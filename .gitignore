@@ -1,0 +1,21 @@
+# PHI / secrets — MUST never be committed.
+# reports/ holds failed-coercion output which may contain raw cell values (PHI).
+reports/
+.env
+.env.*
+!.env.example
+
+# Google service-account credentials (never commit)
+*service-account*.json
+gcp-*.json
+
+# Node
+node_modules/
+dist/
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
