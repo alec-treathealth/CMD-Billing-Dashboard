@@ -9,6 +9,7 @@
   },
   "scripts": {
     "probe": "tsx src/probe.ts",
+    "diagnose": "tsx src/diagnose.ts",
     "ingest": "tsx src/ingest.ts",
     "test": "node --import tsx --test test/**/*.test.ts",
     "typecheck": "tsc --noEmit"

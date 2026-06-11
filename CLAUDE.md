@@ -215,6 +215,15 @@ Only ever collapse true re-ingestion of the same source cell.
 - Query functions = a versioned, tested library, each with fixtures — not
   inline SQL in API routes.
 - Audit log captures who ran which function with which args (structured).
+- **A NULL `collection_rate` is itself a signal — don't treat it as "missing".**
+  The generated column yields NULL when the rate isn't representable: reversals,
+  adjustments, or a near-zero/negative `allowed_amount` (the "< 100" guard in the
+  `claims` schema is a `numeric(6,4)` representability limit, not a business
+  threshold). When `paid_amount` and `allowed_amount` are both non-null but
+  `collection_rate` is NULL, that row is exactly the kind of payer/policy-gap
+  anomaly this system exists to surface. A later phase may add a derived boolean
+  (e.g. `is_rate_anomalous`) or an analyst filter so these aren't lost behind the
+  NULL. (Do not build now.)
 - **RLS scoping is mandatory (shared project).** `claims_raw` / `claims` live in
   the same Supabase project (`dbpabchpvipipkzkogta`) as unrelated CMD billing
   automation tables (`cmd_transactions`, `cmd_facility_daily_summary`). In the
