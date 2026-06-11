@@ -3,9 +3,10 @@
  * never logged. The three sheet IDs are canonical identifiers (not secrets) and
  * are pinned here from CLAUDE.md; per the spec's warning we NEVER substitute
  * the near-identical "Historical Data for ..." copies.
+ *
+ * Google auth is NOT in env — it uses the OAuth installed-app flow in auth.ts
+ * (secrets/oauth-client.json + secrets/token.json). Only Supabase is here.
  */
-import { readFileSync } from 'node:fs';
-import { google } from 'googleapis';
 import { z } from 'zod';
 import type { SheetSource } from './types.js';
 
@@ -19,14 +20,11 @@ export const SHEET_SOURCES: readonly SheetSource[] = [
 const EnvSchema = z.object({
   SUPABASE_URL: z.string().url(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1, 'SUPABASE_SERVICE_ROLE_KEY is required'),
-  GOOGLE_APPLICATION_CREDENTIALS: z.string().min(1).optional(),
-  GOOGLE_SERVICE_ACCOUNT_JSON: z.string().min(1).optional(),
 });
 
 export interface AppConfig {
   supabaseUrl: string;
   supabaseServiceRoleKey: string;
-  googleCredentials: { client_email: string; private_key: string };
 }
 
 /**
@@ -39,41 +37,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     const missing = parsed.error.issues.map((i) => i.path.join('.')).join(', ');
     throw new Error(`Invalid environment config (check, do not log, these vars): ${missing}`);
   }
-  const e = parsed.data;
-
-  const credsJson = e.GOOGLE_SERVICE_ACCOUNT_JSON
-    ? e.GOOGLE_SERVICE_ACCOUNT_JSON
-    : e.GOOGLE_APPLICATION_CREDENTIALS
-      ? readFileSync(e.GOOGLE_APPLICATION_CREDENTIALS, 'utf8')
-      : undefined;
-  if (!credsJson) {
-    throw new Error(
-      'Google credentials missing: set GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS.',
-    );
-  }
-
-  let creds: { client_email?: string; private_key?: string };
-  try {
-    creds = JSON.parse(credsJson);
-  } catch {
-    throw new Error('Google credentials are not valid JSON (value not logged).');
-  }
-  if (!creds.client_email || !creds.private_key) {
-    throw new Error('Google credentials JSON missing client_email/private_key (value not logged).');
-  }
-
   return {
-    supabaseUrl: e.SUPABASE_URL,
-    supabaseServiceRoleKey: e.SUPABASE_SERVICE_ROLE_KEY,
-    googleCredentials: { client_email: creds.client_email, private_key: creds.private_key },
+    supabaseUrl: parsed.data.SUPABASE_URL,
+    supabaseServiceRoleKey: parsed.data.SUPABASE_SERVICE_ROLE_KEY,
   };
-}
-
-/** Build a read-only Google auth client (least privilege). */
-export function googleAuth(creds: AppConfig['googleCredentials']) {
-  return new google.auth.JWT({
-    email: creds.client_email,
-    key: creds.private_key,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-  });
 }

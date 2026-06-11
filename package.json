@@ -8,6 +8,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "probe": "tsx src/probe.ts",
     "ingest": "tsx src/ingest.ts",
     "test": "node --import tsx --test test/**/*.test.ts",
     "typecheck": "tsc --noEmit"

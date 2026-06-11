@@ -49,11 +49,11 @@ export const ROW_VANGUARD_2024 = [
   'H0015',
   '0905',
   'DOE, JANE',
-  'PGE081', // alphanumeric
+  'PGE081', // real alphanumeric member id (appears alongside numeric ones in 2026)
   'GRP123',
   'THE VANGUARD GROUP, INC.', // embedded comma — must NOT shift money fields
   '$3,500.00',
-  '$-1,660.05', // negative money (sign after $)
+  '-$1,660.05', // negative money — minus OUTSIDE the $ (confirmed real 2026 form)
   '$2,000.00',
   '$300.00',
   '$0.00',

@@ -9,7 +9,8 @@
  *
  * Logs carry COUNTS ONLY — never raw cell values / PHI.
  */
-import { googleAuth, loadConfig, SHEET_SOURCES } from './config.js';
+import { getOAuthClient } from './auth.js';
+import { loadConfig, SHEET_SOURCES } from './config.js';
 import {
   fetchExistingClaimRawIds,
   insertClaims,
@@ -34,7 +35,7 @@ interface FileStats {
 
 async function ingestSource(
   db: Db,
-  auth: ReturnType<typeof googleAuth>,
+  auth: Awaited<ReturnType<typeof getOAuthClient>>,
   source: SheetSource,
   report: CoercionReport,
 ): Promise<FileStats> {
@@ -96,7 +97,7 @@ async function ingestSource(
 async function main(): Promise<void> {
   const config = loadConfig();
   const db = makeClient(config.supabaseUrl, config.supabaseServiceRoleKey);
-  const auth = googleAuth(config.googleCredentials);
+  const auth = await getOAuthClient();
   const report = new CoercionReport('ingest');
 
   const stats: FileStats[] = [];

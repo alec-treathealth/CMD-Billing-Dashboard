@@ -24,11 +24,13 @@ const ORDER_2024 = buildColumnOrder(HEADER_2024);
 const ORDER_2025 = buildColumnOrder(HEADER_2025);
 const ctx = { source_file_id: 'FIXTURE', source_row_num: 2, source_year: 2024 };
 
-test('money: both negative-sign placements parse identically', () => {
-  // FORMATTED_VALUE forms — pinning both placements. Removal of $/, is
-  // order-independent so either renders to the same canonical numeric string.
-  assert.deepEqual(normalizeMoney('$-1,660.05'), { ok: true, value: '-1660.05' });
+test('money: confirmed real FORMATTED_VALUE negative form "-$1,660.05" parses', () => {
+  // Real 2026 data renders the minus OUTSIDE the dollar sign. This is the
+  // canonical fixture form.
   assert.deepEqual(normalizeMoney('-$1,660.05'), { ok: true, value: '-1660.05' });
+  // Robustness: the alternate placement also parses (strip of $/, is
+  // order-independent), so a stray "$-1,660.05" can't silently misparse.
+  assert.deepEqual(normalizeMoney('$-1,660.05'), { ok: true, value: '-1660.05' });
 });
 
 test('money: positives, thousands, parens-negative, blank, bad', () => {
@@ -67,8 +69,10 @@ test('optional text: blank -> NULL', () => {
   assert.equal(normalizeOptionalText('GRP123'), 'GRP123');
 });
 
-test('member id: negative -> abs norm; alphanumeric; case/space; blank', () => {
+test('member id: numeric negative -> abs norm; alphanumeric kept as-is, upper', () => {
+  // Numeric negatives drop the leading '-' (absolute value for matching).
   assert.deepEqual(normalizeMemberId('-11724767'), { raw: '-11724767', norm: '11724767' });
+  // Real alphanumeric id (2026) — stored as-is, upper-cased, NO abs() applied.
   assert.deepEqual(normalizeMemberId('PGE081'), { raw: 'PGE081', norm: 'PGE081' });
   assert.deepEqual(normalizeMemberId(' pge081 '), { raw: 'pge081', norm: 'PGE081' });
   assert.deepEqual(normalizeMemberId(''), { raw: null, norm: null });
