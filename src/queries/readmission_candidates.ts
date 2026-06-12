@@ -46,7 +46,74 @@ interface ReadmissionDbRow {
   payer_name: string;
 }
 
-function validateGapDays(raw: number | undefined): number {
+/**
+ * Results-route column allowlist for `readmission_candidates`. These are the
+ * per-claim columns the results route projects for EACH side of a candidate pair
+ * (prefixed `a_` / `b_`); identifiers are included so a human can verify the
+ * match. `id` is the stable row key, surfaced per side as `a_id` / `b_id`.
+ *
+ * Computed fields the route attaches OUTSIDE this allowlist (decision 3 of the
+ * Phase 3 gate): `confidence` (the graded tier — derived, not a column),
+ * `gap_days` (the bound $1, echoed back), and `a_id` / `b_id` (the `id` column
+ * projected once per pair side). group_number / employer_name are intentionally
+ * omitted (group_number is mostly-blank / unreliable per CLAUDE.md). Registered
+ * in columns.ts.
+ */
+export const COLUMNS: readonly string[] = [
+  'id',
+  'patient_name',
+  'patient_last',
+  'patient_first',
+  'member_id_raw',
+  'member_id_norm',
+  'facility_name',
+  'payer_name',
+  'source_year',
+  'date_of_service',
+  'hcpcs_code',
+  'revenue_code',
+  'charge_amount',
+  'allowed_amount',
+  'paid_amount',
+  'collection_rate',
+];
+
+/**
+ * The confidence-tier CASE expression (`... end as confidence`), the single
+ * source of truth for the exact/strong/possible grading. Exported so the Phase 3
+ * results route projects pairs with the SAME grading logic instead of copying it.
+ */
+export const READMISSION_CONFIDENCE_CASE =
+  `case ` +
+  `when a.member_id_norm is not null and a.member_id_norm <> '' ` +
+  `and b.member_id_norm is not null and b.member_id_norm <> '' ` +
+  `and a.member_id_norm = b.member_id_norm ` +
+  `and lower(a.patient_last) = lower(b.patient_last) ` +
+  `then 'exact' ` +
+  `when lower(a.patient_last) = lower(b.patient_last) ` +
+  `and a.payer_name = b.payer_name ` +
+  `and a.member_id_norm is not null and a.member_id_norm <> '' ` +
+  `and b.member_id_norm is not null and b.member_id_norm <> '' ` +
+  `and a.member_id_norm <> b.member_id_norm ` +
+  `then 'strong' ` +
+  `when claims.similarity(a.patient_last, b.patient_last) >= 0.7 ` +
+  `and a.payer_name = b.payer_name ` +
+  `and (a.member_id_norm is null or a.member_id_norm = '' ` +
+  `or b.member_id_norm is null or b.member_id_norm = '') ` +
+  `then 'possible' ` +
+  `end as confidence`;
+
+/**
+ * The chronological self-join ON clause shared by the summary builder and the
+ * results-route row projection. `a.id <> b.id` is a self-pair guard only;
+ * orientation is strictly by service date (see the module header).
+ */
+export const READMISSION_PAIR_JOIN =
+  `join f b on a.id <> b.id ` +
+  `and b.date_of_service > a.date_of_service ` +
+  `and b.date_of_service <= a.date_of_service + ($1 * interval '1 day')`;
+
+export function validateGapDays(raw: number | undefined): number {
   if (raw === undefined) return DEFAULT_GAP_DAYS;
   if (!Number.isInteger(raw) || raw < MIN_GAP_DAYS || raw > MAX_GAP_DAYS) {
     throw new Error(
@@ -70,30 +137,11 @@ export function readmissionCandidatesSql(filterClause: string): string {
     `with f as (${filtered}), ` +
     `pairs as (` +
     `select ` +
-    `case ` +
-    `when a.member_id_norm is not null and a.member_id_norm <> '' ` +
-    `and b.member_id_norm is not null and b.member_id_norm <> '' ` +
-    `and a.member_id_norm = b.member_id_norm ` +
-    `and lower(a.patient_last) = lower(b.patient_last) ` +
-    `then 'exact' ` +
-    `when lower(a.patient_last) = lower(b.patient_last) ` +
-    `and a.payer_name = b.payer_name ` +
-    `and a.member_id_norm is not null and a.member_id_norm <> '' ` +
-    `and b.member_id_norm is not null and b.member_id_norm <> '' ` +
-    `and a.member_id_norm <> b.member_id_norm ` +
-    `then 'strong' ` +
-    `when claims.similarity(a.patient_last, b.patient_last) >= 0.7 ` +
-    `and a.payer_name = b.payer_name ` +
-    `and (a.member_id_norm is null or a.member_id_norm = '' ` +
-    `or b.member_id_norm is null or b.member_id_norm = '') ` +
-    `then 'possible' ` +
-    `end as confidence, ` +
+    `${READMISSION_CONFIDENCE_CASE}, ` +
     `a.facility_name as facility_name, ` +
     `a.payer_name as payer_name ` +
     `from f a ` +
-    `join f b on a.id <> b.id ` +
-    `and b.date_of_service > a.date_of_service ` +
-    `and b.date_of_service <= a.date_of_service + ($1 * interval '1 day')` +
+    `${READMISSION_PAIR_JOIN}` +
     `) ` +
     `select confidence, facility_name, payer_name from pairs where confidence is not null`
   );

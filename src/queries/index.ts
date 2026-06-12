@@ -9,4 +9,8 @@ export { computeIdentityHash, normalizeMemberId } from './identity.js';
 export {
   readmissionCandidates,
   readmissionCandidatesSql,
+  READMISSION_CONFIDENCE_CASE,
+  READMISSION_PAIR_JOIN,
+  validateGapDays,
 } from './readmission_candidates.js';
+export { COLUMNS as RESULTS_COLUMNS, getColumns } from './columns.js';

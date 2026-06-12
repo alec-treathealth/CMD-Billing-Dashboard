@@ -23,6 +23,29 @@ import type {
   QueryResult,
 } from './types.js';
 
+/**
+ * Results-route column allowlist for `distribution`. The PHI results route may
+ * SELECT exactly these `claims.claims` columns (never `SELECT *`) when re-running
+ * this function's filter to surface the underlying rows. A distribution is over
+ * non-PHI dimensions, so the drill-down is financial/dimensional detail only — no
+ * patient identifiers. `id` is the stable row key. Registered in columns.ts.
+ */
+export const COLUMNS: readonly string[] = [
+  'id',
+  'facility_name',
+  'payer_name',
+  'source_year',
+  'date_of_service',
+  'hcpcs_code',
+  'revenue_code',
+  'charge_amount',
+  'allowed_amount',
+  'paid_amount',
+  'adjustment',
+  'balance_due_pt',
+  'collection_rate',
+];
+
 /** Allowlisted group-by columns (fixed identifiers, chosen by validated enum). */
 const FIELD_SQL: Record<DistributionField, string> = {
   facility_name: 'facility_name',

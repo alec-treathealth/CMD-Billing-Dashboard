@@ -19,6 +19,28 @@ import type {
   QueryResult,
 } from './types.js';
 
+/**
+ * Results-route column allowlist for `payer_gap_analysis`. Re-running this
+ * function's filter surfaces the claims behind a payer's gap; the analysis is by
+ * payer, so no patient identifiers are projected. `id` is the stable row key.
+ * Registered in columns.ts.
+ */
+export const COLUMNS: readonly string[] = [
+  'id',
+  'facility_name',
+  'payer_name',
+  'source_year',
+  'date_of_service',
+  'hcpcs_code',
+  'revenue_code',
+  'charge_amount',
+  'allowed_amount',
+  'paid_amount',
+  'adjustment',
+  'balance_due_pt',
+  'collection_rate',
+];
+
 interface PayerGapDbRow {
   payer_name: string | null;
   claim_count: string;

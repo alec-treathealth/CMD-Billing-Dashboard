@@ -17,6 +17,33 @@ import type {
   SearchClaimsSummary,
 } from './types.js';
 
+/**
+ * Results-route column allowlist for `search_claims`. This function's purpose is
+ * to return the matching claim RECORDS for human review, so the projection
+ * includes patient identifiers (confirmed in the Phase 3 gate). `id` is the
+ * stable row key. Registered in columns.ts.
+ */
+export const COLUMNS: readonly string[] = [
+  'id',
+  'patient_name',
+  'patient_last',
+  'patient_first',
+  'member_id_raw',
+  'member_id_norm',
+  'facility_name',
+  'payer_name',
+  'source_year',
+  'date_of_service',
+  'hcpcs_code',
+  'revenue_code',
+  'charge_amount',
+  'allowed_amount',
+  'paid_amount',
+  'adjustment',
+  'balance_due_pt',
+  'collection_rate',
+];
+
 interface SearchClaimsDbRow {
   rows_matched: string;
   total_charge: string;

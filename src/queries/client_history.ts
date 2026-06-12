@@ -28,6 +28,41 @@ import type {
 const MATCH_THRESHOLD = 0.4;
 const MAX_TEXT = 200;
 
+/**
+ * Results-route column allowlist for `client_history`. This is the full claim
+ * history of ONE identified patient, so it carries the fullest projection,
+ * including all identity fields plus group_number / employer_name. `id` is the
+ * stable row key. Registered in columns.ts.
+ *
+ * NOTE: serving these rows is gated on identity re-verification — the patient
+ * search terms are deliberately NOT stored in query_log.arguments, so the results
+ * route cannot reconstruct this query from stored args alone; the caller must
+ * re-supply the identity terms and the route must verify the stored identity_hash
+ * (identity.ts) before executing. See results.ts.
+ */
+export const COLUMNS: readonly string[] = [
+  'id',
+  'patient_name',
+  'patient_last',
+  'patient_first',
+  'member_id_raw',
+  'member_id_norm',
+  'group_number',
+  'employer_name',
+  'source_year',
+  'facility_name',
+  'payer_name',
+  'date_of_service',
+  'hcpcs_code',
+  'revenue_code',
+  'charge_amount',
+  'allowed_amount',
+  'paid_amount',
+  'adjustment',
+  'balance_due_pt',
+  'collection_rate',
+];
+
 interface ClientHistoryDbRow {
   source_year: number | string;
   claim_count: string;

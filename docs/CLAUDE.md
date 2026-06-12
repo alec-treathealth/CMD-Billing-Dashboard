@@ -292,6 +292,12 @@ returns PHI rows, no caching).
   tables. Use a dedicated least-privilege DB role / policy set; do not rely on
   the service-role key for the app path. (Phase 1 ingest uses the service-role
   key for the loader only.)
+- **Express dev-harness advisories (known, dev-only).** Phase 3 added `express`
+  (+ `@types/express`) solely for `src/server.ts`, the local dev harness over the
+  results route. `npm install` flags 4 moderate transitive advisories. This is a
+  DEV-ONLY exposure — `server.ts` is never the production transport (Phase 4 is
+  Next.js on Vercel) and must not be deployed. Re-audit / drop the dep when the
+  Next.js route lands.
 - **SSL hardening (do not build now).** `src/db.ts` connects with
   `ssl: { rejectUnauthorized: false }` — TLS is on (data encrypted in transit)
   but the server certificate is NOT verified, so it is not proof against an
