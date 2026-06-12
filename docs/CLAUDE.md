@@ -256,9 +256,40 @@ An earlier `a.id < b.id` dedup guard was REMOVED — `claims.id` is insertion-or
 identity and ingest is not date-sorted, so id order doesn't track service date;
 `a.id < b.id` silently dropped any pair whose later-dated claim ingested first.
 
-**Next: Phase 2 Step 3 / Phase 3 — `src/routes/results.ts`** (re-executes from
-`query_log`, re-verifies `identity_hash` for `client_history` via `identity.ts`,
-returns PHI rows, no caching).
+**Phase 3 — COMPLETE: `src/routes/results.ts`** (re-executes from `query_log`,
+re-verifies `identity_hash` for `client_history` via `identity.ts`, returns PHI
+rows, no caching).
+
+## Phase 4 — IN PROGRESS (Steps 1–2 COMPLETE: search agent + Next.js transport)
+
+The Anthropic tool-calling search agent and its HTTP transport. See
+`docs/PHASE4_HANDOFF.md` for the full design.
+
+**Step 1 — agent library (`src/agent/`).** `runAgentTurn` maps a natural-language
+question to ONE of the five query functions via Anthropic tool-calling: five tool
+defs mirror the args types (`tools.ts`); the model picks one tool
+(`tool_choice: any`, parallel disabled — single tool per turn), never writes SQL,
+never sees rows. Untrusted tool input is validated at the dispatch boundary
+(`validators.ts`) before the function runs as `claims_reader`; the tool result is
+built from the post-`finalize()` return — `{ summary_stats, query_id }` only,
+non-PHI by construction (`client_history` identity is never reflected back or
+logged). A narrow `AnthropicMessagesClient` seam (`client.ts`) is faked in tests
+(no live LLM) and satisfied in production by `anthropicClient.ts` (`new
+Anthropic()` from `ANTHROPIC_API_KEY`).
+
+**Step 2 — Next.js transport (`app/`).** Next.js 15 App Router app (TS, Tailwind,
+shadcn), Vercel-targeted, importing the library from `../src`. Two POST routes,
+both Bearer-gated (`RESULTS_API_SECRET`, constant-time `src/bearerAuth.ts`):
+`/api/agent` → `runAgentTurn` → non-PHI `{ tool_name, query_id, summary_stats }`;
+`/api/results` → `fetchResults` → PHI rows (allowlisted columns, no cache,
+`client_history` identity re-verified). **Results is POST not GET** so query_id and
+identity terms never ride a URL; non-POST → 405. Transport-agnostic handlers
+(`src/routes/{agent,results}Handler.ts`) are unit-tested fixture-level (faked
+client + executor). `@anthropic-ai/sdk` added; `express` harness retired (above).
+
+**Next: Phase 4 Step 3 — live integration** (real Anthropic API + real DB), after
+the CA-bundling gate (`secrets/supabase-ca.crt` must be resolvable in the Vercel
+deploy). See `docs/PHASE4_HANDOFF.md`.
 
 ## Phase 2+ notes (DO NOT build now — recorded so they aren't lost)
 
@@ -292,15 +323,20 @@ returns PHI rows, no caching).
   tables. Use a dedicated least-privilege DB role / policy set; do not rely on
   the service-role key for the app path. (Phase 1 ingest uses the service-role
   key for the loader only.)
-- **Express dev-harness advisories (known, dev-only).** Phase 3 added `express`
-  (+ `@types/express`) solely for `src/server.ts`, the local dev harness over the
-  results route. `npm install` flags 4 moderate transitive advisories. This is a
-  DEV-ONLY exposure — `server.ts` is never the production transport (Phase 4 is
-  Next.js on Vercel) and must not be deployed. Re-audit / drop the dep when the
-  Next.js route lands.
+- **Express dev-harness — RETIRED in Phase 4 (Step 2).** Phase 3's `src/server.ts`
+  Express harness over the results route is GONE: deleted, and `express` +
+  `@types/express` dropped from `package.json` (clearing the 4 moderate transitive
+  advisories). Production transport is now the Next.js App Router app under `app/`
+  (Phase 4): `app/app/api/results/route.ts` over `fetchResults` and
+  `app/app/api/agent/route.ts` over `runAgentTurn`, both gated by the shared
+  constant-time Bearer check in `src/bearerAuth.ts` (the harness's old auth logic).
+  The transport-agnostic callables (`src/routes/results.ts`, `src/agent/`) and
+  their thin route handlers (`src/routes/resultsHandler.ts`,
+  `src/routes/agentHandler.ts`) are unit-tested fixture-level from the repo root.
 - **SSL hardening — COMPLETED in Phase 3.** All node-postgres pools (claims_admin
-  in `src/db.ts`, claims_reader in `src/queries/executor.ts`, and the dev harness
-  `src/server.ts`, which inherits the reader pool) now connect verify-full via the
+  in `src/db.ts`, claims_reader in `src/queries/executor.ts`, and the Next.js
+  results/agent routes via the app composition root `app/lib/server.ts`, which
+  inherits the reader pool) now connect verify-full via the
   shared `src/ssl.ts` helper: `ssl: { rejectUnauthorized: true, ca: <Supabase Root
   2021 CA> }`. The CA lives at `secrets/supabase-ca.crt` (gitignored; the
   self-signed root anchoring the pooler's leaf→intermediate→root chain, valid to

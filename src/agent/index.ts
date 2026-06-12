@@ -10,6 +10,11 @@ export type {
   Usage,
 } from './client.js';
 export { firstToolUse } from './client.js';
+export {
+  makeAnthropicClient,
+  makeAnthropicClientFromEnv,
+  anthropicApiKeyFromEnv,
+} from './anthropicClient.js';
 export { TOOL_DEFS, TOOL_NAMES, isToolName } from './tools.js';
 export {
   validateClientHistory,
