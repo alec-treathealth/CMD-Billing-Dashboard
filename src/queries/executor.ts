@@ -2,16 +2,19 @@
  * Real (pg-backed) QueryExecutor for the query library. Connects as
  * claims_reader (CLAIMS_READER_DATABASE_URL) over the Supavisor transaction
  * pooler — unnamed parameterized queries only (no named prepared statements),
- * which is what the pooler supports. TLS is on (see the SSL note in src/db.ts;
- * harden to verify-full before Phase 3 per CLAUDE.md).
+ * which is what the pooler supports. TLS is verify-full (Phase 3 hardening): the
+ * pooler certificate is verified against the Supabase Root CA and its hostname is
+ * checked. This is the single place the reader pool — including the one the dev
+ * harness (src/server.ts) builds — gets its SSL config. See src/ssl.ts.
  */
 import pg from 'pg';
+import { verifyFullSsl } from '../ssl.js';
 import type { ExecResult, QueryExecutor } from './types.js';
 
 export function makeReaderPool(connectionString: string): pg.Pool {
   return new pg.Pool({
     connectionString,
-    ssl: { rejectUnauthorized: false },
+    ssl: verifyFullSsl(),
     max: 4,
     application_name: 'claims-query',
   });

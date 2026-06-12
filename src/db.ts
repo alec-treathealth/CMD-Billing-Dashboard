@@ -8,6 +8,7 @@
  * Writes are batched set-operations, never row-by-row loops.
  */
 import pg from 'pg';
+import { verifyFullSsl } from './ssl.js';
 import type { TypedClaim } from './types.js';
 
 const BATCH = 500;
@@ -16,17 +17,15 @@ export type Db = pg.Pool;
 
 /**
  * Build the admin connection pool from a Postgres connection string
- * (CLAIMS_ADMIN_DATABASE_URL). TLS is required — the data is PHI in transit.
- *
- * SSL note: `rejectUnauthorized: false` encrypts the connection but does NOT
- * verify the server certificate, so it is not proof against an active MITM.
- * That is the common Supabase-from-Node default and acceptable for this loader;
- * to harden to verify-full, supply the Supabase CA cert via `ssl.ca` instead.
+ * (CLAIMS_ADMIN_DATABASE_URL). TLS is verify-full (Phase 3 hardening): the
+ * pooler's certificate chain is verified against the Supabase Root CA and its
+ * hostname is checked, so the connection is proof against an active MITM — not
+ * just encrypted. See src/ssl.ts.
  */
 export function makeClient(connectionString: string): Db {
   return new pg.Pool({
     connectionString,
-    ssl: { rejectUnauthorized: false },
+    ssl: verifyFullSsl(),
     max: 4,
     application_name: 'claims-ingest',
   });

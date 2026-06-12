@@ -298,9 +298,13 @@ returns PHI rows, no caching).
   DEV-ONLY exposure — `server.ts` is never the production transport (Phase 4 is
   Next.js on Vercel) and must not be deployed. Re-audit / drop the dep when the
   Next.js route lands.
-- **SSL hardening (do not build now).** `src/db.ts` connects with
-  `ssl: { rejectUnauthorized: false }` — TLS is on (data encrypted in transit)
-  but the server certificate is NOT verified, so it is not proof against an
-  active MITM. Before Phase 3, when the query API becomes externally reachable,
-  harden to verify-full by supplying the Supabase CA cert via `ssl.ca` (apply to
-  both the claims_admin and claims_reader pools).
+- **SSL hardening — COMPLETED in Phase 3.** All node-postgres pools (claims_admin
+  in `src/db.ts`, claims_reader in `src/queries/executor.ts`, and the dev harness
+  `src/server.ts`, which inherits the reader pool) now connect verify-full via the
+  shared `src/ssl.ts` helper: `ssl: { rejectUnauthorized: true, ca: <Supabase Root
+  2021 CA> }`. The CA lives at `secrets/supabase-ca.crt` (gitignored; the
+  self-signed root anchoring the pooler's leaf→intermediate→root chain, valid to
+  2031). The connection now verifies both the certificate chain AND the hostname,
+  so it is proof against an active MITM — not merely encrypted. Verified live
+  against both roles, with a wrong-CA negative control rejected
+  (`SELF_SIGNED_CERT_IN_CHAIN`).

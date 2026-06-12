@@ -69,6 +69,8 @@ function main(): void {
   if (secret === undefined || secret.trim() === '') {
     throw new Error('Missing RESULTS_API_SECRET (set it in .env; never hardcode or log it)');
   }
+  // Verify-full TLS is applied centrally in makeReaderPool (src/ssl.ts) — the
+  // harness inherits it, so there is no separate SSL config to set here.
   const pool = makeReaderPool(readerConnectionStringFromEnv());
   const ctx: ResultsContext = { executor: new PgExecutor(pool) };
   const app = createServer(ctx, secret);
