@@ -200,6 +200,66 @@ Only ever collapse true re-ingestion of the same source cell.
 - Failed-coercion report is produced and reviewed.
 - A second ingest run inserts zero new rows (idempotent).
 
+## Phase 2 — COMPLETE (Steps 1–2: schema/RLS + query function library)
+
+Phase 1 ingest is done (320,116 claims, 2024–2026). Phase 2 Steps 1–2 are done
+and verified. **Full suite: 45 pass, 0 fail. `tsc --noEmit` clean.**
+
+**Step 1 — schema separation, RLS, plumbing (migrations 0003–0004):**
+- Tables moved to the `claims` schema: `claims.claims`, `claims.claims_raw`,
+  `claims.query_log`. `pg_trgm` moved into `claims` too (reader needs
+  `similarity()`/`%` without any `public` privilege). `claims_reader`'s
+  `search_path = claims`.
+- Two least-privilege LOGIN roles: `claims_reader` (SELECT on `claims.claims`
+  ONLY) and `claims_admin` (full claims schema; ingest path). Passwords out of
+  band (`.env`), never in migrations.
+- `claims.log_query(...)` / `claims.get_query_log(...)` — SECURITY DEFINER, owner
+  `claims_admin`, EXECUTE granted to `claims_reader` (which has zero table rights
+  on `query_log`). `get_query_log` excludes `identity_hash`, and fail-closes:
+  no rows when expired, or when a `client_history` row has a NULL `identity_hash`.
+- `claims.similarity(text,text)` EXECUTE is available to `claims_reader`
+  (verified live 2026-06-11; no extra grant needed).
+
+**Step 2 — the five vetted query functions (`src/queries/`):**
+PHI boundary is enforced in the type system — every function returns
+`QueryResult<NoPhi<S>>`; `NoPhi<T>` collapses to `never` if a `PhiKey` appears in
+a summary, and `Expect<HasNoPhiKey<S>>` asserts it at build time. Every function
+routes through `finalize()` (the single chokepoint that writes `query_log` via
+the definer function and emits exactly one non-PHI audit line — no function can
+return without logging). Column names are always fixed literals; only values are
+`$n` params. The Supavisor transaction-mode pooler forbids named prepared
+statements — `pool.query(sql, params)` only.
+
+| Function | Groups by | identity_hash | Notes |
+|----------|-----------|---------------|-------|
+| `distribution` | one allowlisted field | null | metric per bucket + pct_of_total |
+| `payer_gap_analysis` | payer | null | write-down vs collection-gap lenses |
+| `search_claims` | (flat aggregate) | null | adds `hcpcs_code`/`revenue_code` to `ClaimFilter`; `rate_anomaly_count` |
+| `client_history` | source_year | **SHA-256** | PHI INPUT (patient_last + member); terms never stored/logged; threshold 0.4 fixed |
+| `readmission_candidates` | (confidence tiers) | null | self-join, `gap_days` [1,365], exact/strong/possible |
+
+Shared infra: `types.ts` (PHI types + per-summary compile-time assertions),
+`filters.ts` (`ClaimFilter` validate + parameterized WHERE), `runtime.ts`
+(`finalize`), `executor.ts` (`claims_reader` pool), `identity.ts`
+(`computeIdentityHash` + `normalizeMemberId` — the SINGLE source of truth the
+Phase 3 results route MUST reuse), `index.ts` (public surface). Every function
+has a fixture file using a fake executor (no live DB in tests).
+
+**`rate_anomaly_count` semantics (locked):** counts rows where `paid_amount` and
+`allowed_amount` are both non-null but `collection_rate` is NULL — the verbatim
+CLAUDE.md anomaly definition, covering BOTH the `allowed<=0` reversals AND the
+representability overflow. Deliberately NOT narrowed to overflow-only.
+
+**`readmission_candidates` pair orientation (locked):** pairs are oriented by
+`b.date_of_service > a.date_of_service` with `a.id <> b.id` as a self-pair guard.
+An earlier `a.id < b.id` dedup guard was REMOVED — `claims.id` is insertion-order
+identity and ingest is not date-sorted, so id order doesn't track service date;
+`a.id < b.id` silently dropped any pair whose later-dated claim ingested first.
+
+**Next: Phase 2 Step 3 / Phase 3 — `src/routes/results.ts`** (re-executes from
+`query_log`, re-verifies `identity_hash` for `client_history` via `identity.ts`,
+returns PHI rows, no caching).
+
 ## Phase 2+ notes (DO NOT build now — recorded so they aren't lost)
 
 - **Readmission matching is fuzzy and graded.** Member ID is unreliable
@@ -232,3 +292,9 @@ Only ever collapse true re-ingestion of the same source cell.
   tables. Use a dedicated least-privilege DB role / policy set; do not rely on
   the service-role key for the app path. (Phase 1 ingest uses the service-role
   key for the loader only.)
+- **SSL hardening (do not build now).** `src/db.ts` connects with
+  `ssl: { rejectUnauthorized: false }` — TLS is on (data encrypted in transit)
+  but the server certificate is NOT verified, so it is not proof against an
+  active MITM. Before Phase 3, when the query API becomes externally reachable,
+  harden to verify-full by supplying the Supabase CA cert via `ssl.ca` (apply to
+  both the claims_admin and claims_reader pools).

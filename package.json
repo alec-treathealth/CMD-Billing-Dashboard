@@ -11,16 +11,19 @@
     "probe": "tsx src/probe.ts",
     "diagnose": "tsx src/diagnose.ts",
     "ingest": "tsx src/ingest.ts",
+    "dbcheck": "tsx src/dbcheck.ts",
     "test": "node --import tsx --test test/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
     "googleapis": "^144.0.0",
+    "pg": "^8.21.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/pg": "^8.20.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   }

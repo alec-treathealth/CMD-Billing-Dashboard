@@ -4,8 +4,12 @@
  * are pinned here from CLAUDE.md; per the spec's warning we NEVER substitute
  * the near-identical "Historical Data for ..." copies.
  *
+ * Phase 2 / Decision 1: the ingest connects to Postgres as the least-privilege
+ * `claims_admin` role via CLAIMS_ADMIN_DATABASE_URL (node-postgres) — the
+ * service-role key and SUPABASE_URL are no longer on the loader path.
+ *
  * Google auth is NOT in env — it uses the OAuth installed-app flow in auth.ts
- * (secrets/oauth-client.json + secrets/token.json). Only Supabase is here.
+ * (secrets/oauth-client.json + secrets/token.json).
  */
 import { z } from 'zod';
 import type { SheetSource } from './types.js';
@@ -18,13 +22,12 @@ export const SHEET_SOURCES: readonly SheetSource[] = [
 ];
 
 const EnvSchema = z.object({
-  SUPABASE_URL: z.string().url(),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1, 'SUPABASE_SERVICE_ROLE_KEY is required'),
+  // postgresql://claims_admin:<pw>@<host>:5432/postgres?sslmode=require
+  CLAIMS_ADMIN_DATABASE_URL: z.string().url('CLAIMS_ADMIN_DATABASE_URL must be a Postgres URL'),
 });
 
 export interface AppConfig {
-  supabaseUrl: string;
-  supabaseServiceRoleKey: string;
+  claimsAdminDatabaseUrl: string;
 }
 
 /**
@@ -38,7 +41,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error(`Invalid environment config (check, do not log, these vars): ${missing}`);
   }
   return {
-    supabaseUrl: parsed.data.SUPABASE_URL,
-    supabaseServiceRoleKey: parsed.data.SUPABASE_SERVICE_ROLE_KEY,
+    claimsAdminDatabaseUrl: parsed.data.CLAIMS_ADMIN_DATABASE_URL,
   };
 }

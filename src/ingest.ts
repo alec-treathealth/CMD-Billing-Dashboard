@@ -96,7 +96,7 @@ async function ingestSource(
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const db = makeClient(config.supabaseUrl, config.supabaseServiceRoleKey);
+  const db = makeClient(config.claimsAdminDatabaseUrl);
   const auth = await getOAuthClient();
   const report = new CoercionReport('ingest');
 
@@ -109,6 +109,7 @@ async function main(): Promise<void> {
     }
   } finally {
     await report.close();
+    await db.end(); // close the pg pool so the process exits cleanly
   }
 
   // Counts only — no PHI.
