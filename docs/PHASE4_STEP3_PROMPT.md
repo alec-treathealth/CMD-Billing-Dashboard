@@ -71,10 +71,19 @@ actions (live migrations, commits, anything that leaves the machine).
   shadcn); `POST /api/agent` (non-PHI) + `POST /api/results` (PHI, claims_reader,
   identity re-verify, non-POST→405); `@anthropic-ai/sdk` added; Express harness
   (`src/server.ts`) retired; shared Bearer auth `src/bearerAuth.ts`.
-- **Suite: 82 pass, 0 fail. `tsc --noEmit` clean.**
+- **Phase 4 Step 3 prep (commit `96949f4`):** Supabase Root CA committed at
+  `certs/supabase-ca.crt` and `src/ssl.ts` repointed there (gate 1 resolved).
+- **Suite: 82 pass, 0 fail. `tsc --noEmit` clean.** Last verified 2026-06-13.
 
 Run tests: `npm test` · Typecheck: `npm run typecheck` · DB smoke: `npm run dbcheck`
 App: `cd app && npm install && npm run dev` (needs the env vars above + the CA).
+
+**First action in the new session:** resolve the open ownership decision in gate 2
+— does the user want Claude to create + link the Vercel project (via the `vercel:*`
+skills / Vercel MCP) and push a git remote, or will they set those up in the
+dashboard and have Claude wire `next.config`/tracing? Don't deploy until that's
+answered. The local-probe steps (1–2 below) can proceed independently once `.env`
+is populated.
 
 ## Task: Phase 4 Step 3 — live integration
 
@@ -92,10 +101,14 @@ Anthropic API and the real DB. Suggested order (confirm shape with the user firs
    `fetchResults` (or `POST /api/results` via the running app) and confirm
    allowlisted PHI columns come back; for `client_history`, confirm re-supplied
    identity gates the rows (match→rows, wrong/missing→empty).
-3. **Vercel preview deploy** — deploy `app/` to a preview, with the CA mechanism
-   (gate 1) in place and env vars set. Smoke-test both routes over HTTPS with the
-   Bearer token. Confirm the reader pool connects verify-full from Vercel (negative
-   control: a bogus CA should fail closed).
+3. **Vercel preview deploy** — only after gate 2 (project + remote created) and
+   gate 3 (env vars) are done. Deploy `app/` to a preview. Confirm Next's file
+   tracing actually bundled `certs/supabase-ca.crt` and the reader pool connects
+   verify-full from Vercel (negative control: a bogus CA must fail closed,
+   `SELF_SIGNED_CERT_IN_CHAIN`). If the cert was dropped, add
+   `outputFileTracingIncludes` in `next.config.mjs` (or fall back to a
+   `SUPABASE_CA_PEM` env var read in `src/ssl.ts`). Smoke-test both routes over
+   HTTPS with the Bearer token.
 4. **Keep `npm test` hermetic** — all 82 fixture tests stay green and free of live
    LLM/DB. Any live probe is a separate, manually-run script, not part of the suite.
 
