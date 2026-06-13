@@ -81,7 +81,14 @@ export async function runAgentTurn(
     tools: [...TOOL_DEFS],
     // Force exactly one tool call this turn.
     tool_choice: { type: 'any', disable_parallel_tool_use: true },
-    thinking: { type: 'adaptive' },
+    // NO `thinking` here: forced tool use (tool_choice type 'any'/'tool') is
+    // incompatible with extended/adaptive thinking — the Messages API rejects the
+    // pair with 400 "Thinking may not be enabled when tool_choice forces tool use"
+    // (confirmed live against claude-opus-4-8, Phase 4 Step 3). The forced single
+    // tool choice is load-bearing (the model must pick one of the five query
+    // functions, never emit prose/SQL), so thinking is the side that goes. We never
+    // read the model's text — only its tool_use block — so omitting thinking is
+    // harmless here. Do not re-add it.
   };
 
   const message = await opts.client.messages.create(params);

@@ -26,8 +26,10 @@ export function anthropicApiKeyFromEnv(env: NodeJS.ProcessEnv = process.env): st
 
 /**
  * Build an `AnthropicMessagesClient` over a real `new Anthropic()`. The forwarded
- * params include `thinking`/`tool_choice`/`output_config` exactly as the agent
- * set them; the SDK serializes the object as the request body.
+ * params (`tool_choice`, `tools`, `system`, …) are passed exactly as the agent
+ * set them; the SDK serializes the object as the request body. Note the agent does
+ * NOT send `thinking` — it forces tool use, which the API forbids combining with
+ * thinking (see agent.ts).
  */
 export function makeAnthropicClient(apiKey: string): AnthropicMessagesClient {
   const sdk = new Anthropic({ apiKey });
