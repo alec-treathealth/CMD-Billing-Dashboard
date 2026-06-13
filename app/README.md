@@ -24,8 +24,8 @@ Reads from the repo-root `.env` (loaded by Vercel / your runtime):
 - `ANTHROPIC_API_KEY` — the agent's LLM client.
 - `RESULTS_API_SECRET` — shared Bearer secret for both routes.
 - `CLAIMS_READER_DATABASE_URL` — least-privilege claims_reader DB role.
-- `secrets/supabase-ca.crt` — verify-full TLS CA (gitignored). Must be present in
-  the deploy for the pg pool to connect; bundle it with the deployment.
+- `certs/supabase-ca.crt` — verify-full TLS CA, committed to the repo (public root
+  CA, not a secret), so it ships in the Vercel bundle for the pg pool to connect.
 
 ## Develop
 

@@ -287,9 +287,11 @@ identity terms never ride a URL; non-POST → 405. Transport-agnostic handlers
 (`src/routes/{agent,results}Handler.ts`) are unit-tested fixture-level (faked
 client + executor). `@anthropic-ai/sdk` added; `express` harness retired (above).
 
-**Next: Phase 4 Step 3 — live integration** (real Anthropic API + real DB), after
-the CA-bundling gate (`secrets/supabase-ca.crt` must be resolvable in the Vercel
-deploy). See `docs/PHASE4_HANDOFF.md`.
+**Next: Phase 4 Step 3 — live integration** (real Anthropic API + real DB). The
+CA-bundling gate is RESOLVED: the Supabase Root CA is committed at
+`certs/supabase-ca.crt` (public root, read by `src/ssl.ts`) so it ships in the
+Vercel bundle. Remaining Step 3 blocker: **no Vercel project / git remote yet** —
+one must be created and linked. See `docs/PHASE4_STEP3_PROMPT.md`.
 
 ## Phase 2+ notes (DO NOT build now — recorded so they aren't lost)
 
@@ -338,9 +340,11 @@ deploy). See `docs/PHASE4_HANDOFF.md`.
   results/agent routes via the app composition root `app/lib/server.ts`, which
   inherits the reader pool) now connect verify-full via the
   shared `src/ssl.ts` helper: `ssl: { rejectUnauthorized: true, ca: <Supabase Root
-  2021 CA> }`. The CA lives at `secrets/supabase-ca.crt` (gitignored; the
-  self-signed root anchoring the pooler's leaf→intermediate→root chain, valid to
-  2031). The connection now verifies both the certificate chain AND the hostname,
+  2021 CA> }`. The CA is COMMITTED at `certs/supabase-ca.crt` (Phase 4 Step 3 prep;
+  a public self-signed root — not a secret — so it ships in the Vercel/CI bundle,
+  which a gitignored `secrets/` path never would; it anchors the pooler's
+  leaf→intermediate→root chain, valid to 2031). The connection now verifies both
+  the certificate chain AND the hostname,
   so it is proof against an active MITM — not merely encrypted. Verified live
   against both roles, with a wrong-CA negative control rejected
   (`SELF_SIGNED_CERT_IN_CHAIN`).

@@ -8,14 +8,19 @@
  * Supabase Root 2021 CA so node verifies the pooler's certificate chain AND its
  * hostname (`rejectUnauthorized: true`) — i.e. sslmode=verify-full.
  *
- * The CA lives at secrets/supabase-ca.crt (gitignored). It is the self-signed
- * "Supabase Root 2021 CA" that anchors the pooler's leaf -> intermediate -> root
- * chain. Resolved relative to this file so it works regardless of cwd.
+ * The CA lives at certs/supabase-ca.crt — COMMITTED to the repo (not gitignored).
+ * It is the self-signed "Supabase Root 2021 CA" that anchors the pooler's
+ * leaf -> intermediate -> root chain; a root CA is a PUBLIC certificate, not a
+ * secret, so committing it is safe and is what lets the Vercel deploy (and CI)
+ * resolve it — `secrets/` is gitignored and would never reach the bundle. Both
+ * the root tooling (admin pool in db.ts) and the Next.js app (reader pool in
+ * queries/executor.ts) read it through here. Resolved relative to this file so it
+ * works regardless of cwd.
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-const CA_PATH = fileURLToPath(new URL('../secrets/supabase-ca.crt', import.meta.url));
+const CA_PATH = fileURLToPath(new URL('../certs/supabase-ca.crt', import.meta.url));
 
 let cachedCa: string | undefined;
 
@@ -26,8 +31,8 @@ export function supabaseCa(): string {
       cachedCa = readFileSync(CA_PATH, 'utf8');
     } catch {
       throw new Error(
-        `Missing Supabase CA cert at ${CA_PATH}. Download the project's CA to ` +
-          'secrets/supabase-ca.crt (see CLAUDE.md SSL hardening note).',
+        `Missing Supabase CA cert at ${CA_PATH}. It should be committed at ` +
+          'certs/supabase-ca.crt (see CLAUDE.md SSL hardening note).',
       );
     }
   }

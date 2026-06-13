@@ -11,33 +11,37 @@
 
 ## ⛔ USER-SIDE GATING ITEMS (resolve/confirm at the TOP, before running anything)
 
-1. **CA bundling for the Vercel deploy — HARD BLOCKER.** All pg pools connect
-   verify-full and read the Supabase Root 2021 CA from `secrets/supabase-ca.crt`
-   via `src/ssl.ts` (`fileURLToPath(new URL('../secrets/supabase-ca.crt', import.meta.url))`).
-   `secrets/` is **gitignored**, so the cert is NOT in the repo and will NOT be in
-   the Vercel build/runtime — the claims_reader pool will fail to connect in
-   production. This must be resolved **before** any live deploy/integration run.
-   The cert is the **public** Supabase Root 2021 CA (not a secret), so the options:
-   - **(a, recommended) Commit it to a non-ignored path** (e.g. `certs/supabase-ca.crt`)
-     and update `src/ssl.ts` to resolve there. Simplest; the CA is public and
-     valid to 2031. Keeps a single read path for local + Vercel.
-   - **(b) Vercel env var** `SUPABASE_CA_PEM` (full PEM, or base64) read in
-     `src/ssl.ts` with a file fallback for local dev. No repo cert; one more env
-     var to manage per environment.
-   - **(c) Build artifact** that materializes the cert into the deployment.
-   Pick one with the user, implement it, and confirm the reader pool connects from
-   a Vercel preview before the end-to-end run. Until this is decided, Step 3 is
-   blocked.
-2. **Vercel environment variables provisioned** (preview + production):
-   `ANTHROPIC_API_KEY`, `RESULTS_API_SECRET`, `CLAIMS_READER_DATABASE_URL`, and
-   whichever CA mechanism item 1 selects. None hardcoded; none logged. Confirm the
-   reader URL points at the Supavisor **transaction** pooler (port 6543; unnamed
-   prepared statements only — `pool.query(sql, params)`).
-3. **Model id** — the agent defaults to `claude-opus-4-8` (override via
+1. **CA bundling for the Vercel deploy — ✅ RESOLVED (Step 3 prep).** The Supabase
+   Root 2021 CA is now COMMITTED at `certs/supabase-ca.crt` (a public root cert,
+   not a secret, valid to 2031) and `src/ssl.ts` resolves it there
+   (`new URL('../certs/supabase-ca.crt', import.meta.url)`). It ships in the repo
+   and the Vercel bundle, so both the root tooling (admin pool) and the Next app
+   (reader pool) connect verify-full in production. **Still verify at deploy time:**
+   that Next's file tracing actually includes `certs/supabase-ca.crt` in the
+   serverless function bundle (a `new URL(..., import.meta.url)` + `readFileSync`
+   can be missed by static tracing) — confirm the reader pool connects from a
+   Vercel preview, and keep a wrong-CA negative control (must fail
+   `SELF_SIGNED_CERT_IN_CHAIN`). If tracing drops it, add `outputFileTracingIncludes`
+   in `next.config.mjs` (or fall back to a `SUPABASE_CA_PEM` env var read in ssl.ts).
+2. **Vercel project + git remote — HARD BLOCKER (not yet set up).** This repo has
+   **no git remote and no Vercel linkage** (no `.vercel/`, no `vercel.json`). Before
+   any deploy: create/push a remote (e.g. GitHub) and create + link a Vercel
+   project, with the project **root directory set to `app/`** (the Next app is a
+   sub-package; the build runs from there) and a build that can reach `../src` and
+   `../certs`. Decide import behavior: the app imports `../src/*` and `../certs/*`
+   from outside `app/` — confirm Vercel includes the repo root in the build context
+   (monorepo root vs. `app/` root directory setting), or the build/file-tracing will
+   miss them. The `vercel:*` skills / Vercel MCP tools can drive this.
+3. **Vercel environment variables provisioned** (preview + production):
+   `ANTHROPIC_API_KEY`, `RESULTS_API_SECRET`, `CLAIMS_READER_DATABASE_URL`. None
+   hardcoded; none logged. Confirm the reader URL points at the Supavisor
+   **transaction** pooler (port 6543; unnamed prepared statements only —
+   `pool.query(sql, params)`).
+4. **Model id** — the agent defaults to `claude-opus-4-8` (override via
    `ANTHROPIC_MODEL`). Confirm the key's org has access to that model; do NOT
    hardcode an older id. Pull the current id from the `claude-api` skill if in
    doubt.
-4. **Live-call cost / data acknowledgement** — Step 3 makes real Anthropic calls
+5. **Live-call cost / data acknowledgement** — Step 3 makes real Anthropic calls
    and real DB reads against the 320,116-row PHI dataset. Confirm the user wants
    live calls now (a small, bounded probe set, not a sweep), and that the test
    questions used do not embed real patient identifiers in anything logged.
