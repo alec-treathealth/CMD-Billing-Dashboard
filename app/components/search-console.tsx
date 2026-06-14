@@ -1,19 +1,21 @@
 'use client';
 
 /**
- * The search console — the whole Phase 5 UI. A natural-language question goes to
- * the agent Server Action (server-side; the browser never holds the API secret),
- * which returns a chosen tool + non-PHI summary. "Show underlying rows" then calls
- * the results Server Action with the opaque query_id to fetch PHI rows.
+ * The search console. A natural-language question goes to the agent Server Action
+ * (server-side; the browser never holds the API secret), which returns a chosen
+ * tool + non-PHI summary. "Show underlying rows" then calls the results Server
+ * Action with the opaque query_id to fetch PHI rows.
  *
- * client_history is special: its rows are only fetchable after the user re-supplies
- * the patient identity (verified server-side), so that branch shows an identity
- * form instead of a one-click button, and a fail-closed empty result is presented
- * as "no match on the supplied identity," not "no such patient."
+ * Quick-question buttons drive the same path: most auto-run; the patient-history
+ * one only populates the prompt (the user types the last name) since client_history
+ * needs a real name. client_history rows are only fetchable after the user
+ * re-supplies the patient identity (verified server-side); a fail-closed empty
+ * result is presented as "no match on the supplied identity," not "no such patient."
  */
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
 import { IdentityForm } from '@/components/identity-form';
+import { QuickQuestions, type QuickQuestion } from '@/components/quick-questions';
 import { ResultsTable } from '@/components/results-table';
 import { SummaryView } from '@/components/summary-view';
 import { Button } from '@/components/ui/button';
@@ -43,16 +45,33 @@ export function SearchConsole() {
   const [rowsLoading, setRowsLoading] = useState(false);
   const [rowsResult, setRowsResult] = useState<ResultsActionResult | null>(null);
 
-  async function doSearch(e: React.FormEvent) {
-    e.preventDefault();
-    if (question.trim() === '' || searching) return;
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  async function runQuestion(q: string) {
+    if (q.trim() === '' || searching) return;
     setSearching(true);
     setAgent(null);
     setRowsResult(null);
     try {
-      setAgent(await runSearch(question));
+      setAgent(await runSearch(q));
     } finally {
       setSearching(false);
+    }
+  }
+
+  function onQuickSelect(item: QuickQuestion) {
+    setQuestion(item.question);
+    if (item.autoRun) {
+      void runQuestion(item.question);
+    } else {
+      // Populate only — focus the prompt so the user can finish it (e.g. add a name).
+      requestAnimationFrame(() => {
+        const el = inputRef.current;
+        if (el) {
+          el.focus();
+          el.setSelectionRange(item.question.length, item.question.length);
+        }
+      });
     }
   }
 
@@ -71,8 +90,15 @@ export function SearchConsole() {
 
   return (
     <div className="space-y-6">
-      <form onSubmit={doSearch} className="flex gap-2">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void runQuestion(question);
+        }}
+        className="flex gap-2"
+      >
         <Input
+          ref={inputRef}
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
           placeholder="Ask about the claims data — e.g. “payer gaps for Beacon Carelon in 2025”"
@@ -83,6 +109,8 @@ export function SearchConsole() {
           {searching ? 'Searching…' : 'Search'}
         </Button>
       </form>
+
+      <QuickQuestions disabled={searching} onSelect={onQuickSelect} />
 
       {searching && <Notice tone="muted">Interpreting your question…</Notice>}
 

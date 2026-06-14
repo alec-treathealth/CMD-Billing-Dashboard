@@ -7,12 +7,13 @@
  * gated by Vercel deployment protection, not by app-level login (no per-user auth
  * yet — the audit principal is the fixed label 'phase5-ui').
  */
+import { Dashboard } from '@/components/dashboard';
 import { SearchConsole } from '@/components/search-console';
 
 export default function Home() {
   return (
-    <main className="mx-auto max-w-5xl p-6 sm:p-10">
-      <header className="mb-6">
+    <main className="mx-auto max-w-5xl space-y-10 p-6 sm:p-10">
+      <header>
         <h1 className="text-2xl font-semibold tracking-tight">Claims Search</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Ask a question about three years of out-of-network behavioral-health claims. Results
@@ -20,6 +21,7 @@ export default function Home() {
         </p>
       </header>
       <SearchConsole />
+      <Dashboard />
       <footer className="mt-10 border-t pt-4 text-xs text-muted-foreground">
         Internal tool — handles PHI. There is no application login: access is controlled solely by
         Vercel Deployment Protection. Do not share this URL outside the authorized billing audience.

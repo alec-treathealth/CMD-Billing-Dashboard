@@ -13,8 +13,15 @@
  */
 import { makeAnthropicClientFromEnv } from '../../src/agent/index.js';
 import type { AnthropicMessagesClient } from '../../src/agent/index.js';
+import { distribution, payerGapAnalysis } from '../../src/queries/index.js';
 import { makeReaderPool, PgExecutor, readerConnectionStringFromEnv } from '../../src/queries/executor.js';
-import type { QueryContext } from '../../src/queries/types.js';
+import type {
+  DistributionField,
+  DistributionMetric,
+  DistributionSummary,
+  PayerGapSummary,
+  QueryContext,
+} from '../../src/queries/types.js';
 import { handleAgentRequest, type AgentHttpRequest } from '../../src/routes/agentHandler.js';
 import type { ResultsContext } from '../../src/routes/results.js';
 import { handleResultsRequest, type ResultsHttpRequest } from '../../src/routes/resultsHandler.js';
@@ -56,4 +63,33 @@ export function handleAgent(req: AgentHttpRequest) {
 export function handleResults(req: ResultsHttpRequest) {
   const ctx: ResultsContext = { executor: readerExecutor() };
   return handleResultsRequest(req, { ctx, secret: bearerSecret() });
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard data path (non-PHI, summary-only).
+//
+// The default dashboard calls the vetted query functions DIRECTLY (not via the
+// agent — no LLM, deterministic) and returns ONLY their non-PHI `summary_stats`.
+// The `query_id` is intentionally dropped: the dashboard never fetches rows, so
+// no PHI can ever be reached on this path. `summary_stats` is PHI-free by type.
+// ---------------------------------------------------------------------------
+
+function dashboardCtx(): QueryContext {
+  // Same least-privilege claims_reader executor; a fixed non-PHI audit principal.
+  return { executor: readerExecutor(), createdBy: 'phase5-dashboard' };
+}
+
+/** Per-payer billed/allowed/paid + collection gap + avg rate (non-PHI summary). */
+export async function dashboardPayerGap(): Promise<PayerGapSummary> {
+  const { summary_stats } = await payerGapAnalysis({}, dashboardCtx());
+  return summary_stats;
+}
+
+/** A single allowlisted-dimension distribution (non-PHI summary). */
+export async function dashboardDistribution(
+  field: DistributionField,
+  metric: DistributionMetric,
+): Promise<DistributionSummary> {
+  const { summary_stats } = await distribution({ field, metric }, dashboardCtx());
+  return summary_stats;
 }

@@ -20,15 +20,20 @@
  * action argument (a POST body under the hood), never a URL, and is never logged
  * or persisted here.
  */
-import { handleAgent, handleResults } from '@/lib/server';
+import { dashboardDistribution, dashboardPayerGap, handleAgent, handleResults } from '@/lib/server';
 import type { AgentResponseBody } from '../../src/routes/agentHandler';
 import type { ResultsResponse, ResultsIdentity } from '../../src/routes/results';
-import type { FunctionName, SummaryStats } from '../../src/queries/types';
+import type {
+  DistributionSummary,
+  FunctionName,
+  PayerGapSummary,
+  SummaryStats,
+} from '../../src/queries/types';
 
 /** Fixed audit principal until session auth exists (gate 3). */
 const AUDIT_PRINCIPAL = 'phase5-ui';
 
-export type { FunctionName, SummaryStats, ResultsIdentity };
+export type { FunctionName, SummaryStats, ResultsIdentity, DistributionSummary, PayerGapSummary };
 
 export type AgentActionResult =
   | { ok: true; tool_name: FunctionName; query_id: string; summary_stats: SummaryStats }
@@ -144,5 +149,52 @@ export async function fetchRows(
     return { ok: false, error: messageForStatus(status, 'The rows could not be loaded.') };
   } catch {
     return { ok: false, error: 'The rows could not be loaded.' };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard actions — non-PHI, aggregate-only, no row fetch, no LLM.
+//
+// Each is ARG-FREE with a hardcoded query (zero client input → no injection
+// surface) and returns ONLY the non-PHI summary. A failure collapses to
+// { ok: false } so one widget can fail without breaking the page or leaking
+// detail. The dashboard never calls fetchRows, so PHI is unreachable here.
+// ---------------------------------------------------------------------------
+
+export type DashboardResult<T> = { ok: true; data: T } | { ok: false };
+
+/** Per-payer billed/allowed/paid, collection gap, avg rate, and total claims. */
+export async function loadPayerGap(): Promise<DashboardResult<PayerGapSummary>> {
+  try {
+    return { ok: true, data: await dashboardPayerGap() };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** Claim volume by source year. */
+export async function loadClaimsByYear(): Promise<DashboardResult<DistributionSummary>> {
+  try {
+    return { ok: true, data: await dashboardDistribution('source_year', 'count') };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** Top procedure (HCPCS) codes by claim count. */
+export async function loadTopHcpcs(): Promise<DashboardResult<DistributionSummary>> {
+  try {
+    return { ok: true, data: await dashboardDistribution('hcpcs_code', 'count') };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** Top revenue codes by claim count. */
+export async function loadTopRevenue(): Promise<DashboardResult<DistributionSummary>> {
+  try {
+    return { ok: true, data: await dashboardDistribution('revenue_code', 'count') };
+  } catch {
+    return { ok: false };
   }
 }
