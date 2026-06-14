@@ -1,28 +1,29 @@
 /**
- * Placeholder landing page. UI is intentionally minimal this step — the wiring
- * that matters is the two API routes under /api. A later step builds the search
- * UI that POSTs a question to /api/agent and fetches PHI rows from /api/results
- * with the returned query_id.
+ * Phase 5 landing page — the natural-language claims search console.
+ *
+ * This is a Server Component shell; all data access happens through the Server
+ * Actions invoked by <SearchConsole /> (gate 1, option a), so RESULTS_API_SECRET
+ * stays on the server and never reaches the browser bundle. Reaching this page is
+ * gated by Vercel deployment protection, not by app-level login (no per-user auth
+ * yet — the audit principal is the fixed label 'phase5-ui').
  */
+import { SearchConsole } from '@/components/search-console';
+
 export default function Home() {
   return (
-    <main className="mx-auto max-w-2xl p-8">
-      <h1 className="text-xl font-semibold">Claims Search</h1>
-      <p className="mt-2 text-sm opacity-80">
-        Phase 4 transport scaffold. API routes:
-      </p>
-      <ul className="mt-2 list-disc pl-5 text-sm">
-        <li>
-          <code>POST /api/agent</code> — natural-language question → query function (non-PHI summary)
-        </li>
-        <li>
-          <code>POST /api/results</code> — query_id → PHI rows (authenticated)
-        </li>
-      </ul>
-      <p className="mt-4 text-xs opacity-60">
-        Both routes require <code>Authorization: Bearer &lt;RESULTS_API_SECRET&gt;</code>. PHI never
-        appears in the agent response.
-      </p>
+    <main className="mx-auto max-w-5xl p-6 sm:p-10">
+      <header className="mb-6">
+        <h1 className="text-2xl font-semibold tracking-tight">Claims Search</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Ask a question about three years of out-of-network behavioral-health claims. Results
+          summaries are PHI-free; underlying patient rows are masked until revealed.
+        </p>
+      </header>
+      <SearchConsole />
+      <footer className="mt-10 border-t pt-4 text-xs text-muted-foreground">
+        Internal tool — handles PHI. There is no application login: access is controlled solely by
+        Vercel Deployment Protection. Do not share this URL outside the authorized billing audience.
+      </footer>
     </main>
   );
 }
