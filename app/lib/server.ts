@@ -11,6 +11,7 @@
  * call handleAgent / handleResults here. All PHI-boundary, validation, and audit
  * logic lives in the transport-agnostic handlers under ../../src/routes.
  */
+import { unstable_cache } from 'next/cache';
 import { makeAnthropicClientFromEnv } from '../../src/agent/index.js';
 import type { AnthropicMessagesClient } from '../../src/agent/index.js';
 import { distribution, payerGapAnalysis } from '../../src/queries/index.js';
@@ -116,41 +117,71 @@ function dashboardCtx(): QueryContext {
   return { executor: readerExecutor(), createdBy: 'phase5-dashboard' };
 }
 
-/** Per-payer billed/allowed/paid + collection gap + avg rate (non-PHI summary). */
-export async function dashboardPayerGap(): Promise<PayerGapSummary> {
-  const { summary_stats } = await payerGapAnalysis({}, dashboardCtx());
-  return summary_stats;
-}
+// Phase 7.3: the dashboard aggregate reads are wrapped in Next's unstable_cache.
+// These are all ARG-FREE (or fixed-allowlist args) and return ONLY non-PHI
+// `summary_stats` / aggregate shapes, so they are safe to cache and share across
+// requests. A 15-minute revalidation window matches the Google-Sheets-fed ingest
+// cadence; a shared tag lets a future n8n ingest fire revalidateTag() for exact
+// freshness (out of scope here). The PHI/AI paths (runSearch / fetchRows /
+// handleResults) are intentionally NOT cached.
+const DASHBOARD_REVALIDATE_SECONDS = 15 * 60;
+const DASHBOARD_CACHE_TAG = 'dashboard-aggregates';
 
-/** A single allowlisted-dimension distribution (non-PHI summary). */
-export async function dashboardDistribution(
-  field: DistributionField,
-  metric: DistributionMetric,
-): Promise<DistributionSummary> {
-  const { summary_stats } = await distribution({ field, metric }, dashboardCtx());
-  return summary_stats;
-}
+/** Per-payer billed/allowed/paid + collection gap + avg rate (non-PHI summary). */
+export const dashboardPayerGap = unstable_cache(
+  async (): Promise<PayerGapSummary> => {
+    const { summary_stats } = await payerGapAnalysis({}, dashboardCtx());
+    return summary_stats;
+  },
+  ['dashboard-payer-gap'],
+  { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
+);
+
+/**
+ * A single allowlisted-dimension distribution (non-PHI summary). The (field,
+ * metric) args are part of the cache key, so each dimension caches independently.
+ */
+export const dashboardDistribution = unstable_cache(
+  async (
+    field: DistributionField,
+    metric: DistributionMetric,
+  ): Promise<DistributionSummary> => {
+    const { summary_stats } = await distribution({ field, metric }, dashboardCtx());
+    return summary_stats;
+  },
+  ['dashboard-distribution'],
+  { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
+);
 
 /** Monthly collections by facility (non-PHI summary; reader-only, no row fetch). */
-export async function dashboardCollectionsSummary(): Promise<CollectionsMonthlySummary> {
-  return collectionsMonthlySummary(
-    {},
-    { executor: readerExecutor(), createdBy: 'phase7-collections-dashboard' },
-  );
-}
+export const dashboardCollectionsSummary = unstable_cache(
+  async (): Promise<CollectionsMonthlySummary> =>
+    collectionsMonthlySummary(
+      {},
+      { executor: readerExecutor(), createdBy: 'phase7-collections-dashboard' },
+    ),
+  ['dashboard-collections-summary'],
+  { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
+);
 
 /** MTD/YTD collections KPIs by facility (non-PHI; anchored to latest payment_date). */
-export async function dashboardCollectionsKpis(): Promise<CollectionsKpis> {
-  return collectionsKpis(
-    {},
-    { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard' },
-  );
-}
+export const dashboardCollectionsKpis = unstable_cache(
+  async (): Promise<CollectionsKpis> =>
+    collectionsKpis(
+      {},
+      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard' },
+    ),
+  ['dashboard-collections-kpis'],
+  { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
+);
 
 /** Latest-month daily collections rows (non-PHI; date × facility × checks/eft/gross). */
-export async function dashboardCollectionsDaily(): Promise<CollectionsDailyResult> {
-  return collectionsDaily(
-    {},
-    { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard' },
-  );
-}
+export const dashboardCollectionsDaily = unstable_cache(
+  async (): Promise<CollectionsDailyResult> =>
+    collectionsDaily(
+      {},
+      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard' },
+    ),
+  ['dashboard-collections-daily'],
+  { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
+);

@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -37,6 +38,20 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               TREAT MENTAL HEALTH · BILLING &amp; RCM
             </div>
           </div>
+          <nav className="ml-auto flex items-center gap-1 text-sm font-medium">
+            <Link
+              href="/dashboard"
+              className="rounded-md px-3 py-1.5 text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+            >
+              Dashboard
+            </Link>
+            <Link
+              href="/ask"
+              className="rounded-md px-3 py-1.5 text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+            >
+              Ask
+            </Link>
+          </nav>
         </header>
         {children}
       </body>
