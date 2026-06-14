@@ -22,9 +22,9 @@ import type {
 /** A labelled metric tile for the flat-aggregate summaries. */
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md border bg-muted/30 p-3">
-      <div className="text-xs uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className="mt-1 text-lg font-semibold tabular-nums">{value}</div>
+    <div className="rounded-md border border-l-2 border-l-teal500 bg-teal50/50 p-3">
+      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="ths-num mt-1 text-lg font-semibold tabular-nums text-teal700">{value}</div>
     </div>
   );
 }

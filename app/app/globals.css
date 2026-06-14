@@ -1,70 +1,49 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* shadcn/ui slate token set (light/dark). The primitives under components/ui
-   reference these CSS variables; keep the two in sync. */
+/*
+ * TreatHealthOS visual system mapped onto the shadcn/ui CSS-variable theme.
+ * Warm-clinical teal anchor, sparing coral accent, warm off-white ground.
+ * The primitives under components/ui reference these variables; keep them in
+ * sync. Tokens (hex → HSL) per the TreatHealthOS brand:
+ *   ground #FBF8F4 · surface #FFF · ink900 #1B2B2A · ink600 #4A5C5A
+ *   teal900 #0E3A3A · teal700 #135E5A · teal500 #1C8B82 · teal50 #EAF4F2
+ *   line #E4E9E6 · status danger #C0453B
+ */
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    --background: 34.3 46.7% 97.1%; /* ground */
+    --foreground: 176.3 22.9% 13.7%; /* ink900 */
 
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%; /* surface */
+    --card-foreground: 176.3 22.9% 13.7%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
+    --popover-foreground: 176.3 22.9% 13.7%;
 
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
+    --primary: 176.8 66.4% 22.2%; /* teal700 */
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 168 31.3% 93.7%; /* teal50 */
+    --secondary-foreground: 176.8 66.4% 22.2%; /* teal700 */
 
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
+    --muted: 168 31.3% 93.7%; /* teal50 */
+    --muted-foreground: 173.3 10.8% 32.5%; /* ink600 */
 
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
+    --accent: 168 31.3% 93.7%; /* teal50 */
+    --accent-foreground: 176.8 66.4% 22.2%; /* teal700 */
 
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 4.5 53% 49.2%; /* status danger */
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
+    --border: 144 10.2% 90.4%; /* line */
+    --input: 144 10.2% 90.4%; /* line */
+    --ring: 175.1 66.5% 32.7%; /* teal500 */
 
-    --radius: 0.5rem;
-  }
-
-  .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-
-    --primary: 210 40% 98%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 212.7 26.8% 83.9%;
+    --radius: 0.75rem;
   }
 
   * {
@@ -73,5 +52,27 @@
   body {
     background-color: hsl(var(--background));
     color: hsl(var(--foreground));
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    letter-spacing: -0.006em;
+  }
+
+  /* Space Grotesk display headings */
+  h1,
+  h2,
+  h3,
+  .ths-h {
+    font-family: 'Space Grotesk', 'Inter', sans-serif;
+    letter-spacing: -0.02em;
+  }
+
+  /* IBM Plex Mono for tabular/numeric data (financial figures, counts,
+     balances, percentages, numeric dates). The dashboard already marks these
+     cells with `tabular-nums`, so route that utility to the mono face. */
+  .ths-num,
+  .tabular-nums {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0;
   }
 }

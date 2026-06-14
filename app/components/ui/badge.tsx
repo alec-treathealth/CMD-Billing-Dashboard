@@ -3,15 +3,17 @@ import { cva, type VariantProps } from 'class-variance-authority';
 
 import { cn } from '@/lib/utils';
 
+// TreatHealthOS "Pill" look: rounded-md, uppercase, tracking-wide, soft tonal
+// fills (teal/coral/neutral) with a status-colored foreground.
 const badgeVariants = cva(
-  'inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
+  'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
   {
     variants: {
       variant: {
-        default: 'border-transparent bg-primary text-primary-foreground',
-        secondary: 'border-transparent bg-secondary text-secondary-foreground',
-        destructive: 'border-transparent bg-destructive text-destructive-foreground',
-        outline: 'text-foreground',
+        default: 'border-transparent bg-teal50 text-teal700',
+        secondary: 'border-transparent bg-teal50 text-teal700',
+        destructive: 'border-transparent bg-status-danger/10 text-status-danger',
+        outline: 'border-line bg-surface text-ink600',
       },
     },
     defaultVariants: {

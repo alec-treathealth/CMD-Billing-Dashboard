@@ -281,10 +281,10 @@ function CollectionsBody({ data }: { data: CollectionsMonthlySummary }) {
 /** A big-number KPI tile. */
 function Kpi({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
-    <Card>
+    <Card className="border-t-2 border-t-teal500">
       <CardContent className="pt-6">
-        <div className="text-xs uppercase tracking-wide text-muted-foreground">{label}</div>
-        <div className="mt-1 text-2xl font-semibold tabular-nums">{value}</div>
+        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
+        <div className="ths-num mt-1 text-2xl font-semibold tabular-nums text-teal700">{value}</div>
         {sub && <div className="mt-1 text-xs text-muted-foreground">{sub}</div>}
       </CardContent>
     </Card>

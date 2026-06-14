@@ -32,8 +32,8 @@ import {
 function Notice({ tone, children }: { tone: 'error' | 'muted'; children: React.ReactNode }) {
   const cls =
     tone === 'error'
-      ? 'border-destructive/40 bg-destructive/10 text-destructive'
-      : 'border-border bg-muted/40 text-muted-foreground';
+      ? 'border-status-danger/30 bg-status-danger/10 text-status-danger'
+      : 'border-teal200 bg-teal50/60 text-ink600';
   return <div className={`rounded-md border px-3 py-2 text-sm ${cls}`}>{children}</div>;
 }
 
