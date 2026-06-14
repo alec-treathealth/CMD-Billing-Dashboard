@@ -293,6 +293,41 @@ CA-bundling gate is RESOLVED: the Supabase Root CA is committed at
 Vercel bundle. Remaining Step 3 blocker: **no Vercel project / git remote yet** —
 one must be created and linked. See `docs/PHASE4_STEP3_PROMPT.md`.
 
+## Phase 6 — COMPLETE (collections schema + ingest)
+
+Commit **`63d0a82` — phase6: collections schema + ingest** (deployed READY on
+Vercel). Adds a separate `collections` Postgres schema for the CMD collections
+domain, alongside the existing `claims` schema. Migrations `0006`–`0008`
+(`supabase/migrations/`); ingest under `src/collections/`.
+
+**Schema / tables (`collections.*`):**
+
+| Table | Role | Live count |
+|-------|------|-----------:|
+| `collections_raw` | verbatim landing of the source sheet — **PHI-bearing, admin-only** | 58,190 |
+| `daily_collections` | typed per-day collections | 1,902 |
+| `payment_lines` | typed payment line items | 56,176 |
+| `negotiation_worklist` | typed negotiation worklist | 16 |
+| `rollup_snapshots` | typed rollup snapshots | 714 |
+| `facilities` | facility reference | 15 |
+
+**PHI / least-privilege (verified live):** `collections_raw` is PHI-bearing and
+**admin-only** — `claims_reader` has NO SELECT on it (verified: reader cannot
+SELECT `collections_raw`). `claims_reader` is granted SELECT on the five typed
+tables (`daily_collections`, `payment_lines`, `negotiation_worklist`,
+`rollup_snapshots`) **plus** `facilities` only. Any read-side collections feature
+uses the typed tables, never `collections_raw`.
+
+**Lineage rule (locked):** `TREAT_FRCA` and `LSMH_DMH` are `source_group_code`
+**lineage only** — they are NEVER a `facility_code`. Verified: 0 group-code leaks
+into `facility_code`, and 0 FK orphans across the typed tables.
+
+**Deferred:** archived / historical collections data is NOT ingested in Phase 6
+— deferred to a later phase.
+
+**Phase 7 (likely next):** a read-only collections **summary API/UI** over the
+typed tables (never `collections_raw`), mirroring the claims PHI boundary.
+
 ## Phase 2+ notes (DO NOT build now — recorded so they aren't lost)
 
 - **Readmission matching is fuzzy and graded.** Member ID is unreliable
