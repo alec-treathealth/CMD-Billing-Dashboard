@@ -21,6 +21,7 @@
  * or persisted here.
  */
 import {
+  browseClaims,
   dashboardCollectionsDaily,
   dashboardCollectionsKpis,
   dashboardCollectionsSummary,
@@ -29,6 +30,11 @@ import {
   handleAgent,
   handleResults,
 } from '@/lib/server';
+import type {
+  BrowseClaimsResult,
+  BrowseClaimsSort,
+} from '../../src/queries/browse_claims';
+import type { ClaimFilter } from '../../src/queries/types';
 import type { AgentResponseBody } from '../../src/routes/agentHandler';
 import type { ResultsResponse, ResultsIdentity } from '../../src/routes/results';
 import type {
@@ -52,6 +58,9 @@ export type {
   CollectionsMonthlySummary,
   CollectionsKpis,
   CollectionsDailyResult,
+  BrowseClaimsResult,
+  BrowseClaimsSort,
+  ClaimFilter,
 };
 
 export type AgentActionResult =
@@ -242,5 +251,38 @@ export async function loadCollectionsDaily(): Promise<DashboardResult<Collection
     return { ok: true, data: await dashboardCollectionsDaily() };
   } catch {
     return { ok: false };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Claims Data Explorer action (Phase 7.4) — page-limited, NON-PHI browsing.
+//
+// Returns ONE bounded page of non-PHI claim rows. No PHI columns are projected
+// (browse_claims excludes every patient identifier), so this never touches the
+// reveal/audit path, and row-level data is neither cached nor shipped in bulk
+// (the underlying query LIMITs to pageSize). Rows are normalized to JSON-safe
+// scalars before crossing the action boundary, like fetchRows.
+// ---------------------------------------------------------------------------
+
+export type ClaimsPageActionResult =
+  | { ok: true; data: BrowseClaimsResult }
+  | { ok: false; error: string };
+
+export async function loadClaimsPage(params: {
+  filter?: ClaimFilter;
+  sort?: BrowseClaimsSort;
+  page?: number;
+  pageSize?: number;
+}): Promise<ClaimsPageActionResult> {
+  try {
+    const data = await browseClaims({
+      filter: params.filter,
+      sort: params.sort,
+      page: params.page,
+      pageSize: params.pageSize,
+    });
+    return { ok: true, data: { ...data, rows: toPlainRows(data.rows) } };
+  } catch {
+    return { ok: false, error: 'The claims could not be loaded.' };
   }
 }

@@ -92,7 +92,7 @@ function MiniBar({ pct }: { pct: number | null }) {
   );
 }
 
-function PayerOverview() {
+export function PayerOverview() {
   const state = useWidget<PayerGapSummary>(loadPayerGap);
   return (
     <WidgetCard title="Payer overview" state={state}>
@@ -402,49 +402,50 @@ function CollectionsDailyBody({ data }: { data: CollectionsDailyResult }) {
   );
 }
 
-export function Dashboard() {
+/** The three claim-distribution widgets (by year, top HCPCS, top revenue). */
+export function ClaimsDistributions() {
   return (
-    <section className="space-y-4">
-      <div>
-        <h2 className="text-lg font-semibold tracking-tight">Overview</h2>
-        <p className="text-sm text-muted-foreground">
-          Aggregate, non-PHI metrics across all claims. No patient data is loaded here.
-        </p>
-      </div>
-      <PayerOverview />
-      <div className="grid gap-4 lg:grid-cols-3">
-        <DistributionWidget
-          title="Claims by year"
-          action={loadClaimsByYear}
-          topN={10}
-          sort="value"
-        />
-        <DistributionWidget
-          title="Top procedure (HCPCS) codes"
-          action={loadTopHcpcs}
-          topN={10}
-          sort="metric"
-          caption="Top 10 by claim count."
-        />
-        <DistributionWidget
-          title="Top revenue codes"
-          action={loadTopRevenue}
-          topN={10}
-          sort="metric"
-          caption="Top 10 by claim count."
-        />
-      </div>
+    <div className="grid gap-4 lg:grid-cols-3">
+      <DistributionWidget title="Claims by year" action={loadClaimsByYear} topN={10} sort="value" />
+      <DistributionWidget
+        title="Top procedure (HCPCS) codes"
+        action={loadTopHcpcs}
+        topN={10}
+        sort="metric"
+        caption="Top 10 by claim count."
+      />
+      <DistributionWidget
+        title="Top revenue codes"
+        action={loadTopRevenue}
+        topN={10}
+        sort="metric"
+        caption="Top 10 by claim count."
+      />
+    </div>
+  );
+}
 
-      <div className="pt-2">
-        <h2 className="text-lg font-semibold tracking-tight">Collections</h2>
-        <p className="text-sm text-muted-foreground">
-          Daily collections reporting (Checks / EFT / Gross), MTD &amp; YTD by facility. Aggregate,
-          non-PHI; no patient data is loaded here.
-        </p>
-      </div>
+/** Full collections detail: MTD/YTD KPIs, daily detail, and latest-month summary. */
+export function CollectionsSections() {
+  return (
+    <div className="space-y-4">
       <CollectionsKpisWidget />
       <CollectionsDailyWidget />
       <CollectionsSummaryWidget />
+    </div>
+  );
+}
+
+/**
+ * The /dashboard overview: headline collections KPIs + claim distributions. The
+ * page provides the heading and section nav; payer and full collections detail
+ * live on their own sub-routes. Aggregate, non-PHI; no patient data is loaded.
+ */
+export function Dashboard() {
+  return (
+    <section className="space-y-4">
+      <CollectionsKpisWidget />
+      <ClaimsDistributions />
     </section>
   );
 }

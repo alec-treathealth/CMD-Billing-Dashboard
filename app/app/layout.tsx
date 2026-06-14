@@ -46,6 +46,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               Dashboard
             </Link>
             <Link
+              href="/claims"
+              className="rounded-md px-3 py-1.5 text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+            >
+              Claims
+            </Link>
+            <Link
               href="/ask"
               className="rounded-md px-3 py-1.5 text-white/80 transition-colors hover:bg-white/10 hover:text-white"
             >

@@ -7,10 +7,11 @@
  * No PHI is reachable here: the dashboard never fetches rows.
  */
 import { Dashboard } from '@/components/dashboard';
+import { DashboardNav } from '@/components/dashboard-nav';
 
 export default function DashboardPage() {
   return (
-    <main className="mx-auto max-w-5xl space-y-10 p-6 sm:p-10">
+    <main className="mx-auto max-w-5xl space-y-6 p-6 sm:p-10">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
         <p className="mt-1 text-sm text-muted-foreground">
@@ -18,6 +19,7 @@ export default function DashboardPage() {
           here.
         </p>
       </header>
+      <DashboardNav />
       <Dashboard />
       <footer className="mt-10 border-t pt-4 text-xs text-muted-foreground">
         Internal tool — handles PHI. There is no application login: access is controlled solely by

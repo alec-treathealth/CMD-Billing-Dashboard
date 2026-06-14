@@ -27,6 +27,8 @@ import { collectionsMonthlySummary } from '../../src/collections/summary.js';
 import type { CollectionsMonthlySummary } from '../../src/collections/summaryTypes.js';
 import { collectionsDaily, collectionsKpis } from '../../src/collections/daily.js';
 import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collections/dailyTypes.js';
+import { browseClaims as browseClaimsQuery } from '../../src/queries/browse_claims.js';
+import type { BrowseClaimsArgs, BrowseClaimsResult } from '../../src/queries/browse_claims.js';
 import { handleAgentRequest, type AgentHttpRequest } from '../../src/routes/agentHandler.js';
 import {
   handleCollectionsSummaryRequest,
@@ -185,3 +187,17 @@ export const dashboardCollectionsDaily = unstable_cache(
   ['dashboard-collections-daily'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
 );
+
+// ---------------------------------------------------------------------------
+// Claims Data Explorer (Phase 7.4) — page-limited, NON-PHI claim browsing.
+//
+// This is intentionally NOT cached: it is a per-request, page/sort/filter-driven
+// read of claim ROWS. Even though the projection is non-PHI, row-level claims
+// data is never cached. It is also NOT on the two-gate PHI path — browse_claims
+// projects only non-PHI columns, so no patient identifiers are reachable here.
+// ---------------------------------------------------------------------------
+
+/** One page of non-PHI claim rows (LIMIT/OFFSET, allowlisted sort/filter). */
+export async function browseClaims(args: BrowseClaimsArgs): Promise<BrowseClaimsResult> {
+  return browseClaimsQuery(args, { executor: readerExecutor(), createdBy: 'claims-explorer' });
+}
