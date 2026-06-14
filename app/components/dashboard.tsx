@@ -14,13 +14,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { count, money, percent, rate } from '@/lib/format';
 import {
   loadClaimsByYear,
+  loadCollectionsSummary,
   loadPayerGap,
   loadTopHcpcs,
   loadTopRevenue,
+  type CollectionsMonthlySummary,
   type DashboardResult,
   type DistributionSummary,
   type PayerGapSummary,
 } from '@/lib/actions';
+import { facilityLabel } from '../../src/collections/summaryTypes';
 
 type WidgetState<T> = { status: 'loading' } | { status: 'error' } | { status: 'ready'; data: T };
 
@@ -193,6 +196,84 @@ function DistributionWidget({
   );
 }
 
+/**
+ * Collections summary — latest month, by facility. Non-PHI: aggregates only
+ * collections.daily_collections + facilities (never collections_raw /
+ * payment_lines / source_group_code). A null facility renders as "(unassigned)".
+ */
+function CollectionsSummaryWidget() {
+  const state = useWidget<CollectionsMonthlySummary>(loadCollectionsSummary);
+  return (
+    <WidgetCard title="Collections — latest month by facility" state={state}>
+      {state.status === 'ready' && <CollectionsBody data={state.data} />}
+    </WidgetCard>
+  );
+}
+
+function CollectionsBody({ data }: { data: CollectionsMonthlySummary }) {
+  const latestMonth = data.by_month_facility.reduce<string | null>(
+    (m, r) => (m === null || r.month > m ? r.month : m),
+    null,
+  );
+  const rows = data.by_month_facility
+    .filter((r) => r.month === latestMonth)
+    .sort((a, b) => b.gross_amount - a.gross_amount);
+  const totalGross = rows.reduce((acc, r) => acc + (r.gross_amount || 0), 0);
+
+  if (latestMonth === null || rows.length === 0) {
+    return <div className="text-sm text-muted-foreground">No collections in range.</div>;
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="text-sm text-muted-foreground">
+        {latestMonth} · {count(rows.length)} facilities · {money(totalGross)} gross
+      </div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Facility</TableHead>
+            <TableHead className="text-right">Checks</TableHead>
+            <TableHead className="text-right">EFT</TableHead>
+            <TableHead className="text-right">Gross</TableHead>
+            <TableHead className="w-[24%]">Share</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((r, i) => {
+            const pct = totalGross > 0 ? (r.gross_amount / totalGross) * 100 : null;
+            return (
+              <TableRow key={`${r.facility_code ?? 'unassigned'}-${i}`}>
+                <TableCell>
+                  {r.facility_name === null ? (
+                    <span className="text-muted-foreground">{facilityLabel(r)}</span>
+                  ) : (
+                    facilityLabel(r)
+                  )}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">{money(r.checks_amount)}</TableCell>
+                <TableCell className="text-right tabular-nums">{money(r.eft_amount)}</TableCell>
+                <TableCell className="text-right tabular-nums">{money(r.gross_amount)}</TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <MiniBar pct={pct} />
+                    <span className="w-12 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
+                      {percent(pct)}
+                    </span>
+                  </div>
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+      <p className="text-xs text-muted-foreground">
+        Latest month by gross. &quot;(unassigned)&quot; = group-code lineage with no facility code.
+      </p>
+    </div>
+  );
+}
+
 export function Dashboard() {
   return (
     <section className="space-y-4">
@@ -225,6 +306,15 @@ export function Dashboard() {
           caption="Top 10 by claim count."
         />
       </div>
+
+      <div className="pt-2">
+        <h2 className="text-lg font-semibold tracking-tight">Collections</h2>
+        <p className="text-sm text-muted-foreground">
+          Monthly collections by facility (latest month). Aggregate, non-PHI; no patient data is
+          loaded here.
+        </p>
+      </div>
+      <CollectionsSummaryWidget />
     </section>
   );
 }

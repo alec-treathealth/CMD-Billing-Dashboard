@@ -20,7 +20,13 @@
  * action argument (a POST body under the hood), never a URL, and is never logged
  * or persisted here.
  */
-import { dashboardDistribution, dashboardPayerGap, handleAgent, handleResults } from '@/lib/server';
+import {
+  dashboardCollectionsSummary,
+  dashboardDistribution,
+  dashboardPayerGap,
+  handleAgent,
+  handleResults,
+} from '@/lib/server';
 import type { AgentResponseBody } from '../../src/routes/agentHandler';
 import type { ResultsResponse, ResultsIdentity } from '../../src/routes/results';
 import type {
@@ -29,11 +35,19 @@ import type {
   PayerGapSummary,
   SummaryStats,
 } from '../../src/queries/types';
+import type { CollectionsMonthlySummary } from '../../src/collections/summaryTypes';
 
 /** Fixed audit principal until session auth exists (gate 3). */
 const AUDIT_PRINCIPAL = 'phase5-ui';
 
-export type { FunctionName, SummaryStats, ResultsIdentity, DistributionSummary, PayerGapSummary };
+export type {
+  FunctionName,
+  SummaryStats,
+  ResultsIdentity,
+  DistributionSummary,
+  PayerGapSummary,
+  CollectionsMonthlySummary,
+};
 
 export type AgentActionResult =
   | { ok: true; tool_name: FunctionName; query_id: string; summary_stats: SummaryStats }
@@ -194,6 +208,15 @@ export async function loadTopHcpcs(): Promise<DashboardResult<DistributionSummar
 export async function loadTopRevenue(): Promise<DashboardResult<DistributionSummary>> {
   try {
     return { ok: true, data: await dashboardDistribution('revenue_code', 'count') };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** Monthly collections by facility (Phase 7; non-PHI, reader-only). */
+export async function loadCollectionsSummary(): Promise<DashboardResult<CollectionsMonthlySummary>> {
+  try {
+    return { ok: true, data: await dashboardCollectionsSummary() };
   } catch {
     return { ok: false };
   }

@@ -22,7 +22,13 @@ import type {
   PayerGapSummary,
   QueryContext,
 } from '../../src/queries/types.js';
+import { collectionsMonthlySummary } from '../../src/collections/summary.js';
+import type { CollectionsMonthlySummary } from '../../src/collections/summaryTypes.js';
 import { handleAgentRequest, type AgentHttpRequest } from '../../src/routes/agentHandler.js';
+import {
+  handleCollectionsSummaryRequest,
+  type CollectionsSummaryHttpRequest,
+} from '../../src/routes/collectionsSummaryHandler.js';
 import type { ResultsContext } from '../../src/routes/results.js';
 import { handleResultsRequest, type ResultsHttpRequest } from '../../src/routes/resultsHandler.js';
 
@@ -65,6 +71,14 @@ export function handleResults(req: ResultsHttpRequest) {
   return handleResultsRequest(req, { ctx, secret: bearerSecret() });
 }
 
+/** Collections summary route: optional date bounds → non-PHI monthly summary by facility. */
+export function handleCollectionsSummary(req: CollectionsSummaryHttpRequest) {
+  return handleCollectionsSummaryRequest(req, {
+    ctx: { executor: readerExecutor(), createdBy: 'collections-summary-api' },
+    secret: bearerSecret(),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Dashboard data path (non-PHI, summary-only).
 //
@@ -92,4 +106,12 @@ export async function dashboardDistribution(
 ): Promise<DistributionSummary> {
   const { summary_stats } = await distribution({ field, metric }, dashboardCtx());
   return summary_stats;
+}
+
+/** Monthly collections by facility (non-PHI summary; reader-only, no row fetch). */
+export async function dashboardCollectionsSummary(): Promise<CollectionsMonthlySummary> {
+  return collectionsMonthlySummary(
+    {},
+    { executor: readerExecutor(), createdBy: 'phase7-collections-dashboard' },
+  );
 }
