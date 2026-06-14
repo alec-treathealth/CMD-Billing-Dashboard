@@ -21,6 +21,8 @@
  * or persisted here.
  */
 import {
+  dashboardCollectionsDaily,
+  dashboardCollectionsKpis,
   dashboardCollectionsSummary,
   dashboardDistribution,
   dashboardPayerGap,
@@ -36,6 +38,7 @@ import type {
   SummaryStats,
 } from '../../src/queries/types';
 import type { CollectionsMonthlySummary } from '../../src/collections/summaryTypes';
+import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collections/dailyTypes';
 
 /** Fixed audit principal until session auth exists (gate 3). */
 const AUDIT_PRINCIPAL = 'phase5-ui';
@@ -47,6 +50,8 @@ export type {
   DistributionSummary,
   PayerGapSummary,
   CollectionsMonthlySummary,
+  CollectionsKpis,
+  CollectionsDailyResult,
 };
 
 export type AgentActionResult =
@@ -217,6 +222,24 @@ export async function loadTopRevenue(): Promise<DashboardResult<DistributionSumm
 export async function loadCollectionsSummary(): Promise<DashboardResult<CollectionsMonthlySummary>> {
   try {
     return { ok: true, data: await dashboardCollectionsSummary() };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** MTD/YTD collections KPIs by facility (Phase 7.1; non-PHI, reader-only). */
+export async function loadCollectionsKpis(): Promise<DashboardResult<CollectionsKpis>> {
+  try {
+    return { ok: true, data: await dashboardCollectionsKpis() };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** Latest-month daily collections rows (Phase 7.1; non-PHI, reader-only). */
+export async function loadCollectionsDaily(): Promise<DashboardResult<CollectionsDailyResult>> {
+  try {
+    return { ok: true, data: await dashboardCollectionsDaily() };
   } catch {
     return { ok: false };
   }

@@ -24,11 +24,18 @@ import type {
 } from '../../src/queries/types.js';
 import { collectionsMonthlySummary } from '../../src/collections/summary.js';
 import type { CollectionsMonthlySummary } from '../../src/collections/summaryTypes.js';
+import { collectionsDaily, collectionsKpis } from '../../src/collections/daily.js';
+import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collections/dailyTypes.js';
 import { handleAgentRequest, type AgentHttpRequest } from '../../src/routes/agentHandler.js';
 import {
   handleCollectionsSummaryRequest,
   type CollectionsSummaryHttpRequest,
 } from '../../src/routes/collectionsSummaryHandler.js';
+import {
+  handleCollectionsDailyRequest,
+  handleCollectionsKpisRequest,
+  type CollectionsQueryHttpRequest,
+} from '../../src/routes/collectionsQueryHandlers.js';
 import type { ResultsContext } from '../../src/routes/results.js';
 import { handleResultsRequest, type ResultsHttpRequest } from '../../src/routes/resultsHandler.js';
 
@@ -79,6 +86,22 @@ export function handleCollectionsSummary(req: CollectionsSummaryHttpRequest) {
   });
 }
 
+/** Collections daily route: optional facility/window → non-PHI daily rows. */
+export function handleCollectionsDaily(req: CollectionsQueryHttpRequest) {
+  return handleCollectionsDailyRequest(req, {
+    ctx: { executor: readerExecutor(), createdBy: 'collections-daily-api' },
+    secret: bearerSecret(),
+  });
+}
+
+/** Collections KPIs route: optional as_of → non-PHI MTD/YTD by facility. */
+export function handleCollectionsKpis(req: CollectionsQueryHttpRequest) {
+  return handleCollectionsKpisRequest(req, {
+    ctx: { executor: readerExecutor(), createdBy: 'collections-kpis-api' },
+    secret: bearerSecret(),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Dashboard data path (non-PHI, summary-only).
 //
@@ -113,5 +136,21 @@ export async function dashboardCollectionsSummary(): Promise<CollectionsMonthlyS
   return collectionsMonthlySummary(
     {},
     { executor: readerExecutor(), createdBy: 'phase7-collections-dashboard' },
+  );
+}
+
+/** MTD/YTD collections KPIs by facility (non-PHI; anchored to latest payment_date). */
+export async function dashboardCollectionsKpis(): Promise<CollectionsKpis> {
+  return collectionsKpis(
+    {},
+    { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard' },
+  );
+}
+
+/** Latest-month daily collections rows (non-PHI; date × facility × checks/eft/gross). */
+export async function dashboardCollectionsDaily(): Promise<CollectionsDailyResult> {
+  return collectionsDaily(
+    {},
+    { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard' },
   );
 }

@@ -14,10 +14,14 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { count, money, percent, rate } from '@/lib/format';
 import {
   loadClaimsByYear,
+  loadCollectionsDaily,
+  loadCollectionsKpis,
   loadCollectionsSummary,
   loadPayerGap,
   loadTopHcpcs,
   loadTopRevenue,
+  type CollectionsDailyResult,
+  type CollectionsKpis,
   type CollectionsMonthlySummary,
   type DashboardResult,
   type DistributionSummary,
@@ -274,6 +278,130 @@ function CollectionsBody({ data }: { data: CollectionsMonthlySummary }) {
   );
 }
 
+/** A big-number KPI tile. */
+function Kpi({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <div className="text-xs uppercase tracking-wide text-muted-foreground">{label}</div>
+        <div className="mt-1 text-2xl font-semibold tabular-nums">{value}</div>
+        {sub && <div className="mt-1 text-xs text-muted-foreground">{sub}</div>}
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Daily collections KPIs (Phase 7.1) — MTD/YTD anchored to the latest loaded
+ * payment_date. Cards + per-facility table (MTD/YTD gross with the checks vs EFT
+ * split). Non-PHI; reads only daily_collections + facilities. IP/OP + IP Billing
+ * Amt are deferred (no IP/OP classification in the in-scope tables).
+ */
+function CollectionsKpisWidget() {
+  const state = useWidget<CollectionsKpis>(loadCollectionsKpis);
+  return (
+    <WidgetCard title="Collections — MTD / YTD by facility" state={state}>
+      {state.status === 'ready' && <CollectionsKpisBody data={state.data} />}
+    </WidgetCard>
+  );
+}
+
+function CollectionsKpisBody({ data }: { data: CollectionsKpis }) {
+  const asOf = data.as_of ?? '—';
+  const rows = [...data.by_facility].sort((a, b) => b.ytd_gross - a.ytd_gross);
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Kpi label="MTD Gross" value={money(data.mtd.gross)} sub={`as of ${asOf}`} />
+        <Kpi label="YTD Gross" value={money(data.ytd.gross)} sub={`as of ${asOf}`} />
+        <Kpi label="MTD Checks / EFT" value={`${money(data.mtd.checks)} / ${money(data.mtd.eft)}`} />
+        <Kpi label="YTD Checks / EFT" value={`${money(data.ytd.checks)} / ${money(data.ytd.eft)}`} />
+      </div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Facility</TableHead>
+            <TableHead className="text-right">MTD Gross</TableHead>
+            <TableHead className="text-right">YTD Checks</TableHead>
+            <TableHead className="text-right">YTD EFT</TableHead>
+            <TableHead className="text-right">YTD Gross</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((r, i) => (
+            <TableRow key={`${r.facility_code ?? 'unassigned'}-${i}`}>
+              <TableCell>
+                {r.facility_name === null ? (
+                  <span className="text-muted-foreground">{facilityLabel(r)}</span>
+                ) : (
+                  facilityLabel(r)
+                )}
+              </TableCell>
+              <TableCell className="text-right tabular-nums">{money(r.mtd_gross)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(r.ytd_checks)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(r.ytd_eft)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(r.ytd_gross)}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      <p className="text-xs text-muted-foreground">
+        MTD/YTD anchored to the latest loaded day ({asOf}). IP vs OP and IP Billing Amt are deferred
+        (no IP/OP classification in the daily collections data).
+      </p>
+    </div>
+  );
+}
+
+/** Latest-month daily collections rows: date × facility × checks/eft/gross (non-PHI). */
+function CollectionsDailyWidget() {
+  const state = useWidget<CollectionsDailyResult>(loadCollectionsDaily);
+  return (
+    <WidgetCard title="Collections — daily detail (latest month)" state={state}>
+      {state.status === 'ready' && <CollectionsDailyBody data={state.data} />}
+    </WidgetCard>
+  );
+}
+
+function CollectionsDailyBody({ data }: { data: CollectionsDailyResult }) {
+  if (data.row_count === 0) {
+    return <div className="text-sm text-muted-foreground">No daily collections in range.</div>;
+  }
+  return (
+    <div className="space-y-2">
+      <div className="text-sm text-muted-foreground">{count(data.row_count)} daily rows</div>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Date</TableHead>
+            <TableHead>Facility</TableHead>
+            <TableHead className="text-right">Checks</TableHead>
+            <TableHead className="text-right">EFT</TableHead>
+            <TableHead className="text-right">Gross</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {data.rows.map((r, i) => (
+            <TableRow key={`${r.payment_date}-${r.facility_code ?? 'unassigned'}-${i}`}>
+              <TableCell className="tabular-nums">{r.payment_date}</TableCell>
+              <TableCell>
+                {r.facility_name === null ? (
+                  <span className="text-muted-foreground">{facilityLabel(r)}</span>
+                ) : (
+                  facilityLabel(r)
+                )}
+              </TableCell>
+              <TableCell className="text-right tabular-nums">{money(r.checks_amount)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(r.eft_amount)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(r.gross_amount)}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
 export function Dashboard() {
   return (
     <section className="space-y-4">
@@ -310,10 +438,12 @@ export function Dashboard() {
       <div className="pt-2">
         <h2 className="text-lg font-semibold tracking-tight">Collections</h2>
         <p className="text-sm text-muted-foreground">
-          Monthly collections by facility (latest month). Aggregate, non-PHI; no patient data is
-          loaded here.
+          Daily collections reporting (Checks / EFT / Gross), MTD &amp; YTD by facility. Aggregate,
+          non-PHI; no patient data is loaded here.
         </p>
       </div>
+      <CollectionsKpisWidget />
+      <CollectionsDailyWidget />
       <CollectionsSummaryWidget />
     </section>
   );
