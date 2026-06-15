@@ -14,7 +14,11 @@
 import { unstable_cache } from 'next/cache';
 import { makeAnthropicClientFromEnv } from '../../src/agent/index.js';
 import type { AnthropicMessagesClient } from '../../src/agent/index.js';
-import { distribution, payerGapAnalysis, searchClaims } from '../../src/queries/index.js';
+import { distribution, searchClaims } from '../../src/queries/index.js';
+import {
+  distributionCountFromMatview,
+  payerGapFromMatview,
+} from '../../src/queries/dashboard_aggregates.js';
 import { makeReaderPool, PgExecutor, readerConnectionStringFromEnv } from '../../src/queries/executor.js';
 import type {
   ClaimFilter,
@@ -131,12 +135,13 @@ function dashboardCtx(): QueryContext {
 const DASHBOARD_REVALIDATE_SECONDS = 15 * 60;
 const DASHBOARD_CACHE_TAG = 'dashboard-aggregates';
 
-/** Per-payer billed/allowed/paid + collection gap + avg rate (non-PHI summary). */
+/**
+ * Per-payer billed/allowed/paid + collection gap + avg rate (non-PHI summary).
+ * Phase 7.7: reads the pre-aggregated claims.mv_payer_gap matview (migration 0009)
+ * instead of scanning claims.claims live. Same shape; no finalize()/query_id.
+ */
 export const dashboardPayerGap = unstable_cache(
-  async (): Promise<PayerGapSummary> => {
-    const { summary_stats } = await payerGapAnalysis({}, dashboardCtx());
-    return summary_stats;
-  },
+  async (): Promise<PayerGapSummary> => payerGapFromMatview(readerExecutor()),
   ['dashboard-payer-gap'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
 );
@@ -144,12 +149,18 @@ export const dashboardPayerGap = unstable_cache(
 /**
  * A single allowlisted-dimension distribution (non-PHI summary). The (field,
  * metric) args are part of the cache key, so each dimension caches independently.
+ * Phase 7.7: the dashboard/facets only ever request the `count` metric, which is
+ * served from claims.mv_distribution_count (migration 0009). Any other metric
+ * (agent-only in practice) falls back to the live distribution function.
  */
 export const dashboardDistribution = unstable_cache(
   async (
     field: DistributionField,
     metric: DistributionMetric,
   ): Promise<DistributionSummary> => {
+    if (metric === 'count') {
+      return distributionCountFromMatview(readerExecutor(), field);
+    }
     const { summary_stats } = await distribution({ field, metric }, dashboardCtx());
     return summary_stats;
   },

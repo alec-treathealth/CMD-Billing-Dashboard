@@ -15,6 +15,7 @@ import {
   fetchExistingClaimRawIds,
   insertClaims,
   makeClient,
+  refreshAggregateMatviews,
   upsertClaimsRaw,
   type Db,
   type RawRowInsert,
@@ -107,6 +108,11 @@ async function main(): Promise<void> {
       console.log(`[ingest] reading ${source.year} (${source.sheetId})…`);
       stats.push(await ingestSource(db, auth, source, report));
     }
+
+    // Refresh the non-PHI dashboard aggregate matviews now that claims changed
+    // (Phase 7.7). CONCURRENTLY → the dashboard keeps serving during the rebuild.
+    console.log('[ingest] refreshing dashboard aggregate matviews…');
+    await refreshAggregateMatviews(db);
   } finally {
     await report.close();
     await db.end(); // close the pg pool so the process exits cleanly

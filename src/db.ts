@@ -37,6 +37,19 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
+/**
+ * Refresh the non-PHI dashboard aggregate materialized views (migration 0009)
+ * after an ingest changes claims.claims. Delegates to the SECURITY DEFINER
+ * function claims.refresh_aggregate_matviews(), which issues both REFRESH
+ * MATERIALIZED VIEW CONCURRENTLY statements as the function owner so that
+ * claims_admin does not need to be the matview owner. CONCURRENTLY takes no
+ * read lock — the dashboard keeps serving the previous snapshot during rebuild.
+ * Aggregate-only — no PHI.
+ */
+export async function refreshAggregateMatviews(db: Db): Promise<void> {
+  await db.query('select claims.refresh_aggregate_matviews()');
+}
+
 export interface RawRowInsert {
   source_year: number;
   source_file_id: string;
