@@ -12,6 +12,7 @@
  * that does not exist, renders a safe not-found state. force-dynamic guarantees the
  * row is read fresh per request and never cached.
  */
+import type { Metadata } from 'next';
 import Link from 'next/link';
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -20,6 +21,8 @@ import { money, rate } from '@/lib/format';
 import { getClaim } from '@/lib/server';
 
 export const dynamic = 'force-dynamic';
+
+export const metadata: Metadata = { title: 'Claim Detail | Claims Search' };
 
 /** Non-PHI fields to show, in display order, with their formatter. */
 const FIELDS: readonly { key: string; label: string; format: (v: unknown) => string }[] = [
@@ -65,6 +68,10 @@ function Shell({ children }: { children: React.ReactNode }) {
         </Link>
       </div>
       {children}
+      <footer className="mt-10 border-t pt-4 text-xs text-muted-foreground">
+        Internal tool — handles PHI. There is no application login: access is controlled solely by
+        Vercel Deployment Protection. Do not share this URL outside the authorized billing audience.
+      </footer>
     </main>
   );
 }

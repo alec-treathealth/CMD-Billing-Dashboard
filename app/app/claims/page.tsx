@@ -7,7 +7,10 @@
  * client. Patient identifiers are excluded from this list entirely — reveal stays
  * on the audited results path, not here.
  */
+import type { Metadata } from 'next';
 import { ClaimsExplorer } from '@/components/claims-explorer';
+
+export const metadata: Metadata = { title: 'Claims Explorer | Claims Search' };
 
 export default function ClaimsPage() {
   return (

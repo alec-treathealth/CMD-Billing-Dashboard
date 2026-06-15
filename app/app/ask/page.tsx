@@ -10,11 +10,14 @@
  * gated by Vercel deployment protection, not by app-level login (no per-user auth
  * yet — the audit principal is the fixed label 'phase5-ui').
  */
+import type { Metadata } from 'next';
 import { SearchConsole } from '@/components/search-console';
+
+export const metadata: Metadata = { title: 'Ask | Claims Search' };
 
 export default function AskPage() {
   return (
-    <main className="mx-auto max-w-5xl space-y-10 p-6 sm:p-10">
+    <main className="mx-auto max-w-5xl space-y-6 p-6 sm:p-10">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Claims Search</h1>
         <p className="mt-1 text-sm text-muted-foreground">

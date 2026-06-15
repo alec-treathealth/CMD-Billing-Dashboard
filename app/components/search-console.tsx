@@ -254,8 +254,6 @@ function RowsCard({
           </Button>
         )}
 
-        {turn.rowsLoading && <Notice tone="muted">Loading rows…</Notice>}
-
         {turn.rows && !turn.rows.ok && <Notice tone="error">{turn.rows.error}</Notice>}
 
         {turn.rows && turn.rows.ok && turn.rows.rows.length > 0 && <ResultsTable rows={turn.rows.rows} />}

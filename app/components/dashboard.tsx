@@ -10,6 +10,7 @@
 import { useEffect, useState } from 'react';
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { count, money, percent, rate } from '@/lib/format';
 import {
@@ -69,7 +70,11 @@ function WidgetCard({
       </CardHeader>
       <CardContent>
         {state.status === 'loading' && (
-          <div className="text-sm text-muted-foreground">Loading…</div>
+          <div className="space-y-2">
+            <Skeleton className="h-4 w-3/4" />
+            <Skeleton className="h-4 w-1/2" />
+            <Skeleton className="h-4 w-2/3" />
+          </div>
         )}
         {state.status === 'error' && (
           <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">

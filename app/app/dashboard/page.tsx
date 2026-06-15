@@ -6,8 +6,11 @@
  * aggregate reads are cached (see lib/server.ts), so warm loads are memory reads.
  * No PHI is reachable here: the dashboard never fetches rows.
  */
+import type { Metadata } from 'next';
 import { Dashboard } from '@/components/dashboard';
 import { DashboardNav } from '@/components/dashboard-nav';
+
+export const metadata: Metadata = { title: 'Dashboard | Claims Search' };
 
 export default function DashboardPage() {
   return (
