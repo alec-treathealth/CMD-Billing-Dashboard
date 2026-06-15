@@ -123,6 +123,16 @@ async function main(): Promise<void> {
     console.log(`\n[${c.expected}] Q: ${c.question}`);
     try {
       const res = await runAgentTurn(c.question, { client, queryCtx, audit: captureAudit });
+
+      // Phase 7.6: an over-broad search_claims now returns a deterministic
+      // needs_input prompt instead of executing — record it and move on.
+      if (res.status === 'needs_input') {
+        check(
+          res.tool_name === c.expected,
+          `model picked tool = ${res.tool_name} (expected ${c.expected}) — needs_input (no query ran)`,
+        );
+        continue;
+      }
       queryIds.set(res.tool_name, res.query_id);
 
       check(res.tool_name === c.expected, `model picked tool = ${res.tool_name} (expected ${c.expected})`);

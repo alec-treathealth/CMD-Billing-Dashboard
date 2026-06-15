@@ -45,9 +45,18 @@ export interface HandlerResult {
 }
 
 export interface AgentResponseBody {
+  status: 'ok';
   tool_name: FunctionName;
   query_id: string;
   summary_stats: SummaryStats;
+}
+
+/** Deterministic "collect filters first" body — non-PHI; no query ran. */
+export interface AgentNeedsInputBody {
+  status: 'needs_input';
+  tool_name: FunctionName;
+  /** Safe, NON-PHI filter fields the UI should offer in a field-picker. */
+  missing: string[];
 }
 
 export async function handleAgentRequest(
@@ -75,7 +84,17 @@ export async function handleAgentRequest(
       model: deps.model,
       now: deps.now,
     });
+    if (turn.status === 'needs_input') {
+      // Deterministic field-picker prompt — no query ran, so no query_id / PHI.
+      const body: AgentNeedsInputBody = {
+        status: 'needs_input',
+        tool_name: turn.tool_name,
+        missing: turn.missing,
+      };
+      return { status: 200, body };
+    }
     const body: AgentResponseBody = {
+      status: 'ok',
       tool_name: turn.tool_name,
       query_id: turn.query_id,
       summary_stats: turn.summary_stats,

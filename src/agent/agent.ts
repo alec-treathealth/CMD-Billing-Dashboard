@@ -22,6 +22,23 @@ import { firstToolUse } from './client.js';
 import { dispatchTool } from './dispatch.js';
 import { emitAgentAudit, type AgentAuditSink } from './logging.js';
 import { isToolName, TOOL_DEFS } from './tools.js';
+import { validateSearchClaims } from './validators.js';
+
+/**
+ * The safe, NON-PHI filter fields the deterministic field-picker may collect to
+ * sharpen an over-broad search_claims. None is a patient identifier — they mirror
+ * ClaimFilter (validated by validateClaimFilter). Surfaced in the `needs_input`
+ * response so the UI knows which inputs to offer.
+ */
+export const CLAIM_FILTER_FIELDS = [
+  'facility',
+  'payer',
+  'source_year',
+  'date_from',
+  'date_to',
+  'hcpcs_code',
+  'revenue_code',
+] as const;
 
 /** Default model id. Override via `model` or the `ANTHROPIC_MODEL` env var. */
 export const DEFAULT_MODEL = 'claude-opus-4-8';
@@ -61,14 +78,34 @@ export interface AgentTurnResult {
   usage?: Usage;
 }
 
+/** A normal, executed turn. */
+export type AgentOkOutcome = { status: 'ok' } & AgentTurnResult;
+
 /**
- * Run one agent turn. Throws if the model returns no tool call or names a tool
- * outside the closed allowlist, or if the model's input fails boundary validation.
+ * A deterministic "this query is too broad — collect filters first" outcome. No
+ * query ran (no query_id, no DB hit, no audit), so PHI is unreachable here. The UI
+ * renders `missing` as a field-picker and re-dispatches with the filled filter.
+ */
+export interface AgentNeedsInputOutcome {
+  status: 'needs_input';
+  tool_name: FunctionName;
+  /** Safe, NON-PHI filter fields that would sharpen the query (subset of CLAIM_FILTER_FIELDS). */
+  missing: string[];
+}
+
+export type AgentTurnOutcome = AgentOkOutcome | AgentNeedsInputOutcome;
+
+/**
+ * Run one agent turn. Returns a normal `ok` outcome, or a deterministic
+ * `needs_input` outcome when the model picks search_claims with no constraining
+ * filter (an unbounded scan) — in which case nothing is dispatched. Throws if the
+ * model returns no tool call or names a tool outside the closed allowlist, or if
+ * the model's input fails boundary validation.
  */
 export async function runAgentTurn(
   question: string,
   opts: RunAgentOptions,
-): Promise<AgentTurnResult> {
+): Promise<AgentTurnOutcome> {
   if (typeof question !== 'string' || question.trim().length === 0) {
     throw new Error('runAgentTurn: question must be a non-empty string');
   }
@@ -101,6 +138,17 @@ export async function runAgentTurn(
     throw new Error(`runAgentTurn: model chose unknown tool ${JSON.stringify(toolUse.name)}`);
   }
 
+  // Deterministic guard: a search_claims with no constraining filter would scan the
+  // whole table. Do NOT run it — return needs_input so the UI collects safe filters
+  // first. validateSearchClaims throws on malformed input (kept as a 500 upstream);
+  // an empty validated filter is the "too broad" signal.
+  if (toolUse.name === 'search_claims') {
+    const { filter } = validateSearchClaims(toolUse.input);
+    if (filter === undefined || Object.keys(filter).length === 0) {
+      return { status: 'needs_input', tool_name: 'search_claims', missing: [...CLAIM_FILTER_FIELDS] };
+    }
+  }
+
   // Validate (inside dispatch) + execute as claims_reader. finalize() runs here;
   // the result we build below is therefore constructed only after finalize.
   const dispatched = await dispatchTool(toolUse.name, toolUse.input, opts.queryCtx);
@@ -112,6 +160,7 @@ export async function runAgentTurn(
   );
 
   return {
+    status: 'ok',
     tool_name: dispatched.tool_name,
     query_id: dispatched.query_id,
     summary_stats: dispatched.summary_stats,

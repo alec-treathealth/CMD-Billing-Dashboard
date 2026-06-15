@@ -126,6 +126,8 @@ test('runAgentTurn: dispatches one tool call and returns summary_stats + query_i
     now: () => new Date('2026-06-12T00:00:00.000Z'),
   });
 
+  assert.equal(res.status, 'ok');
+  if (res.status !== 'ok') throw new Error('expected ok outcome');
   assert.equal(res.tool_name, 'distribution');
   assert.equal(res.query_id, 'qid-fixed-0001');
   assert.equal(res.tool_use_id, 'toolu_fake_1');
@@ -206,6 +208,8 @@ test('runAgentTurn: client_history returns only non-PHI summary; identity never 
   });
 
   // The result surfaced to the caller/UI carries no identity field.
+  assert.equal(res.status, 'ok');
+  if (res.status !== 'ok') throw new Error('expected ok outcome');
   assert.equal(res.tool_name, 'client_history');
   const summaryJson = JSON.stringify(res.summary_stats);
   assert.ok(!summaryJson.includes('Mossandfar'));
@@ -233,6 +237,75 @@ test('runAgentTurn: client_history returns only non-PHI summary; identity never 
   assert.ok(!storedArgs.includes('PGE081'));
   const dataCall = dbCalls.find((c) => !c.sql.includes('claims.log_query'))!;
   assert.deepEqual(dataCall.params.slice(0, 3), ['Mossandfar', 0.4, 'PGE081']);
+});
+
+// ---------------------------------------------------------------------------
+// Deterministic needs_input for over-broad search_claims (Phase 7.6)
+// ---------------------------------------------------------------------------
+
+/** The patient-identifier fields the field-picker must NEVER request. */
+const PHI_FIELDS = [
+  'patient_name',
+  'patient_first',
+  'patient_last',
+  'member_id_raw',
+  'member_id_norm',
+  'group_number',
+  'employer_name',
+];
+
+test('runAgentTurn: empty-filter search_claims returns needs_input (no DB call, no PHI fields)', async () => {
+  const { client } = makeFakeClient(toolUseResponse('search_claims', {}));
+  const { executor, calls: dbCalls } = makeFakeExecutor([]);
+  const audit: string[] = [];
+
+  const res = await runAgentTurn('show me the claims', {
+    client,
+    queryCtx: queryCtx(executor),
+    audit: (l) => audit.push(l),
+  });
+
+  assert.equal(res.status, 'needs_input');
+  if (res.status !== 'needs_input') throw new Error('expected needs_input');
+  assert.equal(res.tool_name, 'search_claims');
+  assert.ok(res.missing.length > 0);
+  // The picker only ever offers safe, non-PHI filter fields.
+  for (const f of PHI_FIELDS) assert.ok(!res.missing.includes(f), `missing must not include PHI field ${f}`);
+  // Nothing ran: no DB call, no query_log, no audit line.
+  assert.equal(dbCalls.length, 0);
+  assert.equal(audit.length, 0);
+});
+
+test('runAgentTurn: narrowed search_claims executes normally (ok + query_id)', async () => {
+  const { client } = makeFakeClient(
+    toolUseResponse('search_claims', { filter: { source_year: 2025 } }),
+  );
+  const { executor } = makeFakeExecutor([
+    {
+      rows_matched: '12',
+      total_charge: '4000',
+      total_allowed: '2500',
+      total_paid: '2200',
+      avg_collection_rate: '0.88',
+      rate_anomaly_count: '0',
+      date_from: '2025-01-01',
+      date_to: '2025-12-31',
+      distinct_facilities: '2',
+      distinct_payers: '1',
+    },
+  ]);
+
+  const res = await runAgentTurn('claims in 2025', {
+    client,
+    queryCtx: queryCtx(executor),
+    audit: () => {},
+  });
+
+  assert.equal(res.status, 'ok');
+  if (res.status !== 'ok') throw new Error('expected ok outcome');
+  assert.equal(res.tool_name, 'search_claims');
+  assert.equal(res.query_id, 'qid-fixed-0001');
+  assert.equal((res.summary_stats as { rows_matched: number }).rows_matched, 12);
 });
 
 // ---------------------------------------------------------------------------

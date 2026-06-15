@@ -104,6 +104,52 @@ test('agent route: 200 returns tool_name + query_id + non-PHI summary_stats', as
   assert.deepEqual(seen, ['sess-42']);
 });
 
+test('agent route: over-broad search_claims returns 200 needs_input (no query ran)', async () => {
+  // Model picks search_claims with no filter — the deterministic guard intervenes.
+  const { d } = deps(fakeClient('search_claims', {}), []);
+  const res = await handleAgentRequest(
+    { authorization: AUTH, body: { question: 'show me all the claims' } },
+    d,
+  );
+  assert.equal(res.status, 200);
+  const body = res.body as { status: string; tool_name: string; missing: string[]; query_id?: string };
+  assert.equal(body.status, 'needs_input');
+  assert.equal(body.tool_name, 'search_claims');
+  assert.ok(Array.isArray(body.missing) && body.missing.length > 0);
+  // No query ran — there is no query_id on a needs_input response.
+  assert.equal(body.query_id, undefined);
+  // No PHI fields offered.
+  for (const k of ['patient_name', 'patient_last', 'member_id_norm', 'employer_name', 'group_number']) {
+    assert.ok(!body.missing.includes(k), `missing must not include ${k}`);
+  }
+});
+
+test('agent route: narrowed search_claims returns 200 ok with query_id', async () => {
+  const { d } = deps(fakeClient('search_claims', { filter: { source_year: 2025 } }), [
+    {
+      rows_matched: '5',
+      total_charge: '100',
+      total_allowed: '80',
+      total_paid: '70',
+      avg_collection_rate: '0.875',
+      rate_anomaly_count: '0',
+      date_from: '2025-01-01',
+      date_to: '2025-12-31',
+      distinct_facilities: '1',
+      distinct_payers: '1',
+    },
+  ]);
+  const res = await handleAgentRequest(
+    { authorization: AUTH, body: { question: 'claims in 2025' } },
+    d,
+  );
+  assert.equal(res.status, 200);
+  const body = res.body as { status: string; tool_name: string; query_id: string };
+  assert.equal(body.status, 'ok');
+  assert.equal(body.tool_name, 'search_claims');
+  assert.equal(body.query_id, 'qid-route-1');
+});
+
 test('agent route: client_history through the route returns no identity', async () => {
   const { d } = deps(
     fakeClient('client_history', { patient_last: 'Mossandfar', member_id_norm: 'PGE081' }),

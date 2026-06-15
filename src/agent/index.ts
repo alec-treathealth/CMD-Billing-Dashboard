@@ -29,6 +29,10 @@ export {
   runAgentTurn,
   buildToolResultBlock,
   DEFAULT_MODEL,
+  CLAIM_FILTER_FIELDS,
   type RunAgentOptions,
   type AgentTurnResult,
+  type AgentOkOutcome,
+  type AgentNeedsInputOutcome,
+  type AgentTurnOutcome,
 } from './agent.js';

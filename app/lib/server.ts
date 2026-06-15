@@ -14,14 +14,16 @@
 import { unstable_cache } from 'next/cache';
 import { makeAnthropicClientFromEnv } from '../../src/agent/index.js';
 import type { AnthropicMessagesClient } from '../../src/agent/index.js';
-import { distribution, payerGapAnalysis } from '../../src/queries/index.js';
+import { distribution, payerGapAnalysis, searchClaims } from '../../src/queries/index.js';
 import { makeReaderPool, PgExecutor, readerConnectionStringFromEnv } from '../../src/queries/executor.js';
 import type {
+  ClaimFilter,
   DistributionField,
   DistributionMetric,
   DistributionSummary,
   PayerGapSummary,
   QueryContext,
+  SearchClaimsSummary,
 } from '../../src/queries/types.js';
 import { collectionsMonthlySummary } from '../../src/collections/summary.js';
 import type { CollectionsMonthlySummary } from '../../src/collections/summaryTypes.js';
@@ -208,4 +210,21 @@ export async function browseClaims(args: BrowseClaimsArgs): Promise<BrowseClaims
  */
 export async function getClaim(id: number): Promise<Record<string, unknown> | null> {
   return claimById(id, { executor: readerExecutor(), createdBy: 'claims-explorer-detail' });
+}
+
+/**
+ * Deterministic search_claims for the /ask field-picker (Phase 7.6): run the SAME
+ * audited query function the agent would, but with a user-supplied filter and no
+ * model round-trip. finalize() writes the query_log + audit line and returns the
+ * opaque query_id, so the existing "show rows" reveal path is unchanged. Returns
+ * ONLY the non-PHI summary + query_id; row-level data is never produced here.
+ */
+export async function searchClaimsDirect(
+  filter: ClaimFilter,
+): Promise<{ tool_name: 'search_claims'; query_id: string; summary_stats: SearchClaimsSummary }> {
+  const { summary_stats, query_id } = await searchClaims(
+    { filter },
+    { executor: readerExecutor(), createdBy: 'ask-field-picker' },
+  );
+  return { tool_name: 'search_claims', query_id, summary_stats };
 }

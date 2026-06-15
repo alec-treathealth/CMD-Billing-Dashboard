@@ -29,14 +29,16 @@ import {
   dashboardPayerGap,
   handleAgent,
   handleResults,
+  searchClaimsDirect,
 } from '@/lib/server';
 import type {
   BrowseClaimsCursor,
   BrowseClaimsResult,
   BrowseClaimsSort,
 } from '../../src/queries/browse_claims';
+import { validateClaimFilter } from '../../src/queries/filters';
 import type { ClaimFilter } from '../../src/queries/types';
-import type { AgentResponseBody } from '../../src/routes/agentHandler';
+import type { AgentResponseBody, AgentNeedsInputBody } from '../../src/routes/agentHandler';
 import type { ResultsResponse, ResultsIdentity } from '../../src/routes/results';
 import type {
   DistributionSummary,
@@ -66,8 +68,17 @@ export type {
 };
 
 export type AgentActionResult =
-  | { ok: true; tool_name: FunctionName; query_id: string; summary_stats: SummaryStats }
-  | { ok: false; error: string };
+  | { kind: 'ok'; tool_name: FunctionName; query_id: string; summary_stats: SummaryStats }
+  | { kind: 'needs_input'; tool_name: FunctionName; missing: string[] }
+  | { kind: 'error'; error: string };
+
+export type ClaimFacets = {
+  facility: string[];
+  payer: string[];
+  source_year: number[];
+};
+
+export type ClaimFacetsResult = { ok: true; data: ClaimFacets } | { ok: false };
 
 export type ResultsActionResult =
   | { ok: true; function_name: FunctionName | null; rows: Record<string, unknown>[] }
@@ -120,12 +131,14 @@ function authHeader(): string {
 }
 
 /**
- * Run the search agent over a natural-language question. Returns the chosen tool,
- * an opaque query_id, and the non-PHI summary. PHI never appears here.
+ * Run the search agent over a natural-language question. Returns the chosen tool +
+ * non-PHI summary + opaque query_id, OR a deterministic `needs_input` prompt when
+ * the model picked an over-broad search_claims (the UI then shows a field-picker).
+ * PHI never appears here.
  */
 export async function runSearch(question: string): Promise<AgentActionResult> {
   if (typeof question !== 'string' || question.trim() === '') {
-    return { ok: false, error: 'Enter a question to search.' };
+    return { kind: 'error', error: 'Enter a question to search.' };
   }
   try {
     const { status, body } = await handleAgent({
@@ -135,18 +148,21 @@ export async function runSearch(question: string): Promise<AgentActionResult> {
       createdBy: AUDIT_PRINCIPAL,
     });
     if (status === 200) {
-      const ok = body as AgentResponseBody;
+      const b = body as AgentResponseBody | AgentNeedsInputBody;
+      if (b.status === 'needs_input') {
+        return { kind: 'needs_input', tool_name: b.tool_name, missing: b.missing };
+      }
       return {
-        ok: true,
-        tool_name: ok.tool_name,
-        query_id: ok.query_id,
-        summary_stats: ok.summary_stats,
+        kind: 'ok',
+        tool_name: b.tool_name,
+        query_id: b.query_id,
+        summary_stats: b.summary_stats,
       };
     }
-    return { ok: false, error: messageForStatus(status, 'The search could not be completed.') };
+    return { kind: 'error', error: messageForStatus(status, 'The search could not be completed.') };
   } catch {
     // Includes a missing RESULTS_API_SECRET (handler throws). Never echo detail.
-    return { ok: false, error: 'The search could not be completed.' };
+    return { kind: 'error', error: 'The search could not be completed.' };
   }
 }
 
@@ -287,5 +303,64 @@ export async function loadClaimsPage(params: {
     return { ok: true, data: { ...data, rows: toPlainRows(data.rows) } };
   } catch {
     return { ok: false, error: 'The claims could not be loaded.' };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// /ask field-picker actions (Phase 7.6) — deterministic, NON-PHI.
+//
+// The field-picker collects only safe ClaimFilter inputs (facility / payer /
+// year / dates / codes — NEVER patient identifiers) and re-dispatches search_claims
+// directly (no model round-trip) through the SAME audited query function, so the
+// "show rows" reveal path is unchanged. Facets come from the cached, non-PHI
+// distribution; no row-level data is produced or cached here.
+// ---------------------------------------------------------------------------
+
+/**
+ * Deterministically run search_claims from a field-picker-supplied filter. The
+ * filter is re-validated at the boundary; if it is still empty (no constraint), we
+ * return needs_input again rather than scan the whole table.
+ */
+export async function runClaimSearch(filter: ClaimFilter): Promise<AgentActionResult> {
+  let validated: ClaimFilter;
+  try {
+    validated = validateClaimFilter(filter);
+  } catch {
+    return { kind: 'error', error: 'Those filters were not understood. Adjust them and try again.' };
+  }
+  if (Object.keys(validated).length === 0) {
+    return { kind: 'needs_input', tool_name: 'search_claims', missing: ['facility', 'payer', 'source_year', 'date_from', 'date_to', 'hcpcs_code', 'revenue_code'] };
+  }
+  try {
+    const { tool_name, query_id, summary_stats } = await searchClaimsDirect(validated);
+    return { kind: 'ok', tool_name, query_id, summary_stats };
+  } catch {
+    return { kind: 'error', error: 'The search could not be completed.' };
+  }
+}
+
+/**
+ * Safe filter facets for the field-picker: distinct facility / payer / source_year
+ * values from the CACHED, non-PHI distribution. Never returns PHI (facility/payer/
+ * year are allowlisted dimensions; no patient identifiers are queried).
+ */
+export async function loadClaimFacets(): Promise<ClaimFacetsResult> {
+  try {
+    const [facilities, payers, years] = await Promise.all([
+      dashboardDistribution('facility_name', 'count'),
+      dashboardDistribution('payer_name', 'count'),
+      dashboardDistribution('source_year', 'count'),
+    ]);
+    const strings = (s: DistributionSummary): string[] =>
+      s.buckets.map((b) => b.value).filter((v): v is string => v !== null && v !== '');
+    const source_year = years.buckets
+      .map((b) => b.value)
+      .filter((v): v is string => v !== null)
+      .map((v) => Number(v))
+      .filter((n) => Number.isInteger(n))
+      .sort((a, b) => b - a);
+    return { ok: true, data: { facility: strings(facilities), payer: strings(payers), source_year } };
+  } catch {
+    return { ok: false };
   }
 }
