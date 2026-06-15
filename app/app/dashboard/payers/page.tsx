@@ -5,13 +5,13 @@
  */
 import type { Metadata } from 'next';
 import { DashboardNav } from '@/components/dashboard-nav';
-import { PayerOverview } from '@/components/dashboard';
+import { PayerChartWidget, PayerOverview } from '@/components/dashboard';
 
 export const metadata: Metadata = { title: 'Payers | Claims Search' };
 
 export default function PayersPage() {
   return (
-    <main className="mx-auto max-w-5xl space-y-6 p-6 sm:p-10">
+    <main className="mx-auto max-w-7xl space-y-6 p-6 sm:p-10">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Payers</h1>
         <p className="mt-1 text-sm text-muted-foreground">
@@ -20,6 +20,7 @@ export default function PayersPage() {
         </p>
       </header>
       <DashboardNav />
+      <PayerChartWidget defaultTopN={15} />
       <PayerOverview />
       <footer className="mt-10 border-t pt-4 text-xs text-muted-foreground">
         Internal tool — handles PHI. There is no application login: access is controlled solely by

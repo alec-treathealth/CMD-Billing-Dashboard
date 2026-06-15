@@ -7,8 +7,10 @@
  * PHI is reachable here. Each widget owns its loading/error state; if one fails it
  * shows a generic message and the rest of the page stays usable.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
+import { PayerChart } from '@/components/payer-chart';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -16,6 +18,7 @@ import { count, money, percent, rate } from '@/lib/format';
 import {
   loadClaimsByYear,
   loadCollectionsDaily,
+  loadCollectionsDailyRange,
   loadCollectionsKpis,
   loadCollectionsSummary,
   loadPayerGap,
@@ -87,20 +90,36 @@ function WidgetCard({
   );
 }
 
-/** A proportional bar (0–100). Values are also shown as text; bar is decorative. */
+/** A proportional bar (0–100). Values are also shown as text; bar reinforces them. */
 function MiniBar({ pct }: { pct: number | null }) {
   const w = Math.max(0, Math.min(100, pct ?? 0));
   return (
-    <div className="h-2 w-full rounded bg-muted">
-      <div className="h-2 rounded bg-teal500" style={{ width: `${w}%` }} />
+    <div className="h-2.5 w-full overflow-hidden rounded-full bg-teal50">
+      <div
+        className="h-full rounded-full bg-teal700"
+        style={{ width: `${Math.max(w, w > 0 ? 3 : 0)}%` }}
+      />
     </div>
+  );
+}
+
+/**
+ * Payer chart widget — interactive top-N payer chart (paid vs. collection gap).
+ * Used on the overview (default Top 5) and the payers sub-route (default Top 15).
+ */
+export function PayerChartWidget({ defaultTopN = 5 }: { defaultTopN?: number }) {
+  const state = useWidget<PayerGapSummary>(loadPayerGap);
+  return (
+    <WidgetCard title="Payers — paid vs. collection gap" state={state}>
+      {state.status === 'ready' && <PayerChart data={state.data} defaultTopN={defaultTopN} />}
+    </WidgetCard>
   );
 }
 
 export function PayerOverview() {
   const state = useWidget<PayerGapSummary>(loadPayerGap);
   return (
-    <WidgetCard title="Payer overview" state={state}>
+    <WidgetCard title="Payer detail" state={state}>
       {state.status === 'ready' && (
         <div className="space-y-3">
           <div className="text-sm text-muted-foreground">
@@ -169,7 +188,7 @@ function DistributionWidget({
               <TableRow>
                 <TableHead>{state.data.field.replace(/_/g, ' ')}</TableHead>
                 <TableHead className="text-right">Claims</TableHead>
-                <TableHead className="w-[30%]">Share</TableHead>
+                <TableHead className="w-[42%]">Share</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -298,18 +317,18 @@ function Kpi({
   return (
     <Card className="border-t-2 border-t-teal500">
       <CardContent className="pb-4 pt-4">
-        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
           {label}
         </div>
-        <div className="ths-num mt-1 truncate text-xl font-semibold tabular-nums text-teal700">
+        <div className="ths-num mt-1 whitespace-nowrap text-lg font-semibold leading-tight tabular-nums text-teal700 lg:text-xl">
           {value}
         </div>
         {detail && (
-          <div className="ths-num mt-0.5 truncate text-sm tabular-nums text-muted-foreground">
+          <div className="ths-num mt-0.5 whitespace-nowrap text-xs tabular-nums text-muted-foreground">
             {detail}
           </div>
         )}
-        {sub && <div className="mt-1 text-xs text-muted-foreground">{sub}</div>}
+        {sub && <div className="mt-1 text-[11px] text-muted-foreground">{sub}</div>}
       </CardContent>
     </Card>
   );
@@ -321,21 +340,21 @@ function Kpi({
  * split). Non-PHI; reads only daily_collections + facilities. IP/OP + IP Billing
  * Amt are deferred (no IP/OP classification in the in-scope tables).
  */
-function CollectionsKpisWidget() {
+function CollectionsKpisWidget({ compact = false }: { compact?: boolean }) {
   const state = useWidget<CollectionsKpis>(loadCollectionsKpis);
   return (
     <WidgetCard title="Collections — MTD / YTD by facility" state={state}>
-      {state.status === 'ready' && <CollectionsKpisBody data={state.data} />}
+      {state.status === 'ready' && <CollectionsKpisBody data={state.data} compact={compact} />}
     </WidgetCard>
   );
 }
 
-function CollectionsKpisBody({ data }: { data: CollectionsKpis }) {
+function CollectionsKpisBody({ data, compact }: { data: CollectionsKpis; compact?: boolean }) {
   const asOf = data.as_of ?? '—';
   const rows = [...data.by_facility].sort((a, b) => b.ytd_gross - a.ytd_gross);
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className={`grid grid-cols-2 gap-3 ${compact ? '' : 'sm:grid-cols-4'}`}>
         <Kpi label="MTD Gross" value={money(data.mtd.gross)} sub={`as of ${asOf}`} />
         <Kpi label="YTD Gross" value={money(data.ytd.gross)} sub={`as of ${asOf}`} />
         <Kpi
@@ -385,137 +404,260 @@ function CollectionsKpisBody({ data }: { data: CollectionsKpis }) {
   );
 }
 
-/** Latest-month daily collections rows: date × facility × checks/eft/gross (non-PHI). */
-function CollectionsDailyWidget() {
-  const state = useWidget<CollectionsDailyResult>(loadCollectionsDaily);
-  return (
-    <WidgetCard title="Collections — daily detail (latest month)" state={state}>
-      {state.status === 'ready' && <CollectionsDailyBody data={state.data} />}
-    </WidgetCard>
-  );
+const DAILY_PAGE_SIZE = 50;
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+const dailySelectCls =
+  'h-8 rounded-md border border-input bg-background px-2 text-xs ring-offset-background ' +
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
+
+interface YearMonth {
+  year: number;
+  month: number; // 1-12
 }
 
-function CollectionsDailyBody({ data }: { data: CollectionsDailyResult }) {
-  const [filterDate, setFilterDate] = useState('');
-  const [filterFacility, setFilterFacility] = useState('');
+/** Today's local date as 'YYYY-MM-DD' (en-CA renders ISO order). */
+function todayIso(): string {
+  return new Date().toLocaleDateString('en-CA');
+}
+
+/** Derive the latest {year, month} present in a set of daily rows, else null. */
+function latestYearMonth(rows: CollectionsDailyResult['rows']): YearMonth | null {
+  let max: string | null = null;
+  for (const r of rows) if (max === null || r.payment_date > max) max = r.payment_date;
+  if (max === null) return null;
+  return { year: Number(max.slice(0, 4)), month: Number(max.slice(5, 7)) };
+}
+
+/**
+ * Daily collections detail (Phase 7.9) — defaults to the latest month, but the
+ * user can browse any month/year (server-fetched, non-PHI, NOT cached) and filter
+ * by facility (client-side). Paginated at 50 rows/page. The "hide zero rows"
+ * toggle only appears when the shown month extends past today (i.e. when future
+ * all-zero rows actually exist); for fully-past months every row is shown.
+ */
+function CollectionsDailyWidget() {
+  const [data, setData] = useState<CollectionsDailyResult | null>(null);
+  const [status, setStatus] = useState<'loading' | 'error' | 'ready'>('loading');
+  const [selected, setSelected] = useState<YearMonth | null>(null);
+  const [latest, setLatest] = useState<YearMonth | null>(null);
+
+  const [facility, setFacility] = useState('');
   const [hideZero, setHideZero] = useState(true);
+  const [page, setPage] = useState(0);
 
-  const dates = useMemo(
-    () => [...new Set(data.rows.map((r) => r.payment_date))].sort().reverse(),
-    [data.rows],
-  );
+  // Mount: load the latest month (cached) and seed the selected month from it.
+  useEffect(() => {
+    let live = true;
+    loadCollectionsDaily()
+      .then((r) => {
+        if (!live) return;
+        if (!r.ok) {
+          setStatus('error');
+          return;
+        }
+        const ym = latestYearMonth(r.data.rows) ?? {
+          year: Number(todayIso().slice(0, 4)),
+          month: Number(todayIso().slice(5, 7)),
+        };
+        setData(r.data);
+        setLatest(ym);
+        setSelected(ym);
+        setStatus('ready');
+      })
+      .catch(() => {
+        if (live) setStatus('error');
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
 
-  const facilities = useMemo(
-    () =>
-      [...new Set(data.rows.map((r) => facilityLabel(r)))]
-        .filter(Boolean)
-        .sort((a, b) => a.localeCompare(b)),
-    [data.rows],
-  );
+  // Fetch a specific month when the user changes the selection (skips the initial
+  // seed, which reused the cached latest-month payload above).
+  const pick = useCallback((ym: YearMonth) => {
+    setSelected(ym);
+    setPage(0);
+    setStatus('loading');
+    loadCollectionsDailyRange(ym)
+      .then((r) => {
+        if (r.ok) {
+          setData(r.data);
+          setStatus('ready');
+        } else {
+          setStatus('error');
+        }
+      })
+      .catch(() => setStatus('error'));
+  }, []);
+
+  const yearOptions = useMemo(() => {
+    const base = latest?.year ?? Number(todayIso().slice(0, 4));
+    const years = new Set<number>();
+    for (let y = base; y > base - 4; y--) years.add(y);
+    if (selected) years.add(selected.year);
+    return [...years].sort((a, b) => b - a);
+  }, [latest, selected]);
+
+  const facilities = useMemo(() => {
+    if (!data) return [];
+    return [...new Set(data.rows.map((r) => facilityLabel(r)))]
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+  }, [data]);
+
+  // Only show the hide-zero control when the month runs past today — otherwise
+  // there are no future all-zero rows to hide.
+  const showHideZero = useMemo(() => {
+    if (!data || data.rows.length === 0) return false;
+    const maxDate = data.rows.reduce<string>((m, r) => (r.payment_date > m ? r.payment_date : m), '');
+    return maxDate > todayIso();
+  }, [data]);
 
   const filteredRows = useMemo(() => {
+    if (!data) return [];
     return data.rows.filter((r) => {
-      if (
-        hideZero &&
-        r.gross_amount === 0 &&
-        r.checks_amount === 0 &&
-        r.eft_amount === 0
-      )
+      if (showHideZero && hideZero && r.gross_amount === 0 && r.checks_amount === 0 && r.eft_amount === 0)
         return false;
-      if (filterDate && r.payment_date !== filterDate) return false;
-      if (filterFacility && facilityLabel(r) !== filterFacility) return false;
+      if (facility && facilityLabel(r) !== facility) return false;
       return true;
     });
-  }, [data.rows, filterDate, filterFacility, hideZero]);
+  }, [data, facility, hideZero, showHideZero]);
 
-  if (data.row_count === 0) {
-    return <div className="text-sm text-muted-foreground">No daily collections in range.</div>;
-  }
-
-  const selectCls =
-    'h-8 rounded-md border border-input bg-background px-2 text-xs ring-offset-background ' +
-    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
+  const pageRows = filteredRows.slice(page * DAILY_PAGE_SIZE, page * DAILY_PAGE_SIZE + DAILY_PAGE_SIZE);
+  const hasNext = filteredRows.length > (page + 1) * DAILY_PAGE_SIZE;
+  const hasPrev = page > 0;
 
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <select
-          value={filterDate}
-          onChange={(e) => setFilterDate(e.target.value)}
-          className={selectCls}
-          aria-label="Filter by date"
-        >
-          <option value="">All dates</option>
-          {dates.map((d) => (
-            <option key={d} value={d}>
-              {d}
-            </option>
-          ))}
-        </select>
-        <select
-          value={filterFacility}
-          onChange={(e) => setFilterFacility(e.target.value)}
-          className={selectCls}
-          aria-label="Filter by facility"
-        >
-          <option value="">All facilities</option>
-          {facilities.map((f) => (
-            <option key={f} value={f}>
-              {f}
-            </option>
-          ))}
-        </select>
-        <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
-          <input
-            type="checkbox"
-            checked={hideZero}
-            onChange={(e) => setHideZero(e.target.checked)}
-            className="rounded border-input accent-teal700"
-          />
-          Hide zero rows
-        </label>
-        <span className="text-xs text-muted-foreground">
-          {filteredRows.length} / {data.row_count} rows
-        </span>
-      </div>
+    <WidgetCard title="Collections — daily detail" state={{ status }}>
+      {status === 'ready' && data && (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={selected?.month ?? ''}
+              onChange={(e) => selected && pick({ ...selected, month: Number(e.target.value) })}
+              className={dailySelectCls}
+              aria-label="Month"
+            >
+              {MONTH_NAMES.map((name, i) => (
+                <option key={name} value={i + 1}>
+                  {name}
+                </option>
+              ))}
+            </select>
+            <select
+              value={selected?.year ?? ''}
+              onChange={(e) => selected && pick({ ...selected, year: Number(e.target.value) })}
+              className={dailySelectCls}
+              aria-label="Year"
+            >
+              {yearOptions.map((y) => (
+                <option key={y} value={y}>
+                  {y}
+                </option>
+              ))}
+            </select>
+            <select
+              value={facility}
+              onChange={(e) => {
+                setFacility(e.target.value);
+                setPage(0);
+              }}
+              className={dailySelectCls}
+              aria-label="Facility"
+            >
+              <option value="">All facilities</option>
+              {facilities.map((f) => (
+                <option key={f} value={f}>
+                  {f}
+                </option>
+              ))}
+            </select>
+            {showHideZero && (
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={hideZero}
+                  onChange={(e) => {
+                    setHideZero(e.target.checked);
+                    setPage(0);
+                  }}
+                  className="rounded border-input accent-teal700"
+                />
+                Hide zero rows
+              </label>
+            )}
+            <span className="ml-auto text-xs text-muted-foreground">
+              {filteredRows.length.toLocaleString('en-US')} rows
+            </span>
+          </div>
 
-      {filteredRows.length === 0 ? (
-        <div className="py-6 text-center text-sm text-muted-foreground">
-          No rows match these filters.
+          {filteredRows.length === 0 ? (
+            <div className="py-8 text-center text-sm text-muted-foreground">
+              No collections recorded for {selected ? `${MONTH_NAMES[selected.month - 1]} ${selected.year}` : 'this period'}.
+            </div>
+          ) : (
+            <>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Date</TableHead>
+                    <TableHead>Facility</TableHead>
+                    <TableHead className="text-right">Checks</TableHead>
+                    <TableHead className="text-right">EFT</TableHead>
+                    <TableHead className="text-right">Gross</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {pageRows.map((r, i) => (
+                    <TableRow key={`${r.payment_date}-${r.facility_code ?? 'unassigned'}-${i}`}>
+                      <TableCell className="tabular-nums">{r.payment_date}</TableCell>
+                      <TableCell>
+                        {r.facility_name === null ? (
+                          <span className="text-muted-foreground">{facilityLabel(r)}</span>
+                        ) : (
+                          facilityLabel(r)
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">{money(r.checks_amount)}</TableCell>
+                      <TableCell className="text-right tabular-nums">{money(r.eft_amount)}</TableCell>
+                      <TableCell className="text-right tabular-nums">{money(r.gross_amount)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+
+              {(hasPrev || hasNext) && (
+                <div className="flex items-center justify-between">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={!hasPrev}
+                    onClick={() => setPage((p) => Math.max(0, p - 1))}
+                  >
+                    ← Previous
+                  </Button>
+                  <span className="text-xs text-muted-foreground">Page {page + 1}</span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={!hasNext}
+                    onClick={() => setPage((p) => p + 1)}
+                  >
+                    Next →
+                  </Button>
+                </div>
+              )}
+            </>
+          )}
         </div>
-      ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Date</TableHead>
-              <TableHead>Facility</TableHead>
-              <TableHead className="text-right">Checks</TableHead>
-              <TableHead className="text-right">EFT</TableHead>
-              <TableHead className="text-right">Gross</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {filteredRows.map((r, i) => (
-              <TableRow key={`${r.payment_date}-${r.facility_code ?? 'unassigned'}-${i}`}>
-                <TableCell className="tabular-nums">{r.payment_date}</TableCell>
-                <TableCell>
-                  {r.facility_name === null ? (
-                    <span className="text-muted-foreground">{facilityLabel(r)}</span>
-                  ) : (
-                    facilityLabel(r)
-                  )}
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {money(r.checks_amount)}
-                </TableCell>
-                <TableCell className="text-right tabular-nums">{money(r.eft_amount)}</TableCell>
-                <TableCell className="text-right tabular-nums">{money(r.gross_amount)}</TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
       )}
-    </div>
+    </WidgetCard>
   );
 }
 
@@ -542,26 +684,33 @@ export function ClaimsDistributions() {
   );
 }
 
-/** Full collections detail: MTD/YTD KPIs, daily detail, and latest-month summary. */
+/**
+ * Full collections detail: MTD/YTD KPIs and latest-month summary side by side,
+ * with the (paginated, filterable) daily detail full-width below, aligned to the
+ * same grid. Aggregate, non-PHI.
+ */
 export function CollectionsSections() {
   return (
     <div className="space-y-4">
-      <CollectionsKpisWidget />
+      <div className="grid gap-4 lg:grid-cols-2">
+        <CollectionsKpisWidget compact />
+        <CollectionsSummaryWidget />
+      </div>
       <CollectionsDailyWidget />
-      <CollectionsSummaryWidget />
     </div>
   );
 }
 
 /**
- * The /dashboard overview: headline collections KPIs + claim distributions. The
- * page provides the heading and section nav; payer and full collections detail
- * live on their own sub-routes. Aggregate, non-PHI; no patient data is loaded.
+ * The /dashboard overview: headline collections KPIs, the payer chart (paid vs.
+ * collection gap, Top 5 by default), and claim distributions. Full collections
+ * detail lives on its own sub-route. Aggregate, non-PHI; no patient data loaded.
  */
 export function Dashboard() {
   return (
     <section className="space-y-4">
       <CollectionsKpisWidget />
+      <PayerChartWidget defaultTopN={5} />
       <ClaimsDistributions />
     </section>
   );

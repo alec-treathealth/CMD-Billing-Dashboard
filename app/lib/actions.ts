@@ -22,6 +22,7 @@
  */
 import {
   browseClaims,
+  collectionsDailyForMonth,
   dashboardCollectionsDaily,
   dashboardCollectionsKpis,
   dashboardCollectionsSummary,
@@ -267,6 +268,22 @@ export async function loadCollectionsKpis(): Promise<DashboardResult<Collections
 export async function loadCollectionsDaily(): Promise<DashboardResult<CollectionsDailyResult>> {
   try {
     return { ok: true, data: await dashboardCollectionsDaily() };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Daily collections rows for a specific month (non-PHI, reader-only, NOT cached).
+ * Lets the collections daily view browse months other than the latest. `year`/
+ * `month` are re-validated server-side as bounded integers before any query.
+ */
+export async function loadCollectionsDailyRange(params: {
+  year: number;
+  month: number;
+}): Promise<DashboardResult<CollectionsDailyResult>> {
+  try {
+    return { ok: true, data: await collectionsDailyForMonth(params.year, params.month) };
   } catch {
     return { ok: false };
   }

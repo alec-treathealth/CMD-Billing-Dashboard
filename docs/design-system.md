@@ -93,9 +93,21 @@ import { Skeleton } from '@/components/ui/skeleton';
 
 ### MiniBar (proportional)
 ```tsx
-<MiniBar pct={42} />  // decorative 0–100 bar; values always shown as text too
+<MiniBar pct={42} />  // 0–100 share bar; the % value is always shown as text too
 ```
-`h-1.5 rounded bg-muted` track, `bg-primary/60` fill.
+`h-2.5 rounded-full bg-teal50` track, `bg-teal700` fill. A 3% floor keeps tiny
+non-zero shares visible. Used in the distribution Share columns (≥40% col width).
+
+### Payer chart (recharts)
+`components/payer-chart.tsx` — horizontal stacked bar (paid `teal700` + collection
+gap `coral600` = total charges) with a hover tooltip showing the full non-PHI
+breakdown and a **Top N** selector (5/10/15/All, default 5). recharts is the only
+charting dependency. Aggregate, non-PHI; payer_name is an allowlisted dimension.
+
+### KPI grid widths
+KPI tiles use `text-lg lg:text-xl` + `whitespace-nowrap` (never `truncate`, which
+clipped large dollar values). Full-width sections use `grid-cols-2 sm:grid-cols-4`;
+in a half-width (side-by-side) column pass `compact` for a steady `grid-cols-2`.
 
 ### User message bubble (chat)
 ```tsx

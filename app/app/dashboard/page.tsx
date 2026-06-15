@@ -14,7 +14,7 @@ export const metadata: Metadata = { title: 'Dashboard | Claims Search' };
 
 export default function DashboardPage() {
   return (
-    <main className="mx-auto max-w-5xl space-y-6 p-6 sm:p-10">
+    <main className="mx-auto max-w-7xl space-y-6 p-6 sm:p-10">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
         <p className="mt-1 text-sm text-muted-foreground">

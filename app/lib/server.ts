@@ -201,6 +201,36 @@ export const dashboardCollectionsDaily = unstable_cache(
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
 );
 
+/**
+ * Daily collections rows bounded to a single calendar month (non-PHI, reader-only).
+ *
+ * NOT cached: this is a per-request, user-selected window of collection ROWS, so it
+ * stays off the cache like the claims browse path. `year`/`month` are validated as
+ * bounded integers; the [from, next-month) window becomes the existing query's $n
+ * date parameters (parameterized, never interpolated). Reads only daily_collections
+ * + facilities; no patient data, no source_group_code.
+ */
+export async function collectionsDailyForMonth(
+  year: number,
+  month: number,
+): Promise<CollectionsDailyResult> {
+  if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+    throw new Error('year must be an integer in [2000, 2100]');
+  }
+  if (!Number.isInteger(month) || month < 1 || month > 12) {
+    throw new Error('month must be an integer in [1, 12]');
+  }
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const nextYear = month === 12 ? year + 1 : year;
+  const nextMonth = month === 12 ? 1 : month + 1;
+  const from = `${year}-${pad(month)}-01`;
+  const to = `${nextYear}-${pad(nextMonth)}-01`; // exclusive upper bound
+  return collectionsDaily(
+    { from, to },
+    { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard' },
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Claims Data Explorer (Phase 7.4) — page-limited, NON-PHI claim browsing.
 //
