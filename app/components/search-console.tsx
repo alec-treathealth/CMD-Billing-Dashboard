@@ -51,6 +51,14 @@ interface Turn {
   result: AgentActionResult | null;
   rowsLoading: boolean;
   rows: ResultsActionResult | null;
+  /** Zero-based offset of the page currently shown in `rows`. */
+  rowsOffset: number;
+  /**
+   * For client_history only: the verified identity terms re-supplied for the
+   * current reveal, retained in session state ONLY so page navigation can re-fetch
+   * the next/prev page (re-verified server-side each time). PHI — never persisted.
+   */
+  rowsIdentity?: ResultsIdentity;
 }
 
 /** Render a chosen filter as a short, non-PHI human-readable label. */
@@ -94,7 +102,10 @@ export function SearchConsole() {
   async function addTurn(label: string, run: () => Promise<AgentActionResult>) {
     if (busy) return;
     const id = nextId.current++;
-    setTurns((prev) => [...prev, { id, question: label, result: null, rowsLoading: false, rows: null }]);
+    setTurns((prev) => [
+      ...prev,
+      { id, question: label, result: null, rowsLoading: false, rows: null, rowsOffset: 0 },
+    ]);
     setBusy(true);
     try {
       const result = await run();
@@ -132,12 +143,12 @@ export function SearchConsole() {
     }
   }
 
-  async function showRows(turn: Turn, identity?: ResultsIdentity) {
+  async function showRows(turn: Turn, identity?: ResultsIdentity, offset = 0) {
     if (!turn.result || turn.result.kind !== 'ok' || turn.rowsLoading) return;
-    patchTurn(turn.id, { rowsLoading: true, rows: null });
+    patchTurn(turn.id, { rowsLoading: true, rows: null, rowsIdentity: identity });
     try {
-      const rows = await fetchRows(turn.result.query_id, identity);
-      patchTurn(turn.id, { rows, rowsLoading: false });
+      const rows = await fetchRows(turn.result.query_id, identity, offset);
+      patchTurn(turn.id, { rows, rowsLoading: false, rowsOffset: rows.ok ? rows.offset : offset });
     } catch {
       patchTurn(turn.id, { rows: { ok: false, error: 'The rows could not be loaded.' }, rowsLoading: false });
     }
@@ -195,7 +206,7 @@ function TurnView({
   turn: Turn;
   facets: ClaimFacets | null;
   onPickerSubmit: (filter: ClaimFilter) => void;
-  onShowRows: (turn: Turn, identity?: ResultsIdentity) => void;
+  onShowRows: (turn: Turn, identity?: ResultsIdentity, offset?: number) => void;
 }) {
   return (
     <div className="space-y-3">
@@ -237,9 +248,11 @@ function RowsCard({
   onShowRows,
 }: {
   turn: Turn;
-  onShowRows: (turn: Turn, identity?: ResultsIdentity) => void;
+  onShowRows: (turn: Turn, identity?: ResultsIdentity, offset?: number) => void;
 }) {
   const isClientHistory = turn.result?.kind === 'ok' && turn.result.tool_name === 'client_history';
+  const page = turn.rows && turn.rows.ok ? turn.rows : null;
+  const hasRows = page !== null && page.rows.length > 0;
   return (
     <Card>
       <CardHeader>
@@ -247,25 +260,96 @@ function RowsCard({
       </CardHeader>
       <CardContent className="space-y-3">
         {isClientHistory ? (
-          <IdentityForm pending={turn.rowsLoading} onSubmit={(id) => onShowRows(turn, id)} />
+          <IdentityForm pending={turn.rowsLoading} onSubmit={(id) => onShowRows(turn, id, 0)} />
         ) : (
-          <Button variant="outline" size="sm" disabled={turn.rowsLoading} onClick={() => onShowRows(turn)}>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={turn.rowsLoading}
+            onClick={() => onShowRows(turn, undefined, 0)}
+          >
             {turn.rowsLoading ? 'Loading rows…' : 'Show underlying rows'}
           </Button>
         )}
 
         {turn.rows && !turn.rows.ok && <Notice tone="error">{turn.rows.error}</Notice>}
 
-        {turn.rows && turn.rows.ok && turn.rows.rows.length > 0 && <ResultsTable rows={turn.rows.rows} />}
+        {hasRows && <ResultsTable rows={page.rows} />}
 
-        {turn.rows && turn.rows.ok && turn.rows.rows.length === 0 && (
+        {hasRows && (
+          <RowsPager
+            offset={page.offset}
+            pageSize={page.pageSize}
+            count={page.rows.length}
+            hasNext={page.hasNext}
+            pending={turn.rowsLoading}
+            onPage={(nextOffset) => onShowRows(turn, turn.rowsIdentity, nextOffset)}
+          />
+        )}
+
+        {page !== null && page.rows.length === 0 && (
           <Notice tone="muted">
-            {isClientHistory
-              ? 'No rows matched the supplied identity. Double-check the last name and member ID — this does not necessarily mean the patient has no claims.'
-              : 'No underlying rows are available for this result (the query handle may have expired).'}
+            {turn.rowsOffset > 0
+              ? 'No more rows on this page. Use “Previous” to step back.'
+              : isClientHistory
+                ? 'No rows matched the supplied identity. Double-check the last name and member ID — this does not necessarily mean the patient has no claims.'
+                : 'No underlying rows are available for this result (the query handle may have expired).'}
           </Notice>
         )}
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * Page controls for the bounded row reveal. Shows the 1-based row window for the
+ * current page and steps by `pageSize`; "Next" is gated on the server-reported
+ * `hasNext`, "Previous" on a non-zero offset. No totals are shown (the reveal never
+ * counts the full slice).
+ */
+function RowsPager({
+  offset,
+  pageSize,
+  count,
+  hasNext,
+  pending,
+  onPage,
+}: {
+  offset: number;
+  pageSize: number;
+  count: number;
+  hasNext: boolean;
+  pending: boolean;
+  onPage: (nextOffset: number) => void;
+}) {
+  const from = offset + 1;
+  const to = offset + count;
+  const canPrev = offset > 0 && !pending;
+  const canNext = hasNext && !pending;
+  return (
+    <div className="flex items-center justify-between">
+      <div className="text-sm text-muted-foreground">
+        Rows {from.toLocaleString('en-US')}–{to.toLocaleString('en-US')}
+        {hasNext ? '+' : ''}
+      </div>
+      <div className="flex gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={!canPrev}
+          onClick={() => onPage(Math.max(0, offset - pageSize))}
+        >
+          Previous
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={!canNext}
+          onClick={() => onPage(offset + pageSize)}
+        >
+          Next
+        </Button>
+      </div>
+    </div>
   );
 }

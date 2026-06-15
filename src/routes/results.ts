@@ -46,6 +46,28 @@ import type { ClaimFilter, FunctionName, QueryExecutor } from '../queries/types.
 /** Fixed pg_trgm threshold for client_history (mirrors the query function default). */
 const CLIENT_HISTORY_DEFAULT_THRESHOLD = 0.4;
 
+/**
+ * Row-reveal page bounds. The reveal path re-derives PHI on every fetch and must
+ * never ship the entire matched slice at once, so each fetch is bounded to one
+ * page: DEFAULT_PAGE_SIZE rows unless the caller asks for fewer, hard-capped at
+ * MAX_PAGE_SIZE. Mirrors the non-PHI browse explorer (browse_claims.ts) so the two
+ * row paths stay consistent.
+ */
+export const DEFAULT_PAGE_SIZE = 50;
+export const MAX_PAGE_SIZE = 200;
+
+/** Clamp a requested page size to [1, MAX_PAGE_SIZE]; default on anything invalid. */
+function resolveLimit(n: number | undefined): number {
+  if (!Number.isInteger(n) || (n as number) < 1) return DEFAULT_PAGE_SIZE;
+  return Math.min(n as number, MAX_PAGE_SIZE);
+}
+
+/** Clamp a requested offset to a non-negative safe integer; default 0. */
+function resolveOffset(n: number | undefined): number {
+  if (!Number.isSafeInteger(n) || (n as number) < 0) return 0;
+  return n as number;
+}
+
 /** A PHI result row — opaque column bag; never logged, never sent to an LLM. */
 export type PhiRow = Record<string, unknown>;
 
@@ -66,6 +88,10 @@ export interface ResultsInput {
   created_by: string;
   /** Required for client_history (verified before serving); ignored otherwise. */
   identity?: ResultsIdentity;
+  /** Rows per page; defaults to DEFAULT_PAGE_SIZE, hard-capped at MAX_PAGE_SIZE. */
+  limit?: number;
+  /** Zero-based row offset into the matched slice; defaults to 0. */
+  offset?: number;
 }
 
 export interface ResultsResponse {
@@ -73,6 +99,12 @@ export interface ResultsResponse {
   /** The function that produced the handle; null when the handle is missing/expired. */
   function_name: FunctionName | null;
   query_id: string;
+  /** The resolved (clamped) page size used for this fetch. */
+  pageSize: number;
+  /** The resolved (clamped) offset used for this fetch. */
+  offset: number;
+  /** True when at least one more row exists past this page (detected via limit+1). */
+  hasNext: boolean;
 }
 
 /** Per-call context. `executor` MUST be the claims_reader connection. */
@@ -117,10 +149,18 @@ function emitAudit(
  * search_claims). Projects exactly the allowlisted columns over the stored filter.
  * Exposed for the fixture to assert exact SQL.
  */
-export function filterResultsSql(columns: readonly string[], filterClause: string): string {
+export function filterResultsSql(
+  columns: readonly string[],
+  filterClause: string,
+  limitIndex: number,
+  offsetIndex: number,
+): string {
+  // ORDER BY the synthetic id (always the first allowlisted column) so OFFSET
+  // paging is stable across fetches; the reveal never ships the whole slice.
   return (
     `select ${columns.join(', ')} from claims.claims` +
-    (filterClause ? ` where ${filterClause}` : '')
+    (filterClause ? ` where ${filterClause}` : '') +
+    ` order by id limit $${limitIndex} offset $${offsetIndex}`
   );
 }
 
@@ -131,11 +171,18 @@ export function filterResultsSql(columns: readonly string[], filterClause: strin
  * as `a_id` / `b_id`. Reuses the summary builder's CASE + join so the grading can
  * never diverge. Exposed for the fixture to assert exact SQL.
  */
-export function readmissionResultsSql(columns: readonly string[], filterClause: string): string {
+export function readmissionResultsSql(
+  columns: readonly string[],
+  filterClause: string,
+  limitIndex: number,
+  offsetIndex: number,
+): string {
   const filtered = filterClause
     ? `select * from claims.claims where ${filterClause}`
     : `select * from claims.claims`;
   const projection = columns.map((c) => `a.${c} as a_${c}, b.${c} as b_${c}`).join(', ');
+  // No single synthetic id on a pair row, so order by the pair key (a_id, b_id) —
+  // both surfaced in `pairs` — for a stable OFFSET window over the candidate pairs.
   return (
     `with f as (${filtered}), ` +
     `pairs as (` +
@@ -146,7 +193,8 @@ export function readmissionResultsSql(columns: readonly string[], filterClause: 
     `from f a ` +
     `${READMISSION_PAIR_JOIN}` +
     `) ` +
-    `select * from pairs where confidence is not null`
+    `select * from pairs where confidence is not null ` +
+    `order by a_id, b_id limit $${limitIndex} offset $${offsetIndex}`
   );
 }
 
@@ -160,18 +208,31 @@ export function clientHistoryResultsSql(
   columns: readonly string[],
   hasMember: boolean,
   filterClause: string,
+  limitIndex: number,
+  offsetIndex: number,
 ): string {
   const conds = ['claims.similarity(patient_last, $1) >= $2'];
   if (hasMember) conds.push('member_id_norm = $3');
   if (filterClause) conds.push(filterClause);
-  return `select ${columns.join(', ')} from claims.claims where ${conds.join(' and ')}`;
+  // ORDER BY the synthetic id (first allowlisted column) for a stable OFFSET window.
+  return (
+    `select ${columns.join(', ')} from claims.claims where ${conds.join(' and ')} ` +
+    `order by id limit $${limitIndex} offset $${offsetIndex}`
+  );
 }
 
-/** Reconstruct the parameterized row-level query from stored, re-validated args. */
+/**
+ * Reconstruct the parameterized row-level query from stored, re-validated args,
+ * bounded to one page. `limitBound`/`offset` are appended as the final two bound
+ * parameters (their `$n` indices follow the filter params). `limitBound` is the
+ * raw bound passed to SQL (the caller passes pageSize + 1 to detect a next page).
+ */
 function buildResultsQuery(
   functionName: FunctionName,
   columns: readonly string[],
   args: Record<string, unknown>,
+  limitBound: number,
+  offset: number,
 ): { sql: string; params: unknown[] } {
   // Re-validate the stored filter at this boundary (defense in depth) before binding.
   const filter: ClaimFilter = validateClaimFilter((args.filter ?? {}) as ClaimFilter);
@@ -180,14 +241,25 @@ function buildResultsQuery(
     const gapDays = validateGapDays(args.gap_days as number | undefined);
     // gap_days is $1; filter values follow from $2 (mirrors the summary builder).
     const { clause, params } = buildClaimFilter(filter, 2);
-    return { sql: readmissionResultsSql(columns, clause), params: [gapDays, ...params] };
+    const base = [gapDays, ...params];
+    const limitIndex = base.length + 1;
+    const offsetIndex = base.length + 2;
+    return {
+      sql: readmissionResultsSql(columns, clause, limitIndex, offsetIndex),
+      params: [...base, limitBound, offset],
+    };
   }
 
   // distribution / payer_gap_analysis / search_claims: the drill-down is the rows
   // in the filtered slice. field/metric don't constrain rows, so only the filter
   // is re-bound (from $1).
   const { clause, params } = buildClaimFilter(filter, 1);
-  return { sql: filterResultsSql(columns, clause), params };
+  const limitIndex = params.length + 1;
+  const offsetIndex = params.length + 2;
+  return {
+    sql: filterResultsSql(columns, clause, limitIndex, offsetIndex),
+    params: [...params, limitBound, offset],
+  };
 }
 
 /**
@@ -203,10 +275,12 @@ async function fetchClientHistory(
   columns: readonly string[],
   args: Record<string, unknown>,
   identity: ResultsIdentity | undefined,
+  pageSize: number,
+  offset: number,
 ): Promise<ResultsResponse> {
   const empty = (): ResultsResponse => {
     emitAudit(ctx, { query_id, function_name: 'client_history', row_count: 0, created_by });
-    return { rows: [], function_name: 'client_history', query_id };
+    return { rows: [], function_name: 'client_history', query_id, pageSize, offset, hasNext: false };
   };
 
   // Identity terms are mandatory here; absent/blank -> fail-closed empty.
@@ -233,7 +307,8 @@ async function fetchClientHistory(
     return empty(); // wrong identity, expired, or unverifiable — do not serve.
   }
 
-  // Verified — re-run the row query with the SAME WHERE the summary used.
+  // Verified — re-run the row query with the SAME WHERE the summary used, bounded
+  // to one page (limit+1 to detect a next page; offset selects the window).
   const filter = validateClaimFilter((args.filter ?? {}) as ClaimFilter);
   const threshold =
     typeof args.match_threshold === 'number' ? args.match_threshold : CLIENT_HISTORY_DEFAULT_THRESHOLD;
@@ -245,12 +320,17 @@ async function fetchClientHistory(
   }
   const { clause, params: filterParams } = buildClaimFilter(filter, nextIndex);
   params.push(...filterParams);
+  const limitIndex = params.length + 1;
+  const offsetIndex = params.length + 2;
+  params.push(pageSize + 1, offset);
 
-  const sql = clientHistoryResultsSql(columns, hasMember, clause);
+  const sql = clientHistoryResultsSql(columns, hasMember, clause, limitIndex, offsetIndex);
   const { rows } = await ctx.executor.query<PhiRow>(sql, params);
+  const hasNext = rows.length > pageSize;
+  const pageRows = hasNext ? rows.slice(0, pageSize) : rows;
 
-  emitAudit(ctx, { query_id, function_name: 'client_history', row_count: rows.length, created_by });
-  return { rows, function_name: 'client_history', query_id };
+  emitAudit(ctx, { query_id, function_name: 'client_history', row_count: pageRows.length, created_by });
+  return { rows: pageRows, function_name: 'client_history', query_id, pageSize, offset, hasNext };
 }
 
 /**
@@ -265,6 +345,10 @@ export async function fetchResults(
 ): Promise<ResultsResponse> {
   const { query_id, created_by, identity } = input;
 
+  // Clamp the page bounds before any SQL: default 50 rows, hard cap 200, offset >= 0.
+  const pageSize = resolveLimit(input.limit);
+  const offset = resolveOffset(input.offset);
+
   // 1. Resolve the handle. get_query_log is the SECURITY DEFINER point lookup and
   //    already fail-closes on expiry / unverifiable client_history rows.
   const { rows: logRows } = await ctx.executor.query<QueryLogRow>(
@@ -276,7 +360,7 @@ export async function fetchResults(
   if (log === undefined) {
     // Missing, expired, or a client_history row with no verifiable identity_hash.
     emitAudit(ctx, { query_id, function_name: null, row_count: 0, created_by });
-    return { rows: [], function_name: null, query_id };
+    return { rows: [], function_name: null, query_id, pageSize, offset, hasNext: false };
   }
 
   const functionName = log.function_name;
@@ -287,15 +371,27 @@ export async function fetchResults(
   // 3. client_history takes the identity-verification path; identity is ignored
   //    for every other function.
   if (functionName === 'client_history') {
-    return fetchClientHistory(ctx, query_id, created_by, columns, log.arguments, identity);
+    return fetchClientHistory(
+      ctx,
+      query_id,
+      created_by,
+      columns,
+      log.arguments,
+      identity,
+      pageSize,
+      offset,
+    );
   }
 
-  // 4. Re-execute the original parameterized query, projecting only allowlisted columns.
-  const { sql, params } = buildResultsQuery(functionName, columns, log.arguments);
+  // 4. Re-execute the original parameterized query (one page; limit+1 to detect a
+  //    next page), projecting only allowlisted columns.
+  const { sql, params } = buildResultsQuery(functionName, columns, log.arguments, pageSize + 1, offset);
   const { rows } = await ctx.executor.query<PhiRow>(sql, params);
+  const hasNext = rows.length > pageSize;
+  const pageRows = hasNext ? rows.slice(0, pageSize) : rows;
 
-  // 5. One audit line — counts only, never row content.
-  emitAudit(ctx, { query_id, function_name: functionName, row_count: rows.length, created_by });
+  // 5. One audit line — counts only (rows actually served), never row content.
+  emitAudit(ctx, { query_id, function_name: functionName, row_count: pageRows.length, created_by });
 
-  return { rows, function_name: functionName, query_id };
+  return { rows: pageRows, function_name: functionName, query_id, pageSize, offset, hasNext };
 }

@@ -91,8 +91,10 @@ test('distribution: re-executes the filtered slice with only allowlisted columns
   assert.equal(calls.length, 2);
   assert.ok(calls[0]!.sql.includes('claims.get_query_log($1)'));
   assert.deepEqual(calls[0]!.params, ['q-1']);
-  assert.equal(calls[1]!.sql, filterResultsSql(cols, 'lower(payer_name) = lower($1)'));
-  assert.deepEqual(calls[1]!.params, ['Aetna']);
+  // Bounded reveal: filter at $1, then limit ($2 = pageSize+1 = 51) / offset ($3 = 0).
+  assert.equal(calls[1]!.sql, filterResultsSql(cols, 'lower(payer_name) = lower($1)', 2, 3));
+  assert.deepEqual(calls[1]!.params, ['Aetna', 51, 0]);
+  assert.ok(calls[1]!.sql.includes('order by id limit $2 offset $3'));
 
   // Allowlist content: a non-PHI distribution projects NO patient identifiers.
   assert.ok(!calls[1]!.sql.includes('patient_name'));
@@ -119,8 +121,8 @@ test('payer_gap_analysis: re-executes the filter, no patient identifiers project
   const res = await fetchResults(INPUT, ctxWith(executor, []));
 
   assert.equal(res.function_name, 'payer_gap_analysis');
-  assert.equal(calls[1]!.sql, filterResultsSql(cols, 'date_of_service >= $1'));
-  assert.deepEqual(calls[1]!.params, ['2025-01-01']);
+  assert.equal(calls[1]!.sql, filterResultsSql(cols, 'date_of_service >= $1', 2, 3));
+  assert.deepEqual(calls[1]!.params, ['2025-01-01', 51, 0]);
   assert.ok(!calls[1]!.sql.includes('patient_name'));
 });
 
@@ -133,8 +135,8 @@ test('search_claims: projects patient identifiers (record-level review path)', a
   const res = await fetchResults(INPUT, ctxWith(executor, []));
 
   assert.equal(res.function_name, 'search_claims');
-  assert.equal(calls[1]!.sql, filterResultsSql(cols, 'lower(facility_name) = lower($1)'));
-  assert.deepEqual(calls[1]!.params, ['My Time Recovery']);
+  assert.equal(calls[1]!.sql, filterResultsSql(cols, 'lower(facility_name) = lower($1)', 2, 3));
+  assert.deepEqual(calls[1]!.params, ['My Time Recovery', 51, 0]);
   // This is the PHI path for search_claims — identifiers ARE in the projection.
   assert.ok(calls[1]!.sql.includes('patient_name'));
   assert.ok(calls[1]!.sql.includes('member_id_norm'));
@@ -149,12 +151,12 @@ test('readmission_candidates: re-runs the self-join, a_/b_ pair projection + com
   const res = await fetchResults(INPUT, ctxWith(executor, []));
 
   assert.equal(res.function_name, 'readmission_candidates');
-  // gap_days is $1; the filter is numbered from $2 (mirrors the summary builder).
+  // gap_days is $1; the filter is numbered from $2; limit ($3=51) / offset ($4=0) follow.
   assert.equal(
     calls[1]!.sql,
-    readmissionResultsSql(cols, 'lower(facility_name) = lower($2)'),
+    readmissionResultsSql(cols, 'lower(facility_name) = lower($2)', 3, 4),
   );
-  assert.deepEqual(calls[1]!.params, [14, 'My Time Recovery']);
+  assert.deepEqual(calls[1]!.params, [14, 'My Time Recovery', 51, 0]);
 
   // Pair projection (both sides) + computed confidence / gap_days; id -> a_id/b_id.
   assert.ok(calls[1]!.sql.includes('a.patient_last as a_patient_last'));
@@ -172,8 +174,8 @@ test('readmission_candidates: no filter — gap_days $1 only, no WHERE in the CT
     [],
   );
   await fetchResults(INPUT, ctxWith(executor, []));
-  assert.equal(calls[1]!.sql, readmissionResultsSql(cols, ''));
-  assert.deepEqual(calls[1]!.params, [30]);
+  assert.equal(calls[1]!.sql, readmissionResultsSql(cols, '', 2, 3));
+  assert.deepEqual(calls[1]!.params, [30, 51, 0]);
   assert.ok(!calls[1]!.sql.includes('where lower'));
 });
 
@@ -184,7 +186,14 @@ test('missing/expired query_id: empty result, function_name null, no data SQL ru
   const audit: string[] = [];
   const res = await fetchResults(INPUT, ctxWith(executor, audit));
 
-  assert.deepEqual(res, { rows: [], function_name: null, query_id: 'q-1' });
+  assert.deepEqual(res, {
+    rows: [],
+    function_name: null,
+    query_id: 'q-1',
+    pageSize: 50,
+    offset: 0,
+    hasNext: false,
+  });
   assert.equal(calls.length, 1); // only the lookup; no row-level query
   // Still audited as an access attempt, with a null function and zero rows.
   assert.deepEqual(JSON.parse(audit[0]!), {
@@ -228,8 +237,9 @@ test('client_history: valid identity verifies, then serves the row-level query',
   assert.equal(calls.length, 3);
   assert.ok(calls[1]!.sql.includes('claims.verify_identity($1, $2)'));
   assert.deepEqual(calls[1]!.params, ['q-1', storedHash]);
-  assert.equal(calls[2]!.sql, clientHistoryResultsSql(cols, false, ''));
-  assert.deepEqual(calls[2]!.params, ['Doe', 0.4]);
+  // patient_last $1, threshold $2, then limit ($3=51) / offset ($4=0).
+  assert.equal(calls[2]!.sql, clientHistoryResultsSql(cols, false, '', 3, 4));
+  assert.deepEqual(calls[2]!.params, ['Doe', 0.4, 51, 0]);
   // Full identified-patient projection includes identity columns.
   assert.ok(calls[2]!.sql.includes('member_id_norm'));
   assert.ok(calls[2]!.sql.includes('employer_name'));
@@ -258,8 +268,12 @@ test('client_history: with member id — $3 narrowing, filter follows from $4', 
   );
 
   assert.equal(res.rows.length, 1);
-  assert.equal(calls[2]!.sql, clientHistoryResultsSql(cols, true, 'lower(payer_name) = lower($4)'));
-  assert.deepEqual(calls[2]!.params, ['Doe', 0.4, memberNorm, 'Aetna']);
+  // member_id_norm $3, filter $4, then limit ($5=51) / offset ($6=0).
+  assert.equal(
+    calls[2]!.sql,
+    clientHistoryResultsSql(cols, true, 'lower(payer_name) = lower($4)', 5, 6),
+  );
+  assert.deepEqual(calls[2]!.params, ['Doe', 0.4, memberNorm, 'Aetna', 51, 0]);
 });
 
 test('client_history: wrong identity fails verification -> empty (fail-closed), no row query', async () => {
@@ -274,7 +288,14 @@ test('client_history: wrong identity fails verification -> empty (fail-closed), 
     ctxWith(executor, []),
   );
 
-  assert.deepEqual(res, { rows: [], function_name: 'client_history', query_id: 'q-1' });
+  assert.deepEqual(res, {
+    rows: [],
+    function_name: 'client_history',
+    query_id: 'q-1',
+    pageSize: 50,
+    offset: 0,
+    hasNext: false,
+  });
   assert.equal(calls.length, 2); // lookup + verify; verify returned false, no PHI query
 });
 
@@ -286,7 +307,14 @@ test('client_history: missing identity -> empty (fail-closed) before any verify 
   );
   const res = await fetchResults(INPUT, ctxWith(executor, [])); // no identity supplied
 
-  assert.deepEqual(res, { rows: [], function_name: 'client_history', query_id: 'q-1' });
+  assert.deepEqual(res, {
+    rows: [],
+    function_name: 'client_history',
+    query_id: 'q-1',
+    pageSize: 50,
+    offset: 0,
+    hasNext: false,
+  });
   assert.equal(calls.length, 1); // lookup only; verify_identity never called
 });
 
@@ -304,7 +332,83 @@ test('identity field on a non-client_history query is silently ignored', async (
   assert.equal(res.function_name, 'search_claims');
   assert.equal(calls.length, 2); // lookup + row query; no verify_identity call
   assert.ok(!calls.some((c) => c.sql.includes('verify_identity')));
-  assert.equal(calls[1]!.sql, filterResultsSql(cols, 'lower(facility_name) = lower($1)'));
+  assert.equal(calls[1]!.sql, filterResultsSql(cols, 'lower(facility_name) = lower($1)', 2, 3));
+});
+
+// --- bounded pagination -----------------------------------------------------
+
+test('reveal is bounded: default page is 50 rows (limit bound 51, offset 0)', async () => {
+  const cols = getColumns('search_claims');
+  const { executor, calls } = makeFake(
+    logRow('search_claims', { filter: { facility: 'My Time Recovery' } }),
+    [{ id: 1, patient_name: 'DOE, JANE' }],
+  );
+  const res = await fetchResults(INPUT, ctxWith(executor, []));
+
+  assert.equal(res.pageSize, 50);
+  assert.equal(res.offset, 0);
+  // filter $1, then limit $2 = 50 + 1, offset $3 = 0.
+  assert.equal(calls[1]!.sql, filterResultsSql(cols, 'lower(facility_name) = lower($1)', 2, 3));
+  assert.deepEqual(calls[1]!.params, ['My Time Recovery', 51, 0]);
+});
+
+test('reveal page size is capped at 200 (limit bound 201) and offset passes through', async () => {
+  const cols = getColumns('search_claims');
+  const { executor, calls } = makeFake(
+    logRow('search_claims', { filter: { facility: 'My Time Recovery' } }),
+    [{ id: 1, patient_name: 'DOE, JANE' }],
+  );
+  const res = await fetchResults(
+    { ...INPUT, limit: 5000, offset: 200 },
+    ctxWith(executor, []),
+  );
+
+  assert.equal(res.pageSize, 200); // clamped down from 5000
+  assert.equal(res.offset, 200);
+  assert.deepEqual(calls[1]!.params, ['My Time Recovery', 201, 200]);
+});
+
+test('reveal: a negative/invalid limit & offset fall back to the defaults', async () => {
+  const { executor, calls } = makeFake(
+    logRow('search_claims', { filter: { facility: 'My Time Recovery' } }),
+    [{ id: 1 }],
+  );
+  const res = await fetchResults(
+    { ...INPUT, limit: 0, offset: -10 },
+    ctxWith(executor, []),
+  );
+
+  assert.equal(res.pageSize, 50);
+  assert.equal(res.offset, 0);
+  assert.deepEqual(calls[1]!.params, ['My Time Recovery', 51, 0]);
+});
+
+test('reveal: hasNext is true and the extra (limit+1) row is trimmed off the page', async () => {
+  // The fake returns 51 rows for a page size of 50; the route must serve 50 and
+  // report hasNext, never shipping the extra probe row.
+  const fiftyOne = Array.from({ length: 51 }, (_, i) => ({ id: i + 1, patient_name: 'X' }));
+  const { executor } = makeFake(
+    logRow('search_claims', { filter: { facility: 'My Time Recovery' } }),
+    fiftyOne,
+  );
+  const audit: string[] = [];
+  const res = await fetchResults(INPUT, ctxWith(executor, audit));
+
+  assert.equal(res.rows.length, 50); // trimmed to the page size
+  assert.equal(res.hasNext, true);
+  // Audit reports rows actually served (50), not the 51-row probe.
+  assert.equal(JSON.parse(audit[0]!).row_count, 50);
+});
+
+test('reveal: hasNext is false when the slice fits within one page', async () => {
+  const ten = Array.from({ length: 10 }, (_, i) => ({ id: i + 1 }));
+  const { executor } = makeFake(
+    logRow('search_claims', { filter: { facility: 'My Time Recovery' } }),
+    ten,
+  );
+  const res = await fetchResults(INPUT, ctxWith(executor, []));
+  assert.equal(res.rows.length, 10);
+  assert.equal(res.hasNext, false);
 });
 
 // --- column allowlist registry --------------------------------------------

@@ -112,6 +112,28 @@ test('results route: 200 returns PHI rows for a re-executed filter query', async
   assert.equal(body.rows.length, 1);
 });
 
+test('results route: page bounds are clamped server-side and surfaced in the response', async () => {
+  const ctx = ctxWith(fakeExecutor(logRow('distribution', { filter: {} }), [{ id: 1 }]));
+
+  // Default: no limit/offset supplied -> 50-row page at offset 0.
+  const def = await handleResultsRequest(
+    { authorization: AUTH, body: { query_id: 'q-1' } },
+    { ctx, secret: SECRET },
+  );
+  assert.equal(def.status, 200);
+  assert.equal((def.body as { pageSize: number; offset: number }).pageSize, 50);
+  assert.equal((def.body as { pageSize: number; offset: number }).offset, 0);
+
+  // An over-large limit is capped at 200; offset passes through.
+  const capped = await handleResultsRequest(
+    { authorization: AUTH, body: { query_id: 'q-1', limit: 9999, offset: 100 } },
+    { ctx, secret: SECRET },
+  );
+  assert.equal(capped.status, 200);
+  assert.equal((capped.body as { pageSize: number; offset: number }).pageSize, 200);
+  assert.equal((capped.body as { pageSize: number; offset: number }).offset, 100);
+});
+
 test('results route: client_history serves rows only when re-supplied identity verifies', async () => {
   const queryId = 'q-1';
   const patientLast = 'Mossandfar';

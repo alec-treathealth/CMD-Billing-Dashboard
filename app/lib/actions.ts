@@ -82,7 +82,15 @@ export type ClaimFacets = {
 export type ClaimFacetsResult = { ok: true; data: ClaimFacets } | { ok: false };
 
 export type ResultsActionResult =
-  | { ok: true; function_name: FunctionName | null; rows: Record<string, unknown>[] }
+  | {
+      ok: true;
+      function_name: FunctionName | null;
+      rows: Record<string, unknown>[];
+      /** Resolved page size, offset, and whether a further page exists. */
+      pageSize: number;
+      offset: number;
+      hasNext: boolean;
+    }
   | { ok: false; error: string };
 
 /** Map a handler status to a user-facing message (handlers never leak internals). */
@@ -168,13 +176,17 @@ export async function runSearch(question: string): Promise<AgentActionResult> {
 }
 
 /**
- * Fetch the PHI rows behind a query_id. For client_history the caller MUST supply
- * the re-collected identity terms (PHI); they are forwarded to the handler, which
- * re-verifies them server-side and fail-closes to empty rows on any mismatch.
+ * Fetch ONE bounded page of the PHI rows behind a query_id. The reveal is paginated
+ * (default 50 rows, capped server-side) so a broad result never ships its entire
+ * matched slice at once; `offset` selects the page. For client_history the caller
+ * MUST supply the re-collected identity terms (PHI) on EVERY page; they are
+ * forwarded to the handler, which re-verifies them server-side and fail-closes to
+ * empty rows on any mismatch. Row-level data is never cached or persisted here.
  */
 export async function fetchRows(
   query_id: string,
   identity?: ResultsIdentity,
+  offset = 0,
 ): Promise<ResultsActionResult> {
   if (typeof query_id !== 'string' || query_id.trim() === '') {
     return { ok: false, error: 'Missing query handle.' };
@@ -183,7 +195,7 @@ export async function fetchRows(
     const { status, body } = await handleResults({
       method: 'POST',
       authorization: authHeader(),
-      body: identity ? { query_id, identity } : { query_id },
+      body: { query_id, offset, ...(identity ? { identity } : {}) },
       createdBy: AUDIT_PRINCIPAL,
     });
     if (status === 200) {
@@ -191,7 +203,14 @@ export async function fetchRows(
       // Normalize to plain JSON-safe values so the client never receives Date /
       // non-plain pg objects (guardrail). These rows are PHI: only returned to the
       // caller for display, never logged or persisted here.
-      return { ok: true, function_name: ok.function_name, rows: toPlainRows(ok.rows) };
+      return {
+        ok: true,
+        function_name: ok.function_name,
+        rows: toPlainRows(ok.rows),
+        pageSize: ok.pageSize,
+        offset: ok.offset,
+        hasNext: ok.hasNext,
+      };
     }
     return { ok: false, error: messageForStatus(status, 'The rows could not be loaded.') };
   } catch {

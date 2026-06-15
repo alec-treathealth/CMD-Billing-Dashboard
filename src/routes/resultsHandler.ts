@@ -21,7 +21,7 @@ export interface ResultsHttpRequest {
   /** HTTP method. POST only — any other verb is 405 (identity/query_id ride in the body). */
   method?: string;
   authorization?: string | null;
-  /** Parsed JSON body (untrusted): `{ query_id, identity? }`. */
+  /** Parsed JSON body (untrusted): `{ query_id, identity?, limit?, offset? }`. */
   body: unknown;
   /** Optional non-PHI principal for the audit trail (e.g. an `x-created-by` header). */
   createdBy?: string | null;
@@ -58,10 +58,11 @@ export async function handleResultsRequest(
 
   const createdBy = req.createdBy?.trim() || 'results-api';
   const identity = extractIdentity(req.body);
+  const { limit, offset } = extractPaging(req.body);
 
   try {
     const result = await fetchResults(
-      { query_id: queryId, created_by: createdBy, identity },
+      { query_id: queryId, created_by: createdBy, identity, limit, offset },
       deps.ctx,
     );
     return { status: 200, body: result };
@@ -84,6 +85,19 @@ function extractQueryId(body: unknown): string | null {
  * fail-closes (absent/blank/wrong identity → empty rows), so loose extraction
  * here is safe.
  */
+/**
+ * Pull the optional page bounds from the body. Loose extraction is safe:
+ * `fetchResults` clamps `limit` to [1, MAX_PAGE_SIZE] (default 50) and `offset` to
+ * a non-negative integer (default 0), so any garbage collapses to a bounded page.
+ */
+function extractPaging(body: unknown): { limit?: number; offset?: number } {
+  if (typeof body !== 'object' || body === null) return {};
+  const raw = body as Record<string, unknown>;
+  const limit = typeof raw.limit === 'number' ? raw.limit : undefined;
+  const offset = typeof raw.offset === 'number' ? raw.offset : undefined;
+  return { limit, offset };
+}
+
 function extractIdentity(body: unknown): ResultsIdentity | undefined {
   if (typeof body !== 'object' || body === null) return undefined;
   const raw = (body as Record<string, unknown>).identity;
