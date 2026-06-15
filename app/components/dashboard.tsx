@@ -7,7 +7,7 @@
  * PHI is reachable here. Each widget owns its loading/error state; if one fails it
  * shows a generic message and the rest of the page stays usable.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -87,12 +87,12 @@ function WidgetCard({
   );
 }
 
-/** A light proportional bar (0–100). Decorative; values are also shown as text. */
+/** A proportional bar (0–100). Values are also shown as text; bar is decorative. */
 function MiniBar({ pct }: { pct: number | null }) {
   const w = Math.max(0, Math.min(100, pct ?? 0));
   return (
-    <div className="h-1.5 w-full rounded bg-muted">
-      <div className="h-1.5 rounded bg-primary/60" style={{ width: `${w}%` }} />
+    <div className="h-2 w-full rounded bg-muted">
+      <div className="h-2 rounded bg-teal500" style={{ width: `${w}%` }} />
     </div>
   );
 }
@@ -283,13 +283,32 @@ function CollectionsBody({ data }: { data: CollectionsMonthlySummary }) {
   );
 }
 
-/** A big-number KPI tile. */
-function Kpi({ label, value, sub }: { label: string; value: string; sub?: string }) {
+/** A big-number KPI tile. `detail` renders a second, smaller value line. */
+function Kpi({
+  label,
+  value,
+  detail,
+  sub,
+}: {
+  label: string;
+  value: string;
+  detail?: string;
+  sub?: string;
+}) {
   return (
     <Card className="border-t-2 border-t-teal500">
-      <CardContent className="pt-6">
-        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
-        <div className="ths-num mt-1 text-2xl font-semibold tabular-nums text-teal700">{value}</div>
+      <CardContent className="pb-4 pt-4">
+        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          {label}
+        </div>
+        <div className="ths-num mt-1 truncate text-xl font-semibold tabular-nums text-teal700">
+          {value}
+        </div>
+        {detail && (
+          <div className="ths-num mt-0.5 truncate text-sm tabular-nums text-muted-foreground">
+            {detail}
+          </div>
+        )}
         {sub && <div className="mt-1 text-xs text-muted-foreground">{sub}</div>}
       </CardContent>
     </Card>
@@ -319,8 +338,16 @@ function CollectionsKpisBody({ data }: { data: CollectionsKpis }) {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Kpi label="MTD Gross" value={money(data.mtd.gross)} sub={`as of ${asOf}`} />
         <Kpi label="YTD Gross" value={money(data.ytd.gross)} sub={`as of ${asOf}`} />
-        <Kpi label="MTD Checks / EFT" value={`${money(data.mtd.checks)} / ${money(data.mtd.eft)}`} />
-        <Kpi label="YTD Checks / EFT" value={`${money(data.ytd.checks)} / ${money(data.ytd.eft)}`} />
+        <Kpi
+          label="MTD Checks / EFT"
+          value={money(data.mtd.checks)}
+          detail={`EFT ${money(data.mtd.eft)}`}
+        />
+        <Kpi
+          label="YTD Checks / EFT"
+          value={money(data.ytd.checks)}
+          detail={`EFT ${money(data.ytd.eft)}`}
+        />
       </div>
       <Table>
         <TableHeader>
@@ -369,40 +396,125 @@ function CollectionsDailyWidget() {
 }
 
 function CollectionsDailyBody({ data }: { data: CollectionsDailyResult }) {
+  const [filterDate, setFilterDate] = useState('');
+  const [filterFacility, setFilterFacility] = useState('');
+  const [hideZero, setHideZero] = useState(true);
+
+  const dates = useMemo(
+    () => [...new Set(data.rows.map((r) => r.payment_date))].sort().reverse(),
+    [data.rows],
+  );
+
+  const facilities = useMemo(
+    () =>
+      [...new Set(data.rows.map((r) => facilityLabel(r)))]
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b)),
+    [data.rows],
+  );
+
+  const filteredRows = useMemo(() => {
+    return data.rows.filter((r) => {
+      if (
+        hideZero &&
+        r.gross_amount === 0 &&
+        r.checks_amount === 0 &&
+        r.eft_amount === 0
+      )
+        return false;
+      if (filterDate && r.payment_date !== filterDate) return false;
+      if (filterFacility && facilityLabel(r) !== filterFacility) return false;
+      return true;
+    });
+  }, [data.rows, filterDate, filterFacility, hideZero]);
+
   if (data.row_count === 0) {
     return <div className="text-sm text-muted-foreground">No daily collections in range.</div>;
   }
+
+  const selectCls =
+    'h-8 rounded-md border border-input bg-background px-2 text-xs ring-offset-background ' +
+    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
+
   return (
-    <div className="space-y-2">
-      <div className="text-sm text-muted-foreground">{count(data.row_count)} daily rows</div>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Date</TableHead>
-            <TableHead>Facility</TableHead>
-            <TableHead className="text-right">Checks</TableHead>
-            <TableHead className="text-right">EFT</TableHead>
-            <TableHead className="text-right">Gross</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {data.rows.map((r, i) => (
-            <TableRow key={`${r.payment_date}-${r.facility_code ?? 'unassigned'}-${i}`}>
-              <TableCell className="tabular-nums">{r.payment_date}</TableCell>
-              <TableCell>
-                {r.facility_name === null ? (
-                  <span className="text-muted-foreground">{facilityLabel(r)}</span>
-                ) : (
-                  facilityLabel(r)
-                )}
-              </TableCell>
-              <TableCell className="text-right tabular-nums">{money(r.checks_amount)}</TableCell>
-              <TableCell className="text-right tabular-nums">{money(r.eft_amount)}</TableCell>
-              <TableCell className="text-right tabular-nums">{money(r.gross_amount)}</TableCell>
-            </TableRow>
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={filterDate}
+          onChange={(e) => setFilterDate(e.target.value)}
+          className={selectCls}
+          aria-label="Filter by date"
+        >
+          <option value="">All dates</option>
+          {dates.map((d) => (
+            <option key={d} value={d}>
+              {d}
+            </option>
           ))}
-        </TableBody>
-      </Table>
+        </select>
+        <select
+          value={filterFacility}
+          onChange={(e) => setFilterFacility(e.target.value)}
+          className={selectCls}
+          aria-label="Filter by facility"
+        >
+          <option value="">All facilities</option>
+          {facilities.map((f) => (
+            <option key={f} value={f}>
+              {f}
+            </option>
+          ))}
+        </select>
+        <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={hideZero}
+            onChange={(e) => setHideZero(e.target.checked)}
+            className="rounded border-input accent-teal700"
+          />
+          Hide zero rows
+        </label>
+        <span className="text-xs text-muted-foreground">
+          {filteredRows.length} / {data.row_count} rows
+        </span>
+      </div>
+
+      {filteredRows.length === 0 ? (
+        <div className="py-6 text-center text-sm text-muted-foreground">
+          No rows match these filters.
+        </div>
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Date</TableHead>
+              <TableHead>Facility</TableHead>
+              <TableHead className="text-right">Checks</TableHead>
+              <TableHead className="text-right">EFT</TableHead>
+              <TableHead className="text-right">Gross</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {filteredRows.map((r, i) => (
+              <TableRow key={`${r.payment_date}-${r.facility_code ?? 'unassigned'}-${i}`}>
+                <TableCell className="tabular-nums">{r.payment_date}</TableCell>
+                <TableCell>
+                  {r.facility_name === null ? (
+                    <span className="text-muted-foreground">{facilityLabel(r)}</span>
+                  ) : (
+                    facilityLabel(r)
+                  )}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {money(r.checks_amount)}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">{money(r.eft_amount)}</TableCell>
+                <TableCell className="text-right tabular-nums">{money(r.gross_amount)}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
     </div>
   );
 }

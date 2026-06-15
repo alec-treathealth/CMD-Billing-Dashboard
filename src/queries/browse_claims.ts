@@ -21,7 +21,7 @@
  * against a closed allowlist before being interpolated; pageSize and cursor.id are
  * bounded integers; claimById validates its id as a bounded positive integer.
  */
-import { buildClaimFilter, validateClaimFilter } from './filters.js';
+import { validateClaimFilter } from './filters.js';
 import type { ClaimFilter, QueryContext } from './types.js';
 
 /**
@@ -170,6 +170,56 @@ function buildCursorClause(
 }
 
 /**
+ * Build a parameterized WHERE fragment for the browse explorer. Uses ILIKE
+ * substring matching for facility_name and payer_name so partial text (e.g.
+ * "Saddle") matches any facility/payer containing that substring. The `%`
+ * wildcards are fixed SQL literals; only the search value is a $n parameter.
+ * All other filter fields use exact/range comparisons as before.
+ *
+ * This is intentionally separate from buildClaimFilter (filters.ts), which
+ * uses exact-match for the agent's search_claims tool — keeping agent behavior
+ * unchanged while the explorer gains substring search.
+ */
+function buildBrowseClaimFilter(
+  filter: ClaimFilter,
+  startIndex: number,
+): { clause: string; params: unknown[] } {
+  const conds: string[] = [];
+  const params: unknown[] = [];
+  let i = startIndex;
+
+  if (filter.facility !== undefined) {
+    conds.push(`facility_name ilike '%' || $${i++} || '%'`);
+    params.push(filter.facility);
+  }
+  if (filter.payer !== undefined) {
+    conds.push(`payer_name ilike '%' || $${i++} || '%'`);
+    params.push(filter.payer);
+  }
+  if (filter.date_from !== undefined) {
+    conds.push(`date_of_service >= $${i++}`);
+    params.push(filter.date_from);
+  }
+  if (filter.date_to !== undefined) {
+    conds.push(`date_of_service <= $${i++}`);
+    params.push(filter.date_to);
+  }
+  if (filter.source_year !== undefined) {
+    conds.push(`source_year = $${i++}`);
+    params.push(filter.source_year);
+  }
+  if (filter.hcpcs_code !== undefined) {
+    conds.push(`lower(hcpcs_code) = lower($${i++})`);
+    params.push(filter.hcpcs_code);
+  }
+  if (filter.revenue_code !== undefined) {
+    conds.push(`lower(revenue_code) = lower($${i++})`);
+    params.push(filter.revenue_code);
+  }
+  return { clause: conds.join(' and '), params };
+}
+
+/**
  * Build the parameterized listing query. `whereClause` and `orderClause` are
  * composed only from fixed literals + the validated sort allowlist; all VALUES
  * are $n parameters. Exposed for tests.
@@ -196,7 +246,7 @@ export async function browseClaims(
   const pageSize = resolvePageSize(args.pageSize);
   const cursor = resolveCursor(args.cursor);
 
-  const { clause: filterClause, params: filterParams } = buildClaimFilter(filter, 1);
+  const { clause: filterClause, params: filterParams } = buildBrowseClaimFilter(filter, 1);
 
   const conds: string[] = [];
   const params: unknown[] = [...filterParams];

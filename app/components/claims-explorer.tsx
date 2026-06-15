@@ -181,7 +181,7 @@ export function ClaimsExplorer() {
           <Input
             id="cx-facility"
             value={draft.facility}
-            placeholder="exact facility name"
+            placeholder="partial name, e.g. Saddle"
             onChange={(e) => setDraft((d) => ({ ...d, facility: e.target.value }))}
             onKeyDown={(e) => e.key === 'Enter' && applyFilters()}
           />
@@ -191,7 +191,7 @@ export function ClaimsExplorer() {
           <Input
             id="cx-payer"
             value={draft.payer}
-            placeholder="exact payer name"
+            placeholder="partial name, e.g. Aetna"
             onChange={(e) => setDraft((d) => ({ ...d, payer: e.target.value }))}
             onKeyDown={(e) => e.key === 'Enter' && applyFilters()}
           />
