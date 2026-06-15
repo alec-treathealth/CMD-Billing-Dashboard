@@ -1,11 +1,16 @@
 'use client';
 
 /**
- * Claims Data Explorer (Phase 7.4 MVP) — a server-driven, page-limited table of
- * NON-PHI claim rows. Every page is fetched from the loadClaimsPage Server Action
- * (default 50 rows, LIMIT-bounded server-side), so the full table never ships to
- * the client. Filter/sort round-trip to the server through the existing
- * injection-safe allowlist; nothing is persisted client-side.
+ * Claims Data Explorer (Phase 7.4; keyset pagination in 7.5) — a server-driven,
+ * page-limited table of NON-PHI claim rows. Every page is fetched from the
+ * loadClaimsPage Server Action (default 50 rows, LIMIT-bounded server-side), so
+ * the full table never ships to the client. Filter/sort round-trip to the server
+ * through the existing injection-safe allowlist; nothing is persisted client-side.
+ *
+ * Pagination is keyset (cursor) on the synthetic id. Forward navigation uses the
+ * server-provided nextCursor; backward navigation pops a small in-memory stack of
+ * the (non-PHI) cursors used so far — no OFFSET, no backward SQL. The cursor holds
+ * only the sort-column value + id (both non-PHI) and lives in React state only.
  *
  * PHI discipline: browse_claims projects only non-PHI columns, so there is no
  * patient identifier to mask here. Cells still render through displayCell (which
@@ -13,6 +18,7 @@
  * audited reveal path, not in this list.
  */
 import { useCallback, useEffect, useState } from 'react';
+import Link from 'next/link';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -22,6 +28,7 @@ import { money, rate } from '@/lib/format';
 import { displayCell, isPhiColumn } from '@/lib/phi';
 import {
   loadClaimsPage,
+  type BrowseClaimsCursor,
   type BrowseClaimsResult,
   type BrowseClaimsSort,
   type ClaimFilter,
@@ -92,19 +99,29 @@ function draftToFilter(draft: FilterDraft): ClaimFilter {
   return filter;
 }
 
+const DEFAULT_SORT: BrowseClaimsSort = { column: 'date_of_service', direction: 'desc' };
+
 export function ClaimsExplorer() {
   const [draft, setDraft] = useState<FilterDraft>(EMPTY_DRAFT);
   const [filter, setFilter] = useState<ClaimFilter>({});
-  const [sort, setSort] = useState<BrowseClaimsSort>({ column: 'date_of_service', direction: 'desc' });
-  const [page, setPage] = useState(0);
+  const [sort, setSort] = useState<BrowseClaimsSort>(DEFAULT_SORT);
+  // A stack of the cursors used to reach each page; the last entry is the current
+  // page's starting cursor (null = first page). Pushing = next, popping = previous.
+  const [cursorStack, setCursorStack] = useState<(BrowseClaimsCursor | null)[]>([null]);
+  // Bumped to force a re-fetch when neither filter/sort/cursor changed (e.g. Retry).
+  const [reloadKey, setReloadKey] = useState(0);
   const [status, setStatus] = useState<Status>({ kind: 'loading' });
 
-  // Re-fetch whenever the applied filter, sort, or page changes. Rows live in
-  // component state for the session only — never persisted anywhere.
+  const cursor = cursorStack[cursorStack.length - 1] ?? null;
+  const pageNumber = cursorStack.length;
+
+  // Re-fetch whenever the applied filter, sort, or current cursor changes (or a
+  // manual reload is requested). Rows and cursors live in component state for the
+  // session only — never persisted.
   useEffect(() => {
     let live = true;
     setStatus({ kind: 'loading' });
-    loadClaimsPage({ filter, sort, page, pageSize: PAGE_SIZE })
+    loadClaimsPage({ filter, sort, cursor, pageSize: PAGE_SIZE })
       .then((r) => {
         if (!live) return;
         setStatus(r.ok ? { kind: 'ready', data: r.data } : { kind: 'error', message: r.error });
@@ -115,22 +132,23 @@ export function ClaimsExplorer() {
     return () => {
       live = false;
     };
-  }, [filter, sort, page]);
+  }, [filter, sort, cursor, reloadKey]);
 
   const applyFilters = useCallback(() => {
-    setPage(0);
+    setCursorStack([null]);
     setFilter(draftToFilter(draft));
   }, [draft]);
 
   const resetFilters = useCallback(() => {
-    setPage(0);
+    setCursorStack([null]);
     setDraft(EMPTY_DRAFT);
     setFilter({});
+    setSort(DEFAULT_SORT);
   }, []);
 
   const toggleSort = useCallback((column: string) => {
     if (!SORTABLE_COLUMNS.has(column)) return;
-    setPage(0);
+    setCursorStack([null]); // sort change invalidates the keyset position
     setSort((prev) =>
       prev.column === column
         ? { column, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
@@ -138,9 +156,21 @@ export function ClaimsExplorer() {
     );
   }, []);
 
+  const nextCursor = status.kind === 'ready' ? status.data.nextCursor : null;
+
+  const goNext = useCallback(() => {
+    if (nextCursor) setCursorStack((stack) => [...stack, nextCursor]);
+  }, [nextCursor]);
+
+  const goPrev = useCallback(() => {
+    setCursorStack((stack) => (stack.length > 1 ? stack.slice(0, -1) : stack));
+  }, []);
+
   const columns = status.kind === 'ready' ? status.data.columns : [];
   const rows = status.kind === 'ready' ? status.data.rows : [];
   const hasNext = status.kind === 'ready' ? status.data.hasNext : false;
+  const hasPrev = pageNumber > 1;
+  const loading = status.kind === 'loading';
 
   return (
     <div className="space-y-4">
@@ -153,6 +183,7 @@ export function ClaimsExplorer() {
             value={draft.facility}
             placeholder="exact facility name"
             onChange={(e) => setDraft((d) => ({ ...d, facility: e.target.value }))}
+            onKeyDown={(e) => e.key === 'Enter' && applyFilters()}
           />
         </div>
         <div className="space-y-1">
@@ -162,6 +193,7 @@ export function ClaimsExplorer() {
             value={draft.payer}
             placeholder="exact payer name"
             onChange={(e) => setDraft((d) => ({ ...d, payer: e.target.value }))}
+            onKeyDown={(e) => e.key === 'Enter' && applyFilters()}
           />
         </div>
         <div className="space-y-1">
@@ -172,6 +204,7 @@ export function ClaimsExplorer() {
             inputMode="numeric"
             placeholder="e.g. 2023"
             onChange={(e) => setDraft((d) => ({ ...d, source_year: e.target.value }))}
+            onKeyDown={(e) => e.key === 'Enter' && applyFilters()}
           />
         </div>
         <div className="flex gap-2">
@@ -183,8 +216,8 @@ export function ClaimsExplorer() {
       <div className="flex items-center justify-between">
         <div className="text-sm text-muted-foreground">
           {status.kind === 'ready'
-            ? `Page ${status.data.page + 1} · ${rows.length.toLocaleString('en-US')} rows (max ${PAGE_SIZE}/page)`
-            : status.kind === 'loading'
+            ? `Page ${pageNumber} · ${rows.length.toLocaleString('en-US')} rows (max ${PAGE_SIZE}/page)`
+            : loading
               ? 'Loading…'
               : ''}
         </div>
@@ -193,14 +226,22 @@ export function ClaimsExplorer() {
         </span>
       </div>
 
-      {status.kind === 'error' && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+      {status.kind === 'error' ? (
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-6 text-center text-sm text-destructive">
           {status.message}
+          <div className="mt-2">
+            <Button type="button" variant="outline" size="sm" onClick={() => setReloadKey((k) => k + 1)}>
+              Retry
+            </Button>
+          </div>
         </div>
-      )}
-
-      {status.kind !== 'error' && (
-        <div className="rounded-md border">
+      ) : (
+        <div className="relative rounded-md border">
+          {loading && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/60 text-sm text-muted-foreground">
+              Loading…
+            </div>
+          )}
           <Table>
             <TableHeader>
               <TableRow>
@@ -230,25 +271,44 @@ export function ClaimsExplorer() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rows.length === 0 && status.kind === 'ready' ? (
+              {status.kind === 'ready' && rows.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={columns.length} className="text-center text-sm text-muted-foreground">
-                    No claims match these filters.
+                  <TableCell
+                    colSpan={Math.max(1, columns.length)}
+                    className="py-10 text-center text-sm text-muted-foreground"
+                  >
+                    No claims match these filters. Try widening or resetting them.
                   </TableCell>
                 </TableRow>
               ) : (
-                rows.map((row, i) => (
-                  <TableRow key={(row.id as string | number | null) ?? i}>
-                    {columns.map((c) => (
-                      <TableCell
-                        key={c}
-                        className={MONEY_COLUMNS.has(c) || c === 'collection_rate' ? 'text-right tabular-nums' : undefined}
-                      >
-                        {cellText(c, row[c])}
-                      </TableCell>
-                    ))}
-                  </TableRow>
-                ))
+                rows.map((row, i) => {
+                  const id = row.id as string | number | null;
+                  return (
+                    <TableRow key={id ?? i}>
+                      {columns.map((c) => (
+                        <TableCell
+                          key={c}
+                          className={
+                            MONEY_COLUMNS.has(c) || c === 'collection_rate'
+                              ? 'text-right tabular-nums'
+                              : undefined
+                          }
+                        >
+                          {c === 'id' && id !== null ? (
+                            <Link
+                              href={`/claims/${id}`}
+                              className="font-medium text-teal700 underline-offset-2 hover:underline"
+                            >
+                              {String(id)}
+                            </Link>
+                          ) : (
+                            cellText(c, row[c])
+                          )}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  );
+                })
               )}
             </TableBody>
           </Table>
@@ -256,23 +316,11 @@ export function ClaimsExplorer() {
       )}
 
       <div className="flex items-center justify-between">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={page === 0 || status.kind === 'loading'}
-          onClick={() => setPage((p) => Math.max(0, p - 1))}
-        >
+        <Button type="button" variant="outline" size="sm" disabled={!hasPrev || loading} onClick={goPrev}>
           ← Previous
         </Button>
-        <div className="text-xs text-muted-foreground">Page {page + 1}</div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={!hasNext || status.kind === 'loading'}
-          onClick={() => setPage((p) => p + 1)}
-        >
+        <div className="text-xs text-muted-foreground">Page {pageNumber}</div>
+        <Button type="button" variant="outline" size="sm" disabled={!hasNext || loading} onClick={goNext}>
           Next →
         </Button>
       </div>

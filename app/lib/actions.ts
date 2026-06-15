@@ -31,6 +31,7 @@ import {
   handleResults,
 } from '@/lib/server';
 import type {
+  BrowseClaimsCursor,
   BrowseClaimsResult,
   BrowseClaimsSort,
 } from '../../src/queries/browse_claims';
@@ -60,6 +61,7 @@ export type {
   CollectionsDailyResult,
   BrowseClaimsResult,
   BrowseClaimsSort,
+  BrowseClaimsCursor,
   ClaimFilter,
 };
 
@@ -255,13 +257,14 @@ export async function loadCollectionsDaily(): Promise<DashboardResult<Collection
 }
 
 // ---------------------------------------------------------------------------
-// Claims Data Explorer action (Phase 7.4) — page-limited, NON-PHI browsing.
+// Claims Data Explorer action (Phase 7.4; keyset in 7.5) — NON-PHI browsing.
 //
-// Returns ONE bounded page of non-PHI claim rows. No PHI columns are projected
-// (browse_claims excludes every patient identifier), so this never touches the
-// reveal/audit path, and row-level data is neither cached nor shipped in bulk
-// (the underlying query LIMITs to pageSize). Rows are normalized to JSON-safe
-// scalars before crossing the action boundary, like fetchRows.
+// Returns ONE bounded page of non-PHI claim rows via keyset pagination (cursor on
+// the synthetic id). No PHI columns are projected (browse_claims excludes every
+// patient identifier), so this never touches the reveal/audit path, and row-level
+// data is neither cached nor shipped in bulk (the underlying query LIMITs to
+// pageSize). Rows are normalized to JSON-safe scalars before crossing the action
+// boundary, like fetchRows.
 // ---------------------------------------------------------------------------
 
 export type ClaimsPageActionResult =
@@ -271,14 +274,14 @@ export type ClaimsPageActionResult =
 export async function loadClaimsPage(params: {
   filter?: ClaimFilter;
   sort?: BrowseClaimsSort;
-  page?: number;
+  cursor?: BrowseClaimsCursor | null;
   pageSize?: number;
 }): Promise<ClaimsPageActionResult> {
   try {
     const data = await browseClaims({
       filter: params.filter,
       sort: params.sort,
-      page: params.page,
+      cursor: params.cursor ?? null,
       pageSize: params.pageSize,
     });
     return { ok: true, data: { ...data, rows: toPlainRows(data.rows) } };

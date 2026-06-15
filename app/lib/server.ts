@@ -27,7 +27,7 @@ import { collectionsMonthlySummary } from '../../src/collections/summary.js';
 import type { CollectionsMonthlySummary } from '../../src/collections/summaryTypes.js';
 import { collectionsDaily, collectionsKpis } from '../../src/collections/daily.js';
 import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collections/dailyTypes.js';
-import { browseClaims as browseClaimsQuery } from '../../src/queries/browse_claims.js';
+import { browseClaims as browseClaimsQuery, claimById } from '../../src/queries/browse_claims.js';
 import type { BrowseClaimsArgs, BrowseClaimsResult } from '../../src/queries/browse_claims.js';
 import { handleAgentRequest, type AgentHttpRequest } from '../../src/routes/agentHandler.js';
 import {
@@ -197,7 +197,15 @@ export const dashboardCollectionsDaily = unstable_cache(
 // projects only non-PHI columns, so no patient identifiers are reachable here.
 // ---------------------------------------------------------------------------
 
-/** One page of non-PHI claim rows (LIMIT/OFFSET, allowlisted sort/filter). */
+/** One page of non-PHI claim rows (keyset/LIMIT, allowlisted sort/filter). */
 export async function browseClaims(args: BrowseClaimsArgs): Promise<BrowseClaimsResult> {
   return browseClaimsQuery(args, { executor: readerExecutor(), createdBy: 'claims-explorer' });
+}
+
+/**
+ * One claim's non-PHI projection by synthetic id (Phase 7.5), or null if absent.
+ * Not cached; never selects patient identifiers (same allowlist as the browse list).
+ */
+export async function getClaim(id: number): Promise<Record<string, unknown> | null> {
+  return claimById(id, { executor: readerExecutor(), createdBy: 'claims-explorer-detail' });
 }
