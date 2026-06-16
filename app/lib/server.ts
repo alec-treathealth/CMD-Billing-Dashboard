@@ -269,3 +269,31 @@ export async function searchClaimsDirect(
   );
   return { tool_name: 'search_claims', query_id, summary_stats };
 }
+
+/**
+ * Mint an audited query_id scoped to EXACTLY ONE synthetic claim id (Phase 8.0,
+ * the /claims/[claimId] full-detail reveal). It runs the SAME vetted search_claims
+ * query function the agent/field-picker use, but with an `id` equality filter, so
+ * the two-gate PHI boundary is reused verbatim: finalize() writes the query_log row
+ * (non-PHI args `{ filter: { id } }`) + one non-PHI audit line and returns the
+ * opaque query_id, and the existing results route (fetchResults) re-runs the stored
+ * query projecting the allowlisted columns WHERE id = $1 — at most one row.
+ *
+ * `id` is validated as a bounded positive safe integer here (and re-validated in
+ * validateClaimFilter); anything else throws BEFORE any query_log row is created.
+ * This never queries VOB/ref/rag/audit schemas — only claims.claims via the
+ * existing audited path. Returns ONLY the non-PHI summary + query_id; no row-level
+ * data is produced here.
+ */
+export async function revealClaimById(
+  id: number,
+): Promise<{ query_id: string; summary_stats: SearchClaimsSummary }> {
+  if (!Number.isSafeInteger(id) || id < 1) {
+    throw new Error('revealClaimById: id must be a positive safe integer');
+  }
+  const { summary_stats, query_id } = await searchClaims(
+    { filter: { id } },
+    { executor: readerExecutor(), createdBy: 'claim-detail-reveal' },
+  );
+  return { query_id, summary_stats };
+}

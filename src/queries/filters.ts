@@ -58,6 +58,15 @@ export function validateClaimFilter(filter: ClaimFilter | undefined): ClaimFilte
     const v = checkText('revenue_code', filter.revenue_code);
     if (v) f.revenue_code = v;
   }
+  if (filter.id !== undefined) {
+    // Synthetic surrogate key (non-PHI). Bounded positive safe integer; fail-closed
+    // (throw) on anything else so a single-claim reveal can never scope to garbage.
+    const n = filter.id;
+    if (!Number.isSafeInteger(n) || n < 1) {
+      throw new Error('filter.id must be a positive safe integer');
+    }
+    f.id = n;
+  }
   return f;
 }
 
@@ -101,6 +110,10 @@ export function buildClaimFilter(
   if (filter.revenue_code !== undefined) {
     conds.push(`lower(revenue_code) = lower($${i++})`);
     params.push(filter.revenue_code);
+  }
+  if (filter.id !== undefined) {
+    conds.push(`id = $${i++}`);
+    params.push(filter.id);
   }
 
   return { clause: conds.join(' and '), params };

@@ -142,6 +142,39 @@ test('search_claims: projects patient identifiers (record-level review path)', a
   assert.ok(calls[1]!.sql.includes('member_id_norm'));
 });
 
+test('search_claims (single-claim reveal): stored id filter re-runs WHERE id = $1, one row, audit no PHI', async () => {
+  // Phase 8.0: a /claims/[claimId] reveal stores { filter: { id } }; the results
+  // route re-runs the search_claims projection scoped to that one synthetic id.
+  const cols = getColumns('search_claims');
+  const { executor, calls } = makeFake(
+    logRow('search_claims', { filter: { id: 4242 } }),
+    [{ id: 4242, patient_name: 'DOE, JANE', member_id_norm: 'PGE081' }],
+  );
+  const audit: string[] = [];
+  const res = await fetchResults(INPUT, ctxWith(executor, audit));
+
+  assert.equal(res.function_name, 'search_claims');
+  assert.equal(res.rows.length, 1);
+
+  // Scoped re-execution: id at $1, then limit ($2=51) / offset ($3=0).
+  assert.equal(calls[1]!.sql, filterResultsSql(cols, 'id = $1', 2, 3));
+  assert.deepEqual(calls[1]!.params, [4242, 51, 0]);
+  // The reveal IS the PHI path for search_claims — identifiers are in the projection.
+  assert.ok(calls[1]!.sql.includes('patient_name'));
+  assert.ok(calls[1]!.sql.includes('member_id_norm'));
+
+  // Audit line: counts only — never the row content / patient identifiers.
+  assert.deepEqual(JSON.parse(audit[0]!), {
+    timestamp: '2026-06-11T00:30:00.000Z',
+    query_id: 'q-1',
+    function_name: 'search_claims',
+    row_count: 1,
+    created_by: 'sess-9',
+  });
+  assert.ok(!audit[0]!.includes('DOE'));
+  assert.ok(!audit[0]!.includes('PGE081'));
+});
+
 test('readmission_candidates: re-runs the self-join, a_/b_ pair projection + computed fields', async () => {
   const cols = getColumns('readmission_candidates');
   const { executor, calls } = makeFake(

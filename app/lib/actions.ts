@@ -30,6 +30,7 @@ import {
   dashboardPayerGap,
   handleAgent,
   handleResults,
+  revealClaimById,
   searchClaimsDirect,
 } from '@/lib/server';
 import type {
@@ -339,6 +340,36 @@ export async function loadClaimsPage(params: {
     return { ok: true, data: { ...data, rows: toPlainRows(data.rows) } };
   } catch {
     return { ok: false, error: 'The claims could not be loaded.' };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Claim detail reveal action (Phase 8.0) — audited, single-claim PHI gate.
+//
+// The /claims/[claimId] page is non-PHI by default. This action is gate 1 of the
+// explicit reveal: it mints an audited query_id scoped to EXACTLY ONE synthetic
+// claim id by running the existing search_claims query function with an `id`
+// filter (revealClaimById → finalize → claims.log_query). It returns ONLY the
+// opaque query_id; the page then fetches the masked PHI row through the unchanged
+// fetchRows / results path (gate 2 is the per-row reveal in ResultsTable). No
+// row-level data, and no PHI, is produced, logged, or cached here. The id is
+// validated as a bounded positive safe integer; anything else fails closed with no
+// query created.
+// ---------------------------------------------------------------------------
+
+export type RevealClaimActionResult =
+  | { ok: true; query_id: string }
+  | { ok: false; error: string };
+
+export async function revealClaim(claimId: number): Promise<RevealClaimActionResult> {
+  if (!Number.isSafeInteger(claimId) || claimId < 1) {
+    return { ok: false, error: 'That claim reference is not a valid claim id.' };
+  }
+  try {
+    const { query_id } = await revealClaimById(claimId);
+    return { ok: true, query_id };
+  } catch {
+    return { ok: false, error: 'The claim details could not be prepared right now.' };
   }
 }
 

@@ -86,6 +86,14 @@ export interface ClaimFilter {
   source_year?: number;
   hcpcs_code?: string;
   revenue_code?: string;
+  /**
+   * The synthetic, internal-only surrogate row key (claims.claims.id). NOT PHI —
+   * it is a generated bigint, the same handle already used as the explorer's
+   * non-PHI row key and the /claims/[claimId] route param. Used to scope an
+   * audited reveal to exactly one claim (Phase 8.0); it is NOT exposed in the
+   * agent tool schema, so the model can never set it.
+   */
+  id?: number;
 }
 
 // ---------------------------------------------------------------------------

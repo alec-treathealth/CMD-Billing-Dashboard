@@ -3,18 +3,20 @@
  *
  * This Server Component reads the claim directly via getClaim() (the same non-PHI
  * column allowlist as the explorer list); no patient identifiers are queried or
- * shown. PHI reveal is intentionally NOT implemented here: doing it safely would
- * require extending the audited query_id / results path (a SECURITY DEFINER and
- * audit-chokepoint change), which is deferred to a later, reviewed phase. The route
- * therefore neither exposes PHI nor bypasses the audited reveal flow.
+ * shown by default. Full PHI detail is opt-in via <ClaimReveal> (Phase 8.0), which
+ * runs through the EXISTING audited query_id / results path scoped to this one
+ * synthetic id — it does not bypass the two-gate boundary or add a shortcut PHI
+ * query. The default render therefore exposes no PHI.
  *
  * `claimId` is validated as a bounded positive integer; anything else, or a claim
- * that does not exist, renders a safe not-found state. force-dynamic guarantees the
- * row is read fresh per request and never cached.
+ * that does not exist, renders a safe not-found state (and no reveal control). The
+ * same validated id is handed to <ClaimReveal>. force-dynamic guarantees the row is
+ * read fresh per request and never cached.
  */
 import type { Metadata } from 'next';
 import Link from 'next/link';
 
+import { ClaimReveal } from '@/components/claim-reveal';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table';
 import { money, rate } from '@/lib/format';
@@ -118,7 +120,7 @@ export default async function ClaimDetailPage({
         <h1 className="text-2xl font-semibold tracking-tight">Claim {plain(claim.id)}</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Non-PHI claim detail. Patient identifiers (name, member ID, employer, group number) are not
-          shown here and remain available only through the audited search reveal path.
+          shown by default; reveal them below through the audited access path.
         </p>
       </header>
 
@@ -139,6 +141,8 @@ export default async function ClaimDetailPage({
           </Table>
         </CardContent>
       </Card>
+
+      <ClaimReveal claimId={id} />
     </Shell>
   );
 }

@@ -181,6 +181,42 @@ test('search_claims: filter incl. new code keys — parameterized WHERE, order p
   });
 });
 
+test('search_claims: id filter (single-claim reveal) — scoped WHERE, non-PHI args/audit', async () => {
+  // Phase 8.0: the /claims/[claimId] reveal mints a query_id via search_claims with
+  // an `id` equality so the results route later re-runs it scoped to exactly one row.
+  const { executor, calls } = makeFake([
+    {
+      rows_matched: '1',
+      total_charge: '1200',
+      total_allowed: '800',
+      total_paid: '760',
+      avg_collection_rate: '0.9500',
+      rate_anomaly_count: '0',
+      date_from: '2025-04-02',
+      date_to: '2025-04-02',
+      distinct_facilities: '1',
+      distinct_payers: '1',
+    },
+  ]);
+  const audit: string[] = [];
+  const res = await searchClaims({ filter: { id: 4242 } }, ctxWith(executor, audit));
+
+  assert.equal(res.summary_stats.rows_matched, 1);
+
+  // Scoped to one synthetic id, parameterized.
+  assert.equal(calls[0]!.sql, EXPECTED_SELECT + ' where id = $1');
+  assert.deepEqual(calls[0]!.params, [4242]);
+
+  // Stored args are the non-PHI filter (the synthetic id only) — re-run material.
+  assert.deepEqual(JSON.parse(calls[1]!.params[3] as string), { filter: { id: 4242 } });
+
+  // Audit line carries only the non-PHI key shape, never the id value or any PHI.
+  const auditLine = JSON.parse(audit[0]!);
+  assert.deepEqual(auditLine.args_shape, { filter_keys: ['id'] });
+  assert.equal(auditLine.function_name, 'search_claims');
+  assert.ok(!audit[0]!.includes('patient'));
+});
+
 test('search_claims: empty match — count 0, money 0, avg/dates null, row_count 0', async () => {
   // The aggregate returns one row even when nothing matched.
   const { executor } = makeFake([
