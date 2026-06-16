@@ -1,11 +1,21 @@
 'use client';
 
 /**
- * Claims Data Explorer (Phase 7.4; keyset pagination in 7.5) — a server-driven,
- * page-limited table of NON-PHI claim rows. Every page is fetched from the
- * loadClaimsPage Server Action (default 50 rows, LIMIT-bounded server-side), so
- * the full table never ships to the client. Filter/sort round-trip to the server
- * through the existing injection-safe allowlist; nothing is persisted client-side.
+ * Claims Data Explorer (Phase 7.4; keyset pagination in 7.5; faceted dropdowns +
+ * column layout controls in 8.1) — a server-driven, page-limited table of NON-PHI
+ * claim rows. Every page is fetched from the loadClaimsPage Server Action (default
+ * 50 rows, LIMIT-bounded server-side), so the full table never ships to the client.
+ * Filter/sort round-trip to the server through the existing injection-safe
+ * allowlist; nothing is persisted client-side.
+ *
+ * Filters (facility / payer / source year) are dropdowns populated from the CACHED,
+ * non-PHI facet lists (loadClaimFacets → cached distribution matview reads). The
+ * facets are aggregate dimension values only — never patient data.
+ *
+ * Column show/hide/reorder is LAYOUT-ONLY view state held in React for the session:
+ * it changes only how the already-fetched non-PHI columns are presented and never
+ * triggers a re-fetch, never changes the query, and is never persisted (no
+ * localStorage/sessionStorage/cookies). Row data and PHI are never stored.
  *
  * Pagination is keyset (cursor) on the synthetic id. Forward navigation uses the
  * server-provided nextCursor; backward navigation pops a small in-memory stack of
@@ -17,24 +27,33 @@
  * masks any PHI column) as defense in depth — patient-level data stays on the
  * audited reveal path, not in this list.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
+import { ArrowDown, ArrowUp, ChevronDown, Columns3, Eye, EyeOff, RotateCcw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { money, rate } from '@/lib/format';
 import { displayCell, isPhiColumn } from '@/lib/phi';
 import {
+  loadClaimFacets,
   loadClaimsPage,
   type BrowseClaimsCursor,
   type BrowseClaimsResult,
   type BrowseClaimsSort,
+  type ClaimFacets,
   type ClaimFilter,
 } from '@/lib/actions';
 
 const PAGE_SIZE = 50;
+
+/**
+ * Shared native-select styling. `appearance-none` strips the platform chevron so
+ * we can render our own (see SelectField); teal focus ring ties it to the brand.
+ */
+const CONTROL_CLASS =
+  'h-10 w-full cursor-pointer appearance-none truncate rounded-md border border-line bg-surface pl-3 pr-9 text-sm text-ink900 ring-offset-background transition-colors hover:border-teal200 focus-visible:border-teal500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50';
 
 /** Columns rendered as currency; collection_rate renders as a percentage. */
 const MONEY_COLUMNS: ReadonlySet<string> = new Set([
@@ -44,6 +63,12 @@ const MONEY_COLUMNS: ReadonlySet<string> = new Set([
   'adjustment',
   'balance_due_pt',
 ]);
+
+/**
+ * Text columns. Everything else is set in IBM Plex Mono with tabular figures for a
+ * clean financial-ledger read (ids, dates, codes, money, rates align column-wise).
+ */
+const TEXT_COLUMNS: ReadonlySet<string> = new Set(['facility_name', 'payer_name']);
 
 /** Columns the table header allows sorting by (mirrors the server allowlist). */
 const SORTABLE_COLUMNS: ReadonlySet<string> = new Set([
@@ -73,36 +98,62 @@ function cellText(column: string, value: unknown): string {
   return String(value);
 }
 
+/** Per-column cell classes — ledger mono + right-aligned numerics, left-aligned text. */
+function cellClass(column: string): string {
+  if (TEXT_COLUMNS.has(column)) return '';
+  const right = MONEY_COLUMNS.has(column) || column === 'collection_rate';
+  return `font-mono text-[13px] tabular-nums${right ? ' text-right' : ''}`;
+}
+
+/** A labelled facet dropdown with a custom chevron (native select stays accessible). */
+function SelectField({
+  id,
+  label,
+  value,
+  disabled,
+  onChange,
+  children,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-1">
+      <Label htmlFor={id} className="text-[11px] font-medium uppercase tracking-wide text-ink400">
+        {label}
+      </Label>
+      <div className="relative">
+        <select
+          id={id}
+          className={CONTROL_CLASS}
+          value={value}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.value)}
+        >
+          {children}
+        </select>
+        <ChevronDown
+          aria-hidden
+          className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink400"
+        />
+      </div>
+    </div>
+  );
+}
+
 type Status =
   | { kind: 'loading' }
   | { kind: 'error'; message: string }
   | { kind: 'ready'; data: BrowseClaimsResult };
 
-/** The pending filter inputs (applied on submit, not per keystroke). */
-interface FilterDraft {
-  facility: string;
-  payer: string;
-  source_year: string;
-}
-
-const EMPTY_DRAFT: FilterDraft = { facility: '', payer: '', source_year: '' };
-
-/** Turn the draft into a validated-shape ClaimFilter (server re-validates too). */
-function draftToFilter(draft: FilterDraft): ClaimFilter {
-  const filter: ClaimFilter = {};
-  const facility = draft.facility.trim();
-  const payer = draft.payer.trim();
-  const year = draft.source_year.trim();
-  if (facility) filter.facility = facility;
-  if (payer) filter.payer = payer;
-  if (year && /^\d{4}$/.test(year)) filter.source_year = Number(year);
-  return filter;
-}
-
 const DEFAULT_SORT: BrowseClaimsSort = { column: 'date_of_service', direction: 'desc' };
 
 export function ClaimsExplorer() {
-  const [draft, setDraft] = useState<FilterDraft>(EMPTY_DRAFT);
+  const [facets, setFacets] = useState<ClaimFacets | null>(null);
   const [filter, setFilter] = useState<ClaimFilter>({});
   const [sort, setSort] = useState<BrowseClaimsSort>(DEFAULT_SORT);
   // A stack of the cursors used to reach each page; the last entry is the current
@@ -112,12 +163,32 @@ export function ClaimsExplorer() {
   const [reloadKey, setReloadKey] = useState(0);
   const [status, setStatus] = useState<Status>({ kind: 'loading' });
 
+  // ---- Layout-only column view state (session only; never persisted) --------
+  // The stable set of non-PHI columns the server returns, captured on first load
+  // so the header and the Columns panel stay stable across page loads.
+  const [knownColumns, setKnownColumns] = useState<string[]>([]);
+  const [columnOrder, setColumnOrder] = useState<string[]>([]);
+  const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(() => new Set());
+  const [showColumnPanel, setShowColumnPanel] = useState(false);
+
   const cursor = cursorStack[cursorStack.length - 1] ?? null;
   const pageNumber = cursorStack.length;
 
+  // Load the cached, non-PHI facet option lists once for the filter dropdowns.
+  useEffect(() => {
+    let live = true;
+    loadClaimFacets().then((r) => {
+      if (live && r.ok) setFacets(r.data);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
   // Re-fetch whenever the applied filter, sort, or current cursor changes (or a
   // manual reload is requested). Rows and cursors live in component state for the
-  // session only — never persisted.
+  // session only — never persisted. Column layout state is intentionally NOT a
+  // dependency here: changing it never re-queries.
   useEffect(() => {
     let live = true;
     setStatus({ kind: 'loading' });
@@ -134,16 +205,52 @@ export function ClaimsExplorer() {
     };
   }, [filter, sort, cursor, reloadKey]);
 
-  const applyFilters = useCallback(() => {
-    setCursorStack([null]);
-    setFilter(draftToFilter(draft));
-  }, [draft]);
+  // Capture the column set from the first (and any) successful load so layout
+  // controls remain available and the header doesn't flicker during page loads.
+  useEffect(() => {
+    if (status.kind === 'ready' && status.data.columns.length > 0) {
+      setKnownColumns((prev) =>
+        prev.length === status.data.columns.length && prev.every((c, i) => c === status.data.columns[i])
+          ? prev
+          : status.data.columns,
+      );
+    }
+  }, [status]);
 
-  const resetFilters = useCallback(() => {
+  // Effective display order: the user's order filtered to known columns, with any
+  // not-yet-ordered columns appended in their server order. Pure layout.
+  const orderedColumns = useMemo(() => {
+    if (knownColumns.length === 0) return [];
+    const ordered = columnOrder.filter((c) => knownColumns.includes(c));
+    for (const c of knownColumns) if (!ordered.includes(c)) ordered.push(c);
+    return ordered;
+  }, [columnOrder, knownColumns]);
+
+  const visibleColumns = useMemo(
+    () => orderedColumns.filter((c) => !hiddenColumns.has(c)),
+    [orderedColumns, hiddenColumns],
+  );
+
+  const updateFilter = useCallback((patch: Partial<ClaimFilter>) => {
+    setCursorStack([null]); // any filter change invalidates the keyset position
+    setFilter((prev) => {
+      const next: ClaimFilter = { ...prev };
+      for (const key of Object.keys(patch) as (keyof ClaimFilter)[]) {
+        const value = patch[key];
+        if (value === undefined) delete next[key];
+        else (next as Record<string, unknown>)[key] = value;
+      }
+      return next;
+    });
+  }, []);
+
+  const resetAll = useCallback(() => {
     setCursorStack([null]);
-    setDraft(EMPTY_DRAFT);
     setFilter({});
     setSort(DEFAULT_SORT);
+    // Reset layout too, so "Reset" returns the grid to its default presentation.
+    setColumnOrder([]);
+    setHiddenColumns(new Set());
   }, []);
 
   const toggleSort = useCallback((column: string) => {
@@ -156,6 +263,29 @@ export function ClaimsExplorer() {
     );
   }, []);
 
+  const toggleColumnVisible = useCallback((column: string) => {
+    setHiddenColumns((prev) => {
+      const next = new Set(prev);
+      if (next.has(column)) next.delete(column);
+      else next.add(column);
+      return next;
+    });
+  }, []);
+
+  const moveColumn = useCallback(
+    (column: string, direction: 'up' | 'down') => {
+      setColumnOrder(() => {
+        const order = [...orderedColumns];
+        const i = order.indexOf(column);
+        const j = direction === 'up' ? i - 1 : i + 1;
+        if (i < 0 || j < 0 || j >= order.length) return order;
+        [order[i], order[j]] = [order[j]!, order[i]!];
+        return order;
+      });
+    },
+    [orderedColumns],
+  );
+
   const nextCursor = status.kind === 'ready' ? status.data.nextCursor : null;
 
   const goNext = useCallback(() => {
@@ -166,52 +296,132 @@ export function ClaimsExplorer() {
     setCursorStack((stack) => (stack.length > 1 ? stack.slice(0, -1) : stack));
   }, []);
 
-  const columns = status.kind === 'ready' ? status.data.columns : [];
   const rows = status.kind === 'ready' ? status.data.rows : [];
   const hasNext = status.kind === 'ready' ? status.data.hasNext : false;
   const hasPrev = pageNumber > 1;
   const loading = status.kind === 'loading';
+  const yearValue = filter.source_year !== undefined ? String(filter.source_year) : '';
 
   return (
     <div className="space-y-4">
-      {/* Filter bar — values round-trip to the server allowlist; safe by construction. */}
-      <div className="grid items-end gap-3 rounded-md border bg-card p-3 sm:grid-cols-4">
-        <div className="space-y-1">
-          <Label htmlFor="cx-facility" className="text-xs">Facility</Label>
-          <Input
-            id="cx-facility"
-            value={draft.facility}
-            placeholder="partial name, e.g. Saddle"
-            onChange={(e) => setDraft((d) => ({ ...d, facility: e.target.value }))}
-            onKeyDown={(e) => e.key === 'Enter' && applyFilters()}
-          />
-        </div>
-        <div className="space-y-1">
-          <Label htmlFor="cx-payer" className="text-xs">Payer</Label>
-          <Input
-            id="cx-payer"
-            value={draft.payer}
-            placeholder="partial name, e.g. Aetna"
-            onChange={(e) => setDraft((d) => ({ ...d, payer: e.target.value }))}
-            onKeyDown={(e) => e.key === 'Enter' && applyFilters()}
-          />
-        </div>
-        <div className="space-y-1">
-          <Label htmlFor="cx-year" className="text-xs">Source year</Label>
-          <Input
-            id="cx-year"
-            value={draft.source_year}
-            inputMode="numeric"
-            placeholder="e.g. 2023"
-            onChange={(e) => setDraft((d) => ({ ...d, source_year: e.target.value }))}
-            onKeyDown={(e) => e.key === 'Enter' && applyFilters()}
-          />
-        </div>
-        <div className="flex gap-2">
-          <Button type="button" onClick={applyFilters}>Apply</Button>
-          <Button type="button" variant="outline" onClick={resetFilters}>Reset</Button>
+      {/* Filter bar — values come from cached non-PHI facets; round-trip to the
+          server allowlist; safe by construction. */}
+      <div className="grid items-end gap-x-4 gap-y-3 rounded-lg border border-line bg-card p-4 shadow-ths sm:grid-cols-[1fr_1fr_minmax(7rem,0.6fr)_auto]">
+        <SelectField
+          id="cx-facility"
+          label="Facility"
+          value={filter.facility ?? ''}
+          disabled={facets === null}
+          onChange={(v) => updateFilter({ facility: v || undefined })}
+        >
+          <option value="">All facilities</option>
+          {facets?.facility.map((f) => (
+            <option key={f} value={f}>{f}</option>
+          ))}
+        </SelectField>
+        <SelectField
+          id="cx-payer"
+          label="Payer"
+          value={filter.payer ?? ''}
+          disabled={facets === null}
+          onChange={(v) => updateFilter({ payer: v || undefined })}
+        >
+          <option value="">All payers</option>
+          {facets?.payer.map((p) => (
+            <option key={p} value={p}>{p}</option>
+          ))}
+        </SelectField>
+        <SelectField
+          id="cx-year"
+          label="Year"
+          value={yearValue}
+          disabled={facets === null}
+          onChange={(v) => updateFilter({ source_year: v ? Number(v) : undefined })}
+        >
+          <option value="">All years</option>
+          {facets?.source_year.map((y) => (
+            <option key={y} value={y}>{y}</option>
+          ))}
+        </SelectField>
+        <div className="flex gap-2 justify-self-end">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setShowColumnPanel((s) => !s)}
+            aria-expanded={showColumnPanel}
+            className={showColumnPanel ? 'border-teal500 text-teal700' : undefined}
+          >
+            <Columns3 className="h-4 w-4" />
+            Columns
+          </Button>
+          <Button type="button" variant="ghost" onClick={resetAll} className="text-ink600">
+            <RotateCcw className="h-4 w-4" />
+            Reset
+          </Button>
         </div>
       </div>
+
+      {/* Column show/hide + reorder — layout-only; never re-queries or persists. */}
+      {showColumnPanel && orderedColumns.length > 0 && (
+        <div className="rounded-lg border border-line bg-card p-4 shadow-ths animate-in fade-in-0 slide-in-from-top-1 duration-200">
+          <div className="mb-3 flex items-center gap-2 border-b border-line pb-2">
+            <Columns3 className="h-4 w-4 text-teal500" />
+            <span className="text-xs font-semibold uppercase tracking-wide text-ink600">Columns</span>
+            <span className="text-[11px] text-ink400">— show, hide, and reorder (layout only)</span>
+          </div>
+          <ul className="grid gap-x-6 gap-y-0.5 sm:grid-cols-2">
+            {orderedColumns.map((c, i) => {
+              const hidden = hiddenColumns.has(c);
+              return (
+                <li
+                  key={c}
+                  className="group flex items-center justify-between gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-teal50/70"
+                >
+                  <button
+                    type="button"
+                    onClick={() => toggleColumnVisible(c)}
+                    aria-pressed={!hidden}
+                    className="flex min-w-0 items-center gap-2 text-sm capitalize"
+                  >
+                    {hidden ? (
+                      <EyeOff className="h-4 w-4 shrink-0 text-ink400" />
+                    ) : (
+                      <Eye className="h-4 w-4 shrink-0 text-teal500" />
+                    )}
+                    <span className={`truncate ${hidden ? 'text-ink400 line-through' : 'text-ink900'}`}>
+                      {columnLabel(c)}
+                    </span>
+                  </button>
+                  <span className="flex shrink-0 gap-0.5 opacity-50 transition-opacity group-hover:opacity-100">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      disabled={i === 0}
+                      aria-label={`Move ${columnLabel(c)} earlier`}
+                      onClick={() => moveColumn(c, 'up')}
+                    >
+                      <ArrowUp className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      disabled={i === orderedColumns.length - 1}
+                      aria-label={`Move ${columnLabel(c)} later`}
+                      onClick={() => moveColumn(c, 'down')}
+                    >
+                      <ArrowDown className="h-3.5 w-3.5" />
+                    </Button>
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
 
       <div className="flex items-center justify-between">
         <div className="text-sm text-muted-foreground">
@@ -245,22 +455,36 @@ export function ClaimsExplorer() {
           <Table>
             <TableHeader>
               <TableRow>
-                {columns.map((c) => {
+                {visibleColumns.map((c) => {
                   const sortable = SORTABLE_COLUMNS.has(c);
                   const active = sort.column === c;
+                  const numeric = !TEXT_COLUMNS.has(c);
                   return (
-                    <TableHead key={c} className="capitalize">
+                    <TableHead
+                      key={c}
+                      className={`text-[11px] font-semibold uppercase tracking-wide ${
+                        numeric ? 'text-right' : ''
+                      } ${active ? 'text-teal700' : 'text-ink400'}`}
+                    >
                       {sortable ? (
                         <button
                           type="button"
                           onClick={() => toggleSort(c)}
-                          className="inline-flex items-center gap-1 hover:text-foreground"
+                          className={`inline-flex items-center gap-1 transition-colors hover:text-teal700 ${
+                            numeric ? 'flex-row-reverse' : ''
+                          }`}
                           aria-label={`Sort by ${columnLabel(c)}`}
                         >
                           {columnLabel(c)}
-                          <span className="text-[10px] text-muted-foreground">
-                            {active ? (sort.direction === 'asc' ? '▲' : '▼') : '↕'}
-                          </span>
+                          {active ? (
+                            sort.direction === 'asc' ? (
+                              <ArrowUp className="h-3 w-3" />
+                            ) : (
+                              <ArrowDown className="h-3 w-3" />
+                            )
+                          ) : (
+                            <ChevronDown className="h-3 w-3 opacity-40" />
+                          )}
                         </button>
                       ) : (
                         columnLabel(c)
@@ -274,7 +498,7 @@ export function ClaimsExplorer() {
               {status.kind === 'ready' && rows.length === 0 ? (
                 <TableRow>
                   <TableCell
-                    colSpan={Math.max(1, columns.length)}
+                    colSpan={Math.max(1, visibleColumns.length)}
                     className="py-10 text-center text-sm text-muted-foreground"
                   >
                     No claims match these filters. Try widening or resetting them.
@@ -284,16 +508,9 @@ export function ClaimsExplorer() {
                 rows.map((row, i) => {
                   const id = row.id as string | number | null;
                   return (
-                    <TableRow key={id ?? i}>
-                      {columns.map((c) => (
-                        <TableCell
-                          key={c}
-                          className={
-                            MONEY_COLUMNS.has(c) || c === 'collection_rate'
-                              ? 'text-right tabular-nums'
-                              : undefined
-                          }
-                        >
+                    <TableRow key={id ?? i} className="transition-colors hover:bg-teal50/50">
+                      {visibleColumns.map((c) => (
+                        <TableCell key={c} className={cellClass(c)}>
                           {c === 'id' && id !== null ? (
                             <Link
                               href={`/claims/${id}`}
