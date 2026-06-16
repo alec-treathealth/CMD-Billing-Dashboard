@@ -22,6 +22,7 @@ import {
 } from './db.js';
 import { coerceRow } from './normalize.js';
 import { CoercionReport } from './report.js';
+import { notifyDashboardRevalidate } from './revalidateClient.js';
 import { buildColumnOrder, readSheet, toRawRow } from './sheets.js';
 import type { SheetSource, TypedClaim } from './types.js';
 
@@ -113,6 +114,16 @@ async function main(): Promise<void> {
     // (Phase 7.7). CONCURRENTLY → the dashboard keeps serving during the rebuild.
     console.log('[ingest] refreshing dashboard aggregate matviews…');
     await refreshAggregateMatviews(db);
+
+    // Phase 8.2: drop the dashboard's cached aggregates NOW (exact freshness)
+    // instead of waiting out the 15-min fallback. Best-effort and env-gated: a
+    // no-op locally (REVALIDATE_URL/SECRET unset) and never fatal to the ingest.
+    const revalidated = await notifyDashboardRevalidate();
+    console.log(
+      revalidated.attempted
+        ? `[ingest] dashboard cache revalidate: ${revalidated.ok ? 'ok' : 'failed (non-fatal)'}`
+        : '[ingest] dashboard cache revalidate: skipped (REVALIDATE_URL/SECRET not set)',
+    );
   } finally {
     await report.close();
     await db.end(); // close the pg pool so the process exits cleanly

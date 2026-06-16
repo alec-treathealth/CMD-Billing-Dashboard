@@ -11,7 +11,8 @@
  * call handleAgent / handleResults here. All PHI-boundary, validation, and audit
  * logic lives in the transport-agnostic handlers under ../../src/routes.
  */
-import { unstable_cache } from 'next/cache';
+import { revalidateTag, unstable_cache } from 'next/cache';
+import { DASHBOARD_CACHE_TAG } from '../../src/cacheTags.js';
 import { makeAnthropicClientFromEnv } from '../../src/agent/index.js';
 import type { AnthropicMessagesClient } from '../../src/agent/index.js';
 import { distribution, searchClaims } from '../../src/queries/index.js';
@@ -47,6 +48,10 @@ import {
 } from '../../src/routes/collectionsQueryHandlers.js';
 import type { ResultsContext } from '../../src/routes/results.js';
 import { handleResultsRequest, type ResultsHttpRequest } from '../../src/routes/resultsHandler.js';
+import {
+  handleRevalidateRequest,
+  type RevalidateHttpRequest,
+} from '../../src/routes/revalidateHandler.js';
 
 let cachedExecutor: PgExecutor | undefined;
 function readerExecutor(): PgExecutor {
@@ -85,6 +90,22 @@ export function handleAgent(req: AgentHttpRequest) {
 export function handleResults(req: ResultsHttpRequest) {
   const ctx: ResultsContext = { executor: readerExecutor() };
   return handleResultsRequest(req, { ctx, secret: bearerSecret() });
+}
+
+/**
+ * Revalidate route (Phase 8.2): POST → invalidate the dashboard aggregate cache
+ * tag immediately (called by the CMD ingest after the matview refresh), so the
+ * dashboard reflects new data without waiting out the 15-minute fallback. Authed
+ * with REVALIDATE_SECRET (distinct from the PHI Bearer secret) and restricted to
+ * the closed tag allowlist. No DB, no PHI — only revalidateTag is invoked.
+ */
+export function handleRevalidate(req: RevalidateHttpRequest) {
+  return handleRevalidateRequest(req, {
+    secret: process.env.REVALIDATE_SECRET,
+    allowedTags: REVALIDATE_ALLOWED_TAGS,
+    defaultTag: DASHBOARD_CACHE_TAG,
+    revalidate: (tag) => revalidateTag(tag),
+  });
 }
 
 /** Collections summary route: optional date bounds → non-PHI monthly summary by facility. */
@@ -133,7 +154,13 @@ function dashboardCtx(): QueryContext {
 // freshness (out of scope here). The PHI/AI paths (runSearch / fetchRows /
 // handleResults) are intentionally NOT cached.
 const DASHBOARD_REVALIDATE_SECONDS = 15 * 60;
-const DASHBOARD_CACHE_TAG = 'dashboard-aggregates';
+
+/**
+ * The CLOSED allowlist of tags the /api/revalidate endpoint may invalidate. The
+ * endpoint can never drop an unlisted tag — arbitrary tag names are rejected.
+ * DASHBOARD_CACHE_TAG is the shared contract from src/cacheTags.ts.
+ */
+const REVALIDATE_ALLOWED_TAGS: ReadonlySet<string> = new Set([DASHBOARD_CACHE_TAG]);
 
 /**
  * Per-payer billed/allowed/paid + collection gap + avg rate (non-PHI summary).
