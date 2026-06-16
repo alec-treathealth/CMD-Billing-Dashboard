@@ -21,3 +21,6 @@ npm-debug.log*
 .vscode/
 secrets/
 .claude/
+
+# Supabase CLI scratch
+supabase/.temp/
