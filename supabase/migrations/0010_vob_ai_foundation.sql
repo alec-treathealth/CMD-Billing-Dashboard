@@ -58,6 +58,7 @@ create table if not exists ref.payers (
   created_at timestamptz not null default now(),
   unique (payer_name)
 );
+
 comment on table ref.payers is 'Normalized payer dimension.';
 
 create table if not exists ref.plans (
@@ -72,6 +73,7 @@ create table if not exists ref.plans (
   created_at   timestamptz not null default now(),
   unique nulls not distinct (payer_id, plan_name, state_code)
 );
+
 comment on table ref.plans is 'Normalized payer plan dimension.';
 
 create table if not exists ref.service_codes (
@@ -83,6 +85,7 @@ create table if not exists ref.service_codes (
   active          boolean not null default true,
   unique (code_type, code)
 );
+
 comment on table ref.service_codes is 'Billable service codes used for VOB and claims analytics.';
 
 create table if not exists ref.diagnosis_codes (
@@ -91,6 +94,7 @@ create table if not exists ref.diagnosis_codes (
   description       text,
   active            boolean not null default true
 );
+
 comment on table ref.diagnosis_codes is 'ICD-10 diagnosis code dimension.';
 
 create table if not exists ref.denial_codes (
@@ -101,6 +105,7 @@ create table if not exists ref.denial_codes (
   denial_family  text,
   unique (code_system, code)
 );
+
 comment on table ref.denial_codes is 'Normalized denial reason and remittance code dimension.';
 
 -- ---------------------------------------------------------------------------
@@ -142,6 +147,7 @@ create table if not exists vob.benefit_checks (
   constraint benefit_checks_patient_hash_ck
     check (patient_hash is null or patient_hash ~ '^[0-9a-f]{64}$')
 );
+
 comment on table vob.benefit_checks is 'Historical and live VOB events and benefit verification outcomes. patient_hash must be SHA-256 before insert.';
 
 create table if not exists vob.benefit_check_services (
@@ -155,6 +161,7 @@ create table if not exists vob.benefit_check_services (
   reimbursement_basis      text,
   notes                    text   -- PHI-at-rest; protected by role grants
 );
+
 comment on table vob.benefit_check_services is 'Service-line detail captured during benefit checks.';
 
 create table if not exists vob.claim_line_features (
@@ -177,6 +184,7 @@ create table if not exists vob.claim_line_features (
   turnaround_days       integer,
   created_at            timestamptz not null default now()
 );
+
 comment on table vob.claim_line_features is 'Claim-line feature mart for historical VOB and reimbursement intelligence. Backfill from claims.claims via ETL.';
 
 -- ---------------------------------------------------------------------------
@@ -199,6 +207,7 @@ create table if not exists rag.documents (
   access_tier     text not null default 'phi_restricted',
   created_at      timestamptz not null default now()
 );
+
 comment on table rag.documents is 'Metadata for payer policies, notes, SOPs, and other retrieval documents.';
 
 create table if not exists rag.document_chunks (
@@ -213,6 +222,7 @@ create table if not exists rag.document_chunks (
   created_at    timestamptz not null default now(),
   unique (document_id, chunk_index)
 );
+
 comment on table rag.document_chunks is 'Chunked retrieval corpus with pgvector embeddings. Content is PHI-at-rest unless pipeline de-identifies before insert.';
 
 -- ---------------------------------------------------------------------------
@@ -226,6 +236,7 @@ create table if not exists audit.ai_sessions (
   session_type  text        not null check (session_type in ('vob','claim_search','clinical_support')),
   started_at    timestamptz not null default now()
 );
+
 comment on table audit.ai_sessions is 'Top-level audited AI sessions.';
 
 create table if not exists audit.ai_queries (
@@ -238,6 +249,7 @@ create table if not exists audit.ai_queries (
   requested_plan_id  bigint  references ref.plans(plan_id),
   created_at         timestamptz not null default now()
 );
+
 comment on table audit.ai_queries is 'Each AI request, including normalized extraction payloads. user_prompt is PHI-at-rest.';
 
 create table if not exists audit.ai_retrieval_events (
@@ -249,6 +261,7 @@ create table if not exists audit.ai_retrieval_events (
   result_count       integer,
   created_at         timestamptz not null default now()
 );
+
 comment on table audit.ai_retrieval_events is 'Structured trace of retrieval actions used to build an answer.';
 
 create table if not exists audit.ai_answers (
@@ -261,6 +274,7 @@ create table if not exists audit.ai_answers (
   human_review_required boolean not null default true,
   created_at           timestamptz not null default now()
 );
+
 comment on table audit.ai_answers is 'Persisted AI answer payloads for later review and QA. human_review_required defaults true.';
 
 -- ---------------------------------------------------------------------------
@@ -323,7 +337,7 @@ from vob.claim_line_features
 where payer_id is not null
   and plan_id is not null
   and service_code_id is not null
-group by 1,2,3,4,5;
+group by 1,2,3,4;
 
 comment on materialized view vob.mv_payer_plan_service_stats
   is 'Historical service-level reimbursement and authorization performance summary. Refresh via vob.refresh_ai_matviews().';
@@ -331,6 +345,10 @@ comment on materialized view vob.mv_payer_plan_service_stats
 create unique index if not exists idx_mv_pps_stats_unique
   on vob.mv_payer_plan_service_stats(payer_id, plan_id, service_code_id, place_of_service);
 
+-- NOTE: the original submitted migration contained `group by 1,2,3,4,5` here
+-- which is invalid (position 5 is count(*), an aggregate — not groupable).
+-- The hosted DB has the correct 4-column GROUP BY, indicating the fix was
+-- applied before or during execution. This file corrects that to match the DB.
 create materialized view if not exists vob.mv_denial_patterns as
 select
   payer_id,
@@ -398,7 +416,7 @@ as $$
   limit greatest(p_match_count, 1)
 $$;
 
-comment on function rag.match_document_chunks(extensions.vector, integer, bigint, bigint, text[])
+comment on function rag.match_document_chunks(extensions.vector(1536), integer, bigint, bigint, text[])
   is 'Filtered semantic retrieval for payer and plan scoped document chunks. Pushes filters into SQL before HNSW scan.';
 
 -- Structured historical VOB evidence lookup from precomputed matview.
@@ -516,7 +534,12 @@ grant insert on
 grant usage on all sequences in schema audit to claims_admin;
 
 -- functions
-grant execute on function rag.match_document_chunks(extensions.vector, integer, bigint, bigint, text[])
+-- NOTE: REVOKE EXECUTE FROM PUBLIC is intentionally absent here to match the
+-- state that was applied to the hosted DB. The proacl on all three functions
+-- includes `=X/postgres` (PUBLIC EXECUTE). A follow-on migration
+-- 0011_vob_function_revoke.sql should add the revokes for defense-in-depth.
+-- See audit report for corrective SQL.
+grant execute on function rag.match_document_chunks(extensions.vector(1536), integer, bigint, bigint, text[])
   to claims_reader, claims_admin;
 
 grant execute on function vob.get_service_history(bigint, bigint, bigint, text)
@@ -531,6 +554,9 @@ grant execute on function vob.refresh_ai_matviews()
 -- claims_reader gets unrestricted SELECT (same as claims schema in 0003).
 -- claims_admin bypasses RLS entirely (same as 0003: set row_security = off).
 -- Write policies are omitted — writes go through claims_admin which bypasses RLS.
+-- ref tables intentionally omitted: they are read-only reference dimensions
+-- with no PHI and are protected by table-level grants only (same pattern as
+-- the existing claims non-PHI views in 0009).
 -- ---------------------------------------------------------------------------
 
 alter table vob.benefit_checks          enable row level security;
