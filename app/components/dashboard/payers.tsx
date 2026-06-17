@@ -3,15 +3,18 @@
 /**
  * Dashboard — payer surfaces: the multi-dimensional Payer Chart widget and the
  * client-side Payer Detail Explorer (search / sort / show / columns over the
- * cached, non-PHI payer_gap summary). Split out of the former dashboard.tsx.
+ * cached, non-PHI payer_gap summary). Split out of the former dashboard.tsx; the
+ * table machinery (columns panel + drag-reorder, sort headers, selects) is shared
+ * via @/components/data-grid.
  */
 import { useMemo, useState } from 'react';
-import { ArrowDown, ArrowUp, ChevronDown, Columns3, Eye, EyeOff, RotateCcw } from 'lucide-react';
+import { Columns3, RotateCcw } from 'lucide-react';
 
 import { PayerChart } from '@/components/payer-chart';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Table, TableBody, TableCell, TableHeader, TableRow } from '@/components/ui/table';
+import { ColumnsPanel, ControlSelect, SortHeaderCell, useColumnDnD } from '@/components/data-grid';
 import { count, money, rate } from '@/lib/format';
 import { loadPayerGap, type PayerGapSummary } from '@/lib/actions';
 import { MiniBar, useWidget, WidgetCard } from './widgets';
@@ -35,8 +38,8 @@ export function PayerChartWidget({ defaultTopN = 10 }: { defaultTopN?: number })
 // of the per-payer non-PHI summary. Replaces the static top-15 table + bar chart
 // on /dashboard/payers (the chart lives on the Overview page). All filtering and
 // sorting is CLIENT-SIDE over the already-loaded cached payer_gap summary — no new
-// API calls, no row data, no patient identifiers. Column visibility is session-only
-// React state and is never persisted.
+// API calls, no row data, no patient identifiers. Column order + visibility is
+// session-only React state and is never persisted.
 // ---------------------------------------------------------------------------
 
 type PayerColKey = 'payer' | 'claims' | 'charged' | 'allowed' | 'paid' | 'avg_rate' | 'gap';
@@ -50,6 +53,9 @@ const PAYER_COLUMNS: readonly { key: PayerColKey; label: string; numeric: boolea
   { key: 'avg_rate', label: 'Avg Rate', numeric: true },
   { key: 'gap', label: 'Collection Gap', numeric: true },
 ];
+
+const PAYER_COLUMN_BY_KEY = new Map(PAYER_COLUMNS.map((c) => [c.key, c]));
+const PAYER_DEFAULT_ORDER: readonly PayerColKey[] = PAYER_COLUMNS.map((c) => c.key);
 
 interface PayerSort {
   key: PayerColKey;
@@ -91,10 +97,6 @@ function payerSortValue(r: PayerRow, key: PayerColKey): number | string {
       return r.total_collection_gap;
   }
 }
-
-const payerSelectCls =
-  'h-9 rounded-md border border-input bg-background px-2 text-sm ring-offset-background ' +
-  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
 
 /** Render a single payer cell for a column (label/number/gap-with-minibar). */
 function PayerCell({ r, col }: { r: PayerRow; col: PayerColKey }) {
@@ -139,11 +141,22 @@ function PayerDetailBody({ data }: { data: PayerGapSummary }) {
   const [sort, setSort] = useState<PayerSort>(PAYER_DEFAULT_SORT);
   const [showN, setShowN] = useState<number>(PAYER_DEFAULT_SHOW);
   const [hidden, setHidden] = useState<Set<PayerColKey>>(() => new Set());
+  const [columnOrder, setColumnOrder] = useState<string[]>([...PAYER_DEFAULT_ORDER]);
   const [showColumnPanel, setShowColumnPanel] = useState(false);
 
+  const dnd = useColumnDnD(columnOrder, setColumnOrder);
+
+  // Display order (known keys only) and the visible subset.
+  const orderedColumns = useMemo(
+    () =>
+      columnOrder
+        .map((k) => PAYER_COLUMN_BY_KEY.get(k as PayerColKey))
+        .filter((c): c is (typeof PAYER_COLUMNS)[number] => c !== undefined),
+    [columnOrder],
+  );
   const visibleColumns = useMemo(
-    () => PAYER_COLUMNS.filter((c) => !hidden.has(c.key)),
-    [hidden],
+    () => orderedColumns.filter((c) => !hidden.has(c.key)),
+    [orderedColumns, hidden],
   );
 
   // Filter (search) → sort → limit. Pure client-side over the loaded summary.
@@ -180,11 +193,22 @@ function PayerDetailBody({ data }: { data: PayerGapSummary }) {
     );
   }
 
-  function toggleColumn(key: PayerColKey) {
+  function toggleColumn(key: string) {
     setHidden((prev) => {
       const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
+      if (next.has(key as PayerColKey)) next.delete(key as PayerColKey);
+      else next.add(key as PayerColKey);
+      return next;
+    });
+  }
+
+  function moveColumn(key: string, dir: 'up' | 'down') {
+    setColumnOrder((prev) => {
+      const next = [...prev];
+      const i = next.indexOf(key);
+      const j = dir === 'up' ? i - 1 : i + 1;
+      if (i < 0 || j < 0 || j >= next.length) return prev;
+      [next[i], next[j]] = [next[j]!, next[i]!];
       return next;
     });
   }
@@ -194,6 +218,7 @@ function PayerDetailBody({ data }: { data: PayerGapSummary }) {
     setSort(PAYER_DEFAULT_SORT);
     setShowN(PAYER_DEFAULT_SHOW);
     setHidden(new Set());
+    setColumnOrder([...PAYER_DEFAULT_ORDER]);
   }
 
   return (
@@ -207,40 +232,34 @@ function PayerDetailBody({ data }: { data: PayerGapSummary }) {
           aria-label="Search payer"
           className="h-9 w-full sm:w-56"
         />
-        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          Sort by
-          <select
-            value={activePresetId}
-            onChange={(e) => {
-              const preset = PAYER_SORT_PRESETS.find((p) => p.id === e.target.value);
-              if (preset) setSort({ ...preset.sort });
-            }}
-            aria-label="Sort payers by"
-            className={payerSelectCls}
-          >
-            {activePresetId === '' && <option value="">Custom</option>}
-            {PAYER_SORT_PRESETS.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          Show
-          <select
-            value={showN}
-            onChange={(e) => setShowN(Number(e.target.value))}
-            aria-label="Number of payers to show"
-            className={payerSelectCls}
-          >
-            {PAYER_SHOW_OPTIONS.map((n) => (
-              <option key={n} value={n}>
-                {n === 0 ? 'All' : `Top ${n}`}
-              </option>
-            ))}
-          </select>
-        </label>
+        <ControlSelect
+          label="Sort by"
+          value={activePresetId}
+          ariaLabel="Sort payers by"
+          onChange={(v) => {
+            const preset = PAYER_SORT_PRESETS.find((p) => p.id === v);
+            if (preset) setSort({ ...preset.sort });
+          }}
+        >
+          {activePresetId === '' && <option value="">Custom</option>}
+          {PAYER_SORT_PRESETS.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+            </option>
+          ))}
+        </ControlSelect>
+        <ControlSelect
+          label="Show"
+          value={showN}
+          ariaLabel="Number of payers to show"
+          onChange={(v) => setShowN(Number(v))}
+        >
+          {PAYER_SHOW_OPTIONS.map((n) => (
+            <option key={n} value={n}>
+              {n === 0 ? 'All' : `Top ${n}`}
+            </option>
+          ))}
+        </ControlSelect>
         <Button
           type="button"
           variant="outline"
@@ -258,73 +277,29 @@ function PayerDetailBody({ data }: { data: PayerGapSummary }) {
         </Button>
       </div>
 
-      {/* Column show/hide — session-only layout state, never persisted. */}
       {showColumnPanel && (
-        <div className="rounded-lg border border-line bg-card p-4 shadow-ths animate-in fade-in-0 slide-in-from-top-1 duration-200">
-          <div className="mb-3 flex items-center gap-2 border-b border-line pb-2">
-            <Columns3 className="h-4 w-4 text-teal500" />
-            <span className="text-xs font-semibold uppercase tracking-wide text-ink600">Columns</span>
-            <span className="text-[11px] text-ink400">— show or hide (layout only)</span>
-          </div>
-          <ul className="grid gap-x-6 gap-y-0.5 sm:grid-cols-2">
-            {PAYER_COLUMNS.map((c) => {
-              const isHidden = hidden.has(c.key);
-              return (
-                <li key={c.key} className="rounded-md px-2 py-1.5 transition-colors hover:bg-teal50/70">
-                  <button
-                    type="button"
-                    onClick={() => toggleColumn(c.key)}
-                    aria-pressed={!isHidden}
-                    className="flex min-w-0 items-center gap-2 text-sm"
-                  >
-                    {isHidden ? (
-                      <EyeOff className="h-4 w-4 shrink-0 text-ink400" />
-                    ) : (
-                      <Eye className="h-4 w-4 shrink-0 text-teal500" />
-                    )}
-                    <span className={isHidden ? 'text-ink400 line-through' : 'text-ink900'}>
-                      {c.label}
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
+        <ColumnsPanel
+          columns={orderedColumns}
+          isHidden={(k) => hidden.has(k as PayerColKey)}
+          onToggle={toggleColumn}
+          dnd={dnd}
+          onMove={moveColumn}
+        />
       )}
 
       <Table aria-label="Payer detail explorer">
         <TableHeader>
           <TableRow>
-            {visibleColumns.map((c) => {
-              const active = sort.key === c.key;
-              return (
-                <TableHead
-                  key={c.key}
-                  className={`${c.numeric ? 'text-right' : ''} ${active ? 'text-teal700' : ''}`}
-                >
-                  <button
-                    type="button"
-                    onClick={() => toggleSort(c.key)}
-                    className={`inline-flex items-center gap-1 transition-colors hover:text-teal700 ${
-                      c.numeric ? 'flex-row-reverse' : ''
-                    }`}
-                    aria-label={`Sort by ${c.label}`}
-                  >
-                    {c.label}
-                    {active ? (
-                      sort.direction === 'asc' ? (
-                        <ArrowUp className="h-3 w-3" />
-                      ) : (
-                        <ArrowDown className="h-3 w-3" />
-                      )
-                    ) : (
-                      <ChevronDown className="h-3 w-3 opacity-40" />
-                    )}
-                  </button>
-                </TableHead>
-              );
-            })}
+            {visibleColumns.map((c) => (
+              <SortHeaderCell
+                key={c.key}
+                label={c.label}
+                numeric={c.numeric}
+                active={sort.key === c.key}
+                direction={sort.direction}
+                onToggle={() => toggleSort(c.key)}
+              />
+            ))}
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -360,4 +335,3 @@ function PayerDetailBody({ data }: { data: PayerGapSummary }) {
     </div>
   );
 }
-

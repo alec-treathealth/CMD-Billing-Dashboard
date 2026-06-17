@@ -17,11 +17,12 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { ArrowDown, ArrowUp, ChevronDown, Columns3, Eye, EyeOff, GripVertical, RotateCcw } from 'lucide-react';
+import { Columns3, RotateCcw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { ColumnsPanel, ControlSelect, Pager, SortHeaderCell, useColumnDnD } from '@/components/data-grid';
 import { count, money, moneyAxis, percent } from '@/lib/format';
 import {
   loadCollectionsDaily,
@@ -244,21 +245,18 @@ function CollectionsKpisBody({ data, compact }: { data: CollectionsKpis; compact
         <div className="text-sm text-muted-foreground">
           MTD vs. YTD gross by facility, sorted by YTD gross.
         </div>
-        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          Show
-          <select
-            value={topN}
-            onChange={(e) => setTopN(Number(e.target.value))}
-            aria-label="Number of facilities to show"
-            className={dailySelectCls}
-          >
-            {KPI_TOP_N_OPTIONS.map((n) => (
-              <option key={n} value={n}>
-                {n === 0 ? 'All' : `Top ${n}`}
-              </option>
-            ))}
-          </select>
-        </label>
+        <ControlSelect
+          label="Show"
+          value={topN}
+          ariaLabel="Number of facilities to show"
+          onChange={(v) => setTopN(Number(v))}
+        >
+          {KPI_TOP_N_OPTIONS.map((n) => (
+            <option key={n} value={n}>
+              {n === 0 ? 'All' : `Top ${n}`}
+            </option>
+          ))}
+        </ControlSelect>
       </div>
 
       <div role="img" aria-label="Collections MTD vs YTD by facility" style={{ width: '100%', height: chartHeight }}>
@@ -327,10 +325,6 @@ const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December',
 ];
-
-const dailySelectCls =
-  'h-8 rounded-md border border-input bg-background px-2 text-xs ring-offset-background ' +
-  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
 
 interface YearMonth {
   year: number;
@@ -444,7 +438,7 @@ function CollectionsExplorer() {
   const [columnOrder, setColumnOrder] = useState<DailyColKey[]>([...DAILY_COLUMN_DEFAULT_ORDER]);
   const [hidden, setHidden] = useState<Set<DailyColKey>>(() => new Set());
   const [showColumnPanel, setShowColumnPanel] = useState(false);
-  const [dragCol, setDragCol] = useState<DailyColKey | null>(null);
+  const dnd = useColumnDnD(columnOrder, (next) => setColumnOrder(next as DailyColKey[]));
 
   // Mount: load the latest month (cached) and seed the selected month from it.
   useEffect(() => {
@@ -565,19 +559,16 @@ function CollectionsExplorer() {
     });
   }
 
-  /** Native HTML5 DnD: drop `dragCol` immediately before `target` in the order. */
-  function onColumnDrop(target: DailyColKey) {
+  /** Keyboard-fallback reorder (ArrowUp/ArrowDown on the drag handle). */
+  function moveColumn(key: string, dir: 'up' | 'down') {
     setColumnOrder((order) => {
-      if (!dragCol || dragCol === target) return order;
       const next = [...order];
-      const from = next.indexOf(dragCol);
-      const to = next.indexOf(target);
-      if (from < 0 || to < 0) return order;
-      next.splice(from, 1);
-      next.splice(to, 0, dragCol);
+      const i = next.indexOf(key as DailyColKey);
+      const j = dir === 'up' ? i - 1 : i + 1;
+      if (i < 0 || j < 0 || j >= next.length) return order;
+      [next[i], next[j]] = [next[j]!, next[i]!];
       return next;
     });
-    setDragCol(null);
   }
 
   function reset() {
@@ -601,38 +592,38 @@ function CollectionsExplorer() {
           {/* Filter panel — month/year/facility + hide-zero, plus layout controls. */}
           <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
             <div className="flex flex-wrap items-center gap-2">
-              <select
+              <ControlSelect
+                label="Month"
                 value={selected?.month ?? ''}
-                onChange={(e) => selected && pick({ ...selected, month: Number(e.target.value) })}
-                className={dailySelectCls}
-                aria-label="Month"
+                ariaLabel="Month"
+                onChange={(v) => selected && pick({ ...selected, month: Number(v) })}
               >
                 {MONTH_NAMES.map((name, i) => (
                   <option key={name} value={i + 1}>
                     {name}
                   </option>
                 ))}
-              </select>
-              <select
+              </ControlSelect>
+              <ControlSelect
+                label="Year"
                 value={selected?.year ?? ''}
-                onChange={(e) => selected && pick({ ...selected, year: Number(e.target.value) })}
-                className={dailySelectCls}
-                aria-label="Year"
+                ariaLabel="Year"
+                onChange={(v) => selected && pick({ ...selected, year: Number(v) })}
               >
                 {yearOptions.map((y) => (
                   <option key={y} value={y}>
                     {y}
                   </option>
                 ))}
-              </select>
-              <select
+              </ControlSelect>
+              <ControlSelect
+                label="Facility"
                 value={facility}
-                onChange={(e) => {
-                  setFacility(e.target.value);
+                ariaLabel="Facility"
+                onChange={(v) => {
+                  setFacility(v);
                   setPage(0);
                 }}
-                className={dailySelectCls}
-                aria-label="Facility"
               >
                 <option value="">All facilities</option>
                 {facilities.map((f) => (
@@ -640,7 +631,7 @@ function CollectionsExplorer() {
                     {f}
                   </option>
                 ))}
-              </select>
+              </ControlSelect>
               {showHideZero && (
                 <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
                   <input
@@ -675,59 +666,14 @@ function CollectionsExplorer() {
             </div>
           </div>
 
-          {/* Column show/hide + drag-to-reorder — layout-only, session, not persisted. */}
           {showColumnPanel && (
-            <div className="rounded-lg border border-line bg-card p-4 shadow-ths animate-in fade-in-0 slide-in-from-top-1 duration-200">
-              <div className="mb-3 flex items-center gap-2 border-b border-line pb-2">
-                <Columns3 className="h-4 w-4 text-teal500" />
-                <span className="text-xs font-semibold uppercase tracking-wide text-ink600">Columns</span>
-                <span className="text-[11px] text-ink400">— show, hide, and drag to reorder (layout only)</span>
-              </div>
-              <ul className="space-y-0.5">
-                {columnOrder.map((c) => {
-                  const meta = DAILY_COLUMNS[c];
-                  const isHidden = hidden.has(c);
-                  return (
-                    <li
-                      key={c}
-                      draggable
-                      onDragStart={() => setDragCol(c)}
-                      onDragOver={(e) => e.preventDefault()}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        onColumnDrop(c);
-                      }}
-                      onDragEnd={() => setDragCol(null)}
-                      className={`flex items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-teal50/70 ${
-                        dragCol === c ? 'opacity-50' : ''
-                      }`}
-                    >
-                      <span
-                        aria-label={`Drag to reorder ${meta.label}`}
-                        className="cursor-grab text-ink400 active:cursor-grabbing"
-                      >
-                        <GripVertical className="h-4 w-4" aria-hidden />
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => toggleColumn(c)}
-                        aria-pressed={!isHidden}
-                        className="flex min-w-0 items-center gap-2 text-sm"
-                      >
-                        {isHidden ? (
-                          <EyeOff className="h-4 w-4 shrink-0 text-ink400" />
-                        ) : (
-                          <Eye className="h-4 w-4 shrink-0 text-teal500" />
-                        )}
-                        <span className={isHidden ? 'text-ink400 line-through' : 'text-ink900'}>
-                          {meta.label}
-                        </span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
+            <ColumnsPanel
+              columns={columnOrder.map((c) => ({ key: c, label: DAILY_COLUMNS[c].label }))}
+              isHidden={(k) => hidden.has(k as DailyColKey)}
+              onToggle={(k) => toggleColumn(k as DailyColKey)}
+              dnd={dnd}
+              onMove={moveColumn}
+            />
           )}
 
           <div className="text-sm text-muted-foreground">
@@ -747,36 +693,16 @@ function CollectionsExplorer() {
                   <TableRow>
                     {visibleColumns.map((c) => {
                       const meta = DAILY_COLUMNS[c];
-                      const active = sort?.column === c;
                       return (
-                        <TableHead
+                        <SortHeaderCell
                           key={c}
-                          className={`${meta.numeric ? 'text-right' : ''} ${active ? 'text-teal700' : ''}`}
-                        >
-                          {meta.sortable ? (
-                            <button
-                              type="button"
-                              onClick={() => toggleSort(c)}
-                              className={`inline-flex items-center gap-1 transition-colors hover:text-teal700 ${
-                                meta.numeric ? 'flex-row-reverse' : ''
-                              }`}
-                              aria-label={`Sort by ${meta.label}`}
-                            >
-                              {meta.label}
-                              {active ? (
-                                sort!.direction === 'asc' ? (
-                                  <ArrowUp className="h-3 w-3" />
-                                ) : (
-                                  <ArrowDown className="h-3 w-3" />
-                                )
-                              ) : (
-                                <ChevronDown className="h-3 w-3 opacity-40" />
-                              )}
-                            </button>
-                          ) : (
-                            meta.label
-                          )}
-                        </TableHead>
+                          label={meta.label}
+                          numeric={meta.numeric}
+                          sortable={meta.sortable}
+                          active={sort?.column === c}
+                          direction={sort?.direction ?? 'asc'}
+                          onToggle={() => toggleSort(c)}
+                        />
                       );
                     })}
                   </TableRow>
@@ -798,27 +724,13 @@ function CollectionsExplorer() {
               </Table>
 
               {(hasPrev || hasNext) && (
-                <div className="flex items-center justify-between">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    disabled={!hasPrev}
-                    onClick={() => setPage((p) => Math.max(0, p - 1))}
-                  >
-                    ← Previous
-                  </Button>
-                  <span className="text-xs text-muted-foreground">Page {page + 1}</span>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    disabled={!hasNext}
-                    onClick={() => setPage((p) => p + 1)}
-                  >
-                    Next →
-                  </Button>
-                </div>
+                <Pager
+                  page={page + 1}
+                  hasPrev={hasPrev}
+                  hasNext={hasNext}
+                  onPrev={() => setPage((p) => Math.max(0, p - 1))}
+                  onNext={() => setPage((p) => p + 1)}
+                />
               )}
             </>
           )}
