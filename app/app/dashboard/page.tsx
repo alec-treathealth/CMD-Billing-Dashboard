@@ -10,7 +10,7 @@ import type { Metadata } from 'next';
 import { Dashboard } from '@/components/dashboard';
 import { DashboardNav } from '@/components/dashboard-nav';
 
-export const metadata: Metadata = { title: 'Dashboard | Claims Search' };
+export const metadata: Metadata = { title: 'Overview | CMD Billing' };
 
 export default function DashboardPage() {
   return (

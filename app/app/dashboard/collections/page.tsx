@@ -7,7 +7,7 @@ import type { Metadata } from 'next';
 import { DashboardNav } from '@/components/dashboard-nav';
 import { CollectionsSections } from '@/components/dashboard';
 
-export const metadata: Metadata = { title: 'Collections | Claims Search' };
+export const metadata: Metadata = { title: 'Collections Explorer | CMD Billing' };
 
 export default function CollectionsPage() {
   return (
