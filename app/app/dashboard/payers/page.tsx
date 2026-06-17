@@ -5,7 +5,7 @@
  */
 import type { Metadata } from 'next';
 import { DashboardNav } from '@/components/dashboard-nav';
-import { PayerChartWidget, PayerOverview } from '@/components/dashboard';
+import { PayerDetailExplorer } from '@/components/dashboard';
 
 export const metadata: Metadata = { title: 'Payers Explorer | CMD Billing' };
 
@@ -20,8 +20,7 @@ export default function PayersPage() {
         </p>
       </header>
       <DashboardNav />
-      <PayerChartWidget defaultTopN={15} />
-      <PayerOverview />
+      <PayerDetailExplorer />
       <footer className="mt-10 border-t pt-4 text-xs text-muted-foreground">
         Internal tool — handles PHI. There is no application login: access is controlled solely by
         Vercel Deployment Protection. Do not share this URL outside the authorized billing audience.
