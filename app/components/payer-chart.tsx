@@ -1,14 +1,17 @@
 'use client';
 
 /**
- * Payer chart — a fixed default overview (no controls): the top payers by total
- * CHARGED, each bar split into PAID (blue) + COLLECTION GAP (orange). Mirrors the
- * collections KPI chart's stacked-bar style. Hover shows charged, paid, pay gap,
- * and the collection percentage.
+ * Payer chart — top payers by total CHARGED, each bar split into PAID (blue) +
+ * COLLECTION GAP (orange), mirroring the collections KPI chart's stacked style.
+ * Hover shows charged, paid, pay gap, and the collection percentage.
  *
- * Fully client-side over the ALREADY-LOADED PayerGapSummary — no new API calls,
- * aggregate/non-PHI (payer_name is an allowlisted dimension), nothing persisted.
+ * Default view (no range selected) reads the cached, all-time `data` prop. A
+ * year/month range picker lets the user scope to a date_of_service window; when a
+ * bound is set the chart re-fetches a date-filtered, non-PHI payer-gap summary
+ * (loadPayerGapRange → live reader, no query_id, nothing persisted). Clearing the
+ * range returns to the all-time default.
  */
+import { useEffect, useMemo, useState } from 'react';
 import {
   Bar,
   BarChart,
@@ -20,11 +23,23 @@ import {
   YAxis,
 } from 'recharts';
 
+import { SELECT_CLASS } from '@/components/data-grid';
 import { count, money, moneyAxis, rate } from '@/lib/format';
-import type { PayerGapSummary } from '@/lib/actions';
+import { loadPayerGapRange, type PayerGapSummary } from '@/lib/actions';
 
 /** Default number of payers shown (kept small so the chart stays readable). */
 const DEFAULT_TOP_N = 12;
+
+const MONTHS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+const CURRENT_YEAR = new Date().getFullYear();
+/** Selectable years: current and the previous 6 (covers the loaded claim history). */
+const YEARS = Array.from({ length: 7 }, (_, i) => CURRENT_YEAR - i);
+
+const pad2 = (n: number) => String(n).padStart(2, '0');
+const lastDayOfMonth = (year: number, month: number) => new Date(year, month, 0).getDate();
 
 interface ChartRow {
   payer: string;
@@ -57,6 +72,8 @@ function PayerTooltip({ active, payload }: { active?: boolean; payload?: { paylo
   );
 }
 
+type RangeState = { status: 'ready'; data?: PayerGapSummary } | { status: 'loading' } | { status: 'error' };
+
 export function PayerChart({
   data,
   defaultTopN = DEFAULT_TOP_N,
@@ -65,83 +82,220 @@ export function PayerChart({
   defaultTopN?: number;
 }) {
   const topN = defaultTopN > 0 ? defaultTopN : DEFAULT_TOP_N;
-  const rows: ChartRow[] = [...data.by_payer]
-    .map((r) => ({
-      payer: r.payer_name ?? '(blank)',
-      claim_count: r.claim_count,
-      total_charge: r.total_charge,
-      total_paid: r.total_paid,
-      total_collection_gap: r.total_collection_gap,
-      avg_collection_rate: r.avg_collection_rate,
-    }))
-    .sort((a, b) => b.total_charge - a.total_charge)
-    .slice(0, topN);
+
+  // Year/month range picker — '' means "any" (open-ended on that side).
+  const [fromYear, setFromYear] = useState('');
+  const [fromMonth, setFromMonth] = useState('');
+  const [toYear, setToYear] = useState('');
+  const [toMonth, setToMonth] = useState('');
+  const [range, setRange] = useState<RangeState>({ status: 'ready' });
+
+  // A bound exists only when its YEAR is chosen; month defaults to Jan (from) / Dec (to).
+  const dateFrom = fromYear
+    ? `${fromYear}-${pad2(fromMonth ? Number(fromMonth) : 1)}-01`
+    : undefined;
+  const dateTo = toYear
+    ? (() => {
+        const m = toMonth ? Number(toMonth) : 12;
+        return `${toYear}-${pad2(m)}-${pad2(lastDayOfMonth(Number(toYear), m))}`;
+      })()
+    : undefined;
+  const hasRange = Boolean(dateFrom || dateTo);
+
+  // Fetch the date-filtered summary when a bound is set; clear back to all-time otherwise.
+  useEffect(() => {
+    if (!hasRange) {
+      setRange({ status: 'ready' });
+      return;
+    }
+    let live = true;
+    setRange({ status: 'loading' });
+    loadPayerGapRange({ from: dateFrom, to: dateTo })
+      .then((r) => {
+        if (live) setRange(r.ok ? { status: 'ready', data: r.data } : { status: 'error' });
+      })
+      .catch(() => {
+        if (live) setRange({ status: 'error' });
+      });
+    return () => {
+      live = false;
+    };
+  }, [dateFrom, dateTo, hasRange]);
+
+  const loading = hasRange && range.status === 'loading';
+  const error = hasRange && range.status === 'error';
+  // All-time prop by default; the fetched window when a range is active and ready.
+  const summary = hasRange ? (range.status === 'ready' ? range.data : undefined) : data;
+
+  const rows = useMemo<ChartRow[]>(() => {
+    if (!summary) return [];
+    return summary.by_payer
+      .map((r) => ({
+        payer: r.payer_name ?? '(blank)',
+        claim_count: r.claim_count,
+        total_charge: r.total_charge,
+        total_paid: r.total_paid,
+        total_collection_gap: r.total_collection_gap,
+        avg_collection_rate: r.avg_collection_rate,
+      }))
+      .sort((a, b) => b.total_charge - a.total_charge)
+      .slice(0, topN);
+  }, [summary, topN]);
 
   const chartHeight = Math.max(180, rows.length * 38 + 24);
 
+  function clearRange() {
+    setFromYear('');
+    setFromMonth('');
+    setToYear('');
+    setToMonth('');
+  }
+
   return (
     <div className="space-y-3">
-      <div className="text-sm text-muted-foreground">
-        Top {count(rows.length)} payers by total charged — paid vs. collection gap.
-      </div>
-
-      <div
-        role="img"
-        aria-label="Payers — paid vs. collection gap"
-        style={{ width: '100%', height: chartHeight }}
-      >
-        <ResponsiveContainer width="100%" height="100%">
-          <BarChart
-            data={rows}
-            layout="vertical"
-            margin={{ top: 4, right: 16, bottom: 4, left: 8 }}
-            barCategoryGap="28%"
+      {/* Year/month range picker — scopes to a date_of_service window (client-side). */}
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <span>From</span>
+        <select
+          value={fromMonth}
+          onChange={(e) => setFromMonth(e.target.value)}
+          aria-label="From month"
+          className={SELECT_CLASS}
+        >
+          <option value="">Month</option>
+          {MONTHS.map((name, i) => (
+            <option key={name} value={i + 1}>
+              {name}
+            </option>
+          ))}
+        </select>
+        <select
+          value={fromYear}
+          onChange={(e) => setFromYear(e.target.value)}
+          aria-label="From year"
+          className={SELECT_CLASS}
+        >
+          <option value="">Any</option>
+          {YEARS.map((y) => (
+            <option key={y} value={y}>
+              {y}
+            </option>
+          ))}
+        </select>
+        <span>to</span>
+        <select
+          value={toMonth}
+          onChange={(e) => setToMonth(e.target.value)}
+          aria-label="To month"
+          className={SELECT_CLASS}
+        >
+          <option value="">Month</option>
+          {MONTHS.map((name, i) => (
+            <option key={name} value={i + 1}>
+              {name}
+            </option>
+          ))}
+        </select>
+        <select
+          value={toYear}
+          onChange={(e) => setToYear(e.target.value)}
+          aria-label="To year"
+          className={SELECT_CLASS}
+        >
+          <option value="">Any</option>
+          {YEARS.map((y) => (
+            <option key={y} value={y}>
+              {y}
+            </option>
+          ))}
+        </select>
+        {hasRange && (
+          <button
+            type="button"
+            onClick={clearRange}
+            className="text-teal700 underline-offset-2 hover:underline"
           >
-            <CartesianGrid horizontal={false} stroke="#E4E9E6" />
-            <XAxis
-              type="number"
-              tickFormatter={moneyAxis}
-              tick={{ fontSize: 11, fill: '#859794' }}
-              stroke="#E4E9E6"
-            />
-            <YAxis
-              type="category"
-              dataKey="payer"
-              width={160}
-              tick={{ fontSize: 11, fill: '#4A5C5A' }}
-              stroke="#E4E9E6"
-              interval={0}
-            />
-            <Tooltip content={<PayerTooltip />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
-            <Bar dataKey="total_paid" stackId="charge" name="Paid" fill="#135E5A" radius={[2, 0, 0, 2]}>
-              {rows.map((r) => (
-                <Cell key={`paid-${r.payer}`} />
-              ))}
-            </Bar>
-            <Bar
-              dataKey="total_collection_gap"
-              stackId="charge"
-              name="Collection gap"
-              fill="#E2674F"
-              radius={[0, 2, 2, 0]}
-            >
-              {rows.map((r) => (
-                <Cell key={`gap-${r.payer}`} />
-              ))}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>
+            Clear
+          </button>
+        )}
       </div>
 
-      <div className="flex items-center gap-4 text-xs text-muted-foreground">
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-2.5 w-2.5 rounded-sm bg-teal700" /> Paid
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-2.5 w-2.5 rounded-sm bg-coral600" /> Collection gap
-        </span>
-        <span className="ml-auto">Bar length = total charged.</span>
+      <div className="text-sm text-muted-foreground">
+        Top {count(rows.length)} payers by total charged — paid vs. collection gap
+        {hasRange ? ' (date-filtered)' : ''}.
       </div>
+
+      {loading ? (
+        <div className="py-12 text-center text-sm text-muted-foreground">Loading payers…</div>
+      ) : error ? (
+        <div className="rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-sm text-status-danger">
+          That date range could not be loaded.
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="py-12 text-center text-sm text-muted-foreground">
+          No payer activity in the selected range.
+        </div>
+      ) : (
+        <>
+          <div
+            role="img"
+            aria-label="Payers — paid vs. collection gap"
+            style={{ width: '100%', height: chartHeight }}
+          >
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart
+                data={rows}
+                layout="vertical"
+                margin={{ top: 4, right: 16, bottom: 4, left: 8 }}
+                barCategoryGap="28%"
+              >
+                <CartesianGrid horizontal={false} stroke="#E4E9E6" />
+                <XAxis
+                  type="number"
+                  tickFormatter={moneyAxis}
+                  tick={{ fontSize: 11, fill: '#859794' }}
+                  stroke="#E4E9E6"
+                />
+                <YAxis
+                  type="category"
+                  dataKey="payer"
+                  width={160}
+                  tick={{ fontSize: 11, fill: '#4A5C5A' }}
+                  stroke="#E4E9E6"
+                  interval={0}
+                />
+                <Tooltip content={<PayerTooltip />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
+                <Bar dataKey="total_paid" stackId="charge" name="Paid" fill="#135E5A" radius={[2, 0, 0, 2]}>
+                  {rows.map((r) => (
+                    <Cell key={`paid-${r.payer}`} />
+                  ))}
+                </Bar>
+                <Bar
+                  dataKey="total_collection_gap"
+                  stackId="charge"
+                  name="Collection gap"
+                  fill="#E2674F"
+                  radius={[0, 2, 2, 0]}
+                >
+                  {rows.map((r) => (
+                    <Cell key={`gap-${r.payer}`} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div className="flex items-center gap-4 text-xs text-muted-foreground">
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block h-2.5 w-2.5 rounded-sm bg-teal700" /> Paid
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block h-2.5 w-2.5 rounded-sm bg-coral600" /> Collection gap
+            </span>
+            <span className="ml-auto">Bar length = total charged.</span>
+          </div>
+        </>
+      )}
     </div>
   );
 }

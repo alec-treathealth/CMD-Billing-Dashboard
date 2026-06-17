@@ -30,6 +30,7 @@ import {
   dashboardPayerGap,
   handleAgent,
   handleResults,
+  payerGapForRange,
   revealClaimById,
   searchClaimsDirect,
 } from '@/lib/server';
@@ -234,6 +235,23 @@ export type DashboardResult<T> = { ok: true; data: T } | { ok: false };
 export async function loadPayerGap(): Promise<DashboardResult<PayerGapSummary>> {
   try {
     return { ok: true, data: await dashboardPayerGap() };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Per-payer gap bounded to a date_of_service window (non-PHI, reader-only, NOT
+ * cached). Backs the payer chart's year/month range picker. `from`/`to` are
+ * 'YYYY-MM-DD' bounds; either may be omitted (open-ended). Re-validated server-side
+ * as bounded ClaimFilter dates before any query.
+ */
+export async function loadPayerGapRange(params: {
+  from?: string;
+  to?: string;
+}): Promise<DashboardResult<PayerGapSummary>> {
+  try {
+    return { ok: true, data: await payerGapForRange(params.from, params.to) };
   } catch {
     return { ok: false };
   }

@@ -18,6 +18,7 @@ import type { AnthropicMessagesClient } from '../../src/agent/index.js';
 import { distribution, searchClaims } from '../../src/queries/index.js';
 import {
   distributionCountFromMatview,
+  payerGapForFilter,
   payerGapFromMatview,
 } from '../../src/queries/dashboard_aggregates.js';
 import { makeReaderPool, PgExecutor, readerConnectionStringFromEnv } from '../../src/queries/executor.js';
@@ -172,6 +173,20 @@ export const dashboardPayerGap = unstable_cache(
   ['dashboard-payer-gap'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
 );
+
+/**
+ * Per-payer gap bounded to a date_of_service window (non-PHI summary; reader-only,
+ * NOT cached). Backs the payer chart's year/month range picker. `from`/`to` are
+ * 'YYYY-MM-DD' bounds (either may be omitted); they are re-validated as ClaimFilter
+ * dates and bound as $n parameters in payerGapForFilter. Scans claims.claims live
+ * (the matview has no date dimension); no finalize()/query_id — never reveals rows.
+ */
+export async function payerGapForRange(from?: string, to?: string): Promise<PayerGapSummary> {
+  const filter: ClaimFilter = {};
+  if (from) filter.date_from = from;
+  if (to) filter.date_to = to;
+  return payerGapForFilter(readerExecutor(), filter);
+}
 
 /**
  * A single allowlisted-dimension distribution (non-PHI summary). The (field,

@@ -12,7 +12,10 @@
  * claims.claims and still writes query_log via finalize(). No finalize() / query_id
  * here — the dashboard never reveals rows.
  */
+import { buildClaimFilter, validateClaimFilter } from './filters.js';
+import { payerGapSql } from './payer_gap_analysis.js';
 import type {
+  ClaimFilter,
   DistributionBucket,
   DistributionField,
   DistributionSummary,
@@ -38,6 +41,26 @@ interface PayerGapMvRow {
   total_collection_gap: string;
 }
 
+/** Map raw payer-gap rows (numeric columns arrive as strings from pg) to PayerGapRow[]. */
+function mapPayerGapRows(rows: PayerGapMvRow[]): PayerGapRow[] {
+  return rows.map((r) => ({
+    payer_name: r.payer_name,
+    claim_count: Number(r.claim_count),
+    total_charge: Number(r.total_charge),
+    total_allowed: Number(r.total_allowed),
+    total_paid: Number(r.total_paid),
+    avg_collection_rate: r.avg_collection_rate === null ? null : Number(r.avg_collection_rate),
+    total_write_down: Number(r.total_write_down),
+    total_collection_gap: Number(r.total_collection_gap),
+  }));
+}
+
+function summarizePayerGap(rows: PayerGapMvRow[]): PayerGapSummary {
+  const by_payer = mapPayerGapRows(rows);
+  const rows_analyzed = by_payer.reduce((acc, r) => acc + r.claim_count, 0);
+  return { rows_analyzed, by_payer };
+}
+
 /** Read the pre-aggregated payer gap. Ordering mirrors the live payerGapSql. Exposed for tests. */
 export function payerGapMatviewSql(): string {
   return (
@@ -51,18 +74,24 @@ export function payerGapMatviewSql(): string {
 
 export async function payerGapFromMatview(executor: QueryExecutor): Promise<PayerGapSummary> {
   const { rows } = await executor.query<PayerGapMvRow>(payerGapMatviewSql(), []);
-  const by_payer: PayerGapRow[] = rows.map((r) => ({
-    payer_name: r.payer_name,
-    claim_count: Number(r.claim_count),
-    total_charge: Number(r.total_charge),
-    total_allowed: Number(r.total_allowed),
-    total_paid: Number(r.total_paid),
-    avg_collection_rate: r.avg_collection_rate === null ? null : Number(r.avg_collection_rate),
-    total_write_down: Number(r.total_write_down),
-    total_collection_gap: Number(r.total_collection_gap),
-  }));
-  const rows_analyzed = by_payer.reduce((acc, r) => acc + r.claim_count, 0);
-  return { rows_analyzed, by_payer };
+  return summarizePayerGap(rows);
+}
+
+/**
+ * Live, date-filterable payer gap (non-PHI, NOT cached). Reuses the same aggregate
+ * SQL as payer_gap_analysis but is a plain reader: no finalize(), no query_log,
+ * no query_id — the dashboard only needs the summary, never reveals rows. The
+ * filter VALUES are $n parameters (re-validated here); column names are fixed
+ * literals. Used for the payer chart's year/month range picker.
+ */
+export async function payerGapForFilter(
+  executor: QueryExecutor,
+  filter: ClaimFilter,
+): Promise<PayerGapSummary> {
+  const validated = validateClaimFilter(filter);
+  const { clause, params } = buildClaimFilter(validated, 1);
+  const { rows } = await executor.query<PayerGapMvRow>(payerGapSql(clause), params);
+  return summarizePayerGap(rows);
 }
 
 // --- distribution (count) ---------------------------------------------------
