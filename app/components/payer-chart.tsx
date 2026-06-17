@@ -213,16 +213,16 @@ export function PayerChart({
   const single = isStacked ? null : SINGLE_SERIES[metric];
   const sortLabel = SORT_OPTIONS.find((s) => s.id === sort)?.label ?? '';
 
-  /** Group-by selection: anything other than payer is unavailable in this shape. */
+  /**
+   * Group-by selection. Only `payer` is available in this data shape; `year` and
+   * `location` keep the selection visible (so the dropdown reflects the choice) and
+   * surface an inline notice in place of the chart until the backing data exists.
+   * Re-selecting By Payer clears the notice and restores the chart.
+   */
   function onGroupByChange(raw: string) {
-    if (raw === 'payer') {
-      setGroupBy('payer');
-      setNotice(null);
-      return;
-    }
-    // 'year' / 'location': show the relevant notice and revert to By Payer.
-    setNotice(raw === 'location' ? LOCATION_NOTICE : YEAR_NOTICE);
-    setGroupBy('payer');
+    const g = raw as ChartGroupBy;
+    setGroupBy(g);
+    setNotice(g === 'payer' ? null : g === 'location' ? LOCATION_NOTICE : YEAR_NOTICE);
   }
 
   return (
@@ -278,73 +278,77 @@ export function PayerChart({
         </ControlSelect>
       </div>
 
-      {notice && (
+      {notice ? (
+        // Unavailable grouping (year/location): show the explanatory notice in
+        // place of the chart until the backing data load exists.
         <div className="rounded-md border border-teal200 bg-teal50/60 px-3 py-2 text-xs text-ink600">
           {notice}
         </div>
-      )}
+      ) : (
+        <>
+          <div style={{ width: '100%', height: chartHeight }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart
+                data={rows}
+                layout="vertical"
+                margin={{ top: 4, right: 16, bottom: 4, left: 8 }}
+                barCategoryGap="28%"
+              >
+                <CartesianGrid horizontal={false} stroke="#E4E9E6" />
+                <XAxis
+                  type="number"
+                  tickFormatter={metric === 'rate' ? rateAxis : moneyAxis}
+                  tick={{ fontSize: 11, fill: '#859794' }}
+                  stroke="#E4E9E6"
+                />
+                <YAxis
+                  type="category"
+                  dataKey="payer"
+                  width={150}
+                  tick={{ fontSize: 11, fill: '#4A5C5A' }}
+                  stroke="#E4E9E6"
+                  interval={0}
+                />
+                <Tooltip content={<PayerTooltip metric={metric} />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
+                {isStacked ? (
+                  <>
+                    <Bar dataKey="total_paid" stackId="charge" name="Paid" fill="#135E5A" radius={[2, 0, 0, 2]} />
+                    <Bar
+                      dataKey="total_collection_gap"
+                      stackId="charge"
+                      name="Collection gap"
+                      fill="#E2674F"
+                      radius={[0, 2, 2, 0]}
+                    />
+                  </>
+                ) : (
+                  <Bar dataKey={single!.dataKey} name={single!.name} fill={single!.fill} radius={[2, 2, 2, 2]} />
+                )}
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
 
-      <div style={{ width: '100%', height: chartHeight }}>
-        <ResponsiveContainer width="100%" height="100%">
-          <BarChart
-            data={rows}
-            layout="vertical"
-            margin={{ top: 4, right: 16, bottom: 4, left: 8 }}
-            barCategoryGap="28%"
-          >
-            <CartesianGrid horizontal={false} stroke="#E4E9E6" />
-            <XAxis
-              type="number"
-              tickFormatter={metric === 'rate' ? rateAxis : moneyAxis}
-              tick={{ fontSize: 11, fill: '#859794' }}
-              stroke="#E4E9E6"
-            />
-            <YAxis
-              type="category"
-              dataKey="payer"
-              width={150}
-              tick={{ fontSize: 11, fill: '#4A5C5A' }}
-              stroke="#E4E9E6"
-              interval={0}
-            />
-            <Tooltip content={<PayerTooltip metric={metric} />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
+          <div className="flex items-center gap-4 text-xs text-muted-foreground">
             {isStacked ? (
               <>
-                <Bar dataKey="total_paid" stackId="charge" name="Paid" fill="#135E5A" radius={[2, 0, 0, 2]} />
-                <Bar
-                  dataKey="total_collection_gap"
-                  stackId="charge"
-                  name="Collection gap"
-                  fill="#E2674F"
-                  radius={[0, 2, 2, 0]}
-                />
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block h-2.5 w-2.5 rounded-sm bg-teal700" /> Paid
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block h-2.5 w-2.5 rounded-sm bg-coral600" /> Collection gap
+                </span>
+                <span className="text-ink400">(bar length = total charged)</span>
               </>
             ) : (
-              <Bar dataKey={single!.dataKey} name={single!.name} fill={single!.fill} radius={[2, 2, 2, 2]} />
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: single!.fill }} />
+                {single!.name}
+              </span>
             )}
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
-
-      <div className="flex items-center gap-4 text-xs text-muted-foreground">
-        {isStacked ? (
-          <>
-            <span className="flex items-center gap-1.5">
-              <span className="inline-block h-2.5 w-2.5 rounded-sm bg-teal700" /> Paid
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="inline-block h-2.5 w-2.5 rounded-sm bg-coral600" /> Collection gap
-            </span>
-            <span className="text-ink400">(bar length = total charged)</span>
-          </>
-        ) : (
-          <span className="flex items-center gap-1.5">
-            <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: single!.fill }} />
-            {single!.name}
-          </span>
-        )}
-        <span className="ml-auto">Sorted by {sortLabel.toLowerCase()}.</span>
-      </div>
+            <span className="ml-auto">Sorted by {sortLabel.toLowerCase()}.</span>
+          </div>
+        </>
+      )}
     </div>
   );
 }
