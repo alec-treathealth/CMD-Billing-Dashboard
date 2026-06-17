@@ -20,7 +20,11 @@ npm-debug.log*
 .idea/
 .vscode/
 secrets/
-.claude/
+# Claude Code — keep shared config + hooks, ignore local-only overrides
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+.claude/settings.local.json
 
 # Supabase CLI scratch
 supabase/.temp/
