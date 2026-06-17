@@ -129,54 +129,6 @@ export function PayerChartWidget({ defaultTopN = 10 }: { defaultTopN?: number })
   );
 }
 
-export function PayerOverview() {
-  const state = useWidget<PayerGapSummary>(loadPayerGap);
-  return (
-    <WidgetCard title="Payer detail" state={state}>
-      {state.status === 'ready' && (
-        <div className="space-y-3">
-          <div className="text-sm text-muted-foreground">
-            {count(state.data.rows_analyzed)} claims analyzed across{' '}
-            {count(state.data.by_payer.length)} payers
-          </div>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Payer</TableHead>
-                <TableHead className="text-right">Claims</TableHead>
-                <TableHead className="text-right">Charged</TableHead>
-                <TableHead className="text-right">Allowed</TableHead>
-                <TableHead className="text-right">Paid</TableHead>
-                <TableHead className="text-right">Avg rate</TableHead>
-                <TableHead className="text-right">Collection gap</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {[...state.data.by_payer]
-                .sort((a, b) => b.claim_count - a.claim_count)
-                .slice(0, 15)
-                .map((r, i) => (
-                  <TableRow key={`${r.payer_name ?? 'null'}-${i}`}>
-                    <TableCell>
-                      {r.payer_name ?? <span className="text-muted-foreground">(blank)</span>}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">{count(r.claim_count)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{money(r.total_charge)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{money(r.total_allowed)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{money(r.total_paid)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{rate(r.avg_collection_rate)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{money(r.total_collection_gap)}</TableCell>
-                  </TableRow>
-                ))}
-            </TableBody>
-          </Table>
-          <p className="text-xs text-muted-foreground">Top 15 payers by claim volume.</p>
-        </div>
-      )}
-    </WidgetCard>
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Payer Detail Explorer (Phase 8.x) — a filterable, sortable, configurable table
 // of the per-payer non-PHI summary. Replaces the static top-15 table + bar chart
@@ -1386,17 +1338,15 @@ export function ClaimsDistributions() {
 }
 
 /**
- * Full collections detail: the MTD/YTD KPI chart full-width on top, with the
- * Collections Explorer (paginated, filterable, configurable) full-width below.
- * Aggregate, non-PHI. (The latest-month summary card was removed here; its widget
- * remains exported for reuse elsewhere.)
+ * Full collections detail: the Collections Explorer (paginated, filterable,
+ * configurable) full-width. Aggregate, non-PHI. The MTD/YTD KPI widget is
+ * intentionally NOT shown here — it lives on the Overview, and duplicating it on
+ * this sub-route was redundant. (CollectionsSummaryWidget remains exported for
+ * reuse elsewhere but is not rendered here.)
  */
 export function CollectionsSections() {
   return (
     <div className="space-y-4">
-      <div className="w-full">
-        <CollectionsKpisWidget />
-      </div>
       <CollectionsExplorer />
     </div>
   );
