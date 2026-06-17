@@ -27,9 +27,9 @@
  * masks any PHI column) as defense in depth — patient-level data stays on the
  * audited reveal path, not in this list.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { ArrowDown, ArrowUp, ChevronDown, Columns3, Eye, EyeOff, RotateCcw } from 'lucide-react';
+import { ArrowDown, ArrowUp, ChevronDown, Columns3, Eye, EyeOff, GripVertical, RotateCcw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
@@ -272,6 +272,8 @@ export function ClaimsExplorer() {
     });
   }, []);
 
+  // Keyboard-fallback reorder (ArrowUp/ArrowDown on the drag handle). Not exposed as
+  // UI buttons anymore — drag-and-drop is the primary path; this keeps it accessible.
   const moveColumn = useCallback(
     (column: string, direction: 'up' | 'down') => {
       setColumnOrder(() => {
@@ -284,6 +286,76 @@ export function ClaimsExplorer() {
       });
     },
     [orderedColumns],
+  );
+
+  // ---- Native HTML5 drag-to-reorder for the Columns panel -------------------
+  // The dragged key lives in a ref (no re-render while dragging); two small bits of
+  // state drive visuals only: the dragging item (opacity) and the hovered drop
+  // target (top border indicator). Session-only, like the rest of the layout state.
+  const dragColumnRef = useRef<string | null>(null);
+  const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+
+  /** Swap the dragged column with the drop-target column in the persisted order. */
+  const reorderColumns = useCallback(
+    (dragged: string, target: string) => {
+      if (dragged === target) return;
+      setColumnOrder(() => {
+        const order = [...orderedColumns];
+        const i = order.indexOf(dragged);
+        const j = order.indexOf(target);
+        if (i < 0 || j < 0) return order;
+        [order[i], order[j]] = [order[j]!, order[i]!];
+        return order;
+      });
+    },
+    [orderedColumns],
+  );
+
+  const onColumnDragStart = useCallback((e: React.DragEvent, column: string) => {
+    dragColumnRef.current = column;
+    setDraggingColumn(column);
+    e.dataTransfer.effectAllowed = 'move';
+  }, []);
+
+  const onColumnDragOver = useCallback(
+    (e: React.DragEvent, column: string) => {
+      e.preventDefault(); // allow drop
+      e.dataTransfer.dropEffect = 'move';
+      setDropTarget((prev) => (prev === column ? prev : column));
+    },
+    [],
+  );
+
+  const onColumnDrop = useCallback(
+    (e: React.DragEvent, column: string) => {
+      e.preventDefault();
+      const dragged = dragColumnRef.current;
+      if (dragged) reorderColumns(dragged, column);
+      dragColumnRef.current = null;
+      setDraggingColumn(null);
+      setDropTarget(null);
+    },
+    [reorderColumns],
+  );
+
+  const onColumnDragEnd = useCallback(() => {
+    dragColumnRef.current = null;
+    setDraggingColumn(null);
+    setDropTarget(null);
+  }, []);
+
+  const onColumnHandleKeyDown = useCallback(
+    (e: React.KeyboardEvent, column: string) => {
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        moveColumn(column, 'up');
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        moveColumn(column, 'down');
+      }
+    },
+    [moveColumn],
   );
 
   const nextCursor = status.kind === 'ready' ? status.data.nextCursor : null;
@@ -367,21 +439,40 @@ export function ClaimsExplorer() {
           <div className="mb-3 flex items-center gap-2 border-b border-line pb-2">
             <Columns3 className="h-4 w-4 text-teal500" />
             <span className="text-xs font-semibold uppercase tracking-wide text-ink600">Columns</span>
-            <span className="text-[11px] text-ink400">— show, hide, and reorder (layout only)</span>
+            <span className="text-[11px] text-ink400">— show, hide, and drag to reorder (layout only)</span>
           </div>
           <ul className="grid gap-x-6 gap-y-0.5 sm:grid-cols-2">
-            {orderedColumns.map((c, i) => {
+            {orderedColumns.map((c) => {
               const hidden = hiddenColumns.has(c);
+              const isDragging = draggingColumn === c;
+              const isDropTarget = dropTarget === c && draggingColumn !== c;
               return (
                 <li
                   key={c}
-                  className="group flex items-center justify-between gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-teal50/70"
+                  draggable
+                  aria-grabbed={isDragging}
+                  data-drop-target={isDropTarget ? '' : undefined}
+                  onDragStart={(e) => onColumnDragStart(e, c)}
+                  onDragOver={(e) => onColumnDragOver(e, c)}
+                  onDrop={(e) => onColumnDrop(e, c)}
+                  onDragEnd={onColumnDragEnd}
+                  className={`group flex items-center gap-2 rounded-md border-t-2 px-2 py-1.5 transition-colors hover:bg-teal50/70 ${
+                    isDropTarget ? 'border-teal500' : 'border-transparent'
+                  } ${isDragging ? 'opacity-50' : ''}`}
                 >
+                  <button
+                    type="button"
+                    onKeyDown={(e) => onColumnHandleKeyDown(e, c)}
+                    aria-label={`Drag to reorder ${columnLabel(c)}`}
+                    className="shrink-0 cursor-grab text-ink300 active:cursor-grabbing"
+                  >
+                    <GripVertical className="h-4 w-4" />
+                  </button>
                   <button
                     type="button"
                     onClick={() => toggleColumnVisible(c)}
                     aria-pressed={!hidden}
-                    className="flex min-w-0 items-center gap-2 text-sm capitalize"
+                    className="flex min-w-0 flex-1 items-center gap-2 text-sm capitalize"
                   >
                     {hidden ? (
                       <EyeOff className="h-4 w-4 shrink-0 text-ink400" />
@@ -392,30 +483,6 @@ export function ClaimsExplorer() {
                       {columnLabel(c)}
                     </span>
                   </button>
-                  <span className="flex shrink-0 gap-0.5 opacity-50 transition-opacity group-hover:opacity-100">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7"
-                      disabled={i === 0}
-                      aria-label={`Move ${columnLabel(c)} earlier`}
-                      onClick={() => moveColumn(c, 'up')}
-                    >
-                      <ArrowUp className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7"
-                      disabled={i === orderedColumns.length - 1}
-                      aria-label={`Move ${columnLabel(c)} later`}
-                      onClick={() => moveColumn(c, 'down')}
-                    >
-                      <ArrowDown className="h-3.5 w-3.5" />
-                    </Button>
-                  </span>
                 </li>
               );
             })}
