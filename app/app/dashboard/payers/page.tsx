@@ -7,7 +7,7 @@ import type { Metadata } from 'next';
 import { DashboardNav } from '@/components/dashboard-nav';
 import { PayerChartWidget, PayerOverview } from '@/components/dashboard';
 
-export const metadata: Metadata = { title: 'Payers | Claims Search' };
+export const metadata: Metadata = { title: 'Payers Explorer | CMD Billing' };
 
 export default function PayersPage() {
   return (
