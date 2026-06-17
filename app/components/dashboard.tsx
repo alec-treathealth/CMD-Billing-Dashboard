@@ -18,7 +18,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { ArrowDown, ArrowUp, ChevronDown, Columns3, Eye, EyeOff, RotateCcw } from 'lucide-react';
+import { ArrowDown, ArrowUp, ChevronDown, Columns3, Eye, EyeOff, GripVertical, RotateCcw } from 'lucide-react';
 
 import { PayerChart, payerChartTitle } from '@/components/payer-chart';
 import { Button } from '@/components/ui/button';
@@ -575,8 +575,12 @@ function DistributionWidget({
  * Collections summary — latest month, by facility. Non-PHI: aggregates only
  * collections.daily_collections + facilities (never collections_raw /
  * payment_lines / source_group_code). A null facility renders as "(unassigned)".
+ *
+ * Exported but no longer rendered on the collections page (it was removed from
+ * CollectionsSections in favor of the full-width KPI chart + CollectionsExplorer);
+ * kept available in case another surface needs the latest-month summary.
  */
-function CollectionsSummaryWidget() {
+export function CollectionsSummaryWidget() {
   const state = useWidget<CollectionsMonthlySummary>(loadCollectionsSummary);
   return (
     <WidgetCard title="Collections — latest month by facility" state={state}>
@@ -883,14 +887,86 @@ function latestYearMonth(rows: CollectionsDailyResult['rows']): YearMonth | null
   return { year: Number(max.slice(0, 4)), month: Number(max.slice(5, 7)) };
 }
 
+// ---------------------------------------------------------------------------
+// Collections Explorer column model — layout-only (order + visibility), held in
+// React for the session and never persisted (no localStorage). Mirrors the Claims
+// Explorer pattern; here reorder uses the native HTML5 Drag and Drop API (no
+// external DnD library).
+// ---------------------------------------------------------------------------
+type DailyColKey = 'payment_date' | 'facility' | 'checks' | 'eft' | 'gross';
+type DailyRow = CollectionsDailyResult['rows'][number];
+
+const DAILY_COLUMNS: Record<DailyColKey, { label: string; numeric: boolean; sortable: boolean }> = {
+  payment_date: { label: 'Date', numeric: false, sortable: true },
+  facility: { label: 'Facility', numeric: false, sortable: true },
+  checks: { label: 'Checks', numeric: true, sortable: false },
+  eft: { label: 'EFT', numeric: true, sortable: false },
+  gross: { label: 'Gross', numeric: true, sortable: true },
+};
+
+const DAILY_COLUMN_DEFAULT_ORDER: readonly DailyColKey[] = [
+  'payment_date',
+  'facility',
+  'checks',
+  'eft',
+  'gross',
+];
+
+interface DailySort {
+  column: DailyColKey;
+  direction: 'asc' | 'desc';
+}
+
+/** Comparable value for a daily row under a column (string for date/facility). */
+function dailySortValue(r: DailyRow, key: DailyColKey): string | number {
+  switch (key) {
+    case 'payment_date':
+      return r.payment_date;
+    case 'facility':
+      return facilityLabel(r).toLowerCase();
+    case 'checks':
+      return r.checks_amount;
+    case 'eft':
+      return r.eft_amount;
+    case 'gross':
+      return r.gross_amount;
+  }
+}
+
+/** Render a single daily-row cell for a column. */
+function DailyCell({ r, col }: { r: DailyRow; col: DailyColKey }) {
+  switch (col) {
+    case 'payment_date':
+      return <span className="tabular-nums">{r.payment_date}</span>;
+    case 'facility':
+      return r.facility_name === null ? (
+        <span className="text-muted-foreground">{facilityLabel(r)}</span>
+      ) : (
+        <>{facilityLabel(r)}</>
+      );
+    case 'checks':
+      return <span className="tabular-nums">{money(r.checks_amount)}</span>;
+    case 'eft':
+      return <span className="tabular-nums">{money(r.eft_amount)}</span>;
+    case 'gross':
+      return <span className="tabular-nums">{money(r.gross_amount)}</span>;
+  }
+}
+
 /**
- * Daily collections detail (Phase 7.9) — defaults to the latest month, but the
- * user can browse any month/year (server-fetched, non-PHI, NOT cached) and filter
- * by facility (client-side). Paginated at 50 rows/page. The "hide zero rows"
- * toggle only appears when the shown month extends past today (i.e. when future
- * all-zero rows actually exist); for fully-past months every row is shown.
+ * Collections Explorer (Phase 8.x; was CollectionsDailyWidget) — defaults to the
+ * latest month, but the user can browse any month/year (server-fetched, non-PHI,
+ * NOT cached) and filter by facility (client-side). Paginated at 50 rows/page. The
+ * "hide zero rows" toggle only appears when the shown month extends past today
+ * (future all-zero rows); for fully-past months every row is shown.
+ *
+ * UX upgraded to match the Claims Explorer: a filter panel, a column show/hide
+ * panel with native drag-to-reorder, and sortable Date/Facility/Gross headers.
+ * Column order + visibility and sort are session-only React state. The
+ * data-fetching logic (loadCollectionsDaily / loadCollectionsDailyRange) is
+ * unchanged.
  */
-function CollectionsDailyWidget() {
+function CollectionsExplorer() {
   const [data, setData] = useState<CollectionsDailyResult | null>(null);
   const [status, setStatus] = useState<'loading' | 'error' | 'ready'>('loading');
   const [selected, setSelected] = useState<YearMonth | null>(null);
@@ -899,6 +975,13 @@ function CollectionsDailyWidget() {
   const [facility, setFacility] = useState('');
   const [hideZero, setHideZero] = useState(true);
   const [page, setPage] = useState(0);
+
+  // Layout-only view state (session; never persisted) + client-side sort.
+  const [sort, setSort] = useState<DailySort | null>(null);
+  const [columnOrder, setColumnOrder] = useState<DailyColKey[]>([...DAILY_COLUMN_DEFAULT_ORDER]);
+  const [hidden, setHidden] = useState<Set<DailyColKey>>(() => new Set());
+  const [showColumnPanel, setShowColumnPanel] = useState(false);
+  const [dragCol, setDragCol] = useState<DailyColKey | null>(null);
 
   // Mount: load the latest month (cached) and seed the selected month from it.
   useEffect(() => {
@@ -978,104 +1061,274 @@ function CollectionsDailyWidget() {
     });
   }, [data, facility, hideZero, showHideZero]);
 
-  const pageRows = filteredRows.slice(page * DAILY_PAGE_SIZE, page * DAILY_PAGE_SIZE + DAILY_PAGE_SIZE);
-  const hasNext = filteredRows.length > (page + 1) * DAILY_PAGE_SIZE;
+  // Sort the full filtered set (client-side over the loaded month) before paging,
+  // so ordering is stable across pages rather than only within the visible 50.
+  const sortedRows = useMemo(() => {
+    if (!sort) return filteredRows;
+    const copy = [...filteredRows];
+    copy.sort((a, b) => {
+      const av = dailySortValue(a, sort.column);
+      const bv = dailySortValue(b, sort.column);
+      let cmp: number;
+      if (typeof av === 'string' || typeof bv === 'string') cmp = String(av).localeCompare(String(bv));
+      else cmp = av - bv;
+      return sort.direction === 'asc' ? cmp : -cmp;
+    });
+    return copy;
+  }, [filteredRows, sort]);
+
+  const visibleColumns = columnOrder.filter((c) => !hidden.has(c));
+
+  const pageRows = sortedRows.slice(page * DAILY_PAGE_SIZE, page * DAILY_PAGE_SIZE + DAILY_PAGE_SIZE);
+  const hasNext = sortedRows.length > (page + 1) * DAILY_PAGE_SIZE;
   const hasPrev = page > 0;
 
+  function toggleSort(col: DailyColKey) {
+    if (!DAILY_COLUMNS[col].sortable) return;
+    setPage(0);
+    setSort((prev) =>
+      prev && prev.column === col
+        ? { column: col, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
+        : { column: col, direction: col === 'gross' ? 'desc' : 'asc' },
+    );
+  }
+
+  function toggleColumn(col: DailyColKey) {
+    setHidden((prev) => {
+      const next = new Set(prev);
+      if (next.has(col)) next.delete(col);
+      else next.add(col);
+      return next;
+    });
+  }
+
+  /** Native HTML5 DnD: drop `dragCol` immediately before `target` in the order. */
+  function onColumnDrop(target: DailyColKey) {
+    setColumnOrder((order) => {
+      if (!dragCol || dragCol === target) return order;
+      const next = [...order];
+      const from = next.indexOf(dragCol);
+      const to = next.indexOf(target);
+      if (from < 0 || to < 0) return order;
+      next.splice(from, 1);
+      next.splice(to, 0, dragCol);
+      return next;
+    });
+    setDragCol(null);
+  }
+
+  function reset() {
+    setFacility('');
+    setHideZero(true);
+    setPage(0);
+    setSort(null);
+    setColumnOrder([...DAILY_COLUMN_DEFAULT_ORDER]);
+    setHidden(new Set());
+    setShowColumnPanel(false);
+    // Restore the month/year to the latest available (re-fetch only if it changed).
+    if (latest && (!selected || selected.year !== latest.year || selected.month !== latest.month)) {
+      pick(latest);
+    }
+  }
+
   return (
-    <WidgetCard title="Collections — daily detail" state={{ status }}>
+    <WidgetCard title="Collections Explorer" state={{ status }}>
       {status === 'ready' && data && (
         <div className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <select
-              value={selected?.month ?? ''}
-              onChange={(e) => selected && pick({ ...selected, month: Number(e.target.value) })}
-              className={dailySelectCls}
-              aria-label="Month"
-            >
-              {MONTH_NAMES.map((name, i) => (
-                <option key={name} value={i + 1}>
-                  {name}
-                </option>
-              ))}
-            </select>
-            <select
-              value={selected?.year ?? ''}
-              onChange={(e) => selected && pick({ ...selected, year: Number(e.target.value) })}
-              className={dailySelectCls}
-              aria-label="Year"
-            >
-              {yearOptions.map((y) => (
-                <option key={y} value={y}>
-                  {y}
-                </option>
-              ))}
-            </select>
-            <select
-              value={facility}
-              onChange={(e) => {
-                setFacility(e.target.value);
-                setPage(0);
-              }}
-              className={dailySelectCls}
-              aria-label="Facility"
-            >
-              <option value="">All facilities</option>
-              {facilities.map((f) => (
-                <option key={f} value={f}>
-                  {f}
-                </option>
-              ))}
-            </select>
-            {showHideZero && (
-              <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
-                <input
-                  type="checkbox"
-                  checked={hideZero}
-                  onChange={(e) => {
-                    setHideZero(e.target.checked);
-                    setPage(0);
-                  }}
-                  className="rounded border-input accent-teal700"
-                />
-                Hide zero rows
-              </label>
-            )}
-            <span className="ml-auto text-xs text-muted-foreground">
-              {filteredRows.length.toLocaleString('en-US')} rows
-            </span>
+          {/* Filter panel — month/year/facility + hide-zero, plus layout controls. */}
+          <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={selected?.month ?? ''}
+                onChange={(e) => selected && pick({ ...selected, month: Number(e.target.value) })}
+                className={dailySelectCls}
+                aria-label="Month"
+              >
+                {MONTH_NAMES.map((name, i) => (
+                  <option key={name} value={i + 1}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={selected?.year ?? ''}
+                onChange={(e) => selected && pick({ ...selected, year: Number(e.target.value) })}
+                className={dailySelectCls}
+                aria-label="Year"
+              >
+                {yearOptions.map((y) => (
+                  <option key={y} value={y}>
+                    {y}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={facility}
+                onChange={(e) => {
+                  setFacility(e.target.value);
+                  setPage(0);
+                }}
+                className={dailySelectCls}
+                aria-label="Facility"
+              >
+                <option value="">All facilities</option>
+                {facilities.map((f) => (
+                  <option key={f} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </select>
+              {showHideZero && (
+                <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={hideZero}
+                    onChange={(e) => {
+                      setHideZero(e.target.checked);
+                      setPage(0);
+                    }}
+                    className="rounded border-input accent-teal700"
+                  />
+                  Hide zero rows
+                </label>
+              )}
+              <div className="ml-auto flex gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowColumnPanel((s) => !s)}
+                  aria-expanded={showColumnPanel}
+                  className={showColumnPanel ? 'border-teal500 text-teal700' : undefined}
+                >
+                  <Columns3 className="h-4 w-4" />
+                  Columns
+                </Button>
+                <Button type="button" variant="ghost" size="sm" onClick={reset} className="text-ink600">
+                  <RotateCcw className="h-4 w-4" />
+                  Reset
+                </Button>
+              </div>
+            </div>
           </div>
 
-          {filteredRows.length === 0 ? (
+          {/* Column show/hide + drag-to-reorder — layout-only, session, not persisted. */}
+          {showColumnPanel && (
+            <div className="rounded-lg border border-line bg-card p-4 shadow-ths animate-in fade-in-0 slide-in-from-top-1 duration-200">
+              <div className="mb-3 flex items-center gap-2 border-b border-line pb-2">
+                <Columns3 className="h-4 w-4 text-teal500" />
+                <span className="text-xs font-semibold uppercase tracking-wide text-ink600">Columns</span>
+                <span className="text-[11px] text-ink400">— show, hide, and drag to reorder (layout only)</span>
+              </div>
+              <ul className="space-y-0.5">
+                {columnOrder.map((c) => {
+                  const meta = DAILY_COLUMNS[c];
+                  const isHidden = hidden.has(c);
+                  return (
+                    <li
+                      key={c}
+                      draggable
+                      onDragStart={() => setDragCol(c)}
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        onColumnDrop(c);
+                      }}
+                      onDragEnd={() => setDragCol(null)}
+                      className={`flex items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-teal50/70 ${
+                        dragCol === c ? 'opacity-50' : ''
+                      }`}
+                    >
+                      <span
+                        aria-label={`Drag to reorder ${meta.label}`}
+                        className="cursor-grab text-ink400 active:cursor-grabbing"
+                      >
+                        <GripVertical className="h-4 w-4" aria-hidden />
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => toggleColumn(c)}
+                        aria-pressed={!isHidden}
+                        className="flex min-w-0 items-center gap-2 text-sm"
+                      >
+                        {isHidden ? (
+                          <EyeOff className="h-4 w-4 shrink-0 text-ink400" />
+                        ) : (
+                          <Eye className="h-4 w-4 shrink-0 text-teal500" />
+                        )}
+                        <span className={isHidden ? 'text-ink400 line-through' : 'text-ink900'}>
+                          {meta.label}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+
+          <div className="text-sm text-muted-foreground">
+            {sortedRows.length.toLocaleString('en-US')} rows
+          </div>
+
+          {sortedRows.length === 0 || visibleColumns.length === 0 ? (
             <div className="py-8 text-center text-sm text-muted-foreground">
-              No collections recorded for {selected ? `${MONTH_NAMES[selected.month - 1]} ${selected.year}` : 'this period'}.
+              {visibleColumns.length === 0
+                ? 'All columns are hidden — show at least one from the Columns panel.'
+                : `No collections recorded for ${selected ? `${MONTH_NAMES[selected.month - 1]} ${selected.year}` : 'this period'}.`}
             </div>
           ) : (
             <>
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Date</TableHead>
-                    <TableHead>Facility</TableHead>
-                    <TableHead className="text-right">Checks</TableHead>
-                    <TableHead className="text-right">EFT</TableHead>
-                    <TableHead className="text-right">Gross</TableHead>
+                    {visibleColumns.map((c) => {
+                      const meta = DAILY_COLUMNS[c];
+                      const active = sort?.column === c;
+                      return (
+                        <TableHead
+                          key={c}
+                          className={`${meta.numeric ? 'text-right' : ''} ${active ? 'text-teal700' : ''}`}
+                        >
+                          {meta.sortable ? (
+                            <button
+                              type="button"
+                              onClick={() => toggleSort(c)}
+                              className={`inline-flex items-center gap-1 transition-colors hover:text-teal700 ${
+                                meta.numeric ? 'flex-row-reverse' : ''
+                              }`}
+                              aria-label={`Sort by ${meta.label}`}
+                            >
+                              {meta.label}
+                              {active ? (
+                                sort!.direction === 'asc' ? (
+                                  <ArrowUp className="h-3 w-3" />
+                                ) : (
+                                  <ArrowDown className="h-3 w-3" />
+                                )
+                              ) : (
+                                <ChevronDown className="h-3 w-3 opacity-40" />
+                              )}
+                            </button>
+                          ) : (
+                            meta.label
+                          )}
+                        </TableHead>
+                      );
+                    })}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {pageRows.map((r, i) => (
                     <TableRow key={`${r.payment_date}-${r.facility_code ?? 'unassigned'}-${i}`}>
-                      <TableCell className="tabular-nums">{r.payment_date}</TableCell>
-                      <TableCell>
-                        {r.facility_name === null ? (
-                          <span className="text-muted-foreground">{facilityLabel(r)}</span>
-                        ) : (
-                          facilityLabel(r)
-                        )}
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums">{money(r.checks_amount)}</TableCell>
-                      <TableCell className="text-right tabular-nums">{money(r.eft_amount)}</TableCell>
-                      <TableCell className="text-right tabular-nums">{money(r.gross_amount)}</TableCell>
+                      {visibleColumns.map((c) => (
+                        <TableCell
+                          key={c}
+                          className={DAILY_COLUMNS[c].numeric ? 'text-right tabular-nums' : undefined}
+                        >
+                          <DailyCell r={r} col={c} />
+                        </TableCell>
+                      ))}
                     </TableRow>
                   ))}
                 </TableBody>
@@ -1136,18 +1389,18 @@ export function ClaimsDistributions() {
 }
 
 /**
- * Full collections detail: MTD/YTD KPIs and latest-month summary side by side,
- * with the (paginated, filterable) daily detail full-width below, aligned to the
- * same grid. Aggregate, non-PHI.
+ * Full collections detail: the MTD/YTD KPI chart full-width on top, with the
+ * Collections Explorer (paginated, filterable, configurable) full-width below.
+ * Aggregate, non-PHI. (The latest-month summary card was removed here; its widget
+ * remains exported for reuse elsewhere.)
  */
 export function CollectionsSections() {
   return (
     <div className="space-y-4">
-      <div className="grid gap-4 lg:grid-cols-2">
-        <CollectionsKpisWidget compact />
-        <CollectionsSummaryWidget />
+      <div className="w-full">
+        <CollectionsKpisWidget />
       </div>
-      <CollectionsDailyWidget />
+      <CollectionsExplorer />
     </div>
   );
 }
