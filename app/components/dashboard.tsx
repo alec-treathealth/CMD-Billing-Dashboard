@@ -20,7 +20,7 @@ import {
 } from 'recharts';
 import { ArrowDown, ArrowUp, ChevronDown, Columns3, Eye, EyeOff, GripVertical, RotateCcw } from 'lucide-react';
 
-import { PayerChart, payerChartTitle } from '@/components/payer-chart';
+import { PayerChart } from '@/components/payer-chart';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -116,18 +116,15 @@ function MiniBar({ pct }: { pct: number | null }) {
 }
 
 /**
- * Payer chart widget — interactive, multi-dimensional payer chart. The card title
- * is driven by the chart's own metric + Top N selection (reported via onTitleChange),
- * e.g. "Payers — Paid vs. Collection Gap (Top 10)". `defaultTopN` is preserved.
+ * Payer chart widget — interactive, multi-dimensional payer chart (group/metric/
+ * sort/show controls live inside PayerChart). Defaults to Top 10. `defaultTopN` is
+ * preserved for callers that want a different default.
  */
-export function PayerChartWidget({ defaultTopN = 5 }: { defaultTopN?: number }) {
+export function PayerChartWidget({ defaultTopN = 10 }: { defaultTopN?: number }) {
   const state = useWidget<PayerGapSummary>(loadPayerGap);
-  const [title, setTitle] = useState(() => payerChartTitle('stacked', defaultTopN));
   return (
-    <WidgetCard title={title} state={state}>
-      {state.status === 'ready' && (
-        <PayerChart data={state.data} defaultTopN={defaultTopN} onTitleChange={setTitle} />
-      )}
+    <WidgetCard title="Payer Chart - Multidimensional" state={state}>
+      {state.status === 'ready' && <PayerChart data={state.data} defaultTopN={defaultTopN} />}
     </WidgetCard>
   );
 }
@@ -1414,7 +1411,7 @@ export function Dashboard() {
   return (
     <section className="space-y-4">
       <CollectionsKpisWidget />
-      <PayerChartWidget defaultTopN={5} />
+      <PayerChartWidget defaultTopN={10} />
       <ClaimsDistributions />
     </section>
   );

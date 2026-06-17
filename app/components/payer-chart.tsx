@@ -1,11 +1,11 @@
 'use client';
 
 /**
- * Payer chart (Phase 7.9; multi-dimensional controls added Phase 8.x) — an
- * interactive horizontal bar chart over the per-payer non-PHI summary. The default
- * view splits each payer's total charge into PAID (teal) and COLLECTION GAP (coral);
- * other metrics render a single-series bar. Hover reveals the relevant non-PHI
- * fields for the chosen metric.
+ * Payer chart (Phase 7.9; multi-dimensional controls Phase 8.x) — an interactive
+ * horizontal bar chart over the per-payer non-PHI summary. The primary view is a
+ * single stacked bar per payer: total CHARGED split into PAID (teal) and COLLECTION
+ * GAP (coral). Hover reveals the per-color amounts plus claims and avg collection
+ * rate. A second metric plots the avg collection rate as a single-series bar.
  *
  * The control bar is fully client-side over the ALREADY-LOADED PayerGapSummary — no
  * new API calls. The user picks: Group by, Metric, Sort by, and Show (Top N).
@@ -14,12 +14,12 @@
  * year dimension — only payer-level rollups (payer_name, claim_count, total_charge,
  * total_allowed, total_paid, total_collection_gap, avg_collection_rate). So "Group
  * by → By Year" and "By Location" cannot be served from this shape; they require a
- * separate API load returning a year-/facility-keyed rollup. Until that exists,
- * "By Year" shows an inline notice and reverts to "By Payer", and "By Location" is a
- * disabled option. Aggregate, non-PHI: payer_name is an allowlisted dimension; no
- * patient data is present here. Nothing is persisted (session-only React state).
+ * separate API load returning a year-/facility-keyed rollup. Until that exists, both
+ * show an inline notice and revert to "By Payer". Aggregate, non-PHI: payer_name is
+ * an allowlisted dimension; no patient data is present here. Nothing is persisted
+ * (session-only React state).
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Bar,
   BarChart,
@@ -38,23 +38,24 @@ const TOP_N_OPTIONS = [5, 10, 20, 30, 0] as const; // 0 = All
 /** What to break the chart down by. Only `payer` is available in this data shape. */
 export type ChartGroupBy = 'payer' | 'year' | 'location';
 
-/** Which measure to plot. `stacked` is the two-series Paid vs. Gap default. */
-export type ChartMetric = 'stacked' | 'charged' | 'paid' | 'gap' | 'rate';
+/**
+ * Which measure to plot. `stacked` is the default single bar (charged = paid + gap);
+ * `rate` is the avg-collection-rate single-series bar.
+ */
+export type ChartMetric = 'stacked' | 'rate';
 
 type SortId = 'charged' | 'paid' | 'gap' | 'rate';
 
-const GROUP_BY_OPTIONS: readonly { id: ChartGroupBy; label: string; disabled?: boolean }[] = [
+const GROUP_BY_OPTIONS: readonly { id: ChartGroupBy; label: string }[] = [
   { id: 'payer', label: 'By Payer' },
+  // Year/Location aren't in this data shape — selecting them shows a notice and
+  // reverts to By Payer (see file header / onGroupByChange).
   { id: 'year', label: 'By Year' },
-  // Deferred — needs a new API shape (no facility/location dimension in this data).
-  { id: 'location', label: 'By Location (coming soon)', disabled: true },
+  { id: 'location', label: 'By Location' },
 ];
 
 const METRIC_OPTIONS: readonly { id: ChartMetric; label: string }[] = [
-  { id: 'stacked', label: 'Paid vs Gap (stacked)' },
-  { id: 'charged', label: 'Total Charged' },
-  { id: 'paid', label: 'Total Paid' },
-  { id: 'gap', label: 'Collection Gap' },
+  { id: 'stacked', label: 'Charged vs Paid & Gap' },
   { id: 'rate', label: 'Avg Collection Rate' },
 ];
 
@@ -65,11 +66,8 @@ const SORT_OPTIONS: readonly { id: SortId; label: string }[] = [
   { id: 'rate', label: 'Lowest Collection Rate' },
 ];
 
-/** Single-series bar config per non-stacked metric. */
+/** Single-series bar config for the (only) non-stacked metric. */
 const SINGLE_SERIES: Record<Exclude<ChartMetric, 'stacked'>, { dataKey: keyof ChartRow; name: string; fill: string }> = {
-  charged: { dataKey: 'total_charge', name: 'Total charged', fill: '#135E5A' },
-  paid: { dataKey: 'total_paid', name: 'Total paid', fill: '#135E5A' },
-  gap: { dataKey: 'total_collection_gap', name: 'Collection gap', fill: '#E2674F' },
   rate: { dataKey: 'avg_collection_rate', name: 'Avg collection rate', fill: '#1C8B82' },
 };
 
@@ -78,6 +76,7 @@ const SELECT_CLS =
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
 
 const YEAR_NOTICE = 'Year breakdown requires a separate data load — coming in the next release.';
+const LOCATION_NOTICE = 'Location breakdown requires a separate data load — coming in the next release.';
 
 interface ChartRow {
   payer: string;
@@ -87,28 +86,6 @@ interface ChartRow {
   total_paid: number;
   total_collection_gap: number;
   avg_collection_rate: number | null;
-}
-
-/** Human title for a metric, used in the widget card title and the legend. */
-function metricTitle(metric: ChartMetric): string {
-  switch (metric) {
-    case 'stacked':
-      return 'Paid vs. Collection Gap';
-    case 'charged':
-      return 'Total Charged';
-    case 'paid':
-      return 'Total Paid';
-    case 'gap':
-      return 'Collection Gap';
-    case 'rate':
-      return 'Avg Collection Rate';
-  }
-}
-
-/** Build the dynamic WidgetCard title, e.g. "Payers — Paid vs. Collection Gap (Top 10)". */
-export function payerChartTitle(metric: ChartMetric, topN: number): string {
-  const scope = topN > 0 ? `Top ${topN}` : 'All';
-  return `Payers — ${metricTitle(metric)} (${scope})`;
 }
 
 /** Axis tick for a 0..1 rate rendered as a whole percent. */
@@ -143,36 +120,20 @@ function PayerTooltip({
   if (!active || !payload || payload.length === 0) return null;
   const r = payload[0]!.payload;
 
-  // Show only the fields relevant to the selected metric.
+  // Stacked: the full charged/paid/gap breakdown (per-color amounts) + avg rate.
   const lines: { label: string; value: string; cls?: string }[] =
     metric === 'stacked'
       ? [
           { label: 'Claims', value: count(r.claim_count) },
           { label: 'Charged', value: money(r.total_charge) },
-          { label: 'Allowed', value: money(r.total_allowed) },
           { label: 'Paid', value: money(r.total_paid), cls: 'text-teal700' },
           { label: 'Collection gap', value: money(r.total_collection_gap), cls: 'text-coral600' },
-          { label: 'Avg rate', value: rate(r.avg_collection_rate) },
+          { label: 'Avg collection rate', value: rate(r.avg_collection_rate) },
         ]
-      : metric === 'charged'
-        ? [
-            { label: 'Claims', value: count(r.claim_count) },
-            { label: 'Charged', value: money(r.total_charge) },
-          ]
-        : metric === 'paid'
-          ? [
-              { label: 'Claims', value: count(r.claim_count) },
-              { label: 'Paid', value: money(r.total_paid), cls: 'text-teal700' },
-            ]
-          : metric === 'gap'
-            ? [
-                { label: 'Charged', value: money(r.total_charge) },
-                { label: 'Collection gap', value: money(r.total_collection_gap), cls: 'text-coral600' },
-              ]
-            : [
-                { label: 'Claims', value: count(r.claim_count) },
-                { label: 'Avg rate', value: rate(r.avg_collection_rate) },
-              ];
+      : [
+          { label: 'Claims', value: count(r.claim_count) },
+          { label: 'Avg collection rate', value: rate(r.avg_collection_rate) },
+        ];
 
   return (
     <div className="rounded-md border border-line bg-surface px-3 py-2 text-xs shadow-ths">
@@ -220,24 +181,16 @@ function ControlSelect<T extends string | number>({
 
 export function PayerChart({
   data,
-  defaultTopN = 5,
-  onTitleChange,
+  defaultTopN = 10,
 }: {
   data: PayerGapSummary;
   defaultTopN?: number;
-  /** Optional: report the dynamic title so the wrapping card can show it. */
-  onTitleChange?: (title: string) => void;
 }) {
   const [groupBy, setGroupBy] = useState<ChartGroupBy>('payer');
   const [metric, setMetric] = useState<ChartMetric>('stacked');
   const [sort, setSort] = useState<SortId>('charged');
   const [topN, setTopN] = useState<number>(defaultTopN);
   const [notice, setNotice] = useState<string | null>(null);
-
-  // Keep the wrapping WidgetCard title in sync with the active metric + Top N.
-  useEffect(() => {
-    onTitleChange?.(payerChartTitle(metric, topN));
-  }, [metric, topN, onTitleChange]);
 
   const rows = useMemo<ChartRow[]>(() => {
     // groupBy is always 'payer' here — 'year'/'location' aren't in this data shape
@@ -267,8 +220,8 @@ export function PayerChart({
       setNotice(null);
       return;
     }
-    // 'year' (or any non-payer): show the notice and revert to By Payer.
-    setNotice(YEAR_NOTICE);
+    // 'year' / 'location': show the relevant notice and revert to By Payer.
+    setNotice(raw === 'location' ? LOCATION_NOTICE : YEAR_NOTICE);
     setGroupBy('payer');
   }
 
@@ -282,7 +235,7 @@ export function PayerChart({
       <div className="flex flex-wrap items-center gap-2">
         <ControlSelect label="Group by" value={groupBy} ariaLabel="Group chart by" onChange={onGroupByChange}>
           {GROUP_BY_OPTIONS.map((o) => (
-            <option key={o.id} value={o.id} disabled={o.disabled}>
+            <option key={o.id} value={o.id}>
               {o.label}
             </option>
           ))}
@@ -382,6 +335,7 @@ export function PayerChart({
             <span className="flex items-center gap-1.5">
               <span className="inline-block h-2.5 w-2.5 rounded-sm bg-coral600" /> Collection gap
             </span>
+            <span className="text-ink400">(bar length = total charged)</span>
           </>
         ) : (
           <span className="flex items-center gap-1.5">
