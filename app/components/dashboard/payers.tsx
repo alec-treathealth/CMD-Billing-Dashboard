@@ -20,14 +20,14 @@ import { loadPayerGap, type PayerGapSummary } from '@/lib/actions';
 import { MiniBar, useWidget, WidgetCard } from './widgets';
 
 /**
- * Payer chart widget — interactive, multi-dimensional payer chart (group/metric/
- * sort/show controls live inside PayerChart). Defaults to Top 10. `defaultTopN` is
- * preserved for callers that want a different default.
+ * Payer chart widget — interactive payer chart (metric / sort / show controls live
+ * inside PayerChart). Defaults to Top 10 by charges. `defaultTopN` is preserved for
+ * callers that want a different default.
  */
 export function PayerChartWidget({ defaultTopN = 10 }: { defaultTopN?: number }) {
   const state = useWidget<PayerGapSummary>(loadPayerGap);
   return (
-    <WidgetCard title="Payer Chart - Multidimensional" state={state}>
+    <WidgetCard title="Payers — paid vs. collection gap" state={state}>
       {state.status === 'ready' && <PayerChart data={state.data} defaultTopN={defaultTopN} />}
     </WidgetCard>
   );

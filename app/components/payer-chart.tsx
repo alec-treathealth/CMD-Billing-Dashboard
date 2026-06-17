@@ -1,42 +1,36 @@
 'use client';
 
 /**
- * Payer chart (Phase 7.9; multi-dimensional controls Phase 8.x) — an interactive
- * horizontal bar chart over the per-payer non-PHI summary. The primary view is a
- * single stacked bar per payer: total CHARGED split into PAID (teal) and COLLECTION
- * GAP (coral). Hover reveals the per-color amounts plus claims and avg collection
- * rate. A second metric plots the avg collection rate as a single-series bar.
+ * Payer chart — a horizontal bar chart over the per-payer non-PHI summary. Default
+ * view: each payer's total CHARGED split into PAID (teal) + COLLECTION GAP (coral),
+ * top 10 by charges. Two simple, reliable controls drive it: Metric (charged-vs-gap
+ * stacked, or avg collection rate), Sort by, and Show (Top N). Hover reveals the
+ * per-color amounts plus claims and avg collection rate.
  *
- * The control bar is fully client-side over the ALREADY-LOADED PayerGapSummary — no
- * new API calls. The user picks: Group by, Metric, Sort by, and Show (Top N).
+ * Fully client-side over the ALREADY-LOADED PayerGapSummary — no new API calls.
+ * Aggregate, non-PHI (payer_name is an allowlisted dimension; no patient data).
+ * Nothing is persisted (session-only React state).
  *
- * DATA-SHAPE CONSTRAINT: PayerGapSummary.by_payer[] has NO location/facility and NO
- * year dimension — only payer-level rollups (payer_name, claim_count, total_charge,
- * total_allowed, total_paid, total_collection_gap, avg_collection_rate). So "Group
- * by → By Year" and "By Location" cannot be served from this shape; they require a
- * separate API load returning a year-/facility-keyed rollup. Until that exists, both
- * show an inline notice and revert to "By Payer". Aggregate, non-PHI: payer_name is
- * an allowlisted dimension; no patient data is present here. Nothing is persisted
- * (session-only React state).
+ * NOTE: by_payer has no year/location dimension, so a year/location breakdown isn't
+ * offered here — it needs a separate, differently-keyed rollup (a future load).
  */
 import { useMemo, useState } from 'react';
 import {
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts';
 
+import { ControlSelect } from '@/components/data-grid';
 import { count, money, moneyAxis, rate } from '@/lib/format';
 import type { PayerGapSummary } from '@/lib/actions';
 
 const TOP_N_OPTIONS = [5, 10, 20, 30, 0] as const; // 0 = All
-
-/** What to break the chart down by. Only `payer` is available in this data shape. */
-export type ChartGroupBy = 'payer' | 'year' | 'location';
 
 /**
  * Which measure to plot. `stacked` is the default single bar (charged = paid + gap);
@@ -45,14 +39,6 @@ export type ChartGroupBy = 'payer' | 'year' | 'location';
 export type ChartMetric = 'stacked' | 'rate';
 
 type SortId = 'charged' | 'paid' | 'gap' | 'rate';
-
-const GROUP_BY_OPTIONS: readonly { id: ChartGroupBy; label: string }[] = [
-  { id: 'payer', label: 'By Payer' },
-  // Year/Location aren't in this data shape — selecting them shows a notice and
-  // reverts to By Payer (see file header / onGroupByChange).
-  { id: 'year', label: 'By Year' },
-  { id: 'location', label: 'By Location' },
-];
 
 const METRIC_OPTIONS: readonly { id: ChartMetric; label: string }[] = [
   { id: 'stacked', label: 'Charged vs Paid & Gap' },
@@ -70,13 +56,6 @@ const SORT_OPTIONS: readonly { id: SortId; label: string }[] = [
 const SINGLE_SERIES: Record<Exclude<ChartMetric, 'stacked'>, { dataKey: keyof ChartRow; name: string; fill: string }> = {
   rate: { dataKey: 'avg_collection_rate', name: 'Avg collection rate', fill: '#1C8B82' },
 };
-
-const SELECT_CLS =
-  'h-8 rounded-md border border-input bg-background px-2 text-xs ring-offset-background ' +
-  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
-
-const YEAR_NOTICE = 'Year breakdown requires a separate data load — coming in the next release.';
-const LOCATION_NOTICE = 'Location breakdown requires a separate data load — coming in the next release.';
 
 interface ChartRow {
   payer: string;
@@ -150,35 +129,6 @@ function PayerTooltip({
   );
 }
 
-/** A labelled native select matching the control-bar style. */
-function ControlSelect<T extends string | number>({
-  label,
-  value,
-  ariaLabel,
-  onChange,
-  children,
-}: {
-  label: string;
-  value: T;
-  ariaLabel: string;
-  onChange: (raw: string) => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-      {label}
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        aria-label={ariaLabel}
-        className={SELECT_CLS}
-      >
-        {children}
-      </select>
-    </label>
-  );
-}
-
 export function PayerChart({
   data,
   defaultTopN = 10,
@@ -186,15 +136,11 @@ export function PayerChart({
   data: PayerGapSummary;
   defaultTopN?: number;
 }) {
-  const [groupBy, setGroupBy] = useState<ChartGroupBy>('payer');
   const [metric, setMetric] = useState<ChartMetric>('stacked');
   const [sort, setSort] = useState<SortId>('charged');
   const [topN, setTopN] = useState<number>(defaultTopN);
-  const [notice, setNotice] = useState<string | null>(null);
 
   const rows = useMemo<ChartRow[]>(() => {
-    // groupBy is always 'payer' here — 'year'/'location' aren't in this data shape
-    // (see file header); selecting them never changes the grouping.
     const mapped = data.by_payer.map((r) => ({
       payer: r.payer_name ?? '(blank)',
       claim_count: r.claim_count,
@@ -213,33 +159,14 @@ export function PayerChart({
   const single = isStacked ? null : SINGLE_SERIES[metric];
   const sortLabel = SORT_OPTIONS.find((s) => s.id === sort)?.label ?? '';
 
-  /**
-   * Group-by selection. Only `payer` is available in this data shape; `year` and
-   * `location` keep the selection visible (so the dropdown reflects the choice) and
-   * surface an inline notice in place of the chart until the backing data exists.
-   * Re-selecting By Payer clears the notice and restores the chart.
-   */
-  function onGroupByChange(raw: string) {
-    const g = raw as ChartGroupBy;
-    setGroupBy(g);
-    setNotice(g === 'payer' ? null : g === 'location' ? LOCATION_NOTICE : YEAR_NOTICE);
-  }
-
   return (
     <div className="space-y-3">
       <div className="text-sm text-muted-foreground">
         {count(data.rows_analyzed)} claims across {count(data.by_payer.length)} payers.
       </div>
 
-      {/* Multi-dimensional control bar — all client-side over the loaded summary. */}
+      {/* Control bar — all client-side over the loaded summary. */}
       <div className="flex flex-wrap items-center gap-2">
-        <ControlSelect label="Group by" value={groupBy} ariaLabel="Group chart by" onChange={onGroupByChange}>
-          {GROUP_BY_OPTIONS.map((o) => (
-            <option key={o.id} value={o.id}>
-              {o.label}
-            </option>
-          ))}
-        </ControlSelect>
         <ControlSelect
           label="Metric"
           value={metric}
@@ -278,77 +205,79 @@ export function PayerChart({
         </ControlSelect>
       </div>
 
-      {notice ? (
-        // Unavailable grouping (year/location): show the explanatory notice in
-        // place of the chart until the backing data load exists.
-        <div className="rounded-md border border-teal200 bg-teal50/60 px-3 py-2 text-xs text-ink600">
-          {notice}
-        </div>
-      ) : (
-        <>
-          <div style={{ width: '100%', height: chartHeight }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart
-                data={rows}
-                layout="vertical"
-                margin={{ top: 4, right: 16, bottom: 4, left: 8 }}
-                barCategoryGap="28%"
-              >
-                <CartesianGrid horizontal={false} stroke="#E4E9E6" />
-                <XAxis
-                  type="number"
-                  tickFormatter={metric === 'rate' ? rateAxis : moneyAxis}
-                  tick={{ fontSize: 11, fill: '#859794' }}
-                  stroke="#E4E9E6"
-                />
-                <YAxis
-                  type="category"
-                  dataKey="payer"
-                  width={150}
-                  tick={{ fontSize: 11, fill: '#4A5C5A' }}
-                  stroke="#E4E9E6"
-                  interval={0}
-                />
-                <Tooltip content={<PayerTooltip metric={metric} />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
-                {isStacked ? (
-                  <>
-                    <Bar dataKey="total_paid" stackId="charge" name="Paid" fill="#135E5A" radius={[2, 0, 0, 2]} />
-                    <Bar
-                      dataKey="total_collection_gap"
-                      stackId="charge"
-                      name="Collection gap"
-                      fill="#E2674F"
-                      radius={[0, 2, 2, 0]}
-                    />
-                  </>
-                ) : (
-                  <Bar dataKey={single!.dataKey} name={single!.name} fill={single!.fill} radius={[2, 2, 2, 2]} />
-                )}
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-
-          <div className="flex items-center gap-4 text-xs text-muted-foreground">
+      <div style={{ width: '100%', height: chartHeight }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart
+            data={rows}
+            layout="vertical"
+            margin={{ top: 4, right: 16, bottom: 4, left: 8 }}
+            barCategoryGap="28%"
+          >
+            <CartesianGrid horizontal={false} stroke="#E4E9E6" />
+            <XAxis
+              type="number"
+              tickFormatter={metric === 'rate' ? rateAxis : moneyAxis}
+              tick={{ fontSize: 11, fill: '#859794' }}
+              stroke="#E4E9E6"
+            />
+            <YAxis
+              type="category"
+              dataKey="payer"
+              width={150}
+              tick={{ fontSize: 11, fill: '#4A5C5A' }}
+              stroke="#E4E9E6"
+              interval={0}
+            />
+            <Tooltip content={<PayerTooltip metric={metric} />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
             {isStacked ? (
               <>
-                <span className="flex items-center gap-1.5">
-                  <span className="inline-block h-2.5 w-2.5 rounded-sm bg-teal700" /> Paid
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="inline-block h-2.5 w-2.5 rounded-sm bg-coral600" /> Collection gap
-                </span>
-                <span className="text-ink400">(bar length = total charged)</span>
+                <Bar dataKey="total_paid" stackId="charge" name="Paid" fill="#135E5A" radius={[2, 0, 0, 2]}>
+                  {rows.map((r) => (
+                    <Cell key={`paid-${r.payer}`} />
+                  ))}
+                </Bar>
+                <Bar
+                  dataKey="total_collection_gap"
+                  stackId="charge"
+                  name="Collection gap"
+                  fill="#E2674F"
+                  radius={[0, 2, 2, 0]}
+                >
+                  {rows.map((r) => (
+                    <Cell key={`gap-${r.payer}`} />
+                  ))}
+                </Bar>
               </>
             ) : (
-              <span className="flex items-center gap-1.5">
-                <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: single!.fill }} />
-                {single!.name}
-              </span>
+              <Bar dataKey={single!.dataKey} name={single!.name} fill={single!.fill} radius={[2, 2, 2, 2]}>
+                {rows.map((r) => (
+                  <Cell key={`val-${r.payer}`} />
+                ))}
+              </Bar>
             )}
-            <span className="ml-auto">Sorted by {sortLabel.toLowerCase()}.</span>
-          </div>
-        </>
-      )}
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div className="flex items-center gap-4 text-xs text-muted-foreground">
+        {isStacked ? (
+          <>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block h-2.5 w-2.5 rounded-sm bg-teal700" /> Paid
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block h-2.5 w-2.5 rounded-sm bg-coral600" /> Collection gap
+            </span>
+            <span className="text-ink400">(bar length = total charged)</span>
+          </>
+        ) : (
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: single!.fill }} />
+            {single!.name}
+          </span>
+        )}
+        <span className="ml-auto">Sorted by {sortLabel.toLowerCase()}.</span>
+      </div>
     </div>
   );
 }
