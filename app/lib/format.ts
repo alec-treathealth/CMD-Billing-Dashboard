@@ -34,6 +34,16 @@ export function rate(value: unknown): string {
   return `${(n * 100).toFixed(1)}%`;
 }
 
+/** Compact axis money (e.g. $1.2M / $340K) so chart ticks stay readable. */
+export function moneyAxis(value: unknown): string {
+  const v = toNumber(value);
+  if (v === null) return '—';
+  const n = Math.abs(v);
+  if (n >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `$${Math.round(v / 1_000)}K`;
+  return `$${v}`;
+}
+
 /** A pct-of-total value already expressed as a percentage. Null → em dash. */
 export function percent(value: unknown): string {
   const n = toNumber(value);

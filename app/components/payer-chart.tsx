@@ -23,18 +23,10 @@ import {
   YAxis,
 } from 'recharts';
 
-import { count, money, rate } from '@/lib/format';
+import { count, money, moneyAxis, rate } from '@/lib/format';
 import type { PayerGapSummary } from '@/lib/actions';
 
 const TOP_N_OPTIONS = [5, 10, 15, 0] as const; // 0 = All
-
-/** Compact axis money (e.g. $1.2M / $340K) so ticks stay readable. */
-function moneyAxis(v: number): string {
-  const n = Math.abs(v);
-  if (n >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `$${Math.round(v / 1_000)}K`;
-  return `$${v}`;
-}
 
 interface ChartRow {
   payer: string;

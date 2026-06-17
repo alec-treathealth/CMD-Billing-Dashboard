@@ -8,13 +8,23 @@
  * shows a generic message and the rest of the page stays usable.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 
 import { PayerChart } from '@/components/payer-chart';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { count, money, percent, rate } from '@/lib/format';
+import { count, money, moneyAxis, percent, rate } from '@/lib/format';
 import {
   loadClaimsByYear,
   loadCollectionsDaily,
@@ -349,9 +359,65 @@ function CollectionsKpisWidget({ compact = false }: { compact?: boolean }) {
   );
 }
 
+/** Top-N options for the collections KPI chart (0 = All), matching PayerChart. */
+const KPI_TOP_N_OPTIONS = [5, 10, 0] as const;
+
+interface CollectionsKpiChartRow {
+  facility: string;
+  blank: boolean;
+  mtd_gross: number;
+  ytd_remaining: number; // YTD gross minus MTD gross (floored at 0)
+  ytd_checks: number;
+  ytd_eft: number;
+  ytd_gross: number;
+}
+
+function CollectionsKpiTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: { payload: CollectionsKpiChartRow }[];
+}) {
+  if (!active || !payload || payload.length === 0) return null;
+  const r = payload[0]!.payload;
+  return (
+    <div className="rounded-md border border-line bg-surface px-3 py-2 text-xs shadow-ths">
+      <div className="mb-1 font-semibold text-ink900">{r.facility}</div>
+      <dl className="grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5 tabular-nums">
+        <dt className="text-muted-foreground">MTD Gross</dt>
+        <dd className="text-right text-teal700">{money(r.mtd_gross)}</dd>
+        <dt className="text-muted-foreground">YTD Checks</dt>
+        <dd className="text-right text-ink900">{money(r.ytd_checks)}</dd>
+        <dt className="text-muted-foreground">YTD EFT</dt>
+        <dd className="text-right text-ink900">{money(r.ytd_eft)}</dd>
+        <dt className="text-muted-foreground">YTD Gross</dt>
+        <dd className="text-right text-ink900">{money(r.ytd_gross)}</dd>
+      </dl>
+    </div>
+  );
+}
+
 function CollectionsKpisBody({ data, compact }: { data: CollectionsKpis; compact?: boolean }) {
   const asOf = data.as_of ?? '—';
-  const rows = [...data.by_facility].sort((a, b) => b.ytd_gross - a.ytd_gross);
+  const [topN, setTopN] = useState<number>(5);
+
+  const rows = useMemo<CollectionsKpiChartRow[]>(() => {
+    const mapped = data.by_facility.map((r) => ({
+      facility: facilityLabel(r),
+      blank: r.facility_name === null,
+      mtd_gross: r.mtd_gross,
+      ytd_remaining: Math.max(0, r.ytd_gross - r.mtd_gross),
+      ytd_checks: r.ytd_checks,
+      ytd_eft: r.ytd_eft,
+      ytd_gross: r.ytd_gross,
+    }));
+    mapped.sort((a, b) => b.ytd_gross - a.ytd_gross);
+    return topN > 0 ? mapped.slice(0, topN) : mapped;
+  }, [data.by_facility, topN]);
+
+  const chartHeight = Math.max(180, rows.length * 38 + 24);
+
   return (
     <div className="space-y-4">
       <div className={`grid grid-cols-2 gap-3 ${compact ? '' : 'sm:grid-cols-4'}`}>
@@ -368,34 +434,82 @@ function CollectionsKpisBody({ data, compact }: { data: CollectionsKpis; compact
           detail={`EFT ${money(data.ytd.eft)}`}
         />
       </div>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Facility</TableHead>
-            <TableHead className="text-right">MTD Gross</TableHead>
-            <TableHead className="text-right">YTD Checks</TableHead>
-            <TableHead className="text-right">YTD EFT</TableHead>
-            <TableHead className="text-right">YTD Gross</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((r, i) => (
-            <TableRow key={`${r.facility_code ?? 'unassigned'}-${i}`}>
-              <TableCell>
-                {r.facility_name === null ? (
-                  <span className="text-muted-foreground">{facilityLabel(r)}</span>
-                ) : (
-                  facilityLabel(r)
-                )}
-              </TableCell>
-              <TableCell className="text-right tabular-nums">{money(r.mtd_gross)}</TableCell>
-              <TableCell className="text-right tabular-nums">{money(r.ytd_checks)}</TableCell>
-              <TableCell className="text-right tabular-nums">{money(r.ytd_eft)}</TableCell>
-              <TableCell className="text-right tabular-nums">{money(r.ytd_gross)}</TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-sm text-muted-foreground">
+          MTD vs. YTD gross by facility, sorted by YTD gross.
+        </div>
+        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          Show
+          <select
+            value={topN}
+            onChange={(e) => setTopN(Number(e.target.value))}
+            aria-label="Number of facilities to show"
+            className={dailySelectCls}
+          >
+            {KPI_TOP_N_OPTIONS.map((n) => (
+              <option key={n} value={n}>
+                {n === 0 ? 'All' : `Top ${n}`}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div role="img" aria-label="Collections MTD vs YTD by facility" style={{ width: '100%', height: chartHeight }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart
+            data={rows}
+            layout="vertical"
+            margin={{ top: 4, right: 16, bottom: 4, left: 8 }}
+            barCategoryGap="28%"
+          >
+            <CartesianGrid horizontal={false} stroke="#E4E9E6" />
+            <XAxis
+              type="number"
+              tickFormatter={moneyAxis}
+              tick={{ fontSize: 11, fill: '#859794' }}
+              stroke="#E4E9E6"
+            />
+            <YAxis
+              type="category"
+              dataKey="facility"
+              width={160}
+              tick={{ fontSize: 11, fill: '#4A5C5A' }}
+              stroke="#E4E9E6"
+              interval={0}
+            />
+            <Tooltip content={<CollectionsKpiTooltip />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
+            <Bar dataKey="mtd_gross" stackId="ytd" name="MTD Gross" fill="#135E5A" radius={[2, 0, 0, 2]}>
+              {rows.map((r) => (
+                <Cell key={`mtd-${r.facility}`} />
+              ))}
+            </Bar>
+            <Bar
+              dataKey="ytd_remaining"
+              stackId="ytd"
+              name="YTD Remaining"
+              fill="#E2674F"
+              radius={[0, 2, 2, 0]}
+            >
+              {rows.map((r) => (
+                <Cell key={`rem-${r.facility}`} />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div className="flex items-center gap-4 text-xs text-muted-foreground">
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block h-2.5 w-2.5 rounded-sm bg-teal700" /> MTD Gross
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block h-2.5 w-2.5 rounded-sm bg-coral600" /> YTD Remaining
+        </span>
+        <span className="ml-auto">Bar length = YTD gross.</span>
+      </div>
+
       <p className="text-xs text-muted-foreground">
         MTD/YTD anchored to the latest loaded day ({asOf}). IP vs OP and IP Billing Amt are deferred
         (no IP/OP classification in the daily collections data).
