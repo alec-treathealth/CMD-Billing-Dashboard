@@ -400,7 +400,7 @@ function CollectionsKpiTooltip({
 
 function CollectionsKpisBody({ data, compact }: { data: CollectionsKpis; compact?: boolean }) {
   const asOf = data.as_of ?? '—';
-  const [topN, setTopN] = useState<number>(5);
+  const [topN, setTopN] = useState<number>(0); // 0 = All (default)
 
   const rows = useMemo<CollectionsKpiChartRow[]>(() => {
     const mapped = data.by_facility.map((r) => ({
