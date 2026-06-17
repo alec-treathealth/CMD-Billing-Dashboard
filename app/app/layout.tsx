@@ -29,16 +29,23 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body className="min-h-screen bg-ground">
-        {/* teal900 anchor bar */}
-        <header className="flex h-14 items-center gap-3 bg-teal900 px-4 sm:px-6">
-          <Logo size={26} />
-          <div className="leading-none">
-            <div className="ths-h text-sm font-semibold tracking-tight text-white">Claims Search</div>
-            <div className="mt-0.5 text-[9px] font-semibold tracking-widest text-white/70">
-              TREAT MENTAL HEALTH · BILLING &amp; RCM
+        {/* teal900 anchor bar — 3-col grid keeps the nav centered while the logo
+            stays left and the right column is reserved for future actions */}
+        <header className="grid h-14 grid-cols-[auto_1fr_auto] items-center gap-3 bg-teal900 px-4 sm:px-6">
+          {/* col 1: logo + title */}
+          <div className="flex items-center gap-3">
+            <Logo size={26} />
+            <div className="leading-none">
+              <div className="ths-h text-sm font-semibold tracking-tight text-white">Claims Search</div>
+              <div className="mt-0.5 hidden text-[9px] font-semibold tracking-widest text-white/70 sm:block">
+                TREAT MENTAL HEALTH · BILLING &amp; RCM
+              </div>
             </div>
           </div>
+          {/* col 2: nav — centered */}
           <NavLinks />
+          {/* col 3: spacer (keeps nav truly centered) */}
+          <div aria-hidden />
         </header>
         {children}
       </body>

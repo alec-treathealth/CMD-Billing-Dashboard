@@ -12,7 +12,7 @@ const LINKS = [
 export function NavLinks() {
   const pathname = usePathname();
   return (
-    <nav className="ml-auto flex items-center gap-1 text-sm font-medium">
+    <nav className="flex items-center justify-center gap-1 text-[13px] font-medium">
       {LINKS.map(({ href, label }) => {
         const active = pathname === href || pathname.startsWith(href + '/');
         return (
@@ -21,10 +21,10 @@ export function NavLinks() {
             href={href}
             aria-current={active ? 'page' : undefined}
             className={[
-              'rounded-md px-3 py-1.5 transition-colors',
+              'rounded-md px-4 py-2 transition-colors',
               active
-                ? 'bg-white/15 font-semibold text-white'
-                : 'text-white/75 hover:bg-white/10 hover:text-white',
+                ? 'bg-white/25 font-semibold text-white ring-1 ring-white/30'
+                : 'bg-white/10 text-white/80 hover:bg-white/20 hover:text-white',
             ].join(' ')}
           >
             {label}
