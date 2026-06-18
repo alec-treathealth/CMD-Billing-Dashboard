@@ -5,12 +5,15 @@ import {
   browseClaimsSql,
   claimById,
   claimByIdSql,
-  BROWSE_COLUMNS,
+  BROWSE_SELECT_LIST,
 } from '../src/queries/browse_claims.js';
 import type { QueryContext, QueryExecutor } from '../src/queries/types.js';
 
-const COLS = BROWSE_COLUMNS.join(', ');
-const PREFIX = `select ${COLS} from claims.claims`;
+// The SELECT list aliases the computed rate columns; everything else is by name.
+const PREFIX = `select ${BROWSE_SELECT_LIST} from claims.claims`;
+
+// Computed-rate SQL expressions (must mirror RATE_EXPR in browse_claims.ts).
+const COLLECTION_RATE_EXPR = '(coalesce(paid_amount, 0) / nullif(charge_amount, 0))';
 
 /** Fake executor: records every (sql, params) and returns canned rows. */
 function makeFake(dataRows: Record<string, unknown>[]) {
@@ -86,6 +89,26 @@ test('browse_claims: null-value cursor restricts to the trailing NULL block', as
     `${PREFIX} where (hcpcs_code is null and id > $1) order by hcpcs_code asc nulls last, id asc limit $2`,
   );
   assert.deepEqual(calls[0]!.params, [7, 51]);
+});
+
+test('browse_claims: computed rate sort uses the SQL expression in ORDER BY and keyset boundary', async () => {
+  const { executor, calls } = makeFake([]);
+  await browseClaims(
+    {
+      sort: { column: 'collection_rate', direction: 'desc' },
+      cursor: { id: 42, value: '0.4000' },
+      pageSize: 50,
+    },
+    ctx(executor),
+  );
+  assert.equal(
+    calls[0]!.sql,
+    `${PREFIX} where ` +
+      `(${COLLECTION_RATE_EXPR} < $1 or (${COLLECTION_RATE_EXPR} = $1 and id < $2) ` +
+      `or ${COLLECTION_RATE_EXPR} is null) ` +
+      `order by ${COLLECTION_RATE_EXPR} desc nulls last, id desc limit $3`,
+  );
+  assert.deepEqual(calls[0]!.params, ['0.4000', 42, 51]);
 });
 
 test('browse_claims: hasNext slices to pageSize and derives nextCursor from last row', async () => {

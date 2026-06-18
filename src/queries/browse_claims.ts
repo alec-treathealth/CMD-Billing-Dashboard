@@ -28,6 +28,11 @@ import type { ClaimFilter, QueryContext } from './types.js';
  * The explorer projection — every column is non-PHI (allowlisted). Patient
  * identifiers (patient_name/last/first, member_id_*, group_number, employer_name)
  * are intentionally excluded; they are reachable only via the audited results path.
+ *
+ * `allowed_rate` and `collection_rate` are NOT stored columns — they are computed
+ * in SQL against `charge_amount` as the denominator (see RATE_EXPR). The table's
+ * generated `collection_rate` (paid/allowed) is intentionally NOT projected here;
+ * the explorer measures both rates against what was billed.
  */
 export const BROWSE_COLUMNS: readonly string[] = [
   'id',
@@ -41,9 +46,32 @@ export const BROWSE_COLUMNS: readonly string[] = [
   'allowed_amount',
   'paid_amount',
   'adjustment',
+  'allowed_rate',
   'balance_due_pt',
   'collection_rate',
 ];
+
+/**
+ * SQL expressions for the computed rate columns. Denominator is `charge_amount`;
+ * `nullif(charge_amount, 0)` makes a null/zero charge yield NULL (rendered as an em
+ * dash, and sorted NULLS LAST), while a null numerator coalesces to 0. These are
+ * fixed literals (no interpolated values) so they are safe to inline in SELECT,
+ * ORDER BY, and the keyset cursor boundary.
+ */
+const RATE_EXPR: Readonly<Record<string, string>> = {
+  allowed_rate: '(coalesce(allowed_amount, 0) / nullif(charge_amount, 0))',
+  collection_rate: '(coalesce(paid_amount, 0) / nullif(charge_amount, 0))',
+};
+
+/** Map a browse column to the SQL expression to sort/compare it by. */
+function sortExpr(column: string): string {
+  return RATE_EXPR[column] ?? column;
+}
+
+/** The SELECT list: stored columns by name, computed rates aliased to their name. */
+export const BROWSE_SELECT_LIST: string = BROWSE_COLUMNS.map((c) =>
+  RATE_EXPR[c] ? `${RATE_EXPR[c]} as ${c}` : c,
+).join(', ');
 
 /** Columns the UI may sort by (closed allowlist; fixed literals only). */
 const SORTABLE_COLUMNS: ReadonlySet<string> = new Set([
@@ -57,6 +85,7 @@ const SORTABLE_COLUMNS: ReadonlySet<string> = new Set([
   'charge_amount',
   'allowed_amount',
   'paid_amount',
+  'allowed_rate',
   'collection_rate',
 ]);
 
@@ -151,7 +180,7 @@ function buildCursorClause(
     return { clause: `id ${cmp} $${startIndex}`, params: [cursor.id] };
   }
 
-  const col = sort.column; // allowlisted literal
+  const col = sortExpr(sort.column); // allowlisted literal or computed-rate expression
 
   // Cursor row was in the trailing NULL block: only later NULL rows remain.
   if (cursor.value === null) {
@@ -230,7 +259,7 @@ export function browseClaimsSql(
   limitIndex: number,
 ): string {
   return (
-    `select ${BROWSE_COLUMNS.join(', ')} from claims.claims` +
+    `select ${BROWSE_SELECT_LIST} from claims.claims` +
     (whereClause ? ` where ${whereClause}` : '') +
     ` order by ${orderClause}` +
     ` limit $${limitIndex}`
@@ -262,7 +291,7 @@ export async function browseClaims(
   // pages don't shuffle rows with equal sort keys. `id` alone needs no tiebreak.
   const dir = sort.direction === 'asc' ? 'asc' : 'desc';
   const orderClause =
-    sort.column === 'id' ? `id ${dir}` : `${sort.column} ${dir} nulls last, id ${dir}`;
+    sort.column === 'id' ? `id ${dir}` : `${sortExpr(sort.column)} ${dir} nulls last, id ${dir}`;
 
   // Fetch one extra row to detect whether a next page exists, without a count(*).
   const limitIndex = params.length + 1;
@@ -287,7 +316,7 @@ export async function browseClaims(
 
 /** SQL for a single-claim non-PHI lookup by synthetic id. Exposed for tests. */
 export function claimByIdSql(): string {
-  return `select ${BROWSE_COLUMNS.join(', ')} from claims.claims where id = $1`;
+  return `select ${BROWSE_SELECT_LIST} from claims.claims where id = $1`;
 }
 
 /**

@@ -39,6 +39,7 @@ const FIELDS: readonly { key: string; label: string; format: (v: unknown) => str
   { key: 'allowed_amount', label: 'Allowed amount', format: money },
   { key: 'paid_amount', label: 'Paid amount', format: money },
   { key: 'adjustment', label: 'Adjustment', format: money },
+  { key: 'allowed_rate', label: 'Allowed rate', format: rate },
   { key: 'balance_due_pt', label: 'Balance due (patient)', format: money },
   { key: 'collection_rate', label: 'Collection rate', format: rate },
 ];

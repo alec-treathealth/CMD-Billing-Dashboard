@@ -56,7 +56,7 @@ const PAGE_SIZE = 50;
 const CONTROL_CLASS =
   'h-10 w-full cursor-pointer appearance-none truncate rounded-md border border-line bg-surface pl-3 pr-9 text-sm text-ink900 ring-offset-background transition-colors hover:border-teal200 focus-visible:border-teal500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50';
 
-/** Columns rendered as currency; collection_rate renders as a percentage. */
+/** Columns rendered as currency; the rate columns render as a percentage. */
 const MONEY_COLUMNS: ReadonlySet<string> = new Set([
   'charge_amount',
   'allowed_amount',
@@ -64,6 +64,12 @@ const MONEY_COLUMNS: ReadonlySet<string> = new Set([
   'adjustment',
   'balance_due_pt',
 ]);
+
+/**
+ * Computed rate columns (server-side: numerator / charge_amount). Both render as a
+ * percentage (1 d.p.) and carry the same right-aligned mono ledger style as money.
+ */
+const RATE_COLUMNS: ReadonlySet<string> = new Set(['allowed_rate', 'collection_rate']);
 
 /**
  * Text columns. Everything else is set in IBM Plex Mono with tabular figures for a
@@ -83,6 +89,7 @@ const SORTABLE_COLUMNS: ReadonlySet<string> = new Set([
   'charge_amount',
   'allowed_amount',
   'paid_amount',
+  'allowed_rate',
   'collection_rate',
 ]);
 
@@ -90,19 +97,36 @@ function columnLabel(column: string): string {
   return column.replace(/_/g, ' ');
 }
 
+/**
+ * Conditional color for a rate cell (value is a 0..1 ratio, or null → no color):
+ * red below 50%, amber 50–79%, green at 80%+.
+ */
+function rateColorClass(value: unknown): string {
+  const n =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && value.trim() !== ''
+        ? Number(value)
+        : NaN;
+  if (!Number.isFinite(n)) return '';
+  if (n < 0.5) return 'text-red-500';
+  if (n < 0.8) return 'text-amber-500';
+  return 'text-green-600';
+}
+
 /** Format a non-PHI cell; PHI columns (none in this projection) stay masked. */
 function cellText(column: string, value: unknown): string {
   if (isPhiColumn(column)) return displayCell(column, value, false);
   if (value === null || value === undefined) return '—';
   if (MONEY_COLUMNS.has(column)) return money(value);
-  if (column === 'collection_rate') return rate(value);
+  if (RATE_COLUMNS.has(column)) return rate(value);
   return String(value);
 }
 
 /** Per-column cell classes — ledger mono + right-aligned numerics, left-aligned text. */
 function cellClass(column: string): string {
   if (TEXT_COLUMNS.has(column)) return '';
-  const right = MONEY_COLUMNS.has(column) || column === 'collection_rate';
+  const right = MONEY_COLUMNS.has(column) || RATE_COLUMNS.has(column);
   return `font-mono text-[13px] tabular-nums${right ? ' text-right' : ''}`;
 }
 
@@ -441,7 +465,14 @@ export function ClaimsExplorer() {
                   return (
                     <TableRow key={id ?? i} className="transition-colors hover:bg-teal50/50">
                       {visibleColumns.map((c) => (
-                        <TableCell key={c} className={cellClass(c)}>
+                        <TableCell
+                          key={c}
+                          className={
+                            RATE_COLUMNS.has(c)
+                              ? `${cellClass(c)} ${rateColorClass(row[c])}`
+                              : cellClass(c)
+                          }
+                        >
                           {c === 'id' && id !== null ? (
                             <Link
                               href={`/claims/${id}`}
