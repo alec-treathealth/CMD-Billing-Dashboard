@@ -1,385 +1,518 @@
-# CLAUDE.md — Historical Claims Search System
+# CLAUDE.md — CMD Billing Dashboard
 
-This file is persistent context for Claude Code. Read it fully before writing any code.
+Persistent context for Claude Code. **Read this file in full before writing any
+code.** It is the single source of truth for this project; the per-phase handoff
+docs have been consolidated here.
 
-## What this project is
+---
 
-An AI-powered search system over three years of out-of-network behavioral
-health billing data (BXR / Treat Health). A user asks questions in natural
-language ("find readmissions at My Time Recovery", "show payer gaps for
-Beacon Carelon"); an Anthropic tool-calling agent maps the question to one
-of a small set of **vetted, parameterized query functions** and renders the
-results.
+## 1. What this project is
 
-**This data is PHI.** The compliance layer is ON for the entire project
-(SOC 2 / HIPAA / OWASP). Patient names, member IDs, payers, and claim
-amounts are all present. Never log PHI. Never put PHI in an LLM prompt
-(see "PHI boundary" below). Parameterized queries only.
+An internal, PHI-aware web application over three years of out-of-network
+behavioral-health billing data (BXR / Treat Health / CMD). It has two pillars:
 
-## Architecture (whole system, for context — you are building Phase 1 only)
+1. **A natural-language claims search agent.** A user asks a question in plain
+   English ("show payer gaps for Beacon Carelon", "claim history for Smith"); an
+   Anthropic tool-calling agent maps it to ONE of a small set of **vetted,
+   parameterized query functions** and renders the result. The agent never writes
+   SQL and never sees patient rows.
+2. **A non-PHI analytics dashboard.** Deterministic, aggregate-only views over
+   claims and collections (payer overview, distributions, daily/monthly
+   collections, charts), plus a paginated Claims Explorer with audited per-row
+   PHI reveal, and a static behavioral-health code reference.
 
-- **Ingestion:** read 3 Google Sheets → normalize → land raw → transform to typed.
-- **Storage:** Supabase Postgres, RLS on, app-layer encryption for PHI at rest.
-- **Search agent (later phase):** Anthropic API picks a query function + args.
-  It NEVER receives raw SQL and NEVER receives patient rows.
-- **PHI boundary (later phase, but design toward it now):** query functions
-  return two shapes — a non-PHI `summary_stats` object the agent may see, and
-  a PHI result set keyed by an opaque `query_id` that only the UI fetches via
-  a separate authenticated route. The results route re-runs the parameterized
-  query rather than caching PHI at rest.
-- **Frontend (later phase):** Next.js 15 / TS / Tailwind / shadcn/ui on Vercel.
+**This entire dataset is PHI** (patient names, member IDs, payers, claim
+amounts). The compliance layer is ON for the whole project (SOC 2 / HIPAA /
+OWASP). The PHI-boundary rules in §2 are non-negotiable invariants, not
+preferences.
 
-## ⛔ Phase 1 scope — build ONLY this
+**Live data scale:** 320,116 claims (2024–2026) in `claims.claims`; collections
+domain ~58k raw rows (see §7). Deployed to Vercel at
+`https://cmd-billing-dashboard.vercel.app` (Vercel project `cmd-billing-dashboard`,
+team `bloomhouse-marketings-projects`, app root linked at `app/`).
 
-1. A Supabase migration creating `claims_raw`, `claims`, and the indexes,
-   exactly as specified under "Schema" below.
-2. An ingestion script that:
-   - reads the three sheets **via the Google Sheets API as structured cells**
-     (NOT CSV — see "Why not CSV"),
-   - normalizes per the "Column map",
-   - lands every row verbatim in `claims_raw`,
-   - transforms into typed `claims`,
-   - writes a **failed-coercion report** (any row that lands raw but fails to
-     produce a clean typed row is logged with file id, row number, and reason —
-     never silently dropped).
+---
 
-Do NOT build the agent, the query functions, readmission matching, the PHI
-results route, or any UI. Those are later phases. Make the smallest change
-that delivers a correct, verifiable ingest. If you spot adjacent work, name
-it under "Phase 2+ notes" — don't build it.
+## 2. Standing rules — DO NOT REGRESS
 
-## Data sources
+These hold across every phase and every change:
 
-Canonical source = the **"Copy of"** set inside the Drive folder
-**"Reports for Alec AI"** (`1pXsb22qF9Jx8osxSnyyWt40fnNu5FxGc`):
+- **PHI never** appears in logs, LLM prompts/transcripts, `summary_stats`, any
+  URL/query string, browser storage (`localStorage`/cookies), or `query_log`.
+- **The agent sees only `summary_stats` + `query_id`** — never raw SQL, never
+  rows. PHI rows are fetched by the UI (not the agent) via the results path.
+- **Parameterized queries only.** Column/table names are fixed string literals;
+  only values are `$n` bound params. Never `SELECT *` — project explicit
+  allowlisted columns.
+- **All query/agent DB access runs as `claims_reader`** (least privilege, SELECT
+  on typed tables only) — never the service-role key, never `claims_admin`. The
+  service-role key and `claims_admin` are ingest-path only.
+- **`identity.ts` is the single source of truth** for the `client_history`
+  identity hash — reuse `computeIdentityHash` / `normalizeMemberId`, never copy
+  the formula.
+- **Verify-full TLS stays on** (`src/ssl.ts`). Never reintroduce
+  `rejectUnauthorized: false`. The pool verifies the certificate chain AND the
+  hostname (proof against active MITM, not merely encrypted).
+- **Secrets from env only** (never hardcoded, never logged). Server secrets
+  (`RESULTS_API_SECRET`, `REVALIDATE_SECRET`, DB URLs, `ANTHROPIC_API_KEY`)
+  **never reach the browser** — no `NEXT_PUBLIC_*`, no client fetch holding a
+  token. The browser uses **Next Server Actions only** as its data path.
+- **Migrations are idempotent:** `IF NOT EXISTS` on tables/indexes; `DROP POLICY
+  IF EXISTS` before `CREATE POLICY` (SQLSTATE 42710 otherwise); never `DROP ROLE`
+  (CREATE-if-absent + unconditional REVOKE/GRANT).
+- **Supavisor transaction pooler (port 6543) forbids named prepared statements** —
+  use `pool.query(sql, params)` only.
+- **Tests stay hermetic** — `node:test` only, no new test-runner deps, no live
+  LLM/DB in `npm test`. `src/liveProbe.ts` is the separate, manually-run live
+  probe.
+- **Never add a `Co-Authored-By` trailer** to commits or PRs.
+- **Gate outward-facing actions.** Show results and HOLD before live migrations,
+  commits, pushes, or deploys. Don't add or alter SQL query tools without asking.
 
-| Year | Sheet title | Google Sheet ID |
-|------|-------------|-----------------|
-| 2024 | Copy of Historical Data for 2024 | `1BE3d6lzaopaWNQXUUrP1_yLs21uwYG2LNQBDjqzK2Ic` |
-| 2025 | Copy of Historical Data for 2025 | `1FMXHl4b57IPp2jlMsatmkfZHYmq-HfVBQXJrzWjtlOg` |
-| 2026 | Copy of Historical Data for 2026 | `1GQrOoQUhf5JgWrjnHXl-iJ28ZZzrM-9CEt-X7UiC8pc` |
+---
 
-> ⚠️ There is a second, near-identical "Historical Data for…" set in a
-> different folder. Do NOT use it. If the IDs above don't resolve, stop and
-> ask — do not substitute the other copies.
+## 3. Tech stack & repo layout
 
-All three sheets have data in `Sheet1`, row 1 is the header.
+**Stack:** Node ≥20, TypeScript (ESM), `tsx` runner. Supabase Postgres via
+`node-postgres` (`pg`). Anthropic SDK (`@anthropic-ai/sdk`, default model
+`claude-opus-4-8`, override via `ANTHROPIC_MODEL`). Next.js 15 App Router (React
+18, Tailwind, shadcn/ui, recharts) deployed on Vercel. `zod` for validation.
 
-## Why not CSV
+This is a **monorepo-style two-package** repo: the root package is the
+ingest + query/agent/results library (`src/`); the `app/` package is the Next.js
+transport + UI, which imports the library from `../src`.
 
-`Patient Name` is always `LAST, FIRST` (embedded comma, every row) and
-`Employer Name` sometimes contains a comma (`THE VANGUARD GROUP, INC.`), and
-the raw export is **not reliably quoted**. Splitting on commas WILL misalign
-columns. Read cells as structured values through the Sheets API so delimiter
-handling never happens. This is a correctness requirement, not a preference.
-
-## Column map (per-year — 2024 differs)
-
-2024's first column header is **`Office Name`**; 2025 and 2026 use
-**`Facility Name`**. Map by position + per-year header, normalize to the
-canonical name. All other columns are positionally identical across years.
-
-| Canonical | 2024 header | 2025/2026 header | Notes |
-|-----------|-------------|------------------|-------|
-| `facility_name` | `Office Name` | `Facility Name` | header differs in 2024 |
-| `date_of_service` | `Date of Service` | same | mixed `M/D/YYYY` and `MM/DD/YYYY` |
-| `hcpcs_code` | `HCPCS Code` | same | **nullable** — blank for some 2024 rows |
-| `revenue_code` | `Revenue Code` | same | **nullable** — blank for some 2024 rows |
-| `patient_name` | `Patient Name` | same | `LAST, FIRST`, embedded comma |
-| `member_id` | `Member ID` | same | mixed numeric / alphanumeric (`PGE081`); **can be negative in 2024** (`-11724767`) |
-| `group_number` | `Group Number` | same | often blank |
-| `employer_name` | `Employer Name` | same | often blank; embedded comma when present |
-| `charge_debit_amount` | `Charge/Debit Amount` | same | money |
-| `allowed_amount` | `Allowed Amount` | same | money; **can be negative** |
-| `paid_amount` | `Paid Amount` | same | money |
-| `adjustment` | `Adjustment` | same | money |
-| `balance_due_pt` | `Balance Due Pt` | same | money |
-| `payer_name` | `Payer Name` | same | |
-
-## Normalization rules
-
-- **Money** (`charge_debit_amount`, `allowed_amount`, `paid_amount`,
-  `adjustment`, `balance_due_pt`): strip `$` and `,`; preserve leading `-`;
-  parse to `numeric(12,2)`. Blank → NULL.
-- **Dates** (`date_of_service`): accept both `M/D/YYYY` and `MM/DD/YYYY`;
-  store as a real `date`. Never string-compare.
-- **HCPCS / Revenue codes:** blank cell → NULL (do not coerce to empty string).
-- **Patient name:** keep `patient_name` verbatim; also split into
-  `patient_last` / `patient_first` on the first comma for later matching.
-- **Member ID:** store original in `member_id_raw`; also store
-  `member_id_norm` = trimmed, upper-cased, leading `-` removed (absolute value
-  for matching). Blank → NULL in both.
-- Any cell that fails its expected coercion → write the row to the
-  failed-coercion report with `{source_file_id, source_row_num, column, raw_value, reason}`
-  and skip inserting that row into `claims` (it still lands in `claims_raw`).
-
-## Schema (create exactly this)
-
-```sql
-create table claims_raw (
-  id              bigint generated always as identity primary key,
-  source_year     smallint  not null,
-  source_file_id  text      not null,
-  source_row_num  integer   not null,
-  ingested_at     timestamptz not null default now(),
-  raw             jsonb     not null,
-  unique (source_file_id, source_row_num)
-);
-
-create table claims (
-  id              bigint generated always as identity primary key,
-  claims_raw_id   bigint not null references claims_raw(id),
-  source_year     smallint not null,
-
-  facility_name   text not null,
-  date_of_service date not null,
-  hcpcs_code      text,
-  revenue_code    text,
-  patient_name    text not null,
-  patient_last    text not null,
-  patient_first   text not null,
-  member_id_raw   text,
-  member_id_norm  text,
-  group_number    text,
-  employer_name   text,
-
-  charge_amount   numeric(12,2),
-  allowed_amount  numeric(12,2),
-  paid_amount     numeric(12,2),
-  adjustment      numeric(12,2),
-  balance_due_pt  numeric(12,2),
-  payer_name      text not null,
-
-  collection_rate numeric(6,4)
-    generated always as (
-      case when allowed_amount is not null and allowed_amount <> 0
-           then paid_amount / allowed_amount end
-    ) stored,
-
-  created_at      timestamptz not null default now()
-);
-
-create extension if not exists pg_trgm;
-create index claims_patient_trgm  on claims using gin (patient_name gin_trgm_ops);
-create index claims_facility_trgm on claims using gin (facility_name gin_trgm_ops);
-create index claims_payer_trgm    on claims using gin (payer_name gin_trgm_ops);
-create index claims_member_norm   on claims (member_id_norm);
-create index claims_dos           on claims (date_of_service);
-create index claims_facility_payer on claims (facility_name, payer_name);
+```
+src/                     Root library (ingest + query/agent/results)
+  ingest.ts, sheets.ts, normalize.ts, types.ts, report.ts   claims ingest
+  probe.ts, diagnose.ts, dbcheck.ts, liveProbe.ts           dev/ops scripts
+  db.ts, ssl.ts, config.ts, auth.ts, bearerAuth.ts          infra
+  cacheTags.ts, revalidateClient.ts                         cache invalidation
+  queries/               the vetted query function library (see §8)
+  agent/                 the Anthropic tool-calling agent (see §9)
+  routes/                transport-agnostic handlers (see §10)
+  collections/           collections domain ingest + readers (see §7)
+supabase/migrations/     0001–0011 (claims, RLS, collections, matviews, VOB)
+certs/supabase-ca.crt    public Supabase Root CA (verify-full TLS; not a secret)
+secrets/                 gitignored: OAuth client/token for Google Sheets
+reports/                 gitignored: failed-coercion / skipped-tab reports (PHI)
+test/                    node:test fixtures (hermetic — no live LLM/DB)
+docs/                    this file + design-system.md
+app/                     Next.js 15 App Router app (see §11)
 ```
 
-Migrations: use `IF NOT EXISTS` on `CREATE TABLE`/`CREATE INDEX`; for any RLS
-policy use explicit `DROP POLICY IF EXISTS` before `CREATE POLICY`
-(SQLSTATE 42710 otherwise).
+---
 
-## Idempotency
+## 4. Architecture & the PHI boundary
 
-Re-running ingest must not duplicate. Identity is `(source_file_id,
-source_row_num)` on `claims_raw` (note the unique constraint). The heavy
-ROW duplication in the data (e.g. group therapy 90853 billed identically day
-after day) is **legitimate billing** — never dedupe on business columns.
-Only ever collapse true re-ingestion of the same source cell.
+```
+Google Sheets ──ingest──> claims_raw (verbatim) ──transform──> claims (typed)
+                                                                   │
+NL question ─> agent (Anthropic tool-calling) ─> ONE query fn ─────┤ runs as
+                       │ sees summary_stats + query_id only         claims_reader
+                       ▼                                            │
+                  query_log (non-PHI args, drives re-execution)     │
+                                                                    ▼
+UI ──(query_id [+ re-supplied identity])──> results route ──> PHI rows
+        (Server Action, server-side)         re-executes query     (allowlisted
+                                             from query_log         columns, never
+                                             never caches PHI)      cached at rest)
+```
 
-## Secrets / config
+**Two-shape split (the core invariant):** every query function returns a non-PHI
+`summary_stats` object (the agent may see it) plus an opaque `query_id`. PHI rows
+live only behind the results route, which **re-runs** the parameterized query
+from `query_log.arguments` on each fetch (PHI is never cached at rest) and
+projects only allowlisted columns.
 
-- Supabase URL + service role key, and Google credentials, come from env /
-  secret manager — never hardcoded, never logged.
-- macOS/zsh dev env: load `.env` with
-  `export $(cat .env | grep -v '^#' | grep -v '^$' | xargs)` before running.
+**`client_history` is special:** its inputs (patient last name + member id) are
+PHI. They are passed only as bound query params, never stored in `query_log`,
+never echoed into the model transcript, never logged. The binding token is
+`identity_hash = SHA-256(lower(patient_last) | normalizeMemberId(member) |
+query_id)`, computed in-process by `src/queries/identity.ts`. The results route
+requires the caller to **re-supply** the identity terms and verifies them
+server-side (`claims.verify_identity`) before serving any row; wrong/absent
+identity fails closed to empty.
 
-## Verification (Phase 1 is done when)
+---
 
-- Migration applies cleanly to a fresh Supabase project.
-- Ingest run loads all three years; `claims_raw` row count == total source
-  rows; `claims` count == raw minus failed-coercion count.
-- Spot-check: a Covenant Hills 2024 row has NULL hcpcs_code/revenue_code and a
-  positive `member_id_norm` from a negative `member_id_raw`.
-- Spot-check: a `THE VANGUARD GROUP, INC.` row has correctly aligned columns
-  (employer comma did not shift the money fields).
-- Money negatives (`-$1,660.05`) and mixed date formats parse correctly.
-- Failed-coercion report is produced and reviewed.
-- A second ingest run inserts zero new rows (idempotent).
+## 5. Environment, secrets & running
 
-## Phase 2 — COMPLETE (Steps 1–2: schema/RLS + query function library)
+Load `.env` on macOS/zsh before running scripts:
+`export $(cat .env | grep -v '^#' | grep -v '^$' | xargs)`. See `.env.example`
+for the full annotated list. Key vars:
 
-Phase 1 ingest is done (320,116 claims, 2024–2026). Phase 2 Steps 1–2 are done
-and verified. **Full suite: 45 pass, 0 fail. `tsc --noEmit` clean.**
+| Var | Used by | Purpose |
+|-----|---------|---------|
+| `CLAIMS_READER_DATABASE_URL` | query/agent/results path | least-privilege reader role (Supavisor txn pooler, port 6543) |
+| `CLAIMS_ADMIN_DATABASE_URL` | ingest only | admin role for load + matview refresh |
+| `ANTHROPIC_API_KEY` | agent | LLM client (env only) |
+| `ANTHROPIC_MODEL` | agent | optional; defaults to `claude-opus-4-8` |
+| `RESULTS_API_SECRET` | both API routes + collections routes | shared Bearer secret; **server-only** |
+| `REVALIDATE_SECRET` | `/api/revalidate` + ingest | authorizes cache invalidation; distinct from `RESULTS_API_SECRET` |
+| `REVALIDATE_URL` | ingest host only | deployed `…/api/revalidate` URL the ingest POSTs to |
+| `SUPABASE_CA_PEM` | TLS | public Supabase Root CA; `src/ssl.ts` reads it first, falls back to committed `certs/supabase-ca.crt` |
+| `SUPABASE_SERVICE_ROLE_KEY` | legacy/other tooling only | NOT on the app path; never ship to browser |
 
-**Step 1 — schema separation, RLS, plumbing (migrations 0003–0004):**
-- Tables moved to the `claims` schema: `claims.claims`, `claims.claims_raw`,
-  `claims.query_log`. `pg_trgm` moved into `claims` too (reader needs
-  `similarity()`/`%` without any `public` privilege). `claims_reader`'s
-  `search_path = claims`.
-- Two least-privilege LOGIN roles: `claims_reader` (SELECT on `claims.claims`
-  ONLY) and `claims_admin` (full claims schema; ingest path). Passwords out of
-  band (`.env`), never in migrations.
-- `claims.log_query(...)` / `claims.get_query_log(...)` — SECURITY DEFINER, owner
-  `claims_admin`, EXECUTE granted to `claims_reader` (which has zero table rights
-  on `query_log`). `get_query_log` excludes `identity_hash`, and fail-closes:
-  no rows when expired, or when a `client_history` row has a NULL `identity_hash`.
-- `claims.similarity(text,text)` EXECUTE is available to `claims_reader`
-  (verified live 2026-06-11; no extra grant needed).
+- **Google Sheets auth** is OAuth installed-app (org policy forbids
+  service-account keys): OAuth client at `secrets/oauth-client.json`; first
+  `npm run probe`/`ingest` does a one-time browser consent writing
+  `secrets/token.json`. Both gitignored.
+- **Local app dev** MUST export the CA first:
+  `export SUPABASE_CA_PEM="$(cat certs/supabase-ca.crt)"` then
+  `cd app && npm install && npm run dev`. The app reads the repo-root `.env`.
 
-**Step 2 — the five vetted query functions (`src/queries/`):**
-PHI boundary is enforced in the type system — every function returns
-`QueryResult<NoPhi<S>>`; `NoPhi<T>` collapses to `never` if a `PhiKey` appears in
-a summary, and `Expect<HasNoPhiKey<S>>` asserts it at build time. Every function
-routes through `finalize()` (the single chokepoint that writes `query_log` via
-the definer function and emits exactly one non-PHI audit line — no function can
-return without logging). Column names are always fixed literals; only values are
-`$n` params. The Supavisor transaction-mode pooler forbids named prepared
-statements — `pool.query(sql, params)` only.
+**Commands:**
 
-| Function | Groups by | identity_hash | Notes |
-|----------|-----------|---------------|-------|
-| `distribution` | one allowlisted field | null | metric per bucket + pct_of_total |
-| `payer_gap_analysis` | payer | null | write-down vs collection-gap lenses |
-| `search_claims` | (flat aggregate) | null | adds `hcpcs_code`/`revenue_code` to `ClaimFilter`; `rate_anomaly_count` |
-| `client_history` | source_year | **SHA-256** | PHI INPUT (patient_last + member); terms never stored/logged; threshold 0.4 fixed |
-| `readmission_candidates` | (confidence tiers) | null | self-join, `gap_days` [1,365], exact/strong/possible |
+```bash
+# root library
+npm run ingest      # load 3 Google Sheets -> claims_raw + claims (idempotent)
+npm run dbcheck     # DB smoke (counts only)
+npm run probe       # one-off sheet/auth probe
+npm test            # hermetic node:test suite (171 pass, 0 fail)
+npm run typecheck   # tsc --noEmit (clean)
 
-Shared infra: `types.ts` (PHI types + per-summary compile-time assertions),
-`filters.ts` (`ClaimFilter` validate + parameterized WHERE), `runtime.ts`
-(`finalize`), `executor.ts` (`claims_reader` pool), `identity.ts`
-(`computeIdentityHash` + `normalizeMemberId` — the SINGLE source of truth the
-Phase 3 results route MUST reuse), `index.ts` (public surface). Every function
-has a fixture file using a fake executor (no live DB in tests).
+# app
+cd app && npm run dev        # http://localhost:3000
+cd app && npm run typecheck  # clean
+cd app && npm run build      # succeeds
+```
 
-**`rate_anomaly_count` semantics (locked):** counts rows where `paid_amount` and
-`allowed_amount` are both non-null but `collection_rate` is NULL — the verbatim
-CLAUDE.md anomaly definition, covering BOTH the `allowed<=0` reversals AND the
-representability overflow. Deliberately NOT narrowed to overflow-only.
+---
 
-**`readmission_candidates` pair orientation (locked):** pairs are oriented by
-`b.date_of_service > a.date_of_service` with `a.id <> b.id` as a self-pair guard.
-An earlier `a.id < b.id` dedup guard was REMOVED — `claims.id` is insertion-order
-identity and ingest is not date-sorted, so id order doesn't track service date;
-`a.id < b.id` silently dropped any pair whose later-dated claim ingested first.
+## 6. Claims data — sources, schema, normalization
 
-**Phase 3 — COMPLETE: `src/routes/results.ts`** (re-executes from `query_log`,
-re-verifies `identity_hash` for `client_history` via `identity.ts`, returns PHI
-rows, no caching).
+### Data sources (canonical)
+The **"Copy of"** set inside Drive folder **"Reports for Alec AI"**
+(`1pXsb22qF9Jx8osxSnyyWt40fnNu5FxGc`). There is a second, near-identical
+"Historical Data for…" set in another folder — **do NOT use it**; if the IDs
+below don't resolve, stop and ask.
 
-## Phase 4 — IN PROGRESS (Steps 1–2 COMPLETE: search agent + Next.js transport)
+| Year | Sheet ID |
+|------|----------|
+| 2024 | `1BE3d6lzaopaWNQXUUrP1_yLs21uwYG2LNQBDjqzK2Ic` |
+| 2025 | `1FMXHl4b57IPp2jlMsatmkfZHYmq-HfVBQXJrzWjtlOg` |
+| 2026 | `1GQrOoQUhf5JgWrjnHXl-iJ28ZZzrM-9CEt-X7UiC8pc` |
 
-The Anthropic tool-calling search agent and its HTTP transport. See
-`docs/PHASE4_HANDOFF.md` for the full design.
+Data is in `Sheet1`, row 1 = header.
 
-**Step 1 — agent library (`src/agent/`).** `runAgentTurn` maps a natural-language
-question to ONE of the five query functions via Anthropic tool-calling: five tool
-defs mirror the args types (`tools.ts`); the model picks one tool
-(`tool_choice: any`, parallel disabled — single tool per turn), never writes SQL,
-never sees rows. Untrusted tool input is validated at the dispatch boundary
-(`validators.ts`) before the function runs as `claims_reader`; the tool result is
-built from the post-`finalize()` return — `{ summary_stats, query_id }` only,
-non-PHI by construction (`client_history` identity is never reflected back or
-logged). A narrow `AnthropicMessagesClient` seam (`client.ts`) is faked in tests
-(no live LLM) and satisfied in production by `anthropicClient.ts` (`new
-Anthropic()` from `ANTHROPIC_API_KEY`).
+### Why not CSV (correctness requirement)
+`Patient Name` is always `LAST, FIRST` (embedded comma every row) and
+`Employer Name` sometimes contains a comma (`THE VANGUARD GROUP, INC.`), and the
+export is **not reliably quoted**. Splitting on commas misaligns columns. Read
+cells as structured values through the Sheets API — never CSV.
 
-**Step 2 — Next.js transport (`app/`).** Next.js 15 App Router app (TS, Tailwind,
-shadcn), Vercel-targeted, importing the library from `../src`. Two POST routes,
-both Bearer-gated (`RESULTS_API_SECRET`, constant-time `src/bearerAuth.ts`):
-`/api/agent` → `runAgentTurn` → non-PHI `{ tool_name, query_id, summary_stats }`;
-`/api/results` → `fetchResults` → PHI rows (allowlisted columns, no cache,
-`client_history` identity re-verified). **Results is POST not GET** so query_id and
-identity terms never ride a URL; non-POST → 405. Transport-agnostic handlers
-(`src/routes/{agent,results}Handler.ts`) are unit-tested fixture-level (faked
-client + executor). `@anthropic-ai/sdk` added; `express` harness retired (above).
+### Column map (per-year — 2024 differs)
+2024's first column header is `Office Name`; 2025/2026 use `Facility Name`. Map by
+position + per-year header to the canonical `facility_name`. Other columns are
+positionally identical. Notable: `hcpcs_code`/`revenue_code` nullable (blank in
+some 2024 rows); `member_id` mixed numeric/alphanumeric (`PGE081`) and **can be
+negative in 2024** (`-11724767`); money fields can be negative (`-$1,660.05`);
+dates are mixed `M/D/YYYY` and `MM/DD/YYYY`.
 
-**Next: Phase 4 Step 3 — live integration** (real Anthropic API + real DB). The
-CA-bundling gate is RESOLVED: the Supabase Root CA is committed at
-`certs/supabase-ca.crt` (public root, read by `src/ssl.ts`) so it ships in the
-Vercel bundle. Remaining Step 3 blocker: **no Vercel project / git remote yet** —
-one must be created and linked. See `docs/PHASE4_STEP3_PROMPT.md`.
+### Normalization
+- **Money:** strip `$`/`,`, preserve leading `-`, parse to `numeric(12,2)`; blank → NULL.
+- **Dates:** accept both formats, store real `date` (never string-compare).
+- **Codes:** blank → NULL (not empty string).
+- **Patient name:** keep verbatim; also split into `patient_last`/`patient_first`
+  on the first comma.
+- **Member ID:** store `member_id_raw`; also `member_id_norm` = trimmed,
+  upper-cased, leading `-` removed (abs value for matching). Blank → NULL in both.
+- Any cell failing coercion → row written to the **failed-coercion report**
+  `{source_file_id, source_row_num, column, raw_value, reason}` and skipped from
+  `claims` (it still lands in `claims_raw`) — **never silently dropped**.
 
-## Phase 6 — COMPLETE (collections schema + ingest)
+### Schema (claims schema)
+`claims.claims_raw` (verbatim jsonb landing, `unique(source_file_id,
+source_row_num)`) and `claims.claims` (typed). `claims.claims` has a stored
+generated `collection_rate = paid_amount / allowed_amount` (NULL when
+`allowed_amount` is null/0 or the rate isn't representable as `numeric(6,4)`).
+Trigram GIN indexes on patient/facility/payer names; btree on `member_id_norm`,
+`date_of_service`, `(facility_name, payer_name)`. Full DDL in
+`supabase/migrations/0001`–`0002`.
 
-Commit **`63d0a82` — phase6: collections schema + ingest** (deployed READY on
-Vercel). Adds a separate `collections` Postgres schema for the CMD collections
-domain, alongside the existing `claims` schema. Migrations `0006`–`0008`
-(`supabase/migrations/`); ingest under `src/collections/`.
+**`collection_rate` NULL is a signal, not "missing"** — when `paid_amount` and
+`allowed_amount` are both non-null but `collection_rate` is NULL, that's exactly
+the payer/policy-gap anomaly this system surfaces (`rate_anomaly_count`).
 
-**Schema / tables (`collections.*`):**
+### Idempotency
+Identity is `(source_file_id, source_row_num)`. Re-running ingest inserts zero new
+rows. Heavy row duplication in the source (e.g. 90853 group therapy billed
+identically day after day) is **legitimate billing** — never dedupe on business
+columns.
+
+---
+
+## 7. Collections domain (Phase 6+)
+
+A separate `collections` Postgres schema alongside `claims`, for the CMD
+collections domain. Migrations `0006`–`0008`; ingest under `src/collections/`.
 
 | Table | Role | Live count |
 |-------|------|-----------:|
-| `collections_raw` | verbatim landing of the source sheet — **PHI-bearing, admin-only** | 58,190 |
+| `collections_raw` | verbatim landing — **PHI-bearing, admin-only** | 58,190 |
 | `daily_collections` | typed per-day collections | 1,902 |
 | `payment_lines` | typed payment line items | 56,176 |
 | `negotiation_worklist` | typed negotiation worklist | 16 |
 | `rollup_snapshots` | typed rollup snapshots | 714 |
 | `facilities` | facility reference | 15 |
 
-**PHI / least-privilege (verified live):** `collections_raw` is PHI-bearing and
-**admin-only** — `claims_reader` has NO SELECT on it (verified: reader cannot
-SELECT `collections_raw`). `claims_reader` is granted SELECT on the five typed
-tables (`daily_collections`, `payment_lines`, `negotiation_worklist`,
-`rollup_snapshots`) **plus** `facilities` only. Any read-side collections feature
-uses the typed tables, never `collections_raw`.
+- **`collections_raw` is PHI-bearing and admin-only** — `claims_reader` has NO
+  SELECT on it. The reader gets SELECT on the five typed tables + `facilities`
+  only. Read-side features use the typed tables, never `collections_raw`.
+- **Lineage rule (locked):** `TREAT_FRCA` and `LSMH_DMH` are `source_group_code`
+  **lineage only** — NEVER a `facility_code` (0 group-code leaks, 0 FK orphans).
+- **Deferred:** archived/historical collections data is not yet ingested.
 
-**Lineage rule (locked):** `TREAT_FRCA` and `LSMH_DMH` are `source_group_code`
-**lineage only** — they are NEVER a `facility_code`. Verified: 0 group-code leaks
-into `facility_code`, and 0 FK orphans across the typed tables.
+Read APIs (`src/collections/summary.ts`, `daily.ts`; handlers in `src/routes/`)
+serve non-PHI monthly/daily aggregates as `claims_reader`, never reading
+`collections_raw` and never exposing `source_group_code`.
 
-**Deferred:** archived / historical collections data is NOT ingested in Phase 6
-— deferred to a later phase.
+---
 
-**Phase 7 (likely next):** a read-only collections **summary API/UI** over the
-typed tables (never `collections_raw`), mirroring the claims PHI boundary.
+## 8. The query function library (`src/queries/`)
 
-## Phase 2+ notes (DO NOT build now — recorded so they aren't lost)
+PHI boundary is enforced **in the type system**: every function returns
+`QueryResult<NoPhi<S>>`; `NoPhi<T>` collapses to `never` if a `PhiKey` appears in
+a summary, and `Expect<HasNoPhiKey<S>>` asserts it at build time. Every function
+routes through `finalize()` — the single chokepoint that writes `query_log` (via
+the SECURITY DEFINER `claims.log_query`) and emits exactly one non-PHI audit line;
+no function returns without logging.
 
-- **Readmission matching is fuzzy and graded.** Member ID is unreliable
-  (blank / negative / alphanumeric), group number mostly blank. Cross-year
-  identity will rest on `patient_name + payer_name` (+ `member_id_norm` when
-  present), returning confidence tiers (exact / strong / possible) as
-  candidate generation for a human — never an auto-asserted truth.
-- **`summary_stats` allowlist** (fields the agent may ever see): facility_name,
-  payer_name, hcpcs_code, revenue_code, source_year, date_of_service (as
-  ranges/buckets), and aggregates (counts/sums/avg/min/max/collection_rate).
-  NEVER patient_name, patient_first/last, member_id_*, group_number,
-  employer_name. Enforce in code.
-- Query functions = a versioned, tested library, each with fixtures — not
-  inline SQL in API routes.
-- Audit log captures who ran which function with which args (structured).
-- **A NULL `collection_rate` is itself a signal — don't treat it as "missing".**
-  The generated column yields NULL when the rate isn't representable: reversals,
-  adjustments, or a near-zero/negative `allowed_amount` (the "< 100" guard in the
-  `claims` schema is a `numeric(6,4)` representability limit, not a business
-  threshold). When `paid_amount` and `allowed_amount` are both non-null but
-  `collection_rate` is NULL, that row is exactly the kind of payer/policy-gap
-  anomaly this system exists to surface. A later phase may add a derived boolean
-  (e.g. `is_rate_anomalous`) or an analyst filter so these aren't lost behind the
-  NULL. (Do not build now.)
-- **RLS scoping is mandatory (shared project).** `claims_raw` / `claims` live in
-  the same Supabase project (`dbpabchpvipipkzkogta`) as unrelated CMD billing
-  automation tables (`cmd_transactions`, `cmd_facility_daily_summary`). In the
-  storage phase, enable RLS on `claims`/`claims_raw` and scope the search app's
-  credential so it can reach ONLY these two tables — never the unrelated CMD
-  tables. Use a dedicated least-privilege DB role / policy set; do not rely on
-  the service-role key for the app path. (Phase 1 ingest uses the service-role
-  key for the loader only.)
-- **Express dev-harness — RETIRED in Phase 4 (Step 2).** Phase 3's `src/server.ts`
-  Express harness over the results route is GONE: deleted, and `express` +
-  `@types/express` dropped from `package.json` (clearing the 4 moderate transitive
-  advisories). Production transport is now the Next.js App Router app under `app/`
-  (Phase 4): `app/app/api/results/route.ts` over `fetchResults` and
-  `app/app/api/agent/route.ts` over `runAgentTurn`, both gated by the shared
-  constant-time Bearer check in `src/bearerAuth.ts` (the harness's old auth logic).
-  The transport-agnostic callables (`src/routes/results.ts`, `src/agent/`) and
-  their thin route handlers (`src/routes/resultsHandler.ts`,
-  `src/routes/agentHandler.ts`) are unit-tested fixture-level from the repo root.
-- **SSL hardening — COMPLETED in Phase 3.** All node-postgres pools (claims_admin
-  in `src/db.ts`, claims_reader in `src/queries/executor.ts`, and the Next.js
-  results/agent routes via the app composition root `app/lib/server.ts`, which
-  inherits the reader pool) now connect verify-full via the
-  shared `src/ssl.ts` helper: `ssl: { rejectUnauthorized: true, ca: <Supabase Root
-  2021 CA> }`. The CA is COMMITTED at `certs/supabase-ca.crt` (Phase 4 Step 3 prep;
-  a public self-signed root — not a secret — so it ships in the Vercel/CI bundle,
-  which a gitignored `secrets/` path never would; it anchors the pooler's
-  leaf→intermediate→root chain, valid to 2031). The connection now verifies both
-  the certificate chain AND the hostname,
-  so it is proof against an active MITM — not merely encrypted. Verified live
-  against both roles, with a wrong-CA negative control rejected
-  (`SELF_SIGNED_CERT_IN_CHAIN`).
+| Function | Groups by | identity_hash | Notes |
+|----------|-----------|---------------|-------|
+| `distribution` | one allowlisted field | null | metric per bucket + `pct_of_total` |
+| `payer_gap_analysis` | payer | null | write-down vs collection-gap lenses |
+| `search_claims` | flat aggregate | null | `rate_anomaly_count`; HCPCS/revenue filters |
+| `client_history` | source_year | **SHA-256** | PHI INPUT; terms never stored/logged; threshold 0.4 fixed |
+| `readmission_candidates` | confidence tiers | null | self-join; `gap_days` [1,365]; exact/strong/possible |
+| `browse_claims` | keyset page | null | Claims Explorer pagination (non-PHI list columns) |
+| `dashboard_aggregates` | — | null | reads the pre-aggregated matviews (0009) |
+
+Shared infra: `types.ts` (PHI types + per-summary compile-time assertions),
+`filters.ts` (`ClaimFilter` validate + parameterized WHERE), `runtime.ts`
+(`finalize`), `executor.ts` (`claims_reader` pool), `identity.ts` (hash — the
+single source of truth), `columns.ts` (per-function PHI column allowlists;
+`getColumns()` throws on unknown names), `index.ts` (public surface). Every
+function has a fixture file using a fake executor (no live DB in tests).
+
+**Locked semantics:**
+- `rate_anomaly_count` counts rows where `paid_amount` and `allowed_amount` are
+  both non-null but `collection_rate` is NULL — covers BOTH `allowed<=0` reversals
+  AND representability overflow. Deliberately NOT narrowed to overflow-only.
+- `readmission_candidates` orients pairs strictly by `b.date_of_service >
+  a.date_of_service` with `a.id <> b.id` as the only self-pair guard. The
+  `a.id < b.id` dedup guard was REMOVED — `claims.id` is insertion order, ingest
+  is not date-sorted, so it silently dropped pairs whose later-dated claim
+  ingested first.
+
+**`summary_stats` allowlist** (fields the agent may ever see): `facility_name`,
+`payer_name`, `hcpcs_code`, `revenue_code`, `source_year`, `date_of_service` (as
+ranges/buckets), and aggregates (counts/sums/avg/min/max/`collection_rate`).
+NEVER `patient_name`/`patient_first`/`patient_last`, `member_id_*`,
+`group_number`, `employer_name`.
+
+### Column allowlists (results route projections)
+- `distribution` / `payer_gap_analysis` (no identity): `id, facility_name,
+  payer_name, source_year, date_of_service, hcpcs_code, revenue_code,
+  charge_amount, allowed_amount, paid_amount, adjustment, balance_due_pt,
+  collection_rate`.
+- `search_claims` (**PHI**): above **plus** `patient_name, patient_last,
+  patient_first, member_id_raw, member_id_norm`.
+- `client_history` (**PHI**): adds `group_number, employer_name` too.
+- `readmission_candidates` (**PHI, paired**): allowlist columns appear twice,
+  prefixed `a_`/`b_`, plus computed `confidence, gap_days, a_id, b_id` (no bare
+  unprefixed `id`).
+
+### Postgres roles & SECURITY DEFINER plumbing (migrations 0003–0005)
+- Tables live in the `claims` schema; `pg_trgm` moved into `claims` (reader needs
+  `similarity()`/`%`); `claims_reader`'s `search_path = claims`.
+- Two least-privilege LOGIN roles: `claims_reader` (SELECT on `claims.claims`
+  only, + typed collections tables + matviews) and `claims_admin` (full schema,
+  ingest path). Passwords out of band (`.env`), never in migrations.
+- `claims.log_query` / `claims.get_query_log` / `claims.verify_identity` —
+  SECURITY DEFINER, owner `claims_admin`, EXECUTE granted to `claims_reader`.
+  `get_query_log` excludes `identity_hash` and fail-closes on expiry / NULL hash.
+
+---
+
+## 9. The search agent (`src/agent/`)
+
+`runAgentTurn` maps a natural-language question to ONE query function via
+Anthropic tool-calling:
+- Five tool defs mirror the function args types (`tools.ts`); `tool_choice: any`,
+  parallel disabled — single tool per turn. The model never writes SQL.
+- Untrusted tool input is validated at the dispatch boundary (`validators.ts`,
+  reusing the per-function validators) before the function runs as
+  `claims_reader`. The tool result handed back to the model is built from the
+  post-`finalize()` return — `{ summary_stats, query_id }` only, non-PHI by
+  construction. `client_history` identity is never reflected back or logged.
+- A narrow `AnthropicMessagesClient` seam (`client.ts`) is faked in tests and
+  satisfied in production by `anthropicClient.ts` (`new Anthropic()` from
+  `ANTHROPIC_API_KEY`).
+
+---
+
+## 10. API routes & contracts
+
+All under `app/app/api/`. Transport-agnostic handlers live in `src/routes/` and
+are composed in `app/lib/server.ts` (the **composition root**: builds the
+`claims_reader` executor, the Anthropic client, reads the secrets). Browser
+traffic does NOT hit these directly — it goes through Server Actions
+(`app/lib/actions.ts`) which call the composition root in-process.
+
+| Route | Method | Auth | Returns |
+|-------|--------|------|---------|
+| `/api/agent` | POST | Bearer `RESULTS_API_SECRET` | `{ tool_name, query_id, summary_stats }` — **no PHI** |
+| `/api/results` | POST | Bearer | `{ rows, function_name, query_id }` — **PHI** (allowlisted cols) |
+| `/api/collections/summary` | GET | Bearer | non-PHI monthly collections summary |
+| `/api/collections/daily` | GET | Bearer | non-PHI daily collections |
+| `/api/collections/kpis` | GET | Bearer | non-PHI collections KPIs |
+| `/api/revalidate` | POST | Bearer `REVALIDATE_SECRET` | drops `dashboard-aggregates` cache tag |
+
+- **Results is POST, not GET**, so `query_id` and identity terms never ride a URL.
+  Non-allowed verbs → 405 with `Allow`. Errors are generic (`agent_failed`,
+  `results_failed`) — never echo the underlying error (could name a tool/column).
+- `/api/results` body: `{ query_id, identity?: { patient_last, member_id_norm? },
+  created_by? }`. `identity` is **required for `client_history`** (re-verified
+  server-side; wrong/absent → `rows: []`), ignored otherwise. Missing/expired
+  handle → `function_name: null`, `rows: []` (fail-closed).
+- Optional `x-created-by` header sets the audit principal (default
+  `agent-api`/`results-api`).
+- **`/api/revalidate`** (Phase 8.2): POST-only, constant-time Bearer, closed tag
+  allowlist (only `dashboard-aggregates`; any other → 400), no PHI/DB. After a
+  daily ingest + matview refresh, `src/ingest.ts` calls
+  `notifyDashboardRevalidate()` (`src/revalidateClient.ts`) — env-gated (no-op
+  unless both `REVALIDATE_URL` + `REVALIDATE_SECRET` set) and non-fatal. The
+  dashboard readers also carry a 15-minute `unstable_cache` `revalidate` fallback,
+  so a failed revalidate just delays freshness; it never breaks the pipeline.
+
+---
+
+## 11. The Next.js app (`app/`)
+
+Next.js 15 App Router (TS, Tailwind, shadcn/ui, recharts), Vercel-targeted, app
+root linked at `app/` (install bundles the repo root via `app/vercel.json` so
+`../src` and `../certs` ship). **The browser's only data path is Server Actions**
+(`app/lib/actions.ts`, `'use server'`) → composition root (`app/lib/server.ts`)
+in-process. `RESULTS_API_SECRET` never reaches the client.
+
+**Surfaces (top nav: Dashboard · Claims · Code Reference · Ask):**
+- **`/dashboard`** — non-PHI aggregate overview; sub-routes `/dashboard/payers`
+  (filterable payer explorer + multidimensional payer chart) and
+  `/dashboard/collections` (collections KPI chart + Collections Explorer). Built
+  from per-surface modules in `app/components/dashboard/`
+  (`overview`/`payers`/`collections`/`widgets`) over a shared widget shell.
+  Widgets read the materialized aggregates (matviews, migration 0009) through
+  cached readers.
+- **`/claims`** + **`/claims/[claimId]`** — Claims Explorer: keyset pagination,
+  faceted dropdowns, drag-to-reorder/sortable/selectable columns (shared
+  `data-grid.tsx`), and an **audited PHI-gated per-row reveal** on the detail
+  route. Lists project non-PHI columns; reveal goes through the results path.
+- **`/code-reference`** — Phase 9 static, client-only BH HCPCS/CPT + Revenue Code
+  reference. No data access, no API, no PHI (cited sources: CMS, NUBC UB-04,
+  Novitas, Ensora).
+- **`/ask`** — transcript-style NL search console (the agent path) with a
+  deterministic `needs_input` field-picker when a query is too broad, PHI masked
+  by default with per-row reveal, `client_history` identity re-entry, and
+  paginated row reveal.
+
+**PHI rules in the UI (enforced in code):** PHI columns are listed in
+`app/lib/phi.ts`; `ResultsTable` renders `••••••` by default and reveals only on
+explicit per-row action; `IdentityForm` holds patient inputs in local component
+state only (never lifted/persisted); nothing in the transcript is written to
+`localStorage`/cookies. See `docs/design-system.md` for the TreatHealthOS visual
+system (palette, typography, components, nav, PHI rules).
+
+**Access control:** there is no app-level login. The only gate in front of PHI is
+**Vercel Deployment Protection** — it MUST be On and **scoped to Production**
+(Standard Protection defaults to preview-only; production must be explicitly
+included). Sanity check: load the production alias incognito — it should bounce to
+Vercel auth, not the console.
+
+---
+
+## 12. VOB AI foundation (migrations 0010–0011) — schema only
+
+Migrations `0010_vob_ai_foundation.sql` and `0011_vob_function_revoke.sql` add
+the schema foundation for a future VOB (verification-of-benefits) AI intelligence
+layer: schemas `ref`, `vob`, `rag`, `audit`. **No application code consumes these
+yet** — it is groundwork.
+
+- **Access model is role-based** (`claims_reader`/`claims_admin`), NOT
+  JWT/org-scoped; no Supabase Auth / PostgREST exposure (mirrors 0003–0009). All
+  four schemas revoked from public/anon/authenticated/service_role.
+- **PHI-at-rest obligations** (runtime, not DDL): `vob.benefit_checks.patient_hash`
+  must be a 64-char lowercase SHA-256 hex (CHECK-enforced format);
+  `rag.document_chunks.content` must be de-identified before chunking OR treated
+  as PHI-at-rest; `notes`/`visit_limit_text`/`audit.ai_queries.user_prompt`/
+  `audit.ai_answers.*` are PHI-at-rest, protected by role grants.
+- 0011 revokes PUBLIC EXECUTE from the three VOB/RAG functions (defense-in-depth;
+  Postgres auto-grants EXECUTE to PUBLIC on function creation).
+- Apply 0009 before 0010.
+
+---
+
+## 13. Phase history (condensed)
+
+| Phase | Status | What shipped |
+|-------|--------|--------------|
+| 1 | ✅ | Claims ingest — 320,116 claims (2024–2026); `claims_raw` + typed `claims`; failed-coercion report; idempotent. Migrations 0001–0002. |
+| 2 | ✅ | Schema separation + RLS + least-privilege roles + SECURITY DEFINER plumbing (0003–0005); the vetted query function library behind the `NoPhi<S>` type chokepoint + `finalize()` audit gate. |
+| 3 | ✅ | PHI results route (`src/routes/results.ts`): re-executes from `query_log`, column allowlists, `client_history` identity re-verify; verify-full TLS (`src/ssl.ts`). |
+| 4 | ✅ | Anthropic tool-calling agent (`src/agent/`) + Next.js 15 transport (`app/`); `/api/agent` + `/api/results`; shared Bearer auth; Express dev harness retired. **Deployed to production** (Vercel), live smoke passed. |
+| 5 / 5.2 | ✅ | Search UI (server-only BFF via Server Actions, PHI masking, identity re-entry) + quick-question buttons + default non-PHI dashboard. |
+| 6 | ✅ | Collections schema + ingest (0006–0008); typed tables; admin-only `collections_raw`. |
+| 7.x | ✅ | Collections summary/daily/KPI APIs + dashboard; TreatHealthOS design system; dashboard subroutes; Claims Explorer foundation + keyset pagination + claim detail; `/ask` transcript with field-picker; materialized aggregates (0009); payer chart; collections/payers explorers. |
+| 8.0–8.2 | ✅ | Audited PHI-gated claim detail reveal; faceted dropdowns + column controls for Claims Explorer; authenticated post-ingest cache revalidation (`/api/revalidate`). |
+| 9 | ✅ | Static BH code reference page. |
+| VOB | foundation only | Migrations 0010–0011 (schemas `ref`/`vob`/`rag`/`audit`); no app code yet. |
+
+---
+
+## 14. Verification
+
+- **Tests:** `npm test` → **171 pass, 0 fail** (hermetic — faked Anthropic + DB).
+- **Typecheck:** `npm run typecheck` clean (root); `cd app && npm run typecheck`
+  clean; `cd app && npm run build` succeeds.
+- Run `npm test` + both typechecks before any commit. Show results and HOLD
+  before any push/deploy.
+- `src/liveProbe.ts` is the manually-run live probe (real Anthropic + real DB) —
+  never imported by the suite.
+
+---
+
+## 15. Known issues & deferred work
+
+- **`readmission_candidates` performance (open).** The full-population self-join
+  times out (>90s → 500), even date-scoped to one quarter with a 30-day gap. The
+  quick-question button is intentionally omitted. A real fix is query-layer work
+  and is **stop-and-explain gated** (don't alter SQL tools without asking):
+  candidate approaches — (a) an index supporting the pair self-join, (b) make a
+  facility or tight date window mandatory to bound the scan, (c) a
+  `statement_timeout` + friendly "narrow your search" UI error.
+- **`SUPABASE_CA_PEM` on non-production deploys.** If set on production only,
+  preview/dev (and local dev without the export) hit an `src/ssl.ts` bundled-path
+  bug (`ERR_INVALID_URL` on the webpacked `certs/...crt`), 500-ing every DB call.
+  Workaround: set `SUPABASE_CA_PEM` on preview/dev too (or export it locally), or
+  fix the bundled file-fallback in `src/ssl.ts`.
+- **Per-user auth.** Audit principals are currently fixed strings
+  (`phase5-ui`/`phase5-dashboard`/route defaults). Real per-user auth (to replace
+  Deployment Protection as the PHI gate and to name the real principal in the
+  audit trail) is deferred.
+- **Manual browser pass required.** This agent environment has no browser driver;
+  DOM/Network/click/refresh checks (PHI masking, Server-Action-only network,
+  reveal-clears-on-refresh) must be verified by a human at the running app.
+- **Archived/historical collections data** not yet ingested (Phase 6 deferral).
+
+---
+
+## 16. Design system
+
+`docs/design-system.md` — the TreatHealthOS visual system applied to this
+PHI-aware dashboard: palette (teal/coral/ground), typography (Space Grotesk /
+Inter / IBM Plex Mono), layout shells, components (KPI tile, widget card,
+skeleton, notice, MiniBar, payer chart, field picker, chat bubbles), navigation,
+and the code-enforced PHI rules.
+</content>
+</invoke>
