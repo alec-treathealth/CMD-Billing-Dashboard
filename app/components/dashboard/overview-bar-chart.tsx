@@ -22,7 +22,7 @@
  * Aggregate, non-PHI: reads only collections (daily_collections + facilities) and
  * the payer_gap summary. No patient data, no rows.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bar,
   BarChart,
@@ -363,6 +363,14 @@ export function OverviewBarChart() {
 
   // Drill-down: the facility whose daily distribution panel is open (null = none).
   const [selectedFacility, setSelectedFacility] = useState<string | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // Bring the drill-down into view when a bar is clicked (no-op if already visible).
+  // Keyed on the facility only, so changing month while a panel is open swaps the
+  // data in place without yanking the viewport around.
+  useEffect(() => {
+    if (selectedFacility) panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [selectedFacility]);
 
   // Past-month scoping: facility → daily range (aggregated), payer → gap range.
   // MTD reads the cached aggregates above, so no fetch is issued for it.
@@ -406,11 +414,12 @@ export function OverviewBarChart() {
 
   const monthName = MONTH_NAMES[month - 1]!;
   const monthLabel = `${monthName} ${YEAR}`;
+  const clickHint = ' Click a facility for its daily breakdown.';
   const description =
     view === 'facility'
       ? isMtd
-        ? 'MTD vs. YTD gross by facility, sorted by YTD gross.'
-        : `${monthLabel} gross by facility, sorted by gross.`
+        ? `MTD vs. YTD gross by facility, sorted by YTD gross.${clickHint}`
+        : `${monthLabel} gross by facility, sorted by gross.${clickHint}`
       : isMtd
         ? `Top ${PAYER_TOP_N} payers by total charged — paid vs. collection gap.`
         : `Top ${PAYER_TOP_N} payers by total charged (${monthLabel}) — paid vs. collection gap.`;
@@ -425,6 +434,7 @@ export function OverviewBarChart() {
       ? past.daily
       : [];
   const dailyReady = isMtd ? dailyMtdState.status === 'ready' : past.kind === 'facility';
+  const dailyError = isMtd ? dailyMtdState.status === 'error' : past.kind === 'error';
 
   // Export CSV is facility-only; enabled once the displayed data is ready.
   const canExport =
@@ -536,20 +546,37 @@ export function OverviewBarChart() {
         {chartArea()}
 
         {view === 'facility' && selectedFacility && (
-          dailyReady ? (
-            <FacilityDailyPanel
-              facility={selectedFacility}
-              monthLabel={monthLabel}
-              rows={monthDailyRows}
-              onClose={() => setSelectedFacility(null)}
-            />
-          ) : (
-            <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
-              <div className="py-6 text-center text-sm text-muted-foreground">
-                Loading daily distribution…
+          <div ref={panelRef}>
+            {dailyReady ? (
+              <FacilityDailyPanel
+                facility={selectedFacility}
+                monthLabel={monthLabel}
+                rows={monthDailyRows}
+                onClose={() => setSelectedFacility(null)}
+              />
+            ) : (
+              <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold text-ink900">
+                    {selectedFacility} — {monthLabel}
+                  </h3>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setSelectedFacility(null)}
+                    aria-label="Close daily distribution"
+                    className="text-ink600"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+                <div className="py-6 text-center text-sm text-muted-foreground">
+                  {dailyError ? 'Unable to load the daily distribution.' : 'Loading daily distribution…'}
+                </div>
               </div>
-            </div>
-          )
+            )}
+          </div>
         )}
       </div>
     </WidgetCard>
