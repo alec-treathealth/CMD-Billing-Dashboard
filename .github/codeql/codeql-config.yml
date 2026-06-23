@@ -1,0 +1,17 @@
+name: "Treat Health CodeQL Config"
+
+paths-ignore:
+  - "**/node_modules"
+  - "**/.next"
+  - "**/dist"
+  - "**/*.test.ts"
+  - "**/*.spec.ts"
+  - "test/**"
+  - "**/__fixtures__/**"
+  - "supabase/migrations/**"
+  - "docs/**"
+  - "certs/**"
+
+packs:
+  - codeql/javascript-queries
+  - codeql/python-queries
