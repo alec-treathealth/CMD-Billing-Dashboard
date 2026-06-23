@@ -514,5 +514,96 @@ PHI-aware dashboard: palette (teal/coral/ground), typography (Space Grotesk /
 Inter / IBM Plex Mono), layout shells, components (KPI tile, widget card,
 skeleton, notice, MiniBar, payer chart, field picker, chat bubbles), navigation,
 and the code-enforced PHI rules.
+
+---
+
+## 17. Staging pipeline — CMD batch ingest + three-brain ML
+
+A SECOND data pipeline alongside the `claims`/`collections` system, built from
+the CMD **BATCH DUMP ALL TIME** custom report (not the Google Sheets path).
+Source of truth for the RCM ML system. Lives in the `staging.*` / `ref.*` schemas.
+
+> **Provenance warning.** Most of this pipeline's prior-session work was authored
+> in an ephemeral container that was reclaimed before it was pushed; only what is
+> committed to `origin` survives. Verified-in-repo facts (schema, columns, grain)
+> are stated plainly below. DB-state facts (row counts, what is actually deployed)
+> are **unverified from this clone** — there is no DB MCP wired into the web
+> session, so anything about live tables is last-known, not confirmed.
+
+### Tenancy & connection
+- **Single tenant today:** `business_entity_id = af504ab6-3dcd-4aa4-a93c-27bc58de4088`
+  (BXR Consulting LLC, CMD account #475729). Scoped via GUC `app.business_entity_id`,
+  set transaction-locally (`set_config(..., true)`) and read with
+  `current_setting('app.business_entity_id')::uuid` in every RLS policy.
+- DB: project `dbpabchpvipipkzkogta`. Transaction pooler 6543 — no named prepared
+  statements. Money is `numeric(12,2)`, never float. Timestamps `timestamptz`.
+- `claims_admin` owns `staging.*`/`ref.*` (writer; owner bypasses RLS for builds);
+  `claims_reader` has SELECT, RLS-scoped by `business_entity_id`.
+
+### Tables (schema verified in `SQL Schemas/001` + `005`)
+| Object | Grain / key | Notes |
+|--------|-------------|-------|
+| `ref.remittance_code` | `(code, code_type)` | CARC/RARC codebook + reconciliation `category`; Brain-2/3 seed. Shared (no tenant scope). |
+| `ref.payer_alias` | `raw_name` PK | raw → `canonical_name` → `payer_family` (13 families). Global, non-PHI. Seeded in `005` (262 raw rows). |
+| `staging.payer_dim` | `(business_entity_id, cmd_payer_id)` | Payer master; `participates_in_era` = false today (CARC from manual EOB, not 835). |
+| `staging.claim_line` | `(business_entity_id, charge_debit_id, credit_id)` **NULLS NOT DISTINCT** (`007`) | One row per charge/credit. PHI cols are libsodium-encrypted bytea — never features. 4 canonical payer cols added in `005`. `is_training_eligible = COALESCE(tob_frequency,1) NOT IN (2,8)`. |
+| `staging.era_adjustment` | `(business_entity_id, charge_debit_id, credit_id, carc_code)` (`006`) | Long-format CARC/RARC; `adjustment_amount` sign-preserved (reversals negative). FK `claim_line_id → claim_line.id`. |
+| `staging.payment_residual` | `(business_entity_id, charge_debit_id)` | Gap miner. `residual_type ∈ {BALANCE_DUE_INSURANCE, ALLOWED_GAP, MATH_GAP, CLEAN}`. |
+| `staging.brain1_features` | `(business_entity_id, charge_debit_id)` | Leakage firewall: FEATURES submission-time-knowable; LABELS post-adjudication, separated. |
+| `staging.mv_payer_drift` | `(business_entity_id, payer_name, carc_code, carc_type)` (`008`, matview) | Brain 2 drift. `REFRESH … CONCURRENTLY` after each ingest. |
+
+### `allowed_amount` decision
+`allowed_amount = "Charge Amount" − "Charge Insurance Adjustments"` for adjudicated
+rows, NULL otherwise. `Follow Up Allowed Amt` is 100% blank and `Fee Schedule
+Applied` is a text label (not a dollar) — both rejected as allowed sources. Parse
+money via `parseMoney()` (handles `$`/`,`), never `parseFloat`.
+
+### Migration files (`SQL Schemas/`, NOT `supabase/migrations/`)
+`000` seed remittance codes · `001` staging schema · `002` ETL ingest (claim_line +
+era_adjustment unpivot) · `003` reconciliation (payment_residual) · `004` Indigo
+ETL · `005` payer normalization + brain1 schema · `006` era_adjustment credit grain
+· `007` claim_line null-credit idempotency (NULLS NOT DISTINCT) · `008` Brain 2
+drift MV. Canonical drift read: `SQL Schemas/brain2_drift_query.sql`.
+- **No `payer_carc_monthly` / `payer_code_monthly` and no superseded `008/009
+  payer_drift` exist in this clone.** That approach (and the `007 = drift MV`
+  numbering the lost-container lore references) never reached `origin`. `008` is
+  the canonical drift MV here.
+
+### Three brains
+- **Brain 1 (predictor):** `staging.brain1_features`. Targets P(paid)/P(denied)/
+  days_to_pay. `outcome` DENIED is a v1 proxy (`BALANCE_DUE_INSURANCE`); upgrades to
+  CARC-driven once 835/Brain 2 matures. Time-based split required, not random.
+- **Brain 2 (drift):** `staging.mv_payer_drift` (`008`). Per-(tenant, canonical
+  primary payer, CARC) adjudication-rate drift: baseline(120d) vs recent(60d) on
+  `primary_payment_date` (adjudication date, NOT DOS), anchored on each tenant's own
+  `max(primary_payment_date)` — not `CURRENT_DATE` — so a historical batch dump
+  yields a real signal instead of an empty recent window. Statuses:
+  `NEW_PAYER` / `NEW_CODE` / `INCREASING` / `DECREASING` / `LIKELY_LAG_ARTIFACT`
+  (`STABLE` not materialized). Alert layer filters `WHERE drift_status <> 'NEW_PAYER'`.
+  - **CO-45 — CORRECTED:** on full data CO-45 shows **real INCREASING drift across
+    Anthem/BCBS/United**. The earlier "structural OON haircut / ingestion artifact"
+    conclusion was drawn on a **partial ingest and is retracted.** `LIKELY_LAG_ARTIFACT`
+    is a general under-population guard (fires only on a material *decrease* under a
+    thin recent window) — it is NOT a CO-45 verdict; a genuinely rising CO-45 rate
+    classifies as `INCREASING`.
+  - `008` is **reconstructed from this section's prose** (original lost with the
+    container), grounded in the committed schema. Thresholds live in a `params` CTE
+    — review before first `REFRESH`. **Not yet deployed to the DB.**
+- **Brain 3 (evidence):** not started. pgvector intended (embedding columns stubbed
+  in `001`). Similar-claim retrieval for appeals (same payer/CPT/LOC).
+
+### Multi-tenancy note
+`008` deliberately does **not** hardcode the tenant UUID (the matview `GROUP BY
+business_entity_id` over all tenants; a refresh has no session GUC). A matview
+cannot carry RLS, so the `claims_reader` SELECT grant exposes all tenants' MV rows
+— moot at one tenant. **Before onboarding tenant #2:** gate MV reads behind a
+`security_barrier` view filtering `business_entity_id = current_setting('app.business_entity_id')`,
+or read only via `brain2_drift_query.sql` (a plain query that DOES see the GUC).
+
+### Known gaps
+- WELLNESS RECOVERY CENTER (CMD `10033951`) — 1 of 17 account customers failed at
+  pull; re-pull when convenient.
+- `008` drift MV authored but **not deployed/refreshed/verified** against live data
+  (no DB access from web sessions). First-run checks live in the file footer.
 </content>
 </invoke>
