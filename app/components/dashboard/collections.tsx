@@ -208,9 +208,12 @@ export function kpiChartRows(data: CollectionsKpis): CollectionsKpiChartRow[] {
 export function CollectionsKpiTooltip({
   active,
   payload,
+  monthLabel = 'MTD',
 }: {
   active?: boolean;
   payload?: { payload: CollectionsKpiChartRow }[];
+  /** Prefix for the gross row label (e.g. 'MTD'). */
+  monthLabel?: string;
 }) {
   if (!active || !payload || payload.length === 0) return null;
   const r = payload[0]!.payload;
@@ -218,7 +221,7 @@ export function CollectionsKpiTooltip({
     <div className="rounded-md border border-line bg-surface px-3 py-2 text-xs shadow-ths">
       <div className="mb-1 font-semibold text-ink900">{r.facility}</div>
       <dl className="grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5 tabular-nums">
-        <dt className="text-muted-foreground">MTD Gross</dt>
+        <dt className="text-muted-foreground">{monthLabel} Gross</dt>
         <dd className="text-right text-teal700">{money(r.mtd_gross)}</dd>
         <dt className="text-muted-foreground">YTD Checks</dt>
         <dd className="text-right text-ink900">{money(r.ytd_checks)}</dd>
@@ -237,17 +240,34 @@ export function CollectionsKpiTooltip({
  * shared by CollectionsKpisBody and the merged Overview "Master BXR Chart" widget
  * so both render identically.
  */
-export function FacilityKpiBars({ rows }: { rows: CollectionsKpiChartRow[] }) {
+export function FacilityKpiBars({
+  rows,
+  monthLabel = 'MTD',
+  onBarClick,
+}: {
+  rows: CollectionsKpiChartRow[];
+  /** Prefix for the tooltip gross row label (e.g. 'MTD'). */
+  monthLabel?: string;
+  /** Optional: invoked with the facility label when a bar is clicked. */
+  onBarClick?: (facility: string) => void;
+}) {
   const chartHeight = Math.max(180, rows.length * 38 + 24);
   return (
     <>
-      <div role="img" aria-label="Collections MTD vs YTD by facility" style={{ width: '100%', height: chartHeight }}>
+      <div
+        role="img"
+        aria-label="Collections MTD vs YTD by facility"
+        style={{ width: '100%', height: chartHeight, cursor: onBarClick ? 'pointer' : undefined }}
+      >
         <ResponsiveContainer width="100%" height="100%">
           <BarChart
             data={rows}
             layout="vertical"
             margin={{ top: 4, right: 16, bottom: 4, left: 8 }}
             barCategoryGap="28%"
+            onClick={(state) => {
+              if (onBarClick && state && typeof state.activeLabel === 'string') onBarClick(state.activeLabel);
+            }}
           >
             <CartesianGrid horizontal={false} stroke="#E4E9E6" />
             <XAxis
@@ -264,7 +284,7 @@ export function FacilityKpiBars({ rows }: { rows: CollectionsKpiChartRow[] }) {
               stroke="#E4E9E6"
               interval={0}
             />
-            <Tooltip content={<CollectionsKpiTooltip />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
+            <Tooltip content={<CollectionsKpiTooltip monthLabel={monthLabel} />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
             <Bar dataKey="mtd_gross" stackId="ytd" name="MTD Gross" fill="#135E5A" radius={[2, 0, 0, 2]}>
               {rows.map((r) => (
                 <Cell key={`mtd-${r.facility}`} />
