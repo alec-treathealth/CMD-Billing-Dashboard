@@ -41,7 +41,7 @@ const YEARS = Array.from({ length: 7 }, (_, i) => CURRENT_YEAR - i);
 const pad2 = (n: number) => String(n).padStart(2, '0');
 const lastDayOfMonth = (year: number, month: number) => new Date(year, month, 0).getDate();
 
-interface ChartRow {
+export interface ChartRow {
   payer: string;
   claim_count: number;
   total_charge: number;
@@ -50,7 +50,22 @@ interface ChartRow {
   avg_collection_rate: number | null;
 }
 
-function PayerTooltip({ active, payload }: { active?: boolean; payload?: { payload: ChartRow }[] }) {
+/** Map a payer-gap summary to chart rows: top-N payers by total charged. */
+export function payerChartRows(summary: PayerGapSummary, topN: number): ChartRow[] {
+  return summary.by_payer
+    .map((r) => ({
+      payer: r.payer_name ?? '(blank)',
+      claim_count: r.claim_count,
+      total_charge: r.total_charge,
+      total_paid: r.total_paid,
+      total_collection_gap: r.total_collection_gap,
+      avg_collection_rate: r.avg_collection_rate,
+    }))
+    .sort((a, b) => b.total_charge - a.total_charge)
+    .slice(0, topN);
+}
+
+export function PayerTooltip({ active, payload }: { active?: boolean; payload?: { payload: ChartRow }[] }) {
   if (!active || !payload || payload.length === 0) return null;
   const r = payload[0]!.payload;
   return (
@@ -69,6 +84,77 @@ function PayerTooltip({ active, payload }: { active?: boolean; payload?: { paylo
         <dd className="text-right text-ink900">{rate(r.avg_collection_rate)}</dd>
       </dl>
     </div>
+  );
+}
+
+/**
+ * Presentational payer bar chart — top payers by total CHARGED, each bar split
+ * into PAID (teal) + COLLECTION GAP (coral), with hover tooltip + legend. Pure
+ * over its `rows`; shared by PayerChart (with its range picker) and the merged
+ * Overview "Master BXR Chart" widget so both render identically.
+ */
+export function PayerGapBars({ rows }: { rows: ChartRow[] }) {
+  const chartHeight = Math.max(180, rows.length * 38 + 24);
+  return (
+    <>
+      <div
+        role="img"
+        aria-label="Payers — paid vs. collection gap"
+        style={{ width: '100%', height: chartHeight }}
+      >
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart
+            data={rows}
+            layout="vertical"
+            margin={{ top: 4, right: 16, bottom: 4, left: 8 }}
+            barCategoryGap="28%"
+          >
+            <CartesianGrid horizontal={false} stroke="#E4E9E6" />
+            <XAxis
+              type="number"
+              tickFormatter={moneyAxis}
+              tick={{ fontSize: 11, fill: '#859794' }}
+              stroke="#E4E9E6"
+            />
+            <YAxis
+              type="category"
+              dataKey="payer"
+              width={160}
+              tick={{ fontSize: 11, fill: '#4A5C5A' }}
+              stroke="#E4E9E6"
+              interval={0}
+            />
+            <Tooltip content={<PayerTooltip />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
+            <Bar dataKey="total_paid" stackId="charge" name="Paid" fill="#135E5A" radius={[2, 0, 0, 2]}>
+              {rows.map((r) => (
+                <Cell key={`paid-${r.payer}`} />
+              ))}
+            </Bar>
+            <Bar
+              dataKey="total_collection_gap"
+              stackId="charge"
+              name="Collection gap"
+              fill="#E2674F"
+              radius={[0, 2, 2, 0]}
+            >
+              {rows.map((r) => (
+                <Cell key={`gap-${r.payer}`} />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div className="flex items-center gap-4 text-xs text-muted-foreground">
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block h-2.5 w-2.5 rounded-sm bg-teal700" /> Paid
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block h-2.5 w-2.5 rounded-sm bg-coral600" /> Collection gap
+        </span>
+        <span className="ml-auto">Bar length = total charged.</span>
+      </div>
+    </>
   );
 }
 
@@ -127,22 +213,10 @@ export function PayerChart({
   // All-time prop by default; the fetched window when a range is active and ready.
   const summary = hasRange ? (range.status === 'ready' ? range.data : undefined) : data;
 
-  const rows = useMemo<ChartRow[]>(() => {
-    if (!summary) return [];
-    return summary.by_payer
-      .map((r) => ({
-        payer: r.payer_name ?? '(blank)',
-        claim_count: r.claim_count,
-        total_charge: r.total_charge,
-        total_paid: r.total_paid,
-        total_collection_gap: r.total_collection_gap,
-        avg_collection_rate: r.avg_collection_rate,
-      }))
-      .sort((a, b) => b.total_charge - a.total_charge)
-      .slice(0, topN);
-  }, [summary, topN]);
-
-  const chartHeight = Math.max(180, rows.length * 38 + 24);
+  const rows = useMemo<ChartRow[]>(
+    () => (summary ? payerChartRows(summary, topN) : []),
+    [summary, topN],
+  );
 
   function clearRange() {
     setFromYear('');
@@ -236,65 +310,7 @@ export function PayerChart({
           No payer activity in the selected range.
         </div>
       ) : (
-        <>
-          <div
-            role="img"
-            aria-label="Payers — paid vs. collection gap"
-            style={{ width: '100%', height: chartHeight }}
-          >
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart
-                data={rows}
-                layout="vertical"
-                margin={{ top: 4, right: 16, bottom: 4, left: 8 }}
-                barCategoryGap="28%"
-              >
-                <CartesianGrid horizontal={false} stroke="#E4E9E6" />
-                <XAxis
-                  type="number"
-                  tickFormatter={moneyAxis}
-                  tick={{ fontSize: 11, fill: '#859794' }}
-                  stroke="#E4E9E6"
-                />
-                <YAxis
-                  type="category"
-                  dataKey="payer"
-                  width={160}
-                  tick={{ fontSize: 11, fill: '#4A5C5A' }}
-                  stroke="#E4E9E6"
-                  interval={0}
-                />
-                <Tooltip content={<PayerTooltip />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
-                <Bar dataKey="total_paid" stackId="charge" name="Paid" fill="#135E5A" radius={[2, 0, 0, 2]}>
-                  {rows.map((r) => (
-                    <Cell key={`paid-${r.payer}`} />
-                  ))}
-                </Bar>
-                <Bar
-                  dataKey="total_collection_gap"
-                  stackId="charge"
-                  name="Collection gap"
-                  fill="#E2674F"
-                  radius={[0, 2, 2, 0]}
-                >
-                  {rows.map((r) => (
-                    <Cell key={`gap-${r.payer}`} />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-
-          <div className="flex items-center gap-4 text-xs text-muted-foreground">
-            <span className="flex items-center gap-1.5">
-              <span className="inline-block h-2.5 w-2.5 rounded-sm bg-teal700" /> Paid
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="inline-block h-2.5 w-2.5 rounded-sm bg-coral600" /> Collection gap
-            </span>
-            <span className="ml-auto">Bar length = total charged.</span>
-          </div>
-        </>
+        <PayerGapBars rows={rows} />
       )}
     </div>
   );

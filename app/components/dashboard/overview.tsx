@@ -14,8 +14,8 @@ import {
   type DistributionSummary,
 } from '@/lib/actions';
 import { MiniBar, useWidget, WidgetCard } from './widgets';
-import { PayerChartWidget } from './payers';
 import { CollectionsKpisWidget } from './collections';
+import { OverviewBarChart } from './overview-bar-chart';
 
 /** A compact distribution widget: top-N buckets by count with a proportional bar. */
 function DistributionWidget({
@@ -99,15 +99,16 @@ export function ClaimsDistributions() {
   );
 }
 /**
- * The /dashboard overview: headline collections KPIs, the payer chart (paid vs.
- * collection gap, Top 5 by default), and claim distributions. Full collections
- * detail lives on its own sub-route. Aggregate, non-PHI; no patient data loaded.
+ * The /dashboard overview: headline collections KPIs, the merged Master BXR Chart
+ * (one bar chart with View + Month dropdowns — facility MTD/YTD or payer paid vs.
+ * collection gap), and claim distributions. Full collections detail lives on its
+ * own sub-route. Aggregate, non-PHI; no patient data loaded.
  */
 export function Dashboard() {
   return (
     <section className="space-y-4">
-      <CollectionsKpisWidget />
-      <PayerChartWidget defaultTopN={10} />
+      <CollectionsKpisWidget kpiOnly />
+      <OverviewBarChart />
       <ClaimsDistributions />
     </section>
   );

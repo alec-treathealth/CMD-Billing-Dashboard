@@ -156,11 +156,23 @@ function Kpi({
  * split). Non-PHI; reads only daily_collections + facilities. IP/OP + IP Billing
  * Amt are deferred (no IP/OP classification in the in-scope tables).
  */
-export function CollectionsKpisWidget({ compact = false }: { compact?: boolean }) {
+export function CollectionsKpisWidget({
+  compact = false,
+  kpiOnly = false,
+}: {
+  compact?: boolean;
+  /** KPI-only mode: render the four KPI cards and hide the by-facility chart. */
+  kpiOnly?: boolean;
+}) {
   const state = useWidget<CollectionsKpis>(loadCollectionsKpis);
   return (
-    <WidgetCard title="Collections — MTD / YTD by facility" state={state}>
-      {state.status === 'ready' && <CollectionsKpisBody data={state.data} compact={compact} />}
+    <WidgetCard
+      title={kpiOnly ? 'Collections — MTD / YTD' : 'Collections — MTD / YTD by facility'}
+      state={state}
+    >
+      {state.status === 'ready' && (
+        <CollectionsKpisBody data={state.data} compact={compact} kpiOnly={kpiOnly} />
+      )}
     </WidgetCard>
   );
 }
@@ -168,7 +180,7 @@ export function CollectionsKpisWidget({ compact = false }: { compact?: boolean }
 /** Top-N options for the collections KPI chart (0 = All), matching PayerChart. */
 const KPI_TOP_N_OPTIONS = [5, 10, 0] as const;
 
-interface CollectionsKpiChartRow {
+export interface CollectionsKpiChartRow {
   facility: string;
   blank: boolean;
   mtd_gross: number;
@@ -178,7 +190,22 @@ interface CollectionsKpiChartRow {
   ytd_gross: number;
 }
 
-function CollectionsKpiTooltip({
+/** Map collections KPIs to facility chart rows, sorted by YTD gross (desc). */
+export function kpiChartRows(data: CollectionsKpis): CollectionsKpiChartRow[] {
+  const mapped = data.by_facility.map((r) => ({
+    facility: facilityLabel(r),
+    blank: r.facility_name === null,
+    mtd_gross: r.mtd_gross,
+    ytd_remaining: Math.max(0, r.ytd_gross - r.mtd_gross),
+    ytd_checks: r.ytd_checks,
+    ytd_eft: r.ytd_eft,
+    ytd_gross: r.ytd_gross,
+  }));
+  mapped.sort((a, b) => b.ytd_gross - a.ytd_gross);
+  return mapped;
+}
+
+export function CollectionsKpiTooltip({
   active,
   payload,
 }: {
@@ -204,61 +231,16 @@ function CollectionsKpiTooltip({
   );
 }
 
-function CollectionsKpisBody({ data, compact }: { data: CollectionsKpis; compact?: boolean }) {
-  const asOf = data.as_of ?? '—';
-  const [topN, setTopN] = useState<number>(0); // 0 = All (default)
-
-  const rows = useMemo<CollectionsKpiChartRow[]>(() => {
-    const mapped = data.by_facility.map((r) => ({
-      facility: facilityLabel(r),
-      blank: r.facility_name === null,
-      mtd_gross: r.mtd_gross,
-      ytd_remaining: Math.max(0, r.ytd_gross - r.mtd_gross),
-      ytd_checks: r.ytd_checks,
-      ytd_eft: r.ytd_eft,
-      ytd_gross: r.ytd_gross,
-    }));
-    mapped.sort((a, b) => b.ytd_gross - a.ytd_gross);
-    return topN > 0 ? mapped.slice(0, topN) : mapped;
-  }, [data.by_facility, topN]);
-
+/**
+ * Presentational facility KPI bar chart — stacked MTD gross + YTD remaining bars
+ * (bar length = YTD gross), with hover tooltip + legend. Pure over its `rows`;
+ * shared by CollectionsKpisBody and the merged Overview "Master BXR Chart" widget
+ * so both render identically.
+ */
+export function FacilityKpiBars({ rows }: { rows: CollectionsKpiChartRow[] }) {
   const chartHeight = Math.max(180, rows.length * 38 + 24);
-
   return (
-    <div className="space-y-4">
-      <div className={`grid grid-cols-2 gap-3 ${compact ? '' : 'sm:grid-cols-4'}`}>
-        <Kpi label="MTD Gross" value={money(data.mtd.gross)} sub={`as of ${asOf}`} />
-        <Kpi label="YTD Gross" value={money(data.ytd.gross)} sub={`as of ${asOf}`} />
-        <Kpi
-          label="MTD Checks / EFT"
-          value={money(data.mtd.checks)}
-          detail={`EFT ${money(data.mtd.eft)}`}
-        />
-        <Kpi
-          label="YTD Checks / EFT"
-          value={money(data.ytd.checks)}
-          detail={`EFT ${money(data.ytd.eft)}`}
-        />
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="text-sm text-muted-foreground">
-          MTD vs. YTD gross by facility, sorted by YTD gross.
-        </div>
-        <ControlSelect
-          label="Show"
-          value={topN}
-          ariaLabel="Number of facilities to show"
-          onChange={(v) => setTopN(Number(v))}
-        >
-          {KPI_TOP_N_OPTIONS.map((n) => (
-            <option key={n} value={n}>
-              {n === 0 ? 'All' : `Top ${n}`}
-            </option>
-          ))}
-        </ControlSelect>
-      </div>
-
+    <>
       <div role="img" aria-label="Collections MTD vs YTD by facility" style={{ width: '100%', height: chartHeight }}>
         <ResponsiveContainer width="100%" height="100%">
           <BarChart
@@ -312,6 +294,74 @@ function CollectionsKpisBody({ data, compact }: { data: CollectionsKpis; compact
         </span>
         <span className="ml-auto">Bar length = YTD gross.</span>
       </div>
+    </>
+  );
+}
+
+function CollectionsKpisBody({
+  data,
+  compact,
+  kpiOnly = false,
+}: {
+  data: CollectionsKpis;
+  compact?: boolean;
+  kpiOnly?: boolean;
+}) {
+  const asOf = data.as_of ?? '—';
+  const [topN, setTopN] = useState<number>(0); // 0 = All (default)
+
+  const allRows = useMemo<CollectionsKpiChartRow[]>(() => kpiChartRows(data), [data]);
+  const rows = useMemo<CollectionsKpiChartRow[]>(
+    () => (topN > 0 ? allRows.slice(0, topN) : allRows),
+    [allRows, topN],
+  );
+
+  const kpiCards = (
+    <div className={`grid grid-cols-2 gap-3 ${compact ? '' : 'sm:grid-cols-4'}`}>
+      <Kpi label="MTD Gross" value={money(data.mtd.gross)} sub={`as of ${asOf}`} />
+      <Kpi label="YTD Gross" value={money(data.ytd.gross)} sub={`as of ${asOf}`} />
+      <Kpi
+        label="MTD Checks / EFT"
+        value={money(data.mtd.checks)}
+        detail={`EFT ${money(data.mtd.eft)}`}
+      />
+      <Kpi
+        label="YTD Checks / EFT"
+        value={money(data.ytd.checks)}
+        detail={`EFT ${money(data.ytd.eft)}`}
+      />
+    </div>
+  );
+
+  // KPI-only mode (Overview): the four cards sit above the merged Master BXR
+  // Chart, which renders the by-facility bars, so the chart is omitted here.
+  if (kpiOnly) {
+    return <div className="space-y-4">{kpiCards}</div>;
+  }
+
+  return (
+    <div className="space-y-4">
+      {kpiCards}
+
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-sm text-muted-foreground">
+          MTD vs. YTD gross by facility, sorted by YTD gross.
+        </div>
+        <ControlSelect
+          label="Show"
+          value={topN}
+          ariaLabel="Number of facilities to show"
+          onChange={(v) => setTopN(Number(v))}
+        >
+          {KPI_TOP_N_OPTIONS.map((n) => (
+            <option key={n} value={n}>
+              {n === 0 ? 'All' : `Top ${n}`}
+            </option>
+          ))}
+        </ControlSelect>
+      </div>
+
+      <FacilityKpiBars rows={rows} />
 
       <p className="text-xs text-muted-foreground">
         MTD/YTD anchored to the latest loaded day ({asOf}). IP vs OP and IP Billing Amt are deferred
