@@ -32,6 +32,10 @@
 --   signals — NOT a CO-45 verdict. On full data CO-45 shows real INCREASING drift
 --   across Anthem/BCBS/United; the earlier "structural/artifact" conclusion was
 --   drawn on a partial ingest and is retracted.
+-- Anchor GUARD (2026-06-23): as_of is bounded to <= CURRENT_DATE, and scoped charges
+--   to <= as_of_date. Without it, a handful of future-dated primary_payment_date rows
+--   (observed: 2 rows dated 2033-11-27) anchor the windows ~7yr in the future and the
+--   MV materializes 0 rows. The 2 source rows are a separate data-quality fix.
 -- Statuses (the 5 documented in §17): NEW_PAYER, NEW_CODE, INCREASING,
 --   DECREASING, LIKELY_LAG_ARTIFACT. Non-drifting (payer,code) pairs are STABLE
 --   and are NOT materialized. The alert layer (brain2_drift_query.sql) further
@@ -75,6 +79,7 @@ asof AS (
   SELECT business_entity_id, max(primary_payment_date) AS as_of_date
   FROM staging.claim_line
   WHERE primary_payment_date IS NOT NULL
+    AND primary_payment_date <= CURRENT_DATE   -- guard: future-dated outliers must not anchor the windows
   GROUP BY business_entity_id
 ),
 scoped AS (
@@ -94,6 +99,7 @@ scoped AS (
   JOIN asof a USING (business_entity_id)
   CROSS JOIN params p
   WHERE cl.primary_payment_date IS NOT NULL
+    AND cl.primary_payment_date <= a.as_of_date
     AND cl.primary_payment_date > a.as_of_date - (p.recent_days + p.baseline_days)
 ),
 payer_totals AS (
