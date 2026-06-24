@@ -290,14 +290,14 @@ export async function collectionsDailyForMonth(
  */
 function cmdApiConfig(): CmdApiConfig {
   const token = process.env.CMD_API_TOKEN?.trim();
-  const username = process.env.CMD_USERNAME?.trim();
-  const password = process.env.CMD_PASSWORD?.trim();
+  const username = process.env.CMD_API_USERNAME?.trim();
+  const password = process.env.CMD_API_PASSWORD?.trim();
   let auth: CmdApiConfig['auth'];
   if (token) auth = { kind: 'token', token };
   else if (username && password) auth = { kind: 'basic', username, password };
   else {
     throw new Error(
-      'CMD API credentials not configured (set CMD_API_TOKEN, or CMD_USERNAME + CMD_PASSWORD)',
+      'CMD API credentials not configured (set CMD_API_TOKEN, or CMD_API_USERNAME + CMD_API_PASSWORD)',
     );
   }
   return {
