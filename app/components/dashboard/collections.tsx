@@ -11,7 +11,6 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Cell,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -35,6 +34,29 @@ import {
 } from '@/lib/actions';
 import { facilityLabel } from '../../../src/collections/summaryTypes';
 import { MiniBar, useWidget, WidgetCard } from './widgets';
+
+/**
+ * Shared segment colors for the facility bar charts (MTD stacked + past-month
+ * stacked). Kept in one place so the bars and their legends never drift apart.
+ * Gross = teal (the project primary), EFT = blue, Checks = purple, and the MTD
+ * chart's YTD-remaining tail = amber.
+ */
+export const CHART_COLORS = {
+  gross: '#135E5A',
+  eft: '#2563EB',
+  checks: '#7C3AED',
+  ytdRemaining: '#F59E0B',
+} as const;
+
+/** A single legend entry: a color swatch (exact hex, matching its bar) + label. */
+export function LegendSwatch({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: color }} />
+      {label}
+    </span>
+  );
+}
 
 /**
  * Collections summary — latest month, by facility. Non-PHI: aggregates only
@@ -184,6 +206,8 @@ export interface CollectionsKpiChartRow {
   facility: string;
   blank: boolean;
   mtd_gross: number;
+  mtd_checks: number;
+  mtd_eft: number;
   ytd_remaining: number; // YTD gross minus MTD gross (floored at 0)
   ytd_checks: number;
   ytd_eft: number;
@@ -196,6 +220,8 @@ export function kpiChartRows(data: CollectionsKpis): CollectionsKpiChartRow[] {
     facility: facilityLabel(r),
     blank: r.facility_name === null,
     mtd_gross: r.mtd_gross,
+    mtd_checks: r.mtd_checks,
+    mtd_eft: r.mtd_eft,
     ytd_remaining: Math.max(0, r.ytd_gross - r.mtd_gross),
     ytd_checks: r.ytd_checks,
     ytd_eft: r.ytd_eft,
@@ -217,16 +243,18 @@ export function CollectionsKpiTooltip({
 }) {
   if (!active || !payload || payload.length === 0) return null;
   const r = payload[0]!.payload;
+  // Checks/EFT are the MTD (or selected-month) values; the bar's segments and this
+  // tooltip both read mtd_checks/mtd_eft, never the cumulative YTD checks/eft.
   return (
     <div className="rounded-md border border-line bg-surface px-3 py-2 text-xs shadow-ths">
       <div className="mb-1 font-semibold text-ink900">{r.facility}</div>
       <dl className="grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5 tabular-nums">
         <dt className="text-muted-foreground">{monthLabel} Gross</dt>
         <dd className="text-right text-teal700">{money(r.mtd_gross)}</dd>
-        <dt className="text-muted-foreground">YTD Checks</dt>
-        <dd className="text-right text-ink900">{money(r.ytd_checks)}</dd>
-        <dt className="text-muted-foreground">YTD EFT</dt>
-        <dd className="text-right text-ink900">{money(r.ytd_eft)}</dd>
+        <dt className="text-muted-foreground">{monthLabel} EFT</dt>
+        <dd className="text-right text-ink900">{money(r.mtd_eft)}</dd>
+        <dt className="text-muted-foreground">{monthLabel} Checks</dt>
+        <dd className="text-right text-ink900">{money(r.mtd_checks)}</dd>
         <dt className="text-muted-foreground">YTD Gross</dt>
         <dd className="text-right text-ink900">{money(r.ytd_gross)}</dd>
       </dl>
@@ -285,33 +313,20 @@ export function FacilityKpiBars({
               interval={0}
             />
             <Tooltip content={<CollectionsKpiTooltip monthLabel={monthLabel} />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
-            <Bar dataKey="mtd_gross" stackId="ytd" name="MTD Gross" fill="#135E5A" radius={[2, 0, 0, 2]}>
-              {rows.map((r) => (
-                <Cell key={`mtd-${r.facility}`} />
-              ))}
-            </Bar>
-            <Bar
-              dataKey="ytd_remaining"
-              stackId="ytd"
-              name="YTD Remaining"
-              fill="#E2674F"
-              radius={[0, 2, 2, 0]}
-            >
-              {rows.map((r) => (
-                <Cell key={`rem-${r.facility}`} />
-              ))}
-            </Bar>
+            {/* Four stacked segments (left→right): Gross → EFT → Checks → YTD Remaining. */}
+            <Bar dataKey="mtd_gross" stackId="gross" name={`${monthLabel} Gross`} fill={CHART_COLORS.gross} radius={[2, 0, 0, 2]} />
+            <Bar dataKey="mtd_eft" stackId="gross" name={`${monthLabel} EFT`} fill={CHART_COLORS.eft} radius={[0, 0, 0, 0]} />
+            <Bar dataKey="mtd_checks" stackId="gross" name={`${monthLabel} Checks`} fill={CHART_COLORS.checks} radius={[0, 0, 0, 0]} />
+            <Bar dataKey="ytd_remaining" stackId="gross" name="YTD Remaining" fill={CHART_COLORS.ytdRemaining} radius={[0, 2, 2, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </div>
 
-      <div className="flex items-center gap-4 text-xs text-muted-foreground">
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-2.5 w-2.5 rounded-sm bg-teal700" /> MTD Gross
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-2.5 w-2.5 rounded-sm bg-coral600" /> YTD Remaining
-        </span>
+      <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
+        <LegendSwatch color={CHART_COLORS.gross} label={`${monthLabel} Gross`} />
+        <LegendSwatch color={CHART_COLORS.eft} label={`${monthLabel} EFT`} />
+        <LegendSwatch color={CHART_COLORS.checks} label={`${monthLabel} Checks`} />
+        <LegendSwatch color={CHART_COLORS.ytdRemaining} label="YTD Remaining" />
         <span className="ml-auto">Bar length = YTD gross.</span>
       </div>
     </>

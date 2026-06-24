@@ -35,6 +35,7 @@ import { collectionsMonthlySummary } from '../../src/collections/summary.js';
 import type { CollectionsMonthlySummary } from '../../src/collections/summaryTypes.js';
 import { collectionsDaily, collectionsKpis } from '../../src/collections/daily.js';
 import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collections/dailyTypes.js';
+import { cmdPayerGapForMonth, type CmdApiConfig } from '../../src/collections/cmdPayer.js';
 import { browseClaims as browseClaimsQuery, claimById } from '../../src/queries/browse_claims.js';
 import type { BrowseClaimsArgs, BrowseClaimsResult } from '../../src/queries/browse_claims.js';
 import { handleAgentRequest, type AgentHttpRequest } from '../../src/routes/agentHandler.js';
@@ -271,6 +272,45 @@ export async function collectionsDailyForMonth(
     { from, to },
     { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard' },
   );
+}
+
+/**
+ * CollaborateMD (CMD) per-payer gap for one 2026 month (non-PHI summary).
+ *
+ * Reads the CMD_* credentials from the SERVER env here (composition-root pattern)
+ * and injects them into the env-free reader in src/collections/cmdPayer.ts. The
+ * secrets never reach the browser and are never logged. Throws if no credentials
+ * are configured — the caller (loadPayerGapCmd) collapses that to { ok: false },
+ * and the UI falls back to the matview date-range path, so an unconfigured (or
+ * still-unverified) CMD integration never breaks the By Payer view.
+ *
+ * NOT cached: like payerGapForRange, this is a per-request, user-selected window.
+ * Aggregation to payer totals happens inside cmdPayerGapForMonth — only the
+ * non-PHI PayerGapSummary leaves the server.
+ */
+function cmdApiConfig(): CmdApiConfig {
+  const token = process.env.CMD_API_TOKEN?.trim();
+  const username = process.env.CMD_USERNAME?.trim();
+  const password = process.env.CMD_PASSWORD?.trim();
+  let auth: CmdApiConfig['auth'];
+  if (token) auth = { kind: 'token', token };
+  else if (username && password) auth = { kind: 'basic', username, password };
+  else {
+    throw new Error(
+      'CMD API credentials not configured (set CMD_API_TOKEN, or CMD_USERNAME + CMD_PASSWORD)',
+    );
+  }
+  return {
+    baseUrl: process.env.CMD_API_BASE_URL?.trim() || 'https://webapi.collaboratemd.com',
+    customerId: process.env.CMD_CUSTOMER_ID?.trim() || '10027973',
+    reportId: process.env.CMD_REPORT_ID?.trim() || '10091729',
+    filterId: process.env.CMD_FILTER_ID?.trim() || '10147241',
+    auth,
+  };
+}
+
+export async function payerGapCmdForMonth(year: number, month: number): Promise<PayerGapSummary> {
+  return cmdPayerGapForMonth(year, month, cmdApiConfig());
 }
 
 // ---------------------------------------------------------------------------

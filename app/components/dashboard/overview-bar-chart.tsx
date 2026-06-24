@@ -27,7 +27,6 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Cell,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -46,13 +45,14 @@ import {
   loadCollectionsDailyRange,
   loadCollectionsKpis,
   loadPayerGap,
+  loadPayerGapCmd,
   loadPayerGapRange,
   type CollectionsDailyResult,
   type CollectionsKpis,
   type PayerGapSummary,
 } from '@/lib/actions';
 import { facilityLabel } from '../../../src/collections/summaryTypes';
-import { FacilityKpiBars, kpiChartRows } from './collections';
+import { CHART_COLORS, FacilityKpiBars, kpiChartRows, LegendSwatch } from './collections';
 import { useWidget, WidgetCard } from './widgets';
 
 type DailyRow = CollectionsDailyResult['rows'][number];
@@ -179,19 +179,18 @@ function FacilityGrossBars({
               interval={0}
             />
             <Tooltip content={<FacilityGrossTooltip monthLabel={monthLabel} />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
-            <Bar dataKey="gross" name="Gross" fill="#135E5A" radius={[2, 2, 2, 2]}>
-              {rows.map((r) => (
-                <Cell key={`gross-${r.facility}`} />
-              ))}
-            </Bar>
+            {/* Three stacked segments (left→right): Gross → EFT → Checks. No YTD. */}
+            <Bar dataKey="gross" stackId="gross" name={`${monthLabel} Gross`} fill={CHART_COLORS.gross} radius={[2, 0, 0, 2]} />
+            <Bar dataKey="eft" stackId="gross" name={`${monthLabel} EFT`} fill={CHART_COLORS.eft} radius={[0, 0, 0, 0]} />
+            <Bar dataKey="checks" stackId="gross" name={`${monthLabel} Checks`} fill={CHART_COLORS.checks} radius={[0, 2, 2, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </div>
 
-      <div className="flex items-center gap-4 text-xs text-muted-foreground">
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-2.5 w-2.5 rounded-sm bg-teal700" /> Gross
-        </span>
+      <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
+        <LegendSwatch color={CHART_COLORS.gross} label={`${monthLabel} Gross`} />
+        <LegendSwatch color={CHART_COLORS.eft} label={`${monthLabel} EFT`} />
+        <LegendSwatch color={CHART_COLORS.checks} label={`${monthLabel} Checks`} />
         <span className="ml-auto">Bar length = month gross.</span>
       </div>
     </>
@@ -396,16 +395,24 @@ export function OverviewBarChart() {
           if (live) setPast({ kind: 'error' });
         });
     } else {
+      // Past 2026 month: CollaborateMD is the source of truth for payer payments.
+      // Fall back to the matview date-range path when CMD is unavailable (not
+      // configured / unreachable / unrecognized response) so the view never breaks.
       const from = `${YEAR}-${pad2(month)}-01`;
       const to = `${YEAR}-${pad2(month)}-${pad2(lastDayOfMonth(YEAR, month))}`;
-      loadPayerGapRange({ from, to })
-        .then((r) => {
-          if (!live) return;
-          setPast(r.ok ? { kind: 'payer', summary: r.data } : { kind: 'error' });
-        })
-        .catch(() => {
-          if (live) setPast({ kind: 'error' });
-        });
+      (async () => {
+        const cmd = await loadPayerGapCmd(YEAR, month);
+        if (!live) return;
+        if (cmd.ok) {
+          setPast({ kind: 'payer', summary: cmd.data });
+          return;
+        }
+        const fallback = await loadPayerGapRange({ from, to });
+        if (!live) return;
+        setPast(fallback.ok ? { kind: 'payer', summary: fallback.data } : { kind: 'error' });
+      })().catch(() => {
+        if (live) setPast({ kind: 'error' });
+      });
     }
     return () => {
       live = false;

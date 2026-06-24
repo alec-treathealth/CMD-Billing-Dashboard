@@ -30,6 +30,7 @@ import {
   dashboardPayerGap,
   handleAgent,
   handleResults,
+  payerGapCmdForMonth,
   payerGapForRange,
   revealClaimById,
   searchClaimsDirect,
@@ -252,6 +253,24 @@ export async function loadPayerGapRange(params: {
 }): Promise<DashboardResult<PayerGapSummary>> {
   try {
     return { ok: true, data: await payerGapForRange(params.from, params.to) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Per-payer gap for one 2026 month, sourced from CollaborateMD (non-PHI summary).
+ * Backs the By Payer chart's PAST-month view, where the matview lacks complete
+ * 2026 data. Aggregated to payer totals server-side; on any failure (CMD not
+ * configured, unreachable, or an unrecognized response) returns { ok: false } so
+ * the caller can fall back to the matview date-range path. No PHI, no rows.
+ */
+export async function loadPayerGapCmd(
+  year: number,
+  month: number,
+): Promise<DashboardResult<PayerGapSummary>> {
+  try {
+    return { ok: true, data: await payerGapCmdForMonth(year, month) };
   } catch {
     return { ok: false };
   }
