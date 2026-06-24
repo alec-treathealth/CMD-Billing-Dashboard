@@ -114,25 +114,28 @@ function FacilityGrossTooltip({
   if (!active || !payload || payload.length === 0) return null;
   const r = payload[0]!.payload;
   const prefix = monthLabel ? `${monthLabel} ` : '';
+  // gross = checks + eft (verified). The bar splits gross into Checks + EFT; Gross
+  // is shown last as the summary total (the bar length), not a stacked segment.
   return (
     <div className="rounded-md border border-line bg-surface px-3 py-2 text-xs shadow-ths">
       <div className="mb-1 font-semibold text-ink900">{r.facility}</div>
       <dl className="grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5 tabular-nums">
-        <dt className="text-muted-foreground">{prefix}Gross</dt>
-        <dd className="text-right text-teal700">{money(r.gross)}</dd>
         <dt className="text-muted-foreground">{prefix}Checks</dt>
         <dd className="text-right text-ink900">{money(r.checks)}</dd>
         <dt className="text-muted-foreground">{prefix}EFT</dt>
         <dd className="text-right text-ink900">{money(r.eft)}</dd>
+        <dt className="text-muted-foreground">{prefix}Gross</dt>
+        <dd className="text-right text-teal700">{money(r.gross)}</dd>
       </dl>
     </div>
   );
 }
 
 /**
- * Single gross bar per facility (past-month facility view). Reuses the same axes,
- * color token (#135E5A), and money formatters as the MTD/YTD chart — only the
- * stacked split is dropped, since a past month has no MTD/YTD distinction.
+ * Per-facility payment-type bars (past-month facility view). Month gross splits
+ * into its two payment types — Checks + EFT (verified identity: gross = checks +
+ * eft) — as two non-overlapping segments summing to month gross (the bar length).
+ * Reuses the same axes and money formatters as the MTD chart.
  */
 function FacilityGrossBars({
   rows,
@@ -179,18 +182,16 @@ function FacilityGrossBars({
               interval={0}
             />
             <Tooltip content={<FacilityGrossTooltip monthLabel={monthLabel} />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
-            {/* Three stacked segments (left→right): Gross → EFT → Checks. No YTD. */}
-            <Bar dataKey="gross" stackId="gross" name={`${monthLabel} Gross`} fill={CHART_COLORS.gross} radius={[2, 0, 0, 2]} />
-            <Bar dataKey="eft" stackId="gross" name={`${monthLabel} EFT`} fill={CHART_COLORS.eft} radius={[0, 0, 0, 0]} />
-            <Bar dataKey="checks" stackId="gross" name={`${monthLabel} Checks`} fill={CHART_COLORS.checks} radius={[0, 2, 2, 0]} />
+            {/* Two non-overlapping segments (left→right): Checks → EFT = month gross. */}
+            <Bar dataKey="checks" stackId="gross" name={`${monthLabel} Checks`} fill={CHART_COLORS.checks} radius={[2, 0, 0, 2]} />
+            <Bar dataKey="eft" stackId="gross" name={`${monthLabel} EFT`} fill={CHART_COLORS.eft} radius={[0, 2, 2, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </div>
 
       <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
-        <LegendSwatch color={CHART_COLORS.gross} label={`${monthLabel} Gross`} />
-        <LegendSwatch color={CHART_COLORS.eft} label={`${monthLabel} EFT`} />
         <LegendSwatch color={CHART_COLORS.checks} label={`${monthLabel} Checks`} />
+        <LegendSwatch color={CHART_COLORS.eft} label={`${monthLabel} EFT`} />
         <span className="ml-auto">Bar length = month gross.</span>
       </div>
     </>

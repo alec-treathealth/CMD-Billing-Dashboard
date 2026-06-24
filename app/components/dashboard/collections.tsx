@@ -243,30 +243,30 @@ export function CollectionsKpiTooltip({
 }) {
   if (!active || !payload || payload.length === 0) return null;
   const r = payload[0]!.payload;
-  // Checks/EFT are the MTD (or selected-month) values; the bar's segments and this
-  // tooltip both read mtd_checks/mtd_eft, never the cumulative YTD checks/eft.
+  // gross = checks + eft (verified: 0 mismatches across all daily rows), so the
+  // bar splits MTD gross into Checks + EFT — no separate "MTD Gross" row here, as
+  // it would double-count. YTD Gross is the cumulative total (the bar's length).
   return (
     <div className="rounded-md border border-line bg-surface px-3 py-2 text-xs shadow-ths">
       <div className="mb-1 font-semibold text-ink900">{r.facility}</div>
       <dl className="grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5 tabular-nums">
-        <dt className="text-muted-foreground">{monthLabel} Gross</dt>
-        <dd className="text-right text-teal700">{money(r.mtd_gross)}</dd>
-        <dt className="text-muted-foreground">{monthLabel} EFT</dt>
-        <dd className="text-right text-ink900">{money(r.mtd_eft)}</dd>
         <dt className="text-muted-foreground">{monthLabel} Checks</dt>
         <dd className="text-right text-ink900">{money(r.mtd_checks)}</dd>
+        <dt className="text-muted-foreground">{monthLabel} EFT</dt>
+        <dd className="text-right text-ink900">{money(r.mtd_eft)}</dd>
         <dt className="text-muted-foreground">YTD Gross</dt>
-        <dd className="text-right text-ink900">{money(r.ytd_gross)}</dd>
+        <dd className="text-right text-teal700">{money(r.ytd_gross)}</dd>
       </dl>
     </div>
   );
 }
 
 /**
- * Presentational facility KPI bar chart — stacked MTD gross + YTD remaining bars
- * (bar length = YTD gross), with hover tooltip + legend. Pure over its `rows`;
- * shared by CollectionsKpisBody and the merged Overview "Master BXR Chart" widget
- * so both render identically.
+ * Presentational facility KPI bar chart. MTD gross is split into its two payment
+ * types — Checks + EFT (verified identity: gross = checks + eft) — then topped
+ * with YTD Remaining (= YTD gross − MTD gross), so the three non-overlapping
+ * segments sum to exactly YTD gross (the bar length). Pure over its `rows`; shared
+ * by CollectionsKpisBody and the merged "Master BXR Chart" so both render alike.
  */
 export function FacilityKpiBars({
   rows,
@@ -313,19 +313,18 @@ export function FacilityKpiBars({
               interval={0}
             />
             <Tooltip content={<CollectionsKpiTooltip monthLabel={monthLabel} />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
-            {/* Four stacked segments (left→right): Gross → EFT → Checks → YTD Remaining. */}
-            <Bar dataKey="mtd_gross" stackId="gross" name={`${monthLabel} Gross`} fill={CHART_COLORS.gross} radius={[2, 0, 0, 2]} />
+            {/* Three non-overlapping segments (left→right): Checks → EFT → YTD Remaining.
+                Checks + EFT = MTD gross; + YTD Remaining = YTD gross (the bar length). */}
+            <Bar dataKey="mtd_checks" stackId="gross" name={`${monthLabel} Checks`} fill={CHART_COLORS.checks} radius={[2, 0, 0, 2]} />
             <Bar dataKey="mtd_eft" stackId="gross" name={`${monthLabel} EFT`} fill={CHART_COLORS.eft} radius={[0, 0, 0, 0]} />
-            <Bar dataKey="mtd_checks" stackId="gross" name={`${monthLabel} Checks`} fill={CHART_COLORS.checks} radius={[0, 0, 0, 0]} />
             <Bar dataKey="ytd_remaining" stackId="gross" name="YTD Remaining" fill={CHART_COLORS.ytdRemaining} radius={[0, 2, 2, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </div>
 
       <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
-        <LegendSwatch color={CHART_COLORS.gross} label={`${monthLabel} Gross`} />
-        <LegendSwatch color={CHART_COLORS.eft} label={`${monthLabel} EFT`} />
         <LegendSwatch color={CHART_COLORS.checks} label={`${monthLabel} Checks`} />
+        <LegendSwatch color={CHART_COLORS.eft} label={`${monthLabel} EFT`} />
         <LegendSwatch color={CHART_COLORS.ytdRemaining} label="YTD Remaining" />
         <span className="ml-auto">Bar length = YTD gross.</span>
       </div>
