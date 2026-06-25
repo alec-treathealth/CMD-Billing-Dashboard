@@ -77,6 +77,52 @@ export const DAILY_BLOCK_LABEL_FACILITY: Readonly<Record<string, string>> = {
   DMH: 'DMH',
 };
 
+// ---------------------------------------------------------------------------
+// Consolidated 2026 deposit Sheet (the "By Location" daily source, re-sourced).
+// IP/OP monthly tabs whose facility blocks are labelled with the canonical
+// acronyms. This array is the SINGLE source of truth for the acronym → facility
+// code + IP/OP classification — reuse it for the item-3a facilities migration;
+// do NOT build a second map. Every facility_code below is a real seeded facility
+// (collections.facilities); the labels are exactly the sheet's block headers.
+// ---------------------------------------------------------------------------
+
+/** Canonical id of the consolidated deposit Sheet (an identifier, not a secret). */
+export const DEPOSIT_SHEET_ID = '1auO2SDezdYS7tbqqDnk9OU_R7G-Erab8omvOZW0ANRQ';
+
+export interface DepositFacility {
+  /** The block label exactly as it appears in the deposit Sheet header row. */
+  readonly label: string;
+  /** The real facility_code in collections.facilities. */
+  readonly facilityCode: string;
+  /** Inpatient (IP tabs) vs Outpatient (OP tabs). For item-3a reuse. */
+  readonly careSetting: 'IP' | 'OP';
+}
+
+/** The 15 deposit-Sheet facilities (8 IP + 7 OP). Note DLMH → DMH (display relabel
+ *  only; the facility_code stays DMH). TMH xx → TREAT_xx. */
+export const DEPOSIT_FACILITIES: readonly DepositFacility[] = [
+  { label: 'CAMH', facilityCode: 'CAMH', careSetting: 'IP' },
+  { label: 'PCMH', facilityCode: 'PCMH', careSetting: 'IP' },
+  { label: 'LAMH', facilityCode: 'LAMH', careSetting: 'IP' },
+  { label: 'LSMH', facilityCode: 'LSMH', careSetting: 'IP' },
+  { label: 'DLMH', facilityCode: 'DMH', careSetting: 'IP' },
+  { label: 'TBH', facilityCode: 'TBH', careSetting: 'IP' },
+  { label: 'NASH', facilityCode: 'NASH', careSetting: 'IP' },
+  { label: 'KWC', facilityCode: 'KWC', careSetting: 'IP' },
+  { label: 'TMH CA', facilityCode: 'TREAT_CA', careSetting: 'OP' },
+  { label: 'TMH TN', facilityCode: 'TREAT_TN', careSetting: 'OP' },
+  { label: 'TMH WA', facilityCode: 'TREAT_WA', careSetting: 'OP' },
+  { label: 'TMH TX', facilityCode: 'TREAT_TX', careSetting: 'OP' },
+  { label: 'TMH NV', facilityCode: 'TREAT_NV', careSetting: 'OP' },
+  { label: 'FRCA', facilityCode: 'FRCA', careSetting: 'OP' },
+  { label: 'Telehealth MH', facilityCode: 'TELEHEALTH_MH', careSetting: 'OP' },
+];
+
+/** Deposit-Sheet block label → real facility_code (derived from DEPOSIT_FACILITIES). */
+export const DEPOSIT_LABEL_TO_FACILITY: Readonly<Record<string, string>> = Object.fromEntries(
+  DEPOSIT_FACILITIES.map((f) => [f.label, f.facilityCode]),
+);
+
 /** Resolve a free-text facility value (e.g. a negotiation "Facility" cell) to a
  *  real code: exact code match, else exact upper-cased name match, else null. */
 export function resolveFacilityValue(value: string): string | null {

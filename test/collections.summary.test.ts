@@ -18,7 +18,7 @@ const EXPECTED_SQL =
   `coalesce(sum(dc.checks_amount), 0) as checks_amount, ` +
   `coalesce(sum(dc.eft_amount), 0) as eft_amount, ` +
   `coalesce(sum(dc.gross_amount), 0) as gross_amount ` +
-  `from collections.daily_collections dc ` +
+  `from collections.daily_collections_resolved dc ` +
   `left join collections.facilities f on f.facility_code = dc.facility_code ` +
   `where ($1::date is null or dc.payment_date >= $1::date) ` +
   `and ($2::date is null or dc.payment_date < $2::date) ` +

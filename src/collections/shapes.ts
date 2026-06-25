@@ -170,6 +170,7 @@ function parseDaily(workbook: Workbook, tab: Tab, fileId: string, report: FailSi
           checks_amount: (checks as { value: string }).value,
           eft_amount: (eft as { value: string }).value,
           gross_amount: (gross as { value: string }).value,
+          source_tag: 'workbook',
         };
         out.typed.push({ shape: 'daily', rowNum, row: drow });
         landedRaw = true;

@@ -10,7 +10,7 @@ import {
 import type { ExecResult, QueryExecutor } from '../src/queries/types.js';
 
 const DAILY_SQL =
-  `with anchor as (select max(payment_date) as max_d from collections.daily_collections) ` +
+  `with anchor as (select max(payment_date) as max_d from collections.daily_collections_resolved) ` +
   `select ` +
   `to_char(dc.payment_date, 'YYYY-MM-DD') as payment_date, ` +
   `dc.facility_code as facility_code, ` +
@@ -18,7 +18,7 @@ const DAILY_SQL =
   `dc.checks_amount as checks_amount, ` +
   `dc.eft_amount as eft_amount, ` +
   `dc.gross_amount as gross_amount ` +
-  `from collections.daily_collections dc ` +
+  `from collections.daily_collections_resolved dc ` +
   `cross join anchor a ` +
   `left join collections.facilities f on f.facility_code = dc.facility_code ` +
   `where (case when $1::date is null and $2::date is null ` +
@@ -30,7 +30,7 @@ const DAILY_SQL =
   `order by dc.payment_date desc, f.facility_name nulls last, dc.facility_code`;
 
 const KPIS_SQL =
-  `with anchor as (select coalesce($1::date, max(payment_date)) as d from collections.daily_collections) ` +
+  `with anchor as (select coalesce($1::date, max(payment_date)) as d from collections.daily_collections_resolved) ` +
   `select ` +
   `to_char(a.d, 'YYYY-MM-DD') as as_of, ` +
   `dc.facility_code as facility_code, ` +
@@ -41,7 +41,7 @@ const KPIS_SQL =
   `coalesce(sum(dc.checks_amount) filter (where dc.payment_date >= date_trunc('year', a.d)::date and dc.payment_date <= a.d), 0) as ytd_checks, ` +
   `coalesce(sum(dc.eft_amount) filter (where dc.payment_date >= date_trunc('year', a.d)::date and dc.payment_date <= a.d), 0) as ytd_eft, ` +
   `coalesce(sum(dc.gross_amount) filter (where dc.payment_date >= date_trunc('year', a.d)::date and dc.payment_date <= a.d), 0) as ytd_gross ` +
-  `from collections.daily_collections dc ` +
+  `from collections.daily_collections_resolved dc ` +
   `cross join anchor a ` +
   `left join collections.facilities f on f.facility_code = dc.facility_code ` +
   `group by a.d, dc.facility_code, f.facility_name ` +

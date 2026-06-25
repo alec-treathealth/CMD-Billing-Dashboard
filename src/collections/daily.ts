@@ -1,8 +1,10 @@
 /**
  * Phase 7.1 — daily collections queries (read-only, non-PHI).
  *
- * Two functions, both reading ONLY collections.daily_collections joined to
- * collections.facilities as claims_reader:
+ * Two functions, both reading ONLY collections.daily_collections_resolved (the
+ * source-tag dedup view over daily_collections — migration 0014; deposit_sheet wins
+ * per facility-day, workbook fills the rest) joined to collections.facilities as
+ * claims_reader:
  *   - collectionsDaily : granular daily rows (date/facility/checks/eft/gross),
  *     defaulting to the latest calendar month present when unbounded.
  *   - collectionsKpis  : per-facility + overall MTD/YTD (checks/eft/gross),
@@ -41,7 +43,7 @@ export interface CollectionsQueryContext {
  */
 export function collectionsDailySql(): string {
   return (
-    `with anchor as (select max(payment_date) as max_d from collections.daily_collections) ` +
+    `with anchor as (select max(payment_date) as max_d from collections.daily_collections_resolved) ` +
     `select ` +
     `to_char(dc.payment_date, 'YYYY-MM-DD') as payment_date, ` +
     `dc.facility_code as facility_code, ` +
@@ -49,7 +51,7 @@ export function collectionsDailySql(): string {
     `dc.checks_amount as checks_amount, ` +
     `dc.eft_amount as eft_amount, ` +
     `dc.gross_amount as gross_amount ` +
-    `from collections.daily_collections dc ` +
+    `from collections.daily_collections_resolved dc ` +
     `cross join anchor a ` +
     `left join collections.facilities f on f.facility_code = dc.facility_code ` +
     `where (case when $1::date is null and $2::date is null ` +
@@ -119,7 +121,7 @@ export function collectionsKpisSql(): string {
   const mtd = `dc.payment_date >= date_trunc('month', a.d)::date and dc.payment_date <= a.d`;
   const ytd = `dc.payment_date >= date_trunc('year', a.d)::date and dc.payment_date <= a.d`;
   return (
-    `with anchor as (select coalesce($1::date, max(payment_date)) as d from collections.daily_collections) ` +
+    `with anchor as (select coalesce($1::date, max(payment_date)) as d from collections.daily_collections_resolved) ` +
     `select ` +
     `to_char(a.d, 'YYYY-MM-DD') as as_of, ` +
     `dc.facility_code as facility_code, ` +
@@ -130,7 +132,7 @@ export function collectionsKpisSql(): string {
     `coalesce(sum(dc.checks_amount) filter (where ${ytd}), 0) as ytd_checks, ` +
     `coalesce(sum(dc.eft_amount) filter (where ${ytd}), 0) as ytd_eft, ` +
     `coalesce(sum(dc.gross_amount) filter (where ${ytd}), 0) as ytd_gross ` +
-    `from collections.daily_collections dc ` +
+    `from collections.daily_collections_resolved dc ` +
     `cross join anchor a ` +
     `left join collections.facilities f on f.facility_code = dc.facility_code ` +
     `group by a.d, dc.facility_code, f.facility_name ` +

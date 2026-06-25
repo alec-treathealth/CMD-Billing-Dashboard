@@ -18,6 +18,9 @@ import type { DailyRow, NegotiationRow, PaymentLineRow, RawRecord, RollupRow } f
 
 const BATCH = 500;
 export type Db = pg.Pool;
+/** Pool OR a checked-out client — both expose .query, so the same writers can run
+ *  standalone (legacy ingest) or inside a transaction (deposit-sheet replace). */
+type Queryable = { query: pg.Pool['query'] };
 
 export function makeClient(connectionString: string): Db {
   return new pg.Pool({ connectionString, ssl: verifyFullSsl(), max: 4, application_name: 'collections-ingest' });
@@ -30,7 +33,7 @@ function chunk<T>(a: T[], n: number): T[][] {
 }
 
 /** Upsert raw rows; return source key -> collections_raw.id for every input. */
-export async function upsertRaw(db: Db, rows: RawRecord[]): Promise<Map<string, number>> {
+export async function upsertRaw(db: Queryable, rows: RawRecord[]): Promise<Map<string, number>> {
   const idByKey = new Map<string, number>();
   for (const batch of chunk(rows, BATCH)) {
     const params: unknown[] = [];
@@ -55,7 +58,7 @@ export async function upsertRaw(db: Db, rows: RawRecord[]): Promise<Map<string, 
 
 export const rawKey = (file: string, tab: string, rowNum: number): string => `${file} ${tab} ${rowNum}`;
 
-async function insertBatched(db: Db, cols: readonly string[], table: string, conflict: string, rows: unknown[][]): Promise<number> {
+async function insertBatched(db: Queryable, cols: readonly string[], table: string, conflict: string, rows: unknown[][]): Promise<number> {
   let inserted = 0;
   for (const batch of chunk(rows, BATCH)) {
     const params: unknown[] = [];
@@ -71,11 +74,13 @@ async function insertBatched(db: Db, cols: readonly string[], table: string, con
   return inserted;
 }
 
-const DAILY_COLS = ['collections_raw_id', 'facility_code', 'source_group_code', 'payment_date', 'checks_amount', 'eft_amount', 'gross_amount'] as const;
-export function insertDaily(db: Db, items: { rawId: number; row: DailyRow }[]): Promise<number> {
-  const rows = items.map(({ rawId, row }) => [rawId, row.facility_code, row.source_group_code, row.payment_date, row.checks_amount, row.eft_amount, row.gross_amount]);
+const DAILY_COLS = ['collections_raw_id', 'facility_code', 'source_group_code', 'payment_date', 'checks_amount', 'eft_amount', 'gross_amount', 'source_tag'] as const;
+export function insertDaily(db: Queryable, items: { rawId: number; row: DailyRow }[]): Promise<number> {
+  const rows = items.map(({ rawId, row }) => [rawId, row.facility_code, row.source_group_code, row.payment_date, row.checks_amount, row.eft_amount, row.gross_amount, row.source_tag]);
+  // Bucket key now includes source_tag (migration 0014), so workbook + deposit_sheet
+  // rows for the same facility-day coexist; the resolved view picks one for display.
   return insertBatched(db, DAILY_COLS, 'collections.daily_collections',
-    'on conflict (facility_code, source_group_code, payment_date) do nothing', rows);
+    'on conflict (facility_code, source_group_code, payment_date, source_tag) do nothing', rows);
 }
 
 const PL_COLS = ['collections_raw_id', 'facility_code', 'source_group_code', 'service_date', 'payment_date', 'cpt_code', 'revenue_code', 'patient_name', 'patient_last', 'patient_first', 'member_id_raw', 'member_id_norm', 'group_number', 'charge_amount', 'allowed_amount', 'insurance_paid', 'adjustment', 'balance_due_pt', 'payer_name', 'recon_ok', 'paid_gt_allowed'] as const;
@@ -94,4 +99,39 @@ const RU_COLS = ['collections_raw_id', 'source_file_id', 'grain', 'raw'] as cons
 export function insertRollup(db: Db, items: { rawId: number; row: RollupRow }[]): Promise<number> {
   const rows = items.map(({ rawId, row }) => [rawId, row.source_file_id, row.grain, JSON.stringify(row.raw)]);
   return insertBatched(db, RU_COLS, 'collections.rollup_snapshots', 'on conflict (collections_raw_id) do nothing', rows);
+}
+
+/**
+ * Re-source the deposit-Sheet daily series, transactionally (zero-wipe, idempotent).
+ * Within ONE transaction: upsert the verbatim raw rows, DELETE the prior
+ * source_tag='deposit_sheet' daily rows, then insert the freshly parsed ones. Legacy
+ * 'workbook' rows are never touched (history preserved); a re-run with identical
+ * source yields identical rows (delete-then-reinsert), so re-running adds nothing.
+ * Mirrors cmdPayerIngest.writeRollup's replace-in-a-transaction model.
+ */
+export async function replaceDepositSheetDaily(
+  db: Db,
+  fileId: string,
+  raws: RawRecord[],
+  daily: { source_tab: string; source_row_num: number; row: DailyRow }[],
+): Promise<{ rawUpserted: number; dailyDeleted: number; dailyInserted: number }> {
+  const client = await db.connect();
+  try {
+    await client.query('begin');
+    const idByKey = await upsertRaw(client, raws);
+    const del = await client.query("delete from collections.daily_collections where source_tag = 'deposit_sheet'");
+    const items = daily.map((d) => {
+      const id = idByKey.get(rawKey(fileId, d.source_tab, d.source_row_num));
+      if (id === undefined) throw new Error(`no raw id for deposit daily row ${d.source_tab}#${d.source_row_num}`);
+      return { rawId: id, row: d.row };
+    });
+    const inserted = await insertDaily(client, items);
+    await client.query('commit');
+    return { rawUpserted: idByKey.size, dailyDeleted: del.rowCount ?? 0, dailyInserted: inserted };
+  } catch (err) {
+    await client.query('rollback');
+    throw err;
+  } finally {
+    client.release();
+  }
 }

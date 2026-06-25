@@ -1,7 +1,8 @@
 /**
  * Phase 7 — monthly collections summary by facility (read-only, non-PHI).
  *
- * Aggregates `collections.daily_collections` joined to `collections.facilities`
+ * Aggregates `collections.daily_collections_resolved` (the source-tag dedup view
+ * over daily_collections — migration 0014) joined to `collections.facilities`
  * as claims_reader. It NEVER touches `collections.collections_raw` (PHI-bearing,
  * admin-only) or `collections.payment_lines`, and it NEVER selects
  * `source_group_code` — TREAT_FRCA / LSMH_DMH are lineage only, never a facility,
@@ -57,7 +58,7 @@ export function collectionsMonthlySummarySql(): string {
     `coalesce(sum(dc.checks_amount), 0) as checks_amount, ` +
     `coalesce(sum(dc.eft_amount), 0) as eft_amount, ` +
     `coalesce(sum(dc.gross_amount), 0) as gross_amount ` +
-    `from collections.daily_collections dc ` +
+    `from collections.daily_collections_resolved dc ` +
     `left join collections.facilities f on f.facility_code = dc.facility_code ` +
     `where ($1::date is null or dc.payment_date >= $1::date) ` +
     `and ($2::date is null or dc.payment_date < $2::date) ` +

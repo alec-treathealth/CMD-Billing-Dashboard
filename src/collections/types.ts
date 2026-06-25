@@ -33,6 +33,9 @@ export interface RawRecord {
   raw: Record<string, unknown>;
 }
 
+/** Lineage of a daily_collections row: the legacy workbooks vs the deposit Sheet. */
+export type DailySourceTag = 'workbook' | 'deposit_sheet';
+
 export interface DailyRow {
   facility_code: string | null;
   source_group_code: string | null;
@@ -40,6 +43,8 @@ export interface DailyRow {
   checks_amount: string; // numeric string
   eft_amount: string;
   gross_amount: string;
+  /** Which source produced this row (drives the resolved-view display precedence). */
+  source_tag: DailySourceTag;
 }
 
 export interface PaymentLineRow {

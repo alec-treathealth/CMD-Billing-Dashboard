@@ -13,6 +13,7 @@
     "diagnose": "tsx src/diagnose.ts",
     "ingest": "tsx src/ingest.ts",
     "ingest:cmd-payer": "tsx src/collections/cmdPayerIngest.ts",
+    "ingest:deposit": "tsx src/collections/depositSheetIngest.ts",
     "dbcheck": "tsx src/dbcheck.ts",
     "test": "node --import tsx --test test/**/*.test.ts",
     "typecheck": "tsc --noEmit"
