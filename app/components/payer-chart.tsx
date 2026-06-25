@@ -16,7 +16,6 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Cell,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -99,56 +98,45 @@ export function PayerGapBars({
   /** Optional: invoked with the payer label when a bar is clicked (drill-down). */
   onBarClick?: (payer: string) => void;
 }) {
-  const chartHeight = Math.max(180, rows.length * 38 + 24);
   return (
     <>
+      {/* Vertical bars (category on X, money on Y), spread to the full container width. */}
       <div
         role="img"
         aria-label="Payers — paid vs. collection gap"
-        style={{ width: '100%', height: chartHeight, cursor: onBarClick ? 'pointer' : undefined }}
+        style={{ width: '100%', height: 380, cursor: onBarClick ? 'pointer' : undefined }}
       >
         <ResponsiveContainer width="100%" height="100%">
           <BarChart
             data={rows}
-            layout="vertical"
-            margin={{ top: 4, right: 16, bottom: 4, left: 8 }}
-            barCategoryGap="28%"
+            margin={{ top: 8, right: 12, bottom: 72, left: 8 }}
+            barCategoryGap="18%"
             onClick={(state) => {
               if (onBarClick && state && typeof state.activeLabel === 'string') onBarClick(state.activeLabel);
             }}
           >
-            <CartesianGrid horizontal={false} stroke="#E4E9E6" />
+            <CartesianGrid vertical={false} stroke="#E4E9E6" />
             <XAxis
-              type="number"
-              tickFormatter={moneyAxis}
-              tick={{ fontSize: 11, fill: '#859794' }}
+              type="category"
+              dataKey="payer"
+              interval={0}
+              angle={-35}
+              textAnchor="end"
+              height={72}
+              tick={{ fontSize: 10, fill: '#4A5C5A' }}
               stroke="#E4E9E6"
             />
             <YAxis
-              type="category"
-              dataKey="payer"
-              width={160}
-              tick={{ fontSize: 11, fill: '#4A5C5A' }}
+              type="number"
+              tickFormatter={moneyAxis}
+              width={64}
+              tick={{ fontSize: 11, fill: '#859794' }}
               stroke="#E4E9E6"
-              interval={0}
             />
             <Tooltip content={<PayerTooltip />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
-            <Bar dataKey="total_paid" stackId="charge" name="Paid" fill="#135E5A" radius={[2, 0, 0, 2]}>
-              {rows.map((r) => (
-                <Cell key={`paid-${r.payer}`} />
-              ))}
-            </Bar>
-            <Bar
-              dataKey="total_collection_gap"
-              stackId="charge"
-              name="Collection gap"
-              fill="#E2674F"
-              radius={[0, 2, 2, 0]}
-            >
-              {rows.map((r) => (
-                <Cell key={`gap-${r.payer}`} />
-              ))}
-            </Bar>
+            {/* Stacked bottom→top: Paid → Collection gap = total charged (bar height). */}
+            <Bar dataKey="total_paid" stackId="charge" name="Paid" fill="#135E5A" radius={[0, 0, 0, 0]} />
+            <Bar dataKey="total_collection_gap" stackId="charge" name="Collection gap" fill="#E2674F" radius={[2, 2, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -160,7 +148,7 @@ export function PayerGapBars({
         <span className="flex items-center gap-1.5">
           <span className="inline-block h-2.5 w-2.5 rounded-sm bg-coral600" /> Collection gap
         </span>
-        <span className="ml-auto">Bar length = total charged.</span>
+        <span className="ml-auto">Bar height = total charged.</span>
       </div>
     </>
   );

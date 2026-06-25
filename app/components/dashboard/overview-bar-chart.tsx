@@ -49,9 +49,11 @@ import {
   loadCollectionsDaily,
   loadCollectionsDailyRange,
   loadCollectionsKpis,
+  loadFacilityDimension,
   loadPayerGapRange,
   type CollectionsDailyResult,
   type CollectionsKpis,
+  type FacilityDimensionRow,
   type PayerGapSummary,
 } from '@/lib/actions';
 import { facilityLabel } from '../../../src/collections/summaryTypes';
@@ -72,10 +74,14 @@ const pad2 = (n: number) => String(n).padStart(2, '0');
 const lastDayOfMonth = (year: number, month: number) => new Date(year, month, 0).getDate();
 
 type View = 'facility' | 'payer';
+/** By Facility care-setting filter: all facilities, inpatient only, or outpatient only. */
+type CareFilter = 'ALL' | 'IP' | 'OP';
 
 /** A single-month gross row per facility (past-month facility view). */
 interface FacilityGrossRow {
   facility: string;
+  /** Real facility code (drill-down key + IP/OP dimension join), or null if unassigned. */
+  facility_code: string | null;
   blank: boolean;
   gross: number;
   checks: number;
@@ -95,6 +101,7 @@ function aggregateGrossByFacility(rows: CollectionsDailyResult['rows']): Facilit
     } else {
       byFacility.set(key, {
         facility: facilityLabel(r),
+        facility_code: r.facility_code,
         blank: r.facility_name === null,
         gross: r.gross_amount,
         checks: r.checks_amount,
@@ -149,46 +156,49 @@ function FacilityGrossBars({
   rows: FacilityGrossRow[];
   /** Selected month name (e.g. 'May'), used as the tooltip label prefix. */
   monthLabel: string;
-  /** Optional: invoked with the facility label when a bar is clicked. */
-  onBarClick?: (facility: string) => void;
+  /** Optional: invoked with the clicked bar's facility_code (drill-down key). */
+  onBarClick?: (facilityCode: string) => void;
 }) {
-  const chartHeight = Math.max(180, rows.length * 38 + 24);
   return (
     <>
+      {/* Vertical bars (facility on X, money on Y), spread to the full container width. */}
       <div
         role="img"
         aria-label="Collections gross by facility"
-        style={{ width: '100%', height: chartHeight, cursor: onBarClick ? 'pointer' : undefined }}
+        style={{ width: '100%', height: 380, cursor: onBarClick ? 'pointer' : undefined }}
       >
         <ResponsiveContainer width="100%" height="100%">
           <BarChart
             data={rows}
-            layout="vertical"
-            margin={{ top: 4, right: 16, bottom: 4, left: 8 }}
-            barCategoryGap="28%"
+            margin={{ top: 8, right: 12, bottom: 64, left: 8 }}
+            barCategoryGap="18%"
             onClick={(state) => {
-              if (onBarClick && state && typeof state.activeLabel === 'string') onBarClick(state.activeLabel);
+              const code = (state?.activePayload?.[0]?.payload as FacilityGrossRow | undefined)?.facility_code;
+              if (onBarClick && typeof code === 'string') onBarClick(code);
             }}
           >
-            <CartesianGrid horizontal={false} stroke="#E4E9E6" />
+            <CartesianGrid vertical={false} stroke="#E4E9E6" />
             <XAxis
-              type="number"
-              tickFormatter={moneyAxis}
-              tick={{ fontSize: 11, fill: '#859794' }}
+              type="category"
+              dataKey="facility"
+              interval={0}
+              angle={-35}
+              textAnchor="end"
+              height={64}
+              tick={{ fontSize: 10, fill: '#4A5C5A' }}
               stroke="#E4E9E6"
             />
             <YAxis
-              type="category"
-              dataKey="facility"
-              width={160}
-              tick={{ fontSize: 11, fill: '#4A5C5A' }}
+              type="number"
+              tickFormatter={moneyAxis}
+              width={64}
+              tick={{ fontSize: 11, fill: '#859794' }}
               stroke="#E4E9E6"
-              interval={0}
             />
             <Tooltip content={<FacilityGrossTooltip monthLabel={monthLabel} />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
-            {/* Two non-overlapping segments (left→right): Checks → EFT = month gross. */}
-            <Bar dataKey="checks" stackId="gross" name={`${monthLabel} Checks`} fill={CHART_COLORS.checks} radius={[2, 0, 0, 2]} />
-            <Bar dataKey="eft" stackId="gross" name={`${monthLabel} EFT`} fill={CHART_COLORS.eft} radius={[0, 2, 2, 0]} />
+            {/* Stacked bottom→top: Checks → EFT = month gross (bar height). */}
+            <Bar dataKey="checks" stackId="gross" name={`${monthLabel} Checks`} fill={CHART_COLORS.checks} radius={[0, 0, 0, 0]} />
+            <Bar dataKey="eft" stackId="gross" name={`${monthLabel} EFT`} fill={CHART_COLORS.eft} radius={[2, 2, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -196,7 +206,7 @@ function FacilityGrossBars({
       <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
         <LegendSwatch color={CHART_COLORS.checks} label={`${monthLabel} Checks`} />
         <LegendSwatch color={CHART_COLORS.eft} label={`${monthLabel} EFT`} />
-        <span className="ml-auto">Bar length = month gross.</span>
+        <span className="ml-auto">Bar height = month gross.</span>
       </div>
     </>
   );
@@ -245,12 +255,16 @@ function downloadCsv(filename: string, table: string[][]): void {
  * non-PHI (daily_collections only).
  */
 function FacilityDailyPanel({
-  facility,
+  facilityCode,
+  facilityName,
   monthLabel,
   rows,
   onClose,
 }: {
-  facility: string;
+  /** Drill-down key (the clicked bar's facility_code). */
+  facilityCode: string;
+  /** Display name/acronym for the panel heading. */
+  facilityName: string;
   monthLabel: string;
   rows: DailyRow[];
   onClose: () => void;
@@ -258,10 +272,10 @@ function FacilityDailyPanel({
   const facilityRows = useMemo(
     () =>
       rows
-        .filter((r) => facilityLabel(r) === facility)
+        .filter((r) => r.facility_code === facilityCode)
         .filter((r) => r.gross_amount !== 0 || r.checks_amount !== 0 || r.eft_amount !== 0)
         .sort((a, b) => a.payment_date.localeCompare(b.payment_date)),
-    [rows, facility],
+    [rows, facilityCode],
   );
 
   const totals = useMemo(
@@ -281,7 +295,7 @@ function FacilityDailyPanel({
     <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
       <div className="mb-3 flex items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-ink900">
-          {facility} — {monthLabel}
+          {facilityName} — {monthLabel}
         </h3>
         <Button
           type="button"
@@ -548,6 +562,9 @@ export function OverviewBarChart() {
   const kpisState = useWidget<CollectionsKpis>(loadCollectionsKpis);
   // Latest-month daily rows (cached) — backs the MTD facility drill-down panel.
   const dailyMtdState = useWidget<CollectionsDailyResult>(loadCollectionsDaily);
+  // Canonical facility dimension (code -> care_setting/acronym) for the IP/OP split,
+  // Facility filters, and acronym bar labels. Cached reference (migration 0016).
+  const dimState = useWidget<FacilityDimensionRow[]>(loadFacilityDimension);
 
   // Month options: current 2026 month (MTD) + every prior 2026 month, reverse-chron.
   const { currentMonth, monthOptions } = useMemo(() => {
@@ -559,6 +576,18 @@ export function OverviewBarChart() {
   const [view, setView] = useState<View>('facility');
   const [month, setMonth] = useState<number>(currentMonth);
   const isMtd = month === currentMonth;
+
+  // Bar filters. care/facility apply to the By Facility view; payer to By Payer.
+  const [careFilter, setCareFilter] = useState<CareFilter>('ALL');
+  const [facilityFilter, setFacilityFilter] = useState<string>(''); // facility_code, '' = all
+  const [payerFilter, setPayerFilter] = useState<string>(''); // payer label, '' = all
+
+  // facility_code -> dimension row (care_setting + display_acronym). Empty until loaded.
+  const dimByCode = useMemo(() => {
+    const m = new Map<string, FacilityDimensionRow>();
+    if (dimState.status === 'ready') for (const d of dimState.data) m.set(d.facility_code, d);
+    return m;
+  }, [dimState]);
 
   // Drill-down: the facility whose daily distribution panel is open (null = none).
   const [selectedFacility, setSelectedFacility] = useState<string | null>(null);
@@ -630,6 +659,77 @@ export function OverviewBarChart() {
     };
   }, [view, month, isMtd]);
 
+  // --- Filtering + acronym relabeling (client-side over the loaded rows). ---
+  // Filter facility rows by the active care-setting + facility selection, and relabel
+  // each bar's category to its display acronym. Drill-down still keys on facility_code
+  // (preserved by the spread). Generic so it serves both the MTD and past-month shapes.
+  function filterFacilityRows<T extends { facility: string; facility_code: string | null }>(rows: T[]): T[] {
+    return rows
+      .filter((r) => {
+        if (careFilter !== 'ALL') {
+          const cs = r.facility_code ? dimByCode.get(r.facility_code)?.care_setting ?? null : null;
+          if (cs !== careFilter) return false;
+        }
+        if (facilityFilter && r.facility_code !== facilityFilter) return false;
+        return true;
+      })
+      .map((r) => {
+        const acr = r.facility_code ? dimByCode.get(r.facility_code)?.display_acronym : null;
+        return acr ? { ...r, facility: acr } : r;
+      });
+  }
+
+  // Unfiltered facility rows for the current view/month — backs the Facility dropdown
+  // options (only facilities that actually have bars this month).
+  const facilityBase: { facility_code: string | null }[] =
+    view !== 'facility'
+      ? []
+      : isMtd
+        ? kpisState.status === 'ready'
+          ? kpisState.data.by_facility
+          : []
+        : past.kind === 'facility'
+          ? past.rows
+          : [];
+
+  // Facility dropdown options: facilities present this month whose care_setting matches
+  // the IP/OP filter, labeled by acronym, value = facility_code.
+  const facilityOptions = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const r of facilityBase) {
+      const code = r.facility_code;
+      if (!code) continue;
+      const dim = dimByCode.get(code);
+      if (careFilter !== 'ALL' && (dim?.care_setting ?? null) !== careFilter) continue;
+      if (!seen.has(code)) seen.set(code, dim?.display_acronym ?? code);
+    }
+    return [...seen.entries()]
+      .map(([code, label]) => ({ code, label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [facilityBase, dimByCode, careFilter]);
+
+  // By Payer: the month's summary filtered to the selected payer (drives BOTH the bars
+  // and the breakdown table) + the payer dropdown options.
+  const payerSummaryFiltered: PayerGapSummary | null = useMemo(() => {
+    if (past.kind !== 'payer') return null;
+    if (!payerFilter) return past.summary;
+    return {
+      ...past.summary,
+      by_payer: past.summary.by_payer.filter((p) => (p.payer_name ?? '(blank)') === payerFilter),
+    };
+  }, [past, payerFilter]);
+
+  const payerOptions = useMemo(() => {
+    if (past.kind !== 'payer') return [];
+    return [...past.summary.by_payer]
+      .sort((a, b) => b.total_charge - a.total_charge)
+      .map((p) => p.payer_name ?? '(blank)');
+  }, [past]);
+
+  // Display name for the open facility drill-down (selectedFacility holds a code).
+  const selectedDim = selectedFacility ? dimByCode.get(selectedFacility) : undefined;
+  const selectedFacilityName = selectedDim?.display_acronym ?? selectedDim?.facility_name ?? selectedFacility ?? '';
+
   const monthName = MONTH_NAMES[month - 1]!;
   const monthLabel = `${monthName} ${YEAR}`;
   const clickHint = ' Click a facility for its daily breakdown.';
@@ -684,27 +784,35 @@ export function OverviewBarChart() {
     downloadCsv(filename, table);
   }
 
+  const facilityFiltersActive = careFilter !== 'ALL' || facilityFilter !== '';
+  const emptyFacilityLabel = facilityFiltersActive
+    ? 'No facilities match the current filters.'
+    : 'No collections to show.';
+
   function chartArea() {
     if (view === 'facility') {
       if (isMtd) {
         if (kpisState.status === 'loading') return <ChartLoading />;
         if (kpisState.status === 'error') return <ChartError />;
-        const rows = kpiChartRows(kpisState.data);
-        if (rows.length === 0) return <ChartEmpty label="No collections to show." />;
+        const rows = filterFacilityRows(kpiChartRows(kpisState.data));
+        if (rows.length === 0) return <ChartEmpty label={emptyFacilityLabel} />;
         return <FacilityKpiBars rows={rows} monthLabel="MTD" onBarClick={setSelectedFacility} />;
       }
       if (past.kind === 'facility') {
-        if (past.rows.length === 0) return <ChartEmpty label={`No collections recorded for ${monthLabel}.`} />;
-        return <FacilityGrossBars rows={past.rows} monthLabel={monthName} onBarClick={setSelectedFacility} />;
+        const rows = filterFacilityRows(past.rows);
+        if (rows.length === 0) {
+          return <ChartEmpty label={facilityFiltersActive ? emptyFacilityLabel : `No collections recorded for ${monthLabel}.`} />;
+        }
+        return <FacilityGrossBars rows={rows} monthLabel={monthName} onBarClick={setSelectedFacility} />;
       }
       if (past.kind === 'error') return <ChartError />;
       return <ChartLoading />;
     }
 
-    // By Payer — month-scoped for every month via `past` (CMD rollup, matview
-    // fallback). Clicking a payer opens its per-facility breakdown panel.
-    if (past.kind === 'payer') {
-      const rows = payerChartRows(past.summary, PAYER_TOP_N);
+    // By Payer — month-scoped via `past` (CMD rollup, matview fallback), narrowed by
+    // the Payer filter. Clicking a payer opens its per-facility breakdown panel.
+    if (past.kind === 'payer' && payerSummaryFiltered) {
+      const rows = payerChartRows(payerSummaryFiltered, PAYER_TOP_N);
       if (rows.length === 0) return <ChartEmpty label={`No payer activity in ${monthLabel}.`} />;
       return <PayerGapBars rows={rows} onBarClick={setSelectedPayer} />;
     }
@@ -720,7 +828,13 @@ export function OverviewBarChart() {
             label="View"
             value={view}
             ariaLabel="Chart view"
-            onChange={(v) => setView(v as View)}
+            onChange={(v) => {
+              setView(v as View);
+              // Filters are view-specific; reset them so a stale filter never hides data.
+              setCareFilter('ALL');
+              setFacilityFilter('');
+              setPayerFilter('');
+            }}
           >
             <option value="facility">By Facility</option>
             <option value="payer">By Payer</option>
@@ -737,6 +851,51 @@ export function OverviewBarChart() {
               </option>
             ))}
           </ControlSelect>
+          {view === 'facility' && (
+            <>
+              <ControlSelect
+                label="Setting"
+                value={careFilter}
+                ariaLabel="Inpatient / Outpatient filter"
+                onChange={(v) => {
+                  setCareFilter(v as CareFilter);
+                  setFacilityFilter(''); // the facility list is scoped to the chosen setting
+                }}
+              >
+                <option value="ALL">IP &amp; OP</option>
+                <option value="IP">IP only</option>
+                <option value="OP">OP only</option>
+              </ControlSelect>
+              <ControlSelect
+                label="Facility"
+                value={facilityFilter}
+                ariaLabel="Facility filter"
+                onChange={(v) => setFacilityFilter(v)}
+              >
+                <option value="">All facilities</option>
+                {facilityOptions.map((f) => (
+                  <option key={f.code} value={f.code}>
+                    {f.label}
+                  </option>
+                ))}
+              </ControlSelect>
+            </>
+          )}
+          {view === 'payer' && (
+            <ControlSelect
+              label="Payer"
+              value={payerFilter}
+              ariaLabel="Payer filter"
+              onChange={(v) => setPayerFilter(v)}
+            >
+              <option value="">All payers</option>
+              {payerOptions.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </ControlSelect>
+          )}
           {view === 'facility' && (
             <Button
               type="button"
@@ -756,9 +915,9 @@ export function OverviewBarChart() {
 
         {chartArea()}
 
-        {view === 'payer' && past.kind === 'payer' && (
+        {view === 'payer' && payerSummaryFiltered && (
           <PayerBreakdownTable
-            summary={past.summary}
+            summary={payerSummaryFiltered}
             monthLabel={monthLabel}
             selectedPayer={selectedPayer}
             onPayerClick={setSelectedPayer}
@@ -769,7 +928,8 @@ export function OverviewBarChart() {
           <div ref={panelRef}>
             {dailyReady ? (
               <FacilityDailyPanel
-                facility={selectedFacility}
+                facilityCode={selectedFacility}
+                facilityName={selectedFacilityName}
                 monthLabel={monthLabel}
                 rows={monthDailyRows}
                 onClose={() => setSelectedFacility(null)}
@@ -778,7 +938,7 @@ export function OverviewBarChart() {
               <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <h3 className="text-sm font-semibold text-ink900">
-                    {selectedFacility} — {monthLabel}
+                    {selectedFacilityName} — {monthLabel}
                   </h3>
                   <Button
                     type="button"

@@ -204,6 +204,8 @@ const KPI_TOP_N_OPTIONS = [5, 10, 0] as const;
 
 export interface CollectionsKpiChartRow {
   facility: string;
+  /** Real facility code (drill-down key + IP/OP dimension join), or null if unassigned. */
+  facility_code: string | null;
   blank: boolean;
   mtd_gross: number;
   mtd_checks: number;
@@ -218,6 +220,7 @@ export interface CollectionsKpiChartRow {
 export function kpiChartRows(data: CollectionsKpis): CollectionsKpiChartRow[] {
   const mapped = data.by_facility.map((r) => ({
     facility: facilityLabel(r),
+    facility_code: r.facility_code,
     blank: r.facility_name === null,
     mtd_gross: r.mtd_gross,
     mtd_checks: r.mtd_checks,
@@ -276,48 +279,51 @@ export function FacilityKpiBars({
   rows: CollectionsKpiChartRow[];
   /** Prefix for the tooltip gross row label (e.g. 'MTD'). */
   monthLabel?: string;
-  /** Optional: invoked with the facility label when a bar is clicked. */
-  onBarClick?: (facility: string) => void;
+  /** Optional: invoked with the clicked bar's facility_code (drill-down key). */
+  onBarClick?: (facilityCode: string) => void;
 }) {
-  const chartHeight = Math.max(180, rows.length * 38 + 24);
   return (
     <>
+      {/* Vertical bars (facility on X, money on Y), spread to the full container width. */}
       <div
         role="img"
         aria-label="Collections MTD vs YTD by facility"
-        style={{ width: '100%', height: chartHeight, cursor: onBarClick ? 'pointer' : undefined }}
+        style={{ width: '100%', height: 380, cursor: onBarClick ? 'pointer' : undefined }}
       >
         <ResponsiveContainer width="100%" height="100%">
           <BarChart
             data={rows}
-            layout="vertical"
-            margin={{ top: 4, right: 16, bottom: 4, left: 8 }}
-            barCategoryGap="28%"
+            margin={{ top: 8, right: 12, bottom: 64, left: 8 }}
+            barCategoryGap="18%"
             onClick={(state) => {
-              if (onBarClick && state && typeof state.activeLabel === 'string') onBarClick(state.activeLabel);
+              const code = (state?.activePayload?.[0]?.payload as CollectionsKpiChartRow | undefined)?.facility_code;
+              if (onBarClick && typeof code === 'string') onBarClick(code);
             }}
           >
-            <CartesianGrid horizontal={false} stroke="#E4E9E6" />
+            <CartesianGrid vertical={false} stroke="#E4E9E6" />
             <XAxis
-              type="number"
-              tickFormatter={moneyAxis}
-              tick={{ fontSize: 11, fill: '#859794' }}
+              type="category"
+              dataKey="facility"
+              interval={0}
+              angle={-35}
+              textAnchor="end"
+              height={64}
+              tick={{ fontSize: 10, fill: '#4A5C5A' }}
               stroke="#E4E9E6"
             />
             <YAxis
-              type="category"
-              dataKey="facility"
-              width={160}
-              tick={{ fontSize: 11, fill: '#4A5C5A' }}
+              type="number"
+              tickFormatter={moneyAxis}
+              width={64}
+              tick={{ fontSize: 11, fill: '#859794' }}
               stroke="#E4E9E6"
-              interval={0}
             />
             <Tooltip content={<CollectionsKpiTooltip monthLabel={monthLabel} />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
-            {/* Three non-overlapping segments (left→right): Checks → EFT → YTD Remaining.
-                Checks + EFT = MTD gross; + YTD Remaining = YTD gross (the bar length). */}
-            <Bar dataKey="mtd_checks" stackId="gross" name={`${monthLabel} Checks`} fill={CHART_COLORS.checks} radius={[2, 0, 0, 2]} />
+            {/* Stacked bottom→top: Checks → EFT → YTD Remaining.
+                Checks + EFT = MTD gross; + YTD Remaining = YTD gross (the bar height). */}
+            <Bar dataKey="mtd_checks" stackId="gross" name={`${monthLabel} Checks`} fill={CHART_COLORS.checks} radius={[0, 0, 0, 0]} />
             <Bar dataKey="mtd_eft" stackId="gross" name={`${monthLabel} EFT`} fill={CHART_COLORS.eft} radius={[0, 0, 0, 0]} />
-            <Bar dataKey="ytd_remaining" stackId="gross" name="YTD Remaining" fill={CHART_COLORS.ytdRemaining} radius={[0, 2, 2, 0]} />
+            <Bar dataKey="ytd_remaining" stackId="gross" name="YTD Remaining" fill={CHART_COLORS.ytdRemaining} radius={[2, 2, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -326,7 +332,7 @@ export function FacilityKpiBars({
         <LegendSwatch color={CHART_COLORS.checks} label={`${monthLabel} Checks`} />
         <LegendSwatch color={CHART_COLORS.eft} label={`${monthLabel} EFT`} />
         <LegendSwatch color={CHART_COLORS.ytdRemaining} label="YTD Remaining" />
-        <span className="ml-auto">Bar length = YTD gross.</span>
+        <span className="ml-auto">Bar height = YTD gross.</span>
       </div>
     </>
   );
