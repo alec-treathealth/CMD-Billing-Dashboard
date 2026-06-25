@@ -57,7 +57,7 @@ import {
 import { facilityLabel } from '../../../src/collections/summaryTypes';
 import type { CmdPayerFacilityRow } from '../../../src/collections/cmdPayerRollup';
 import { CHART_COLORS, FacilityKpiBars, kpiChartRows, LegendSwatch } from './collections';
-import { useWidget, WidgetCard } from './widgets';
+import { MiniBar, useWidget, WidgetCard } from './widgets';
 
 type DailyRow = CollectionsDailyResult['rows'][number];
 
@@ -431,6 +431,102 @@ function PayerFacilityPanel({
   );
 }
 
+/**
+ * Per-payer breakdown table for the By Payer view — the richer field set from
+ * /dashboard/payers (Charged / Allowed / Paid / Collection gap per payer, BCBS-TX
+ * style), month-scoped to the chart's selected month. Accompanies the bars (it does
+ * not replace them): the bars give at-a-glance shape, this gives the full numbers.
+ * Clicking a payer row opens the SAME per-facility drill-down a bar click does, so
+ * the row label matches the bar's '(blank)' fallback. Aggregate, non-PHI.
+ */
+function PayerBreakdownTable({
+  summary,
+  monthLabel,
+  selectedPayer,
+  onPayerClick,
+}: {
+  summary: PayerGapSummary;
+  monthLabel: string;
+  selectedPayer: string | null;
+  onPayerClick: (payer: string) => void;
+}) {
+  const rows = useMemo(
+    () => [...summary.by_payer].sort((a, b) => b.total_charge - a.total_charge),
+    [summary],
+  );
+  const totals = useMemo(
+    () =>
+      rows.reduce(
+        (acc, r) => ({
+          charge: acc.charge + r.total_charge,
+          allowed: acc.allowed + r.total_allowed,
+          paid: acc.paid + r.total_paid,
+          gap: acc.gap + r.total_collection_gap,
+        }),
+        { charge: 0, allowed: 0, paid: 0, gap: 0 },
+      ),
+    [rows],
+  );
+
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
+      <h3 className="text-sm font-semibold text-ink900">Payer breakdown — {monthLabel}</h3>
+      <p className="mb-3 mt-0.5 text-xs text-muted-foreground">
+        Charged / Allowed / Paid / Collection gap per payer. Click a payer for its per-facility breakdown.
+      </p>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Payer</TableHead>
+            <TableHead className="text-right">Charged</TableHead>
+            <TableHead className="text-right">Allowed</TableHead>
+            <TableHead className="text-right">Paid</TableHead>
+            <TableHead className="text-right">Collection Gap</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((r, i) => {
+            const label = r.payer_name ?? '(blank)';
+            const gapPct = r.total_charge > 0 ? (r.total_collection_gap / r.total_charge) * 100 : 0;
+            const active = selectedPayer === label;
+            return (
+              <TableRow
+                key={`${label}-${i}`}
+                onClick={() => onPayerClick(label)}
+                className={`cursor-pointer ${active ? 'bg-teal50' : 'hover:bg-teal50/50'}`}
+              >
+                <TableCell>
+                  {r.payer_name ?? <span className="text-muted-foreground">(blank)</span>}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">{money(r.total_charge)}</TableCell>
+                <TableCell className="text-right tabular-nums">{money(r.total_allowed)}</TableCell>
+                <TableCell className="text-right tabular-nums">{money(r.total_paid)}</TableCell>
+                <TableCell className="text-right">
+                  <div className="flex items-center justify-end gap-2">
+                    <span className="tabular-nums">{money(r.total_collection_gap)}</span>
+                    <span className="w-14 shrink-0">
+                      <MiniBar pct={gapPct} />
+                    </span>
+                  </div>
+                </TableCell>
+              </TableRow>
+            );
+          })}
+          <TableRow className="border-t-2 font-semibold">
+            <TableCell>TOTALS</TableCell>
+            <TableCell className="text-right tabular-nums">{money(totals.charge)}</TableCell>
+            <TableCell className="text-right tabular-nums">{money(totals.allowed)}</TableCell>
+            <TableCell className="text-right tabular-nums">{money(totals.paid)}</TableCell>
+            <TableCell className="text-right tabular-nums">{money(totals.gap)}</TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
 function ChartLoading() {
   return <div className="py-12 text-center text-sm text-muted-foreground">Loading…</div>;
 }
@@ -659,6 +755,15 @@ export function OverviewBarChart() {
         <div className="text-sm text-muted-foreground">{description}</div>
 
         {chartArea()}
+
+        {view === 'payer' && past.kind === 'payer' && (
+          <PayerBreakdownTable
+            summary={past.summary}
+            monthLabel={monthLabel}
+            selectedPayer={selectedPayer}
+            onPayerClick={setSelectedPayer}
+          />
+        )}
 
         {view === 'facility' && selectedFacility && (
           <div ref={panelRef}>
