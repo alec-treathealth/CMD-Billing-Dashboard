@@ -43,7 +43,7 @@ export interface CmdApiConfig {
   baseUrl: string;
   /** CMD customer/account id (BXR/CMD = '10027973'). */
   customerId: string;
-  /** Saved report id ('10091729' — the payer payments report). */
+  /** Saved report id ('10091828' — the payer payments report). */
   reportId: string;
   /** Saved filter id ('10147241'). The filter defines the report's date window. */
   filterId: string;

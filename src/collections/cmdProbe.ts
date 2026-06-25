@@ -41,7 +41,7 @@ function configFromEnv(): CmdApiConfig {
   return {
     baseUrl: process.env.CMD_API_BASE_URL?.trim() || 'https://webapi.collaboratemd.com',
     customerId: process.env.CMD_CUSTOMER_ID?.trim() || '10027973',
-    reportId: process.env.CMD_REPORT_ID?.trim() || '10091729',
+    reportId: process.env.CMD_REPORT_ID?.trim() || '10091828',
     filterId: process.env.CMD_FILTER_ID?.trim() || '10147241',
     auth,
   };

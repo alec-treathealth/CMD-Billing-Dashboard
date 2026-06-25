@@ -35,8 +35,10 @@ import { collectionsMonthlySummary } from '../../src/collections/summary.js';
 import type { CollectionsMonthlySummary } from '../../src/collections/summaryTypes.js';
 import { collectionsDaily, collectionsKpis } from '../../src/collections/daily.js';
 import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collections/dailyTypes.js';
-import { cmdPayerGapForMonth, type CmdApiConfig } from '../../src/collections/cmdPayer.js';
+import { cmdPayerGapForMonth, cmdReportRows, type CmdApiConfig } from '../../src/collections/cmdPayer.js';
 import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
+import { refreshCmdPayerRollup } from '../../src/collections/cmdPayerRefresh.js';
+import { makeClient, type Db } from '../../src/collections/db.js';
 import { browseClaims as browseClaimsQuery, claimById } from '../../src/queries/browse_claims.js';
 import type { BrowseClaimsArgs, BrowseClaimsResult } from '../../src/queries/browse_claims.js';
 import { handleAgentRequest, type AgentHttpRequest } from '../../src/routes/agentHandler.js';
@@ -55,12 +57,30 @@ import {
   handleRevalidateRequest,
   type RevalidateHttpRequest,
 } from '../../src/routes/revalidateHandler.js';
+import {
+  handleCmdPayerRefreshRequest,
+  type CmdPayerRefreshHttpRequest,
+} from '../../src/routes/cmdPayerRefreshHandler.js';
 
 let cachedExecutor: PgExecutor | undefined;
 function readerExecutor(): PgExecutor {
   // verify-full TLS is applied centrally in makeReaderPool (src/ssl.ts).
   cachedExecutor ??= new PgExecutor(makeReaderPool(readerConnectionStringFromEnv()));
   return cachedExecutor;
+}
+
+// Least-privilege writer pool for the daily CMD rollup refresh — the ONLY write
+// path in the web app. cmd_rollup_writer (migration 0013) can INSERT/DELETE only
+// collections.cmd_payer_facility_monthly; NOT claims_admin, NOT the reader. The
+// URL comes from env only and is never logged; verify-full TLS via makeClient.
+let cachedWriterDb: Db | undefined;
+function rollupWriterDb(): Db {
+  const url = process.env.CMD_ROLLUP_WRITER_DATABASE_URL;
+  if (!url || url.trim() === '') {
+    throw new Error('Missing CMD_ROLLUP_WRITER_DATABASE_URL (set in env; never hardcode or log it)');
+  }
+  cachedWriterDb ??= makeClient(url);
+  return cachedWriterDb;
 }
 
 let cachedClient: AnthropicMessagesClient | undefined;
@@ -108,6 +128,23 @@ export function handleRevalidate(req: RevalidateHttpRequest) {
     allowedTags: REVALIDATE_ALLOWED_TAGS,
     defaultTag: DASHBOARD_CACHE_TAG,
     revalidate: (tag) => revalidateTag(tag),
+  });
+}
+
+/**
+ * Daily CMD payer rollup refresh route (Vercel Cron). Gated on CRON_SECRET. Pulls
+ * the live CMD report, aggregates to the non-PHI rollup IN-PROCESS, and refreshes
+ * the trailing window of months as the least-privilege cmd_rollup_writer role. No
+ * PHI crosses this boundary; only non-PHI stats are returned.
+ */
+export function handleCmdPayerRefresh(req: CmdPayerRefreshHttpRequest) {
+  return handleCmdPayerRefreshRequest(req, {
+    secret: process.env.CRON_SECRET,
+    refresh: () =>
+      refreshCmdPayerRollup({
+        fetchRows: () => cmdReportRows(cmdApiConfig()),
+        writeDb: rollupWriterDb(),
+      }),
   });
 }
 
@@ -304,7 +341,7 @@ function cmdApiConfig(): CmdApiConfig {
   return {
     baseUrl: process.env.CMD_API_BASE_URL?.trim() || 'https://webapi.collaboratemd.com',
     customerId: process.env.CMD_CUSTOMER_ID?.trim() || '10027973',
-    reportId: process.env.CMD_REPORT_ID?.trim() || '10091729',
+    reportId: process.env.CMD_REPORT_ID?.trim() || '10091828',
     filterId: process.env.CMD_FILTER_ID?.trim() || '10147241',
     auth,
     // CMD batch reporting is async (run → poll a base64 zip). Bound the poll so a
