@@ -55,8 +55,9 @@ export async function retrieveAppealEvidence(params: {
         where business_entity_id = $1 and charge_debit_id = $2`,
       [beid, params.queryClaimId],
     );
-    if (q.rowCount === 0) return [];
-    const { payer, dense, fts_text } = q.rows[0];
+    const signature = q.rows[0];
+    if (!signature) return [];
+    const { payer, dense, fts_text } = signature;
 
     // RRF fusion of dense ANN (top 50) and FTS (top 50), same-payer CLEAN pool.
     const fused = await reader.query<{
