@@ -28,6 +28,7 @@ import {
   dashboardCollectionsSummary,
   dashboardDistribution,
   dashboardPayerGap,
+  facilitiesDimension,
   handleAgent,
   handleResults,
   payerCmdMonth,
@@ -54,6 +55,7 @@ import type {
 import type { CollectionsMonthlySummary } from '../../src/collections/summaryTypes';
 import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collections/dailyTypes';
 import type { CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup';
+import type { FacilityDimensionRow } from '../../src/collections/facilities';
 
 /** Fixed audit principal until session auth exists (gate 3). */
 const AUDIT_PRINCIPAL = 'phase5-ui';
@@ -71,6 +73,7 @@ export type {
   BrowseClaimsSort,
   BrowseClaimsCursor,
   ClaimFilter,
+  FacilityDimensionRow,
 };
 
 export type AgentActionResult =
@@ -346,6 +349,19 @@ export async function loadCollectionsKpis(): Promise<DashboardResult<Collections
 export async function loadCollectionsDaily(): Promise<DashboardResult<CollectionsDailyResult>> {
   try {
     return { ok: true, data: await dashboardCollectionsDaily() };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Canonical facility dimension (facility_code → name / care_setting (IP/OP) /
+ * display_acronym) for the Master BXR chart's IP/OP split, Facility(IP)/Facility(OP)
+ * filters, and acronym labels. Non-PHI reference, reader-only, cached.
+ */
+export async function loadFacilityDimension(): Promise<DashboardResult<FacilityDimensionRow[]>> {
+  try {
+    return { ok: true, data: await facilitiesDimension() };
   } catch {
     return { ok: false };
   }

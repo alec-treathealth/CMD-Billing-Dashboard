@@ -35,6 +35,7 @@ import { collectionsMonthlySummary } from '../../src/collections/summary.js';
 import type { CollectionsMonthlySummary } from '../../src/collections/summaryTypes.js';
 import { collectionsDaily, collectionsKpis } from '../../src/collections/daily.js';
 import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collections/dailyTypes.js';
+import { facilityDimension, type FacilityDimensionRow } from '../../src/collections/facilities.js';
 import { cmdPayerGapForMonth, cmdReportRows, type CmdApiConfig } from '../../src/collections/cmdPayer.js';
 import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
 import { refreshCmdPayerRollup } from '../../src/collections/cmdPayerRefresh.js';
@@ -279,6 +280,19 @@ export const dashboardCollectionsDaily = unstable_cache(
       { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard' },
     ),
   ['dashboard-collections-daily'],
+  { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
+);
+
+/**
+ * Canonical facility dimension (facility_code -> name / care_setting (IP/OP) /
+ * display_acronym), from collections.facilities (migration 0016). Backs the Master
+ * BXR chart's IP/OP split, Facility(IP)/Facility(OP) filters, and acronym labels.
+ * Static reference data — cached like the other aggregates; non-PHI, reader-only.
+ */
+export const facilitiesDimension = unstable_cache(
+  async (): Promise<FacilityDimensionRow[]> =>
+    facilityDimension({ executor: readerExecutor(), createdBy: 'phase71-facilities-dimension' }),
+  ['facilities-dimension'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
 );
 
