@@ -12,6 +12,7 @@
     "probe:cmd": "tsx src/collections/cmdProbe.ts",
     "diagnose": "tsx src/diagnose.ts",
     "ingest": "tsx src/ingest.ts",
+    "ingest:cmd-payer": "tsx src/collections/cmdPayerIngest.ts",
     "dbcheck": "tsx src/dbcheck.ts",
     "test": "node --import tsx --test test/**/*.test.ts",
     "typecheck": "tsc --noEmit"

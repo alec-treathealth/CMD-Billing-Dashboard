@@ -1,6 +1,8 @@
 # PHI / secrets — MUST never be committed.
 # reports/ holds failed-coercion output which may contain raw cell values (PHI).
 reports/
+# data/ holds raw CMD batch report CSV pulls (patient-level PHI). Never commit.
+data/
 .env
 .env.*
 !.env.example

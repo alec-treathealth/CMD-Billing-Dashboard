@@ -30,6 +30,7 @@ import {
   dashboardPayerGap,
   handleAgent,
   handleResults,
+  payerCmdMonth,
   payerGapCmdForMonth,
   payerGapForRange,
   revealClaimById,
@@ -52,6 +53,7 @@ import type {
 } from '../../src/queries/types';
 import type { CollectionsMonthlySummary } from '../../src/collections/summaryTypes';
 import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collections/dailyTypes';
+import type { CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup';
 
 /** Fixed audit principal until session auth exists (gate 3). */
 const AUDIT_PRINCIPAL = 'phase5-ui';
@@ -271,6 +273,25 @@ export async function loadPayerGapCmd(
 ): Promise<DashboardResult<PayerGapSummary>> {
   try {
     return { ok: true, data: await payerGapCmdForMonth(year, month) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * CMD per-payer gap + per-facility breakdown for one month, from the DB rollup
+ * (collections.cmd_payer_facility_monthly). Backs the Master BXR Chart "By Payer"
+ * bars AND the per-payer click-into drill-down (the by_facility rows are filtered
+ * client-side per clicked payer — no extra fetch). Non-PHI, reader-only, not
+ * cached. A month with no rollup rows returns an empty summary; the caller falls
+ * back to the matview date-range path.
+ */
+export async function loadCmdPayerMonth(
+  year: number,
+  month: number,
+): Promise<DashboardResult<CmdPayerMonthResult>> {
+  try {
+    return { ok: true, data: await payerCmdMonth(year, month) };
   } catch {
     return { ok: false };
   }

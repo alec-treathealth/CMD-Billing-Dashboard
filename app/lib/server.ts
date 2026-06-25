@@ -36,6 +36,7 @@ import type { CollectionsMonthlySummary } from '../../src/collections/summaryTyp
 import { collectionsDaily, collectionsKpis } from '../../src/collections/daily.js';
 import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collections/dailyTypes.js';
 import { cmdPayerGapForMonth, type CmdApiConfig } from '../../src/collections/cmdPayer.js';
+import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
 import { browseClaims as browseClaimsQuery, claimById } from '../../src/queries/browse_claims.js';
 import type { BrowseClaimsArgs, BrowseClaimsResult } from '../../src/queries/browse_claims.js';
 import { handleAgentRequest, type AgentHttpRequest } from '../../src/routes/agentHandler.js';
@@ -306,11 +307,33 @@ function cmdApiConfig(): CmdApiConfig {
     reportId: process.env.CMD_REPORT_ID?.trim() || '10091729',
     filterId: process.env.CMD_FILTER_ID?.trim() || '10147241',
     auth,
+    // CMD batch reporting is async (run → poll a base64 zip). Bound the poll so a
+    // slow/contended report (one-at-a-time per partner, 20-min server cap) fails
+    // fast and the dashboard falls back to the matview range instead of hanging.
+    // The payer report typically completes in well under a minute.
+    pollIntervalMs: Number(process.env.CMD_POLL_INTERVAL_MS) || 4_000,
+    maxPollAttempts: Number(process.env.CMD_POLL_ATTEMPTS) || 12, // ~48s ceiling
   };
 }
 
 export async function payerGapCmdForMonth(year: number, month: number): Promise<PayerGapSummary> {
   return cmdPayerGapForMonth(year, month, cmdApiConfig());
+}
+
+/**
+ * CMD per-payer gap + per-facility breakdown for one month, read from the DB
+ * rollup (collections.cmd_payer_facility_monthly, ingested from the CMD report
+ * CSV). This is the Master BXR Chart "By Payer" data source — fast, non-PHI, and
+ * independent of the live CMD API. Reads as claims_reader; NOT cached (per-request
+ * user-selected month, mirroring payerGapForRange / collectionsDailyForMonth).
+ * Returns an empty result for a month with no rollup rows, so the caller can fall
+ * back to the matview date-range path.
+ */
+export async function payerCmdMonth(year: number, month: number): Promise<CmdPayerMonthResult> {
+  return cmdPayerMonth(year, month, {
+    executor: readerExecutor(),
+    createdBy: 'phase71-collections-dashboard',
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -41,17 +41,17 @@ import { ControlSelect } from '@/components/data-grid';
 import { PayerGapBars, payerChartRows } from '@/components/payer-chart';
 import { money, moneyAxis } from '@/lib/format';
 import {
+  loadCmdPayerMonth,
   loadCollectionsDaily,
   loadCollectionsDailyRange,
   loadCollectionsKpis,
-  loadPayerGap,
-  loadPayerGapCmd,
   loadPayerGapRange,
   type CollectionsDailyResult,
   type CollectionsKpis,
   type PayerGapSummary,
 } from '@/lib/actions';
 import { facilityLabel } from '../../../src/collections/summaryTypes';
+import type { CmdPayerFacilityRow } from '../../../src/collections/cmdPayerRollup';
 import { CHART_COLORS, FacilityKpiBars, kpiChartRows, LegendSwatch } from './collections';
 import { useWidget, WidgetCard } from './widgets';
 
@@ -204,7 +204,7 @@ type PastState =
   | { kind: 'loading' }
   | { kind: 'error' }
   | { kind: 'facility'; rows: FacilityGrossRow[]; daily: DailyRow[] }
-  | { kind: 'payer'; summary: PayerGapSummary };
+  | { kind: 'payer'; summary: PayerGapSummary; byFacility: CmdPayerFacilityRow[] };
 
 /** 'YYYY-MM-DD' → 'MM/DD/YYYY' for the drill-down table (matches the source grid). */
 function formatMmDdYyyy(iso: string): string {
@@ -327,6 +327,106 @@ function FacilityDailyPanel({
   );
 }
 
+/**
+ * Drill-down: the per-facility breakdown for one payer in the selected month.
+ * Mirrors FacilityDailyPanel — an inline card below the chart with a
+ * Facility/Charged/Allowed/Paid/Gap table + a bold totals row. `rows` are the
+ * already-in-memory per-facility rows for the month; we filter them to the clicked
+ * payer client-side (no new fetch). Aggregate, non-PHI (CMD rollup only).
+ */
+function PayerFacilityPanel({
+  payer,
+  monthLabel,
+  rows,
+  onClose,
+}: {
+  payer: string;
+  monthLabel: string;
+  rows: CmdPayerFacilityRow[];
+  onClose: () => void;
+}) {
+  // Match the bar's displayed payer label: payerChartRows renders a null payer as
+  // '(blank)', so the clicked label compares against the same fallback here.
+  const payerRows = useMemo(
+    () =>
+      rows
+        .filter((r) => (r.payer_name ?? '(blank)') === payer)
+        .filter((r) => r.total_charge !== 0 || r.total_allowed !== 0 || r.total_paid !== 0)
+        .sort((a, b) => b.total_charge - a.total_charge),
+    [rows, payer],
+  );
+
+  const totals = useMemo(
+    () =>
+      payerRows.reduce(
+        (acc, r) => ({
+          charge: acc.charge + r.total_charge,
+          allowed: acc.allowed + r.total_allowed,
+          paid: acc.paid + r.total_paid,
+          gap: acc.gap + r.total_collection_gap,
+        }),
+        { charge: 0, allowed: 0, paid: 0, gap: 0 },
+      ),
+    [payerRows],
+  );
+
+  return (
+    <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-ink900">
+          {payer} — {monthLabel}
+        </h3>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={onClose}
+          aria-label="Close facility breakdown"
+          className="text-ink600"
+        >
+          <X className="h-4 w-4" />
+        </Button>
+      </div>
+
+      {payerRows.length === 0 ? (
+        <div className="py-6 text-center text-sm text-muted-foreground">
+          No facility breakdown for this payer in {monthLabel}.
+        </div>
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Facility</TableHead>
+              <TableHead className="text-right">Charged</TableHead>
+              <TableHead className="text-right">Allowed</TableHead>
+              <TableHead className="text-right">Paid</TableHead>
+              <TableHead className="text-right">Gap</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {payerRows.map((r) => (
+              <TableRow key={r.facility_name ?? '(unassigned)'}>
+                <TableCell>{r.facility_name ?? '(unassigned)'}</TableCell>
+                <TableCell className="text-right tabular-nums">{money(r.total_charge)}</TableCell>
+                <TableCell className="text-right tabular-nums">{money(r.total_allowed)}</TableCell>
+                <TableCell className="text-right tabular-nums">{money(r.total_paid)}</TableCell>
+                <TableCell className="text-right tabular-nums">{money(r.total_collection_gap)}</TableCell>
+              </TableRow>
+            ))}
+            <TableRow className="border-t-2 font-semibold">
+              <TableCell>TOTALS</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.charge)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.allowed)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.paid)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.gap)}</TableCell>
+            </TableRow>
+          </TableBody>
+        </Table>
+      )}
+    </div>
+  );
+}
+
 function ChartLoading() {
   return <div className="py-12 text-center text-sm text-muted-foreground">Loading…</div>;
 }
@@ -346,7 +446,6 @@ function ChartEmpty({ label }: { label: string }) {
 export function OverviewBarChart() {
   // MTD data is the already-cached aggregate read for whichever view is active.
   const kpisState = useWidget<CollectionsKpis>(loadCollectionsKpis);
-  const payerState = useWidget<PayerGapSummary>(loadPayerGap);
   // Latest-month daily rows (cached) — backs the MTD facility drill-down panel.
   const dailyMtdState = useWidget<CollectionsDailyResult>(loadCollectionsDaily);
 
@@ -372,11 +471,22 @@ export function OverviewBarChart() {
     if (selectedFacility) panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, [selectedFacility]);
 
+  // By Payer drill-down: the payer whose per-facility table is open (null = none).
+  const [selectedPayer, setSelectedPayer] = useState<string | null>(null);
+  const payerPanelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (selectedPayer) payerPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [selectedPayer]);
+
   // Past-month scoping: facility → daily range (aggregated), payer → gap range.
   // MTD reads the cached aggregates above, so no fetch is issued for it.
   const [past, setPast] = useState<PastState>({ kind: 'idle' });
   useEffect(() => {
-    if (isMtd) {
+    // Facility MTD reads the cached kpis aggregate — no fetch. Facility past months
+    // fetch a daily range. By Payer is month-scoped for EVERY month (incl. the
+    // current one): it reads the CMD rollup, falling back to the matview date-range
+    // path when the rollup has no rows for the month, so the view never breaks.
+    if (view === 'facility' && isMtd) {
       setPast({ kind: 'idle' });
       return;
     }
@@ -396,21 +506,21 @@ export function OverviewBarChart() {
           if (live) setPast({ kind: 'error' });
         });
     } else {
-      // Past 2026 month: CollaborateMD is the source of truth for payer payments.
-      // Fall back to the matview date-range path when CMD is unavailable (not
-      // configured / unreachable / unrecognized response) so the view never breaks.
       const from = `${YEAR}-${pad2(month)}-01`;
       const to = `${YEAR}-${pad2(month)}-${pad2(lastDayOfMonth(YEAR, month))}`;
       (async () => {
-        const cmd = await loadPayerGapCmd(YEAR, month);
+        const cmd = await loadCmdPayerMonth(YEAR, month);
         if (!live) return;
-        if (cmd.ok) {
-          setPast({ kind: 'payer', summary: cmd.data });
+        if (cmd.ok && cmd.data.summary.by_payer.length > 0) {
+          setPast({ kind: 'payer', summary: cmd.data.summary, byFacility: cmd.data.by_facility });
           return;
         }
+        // Empty rollup (month not ingested) → matview range; no facility breakdown.
         const fallback = await loadPayerGapRange({ from, to });
         if (!live) return;
-        setPast(fallback.ok ? { kind: 'payer', summary: fallback.data } : { kind: 'error' });
+        setPast(
+          fallback.ok ? { kind: 'payer', summary: fallback.data, byFacility: [] } : { kind: 'error' },
+        );
       })().catch(() => {
         if (live) setPast({ kind: 'error' });
       });
@@ -423,14 +533,13 @@ export function OverviewBarChart() {
   const monthName = MONTH_NAMES[month - 1]!;
   const monthLabel = `${monthName} ${YEAR}`;
   const clickHint = ' Click a facility for its daily breakdown.';
+  const payerClickHint = ' Click a payer for its facility breakdown.';
   const description =
     view === 'facility'
       ? isMtd
         ? `MTD vs. YTD gross by facility, sorted by YTD gross.${clickHint}`
         : `${monthLabel} gross by facility, sorted by gross.${clickHint}`
-      : isMtd
-        ? `Top ${PAYER_TOP_N} payers by total charged — paid vs. collection gap.`
-        : `Top ${PAYER_TOP_N} payers by total charged (${monthLabel}) — paid vs. collection gap.`;
+      : `Top ${PAYER_TOP_N} payers by total charged (${monthLabel}) — paid vs. collection gap.${payerClickHint}`;
 
   // Daily rows for the selected month (drill-down): cached latest-month rows for
   // MTD, the already-fetched range rows for a past month. No new fetch is issued.
@@ -492,18 +601,12 @@ export function OverviewBarChart() {
       return <ChartLoading />;
     }
 
-    // By Payer
-    if (isMtd) {
-      if (payerState.status === 'loading') return <ChartLoading />;
-      if (payerState.status === 'error') return <ChartError />;
-      const rows = payerChartRows(payerState.data, PAYER_TOP_N);
-      if (rows.length === 0) return <ChartEmpty label="No payer activity to show." />;
-      return <PayerGapBars rows={rows} />;
-    }
+    // By Payer — month-scoped for every month via `past` (CMD rollup, matview
+    // fallback). Clicking a payer opens its per-facility breakdown panel.
     if (past.kind === 'payer') {
       const rows = payerChartRows(past.summary, PAYER_TOP_N);
       if (rows.length === 0) return <ChartEmpty label={`No payer activity in ${monthLabel}.`} />;
-      return <PayerGapBars rows={rows} />;
+      return <PayerGapBars rows={rows} onBarClick={setSelectedPayer} />;
     }
     if (past.kind === 'error') return <ChartError />;
     return <ChartLoading />;
@@ -584,6 +687,17 @@ export function OverviewBarChart() {
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {view === 'payer' && selectedPayer && (
+          <div ref={payerPanelRef}>
+            <PayerFacilityPanel
+              payer={selectedPayer}
+              monthLabel={monthLabel}
+              rows={past.kind === 'payer' ? past.byFacility : []}
+              onClose={() => setSelectedPayer(null)}
+            />
           </div>
         )}
       </div>

@@ -72,8 +72,6 @@ export function PayerTooltip({ active, payload }: { active?: boolean; payload?: 
     <div className="rounded-md border border-line bg-surface px-3 py-2 text-xs shadow-ths">
       <div className="mb-1 font-semibold text-ink900">{r.payer}</div>
       <dl className="grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5 tabular-nums">
-        <dt className="text-muted-foreground">Claims</dt>
-        <dd className="text-right text-ink900">{count(r.claim_count)}</dd>
         <dt className="text-muted-foreground">Charged</dt>
         <dd className="text-right text-ink900">{money(r.total_charge)}</dd>
         <dt className="text-muted-foreground">Paid</dt>
@@ -93,14 +91,21 @@ export function PayerTooltip({ active, payload }: { active?: boolean; payload?: 
  * over its `rows`; shared by PayerChart (with its range picker) and the merged
  * Overview "Master BXR Chart" widget so both render identically.
  */
-export function PayerGapBars({ rows }: { rows: ChartRow[] }) {
+export function PayerGapBars({
+  rows,
+  onBarClick,
+}: {
+  rows: ChartRow[];
+  /** Optional: invoked with the payer label when a bar is clicked (drill-down). */
+  onBarClick?: (payer: string) => void;
+}) {
   const chartHeight = Math.max(180, rows.length * 38 + 24);
   return (
     <>
       <div
         role="img"
         aria-label="Payers — paid vs. collection gap"
-        style={{ width: '100%', height: chartHeight }}
+        style={{ width: '100%', height: chartHeight, cursor: onBarClick ? 'pointer' : undefined }}
       >
         <ResponsiveContainer width="100%" height="100%">
           <BarChart
@@ -108,6 +113,9 @@ export function PayerGapBars({ rows }: { rows: ChartRow[] }) {
             layout="vertical"
             margin={{ top: 4, right: 16, bottom: 4, left: 8 }}
             barCategoryGap="28%"
+            onClick={(state) => {
+              if (onBarClick && state && typeof state.activeLabel === 'string') onBarClick(state.activeLabel);
+            }}
           >
             <CartesianGrid horizontal={false} stroke="#E4E9E6" />
             <XAxis

@@ -1,22 +1,30 @@
 /**
  * One-off CMD Web API probe — run BEFORE trusting src/collections/cmdPayer.ts.
  *
- *   npm run probe:cmd            # current 2026 month (or set CMD_PROBE_MONTH=5)
+ *   npm run probe:cmd
  *
- * Purpose: reveal the report-run response SHAPE so the mapping in cmdPayer.ts can
- * be reconciled with reality (this agent environment has no CMD credentials, so
- * the mapping there is an unverified assumption).
+ * Purpose: exercise the real CollaborateMD batch-reporting contract end-to-end and
+ * reveal the report's STRUCTURE so the mapping in cmdPayer.ts stays grounded in
+ * reality. The flow is the documented two-step async one:
+ *   1. POST .../reports/{report}/filter/{filter}/run  → Identifier (requestSeq)
+ *   2. POST .../reports/results/{requestSeq}          → base64 → .zip of CSV(s)
+ * polling while Status is "REPORT RUNNING".
  *
- * PHI SAFETY: this prints STRUCTURE ONLY — top-level type, object keys, array
- * lengths, and the key set of the first row. It never prints field VALUES, so no
- * patient-level data is emitted. If you must inspect values, do so in a trusted
- * terminal and never paste them anywhere. Credentials are read from env and never
- * printed.
+ * PHI SAFETY: this prints STRUCTURE ONLY — the run-step envelope keys, the zip
+ * entry filenames, each CSV's column headers, and row COUNTS. It never prints any
+ * field VALUE, so no patient-level data is emitted. Credentials are read from env
+ * and never printed.
  *
- * Credentials (env only): CMD_API_TOKEN, or CMD_USERNAME + CMD_PASSWORD. Optional
- * overrides: CMD_API_BASE_URL, CMD_CUSTOMER_ID, CMD_REPORT_ID, CMD_FILTER_ID.
+ * Credentials (env only): CMD_API_TOKEN, or CMD_API_USERNAME + CMD_API_PASSWORD.
+ * Optional overrides: CMD_API_BASE_URL, CMD_CUSTOMER_ID, CMD_REPORT_ID,
+ * CMD_FILTER_ID. Poll tuning: CMD_POLL_ATTEMPTS, CMD_POLL_INTERVAL_MS.
  */
-import { cmdRunReport, type CmdApiConfig } from './cmdPayer.js';
+import {
+  cmdRunReport,
+  cmdFetchResults,
+  describeReportZip,
+  type CmdApiConfig,
+} from './cmdPayer.js';
 
 function configFromEnv(): CmdApiConfig {
   const token = process.env.CMD_API_TOKEN?.trim();
@@ -39,47 +47,55 @@ function configFromEnv(): CmdApiConfig {
   };
 }
 
-/** Print structure (keys/types/lengths) only — never values (PHI-safe). */
-function describe(label: string, value: unknown, depth = 0): void {
-  const indent = '  '.repeat(depth);
-  if (Array.isArray(value)) {
-    console.log(`${indent}${label}: Array(${value.length})`);
-    const first = value[0];
-    if (first && typeof first === 'object') {
-      console.log(`${indent}  [0] keys: ${Object.keys(first as object).join(', ')}`);
-    } else if (value.length > 0) {
-      console.log(`${indent}  [0] type: ${typeof first}`);
-    }
-    return;
-  }
-  if (value && typeof value === 'object') {
-    const keys = Object.keys(value as object);
-    console.log(`${indent}${label}: object { ${keys.join(', ')} }`);
-    if (depth < 2) {
-      for (const k of keys) describe(k, (value as Record<string, unknown>)[k], depth + 1);
-    }
-    return;
-  }
-  console.log(`${indent}${label}: ${typeof value}`);
-}
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 async function main(): Promise<void> {
   const cfg = configFromEnv();
-  const now = new Date();
-  const month = Number(process.env.CMD_PROBE_MONTH) || (now.getUTCFullYear() === 2026 ? now.getUTCMonth() + 1 : 5);
-  const year = 2026;
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const from = `${year}-${pad(month)}-01`;
-  const to = `${year}-${pad(month)}-${pad(new Date(Date.UTC(year, month, 0)).getUTCDate())}`;
-  console.log(`Probing CMD report ${cfg.reportId}/filter ${cfg.filterId} for ${from}..${to}`);
-  const json = await cmdRunReport(cfg, { from, to });
-  console.log('--- response shape (structure only; no values) ---');
-  describe('root', json);
+  const intervalMs = Number(process.env.CMD_POLL_INTERVAL_MS) || 15_000;
+  const maxAttempts = Number(process.env.CMD_POLL_ATTEMPTS) || 40;
+
+  console.log(`Probing CMD report ${cfg.reportId} / filter ${cfg.filterId} (window set by filter)`);
+
+  // Step 1 — fire the run; the window is baked into the saved filter (no date param).
+  const requestSeq = await cmdRunReport(cfg);
+  console.log(`run → requestSeq: ${requestSeq}`);
+
+  // Step 2 — poll results until the base64 zip is ready (PHI-safe: status only).
+  let zip: Buffer | null = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const out = await cmdFetchResults(cfg, requestSeq);
+    if (Buffer.isBuffer(out)) {
+      zip = out;
+      console.log(`results → ready on attempt ${attempt} (${out.byteLength} zip bytes)`);
+      break;
+    }
+    if (out === 'TIMED_OUT') {
+      console.error('results → REPORT TIMED OUT (narrow the saved filter and retry).');
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`results → REPORT RUNNING (attempt ${attempt}/${maxAttempts}); waiting…`);
+    if (attempt < maxAttempts) await sleep(intervalMs);
+  }
+  if (!zip) {
+    console.error('results → still running after poll budget exhausted.');
+    process.exitCode = 1;
+    return;
+  }
+
+  // Structure only — entry filenames, CSV column headers, row counts. No values.
+  console.log('--- report zip structure (structure only; no values) ---');
+  for (const entry of describeReportZip(zip)) {
+    console.log(`  entry: ${entry.name}  (rows: ${entry.rowCount})`);
+    if (entry.columns.length > 0) {
+      console.log(`    columns (${entry.columns.length}): ${entry.columns.join(' | ')}`);
+    }
+  }
   console.log('--- end ---');
 }
 
 main().catch((err) => {
-  // Status/message only — cmdRunReport never includes the body, so this is PHI-safe.
+  // Status/label only — the client never includes the body, so this is PHI-safe.
   console.error('CMD probe failed:', err instanceof Error ? err.message : String(err));
   process.exit(1);
 });
