@@ -16,8 +16,12 @@
  *  • Facility · MTD  → cached loadCollectionsKpis() (stacked MTD + YTD bars).
  *  • Facility · past → loadCollectionsDailyRange({year,month}) aggregated to a
  *                      single gross bar per facility (tooltip: Gross/Checks/EFT).
- *  • Payer · MTD     → cached loadPayerGap() (all-time, the working default).
- *  • Payer · past    → loadPayerGapRange({from:'2026-MM-01', to:'2026-MM-DD'}).
+ *  • Payer · any month → month-scoped for EVERY month incl. the current one:
+ *                        loadCmdPayerMonth(year,month) reads that month's CMD
+ *                        rollup (with per-facility drill-down). When the rollup
+ *                        has no rows for the month, it falls back to
+ *                        loadPayerGapRange({from:'2026-MM-01', to:'2026-MM-DD'})
+ *                        so the view never breaks (no facility breakdown then).
  *
  * Aggregate, non-PHI: reads only collections (daily_collections + facilities) and
  * the payer_gap summary. No patient data, no rows.
