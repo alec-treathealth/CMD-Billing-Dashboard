@@ -5,7 +5,8 @@ import { usePathname } from 'next/navigation';
 
 const TABS: readonly { href: string; label: string }[] = [
   { href: '/dashboard', label: 'Overview' },
-  { href: '/dashboard/collections', label: 'Collections Explorer' },
+  { href: '/dashboard/collections', label: 'Collections' },
+  { href: '/dashboard/collections/explorer', label: 'Collections Explorer' },
 ];
 
 export function DashboardNav() {

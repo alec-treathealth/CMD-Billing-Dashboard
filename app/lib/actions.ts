@@ -37,9 +37,12 @@ import {
   payerGapForRange,
   revealClaimById,
   searchClaimsDirect,
+  loadCmdExplorerNonPhi,
+  revealCmdExplorerRow,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
 import { supabaseAuthConfigured } from '@/lib/supabase/env';
+import type { CmdExplorerNonPhiRow, CmdExplorerPhi } from '../../src/collections/cmdExplorer';
 import type {
   BrowseClaimsCursor,
   BrowseClaimsResult,
@@ -524,5 +527,51 @@ export async function loadClaimFacets(): Promise<ClaimFacetsResult> {
     return { ok: true, data: { facility: strings(facilities), payer: strings(payers), source_year } };
   } catch {
     return { ok: false };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CMD Collections Explorer (Phase: Derek's 14-column batch report) — NON-PHI grid
+// + audited per-row PHI reveal.
+//
+// loadCmdReport returns ONLY the non-PHI projection (cached 15 min server-side; no PHI
+// at rest). The 3 PHI columns are masked in the UI and fetched per-row via
+// revealCmdReportRow, which requires an authorized session and writes a durable audit
+// record. Row identity is a content fingerprint (SHA-256 over all fields), so reveal
+// fails closed to "unavailable" rather than ever returning the wrong patient's data.
+// ---------------------------------------------------------------------------
+
+export type CmdReportResult =
+  | { ok: true; rows: CmdExplorerNonPhiRow[] }
+  | { ok: false; error: string };
+
+/** Load the CMD Collections Explorer report — NON-PHI columns only (cached 15 min). */
+export async function loadCmdReport(): Promise<CmdReportResult> {
+  try {
+    return { ok: true, rows: await loadCmdExplorerNonPhi() };
+  } catch {
+    return { ok: false, error: 'The collections report could not be loaded right now.' };
+  }
+}
+
+export type RevealCmdRowResult =
+  | { ok: true; phi: CmdExplorerPhi }
+  | { ok: false; error: string };
+
+/** Reveal ONE row's PHI by content fingerprint. Requires an authorized session; audited. */
+export async function revealCmdReportRow(rowId: string): Promise<RevealCmdRowResult> {
+  if (typeof rowId !== 'string' || !/^[0-9a-f]{64}$/.test(rowId)) {
+    return { ok: false, error: 'Invalid row reference.' };
+  }
+  const gate = await requireExecutive();
+  if (!gate.ok) return { ok: false, error: 'Sign in to reveal patient identifiers.' };
+  try {
+    const phi = await revealCmdExplorerRow(rowId, { email: gate.user.email, userId: gate.user.id });
+    if (!phi) {
+      return { ok: false, error: 'Those identifiers are no longer available — reload and try again.' };
+    }
+    return { ok: true, phi };
+  } catch {
+    return { ok: false, error: 'The identifiers could not be revealed right now.' };
   }
 }

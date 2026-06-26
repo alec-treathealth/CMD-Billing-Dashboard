@@ -37,6 +37,13 @@ import { collectionsDaily, collectionsKpis } from '../../src/collections/daily.j
 import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collections/dailyTypes.js';
 import { facilityDimension, type FacilityDimensionRow } from '../../src/collections/facilities.js';
 import { cmdPayerGapForMonth, cmdReportRows, type CmdApiConfig } from '../../src/collections/cmdPayer.js';
+import {
+  mapReportRows,
+  toNonPhi,
+  type CmdExplorerFullRow,
+  type CmdExplorerNonPhiRow,
+  type CmdExplorerPhi,
+} from '../../src/collections/cmdExplorer.js';
 import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
 import { refreshCmdPayerRollup } from '../../src/collections/cmdPayerRefresh.js';
 import { makeClient, type Db } from '../../src/collections/db.js';
@@ -420,6 +427,58 @@ export async function payerCmdMonth(year: number, month: number): Promise<CmdPay
     executor: readerExecutor(),
     createdBy: 'phase71-collections-dashboard',
   });
+}
+
+// ---------------------------------------------------------------------------
+// CMD Collections Explorer (Derek's 14-column batch report).
+//
+// Same credentials/customer as the payer rollup; a DISTINCT saved report + filter.
+// The non-PHI projection is cached via unstable_cache (no PHI at rest). The FULL
+// report (incl. PHI) lives only in a VOLATILE in-process cache (15 min) — never
+// persisted, never unstable_cache'd — so a per-row reveal resolves without re-running
+// the slow, one-at-a-time report. Reveal matches by content fingerprint, so it fails
+// closed to null and can never return a different patient's identifiers.
+// ---------------------------------------------------------------------------
+function cmdExplorerConfig(): CmdApiConfig {
+  return {
+    ...cmdApiConfig(),
+    reportId: process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10091971',
+    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147377',
+  };
+}
+
+const CMD_EXPLORER_TTL_MS = 15 * 60_000;
+let cmdExplorerFull: { at: number; rows: CmdExplorerFullRow[] } | null = null;
+
+async function getCmdExplorerFull(): Promise<CmdExplorerFullRow[]> {
+  const now = Date.now();
+  if (cmdExplorerFull && now - cmdExplorerFull.at < CMD_EXPLORER_TTL_MS) return cmdExplorerFull.rows;
+  const rows = mapReportRows(await cmdReportRows(cmdExplorerConfig()));
+  cmdExplorerFull = { at: now, rows };
+  return rows;
+}
+
+/** NON-PHI projection of the CMD explorer report, cached 15 min (no PHI at rest). */
+export const loadCmdExplorerNonPhi = unstable_cache(
+  async (): Promise<CmdExplorerNonPhiRow[]> => toNonPhi(await getCmdExplorerFull()),
+  ['cmd-explorer-nonphi'],
+  { revalidate: 900, tags: ['cmd-explorer'] },
+);
+
+/** Resolve ONE row's PHI by content fingerprint + write a durable audit record. */
+export async function revealCmdExplorerRow(
+  rowId: string,
+  actor: { email: string; userId: string },
+): Promise<CmdExplorerPhi | null> {
+  const match = (await getCmdExplorerFull()).find((r) => r.rowId === rowId);
+  if (!match) return null;
+  await recordAccess({
+    actorEmail: actor.email,
+    actorUserId: actor.userId,
+    action: 'reveal_cmd_explorer_row',
+    detail: { rowId }, // non-PHI fingerprint only — never the values
+  });
+  return match.phi;
 }
 
 // ---------------------------------------------------------------------------
