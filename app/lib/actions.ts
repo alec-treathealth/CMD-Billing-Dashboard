@@ -12,8 +12,9 @@
  * bundle. All PHI-boundary, validation, and generic-error-collapsing logic is
  * reused from the handlers — this file adds no new SQL and no new PHI handling.
  *
- * The audit principal is a fixed app label for now ('phase5-ui', gate 3); when
- * real per-user auth lands it should be derived from the session instead.
+ * The audit principal is the authenticated user's session email (resolved via
+ * requireExecutive), so query_log names the REAL user. Until auth env is configured it
+ * falls back to the prior fixed label so the staged rollout never breaks search/reveal.
  *
  * PHI discipline preserved: the agent action returns non-PHI summary only; the
  * results action's `identity` (client_history terms) is PHI and travels in the
@@ -37,6 +38,8 @@ import {
   revealClaimById,
   searchClaimsDirect,
 } from '@/lib/server';
+import { requireExecutive } from '@/lib/executive';
+import { supabaseAuthConfigured } from '@/lib/supabase/env';
 import type {
   BrowseClaimsCursor,
   BrowseClaimsResult,
@@ -57,8 +60,18 @@ import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collecti
 import type { CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup';
 import type { FacilityDimensionRow } from '../../src/collections/facilities';
 
-/** Fixed audit principal until session auth exists (gate 3). */
-const AUDIT_PRINCIPAL = 'phase5-ui';
+/**
+ * Verified per-user audit principal: the authenticated session email, so query_log
+ * attributes the REAL user (email is a staff identity, not patient PHI, and fits the
+ * created_by bound). Until auth env is configured the staged rollout falls back to the
+ * prior fixed label. Returns null only when auth IS configured but there is no authorized
+ * session — PHI-touching actions then fail closed.
+ */
+async function sessionPrincipal(): Promise<string | null> {
+  if (!supabaseAuthConfigured()) return 'phase5-ui';
+  const gate = await requireExecutive();
+  return gate.ok ? gate.user.email : null;
+}
 
 export type {
   FunctionName,
@@ -157,12 +170,16 @@ export async function runSearch(question: string): Promise<AgentActionResult> {
   if (typeof question !== 'string' || question.trim() === '') {
     return { kind: 'error', error: 'Enter a question to search.' };
   }
+  const principal = await sessionPrincipal();
+  if (!principal) {
+    return { kind: 'error', error: 'Your session has expired — please sign in again.' };
+  }
   try {
     const { status, body } = await handleAgent({
       method: 'POST',
       authorization: authHeader(),
       body: { question },
-      createdBy: AUDIT_PRINCIPAL,
+      createdBy: principal,
     });
     if (status === 200) {
       const b = body as AgentResponseBody | AgentNeedsInputBody;
@@ -199,12 +216,16 @@ export async function fetchRows(
   if (typeof query_id !== 'string' || query_id.trim() === '') {
     return { ok: false, error: 'Missing query handle.' };
   }
+  const principal = await sessionPrincipal();
+  if (!principal) {
+    return { ok: false, error: 'Your session has expired — please sign in again.' };
+  }
   try {
     const { status, body } = await handleResults({
       method: 'POST',
       authorization: authHeader(),
       body: { query_id, offset, ...(identity ? { identity } : {}) },
-      createdBy: AUDIT_PRINCIPAL,
+      createdBy: principal,
     });
     if (status === 200) {
       const ok = body as ResultsResponse;

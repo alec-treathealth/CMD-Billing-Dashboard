@@ -98,6 +98,41 @@ function bearerSecret(): string {
   return s;
 }
 
+// ---------------------------------------------------------------------------
+// Durable per-user access audit (claims.access_audit, migration 0017).
+//
+// Records ONE permanent row per audited executive action: the real authenticated
+// user (email + Supabase uid), the action, and a NON-PHI detail blob. Written via
+// the SECURITY DEFINER claims.log_access function on the SAME least-privilege
+// claims_reader pool used everywhere else — the reader has no direct table rights.
+// This is the durable replacement for the hardcoded 'phase5-ui' principal; unlike
+// query_log it never expires. NEVER put PHI in `detail` (action metadata / path /
+// counts only). Awaited and fail-closed: callers on a sensitive surface should
+// treat a throw as "deny the access".
+// ---------------------------------------------------------------------------
+export interface AccessAuditEntry {
+  /** Real authenticated user email (already verified + lowercased upstream). */
+  actorEmail: string;
+  /** Supabase auth user id (uuid). */
+  actorUserId: string;
+  /** Short action verb, e.g. 'view_account'. */
+  action: string;
+  /** NON-PHI request context only. */
+  detail?: Record<string, unknown>;
+}
+
+export async function recordAccess(entry: AccessAuditEntry): Promise<string> {
+  const { rows } = await readerExecutor().query<{ id: string }>(
+    'select claims.log_access($1, $2, $3, $4::jsonb) as id',
+    [entry.actorEmail, entry.actorUserId, entry.action, JSON.stringify(entry.detail ?? {})],
+  );
+  const id = rows[0]?.id;
+  if (!id) {
+    throw new Error('recordAccess: claims.log_access returned no id');
+  }
+  return id;
+}
+
 /** Agent route: NL question → one query function → non-PHI { tool_name, query_id, summary_stats }. */
 export function handleAgent(req: AgentHttpRequest) {
   return handleAgentRequest(req, {

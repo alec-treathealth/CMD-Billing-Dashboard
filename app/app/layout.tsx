@@ -1,5 +1,8 @@
 import type { Metadata } from 'next';
 import { NavLinks } from '@/components/nav-links';
+import { signOut } from '@/lib/auth-actions';
+import { createSupabaseServerClient } from '@/lib/supabase/server';
+import { supabaseAuthConfigured } from '@/lib/supabase/env';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -25,12 +28,41 @@ function Logo({ size = 26 }: { size?: number }) {
   );
 }
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+/** Sign-out — a server-action form button (no client JS). Shown only when signed in. */
+function SignOutButton() {
+  return (
+    <form action={signOut}>
+      <button
+        type="submit"
+        className="rounded-md bg-white/10 px-3 py-1.5 text-[13px] font-medium text-white/80 ring-1 ring-white/20 transition-colors hover:bg-white/20 hover:text-white"
+      >
+        Sign out
+      </button>
+    </form>
+  );
+}
+
+/** Cheap session-presence check for nav (cookie read only; the real gate is middleware). */
+async function isSignedIn(): Promise<boolean> {
+  if (!supabaseAuthConfigured()) return false;
+  try {
+    const supabase = await createSupabaseServerClient();
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    return Boolean(session);
+  } catch {
+    return false;
+  }
+}
+
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const signedIn = await isSignedIn();
   return (
     <html lang="en">
       <body className="min-h-screen bg-ground">
         {/* teal900 anchor bar — 3-col grid keeps the nav centered while the logo
-            stays left and the right column is reserved for future actions */}
+            stays left and the right column holds the sign-out action */}
         <header className="grid h-14 grid-cols-[auto_1fr_auto] items-center gap-3 bg-teal900 px-4 sm:px-6">
           {/* col 1: logo + title */}
           <div className="flex items-center gap-3">
@@ -44,8 +76,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </div>
           {/* col 2: nav — centered */}
           <NavLinks />
-          {/* col 3: spacer (keeps nav truly centered) */}
-          <div aria-hidden />
+          {/* col 3: sign-out when authenticated (keeps nav centered otherwise) */}
+          <div className="flex items-center justify-end">
+            {signedIn ? <SignOutButton /> : null}
+          </div>
         </header>
         {children}
       </body>
