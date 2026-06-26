@@ -45,6 +45,21 @@ function readClientConfig(): OAuthClientConfig {
   return { client_id: cfg.client_id, client_secret: cfg.client_secret };
 }
 
+/**
+ * HTML-escape a value before writing it into the loopback HTTP response. The OAuth
+ * redirect lands on this local server and its query params (e.g. `error`) are
+ * attacker-influenceable, so reflecting one unescaped is a reflected-XSS sink
+ * (CodeQL js/reflected-xss). Escaping renders any markup as inert text.
+ */
+function escapeHtml(value: string): string {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 /** Wait for the OAuth redirect on the loopback server and return the auth code. */
 function waitForCode(authUrl: string): Promise<string> {
   return new Promise<string>((resolve, reject) => {
@@ -54,7 +69,7 @@ function waitForCode(authUrl: string): Promise<string> {
         const error = url.searchParams.get('error');
         const code = url.searchParams.get('code');
         if (error) {
-          res.end(`Authorization failed: ${error}. You can close this tab.`);
+          res.end(`Authorization failed: ${escapeHtml(error)}. You can close this tab.`);
           server.close();
           reject(new Error(`OAuth consent denied: ${error}`));
           return;
