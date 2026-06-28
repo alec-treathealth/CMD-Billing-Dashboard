@@ -29,7 +29,8 @@
  * DB connection at all. Secrets come from env only and are never logged.
  */
 import { closeSync, openSync, readdirSync, readFileSync, readSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { mapReportRows } from './cmdExplorer.js';
 import type { CmdExplorerFullRow } from './cmdExplorer.js';
 import { parseReportCsv } from './cmdPayer.js';
@@ -321,7 +322,13 @@ export async function insertRows(db: ReturnType<typeof makeClient>, rows: PlainR
 function loadDotEnvIfPresent(): void {
   let text: string;
   try {
-    text = readFileSync(new URL('../../.env', import.meta.url), 'utf8');
+    // Resolve the repo-root .env relative to THIS compiled module, built via path.join
+    // — NOT `new URL('<literal>', import.meta.url)`, which webpack/Next statically detect
+    // as an asset reference and try to bundle. The cron route imports this module (for
+    // mapRow/insertRows), so that probe runs during `next build`; since .env is gitignored
+    // (absent on Vercel) the probe fails the build. This is CLI-only and runtime-safe.
+    const here = dirname(fileURLToPath(import.meta.url));
+    text = readFileSync(join(here, '..', '..', '.env'), 'utf8');
   } catch {
     return; // no .env file — rely on the exported environment
   }
