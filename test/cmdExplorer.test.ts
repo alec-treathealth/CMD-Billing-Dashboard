@@ -8,7 +8,7 @@ const baseRow: CmdReportRow = {
   'Payment Received': '',
   'Charge CPT Code': '90853',
   'Revenue Code': '0915',
-  'Facility Name/ID': 'Saddleback / 12',
+  'Facility Name': 'Saddleback',
   'Patient Full Name': 'DOE, JANE',
   'Claim Primary Member ID': 'PGE081',
   'Primary Group Number': 'GRP-7',
@@ -26,7 +26,7 @@ test('maps all 14 columns and splits PHI out of the non-PHI projection', () => {
   assert.equal(row.charge_from_date, '03/14/2026');
   assert.equal(row.cpt_code, '90853');
   assert.equal(row.revenue_code, '0915');
-  assert.equal(row.facility, 'Saddleback / 12');
+  assert.equal(row.facility, 'Saddleback');
   assert.equal(row.charge_amount, '$250.00');
   assert.equal(row.insurance_payments, '$0.00');
   assert.equal(row.adjustments, '$10.00');

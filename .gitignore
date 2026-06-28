@@ -3,6 +3,14 @@
 reports/
 # data/ holds raw CMD batch report CSV pulls (patient-level PHI). Never commit.
 data/
+# Local CMD report CSV pulls feeding the Collections Explorer seed/cron — patient-level
+# PHI (Patient Full Name / Member ID / Group Number). Read by cmdExplorerSeed.ts via
+# CMD_EXPLORER_SEED_DIR. NEVER commit the data. *.csv is a blanket guard for the same
+# reason (every CSV in this repo is a CMD PHI export); use `git add -f` for a rare
+# deliberately-non-PHI csv.
+Derek Historical Report Data/
+Indigo Cron Job/
+*.csv
 .env
 .env.*
 !.env.example

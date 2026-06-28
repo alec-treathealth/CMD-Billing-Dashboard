@@ -19,7 +19,6 @@ import { distribution, searchClaims } from '../../src/queries/index.js';
 import {
   distributionCountFromMatview,
   payerGapForFilter,
-  payerGapFromMatview,
 } from '../../src/queries/dashboard_aggregates.js';
 import { makeReaderPool, PgExecutor, readerConnectionStringFromEnv } from '../../src/queries/executor.js';
 import type {
@@ -37,13 +36,8 @@ import { collectionsDaily, collectionsKpis } from '../../src/collections/daily.j
 import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collections/dailyTypes.js';
 import { facilityDimension, type FacilityDimensionRow } from '../../src/collections/facilities.js';
 import { cmdPayerGapForMonth, cmdReportRows, type CmdApiConfig } from '../../src/collections/cmdPayer.js';
-import {
-  mapReportRows,
-  toNonPhi,
-  type CmdExplorerFullRow,
-  type CmdExplorerNonPhiRow,
-  type CmdExplorerPhi,
-} from '../../src/collections/cmdExplorer.js';
+import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdExplorer.js';
+import { decryptPhi } from '../../src/collections/phiCrypto.js';
 import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
 import { refreshCmdPayerRollup } from '../../src/collections/cmdPayerRefresh.js';
 import { makeClient, type Db } from '../../src/collections/db.js';
@@ -69,6 +63,8 @@ import {
   handleCmdPayerRefreshRequest,
   type CmdPayerRefreshHttpRequest,
 } from '../../src/routes/cmdPayerRefreshHandler.js';
+import { cmdExplorerCron } from '../../src/collections/cmdExplorerCron.js';
+import { isAuthorized } from '../../src/bearerAuth.js';
 
 let cachedExecutor: PgExecutor | undefined;
 function readerExecutor(): PgExecutor {
@@ -77,10 +73,11 @@ function readerExecutor(): PgExecutor {
   return cachedExecutor;
 }
 
-// Least-privilege writer pool for the daily CMD rollup refresh — the ONLY write
-// path in the web app. cmd_rollup_writer (migration 0013) can INSERT/DELETE only
-// collections.cmd_payer_facility_monthly; NOT claims_admin, NOT the reader. The
-// URL comes from env only and is never logged; verify-full TLS via makeClient.
+// Least-privilege writer pool for the web app's CMD ingests — the ONLY write path
+// in the web app. cmd_rollup_writer can INSERT/DELETE collections.cmd_payer_facility_monthly
+// (migration 0013) and INSERT collections.cmd_explorer_rows (migration 0019); NOT
+// claims_admin, NOT the reader. The URL comes from env only and is never logged;
+// verify-full TLS via makeClient.
 let cachedWriterDb: Db | undefined;
 function rollupWriterDb(): Db {
   const url = process.env.CMD_ROLLUP_WRITER_DATABASE_URL;
@@ -191,6 +188,42 @@ export function handleCmdPayerRefresh(req: CmdPayerRefreshHttpRequest) {
   });
 }
 
+/**
+ * Daily CMD Collections Explorer ingest route (Vercel Cron). GET only; gated on
+ * CRON_SECRET with the same constant-time Bearer check the other cron uses
+ * (isAuthorized). Pulls the live 14-column explorer report, encrypts the 3 PHI
+ * identifiers in-process, and idempotently upserts into collections.cmd_explorer_rows
+ * as the least-privilege cmd_rollup_writer role; busts the 'cmd-explorer' cache tag
+ * after a successful insert. Returns non-PHI counts only. Auth + compose live here
+ * (the composition root); the cmdExplorerCron logic stays transport-agnostic.
+ */
+export async function handleCmdExplorerCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  // GET only — reject any other verb before touching auth or the live API.
+  if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
+    return { status: 405, body: { error: 'method_not_allowed' } };
+  }
+  // Fail closed on a missing/empty secret, then constant-time Bearer compare.
+  const secret = process.env.CRON_SECRET;
+  if (!secret || !isAuthorized(req.authorization, secret)) {
+    return { status: 401, body: { error: 'unauthorized' } };
+  }
+  try {
+    const stats = await cmdExplorerCron({
+      fetchRows: () => cmdReportRows(cmdExplorerConfig()),
+      writeDb: rollupWriterDb(),
+      revalidate: () => revalidateTag('cmd-explorer'),
+    });
+    return { status: 200, body: { ok: true, ...stats } };
+  } catch (err) {
+    // Generic to the client; message only to the server log (no PHI, no token).
+    console.error('cmd-explorer cron failed:', err instanceof Error ? err.message : String(err));
+    return { status: 500, body: { error: 'cron_failed' } };
+  }
+}
+
 /** Collections summary route: optional date bounds → non-PHI monthly summary by facility. */
 export function handleCollectionsSummary(req: CollectionsSummaryHttpRequest) {
   return handleCollectionsSummaryRequest(req, {
@@ -244,17 +277,6 @@ const DASHBOARD_REVALIDATE_SECONDS = 15 * 60;
  * DASHBOARD_CACHE_TAG is the shared contract from src/cacheTags.ts.
  */
 const REVALIDATE_ALLOWED_TAGS: ReadonlySet<string> = new Set([DASHBOARD_CACHE_TAG]);
-
-/**
- * Per-payer billed/allowed/paid + collection gap + avg rate (non-PHI summary).
- * Phase 7.7: reads the pre-aggregated claims.mv_payer_gap matview (migration 0009)
- * instead of scanning claims.claims live. Same shape; no finalize()/query_id.
- */
-export const dashboardPayerGap = unstable_cache(
-  async (): Promise<PayerGapSummary> => payerGapFromMatview(readerExecutor()),
-  ['dashboard-payer-gap'],
-  { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
-);
 
 /**
  * Per-payer gap bounded to a date_of_service window (non-PHI summary; reader-only,
@@ -430,55 +452,113 @@ export async function payerCmdMonth(year: number, month: number): Promise<CmdPay
 }
 
 // ---------------------------------------------------------------------------
-// CMD Collections Explorer (Derek's 14-column batch report).
+// CMD Collections Explorer (Derek's 14-column batch report) — DB-backed.
 //
-// Same credentials/customer as the payer rollup; a DISTINCT saved report + filter.
-// The non-PHI projection is cached via unstable_cache (no PHI at rest). The FULL
-// report (incl. PHI) lives only in a VOLATILE in-process cache (15 min) — never
-// persisted, never unstable_cache'd — so a per-row reveal resolves without re-running
-// the slow, one-at-a-time report. Reveal matches by content fingerprint, so it fails
-// closed to null and can never return a different patient's identifiers.
+// Reads collections.cmd_explorer_rows (migration 0019): seeded from history
+// (cmdExplorerSeed.ts) and kept current by the daily cron (handleCmdExplorerCron).
+// The non-PHI grid is keyset-paginated and cached PER PAGE via unstable_cache (no PHI
+// at rest); the cron busts the 'cmd-explorer' tag after any insert. The 3 PHI columns
+// are stored as libsodium ciphertext and surface ONLY through the audited per-row
+// reveal, which decrypts in-process and is NEVER cached. All reads run as claims_reader
+// (SELECT only). cmdExplorerConfig() is retained for the cron's live fetch (30-day
+// filter); the UI no longer polls the live CMD report.
 // ---------------------------------------------------------------------------
 function cmdExplorerConfig(): CmdApiConfig {
   return {
     ...cmdApiConfig(),
     reportId: process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10091971',
-    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147377',
+    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147392',
   };
 }
 
-const CMD_EXPLORER_TTL_MS = 15 * 60_000;
-let cmdExplorerFull: { at: number; rows: CmdExplorerFullRow[] } | null = null;
-
-async function getCmdExplorerFull(): Promise<CmdExplorerFullRow[]> {
-  const now = Date.now();
-  if (cmdExplorerFull && now - cmdExplorerFull.at < CMD_EXPLORER_TTL_MS) return cmdExplorerFull.rows;
-  const rows = mapReportRows(await cmdReportRows(cmdExplorerConfig()));
-  cmdExplorerFull = { at: now, rows };
-  return rows;
+/** One keyset page of the explorer grid + the cursor to fetch the next page (null at end). */
+export interface CmdExplorerPage {
+  rows: CmdExplorerRow[];
+  nextCursor: number | null;
 }
 
-/** NON-PHI projection of the CMD explorer report, cached 15 min (no PHI at rest). */
+const CMD_EXPLORER_PAGE_SIZE = 50;
+
+// Explicit non-PHI column list — the bytea PHI columns are NEVER selected here. Dates and
+// ingested_at are cast to text so the row shape is stable strings (not pg Date objects);
+// numeric money stays a fixed-2-decimal string. id (bigserial) is the keyset + reveal key.
+const CMD_EXPLORER_SELECT =
+  "select id, to_char(charge_date, 'YYYY-MM-DD') as charge_date, " +
+  "to_char(payment_received, 'YYYY-MM-DD') as payment_received, cpt_code, revenue_code, " +
+  'facility, charge_amount, allowed_amount, insurance_payments, adjustments, ' +
+  'patient_balance_due, primary_payer, ' +
+  `to_char(ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
+  'from collections.cmd_explorer_rows';
+
+/** Raw DB shape — pg returns int8 (id) as a string; toExplorerRow narrows it to number. */
+interface CmdExplorerDbRecord extends Omit<CmdExplorerRow, 'id'> {
+  id: string;
+}
+
+function toExplorerRow(r: CmdExplorerDbRecord): CmdExplorerRow {
+  return { ...r, id: Number(r.id) };
+}
+
+async function loadCmdExplorerPage(cursor: number | null): Promise<CmdExplorerPage> {
+  // Keyset: WHERE id > cursor (omitted on the first page), ORDER BY id ASC. Over-fetch
+  // one row to learn whether a next page exists without a separate count(*).
+  const limit = CMD_EXPLORER_PAGE_SIZE + 1;
+  const sql =
+    cursor === null
+      ? `${CMD_EXPLORER_SELECT} order by id asc limit $1`
+      : `${CMD_EXPLORER_SELECT} where id > $1 order by id asc limit $2`;
+  const params = cursor === null ? [limit] : [cursor, limit];
+  const { rows } = await readerExecutor().query<CmdExplorerDbRecord>(sql, params);
+  const hasMore = rows.length > CMD_EXPLORER_PAGE_SIZE;
+  const page = (hasMore ? rows.slice(0, CMD_EXPLORER_PAGE_SIZE) : rows).map(toExplorerRow);
+  const nextCursor = hasMore ? (page[page.length - 1]?.id ?? null) : null;
+  return { rows: page, nextCursor };
+}
+
+/**
+ * NON-PHI explorer page, cached 15 min PER cursor (no PHI at rest). The cron busts the
+ * shared 'cmd-explorer' tag after any insert. The cursor is a plain number (the bigserial
+ * id is far below 2^53 at this scale) so it serializes cleanly into the unstable_cache key
+ * — a bigint would throw in unstable_cache's JSON key derivation.
+ */
 export const loadCmdExplorerNonPhi = unstable_cache(
-  async (): Promise<CmdExplorerNonPhiRow[]> => toNonPhi(await getCmdExplorerFull()),
+  (cursor: number | null = null): Promise<CmdExplorerPage> => loadCmdExplorerPage(cursor),
   ['cmd-explorer-nonphi'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
 
-/** Resolve ONE row's PHI by content fingerprint + write a durable audit record. */
+/**
+ * Resolve ONE row's PHI by bigserial id: decrypt the 3 ciphertext columns in-process,
+ * write a synchronous (fail-closed) audit record, then return the identifiers. The PHI
+ * is never cached and never logged; absent id → null. Runs as claims_reader.
+ */
 export async function revealCmdExplorerRow(
-  rowId: string,
+  id: number,
   actor: { email: string; userId: string },
 ): Promise<CmdExplorerPhi | null> {
-  const match = (await getCmdExplorerFull()).find((r) => r.rowId === rowId);
-  if (!match) return null;
+  const { rows } = await readerExecutor().query<{
+    patient_name: Buffer;
+    member_id: Buffer;
+    group_number: Buffer | null;
+  }>(
+    'select patient_name, member_id, group_number from collections.cmd_explorer_rows where id = $1',
+    [id],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  const [patient_name, member_id_raw, group_number] = await Promise.all([
+    decryptPhi(row.patient_name),
+    decryptPhi(row.member_id),
+    row.group_number ? decryptPhi(row.group_number) : Promise.resolve(null),
+  ]);
+  // Synchronous audit BEFORE returning PHI — a throw here denies the reveal (fail-closed).
   await recordAccess({
     actorEmail: actor.email,
     actorUserId: actor.userId,
     action: 'reveal_cmd_explorer_row',
-    detail: { rowId }, // non-PHI fingerprint only — never the values
+    detail: { id }, // non-PHI synthetic id only — never the values
   });
-  return match.phi;
+  return { patient_name, member_id_raw, group_number };
 }
 
 // ---------------------------------------------------------------------------

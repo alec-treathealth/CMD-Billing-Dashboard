@@ -504,6 +504,17 @@ yet** — it is groundwork.
   DOM/Network/click/refresh checks (PHI masking, Server-Action-only network,
   reveal-clears-on-refresh) must be verified by a human at the running app.
 - **Archived/historical collections data** not yet ingested (Phase 6 deferral).
+- **`libsodium-wrappers` needs `serverExternalPackages` before the next `next build`.**
+  The package's ESM build (`dist/modules-esm/libsodium-wrappers.mjs`) imports a
+  non-existent sibling `./libsodium.mjs`, so a native `import` throws
+  `ERR_MODULE_NOT_FOUND`; `src/collections/phiCrypto.ts` therefore loads the working
+  CJS build via `createRequire`. Any Next route that pulls in `phiCrypto` —
+  the `/api/cron/cmd-explorer` route (Collections Explorer ingest) and the future PHI
+  reveal path — must NOT be bundled by webpack. **Before the next `next build`/deploy
+  that includes those routes, add `serverExternalPackages: ['libsodium-wrappers']` to
+  `app/next.config.*`** (and ensure `libsodium-wrappers` is installed for the `app/`
+  package so it ships). Until then, `next build` will fail on the wasm. `tsc`/typecheck
+  is unaffected (it does not bundle).
 
 ---
 

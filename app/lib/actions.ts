@@ -28,7 +28,6 @@ import {
   dashboardCollectionsKpis,
   dashboardCollectionsSummary,
   dashboardDistribution,
-  dashboardPayerGap,
   facilitiesDimension,
   handleAgent,
   handleResults,
@@ -42,7 +41,7 @@ import {
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
 import { supabaseAuthConfigured } from '@/lib/supabase/env';
-import type { CmdExplorerNonPhiRow, CmdExplorerPhi } from '../../src/collections/cmdExplorer';
+import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdExplorer';
 import type {
   BrowseClaimsCursor,
   BrowseClaimsResult,
@@ -260,15 +259,6 @@ export async function fetchRows(
 // ---------------------------------------------------------------------------
 
 export type DashboardResult<T> = { ok: true; data: T } | { ok: false };
-
-/** Per-payer billed/allowed/paid, collection gap, avg rate, and total claims. */
-export async function loadPayerGap(): Promise<DashboardResult<PayerGapSummary>> {
-  try {
-    return { ok: true, data: await dashboardPayerGap() };
-  } catch {
-    return { ok: false };
-  }
-}
 
 /**
  * Per-payer gap bounded to a date_of_service window (non-PHI, reader-only, NOT
@@ -531,24 +521,34 @@ export async function loadClaimFacets(): Promise<ClaimFacetsResult> {
 }
 
 // ---------------------------------------------------------------------------
-// CMD Collections Explorer (Phase: Derek's 14-column batch report) — NON-PHI grid
+// CMD Collections Explorer (Derek's 14-column batch report) — DB-backed NON-PHI grid
 // + audited per-row PHI reveal.
 //
-// loadCmdReport returns ONLY the non-PHI projection (cached 15 min server-side; no PHI
-// at rest). The 3 PHI columns are masked in the UI and fetched per-row via
-// revealCmdReportRow, which requires an authorized session and writes a durable audit
-// record. Row identity is a content fingerprint (SHA-256 over all fields), so reveal
-// fails closed to "unavailable" rather than ever returning the wrong patient's data.
+// loadCmdReport returns ONE keyset page of the non-PHI projection from
+// collections.cmd_explorer_rows (cached 15 min server-side per cursor; no PHI at rest)
+// plus the cursor for the next page. The 3 PHI columns are masked in the UI and fetched
+// per-row via revealCmdReportRow, which requires an authorized session, decrypts the
+// stored ciphertext server-side, and writes a durable audit record. Row identity is the
+// bigserial id (not a content fingerprint); an absent id fails closed to "unavailable".
 // ---------------------------------------------------------------------------
 
 export type CmdReportResult =
-  | { ok: true; rows: CmdExplorerNonPhiRow[] }
+  | { ok: true; rows: CmdExplorerRow[]; nextCursor: number | null }
   | { ok: false; error: string };
 
-/** Load the CMD Collections Explorer report — NON-PHI columns only (cached 15 min). */
-export async function loadCmdReport(): Promise<CmdReportResult> {
+/**
+ * Load ONE keyset page of the CMD Collections Explorer — NON-PHI columns only (cached
+ * 15 min per cursor). `cursor` is the last id of the previous page (null/omitted = first
+ * page); the result carries `nextCursor` (null when there are no more rows).
+ */
+export async function loadCmdReport(cursor: number | null = null): Promise<CmdReportResult> {
+  // Bound the client-supplied cursor before it reaches SQL: a non-negative integer or null.
+  if (cursor !== null && (!Number.isInteger(cursor) || cursor < 0)) {
+    return { ok: false, error: 'Invalid page cursor.' };
+  }
   try {
-    return { ok: true, rows: await loadCmdExplorerNonPhi() };
+    const page = await loadCmdExplorerNonPhi(cursor);
+    return { ok: true, rows: page.rows, nextCursor: page.nextCursor };
   } catch {
     return { ok: false, error: 'The collections report could not be loaded right now.' };
   }
@@ -558,15 +558,15 @@ export type RevealCmdRowResult =
   | { ok: true; phi: CmdExplorerPhi }
   | { ok: false; error: string };
 
-/** Reveal ONE row's PHI by content fingerprint. Requires an authorized session; audited. */
-export async function revealCmdReportRow(rowId: string): Promise<RevealCmdRowResult> {
-  if (typeof rowId !== 'string' || !/^[0-9a-f]{64}$/.test(rowId)) {
+/** Reveal ONE row's PHI by bigserial id. Requires an authorized session; audited. */
+export async function revealCmdReportRow(id: number): Promise<RevealCmdRowResult> {
+  if (!Number.isInteger(id) || id <= 0) {
     return { ok: false, error: 'Invalid row reference.' };
   }
   const gate = await requireExecutive();
   if (!gate.ok) return { ok: false, error: 'Sign in to reveal patient identifiers.' };
   try {
-    const phi = await revealCmdExplorerRow(rowId, { email: gate.user.email, userId: gate.user.id });
+    const phi = await revealCmdExplorerRow(id, { email: gate.user.email, userId: gate.user.id });
     if (!phi) {
       return { ok: false, error: 'Those identifiers are no longer available — reload and try again.' };
     }

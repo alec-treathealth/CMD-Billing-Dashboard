@@ -25,7 +25,7 @@ const HEADERS = {
   payment_received: ['Payment Received'],
   cpt_code: ['Charge CPT Code', 'CPT Code'],
   revenue_code: ['Revenue Code'],
-  facility: ['Facility Name/ID', 'Facility Name'],
+  facility: ['Facility Name'],
   patient_name: ['Patient Full Name'], //               PHI
   member_id_raw: ['Claim Primary Member ID'], //         PHI
   group_number: ['Primary Group Number'], //             PHI
@@ -64,6 +64,30 @@ export interface CmdExplorerNonPhiRow {
 /** Full row = non-PHI projection + its PHI. Held only in volatile server memory. */
 export interface CmdExplorerFullRow extends CmdExplorerNonPhiRow {
   phi: CmdExplorerPhi;
+}
+
+/**
+ * NON-PHI projection of one PERSISTED explorer row (collections.cmd_explorer_rows),
+ * returned by the DB-backed reader. `id` is the bigserial PK — the keyset-pagination
+ * cursor AND the per-row reveal key (it replaces the old SHA-256 `rowId`). The 3 PHI
+ * columns are stored as ciphertext and are NEVER part of this shape; they surface only
+ * via the audited reveal. Dates are ISO 'YYYY-MM-DD'; money is a fixed-2-decimal string
+ * (pg numeric); `ingested_at` is ISO-8601 UTC.
+ */
+export interface CmdExplorerRow {
+  id: number;
+  charge_date: string;
+  payment_received: string | null;
+  cpt_code: string;
+  revenue_code: string | null;
+  facility: string;
+  charge_amount: string;
+  allowed_amount: string | null;
+  insurance_payments: string | null;
+  adjustments: string | null;
+  patient_balance_due: string | null;
+  primary_payer: string | null;
+  ingested_at: string;
 }
 
 /** Trim; empty string → null (so blanks render as an em dash, not ''). */

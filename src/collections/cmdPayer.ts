@@ -340,6 +340,13 @@ export function describeReportZip(
 // Full Name / Member ID / Group Number are PHI and are never read here. One alias
 // kept per field for resilience to minor report-label edits.
 const PAYER_KEYS = ['Charge Primary Payer Name', 'Primary Payer Name'];
+// 'Facility Name/ID' is a REQUIRED fallback here — do NOT remove. The shipped payer
+// rollup pulls a DIFFERENT CMD report (report 10091729 / filter 10147241) that emits
+// the older 'Facility Name/ID' header; dropping the fallback silently nulls facility
+// attribution on the next rollup cron. The Collections Explorer standardized on the
+// bare 'Facility Name' (cmdExplorer.ts / cmdExplorerSeed.ts) — that cleanup is
+// Explorer-scoped and does NOT apply to this payer-rollup path. Guarded by
+// test/cmdPayer.test.ts ('FACILITY_KEYS keeps the Facility Name/ID fallback').
 const FACILITY_KEYS = ['Facility Name', 'Facility Name/ID'];
 const CHARGE_KEYS = ['Charge/Debit Amount', 'Charge Amount'];
 const ALLOWED_KEYS = ['Payment Allowed Amount', 'Allowed Amount'];
