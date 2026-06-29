@@ -468,6 +468,13 @@ function cmdExplorerConfig(): CmdApiConfig {
     ...cmdApiConfig(),
     reportId: process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10091971',
     filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147392',
+    // The explorer report is a 30-day 14-col export (~138k rows) and takes longer
+    // to generate than the smaller payer report. Override the inherited poll params:
+    // 3s × 17 = 51s ceiling, leaving ~8s for run trigger + encrypt + DB write
+    // within the 60s maxDuration. CMD_EXPLORER_POLL_* env vars allow tuning
+    // without a deploy.
+    pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 3_000,
+    maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 17,
   };
 }
 
