@@ -72,11 +72,6 @@ export function payerGapMatviewSql(): string {
   );
 }
 
-export async function payerGapFromMatview(executor: QueryExecutor): Promise<PayerGapSummary> {
-  const { rows } = await executor.query<PayerGapMvRow>(payerGapMatviewSql(), []);
-  return summarizePayerGap(rows);
-}
-
 /**
  * Live, date-filterable payer gap (non-PHI, NOT cached). Reuses the same aggregate
  * SQL as payer_gap_analysis but is a plain reader: no finalize(), no query_log,

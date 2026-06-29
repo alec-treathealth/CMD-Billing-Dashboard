@@ -4,7 +4,6 @@ import { test } from 'node:test';
 import {
   distributionCountFromMatview,
   distributionCountMatviewSql,
-  payerGapFromMatview,
   payerGapMatviewSql,
 } from '../src/queries/dashboard_aggregates.js';
 import type { QueryExecutor } from '../src/queries/types.js';
@@ -34,53 +33,6 @@ test('payerGapMatviewSql: reads the matview, ordering mirrors the live query', (
       'from claims.mv_payer_gap ' +
       'order by total_collection_gap desc nulls last',
   );
-});
-
-test('payerGapFromMatview: maps numerics + sums rows_analyzed; never queries claims.claims', async () => {
-  const { executor, calls } = makeFake([
-    {
-      payer_name: 'Aetna',
-      claim_count: '120',
-      total_charge: '5000',
-      total_allowed: '3000',
-      total_paid: '2500',
-      avg_collection_rate: '0.7421',
-      total_write_down: '2000',
-      total_collection_gap: '2500',
-    },
-    {
-      payer_name: 'Cigna',
-      claim_count: '30',
-      total_charge: '1000',
-      total_allowed: '700',
-      total_paid: '600',
-      avg_collection_rate: null,
-      total_write_down: '300',
-      total_collection_gap: '400',
-    },
-  ]);
-
-  const res = await payerGapFromMatview(executor);
-
-  assert.equal(res.rows_analyzed, 150);
-  assert.equal(res.by_payer.length, 2);
-  assert.deepEqual(res.by_payer[0], {
-    payer_name: 'Aetna',
-    claim_count: 120,
-    total_charge: 5000,
-    total_allowed: 3000,
-    total_paid: 2500,
-    avg_collection_rate: 0.7421,
-    total_write_down: 2000,
-    total_collection_gap: 2500,
-  });
-  assert.equal(res.by_payer[1]!.avg_collection_rate, null);
-
-  // Reads the matview, not claims.claims (no live scan, no filter params).
-  assert.equal(calls.length, 1);
-  assert.ok(calls[0]!.sql.includes('claims.mv_payer_gap'));
-  assert.ok(!calls[0]!.sql.includes('from claims.claims'));
-  assert.deepEqual(calls[0]!.params, []);
 });
 
 test('distributionCountMatviewSql: filters by field via a bound param', () => {
