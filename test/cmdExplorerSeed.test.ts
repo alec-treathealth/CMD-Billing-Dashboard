@@ -152,7 +152,6 @@ test('mapRow: a valid row maps ok with normalized values + a 64-hex fingerprint'
 
 const skipCases: ReadonlyArray<{ name: string; override: RowOverride; label: string }> = [
   { name: 'blank charge_date', override: { charge_from_date: '' }, label: 'charge_date: missing' },
-  { name: 'blank cpt_code', override: { cpt_code: '' }, label: 'cpt_code: missing' },
   { name: 'blank facility', override: { facility: '' }, label: 'facility: missing' },
   { name: 'blank charge_amount', override: { charge_amount: '' }, label: 'charge_amount: missing' },
   { name: 'blank patient_name', override: { phi: { patient_name: '' } }, label: 'patient_name: missing' },
@@ -167,8 +166,22 @@ for (const { name, override, label } of skipCases) {
   });
 }
 
-test('mapRow: a null required field (as mapReportRows emits for blanks) also skips', () => {
-  const result = mapRow(fullRow({ cpt_code: null }), 'seed.csv');
+test('mapRow: a null required field (as mapReportRows emits for blanks) skips', () => {
+  // facility is still required, so a null facility still skips (proves null-handling).
+  const result = mapRow(fullRow({ facility: null }), 'seed.csv');
   assert.equal(result.ok, false);
-  if (!result.ok) assert.equal(result.label, 'cpt_code: missing');
+  if (!result.ok) assert.equal(result.label, 'facility: missing');
+});
+
+// cpt_code is no longer required (migration 0020): a blank cell — which mapReportRows
+// emits as '' OR null — is persisted with an em-dash (U+2014) placeholder, not skipped.
+test('mapRow: blank/null cpt_code maps ok with an em-dash placeholder', () => {
+  for (const blank of ['', null] as const) {
+    const result = mapRow(fullRow({ cpt_code: blank }), 'seed.csv');
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.row.cpt_code, '—');
+      assert.match(result.row.row_fingerprint, /^[0-9a-f]{64}$/);
+    }
+  }
 });

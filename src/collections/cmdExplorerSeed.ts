@@ -91,7 +91,7 @@ const BATCH = 500;
 export interface PlainRow {
   charge_date: string; //               ISO date (required)
   payment_received: string | null; //   ISO date
-  cpt_code: string; //                  required
+  cpt_code: string; //                  always set ('—' placeholder when the line has no CPT)
   revenue_code: string | null;
   facility: string; //                  required
   patient_name: string; //              PHI plaintext (required)
@@ -126,10 +126,12 @@ function toIsoDate(raw: string): Coerced<string | null> {
 
 /**
  * Map one parsed report row to a typed PlainRow + fingerprint, or a skip label.
- * Required fields (charge_date, cpt_code, facility, patient_name, member_id,
- * charge_amount) that are blank → skip (the column is NOT NULL). Any non-blank but
- * unparseable money/date → skip (never silently null real-but-malformed data, per the
- * claims-ingest philosophy). Blank optionals → null. Labels carry NO cell values.
+ * Required fields (charge_date, facility, patient_name, member_id, charge_amount) that
+ * are blank → skip (the column is NOT NULL). cpt_code is NO LONGER required: a blank CPT
+ * becomes an em-dash (U+2014) placeholder rather than a skip (migration 0020 dropped its
+ * NOT NULL). Any non-blank but unparseable money/date → skip (never silently null
+ * real-but-malformed data, per the claims-ingest philosophy). Blank optionals → null.
+ * Labels carry NO cell values.
  */
 export function mapRow(full: CmdExplorerFullRow, sourceFile: string): MapResult {
   const chargeDate = toIsoDate(full.charge_from_date ?? '');
@@ -139,9 +141,13 @@ export function mapRow(full: CmdExplorerFullRow, sourceFile: string): MapResult 
   const paymentReceived = toIsoDate(full.payment_received ?? '');
   if (!paymentReceived.ok) return { ok: false, label: 'payment_received: invalid' };
 
-  // Required text/PHI: blank cell arrives as null from mapReportRows; guard '' too.
-  const cpt = full.cpt_code;
-  if (cpt === null || cpt.trim() === '') return { ok: false, label: 'cpt_code: missing' };
+  // cpt_code: ~8% of charge lines are revenue-code-only institutional charges that carry
+  // NO CPT. Migration 0020 made the column nullable; rather than drop these rows we persist
+  // them with an em-dash (U+2014) placeholder — matching the grid's empty-cell glyph — set
+  // HERE, before fingerprinting, so it normalizes like any other string ('—'.toLowerCase()
+  // === '—') with no special case.
+  const cpt = full.cpt_code === null || full.cpt_code.trim() === '' ? '—' : full.cpt_code;
+  // facility stays required (NOT NULL): a charge line with no facility is malformed.
   const facility = full.facility;
   if (facility === null || facility.trim() === '') return { ok: false, label: 'facility: missing' };
 

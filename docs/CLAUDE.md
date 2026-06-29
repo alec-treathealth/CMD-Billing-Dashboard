@@ -515,6 +515,14 @@ yet** — it is groundwork.
   `app/next.config.*`** (and ensure `libsodium-wrappers` is installed for the `app/`
   package so it ships). Until then, `next build` will fail on the wasm. `tsc`/typecheck
   is unaffected (it does not bundle).
+- **Pre-deploy gate: run `next build` with `.env` temporarily moved aside (or in a
+  clean checkout) before any push that adds a new env-dependent import.** Local builds
+  with `.env` present mask Vercel-only webpack/bundler failures. Concretely:
+  `new URL('../../.env', import.meta.url)` in `cmdExplorerSeed.ts` is detected by
+  webpack as a static asset reference; it compiled locally (the repo-root `.env`
+  existed) but failed the Vercel build where it does not — fixed in `fc46db8` by
+  resolving the path via `dirname(fileURLToPath(...))` + `path.join`. `tsc`/typecheck
+  will NOT catch this class of failure (it does not bundle).
 
 ---
 
