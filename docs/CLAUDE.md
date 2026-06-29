@@ -491,11 +491,19 @@ yet** — it is groundwork.
   candidate approaches — (a) an index supporting the pair self-join, (b) make a
   facility or tight date window mandatory to bound the scan, (c) a
   `statement_timeout` + friendly "narrow your search" UI error.
-- **`SUPABASE_CA_PEM` on non-production deploys.** If set on production only,
+- **`SUPABASE_CA_PEM` on non-production deploys (bundled-path fragility — hardened
+  in `370c1bd`).** Historically, if `SUPABASE_CA_PEM` was set on production only,
   preview/dev (and local dev without the export) hit an `src/ssl.ts` bundled-path
   bug (`ERR_INVALID_URL` on the webpacked `certs/...crt`), 500-ing every DB call.
-  Workaround: set `SUPABASE_CA_PEM` on preview/dev too (or export it locally), or
-  fix the bundled file-fallback in `src/ssl.ts`.
+  `supabaseCa()` now resolves the CA through a fallback ladder — `SUPABASE_CA_PEM`
+  → `SUPABASE_CA_PATH` (absolute-path override) → `process.cwd()/certs/supabase-ca.crt`
+  (reliable on Vercel serverless) → the `import.meta.url`-relative path (last resort) —
+  each file path tried independently in try/catch, throwing only when all are
+  exhausted, and logging the path label that succeeded (never cert content). Setting
+  `SUPABASE_CA_PEM` everywhere is still the simplest path; the ladder is defense in
+  depth. The CA bundle itself is the public Supabase Root **+ Intermediate** 2021 CAs
+  (`370c1bd`'s sibling fix `1a2c289`); a single root-only PEM no longer anchors the
+  Supavisor pooler chain.
 - **Per-user auth.** Audit principals are currently fixed strings
   (`phase5-ui`/`phase5-dashboard`/route defaults). Real per-user auth (to replace
   Deployment Protection as the PHI gate and to name the real principal in the
