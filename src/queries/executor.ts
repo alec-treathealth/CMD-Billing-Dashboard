@@ -8,12 +8,13 @@
  * harness (src/server.ts) builds — gets its SSL config. See src/ssl.ts.
  */
 import pg from 'pg';
-import { verifyFullSsl } from '../ssl.js';
+import { sanitizeConnectionString, verifyFullSsl } from '../ssl.js';
 import type { ExecResult, QueryExecutor } from './types.js';
 
 export function makeReaderPool(connectionString: string): pg.Pool {
   return new pg.Pool({
-    connectionString,
+    // Strip any sslmode/ssl param so it can't override our verify-full ssl (drop the ca).
+    connectionString: sanitizeConnectionString(connectionString),
     ssl: verifyFullSsl(),
     max: 4,
     application_name: 'claims-query',

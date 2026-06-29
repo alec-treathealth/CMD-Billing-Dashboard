@@ -8,7 +8,7 @@
  * Writes are batched set-operations, never row-by-row loops.
  */
 import pg from 'pg';
-import { verifyFullSsl } from './ssl.js';
+import { sanitizeConnectionString, verifyFullSsl } from './ssl.js';
 import type { TypedClaim } from './types.js';
 
 const BATCH = 500;
@@ -24,7 +24,8 @@ export type Db = pg.Pool;
  */
 export function makeClient(connectionString: string): Db {
   return new pg.Pool({
-    connectionString,
+    // Strip any sslmode/ssl param so it can't override our verify-full ssl (drop the ca).
+    connectionString: sanitizeConnectionString(connectionString),
     ssl: verifyFullSsl(),
     max: 4,
     application_name: 'claims-ingest',

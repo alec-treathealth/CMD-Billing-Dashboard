@@ -102,3 +102,46 @@ export function supabaseCa(): string {
 export function verifyFullSsl(): { rejectUnauthorized: true; ca: string } {
   return { rejectUnauthorized: true, ca: supabaseCa() };
 }
+
+/**
+ * Strip SSL-related query params (`sslmode`, `ssl`, `sslrootcert`, `sslcert`,
+ * `sslkey`) from a Postgres connection string.
+ *
+ * WHY (footgun, learned the hard way): node-postgres builds its connection config as
+ * `{ ...explicitConfig, ...parse(connectionString) }`. pg-connection-string emits its
+ * own `ssl` object whenever ANY of `sslmode`/`ssl`/`sslrootcert`/`sslcert`/`sslkey` is
+ * present (and even reads the referenced files into ca/cert/key), and that object
+ * OVERRIDES the explicit `ssl: verifyFullSsl()` we pass — silently DROPPING (or
+ * replacing) our `ca`. The pool then verifies against the system trust store (which has
+ * no Supabase root) and every connection fails `self-signed certificate in certificate
+ * chain`. This is exactly what broke the cmd-explorer cron writer (it carried
+ * `?sslmode=verify-full`). TLS here is ALWAYS supplied via the `ssl` object (ca +
+ * rejectUnauthorized), so none of these params are ever wanted — strip them all so they
+ * can't shadow the ca.
+ *
+ * Only the query portion (after the first `?`) is touched — the scheme/userinfo/host/
+ * path are returned byte-for-byte, so a password with URL-special characters is never
+ * re-encoded or mangled (which a full `new URL(...).toString()` round-trip would risk).
+ * Inputs without a query string, or without these params, are returned unchanged.
+ */
+export function sanitizeConnectionString(connectionString: string): string {
+  const qIdx = connectionString.indexOf('?');
+  if (qIdx === -1) return connectionString;
+  const base = connectionString.slice(0, qIdx);
+  const params = new URLSearchParams(connectionString.slice(qIdx + 1));
+  let stripped = false;
+  for (const key of ['sslmode', 'ssl', 'sslrootcert', 'sslcert', 'sslkey']) {
+    if (params.has(key)) {
+      params.delete(key);
+      stripped = true;
+    }
+  }
+  if (!stripped) return connectionString;
+  console.warn(
+    'ssl: stripped sslmode/ssl from a DB connection string — TLS is enforced via ' +
+      'verifyFullSsl() (ca + rejectUnauthorized); a connection-string sslmode would ' +
+      'override and drop the ca.',
+  );
+  const rest = params.toString();
+  return rest ? `${base}?${rest}` : base;
+}

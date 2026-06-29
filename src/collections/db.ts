@@ -13,7 +13,7 @@
  *     DO NOTHING on the collections_daily_bucket index.
  */
 import pg from 'pg';
-import { verifyFullSsl } from '../ssl.js';
+import { sanitizeConnectionString, verifyFullSsl } from '../ssl.js';
 import type { DailyRow, NegotiationRow, PaymentLineRow, RawRecord, RollupRow } from './types.js';
 
 const BATCH = 500;
@@ -23,7 +23,8 @@ export type Db = pg.Pool;
 type Queryable = { query: pg.Pool['query'] };
 
 export function makeClient(connectionString: string): Db {
-  return new pg.Pool({ connectionString, ssl: verifyFullSsl(), max: 4, application_name: 'collections-ingest' });
+  // Strip any sslmode/ssl param so it can't override our verify-full ssl (drop the ca).
+  return new pg.Pool({ connectionString: sanitizeConnectionString(connectionString), ssl: verifyFullSsl(), max: 4, application_name: 'collections-ingest' });
 }
 
 function chunk<T>(a: T[], n: number): T[][] {
