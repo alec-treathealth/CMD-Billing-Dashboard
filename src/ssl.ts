@@ -28,34 +28,71 @@
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 
 let cachedCa: string | undefined;
 
-/** Read (and cache) the Supabase Root CA. Throws a clear error if it's missing. */
+/**
+ * Read (and cache) the Supabase CA bundle. Resolution order (first hit wins):
+ *   1. SUPABASE_CA_PEM   — the full PEM as an env var (preferred on Vercel).
+ *   2. SUPABASE_CA_PATH  — absolute path to the cert file (escape hatch for envs
+ *                          where the PEM string can't be set reliably).
+ *   3. process.cwd()/certs/supabase-ca.crt — reliable on Vercel serverless (the
+ *                          function cwd is the project root where certs/ is bundled).
+ *   4. import.meta.url-relative path — last resort; correct in raw Node ESM (local
+ *                          dev, CLI, tests), but webpack rewrites import.meta.url to
+ *                          the compiled chunk's location on Vercel, so it can miss.
+ * Each file path is tried independently (try/catch); we only throw once all are
+ * exhausted. The path LABEL that succeeded is logged (never the cert content).
+ */
 export function supabaseCa(): string {
   if (cachedCa !== undefined) return cachedCa;
 
-  // Preferred on Vercel: set SUPABASE_CA_PEM to the content of certs/supabase-ca.crt.
-  // It is a public root CA (not a secret), safe to store as an env var.
+  // 1. SUPABASE_CA_PEM — public root CA (not a secret), safe to store as an env var.
   const fromEnv = process.env.SUPABASE_CA_PEM;
   if (fromEnv && fromEnv.trim()) {
     cachedCa = fromEnv.trim();
+    console.log('ssl: loaded CA from SUPABASE_CA_PEM env var');
     return cachedCa;
   }
 
-  // Fallback: read from the committed file. Pass .href (string) to fileURLToPath to
-  // avoid cross-realm URL instanceof failures in webpack-bundled code.
-  const caPath = fileURLToPath(new URL('../certs/supabase-ca.crt', import.meta.url).href);
-  try {
-    cachedCa = readFileSync(caPath, 'utf8');
-  } catch {
-    throw new Error(
-      `Missing Supabase CA cert. ` +
-        `Set SUPABASE_CA_PEM env var (Vercel) or commit certs/supabase-ca.crt (local). ` +
-        `Tried file path: ${caPath}`,
-    );
+  // File-based fallbacks, in priority order. resolve() is a thunk so a path-computation
+  // throw (e.g. fileURLToPath cross-realm failure in webpack-bundled code) is caught and
+  // we move to the next candidate rather than aborting the whole resolution.
+  const candidates: Array<{ label: string; resolve: () => string }> = [];
+
+  const fromPath = process.env.SUPABASE_CA_PATH?.trim();
+  if (fromPath) candidates.push({ label: 'SUPABASE_CA_PATH', resolve: () => fromPath });
+
+  candidates.push({ label: 'cwd', resolve: () => path.join(process.cwd(), 'certs', 'supabase-ca.crt') });
+  candidates.push({
+    label: 'import.meta.url',
+    resolve: () => fileURLToPath(new URL('../certs/supabase-ca.crt', import.meta.url).href),
+  });
+
+  const tried: string[] = [];
+  for (const { label, resolve } of candidates) {
+    let caPath: string;
+    try {
+      caPath = resolve();
+    } catch {
+      tried.push(`${label}=<unresolved>`);
+      continue;
+    }
+    tried.push(`${label}=${caPath}`);
+    try {
+      cachedCa = readFileSync(caPath, 'utf8');
+      console.log(`ssl: loaded CA from ${label} path`);
+      return cachedCa;
+    } catch {
+      // file missing/unreadable at this path — try the next candidate
+    }
   }
-  return cachedCa;
+
+  throw new Error(
+    `Missing Supabase CA cert. Set SUPABASE_CA_PEM (full PEM) or SUPABASE_CA_PATH ` +
+      `(absolute path), or commit certs/supabase-ca.crt (local). Tried: ${tried.join(', ')}`,
+  );
 }
 
 /**
