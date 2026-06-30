@@ -9,7 +9,8 @@
  * fetches just that row's identifiers via the audited revealCmdReportRow action; fetched
  * PHI is held in component state only (never persisted) and is dropped on page change so
  * every page starts fully masked. Column show/hide + drag-reorder come from the shared
- * data-grid shell. Rows are ordered by id (the seed/cron insertion order).
+ * data-grid shell. Rows are ordered by id DESCENDING (newest snapshot first) so freshly
+ * cron-ingested rows surface on the first page.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';

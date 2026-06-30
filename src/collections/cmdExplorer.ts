@@ -17,7 +17,8 @@
  * values. The live fetch/poll/unzip lives in cmdPayer.ts; this only maps parsed rows.
  */
 import { createHash } from 'node:crypto';
-import type { CmdReportRow } from './cmdPayer.js';
+import { toAmount, type CmdReportRow } from './cmdPayer.js';
+import { normalizeDate } from './normalize.js';
 
 /** Verified CMD report CSV headers. One alias each for resilience to label edits. */
 const HEADERS = {
@@ -142,4 +143,73 @@ export function toNonPhi(rows: CmdExplorerFullRow[]): CmdExplorerNonPhiRow[] {
     void phi; // intentionally omit PHI from the projection
     return rest;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Daily deposit aggregation — feeds the Master BXR chart (collections.daily_collections,
+// source_tag='cmd'). Report 10091971 / filter 10147430 carries `Check Payment` + `EFT
+// Payment` per charge line; we sum them by Payment-Received DATE for ONE facility (the
+// customer being pulled). NON-PHI by construction: only the date + summed dollars leave
+// here — never a patient cell. Pure + env-free, like the rest of this module.
+// ---------------------------------------------------------------------------
+
+/** Live-report headers for the two deposit columns (only present under filter 10147430). */
+const CHECK_KEYS = ['Check Payment'] as const;
+const EFT_KEYS = ['EFT Payment'] as const;
+const PAYMENT_DATE_KEYS = ['Payment Received'] as const;
+
+/** One facility-day deposit total (non-PHI). Money are fixed-2-decimal strings (pg numeric). */
+export interface CmdDailyDeposit {
+  facility_code: string;
+  /** ISO 'YYYY-MM-DD' (the Payment Received date). */
+  payment_date: string;
+  checks_amount: string;
+  eft_amount: string;
+  gross_amount: string;
+}
+
+/** Payment Received → ISO 'YYYY-MM-DD', or null when blank/unparseable (row is skipped). */
+function paymentDateIso(raw: string | null): string | null {
+  const t = (raw ?? '').trim();
+  if (t === '') return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) {
+    const probe = new Date(`${t}T00:00:00Z`);
+    return !Number.isNaN(probe.getTime()) && probe.toISOString().slice(0, 10) === t ? t : null;
+  }
+  const d = normalizeDate(t); // M/D/YYYY with calendar validation
+  return d.ok ? d.value : null;
+}
+
+/**
+ * Sum Check + EFT payments by Payment-Received date for one facility. Rows with no/invalid
+ * payment date are skipped (a deposit must land on a real banking day). Only buckets with a
+ * non-zero check+eft total are emitted — a day with charge lines but no money collected adds
+ * no deposit row (mirrors how the chart treated empty days, and keeps daily_collections lean).
+ * Reversals (negative check/eft) are preserved. Output is sorted by date for stable inserts.
+ */
+export function aggregateDailyDeposits(rows: CmdReportRow[], facilityCode: string): CmdDailyDeposit[] {
+  const byDate = new Map<string, { checks: number; eft: number }>();
+  for (const row of rows) {
+    const date = paymentDateIso(pick(row, PAYMENT_DATE_KEYS));
+    if (date === null) continue;
+    const checks = toAmount(pick(row, CHECK_KEYS) ?? undefined);
+    const eft = toAmount(pick(row, EFT_KEYS) ?? undefined);
+    const acc = byDate.get(date) ?? { checks: 0, eft: 0 };
+    acc.checks += checks;
+    acc.eft += eft;
+    byDate.set(date, acc);
+  }
+  const out: CmdDailyDeposit[] = [];
+  for (const [payment_date, { checks, eft }] of byDate) {
+    if (checks === 0 && eft === 0) continue; // no deposit that day → no row
+    out.push({
+      facility_code: facilityCode,
+      payment_date,
+      checks_amount: checks.toFixed(2),
+      eft_amount: eft.toFixed(2),
+      gross_amount: (checks + eft).toFixed(2),
+    });
+  }
+  out.sort((a, b) => (a.payment_date < b.payment_date ? -1 : a.payment_date > b.payment_date ? 1 : 0));
+  return out;
 }

@@ -78,19 +78,16 @@ export const DAILY_BLOCK_LABEL_FACILITY: Readonly<Record<string, string>> = {
 };
 
 // ---------------------------------------------------------------------------
-// Consolidated 2026 deposit Sheet (the "By Location" daily source, re-sourced).
-// IP/OP monthly tabs whose facility blocks are labelled with the canonical
-// acronyms. This array is the SINGLE source of truth for the acronym → facility
-// code + IP/OP classification — reuse it for the item-3a facilities migration;
-// do NOT build a second map. Every facility_code below is a real seeded facility
-// (collections.facilities); the labels are exactly the sheet's block headers.
+// Facility IP/OP reference (acronym → facility_code + care setting). Originally the
+// 2026 deposit-Sheet block labels; the deposit-Sheet ingest has been REMOVED (collections
+// are now CMD-sourced via the per-customer cron), but this stays as the SINGLE source of
+// truth for the acronym → facility code + IP/OP classification (it seeded the item-3a
+// collections.facilities migration 0016) — do NOT build a second map. Every facility_code
+// below is a real seeded facility (collections.facilities).
 // ---------------------------------------------------------------------------
 
-/** Canonical id of the consolidated deposit Sheet (an identifier, not a secret). */
-export const DEPOSIT_SHEET_ID = '1auO2SDezdYS7tbqqDnk9OU_R7G-Erab8omvOZW0ANRQ';
-
 export interface DepositFacility {
-  /** The block label exactly as it appears in the deposit Sheet header row. */
+  /** The canonical block/acronym label for this facility. */
   readonly label: string;
   /** The real facility_code in collections.facilities. */
   readonly facilityCode: string;

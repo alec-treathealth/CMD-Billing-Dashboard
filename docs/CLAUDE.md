@@ -246,12 +246,12 @@ columns.
 ## 7. Collections domain (Phase 6+)
 
 A separate `collections` Postgres schema alongside `claims`, for the CMD
-collections domain. Migrations `0006`–`0008`; ingest under `src/collections/`.
+collections domain. Migrations `0006`–`0022`; ingest under `src/collections/`.
 
 | Table | Role | Live count |
 |-------|------|-----------:|
 | `collections_raw` | verbatim landing — **PHI-bearing, admin-only** | 58,190 |
-| `daily_collections` | typed per-day collections | 1,902 |
+| `daily_collections` | typed per-day collections (`source_tag`: legacy `workbook`, and **`cmd`** — the live CMD-sourced deposit series) | — |
 | `payment_lines` | typed payment line items | 56,176 |
 | `negotiation_worklist` | typed negotiation worklist | 16 |
 | `rollup_snapshots` | typed rollup snapshots | 714 |
@@ -267,6 +267,33 @@ collections domain. Migrations `0006`–`0008`; ingest under `src/collections/`.
 Read APIs (`src/collections/summary.ts`, `daily.ts`; handlers in `src/routes/`)
 serve non-PHI monthly/daily aggregates as `claims_reader`, never reading
 `collections_raw` and never exposing `source_group_code`.
+
+### CMD-sourced collections pipeline (the live source for BOTH surfaces)
+The **Collections Explorer** (`collections.cmd_explorer_rows`, charge-line detail) and the
+**Master BXR chart's "By Facility" deposit series** (`daily_collections`, `source_tag='cmd'`)
+are both fed from ONE daily Vercel cron (`/api/cron/cmd-explorer`, `0 6 * * *`). The CMD Web API
+scopes data by **customer** (one customer == one facility), so the cron loops the 15 active
+facility accounts in `src/collections/cmdCustomers.ts`, running report **`10091971`** / filter
+**`10147430`** (the 16-column export = 14 explorer columns **+ `Check Payment` + `EFT Payment`**,
+window baked to 1/1/2026→6/30/2027) once per customer (`cmdExplorerConfigFor(customerId)`). The
+`CMD_CUSTOMER_ID` default (`10027973` = CA Mental Health) is the per-customer override target;
+filter/report/poll are tunable via `CMD_EXPLORER_*` env. Per customer the cron (`cmdExplorerCron`,
+transport-agnostic; composed in `app/lib/server.ts`):
+- maps + encrypts charge lines → `cmd_explorer_rows` (append-only `ON CONFLICT (row_fingerprint)`);
+- aggregates Check+EFT by payment-received date → `daily_collections` via `replaceCmdDailyForFacility`
+  (per-facility `DELETE source_tag='cmd' + INSERT`, so a partial run never wipes other facilities).
+It runs SEQUENTIALLY (CMD = one report at a time per partner) with a wall-clock guard; unfinished
+facilities catch up next run (idempotent). `maxDuration=300` (needs Vercel Pro+). Writes as the
+least-privilege `cmd_rollup_writer` (migration **0021** = explorer SELECT/RLS; **0022** = daily
+SELECT/INSERT/DELETE + RLS, nullable `collections_raw_id`, `source_tag='cmd'`). Backfill / timing
+check: `npm run ingest:cmd-daily [-- --commit]`. The Master BXR chart UI + readers
+(`daily_collections_resolved`, max-gross-wins) are **unchanged** — only the writer changed.
+
+**REMOVED:** the deposit Google-Sheet ingest (`depositSheet*.ts`, `DEPOSIT_SHEET_ID`,
+`replaceDepositSheetDaily`, `ingest:deposit`, `source_tag='deposit_sheet'` rows). The legacy
+`workbook` ingest (`src/collections/ingest.ts` → `payment_lines`/`negotiation_worklist`/
+`rollup_snapshots`) is untouched; only its all-zero 2026 daily placeholders remain (superseded by
+`cmd` rows via the resolved view's max-gross precedence).
 
 ---
 

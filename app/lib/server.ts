@@ -40,6 +40,7 @@ import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdEx
 import { decryptPhi } from '../../src/collections/phiCrypto.js';
 import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
 import { refreshCmdPayerRollup } from '../../src/collections/cmdPayerRefresh.js';
+import { CMD_EXPLORER_CUSTOMERS } from '../../src/collections/cmdCustomers.js';
 import { makeClient, type Db } from '../../src/collections/db.js';
 import { browseClaims as browseClaimsQuery, claimById } from '../../src/queries/browse_claims.js';
 import type { BrowseClaimsArgs, BrowseClaimsResult } from '../../src/queries/browse_claims.js';
@@ -212,9 +213,11 @@ export async function handleCmdExplorerCron(req: {
   }
   try {
     const stats = await cmdExplorerCron({
-      fetchRows: () => cmdReportRows(cmdExplorerConfig()),
+      customers: CMD_EXPLORER_CUSTOMERS,
+      fetchRows: (customerId) => cmdReportRows(cmdExplorerConfigFor(customerId)),
       writeDb: rollupWriterDb(),
       revalidate: () => revalidateTag('cmd-explorer'),
+      revalidateDashboard: () => revalidateTag(DASHBOARD_CACHE_TAG),
     });
     return { status: 200, body: { ok: true, ...stats } };
   } catch (err) {
@@ -460,21 +463,26 @@ export async function payerCmdMonth(year: number, month: number): Promise<CmdPay
 // at rest); the cron busts the 'cmd-explorer' tag after any insert. The 3 PHI columns
 // are stored as libsodium ciphertext and surface ONLY through the audited per-row
 // reveal, which decrypts in-process and is NEVER cached. All reads run as claims_reader
-// (SELECT only). cmdExplorerConfig() is retained for the cron's live fetch (30-day
-// filter); the UI no longer polls the live CMD report.
+// (SELECT only). cmdExplorerConfigFor() builds the cron's live fetch config PER CUSTOMER
+// (one CMD customer == one facility); the cron loops CMD_EXPLORER_CUSTOMERS. The UI no longer
+// polls the live CMD report.
 // ---------------------------------------------------------------------------
-function cmdExplorerConfig(): CmdApiConfig {
+
+/**
+ * Live-fetch config for ONE CMD customer account. Report 10091971 / filter 10147430 is the
+ * 16-column batch export (the 14 explorer columns + Check/EFT) with the date window baked into
+ * the saved filter (1/1/2026 → 6/30/2027). customerId varies per call so the cron covers every
+ * facility. Per-customer poll budget is small (the cron loops 15 accounts within the function
+ * deadline); CMD_EXPLORER_* env vars allow tuning report/filter/poll without a deploy.
+ */
+function cmdExplorerConfigFor(customerId: string): CmdApiConfig {
   return {
     ...cmdApiConfig(),
+    customerId,
     reportId: process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10091971',
-    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147392',
-    // The explorer report is a 30-day 14-col export (~138k rows) and takes longer
-    // to generate than the smaller payer report. Override the inherited poll params:
-    // 3s × 17 = 51s ceiling, leaving ~8s for run trigger + encrypt + DB write
-    // within the 60s maxDuration. CMD_EXPLORER_POLL_* env vars allow tuning
-    // without a deploy.
+    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147430',
     pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 3_000,
-    maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 17,
+    maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 8,
   };
 }
 
@@ -507,13 +515,14 @@ function toExplorerRow(r: CmdExplorerDbRecord): CmdExplorerRow {
 }
 
 async function loadCmdExplorerPage(cursor: number | null): Promise<CmdExplorerPage> {
-  // Keyset: WHERE id > cursor (omitted on the first page), ORDER BY id ASC. Over-fetch
-  // one row to learn whether a next page exists without a separate count(*).
+  // Keyset: ORDER BY id DESC (newest snapshot first) so freshly cron-ingested rows surface on
+  // the first page. WHERE id < cursor pages backward through ids (omitted on the first page).
+  // Over-fetch one row to learn whether a next page exists without a separate count(*).
   const limit = CMD_EXPLORER_PAGE_SIZE + 1;
   const sql =
     cursor === null
-      ? `${CMD_EXPLORER_SELECT} order by id asc limit $1`
-      : `${CMD_EXPLORER_SELECT} where id > $1 order by id asc limit $2`;
+      ? `${CMD_EXPLORER_SELECT} order by id desc limit $1`
+      : `${CMD_EXPLORER_SELECT} where id < $1 order by id desc limit $2`;
   const params = cursor === null ? [limit] : [cursor, limit];
   const { rows } = await readerExecutor().query<CmdExplorerDbRecord>(sql, params);
   const hasMore = rows.length > CMD_EXPLORER_PAGE_SIZE;

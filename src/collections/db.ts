@@ -14,6 +14,7 @@
  */
 import pg from 'pg';
 import { sanitizeConnectionString, verifyFullSsl } from '../ssl.js';
+import type { CmdDailyDeposit } from './cmdExplorer.js';
 import type { DailyRow, NegotiationRow, PaymentLineRow, RawRecord, RollupRow } from './types.js';
 
 const BATCH = 500;
@@ -102,33 +103,47 @@ export function insertRollup(db: Db, items: { rawId: number; row: RollupRow }[])
   return insertBatched(db, RU_COLS, 'collections.rollup_snapshots', 'on conflict (collections_raw_id) do nothing', rows);
 }
 
+// CMD-sourced daily collections (source_tag='cmd') — the Master BXR chart's deposit series,
+// re-sourced from the live CMD report (Check+EFT per charge line, aggregated to facility-day
+// by aggregateDailyDeposits). collections_raw_id is NULL (migration 0022 made it nullable):
+// these rows do NOT derive from a collections_raw landing row, so the writer never touches the
+// PHI-bearing collections_raw table. source_group_code is NULL (a real facility, not lineage).
+const CMD_DAILY_COLS = ['collections_raw_id', 'facility_code', 'source_group_code', 'payment_date', 'checks_amount', 'eft_amount', 'gross_amount', 'source_tag'] as const;
+
 /**
- * Re-source the deposit-Sheet daily series, transactionally (zero-wipe, idempotent).
- * Within ONE transaction: upsert the verbatim raw rows, DELETE the prior
- * source_tag='deposit_sheet' daily rows, then insert the freshly parsed ones. Legacy
- * 'workbook' rows are never touched (history preserved); a re-run with identical
- * source yields identical rows (delete-then-reinsert), so re-running adds nothing.
- * Mirrors cmdPayerIngest.writeRollup's replace-in-a-transaction model.
+ * Re-source ONE facility's CMD daily deposits, transactionally (idempotent, partial-safe).
+ * Within ONE transaction: DELETE this facility's prior source_tag='cmd' rows, then INSERT the
+ * freshly aggregated facility-day deposits. Scoped per facility_code (NOT a global wipe) so a
+ * cron run that only completes some facilities never erases the others' data. Legacy 'workbook'
+ * rows are never touched. Re-running with identical source yields identical rows.
+ *
+ * Runs as the least-privilege cmd_rollup_writer (migration 0022 grants SELECT/INSERT/DELETE +
+ * an RLS policy on daily_collections; this table is non-PHI aggregates only).
  */
-export async function replaceDepositSheetDaily(
+export async function replaceCmdDailyForFacility(
   db: Db,
-  fileId: string,
-  raws: RawRecord[],
-  daily: { source_tab: string; source_row_num: number; row: DailyRow }[],
-): Promise<{ rawUpserted: number; dailyDeleted: number; dailyInserted: number }> {
+  facilityCode: string,
+  rows: CmdDailyDeposit[],
+): Promise<{ deleted: number; inserted: number }> {
   const client = await db.connect();
   try {
     await client.query('begin');
-    const idByKey = await upsertRaw(client, raws);
-    const del = await client.query("delete from collections.daily_collections where source_tag = 'deposit_sheet'");
-    const items = daily.map((d) => {
-      const id = idByKey.get(rawKey(fileId, d.source_tab, d.source_row_num));
-      if (id === undefined) throw new Error(`no raw id for deposit daily row ${d.source_tab}#${d.source_row_num}`);
-      return { rawId: id, row: d.row };
-    });
-    const inserted = await insertDaily(client, items);
+    const del = await client.query(
+      "delete from collections.daily_collections where source_tag = 'cmd' and facility_code = $1",
+      [facilityCode],
+    );
+    const tuples = rows.map((r) => [null, r.facility_code, null, r.payment_date, r.checks_amount, r.eft_amount, r.gross_amount, 'cmd']);
+    const inserted = tuples.length === 0
+      ? 0
+      : await insertBatched(
+          client,
+          CMD_DAILY_COLS,
+          'collections.daily_collections',
+          'on conflict (facility_code, source_group_code, payment_date, source_tag) do nothing',
+          tuples,
+        );
     await client.query('commit');
-    return { rawUpserted: idByKey.size, dailyDeleted: del.rowCount ?? 0, dailyInserted: inserted };
+    return { deleted: del.rowCount ?? 0, inserted };
   } catch (err) {
     await client.query('rollback');
     throw err;
