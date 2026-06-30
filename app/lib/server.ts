@@ -161,6 +161,13 @@ export interface AppUserRow {
   email: string;
 }
 
+function narrowRole(role: string | null): AppRole | null {
+  return role === 'super_admin' || role === 'admin' || role === 'user' ? role : null;
+}
+function narrowEntity(entity: string | null): AppEntity | null {
+  return entity === 'bxr' || entity === 'indigo' ? entity : null;
+}
+
 export async function appUserFor(userId: string): Promise<AppUserRow | null> {
   const { rows } = await readerExecutor().query<{
     role: string;
@@ -170,9 +177,71 @@ export async function appUserFor(userId: string): Promise<AppUserRow | null> {
   const row = rows[0];
   if (!row) return null;
   // Fail closed on any value outside the known unions (CHECK constraints make this unreachable).
-  if (row.role !== 'super_admin' && row.role !== 'admin' && row.role !== 'user') return null;
-  if (row.entity !== null && row.entity !== 'bxr' && row.entity !== 'indigo') return null;
-  return { role: row.role, entity: row.entity, email: row.email };
+  const role = narrowRole(row.role);
+  if (!role) return null;
+  return { role, entity: narrowEntity(row.entity), email: row.email };
+}
+
+// ---------------------------------------------------------------------------
+// In-app user management (migration 0026). The list bridges to auth.users through the
+// postgres-owned SECURITY DEFINER claims.list_app_users() (projects ONLY id/email/confirmed,
+// never password data); writes go through the claims_admin-owned upsert/delete functions that
+// enforce data integrity + the last-super-admin guard. All on the claims_reader pool (EXECUTE
+// grants only — no direct table write). AUTHORIZATION (caller role / entity scope / no self-edit)
+// is enforced by the calling Server Action (app/lib/admin-actions.ts), never here.
+// ---------------------------------------------------------------------------
+
+/** One row of the user-management list: an auth user + their dashboard role (null = unprovisioned). */
+export interface ManagedUser {
+  userId: string;
+  email: string;
+  emailConfirmed: boolean;
+  /** ISO timestamp the auth account was created. */
+  createdAt: string;
+  role: AppRole | null;
+  entity: AppEntity | null;
+}
+
+export async function listAppUsers(): Promise<ManagedUser[]> {
+  const { rows } = await readerExecutor().query<{
+    user_id: string;
+    email: string;
+    email_confirmed: boolean;
+    created_at: Date | string;
+    role: string | null;
+    entity: string | null;
+  }>(
+    'select user_id, email, email_confirmed, created_at, role, entity from claims.list_app_users()',
+    [],
+  );
+  return rows.map((r) => ({
+    userId: r.user_id,
+    email: r.email,
+    emailConfirmed: Boolean(r.email_confirmed),
+    createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+    role: narrowRole(r.role),
+    entity: narrowEntity(r.entity),
+  }));
+}
+
+/** Assign/change a user's role (parameterized; the DB fn validates + guards the last super_admin). */
+export async function upsertAppUser(
+  userId: string,
+  email: string,
+  role: AppRole,
+  entity: AppEntity | null,
+): Promise<void> {
+  await readerExecutor().query('select claims.upsert_app_user($1, $2, $3, $4)', [
+    userId,
+    email,
+    role,
+    entity,
+  ]);
+}
+
+/** Revoke a user's role (delete the row → unprovisioned). The DB fn guards the last super_admin. */
+export async function deleteAppUser(userId: string): Promise<void> {
+  await readerExecutor().query('select claims.delete_app_user($1)', [userId]);
 }
 
 /** Agent route: NL question → one query function → non-PHI { tool_name, query_id, summary_stats }. */

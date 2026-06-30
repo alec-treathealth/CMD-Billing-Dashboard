@@ -8,6 +8,7 @@
  * `signOut` server action. Closes on outside-click or Escape.
  */
 import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { signOut } from '@/lib/auth-actions';
 
 /** Initials from an email local-part: first letters of up to two name tokens, else first two chars. */
@@ -18,7 +19,13 @@ function initialsFromEmail(email: string): string {
   return local.slice(0, 2).toUpperCase() || '?';
 }
 
-export function UserMenu({ email }: { email: string }) {
+export function UserMenu({
+  email,
+  canManageUsers = false,
+}: {
+  email: string;
+  canManageUsers?: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -63,6 +70,16 @@ export function UserMenu({ email }: { email: string }) {
               {email}
             </div>
           </div>
+          {canManageUsers && (
+            <Link
+              href="/admin/users"
+              role="menuitem"
+              onClick={() => setOpen(false)}
+              className="block border-b border-line px-3 py-2 text-left text-sm text-ink900 transition-colors hover:bg-teal50"
+            >
+              Manage users
+            </Link>
+          )}
           <form action={signOut}>
             <button
               type="submit"

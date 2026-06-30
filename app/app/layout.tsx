@@ -41,6 +41,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       ? access.user.email
       : null;
   const allowedViews = access.ok ? access.access.allowedViews : undefined;
+  const canManageUsers = access.ok ? access.access.canManageUsers : false;
   return (
     <html lang="en">
       <body className="min-h-screen bg-ground">
@@ -75,7 +76,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             <Suspense fallback={null}>
               <ViewSwitcher allowedViews={allowedViews} />
             </Suspense>
-            {email ? <UserMenu email={email} /> : null}
+            {email ? <UserMenu email={email} canManageUsers={canManageUsers} /> : null}
           </div>
         </header>
         {children}

@@ -525,6 +525,18 @@ row, else they are *unprovisioned* (default-deny, friendly notice).
   CMD `revealCmdReportRow[s]`) gates on `canRevealPhi`; the Collections "Reveal all"
   control is hidden for `user` roles. Non-PHI surfaces (overview, browse, `/ask`
   summaries) stay open to all provisioned roles.
+- **In-app user management (`/admin/users`, migration 0026).** Admins/super_admins
+  provision/change/revoke roles from the UI (no SQL). Surfaced via the avatar menu
+  ("Manage users", shown only when `canManageUsers`). Reads the auth roster through
+  the **postgres-owned** SECURITY DEFINER `claims.list_app_users()` (projects ONLY
+  id/email/confirmed — never password columns; no role gets a broad `auth.users`
+  grant, **no service-role key on the app path**); writes go through the
+  `claims_admin`-owned `claims.upsert_app_user` / `claims.delete_app_user`
+  (data-integrity + **last-super-admin guard**), EXECUTE granted to `claims_reader`
+  only. Authorization (caller role, **entity scope**, **no self-edit**) is enforced
+  in `app/lib/admin-actions.ts`; every mutation writes a `claims.access_audit` row.
+  A super_admin manages everyone/all entities; an entity admin manages only their
+  own entity + unprovisioned users and may assign only `admin`/`user` in that entity.
 - **Server gate:** `requireExecutive()` (`app/lib/executive.ts`, default-deny,
   closest to the data) validates the session via `auth.getUser()`; it underpins
   `dashboardAccess()` and the data Server Actions (`app/lib/actions.ts`). The
@@ -589,6 +601,7 @@ yet** — it is groundwork.
 | 9 | ✅ | Static BH code reference page. |
 | 10 | ✅ | Dashboard "views" (Consolidated/BXR/Indigo) via top-bar `?view=` switcher + `app/lib/views.ts` seam (`8aa0ba1`); overview KPI tiles (MTD/YTD gross + IP/OP split, MoM/YoY, linear-run-rate forecast) + `payment_lines` YoY reader; All Facilities table. Then (`3cb478e`): top-bar user avatar, collapse to **two tabs** (Overview, Collections) with a unified Collections view (Payment Type / All Collections, server-side explorer filters, header drag-reorder), and **per-view branding** (`--brand-*` / `brand-theme.tsx`). Data still BXR-or-stub (no `business_entity_id` on dashboard tables). |
 | 11 | ✅ | Per-user **RBAC** (migration **0025** `claims.app_user`): `super_admin` / entity `admin` / entity `user`; `rbac.ts` (pure policy) + `access.ts` (`dashboardAccess`); pages clamp `?view=` to entitled views; PHI reveal (claims + CMD) gated on `canRevealPhi`; unprovisioned = default-deny notice. Seeded `alec@treathealth.ai`=super_admin. Replaces the flat "any verified session = full access". |
+| 11.1 | ✅ | **In-app user management** (`/admin/users`, migration **0026**): admins provision/change/revoke roles (no SQL) via avatar-menu link. Auth roster via postgres-owned SECURITY DEFINER `list_app_users` (id/email/confirmed only, no service-role key); writes via `claims_admin`-owned `upsert_app_user`/`delete_app_user` with last-super-admin guard; authz (role/entity scope, no self-edit) + audit in `admin-actions.ts`. |
 | VOB | foundation only | Migrations 0010–0011 (schemas `ref`/`vob`/`rag`/`audit`); no app code yet. |
 
 ---
