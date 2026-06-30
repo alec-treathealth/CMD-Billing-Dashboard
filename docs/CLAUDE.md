@@ -293,10 +293,19 @@ check: `npm run ingest:cmd-daily [-- --commit]`. The Master BXR chart UI + reade
 (`daily_collections_resolved`, max-gross-wins) are **unchanged** — only the writer changed.
 
 **REMOVED:** the deposit Google-Sheet ingest (`depositSheet*.ts`, `DEPOSIT_SHEET_ID`,
-`replaceDepositSheetDaily`, `ingest:deposit`, `source_tag='deposit_sheet'` rows). The legacy
-`workbook` ingest (`src/collections/ingest.ts` → `payment_lines`/`negotiation_worklist`/
-`rollup_snapshots`) is untouched; only its all-zero 2026 daily placeholders remain (superseded by
-`cmd` rows via the resolved view's max-gross precedence).
+`replaceDepositSheetDaily`, `ingest:deposit`, `source_tag='deposit_sheet'` rows).
+
+**The CMD cron is the authoritative live source of truth going forward.** It is the ONLY scheduled
+writer (the single entry in `app/vercel.json` `crons`). The legacy `workbook` ingest
+(`src/collections/ingest.ts` → `payment_lines`/`negotiation_worklist`/`rollup_snapshots` +
+`source_tag='workbook'` dailies, sourced from Google-Sheet workbooks) is a **frozen** manual CLI:
+unscheduled, not aliased in `package.json`, DRY-RUN unless `--commit`. It cannot write on its own, so
+every future date is pure CMD. Its existing 2026 daily rows (~$20.85M, spanning the same
+1/2→6/30 window) are **intentionally retained** — on 59 facility/days workbook's gross exceeds CMD's,
+so the resolved view's max-gross precedence puts the chart at ~$26.97M vs ~$26.75M pure-CMD (a
+deliberate "leave historical as-is" call, 2026-06-29). `daily_collections_resolved` (max-gross-wins)
+is **unchanged**. ⚠️ Do NOT re-run the `workbook` ingest for any period CMD covers — that would let a
+stale legacy import override the authoritative CMD figures; treat it as a historical backfill tool only.
 
 ---
 
