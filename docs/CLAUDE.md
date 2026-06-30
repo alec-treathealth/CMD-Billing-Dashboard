@@ -169,7 +169,7 @@ for the full annotated list. Key vars:
 npm run ingest      # load 3 Google Sheets -> claims_raw + claims (idempotent)
 npm run dbcheck     # DB smoke (counts only)
 npm run probe       # one-off sheet/auth probe
-npm test            # hermetic node:test suite (171 pass, 0 fail)
+npm test            # hermetic node:test suite (239 pass, 0 fail)
 npm run typecheck   # tsc --noEmit (clean)
 
 # app
@@ -264,9 +264,15 @@ collections domain. Migrations `0006`–`0022`; ingest under `src/collections/`.
   **lineage only** — NEVER a `facility_code` (0 group-code leaks, 0 FK orphans).
 - **Deferred:** archived/historical collections data is not yet ingested.
 
-Read APIs (`src/collections/summary.ts`, `daily.ts`; handlers in `src/routes/`)
-serve non-PHI monthly/daily aggregates as `claims_reader`, never reading
-`collections_raw` and never exposing `source_group_code`.
+Read APIs (`src/collections/summary.ts`, `daily.ts`, `collectionsYoy.ts`; handlers in
+`src/routes/`) serve non-PHI monthly/daily aggregates as `claims_reader`, never reading
+`collections_raw` and never exposing `source_group_code`. **`collectionsYoy.ts`** (the
+overview YTD/forecast YoY trend) reads ONLY `payment_lines` — the only multi-year
+collections series, since `daily_collections_resolved` is 2026-only — projecting only
+`sum(insurance_paid)` windowed on `payment_date`. The **`cmd_explorer_rows`** grid reader
+(`app/lib/server.ts`: `buildCmdExplorerQuery`/`loadCmdExplorerPage`) supports optional
+**server-side Facility + Month filters** (parameterized, keyset paging preserved, non-PHI
+projection unchanged; PHI columns surface only via the audited per-row reveal).
 
 ### CMD-sourced collections pipeline (the live source for BOTH surfaces)
 The **Collections Explorer** (`collections.cmd_explorer_rows`, charge-line detail) and the
@@ -437,13 +443,35 @@ root linked at `app/` (install bundles the repo root via `app/vercel.json` so
 in-process. `RESULTS_API_SECRET` never reaches the client.
 
 **Surfaces (top nav: Dashboard · Claims · Code Reference · Ask):**
-- **`/dashboard`** — non-PHI aggregate overview; sub-routes `/dashboard/payers`
-  (filterable payer explorer + multidimensional payer chart) and
-  `/dashboard/collections` (collections KPI chart + Collections Explorer). Built
-  from per-surface modules in `app/components/dashboard/`
-  (`overview`/`payers`/`collections`/`widgets`) over a shared widget shell.
-  Widgets read the materialized aggregates (matviews, migration 0009) through
-  cached readers.
+- **`/dashboard`** — non-PHI aggregate overview with a dashboard **"view"** selector
+  (Consolidated / BXR Consulting / Indigo Billing) in the global top bar. **Two tabs**
+  (`app/components/dashboard-nav.tsx`): **Overview** and **Collections** (the former
+  standalone "Collections Explorer" sub-route `/dashboard/collections/explorer` now
+  redirects into Collections).
+  - **Overview**: a row of KPI tiles — MTD Gross (MoM trend), YTD Gross split
+    **IP / OP / IP+OP** (YoY trend), and **Year Forecast** (linear YTD run-rate,
+    recomputed live) — plus an **All Facilities** table (all rows; Month + IP/OP
+    filters), above the **Master chart** (one bar chart: By Facility / By Payer +
+    Month dropdown + per-facility/payer drill-down).
+  - **Collections**: a unified surface (`collections-view.tsx`) with a view dropdown —
+    **Payment Type** (daily Checks/EFT/Gross by facility, from
+    `daily_collections_resolved`) and **All Collections** (CMD charge-line detail from
+    `cmd_explorer_rows`, PHI masked + audited per-row reveal, **server-side
+    Facility/Month filters**). Columns reorder by **dragging the table headers** (no
+    separate "Columns" panel).
+  - Built from per-surface modules in `app/components/dashboard/` (`overview`,
+    `overview-kpis`, `overview-bar-chart`, `collections`, `collections-view`,
+    `cmd-explorer`, `widgets`) over a shared widget shell + `data-grid.tsx`. Aggregate
+    reads go through cached readers (matviews migration 0009, `daily_collections_resolved`,
+    `cmd_explorer_rows`, and the `payment_lines` YoY reader).
+- **Dashboard "view" scoping seam (`app/lib/views.ts`).** `resolveView(searchParams)`
+  parses `?view=` (URL only — never browser storage; non-PHI; default `consolidated`);
+  `viewToEntityIds(view)` is the ONE place the view→business_entity_id decision lives.
+  **Today the dashboard tables carry no `business_entity_id` and no GUC scoping** (that
+  lives only in the `staging.*` ML pipeline, §17), and there is **no separate Indigo
+  UUID**, so all three views render BXR-or-stub data — the entity ids are carried but
+  not yet consumed. The top-bar `view-switcher.tsx` (dashboard routes only) drives the
+  param; `brand-theme.tsx` sets `<html data-view=…>` so per-view branding applies.
 - **`/claims`** + **`/claims/[claimId]`** — Claims Explorer: keyset pagination,
   faceted dropdowns, drag-to-reorder/sortable/selectable columns (shared
   `data-grid.tsx`), and an **audited PHI-gated per-row reveal** on the detail
@@ -462,6 +490,15 @@ explicit per-row action; `IdentityForm` holds patient inputs in local component
 state only (never lifted/persisted); nothing in the transcript is written to
 `localStorage`/cookies. See `docs/design-system.md` for the TreatHealthOS visual
 system (palette, typography, components, nav, PHI rules).
+
+**Top bar & per-view branding.** The global top bar shows a user-initials avatar at the
+far right (`app/components/user-menu.tsx`, click → email + Sign out) and, on dashboard
+routes, the view switcher. On dashboard routes the bar + dashboard accents (KPI tiles,
+nav, MiniBar, active states, gross/YTD tooltip emphasis) recolor per active view via
+`--brand-bar/-ink/-accent/-soft` CSS variables — set by `brand-theme.tsx`
+(`<html data-view=…>`) and defined in `globals.css`: **Consolidated** = TreatHealthOS
+teal, **BXR** = deep navy + brass/gold, **Indigo** = indigo + violet. Off-dashboard
+chrome stays teal; charts keep their functional multi-series colors.
 
 **Access control (per-user login, invite-only).** The PHI surface is gated by
 real per-user Supabase Auth (email + password) — this supersedes Vercel
@@ -531,13 +568,14 @@ yet** — it is groundwork.
 | 7.x | ✅ | Collections summary/daily/KPI APIs + dashboard; TreatHealthOS design system; dashboard subroutes; Claims Explorer foundation + keyset pagination + claim detail; `/ask` transcript with field-picker; materialized aggregates (0009); payer chart; collections/payers explorers. |
 | 8.0–8.2 | ✅ | Audited PHI-gated claim detail reveal; faceted dropdowns + column controls for Claims Explorer; authenticated post-ingest cache revalidation (`/api/revalidate`). |
 | 9 | ✅ | Static BH code reference page. |
+| 10 | ✅ | Dashboard "views" (Consolidated/BXR/Indigo) via top-bar `?view=` switcher + `app/lib/views.ts` seam (`8aa0ba1`); overview KPI tiles (MTD/YTD gross + IP/OP split, MoM/YoY, linear-run-rate forecast) + `payment_lines` YoY reader; All Facilities table. Then (`3cb478e`): top-bar user avatar, collapse to **two tabs** (Overview, Collections) with a unified Collections view (Payment Type / All Collections, server-side explorer filters, header drag-reorder), and **per-view branding** (`--brand-*` / `brand-theme.tsx`). Data still BXR-or-stub (no `business_entity_id` on dashboard tables). |
 | VOB | foundation only | Migrations 0010–0011 (schemas `ref`/`vob`/`rag`/`audit`); no app code yet. |
 
 ---
 
 ## 14. Verification
 
-- **Tests:** `npm test` → **171 pass, 0 fail** (hermetic — faked Anthropic + DB).
+- **Tests:** `npm test` → **239 pass, 0 fail** (hermetic — faked Anthropic + DB).
 - **Typecheck:** `npm run typecheck` clean (root); `cd app && npm run typecheck`
   clean; `cd app && npm run build` succeeds.
 - Run `npm test` + both typechecks before any commit. Show results and HOLD
