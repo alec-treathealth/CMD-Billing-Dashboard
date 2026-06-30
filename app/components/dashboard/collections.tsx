@@ -19,7 +19,6 @@ import {
 import { Columns3, RotateCcw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ColumnsPanel, ControlSelect, Pager, SortHeaderCell, useColumnDnD } from '@/components/data-grid';
 import { count, money, moneyAxis, percent } from '@/lib/format';
@@ -33,7 +32,7 @@ import {
   type CollectionsMonthlySummary,
 } from '@/lib/actions';
 import { facilityLabel } from '../../../src/collections/summaryTypes';
-import { MiniBar, useWidget, WidgetCard } from './widgets';
+import { Kpi, MiniBar, useWidget, WidgetCard } from './widgets';
 
 /**
  * Shared segment colors for the facility bar charts (MTD stacked + past-month
@@ -137,38 +136,6 @@ function CollectionsBody({ data }: { data: CollectionsMonthlySummary }) {
         Latest month by gross. &quot;(unassigned)&quot; = group-code lineage with no facility code.
       </p>
     </div>
-  );
-}
-
-/** A big-number KPI tile. `detail` renders a second, smaller value line. */
-function Kpi({
-  label,
-  value,
-  detail,
-  sub,
-}: {
-  label: string;
-  value: string;
-  detail?: string;
-  sub?: string;
-}) {
-  return (
-    <Card className="border-t-2 border-t-teal500">
-      <CardContent className="pb-4 pt-4">
-        <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-          {label}
-        </div>
-        <div className="ths-num mt-1 whitespace-nowrap text-lg font-semibold leading-tight tabular-nums text-teal700 lg:text-xl">
-          {value}
-        </div>
-        {detail && (
-          <div className="ths-num mt-0.5 whitespace-nowrap text-xs tabular-nums text-muted-foreground">
-            {detail}
-          </div>
-        )}
-        {sub && <div className="mt-1 text-[11px] text-muted-foreground">{sub}</div>}
-      </CardContent>
-    </Card>
   );
 }
 

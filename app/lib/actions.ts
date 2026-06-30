@@ -27,6 +27,7 @@ import {
   dashboardCollectionsDaily,
   dashboardCollectionsKpis,
   dashboardCollectionsSummary,
+  dashboardCollectionsYoy,
   dashboardDistribution,
   facilitiesDimension,
   handleAgent,
@@ -59,6 +60,7 @@ import type {
 } from '../../src/queries/types';
 import type { CollectionsMonthlySummary } from '../../src/collections/summaryTypes';
 import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collections/dailyTypes';
+import type { CollectionsYoy } from '../../src/collections/collectionsYoy';
 import type { CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup';
 import type { FacilityDimensionRow } from '../../src/collections/facilities';
 
@@ -83,6 +85,7 @@ export type {
   PayerGapSummary,
   CollectionsMonthlySummary,
   CollectionsKpis,
+  CollectionsYoy,
   CollectionsDailyResult,
   BrowseClaimsResult,
   BrowseClaimsSort,
@@ -354,6 +357,22 @@ export async function loadCollectionsSummary(): Promise<DashboardResult<Collecti
 export async function loadCollectionsKpis(): Promise<DashboardResult<CollectionsKpis>> {
   try {
     return { ok: true, data: await dashboardCollectionsKpis() };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Year-over-year collected totals (non-PHI), anchored to `asOf` (the live KPI anchor =
+ * max payment_date). Backs the YTD Gross card's YoY trend and the Year Forecast card's
+ * prior-year comparison; sourced from payment_lines (multi-year). Reader-only, cached.
+ * On any failure (or a malformed anchor) returns { ok: false } so the cards just drop
+ * the YoY line rather than break the page.
+ */
+export async function loadCollectionsYoy(asOf: string): Promise<DashboardResult<CollectionsYoy>> {
+  if (typeof asOf !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return { ok: false };
+  try {
+    return { ok: true, data: await dashboardCollectionsYoy(asOf) };
   } catch {
     return { ok: false };
   }

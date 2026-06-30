@@ -34,6 +34,8 @@ import { collectionsMonthlySummary } from '../../src/collections/summary.js';
 import type { CollectionsMonthlySummary } from '../../src/collections/summaryTypes.js';
 import { collectionsDaily, collectionsKpis } from '../../src/collections/daily.js';
 import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collections/dailyTypes.js';
+import { collectionsYoy } from '../../src/collections/collectionsYoy.js';
+import type { CollectionsYoy } from '../../src/collections/collectionsYoy.js';
 import { facilityDimension, type FacilityDimensionRow } from '../../src/collections/facilities.js';
 import { cmdPayerGapForMonth, cmdReportRows, type CmdApiConfig } from '../../src/collections/cmdPayer.js';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdExplorer.js';
@@ -340,6 +342,23 @@ export const dashboardCollectionsKpis = unstable_cache(
       { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard' },
     ),
   ['dashboard-collections-kpis'],
+  { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
+);
+
+/**
+ * Year-over-year collected totals for the overview cards' YoY trend (non-PHI).
+ * Sourced from collections.payment_lines (the only multi-year collections-side
+ * series — the live deposit series is 2026-only). Cached per `asOf` like the other
+ * aggregates: the anchor changes ~daily, so each day's window memoizes once and the
+ * shared DASHBOARD_CACHE_TAG busts it on ingest. Reader projects only non-PHI sums.
+ */
+export const dashboardCollectionsYoy = unstable_cache(
+  async (asOf: string): Promise<CollectionsYoy> =>
+    collectionsYoy(
+      { as_of: asOf },
+      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard' },
+    ),
+  ['dashboard-collections-yoy'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
 );
 

@@ -15,6 +15,8 @@ import {
 } from '@/lib/actions';
 import { MiniBar, useWidget, WidgetCard } from './widgets';
 import { OverviewBarChart } from './overview-bar-chart';
+import { OverviewKpis } from './overview-kpis';
+import type { DashboardView } from '@/lib/views';
 
 /** A compact distribution widget: top-N buckets by count with a proportional bar. */
 function DistributionWidget({
@@ -106,11 +108,16 @@ export function ClaimsDistributions() {
  * sub-routes. The underlying readers are unchanged — CollectionsKpisWidget and
  * ClaimsDistributions remain exported (parked) and dashboardDistribution still backs
  * the /ask facets. Aggregate, non-PHI; no patient data loaded.
+ *
+ * `view` selects the data scope (Consolidated / BXR / Indigo). All three render the
+ * identical UI; the scope flows through the viewToEntityIds seam (app/lib/views.ts).
+ * Until Indigo data is ingested, every view resolves to BXR-or-stub data.
  */
-export function Dashboard() {
+export function Dashboard({ view }: { view: DashboardView }) {
   return (
     <section className="space-y-4">
-      <OverviewBarChart />
+      <OverviewKpis view={view} />
+      <OverviewBarChart scope={view} />
     </section>
   );
 }

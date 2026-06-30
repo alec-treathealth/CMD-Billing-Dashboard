@@ -71,6 +71,43 @@ export function WidgetCard({
   );
 }
 
+/**
+ * A big-number KPI tile (the TreatHealthOS "KPI tile" — see docs/design-system.md).
+ * `detail` renders a second, smaller value line; `sub` a muted footnote. Both accept
+ * a ReactNode so callers can pass a colored trend/breakdown, not just a string.
+ * Shared by the Collections MTD/YTD widget and the overview KPI row.
+ */
+export function Kpi({
+  label,
+  value,
+  detail,
+  sub,
+}: {
+  label: string;
+  value: string;
+  detail?: React.ReactNode;
+  sub?: React.ReactNode;
+}) {
+  return (
+    <Card className="border-t-2 border-t-teal500">
+      <CardContent className="pb-4 pt-4">
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          {label}
+        </div>
+        <div className="ths-num mt-1 whitespace-nowrap text-lg font-semibold leading-tight tabular-nums text-teal700 lg:text-xl">
+          {value}
+        </div>
+        {detail && (
+          <div className="ths-num mt-0.5 whitespace-nowrap text-xs tabular-nums text-muted-foreground">
+            {detail}
+          </div>
+        )}
+        {sub && <div className="mt-1 text-[11px] text-muted-foreground">{sub}</div>}
+      </CardContent>
+    </Card>
+  );
+}
+
 /** A proportional bar (0–100). Values are also shown as text; bar reinforces them. */
 export function MiniBar({ pct }: { pct: number | null }) {
   const w = Math.max(0, Math.min(100, pct ?? 0));

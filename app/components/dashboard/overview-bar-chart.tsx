@@ -60,6 +60,19 @@ import { facilityLabel } from '../../../src/collections/summaryTypes';
 import type { CmdPayerFacilityRow } from '../../../src/collections/cmdPayerRollup';
 import { CHART_COLORS, FacilityKpiBars, kpiChartRows, LegendSwatch } from './collections';
 import { MiniBar, useWidget, WidgetCard } from './widgets';
+import { type DashboardView, viewToEntityIds } from '@/lib/views';
+
+/** The chart card title per view (so an Indigo/Consolidated view isn't mislabeled "BXR"). */
+function chartTitleFor(view: DashboardView): string {
+  switch (view) {
+    case 'bxr':
+      return 'Master BXR Chart';
+    case 'indigo':
+      return 'Master Indigo Chart';
+    case 'consolidated':
+      return 'Master Chart (Consolidated)';
+  }
+}
 
 type DailyRow = CollectionsDailyResult['rows'][number];
 
@@ -557,7 +570,15 @@ function ChartEmpty({ label }: { label: string }) {
   return <div className="py-12 text-center text-sm text-muted-foreground">{label}</div>;
 }
 
-export function OverviewBarChart() {
+export function OverviewBarChart({ scope = 'consolidated' }: { scope?: DashboardView }) {
+  // The view → entity-id seam (app/lib/views.ts). Carried but not yet consumed by the
+  // readers (the collections schema has no business_entity_id column today); all three
+  // views render BXR-or-stub data. This is where the chart gains real scope once Indigo
+  // data lands. Title reflects the scope so the card isn't mislabeled.
+  // (`scope`, not `view`: this file's own `view` state is the By Facility/By Payer toggle.)
+  const entityIds = viewToEntityIds(scope);
+  void entityIds;
+
   // MTD data is the already-cached aggregate read for whichever view is active.
   const kpisState = useWidget<CollectionsKpis>(loadCollectionsKpis);
   // Latest-month daily rows (cached) — backs the MTD facility drill-down panel.
@@ -821,7 +842,7 @@ export function OverviewBarChart() {
   }
 
   return (
-    <WidgetCard title="Master BXR Chart" state={{ status: 'ready' }}>
+    <WidgetCard title={chartTitleFor(scope)} state={{ status: 'ready' }}>
       <div className="space-y-4">
         <div className="flex flex-wrap items-center gap-3">
           <ControlSelect
