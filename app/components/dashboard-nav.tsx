@@ -6,7 +6,6 @@ import { usePathname } from 'next/navigation';
 const TABS: readonly { href: string; label: string }[] = [
   { href: '/dashboard', label: 'Overview' },
   { href: '/dashboard/collections', label: 'Collections' },
-  { href: '/dashboard/collections/explorer', label: 'Collections Explorer' },
 ];
 
 export function DashboardNav() {
@@ -23,8 +22,8 @@ export function DashboardNav() {
             className={[
               '-mb-px border-b-2 px-3 py-2 text-sm font-medium transition-colors',
               active
-                ? 'border-teal500 text-teal700'
-                : 'border-transparent text-muted-foreground hover:border-teal500 hover:text-teal700',
+                ? 'border-[var(--brand-accent)] text-[var(--brand-ink)]'
+                : 'border-transparent text-muted-foreground hover:border-[var(--brand-accent)] hover:text-[var(--brand-ink)]',
             ].join(' ')}
           >
             {t.label}

@@ -1,6 +1,9 @@
 import type { Metadata } from 'next';
+import { Suspense } from 'react';
 import { NavLinks } from '@/components/nav-links';
-import { signOut } from '@/lib/auth-actions';
+import { ViewSwitcher } from '@/components/dashboard/view-switcher';
+import { UserMenu } from '@/components/user-menu';
+import { BrandTheme } from '@/components/brand-theme';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 import { supabaseAuthConfigured } from '@/lib/supabase/env';
 import './globals.css';
@@ -28,42 +31,33 @@ function Logo({ size = 26 }: { size?: number }) {
   );
 }
 
-/** Sign-out — a server-action form button (no client JS). Shown only when signed in. */
-function SignOutButton() {
-  return (
-    <form action={signOut}>
-      <button
-        type="submit"
-        className="rounded-md bg-white/10 px-3 py-1.5 text-[13px] font-medium text-white/80 ring-1 ring-white/20 transition-colors hover:bg-white/20 hover:text-white"
-      >
-        Sign out
-      </button>
-    </form>
-  );
-}
-
-/** Cheap session-presence check for nav (cookie read only; the real gate is middleware). */
-async function isSignedIn(): Promise<boolean> {
-  if (!supabaseAuthConfigured()) return false;
+/** Cheap session email for the nav avatar (cookie read only; the real gate is middleware). */
+async function sessionEmail(): Promise<string | null> {
+  if (!supabaseAuthConfigured()) return null;
   try {
     const supabase = await createSupabaseServerClient();
     const {
       data: { session },
     } = await supabase.auth.getSession();
-    return Boolean(session);
+    return session?.user?.email ?? null;
   } catch {
-    return false;
+    return null;
   }
 }
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  const signedIn = await isSignedIn();
+  const email = await sessionEmail();
   return (
     <html lang="en">
       <body className="min-h-screen bg-ground">
-        {/* teal900 anchor bar — 3-col grid keeps the nav centered while the logo
-            stays left and the right column holds the sign-out action */}
-        <header className="grid h-14 grid-cols-[auto_1fr_auto] items-center gap-3 bg-teal900 px-4 sm:px-6">
+        {/* Sets <html data-view="…"> per active dashboard view (brand accent). */}
+        <Suspense fallback={null}>
+          <BrandTheme />
+        </Suspense>
+        {/* Brand anchor bar — background follows the active view (--brand-bar; teal by
+            default off-dashboard). 3-col grid keeps the nav centered, logo left, and the
+            right column holds the view switcher + user avatar. */}
+        <header className="grid h-14 grid-cols-[auto_1fr_auto] items-center gap-3 bg-[var(--brand-bar)] px-4 transition-colors duration-300 sm:px-6">
           {/* col 1: logo + title */}
           <div className="flex items-center gap-3">
             <Logo size={26} />
@@ -76,9 +70,18 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           </div>
           {/* col 2: nav — centered */}
           <NavLinks />
-          {/* col 3: sign-out when authenticated (keeps nav centered otherwise) */}
-          <div className="flex items-center justify-end">
-            {signedIn ? <SignOutButton /> : null}
+          {/* col 3: view switcher (dashboard routes only) + user avatar, when authenticated.
+              ViewSwitcher reads ?view= via useSearchParams, so it must be wrapped in Suspense
+              for the static routes (/, /code-reference) this shared layout also renders. */}
+          <div className="flex items-center justify-end gap-3">
+            {email ? (
+              <>
+                <Suspense fallback={null}>
+                  <ViewSwitcher />
+                </Suspense>
+                <UserMenu email={email} />
+              </>
+            ) : null}
           </div>
         </header>
         {children}

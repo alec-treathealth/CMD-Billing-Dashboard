@@ -3,4 +3,5 @@
  * existing imports (`@/components/dashboard`) keep working after the split.
  */
 export { Dashboard, ClaimsDistributions } from './overview';
-export { CollectionsSections, CollectionsSummaryWidget } from './collections';
+export { CollectionsSummaryWidget } from './collections';
+export { CollectionsView } from './collections-view';

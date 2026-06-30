@@ -33,7 +33,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Pager } from '@/components/data-grid';
+import { ControlSelect } from '@/components/data-grid';
 import { money } from '@/lib/format';
 import {
   loadCollectionsDailyRange,
@@ -53,7 +53,8 @@ const MONTH_NAMES = [
   'July', 'August', 'September', 'October', 'November', 'December',
 ];
 
-const FACILITIES_PAGE_SIZE = 8;
+/** All Facilities care-setting filter. */
+type FacilitySetting = 'ALL' | 'IP' | 'OP';
 
 // --- pure date/number helpers (anchored to the live as_of, not wall-clock) --------
 
@@ -101,7 +102,7 @@ function KpiSkeletonRow() {
   return (
     <div className="grid gap-3 sm:grid-cols-3">
       {[0, 1, 2].map((i) => (
-        <Card key={i} className="border-t-2 border-t-teal500">
+        <Card key={i} className="border-t-2 border-t-[var(--brand-accent)]">
           <CardContent className="space-y-2 pb-4 pt-4">
             <Skeleton className="h-3 w-20" />
             <Skeleton className="h-6 w-28" />
@@ -243,54 +244,132 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
         />
       </div>
 
-      <AllFacilitiesTable kpis={kpis} dimByCode={dimByCode} monthName={monthName} year={year} />
+      <AllFacilitiesTable kpis={kpis} dimByCode={dimByCode} asOf={asOf} />
     </div>
   );
 }
 
-/** A per-facility row for the All Facilities table (MTD, summed for the current month). */
+/** A per-facility row for the All Facilities table (summed for the selected month). */
 interface FacilityTableRow {
   label: string;
-  setting: string;
+  careSetting: 'IP' | 'OP' | null;
+  checks: number;
+  eft: number;
+  gross: number;
+}
+
+/** A facility's per-month checks/eft/gross totals (the shape both sources reduce to). */
+interface FacilityMonthTotals {
+  facility_code: string | null;
+  facility_name: string | null;
   checks: number;
   eft: number;
   gross: number;
 }
 
 /**
- * "All Facilities Table" — a toggle that reveals a paginated, per-facility table summed
- * for the current month (MTD), reusing the shared Pager. Aggregate, non-PHI: reads only
- * the already-loaded KPI by-facility rows + the facility dimension (acronym / IP-OP).
+ * "All Facilities Table" — a toggle that reveals the full (un-paginated) per-facility
+ * table summed for a selected month, with an IP/OP setting filter. Aggregate, non-PHI:
+ * the current month reads the already-loaded MTD KPI rows; a past month fetches that
+ * month's daily rows (loadCollectionsDailyRange) and sums them per facility. Joined to
+ * the facility dimension for acronym labels + the IP/OP (care_setting) filter.
  */
 function AllFacilitiesTable({
   kpis,
   dimByCode,
-  monthName,
-  year,
+  asOf,
 }: {
   kpis: CollectionsKpis;
   dimByCode: Map<string, FacilityDimensionRow>;
-  monthName: string | null;
-  year: number | null;
+  asOf: string | null;
 }) {
   const [open, setOpen] = useState(false);
-  const [page, setPage] = useState(0);
+  const [setting, setSetting] = useState<FacilitySetting>('ALL');
 
+  const currentYear = asOf ? Number(asOf.slice(0, 4)) : null;
+  const currentMonth = asOf ? Number(asOf.slice(5, 7)) : null;
+  const [month, setMonth] = useState<number | null>(currentMonth);
+  // Re-anchor the selected month when the live anchor first resolves / changes.
+  useEffect(() => {
+    setMonth(currentMonth);
+  }, [currentMonth]);
+
+  const isCurrent = month !== null && month === currentMonth;
+
+  // Past-month totals (fetched). The current month uses the already-loaded MTD KPI rows,
+  // so no fetch is issued for it. Only fetch while the panel is open.
+  const [pastRows, setPastRows] = useState<FacilityMonthTotals[] | null>(null);
+  const [pastStatus, setPastStatus] = useState<'idle' | 'loading' | 'error' | 'ready'>('idle');
+  useEffect(() => {
+    if (!open || isCurrent || month === null || currentYear === null) {
+      setPastRows(null);
+      setPastStatus('idle');
+      return;
+    }
+    let live = true;
+    setPastStatus('loading');
+    loadCollectionsDailyRange({ year: currentYear, month })
+      .then((r) => {
+        if (!live) return;
+        if (!r.ok) {
+          setPastStatus('error');
+          return;
+        }
+        const byFacility = new Map<string, FacilityMonthTotals>();
+        for (const row of r.data.rows) {
+          const key = row.facility_code ?? '__unassigned__';
+          const e = byFacility.get(key);
+          if (e) {
+            e.checks += row.checks_amount;
+            e.eft += row.eft_amount;
+            e.gross += row.gross_amount;
+          } else {
+            byFacility.set(key, {
+              facility_code: row.facility_code,
+              facility_name: row.facility_name,
+              checks: row.checks_amount,
+              eft: row.eft_amount,
+              gross: row.gross_amount,
+            });
+          }
+        }
+        setPastRows([...byFacility.values()]);
+        setPastStatus('ready');
+      })
+      .catch(() => {
+        if (live) setPastStatus('error');
+      });
+    return () => {
+      live = false;
+    };
+  }, [open, isCurrent, month, currentYear]);
+
+  // Rows for display: current month → MTD KPI rows; past month → fetched + aggregated.
+  // Joined to the dimension for the acronym label + IP/OP, then filtered by setting.
   const rows = useMemo<FacilityTableRow[]>(() => {
-    return kpis.by_facility
-      .map((f) => {
-        const dim = f.facility_code ? dimByCode.get(f.facility_code) : undefined;
-        const label = dim?.display_acronym ?? f.facility_name ?? '(unassigned)';
-        return {
-          label,
-          setting: dim?.care_setting ?? '—',
+    const source: FacilityMonthTotals[] = isCurrent
+      ? kpis.by_facility.map((f) => ({
+          facility_code: f.facility_code,
+          facility_name: f.facility_name,
           checks: f.mtd_checks,
           eft: f.mtd_eft,
           gross: f.mtd_gross,
+        }))
+      : (pastRows ?? []);
+    return source
+      .map((f) => {
+        const dim = f.facility_code ? dimByCode.get(f.facility_code) : undefined;
+        return {
+          label: dim?.display_acronym ?? f.facility_name ?? '(unassigned)',
+          careSetting: dim?.care_setting ?? null,
+          checks: f.checks,
+          eft: f.eft,
+          gross: f.gross,
         };
       })
+      .filter((r) => setting === 'ALL' || r.careSetting === setting)
       .sort((a, b) => b.gross - a.gross);
-  }, [kpis, dimByCode]);
+  }, [isCurrent, kpis, pastRows, dimByCode, setting]);
 
   const totals = useMemo(
     () =>
@@ -305,9 +384,11 @@ function AllFacilitiesTable({
     [rows],
   );
 
-  const pageRows = rows.slice(page * FACILITIES_PAGE_SIZE, page * FACILITIES_PAGE_SIZE + FACILITIES_PAGE_SIZE);
-  const hasPrev = page > 0;
-  const hasNext = rows.length > (page + 1) * FACILITIES_PAGE_SIZE;
+  // Month options: current month + every preceding month of the current year (reverse-chron).
+  const monthOptions = currentMonth ? Array.from({ length: currentMonth }, (_, i) => currentMonth - i) : [];
+  const monthName = month ? MONTH_NAMES[month - 1] : null;
+  const loadingPast = !isCurrent && pastStatus === 'loading';
+  const errorPast = !isCurrent && pastStatus === 'error';
 
   return (
     <div className="space-y-3">
@@ -317,7 +398,7 @@ function AllFacilitiesTable({
         size="sm"
         onClick={() => setOpen((s) => !s)}
         aria-expanded={open}
-        className={open ? 'border-teal500 text-teal700' : undefined}
+        className={open ? 'border-[var(--brand-accent)] text-[var(--brand-ink)]' : undefined}
       >
         <Table2 className="h-4 w-4" />
         All Facilities Table
@@ -325,54 +406,75 @@ function AllFacilitiesTable({
 
       {open && (
         <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
-          <h3 className="mb-3 text-sm font-semibold text-ink900">
-            All facilities{monthName && year ? ` — ${monthName} ${year}` : ''} (MTD)
-          </h3>
-          {rows.length === 0 ? (
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <h3 className="text-sm font-semibold text-ink900">
+              All facilities{monthName && currentYear ? ` — ${monthName} ${currentYear}` : ''}
+              {isCurrent ? ' (MTD)' : ''}
+            </h3>
+            <div className="flex flex-wrap items-center gap-3">
+              <ControlSelect
+                label="Month"
+                value={month ?? ''}
+                ariaLabel="Month"
+                onChange={(v) => setMonth(Number(v))}
+              >
+                {monthOptions.map((m) => (
+                  <option key={m} value={m}>
+                    {m === currentMonth ? `${MONTH_NAMES[m - 1]} (current)` : MONTH_NAMES[m - 1]}
+                  </option>
+                ))}
+              </ControlSelect>
+              <ControlSelect
+                label="Setting"
+                value={setting}
+                ariaLabel="Inpatient / Outpatient filter"
+                onChange={(v) => setSetting(v as FacilitySetting)}
+              >
+                <option value="ALL">IP &amp; OP</option>
+                <option value="IP">IP only</option>
+                <option value="OP">OP only</option>
+              </ControlSelect>
+            </div>
+          </div>
+
+          {loadingPast ? (
+            <div className="py-6 text-center text-sm text-muted-foreground">Loading…</div>
+          ) : errorPast ? (
+            <div className="rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-sm text-status-danger">
+              Could not load that month.
+            </div>
+          ) : rows.length === 0 ? (
             <div className="py-6 text-center text-sm text-muted-foreground">No facilities to show.</div>
           ) : (
-            <>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Facility</TableHead>
-                    <TableHead>Setting</TableHead>
-                    <TableHead className="text-right">Checks</TableHead>
-                    <TableHead className="text-right">EFT</TableHead>
-                    <TableHead className="text-right">Gross</TableHead>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Facility</TableHead>
+                  <TableHead>Setting</TableHead>
+                  <TableHead className="text-right">Checks</TableHead>
+                  <TableHead className="text-right">EFT</TableHead>
+                  <TableHead className="text-right">Gross</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rows.map((r, i) => (
+                  <TableRow key={`${r.label}-${i}`}>
+                    <TableCell>{r.label}</TableCell>
+                    <TableCell className="text-muted-foreground">{r.careSetting ?? '—'}</TableCell>
+                    <TableCell className="text-right tabular-nums">{money(r.checks)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{money(r.eft)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{money(r.gross)}</TableCell>
                   </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {pageRows.map((r, i) => (
-                    <TableRow key={`${r.label}-${i}`}>
-                      <TableCell>{r.label}</TableCell>
-                      <TableCell className="text-muted-foreground">{r.setting}</TableCell>
-                      <TableCell className="text-right tabular-nums">{money(r.checks)}</TableCell>
-                      <TableCell className="text-right tabular-nums">{money(r.eft)}</TableCell>
-                      <TableCell className="text-right tabular-nums">{money(r.gross)}</TableCell>
-                    </TableRow>
-                  ))}
-                  <TableRow className="border-t-2 font-semibold">
-                    <TableCell>TOTALS</TableCell>
-                    <TableCell />
-                    <TableCell className="text-right tabular-nums">{money(totals.checks)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{money(totals.eft)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{money(totals.gross)}</TableCell>
-                  </TableRow>
-                </TableBody>
-              </Table>
-              {(hasPrev || hasNext) && (
-                <div className="mt-3">
-                  <Pager
-                    page={page + 1}
-                    hasPrev={hasPrev}
-                    hasNext={hasNext}
-                    onPrev={() => setPage((p) => Math.max(0, p - 1))}
-                    onNext={() => setPage((p) => p + 1)}
-                  />
-                </div>
-              )}
-            </>
+                ))}
+                <TableRow className="border-t-2 font-semibold">
+                  <TableCell>TOTALS</TableCell>
+                  <TableCell />
+                  <TableCell className="text-right tabular-nums">{money(totals.checks)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{money(totals.eft)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{money(totals.gross)}</TableCell>
+                </TableRow>
+              </TableBody>
+            </Table>
           )}
         </div>
       )}

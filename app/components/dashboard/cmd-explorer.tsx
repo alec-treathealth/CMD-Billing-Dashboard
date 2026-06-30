@@ -1,23 +1,28 @@
 'use client';
 
 /**
- * CMD Collections Explorer grid (Derek's 14-column batch export) — DB-backed.
+ * "All Collections" grid (Derek's 14-column CMD batch export) — DB-backed charge-line detail.
  *
- * Non-PHI columns come from loadCmdReport() ONE keyset page at a time (server-cached,
- * NON-PHI only) — the pager drives the server cursor, so the browser never holds the
- * whole dataset. The 3 PHI columns render •••••• until an explicit per-row reveal, which
- * fetches just that row's identifiers via the audited revealCmdReportRow action; fetched
- * PHI is held in component state only (never persisted) and is dropped on page change so
- * every page starts fully masked. Column show/hide + drag-reorder come from the shared
- * data-grid shell. Rows are ordered by id DESCENDING (newest snapshot first) so freshly
- * cron-ingested rows surface on the first page.
+ * Non-PHI columns come from loadCmdReport() ONE keyset page at a time (server-cached, NON-PHI
+ * only), now scoped by an optional Facility + Month filter applied SERVER-SIDE (so a filter
+ * searches the whole dataset, not just the visible page). The 3 PHI columns render •••••• until
+ * an explicit per-row reveal, which fetches just that row's identifiers via the audited
+ * revealCmdReportRow action; fetched PHI is held in component state only (never persisted) and
+ * dropped on page/filter change so every page starts fully masked. Columns are reordered by
+ * dragging the header cells directly (no separate panel). Rows are ordered by id DESC.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { GripVertical } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { ColumnsPanel, Pager, useColumnDnD } from '@/components/data-grid';
+import { ControlSelect, Pager, useColumnDnD } from '@/components/data-grid';
 import { PHI_MASK } from '@/lib/phi';
-import { loadCmdReport, revealCmdReportRow, type CmdReportResult } from '@/lib/actions';
+import {
+  loadCmdExplorerFacilities,
+  loadCmdReport,
+  revealCmdReportRow,
+  type CmdReportResult,
+} from '@/lib/actions';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../../src/collections/cmdExplorer';
 
 type ColKey =
@@ -47,6 +52,12 @@ const IS_PHI = new Set<string>(COLUMNS.filter((c) => c.phi).map((c) => c.key));
 const IS_NUMERIC = new Set<string>(COLUMNS.filter((c) => c.numeric).map((c) => c.key));
 const DEFAULT_ORDER: ColKey[] = COLUMNS.map((c) => c.key);
 
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+const YEAR_OPTIONS = [2026, 2025, 2024];
+
 const MONEY = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 /** DB numerics arrive as clean decimal strings ('250.00', '-1660.05'); format as USD. */
 function formatMoney(s: string | null): string {
@@ -59,6 +70,13 @@ export function CmdCollectionsExplorer() {
   const [rows, setRows] = useState<CmdExplorerRow[]>([]);
   const [status, setStatus] = useState<'loading' | 'error' | 'ready'>('loading');
 
+  // Server-side filters (the "same filters" the daily view has). `month === 0` = All months
+  // (no date window); year is only used when a specific month is chosen. facility = '' = all.
+  const [facility, setFacility] = useState('');
+  const [year, setYear] = useState(YEAR_OPTIONS[0]!);
+  const [month, setMonth] = useState(0); // 0 = All months
+  const [facilityOptions, setFacilityOptions] = useState<string[]>([]);
+
   // Keyset pagination: cursors[p] is the cursor used to fetch page p (cursors[0] = null =
   // first page). hasNext mirrors the last page's nextCursor. Held client-side so Previous
   // can re-fetch an earlier page without a count(*) or offset.
@@ -66,14 +84,12 @@ export function CmdCollectionsExplorer() {
   const [cursors, setCursors] = useState<(number | null)[]>([null]);
   const [hasNext, setHasNext] = useState(false);
 
-  // Column layout (session only).
+  // Column order (session only); reorder by dragging the headers directly.
   const [order, setOrder] = useState<ColKey[]>([...DEFAULT_ORDER]);
-  const [hidden, setHidden] = useState<Set<string>>(() => new Set());
-  const [showPanel, setShowPanel] = useState(false);
   const dnd = useColumnDnD(order, (next) => setOrder(next as ColKey[]));
 
   // PHI revealed per row (fetched on demand, kept in memory only) + visibility toggle.
-  // Keyed by bigserial id; cleared on page change so a new page starts fully masked.
+  // Keyed by bigserial id; cleared on page/filter change so a new page starts fully masked.
   const [phi, setPhi] = useState<Map<number, CmdExplorerPhi>>(() => new Map());
   const [shown, setShown] = useState<Set<number>>(() => new Set());
   const [revealing, setRevealing] = useState<number | null>(null);
@@ -81,56 +97,74 @@ export function CmdCollectionsExplorer() {
   // Guards against out-of-order page responses (fast Prev/Next clicks).
   const reqRef = useRef(0);
 
-  const loadPage = useCallback(async (target: number, cursor: number | null) => {
-    const myReq = ++reqRef.current;
-    setStatus('loading');
-    // New page → drop any revealed PHI so nothing from the prior page lingers in memory.
-    setPhi(new Map());
-    setShown(new Set());
-    setRevealing(null);
-    try {
-      const res: CmdReportResult = await loadCmdReport(cursor);
-      if (myReq !== reqRef.current) return; // a newer navigation superseded this load
-      if (!res.ok) {
-        setStatus('error');
-        return;
+  // The active filter object passed to the action (month 0 → no date window). `year` only
+  // contributes when a specific month is chosen, so it's excluded from the deps while
+  // month === 0 — otherwise touching the Year dropdown in "All months" mode would mint a new
+  // (identical) filter object and bounce pagination back to page 0 for no reason.
+  const filterArg = useMemo(
+    () => ({ facility: facility || undefined, ...(month > 0 ? { year, month } : {}) }),
+    [facility, month, month > 0 ? year : 0],
+  );
+
+  const loadPage = useCallback(
+    async (target: number, cursor: number | null, filter: typeof filterArg) => {
+      const myReq = ++reqRef.current;
+      setStatus('loading');
+      // New page → drop any revealed PHI so nothing from the prior page lingers in memory.
+      setPhi(new Map());
+      setShown(new Set());
+      setRevealing(null);
+      try {
+        const res: CmdReportResult = await loadCmdReport(cursor, filter);
+        if (myReq !== reqRef.current) return; // a newer navigation superseded this load
+        if (!res.ok) {
+          setStatus('error');
+          return;
+        }
+        setRows(res.rows);
+        setHasNext(res.nextCursor !== null);
+        setCursors((prev) => {
+          const next = [...prev];
+          next[target] = cursor;
+          if (res.nextCursor !== null) next[target + 1] = res.nextCursor;
+          return next;
+        });
+        setPage(target);
+        setStatus('ready');
+      } catch {
+        if (myReq === reqRef.current) setStatus('error');
       }
-      setRows(res.rows);
-      setHasNext(res.nextCursor !== null);
-      setCursors((prev) => {
-        const next = [...prev];
-        next[target] = cursor;
-        if (res.nextCursor !== null) next[target + 1] = res.nextCursor;
-        return next;
-      });
-      setPage(target);
-      setStatus('ready');
-    } catch {
-      if (myReq === reqRef.current) setStatus('error');
-    }
+    },
+    [],
+  );
+
+  // Facility options for the filter (the explorer's own facility vocabulary), once on mount.
+  useEffect(() => {
+    let live = true;
+    loadCmdExplorerFacilities()
+      .then((r) => {
+        if (live && r.ok) setFacilityOptions(r.facilities);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
   }, []);
 
+  // (Re)load the first page whenever the filter changes (resets keyset pagination).
   useEffect(() => {
-    void loadPage(0, null);
-  }, [loadPage]);
+    setCursors([null]);
+    void loadPage(0, null, filterArg);
+  }, [filterArg, loadPage]);
 
-  const visible = useMemo(() => order.filter((k) => !hidden.has(k)), [order, hidden]);
-  const hasPhiColumn = visible.some((c) => IS_PHI.has(c));
+  const hasPhiColumn = order.some((c) => IS_PHI.has(c));
   const busy = status === 'loading';
 
-  function toggleHidden(k: string) {
-    setHidden((prev) => {
-      const next = new Set(prev);
-      if (next.has(k)) next.delete(k);
-      else next.add(k);
-      return next;
-    });
-  }
-
-  function moveColumn(key: string, dir: 'up' | 'down') {
+  /** Keyboard-fallback reorder (ArrowLeft/ArrowRight on the header grip → prev/next). */
+  function moveColumn(key: ColKey, dir: 'left' | 'right') {
     setOrder((prev) => {
-      const i = prev.indexOf(key as ColKey);
-      const j = dir === 'up' ? i - 1 : i + 1;
+      const i = prev.indexOf(key);
+      const j = dir === 'left' ? i - 1 : i + 1;
       if (i < 0 || j < 0 || j >= prev.length) return prev;
       const next = [...prev];
       [next[i], next[j]] = [next[j]!, next[i]!];
@@ -172,26 +206,53 @@ export function CmdCollectionsExplorer() {
     return v ?? '—';
   }
 
-  if (status === 'loading' && rows.length === 0) {
-    return <p className="text-sm text-muted-foreground">Loading collections…</p>;
-  }
-  if (status === 'error' && rows.length === 0) {
-    return (
-      <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-        The collections report could not be loaded. Reload and try again.
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">
-          {rows.length.toLocaleString()} charge lines on this page
-        </p>
-        <Button variant="outline" size="sm" onClick={() => setShowPanel((s) => !s)}>
-          {showPanel ? 'Hide columns' : 'Columns'}
-        </Button>
+      {/* Filter bar — Facility (explorer vocabulary) + Month/Year window (server-side). */}
+      <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
+        <div className="flex flex-wrap items-center gap-3">
+          <ControlSelect
+            label="Facility"
+            value={facility}
+            ariaLabel="Facility"
+            onChange={(v) => setFacility(v)}
+          >
+            <option value="">All facilities</option>
+            {facilityOptions.map((f) => (
+              <option key={f} value={f}>
+                {f}
+              </option>
+            ))}
+          </ControlSelect>
+          <ControlSelect
+            label="Month"
+            value={month}
+            ariaLabel="Month"
+            onChange={(v) => setMonth(Number(v))}
+          >
+            <option value={0}>All months</option>
+            {MONTH_NAMES.map((name, i) => (
+              <option key={name} value={i + 1}>
+                {name}
+              </option>
+            ))}
+          </ControlSelect>
+          <ControlSelect
+            label="Year"
+            value={year}
+            ariaLabel="Year"
+            onChange={(v) => setYear(Number(v))}
+          >
+            {YEAR_OPTIONS.map((y) => (
+              <option key={y} value={y}>
+                {y}
+              </option>
+            ))}
+          </ControlSelect>
+          <p className="ml-auto text-sm text-muted-foreground">
+            {rows.length.toLocaleString()} charge lines on this page
+          </p>
+        </div>
       </div>
 
       {status === 'error' && (
@@ -200,65 +261,96 @@ export function CmdCollectionsExplorer() {
         </div>
       )}
 
-      {showPanel && (
-        <ColumnsPanel
-          columns={COLUMNS.map((c) => ({ key: c.key, label: c.label }))}
-          isHidden={(k) => hidden.has(k)}
-          onToggle={toggleHidden}
-          dnd={dnd}
-          onMove={moveColumn}
-        />
-      )}
-
-      <div className="overflow-x-auto rounded-md border">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              {visible.map((c) => (
-                <TableHead key={c} className={IS_NUMERIC.has(c) ? 'text-right' : undefined}>
-                  {COLUMN_LABEL[c] ?? c}
-                </TableHead>
-              ))}
-              {hasPhiColumn && <TableHead className="text-right">Identifiers</TableHead>}
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((row) => (
-              <TableRow key={row.id} className="transition-colors hover:bg-teal50/50">
-                {visible.map((c) => (
-                  <TableCell
-                    key={c}
-                    className={
-                      IS_NUMERIC.has(c)
-                        ? 'text-right tabular-nums'
-                        : IS_PHI.has(c) && !shown.has(row.id)
-                          ? 'text-muted-foreground'
-                          : undefined
-                    }
-                  >
-                    {cellText(c, row)}
-                  </TableCell>
-                ))}
-                {hasPhiColumn && (
-                  <TableCell className="text-right">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 px-2 text-xs"
-                      disabled={revealing === row.id}
-                      aria-pressed={shown.has(row.id)}
-                      onClick={() => void onReveal(row.id)}
+      {status === 'loading' && rows.length === 0 ? (
+        <p className="text-sm text-muted-foreground">Loading collections…</p>
+      ) : rows.length === 0 ? (
+        <div className="py-8 text-center text-sm text-muted-foreground">
+          No charge lines match the current filters.
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-md border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                {order.map((c) => {
+                  const dragging = dnd.draggingKey === c;
+                  const isTarget = dnd.dropTargetKey === c && dnd.draggingKey !== c;
+                  return (
+                    <TableHead
+                      key={c}
+                      {...dnd.itemProps(c)}
+                      aria-grabbed={dragging}
+                      title="Drag to reorder"
+                      className={[
+                        'cursor-grab select-none border-l-2 active:cursor-grabbing',
+                        IS_NUMERIC.has(c) ? 'text-right' : '',
+                        isTarget ? 'border-l-[var(--brand-accent)]' : 'border-l-transparent',
+                        dragging ? 'opacity-50' : '',
+                      ].join(' ')}
                     >
-                      {revealing === row.id ? '…' : shown.has(row.id) ? 'Hide' : 'Reveal'}
-                    </Button>
-                  </TableCell>
-                )}
+                      <span className={`inline-flex items-center gap-1 ${IS_NUMERIC.has(c) ? 'flex-row-reverse' : ''}`}>
+                        <button
+                          type="button"
+                          aria-label={`Reorder ${COLUMN_LABEL[c] ?? c}`}
+                          onKeyDown={(e) => {
+                            if (e.key === 'ArrowLeft') {
+                              e.preventDefault();
+                              moveColumn(c, 'left');
+                            } else if (e.key === 'ArrowRight') {
+                              e.preventDefault();
+                              moveColumn(c, 'right');
+                            }
+                          }}
+                          className="shrink-0 cursor-grab text-ink400 active:cursor-grabbing"
+                        >
+                          <GripVertical className="h-3 w-3" aria-hidden />
+                        </button>
+                        {COLUMN_LABEL[c] ?? c}
+                      </span>
+                    </TableHead>
+                  );
+                })}
+                {hasPhiColumn && <TableHead className="text-right">Identifiers</TableHead>}
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
+            </TableHeader>
+            <TableBody>
+              {rows.map((row) => (
+                <TableRow key={row.id} className="transition-colors hover:bg-[var(--brand-soft)]">
+                  {order.map((c) => (
+                    <TableCell
+                      key={c}
+                      className={
+                        IS_NUMERIC.has(c)
+                          ? 'text-right tabular-nums'
+                          : IS_PHI.has(c) && !shown.has(row.id)
+                            ? 'text-muted-foreground'
+                            : undefined
+                      }
+                    >
+                      {cellText(c, row)}
+                    </TableCell>
+                  ))}
+                  {hasPhiColumn && (
+                    <TableCell className="text-right">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        disabled={revealing === row.id}
+                        aria-pressed={shown.has(row.id)}
+                        onClick={() => void onReveal(row.id)}
+                      >
+                        {revealing === row.id ? '…' : shown.has(row.id) ? 'Hide' : 'Reveal'}
+                      </Button>
+                    </TableCell>
+                  )}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
 
       <Pager
         page={page + 1}
@@ -266,10 +358,10 @@ export function CmdCollectionsExplorer() {
         hasNext={hasNext}
         disabled={busy}
         onPrev={() => {
-          if (page > 0) void loadPage(page - 1, cursors[page - 1] ?? null);
+          if (page > 0) void loadPage(page - 1, cursors[page - 1] ?? null, filterArg);
         }}
         onNext={() => {
-          if (hasNext) void loadPage(page + 1, cursors[page + 1] ?? null);
+          if (hasNext) void loadPage(page + 1, cursors[page + 1] ?? null, filterArg);
         }}
       />
     </div>

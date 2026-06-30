@@ -517,6 +517,18 @@ export interface CmdExplorerPage {
   nextCursor: number | null;
 }
 
+/**
+ * Server-side filters for the explorer grid (non-PHI). `facility` is an EXACT match on
+ * the cmd_explorer_rows.facility text column (its own vocabulary — distinct values come
+ * from cmdExplorerFacilities, NOT the canonical facility dimension). `from`/`to` window
+ * payment_received ([from, to)). All values are bound parameters; nulls are no-ops.
+ */
+export interface CmdExplorerFilter {
+  facility?: string | null;
+  from?: string | null; // 'YYYY-MM-DD' inclusive (payment_received >= from)
+  to?: string | null; // 'YYYY-MM-DD' exclusive (payment_received < to)
+}
+
 const CMD_EXPLORER_PAGE_SIZE = 50;
 
 // Explicit non-PHI column list — the bytea PHI columns are NEVER selected here. Dates and
@@ -539,16 +551,41 @@ function toExplorerRow(r: CmdExplorerDbRecord): CmdExplorerRow {
   return { ...r, id: Number(r.id) };
 }
 
-async function loadCmdExplorerPage(cursor: number | null): Promise<CmdExplorerPage> {
+/**
+ * Build the keyset page query with optional filters. Column/table names are fixed
+ * literals; every VALUE (cursor, facility, dates, limit) is a bound $n parameter — no
+ * interpolation, no SELECT *. Keyset (id < cursor) AND the filters are ANDed, so paging
+ * walks the FILTERED set consistently (the filter is constant across a page sequence).
+ */
+function buildCmdExplorerQuery(
+  cursor: number | null,
+  filter: CmdExplorerFilter,
+  limit: number,
+): { sql: string; params: unknown[] } {
+  const conds: string[] = [];
+  const params: unknown[] = [];
+  const add = (v: unknown): string => {
+    params.push(v);
+    return `$${params.length}`;
+  };
+  if (cursor !== null) conds.push(`id < ${add(cursor)}`);
+  if (filter.facility) conds.push(`facility = ${add(filter.facility)}`);
+  if (filter.from) conds.push(`payment_received >= ${add(filter.from)}::date`);
+  if (filter.to) conds.push(`payment_received < ${add(filter.to)}::date`);
+  const where = conds.length > 0 ? ` where ${conds.join(' and ')}` : '';
+  const limitClause = ` order by id desc limit ${add(limit)}`;
+  return { sql: `${CMD_EXPLORER_SELECT}${where}${limitClause}`, params };
+}
+
+async function loadCmdExplorerPage(
+  cursor: number | null,
+  filter: CmdExplorerFilter = {},
+): Promise<CmdExplorerPage> {
   // Keyset: ORDER BY id DESC (newest snapshot first) so freshly cron-ingested rows surface on
-  // the first page. WHERE id < cursor pages backward through ids (omitted on the first page).
-  // Over-fetch one row to learn whether a next page exists without a separate count(*).
+  // the first page. WHERE id < cursor pages backward (omitted on the first page), ANDed with the
+  // active filters. Over-fetch one row to learn whether a next page exists without a count(*).
   const limit = CMD_EXPLORER_PAGE_SIZE + 1;
-  const sql =
-    cursor === null
-      ? `${CMD_EXPLORER_SELECT} order by id desc limit $1`
-      : `${CMD_EXPLORER_SELECT} where id < $1 order by id desc limit $2`;
-  const params = cursor === null ? [limit] : [cursor, limit];
+  const { sql, params } = buildCmdExplorerQuery(cursor, filter, limit);
   const { rows } = await readerExecutor().query<CmdExplorerDbRecord>(sql, params);
   const hasMore = rows.length > CMD_EXPLORER_PAGE_SIZE;
   const page = (hasMore ? rows.slice(0, CMD_EXPLORER_PAGE_SIZE) : rows).map(toExplorerRow);
@@ -557,14 +594,35 @@ async function loadCmdExplorerPage(cursor: number | null): Promise<CmdExplorerPa
 }
 
 /**
- * NON-PHI explorer page, cached 15 min PER cursor (no PHI at rest). The cron busts the
- * shared 'cmd-explorer' tag after any insert. The cursor is a plain number (the bigserial
- * id is far below 2^53 at this scale) so it serializes cleanly into the unstable_cache key
- * — a bigint would throw in unstable_cache's JSON key derivation.
+ * NON-PHI explorer page, cached 15 min PER (cursor, filter) key (no PHI at rest). The cron
+ * busts the shared 'cmd-explorer' tag after any insert. The cursor is a plain number (the
+ * bigserial id is far below 2^53 at this scale) so it serializes cleanly into the
+ * unstable_cache key; the filter is a small plain object, also JSON-serializable.
  */
 export const loadCmdExplorerNonPhi = unstable_cache(
-  (cursor: number | null = null): Promise<CmdExplorerPage> => loadCmdExplorerPage(cursor),
+  (cursor: number | null = null, filter: CmdExplorerFilter = {}): Promise<CmdExplorerPage> =>
+    loadCmdExplorerPage(cursor, filter),
   ['cmd-explorer-nonphi'],
+  { revalidate: 900, tags: ['cmd-explorer'] },
+);
+
+/**
+ * Distinct facility strings present in the explorer rows (non-PHI), for the "All Collections"
+ * facility filter. This vocabulary is the CMD report's own facility text — it does NOT match
+ * the canonical facility dimension, so the All Collections filter uses these values directly.
+ * Reader-only, fixed literal SQL (no params, no SELECT *), cached + tag-busted like the grid.
+ */
+export const cmdExplorerFacilities = unstable_cache(
+  async (): Promise<string[]> => {
+    const { rows } = await readerExecutor().query<{ facility: string | null }>(
+      'select distinct facility from collections.cmd_explorer_rows order by facility',
+      [],
+    );
+    return rows
+      .map((r) => r.facility)
+      .filter((f): f is string => typeof f === 'string' && f.trim() !== '');
+  },
+  ['cmd-explorer-facilities'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
 

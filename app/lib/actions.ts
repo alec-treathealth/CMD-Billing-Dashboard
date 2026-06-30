@@ -38,6 +38,7 @@ import {
   revealClaimById,
   searchClaimsDirect,
   loadCmdExplorerNonPhi,
+  cmdExplorerFacilities,
   revealCmdExplorerRow,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
@@ -556,20 +557,70 @@ export type CmdReportResult =
   | { ok: false; error: string };
 
 /**
- * Load ONE keyset page of the CMD Collections Explorer — NON-PHI columns only (cached
- * 15 min per cursor). `cursor` is the last id of the previous page (null/omitted = first
- * page); the result carries `nextCursor` (null when there are no more rows).
+ * Filters for the "All Collections" grid (non-PHI). `facility` is an exact match on the
+ * explorer's own facility vocabulary (see loadCmdExplorerFacilities). `year`/`month`
+ * window payment_received to that calendar month. All values are re-validated here and
+ * bound as parameters in the reader.
  */
-export async function loadCmdReport(cursor: number | null = null): Promise<CmdReportResult> {
+export interface CmdReportFilter {
+  facility?: string;
+  year?: number;
+  month?: number; // 1-12; requires year
+}
+
+/**
+ * Load ONE keyset page of the CMD Collections Explorer — NON-PHI columns only (cached
+ * 15 min per cursor+filter). `cursor` is the last id of the previous page (null/omitted =
+ * first page); the result carries `nextCursor` (null when there are no more rows). The
+ * optional `filter` scopes by facility and/or a payment-received month, applied server-side.
+ */
+export async function loadCmdReport(
+  cursor: number | null = null,
+  filter: CmdReportFilter = {},
+): Promise<CmdReportResult> {
   // Bound the client-supplied cursor before it reaches SQL: a non-negative integer or null.
   if (cursor !== null && (!Number.isInteger(cursor) || cursor < 0)) {
     return { ok: false, error: 'Invalid page cursor.' };
   }
+  // Re-validate + translate the filter into bounded date/string params for the reader.
+  const readerFilter: { facility?: string; from?: string; to?: string } = {};
+  if (typeof filter.facility === 'string' && filter.facility.trim() !== '') {
+    if (filter.facility.length > 200) return { ok: false, error: 'Invalid facility.' };
+    readerFilter.facility = filter.facility;
+  }
+  if (filter.year !== undefined || filter.month !== undefined) {
+    const { year, month } = filter;
+    if (
+      !Number.isInteger(year) || year! < 2000 || year! > 2100 ||
+      !Number.isInteger(month) || month! < 1 || month! > 12
+    ) {
+      return { ok: false, error: 'Invalid month.' };
+    }
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const nextYear = month === 12 ? year! + 1 : year!;
+    const nextMonth = month === 12 ? 1 : month! + 1;
+    readerFilter.from = `${year}-${pad(month!)}-01`;
+    readerFilter.to = `${nextYear}-${pad(nextMonth)}-01`; // exclusive upper bound
+  }
   try {
-    const page = await loadCmdExplorerNonPhi(cursor);
+    const page = await loadCmdExplorerNonPhi(cursor, readerFilter);
     return { ok: true, rows: page.rows, nextCursor: page.nextCursor };
   } catch {
     return { ok: false, error: 'The collections report could not be loaded right now.' };
+  }
+}
+
+export type CmdFacilitiesResult = { ok: true; facilities: string[] } | { ok: false };
+
+/**
+ * Distinct facility values present in the explorer rows (non-PHI), for the All Collections
+ * facility filter. Cached reader-only; never returns PHI.
+ */
+export async function loadCmdExplorerFacilities(): Promise<CmdFacilitiesResult> {
+  try {
+    return { ok: true, facilities: await cmdExplorerFacilities() };
+  } catch {
+    return { ok: false };
   }
 }
 

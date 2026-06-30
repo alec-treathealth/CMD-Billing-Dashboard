@@ -44,6 +44,39 @@
     --ring: 175.1 66.5% 32.7%; /* teal500 */
 
     --radius: 0.75rem;
+
+    /* Per-view brand accent (defaults = TreatHealthOS teal). BrandTheme sets
+       <html data-view="bxr|indigo|consolidated"> on dashboard routes only, so
+       non-dashboard chrome and the Consolidated view stay teal. Dashboard surfaces
+       reference these vars for their accent (top bar, KPI tiles, nav, MiniBar). */
+    --brand-bar: #0e3a3a; /* top-bar background */
+    --brand-ink: #135e5a; /* strong accent: KPI numbers, active text */
+    --brand-accent: #1c8b82; /* highlight: KPI top border, active underline, fills */
+    --brand-soft: #eaf4f2; /* soft tint: tracks / subtle backgrounds */
+  }
+
+  /* Consolidated = the default TreatHealthOS teal (combined identity). */
+  [data-view='consolidated'] {
+    --brand-bar: #0e3a3a;
+    --brand-ink: #135e5a;
+    --brand-accent: #1c8b82;
+    --brand-soft: #eaf4f2;
+  }
+
+  /* BXR Consulting — deep navy chrome, muted brass/gold accent, warm pale ground. */
+  [data-view='bxr'] {
+    --brand-bar: #1a1a2e;
+    --brand-ink: #1a1a2e;
+    --brand-accent: #c8a24b;
+    --brand-soft: #f4efe3;
+  }
+
+  /* Indigo Billing — rich indigo chrome, bright violet accent, soft lavender ground. */
+  [data-view='indigo'] {
+    --brand-bar: #5b2a9e;
+    --brand-ink: #5b2a9e;
+    --brand-accent: #7c3aed;
+    --brand-soft: #f3eefb;
   }
 
   * {

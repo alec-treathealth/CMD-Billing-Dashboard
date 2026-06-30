@@ -89,12 +89,12 @@ export function Kpi({
   sub?: React.ReactNode;
 }) {
   return (
-    <Card className="border-t-2 border-t-teal500">
+    <Card className="border-t-2 border-t-[var(--brand-accent)]">
       <CardContent className="pb-4 pt-4">
         <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
           {label}
         </div>
-        <div className="ths-num mt-1 whitespace-nowrap text-lg font-semibold leading-tight tabular-nums text-teal700 lg:text-xl">
+        <div className="ths-num mt-1 whitespace-nowrap text-lg font-semibold leading-tight tabular-nums text-[var(--brand-ink)] lg:text-xl">
           {value}
         </div>
         {detail && (
@@ -112,9 +112,9 @@ export function Kpi({
 export function MiniBar({ pct }: { pct: number | null }) {
   const w = Math.max(0, Math.min(100, pct ?? 0));
   return (
-    <div className="h-2.5 w-full overflow-hidden rounded-full bg-teal50">
+    <div className="h-2.5 w-full overflow-hidden rounded-full bg-[var(--brand-soft)]">
       <div
-        className="h-full rounded-full bg-teal700"
+        className="h-full rounded-full bg-[var(--brand-ink)]"
         style={{ width: `${Math.max(w, w > 0 ? 3 : 0)}%` }}
       />
     </div>

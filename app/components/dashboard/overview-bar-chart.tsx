@@ -149,7 +149,7 @@ function FacilityGrossTooltip({
         <dt className="text-muted-foreground">{prefix}EFT</dt>
         <dd className="text-right text-ink900">{money(r.eft)}</dd>
         <dt className="text-muted-foreground">{prefix}Gross</dt>
-        <dd className="text-right text-teal700">{money(r.gross)}</dd>
+        <dd className="text-right text-[var(--brand-ink)]">{money(r.gross)}</dd>
       </dl>
     </div>
   );
@@ -522,7 +522,7 @@ function PayerBreakdownTable({
               <TableRow
                 key={`${label}-${i}`}
                 onClick={() => onPayerClick(label)}
-                className={`cursor-pointer ${active ? 'bg-teal50' : 'hover:bg-teal50/50'}`}
+                className={`cursor-pointer ${active ? 'bg-[var(--brand-soft)]' : 'hover:bg-[var(--brand-soft)]'}`}
               >
                 <TableCell>
                   {r.payer_name ?? <span className="text-muted-foreground">(blank)</span>}
