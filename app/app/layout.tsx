@@ -70,18 +70,18 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           </div>
           {/* col 2: nav — centered */}
           <NavLinks />
-          {/* col 3: view switcher (dashboard routes only) + user avatar, when authenticated.
-              ViewSwitcher reads ?view= via useSearchParams, so it must be wrapped in Suspense
-              for the static routes (/, /code-reference) this shared layout also renders. */}
+          {/* col 3: view switcher (dashboard routes only) + user avatar.
+              The ViewSwitcher is NON-PHI UI (it just rewrites ?view=) and renders regardless
+              of auth — production gates the app via Vercel Deployment Protection, where there
+              is no Supabase session/email, so gating it on `email` wrongly hid it there. It
+              reads ?view= via useSearchParams, so it must be wrapped in Suspense for the static
+              routes (/, /code-reference) this shared layout also renders, and it self-hides off
+              dashboard routes. The avatar needs a session email, so it stays conditional. */}
           <div className="flex items-center justify-end gap-3">
-            {email ? (
-              <>
-                <Suspense fallback={null}>
-                  <ViewSwitcher />
-                </Suspense>
-                <UserMenu email={email} />
-              </>
-            ) : null}
+            <Suspense fallback={null}>
+              <ViewSwitcher />
+            </Suspense>
+            {email ? <UserMenu email={email} /> : null}
           </div>
         </header>
         {children}

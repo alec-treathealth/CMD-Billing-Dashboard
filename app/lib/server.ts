@@ -660,6 +660,53 @@ export async function revealCmdExplorerRow(
   return { patient_name, member_id_raw, group_number };
 }
 
+/** One revealed row: its bigserial id + the decrypted PHI identifiers. */
+export interface CmdExplorerRevealedRow extends CmdExplorerPhi {
+  id: number;
+}
+
+/**
+ * Bulk reveal: decrypt the PHI for a SET of explorer ids (one page's worth) in-process,
+ * write ONE fail-closed audit row for the batch, then return the identifiers. Backs the
+ * grid's "Reveal all" action. The PHI is never cached and never logged; only the non-PHI
+ * synthetic ids are audited. Runs as claims_reader. A decryption failure (e.g. a
+ * LIBSODIUM_KEY that does not match the key the rows were ingested with) THROWS here and
+ * is surfaced to the user by the action — never silently swallowed.
+ */
+export async function revealCmdExplorerRows(
+  ids: number[],
+  actor: { email: string; userId: string },
+): Promise<CmdExplorerRevealedRow[]> {
+  if (ids.length === 0) return [];
+  const { rows } = await readerExecutor().query<{
+    id: string;
+    patient_name: Buffer;
+    member_id: Buffer;
+    group_number: Buffer | null;
+  }>(
+    'select id, patient_name, member_id, group_number from collections.cmd_explorer_rows where id = any($1::bigint[])',
+    [ids],
+  );
+  const out: CmdExplorerRevealedRow[] = [];
+  for (const row of rows) {
+    const [patient_name, member_id_raw, group_number] = await Promise.all([
+      decryptPhi(row.patient_name),
+      decryptPhi(row.member_id),
+      row.group_number ? decryptPhi(row.group_number) : Promise.resolve(null),
+    ]);
+    out.push({ id: Number(row.id), patient_name, member_id_raw, group_number });
+  }
+  // ONE bulk audit BEFORE returning PHI (fail-closed): records who revealed how many rows
+  // and which non-PHI synthetic ids — never the decrypted values.
+  await recordAccess({
+    actorEmail: actor.email,
+    actorUserId: actor.userId,
+    action: 'reveal_cmd_explorer_rows',
+    detail: { count: out.length, ids: out.map((o) => o.id) },
+  });
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Claims Data Explorer (Phase 7.4) — page-limited, NON-PHI claim browsing.
 //

@@ -40,6 +40,7 @@ import {
   loadCmdExplorerNonPhi,
   cmdExplorerFacilities,
   revealCmdExplorerRow,
+  revealCmdExplorerRows,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
 import { supabaseAuthConfigured } from '@/lib/supabase/env';
@@ -627,6 +628,36 @@ export async function loadCmdExplorerFacilities(): Promise<CmdFacilitiesResult> 
 export type RevealCmdRowResult =
   | { ok: true; phi: CmdExplorerPhi }
   | { ok: false; error: string };
+
+export type RevealCmdRowsResult =
+  | { ok: true; rows: Array<{ id: number } & CmdExplorerPhi> }
+  | { ok: false; error: string };
+
+/**
+ * Reveal PHI for a SET of rows (the current page's ids) in one audited call — backs the
+ * grid's "Reveal all" button. Requires an authorized session; writes one bulk audit row.
+ * Returns a clear error on failure (e.g. a LIBSODIUM_KEY mismatch) so the UI can surface
+ * it rather than silently appearing to do nothing.
+ */
+export async function revealCmdReportRows(ids: number[]): Promise<RevealCmdRowsResult> {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return { ok: false, error: 'There is nothing to reveal.' };
+  }
+  if (ids.length > 200) {
+    return { ok: false, error: 'Too many rows to reveal at once.' };
+  }
+  if (!ids.every((id) => Number.isInteger(id) && id > 0)) {
+    return { ok: false, error: 'Invalid row reference.' };
+  }
+  const gate = await requireExecutive();
+  if (!gate.ok) return { ok: false, error: 'Sign in to reveal patient identifiers.' };
+  try {
+    const rows = await revealCmdExplorerRows(ids, { email: gate.user.email, userId: gate.user.id });
+    return { ok: true, rows };
+  } catch {
+    return { ok: false, error: 'The identifiers could not be revealed right now.' };
+  }
+}
 
 /** Reveal ONE row's PHI by bigserial id. Requires an authorized session; audited. */
 export async function revealCmdReportRow(id: number): Promise<RevealCmdRowResult> {

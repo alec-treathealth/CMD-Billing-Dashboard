@@ -6,9 +6,10 @@
  * Non-PHI columns come from loadCmdReport() ONE keyset page at a time (server-cached, NON-PHI
  * only), now scoped by an optional Facility + Month filter applied SERVER-SIDE (so a filter
  * searches the whole dataset, not just the visible page). The 3 PHI columns render •••••• until
- * an explicit per-row reveal, which fetches just that row's identifiers via the audited
- * revealCmdReportRow action; fetched PHI is held in component state only (never persisted) and
- * dropped on page/filter change so every page starts fully masked. Columns are reordered by
+ * the "Reveal all" button decrypts the current page's identifiers in one audited call
+ * (revealCmdReportRows); fetched PHI is held in component state only (never persisted) and
+ * dropped on page/filter change so every page starts fully masked. A reveal failure (e.g. a
+ * LIBSODIUM_KEY mismatch) is surfaced, never silently swallowed. Columns are reordered by
  * dragging the header cells directly (no separate panel). Rows are ordered by id DESC.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -20,7 +21,7 @@ import { PHI_MASK } from '@/lib/phi';
 import {
   loadCmdExplorerFacilities,
   loadCmdReport,
-  revealCmdReportRow,
+  revealCmdReportRows,
   type CmdReportResult,
 } from '@/lib/actions';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../../src/collections/cmdExplorer';
@@ -88,11 +89,12 @@ export function CmdCollectionsExplorer() {
   const [order, setOrder] = useState<ColKey[]>([...DEFAULT_ORDER]);
   const dnd = useColumnDnD(order, (next) => setOrder(next as ColKey[]));
 
-  // PHI revealed per row (fetched on demand, kept in memory only) + visibility toggle.
-  // Keyed by bigserial id; cleared on page/filter change so a new page starts fully masked.
+  // PHI for the current page, revealed in bulk via the "Reveal all" button (kept in memory
+  // only, never persisted). Cleared on page/filter change so a new page starts fully masked.
   const [phi, setPhi] = useState<Map<number, CmdExplorerPhi>>(() => new Map());
-  const [shown, setShown] = useState<Set<number>>(() => new Set());
-  const [revealing, setRevealing] = useState<number | null>(null);
+  const [revealed, setRevealed] = useState(false);
+  const [revealing, setRevealing] = useState(false);
+  const [revealError, setRevealError] = useState<string | null>(null);
 
   // Guards against out-of-order page responses (fast Prev/Next clicks).
   const reqRef = useRef(0);
@@ -112,8 +114,9 @@ export function CmdCollectionsExplorer() {
       setStatus('loading');
       // New page → drop any revealed PHI so nothing from the prior page lingers in memory.
       setPhi(new Map());
-      setShown(new Set());
-      setRevealing(null);
+      setRevealed(false);
+      setRevealing(false);
+      setRevealError(null);
       try {
         const res: CmdReportResult = await loadCmdReport(cursor, filter);
         if (myReq !== reqRef.current) return; // a newer navigation superseded this load
@@ -157,7 +160,6 @@ export function CmdCollectionsExplorer() {
     void loadPage(0, null, filterArg);
   }, [filterArg, loadPage]);
 
-  const hasPhiColumn = order.some((c) => IS_PHI.has(c));
   const busy = status === 'loading';
 
   /** Keyboard-fallback reorder (ArrowLeft/ArrowRight on the header grip → prev/next). */
@@ -172,31 +174,42 @@ export function CmdCollectionsExplorer() {
     });
   }
 
-  async function onReveal(id: number) {
-    if (phi.has(id)) {
-      setShown((prev) => {
-        const next = new Set(prev);
-        if (next.has(id)) next.delete(id);
-        else next.add(id);
-        return next;
-      });
+  /**
+   * Reveal (or hide) the patient identifiers for ALL rows on the current page in one
+   * audited call. On failure the error is shown (not silently swallowed) — a common cause
+   * is a LIBSODIUM_KEY that doesn't match the key the rows were ingested with.
+   */
+  async function toggleRevealAll() {
+    if (revealed) {
+      setRevealed(false);
       return;
     }
-    setRevealing(id);
+    if (rows.length === 0) return;
+    setRevealing(true);
+    setRevealError(null);
     try {
-      const res = await revealCmdReportRow(id);
+      const res = await revealCmdReportRows(rows.map((r) => r.id));
       if (res.ok) {
-        setPhi((prev) => new Map(prev).set(id, res.phi));
-        setShown((prev) => new Set(prev).add(id));
+        const map = new Map<number, CmdExplorerPhi>();
+        for (const r of res.rows) {
+          const { id, ...phiFields } = r;
+          map.set(id, phiFields);
+        }
+        setPhi(map);
+        setRevealed(true);
+      } else {
+        setRevealError(res.error);
       }
+    } catch {
+      setRevealError('The identifiers could not be revealed right now.');
     } finally {
-      setRevealing(null);
+      setRevealing(false);
     }
   }
 
   function cellText(key: ColKey, row: CmdExplorerRow): string {
     if (IS_PHI.has(key)) {
-      if (!shown.has(row.id)) return PHI_MASK;
+      if (!revealed) return PHI_MASK;
       const p = phi.get(row.id);
       const v = p ? p[key as keyof CmdExplorerPhi] : null;
       return v ?? '—';
@@ -249,15 +262,36 @@ export function CmdCollectionsExplorer() {
               </option>
             ))}
           </ControlSelect>
-          <p className="ml-auto text-sm text-muted-foreground">
-            {rows.length.toLocaleString()} charge lines on this page
-          </p>
+          <div className="ml-auto flex items-center gap-3">
+            <p className="text-sm text-muted-foreground">
+              {rows.length.toLocaleString()} charge lines on this page
+            </p>
+            {rows.length > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={revealing}
+                aria-pressed={revealed}
+                onClick={() => void toggleRevealAll()}
+                className={revealed ? 'border-[var(--brand-accent)] text-[var(--brand-ink)]' : undefined}
+              >
+                {revealing ? 'Revealing…' : revealed ? 'Hide identifiers' : 'Reveal all'}
+              </Button>
+            )}
+          </div>
         </div>
       </div>
 
       {status === 'error' && (
         <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           That page could not be loaded. Try again.
+        </div>
+      )}
+
+      {revealError && (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {revealError}
         </div>
       )}
 
@@ -310,7 +344,6 @@ export function CmdCollectionsExplorer() {
                     </TableHead>
                   );
                 })}
-                {hasPhiColumn && <TableHead className="text-right">Identifiers</TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -322,7 +355,7 @@ export function CmdCollectionsExplorer() {
                       className={
                         IS_NUMERIC.has(c)
                           ? 'text-right tabular-nums'
-                          : IS_PHI.has(c) && !shown.has(row.id)
+                          : IS_PHI.has(c) && !revealed
                             ? 'text-muted-foreground'
                             : undefined
                       }
@@ -330,21 +363,6 @@ export function CmdCollectionsExplorer() {
                       {cellText(c, row)}
                     </TableCell>
                   ))}
-                  {hasPhiColumn && (
-                    <TableCell className="text-right">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 px-2 text-xs"
-                        disabled={revealing === row.id}
-                        aria-pressed={shown.has(row.id)}
-                        onClick={() => void onReveal(row.id)}
-                      >
-                        {revealing === row.id ? '…' : shown.has(row.id) ? 'Hide' : 'Reveal'}
-                      </Button>
-                    </TableCell>
-                  )}
                 </TableRow>
               ))}
             </TableBody>
