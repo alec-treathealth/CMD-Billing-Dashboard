@@ -463,11 +463,37 @@ state only (never lifted/persisted); nothing in the transcript is written to
 `localStorage`/cookies. See `docs/design-system.md` for the TreatHealthOS visual
 system (palette, typography, components, nav, PHI rules).
 
-**Access control:** there is no app-level login. The only gate in front of PHI is
-**Vercel Deployment Protection** — it MUST be On and **scoped to Production**
-(Standard Protection defaults to preview-only; production must be explicitly
-included). Sanity check: load the production alias incognito — it should bounce to
-Vercel auth, not the console.
+**Access control (per-user login, invite-only).** The PHI surface is gated by
+real per-user Supabase Auth (email + password) — this supersedes Vercel
+Deployment Protection as the primary gate. The model is **invite-only**: the
+admin invites users from the Supabase dashboard (Authentication → Users → Invite),
+**self-signup is disabled**, and there is **no email allowlist** — a verified
+Supabase session *is* authorization.
+- **Server gate:** `requireExecutive()` (`app/lib/executive.ts`, default-deny,
+  closest to the data) validates the session via `auth.getUser()`; it gates the
+  data Server Actions (`app/lib/actions.ts`) and the auth-bearing pages. The
+  Next middleware (`app/lib/supabase/middleware.ts`) refreshes the session and
+  bounces unauthenticated requests on protected paths to `/login`. Both no-op
+  until `NEXT_PUBLIC_SUPABASE_URL` + `NEXT_PUBLIC_SUPABASE_ANON_KEY` are set
+  (staged rollout). PHI/claims data still flows only through the least-privilege
+  `claims_reader` node-postgres path — **never** Supabase PostgREST; the Supabase
+  client is for AUTH only.
+- **Routes/actions:** `/login` + `signIn`, `/forgot-password` +
+  `requestPasswordReset`, `/set-password` + `setPassword` (used by invite
+  acceptance, recovery, and self-service change), `/account` (own identity,
+  audited), `signOut`. Email links (invite/recovery) land on **`/auth/confirm`**
+  (token-hash `verifyOtp`, routes invite+recovery → `/set-password`);
+  `/auth/callback` handles the PKCE `?code=` flow (OAuth/future).
+- **Audit:** authorized access writes one durable row to `claims.access_audit`
+  via `recordAccess()`, attributed to the real user (email + uid) — replacing the
+  old fixed `phase5-*` principals.
+- **History:** migration **0018** introduced an `auth_config.allowed_emails`
+  allowlist + a "Before User Created" signup-gating hook; **0024** retires both
+  (the invite-only model makes them redundant). Manual Supabase config (toggles,
+  redirect URLs, email templates, SMTP) is documented in 0024's header.
+- Vercel Deployment Protection is now optional defense-in-depth, not the gate;
+  custom SMTP is recommended (the default sender is rate-limited and unreliable
+  to external domains).
 
 ---
 
@@ -543,10 +569,15 @@ yet** — it is groundwork.
   depth. The CA bundle itself is the public Supabase Root **+ Intermediate** 2021 CAs
   (`370c1bd`'s sibling fix `1a2c289`); a single root-only PEM no longer anchors the
   Supavisor pooler chain.
-- **Per-user auth.** Audit principals are currently fixed strings
-  (`phase5-ui`/`phase5-dashboard`/route defaults). Real per-user auth (to replace
-  Deployment Protection as the PHI gate and to name the real principal in the
-  audit trail) is deferred.
+- **Per-user auth — DONE (invite-only).** Real per-user Supabase Auth gates the
+  PHI surface and names the real principal in `claims.access_audit` (see §11).
+  Migration 0018 (allowlist + signup hook) was superseded by 0024 (invite-only;
+  allowlist dropped). The remaining work is **operational, not code**: the
+  Supabase dashboard steps in 0024's header (disable the Before-User-Created hook,
+  disable self-signup, set Site/Redirect URLs, point the Invite + Reset Password
+  email templates at `/auth/confirm`, ideally custom SMTP) must be done for the
+  flow to work end-to-end, and **0024 must be applied only after the new build is
+  deployed** (the live build reads the allowlist table on every request).
 - **Manual browser pass required.** This agent environment has no browser driver;
   DOM/Network/click/refresh checks (PHI masking, Server-Action-only network,
   reveal-clears-on-refresh) must be verified by a human at the running app.

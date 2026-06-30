@@ -1,33 +1,31 @@
 /**
- * Executive authorization gate (default-deny). SERVER-ONLY.
+ * Authentication gate (default-deny). SERVER-ONLY.
  *
- * "Is the current request a logged-in user on the allowlist?" The single authoritative
- * check that protects the PHI surface. It combines:
- *   1. a VERIFIED Supabase session (auth.getUser() validates the JWT — never trust an
- *      unverified cookie), and
- *   2. membership in auth_config.allowed_emails (read own-row under RLS via the same
- *      authenticated client — the single source of truth, migration 0018).
+ * "Is the current request a signed-in user?" The single authoritative check that protects
+ * every PHI surface. Authorization model is invite-only: accounts are created only by an
+ * admin invite (self-signup is disabled in Supabase), so a VERIFIED Supabase session IS
+ * authorization — there is no separate allowlist to consult.
  *
- * Fail-closed: no env / no session => 'unauthenticated'; verified but not allowlisted =>
- * 'forbidden'. Do not import from a Client Component — it reads cookies.
+ * It validates the session with auth.getUser() (which verifies the JWT — never trust an
+ * unverified cookie). Fail-closed: no env / no session => 'unauthenticated'. Do not import
+ * from a Client Component — it reads cookies.
  */
 import { createSupabaseServerClient } from './supabase/server';
 import { supabaseAuthConfigured } from './supabase/env';
-import { isAllowedEmail } from './supabase/allowlist';
 
 export interface ExecutiveUser {
   /** Supabase auth user id (uuid). */
   id: string;
-  /** Lowercased, allowlisted email. */
+  /** Lowercased email of the signed-in user. */
   email: string;
 }
 
 export type ExecutiveGate =
   | { ok: true; user: ExecutiveUser }
-  | { ok: false; reason: 'unauthenticated' | 'forbidden' };
+  | { ok: false; reason: 'unauthenticated' };
 
 /**
- * Resolve the current request's executive identity, or a typed denial. Default-deny.
+ * Resolve the current request's signed-in identity, or a typed denial. Default-deny.
  */
 export async function requireExecutive(): Promise<ExecutiveGate> {
   // Fail-closed if auth isn't configured yet (no env => nobody is authorized).
@@ -40,7 +38,6 @@ export async function requireExecutive(): Promise<ExecutiveGate> {
   } = await supabase.auth.getUser();
 
   if (error || !user || !user.email) return { ok: false, reason: 'unauthenticated' };
-  if (!(await isAllowedEmail(supabase, user.email))) return { ok: false, reason: 'forbidden' };
 
   return { ok: true, user: { id: user.id, email: user.email.toLowerCase() } };
 }

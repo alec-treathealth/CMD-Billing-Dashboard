@@ -1,9 +1,9 @@
 /**
- * Supabase Auth callback — exchanges an auth `code` for a session cookie, then redirects
- * to the sanitized `next` path (default /dashboard). Wired now so the route exists for
- * magic links / OAuth if enabled later; password sign-in does not use it. The allowlist
- * gate still applies on the next navigation (middleware + requireExecutive), so landing
- * here never bypasses authorization.
+ * Supabase Auth callback — exchanges an auth `code` (PKCE) for a session cookie, then
+ * redirects to the sanitized `next` path (default /dashboard). Used by the OAuth/PKCE code
+ * flow; email links (invite/recovery/confirm) use the token-hash route at /auth/confirm
+ * instead. Password sign-in does not use either. The session gate still applies on the next
+ * navigation (middleware + requireExecutive), so landing here never bypasses authorization.
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
