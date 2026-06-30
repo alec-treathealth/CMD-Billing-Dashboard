@@ -218,6 +218,10 @@ export async function handleCmdExplorerCron(req: {
       writeDb: rollupWriterDb(),
       revalidate: () => revalidateTag('cmd-explorer'),
       revalidateDashboard: () => revalidateTag(DASHBOARD_CACHE_TAG),
+      // Saved filter 10147432 windows on payment-received 1/1/2026→6/30/2027. Past that end the
+      // filter silently stops returning newer dates; this drives a heads-up warning ~30d ahead.
+      // Override via CMD_FILTER_WINDOW_END when the filter's window is extended in CMD.
+      filterWindowEnd: process.env.CMD_FILTER_WINDOW_END?.trim() || '2027-06-30',
     });
     return { status: 200, body: { ok: true, ...stats } };
   } catch (err) {

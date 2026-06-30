@@ -4,7 +4,7 @@
  * (per-facility/day Check+EFT deposit totals, source_tag='cmd').
  *
  * WHY: the CMD Web API scopes data by CUSTOMER (one customer == one facility). A single
- * report/filter (10091971 / 10147430, the 16-column export with Check/EFT, window baked to
+ * report/filter (10091971 / 10147432, the export incl Check/EFT, window baked to PAYMENT-RECEIVED
  * 1/1/2026→6/30/2027) is run ONCE PER CUSTOMER (src/collections/cmdCustomers.ts) to cover all
  * facilities. Each customer's rows feed BOTH surfaces:
  *   - charge lines  → cmd_explorer_rows  (Explorer; append-only ON CONFLICT, full-history grain)
@@ -39,6 +39,71 @@ const CRON_SOURCE = 'cmd_api';
  *  headroom under a 300s Vercel function for the final write + revalidate. */
 const DEFAULT_BUDGET_MS = 270_000;
 
+/** Non-fatal freshness/expiry thresholds (logged as warnings; never fail the run). */
+const STALE_AFTER_DAYS = 10; // newest payment_date this far behind `now` ⇒ pipeline may be stalled
+const WINDOW_WARN_DAYS = 30; // saved filter's window-end this close ⇒ extend it in CMD soon
+const DAY_MS = 86_400_000;
+
+/** Parse a 'YYYY-MM-DD' date to epoch ms at UTC midnight; NaN if malformed. */
+function isoDateMs(d: string): number {
+  return Date.parse(`${d}T00:00:00Z`);
+}
+
+/**
+ * Build non-fatal operational warnings from the run's newest payment_date and the saved CMD
+ * filter's absolute window-end. Two INDEPENDENT signals — either can fire alone:
+ *  - STALE (reactive): newest ingested payment_date is > STALE_AFTER_DAYS behind `now`, so the
+ *    pipeline may be stalled (CMD outage, broken cron, expired filter) even on a "successful" run.
+ *  - WINDOW EXPIRY (proactive): the filter's window-end (filterWindowEnd) is within WINDOW_WARN_DAYS
+ *    or already past — payment dates beyond it silently stop ingesting until the filter is extended
+ *    in CMD. This is the deferred form of the original 6/24 freshness stall. Because every run
+ *    re-pulls the full window, extending the filter later backfills any gap — so this is a heads-up,
+ *    not a data-loss event.
+ * Pure + exported for tests. Every string is non-PHI (dates + day-counts only) and safe to log.
+ */
+export function computeFreshnessWarnings(input: {
+  maxPaymentDate: string | null;
+  nowMs: number;
+  filterWindowEnd?: string;
+}): string[] {
+  const { maxPaymentDate, nowMs, filterWindowEnd } = input;
+  const warnings: string[] = [];
+
+  if (maxPaymentDate) {
+    const ms = isoDateMs(maxPaymentDate);
+    if (!Number.isNaN(ms)) {
+      const lagDays = Math.floor((nowMs - ms) / DAY_MS);
+      if (lagDays > STALE_AFTER_DAYS) {
+        warnings.push(
+          `STALE: newest payment_date ${maxPaymentDate} is ${lagDays} days behind now ` +
+            `(threshold ${STALE_AFTER_DAYS}d) — the cmd-explorer pipeline may be stalled.`,
+        );
+      }
+    }
+  }
+
+  if (filterWindowEnd) {
+    const ms = isoDateMs(filterWindowEnd);
+    if (!Number.isNaN(ms)) {
+      const remainingDays = Math.floor((ms - nowMs) / DAY_MS);
+      if (remainingDays < 0) {
+        warnings.push(
+          `FILTER WINDOW EXPIRED: the saved CMD filter window ended ${filterWindowEnd} ` +
+            `(${-remainingDays} days ago) — payment dates past it are NOT being ingested. ` +
+            `Extend/replace the filter's window in CMD (then a normal run backfills the gap).`,
+        );
+      } else if (remainingDays <= WINDOW_WARN_DAYS) {
+        warnings.push(
+          `FILTER WINDOW EXPIRING: the saved CMD filter window ends ${filterWindowEnd} ` +
+            `in ${remainingDays} days — extend it in CMD before then or new months stop appending.`,
+        );
+      }
+    }
+  }
+
+  return warnings;
+}
+
 /** One CMD customer account to pull (== one facility). */
 export interface CmdCustomerTarget {
   customerId: string;
@@ -60,6 +125,8 @@ export interface CmdExplorerCronDeps {
   now?: () => number;
   /** Wall-clock budget before new customers stop launching. Default 270s. */
   budgetMs?: number;
+  /** Saved CMD filter's absolute window-end ('YYYY-MM-DD'). Drives the expiry warning; omit to skip. */
+  filterWindowEnd?: string;
 }
 
 /** Non-PHI summary of a cron run — safe to log and return to the (authed) caller. */
@@ -82,10 +149,14 @@ export interface CmdExplorerCronStats {
   daily_rows_inserted: number;
   /** Prior source_tag='cmd' daily rows deleted (per-facility replace). */
   daily_rows_deleted: number;
+  /** Newest payment_date ingested this run (ISO 'YYYY-MM-DD'), or null if nothing landed. */
+  max_payment_date: string | null;
+  /** Non-fatal operational warnings (stale data / filter-window expiry). Empty ⇒ healthy. */
+  freshness_warnings: string[];
 }
 
 /**
- * Loop the CMD customer accounts, pulling report 10091971/filter 10147430 for each and writing
+ * Loop the CMD customer accounts, pulling report 10091971/filter 10147432 for each and writing
  * both surfaces per customer (so a partial run leaves processed facilities fresh and the rest
  * untouched). Revalidates both caches if anything was processed. Returns non-PHI stats only.
  * Per-customer failures are isolated (logged + skipped); a hard DB/auth failure still throws.
@@ -106,6 +177,8 @@ export async function cmdExplorerCron(deps: CmdExplorerCronDeps): Promise<CmdExp
     charge_inserted: 0,
     daily_rows_inserted: 0,
     daily_rows_deleted: 0,
+    max_payment_date: null,
+    freshness_warnings: [],
   };
 
   for (const { customerId, facilityCode } of deps.customers) {
@@ -140,6 +213,13 @@ export async function cmdExplorerCron(deps: CmdExplorerCronDeps): Promise<CmdExp
       stats.daily_rows_deleted += deleted;
       stats.daily_rows_inserted += inserted;
 
+      // Track the newest payment_date across all facilities (daily is sorted ascending by date,
+      // and ISO 'YYYY-MM-DD' sorts chronologically) for the freshness warning below.
+      const last = daily.at(-1);
+      if (last && (stats.max_payment_date === null || last.payment_date > stats.max_payment_date)) {
+        stats.max_payment_date = last.payment_date;
+      }
+
       stats.customers_processed += 1;
     } catch (err) {
       // Per-customer isolation: log the facility + message (non-PHI) and continue.
@@ -156,6 +236,15 @@ export async function cmdExplorerCron(deps: CmdExplorerCronDeps): Promise<CmdExp
     if (deps.revalidate) await deps.revalidate();
     if (deps.revalidateDashboard) await deps.revalidateDashboard();
   }
+
+  // Non-fatal freshness/expiry warnings (run unconditionally — the window-expiry signal matters
+  // most precisely when processing failed). Logged loudly; also surfaced in the returned stats.
+  stats.freshness_warnings = computeFreshnessWarnings({
+    maxPaymentDate: stats.max_payment_date,
+    nowMs: now(),
+    filterWindowEnd: deps.filterWindowEnd,
+  });
+  for (const w of stats.freshness_warnings) console.warn(`cmd-explorer cron: ${w}`);
 
   console.log(
     `cmd-explorer cron: customers ${stats.customers_processed}/${stats.customers_total} ` +
