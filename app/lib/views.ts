@@ -33,6 +33,24 @@ export const viewOptions: ReadonlyArray<{ value: DashboardView; label: string }>
 
 const VIEW_VALUES: ReadonlySet<string> = new Set(viewOptions.map((o) => o.value));
 
+/** All three views, in dropdown order — the set a super-admin sees. */
+export const ALL_VIEWS: ReadonlyArray<DashboardView> = viewOptions.map((o) => o.value);
+
+/**
+ * Constrain a requested view to the caller's entitlement. If `requested` is allowed it
+ * passes through; otherwise it falls back to the first allowed view (an entity-scoped user's
+ * single view), or DEFAULT_VIEW if the allowlist is somehow empty. Pure; the role→allowlist
+ * decision lives in `rbac.ts` (this only enforces it). Defense-in-depth: the page also scopes
+ * data by the clamped view, so a hand-edited `?view=` can never widen access.
+ */
+export function clampView(
+  requested: DashboardView,
+  allowed: ReadonlyArray<DashboardView>,
+): DashboardView {
+  if (allowed.includes(requested)) return requested;
+  return allowed[0] ?? DEFAULT_VIEW;
+}
+
 /** The screen title for a view ("Consolidated View" / "BXR Consulting" / "Indigo Billing"). */
 export function viewTitle(view: DashboardView): string {
   switch (view) {

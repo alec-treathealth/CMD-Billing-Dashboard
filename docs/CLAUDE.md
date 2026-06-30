@@ -500,15 +500,34 @@ nav, MiniBar, active states, gross/YTD tooltip emphasis) recolor per active view
 teal, **BXR** = deep navy + brass/gold, **Indigo** = indigo + violet. Off-dashboard
 chrome stays teal; charts keep their functional multi-series colors.
 
-**Access control (per-user login, invite-only).** The PHI surface is gated by
-real per-user Supabase Auth (email + password) — this supersedes Vercel
-Deployment Protection as the primary gate. The model is **invite-only**: the
-admin invites users from the Supabase dashboard (Authentication → Users → Invite),
-**self-signup is disabled**, and there is **no email allowlist** — a verified
-Supabase session *is* authorization.
+**Access control (per-user login, invite-only + RBAC roles).** The PHI surface is
+gated by real per-user Supabase Auth (email + password) — this supersedes Vercel
+Deployment Protection as the primary gate. **Authentication** is **invite-only**:
+the admin invites users from the Supabase dashboard (Authentication → Users →
+Invite), **self-signup is disabled**, and there is no email allowlist.
+**Authorization** is **role-based** (migration **0025**, `claims.app_user`): a
+verified session is necessary but not sufficient — the user must also have a role
+row, else they are *unprovisioned* (default-deny, friendly notice).
+- **Roles (`app/lib/rbac.ts`, pure policy):** `super_admin` (all three views; may
+  reveal PHI; may manage users), `admin` + entity `bxr`/`indigo` (that entity's
+  view only; may reveal PHI; user-mgmt UI deferred), `user` + entity (that entity's
+  view only; **NON-PHI only — cannot reveal patient identifiers**). The
+  view→entitlement decision lives in `rbac.ts`; `app/lib/access.ts`
+  (`dashboardAccess()`, React-`cache`d) resolves the principal (`requireExecutive`)
+  + role row (`appUserFor` → `claims.app_user`, read as `claims_reader`) into
+  allowed views + `canRevealPhi`/`canManageUsers`. Seed: `alec@treathealth.ai` =
+  `super_admin` (bootstrap; idempotent in 0025). **Apply 0025 + seed BEFORE
+  deploying enforcement** (lockout prevention).
+- **Enforcement:** dashboard pages gate on `dashboardAccess()` and `clampView` the
+  `?view=` to an allowed view (entity users redirect to their canonical `?view=` so
+  URL/branding/data agree); the top-bar `view-switcher` lists only entitled views
+  (hidden at ≤1). Every PHI reveal Server Action (claims `fetchRows`/`revealClaim`,
+  CMD `revealCmdReportRow[s]`) gates on `canRevealPhi`; the Collections "Reveal all"
+  control is hidden for `user` roles. Non-PHI surfaces (overview, browse, `/ask`
+  summaries) stay open to all provisioned roles.
 - **Server gate:** `requireExecutive()` (`app/lib/executive.ts`, default-deny,
-  closest to the data) validates the session via `auth.getUser()`; it gates the
-  data Server Actions (`app/lib/actions.ts`) and the auth-bearing pages. The
+  closest to the data) validates the session via `auth.getUser()`; it underpins
+  `dashboardAccess()` and the data Server Actions (`app/lib/actions.ts`). The
   Next middleware (`app/lib/supabase/middleware.ts`) refreshes the session and
   bounces unauthenticated requests on protected paths to `/login`. Both no-op
   until `NEXT_PUBLIC_SUPABASE_URL` + `NEXT_PUBLIC_SUPABASE_ANON_KEY` are set
@@ -569,6 +588,7 @@ yet** — it is groundwork.
 | 8.0–8.2 | ✅ | Audited PHI-gated claim detail reveal; faceted dropdowns + column controls for Claims Explorer; authenticated post-ingest cache revalidation (`/api/revalidate`). |
 | 9 | ✅ | Static BH code reference page. |
 | 10 | ✅ | Dashboard "views" (Consolidated/BXR/Indigo) via top-bar `?view=` switcher + `app/lib/views.ts` seam (`8aa0ba1`); overview KPI tiles (MTD/YTD gross + IP/OP split, MoM/YoY, linear-run-rate forecast) + `payment_lines` YoY reader; All Facilities table. Then (`3cb478e`): top-bar user avatar, collapse to **two tabs** (Overview, Collections) with a unified Collections view (Payment Type / All Collections, server-side explorer filters, header drag-reorder), and **per-view branding** (`--brand-*` / `brand-theme.tsx`). Data still BXR-or-stub (no `business_entity_id` on dashboard tables). |
+| 11 | ✅ | Per-user **RBAC** (migration **0025** `claims.app_user`): `super_admin` / entity `admin` / entity `user`; `rbac.ts` (pure policy) + `access.ts` (`dashboardAccess`); pages clamp `?view=` to entitled views; PHI reveal (claims + CMD) gated on `canRevealPhi`; unprovisioned = default-deny notice. Seeded `alec@treathealth.ai`=super_admin. Replaces the flat "any verified session = full access". |
 | VOB | foundation only | Migrations 0010–0011 (schemas `ref`/`vob`/`rag`/`audit`); no app code yet. |
 
 ---

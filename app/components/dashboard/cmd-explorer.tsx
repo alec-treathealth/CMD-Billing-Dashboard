@@ -67,7 +67,7 @@ function formatMoney(s: string | null): string {
   return Number.isFinite(n) ? MONEY.format(n) : s;
 }
 
-export function CmdCollectionsExplorer() {
+export function CmdCollectionsExplorer({ canRevealPhi }: { canRevealPhi: boolean }) {
   const [rows, setRows] = useState<CmdExplorerRow[]>([]);
   const [status, setStatus] = useState<'loading' | 'error' | 'ready'>('loading');
 
@@ -266,7 +266,7 @@ export function CmdCollectionsExplorer() {
             <p className="text-sm text-muted-foreground">
               {rows.length.toLocaleString()} charge lines on this page
             </p>
-            {rows.length > 0 && (
+            {rows.length > 0 && canRevealPhi && (
               <Button
                 type="button"
                 variant="outline"

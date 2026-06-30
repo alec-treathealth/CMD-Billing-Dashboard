@@ -4,8 +4,7 @@ import { NavLinks } from '@/components/nav-links';
 import { ViewSwitcher } from '@/components/dashboard/view-switcher';
 import { UserMenu } from '@/components/user-menu';
 import { BrandTheme } from '@/components/brand-theme';
-import { createSupabaseServerClient } from '@/lib/supabase/server';
-import { supabaseAuthConfigured } from '@/lib/supabase/env';
+import { dashboardAccess } from '@/lib/access';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -31,22 +30,17 @@ function Logo({ size = 26 }: { size?: number }) {
   );
 }
 
-/** Cheap session email for the nav avatar (cookie read only; the real gate is middleware). */
-async function sessionEmail(): Promise<string | null> {
-  if (!supabaseAuthConfigured()) return null;
-  try {
-    const supabase = await createSupabaseServerClient();
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-    return session?.user?.email ?? null;
-  } catch {
-    return null;
-  }
-}
-
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  const email = await sessionEmail();
+  // One cached resolution (deduped with the dashboard page on dashboard routes): the avatar email
+  // and the entitled views for the switcher. An unprovisioned user still gets an avatar (so they
+  // can Sign out) but no switcher; the no-auth fallback yields all views and a null email (no avatar).
+  const access = await dashboardAccess();
+  const email = access.ok
+    ? access.access.user?.email ?? null
+    : access.reason === 'unprovisioned'
+      ? access.user.email
+      : null;
+  const allowedViews = access.ok ? access.access.allowedViews : undefined;
   return (
     <html lang="en">
       <body className="min-h-screen bg-ground">
@@ -79,7 +73,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               dashboard routes. The avatar needs a session email, so it stays conditional. */}
           <div className="flex items-center justify-end gap-3">
             <Suspense fallback={null}>
-              <ViewSwitcher />
+              <ViewSwitcher allowedViews={allowedViews} />
             </Suspense>
             {email ? <UserMenu email={email} /> : null}
           </div>

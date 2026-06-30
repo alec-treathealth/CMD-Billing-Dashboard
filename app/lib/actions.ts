@@ -43,6 +43,7 @@ import {
   revealCmdExplorerRows,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
+import { dashboardAccess } from '@/lib/access';
 import { supabaseAuthConfigured } from '@/lib/supabase/env';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdExplorer';
 import type {
@@ -77,6 +78,40 @@ async function sessionPrincipal(): Promise<string | null> {
   if (!supabaseAuthConfigured()) return 'phase5-ui';
   const gate = await requireExecutive();
   return gate.ok ? gate.user.email : null;
+}
+
+/**
+ * PHI-reveal gate (RBAC). Every patient-identifier reveal — claims (fetchRows / revealClaim) and the
+ * CMD explorer (revealCmdReportRow[s]) — must pass this: a provisioned, signed-in user whose role may
+ * reveal PHI (admin or super_admin; see rbac.ts). Returns the real audit principal (email + uid) so the
+ * downstream recordAccess names the actual person. Fails closed with a user-facing reason when the user
+ * is unauthenticated, unprovisioned, a non-PHI `user` role, or when per-user auth is not configured (no
+ * principal to audit). Plain `user` roles and the no-auth fallback can still browse all NON-PHI surfaces.
+ */
+type PhiPrincipal =
+  | { ok: true; actor: { email: string; userId: string } }
+  | { ok: false; error: string };
+
+async function requirePhiPrincipal(): Promise<PhiPrincipal> {
+  const result = await dashboardAccess();
+  if (!result.ok) {
+    return {
+      ok: false,
+      error:
+        result.reason === 'unprovisioned'
+          ? 'Your account is not provisioned for this dashboard.'
+          : 'Sign in to view patient identifiers.',
+    };
+  }
+  const { access } = result;
+  if (!access.user) {
+    // No-auth staged rollout: no real principal to audit a reveal against → deny.
+    return { ok: false, error: 'Patient identifiers require per-user sign-in.' };
+  }
+  if (!access.canRevealPhi) {
+    return { ok: false, error: 'Your role does not permit revealing patient identifiers.' };
+  }
+  return { ok: true, actor: { email: access.user.email, userId: access.user.id } };
 }
 
 export type {
@@ -223,16 +258,16 @@ export async function fetchRows(
   if (typeof query_id !== 'string' || query_id.trim() === '') {
     return { ok: false, error: 'Missing query handle.' };
   }
-  const principal = await sessionPrincipal();
-  if (!principal) {
-    return { ok: false, error: 'Your session has expired — please sign in again.' };
-  }
+  // PHI rows: gate on the RBAC reveal capability (admins + super-admins). A plain `user` role can
+  // run searches (non-PHI summary) but cannot fetch the underlying patient rows.
+  const gate = await requirePhiPrincipal();
+  if (!gate.ok) return { ok: false, error: gate.error };
   try {
     const { status, body } = await handleResults({
       method: 'POST',
       authorization: authHeader(),
       body: { query_id, offset, ...(identity ? { identity } : {}) },
-      createdBy: principal,
+      createdBy: gate.actor.email,
     });
     if (status === 200) {
       const ok = body as ResultsResponse;
@@ -474,6 +509,10 @@ export async function revealClaim(claimId: number): Promise<RevealClaimActionRes
   if (!Number.isSafeInteger(claimId) || claimId < 1) {
     return { ok: false, error: 'That claim reference is not a valid claim id.' };
   }
+  // Minting a reveal handle is the first step of a PHI reveal — gate it on the RBAC capability so a
+  // non-PHI `user` role is denied up front (the row fetch is gated too, in fetchRows).
+  const gate = await requirePhiPrincipal();
+  if (!gate.ok) return { ok: false, error: gate.error };
   try {
     const { query_id } = await revealClaimById(claimId);
     return { ok: true, query_id };
@@ -649,10 +688,10 @@ export async function revealCmdReportRows(ids: number[]): Promise<RevealCmdRowsR
   if (!ids.every((id) => Number.isInteger(id) && id > 0)) {
     return { ok: false, error: 'Invalid row reference.' };
   }
-  const gate = await requireExecutive();
-  if (!gate.ok) return { ok: false, error: 'Sign in to reveal patient identifiers.' };
+  const gate = await requirePhiPrincipal();
+  if (!gate.ok) return { ok: false, error: gate.error };
   try {
-    const rows = await revealCmdExplorerRows(ids, { email: gate.user.email, userId: gate.user.id });
+    const rows = await revealCmdExplorerRows(ids, gate.actor);
     return { ok: true, rows };
   } catch {
     return { ok: false, error: 'The identifiers could not be revealed right now.' };
@@ -664,10 +703,10 @@ export async function revealCmdReportRow(id: number): Promise<RevealCmdRowResult
   if (!Number.isInteger(id) || id <= 0) {
     return { ok: false, error: 'Invalid row reference.' };
   }
-  const gate = await requireExecutive();
-  if (!gate.ok) return { ok: false, error: 'Sign in to reveal patient identifiers.' };
+  const gate = await requirePhiPrincipal();
+  if (!gate.ok) return { ok: false, error: gate.error };
   try {
-    const phi = await revealCmdExplorerRow(id, { email: gate.user.email, userId: gate.user.id });
+    const phi = await revealCmdExplorerRow(id, gate.actor);
     if (!phi) {
       return { ok: false, error: 'Those identifiers are no longer available — reload and try again.' };
     }

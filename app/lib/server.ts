@@ -140,6 +140,41 @@ export async function recordAccess(entry: AccessAuditEntry): Promise<string> {
   return id;
 }
 
+// ---------------------------------------------------------------------------
+// Per-user RBAC lookup (claims.app_user, migration 0025).
+//
+// Resolves a signed-in Supabase user's role row by their verified auth uid. Read on the SAME
+// least-privilege claims_reader pool (SELECT-only on app_user; no write path from the app —
+// provisioning is admin-only). NON-PHI: this is staff identity + role, never patient data. A
+// missing row => null (the caller treats that as UNPROVISIONED / default-deny). The DB CHECK
+// constraints already bound role/entity to the known values; we re-narrow here so an unexpected
+// value fails closed to null rather than widening access.
+// ---------------------------------------------------------------------------
+export type AppRole = 'super_admin' | 'admin' | 'user';
+export type AppEntity = 'bxr' | 'indigo';
+
+export interface AppUserRow {
+  role: AppRole;
+  /** null for super_admin; the entity for entity-scoped roles. */
+  entity: AppEntity | null;
+  /** Lowercased staff email stored alongside the role (display/audit convenience). */
+  email: string;
+}
+
+export async function appUserFor(userId: string): Promise<AppUserRow | null> {
+  const { rows } = await readerExecutor().query<{
+    role: string;
+    entity: string | null;
+    email: string;
+  }>('select role, entity, email from claims.app_user where user_id = $1', [userId]);
+  const row = rows[0];
+  if (!row) return null;
+  // Fail closed on any value outside the known unions (CHECK constraints make this unreachable).
+  if (row.role !== 'super_admin' && row.role !== 'admin' && row.role !== 'user') return null;
+  if (row.entity !== null && row.entity !== 'bxr' && row.entity !== 'indigo') return null;
+  return { role: row.role, entity: row.entity, email: row.email };
+}
+
 /** Agent route: NL question → one query function → non-PHI { tool_name, query_id, summary_stats }. */
 export function handleAgent(req: AgentHttpRequest) {
   return handleAgentRequest(req, {
