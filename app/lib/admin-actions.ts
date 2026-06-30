@@ -23,10 +23,13 @@ import {
   type ManagedUser,
 } from '@/lib/server';
 import { dashboardAccess } from '@/lib/access';
+import { supabaseAdminClient } from '@/lib/supabase/admin';
+import { headers } from 'next/headers';
 import type { ExecutiveUser } from '@/lib/executive';
 import type { Entity, Role } from '@/lib/rbac';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ROLES: readonly AppRole[] = ['super_admin', 'admin', 'user'];
 const ENTITIES: readonly AppEntity[] = ['bxr', 'indigo'];
 
@@ -48,6 +51,7 @@ export interface ManageContext {
 
 export type ManageUsersResult = { ok: true; data: ManageContext } | { ok: false; error: string };
 export type MutateUserResult = { ok: true } | { ok: false; error: string };
+export type InviteUserResult = { ok: true; user: ManagedUserDto } | { ok: false; error: string };
 
 interface ManageGate {
   user: ExecutiveUser;
@@ -204,4 +208,89 @@ export async function revokeUser(targetUserId: string): Promise<MutateUserResult
     detail: { target: targetUserId },
   });
   return { ok: true };
+}
+
+/**
+ * Invite a brand-new user (SUPER_ADMIN only): create their Supabase Auth account + email the invite via
+ * the admin API (service-role, server-side ONLY), then assign their dashboard role. If the email already
+ * has an account, falls back to assigning the role to that existing user. Audited; role/entity coherence
+ * enforced. Invite emails use Supabase's configured templates/SMTP (default sender is rate-limited to
+ * external domains — custom SMTP recommended for reliable delivery).
+ */
+export async function inviteUser(
+  email: string,
+  role: AppRole,
+  entity: AppEntity | null,
+): Promise<InviteUserResult> {
+  const auth = await requireManage();
+  if (!auth.ok) return auth;
+  const { gate } = auth;
+  if (gate.role !== 'super_admin') {
+    return { ok: false, error: 'Only a super admin can invite new users.' };
+  }
+
+  const normEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+  if (!EMAIL_RE.test(normEmail) || normEmail.length > 320) {
+    return { ok: false, error: 'Enter a valid email address.' };
+  }
+  if (!ROLES.includes(role)) return { ok: false, error: 'Invalid role.' };
+  if (entity !== null && !ENTITIES.includes(entity)) return { ok: false, error: 'Invalid entity.' };
+  if (!canAssign(gate, role, entity)) {
+    return { ok: false, error: 'That role/entity combination is not valid.' };
+  }
+
+  const origin = (await headers()).get('origin') ?? undefined;
+
+  let userId: string | null = null;
+  try {
+    const { data, error } = await supabaseAdminClient().auth.admin.inviteUserByEmail(
+      normEmail,
+      origin ? { redirectTo: `${origin}/auth/confirm?next=/set-password` } : undefined,
+    );
+    if (error) throw error;
+    userId = data.user?.id ?? null;
+  } catch {
+    // Most likely the email already has an account — fall back to assigning the role to that user.
+    try {
+      userId = (await listAppUsers()).find((u) => u.email.toLowerCase() === normEmail)?.userId ?? null;
+    } catch {
+      userId = null;
+    }
+    if (!userId) {
+      return {
+        ok: false,
+        error: 'Could not send the invite. Check the address and email delivery, then try again.',
+      };
+    }
+  }
+  if (!userId) return { ok: false, error: 'The invite did not return a user. Please try again.' };
+
+  try {
+    await upsertAppUser(userId, normEmail, role, entity);
+  } catch (err) {
+    return { ok: false, error: mutationError(err) };
+  }
+  await recordAccess({
+    actorEmail: gate.user.email,
+    actorUserId: gate.user.id,
+    action: 'invite_user',
+    detail: { target: userId, role, entity }, // non-PHI: uid + assigned role only
+  });
+
+  // Return an accurate row for the UI (re-read so confirmed-status / created_at reflect reality).
+  const fallback: ManagedUserDto = {
+    userId,
+    email: normEmail,
+    emailConfirmed: false,
+    createdAt: new Date().toISOString(),
+    role,
+    entity,
+    editable: true,
+  };
+  try {
+    const fresh = (await listAppUsers()).find((u) => u.userId === userId);
+    return { ok: true, user: fresh ? { ...fresh, editable: inScope(gate, fresh) } : fallback };
+  } catch {
+    return { ok: true, user: fallback };
+  }
 }

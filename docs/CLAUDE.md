@@ -152,7 +152,7 @@ for the full annotated list. Key vars:
 | `REVALIDATE_SECRET` | `/api/revalidate` + ingest | authorizes cache invalidation; distinct from `RESULTS_API_SECRET` |
 | `REVALIDATE_URL` | ingest host only | deployed `…/api/revalidate` URL the ingest POSTs to |
 | `SUPABASE_CA_PEM` | TLS | public Supabase Root CA; `src/ssl.ts` reads it first, falls back to committed `certs/supabase-ca.crt` |
-| `SUPABASE_SERVICE_ROLE_KEY` | legacy/other tooling only | NOT on the app path; never ship to browser |
+| `SUPABASE_SERVICE_ROLE_KEY` | in-app user **invites** (server-only) + other tooling | bypasses RLS (god key); used ONLY by the `inviteUser` Server Action via `app/lib/supabase/admin.ts`; **server-side only, never `NEXT_PUBLIC_*`, never browser**. Must be set in the Vercel app env for prod invites. |
 
 - **Google Sheets auth** is OAuth installed-app (org policy forbids
   service-account keys): OAuth client at `secrets/oauth-client.json`; first
@@ -537,6 +537,16 @@ row, else they are *unprovisioned* (default-deny, friendly notice).
   in `app/lib/admin-actions.ts`; every mutation writes a `claims.access_audit` row.
   A super_admin manages everyone/all entities; an entity admin manages only their
   own entity + unprovisioned users and may assign only `admin`/`user` in that entity.
+- **In-app invites (super_admin only).** The Manage Users page has an "Invite by email"
+  form (shown to super_admins) that creates the Supabase Auth account, emails the invite,
+  and assigns the role in one step — via `inviteUser` (`admin-actions.ts`) using the
+  service-role admin client (`app/lib/supabase/admin.ts`, **server-side only**). If the
+  email already exists it falls back to assigning the role. This is the ONE place the
+  service-role key is on the app path (a deliberate exception to the §5 "off the app path"
+  rule, accepted 2026-06-30 for in-app invites); it never reaches the browser. Requires
+  `SUPABASE_SERVICE_ROLE_KEY` in the Vercel app env; invite email delivery uses Supabase
+  SMTP (custom SMTP recommended for external domains). Entity admins still provision only
+  already-invited users.
 - **Server gate:** `requireExecutive()` (`app/lib/executive.ts`, default-deny,
   closest to the data) validates the session via `auth.getUser()`; it underpins
   `dashboardAccess()` and the data Server Actions (`app/lib/actions.ts`). The
@@ -601,7 +611,8 @@ yet** — it is groundwork.
 | 9 | ✅ | Static BH code reference page. |
 | 10 | ✅ | Dashboard "views" (Consolidated/BXR/Indigo) via top-bar `?view=` switcher + `app/lib/views.ts` seam (`8aa0ba1`); overview KPI tiles (MTD/YTD gross + IP/OP split, MoM/YoY, linear-run-rate forecast) + `payment_lines` YoY reader; All Facilities table. Then (`3cb478e`): top-bar user avatar, collapse to **two tabs** (Overview, Collections) with a unified Collections view (Payment Type / All Collections, server-side explorer filters, header drag-reorder), and **per-view branding** (`--brand-*` / `brand-theme.tsx`). Data still BXR-or-stub (no `business_entity_id` on dashboard tables). |
 | 11 | ✅ | Per-user **RBAC** (migration **0025** `claims.app_user`): `super_admin` / entity `admin` / entity `user`; `rbac.ts` (pure policy) + `access.ts` (`dashboardAccess`); pages clamp `?view=` to entitled views; PHI reveal (claims + CMD) gated on `canRevealPhi`; unprovisioned = default-deny notice. Seeded `alec@treathealth.ai`=super_admin. Replaces the flat "any verified session = full access". |
-| 11.1 | ✅ | **In-app user management** (`/admin/users`, migration **0026**): admins provision/change/revoke roles (no SQL) via avatar-menu link. Auth roster via postgres-owned SECURITY DEFINER `list_app_users` (id/email/confirmed only, no service-role key); writes via `claims_admin`-owned `upsert_app_user`/`delete_app_user` with last-super-admin guard; authz (role/entity scope, no self-edit) + audit in `admin-actions.ts`. |
+| 11.1 | ✅ | **In-app user management** (`/admin/users`, migration **0026**): admins provision/change/revoke roles (no SQL) via avatar-menu link. Auth roster via postgres-owned SECURITY DEFINER `list_app_users` (id/email/confirmed only); writes via `claims_admin`-owned `upsert_app_user`/`delete_app_user` with last-super-admin guard; authz (role/entity scope, no self-edit) + audit in `admin-actions.ts`. |
+| 11.2 | ✅ | **In-app invites** (super_admin only): `inviteUser` (`admin-actions.ts`) creates the Supabase account + emails the invite + assigns the role via the service-role admin client (`app/lib/supabase/admin.ts`, **server-only** — the one deliberate service-role-on-app-path exception). Needs `SUPABASE_SERVICE_ROLE_KEY` in the Vercel app env. |
 | VOB | foundation only | Migrations 0010–0011 (schemas `ref`/`vob`/`rag`/`audit`); no app code yet. |
 
 ---

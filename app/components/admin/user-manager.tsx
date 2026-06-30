@@ -11,6 +11,7 @@ import { useState, useTransition } from 'react';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import {
+  inviteUser,
   revokeUser,
   setUserRole,
   type ManageContext,
@@ -48,6 +49,42 @@ export function UserManager({ initial }: { initial: ManageContext }) {
   const [, startTransition] = useTransition();
 
   const { assignableRoles, assignableEntities } = initial;
+  const canInvite = initial.callerRole === 'super_admin';
+
+  // Invite form (super_admin only) — create a new Supabase account + assign a role in one step.
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<AppRole>('user');
+  const [inviteEntity, setInviteEntity] = useState<AppEntity | ''>(assignableEntities[0] ?? '');
+  const [inviting, setInviting] = useState(false);
+  const [inviteMsg, setInviteMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  function onInvite() {
+    const emailValue = inviteEmail.trim();
+    if (!emailValue) {
+      setInviteMsg({ kind: 'err', text: 'Enter an email address.' });
+      return;
+    }
+    const entity = inviteRole === 'super_admin' ? null : ((inviteEntity || null) as AppEntity | null);
+    if (inviteRole !== 'super_admin' && !entity) {
+      setInviteMsg({ kind: 'err', text: 'Choose an entity for this role.' });
+      return;
+    }
+    setInviting(true);
+    setInviteMsg(null);
+    startTransition(async () => {
+      const res = await inviteUser(emailValue, inviteRole, entity);
+      setInviting(false);
+      if (res.ok) {
+        const newUser = res.user;
+        setUsers((prev) => [newUser, ...prev.filter((u) => u.userId !== newUser.userId)]);
+        setDrafts((prev) => ({ ...prev, [newUser.userId]: draftFromUser(newUser) }));
+        setInviteEmail('');
+        setInviteMsg({ kind: 'ok', text: `Invited ${newUser.email}.` });
+      } else {
+        setInviteMsg({ kind: 'err', text: res.error });
+      }
+    });
+  }
 
   function patchDraft(userId: string, patch: Partial<Draft>) {
     setDrafts((prev) => {
@@ -113,6 +150,73 @@ export function UserManager({ initial }: { initial: ManageContext }) {
 
   return (
     <div className="space-y-3">
+      {canInvite && (
+        <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="flex flex-col gap-1 text-[11px] font-semibold uppercase tracking-wide text-ink400">
+              Invite by email
+              <input
+                type="email"
+                value={inviteEmail}
+                disabled={inviting}
+                placeholder="name@company.com"
+                aria-label="Invite email"
+                onChange={(e) => setInviteEmail(e.target.value)}
+                className="h-8 w-64 rounded-md border border-line bg-card px-2 text-[13px] font-normal normal-case text-ink900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-accent)]"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-[11px] font-semibold uppercase tracking-wide text-ink400">
+              Role
+              <select
+                value={inviteRole}
+                disabled={inviting}
+                aria-label="Invite role"
+                onChange={(e) => setInviteRole(e.target.value as AppRole)}
+                className={`${SELECT_CLASS} font-normal normal-case`}
+              >
+                {assignableRoles.map((r) => (
+                  <option key={r} value={r}>
+                    {ROLE_LABEL[r]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-[11px] font-semibold uppercase tracking-wide text-ink400">
+              Entity
+              <select
+                value={inviteRole === 'super_admin' ? '' : inviteEntity}
+                disabled={inviting || inviteRole === 'super_admin'}
+                aria-label="Invite entity"
+                onChange={(e) => setInviteEntity(e.target.value as AppEntity | '')}
+                className={`${SELECT_CLASS} font-normal normal-case`}
+              >
+                {inviteRole === 'super_admin' ? (
+                  <option value="">—</option>
+                ) : (
+                  assignableEntities.map((en) => (
+                    <option key={en} value={en}>
+                      {ENTITY_LABEL[en]}
+                    </option>
+                  ))
+                )}
+              </select>
+            </label>
+            <Button type="button" size="sm" disabled={inviting} onClick={onInvite}>
+              {inviting ? 'Inviting…' : 'Invite user'}
+            </Button>
+            {inviteMsg && (
+              <span className={`text-xs ${inviteMsg.kind === 'ok' ? 'text-ink400' : 'text-destructive'}`}>
+                {inviteMsg.text}
+              </span>
+            )}
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Creates the Supabase account, emails an invite link, and assigns the role in one step.
+            Delivery uses Supabase&rsquo;s email sender (external domains can be slow without custom SMTP).
+          </p>
+        </div>
+      )}
+
       <div className="overflow-x-auto rounded-md border">
         <Table>
           <TableHeader>
