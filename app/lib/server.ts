@@ -469,18 +469,20 @@ export async function payerCmdMonth(year: number, month: number): Promise<CmdPay
 // ---------------------------------------------------------------------------
 
 /**
- * Live-fetch config for ONE CMD customer account. Report 10091971 / filter 10147430 is the
- * 16-column batch export (the 14 explorer columns + Check/EFT) with the date window baked into
- * the saved filter (1/1/2026 → 6/30/2027). customerId varies per call so the cron covers every
- * facility. Per-customer poll budget is small (the cron loops 15 accounts within the function
- * deadline); CMD_EXPLORER_* env vars allow tuning report/filter/poll without a deploy.
+ * Live-fetch config for ONE CMD customer account. Report 10091971 / filter 10147432 is the
+ * batch export (the 14 explorer columns + Check/EFT + Patient Payments) windowed on PAYMENT
+ * RECEIVED date (1/1/2026 → 6/30/2027) — so it captures all 2026 collections, INCLUDING payments
+ * received in 2026 on charges dated before 2026 (an earlier charge-date-windowed filter, 10147430,
+ * dropped those — undercounting the collections chart by ~$6.9M). customerId varies per call so the
+ * cron covers every facility. Per-customer poll budget is small (the cron loops 15 accounts within
+ * the function deadline); CMD_EXPLORER_* env vars allow tuning report/filter/poll without a deploy.
  */
 function cmdExplorerConfigFor(customerId: string): CmdApiConfig {
   return {
     ...cmdApiConfig(),
     customerId,
     reportId: process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10091971',
-    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147430',
+    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147432',
     pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 3_000,
     maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 8,
   };

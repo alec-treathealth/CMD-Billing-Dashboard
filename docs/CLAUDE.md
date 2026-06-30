@@ -274,8 +274,11 @@ The **Collections Explorer** (`collections.cmd_explorer_rows`, charge-line detai
 are both fed from ONE daily Vercel cron (`/api/cron/cmd-explorer`, `0 6 * * *`). The CMD Web API
 scopes data by **customer** (one customer == one facility), so the cron loops the 15 active
 facility accounts in `src/collections/cmdCustomers.ts`, running report **`10091971`** / filter
-**`10147430`** (the 16-column export = 14 explorer columns **+ `Check Payment` + `EFT Payment`**,
-window baked to 1/1/2026→6/30/2027) once per customer (`cmdExplorerConfigFor(customerId)`). The
+**`10147432`** (14 explorer columns **+ `Check Payment` + `EFT Payment` + `Charge Patient Payments`**)
+windowed on **Payment Received date** 1/1/2026→6/30/2027 once per customer (`cmdExplorerConfigFor(customerId)`).
+The filter MUST window on payment-received (not charge date): a charge-date filter (the earlier
+10147430) drops 2026 payments on pre-2026 charges, undercounting collections by ~$6.9M. Patient
+payments are $0 in 2026 (none yet). The
 `CMD_CUSTOMER_ID` default (`10027973` = CA Mental Health) is the per-customer override target;
 filter/report/poll are tunable via `CMD_EXPLORER_*` env. Per customer the cron (`cmdExplorerCron`,
 transport-agnostic; composed in `app/lib/server.ts`):

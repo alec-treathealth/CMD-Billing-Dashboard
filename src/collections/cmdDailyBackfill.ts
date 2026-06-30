@@ -62,7 +62,7 @@ function baseConfig(): Omit<CmdApiConfig, 'customerId'> {
   return {
     baseUrl: process.env.CMD_API_BASE_URL?.trim() || 'https://webapi.collaboratemd.com',
     reportId: process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10091971',
-    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147430',
+    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147432',
     auth,
     pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 5_000,
     maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 40,
