@@ -1,7 +1,7 @@
 /**
  * CMD Collections backfill — one-shot loop over all CMD customer accounts to populate
  * collections.daily_collections (source_tag='cmd', Check+EFT by facility/day) AND refresh
- * collections.cmd_explorer_rows from the live report (10091971 / filter 10147494). Run locally
+ * collections.cmd_explorer_rows from the live report (10091971 / filter 10147499). Run locally
  * (no Vercel function deadline); also doubles as the timing check for the cron's wall-clock guard.
  *
  *   node --env-file=.env --import tsx src/collections/cmdDailyBackfill.ts            # DRY-RUN (no DB)
@@ -62,7 +62,7 @@ function baseConfig(): Omit<CmdApiConfig, 'customerId'> {
   return {
     baseUrl: process.env.CMD_API_BASE_URL?.trim() || 'https://webapi.collaboratemd.com',
     reportId: process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10091971',
-    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147494',
+    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147499',
     auth,
     pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 5_000,
     maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 40,

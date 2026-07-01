@@ -147,13 +147,13 @@ export function toNonPhi(rows: CmdExplorerFullRow[]): CmdExplorerNonPhiRow[] {
 
 // ---------------------------------------------------------------------------
 // Daily deposit aggregation — feeds the Master BXR chart (collections.daily_collections,
-// source_tag='cmd'). Report 10091971 / filter 10147494 carries `Check Payment` + `EFT
+// source_tag='cmd'). Report 10091971 / filter 10147499 carries `Check Payment` + `EFT
 // Payment` per charge line; we sum them by Payment-Received DATE for ONE facility (the
 // customer being pulled). NON-PHI by construction: only the date + summed dollars leave
 // here — never a patient cell. Pure + env-free, like the rest of this module.
 // ---------------------------------------------------------------------------
 
-/** Live-report headers for the two deposit columns (only present under filter 10147494). */
+/** Live-report headers for the two deposit columns (only present under filter 10147499). */
 const CHECK_KEYS = ['Check Payment'] as const;
 const EFT_KEYS = ['EFT Payment'] as const;
 const PAYMENT_DATE_KEYS = ['Payment Received'] as const;

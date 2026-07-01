@@ -324,7 +324,7 @@ export async function handleCmdExplorerCron(req: {
       writeDb: rollupWriterDb(),
       revalidate: () => revalidateTag('cmd-explorer'),
       revalidateDashboard: () => revalidateTag(DASHBOARD_CACHE_TAG),
-      // Saved filter 10147494 windows on payment-received 1/1/2026→6/30/2027. Past that end the
+      // Saved filter 10147499 windows on payment-received 1/1/2026→6/30/2027. Past that end the
       // filter silently stops returning newer dates; this drives a heads-up warning ~30d ahead.
       // Override via CMD_FILTER_WINDOW_END when the filter's window is extended in CMD.
       filterWindowEnd: process.env.CMD_FILTER_WINDOW_END?.trim() || '2027-06-30',
@@ -596,7 +596,7 @@ export async function payerCmdMonth(year: number, month: number): Promise<CmdPay
 // ---------------------------------------------------------------------------
 
 /**
- * Live-fetch config for ONE CMD customer account. Report 10091971 / filter 10147494 is the
+ * Live-fetch config for ONE CMD customer account. Report 10091971 / filter 10147499 is the
  * batch export (the 14 explorer columns + Check/EFT + Patient Payments) windowed on PAYMENT
  * RECEIVED date (1/1/2026 → 6/30/2027) — so it captures all 2026 collections, INCLUDING payments
  * received in 2026 on charges dated before 2026 (an earlier charge-date-windowed filter, 10147430,
@@ -609,7 +609,7 @@ function cmdExplorerConfigFor(customerId: string): CmdApiConfig {
     ...cmdApiConfig(),
     customerId,
     reportId: process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10091971',
-    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147494',
+    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147499',
     pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 3_000,
     maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 8,
   };
