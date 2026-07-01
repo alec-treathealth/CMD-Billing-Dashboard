@@ -27,7 +27,7 @@
  * that needs to change scope once the real data layer lands.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { Table2 } from 'lucide-react';
+import { Filter, Table2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -94,6 +94,55 @@ function Trend({ pct, label }: { pct: number | null; label: string }) {
     <span className={cls}>
       {arrow} {Math.abs(pct).toFixed(1)}% {label}
     </span>
+  );
+}
+
+/**
+ * True when the latest-data month (`asOf`) is an already-completed calendar month — i.e. the
+ * wall-clock month is later than the last day of data. This is the "new month, data pending"
+ * case (e.g. it's July 1 but collections only run through June 30). Wall-clock is legitimate
+ * here: the whole point is to compare the DATA anchor against today's calendar.
+ */
+function anchorIsBehindCalendar(asOf: string): boolean {
+  const now = new Date();
+  const curYM = now.getFullYear() * 12 + now.getMonth(); // getMonth() is 0-based
+  const y = Number(asOf.slice(0, 4));
+  const m = Number(asOf.slice(5, 7));
+  return y * 12 + (m - 1) < curYM;
+}
+
+/**
+ * Freshness ribbon — a calm status strip shown ONLY when the latest data month trails the
+ * current calendar month (the first-of-month gap). It states what period is shown, that it's
+ * the latest complete data, and that the new month fills in over time — so a user landing on
+ * the 1st never mistakes "showing June" for a stale/broken dashboard. Self-hides once the
+ * current month has data. Non-PHI; brand-tokened; the pulsing dot signals "live".
+ */
+function FreshnessRibbon({ asOf }: { asOf: string }) {
+  if (!anchorIsBehindCalendar(asOf)) return null;
+  const y = Number(asOf.slice(0, 4));
+  const m = Number(asOf.slice(5, 7));
+  const shownMonth = MONTH_NAMES[m - 1];
+  const nextMonth = MONTH_NAMES[m % 12]; // month after m (Dec → January)
+  return (
+    <div
+      role="status"
+      className="flex items-start gap-2.5 rounded-lg border border-line border-l-2 border-l-[var(--brand-accent)] bg-[var(--brand-soft)] px-3.5 py-2.5"
+    >
+      <span className="relative mt-[3px] flex h-2 w-2 shrink-0" aria-hidden>
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--brand-accent)] opacity-60" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--brand-accent)]" />
+      </span>
+      <p className="text-sm leading-snug">
+        <span className="font-semibold text-[var(--brand-ink)]">
+          Showing {shownMonth} {y}
+        </span>
+        <span className="text-muted-foreground">
+          {' '}— latest complete data, as of {asOf}. {nextMonth} collections post throughout the
+          month; this view updates daily (~6&nbsp;AM).
+        </span>
+      </p>
+    </div>
   );
 }
 
@@ -205,7 +254,11 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
       ? (ytdGross / dayOfYear(asOf)) * (isLeap(year) ? 366 : 365)
       : null;
 
-  const momPct = priorMonthSamePeriod !== null ? pctChange(mtdGross, priorMonthSamePeriod) : null;
+  // Trend guardrail: only show a MoM % when there's a real current-period basis. Off a zero
+  // (or not-yet-posted) month, a computed % would render a misleading ▼100% / spike — show a
+  // neutral em-dash instead (pctChange already guards a non-positive prior).
+  const momPct =
+    priorMonthSamePeriod !== null && mtdGross > 0 ? pctChange(mtdGross, priorMonthSamePeriod) : null;
   const yoyPct = yoy ? pctChange(yoy.current_ytd_paid, yoy.prior_ytd_paid) : null;
   const forecastYoyPct = yoy && forecast !== null ? pctChange(forecast, yoy.prior_full_year_paid) : null;
 
@@ -214,12 +267,13 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
 
   return (
     <div className="space-y-3">
+      {asOf && <FreshnessRibbon asOf={asOf} />}
       <div className="grid gap-3 sm:grid-cols-3">
         <Kpi
-          label="MTD Gross"
+          label={monthName ? `MTD Gross · ${monthName}` : 'MTD Gross'}
           value={money(mtdGross)}
           detail={<Trend pct={momPct} label={priorMonthName ? `vs ${priorMonthName}` : 'vs last month'} />}
-          sub={asOf ? `${monthName} — as of ${asOf}` : undefined}
+          sub={asOf ? `as of ${asOf}` : undefined}
         />
         <Kpi
           label="YTD Gross"
@@ -288,6 +342,9 @@ function AllFacilitiesTable({
 
   const currentYear = asOf ? Number(asOf.slice(0, 4)) : null;
   const currentMonth = asOf ? Number(asOf.slice(5, 7)) : null;
+  // The anchor month is already complete when today's calendar month is later (first-of-month
+  // gap) — then it's the "latest/final" month, not the live "current (MTD)" one.
+  const isComplete = asOf ? anchorIsBehindCalendar(asOf) : false;
   const [month, setMonth] = useState<number | null>(currentMonth);
   // Re-anchor the selected month when the live anchor first resolves / changes.
   useEffect(() => {
@@ -409,7 +466,7 @@ function AllFacilitiesTable({
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
             <h3 className="text-sm font-semibold text-ink900">
               All facilities{monthName && currentYear ? ` — ${monthName} ${currentYear}` : ''}
-              {isCurrent ? ' (MTD)' : ''}
+              {isCurrent ? (isComplete ? ' (final)' : ' (MTD)') : ''}
             </h3>
             <div className="flex flex-wrap items-center gap-3">
               <ControlSelect
@@ -420,7 +477,9 @@ function AllFacilitiesTable({
               >
                 {monthOptions.map((m) => (
                   <option key={m} value={m}>
-                    {m === currentMonth ? `${MONTH_NAMES[m - 1]} (current)` : MONTH_NAMES[m - 1]}
+                    {m === currentMonth
+                      ? `${MONTH_NAMES[m - 1]} ${isComplete ? '(latest)' : '(current)'}`
+                      : MONTH_NAMES[m - 1]}
                   </option>
                 ))}
               </ControlSelect>
@@ -444,7 +503,23 @@ function AllFacilitiesTable({
               Could not load that month.
             </div>
           ) : rows.length === 0 ? (
-            <div className="py-6 text-center text-sm text-muted-foreground">No facilities to show.</div>
+            setting !== 'ALL' ? (
+              <div className="flex flex-col items-center gap-1.5 py-8 text-center">
+                <Filter className="h-5 w-5 text-muted-foreground" aria-hidden />
+                <div className="text-sm font-medium text-ink900">No {setting} facilities this month</div>
+                <button
+                  type="button"
+                  onClick={() => setSetting('ALL')}
+                  className="text-xs font-medium text-[var(--brand-ink)] underline underline-offset-2"
+                >
+                  Show IP &amp; OP
+                </button>
+              </div>
+            ) : (
+              <div className="py-8 text-center text-sm text-muted-foreground">
+                No collections recorded{monthName ? ` for ${monthName}` : ''} yet.
+              </div>
+            )
           ) : (
             <Table>
               <TableHeader>

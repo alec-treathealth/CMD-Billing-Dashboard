@@ -37,7 +37,7 @@ import {
   YAxis,
 } from 'recharts';
 
-import { Download, X } from 'lucide-react';
+import { CalendarClock, Download, Filter, X } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -566,8 +566,37 @@ function ChartError() {
   );
 }
 
-function ChartEmpty({ label }: { label: string }) {
-  return <div className="py-12 text-center text-sm text-muted-foreground">{label}</div>;
+/**
+ * Designed empty state. Two flavors so "no data yet" never reads the same as "your filter hid
+ * everything": `pending` (a clock — data hasn't posted; optional CTA to jump back to the latest
+ * month) vs `filtered` (a funnel — loosen/reset the filter). Brand-tokened, non-PHI.
+ */
+function ChartEmpty({
+  title,
+  subtitle,
+  variant = 'pending',
+  action,
+}: {
+  title: string;
+  subtitle?: string;
+  variant?: 'pending' | 'filtered';
+  action?: { label: string; onClick: () => void };
+}) {
+  const Icon = variant === 'filtered' ? Filter : CalendarClock;
+  return (
+    <div className="flex flex-col items-center justify-center gap-2 py-14 text-center">
+      <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--brand-soft)] text-[var(--brand-ink)]">
+        <Icon className="h-5 w-5" aria-hidden />
+      </span>
+      <div className="text-sm font-semibold text-ink900">{title}</div>
+      {subtitle && <p className="max-w-xs text-xs text-muted-foreground">{subtitle}</p>}
+      {action && (
+        <Button type="button" variant="outline" size="sm" className="mt-1" onClick={action.onClick}>
+          {action.label}
+        </Button>
+      )}
+    </div>
+  );
 }
 
 export function OverviewBarChart({ scope = 'consolidated' }: { scope?: DashboardView }) {
@@ -587,16 +616,26 @@ export function OverviewBarChart({ scope = 'consolidated' }: { scope?: Dashboard
   // Facility filters, and acronym bar labels. Cached reference (migration 0016).
   const dimState = useWidget<FacilityDimensionRow[]>(loadFacilityDimension);
 
-  // Month options: current 2026 month (MTD) + every prior 2026 month, reverse-chron.
-  const { currentMonth, monthOptions } = useMemo(() => {
-    const now = new Date();
-    const cm = now.getFullYear() === YEAR ? now.getMonth() + 1 : 12;
-    return { currentMonth: cm, monthOptions: Array.from({ length: cm }, (_, i) => cm - i) };
-  }, []);
+  // Anchor the "current" month to the latest DATA day (as_of = max payment_date), NOT the
+  // wall clock. On the 1st of a new month — before that month's collections have posted —
+  // `new Date()` would point the chart at an empty month while the KPI tiles and All
+  // Facilities table (which both anchor to the data) still show the prior month, so the
+  // chart's "July" filter would sit over June's numbers. Deriving from as_of keeps the whole
+  // overview consistent; the anchor advances on its own once the new month's data lands.
+  const asOf = kpisState.status === 'ready' ? kpisState.data.as_of : null;
+  const anchorYear = asOf ? Number(asOf.slice(0, 4)) : YEAR;
+  const currentMonth = asOf ? Number(asOf.slice(5, 7)) : null;
+  const monthOptions = currentMonth
+    ? Array.from({ length: currentMonth }, (_, i) => currentMonth - i)
+    : [];
 
   const [view, setView] = useState<View>('facility');
-  const [month, setMonth] = useState<number>(currentMonth);
-  const isMtd = month === currentMonth;
+  const [month, setMonth] = useState<number | null>(null);
+  // Re-anchor the selected month when the data anchor first resolves (or advances).
+  useEffect(() => {
+    setMonth(currentMonth);
+  }, [currentMonth]);
+  const isMtd = month !== null && month === currentMonth;
 
   // Bar filters. care/facility apply to the By Facility view; payer to By Payer.
   const [careFilter, setCareFilter] = useState<CareFilter>('ALL');
@@ -636,6 +675,11 @@ export function OverviewBarChart({ scope = 'consolidated' }: { scope?: Dashboard
     // fetch a daily range. By Payer is month-scoped for EVERY month (incl. the
     // current one): it reads the CMD rollup, falling back to the matview date-range
     // path when the rollup has no rows for the month, so the view never breaks.
+    if (month === null) {
+      // Data anchor not resolved yet (KPIs still loading) — nothing to fetch.
+      setPast({ kind: 'idle' });
+      return;
+    }
     if (view === 'facility' && isMtd) {
       setPast({ kind: 'idle' });
       return;
@@ -643,7 +687,7 @@ export function OverviewBarChart({ scope = 'consolidated' }: { scope?: Dashboard
     let live = true;
     setPast({ kind: 'loading' });
     if (view === 'facility') {
-      loadCollectionsDailyRange({ year: YEAR, month })
+      loadCollectionsDailyRange({ year: anchorYear, month })
         .then((r) => {
           if (!live) return;
           setPast(
@@ -656,10 +700,10 @@ export function OverviewBarChart({ scope = 'consolidated' }: { scope?: Dashboard
           if (live) setPast({ kind: 'error' });
         });
     } else {
-      const from = `${YEAR}-${pad2(month)}-01`;
-      const to = `${YEAR}-${pad2(month)}-${pad2(lastDayOfMonth(YEAR, month))}`;
+      const from = `${anchorYear}-${pad2(month)}-01`;
+      const to = `${anchorYear}-${pad2(month)}-${pad2(lastDayOfMonth(anchorYear, month))}`;
       (async () => {
-        const cmd = await loadCmdPayerMonth(YEAR, month);
+        const cmd = await loadCmdPayerMonth(anchorYear, month);
         if (!live) return;
         if (cmd.ok && cmd.data.summary.by_payer.length > 0) {
           setPast({ kind: 'payer', summary: cmd.data.summary, byFacility: cmd.data.by_facility });
@@ -678,7 +722,7 @@ export function OverviewBarChart({ scope = 'consolidated' }: { scope?: Dashboard
     return () => {
       live = false;
     };
-  }, [view, month, isMtd]);
+  }, [view, month, isMtd, anchorYear]);
 
   // --- Filtering + acronym relabeling (client-side over the loaded rows). ---
   // Filter facility rows by the active care-setting + facility selection, and relabel
@@ -751,8 +795,8 @@ export function OverviewBarChart({ scope = 'consolidated' }: { scope?: Dashboard
   const selectedDim = selectedFacility ? dimByCode.get(selectedFacility) : undefined;
   const selectedFacilityName = selectedDim?.display_acronym ?? selectedDim?.facility_name ?? selectedFacility ?? '';
 
-  const monthName = MONTH_NAMES[month - 1]!;
-  const monthLabel = `${monthName} ${YEAR}`;
+  const monthName = month ? MONTH_NAMES[month - 1]! : '';
+  const monthLabel = month ? `${monthName} ${anchorYear}` : '';
   const clickHint = ' Click a facility for its daily breakdown.';
   const payerClickHint = ' Click a payer for its facility breakdown.';
   const description =
@@ -780,7 +824,7 @@ export function OverviewBarChart({ scope = 'consolidated' }: { scope?: Dashboard
 
   function handleExport() {
     const fileMonth = isMtd ? `mtd-${monthName.toLowerCase()}` : monthName.toLowerCase();
-    const filename = `collections-by-facility-${fileMonth}-${YEAR}.csv`;
+    const filename = `collections-by-facility-${fileMonth}-${anchorYear}.csv`;
     let table: string[][];
     if (isMtd) {
       if (kpisState.status !== 'ready') return;
@@ -806,9 +850,16 @@ export function OverviewBarChart({ scope = 'consolidated' }: { scope?: Dashboard
   }
 
   const facilityFiltersActive = careFilter !== 'ALL' || facilityFilter !== '';
-  const emptyFacilityLabel = facilityFiltersActive
-    ? 'No facilities match the current filters.'
-    : 'No collections to show.';
+  const resetFacilityFilters = () => {
+    setCareFilter('ALL');
+    setFacilityFilter('');
+  };
+  // CTA shown on an empty NON-latest month: jump back to the latest month with data.
+  const latestName = currentMonth ? MONTH_NAMES[currentMonth - 1] : null;
+  const backToLatest =
+    currentMonth !== null && month !== currentMonth && latestName
+      ? { label: `View ${latestName}`, onClick: () => setMonth(currentMonth) }
+      : undefined;
 
   function chartArea() {
     if (view === 'facility') {
@@ -816,13 +867,40 @@ export function OverviewBarChart({ scope = 'consolidated' }: { scope?: Dashboard
         if (kpisState.status === 'loading') return <ChartLoading />;
         if (kpisState.status === 'error') return <ChartError />;
         const rows = filterFacilityRows(kpiChartRows(kpisState.data));
-        if (rows.length === 0) return <ChartEmpty label={emptyFacilityLabel} />;
+        if (rows.length === 0) {
+          return facilityFiltersActive ? (
+            <ChartEmpty
+              variant="filtered"
+              title="No facilities match"
+              subtitle="Adjust the IP/OP setting or facility filter to see collections."
+              action={{ label: 'Reset filters', onClick: resetFacilityFilters }}
+            />
+          ) : (
+            <ChartEmpty
+              title="No collections yet"
+              subtitle="This month's collections haven't posted. This view updates daily around 6 AM."
+            />
+          );
+        }
         return <FacilityKpiBars rows={rows} monthLabel="MTD" onBarClick={setSelectedFacility} />;
       }
       if (past.kind === 'facility') {
         const rows = filterFacilityRows(past.rows);
         if (rows.length === 0) {
-          return <ChartEmpty label={facilityFiltersActive ? emptyFacilityLabel : `No collections recorded for ${monthLabel}.`} />;
+          return facilityFiltersActive ? (
+            <ChartEmpty
+              variant="filtered"
+              title="No facilities match"
+              subtitle="Adjust the IP/OP setting or facility filter to see collections."
+              action={{ label: 'Reset filters', onClick: resetFacilityFilters }}
+            />
+          ) : (
+            <ChartEmpty
+              title={`No collections in ${monthLabel}`}
+              subtitle="Payments for this month haven't posted yet. This view updates daily around 6 AM."
+              action={backToLatest}
+            />
+          );
         }
         return <FacilityGrossBars rows={rows} monthLabel={monthName} onBarClick={setSelectedFacility} />;
       }
@@ -834,7 +912,22 @@ export function OverviewBarChart({ scope = 'consolidated' }: { scope?: Dashboard
     // the Payer filter. Clicking a payer opens its per-facility breakdown panel.
     if (past.kind === 'payer' && payerSummaryFiltered) {
       const rows = payerChartRows(payerSummaryFiltered, PAYER_TOP_N);
-      if (rows.length === 0) return <ChartEmpty label={`No payer activity in ${monthLabel}.`} />;
+      if (rows.length === 0) {
+        return payerFilter ? (
+          <ChartEmpty
+            variant="filtered"
+            title="No activity for this payer"
+            subtitle={`No ${monthLabel} activity for the selected payer.`}
+            action={{ label: 'All payers', onClick: () => setPayerFilter('') }}
+          />
+        ) : (
+          <ChartEmpty
+            title={`No payer activity in ${monthLabel}`}
+            subtitle="Payments for this month haven't posted yet. This view updates daily around 6 AM."
+            action={backToLatest}
+          />
+        );
+      }
       return <PayerGapBars rows={rows} onBarClick={setSelectedPayer} />;
     }
     if (past.kind === 'error') return <ChartError />;
@@ -862,8 +955,8 @@ export function OverviewBarChart({ scope = 'consolidated' }: { scope?: Dashboard
           </ControlSelect>
           <ControlSelect
             label="Month"
-            value={month}
-            ariaLabel="Month (2026)"
+            value={month ?? ''}
+            ariaLabel="Month"
             onChange={(v) => setMonth(Number(v))}
           >
             {monthOptions.map((m) => (
