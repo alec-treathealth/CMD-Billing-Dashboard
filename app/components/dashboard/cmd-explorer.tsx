@@ -13,7 +13,7 @@
  * dragging the header cells directly (no separate panel). Rows are ordered by id DESC.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { GripVertical } from 'lucide-react';
+import { ArrowDown, ArrowUp, ArrowUpDown, GripVertical } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ControlSelect, Pager, useColumnDnD } from '@/components/data-grid';
@@ -23,6 +23,8 @@ import {
   loadCmdReport,
   revealCmdReportRows,
   type CmdReportResult,
+  type CmdExplorerCursor,
+  type CmdExplorerSort,
 } from '@/lib/actions';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../../src/collections/cmdExplorer';
 
@@ -52,6 +54,17 @@ const COLUMN_LABEL: Record<string, string> = Object.fromEntries(COLUMNS.map((c) 
 const IS_PHI = new Set<string>(COLUMNS.filter((c) => c.phi).map((c) => c.key));
 const IS_NUMERIC = new Set<string>(COLUMNS.filter((c) => c.numeric).map((c) => c.key));
 const DEFAULT_ORDER: ColKey[] = COLUMNS.map((c) => c.key);
+// Columns the grid can sort by (server-side; mirrors CMD_EXPLORER_SORTABLE_COLUMNS): the two
+// date columns + every money column. Everything else (codes, facility, payer, PHI) is unsorted.
+const SORTABLE_KEYS = new Set<string>([
+  'charge_date',
+  'payment_received',
+  'charge_amount',
+  'allowed_amount',
+  'insurance_payments',
+  'adjustments',
+  'patient_balance_due',
+]);
 
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -78,11 +91,16 @@ export function CmdCollectionsExplorer({ canRevealPhi }: { canRevealPhi: boolean
   const [month, setMonth] = useState(0); // 0 = All months
   const [facilityOptions, setFacilityOptions] = useState<string[]>([]);
 
+  // Server-side sort. Default: most-recent Payment Received first. Only the two date columns and
+  // the five money columns are sortable (SORTABLE_KEYS); clicking a sortable header toggles
+  // asc/desc, switching columns starts at desc. Changing the sort resets keyset pagination.
+  const [sort, setSort] = useState<CmdExplorerSort>({ column: 'payment_received', direction: 'desc' });
+
   // Keyset pagination: cursors[p] is the cursor used to fetch page p (cursors[0] = null =
   // first page). hasNext mirrors the last page's nextCursor. Held client-side so Previous
   // can re-fetch an earlier page without a count(*) or offset.
   const [page, setPage] = useState(0);
-  const [cursors, setCursors] = useState<(number | null)[]>([null]);
+  const [cursors, setCursors] = useState<(CmdExplorerCursor | null)[]>([null]);
   const [hasNext, setHasNext] = useState(false);
 
   // Column order (session only); reorder by dragging the headers directly.
@@ -109,7 +127,12 @@ export function CmdCollectionsExplorer({ canRevealPhi }: { canRevealPhi: boolean
   );
 
   const loadPage = useCallback(
-    async (target: number, cursor: number | null, filter: typeof filterArg) => {
+    async (
+      target: number,
+      cursor: CmdExplorerCursor | null,
+      filter: typeof filterArg,
+      sortArg: CmdExplorerSort,
+    ) => {
       const myReq = ++reqRef.current;
       setStatus('loading');
       // New page → drop any revealed PHI so nothing from the prior page lingers in memory.
@@ -118,7 +141,7 @@ export function CmdCollectionsExplorer({ canRevealPhi }: { canRevealPhi: boolean
       setRevealing(false);
       setRevealError(null);
       try {
-        const res: CmdReportResult = await loadCmdReport(cursor, filter);
+        const res: CmdReportResult = await loadCmdReport(cursor, filter, sortArg);
         if (myReq !== reqRef.current) return; // a newer navigation superseded this load
         if (!res.ok) {
           setStatus('error');
@@ -154,11 +177,11 @@ export function CmdCollectionsExplorer({ canRevealPhi }: { canRevealPhi: boolean
     };
   }, []);
 
-  // (Re)load the first page whenever the filter changes (resets keyset pagination).
+  // (Re)load the first page whenever the filter OR sort changes (resets keyset pagination).
   useEffect(() => {
     setCursors([null]);
-    void loadPage(0, null, filterArg);
-  }, [filterArg, loadPage]);
+    void loadPage(0, null, filterArg, sort);
+  }, [filterArg, sort, loadPage]);
 
   const busy = status === 'loading';
 
@@ -172,6 +195,16 @@ export function CmdCollectionsExplorer({ canRevealPhi }: { canRevealPhi: boolean
       [next[i], next[j]] = [next[j]!, next[i]!];
       return next;
     });
+  }
+
+  /** Toggle server-side sort for a sortable column: the same column flips direction, a new
+   *  column starts at desc (most-recent / highest first). The reload effect resets pagination. */
+  function toggleSort(key: CmdExplorerSort['column']) {
+    setSort((prev) =>
+      prev.column === key
+        ? { column: key, direction: prev.direction === 'desc' ? 'asc' : 'desc' }
+        : { column: key, direction: 'desc' },
+    );
   }
 
   /**
@@ -309,15 +342,21 @@ export function CmdCollectionsExplorer({ canRevealPhi }: { canRevealPhi: boolean
                 {order.map((c) => {
                   const dragging = dnd.draggingKey === c;
                   const isTarget = dnd.dropTargetKey === c && dnd.draggingKey !== c;
+                  const sortable = SORTABLE_KEYS.has(c);
+                  const isSorted = sort.column === c;
                   return (
                     <TableHead
                       key={c}
                       {...dnd.itemProps(c)}
                       aria-grabbed={dragging}
+                      aria-sort={
+                        isSorted ? (sort.direction === 'asc' ? 'ascending' : 'descending') : undefined
+                      }
                       title="Drag to reorder"
                       className={[
                         'cursor-grab select-none border-l-2 active:cursor-grabbing',
                         IS_NUMERIC.has(c) ? 'text-right' : '',
+                        isSorted ? 'text-[var(--brand-ink)]' : '',
                         isTarget ? 'border-l-[var(--brand-accent)]' : 'border-l-transparent',
                         dragging ? 'opacity-50' : '',
                       ].join(' ')}
@@ -339,7 +378,32 @@ export function CmdCollectionsExplorer({ canRevealPhi }: { canRevealPhi: boolean
                         >
                           <GripVertical className="h-3 w-3" aria-hidden />
                         </button>
-                        {COLUMN_LABEL[c] ?? c}
+                        {sortable ? (
+                          <button
+                            type="button"
+                            draggable={false}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleSort(c as CmdExplorerSort['column']);
+                            }}
+                            aria-label={`Sort by ${COLUMN_LABEL[c] ?? c}`}
+                            className="inline-flex cursor-pointer items-center gap-1 hover:text-[var(--brand-ink)]"
+                          >
+                            {COLUMN_LABEL[c] ?? c}
+                            {isSorted ? (
+                              sort.direction === 'asc' ? (
+                                <ArrowUp className="h-3 w-3" aria-hidden />
+                              ) : (
+                                <ArrowDown className="h-3 w-3" aria-hidden />
+                              )
+                            ) : (
+                              <ArrowUpDown className="h-3 w-3 opacity-40" aria-hidden />
+                            )}
+                          </button>
+                        ) : (
+                          (COLUMN_LABEL[c] ?? c)
+                        )}
                       </span>
                     </TableHead>
                   );
@@ -376,10 +440,10 @@ export function CmdCollectionsExplorer({ canRevealPhi }: { canRevealPhi: boolean
         hasNext={hasNext}
         disabled={busy}
         onPrev={() => {
-          if (page > 0) void loadPage(page - 1, cursors[page - 1] ?? null, filterArg);
+          if (page > 0) void loadPage(page - 1, cursors[page - 1] ?? null, filterArg, sort);
         }}
         onNext={() => {
-          if (hasNext) void loadPage(page + 1, cursors[page + 1] ?? null, filterArg);
+          if (hasNext) void loadPage(page + 1, cursors[page + 1] ?? null, filterArg, sort);
         }}
       />
     </div>

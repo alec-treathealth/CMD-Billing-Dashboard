@@ -41,6 +41,10 @@ import {
   cmdExplorerFacilities,
   revealCmdExplorerRow,
   revealCmdExplorerRows,
+  resolveCmdExplorerSort,
+  resolveCmdExplorerCursor,
+  type CmdExplorerSort,
+  type CmdExplorerCursor,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
 import { dashboardAccess } from '@/lib/access';
@@ -592,8 +596,12 @@ export async function loadClaimFacets(): Promise<ClaimFacetsResult> {
 // bigserial id (not a content fingerprint); an absent id fails closed to "unavailable".
 // ---------------------------------------------------------------------------
 
+// Re-export the grid's sort/cursor types so the client imports them from the action module
+// (the same seam the Claims explorer uses), never from the server-only '@/lib/server'.
+export type { CmdExplorerSort, CmdExplorerCursor };
+
 export type CmdReportResult =
-  | { ok: true; rows: CmdExplorerRow[]; nextCursor: number | null }
+  | { ok: true; rows: CmdExplorerRow[]; nextCursor: CmdExplorerCursor | null }
   | { ok: false; error: string };
 
 /**
@@ -609,19 +617,21 @@ export interface CmdReportFilter {
 }
 
 /**
- * Load ONE keyset page of the CMD Collections Explorer — NON-PHI columns only (cached
- * 15 min per cursor+filter). `cursor` is the last id of the previous page (null/omitted =
- * first page); the result carries `nextCursor` (null when there are no more rows). The
- * optional `filter` scopes by facility and/or a payment-received month, applied server-side.
+ * Load ONE keyset page of the CMD Collections Explorer — NON-PHI columns only (cached 15 min
+ * per cursor+filter+sort). `cursor` is the {id, value} of the previous page's last row
+ * (null/omitted = first page); `sort` is an allowlisted column + direction (default: Payment
+ * Received DESC). The result carries `nextCursor` (null at the end). The optional `filter`
+ * scopes by facility and/or a payment-received month, applied server-side.
  */
 export async function loadCmdReport(
-  cursor: number | null = null,
+  cursor: CmdExplorerCursor | null = null,
   filter: CmdReportFilter = {},
+  sort?: CmdExplorerSort,
 ): Promise<CmdReportResult> {
-  // Bound the client-supplied cursor before it reaches SQL: a non-negative integer or null.
-  if (cursor !== null && (!Number.isInteger(cursor) || cursor < 0)) {
-    return { ok: false, error: 'Invalid page cursor.' };
-  }
+  // Coerce the client-supplied cursor + sort to safe shapes before they reach SQL (a bad cursor
+  // becomes "first page"; a bad/absent sort becomes the Payment-Received-DESC default).
+  const safeCursor = resolveCmdExplorerCursor(cursor);
+  const safeSort = resolveCmdExplorerSort(sort);
   // Re-validate + translate the filter into bounded date/string params for the reader.
   const readerFilter: { facility?: string; from?: string; to?: string } = {};
   if (typeof filter.facility === 'string' && filter.facility.trim() !== '') {
@@ -643,7 +653,7 @@ export async function loadCmdReport(
     readerFilter.to = `${nextYear}-${pad(nextMonth)}-01`; // exclusive upper bound
   }
   try {
-    const page = await loadCmdExplorerNonPhi(cursor, readerFilter);
+    const page = await loadCmdExplorerNonPhi(safeCursor, readerFilter, safeSort);
     return { ok: true, rows: page.rows, nextCursor: page.nextCursor };
   } catch {
     return { ok: false, error: 'The collections report could not be loaded right now.' };

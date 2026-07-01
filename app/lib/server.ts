@@ -618,7 +618,7 @@ function cmdExplorerConfigFor(customerId: string): CmdApiConfig {
 /** One keyset page of the explorer grid + the cursor to fetch the next page (null at end). */
 export interface CmdExplorerPage {
   rows: CmdExplorerRow[];
-  nextCursor: number | null;
+  nextCursor: CmdExplorerCursor | null;
 }
 
 /**
@@ -631,6 +631,68 @@ export interface CmdExplorerFilter {
   facility?: string | null;
   from?: string | null; // 'YYYY-MM-DD' inclusive (payment_received >= from)
   to?: string | null; // 'YYYY-MM-DD' exclusive (payment_received < to)
+}
+
+/**
+ * Columns the explorer grid may sort by — a CLOSED allowlist of fixed SQL literals (the two
+ * dates + the five money columns). Anything else falls back to the default sort. These are the
+ * raw cmd_explorer_rows columns (dates sort chronologically, money numerically), which is why
+ * ORDER BY uses them directly rather than the to_char text aliases in the SELECT.
+ */
+export const CMD_EXPLORER_SORTABLE_COLUMNS = [
+  'payment_received',
+  'charge_date',
+  'charge_amount',
+  'allowed_amount',
+  'insurance_payments',
+  'adjustments',
+  'patient_balance_due',
+] as const;
+export type CmdExplorerSortColumn = (typeof CMD_EXPLORER_SORTABLE_COLUMNS)[number];
+const CMD_EXPLORER_SORTABLE = new Set<string>(CMD_EXPLORER_SORTABLE_COLUMNS);
+
+export interface CmdExplorerSort {
+  column: CmdExplorerSortColumn;
+  direction: 'asc' | 'desc';
+}
+
+/** Default grid order: most-recent Payment Received first. */
+export const CMD_EXPLORER_DEFAULT_SORT: CmdExplorerSort = {
+  column: 'payment_received',
+  direction: 'desc',
+};
+
+/**
+ * Forward keyset cursor for the grid: the sort-column value + id of the LAST row of the page
+ * just shown (both non-PHI). `value` is a JSON-safe scalar (dates are 'YYYY-MM-DD' text, money a
+ * decimal string); null means that row sat in the trailing NULLS-LAST block.
+ */
+export interface CmdExplorerCursor {
+  id: number;
+  value: string | number | null;
+}
+
+/** Clamp a sort to the allowlist; fall back to the Payment-Received-DESC default otherwise. */
+export function resolveCmdExplorerSort(sort: CmdExplorerSort | undefined): CmdExplorerSort {
+  if (
+    sort !== undefined &&
+    CMD_EXPLORER_SORTABLE.has(sort.column) &&
+    (sort.direction === 'asc' || sort.direction === 'desc')
+  ) {
+    return { column: sort.column, direction: sort.direction };
+  }
+  return { ...CMD_EXPLORER_DEFAULT_SORT };
+}
+
+/** Accept a cursor only if shaped safely; otherwise treat it as the first page. */
+export function resolveCmdExplorerCursor(
+  cursor: CmdExplorerCursor | null | undefined,
+): CmdExplorerCursor | null {
+  if (cursor === null || cursor === undefined) return null;
+  if (!Number.isSafeInteger(cursor.id) || cursor.id < 1) return null;
+  const v = cursor.value;
+  if (v !== null && typeof v !== 'string' && typeof v !== 'number') return null;
+  return { id: cursor.id, value: v ?? null };
 }
 
 const CMD_EXPLORER_PAGE_SIZE = 50;
@@ -656,14 +718,17 @@ function toExplorerRow(r: CmdExplorerDbRecord): CmdExplorerRow {
 }
 
 /**
- * Build the keyset page query with optional filters. Column/table names are fixed
- * literals; every VALUE (cursor, facility, dates, limit) is a bound $n parameter — no
- * interpolation, no SELECT *. Keyset (id < cursor) AND the filters are ANDed, so paging
- * walks the FILTERED set consistently (the filter is constant across a page sequence).
+ * Build the keyset page query with optional filters + an allowlisted sort. Column/table names
+ * are fixed literals; every VALUE (facility, dates, cursor value/id, limit) is a bound $n
+ * parameter — no interpolation, no SELECT *. The order is `<sortcol> <dir> NULLS LAST, id <dir>`,
+ * and the cursor boundary continues STRICTLY after the previous page's last row in that ordering
+ * (the NULLS-LAST block is handled explicitly for both directions), so paging walks the FILTERED,
+ * SORTED set consistently.
  */
 function buildCmdExplorerQuery(
-  cursor: number | null,
+  cursor: CmdExplorerCursor | null,
   filter: CmdExplorerFilter,
+  sort: CmdExplorerSort,
   limit: number,
 ): { sql: string; params: unknown[] } {
   const conds: string[] = [];
@@ -672,40 +737,70 @@ function buildCmdExplorerQuery(
     params.push(v);
     return `$${params.length}`;
   };
-  if (cursor !== null) conds.push(`id < ${add(cursor)}`);
   if (filter.facility) conds.push(`facility = ${add(filter.facility)}`);
   if (filter.from) conds.push(`payment_received >= ${add(filter.from)}::date`);
   if (filter.to) conds.push(`payment_received < ${add(filter.to)}::date`);
+
+  const col = sort.column; // allowlisted fixed literal (see CMD_EXPLORER_SORTABLE_COLUMNS)
+  const cmp = sort.direction === 'asc' ? '>' : '<';
+  if (cursor !== null) {
+    if (cursor.value === null) {
+      // Cursor row sat in the trailing NULL block: only later NULL rows remain.
+      conds.push(`(${col} is null and id ${cmp} ${add(cursor.id)})`);
+    } else {
+      // Rows past the cursor on the sort key, ties broken by id, plus the whole NULL block
+      // (which sorts after any non-null value under NULLS LAST).
+      const valueParam = add(cursor.value);
+      const idParam = add(cursor.id);
+      conds.push(
+        `(${col} ${cmp} ${valueParam} or (${col} = ${valueParam} and id ${cmp} ${idParam}) or ${col} is null)`,
+      );
+    }
+  }
+
   const where = conds.length > 0 ? ` where ${conds.join(' and ')}` : '';
-  const limitClause = ` order by id desc limit ${add(limit)}`;
-  return { sql: `${CMD_EXPLORER_SELECT}${where}${limitClause}`, params };
+  const dir = sort.direction === 'asc' ? 'asc' : 'desc';
+  const orderClause = ` order by ${col} ${dir} nulls last, id ${dir}`;
+  const limitClause = ` limit ${add(limit)}`;
+  return { sql: `${CMD_EXPLORER_SELECT}${where}${orderClause}${limitClause}`, params };
+}
+
+/** A row's sort-column value as a JSON-safe cursor scalar (all sortable columns are text/null). */
+function cmdExplorerSortValue(row: CmdExplorerRow, column: CmdExplorerSortColumn): string | null {
+  return row[column] ?? null;
 }
 
 async function loadCmdExplorerPage(
-  cursor: number | null,
+  cursor: CmdExplorerCursor | null,
   filter: CmdExplorerFilter = {},
+  sort: CmdExplorerSort = CMD_EXPLORER_DEFAULT_SORT,
 ): Promise<CmdExplorerPage> {
-  // Keyset: ORDER BY id DESC (newest snapshot first) so freshly cron-ingested rows surface on
-  // the first page. WHERE id < cursor pages backward (omitted on the first page), ANDed with the
-  // active filters. Over-fetch one row to learn whether a next page exists without a count(*).
+  // Keyset on (sort column, id): ORDER BY <sortcol> <dir> NULLS LAST, id <dir>. Default is
+  // Payment Received DESC (most-recent payments first). The cursor continues strictly after the
+  // previous page's last row; over-fetch one row to detect a next page without a count(*).
   const limit = CMD_EXPLORER_PAGE_SIZE + 1;
-  const { sql, params } = buildCmdExplorerQuery(cursor, filter, limit);
+  const { sql, params } = buildCmdExplorerQuery(cursor, filter, sort, limit);
   const { rows } = await readerExecutor().query<CmdExplorerDbRecord>(sql, params);
   const hasMore = rows.length > CMD_EXPLORER_PAGE_SIZE;
   const page = (hasMore ? rows.slice(0, CMD_EXPLORER_PAGE_SIZE) : rows).map(toExplorerRow);
-  const nextCursor = hasMore ? (page[page.length - 1]?.id ?? null) : null;
+  const last = page[page.length - 1];
+  const nextCursor: CmdExplorerCursor | null =
+    hasMore && last ? { id: last.id, value: cmdExplorerSortValue(last, sort.column) } : null;
   return { rows: page, nextCursor };
 }
 
 /**
- * NON-PHI explorer page, cached 15 min PER (cursor, filter) key (no PHI at rest). The cron
- * busts the shared 'cmd-explorer' tag after any insert. The cursor is a plain number (the
- * bigserial id is far below 2^53 at this scale) so it serializes cleanly into the
- * unstable_cache key; the filter is a small plain object, also JSON-serializable.
+ * NON-PHI explorer page, cached 15 min PER (cursor, filter, sort) key (no PHI at rest). The cron
+ * busts the shared 'cmd-explorer' tag after any insert. The cursor is a small {id, value} object,
+ * the filter a small plain object, and the sort a {column, direction} pair — all
+ * JSON-serializable, so they key the unstable_cache entry cleanly.
  */
 export const loadCmdExplorerNonPhi = unstable_cache(
-  (cursor: number | null = null, filter: CmdExplorerFilter = {}): Promise<CmdExplorerPage> =>
-    loadCmdExplorerPage(cursor, filter),
+  (
+    cursor: CmdExplorerCursor | null = null,
+    filter: CmdExplorerFilter = {},
+    sort: CmdExplorerSort = CMD_EXPLORER_DEFAULT_SORT,
+  ): Promise<CmdExplorerPage> => loadCmdExplorerPage(cursor, filter, sort),
   ['cmd-explorer-nonphi'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
