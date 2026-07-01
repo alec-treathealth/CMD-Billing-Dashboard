@@ -4,7 +4,7 @@
  * (per-facility/day Check+EFT deposit totals, source_tag='cmd').
  *
  * WHY: the CMD Web API scopes data by CUSTOMER (one customer == one facility). A single
- * report/filter (10091971 / 10147432, the export incl Check/EFT, window baked to PAYMENT-RECEIVED
+ * report/filter (10091971 / 10147494, the export incl Check/EFT, window baked to PAYMENT-RECEIVED
  * 1/1/2026→6/30/2027) is run ONCE PER CUSTOMER (src/collections/cmdCustomers.ts) to cover all
  * facilities. Each customer's rows feed BOTH surfaces:
  *   - charge lines  → cmd_explorer_rows  (Explorer; append-only ON CONFLICT, full-history grain)
@@ -156,7 +156,7 @@ export interface CmdExplorerCronStats {
 }
 
 /**
- * Loop the CMD customer accounts, pulling report 10091971/filter 10147432 for each and writing
+ * Loop the CMD customer accounts, pulling report 10091971/filter 10147494 for each and writing
  * both surfaces per customer (so a partial run leaves processed facilities fresh and the rest
  * untouched). Revalidates both caches if anything was processed. Returns non-PHI stats only.
  * Per-customer failures are isolated (logged + skipped); a hard DB/auth failure still throws.

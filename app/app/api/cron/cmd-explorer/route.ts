@@ -3,7 +3,7 @@
  * Auth: Authorization: Bearer <CRON_SECRET> (Vercel Cron attaches this when
  * CRON_SECRET is set). GET only — any other verb is 405.
  *
- * Pulls the live CMD 16-column report (filter 10147430) once PER CUSTOMER (15 facility
+ * Pulls the live CMD 16-column report (filter 10147494) once PER CUSTOMER (15 facility
  * accounts), encrypts the 3 PHI identifiers, idempotently upserts charge lines into
  * collections.cmd_explorer_rows AND re-sources per-facility Check+EFT deposits into
  * collections.daily_collections (source_tag='cmd') as the least-privilege cmd_rollup_writer
