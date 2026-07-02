@@ -68,6 +68,12 @@ These hold across every phase and every change:
 - **Never add a `Co-Authored-By` trailer** to commits or PRs.
 - **Gate outward-facing actions.** Show results and HOLD before live migrations,
   commits, pushes, or deploys. Don't add or alter SQL query tools without asking.
+- **The hourly `/api/cron/cmd-explorer` BXR ingest is production-critical.** No
+  session may modify its route, schedule, Vercel env, writer-role grants, or
+  apply schema/RLS changes to the collections.* tables it writes, unless the
+  session is explicitly scoped to that work. After any push that triggers a
+  deploy, verify the next scheduled run logs success before proposing further
+  work.
 
 ---
 
@@ -654,6 +660,10 @@ yet** — it is groundwork.
   fold into `row_fingerprint`) + tenant-scoped RLS/GUC on the writer + every collections reader
   filtering by `viewToEntityIds(clampedView)`. Do NOT enable Indigo collections ingest before all
   three land, or BXR/Indigo commingle irrecoverably in shared tables.
+  **Superseded (S1 ADR, 2026-07-02 — see §18):** CMD-Billing-Dashboard stays single-tenant;
+  0027/0028 stay shelved and uncommitted (0027's registry was never applied live; 0028's
+  `business_entity_id` column IS live on `cmd_explorer_rows` — recorded drift, record-and-leave,
+  see `docs/veris-data-notes.md`). Do not build this item without re-opening the ADR with Alec.
 - **`readmission_candidates` performance (open).** The full-population self-join
   times out (>90s → 500), even date-scoped to one quarter with a 30-day gap. The
   quick-question button is intentionally omitted. A real fix is query-layer work
@@ -807,5 +817,31 @@ or read only via `brain2_drift_query.sql` (a plain query that DOES see the GUC).
   pull; re-pull when convenient.
 - `008` drift MV authored but **not deployed/refreshed/verified** against live data
   (no DB access from web sessions). First-run checks live in the file footer.
-</content>
-</invoke>
+
+---
+
+## 18. ADR — Veris / CMD-Billing-Dashboard product split (PG-A; recorded by S1, 2026-07-02)
+
+Veris is the multi-tenant product; CMD-Billing-Dashboard stays single-tenant serving
+Treat Health (BXR) only. The dashboard's hardened PHI patterns — the `NoPhi<S>` type
+chokepoint, the `finalize()` audit gate, results-route re-execution, verify-full TLS —
+get ported INTO Veris; `business_entity_id`/tenancy is NOT added to CMD-Billing-Dashboard's
+schema or query library, and its locked semantics (`rate_anomaly_count`, the
+`readmission_candidates` self-join guard, the `client_history` identity-hash binding) stay
+untouched. Veris has exactly TWO data-bearing tenants in `core.business_entity` (S2 creates
+it; `id` is uuid PK): **BXR Consulting** — the entity behind the existing claims book; the
+master plan's "Treat Health" seed row is named BXR Consulting (CMD account `475729`) — and
+**Indigo Consulting** (CMD account `474623`), seeded with the canonical UUIDs in
+`src/tenants.ts`, never re-minted (BXR's UUID is already live in production data). Plus ONE
+derived surface: **"Consolidated"** — a read-only aggregation of BXR + Indigo added
+together; Consolidated is NOT a tenant, gets no `business_entity_id`, and no row is ever
+tagged to it (cross-tenant read path: schema in S2, access in S5). Tenant key is the
+**6-digit CMD ACCOUNT number**; the 8-digit CMD CUSTOMER numbers are facilities/legal
+entities WITHIN an account (supersedes the master plan's "tenant key is the 8-digit
+customer number"). Ingest: BXR already runs on the CMD Web API path today (the
+cmd-explorer cron) — no Google-Sheets migration remains in this build. Migration
+numbering: dashboard = `supabase/migrations/00NN_*`, Veris = `SQL Schemas/0NN_*` (next
+Veris number: 014), never the same directory. Known accepted drift: `cmd_explorer_rows.
+business_entity_id` exists live (all rows BXR) from an uncommitted prior apply —
+record-and-leave; whichever later session finalizes collections' tenancy stance reconciles
+it deliberately. Verbatim answers, rosters, and live-DB verification: `docs/veris-data-notes.md`.
