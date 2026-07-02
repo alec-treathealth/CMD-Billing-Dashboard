@@ -298,6 +298,21 @@ SELECT/INSERT/DELETE + RLS, nullable `collections_raw_id`, `source_tag='cmd'`). 
 check: `npm run ingest:cmd-daily [-- --commit]`. The Master BXR chart UI + readers
 (`daily_collections_resolved`, max-gross-wins) are **unchanged** — only the writer changed.
 
+**⚠️ TENANCY GUARDRAIL — the collections cron is BXR-ONLY; do NOT ingest Indigo here yet.** The
+`collections.*` dashboard tables (`cmd_explorer_rows`, `daily_collections`, `cmd_payer_facility_monthly`)
+are **single-tenant**: they carry NO `business_entity_id` column, the readers do NOT filter by entity,
+and `viewToEntityIds()` (`app/lib/views.ts`) is carried but **not consumed**. Migration **0027** adds only
+a *registry* (`collections.business_entities` + BXR/Indigo seed), NOT per-row columns. So the cron loops
+`CMD_EXPLORER_CUSTOMERS` = **`BXR_CUSTOMERS` (15) ONLY** — `ALL_CMD_CUSTOMERS` (BXR + 36 Indigo) exists in
+`cmdCustomers.ts` for the staging/835 pipeline but **must NOT** be wired into this cron. **Do not** point
+the explorer/deposit ingest at Indigo (don't swap the roster to `ALL_CMD_CUSTOMERS`, don't backfill Indigo
+deposits) until per-row tenancy lands: (1) a `business_entity_id` column on the three tables + existing
+rows backfilled → BXR + folded into `row_fingerprint`; (2) tenant-scoped RLS + the writer setting the
+`app.business_entity_id` GUC; (3) EVERY collections reader filtering by the clamped view's entity ids.
+Until all three ship, Indigo rows would commingle with BXR in shared tables with no way to separate them —
+on the Collections tab, All Facilities table, and Master chart, regardless of `?view=`. Follow-up:
+**collections per-row tenancy (migration 0028)** — see §15.
+
 **REMOVED:** the deposit Google-Sheet ingest (`depositSheet*.ts`, `DEPOSIT_SHEET_ID`,
 `replaceDepositSheetDaily`, `ingest:deposit`, `source_tag='deposit_sheet'` rows).
 
@@ -631,6 +646,14 @@ yet** — it is groundwork.
 
 ## 15. Known issues & deferred work
 
+- **Collections per-row tenancy (deferred — migration 0028).** The dashboard's `collections.*`
+  tables are single-tenant and the explorer/deposit cron is **BXR-only** (see §7's ⚠️ TENANCY
+  GUARDRAIL). Migration 0027 seeded a `business_entities` registry only. Before Indigo (or any
+  2nd tenant) can appear on the dashboard, three things must ship together: `business_entity_id`
+  on `cmd_explorer_rows`/`daily_collections`/`cmd_payer_facility_monthly` (backfill existing→BXR,
+  fold into `row_fingerprint`) + tenant-scoped RLS/GUC on the writer + every collections reader
+  filtering by `viewToEntityIds(clampedView)`. Do NOT enable Indigo collections ingest before all
+  three land, or BXR/Indigo commingle irrecoverably in shared tables.
 - **`readmission_candidates` performance (open).** The full-population self-join
   times out (>90s → 500), even date-scoped to one quarter with a 30-day gap. The
   quick-question button is intentionally omitted. A real fix is query-layer work
