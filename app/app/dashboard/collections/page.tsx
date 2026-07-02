@@ -12,6 +12,7 @@ import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { DashboardNav } from '@/components/dashboard-nav';
 import { CollectionsView } from '@/components/dashboard';
+import { DataFreshness } from '@/components/dashboard/data-freshness';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { dashboardAccess } from '@/lib/access';
 import { clampView, resolveView } from '@/lib/views';
@@ -41,6 +42,7 @@ export default async function CollectionsPage({
           CMD charge-line detail, filterable by facility and month. Patient identifiers are
           masked by default and revealed in bulk on an explicit, audited action.
         </p>
+        <DataFreshness />
       </header>
       <DashboardNav />
       <CollectionsView view={view} canRevealPhi={access.access.canRevealPhi} />

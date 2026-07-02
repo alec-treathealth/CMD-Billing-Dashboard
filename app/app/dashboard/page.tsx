@@ -14,6 +14,7 @@ import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { Dashboard } from '@/components/dashboard';
 import { DashboardNav } from '@/components/dashboard-nav';
+import { DataFreshness } from '@/components/dashboard/data-freshness';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { dashboardAccess } from '@/lib/access';
 import { clampView, resolveView } from '@/lib/views';
@@ -46,6 +47,7 @@ export default async function DashboardPage({
           Aggregate, non-PHI metrics across all claims and collections. No patient data is loaded
           here.
         </p>
+        <DataFreshness />
       </header>
       <DashboardNav />
       <Dashboard view={view} />
