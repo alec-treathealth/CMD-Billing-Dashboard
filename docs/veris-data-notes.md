@@ -128,6 +128,29 @@ Canonical tenant UUIDs (src/tenants.ts, currently untracked — commit in a late
 code session): BXR Consulting `af504ab6-3dcd-4aa4-a93c-27bc58de4088` · Indigo
 Consulting `141d459c-f371-4229-9a92-ace198e940bb`.
 
+**Consolidated surface — NAMED AND GATED (Alec, verbatim, 2026-07-02, ratified
+after the initial S1 docs commit — supersedes the placeholder name
+"Consolidated" in the quote above):**
+
+> "- The derived read-only aggregation across both tenants is named
+>   'Treat Health' — the all-accounts view: BXR Consulting + Indigo
+>   Consulting combined, all 56 CMD customers.
+> - Access: SUPER ADMINS ONLY. No tenant-scoped user ever sees it.
+>   S5 defines the super-admin role/claim mechanics; S2's RLS design
+>   must support a super-admin cross-tenant read path WITHOUT
+>   weakening tenant isolation for normal sessions (explicit policy
+>   clause or security-definer layer — S2's design call, shown at
+>   HOLD like everything else).
+> - Hard guard: 'Treat Health' is NOT a tenant and must NEVER become a
+>   core.business_entity row. The master plan's 'insert rows for Treat
+>   Health and Indigo' language is superseded. Any future session
+>   proposing a Treat Health entity row is re-opening the ADR and must
+>   stop for me.
+> - Disambiguation note: 'Treat Health' (the consolidated super-admin
+>   surface) is distinct from the TREAT MENTAL HEALTH * facility
+>   customers inside BXR's roster — those are 8-digit customers under
+>   account 475729, nothing more."
+
 ### 4a — CMD account/customer numbers (Alec, verbatim, 2026-07-02)
 
 **Terminology correction (supersedes the master plan):**

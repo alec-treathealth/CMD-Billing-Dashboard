@@ -833,9 +833,17 @@ it; `id` is uuid PK): **BXR Consulting** — the entity behind the existing clai
 master plan's "Treat Health" seed row is named BXR Consulting (CMD account `475729`) — and
 **Indigo Consulting** (CMD account `474623`), seeded with the canonical UUIDs in
 `src/tenants.ts`, never re-minted (BXR's UUID is already live in production data). Plus ONE
-derived surface: **"Consolidated"** — a read-only aggregation of BXR + Indigo added
-together; Consolidated is NOT a tenant, gets no `business_entity_id`, and no row is ever
-tagged to it (cross-tenant read path: schema in S2, access in S5). Tenant key is the
+derived surface, named **"Treat Health"** — the all-accounts, read-only aggregation of BXR
+Consulting + Indigo Consulting combined (all 56 CMD customers), **SUPER ADMINS ONLY** — no
+tenant-scoped user ever sees it (S5 defines the super-admin role/claim mechanics; S2's RLS
+design must support a super-admin cross-tenant read path WITHOUT weakening tenant isolation
+for normal sessions — explicit policy clause or security-definer layer, S2's design call,
+shown at HOLD). Hard guard: "Treat Health" is NOT a tenant, gets no `business_entity_id`,
+no row is ever tagged to it, and it must NEVER become a `core.business_entity` row — the
+master plan's "insert rows for Treat Health and Indigo" language is superseded; any future
+session proposing a Treat Health entity row is re-opening this ADR and must stop for Alec.
+(Disambiguation: distinct from the TREAT MENTAL HEALTH * facility customers inside BXR's
+roster — those are 8-digit customers under account `475729`, nothing more.) Tenant key is the
 **6-digit CMD ACCOUNT number**; the 8-digit CMD CUSTOMER numbers are facilities/legal
 entities WITHIN an account (supersedes the master plan's "tenant key is the 8-digit
 customer number"). Ingest: BXR already runs on the CMD Web API path today (the
