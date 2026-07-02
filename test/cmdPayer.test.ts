@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractLineFields } from '../src/collections/cmdPayer.js';
-import type { CmdReportRow } from '../src/collections/cmdPayer.js';
+import { cmdRunReportToZip, extractLineFields } from '../src/collections/cmdPayer.js';
+import type { CmdApiConfig, CmdReportRow } from '../src/collections/cmdPayer.js';
 
 /**
  * REGRESSION GUARD for the payer-rollup facility fallback.
@@ -38,4 +38,48 @@ test('extractLineFields: the canonical Facility Name header still maps', () => {
   const fields = extractLineFields(rowWithFacilityHeader('Facility Name', 'Saddleback'));
   assert.ok(fields);
   assert.equal(fields.facility, 'Saddleback');
+});
+
+/**
+ * POLL-RACE GUARD (the 2026-07-02 incident): CMD returns `Status: SUCCESS` with no `Data`
+ * BOTH transiently (report accepted, CSV not materialized yet) AND permanently (empty window).
+ * cmdRunReportToZip must ride out the transient form and only conclude "empty" after the grace.
+ * A fake fetch scripts the run step (returns an Identifier) then a queue of results-step bodies.
+ */
+function fakeCmd(resultsQueue: Array<Record<string, unknown>>, overrides: Partial<CmdApiConfig> = {}): CmdApiConfig {
+  let i = 0;
+  const fetchImpl = (async (url: string) => {
+    if (String(url).endsWith('/run')) return { ok: true, json: async () => ({ Status: 'SUCCESS', Identifier: 999 }) };
+    const body = resultsQueue[Math.min(i, resultsQueue.length - 1)]!; // last entry repeats
+    i += 1;
+    return { ok: true, json: async () => body };
+  }) as unknown as typeof fetch;
+  return {
+    baseUrl: 'https://cmd.test', customerId: '1', reportId: 'r', filterId: 'f',
+    auth: { kind: 'basic', username: 'u', password: 'p' },
+    fetchImpl, pollIntervalMs: 0, maxPollAttempts: 8, emptyGraceAttempts: 4, ...overrides,
+  };
+}
+const SUCCESS_EMPTY = { Status: 'SUCCESS' }; // SUCCESS with no Data field
+const RUNNING = { Status: 'REPORT RUNNING' };
+const WITH_DATA = { Status: 'SUCCESS', Data: 'QUJD' }; // base64('ABC') → non-empty zip bytes
+
+test('cmdRunReportToZip: rides out transient SUCCESS-empty and returns the data', async () => {
+  // Two poll-1/2 SUCCESS-empty "not ready" responses, then the data — must NOT abort early.
+  const zip = await cmdRunReportToZip(fakeCmd([SUCCESS_EMPTY, SUCCESS_EMPTY, WITH_DATA]));
+  assert.ok(Buffer.isBuffer(zip));
+  assert.equal(zip!.toString('utf8'), 'ABC');
+});
+
+test('cmdRunReportToZip: genuinely empty (SUCCESS-empty past the grace) returns null, not a throw', async () => {
+  const zip = await cmdRunReportToZip(fakeCmd([SUCCESS_EMPTY], { emptyGraceAttempts: 3 }));
+  assert.equal(zip, null); // 3 consecutive empties → concluded empty, non-fatal
+});
+
+test('cmdRunReportToZip: a RUNNING poll resets the empty streak so a busy report still resolves', async () => {
+  // Max 2 consecutive empties (RUNNING breaks the run) with grace=3 ⇒ never prematurely "empty".
+  const zip = await cmdRunReportToZip(
+    fakeCmd([SUCCESS_EMPTY, SUCCESS_EMPTY, RUNNING, SUCCESS_EMPTY, SUCCESS_EMPTY, WITH_DATA], { emptyGraceAttempts: 3 }),
+  );
+  assert.ok(Buffer.isBuffer(zip));
 });

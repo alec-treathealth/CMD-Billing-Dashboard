@@ -60,6 +60,13 @@ export interface CmdApiConfig {
   /** Poll budget overrides (results step). Defaults: 40 attempts × 15s = ~10min. */
   pollIntervalMs?: number;
   maxPollAttempts?: number;
+  /**
+   * Consecutive SUCCESS-with-empty-Data polls tolerated before concluding the report is
+   * genuinely empty (0 rows) rather than still materializing. CMD returns SUCCESS with no
+   * Data BOTH transiently (report accepted, CSV not attached yet) AND permanently (the
+   * account has no rows in the window); only elapsed time tells them apart. Defaults to 4.
+   */
+  emptyGraceAttempts?: number;
 }
 
 /** CMD status envelope values (run + results). */
@@ -73,6 +80,7 @@ type CmdStatus =
 
 const DEFAULT_POLL_INTERVAL_MS = 15_000;
 const DEFAULT_MAX_POLL_ATTEMPTS = 40; // 40 × 15s = 10 min (< CMD's 20-min server timeout)
+const DEFAULT_EMPTY_GRACE_ATTEMPTS = 4; // consecutive SUCCESS-empty polls before "genuinely empty"
 const RUN_TIMEOUT_MS = 60_000;
 const RESULTS_TIMEOUT_MS = 60_000;
 
@@ -145,13 +153,22 @@ export async function cmdRunReport(cfg: CmdApiConfig): Promise<string> {
 }
 
 /**
- * One results poll. SUCCESS (non-empty Data) → decoded zip bytes; REPORT RUNNING
- * → 'RUNNING'; REPORT TIMED OUT → 'TIMED_OUT'. Any other no-data status throws.
+ * One results poll:
+ *   - non-empty base64 Data            → decoded zip bytes (done)
+ *   - REPORT RUNNING                   → 'RUNNING'  (report is computing; poll again)
+ *   - SUCCESS/other with empty Data    → 'EMPTY'    (accepted but no CSV attached — see below)
+ *   - REPORT TIMED OUT                 → 'TIMED_OUT'
+ *
+ * 'EMPTY' is deliberately NOT an error: CMD returns SUCCESS with the Data field empty/absent
+ * BOTH transiently (the just-fired report hasn't materialized its CSV yet — observed live on a
+ * slow morning where a single poll-1 SUCCESS-empty aborted every customer) AND permanently (the
+ * account genuinely has no rows in the filter window). The caller (cmdRunReportToZip) decides
+ * which by polling through EMPTY for a short grace window before concluding "genuinely empty".
  */
 export async function cmdFetchResults(
   cfg: CmdApiConfig,
   requestSeq: string,
-): Promise<Buffer | 'RUNNING' | 'TIMED_OUT'> {
+): Promise<Buffer | 'RUNNING' | 'TIMED_OUT' | 'EMPTY'> {
   const base = cfg.baseUrl.replace(/\/+$/, '');
   const url =
     `${base}/v1/customer/${encodeURIComponent(cfg.customerId)}` +
@@ -163,22 +180,34 @@ export async function cmdFetchResults(
   if (typeof data === 'string' && data.length > 0) return Buffer.from(data, 'base64');
   if (status === 'REPORT RUNNING') return 'RUNNING';
   if (status === 'REPORT TIMED OUT') return 'TIMED_OUT';
-  throw new Error(`CMD report.results returned ${status ?? 'unknown'} with no data`);
+  return 'EMPTY';
 }
 
 /**
- * Step 1+2 — run the report and poll to completion, returning the raw zip bytes.
- * Bounded by maxPollAttempts × pollIntervalMs (default ~10 min). Throws on
- * timeout/exhaustion so the caller fails closed to its fallback.
+ * Step 1+2 — run the report and poll to completion. Returns the raw zip bytes, or `null` when
+ * the report is GENUINELY EMPTY (SUCCESS with no Data for `emptyGraceAttempts` consecutive polls
+ * — the account has no rows in the window). Bounded by maxPollAttempts × pollIntervalMs.
+ *
+ * A transient SUCCESS-empty (CSV not materialized yet) is ridden out: consecutive EMPTY polls
+ * are counted, and a RUNNING or Data poll resets that streak, so a busy report that briefly
+ * reports EMPTY still resolves to its data instead of being mistaken for empty. Throws only on
+ * TIMED_OUT or budget exhaustion (still RUNNING), so a stuck report fails closed to the caller.
  */
-export async function cmdRunReportToZip(cfg: CmdApiConfig): Promise<Buffer> {
+export async function cmdRunReportToZip(cfg: CmdApiConfig): Promise<Buffer | null> {
   const requestSeq = await cmdRunReport(cfg);
   const interval = cfg.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const maxAttempts = cfg.maxPollAttempts ?? DEFAULT_MAX_POLL_ATTEMPTS;
+  const emptyGrace = Math.min(cfg.emptyGraceAttempts ?? DEFAULT_EMPTY_GRACE_ATTEMPTS, maxAttempts);
+  let emptyStreak = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const out = await cmdFetchResults(cfg, requestSeq);
     if (out instanceof Buffer) return out;
     if (out === 'TIMED_OUT') throw new Error('CMD report timed out');
+    if (out === 'EMPTY') {
+      if (++emptyStreak >= emptyGrace) return null; // genuinely empty — non-fatal, 0 rows
+    } else {
+      emptyStreak = 0; // 'RUNNING' — report is active; don't count it toward the empty grace
+    }
     if (attempt < maxAttempts) await sleep(interval);
   }
   throw new Error('CMD report still running after poll budget exhausted');
@@ -306,9 +335,11 @@ export function readReportRows(zip: Buffer): CmdReportRow[] {
   return out;
 }
 
-/** Run the report end-to-end and return parsed CSV rows (run → poll → unzip). */
+/** Run the report end-to-end and return parsed CSV rows (run → poll → unzip). A genuinely
+ *  empty report (no Data after the poll grace) yields `[]` — an empty window is not an error. */
 export async function cmdReportRows(cfg: CmdApiConfig): Promise<CmdReportRow[]> {
-  return readReportRows(await cmdRunReportToZip(cfg));
+  const zip = await cmdRunReportToZip(cfg);
+  return zip === null ? [] : readReportRows(zip);
 }
 
 /**

@@ -112,10 +112,20 @@ const CMD_DAILY_COLS = ['collections_raw_id', 'facility_code', 'source_group_cod
 
 /**
  * Re-source ONE facility's CMD daily deposits, transactionally (idempotent, partial-safe).
- * Within ONE transaction: DELETE this facility's prior source_tag='cmd' rows, then INSERT the
- * freshly aggregated facility-day deposits. Scoped per facility_code (NOT a global wipe) so a
- * cron run that only completes some facilities never erases the others' data. Legacy 'workbook'
- * rows are never touched. Re-running with identical source yields identical rows.
+ * Within ONE transaction: DELETE this facility's prior source_tag='cmd' rows WITHIN THE PULLED
+ * payment_date SPAN, then INSERT the freshly aggregated facility-day deposits.
+ *
+ * WHY the span scope (not a facility-wide wipe): the cron's saved CMD filter windows on a
+ * ROLLING window (current-month payment-received), so a run only re-supplies rows for that
+ * window. Deleting all of a facility's cmd rows would erase every earlier month the filter no
+ * longer returns (the Master BXR chart's whole history). We therefore delete only the
+ * [min..max] payment_date span the pull actually covers and leave everything outside it intact:
+ *   - normal run     → refreshes just the current window; prior months are preserved
+ *   - EMPTY pull      → deletes nothing (a facility with no data in the window keeps its history)
+ * Still scoped per facility_code (never a global wipe) so a partial run never touches other
+ * facilities, and legacy 'workbook' rows are never touched. Re-running identical source yields
+ * identical rows. (Edge: a facility-day that disappears from the window's trailing edge — i.e.
+ * shrinks `max` — isn't pruned until a later pull re-covers it; acceptable vs. losing history.)
  *
  * Runs as the least-privilege cmd_rollup_writer (migration 0022 grants SELECT/INSERT/DELETE +
  * an RLS policy on daily_collections; this table is non-PHI aggregates only).
@@ -128,10 +138,22 @@ export async function replaceCmdDailyForFacility(
   const client = await db.connect();
   try {
     await client.query('begin');
-    const del = await client.query(
-      "delete from collections.daily_collections where source_tag = 'cmd' and facility_code = $1",
-      [facilityCode],
-    );
+    // Delete only within the pulled payment_date span (ISO 'YYYY-MM-DD' sorts chronologically).
+    // No rows ⇒ no delete, so an empty window never erases the facility's earlier history.
+    let deleted = 0;
+    if (rows.length > 0) {
+      let minDate = rows[0]!.payment_date;
+      let maxDate = rows[0]!.payment_date;
+      for (const r of rows) {
+        if (r.payment_date < minDate) minDate = r.payment_date;
+        if (r.payment_date > maxDate) maxDate = r.payment_date;
+      }
+      const del = await client.query(
+        "delete from collections.daily_collections where source_tag = 'cmd' and facility_code = $1 and payment_date between $2 and $3",
+        [facilityCode, minDate, maxDate],
+      );
+      deleted = del.rowCount ?? 0;
+    }
     const tuples = rows.map((r) => [null, r.facility_code, null, r.payment_date, r.checks_amount, r.eft_amount, r.gross_amount, 'cmd']);
     const inserted = tuples.length === 0
       ? 0
@@ -143,7 +165,7 @@ export async function replaceCmdDailyForFacility(
           tuples,
         );
     await client.query('commit');
-    return { deleted: del.rowCount ?? 0, inserted };
+    return { deleted, inserted };
   } catch (err) {
     await client.query('rollback');
     throw err;

@@ -324,10 +324,11 @@ export async function handleCmdExplorerCron(req: {
       writeDb: rollupWriterDb(),
       revalidate: () => revalidateTag('cmd-explorer'),
       revalidateDashboard: () => revalidateTag(DASHBOARD_CACHE_TAG),
-      // Saved filter 10147499 windows on payment-received 1/1/2026→6/30/2027. Past that end the
-      // filter silently stops returning newer dates; this drives a heads-up warning ~30d ahead.
-      // Override via CMD_FILTER_WINDOW_END when the filter's window is extended in CMD.
-      filterWindowEnd: process.env.CMD_FILTER_WINDOW_END?.trim() || '2027-06-30',
+      // Filter 10147530 uses a ROLLING (current-month) payment-received window, so there is no
+      // fixed end date to expire — the window-expiry warning does not apply. The STALE warning
+      // (newest payment_date lagging `now`) still fires and is the relevant freshness signal.
+      // Set CMD_FILTER_WINDOW_END only if you point the cron back at a fixed-window filter.
+      filterWindowEnd: process.env.CMD_FILTER_WINDOW_END?.trim() || undefined,
     });
     return { status: 200, body: { ok: true, ...stats } };
   } catch (err) {
@@ -596,22 +597,26 @@ export async function payerCmdMonth(year: number, month: number): Promise<CmdPay
 // ---------------------------------------------------------------------------
 
 /**
- * Live-fetch config for ONE CMD customer account. Report 10091971 / filter 10147499 is the
+ * Live-fetch config for ONE CMD customer account. Report 10091971 / filter 10147530 is the
  * batch export (the 14 explorer columns + Check/EFT + Patient Payments) windowed on PAYMENT
- * RECEIVED date (1/1/2026 → 6/30/2027) — so it captures all 2026 collections, INCLUDING payments
- * received in 2026 on charges dated before 2026 (an earlier charge-date-windowed filter, 10147430,
- * dropped those — undercounting the collections chart by ~$6.9M). customerId varies per call so the
- * cron covers every facility. Per-customer poll budget is small (the cron loops 15 accounts within
- * the function deadline); CMD_EXPLORER_* env vars allow tuning report/filter/poll without a deploy.
+ * RECEIVED date via a ROLLING window (current-month) — so each run re-supplies the current
+ * month's collections and the append-only explorer + span-scoped daily replace self-heal any
+ * missed run. (Predecessor 10147499 under-returned per account; a charge-date-windowed 10147430
+ * dropped 2026 payments on pre-2026 charges — undercounting the chart by ~$6.9M.) customerId
+ * varies per call so the cron covers every facility. Per-customer poll budget is small (the cron
+ * loops 15 accounts within the function deadline); CMD_EXPLORER_* env vars tune report/filter/poll
+ * without a deploy. emptyGraceAttempts rides out CMD's transient SUCCESS-empty "not ready yet"
+ * response (which once aborted a whole run on poll 1) before treating an account as truly empty.
  */
 function cmdExplorerConfigFor(customerId: string): CmdApiConfig {
   return {
     ...cmdApiConfig(),
     customerId,
     reportId: process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10091971',
-    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147499',
+    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147530',
     pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 3_000,
     maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 8,
+    emptyGraceAttempts: Number(process.env.CMD_EXPLORER_EMPTY_GRACE) || 4,
   };
 }
 
