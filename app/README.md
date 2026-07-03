@@ -1,4 +1,4 @@
-# Claims Search — Next.js transport (Phase 4)
+# TH Veris — Next.js transport (Phase 4)
 
 Next.js 15 App Router app that exposes the claims search agent and the PHI
 results route over HTTP, for Vercel deploy. It is a separate package

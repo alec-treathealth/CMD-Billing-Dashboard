@@ -10,7 +10,7 @@ import { redirect } from 'next/navigation';
 import { LoginForm } from '@/components/login-form';
 import { requireExecutive } from '@/lib/executive';
 
-export const metadata: Metadata = { title: 'Sign in · CMD Billing' };
+export const metadata: Metadata = { title: 'Sign in · TH Veris' };
 export const dynamic = 'force-dynamic';
 
 function safeNext(value: string | string[] | undefined): string {

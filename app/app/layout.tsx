@@ -2,13 +2,15 @@ import type { Metadata } from 'next';
 import { Suspense } from 'react';
 import { NavLinks } from '@/components/nav-links';
 import { ViewSwitcher } from '@/components/dashboard/view-switcher';
+import { SwitcherTenantLogo } from '@/components/dashboard/switcher-tenant-logo';
+import { TenantLogo } from '@/components/tenant-logo';
 import { UserMenu } from '@/components/user-menu';
 import { BrandTheme } from '@/components/brand-theme';
 import { dashboardAccess } from '@/lib/access';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Claims Search',
+  title: 'TH Veris',
   description: 'Historical out-of-network behavioral-health claims search (PHI — compliance layer on).',
 };
 
@@ -42,6 +44,12 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       : null;
   const allowedViews = access.ok ? access.access.allowedViews : undefined;
   const canManageUsers = access.ok ? access.access.canManageUsers : false;
+  // A single-entitled-tenant user (entity admin OR entity user — anyone who is NOT a super-admin
+  // and has an entity) is branded by their fixed entity, server-side, LEFT of the avatar on every
+  // route. A super-admin's tenant is view-dependent (?view=) and is handled client-side by the
+  // switcher-side <SwitcherTenantLogo>; here it resolves to null (no entity), so no avatar-side logo.
+  const role = access.ok ? access.access.role : undefined;
+  const singleTenantSlug = role && role !== 'super_admin' ? (access.ok ? access.access.entity : null) : null;
   return (
     <html lang="en">
       <body className="min-h-screen bg-ground">
@@ -57,9 +65,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           <div className="flex items-center gap-3">
             <Logo size={26} />
             <div className="leading-none">
-              <div className="ths-h text-sm font-semibold tracking-tight text-white">Claims Search</div>
+              <div className="ths-h text-sm font-semibold tracking-tight text-white">TH Veris</div>
               <div className="mt-0.5 hidden text-[9px] font-semibold tracking-widest text-white/70 sm:block">
-                TREAT MENTAL HEALTH · BILLING &amp; RCM
+                POWERED BY TREAT HEALTH AI · BILLING &amp; RCM
               </div>
             </div>
           </div>
@@ -73,9 +81,16 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               routes (/, /code-reference) this shared layout also renders, and it self-hides off
               dashboard routes. The avatar needs a session email, so it stays conditional. */}
           <div className="flex items-center justify-end gap-3">
+            {/* super-admin: current-tenant logo LEFT of the switcher (client, ?view=-driven; null on
+                consolidated / off-dashboard). Single-tenant users render nothing here (≤1 view). */}
+            <Suspense fallback={null}>
+              <SwitcherTenantLogo allowedViews={allowedViews} />
+            </Suspense>
             <Suspense fallback={null}>
               <ViewSwitcher allowedViews={allowedViews} />
             </Suspense>
+            {/* single-tenant user: their entity's logo immediately LEFT of the avatar (server-side). */}
+            {singleTenantSlug ? <TenantLogo slug={singleTenantSlug} /> : null}
             {email ? <UserMenu email={email} canManageUsers={canManageUsers} /> : null}
           </div>
         </header>

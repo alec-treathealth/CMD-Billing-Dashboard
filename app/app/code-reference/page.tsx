@@ -10,7 +10,7 @@ import type { Metadata } from 'next';
 import { Info } from 'lucide-react';
 import { CodeReference } from '@/components/code-reference';
 
-export const metadata: Metadata = { title: 'Behavioral Health Code Reference | Claims Search' };
+export const metadata: Metadata = { title: 'Behavioral Health Code Reference | TH Veris' };
 
 export default function CodeReferencePage() {
   return (

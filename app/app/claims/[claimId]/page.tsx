@@ -24,7 +24,7 @@ import { getClaim } from '@/lib/server';
 
 export const dynamic = 'force-dynamic';
 
-export const metadata: Metadata = { title: 'Claim Detail | Claims Search' };
+export const metadata: Metadata = { title: 'Claim Detail | TH Veris' };
 
 /** Non-PHI fields to show, in display order, with their formatter. */
 const FIELDS: readonly { key: string; label: string; format: (v: unknown) => string }[] = [
