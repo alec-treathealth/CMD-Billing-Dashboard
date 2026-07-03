@@ -29,8 +29,12 @@ export default async function LoginPage({
 }) {
   const sp = await searchParams;
   const next = safeNext(sp.next);
-  const linkError = sp.error === 'auth';
   const resetSent = sp.notice === 'reset-sent';
+  // The expired/consumed invite-link error is seeded into the form's single `authError` state
+  // (one alert surface) rather than rendered as a separate page-level banner — so it can never
+  // stack with a subsequent "Invalid credentials." and clears on the first field change.
+  const initialError =
+    sp.error === 'auth' ? 'That link was invalid or has expired. Request a new one below.' : null;
 
   // Already an authorized user? Skip the form.
   const gate = await requireExecutive();
@@ -43,14 +47,6 @@ export default async function LoginPage({
         <p className="mt-1 text-sm text-ink600">
           Internal billing &amp; RCM console. This tool handles PHI and every access is audited.
         </p>
-        {linkError ? (
-          <div
-            role="alert"
-            className="mt-4 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-          >
-            That link was invalid or has expired. Request a new one below.
-          </div>
-        ) : null}
         {resetSent ? (
           <div
             role="status"
@@ -60,7 +56,7 @@ export default async function LoginPage({
           </div>
         ) : null}
         <div className="mt-6">
-          <LoginForm next={next} />
+          <LoginForm next={next} initialError={initialError} />
         </div>
         <p className="mt-4 text-sm text-ink600">
           <Link
