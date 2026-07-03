@@ -1,0 +1,240 @@
+/**
+ * POST /api/auth-email-hook — Supabase "Send Email" Auth Hook (HTTPS), implemented in THIS app's
+ * Node/Next runtime (no Supabase Edge Function / Deno). When registered in Supabase → Authentication
+ * → Hooks → Send Email, GoTrue POSTs the email payload here INSTEAD of using its built-in templating
+ * + SMTP, and we render + send the mail ourselves via Resend. This fixes the template/SMTP bug class
+ * (empty `{{ .Type }}`-style params, wrong link host) by building the link in code.
+ *
+ * It does NOT remove Resend's domain-verification requirement: with an unverified domain Resend only
+ * delivers to the account owner's address, whether called via API (here) or SMTP. Verifying
+ * treathealth.ai in Resend is separate, out-of-scope work.
+ *
+ * Security: the request is signed per the Standard Webhooks spec. We verify it against
+ * SEND_EMAIL_HOOK_SECRET (the `v1,whsec_<base64>` value Supabase generates when the hook is
+ * registered) using the `standardwebhooks` package, over the RAW request body. Unverified requests
+ * are rejected 401. No token, token_hash, or recipient address is ever logged.
+ *
+ * Response contract (per Supabase HTTP hook docs):
+ *   - success → 200, body `{}`, Content-Type application/json (empty body also accepted).
+ *   - failure → JSON `{ error: { http_code, message } }`, Content-Type application/json.
+ *     GoTrue treats 400/403 as 500; 429/503 are the only retry-able codes (need a `retry-after`).
+ */
+import { Webhook } from 'standardwebhooks';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+/** Verified payload subset we use. GoTrue sends much more (see docs); we read only these fields. */
+interface HookPayload {
+  user: { email: string; new_email?: string };
+  email_data: {
+    token: string;
+    token_hash: string;
+    redirect_to: string;
+    email_action_type: string;
+    site_url: string;
+    token_new?: string;
+    token_hash_new?: string;
+  };
+}
+
+const RESEND_ENDPOINT = 'https://api.resend.com/emails';
+/** Sender. Until treathealth.ai is verified in Resend, this must be Resend's shared sender and mail
+ *  only reaches the account owner. Override via RESEND_FROM once the domain is verified. */
+const DEFAULT_FROM = 'TH Veris <onboarding@resend.dev>';
+
+/** Post-verification destination for each action, matching app/app/auth/confirm/route.ts:
+ *  invite + recovery land on /set-password; everything else defaults to /dashboard. */
+function nextFor(actionType: string): string {
+  return actionType === 'invite' || actionType === 'recovery' ? '/set-password' : '/dashboard';
+}
+
+/** Build the app's token-hash confirm URL (NOT GoTrue's /verify) — mirrors auth/confirm/route.ts. */
+function confirmUrl(siteUrl: string, tokenHash: string, actionType: string): string {
+  const base = siteUrl.replace(/\/+$/, '');
+  const params = new URLSearchParams({
+    token_hash: tokenHash,
+    type: actionType,
+    next: nextFor(actionType),
+  });
+  return `${base}/auth/confirm?${params.toString()}`;
+}
+
+function subjectFor(actionType: string): string {
+  switch (actionType) {
+    case 'invite':
+      return "You're invited to TH Veris";
+    case 'recovery':
+      return 'Reset your TH Veris password';
+    case 'magiclink':
+      return 'Your TH Veris sign-in link';
+    case 'signup':
+      return 'Confirm your TH Veris account';
+    case 'email_change':
+      return 'Confirm your email change · TH Veris';
+    case 'reauthentication':
+      return 'Your TH Veris verification code';
+    default:
+      return 'TH Veris';
+  }
+}
+
+function introFor(actionType: string): string {
+  switch (actionType) {
+    case 'invite':
+      return 'You’ve been invited to the TH Veris billing &amp; RCM console. Click below to set your password and finish setting up your account.';
+    case 'recovery':
+      return 'We received a request to reset your password. Click below to choose a new one. If you didn’t request this, you can ignore this email.';
+    case 'magiclink':
+      return 'Click below to sign in to TH Veris. If you didn’t request this, you can ignore this email.';
+    case 'signup':
+      return 'Confirm your email address to activate your TH Veris account.';
+    case 'email_change':
+      return 'Confirm this email address to complete your email change on TH Veris.';
+    default:
+      return 'Continue to TH Veris.';
+  }
+}
+
+function ctaLabelFor(actionType: string): string {
+  switch (actionType) {
+    case 'invite':
+      return 'Set your password';
+    case 'recovery':
+      return 'Reset password';
+    case 'magiclink':
+      return 'Sign in';
+    default:
+      return 'Confirm';
+  }
+}
+
+/** Minimal, email-client-safe (inline-styled) branded template. TH Veris teal (#1C8B82). */
+function renderActionEmail(opts: { subject: string; intro: string; ctaLabel: string; ctaUrl: string }): string {
+  const { subject, intro, ctaLabel, ctaUrl } = opts;
+  return `<!doctype html>
+<html><body style="margin:0;background:#f4f6f6;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f2a29;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f6;padding:24px 0;">
+    <tr><td align="center">
+      <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="max-width:480px;background:#ffffff;border:1px solid #e2e8e7;border-radius:12px;overflow:hidden;">
+        <tr><td style="background:#1C8B82;padding:18px 24px;">
+          <div style="font-size:16px;font-weight:700;color:#ffffff;letter-spacing:-0.2px;">TH Veris</div>
+          <div style="font-size:9px;font-weight:600;letter-spacing:1.5px;color:rgba(255,255,255,0.75);margin-top:2px;">POWERED BY TREAT HEALTH AI · BILLING &amp; RCM</div>
+        </td></tr>
+        <tr><td style="padding:28px 24px;">
+          <h1 style="margin:0 0 12px;font-size:18px;font-weight:600;">${subject}</h1>
+          <p style="margin:0 0 20px;font-size:14px;line-height:1.5;color:#334e4c;">${intro}</p>
+          <table role="presentation" cellpadding="0" cellspacing="0"><tr><td style="border-radius:8px;background:#1C8B82;">
+            <a href="${ctaUrl}" style="display:inline-block;padding:11px 20px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">${ctaLabel}</a>
+          </td></tr></table>
+          <p style="margin:20px 0 0;font-size:12px;line-height:1.5;color:#66807e;">Or paste this link into your browser:<br/>
+            <a href="${ctaUrl}" style="color:#1C8B82;word-break:break-all;">${ctaUrl}</a></p>
+          <p style="margin:16px 0 0;font-size:11px;color:#8aa19f;">This link handles PHI-adjacent access and is single-use. Every access is audited.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+}
+
+/** Reauthentication has no link — the user types a code back into the app. Show the code. */
+function renderCodeEmail(code: string): string {
+  return `<!doctype html>
+<html><body style="margin:0;background:#f4f6f6;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f2a29;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f6;padding:24px 0;"><tr><td align="center">
+    <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="max-width:480px;background:#fff;border:1px solid #e2e8e7;border-radius:12px;overflow:hidden;">
+      <tr><td style="background:#1C8B82;padding:18px 24px;">
+        <div style="font-size:16px;font-weight:700;color:#fff;">TH Veris</div>
+        <div style="font-size:9px;font-weight:600;letter-spacing:1.5px;color:rgba(255,255,255,0.75);margin-top:2px;">POWERED BY TREAT HEALTH AI · BILLING &amp; RCM</div>
+      </td></tr>
+      <tr><td style="padding:28px 24px;">
+        <h1 style="margin:0 0 12px;font-size:18px;font-weight:600;">Your verification code</h1>
+        <p style="margin:0 0 16px;font-size:14px;color:#334e4c;">Enter this code to confirm it’s you. If you didn’t request it, you can ignore this email.</p>
+        <div style="font-size:28px;font-weight:700;letter-spacing:6px;color:#1C8B82;">${code}</div>
+      </td></tr>
+    </table>
+  </td></tr></table>
+</body></html>`;
+}
+
+/** JSON error in Supabase's hook error shape. 400/403 → GoTrue treats as 500; 429/503 are retry-able. */
+function hookError(httpCode: number, message: string, status: number, retryable = false): Response {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (retryable) headers['retry-after'] = '5';
+  return new Response(JSON.stringify({ error: { http_code: httpCode, message } }), { status, headers });
+}
+
+/** Send one email via Resend's REST API (no SDK dependency). Returns true on 2xx. */
+async function sendEmail(to: string, subject: string, html: string): Promise<{ ok: boolean; status: number }> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) return { ok: false, status: 0 };
+  const from = process.env.RESEND_FROM || DEFAULT_FROM;
+  const res = await fetch(RESEND_ENDPOINT, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from, to, subject, html }),
+  });
+  return { ok: res.ok, status: res.status };
+}
+
+export async function POST(req: Request): Promise<Response> {
+  if (req.method !== 'POST') return hookError(405, 'Method not allowed', 405);
+
+  const secret = process.env.SEND_EMAIL_HOOK_SECRET;
+  const resendKey = process.env.RESEND_API_KEY;
+  if (!secret || !resendKey) {
+    // Misconfiguration — do not attempt to send unsigned/unauthenticated mail. Generic message.
+    return hookError(500, 'Email hook is not configured', 500);
+  }
+
+  // Standard Webhooks: verify over the RAW body. Supabase stores the secret as `v1,whsec_<base64>`;
+  // the library takes the base64 portion.
+  const raw = await req.text();
+  const headers = Object.fromEntries(req.headers);
+  let payload: HookPayload;
+  try {
+    const wh = new Webhook(secret.replace(/^v1,whsec_/, ''));
+    payload = wh.verify(raw, headers) as HookPayload;
+  } catch {
+    return hookError(401, 'Invalid signature', 401);
+  }
+
+  const { user, email_data } = payload;
+  const type = email_data.email_action_type;
+
+  try {
+    if (type === 'reauthentication') {
+      // No link — send the OTP code.
+      const { ok } = await sendEmail(user.email, subjectFor(type), renderCodeEmail(email_data.token));
+      if (!ok) return hookError(500, 'Failed to send email', 500);
+    } else if (type === 'email_change') {
+      // Secure Email Change (both token/hash pairs present) → two emails. NOTE the docs' REVERSED
+      // field mapping: current email uses token_hash_new; new email uses token_hash.
+      const secure = Boolean(email_data.token_hash_new) && Boolean(user.new_email);
+      if (secure) {
+        const toCurrent = confirmUrl(email_data.site_url, email_data.token_hash_new!, type);
+        const toNew = confirmUrl(email_data.site_url, email_data.token_hash, type);
+        const a = await sendEmail(user.email, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: toCurrent }));
+        const b = await sendEmail(user.new_email!, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: toNew }));
+        if (!a.ok || !b.ok) return hookError(500, 'Failed to send email', 500);
+      } else {
+        const to = user.new_email || user.email;
+        const url = confirmUrl(email_data.site_url, email_data.token_hash, type);
+        const { ok } = await sendEmail(to, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: url }));
+        if (!ok) return hookError(500, 'Failed to send email', 500);
+      }
+    } else {
+      // Link-based: invite | recovery | magiclink | signup (+ safe default).
+      const url = confirmUrl(email_data.site_url, email_data.token_hash, type);
+      const { ok } = await sendEmail(user.email, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: url }));
+      if (!ok) return hookError(500, 'Failed to send email', 500);
+    }
+  } catch {
+    // Network/unexpected send failure. 500 = non-retryable (a permanent Resend domain error should
+    // not be retried three times); transient issues will surface to the admin who re-triggers.
+    return hookError(500, 'Failed to send email', 500);
+  }
+
+  // Success: empty JSON object, 200, application/json.
+  return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+}
