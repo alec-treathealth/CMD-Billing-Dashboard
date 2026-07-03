@@ -2,7 +2,7 @@
 
 /**
  * User-management table (admins + super_admins). Lists Supabase Auth users + their dashboard role and
- * lets the caller assign / change / revoke roles within their scope (a super_admin manages everyone and
+ * lets the caller assign / change roles and delete users within their scope (a super_admin manages everyone and
  * all entities; an entity admin manages only their own entity + unprovisioned users). Controls are shaped
  * by the caller's entitlement passed from the server, and EVERY mutation is re-authorized server-side in
  * the Server Actions — the client shaping is convenience, never the gate. Your own row is read-only.
@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import {
   inviteUser,
-  revokeUser,
+  deleteUser,
   setUserRole,
   type ManageContext,
   type ManagedUserDto,
@@ -133,15 +133,24 @@ export function UserManager({ initial }: { initial: ManageContext }) {
     });
   }
 
-  function onRevoke(u: ManagedUserDto) {
+  function onDelete(u: ManagedUserDto) {
+    // Destructive + irreversible: removes the dashboard role AND permanently deletes the sign-in
+    // account. Confirm before firing (staff email is non-PHI).
+    if (
+      !window.confirm(
+        `Delete ${u.email}?\n\nThis removes their dashboard role and permanently deletes their sign-in account. This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
     setPendingId(u.userId);
     setRowMsg((m) => ({ ...m, [u.userId]: undefined as never }));
     startTransition(async () => {
-      const res = await revokeUser(u.userId);
+      const res = await deleteUser(u.userId);
       setPendingId(null);
       if (res.ok) {
         applyResult(u.userId, null, null);
-        setRowMsg((m) => ({ ...m, [u.userId]: { kind: 'ok', text: 'Revoked' } }));
+        setRowMsg((m) => ({ ...m, [u.userId]: { kind: 'ok', text: 'Deleted' } }));
       } else {
         setRowMsg((m) => ({ ...m, [u.userId]: { kind: 'err', text: res.error } }));
       }
@@ -316,10 +325,10 @@ export function UserManager({ initial }: { initial: ManageContext }) {
                             variant="ghost"
                             size="sm"
                             disabled={busy}
-                            onClick={() => onRevoke(u)}
+                            onClick={() => onDelete(u)}
                             className="text-destructive hover:text-destructive"
                           >
-                            Revoke
+                            Delete
                           </Button>
                         )}
                         <Button

@@ -1,7 +1,7 @@
 'use server';
 
 /**
- * User-management Server Actions (the ONLY browser path to provision/change/revoke dashboard roles).
+ * User-management Server Actions (the ONLY browser path to provision/change dashboard roles and delete users).
  *
  * AUTHORIZATION lives here (the DB functions in migration 0026 can't see the session and enforce only
  * data integrity + the last-super-admin guard):
@@ -9,12 +9,13 @@
  *   • a super_admin manages anyone and assigns any role/entity;
  *   • an entity admin manages ONLY users in their own entity (or unprovisioned users), and may assign
  *     ONLY role∈{admin,user} within their OWN entity — never super_admin, never another entity;
- *   • no one may edit or revoke THEIR OWN row (prevents accidental self-demotion / lockout).
+ *   • no one may edit or delete THEIR OWN account (prevents accidental self-demotion / lockout).
  * Every successful mutation writes a non-PHI audit row (claims.access_audit) naming the real actor.
  * Inputs are validated/bounded; client-supplied identity is never trusted (target state is re-read).
  */
 import {
   deleteAppUser,
+  deleteOrphanAppUsers,
   listAppUsers,
   recordAccess,
   upsertAppUser,
@@ -176,7 +177,17 @@ export async function setUserRole(
   return { ok: true };
 }
 
-export async function revokeUser(targetUserId: string): Promise<MutateUserResult> {
+/**
+ * Delete a user entirely: remove the dashboard role row AND hard-delete the underlying Supabase Auth
+ * account (so "Delete" means gone — the user can no longer authenticate). Strict, non-negotiable order:
+ *   1. self-delete guard;
+ *   2. deleteAppUser() FIRST — its last-super-admin guard (in claims.delete_app_user) is the real check
+ *      and MUST succeed before anything irreversible happens;
+ *   3. only THEN hard-delete the auth account;
+ *   4. if (3) throws, surface a specific, retryable error — do NOT restore the role row to compensate
+ *      (the role is intentionally gone; a retry re-runs step 2 as a no-op and re-attempts the delete).
+ */
+export async function deleteUser(targetUserId: string): Promise<MutateUserResult> {
   const auth = await requireManage();
   if (!auth.ok) return auth;
   const { gate } = auth;
@@ -184,7 +195,8 @@ export async function revokeUser(targetUserId: string): Promise<MutateUserResult
   if (typeof targetUserId !== 'string' || !UUID_RE.test(targetUserId)) {
     return { ok: false, error: 'Invalid user reference.' };
   }
-  if (targetUserId === gate.user.id) return { ok: false, error: "You can't revoke your own access." };
+  // 1. Self-delete guard.
+  if (targetUserId === gate.user.id) return { ok: false, error: "You can't delete your own account." };
 
   let target: ManagedUser | undefined;
   try {
@@ -193,19 +205,41 @@ export async function revokeUser(targetUserId: string): Promise<MutateUserResult
     return { ok: false, error: 'Could not load that user right now.' };
   }
   if (!target) return { ok: false, error: 'That user no longer exists.' };
-  if (target.role === null) return { ok: true }; // already unprovisioned — no-op
   if (!inScope(gate, target)) return { ok: false, error: 'You may not manage that user.' };
 
+  // 2. Role row first — the last-super-admin guard lives here and must pass before we touch auth.
+  //    (If the user is already unprovisioned, this is a no-op DELETE and we still proceed to auth.)
   try {
     await deleteAppUser(targetUserId);
   } catch (err) {
     return { ok: false, error: mutationError(err) };
   }
+  // Audit the role removal NOW, so it is recorded even if the auth-account deletion below fails.
   await recordAccess({
     actorEmail: gate.user.email,
     actorUserId: gate.user.id,
-    action: 'revoke_user',
-    detail: { target: targetUserId },
+    action: 'delete_user_role',
+    detail: { target: targetUserId }, // non-PHI: uid + action only
+  });
+
+  // 3. Only now hard-delete the Supabase Auth account (service-role, server-side only).
+  try {
+    const { error } = await supabaseAdminClient().auth.admin.deleteUser(targetUserId);
+    if (error) throw error;
+  } catch {
+    // 4. Role is gone but the auth account is not — report a specific, retryable error. Do NOT
+    //    re-create the role row to compensate; a retry re-runs step 2 (no-op) and retries the delete.
+    return {
+      ok: false,
+      error: 'Role removed, but the auth account could not be deleted — click Delete again to retry.',
+    };
+  }
+  // Distinct audit row for the irreversible auth-account deletion (separate from the role removal above).
+  await recordAccess({
+    actorEmail: gate.user.email,
+    actorUserId: gate.user.id,
+    action: 'delete_auth_account',
+    detail: { target: targetUserId }, // non-PHI: uid + action only
   });
   return { ok: true };
 }
@@ -270,6 +304,17 @@ export async function inviteUser(
   } catch (err) {
     return { ok: false, error: mutationError(err) };
   }
+
+  // Reap any same-email rows orphaned by a prior out-of-band auth deletion (their uid no longer
+  // exists in auth.users), keeping the row we just upserted. Covers both the invite-succeeded and
+  // existing-account-fallback branches (both converge on `userId` above). Best-effort: the invite
+  // itself has already succeeded, so a cleanup failure must not fail the action.
+  try {
+    await deleteOrphanAppUsers(normEmail, userId);
+  } catch {
+    // Non-fatal — the orphan (if any) stays until the next successful invite/cleanup.
+  }
+
   await recordAccess({
     actorEmail: gate.user.email,
     actorUserId: gate.user.id,

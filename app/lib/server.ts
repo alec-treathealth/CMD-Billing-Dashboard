@@ -244,6 +244,20 @@ export async function deleteAppUser(userId: string): Promise<void> {
   await readerExecutor().query('select claims.delete_app_user($1)', [userId]);
 }
 
+/**
+ * Reap app_user rows for `email` that were orphaned by an out-of-band auth deletion (their uid no
+ * longer exists in auth.users), keeping `keepUserId`. Prevents duplicate rows when an email whose
+ * auth account was deleted directly in Supabase is re-invited. The DB fn (0029) only ever deletes
+ * provably-orphaned rows. Returns the number of orphans removed.
+ */
+export async function deleteOrphanAppUsers(email: string, keepUserId: string): Promise<number> {
+  const { rows } = await readerExecutor().query<{ deleted: number }>(
+    'select claims.delete_orphan_app_users($1, $2) as deleted',
+    [email, keepUserId],
+  );
+  return Number(rows[0]?.deleted ?? 0);
+}
+
 /** Agent route: NL question → one query function → non-PHI { tool_name, query_id, summary_stats }. */
 export function handleAgent(req: AgentHttpRequest) {
   return handleAgentRequest(req, {
