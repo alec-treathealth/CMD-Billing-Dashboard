@@ -12,10 +12,16 @@
  * Security: the request is signed per the Standard Webhooks spec. We verify it against
  * SEND_EMAIL_HOOK_SECRET (the `v1,whsec_<base64>` value Supabase generates when the hook is
  * registered) using the `standardwebhooks` package, over the RAW request body. Unverified requests
- * are rejected 401. No token, token_hash, or recipient address is ever logged.
+ * are rejected 401.
+ *
+ * Observability: the ENTIRE handler is wrapped in a top-level try/catch that console.error's the full
+ * error (message + stack) before returning any 500, and every Resend failure logs the HTTP status +
+ * Resend's error body. We deliberately DO NOT log token / token_hash (single-use auth secrets). Resend
+ * error bodies may include the sender/recipient address (staff identity, not patient PHI) — acceptable
+ * for debugging this internal auth flow.
  *
  * Response contract (per Supabase HTTP hook docs):
- *   - success → 200, body `{}`, Content-Type application/json (empty body also accepted).
+ *   - success → 200, body `{}`, Content-Type application/json.
  *   - failure → JSON `{ error: { http_code, message } }`, Content-Type application/json.
  *     GoTrue treats 400/403 as 500; 429/503 are the only retry-able codes (need a `retry-after`).
  */
@@ -164,49 +170,72 @@ function hookError(httpCode: number, message: string, status: number, retryable 
   return new Response(JSON.stringify({ error: { http_code: httpCode, message } }), { status, headers });
 }
 
-/** Send one email via Resend's REST API (no SDK dependency). Returns true on 2xx. */
-async function sendEmail(to: string, subject: string, html: string): Promise<{ ok: boolean; status: number }> {
+/** Send one email via Resend's REST API (no SDK). Returns ok + the HTTP status + the response body
+ *  (so failures can be logged with Resend's actual reason). */
+async function sendEmail(
+  to: string,
+  subject: string,
+  html: string,
+): Promise<{ ok: boolean; status: number; body: string }> {
   const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) return { ok: false, status: 0 };
+  if (!apiKey) return { ok: false, status: 0, body: 'missing RESEND_API_KEY' };
   const from = process.env.RESEND_FROM || DEFAULT_FROM;
   const res = await fetch(RESEND_ENDPOINT, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ from, to, subject, html }),
   });
-  return { ok: res.ok, status: res.status };
+  const body = await res.text().catch(() => '');
+  return { ok: res.ok, status: res.status, body };
+}
+
+/** Send + log. Logs Resend's HTTP status and error body on failure (may name sender/recipient — staff
+ *  identity, not patient PHI); never logs token/token_hash. Returns whether the send succeeded. */
+async function sendLogged(to: string, subject: string, html: string, type: string): Promise<boolean> {
+  const r = await sendEmail(to, subject, html);
+  if (!r.ok) {
+    console.error(`[auth-email-hook] Resend send FAILED type=${type} status=${r.status} body=${r.body}`);
+    return false;
+  }
+  console.log(`[auth-email-hook] Resend send OK type=${type} status=${r.status}`);
+  return true;
 }
 
 export async function POST(req: Request): Promise<Response> {
-  if (req.method !== 'POST') return hookError(405, 'Method not allowed', 405);
-
-  const secret = process.env.SEND_EMAIL_HOOK_SECRET;
-  const resendKey = process.env.RESEND_API_KEY;
-  if (!secret || !resendKey) {
-    // Misconfiguration — do not attempt to send unsigned/unauthenticated mail. Generic message.
-    return hookError(500, 'Email hook is not configured', 500);
-  }
-
-  // Standard Webhooks: verify over the RAW body. Supabase stores the secret as `v1,whsec_<base64>`;
-  // the library takes the base64 portion.
-  const raw = await req.text();
-  const headers = Object.fromEntries(req.headers);
-  let payload: HookPayload;
   try {
-    const wh = new Webhook(secret.replace(/^v1,whsec_/, ''));
-    payload = wh.verify(raw, headers) as HookPayload;
-  } catch {
-    return hookError(401, 'Invalid signature', 401);
-  }
+    if (req.method !== 'POST') return hookError(405, 'Method not allowed', 405);
 
-  const { user, email_data } = payload;
-  const type = email_data.email_action_type;
+    const secret = process.env.SEND_EMAIL_HOOK_SECRET;
+    const resendKey = process.env.RESEND_API_KEY;
+    if (!secret || !resendKey) {
+      console.error(
+        `[auth-email-hook] misconfigured: SEND_EMAIL_HOOK_SECRET=${secret ? 'set' : 'MISSING'} RESEND_API_KEY=${resendKey ? 'set' : 'MISSING'}`,
+      );
+      return hookError(500, 'Email hook is not configured', 500);
+    }
 
-  try {
+    // Standard Webhooks: verify over the RAW body. Supabase stores the secret as `v1,whsec_<base64>`;
+    // the library takes the base64 portion.
+    const raw = await req.text();
+    const headers = Object.fromEntries(req.headers);
+    let payload: HookPayload;
+    try {
+      const wh = new Webhook(secret.replace(/^v1,whsec_/, ''));
+      payload = wh.verify(raw, headers) as HookPayload;
+    } catch (err) {
+      console.error('[auth-email-hook] signature verification failed:', err);
+      return hookError(401, 'Invalid signature', 401);
+    }
+
+    const { user, email_data } = payload;
+    const type = email_data.email_action_type;
+    console.log(`[auth-email-hook] verified request type=${type}`);
+
     if (type === 'reauthentication') {
       // No link — send the OTP code.
-      const { ok } = await sendEmail(user.email, subjectFor(type), renderCodeEmail(email_data.token));
-      if (!ok) return hookError(500, 'Failed to send email', 500);
+      if (!(await sendLogged(user.email, subjectFor(type), renderCodeEmail(email_data.token), type))) {
+        return hookError(500, 'Failed to send email', 500);
+      }
     } else if (type === 'email_change') {
       // Secure Email Change (both token/hash pairs present) → two emails. NOTE the docs' REVERSED
       // field mapping: current email uses token_hash_new; new email uses token_hash.
@@ -214,27 +243,30 @@ export async function POST(req: Request): Promise<Response> {
       if (secure) {
         const toCurrent = confirmUrl(email_data.site_url, email_data.token_hash_new!, type);
         const toNew = confirmUrl(email_data.site_url, email_data.token_hash, type);
-        const a = await sendEmail(user.email, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: toCurrent }));
-        const b = await sendEmail(user.new_email!, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: toNew }));
-        if (!a.ok || !b.ok) return hookError(500, 'Failed to send email', 500);
+        const a = await sendLogged(user.email, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: toCurrent }), type);
+        const b = await sendLogged(user.new_email!, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: toNew }), type);
+        if (!a || !b) return hookError(500, 'Failed to send email', 500);
       } else {
         const to = user.new_email || user.email;
         const url = confirmUrl(email_data.site_url, email_data.token_hash, type);
-        const { ok } = await sendEmail(to, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: url }));
-        if (!ok) return hookError(500, 'Failed to send email', 500);
+        if (!(await sendLogged(to, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: url }), type))) {
+          return hookError(500, 'Failed to send email', 500);
+        }
       }
     } else {
       // Link-based: invite | recovery | magiclink | signup (+ safe default).
       const url = confirmUrl(email_data.site_url, email_data.token_hash, type);
-      const { ok } = await sendEmail(user.email, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: url }));
-      if (!ok) return hookError(500, 'Failed to send email', 500);
+      if (!(await sendLogged(user.email, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: url }), type))) {
+        return hookError(500, 'Failed to send email', 500);
+      }
     }
-  } catch {
-    // Network/unexpected send failure. 500 = non-retryable (a permanent Resend domain error should
-    // not be retried three times); transient issues will surface to the admin who re-triggers.
-    return hookError(500, 'Failed to send email', 500);
-  }
 
-  // Success: empty JSON object, 200, application/json.
-  return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    // Success: empty JSON object, 200, application/json.
+    return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  } catch (err) {
+    // Anything that threw before/outside the branches above (body read, header parse, JSON, etc.)
+    // — previously an UNLOGGED 500. Now logged with the full error + stack.
+    console.error('[auth-email-hook] unhandled error:', err);
+    return hookError(500, 'Internal error', 500);
+  }
 }
