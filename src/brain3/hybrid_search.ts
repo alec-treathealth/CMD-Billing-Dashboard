@@ -9,10 +9,20 @@
  * Reads via claims_reader; writes via claims_admin. Both use $n params over the
  * pooler (6543) — no named prepared statements. hnsw.iterative_scan='relaxed_order'
  * (set in migration 009) keeps the HNSW scan correct under the payer pre-filter.
+ *
+ * Tenant scoping: both reads run inside ONE withTenant transaction (the GUC is
+ * transaction-local — set_config(..., true) — per the S2 gate ruling; the old
+ * session-scoped set_config(..., false) drift is retired). The claims_admin
+ * persist runs AFTER the read transaction ends — admin is the table owner
+ * (RLS owner-bypass) and tags rows with the explicit business_entity_id value.
  */
 import { makeClient, type Db } from '../db.js';
+import { withTenant } from '../veris/withTenant.js';
+import { BXR_ENTITY_ID } from '../tenants.js';
 
-const BEID = 'af504ab6-3dcd-4aa4-a93c-27bc58de4088';
+// Default tenant (sourced from config, not a re-hardcoded literal) for callers that
+// don't pass one — the sane-default `?? BEID` pattern is preserved.
+const BEID = BXR_ENTITY_ID;
 
 export interface AppealEvidence {
   matchClaimId: string;
@@ -39,34 +49,34 @@ export async function retrieveAppealEvidence(params: {
   const reader: Db = makeClient(readerUrl);
 
   try {
-    await reader.query("select set_config('app.business_entity_id', $1, false)", [beid]);
-
-    // Query claim signature (vector + the FTS text it would generate).
-    const q = await reader.query<{
-      payer: string; dense: string;
-      fts_text: string;
-    }>(
-      `select canonical_primary_payer_name as payer,
+    // Both reads share one tenant-scoped transaction on one client.
+    const fusedRows = await withTenant(reader, beid, async (client) => {
+      // Query claim signature (vector + the FTS text it would generate).
+      const q = await client.query<{
+        payer: string; dense: string;
+        fts_text: string;
+      }>(
+        `select canonical_primary_payer_name as payer,
               dense_embedding::text as dense,
               coalesce(canonical_primary_payer_name,'') || ' ' || coalesce(payer_family,'') || ' ' ||
               coalesce(cpt_code,'') || ' ' || coalesce(tob_raw,'') || ' ' ||
               coalesce(residual_type,'') as fts_text
          from staging.claim_signatures
         where business_entity_id = $1 and charge_debit_id = $2`,
-      [beid, params.queryClaimId],
-    );
-    const signature = q.rows[0];
-    if (!signature) return [];
-    const { payer, dense, fts_text } = signature;
+        [beid, params.queryClaimId],
+      );
+      const signature = q.rows[0];
+      if (!signature) return [];
+      const { payer, dense, fts_text } = signature;
 
-    // RRF fusion of dense ANN (top 50) and FTS (top 50), same-payer CLEAN pool.
-    const fused = await reader.query<{
-      charge_debit_id: string; rrf_score: string;
-      vector_rank: number | null; fts_rank: number | null;
-      match_outcome: string | null; match_payment_amt: string | null;
-      payer_name: string | null; cpt_code: string | null;
-    }>(
-      `with vector_ranked as (
+      // RRF fusion of dense ANN (top 50) and FTS (top 50), same-payer CLEAN pool.
+      const fused = await client.query<{
+        charge_debit_id: string; rrf_score: string;
+        vector_rank: number | null; fts_rank: number | null;
+        match_outcome: string | null; match_payment_amt: string | null;
+        payer_name: string | null; cpt_code: string | null;
+      }>(
+        `with vector_ranked as (
          select charge_debit_id,
                 row_number() over (order by dense_embedding <=> $2::halfvec) as vector_rank
            from staging.claim_signatures
@@ -98,10 +108,13 @@ export async function retrieveAppealEvidence(params: {
          left join staging.payment_residual pr
            on pr.business_entity_id = $1 and pr.charge_debit_id = r.charge_debit_id
         order by r.rrf_score desc limit $6`,
-      [beid, dense, payer, params.queryClaimId, fts_text, topN],
-    );
+        [beid, dense, payer, params.queryClaimId, fts_text, topN],
+      );
+      return fused.rows;
+    });
+    if (fusedRows.length === 0) return [];
 
-    const results: AppealEvidence[] = fused.rows.map((r) => ({
+    const results: AppealEvidence[] = fusedRows.map((r) => ({
       matchClaimId: r.charge_debit_id,
       rrfScore: Number(r.rrf_score),
       vectorRank: r.vector_rank,

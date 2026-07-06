@@ -14,8 +14,11 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { makeClient, type Db } from '../db.js';
 import { retrieveAppealEvidence } from '../brain3/hybrid_search.js';
+import { withTenant } from '../veris/withTenant.js';
+import { BXR_ENTITY_ID } from '../tenants.js';
 
-const BEID = 'af504ab6-3dcd-4aa4-a93c-27bc58de4088';
+// Default tenant when a caller does not specify one. No caller passes a business_entity_id
+// today (adviseCharge is CLI-only), so behavior is unchanged (BXR) unless one is passed.
 const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-opus-4-8';
 
 export type VerisAction = 'FIX_BEFORE_SEND' | 'INVESTIGATE_PAYER' | 'FILE_APPEAL' | 'MONITOR';
@@ -53,39 +56,47 @@ const TOOLS: Anthropic.Tool[] = [
       required: ['hcpcs_code'] } },
 ];
 
-async function readerScoped(): Promise<Db> {
+function readerPool(): Db {
   const url = process.env.CLAIMS_READER_DATABASE_URL;
   if (!url) throw new Error('Missing CLAIMS_READER_DATABASE_URL');
-  const db = makeClient(url);
-  await db.query("select set_config('app.business_entity_id', $1, false)", [BEID]);
-  return db;
+  return makeClient(url);
 }
 
-async function runTool(db: Db, name: string, input: any): Promise<unknown> {
+/**
+ * Each tenant-scoped tool read runs in its OWN withTenant transaction — the
+ * GUC is transaction-local, and no transaction is ever held open across the
+ * Anthropic call in the agent loop (S2 gate ruling: one withTenant per query
+ * batch, never per agent loop).
+ */
+async function runTool(db: Db, beid: string, name: string, input: any): Promise<unknown> {
   switch (name) {
-    case 'get_brain1_score': {
-      const r = await db.query(
-        `select p_paid, p_denied, p_partial, expected_days_to_pay, shap_top_feature,
-                shap_top_value, counterfactual_hint
-           from staging.brain1_scores
-          where business_entity_id = $1 and charge_debit_id = $2
-          order by scored_at desc limit 1`, [BEID, input.charge_debit_id]);
-      return r.rows[0] ?? null;
-    }
-    case 'get_brain2_alerts': {
-      const r = await db.query(
-        `select alert_type, prior_rate, post_rate, run_length_posterior,
-                similar_carc_cluster, plain_language, detected_at
-           from staging.brain2_alerts
-          where business_entity_id = $1 and payer_name = $2
-            and ($3::text is null or carc_code = $3) and acknowledged = false
-          order by detected_at desc`, [BEID, input.payer_name, input.carc_code ?? null]);
-      return r.rows;
-    }
+    case 'get_brain1_score':
+      return withTenant(db, beid, async (client) => {
+        const r = await client.query(
+          `select p_paid, p_denied, p_partial, expected_days_to_pay, shap_top_feature,
+                  shap_top_value, counterfactual_hint
+             from staging.brain1_scores
+            where business_entity_id = $1 and charge_debit_id = $2
+            order by scored_at desc limit 1`, [beid, input.charge_debit_id]);
+        return r.rows[0] ?? null;
+      });
+    case 'get_brain2_alerts':
+      return withTenant(db, beid, async (client) => {
+        const r = await client.query(
+          `select alert_type, prior_rate, post_rate, run_length_posterior,
+                  similar_carc_cluster, plain_language, detected_at
+             from staging.brain2_alerts
+            where business_entity_id = $1 and payer_name = $2
+              and ($3::text is null or carc_code = $3) and acknowledged = false
+            order by detected_at desc`, [beid, input.payer_name, input.carc_code ?? null]);
+        return r.rows;
+      });
     case 'get_brain3_evidence':
+      // Manages its own tenant-scoped transaction internally (hybrid_search.ts).
       return retrieveAppealEvidence({ queryClaimId: input.charge_debit_id,
-        businessEntityId: BEID, topN: input.top_n ?? 10 });
+        businessEntityId: beid, topN: input.top_n ?? 10 });
     case 'get_pfs_anchor': {
+      // ref.* is global (read-all RLS, not tenant-scoped) — no tenant txn needed.
       const r = await db.query(
         `select avg(facility_rate) as facility_rate, avg(non_facility_rate) as non_facility_rate,
                 avg(rvu_work) as rvu_work
@@ -97,9 +108,12 @@ async function runTool(db: Db, name: string, input: any): Promise<unknown> {
   }
 }
 
-export async function adviseCharge(chargeDebitId: string): Promise<VerisRecommendation> {
+export async function adviseCharge(
+  chargeDebitId: string,
+  businessEntityId: string = BXR_ENTITY_ID,
+): Promise<VerisRecommendation> {
   const client = new Anthropic();
-  const db = await readerScoped();
+  const db = readerPool();
   const used = { brain1_used: false, brain2_used: false, brain3_used: false };
   const messages: Anthropic.MessageParam[] = [
     { role: 'user', content: `Advise on charge ${chargeDebitId}. Call the tools, then reply ONLY ` +
@@ -128,7 +142,7 @@ export async function adviseCharge(chargeDebitId: string): Promise<VerisRecommen
         if (tu.name === 'get_brain1_score') used.brain1_used = true;
         if (tu.name === 'get_brain2_alerts') used.brain2_used = true;
         if (tu.name === 'get_brain3_evidence') used.brain3_used = true;
-        const out = await runTool(db, tu.name, tu.input);
+        const out = await runTool(db, businessEntityId, tu.name, tu.input);
         results.push({ type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(out) });
       }
       messages.push({ role: 'user', content: results });
@@ -140,7 +154,8 @@ export async function adviseCharge(chargeDebitId: string): Promise<VerisRecommen
 }
 
 if (process.argv[2]) {
-  adviseCharge(process.argv[2])
+  // Optional 2nd arg = business_entity_id (defaults to BXR when omitted).
+  adviseCharge(process.argv[2], process.argv[3] ?? BXR_ENTITY_ID)
     .then((r) => console.log(JSON.stringify(r, null, 2)))
     .catch((err) => { console.error('[veris_agent] failed:', err.message); process.exit(1); });
 }

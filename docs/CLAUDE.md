@@ -743,14 +743,33 @@ Source of truth for the RCM ML system. Lives in the `staging.*` / `ref.*` schema
 > session, so anything about live tables is last-known, not confirmed.
 
 ### Tenancy & connection
-- **Single tenant today:** `business_entity_id = af504ab6-3dcd-4aa4-a93c-27bc58de4088`
-  (BXR Consulting LLC, CMD account #475729). Scoped via GUC `app.business_entity_id`,
-  set transaction-locally (`set_config(..., true)`) and read with
-  `current_setting('app.business_entity_id')::uuid` in every RLS policy.
+- **Tenant registry is LIVE (Veris 014, applied 2026-07-03):** `core.business_entity`
+  holds EXACTLY two tenants — BXR Consulting `af504ab6-3dcd-4aa4-a93c-27bc58de4088`
+  (CMD account 475729) and Indigo Consulting `141d459c-f371-4229-9a92-ace198e940bb`
+  (474623) — plus `core.cmd_customer` (56 customers: 20 BXR / 36 Indigo). Both are
+  RLS self-scoped (USING + WITH CHECK), owned by `claims_admin`, seeded VERBATIM from
+  `src/tenants.ts` (canonical UUIDs — never re-mint). All tenant data is BXR's today;
+  Indigo is 0 rows everywhere (its empty state is the S2 isolation assertion).
+- Tenant scoping is via GUC `app.business_entity_id`, set TRANSACTION-locally
+  (`set_config(..., true)`) and read with
+  `current_setting('app.business_entity_id')::uuid` in every RLS policy. All
+  tenant-scoped code goes through **`src/veris/withTenant.ts`** (single client, one
+  txn; never `pool.query()` inside the callback; never a network call inside a txn) —
+  session-scoped `set_config(..., false)` is retired drift.
+- **`ref.*` is fully RLS-gated read-all (Veris 015, applied 2026-07-05):** all 13
+  `ref` tables have RLS enabled + `FOR SELECT USING(true)` policies — global
+  X12/CMS/NPPES/payer reference data, NEVER tenant-scoped. The 5 VOB-foundation
+  tables (dashboard 0010) are now owned by `claims_admin`. The master plan's
+  `0013_rls_remediation` thread is CLOSED.
+- **Apply-path privilege note (STANDING — do not revoke):** `apply_migration` runs as
+  `postgres`, a NON-superuser (with BYPASSRLS). `GRANT claims_admin TO postgres WITH
+  SET TRUE` is the intended posture: migrations create objects BORN OWNED via
+  `SET ROLE claims_admin` + `RESET ROLE`. Revoking the grant re-breaks the apply path
+  (SQLSTATE 42501). Details: veris-data-notes.md S2.
 - DB: project `dbpabchpvipipkzkogta`. Transaction pooler 6543 — no named prepared
   statements. Money is `numeric(12,2)`, never float. Timestamps `timestamptz`.
-- `claims_admin` owns `staging.*`/`ref.*` (writer; owner bypasses RLS for builds);
-  `claims_reader` has SELECT, RLS-scoped by `business_entity_id`.
+- `claims_admin` owns `staging.*`/`ref.*`/`core.*` (writer; owner bypasses RLS for
+  builds); `claims_reader` has SELECT, RLS-scoped by `business_entity_id`.
 
 ### Tables (schema verified in `SQL Schemas/001` + `005`)
 | Object | Grain / key | Notes |
@@ -849,7 +868,7 @@ entities WITHIN an account (supersedes the master plan's "tenant key is the 8-di
 customer number"). Ingest: BXR already runs on the CMD Web API path today (the
 cmd-explorer cron) — no Google-Sheets migration remains in this build. Migration
 numbering: dashboard = `supabase/migrations/00NN_*`, Veris = `SQL Schemas/0NN_*` (next
-Veris number: 014), never the same directory. Known accepted drift: `cmd_explorer_rows.
+Veris number: 020), never the same directory. Known accepted drift: `cmd_explorer_rows.
 business_entity_id` exists live (all rows BXR) from an uncommitted prior apply —
 record-and-leave; whichever later session finalizes collections' tenancy stance reconciles
 it deliberately. Verbatim answers, rosters, and live-DB verification: `docs/veris-data-notes.md`.

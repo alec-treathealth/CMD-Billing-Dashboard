@@ -342,3 +342,358 @@ session.
    per-tenant job (recorded, unanswered).
 4. `013_era_835_adjustment.sql` live-deployment state unverified (S8 concern).
 5. `supabaseCa()` ladder unit tests (above).
+
+---
+
+## S2 — Tenancy foundation & isolation test (2026-07-02)
+
+### Live-state verified (S2, read-only; `claims_reader` + GUC, verify-full TLS)
+
+- **`core` schema does NOT exist** (only `collections`/`staging`/`ref`) → 014 creates it.
+- **Every tenant-scoped `business_entity_id` column is `uuid NOT NULL`** — all 9
+  `staging.*` tables + `collections.cmd_explorer_rows` (default `'af504ab6…'::uuid`,
+  the recorded 0028 drift). **No `ref.*` table has `business_entity_id`** (ref is
+  global). ⟹ **`core.business_entity.id` MUST be `uuid PK`**, seeded verbatim (no
+  `gen_random_uuid()` default). `pgcrypto`/`uuid-ossp`/`vector` present.
+- **The staging tenancy layer is already 90% built** (migrations 001/005/010/011/012):
+  every staging table already has `business_entity_id uuid NOT NULL` + RLS enabled +
+  (mostly) tenant-leading indexes. **The real gaps: (a) NO FK to `core.business_entity`
+  (zero FKs reference core, zero FKs on any staging beid); (b) all 9 RLS policies are
+  `cmd=ALL`, `USING`-only, NO `WITH CHECK`.** So the master plan's "add business_entity_id
+  + backfill + NOT NULL" is a no-op; S2's staging work is FK + WITH CHECK + index-leadership.
+- **Master plan table list was incomplete** — it omitted `staging.payer_dim` and
+  `staging.era_adjustment` (both tenant-scoped; S2 includes all 9).
+- **Tenant data is BXR-only** (RLS-scoped counts): claim_line 150,900 · payment_residual
+  57,486 · payer_dim 286 · era_adjustment 65,615 · brain1_features 64,346;
+  brain1_scores/brain2_alerts/claim_signatures/appeal_evidence = 0. Indigo = 0 everywhere.
+  ⟹ FK ADD is safe once BXR is seeded (016 still carries an owner-run orphan pre-flight guard).
+- **12 ungated `ref.*` tables** (RLS disabled): the master plan's six
+  (`payer_alias, payers, plans, service_codes, diagnosis_codes, denial_codes`) PLUS
+  `carc_code, rarc_code, cms_pfs_rate, nppes_provider, carc_embeddings, rarc_embeddings`
+  (from committed 009/011). Only `ref.remittance_code` is gated. **None are tenant-scoped**
+  (global X12/CMS/NPPES/payer data) → remediation = enable RLS + `FOR SELECT USING(true)`,
+  never a tenancy column.
+- **§17 DRIFT — 5 undocumented ref tables** (`payers`, `plans`, `service_codes`,
+  `diagnosis_codes`, `denial_codes`): owner=`postgres`, ~empty, in **no committed
+  migration** (same provenance pattern as the 0028 column). Columns are simple
+  reference/dimension data (no `business_entity_id`). **Record-and-leave** (no drop);
+  015 reassigns them to `claims_admin` + gates them. `veris-runbook.md` §50 already
+  flagged these six as RLS-disabled and left them "decide separately" — S2 decides.
+- **Apply path = `apply_migration` (postgres/superuser level)** (per veris-runbook.md).
+  ⟹ `ALTER TABLE … OWNER TO claims_admin` on the 5 postgres-owned drift tables WILL
+  succeed. 015's header records this postgres-apply exception deliberately.
+- **GUC drift**: `veris_agent.ts:62` + `hybrid_search.ts:45` use `set_config(…, false)`
+  (SESSION-scoped) on dedicated short-lived connections — safe today, fragile on the
+  Supavisor pool. veris-runbook.md §96 states the intended standard is transaction-local
+  `set_config(…, true)`. S2's `withTenant` restores that standard.
+
+### S2 gate rulings (Alec, verbatim intent, 2026-07-02)
+
+- **014 APPROVED after two amendments** (applied): (1) rollback carries an ACTIVE guard
+  that queries `pg_constraint` for FKs referencing `core.business_entity` and RAISEs
+  naming offenders — a comment is not a guard. (2) Seed fails LOUD on identity mismatch:
+  `business_entity` conflict target is `(id)` only, same-account-different-uuid or
+  same-uuid-different-account RAISEs (never silent DO UPDATE); `cmd_customer` tenant
+  binding is immutable — a customer number under the wrong tenant RAISEs, only
+  `customer_name` may update on a matching-tenant re-run. Implemented via temp-table +
+  guard DO-blocks.
+- **019 ROADMAP CORRECTION — NO `BYPASSRLS`.** BYPASSRLS ignores every RLS policy on
+  every table the role can ever see (incl. future tables); a later `GRANT SELECT` would
+  silently widen the cross-tenant surface with zero diff on the function. The bypass must
+  be **enumerable per-table**: `consolidated_reader` is NOLOGIN, **no BYPASSRLS, no write
+  grants**; on ONLY the tables `core.consolidated_summary()` reads → `GRANT SELECT` +
+  explicit `CREATE POLICY … FOR SELECT TO consolidated_reader USING (true)`. Definer fn
+  owned by `consolidated_reader`, `search_path` pinned `pg_catalog` first, fixed SQL,
+  EXECUTE to nobody (S5 grants), aggregate-only PHI-denylisted return. `isolationProbe.ts`
+  asserts `consolidated_reader` is denied / sees zero rows on any staging table NOT in the
+  fn's enumerated read set.
+- **CADENCE — modified write-all:** (1) amend 014 → show → apply; (2) write 015 → show →
+  apply, then run the read-only ungated-ref-table count — **must be ZERO**; this closes the
+  master plan's original `0013_rls_remediation` thread completely; (3) THEN write 016–019 +
+  `src/veris/withTenant.ts` + `veris_agent.ts`/`hybrid_search.ts` refactors + hermetic
+  tests + `isolationProbe.ts` as ONE reviewable bundle against verified live state; apply in
+  order, HOLD before each apply.
+- **HARD SEQUENCING GUARD:** the `withTenant` refactor must be **committed, pushed, AND
+  verified running on the production deployment BEFORE 017 applies.** 017 is the moment
+  session-scoped GUCs become an active cross-tenant leak vector on the transaction pooler,
+  and code ships slower than SQL. If ordering gets tight, **017 waits. No exceptions.**
+- **`withTenant` implementation constraints:** single-client discipline — one `pool.connect()`,
+  `BEGIN` → `set_config('app.business_entity_id', $1, true)` → callback queries on that SAME
+  client → `COMMIT`; `ROLLBACK`+`release` in finally. **Never `pool.query()` inside** (each
+  can land on a different pooled connection, escaping the txn). GUC name is a fixed literal;
+  only the value is parameterized. **No network calls inside the txn** — `veris_agent.ts` must
+  never hold a txn open across an Anthropic call/tool turn; one `withTenant` per query batch,
+  never per agent loop. `isolationProbe.ts` asserts that after COMMIT
+  `current_setting('app.business_entity_id', true)` is empty (tests the pooler-leak class).
+
+### APPLY-PATH PRIVILEGE NOTE (deliberate, dated 2026-07-03)
+
+- **`apply_migration` runs as `postgres`, which on this project is NOT a superuser**
+  (`rolsuper=false`). It was a MEMBER of `claims_admin` with `admin_option=true` but
+  **`set_option=false`** — so under the Postgres 16 membership split it could NOT
+  `SET ROLE claims_admin`, and `ALTER … OWNER TO claims_admin` / `SET ROLE` both failed
+  `42501`. The first 014 apply hit this on `ALTER TABLE … OWNER TO claims_admin` and
+  **rolled back whole** (apply_migration is transactional — verified `core` absent after).
+- **Fix (Alec-approved, STANDING — do not revoke):** `GRANT claims_admin TO postgres
+  WITH SET TRUE;` (within postgres's existing `admin_option`). Verified
+  `pg_has_role('postgres','claims_admin','SET') = true`. **This is the intended apply
+  posture**: apply path = `postgres` with SET-capable membership in `claims_admin`; new
+  objects are **born owned** via `SET ROLE claims_admin` at the top of each migration +
+  `RESET ROLE` at the end (cleaner than post-hoc ALTER OWNER, and doesn't skip
+  already-existing objects the way IF NOT EXISTS would). Revoking reintroduces this exact
+  failure — leave it. (`pg_auth_members` shows 2 postgres→claims_admin rows from
+  multiple grantors; harmless.)
+- **015 is mixed-mode:** the 5 postgres-owned drift tables' `ALTER … OWNER TO
+  claims_admin` run AS postgres (only the current owner can transfer; the grant makes the
+  transfer target valid); all NEW objects/policies follow the born-owned `SET ROLE` pattern.
+
+### OWNERSHIP CENSUS (read-only, 2026-07-03) — for 016–018 (ALTER requires ownership)
+
+- **`staging.*` — all 9 owned by `claims_admin`** (appeal_evidence, brain1_features,
+  brain1_scores, brain2_alerts, claim_line, claim_signatures, era_adjustment, payer_dim,
+  payment_residual). 016/017/018 ALTER them via `SET ROLE claims_admin`. No surprise.
+- **`ref.*`**: `claims_admin` owns 8 (carc_code, carc_embeddings, cms_pfs_rate,
+  nppes_provider, payer_alias, rarc_code, rarc_embeddings, remittance_code);
+  **`postgres` owns 5** (denial_codes, diagnosis_codes, payers, plans, service_codes) —
+  the §17 drift tables 015 reassigns.
+- **`core.*`** (new): business_entity + cmd_customer owned by claims_admin.
+
+### 015 pre-apply preflight (2026-07-05) — writer inventory, ACL snapshot, apply probe
+
+- **§2 no-dynamic-SQL scope (ratified):** that rule governs the app/query/ETL path
+  (parameterized runtime queries), NOT fixed-list migration DDL. 015's `DO`-loop over a
+  hardcoded table array using `format(%I)` is allowed — no external input.
+- **CORRECTION to the S2 "5 drift tables" entry above:** `ref.payers/plans/service_codes/
+  diagnosis_codes/denial_codes` are **NOT lost-container drift** — they are the **VOB
+  FOUNDATION** tables created by `supabase/migrations/0010_vob_ai_foundation.sql`
+  (CLAUDE.md §12; runbook §50/§63). They are owner=postgres only because 0010 (unlike
+  009/011) never ran `ALTER OWNER`. The earlier "undocumented / no committed migration"
+  characterization was from not having read 0010 (a dashboard-sequence file) at that point.
+- **ref.* writer inventory (BLOCKING check — GREEN):** all code writers to the 12 tables
+  connect as **`claims_admin`** (`CLAIMS_ADMIN_DATABASE_URL`): loaders
+  `carc_rarc_refresh.ts` (carc_code/rarc_code), `cms_pfs_loader.ts` (cms_pfs_rate),
+  `nppes_loader.ts` (nppes_provider), `embed_carc.py` (carc/rarc_embeddings + carc_code
+  update), and the 005 seed (payer_alias). The 5 VOB tables have **zero** writers in code
+  (§12 groundwork). Post-015, claims_admin OWNS all 12 → bypasses RLS → every writer
+  survives. **No writer on claims_reader or any non-owner role; no lockout.**
+- **write-activity (pg_stat_user_tables):** only `payer_alias` has writes (262 ins = seed);
+  the other 11 are empty (0 ins/upd/del) — matches "deployed empty" (runbook) + VOB groundwork.
+- **ACL snapshot (rollback restore target):** 7 claims_admin tables =
+  `claims_admin=arwdDxtm` (owner) + `claims_reader=r`. 5 VOB tables = `postgres=arwdDxtm`
+  (owner) + `claims_reader=r` + **`claims_admin=arw`** (INSERT/SELECT/UPDATE, from 0010).
+  ⟹ 015 rollback FIXED: it must NOT revoke the 5's claims_reader SELECT (pre-dates 015);
+  rollback returns owner→postgres and re-asserts the 0010 grants. All 12 RLS=false pre-015.
+- **apply-path probe (reversible):** `SET ROLE claims_admin; COMMENT ON TABLE
+  ref.payer_alias IS '…'; RESET ROLE` succeeded as postgres, then restored to NULL. Proves
+  apply_migration (postgres + SET-capable claims_admin membership) can touch `ref.*` — the
+  same mechanism 015 §2 uses. No execute_sql fallback needed.
+- **anon/authenticated/service_role/PUBLIC:** 0010 revoked all on schema `ref`; 015's
+  read-all `USING(true)` does not widen exposure (those roles hold no table privilege).
+
+### 015 — APPLIED + VERIFIED (2026-07-05)
+
+`SQL Schemas/015_ref_rls_remediation.sql` applied via apply_migration. Post-apply:
+**ungated ref tables = 0** (closes the master plan's `0013_rls_remediation` thread
+completely); all **5 VOB tables now owner=claims_admin**; **13** `*_read_all` policies in
+`ref` (12 from 015 + the pre-existing `remittance_code_read_all` from 001);
+`claims_reader` SELECT true on all 12; anon/authenticated **cannot** read (0010 schema
+revoke holds). Rollback re-asserts 0010 grants (does not revoke). Every ref.* writer is
+claims_admin (owner → RLS-bypass) — no lockout.
+
+### S2 bundle pre-flight (2026-07-05, read-only as claims_reader + GUC, verify-full TLS)
+
+Grounds the 016–019 + withTenant bundle (authored this date, NOT yet applied):
+
+- **016 orphan pre-flight — GREEN on all 9 staging tables:** (a) every table has
+  `business_entity_id`; (b) NULL count = 0 **by validated constraint** (catalog
+  `attnotnull = t` on all 9 — definitive, grant-independent); (c) distinct values ⊆
+  the two ratified UUIDs, corroborated: BXR-GUC counts EXACTLY equal
+  `pg_stat_user_tables.n_live_tup` on every populated table (claim_line 150,900 ·
+  era_adjustment 65,615 · payment_residual 57,486 · brain1_features 64,346 ·
+  payer_dim 286; the other 4 are 0) and Indigo-GUC counts are 0 everywhere. The
+  definitive cross-tenant gate is 016's in-migration owner-run guard (RAISEs on any
+  NULL or out-of-registry value before ADD CONSTRAINT).
+- **017 guard — GREEN:** `relforcerowsecurity = f` on all 9 staging + both core
+  tables (claims_admin owner-bypass ingest survives WITH CHECK); 017 also
+  re-asserts this with an active in-migration guard. All 9 live policies confirmed
+  `ALL`/USING-only, `TO public`, exact same GUC predicate.
+- **018 index census:** non-tenant-leading btrees = idx_brain1_cpt / _dos /
+  _payer_family / _payer_name + idx_claim_sig_prefilter (fixed in 018, same names,
+  tenant-leading). DELIBERATELY untouched: the three single-column `claim_line_id`
+  FK-support indexes (era_adjustment / payment_residual / brain1_features) — FK
+  cascade/RESTRICT probes have no tenant qual; pkeys/UNIQUEs (identity); HNSW/GIN
+  (method can't lead with a btree column). `claim_signatures.model_version` absent
+  live → 018 adds it NOT NULL (table has 0 rows) + companion `claim_embedder.py`
+  patch stamps MODEL_NAME.
+- **`postgres` has `rolbypassrls = true`** (Supabase default; `claims_admin`/
+  `claims_reader` = false). Apply-path reads see ALL rows — that's what makes
+  in-migration guards definitive. `consolidated_reader` (019) is created NOLOGIN
+  **NOBYPASSRLS** with an ALTER ROLE re-assert on every re-run.
+- **019 enumerated read set (ratification target at HOLD — this list IS the policy
+  list):** `core.business_entity`, `staging.claim_line`, `staging.payment_residual`.
+  Nothing else. `GRANT consolidated_reader TO postgres WITH SET TRUE` is the 019
+  apply-path mirror of the standing claims_admin grant (postgres already bypasses
+  RLS — widens nothing; needed for ALTER FUNCTION OWNER + SET ROLE verification).
+- **013's era_835 table is NOT live** (staging has exactly the 9 tables + the
+  mv_payer_drift matview) — 016 scope confirmed; S8 concern unchanged.
+- **Working-tree flag:** `cd app && npm run typecheck` is RED on a PRE-EXISTING
+  uncommitted parallel-session edit — `<Analytics />` in `app/app/layout.tsx:98`
+  with no import (root package.json gained `@vercel/analytics`). Not S2 code. Root
+  typecheck clean; suite 262/262 green (incl. 7 new withTenant tests). Resolve or
+  hand back to the owning session BEFORE the withTenant push (both-typechecks gate).
+
+### S2 gate rulings at 016 release (Alec, 2026-07-05)
+
+- **019 combined-row label = `'CONSOLIDATED (ALL TENANTS)'`, never "Treat Health".**
+  §18 forbids Treat Health existing as a data-path entity string; five BXR facility
+  customers are named `TREAT MENTAL HEALTH *` and a result-set string would
+  pattern-match them. The surface is branded "Treat Health" at the UI layer (S10)
+  only — never in a result set. Rationale also recorded in 019's header.
+- **layout.tsx `<Analytics />` (parallel-session WIP): do NOT fix, do NOT wait.**
+  At the withTenant commit HOLD: `git stash` the uncommitted parallel edits → both
+  typechecks must be green against the clean state → surgical `git add` of exactly
+  the withTenant files → commit → `origin/main..HEAD` check → push → `git stash pop`
+  to restore the WIP untouched. If the pop conflicts, STOP and show Alec. The
+  Analytics import remains the owning session's to gate.
+- **017's landing gate is the probe:** apply 017 → `npm run probe:isolation` green →
+  only then is 017 landed and 019 released. If the probe reds, 017's rollback is the
+  immediate default unless the failure is provably probe-side; show Alec either way
+  before touching anything else.
+
+### Apply-path privilege model (consolidated entry — supersedes scattered notes)
+
+`postgres` — the `apply_migration`/`execute_sql` role — is a NON-superuser with
+`rolbypassrls = true` (Supabase default) and holds **SET-capable membership in every
+object-owning role**:
+
+| owning role | grant | purpose |
+|---|---|---|
+| `claims_admin` | `GRANT claims_admin TO postgres WITH SET TRUE` (S2, 2026-07-03) | born-owned objects via `SET ROLE`; ownership transfers |
+| `consolidated_reader` | `GRANT consolidated_reader TO postgres WITH SET TRUE` (019, approved 2026-07-05) | `ALTER FUNCTION OWNER`; idempotent re-runs; `SET ROLE` verification |
+
+Both grants are STANDING — revoking either re-breaks the apply path (42501).
+**Future object-owning roles follow the same pattern deliberately.** BYPASSRLS on
+postgres is also what makes in-migration data guards (016 orphan guard) definitive.
+
+### Live user-access pre-flight before 017 (2026-07-05 — VERIFIED, per Alec's order)
+
+Question: tenant-scoped user access controls are live today (RBAC, migration 0025) —
+does ANY live user path read `staging.*` or set/depend on `app.business_entity_id`?
+
+**Answer: NO — verified, not carried.** Enumerated against DEPLOYED `origin/main`
+and the working tree:
+- `staging.*` in app-reachable code (`app/`, `src/queries`, `src/routes`,
+  `src/collections`, `src/agent` minus veris_agent): **prose comments only**
+  (`app/lib/views.ts` lines 92/98; `cmdCustomers.ts` comments in the working tree).
+- `app.business_entity_id` set/read in app-reachable code: **comment only**
+  (`views.ts:91`). The only code that sets/reads the GUC is Veris-side CLI/ETL —
+  `veris_agent.ts`, `hybrid_search.ts`, `brain1/2/3` Python, the `SQL Schemas/`
+  ETL scripts — none deployed as routes.
+- RBAC entity users read `claims.*`/`collections.*` through Server Actions;
+  `viewToEntityIds()` is consumed by dashboard components as plain id arrays
+  (carried-but-not-consumed for filtering; no GUC, no staging).
+
+⟹ 017's WITH CHECK change touches zero live user traffic. Its only runtime writers
+are owner-path (claims_admin, RLS-bypassed). PROCEED ruling satisfied.
+
+### Stash-protocol dry-run finding (2026-07-05, before the withTenant commit HOLD)
+
+Dry-run of the ruled stash protocol (stash parallel WIP → gates → pop; pop was
+clean): root+app typecheck and 1 test go RED on the clean tree — but every failure
+is in the **untracked 835 WIP** (`src/ingest/era_ingest.ts`, `test/era835.test.ts`),
+which depends on the PARALLEL-SESSION `cmdCustomers.ts` edit (`businessEntityId` on
+`CmdCustomer`) that the stash removes. Zero failures in the withTenant set. The
+untracked 835 files are invisible to git and won't ship with the commit — so the
+honest push gate is the PUSHED TREE (origin/main + exactly the commit set),
+verified in a temporary git worktree; the stash is then needed only around the
+`git add`/commit itself. Shown to Alec at the withTenant commit HOLD.
+
+### 019 — APPLIED + LANDED (2026-07-06; S2 landing gate GREEN)
+
+Applied via apply_migration on the **third attempt** — two transactional whole-rollbacks,
+both root-caused and fixed in the artifact: (1) 0A000, expression ORDER BY directly on a
+UNION → subquery wrap, semantics unchanged; (2) 42501 "permission denied for schema core"
+at `ALTER FUNCTION … OWNER TO consolidated_reader` — the NEW owner needs CREATE on the
+schema → transient `GRANT CREATE ON SCHEMA core` around the owner transfer, revoked
+same-transaction (end state USAGE-only, verified `core_create=false`).
+
+**Apply-time block (all live-verified):** consolidated_reader = NOLOGIN / NOBYPASSRLS;
+fn = SECURITY DEFINER, `search_path=pg_catalog`, owner consolidated_reader, ACL
+owner-only (`{consolidated_reader=X/consolidated_reader}`); positive aggregates: BXR
+150,900 lines / $625,933,638.28 billed / $187,278,601.18 primary paid / 25,989 open
+residuals; Indigo all-zero; combined row `CONSOLIDATED (ALL TENANTS)` (beid NULL) = sums;
+outside-set denial 42501; claims_reader EXECUTE denied 42501.
+
+**Landing gate (2026-07-06):** shell probe **29 PASS / 0 FAIL** (former SKIP #1 —
+consolidated fn assertions — converted to PASS in-probe). Former SKIP #2 (positive
+consolidated branch) converted via the **management-API leg** (execute_sql as postgres →
+SET ROLE consolidated_reader; OAuth, zero password handling — Alec-approved "option 1",
+2026-07-06): 3-row positive result matching the shell probe's BXR counts run minutes
+apart, outside-set denial 42501. Distinction recorded: those two assertions passed via an
+equivalent credentialed path, not the probe's own socket; the probe's env-gated branch
+stays dormant until a real credential exists (option 2, `veris_probe` SCRAM role, is the
+durable follow-up if scheduled probes are wanted).
+
+**§2 cron guard post-redeploy:** run at 07:00:26 UTC 2026-07-06 on the new deployment
+(dpl_CBs4Wh2bRBAMUjyvaSh7d8RQEg8C) → 200, customers 15/15, failed 0.
+
+**Secrets facts (learned the hard way):** ALL Supabase-integration + sensitive Vercel
+vars are WRITE-ONLY (env pull returns empty — old CLI 54.17.2 returns empty for
+everything; use vercel@latest). `VERIS_POSTGRES_DATABASE_URL` exists in Vercel
+(Production+Preview, sensitive) but its value is UNVALIDATED (write-only) and the local
+`.env` copy FAILED auth (wrong password or URL-encoding) — ⚠️ the `.env` line is stale
+and should be corrected or removed; the working landing path needs neither.
+
+### ⚠️ S2 CODE IS COMMITTED NOWHERE (2026-07-06 — top S3 blocker)
+
+Fresh-fetch verified: `origin/main` = `e8c503f`; every prod deployment builds it. The
+ENTIRE S2 bundle — src/veris/ (withTenant, probe), src/tenants.ts, the
+veris_agent/hybrid_search refactors, claim_embedder patch, SQL Schemas 014–019 +
+rollbacks, these notes, the CLAUDE.md §17/§18 patch — exists ONLY in this working tree.
+The 017 hard guard's commit+push leg was therefore NOT satisfied when 017 applied (the
+prod-verify that actually happened was the probe running local code against the prod DB;
+the deployed app touches neither staging.* nor the GUC, so no live exposure — but the
+container-loss risk (§17 lesson) is MAXIMAL until the surgical commit lands). The
+commit set is staged-by-list (worktree-verified: both typechecks clean, 251/251 on
+exactly that tree); push awaits Alec's HOLD release.
+
+### 017 — APPLIED + LANDED (2026-07-05; landing gate = isolation probe, GREEN)
+
+Applied via apply_migration after the hard sequencing guard was satisfied
+(withTenant committed + pushed + prod-verified: cron green + live BXR probe read).
+Pre-deploy live re-verification: request path = `claims_reader` (rolbypassrls=f,
+SELECT-only on all 9, zero non-owner write grants anywhere in staging);
+`service_role` has BYPASSRLS but ZERO reach (no USAGE on staging/core — proven);
+apply-path model unchanged. Structural verify: 9 policies, USING + WITH CHECK
+present and IDENTICAL (`qual = with_check` = t × 9), cmd=ALL, names unchanged.
+**Landing gate: `npx tsx src/veris/isolationProbe.ts` = 27 PASS / 0 FAIL** — no-GUC
+fails closed (42704), BXR sees exactly its counts + 20 customers, Indigo sees ZERO
+on all 9 surfaces + 36 customers, Indigo ANN empty, post-COMMIT GUC empty. 2 SKIPs,
+both declared pre-run and both pre-019: consolidated_summary absent (function not
+deployed) and the consolidated-positive branch env-gated off (no
+VERIS_POSTGRES_DATABASE_URL) — covered by 019's apply-time verification block.
+**Honesty note:** 017 has no behavioral delta today (no non-owner write privilege
+exists; FOR ALL USING-only already implicitly gated writes) — it is a posture
+migration: explicit WITH CHECK survives policy reshapes and pre-arms the S6 writer
+role. First behavioral exercise arrives with S6. 019 is RELEASED by this gate per
+Alec's 016-release ruling (separate HOLD still applies).
+
+### 016 — APPLIED + VERIFIED (2026-07-05)
+
+`SQL Schemas/016_staging_fk_tenancy.sql` applied via apply_migration (in-migration
+orphan guard passed: zero NULLs, zero out-of-registry values, owner-run/BYPASSRLS —
+definitive). Post-apply verify (claims_reader, catalog): **exactly 9 FKs** from
+staging.* onto `core.business_entity(id)`, **all `convalidated = t`**, all
+`ON DELETE RESTRICT`, named `<table>_business_entity_id_fkey`. A phantom-tenant
+UUID can no longer enter any staging table. Rollback on file
+(`016_staging_fk_tenancy_rollback.sql`, drops the 9 FKs only).
+
+### 014 — APPLIED + VERIFIED (2026-07-03, born-owned)
+
+`SQL Schemas/014_core_business_entity.sql` applied via apply_migration. Four-point
+verify: entities=2, customers=56 (BXR 20 / Indigo 36), 0 rows outside the two ratified
+UUIDs; both core tables owner=claims_admin, RLS enabled; policies `ALL` with USING +
+WITH CHECK; grants = claims_admin (owner) + claims_reader SELECT, nothing to
+anon/authenticated/PUBLIC. `core.cmd_customer` FK → `core.business_entity` ON DELETE
+RESTRICT. Rollback carries an active pg_constraint guard; seed carries fail-loud identity
+guards (temp-table + RAISE).

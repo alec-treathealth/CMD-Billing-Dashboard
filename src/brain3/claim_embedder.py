@@ -87,7 +87,8 @@ def main():
                      r.canonical_primary_payer_name, r.payer_family, r.cpt_code, r.tob_raw,
                      r.claim_facility_id, int(r.outcome_class), r.residual_type,
                      r.charge_amount_bucket, vec_literal(dense[i]),
-                     Json({str(k): float(v) for k, v in (sparse[i] or {}).items()})))
+                     Json({str(k): float(v) for k, v in (sparse[i] or {}).items()}),
+                     MODEL_NAME))
 
     admin = psycopg2.connect(os.environ["CLAIMS_ADMIN_DATABASE_URL"])
     try:
@@ -98,12 +99,13 @@ def main():
                        (business_entity_id, charge_debit_id, claim_line_id,
                         canonical_primary_payer_name, payer_family, cpt_code, tob_raw,
                         claim_facility_id, outcome_class, residual_type, charge_amount_bucket,
-                        dense_embedding, sparse_weights) values %s
+                        dense_embedding, sparse_weights, model_version) values %s
                        on conflict (business_entity_id, charge_debit_id) do update set
                          dense_embedding = excluded.dense_embedding,
-                         sparse_weights = excluded.sparse_weights, embedded_at = now()""",
+                         sparse_weights = excluded.sparse_weights,
+                         model_version = excluded.model_version, embedded_at = now()""",
                     rows[j:j + 500],
-                    template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::halfvec,%s)")
+                    template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::halfvec,%s,%s)")
         admin.commit()
     finally:
         admin.close()
