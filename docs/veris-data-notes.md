@@ -799,3 +799,23 @@ separate go required** (his ruling 2026-07-06: "hold on 0008 keep it gated").
 - **.env hygiene (still Alec's):** lines 15/22/24 are unquoted and break naive
   `source`; the stale `VERIS_POSTGRES_DATABASE_URL` line persists. Extract single
   vars with grep until cleaned.
+
+### 0008 — RE-APPLIED FOR PROVENANCE + CONCURRENT REFRESH VERIFIED (2026-07-06)
+
+Re-applied via apply_migration, byte-identical to `SQL Schemas/008_brain2_drift_mv.sql`
+at `fef840b` (pre-apply diff working-tree-vs-commit: clean; last file change 8fa6f19,
+the reviewed version). Live state is now provably BYTE-DERIVED from the committed
+artifact, not merely consistent with a lost-container apply. No deployed reader
+touches the MV (zero `mv_payer_drift` refs in app-reachable code) — no disruption
+window. `REFRESH MATERIALIZED VIEW CONCURRENTLY` ran clean as claims_admin (~1s,
+separate autocommit statement — cannot run inside the apply txn). Post-refresh:
+**114 rows, distribution IDENTICAL to baseline** (NEW_PAYER 41 · LIKELY_LAG_ARTIFACT
+27 · INCREASING 21 · DECREASING 15 · NEW_CODE 10 — expected: staging source unchanged
+since the 2026-06-23 batch), all 3 indexes intact incl. `uq_mv_payer_drift`, owner
+claims_admin, ACL = owner + claims_reader SELECT. Verified against the JUST-APPLIED
+live definition (pg_matviews, not the file): zero hardcoded UUIDs; era_adjustment
+join carries `AND ea.business_entity_id = s.business_entity_id` (tenant-safe).
+Isolation probe fresh pre-apply: 29/0/1. **Index-grain tripwire STILL LIVE:**
+`uq_mv_payer_drift` omits `payer_family` while the MV groups by it — payer_family is
+functionally dependent on payer_name today; if ref.payer_alias ever maps one name to
+two families, REFRESH CONCURRENTLY breaks (treat as a data-quality signal).
