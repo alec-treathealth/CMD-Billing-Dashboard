@@ -697,3 +697,105 @@ WITH CHECK; grants = claims_admin (owner) + claims_reader SELECT, nothing to
 anon/authenticated/PUBLIC. `core.cmd_customer` FK → `core.business_entity` ON DELETE
 RESTRICT. Rollback carries an active pg_constraint guard; seed carries fail-loud identity
 guards (temp-table + RAISE).
+
+---
+
+## S3 — brain1_features backfill (migration 020) & ratified feature-surface contract (2026-07-06)
+
+### RATIFIED (Alec, 2026-07-06): staging.brain1_features is the FULL FEATURE SURFACE
+
+`staging.brain1_features` is NOT the labeled-training subset. Un-adjudicated rows
+(`outcome='PENDING'`, `residual_type IS NULL`, `label_is_terminal=false`) are valid
+state — present as features, awaiting a residual-derived label as claims adjudicate.
+Backfills/reconciliations are therefore ADDITIVE/UPSERT-ONLY, never delete-and-replace;
+labeling is monotonic (a labeled row never flips back to PENDING); post-adjudication
+values never land on a PENDING row. The training subset is selected downstream
+(live schema already agrees: partial index `idx_brain1_trainset … WHERE
+(is_training_eligible AND label_is_terminal)`). Prior to this entry the contract was
+unwritten (docs silent; schema implied it) — do not re-litigate.
+
+### 64,346 vs 57,486 — forensic classification (read-only, BYPASSRLS path, 2026-07-06)
+
+Exact accounting, zero residual: 57,486 rows in the S1-ratified INNER JOIN population
+(pr.claim_line_id = cl.id) + 6,860 rows with NO matching payment_residual + 0 non-BXR +
+0 NULL claim_line_id = 64,346. All 6,860 extras are uniformly `PENDING/NULL/false`
+(6,857 training-eligible / 3 not). Zero duplicate claim_line_ids; zero population rows
+missing from the table. The S2 recorded figure 64,346 is CORRECT as table state — it
+never claimed to be the join population count.
+
+### Upsert key ruling (Option A, Alec 2026-07-06)
+
+The backfill/cron upsert target is the EXISTING `UNIQUE (business_entity_id,
+charge_debit_id)` — §17's documented grain. There is NO unique constraint on
+(business_entity_id, claim_line_id) (plain index + FK only; uniqueness there is
+empirical, not enforced) and none is added. No prerequisite migration needed.
+
+### Label mapping — reconstructed EMPIRICALLY, 0 mismatches on all 57,486 (2026-07-06)
+
+Original build SQL lost with a prior container (single build, built_at 2026-06-22).
+Verified-exact semantics, now canonical in `SQL Schemas/020_etl_backfill.sql` +
+`src/veris/etl_backfill.ts`:
+- `outcome`: CLEAN→PAID · ALLOWED_GAP→PARTIAL · MATH_GAP→PARTIAL ·
+  BALANCE_DUE_INSURANCE→DENIED (all `label_is_terminal=true`); no residual → PENDING.
+- **`days_to_pay` = `payment_received_date - charge_from_date`, NULL when negative
+  (105 such rows live; CHECK days_to_pay>=0). SUPERSEDES the master plan's
+  `primary_payment_date` assumption — payment_received_date is the source.**
+- `was_underpayment` = `residual_type IN ('ALLOWED_GAP','BALANCE_DUE_INSURANCE')`.
+- `net_underpayment_amt` = allowed_gap (ALLOWED_GAP) · balance_due_insurance
+  (BALANCE_DUE_INSURANCE) · else 0. `allowed_amount` = pr.allowed_amount.
+- Features copy 1:1 from claim_line except: payer_type←current_payer_type;
+  network_status/participates_in_era←payer_dim via cl.payer_dim_id;
+  diagnosis_pointer_count←cardinality(string_to_array(diagnosis_pointer_list,','));
+  dos←charge_from_date (+EXTRACT y/m/dow); billed_amount←charge_amount. All 26
+  derivations verified 0-mismatch before authoring.
+
+### Migration numbering note
+
+The master plan's "0012_etl_backfill" landed as **020** (S1 mapping rule: 0012 takes
+the next free Veris number; 012 was taken/live). Artifacts:
+`SQL Schemas/020_etl_backfill.sql` + `020_etl_backfill_rollback.sql`. Next Veris
+number: **021**.
+
+### 020 — APPLIED + LOADER RUN + CONSERVATION GATE GREEN (2026-07-06)
+
+Applied via apply_migration (first attempt, guards passed). Apply-time DML: **0
+inserted / 0 label-updated** — live state already matched the ratified mapping exactly
+(expected-vs-actual: exact). `staging.etl_backfill_020_undo` created (claims_admin
+owner, RLS USING+WITH CHECK, FK→core.business_entity), 0 undo rows. Loader
+`etl_backfill.ts --tenant=bxr --commit`: source 57,486, 0/0, **all 8 conservation
+gates PASS** (G1 completeness 0/57,486 · G2 label correctness 0 · G3 monotonic
+stateless+stateful 0 · G4 pending-clean + pending-preserved 0 · G5 no-dupes 0 ·
+G6 Indigo zero). Expected-vs-actual regime is CONSERVATION, not count-equality
+(table is legitimately a superset: 57,486 labeled ⊂ 64,346 surface; 1% stop-tolerance
+applies ONLY to G1/G2 labeled-population drift). Post-ETL isolation probe fresh,
+own-socket: **29 PASS / 0 FAIL / 1 declared SKIP**. Suite 269/269 (incl. 7 new
+hermetic PHI-firewall tests, test/etlBackfill.test.ts); root typecheck clean; app
+typecheck red ONLY on the parallel session's known `<Analytics/>` line. NOT
+committed/pushed (separate gate). Rollback honesty: the undo table covers 020's
+apply-time DML only; loader runs are forward-only reconciliation.
+
+### 0008 / mv_payer_drift — ALREADY LIVE (corrects CLAUDE.md §17 "not yet deployed")
+
+`staging.mv_payer_drift` EXISTS live: owner claims_admin, populated, 114 rows,
+computed_at 2026-06-23 (same day 009–012 deployed), all 3 indexes incl.
+`uq_mv_payer_drift`, live params CTE verbatim-identical to the file
+(60/120/30/5/0.05/0.50). Status dist: NEW_PAYER 41 · LIKELY_LAG_ARTIFACT 27 ·
+INCREASING 21 · DECREASING 15 · NEW_CODE 10. §17's "not yet deployed to the DB" is
+STALE — the S2 pre-flight note ("9 tables + the mv_payer_drift matview") was right.
+File review found NO hardcoded UUIDs (re-verified against the artifact). The
+re-apply-for-provenance + CONCURRENTLY refresh remains **GATED — Alec's explicit
+separate go required** (his ruling 2026-07-06: "hold on 0008 keep it gated").
+
+### Watch items (S3)
+
+- **0008 index-grain tripwire:** `uq_mv_payer_drift` omits `payer_family` while the
+  MV GROUPs BY it. If one payer_name ever maps to two families via ref.payer_alias,
+  REFRESH CONCURRENTLY breaks. Today family is functionally dependent on name —
+  treat a failure there as a data-quality signal, not an index bug.
+- **isolationProbe env coupling:** the probe requires `CLAIMS_ADMIN_DATABASE_URL`
+  present in-env even for its reader-context run (`hybrid_search.ts:48` checks both
+  URLs) — export BOTH or it dies after the Indigo registry assertions with
+  "Missing CLAIMS_*_DATABASE_URL".
+- **.env hygiene (still Alec's):** lines 15/22/24 are unquoted and break naive
+  `source`; the stale `VERIS_POSTGRES_DATABASE_URL` line persists. Extract single
+  vars with grep until cleaned.
