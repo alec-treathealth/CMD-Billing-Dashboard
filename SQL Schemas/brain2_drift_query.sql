@@ -20,11 +20,20 @@
 -- caller's tenant via the app.business_entity_id GUC, set transaction-locally per
 -- the project convention. Run inside a transaction so SET LOCAL applies.
 
+-- Tenant scope is a BOUND psql variable, not a hardcoded literal. Invoke for a specific
+-- tenant with, e.g.:
+--   psql -v business_entity_id="141d459c-f371-4229-9a92-ace198e940bb" -f brain2_drift_query.sql
+-- When unset it DEFAULTS to BXR (af504ab6…), so running the file plainly is byte-identical
+-- to before. (\if/\set are psql client meta-commands; they run regardless of the BEGIN below.)
+\if :{?business_entity_id}
+\else
+  \set business_entity_id 'af504ab6-3dcd-4aa4-a93c-27bc58de4088'
+\endif
+
 BEGIN;
 
--- Single-tenant today: BXR Consulting LLC. Replace when scoping another tenant,
--- or have the app set this from the session before running.
-SELECT set_config('app.business_entity_id', 'af504ab6-3dcd-4aa4-a93c-27bc58de4088', true);
+-- Scope the session to the chosen tenant (SET LOCAL; the read below sees this GUC).
+SELECT set_config('app.business_entity_id', :'business_entity_id', true);
 
 SELECT
   d.payer_name,
