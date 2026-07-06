@@ -325,6 +325,14 @@ export function parseReportCsv(text: string): CmdReportRow[] {
   return out;
 }
 
+/** Raw unzip of a CMD payload → per-entry filename + bytes. Exposed so the 835 ERA
+ *  download path (src/collections/cmd835.ts) reuses the SAME dependency-free reader
+ *  (STORE + DEFLATE, ZIP64 rejected) instead of a second copy. */
+export type CmdZipEntry = { name: string; data: Buffer };
+export function readZipEntries(zip: Buffer): CmdZipEntry[] {
+  return readZip(zip);
+}
+
 /** Unzip a CMD report payload and parse every .csv entry into row objects. */
 export function readReportRows(zip: Buffer): CmdReportRow[] {
   const entries = readZip(zip);

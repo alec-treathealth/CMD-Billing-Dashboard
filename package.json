@@ -15,7 +15,9 @@
     "ingest:cmd-payer": "tsx src/collections/cmdPayerIngest.ts",
     "ingest:cmd-explorer": "tsx src/collections/cmdExplorerSeed.ts",
     "ingest:cmd-daily": "tsx src/collections/cmdDailyBackfill.ts",
+    "ingest:era-835": "tsx src/ingest/era_ingest.ts",
     "dbcheck": "tsx src/dbcheck.ts",
+    "probe:isolation": "tsx src/veris/isolationProbe.ts",
     "test": "node --import tsx --test test/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
