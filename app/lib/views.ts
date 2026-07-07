@@ -87,9 +87,9 @@ export function resolveView(
 // `viewToEntityIds` maps a view to the business_entity_id(s) its data lives under, and is
 // the ONE place that decision lives. As of the collections-tenancy work (0028 on
 // cmd_explorer_rows; 0030 on daily_collections + cmd_payer_facility_monthly) the
-// collections.* tables carry business_entity_id, and the explorer readers scope by these
-// ids server-side (app/lib/actions.ts explorerEntityScope). The aggregate overview readers
-// are being taught to scope next (review finding #1); when they are, they consume THIS
+// collections.* tables carry business_entity_id, and BOTH the explorer readers AND the aggregate
+// overview readers (summary/kpis/daily/payer/freshness) scope by these ids server-side via
+// app/lib/actions.ts viewEntityScope (review finding #1 — landed). Every reader consumes THIS
 // function — the view→entity decision stays here and only here.
 //
 // Both UUIDs are FIXED, business-owner-confirmed constants — never regenerate. They MUST

@@ -64,6 +64,13 @@ export function LegendSwatch({ color, label }: { color: string; label: string })
  *
  * Exported but not rendered on the collections page (superseded by the unified
  * CollectionsView); kept available in case another surface needs the latest-month summary.
+ *
+ * PARKED — TENANT-SCOPE BEFORE REVIVING: this and the sibling parked widgets
+ * (CollectionsKpisWidget, CollectionsExplorer) call the view-scoped load* actions WITHOUT a
+ * `view`. Because `view?` is optional they compile, but with no view the action falls back to the
+ * caller's FULL entitlement (allowedViews[0] → 'consolidated' for a super-admin), so a revived
+ * widget would ignore the page's ?view= and render consolidated data. Thread the active `view`
+ * (as OverviewKpis/CollectionsView do) before mounting any of these. Tracked for the step-5 UI pass.
  */
 export function CollectionsSummaryWidget() {
   const state = useWidget<CollectionsMonthlySummary>(loadCollectionsSummary);
