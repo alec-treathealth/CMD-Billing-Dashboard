@@ -449,13 +449,18 @@ function AllFacilitiesTable({
 
   return (
     <div className="space-y-3">
+      {/* Filled with the active view's brand color for discoverability. --brand-ink is dark in all
+          three views (teal/navy/purple), so white text stays legible everywhere (unlike
+          --brand-accent, which is gold for BXR). A brand-accent ring marks the expanded state. */}
       <Button
         type="button"
         variant="outline"
         size="sm"
         onClick={() => setOpen((s) => !s)}
         aria-expanded={open}
-        className={open ? 'border-[var(--brand-accent)] text-[var(--brand-ink)]' : undefined}
+        className={`border-[var(--brand-ink)] bg-[var(--brand-ink)] text-white hover:bg-[var(--brand-ink)] hover:text-white hover:opacity-90 ${
+          open ? 'ring-2 ring-[var(--brand-accent)] ring-offset-1' : ''
+        }`}
       >
         <Table2 className="h-4 w-4" />
         All Facilities Table
