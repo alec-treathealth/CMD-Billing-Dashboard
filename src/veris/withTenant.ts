@@ -53,6 +53,19 @@ export async function withTenant<T>(
   try {
     await client.query('BEGIN');
     await client.query(`select set_config('${TENANT_GUC}', $1, true)`, [businessEntityId]);
+    // Read-back verification: confirm the GUC actually took on THIS pooled backend before any
+    // tenant-scoped query runs. On the 6543 transaction pooler a different backend can serve each
+    // transaction; this is an EARLY, CLEAR abort if set_config didn't apply — in ADDITION to (not
+    // instead of) the RLS WITH CHECK that DB-enforces the tenant on every write (RLS enforces; the
+    // read-back diagnoses). A mismatch throws → the finally block ROLLs back (fail-closed).
+    const readback = await client.query<{ v: string | null }>(
+      `select current_setting('${TENANT_GUC}', true) as v`,
+    );
+    if (readback.rows[0]?.v !== businessEntityId) {
+      throw new Error(
+        'withTenant: tenant GUC read-back mismatch — refusing to run under an unset/wrong tenant scope',
+      );
+    }
     const result = await fn(client);
     await client.query('COMMIT');
     committed = true;
