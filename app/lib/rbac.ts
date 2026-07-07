@@ -12,7 +12,7 @@
  *   • admin   + entity   — that entity's view only; may reveal PHI; may manage users.
  *   • user    + entity   — that entity's view only; NON-PHI only (no PHI reveal, no user mgmt).
  */
-import { ALL_VIEWS, DEFAULT_VIEW, type DashboardView } from './views';
+import { ALL_VIEWS, type DashboardView } from './views';
 
 export type Role = 'super_admin' | 'admin' | 'user';
 export type Entity = 'bxr' | 'indigo';
@@ -25,14 +25,16 @@ const ENTITY_VIEW: Record<Entity, DashboardView> = {
 
 /**
  * Views a (role, entity) may select. super_admin sees all three (incl. Consolidated = BXR+Indigo);
- * an entity-scoped role sees ONLY its entity's view. The list is non-empty and its first element is
- * that user's effective default (used by clampView). An admin/user is always entity-scoped per the
- * DB CHECK, so the empty-entity branch is an unreachable safe fallback.
+ * an entity-scoped role sees ONLY its entity's view; the first element is that user's effective
+ * default (used by clampView). An admin/user is always entity-scoped per the app_user CHECK, so
+ * the entity-less branch is unreachable — but it FAILS CLOSED (empty list, NOT DEFAULT_VIEW).
+ * DEFAULT_VIEW is 'consolidated' (cross-tenant); returning it for a misconfigured entity-scoped
+ * role would silently grant BXR+Indigo. Every consumer treats an empty allowlist as "deny".
  */
 export function allowedViewsFor(role: Role, entity: Entity | null): DashboardView[] {
   if (role === 'super_admin') return [...ALL_VIEWS];
   if (entity) return [ENTITY_VIEW[entity]];
-  return [DEFAULT_VIEW];
+  return [];
 }
 
 /** Admins and super-admins may unmask patient identifiers; plain users may not. */

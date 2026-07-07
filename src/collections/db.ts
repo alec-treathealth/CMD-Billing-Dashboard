@@ -14,6 +14,7 @@
  */
 import pg from 'pg';
 import { sanitizeConnectionString, verifyFullSsl } from '../ssl.js';
+import { withTenant } from '../veris/withTenant.js';
 import type { CmdDailyDeposit } from './cmdExplorer.js';
 import type { DailyRow, NegotiationRow, PaymentLineRow, RawRecord, RollupRow } from './types.js';
 
@@ -81,8 +82,16 @@ export function insertDaily(db: Queryable, items: { rawId: number; row: DailyRow
   const rows = items.map(({ rawId, row }) => [rawId, row.facility_code, row.source_group_code, row.payment_date, row.checks_amount, row.eft_amount, row.gross_amount, row.source_tag]);
   // Bucket key now includes source_tag (migration 0014), so workbook + deposit_sheet
   // rows for the same facility-day coexist; the resolved view picks one for display.
+  //
+  // TARGETLESS on conflict (migration-B era, 2026-07-06): the collections_daily_bucket
+  // unique index gains business_entity_id (migration 0031), and a COLUMN-LIST conflict
+  // target must match a unique index EXACTLY — a targetless DO NOTHING matches ANY unique
+  // violation, so this frozen BXR-only workbook CLI works under BOTH index shapes (the
+  // only other unique index is the bigserial pkey, which fresh inserts can never hit).
+  // business_entity_id is NOT stamped here: the column's DEFAULT (BXR) covers this
+  // claims_admin-path CLI; the tenant-parameterized paths stamp it explicitly.
   return insertBatched(db, DAILY_COLS, 'collections.daily_collections',
-    'on conflict (facility_code, source_group_code, payment_date, source_tag) do nothing', rows);
+    'on conflict do nothing', rows);
 }
 
 const PL_COLS = ['collections_raw_id', 'facility_code', 'source_group_code', 'service_date', 'payment_date', 'cpt_code', 'revenue_code', 'patient_name', 'patient_last', 'patient_first', 'member_id_raw', 'member_id_norm', 'group_number', 'charge_amount', 'allowed_amount', 'insurance_paid', 'adjustment', 'balance_due_pt', 'payer_name', 'recon_ok', 'paid_gt_allowed'] as const;
@@ -108,12 +117,29 @@ export function insertRollup(db: Db, items: { rawId: number; row: RollupRow }[])
 // by aggregateDailyDeposits). collections_raw_id is NULL (migration 0022 made it nullable):
 // these rows do NOT derive from a collections_raw landing row, so the writer never touches the
 // PHI-bearing collections_raw table. source_group_code is NULL (a real facility, not lineage).
-const CMD_DAILY_COLS = ['collections_raw_id', 'facility_code', 'source_group_code', 'payment_date', 'checks_amount', 'eft_amount', 'gross_amount', 'source_tag'] as const;
+// business_entity_id is stamped EXPLICITLY per tenant (migration-B era) — the DEFAULT (BXR) is
+// a safety net, not the mechanism, so the Indigo path can never silently inherit BXR's tag.
+const CMD_DAILY_COLS = ['collections_raw_id', 'facility_code', 'source_group_code', 'payment_date', 'checks_amount', 'eft_amount', 'gross_amount', 'source_tag', 'business_entity_id'] as const;
 
 /**
  * Re-source ONE facility's CMD daily deposits, transactionally (idempotent, partial-safe).
- * Within ONE transaction: DELETE this facility's prior source_tag='cmd' rows WITHIN THE PULLED
- * payment_date SPAN, then INSERT the freshly aggregated facility-day deposits.
+ * Within ONE tenant-scoped transaction (withTenant: BEGIN → transaction-local
+ * set_config('app.business_entity_id', $1, true) → queries on that same client → COMMIT):
+ * DELETE this facility's prior source_tag='cmd' rows WITHIN THE PULLED payment_date SPAN,
+ * then INSERT the freshly aggregated facility-day deposits, stamped with the tenant id.
+ *
+ * TENANT SCOPING (migration-B era, 2026-07-06): both legs are tenant-scoped. The DELETE
+ * carries `business_entity_id = $4` — facility-name disjointness across tenants is believed
+ * true but is NOT the isolation mechanism; without the explicit predicate a colliding
+ * facility_code would let one tenant's refresh erase another's rows. The INSERT stamps
+ * business_entity_id explicitly. The GUC set by withTenant is what migration C's writer
+ * policies will enforce (WITH CHECK business_entity_id = current_setting(...)::uuid).
+ *
+ * TARGETLESS on conflict: collections_daily_bucket gains business_entity_id in migration
+ * 0031, and a column-list conflict target must match a unique index exactly — targetless
+ * DO NOTHING works under BOTH index shapes, making the code deploy and the 0031 apply
+ * order-independent (no mixed state errors the cron). The only other unique index is the
+ * bigserial pkey, which fresh inserts can never violate.
  *
  * WHY the span scope (not a facility-wide wipe): the cron's saved CMD filter windows on a
  * ROLLING window (current-month payment-received), so a run only re-supplies rows for that
@@ -134,10 +160,9 @@ export async function replaceCmdDailyForFacility(
   db: Db,
   facilityCode: string,
   rows: CmdDailyDeposit[],
+  businessEntityId: string,
 ): Promise<{ deleted: number; inserted: number }> {
-  const client = await db.connect();
-  try {
-    await client.query('begin');
+  return withTenant(db, businessEntityId, async (client) => {
     // Delete only within the pulled payment_date span (ISO 'YYYY-MM-DD' sorts chronologically).
     // No rows ⇒ no delete, so an empty window never erases the facility's earlier history.
     let deleted = 0;
@@ -149,27 +174,21 @@ export async function replaceCmdDailyForFacility(
         if (r.payment_date > maxDate) maxDate = r.payment_date;
       }
       const del = await client.query(
-        "delete from collections.daily_collections where source_tag = 'cmd' and facility_code = $1 and payment_date between $2 and $3",
-        [facilityCode, minDate, maxDate],
+        "delete from collections.daily_collections where source_tag = 'cmd' and facility_code = $1 and payment_date between $2 and $3 and business_entity_id = $4",
+        [facilityCode, minDate, maxDate, businessEntityId],
       );
       deleted = del.rowCount ?? 0;
     }
-    const tuples = rows.map((r) => [null, r.facility_code, null, r.payment_date, r.checks_amount, r.eft_amount, r.gross_amount, 'cmd']);
+    const tuples = rows.map((r) => [null, r.facility_code, null, r.payment_date, r.checks_amount, r.eft_amount, r.gross_amount, 'cmd', businessEntityId]);
     const inserted = tuples.length === 0
       ? 0
       : await insertBatched(
           client,
           CMD_DAILY_COLS,
           'collections.daily_collections',
-          'on conflict (facility_code, source_group_code, payment_date, source_tag) do nothing',
+          'on conflict do nothing',
           tuples,
         );
-    await client.query('commit');
     return { deleted, inserted };
-  } catch (err) {
-    await client.query('rollback');
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
 }

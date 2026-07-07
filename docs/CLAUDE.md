@@ -319,6 +319,15 @@ Until all three ship, Indigo rows would commingle with BXR in shared tables with
 on the Collections tab, All Facilities table, and Master chart, regardless of `?view=`. Follow-up:
 **collections per-row tenancy (migration 0028)** — see §15.
 
+**⚠️ GUARDRAIL BEING EXECUTED — REOPENED 2026-07-06 (Alec, deliberate ADR reopening; see §18's
+2026-07-06 amendment + `docs/veris-data-notes.md`).** This BXR-only guardrail is now being SATISFIED,
+not held: collections becomes multi-tenant by BUILDING its three conditions (per-row
+`business_entity_id` + backfill/fingerprint on all three tables · tenant RLS + writer GUC · every
+reader filtering by entity) with full S2-grade discipline, THEN loading Indigo. The guardrail's core
+intent — **no Indigo rows in shared tables until end-to-end isolation is proven** — STILL HOLDS and
+gates the load. Note the prose above is pre-0028 and now stale in two places: `cmd_explorer_rows` HAS
+`business_entity_id` (0028, live) and 0027/0028 ARE committed (`77cc3be`), not "registry only".
+
 **REMOVED:** the deposit Google-Sheet ingest (`depositSheet*.ts`, `DEPOSIT_SHEET_ID`,
 `replaceDepositSheetDaily`, `ingest:deposit`, `source_tag='deposit_sheet'` rows).
 
@@ -664,6 +673,13 @@ yet** — it is groundwork.
   0027/0028 stay shelved and uncommitted (0027's registry was never applied live; 0028's
   `business_entity_id` column IS live on `cmd_explorer_rows` — recorded drift, record-and-leave,
   see `docs/veris-data-notes.md`). Do not build this item without re-opening the ADR with Alec.
+  **REOPENED 2026-07-06 (Alec):** the ADR WAS reopened, deliberately — this item is now IN PROGRESS,
+  not deferred. See §18's 2026-07-06 amendment + `docs/veris-data-notes.md` ("ADR REOPENED:
+  collections tenancy"). Accurate state (corrects the "shelved and uncommitted" line just above):
+  0027 (registry) **committed** (`77cc3be`) but NOT applied live; 0028 (`cmd_explorer_rows.
+  business_entity_id`) **committed AND live**. Remaining reopened scope — `daily_collections`/`cpfm`
+  columns+RLS+tenant-leading indexes, writer GUC, reader scoping, Indigo adapter/load, claims-UI
+  pause — is built under HOLD gates with S2-grade discipline.
 - **`readmission_candidates` performance (open).** The full-population self-join
   times out (>90s → 500), even date-scoped to one quarter with a 30-day gap. The
   quick-question button is intentionally omitted. A real fix is query-layer work
@@ -872,3 +888,27 @@ Veris number: 020), never the same directory. Known accepted drift: `cmd_explore
 business_entity_id` exists live (all rows BXR) from an uncommitted prior apply —
 record-and-leave; whichever later session finalizes collections' tenancy stance reconciles
 it deliberately. Verbatim answers, rosters, and live-DB verification: `docs/veris-data-notes.md`.
+
+### ADR AMENDMENT (2026-07-06) — collections tenancy REOPENED; CMD-Billing-Dashboard becomes multi-tenant on the COLLECTIONS plane
+
+Alec DELIBERATELY reopened the shelved 0027/0028 direction, with fresh-ADR rigor — this amends
+(does not accidentally drift from) the 2026-07-02 ADR above. NEW decision, superseding "CMD-
+Billing-Dashboard stays single-tenant" **for the collections plane only**:
+
+- The `collections.*` dashboard plane becomes MULTI-TENANT (BXR + Indigo) via per-row
+  `business_entity_id` + tenant-scoped RLS + reader/writer scoping — built with full S2-grade
+  discipline (RLS, composite indexes leading with the tenant column, per-migration rollback,
+  writer-path isolation test) because it touches the **production-critical BXR collections cron**.
+- The Indigo Seed Data CSV (a CMD **Explorer** export, collections-shaped) renders on the Indigo
+  collections/overview page — NOT the Veris claims plane. Fingerprint grain is CORRECT for this
+  paid-activity Explorer data (not a compromise).
+- The Veris CLAIMS plane (`staging.*`, brains) is **PAUSED, not abandoned**; its claims-facing UI
+  comes down (paused). brain1/2/3 stay OFF; S4 deferred; S3 landed.
+- UNCHANGED: the two-tenant registry (BXR/Indigo canonical UUIDs, never re-mint); "Treat Health"/
+  Consolidated stays super-admin-only and never a `business_entity` row; the claims/query library's
+  locked PHI semantics stay untouched (this touches `collections.*`, not `claims.*`).
+- Correcting STALE text below: §7/§15 say 0027/0028 are "shelved and uncommitted" — they are
+  **committed** (`77cc3be`). 0027 registry committed-but-**unapplied**; 0028 column committed **+live**.
+
+Full reasoning, live-state verification, and the gated build sequence: `docs/veris-data-notes.md`
+→ "ADR REOPENED: collections tenancy (0027/0028 completion)" (2026-07-06).

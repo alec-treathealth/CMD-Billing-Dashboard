@@ -104,10 +104,14 @@ export function computeFreshnessWarnings(input: {
   return warnings;
 }
 
-/** One CMD customer account to pull (== one facility). */
+/** One CMD customer account to pull (== one facility). Optionally carries its OWN owning
+ *  tenant (src/collections/cmdCustomers.ts stamps every entry): when present it OVERRIDES the
+ *  run-level deps.businessEntityId, so a mixed-tenant roster tags each customer's rows to the
+ *  correct tenant instead of a single global stamp. Omitted → the run-level default applies. */
 export interface CmdCustomerTarget {
   customerId: string;
   facilityCode: string;
+  businessEntityId?: string;
 }
 
 export interface CmdExplorerCronDeps {
@@ -117,6 +121,12 @@ export interface CmdExplorerCronDeps {
   fetchRows: (customerId: string) => Promise<CmdReportRow[]>;
   /** Least-privilege writer pool (cmd_rollup_writer), injected by the composition root. */
   writeDb: Db;
+  /** Run-level DEFAULT tenant, used for any customer that doesn't carry its own
+   *  businessEntityId (BXR for the production cron — the roster is CMD_EXPLORER_CUSTOMERS =
+   *  BXR only). A customer's own businessEntityId, when present, overrides this. Whichever
+   *  wins is stamped on every insert and scoped into every delete + the transaction GUC
+   *  (withTenant) — never inferred from the data. */
+  businessEntityId: string;
   /** Bust the explorer's non-PHI cache after a successful pass. In prod: () => revalidateTag('cmd-explorer'). */
   revalidate?: () => void | Promise<void>;
   /** Bust the dashboard aggregate cache (Master BXR chart). In prod: () => revalidateTag('dashboard-aggregates'). */
@@ -181,7 +191,11 @@ export async function cmdExplorerCron(deps: CmdExplorerCronDeps): Promise<CmdExp
     freshness_warnings: [],
   };
 
-  for (const { customerId, facilityCode } of deps.customers) {
+  for (const target of deps.customers) {
+    const { customerId, facilityCode } = target;
+    // Per-customer tenant wins over the run-level default, so a mixed-tenant roster never
+    // mis-stamps one tenant's rows with another's id.
+    const entityId = target.businessEntityId ?? deps.businessEntityId;
     if (now() - started > budgetMs) {
       stats.customers_skipped_budget += 1;
       continue;
@@ -205,11 +219,11 @@ export async function cmdExplorerCron(deps: CmdExplorerCronDeps): Promise<CmdExp
           byFingerprint.set(result.row.row_fingerprint, result.row);
         }
       }
-      stats.charge_inserted += await insertRows(deps.writeDb, [...byFingerprint.values()]);
+      stats.charge_inserted += await insertRows(deps.writeDb, [...byFingerprint.values()], entityId);
 
       // Check+EFT deposits → daily_collections (source_tag='cmd'), per-facility replace.
       const daily = aggregateDailyDeposits(reportRows, facilityCode);
-      const { deleted, inserted } = await replaceCmdDailyForFacility(deps.writeDb, facilityCode, daily);
+      const { deleted, inserted } = await replaceCmdDailyForFacility(deps.writeDb, facilityCode, daily, entityId);
       stats.daily_rows_deleted += deleted;
       stats.daily_rows_inserted += inserted;
 

@@ -29,7 +29,8 @@ export interface Access {
   user: ExecutiveUser | null;
   role: Role;
   entity: Entity | null;
-  /** Views this principal may select (non-empty; first element is their default). */
+  /** Views this principal may select; first element is their default. EMPTY means "no
+   *  entitlement" (a misconfigured entity-scoped role) — every consumer fails closed on it. */
   allowedViews: DashboardView[];
   /** May unmask patient identifiers (admins + super-admins). */
   canRevealPhi: boolean;

@@ -10,6 +10,10 @@ data/
 # deliberately-non-PHI csv.
 Derek Historical Report Data/
 Indigo Cron Job/
+# Indigo Seed Data/ holds REAL Indigo patient PHI (CMD batch-dump CSV export). Load into
+# Supabase staging.* only — NEVER commit. Its CSVs are already caught by *.csv below; this
+# explicit folder entry guards any non-CSV file dropped there (mirrors the two folders above).
+Indigo Seed Data/
 *.csv
 .env
 .env.*

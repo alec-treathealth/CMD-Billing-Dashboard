@@ -22,6 +22,7 @@ import { CMD_EXPLORER_CUSTOMERS } from './cmdCustomers.js';
 import { cmdReportRows, type CmdApiConfig } from './cmdPayer.js';
 import { encryptPhi } from './phiCrypto.js';
 import { makeClient } from './db.js';
+import { BXR_ENTITY_ID } from '../tenants.js';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -114,6 +115,7 @@ async function main(): Promise<void> {
       customers: CMD_EXPLORER_CUSTOMERS,
       fetchRows: (customerId) => cmdReportRows({ ...base, customerId }),
       writeDb,
+      businessEntityId: BXR_ENTITY_ID, // roster is CMD_EXPLORER_CUSTOMERS = BXR-only
       budgetMs: Number.MAX_SAFE_INTEGER, // local backfill: no wall-clock guard
     });
     console.log('COMMIT stats:', JSON.stringify(stats, null, 2));

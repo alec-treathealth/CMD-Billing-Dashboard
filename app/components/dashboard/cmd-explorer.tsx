@@ -27,6 +27,7 @@ import {
   type CmdExplorerSort,
 } from '@/lib/actions';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../../src/collections/cmdExplorer';
+import type { DashboardView } from '@/lib/views';
 
 type ColKey =
   | keyof Omit<CmdExplorerRow, 'id' | 'ingested_at'>
@@ -80,7 +81,13 @@ function formatMoney(s: string | null): string {
   return Number.isFinite(n) ? MONEY.format(n) : s;
 }
 
-export function CmdCollectionsExplorer({ canRevealPhi }: { canRevealPhi: boolean }) {
+export function CmdCollectionsExplorer({
+  view,
+  canRevealPhi,
+}: {
+  view: DashboardView;
+  canRevealPhi: boolean;
+}) {
   const [rows, setRows] = useState<CmdExplorerRow[]>([]);
   const [status, setStatus] = useState<'loading' | 'error' | 'ready'>('loading');
 
@@ -90,6 +97,18 @@ export function CmdCollectionsExplorer({ canRevealPhi }: { canRevealPhi: boolean
   const [year, setYear] = useState(YEAR_OPTIONS[0]!);
   const [month, setMonth] = useState(0); // 0 = All months
   const [facilityOptions, setFacilityOptions] = useState<string[]>([]);
+
+  // Facility vocabulary is tenant-specific: a facility selected under one view (tenant) is
+  // meaningless under another and would filter the grid to zero rows (the value lingers even
+  // though it is absent from the new view's options). Reset it DURING render when the view
+  // changes (React's "adjust state on prop change" pattern) so the reload effect below runs
+  // once with the cleared filter — no stale-facility fetch. Month/Year are tenant-agnostic and
+  // intentionally preserved.
+  const [prevView, setPrevView] = useState(view);
+  if (view !== prevView) {
+    setPrevView(view);
+    setFacility('');
+  }
 
   // Server-side sort. Default: most-recent Payment Received first. Only the two date columns and
   // the five money columns are sortable (SORTABLE_KEYS); clicking a sortable header toggles
@@ -141,7 +160,7 @@ export function CmdCollectionsExplorer({ canRevealPhi }: { canRevealPhi: boolean
       setRevealing(false);
       setRevealError(null);
       try {
-        const res: CmdReportResult = await loadCmdReport(cursor, filter, sortArg);
+        const res: CmdReportResult = await loadCmdReport(cursor, filter, sortArg, view);
         if (myReq !== reqRef.current) return; // a newer navigation superseded this load
         if (!res.ok) {
           setStatus('error');
@@ -161,13 +180,14 @@ export function CmdCollectionsExplorer({ canRevealPhi }: { canRevealPhi: boolean
         if (myReq === reqRef.current) setStatus('error');
       }
     },
-    [],
+    [view],
   );
 
-  // Facility options for the filter (the explorer's own facility vocabulary), once on mount.
+  // Facility options for the filter (the explorer's own facility vocabulary). Reloads when the
+  // view changes so the filter lists only the selected tenant's facilities.
   useEffect(() => {
     let live = true;
-    loadCmdExplorerFacilities()
+    loadCmdExplorerFacilities(view)
       .then((r) => {
         if (live && r.ok) setFacilityOptions(r.facilities);
       })
@@ -175,7 +195,7 @@ export function CmdCollectionsExplorer({ canRevealPhi }: { canRevealPhi: boolean
     return () => {
       live = false;
     };
-  }, []);
+  }, [view]);
 
   // (Re)load the first page whenever the filter OR sort changes (resets keyset pagination).
   useEffect(() => {

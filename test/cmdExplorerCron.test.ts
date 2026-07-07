@@ -13,6 +13,7 @@ import {
   type CmdCustomerTarget,
 } from '../src/collections/cmdExplorerCron.js';
 import type { Db } from '../src/collections/db.js';
+import { BXR_ENTITY_ID } from '../src/tenants.js';
 
 const isoMs = (d: string): number => Date.parse(`${d}T00:00:00Z`);
 
@@ -65,6 +66,7 @@ test('cmdExplorerCron: isolates a failing customer and processes the rest; reval
       return [depositRow('06/01/2026', '$100.00', '$0.00')];
     },
     writeDb: fake.db,
+    businessEntityId: BXR_ENTITY_ID,
     revalidate: () => { revalidated = true; },
     revalidateDashboard: () => { dashboardRevalidated = true; },
   });
@@ -90,6 +92,7 @@ test('cmdExplorerCron: wall-clock guard stops launching new customers past the b
     customers: CUSTOMERS,
     fetchRows: async () => { fetched += 1; return [depositRow('06/02/2026', '$10.00', '$0.00')]; },
     writeDb: fake.db,
+    businessEntityId: BXR_ENTITY_ID,
     now,
     budgetMs: 100,
   });
@@ -105,6 +108,7 @@ test('cmdExplorerCron: no successful customers → no revalidation', async () =>
     customers: [{ customerId: '9', facilityCode: 'CAMH' }],
     fetchRows: async () => { throw new Error('boom'); },
     writeDb: fake.db,
+    businessEntityId: BXR_ENTITY_ID,
     revalidate: () => { revalidated = true; },
   });
   assert.equal(stats.customers_processed, 0);
@@ -121,6 +125,7 @@ test('cmdExplorerCron: tracks newest payment_date and emits no warning when fres
       depositRow('06/29/2026', '$20.00', '$0.00'),
     ],
     writeDb: fake.db,
+    businessEntityId: BXR_ENTITY_ID,
     now: () => isoMs('2026-07-01'), // 2 days after the newest payment
     filterWindowEnd: '2027-06-30',
   });

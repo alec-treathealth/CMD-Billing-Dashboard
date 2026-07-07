@@ -74,6 +74,9 @@ export interface RefreshDeps {
   fetchRows: () => Promise<CmdReportRow[]>;
   /** Least-privilege writer pool (cmd_rollup_writer). */
   writeDb: Db;
+  /** Tenant this refresh writes for (BXR for the production cron — the report config is
+   *  BXR's). Stamped on inserts, scoped into the month-bucket DELETE + the txn GUC. */
+  businessEntityId: string;
   /** Defaults to `new Date()`. Injected for deterministic tests. */
   now?: Date;
   /** Defaults to DEFAULT_WINDOW_SIZE. */
@@ -101,7 +104,7 @@ export async function refreshCmdPayerRollup(deps: RefreshDeps): Promise<RefreshS
   const rows = await deps.fetchRows();
   const { tuples } = aggregateRollup(rows);
   const scoped = filterTuplesToWindow(tuples, months);
-  const written = await writeRollup(deps.writeDb, scoped);
+  const written = await writeRollup(deps.writeDb, scoped, deps.businessEntityId);
   return {
     months: [...new Set(scoped.map(monthKey))].sort(),
     rows_fetched: rows.length,

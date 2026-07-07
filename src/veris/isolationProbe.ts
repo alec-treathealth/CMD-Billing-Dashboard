@@ -31,6 +31,7 @@ import { makeClient, type Db } from '../db.js';
 import { withTenant, TENANT_GUC } from './withTenant.js';
 import { retrieveAppealEvidence } from '../brain3/hybrid_search.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../tenants.js';
+import { resolveVerisScope } from './tenantScope.js';
 
 // Fixed table list — identifiers are string literals, never interpolated input.
 const STAGING_TABLES = [
@@ -192,6 +193,66 @@ async function main(): Promise<void> {
         client.release();
         await su.end();
       }
+    }
+
+    // ---- 7. Authenticated-path isolation (S5): scope resolved from role+entity, ----
+    // never from client input. Drives the SAME pure resolver a Veris Server Action uses
+    // (src/veris/tenantScope), then runs the resolved scope through withTenant and asserts
+    // row visibility. This is the isolation test "through the authenticated path".
+    const bxrClaimLine = bxr['claim_line'] ?? -1;   // BXR's real count (150,900)
+    const indClaimLine = ind['claim_line'] ?? -1;   // Indigo's count (0 until S7 load)
+
+    // admin@bxr → BXR scope, sees BXR's rows.
+    {
+      const r = resolveVerisScope('admin', 'bxr');
+      const scopedId = r.ok && r.scope.mode === 'tenant' ? r.scope.entityId : '';
+      check('auth-path: admin@bxr resolves to BXR scope', scopedId === BXR_ENTITY_ID);
+      // No `|| BXR_ENTITY_ID` fallback: the count MUST run under the resolver's OWN output, so a
+      // resolver that returns the wrong/empty id fails the probe instead of being papered over.
+      const c = await countsUnderTenant(db, scopedId);
+      check('auth-path: admin@bxr sees BXR claim_line', c['claim_line'] === bxrClaimLine,
+        `count=${c['claim_line']}`);
+    }
+
+    // SECURITY: admin@bxr requesting the indigo view is STILL scoped to BXR (no rescope).
+    {
+      const r = resolveVerisScope('admin', 'bxr', 'indigo');
+      const scopedId = r.ok && r.scope.mode === 'tenant' ? r.scope.entityId : '';
+      check('auth-path: forged view cannot rescope admin@bxr → indigo', scopedId === BXR_ENTITY_ID,
+        r.ok ? `anomaly=${r.anomaly ?? 'none'}` : 'resolver denied');
+      const c = await countsUnderTenant(db, scopedId);
+      check('auth-path: admin@bxr + forged indigo view still sees BXR (not Indigo)',
+        c['claim_line'] === bxrClaimLine, `count=${c['claim_line']}`);
+    }
+
+    // SECURITY: user@indigo requesting the bxr view is STILL scoped to Indigo → ZERO BXR rows.
+    {
+      const r = resolveVerisScope('user', 'indigo', 'bxr');
+      const scopedId = r.ok && r.scope.mode === 'tenant' ? r.scope.entityId : '';
+      check('auth-path: forged view cannot rescope user@indigo → bxr', scopedId === INDIGO_ENTITY_ID);
+      const c = await countsUnderTenant(db, scopedId);
+      check('auth-path: user@indigo + forged bxr view sees ZERO claim_line (isolation)',
+        c['claim_line'] === 0 && c['claim_line'] === indClaimLine, `count=${c['claim_line']}`);
+    }
+
+    // super_admin switches between tenants (within full entitlement); default = consolidated.
+    {
+      const bxrView = resolveVerisScope('super_admin', null, 'bxr');
+      const indView = resolveVerisScope('super_admin', null, 'indigo');
+      const conView = resolveVerisScope('super_admin', null);
+      check('auth-path: super_admin → bxr resolves to BXR scope',
+        bxrView.ok && bxrView.scope.mode === 'tenant' && bxrView.scope.entityId === BXR_ENTITY_ID);
+      check('auth-path: super_admin → indigo resolves to Indigo scope',
+        indView.ok && indView.scope.mode === 'tenant' && indView.scope.entityId === INDIGO_ENTITY_ID);
+      check('auth-path: super_admin default → consolidated scope',
+        conView.ok && conView.scope.mode === 'consolidated');
+    }
+
+    // Defensive: a tenant-scoped role with no entity fails closed (the claims.app_user
+    // CHECK prevents this; the resolver still refuses to invent a scope).
+    {
+      const r = resolveVerisScope('admin', null);
+      check('auth-path: tenant-scoped role with no entity fails closed', r.ok === false);
     }
   } finally {
     await db.end();

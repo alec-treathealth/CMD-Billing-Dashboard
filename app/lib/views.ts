@@ -81,54 +81,39 @@ export function resolveView(
 }
 
 // ===========================================================================
-// THE ONE DATA SEAM — change ONLY this when real Indigo data is wired in.
+// THE DATA SEAM — view → business_entity_id(s). BOTH tenants are now real.
 // ===========================================================================
 //
-// `viewToEntityIds` maps a view to the business_entity_id(s) its data lives under.
+// `viewToEntityIds` maps a view to the business_entity_id(s) its data lives under, and is
+// the ONE place that decision lives. As of the collections-tenancy work (0028 on
+// cmd_explorer_rows; 0030 on daily_collections + cmd_payer_facility_monthly) the
+// collections.* tables carry business_entity_id, and the explorer readers scope by these
+// ids server-side (app/lib/actions.ts explorerEntityScope). The aggregate overview readers
+// are being taught to scope next (review finding #1); when they are, they consume THIS
+// function — the view→entity decision stays here and only here.
 //
-// IMPORTANT — current reality (verified against the live repo, 2026-06-29):
-//   • The dashboard overview reads the `claims` / `collections` schemas, which have
-//     NO `business_entity_id` column and NO GUC scoping (the `app.business_entity_id`
-//     GUC + set_config pattern exists ONLY in the unrelated `staging.*`/`ref.*` ML
-//     pipeline, which the dashboard never reads). So these entity ids are CARRIED
-//     through the UI as the scoping seam but are NOT YET CONSUMED by any reader.
-//   • There is NO separate Indigo business_entity_id anywhere in the repo. The Indigo
-//     ETL (SQL Schemas/004) ingests under CMD_BUSINESS_ENTITY_ID — which is the BXR
-//     UUID — and distinguishes Indigo only by source_type='INDIGO_CLAIMS', and only
-//     in staging.claim_line (not in the dashboard's tables). So `INDIGO_ENTITY_ID` is
-//     a documented placeholder (null), NOT a real UUID — do not invent one.
-//
-// Until Indigo data is ingested into the dashboard's data source, indigo and
-// consolidated both resolve to BXR-or-stub (i.e. just [BXR]) — every view renders
-// BXR data. When the real data layer lands:
-//   1. set INDIGO_ENTITY_ID to Indigo's real business_entity_id,
-//   2. have viewToEntityIds return it for 'indigo' / 'consolidated', and
-//   3. teach the dashboard readers to scope by these ids (add a tenant column /
-//      WHERE filter, or a GUC) — that wiring belongs at the readers, but the
-//      view→entity decision belongs HERE and ONLY here.
+// Both UUIDs are FIXED, business-owner-confirmed constants — never regenerate. They MUST
+// equal the src-side source of truth in src/tenants.ts (the app/ side cannot import from
+// src/, so each keeps its own copy); test/tenantIdParity.test.ts locks the two together.
 
-/** BXR Consulting LLC (CMD account #475729) — the only real tenant today. */
+/** BXR Consulting LLC (CMD account #475729). */
 export const BXR_ENTITY_ID = 'af504ab6-3dcd-4aa4-a93c-27bc58de4088';
 
-/**
- * Indigo's business_entity_id — UNKNOWN. No definitive Indigo UUID exists in the
- * repo (see the seam note above); left null rather than inventing one. Set this to
- * the real UUID when Indigo data is onboarded.
- */
-export const INDIGO_ENTITY_ID: string | null = null;
+/** Indigo Billing (CMD account #474623) — the second real tenant (collections plane). */
+export const INDIGO_ENTITY_ID = '141d459c-f371-4229-9a92-ace198e940bb';
 
 /**
- * The view → business_entity_id(s) resolver. De-duplicated; null placeholders are
- * dropped (so consolidated == [BXR] today, [BXR, INDIGO] once INDIGO_ENTITY_ID is set).
+ * The view → business_entity_id(s) resolver. 'bxr'/'indigo' resolve to their single tenant;
+ * 'consolidated' = both tenants summed (a super-admin-only surface). De-duplicated so two
+ * constants accidentally set equal can never double-count.
  */
 export function viewToEntityIds(view: DashboardView): string[] {
-  const ids: (string | null)[] =
-    view === 'bxr'
-      ? [BXR_ENTITY_ID]
-      : view === 'indigo'
-        ? // STUB: no Indigo entity/data yet → render BXR data until the data layer lands.
-          [INDIGO_ENTITY_ID ?? BXR_ENTITY_ID]
-        : // consolidated = BXR + Indigo summed (Indigo is a no-op placeholder for now).
-          [BXR_ENTITY_ID, INDIGO_ENTITY_ID];
-  return [...new Set(ids.filter((id): id is string => id !== null))];
+  switch (view) {
+    case 'bxr':
+      return [BXR_ENTITY_ID];
+    case 'indigo':
+      return [INDIGO_ENTITY_ID];
+    case 'consolidated':
+      return [...new Set([BXR_ENTITY_ID, INDIGO_ENTITY_ID])];
+  }
 }

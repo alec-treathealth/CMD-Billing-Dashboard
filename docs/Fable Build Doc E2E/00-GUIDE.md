@@ -38,6 +38,17 @@ PG-A → S1 → S2 → S3 → S4 ─────────────┐
                                               └→ S11        S12
 ```
 
+> **⚠️ EXECUTION-ORDER DEVIATION (annotated 2026-07-06 — table left AS PLANNED below).**
+> Actual build order diverged from this table for S3–S6. S3 (ETL + reference data) LANDED
+> (migrations 016–020 + CARC/RARC/CMS-PFS ref loaders). S5/S6 were then run COMPRESSED and
+> resequenced AHEAD of S4, to load Indigo's real data into `staging.*` under auth +
+> isolation without waiting on the ML runtime. **S4 (Python ML runtime / brain training)
+> is deliberately DEFERRED; brains 1/2/3 stay OFF.** The Indigo RENDER surface was carved
+> out for a separate later decision (Option 3) — NOT the CMD dashboard (that would reopen
+> the S1 ADR). Full reasoning + rulings: `docs/veris-data-notes.md` →
+> "S5/S6 (compressed, resequenced)" (2026-07-06). This annotates the map; it does not
+> rewrite the table.
+
 ---
 
 ## The three product gates (not coding sessions)

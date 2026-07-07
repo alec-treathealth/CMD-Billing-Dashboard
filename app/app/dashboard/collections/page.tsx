@@ -29,6 +29,12 @@ export default async function CollectionsPage({
     if (access.reason === 'unauthenticated') redirect('/login');
     return <UnprovisionedNotice email={access.user.email} />;
   }
+  // Fail closed: a provisioned role entitled to NO views (entity-scoped role with a null
+  // entity — forbidden by the app_user CHECK) must not fall through to clampView's
+  // consolidated (cross-tenant) default. Treat it as unprovisioned.
+  if (access.access.allowedViews.length === 0) {
+    return <UnprovisionedNotice email={access.access.user?.email} />;
+  }
 
   const requested = resolveView(await searchParams);
   const view = clampView(requested, access.access.allowedViews);

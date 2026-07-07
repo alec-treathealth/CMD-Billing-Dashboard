@@ -9,6 +9,7 @@ import {
 import type { RollupTuple } from '../src/collections/cmdPayerIngest.js';
 import type { CmdReportRow } from '../src/collections/cmdPayer.js';
 import type { Db } from '../src/collections/db.js';
+import { BXR_ENTITY_ID } from '../src/tenants.js';
 
 const tuple = (year: number, month: number, payer = 'ANTHEM', facility = 'CAMH'): RollupTuple => ({
   payer_name: payer,
@@ -85,30 +86,44 @@ test('filterTuplesToWindow: keeps only in-window months', () => {
 
 // --- refreshCmdPayerRollup (orchestration) ----------------------------------
 
-/** Fake Db that records the months deleted and tuples inserted by writeRollup. */
-function fakeDb(): { db: Db; deletedPairs: Array<[number, number]>; insertedCount: number } {
+/** Fake Db that records the months deleted (and the tenant scoping them) and tuples
+ *  inserted by writeRollup. Migration-B shape: DELETE params = [business_entity_id,
+ *  y, m, y, m, ...]; INSERT carries 9 columns per row (business_entity_id stamped last). */
+function fakeDb(): {
+  db: Db;
+  deletedPairs: Array<[number, number]>;
+  insertedCount: number;
+  deleteTenants: unknown[];
+} {
   const deletedPairs: Array<[number, number]> = [];
+  const deleteTenants: unknown[] = [];
   let insertedCount = 0;
   const client = {
     async query(sql: string, params?: unknown[]) {
       if (/^\s*delete/i.test(sql) && params) {
-        for (let i = 0; i < params.length; i += 2) {
+        deleteTenants.push(params[0]); // $1 = business_entity_id (tenant-scoped delete)
+        for (let i = 1; i < params.length; i += 2) {
           deletedPairs.push([Number(params[i]), Number(params[i + 1])]);
         }
         return { rowCount: 0, rows: [] };
       }
       if (/^\s*insert/i.test(sql) && params) {
-        // 8 columns per row in writeRollup's INSERT.
-        const n = params.length / 8;
+        // 9 columns per row in writeRollup's INSERT (business_entity_id stamped).
+        const n = params.length / 9;
         insertedCount += n;
         return { rowCount: n, rows: [] };
       }
-      return { rowCount: 0, rows: [] };
+      return { rowCount: 0, rows: [] }; // begin / set_config / commit
     },
     release() {},
   };
   const db = { connect: async () => client } as unknown as Db;
-  return { db, get deletedPairs() { return deletedPairs; }, get insertedCount() { return insertedCount; } };
+  return {
+    db,
+    get deletedPairs() { return deletedPairs; },
+    get insertedCount() { return insertedCount; },
+    get deleteTenants() { return deleteTenants; },
+  };
 }
 
 test('refreshCmdPayerRollup: writes only windowed months, returns non-PHI stats', async () => {
@@ -123,6 +138,7 @@ test('refreshCmdPayerRollup: writes only windowed months, returns non-PHI stats'
   const stats = await refreshCmdPayerRollup({
     fetchRows: async () => rows,
     writeDb: fake.db,
+    businessEntityId: BXR_ENTITY_ID,
     now: new Date('2026-06-24T08:00:00Z'), // window: Jun, May, Apr 2026
     windowSize: 3,
   });
@@ -138,6 +154,11 @@ test('refreshCmdPayerRollup: writes only windowed months, returns non-PHI stats'
   assert.deepEqual(deleted, ['2026-5', '2026-6']);
   assert.ok(!deleted.includes('2026-1'), 'out-of-window month must not be deleted');
   assert.equal(fake.insertedCount, 2);
+  assert.deepEqual(
+    fake.deleteTenants,
+    [BXR_ENTITY_ID],
+    'the month-bucket DELETE must be tenant-scoped — never cross-tenant destructive',
+  );
 });
 
 test('refreshCmdPayerRollup: empty live report writes nothing', async () => {
@@ -145,6 +166,7 @@ test('refreshCmdPayerRollup: empty live report writes nothing', async () => {
   const stats = await refreshCmdPayerRollup({
     fetchRows: async () => [],
     writeDb: fake.db,
+    businessEntityId: BXR_ENTITY_ID,
     now: new Date('2026-06-24T08:00:00Z'),
   });
   assert.deepEqual(stats.months, []);

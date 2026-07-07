@@ -38,6 +38,8 @@ import { normalizeDate, normalizeMoney, type Coerced } from './normalize.js';
 import { normalizeMemberId } from '../queries/identity.js';
 import { encryptPhi, fingerprintRow } from './phiCrypto.js';
 import { makeClient } from './db.js';
+import { withTenant } from '../veris/withTenant.js';
+import { BXR_ENTITY_ID } from '../tenants.js';
 
 /**
  * The exact 14 headers of Derek's CMD batch export. A file whose header set does not
@@ -75,12 +77,16 @@ export const EXPECTED_HEADERS = [
  *  12 patient_balance_due  13 primary_payer  14 facility
  */
 
-/** Columns for the INSERT — order matches buildInsertParams() exactly. */
+/** Columns for the INSERT — order matches buildInsertParams() exactly.
+ *  business_entity_id (migration-B era) is stamped EXPLICITLY per tenant — the column's
+ *  DEFAULT (BXR, migration 0028) is a safety net, not the mechanism, so the Indigo path
+ *  can never silently inherit BXR's tag. NOT part of row_fingerprint (0028 ruling;
+ *  tenant facility vocabularies are disjoint — collision-checked empirically 2026-07-06). */
 const INSERT_COLS = [
   'charge_date', 'payment_received', 'cpt_code', 'revenue_code', 'facility',
   'patient_name', 'member_id', 'group_number', 'charge_amount', 'allowed_amount',
   'insurance_payments', 'adjustments', 'patient_balance_due', 'primary_payer',
-  'source_file', 'row_fingerprint',
+  'source_file', 'row_fingerprint', 'business_entity_id',
 ] as const;
 
 const BATCH = 500;
@@ -284,7 +290,7 @@ function chunk<T>(a: T[], n: number): T[][] {
 }
 
 /** Encrypt the 3 PHI fields and assemble one row's positional params (INSERT_COLS order). */
-async function buildInsertParams(row: PlainRow): Promise<unknown[]> {
+async function buildInsertParams(row: PlainRow, businessEntityId: string): Promise<unknown[]> {
   const [patient, member, group] = await Promise.all([
     encryptPhi(row.patient_name),
     encryptPhi(row.member_id),
@@ -294,28 +300,46 @@ async function buildInsertParams(row: PlainRow): Promise<unknown[]> {
     row.charge_date, row.payment_received, row.cpt_code, row.revenue_code, row.facility,
     patient, member, group, row.charge_amount, row.allowed_amount,
     row.insurance_payments, row.adjustments, row.patient_balance_due, row.primary_payer,
-    row.source_file, row.row_fingerprint,
+    row.source_file, row.row_fingerprint, businessEntityId,
   ];
 }
 
-/** Batched, parameterized, idempotent upsert. Returns the count actually inserted
- *  (ON CONFLICT DO NOTHING skips fingerprints already in the table). Exported so the
- *  cron reuses the identical encrypt + batch-upsert path (same INSERT_COLS, same SQL). */
-export async function insertRows(db: ReturnType<typeof makeClient>, rows: PlainRow[]): Promise<number> {
+/** Batched, parameterized, idempotent upsert. Each batch runs in its OWN short
+ *  tenant-scoped transaction (withTenant: BEGIN → set_config('app.business_entity_id', …,
+ *  true) → INSERT → COMMIT — what migration C's writer policies will enforce), and PHI
+ *  encryption happens BEFORE that transaction opens. This matters at load scale: a single
+ *  historical seed is ~500k rows, and wrapping every batch in ONE mega-transaction would
+ *  pin a pooler backend for the whole run AND hold that connection across CPU-bound
+ *  libsodium work between INSERTs — it would not converge on Supavisor. Per-batch commits
+ *  keep each connection-hold to one INSERT. Rows are stamped with `businessEntityId`
+ *  explicitly. ON CONFLICT (row_fingerprint) DO NOTHING makes BOTH a re-run AND a mid-load
+ *  failure safe: the next pass (cron's next tick / re-invoked CLI) re-supplies any batch
+ *  that didn't commit — there is no half-written row, only fewer-than-expected inserts on a
+ *  crash. The row_fingerprint unique index is UNCHANGED by the 0031 refold, so the
+ *  column-list target here stays exact. Exported so the cron and the Indigo adapter reuse
+ *  the identical encrypt + batch-upsert path (same INSERT_COLS, same SQL). */
+export async function insertRows(
+  db: ReturnType<typeof makeClient>,
+  rows: PlainRow[],
+  businessEntityId: string,
+): Promise<number> {
   let inserted = 0;
   for (const batch of chunk(rows, BATCH)) {
-    const paramRows = await Promise.all(batch.map(buildInsertParams));
-    const params: unknown[] = [];
-    const tuples = paramRows.map((vals) => {
-      const base = params.length;
-      params.push(...vals);
-      return `(${vals.map((_, i) => `$${base + i + 1}`).join(', ')})`;
+    // Encrypt OUTSIDE the transaction — never hold a pooled connection across libsodium work.
+    const paramRows = await Promise.all(batch.map((r) => buildInsertParams(r, businessEntityId)));
+    inserted += await withTenant(db, businessEntityId, async (client) => {
+      const params: unknown[] = [];
+      const tuples = paramRows.map((vals) => {
+        const base = params.length;
+        params.push(...vals);
+        return `(${vals.map((_, i) => `$${base + i + 1}`).join(', ')})`;
+      });
+      const sql =
+        `insert into collections.cmd_explorer_rows (${INSERT_COLS.join(', ')}) ` +
+        `values ${tuples.join(', ')} on conflict (row_fingerprint) do nothing`;
+      const res = await client.query(sql, params);
+      return res.rowCount ?? 0;
     });
-    const sql =
-      `insert into collections.cmd_explorer_rows (${INSERT_COLS.join(', ')}) ` +
-      `values ${tuples.join(', ')} on conflict (row_fingerprint) do nothing`;
-    const res = await db.query(sql, params);
-    inserted += res.rowCount ?? 0;
   }
   return inserted;
 }
@@ -443,7 +467,9 @@ async function main(): Promise<void> {
 
   const db = makeClient(writerUrl!); // verify-full TLS (src/ssl.ts) via makeClient
   try {
-    const inserted = await insertRows(db, distinct);
+    // This seed CLI ingests BXR's CMD export only (the Indigo path is a separate adapter
+    // that passes INDIGO_ENTITY_ID explicitly).
+    const inserted = await insertRows(db, distinct, BXR_ENTITY_ID);
     console.log(
       `COMMIT — inserted ${inserted}; ` +
         `already in DB (skipped by ON CONFLICT): ${distinct.length - inserted}.`,

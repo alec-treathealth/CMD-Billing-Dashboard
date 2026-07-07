@@ -43,6 +43,10 @@ import { decryptPhi } from '../../src/collections/phiCrypto.js';
 import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
 import { refreshCmdPayerRollup } from '../../src/collections/cmdPayerRefresh.js';
 import { CMD_EXPLORER_CUSTOMERS } from '../../src/collections/cmdCustomers.js';
+// src-side canonical tenant id (agrees with app/lib/views.ts BXR_ENTITY_ID — dual-declaration
+// note in src/tenants.ts). Both production crons are BXR-only; their writes are stamped +
+// GUC-scoped to this tenant explicitly (migration-B era), never inferred.
+import { BXR_ENTITY_ID as BXR_TENANT_ID } from '../../src/tenants.js';
 import { makeClient, type Db } from '../../src/collections/db.js';
 import { browseClaims as browseClaimsQuery, claimById } from '../../src/queries/browse_claims.js';
 import type { BrowseClaimsArgs, BrowseClaimsResult } from '../../src/queries/browse_claims.js';
@@ -305,6 +309,7 @@ export function handleCmdPayerRefresh(req: CmdPayerRefreshHttpRequest) {
       refreshCmdPayerRollup({
         fetchRows: () => cmdReportRows(cmdApiConfig()),
         writeDb: rollupWriterDb(),
+        businessEntityId: BXR_TENANT_ID, // BXR-only report config (cmdApiConfig)
       }),
   });
 }
@@ -336,6 +341,7 @@ export async function handleCmdExplorerCron(req: {
       customers: CMD_EXPLORER_CUSTOMERS,
       fetchRows: (customerId) => cmdReportRows(cmdExplorerConfigFor(customerId)),
       writeDb: rollupWriterDb(),
+      businessEntityId: BXR_TENANT_ID, // roster is CMD_EXPLORER_CUSTOMERS = BXR-only
       revalidate: () => revalidateTag('cmd-explorer'),
       revalidateDashboard: () => revalidateTag(DASHBOARD_CACHE_TAG),
       // Filter 10147530 uses a ROLLING (current-month) payment-received window, so there is no
@@ -738,17 +744,22 @@ function toExplorerRow(r: CmdExplorerDbRecord): CmdExplorerRow {
 
 /**
  * Build the keyset page query with optional filters + an allowlisted sort. Column/table names
- * are fixed literals; every VALUE (facility, dates, cursor value/id, limit) is a bound $n
- * parameter — no interpolation, no SELECT *. The order is `<sortcol> <dir> NULLS LAST, id <dir>`,
+ * are fixed literals; every VALUE (entity ids, facility, dates, cursor value/id, limit) is a bound
+ * $n parameter — no interpolation, no SELECT *. The order is `<sortcol> <dir> NULLS LAST, id <dir>`,
  * and the cursor boundary continues STRICTLY after the previous page's last row in that ordering
  * (the NULLS-LAST block is handled explicitly for both directions), so paging walks the FILTERED,
  * SORTED set consistently.
+ *
+ * `entityIds` is the TENANT SCOPE — the business_entity_id(s) the caller may see, derived
+ * SERVER-SIDE from the RBAC-clamped view (never client input; see loadCmdReport). It is applied
+ * as a mandatory WHERE so a page never crosses tenants.
  */
 function buildCmdExplorerQuery(
   cursor: CmdExplorerCursor | null,
   filter: CmdExplorerFilter,
   sort: CmdExplorerSort,
   limit: number,
+  entityIds: string[],
 ): { sql: string; params: unknown[] } {
   const conds: string[] = [];
   const params: unknown[] = [];
@@ -756,6 +767,8 @@ function buildCmdExplorerQuery(
     params.push(v);
     return `$${params.length}`;
   };
+  // Tenant scope FIRST — server-derived entitled entity ids, applied to every page.
+  conds.push(`business_entity_id = any(${add(entityIds)}::uuid[])`);
   if (filter.facility) conds.push(`facility = ${add(filter.facility)}`);
   if (filter.from) conds.push(`payment_received >= ${add(filter.from)}::date`);
   if (filter.to) conds.push(`payment_received < ${add(filter.to)}::date`);
@@ -791,14 +804,15 @@ function cmdExplorerSortValue(row: CmdExplorerRow, column: CmdExplorerSortColumn
 
 async function loadCmdExplorerPage(
   cursor: CmdExplorerCursor | null,
-  filter: CmdExplorerFilter = {},
-  sort: CmdExplorerSort = CMD_EXPLORER_DEFAULT_SORT,
+  filter: CmdExplorerFilter,
+  sort: CmdExplorerSort,
+  entityIds: string[],
 ): Promise<CmdExplorerPage> {
   // Keyset on (sort column, id): ORDER BY <sortcol> <dir> NULLS LAST, id <dir>. Default is
   // Payment Received DESC (most-recent payments first). The cursor continues strictly after the
   // previous page's last row; over-fetch one row to detect a next page without a count(*).
   const limit = CMD_EXPLORER_PAGE_SIZE + 1;
-  const { sql, params } = buildCmdExplorerQuery(cursor, filter, sort, limit);
+  const { sql, params } = buildCmdExplorerQuery(cursor, filter, sort, limit, entityIds);
   const { rows } = await readerExecutor().query<CmdExplorerDbRecord>(sql, params);
   const hasMore = rows.length > CMD_EXPLORER_PAGE_SIZE;
   const page = (hasMore ? rows.slice(0, CMD_EXPLORER_PAGE_SIZE) : rows).map(toExplorerRow);
@@ -809,17 +823,20 @@ async function loadCmdExplorerPage(
 }
 
 /**
- * NON-PHI explorer page, cached 15 min PER (cursor, filter, sort) key (no PHI at rest). The cron
- * busts the shared 'cmd-explorer' tag after any insert. The cursor is a small {id, value} object,
- * the filter a small plain object, and the sort a {column, direction} pair — all
- * JSON-serializable, so they key the unstable_cache entry cleanly.
+ * NON-PHI explorer page, cached 15 min PER (cursor, filter, sort, entityIds) key (no PHI at
+ * rest). The cron busts the shared 'cmd-explorer' tag after any insert. The cursor is a small
+ * {id, value} object, the filter a small plain object, the sort a {column, direction} pair, and
+ * entityIds a small string[] — all JSON-serializable, so they key the unstable_cache entry
+ * cleanly. entityIds is part of the key so each tenant scope caches SEPARATELY (a BXR page is
+ * never served to an Indigo request and vice versa).
  */
 export const loadCmdExplorerNonPhi = unstable_cache(
   (
-    cursor: CmdExplorerCursor | null = null,
-    filter: CmdExplorerFilter = {},
-    sort: CmdExplorerSort = CMD_EXPLORER_DEFAULT_SORT,
-  ): Promise<CmdExplorerPage> => loadCmdExplorerPage(cursor, filter, sort),
+    cursor: CmdExplorerCursor | null,
+    filter: CmdExplorerFilter,
+    sort: CmdExplorerSort,
+    entityIds: string[],
+  ): Promise<CmdExplorerPage> => loadCmdExplorerPage(cursor, filter, sort, entityIds),
   ['cmd-explorer-nonphi'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
@@ -828,13 +845,15 @@ export const loadCmdExplorerNonPhi = unstable_cache(
  * Distinct facility strings present in the explorer rows (non-PHI), for the "All Collections"
  * facility filter. This vocabulary is the CMD report's own facility text — it does NOT match
  * the canonical facility dimension, so the All Collections filter uses these values directly.
- * Reader-only, fixed literal SQL (no params, no SELECT *), cached + tag-busted like the grid.
+ * Reader-only, no SELECT *; scoped to the caller's entitled `entityIds` (bound param, part of
+ * the cache key), cached + tag-busted like the grid.
  */
 export const cmdExplorerFacilities = unstable_cache(
-  async (): Promise<string[]> => {
+  async (entityIds: string[]): Promise<string[]> => {
     const { rows } = await readerExecutor().query<{ facility: string | null }>(
-      'select distinct facility from collections.cmd_explorer_rows order by facility',
-      [],
+      'select distinct facility from collections.cmd_explorer_rows ' +
+        'where business_entity_id = any($1::uuid[]) order by facility',
+      [entityIds],
     );
     return rows
       .map((r) => r.facility)
@@ -848,18 +867,24 @@ export const cmdExplorerFacilities = unstable_cache(
  * Resolve ONE row's PHI by bigserial id: decrypt the 3 ciphertext columns in-process,
  * write a synchronous (fail-closed) audit record, then return the identifiers. The PHI
  * is never cached and never logged; absent id → null. Runs as claims_reader.
+ *
+ * `entityIds` is the caller's entitled tenant scope (server-derived from the session; see
+ * requirePhiPrincipal). A row outside that scope resolves to null — so an entity user can
+ * never unmask another tenant's patient identifiers even with a hand-crafted id.
  */
 export async function revealCmdExplorerRow(
   id: number,
   actor: { email: string; userId: string },
+  entityIds: string[],
 ): Promise<CmdExplorerPhi | null> {
   const { rows } = await readerExecutor().query<{
     patient_name: Buffer;
     member_id: Buffer;
     group_number: Buffer | null;
   }>(
-    'select patient_name, member_id, group_number from collections.cmd_explorer_rows where id = $1',
-    [id],
+    'select patient_name, member_id, group_number from collections.cmd_explorer_rows ' +
+      'where id = $1 and business_entity_id = any($2::uuid[])',
+    [id, entityIds],
   );
   const row = rows[0];
   if (!row) return null;
@@ -887,13 +912,16 @@ export interface CmdExplorerRevealedRow extends CmdExplorerPhi {
  * Bulk reveal: decrypt the PHI for a SET of explorer ids (one page's worth) in-process,
  * write ONE fail-closed audit row for the batch, then return the identifiers. Backs the
  * grid's "Reveal all" action. The PHI is never cached and never logged; only the non-PHI
- * synthetic ids are audited. Runs as claims_reader. A decryption failure (e.g. a
- * LIBSODIUM_KEY that does not match the key the rows were ingested with) THROWS here and
- * is surfaced to the user by the action — never silently swallowed.
+ * synthetic ids are audited. Runs as claims_reader. Ids outside the caller's entitled
+ * `entityIds` (server-derived; see requirePhiPrincipal) are silently dropped, so a batch can
+ * never unmask another tenant's identifiers. A decryption failure (e.g. a LIBSODIUM_KEY that
+ * does not match the key the rows were ingested with) THROWS here and is surfaced to the user
+ * by the action — never silently swallowed.
  */
 export async function revealCmdExplorerRows(
   ids: number[],
   actor: { email: string; userId: string },
+  entityIds: string[],
 ): Promise<CmdExplorerRevealedRow[]> {
   if (ids.length === 0) return [];
   const { rows } = await readerExecutor().query<{
@@ -902,8 +930,9 @@ export async function revealCmdExplorerRows(
     member_id: Buffer;
     group_number: Buffer | null;
   }>(
-    'select id, patient_name, member_id, group_number from collections.cmd_explorer_rows where id = any($1::bigint[])',
-    [ids],
+    'select id, patient_name, member_id, group_number from collections.cmd_explorer_rows ' +
+      'where id = any($1::bigint[]) and business_entity_id = any($2::uuid[])',
+    [ids, entityIds],
   );
   const out: CmdExplorerRevealedRow[] = [];
   for (const row of rows) {

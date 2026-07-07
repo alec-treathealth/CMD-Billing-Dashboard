@@ -48,6 +48,7 @@ import {
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
 import { dashboardAccess } from '@/lib/access';
+import { clampView, viewToEntityIds, type DashboardView } from '@/lib/views';
 import { supabaseAuthConfigured } from '@/lib/supabase/env';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdExplorer';
 import type {
@@ -93,7 +94,7 @@ async function sessionPrincipal(): Promise<string | null> {
  * principal to audit). Plain `user` roles and the no-auth fallback can still browse all NON-PHI surfaces.
  */
 type PhiPrincipal =
-  | { ok: true; actor: { email: string; userId: string } }
+  | { ok: true; actor: { email: string; userId: string }; entityIds: string[] }
   | { ok: false; error: string };
 
 async function requirePhiPrincipal(): Promise<PhiPrincipal> {
@@ -115,7 +116,44 @@ async function requirePhiPrincipal(): Promise<PhiPrincipal> {
   if (!access.canRevealPhi) {
     return { ok: false, error: 'Your role does not permit revealing patient identifiers.' };
   }
-  return { ok: true, actor: { email: access.user.email, userId: access.user.id } };
+  // Tenant scope for the reveal = the caller's FULL entitlement (union over their allowed views),
+  // derived server-side from the role row — never client input. This is the PHI boundary: a reveal
+  // can only ever unmask a row whose business_entity_id is in this set.
+  const entityIds = [...new Set(access.allowedViews.flatMap(viewToEntityIds))];
+  // Fail closed: a principal entitled to NO views (an entity-scoped role with a null entity — a
+  // state the app_user CHECK forbids) must never reach the reveal path with an empty scope.
+  if (entityIds.length === 0) {
+    return { ok: false, error: 'Your account is not scoped to any data.' };
+  }
+  return { ok: true, actor: { email: access.user.email, userId: access.user.id }, entityIds };
+}
+
+/**
+ * Non-PHI tenant scope for the explorer GRID + facility filter: the business_entity_id(s) for the
+ * REQUESTED view, clamped SERVER-SIDE to the session's entitlement (via clampView), so a
+ * hand-edited/forged `view` can never widen scope beyond what the role allows. `view` is a display
+ * hint from the client; the entitlement is the authority. Returns null when there is no authorized
+ * principal so the caller fails closed.
+ *
+ * FAIL CLOSED for the collections plane (matches app/lib/veris/tenant.ts): a request with NO real
+ * signed-in principal gets NO scope — NOT the dashboard's permissive no-auth super_admin fallback.
+ * Once Indigo data lands, an environment without Supabase auth configured must never expose a
+ * tenant's collections rows (even non-PHI payer/revenue data), so a null user → null scope here.
+ * (PHI reveal already fails closed the same way in requirePhiPrincipal.)
+ */
+async function explorerEntityScope(view?: DashboardView): Promise<string[] | null> {
+  const result = await dashboardAccess();
+  if (!result.ok) return null;
+  const { access } = result;
+  // No real principal (no-auth staged-rollout fallback) → no scope. Fail closed for tenant data.
+  if (!access.user) return null;
+  const { allowedViews } = access;
+  // Entitled to NO views (entity-scoped role with a null entity — forbidden by the app_user
+  // CHECK) → fail closed. Without this, clampView's `?? DEFAULT_VIEW` fallback would resolve an
+  // empty allowlist to 'consolidated' (BXR+Indigo), silently widening scope.
+  if (allowedViews.length === 0) return null;
+  const requested = view ?? allowedViews[0]!;
+  return viewToEntityIds(clampView(requested, allowedViews));
 }
 
 export type {
@@ -627,7 +665,13 @@ export async function loadCmdReport(
   cursor: CmdExplorerCursor | null = null,
   filter: CmdReportFilter = {},
   sort?: CmdExplorerSort,
+  view?: DashboardView,
 ): Promise<CmdReportResult> {
+  // Tenant scope from the RBAC-clamped view (server-derived). Fail closed if unauthorized.
+  const entityIds = await explorerEntityScope(view);
+  if (entityIds === null) {
+    return { ok: false, error: 'The collections report could not be loaded right now.' };
+  }
   // Coerce the client-supplied cursor + sort to safe shapes before they reach SQL (a bad cursor
   // becomes "first page"; a bad/absent sort becomes the Payment-Received-DESC default).
   const safeCursor = resolveCmdExplorerCursor(cursor);
@@ -653,7 +697,7 @@ export async function loadCmdReport(
     readerFilter.to = `${nextYear}-${pad(nextMonth)}-01`; // exclusive upper bound
   }
   try {
-    const page = await loadCmdExplorerNonPhi(safeCursor, readerFilter, safeSort);
+    const page = await loadCmdExplorerNonPhi(safeCursor, readerFilter, safeSort, entityIds);
     return { ok: true, rows: page.rows, nextCursor: page.nextCursor };
   } catch {
     return { ok: false, error: 'The collections report could not be loaded right now.' };
@@ -664,11 +708,14 @@ export type CmdFacilitiesResult = { ok: true; facilities: string[] } | { ok: fal
 
 /**
  * Distinct facility values present in the explorer rows (non-PHI), for the All Collections
- * facility filter. Cached reader-only; never returns PHI.
+ * facility filter. Scoped to the RBAC-clamped `view`'s entity ids (server-derived), so the filter
+ * lists only facilities the caller may see. Cached reader-only; never returns PHI.
  */
-export async function loadCmdExplorerFacilities(): Promise<CmdFacilitiesResult> {
+export async function loadCmdExplorerFacilities(view?: DashboardView): Promise<CmdFacilitiesResult> {
+  const entityIds = await explorerEntityScope(view);
+  if (entityIds === null) return { ok: false };
   try {
-    return { ok: true, facilities: await cmdExplorerFacilities() };
+    return { ok: true, facilities: await cmdExplorerFacilities(entityIds) };
   } catch {
     return { ok: false };
   }
@@ -701,7 +748,7 @@ export async function revealCmdReportRows(ids: number[]): Promise<RevealCmdRowsR
   const gate = await requirePhiPrincipal();
   if (!gate.ok) return { ok: false, error: gate.error };
   try {
-    const rows = await revealCmdExplorerRows(ids, gate.actor);
+    const rows = await revealCmdExplorerRows(ids, gate.actor, gate.entityIds);
     return { ok: true, rows };
   } catch {
     return { ok: false, error: 'The identifiers could not be revealed right now.' };
@@ -716,7 +763,7 @@ export async function revealCmdReportRow(id: number): Promise<RevealCmdRowResult
   const gate = await requirePhiPrincipal();
   if (!gate.ok) return { ok: false, error: gate.error };
   try {
-    const phi = await revealCmdExplorerRow(id, gate.actor);
+    const phi = await revealCmdExplorerRow(id, gate.actor, gate.entityIds);
     if (!phi) {
       return { ok: false, error: 'Those identifiers are no longer available — reload and try again.' };
     }

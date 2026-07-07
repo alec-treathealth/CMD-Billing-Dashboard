@@ -819,3 +819,288 @@ Isolation probe fresh pre-apply: 29/0/1. **Index-grain tripwire STILL LIVE:**
 `uq_mv_payer_drift` omits `payer_family` while the MV groups by it — payer_family is
 functionally dependent on payer_name today; if ref.payer_alias ever maps one name to
 two families, REFRESH CONCURRENTLY breaks (treat as a data-quality signal).
+
+### Ref-table loaders — CARC/RARC + CMS PFS loaded; NPPES deferred (2026-07-06)
+
+**Step-0 diagnosis of the "98":** the 98 rows are `ref.remittance_code` — the
+migration-000 SEED codebook (45 CARC + 53 RARC, all `ingested_by='seed_script'`,
+reconciliation categories) — NOT a partial load of `ref.rarc_code` (which was 0).
+The loader's remittance leg is additive-only (`ON CONFLICT DO NOTHING`); the seed
+can never be overwritten. Only 25 distinct CARCs appear in `staging.era_adjustment`
+and ALL 25 were already in the seed (gap=0).
+
+**CARC/RARC source (PROVISIONAL, ruled by Alec 2026-07-06):** CMS **MREP 4.6
+`Codes.ini`** (official CMS distribution zip, cms.gov `.../downloads/
+medicareremiteasyprint46.zip`; file date 2026-02-04, X12 vintage 11/1/25) →
+converted to `data/ref/{carc,rarc}.tsv` with provenance headers. Supersede with a
+licensed X12 export when available. **Rejected first candidate:** the MassHealth
+CARC/RARC XLSX (the loader header's named mirror) is a MassHealth EOB *crosswalk*
+subset — only 89 CARC / 193 RARC and it covered just 13/25 of our observed CARCs
+(missing 1/2/3/35/44/100/102/200/242/243/279/B11). mass.gov also hard-403s all
+non-browser fetches (Wayback got the file). Coverage check on the CMS source:
+**25/25 observed CARCs covered.** Loaded: `ref.carc_code` 0→**455** (110
+deactivated w/ stop_date) · `ref.rarc_code` 0→**1,192** (190 INFORMATIONAL) ·
+`ref.remittance_code` 98→**98** (preserved) · era_adjustment→carc_code join
+orphans = 0.
+
+**CMS PFS CY2026:** the pfs.data.cms.gov datastore's per-year payment data is the
+"**Indicators for 2026**" dataset (dataset id `7c7df311-5315-4f38-b9ed-fd62f8bebe11`,
+public domain, modified 2026-07-01). **Vintage field-shape mismatch** vs the
+loader's candidates: code column is `hcpc` (not `hcpcs`), NO locality column
+(national file → pseudo-locality '00'), and no dollar fields — price = `full_*_total`
+RVUs × `conv_fact` (CY2026 CFs: 33.4009 non-APM / 33.5675 APM). Loader edited
+accordingly (+ dedup before upsert: datastore returns duplicate rows; multi-VALUES
+ON CONFLICT would fail "cannot affect row a second time"); `CMS_PFS_HCPCS_FIELD=hcpc`
++ `CMS_PFS_QUERY_URL=…/api/1/datastore/query/7c7df311-…/0` exported in-shell only
+(.env untouched). Loaded: `ref.cms_pfs_rate` 0→**52** (year 2026, 52/52 BH codes,
+fetched 74 → deduped 52). Sanity: 90837 nfac **$167.84**, 90791 $173.35, 99213
+$95.19. ⚠️ H-codes (H0001–H0050) are `proc_stat='I'` — NOT PFS-payable, loaded
+with $0.00 rates: the fee-schedule anchor exists ONLY for PFS-payable codes
+(psychotherapy CPTs + E/M); Brain-1 must not treat $0.00 as a real rate.
+
+**nppes_loader: DEFERRED, known no-op, untouched** (`ref.nppes_provider` = 0) —
+deliberate skip per S1 correction #3 (no facility→NPI crosswalk exists).
+
+Post-write gates: isolation probe fresh 29/0/1 (pre-write AND post-write runs);
+suite 269/269; root typecheck clean; app typecheck red only on the parallel
+`<Analytics/>` line. Working tree (shown, NOT committed): `cms_pfs_loader.ts`
+vintage edits, new `data/ref/*.tsv`, this note.
+
+---
+
+## S5/S6 (compressed, resequenced) — auth extension + Indigo staging load (2026-07-06)
+
+Resequenced by Alec's explicit, informed call (**Option 3**, 2026-07-06): load Indigo's
+real data into the Veris plane + extend auth + verify isolation THIS session; the Indigo
+RENDER surface is a separate, later, deliberate decision — NOT decided under time
+pressure, and NOT the CMD dashboard (see "render conflict" below). This note is the
+write-down the session ritual (§8.5.3) requires BEFORE any code/load ran.
+
+### PG-B / S7 gate item 5 — written BAA/DPA + tenancy artifact (Alec, verbatim, 2026-07-06)
+
+The "in writing" artifact S7's gate looks for. Do NOT treat a chat statement as
+sufficient on its own — THIS dated entry is the artifact:
+
+- **Indigo is covered under the master BAA/DPA shared with BXR Consulting** — confirmed by
+  Alec on 2026-07-06.
+- **Indigo has confirmed acceptance of shared-Postgres RLS tenancy** (not a dedicated
+  instance) — confirmed by Alec on 2026-07-06.
+
+These satisfy the two written-confirmation conditions PG-B and S7 gate item 5 require
+before real Indigo data lands in `staging.*`. The pooled de-identified cross-tenant
+TRAINING clause is a SEPARATE clause (S1 4d recorded it signed); it does not gate this
+session because brains stay OFF for Indigo.
+
+### Resequencing — ACCURATE record (corrects this session's prompt framing)
+
+- **S4 (Python ML runtime / brain TRAINING) is deliberately DEFERRED** — not built this
+  session; resumes separately.
+- **S3 (ETL + reference data) already LANDED — do NOT record it as "deferred."** The
+  prompt said "defer S3 and S4"; that is stale. Migration 020 (brain1_features backfill)
+  applied + 8/8 conservation gates green; ref loaders done (`ref.carc_code` 455,
+  `ref.rarc_code` 1,192, `ref.cms_pfs_rate` 52; NPPES a deliberate no-op). See the S3
+  sections above. Only S4 is genuinely un-built.
+- **S5/S6 (compressed) are being run NOW, ahead of the plan's S3→S4→S5→S6 order.** S6 is
+  compressed to a STATIC-FILE load (the Indigo Seed Data CMD batch-dump CSVs → the staging
+  ETL), NOT the live CMD Web API per-tenant job — the API path stays OUT of scope.
+- **Brains 1/2/3 stay OFF for Indigo** regardless of sequencing (true in every version of
+  the plan). This note exists so a future session/hire does not mistake the skip-ahead
+  for a mistake.
+
+### Render conflict — SURFACED AND HELD (Option 3; Alec, 2026-07-06)
+
+> **SUPERSEDED same day (2026-07-06) — see "ADR REOPENED: collections tenancy" below.** Alec
+> subsequently made the opposite call, with full deliberation: reopen 0027/0028 and render Indigo
+> on the collections/overview plane. This "held" reasoning is retained for the decision trail —
+> why it was held first, then consciously reopened.
+
+The session prompt asked to make `/dashboard?view=indigo` render Indigo's data. That
+CONFLICTS with the S1 ADR (docs/CLAUDE.md §18; §7/§15 guardrails): CMD-Billing-Dashboard
+stays single-tenant, no `business_entity_id` in its schema, 0027/0028 shelved. Live
+mechanics that make the conflict concrete (verified read-only 2026-07-06):
+- `/dashboard` reads `claims.*` / `collections.*`, NEVER `staging.*`; `viewToEntityIds()`
+  is carried but not consumed by any committed reader.
+- Of the 3 collections dashboard tables, only `cmd_explorer_rows` has `business_entity_id`
+  (all BXR; Indigo=0); `daily_collections` and `cmd_payer_facility_monthly` have NO
+  tenancy column. Rendering Indigo on `/dashboard` would require building the shelved
+  0027/0028 + an Indigo COLLECTIONS ingest (the BXR-only guardrailed cron) → reopens ADR.
+- The static Indigo CSVs are the CMD **Explorer** export (report 10091971 shape: 14 explorer
+  columns + Check/EFT/Charge Patient Payments) — i.e. `collections.cmd_explorer_rows` shape.
+  **CORRECTION (2026-07-06, in place per Alec):** an earlier draft of this bullet claimed the
+  CSVs were "shaped for `staging.*` (SQL Schemas/004 batch-dump ETL)" — WRONG. `004` is a 10-col
+  *episode* ETL (a third, different shape); the batch-dump is richer still. The file matches
+  NEITHER — its true home is the collections plane, which is exactly why the ADR was reopened
+  (see "ADR REOPENED: collections tenancy" below).
+
+**Ruling (Alec, Option 3):** do NOT render on `/dashboard` this session; do NOT reopen the
+ADR. Load lands in `staging.*` (Veris plane); the Indigo render surface is deferred to its
+own deliberate decision. Uncommitted collections-tenancy exploration in the working tree
+(views.ts `INDIGO_ENTITY_ID` flip + server.ts/actions.ts reader scoping + 2 components) is
+**Alec's earlier exploration, NOT a decision to reopen 0027/0028** — STASHED and set aside
+this session (`git stash` stash@{0}; preserved, not built on, not discarded).
+
+### Auth ruling (Alec, 2026-07-06) — EXTEND; reuse claims.app_user as-is
+
+- **EXTEND the existing dashboard identity onto the Veris request paths; do NOT stand up a
+  parallel Veris membership table.** The 3-label/2-tier model is already implemented AND
+  committed: `app/lib/rbac.ts` (`super_admin` / `admin`+entity / `user`+entity, entity ∈
+  {bxr, indigo}), `app/lib/access.ts` (resolves role+entity from `claims.app_user`
+  (migration 0025) per request via the verified Supabase session), `app/lib/executive.ts`
+  (default-deny session gate).
+- **Reuse `claims.app_user` AS-IS — no new membership table, no new claims migration.**
+- **`user` stays NON-PHI** (dashboard rule preserved). Tier (admin vs user) governs WHICH
+  tenant's data a user sees, NOT PHI visibility within it; `canRevealPhi` remains
+  admin+super_admin only. (SUPERSEDES the prompt's "admin and user identical data access"
+  — Alec clarified that was about tenant scope, not PHI reveal.)
+- Role/entity resolve SERVER-SIDE per request from `claims.app_user` (NOT JWT-embedded) —
+  keep this; it is server-authoritative and needs no token re-issue on role change. Veris
+  paths read `access.entity` → `withTenant(entityId)` GUC; `super_admin` (entity = null)
+  takes the explicit `core.consolidated_summary()` (019) path, never an RLS hole.
+
+### Prerequisite verification (read-only, 2026-07-06)
+
+- `core.business_entity`: 2 rows — Indigo Consulting (id `141d459c-…`, acct 474623) + BXR
+  Consulting (`af504ab6-…`, 475729). `core.cmd_customer`: Indigo 36 / BXR 20.
+- Tenant-isolation probe (`npm run probe:isolation`): **29 PASS / 0 FAIL / 1 declared
+  SKIP** — Indigo sees ZERO on all 9 staging surfaces; no-GUC read fails closed (42704);
+  post-COMMIT GUC empty; `consolidated_summary()` denied to `claims_reader`.
+- **`core.tenant_feature_flags` DOES NOT EXIST** (`to_regclass` → null) — S6-proper scope;
+  per the prompt NOT created ad hoc this session. [OPEN: build it in a proper S6 pass;
+  S7 gate item 4 cannot be checked until it exists + Indigo rows seeded all-OFF.]
+- Data planes confirmed distinct: `staging.*` (Veris) Indigo=0 everywhere;
+  `collections.cmd_explorer_rows` BXR=139,873 / Indigo=0.
+- `.gitignore` gap: the "Indigo Seed Data" FOLDER is not explicitly ignored (its 4 CSVs
+  are caught only by the blanket `*.csv`; a stray non-CSV there would NOT be). [RESOLVED
+  same pass: `Indigo Seed Data/` added explicitly, mirroring `Derek Historical Report Data/`.]
+
+---
+
+## ADR REOPENED: collections tenancy (0027/0028 completion) — CMD-Billing-Dashboard goes multi-tenant on the collections plane (2026-07-06)
+
+**Supersedes** the same-day "Render conflict — SURFACED AND HELD (Option 3)" entry above AND the
+S1 ADR's "CMD-Billing-Dashboard stays single-tenant / 0027-0028 shelved" stance (docs/CLAUDE.md
+§18/§7/§15, now annotated). Alec reopened the shelved direction DELIBERATELY, with fresh-ADR rigor
+— a conscious decision, not drift or an accident. Mirrored as a §18 amendment.
+
+### The decision (Alec, verbatim intent, 2026-07-06)
+
+> Reopen the shelved 0027/0028 direction. The Indigo Seed Data CSV is collections-shaped
+> (`cmd_explorer_rows`, not `staging.claim_line`) and belongs on the Indigo collections/overview
+> page, not the Veris claims plane. Treat it with full S2-grade tenancy discipline because it
+> touches the production-critical collections cron writer that is live for BXR. Claims/staging
+> Veris work stops for now and its UI comes down — paused, not abandoned.
+
+### Why (fresh-ADR-grade rationale)
+
+- The seed file IS the CMD Explorer export (report 10091971 shape) — its natural, correct home is
+  `collections.cmd_explorer_rows`, whose `row_fingerprint` append-only model already fits this
+  paid-activity, heavily-duplicated (53% attribute-dupe) data. Forcing it into `staging.claim_line`
+  would demand an invented grain, drop it to paid-only, and yield Indigo rows structurally poorer
+  than BXR's batch-dump-derived staging. The collections plane is the right fit.
+- The **fingerprint grain is CORRECT** for this data (not a shortcut): it is genuinely paid-activity
+  Explorer data, not a claims batch-dump.
+
+### Accurate committed/live state (verified read-only 2026-07-06 — corrects stale §7/§15/§18 text)
+
+- **0027** `collections.business_entities` registry: **committed** (`77cc3be`) but **NOT applied
+  live** (`to_regclass` → null). BXR/Indigo seed values match the canonical UUIDs.
+- **0028** `cmd_explorer_rows.business_entity_id`: **committed AND live** — uuid NOT NULL DEFAULT
+  BXR, all rows BXR (139,873), RLS enabled. `row_fingerprint` deliberately EXCLUDES
+  `business_entity_id` (SHA-256 over the 14 CMD field values; relies on tenant customer-names being
+  disjoint). ⟹ **Fingerprint-collision check is a MANDATORY pre-load gate** (Alec): confirm NO
+  Indigo fingerprint equals an existing BXR fingerprint before any insert.
+- **RLS is ENABLED (`relrowsecurity=true`) on all three** `cmd_explorer_rows` / `daily_collections`
+  / `cmd_payer_facility_monthly` — but the POLICIES must be reviewed (enabling RLS ≠ tenant-scoping;
+  the reader runs as `claims_reader`, no BYPASSRLS, and the dashboard works today ⟹ permissive
+  policies exist; the migration reshapes them to tenant-scoped WITHOUT breaking BXR reads/writes).
+- **daily_collections** (10 cols) and **cmd_payer_facility_monthly** (10 cols) have NO
+  `business_entity_id` — the new migration adds it + backfill BXR + tenant RLS + composite index
+  leading with the tenant column.
+
+### Reopened workstream — gated sequence (one artifact at a time, HOLD before each)
+
+1. **Docs (this entry + §18 amendment + §7/§15 annotations + staging-shape correction).**
+2. **Stash pop + audit.** Adopt `stash@{0}` (Alec's earlier exploration: `views.ts` INDIGO flip,
+   `server.ts`/`actions.ts` reader scoping, `cmd-explorer.tsx`/`collections-view.tsx`) as a DRAFT to
+   review + finish — NOT trusted as-is (unreviewed, untested at prod quality). HOLD: shown before use.
+3. **Migration(s)** (dashboard seq, next number ≥ 0030): `business_entity_id` + tenant-scoped RLS +
+   composite index (tenant-leading) on `daily_collections` + `cmd_payer_facility_monthly`; tenant RLS
+   + writer GUC on `cmd_explorer_rows` (0028 deferred these). Rollback script per migration. HOLD:
+   diffs shown before running.
+4. **Writer review.** How the cron writes these tables unscoped today + how scoping avoids risk to
+   BXR's LIVE writes. HOLD before touching the cron writer at all — diff shown first.
+5. **Isolation-test extension.** Cover `daily_collections` + `cmd_payer_facility_monthly` on the
+   WRITER path (not only reader): BXR live data shows ZERO tenant-A/tenant-B exposure. HOLD: shown
+   before trusted.
+6. **Adapter + load.** Indigo Explorer CSV → `cmd_explorer_rows`-shaped tenancy (fingerprint grain);
+   confirm no fingerprint collision with BXR first; narrow batch (HOLD) → full (HOLD).
+7. **Claims/staging UI pause.** Take the live claims-facing Veris UI down (show exactly what is live
+   first; HOLD before removal/flagging). **PAUSED, NOT ABANDONED.**
+
+### Isolation-model ruling R1 + A→B→C sequencing (Alec, 2026-07-06)
+
+- **R1 (ruled):** collections READS stay app-layer-scoped (`WHERE business_entity_id =
+  ANY(<server-derived entitled ids>)` in the enumerable, now-uniform reader set — this is
+  what lets Consolidated read BXR+Indigo in one query, which a single-valued GUC cannot
+  express). Collections WRITES get GUC-based RLS enforcement (the Veris pattern), because
+  the production-critical cron writer is where the real risk lives.
+- **R4 (documented future hardening, deliberate "not now" — NOT a dropped idea):** a DB-level
+  READ backstop for the collections plane: the reader sets an entitled-ids GUC (list-valued)
+  inside a txn and RLS enforces `business_entity_id = ANY(<parsed list>)`. Requires wrapping
+  every cached collections reader in a GUC-setting transaction — moderate reader surgery, no
+  behavior change. Pick it up when hardening passes happen; the app-WHERE layer is the
+  operative isolation until then. (Same deferred-seam register as viewToEntityIds pre-0028.)
+- **A→B→C (ruled, strictly sequenced, never collapsed):** A = schema only (0030: columns +
+  BXR backfill + in-migration guards + tenant-leading indexes; ALL policies stay permissive).
+  B = writer sets the `app.business_entity_id` GUC (BXR for the live cron; Indigo for the
+  adapter) — after deploy, a REAL BXR cron run must be verified green. C = the enforcement
+  flip (writer policies check the GUC) — only after B is live-verified.
+- **Terminology (Alec):** "Veris view" on the dashboard = the CONSOLIDATED view,
+  super-admins only. It shows BXR-only numbers today simply because BXR is the only tenant
+  with seeded/cron data — not a separate surface, and not the paused Veris claims plane.
+
+### ⚠️ collections_daily_bucket / ON CONFLICT coupling (learned 2026-07-06 — do not trip this)
+
+`daily_collections`' identity is the UNIQUE index `collections_daily_bucket (facility_code,
+source_group_code, payment_date, source_tag) NULLS NOT DISTINCT`, and BOTH live insert paths
+target it by column list — `src/collections/db.ts:85` (workbook CLI) and `db.ts:164` (cron's
+`replaceCmdDailyForFacility`) use `on conflict (facility_code, source_group_code,
+payment_date, source_tag) do nothing`. A column-list ON CONFLICT must match a unique index
+EXACTLY, so **refolding that index to include `business_entity_id` in a schema-only migration
+would error the very next cron run**. The fold ships WITH the writer change (B era): index
+recreate + both ON CONFLICT lists move in one coordinated artifact. Same rule applies to
+`cmd_payer_facility_monthly`'s `(payer_name, facility_name, service_year, service_month)`
+UNIQUE key. 0030 deliberately touches neither.
+
+### Live census backing 0030 (read-only, 2026-07-06)
+
+- **Policies (11 total, ALL permissive today):** cmd_explorer_rows — reader SELECT
+  `USING(true)`, writer INSERT `WITH CHECK(true)`, writer SELECT; daily_collections —
+  reader SELECT, admin ALL, writer SELECT/INSERT/DELETE (all true); cpfm — reader SELECT,
+  admin ALL, writer ALL (all true). RLS *enabled* on all three but wide-open ⟹ today the
+  app-layer WHERE is the only read isolation, and C is where writer teeth arrive.
+- **Owners:** daily_collections + cmd_explorer_rows = postgres; cmd_payer_facility_monthly =
+  claims_admin ⟹ 0030 wraps only the cpfm DDL in `SET ROLE claims_admin` (standing grant).
+- **Writer:** `cmd_rollup_writer` (no BYPASSRLS) via `CMD_ROLLUP_WRITER_DATABASE_URL`;
+  INSERT lists omit business_entity_id everywhere ⟹ the BXR DEFAULT covers A/B with zero
+  cron code change until B deliberately sets the GUC.
+- **Fingerprint collision gate (Alec-ordered, PROVEN):** Indigo CSV → real `mapRow()`
+  (Customer Name → facility, the 14th fingerprint field) = 492,727 mapped rows, 483,936
+  distinct fingerprints, **0 collisions** against all 139,873 live BXR fingerprints.
+  76 rows skipped (`member_id: missing` — the loader would skip identically); 8,791
+  within-Indigo exact dupes collapse via ON CONFLICT DO NOTHING (expected at this grain).
+
+### Still TRUE from the auth-wiring session (NOT superseded)
+
+- Auth EXTEND ruling stands: reuse `claims.app_user`; `user` NON-PHI; server-side session→scope seam
+  (`src/veris/tenantScope` + `app/lib/veris/tenant`). The reader scoping in the stash consumes the
+  SAME RBAC entity decision (`viewToEntityIds` / `rbac.ts`) — auth + collections scoping share one
+  identity, as intended.
+- The Veris tenant-scope resolver + isolation-probe auth-path extension remain valid and green
+  (277 hermetic tests; 39-pass probe). They serve the collections plane too.
+
+### Claims/staging — PAUSED, NOT ABANDONED (record plainly so "UI removed" ≠ "decided against")
+
+The Veris claims plane (`staging.*`, brains, S8–S10) is a real workstream, deliberately paused to
+prioritize Indigo collections onboarding. Nothing here decides against it. brain1/2/3 stay OFF; S4
+(ML runtime) remains deferred; S3 landed. "Claims UI removed" means **on hold**, not cancelled.
