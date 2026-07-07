@@ -448,23 +448,27 @@ export const dashboardDistribution = unstable_cache(
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
 );
 
-/** Monthly collections by facility (non-PHI summary; reader-only, no row fetch). */
+/**
+ * Monthly collections by facility (non-PHI summary; reader-only, no row fetch). `entityIds` is the
+ * RBAC-clamped tenant scope; it is an argument to the cached function, so each tenant scope caches
+ * SEPARATELY (BXR / Indigo / Consolidated never share a cache entry).
+ */
 export const dashboardCollectionsSummary = unstable_cache(
-  async (): Promise<CollectionsMonthlySummary> =>
+  async (entityIds: string[]): Promise<CollectionsMonthlySummary> =>
     collectionsMonthlySummary(
       {},
-      { executor: readerExecutor(), createdBy: 'phase7-collections-dashboard' },
+      { executor: readerExecutor(), createdBy: 'phase7-collections-dashboard', entityIds },
     ),
   ['dashboard-collections-summary'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
 );
 
-/** MTD/YTD collections KPIs by facility (non-PHI; anchored to latest payment_date). */
+/** MTD/YTD collections KPIs by facility (non-PHI; anchored to latest payment_date). Per-tenant cache. */
 export const dashboardCollectionsKpis = unstable_cache(
-  async (): Promise<CollectionsKpis> =>
+  async (entityIds: string[]): Promise<CollectionsKpis> =>
     collectionsKpis(
       {},
-      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard' },
+      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds },
     ),
   ['dashboard-collections-kpis'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
@@ -487,12 +491,12 @@ export const dashboardCollectionsYoy = unstable_cache(
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
 );
 
-/** Latest-month daily collections rows (non-PHI; date × facility × checks/eft/gross). */
+/** Latest-month daily collections rows (non-PHI; date × facility × checks/eft/gross). Per-tenant cache. */
 export const dashboardCollectionsDaily = unstable_cache(
-  async (): Promise<CollectionsDailyResult> =>
+  async (entityIds: string[]): Promise<CollectionsDailyResult> =>
     collectionsDaily(
       {},
-      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard' },
+      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds },
     ),
   ['dashboard-collections-daily'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
@@ -523,6 +527,7 @@ export const facilitiesDimension = unstable_cache(
 export async function collectionsDailyForMonth(
   year: number,
   month: number,
+  entityIds: string[],
 ): Promise<CollectionsDailyResult> {
   if (!Number.isInteger(year) || year < 2000 || year > 2100) {
     throw new Error('year must be an integer in [2000, 2100]');
@@ -537,7 +542,7 @@ export async function collectionsDailyForMonth(
   const to = `${nextYear}-${pad(nextMonth)}-01`; // exclusive upper bound
   return collectionsDaily(
     { from, to },
-    { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard' },
+    { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds },
   );
 }
 
@@ -595,10 +600,15 @@ export async function payerGapCmdForMonth(year: number, month: number): Promise<
  * Returns an empty result for a month with no rollup rows, so the caller can fall
  * back to the matview date-range path.
  */
-export async function payerCmdMonth(year: number, month: number): Promise<CmdPayerMonthResult> {
+export async function payerCmdMonth(
+  year: number,
+  month: number,
+  entityIds: string[],
+): Promise<CmdPayerMonthResult> {
   return cmdPayerMonth(year, month, {
     executor: readerExecutor(),
     createdBy: 'phase71-collections-dashboard',
+    entityIds,
   });
 }
 

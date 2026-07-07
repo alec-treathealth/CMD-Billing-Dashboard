@@ -13,6 +13,7 @@
  */
 import { unstable_cache } from 'next/cache';
 import { makeReaderPool, PgExecutor, readerConnectionStringFromEnv } from '../../src/queries/executor.js';
+import { assertEntityScope } from '../../src/collections/entityScope.js';
 import { DASHBOARD_CACHE_TAG } from '../../src/cacheTags.js';
 
 let cachedExecutor: PgExecutor | undefined;
@@ -22,19 +23,22 @@ function readerExecutor(): PgExecutor {
   return cachedExecutor;
 }
 
-async function queryCollectionsUpdatedAt(): Promise<string | null> {
+async function queryCollectionsUpdatedAt(entityIds: string[]): Promise<string | null> {
+  const scope = assertEntityScope(entityIds, 'collectionsDataUpdatedAt');
   const { rows } = await readerExecutor().query<{ updated_at: string | null }>(
-    "select max(created_at)::text as updated_at from collections.daily_collections where source_tag = 'cmd'",
-    [],
+    "select max(created_at)::text as updated_at from collections.daily_collections where source_tag = 'cmd' and business_entity_id = any($1::uuid[])",
+    [scope],
   );
   return rows[0]?.updated_at ?? null;
 }
 
 /**
- * ISO timestamp (UTC, with offset) of the last CMD cron write, or null if nothing has been
- * ingested yet. Cached and invalidated by the same tags the cron revalidates ('cmd-explorer'
- * for the explorer grid, DASHBOARD_CACHE_TAG for the overview aggregates), so a completed run
- * surfaces immediately; the 5-min TTL is only a fallback if a tag-bust is ever missed.
+ * ISO timestamp (UTC, with offset) of the last CMD cron write for the given tenant scope, or
+ * null if nothing has been ingested yet. `entityIds` is the RBAC-clamped tenant scope (fail-closed
+ * — an empty scope throws), and it is part of the cache key, so each tenant scope memoizes
+ * separately. Cached and invalidated by the same tags the cron revalidates ('cmd-explorer' for the
+ * explorer grid, DASHBOARD_CACHE_TAG for the overview aggregates), so a completed run surfaces
+ * immediately; the 5-min TTL is only a fallback if a tag-bust is ever missed.
  */
 export const collectionsDataUpdatedAt = unstable_cache(
   queryCollectionsUpdatedAt,

@@ -15,6 +15,7 @@
  * Each call emits one lightweight, non-PHI audit line (no claims.query_log).
  */
 import type { QueryExecutor } from '../queries/types.js';
+import { assertEntityScope } from './entityScope.js';
 import { validateDateBound } from './summary.js';
 import type {
   CollectionsAmounts,
@@ -29,6 +30,17 @@ import type {
 export interface CollectionsQueryContext {
   executor: QueryExecutor;
   createdBy: string;
+  /**
+   * Tenant scope: the business_entity_id(s) the caller is entitled to (server-derived from the
+   * RBAC-clamped view). Fail-closed and REQUIRED AT RUNTIME for the SCOPED readers
+   * (collectionsDaily / collectionsKpis / cmdPayerMonth call assertEntityScope and throw on an
+   * empty/absent scope). Filters both the anchor CTE (so "latest month" is per-tenant) and the main
+   * query. Typed optional ONLY because this context is also shared by the NON-scoped readers
+   * (collectionsYoy over payment_lines, facilityDimension reference data) that legitimately omit it,
+   * and so the Bearer /api route can inject its own scope via spread; every scoped caller MUST
+   * supply it.
+   */
+  entityIds?: string[];
   now?: () => Date;
   audit?: (line: string) => void;
 }
@@ -36,14 +48,15 @@ export interface CollectionsQueryContext {
 // --- collectionsDaily -------------------------------------------------------
 
 /**
- * Daily rows. $1 = from (incl), $2 = to (excl), $3 = facility_code. When BOTH
- * $1 and $2 are null the window defaults to the latest calendar month present
- * (via the anchor CTE) so the dashboard/API "this month" view needs no client
- * date math. Exposed for the fixture to assert the exact SQL.
+ * Daily rows. $1 = from (incl), $2 = to (excl), $3 = facility_code, $4 = tenant scope
+ * (business_entity_id[]; required, non-empty). When BOTH $1 and $2 are null the window
+ * defaults to the latest calendar month present FOR THE TENANT (the anchor CTE is itself
+ * tenant-scoped, so one tenant's latest month never anchors another's). Exposed for the
+ * fixture to assert the exact SQL.
  */
 export function collectionsDailySql(): string {
   return (
-    `with anchor as (select max(payment_date) as max_d from collections.daily_collections_resolved) ` +
+    `with anchor as (select max(payment_date) as max_d from collections.daily_collections_resolved where business_entity_id = any($4::uuid[])) ` +
     `select ` +
     `to_char(dc.payment_date, 'YYYY-MM-DD') as payment_date, ` +
     `dc.facility_code as facility_code, ` +
@@ -54,7 +67,8 @@ export function collectionsDailySql(): string {
     `from collections.daily_collections_resolved dc ` +
     `cross join anchor a ` +
     `left join collections.facilities f on f.facility_code = dc.facility_code ` +
-    `where (case when $1::date is null and $2::date is null ` +
+    `where dc.business_entity_id = any($4::uuid[]) ` +
+    `and (case when $1::date is null and $2::date is null ` +
     `then dc.payment_date >= date_trunc('month', a.max_d)::date ` +
     `and dc.payment_date < (date_trunc('month', a.max_d) + interval '1 month')::date ` +
     `else (($1::date is null or dc.payment_date >= $1::date) ` +
@@ -82,11 +96,13 @@ export async function collectionsDaily(
   const facility = typeof args.facility_code === 'string' && args.facility_code.trim() !== ''
     ? args.facility_code.trim()
     : undefined;
+  const entityIds = assertEntityScope(ctx.entityIds, 'collectionsDaily');
 
   const { rows } = await ctx.executor.query<RawDailyRow>(collectionsDailySql(), [
     from ?? null,
     to ?? null,
     facility ?? null,
+    entityIds,
   ]);
 
   const out: CollectionsDailyRow[] = rows.map((r) => ({
@@ -113,15 +129,16 @@ export async function collectionsDaily(
 
 /**
  * Per-facility + overall MTD/YTD. $1 = as_of (anchor); when null it defaults to
- * max(payment_date). MTD = [date_trunc('month', anchor), anchor]; YTD =
- * [date_trunc('year', anchor), anchor] (both inclusive of the anchor day).
+ * max(payment_date) FOR THE TENANT (the anchor CTE is tenant-scoped). $2 = tenant scope
+ * (business_entity_id[]; required, non-empty). MTD = [date_trunc('month', anchor), anchor];
+ * YTD = [date_trunc('year', anchor), anchor] (both inclusive of the anchor day).
  * Exposed for the fixture to assert the exact SQL.
  */
 export function collectionsKpisSql(): string {
   const mtd = `dc.payment_date >= date_trunc('month', a.d)::date and dc.payment_date <= a.d`;
   const ytd = `dc.payment_date >= date_trunc('year', a.d)::date and dc.payment_date <= a.d`;
   return (
-    `with anchor as (select coalesce($1::date, max(payment_date)) as d from collections.daily_collections_resolved) ` +
+    `with anchor as (select coalesce($1::date, max(payment_date)) as d from collections.daily_collections_resolved where business_entity_id = any($2::uuid[])) ` +
     `select ` +
     `to_char(a.d, 'YYYY-MM-DD') as as_of, ` +
     `dc.facility_code as facility_code, ` +
@@ -135,6 +152,7 @@ export function collectionsKpisSql(): string {
     `from collections.daily_collections_resolved dc ` +
     `cross join anchor a ` +
     `left join collections.facilities f on f.facility_code = dc.facility_code ` +
+    `where dc.business_entity_id = any($2::uuid[]) ` +
     `group by a.d, dc.facility_code, f.facility_name ` +
     `order by ytd_gross desc`
   );
@@ -157,8 +175,9 @@ export async function collectionsKpis(
   ctx: CollectionsQueryContext,
 ): Promise<CollectionsKpis> {
   const asOfArg = validateDateBound('as_of' as 'from', args.as_of);
+  const entityIds = assertEntityScope(ctx.entityIds, 'collectionsKpis');
 
-  const { rows } = await ctx.executor.query<RawKpiRow>(collectionsKpisSql(), [asOfArg ?? null]);
+  const { rows } = await ctx.executor.query<RawKpiRow>(collectionsKpisSql(), [asOfArg ?? null, entityIds]);
 
   const by_facility: CollectionsFacilityKpi[] = rows.map((r) => ({
     facility_code: r.facility_code,

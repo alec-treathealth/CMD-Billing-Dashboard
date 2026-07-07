@@ -53,7 +53,7 @@ export default async function DashboardPage({
           Aggregate, non-PHI metrics across all claims and collections. No patient data is loaded
           here.
         </p>
-        <DataFreshness />
+        <DataFreshness view={view} />
       </header>
       <DashboardNav />
       <Dashboard view={view} />

@@ -5,7 +5,7 @@
  * once-on-mount data hook, and the proportional MiniBar. Used by every dashboard
  * surface (overview / payers / collections). Non-PHI, aggregate-only.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type DependencyList } from 'react';
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -16,11 +16,20 @@ export type WidgetState<T> =
   | { status: 'error' }
   | { status: 'ready'; data: T };
 
-/** Run a dashboard action once on mount; expose loading/error/ready state. */
-export function useWidget<T>(action: () => Promise<DashboardResult<T>>): WidgetState<T> {
+/**
+ * Run a dashboard action and expose loading/error/ready state. Re-runs whenever `deps` change
+ * (default `[]` = once on mount). Pass `[view]` for tenant-scoped widgets so switching the view
+ * re-fetches for the new tenant; the effect resets to `loading` first so the previous tenant's
+ * numbers never linger on screen during the switch.
+ */
+export function useWidget<T>(
+  action: () => Promise<DashboardResult<T>>,
+  deps: DependencyList = [],
+): WidgetState<T> {
   const [state, setState] = useState<WidgetState<T>>({ status: 'loading' });
   useEffect(() => {
     let live = true;
+    setState({ status: 'loading' });
     action()
       .then((r) => {
         if (!live) return;
@@ -32,9 +41,10 @@ export function useWidget<T>(action: () => Promise<DashboardResult<T>>): WidgetS
     return () => {
       live = false;
     };
-    // action identity is stable (module-level server action); run once.
+    // `action` is a fresh closure each render; we intentionally key the effect on `deps`
+    // (the caller's real inputs, e.g. [view]) rather than on action identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, deps);
   return state;
 }
 

@@ -17,6 +17,15 @@ import {
   type CollectionsQueryContext,
 } from '../collections/daily.js';
 import { ISO_DATE_RE } from '../collections/summary.js';
+import { BXR_ENTITY_ID } from '../tenants.js';
+
+/**
+ * These Bearer-gated /api/collections routes have no user session (so no RBAC-clamped view) and,
+ * pre-Indigo, always returned BXR's data. We pin them to BXR explicitly so they keep that exact
+ * behavior and can NEVER return Indigo rows. A per-tenant API contract (e.g. an explicit tenant
+ * query param) is a deliberate future change; until then this is the safe, non-leaking default.
+ */
+const API_ENTITY_SCOPE = [BXR_ENTITY_ID];
 
 export interface CollectionsQueryHttpRequest {
   method?: string;
@@ -49,7 +58,10 @@ export async function handleCollectionsDailyRequest(
   const createdBy = req.createdBy?.trim() || 'collections-daily-api';
 
   try {
-    const result = await collectionsDaily({ facility_code: facility, from, to }, { ...deps.ctx, createdBy });
+    const result = await collectionsDaily(
+      { facility_code: facility, from, to },
+      { ...deps.ctx, createdBy, entityIds: API_ENTITY_SCOPE },
+    );
     return { status: 200, body: result };
   } catch {
     return { status: 500, body: { error: 'daily_failed' } };
@@ -68,7 +80,7 @@ export async function handleCollectionsKpisRequest(
   const createdBy = req.createdBy?.trim() || 'collections-kpis-api';
 
   try {
-    const result = await collectionsKpis({ as_of }, { ...deps.ctx, createdBy });
+    const result = await collectionsKpis({ as_of }, { ...deps.ctx, createdBy, entityIds: API_ENTITY_SCOPE });
     return { status: 200, body: result };
   } catch {
     return { status: 500, body: { error: 'kpis_failed' } };

@@ -60,7 +60,7 @@ import { facilityLabel } from '../../../src/collections/summaryTypes';
 import type { CmdPayerFacilityRow } from '../../../src/collections/cmdPayerRollup';
 import { CHART_COLORS, FacilityKpiBars, kpiChartRows, LegendSwatch } from './collections';
 import { MiniBar, useWidget, WidgetCard } from './widgets';
-import { type DashboardView, viewToEntityIds } from '@/lib/views';
+import { type DashboardView } from '@/lib/views';
 
 /** The chart card title per view (so an Indigo/Consolidated view isn't mislabeled "BXR"). */
 function chartTitleFor(view: DashboardView): string {
@@ -600,18 +600,15 @@ function ChartEmpty({
 }
 
 export function OverviewBarChart({ scope = 'consolidated' }: { scope?: DashboardView }) {
-  // The view → entity-id seam (app/lib/views.ts). Carried but not yet consumed by the
-  // readers (the collections schema has no business_entity_id column today); all three
-  // views render BXR-or-stub data. This is where the chart gains real scope once Indigo
-  // data lands. Title reflects the scope so the card isn't mislabeled.
+  // `scope` is the active tenant view. It is passed to every collections load* action (which
+  // re-derives the entitled business_entity_id(s) SERVER-SIDE — the client value is only a hint)
+  // and used as the useWidget/effect dependency so switching views re-fetches for the new tenant.
   // (`scope`, not `view`: this file's own `view` state is the By Facility/By Payer toggle.)
-  const entityIds = viewToEntityIds(scope);
-  void entityIds;
 
-  // MTD data is the already-cached aggregate read for whichever view is active.
-  const kpisState = useWidget<CollectionsKpis>(loadCollectionsKpis);
+  // MTD data is the already-cached aggregate read for the active tenant.
+  const kpisState = useWidget<CollectionsKpis>(() => loadCollectionsKpis(scope), [scope]);
   // Latest-month daily rows (cached) — backs the MTD facility drill-down panel.
-  const dailyMtdState = useWidget<CollectionsDailyResult>(loadCollectionsDaily);
+  const dailyMtdState = useWidget<CollectionsDailyResult>(() => loadCollectionsDaily(scope), [scope]);
   // Canonical facility dimension (code -> care_setting/acronym) for the IP/OP split,
   // Facility filters, and acronym bar labels. Cached reference (migration 0016).
   const dimState = useWidget<FacilityDimensionRow[]>(loadFacilityDimension);
@@ -687,7 +684,7 @@ export function OverviewBarChart({ scope = 'consolidated' }: { scope?: Dashboard
     let live = true;
     setPast({ kind: 'loading' });
     if (view === 'facility') {
-      loadCollectionsDailyRange({ year: anchorYear, month })
+      loadCollectionsDailyRange({ year: anchorYear, month }, scope)
         .then((r) => {
           if (!live) return;
           setPast(
@@ -703,13 +700,21 @@ export function OverviewBarChart({ scope = 'consolidated' }: { scope?: Dashboard
       const from = `${anchorYear}-${pad2(month)}-01`;
       const to = `${anchorYear}-${pad2(month)}-${pad2(lastDayOfMonth(anchorYear, month))}`;
       (async () => {
-        const cmd = await loadCmdPayerMonth(anchorYear, month);
+        const cmd = await loadCmdPayerMonth(anchorYear, month, scope);
         if (!live) return;
         if (cmd.ok && cmd.data.summary.by_payer.length > 0) {
           setPast({ kind: 'payer', summary: cmd.data.summary, byFacility: cmd.data.by_facility });
           return;
         }
-        // Empty rollup (month not ingested) → matview range; no facility breakdown.
+        // Empty CMD rollup (month not ingested). The fallback (loadPayerGapRange) reads the
+        // claims matview, which is BXR-only and NOT tenant-scoped (claims.claims has no
+        // business_entity_id — a separate tenancy follow-up). So use it ONLY when BXR is in
+        // scope (bxr / consolidated); for an Indigo-only view show an empty payer result rather
+        // than leak BXR claims data under Indigo.
+        if (scope === 'indigo') {
+          setPast({ kind: 'payer', summary: { rows_analyzed: 0, by_payer: [] }, byFacility: [] });
+          return;
+        }
         const fallback = await loadPayerGapRange({ from, to });
         if (!live) return;
         setPast(
@@ -722,7 +727,7 @@ export function OverviewBarChart({ scope = 'consolidated' }: { scope?: Dashboard
     return () => {
       live = false;
     };
-  }, [view, month, isMtd, anchorYear]);
+  }, [view, month, isMtd, anchorYear, scope]);
 
   // --- Filtering + acronym relabeling (client-side over the loaded rows). ---
   // Filter facility rows by the active care-setting + facility selection, and relabel

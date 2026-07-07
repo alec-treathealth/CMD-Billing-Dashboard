@@ -48,7 +48,7 @@ export default async function CollectionsPage({
           CMD charge-line detail, filterable by facility and month. Patient identifiers are
           masked by default and revealed in bulk on an explicit, audited action.
         </p>
-        <DataFreshness />
+        <DataFreshness view={view} />
       </header>
       <DashboardNav />
       <CollectionsView view={view} canRevealPhi={access.access.canRevealPhi} />

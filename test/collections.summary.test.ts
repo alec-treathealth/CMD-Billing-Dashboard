@@ -7,7 +7,11 @@ import {
   type CollectionsSummaryContext,
 } from '../src/collections/summary.js';
 import { facilityLabel } from '../src/collections/summaryTypes.js';
+import { BXR_ENTITY_ID } from '../src/tenants.js';
 import type { ExecResult, QueryExecutor } from '../src/queries/types.js';
+
+/** A valid single-tenant scope for the reader tests (bound as the trailing $n param). */
+const SCOPE = [BXR_ENTITY_ID];
 
 const EXPECTED_SQL =
   `select ` +
@@ -20,7 +24,8 @@ const EXPECTED_SQL =
   `coalesce(sum(dc.gross_amount), 0) as gross_amount ` +
   `from collections.daily_collections_resolved dc ` +
   `left join collections.facilities f on f.facility_code = dc.facility_code ` +
-  `where ($1::date is null or dc.payment_date >= $1::date) ` +
+  `where dc.business_entity_id = any($3::uuid[]) ` +
+  `and ($1::date is null or dc.payment_date >= $1::date) ` +
   `and ($2::date is null or dc.payment_date < $2::date) ` +
   `group by 1, dc.facility_code, f.facility_name ` +
   `order by month desc, gross_amount desc`;
@@ -43,24 +48,33 @@ function fakeExecutor(rows: Record<string, unknown>[], cap: Capture): QueryExecu
 
 /** Context with a no-op audit sink (assert audit shape separately where needed). */
 function ctxWith(executor: QueryExecutor, audit?: (line: string) => void): CollectionsSummaryContext {
-  return { executor, createdBy: 'test', now: () => new Date('2026-06-14T00:00:00Z'), audit: audit ?? (() => {}) };
+  return { executor, createdBy: 'test', entityIds: SCOPE, now: () => new Date('2026-06-14T00:00:00Z'), audit: audit ?? (() => {}) };
 }
 
 test('collectionsMonthlySummarySql: exact SQL string is stable', () => {
   assert.equal(collectionsMonthlySummarySql(), EXPECTED_SQL);
 });
 
-test('no args → both date params are null', async () => {
+test('no args → both date params are null; tenant scope bound as $3', async () => {
   const cap: Capture = {};
   await collectionsMonthlySummary({}, ctxWith(fakeExecutor([], cap)));
   assert.equal(cap.sql, EXPECTED_SQL);
-  assert.deepEqual(cap.params, [null, null]);
+  assert.deepEqual(cap.params, [null, null, SCOPE]);
 });
 
-test('date bounds are passed as $1/$2 verbatim', async () => {
+test('date bounds are passed as $1/$2 verbatim; scope as $3', async () => {
   const cap: Capture = {};
   await collectionsMonthlySummary({ from: '2026-01-01', to: '2026-04-01' }, ctxWith(fakeExecutor([], cap)));
-  assert.deepEqual(cap.params, ['2026-01-01', '2026-04-01']);
+  assert.deepEqual(cap.params, ['2026-01-01', '2026-04-01', SCOPE]);
+});
+
+test('fail-closed: empty entityIds is rejected before any query', async () => {
+  const cap: Capture = {};
+  await assert.rejects(
+    () => collectionsMonthlySummary({}, { executor: fakeExecutor([], cap), createdBy: 'test', entityIds: [], audit: () => {} }),
+    /entityIds required/,
+  );
+  assert.equal(cap.sql, undefined, 'executor must not run without a tenant scope');
 });
 
 test('malformed date is rejected (fail-closed) before any query', async () => {

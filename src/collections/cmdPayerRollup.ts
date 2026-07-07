@@ -14,6 +14,7 @@
  */
 import type { Expect, HasNoPhiKey, PayerGapRow, PayerGapSummary } from '../queries/types.js';
 import type { CollectionsQueryContext } from './daily.js';
+import { assertEntityScope } from './entityScope.js';
 
 /** Sentinel stored for a blank payer/facility (migration 0012); shown as null. */
 const BLANK = '';
@@ -43,15 +44,16 @@ export interface CmdPayerMonthResult {
 }
 
 /**
- * SQL: one month, projected explicitly (never SELECT *). The 0012 unique key makes
- * (payer, facility) unique within a month, so this is a straight projection.
- * Exposed so the fixture can assert the exact statement.
+ * SQL: one month, projected explicitly (never SELECT *). The 0031 unique key makes
+ * (business_entity_id, payer, facility) unique within a month, so this is a straight projection.
+ * $1 = service_year, $2 = service_month, $3 = tenant scope (business_entity_id[]; required,
+ * non-empty). Exposed so the fixture can assert the exact statement.
  */
 export function cmdPayerMonthSql(): string {
   return (
     `select payer_name, facility_name, total_charge, total_allowed, total_paid, charge_line_count ` +
     `from collections.cmd_payer_facility_monthly ` +
-    `where service_year = $1 and service_month = $2 ` +
+    `where service_year = $1 and service_month = $2 and business_entity_id = any($3::uuid[]) ` +
     `order by payer_name, total_charge desc`
   );
 }
@@ -176,7 +178,8 @@ export async function cmdPayerMonth(
   if (!Number.isInteger(month) || month < 1 || month > 12) {
     throw new Error('month must be an integer in [1, 12]');
   }
-  const { rows } = await ctx.executor.query<RawRollupRow>(cmdPayerMonthSql(), [year, month]);
+  const entityIds = assertEntityScope(ctx.entityIds, 'cmdPayerMonth');
+  const { rows } = await ctx.executor.query<RawRollupRow>(cmdPayerMonthSql(), [year, month, entityIds]);
   const result = rollupRowsToMonthResult(rows, year, month);
   emitAudit(ctx, { year, month, payers: result.summary.by_payer.length, facility_rows: result.by_facility.length });
   return result;

@@ -15,6 +15,7 @@
  * audit); it emits exactly one lightweight structured, non-PHI audit line.
  */
 import type { QueryExecutor } from '../queries/types.js';
+import { assertEntityScope } from './entityScope.js';
 import type {
   CollectionsMonthlySummary,
   CollectionsMonthRow,
@@ -29,6 +30,14 @@ export interface CollectionsSummaryContext {
   executor: QueryExecutor;
   /** Non-PHI principal for the audit line. */
   createdBy: string;
+  /**
+   * Tenant scope: the business_entity_id(s) the caller is entitled to (server-derived from the
+   * RBAC-clamped view). Fail-closed and REQUIRED AT RUNTIME — collectionsMonthlySummary calls
+   * assertEntityScope and throws on an empty/absent scope, so it never reads all tenants (review
+   * finding #1). Typed optional ONLY so the Bearer /api route can inject its own scope via object
+   * spread; every real caller MUST supply it. Bound as $3 (business_entity_id = any(...)).
+   */
+  entityIds?: string[];
   now?: () => Date;
   /** Audit sink; defaults to one JSON line on stdout. */
   audit?: (line: string) => void;
@@ -46,7 +55,8 @@ interface RawRow {
 
 /**
  * The parameterized SQL. Exposed so the fixture can assert the exact string.
- * `$1` = inclusive from-date, `$2` = exclusive to-date (either may be NULL).
+ * `$1` = inclusive from-date, `$2` = exclusive to-date (either may be NULL),
+ * `$3` = tenant scope (business_entity_id[]; required, non-empty — see CollectionsSummaryContext).
  */
 export function collectionsMonthlySummarySql(): string {
   return (
@@ -60,7 +70,8 @@ export function collectionsMonthlySummarySql(): string {
     `coalesce(sum(dc.gross_amount), 0) as gross_amount ` +
     `from collections.daily_collections_resolved dc ` +
     `left join collections.facilities f on f.facility_code = dc.facility_code ` +
-    `where ($1::date is null or dc.payment_date >= $1::date) ` +
+    `where dc.business_entity_id = any($3::uuid[]) ` +
+    `and ($1::date is null or dc.payment_date >= $1::date) ` +
     `and ($2::date is null or dc.payment_date < $2::date) ` +
     `group by 1, dc.facility_code, f.facility_name ` +
     `order by month desc, gross_amount desc`
@@ -92,10 +103,12 @@ export async function collectionsMonthlySummary(
 ): Promise<CollectionsMonthlySummary> {
   const from = validateDateBound('from', args.from);
   const to = validateDateBound('to', args.to);
+  const entityIds = assertEntityScope(ctx.entityIds, 'collectionsMonthlySummary');
 
   const { rows } = await ctx.executor.query<RawRow>(collectionsMonthlySummarySql(), [
     from ?? null,
     to ?? null,
+    entityIds,
   ]);
 
   const by_month_facility: CollectionsMonthRow[] = rows.map((r) => ({

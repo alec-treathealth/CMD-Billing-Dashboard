@@ -9,6 +9,10 @@ import {
 import type { CmdReportRow } from '../src/collections/cmdPayer.js';
 import type { QueryExecutor } from '../src/queries/types.js';
 import type { CollectionsQueryContext } from '../src/collections/daily.js';
+import { BXR_ENTITY_ID } from '../src/tenants.js';
+
+/** A valid single-tenant scope for the reader test (bound as $3). */
+const SCOPE = [BXR_ENTITY_ID];
 
 /** Build a report row keyed by the live CMD report header names. */
 function row(fields: Partial<Record<string, string>>): CmdReportRow {
@@ -152,6 +156,7 @@ function ctxWith(executor: QueryExecutor, audit: string[]): CollectionsQueryCont
   return {
     executor,
     createdBy: 'test',
+    entityIds: SCOPE,
     now: () => new Date('2026-06-24T00:00:00.000Z'),
     audit: (line) => audit.push(line),
   };
@@ -166,7 +171,7 @@ test('cmdPayerMonth: exact parameterized SQL, maps result, emits non-PHI audit',
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0]!.sql, cmdPayerMonthSql());
-  assert.deepEqual(calls[0]!.params, [2026, 5]);
+  assert.deepEqual(calls[0]!.params, [2026, 5, SCOPE]);
 
   assert.equal(result.year, 2026);
   assert.equal(result.month, 5);

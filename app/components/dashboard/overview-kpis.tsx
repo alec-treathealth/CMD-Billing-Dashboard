@@ -45,7 +45,7 @@ import {
   type CollectionsYoy,
   type FacilityDimensionRow,
 } from '@/lib/actions';
-import { type DashboardView, viewToEntityIds } from '@/lib/views';
+import { type DashboardView } from '@/lib/views';
 import { Kpi, useWidget } from './widgets';
 
 const MONTH_NAMES = [
@@ -164,13 +164,11 @@ function KpiSkeletonRow() {
 }
 
 export function OverviewKpis({ view }: { view: DashboardView }) {
-  // The view → entity-id seam. Carried (and logged-in-spirit) but not yet consumed by
-  // the readers below — see the seam note in app/lib/views.ts. All three views render
-  // BXR-or-stub data today; this is the one line that gains meaning when Indigo lands.
-  const entityIds = viewToEntityIds(view);
-  void entityIds;
-
-  const kpisState = useWidget<CollectionsKpis>(loadCollectionsKpis);
+  // `view` is the active tenant scope. It is passed to every collections load* action (which
+  // re-derives the entitled business_entity_id(s) SERVER-SIDE — the client value is only a hint)
+  // and used as the useWidget/effect dependency, so switching the view re-fetches for the new
+  // tenant. The facility dimension is tenant-agnostic reference data, so it is not view-scoped.
+  const kpisState = useWidget<CollectionsKpis>(() => loadCollectionsKpis(view), [view]);
   const dimState = useWidget<FacilityDimensionRow[]>(loadFacilityDimension);
 
   const asOf = kpisState.status === 'ready' ? kpisState.data.as_of : null;
@@ -184,12 +182,12 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
     setYoy(null);
     setPriorMonth(null);
     const { year, month } = priorMonthOf(asOf);
-    loadCollectionsYoy(asOf)
+    loadCollectionsYoy(asOf, view)
       .then((r) => {
         if (live && r.ok) setYoy(r.data);
       })
       .catch(() => {});
-    loadCollectionsDailyRange({ year, month })
+    loadCollectionsDailyRange({ year, month }, view)
       .then((r) => {
         if (live && r.ok) setPriorMonth(r.data);
       })
@@ -197,7 +195,7 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
     return () => {
       live = false;
     };
-  }, [asOf]);
+  }, [asOf, view]);
 
   // facility_code → dimension row, for IP/OP and acronym labels.
   const dimByCode = useMemo(() => {
@@ -298,7 +296,7 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
         />
       </div>
 
-      <AllFacilitiesTable kpis={kpis} dimByCode={dimByCode} asOf={asOf} />
+      <AllFacilitiesTable kpis={kpis} dimByCode={dimByCode} asOf={asOf} view={view} />
     </div>
   );
 }
@@ -332,10 +330,12 @@ function AllFacilitiesTable({
   kpis,
   dimByCode,
   asOf,
+  view,
 }: {
   kpis: CollectionsKpis;
   dimByCode: Map<string, FacilityDimensionRow>;
   asOf: string | null;
+  view: DashboardView;
 }) {
   const [open, setOpen] = useState(false);
   const [setting, setSetting] = useState<FacilitySetting>('ALL');
@@ -365,7 +365,7 @@ function AllFacilitiesTable({
     }
     let live = true;
     setPastStatus('loading');
-    loadCollectionsDailyRange({ year: currentYear, month })
+    loadCollectionsDailyRange({ year: currentYear, month }, view)
       .then((r) => {
         if (!live) return;
         if (!r.ok) {
@@ -399,7 +399,7 @@ function AllFacilitiesTable({
     return () => {
       live = false;
     };
-  }, [open, isCurrent, month, currentYear]);
+  }, [open, isCurrent, month, currentYear, view]);
 
   // Rows for display: current month → MTD KPI rows; past month → fetched + aggregated.
   // Joined to the dimension for the acronym label + IP/OP, then filtered by setting.

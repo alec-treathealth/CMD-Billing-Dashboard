@@ -19,6 +19,15 @@ import {
   type CollectionsSummaryContext,
 } from '../collections/summary.js';
 import type { CollectionsSummaryArgs } from '../collections/summaryTypes.js';
+import { BXR_ENTITY_ID } from '../tenants.js';
+
+/**
+ * This Bearer-gated /api/collections/summary route has no user session (so no RBAC-clamped view)
+ * and, pre-Indigo, always returned BXR's data. Pin it to BXR explicitly so it keeps that exact
+ * behavior and can NEVER return Indigo rows (a per-tenant API contract is a deliberate future
+ * change; this is the safe, non-leaking default until then).
+ */
+const API_ENTITY_SCOPE = [BXR_ENTITY_ID];
 
 export interface CollectionsSummaryHttpRequest {
   /** HTTP method. GET only — any other verb is 405. */
@@ -68,7 +77,7 @@ export async function handleCollectionsSummaryRequest(
   const createdBy = req.createdBy?.trim() || 'collections-summary-api';
 
   try {
-    const summary = await collectionsMonthlySummary(args, { ...deps.ctx, createdBy });
+    const summary = await collectionsMonthlySummary(args, { ...deps.ctx, createdBy, entityIds: API_ENTITY_SCOPE });
     return { status: 200, body: summary };
   } catch {
     // Never echo the error (it may name a table/column).

@@ -48,7 +48,7 @@ import {
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
 import { dashboardAccess } from '@/lib/access';
-import { clampView, viewToEntityIds, type DashboardView } from '@/lib/views';
+import { BXR_ENTITY_ID, clampView, viewToEntityIds, type DashboardView } from '@/lib/views';
 import { supabaseAuthConfigured } from '@/lib/supabase/env';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdExplorer';
 import type {
@@ -129,8 +129,9 @@ async function requirePhiPrincipal(): Promise<PhiPrincipal> {
 }
 
 /**
- * Non-PHI tenant scope for the explorer GRID + facility filter: the business_entity_id(s) for the
- * REQUESTED view, clamped SERVER-SIDE to the session's entitlement (via clampView), so a
+ * Non-PHI tenant scope for ALL collections reads (the explorer grid + facility filter AND the
+ * aggregate overview readers — summary/kpis/daily/payer/freshness): the business_entity_id(s) for
+ * the REQUESTED view, clamped SERVER-SIDE to the session's entitlement (via clampView), so a
  * hand-edited/forged `view` can never widen scope beyond what the role allows. `view` is a display
  * hint from the client; the entitlement is the authority. Returns null when there is no authorized
  * principal so the caller fails closed.
@@ -141,7 +142,7 @@ async function requirePhiPrincipal(): Promise<PhiPrincipal> {
  * tenant's collections rows (even non-PHI payer/revenue data), so a null user → null scope here.
  * (PHI reveal already fails closed the same way in requirePhiPrincipal.)
  */
-async function explorerEntityScope(view?: DashboardView): Promise<string[] | null> {
+async function viewEntityScope(view?: DashboardView): Promise<string[] | null> {
   const result = await dashboardAccess();
   if (!result.ok) return null;
   const { access } = result;
@@ -388,9 +389,12 @@ export async function loadPayerGapCmd(
 export async function loadCmdPayerMonth(
   year: number,
   month: number,
+  view?: DashboardView,
 ): Promise<DashboardResult<CmdPayerMonthResult>> {
+  const entityIds = await viewEntityScope(view);
+  if (!entityIds) return { ok: false };
   try {
-    return { ok: true, data: await payerCmdMonth(year, month) };
+    return { ok: true, data: await payerCmdMonth(year, month, entityIds) };
   } catch {
     return { ok: false };
   }
@@ -423,19 +427,25 @@ export async function loadTopRevenue(): Promise<DashboardResult<DistributionSumm
   }
 }
 
-/** Monthly collections by facility (Phase 7; non-PHI, reader-only). */
-export async function loadCollectionsSummary(): Promise<DashboardResult<CollectionsMonthlySummary>> {
+/** Monthly collections by facility (Phase 7; non-PHI, reader-only). Tenant-scoped by the clamped view. */
+export async function loadCollectionsSummary(
+  view?: DashboardView,
+): Promise<DashboardResult<CollectionsMonthlySummary>> {
+  const entityIds = await viewEntityScope(view);
+  if (!entityIds) return { ok: false };
   try {
-    return { ok: true, data: await dashboardCollectionsSummary() };
+    return { ok: true, data: await dashboardCollectionsSummary(entityIds) };
   } catch {
     return { ok: false };
   }
 }
 
-/** MTD/YTD collections KPIs by facility (Phase 7.1; non-PHI, reader-only). */
-export async function loadCollectionsKpis(): Promise<DashboardResult<CollectionsKpis>> {
+/** MTD/YTD collections KPIs by facility (Phase 7.1; non-PHI, reader-only). Tenant-scoped by the clamped view. */
+export async function loadCollectionsKpis(view?: DashboardView): Promise<DashboardResult<CollectionsKpis>> {
+  const entityIds = await viewEntityScope(view);
+  if (!entityIds) return { ok: false };
   try {
-    return { ok: true, data: await dashboardCollectionsKpis() };
+    return { ok: true, data: await dashboardCollectionsKpis(entityIds) };
   } catch {
     return { ok: false };
   }
@@ -448,8 +458,18 @@ export async function loadCollectionsKpis(): Promise<DashboardResult<Collections
  * On any failure (or a malformed anchor) returns { ok: false } so the cards just drop
  * the YoY line rather than break the page.
  */
-export async function loadCollectionsYoy(asOf: string): Promise<DashboardResult<CollectionsYoy>> {
+export async function loadCollectionsYoy(
+  asOf: string,
+  view?: DashboardView,
+): Promise<DashboardResult<CollectionsYoy>> {
   if (typeof asOf !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return { ok: false };
+  const entityIds = await viewEntityScope(view);
+  if (!entityIds) return { ok: false };
+  // YoY sources collections.payment_lines, which has NO business_entity_id (it is NOT in the
+  // 0027–0031 tenancy set) and holds BXR-only history. Show it only when BXR is in scope
+  // (bxr / consolidated); hide for an Indigo-only view so BXR totals never render under Indigo.
+  // (payment_lines tenancy is a separate follow-up; until then YoY is BXR-only by construction.)
+  if (!entityIds.includes(BXR_ENTITY_ID)) return { ok: false };
   try {
     return { ok: true, data: await dashboardCollectionsYoy(asOf) };
   } catch {
@@ -457,10 +477,14 @@ export async function loadCollectionsYoy(asOf: string): Promise<DashboardResult<
   }
 }
 
-/** Latest-month daily collections rows (Phase 7.1; non-PHI, reader-only). */
-export async function loadCollectionsDaily(): Promise<DashboardResult<CollectionsDailyResult>> {
+/** Latest-month daily collections rows (Phase 7.1; non-PHI, reader-only). Tenant-scoped by the clamped view. */
+export async function loadCollectionsDaily(
+  view?: DashboardView,
+): Promise<DashboardResult<CollectionsDailyResult>> {
+  const entityIds = await viewEntityScope(view);
+  if (!entityIds) return { ok: false };
   try {
-    return { ok: true, data: await dashboardCollectionsDaily() };
+    return { ok: true, data: await dashboardCollectionsDaily(entityIds) };
   } catch {
     return { ok: false };
   }
@@ -484,12 +508,17 @@ export async function loadFacilityDimension(): Promise<DashboardResult<FacilityD
  * Lets the collections daily view browse months other than the latest. `year`/
  * `month` are re-validated server-side as bounded integers before any query.
  */
-export async function loadCollectionsDailyRange(params: {
-  year: number;
-  month: number;
-}): Promise<DashboardResult<CollectionsDailyResult>> {
+export async function loadCollectionsDailyRange(
+  params: {
+    year: number;
+    month: number;
+  },
+  view?: DashboardView,
+): Promise<DashboardResult<CollectionsDailyResult>> {
+  const entityIds = await viewEntityScope(view);
+  if (!entityIds) return { ok: false };
   try {
-    return { ok: true, data: await collectionsDailyForMonth(params.year, params.month) };
+    return { ok: true, data: await collectionsDailyForMonth(params.year, params.month, entityIds) };
   } catch {
     return { ok: false };
   }
@@ -668,7 +697,7 @@ export async function loadCmdReport(
   view?: DashboardView,
 ): Promise<CmdReportResult> {
   // Tenant scope from the RBAC-clamped view (server-derived). Fail closed if unauthorized.
-  const entityIds = await explorerEntityScope(view);
+  const entityIds = await viewEntityScope(view);
   if (entityIds === null) {
     return { ok: false, error: 'The collections report could not be loaded right now.' };
   }
@@ -712,7 +741,7 @@ export type CmdFacilitiesResult = { ok: true; facilities: string[] } | { ok: fal
  * lists only facilities the caller may see. Cached reader-only; never returns PHI.
  */
 export async function loadCmdExplorerFacilities(view?: DashboardView): Promise<CmdFacilitiesResult> {
-  const entityIds = await explorerEntityScope(view);
+  const entityIds = await viewEntityScope(view);
   if (entityIds === null) return { ok: false };
   try {
     return { ok: true, facilities: await cmdExplorerFacilities(entityIds) };
