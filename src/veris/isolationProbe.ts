@@ -24,8 +24,18 @@
  *      set (apply-path credentials); otherwise it is SKIPped here and executed
  *      as the 019 apply-time verification block instead.
  *
- * Connects as claims_reader (verify-full TLS via makeClient). The admin URL is
- * never used to read.
+ * Connects as claims_reader (verify-full TLS via makeClient) for the staging.* and core.*
+ * assertions above. The admin URL is never used to read.
+ *
+ * COLLECTIONS PLANE (section 8, added with migration 0033): the collections.* readers are
+ * APP-scoped — claims_reader's SELECT policy there is permissive (USING true), because the
+ * dashboard readers filter by business_entity_id in the query (0032 + app viewEntityScope) and
+ * run WITHOUT a GUC. GUC-based row visibility on collections is therefore a WRITER property:
+ * 0033 made cmd_rollup_writer's SELECT policies USING (business_entity_id =
+ * current_setting('app.business_entity_id')::uuid). So section 8 connects as the writer
+ * (CMD_ROLLUP_WRITER_DATABASE_URL) and asserts, read-only: no-GUC read fails closed; BXR-GUC
+ * sees only BXR (>0); Indigo-GUC sees ZERO (Indigo's empty state = perfect isolation until the
+ * step-4 seed load). SKIPs if the writer URL is unset (mirrors the consolidated_reader skip).
  */
 import { makeClient, type Db } from '../db.js';
 import { withTenant, TENANT_GUC } from './withTenant.js';
@@ -44,6 +54,11 @@ const STAGING_TABLES = [
 const BXR_POPULATED = new Set([
   'payer_dim', 'claim_line', 'era_adjustment', 'payment_residual', 'brain1_features',
 ]);
+
+/** Collections-plane tables whose WRITER SELECT is GUC-scoped by migration 0033 (section 8). */
+const COLLECTIONS_TABLES = [
+  'daily_collections', 'cmd_payer_facility_monthly', 'cmd_explorer_rows',
+] as const;
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -68,6 +83,24 @@ async function countsUnderTenant(db: Db, beid: string): Promise<Record<string, n
     out['__entity_is_self'] = ent.rows.length === 1 && ent.rows[0]?.id === beid ? 1 : 0;
     out['__customers'] = Number(cust.rows[0]?.n ?? -1);
     // Positive control: the GUC reads back inside the transaction.
+    const guc = await client.query<{ v: string | null }>(
+      `select current_setting('${TENANT_GUC}', true) as v`);
+    out['__guc_visible'] = guc.rows[0]?.v === beid ? 1 : 0;
+    return out;
+  });
+}
+
+/**
+ * Collections-plane counts under a tenant GUC, run over the WRITER connection (cmd_rollup_writer),
+ * whose SELECT policies are GUC-scoped by 0033. Read-only (count(*) only) — never inserts.
+ */
+async function collectionsCountsUnderTenant(db: Db, beid: string): Promise<Record<string, number>> {
+  return withTenant(db, beid, async (client) => {
+    const out: Record<string, number> = {};
+    for (const t of COLLECTIONS_TABLES) {
+      const r = await client.query<{ n: string }>(`select count(*) as n from collections.${t}`);
+      out[t] = Number(r.rows[0]?.n ?? -1);
+    }
     const guc = await client.query<{ v: string | null }>(
       `select current_setting('${TENANT_GUC}', true) as v`);
     out['__guc_visible'] = guc.rows[0]?.v === beid ? 1 : 0;
@@ -256,6 +289,62 @@ async function main(): Promise<void> {
     }
   } finally {
     await db.end();
+  }
+
+  // ---- 8. Collections plane isolation (writer path, migration 0033). ----
+  // GUC-based row visibility on collections.* is a WRITER property (claims_reader SELECT is
+  // permissive there; dashboard reads are app-scoped). So connect as cmd_rollup_writer
+  // (CMD_ROLLUP_WRITER_DATABASE_URL) and assert read-only: no-GUC read fails closed; BXR-GUC sees
+  // only BXR (>0); Indigo-GUC sees ZERO (isolation, until the step-4 seed load). SKIP if unset.
+  const writerUrl = process.env.CMD_ROLLUP_WRITER_DATABASE_URL;
+  if (!writerUrl) {
+    skip('collections plane isolation (section 8)', 'CMD_ROLLUP_WRITER_DATABASE_URL not set');
+  } else {
+    const wdb = makeClient(writerUrl);
+    try {
+      // Guard: only meaningful as an RLS-SUBJECT role. A bypassrls/owner role sees everything
+      // regardless of GUC — fail loudly rather than emit a false PASS. (This query also proves the
+      // connection, so a caught error in 8a below is the RLS/GUC guard, not a connect failure.)
+      const who = await wdb.query<{ current_user: string; bypassrls: boolean }>(
+        'select current_user, (select rolbypassrls from pg_roles where rolname = current_user) as bypassrls');
+      check('collections: probe runs as an RLS-subject writer (not bypassrls)',
+        who.rows[0]?.bypassrls === false, `role=${who.rows[0]?.current_user}`);
+
+      // 8a. no-GUC read fails closed: the writer USING policy's 1-arg current_setting ERRORS (42704)
+      // when the GUC is unset.
+      try {
+        const r = await wdb.query<{ n: string }>('select count(*) as n from collections.daily_collections');
+        const n = Number(r.rows[0]?.n ?? -1);
+        check('collections no-GUC read fails closed', n === 0, `count=${n} (zero is closed)`);
+      } catch (err) {
+        const code = (err as { code?: string }).code ?? 'unknown';
+        check('collections no-GUC read fails closed', code === '42704' || code === '42501',
+          `errored as expected, SQLSTATE=${code}`);
+      }
+
+      // 8b. BXR-GUC sees only BXR (every collections table > 0).
+      const bxr = await collectionsCountsUnderTenant(wdb, BXR_ENTITY_ID);
+      check('collections BXR: GUC visible inside txn', bxr['__guc_visible'] === 1);
+      for (const t of COLLECTIONS_TABLES) {
+        check(`collections BXR sees its own ${t} (>0)`, (bxr[t] ?? -1) > 0, `count=${bxr[t]}`);
+      }
+
+      // 8c. Indigo-GUC sees ZERO on every collections table (perfect isolation until step-4 load).
+      const ind = await collectionsCountsUnderTenant(wdb, INDIGO_ENTITY_ID);
+      check('collections Indigo: GUC visible inside txn', ind['__guc_visible'] === 1);
+      for (const t of COLLECTIONS_TABLES) {
+        check(`collections Indigo sees ZERO ${t}`, ind[t] === 0, `count=${ind[t]}`);
+      }
+
+      // 8d. post-COMMIT GUC empty on the same writer client (Supavisor txn-pooler leak class).
+      const after = await wdb.query<{ v: string | null }>(
+        `select current_setting('${TENANT_GUC}', true) as v`);
+      const v = after.rows[0]?.v ?? null;
+      check('collections post-COMMIT GUC empty on same client', v === null || v === '',
+        `value=${JSON.stringify(v)}`);
+    } finally {
+      await wdb.end();
+    }
   }
 
   console.log(failures === 0
