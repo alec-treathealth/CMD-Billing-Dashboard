@@ -74,8 +74,8 @@ export function LoginForm({
           {authError}
         </div>
       ) : null}
-      <div className="space-y-1.5">
-        <label htmlFor="email" className="text-sm font-medium text-ink900">
+      <div>
+        <label htmlFor="email" className="mb-1 block text-[13px] font-medium text-[#44544D]">
           Work email
         </label>
         <Input
@@ -85,11 +85,11 @@ export function LoginForm({
           autoComplete="username"
           required
           placeholder="you@treathealth.ai"
-          className="rounded-lg bg-surface shadow-sm"
+          className="h-auto rounded-lg border-[#E5E1D6] bg-white px-3.5 py-2.5 text-sm text-[#16211C] shadow-sm focus-visible:border-[#0D5C4D] focus-visible:ring-0 focus-visible:ring-offset-0"
         />
       </div>
-      <div className="space-y-1.5">
-        <label htmlFor="password" className="text-sm font-medium text-ink900">
+      <div>
+        <label htmlFor="password" className="mb-1 block text-[13px] font-medium text-[#44544D]">
           Password
         </label>
         <Input
@@ -98,12 +98,12 @@ export function LoginForm({
           type="password"
           autoComplete="current-password"
           required
-          className="rounded-lg bg-surface shadow-sm"
+          className="h-auto rounded-lg border-[#E5E1D6] bg-white px-3.5 py-2.5 text-sm text-[#16211C] shadow-sm focus-visible:border-[#0D5C4D] focus-visible:ring-0 focus-visible:ring-offset-0"
         />
       </div>
       <Button
         type="submit"
-        className="w-full rounded-lg bg-teal900 hover:bg-teal700"
+        className="h-auto w-full rounded-lg bg-[#0D5C4D] py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-[#0A453B]"
         disabled={submitting}
       >
         {submitting ? (

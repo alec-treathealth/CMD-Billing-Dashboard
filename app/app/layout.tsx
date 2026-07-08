@@ -6,6 +6,7 @@ import { SwitcherTenantLogo } from '@/components/dashboard/switcher-tenant-logo'
 import { TenantLogo } from '@/components/tenant-logo';
 import { UserMenu } from '@/components/user-menu';
 import { BrandTheme } from '@/components/brand-theme';
+import { HeaderGate } from '@/components/header-gate';
 import { dashboardAccess } from '@/lib/access';
 import './globals.css';
 
@@ -59,7 +60,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         </Suspense>
         {/* Brand anchor bar — background follows the active view (--brand-bar; teal by
             default off-dashboard). 3-col grid keeps the nav centered, logo left, and the
-            right column holds the view switcher + user avatar. */}
+            right column holds the view switcher + user avatar. Hidden on /login, which
+            renders its own full-page split-panel chrome. */}
+        <HeaderGate>
         <header className="grid h-14 grid-cols-[auto_1fr_auto] items-center gap-3 bg-[var(--brand-bar)] px-4 transition-colors duration-300 sm:px-6">
           {/* col 1: logo + title */}
           <div className="flex items-center gap-3">
@@ -98,6 +101,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             {email ? <UserMenu email={email} canManageUsers={canManageUsers} /> : null}
           </div>
         </header>
+        </HeaderGate>
         {children}
       </body>
     </html>

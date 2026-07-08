@@ -12,6 +12,8 @@ const config: Config = {
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
         head: ['Space Grotesk', 'Inter', 'sans-serif'],
+        // TreatHealthOS editorial display face (matches the Continuity app's login).
+        display: ['Fraunces', 'Georgia', 'serif'],
         mono: ['IBM Plex Mono', 'ui-monospace', 'monospace'],
       },
       boxShadow: {
