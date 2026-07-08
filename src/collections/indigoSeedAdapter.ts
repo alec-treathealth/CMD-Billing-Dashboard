@@ -32,7 +32,7 @@
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { parseReportCsv, type CmdReportRow } from './cmdPayer.js';
-import { mapReportRows } from './cmdExplorer.js';
+import { mapReportRows, aliasIndigoFacilityColumn } from './cmdExplorer.js';
 import { mapRow, insertRows, type PlainRow } from './cmdExplorerSeed.js';
 import { encryptPhi } from './phiCrypto.js';
 import { makeClient } from './db.js';
@@ -107,15 +107,18 @@ export function parseIndigoCsv(path: string, limit: number | null): IndigoParseO
   }
 
   const source = basename(path);
+  // Alias Indigo's facility label ("Customer Name") onto the one the shared mapping + LOCKED
+  // fingerprint expect ("Facility Name"), IN PLACE (no second 490k-row array). This is the SAME
+  // shared helper the Indigo cron uses, so a seed row and a cron-pulled row for the same charge
+  // fingerprint identically — keeping cron re-pulls idempotent (ON CONFLICT) against this seed.
+  // mapReportRows ignores the 3 extra deposit columns.
+  aliasIndigoFacilityColumn(rows);
   const byFingerprint = new Map<string, PlainRow>();
   const skipsByLabel = new Map<string, number>();
   let mappedValid = 0;
   let inSetDuplicates = 0;
 
   for (const row of rows) {
-    // Alias Indigo's facility label onto the one the shared mapping expects (in place — no second
-    // 490k-row array). mapReportRows ignores the 3 extra deposit columns.
-    if (!('Facility Name' in row)) row['Facility Name'] = row['Customer Name'] ?? '';
     const full = mapReportRows([row])[0]!;
     const result = mapRow(full, source); // LOCKED fingerprint + required-field validation (reused)
     if (!result.ok) {

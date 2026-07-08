@@ -136,6 +136,24 @@ export function mapReportRows(rows: CmdReportRow[]): CmdExplorerFullRow[] {
   });
 }
 
+/**
+ * Indigo's CMD export (report 10092391) labels the facility column "Customer Name" (CMD: one
+ * customer == one facility), where BXR's (10091971) uses "Facility Name". The shared mapReportRows
+ * above + the LOCKED fingerprint (cmdExplorerSeed.mapRow) read facility ONLY from "Facility Name"
+ * and mapRow treats it as REQUIRED — so an UNALIASED Indigo pull skips EVERY charge line
+ * (charge_skipped == rows_fetched). This aliases "Customer Name" → "Facility Name" IN PLACE so both
+ * the one-time seed adapter and the recurring Indigo cron feed the shared mapping an identical,
+ * fingerprint-compatible facility value — WITHOUT editing mapReportRows or touching the BXR path.
+ * No-op when "Facility Name" is already present (BXR, or a future API shape that already carries it).
+ * Missing "Customer Name" → "" (row then skips on facility:missing rather than crashing).
+ */
+export function aliasIndigoFacilityColumn(rows: CmdReportRow[]): CmdReportRow[] {
+  for (const row of rows) {
+    if (!('Facility Name' in row)) row['Facility Name'] = row['Customer Name'] ?? '';
+  }
+  return rows;
+}
+
 /** Strip PHI for the cacheable / browser-bound projection. */
 export function toNonPhi(rows: CmdExplorerFullRow[]): CmdExplorerNonPhiRow[] {
   return rows.map((r) => {

@@ -1,6 +1,7 @@
 {
   "installCommand": "cd .. && npm install && cd app && npm install",
   "crons": [
-    { "path": "/api/cron/cmd-explorer", "schedule": "0 * * * *" }
+    { "path": "/api/cron/cmd-explorer", "schedule": "0 * * * *" },
+    { "path": "/api/cron/indigo-explorer", "schedule": "30 * * * *" }
   ]
 }

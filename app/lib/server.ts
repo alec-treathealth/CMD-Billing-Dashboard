@@ -37,16 +37,17 @@ import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collecti
 import { collectionsYoy } from '../../src/collections/collectionsYoy.js';
 import type { CollectionsYoy } from '../../src/collections/collectionsYoy.js';
 import { facilityDimension, type FacilityDimensionRow } from '../../src/collections/facilities.js';
-import { cmdPayerGapForMonth, cmdReportRows, type CmdApiConfig } from '../../src/collections/cmdPayer.js';
+import { cmdPayerGapForMonth, cmdReportRows, type CmdApiConfig, type CmdReportRow } from '../../src/collections/cmdPayer.js';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdExplorer.js';
+import { aliasIndigoFacilityColumn } from '../../src/collections/cmdExplorer.js';
 import { decryptPhi } from '../../src/collections/phiCrypto.js';
 import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
 import { refreshCmdPayerRollup } from '../../src/collections/cmdPayerRefresh.js';
-import { CMD_EXPLORER_CUSTOMERS } from '../../src/collections/cmdCustomers.js';
-// src-side canonical tenant id (agrees with app/lib/views.ts BXR_ENTITY_ID — dual-declaration
-// note in src/tenants.ts). Both production crons are BXR-only; their writes are stamped +
-// GUC-scoped to this tenant explicitly (migration-B era), never inferred.
-import { BXR_ENTITY_ID as BXR_TENANT_ID } from '../../src/tenants.js';
+import { CMD_EXPLORER_CUSTOMERS, INDIGO_CUSTOMERS, type CmdCustomer } from '../../src/collections/cmdCustomers.js';
+// src-side canonical tenant ids (agree with app/lib/views.ts — dual-declaration note in
+// src/tenants.ts). Each cron's writes are stamped + GUC-scoped to its tenant explicitly
+// (migration-B era), never inferred; the Indigo roster also carries per-customer ids.
+import { BXR_ENTITY_ID as BXR_TENANT_ID, INDIGO_ENTITY_ID as INDIGO_TENANT_ID } from '../../src/tenants.js';
 import { makeClient, type Db } from '../../src/collections/db.js';
 import { browseClaims as browseClaimsQuery, claimById } from '../../src/queries/browse_claims.js';
 import type { BrowseClaimsArgs, BrowseClaimsResult } from '../../src/queries/browse_claims.js';
@@ -315,18 +316,35 @@ export function handleCmdPayerRefresh(req: CmdPayerRefreshHttpRequest) {
 }
 
 /**
- * Daily CMD Collections Explorer ingest route (Vercel Cron). GET only; gated on
- * CRON_SECRET with the same constant-time Bearer check the other cron uses
- * (isAuthorized). Pulls the live 14-column explorer report, encrypts the 3 PHI
- * identifiers in-process, and idempotently upserts into collections.cmd_explorer_rows
- * as the least-privilege cmd_rollup_writer role; busts the 'cmd-explorer' cache tag
- * after a successful insert. Returns non-PHI counts only. Auth + compose live here
- * (the composition root); the cmdExplorerCron logic stays transport-agnostic.
+ * Tenant-parameterized CMD Collections Explorer ingest (Vercel Cron). GET only; gated on
+ * CRON_SECRET with the same constant-time Bearer check (isAuthorized). For the given tenant it
+ * pulls the live per-customer report, encrypts the 3 PHI identifiers in-process, idempotently
+ * upserts charge lines into collections.cmd_explorer_rows AND replaces per-facility Check+EFT
+ * deposits in collections.daily_collections — as the least-privilege cmd_rollup_writer role —
+ * then busts the shared 'cmd-explorer' + dashboard-aggregates cache tags. Returns non-PHI counts
+ * only. Auth + compose live here (the composition root); cmdExplorerCron stays transport-agnostic.
+ *
+ * Each tenant gets its OWN thin wrapper + route (/api/cron/cmd-explorer, /api/cron/indigo-explorer)
+ * so a failing run is attributable by route name in the logs + the Vercel Cron tab, with ZERO
+ * logic duplication — the only per-tenant inputs are the roster, the report/filter config, the
+ * tenant stamp, and (Indigo only) a row transform. Separate schedules keep the two off the shared
+ * one-report-at-a-time CMD partner session (BXR :00, Indigo :30).
  */
-export async function handleCmdExplorerCron(req: {
-  method?: string;
-  authorization?: string | null;
-}): Promise<{ status: number; body: unknown }> {
+async function handleExplorerCronForTenant(
+  req: { method?: string; authorization?: string | null },
+  tenant: {
+    /** Human label for the failure log line — distinct per tenant for log attribution. */
+    label: string;
+    /** The CMD customer accounts to loop (one report/filter run each). */
+    customers: readonly CmdCustomer[];
+    /** Per-customer live-fetch config (report/filter/poll) for this tenant. */
+    configFor: (customerId: string) => CmdApiConfig;
+    /** Run-level DEFAULT tenant stamp; a customer's own businessEntityId still overrides it. */
+    businessEntityId: string;
+    /** Optional per-fetch row transform (Indigo: alias "Customer Name" → "Facility Name"). */
+    transformRows?: (rows: CmdReportRow[]) => CmdReportRow[];
+  },
+): Promise<{ status: number; body: unknown }> {
   // GET only — reject any other verb before touching auth or the live API.
   if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
     return { status: 405, body: { error: 'method_not_allowed' } };
@@ -337,25 +355,63 @@ export async function handleCmdExplorerCron(req: {
     return { status: 401, body: { error: 'unauthorized' } };
   }
   try {
+    const transform = tenant.transformRows;
     const stats = await cmdExplorerCron({
-      customers: CMD_EXPLORER_CUSTOMERS,
-      fetchRows: (customerId) => cmdReportRows(cmdExplorerConfigFor(customerId)),
+      customers: tenant.customers,
+      fetchRows: async (customerId) => {
+        const rows = await cmdReportRows(tenant.configFor(customerId));
+        return transform ? transform(rows) : rows;
+      },
       writeDb: rollupWriterDb(),
-      businessEntityId: BXR_TENANT_ID, // roster is CMD_EXPLORER_CUSTOMERS = BXR-only
+      businessEntityId: tenant.businessEntityId,
       revalidate: () => revalidateTag('cmd-explorer'),
       revalidateDashboard: () => revalidateTag(DASHBOARD_CACHE_TAG),
-      // Filter 10147530 uses a ROLLING (current-month) payment-received window, so there is no
-      // fixed end date to expire — the window-expiry warning does not apply. The STALE warning
-      // (newest payment_date lagging `now`) still fires and is the relevant freshness signal.
-      // Set CMD_FILTER_WINDOW_END only if you point the cron back at a fixed-window filter.
+      // Both rosters use a ROLLING (current-month) payment-received window, so there is no fixed
+      // end date to expire — the window-expiry warning does not apply. The STALE warning (newest
+      // payment_date lagging `now`) still fires. Set CMD_FILTER_WINDOW_END only for a fixed window.
       filterWindowEnd: process.env.CMD_FILTER_WINDOW_END?.trim() || undefined,
     });
     return { status: 200, body: { ok: true, ...stats } };
   } catch (err) {
-    // Generic to the client; message only to the server log (no PHI, no token).
-    console.error('cmd-explorer cron failed:', err instanceof Error ? err.message : String(err));
+    // Generic to the client; message only to the server log (no PHI, no token). The tenant label
+    // makes a hard failure attributable to the right cron in the shared log stream.
+    console.error(`${tenant.label} cron failed:`, err instanceof Error ? err.message : String(err));
     return { status: 500, body: { error: 'cron_failed' } };
   }
+}
+
+/** BXR daily explorer cron (/api/cron/cmd-explorer). Roster = CMD_EXPLORER_CUSTOMERS (BXR's 15). */
+export function handleCmdExplorerCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  return handleExplorerCronForTenant(req, {
+    label: 'cmd-explorer',
+    customers: CMD_EXPLORER_CUSTOMERS,
+    configFor: cmdExplorerConfigFor,
+    businessEntityId: BXR_TENANT_ID,
+  });
+}
+
+/**
+ * Indigo daily explorer cron (/api/cron/indigo-explorer). Roster = INDIGO_CUSTOMERS (36).
+ * Indigo's report (10092391) labels the facility column "Customer Name"; the shared mapReportRows +
+ * LOCKED fingerprint read facility ONLY from "Facility Name" and mapRow REQUIRES it — so an
+ * unaliased Indigo pull would skip EVERY charge line (watch charge_skipped == rows_fetched).
+ * aliasIndigoFacilityColumn maps it before mapping — the SAME transform the one-time seed used, so
+ * cron re-pulls are fingerprint-idempotent (ON CONFLICT) against the loaded seed.
+ */
+export function handleIndigoExplorerCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  return handleExplorerCronForTenant(req, {
+    label: 'indigo-explorer',
+    customers: INDIGO_CUSTOMERS,
+    configFor: cmdIndigoConfigFor,
+    businessEntityId: INDIGO_TENANT_ID,
+    transformRows: aliasIndigoFacilityColumn,
+  });
 }
 
 /** Collections summary route: optional date bounds → non-PHI monthly summary by facility. */
@@ -644,6 +700,26 @@ function cmdExplorerConfigFor(customerId: string): CmdApiConfig {
     customerId,
     reportId: process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10091971',
     filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147530',
+    pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 3_000,
+    maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 8,
+    emptyGraceAttempts: Number(process.env.CMD_EXPLORER_EMPTY_GRACE) || 4,
+  };
+}
+
+/**
+ * Live-fetch config for ONE Indigo CMD customer account (report 10092391 / filter 10147602) —
+ * Indigo's equivalent of BXR's 10091971/10147530, on the SAME CMD_API_* partner creds. Overridable
+ * via CMD_INDIGO_REPORT_ID / CMD_INDIGO_FILTER_ID without a deploy; poll tuning is shared with the
+ * BXR explorer cron (identical CMD batch behavior). customerId varies per call to cover all 36
+ * Indigo facilities. The "Customer Name" → "Facility Name" alias is applied by the cron wrapper
+ * (transformRows: aliasIndigoFacilityColumn), NOT here — this only selects the report/filter.
+ */
+function cmdIndigoConfigFor(customerId: string): CmdApiConfig {
+  return {
+    ...cmdApiConfig(),
+    customerId,
+    reportId: process.env.CMD_INDIGO_REPORT_ID?.trim() || '10092391',
+    filterId: process.env.CMD_INDIGO_FILTER_ID?.trim() || '10147602',
     pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 3_000,
     maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 8,
     emptyGraceAttempts: Number(process.env.CMD_EXPLORER_EMPTY_GRACE) || 4,
