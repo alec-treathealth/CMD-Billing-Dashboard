@@ -2,13 +2,16 @@
  * /set-password — choose a password. Reached after clicking an invite or password-recovery
  * link (via /auth/confirm, which establishes the session first), or by a signed-in user who
  * wants to change their password. Protected: requires a verified session, else -> /login.
+ * Continuity-styled companion to /login: full-page warm-paper sheet (global header hidden
+ * via HeaderGate), wordmark on top, Fraunces display heading.
  */
 import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { SetPasswordForm } from '@/components/set-password-form';
+import { Wordmark } from '@/components/wordmark';
 import { requireExecutive } from '@/lib/executive';
 
-export const metadata: Metadata = { title: 'Set your password · CMD Billing' };
+export const metadata: Metadata = { title: 'Set your password · TH Veris' };
 export const dynamic = 'force-dynamic';
 
 export default async function SetPasswordPage() {
@@ -16,17 +19,25 @@ export default async function SetPasswordPage() {
   if (!gate.ok) redirect('/login?next=/set-password');
 
   return (
-    <main className="mx-auto flex min-h-[calc(100vh-3.5rem)] max-w-md flex-col justify-center p-6">
-      <div className="rounded-xl border border-line bg-surface p-6 shadow-ths sm:p-8">
-        <h1 className="font-head text-2xl font-semibold tracking-tight text-ink900">
-          Set your password
-        </h1>
-        <p className="mt-1 text-sm text-ink600">
-          Choose a password to finish setting up your account. You’ll use it to sign in from
-          now on.
-        </p>
-        <div className="mt-6">
-          <SetPasswordForm />
+    <main className="flex min-h-screen flex-col bg-[#F6F4EF] p-8">
+      <div className="flex flex-1 items-center justify-center">
+        <div className="w-full max-w-[380px]">
+          <div className="mb-8">
+            <Wordmark />
+          </div>
+          <h1 className="font-display text-[26px] font-semibold text-[#16211C]">
+            Set your password
+          </h1>
+          <p className="mt-1 text-sm text-[#75847D]">
+            Choose a password to finish setting up your account. You’ll use it to sign in from
+            now on.
+          </p>
+          <div className="mt-7">
+            <SetPasswordForm />
+          </div>
+          <p className="mt-8 text-center text-xs text-[#75847D]">
+            © 2026 TreatHealth · Access restricted to authorized staff.
+          </p>
         </div>
       </div>
     </main>

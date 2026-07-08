@@ -7,7 +7,7 @@
  */
 import { usePathname } from 'next/navigation';
 
-const FULL_PAGE_ROUTES = new Set(['/login', '/forgot-password']);
+const FULL_PAGE_ROUTES = new Set(['/login', '/forgot-password', '/set-password']);
 
 export function HeaderGate({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
