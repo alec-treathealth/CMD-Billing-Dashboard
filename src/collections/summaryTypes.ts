@@ -31,6 +31,9 @@ export interface CollectionsMonthRow {
   facility_code: string | null;
   /** Facility display name; null when facility_code is null/unmatched. */
   facility_name: string | null;
+  /** Owning tenant (business_entity_id) — drives the Consolidated By-Facility tenant
+   *  filter/color split. Always present (the query groups by it); non-PHI. */
+  business_entity_id: string;
   /** Number of daily_collections rows aggregated into this bucket. */
   day_rows: number;
   checks_amount: number;

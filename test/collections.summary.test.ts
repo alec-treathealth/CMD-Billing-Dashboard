@@ -18,6 +18,7 @@ const EXPECTED_SQL =
   `to_char(date_trunc('month', dc.payment_date), 'YYYY-MM') as month, ` +
   `dc.facility_code as facility_code, ` +
   `f.facility_name as facility_name, ` +
+  `dc.business_entity_id as business_entity_id, ` +
   `count(*)::bigint as day_rows, ` +
   `coalesce(sum(dc.checks_amount), 0) as checks_amount, ` +
   `coalesce(sum(dc.eft_amount), 0) as eft_amount, ` +
@@ -27,7 +28,7 @@ const EXPECTED_SQL =
   `where dc.business_entity_id = any($3::uuid[]) ` +
   `and ($1::date is null or dc.payment_date >= $1::date) ` +
   `and ($2::date is null or dc.payment_date < $2::date) ` +
-  `group by 1, dc.facility_code, f.facility_name ` +
+  `group by 1, dc.facility_code, f.facility_name, dc.business_entity_id ` +
   `order by month desc, gross_amount desc`;
 
 interface Capture {
@@ -130,14 +131,14 @@ test('source_group_code never appears in the output (lineage-only invariant)', a
   // Even if the underlying row object carried a stray source_group_code, the
   // typed summary must not surface it.
   const rows = [
-    { month: '2026-03', facility_code: null, facility_name: null, day_rows: '1', checks_amount: '0', eft_amount: '0', gross_amount: '25.00', source_group_code: 'TREAT_FRCA' },
+    { month: '2026-03', facility_code: null, facility_name: null, business_entity_id: BXR_ENTITY_ID, day_rows: '1', checks_amount: '0', eft_amount: '0', gross_amount: '25.00', source_group_code: 'TREAT_FRCA' },
   ];
   const summary = await collectionsMonthlySummary({}, ctxWith(fakeExecutor(rows, cap)));
   const serialized = JSON.stringify(summary);
   assert.ok(!serialized.includes('source_group_code'), 'no source_group_code key in output');
   assert.ok(!serialized.includes('TREAT_FRCA'), 'no group-code value in output');
   assert.deepEqual(Object.keys(summary.by_month_facility[0]!).sort(), [
-    'checks_amount', 'day_rows', 'eft_amount', 'facility_code', 'facility_name', 'gross_amount', 'month',
+    'business_entity_id', 'checks_amount', 'day_rows', 'eft_amount', 'facility_code', 'facility_name', 'gross_amount', 'month',
   ]);
   // The SQL itself must never select source_group_code.
   assert.ok(!cap.sql!.includes('source_group_code'));

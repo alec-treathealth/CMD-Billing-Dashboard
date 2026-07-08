@@ -47,6 +47,7 @@ interface RawRow {
   month: string;
   facility_code: string | null;
   facility_name: string | null;
+  business_entity_id: string;
   day_rows: string | number;
   checks_amount: string | number;
   eft_amount: string | number;
@@ -64,6 +65,7 @@ export function collectionsMonthlySummarySql(): string {
     `to_char(date_trunc('month', dc.payment_date), 'YYYY-MM') as month, ` +
     `dc.facility_code as facility_code, ` +
     `f.facility_name as facility_name, ` +
+    `dc.business_entity_id as business_entity_id, ` +
     `count(*)::bigint as day_rows, ` +
     `coalesce(sum(dc.checks_amount), 0) as checks_amount, ` +
     `coalesce(sum(dc.eft_amount), 0) as eft_amount, ` +
@@ -73,7 +75,7 @@ export function collectionsMonthlySummarySql(): string {
     `where dc.business_entity_id = any($3::uuid[]) ` +
     `and ($1::date is null or dc.payment_date >= $1::date) ` +
     `and ($2::date is null or dc.payment_date < $2::date) ` +
-    `group by 1, dc.facility_code, f.facility_name ` +
+    `group by 1, dc.facility_code, f.facility_name, dc.business_entity_id ` +
     `order by month desc, gross_amount desc`
   );
 }
@@ -115,6 +117,7 @@ export async function collectionsMonthlySummary(
     month: r.month,
     facility_code: r.facility_code,
     facility_name: r.facility_name,
+    business_entity_id: r.business_entity_id,
     day_rows: num(r.day_rows),
     checks_amount: num(r.checks_amount),
     eft_amount: num(r.eft_amount),
