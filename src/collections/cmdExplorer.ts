@@ -231,3 +231,31 @@ export function aggregateDailyDeposits(rows: CmdReportRow[], facilityCode: strin
   out.sort((a, b) => (a.payment_date < b.payment_date ? -1 : a.payment_date > b.payment_date ? 1 : 0));
   return out;
 }
+
+/**
+ * Drop charge-line rows whose Payment Received date is in the FUTURE relative to `todayIso`
+ * (both ISO 'YYYY-MM-DD'; ISO dates compare lexically == chronologically). A payment cannot be
+ * received on a future date — such rows are upstream data-entry errors (e.g. a 12/30/2026 typo)
+ * that shove max(payment_date) months ahead and break every date-window/chart in the app.
+ *
+ * Rows with a blank/unparseable payment date are KEPT: an unpaid charge line is still a valid
+ * cmd_explorer_rows entry (payment_received is nullable), and aggregateDailyDeposits already
+ * skips null-date rows — so keeping them is safe for BOTH downstream writes. Applied ONCE in the
+ * cron before mapRow (explorer) AND aggregateDailyDeposits (daily), keeping the two consistent.
+ */
+export function dropFuturePaymentRows(
+  rows: CmdReportRow[],
+  todayIso: string,
+): { kept: CmdReportRow[]; dropped: number } {
+  const kept: CmdReportRow[] = [];
+  let dropped = 0;
+  for (const row of rows) {
+    const d = paymentDateIso(pick(row, PAYMENT_DATE_KEYS));
+    if (d !== null && d > todayIso) {
+      dropped += 1;
+      continue;
+    }
+    kept.push(row);
+  }
+  return { kept, dropped };
+}

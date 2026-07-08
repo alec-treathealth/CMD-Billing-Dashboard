@@ -27,7 +27,7 @@
  * lines, per-facility DELETE+INSERT for daily), and each run re-pulls the full filter window, so
  * the data self-heals rather than drifting.
  */
-import { aggregateDailyDeposits, mapReportRows } from './cmdExplorer.js';
+import { aggregateDailyDeposits, dropFuturePaymentRows, mapReportRows } from './cmdExplorer.js';
 import { insertRows, mapRow, type PlainRow } from './cmdExplorerSeed.js';
 import type { CmdReportRow } from './cmdPayer.js';
 import { replaceCmdDailyForFacility, type Db } from './db.js';
@@ -153,6 +153,8 @@ export interface CmdExplorerCronStats {
   charge_mapped_valid: number;
   /** Charge rows skipped for a missing/invalid required field (counts only). */
   charge_skipped: number;
+  /** Rows dropped because Payment Received was a FUTURE date (upstream data-entry errors). */
+  rows_future_skipped: number;
   /** New charge-line rows actually inserted (ON CONFLICT skipped the rest). */
   charge_inserted: number;
   /** Daily deposit rows (facility-day) inserted into daily_collections. */
@@ -175,6 +177,8 @@ export async function cmdExplorerCron(deps: CmdExplorerCronDeps): Promise<CmdExp
   const now = deps.now ?? Date.now;
   const budgetMs = deps.budgetMs ?? DEFAULT_BUDGET_MS;
   const started = now();
+  // Reference "today" (UTC) for the future-date guard — a per-run constant.
+  const todayIso = new Date(started).toISOString().slice(0, 10);
 
   const stats: CmdExplorerCronStats = {
     customers_total: deps.customers.length,
@@ -184,6 +188,7 @@ export async function cmdExplorerCron(deps: CmdExplorerCronDeps): Promise<CmdExp
     rows_fetched: 0,
     charge_mapped_valid: 0,
     charge_skipped: 0,
+    rows_future_skipped: 0,
     charge_inserted: 0,
     daily_rows_inserted: 0,
     daily_rows_deleted: 0,
@@ -201,8 +206,15 @@ export async function cmdExplorerCron(deps: CmdExplorerCronDeps): Promise<CmdExp
       continue;
     }
     try {
-      const reportRows = await deps.fetchRows(customerId);
-      stats.rows_fetched += reportRows.length;
+      const fetched = await deps.fetchRows(customerId);
+      stats.rows_fetched += fetched.length;
+
+      // Guard: drop rows whose Payment Received date is in the FUTURE (upstream data-entry
+      // errors — a payment can't be received on a future date). Done ONCE here so BOTH writes
+      // below (cmd_explorer_rows via mapRow AND daily_collections via aggregateDailyDeposits)
+      // see the same non-future rows and stay consistent. Blank-date rows are kept.
+      const { kept: reportRows, dropped: futureDropped } = dropFuturePaymentRows(fetched, todayIso);
+      stats.rows_future_skipped += futureDropped;
 
       // Charge lines → cmd_explorer_rows. De-dup by fingerprint within this customer's pull
       // (first wins); cross-customer fingerprints differ (facility is part of the hash), and
