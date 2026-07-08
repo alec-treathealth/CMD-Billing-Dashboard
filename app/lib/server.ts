@@ -707,8 +707,10 @@ function cmdExplorerConfigFor(customerId: string): CmdApiConfig {
 }
 
 /**
- * Live-fetch config for ONE Indigo CMD customer account (report 10092391 / filter 10147602) —
- * Indigo's equivalent of BXR's 10091971/10147530, on the SAME CMD_API_* partner creds. Overridable
+ * Live-fetch config for ONE Indigo CMD customer account (report 10092391 / filter 10147669 —
+ * replaced 10147602 after 2 facilities were added to the account; 10147602 was Indigo's own but is
+ * being retired). Indigo's equivalent of BXR's 10091971/10147530, on the SAME CMD_API_* partner
+ * creds. Overridable
  * via CMD_INDIGO_REPORT_ID / CMD_INDIGO_FILTER_ID without a deploy; poll tuning is shared with the
  * BXR explorer cron (identical CMD batch behavior). customerId varies per call to cover all 36
  * Indigo facilities. The "Customer Name" → "Facility Name" alias is applied by the cron wrapper
@@ -719,7 +721,7 @@ function cmdIndigoConfigFor(customerId: string): CmdApiConfig {
     ...cmdApiConfig(),
     customerId,
     reportId: process.env.CMD_INDIGO_REPORT_ID?.trim() || '10092391',
-    filterId: process.env.CMD_INDIGO_FILTER_ID?.trim() || '10147602',
+    filterId: process.env.CMD_INDIGO_FILTER_ID?.trim() || '10147669',
     pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 3_000,
     maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 8,
     emptyGraceAttempts: Number(process.env.CMD_EXPLORER_EMPTY_GRACE) || 4,
