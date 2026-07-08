@@ -71,8 +71,12 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               </div>
             </div>
           </div>
-          {/* col 2: nav — centered */}
-          <NavLinks />
+          {/* col 2: nav — centered. NavLinks reads ?view= (to forward it onto the Dashboard
+              link) via useSearchParams, so it must be wrapped in Suspense for the static routes
+              (/, /code-reference) this shared layout also renders — same as the switcher below. */}
+          <Suspense fallback={null}>
+            <NavLinks />
+          </Suspense>
           {/* col 3: view switcher (dashboard routes only) + user avatar.
               The ViewSwitcher is NON-PHI UI (it just rewrites ?view=) and renders regardless
               of auth — production gates the app via Vercel Deployment Protection, where there
