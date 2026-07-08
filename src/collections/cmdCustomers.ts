@@ -34,11 +34,14 @@
  *   INVALID CRITERIA — and TEEN TX / WELLNESS RECOVERY accept it but return no rows. If any of
  *   these becomes active, add its collections.facilities row + the saved filter before listing it.)
  *
- * Indigo (business_entity_id 141d459c…, CMD account 474623): 36 facility accounts,
+ * Indigo (business_entity_id 141d459c…, CMD account 474623): 37 active facility accounts,
  * confirmed by the business owner. Indigo has no short-code/acronym/care-setting scheme
  * yet, so facilityCode = the CMD facility ID itself (staging.era_835_adjustment.facility_code
  * is free text). Names below are authoritative — preserve exact spelling/casing; the two
  * CROWN VIEW entries are deliberately distinct (do NOT merge).
+ *   EXCLUDED on purpose (mirrors BXR's billing-account exclusion): 10025030 BILLING SERVICE
+ *   ACCOUNT — empty CMD-side and not saved under filter 10147669 (returns INVALID CRITERIA). If it
+ *   ever carries data, save the filter under it + add a collections.facilities row before listing.
  */
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../tenants.js';
 
@@ -71,12 +74,11 @@ export const BXR_CUSTOMERS: readonly CmdCustomer[] = [
   { customerId: '10031212', facilityCode: 'TREAT_WA', businessEntityId: BXR_ENTITY_ID }, //      TREAT MENTAL HEALTH WASHINGTON (OP)
 ];
 
-/** Indigo's 36 facility customer accounts (CMD account 474623). facilityCode = CMD id. */
+/** Indigo's 37 active facility customer accounts (CMD account 474623). facilityCode = CMD id. */
 export const INDIGO_CUSTOMERS: readonly CmdCustomer[] = [
   { customerId: '10026460', facilityCode: '10026460', businessEntityId: INDIGO_ENTITY_ID }, // 405 RECOVERY
   { customerId: '10029373', facilityCode: '10029373', businessEntityId: INDIGO_ENTITY_ID }, // ADDICTION FREE RECOVERY SERVICES
   { customerId: '10029528', facilityCode: '10029528', businessEntityId: INDIGO_ENTITY_ID }, // ADOLESCENT MENTAL HEALTH
-  { customerId: '10025030', facilityCode: '10025030', businessEntityId: INDIGO_ENTITY_ID }, // BILLING SERVICE ACCOUNT
   { customerId: '10031413', facilityCode: '10031413', businessEntityId: INDIGO_ENTITY_ID }, // BRITE RECOVERY
   { customerId: '10028848', facilityCode: '10028848', businessEntityId: INDIGO_ENTITY_ID }, // CALIFORNIA TREATMENT COLLECTIVE
   { customerId: '10028842', facilityCode: '10028842', businessEntityId: INDIGO_ENTITY_ID }, // COVENANT HILLS TREATMENT CENTERS
@@ -87,10 +89,12 @@ export const INDIGO_CUSTOMERS: readonly CmdCustomer[] = [
   { customerId: '10033859', facilityCode: '10033859', businessEntityId: INDIGO_ENTITY_ID }, // INTO THE LIGHT
   { customerId: '10032291', facilityCode: '10032291', businessEntityId: INDIGO_ENTITY_ID }, // KIN WELLNESS
   { customerId: '10030095', facilityCode: '10030095', businessEntityId: INDIGO_ENTITY_ID }, // KNOX RECOVERY
+  { customerId: '10036020', facilityCode: '10036020', businessEntityId: INDIGO_ENTITY_ID }, // MADISON RECOVERY CENTER (added 2026-07-08, in filter 10147669)
   { customerId: '10034063', facilityCode: '10034063', businessEntityId: INDIGO_ENTITY_ID }, // MAPSONG PC
   { customerId: '10024431', facilityCode: '10024431', businessEntityId: INDIGO_ENTITY_ID }, // MENTAL HEALTH CENTER OF SAN DIEGO
   { customerId: '10030319', facilityCode: '10030319', businessEntityId: INDIGO_ENTITY_ID }, // MENTAL HEALTH MODESTO
   { customerId: '10034979', facilityCode: '10034979', businessEntityId: INDIGO_ENTITY_ID }, // MENTAL HEALTH TREATMENT AND STABILIZATION CENTER OF SACRAMENTO
+  { customerId: '10036030', facilityCode: '10036030', businessEntityId: INDIGO_ENTITY_ID }, // MISSOURI BEHAVIORAL HEALTH (added 2026-07-08, in filter 10147669)
   { customerId: '10034230', facilityCode: '10034230', businessEntityId: INDIGO_ENTITY_ID }, // MY TEEN MENTAL HEALTH
   { customerId: '10026125', facilityCode: '10026125', businessEntityId: INDIGO_ENTITY_ID }, // MY TIME RECOVERY, LLC
   { customerId: '10033867', facilityCode: '10033867', businessEntityId: INDIGO_ENTITY_ID }, // NEW ORIGINS
