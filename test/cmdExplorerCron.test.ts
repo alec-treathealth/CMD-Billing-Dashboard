@@ -24,12 +24,23 @@ const depositRow = (date: string, check: string, eft: string): Record<string, st
   'EFT Payment': eft,
 });
 
-/** Minimal fake pg pool: pool.query (insertRows) + pool.connect()->client (replace txn). */
+/** Minimal fake pg pool: pool.query (insertRows) + pool.connect()->client (replace txn).
+ *  The client simulates the withTenant GUC handshake — set_config stores the bound tenant id and
+ *  the current_setting read-back returns it — so the hardened withTenant's read-back assertion
+ *  (src/veris/withTenant.ts) passes under the fake instead of throwing on an empty result. */
 function fakeDb(): { db: Db; deletes: number; inserts: number } {
   const counters = { deletes: 0, inserts: 0 };
+  let guc: string | null = null;
   const client = {
-    query: async (sql: string) => {
+    query: async (sql: string, params?: unknown[]) => {
       const s = String(sql).trim();
+      if (/set_config/i.test(s)) {
+        guc = params?.[0] === undefined ? null : String(params[0]);
+        return { rowCount: 1, rows: [{ set_config: guc }] };
+      }
+      if (/current_setting/i.test(s)) {
+        return { rowCount: 1, rows: [{ v: guc }] };
+      }
       if (/^delete/i.test(s)) {
         counters.deletes += 1;
         return { rowCount: 0, rows: [] };

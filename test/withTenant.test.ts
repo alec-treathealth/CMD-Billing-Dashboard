@@ -28,10 +28,18 @@ interface Recorded {
 function fakeClient(failOn?: (sql: string) => boolean) {
   const calls: Recorded[] = [];
   let released = 0;
+  let guc: string | null = null;
   const client = {
     async query(sql: string, params?: unknown[]) {
       calls.push({ sql, params });
       if (failOn?.(sql)) throw new Error(`fake failure on: ${sql}`);
+      // Simulate the GUC handshake: set_config stores the bound tenant id; the read-back returns
+      // it, so withTenant's post-set_config assertion sees the tenant it set (not an empty result).
+      if (/set_config/i.test(sql)) {
+        guc = params?.[0] === undefined ? null : String(params[0]);
+        return { rows: [{ set_config: guc }], rowCount: 1 };
+      }
+      if (/current_setting/i.test(sql)) return { rows: [{ v: guc }], rowCount: 1 };
       return { rows: [], rowCount: 0 };
     },
     release() {
@@ -71,6 +79,7 @@ test('happy path: BEGIN -> txn-local set_config -> callback on same client -> CO
   assert.deepEqual(calls.map((c) => c.sql), [
     'BEGIN',
     `select set_config('${TENANT_GUC}', $1, true)`,
+    `select current_setting('${TENANT_GUC}', true) as v`,
     'select 1 from staging.claim_line',
     'COMMIT',
   ]);
@@ -119,6 +128,7 @@ test('COMMIT failure: ROLLBACK attempted, client released, error rethrown', asyn
   assert.deepEqual(sqls, [
     'BEGIN',
     `select set_config('${TENANT_GUC}', $1, true)`,
+    `select current_setting('${TENANT_GUC}', true) as v`,
     'COMMIT',
     'ROLLBACK',
   ]);

@@ -22,13 +22,21 @@ interface Recorded { sql: string; params?: unknown[] }
 
 function fakeDb(): { db: Db; queries: Recorded[] } {
   const queries: Recorded[] = [];
+  let guc: string | null = null;
   const client = {
     query: async (sql: string, params?: unknown[]) => {
       const s = String(sql).trim();
       queries.push({ sql: s, params });
+      // Simulate the withTenant GUC handshake so the hardened read-back (src/veris/withTenant.ts)
+      // sees the tenant it just set instead of an empty result (which would throw).
+      if (/set_config/i.test(s)) {
+        guc = params?.[0] === undefined ? null : String(params[0]);
+        return { rowCount: 1, rows: [{ set_config: guc }] };
+      }
+      if (/current_setting/i.test(s)) return { rowCount: 1, rows: [{ v: guc }] };
       if (/^delete/i.test(s)) return { rowCount: 5, rows: [] };
       if (/^insert/i.test(s)) return { rowCount: (params ? params.length / 9 : 0), rows: [] };
-      return { rowCount: 0, rows: [] }; // begin / set_config / commit
+      return { rowCount: 0, rows: [] }; // begin / commit
     },
     release: () => {},
   };

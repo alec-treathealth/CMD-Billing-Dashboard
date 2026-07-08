@@ -98,8 +98,15 @@ function fakeDb(): {
   const deletedPairs: Array<[number, number]> = [];
   const deleteTenants: unknown[] = [];
   let insertedCount = 0;
+  let guc: string | null = null;
   const client = {
     async query(sql: string, params?: unknown[]) {
+      // Simulate the withTenant GUC handshake so the hardened read-back passes under the fake.
+      if (/set_config/i.test(sql)) {
+        guc = params?.[0] === undefined ? null : String(params[0]);
+        return { rowCount: 1, rows: [{ set_config: guc }] };
+      }
+      if (/current_setting/i.test(sql)) return { rowCount: 1, rows: [{ v: guc }] };
       if (/^\s*delete/i.test(sql) && params) {
         deleteTenants.push(params[0]); // $1 = business_entity_id (tenant-scoped delete)
         for (let i = 1; i < params.length; i += 2) {
