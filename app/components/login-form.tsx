@@ -14,6 +14,7 @@
  */
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
+import { ArrowRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { signIn } from '@/lib/auth-actions';
@@ -74,7 +75,7 @@ export function LoginForm({
         </div>
       ) : null}
       <div className="space-y-1.5">
-        <label htmlFor="email" className="text-sm font-medium">
+        <label htmlFor="email" className="text-sm font-medium text-ink900">
           Work email
         </label>
         <Input
@@ -84,10 +85,11 @@ export function LoginForm({
           autoComplete="username"
           required
           placeholder="you@treathealth.ai"
+          className="rounded-lg bg-surface shadow-sm"
         />
       </div>
       <div className="space-y-1.5">
-        <label htmlFor="password" className="text-sm font-medium">
+        <label htmlFor="password" className="text-sm font-medium text-ink900">
           Password
         </label>
         <Input
@@ -96,10 +98,22 @@ export function LoginForm({
           type="password"
           autoComplete="current-password"
           required
+          className="rounded-lg bg-surface shadow-sm"
         />
       </div>
-      <Button type="submit" className="w-full" disabled={submitting}>
-        {submitting ? 'Signing in…' : 'Sign in'}
+      <Button
+        type="submit"
+        className="w-full rounded-lg bg-teal900 hover:bg-teal700"
+        disabled={submitting}
+      >
+        {submitting ? (
+          'Signing in…'
+        ) : (
+          <>
+            Continue
+            <ArrowRight className="h-4 w-4" aria-hidden />
+          </>
+        )}
       </Button>
     </form>
   );
