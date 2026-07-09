@@ -13,7 +13,6 @@
 import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { Dashboard } from '@/components/dashboard';
-import { DashboardNav } from '@/components/dashboard-nav';
 import { DataFreshness } from '@/components/dashboard/data-freshness';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { dashboardAccess } from '@/lib/access';
@@ -55,7 +54,6 @@ export default async function DashboardPage({
         </p>
         <DataFreshness view={view} />
       </header>
-      <DashboardNav />
       <Dashboard view={view} />
       <footer className="mt-10 border-t pt-4 text-xs text-muted-foreground">
         Internal tool — handles PHI. Access requires per-user sign-in and is scoped by your assigned

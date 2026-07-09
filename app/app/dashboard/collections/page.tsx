@@ -10,7 +10,6 @@
  */
 import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
-import { DashboardNav } from '@/components/dashboard-nav';
 import { CollectionsView } from '@/components/dashboard';
 import { DataFreshness } from '@/components/dashboard/data-freshness';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
@@ -50,7 +49,6 @@ export default async function CollectionsPage({
         </p>
         <DataFreshness view={view} />
       </header>
-      <DashboardNav />
       <CollectionsView view={view} canRevealPhi={access.access.canRevealPhi} />
     </main>
   );

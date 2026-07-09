@@ -4,25 +4,35 @@ import Link from 'next/link';
 import { usePathname, useSearchParams } from 'next/navigation';
 import { BookOpen, type LucideIcon } from 'lucide-react';
 
+// Overview + Collections are the two tenant-scoped dashboard surfaces, promoted to the top bar
+// (they used to live in a secondary sub-nav). They share the ?view= tenant scope; the rest are
+// global. Order matches the reading flow: Overview → Collections → Claims → reference/agent.
 const LINKS: readonly { href: string; label: string; icon?: LucideIcon }[] = [
-  { href: '/dashboard', label: 'Dashboard' },
+  { href: '/dashboard', label: 'Overview' },
+  { href: '/dashboard/collections', label: 'Collections' },
   { href: '/claims', label: 'Claims' },
   { href: '/code-reference', label: 'Code Reference', icon: BookOpen },
   { href: '/ask', label: 'Ask' },
 ];
 
+/** The two dashboard routes that carry a tenant scope (?view=); the rest are view-agnostic. */
+const VIEW_SCOPED = new Set<string>(['/dashboard', '/dashboard/collections']);
+
 export function NavLinks() {
   const pathname = usePathname();
-  // Carry the active dashboard view (?view=) onto the Dashboard link so it doesn't reset the
-  // tenant scope to Consolidated. Only /dashboard has a view; other links are untouched.
-  // `active` stays keyed off the bare href, never the decorated one.
+  // Carry the active dashboard view (?view=) onto the tenant-scoped links so switching surfaces
+  // doesn't reset the scope to Consolidated. The value is canonical on any settled dashboard page
+  // (each self-redirects to its clamped view) and re-clamped server-side at the destination.
   const view = useSearchParams().get('view');
   return (
     <nav className="flex items-center justify-center gap-1 text-[13px] font-medium">
       {LINKS.map(({ href, label, icon: Icon }) => {
-        const active = pathname === href || pathname.startsWith(href + '/');
+        // '/dashboard' must match EXACTLY — otherwise '/dashboard/collections' (which starts with
+        // '/dashboard/') would light up Overview too. Every other link still matches its subroutes.
+        const active =
+          pathname === href || (href !== '/dashboard' && pathname.startsWith(href + '/'));
         const linkHref =
-          href === '/dashboard' && view ? `/dashboard?view=${encodeURIComponent(view)}` : href;
+          VIEW_SCOPED.has(href) && view ? `${href}?view=${encodeURIComponent(view)}` : href;
         return (
           <Link
             key={href}
