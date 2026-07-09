@@ -34,14 +34,18 @@
  *   INVALID CRITERIA — and TEEN TX / WELLNESS RECOVERY accept it but return no rows. If any of
  *   these becomes active, add its collections.facilities row + the saved filter before listing it.)
  *
- * Indigo (business_entity_id 141d459c…, CMD account 474623): 37 active facility accounts,
- * confirmed by the business owner. Indigo has no short-code/acronym/care-setting scheme
- * yet, so facilityCode = the CMD facility ID itself (staging.era_835_adjustment.facility_code
- * is free text). Names below are authoritative — preserve exact spelling/casing; the two
- * CROWN VIEW entries are deliberately distinct (do NOT merge).
+ * Indigo (business_entity_id 141d459c…, CMD account 474623): 32 active facility accounts,
+ * confirmed by the business owner. Indigo has no short-code/acronym scheme yet, so facilityCode
+ * = the CMD facility ID itself (staging.era_835_adjustment.facility_code is free text). Names
+ * below are authoritative — preserve exact spelling/casing; the two CROWN VIEW entries are
+ * deliberately distinct (do NOT merge). care_setting (IP/OP/BOTH) lives on collections.facilities
+ * (migration 0035), not here.
  *   EXCLUDED on purpose (mirrors BXR's billing-account exclusion): 10025030 BILLING SERVICE
  *   ACCOUNT — empty CMD-side and not saved under filter 10147669 (returns INVALID CRITERIA). If it
  *   ever carries data, save the filter under it + add a collections.facilities row before listing.
+ *   REMOVED 2026-07-09 (shut down / no longer exist, verified 0 rows): 10034063 MAPSONG PC,
+ *   10035913 NORTHERN CALIFORNIA MENTAL HEALTH, 10032612 POSTPARTUM MENTAL HEALTH,
+ *   10029219 THRIVE MEDICAL SPECIALISTS, 10034039 TREADSTONE SERVICES PC.
  */
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../tenants.js';
 
@@ -74,7 +78,7 @@ export const BXR_CUSTOMERS: readonly CmdCustomer[] = [
   { customerId: '10031212', facilityCode: 'TREAT_WA', businessEntityId: BXR_ENTITY_ID }, //      TREAT MENTAL HEALTH WASHINGTON (OP)
 ];
 
-/** Indigo's 37 active facility customer accounts (CMD account 474623). facilityCode = CMD id. */
+/** Indigo's 32 active facility customer accounts (CMD account 474623). facilityCode = CMD id. */
 export const INDIGO_CUSTOMERS: readonly CmdCustomer[] = [
   { customerId: '10026460', facilityCode: '10026460', businessEntityId: INDIGO_ENTITY_ID }, // 405 RECOVERY
   { customerId: '10029373', facilityCode: '10029373', businessEntityId: INDIGO_ENTITY_ID }, // ADDICTION FREE RECOVERY SERVICES
@@ -90,7 +94,6 @@ export const INDIGO_CUSTOMERS: readonly CmdCustomer[] = [
   { customerId: '10032291', facilityCode: '10032291', businessEntityId: INDIGO_ENTITY_ID }, // KIN WELLNESS
   { customerId: '10030095', facilityCode: '10030095', businessEntityId: INDIGO_ENTITY_ID }, // KNOX RECOVERY
   { customerId: '10036020', facilityCode: '10036020', businessEntityId: INDIGO_ENTITY_ID }, // MADISON RECOVERY CENTER (added 2026-07-08, in filter 10147669)
-  { customerId: '10034063', facilityCode: '10034063', businessEntityId: INDIGO_ENTITY_ID }, // MAPSONG PC
   { customerId: '10024431', facilityCode: '10024431', businessEntityId: INDIGO_ENTITY_ID }, // MENTAL HEALTH CENTER OF SAN DIEGO
   { customerId: '10030319', facilityCode: '10030319', businessEntityId: INDIGO_ENTITY_ID }, // MENTAL HEALTH MODESTO
   { customerId: '10034979', facilityCode: '10034979', businessEntityId: INDIGO_ENTITY_ID }, // MENTAL HEALTH TREATMENT AND STABILIZATION CENTER OF SACRAMENTO
@@ -99,10 +102,8 @@ export const INDIGO_CUSTOMERS: readonly CmdCustomer[] = [
   { customerId: '10026125', facilityCode: '10026125', businessEntityId: INDIGO_ENTITY_ID }, // MY TIME RECOVERY, LLC
   { customerId: '10033867', facilityCode: '10033867', businessEntityId: INDIGO_ENTITY_ID }, // NEW ORIGINS
   { customerId: '10034901', facilityCode: '10034901', businessEntityId: INDIGO_ENTITY_ID }, // NEXT FRONTIER RECOVERY
-  { customerId: '10035913', facilityCode: '10035913', businessEntityId: INDIGO_ENTITY_ID }, // NORTHERN CALIFORNIA MENTAL HEALTH
   { customerId: '10021573', facilityCode: '10021573', businessEntityId: INDIGO_ENTITY_ID }, // OPUS HEALTH
   { customerId: '10031652', facilityCode: '10031652', businessEntityId: INDIGO_ENTITY_ID }, // ORANGE COUNTY MENTAL HEALTH
-  { customerId: '10032612', facilityCode: '10032612', businessEntityId: INDIGO_ENTITY_ID }, // POSTPARTUM MENTAL HEALTH
   { customerId: '10035467', facilityCode: '10035467', businessEntityId: INDIGO_ENTITY_ID }, // RESTORED HOPE RECOVERY
   { customerId: '10028595', facilityCode: '10028595', businessEntityId: INDIGO_ENTITY_ID }, // REVIVAL MENTAL HEALTH
   { customerId: '10026159', facilityCode: '10026159', businessEntityId: INDIGO_ENTITY_ID }, // SADDLEBACK RECOVERY
@@ -110,8 +111,6 @@ export const INDIGO_CUSTOMERS: readonly CmdCustomer[] = [
   { customerId: '10025950', facilityCode: '10025950', businessEntityId: INDIGO_ENTITY_ID }, // SILICON VALLEY RECOVERY, LLC
   { customerId: '10033531', facilityCode: '10033531', businessEntityId: INDIGO_ENTITY_ID }, // THE EDGE TREATMENT CENTER
   { customerId: '10033708', facilityCode: '10033708', businessEntityId: INDIGO_ENTITY_ID }, // THE FORGE RECOVERY CENTER
-  { customerId: '10029219', facilityCode: '10029219', businessEntityId: INDIGO_ENTITY_ID }, // THRIVE MEDICAL SPECIALISTS
-  { customerId: '10034039', facilityCode: '10034039', businessEntityId: INDIGO_ENTITY_ID }, // TREADSTONE SERVICES PC
   { customerId: '10031547', facilityCode: '10031547', businessEntityId: INDIGO_ENTITY_ID }, // VISALIA RECOVERY CENTER
 ];
 
