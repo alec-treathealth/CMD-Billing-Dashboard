@@ -12,14 +12,18 @@
 import type { Expect, HasNoPhiKey } from '../queries/types.js';
 import type { CollectionsQueryContext } from './daily.js';
 
-/** Inpatient / Outpatient, or null when a facility is outside the canonical set. */
-export type CareSetting = 'IP' | 'OP';
+/**
+ * Inpatient / Outpatient / Both, or null when a facility is outside the canonical set.
+ * 'BOTH' (migration 0035, Indigo) means the facility serves both settings — the UI treats it
+ * as a member of BOTH the IP and OP filters, never a third bucket.
+ */
+export type CareSetting = 'IP' | 'OP' | 'BOTH';
 
 /** One facility's non-PHI dimension row. */
 export interface FacilityDimensionRow {
   facility_code: string;
   facility_name: string;
-  /** 'IP' | 'OP' | null (null = unclassified / "Other"). */
+  /** 'IP' | 'OP' | 'BOTH' | null (null = unclassified / "Other"). */
   care_setting: CareSetting | null;
   /** Display acronym (e.g. 'DLMH', 'TMH CA'); null when unseeded. */
   display_acronym: string | null;
@@ -41,7 +45,8 @@ interface RawRow {
   display_acronym: string | null;
 }
 
-const asCareSetting = (v: string | null): CareSetting | null => (v === 'IP' || v === 'OP' ? v : null);
+const asCareSetting = (v: string | null): CareSetting | null =>
+  v === 'IP' || v === 'OP' || v === 'BOTH' ? v : null;
 
 export async function facilityDimension(ctx: CollectionsQueryContext): Promise<FacilityDimensionRow[]> {
   const { rows } = await ctx.executor.query<RawRow>(facilityDimensionSql(), []);

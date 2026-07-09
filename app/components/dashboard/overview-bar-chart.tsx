@@ -599,7 +599,27 @@ function ChartEmpty({
   );
 }
 
+/**
+ * Overview chart entry point. For a single tenant (bxr/indigo) it renders one chart. For the
+ * CONSOLIDATED view it renders TWO self-contained per-tenant charts stacked vertically — one
+ * scoped to BXR, one to Indigo — instead of one commingled chart, so each tenant's facilities,
+ * months, and drill-downs stand on their own. Consolidated is only ever shown to a super-admin
+ * entitled to both tenants, so each child's server-side scope (bxr / indigo) is authorized; the
+ * server re-derives entity ids from the view and never trusts this client hint.
+ */
 export function OverviewBarChart({ scope = 'consolidated' }: { scope?: DashboardView }) {
+  if (scope === 'consolidated') {
+    return (
+      <div className="space-y-6">
+        <OverviewBarChartSingle scope="bxr" />
+        <OverviewBarChartSingle scope="indigo" />
+      </div>
+    );
+  }
+  return <OverviewBarChartSingle scope={scope} />;
+}
+
+function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
   // `scope` is the active tenant view. It is passed to every collections load* action (which
   // re-derives the entitled business_entity_id(s) SERVER-SIDE — the client value is only a hint)
   // and used as the useWidget/effect dependency so switching views re-fetches for the new tenant.
@@ -738,7 +758,8 @@ export function OverviewBarChart({ scope = 'consolidated' }: { scope?: Dashboard
       .filter((r) => {
         if (careFilter !== 'ALL') {
           const cs = r.facility_code ? dimByCode.get(r.facility_code)?.care_setting ?? null : null;
-          if (cs !== careFilter) return false;
+          // A 'BOTH' facility (serves inpatient AND outpatient) is a member of both filters.
+          if (cs !== careFilter && cs !== 'BOTH') return false;
         }
         if (facilityFilter && r.facility_code !== facilityFilter) return false;
         return true;
@@ -770,7 +791,9 @@ export function OverviewBarChart({ scope = 'consolidated' }: { scope?: Dashboard
       const code = r.facility_code;
       if (!code) continue;
       const dim = dimByCode.get(code);
-      if (careFilter !== 'ALL' && (dim?.care_setting ?? null) !== careFilter) continue;
+      const cs = dim?.care_setting ?? null;
+      // 'BOTH' facilities appear under both the IP and OP filters (not a separate bucket).
+      if (careFilter !== 'ALL' && cs !== careFilter && cs !== 'BOTH') continue;
       if (!seen.has(code)) seen.set(code, dim?.display_acronym ?? code);
     }
     return [...seen.entries()]
