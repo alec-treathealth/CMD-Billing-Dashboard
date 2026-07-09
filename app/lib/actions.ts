@@ -38,13 +38,18 @@ import {
   revealClaimById,
   searchClaimsDirect,
   loadCmdExplorerNonPhi,
+  loadCmdSearchSummary as loadCmdSearchSummary_,
   cmdExplorerFacilities,
   revealCmdExplorerRow,
   revealCmdExplorerRows,
   resolveCmdExplorerSort,
   resolveCmdExplorerCursor,
+  CMD_EXPLORER_SEARCH_COLUMNS,
   type CmdExplorerSort,
   type CmdExplorerCursor,
+  type CmdExplorerSearchColumn,
+  type CmdSearchSummary,
+  type CmdSearchGroup,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
 import { dashboardAccess } from '@/lib/access';
@@ -172,6 +177,8 @@ export type {
   BrowseClaimsCursor,
   ClaimFilter,
   FacilityDimensionRow,
+  CmdSearchSummary,
+  CmdSearchGroup,
 };
 
 export type AgentActionResult =
@@ -681,6 +688,51 @@ export interface CmdReportFilter {
   facility?: string;
   year?: number;
   month?: number; // 1-12; requires year
+  /** Smart-search substring term (matched literally, ILIKE) across `searchColumns`. */
+  q?: string;
+  /** Which NON-PHI columns `q` searches (allowlisted server-side; PHI columns are rejected). */
+  searchColumns?: string[];
+  /** Exact drill-down refinements set by clicking a summary chip. */
+  cpt_code?: string;
+  primary_payer?: string;
+}
+
+/** Max length for the free-text search term (bounded input — DoS/abuse guard). */
+const CMD_SEARCH_TERM_MAX = 120;
+
+/**
+ * Translate the client filter's smart-search fields into the reader filter, dropping anything
+ * unsafe: the term is trimmed + length-bounded, and search columns are intersected with the
+ * server allowlist (PHI/unknown keys silently dropped). Exact refinements are length-bounded.
+ * Returns null on a hard rejection (over-long term).
+ */
+function applySearchFilter(
+  filter: CmdReportFilter,
+  readerFilter: { facility?: string; from?: string; to?: string; q?: string; searchColumns?: CmdExplorerSearchColumn[]; cpt_code?: string; primary_payer?: string },
+): boolean {
+  if (typeof filter.cpt_code === 'string' && filter.cpt_code.trim() !== '') {
+    if (filter.cpt_code.length > 100) return false;
+    readerFilter.cpt_code = filter.cpt_code;
+  }
+  if (typeof filter.primary_payer === 'string' && filter.primary_payer.trim() !== '') {
+    if (filter.primary_payer.length > 200) return false;
+    readerFilter.primary_payer = filter.primary_payer;
+  }
+  const term = typeof filter.q === 'string' ? filter.q.trim() : '';
+  if (term !== '') {
+    if (term.length > CMD_SEARCH_TERM_MAX) return false;
+    const cols = Array.isArray(filter.searchColumns)
+      ? filter.searchColumns.filter(
+          (c): c is CmdExplorerSearchColumn =>
+            typeof c === 'string' && Object.prototype.hasOwnProperty.call(CMD_EXPLORER_SEARCH_COLUMNS, c),
+        )
+      : [];
+    if (cols.length > 0) {
+      readerFilter.q = term;
+      readerFilter.searchColumns = cols;
+    }
+  }
+  return true;
 }
 
 /**
@@ -706,10 +758,21 @@ export async function loadCmdReport(
   const safeCursor = resolveCmdExplorerCursor(cursor);
   const safeSort = resolveCmdExplorerSort(sort);
   // Re-validate + translate the filter into bounded date/string params for the reader.
-  const readerFilter: { facility?: string; from?: string; to?: string } = {};
+  const readerFilter: {
+    facility?: string;
+    from?: string;
+    to?: string;
+    q?: string;
+    searchColumns?: CmdExplorerSearchColumn[];
+    cpt_code?: string;
+    primary_payer?: string;
+  } = {};
   if (typeof filter.facility === 'string' && filter.facility.trim() !== '') {
     if (filter.facility.length > 200) return { ok: false, error: 'Invalid facility.' };
     readerFilter.facility = filter.facility;
+  }
+  if (!applySearchFilter(filter, readerFilter)) {
+    return { ok: false, error: 'Invalid search.' };
   }
   if (filter.year !== undefined || filter.month !== undefined) {
     const { year, month } = filter;
@@ -730,6 +793,57 @@ export async function loadCmdReport(
     return { ok: true, rows: page.rows, nextCursor: page.nextCursor };
   } catch {
     return { ok: false, error: 'The collections report could not be loaded right now.' };
+  }
+}
+
+export type CmdSearchSummaryResult =
+  | { ok: true; summary: CmdSearchSummary }
+  | { ok: false; error: string };
+
+/**
+ * Smart-search summary — the aggregate "search engine" result for the current query/window
+ * (count + money totals + top facilities/payers/CPTs), tenant-scoped SERVER-SIDE from the
+ * RBAC-clamped view. Same filter validation as loadCmdReport, so the summary and the rows a
+ * chip drills into always agree. Non-PHI; cached per (filter, tenant).
+ */
+export async function loadCmdSearchSummary(
+  filter: CmdReportFilter = {},
+  view?: DashboardView,
+): Promise<CmdSearchSummaryResult> {
+  const entityIds = await viewEntityScope(view);
+  if (entityIds === null) return { ok: false, error: 'The search could not be run right now.' };
+  const readerFilter: {
+    facility?: string;
+    from?: string;
+    to?: string;
+    q?: string;
+    searchColumns?: CmdExplorerSearchColumn[];
+    cpt_code?: string;
+    primary_payer?: string;
+  } = {};
+  if (typeof filter.facility === 'string' && filter.facility.trim() !== '') {
+    if (filter.facility.length > 200) return { ok: false, error: 'Invalid facility.' };
+    readerFilter.facility = filter.facility;
+  }
+  if (!applySearchFilter(filter, readerFilter)) return { ok: false, error: 'Invalid search.' };
+  if (filter.year !== undefined || filter.month !== undefined) {
+    const { year, month } = filter;
+    if (
+      !Number.isInteger(year) || year! < 2000 || year! > 2100 ||
+      !Number.isInteger(month) || month! < 1 || month! > 12
+    ) {
+      return { ok: false, error: 'Invalid month.' };
+    }
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const nextYear = month === 12 ? year! + 1 : year!;
+    const nextMonth = month === 12 ? 1 : month! + 1;
+    readerFilter.from = `${year}-${pad(month!)}-01`;
+    readerFilter.to = `${nextYear}-${pad(nextMonth)}-01`;
+  }
+  try {
+    return { ok: true, summary: await loadCmdSearchSummary_(readerFilter, entityIds) };
+  } catch {
+    return { ok: false, error: 'The search could not be run right now.' };
   }
 }
 

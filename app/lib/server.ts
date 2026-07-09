@@ -21,6 +21,40 @@ import {
   payerGapForFilter,
 } from '../../src/queries/dashboard_aggregates.js';
 import { makeReaderPool, PgExecutor, readerConnectionStringFromEnv } from '../../src/queries/executor.js';
+// Pure explorer query builders live in a Next-free module so they're unit-testable; this file
+// adds the DB execution + caching and re-exports the public seam (below) so callers keep
+// importing these names from '@/lib/server'.
+import {
+  buildCmdExplorerQuery,
+  buildCmdSearchSummaryQueries,
+  cmdExplorerSortValue,
+  CMD_EXPLORER_PAGE_SIZE,
+  type CmdExplorerFilter,
+  type CmdExplorerSort,
+  type CmdExplorerCursor,
+  type CmdExplorerPage,
+  type CmdSearchSummary,
+  type CmdSearchGroup,
+} from '../../src/collections/cmdExplorerQuery.js';
+export {
+  CMD_EXPLORER_SEARCH_COLUMNS,
+  CMD_EXPLORER_SORTABLE_COLUMNS,
+  CMD_EXPLORER_DEFAULT_SORT,
+  CMD_SEARCH_TOP_N,
+  resolveCmdExplorerSort,
+  resolveCmdExplorerCursor,
+  buildCmdSearchSummaryQueries,
+} from '../../src/collections/cmdExplorerQuery.js';
+export type {
+  CmdExplorerFilter,
+  CmdExplorerSearchColumn,
+  CmdExplorerSort,
+  CmdExplorerSortColumn,
+  CmdExplorerCursor,
+  CmdExplorerPage,
+  CmdSearchGroup,
+  CmdSearchSummary,
+} from '../../src/collections/cmdExplorerQuery.js';
 import type {
   ClaimFilter,
   DistributionField,
@@ -728,99 +762,6 @@ function cmdIndigoConfigFor(customerId: string): CmdApiConfig {
   };
 }
 
-/** One keyset page of the explorer grid + the cursor to fetch the next page (null at end). */
-export interface CmdExplorerPage {
-  rows: CmdExplorerRow[];
-  nextCursor: CmdExplorerCursor | null;
-}
-
-/**
- * Server-side filters for the explorer grid (non-PHI). `facility` is an EXACT match on
- * the cmd_explorer_rows.facility text column (its own vocabulary — distinct values come
- * from cmdExplorerFacilities, NOT the canonical facility dimension). `from`/`to` window
- * payment_received ([from, to)). All values are bound parameters; nulls are no-ops.
- */
-export interface CmdExplorerFilter {
-  facility?: string | null;
-  from?: string | null; // 'YYYY-MM-DD' inclusive (payment_received >= from)
-  to?: string | null; // 'YYYY-MM-DD' exclusive (payment_received < to)
-}
-
-/**
- * Columns the explorer grid may sort by — a CLOSED allowlist of fixed SQL literals (the two
- * dates + the five money columns). Anything else falls back to the default sort. These are the
- * raw cmd_explorer_rows columns (dates sort chronologically, money numerically), which is why
- * ORDER BY uses them directly rather than the to_char text aliases in the SELECT.
- */
-export const CMD_EXPLORER_SORTABLE_COLUMNS = [
-  'payment_received',
-  'charge_date',
-  'charge_amount',
-  'allowed_amount',
-  'insurance_payments',
-  'adjustments',
-  'patient_balance_due',
-] as const;
-export type CmdExplorerSortColumn = (typeof CMD_EXPLORER_SORTABLE_COLUMNS)[number];
-const CMD_EXPLORER_SORTABLE = new Set<string>(CMD_EXPLORER_SORTABLE_COLUMNS);
-
-export interface CmdExplorerSort {
-  column: CmdExplorerSortColumn;
-  direction: 'asc' | 'desc';
-}
-
-/** Default grid order: most-recent Payment Received first. */
-export const CMD_EXPLORER_DEFAULT_SORT: CmdExplorerSort = {
-  column: 'payment_received',
-  direction: 'desc',
-};
-
-/**
- * Forward keyset cursor for the grid: the sort-column value + id of the LAST row of the page
- * just shown (both non-PHI). `value` is a JSON-safe scalar (dates are 'YYYY-MM-DD' text, money a
- * decimal string); null means that row sat in the trailing NULLS-LAST block.
- */
-export interface CmdExplorerCursor {
-  id: number;
-  value: string | number | null;
-}
-
-/** Clamp a sort to the allowlist; fall back to the Payment-Received-DESC default otherwise. */
-export function resolveCmdExplorerSort(sort: CmdExplorerSort | undefined): CmdExplorerSort {
-  if (
-    sort !== undefined &&
-    CMD_EXPLORER_SORTABLE.has(sort.column) &&
-    (sort.direction === 'asc' || sort.direction === 'desc')
-  ) {
-    return { column: sort.column, direction: sort.direction };
-  }
-  return { ...CMD_EXPLORER_DEFAULT_SORT };
-}
-
-/** Accept a cursor only if shaped safely; otherwise treat it as the first page. */
-export function resolveCmdExplorerCursor(
-  cursor: CmdExplorerCursor | null | undefined,
-): CmdExplorerCursor | null {
-  if (cursor === null || cursor === undefined) return null;
-  if (!Number.isSafeInteger(cursor.id) || cursor.id < 1) return null;
-  const v = cursor.value;
-  if (v !== null && typeof v !== 'string' && typeof v !== 'number') return null;
-  return { id: cursor.id, value: v ?? null };
-}
-
-const CMD_EXPLORER_PAGE_SIZE = 50;
-
-// Explicit non-PHI column list — the bytea PHI columns are NEVER selected here. Dates and
-// ingested_at are cast to text so the row shape is stable strings (not pg Date objects);
-// numeric money stays a fixed-2-decimal string. id (bigserial) is the keyset + reveal key.
-const CMD_EXPLORER_SELECT =
-  "select id, to_char(charge_date, 'YYYY-MM-DD') as charge_date, " +
-  "to_char(payment_received, 'YYYY-MM-DD') as payment_received, cpt_code, revenue_code, " +
-  'facility, charge_amount, allowed_amount, insurance_payments, adjustments, ' +
-  'patient_balance_due, primary_payer, ' +
-  `to_char(ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
-  'from collections.cmd_explorer_rows';
-
 /** Raw DB shape — pg returns int8 (id) as a string; toExplorerRow narrows it to number. */
 interface CmdExplorerDbRecord extends Omit<CmdExplorerRow, 'id'> {
   id: string;
@@ -828,66 +769,6 @@ interface CmdExplorerDbRecord extends Omit<CmdExplorerRow, 'id'> {
 
 function toExplorerRow(r: CmdExplorerDbRecord): CmdExplorerRow {
   return { ...r, id: Number(r.id) };
-}
-
-/**
- * Build the keyset page query with optional filters + an allowlisted sort. Column/table names
- * are fixed literals; every VALUE (entity ids, facility, dates, cursor value/id, limit) is a bound
- * $n parameter — no interpolation, no SELECT *. The order is `<sortcol> <dir> NULLS LAST, id <dir>`,
- * and the cursor boundary continues STRICTLY after the previous page's last row in that ordering
- * (the NULLS-LAST block is handled explicitly for both directions), so paging walks the FILTERED,
- * SORTED set consistently.
- *
- * `entityIds` is the TENANT SCOPE — the business_entity_id(s) the caller may see, derived
- * SERVER-SIDE from the RBAC-clamped view (never client input; see loadCmdReport). It is applied
- * as a mandatory WHERE so a page never crosses tenants.
- */
-function buildCmdExplorerQuery(
-  cursor: CmdExplorerCursor | null,
-  filter: CmdExplorerFilter,
-  sort: CmdExplorerSort,
-  limit: number,
-  entityIds: string[],
-): { sql: string; params: unknown[] } {
-  const conds: string[] = [];
-  const params: unknown[] = [];
-  const add = (v: unknown): string => {
-    params.push(v);
-    return `$${params.length}`;
-  };
-  // Tenant scope FIRST — server-derived entitled entity ids, applied to every page.
-  conds.push(`business_entity_id = any(${add(entityIds)}::uuid[])`);
-  if (filter.facility) conds.push(`facility = ${add(filter.facility)}`);
-  if (filter.from) conds.push(`payment_received >= ${add(filter.from)}::date`);
-  if (filter.to) conds.push(`payment_received < ${add(filter.to)}::date`);
-
-  const col = sort.column; // allowlisted fixed literal (see CMD_EXPLORER_SORTABLE_COLUMNS)
-  const cmp = sort.direction === 'asc' ? '>' : '<';
-  if (cursor !== null) {
-    if (cursor.value === null) {
-      // Cursor row sat in the trailing NULL block: only later NULL rows remain.
-      conds.push(`(${col} is null and id ${cmp} ${add(cursor.id)})`);
-    } else {
-      // Rows past the cursor on the sort key, ties broken by id, plus the whole NULL block
-      // (which sorts after any non-null value under NULLS LAST).
-      const valueParam = add(cursor.value);
-      const idParam = add(cursor.id);
-      conds.push(
-        `(${col} ${cmp} ${valueParam} or (${col} = ${valueParam} and id ${cmp} ${idParam}) or ${col} is null)`,
-      );
-    }
-  }
-
-  const where = conds.length > 0 ? ` where ${conds.join(' and ')}` : '';
-  const dir = sort.direction === 'asc' ? 'asc' : 'desc';
-  const orderClause = ` order by ${col} ${dir} nulls last, id ${dir}`;
-  const limitClause = ` limit ${add(limit)}`;
-  return { sql: `${CMD_EXPLORER_SELECT}${where}${orderClause}${limitClause}`, params };
-}
-
-/** A row's sort-column value as a JSON-safe cursor scalar (all sortable columns are text/null). */
-function cmdExplorerSortValue(row: CmdExplorerRow, column: CmdExplorerSortColumn): string | null {
-  return row[column] ?? null;
 }
 
 async function loadCmdExplorerPage(
@@ -926,6 +807,51 @@ export const loadCmdExplorerNonPhi = unstable_cache(
     entityIds: string[],
   ): Promise<CmdExplorerPage> => loadCmdExplorerPage(cursor, filter, sort, entityIds),
   ['cmd-explorer-nonphi'],
+  { revalidate: 900, tags: ['cmd-explorer'] },
+);
+
+// --- Smart search summary ---------------------------------------------------
+// The "search engine" result: instead of paging through noisy rows, the search first returns
+// an AGGREGATE summary of everything matching (count + money totals) plus the top facilities /
+// payers / CPT codes, each of which the UI turns into a clickable drill-down chip (an exact
+// refinement that then loads the detail grid). All non-PHI; same tenant scope + filters as the
+// grid, so the summary and the rows it drills into always agree.
+
+async function loadCmdSearchSummaryData(
+  filter: CmdExplorerFilter,
+  entityIds: string[],
+): Promise<CmdSearchSummary> {
+  const { totals, groups } = buildCmdSearchSummaryQueries(filter, entityIds);
+  const exec = readerExecutor();
+  const [t, byFacility, byPayer, byCpt] = await Promise.all([
+    exec.query<{ total_count: number; total_charge: number; total_paid: number; total_balance: number }>(
+      totals.sql,
+      totals.params,
+    ),
+    exec.query<CmdSearchGroup>(groups.facility.sql, groups.facility.params),
+    exec.query<CmdSearchGroup>(groups.primary_payer.sql, groups.primary_payer.params),
+    exec.query<CmdSearchGroup>(groups.cpt_code.sql, groups.cpt_code.params),
+  ]);
+  const row = t.rows[0];
+  return {
+    total_count: row?.total_count ?? 0,
+    total_charge: row?.total_charge ?? 0,
+    total_paid: row?.total_paid ?? 0,
+    total_balance: row?.total_balance ?? 0,
+    by_facility: byFacility.rows,
+    by_payer: byPayer.rows,
+    by_cpt: byCpt.rows,
+  };
+}
+
+/**
+ * Cached search summary, keyed PER (filter, entityIds) like the grid page — no PHI at rest,
+ * tag-busted by the cron after any insert. Each tenant scope caches separately.
+ */
+export const loadCmdSearchSummary = unstable_cache(
+  (filter: CmdExplorerFilter, entityIds: string[]): Promise<CmdSearchSummary> =>
+    loadCmdSearchSummaryData(filter, entityIds),
+  ['cmd-explorer-search-summary'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
 
