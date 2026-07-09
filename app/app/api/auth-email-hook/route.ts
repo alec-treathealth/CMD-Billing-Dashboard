@@ -47,7 +47,7 @@ interface HookPayload {
 const RESEND_ENDPOINT = 'https://api.resend.com/emails';
 /** Sender. Until treathealth.ai is verified in Resend, this must be Resend's shared sender and mail
  *  only reaches the account owner. Override via RESEND_FROM once the domain is verified. */
-const DEFAULT_FROM = 'TH Veris <onboarding@resend.dev>';
+const DEFAULT_FROM = 'TreatHealthOS <onboarding@resend.dev>';
 
 /** Post-verification destination for each action, matching app/app/auth/confirm/route.ts:
  *  invite + recovery land on /set-password; everything else defaults to /dashboard. */
@@ -69,36 +69,36 @@ function confirmUrl(siteUrl: string, tokenHash: string, actionType: string): str
 function subjectFor(actionType: string): string {
   switch (actionType) {
     case 'invite':
-      return "You're invited to TH Veris";
+      return "You're invited to TreatHealthOS";
     case 'recovery':
-      return 'Reset your TH Veris password';
+      return 'Reset your TreatHealthOS password';
     case 'magiclink':
-      return 'Your TH Veris sign-in link';
+      return 'Your TreatHealthOS sign-in link';
     case 'signup':
-      return 'Confirm your TH Veris account';
+      return 'Confirm your TreatHealthOS account';
     case 'email_change':
-      return 'Confirm your email change · TH Veris';
+      return 'Confirm your email change · TreatHealthOS';
     case 'reauthentication':
-      return 'Your TH Veris verification code';
+      return 'Your TreatHealthOS verification code';
     default:
-      return 'TH Veris';
+      return 'TreatHealthOS';
   }
 }
 
 function introFor(actionType: string): string {
   switch (actionType) {
     case 'invite':
-      return 'You’ve been invited to the TH Veris billing &amp; RCM console. Click below to set your password and finish setting up your account.';
+      return 'You’ve been invited to the TreatHealthOS billing &amp; RCM console. Click below to set your password and finish setting up your account.';
     case 'recovery':
       return 'We received a request to reset your password. Click below to choose a new one. If you didn’t request this, you can ignore this email.';
     case 'magiclink':
-      return 'Click below to sign in to TH Veris. If you didn’t request this, you can ignore this email.';
+      return 'Click below to sign in to TreatHealthOS. If you didn’t request this, you can ignore this email.';
     case 'signup':
-      return 'Confirm your email address to activate your TH Veris account.';
+      return 'Confirm your email address to activate your TreatHealthOS account.';
     case 'email_change':
-      return 'Confirm this email address to complete your email change on TH Veris.';
+      return 'Confirm this email address to complete your email change on TreatHealthOS.';
     default:
-      return 'Continue to TH Veris.';
+      return 'Continue to TreatHealthOS.';
   }
 }
 
@@ -115,7 +115,7 @@ function ctaLabelFor(actionType: string): string {
   }
 }
 
-/** Minimal, email-client-safe (inline-styled) branded template. TH Veris teal (#1C8B82). */
+/** Minimal, email-client-safe (inline-styled) branded template. TreatHealthOS teal (#1C8B82). */
 function renderActionEmail(opts: { subject: string; intro: string; ctaLabel: string; ctaUrl: string }): string {
   const { subject, intro, ctaLabel, ctaUrl } = opts;
   return `<!doctype html>
@@ -124,7 +124,7 @@ function renderActionEmail(opts: { subject: string; intro: string; ctaLabel: str
     <tr><td align="center">
       <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="max-width:480px;background:#ffffff;border:1px solid #e2e8e7;border-radius:12px;overflow:hidden;">
         <tr><td style="background:#1C8B82;padding:18px 24px;">
-          <div style="font-size:16px;font-weight:700;color:#ffffff;letter-spacing:-0.2px;">TH Veris</div>
+          <div style="font-size:16px;font-weight:700;color:#ffffff;letter-spacing:-0.2px;">TreatHealthOS</div>
           <div style="font-size:9px;font-weight:600;letter-spacing:1.5px;color:rgba(255,255,255,0.75);margin-top:2px;">POWERED BY TREAT HEALTH AI · BILLING &amp; RCM</div>
         </td></tr>
         <tr><td style="padding:28px 24px;">
@@ -150,7 +150,7 @@ function renderCodeEmail(code: string): string {
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f6;padding:24px 0;"><tr><td align="center">
     <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="max-width:480px;background:#fff;border:1px solid #e2e8e7;border-radius:12px;overflow:hidden;">
       <tr><td style="background:#1C8B82;padding:18px 24px;">
-        <div style="font-size:16px;font-weight:700;color:#fff;">TH Veris</div>
+        <div style="font-size:16px;font-weight:700;color:#fff;">TreatHealthOS</div>
         <div style="font-size:9px;font-weight:600;letter-spacing:1.5px;color:rgba(255,255,255,0.75);margin-top:2px;">POWERED BY TREAT HEALTH AI · BILLING &amp; RCM</div>
       </td></tr>
       <tr><td style="padding:28px 24px;">

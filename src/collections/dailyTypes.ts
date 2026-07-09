@@ -30,6 +30,8 @@ export interface CollectionsDailyRow {
   payment_date: string;
   facility_code: string | null;
   facility_name: string | null;
+  /** Owning tenant (business_entity_id); drives the Consolidated tenant filter/color. Non-PHI. */
+  business_entity_id: string;
   checks_amount: number;
   eft_amount: number;
   gross_amount: number;
@@ -63,6 +65,8 @@ export interface CollectionsAmounts {
 export interface CollectionsFacilityKpi {
   facility_code: string | null;
   facility_name: string | null;
+  /** Owning tenant (business_entity_id); drives the Consolidated tenant filter/color. Non-PHI. */
+  business_entity_id: string;
   mtd_checks: number;
   mtd_eft: number;
   mtd_gross: number;

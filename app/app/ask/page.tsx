@@ -13,13 +13,13 @@
 import type { Metadata } from 'next';
 import { SearchConsole } from '@/components/search-console';
 
-export const metadata: Metadata = { title: 'Ask | TH Veris' };
+export const metadata: Metadata = { title: 'Ask | TreatHealthOS' };
 
 export default function AskPage() {
   return (
     <main className="mx-auto max-w-5xl space-y-6 p-6 sm:p-10">
       <header>
-        <h1 className="text-2xl font-semibold tracking-tight">TH Veris</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">TreatHealthOS</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Ask a question about three years of out-of-network behavioral-health claims. Results
           summaries are PHI-free; underlying patient rows are masked until revealed.

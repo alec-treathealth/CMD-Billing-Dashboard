@@ -11,7 +11,7 @@ import { SetPasswordForm } from '@/components/set-password-form';
 import { Wordmark } from '@/components/wordmark';
 import { requireExecutive } from '@/lib/executive';
 
-export const metadata: Metadata = { title: 'Set your password · TH Veris' };
+export const metadata: Metadata = { title: 'Set your password · TreatHealthOS' };
 export const dynamic = 'force-dynamic';
 
 export default async function SetPasswordPage() {

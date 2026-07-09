@@ -14,7 +14,7 @@ import { LoginForm } from '@/components/login-form';
 import { Wordmark } from '@/components/wordmark';
 import { requireExecutive } from '@/lib/executive';
 
-export const metadata: Metadata = { title: 'Sign in · TH Veris' };
+export const metadata: Metadata = { title: 'Sign in · TreatHealthOS' };
 export const dynamic = 'force-dynamic';
 
 function safeNext(value: string | string[] | undefined): string {
@@ -101,7 +101,7 @@ export default async function LoginPage({
             <span className="block text-[#5FBFA8]">The money is the other half.</span>
           </h2>
           <p className="mt-5 text-[15px] leading-relaxed text-white/60">
-            Veris reads every payer batch and collection sheet, then surfaces denials,
+            TreatHealthOS reads every payer batch and collection sheet, then surfaces denials,
             underpayments, and aging risk before they cost you the recovery.
           </p>
           <div className="mt-8 space-y-3">

@@ -10,7 +10,7 @@
 import type { Metadata } from 'next';
 import { ClaimsExplorer } from '@/components/claims-explorer';
 
-export const metadata: Metadata = { title: 'Claims Explorer | TH Veris' };
+export const metadata: Metadata = { title: 'Claims Explorer | TreatHealthOS' };
 
 export default function ClaimsPage() {
   return (

@@ -11,7 +11,7 @@ import { dashboardAccess } from '@/lib/access';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'TH Veris',
+  title: 'TreatHealthOS Billing & RCM',
   description: 'Historical out-of-network behavioral-health claims search (PHI — compliance layer on).',
 };
 
@@ -68,9 +68,11 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           <div className="flex items-center gap-3">
             <Logo size={26} />
             <div className="leading-none">
-              <div className="ths-h text-sm font-semibold tracking-tight text-white">TH Veris</div>
-              <div className="mt-0.5 hidden text-[9px] font-semibold tracking-widest text-white/70 sm:block">
-                POWERED BY TREAT HEALTH AI · BILLING &amp; RCM
+              <div className="ths-h text-sm font-semibold tracking-tight text-white">
+                TreatHealth<span className="text-[#5FBFA8]">OS</span>
+              </div>
+              <div className="mt-0.5 hidden text-[9px] font-semibold uppercase tracking-widest text-white/70 sm:block">
+                Billing · RCM
               </div>
             </div>
           </div>

@@ -19,6 +19,7 @@ const DAILY_SQL =
   `to_char(dc.payment_date, 'YYYY-MM-DD') as payment_date, ` +
   `dc.facility_code as facility_code, ` +
   `f.facility_name as facility_name, ` +
+  `dc.business_entity_id as business_entity_id, ` +
   `dc.checks_amount as checks_amount, ` +
   `dc.eft_amount as eft_amount, ` +
   `dc.gross_amount as gross_amount ` +
@@ -40,6 +41,7 @@ const KPIS_SQL =
   `to_char(a.d, 'YYYY-MM-DD') as as_of, ` +
   `dc.facility_code as facility_code, ` +
   `f.facility_name as facility_name, ` +
+  `dc.business_entity_id as business_entity_id, ` +
   `coalesce(sum(dc.checks_amount) filter (where dc.payment_date >= date_trunc('month', a.d)::date and dc.payment_date <= a.d), 0) as mtd_checks, ` +
   `coalesce(sum(dc.eft_amount) filter (where dc.payment_date >= date_trunc('month', a.d)::date and dc.payment_date <= a.d), 0) as mtd_eft, ` +
   `coalesce(sum(dc.gross_amount) filter (where dc.payment_date >= date_trunc('month', a.d)::date and dc.payment_date <= a.d), 0) as mtd_gross, ` +
@@ -50,7 +52,7 @@ const KPIS_SQL =
   `cross join anchor a ` +
   `left join collections.facilities f on f.facility_code = dc.facility_code ` +
   `where dc.business_entity_id = any($2::uuid[]) ` +
-  `group by a.d, dc.facility_code, f.facility_name ` +
+  `group by a.d, dc.facility_code, f.facility_name, dc.business_entity_id ` +
   `order by ytd_gross desc`;
 
 interface Capture {
@@ -124,8 +126,8 @@ test('daily: malformed date rejected before any query', async () => {
 test('daily: numeric (text) amounts parsed; echo + row_count correct; no PHI/group keys', async () => {
   const cap: Capture = {};
   const rows = [
-    { payment_date: '2026-06-30', facility_code: 'CAMH', facility_name: 'CA MENTAL HEALTH', checks_amount: '100.00', eft_amount: '0', gross_amount: '100.00' },
-    { payment_date: '2026-06-29', facility_code: 'CAMH', facility_name: 'CA MENTAL HEALTH', checks_amount: '5.50', eft_amount: '44.50', gross_amount: '50.00' },
+    { payment_date: '2026-06-30', facility_code: 'CAMH', facility_name: 'CA MENTAL HEALTH', business_entity_id: 'af504ab6-3dcd-4aa4-a93c-27bc58de4088', checks_amount: '100.00', eft_amount: '0', gross_amount: '100.00' },
+    { payment_date: '2026-06-29', facility_code: 'CAMH', facility_name: 'CA MENTAL HEALTH', business_entity_id: 'af504ab6-3dcd-4aa4-a93c-27bc58de4088', checks_amount: '5.50', eft_amount: '44.50', gross_amount: '50.00' },
   ];
   const res = await collectionsDaily({ facility_code: 'CAMH' }, ctx(fakeExecutor(rows, cap)));
   assert.equal(res.row_count, 2);
@@ -133,7 +135,7 @@ test('daily: numeric (text) amounts parsed; echo + row_count correct; no PHI/gro
   assert.strictEqual(res.rows[0]!.gross_amount, 100);
   assert.strictEqual(res.rows[1]!.eft_amount, 44.5);
   assert.deepEqual(Object.keys(res.rows[0]!).sort(), [
-    'checks_amount', 'eft_amount', 'facility_code', 'facility_name', 'gross_amount', 'payment_date',
+    'business_entity_id', 'checks_amount', 'eft_amount', 'facility_code', 'facility_name', 'gross_amount', 'payment_date',
   ]);
   const s = JSON.stringify(res);
   for (const bad of ['source_group_code', 'patient', 'member_id', 'inpatient', 'outpatient']) {
@@ -146,9 +148,9 @@ test('daily: numeric (text) amounts parsed; echo + row_count correct; no PHI/gro
 test('kpis: as_of param passthrough; overall = sum of by_facility; checks/eft split present', async () => {
   const cap: Capture = {};
   const rows = [
-    { as_of: '2026-06-30', facility_code: 'CAMH', facility_name: 'CA MENTAL HEALTH',
+    { as_of: '2026-06-30', facility_code: 'CAMH', facility_name: 'CA MENTAL HEALTH', business_entity_id: 'af504ab6-3dcd-4aa4-a93c-27bc58de4088',
       mtd_checks: '10', mtd_eft: '5', mtd_gross: '15', ytd_checks: '100', ytd_eft: '50', ytd_gross: '150' },
-    { as_of: '2026-06-30', facility_code: 'DMH', facility_name: 'DALLAS MENTAL HEALTH LLC',
+    { as_of: '2026-06-30', facility_code: 'DMH', facility_name: 'DALLAS MENTAL HEALTH LLC', business_entity_id: 'af504ab6-3dcd-4aa4-a93c-27bc58de4088',
       mtd_checks: '2', mtd_eft: '3', mtd_gross: '5', ytd_checks: '20', ytd_eft: '30', ytd_gross: '50' },
   ];
   const k = await collectionsKpis({ as_of: '2026-06-30' }, ctx(fakeExecutor(rows, cap)));
@@ -165,7 +167,7 @@ test('kpis: as_of param passthrough; overall = sum of by_facility; checks/eft sp
   // checks + eft reconcile to gross in the fixture
   assert.strictEqual(k.ytd.checks + k.ytd.eft, k.ytd.gross);
   assert.deepEqual(Object.keys(k.by_facility[0]!).sort(), [
-    'facility_code', 'facility_name', 'mtd_checks', 'mtd_eft', 'mtd_gross', 'ytd_checks', 'ytd_eft', 'ytd_gross',
+    'business_entity_id', 'facility_code', 'facility_name', 'mtd_checks', 'mtd_eft', 'mtd_gross', 'ytd_checks', 'ytd_eft', 'ytd_gross',
   ]);
 });
 

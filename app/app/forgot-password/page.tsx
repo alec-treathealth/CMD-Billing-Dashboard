@@ -12,7 +12,7 @@ import { ForgotPasswordForm } from '@/components/forgot-password-form';
 import { Wordmark } from '@/components/wordmark';
 import { requireExecutive } from '@/lib/executive';
 
-export const metadata: Metadata = { title: 'Reset password · TH Veris' };
+export const metadata: Metadata = { title: 'Reset password · TreatHealthOS' };
 export const dynamic = 'force-dynamic';
 
 export default async function ForgotPasswordPage() {

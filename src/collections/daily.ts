@@ -61,6 +61,7 @@ export function collectionsDailySql(): string {
     `to_char(dc.payment_date, 'YYYY-MM-DD') as payment_date, ` +
     `dc.facility_code as facility_code, ` +
     `f.facility_name as facility_name, ` +
+    `dc.business_entity_id as business_entity_id, ` +
     `dc.checks_amount as checks_amount, ` +
     `dc.eft_amount as eft_amount, ` +
     `dc.gross_amount as gross_amount ` +
@@ -82,6 +83,7 @@ interface RawDailyRow {
   payment_date: string;
   facility_code: string | null;
   facility_name: string | null;
+  business_entity_id: string;
   checks_amount: string | number;
   eft_amount: string | number;
   gross_amount: string | number;
@@ -109,6 +111,7 @@ export async function collectionsDaily(
     payment_date: r.payment_date,
     facility_code: r.facility_code,
     facility_name: r.facility_name,
+    business_entity_id: r.business_entity_id,
     checks_amount: money2(r.checks_amount),
     eft_amount: money2(r.eft_amount),
     gross_amount: money2(r.gross_amount),
@@ -143,6 +146,7 @@ export function collectionsKpisSql(): string {
     `to_char(a.d, 'YYYY-MM-DD') as as_of, ` +
     `dc.facility_code as facility_code, ` +
     `f.facility_name as facility_name, ` +
+    `dc.business_entity_id as business_entity_id, ` +
     `coalesce(sum(dc.checks_amount) filter (where ${mtd}), 0) as mtd_checks, ` +
     `coalesce(sum(dc.eft_amount) filter (where ${mtd}), 0) as mtd_eft, ` +
     `coalesce(sum(dc.gross_amount) filter (where ${mtd}), 0) as mtd_gross, ` +
@@ -153,7 +157,7 @@ export function collectionsKpisSql(): string {
     `cross join anchor a ` +
     `left join collections.facilities f on f.facility_code = dc.facility_code ` +
     `where dc.business_entity_id = any($2::uuid[]) ` +
-    `group by a.d, dc.facility_code, f.facility_name ` +
+    `group by a.d, dc.facility_code, f.facility_name, dc.business_entity_id ` +
     `order by ytd_gross desc`
   );
 }
@@ -162,6 +166,7 @@ interface RawKpiRow {
   as_of: string | null;
   facility_code: string | null;
   facility_name: string | null;
+  business_entity_id: string;
   mtd_checks: string | number;
   mtd_eft: string | number;
   mtd_gross: string | number;
@@ -182,6 +187,7 @@ export async function collectionsKpis(
   const by_facility: CollectionsFacilityKpi[] = rows.map((r) => ({
     facility_code: r.facility_code,
     facility_name: r.facility_name,
+    business_entity_id: r.business_entity_id,
     mtd_checks: money2(r.mtd_checks),
     mtd_eft: money2(r.mtd_eft),
     mtd_gross: money2(r.mtd_gross),
