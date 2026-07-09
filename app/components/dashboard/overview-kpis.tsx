@@ -304,7 +304,8 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
 /** A per-facility row for the All Facilities table (summed for the selected month). */
 interface FacilityTableRow {
   label: string;
-  careSetting: 'IP' | 'OP' | null;
+  // CareSetting | null — includes 'BOTH' (a facility serving inpatient AND outpatient).
+  careSetting: FacilityDimensionRow['care_setting'];
   checks: number;
   eft: number;
   gross: number;
@@ -424,7 +425,8 @@ function AllFacilitiesTable({
           gross: f.gross,
         };
       })
-      .filter((r) => setting === 'ALL' || r.careSetting === setting)
+      // A 'BOTH' facility (serves inpatient AND outpatient) is a member of both filters.
+      .filter((r) => setting === 'ALL' || r.careSetting === setting || r.careSetting === 'BOTH')
       .sort((a, b) => b.gross - a.gross);
   }, [isCurrent, kpis, pastRows, dimByCode, setting]);
 
