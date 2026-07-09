@@ -40,6 +40,7 @@ import {
   loadCmdExplorerNonPhi,
   loadCmdSearchSummary as loadCmdSearchSummary_,
   cmdExplorerFacilities,
+  recordAccess,
   revealCmdExplorerRow,
   revealCmdExplorerRows,
   resolveCmdExplorerSort,
@@ -56,6 +57,12 @@ import { dashboardAccess } from '@/lib/access';
 import { BXR_ENTITY_ID, clampView, viewToEntityIds, type DashboardView } from '@/lib/views';
 import { supabaseAuthConfigured } from '@/lib/supabase/env';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdExplorer';
+import {
+  memberIdBlindIndex,
+  alphaPrefixBlindIndex,
+  groupNumberBlindIndex,
+  BlindIndexError,
+} from '../../src/collections/blindIndex';
 import type {
   BrowseClaimsCursor,
   BrowseClaimsResult,
@@ -695,6 +702,15 @@ export interface CmdReportFilter {
   /** Exact drill-down refinements set by clicking a summary chip. */
   cpt_code?: string;
   primary_payer?: string;
+  /**
+   * Searchable-PHI terms (raw). Resolved SERVER-SIDE to blind-index tokens, gated to
+   * PHI-entitled roles, and audited — the raw terms are never stored, logged, or sent to SQL.
+   */
+  phiSearch?: {
+    memberId?: string;
+    alphaPrefix?: string;
+    groupNumber?: string;
+  };
 }
 
 /** Max length for the free-text search term (bounded input — DoS/abuse guard). */
@@ -735,6 +751,59 @@ function applySearchFilter(
   return true;
 }
 
+type PhiIndexTokens = { memberIdBidx?: string; memberIdPrefixBidx?: string; groupNumberBidx?: string };
+type PhiSearchResult = { ok: true; phiIndex?: PhiIndexTokens } | { ok: false; error: string };
+
+/**
+ * Resolve RAW searchable-PHI terms → keyed blind-index tokens, GATED to PHI-entitled roles and
+ * AUDITED. The raw terms are never stored, logged, or sent to SQL — only the one-way HMAC token
+ * is. Returns a no-op ({ok,phiIndex:undefined}) when no PHI terms were supplied; an error when a
+ * non-entitled principal supplies PHI terms or the index key is unavailable. `doAudit` writes ONE
+ * access row (field names only — never the term or token). Tenant SCOPE stays the caller's
+ * view-clamped entityIds (passed separately); this gate only authorizes + names the audit.
+ */
+async function resolvePhiSearch(
+  phiSearch: CmdReportFilter['phiSearch'],
+  view: DashboardView | undefined,
+  doAudit: boolean,
+): Promise<PhiSearchResult> {
+  const memberId = phiSearch?.memberId?.trim() ?? '';
+  const alphaPrefix = phiSearch?.alphaPrefix?.trim() ?? '';
+  const groupNumber = phiSearch?.groupNumber?.trim() ?? '';
+  if (memberId === '' && alphaPrefix === '' && groupNumber === '') return { ok: true };
+  if (memberId.length > 120 || alphaPrefix.length > 20 || groupNumber.length > 120) {
+    return { ok: false, error: 'Invalid search.' };
+  }
+  // GATE: only a signed-in, PHI-entitled role may search PHI (same gate as reveal).
+  const gate = await requirePhiPrincipal();
+  if (!gate.ok) return { ok: false, error: gate.error };
+  let tokens: PhiIndexTokens;
+  try {
+    tokens = {};
+    const m = memberId !== '' ? memberIdBlindIndex(memberId) : null;
+    const p = alphaPrefix !== '' ? alphaPrefixBlindIndex(alphaPrefix) : null;
+    const g = groupNumber !== '' ? groupNumberBlindIndex(groupNumber) : null;
+    if (m) tokens.memberIdBidx = m;
+    if (p) tokens.memberIdPrefixBidx = p;
+    if (g) tokens.groupNumberBidx = g;
+  } catch (e) {
+    // Missing/invalid INDEX_HMAC_KEY → PHI search unavailable (never leak the reason as PHI).
+    if (e instanceof BlindIndexError) return { ok: false, error: 'Search is temporarily unavailable.' };
+    throw e;
+  }
+  const fields = Object.keys(tokens);
+  if (fields.length === 0) return { ok: true }; // nothing usable (e.g. alpha prefix < 3 chars)
+  if (doAudit) {
+    await recordAccess({
+      actorEmail: gate.actor.email,
+      actorUserId: gate.actor.userId,
+      action: 'search_cmd_explorer_phi',
+      detail: { fields, view: view ?? null }, // field NAMES only — never the term/token
+    });
+  }
+  return { ok: true, phiIndex: tokens };
+}
+
 /**
  * Load ONE keyset page of the CMD Collections Explorer — NON-PHI columns only (cached 15 min
  * per cursor+filter+sort). `cursor` is the {id, value} of the previous page's last row
@@ -766,6 +835,7 @@ export async function loadCmdReport(
     searchColumns?: CmdExplorerSearchColumn[];
     cpt_code?: string;
     primary_payer?: string;
+    phiIndex?: PhiIndexTokens;
   } = {};
   if (typeof filter.facility === 'string' && filter.facility.trim() !== '') {
     if (filter.facility.length > 200) return { ok: false, error: 'Invalid facility.' };
@@ -774,6 +844,10 @@ export async function loadCmdReport(
   if (!applySearchFilter(filter, readerFilter)) {
     return { ok: false, error: 'Invalid search.' };
   }
+  // PHI search (gated + audited here — this is the actual row-returning PHI access).
+  const phi = await resolvePhiSearch(filter.phiSearch, view, true);
+  if (!phi.ok) return { ok: false, error: phi.error };
+  if (phi.phiIndex) readerFilter.phiIndex = phi.phiIndex;
   if (filter.year !== undefined || filter.month !== undefined) {
     const { year, month } = filter;
     if (
@@ -820,12 +894,18 @@ export async function loadCmdSearchSummary(
     searchColumns?: CmdExplorerSearchColumn[];
     cpt_code?: string;
     primary_payer?: string;
+    phiIndex?: PhiIndexTokens;
   } = {};
   if (typeof filter.facility === 'string' && filter.facility.trim() !== '') {
     if (filter.facility.length > 200) return { ok: false, error: 'Invalid facility.' };
     readerFilter.facility = filter.facility;
   }
   if (!applySearchFilter(filter, readerFilter)) return { ok: false, error: 'Invalid search.' };
+  // PHI search: gate (canRevealPhi) + resolve tokens; audit happens in loadCmdReport (the
+  // row-returning access) so a single search isn't double-logged by the summary + the grid.
+  const phi = await resolvePhiSearch(filter.phiSearch, view, false);
+  if (!phi.ok) return { ok: false, error: phi.error };
+  if (phi.phiIndex) readerFilter.phiIndex = phi.phiIndex;
   if (filter.year !== undefined || filter.month !== undefined) {
     const { year, month } = filter;
     if (

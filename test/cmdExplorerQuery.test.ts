@@ -126,6 +126,27 @@ test('search summary: totals + 3 group queries, tenant-scoped, group cols are li
   }
 });
 
+test('PHI blind-index tokens add ANDed equality predicates, all bound (raw PHI never here)', () => {
+  const filter: CmdExplorerFilter = {
+    phiIndex: { memberIdBidx: 'aa11', memberIdPrefixBidx: 'bb22', groupNumberBidx: 'cc33' },
+  };
+  const { sql, params } = buildCmdExplorerQuery(null, filter, SORT, 51, ENTITY);
+  assert.match(sql, /member_id_bidx = \$2/);
+  assert.match(sql, /member_id_prefix_bidx = \$3/);
+  assert.match(sql, /group_number_bidx = \$4/);
+  assert.deepEqual(params.slice(1, 4), ['aa11', 'bb22', 'cc33']);
+  assertAllBound(sql, params);
+});
+
+test('search summary carries the same PHI predicate, tenant-scoped', () => {
+  const { totals, groups } = buildCmdSearchSummaryQueries({ phiIndex: { memberIdBidx: 'aa11' } }, ENTITY);
+  assert.match(totals.sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
+  assert.match(totals.sql, /member_id_bidx = \$2/);
+  assertAllBound(totals.sql, totals.params);
+  assert.match(groups.facility.sql, /member_id_bidx = \$2/);
+  assertAllBound(groups.facility.sql, groups.facility.params);
+});
+
 test('resolveCmdExplorerSort clamps unknown columns to the default', () => {
   assert.deepEqual(resolveCmdExplorerSort({ column: 'ssn' as never, direction: 'asc' }), CMD_EXPLORER_DEFAULT_SORT);
   assert.deepEqual(resolveCmdExplorerSort(undefined), CMD_EXPLORER_DEFAULT_SORT);

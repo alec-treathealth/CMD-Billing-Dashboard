@@ -22,6 +22,7 @@ import {
   ArrowUpDown,
   Building2,
   CreditCard,
+  Fingerprint,
   GripVertical,
   Lock,
   Search,
@@ -152,6 +153,17 @@ export function CmdCollectionsExplorer({
   const [year, setYear] = useState(YEAR_OPTIONS[0]!);
   const [month, setMonth] = useState(0); // 0 = All months
 
+  // Searchable PHI (gated to canRevealPhi + audited server-side). These are matched via keyed
+  // blind indexes (exact member ID / 3-char alpha prefix / exact group #) — the raw value is
+  // HMAC'd server-side, never substring-matched, and results keep the name masked.
+  const [phiMemberId, setPhiMemberId] = useState('');
+  const [phiAlphaPrefix, setPhiAlphaPrefix] = useState('');
+  const [phiGroup, setPhiGroup] = useState('');
+  const dMember = useDebouncedValue(phiMemberId, 350).trim();
+  const dAlpha = useDebouncedValue(phiAlphaPrefix, 350).trim();
+  const dGroup = useDebouncedValue(phiGroup, 350).trim();
+  const hasPhiSearch = canRevealPhi && (dMember !== '' || dAlpha !== '' || dGroup !== '');
+
   const [summary, setSummary] = useState<SummaryState>({ kind: 'idle' });
 
   // A facility/payer refinement is tenant-specific; a term is generic. Reset the refinement when
@@ -186,10 +198,13 @@ export function CmdCollectionsExplorer({
   const gridRef = useRef<HTMLDivElement>(null);
 
   const hasSearch = term.trim() !== '' && searchCols.length > 0;
+  const hasAnySearch = hasSearch || hasPhiSearch;
   // Stable dep key for the column set (array identity changes on every toggle otherwise).
   const searchColsKey = searchCols.join(',');
 
-  // The filter passed to the grid action: window + (debounced) substring + chip refinement.
+  // The filter passed to the grid action: window + (debounced) substring + chip refinement +
+  // gated PHI lookup. PHI terms are sent raw ONLY to the server action, which HMACs them into
+  // blind-index tokens, gates to canRevealPhi, and audits — never matched client-side.
   const filterArg = useMemo(() => {
     const f: {
       year?: number;
@@ -199,6 +214,7 @@ export function CmdCollectionsExplorer({
       facility?: string;
       primary_payer?: string;
       cpt_code?: string;
+      phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
     } = {};
     if (month > 0) {
       f.year = year;
@@ -209,10 +225,17 @@ export function CmdCollectionsExplorer({
       f.searchColumns = searchCols;
     }
     if (refinement) f[refinement.kind] = refinement.value;
+    if (hasPhiSearch) {
+      f.phiSearch = {
+        ...(dMember !== '' ? { memberId: dMember } : {}),
+        ...(dAlpha !== '' ? { alphaPrefix: dAlpha } : {}),
+        ...(dGroup !== '' ? { groupNumber: dGroup } : {}),
+      };
+    }
     return f;
     // year only matters when a specific month is chosen (see original rationale).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [term, searchColsKey, hasSearch, month, month > 0 ? year : 0, refinement]);
+  }, [term, searchColsKey, hasSearch, month, month > 0 ? year : 0, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
 
   const loadPage = useCallback(
     async (
@@ -261,19 +284,33 @@ export function CmdCollectionsExplorer({
   // Skipped entirely when there's no active search. The summary reflects the SEARCH level (term +
   // window), NOT the chip refinement — so the chips stay a stable facet navigator while drilling.
   useEffect(() => {
-    if (!hasSearch) {
+    if (!hasAnySearch) {
       setSummary({ kind: 'idle' });
       return;
     }
     let live = true;
     setSummary({ kind: 'loading' });
-    const f: { q: string; searchColumns: string[]; year?: number; month?: number } = {
-      q: term.trim(),
-      searchColumns: searchCols,
-    };
+    const f: {
+      q?: string;
+      searchColumns?: string[];
+      year?: number;
+      month?: number;
+      phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
+    } = {};
+    if (hasSearch) {
+      f.q = term.trim();
+      f.searchColumns = searchCols;
+    }
     if (month > 0) {
       f.year = year;
       f.month = month;
+    }
+    if (hasPhiSearch) {
+      f.phiSearch = {
+        ...(dMember !== '' ? { memberId: dMember } : {}),
+        ...(dAlpha !== '' ? { alphaPrefix: dAlpha } : {}),
+        ...(dGroup !== '' ? { groupNumber: dGroup } : {}),
+      };
     }
     loadCmdSearchSummary(f, view)
       .then((r) => {
@@ -287,7 +324,7 @@ export function CmdCollectionsExplorer({
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [term, searchColsKey, hasSearch, month, month > 0 ? year : 0, view]);
+  }, [term, searchColsKey, hasSearch, hasPhiSearch, dMember, dAlpha, dGroup, month, month > 0 ? year : 0, view]);
 
   const busy = status === 'loading';
 
@@ -424,11 +461,31 @@ export function CmdCollectionsExplorer({
           </ControlSelect>
         </div>
 
+        {/* Gated patient lookup — only for PHI-entitled roles. Matched via keyed blind indexes
+            server-side (exact member ID / 3-char alpha prefix / exact group #), audited, results
+            masked. The raw value is never substring-matched and never revealed by the search. */}
+        {canRevealPhi && (
+          <div className="mt-3 rounded-lg border border-line bg-surface p-3">
+            <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <Fingerprint className="h-3.5 w-3.5 text-[var(--brand-ink)]" aria-hidden />
+              Patient lookup
+              <span className="inline-flex items-center gap-1 font-normal normal-case text-ink400">
+                <Lock className="h-3 w-3" aria-hidden /> encrypted · exact match · audited
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <PhiField label="Member ID" value={phiMemberId} onChange={setPhiMemberId} placeholder="exact member ID" width="w-48" />
+              <PhiField label="Alpha prefix" value={phiAlphaPrefix} onChange={setPhiAlphaPrefix} placeholder="3-letter" width="w-28" maxLength={3} />
+              <PhiField label="Group #" value={phiGroup} onChange={setPhiGroup} placeholder="exact group #" width="w-40" />
+            </div>
+          </div>
+        )}
+
         {/* Active-scope line + active refinement pill. */}
         <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span>
-            {hasSearch
-              ? `Searching ${searchCols.length} column${searchCols.length === 1 ? '' : 's'} · ${monthLabel}`
+            {hasAnySearch
+              ? `${hasSearch ? `Searching ${searchCols.length} column${searchCols.length === 1 ? '' : 's'}` : 'Patient lookup'} · ${monthLabel}`
               : `Browsing ${monthLabel} — type to search`}
           </span>
           {refinement && (
@@ -445,10 +502,10 @@ export function CmdCollectionsExplorer({
       </div>
 
       {/* ---- Search summary (search-engine result) ------------------------ */}
-      {hasSearch && (
+      {hasAnySearch && (
         <SearchSummaryPanel
           state={summary}
-          term={term.trim()}
+          label={hasSearch ? `“${term.trim()}”` : 'your search'}
           refinement={refinement}
           onDrill={applyRefinement}
         />
@@ -458,7 +515,7 @@ export function CmdCollectionsExplorer({
       <div ref={gridRef} className="space-y-3">
         <div className="flex items-center justify-between gap-3">
           <p className="text-sm text-muted-foreground">
-            {hasSearch ? 'Matching charge lines' : 'Charge lines'} · {rows.length.toLocaleString()} on this page
+            {hasAnySearch ? 'Matching charge lines' : 'Charge lines'} · {rows.length.toLocaleString()} on this page
           </p>
           {rows.length > 0 && canRevealPhi && (
             <Button
@@ -491,7 +548,7 @@ export function CmdCollectionsExplorer({
           <p className="text-sm text-muted-foreground">Loading collections…</p>
         ) : rows.length === 0 ? (
           <div className="py-8 text-center text-sm text-muted-foreground">
-            {hasSearch ? 'No charge lines match this search.' : 'No charge lines match the current filters.'}
+            {hasAnySearch ? 'No charge lines match this search.' : 'No charge lines match the current filters.'}
           </div>
         ) : (
           <div className="overflow-x-auto rounded-md border">
@@ -761,15 +818,49 @@ function DrillList({
   );
 }
 
+/** One gated PHI lookup input (member id / alpha prefix / group #). */
+function PhiField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  width,
+  maxLength = 120,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder: string;
+  width: string;
+  maxLength?: number;
+}) {
+  return (
+    <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+      <span className="whitespace-nowrap">{label}</span>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        aria-label={label}
+        maxLength={maxLength}
+        autoComplete="off"
+        spellCheck={false}
+        className={`${width} h-8 rounded-md border border-line bg-card px-2 text-sm text-ink900 outline-none transition-colors placeholder:text-ink400 focus:border-[var(--brand-accent)] focus:ring-2 focus:ring-[var(--brand-accent)]/25`}
+      />
+    </label>
+  );
+}
+
 /** The search-engine result: headline count + money totals, then the three drill-down lists. */
 function SearchSummaryPanel({
   state,
-  term,
+  label,
   refinement,
   onDrill,
 }: {
   state: SummaryState;
-  term: string;
+  label: string;
   refinement: Refinement | null;
   onDrill: (kind: RefineKind, value: string) => void;
 }) {
@@ -793,7 +884,7 @@ function SearchSummaryPanel({
   if (s.total_count === 0) {
     return (
       <div className="rounded-xl border border-line bg-card p-6 text-center text-sm text-muted-foreground shadow-ths">
-        No charge lines match “{term}”. Try a different term or add columns to search.
+        No charge lines match {label}. Try a different term or add columns to search.
       </div>
     );
   }
@@ -803,7 +894,7 @@ function SearchSummaryPanel({
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="text-sm font-semibold text-ink900">
           <span className="tabular-nums">{s.total_count.toLocaleString()}</span> charge line
-          {s.total_count === 1 ? '' : 's'} match “{term}”
+          {s.total_count === 1 ? '' : 's'} match {label}
         </h3>
         <span className="text-xs text-muted-foreground">Click a facility, payer, or CPT to drill in.</span>
       </div>

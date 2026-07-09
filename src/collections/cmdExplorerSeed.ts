@@ -37,6 +37,7 @@ import { parseReportCsv } from './cmdPayer.js';
 import { normalizeDate, normalizeMoney, type Coerced } from './normalize.js';
 import { normalizeMemberId } from '../queries/identity.js';
 import { encryptPhi, fingerprintRow } from './phiCrypto.js';
+import { blindIndexesForRowSafe } from './blindIndex.js';
 import { makeClient } from './db.js';
 import { withTenant } from '../veris/withTenant.js';
 import { BXR_ENTITY_ID } from '../tenants.js';
@@ -87,6 +88,11 @@ const INSERT_COLS = [
   'patient_name', 'member_id', 'group_number', 'charge_amount', 'allowed_amount',
   'insurance_payments', 'adjustments', 'patient_balance_due', 'primary_payer',
   'source_file', 'row_fingerprint', 'business_entity_id',
+  // Searchable PHI blind indexes (migration 0036) — keyed HMAC of the normalized member id /
+  // alpha prefix / group number, computed from plaintext here (before it's encrypted). Never
+  // the plaintext; safe to store + index. Absent when INDEX_HMAC_KEY is unset (search degrades
+  // gracefully — see blindIndex.ts) or the source value is blank.
+  'member_id_bidx', 'member_id_prefix_bidx', 'group_number_bidx',
 ] as const;
 
 const BATCH = 500;
@@ -296,11 +302,15 @@ async function buildInsertParams(row: PlainRow, businessEntityId: string): Promi
     encryptPhi(row.member_id),
     row.group_number === null ? Promise.resolve(null) : encryptPhi(row.group_number),
   ]);
+  // Blind indexes from PLAINTEXT (before it's discarded); safe variant so a missing search key
+  // never breaks ingest (see blindIndex.ts). Same INSERT_COLS order.
+  const bidx = blindIndexesForRowSafe(row.member_id, row.group_number);
   return [
     row.charge_date, row.payment_received, row.cpt_code, row.revenue_code, row.facility,
     patient, member, group, row.charge_amount, row.allowed_amount,
     row.insurance_payments, row.adjustments, row.patient_balance_due, row.primary_payer,
     row.source_file, row.row_fingerprint, businessEntityId,
+    bidx.member_id_bidx, bidx.member_id_prefix_bidx, bidx.group_number_bidx,
   ];
 }
 

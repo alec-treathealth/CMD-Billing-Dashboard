@@ -51,6 +51,18 @@ export interface CmdExplorerFilter {
   to?: string | null; // 'YYYY-MM-DD' exclusive (payment_received < to)
   q?: string | null; // substring term (matched literally; LIKE metachars escaped)
   searchColumns?: CmdExplorerSearchColumn[]; // which NON-PHI columns `q` searches
+  /**
+   * Searchable-PHI blind-index tokens (migration 0036) — ALREADY keyed-HMAC'd by the caller
+   * (see blindIndex.ts). The RAW PHI never reaches this pure module: only the one-way token
+   * does, and it's matched by equality. Each present token ANDs an equality predicate (an
+   * identifier lookup narrows the result set). The action layer gates this to PHI-entitled
+   * users + audits it; here it's just opaque tokens.
+   */
+  phiIndex?: {
+    memberIdBidx?: string | null;
+    memberIdPrefixBidx?: string | null;
+    groupNumberBidx?: string | null;
+  };
 }
 
 /** A `$n` parameter emitter: pushes a bound value and returns its placeholder. */
@@ -90,6 +102,11 @@ export function cmdExplorerBaseConds(
     const ors = cols.map((c) => `${CMD_EXPLORER_SEARCH_COLUMNS[c]}::text ilike ${p}`);
     conds.push(`(${ors.join(' or ')})`);
   }
+  // Searchable-PHI blind-index equality (opaque keyed-HMAC tokens; raw PHI never gets here).
+  const phi = filter.phiIndex;
+  if (phi?.memberIdBidx) conds.push(`member_id_bidx = ${add(phi.memberIdBidx)}`);
+  if (phi?.memberIdPrefixBidx) conds.push(`member_id_prefix_bidx = ${add(phi.memberIdPrefixBidx)}`);
+  if (phi?.groupNumberBidx) conds.push(`group_number_bidx = ${add(phi.groupNumberBidx)}`);
   return conds;
 }
 
