@@ -26,7 +26,8 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { makeClient } from './db.js';
+import pg from 'pg';
+import { sanitizeConnectionString, verifyFullSsl } from '../ssl.js';
 import { decryptPhi } from './phiCrypto.js';
 import { blindIndexesForRow } from './blindIndex.js';
 
@@ -61,19 +62,55 @@ function loadDotEnvIfPresent(): void {
   }
 }
 
+/**
+ * Build the backfill pool. Two ways to supply the password, so a password with URI-special
+ * characters (@ : / etc.) never needs URL-encoding:
+ *   - BLIND_INDEX_PGPASSWORD set → take host/port/user/db from BLIND_INDEX_DB_URL (paste it
+ *     WITHOUT the password, e.g. postgresql://postgres@host:5432/postgres) and use this RAW
+ *     password verbatim; or
+ *   - otherwise → BLIND_INDEX_DB_URL is a complete connection string (password URL-encoded).
+ */
+/** Direct-connection host derived from SUPABASE_URL (https://<ref>.supabase.co → db.<ref>.supabase.co). */
+function supabaseDbHost(): string | undefined {
+  const u = process.env.SUPABASE_URL?.trim();
+  if (!u) return undefined;
+  const host = u.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  return host ? `db.${host}` : undefined;
+}
+
+function buildPool(): pg.Pool {
+  const opts = { ssl: verifyFullSsl(), max: 4, application_name: 'blind-index-backfill' } as const;
+  const rawPw = process.env.BLIND_INDEX_PGPASSWORD;
+  if (rawPw) {
+    // RAW-password path (no URI encoding). Target the OWNER directly: user 'postgres', db
+    // 'postgres', host from BLIND_INDEX_PGHOST → the URL → SUPABASE_URL. NEVER falls back to a
+    // least-priv role URL (that would pair the owner password with the wrong user → auth fail).
+    const host =
+      process.env.BLIND_INDEX_PGHOST?.trim() ||
+      (process.env.BLIND_INDEX_DB_URL ? new URL(process.env.BLIND_INDEX_DB_URL).hostname : undefined) ||
+      supabaseDbHost();
+    if (!host) throw new Error('cannot resolve DB host (set BLIND_INDEX_PGHOST or SUPABASE_URL)');
+    return new pg.Pool({
+      host,
+      port: Number(process.env.BLIND_INDEX_PGPORT ?? 5432),
+      user: process.env.BLIND_INDEX_PGUSER?.trim() || 'postgres',
+      password: rawPw,
+      database: process.env.BLIND_INDEX_PGDATABASE?.trim() || 'postgres',
+      ...opts,
+    });
+  }
+  const url = (process.env.BLIND_INDEX_DB_URL ?? process.env.CLAIMS_READER_DATABASE_URL ?? process.env.DATABASE_URL)?.trim();
+  if (!url) throw new Error('BLIND_INDEX_DB_URL or BLIND_INDEX_PGPASSWORD must be set (never log it)');
+  return new pg.Pool({ connectionString: sanitizeConnectionString(url), ...opts });
+}
+
 async function main(): Promise<void> {
   loadDotEnvIfPresent();
   const commit = process.argv.includes('--commit');
-  const url = (
-    process.env.BLIND_INDEX_DB_URL ??
-    process.env.CLAIMS_READER_DATABASE_URL ??
-    process.env.DATABASE_URL
-  )?.trim();
-  if (!url) throw new Error('BLIND_INDEX_DB_URL / CLAIMS_READER_DATABASE_URL must be set (never log it)');
   if (!process.env.LIBSODIUM_KEY) throw new Error('LIBSODIUM_KEY must be set (to decrypt existing PHI)');
   if (!process.env.INDEX_HMAC_KEY) throw new Error('INDEX_HMAC_KEY must be set (to compute blind indexes)');
 
-  const db = makeClient(url);
+  const db = buildPool();
   try {
     const who = await db.query<{ current_user: string; bypass: boolean }>(
       'select current_user, (select rolbypassrls from pg_roles where rolname = current_user) as bypass',
