@@ -36,15 +36,18 @@ export const CMD_EXPLORER_SEARCH_COLUMNS = {
 export type CmdExplorerSearchColumn = keyof typeof CMD_EXPLORER_SEARCH_COLUMNS;
 
 /**
- * Server-side filters for the explorer grid (non-PHI). `facility` / `cpt_code` / `primary_payer`
- * are EXACT matches (used by the smart-search drill-down chips); `facility`'s vocabulary comes
- * from cmdExplorerFacilities, NOT the canonical facility dimension. `from`/`to` window
- * payment_received ([from, to)). `q` + `searchColumns` are the free-text substring search: `q`
- * is matched as a literal substring (ILIKE) against EACH allowlisted column in `searchColumns`,
- * OR'd together. All values are bound parameters; nulls/empties are no-ops.
+ * Server-side filters for the explorer grid (non-PHI). `facility` is a MULTI-select set membership
+ * (`facility = any(...)`) — the facility multi-select dropdown AND a single-facility drill-down chip
+ * both feed it (the chip as a one-element array); its vocabulary comes from buildCmdFacilityOptionsQuery,
+ * NOT the canonical facility dimension. An EMPTY array means "no facility restriction" (all facilities),
+ * NOT "match nothing" — the condition is omitted entirely. `cpt_code` / `primary_payer` are EXACT
+ * matches (drill-down chips). `from`/`to` window payment_received ([from, to)). `q` + `searchColumns`
+ * are the free-text substring search: `q` is matched as a literal substring (ILIKE) against EACH
+ * allowlisted column in `searchColumns`, OR'd together. All values are bound parameters; nulls/empties
+ * are no-ops.
  */
 export interface CmdExplorerFilter {
-  facility?: string | null;
+  facility?: string[] | null;
   cpt_code?: string | null;
   primary_payer?: string | null;
   from?: string | null; // 'YYYY-MM-DD' inclusive (payment_received >= from)
@@ -88,7 +91,12 @@ export function cmdExplorerBaseConds(
   const conds: string[] = [];
   // Tenant scope FIRST — server-derived entitled entity ids, applied to every read.
   conds.push(`business_entity_id = any(${add(entityIds)}::uuid[])`);
-  if (filter.facility) conds.push(`facility = ${add(filter.facility)}`);
+  // Facility set-membership. A NON-EMPTY array narrows to those facilities; an EMPTY array (or
+  // null/undefined) is NO restriction — the condition is omitted so the result set is ALL
+  // facilities, never zero rows. (Emitting `= any(ARRAY[]::text[])` on empty would match nothing.)
+  if (Array.isArray(filter.facility) && filter.facility.length > 0) {
+    conds.push(`facility = any(${add(filter.facility)}::text[])`);
+  }
   if (filter.cpt_code) conds.push(`cpt_code = ${add(filter.cpt_code)}`);
   if (filter.primary_payer) conds.push(`primary_payer = ${add(filter.primary_payer)}`);
   if (filter.from) conds.push(`payment_received >= ${add(filter.from)}::date`);
@@ -110,13 +118,52 @@ export function cmdExplorerBaseConds(
   return conds;
 }
 
+// --- facility options (multi-select dropdown) -------------------------------
+
+/**
+ * One facility choice for the multi-select dropdown. `facility` is the EXACT filterable value
+ * (what the grid/summary match on — the CMD report's own facility text). `facility_name` is the
+ * friendlier dimension name when it resolves, else null (falls back to `facility` in the UI).
+ * `care_setting` powers the "select all IP/OP" group affordance; null = Unclassified/Other (the
+ * facility isn't in collections.facilities, or its CMD text doesn't match the dimension name —
+ * this is expected for a chunk of BXR facilities whose export text carries a trailing " LLC").
+ */
+export interface CmdFacilityOption {
+  facility: string;
+  facility_name: string | null;
+  care_setting: 'IP' | 'OP' | 'BOTH' | null;
+}
+
+/**
+ * Build the tenant-scoped facility-options query for the dropdown. The DISTINCT facility list is
+ * taken STRICTLY from cmd_explorer_rows scoped to the caller's entitled entityIds (a BXR user never
+ * sees an Indigo-only facility string), then LEFT JOINed to the non-PHI facility dimension purely
+ * to enrich name + care_setting. The dimension has no business_entity_id, so it is NOT (and cannot
+ * be) tenant-filtered — but since we only ever surface facility STRINGS that already passed the
+ * tenant scope, no other tenant's facility leaks into the list; the join only attaches IP/OP labels.
+ * `max()` collapses the rare case of two dimension rows sharing an upper(facility_name). Non-PHI;
+ * every value bound ($1 = entityIds), every identifier a fixed literal.
+ */
+export function buildCmdFacilityOptionsQuery(entityIds: string[]): { sql: string; params: unknown[] } {
+  const params: unknown[] = [entityIds];
+  const sql =
+    'select r.facility, max(f.facility_name) as facility_name, max(f.care_setting) as care_setting ' +
+    'from (select distinct facility from collections.cmd_explorer_rows ' +
+    "where business_entity_id = any($1::uuid[]) and facility is not null and btrim(facility) <> '') r " +
+    'left join collections.facilities f on upper(f.facility_name) = upper(r.facility) ' +
+    'group by r.facility order by r.facility';
+  return { sql, params };
+}
+
 // --- sort + cursor ----------------------------------------------------------
 
 /**
  * Columns the explorer grid may sort by — a CLOSED allowlist of fixed SQL literals (the two
- * dates + the five money columns). Anything else falls back to the default sort. These are the
- * raw cmd_explorer_rows columns (dates sort chronologically, money numerically), which is why
- * ORDER BY uses them directly rather than the to_char text aliases in the SELECT.
+ * dates + the five money columns + the two payer-gap ratio columns). Anything else falls back to
+ * the default sort. These are the raw cmd_explorer_rows columns (dates sort chronologically, money
+ * + ratios numerically), which is why ORDER BY uses them directly rather than the to_char text
+ * aliases in the SELECT. pct_allowed / pct_paid are GENERATED STORED numerics (migration 0038), so
+ * they sort and keyset-cursor exactly like charge_amount — no pagination-strategy change.
  */
 export const CMD_EXPLORER_SORTABLE_COLUMNS = [
   'payment_received',
@@ -126,6 +173,8 @@ export const CMD_EXPLORER_SORTABLE_COLUMNS = [
   'insurance_payments',
   'adjustments',
   'patient_balance_due',
+  'pct_allowed',
+  'pct_paid',
 ] as const;
 export type CmdExplorerSortColumn = (typeof CMD_EXPLORER_SORTABLE_COLUMNS)[number];
 const CMD_EXPLORER_SORTABLE = new Set<string>(CMD_EXPLORER_SORTABLE_COLUMNS);
@@ -186,12 +235,14 @@ export interface CmdExplorerPage {
 
 // Explicit non-PHI column list — the bytea PHI columns are NEVER selected here. Dates and
 // ingested_at are cast to text so the row shape is stable strings (not pg Date objects);
-// numeric money stays a fixed-2-decimal string. id (bigserial) is the keyset + reveal key.
+// numeric money stays a fixed-2-decimal string. pct_allowed / pct_paid are the GENERATED STORED
+// payer-gap ratios (migration 0038) — non-PHI numerics that arrive as decimal strings (or null),
+// formatted as percentages client-side. id (bigserial) is the keyset + reveal key.
 export const CMD_EXPLORER_SELECT =
   "select id, to_char(charge_date, 'YYYY-MM-DD') as charge_date, " +
   "to_char(payment_received, 'YYYY-MM-DD') as payment_received, cpt_code, revenue_code, " +
   'facility, charge_amount, allowed_amount, insurance_payments, adjustments, ' +
-  'patient_balance_due, primary_payer, ' +
+  'patient_balance_due, primary_payer, pct_allowed, pct_paid, ' +
   `to_char(ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
   'from collections.cmd_explorer_rows';
 

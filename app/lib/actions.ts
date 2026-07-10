@@ -51,6 +51,7 @@ import {
   type CmdExplorerSearchColumn,
   type CmdSearchSummary,
   type CmdSearchGroup,
+  type CmdFacilityOption,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
 import { dashboardAccess } from '@/lib/access';
@@ -186,6 +187,7 @@ export type {
   FacilityDimensionRow,
   CmdSearchSummary,
   CmdSearchGroup,
+  CmdFacilityOption,
 };
 
 export type AgentActionResult =
@@ -686,15 +688,18 @@ export type CmdReportResult =
   | { ok: false; error: string };
 
 /**
- * Filters for the "All Collections" grid (non-PHI). `facility` is an exact match on the
- * explorer's own facility vocabulary (see loadCmdExplorerFacilities). `year`/`month`
- * window payment_received to that calendar month. All values are re-validated here and
- * bound as parameters in the reader.
+ * Filters for the "All Collections" grid (non-PHI). `facility` is a SET of facilities from the
+ * explorer's own facility vocabulary (see loadCmdExplorerFacilities) — the multi-select dropdown
+ * and a single-facility drill-down chip both feed it; an empty/absent array means "all facilities".
+ * `year`/`month` window payment_received to that calendar month; `recencyDays` (7/14/30) is a
+ * mutually-exclusive rolling window ending today, computed from the SERVER clock. All values are
+ * re-validated here and bound as parameters in the reader.
  */
 export interface CmdReportFilter {
-  facility?: string;
+  facility?: string[];
   year?: number;
   month?: number; // 1-12; requires year
+  recencyDays?: number; // 7 | 14 | 30 — rolling window (server clock); overrides year/month
   /** Smart-search substring term (matched literally, ILIKE) across `searchColumns`. */
   q?: string;
   /** Which NON-PHI columns `q` searches (allowlisted server-side; PHI columns are rejected). */
@@ -724,7 +729,7 @@ const CMD_SEARCH_TERM_MAX = 120;
  */
 function applySearchFilter(
   filter: CmdReportFilter,
-  readerFilter: { facility?: string; from?: string; to?: string; q?: string; searchColumns?: CmdExplorerSearchColumn[]; cpt_code?: string; primary_payer?: string },
+  readerFilter: { facility?: string[]; from?: string; to?: string; q?: string; searchColumns?: CmdExplorerSearchColumn[]; cpt_code?: string; primary_payer?: string },
 ): boolean {
   if (typeof filter.cpt_code === 'string' && filter.cpt_code.trim() !== '') {
     if (filter.cpt_code.length > 100) return false;
@@ -747,6 +752,66 @@ function applySearchFilter(
       readerFilter.q = term;
       readerFilter.searchColumns = cols;
     }
+  }
+  return true;
+}
+
+/** Max facilities acceptable in one multi-select (bounded input — both tenants have < 40 today). */
+const CMD_FACILITY_SET_MAX = 200;
+/** Max length of a single facility string (matches the exact-match bound used elsewhere). */
+const CMD_FACILITY_NAME_MAX = 200;
+/** Rolling recency windows offered by the quick-filter chips (server-computed; closed allowlist). */
+const CMD_RECENCY_DAYS = new Set([7, 14, 30]);
+
+/**
+ * Validate + copy the facility multi-select into the reader filter. An empty/absent array is a
+ * no-op (means "all facilities" — the reader omits the condition), NOT a match-nothing filter.
+ * Bounds the set size and each element's length. Returns false on a hard rejection.
+ */
+function applyFacilityFilter(filter: CmdReportFilter, readerFilter: { facility?: string[] }): boolean {
+  if (!Array.isArray(filter.facility) || filter.facility.length === 0) return true;
+  const facilities = filter.facility;
+  if (facilities.length > CMD_FACILITY_SET_MAX) return false;
+  for (const f of facilities) {
+    if (typeof f !== 'string' || f.length === 0 || f.length > CMD_FACILITY_NAME_MAX) return false;
+  }
+  readerFilter.facility = facilities;
+  return true;
+}
+
+/**
+ * Resolve the payment_received window into the reader's `from`/`to` (ISO 'YYYY-MM-DD'). A
+ * `recencyDays` chip (7/14/30) takes precedence and is computed from the SERVER clock — the client
+ * never supplies the date, so the window can't be spoofed — as an open-ended "on or after
+ * today − N days" (future-dated rows are already dropped at ingest). Otherwise a year+month selects
+ * that calendar month ([from, to) exclusive upper). Returns false on invalid input. `today` is
+ * injectable for determinism. Consolidates the month logic that the grid + summary loaders shared.
+ */
+function applyDateWindow(
+  filter: CmdReportFilter,
+  readerFilter: { from?: string; to?: string },
+  today: Date = new Date(),
+): boolean {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  if (filter.recencyDays !== undefined) {
+    if (!CMD_RECENCY_DAYS.has(filter.recencyDays)) return false;
+    const from = new Date(today);
+    from.setUTCDate(from.getUTCDate() - filter.recencyDays);
+    readerFilter.from = `${from.getUTCFullYear()}-${pad(from.getUTCMonth() + 1)}-${pad(from.getUTCDate())}`;
+    return true;
+  }
+  if (filter.year !== undefined || filter.month !== undefined) {
+    const { year, month } = filter;
+    if (
+      !Number.isInteger(year) || year! < 2000 || year! > 2100 ||
+      !Number.isInteger(month) || month! < 1 || month! > 12
+    ) {
+      return false;
+    }
+    const nextYear = month === 12 ? year! + 1 : year!;
+    const nextMonth = month === 12 ? 1 : month! + 1;
+    readerFilter.from = `${year}-${pad(month!)}-01`;
+    readerFilter.to = `${nextYear}-${pad(nextMonth)}-01`; // exclusive upper bound
   }
   return true;
 }
@@ -828,7 +893,7 @@ export async function loadCmdReport(
   const safeSort = resolveCmdExplorerSort(sort);
   // Re-validate + translate the filter into bounded date/string params for the reader.
   const readerFilter: {
-    facility?: string;
+    facility?: string[];
     from?: string;
     to?: string;
     q?: string;
@@ -837,31 +902,15 @@ export async function loadCmdReport(
     primary_payer?: string;
     phiIndex?: PhiIndexTokens;
   } = {};
-  if (typeof filter.facility === 'string' && filter.facility.trim() !== '') {
-    if (filter.facility.length > 200) return { ok: false, error: 'Invalid facility.' };
-    readerFilter.facility = filter.facility;
-  }
+  if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
   if (!applySearchFilter(filter, readerFilter)) {
     return { ok: false, error: 'Invalid search.' };
   }
+  if (!applyDateWindow(filter, readerFilter)) return { ok: false, error: 'Invalid date window.' };
   // PHI search (gated + audited here — this is the actual row-returning PHI access).
   const phi = await resolvePhiSearch(filter.phiSearch, view, true);
   if (!phi.ok) return { ok: false, error: phi.error };
   if (phi.phiIndex) readerFilter.phiIndex = phi.phiIndex;
-  if (filter.year !== undefined || filter.month !== undefined) {
-    const { year, month } = filter;
-    if (
-      !Number.isInteger(year) || year! < 2000 || year! > 2100 ||
-      !Number.isInteger(month) || month! < 1 || month! > 12
-    ) {
-      return { ok: false, error: 'Invalid month.' };
-    }
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const nextYear = month === 12 ? year! + 1 : year!;
-    const nextMonth = month === 12 ? 1 : month! + 1;
-    readerFilter.from = `${year}-${pad(month!)}-01`;
-    readerFilter.to = `${nextYear}-${pad(nextMonth)}-01`; // exclusive upper bound
-  }
   try {
     const page = await loadCmdExplorerNonPhi(safeCursor, readerFilter, safeSort, entityIds);
     return { ok: true, rows: page.rows, nextCursor: page.nextCursor };
@@ -887,7 +936,7 @@ export async function loadCmdSearchSummary(
   const entityIds = await viewEntityScope(view);
   if (entityIds === null) return { ok: false, error: 'The search could not be run right now.' };
   const readerFilter: {
-    facility?: string;
+    facility?: string[];
     from?: string;
     to?: string;
     q?: string;
@@ -896,30 +945,14 @@ export async function loadCmdSearchSummary(
     primary_payer?: string;
     phiIndex?: PhiIndexTokens;
   } = {};
-  if (typeof filter.facility === 'string' && filter.facility.trim() !== '') {
-    if (filter.facility.length > 200) return { ok: false, error: 'Invalid facility.' };
-    readerFilter.facility = filter.facility;
-  }
+  if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
   if (!applySearchFilter(filter, readerFilter)) return { ok: false, error: 'Invalid search.' };
+  if (!applyDateWindow(filter, readerFilter)) return { ok: false, error: 'Invalid date window.' };
   // PHI search: gate (canRevealPhi) + resolve tokens; audit happens in loadCmdReport (the
   // row-returning access) so a single search isn't double-logged by the summary + the grid.
   const phi = await resolvePhiSearch(filter.phiSearch, view, false);
   if (!phi.ok) return { ok: false, error: phi.error };
   if (phi.phiIndex) readerFilter.phiIndex = phi.phiIndex;
-  if (filter.year !== undefined || filter.month !== undefined) {
-    const { year, month } = filter;
-    if (
-      !Number.isInteger(year) || year! < 2000 || year! > 2100 ||
-      !Number.isInteger(month) || month! < 1 || month! > 12
-    ) {
-      return { ok: false, error: 'Invalid month.' };
-    }
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const nextYear = month === 12 ? year! + 1 : year!;
-    const nextMonth = month === 12 ? 1 : month! + 1;
-    readerFilter.from = `${year}-${pad(month!)}-01`;
-    readerFilter.to = `${nextYear}-${pad(nextMonth)}-01`;
-  }
   try {
     return { ok: true, summary: await loadCmdSearchSummary_(readerFilter, entityIds) };
   } catch {
@@ -927,12 +960,14 @@ export async function loadCmdSearchSummary(
   }
 }
 
-export type CmdFacilitiesResult = { ok: true; facilities: string[] } | { ok: false };
+export type CmdFacilitiesResult = { ok: true; facilities: CmdFacilityOption[] } | { ok: false };
 
 /**
- * Distinct facility values present in the explorer rows (non-PHI), for the All Collections
- * facility filter. Scoped to the RBAC-clamped `view`'s entity ids (server-derived), so the filter
- * lists only facilities the caller may see. Cached reader-only; never returns PHI.
+ * Facility options for the explorer's multi-select filter (non-PHI): the exact filterable facility
+ * strings present in the caller's tenant, each enriched with a friendly name + care_setting (IP/OP/
+ * BOTH, or null = Unclassified) for the dropdown's group affordances. Scoped to the RBAC-clamped
+ * `view`'s entity ids (server-derived), so it lists only facilities the caller may see. Cached
+ * reader-only; never returns PHI.
  */
 export async function loadCmdExplorerFacilities(view?: DashboardView): Promise<CmdFacilitiesResult> {
   const entityIds = await viewEntityScope(view);

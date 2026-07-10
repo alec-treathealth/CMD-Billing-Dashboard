@@ -27,6 +27,7 @@ import { makeReaderPool, PgExecutor, readerConnectionStringFromEnv } from '../..
 import {
   buildCmdExplorerQuery,
   buildCmdSearchSummaryQueries,
+  buildCmdFacilityOptionsQuery,
   cmdExplorerSortValue,
   CMD_EXPLORER_PAGE_SIZE,
   type CmdExplorerFilter,
@@ -35,6 +36,7 @@ import {
   type CmdExplorerPage,
   type CmdSearchSummary,
   type CmdSearchGroup,
+  type CmdFacilityOption,
 } from '../../src/collections/cmdExplorerQuery.js';
 export {
   CMD_EXPLORER_SEARCH_COLUMNS,
@@ -54,6 +56,7 @@ export type {
   CmdExplorerPage,
   CmdSearchGroup,
   CmdSearchSummary,
+  CmdFacilityOption,
 } from '../../src/collections/cmdExplorerQuery.js';
 import type {
   ClaimFilter,
@@ -856,22 +859,30 @@ export const loadCmdSearchSummary = unstable_cache(
 );
 
 /**
- * Distinct facility strings present in the explorer rows (non-PHI), for the "All Collections"
- * facility filter. This vocabulary is the CMD report's own facility text — it does NOT match
- * the canonical facility dimension, so the All Collections filter uses these values directly.
- * Reader-only, no SELECT *; scoped to the caller's entitled `entityIds` (bound param, part of
- * the cache key), cached + tag-busted like the grid.
+ * Facility options for the explorer's multi-select filter (non-PHI). The DISTINCT facility list is
+ * the CMD report's own facility text, scoped to the caller's entitled `entityIds` (bound param, part
+ * of the cache key) — the exact values the grid/summary filter on. Each is LEFT JOINed to the
+ * canonical dimension purely to enrich a friendly name + care_setting (IP/OP/BOTH) for the dropdown's
+ * "select all IP/OP" groups; an unmatched facility carries care_setting=null ("Unclassified/Other")
+ * and is still individually selectable. Reader-only, no SELECT *; cached + tag-busted like the grid.
+ * See buildCmdFacilityOptionsQuery for the tenant-isolation rationale of the join.
  */
 export const cmdExplorerFacilities = unstable_cache(
-  async (entityIds: string[]): Promise<string[]> => {
-    const { rows } = await readerExecutor().query<{ facility: string | null }>(
-      'select distinct facility from collections.cmd_explorer_rows ' +
-        'where business_entity_id = any($1::uuid[]) order by facility',
-      [entityIds],
-    );
-    return rows
-      .map((r) => r.facility)
-      .filter((f): f is string => typeof f === 'string' && f.trim() !== '');
+  async (entityIds: string[]): Promise<CmdFacilityOption[]> => {
+    const { sql, params } = buildCmdFacilityOptionsQuery(entityIds);
+    const { rows } = await readerExecutor().query<{
+      facility: string;
+      facility_name: string | null;
+      care_setting: string | null;
+    }>(sql, params);
+    return rows.map((r) => ({
+      facility: r.facility,
+      facility_name: r.facility_name,
+      care_setting:
+        r.care_setting === 'IP' || r.care_setting === 'OP' || r.care_setting === 'BOTH'
+          ? r.care_setting
+          : null,
+    }));
   },
   ['cmd-explorer-facilities'],
   { revalidate: 900, tags: ['cmd-explorer'] },

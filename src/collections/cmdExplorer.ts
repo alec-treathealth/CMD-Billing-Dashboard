@@ -73,7 +73,9 @@ export interface CmdExplorerFullRow extends CmdExplorerNonPhiRow {
  * cursor AND the per-row reveal key (it replaces the old SHA-256 `rowId`). The 3 PHI
  * columns are stored as ciphertext and are NEVER part of this shape; they surface only
  * via the audited reveal. Dates are ISO 'YYYY-MM-DD'; money is a fixed-2-decimal string
- * (pg numeric); `ingested_at` is ISO-8601 UTC.
+ * (pg numeric); `ingested_at` is ISO-8601 UTC. pct_allowed / pct_paid are the GENERATED
+ * STORED payer-gap ratios (migration 0038) — pg numeric, so they arrive as a decimal string
+ * (e.g. '92.34') or null when the denominator was 0/negative/null.
  */
 export interface CmdExplorerRow {
   id: number;
@@ -88,6 +90,8 @@ export interface CmdExplorerRow {
   adjustments: string | null;
   patient_balance_due: string | null;
   primary_payer: string | null;
+  pct_allowed: string | null;
+  pct_paid: string | null;
   ingested_at: string;
 }
 

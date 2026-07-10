@@ -21,9 +21,12 @@ import {
   ArrowUp,
   ArrowUpDown,
   Building2,
+  Check,
+  ChevronDown,
   CreditCard,
   Fingerprint,
   GripVertical,
+  Hospital,
   Lock,
   Search,
   SlidersHorizontal,
@@ -37,12 +40,14 @@ import { PHI_MASK } from '@/lib/phi';
 import {
   loadCmdReport,
   loadCmdSearchSummary,
+  loadCmdExplorerFacilities,
   revealCmdReportRows,
   type CmdReportResult,
   type CmdSearchGroup,
   type CmdSearchSummary,
   type CmdExplorerCursor,
   type CmdExplorerSort,
+  type CmdFacilityOption,
 } from '@/lib/actions';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../../src/collections/cmdExplorer';
 import type { DashboardView } from '@/lib/views';
@@ -64,7 +69,9 @@ const COLUMNS: readonly { key: ColKey; label: string; phi: boolean; numeric: boo
   { key: 'group_number', label: 'Group Number', phi: true, numeric: false },
   { key: 'charge_amount', label: 'Charge Amount', phi: false, numeric: true },
   { key: 'allowed_amount', label: 'Allowed Amount', phi: false, numeric: true },
+  { key: 'pct_allowed', label: '% Allowed', phi: false, numeric: true },
   { key: 'insurance_payments', label: 'Insurance Payments', phi: false, numeric: true },
+  { key: 'pct_paid', label: '% Paid', phi: false, numeric: true },
   { key: 'adjustments', label: 'Adjustments', phi: false, numeric: true },
   { key: 'patient_balance_due', label: 'Patient Balance Due', phi: false, numeric: true },
   { key: 'primary_payer', label: 'Primary Payer', phi: false, numeric: false },
@@ -83,7 +90,12 @@ const SORTABLE_KEYS = new Set<string>([
   'insurance_payments',
   'adjustments',
   'patient_balance_due',
+  'pct_allowed',
+  'pct_paid',
 ]);
+// The two payer-gap columns render as percentages (formatPercent), not currency. They ARE numeric
+// (right-aligned, sortable) — this set only overrides how cellText formats them.
+const IS_PERCENT = new Set<string>(['pct_allowed', 'pct_paid']);
 
 // Searchable columns = the NON-PHI columns (the 3 PHI columns are encrypted bytea and cannot be
 // substring-searched server-side). The server independently enforces this same allowlist.
@@ -97,6 +109,9 @@ const MONTH_NAMES = [
   'July', 'August', 'September', 'October', 'November', 'December',
 ];
 const YEAR_OPTIONS = [2026, 2025, 2024];
+/** Rolling recency quick-filters (days). Mutually exclusive with the Month/Year window. */
+const RECENCY_OPTIONS = [7, 14, 30] as const;
+const RECENCY_LABEL: Record<number, string> = { 7: 'Past 7 days', 14: 'Past 14 days', 30: 'Past 30 days' };
 
 const MONEY = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const MONEY0 = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
@@ -105,6 +120,17 @@ function formatMoney(s: string | null): string {
   if (s === null || s === '') return '—';
   const n = Number(s);
   return Number.isFinite(n) ? MONEY.format(n) : s;
+}
+
+/**
+ * Payer-gap ratios (pct_allowed / pct_paid) arrive as decimal strings already rounded to 2 dp by
+ * the generated column ('92.34', '100.00'), or null when the denominator was 0/negative/null.
+ * Render as a percent, dropping trailing-zero noise ('92.34%', '100%', '92.5%'); null → em dash.
+ */
+function formatPercent(s: string | null): string {
+  if (s === null || s === '') return '—';
+  const n = Number(s);
+  return Number.isFinite(n) ? `${n}%` : '—';
 }
 
 /** Debounce a fast-changing value (search box) so downstream fetches don't fire per keystroke. */
@@ -152,6 +178,15 @@ export function CmdCollectionsExplorer({
   const [refinement, setRefinement] = useState<Refinement | null>(null);
   const [year, setYear] = useState(YEAR_OPTIONS[0]!);
   const [month, setMonth] = useState(0); // 0 = All months
+  // Recency quick-filter: 0 = off (default — the grid still shows ALL months, an additive control,
+  // not a changed default), or a rolling window of 7/14/30 days. Mutually exclusive with Month/Year.
+  const [recencyDays, setRecencyDays] = useState(0);
+
+  // Facility multi-select. Empty selection = ALL facilities (no restriction), NOT zero rows. Options
+  // are tenant-scoped (loaded per view); the selection is tenant-specific, so it resets on view change.
+  const [facilityOptions, setFacilityOptions] = useState<CmdFacilityOption[]>([]);
+  const [facilitySelection, setFacilitySelection] = useState<string[]>([]);
+  const [facilityPickerOpen, setFacilityPickerOpen] = useState(false);
 
   // Searchable PHI (gated to canRevealPhi + audited server-side). These are matched via keyed
   // blind indexes (exact member ID / 3-char alpha prefix / exact group #) — the raw value is
@@ -166,13 +201,14 @@ export function CmdCollectionsExplorer({
 
   const [summary, setSummary] = useState<SummaryState>({ kind: 'idle' });
 
-  // A facility/payer refinement is tenant-specific; a term is generic. Reset the refinement when
-  // the view (tenant) changes so a stale drill-down doesn't filter the new tenant to zero rows.
-  // (React "adjust state on prop change" — runs once before the reload effect.)
+  // A facility/payer refinement AND the facility multi-select are tenant-specific; a term is generic.
+  // Reset both when the view (tenant) changes so a stale drill-down / facility set doesn't filter the
+  // new tenant to zero rows. (React "adjust state on prop change" — runs once before the reload effect.)
   const [prevView, setPrevView] = useState(view);
   if (view !== prevView) {
     setPrevView(view);
     setRefinement(null);
+    setFacilitySelection([]);
   }
 
   // Server-side sort. Default: most-recent Payment Received first.
@@ -199,24 +235,45 @@ export function CmdCollectionsExplorer({
 
   const hasSearch = term.trim() !== '' && searchCols.length > 0;
   const hasAnySearch = hasSearch || hasPhiSearch;
-  // Stable dep key for the column set (array identity changes on every toggle otherwise).
+  // Stable dep keys for the sets (array identity changes on every toggle otherwise).
   const searchColsKey = searchCols.join(',');
+  const facilityKey = facilitySelection.join(''); // control char can't appear in a facility name
 
-  // The filter passed to the grid action: window + (debounced) substring + chip refinement +
-  // gated PHI lookup. PHI terms are sent raw ONLY to the server action, which HMACs them into
-  // blind-index tokens, gates to canRevealPhi, and audits — never matched client-side.
+  // Load the tenant-scoped facility options for the multi-select whenever the view changes.
+  useEffect(() => {
+    let live = true;
+    loadCmdExplorerFacilities(view)
+      .then((r) => {
+        if (live) setFacilityOptions(r.ok ? r.facilities : []);
+      })
+      .catch(() => {
+        if (live) setFacilityOptions([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [view]);
+
+  // The filter passed to the grid action: date window (recency OR month/year) + facility set +
+  // (debounced) substring + chip refinement + gated PHI lookup. PHI terms are sent raw ONLY to the
+  // server action, which HMACs them into blind-index tokens, gates to canRevealPhi, and audits —
+  // never matched client-side.
   const filterArg = useMemo(() => {
     const f: {
       year?: number;
       month?: number;
+      recencyDays?: number;
       q?: string;
       searchColumns?: string[];
-      facility?: string;
+      facility?: string[];
       primary_payer?: string;
       cpt_code?: string;
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
     } = {};
-    if (month > 0) {
+    // Recency wins over Month/Year (they're mutually exclusive in the UI, but be explicit).
+    if (recencyDays > 0) {
+      f.recencyDays = recencyDays;
+    } else if (month > 0) {
       f.year = year;
       f.month = month;
     }
@@ -224,7 +281,14 @@ export function CmdCollectionsExplorer({
       f.q = term.trim();
       f.searchColumns = searchCols;
     }
-    if (refinement) f[refinement.kind] = refinement.value;
+    // Facility multi-select is a top-level scope; a facility drill-down chip narrows to that ONE
+    // facility (overriding the dropdown). Payer/CPT chips stay exact single-value refinements.
+    if (facilitySelection.length > 0) f.facility = facilitySelection;
+    if (refinement) {
+      if (refinement.kind === 'facility') f.facility = [refinement.value];
+      else if (refinement.kind === 'primary_payer') f.primary_payer = refinement.value;
+      else f.cpt_code = refinement.value;
+    }
     if (hasPhiSearch) {
       f.phiSearch = {
         ...(dMember !== '' ? { memberId: dMember } : {}),
@@ -233,9 +297,10 @@ export function CmdCollectionsExplorer({
       };
     }
     return f;
-    // year only matters when a specific month is chosen (see original rationale).
+    // year only matters when a specific month is chosen (see original rationale); facilityKey is the
+    // stable proxy for facilitySelection's contents.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [term, searchColsKey, hasSearch, month, month > 0 ? year : 0, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
+  }, [term, searchColsKey, hasSearch, recencyDays, month, month > 0 ? year : 0, facilityKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
 
   const loadPage = useCallback(
     async (
@@ -295,16 +360,24 @@ export function CmdCollectionsExplorer({
       searchColumns?: string[];
       year?: number;
       month?: number;
+      recencyDays?: number;
+      facility?: string[];
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
     } = {};
     if (hasSearch) {
       f.q = term.trim();
       f.searchColumns = searchCols;
     }
-    if (month > 0) {
+    // Top-level scope (date window + facility set) applies to the summary too — so the drill lists
+    // describe the SAME population the grid shows. The chip refinement does NOT (it's a within-
+    // results drill; the chips stay a stable facet navigator while drilling).
+    if (recencyDays > 0) {
+      f.recencyDays = recencyDays;
+    } else if (month > 0) {
       f.year = year;
       f.month = month;
     }
+    if (facilitySelection.length > 0) f.facility = facilitySelection;
     if (hasPhiSearch) {
       f.phiSearch = {
         ...(dMember !== '' ? { memberId: dMember } : {}),
@@ -324,7 +397,7 @@ export function CmdCollectionsExplorer({
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [term, searchColsKey, hasSearch, hasPhiSearch, dMember, dAlpha, dGroup, month, month > 0 ? year : 0, view]);
+  }, [term, searchColsKey, hasSearch, hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, view]);
 
   const busy = status === 'loading';
 
@@ -349,6 +422,36 @@ export function CmdCollectionsExplorer({
 
   function toggleSearchColumn(key: ColKey) {
     setSearchCols((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  }
+
+  // --- facility multi-select handlers ---------------------------------------
+  function toggleFacility(value: string) {
+    setFacilitySelection((prev) =>
+      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
+    );
+  }
+  function selectAllFacilities() {
+    setFacilitySelection(facilityOptions.map((o) => o.facility));
+  }
+  function clearFacilities() {
+    setFacilitySelection([]);
+  }
+  /**
+   * Add every facility in a care-setting group to the selection (union — composes with other
+   * groups). A facility classified 'BOTH' matches BOTH the IP and OP groups, mirroring migration
+   * 0035's chart semantics. Facilities with no care_setting (Unclassified) join no group.
+   */
+  function selectCareSettingGroup(cs: 'IP' | 'OP') {
+    const matches = facilityOptions
+      .filter((o) => o.care_setting === cs || o.care_setting === 'BOTH')
+      .map((o) => o.facility);
+    setFacilitySelection((prev) => [...new Set([...prev, ...matches])]);
+  }
+
+  /** Pick a rolling recency window (toggle off if re-clicked); clears any Month/Year selection. */
+  function selectRecency(days: number) {
+    setRecencyDays((prev) => (prev === days ? 0 : days));
+    setMonth(0);
   }
 
   /** Apply (or toggle off) a drill-down refinement from a summary chip, then scroll to the grid. */
@@ -393,11 +496,21 @@ export function CmdCollectionsExplorer({
       return v ?? '—';
     }
     const v = row[key as keyof CmdExplorerRow] as string | null;
+    if (IS_PERCENT.has(key)) return formatPercent(v);
     if (IS_NUMERIC.has(key)) return formatMoney(v);
     return v ?? '—';
   }
 
-  const monthLabel = month > 0 ? `${MONTH_NAMES[month - 1]} ${year}` : 'All months';
+  const windowLabel =
+    recencyDays > 0
+      ? RECENCY_LABEL[recencyDays]!
+      : month > 0
+        ? `${MONTH_NAMES[month - 1]} ${year}`
+        : 'All months';
+  const facilityLabel =
+    facilitySelection.length === 0
+      ? 'All facilities'
+      : `${facilitySelection.length} facilit${facilitySelection.length === 1 ? 'y' : 'ies'}`;
 
   return (
     <div className="space-y-4">
@@ -444,7 +557,46 @@ export function CmdCollectionsExplorer({
             )}
           </div>
 
-          <ControlSelect label="Month" value={month} ariaLabel="Month" onChange={(v) => setMonth(Number(v))}>
+          {/* Facility multi-select — a DISTINCT control from "Set filtered search": this scopes WHICH
+              facilities' rows show, not which columns the term matches. Empty = all facilities. */}
+          <div className="relative">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              aria-expanded={facilityPickerOpen}
+              aria-haspopup="true"
+              onClick={() => setFacilityPickerOpen((o) => !o)}
+            >
+              <Hospital className="h-4 w-4" />
+              Facilities
+              <span className="ml-1 rounded-full bg-[var(--brand-soft)] px-1.5 text-[11px] font-semibold text-[var(--brand-ink)]">
+                {facilitySelection.length === 0 ? 'All' : facilitySelection.length}
+              </span>
+              <ChevronDown className="h-3.5 w-3.5 opacity-60" aria-hidden />
+            </Button>
+            {facilityPickerOpen && (
+              <FacilityFilter
+                options={facilityOptions}
+                selected={facilitySelection}
+                onToggle={toggleFacility}
+                onSelectAll={selectAllFacilities}
+                onClear={clearFacilities}
+                onSelectGroup={selectCareSettingGroup}
+                onClose={() => setFacilityPickerOpen(false)}
+              />
+            )}
+          </div>
+
+          <ControlSelect
+            label="Month"
+            value={month}
+            ariaLabel="Month"
+            onChange={(v) => {
+              setMonth(Number(v));
+              setRecencyDays(0); // Month/Year and recency are mutually exclusive windows.
+            }}
+          >
             <option value={0}>All months</option>
             {MONTH_NAMES.map((name, i) => (
               <option key={name} value={i + 1}>
@@ -459,6 +611,32 @@ export function CmdCollectionsExplorer({
               </option>
             ))}
           </ControlSelect>
+
+          {/* Recency quick-filters (Derek's "past 7/14/30 days" ask). ADDITIVE: the default window is
+              still All months — these are one-click shortcuts, not a changed default. Picking one
+              clears Month/Year; re-clicking toggles it off (back to All months). */}
+          <div className="flex items-center gap-1" role="group" aria-label="Recency quick filters">
+            {RECENCY_OPTIONS.map((d) => {
+              const active = recencyDays === d;
+              return (
+                <button
+                  key={d}
+                  type="button"
+                  aria-pressed={active}
+                  title={RECENCY_LABEL[d]}
+                  onClick={() => selectRecency(d)}
+                  className={[
+                    'rounded-full border px-2.5 py-1 text-xs font-medium transition-colors',
+                    active
+                      ? 'border-[var(--brand-accent)] bg-[var(--brand-soft)] text-[var(--brand-ink)]'
+                      : 'border-line text-muted-foreground hover:bg-[var(--brand-soft)]',
+                  ].join(' ')}
+                >
+                  {d}d
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         {/* Gated patient lookup — only for PHI-entitled roles. Matched via keyed blind indexes
@@ -485,8 +663,8 @@ export function CmdCollectionsExplorer({
         <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span>
             {hasAnySearch
-              ? `${hasSearch ? `Searching ${searchCols.length} column${searchCols.length === 1 ? '' : 's'}` : 'Patient lookup'} · ${monthLabel}`
-              : `Browsing ${monthLabel} — type to search`}
+              ? `${hasSearch ? `Searching ${searchCols.length} column${searchCols.length === 1 ? '' : 's'}` : 'Patient lookup'} · ${facilityLabel} · ${windowLabel}`
+              : `Browsing ${facilityLabel} · ${windowLabel} — type to search`}
           </span>
           {refinement && (
             <button
@@ -727,6 +905,131 @@ function SearchColumnPicker({
             </div>
           ))}
         </div>
+      </div>
+    </>
+  );
+}
+
+/**
+ * The facility multi-select popover — the "which facilities' rows do I see" control (distinct from
+ * "Set filtered search", which chooses columns). Empty selection = ALL facilities, communicated
+ * explicitly at the top so the empty state never reads as "broken / nothing selected". Offers
+ * Select all / Clear, per-care-setting group selects (All IP / All OP, shown only when that group
+ * exists — a facility classified BOTH counts for both), and individual checkboxes with a care-setting
+ * badge. A full-screen invisible backdrop closes it on outside click.
+ */
+function FacilityFilter({
+  options,
+  selected,
+  onToggle,
+  onSelectAll,
+  onClear,
+  onSelectGroup,
+  onClose,
+}: {
+  options: CmdFacilityOption[];
+  selected: string[];
+  onToggle: (value: string) => void;
+  onSelectAll: () => void;
+  onClear: () => void;
+  onSelectGroup: (cs: 'IP' | 'OP') => void;
+  onClose: () => void;
+}) {
+  const selectedSet = new Set(selected);
+  const hasIp = options.some((o) => o.care_setting === 'IP' || o.care_setting === 'BOTH');
+  const hasOp = options.some((o) => o.care_setting === 'OP' || o.care_setting === 'BOTH');
+  return (
+    <>
+      <button
+        type="button"
+        aria-label="Close facility filter"
+        className="fixed inset-0 z-40 cursor-default"
+        onClick={onClose}
+      />
+      <div
+        role="dialog"
+        aria-label="Filter by facility"
+        className="absolute left-0 top-full z-50 mt-2 w-80 rounded-lg border border-line bg-surface p-3 shadow-ths"
+      >
+        <div className="mb-1 flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          <span>Show facilities</span>
+          <span className="font-normal normal-case">
+            {selected.length === 0 ? 'All facilities' : `${selected.length} selected`}
+          </span>
+        </div>
+        {selected.length === 0 && (
+          <p className="mb-2 text-[11px] text-ink400">
+            No filter — showing every facility. Check any below to narrow.
+          </p>
+        )}
+
+        <div className="mb-2 flex flex-wrap items-center gap-1.5 border-b border-line pb-2">
+          <button
+            type="button"
+            onClick={onSelectAll}
+            disabled={options.length === 0}
+            className="rounded-md border border-line px-2 py-0.5 text-xs text-ink900 transition-colors hover:bg-[var(--brand-soft)] disabled:opacity-40"
+          >
+            Select all
+          </button>
+          <button
+            type="button"
+            onClick={onClear}
+            disabled={selected.length === 0}
+            className="rounded-md border border-line px-2 py-0.5 text-xs text-ink900 transition-colors hover:bg-[var(--brand-soft)] disabled:opacity-40"
+          >
+            Clear
+          </button>
+          {hasIp && (
+            <button
+              type="button"
+              onClick={() => onSelectGroup('IP')}
+              className="rounded-md border border-line px-2 py-0.5 text-xs text-ink900 transition-colors hover:bg-[var(--brand-soft)]"
+            >
+              + All IP
+            </button>
+          )}
+          {hasOp && (
+            <button
+              type="button"
+              onClick={() => onSelectGroup('OP')}
+              className="rounded-md border border-line px-2 py-0.5 text-xs text-ink900 transition-colors hover:bg-[var(--brand-soft)]"
+            >
+              + All OP
+            </button>
+          )}
+        </div>
+
+        {options.length === 0 ? (
+          <p className="py-4 text-center text-sm text-muted-foreground">No facilities available.</p>
+        ) : (
+          <div className="max-h-72 space-y-0.5 overflow-y-auto">
+            {options.map((o) => (
+              <label
+                key={o.facility}
+                className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm text-ink900 hover:bg-[var(--brand-soft)]"
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedSet.has(o.facility)}
+                  onChange={() => onToggle(o.facility)}
+                  className="h-4 w-4 shrink-0 accent-[var(--brand-accent)]"
+                />
+                <span className="flex-1 truncate">{o.facility_name ?? o.facility}</span>
+                <span
+                  className={[
+                    'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium',
+                    o.care_setting
+                      ? 'bg-[var(--brand-soft)] text-[var(--brand-ink)]'
+                      : 'text-ink400',
+                  ].join(' ')}
+                >
+                  {o.care_setting ?? 'Other'}
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
       </div>
     </>
   );

@@ -4,9 +4,11 @@ import {
   likeContains,
   buildCmdExplorerQuery,
   buildCmdSearchSummaryQueries,
+  buildCmdFacilityOptionsQuery,
   resolveCmdExplorerSort,
   resolveCmdExplorerCursor,
   CMD_EXPLORER_DEFAULT_SORT,
+  CMD_EXPLORER_SORTABLE_COLUMNS,
   CMD_SEARCH_TOP_N,
   type CmdExplorerFilter,
   type CmdExplorerSort,
@@ -82,13 +84,76 @@ test('substring term with % is bound (escaped), never interpolated', () => {
   assertAllBound(sql, params);
 });
 
-test('exact refinements (facility / cpt / payer) are each bound', () => {
-  const filter: CmdExplorerFilter = { facility: 'DALLAS MENTAL HEALTH LLC', cpt_code: '90837', primary_payer: 'Aetna' };
+test('facility multi-select + exact cpt/payer refinements are each bound', () => {
+  const filter: CmdExplorerFilter = {
+    facility: ['DALLAS MENTAL HEALTH LLC'],
+    cpt_code: '90837',
+    primary_payer: 'Aetna',
+  };
   const { sql, params } = buildCmdExplorerQuery(null, filter, SORT, 51, ENTITY);
-  assert.match(sql, /facility = \$2/);
+  // facility is now set-membership (multi-select), bound as ONE array param
+  assert.match(sql, /facility = any\(\$2::text\[\]\)/);
   assert.match(sql, /cpt_code = \$3/);
   assert.match(sql, /primary_payer = \$4/);
-  assert.deepEqual(params.slice(1, 4), ['DALLAS MENTAL HEALTH LLC', '90837', 'Aetna']);
+  assert.deepEqual(params[1], ['DALLAS MENTAL HEALTH LLC']);
+  assert.deepEqual(params.slice(2, 4), ['90837', 'Aetna']);
+  assertAllBound(sql, params);
+});
+
+test('facility multi-select: multiple values bind as a single text[] param', () => {
+  const filter: CmdExplorerFilter = { facility: ['DALLAS MENTAL HEALTH LLC', 'FIRST RESPONDERS OF CALIFORNIA LLC'] };
+  const { sql, params } = buildCmdExplorerQuery(null, filter, SORT, 51, ENTITY);
+  assert.match(sql, /facility = any\(\$2::text\[\]\)/);
+  assert.deepEqual(params[1], ['DALLAS MENTAL HEALTH LLC', 'FIRST RESPONDERS OF CALIFORNIA LLC']);
+  assertAllBound(sql, params);
+});
+
+test('facility multi-select: EMPTY array is NO restriction (all facilities), not zero rows', () => {
+  // The trap this guards: emitting `facility = any(ARRAY[]::text[])` would match NOTHING. An empty
+  // (or null) selection must OMIT the facility condition entirely — same result set as no filter.
+  for (const facility of [[], null, undefined] as (string[] | null | undefined)[]) {
+    const { sql, params } = buildCmdExplorerQuery(null, { facility }, SORT, 51, ENTITY);
+    assert.doesNotMatch(sql, /facility = any/, `facility=${JSON.stringify(facility)} must emit no facility clause`);
+    // tenant scope is still the only WHERE predicate → identical to the no-filter query
+    assert.match(sql, /where business_entity_id = any\(\$1::uuid\[\]\) order by/);
+    assertAllBound(sql, params);
+  }
+});
+
+test('search summary honors the facility multi-select the same way (empty = no restriction)', () => {
+  const nonEmpty = buildCmdSearchSummaryQueries({ facility: ['DALLAS MENTAL HEALTH LLC'] }, ENTITY);
+  assert.match(nonEmpty.totals.sql, /facility = any\(\$2::text\[\]\)/);
+  assert.deepEqual(nonEmpty.totals.params[1], ['DALLAS MENTAL HEALTH LLC']);
+  assertAllBound(nonEmpty.totals.sql, nonEmpty.totals.params);
+
+  const empty = buildCmdSearchSummaryQueries({ facility: [] }, ENTITY);
+  assert.doesNotMatch(empty.totals.sql, /facility = any/);
+  assertAllBound(empty.totals.sql, empty.totals.params);
+});
+
+test('pct_allowed / pct_paid are sortable and selected (payer-gap columns)', () => {
+  // both generated columns are in the sort allowlist
+  assert.ok((CMD_EXPLORER_SORTABLE_COLUMNS as readonly string[]).includes('pct_allowed'));
+  assert.ok((CMD_EXPLORER_SORTABLE_COLUMNS as readonly string[]).includes('pct_paid'));
+  // a sort by pct_allowed drives ORDER BY the raw generated column (keyset-compatible)
+  const { sql } = buildCmdExplorerQuery(null, {}, { column: 'pct_allowed', direction: 'desc' }, 51, ENTITY);
+  assert.match(sql, /order by pct_allowed desc nulls last, id desc/);
+  // both columns are projected by the grid SELECT
+  assert.match(sql, /pct_allowed/);
+  assert.match(sql, /pct_paid/);
+});
+
+test('facility options query is tenant-scoped and its only bound value is entityIds', () => {
+  const { sql, params } = buildCmdFacilityOptionsQuery(ENTITY);
+  // tenant scope on cmd_explorer_rows is the sole bound param ($1 = entityIds)
+  assert.match(sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
+  assert.deepEqual(params, [ENTITY]);
+  assert.equal(params.length, 1);
+  // distinct facilities from the ROWS (tenant-scoped), enriched by a LEFT JOIN to the dimension
+  assert.match(sql, /select distinct facility from collections\.cmd_explorer_rows/);
+  assert.match(sql, /left join collections\.facilities/);
+  // blank facilities excluded; no interpolation
+  assert.match(sql, /btrim\(facility\) <> ''/);
   assertAllBound(sql, params);
 });
 
