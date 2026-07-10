@@ -149,9 +149,12 @@ test('facility options query is tenant-scoped and its only bound value is entity
   assert.match(sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
   assert.deepEqual(params, [ENTITY]);
   assert.equal(params.length, 1);
-  // distinct facilities from the ROWS (tenant-scoped), enriched by a LEFT JOIN to the dimension
+  // distinct facilities from the ROWS (tenant-scoped), enriched by resolving to the dimension
   assert.match(sql, /select distinct facility from collections\.cmd_explorer_rows/);
-  assert.match(sql, /left join collections\.facilities/);
+  // two-path resolution: exact name match OR the explicit alias crosswalk, then dimension by code
+  assert.match(sql, /left join collections\.facilities fe on upper\(fe\.facility_name\) = upper\(r\.facility\)/);
+  assert.match(sql, /left join collections\.cmd_facility_aliases a on upper\(a\.facility_text\) = upper\(r\.facility\)/);
+  assert.match(sql, /f\.facility_code = coalesce\(fe\.facility_code, a\.facility_code\)/);
   // blank facilities excluded; no interpolation
   assert.match(sql, /btrim\(facility\) <> ''/);
   assertAllBound(sql, params);

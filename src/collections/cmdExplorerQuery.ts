@@ -137,12 +137,17 @@ export interface CmdFacilityOption {
 /**
  * Build the tenant-scoped facility-options query for the dropdown. The DISTINCT facility list is
  * taken STRICTLY from cmd_explorer_rows scoped to the caller's entitled entityIds (a BXR user never
- * sees an Indigo-only facility string), then LEFT JOINed to the non-PHI facility dimension purely
- * to enrich name + care_setting. The dimension has no business_entity_id, so it is NOT (and cannot
- * be) tenant-filtered — but since we only ever surface facility STRINGS that already passed the
- * tenant scope, no other tenant's facility leaks into the list; the join only attaches IP/OP labels.
- * `max()` collapses the rare case of two dimension rows sharing an upper(facility_name). Non-PHI;
- * every value bound ($1 = entityIds), every identifier a fixed literal.
+ * sees an Indigo-only facility string), then resolved to the non-PHI facility dimension purely to
+ * enrich name + care_setting. Resolution is two-path: an EXACT name match, else the explicit
+ * cmd_facility_aliases crosswalk (migration 0039) — which reconciles the CMD export text with the
+ * curated dimension name (trailing " LLC", abbreviations, multi-text facilities, a confirmed typo).
+ * care_setting is always read from the resolved dimension row (single source of truth), never the
+ * crosswalk. The dimension has no business_entity_id, so it is NOT tenant-filtered — but since we
+ * only ever surface facility STRINGS that already passed the tenant scope, no other tenant's
+ * facility leaks into the list; the joins only attach the IP/OP label. A text that resolves to
+ * neither (e.g. the "No Facility" placeholder) yields a null care_setting → "Other" in the UI.
+ * `max()` collapses any join multiplicity. Non-PHI; every value bound ($1 = entityIds), every
+ * identifier a fixed literal.
  */
 export function buildCmdFacilityOptionsQuery(entityIds: string[]): { sql: string; params: unknown[] } {
   const params: unknown[] = [entityIds];
@@ -150,7 +155,9 @@ export function buildCmdFacilityOptionsQuery(entityIds: string[]): { sql: string
     'select r.facility, max(f.facility_name) as facility_name, max(f.care_setting) as care_setting ' +
     'from (select distinct facility from collections.cmd_explorer_rows ' +
     "where business_entity_id = any($1::uuid[]) and facility is not null and btrim(facility) <> '') r " +
-    'left join collections.facilities f on upper(f.facility_name) = upper(r.facility) ' +
+    'left join collections.facilities fe on upper(fe.facility_name) = upper(r.facility) ' +
+    'left join collections.cmd_facility_aliases a on upper(a.facility_text) = upper(r.facility) ' +
+    'left join collections.facilities f on f.facility_code = coalesce(fe.facility_code, a.facility_code) ' +
     'group by r.facility order by r.facility';
   return { sql, params };
 }
