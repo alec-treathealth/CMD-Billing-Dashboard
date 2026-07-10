@@ -1800,15 +1800,12 @@ function CohortLineChart({
   return (
     <div className="h-52 w-full">
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data} margin={{ top: 8, right: 12, bottom: 18, left: -8 }}>
+        <LineChart data={data} margin={{ top: 8, right: 12, bottom: 4, left: -8 }}>
           <CartesianGrid vertical={false} stroke="#E4E9E6" />
-          <XAxis
-            dataKey="bucket"
-            tick={{ fontSize: 11 }}
-            stroke="#E4E9E6"
-            tickLine={false}
-            label={{ value: xLabel, position: 'insideBottom', offset: -8, fontSize: 11 }}
-          />
+          {/* No inline axis label — the section heading above each chart ("By claim number" / "By
+              days since first claim") already names the axis. An insideBottom label here collided
+              with the legend. xLabel still names the axis in the tooltip. */}
+          <XAxis dataKey="bucket" tick={{ fontSize: 11 }} stroke="#E4E9E6" tickLine={false} />
           {/* %-paid legitimately exceeds 100% (insurance can pay more than the fee-schedule
               "allowed" — common out-of-network), so the top expands to fit rather than clipping. */}
           <YAxis
