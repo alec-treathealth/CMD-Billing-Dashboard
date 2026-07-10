@@ -7,30 +7,36 @@
  * of which is a clickable drill-down chip that refines the detail grid below. The noisy rows
  * stay one click away instead of being the first thing you face.
  *
- * Search is a SERVER-SIDE substring (ILIKE) match across the NON-PHI columns the user selects
- * via the branded "Set filtered search" picker (the 3 PHI columns are encrypted at rest and
- * cannot be substring-searched — they're shown disabled). Typing is debounced (~350ms) so a
- * large dataset isn't hammered on every keystroke. A Month/Year window still scopes everything
- * server-side. Row PHI renders •••••• until "Reveal all" decrypts the current page in one
- * audited call (held in memory only, dropped on page/filter change). Columns reorder by dragging
- * headers; the two date columns + money columns sort server-side. Rows order by the sort key.
+ * Search is a SERVER-SIDE substring (ILIKE) match. Scope FOLLOWS the visible columns — there is one
+ * "columns" concept: the term matches the SEARCHABLE columns currently shown (non-PHI, non-percent;
+ * the 3 PHI columns are encrypted at rest and can't be substring-searched — the gated Patient lookup
+ * handles those). Typing is debounced (~350ms) so a large dataset isn't hammered on every keystroke.
+ * A Month/Year window still scopes everything server-side. Row PHI renders •••••• until "Reveal all"
+ * decrypts the current page in one audited call (held in memory only, dropped on page/filter change).
+ * The "Columns" menu controls which columns are shown (+ their order) and persists that as a named
+ * per-user saved view; shown columns are also what search matches. Rows order by the sort key.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  Bookmark,
   Building2,
   Check,
   ChevronDown,
+  Columns3,
   CreditCard,
   Fingerprint,
   GripVertical,
   Hospital,
   Lock,
+  RotateCcw,
+  Save,
   Search,
-  SlidersHorizontal,
+  Star,
   Stethoscope,
+  Trash2,
   X,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -42,12 +48,17 @@ import {
   loadCmdSearchSummary,
   loadCmdExplorerFacilities,
   revealCmdReportRows,
+  listGridViews,
+  saveGridView,
+  setDefaultGridView,
+  deleteGridView,
   type CmdReportResult,
   type CmdSearchGroup,
   type CmdSearchSummary,
   type CmdExplorerCursor,
   type CmdExplorerSort,
   type CmdFacilityOption,
+  type GridViewRow,
 } from '@/lib/actions';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../../src/collections/cmdExplorer';
 import type { DashboardView } from '@/lib/views';
@@ -97,12 +108,14 @@ const SORTABLE_KEYS = new Set<string>([
 // (right-aligned, sortable) — this set only overrides how cellText formats them.
 const IS_PERCENT = new Set<string>(['pct_allowed', 'pct_paid']);
 
-// Searchable columns = the NON-PHI columns (the 3 PHI columns are encrypted bytea and cannot be
-// substring-searched server-side). The server independently enforces this same allowlist.
-const SEARCHABLE_COLUMNS = COLUMNS.filter((c) => !c.phi);
-const PHI_COLUMNS = COLUMNS.filter((c) => c.phi);
-// Sensible default: the identity-ish text columns most searches key on. The user can change it.
-const DEFAULT_SEARCH_COLUMNS: ColKey[] = ['facility', 'cpt_code', 'primary_payer'];
+// Search scope FOLLOWS the visible columns — one unified "columns" concept, no separate search-scope
+// picker. The free-text term matches the SEARCHABLE columns currently shown: non-PHI (the 3 PHI
+// columns are encrypted bytea and can't be substring-searched — the gated Patient lookup handles
+// those) and non-percent (the pct_* ratios aren't in the server's search allowlist). This set mirrors
+// the server's CMD_EXPLORER_SEARCH_COLUMNS exactly; the server independently re-enforces it.
+const SEARCHABLE_KEYS = new Set<string>(
+  COLUMNS.filter((c) => !c.phi && !IS_PERCENT.has(c.key)).map((c) => c.key),
+);
 
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -146,6 +159,8 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
 /** Exact drill-down refinement set by clicking a summary chip. */
 type RefineKind = 'facility' | 'primary_payer' | 'cpt_code';
 type Refinement = { kind: RefineKind; value: string };
+/** Result of a save from the column-view manager (mirrors the server action's shape). */
+type GridViewMutationOutcome = { ok: true } | { ok: false; error: string };
 const REFINE_LABEL: Record<RefineKind, string> = {
   facility: 'Facility',
   primary_payer: 'Payer',
@@ -169,12 +184,11 @@ export function CmdCollectionsExplorer({
   const [status, setStatus] = useState<'loading' | 'error' | 'ready'>('loading');
 
   // Smart search. `searchInput` is the raw box; `term` is its debounced value (drives fetches).
-  // `searchCols` are the NON-PHI columns the term matches against (configurable). `refinement`
-  // is an exact filter applied by clicking a summary chip. Month/Year window is retained.
+  // The term matches the SEARCHABLE columns that are currently SHOWN (see `searchCols`, derived from
+  // `order` below) — there is no separate search-scope picker. `refinement` is an exact filter
+  // applied by clicking a summary chip. Month/Year window is retained.
   const [searchInput, setSearchInput] = useState('');
   const term = useDebouncedValue(searchInput, 350);
-  const [searchCols, setSearchCols] = useState<ColKey[]>([...DEFAULT_SEARCH_COLUMNS]);
-  const [pickerOpen, setPickerOpen] = useState(false);
   const [refinement, setRefinement] = useState<Refinement | null>(null);
   const [year, setYear] = useState(YEAR_OPTIONS[0]!);
   const [month, setMonth] = useState(0); // 0 = All months
@@ -219,9 +233,17 @@ export function CmdCollectionsExplorer({
   const [cursors, setCursors] = useState<(CmdExplorerCursor | null)[]>([null]);
   const [hasNext, setHasNext] = useState(false);
 
-  // Column order (session only); reorder by dragging the headers directly.
+  // VISIBLE columns, in display order (membership = visibility). Starts as all columns; a saved
+  // default view (if any) overrides it on mount. Reorder by dragging headers; toggle visibility in
+  // the "Columns" menu. Persisted per-user as a named view via the server actions below.
   const [order, setOrder] = useState<ColKey[]>([...DEFAULT_ORDER]);
   const dnd = useColumnDnD(order, (next) => setOrder(next as ColKey[]));
+
+  // Per-user saved column views (server-side, private). Loaded once on mount; the caller's default
+  // view (if one exists) sets the initial layout, else all columns (DEFAULT_ORDER).
+  const [views, setViews] = useState<GridViewRow[]>([]);
+  const [columnsMenuOpen, setColumnsMenuOpen] = useState(false);
+  const defaultViewAppliedRef = useRef(false);
 
   // PHI for the current page, revealed in bulk (memory only; cleared on page/filter change).
   const [phi, setPhi] = useState<Map<number, CmdExplorerPhi>>(() => new Map());
@@ -233,6 +255,9 @@ export function CmdCollectionsExplorer({
   const reqRef = useRef(0);
   const gridRef = useRef<HTMLDivElement>(null);
 
+  // Search scope FOLLOWS visibility: the term matches the searchable columns currently shown (in
+  // display order). Hiding a column removes it from search too; there is one "columns" concept.
+  const searchCols = order.filter((k) => SEARCHABLE_KEYS.has(k));
   const hasSearch = term.trim() !== '' && searchCols.length > 0;
   const hasAnySearch = hasSearch || hasPhiSearch;
   // Stable dep keys for the sets (array identity changes on every toggle otherwise).
@@ -253,6 +278,35 @@ export function CmdCollectionsExplorer({
       live = false;
     };
   }, [view]);
+
+  const refreshViews = useCallback(async () => {
+    const r = await listGridViews();
+    if (r.ok) setViews(r.views);
+  }, []);
+
+  // Load the caller's saved views ONCE on mount; apply their default layout if one exists (guarded so
+  // it never clobbers a manual column edit the user makes before/after the fetch resolves). Views are
+  // per-USER, not per-tenant-view, so this does NOT depend on `view` and runs a single time.
+  useEffect(() => {
+    let live = true;
+    listGridViews()
+      .then((r) => {
+        if (!live || !r.ok) return;
+        setViews(r.views);
+        if (!defaultViewAppliedRef.current) {
+          defaultViewAppliedRef.current = true;
+          const def = r.views.find((v) => v.isDefault);
+          if (def) {
+            const known = def.columns.filter((c): c is ColKey => (DEFAULT_ORDER as string[]).includes(c));
+            if (known.length > 0) setOrder(known);
+          }
+        }
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
 
   // The filter passed to the grid action: date window (recency OR month/year) + facility set +
   // (debounced) substring + chip refinement + gated PHI lookup. PHI terms are sent raw ONLY to the
@@ -420,8 +474,36 @@ export function CmdCollectionsExplorer({
     );
   }
 
-  function toggleSearchColumn(key: ColKey) {
-    setSearchCols((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  // --- column visibility + saved views --------------------------------------
+  // Toggle a column's VISIBILITY: hidden → append (shows rightmost); visible → remove. Never remove
+  // the last visible column (a zero-column grid is broken).
+  function toggleColumnVisible(key: ColKey) {
+    setOrder((prev) => {
+      if (prev.includes(key)) return prev.length <= 1 ? prev : prev.filter((k) => k !== key);
+      return [...prev, key];
+    });
+  }
+  function resetColumns() {
+    setOrder([...DEFAULT_ORDER]);
+  }
+  /** Apply a saved view's layout — keep only still-known columns, in the saved order. */
+  function applyView(cols: string[]) {
+    const known = cols.filter((c): c is ColKey => (DEFAULT_ORDER as string[]).includes(c));
+    setOrder(known.length > 0 ? known : [...DEFAULT_ORDER]);
+  }
+  /** Save the CURRENT visible-column layout as a named view (create/overwrite by name). */
+  async function handleSaveView(name: string, makeDefault: boolean): Promise<GridViewMutationOutcome> {
+    const res = await saveGridView(name, order as string[], makeDefault);
+    if (res.ok) await refreshViews();
+    return res.ok ? { ok: true } : { ok: false, error: res.error };
+  }
+  async function handleSetDefaultView(name: string) {
+    const res = await setDefaultGridView(name);
+    if (res.ok) await refreshViews();
+  }
+  async function handleDeleteView(name: string) {
+    const res = await deleteGridView(name);
+    if (res.ok) await refreshViews();
   }
 
   // --- facility multi-select handlers ---------------------------------------
@@ -531,34 +613,7 @@ export function CmdCollectionsExplorer({
             />
           </div>
 
-          {/* Branded column-scope picker. */}
-          <div className="relative">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              aria-expanded={pickerOpen}
-              aria-haspopup="true"
-              onClick={() => setPickerOpen((o) => !o)}
-              className="border-[var(--brand-accent)]/40 text-[var(--brand-ink)]"
-            >
-              <SlidersHorizontal className="h-4 w-4" />
-              Set filtered search
-              <span className="ml-1 rounded-full bg-[var(--brand-soft)] px-1.5 text-[11px] font-semibold text-[var(--brand-ink)]">
-                {searchCols.length}
-              </span>
-            </Button>
-            {pickerOpen && (
-              <SearchColumnPicker
-                selected={searchCols}
-                onToggle={toggleSearchColumn}
-                onClose={() => setPickerOpen(false)}
-              />
-            )}
-          </div>
-
-          {/* Facility multi-select — a DISTINCT control from "Set filtered search": this scopes WHICH
-              facilities' rows show, not which columns the term matches. Empty = all facilities. */}
+          {/* Facility multi-select — scopes WHICH facilities' rows show. Empty = all facilities. */}
           <div className="relative">
             <Button
               type="button"
@@ -663,7 +718,7 @@ export function CmdCollectionsExplorer({
         <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span>
             {hasAnySearch
-              ? `${hasSearch ? `Searching ${searchCols.length} column${searchCols.length === 1 ? '' : 's'}` : 'Patient lookup'} · ${facilityLabel} · ${windowLabel}`
+              ? `${hasSearch ? `Searching ${searchCols.length} shown column${searchCols.length === 1 ? '' : 's'}` : 'Patient lookup'} · ${facilityLabel} · ${windowLabel}`
               : `Browsing ${facilityLabel} · ${windowLabel} — type to search`}
           </span>
           {refinement && (
@@ -695,19 +750,53 @@ export function CmdCollectionsExplorer({
           <p className="text-sm text-muted-foreground">
             {hasAnySearch ? 'Matching charge lines' : 'Charge lines'} · {rows.length.toLocaleString()} on this page
           </p>
-          {rows.length > 0 && canRevealPhi && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={revealing}
-              aria-pressed={revealed}
-              onClick={() => void toggleRevealAll()}
-              className={revealed ? 'border-[var(--brand-accent)] text-[var(--brand-ink)]' : undefined}
-            >
-              {revealing ? 'Revealing…' : revealed ? 'Hide identifiers' : 'Reveal all'}
-            </Button>
-          )}
+          <div className="flex items-center gap-2">
+            {/* Column layout + saved views — a GRID control (lives on the grid toolbar, not the search
+                hero). Shown columns are both what the grid displays and what the search term matches. */}
+            <div className="relative">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                aria-expanded={columnsMenuOpen}
+                aria-haspopup="true"
+                onClick={() => setColumnsMenuOpen((o) => !o)}
+              >
+                <Columns3 className="h-4 w-4" />
+                Columns
+                <span className="ml-1 rounded-full bg-[var(--brand-soft)] px-1.5 text-[11px] font-semibold text-[var(--brand-ink)]">
+                  {order.length}/{COLUMNS.length}
+                </span>
+                <ChevronDown className="h-3.5 w-3.5 opacity-60" aria-hidden />
+              </Button>
+              {columnsMenuOpen && (
+                <ColumnViewManager
+                  order={order}
+                  views={views}
+                  onToggleColumn={toggleColumnVisible}
+                  onReset={resetColumns}
+                  onLoadView={(v) => applyView(v.columns)}
+                  onSaveView={handleSaveView}
+                  onSetDefault={handleSetDefaultView}
+                  onDeleteView={handleDeleteView}
+                  onClose={() => setColumnsMenuOpen(false)}
+                />
+              )}
+            </div>
+            {rows.length > 0 && canRevealPhi && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={revealing}
+                aria-pressed={revealed}
+                onClick={() => void toggleRevealAll()}
+                className={revealed ? 'border-[var(--brand-accent)] text-[var(--brand-ink)]' : undefined}
+              >
+                {revealing ? 'Revealing…' : revealed ? 'Hide identifiers' : 'Reveal all'}
+              </Button>
+            )}
+          </div>
         </div>
 
         {status === 'error' && (
@@ -846,74 +935,9 @@ export function CmdCollectionsExplorer({
 }
 
 /**
- * The "Set filtered search" popover: checkboxes for every NON-PHI column (the term matches ANY
- * checked column). The 3 PHI columns are listed disabled with a lock — they're encrypted at rest
- * and cannot be substring-searched. A full-screen invisible backdrop closes it on outside click.
- */
-function SearchColumnPicker({
-  selected,
-  onToggle,
-  onClose,
-}: {
-  selected: ColKey[];
-  onToggle: (key: ColKey) => void;
-  onClose: () => void;
-}) {
-  return (
-    <>
-      <button
-        type="button"
-        aria-label="Close column picker"
-        className="fixed inset-0 z-40 cursor-default"
-        onClick={onClose}
-      />
-      <div
-        role="dialog"
-        aria-label="Choose search columns"
-        className="absolute left-0 top-full z-50 mt-2 w-72 rounded-lg border border-line bg-surface p-3 shadow-ths"
-      >
-        <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          Search these columns
-        </div>
-        <div className="space-y-0.5">
-          {SEARCHABLE_COLUMNS.map((c) => {
-            const checked = selected.includes(c.key);
-            return (
-              <label
-                key={c.key}
-                className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm text-ink900 hover:bg-[var(--brand-soft)]"
-              >
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={() => onToggle(c.key)}
-                  className="h-4 w-4 accent-[var(--brand-accent)]"
-                />
-                {c.label}
-              </label>
-            );
-          })}
-        </div>
-        <div className="mt-2 border-t border-line pt-2">
-          <div className="mb-1 flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-            <Lock className="h-3 w-3" aria-hidden /> Encrypted — not searchable
-          </div>
-          {PHI_COLUMNS.map((c) => (
-            <div key={c.key} className="flex items-center gap-2 px-2 py-1 text-sm text-ink400">
-              <input type="checkbox" disabled className="h-4 w-4" />
-              {c.label}
-            </div>
-          ))}
-        </div>
-      </div>
-    </>
-  );
-}
-
-/**
- * The facility multi-select popover — the "which facilities' rows do I see" control (distinct from
- * "Set filtered search", which chooses columns). Empty selection = ALL facilities, communicated
- * explicitly at the top so the empty state never reads as "broken / nothing selected". Offers
+ * The facility multi-select popover — the "which facilities' rows do I see" control. Empty selection
+ * = ALL facilities, communicated explicitly at the top so the empty state never reads as
+ * "broken / nothing selected". Offers
  * Select all / Clear, per-care-setting group selects (All IP / All OP, shown only when that group
  * exists — a facility classified BOTH counts for both), and individual checkboxes with a care-setting
  * badge. A full-screen invisible backdrop closes it on outside click.
@@ -1030,6 +1054,191 @@ function FacilityFilter({
             ))}
           </div>
         )}
+      </div>
+    </>
+  );
+}
+
+/**
+ * Column layout + saved-views manager — the "Columns" popover. A two-section manager (top = which
+ * columns are VISIBLE + reset; bottom = the user's private saved layouts, with load / set-default /
+ * delete / save-current), living on the grid toolbar. This is the SINGLE columns control: the shown
+ * columns are both what the grid displays AND (for the searchable ones) what the search term matches.
+ */
+function ColumnViewManager({
+  order,
+  views,
+  onToggleColumn,
+  onReset,
+  onLoadView,
+  onSaveView,
+  onSetDefault,
+  onDeleteView,
+  onClose,
+}: {
+  order: ColKey[];
+  views: GridViewRow[];
+  onToggleColumn: (key: ColKey) => void;
+  onReset: () => void;
+  onLoadView: (v: GridViewRow) => void;
+  onSaveView: (name: string, makeDefault: boolean) => Promise<GridViewMutationOutcome>;
+  onSetDefault: (name: string) => void | Promise<void>;
+  onDeleteView: (name: string) => void | Promise<void>;
+  onClose: () => void;
+}) {
+  const visible = new Set<string>(order);
+  const [saveName, setSaveName] = useState('');
+  const [makeDefault, setMakeDefault] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submitSave() {
+    const name = saveName.trim();
+    if (name === '') {
+      setError('Name your view first.');
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    const res = await onSaveView(name, makeDefault);
+    setSaving(false);
+    if (res.ok) {
+      setSaveName('');
+      setMakeDefault(false);
+    } else {
+      setError(res.error);
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        aria-label="Close columns menu"
+        className="fixed inset-0 z-40 cursor-default"
+        onClick={onClose}
+      />
+      <div
+        role="dialog"
+        aria-label="Columns and saved views"
+        className="absolute right-0 top-full z-50 mt-2 w-80 rounded-lg border border-line bg-surface p-3 shadow-ths"
+      >
+        {/* Section 1 — visibility */}
+        <div className="mb-1 flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          <span>Visible columns</span>
+          <span className="font-normal normal-case">{order.length} of {COLUMNS.length}</span>
+        </div>
+        <p className="mb-1.5 text-[11px] text-ink400">Shown columns are also what search matches.</p>
+        <div className="max-h-56 space-y-0.5 overflow-y-auto">
+          {COLUMNS.map((c) => {
+            const shown = visible.has(c.key);
+            const isLastVisible = shown && order.length <= 1;
+            return (
+              <label
+                key={c.key}
+                className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-ink900 ${
+                  isLastVisible ? 'opacity-60' : 'cursor-pointer hover:bg-[var(--brand-soft)]'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={shown}
+                  disabled={isLastVisible}
+                  onChange={() => onToggleColumn(c.key)}
+                  className="h-4 w-4 accent-[var(--brand-accent)]"
+                />
+                <span className="flex-1 truncate">{c.label}</span>
+                {c.phi && <Lock className="h-3 w-3 shrink-0 text-ink400" aria-hidden />}
+              </label>
+            );
+          })}
+        </div>
+        <button
+          type="button"
+          onClick={onReset}
+          className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-[var(--brand-ink)]"
+        >
+          <RotateCcw className="h-3 w-3" aria-hidden /> Reset to all columns
+        </button>
+
+        {/* Section 2 — saved views */}
+        <div className="mt-3 border-t border-line pt-2">
+          <div className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            <Bookmark className="h-3.5 w-3.5" aria-hidden /> Saved views
+          </div>
+          {views.length === 0 ? (
+            <p className="px-1 py-1 text-xs text-ink400">No saved views yet — save the current layout below.</p>
+          ) : (
+            <ul className="space-y-0.5">
+              {views.map((v) => (
+                <li key={v.name} className="group flex items-center gap-1 rounded-md px-1 py-1 hover:bg-[var(--brand-soft)]">
+                  <button
+                    type="button"
+                    onClick={() => onLoadView(v)}
+                    className="flex-1 truncate text-left text-sm text-ink900"
+                    title={`Load “${v.name}” (${v.columns.length} columns)`}
+                  >
+                    {v.name}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void onSetDefault(v.name)}
+                    aria-pressed={v.isDefault}
+                    aria-label={v.isDefault ? `${v.name} is your default view` : `Make ${v.name} your default`}
+                    title={v.isDefault ? 'Default view' : 'Set as default'}
+                    className="shrink-0 rounded p-1 text-ink400 hover:text-[var(--brand-ink)]"
+                  >
+                    <Star className={`h-3.5 w-3.5 ${v.isDefault ? 'fill-[var(--brand-accent)] text-[var(--brand-accent)]' : ''}`} aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void onDeleteView(v.name)}
+                    aria-label={`Delete ${v.name}`}
+                    title="Delete view"
+                    className="shrink-0 rounded p-1 text-ink400 hover:text-destructive"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" aria-hidden />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {/* Save current layout */}
+          <div className="mt-2 space-y-1.5">
+            <input
+              type="text"
+              value={saveName}
+              onChange={(e) => setSaveName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void submitSave();
+                }
+              }}
+              placeholder="Save current layout as…"
+              aria-label="New view name"
+              maxLength={80}
+              className="h-8 w-full rounded-md border border-line bg-card px-2 text-sm text-ink900 outline-none transition-colors placeholder:text-ink400 focus:border-[var(--brand-accent)] focus:ring-2 focus:ring-[var(--brand-accent)]/25"
+            />
+            <div className="flex items-center justify-between gap-2">
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={makeDefault}
+                  onChange={(e) => setMakeDefault(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-[var(--brand-accent)]"
+                />
+                Make default
+              </label>
+              <Button type="button" size="sm" disabled={saving || saveName.trim() === ''} onClick={() => void submitSave()}>
+                <Save className="h-3.5 w-3.5" aria-hidden />
+                {saving ? 'Saving…' : 'Save'}
+              </Button>
+            </div>
+            {error && <p className="text-xs text-destructive">{error}</p>}
+          </div>
+        </div>
       </div>
     </>
   );

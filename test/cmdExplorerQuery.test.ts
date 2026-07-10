@@ -5,10 +5,12 @@ import {
   buildCmdExplorerQuery,
   buildCmdSearchSummaryQueries,
   buildCmdFacilityOptionsQuery,
+  sanitizeGridColumns,
   resolveCmdExplorerSort,
   resolveCmdExplorerCursor,
   CMD_EXPLORER_DEFAULT_SORT,
   CMD_EXPLORER_SORTABLE_COLUMNS,
+  CMD_EXPLORER_COLUMN_KEYS,
   CMD_SEARCH_TOP_N,
   type CmdExplorerFilter,
   type CmdExplorerSort,
@@ -213,6 +215,31 @@ test('search summary carries the same PHI predicate, tenant-scoped', () => {
   assertAllBound(totals.sql, totals.params);
   assert.match(groups.facility.sql, /member_id_bidx = \$2/);
   assertAllBound(groups.facility.sql, groups.facility.params);
+});
+
+test('sanitizeGridColumns: keeps allowlisted keys in order, drops unknown/non-string, dedups', () => {
+  // unknown key, a non-string, and a duplicate are all dropped; valid keys keep their given order
+  const input = ['facility', 'charge_date', 'facility', 'ssn', 42, 'pct_allowed', null];
+  assert.deepEqual(sanitizeGridColumns(input), ['facility', 'charge_date', 'pct_allowed']);
+});
+
+test('sanitizeGridColumns: injection-y / garbage input never yields a bogus key', () => {
+  assert.deepEqual(sanitizeGridColumns(['charge_date; drop table x']), []);
+  assert.deepEqual(sanitizeGridColumns('not-an-array' as unknown), []);
+  assert.deepEqual(sanitizeGridColumns(null), []);
+  assert.deepEqual(sanitizeGridColumns(undefined), []);
+  assert.deepEqual(sanitizeGridColumns([]), []);
+});
+
+test('sanitizeGridColumns: the full allowlist round-trips and result never exceeds it', () => {
+  const all = [...CMD_EXPLORER_COLUMN_KEYS];
+  assert.deepEqual(sanitizeGridColumns(all), all);
+  // duplicating every key still can't exceed the allowlist size (dedup)
+  assert.equal(sanitizeGridColumns([...all, ...all]).length, all.length);
+  // the 3 PHI display keys ARE valid layout keys (the KEY is non-PHI; the value renders masked)
+  for (const k of ['patient_name', 'member_id_raw', 'group_number']) {
+    assert.ok((CMD_EXPLORER_COLUMN_KEYS as readonly string[]).includes(k));
+  }
 });
 
 test('resolveCmdExplorerSort clamps unknown columns to the default', () => {

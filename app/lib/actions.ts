@@ -46,12 +46,18 @@ import {
   resolveCmdExplorerSort,
   resolveCmdExplorerCursor,
   CMD_EXPLORER_SEARCH_COLUMNS,
+  sanitizeGridColumns,
+  gridViewsFor,
+  saveGridViewRow,
+  setDefaultGridViewRow,
+  deleteGridViewRow,
   type CmdExplorerSort,
   type CmdExplorerCursor,
   type CmdExplorerSearchColumn,
   type CmdSearchSummary,
   type CmdSearchGroup,
   type CmdFacilityOption,
+  type GridViewRow,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
 import { dashboardAccess } from '@/lib/access';
@@ -188,6 +194,7 @@ export type {
   CmdSearchSummary,
   CmdSearchGroup,
   CmdFacilityOption,
+  GridViewRow,
 };
 
 export type AgentActionResult =
@@ -976,6 +983,92 @@ export async function loadCmdExplorerFacilities(view?: DashboardView): Promise<C
     return { ok: true, facilities: await cmdExplorerFacilities(entityIds) };
   } catch {
     return { ok: false };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Per-user saved grid views (Collections Explorer "Show columns" templates, migration 0046). ALL
+// four actions scope to the caller's OWN authenticated identity, resolved SERVER-SIDE — they never
+// accept a client-supplied user id, so one user can never read/modify/delete another's views. The
+// writes go through the SECURITY DEFINER functions (server.ts wrappers); the columns array is
+// allowlist-sanitized here before it is persisted. Fail closed with no principal (not signed in /
+// unprovisioned / the no-auth staged-rollout fallback) — personal views require a real user.
+// ---------------------------------------------------------------------------
+
+/** The caller's own verified auth uid (the grid-view owner key), or null when there's no principal. */
+async function currentUserId(): Promise<string | null> {
+  const result = await dashboardAccess();
+  if (!result.ok) return null;
+  return result.access.user?.id ?? null;
+}
+
+/** Max saved views per user surfaced/creatable (bounded; a UI convenience, not a hard business cap). */
+const GRID_VIEW_NAME_MAX = 80;
+
+export type GridViewsResult = { ok: true; views: GridViewRow[] } | { ok: false };
+export type GridViewMutationResult = { ok: true } | { ok: false; error: string };
+
+/** List the signed-in user's saved column layouts (their own only). */
+export async function listGridViews(): Promise<GridViewsResult> {
+  const uid = await currentUserId();
+  if (!uid) return { ok: false };
+  try {
+    return { ok: true, views: await gridViewsFor(uid) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Create or update (by name) one of the caller's saved views. `columns` is allowlist-sanitized
+ * (unknown/dup/non-string keys dropped, order preserved); a view must keep at least one column.
+ */
+export async function saveGridView(
+  name: string,
+  columns: string[],
+  makeDefault = false,
+): Promise<GridViewMutationResult> {
+  const uid = await currentUserId();
+  if (!uid) return { ok: false, error: 'Sign in to save a view.' };
+  const trimmed = typeof name === 'string' ? name.trim() : '';
+  if (trimmed.length < 1 || trimmed.length > GRID_VIEW_NAME_MAX) {
+    return { ok: false, error: `View name must be 1–${GRID_VIEW_NAME_MAX} characters.` };
+  }
+  const cols = sanitizeGridColumns(columns);
+  if (cols.length === 0) return { ok: false, error: 'A view must include at least one column.' };
+  try {
+    await saveGridViewRow(uid, trimmed, cols, Boolean(makeDefault));
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'The view could not be saved right now.' };
+  }
+}
+
+/** Make one of the caller's views their default (server fn errors if the name isn't theirs/absent). */
+export async function setDefaultGridView(name: string): Promise<GridViewMutationResult> {
+  const uid = await currentUserId();
+  if (!uid) return { ok: false, error: 'Sign in to set a default view.' };
+  const trimmed = typeof name === 'string' ? name.trim() : '';
+  if (!trimmed) return { ok: false, error: 'Invalid view.' };
+  try {
+    await setDefaultGridViewRow(uid, trimmed);
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'Your default view could not be updated right now.' };
+  }
+}
+
+/** Delete one of the caller's saved views by name (no-op if it isn't theirs / doesn't exist). */
+export async function deleteGridView(name: string): Promise<GridViewMutationResult> {
+  const uid = await currentUserId();
+  if (!uid) return { ok: false, error: 'Sign in to delete a view.' };
+  const trimmed = typeof name === 'string' ? name.trim() : '';
+  if (!trimmed) return { ok: false, error: 'Invalid view.' };
+  try {
+    await deleteGridViewRow(uid, trimmed);
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'The view could not be deleted right now.' };
   }
 }
 

@@ -162,6 +162,57 @@ export function buildCmdFacilityOptionsQuery(entityIds: string[]): { sql: string
   return { sql, params };
 }
 
+// --- saved grid views (per-user column layout) ------------------------------
+
+/**
+ * The explorer grid's DISPLAY columns — the CLOSED allowlist of column KEYS a saved view may
+ * reference. The ORDER of a saved view's array is the display order; MEMBERSHIP is visibility (a
+ * column absent from the array is hidden). This includes the 3 PHI *display* keys (patient_name /
+ * member_id_raw / group_number): the KEY is non-PHI (the VALUE renders masked until an audited
+ * reveal), so a layout may legitimately include or omit them. Kept here (not just in the client's
+ * COLUMNS) so the server can validate a client-supplied saved-view column list against a fixed set —
+ * no unknown/garbage key is ever persisted. Order mirrors the client's DEFAULT_ORDER.
+ */
+export const CMD_EXPLORER_COLUMN_KEYS = [
+  'charge_date',
+  'payment_received',
+  'cpt_code',
+  'revenue_code',
+  'facility',
+  'patient_name',
+  'member_id_raw',
+  'group_number',
+  'charge_amount',
+  'allowed_amount',
+  'pct_allowed',
+  'insurance_payments',
+  'pct_paid',
+  'adjustments',
+  'patient_balance_due',
+  'primary_payer',
+] as const;
+export type CmdExplorerColumnKey = (typeof CMD_EXPLORER_COLUMN_KEYS)[number];
+const CMD_EXPLORER_COLUMN_KEY_SET = new Set<string>(CMD_EXPLORER_COLUMN_KEYS);
+
+/**
+ * Sanitize a client-supplied saved-view column list before it is persisted: keep only allowlisted
+ * keys, in the supplied order, de-duplicated; silently drop anything unknown/non-string; the result
+ * can never exceed the allowlist size. Returns [] when nothing valid remains — the caller treats an
+ * empty result as an invalid save (a view must show at least one column). This is the injection/DoS
+ * boundary for the untrusted `columns` array (which is otherwise stored verbatim as jsonb).
+ */
+export function sanitizeGridColumns(input: unknown): CmdExplorerColumnKey[] {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set<string>();
+  const out: CmdExplorerColumnKey[] = [];
+  for (const v of input) {
+    if (typeof v !== 'string' || !CMD_EXPLORER_COLUMN_KEY_SET.has(v) || seen.has(v)) continue;
+    seen.add(v);
+    out.push(v as CmdExplorerColumnKey);
+  }
+  return out;
+}
+
 // --- sort + cursor ----------------------------------------------------------
 
 /**

@@ -43,6 +43,8 @@ export {
   CMD_EXPLORER_SORTABLE_COLUMNS,
   CMD_EXPLORER_DEFAULT_SORT,
   CMD_SEARCH_TOP_N,
+  CMD_EXPLORER_COLUMN_KEYS,
+  sanitizeGridColumns,
   resolveCmdExplorerSort,
   resolveCmdExplorerCursor,
   buildCmdSearchSummaryQueries,
@@ -284,6 +286,67 @@ export async function upsertAppUser(
 /** Revoke a user's role (delete the row → unprovisioned). The DB fn guards the last super_admin. */
 export async function deleteAppUser(userId: string): Promise<void> {
   await readerExecutor().query('select claims.delete_app_user($1)', [userId]);
+}
+
+// ---------------------------------------------------------------------------
+// Per-user saved grid views (migration 0046) — the Collections Explorer's "Show columns" templates.
+// READS: direct claims_reader SELECT, app-scoped by the caller's uid (mirrors appUserFor — the
+// WHERE is the scope). WRITES: the claims_admin-owned SECURITY DEFINER save/set-default/delete
+// functions, EXECUTE'd on the reader pool (no direct DML), every op scoped to the p_user the Server
+// Action passes — ALWAYS the caller's own verified uid, NEVER client input. Non-PHI (column keys +
+// the user's own label). `columns` crosses as jsonb (stringified, cast $n::jsonb).
+// ---------------------------------------------------------------------------
+
+/** One saved column layout: the display column keys in order (membership = visibility) + default flag. */
+export interface GridViewRow {
+  name: string;
+  columns: string[];
+  isDefault: boolean;
+}
+
+/** List the caller's saved views (app-scoped by uid; default first, then alphabetical). */
+export async function gridViewsFor(userId: string): Promise<GridViewRow[]> {
+  const { rows } = await readerExecutor().query<{
+    view_name: string;
+    columns: unknown;
+    is_default: boolean;
+  }>(
+    'select view_name, columns, is_default from claims.user_grid_views ' +
+      'where app_user_id = $1 order by is_default desc, view_name',
+    [userId],
+  );
+  return rows.map((r) => ({
+    name: r.view_name,
+    columns: Array.isArray(r.columns)
+      ? (r.columns as unknown[]).filter((c): c is string => typeof c === 'string')
+      : [],
+    isDefault: Boolean(r.is_default),
+  }));
+}
+
+/** Create/update the caller's named view (columns pre-sanitized by the action; DB fn bounds shape). */
+export async function saveGridViewRow(
+  userId: string,
+  name: string,
+  columns: string[],
+  makeDefault: boolean,
+): Promise<void> {
+  await readerExecutor().query('select claims.save_grid_view($1, $2, $3::jsonb, $4)', [
+    userId,
+    name,
+    JSON.stringify(columns),
+    makeDefault,
+  ]);
+}
+
+/** Set the caller's default view by name (DB fn raises if the name doesn't exist). */
+export async function setDefaultGridViewRow(userId: string, name: string): Promise<void> {
+  await readerExecutor().query('select claims.set_default_grid_view($1, $2)', [userId, name]);
+}
+
+/** Delete the caller's view by name (no-op if absent). */
+export async function deleteGridViewRow(userId: string, name: string): Promise<void> {
+  await readerExecutor().query('select claims.delete_grid_view($1, $2)', [userId, name]);
 }
 
 /**
