@@ -109,3 +109,22 @@
     letter-spacing: 0;
   }
 }
+
+/*
+ * prefers-reduced-motion (Session E) — accessibility, not optional polish. When the OS setting is
+ * on, collapse ALL animation + transition to near-instant globally (the standard a11y reset). This
+ * is the single, verifiable mechanism behind every motion primitive added in Session E: the staged
+ * panel reveals, the skeleton pulse, hover/refresh transitions, and smooth scroll all become
+ * effectively instant here, so no per-component opt-out is needed. Verify by toggling the OS
+ * "Reduce motion" setting (macOS: System Settings → Accessibility → Display → Reduce motion).
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

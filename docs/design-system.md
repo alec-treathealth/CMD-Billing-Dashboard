@@ -82,7 +82,30 @@ Uses `WidgetCard` in `dashboard.tsx`. Renders:
 import { Skeleton } from '@/components/ui/skeleton';
 <Skeleton className="h-4 w-3/4" />
 ```
-`animate-pulse rounded-md bg-muted` — use for any data-pending placeholder.
+`animate-pulse rounded-md bg-muted` — use for any data-pending placeholder. **Size every skeleton to
+its real content's footprint** so content swapping in causes no layout shift (CLS). Reserve skeletons
+for genuine first-load / empty→populated; on a *refetch* of already-shown content, keep the content
+visible and dim it (see Motion → refresh) instead of collapsing to a skeleton.
+
+### Motion (tokens — Session E)
+One easing everywhere: **`ease-out`**. Two durations:
+
+| Token | Duration | Tailwind | Use |
+|-------|---------:|----------|-----|
+| **fast** | ~150ms | `duration-150` | hover/focus, small state flips, the refresh dim |
+| **panel** | ~220ms | `animate-ths-reveal` / `animate-ths-exit` (0.22s / 0.18s) | panel enter/exit, skeleton→content swap, staged reveal |
+
+- **Enter/exit:** `animate-ths-reveal` (fade + 4px rise) on mount; `animate-ths-exit` on a
+  delayed-unmount so conditionally-rendered panels don't pop (keyframes in `tailwind.config.ts`).
+- **Staged reveal:** for a group of sibling panels, apply `animate-ths-reveal` with a small
+  per-item `animationDelay`, **capped** (≈`min(i, 3) * 60ms`) so the total stagger stays bounded no
+  matter how many panels are present — a quick settle, not a slow cascade.
+- **Refresh (non-blocking):** during an in-flight refetch of content that's already on screen, keep
+  it rendered at `opacity-60 transition-opacity duration-150` with a thin top progress bar — never
+  blank it to a skeleton on every interaction.
+- **Reduced motion:** a single global `@media (prefers-reduced-motion: reduce)` reset in
+  `globals.css` collapses all animation/transition to near-instant — no per-component opt-out needed.
+  Verify by toggling the OS "Reduce motion" setting.
 
 ### Notice banner
 ```tsx

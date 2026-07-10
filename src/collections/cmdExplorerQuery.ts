@@ -181,10 +181,11 @@ export const CMD_EXPLORER_COLUMN_KEYS = [
   'payment_received',
   'cpt_code',
   'revenue_code',
-  'facility',
+  'primary_payer',
   'patient_name',
   'member_id_raw',
   'group_number',
+  'facility',
   'charge_amount',
   'allowed_amount',
   'pct_allowed',
@@ -192,7 +193,6 @@ export const CMD_EXPLORER_COLUMN_KEYS = [
   'pct_paid',
   'adjustments',
   'patient_balance_due',
-  'primary_payer',
 ] as const;
 export type CmdExplorerColumnKey = (typeof CMD_EXPLORER_COLUMN_KEYS)[number];
 const CMD_EXPLORER_COLUMN_KEY_SET = new Set<string>(CMD_EXPLORER_COLUMN_KEYS);

@@ -93,10 +93,24 @@ const config: Config = {
           from: { height: 'var(--radix-accordion-content-height)' },
           to: { height: '0' },
         },
+        // TreatHealthOS motion tokens (Session E). Enter = fade + small rise; exit = the reverse.
+        // One shared easing (ease-out) + the "panel" duration (see docs/design-system.md §Motion).
+        'ths-reveal': {
+          from: { opacity: '0', transform: 'translateY(4px)' },
+          to: { opacity: '1', transform: 'translateY(0)' },
+        },
+        'ths-exit': {
+          from: { opacity: '1', transform: 'translateY(0)' },
+          to: { opacity: '0', transform: 'translateY(4px)' },
+        },
       },
       animation: {
         'accordion-down': 'accordion-down 0.2s ease-out',
         'accordion-up': 'accordion-up 0.2s ease-out',
+        // Canonical enter/exit for panels + staged summary reveal. `both` keeps the from-state
+        // before a staggered animation-delay fires (no pre-flash). ~220ms = the "panel" token.
+        'ths-reveal': 'ths-reveal 0.22s ease-out both',
+        'ths-exit': 'ths-exit 0.18s ease-out both',
       },
     },
   },

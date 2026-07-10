@@ -16,7 +16,7 @@
  * The "Columns" menu controls which columns are shown (+ their order) and persists that as a named
  * per-user saved view; shown columns are also what search matches. Rows order by the sort key.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import {
   Activity,
   ArrowDown,
@@ -54,6 +54,7 @@ import {
   YAxis,
 } from 'recharts';
 import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ControlSelect, Pager, useColumnDnD } from '@/components/data-grid';
 import { PHI_MASK } from '@/lib/phi';
@@ -87,15 +88,19 @@ type ColKey =
   | 'member_id_raw'
   | 'group_number';
 
+// Default column order (drives DEFAULT_ORDER). Per Alec: Primary Payer sits right after Revenue
+// Code (up front with the other coding fields), and Facility moves down next to the money block
+// (between Group Number and Charge Amount). Users can still drag/hide from here; this is the default.
 const COLUMNS: readonly { key: ColKey; label: string; phi: boolean; numeric: boolean }[] = [
   { key: 'charge_date', label: 'Charge From Date', phi: false, numeric: false },
   { key: 'payment_received', label: 'Payment Received', phi: false, numeric: false },
   { key: 'cpt_code', label: 'CPT Code', phi: false, numeric: false },
   { key: 'revenue_code', label: 'Revenue Code', phi: false, numeric: false },
-  { key: 'facility', label: 'Facility', phi: false, numeric: false },
+  { key: 'primary_payer', label: 'Primary Payer', phi: false, numeric: false },
   { key: 'patient_name', label: 'Patient Name', phi: true, numeric: false },
   { key: 'member_id_raw', label: 'Member ID', phi: true, numeric: false },
   { key: 'group_number', label: 'Group Number', phi: true, numeric: false },
+  { key: 'facility', label: 'Facility', phi: false, numeric: false },
   { key: 'charge_amount', label: 'Charge Amount', phi: false, numeric: true },
   { key: 'allowed_amount', label: 'Allowed Amount', phi: false, numeric: true },
   { key: 'pct_allowed', label: '% Allowed', phi: false, numeric: true },
@@ -103,7 +108,6 @@ const COLUMNS: readonly { key: ColKey; label: string; phi: boolean; numeric: boo
   { key: 'pct_paid', label: '% Paid', phi: false, numeric: true },
   { key: 'adjustments', label: 'Adjustments', phi: false, numeric: true },
   { key: 'patient_balance_due', label: 'Patient Balance Due', phi: false, numeric: true },
-  { key: 'primary_payer', label: 'Primary Payer', phi: false, numeric: false },
 ];
 const COLUMN_LABEL: Record<string, string> = Object.fromEntries(COLUMNS.map((c) => [c.key, c.label]));
 const IS_PHI = new Set<string>(COLUMNS.filter((c) => c.phi).map((c) => c.key));
@@ -203,17 +207,41 @@ function refinementLabel(r: Refinement): string {
   return r.kind === 'combo' ? `CPT×Rev: ${r.cpt} / ${r.revenue}` : `${REFINE_LABEL[r.kind]}: ${r.value}`;
 }
 
+// `refreshing` = a refetch is in flight but we ALREADY have data from a prior fetch: keep it on
+// screen (dimmed) instead of collapsing to a skeleton. `loading` = genuine first load / no prior
+// data → show a skeleton. (Session E: non-blocking refetch feel, no fetch-architecture change.)
 type SummaryState =
   | { kind: 'idle' }
   | { kind: 'loading' }
   | { kind: 'error' }
-  | { kind: 'ready'; data: CmdSearchSummary };
+  | { kind: 'ready'; data: CmdSearchSummary }
+  | { kind: 'refreshing'; data: CmdSearchSummary };
 
 type CohortState =
   | { kind: 'idle' }
   | { kind: 'loading' }
   | { kind: 'error' }
-  | { kind: 'ready'; data: CohortCurve };
+  | { kind: 'ready'; data: CohortCurve }
+  | { kind: 'refreshing'; data: CohortCurve };
+
+/**
+ * Keep a conditionally-rendered node mounted through its exit animation. Returns `rendered` (mount
+ * flag) and `exiting` (true during the exit window) so the caller can swap enter/exit animations.
+ * Pure presentation — no data or fetch involvement. Respects reduced motion transparently (the
+ * global CSS reset makes the exit animation near-instant; the timer still fires to unmount).
+ */
+function useDelayedUnmount(active: boolean, exitMs = 200): { rendered: boolean; exiting: boolean } {
+  const [rendered, setRendered] = useState(active);
+  useEffect(() => {
+    if (active) {
+      setRendered(true);
+      return;
+    }
+    const t = setTimeout(() => setRendered(false), exitMs);
+    return () => clearTimeout(t);
+  }, [active, exitMs]);
+  return { rendered, exiting: rendered && !active };
+}
 
 export function CmdCollectionsExplorer({
   view,
@@ -261,6 +289,15 @@ export function CmdCollectionsExplorer({
 
   const [summary, setSummary] = useState<SummaryState>({ kind: 'idle' });
   const [cohort, setCohort] = useState<CohortState>({ kind: 'idle' });
+  // Mark grid refetches (filter/sort/pagination) as non-urgent so typing/clicking stays responsive;
+  // `isPending` also feeds the grid's subtle "refreshing" treatment. This wraps the EXISTING fetch
+  // calls — it changes nothing about what is fetched or when. Keep the cohort panel mounted through
+  // its exit animation so it doesn't pop out when the alpha-prefix search clears.
+  const [isPending, startTransition] = useTransition();
+  const cohortPresence = useDelayedUnmount(cohortActive, 200);
+  // Freeze the last resolved cohort (data + the prefix it was for) so the panel can keep showing it
+  // while it fades OUT — by exit time the live `cohort` state has already reset to idle.
+  const cohortSnapshotRef = useRef<{ data: CohortCurve; prefix: string } | null>(null);
 
   // A facility/payer refinement AND the facility multi-select are tenant-specific; a term is generic.
   // Reset both when the view (tenant) changes so a stale drill-down / facility set doesn't filter the
@@ -297,6 +334,11 @@ export function CmdCollectionsExplorer({
   const [revealed, setRevealed] = useState(false);
   const [revealing, setRevealing] = useState(false);
   const [revealError, setRevealError] = useState<string | null>(null);
+  // STICKY reveal preference: once a PHI-entitled user turns "Reveal all" on, it STAYS on across
+  // page/filter/sort changes — the new page auto-reveals so they don't re-click every navigation
+  // (Alec's painpoint). Each page is still decrypted via the audited server action (one audit per
+  // page), and loadPage still drops the decrypted PHI from memory on every navigation.
+  const [revealAll, setRevealAll] = useState(false);
 
   // Guards against out-of-order page responses (fast Prev/Next clicks).
   const reqRef = useRef(0);
@@ -454,10 +496,14 @@ export function CmdCollectionsExplorer({
     [view],
   );
 
-  // (Re)load the first page whenever the filter OR sort changes (resets keyset pagination).
+  // (Re)load the first page whenever the filter OR sort changes (resets keyset pagination). The
+  // fetch call is UNCHANGED — wrapping it in a transition just marks the refetch non-urgent so the
+  // current page stays interactive and shows the "refreshing" treatment rather than blanking.
   useEffect(() => {
     setCursors([null]);
-    void loadPage(0, null, filterArg, sort);
+    startTransition(() => {
+      void loadPage(0, null, filterArg, sort);
+    });
   }, [filterArg, sort, loadPage]);
 
   // Fetch the aggregate search summary whenever the (debounced) term / columns / window change.
@@ -469,7 +515,10 @@ export function CmdCollectionsExplorer({
       return;
     }
     let live = true;
-    setSummary({ kind: 'loading' });
+    // Keep prior results on screen (dimmed) during a refetch; skeleton only on genuine first load.
+    setSummary((prev) =>
+      prev.kind === 'ready' || prev.kind === 'refreshing' ? { kind: 'refreshing', data: prev.data } : { kind: 'loading' },
+    );
     const f: {
       q?: string;
       searchColumns?: string[];
@@ -523,7 +572,10 @@ export function CmdCollectionsExplorer({
       return;
     }
     let live = true;
-    setCohort({ kind: 'loading' });
+    // Keep the prior cohort curve visible (dimmed) while re-analyzing a changed prefix.
+    setCohort((prev) =>
+      prev.kind === 'ready' || prev.kind === 'refreshing' ? { kind: 'refreshing', data: prev.data } : { kind: 'loading' },
+    );
     loadCohortCurve(dAlpha, view)
       .then((r) => {
         if (live) setCohort(r.ok ? { kind: 'ready', data: r.curve } : { kind: 'error' });
@@ -536,7 +588,17 @@ export function CmdCollectionsExplorer({
     };
   }, [cohortActive, dAlpha, view]);
 
-  const busy = status === 'loading';
+  // Snapshot the last resolved cohort so the panel can render it while fading out (by exit time the
+  // live state has reset to idle). Presentation only — no fetch involvement.
+  useEffect(() => {
+    if (cohort.kind === 'ready' || cohort.kind === 'refreshing') {
+      cohortSnapshotRef.current = { data: cohort.data, prefix: dAlpha };
+    }
+  }, [cohort, dAlpha]);
+
+  const busy = status === 'loading' || isPending;
+  // A refetch is in flight but we still have rows on screen → dim + progress bar (don't blank).
+  const gridRefreshing = busy && rows.length > 0;
 
   function moveColumn(key: ColKey, dir: 'left' | 'right') {
     setOrder((prev) => {
@@ -640,11 +702,9 @@ export function CmdCollectionsExplorer({
     requestAnimationFrame(() => gridRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
   }
 
-  async function toggleRevealAll() {
-    if (revealed) {
-      setRevealed(false);
-      return;
-    }
+  // Decrypt the CURRENT page's PHI via the audited server action. Unchanged reveal logic — just
+  // extracted so the sticky preference can call it on each page (incl. after navigation).
+  const revealCurrentPage = useCallback(async () => {
     if (rows.length === 0) return;
     setRevealing(true);
     setRevealError(null);
@@ -666,7 +726,21 @@ export function CmdCollectionsExplorer({
     } finally {
       setRevealing(false);
     }
-  }
+  }, [rows]);
+
+  // Honor the sticky preference: when ON, auto-reveal the current page (loadPage resets `revealed`
+  // to false for each fresh page, so this re-fires after every navigation — each audited). When
+  // OFF, hide immediately. Gated on canRevealPhi so a non-entitled role can never trigger a reveal.
+  // The `status === 'ready'` guard is essential: it waits until the NEW page's rows have landed, so
+  // a mid-navigation fire can't reveal the stale page and leave the new one masked.
+  useEffect(() => {
+    if (!canRevealPhi) return;
+    if (revealAll && status === 'ready' && !revealed && !revealing && rows.length > 0) {
+      void revealCurrentPage();
+    } else if (!revealAll && revealed) {
+      setRevealed(false);
+    }
+  }, [revealAll, revealed, revealing, rows, status, canRevealPhi, revealCurrentPage]);
 
   function cellText(key: ColKey, row: CmdExplorerRow): string {
     if (IS_PHI.has(key)) {
@@ -844,7 +918,20 @@ export function CmdCollectionsExplorer({
       )}
 
       {/* ---- Alpha-prefix cohort payer-behavior curve (PHI-gated, Session D) --- */}
-      {cohortActive && <CohortCurvePanel state={cohort} prefix={dAlpha} />}
+      {/* Kept mounted through its exit animation so it fades out instead of popping; during the exit
+          window the live state has reset to idle, so render the frozen snapshot. */}
+      {cohortPresence.rendered && (
+        <div className={cohortPresence.exiting ? 'animate-ths-exit' : 'animate-ths-reveal'}>
+          {cohortPresence.exiting && cohortSnapshotRef.current ? (
+            <CohortCurvePanel
+              state={{ kind: 'ready', data: cohortSnapshotRef.current.data }}
+              prefix={cohortSnapshotRef.current.prefix}
+            />
+          ) : (
+            <CohortCurvePanel state={cohort} prefix={dAlpha} />
+          )}
+        </div>
+      )}
 
       {/* ---- Detail grid -------------------------------------------------- */}
       <div ref={gridRef} className="space-y-3">
@@ -891,11 +978,11 @@ export function CmdCollectionsExplorer({
                 variant="outline"
                 size="sm"
                 disabled={revealing}
-                aria-pressed={revealed}
-                onClick={() => void toggleRevealAll()}
-                className={revealed ? 'border-[var(--brand-accent)] text-[var(--brand-ink)]' : undefined}
+                aria-pressed={revealAll}
+                onClick={() => setRevealAll((v) => !v)}
+                className={revealAll ? 'border-[var(--brand-accent)] text-[var(--brand-ink)]' : undefined}
               >
-                {revealing ? 'Revealing…' : revealed ? 'Hide identifiers' : 'Reveal all'}
+                {revealing ? 'Revealing…' : revealAll ? 'Hide identifiers' : 'Reveal all'}
               </Button>
             )}
           </div>
@@ -914,13 +1001,22 @@ export function CmdCollectionsExplorer({
         )}
 
         {status === 'loading' && rows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">Loading collections…</p>
+          <GridSkeleton cols={order.length} />
         ) : rows.length === 0 ? (
           <div className="py-8 text-center text-sm text-muted-foreground">
             {hasAnySearch ? 'No charge lines match this search.' : 'No charge lines match the current filters.'}
           </div>
         ) : (
-          <div className="overflow-x-auto rounded-md border">
+          <div className="relative">
+            {/* Non-blocking refetch: keep the current page visible, dimmed, with a thin progress bar
+                on top — don't blank to a skeleton on every filter/sort/pagination change. */}
+            {gridRefreshing && (
+              <div className="absolute inset-x-0 top-0 z-10 h-0.5 animate-pulse rounded-t-md bg-[var(--brand-accent)]" aria-hidden />
+            )}
+            <div
+              aria-busy={gridRefreshing}
+              className={`overflow-x-auto rounded-md border transition-opacity duration-150 ${gridRefreshing ? 'opacity-60' : ''}`}
+            >
             <Table>
               <TableHeader>
                 <TableRow>
@@ -1016,6 +1112,7 @@ export function CmdCollectionsExplorer({
                 ))}
               </TableBody>
             </Table>
+            </div>
           </div>
         )}
 
@@ -1025,10 +1122,10 @@ export function CmdCollectionsExplorer({
           hasNext={hasNext}
           disabled={busy}
           onPrev={() => {
-            if (page > 0) void loadPage(page - 1, cursors[page - 1] ?? null, filterArg, sort);
+            if (page > 0) startTransition(() => void loadPage(page - 1, cursors[page - 1] ?? null, filterArg, sort));
           }}
           onNext={() => {
-            if (hasNext) void loadPage(page + 1, cursors[page + 1] ?? null, filterArg, sort);
+            if (hasNext) startTransition(() => void loadPage(page + 1, cursors[page + 1] ?? null, filterArg, sort));
           }}
         />
       </div>
@@ -1075,7 +1172,7 @@ function FacilityFilter({
       <div
         role="dialog"
         aria-label="Filter by facility"
-        className="absolute left-0 top-full z-50 mt-2 w-80 rounded-lg border border-line bg-surface p-3 shadow-ths"
+        className="absolute left-0 top-full z-50 mt-2 w-80 animate-ths-reveal rounded-lg border border-line bg-surface p-3 shadow-ths"
       >
         <div className="mb-1 flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           <span>Show facilities</span>
@@ -1223,7 +1320,7 @@ function ColumnViewManager({
       <div
         role="dialog"
         aria-label="Columns and saved views"
-        className="absolute right-0 top-full z-50 mt-2 w-80 rounded-lg border border-line bg-surface p-3 shadow-ths"
+        className="absolute right-0 top-full z-50 mt-2 w-80 animate-ths-reveal rounded-lg border border-line bg-surface p-3 shadow-ths"
       >
         {/* Section 1 — visibility */}
         <div className="mb-1 flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -1364,6 +1461,7 @@ function DrillList({
   groups,
   activeValue,
   onDrill,
+  revealDelayMs = 0,
 }: {
   title: string;
   icon: React.ReactNode;
@@ -1371,11 +1469,12 @@ function DrillList({
   groups: CmdSearchGroup[];
   activeValue: string | null;
   onDrill: (kind: RefineKind, value: string) => void;
+  revealDelayMs?: number;
 }) {
   if (groups.length === 0) return null;
   const max = Math.max(...groups.map((g) => g.charge), 1);
   return (
-    <div className="rounded-lg border border-line bg-surface p-3">
+    <div className="animate-ths-reveal rounded-lg border border-line bg-surface p-3" style={{ animationDelay: `${revealDelayMs}ms` }}>
       <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         {icon}
         {title}
@@ -1484,13 +1583,8 @@ function SearchSummaryPanel({
   onDrill: (kind: RefineKind, value: string) => void;
   onDrillCombo: (cpt: string, revenue: string) => void;
 }) {
-  if (state.kind === 'loading') {
-    return (
-      <div className="rounded-xl border border-line bg-card p-4 text-sm text-muted-foreground shadow-ths">
-        Searching…
-      </div>
-    );
-  }
+  // First load (no prior data) → footprint-matched skeleton (no blank flash, no layout shift).
+  if (state.kind === 'loading') return <SummaryPanelSkeleton />;
   if (state.kind === 'error') {
     return (
       <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
@@ -1500,6 +1594,9 @@ function SearchSummaryPanel({
   }
   if (state.kind === 'idle') return null;
 
+  // 'ready' or 'refreshing' both carry data. On a refetch we keep the prior panel visible + dimmed
+  // (see the refresh treatment below) rather than collapsing it to a skeleton on every keystroke.
+  const refreshing = state.kind === 'refreshing';
   const s = state.data;
   if (s.total_count === 0) {
     return (
@@ -1510,7 +1607,15 @@ function SearchSummaryPanel({
   }
 
   return (
-    <div className="rounded-xl border border-line bg-card p-4 shadow-ths">
+    <div
+      aria-busy={refreshing}
+      className={`relative rounded-xl border border-line bg-card p-4 shadow-ths transition-opacity duration-150 ${
+        refreshing ? 'opacity-60' : ''
+      }`}
+    >
+      {refreshing && (
+        <div className="absolute inset-x-0 top-0 h-0.5 animate-pulse rounded-t-xl bg-[var(--brand-accent)]" aria-hidden />
+      )}
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="text-sm font-semibold text-ink900">
           <span className="tabular-nums">{s.total_count.toLocaleString()}</span> charge line
@@ -1519,7 +1624,10 @@ function SearchSummaryPanel({
         <span className="text-xs text-muted-foreground">Click a facility, payer, CPT, or CPT×Rev combo to drill in.</span>
       </div>
 
-      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+      {/* Staged reveal: the four groups arrive in ONE response (single Promise.all), so this is a
+          bounded, capped visual settle (0→180ms), not a slow per-panel cascade. It runs once on
+          mount; a refetch keeps the same mounted elements, so it doesn't re-animate on each keystroke. */}
+      <div className="mt-3 grid animate-ths-reveal grid-cols-2 gap-2 sm:grid-cols-3">
         <StatTile label="Charged" value={MONEY0.format(s.total_charge)} />
         <StatTile label="Insurance Paid" value={MONEY0.format(s.total_paid)} />
         <StatTile label="Patient Balance" value={MONEY0.format(s.total_balance)} />
@@ -1533,6 +1641,7 @@ function SearchSummaryPanel({
           groups={s.by_facility}
           activeValue={refinement?.kind === 'facility' ? refinement.value : null}
           onDrill={onDrill}
+          revealDelayMs={60}
         />
         <DrillList
           title="Top payers"
@@ -1541,6 +1650,7 @@ function SearchSummaryPanel({
           groups={s.by_payer}
           activeValue={refinement?.kind === 'primary_payer' ? refinement.value : null}
           onDrill={onDrill}
+          revealDelayMs={120}
         />
         <DrillList
           title="Top CPT codes"
@@ -1549,6 +1659,7 @@ function SearchSummaryPanel({
           groups={s.by_cpt}
           activeValue={refinement?.kind === 'cpt_code' ? refinement.value : null}
           onDrill={onDrill}
+          revealDelayMs={180}
         />
       </div>
 
@@ -1558,6 +1669,7 @@ function SearchSummaryPanel({
         groups={s.by_combo}
         activeCombo={refinement?.kind === 'combo' ? { cpt: refinement.cpt, revenue: refinement.revenue } : null}
         onDrill={onDrillCombo}
+        revealDelayMs={180}
       />
     </div>
   );
@@ -1575,14 +1687,16 @@ function ComboDrillList({
   groups,
   activeCombo,
   onDrill,
+  revealDelayMs = 0,
 }: {
   groups: CmdComboGroup[];
   activeCombo: { cpt: string; revenue: string } | null;
   onDrill: (cpt: string, revenue: string) => void;
+  revealDelayMs?: number;
 }) {
   if (groups.length === 0) return null;
   return (
-    <div className="mt-3 rounded-lg border border-line bg-surface p-3">
+    <div className="mt-3 animate-ths-reveal rounded-lg border border-line bg-surface p-3" style={{ animationDelay: `${revealDelayMs}ms` }}>
       <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         <Layers className="h-3.5 w-3.5" aria-hidden />
         Top CPT × Revenue-code combinations
@@ -1730,13 +1844,8 @@ function CohortLineChart({
  */
 function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: string }) {
   if (state.kind === 'idle') return null;
-  if (state.kind === 'loading') {
-    return (
-      <div className="rounded-xl border border-line bg-card p-4 text-sm text-muted-foreground shadow-ths">
-        Analyzing the “{prefix}” cohort…
-      </div>
-    );
-  }
+  // First analysis (no prior data) → footprint-matched skeleton, no blank flash.
+  if (state.kind === 'loading') return <CohortPanelSkeleton prefix={prefix} />;
   if (state.kind === 'error') {
     return (
       <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
@@ -1745,6 +1854,9 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
     );
   }
 
+  // 'ready' or 'refreshing' → both carry data; re-analyzing a changed prefix keeps the prior curve
+  // visible + dimmed rather than collapsing to a skeleton.
+  const refreshing = state.kind === 'refreshing';
   const c = state.data;
   // Fail-closed: an empty position curve means every bucket fell below the min-patient floor (or the
   // cohort doesn't exist). Show a notice — never a partial, potentially re-identifiable curve.
@@ -1787,7 +1899,15 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
       : null;
 
   return (
-    <div className="rounded-xl border border-line bg-card p-4 shadow-ths">
+    <div
+      aria-busy={refreshing}
+      className={`relative rounded-xl border border-line bg-card p-4 shadow-ths transition-opacity duration-150 ${
+        refreshing ? 'opacity-60' : ''
+      }`}
+    >
+      {refreshing && (
+        <div className="absolute inset-x-0 top-0 h-0.5 animate-pulse rounded-t-xl bg-[var(--brand-accent)]" aria-hidden />
+      )}
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink900">
           <Activity className="h-4 w-4 text-[var(--brand-ink)]" aria-hidden />
@@ -1821,6 +1941,97 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
             By days since first claim
           </div>
           <CohortLineChart data={c.by_days} xLabel="Day" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- skeletons (Session E) --------------------------------------------------
+// Each is sized to the REAL panel's footprint so content swapping in causes no layout shift (CLS).
+// Reserved for genuine first-load; a refetch of already-shown content keeps it visible + dimmed.
+
+/** Grid table skeleton — a header row + rows of `cols`-wide cells, matching the real grid frame. */
+function GridSkeleton({ cols }: { cols: number }) {
+  const n = Math.max(1, cols);
+  return (
+    <div className="overflow-hidden rounded-md border" aria-hidden>
+      <div className="flex gap-4 border-b bg-muted/30 px-3 py-2.5">
+        {Array.from({ length: n }).map((_, i) => (
+          <Skeleton key={i} className="h-3.5 flex-1" />
+        ))}
+      </div>
+      {Array.from({ length: 8 }).map((_, r) => (
+        <div key={r} className="flex gap-4 border-b px-3 py-3 last:border-b-0">
+          {Array.from({ length: n }).map((_, i) => (
+            <Skeleton key={i} className="h-4 flex-1" />
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Search-summary skeleton — header + 3 stat tiles + 3 drill lists + the combo list, same layout. */
+function SummaryPanelSkeleton() {
+  return (
+    <div className="rounded-xl border border-line bg-card p-4 shadow-ths" aria-hidden>
+      <div className="flex items-center justify-between">
+        <Skeleton className="h-5 w-64" />
+        <Skeleton className="h-3.5 w-48" />
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <div key={i} className="rounded-lg border border-line bg-surface px-3 py-2">
+            <Skeleton className="h-3 w-20" />
+            <Skeleton className="mt-2 h-6 w-24" />
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-3">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <div key={i} className="rounded-lg border border-line bg-surface p-3">
+            <Skeleton className="mb-2 h-3 w-24" />
+            <div className="space-y-2">
+              {Array.from({ length: 6 }).map((_, r) => (
+                <Skeleton key={r} className="h-5 w-full" />
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 rounded-lg border border-line bg-surface p-3">
+        <Skeleton className="mb-2 h-3 w-56" />
+        <div className="space-y-2">
+          {Array.from({ length: 4 }).map((_, r) => (
+            <Skeleton key={r} className="h-5 w-full" />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Cohort-curve skeleton — keeps the real title (with prefix) + two chart-sized placeholders. */
+function CohortPanelSkeleton({ prefix }: { prefix: string }) {
+  return (
+    <div className="rounded-xl border border-line bg-card p-4 shadow-ths" aria-hidden>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1.5">
+          <Activity className="h-4 w-4 text-[var(--brand-ink)]" aria-hidden />
+          <span className="text-sm font-semibold text-ink900">Cohort payer behavior — “{prefix}”</span>
+        </div>
+        <Skeleton className="h-3.5 w-56" />
+      </div>
+      <Skeleton className="mt-3 h-10 w-full rounded-lg" />
+      <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div>
+          <Skeleton className="mb-1 h-3 w-24" />
+          <Skeleton className="h-52 w-full rounded-md" />
+        </div>
+        <div>
+          <Skeleton className="mb-1 h-3 w-36" />
+          <Skeleton className="h-52 w-full rounded-md" />
         </div>
       </div>
     </div>
