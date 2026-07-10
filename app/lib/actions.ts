@@ -39,6 +39,7 @@ import {
   searchClaimsDirect,
   loadCmdExplorerNonPhi,
   loadCmdSearchSummary as loadCmdSearchSummary_,
+  loadCohortCurve as loadCohortCurve_,
   cmdExplorerFacilities,
   recordAccess,
   revealCmdExplorerRow,
@@ -58,6 +59,8 @@ import {
   type CmdSearchGroup,
   type CmdComboGroup,
   type CmdFacilityOption,
+  type CohortCurve,
+  type CohortCurvePoint,
   type GridViewRow,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
@@ -196,6 +199,8 @@ export type {
   CmdSearchGroup,
   CmdComboGroup,
   CmdFacilityOption,
+  CohortCurve,
+  CohortCurvePoint,
   GridViewRow,
 };
 
@@ -974,6 +979,40 @@ export async function loadCmdSearchSummary(
     return { ok: true, summary: await loadCmdSearchSummary_(readerFilter, entityIds) };
   } catch {
     return { ok: false, error: 'The search could not be run right now.' };
+  }
+}
+
+export type CohortCurveResult =
+  | { ok: true; curve: CohortCurve }
+  | { ok: false; error: string };
+
+/**
+ * Alpha-prefix cohort payer-behavior curve (Session D) — the MERGED attrition-rate / days-authorized
+ * metric: allowed%/paid% across the claim sequence, rolled up over every patient sharing an alpha
+ * prefix, on BOTH x-axes (claim/visit position + days-since-first). Tenant-scoped SERVER-SIDE from
+ * the RBAC-clamped view. The raw alpha prefix is resolved to a keyed-HMAC blind-index TOKEN via the
+ * SAME gated (canRevealPhi) + AUDITED path as the Patient Lookup — the raw value is never stored,
+ * logged, or sent to SQL. Small-cohort suppression (min distinct patients/bucket) is enforced INSIDE
+ * the query. Returns an EMPTY curve (never an error) when the prefix isn't usable (< 3 chars) or the
+ * whole cohort is below the floor — the UI then shows "not enough data", never a partial disclosure.
+ * NEVER returns a single patient's sequence or identity, under any role.
+ */
+export async function loadCohortCurve(
+  alphaPrefix: string,
+  view?: DashboardView,
+): Promise<CohortCurveResult> {
+  const entityIds = await viewEntityScope(view);
+  if (entityIds === null) return { ok: false, error: 'The cohort view could not be loaded right now.' };
+  // Gate (canRevealPhi) + resolve raw prefix -> opaque token + AUDIT (field names only, no term).
+  const phi = await resolvePhiSearch({ alphaPrefix }, view, true);
+  if (!phi.ok) return { ok: false, error: phi.error };
+  const token = phi.phiIndex?.memberIdPrefixBidx;
+  // No usable token (prefix < 3 chars, or nothing entitled/resolvable) → empty curve, not an error.
+  if (!token) return { ok: true, curve: { by_position: [], by_days: [], cohort_patients: 0 } };
+  try {
+    return { ok: true, curve: await loadCohortCurve_(token, entityIds) };
+  } catch {
+    return { ok: false, error: 'The cohort view could not be loaded right now.' };
   }
 }
 

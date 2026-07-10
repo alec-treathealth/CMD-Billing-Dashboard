@@ -5,6 +5,7 @@ import {
   buildCmdExplorerQuery,
   buildCmdSearchSummaryQueries,
   buildCmdFacilityOptionsQuery,
+  buildCohortCurveQueries,
   sanitizeGridColumns,
   resolveCmdExplorerSort,
   resolveCmdExplorerCursor,
@@ -12,6 +13,8 @@ import {
   CMD_EXPLORER_SORTABLE_COLUMNS,
   CMD_EXPLORER_COLUMN_KEYS,
   CMD_SEARCH_TOP_N,
+  COHORT_MIN_PATIENTS,
+  COHORT_POSITION_CAP,
   type CmdExplorerFilter,
   type CmdExplorerSort,
 } from '../src/collections/cmdExplorerQuery.js';
@@ -343,4 +346,67 @@ test('combo drill-down narrows the grid by BOTH cpt_code AND revenue_code togeth
   assert.doesNotMatch(cleared.sql, /cpt_code =/);
   assert.doesNotMatch(cleared.sql, /revenue_code =/);
   assertAllBound(cleared.sql, cleared.params);
+});
+
+// --- Session D: alpha-prefix cohort payer-behavior curve --------------------
+
+const PREFIX_TOKEN = 'deadbeefcafe0011'; // opaque keyed-HMAC blind-index token (never raw PHI)
+
+test('cohort curve: BOTH queries tenant-scoped + prefix-token bound, sequenced, dollar-weighted', () => {
+  const { byPosition, byDays } = buildCohortCurveQueries(PREFIX_TOKEN, ENTITY);
+  for (const q of [byPosition, byDays]) {
+    // Tenant scope + the opaque prefix token are the only cohort selectors, both bound.
+    assert.match(q.sql, /business_entity_id = any\(\$1::uuid\[\]\)/);
+    assert.match(q.sql, /member_id_prefix_bidx = \$2/);
+    assert.deepEqual(q.params[0], ENTITY);
+    assert.equal(q.params[1], PREFIX_TOKEN);
+    // Dollar-weighted ratio-of-sums (same discipline as the combo grouping) — never avg-of-ratios.
+    assert.match(q.sql, /round\(sum\(allowed_amount\) \/ sum\(charge_amount\) \* 100, 2\)::float8 end as pct_allowed/);
+    assert.match(q.sql, /round\(sum\(insurance_payments\) \/ sum\(allowed_amount\) \* 100, 2\)::float8 end as pct_paid/);
+    assert.doesNotMatch(q.sql, /avg\(/);
+    assertAllBound(q.sql, q.params);
+  }
+  // Position query sequences visits with dense_rank over charge_date (same-day lines = one visit).
+  assert.match(byPosition.sql, /dense_rank\(\) over \(partition by member_id_bidx order by charge_date\)/);
+  // Days query measures each patient's days since their OWN first claim.
+  assert.match(byDays.sql, /min\(charge_date\) as first_dt/);
+  assert.match(byDays.sql, /charge_date - f\.first_dt/);
+});
+
+test('cohort curve: SMALL-COHORT SUPPRESSION is in-query and counts DISTINCT PATIENTS', () => {
+  const { byPosition, byDays } = buildCohortCurveQueries(PREFIX_TOKEN, ENTITY);
+  for (const q of [byPosition, byDays]) {
+    // Suppression is a HAVING on the FINAL grouped result, on distinct PATIENTS (not rows), bound.
+    assert.match(q.sql, /having count\(distinct member_id_bidx\) >= \$\d+/);
+    // No LIMIT/pagination exists that could return a pre-suppression slice.
+    assert.doesNotMatch(q.sql, /\blimit\b/i);
+  }
+});
+
+test('cohort curve: the min-patient floor is CLAMPED — a caller can never weaken suppression', () => {
+  // Adversarial: try to lower the floor below the agreed minimum. It must stay pinned at the floor.
+  for (const attempt of [0, 1, 2, 4, -100]) {
+    const { byPosition, byDays } = buildCohortCurveQueries(PREFIX_TOKEN, ENTITY, { minPatients: attempt });
+    for (const q of [byPosition, byDays]) {
+      const minParam = q.params[q.params.length - 1];
+      assert.equal(minParam, COHORT_MIN_PATIENTS, `minPatients=${attempt} must clamp UP to ${COHORT_MIN_PATIENTS}`);
+    }
+  }
+  // A caller may only make it STRICTER.
+  const strict = buildCohortCurveQueries(PREFIX_TOKEN, ENTITY, { minPatients: 25 });
+  assert.equal(strict.byPosition.params[strict.byPosition.params.length - 1], 25);
+});
+
+test('cohort curve: position axis is capped and bound; no raw-PHI column is ever projected', () => {
+  const { byPosition, byDays } = buildCohortCurveQueries(PREFIX_TOKEN, ENTITY);
+  // Position cap is a bound param defaulting to COHORT_POSITION_CAP.
+  assert.match(byPosition.sql, /where pos <= \$3/);
+  assert.ok(byPosition.params.includes(COHORT_POSITION_CAP));
+  // The ONLY identity column touched is the blind-index token (in WHERE / window / distinct-count);
+  // the encrypted raw-PHI columns are NEVER referenced, and the OUTPUT is a pure aggregate.
+  for (const q of [byPosition, byDays]) {
+    assert.doesNotMatch(q.sql, /member_id_raw|patient_name|group_number/);
+    // output projection is only the aggregate shape — no bare member_id_bidx column selected out
+    assert.match(q.sql, /as bucket, count\(distinct member_id_bidx\)::int as patients, count\(\*\)::int as claims/);
+  }
 });

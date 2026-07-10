@@ -28,8 +28,10 @@ import {
   buildCmdExplorerQuery,
   buildCmdSearchSummaryQueries,
   buildCmdFacilityOptionsQuery,
+  buildCohortCurveQueries,
   cmdExplorerSortValue,
   CMD_EXPLORER_PAGE_SIZE,
+  COHORT_MIN_PATIENTS,
   type CmdExplorerFilter,
   type CmdExplorerSort,
   type CmdExplorerCursor,
@@ -38,6 +40,8 @@ import {
   type CmdSearchGroup,
   type CmdComboGroup,
   type CmdFacilityOption,
+  type CohortCurvePoint,
+  type CohortCurve,
 } from '../../src/collections/cmdExplorerQuery.js';
 export {
   CMD_EXPLORER_SEARCH_COLUMNS,
@@ -61,6 +65,8 @@ export type {
   CmdComboGroup,
   CmdSearchSummary,
   CmdFacilityOption,
+  CohortCurvePoint,
+  CohortCurve,
 } from '../../src/collections/cmdExplorerQuery.js';
 import type {
   ClaimFilter,
@@ -926,6 +932,42 @@ export const loadCmdSearchSummary = unstable_cache(
   (filter: CmdExplorerFilter, entityIds: string[]): Promise<CmdSearchSummary> =>
     loadCmdSearchSummaryData(filter, entityIds),
   ['cmd-explorer-search-summary'],
+  { revalidate: 900, tags: ['cmd-explorer'] },
+);
+
+// --- alpha-prefix cohort payer-behavior curve (Session D) -------------------
+// Reads BOTH cohort rollups (claim/visit position + days-since-first) for one alpha-prefix
+// blind-index token. Suppression is enforced IN the query (HAVING >= floor); the extra
+// `.filter(patients >= COHORT_MIN_PATIENTS)` below is DEFENSE-IN-DEPTH — redundant with the query,
+// so a future query edit can never let a sub-threshold bucket reach the client. cohort_patients is
+// the position-1 bucket's distinct-patient count (every patient has a 1st visit) — 0 when the whole
+// cohort was suppressed (both arrays then empty → the panel shows "not enough data", never a leak).
+
+async function loadCohortCurveData(prefixBidx: string, entityIds: string[]): Promise<CohortCurve> {
+  const { byPosition, byDays } = buildCohortCurveQueries(prefixBidx, entityIds);
+  const exec = readerExecutor();
+  const [pos, days] = await Promise.all([
+    exec.query<CohortCurvePoint>(byPosition.sql, byPosition.params),
+    exec.query<CohortCurvePoint>(byDays.sql, byDays.params),
+  ]);
+  const safe = (rows: CohortCurvePoint[]) => rows.filter((r) => r.patients >= COHORT_MIN_PATIENTS);
+  const by_position = safe(pos.rows);
+  return {
+    by_position,
+    by_days: safe(days.rows),
+    cohort_patients: by_position[0]?.patients ?? 0,
+  };
+}
+
+/**
+ * Cached cohort curve, keyed per (prefix token, entityIds). The token is an opaque keyed-HMAC (no
+ * raw PHI at rest); the output is a min-5-suppressed aggregate. Tag-busted with the rest of the
+ * explorer on cron insert. NOTE: the PHI GATE + AUDIT live in the action (loadCohortCurve), which
+ * runs on EVERY call before this cache is consulted — so a cache hit never skips the audit.
+ */
+export const loadCohortCurve = unstable_cache(
+  (prefixBidx: string, entityIds: string[]): Promise<CohortCurve> => loadCohortCurveData(prefixBidx, entityIds),
+  ['cmd-explorer-cohort-curve'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
 

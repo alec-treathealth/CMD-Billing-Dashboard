@@ -479,3 +479,146 @@ export function buildCmdSearchSummaryQueries(
 
   return { totals, groups, combo };
 }
+
+// --- alpha-prefix cohort payer-behavior curve (Session D) -------------------
+// The merged "attrition rate" (how many claims before a payer's reimbursement degrades) + "days
+// insurer paid" (how long a new patient under the same alpha prefix keeps full authorization)
+// metric: allowed% / paid% plotted across a patient's claim sequence, rolled up over ALL patients
+// sharing an alpha-prefix blind-index token. The OUTPUT is a cohort AGGREGATE — never a single
+// patient's figures — but computing it groups by member_id_bidx internally to sequence each
+// patient's visits, THEN rolls the cohort up. Two x-axes come from the SAME sequencing idea: claim/
+// visit POSITION (ordinal by distinct service date) and DAYS since the patient's first claim.
+//
+// SMALL-COHORT SUPPRESSION is load-bearing, not cosmetic (a 2-patient "cohort" is a 2-patient
+// disclosure wearing an aggregate's clothes). A `HAVING count(distinct member_id_bidx) >= threshold`
+// on the FINAL grouped result drops any bucket below the floor ENTIRELY, IN-QUERY, before the data
+// serializes — a client-side or action-layer hide would be inspectable in the network tab. The
+// threshold is CLAMPED to COHORT_MIN_PATIENTS here so no caller can weaken it below the agreed floor.
+
+/**
+ * Floor on distinct patients per bucket. Buckets below it are SUPPRESSED in-query (absent, not
+ * caveated). Signed off with Alec (Session D). Callers may raise it; they can NEVER lower it.
+ */
+export const COHORT_MIN_PATIENTS = 5;
+/**
+ * Cap on the claim-position axis. Behavioral-health patients average ~40–70 visits, so the raw
+ * sequence has a long tail; the early sequence carries the degradation signal and a bounded axis
+ * keeps the payload small.
+ */
+export const COHORT_POSITION_CAP = 24;
+/** Day-axis bucket width + cap: monthly buckets across the first ~year since a patient's 1st claim. */
+export const COHORT_DAY_BUCKET_DAYS = 30;
+export const COHORT_DAY_CAP = 360;
+
+/**
+ * One cohort-curve bucket. `patients` is ALWAYS >= COHORT_MIN_PATIENTS (a smaller bucket was
+ * suppressed and never appears). `pct_allowed` / `pct_paid` are DOLLAR-WEIGHTED (ratio of the
+ * bucket's summed dollars, guarded), the same discipline as the Session C combo grouping.
+ */
+export interface CohortCurvePoint {
+  bucket: number;
+  patients: number;
+  claims: number;
+  pct_allowed: number | null;
+  pct_paid: number | null;
+}
+
+export interface CohortCurveOptions {
+  minPatients?: number;
+  positionCap?: number;
+  dayBucketDays?: number;
+  dayCap?: number;
+}
+
+/**
+ * The cohort-curve response: both suppressed x-axes plus the cohort's distinct-patient count
+ * (derived from the position-1 bucket, since every patient has a first visit). When the whole
+ * cohort is below the floor, EVERY bucket is suppressed → both arrays are empty and
+ * `cohort_patients` is 0 (the panel then shows "not enough data", never a partial disclosure).
+ */
+export interface CohortCurve {
+  by_position: CohortCurvePoint[];
+  by_days: CohortCurvePoint[];
+  cohort_patients: number;
+}
+
+// Dollar-weighted ratio-of-sums, guarded (identical discipline to the combo grouping): NULL when the
+// denominator is 0/negative/null, never a division error; ::float8 so rounded numerics arrive as JS numbers.
+const COHORT_PCT_SELECT =
+  'case when sum(charge_amount) > 0 then round(sum(allowed_amount) / sum(charge_amount) * 100, 2)::float8 end as pct_allowed, ' +
+  'case when sum(allowed_amount) > 0 then round(sum(insurance_payments) / sum(allowed_amount) * 100, 2)::float8 end as pct_paid';
+
+/**
+ * Build the TWO read-only cohort-curve queries — by claim/visit POSITION and by DAYS-since-first —
+ * for one alpha-prefix blind-index token, tenant-scoped. Both enforce the min-patient floor via
+ * HAVING on the final grouped result. Every value is a bound parameter; every identifier is a fixed
+ * literal. `prefixBidx` is an OPAQUE keyed-HMAC token — no raw PHI reaches this module. The floor is
+ * clamped so it can never drop below COHORT_MIN_PATIENTS.
+ *
+ * Grain: a "claim/visit" is a DISTINCT service date (charge_date). The table is charge-line grain
+ * (one visit → many CPT×rev lines), so dense_rank() over charge_date collapses same-day lines into
+ * one visit position. The cohort is scoped ONLY by tenant + prefix token (NOT the grid's facility/
+ * month filters) so each patient's full lifetime sequence is intact, never truncated to a window.
+ */
+export function buildCohortCurveQueries(
+  prefixBidx: string,
+  entityIds: string[],
+  opts: CohortCurveOptions = {},
+): { byPosition: { sql: string; params: unknown[] }; byDays: { sql: string; params: unknown[] } } {
+  // Clamp the floor: a caller may make suppression STRICTER, never weaker than the agreed minimum.
+  const minPatients = Math.max(COHORT_MIN_PATIENTS, opts.minPatients ?? COHORT_MIN_PATIENTS);
+  const positionCap = opts.positionCap ?? COHORT_POSITION_CAP;
+  const dayBucketDays = opts.dayBucketDays ?? COHORT_DAY_BUCKET_DAYS;
+  const dayCap = opts.dayCap ?? COHORT_DAY_CAP;
+
+  const byPosition = (() => {
+    const params: unknown[] = [];
+    const add: ParamAdder = (v) => {
+      params.push(v);
+      return `$${params.length}`;
+    };
+    const ent = add(entityIds);
+    const pref = add(prefixBidx);
+    const cap = add(positionCap);
+    const minp = add(minPatients);
+    // dense_rank over charge_date = VISIT position (same-day charge lines share a position). The
+    // HAVING is the suppression boundary — no LIMIT/pagination exists to bypass it.
+    const sql =
+      'with seq as (select member_id_bidx, ' +
+      'dense_rank() over (partition by member_id_bidx order by charge_date) as pos, ' +
+      'charge_amount, allowed_amount, insurance_payments ' +
+      'from collections.cmd_explorer_rows ' +
+      `where business_entity_id = any(${ent}::uuid[]) and member_id_prefix_bidx = ${pref} and charge_date is not null) ` +
+      'select pos::int as bucket, count(distinct member_id_bidx)::int as patients, count(*)::int as claims, ' +
+      COHORT_PCT_SELECT + ' ' +
+      `from seq where pos <= ${cap} group by pos having count(distinct member_id_bidx) >= ${minp} order by pos`;
+    return { sql, params };
+  })();
+
+  const byDays = (() => {
+    const params: unknown[] = [];
+    const add: ParamAdder = (v) => {
+      params.push(v);
+      return `$${params.length}`;
+    };
+    const ent = add(entityIds);
+    const pref = add(prefixBidx);
+    const bucket = add(dayBucketDays);
+    const cap = add(dayCap);
+    const minp = add(minPatients);
+    // Bucket by whole `dayBucketDays`-wide windows measured from each patient's OWN first claim
+    // (days_since = charge_date − first_dt, an integer). Same HAVING suppression on the rollup.
+    const sql =
+      'with base as (select member_id_bidx, charge_date, charge_amount, allowed_amount, insurance_payments ' +
+      `from collections.cmd_explorer_rows where business_entity_id = any(${ent}::uuid[]) and member_id_prefix_bidx = ${pref} and charge_date is not null), ` +
+      'firstdt as (select member_id_bidx, min(charge_date) as first_dt from base group by member_id_bidx), ' +
+      'seq as (select b.member_id_bidx, (b.charge_date - f.first_dt) as days_since, b.charge_amount, b.allowed_amount, b.insurance_payments ' +
+      'from base b join firstdt f using (member_id_bidx)) ' +
+      `select (floor(days_since::numeric / ${bucket}) * ${bucket})::int as bucket, count(distinct member_id_bidx)::int as patients, count(*)::int as claims, ` +
+      COHORT_PCT_SELECT + ' ' +
+      `from seq where days_since <= ${cap} group by floor(days_since::numeric / ${bucket}) having count(distinct member_id_bidx) >= ${minp} order by bucket`;
+    return { sql, params };
+  })();
+
+  return { byPosition, byDays };
+}

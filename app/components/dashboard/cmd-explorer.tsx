@@ -18,6 +18,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Activity,
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
@@ -38,8 +39,20 @@ import {
   Star,
   Stethoscope,
   Trash2,
+  TrendingDown,
   X,
 } from 'lucide-react';
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ControlSelect, Pager, useColumnDnD } from '@/components/data-grid';
@@ -48,6 +61,7 @@ import {
   loadCmdReport,
   loadCmdSearchSummary,
   loadCmdExplorerFacilities,
+  loadCohortCurve,
   revealCmdReportRows,
   listGridViews,
   saveGridView,
@@ -60,6 +74,8 @@ import {
   type CmdExplorerCursor,
   type CmdExplorerSort,
   type CmdFacilityOption,
+  type CohortCurve,
+  type CohortCurvePoint,
   type GridViewRow,
 } from '@/lib/actions';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../../src/collections/cmdExplorer';
@@ -193,6 +209,12 @@ type SummaryState =
   | { kind: 'error' }
   | { kind: 'ready'; data: CmdSearchSummary };
 
+type CohortState =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | { kind: 'error' }
+  | { kind: 'ready'; data: CohortCurve };
+
 export function CmdCollectionsExplorer({
   view,
   canRevealPhi,
@@ -232,8 +254,13 @@ export function CmdCollectionsExplorer({
   const dAlpha = useDebouncedValue(phiAlphaPrefix, 350).trim();
   const dGroup = useDebouncedValue(phiGroup, 350).trim();
   const hasPhiSearch = canRevealPhi && (dMember !== '' || dAlpha !== '' || dGroup !== '');
+  // The alpha-prefix cohort curve (Session D) is gated to PHI-entitled roles AND an active ≥3-char
+  // alpha-prefix search (the blind-index token needs ≥3 chars). The raw prefix goes ONLY to the
+  // server action, which HMACs + gates + audits it; it is never matched or held client-side.
+  const cohortActive = canRevealPhi && dAlpha.length >= 3;
 
   const [summary, setSummary] = useState<SummaryState>({ kind: 'idle' });
+  const [cohort, setCohort] = useState<CohortState>({ kind: 'idle' });
 
   // A facility/payer refinement AND the facility multi-select are tenant-specific; a term is generic.
   // Reset both when the view (tenant) changes so a stale drill-down / facility set doesn't filter the
@@ -486,6 +513,28 @@ export function CmdCollectionsExplorer({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [term, searchColsKey, hasSearch, hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, view]);
+
+  // Fetch the alpha-prefix cohort curve when a ≥3-char alpha-prefix search is active (PHI-gated).
+  // Independent of the term/window/facility filters: the cohort is defined solely by the prefix +
+  // tenant, so a patient's full lifetime sequence stays intact (not truncated to the grid window).
+  useEffect(() => {
+    if (!cohortActive) {
+      setCohort({ kind: 'idle' });
+      return;
+    }
+    let live = true;
+    setCohort({ kind: 'loading' });
+    loadCohortCurve(dAlpha, view)
+      .then((r) => {
+        if (live) setCohort(r.ok ? { kind: 'ready', data: r.curve } : { kind: 'error' });
+      })
+      .catch(() => {
+        if (live) setCohort({ kind: 'error' });
+      });
+    return () => {
+      live = false;
+    };
+  }, [cohortActive, dAlpha, view]);
 
   const busy = status === 'loading';
 
@@ -793,6 +842,9 @@ export function CmdCollectionsExplorer({
           onDrillCombo={applyComboRefinement}
         />
       )}
+
+      {/* ---- Alpha-prefix cohort payer-behavior curve (PHI-gated, Session D) --- */}
+      {cohortActive && <CohortCurvePanel state={cohort} prefix={dAlpha} />}
 
       {/* ---- Detail grid -------------------------------------------------- */}
       <div ref={gridRef} className="space-y-3">
@@ -1587,6 +1639,189 @@ function ComboDrillList({
             })}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+// --- alpha-prefix cohort payer-behavior curve (Session D) -------------------
+
+// Two functional multi-series colors (per the design system, charts keep their own colors):
+// Allowed = teal, Paid = violet. Both read in light + dark.
+const COHORT_ALLOWED_COLOR = '#0d9488';
+const COHORT_PAID_COLOR = '#7c3aed';
+
+/**
+ * Plain-language degradation read of the claim-position curve: the FIRST bucket whose dollar-
+ * weighted %-allowed falls more than `dropPts` points below the cohort's OWN first-bucket baseline.
+ * A simple, maintainable threshold rule — deliberately NOT a statistical model. Returns null when
+ * there aren't enough surviving buckets to say anything.
+ */
+function cohortDegradation(
+  points: CohortCurvePoint[],
+  dropPts = 10,
+): { baseline: number; dropAt: number | null; dropTo: number | null; lastBucket: number } | null {
+  const withPct = points.filter((p) => p.pct_allowed !== null);
+  if (withPct.length < 2) return null;
+  const baseline = withPct[0]!.pct_allowed!;
+  const hit = withPct.find((p, i) => i > 0 && p.pct_allowed! <= baseline - dropPts);
+  return {
+    baseline,
+    dropAt: hit ? hit.bucket : null,
+    dropTo: hit ? hit.pct_allowed! : null,
+    lastBucket: withPct[withPct.length - 1]!.bucket,
+  };
+}
+
+/** One cohort line chart (reused for the claim-position and days axes). */
+function CohortLineChart({
+  data,
+  xLabel,
+  markerBucket,
+}: {
+  data: CohortCurvePoint[];
+  xLabel: string;
+  markerBucket?: number | null;
+}) {
+  return (
+    <div className="h-52 w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={data} margin={{ top: 8, right: 12, bottom: 18, left: -8 }}>
+          <CartesianGrid vertical={false} stroke="#E4E9E6" />
+          <XAxis
+            dataKey="bucket"
+            tick={{ fontSize: 11 }}
+            stroke="#E4E9E6"
+            tickLine={false}
+            label={{ value: xLabel, position: 'insideBottom', offset: -8, fontSize: 11 }}
+          />
+          {/* %-paid legitimately exceeds 100% (insurance can pay more than the fee-schedule
+              "allowed" — common out-of-network), so the top expands to fit rather than clipping. */}
+          <YAxis
+            domain={[0, (dataMax: number) => Math.max(100, Math.ceil(dataMax / 10) * 10)]}
+            tick={{ fontSize: 11 }}
+            stroke="#E4E9E6"
+            tickLine={false}
+            width={40}
+            unit="%"
+          />
+          <Tooltip
+            formatter={(v: number | string) => (v === null || v === undefined ? '—' : `${v}%`)}
+            labelFormatter={(l) => `${xLabel}: ${l}`}
+          />
+          <Legend wrapperStyle={{ fontSize: 11 }} />
+          {markerBucket != null && <ReferenceLine x={markerBucket} stroke="#dc2626" strokeDasharray="4 3" />}
+          <Line type="monotone" dataKey="pct_allowed" name="% Allowed" stroke={COHORT_ALLOWED_COLOR} strokeWidth={2} dot={false} connectNulls />
+          <Line type="monotone" dataKey="pct_paid" name="% Paid" stroke={COHORT_PAID_COLOR} strokeWidth={2} dot={false} connectNulls />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+/**
+ * The alpha-prefix cohort payer-behavior curve — the MERGED attrition-rate / days-authorized metric.
+ * Renders only for PHI-entitled roles with an active ≥3-char alpha-prefix search (gated by the
+ * caller). Shows BOTH x-axes (claim/visit position + days since first claim) side by side, no toggle,
+ * plus a plain-language degradation callout (Derek's framing) and a days-framing summary line
+ * (Alec's). Every value is a cohort AGGREGATE that already passed server-side min-5-patient
+ * suppression — no single patient's figures reach here. When the whole cohort is too small (all
+ * buckets suppressed), it shows a "not enough data" notice, never a partial (re-identifiable) curve.
+ */
+function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: string }) {
+  if (state.kind === 'idle') return null;
+  if (state.kind === 'loading') {
+    return (
+      <div className="rounded-xl border border-line bg-card p-4 text-sm text-muted-foreground shadow-ths">
+        Analyzing the “{prefix}” cohort…
+      </div>
+    );
+  }
+  if (state.kind === 'error') {
+    return (
+      <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
+        The cohort trend could not be loaded.
+      </div>
+    );
+  }
+
+  const c = state.data;
+  // Fail-closed: an empty position curve means every bucket fell below the min-patient floor (or the
+  // cohort doesn't exist). Show a notice — never a partial, potentially re-identifiable curve.
+  if (c.by_position.length === 0) {
+    return (
+      <div className="rounded-xl border border-line bg-card p-4 shadow-ths">
+        <div className="mb-1 flex items-center gap-1.5 text-sm font-semibold text-ink900">
+          <Activity className="h-4 w-4 text-[var(--brand-ink)]" aria-hidden />
+          Cohort payer behavior — “{prefix}”
+        </div>
+        <p className="text-sm text-muted-foreground">
+          Not enough patients share this alpha prefix to show a cohort trend without risking
+          identifying an individual. Try a broader prefix.
+        </p>
+      </div>
+    );
+  }
+
+  const deg = cohortDegradation(c.by_position);
+  const round = (n: number) => Math.round(n);
+  let callout: string;
+  if (deg && deg.dropAt !== null && deg.dropTo !== null) {
+    callout =
+      deg.dropAt <= 2
+        ? `The 1st claim was allowed ~${round(deg.baseline)}% of billed; from claim ${deg.dropAt} on, allowed drops to ~${round(deg.dropTo)}%.`
+        : `Claims 1–${deg.dropAt - 1} were allowed ~${round(deg.baseline)}% of billed; from claim ${deg.dropAt} on, allowed drops to ~${round(deg.dropTo)}%.`;
+  } else if (deg) {
+    callout = `Reimbursement holds steady (~${round(deg.baseline)}% allowed) across the first ${deg.lastBucket} claims — no clear degradation in this cohort.`;
+  } else {
+    callout = 'Not enough sequenced claims to read a degradation trend for this cohort.';
+  }
+
+  // Days-framing one-liner (Alec's "how long does full authorization last"): first vs last surviving
+  // day-bucket %-allowed. bucketWidth is read from the data (bucket start-days) so copy never drifts.
+  const days = c.by_days.filter((p) => p.pct_allowed !== null);
+  const bucketWidth = days.length >= 2 ? days[1]!.bucket - days[0]!.bucket : 30;
+  const daysLine =
+    days.length >= 2
+      ? `By elapsed time: ~${round(days[0]!.pct_allowed!)}% allowed in the first ${bucketWidth} days, ~${round(days[days.length - 1]!.pct_allowed!)}% by day ${days[days.length - 1]!.bucket}+.`
+      : null;
+
+  return (
+    <div className="rounded-xl border border-line bg-card p-4 shadow-ths">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink900">
+          <Activity className="h-4 w-4 text-[var(--brand-ink)]" aria-hidden />
+          Cohort payer behavior — “{prefix}”
+        </h3>
+        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+          <Lock className="h-3 w-3" aria-hidden />
+          {c.cohort_patients.toLocaleString()} patients · dollar-weighted · min 5/bucket
+        </span>
+      </div>
+
+      {/* Plain-language degradation callout (Derek's framing) + days summary (Alec's framing). */}
+      <div className="mt-3 flex items-start gap-2 rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink900">
+        <TrendingDown className="mt-0.5 h-4 w-4 shrink-0 text-[var(--brand-ink)]" aria-hidden />
+        <div>
+          <p>{callout}</p>
+          {daysLine && <p className="mt-0.5 text-muted-foreground">{daysLine}</p>}
+        </div>
+      </div>
+
+      {/* Both axes, side by side — no toggle. */}
+      <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div>
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            By claim number
+          </div>
+          <CohortLineChart data={c.by_position} xLabel="Claim #" markerBucket={deg?.dropAt ?? null} />
+        </div>
+        <div>
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            By days since first claim
+          </div>
+          <CohortLineChart data={c.by_days} xLabel="Day" />
+        </div>
       </div>
     </div>
   );
