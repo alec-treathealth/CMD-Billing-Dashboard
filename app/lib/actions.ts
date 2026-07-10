@@ -56,6 +56,7 @@ import {
   type CmdExplorerSearchColumn,
   type CmdSearchSummary,
   type CmdSearchGroup,
+  type CmdComboGroup,
   type CmdFacilityOption,
   type GridViewRow,
 } from '@/lib/server';
@@ -193,6 +194,7 @@ export type {
   FacilityDimensionRow,
   CmdSearchSummary,
   CmdSearchGroup,
+  CmdComboGroup,
   CmdFacilityOption,
   GridViewRow,
 };
@@ -711,8 +713,10 @@ export interface CmdReportFilter {
   q?: string;
   /** Which NON-PHI columns `q` searches (allowlisted server-side; PHI columns are rejected). */
   searchColumns?: string[];
-  /** Exact drill-down refinements set by clicking a summary chip. */
+  /** Exact drill-down refinements set by clicking a summary chip. A (CPT, Revenue-code) combo
+   *  chip sets `cpt_code` AND `revenue_code` together (and clears both together). */
   cpt_code?: string;
+  revenue_code?: string;
   primary_payer?: string;
   /**
    * Searchable-PHI terms (raw). Resolved SERVER-SIDE to blind-index tokens, gated to
@@ -736,11 +740,15 @@ const CMD_SEARCH_TERM_MAX = 120;
  */
 function applySearchFilter(
   filter: CmdReportFilter,
-  readerFilter: { facility?: string[]; from?: string; to?: string; q?: string; searchColumns?: CmdExplorerSearchColumn[]; cpt_code?: string; primary_payer?: string },
+  readerFilter: { facility?: string[]; from?: string; to?: string; q?: string; searchColumns?: CmdExplorerSearchColumn[]; cpt_code?: string; revenue_code?: string; primary_payer?: string },
 ): boolean {
   if (typeof filter.cpt_code === 'string' && filter.cpt_code.trim() !== '') {
     if (filter.cpt_code.length > 100) return false;
     readerFilter.cpt_code = filter.cpt_code;
+  }
+  if (typeof filter.revenue_code === 'string' && filter.revenue_code.trim() !== '') {
+    if (filter.revenue_code.length > 100) return false;
+    readerFilter.revenue_code = filter.revenue_code;
   }
   if (typeof filter.primary_payer === 'string' && filter.primary_payer.trim() !== '') {
     if (filter.primary_payer.length > 200) return false;
@@ -906,6 +914,7 @@ export async function loadCmdReport(
     q?: string;
     searchColumns?: CmdExplorerSearchColumn[];
     cpt_code?: string;
+    revenue_code?: string;
     primary_payer?: string;
     phiIndex?: PhiIndexTokens;
   } = {};
@@ -949,6 +958,7 @@ export async function loadCmdSearchSummary(
     q?: string;
     searchColumns?: CmdExplorerSearchColumn[];
     cpt_code?: string;
+    revenue_code?: string;
     primary_payer?: string;
     phiIndex?: PhiIndexTokens;
   } = {};

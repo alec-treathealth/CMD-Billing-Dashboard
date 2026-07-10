@@ -36,6 +36,7 @@ import {
   type CmdExplorerPage,
   type CmdSearchSummary,
   type CmdSearchGroup,
+  type CmdComboGroup,
   type CmdFacilityOption,
 } from '../../src/collections/cmdExplorerQuery.js';
 export {
@@ -57,6 +58,7 @@ export type {
   CmdExplorerCursor,
   CmdExplorerPage,
   CmdSearchGroup,
+  CmdComboGroup,
   CmdSearchSummary,
   CmdFacilityOption,
 } from '../../src/collections/cmdExplorerQuery.js';
@@ -887,9 +889,13 @@ async function loadCmdSearchSummaryData(
   filter: CmdExplorerFilter,
   entityIds: string[],
 ): Promise<CmdSearchSummary> {
-  const { totals, groups } = buildCmdSearchSummaryQueries(filter, entityIds);
+  const { totals, groups, combo } = buildCmdSearchSummaryQueries(filter, entityIds);
   const exec = readerExecutor();
-  const [t, byFacility, byPayer, byCpt] = await Promise.all([
+  // All five aggregates fan out CONCURRENTLY over the same tenant-scoped WHERE — the (CPT, Rev)
+  // combo query joins the existing Promise.all, so wall-clock stays ~one scan (they run in
+  // parallel), not the sum. Each is the same cost class (parallel seq scan → hashaggregate over
+  // the tenant slice); the combo groups by two keys but is otherwise identical.
+  const [t, byFacility, byPayer, byCpt, byCombo] = await Promise.all([
     exec.query<{ total_count: number; total_charge: number; total_paid: number; total_balance: number }>(
       totals.sql,
       totals.params,
@@ -897,6 +903,7 @@ async function loadCmdSearchSummaryData(
     exec.query<CmdSearchGroup>(groups.facility.sql, groups.facility.params),
     exec.query<CmdSearchGroup>(groups.primary_payer.sql, groups.primary_payer.params),
     exec.query<CmdSearchGroup>(groups.cpt_code.sql, groups.cpt_code.params),
+    exec.query<CmdComboGroup>(combo.sql, combo.params),
   ]);
   const row = t.rows[0];
   return {
@@ -907,6 +914,7 @@ async function loadCmdSearchSummaryData(
     by_facility: byFacility.rows,
     by_payer: byPayer.rows,
     by_cpt: byCpt.rows,
+    by_combo: byCombo.rows,
   };
 }
 

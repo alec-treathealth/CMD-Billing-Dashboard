@@ -258,3 +258,89 @@ test('resolveCmdExplorerCursor rejects malformed cursors', () => {
   assert.deepEqual(resolveCmdExplorerCursor({ id: 5, value: null }), { id: 5, value: null });
   assert.deepEqual(resolveCmdExplorerCursor({ id: 5, value: 'abc' }), { id: 5, value: 'abc' });
 });
+
+// --- Session C: (CPT × Revenue-code) combination grouping -------------------
+
+/**
+ * The distinction the combo grouping MUST get right: pct_allowed/pct_paid are DOLLAR-WEIGHTED
+ * (ratio of the bucket's summed dollars), NOT the average of each row's individual ratio. On a
+ * bucket of a few large low-recovery claims + many small high-recovery claims the two DISAGREE
+ * sharply, and the dollar-weighted number is the one admissions must trust. This fixture makes
+ * them disagree, proving the trap is real; the SQL-shape assertions below then prove the query
+ * implements the dollar-weighted formula (ratio of sums), never avg-of-ratios.
+ */
+test('combo grouping: dollar-weighted (ratio of sums) is what the fixture demands, and it differs from avg-of-ratios', () => {
+  // 2 large claims recovering 50%, 10 small claims recovering 90%.
+  const claims = [
+    ...Array.from({ length: 2 }, () => ({ charge: 10000, allowed: 5000 })),
+    ...Array.from({ length: 10 }, () => ({ charge: 100, allowed: 90 })),
+  ];
+  const sum = (f: (c: { charge: number; allowed: number }) => number) => claims.reduce((a, c) => a + f(c), 0);
+  const dollarWeighted = (sum((c) => c.allowed) / sum((c) => c.charge)) * 100; // 10900/21000 → 51.90%
+  const avgOfRatios = (claims.reduce((a, c) => a + c.allowed / c.charge, 0) / claims.length) * 100; // → 83.33%
+  // They must genuinely disagree (else the fixture wouldn't prove anything).
+  assert.ok(Math.abs(dollarWeighted - avgOfRatios) > 30, 'fixture must make the two approaches disagree');
+  assert.ok(Math.abs(dollarWeighted - 51.9) < 0.01, 'dollar-weighted %allowed is 51.90%, dominated by the large claims');
+  assert.ok(Math.abs(avgOfRatios - 83.33) < 0.01, 'avg-of-ratios is 83.33%, wrongly over-weighting the small claims');
+});
+
+test('combo grouping: SQL is dollar-weighted ratio-of-SUMS, never avg-of-ratios or per-row division', () => {
+  const { combo } = buildCmdSearchSummaryQueries({}, ENTITY);
+  // pct_allowed = sum(allowed)/sum(charge); pct_paid = sum(insurance)/sum(allowed) — ratio of SUMS
+  // (each wrapped in a guarded CASE … END and aliased to the pct_* output column).
+  assert.match(combo.sql, /round\(sum\(allowed_amount\) \/ sum\(charge_amount\) \* 100, 2\)::float8 end as pct_allowed/);
+  assert.match(combo.sql, /round\(sum\(insurance_payments\) \/ sum\(allowed_amount\) \* 100, 2\)::float8 end as pct_paid/);
+  // The trap it must NOT fall into: no averaging of any kind, and never aggregating the per-row
+  // generated ratio columns (which would be avg/sum-of-per-row-ratios, not ratio-of-sums).
+  assert.doesNotMatch(combo.sql, /avg\(/);
+  assert.doesNotMatch(combo.sql, /(sum|avg)\(\s*pct_(allowed|paid)/);
+});
+
+test('combo grouping: tenant-scoped, groups by BOTH keys, denominators guarded, topN bound last', () => {
+  const { combo } = buildCmdSearchSummaryQueries({ q: 'BCBS', searchColumns: ['facility'] }, ENTITY);
+  // same shared tenant scope as every other summary query (business_entity_id first)
+  assert.match(combo.sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
+  // grouped by the two-key combination, ordered like the other groups, topN as the LAST bound param
+  assert.match(combo.sql, /group by cpt_code, revenue_code order by charge desc nulls last, count desc limit \$\d+/);
+  assert.equal(combo.params[combo.params.length - 1], CMD_SEARCH_TOP_N);
+  // both divisions guarded by `sum(denominator) > 0` → NULL on zero/negative/null denom (never an error)
+  assert.match(combo.sql, /case when sum\(charge_amount\) > 0 then/);
+  assert.match(combo.sql, /case when sum\(allowed_amount\) > 0 then/);
+  // labels carried as cpt + revenue (distinct shape, two labels)
+  assert.match(combo.sql, /cpt_code as cpt, revenue_code as revenue/);
+  assertAllBound(combo.sql, combo.params);
+});
+
+test('combo grouping: honors the facility multi-select the same way (empty = no restriction)', () => {
+  const nonEmpty = buildCmdSearchSummaryQueries({ facility: ['DALLAS MENTAL HEALTH LLC'] }, ENTITY);
+  assert.match(nonEmpty.combo.sql, /facility = any\(\$2::text\[\]\)/);
+  assertAllBound(nonEmpty.combo.sql, nonEmpty.combo.params);
+  const empty = buildCmdSearchSummaryQueries({ facility: [] }, ENTITY);
+  assert.doesNotMatch(empty.combo.sql, /facility = any/);
+  assertAllBound(empty.combo.sql, empty.combo.params);
+});
+
+test('revenue_code exact filter binds (page query + all summary queries)', () => {
+  const { sql, params } = buildCmdExplorerQuery(null, { revenue_code: '0100' }, SORT, 51, ENTITY);
+  assert.match(sql, /revenue_code = \$2/);
+  assert.equal(params[1], '0100');
+  assertAllBound(sql, params);
+  // the exact same predicate flows into the summary queries (so summary + grid agree)
+  const { totals, combo } = buildCmdSearchSummaryQueries({ revenue_code: '0100' }, ENTITY);
+  assert.match(totals.sql, /revenue_code = \$2/);
+  assert.match(combo.sql, /revenue_code = \$2/);
+});
+
+test('combo drill-down narrows the grid by BOTH cpt_code AND revenue_code together', () => {
+  // A combo chip sets both fields; the page query must emit BOTH bound equality predicates.
+  const both = buildCmdExplorerQuery(null, { cpt_code: '90853', revenue_code: '0900' }, SORT, 51, ENTITY);
+  assert.match(both.sql, /cpt_code = \$2/);
+  assert.match(both.sql, /revenue_code = \$3/);
+  assert.deepEqual(both.params.slice(1, 3), ['90853', '0900']);
+  assertAllBound(both.sql, both.params);
+  // Clearing the combo (neither field) drops BOTH predicates — back to the search-level result set.
+  const cleared = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
+  assert.doesNotMatch(cleared.sql, /cpt_code =/);
+  assert.doesNotMatch(cleared.sql, /revenue_code =/);
+  assertAllBound(cleared.sql, cleared.params);
+});

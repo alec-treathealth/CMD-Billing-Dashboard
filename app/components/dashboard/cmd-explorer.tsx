@@ -30,6 +30,7 @@ import {
   Fingerprint,
   GripVertical,
   Hospital,
+  Layers,
   Lock,
   RotateCcw,
   Save,
@@ -54,6 +55,7 @@ import {
   deleteGridView,
   type CmdReportResult,
   type CmdSearchGroup,
+  type CmdComboGroup,
   type CmdSearchSummary,
   type CmdExplorerCursor,
   type CmdExplorerSort,
@@ -146,6 +148,14 @@ function formatPercent(s: string | null): string {
   return Number.isFinite(n) ? `${n}%` : '—';
 }
 
+/**
+ * Same percent rendering for the combo list's dollar-weighted ratios, which arrive as JS `number`
+ * (float8) already rounded to 2 dp server-side — or null when the denominator was 0/negative/null.
+ */
+function formatPercentNum(n: number | null): string {
+  return n === null || !Number.isFinite(n) ? '—' : `${n}%`;
+}
+
 /** Debounce a fast-changing value (search box) so downstream fetches don't fire per keystroke. */
 function useDebouncedValue<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -156,9 +166,15 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
   return debounced;
 }
 
-/** Exact drill-down refinement set by clicking a summary chip. */
+/**
+ * Exact drill-down refinement set by clicking a summary chip. Single-field chips (facility / payer /
+ * CPT) carry one value; the (CPT, Revenue-code) COMBO chip carries BOTH codes and sets/clears them
+ * together — so the grid narrows to that exact pairing, not just one of the two.
+ */
 type RefineKind = 'facility' | 'primary_payer' | 'cpt_code';
-type Refinement = { kind: RefineKind; value: string };
+type Refinement =
+  | { kind: RefineKind; value: string }
+  | { kind: 'combo'; cpt: string; revenue: string };
 /** Result of a save from the column-view manager (mirrors the server action's shape). */
 type GridViewMutationOutcome = { ok: true } | { ok: false; error: string };
 const REFINE_LABEL: Record<RefineKind, string> = {
@@ -166,6 +182,10 @@ const REFINE_LABEL: Record<RefineKind, string> = {
   primary_payer: 'Payer',
   cpt_code: 'CPT',
 };
+/** Human label for the active-refinement pill (the combo case shows both codes). */
+function refinementLabel(r: Refinement): string {
+  return r.kind === 'combo' ? `CPT×Rev: ${r.cpt} / ${r.revenue}` : `${REFINE_LABEL[r.kind]}: ${r.value}`;
+}
 
 type SummaryState =
   | { kind: 'idle' }
@@ -322,6 +342,7 @@ export function CmdCollectionsExplorer({
       facility?: string[];
       primary_payer?: string;
       cpt_code?: string;
+      revenue_code?: string;
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
     } = {};
     // Recency wins over Month/Year (they're mutually exclusive in the UI, but be explicit).
@@ -339,9 +360,22 @@ export function CmdCollectionsExplorer({
     // facility (overriding the dropdown). Payer/CPT chips stay exact single-value refinements.
     if (facilitySelection.length > 0) f.facility = facilitySelection;
     if (refinement) {
-      if (refinement.kind === 'facility') f.facility = [refinement.value];
-      else if (refinement.kind === 'primary_payer') f.primary_payer = refinement.value;
-      else f.cpt_code = refinement.value;
+      switch (refinement.kind) {
+        case 'facility':
+          f.facility = [refinement.value];
+          break;
+        case 'primary_payer':
+          f.primary_payer = refinement.value;
+          break;
+        case 'cpt_code':
+          f.cpt_code = refinement.value;
+          break;
+        case 'combo':
+          // A combo chip narrows by BOTH codes at once (and clears both together).
+          f.cpt_code = refinement.cpt;
+          f.revenue_code = refinement.revenue;
+          break;
+      }
     }
     if (hasPhiSearch) {
       f.phiSearch = {
@@ -536,9 +570,24 @@ export function CmdCollectionsExplorer({
     setMonth(0);
   }
 
-  /** Apply (or toggle off) a drill-down refinement from a summary chip, then scroll to the grid. */
+  /** Apply (or toggle off) a single-field drill-down refinement from a summary chip. */
   function applyRefinement(kind: RefineKind, value: string) {
-    setRefinement((prev) => (prev && prev.kind === kind && prev.value === value ? null : { kind, value }));
+    setRefinement((prev) =>
+      prev && prev.kind === kind && 'value' in prev && prev.value === value ? null : { kind, value },
+    );
+    requestAnimationFrame(() => gridRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
+  }
+
+  /**
+   * Apply (or toggle off) a (CPT, Revenue-code) COMBO refinement — narrows the grid by BOTH codes
+   * at once. Re-clicking the active combo clears both together (back to the search-level results).
+   */
+  function applyComboRefinement(cpt: string, revenue: string) {
+    setRefinement((prev) =>
+      prev && prev.kind === 'combo' && prev.cpt === cpt && prev.revenue === revenue
+        ? null
+        : { kind: 'combo', cpt, revenue },
+    );
     requestAnimationFrame(() => gridRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
   }
 
@@ -727,7 +776,7 @@ export function CmdCollectionsExplorer({
               onClick={() => setRefinement(null)}
               className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] px-2 py-0.5 font-medium text-[var(--brand-ink)] transition-colors hover:bg-[var(--brand-accent)]/20"
             >
-              {REFINE_LABEL[refinement.kind]}: {refinement.value}
+              {refinementLabel(refinement)}
               <X className="h-3 w-3" aria-hidden />
             </button>
           )}
@@ -741,6 +790,7 @@ export function CmdCollectionsExplorer({
           label={hasSearch ? `“${term.trim()}”` : 'your search'}
           refinement={refinement}
           onDrill={applyRefinement}
+          onDrillCombo={applyComboRefinement}
         />
       )}
 
@@ -1364,17 +1414,23 @@ function PhiField({
   );
 }
 
-/** The search-engine result: headline count + money totals, then the three drill-down lists. */
+/**
+ * The search-engine result: headline count + money totals, the three single-dimension drill-down
+ * lists, then the (CPT × Revenue-code) combination list full-width below them (it carries more
+ * numbers per row — count, charge, %-allowed, %-paid — so it gets the full width to stay readable).
+ */
 function SearchSummaryPanel({
   state,
   label,
   refinement,
   onDrill,
+  onDrillCombo,
 }: {
   state: SummaryState;
   label: string;
   refinement: Refinement | null;
   onDrill: (kind: RefineKind, value: string) => void;
+  onDrillCombo: (cpt: string, revenue: string) => void;
 }) {
   if (state.kind === 'loading') {
     return (
@@ -1408,7 +1464,7 @@ function SearchSummaryPanel({
           <span className="tabular-nums">{s.total_count.toLocaleString()}</span> charge line
           {s.total_count === 1 ? '' : 's'} match {label}
         </h3>
-        <span className="text-xs text-muted-foreground">Click a facility, payer, or CPT to drill in.</span>
+        <span className="text-xs text-muted-foreground">Click a facility, payer, CPT, or CPT×Rev combo to drill in.</span>
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -1442,6 +1498,95 @@ function SearchSummaryPanel({
           activeValue={refinement?.kind === 'cpt_code' ? refinement.value : null}
           onDrill={onDrill}
         />
+      </div>
+
+      {/* Fourth list, full-width: the (CPT × Revenue-code) combination with dollar-weighted
+          %-allowed / %-paid — one click drills the grid by BOTH codes at once. */}
+      <ComboDrillList
+        groups={s.by_combo}
+        activeCombo={refinement?.kind === 'combo' ? { cpt: refinement.cpt, revenue: refinement.revenue } : null}
+        onDrill={onDrillCombo}
+      />
+    </div>
+  );
+}
+
+/**
+ * The (CPT × Revenue-code) combination drill list. Distinct from DrillList: each row carries TWO
+ * labels (CPT + Revenue code) and FOUR numbers (count, charge, dollar-weighted %-allowed and
+ * %-paid), so it renders full-width as a compact table rather than a ranked bar list. A row is
+ * drillable only when BOTH codes are present (a partial-null combo can't be exact-matched, so it
+ * shows as a non-interactive stat row — mirroring DrillList's blank-label convention). The two
+ * percentages are already dollar-weighted server-side (ratio of sums, not average of ratios).
+ */
+function ComboDrillList({
+  groups,
+  activeCombo,
+  onDrill,
+}: {
+  groups: CmdComboGroup[];
+  activeCombo: { cpt: string; revenue: string } | null;
+  onDrill: (cpt: string, revenue: string) => void;
+}) {
+  if (groups.length === 0) return null;
+  return (
+    <div className="mt-3 rounded-lg border border-line bg-surface p-3">
+      <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        <Layers className="h-3.5 w-3.5" aria-hidden />
+        Top CPT × Revenue-code combinations
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-[11px] uppercase tracking-wide text-muted-foreground">
+              <th className="px-2 py-1 text-left font-medium">CPT</th>
+              <th className="px-2 py-1 text-left font-medium">Revenue</th>
+              <th className="px-2 py-1 text-right font-medium">Lines</th>
+              <th className="px-2 py-1 text-right font-medium">Charged</th>
+              <th className="px-2 py-1 text-right font-medium">% Allowed</th>
+              <th className="px-2 py-1 text-right font-medium">% Paid</th>
+            </tr>
+          </thead>
+          <tbody>
+            {groups.map((g, i) => {
+              const drillable = g.cpt !== null && g.cpt !== '' && g.revenue !== null && g.revenue !== '';
+              const active = drillable && activeCombo?.cpt === g.cpt && activeCombo?.revenue === g.revenue;
+              const key = `${g.cpt ?? '∅'}|${g.revenue ?? '∅'}|${i}`;
+              return (
+                <tr
+                  key={key}
+                  onClick={drillable ? () => onDrill(g.cpt as string, g.revenue as string) : undefined}
+                  onKeyDown={
+                    drillable
+                      ? (e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            onDrill(g.cpt as string, g.revenue as string);
+                          }
+                        }
+                      : undefined
+                  }
+                  role={drillable ? 'button' : undefined}
+                  tabIndex={drillable ? 0 : undefined}
+                  aria-pressed={drillable ? active : undefined}
+                  aria-label={drillable ? `Drill into CPT ${g.cpt} with revenue code ${g.revenue}` : undefined}
+                  className={[
+                    'border-t border-line/60 tabular-nums',
+                    drillable ? 'cursor-pointer' : 'text-muted-foreground',
+                    active ? 'bg-[var(--brand-soft)] ring-1 ring-inset ring-[var(--brand-accent)]' : drillable ? 'hover:bg-[var(--brand-soft)]' : '',
+                  ].join(' ')}
+                >
+                  <td className="px-2 py-1.5 text-left font-medium text-ink900">{g.cpt ?? '(blank)'}</td>
+                  <td className="px-2 py-1.5 text-left text-ink900">{g.revenue ?? '(blank)'}</td>
+                  <td className="px-2 py-1.5 text-right">{g.count.toLocaleString()}</td>
+                  <td className="px-2 py-1.5 text-right">{MONEY0.format(g.charge)}</td>
+                  <td className="px-2 py-1.5 text-right">{formatPercentNum(g.pct_allowed)}</td>
+                  <td className="px-2 py-1.5 text-right">{formatPercentNum(g.pct_paid)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );

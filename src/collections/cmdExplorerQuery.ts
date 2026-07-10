@@ -40,8 +40,9 @@ export type CmdExplorerSearchColumn = keyof typeof CMD_EXPLORER_SEARCH_COLUMNS;
  * (`facility = any(...)`) — the facility multi-select dropdown AND a single-facility drill-down chip
  * both feed it (the chip as a one-element array); its vocabulary comes from buildCmdFacilityOptionsQuery,
  * NOT the canonical facility dimension. An EMPTY array means "no facility restriction" (all facilities),
- * NOT "match nothing" — the condition is omitted entirely. `cpt_code` / `primary_payer` are EXACT
- * matches (drill-down chips). `from`/`to` window payment_received ([from, to)). `q` + `searchColumns`
+ * NOT "match nothing" — the condition is omitted entirely. `cpt_code` / `revenue_code` / `primary_payer`
+ * are EXACT matches (drill-down chips); a (CPT, Revenue-code) combo chip sets `cpt_code` AND
+ * `revenue_code` together. `from`/`to` window payment_received ([from, to)). `q` + `searchColumns`
  * are the free-text substring search: `q` is matched as a literal substring (ILIKE) against EACH
  * allowlisted column in `searchColumns`, OR'd together. All values are bound parameters; nulls/empties
  * are no-ops.
@@ -49,6 +50,7 @@ export type CmdExplorerSearchColumn = keyof typeof CMD_EXPLORER_SEARCH_COLUMNS;
 export interface CmdExplorerFilter {
   facility?: string[] | null;
   cpt_code?: string | null;
+  revenue_code?: string | null;
   primary_payer?: string | null;
   from?: string | null; // 'YYYY-MM-DD' inclusive (payment_received >= from)
   to?: string | null; // 'YYYY-MM-DD' exclusive (payment_received < to)
@@ -98,6 +100,7 @@ export function cmdExplorerBaseConds(
     conds.push(`facility = any(${add(filter.facility)}::text[])`);
   }
   if (filter.cpt_code) conds.push(`cpt_code = ${add(filter.cpt_code)}`);
+  if (filter.revenue_code) conds.push(`revenue_code = ${add(filter.revenue_code)}`);
   if (filter.primary_payer) conds.push(`primary_payer = ${add(filter.primary_payer)}`);
   if (filter.from) conds.push(`payment_received >= ${add(filter.from)}::date`);
   if (filter.to) conds.push(`payment_received < ${add(filter.to)}::date`);
@@ -376,6 +379,27 @@ export interface CmdSearchGroup {
   charge: number;
 }
 
+/**
+ * One (CPT code, Revenue code) COMBINATION bucket. A DISTINCT shape from CmdSearchGroup — it
+ * carries TWO label fields (`cpt` + `revenue`) plus two ratios — because a combo entry answers
+ * "how does this payer treat this exact CPT×revenue-code pairing", which one label can't express.
+ *
+ * `pct_allowed` / `pct_paid` are DOLLAR-WEIGHTED ratios of the bucket's SUMS —
+ * sum(allowed_amount)/sum(charge_amount) and sum(insurance_payments)/sum(allowed_amount), each ×100
+ * rounded to 2 dp — NEVER an average of each row's individual ratio (avg-of-ratios over-weights
+ * small claims and misstates the actual dollar recovery rate, which is the number admissions must
+ * trust). NULL when the denominator is 0 / negative / null (guarded in SQL, never an error). `count`
+ * + `charge` mirror CmdSearchGroup.
+ */
+export interface CmdComboGroup {
+  cpt: string | null;
+  revenue: string | null;
+  count: number;
+  charge: number;
+  pct_allowed: number | null;
+  pct_paid: number | null;
+}
+
 export interface CmdSearchSummary {
   total_count: number;
   total_charge: number;
@@ -384,6 +408,7 @@ export interface CmdSearchSummary {
   by_facility: CmdSearchGroup[];
   by_payer: CmdSearchGroup[];
   by_cpt: CmdSearchGroup[];
+  by_combo: CmdComboGroup[];
 }
 
 /** Group-by columns the summary rolls up — fixed literals, never user input. */
@@ -395,9 +420,10 @@ const CMD_SEARCH_GROUP_COLUMNS = {
 export type CmdSearchGroupColumn = keyof typeof CMD_SEARCH_GROUP_COLUMNS;
 
 /**
- * Build the four aggregate queries backing the search summary — a totals query plus one top-N
- * grouping per dimension — all sharing the SAME tenant-scoped WHERE. Column names are fixed
- * literals; every value is a bound parameter. Exposed so a fixture can assert the exact SQL.
+ * Build the five aggregate queries backing the search summary — a totals query, one top-N grouping
+ * per single dimension (facility / payer / cpt), and one top-N (CPT, Revenue-code) COMBINATION
+ * grouping — all sharing the SAME tenant-scoped WHERE. Column names are fixed literals; every value
+ * is a bound parameter. Exposed so a fixture can assert the exact SQL.
  */
 export function buildCmdSearchSummaryQueries(
   filter: CmdExplorerFilter,
@@ -406,6 +432,7 @@ export function buildCmdSearchSummaryQueries(
 ): {
   totals: { sql: string; params: unknown[] };
   groups: Record<CmdSearchGroupColumn, { sql: string; params: unknown[] }>;
+  combo: { sql: string; params: unknown[] };
 } {
   const build = (select: string, tail: (add: ParamAdder) => string) => {
     const params: unknown[] = [];
@@ -434,5 +461,21 @@ export function buildCmdSearchSummaryQueries(
       (add) => ` group by ${col} order by charge desc nulls last, count desc limit ${add(topN)}`,
     );
   }
-  return { totals, groups };
+
+  // The (CPT, Revenue-code) combination grouping. pct_allowed / pct_paid are DOLLAR-WEIGHTED —
+  // round(sum(numerator) / sum(denominator) * 100, 2) — guarded by `sum(denominator) > 0` so a
+  // zero / negative / NULL denominator yields SQL NULL (the CASE else-branch), never a division
+  // error. This mirrors the per-row generated columns' round-to-2dp scale for a consistent render,
+  // but the MATH is the aggregate ratio-of-sums, NOT an average of per-row ratios. cpt_code and
+  // revenue_code are fixed-literal group columns; ::float8 makes the rounded numerics arrive as JS
+  // numbers (like `charge`).
+  const combo = build(
+    'select cpt_code as cpt, revenue_code as revenue, count(*)::int as count, ' +
+      'coalesce(sum(charge_amount), 0)::float8 as charge, ' +
+      'case when sum(charge_amount) > 0 then round(sum(allowed_amount) / sum(charge_amount) * 100, 2)::float8 end as pct_allowed, ' +
+      'case when sum(allowed_amount) > 0 then round(sum(insurance_payments) / sum(allowed_amount) * 100, 2)::float8 end as pct_paid',
+    (add) => ` group by cpt_code, revenue_code order by charge desc nulls last, count desc limit ${add(topN)}`,
+  );
+
+  return { totals, groups, combo };
 }
