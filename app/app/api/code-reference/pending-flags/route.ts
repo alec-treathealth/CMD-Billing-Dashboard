@@ -12,8 +12,10 @@ import { handlePendingCodeFlags } from '@/lib/codeIntel';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-async function route(): Promise<Response> {
-  const { status, body } = await handlePendingCodeFlags();
+async function route(req: Request): Promise<Response> {
+  const { status, body } = await handlePendingCodeFlags({
+    authorization: req.headers.get('authorization'),
+  });
   return Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 }
 

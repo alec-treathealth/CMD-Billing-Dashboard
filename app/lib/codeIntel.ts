@@ -56,9 +56,9 @@ export async function handleCmsHcpcsSync(req: {
     const summary = await runCmsHcpcsSync();
     return { status: 200, body: { ok: true, summary } };
   } catch (err) {
-    // Never leak internals/secrets — message only.
-    const message = err instanceof Error ? err.message : 'unknown error';
-    return { status: 500, body: { ok: false, error: message } };
+    // Never leak internals/secrets to the client — log server-side, return a generic error.
+    console.error('[codeIntel] handleCmsHcpcsSync:', err);
+    return { status: 500, body: { ok: false, error: 'internal error' } };
   }
 }
 
@@ -70,12 +70,32 @@ function executor(): PgExecutor {
   return cachedExecutor;
 }
 
+// Reader endpoints are gated on the same shared secret as the other non-PHI reader
+// routes (/api/collections/*, /api/results → RESULTS_API_SECRET). Fail-closed: no secret
+// or a mismatch → 401 before any DB access. These surfaces are currently unwired (no UI
+// consumes them) and belong to the code-intelligence workstream; when that workstream
+// wires a dashboard UI it should decide whether to move to per-user session auth — until
+// then default-deny is the correct posture.
+function readAuthorized(authorization: string | null | undefined): boolean {
+  return isAuthorized(authorization, process.env.RESULTS_API_SECRET);
+}
+
+/** Generic 500 — log the real error server-side, never return internals (DB/schema names) to clients. */
+function internalError(context: string, err: unknown): HandlerResult {
+  console.error(`[codeIntel] ${context}:`, err);
+  return { status: 500, body: { error: 'internal error' } };
+}
+
 export async function handleActiveBillingCodes(params: {
+  authorization?: string | null;
   facility?: string | null;
   payer?: string | null;
   setting?: string | null;
   asOf?: string | null;
 }): Promise<HandlerResult> {
+  if (!readAuthorized(params.authorization)) {
+    return { status: 401, body: { error: 'Unauthorized' } };
+  }
   const facility = (params.facility ?? '').trim();
   const payer = (params.payer ?? '').trim();
   const setting = (params.setting ?? '').trim();
@@ -92,17 +112,20 @@ export async function handleActiveBillingCodes(params: {
     });
     return { status: 200, body: { rows } };
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'unknown error';
-    return { status: 500, body: { error: message } };
+    return internalError('handleActiveBillingCodes', err);
   }
 }
 
-export async function handlePendingCodeFlags(): Promise<HandlerResult> {
+export async function handlePendingCodeFlags(params: {
+  authorization?: string | null;
+}): Promise<HandlerResult> {
+  if (!readAuthorized(params.authorization)) {
+    return { status: 401, body: { error: 'Unauthorized' } };
+  }
   try {
     const rows: PendingCodeFlagRow[] = await getPendingCodeFlags(executor());
     return { status: 200, body: { rows } };
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'unknown error';
-    return { status: 500, body: { error: message } };
+    return internalError('handlePendingCodeFlags', err);
   }
 }

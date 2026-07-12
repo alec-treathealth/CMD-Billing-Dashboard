@@ -15,6 +15,7 @@ export const dynamic = 'force-dynamic';
 async function route(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const { status, body } = await handleActiveBillingCodes({
+    authorization: req.headers.get('authorization'),
     facility: url.searchParams.get('facility'),
     payer: url.searchParams.get('payer'),
     setting: url.searchParams.get('setting'),
