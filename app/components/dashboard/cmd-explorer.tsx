@@ -53,10 +53,31 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type SensorDescriptor,
+  type SensorOptions,
+} from '@dnd-kit/core';
+import { restrictToHorizontalAxis, restrictToVerticalAxis } from '@dnd-kit/modifiers';
+import {
+  SortableContext,
+  arrayMove,
+  horizontalListSortingStrategy,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { ControlSelect, Pager, useColumnDnD } from '@/components/data-grid';
+import { ControlSelect, Pager } from '@/components/data-grid';
 import { PHI_MASK } from '@/lib/phi';
 import {
   loadCmdReport,
@@ -80,6 +101,7 @@ import {
   type GridViewRow,
 } from '@/lib/actions';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../../src/collections/cmdExplorer';
+import { deriveGridLayout } from '../../../src/collections/gridViewLayout';
 import type { DashboardView } from '@/lib/views';
 
 type ColKey =
@@ -138,6 +160,16 @@ const IS_PERCENT = new Set<string>(['pct_allowed', 'pct_paid']);
 const SEARCHABLE_KEYS = new Set<string>(
   COLUMNS.filter((c) => !c.phi && !IS_PERCENT.has(c.key)).map((c) => c.key),
 );
+
+/**
+ * Reconstruct a saved view into this component's { order, hidden } layout. Thin typed wrapper over the
+ * pure, unit-tested `deriveGridLayout` (which handles the legacy-format fallback, allowlist repair,
+ * PHI-lock, and the at-least-one-visible guard) — keeps load-view and default-on-mount in lockstep.
+ */
+function deriveLayout(v: GridViewRow): { order: ColKey[]; hidden: Set<ColKey> } {
+  const { order, hidden } = deriveGridLayout(v, DEFAULT_ORDER, IS_PHI);
+  return { order: order as ColKey[], hidden: hidden as Set<ColKey> };
+}
 
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -317,11 +349,32 @@ export function CmdCollectionsExplorer({
   const [cursors, setCursors] = useState<(CmdExplorerCursor | null)[]>([null]);
   const [hasNext, setHasNext] = useState(false);
 
-  // VISIBLE columns, in display order (membership = visibility). Starts as all columns; a saved
-  // default view (if any) overrides it on mount. Reorder by dragging headers; toggle visibility in
-  // the "Columns" menu. Persisted per-user as a named view via the server actions below.
+  // Column layout, split into two pieces (superseding the old "membership = visibility" single array):
+  //   • `order`  — ALL columns in display order (the single draggable list in the Columns popover).
+  //   • `hidden` — which of those columns are hidden. PHI columns are never in here (locked-visible).
+  // The TABLE renders `visibleOrder` (order minus hidden). Reorder by dragging in the popover OR the
+  // table headers; toggle visibility in the popover. Both are persisted per-user as a named view.
   const [order, setOrder] = useState<ColKey[]>([...DEFAULT_ORDER]);
-  const dnd = useColumnDnD(order, (next) => setOrder(next as ColKey[]));
+  const [hidden, setHidden] = useState<Set<ColKey>>(() => new Set());
+  const visibleOrder = order.filter((k) => !hidden.has(k));
+
+  // @dnd-kit drag: activation lives on the grip handles only (see the Sortable* components), so
+  // clicking a sort button or checkbox never starts a drag. Keyboard drag (Space to lift, arrows to
+  // move, Space to drop) comes from the KeyboardSensor. Shared by the popover list AND the table
+  // headers; both reorder the SAME full `order` via keys, so they stay perfectly in sync.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  const reorderColumns = useCallback((activeKey: string, overKey: string) => {
+    if (activeKey === overKey) return;
+    setOrder((prev) => {
+      const from = prev.indexOf(activeKey as ColKey);
+      const to = prev.indexOf(overKey as ColKey);
+      if (from < 0 || to < 0) return prev;
+      return arrayMove(prev, from, to);
+    });
+  }, []);
 
   // Per-user saved column views (server-side, private). Loaded once on mount; the caller's default
   // view (if one exists) sets the initial layout, else all columns (DEFAULT_ORDER).
@@ -346,7 +399,8 @@ export function CmdCollectionsExplorer({
 
   // Search scope FOLLOWS visibility: the term matches the searchable columns currently shown (in
   // display order). Hiding a column removes it from search too; there is one "columns" concept.
-  const searchCols = order.filter((k) => SEARCHABLE_KEYS.has(k));
+  // Derived from `visibleOrder` (NOT the full `order`) so hidden columns never widen the search.
+  const searchCols = visibleOrder.filter((k) => SEARCHABLE_KEYS.has(k));
   const hasSearch = term.trim() !== '' && searchCols.length > 0;
   const hasAnySearch = hasSearch || hasPhiSearch;
   // Stable dep keys for the sets (array identity changes on every toggle otherwise).
@@ -386,8 +440,9 @@ export function CmdCollectionsExplorer({
           defaultViewAppliedRef.current = true;
           const def = r.views.find((v) => v.isDefault);
           if (def) {
-            const known = def.columns.filter((c): c is ColKey => (DEFAULT_ORDER as string[]).includes(c));
-            if (known.length > 0) setOrder(known);
+            const layout = deriveLayout(def);
+            setOrder(layout.order);
+            setHidden(layout.hidden);
           }
         }
       })
@@ -600,17 +655,6 @@ export function CmdCollectionsExplorer({
   // A refetch is in flight but we still have rows on screen → dim + progress bar (don't blank).
   const gridRefreshing = busy && rows.length > 0;
 
-  function moveColumn(key: ColKey, dir: 'left' | 'right') {
-    setOrder((prev) => {
-      const i = prev.indexOf(key);
-      const j = dir === 'left' ? i - 1 : i + 1;
-      if (i < 0 || j < 0 || j >= prev.length) return prev;
-      const next = [...prev];
-      [next[i], next[j]] = [next[j]!, next[i]!];
-      return next;
-    });
-  }
-
   function toggleSort(key: CmdExplorerSort['column']) {
     setSort((prev) =>
       prev.column === key
@@ -620,25 +664,36 @@ export function CmdCollectionsExplorer({
   }
 
   // --- column visibility + saved views --------------------------------------
-  // Toggle a column's VISIBILITY: hidden → append (shows rightmost); visible → remove. Never remove
-  // the last visible column (a zero-column grid is broken).
+  // Toggle a column's VISIBILITY in place (position is preserved — visibility and order are now
+  // independent). PHI columns are locked-visible (never toggle). Never hide the last visible column.
   function toggleColumnVisible(key: ColKey) {
-    setOrder((prev) => {
-      if (prev.includes(key)) return prev.length <= 1 ? prev : prev.filter((k) => k !== key);
-      return [...prev, key];
+    if (IS_PHI.has(key)) return; // locked-visible; masking is handled separately
+    setHidden((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key); // show
+        return next;
+      }
+      // Hiding: refuse if it would leave zero visible columns.
+      const visibleCount = order.reduce((n, k) => n + (next.has(k) ? 0 : 1), 0);
+      if (visibleCount <= 1) return prev;
+      next.add(key);
+      return next;
     });
   }
   function resetColumns() {
     setOrder([...DEFAULT_ORDER]);
+    setHidden(new Set());
   }
-  /** Apply a saved view's layout — keep only still-known columns, in the saved order. */
-  function applyView(cols: string[]) {
-    const known = cols.filter((c): c is ColKey => (DEFAULT_ORDER as string[]).includes(c));
-    setOrder(known.length > 0 ? known : [...DEFAULT_ORDER]);
+  /** Apply a saved view's layout (full order + hidden set), tolerant of the legacy format. */
+  function applyView(v: GridViewRow) {
+    const layout = deriveLayout(v);
+    setOrder(layout.order);
+    setHidden(layout.hidden);
   }
-  /** Save the CURRENT visible-column layout as a named view (create/overwrite by name). */
+  /** Save the CURRENT layout as a named view: the full column order + the hidden set. */
   async function handleSaveView(name: string, makeDefault: boolean): Promise<GridViewMutationOutcome> {
-    const res = await saveGridView(name, order as string[], makeDefault);
+    const res = await saveGridView(name, order as string[], [...hidden] as string[], makeDefault);
     if (res.ok) await refreshViews();
     return res.ok ? { ok: true } : { ok: false, error: res.error };
   }
@@ -954,17 +1009,20 @@ export function CmdCollectionsExplorer({
                 <Columns3 className="h-4 w-4" />
                 Columns
                 <span className="ml-1 rounded-full bg-[var(--brand-soft)] px-1.5 text-[11px] font-semibold text-[var(--brand-ink)]">
-                  {order.length}/{COLUMNS.length}
+                  {visibleOrder.length}/{COLUMNS.length}
                 </span>
                 <ChevronDown className="h-3.5 w-3.5 opacity-60" aria-hidden />
               </Button>
               {columnsMenuOpen && (
                 <ColumnViewManager
                   order={order}
+                  hidden={hidden}
+                  sensors={sensors}
+                  onReorder={reorderColumns}
                   views={views}
                   onToggleColumn={toggleColumnVisible}
                   onReset={resetColumns}
-                  onLoadView={(v) => applyView(v.columns)}
+                  onLoadView={applyView}
                   onSaveView={handleSaveView}
                   onSetDefault={handleSetDefaultView}
                   onDeleteView={handleDeleteView}
@@ -1001,7 +1059,7 @@ export function CmdCollectionsExplorer({
         )}
 
         {status === 'loading' && rows.length === 0 ? (
-          <GridSkeleton cols={order.length} />
+          <GridSkeleton cols={visibleOrder.length} />
         ) : rows.length === 0 ? (
           <div className="py-8 text-center text-sm text-muted-foreground">
             {hasAnySearch ? 'No charge lines match this search.' : 'No charge lines match the current filters.'}
@@ -1017,101 +1075,53 @@ export function CmdCollectionsExplorer({
               aria-busy={gridRefreshing}
               className={`overflow-x-auto rounded-md border transition-opacity duration-150 ${gridRefreshing ? 'opacity-60' : ''}`}
             >
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  {order.map((c) => {
-                    const dragging = dnd.draggingKey === c;
-                    const isTarget = dnd.dropTargetKey === c && dnd.draggingKey !== c;
-                    const sortable = SORTABLE_KEYS.has(c);
-                    const isSorted = sort.column === c;
-                    return (
-                      <TableHead
-                        key={c}
-                        {...dnd.itemProps(c)}
-                        aria-grabbed={dragging}
-                        aria-sort={
-                          isSorted ? (sort.direction === 'asc' ? 'ascending' : 'descending') : undefined
-                        }
-                        title="Drag to reorder"
-                        className={[
-                          'cursor-grab select-none border-l-2 active:cursor-grabbing',
-                          IS_NUMERIC.has(c) ? 'text-right' : '',
-                          isSorted ? 'text-[var(--brand-ink)]' : '',
-                          isTarget ? 'border-l-[var(--brand-accent)]' : 'border-l-transparent',
-                          dragging ? 'opacity-50' : '',
-                        ].join(' ')}
-                      >
-                        <span className={`inline-flex items-center gap-1 ${IS_NUMERIC.has(c) ? 'flex-row-reverse' : ''}`}>
-                          <button
-                            type="button"
-                            aria-label={`Reorder ${COLUMN_LABEL[c] ?? c}`}
-                            onKeyDown={(e) => {
-                              if (e.key === 'ArrowLeft') {
-                                e.preventDefault();
-                                moveColumn(c, 'left');
-                              } else if (e.key === 'ArrowRight') {
-                                e.preventDefault();
-                                moveColumn(c, 'right');
-                              }
-                            }}
-                            className="shrink-0 cursor-grab text-ink400 active:cursor-grabbing"
-                          >
-                            <GripVertical className="h-3 w-3" aria-hidden />
-                          </button>
-                          {sortable ? (
-                            <button
-                              type="button"
-                              draggable={false}
-                              onMouseDown={(e) => e.stopPropagation()}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                toggleSort(c as CmdExplorerSort['column']);
-                              }}
-                              aria-label={`Sort by ${COLUMN_LABEL[c] ?? c}`}
-                              className="inline-flex cursor-pointer items-center gap-1 hover:text-[var(--brand-ink)]"
-                            >
-                              {COLUMN_LABEL[c] ?? c}
-                              {isSorted ? (
-                                sort.direction === 'asc' ? (
-                                  <ArrowUp className="h-3 w-3" aria-hidden />
-                                ) : (
-                                  <ArrowDown className="h-3 w-3" aria-hidden />
-                                )
-                              ) : (
-                                <ArrowUpDown className="h-3 w-3 opacity-40" aria-hidden />
-                              )}
-                            </button>
-                          ) : (
-                            (COLUMN_LABEL[c] ?? c)
-                          )}
-                        </span>
-                      </TableHead>
-                    );
-                  })}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {rows.map((row) => (
-                  <TableRow key={row.id} className="transition-colors hover:bg-[var(--brand-soft)]">
-                    {order.map((c) => (
-                      <TableCell
-                        key={c}
-                        className={
-                          IS_NUMERIC.has(c)
-                            ? 'text-right tabular-nums'
-                            : IS_PHI.has(c) && !revealed
-                              ? 'text-muted-foreground'
-                              : undefined
-                        }
-                      >
-                        {cellText(c, row)}
-                      </TableCell>
-                    ))}
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              modifiers={[restrictToHorizontalAxis]}
+              onDragEnd={(e: DragEndEvent) => {
+                if (e.over) reorderColumns(String(e.active.id), String(e.over.id));
+              }}
+            >
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <SortableContext items={visibleOrder} strategy={horizontalListSortingStrategy}>
+                      {visibleOrder.map((c) => (
+                        <SortableHeadCell
+                          key={c}
+                          colKey={c}
+                          sortable={SORTABLE_KEYS.has(c)}
+                          isSorted={sort.column === c}
+                          direction={sort.direction}
+                          onToggleSort={() => toggleSort(c as CmdExplorerSort['column'])}
+                        />
+                      ))}
+                    </SortableContext>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {rows.map((row) => (
+                    <TableRow key={row.id} className="transition-colors hover:bg-[var(--brand-soft)]">
+                      {visibleOrder.map((c) => (
+                        <TableCell
+                          key={c}
+                          className={
+                            IS_NUMERIC.has(c)
+                              ? 'text-right tabular-nums'
+                              : IS_PHI.has(c) && !revealed
+                                ? 'text-muted-foreground'
+                                : undefined
+                          }
+                        >
+                          {cellText(c, row)}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </DndContext>
             </div>
           </div>
         )}
@@ -1259,13 +1269,150 @@ function FacilityFilter({
 }
 
 /**
- * Column layout + saved-views manager — the "Columns" popover. A two-section manager (top = which
- * columns are VISIBLE + reset; bottom = the user's private saved layouts, with load / set-default /
- * delete / save-current), living on the grid toolbar. This is the SINGLE columns control: the shown
- * columns are both what the grid displays AND (for the searchable ones) what the search term matches.
+ * A drag-reorderable table header cell (@dnd-kit sortable). Drag activates on the GRIP handle only —
+ * so the sort button still clicks normally and text stays selectable. Keyboard reorder (focus grip →
+ * Space → arrows → Space) is handled by the shared KeyboardSensor. Reordering is applied to the full
+ * column `order` by the parent (via key lookup), so headers and the popover list stay in sync.
+ */
+function SortableHeadCell({
+  colKey,
+  sortable,
+  isSorted,
+  direction,
+  onToggleSort,
+}: {
+  colKey: ColKey;
+  sortable: boolean;
+  isSorted: boolean;
+  direction: 'asc' | 'desc';
+  onToggleSort: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } =
+    useSortable({ id: colKey });
+  const numeric = IS_NUMERIC.has(colKey);
+  const label = COLUMN_LABEL[colKey] ?? colKey;
+  const style = { transform: CSS.Transform.toString(transform), transition };
+  return (
+    <TableHead
+      ref={setNodeRef}
+      style={style}
+      aria-sort={isSorted ? (direction === 'asc' ? 'ascending' : 'descending') : undefined}
+      className={[
+        'select-none',
+        numeric ? 'text-right' : '',
+        isSorted ? 'text-[var(--brand-ink)]' : '',
+        isDragging ? 'relative z-10 opacity-70' : '',
+      ].join(' ')}
+    >
+      <span className={`inline-flex items-center gap-1 ${numeric ? 'flex-row-reverse' : ''}`}>
+        <button
+          type="button"
+          ref={setActivatorNodeRef}
+          {...attributes}
+          {...listeners}
+          aria-label={`Reorder ${label}`}
+          title="Drag to reorder"
+          className="shrink-0 cursor-grab touch-none text-ink400 hover:text-ink600 active:cursor-grabbing"
+        >
+          <GripVertical className="h-3 w-3" aria-hidden />
+        </button>
+        {sortable ? (
+          <button
+            type="button"
+            onClick={onToggleSort}
+            aria-label={`Sort by ${label}`}
+            className="inline-flex cursor-pointer items-center gap-1 hover:text-[var(--brand-ink)]"
+          >
+            {label}
+            {isSorted ? (
+              direction === 'asc' ? (
+                <ArrowUp className="h-3 w-3" aria-hidden />
+              ) : (
+                <ArrowDown className="h-3 w-3" aria-hidden />
+              )
+            ) : (
+              <ArrowUpDown className="h-3 w-3 opacity-40" aria-hidden />
+            )}
+          </button>
+        ) : (
+          label
+        )}
+      </span>
+    </TableHead>
+  );
+}
+
+/**
+ * One drag-reorderable row in the Columns popover: grip handle + show/hide checkbox + label (+ a PHI
+ * lock badge). Drag activates on the grip only. `lockHide` disables the checkbox (PHI columns are
+ * locked-visible; and the last remaining visible column can't be hidden) — the row is still fully
+ * draggable regardless, so a locked column's POSITION is freely reorderable.
+ */
+function SortableColumnItem({
+  colKey,
+  label,
+  phi,
+  shown,
+  lockHide,
+  onToggle,
+}: {
+  colKey: ColKey;
+  label: string;
+  phi: boolean;
+  shown: boolean;
+  lockHide: boolean;
+  onToggle: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } =
+    useSortable({ id: colKey });
+  const style = { transform: CSS.Transform.toString(transform), transition };
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={[
+        'flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-ink900',
+        isDragging ? 'relative z-10 bg-surface shadow-ths' : 'hover:bg-[var(--brand-soft)]',
+      ].join(' ')}
+    >
+      <button
+        type="button"
+        ref={setActivatorNodeRef}
+        {...attributes}
+        {...listeners}
+        aria-label={`Reorder ${label}`}
+        title="Drag to reorder"
+        className="shrink-0 cursor-grab touch-none text-ink400 hover:text-ink600 active:cursor-grabbing"
+      >
+        <GripVertical className="h-4 w-4" aria-hidden />
+      </button>
+      <label className={`flex min-w-0 flex-1 items-center gap-2 ${lockHide ? '' : 'cursor-pointer'}`}>
+        <input
+          type="checkbox"
+          checked={shown}
+          disabled={lockHide}
+          onChange={onToggle}
+          className="h-4 w-4 shrink-0 accent-[var(--brand-accent)]"
+        />
+        <span className={`flex-1 truncate ${shown ? '' : 'text-ink400'}`}>{label}</span>
+      </label>
+      {phi && <Lock className="h-3 w-3 shrink-0 text-ink400" aria-hidden />}
+    </div>
+  );
+}
+
+/**
+ * Column layout + saved-views manager — the "Columns" popover. A two-section manager (top = a single
+ * DRAG-TO-REORDER list of every column with a show/hide checkbox; bottom = the user's private saved
+ * layouts, with load / set-default / delete / save-current), living on the grid toolbar. This is the
+ * SINGLE columns control: the shown columns are both what the grid displays AND (for the searchable
+ * ones) what the search term matches. Dragging a row reorders the actual table columns instantly.
  */
 function ColumnViewManager({
   order,
+  hidden,
+  sensors,
+  onReorder,
   views,
   onToggleColumn,
   onReset,
@@ -1276,6 +1423,9 @@ function ColumnViewManager({
   onClose,
 }: {
   order: ColKey[];
+  hidden: Set<ColKey>;
+  sensors: SensorDescriptor<SensorOptions>[];
+  onReorder: (activeKey: string, overKey: string) => void;
   views: GridViewRow[];
   onToggleColumn: (key: ColKey) => void;
   onReset: () => void;
@@ -1285,7 +1435,7 @@ function ColumnViewManager({
   onDeleteView: (name: string) => void | Promise<void>;
   onClose: () => void;
 }) {
-  const visible = new Set<string>(order);
+  const visibleCount = order.reduce((n, k) => n + (hidden.has(k) ? 0 : 1), 0);
   const [saveName, setSaveName] = useState('');
   const [makeDefault, setMakeDefault] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -1322,36 +1472,42 @@ function ColumnViewManager({
         aria-label="Columns and saved views"
         className="absolute right-0 top-full z-50 mt-2 w-80 animate-ths-reveal rounded-lg border border-line bg-surface p-3 shadow-ths"
       >
-        {/* Section 1 — visibility */}
+        {/* Section 1 — reorder + visibility (single drag-to-reorder list of every column) */}
         <div className="mb-1 flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           <span>Visible columns</span>
-          <span className="font-normal normal-case">{order.length} of {COLUMNS.length}</span>
+          <span className="font-normal normal-case">{visibleCount} of {COLUMNS.length}</span>
         </div>
-        <p className="mb-1.5 text-[11px] text-ink400">Shown columns are also what search matches.</p>
-        <div className="max-h-56 space-y-0.5 overflow-y-auto">
-          {COLUMNS.map((c) => {
-            const shown = visible.has(c.key);
-            const isLastVisible = shown && order.length <= 1;
-            return (
-              <label
-                key={c.key}
-                className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-ink900 ${
-                  isLastVisible ? 'opacity-60' : 'cursor-pointer hover:bg-[var(--brand-soft)]'
-                }`}
-              >
-                <input
-                  type="checkbox"
-                  checked={shown}
-                  disabled={isLastVisible}
-                  onChange={() => onToggleColumn(c.key)}
-                  className="h-4 w-4 accent-[var(--brand-accent)]"
-                />
-                <span className="flex-1 truncate">{c.label}</span>
-                {c.phi && <Lock className="h-3 w-3 shrink-0 text-ink400" aria-hidden />}
-              </label>
-            );
-          })}
-        </div>
+        <p className="mb-1.5 text-[11px] text-ink400">Drag to reorder · shown columns are also what search matches.</p>
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          modifiers={[restrictToVerticalAxis]}
+          onDragEnd={(e: DragEndEvent) => {
+            if (e.over) onReorder(String(e.active.id), String(e.over.id));
+          }}
+        >
+          <SortableContext items={order} strategy={verticalListSortingStrategy}>
+            <div className="max-h-56 space-y-0.5 overflow-y-auto">
+              {order.map((key) => {
+                const phi = IS_PHI.has(key);
+                const shown = !hidden.has(key);
+                // PHI columns are locked-visible; a non-PHI column can't be hidden if it's the last one shown.
+                const lockHide = phi || (shown && visibleCount <= 1);
+                return (
+                  <SortableColumnItem
+                    key={key}
+                    colKey={key}
+                    label={COLUMN_LABEL[key] ?? key}
+                    phi={phi}
+                    shown={shown}
+                    lockHide={lockHide}
+                    onToggle={() => onToggleColumn(key)}
+                  />
+                );
+              })}
+            </div>
+          </SortableContext>
+        </DndContext>
         <button
           type="button"
           onClick={onReset}

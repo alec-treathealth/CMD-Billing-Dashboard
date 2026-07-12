@@ -305,44 +305,60 @@ export async function deleteAppUser(userId: string): Promise<void> {
 // the user's own label). `columns` crosses as jsonb (stringified, cast $n::jsonb).
 // ---------------------------------------------------------------------------
 
-/** One saved column layout: the display column keys in order (membership = visibility) + default flag. */
+/**
+ * One saved column layout. `columns` is the display column order; `hidden` is which of those keys are
+ * hidden. `hidden` is NULL for LEGACY rows (migration 0046, before hidden_columns existed) where
+ * `columns` held only the visible columns in order — the caller reconstructs the full order + hidden
+ * set from a null `hidden` (see cmd-explorer's applyView). A non-null array is the new (0047) format.
+ */
 export interface GridViewRow {
   name: string;
   columns: string[];
+  hidden: string[] | null;
   isDefault: boolean;
 }
+
+const toStringArray = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((c): c is string => typeof c === 'string') : [];
 
 /** List the caller's saved views (app-scoped by uid; default first, then alphabetical). */
 export async function gridViewsFor(userId: string): Promise<GridViewRow[]> {
   const { rows } = await readerExecutor().query<{
     view_name: string;
     columns: unknown;
+    hidden_columns: unknown;
     is_default: boolean;
   }>(
-    'select view_name, columns, is_default from claims.user_grid_views ' +
+    'select view_name, columns, hidden_columns, is_default from claims.user_grid_views ' +
       'where app_user_id = $1 order by is_default desc, view_name',
     [userId],
   );
   return rows.map((r) => ({
     name: r.view_name,
-    columns: Array.isArray(r.columns)
-      ? (r.columns as unknown[]).filter((c): c is string => typeof c === 'string')
-      : [],
+    columns: toStringArray(r.columns),
+    // Preserve NULL (legacy) vs array (new). NULL signals the caller to derive the hidden set from
+    // whichever allowlisted columns are absent from `columns` (0046 semantics); an array is explicit.
+    hidden: r.hidden_columns == null ? null : toStringArray(r.hidden_columns),
     isDefault: Boolean(r.is_default),
   }));
 }
 
-/** Create/update the caller's named view (columns pre-sanitized by the action; DB fn bounds shape). */
+/**
+ * Create/update the caller's named view. `columns` (full display order) and `hidden` (a subset) are
+ * pre-sanitized by the action; the DB fn re-bounds the shape. Uses the 5-arg save_grid_view (0047).
+ */
 export async function saveGridViewRow(
   userId: string,
   name: string,
   columns: string[],
+  hidden: string[],
   makeDefault: boolean,
 ): Promise<void> {
-  await readerExecutor().query('select claims.save_grid_view($1, $2, $3::jsonb, $4)', [
+  await readerExecutor().query('select claims.save_grid_view($1, $2, $3::jsonb, $4::jsonb, $5)', [
     userId,
     name,
     JSON.stringify(columns),
+    JSON.stringify(hidden),
     makeDefault,
   ]);
 }

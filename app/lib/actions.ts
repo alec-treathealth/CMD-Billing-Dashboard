@@ -1069,12 +1069,15 @@ export async function listGridViews(): Promise<GridViewsResult> {
 }
 
 /**
- * Create or update (by name) one of the caller's saved views. `columns` is allowlist-sanitized
- * (unknown/dup/non-string keys dropped, order preserved); a view must keep at least one column.
+ * Create or update (by name) one of the caller's saved views. `columns` is the full display order and
+ * `hidden` the subset that is hidden — both allowlist-sanitized (unknown/dup/non-string keys dropped,
+ * order preserved). A view must keep at least one column; `hidden` is intersected with `columns` so a
+ * key can never be marked hidden without also being in the order, and at least one column stays visible.
  */
 export async function saveGridView(
   name: string,
   columns: string[],
+  hidden: string[] = [],
   makeDefault = false,
 ): Promise<GridViewMutationResult> {
   const uid = await currentUserId();
@@ -1085,8 +1088,14 @@ export async function saveGridView(
   }
   const cols = sanitizeGridColumns(columns);
   if (cols.length === 0) return { ok: false, error: 'A view must include at least one column.' };
+  const colSet = new Set<string>(cols);
+  const hiddenCols = sanitizeGridColumns(hidden).filter((c) => colSet.has(c));
+  // A view must keep at least one visible column (hiding everything is not a valid layout).
+  if (hiddenCols.length >= cols.length) {
+    return { ok: false, error: 'A view must keep at least one column visible.' };
+  }
   try {
-    await saveGridViewRow(uid, trimmed, cols, Boolean(makeDefault));
+    await saveGridViewRow(uid, trimmed, cols, hiddenCols, Boolean(makeDefault));
     return { ok: true };
   } catch {
     return { ok: false, error: 'The view could not be saved right now.' };
