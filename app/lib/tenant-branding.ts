@@ -22,8 +22,8 @@ export type TenantBrand =
 export const TENANT_BRANDING: Record<TenantSlug, TenantBrand> = {
   // Real asset supplied out-of-band into app/public/logos/bxr.png (do NOT commit-wire until present).
   bxr: { kind: 'image', src: '/logos/bxr.png', alt: 'BxR Consulting' },
-  // No real Indigo asset yet → initials placeholder; swap to { kind: 'image', src, alt } when it lands.
-  indigo: { kind: 'initials', initials: 'IB', alt: 'Indigo Billing' },
+  // Real asset supplied out-of-band into app/public/logos/indigo.webp.
+  indigo: { kind: 'image', src: '/logos/indigo.webp', alt: 'Indigo Billing' },
 };
 
 /** Resolve a slug (an entity or a non-consolidated view) to its brand, or null if none/consolidated. */
