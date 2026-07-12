@@ -46,7 +46,7 @@ test('page query: tenant scope is always the first bound param, no filters', () 
   const { sql, params } = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
   assert.match(sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
   assert.deepEqual(params[0], ENTITY);
-  assert.match(sql, /order by payment_received desc nulls last, id desc/);
+  assert.match(sql, /order by t\.payment_received desc nulls last, t\.id desc/);
   assertAllBound(sql, params);
 });
 
@@ -142,7 +142,7 @@ test('pct_allowed / pct_paid are sortable and selected (payer-gap columns)', () 
   assert.ok((CMD_EXPLORER_SORTABLE_COLUMNS as readonly string[]).includes('pct_paid'));
   // a sort by pct_allowed drives ORDER BY the raw generated column (keyset-compatible)
   const { sql } = buildCmdExplorerQuery(null, {}, { column: 'pct_allowed', direction: 'desc' }, 51, ENTITY);
-  assert.match(sql, /order by pct_allowed desc nulls last, id desc/);
+  assert.match(sql, /order by t\.pct_allowed desc nulls last, t\.id desc/);
   // both columns are projected by the grid SELECT
   assert.match(sql, /pct_allowed/);
   assert.match(sql, /pct_paid/);
@@ -168,7 +168,7 @@ test('facility options query is tenant-scoped and its only bound value is entity
 test('page query: cursor + limit are bound; sort column drives ORDER BY', () => {
   const sort: CmdExplorerSort = { column: 'charge_amount', direction: 'asc' };
   const { sql, params } = buildCmdExplorerQuery({ id: 42, value: '250.00' }, {}, sort, 51, ENTITY);
-  assert.match(sql, /order by charge_amount asc nulls last, id asc/);
+  assert.match(sql, /order by t\.charge_amount asc nulls last, t\.id asc/);
   assert.match(sql, /limit \$\d+/);
   // cursor value + id are bound (not concatenated)
   assert.ok(params.includes('250.00'));

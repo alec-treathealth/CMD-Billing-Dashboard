@@ -305,7 +305,13 @@ export const CMD_EXPLORER_SELECT =
   'facility, charge_amount, allowed_amount, insurance_payments, adjustments, ' +
   'patient_balance_due, primary_payer, pct_allowed, pct_paid, ' +
   `to_char(ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
-  'from collections.cmd_explorer_rows';
+  // Aliased `t` SO THE ORDER BY CAN TARGET THE RAW COLUMN: the two date columns are projected as
+  // `to_char(<date>, 'YYYY-MM-DD') AS <date>` (output name == column name), and an UNQUALIFIED
+  // `order by payment_received` resolves to that TEXT output alias (Postgres: output name wins in
+  // ORDER BY), which no index can serve — forcing a full seq scan + top-N sort of the tenant slice.
+  // `order by t.<col>` (see buildCmdExplorerQuery) binds to the underlying date/numeric column so
+  // idx_cmd_explorer_payment_received (and the money/ratio orderings) drive the sort + LIMIT.
+  'from collections.cmd_explorer_rows t';
 
 /**
  * Build the keyset page query with optional filters + an allowlisted sort. Column/table names
@@ -353,7 +359,10 @@ export function buildCmdExplorerQuery(
 
   const where = conds.length > 0 ? ` where ${conds.join(' and ')}` : '';
   const dir = sort.direction === 'asc' ? 'asc' : 'desc';
-  const orderClause = ` order by ${col} ${dir} nulls last, id ${dir}`;
+  // Table-qualified (`t.`) ON PURPOSE — see CMD_EXPLORER_SELECT: an unqualified `order by <col>`
+  // would bind to the `to_char(...) AS <date>` output alias (a text sort no index serves). `t.<col>`
+  // + `t.id` target the raw columns so the keyset indexes drive the sort and LIMIT stops at the page.
+  const orderClause = ` order by t.${col} ${dir} nulls last, t.id ${dir}`;
   const limitClause = ` limit ${add(limit)}`;
   return { sql: `${CMD_EXPLORER_SELECT}${where}${orderClause}${limitClause}`, params };
 }
