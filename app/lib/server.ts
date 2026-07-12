@@ -1014,7 +1014,13 @@ export const cmdExplorerFacilities = unstable_cache(
     }));
   },
   ['cmd-explorer-facilities'],
-  { revalidate: 900, tags: ['cmd-explorer'] },
+  // The facility vocabulary is near-static — a new facility STRING appears only the first time
+  // ingestion sees one (rare), NOT on the daily payment refresh. Deliberately OFF the 'cmd-explorer'
+  // tag the 30-min ingest cron busts: sharing it rebuilt this ~627k-row DISTINCT scan (~2.1s) on
+  // every pass, so any visitor right after a cron run ate the full cost. A dedicated tag + a longer
+  // timer means the dropdown is a warm cache hit ~always; a brand-new facility surfaces within the
+  // hour (its rows are already in the grid regardless — this only gates the filter dropdown's list).
+  { revalidate: 3600, tags: ['cmd-facilities'] },
 );
 
 /**
