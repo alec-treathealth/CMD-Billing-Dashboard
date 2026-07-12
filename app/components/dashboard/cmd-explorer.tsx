@@ -23,7 +23,6 @@ import {
   ArrowUp,
   ArrowUpDown,
   Bookmark,
-  Building2,
   Check,
   ChevronDown,
   Columns3,
@@ -1898,7 +1897,7 @@ function SearchSummaryPanel({
           <span className="tabular-nums">{s.total_count.toLocaleString()}</span> charge line
           {s.total_count === 1 ? '' : 's'} match {label}
         </h3>
-        <span className="text-xs text-muted-foreground">Click a facility, payer, CPT, or CPT×Rev combo to drill in.</span>
+        <span className="text-xs text-muted-foreground">Click a payer, CPT, or CPT×Rev combo to drill in.</span>
       </div>
 
       {/* Staged reveal: the four groups arrive in ONE response (single Promise.all), so this is a
@@ -1910,16 +1909,11 @@ function SearchSummaryPanel({
         <StatTile label="Patient Balance" value={MONEY0.format(s.total_balance)} />
       </div>
 
-      <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-3">
-        <DrillList
-          title="Top facilities"
-          icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
-          kind="facility"
-          groups={s.by_facility}
-          activeValue={refinement?.kind === 'facility' ? refinement.value : null}
-          onDrill={onDrill}
-          revealDelayMs={60}
-        />
+      {/* Top Results groups (B): Payer + CPT single-dimension lists, then the full-width CPT×Rev combo
+          below. The Facility drill list was removed here — facility stays filterable via the Facilities
+          dropdown. This is a render-only removal: the summary object still returns by_facility (unused
+          now), so its shape and the server groups are unchanged. */}
+      <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
         <DrillList
           title="Top payers"
           icon={<CreditCard className="h-3.5 w-3.5" aria-hidden />}
@@ -1927,7 +1921,7 @@ function SearchSummaryPanel({
           groups={s.by_payer}
           activeValue={refinement?.kind === 'primary_payer' ? refinement.value : null}
           onDrill={onDrill}
-          revealDelayMs={120}
+          revealDelayMs={60}
         />
         <DrillList
           title="Top CPT codes"
@@ -1936,7 +1930,7 @@ function SearchSummaryPanel({
           groups={s.by_cpt}
           activeValue={refinement?.kind === 'cpt_code' ? refinement.value : null}
           onDrill={onDrill}
-          revealDelayMs={180}
+          revealDelayMs={120}
         />
       </div>
 
