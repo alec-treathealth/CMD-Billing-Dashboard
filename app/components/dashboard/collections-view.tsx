@@ -15,14 +15,20 @@
  * control; a plain user never sees it.
  */
 import { type DashboardView } from '@/lib/views';
-import { CmdCollectionsExplorer } from './cmd-explorer';
+import { CmdCollectionsExplorer, type CmdExplorerInitialData } from './cmd-explorer';
 
 export function CollectionsView({
   view,
   canRevealPhi,
+  initialData,
 }: {
   view: DashboardView;
   canRevealPhi: boolean;
+  // Server-rendered first page + facilities + saved views (from the Collections Server Component),
+  // passed straight through so the explorer paints with data in the initial HTML.
+  initialData?: CmdExplorerInitialData;
 }) {
-  return <CmdCollectionsExplorer view={view} canRevealPhi={canRevealPhi} />;
+  return (
+    <CmdCollectionsExplorer view={view} canRevealPhi={canRevealPhi} initialData={initialData} />
+  );
 }

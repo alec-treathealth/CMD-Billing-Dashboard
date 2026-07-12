@@ -14,6 +14,7 @@ import { CollectionsView } from '@/components/dashboard';
 import { DataFreshness } from '@/components/dashboard/data-freshness';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { dashboardAccess } from '@/lib/access';
+import { listGridViews, loadCmdReport } from '@/lib/actions';
 import { clampView, resolveView } from '@/lib/views';
 
 export const metadata: Metadata = { title: 'Collections | CMD Billing' };
@@ -39,8 +40,20 @@ export default async function CollectionsPage({
   const view = clampView(requested, access.access.allowedViews);
   if (view !== requested) redirect(`/dashboard/collections?view=${view}`);
 
+  // Server-render the initial grid: fetch the first page (default sort, no filter) + the caller's
+  // saved column views IN PARALLEL, server-side, so the explorer paints WITH data in the initial
+  // HTML instead of firing serialized client round-trips on mount. Both are fast (the row query is
+  // index-backed; saved views is a tiny per-user lookup). Facility options are deliberately NOT
+  // fetched here: it's a non-critical filter dropdown whose rare cold rebuild is slow, and we must
+  // never let it block the page render — the client fetches it after paint. Each action fails
+  // closed to {ok:false} internally, so a slice that errors just degrades to its client fetch.
+  const [report, savedViews] = await Promise.all([
+    loadCmdReport(null, {}, undefined, view),
+    listGridViews(),
+  ]);
+
   return (
-    <main className="mx-auto max-w-7xl space-y-6 p-6 sm:p-10">
+    <main className="mx-auto max-w-[1800px] space-y-6 p-6 sm:p-10">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Collections</h1>
         <p className="mt-1 text-sm text-muted-foreground">
@@ -49,7 +62,11 @@ export default async function CollectionsPage({
         </p>
         <DataFreshness view={view} />
       </header>
-      <CollectionsView view={view} canRevealPhi={access.access.canRevealPhi} />
+      <CollectionsView
+        view={view}
+        canRevealPhi={access.access.canRevealPhi}
+        initialData={{ report, views: savedViews }}
+      />
     </main>
   );
 }

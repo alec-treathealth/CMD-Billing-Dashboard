@@ -96,6 +96,8 @@ import {
   type CmdExplorerCursor,
   type CmdExplorerSort,
   type CmdFacilityOption,
+  type CmdFacilitiesResult,
+  type GridViewsResult,
   type CohortCurve,
   type CohortCurvePoint,
   type GridViewRow,
@@ -275,15 +277,43 @@ function useDelayedUnmount(active: boolean, exitMs = 200): { rendered: boolean; 
   return { rendered, exiting: rendered && !active };
 }
 
+/**
+ * Server-rendered bootstrap for the explorer's initial view: the first page of rows + the facility
+ * options + the caller's saved views, fetched in the Collections Server Component and passed down.
+ * When present, the grid paints WITH data in the initial HTML and the client SKIPS its three mount
+ * fetches — removing the serialized round-trips that dominated first-load latency. Each slice
+ * degrades independently: an absent/failed one falls back to its client fetch. Carries only the same
+ * masked, non-PHI CmdExplorerRow the client action already returns (the page is auth-gated) — no PHI.
+ */
+export type CmdExplorerInitialData = {
+  report?: CmdReportResult;
+  facilities?: CmdFacilitiesResult;
+  views?: GridViewsResult;
+};
+
 export function CmdCollectionsExplorer({
   view,
   canRevealPhi,
+  initialData,
 }: {
   view: DashboardView;
   canRevealPhi: boolean;
+  initialData?: CmdExplorerInitialData;
 }) {
-  const [rows, setRows] = useState<CmdExplorerRow[]>([]);
-  const [status, setStatus] = useState<'loading' | 'error' | 'ready'>('loading');
+  // Narrow the optional server-seeded slices once. Used ONLY by the useState initializers and the
+  // one-shot skip refs below (all mount-only), so recomputing each render is free.
+  const reportRes = initialData?.report;
+  const seededReport = reportRes && reportRes.ok ? reportRes : null;
+  const facilitiesRes = initialData?.facilities;
+  const seededFacilities = facilitiesRes && facilitiesRes.ok ? facilitiesRes.facilities : null;
+  const viewsRes = initialData?.views;
+  const seededViews = viewsRes && viewsRes.ok ? viewsRes.views : null;
+  const seededDefaultView = seededViews?.find((v) => v.isDefault) ?? null;
+
+  const [rows, setRows] = useState<CmdExplorerRow[]>(() => (seededReport ? seededReport.rows : []));
+  const [status, setStatus] = useState<'loading' | 'error' | 'ready'>(() =>
+    seededReport ? 'ready' : 'loading',
+  );
 
   // Smart search. `searchInput` is the raw box; `term` is its debounced value (drives fetches).
   // The term matches the SEARCHABLE columns that are currently SHOWN (see `searchCols`, derived from
@@ -300,7 +330,9 @@ export function CmdCollectionsExplorer({
 
   // Facility multi-select. Empty selection = ALL facilities (no restriction), NOT zero rows. Options
   // are tenant-scoped (loaded per view); the selection is tenant-specific, so it resets on view change.
-  const [facilityOptions, setFacilityOptions] = useState<CmdFacilityOption[]>([]);
+  const [facilityOptions, setFacilityOptions] = useState<CmdFacilityOption[]>(
+    () => seededFacilities ?? [],
+  );
   const [facilitySelection, setFacilitySelection] = useState<string[]>([]);
   const [facilityPickerOpen, setFacilityPickerOpen] = useState(false);
 
@@ -346,16 +378,22 @@ export function CmdCollectionsExplorer({
 
   // Keyset pagination: cursors[p] is the cursor used to fetch page p (cursors[0] = null).
   const [page, setPage] = useState(0);
-  const [cursors, setCursors] = useState<(CmdExplorerCursor | null)[]>([null]);
-  const [hasNext, setHasNext] = useState(false);
+  const [cursors, setCursors] = useState<(CmdExplorerCursor | null)[]>(() =>
+    seededReport && seededReport.nextCursor ? [null, seededReport.nextCursor] : [null],
+  );
+  const [hasNext, setHasNext] = useState(() => Boolean(seededReport && seededReport.nextCursor));
 
   // Column layout, split into two pieces (superseding the old "membership = visibility" single array):
   //   • `order`  — ALL columns in display order (the single draggable list in the Columns popover).
   //   • `hidden` — which of those columns are hidden. PHI columns are never in here (locked-visible).
   // The TABLE renders `visibleOrder` (order minus hidden). Reorder by dragging in the popover OR the
   // table headers; toggle visibility in the popover. Both are persisted per-user as a named view.
-  const [order, setOrder] = useState<ColKey[]>([...DEFAULT_ORDER]);
-  const [hidden, setHidden] = useState<Set<ColKey>>(() => new Set());
+  const [order, setOrder] = useState<ColKey[]>(() =>
+    seededDefaultView ? deriveLayout(seededDefaultView).order : [...DEFAULT_ORDER],
+  );
+  const [hidden, setHidden] = useState<Set<ColKey>>(() =>
+    seededDefaultView ? deriveLayout(seededDefaultView).hidden : new Set(),
+  );
   const visibleOrder = order.filter((k) => !hidden.has(k));
 
   // @dnd-kit drag: activation lives on the grip handles only (see the Sortable* components), so
@@ -378,9 +416,18 @@ export function CmdCollectionsExplorer({
 
   // Per-user saved column views (server-side, private). Loaded once on mount; the caller's default
   // view (if one exists) sets the initial layout, else all columns (DEFAULT_ORDER).
-  const [views, setViews] = useState<GridViewRow[]>([]);
+  const [views, setViews] = useState<GridViewRow[]>(() => seededViews ?? []);
   const [columnsMenuOpen, setColumnsMenuOpen] = useState(false);
-  const defaultViewAppliedRef = useRef(false);
+  // If views were server-seeded, the default layout is already applied via the order/hidden
+  // initializers above — mark it applied so the (skipped) mount effect never re-applies it.
+  const defaultViewAppliedRef = useRef(Boolean(seededViews));
+
+  // One-shot guards: when a slice was server-seeded, skip its FIRST client fetch on mount (the
+  // seeded data already covers the initial view). They flip to false after the first effect run,
+  // so any later change (view switch, filter/sort) fetches normally.
+  const skipInitialRowFetchRef = useRef(Boolean(seededReport));
+  const skipFacilitiesFetchRef = useRef(Boolean(seededFacilities));
+  const skipViewsFetchRef = useRef(Boolean(seededViews));
 
   // PHI for the current page, revealed in bulk (memory only; cleared on page/filter change).
   const [phi, setPhi] = useState<Map<number, CmdExplorerPhi>>(() => new Map());
@@ -409,6 +456,11 @@ export function CmdCollectionsExplorer({
 
   // Load the tenant-scoped facility options for the multi-select whenever the view changes.
   useEffect(() => {
+    // Server-seeded on first mount → skip the initial fetch (the seed is for this view already).
+    if (skipFacilitiesFetchRef.current) {
+      skipFacilitiesFetchRef.current = false;
+      return;
+    }
     let live = true;
     loadCmdExplorerFacilities(view)
       .then((r) => {
@@ -431,6 +483,11 @@ export function CmdCollectionsExplorer({
   // it never clobbers a manual column edit the user makes before/after the fetch resolves). Views are
   // per-USER, not per-tenant-view, so this does NOT depend on `view` and runs a single time.
   useEffect(() => {
+    // Server-seeded on first mount → views + default layout are already applied; skip the fetch.
+    if (skipViewsFetchRef.current) {
+      skipViewsFetchRef.current = false;
+      return;
+    }
     let live = true;
     listGridViews()
       .then((r) => {
@@ -555,6 +612,13 @@ export function CmdCollectionsExplorer({
   // fetch call is UNCHANGED — wrapping it in a transition just marks the refetch non-urgent so the
   // current page stays interactive and shows the "refreshing" treatment rather than blanking.
   useEffect(() => {
+    // Server-seeded first page on mount → skip this initial load (filter/sort are still at their
+    // defaults, which is exactly what the seed represents). Any later filter/sort/view change flips
+    // the ref off and loads normally, so pagination + refinement are unaffected.
+    if (skipInitialRowFetchRef.current) {
+      skipInitialRowFetchRef.current = false;
+      return;
+    }
     setCursors([null]);
     startTransition(() => {
       void loadPage(0, null, filterArg, sort);
