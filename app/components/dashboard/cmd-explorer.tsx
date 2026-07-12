@@ -327,6 +327,9 @@ export function CmdCollectionsExplorer({
   // Recency quick-filter: 0 = off (default — the grid still shows ALL months, an additive control,
   // not a changed default), or a rolling window of 7/14/30 days. Mutually exclusive with Month/Year.
   const [recencyDays, setRecencyDays] = useState(0);
+  // Month/Year picker popover — the [Month/Year ▾] segment of the unified time control (A).
+  const [monthYearOpen, setMonthYearOpen] = useState(false);
+  const monthYearRef = useRef<HTMLDivElement>(null);
 
   // Facility multi-select. Empty selection = ALL facilities (no restriction), NOT zero rows. Options
   // are tenant-scoped (loaded per view); the selection is tenant-specific, so it resets on view change.
@@ -473,6 +476,25 @@ export function CmdCollectionsExplorer({
       live = false;
     };
   }, [view]);
+
+  // Dismiss the Month/Year popover on outside pointer-down or Escape — the SAME dismiss behavior as
+  // the view-switcher dropdown (D). Listeners attach only while it's open. (The popover holds
+  // focusable selects, so Escape is a document listener rather than a trigger-local keydown.)
+  useEffect(() => {
+    if (!monthYearOpen) return;
+    function onPointerDown(e: PointerEvent) {
+      if (!monthYearRef.current?.contains(e.target as Node)) setMonthYearOpen(false);
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setMonthYearOpen(false);
+    }
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [monthYearOpen]);
 
   const refreshViews = useCallback(async () => {
     const r = await listGridViews();
@@ -934,34 +956,19 @@ export function CmdCollectionsExplorer({
             )}
           </div>
 
-          <ControlSelect
-            label="Month"
-            value={month}
-            ariaLabel="Month"
-            onChange={(v) => {
-              setMonth(Number(v));
-              setRecencyDays(0); // Month/Year and recency are mutually exclusive windows.
-            }}
+          {/* Unified time window (A): ONE segmented control — [7d][14d][30d][Month/Year ▾] — with an
+              "All months" REST STATE (no segment active). Each segment drives the SAME state setters
+              the three old controls did (selectRecency for the chips; the Month/Year selects' unchanged
+              onChange), preserving the exact recency⇄Month/Year mutual exclusion. Because neither
+              filterArg nor the summary effect is touched, the wire payload is byte-identical to the old
+              three controls for any given selection — a presentational consolidation, not a behavior
+              change. Reaching "All months": re-click the active chip (toggles off) or pick "All months"
+              in the Month select — exactly as before. */}
+          <div
+            className="inline-flex items-center gap-0.5 rounded-lg border border-line bg-surface p-0.5"
+            role="group"
+            aria-label="Time window"
           >
-            <option value={0}>All months</option>
-            {MONTH_NAMES.map((name, i) => (
-              <option key={name} value={i + 1}>
-                {name}
-              </option>
-            ))}
-          </ControlSelect>
-          <ControlSelect label="Year" value={year} ariaLabel="Year" onChange={(v) => setYear(Number(v))}>
-            {YEAR_OPTIONS.map((y) => (
-              <option key={y} value={y}>
-                {y}
-              </option>
-            ))}
-          </ControlSelect>
-
-          {/* Recency quick-filters (Derek's "past 7/14/30 days" ask). ADDITIVE: the default window is
-              still All months — these are one-click shortcuts, not a changed default. Picking one
-              clears Month/Year; re-clicking toggles it off (back to All months). */}
-          <div className="flex items-center gap-1" role="group" aria-label="Recency quick filters">
             {RECENCY_OPTIONS.map((d) => {
               const active = recencyDays === d;
               return (
@@ -972,16 +979,66 @@ export function CmdCollectionsExplorer({
                   title={RECENCY_LABEL[d]}
                   onClick={() => selectRecency(d)}
                   className={[
-                    'rounded-full border px-2.5 py-1 text-xs font-medium transition-colors',
+                    'rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
                     active
-                      ? 'border-[var(--brand-accent)] bg-[var(--brand-soft)] text-[var(--brand-ink)]'
-                      : 'border-line text-muted-foreground hover:bg-[var(--brand-soft)]',
+                      ? 'bg-[var(--brand-soft)] text-[var(--brand-ink)]'
+                      : 'text-muted-foreground hover:bg-[var(--brand-soft)]',
                   ].join(' ')}
                 >
                   {d}d
                 </button>
               );
             })}
+            {/* [Month/Year ▾] — opens a popover holding the SAME Month + Year selects (onChange bodies
+                unchanged). Highlighted + labelled with the chosen window when a specific month is active. */}
+            <div ref={monthYearRef} className="relative">
+              <button
+                type="button"
+                aria-expanded={monthYearOpen}
+                aria-haspopup="true"
+                onClick={() => setMonthYearOpen((o) => !o)}
+                className={[
+                  'flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+                  month > 0
+                    ? 'bg-[var(--brand-soft)] text-[var(--brand-ink)]'
+                    : 'text-muted-foreground hover:bg-[var(--brand-soft)]',
+                ].join(' ')}
+              >
+                {month > 0 ? `${MONTH_NAMES[month - 1]} ${year}` : 'Month/Year'}
+                <ChevronDown className="h-3.5 w-3.5 opacity-70" aria-hidden />
+              </button>
+              {monthYearOpen && (
+                <div
+                  role="dialog"
+                  aria-label="Choose month and year"
+                  className="absolute right-0 top-full z-50 mt-2 flex items-center gap-2 animate-ths-reveal rounded-lg border border-line bg-surface p-3 shadow-ths"
+                >
+                  <ControlSelect
+                    label="Month"
+                    value={month}
+                    ariaLabel="Month"
+                    onChange={(v) => {
+                      setMonth(Number(v));
+                      setRecencyDays(0); // Month/Year and recency are mutually exclusive windows.
+                    }}
+                  >
+                    <option value={0}>All months</option>
+                    {MONTH_NAMES.map((name, i) => (
+                      <option key={name} value={i + 1}>
+                        {name}
+                      </option>
+                    ))}
+                  </ControlSelect>
+                  <ControlSelect label="Year" value={year} ariaLabel="Year" onChange={(v) => setYear(Number(v))}>
+                    {YEAR_OPTIONS.map((y) => (
+                      <option key={y} value={y}>
+                        {y}
+                      </option>
+                    ))}
+                  </ControlSelect>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
