@@ -14,7 +14,7 @@ export const metadata: Metadata = { title: 'Claims Explorer | TreatHealthOS' };
 
 export default function ClaimsPage() {
   return (
-    <main className="mx-auto max-w-6xl space-y-6 p-6 sm:p-10">
+    <main className="mx-auto max-w-[1800px] space-y-6 p-6 sm:p-10">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Claims Explorer</h1>
         <p className="mt-1 text-sm text-muted-foreground">
