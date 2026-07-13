@@ -27,9 +27,11 @@ import {
   ChevronDown,
   Columns3,
   CreditCard,
+  Eye,
+  EyeOff,
+  Filter,
   Fingerprint,
   GripVertical,
-  Hospital,
   Layers,
   Lock,
   RotateCcw,
@@ -934,8 +936,12 @@ export function CmdCollectionsExplorer({
               aria-expanded={facilityPickerOpen}
               aria-haspopup="true"
               onClick={() => setFacilityPickerOpen((o) => !o)}
+              className={[
+                'border-line bg-[var(--brand-soft)]/50 text-ink900 hover:bg-[var(--brand-soft)]',
+                facilityPickerOpen ? 'bg-[var(--brand-soft)] ring-1 ring-[var(--brand-accent)]/40' : '',
+              ].join(' ')}
             >
-              <Hospital className="h-4 w-4" />
+              <Filter className="h-4 w-4" aria-hidden />
               Facilities
               <span className="ml-1 rounded-full bg-[var(--brand-soft)] px-1.5 text-[11px] font-semibold text-[var(--brand-ink)]">
                 {facilitySelection.length === 0 ? 'All' : facilitySelection.length}
@@ -1125,8 +1131,12 @@ export function CmdCollectionsExplorer({
                 aria-expanded={columnsMenuOpen}
                 aria-haspopup="true"
                 onClick={() => setColumnsMenuOpen((o) => !o)}
+                className={[
+                  'border-line bg-[var(--brand-soft)]/50 text-ink900 hover:bg-[var(--brand-soft)]',
+                  columnsMenuOpen ? 'bg-[var(--brand-soft)] ring-1 ring-[var(--brand-accent)]/40' : '',
+                ].join(' ')}
               >
-                <Columns3 className="h-4 w-4" />
+                <Columns3 className="h-4 w-4" aria-hidden />
                 Columns
                 <span className="ml-1 rounded-full bg-[var(--brand-soft)] px-1.5 text-[11px] font-semibold text-[var(--brand-ink)]">
                   {visibleOrder.length}/{COLUMNS.length}
@@ -1158,8 +1168,12 @@ export function CmdCollectionsExplorer({
                 disabled={revealing}
                 aria-pressed={revealAll}
                 onClick={() => setRevealAll((v) => !v)}
-                className={revealAll ? 'border-[var(--brand-accent)] text-[var(--brand-ink)]' : undefined}
+                className={[
+                  'border-line bg-[var(--brand-soft)]/50 text-ink900 hover:bg-[var(--brand-soft)]',
+                  revealAll ? 'border-[var(--brand-accent)] bg-[var(--brand-soft)] text-[var(--brand-ink)]' : '',
+                ].join(' ')}
               >
+                {revealAll ? <EyeOff className="h-4 w-4" aria-hidden /> : <Eye className="h-4 w-4" aria-hidden />}
                 {revealing ? 'Revealing…' : revealAll ? 'Hide identifiers' : 'Reveal all'}
               </Button>
             )}
