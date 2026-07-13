@@ -46,10 +46,10 @@ import {
   X,
 } from 'lucide-react';
 import {
+  Bar,
   CartesianGrid,
-  Legend,
+  ComposedChart,
   Line,
-  LineChart,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -2119,45 +2119,75 @@ function cohortDegradation(
   };
 }
 
-/** One cohort line chart (reused for the claim-position and days axes). */
-function CohortLineChart({
+/**
+ * One SINGLE-SERIES cohort mini chart. The two %-series live on very different scales (~10% allowed
+ * vs 50–140% paid), so sharing one axis squashed the allowed line flat — each metric now gets its own
+ * chart + y-domain. %-allowed auto-scales to its data; %-paid keeps an axis anchored at ≥100
+ * (`forceHundredMax`) since it legitimately exceeds 100 out-of-network. A faint patients-per-bucket
+ * bar on a hidden secondary axis (~quarter height) shows cohort EXPOSURE, so a thinning tail reads
+ * as exactly that; the tooltip names the patient count per bucket. Self-labeled (name in its color)
+ * — no per-chart legend needed for one series.
+ */
+function CohortMiniChart({
   data,
+  dataKey,
+  name,
+  color,
   xLabel,
   markerBucket,
+  forceHundredMax = false,
 }: {
   data: CohortCurvePoint[];
+  dataKey: 'pct_allowed' | 'pct_paid';
+  name: string;
+  color: string;
   xLabel: string;
   markerBucket?: number | null;
+  forceHundredMax?: boolean;
 }) {
+  // Scale the hidden volume axis so the tallest exposure bar fills ~1/4 of the chart height.
+  const maxPatients = Math.max(...data.map((p) => p.patients), 1);
   return (
-    <div className="h-52 w-full">
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
-          <CartesianGrid vertical={false} stroke="#E4E9E6" />
-          {/* No inline axis label — the section heading above each chart ("By claim number" / "By
-              days since first claim") already names the axis. An insideBottom label here collided
-              with the legend. xLabel still names the axis in the tooltip. */}
-          <XAxis dataKey="bucket" tick={{ fontSize: 11 }} stroke="#E4E9E6" tickLine={false} />
-          {/* %-paid legitimately exceeds 100% (insurance can pay more than the fee-schedule
-              "allowed" — common out-of-network), so the top expands to fit rather than clipping. */}
-          <YAxis
-            domain={[0, (dataMax: number) => Math.max(100, Math.ceil(dataMax / 10) * 10)]}
-            tick={{ fontSize: 11 }}
-            stroke="#E4E9E6"
-            tickLine={false}
-            width={52}
-            unit="%"
-          />
-          <Tooltip
-            formatter={(v: number | string) => (v === null || v === undefined ? '—' : `${v}%`)}
-            labelFormatter={(l) => `${xLabel}: ${l}`}
-          />
-          <Legend wrapperStyle={{ fontSize: 11 }} />
-          {markerBucket != null && <ReferenceLine x={markerBucket} stroke="#dc2626" strokeDasharray="4 3" />}
-          <Line type="monotone" dataKey="pct_allowed" name="% Allowed" stroke={COHORT_ALLOWED_COLOR} strokeWidth={2} dot={false} connectNulls />
-          <Line type="monotone" dataKey="pct_paid" name="% Paid" stroke={COHORT_PAID_COLOR} strokeWidth={2} dot={false} connectNulls />
-        </LineChart>
-      </ResponsiveContainer>
+    <div>
+      <div className="text-[10px] font-semibold" style={{ color }}>
+        {name}
+      </div>
+      <div className="h-28 w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={data} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
+            <CartesianGrid vertical={false} stroke="#E4E9E6" />
+            {/* No inline axis label — the section heading above each column ("By claim number" / "By
+                days since first claim") already names the axis; xLabel names it in the tooltip. */}
+            <XAxis dataKey="bucket" tick={{ fontSize: 10 }} stroke="#E4E9E6" tickLine={false} />
+            <YAxis
+              domain={[
+                0,
+                (dataMax: number) => {
+                  const top = Math.max(Math.ceil((dataMax || 0) / 10) * 10, 20);
+                  return forceHundredMax ? Math.max(100, top) : top;
+                },
+              ]}
+              tick={{ fontSize: 10 }}
+              stroke="#E4E9E6"
+              tickLine={false}
+              width={52}
+              unit="%"
+            />
+            <YAxis yAxisId="vol" hide domain={[0, maxPatients * 4]} />
+            <Tooltip
+              formatter={(v: number | string, n: string) =>
+                n === 'Patients'
+                  ? [Number(v).toLocaleString(), 'Patients']
+                  : [v === null || v === undefined ? '—' : `${v}%`, n]
+              }
+              labelFormatter={(l) => `${xLabel}: ${l}`}
+            />
+            {markerBucket != null && <ReferenceLine x={markerBucket} stroke="#dc2626" strokeDasharray="4 3" />}
+            <Bar yAxisId="vol" dataKey="patients" name="Patients" fill={color} fillOpacity={0.12} isAnimationActive={false} />
+            <Line type="monotone" dataKey={dataKey} name={name} stroke={color} strokeWidth={2} dot={false} connectNulls />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
     </div>
   );
 }
@@ -2287,19 +2317,54 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
                 By claim number
               </div>
               <div className="mb-1 text-[11px] text-ink400">Each patient’s visits in order · 1 = first visit</div>
-              <CohortLineChart data={c.by_position} xLabel="Claim #" markerBucket={deg?.dropAt ?? null} />
+              <div className="space-y-2">
+                <CohortMiniChart
+                  data={c.by_position}
+                  dataKey="pct_allowed"
+                  name="% Allowed"
+                  color={COHORT_ALLOWED_COLOR}
+                  xLabel="Claim #"
+                  markerBucket={deg?.dropAt ?? null}
+                />
+                <CohortMiniChart
+                  data={c.by_position}
+                  dataKey="pct_paid"
+                  name="% Paid"
+                  color={COHORT_PAID_COLOR}
+                  xLabel="Claim #"
+                  forceHundredMax
+                />
+              </div>
             </div>
             <div>
               <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 By days since first claim
               </div>
               <div className="mb-1 text-[11px] text-ink400">Days elapsed from each patient’s first visit</div>
-              <CohortLineChart data={c.by_days} xLabel="Day" />
+              <div className="space-y-2">
+                <CohortMiniChart
+                  data={c.by_days}
+                  dataKey="pct_allowed"
+                  name="% Allowed"
+                  color={COHORT_ALLOWED_COLOR}
+                  xLabel="Day"
+                />
+                <CohortMiniChart
+                  data={c.by_days}
+                  dataKey="pct_paid"
+                  name="% Paid"
+                  color={COHORT_PAID_COLOR}
+                  xLabel="Day"
+                  forceHundredMax
+                />
+              </div>
             </div>
           </div>
           <p className="mt-2 text-[11px] leading-relaxed text-ink400">
             % Allowed = allowed ÷ charged. % Paid = insurance paid ÷ allowed — can exceed 100% when
-            insurance pays above the plan’s allowed amount (common out-of-network).
+            insurance pays above the plan’s allowed amount (common out-of-network). Shaded bars show
+            patients per point; later points reflect only patients whose claims continued — early
+            drop-offs leave the tail, which can flatter it.
           </p>
         </div>
       )}
@@ -2387,11 +2452,13 @@ function CohortPanelSkeleton({ prefix }: { prefix: string }) {
       <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div>
           <Skeleton className="mb-1 h-3 w-24" />
-          <Skeleton className="h-52 w-full rounded-md" />
+          <Skeleton className="h-28 w-full rounded-md" />
+          <Skeleton className="mt-2 h-28 w-full rounded-md" />
         </div>
         <div>
           <Skeleton className="mb-1 h-3 w-36" />
-          <Skeleton className="h-52 w-full rounded-md" />
+          <Skeleton className="h-28 w-full rounded-md" />
+          <Skeleton className="mt-2 h-28 w-full rounded-md" />
         </div>
       </div>
     </div>
