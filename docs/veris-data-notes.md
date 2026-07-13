@@ -1104,3 +1104,33 @@ UNIQUE key. 0030 deliberately touches neither.
 The Veris claims plane (`staging.*`, brains, S8–S10) is a real workstream, deliberately paused to
 prioritize Indigo collections onboarding. Nothing here decides against it. brain1/2/3 stay OFF; S4
 (ML runtime) remains deferred; S3 landed. "Claims UI removed" means **on hold**, not cancelled.
+
+---
+
+## Billing Audit S2 (Phase 1 apply) — apply-path SET grant found REVOKED (2026-07-13)
+
+**Dated correction to the S2 "Apply-path privilege model" entry above:** the standing
+`GRANT claims_admin TO postgres WITH SET TRUE` (S2, 2026-07-03, "do not revoke") was
+found GONE from the live cluster at 0049 apply time. `pg_auth_members` showed exactly
+ONE postgres→claims_admin row — grantor `supabase_admin`, `admin_option=true`,
+`set_option=false`, `inherit_option=false`. The S2-era duplicate rows ("2 rows from
+multiple grantors; harmless") were evidently collapsed by a platform-side
+maintenance/upgrade pass, and the collapse kept the supabase_admin grant (no SET),
+dropping the SET-capable one. Consequence: 0049's `SET ROLE claims_admin` failed 42501
+and the apply rolled back whole (transactional — verified zero partial state).
+Session tooling denied executing the restore grant without explicit authorization
+(correct per the who-gets-which-permission gate), so it was surfaced instead of routed
+around (per the standing "grant blocked by tooling → STOP" invariant).
+
+**RESOLUTION (2026-07-13):** Alec personally ran
+`grant claims_admin to postgres with set true;` in the Supabase SQL editor —
+a deliberate OPERATOR STEP, not part of any migration (role-membership posture is
+cluster-level, not schema state; 0049's header records the same). Verified
+`pg_has_role('postgres','claims_admin','SET') = true`; 0049 then applied verbatim,
+first attempt, full verification block green.
+
+**Watch item (standing):** this grant can silently disappear on platform maintenance —
+any future 42501 at `SET ROLE claims_admin` (or `consolidated_reader`) means re-check
+`pg_has_role('postgres','<role>','SET')` FIRST, and the restore is postgres
+self-granting within its admin_option. Same exposure applies to the 019-era
+`consolidated_reader` grant.
