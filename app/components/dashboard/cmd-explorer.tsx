@@ -16,7 +16,7 @@
  * The "Columns" menu controls which columns are shown (+ their order) and persists that as a named
  * per-user saved view; shown columns are also what search matches. Rows order by the sort key.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, useTransition } from 'react';
 import {
   Activity,
   ArrowDown,
@@ -1873,6 +1873,12 @@ function SearchSummaryPanel({
   onDrill: (kind: RefineKind, value: string) => void;
   onDrillCombo: (cpt: string, revenue: string) => void;
 }) {
+  // Fold/unfold the panel body below the header (Session F). Local, resets each session — not a
+  // saved-view mechanism. Conditional render (not a max-height transition) so the drill buttons
+  // inside are fully removed from the tab order while collapsed, not just visually hidden.
+  const [collapsed, setCollapsed] = useState(false);
+  const bodyId = useId();
+
   // First load (no prior data) → footprint-matched skeleton (no blank flash, no layout shift).
   if (state.kind === 'loading') return <SummaryPanelSkeleton />;
   if (state.kind === 'error') {
@@ -1911,51 +1917,68 @@ function SearchSummaryPanel({
           <span className="tabular-nums">{s.total_count.toLocaleString()}</span> charge line
           {s.total_count === 1 ? '' : 's'} match {label}
         </h3>
-        <span className="text-xs text-muted-foreground">Click a payer, CPT, or CPT×Rev combo to drill in.</span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">Click a payer, CPT, or CPT×Rev combo to drill in.</span>
+          <button
+            type="button"
+            aria-expanded={!collapsed}
+            aria-controls={bodyId}
+            aria-label={collapsed ? 'Expand search results' : 'Collapse search results'}
+            title={collapsed ? 'Expand' : 'Collapse'}
+            onClick={() => setCollapsed((c) => !c)}
+            className="shrink-0 rounded-md p-1 text-ink400 transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)]"
+          >
+            <ChevronDown className={`h-4 w-4 transition-transform ${collapsed ? '-rotate-90' : ''}`} aria-hidden />
+          </button>
+        </div>
       </div>
 
-      {/* Staged reveal: the four groups arrive in ONE response (single Promise.all), so this is a
-          bounded, capped visual settle (0→180ms), not a slow per-panel cascade. It runs once on
-          mount; a refetch keeps the same mounted elements, so it doesn't re-animate on each keystroke. */}
-      <div className="mt-3 grid animate-ths-reveal grid-cols-2 gap-2 sm:grid-cols-3">
-        <StatTile label="Charged" value={MONEY0.format(s.total_charge)} />
-        <StatTile label="Insurance Paid" value={MONEY0.format(s.total_paid)} />
-        <StatTile label="Patient Balance" value={MONEY0.format(s.total_balance)} />
-      </div>
+      {!collapsed && (
+        <div id={bodyId}>
+          {/* Staged reveal: the four groups arrive in ONE response (single Promise.all), so this is a
+              bounded, capped visual settle (0→180ms), not a slow per-panel cascade. It runs once on
+              mount; a refetch keeps the same mounted elements, so it doesn't re-animate on each keystroke. */}
+          <div className="mt-3 grid animate-ths-reveal grid-cols-2 gap-2 sm:grid-cols-3">
+            <StatTile label="Charged" value={MONEY0.format(s.total_charge)} />
+            <StatTile label="Insurance Paid" value={MONEY0.format(s.total_paid)} />
+            <StatTile label="Patient Balance" value={MONEY0.format(s.total_balance)} />
+          </div>
 
-      {/* Top Results groups (B): Payer + CPT single-dimension lists, then the full-width CPT×Rev combo
-          below. The Facility drill list was removed here — facility stays filterable via the Facilities
-          dropdown. This is a render-only removal: the summary object still returns by_facility (unused
-          now), so its shape and the server groups are unchanged. */}
-      <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
-        <DrillList
-          title="Top payers"
-          icon={<CreditCard className="h-3.5 w-3.5" aria-hidden />}
-          kind="primary_payer"
-          groups={s.by_payer}
-          activeValue={refinement?.kind === 'primary_payer' ? refinement.value : null}
-          onDrill={onDrill}
-          revealDelayMs={60}
-        />
-        <DrillList
-          title="Top CPT codes"
-          icon={<Stethoscope className="h-3.5 w-3.5" aria-hidden />}
-          kind="cpt_code"
-          groups={s.by_cpt}
-          activeValue={refinement?.kind === 'cpt_code' ? refinement.value : null}
-          onDrill={onDrill}
-          revealDelayMs={120}
-        />
-      </div>
+          {/* Top Results groups (B): Payer + CPT single-dimension lists, then the full-width CPT×Rev
+              combo below. The Facility drill list was removed here — facility stays filterable via the
+              Facilities dropdown. This is a render-only removal: the summary object still returns
+              by_facility (unused now), so its shape and the server groups are unchanged. */}
+          <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+            <DrillList
+              title="Top payers"
+              icon={<CreditCard className="h-3.5 w-3.5" aria-hidden />}
+              kind="primary_payer"
+              groups={s.by_payer}
+              activeValue={refinement?.kind === 'primary_payer' ? refinement.value : null}
+              onDrill={onDrill}
+              revealDelayMs={60}
+            />
+            <DrillList
+              title="Top CPT codes"
+              icon={<Stethoscope className="h-3.5 w-3.5" aria-hidden />}
+              kind="cpt_code"
+              groups={s.by_cpt}
+              activeValue={refinement?.kind === 'cpt_code' ? refinement.value : null}
+              onDrill={onDrill}
+              revealDelayMs={120}
+            />
+          </div>
 
-      {/* Fourth list, full-width: the (CPT × Revenue-code) combination with dollar-weighted
-          %-allowed / %-paid — one click drills the grid by BOTH codes at once. */}
-      <ComboDrillList
-        groups={s.by_combo}
-        activeCombo={refinement?.kind === 'combo' ? { cpt: refinement.cpt, revenue: refinement.revenue } : null}
-        onDrill={onDrillCombo}
-        revealDelayMs={180}
-      />
+          {/* Fourth list, full-width: the (CPT × Revenue-code) combination with dollar-weighted
+              %-allowed / %-paid — one click drills the grid by BOTH codes at once. */}
+          <ComboDrillList
+            groups={s.by_combo}
+            activeCombo={refinement?.kind === 'combo' ? { cpt: refinement.cpt, revenue: refinement.revenue } : null}
+            onDrill={onDrillCombo}
+            revealDelayMs={180}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -2125,6 +2148,12 @@ function CohortLineChart({
  * buckets suppressed), it shows a "not enough data" notice, never a partial (re-identifiable) curve.
  */
 function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: string }) {
+  // Fold/unfold the panel body below the header (Session F). Local, resets each session. Declared
+  // before the early returns (rules-of-hooks) even though the collapse control only renders in the
+  // 'ready'/'refreshing' branch below.
+  const [collapsed, setCollapsed] = useState(false);
+  const bodyId = useId();
+
   if (state.kind === 'idle') return null;
   // First analysis (no prior data) → footprint-matched skeleton, no blank flash.
   if (state.kind === 'loading') return <CohortPanelSkeleton prefix={prefix} />;
@@ -2198,33 +2227,48 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
         <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
           <Lock className="h-3 w-3" aria-hidden />
           {c.cohort_patients.toLocaleString()} patients · dollar-weighted · min 5/bucket
+          <button
+            type="button"
+            aria-expanded={!collapsed}
+            aria-controls={bodyId}
+            aria-label={collapsed ? 'Expand cohort payer behavior' : 'Collapse cohort payer behavior'}
+            title={collapsed ? 'Expand' : 'Collapse'}
+            onClick={() => setCollapsed((v) => !v)}
+            className="ml-1 shrink-0 rounded-md p-1 text-ink400 transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)]"
+          >
+            <ChevronDown className={`h-4 w-4 transition-transform ${collapsed ? '-rotate-90' : ''}`} aria-hidden />
+          </button>
         </span>
       </div>
 
-      {/* Plain-language degradation callout (Derek's framing) + days summary (Alec's framing). */}
-      <div className="mt-3 flex items-start gap-2 rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink900">
-        <TrendingDown className="mt-0.5 h-4 w-4 shrink-0 text-[var(--brand-ink)]" aria-hidden />
-        <div>
-          <p>{callout}</p>
-          {daysLine && <p className="mt-0.5 text-muted-foreground">{daysLine}</p>}
-        </div>
-      </div>
+      {!collapsed && (
+        <div id={bodyId}>
+          {/* Plain-language degradation callout (Derek's framing) + days summary (Alec's framing). */}
+          <div className="mt-3 flex items-start gap-2 rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink900">
+            <TrendingDown className="mt-0.5 h-4 w-4 shrink-0 text-[var(--brand-ink)]" aria-hidden />
+            <div>
+              <p>{callout}</p>
+              {daysLine && <p className="mt-0.5 text-muted-foreground">{daysLine}</p>}
+            </div>
+          </div>
 
-      {/* Both axes, side by side — no toggle. */}
-      <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <div>
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-            By claim number
+          {/* Both axes, side by side — no toggle. */}
+          <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                By claim number
+              </div>
+              <CohortLineChart data={c.by_position} xLabel="Claim #" markerBucket={deg?.dropAt ?? null} />
+            </div>
+            <div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                By days since first claim
+              </div>
+              <CohortLineChart data={c.by_days} xLabel="Day" />
+            </div>
           </div>
-          <CohortLineChart data={c.by_position} xLabel="Claim #" markerBucket={deg?.dropAt ?? null} />
         </div>
-        <div>
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-            By days since first claim
-          </div>
-          <CohortLineChart data={c.by_days} xLabel="Day" />
-        </div>
-      </div>
+      )}
     </div>
   );
 }
