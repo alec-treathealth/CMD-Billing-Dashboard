@@ -622,6 +622,63 @@ export function handleBillingAuditOpCron(req: {
   return handleBillingAuditCronForScope(req, 'OP');
 }
 
+/**
+ * Billing-code-decision sync cron (/api/cron/billing-code-decisions). GET only;
+ * CRON_SECRET-gated. Reads the "JT Master Issues" decision-matrix tabs (EH canonical;
+ * JT col O for stops — Alec's locked ruling) via a Google OAuth installed-app REFRESH
+ * TOKEN supplied out of band in env (org policy forbids service-account keys):
+ * GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET / GOOGLE_SHEETS_REFRESH_TOKEN /
+ * BILLING_SHEET_ID — all env-only, fail-fast, names never values. googleapis loads
+ * DYNAMICALLY inside this handler so the heavy client never rides the other routes'
+ * bundles. Writes as claims_audit_writer; fail-soft parse keeps last good data.
+ */
+export async function handleBillingCodeDecisionsCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
+    return { status: 405, body: { error: 'method_not_allowed' } };
+  }
+  const secret = process.env.CRON_SECRET;
+  if (!secret || !isAuthorized(req.authorization, secret)) {
+    return { status: 401, body: { error: 'unauthorized' } };
+  }
+  try {
+    const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID?.trim();
+    const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET?.trim();
+    const refreshToken = process.env.GOOGLE_SHEETS_REFRESH_TOKEN?.trim();
+    const sheetId = process.env.BILLING_SHEET_ID?.trim();
+    if (!clientId || !clientSecret || !refreshToken || !sheetId) {
+      throw new Error(
+        'Billing-code sync env not configured: set GOOGLE_OAUTH_CLIENT_ID, ' +
+          'GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_SHEETS_REFRESH_TOKEN, BILLING_SHEET_ID',
+      );
+    }
+    const [{ google }, { readSheet }, { decisionSync }] = await Promise.all([
+      import('googleapis'),
+      import('../../src/sheets.js'),
+      import('../../src/billingAudit/decisionSync.js'),
+    ]);
+    const oauth = new google.auth.OAuth2(clientId, clientSecret);
+    oauth.setCredentials({ refresh_token: refreshToken });
+    const stats = await decisionSync({
+      // readSheet splits off row 1 as "header"; the matrix parser is block-based and
+      // needs EVERY row with true 1-based rowNums — reassemble.
+      fetchTab: async (tab) => {
+        const res = await readSheet(sheetId, tab, oauth);
+        return { rows: [{ rowNum: 1, cells: res.header }, ...res.rows] };
+      },
+      writeDb: auditWriterDb(),
+      businessEntityId: BXR_TENANT_ID,
+    });
+    if (stats.status !== 'parse_failed' && stats.upserted > 0) revalidateTag('billing-audit');
+    return { status: 200, body: { ok: stats.status !== 'parse_failed', ...stats } };
+  } catch (err) {
+    console.error('billing-code-decisions cron failed:', err instanceof Error ? err.message : String(err));
+    return { status: 500, body: { error: 'cron_failed' } };
+  }
+}
+
 /** Collections summary route: optional date bounds → non-PHI monthly summary by facility. */
 export function handleCollectionsSummary(req: CollectionsSummaryHttpRequest) {
   return handleCollectionsSummaryRequest(req, {
