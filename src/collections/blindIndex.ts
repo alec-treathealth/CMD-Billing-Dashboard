@@ -95,10 +95,65 @@ export function groupNumberBlindIndex(raw: string | null | undefined): string | 
   return hmac(groupNumberNormalized(raw));
 }
 
+/** Normalized patient name (trimmed, internal whitespace collapsed, upper) or null.
+ *  ADDITIVE (billing-audit plane, 2026-07-13): ingest + query MUST share this transform;
+ *  collections' member/group helpers above are untouched. */
+export function patientNameNormalized(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined) return null;
+  const norm = raw.trim().replace(/\s+/g, ' ').toUpperCase();
+  return norm === '' ? null : norm;
+}
+
+/** Full-name blind index for a raw patient name (audit ingest + exact-lookup query). */
+export function patientNameBlindIndex(raw: string | null | undefined): string | null {
+  return hmac(patientNameNormalized(raw));
+}
+
+/** First-3-chars prefix blind index for a raw patient name / typed prefix. */
+export function patientNamePrefixBlindIndex(raw: string | null | undefined): string | null {
+  const norm = patientNameNormalized(raw);
+  if (norm === null || norm.length < ALPHA_PREFIX_LEN) return null;
+  return hmac(norm.slice(0, ALPHA_PREFIX_LEN));
+}
+
 export interface RowBlindIndexes {
   member_id_bidx: string | null;
   member_id_prefix_bidx: string | null;
   group_number_bidx: string | null;
+}
+
+/** The four blind-index tokens for one claims.audit_row (billing-audit plane). */
+export interface AuditRowBlindIndexes {
+  patient_name_bidx: string | null;
+  patient_name_pfx3_bidx: string | null;
+  member_id_bidx: string | null;
+  member_id_pfx3_bidx: string | null;
+}
+
+/**
+ * Ingest-safe audit-row variant (mirrors blindIndexesForRowSafe): a missing/invalid
+ * INDEX_HMAC_KEY returns all-null tokens instead of breaking the ingest — the rows
+ * simply aren't PHI-searchable until the key is set and a backfill runs. NOTE the
+ * schema requires patient_name_bidx NOT NULL, so the INGEST maps a null token to a
+ * skip; query paths use the throwing helpers above so misconfiguration is visible.
+ */
+export function auditBlindIndexesForRowSafe(
+  patientName: string | null,
+  memberId: string | null,
+): AuditRowBlindIndexes {
+  try {
+    return {
+      patient_name_bidx: patientNameBlindIndex(patientName),
+      patient_name_pfx3_bidx: patientNamePrefixBlindIndex(patientName),
+      member_id_bidx: memberIdBlindIndex(memberId),
+      member_id_pfx3_bidx: alphaPrefixBlindIndex(memberId),
+    };
+  } catch (e) {
+    if (e instanceof BlindIndexError) {
+      return { patient_name_bidx: null, patient_name_pfx3_bidx: null, member_id_bidx: null, member_id_pfx3_bidx: null };
+    }
+    throw e;
+  }
 }
 
 /** All three tokens for one row's PHI (throws if INDEX_HMAC_KEY is unset/invalid). */

@@ -119,6 +119,9 @@ import {
   type CmdPayerRefreshHttpRequest,
 } from '../../src/routes/cmdPayerRefreshHandler.js';
 import { cmdExplorerCron } from '../../src/collections/cmdExplorerCron.js';
+import { cmdRunReportToZip, readZipEntries } from '../../src/collections/cmdPayer.js';
+import { billingAuditCron } from '../../src/billingAudit/auditIngest.js';
+import { auditCustomersFor, auditReportIds, type AuditScope } from '../../src/billingAudit/auditConfig.js';
 import { isAuthorized } from '../../src/bearerAuth.js';
 
 let cachedExecutor: PgExecutor | undefined;
@@ -536,6 +539,87 @@ export function handleIndigoExplorerCron(req: {
     businessEntityId: INDIGO_TENANT_ID,
     transformRows: aliasIndigoFacilityColumn,
   });
+}
+
+// Least-privilege writer pool for the BILLING AUDIT plane (claims.audit_row /
+// billing_code_decision / flag) — the dedicated claims_audit_writer role (migration
+// 0049), NEVER cmd_rollup_writer (collections blast radius stays untouched), NEVER
+// claims_admin. URL from env only; verify-full TLS via makeClient.
+let cachedAuditWriterDb: Db | undefined;
+function auditWriterDb(): Db {
+  const url = process.env.CLAIMS_AUDIT_WRITER_DATABASE_URL;
+  if (!url || url.trim() === '') {
+    throw new Error('Missing CLAIMS_AUDIT_WRITER_DATABASE_URL (set in env; never hardcode or log it)');
+  }
+  cachedAuditWriterDb ??= makeClient(url);
+  return cachedAuditWriterDb;
+}
+
+/**
+ * Scope-parameterized Billing Audit ingest (Vercel Cron). GET only; CRON_SECRET-gated
+ * (constant-time Bearer). Loops the scope's LOCKED roster (auditConfig — scope IS the
+ * roster), running the scope's report+filter once per customer, and Option-B-upserts
+ * charge lines into claims.audit_row as claims_audit_writer. Report/filter ids are
+ * ENV-VAR-ONLY (auditReportIds throws on a missing var — no hardcoded fallback, a
+ * deliberate break from the collections pattern). Non-PHI counts only. Each scope gets
+ * its own thin wrapper + route (/api/cron/billing-audit-ip, /api/cron/billing-audit-op)
+ * for log/Cron-tab attribution, mirroring the explorer crons.
+ */
+async function handleBillingAuditCronForScope(
+  req: { method?: string; authorization?: string | null },
+  scope: AuditScope,
+): Promise<{ status: number; body: unknown }> {
+  if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
+    return { status: 405, body: { error: 'method_not_allowed' } };
+  }
+  const secret = process.env.CRON_SECRET;
+  if (!secret || !isAuthorized(req.authorization, secret)) {
+    return { status: 401, body: { error: 'unauthorized' } };
+  }
+  try {
+    const ids = auditReportIds(scope, process.env); // throws on missing env — fail fast, names only
+    const base = cmdApiConfig(); // CMD_API_* credentials + base URL (report/filter overridden below)
+    const stats = await billingAuditCron({
+      scope,
+      customers: auditCustomersFor(scope),
+      fetchZip: (customerId) =>
+        cmdRunReportToZip({
+          ...base,
+          customerId,
+          reportId: ids.reportId,
+          filterId: ids.filterId,
+          // Poll tuning shared with the explorer crons (same CMD partner session).
+          pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 3_000,
+          maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 8,
+          emptyGraceAttempts: Number(process.env.CMD_EXPLORER_EMPTY_GRACE) || 4,
+        }),
+      zipToCsvTexts: (zip) => readZipEntries(zip).map((e) => e.data.toString('utf8')),
+      writeDb: auditWriterDb(),
+      businessEntityId: BXR_TENANT_ID,
+      sourceReportId: ids.reportId,
+      revalidate: () => revalidateTag('billing-audit'),
+    });
+    return { status: 200, body: { ok: true, ...stats } };
+  } catch (err) {
+    console.error(`billing-audit-${scope.toLowerCase()} cron failed:`, err instanceof Error ? err.message : String(err));
+    return { status: 500, body: { error: 'cron_failed' } };
+  }
+}
+
+/** IP audit ingest cron (/api/cron/billing-audit-ip). Roster = AUDIT_IP_CUSTOMERS (8). */
+export function handleBillingAuditIpCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  return handleBillingAuditCronForScope(req, 'IP');
+}
+
+/** OP audit ingest cron (/api/cron/billing-audit-op). Roster = AUDIT_OP_CUSTOMERS (11). */
+export function handleBillingAuditOpCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  return handleBillingAuditCronForScope(req, 'OP');
 }
 
 /** Collections summary route: optional date bounds → non-PHI monthly summary by facility. */
