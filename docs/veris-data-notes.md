@@ -1134,3 +1134,21 @@ any future 42501 at `SET ROLE claims_admin` (or `consolidated_reader`) means re-
 `pg_has_role('postgres','<role>','SET')` FIRST, and the restore is postgres
 self-granting within its admin_option. Same exposure applies to the 019-era
 `consolidated_reader` grant.
+
+### Dashboard-sequence migration-number RESERVATIONS (2026-07-13 — check BEFORE claiming)
+
+Parallel sessions have collided on dashboard migration numbers twice (0049 was
+nearly double-claimed; 0050 WAS double-claimed). Standing convention: before
+claiming the next `supabase/migrations/00NN`, check (a) `origin/main`,
+(b) every ACTIVE worktree/branch, AND (c) untracked files in every checkout —
+another session's WIP claim is usually an untracked file. Current reservations:
+
+| number | claimed by | state |
+|---|---|---|
+| 0024 | ANOTHER session | 0024-related WIP (per Alec, 2026-07-13 — listed in the parallel-WIP set; 0024 itself is applied on origin/main) |
+| 0049 | billing-audit branch (`feat/billing-audit-plane`) | `0049_billing_audit_plane` — APPLIED live + committed on that branch |
+| 0050 | ANOTHER session (collections) | `0050_cmd_explorer_charge_rollup` — untracked WIP in the main checkout |
+| 0051 | billing-audit branch | `0051_payer_alias_seed` — DRAFT, not applied, pending Alec's ruling |
+
+Record new claims here when made; remove rows once the file is on origin/main
+(the tree then speaks for itself).
