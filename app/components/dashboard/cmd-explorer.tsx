@@ -2132,7 +2132,7 @@ function CohortLineChart({
   return (
     <div className="h-52 w-full">
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data} margin={{ top: 8, right: 12, bottom: 4, left: -8 }}>
+        <LineChart data={data} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
           <CartesianGrid vertical={false} stroke="#E4E9E6" />
           {/* No inline axis label — the section heading above each chart ("By claim number" / "By
               days since first claim") already names the axis. An insideBottom label here collided
@@ -2145,7 +2145,7 @@ function CohortLineChart({
             tick={{ fontSize: 11 }}
             stroke="#E4E9E6"
             tickLine={false}
-            width={40}
+            width={52}
             unit="%"
           />
           <Tooltip
@@ -2264,6 +2264,10 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
           </button>
         </span>
       </div>
+      <p className="mt-1 text-xs text-muted-foreground">
+        All {c.cohort_patients.toLocaleString()} patients whose insurance member ID begins with “{prefix}” —
+        curves are dollar-weighted cohort averages, never one patient.
+      </p>
 
       {!collapsed && (
         <div id={bodyId}>
@@ -2279,18 +2283,24 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
           {/* Both axes, side by side — no toggle. */}
           <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
             <div>
-              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 By claim number
               </div>
+              <div className="mb-1 text-[11px] text-ink400">Each patient’s visits in order · 1 = first visit</div>
               <CohortLineChart data={c.by_position} xLabel="Claim #" markerBucket={deg?.dropAt ?? null} />
             </div>
             <div>
-              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 By days since first claim
               </div>
+              <div className="mb-1 text-[11px] text-ink400">Days elapsed from each patient’s first visit</div>
               <CohortLineChart data={c.by_days} xLabel="Day" />
             </div>
           </div>
+          <p className="mt-2 text-[11px] leading-relaxed text-ink400">
+            % Allowed = allowed ÷ charged. % Paid = insurance paid ÷ allowed — can exceed 100% when
+            insurance pays above the plan’s allowed amount (common out-of-network).
+          </p>
         </div>
       )}
     </div>
