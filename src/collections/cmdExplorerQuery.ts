@@ -15,25 +15,34 @@ import type { CmdExplorerRow } from './cmdExplorer.js';
 
 /**
  * Closed allowlist for the smart search — the UI search-column key → raw SQL column literal.
- * ONLY the 11 NON-PHI columns are here; the 3 PHI columns (patient_name / member_id /
- * group_number) are encrypted bytea and cannot be substring-searched, so they are absent BY
- * DESIGN. The client only ever picks KEYS, never raw column names, so no identifier ever reaches
- * SQL from user input (injection-safe).
+ * ONLY the 4 TEXT columns admissions actually search by are here (facility / primary_payer /
+ * cpt_code / revenue_code). The numeric + date columns (charge_amount, allowed_amount,
+ * insurance_payments, adjustments, patient_balance_due, charge_date, payment_received) were REMOVED
+ * from the substring bar: a leading-wildcard `::text ILIKE '%q%'` on them can't use any index and
+ * roughly DOUBLED the per-keystroke aggregate cost for almost no real use (nobody free-text-searches
+ * a dollar amount — the date window, the sort headers, and the drill chips are the right tools for
+ * money/date). The 3 PHI columns (patient_name / member_id / group_number) are encrypted bytea and
+ * cannot be substring-searched, so they are absent BY DESIGN (the gated blind-index lookup handles
+ * those). The client only ever picks KEYS, never raw column names, so no identifier ever reaches SQL
+ * from user input (injection-safe).
  */
 export const CMD_EXPLORER_SEARCH_COLUMNS = {
-  charge_date: 'charge_date',
-  payment_received: 'payment_received',
+  facility: 'facility',
+  primary_payer: 'primary_payer',
   cpt_code: 'cpt_code',
   revenue_code: 'revenue_code',
-  facility: 'facility',
-  charge_amount: 'charge_amount',
-  allowed_amount: 'allowed_amount',
-  insurance_payments: 'insurance_payments',
-  adjustments: 'adjustments',
-  patient_balance_due: 'patient_balance_due',
-  primary_payer: 'primary_payer',
 } as const;
 export type CmdExplorerSearchColumn = keyof typeof CMD_EXPLORER_SEARCH_COLUMNS;
+
+/**
+ * Minimum free-text term length before the substring search runs. A 1–2 char prefix (`%90%`) matches
+ * a huge fraction of the tenant slice and is a THROWAWAY mid-typing query — also the single most
+ * expensive to run — so a shorter term emits NO substring clause at all (the query degrades to a
+ * plain browse of the current window). The client mirrors this floor (MIN_SEARCH_LEN in
+ * cmd-explorer.tsx) to avoid firing the request; this is the authoritative, unit-tested server-side
+ * floor that the summary + grid builders both honor.
+ */
+export const CMD_SEARCH_TERM_MIN = 3;
 
 /**
  * Server-side filters for the explorer grid (non-PHI). `facility` is a MULTI-select set membership
@@ -108,7 +117,9 @@ export function cmdExplorerBaseConds(
   const cols = (filter.searchColumns ?? []).filter(
     (c): c is CmdExplorerSearchColumn => Object.prototype.hasOwnProperty.call(CMD_EXPLORER_SEARCH_COLUMNS, c),
   );
-  if (term !== '' && cols.length > 0) {
+  // A sub-minimum term emits NO substring clause (see CMD_SEARCH_TERM_MIN) — the short-prefix
+  // scans were the bulk of the wasted work, and this is the authoritative floor both builders share.
+  if (term.length >= CMD_SEARCH_TERM_MIN && cols.length > 0) {
     const p = add(likeContains(term)); // one bound pattern, reused across the OR
     const ors = cols.map((c) => `${CMD_EXPLORER_SEARCH_COLUMNS[c]}::text ilike ${p}`);
     conds.push(`(${ors.join(' or ')})`);

@@ -7,10 +7,12 @@
  * of which is a clickable drill-down chip that refines the detail grid below. The noisy rows
  * stay one click away instead of being the first thing you face.
  *
- * Search is a SERVER-SIDE substring (ILIKE) match. Scope FOLLOWS the visible columns — there is one
- * "columns" concept: the term matches the SEARCHABLE columns currently shown (non-PHI, non-percent;
- * the 3 PHI columns are encrypted at rest and can't be substring-searched — the gated Patient lookup
- * handles those). Typing is debounced (~350ms) so a large dataset isn't hammered on every keystroke.
+ * Search is a SERVER-SIDE substring (ILIKE) match over the 4 TEXT columns (facility / payer / CPT /
+ * revenue code) — the numeric + date columns aren't substring-searchable (a leading-wildcard ILIKE on
+ * them can't use an index and doubled the cost; use the date window / sort / drill chips instead), and
+ * the 3 PHI columns are encrypted at rest (the gated Patient lookup handles those). Scope still FOLLOWS
+ * the visible columns — hiding a searchable column drops it from search too. Typing is debounced
+ * (~550ms) and needs at least 3 characters, so a large dataset isn't hammered by throwaway prefixes.
  * A Month/Year window still scopes everything server-side. Row PHI renders •••••• until "Reveal all"
  * decrypts the current page in one audited call (held in memory only, dropped on page/filter change).
  * The "Columns" menu controls which columns are shown (+ their order) and persists that as a named
@@ -156,13 +158,18 @@ const SORTABLE_KEYS = new Set<string>([
 const IS_PERCENT = new Set<string>(['pct_allowed', 'pct_paid']);
 
 // Search scope FOLLOWS the visible columns — one unified "columns" concept, no separate search-scope
-// picker. The free-text term matches the SEARCHABLE columns currently shown: non-PHI (the 3 PHI
-// columns are encrypted bytea and can't be substring-searched — the gated Patient lookup handles
-// those) and non-percent (the pct_* ratios aren't in the server's search allowlist). This set mirrors
-// the server's CMD_EXPLORER_SEARCH_COLUMNS exactly; the server independently re-enforces it.
-const SEARCHABLE_KEYS = new Set<string>(
-  COLUMNS.filter((c) => !c.phi && !IS_PERCENT.has(c.key)).map((c) => c.key),
-);
+// picker. The free-text term matches only the 4 TEXT columns currently shown: facility / payer / CPT
+// code / revenue code. The money + date columns are deliberately NOT substring-searchable (a leading-
+// wildcard ILIKE on them can't be indexed and doubled the per-keystroke cost — the date window, sort
+// headers, and drill chips cover money/date); the pct_* ratios and the 3 encrypted PHI columns are
+// out too. This set mirrors the server's CMD_EXPLORER_SEARCH_COLUMNS exactly; the server independently
+// re-enforces it, so hiding a column narrows search but can never widen it beyond these four.
+const SEARCHABLE_KEYS = new Set<string>(['facility', 'primary_payer', 'cpt_code', 'revenue_code']);
+
+// Minimum free-text term length before a search fires (mirrors the server's CMD_SEARCH_TERM_MIN). A
+// 1–2 char prefix matches a huge slice of the table and is a throwaway mid-typing query, so the UI
+// stays in browse mode until the term is long enough — the server re-enforces the same floor.
+const MIN_SEARCH_LEN = 3;
 
 /**
  * Reconstruct a saved view into this component's { order, hidden } layout. Thin typed wrapper over the
@@ -321,7 +328,10 @@ export function CmdCollectionsExplorer({
   // `order` below) — there is no separate search-scope picker. `refinement` is an exact filter
   // applied by clicking a summary chip. Month/Year window is retained.
   const [searchInput, setSearchInput] = useState('');
-  const term = useDebouncedValue(searchInput, 350);
+  // 550ms (was 350): the free-text term drives the 5-query aggregate summary burst, so a longer
+  // debounce collapses more of a fast typist's keystrokes into a single fetch. The exact-match PHI
+  // lookups below stay at 350ms — they're cheap indexed equality, not the expensive substring scan.
+  const term = useDebouncedValue(searchInput, 550);
   const [refinement, setRefinement] = useState<Refinement | null>(null);
   const [year, setYear] = useState(YEAR_OPTIONS[0]!);
   const [month, setMonth] = useState(0); // 0 = All months
@@ -452,8 +462,14 @@ export function CmdCollectionsExplorer({
   // display order). Hiding a column removes it from search too; there is one "columns" concept.
   // Derived from `visibleOrder` (NOT the full `order`) so hidden columns never widen the search.
   const searchCols = visibleOrder.filter((k) => SEARCHABLE_KEYS.has(k));
-  const hasSearch = term.trim() !== '' && searchCols.length > 0;
+  const trimmedTerm = term.trim();
+  const hasSearch = trimmedTerm.length >= MIN_SEARCH_LEN && searchCols.length > 0;
   const hasAnySearch = hasSearch || hasPhiSearch;
+  // The user has started typing but hasn't reached the minimum yet (and isn't doing a PHI lookup) —
+  // show a gentle hint instead of silently doing nothing. Driven by the RAW input (not the debounced
+  // term) so it appears/clears as they type rather than 550ms later.
+  const rawTerm = searchInput.trim();
+  const belowMinTerm = !hasPhiSearch && rawTerm.length > 0 && rawTerm.length < MIN_SEARCH_LEN;
   // Stable dep keys for the sets (array identity changes on every toggle otherwise).
   const searchColsKey = searchCols.join(',');
   const facilityKey = facilitySelection.join(''); // control char can't appear in a facility name
@@ -656,7 +672,13 @@ export function CmdCollectionsExplorer({
       setSummary({ kind: 'idle' });
       return;
     }
-    let live = true;
+    // Cancel a superseded in-flight summary via an AbortController: each keystroke burst aborts the
+    // previous one, so a stale response can never clobber the fresh one. NOTE the server action is
+    // invoked through Next's direct-call API, which exposes no request signal — so this cancels the
+    // CLIENT-observed request (the result is dropped), it does NOT kill the DB query mid-flight. The
+    // min-length gate + longer debounce are what actually stop the expensive queries from firing.
+    const controller = new AbortController();
+    const { signal } = controller;
     // Keep prior results on screen (dimmed) during a refetch; skeleton only on genuine first load.
     setSummary((prev) =>
       prev.kind === 'ready' || prev.kind === 'refreshing' ? { kind: 'refreshing', data: prev.data } : { kind: 'loading' },
@@ -693,14 +715,14 @@ export function CmdCollectionsExplorer({
     }
     loadCmdSearchSummary(f, view)
       .then((r) => {
-        if (!live) return;
+        if (signal.aborted) return;
         setSummary(r.ok ? { kind: 'ready', data: r.summary } : { kind: 'error' });
       })
       .catch(() => {
-        if (live) setSummary({ kind: 'error' });
+        if (!signal.aborted) setSummary({ kind: 'error' });
       });
     return () => {
-      live = false;
+      controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [term, searchColsKey, hasSearch, hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, view]);
@@ -920,7 +942,7 @@ export function CmdCollectionsExplorer({
               type="search"
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
-              placeholder="Search collections — facility, CPT, payer, amount, date…"
+              placeholder="Search collections — facility, payer, CPT, revenue code…"
               aria-label="Search collections"
               maxLength={120}
               className="h-10 w-full rounded-lg border border-line bg-surface pl-9 pr-3 text-sm text-ink900 outline-none transition-colors placeholder:text-ink400 focus:border-[var(--brand-accent)] focus:ring-2 focus:ring-[var(--brand-accent)]/25"
@@ -1072,7 +1094,9 @@ export function CmdCollectionsExplorer({
           <span>
             {hasAnySearch
               ? `${hasSearch ? `Searching ${searchCols.length} shown column${searchCols.length === 1 ? '' : 's'}` : 'Patient lookup'} · ${facilityLabel} · ${windowLabel}`
-              : `Browsing ${facilityLabel} · ${windowLabel} — type to search`}
+              : belowMinTerm
+                ? `Type at least ${MIN_SEARCH_LEN} characters to search · Browsing ${facilityLabel} · ${windowLabel}`
+                : `Browsing ${facilityLabel} · ${windowLabel} — type to search`}
           </span>
           {refinement && (
             <button

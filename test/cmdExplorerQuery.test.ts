@@ -12,6 +12,8 @@ import {
   CMD_EXPLORER_DEFAULT_SORT,
   CMD_EXPLORER_SORTABLE_COLUMNS,
   CMD_EXPLORER_COLUMN_KEYS,
+  CMD_EXPLORER_SEARCH_COLUMNS,
+  CMD_SEARCH_TERM_MIN,
   CMD_SEARCH_TOP_N,
   COHORT_MIN_PATIENTS,
   COHORT_POSITION_CAP,
@@ -66,6 +68,46 @@ test('substring search: OR across ONLY allowlisted columns, one shared pattern p
   assert.match(sql, /\(facility::text ilike \$2 or primary_payer::text ilike \$2\)/);
   assert.equal(params[1], '%BCBS%');
   assertAllBound(sql, params);
+});
+
+test('search allowlist is the 4 TEXT columns only — money/date keys are dropped (Tier B)', () => {
+  // The allowlist itself is exactly the 4 text columns.
+  assert.deepEqual(Object.keys(CMD_EXPLORER_SEARCH_COLUMNS).sort(), [
+    'cpt_code',
+    'facility',
+    'primary_payer',
+    'revenue_code',
+  ]);
+  // A term asking to search removed numeric/date columns emits ILIKE only for the surviving text col.
+  const filter: CmdExplorerFilter = {
+    q: 'BCBS',
+    searchColumns: [
+      'charge_amount' as never,
+      'payment_received' as never,
+      'charge_date' as never,
+      'allowed_amount' as never,
+      'cpt_code',
+    ],
+  };
+  const { sql } = buildCmdExplorerQuery(null, filter, SORT, 51, ENTITY);
+  assert.match(sql, /cpt_code::text ilike \$2/);
+  assert.doesNotMatch(sql, /charge_amount::text ilike/);
+  assert.doesNotMatch(sql, /payment_received::text ilike/);
+  assert.doesNotMatch(sql, /charge_date::text ilike/);
+  assert.doesNotMatch(sql, /allowed_amount::text ilike/);
+});
+
+test('substring search: a sub-minimum term emits NO ILIKE clause (browse), the floor is 3', () => {
+  assert.equal(CMD_SEARCH_TERM_MIN, 3);
+  // 2 chars → no substring clause even with a valid column (degrades to a plain browse).
+  const short = buildCmdExplorerQuery(null, { q: '90', searchColumns: ['cpt_code'] }, SORT, 51, ENTITY);
+  assert.doesNotMatch(short.sql, /ilike/);
+  // Exactly 3 chars → the substring clause is emitted.
+  const ok = buildCmdExplorerQuery(null, { q: '908', searchColumns: ['cpt_code'] }, SORT, 51, ENTITY);
+  assert.match(ok.sql, /cpt_code::text ilike \$2/);
+  // The floor also guards the summary aggregates.
+  const { totals } = buildCmdSearchSummaryQueries({ q: 'ab', searchColumns: ['facility'] }, ENTITY);
+  assert.doesNotMatch(totals.sql, /ilike/);
 });
 
 test('substring search: injection payload as a column name is dropped, not emitted', () => {
