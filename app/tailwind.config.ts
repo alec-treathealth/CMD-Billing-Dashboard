@@ -9,6 +9,15 @@ const config: Config = {
   content: ['./app/**/*.{ts,tsx}', './components/**/*.{ts,tsx}', './lib/**/*.{ts,tsx}'],
   theme: {
     extend: {
+      // Bumped one notch app-wide (13→14-15px body) now that the collections/claims explorer
+      // is wider (max-w-1800px); proportional line-heights preserved. Deliberately doesn't
+      // touch the html root size, which would also inflate rem-based spacing/radius.
+      fontSize: {
+        xs: ['0.8125rem', { lineHeight: '1.125rem' }],
+        sm: ['0.9375rem', { lineHeight: '1.375rem' }],
+        base: ['1.0625rem', { lineHeight: '1.625rem' }],
+        lg: ['1.1875rem', { lineHeight: '1.875rem' }],
+      },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
         head: ['Space Grotesk', 'Inter', 'sans-serif'],
