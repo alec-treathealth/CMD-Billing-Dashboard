@@ -736,6 +736,12 @@ export interface CmdReportFilter {
 
 /** Max length for the free-text search term (bounded input — DoS/abuse guard). */
 const CMD_SEARCH_TERM_MAX = 120;
+/**
+ * Min length before a free-text term runs as a substring search (mirrors CMD_SEARCH_TERM_MIN in the
+ * pure query module + MIN_SEARCH_LEN in the client). A shorter term is treated as NO search (browse),
+ * so the throwaway 1–2 char prefix scans never reach the DB even on a direct action call.
+ */
+const CMD_SEARCH_TERM_MIN = 3;
 
 /**
  * Translate the client filter's smart-search fields into the reader filter, dropping anything
@@ -760,7 +766,9 @@ function applySearchFilter(
     readerFilter.primary_payer = filter.primary_payer;
   }
   const term = typeof filter.q === 'string' ? filter.q.trim() : '';
-  if (term !== '') {
+  // A sub-minimum term is treated as no substring search (browse) — not an error — so short
+  // throwaway prefixes never trigger the expensive aggregate scans. Longer-than-max is still rejected.
+  if (term.length >= CMD_SEARCH_TERM_MIN) {
     if (term.length > CMD_SEARCH_TERM_MAX) return false;
     const cols = Array.isArray(filter.searchColumns)
       ? filter.searchColumns.filter(
