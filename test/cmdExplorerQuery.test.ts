@@ -452,3 +452,30 @@ test('cohort curve: position axis is capped and bound; no raw-PHI column is ever
     assert.match(q.sql, /as bucket, count\(distinct member_id_bidx\)::int as patients, count\(\*\)::int as claims/);
   }
 });
+
+// --- Phase 2: dollars + zero-pay per bucket ----------------------------------
+
+test('cohort curve: Phase 2 dollars + zero-pay ride the SAME suppressed select, keyed off payments', () => {
+  const { byPosition, byDays } = buildCohortCurveQueries(PREFIX_TOKEN, ENTITY);
+  for (const q of [byPosition, byDays]) {
+    // Bucket $ paid (powers client-side avg-$/patient + cumulative-$/starting-patient), coalesced.
+    assert.match(q.sql, /round\(coalesce\(sum\(insurance_payments\), 0\), 2\)::float8 as paid_total/);
+    // Zero-pay share = lines with NO positive insurance payment; NULL payment counts as zero-paid.
+    assert.match(
+      q.sql,
+      /round\(count\(\*\) filter \(where coalesce\(insurance_payments, 0\) <= 0\)::numeric \/ count\(\*\) \* 100, 2\)::float8 as pct_zero_paid/,
+    );
+    // Patient-shifted subset: zero-paid AND balance moved to the patient (deductible/coinsurance).
+    assert.match(
+      q.sql,
+      /round\(count\(\*\) filter \(where coalesce\(insurance_payments, 0\) <= 0 and patient_balance_due > 0\)::numeric \/ count\(\*\) \* 100, 2\)::float8 as pct_patient_shifted/,
+    );
+    // The zero-pay signal is PAYMENTS, deliberately never allowed_amount (~85% of allowed<=0/null
+    // lines in this dataset carry real payments — allowed<=0 is not a denial signal).
+    assert.doesNotMatch(q.sql, /allowed_amount <= /);
+    // The metric fields sit in the FINAL suppressed select (immediately before `from seq`, whose
+    // rollup carries the HAVING floor) — no second unsuppressed projection exists.
+    assert.match(q.sql, /as pct_patient_shifted from seq/);
+    assertAllBound(q.sql, q.params);
+  }
+});

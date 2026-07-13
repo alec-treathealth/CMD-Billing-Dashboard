@@ -983,7 +983,9 @@ async function loadCohortCurveData(prefixBidx: string, entityIds: string[]): Pro
  */
 export const loadCohortCurve = unstable_cache(
   (prefixBidx: string, entityIds: string[]): Promise<CohortCurve> => loadCohortCurveData(prefixBidx, entityIds),
-  ['cmd-explorer-cohort-curve'],
+  // -v2: CohortCurvePoint gained paid_total/pct_zero_paid/pct_patient_shifted (Phase 2); the key bump
+  // keeps a pre-deploy cached curve (old shape, up to 15 min) from reaching the new UI.
+  ['cmd-explorer-cohort-curve-v2'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
 

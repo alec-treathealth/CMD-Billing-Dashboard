@@ -2092,10 +2092,38 @@ function ComboDrillList({
 
 // --- alpha-prefix cohort payer-behavior curve (Session D) -------------------
 
-// Two functional multi-series colors (per the design system, charts keep their own colors):
-// Allowed = teal, Paid = violet. Both read in light + dark.
+// Functional multi-series colors (per the design system, charts keep their own colors):
+// Allowed = teal, Paid = violet, Dollars = amber. All read in light + dark, and amber stays
+// distinct from the red degradation marker line.
 const COHORT_ALLOWED_COLOR = '#0d9488';
 const COHORT_PAID_COLOR = '#7c3aed';
+const COHORT_DOLLARS_COLOR = '#d97706';
+
+/** A cohort point plus the client-side dollar derivations (Phase 2). */
+type CohortDollarPoint = CohortCurvePoint & {
+  paid_per_patient: number;
+  cum_paid_per_start: number | null;
+};
+
+/**
+ * Derive the dollar series from the suppressed buckets. `paid_per_patient` = the point's insurance $
+ * ÷ its patients (on the position axis each patient has exactly ONE visit per bucket, so this is
+ * "$ the payer puts behind visit N"). `cum_paid_per_start` = running Σ paid_total ÷ the FIXED
+ * starting-cohort count — never the shrinking survivor count, which would restate the survivorship
+ * bias this metric exists to counter. Suppressed buckets' dollars are absent by design, so the
+ * cumulative line is a FLOOR (the footnote says so); patients >= 5 always, so no division guard.
+ */
+function withDollarSeries(points: CohortCurvePoint[], cohortPatients: number): CohortDollarPoint[] {
+  let running = 0;
+  return points.map((p) => {
+    running += p.paid_total;
+    return {
+      ...p,
+      paid_per_patient: p.paid_total / p.patients,
+      cum_paid_per_start: cohortPatients > 0 ? running / cohortPatients : null,
+    };
+  });
+}
 
 /**
  * Plain-language degradation read of the claim-position curve: the FIRST bucket whose dollar-
@@ -2193,6 +2221,104 @@ function CohortMiniChart({
 }
 
 /**
+ * The Phase 2 dollar mini — per-bucket avg insurance $ per patient, in the same frame (grid, hidden
+ * exposure bars, red drop marker) as the % minis. The cumulative-$/starting-patient and zero-pay
+ * reads ride the tooltip as INVISIBLE series (stroke "none", pinned to the hidden volume axis so
+ * their large values can't stretch the $ axis) — each hover tells the whole dollar story without a
+ * fourth chart. The $ axis floors at 0 but follows the data down if a reversal-heavy bucket nets
+ * negative, so no point is ever clipped away.
+ */
+function CohortDollarMiniChart({
+  data,
+  xLabel,
+  markerBucket,
+}: {
+  data: CohortDollarPoint[];
+  xLabel: string;
+  markerBucket?: number | null;
+}) {
+  const maxPatients = Math.max(...data.map((p) => p.patients), 1);
+  const usd = (v: number) => `$${Math.round(v).toLocaleString()}`;
+  return (
+    <div>
+      <div className="text-[10px] font-semibold" style={{ color: COHORT_DOLLARS_COLOR }}>
+        $ Paid / patient
+      </div>
+      <div className="h-28 w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={data} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
+            <CartesianGrid vertical={false} stroke="#E4E9E6" />
+            <XAxis dataKey="bucket" tick={{ fontSize: 10 }} stroke="#E4E9E6" tickLine={false} />
+            <YAxis
+              domain={[
+                (dataMin: number) => Math.min(0, dataMin),
+                (dataMax: number) => Math.max(Math.ceil((dataMax || 0) / 50) * 50, 50),
+              ]}
+              tick={{ fontSize: 10 }}
+              stroke="#E4E9E6"
+              tickLine={false}
+              width={52}
+              tickFormatter={usd}
+            />
+            <YAxis yAxisId="vol" hide domain={[0, maxPatients * 4]} />
+            <Tooltip
+              formatter={(v: number | string, n: string, item: { payload?: CohortDollarPoint }) => {
+                if (n === 'Patients') return [Number(v).toLocaleString(), 'Patients'];
+                if (n === 'Zero-paid lines') {
+                  const shifted = item.payload?.pct_patient_shifted ?? 0;
+                  return [`${v}%${shifted > 0 ? ` (${shifted}% → patient balance)` : ''}`, n];
+                }
+                return [v === null || v === undefined ? '—' : usd(Number(v)), n];
+              }}
+              labelFormatter={(l) => `${xLabel}: ${l}`}
+            />
+            {markerBucket != null && <ReferenceLine x={markerBucket} stroke="#dc2626" strokeDasharray="4 3" />}
+            <Bar
+              yAxisId="vol"
+              dataKey="patients"
+              name="Patients"
+              fill={COHORT_DOLLARS_COLOR}
+              fillOpacity={0.12}
+              isAnimationActive={false}
+            />
+            <Line
+              type="monotone"
+              dataKey="paid_per_patient"
+              name="$ Paid / patient"
+              stroke={COHORT_DOLLARS_COLOR}
+              strokeWidth={2}
+              dot={false}
+              connectNulls
+            />
+            {/* Tooltip-only series (invisible; hidden axis so their scale can't distort the $ axis). */}
+            <Line
+              yAxisId="vol"
+              dataKey="cum_paid_per_start"
+              name="Cumulative $ / starting patient"
+              stroke="none"
+              dot={false}
+              activeDot={false}
+              legendType="none"
+              isAnimationActive={false}
+            />
+            <Line
+              yAxisId="vol"
+              dataKey="pct_zero_paid"
+              name="Zero-paid lines"
+              stroke="none"
+              dot={false}
+              activeDot={false}
+              legendType="none"
+              isAnimationActive={false}
+            />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
+/**
  * The alpha-prefix cohort payer-behavior curve — the MERGED attrition-rate / days-authorized metric.
  * Renders only for PHI-entitled roles with an active ≥3-char alpha-prefix search (gated by the
  * caller). Shows BOTH x-axes (claim/visit position + days since first claim) side by side, no toggle,
@@ -2242,25 +2368,47 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
 
   const deg = cohortDegradation(c.by_position);
   const round = (n: number) => Math.round(n);
+  const usd = (n: number) => `$${Math.round(n).toLocaleString()}`;
+  // Client-side dollar derivations (Phase 2) — per-bucket $/patient + cumulative-$/starting-patient.
+  const posDollars = withDollarSeries(c.by_position, c.cohort_patients);
+  const daysDollars = withDollarSeries(c.by_days, c.cohort_patients);
+  // Claims-weighted zero-pay share over a run of buckets (never avg-of-shares).
+  const zeroPayOver = (pts: CohortDollarPoint[], pick: (p: CohortDollarPoint) => number) => {
+    const claims = pts.reduce((s, p) => s + p.claims, 0);
+    return claims > 0 ? round((pts.reduce((s, p) => s + (pick(p) / 100) * p.claims, 0) / claims) * 100) : 0;
+  };
+
+  // Callout leads with dollars + zero-pay (Phase 2); %-allowed demoted to the trailing clause. The
+  // dollar read is anchored to the SAME drop bucket the %-allowed rule found, so the red marker
+  // line and the copy tell one story.
   let callout: string;
   if (deg && deg.dropAt !== null && deg.dropTo !== null) {
+    const at = posDollars.find((p) => p.bucket >= deg.dropAt!) ?? posDollars[posDollars.length - 1]!;
+    const fromDrop = posDollars.filter((p) => p.bucket >= deg.dropAt!);
+    const zeroPct = zeroPayOver(fromDrop, (p) => p.pct_zero_paid);
+    const shiftPct = zeroPayOver(fromDrop, (p) => p.pct_patient_shifted);
     callout =
-      deg.dropAt <= 2
-        ? `The 1st claim was allowed ~${round(deg.baseline)}% of billed; from claim ${deg.dropAt} on, allowed drops to ~${round(deg.dropTo)}%.`
-        : `Claims 1–${deg.dropAt - 1} were allowed ~${round(deg.baseline)}% of billed; from claim ${deg.dropAt} on, allowed drops to ~${round(deg.dropTo)}%.`;
+      `Insurance paid ~${usd(posDollars[0]!.paid_per_patient)} per patient on the 1st claim, falling to ~${usd(at.paid_per_patient)} by claim ${deg.dropAt}. ` +
+      `${zeroPct}% of charge lines from claim ${deg.dropAt} on were zero-paid${shiftPct > 0 ? ` (${shiftPct} pts moved to patient balance)` : ''}. ` +
+      `Allowed fell from ~${round(deg.baseline)}% to ~${round(deg.dropTo)}%.`;
   } else if (deg) {
-    callout = `Reimbursement holds steady (~${round(deg.baseline)}% allowed) across the first ${deg.lastBucket} claims — no clear degradation in this cohort.`;
+    const zeroPct = zeroPayOver(posDollars, (p) => p.pct_zero_paid);
+    callout =
+      `Insurance payments hold steady (~${usd(posDollars[0]!.paid_per_patient)} per patient per claim, ~${round(deg.baseline)}% allowed) ` +
+      `across the first ${deg.lastBucket} claims; ${zeroPct}% of charge lines were zero-paid — no clear degradation in this cohort.`;
   } else {
     callout = 'Not enough sequenced claims to read a degradation trend for this cohort.';
   }
 
-  // Days-framing one-liner (Alec's "how long does full authorization last"): first vs last surviving
-  // day-bucket %-allowed. bucketWidth is read from the data (bucket start-days) so copy never drifts.
+  // Days-framing one-liner (Alec's "how long does full authorization last"), now led by the
+  // cumulative-$ plateau: what a starting patient is ultimately worth by the last surviving day
+  // bucket. bucketWidth is read from the data (bucket start-days) so copy never drifts.
   const days = c.by_days.filter((p) => p.pct_allowed !== null);
   const bucketWidth = days.length >= 2 ? days[1]!.bucket - days[0]!.bucket : 30;
+  const lastCum = daysDollars.length > 0 ? daysDollars[daysDollars.length - 1]!.cum_paid_per_start : null;
   const daysLine =
     days.length >= 2
-      ? `By elapsed time: ~${round(days[0]!.pct_allowed!)}% allowed in the first ${bucketWidth} days, ~${round(days[days.length - 1]!.pct_allowed!)}% by day ${days[days.length - 1]!.bucket}+.`
+      ? `By elapsed time: ${lastCum !== null ? `~${usd(lastCum)} collected per starting patient by day ${daysDollars[daysDollars.length - 1]!.bucket}+; ` : ''}~${round(days[0]!.pct_allowed!)}% allowed in the first ${bucketWidth} days, ~${round(days[days.length - 1]!.pct_allowed!)}% by day ${days[days.length - 1]!.bucket}+.`
       : null;
 
   return (
@@ -2334,6 +2482,7 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
                   xLabel="Claim #"
                   forceHundredMax
                 />
+                <CohortDollarMiniChart data={posDollars} xLabel="Claim #" markerBucket={deg?.dropAt ?? null} />
               </div>
             </div>
             <div>
@@ -2357,12 +2506,17 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
                   xLabel="Day"
                   forceHundredMax
                 />
+                <CohortDollarMiniChart data={daysDollars} xLabel="Day" />
               </div>
             </div>
           </div>
           <p className="mt-2 text-[11px] leading-relaxed text-ink400">
             % Allowed = allowed ÷ charged. % Paid = insurance paid ÷ allowed — can exceed 100% when
-            insurance pays above the plan’s allowed amount (common out-of-network). Shaded bars show
+            insurance pays above the plan’s allowed amount (common out-of-network). $ Paid / patient =
+            the point’s insurance dollars ÷ its patients; the tooltip’s cumulative $ divides by the
+            full starting cohort and skips suppressed points, so it reads as a floor. Zero-paid =
+            charge lines with no insurance payment; “→ patient balance” means the amount moved to
+            patient responsibility (often deductible), not necessarily a denial. Shaded bars show
             patients per point; later points reflect only patients whose claims continued — early
             drop-offs leave the tail, which can flatter it.
           </p>
@@ -2437,7 +2591,7 @@ function SummaryPanelSkeleton() {
   );
 }
 
-/** Cohort-curve skeleton — keeps the real title (with prefix) + two chart-sized placeholders. */
+/** Cohort-curve skeleton — keeps the real title (with prefix) + three chart-sized placeholders per column. */
 function CohortPanelSkeleton({ prefix }: { prefix: string }) {
   return (
     <div className="rounded-xl border border-line bg-card p-4 shadow-ths" aria-hidden>
@@ -2454,10 +2608,12 @@ function CohortPanelSkeleton({ prefix }: { prefix: string }) {
           <Skeleton className="mb-1 h-3 w-24" />
           <Skeleton className="h-28 w-full rounded-md" />
           <Skeleton className="mt-2 h-28 w-full rounded-md" />
+          <Skeleton className="mt-2 h-28 w-full rounded-md" />
         </div>
         <div>
           <Skeleton className="mb-1 h-3 w-36" />
           <Skeleton className="h-28 w-full rounded-md" />
+          <Skeleton className="mt-2 h-28 w-full rounded-md" />
           <Skeleton className="mt-2 h-28 w-full rounded-md" />
         </div>
       </div>

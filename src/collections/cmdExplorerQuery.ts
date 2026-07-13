@@ -534,6 +534,13 @@ export const COHORT_DAY_CAP = 360;
  * One cohort-curve bucket. `patients` is ALWAYS >= COHORT_MIN_PATIENTS (a smaller bucket was
  * suppressed and never appears). `pct_allowed` / `pct_paid` are DOLLAR-WEIGHTED (ratio of the
  * bucket's summed dollars, guarded), the same discipline as the Session C combo grouping.
+ *
+ * Phase 2 (dollars + zero-pay): `paid_total` is the bucket's summed insurance $ — it powers the
+ * client-side avg-$/patient and cumulative-$/starting-patient reads. `pct_zero_paid` is the share
+ * of charge LINES with no positive insurance payment; `pct_patient_shifted` is its subset where the
+ * balance moved to the patient (deductible/coinsurance — a collections problem, NOT a denial).
+ * `allowed_amount <= 0` is deliberately NOT the zero-pay signal: in this dataset ~85% of
+ * allowed<=0/null lines carry real payments (CMD often omits a meaningful allowed amount).
  */
 export interface CohortCurvePoint {
   bucket: number;
@@ -541,6 +548,9 @@ export interface CohortCurvePoint {
   claims: number;
   pct_allowed: number | null;
   pct_paid: number | null;
+  paid_total: number;
+  pct_zero_paid: number;
+  pct_patient_shifted: number;
 }
 
 export interface CohortCurveOptions {
@@ -567,6 +577,19 @@ export interface CohortCurve {
 const COHORT_PCT_SELECT =
   'case when sum(charge_amount) > 0 then round(sum(allowed_amount) / sum(charge_amount) * 100, 2)::float8 end as pct_allowed, ' +
   'case when sum(allowed_amount) > 0 then round(sum(insurance_payments) / sum(allowed_amount) * 100, 2)::float8 end as pct_paid';
+
+// Phase 2 dollars + zero-pay, appended to the SAME suppressed select (the HAVING covers every field
+// here — nothing derivable below the min-patient floor can serialize). Same discipline: sums and
+// filtered counts only, never avg() (the fixture tests forbid the token so avg-of-ratios can't creep
+// back in). A surviving group always has count(*) >= 1, so the share divisions need no zero guard;
+// insurance_payments is coalesced defensively (no NULLs in the data today, but the schema allows them,
+// and a NULL must read as "no positive payment", not silently drop out of the zero-pay share).
+const COHORT_METRIC_SELECT =
+  COHORT_PCT_SELECT +
+  ', ' +
+  'round(coalesce(sum(insurance_payments), 0), 2)::float8 as paid_total, ' +
+  'round(count(*) filter (where coalesce(insurance_payments, 0) <= 0)::numeric / count(*) * 100, 2)::float8 as pct_zero_paid, ' +
+  'round(count(*) filter (where coalesce(insurance_payments, 0) <= 0 and patient_balance_due > 0)::numeric / count(*) * 100, 2)::float8 as pct_patient_shifted';
 
 /**
  * Build the TWO read-only cohort-curve queries — by claim/visit POSITION and by DAYS-since-first —
@@ -606,11 +629,11 @@ export function buildCohortCurveQueries(
     const sql =
       'with seq as (select member_id_bidx, ' +
       'dense_rank() over (partition by member_id_bidx order by charge_date) as pos, ' +
-      'charge_amount, allowed_amount, insurance_payments ' +
+      'charge_amount, allowed_amount, insurance_payments, patient_balance_due ' +
       'from collections.cmd_explorer_rows ' +
       `where business_entity_id = any(${ent}::uuid[]) and member_id_prefix_bidx = ${pref} and charge_date is not null) ` +
       'select pos::int as bucket, count(distinct member_id_bidx)::int as patients, count(*)::int as claims, ' +
-      COHORT_PCT_SELECT + ' ' +
+      COHORT_METRIC_SELECT + ' ' +
       `from seq where pos <= ${cap} group by pos having count(distinct member_id_bidx) >= ${minp} order by pos`;
     return { sql, params };
   })();
@@ -629,13 +652,13 @@ export function buildCohortCurveQueries(
     // Bucket by whole `dayBucketDays`-wide windows measured from each patient's OWN first claim
     // (days_since = charge_date − first_dt, an integer). Same HAVING suppression on the rollup.
     const sql =
-      'with base as (select member_id_bidx, charge_date, charge_amount, allowed_amount, insurance_payments ' +
+      'with base as (select member_id_bidx, charge_date, charge_amount, allowed_amount, insurance_payments, patient_balance_due ' +
       `from collections.cmd_explorer_rows where business_entity_id = any(${ent}::uuid[]) and member_id_prefix_bidx = ${pref} and charge_date is not null), ` +
       'firstdt as (select member_id_bidx, min(charge_date) as first_dt from base group by member_id_bidx), ' +
-      'seq as (select b.member_id_bidx, (b.charge_date - f.first_dt) as days_since, b.charge_amount, b.allowed_amount, b.insurance_payments ' +
+      'seq as (select b.member_id_bidx, (b.charge_date - f.first_dt) as days_since, b.charge_amount, b.allowed_amount, b.insurance_payments, b.patient_balance_due ' +
       'from base b join firstdt f using (member_id_bidx)) ' +
       `select (floor(days_since::numeric / ${bucket}) * ${bucket})::int as bucket, count(distinct member_id_bidx)::int as patients, count(*)::int as claims, ` +
-      COHORT_PCT_SELECT + ' ' +
+      COHORT_METRIC_SELECT + ' ' +
       `from seq where days_since <= ${cap} group by floor(days_since::numeric / ${bucket}) having count(distinct member_id_bidx) >= ${minp} order by bucket`;
     return { sql, params };
   })();
