@@ -6,6 +6,7 @@ import {
   buildCmdSearchSummaryQueries,
   buildCmdFacilityOptionsQuery,
   buildCohortCurveQueries,
+  buildCohortDrilldownQueries,
   sanitizeGridColumns,
   resolveCmdExplorerSort,
   resolveCmdExplorerCursor,
@@ -17,6 +18,9 @@ import {
   CMD_SEARCH_TOP_N,
   COHORT_MIN_PATIENTS,
   COHORT_POSITION_CAP,
+  COHORT_DRILLDOWN_TABLE_MIN_PATIENTS,
+  clearsCohortFloor,
+  clearsDrilldownTableFloor,
   type CmdExplorerFilter,
   type CmdExplorerSort,
 } from '../src/collections/cmdExplorerQuery.js';
@@ -477,5 +481,120 @@ test('cohort curve: Phase 2 dollars + zero-pay ride the SAME suppressed select, 
     // rollup carries the HAVING floor) — no second unsuppressed projection exists.
     assert.match(q.sql, /as pct_patient_shifted from seq/);
     assertAllBound(q.sql, q.params);
+  }
+});
+
+// --- Session G: cohort-point drilldown ---------------------------------------
+
+const ENTITY_B = ['141d459c-f371-4229-9a92-ace198e940bb']; // Indigo — distinct from ENTITY (BXR)
+
+test('drilldown: N-1 suppressed, N shows — exact boundary on the patient-table floor', () => {
+  assert.equal(clearsDrilldownTableFloor(COHORT_DRILLDOWN_TABLE_MIN_PATIENTS - 1), false);
+  assert.equal(clearsDrilldownTableFloor(COHORT_DRILLDOWN_TABLE_MIN_PATIENTS), true);
+  // Locks the signed-off value itself — a silent constant change would fail this test.
+  assert.equal(COHORT_DRILLDOWN_TABLE_MIN_PATIENTS, 10);
+  // The table floor is STRICTER than (never equal to or below) the curve's own aggregate floor.
+  assert.ok(COHORT_DRILLDOWN_TABLE_MIN_PATIENTS > COHORT_MIN_PATIENTS);
+});
+
+test('drilldown: the aggregate floor is the SAME boundary the curve itself enforces', () => {
+  assert.equal(clearsCohortFloor(COHORT_MIN_PATIENTS - 1), false);
+  assert.equal(clearsCohortFloor(COHORT_MIN_PATIENTS), true);
+});
+
+test('drilldown queries: all four share the SAME tenant + prefix-token scope, fully bound', () => {
+  for (const axis of ['position', 'days'] as const) {
+    const { stats, byPayer, byCptRevenue, rows } = buildCohortDrilldownQueries(PREFIX_TOKEN, ENTITY, axis, 3);
+    for (const q of [stats, byPayer, byCptRevenue, rows]) {
+      assert.match(q.sql, /business_entity_id = any\(\$1::uuid\[\]\)/);
+      assert.match(q.sql, /member_id_prefix_bidx = \$2/);
+      assert.deepEqual(q.params[0], ENTITY);
+      assert.equal(q.params[1], PREFIX_TOKEN);
+      assertAllBound(q.sql, q.params);
+    }
+  }
+});
+
+test('drilldown queries: tenant scope is DERIVED from the caller — swapping entityIds swaps the bound param, not the SQL shape', () => {
+  // The single hermetic proxy this repo has for "reader isolation" (no live-DB harness exists for
+  // ANY reader here — see buildCmdExplorerQuery's identical "tenant scope is always the first bound
+  // param" test above): prove the tenant condition is a bound $1 driven by the argument, so no code
+  // path can silently hardcode or drop it. Live cross-tenant verification is run separately (see the
+  // G3 handoff notes) against the real BXR/Indigo data.
+  const bxr = buildCohortDrilldownQueries(PREFIX_TOKEN, ENTITY, 'position', 3);
+  const indigo = buildCohortDrilldownQueries(PREFIX_TOKEN, ENTITY_B, 'position', 3);
+  for (const [a, b] of [
+    [bxr.stats, indigo.stats],
+    [bxr.byPayer, indigo.byPayer],
+    [bxr.byCptRevenue, indigo.byCptRevenue],
+    [bxr.rows, indigo.rows],
+  ] as const) {
+    assert.equal(a.sql, b.sql, 'SQL shape must be identical regardless of tenant');
+    assert.deepEqual(a.params[0], ENTITY);
+    assert.deepEqual(b.params[0], ENTITY_B);
+    assert.notDeepEqual(a.params[0], b.params[0]);
+  }
+});
+
+test('drilldown queries: position axis sequences by dense_rank and filters to the exact bucket', () => {
+  const { stats } = buildCohortDrilldownQueries(PREFIX_TOKEN, ENTITY, 'position', 7);
+  assert.match(stats.sql, /dense_rank\(\) over \(partition by member_id_bidx order by charge_date\) as pos/);
+  assert.match(stats.sql, /bucket_rows as \(select id, member_id_bidx from seq where pos = \$3\)/);
+  assert.equal(stats.params[2], 7);
+});
+
+test('drilldown queries: days axis measures from each patient\'s OWN first claim and filters to the exact bucket', () => {
+  const { stats } = buildCohortDrilldownQueries(PREFIX_TOKEN, ENTITY, 'days', 60);
+  assert.match(stats.sql, /min\(charge_date\) as first_dt/);
+  assert.match(stats.sql, /charge_date - f\.first_dt/);
+  assert.match(
+    stats.sql,
+    /bucket_rows as \(select id, member_id_bidx from seq where \(floor\(days_since::numeric \/ \$3\) \* \$3\)::int = \$4\)/,
+  );
+  // dayBucketDays defaults to COHORT_DAY_BUCKET_DAYS (30), bound just before the target bucket.
+  assert.equal(stats.params[2], 30);
+  assert.equal(stats.params[3], 60);
+});
+
+test('drilldown queries: stats re-derives patients from DISTINCT member_id_bidx, never trusts a count', () => {
+  const { stats } = buildCohortDrilldownQueries(PREFIX_TOKEN, ENTITY, 'position', 3);
+  assert.match(stats.sql, /count\(distinct bucket_rows\.member_id_bidx\)::int as patients/);
+  // Dollar-weighted metrics ride the SAME suppressed-style select as the curve — never avg().
+  assert.doesNotMatch(stats.sql, /avg\(/);
+});
+
+test('drilldown queries: byPayer / byCptRevenue are top-N, dollar-weighted, and bound (default + override)', () => {
+  // Position axis: the shared CTE binds 3 params (entityIds, prefix, bucket) before topN, so topN
+  // lands at $4 / params[3] — asserted here rather than assumed, since it depends on the CTE shape.
+  const def = buildCohortDrilldownQueries(PREFIX_TOKEN, ENTITY, 'position', 3);
+  assert.match(def.byPayer.sql, /group by primary_payer order by charge desc nulls last, count desc limit \$4/);
+  assert.equal(def.byPayer.params[3], CMD_SEARCH_TOP_N);
+  assert.match(
+    def.byCptRevenue.sql,
+    /group by cpt_code, revenue_code order by charge desc nulls last, count desc limit \$4/,
+  );
+  assert.equal(def.byCptRevenue.params[3], CMD_SEARCH_TOP_N);
+  assert.match(def.byCptRevenue.sql, /round\(sum\(allowed_amount\) \/ sum\(charge_amount\) \* 100, 2\)::float8 end as pct_allowed/);
+
+  const custom = buildCohortDrilldownQueries(PREFIX_TOKEN, ENTITY, 'position', 3, { topN: 3 });
+  assert.equal(custom.byPayer.params[3], 3);
+  assert.equal(custom.byCptRevenue.params[3], 3);
+  assertAllBound(custom.byPayer.sql, custom.byPayer.params);
+  assertAllBound(custom.byCptRevenue.sql, custom.byCptRevenue.params);
+});
+
+test('drilldown queries: the patient-table row projection reuses CMD_EXPLORER_SELECT — same non-PHI shape, NO raw PHI column ever', () => {
+  const { rows, stats, byPayer, byCptRevenue } = buildCohortDrilldownQueries(PREFIX_TOKEN, ENTITY, 'position', 3);
+  // Same explicit non-PHI column list the main grid returns (id, charge_date, cpt_code, ... pct_paid).
+  assert.match(rows.sql, /select id, to_char\(charge_date, 'YYYY-MM-DD'\) as charge_date/);
+  // USING (id), not an explicit ON-join — an ON-join would leave CMD_EXPLORER_SELECT's bare `id`
+  // column ambiguous (both `t` and `bucket_rows` have their own `id`); USING merges it into one.
+  // (This exact ambiguity was caught live against a real Postgres planner, not by a string match —
+  // ­see the G3 handoff notes.)
+  assert.match(rows.sql, /join bucket_rows using \(id\)/);
+  assert.match(rows.sql, /order by t\.charge_date/);
+  // No query in this drilldown ever references the encrypted raw-PHI columns, under any axis/query.
+  for (const q of [stats, byPayer, byCptRevenue, rows]) {
+    assert.doesNotMatch(q.sql, /member_id_raw|patient_name|group_number/);
   }
 });

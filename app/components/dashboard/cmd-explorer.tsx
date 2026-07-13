@@ -87,6 +87,7 @@ import {
   loadCmdSearchSummary,
   loadCmdExplorerFacilities,
   loadCohortCurve,
+  loadCohortDrilldown,
   revealCmdReportRows,
   listGridViews,
   saveGridView,
@@ -103,6 +104,8 @@ import {
   type GridViewsResult,
   type CohortCurve,
   type CohortCurvePoint,
+  type CohortDrilldownResult,
+  type CohortDrilldownTable,
   type GridViewRow,
 } from '@/lib/actions';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../../src/collections/cmdExplorer';
@@ -266,6 +269,15 @@ type CohortState =
   | { kind: 'ready'; data: CohortCurve }
   | { kind: 'refreshing'; data: CohortCurve };
 
+/** One clicked cohort-curve point — which axis + which bucket on that axis. */
+type CohortPoint = { axis: 'position' | 'days'; bucket: number };
+
+/** Fetch state for the drilldown of the currently-selected cohort point (Session G). */
+type DrilldownState =
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string }
+  | { kind: 'ready'; data: CohortDrilldownResult };
+
 /**
  * Keep a conditionally-rendered node mounted through its exit animation. Returns `rendered` (mount
  * flag) and `exiting` (true during the exit window) so the caller can swap enter/exit animations.
@@ -376,6 +388,11 @@ export function CmdCollectionsExplorer({
   // Freeze the last resolved cohort (data + the prefix it was for) so the panel can keep showing it
   // while it fades OUT — by exit time the live `cohort` state has already reset to idle.
   const cohortSnapshotRef = useRef<{ data: CohortCurve; prefix: string } | null>(null);
+
+  // Cohort-point drilldown (Session G): which point is selected (null = none), and its fetch state.
+  // Independent of `cohort`/`cohortPresence` above — selecting a point does not affect the curve.
+  const [drilldownPoint, setDrilldownPoint] = useState<CohortPoint | null>(null);
+  const [drilldown, setDrilldown] = useState<DrilldownState | null>(null);
 
   // A facility/payer refinement AND the facility multi-select are tenant-specific; a term is generic.
   // Reset both when the view (tenant) changes so a stale drill-down / facility set doesn't filter the
@@ -731,6 +748,9 @@ export function CmdCollectionsExplorer({
   // Independent of the term/window/facility filters: the cohort is defined solely by the prefix +
   // tenant, so a patient's full lifetime sequence stays intact (not truncated to the grid window).
   useEffect(() => {
+    // A changed prefix/tenant invalidates any drilldown selection from the PRIOR curve — a bucket
+    // number from one cohort means nothing against another.
+    setDrilldownPoint(null);
     if (!cohortActive) {
       setCohort({ kind: 'idle' });
       return;
@@ -751,6 +771,27 @@ export function CmdCollectionsExplorer({
       live = false;
     };
   }, [cohortActive, dAlpha, view]);
+
+  // Fetch the drilldown for the currently-selected cohort point (Session G). Independent of the
+  // curve fetch above — re-fires only when the SELECTED POINT changes, not on every curve refresh.
+  useEffect(() => {
+    if (!drilldownPoint) {
+      setDrilldown(null);
+      return;
+    }
+    let live = true;
+    setDrilldown({ kind: 'loading' });
+    loadCohortDrilldown(dAlpha, drilldownPoint.axis, drilldownPoint.bucket, view)
+      .then((r) => {
+        if (live) setDrilldown(r.ok ? { kind: 'ready', data: r.drilldown } : { kind: 'error', message: r.error });
+      })
+      .catch(() => {
+        if (live) setDrilldown({ kind: 'error', message: 'The point detail could not be loaded right now.' });
+      });
+    return () => {
+      live = false;
+    };
+  }, [drilldownPoint, dAlpha, view]);
 
   // Snapshot the last resolved cohort so the panel can render it while fading out (by exit time the
   // live state has reset to idle). Presentation only — no fetch involvement.
@@ -864,6 +905,14 @@ export function CmdCollectionsExplorer({
         : { kind: 'combo', cpt, revenue },
     );
     requestAnimationFrame(() => gridRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
+  }
+
+  /**
+   * Select (or toggle off) a cohort-curve point to open its drilldown. Purely a UI selection — it
+   * does not touch the grid's `refinement`/search state, unlike applyRefinement above.
+   */
+  function selectDrilldownPoint(axis: 'position' | 'days', bucket: number) {
+    setDrilldownPoint((prev) => (prev && prev.axis === axis && prev.bucket === bucket ? null : { axis, bucket }));
   }
 
   // Decrypt the CURRENT page's PHI via the audited server action. Unchanged reveal logic — just
@@ -1128,12 +1177,25 @@ export function CmdCollectionsExplorer({
       {cohortPresence.rendered && (
         <div className={cohortPresence.exiting ? 'animate-ths-exit' : 'animate-ths-reveal'}>
           {cohortPresence.exiting && cohortSnapshotRef.current ? (
+            // Frozen snapshot fading out — drilldownPoint is already cleared by the effect above
+            // (it resets on any cohortActive/prefix change), so no live selection to render here.
             <CohortCurvePanel
               state={{ kind: 'ready', data: cohortSnapshotRef.current.data }}
               prefix={cohortSnapshotRef.current.prefix}
+              selectedPoint={null}
+              drilldown={null}
+              onSelectPoint={() => {}}
+              onCloseDrilldown={() => {}}
             />
           ) : (
-            <CohortCurvePanel state={cohort} prefix={dAlpha} />
+            <CohortCurvePanel
+              state={cohort}
+              prefix={dAlpha}
+              selectedPoint={drilldownPoint}
+              drilldown={drilldown}
+              onSelectPoint={selectDrilldownPoint}
+              onCloseDrilldown={() => setDrilldownPoint(null)}
+            />
           )}
         </div>
       )}
@@ -2094,10 +2156,13 @@ function ComboDrillList({
 
 // Functional multi-series colors (per the design system, charts keep their own colors):
 // Allowed = teal, Paid = violet, Dollars = amber. All read in light + dark, and amber stays
-// distinct from the red degradation marker line.
+// distinct from the red degradation marker line. Selected-point highlight = blue (Session G) —
+// distinct from all of the above, deliberately NOT --brand-accent (charts keep fixed functional
+// colors regardless of tenant, so the selection marker reads the same for every view).
 const COHORT_ALLOWED_COLOR = '#0d9488';
 const COHORT_PAID_COLOR = '#7c3aed';
 const COHORT_DOLLARS_COLOR = '#d97706';
+const COHORT_SELECTED_COLOR = '#2563eb';
 
 /** A cohort point plus the client-side dollar derivations (Phase 2). */
 type CohortDollarPoint = CohortCurvePoint & {
@@ -2164,6 +2229,8 @@ function CohortMiniChart({
   xLabel,
   markerBucket,
   forceHundredMax = false,
+  onPointClick,
+  selectedBucket,
 }: {
   data: CohortCurvePoint[];
   dataKey: 'pct_allowed' | 'pct_paid';
@@ -2172,6 +2239,12 @@ function CohortMiniChart({
   xLabel: string;
   markerBucket?: number | null;
   forceHundredMax?: boolean;
+  /** Session G: clicking anywhere on the chart opens that bucket's drilldown. Optional — the days-
+   * axis %-paid chart etc. all pass it identically; only omitted where a click wouldn't make sense. */
+  onPointClick?: (bucket: number) => void;
+  /** The currently-selected drilldown bucket, if it's on THIS chart's axis — drawn as a highlight
+   * line distinct from the red degradation marker. */
+  selectedBucket?: number | null;
 }) {
   // Scale the hidden volume axis so the tallest exposure bar fills ~1/4 of the chart height.
   const maxPatients = Math.max(...data.map((p) => p.patients), 1);
@@ -2182,7 +2255,18 @@ function CohortMiniChart({
       </div>
       <div className="h-28 w-full">
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={data} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
+          <ComposedChart
+            data={data}
+            margin={{ top: 4, right: 12, bottom: 0, left: 0 }}
+            onClick={
+              onPointClick
+                ? (s) => {
+                    if (s?.activeLabel !== undefined && s.activeLabel !== null) onPointClick(Number(s.activeLabel));
+                  }
+                : undefined
+            }
+            style={onPointClick ? { cursor: 'pointer' } : undefined}
+          >
             <CartesianGrid vertical={false} stroke="#E4E9E6" />
             {/* No inline axis label — the section heading above each column ("By claim number" / "By
                 days since first claim") already names the axis; xLabel names it in the tooltip. */}
@@ -2211,6 +2295,9 @@ function CohortMiniChart({
               labelFormatter={(l) => `${xLabel}: ${l}`}
             />
             {markerBucket != null && <ReferenceLine x={markerBucket} stroke="#dc2626" strokeDasharray="4 3" />}
+            {selectedBucket != null && (
+              <ReferenceLine x={selectedBucket} stroke={COHORT_SELECTED_COLOR} strokeWidth={2} strokeDasharray="2 2" />
+            )}
             <Bar yAxisId="vol" dataKey="patients" name="Patients" fill={color} fillOpacity={0.12} isAnimationActive={false} />
             <Line type="monotone" dataKey={dataKey} name={name} stroke={color} strokeWidth={2} dot={false} connectNulls />
           </ComposedChart>
@@ -2232,10 +2319,15 @@ function CohortDollarMiniChart({
   data,
   xLabel,
   markerBucket,
+  onPointClick,
+  selectedBucket,
 }: {
   data: CohortDollarPoint[];
   xLabel: string;
   markerBucket?: number | null;
+  /** Session G: same click-to-drilldown affordance as CohortMiniChart. */
+  onPointClick?: (bucket: number) => void;
+  selectedBucket?: number | null;
 }) {
   const maxPatients = Math.max(...data.map((p) => p.patients), 1);
   const usd = (v: number) => `$${Math.round(v).toLocaleString()}`;
@@ -2246,7 +2338,18 @@ function CohortDollarMiniChart({
       </div>
       <div className="h-28 w-full">
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={data} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
+          <ComposedChart
+            data={data}
+            margin={{ top: 4, right: 12, bottom: 0, left: 0 }}
+            onClick={
+              onPointClick
+                ? (s) => {
+                    if (s?.activeLabel !== undefined && s.activeLabel !== null) onPointClick(Number(s.activeLabel));
+                  }
+                : undefined
+            }
+            style={onPointClick ? { cursor: 'pointer' } : undefined}
+          >
             <CartesianGrid vertical={false} stroke="#E4E9E6" />
             <XAxis dataKey="bucket" tick={{ fontSize: 10 }} stroke="#E4E9E6" tickLine={false} />
             <YAxis
@@ -2273,6 +2376,9 @@ function CohortDollarMiniChart({
               labelFormatter={(l) => `${xLabel}: ${l}`}
             />
             {markerBucket != null && <ReferenceLine x={markerBucket} stroke="#dc2626" strokeDasharray="4 3" />}
+            {selectedBucket != null && (
+              <ReferenceLine x={selectedBucket} stroke={COHORT_SELECTED_COLOR} strokeWidth={2} strokeDasharray="2 2" />
+            )}
             <Bar
               yAxisId="vol"
               dataKey="patients"
@@ -2327,7 +2433,22 @@ function CohortDollarMiniChart({
  * suppression — no single patient's figures reach here. When the whole cohort is too small (all
  * buckets suppressed), it shows a "not enough data" notice, never a partial (re-identifiable) curve.
  */
-function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: string }) {
+function CohortCurvePanel({
+  state,
+  prefix,
+  selectedPoint,
+  drilldown,
+  onSelectPoint,
+  onCloseDrilldown,
+}: {
+  state: CohortState;
+  prefix: string;
+  /** Session G: the currently-selected cohort-curve point (null = none selected). */
+  selectedPoint: CohortPoint | null;
+  drilldown: DrilldownState | null;
+  onSelectPoint: (axis: 'position' | 'days', bucket: number) => void;
+  onCloseDrilldown: () => void;
+}) {
   // Fold/unfold the panel body below the header (Session F). Local, resets each session. Declared
   // before the early returns (rules-of-hooks) even though the collapse control only renders in the
   // 'ready'/'refreshing' branch below.
@@ -2464,7 +2585,9 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
               <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 By claim number
               </div>
-              <div className="mb-1 text-[11px] text-ink400">Each patient’s visits in order · 1 = first visit</div>
+              <div className="mb-1 text-[11px] text-ink400">
+                Each patient’s visits in order · 1 = first visit · click a point for details
+              </div>
               <div className="space-y-2">
                 <CohortMiniChart
                   data={c.by_position}
@@ -2473,6 +2596,8 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
                   color={COHORT_ALLOWED_COLOR}
                   xLabel="Claim #"
                   markerBucket={deg?.dropAt ?? null}
+                  onPointClick={(bucket) => onSelectPoint('position', bucket)}
+                  selectedBucket={selectedPoint?.axis === 'position' ? selectedPoint.bucket : null}
                 />
                 <CohortMiniChart
                   data={c.by_position}
@@ -2481,15 +2606,33 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
                   color={COHORT_PAID_COLOR}
                   xLabel="Claim #"
                   forceHundredMax
+                  onPointClick={(bucket) => onSelectPoint('position', bucket)}
+                  selectedBucket={selectedPoint?.axis === 'position' ? selectedPoint.bucket : null}
                 />
-                <CohortDollarMiniChart data={posDollars} xLabel="Claim #" markerBucket={deg?.dropAt ?? null} />
+                <CohortDollarMiniChart
+                  data={posDollars}
+                  xLabel="Claim #"
+                  markerBucket={deg?.dropAt ?? null}
+                  onPointClick={(bucket) => onSelectPoint('position', bucket)}
+                  selectedBucket={selectedPoint?.axis === 'position' ? selectedPoint.bucket : null}
+                />
               </div>
+              {selectedPoint?.axis === 'position' && drilldown && (
+                <CohortDrilldownPanel
+                  axis="position"
+                  bucket={selectedPoint.bucket}
+                  state={drilldown}
+                  onClose={onCloseDrilldown}
+                />
+              )}
             </div>
             <div>
               <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 By days since first claim
               </div>
-              <div className="mb-1 text-[11px] text-ink400">Days elapsed from each patient’s first visit</div>
+              <div className="mb-1 text-[11px] text-ink400">
+                Days elapsed from each patient’s first visit · click a point for details
+              </div>
               <div className="space-y-2">
                 <CohortMiniChart
                   data={c.by_days}
@@ -2497,6 +2640,8 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
                   name="% Allowed"
                   color={COHORT_ALLOWED_COLOR}
                   xLabel="Day"
+                  onPointClick={(bucket) => onSelectPoint('days', bucket)}
+                  selectedBucket={selectedPoint?.axis === 'days' ? selectedPoint.bucket : null}
                 />
                 <CohortMiniChart
                   data={c.by_days}
@@ -2505,9 +2650,24 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
                   color={COHORT_PAID_COLOR}
                   xLabel="Day"
                   forceHundredMax
+                  onPointClick={(bucket) => onSelectPoint('days', bucket)}
+                  selectedBucket={selectedPoint?.axis === 'days' ? selectedPoint.bucket : null}
                 />
-                <CohortDollarMiniChart data={daysDollars} xLabel="Day" />
+                <CohortDollarMiniChart
+                  data={daysDollars}
+                  xLabel="Day"
+                  onPointClick={(bucket) => onSelectPoint('days', bucket)}
+                  selectedBucket={selectedPoint?.axis === 'days' ? selectedPoint.bucket : null}
+                />
               </div>
+              {selectedPoint?.axis === 'days' && drilldown && (
+                <CohortDrilldownPanel
+                  axis="days"
+                  bucket={selectedPoint.bucket}
+                  state={drilldown}
+                  onClose={onCloseDrilldown}
+                />
+              )}
             </div>
           </div>
           <p className="mt-2 text-[11px] leading-relaxed text-ink400">
@@ -2522,6 +2682,243 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
           </p>
         </div>
       )}
+    </div>
+  );
+}
+
+// --- cohort-point drilldown (Session G) -------------------------------------
+
+/**
+ * The drilldown for ONE clicked cohort-curve point — an aggregate breakdown (payer mix, CPT ×
+ * Revenue-code mix, allowed/paid/zero-paid) for that exact bucket, plus an OPTIONAL masked patient
+ * table gated by a stricter, separate floor (COHORT_DRILLDOWN_TABLE_MIN_PATIENTS). The aggregate is
+ * a pure SQL aggregate — no row egress, non-PHI; the table (when shown) reuses the SAME masking +
+ * audited per-row reveal as the main grid, never a new PHI surface. `state` is fetch state owned by
+ * the parent (CmdCollectionsExplorer) — this component is purely presentational.
+ */
+function CohortDrilldownPanel({
+  axis,
+  bucket,
+  state,
+  onClose,
+}: {
+  axis: 'position' | 'days';
+  bucket: number;
+  state: DrilldownState;
+  onClose: () => void;
+}) {
+  const label = axis === 'position' ? `Claim ${bucket}` : `Day ${bucket}+`;
+  return (
+    <div className="mt-2 animate-ths-reveal rounded-lg border border-line bg-card p-3 shadow-ths">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-ink900">{label} detail</div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close point detail"
+          className="shrink-0 rounded p-1 text-ink400 transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)]"
+        >
+          <X className="h-3.5 w-3.5" aria-hidden />
+        </button>
+      </div>
+      {state.kind === 'loading' && (
+        <div className="space-y-2" aria-hidden>
+          <Skeleton className="h-14 w-full" />
+          <Skeleton className="h-20 w-full" />
+        </div>
+      )}
+      {state.kind === 'error' && <p className="text-sm text-destructive">{state.message}</p>}
+      {state.kind === 'ready' && <CohortDrilldownContent data={state.data} />}
+    </div>
+  );
+}
+
+/**
+ * One read-only payer bar row. Deliberately NOT DrillList — that component's rows apply a GRID-WIDE
+ * refinement on click, which would be the wrong behavior here (this is informational context for
+ * ONE point, not a search-level filter), so this is a small, non-interactive, visually-matching twin.
+ */
+function DrilldownPayerRow({ group, max }: { group: CmdSearchGroup; max: number }) {
+  const pct = Math.max(2, Math.round((group.charge / max) * 100));
+  return (
+    <div className="relative overflow-hidden rounded-md px-2 py-1 text-sm">
+      <span aria-hidden className="absolute inset-y-0 left-0 bg-[var(--brand-accent)]/10" style={{ width: `${pct}%` }} />
+      <span className="relative flex items-center justify-between gap-2">
+        <span className="truncate text-ink900">{group.label ?? '(blank)'}</span>
+        <span className="shrink-0 tabular-nums text-xs text-muted-foreground">
+          {group.count.toLocaleString()} · {MONEY0.format(group.charge)}
+        </span>
+      </span>
+    </div>
+  );
+}
+
+/** The read-only breakdown: patient/claims/%-stats + payer mix + CPT×Rev mix + the patient table. */
+function CohortDrilldownContent({ data }: { data: CohortDrilldownResult }) {
+  const { aggregate: a, table } = data;
+  const maxPayerCharge = Math.max(...a.by_payer.map((g) => g.charge), 1);
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <StatTile label="Patients" value={a.patients.toLocaleString()} />
+        <StatTile label="Claims" value={a.claims.toLocaleString()} />
+        <StatTile label="% Allowed" value={formatPercentNum(a.pct_allowed)} />
+        <StatTile label="% Paid" value={formatPercentNum(a.pct_paid)} />
+      </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="rounded-md border border-line bg-surface p-2">
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            By payer
+          </div>
+          {a.by_payer.length === 0 ? (
+            <p className="px-2 py-1 text-xs text-ink400">No payer data for this point.</p>
+          ) : (
+            <div className="space-y-0.5">
+              {a.by_payer.map((g) => (
+                <DrilldownPayerRow key={g.label ?? '(blank)'} group={g} max={maxPayerCharge} />
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="rounded-md border border-line bg-surface p-2">
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            By CPT × Revenue code
+          </div>
+          {a.by_cpt_revenue.length === 0 ? (
+            <p className="px-2 py-1 text-xs text-ink400">No CPT/revenue data for this point.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                    <th className="px-2 py-1 text-left font-medium">CPT</th>
+                    <th className="px-2 py-1 text-left font-medium">Revenue</th>
+                    <th className="px-2 py-1 text-right font-medium">Lines</th>
+                    <th className="px-2 py-1 text-right font-medium">Charged</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {a.by_cpt_revenue.map((g, i) => (
+                    <tr key={`${g.cpt ?? '∅'}|${g.revenue ?? '∅'}|${i}`} className="border-t border-line/60 tabular-nums">
+                      <td className="px-2 py-1 text-left text-ink900">{g.cpt ?? '(blank)'}</td>
+                      <td className="px-2 py-1 text-left text-ink900">{g.revenue ?? '(blank)'}</td>
+                      <td className="px-2 py-1 text-right">{g.count.toLocaleString()}</td>
+                      <td className="px-2 py-1 text-right">{MONEY0.format(g.charge)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+      <p className="text-[11px] text-ink400">
+        {a.pct_zero_paid}% of charge lines were zero-paid
+        {a.pct_patient_shifted > 0 ? ` (${a.pct_patient_shifted}% → patient balance)` : ''}; {MONEY0.format(a.paid_total)}{' '}
+        total insurance paid at this point.
+      </p>
+      <CohortDrilldownTableView table={table} />
+    </div>
+  );
+}
+
+/**
+ * The patient table (masked, audited reveal — reusing revealCmdReportRows verbatim, the SAME action
+ * the main grid's "Reveal all" uses) or the suppression notice. Never a partial table: `table` is
+ * already one or the other by construction (the reader never returns a truncated row set).
+ */
+function CohortDrilldownTableView({ table }: { table: CohortDrilldownTable }) {
+  const [phi, setPhi] = useState<Map<number, CmdExplorerPhi>>(() => new Map());
+  const [revealed, setRevealed] = useState(false);
+  const [revealing, setRevealing] = useState(false);
+  const [revealError, setRevealError] = useState<string | null>(null);
+
+  if (table.kind === 'suppressed') {
+    return (
+      <div className="rounded-md border border-line bg-surface p-2 text-xs text-muted-foreground">
+        Fewer than {table.floor} patients back this point — the patient list is hidden to protect
+        identifiability. The breakdown above is still a full, dollar-weighted aggregate.
+      </div>
+    );
+  }
+
+  const rows = table.rows;
+
+  async function reveal() {
+    setRevealing(true);
+    setRevealError(null);
+    try {
+      const res = await revealCmdReportRows(rows.map((r) => r.id));
+      if (res.ok) {
+        const map = new Map<number, CmdExplorerPhi>();
+        for (const r of res.rows) {
+          const { id, ...phiFields } = r;
+          map.set(id, phiFields);
+        }
+        setPhi(map);
+        setRevealed(true);
+      } else {
+        setRevealError(res.error);
+      }
+    } catch {
+      setRevealError('The identifiers could not be revealed right now.');
+    } finally {
+      setRevealing(false);
+    }
+  }
+
+  function maskedCell(key: 'patient_name' | 'member_id_raw', row: CmdExplorerRow): string {
+    if (!revealed) return PHI_MASK;
+    return phi.get(row.id)?.[key] ?? '—';
+  }
+
+  return (
+    <div className="rounded-md border border-line bg-surface p-2">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Patients at this point ({rows.length})
+        </div>
+        <Button type="button" variant="outline" size="sm" disabled={revealing} onClick={() => void reveal()}>
+          {revealing ? 'Revealing…' : revealed ? 'Hide identifiers' : 'Reveal identifiers'}
+        </Button>
+      </div>
+      {revealError && <p className="mb-1 text-xs text-destructive">{revealError}</p>}
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-[10px] uppercase tracking-wide text-muted-foreground">
+              <th className="px-2 py-1 text-left font-medium">Charge date</th>
+              <th className="px-2 py-1 text-left font-medium">CPT</th>
+              <th className="px-2 py-1 text-left font-medium">Revenue</th>
+              <th className="px-2 py-1 text-left font-medium">Payer</th>
+              <th className="px-2 py-1 text-right font-medium">Charge</th>
+              <th className="px-2 py-1 text-right font-medium">Allowed</th>
+              <th className="px-2 py-1 text-right font-medium">Paid</th>
+              <th className="px-2 py-1 text-left font-medium">Patient</th>
+              <th className="px-2 py-1 text-left font-medium">Member ID</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.id} className="border-t border-line/60 tabular-nums">
+                <td className="px-2 py-1 text-left">{row.charge_date}</td>
+                <td className="px-2 py-1 text-left">{row.cpt_code}</td>
+                <td className="px-2 py-1 text-left">{row.revenue_code ?? '—'}</td>
+                <td className="px-2 py-1 text-left">{row.primary_payer ?? '—'}</td>
+                <td className="px-2 py-1 text-right">{formatMoney(row.charge_amount)}</td>
+                <td className="px-2 py-1 text-right">{formatMoney(row.allowed_amount)}</td>
+                <td className="px-2 py-1 text-right">{formatMoney(row.insurance_payments)}</td>
+                <td className={`px-2 py-1 text-left ${revealed ? '' : 'text-muted-foreground'}`}>
+                  {maskedCell('patient_name', row)}
+                </td>
+                <td className={`px-2 py-1 text-left ${revealed ? '' : 'text-muted-foreground'}`}>
+                  {maskedCell('member_id_raw', row)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

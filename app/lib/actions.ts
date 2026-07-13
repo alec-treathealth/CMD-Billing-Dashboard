@@ -40,6 +40,7 @@ import {
   loadCmdExplorerNonPhi,
   loadCmdSearchSummary as loadCmdSearchSummary_,
   loadCohortCurve as loadCohortCurve_,
+  loadCohortDrilldown as loadCohortDrilldown_,
   cmdExplorerFacilities,
   recordAccess,
   revealCmdExplorerRow,
@@ -61,6 +62,9 @@ import {
   type CmdFacilityOption,
   type CohortCurve,
   type CohortCurvePoint,
+  type CohortDrilldownAggregate,
+  type CohortDrilldownTable,
+  type CohortDrilldownResult,
   type GridViewRow,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
@@ -201,6 +205,9 @@ export type {
   CmdFacilityOption,
   CohortCurve,
   CohortCurvePoint,
+  CohortDrilldownAggregate,
+  CohortDrilldownTable,
+  CohortDrilldownResult,
   GridViewRow,
 };
 
@@ -1021,6 +1028,46 @@ export async function loadCohortCurve(
     return { ok: true, curve: await loadCohortCurve_(token, entityIds) };
   } catch {
     return { ok: false, error: 'The cohort view could not be loaded right now.' };
+  }
+}
+
+export type CohortDrilldownActionResult =
+  | { ok: true; drilldown: CohortDrilldownResult }
+  | { ok: false; error: string };
+
+/**
+ * Drilldown for ONE clicked cohort-curve point (Session G) — an aggregate breakdown (payer mix,
+ * CPT/rev mix) for that exact bucket, plus an optional patient table gated by a stricter, separate
+ * floor (COHORT_DRILLDOWN_TABLE_MIN_PATIENTS). Same gate+audit shape as loadCohortCurve, but audited
+ * as its OWN distinct access (`reveal_cmd_explorer_row(s)`-style, not piggybacked on the curve's
+ * audit) — this is new disclosure surface (per-point breakdown, potentially per-row PHI-masked
+ * data), so it gets its own audit trail entry independent of the curve fetch that preceded it.
+ *
+ * Tenant-scoped SERVER-SIDE from the RBAC-clamped view (same `entityIds` derivation as every other
+ * collections reader); the reader independently re-derives `patients` for this exact bucket and
+ * fails closed (null) if it doesn't clear COHORT_MIN_PATIENTS — a forged/stale bucket argument gets
+ * nothing, never a partial answer.
+ */
+export async function loadCohortDrilldown(
+  alphaPrefix: string,
+  axis: 'position' | 'days',
+  bucket: number,
+  view?: DashboardView,
+): Promise<CohortDrilldownActionResult> {
+  const entityIds = await viewEntityScope(view);
+  if (entityIds === null) return { ok: false, error: 'The point detail could not be loaded right now.' };
+  if (axis !== 'position' && axis !== 'days') return { ok: false, error: 'Invalid point.' };
+  if (!Number.isInteger(bucket) || bucket < 0) return { ok: false, error: 'Invalid point.' };
+  const phi = await resolvePhiSearch({ alphaPrefix }, view, true);
+  if (!phi.ok) return { ok: false, error: phi.error };
+  const token = phi.phiIndex?.memberIdPrefixBidx;
+  if (!token) return { ok: false, error: 'That point is no longer available — try again.' };
+  try {
+    const drilldown = await loadCohortDrilldown_(token, entityIds, axis, bucket);
+    if (!drilldown) return { ok: false, error: 'That point is no longer available — try again.' };
+    return { ok: true, drilldown };
+  } catch {
+    return { ok: false, error: 'The point detail could not be loaded right now.' };
   }
 }
 

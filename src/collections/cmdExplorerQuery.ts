@@ -572,6 +572,70 @@ export interface CohortCurve {
   cohort_patients: number;
 }
 
+// --- cohort-point drilldown (Session G) -------------------------------------
+// Clicking one cohort-curve point opens a breakdown for THAT bucket: an aggregate slice (payer mix,
+// CPT/rev mix — always renders once the point clears COHORT_MIN_PATIENTS, the SAME floor the curve
+// itself already enforces, since a suppressed point is never clickable) plus an OPTIONAL patient
+// table gated by a SEPARATE, stricter floor. Row-level disclosure — even PHI-masked — carries more
+// re-identification risk than an aggregate ratio, so it needs its own, higher bar than the curve's.
+
+/**
+ * Floor on distinct patients before the drilldown's PATIENT TABLE may render rows. Independent of
+ * and stricter than COHORT_MIN_PATIENTS (which gates the aggregate breakdown + the curve itself).
+ * Signed off with Alec: N=10 (real-data check: at N=5 the table would show for ~78% of points that
+ * render on a typical viewable cohort; at N=10, ~25-27% — still usable at early claim positions,
+ * where the disclosure risk of a small table is highest anyway).
+ */
+export const COHORT_DRILLDOWN_TABLE_MIN_PATIENTS = 10;
+
+/**
+ * Does a bucket's (server-recomputed) distinct-patient count clear the curve's OWN aggregate floor?
+ * Pulled out as a named, pure predicate — rather than an inline `>=` in server.ts — so the exact
+ * boundary is unit-testable in this hermetic module (server.ts has no test harness in this repo).
+ */
+export function clearsCohortFloor(patients: number): boolean {
+  return patients >= COHORT_MIN_PATIENTS;
+}
+
+/** Does a bucket's patient count clear the STRICTER, separate patient-table floor (Session G)? */
+export function clearsDrilldownTableFloor(patients: number): boolean {
+  return patients >= COHORT_DRILLDOWN_TABLE_MIN_PATIENTS;
+}
+
+/**
+ * The aggregate breakdown for ONE cohort-curve point. Pure SQL aggregate, NO row egress, non-PHI.
+ * `patients` is RE-DERIVED server-side for this exact bucket (never trusted from the client's
+ * click) — the authoritative gate for whether this breakdown may render at all. `by_payer` /
+ * `by_cpt_revenue` reuse the EXISTING CmdSearchGroup / CmdComboGroup shapes (same fields the smart-
+ * search summary already returns) rather than inventing parallel types.
+ */
+export interface CohortDrilldownAggregate {
+  bucket: number;
+  patients: number;
+  claims: number;
+  pct_allowed: number | null;
+  pct_paid: number | null;
+  paid_total: number;
+  pct_zero_paid: number;
+  pct_patient_shifted: number;
+  by_payer: CmdSearchGroup[];
+  by_cpt_revenue: CmdComboGroup[];
+}
+
+/**
+ * The patient table for one point: EITHER the masked non-PHI rows (same CmdExplorerRow shape +
+ * reveal path the main grid uses) OR a suppression marker — never a partial/truncated row set.
+ */
+export type CohortDrilldownTable =
+  | { kind: 'suppressed'; floor: number }
+  | { kind: 'rows'; rows: CmdExplorerRow[] };
+
+/** The full response for one clicked cohort-curve point. */
+export interface CohortDrilldownResult {
+  aggregate: CohortDrilldownAggregate;
+  table: CohortDrilldownTable;
+}
+
 // Dollar-weighted ratio-of-sums, guarded (identical discipline to the combo grouping): NULL when the
 // denominator is 0/negative/null, never a division error; ::float8 so rounded numerics arrive as JS numbers.
 const COHORT_PCT_SELECT =
@@ -664,4 +728,110 @@ export function buildCohortCurveQueries(
   })();
 
   return { byPosition, byDays };
+}
+
+/**
+ * Build the FOUR read-only queries behind ONE cohort-curve point's drilldown (Session G) — a stats
+ * query (patients/claims/dollar-weighted %s + $/zero-pay, RE-DERIVED for this EXACT bucket — the
+ * caller must never trust a client-supplied bucket's implied patient count), a top-N payer
+ * breakdown, a top-N (CPT, Revenue-code) breakdown, and the FULL non-PHI row projection (reusing
+ * CMD_EXPLORER_SELECT verbatim — the exact same column allowlist + shape the main grid returns).
+ * All four share the SAME tiny `bucket_rows` CTE (just `id` + `member_id_bidx` for the matching
+ * charge lines at this bucket) — every value is a bound parameter, every column/table a fixed
+ * literal. The CALLER decides which to run: `stats` first (the authoritative gate), then
+ * `byPayer`/`byCptRevenue` only once it clears COHORT_MIN_PATIENTS (the SAME floor the curve itself
+ * enforces — a point that never rendered can't be drilled into), and `rows` only if it ADDITIONALLY
+ * clears the stricter COHORT_DRILLDOWN_TABLE_MIN_PATIENTS.
+ *
+ * `axis` picks which of the curve's two x-axes this bucket belongs to (claim/visit POSITION vs DAYS
+ * since first claim) — mirrors buildCohortCurveQueries' own by_position/by_days split exactly, so a
+ * bucket number here means the same thing it means on the curve.
+ */
+export function buildCohortDrilldownQueries(
+  prefixBidx: string,
+  entityIds: string[],
+  axis: 'position' | 'days',
+  bucket: number,
+  opts: CohortCurveOptions & { topN?: number } = {},
+): {
+  stats: { sql: string; params: unknown[] };
+  byPayer: { sql: string; params: unknown[] };
+  byCptRevenue: { sql: string; params: unknown[] };
+  rows: { sql: string; params: unknown[] };
+} {
+  const dayBucketDays = opts.dayBucketDays ?? COHORT_DAY_BUCKET_DAYS;
+  const topN = opts.topN ?? CMD_SEARCH_TOP_N;
+
+  // The shared `bucket_rows` CTE: which (id, member_id_bidx) pairs fall in this exact bucket, tenant
+  // + prefix scoped identically to buildCohortCurveQueries. Deliberately minimal (just the join key
+  // + the patient key) — every other column each query needs comes from joining BACK to the base
+  // table below, so there is exactly one place that defines "which rows are in this bucket."
+  const bucketRowsCte = (add: ParamAdder): string => {
+    const ent = add(entityIds);
+    const pref = add(prefixBidx);
+    if (axis === 'position') {
+      const buck = add(bucket);
+      return (
+        'with seq as (select id, member_id_bidx, ' +
+        'dense_rank() over (partition by member_id_bidx order by charge_date) as pos ' +
+        'from collections.cmd_explorer_rows ' +
+        `where business_entity_id = any(${ent}::uuid[]) and member_id_prefix_bidx = ${pref} and charge_date is not null), ` +
+        `bucket_rows as (select id, member_id_bidx from seq where pos = ${buck}) `
+      );
+    }
+    const bwidth = add(dayBucketDays);
+    const buck = add(bucket);
+    return (
+      'with base as (select id, member_id_bidx, charge_date from collections.cmd_explorer_rows ' +
+      `where business_entity_id = any(${ent}::uuid[]) and member_id_prefix_bidx = ${pref} and charge_date is not null), ` +
+      'firstdt as (select member_id_bidx, min(charge_date) as first_dt from base group by member_id_bidx), ' +
+      'seq as (select b.id, b.member_id_bidx, (b.charge_date - f.first_dt) as days_since ' +
+      'from base b join firstdt f using (member_id_bidx)), ' +
+      `bucket_rows as (select id, member_id_bidx from seq where (floor(days_since::numeric / ${bwidth}) * ${bwidth})::int = ${buck}) `
+    );
+  };
+
+  const build = (select: string, tail: (add: ParamAdder) => string = () => ''): { sql: string; params: unknown[] } => {
+    const params: unknown[] = [];
+    const add: ParamAdder = (v) => {
+      params.push(v);
+      return `$${params.length}`;
+    };
+    const cte = bucketRowsCte(add);
+    return { sql: `${cte}${select}${tail(add)}`, params };
+  };
+
+  // `member_id_bidx` exists on BOTH the base table and bucket_rows, so it's qualified; every other
+  // column referenced is unique to whichever side actually has it (no other ambiguity).
+  const stats = build(
+    'select count(distinct bucket_rows.member_id_bidx)::int as patients, count(*)::int as claims, ' +
+      COHORT_METRIC_SELECT +
+      ' from collections.cmd_explorer_rows join bucket_rows using (id)',
+  );
+
+  const byPayer = build(
+    'select primary_payer as label, count(*)::int as count, coalesce(sum(charge_amount), 0)::float8 as charge ' +
+      'from collections.cmd_explorer_rows join bucket_rows using (id)',
+    (add) => ` group by primary_payer order by charge desc nulls last, count desc limit ${add(topN)}`,
+  );
+
+  const byCptRevenue = build(
+    'select cpt_code as cpt, revenue_code as revenue, count(*)::int as count, ' +
+      'coalesce(sum(charge_amount), 0)::float8 as charge, ' +
+      'case when sum(charge_amount) > 0 then round(sum(allowed_amount) / sum(charge_amount) * 100, 2)::float8 end as pct_allowed, ' +
+      'case when sum(allowed_amount) > 0 then round(sum(insurance_payments) / sum(allowed_amount) * 100, 2)::float8 end as pct_paid ' +
+      'from collections.cmd_explorer_rows join bucket_rows using (id)',
+    (add) => ` group by cpt_code, revenue_code order by charge desc nulls last, count desc limit ${add(topN)}`,
+  );
+
+  // Reuse CMD_EXPLORER_SELECT verbatim (aliased `t`) — the identical non-PHI column allowlist +
+  // shape the main grid returns, so the drilldown's patient table is a CmdExplorerRow[] the SAME
+  // masking + reveal path already handles. `using (id)` (not `on bucket_rows.id = t.id`) — CRITICAL:
+  // CMD_EXPLORER_SELECT's bare `id` column would otherwise be ambiguous once bucket_rows' OWN `id`
+  // is also in scope from an explicit ON-join; USING merges the shared column into one unambiguous
+  // output (caught by a live query-execution check — a plain SQL-string match test can't catch this
+  // class of bug, since it never actually runs the query against a real Postgres planner).
+  const rows = build(`${CMD_EXPLORER_SELECT} join bucket_rows using (id)`, () => ' order by t.charge_date');
+
+  return { stats, byPayer, byCptRevenue, rows };
 }
