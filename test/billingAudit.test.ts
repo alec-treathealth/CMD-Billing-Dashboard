@@ -20,7 +20,7 @@ const {
   IP_HEADERS, OP_HEADERS, headerMismatch, parsePositionalCsv, normalizeStatus,
   toIsoDate, toCents, toUnits, collapseDiagnoses, mapAuditRow,
 } = await import('../src/billingAudit/auditRowMap.js');
-const { upsertAuditRows } = await import('../src/billingAudit/auditIngest.js');
+const { upsertAuditRows, billingAuditCron } = await import('../src/billingAudit/auditIngest.js');
 const {
   patientNameNormalized, patientNameBlindIndex, patientNamePrefixBlindIndex,
   auditBlindIndexesForRowSafe,
@@ -345,4 +345,85 @@ test('upsertAuditRows: Option-B SQL shape + inserted/updated split from xmax', a
   // 39 insert columns × 2 tuples.
   assert.equal(fake.paramCounts[0], 39 * 2);
   assert.deepEqual(counts, { inserted: 1, updated: 1, key_skipped: 0 });
+});
+
+// --- cron per-customer observability ---------------------------------------------------
+
+function buildIpCsv(values: Record<string, string>): string {
+  const q = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  const header = [...IP_HEADERS].join(',');
+  const row = [...IP_HEADERS].map((h) => q(values[h] ?? '')).join(',');
+  return `${header}\n${row}\n`;
+}
+
+test('billingAuditCron: per_customer records each outcome (processed/empty/header_mismatch/failed)', async () => {
+  const fake = fakeAuditDb();
+  const goodCsv = buildIpCsv({
+    'Patient Full Name': 'TESTPATIENT JANE',
+    'Charge From Date': '3/5/2026',
+    'Charge Amount': '$100.00',
+    'Charge Claim ID': '900001',
+    'Charge Patient ID': '800001',
+    'Charge Status': 'PAID',
+    'Charge CPT Code': 'H0018',
+  });
+  const stats = await billingAuditCron({
+    scope: 'IP',
+    customers: [
+      { customerId: 'C_PROC', facilityCode: 'FPROC', businessEntityId: BXR_ENTITY_ID },
+      { customerId: 'C_EMPTY', facilityCode: 'FEMPTY', businessEntityId: BXR_ENTITY_ID },
+      { customerId: 'C_MISMATCH', facilityCode: 'FMIS', businessEntityId: BXR_ENTITY_ID },
+      { customerId: 'C_FAIL', facilityCode: 'FFAIL', businessEntityId: BXR_ENTITY_ID },
+    ],
+    fetchZip: async (id) => {
+      if (id === 'C_PROC') return Buffer.from(goodCsv);
+      if (id === 'C_EMPTY') return null;
+      if (id === 'C_MISMATCH') return Buffer.from('Col A,Col B,Col C\n1,2,3\n');
+      throw new Error('CMD run failed: INVALID CRITERIA (no identifier)');
+    },
+    zipToCsvTexts: (zip) => [zip.toString('utf8')],
+    writeDb: fake.db as never,
+    businessEntityId: BXR_ENTITY_ID,
+    sourceReportId: '10064394',
+    now: () => 1_000, //     constant clock — budget never trips
+    budgetMs: 1_000_000,
+  });
+
+  assert.equal(stats.customers_processed, 2); // C_PROC + C_EMPTY both increment
+  assert.equal(stats.customers_failed, 1);
+  assert.equal(stats.customers_header_mismatch, 1);
+  assert.equal(stats.inserted, 1);
+  assert.equal(stats.per_customer.length, 4);
+  const by = Object.fromEntries(stats.per_customer.map((p) => [p.customer_id, p]));
+  assert.equal(by['C_PROC']!.outcome, 'processed');
+  assert.equal(by['C_PROC']!.rows_inserted, 1);
+  assert.equal(by['C_EMPTY']!.outcome, 'empty');
+  assert.equal(by['C_MISMATCH']!.outcome, 'header_mismatch');
+  assert.match(by['C_MISMATCH']!.reason!, /column count 3 != expected 46/);
+  assert.equal(by['C_FAIL']!.outcome, 'failed');
+  assert.match(by['C_FAIL']!.reason!, /INVALID CRITERIA/);
+  // reason carries a CMD/DB MESSAGE only — never a cell value (PHI discipline).
+  assert.ok(!by['C_FAIL']!.reason!.includes('TESTPATIENT'));
+});
+
+test('billingAuditCron: budget guard marks remaining customers skipped_budget in per_customer', async () => {
+  const fake = fakeAuditDb();
+  let t = 0;
+  const stats = await billingAuditCron({
+    scope: 'IP',
+    customers: [
+      { customerId: 'C1', facilityCode: 'F1', businessEntityId: BXR_ENTITY_ID },
+      { customerId: 'C2', facilityCode: 'F2', businessEntityId: BXR_ENTITY_ID },
+    ],
+    fetchZip: async () => null,
+    zipToCsvTexts: () => [],
+    writeDb: fake.db as never,
+    businessEntityId: BXR_ENTITY_ID,
+    sourceReportId: '10064394',
+    now: () => (t += 10_000), // each call +10s; started=10s, budget 5s → both skip
+    budgetMs: 5_000,
+  });
+  assert.equal(stats.customers_skipped_budget, 2);
+  assert.equal(stats.per_customer.length, 2);
+  assert.ok(stats.per_customer.every((p) => p.outcome === 'skipped_budget'));
 });

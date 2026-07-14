@@ -103,6 +103,21 @@ export interface BillingAuditCronStats {
   updated: number;
   /** Customers where EVERY fetched row skipped — the alias-failure signal convention. */
   all_rows_skipped_customers: number;
+  /** Per-customer outcome — the self-reporting operability record (non-PHI: ids, facility
+   *  labels, counts, and CMD/DB error MESSAGES only, never a cell value). Vercel runtime
+   *  logs are not reliably retrievable from every ops context, so a failed/empty/mismatch
+   *  customer must be nameable straight from the (authed) response. */
+  per_customer: PerCustomerOutcome[];
+}
+
+export interface PerCustomerOutcome {
+  customer_id: string;
+  facility: string;
+  outcome: 'processed' | 'empty' | 'failed' | 'header_mismatch' | 'skipped_budget';
+  rows_inserted?: number;
+  rows_updated?: number;
+  /** Non-PHI reason for failed / header_mismatch (CMD or DB message; column-label diff). */
+  reason?: string;
 }
 
 /** Encrypt the 3 PHI fields + compute blind indexes → one row's positional params. */
@@ -202,12 +217,14 @@ export async function billingAuditCron(deps: BillingAuditCronDeps): Promise<Bill
     inserted: 0,
     updated: 0,
     all_rows_skipped_customers: 0,
+    per_customer: [],
   };
 
   for (const target of deps.customers) {
     const entityId = target.businessEntityId ?? deps.businessEntityId;
     if (now() - started > budgetMs) {
       stats.customers_skipped_budget += 1;
+      stats.per_customer.push({ customer_id: target.customerId, facility: target.facilityCode, outcome: 'skipped_budget' });
       continue;
     }
     try {
@@ -215,6 +232,7 @@ export async function billingAuditCron(deps: BillingAuditCronDeps): Promise<Bill
       if (zip === null) {
         // Genuinely-empty report (post empty-grace) — processed, nothing to write.
         stats.customers_processed += 1;
+        stats.per_customer.push({ customer_id: target.customerId, facility: target.facilityCode, outcome: 'empty' });
         continue;
       }
       let customerFetched = 0;
@@ -239,6 +257,10 @@ export async function billingAuditCron(deps: BillingAuditCronDeps): Promise<Bill
       }
       if (mismatch !== null) {
         stats.customers_header_mismatch += 1;
+        stats.per_customer.push({
+          customer_id: target.customerId, facility: target.facilityCode,
+          outcome: 'header_mismatch', reason: mismatch,
+        });
         console.error(
           `billing-audit ${deps.scope} cron: customer ${target.customerId} (${target.facilityCode}) header mismatch — ${mismatch}`,
         );
@@ -256,11 +278,18 @@ export async function billingAuditCron(deps: BillingAuditCronDeps): Promise<Bill
       stats.inserted += counts.inserted;
       stats.updated += counts.updated;
       stats.customers_processed += 1;
+      stats.per_customer.push({
+        customer_id: target.customerId, facility: target.facilityCode,
+        outcome: 'processed', rows_inserted: counts.inserted, rows_updated: counts.updated,
+      });
     } catch (err) {
       stats.customers_failed += 1;
+      const reason = err instanceof Error ? err.message : String(err);
+      stats.per_customer.push({
+        customer_id: target.customerId, facility: target.facilityCode, outcome: 'failed', reason,
+      });
       console.error(
-        `billing-audit ${deps.scope} cron: customer ${target.customerId} (${target.facilityCode}) failed: ` +
-          (err instanceof Error ? err.message : String(err)),
+        `billing-audit ${deps.scope} cron: customer ${target.customerId} (${target.facilityCode}) failed: ${reason}`,
       );
     }
   }
