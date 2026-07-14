@@ -352,9 +352,10 @@ test('combo grouping: tenant-scoped, groups by BOTH keys, denominators guarded, 
   // grouped by the two-key combination, ordered like the other groups, topN as the LAST bound param
   assert.match(combo.sql, /group by cpt_code, revenue_code order by charge desc nulls last, count desc limit \$\d+/);
   assert.equal(combo.params[combo.params.length - 1], CMD_SEARCH_TOP_N);
-  // both divisions guarded by `sum(denominator) > 0` → NULL on zero/negative/null denom (never an error)
+  // %-allowed guarded by `sum(charge) > 0`; %-paid guarded by the DENOMINATOR FLOOR (netted allowed
+  // must be ≥ 2% of billed and ≥ $100) → NULL on a meaningless denominator, never a 1900% artifact.
   assert.match(combo.sql, /case when sum\(charge_amount\) > 0 then/);
-  assert.match(combo.sql, /case when sum\(allowed_amount\) > 0 then/);
+  assert.match(combo.sql, /case when sum\(allowed_amount\) >= greatest\(sum\(charge_amount\) \* 0\.02, 100\) then/);
   // labels carried as cpt + revenue (distinct shape, two labels)
   assert.match(combo.sql, /cpt_code as cpt, revenue_code as revenue/);
   assertAllBound(combo.sql, combo.params);
@@ -392,6 +393,56 @@ test('combo drill-down narrows the grid by BOTH cpt_code AND revenue_code togeth
   assert.doesNotMatch(cleared.sql, /cpt_code =/);
   assert.doesNotMatch(cleared.sql, /revenue_code =/);
   assertAllBound(cleared.sql, cleared.params);
+});
+
+// --- 0050 charge-grain rollup: which table each query reads -----------------
+// The grain audit (2026-07-13) confirmed cmd_explorer_rows is SNAPSHOT grain (BXR ~2.14 rows per
+// logical charge), so every AGGREGATE must read the charge-grain rollup view — summing the raw
+// table double-counts charges and produced the >100% ratios. The row-BROWSING surfaces (grid page
+// query, facility options, drilldown patient table) stay on the base table by design.
+
+test('grain: every aggregate reads the 0050 charge rollup; row-browsing reads stay on the base table', () => {
+  const { totals, groups, combo } = buildCmdSearchSummaryQueries({}, ENTITY);
+  for (const q of [totals, groups.facility, groups.primary_payer, groups.cpt_code, combo]) {
+    assert.match(q.sql, /from collections\.cmd_explorer_charge_rollup/);
+    assert.doesNotMatch(q.sql, /from collections\.cmd_explorer_rows/);
+  }
+  const curve = buildCohortCurveQueries('deadbeefcafe0011', ENTITY);
+  for (const q of [curve.byPosition, curve.byDays]) {
+    assert.match(q.sql, /from collections\.cmd_explorer_charge_rollup/);
+    assert.doesNotMatch(q.sql, /cmd_explorer_rows/);
+  }
+  for (const axis of ['position', 'days'] as const) {
+    const dd = buildCohortDrilldownQueries('deadbeefcafe0011', ENTITY, axis, 3);
+    // Bucket membership + the three aggregate joins: charge grain.
+    for (const q of [dd.stats, dd.byPayer, dd.byCptRevenue]) {
+      assert.match(q.sql, /cmd_explorer_charge_rollup/);
+      assert.doesNotMatch(q.sql, /join collections\.cmd_explorer_rows/);
+    }
+    // The patient TABLE projects real base-table rows (latest snapshot per charge via the rollup's
+    // latest-row ids) — the audited reveal path needs real row ids.
+    assert.match(dd.rows.sql, /from collections\.cmd_explorer_rows t/);
+  }
+  // Grid page query: snapshot rows on purpose (posting history is what it displays).
+  const grid = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
+  assert.match(grid.sql, /from collections\.cmd_explorer_rows t/);
+  assert.doesNotMatch(grid.sql, /charge_rollup/);
+});
+
+test('grain: the %-paid denominator floor is the SHARED select everywhere ratios render', () => {
+  const guard = /case when sum\(allowed_amount\) >= greatest\(sum\(charge_amount\) \* 0\.02, 100\) then/;
+  const { combo } = buildCmdSearchSummaryQueries({}, ENTITY);
+  assert.match(combo.sql, guard);
+  const { byPosition, byDays } = buildCohortCurveQueries('deadbeefcafe0011', ENTITY);
+  assert.match(byPosition.sql, guard);
+  assert.match(byDays.sql, guard);
+  const dd = buildCohortDrilldownQueries('deadbeefcafe0011', ENTITY, 'position', 3);
+  assert.match(dd.stats.sql, guard);
+  assert.match(dd.byCptRevenue.sql, guard);
+  // The UNGUARDED division must not survive anywhere a %-paid is computed.
+  for (const q of [combo, byPosition, byDays, dd.stats, dd.byCptRevenue]) {
+    assert.doesNotMatch(q.sql, /case when sum\(allowed_amount\) > 0 then/);
+  }
 });
 
 // --- Session D: alpha-prefix cohort payer-behavior curve --------------------

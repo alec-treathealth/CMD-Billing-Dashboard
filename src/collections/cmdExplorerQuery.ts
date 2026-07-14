@@ -392,6 +392,31 @@ export function cmdExplorerSortValue(row: CmdExplorerRow, column: CmdExplorerSor
 /** How many entries each top-N grouping returns. */
 export const CMD_SEARCH_TOP_N = 8;
 
+/**
+ * The CHARGE-GRAIN aggregate source (migration 0050): one row per logical charge with
+ * grain-correct netting — charge_amount counted once; insurance_payments = the charge-cumulative
+ * running total's max (NEVER summed); allowed_amount = the posting-netted sum (± reversal rows
+ * cancel); point-in-time fields = latest snapshot. EVERY aggregate builder in this module reads
+ * this view: summing raw cmd_explorer_rows (snapshot grain, BXR ~2.14 rows per charge) was the
+ * confirmed root cause of the >100% ratios and ~2× inflated totals (2026-07-13 grain audit).
+ * The row-browsing grid and the drilldown patient TABLE intentionally stay on cmd_explorer_rows —
+ * row grain is what they display — and the view's `id` is the latest snapshot's real row id, so
+ * joins back to the base table (and the audited PHI reveal) still hold.
+ */
+export const CMD_EXPLORER_CHARGE_ROLLUP = 'collections.cmd_explorer_charge_rollup';
+
+/**
+ * Shared dollar-weighted %-allowed / %-paid select — ratio of the group's SUMS, never an average
+ * of per-row ratios (see CmdComboGroup). %-allowed guards a zero/negative/null denominator to SQL
+ * NULL. %-paid guards HARDER: the netted allowed must be a MEANINGFUL denominator — at least 2% of
+ * the group's billed dollars and at least $100 — because reversal-heavy groups net allowed toward
+ * zero and turn the ratio into a 500–1900% artifact (the pre-0050 readings the footnote used to
+ * rationalize as out-of-network). Below the floor the ratio is NULL ("—"), never a huge number.
+ */
+export const PCT_RATIO_SELECT =
+  'case when sum(charge_amount) > 0 then round(sum(allowed_amount) / sum(charge_amount) * 100, 2)::float8 end as pct_allowed, ' +
+  'case when sum(allowed_amount) >= greatest(sum(charge_amount) * 0.02, 100) then round(sum(insurance_payments) / sum(allowed_amount) * 100, 2)::float8 end as pct_paid';
+
 /** One grouped bucket (facility / payer / cpt): its label + match count + charged total. */
 export interface CmdSearchGroup {
   label: string | null;
@@ -421,6 +446,8 @@ export interface CmdComboGroup {
 }
 
 export interface CmdSearchSummary {
+  /** Matching LOGICAL CHARGES (0050 rollup grain) — the grid below pages snapshot rows, so its
+   *  page count can exceed this; the UI labels the two grains differently on purpose. */
   total_count: number;
   total_charge: number;
   total_paid: number;
@@ -462,7 +489,9 @@ export function buildCmdSearchSummaryQueries(
     };
     const conds = cmdExplorerBaseConds(filter, entityIds, add);
     const where = ` where ${conds.join(' and ')}`;
-    return { sql: `${select} from collections.cmd_explorer_rows${where}${tail(add)}`, params };
+    // CHARGE grain (0050 rollup), so counts are logical charges and sums are netted — the grid
+    // below the summary still pages snapshot ROWS, which is why its copy says "posting rows".
+    return { sql: `${select} from ${CMD_EXPLORER_CHARGE_ROLLUP}${where}${tail(add)}`, params };
   };
 
   const totals = build(
@@ -482,18 +511,14 @@ export function buildCmdSearchSummaryQueries(
     );
   }
 
-  // The (CPT, Revenue-code) combination grouping. pct_allowed / pct_paid are DOLLAR-WEIGHTED —
-  // round(sum(numerator) / sum(denominator) * 100, 2) — guarded by `sum(denominator) > 0` so a
-  // zero / negative / NULL denominator yields SQL NULL (the CASE else-branch), never a division
-  // error. This mirrors the per-row generated columns' round-to-2dp scale for a consistent render,
-  // but the MATH is the aggregate ratio-of-sums, NOT an average of per-row ratios. cpt_code and
+  // The (CPT, Revenue-code) combination grouping. Ratios come from the shared PCT_RATIO_SELECT
+  // (dollar-weighted ratio-of-sums with the guarded denominators — see its doc). cpt_code and
   // revenue_code are fixed-literal group columns; ::float8 makes the rounded numerics arrive as JS
   // numbers (like `charge`).
   const combo = build(
     'select cpt_code as cpt, revenue_code as revenue, count(*)::int as count, ' +
       'coalesce(sum(charge_amount), 0)::float8 as charge, ' +
-      'case when sum(charge_amount) > 0 then round(sum(allowed_amount) / sum(charge_amount) * 100, 2)::float8 end as pct_allowed, ' +
-      'case when sum(allowed_amount) > 0 then round(sum(insurance_payments) / sum(allowed_amount) * 100, 2)::float8 end as pct_paid',
+      PCT_RATIO_SELECT,
     (add) => ` group by cpt_code, revenue_code order by charge desc nulls last, count desc limit ${add(topN)}`,
   );
 
@@ -545,6 +570,8 @@ export const COHORT_DAY_CAP = 360;
 export interface CohortCurvePoint {
   bucket: number;
   patients: number;
+  /** Logical CHARGE LINES in the bucket (0050 rollup grain). Field name kept for API/cache
+   *  compatibility; UI copy says "charge lines", never "claims". */
   claims: number;
   pct_allowed: number | null;
   pct_paid: number | null;
@@ -636,20 +663,17 @@ export interface CohortDrilldownResult {
   table: CohortDrilldownTable;
 }
 
-// Dollar-weighted ratio-of-sums, guarded (identical discipline to the combo grouping): NULL when the
-// denominator is 0/negative/null, never a division error; ::float8 so rounded numerics arrive as JS numbers.
-const COHORT_PCT_SELECT =
-  'case when sum(charge_amount) > 0 then round(sum(allowed_amount) / sum(charge_amount) * 100, 2)::float8 end as pct_allowed, ' +
-  'case when sum(allowed_amount) > 0 then round(sum(insurance_payments) / sum(allowed_amount) * 100, 2)::float8 end as pct_paid';
-
 // Phase 2 dollars + zero-pay, appended to the SAME suppressed select (the HAVING covers every field
-// here — nothing derivable below the min-patient floor can serialize). Same discipline: sums and
-// filtered counts only, never avg() (the fixture tests forbid the token so avg-of-ratios can't creep
-// back in). A surviving group always has count(*) >= 1, so the share divisions need no zero guard;
-// insurance_payments is coalesced defensively (no NULLs in the data today, but the schema allows them,
-// and a NULL must read as "no positive payment", not silently drop out of the zero-pay share).
+// here — nothing derivable below the min-patient floor can serialize). Ratios come from the shared
+// PCT_RATIO_SELECT (dollar-weighted, guarded denominators). Same discipline: sums and filtered
+// counts only, never avg() (the fixture tests forbid the token so avg-of-ratios can't creep back
+// in). A surviving group always has count(*) >= 1, so the share divisions need no zero guard;
+// insurance_payments is coalesced defensively (no NULLs in the data today, but the schema allows
+// them, and a NULL must read as "no positive payment", not silently drop out of the zero-pay share).
+// At CHARGE grain (0050 rollup) the `claims` count and zero-pay shares are per logical charge line,
+// not per snapshot row.
 const COHORT_METRIC_SELECT =
-  COHORT_PCT_SELECT +
+  PCT_RATIO_SELECT +
   ', ' +
   'round(coalesce(sum(insurance_payments), 0), 2)::float8 as paid_total, ' +
   'round(count(*) filter (where coalesce(insurance_payments, 0) <= 0)::numeric / count(*) * 100, 2)::float8 as pct_zero_paid, ' +
@@ -662,10 +686,12 @@ const COHORT_METRIC_SELECT =
  * literal. `prefixBidx` is an OPAQUE keyed-HMAC token — no raw PHI reaches this module. The floor is
  * clamped so it can never drop below COHORT_MIN_PATIENTS.
  *
- * Grain: a "claim/visit" is a DISTINCT service date (charge_date). The table is charge-line grain
- * (one visit → many CPT×rev lines), so dense_rank() over charge_date collapses same-day lines into
- * one visit position. The cohort is scoped ONLY by tenant + prefix token (NOT the grid's facility/
- * month filters) so each patient's full lifetime sequence is intact, never truncated to a window.
+ * Grain: reads the CHARGE-GRAIN rollup (0050) — one row per logical charge line with netted
+ * dollars, never the raw snapshot table. A "claim/visit" is a DISTINCT service date (charge_date):
+ * one visit → many CPT×rev charge lines, so dense_rank() over charge_date collapses same-day lines
+ * into one visit position. The cohort is scoped ONLY by tenant + prefix token (NOT the grid's
+ * facility/month filters) so each patient's full lifetime sequence is intact, never truncated to a
+ * window.
  */
 export function buildCohortCurveQueries(
   prefixBidx: string,
@@ -694,7 +720,7 @@ export function buildCohortCurveQueries(
       'with seq as (select member_id_bidx, ' +
       'dense_rank() over (partition by member_id_bidx order by charge_date) as pos, ' +
       'charge_amount, allowed_amount, insurance_payments, patient_balance_due ' +
-      'from collections.cmd_explorer_rows ' +
+      `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
       `where business_entity_id = any(${ent}::uuid[]) and member_id_prefix_bidx = ${pref} and charge_date is not null) ` +
       'select pos::int as bucket, count(distinct member_id_bidx)::int as patients, count(*)::int as claims, ' +
       COHORT_METRIC_SELECT + ' ' +
@@ -717,7 +743,7 @@ export function buildCohortCurveQueries(
     // (days_since = charge_date − first_dt, an integer). Same HAVING suppression on the rollup.
     const sql =
       'with base as (select member_id_bidx, charge_date, charge_amount, allowed_amount, insurance_payments, patient_balance_due ' +
-      `from collections.cmd_explorer_rows where business_entity_id = any(${ent}::uuid[]) and member_id_prefix_bidx = ${pref} and charge_date is not null), ` +
+      `from ${CMD_EXPLORER_CHARGE_ROLLUP} where business_entity_id = any(${ent}::uuid[]) and member_id_prefix_bidx = ${pref} and charge_date is not null), ` +
       'firstdt as (select member_id_bidx, min(charge_date) as first_dt from base group by member_id_bidx), ' +
       'seq as (select b.member_id_bidx, (b.charge_date - f.first_dt) as days_since, b.charge_amount, b.allowed_amount, b.insurance_payments, b.patient_balance_due ' +
       'from base b join firstdt f using (member_id_bidx)) ' +
@@ -763,9 +789,11 @@ export function buildCohortDrilldownQueries(
   const topN = opts.topN ?? CMD_SEARCH_TOP_N;
 
   // The shared `bucket_rows` CTE: which (id, member_id_bidx) pairs fall in this exact bucket, tenant
-  // + prefix scoped identically to buildCohortCurveQueries. Deliberately minimal (just the join key
-  // + the patient key) — every other column each query needs comes from joining BACK to the base
-  // table below, so there is exactly one place that defines "which rows are in this bucket."
+  // + prefix scoped identically to buildCohortCurveQueries — and, like the curve, at CHARGE grain
+  // (0050 rollup: one id per logical charge = the latest snapshot's row id). Deliberately minimal
+  // (just the join key + the patient key) — every other column each query needs comes from joining
+  // BACK to the rollup (aggregates: netted dollars) or the base table (the patient-table row
+  // projection) below, so there is exactly one place that defines "which charges are in this bucket."
   const bucketRowsCte = (add: ParamAdder): string => {
     const ent = add(entityIds);
     const pref = add(prefixBidx);
@@ -774,7 +802,7 @@ export function buildCohortDrilldownQueries(
       return (
         'with seq as (select id, member_id_bidx, ' +
         'dense_rank() over (partition by member_id_bidx order by charge_date) as pos ' +
-        'from collections.cmd_explorer_rows ' +
+        `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
         `where business_entity_id = any(${ent}::uuid[]) and member_id_prefix_bidx = ${pref} and charge_date is not null), ` +
         `bucket_rows as (select id, member_id_bidx from seq where pos = ${buck}) `
       );
@@ -782,7 +810,7 @@ export function buildCohortDrilldownQueries(
     const bwidth = add(dayBucketDays);
     const buck = add(bucket);
     return (
-      'with base as (select id, member_id_bidx, charge_date from collections.cmd_explorer_rows ' +
+      `with base as (select id, member_id_bidx, charge_date from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
       `where business_entity_id = any(${ent}::uuid[]) and member_id_prefix_bidx = ${pref} and charge_date is not null), ` +
       'firstdt as (select member_id_bidx, min(charge_date) as first_dt from base group by member_id_bidx), ' +
       'seq as (select b.id, b.member_id_bidx, (b.charge_date - f.first_dt) as days_since ' +
@@ -801,32 +829,35 @@ export function buildCohortDrilldownQueries(
     return { sql: `${cte}${select}${tail(add)}`, params };
   };
 
-  // `member_id_bidx` exists on BOTH the base table and bucket_rows, so it's qualified; every other
+  // The three AGGREGATE queries join back to the ROLLUP (netted dollars at charge grain — joining
+  // the raw snapshot table here would resurrect the grain bug for exactly this bucket).
+  // `member_id_bidx` exists on BOTH the rollup and bucket_rows, so it's qualified; every other
   // column referenced is unique to whichever side actually has it (no other ambiguity).
   const stats = build(
     'select count(distinct bucket_rows.member_id_bidx)::int as patients, count(*)::int as claims, ' +
       COHORT_METRIC_SELECT +
-      ' from collections.cmd_explorer_rows join bucket_rows using (id)',
+      ` from ${CMD_EXPLORER_CHARGE_ROLLUP} join bucket_rows using (id)`,
   );
 
   const byPayer = build(
     'select primary_payer as label, count(*)::int as count, coalesce(sum(charge_amount), 0)::float8 as charge ' +
-      'from collections.cmd_explorer_rows join bucket_rows using (id)',
+      `from ${CMD_EXPLORER_CHARGE_ROLLUP} join bucket_rows using (id)`,
     (add) => ` group by primary_payer order by charge desc nulls last, count desc limit ${add(topN)}`,
   );
 
   const byCptRevenue = build(
     'select cpt_code as cpt, revenue_code as revenue, count(*)::int as count, ' +
       'coalesce(sum(charge_amount), 0)::float8 as charge, ' +
-      'case when sum(charge_amount) > 0 then round(sum(allowed_amount) / sum(charge_amount) * 100, 2)::float8 end as pct_allowed, ' +
-      'case when sum(allowed_amount) > 0 then round(sum(insurance_payments) / sum(allowed_amount) * 100, 2)::float8 end as pct_paid ' +
-      'from collections.cmd_explorer_rows join bucket_rows using (id)',
+      PCT_RATIO_SELECT +
+      ` from ${CMD_EXPLORER_CHARGE_ROLLUP} join bucket_rows using (id)`,
     (add) => ` group by cpt_code, revenue_code order by charge desc nulls last, count desc limit ${add(topN)}`,
   );
 
-  // Reuse CMD_EXPLORER_SELECT verbatim (aliased `t`) — the identical non-PHI column allowlist +
-  // shape the main grid returns, so the drilldown's patient table is a CmdExplorerRow[] the SAME
-  // masking + reveal path already handles. `using (id)` (not `on bucket_rows.id = t.id`) — CRITICAL:
+  // Reuse CMD_EXPLORER_SELECT verbatim (aliased `t`, over the BASE table) — the identical non-PHI
+  // column allowlist + shape the main grid returns, so the drilldown's patient table is a
+  // CmdExplorerRow[] the SAME masking + reveal path already handles. bucket_rows ids are the
+  // rollup's latest-snapshot row ids, so this join lands on ONE real row per charge (the current
+  // state) rather than every historical snapshot. `using (id)` (not `on bucket_rows.id = t.id`) — CRITICAL:
   // CMD_EXPLORER_SELECT's bare `id` column would otherwise be ambiguous once bucket_rows' OWN `id`
   // is also in scope from an explicit ON-join; USING merges the shared column into one unambiguous
   // output (caught by a live query-execution check — a plain SQL-string match test can't catch this

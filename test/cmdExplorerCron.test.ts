@@ -112,6 +112,70 @@ test('cmdExplorerCron: wall-clock guard stops launching new customers past the b
   assert.equal(fetched, 1, 'budget-skipped customers are never fetched');
 });
 
+/** A FULL charge-line report row (all 14 headers) so mapRow succeeds and insertRows runs —
+ *  the path that must trigger the 0050 charge-rollup refresh. PHI values are obvious fakes. */
+const chargeReportRow = (): Record<string, string> => ({
+  'Charge From Date': '6/21/2026',
+  'Payment Received': '6/25/2026',
+  'Charge CPT Code': '90853',
+  'Revenue Code': '0915',
+  'Facility Name': 'CAMH',
+  'Patient Full Name': 'TEST, PATIENT',
+  'Claim Primary Member ID': 'ZZZ000000',
+  'Primary Group Number': 'GRP0',
+  'Charge/Debit Amount': '$100.00',
+  'Payment Allowed Amount': '$50.00',
+  'Charge Insurance Payments': '$40.00',
+  'Charge Total Adjustments w/o Transfers': '$0.00',
+  'Charge Balance Due Pat': '$10.00',
+  'Charge Primary Payer Name': 'TEST PAYER',
+});
+
+/** Throwaway 64-hex test key (obvious dummy) so encryptPhi can run hermetically — NOT a secret. */
+const TEST_LIBSODIUM_KEY = '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff';
+
+test('cmdExplorerCron: charge inserts trigger the 0050 rollup refresh; a refresh failure is NON-FATAL', async () => {
+  const prevKey = process.env.LIBSODIUM_KEY;
+  process.env.LIBSODIUM_KEY = TEST_LIBSODIUM_KEY;
+  try {
+    const fake = fakeDb();
+    let refreshes = 0;
+    let revalidated = false;
+    const stats = await cmdExplorerCron({
+      customers: [{ customerId: '1', facilityCode: 'CAMH' }],
+      fetchRows: async () => [chargeReportRow()],
+      writeDb: fake.db,
+      businessEntityId: BXR_ENTITY_ID,
+      refreshChargeRollup: () => {
+        refreshes += 1;
+        throw new Error('refresh timed out'); // non-fatal by contract
+      },
+      revalidate: () => { revalidated = true; },
+    });
+    assert.equal(stats.charge_inserted, 1, 'the full charge row must map + insert');
+    assert.equal(refreshes, 1, 'refresh fires exactly once, after inserts');
+    assert.equal(stats.customers_failed, 0, 'a throwing refresh must not fail the run');
+    assert.equal(revalidated, true, 'caches still bust after a failed refresh');
+  } finally {
+    if (prevKey === undefined) delete process.env.LIBSODIUM_KEY;
+    else process.env.LIBSODIUM_KEY = prevKey;
+  }
+});
+
+test('cmdExplorerCron: deposit-only pass (no charge rows) skips the rollup refresh', async () => {
+  const fake = fakeDb();
+  let refreshes = 0;
+  const stats = await cmdExplorerCron({
+    customers: [{ customerId: '1', facilityCode: 'CAMH' }],
+    fetchRows: async () => [depositRow('06/01/2026', '$100.00', '$0.00')],
+    writeDb: fake.db,
+    businessEntityId: BXR_ENTITY_ID,
+    refreshChargeRollup: () => { refreshes += 1; },
+  });
+  assert.equal(stats.charge_inserted, 0);
+  assert.equal(refreshes, 0, 'nothing the matview summarizes changed → no refresh');
+});
+
 test('cmdExplorerCron: no successful customers → no revalidation', async () => {
   const fake = fakeDb();
   let revalidated = false;

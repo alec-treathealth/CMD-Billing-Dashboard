@@ -498,6 +498,11 @@ async function handleExplorerCronForTenant(
       },
       writeDb: rollupWriterDb(),
       businessEntityId: tenant.businessEntityId,
+      // 0050: rebuild the charge-grain matview after inserts (SECURITY DEFINER function; the
+      // writer role holds EXECUTE only). The cron treats a failure as non-fatal (stale-but-correct).
+      refreshChargeRollup: async () => {
+        await rollupWriterDb().query('select collections.refresh_cmd_explorer_charge_rollup()');
+      },
       revalidate: () => revalidateTag('cmd-explorer'),
       revalidateDashboard: () => revalidateTag(DASHBOARD_CACHE_TAG),
       // Both rosters use a ROLLING (current-month) payment-received window, so there is no fixed
@@ -957,7 +962,9 @@ async function loadCmdSearchSummaryData(
 export const loadCmdSearchSummary = unstable_cache(
   (filter: CmdExplorerFilter, entityIds: string[]): Promise<CmdSearchSummary> =>
     loadCmdSearchSummaryData(filter, entityIds),
-  ['cmd-explorer-search-summary'],
+  // -v2: summary moved to the 0050 charge-grain rollup (counts/sums are logical charges) — the key
+  // bump keeps a pre-deploy snapshot-grain summary (up to 15 min old) from reaching the new UI copy.
+  ['cmd-explorer-search-summary-v2'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
 
@@ -993,9 +1000,10 @@ async function loadCohortCurveData(prefixBidx: string, entityIds: string[]): Pro
  */
 export const loadCohortCurve = unstable_cache(
   (prefixBidx: string, entityIds: string[]): Promise<CohortCurve> => loadCohortCurveData(prefixBidx, entityIds),
-  // -v2: CohortCurvePoint gained paid_total/pct_zero_paid/pct_patient_shifted (Phase 2); the key bump
-  // keeps a pre-deploy cached curve (old shape, up to 15 min) from reaching the new UI.
-  ['cmd-explorer-cohort-curve-v2'],
+  // -v3: cohort queries moved to the 0050 charge-grain rollup (netted dollars, charge-line counts);
+  // the key bump keeps a pre-deploy snapshot-grain curve (up to 15 min old) from reaching the new UI.
+  // (-v2 was the Phase 2 paid_total/pct_zero_paid/pct_patient_shifted shape change.)
+  ['cmd-explorer-cohort-curve-v3'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
 
@@ -1069,7 +1077,8 @@ export const loadCohortDrilldown = unstable_cache(
     axis: 'position' | 'days',
     bucket: number,
   ): Promise<CohortDrilldownResult | null> => loadCohortDrilldownData(prefixBidx, entityIds, axis, bucket),
-  ['cmd-explorer-cohort-drilldown'],
+  // -v2: drilldown aggregates moved to the 0050 charge-grain rollup (same bump rationale as the curve).
+  ['cmd-explorer-cohort-drilldown-v2'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
 
