@@ -1105,6 +1105,56 @@ The Veris claims plane (`staging.*`, brains, S8–S10) is a real workstream, del
 prioritize Indigo collections onboarding. Nothing here decides against it. brain1/2/3 stay OFF; S4
 (ML runtime) remains deferred; S3 landed. "Claims UI removed" means **on hold**, not cancelled.
 
+---
+
+## Billing Audit S2 (Phase 1 apply) — apply-path SET grant found REVOKED (2026-07-13)
+
+**Dated correction to the S2 "Apply-path privilege model" entry above:** the standing
+`GRANT claims_admin TO postgres WITH SET TRUE` (S2, 2026-07-03, "do not revoke") was
+found GONE from the live cluster at 0049 apply time. `pg_auth_members` showed exactly
+ONE postgres→claims_admin row — grantor `supabase_admin`, `admin_option=true`,
+`set_option=false`, `inherit_option=false`. The S2-era duplicate rows ("2 rows from
+multiple grantors; harmless") were evidently collapsed by a platform-side
+maintenance/upgrade pass, and the collapse kept the supabase_admin grant (no SET),
+dropping the SET-capable one. Consequence: 0049's `SET ROLE claims_admin` failed 42501
+and the apply rolled back whole (transactional — verified zero partial state).
+Session tooling denied executing the restore grant without explicit authorization
+(correct per the who-gets-which-permission gate), so it was surfaced instead of routed
+around (per the standing "grant blocked by tooling → STOP" invariant).
+
+**RESOLUTION (2026-07-13):** Alec personally ran
+`grant claims_admin to postgres with set true;` in the Supabase SQL editor —
+a deliberate OPERATOR STEP, not part of any migration (role-membership posture is
+cluster-level, not schema state; 0049's header records the same). Verified
+`pg_has_role('postgres','claims_admin','SET') = true`; 0049 then applied verbatim,
+first attempt, full verification block green.
+
+**Watch item (standing):** this grant can silently disappear on platform maintenance —
+any future 42501 at `SET ROLE claims_admin` (or `consolidated_reader`) means re-check
+`pg_has_role('postgres','<role>','SET')` FIRST, and the restore is postgres
+self-granting within its admin_option. Same exposure applies to the 019-era
+`consolidated_reader` grant.
+
+### Dashboard-sequence migration-number RESERVATIONS (2026-07-13 — check BEFORE claiming)
+
+Parallel sessions have collided on dashboard migration numbers twice (0049 was
+nearly double-claimed; 0050 WAS double-claimed). Standing convention: before
+claiming the next `supabase/migrations/00NN`, check (a) `origin/main`,
+(b) every ACTIVE worktree/branch, AND (c) untracked files in every checkout —
+another session's WIP claim is usually an untracked file. Current reservations:
+
+| number | claimed by | state |
+|---|---|---|
+| 0024 | ANOTHER session | 0024-related WIP (per Alec, 2026-07-13 — listed in the parallel-WIP set; 0024 itself is applied on origin/main) |
+| 0049 | billing-audit branch (`feat/billing-audit-plane`) | `0049_billing_audit_plane` — APPLIED live + committed on that branch |
+| 0050 | collections session | `0050_cmd_explorer_charge_rollup` — LANDED on origin/main (fed5930) |
+| 0051 | billing-audit branch | `0051_payer_alias_seed` — DRAFT, not applied, pending Alec's ruling |
+
+Record new claims here when made; remove rows once the file is on origin/main
+(the tree then speaks for itself).
+
+---
+
 ## Collections aggregate grain — `cmd_explorer_rows` is POSTING grain; aggregate ONLY over `cmd_explorer_charge_rollup` (2026-07-13)
 
 `collections.cmd_explorer_rows` is append-only **payment-posting-snapshot grain**, NOT charge grain:

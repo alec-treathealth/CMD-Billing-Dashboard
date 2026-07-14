@@ -130,6 +130,9 @@ import {
   type CmdPayerRefreshHttpRequest,
 } from '../../src/routes/cmdPayerRefreshHandler.js';
 import { cmdExplorerCron } from '../../src/collections/cmdExplorerCron.js';
+import { cmdRunReportToZip, readZipEntries } from '../../src/collections/cmdPayer.js';
+import { billingAuditCron } from '../../src/billingAudit/auditIngest.js';
+import { auditCustomersFor, auditReportIds, type AuditScope } from '../../src/billingAudit/auditConfig.js';
 import { isAuthorized } from '../../src/bearerAuth.js';
 
 let cachedExecutor: PgExecutor | undefined;
@@ -552,6 +555,180 @@ export function handleIndigoExplorerCron(req: {
     businessEntityId: INDIGO_TENANT_ID,
     transformRows: aliasIndigoFacilityColumn,
   });
+}
+
+// Least-privilege writer pool for the BILLING AUDIT plane (claims.audit_row /
+// billing_code_decision / flag) — the dedicated claims_audit_writer role (migration
+// 0049), NEVER cmd_rollup_writer (collections blast radius stays untouched), NEVER
+// claims_admin. URL from env only; verify-full TLS via makeClient.
+let cachedAuditWriterDb: Db | undefined;
+function auditWriterDb(): Db {
+  const url = process.env.CLAIMS_AUDIT_WRITER_DATABASE_URL;
+  if (!url || url.trim() === '') {
+    throw new Error('Missing CLAIMS_AUDIT_WRITER_DATABASE_URL (set in env; never hardcode or log it)');
+  }
+  cachedAuditWriterDb ??= makeClient(url);
+  return cachedAuditWriterDb;
+}
+
+/**
+ * Preflight IDENTITY GUARD — asserts the audit writer pool is a least-privilege
+ * claims_audit_writer identity (has the role, NOT a superuser, NOT claims_admin/postgres)
+ * BEFORE any billing-audit write. A misconfigured CLAIMS_AUDIT_WRITER_DATABASE_URL that
+ * pointed at an admin/superuser would fail the run loudly instead of writing PHI over a
+ * privileged connection. Returns current_user so the (authed) caller can surface exactly
+ * which role wrote. Membership-based (not a hardcoded login name) so it survives a role
+ * rename, while still reporting the concrete user. Throws → the handler's catch → 500.
+ */
+async function assertAuditWriterIdentity(): Promise<string> {
+  const res = await auditWriterDb().query<{
+    u: string; is_super: boolean; has_writer: boolean; is_admin: boolean;
+  }>(
+    `select current_user as u,
+            coalesce((select rolsuper from pg_roles where rolname = current_user), false) as is_super,
+            pg_has_role(current_user, 'claims_audit_writer', 'USAGE') as has_writer,
+            pg_has_role(current_user, 'claims_admin', 'MEMBER') as is_admin`,
+  );
+  const row = res.rows[0];
+  if (!row || !row.has_writer || row.is_super || row.is_admin) {
+    throw new Error(
+      `audit writer identity check failed (user=${row?.u ?? '?'}, super=${row?.is_super}, ` +
+        `has_writer=${row?.has_writer}, is_admin=${row?.is_admin}) — refusing to write`,
+    );
+  }
+  return row.u;
+}
+
+/**
+ * Scope-parameterized Billing Audit ingest (Vercel Cron). GET only; CRON_SECRET-gated
+ * (constant-time Bearer). Loops the scope's LOCKED roster (auditConfig — scope IS the
+ * roster), running the scope's report+filter once per customer, and Option-B-upserts
+ * charge lines into claims.audit_row as claims_audit_writer. Report/filter ids are
+ * ENV-VAR-ONLY (auditReportIds throws on a missing var — no hardcoded fallback, a
+ * deliberate break from the collections pattern). Non-PHI counts only. Each scope gets
+ * its own thin wrapper + route (/api/cron/billing-audit-ip, /api/cron/billing-audit-op)
+ * for log/Cron-tab attribution, mirroring the explorer crons.
+ */
+async function handleBillingAuditCronForScope(
+  req: { method?: string; authorization?: string | null },
+  scope: AuditScope,
+): Promise<{ status: number; body: unknown }> {
+  if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
+    return { status: 405, body: { error: 'method_not_allowed' } };
+  }
+  const secret = process.env.CRON_SECRET;
+  if (!secret || !isAuthorized(req.authorization, secret)) {
+    return { status: 401, body: { error: 'unauthorized' } };
+  }
+  try {
+    const ids = auditReportIds(scope, process.env); // throws on missing env — fail fast, names only
+    const writerUser = await assertAuditWriterIdentity(); // in-process identity assert BEFORE any write
+    const base = cmdApiConfig(); // CMD_API_* credentials + base URL (report/filter overridden below)
+    const stats = await billingAuditCron({
+      scope,
+      customers: auditCustomersFor(scope),
+      fetchZip: (customerId) =>
+        cmdRunReportToZip({
+          ...base,
+          customerId,
+          reportId: ids.reportId,
+          filterId: ids.filterId,
+          // DEDICATED audit poll tuning (NOT the explorer's 8×3s=24s). The 46/39-col audit
+          // reports are heavier to generate than the collections explorer report; the fast
+          // explorer ceiling poll-timed-out the largest facilities (CAMH/NASH/TBH,
+          // 2026-07-14). 18×5s = 90s ceiling per customer, empty-grace 6 (also absorbs the
+          // SUCCESS-empty poll race that made PCMH read empty despite having data). The 270s
+          // wall-clock guard still caps total run time — a customer that can't finish inside
+          // the budget budget-skips and catches up next run (idempotent upsert).
+          pollIntervalMs: Number(process.env.CMD_AUDIT_POLL_INTERVAL_MS) || 5_000,
+          maxPollAttempts: Number(process.env.CMD_AUDIT_POLL_ATTEMPTS) || 18,
+          emptyGraceAttempts: Number(process.env.CMD_AUDIT_EMPTY_GRACE) || 6,
+        }),
+      zipToCsvTexts: (zip) => readZipEntries(zip).map((e) => e.data.toString('utf8')),
+      writeDb: auditWriterDb(),
+      businessEntityId: BXR_TENANT_ID,
+      sourceReportId: ids.reportId,
+      revalidate: () => revalidateTag('billing-audit'),
+    });
+    return { status: 200, body: { ok: true, writer_user: writerUser, ...stats } };
+  } catch (err) {
+    console.error(`billing-audit-${scope.toLowerCase()} cron failed:`, err instanceof Error ? err.message : String(err));
+    return { status: 500, body: { error: 'cron_failed' } };
+  }
+}
+
+/** IP audit ingest cron (/api/cron/billing-audit-ip). Roster = AUDIT_IP_CUSTOMERS (8). */
+export function handleBillingAuditIpCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  return handleBillingAuditCronForScope(req, 'IP');
+}
+
+/** OP audit ingest cron (/api/cron/billing-audit-op). Roster = AUDIT_OP_CUSTOMERS (9). */
+export function handleBillingAuditOpCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  return handleBillingAuditCronForScope(req, 'OP');
+}
+
+/**
+ * Billing-code-decision sync cron (/api/cron/billing-code-decisions). GET only;
+ * CRON_SECRET-gated. Reads the "JT Master Issues" decision-matrix tabs (EH canonical;
+ * JT col O for stops — Alec's locked ruling) via a Google OAuth installed-app REFRESH
+ * TOKEN supplied out of band in env (org policy forbids service-account keys):
+ * GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET / GOOGLE_SHEETS_REFRESH_TOKEN /
+ * BILLING_SHEET_ID — all env-only, fail-fast, names never values. googleapis loads
+ * DYNAMICALLY inside this handler so the heavy client never rides the other routes'
+ * bundles. Writes as claims_audit_writer; fail-soft parse keeps last good data.
+ */
+export async function handleBillingCodeDecisionsCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
+    return { status: 405, body: { error: 'method_not_allowed' } };
+  }
+  const secret = process.env.CRON_SECRET;
+  if (!secret || !isAuthorized(req.authorization, secret)) {
+    return { status: 401, body: { error: 'unauthorized' } };
+  }
+  try {
+    const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID?.trim();
+    const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET?.trim();
+    const refreshToken = process.env.GOOGLE_SHEETS_REFRESH_TOKEN?.trim();
+    const sheetId = process.env.BILLING_SHEET_ID?.trim();
+    if (!clientId || !clientSecret || !refreshToken || !sheetId) {
+      throw new Error(
+        'Billing-code sync env not configured: set GOOGLE_OAUTH_CLIENT_ID, ' +
+          'GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_SHEETS_REFRESH_TOKEN, BILLING_SHEET_ID',
+      );
+    }
+    const [{ google }, { readSheet }, { decisionSync }] = await Promise.all([
+      import('googleapis'),
+      import('../../src/sheets.js'),
+      import('../../src/billingAudit/decisionSync.js'),
+    ]);
+    const oauth = new google.auth.OAuth2(clientId, clientSecret);
+    oauth.setCredentials({ refresh_token: refreshToken });
+    const writerUser = await assertAuditWriterIdentity(); // in-process identity assert BEFORE any write
+    const stats = await decisionSync({
+      // readSheet splits off row 1 as "header"; the matrix parser is block-based and
+      // needs EVERY row with true 1-based rowNums — reassemble.
+      fetchTab: async (tab) => {
+        const res = await readSheet(sheetId, tab, oauth);
+        return { rows: [{ rowNum: 1, cells: res.header }, ...res.rows] };
+      },
+      writeDb: auditWriterDb(),
+      businessEntityId: BXR_TENANT_ID,
+    });
+    if (stats.status !== 'parse_failed' && stats.upserted > 0) revalidateTag('billing-audit');
+    return { status: 200, body: { ok: stats.status !== 'parse_failed', writer_user: writerUser, ...stats } };
+  } catch (err) {
+    console.error('billing-code-decisions cron failed:', err instanceof Error ? err.message : String(err));
+    return { status: 500, body: { error: 'cron_failed' } };
+  }
 }
 
 /** Collections summary route: optional date bounds → non-PHI monthly summary by facility. */
