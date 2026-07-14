@@ -5,6 +5,7 @@ import {
   buildCmdExplorerQuery,
   buildCmdSearchSummaryQueries,
   buildCmdFacilityOptionsQuery,
+  buildCmdPayerOptionsQuery,
   buildCohortCurveQueries,
   buildCohortDrilldownQueries,
   sanitizeGridColumns,
@@ -208,6 +209,44 @@ test('facility options query is tenant-scoped and its only bound value is entity
   assert.match(sql, /f\.facility_code = coalesce\(fe\.facility_code, a\.facility_code\)/);
   // blank facilities excluded; no interpolation
   assert.match(sql, /btrim\(facility\) <> ''/);
+  assertAllBound(sql, params);
+});
+
+// --- guided payer search: multi-select payer filter + payer options -----------
+
+test('payer multi-select binds as a single text[] param (guided payer search)', () => {
+  const { sql, params } = buildCmdExplorerQuery(null, { primary_payers: ['AETNA', 'CIGNA'] }, SORT, 51, ENTITY);
+  assert.match(sql, /primary_payer = any\(\$2::text\[\]\)/);
+  assert.deepEqual(params[1], ['AETNA', 'CIGNA']);
+  assertAllBound(sql, params);
+});
+
+test('payer multi-select: EMPTY array is NO restriction (all payers), not zero rows', () => {
+  // Same trap as the facility set: `primary_payer = any(ARRAY[]::text[])` would match nothing. An
+  // empty/null selection must OMIT the payer clause entirely.
+  for (const primary_payers of [[], null, undefined] as (string[] | null | undefined)[]) {
+    const { sql, params } = buildCmdExplorerQuery(null, { primary_payers }, SORT, 51, ENTITY);
+    assert.doesNotMatch(sql, /primary_payer = any/, `primary_payers=${JSON.stringify(primary_payers)} must emit no payer clause`);
+    assertAllBound(sql, params);
+  }
+});
+
+test('search summary honors the payer multi-select the same way (empty = no restriction)', () => {
+  const nonEmpty = buildCmdSearchSummaryQueries({ primary_payers: ['AETNA'] }, ENTITY);
+  assert.match(nonEmpty.totals.sql, /primary_payer = any\(\$2::text\[\]\)/);
+  assert.deepEqual(nonEmpty.totals.params[1], ['AETNA']);
+  assertAllBound(nonEmpty.totals.sql, nonEmpty.totals.params);
+  const empty = buildCmdSearchSummaryQueries({ primary_payers: [] }, ENTITY);
+  assert.doesNotMatch(empty.totals.sql, /primary_payer = any/);
+});
+
+test('payer options query is tenant-scoped and its only bound value is entityIds', () => {
+  const { sql, params } = buildCmdPayerOptionsQuery(ENTITY);
+  assert.match(sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
+  assert.deepEqual(params, [ENTITY]);
+  assert.equal(params.length, 1);
+  assert.match(sql, /select distinct primary_payer from collections\.cmd_explorer_rows/);
+  assert.match(sql, /btrim\(primary_payer\) <> ''/);
   assertAllBound(sql, params);
 });
 

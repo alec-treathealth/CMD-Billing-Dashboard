@@ -32,14 +32,12 @@ import {
   CreditCard,
   Eye,
   EyeOff,
-  Filter,
   Fingerprint,
   GripVertical,
   Layers,
   Lock,
   RotateCcw,
   Save,
-  Search,
   Star,
   Table2,
   Trash2,
@@ -87,6 +85,7 @@ import {
   loadCmdReport,
   loadCmdSearchSummary,
   loadCmdExplorerFacilities,
+  loadCmdExplorerPayers,
   loadCohortCurve,
   loadCohortDrilldown,
   revealCmdReportRows,
@@ -161,19 +160,6 @@ const SORTABLE_KEYS = new Set<string>([
 // (right-aligned, sortable) — this set only overrides how cellText formats them.
 const IS_PERCENT = new Set<string>(['pct_allowed', 'pct_paid']);
 
-// Search scope FOLLOWS the visible columns — one unified "columns" concept, no separate search-scope
-// picker. The free-text term matches only the 4 TEXT columns currently shown: facility / payer / CPT
-// code / revenue code. The money + date columns are deliberately NOT substring-searchable (a leading-
-// wildcard ILIKE on them can't be indexed and doubled the per-keystroke cost — the date window, sort
-// headers, and drill chips cover money/date); the pct_* ratios and the 3 encrypted PHI columns are
-// out too. This set mirrors the server's CMD_EXPLORER_SEARCH_COLUMNS exactly; the server independently
-// re-enforces it, so hiding a column narrows search but can never widen it beyond these four.
-const SEARCHABLE_KEYS = new Set<string>(['facility', 'primary_payer', 'cpt_code', 'revenue_code']);
-
-// Minimum free-text term length before a search fires (mirrors the server's CMD_SEARCH_TERM_MIN). A
-// 1–2 char prefix matches a huge slice of the table and is a throwaway mid-typing query, so the UI
-// stays in browse mode until the term is long enough — the server re-enforces the same floor.
-const MIN_SEARCH_LEN = 3;
 
 /**
  * Reconstruct a saved view into this component's { order, hidden } layout. Thin typed wrapper over the
@@ -336,15 +322,10 @@ export function CmdCollectionsExplorer({
     seededReport ? 'ready' : 'loading',
   );
 
-  // Smart search. `searchInput` is the raw box; `term` is its debounced value (drives fetches).
-  // The term matches the SEARCHABLE columns that are currently SHOWN (see `searchCols`, derived from
-  // `order` below) — there is no separate search-scope picker. `refinement` is an exact filter
-  // applied by clicking a summary chip. Month/Year window is retained.
-  const [searchInput, setSearchInput] = useState('');
-  // 550ms (was 350): the free-text term drives the 5-query aggregate summary burst, so a longer
-  // debounce collapses more of a fast typist's keystrokes into a single fetch. The exact-match PHI
-  // lookups below stay at 350ms — they're cheap indexed equality, not the expensive substring scan.
-  const term = useDebouncedValue(searchInput, 550);
+  // Guided search (replaces the old free-text bar): Facility + Payer are multi-select tag pickers
+  // (facilitySelection / payerSelection below). `refinement` is now ONLY the (CPT × Revenue-code)
+  // combo drill from the summary combo table — facility/payer summary clicks add tags instead of
+  // setting a single refinement (see applyRefinement).
   const [refinement, setRefinement] = useState<Refinement | null>(null);
   const [year, setYear] = useState(YEAR_OPTIONS[0]!);
   const [month, setMonth] = useState(0); // 0 = All months
@@ -361,7 +342,10 @@ export function CmdCollectionsExplorer({
     () => seededFacilities ?? [],
   );
   const [facilitySelection, setFacilitySelection] = useState<string[]>([]);
-  const [facilityPickerOpen, setFacilityPickerOpen] = useState(false);
+  // Payer multi-select (guided payer search). The distinct-payer vocabulary is near-static, so it's
+  // loaded once per view (like facilities) and filtered client-side as the user types.
+  const [payerOptions, setPayerOptions] = useState<string[]>([]);
+  const [payerSelection, setPayerSelection] = useState<string[]>([]);
 
   // Searchable PHI (gated to canRevealPhi + audited server-side). These are matched via keyed
   // blind indexes (exact member ID / 3-char alpha prefix / exact group #) — the raw value is
@@ -403,6 +387,7 @@ export function CmdCollectionsExplorer({
     setPrevView(view);
     setRefinement(null);
     setFacilitySelection([]);
+    setPayerSelection([]);
   }
 
   // Server-side sort. Default: most-recent Payment Received first.
@@ -476,20 +461,11 @@ export function CmdCollectionsExplorer({
   const reqRef = useRef(0);
   const gridRef = useRef<HTMLDivElement>(null);
 
-  // Search scope FOLLOWS visibility: the term matches the searchable columns currently shown (in
-  // display order). Hiding a column removes it from search too; there is one "columns" concept.
-  // Derived from `visibleOrder` (NOT the full `order`) so hidden columns never widen the search.
-  const searchCols = visibleOrder.filter((k) => SEARCHABLE_KEYS.has(k));
-  const trimmedTerm = term.trim();
-  const hasSearch = trimmedTerm.length >= MIN_SEARCH_LEN && searchCols.length > 0;
-  const hasAnySearch = hasSearch || hasPhiSearch;
-  // The user has started typing but hasn't reached the minimum yet (and isn't doing a PHI lookup) —
-  // show a gentle hint instead of silently doing nothing. Driven by the RAW input (not the debounced
-  // term) so it appears/clears as they type rather than 550ms later.
-  const rawTerm = searchInput.trim();
-  const belowMinTerm = !hasPhiSearch && rawTerm.length > 0 && rawTerm.length < MIN_SEARCH_LEN;
-  // Stable dep keys for the sets (array identity changes on every toggle otherwise).
-  const searchColsKey = searchCols.join(',');
+  // A "search" is now any active guided selection: facility tags, payer tags, or a PHI lookup.
+  // (The free-text term + column-scoped substring search were removed with the search bar.)
+  const hasAnySearch = facilitySelection.length > 0 || payerSelection.length > 0 || hasPhiSearch;
+  // Stable dep keys for the selection sets (array identity changes on every toggle otherwise).
+  const payerKey = payerSelection.join('\n');
   const facilityKey = facilitySelection.join(''); // control char can't appear in a facility name
 
   // Raw CMD facility text → curated friendly name from the already-loaded dimension options, for
@@ -499,6 +475,22 @@ export function CmdCollectionsExplorer({
     const m = new Map(facilityOptions.map((o) => [o.facility, o.facility_name ?? o.facility]));
     return (raw: string) => m.get(raw) ?? raw;
   }, [facilityOptions]);
+
+  // Options for the guided pickers. Facility carries a friendly display name + IP/OP/Both badge;
+  // payer is a plain name. `value` (raw facility text / payer name) is what the grid filters on.
+  const facilityPickerOptions = useMemo<PickerOption[]>(
+    () =>
+      facilityOptions.map((o) => ({
+        value: o.facility,
+        display: o.facility_name ?? o.facility,
+        badge: o.care_setting,
+      })),
+    [facilityOptions],
+  );
+  const payerPickerOptions = useMemo<PickerOption[]>(
+    () => payerOptions.map((p) => ({ value: p, display: p })),
+    [payerOptions],
+  );
 
   // Load the tenant-scoped facility options for the multi-select whenever the view changes.
   useEffect(() => {
@@ -514,6 +506,22 @@ export function CmdCollectionsExplorer({
       })
       .catch(() => {
         if (live) setFacilityOptions([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [view]);
+
+  // Load the tenant-scoped payer options for the guided payer search whenever the view changes.
+  // No server seed for payers (unlike facilities), so this always fetches on mount + view change.
+  useEffect(() => {
+    let live = true;
+    loadCmdExplorerPayers(view)
+      .then((r) => {
+        if (live) setPayerOptions(r.ok ? r.payers : []);
+      })
+      .catch(() => {
+        if (live) setPayerOptions([]);
       });
     return () => {
       live = false;
@@ -583,10 +591,9 @@ export function CmdCollectionsExplorer({
       year?: number;
       month?: number;
       recencyDays?: number;
-      q?: string;
-      searchColumns?: string[];
       facility?: string[];
       primary_payer?: string;
+      primary_payers?: string[];
       cpt_code?: string;
       revenue_code?: string;
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
@@ -598,10 +605,7 @@ export function CmdCollectionsExplorer({
       f.year = year;
       f.month = month;
     }
-    if (hasSearch) {
-      f.q = term.trim();
-      f.searchColumns = searchCols;
-    }
+    if (payerSelection.length > 0) f.primary_payers = payerSelection;
     // Facility multi-select is a top-level scope; a facility drill-down chip narrows to that ONE
     // facility (overriding the dropdown). Payer/CPT chips stay exact single-value refinements.
     if (facilitySelection.length > 0) f.facility = facilitySelection;
@@ -634,7 +638,7 @@ export function CmdCollectionsExplorer({
     // year only matters when a specific month is chosen (see original rationale); facilityKey is the
     // stable proxy for facilitySelection's contents.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [term, searchColsKey, hasSearch, recencyDays, month, month > 0 ? year : 0, facilityKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
+  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
 
   const loadPage = useCallback(
     async (
@@ -710,18 +714,14 @@ export function CmdCollectionsExplorer({
       prev.kind === 'ready' || prev.kind === 'refreshing' ? { kind: 'refreshing', data: prev.data } : { kind: 'loading' },
     );
     const f: {
-      q?: string;
-      searchColumns?: string[];
       year?: number;
       month?: number;
       recencyDays?: number;
       facility?: string[];
+      primary_payers?: string[];
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
     } = {};
-    if (hasSearch) {
-      f.q = term.trim();
-      f.searchColumns = searchCols;
-    }
+    if (payerSelection.length > 0) f.primary_payers = payerSelection;
     // Top-level scope (date window + facility set) applies to the summary too — so the drill lists
     // describe the SAME population the grid shows. The chip refinement does NOT (it's a within-
     // results drill; the chips stay a stable facet navigator while drilling).
@@ -751,7 +751,7 @@ export function CmdCollectionsExplorer({
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [term, searchColsKey, hasSearch, hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, view]);
+  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, view]);
 
   // Fetch the alpha-prefix cohort curve when a ≥3-char alpha-prefix search is active (PHI-gated).
   // Independent of the term/window/facility filters: the cohort is defined solely by the prefix +
@@ -865,28 +865,22 @@ export function CmdCollectionsExplorer({
     if (res.ok) await refreshViews();
   }
 
-  // --- facility multi-select handlers ---------------------------------------
+  // --- facility + payer multi-select handlers (guided search) ---------------
   function toggleFacility(value: string) {
     setFacilitySelection((prev) =>
       prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
     );
   }
-  function selectAllFacilities() {
-    setFacilitySelection(facilityOptions.map((o) => o.facility));
-  }
   function clearFacilities() {
     setFacilitySelection([]);
   }
-  /**
-   * Add every facility in a care-setting group to the selection (union — composes with other
-   * groups). A facility classified 'BOTH' matches BOTH the IP and OP groups, mirroring migration
-   * 0035's chart semantics. Facilities with no care_setting (Unclassified) join no group.
-   */
-  function selectCareSettingGroup(cs: 'IP' | 'OP') {
-    const matches = facilityOptions
-      .filter((o) => o.care_setting === cs || o.care_setting === 'BOTH')
-      .map((o) => o.facility);
-    setFacilitySelection((prev) => [...new Set([...prev, ...matches])]);
+  function togglePayer(value: string) {
+    setPayerSelection((prev) =>
+      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
+    );
+  }
+  function clearPayers() {
+    setPayerSelection([]);
   }
 
   /** Pick a rolling recency window (toggle off if re-clicked); clears any Month/Year selection. */
@@ -897,9 +891,18 @@ export function CmdCollectionsExplorer({
 
   /** Apply (or toggle off) a single-field drill-down refinement from a summary chip. */
   function applyRefinement(kind: RefineKind, value: string) {
-    setRefinement((prev) =>
-      prev && prev.kind === kind && 'value' in prev && prev.value === value ? null : { kind, value },
-    );
+    // Facility/payer summary clicks ADD a tag to the guided search (dedup) — unifying the drill with
+    // the pickers. Any other kind falls back to the single refinement (none is emitted today; the CPT
+    // card was replaced by facilities). The CPT×Rev combo table uses applyComboRefinement, not this.
+    if (kind === 'facility') {
+      setFacilitySelection((prev) => (prev.includes(value) ? prev : [...prev, value]));
+    } else if (kind === 'primary_payer') {
+      setPayerSelection((prev) => (prev.includes(value) ? prev : [...prev, value]));
+    } else {
+      setRefinement((prev) =>
+        prev && prev.kind === kind && 'value' in prev && prev.value === value ? null : { kind, value },
+      );
+    }
     requestAnimationFrame(() => gridRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
   }
 
@@ -987,59 +990,37 @@ export function CmdCollectionsExplorer({
     facilitySelection.length === 0
       ? 'All facilities'
       : `${facilitySelection.length} facilit${facilitySelection.length === 1 ? 'y' : 'ies'}`;
+  const payerLabel =
+    payerSelection.length === 0
+      ? 'All payers'
+      : `${payerSelection.length} payer${payerSelection.length === 1 ? '' : 's'}`;
 
   return (
     <div className="space-y-4">
       {/* ---- Search hero -------------------------------------------------- */}
       <div className="rounded-xl border border-line bg-card p-4 shadow-ths">
-        <div className="flex flex-wrap items-center gap-3">
-          {/* Search box — grows to fill the row. */}
-          <div className="relative min-w-[16rem] flex-1">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink400" aria-hidden />
-            <input
-              type="search"
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              placeholder="Search collections — facility, payer, CPT, revenue code…"
-              aria-label="Search collections"
-              maxLength={120}
-              className="h-10 w-full rounded-lg border border-line bg-surface pl-9 pr-3 text-sm text-ink900 outline-none transition-colors placeholder:text-ink400 focus:border-[var(--brand-accent)] focus:ring-2 focus:ring-[var(--brand-accent)]/25"
-            />
-          </div>
-
-          {/* Facility multi-select — scopes WHICH facilities' rows show. Empty = all facilities. */}
-          <div className="relative">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              aria-expanded={facilityPickerOpen}
-              aria-haspopup="true"
-              onClick={() => setFacilityPickerOpen((o) => !o)}
-              className={[
-                'border-line bg-[var(--brand-soft)]/50 text-ink900 hover:bg-[var(--brand-soft)]',
-                facilityPickerOpen ? 'bg-[var(--brand-soft)] ring-1 ring-[var(--brand-accent)]/40' : '',
-              ].join(' ')}
-            >
-              <Filter className="h-4 w-4" aria-hidden />
-              Facilities
-              <span className="ml-1 rounded-full bg-[var(--brand-soft)] px-1.5 text-[11px] font-semibold text-[var(--brand-ink)]">
-                {facilitySelection.length === 0 ? 'All' : facilitySelection.length}
-              </span>
-              <ChevronDown className="h-3.5 w-3.5 opacity-60" aria-hidden />
-            </Button>
-            {facilityPickerOpen && (
-              <FacilityFilter
-                options={facilityOptions}
-                selected={facilitySelection}
-                onToggle={toggleFacility}
-                onSelectAll={selectAllFacilities}
-                onClear={clearFacilities}
-                onSelectGroup={selectCareSettingGroup}
-                onClose={() => setFacilityPickerOpen(false)}
-              />
-            )}
-          </div>
+        <div className="flex flex-wrap items-end gap-3">
+          {/* Guided search — Facility + Payer multi-select tag pickers (replaces the old free-text
+              bar + facility dropdown). Both scope the grid AND the summary; empty = no restriction.
+              Options load once per tenant and filter client-side as the user types. */}
+          <MultiSelectTagPicker
+            label="Facility"
+            placeholder="Type to find facilities…"
+            icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
+            options={facilityPickerOptions}
+            selected={facilitySelection}
+            onToggle={toggleFacility}
+            onClear={clearFacilities}
+          />
+          <MultiSelectTagPicker
+            label="Payer"
+            placeholder="Type to find payers…"
+            icon={<CreditCard className="h-3.5 w-3.5" aria-hidden />}
+            options={payerPickerOptions}
+            selected={payerSelection}
+            onToggle={togglePayer}
+            onClear={clearPayers}
+          />
 
           {/* Unified time window (A): ONE segmented control — [7d][14d][30d][Month/Year ▾] — with an
               "All months" REST STATE (no segment active). Each segment drives the SAME state setters
@@ -1151,10 +1132,8 @@ export function CmdCollectionsExplorer({
         <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span>
             {hasAnySearch
-              ? `${hasSearch ? `Searching ${searchCols.length} shown column${searchCols.length === 1 ? '' : 's'}` : 'Patient lookup'} · ${facilityLabel} · ${windowLabel}`
-              : belowMinTerm
-                ? `Type at least ${MIN_SEARCH_LEN} characters to search · Browsing ${facilityLabel} · ${windowLabel}`
-                : `Browsing ${facilityLabel} · ${windowLabel} — type to search`}
+              ? `${facilityLabel} · ${payerLabel} · ${windowLabel}`
+              : `Browsing ${facilityLabel} · ${payerLabel} · ${windowLabel} — pick a facility or payer to search`}
           </span>
           {refinement && (
             <button
@@ -1173,7 +1152,7 @@ export function CmdCollectionsExplorer({
       {hasAnySearch && (
         <SearchSummaryPanel
           state={summary}
-          label={hasSearch ? `“${term.trim()}”` : 'your search'}
+          label="your selection"
           refinement={refinement}
           onDrill={applyRefinement}
           onDrillCombo={applyComboRefinement}
@@ -1389,120 +1368,173 @@ export function CmdCollectionsExplorer({
  * exists — a facility classified BOTH counts for both), and individual checkboxes with a care-setting
  * badge. A full-screen invisible backdrop closes it on outside click.
  */
-function FacilityFilter({
+/** One option in a guided picker. `value` is the raw filter value the grid matches on; `display`
+ *  is the friendly label shown; `badge` (facility only) shows the IP/OP/Both care setting. */
+type PickerOption = { value: string; display: string; badge?: 'IP' | 'OP' | 'BOTH' | null };
+
+/**
+ * Guided multi-select "type-ahead + tags" picker — the search primitive that replaces the old
+ * free-text bar + facility dropdown. The parent loads the full option list ONCE (facility ~30,
+ * payer ~260 per tenant), so filtering is instant client-side as the user types — no per-keystroke
+ * server round-trip. Selected values render as removable tags inside the control; a filtered list
+ * drops below on focus/typing (capped, with a "keep typing" hint past the cap). Matches the
+ * dashboard token system — no new design language.
+ */
+function MultiSelectTagPicker({
+  label,
+  placeholder,
+  icon,
   options,
   selected,
   onToggle,
-  onSelectAll,
   onClear,
-  onSelectGroup,
-  onClose,
 }: {
-  options: CmdFacilityOption[];
+  label: string;
+  placeholder: string;
+  icon: React.ReactNode;
+  options: PickerOption[];
   selected: string[];
   onToggle: (value: string) => void;
-  onSelectAll: () => void;
   onClear: () => void;
-  onSelectGroup: (cs: 'IP' | 'OP') => void;
-  onClose: () => void;
 }) {
-  const selectedSet = new Set(selected);
-  const hasIp = options.some((o) => o.care_setting === 'IP' || o.care_setting === 'BOTH');
-  const hasOp = options.some((o) => o.care_setting === 'OP' || o.care_setting === 'BOTH');
-  return (
-    <>
-      <button
-        type="button"
-        aria-label="Close facility filter"
-        className="fixed inset-0 z-40 cursor-default"
-        onClick={onClose}
-      />
-      <div
-        role="dialog"
-        aria-label="Filter by facility"
-        className="absolute left-0 top-full z-50 mt-2 w-80 animate-ths-reveal rounded-lg border border-line bg-surface p-3 shadow-ths"
-      >
-        <div className="mb-1 flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          <span>Show facilities</span>
-          <span className="font-normal normal-case">
-            {selected.length === 0 ? 'All facilities' : `${selected.length} selected`}
-          </span>
-        </div>
-        {selected.length === 0 && (
-          <p className="mb-2 text-[11px] text-ink400">
-            No filter — showing every facility. Check any below to narrow.
-          </p>
-        )}
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const displayOf = useMemo(() => new Map(options.map((o) => [o.value, o.display])), [options]);
 
-        <div className="mb-2 flex flex-wrap items-center gap-1.5 border-b border-line pb-2">
-          <button
-            type="button"
-            onClick={onSelectAll}
-            disabled={options.length === 0}
-            className="rounded-md border border-line px-2 py-0.5 text-xs text-ink900 transition-colors hover:bg-[var(--brand-soft)] disabled:opacity-40"
-          >
-            Select all
-          </button>
+  // Dismiss on outside pointer-down or Escape (same pattern as the Month/Year + view-switcher popovers).
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e: PointerEvent) {
+      if (!boxRef.current?.contains(e.target as Node)) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false);
+    }
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const q = query.trim().toLowerCase();
+  const CAP = 50;
+  const matches = useMemo(
+    () => (q === '' ? options : options.filter((o) => o.display.toLowerCase().includes(q))),
+    [options, q],
+  );
+  const shown = matches.slice(0, CAP);
+
+  return (
+    <div ref={boxRef} className="relative min-w-[15rem] flex-1">
+      <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        {icon}
+        {label}
+        {selected.length > 0 && (
           <button
             type="button"
             onClick={onClear}
-            disabled={selected.length === 0}
-            className="rounded-md border border-line px-2 py-0.5 text-xs text-ink900 transition-colors hover:bg-[var(--brand-soft)] disabled:opacity-40"
+            className="ml-auto font-normal normal-case text-ink400 underline-offset-2 transition-colors hover:text-[var(--brand-ink)] hover:underline"
           >
-            Clear
+            Clear {selected.length}
           </button>
-          {hasIp && (
-            <button
-              type="button"
-              onClick={() => onSelectGroup('IP')}
-              className="rounded-md border border-line px-2 py-0.5 text-xs text-ink900 transition-colors hover:bg-[var(--brand-soft)]"
-            >
-              + All IP
-            </button>
-          )}
-          {hasOp && (
-            <button
-              type="button"
-              onClick={() => onSelectGroup('OP')}
-              className="rounded-md border border-line px-2 py-0.5 text-xs text-ink900 transition-colors hover:bg-[var(--brand-soft)]"
-            >
-              + All OP
-            </button>
-          )}
-        </div>
-
-        {options.length === 0 ? (
-          <p className="py-4 text-center text-sm text-muted-foreground">No facilities available.</p>
-        ) : (
-          <div className="max-h-72 space-y-0.5 overflow-y-auto">
-            {options.map((o) => (
-              <label
-                key={o.facility}
-                className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm text-ink900 hover:bg-[var(--brand-soft)]"
-              >
-                <input
-                  type="checkbox"
-                  checked={selectedSet.has(o.facility)}
-                  onChange={() => onToggle(o.facility)}
-                  className="h-4 w-4 shrink-0 accent-[var(--brand-accent)]"
-                />
-                <span className="flex-1 truncate">{o.facility_name ?? o.facility}</span>
-                <span
-                  className={[
-                    'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium',
-                    o.care_setting
-                      ? 'bg-[var(--brand-soft)] text-[var(--brand-ink)]'
-                      : 'text-ink400',
-                  ].join(' ')}
-                >
-                  {o.care_setting ?? 'Other'}
-                </span>
-              </label>
-            ))}
-          </div>
         )}
       </div>
-    </>
+      <div
+        onClick={() => {
+          setOpen(true);
+          inputRef.current?.focus();
+        }}
+        className={[
+          'flex min-h-10 w-full flex-wrap items-center gap-1 rounded-lg border bg-surface px-2 py-1.5 text-sm transition-colors',
+          open ? 'border-[var(--brand-accent)] ring-2 ring-[var(--brand-accent)]/25' : 'border-line',
+        ].join(' ')}
+      >
+        {selected.map((v) => (
+          <span
+            key={v}
+            className="inline-flex max-w-[16rem] items-center gap-1 rounded-md bg-[var(--brand-soft)] py-0.5 pl-2 pr-1 text-xs font-medium text-[var(--brand-ink)]"
+          >
+            <span className="truncate">{displayOf.get(v) ?? v}</span>
+            <button
+              type="button"
+              aria-label={`Remove ${displayOf.get(v) ?? v}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggle(v);
+              }}
+              className="shrink-0 rounded transition-colors hover:text-[var(--brand-accent)]"
+            >
+              <X className="h-3 w-3" aria-hidden />
+            </button>
+          </span>
+        ))}
+        <input
+          ref={inputRef}
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setOpen(true);
+          }}
+          onFocus={() => setOpen(true)}
+          placeholder={selected.length === 0 ? placeholder : 'Add more…'}
+          aria-label={label}
+          className="h-6 min-w-[6rem] flex-1 bg-transparent text-sm text-ink900 outline-none placeholder:text-ink400"
+        />
+      </div>
+      {open && (
+        <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-64 overflow-y-auto rounded-lg border border-line bg-surface p-1 shadow-ths animate-ths-reveal">
+          {options.length === 0 ? (
+            <p className="px-2 py-2 text-xs text-ink400">Loading…</p>
+          ) : shown.length === 0 ? (
+            <p className="px-2 py-2 text-xs text-ink400">No matches for “{query.trim()}”.</p>
+          ) : (
+            shown.map((o) => {
+              const on = selectedSet.has(o.value);
+              return (
+                <button
+                  key={o.value}
+                  type="button"
+                  onClick={() => onToggle(o.value)}
+                  aria-pressed={on}
+                  className={[
+                    'flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
+                    on ? 'bg-[var(--brand-soft)]' : 'hover:bg-[var(--brand-soft)]',
+                  ].join(' ')}
+                >
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <Check
+                      className={['h-3.5 w-3.5 shrink-0 text-[var(--brand-accent)]', on ? '' : 'opacity-0'].join(' ')}
+                      aria-hidden
+                    />
+                    <span className="truncate text-ink900">{o.display}</span>
+                  </span>
+                  {o.badge !== undefined && (
+                    <span
+                      className={[
+                        'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium',
+                        o.badge ? 'bg-[var(--brand-soft)] text-[var(--brand-ink)]' : 'text-ink400',
+                      ].join(' ')}
+                    >
+                      {o.badge ?? 'Other'}
+                    </span>
+                  )}
+                </button>
+              );
+            })
+          )}
+          {matches.length > CAP && (
+            <p className="px-2 py-1.5 text-[11px] text-ink400">
+              Showing first {CAP} of {matches.length.toLocaleString()} — keep typing to narrow.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

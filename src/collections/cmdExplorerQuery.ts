@@ -61,6 +61,13 @@ export interface CmdExplorerFilter {
   cpt_code?: string | null;
   revenue_code?: string | null;
   primary_payer?: string | null;
+  /**
+   * Multi-select payer tags (the guided payer search). Set membership like `facility`: a NON-EMPTY
+   * array ANDs `primary_payer = any(...)`; empty/absent = no payer restriction (not match-nothing).
+   * Distinct from the single `primary_payer` (legacy single-drill field) — both are supported; the
+   * explorer UI now feeds this array.
+   */
+  primary_payers?: string[] | null;
   from?: string | null; // 'YYYY-MM-DD' inclusive (payment_received >= from)
   to?: string | null; // 'YYYY-MM-DD' exclusive (payment_received < to)
   q?: string | null; // substring term (matched literally; LIKE metachars escaped)
@@ -111,6 +118,11 @@ export function cmdExplorerBaseConds(
   if (filter.cpt_code) conds.push(`cpt_code = ${add(filter.cpt_code)}`);
   if (filter.revenue_code) conds.push(`revenue_code = ${add(filter.revenue_code)}`);
   if (filter.primary_payer) conds.push(`primary_payer = ${add(filter.primary_payer)}`);
+  // Payer set-membership (multi-select tags), same discipline as facility: non-empty array narrows,
+  // empty/absent is no restriction (omitted, never `= any(ARRAY[]::text[])` which matches nothing).
+  if (Array.isArray(filter.primary_payers) && filter.primary_payers.length > 0) {
+    conds.push(`primary_payer = any(${add(filter.primary_payers)}::text[])`);
+  }
   if (filter.from) conds.push(`payment_received >= ${add(filter.from)}::date`);
   if (filter.to) conds.push(`payment_received < ${add(filter.to)}::date`);
   const term = typeof filter.q === 'string' ? filter.q.trim() : '';
@@ -173,6 +185,23 @@ export function buildCmdFacilityOptionsQuery(entityIds: string[]): { sql: string
     'left join collections.cmd_facility_aliases a on upper(a.facility_text) = upper(r.facility) ' +
     'left join collections.facilities f on f.facility_code = coalesce(fe.facility_code, a.facility_code) ' +
     'group by r.facility order by r.facility';
+  return { sql, params };
+}
+
+/**
+ * Distinct payer names for the guided PAYER search's type-ahead, tenant-scoped to the caller's
+ * entitled entityIds. Non-PHI (`primary_payer` is a payer name, not an identifier). Blank/null
+ * payers are excluded; results are ordered for a stable client list. Every value is bound
+ * ($1 = entityIds); every identifier is a fixed literal. ~260 distinct payers per tenant, so the
+ * client loads the full list ONCE and filters it as the user types — no per-keystroke round-trip
+ * and no server-side pagination needed at this cardinality.
+ */
+export function buildCmdPayerOptionsQuery(entityIds: string[]): { sql: string; params: unknown[] } {
+  const params: unknown[] = [entityIds];
+  const sql =
+    'select distinct primary_payer from collections.cmd_explorer_rows ' +
+    "where business_entity_id = any($1::uuid[]) and primary_payer is not null and btrim(primary_payer) <> '' " +
+    'order by primary_payer';
   return { sql, params };
 }
 

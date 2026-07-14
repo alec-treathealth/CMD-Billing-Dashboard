@@ -28,6 +28,7 @@ import {
   buildCmdExplorerQuery,
   buildCmdSearchSummaryQueries,
   buildCmdFacilityOptionsQuery,
+  buildCmdPayerOptionsQuery,
   buildCohortCurveQueries,
   buildCohortDrilldownQueries,
   cmdExplorerSortValue,
@@ -1116,6 +1117,24 @@ export const cmdExplorerFacilities = unstable_cache(
   // timer means the dropdown is a warm cache hit ~always; a brand-new facility surfaces within the
   // hour (its rows are already in the grid regardless — this only gates the filter dropdown's list).
   { revalidate: 3600, tags: ['cmd-facilities'] },
+);
+
+/**
+ * Payer options for the guided payer search (non-PHI): the distinct payer names present in the
+ * caller's tenant slice (RBAC-clamped `entityIds`, part of the cache key). Like the facility
+ * vocabulary, the payer set is near-static — a new payer name is rare and NOT a daily-refresh
+ * event — so this rides its own 'cmd-payers' tag + 1-hour timer (NOT the 'cmd-explorer' tag the
+ * 30-min cron busts), keeping the ~627k-row DISTINCT scan a warm hit rather than rebuilding it
+ * every ingest. The client loads this once and filters it as the user types. Reader-only, non-PHI.
+ */
+export const cmdExplorerPayers = unstable_cache(
+  async (entityIds: string[]): Promise<string[]> => {
+    const { sql, params } = buildCmdPayerOptionsQuery(entityIds);
+    const { rows } = await readerExecutor().query<{ primary_payer: string }>(sql, params);
+    return rows.map((r) => r.primary_payer);
+  },
+  ['cmd-explorer-payers'],
+  { revalidate: 3600, tags: ['cmd-payers'] },
 );
 
 /**

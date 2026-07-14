@@ -42,6 +42,7 @@ import {
   loadCohortCurve as loadCohortCurve_,
   loadCohortDrilldown as loadCohortDrilldown_,
   cmdExplorerFacilities,
+  cmdExplorerPayers,
   recordAccess,
   revealCmdExplorerRow,
   revealCmdExplorerRows,
@@ -730,6 +731,8 @@ export interface CmdReportFilter {
   cpt_code?: string;
   revenue_code?: string;
   primary_payer?: string;
+  /** Multi-select payer tags (guided payer search) — set membership; empty/absent = all payers. */
+  primary_payers?: string[];
   /**
    * Searchable-PHI terms (raw). Resolved SERVER-SIDE to blind-index tokens, gated to
    * PHI-entitled roles, and audited — the raw terms are never stored, logged, or sent to SQL.
@@ -811,6 +814,28 @@ function applyFacilityFilter(filter: CmdReportFilter, readerFilter: { facility?:
     if (typeof f !== 'string' || f.length === 0 || f.length > CMD_FACILITY_NAME_MAX) return false;
   }
   readerFilter.facility = facilities;
+  return true;
+}
+
+/** Max payers in one multi-select (bounded input; a tenant has ~260 distinct today). */
+const CMD_PAYER_SET_MAX = 300;
+/** Max length of a single payer string (payer names are short; matches the exact-match discipline). */
+const CMD_PAYER_NAME_MAX = 200;
+
+/**
+ * Validate + copy the payer multi-select into the reader filter — the payer analogue of
+ * applyFacilityFilter. An empty/absent array is a no-op ("all payers", the reader omits the
+ * condition), NOT a match-nothing filter. Bounds the set size and each element's length. Returns
+ * false on a hard rejection.
+ */
+function applyPayerFilter(filter: CmdReportFilter, readerFilter: { primary_payers?: string[] }): boolean {
+  if (!Array.isArray(filter.primary_payers) || filter.primary_payers.length === 0) return true;
+  const payers = filter.primary_payers;
+  if (payers.length > CMD_PAYER_SET_MAX) return false;
+  for (const p of payers) {
+    if (typeof p !== 'string' || p.length === 0 || p.length > CMD_PAYER_NAME_MAX) return false;
+  }
+  readerFilter.primary_payers = payers;
   return true;
 }
 
@@ -936,9 +961,11 @@ export async function loadCmdReport(
     cpt_code?: string;
     revenue_code?: string;
     primary_payer?: string;
+    primary_payers?: string[];
     phiIndex?: PhiIndexTokens;
   } = {};
   if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
+  if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
   if (!applySearchFilter(filter, readerFilter)) {
     return { ok: false, error: 'Invalid search.' };
   }
@@ -980,9 +1007,11 @@ export async function loadCmdSearchSummary(
     cpt_code?: string;
     revenue_code?: string;
     primary_payer?: string;
+    primary_payers?: string[];
     phiIndex?: PhiIndexTokens;
   } = {};
   if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
+  if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
   if (!applySearchFilter(filter, readerFilter)) return { ok: false, error: 'Invalid search.' };
   if (!applyDateWindow(filter, readerFilter)) return { ok: false, error: 'Invalid date window.' };
   // PHI search: gate (canRevealPhi) + resolve tokens; audit happens in loadCmdReport (the
@@ -1085,6 +1114,23 @@ export async function loadCmdExplorerFacilities(view?: DashboardView): Promise<C
   if (entityIds === null) return { ok: false };
   try {
     return { ok: true, facilities: await cmdExplorerFacilities(entityIds) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export type CmdPayersResult = { ok: true; payers: string[] } | { ok: false };
+
+/**
+ * Payer options for the guided payer search (non-PHI): the distinct payer names present in the
+ * caller's tenant, RBAC-clamped by `view` (server-derived entity scope). Cached reader-only; the
+ * client loads this once and filters it as the user types. Never returns PHI.
+ */
+export async function loadCmdExplorerPayers(view?: DashboardView): Promise<CmdPayersResult> {
+  const entityIds = await viewEntityScope(view);
+  if (entityIds === null) return { ok: false };
+  try {
+    return { ok: true, payers: await cmdExplorerPayers(entityIds) };
   } catch {
     return { ok: false };
   }
