@@ -2,7 +2,7 @@
  * GET /api/cron/billing-audit-op — OP billing-audit ingest (claims.audit_row).
  * Auth: Authorization: Bearer <CRON_SECRET>. GET only — any other verb is 405.
  *
- * IP's sibling for the OP scope: loops the LOCKED 11-customer OP roster
+ * IP's sibling for the OP scope: loops the LOCKED 9-customer OP roster
  * (src/billingAudit/auditConfig.ts), pulling the OP audit report
  * (CMD_OP_AUDIT_REPORT_ID / _FILTER_ID, env-var-only, no fallbacks) once per customer.
  * The OP report is a DIFFERENT 39-column projection (duplicate "Charge Status" header,

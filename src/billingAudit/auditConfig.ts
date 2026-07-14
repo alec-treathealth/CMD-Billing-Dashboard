@@ -35,8 +35,16 @@ export const AUDIT_IP_CUSTOMERS: readonly CmdCustomerTarget[] = [
   { customerId: '10029105', facilityCode: 'TBH', businessEntityId: BXR_ENTITY_ID },
 ] as const;
 
-/** OP audit roster — 11 outpatient customers (Alec, 2026-07-13). The last four have no
- *  collections.facilities row; their facilityCode here is a provisional log label. */
+/** OP audit roster — 9 outpatient customers (Alec, 2026-07-13; roster trimmed 2026-07-14).
+ *  facilityCode is a LOG LABEL only (row attribution comes from the report's Office Name).
+ *
+ *  EXCLUDED on purpose — the audit saved filter is NOT valid under these customers (live
+ *  invoke 2026-07-14 returned `INVALID CRITERIA (no identifier)` for each): 10035976
+ *  HOUSTON_MH, 10035974 TREAT_CO. Same class as the collections cron's excluded accounts —
+ *  BUT the exclusion sets differ: 10035166 TEEN_MH_TX is excluded from collections yet the
+ *  audit filter IS valid under it (223 rows landed), so it STAYS here. WRC (10033951) is
+ *  kept — it returns a valid-but-empty report, not INVALID CRITERIA. If an excluded account
+ *  later gets a valid audit filter, re-add it here (and confirm with a probe first). */
 export const AUDIT_OP_CUSTOMERS: readonly CmdCustomerTarget[] = [
   { customerId: '10032340', facilityCode: 'FRCA', businessEntityId: BXR_ENTITY_ID },
   { customerId: '10034666', facilityCode: 'TELEHEALTH_MH', businessEntityId: BXR_ENTITY_ID },
@@ -45,9 +53,7 @@ export const AUDIT_OP_CUSTOMERS: readonly CmdCustomerTarget[] = [
   { customerId: '10029905', facilityCode: 'TREAT_TN', businessEntityId: BXR_ENTITY_ID },
   { customerId: '10029722', facilityCode: 'TREAT_TX', businessEntityId: BXR_ENTITY_ID },
   { customerId: '10031212', facilityCode: 'TREAT_WA', businessEntityId: BXR_ENTITY_ID },
-  { customerId: '10035976', facilityCode: 'HOUSTON_MH', businessEntityId: BXR_ENTITY_ID },
   { customerId: '10035166', facilityCode: 'TEEN_MH_TX', businessEntityId: BXR_ENTITY_ID },
-  { customerId: '10035974', facilityCode: 'TREAT_CO', businessEntityId: BXR_ENTITY_ID },
   { customerId: '10033951', facilityCode: 'WRC', businessEntityId: BXR_ENTITY_ID },
 ] as const;
 

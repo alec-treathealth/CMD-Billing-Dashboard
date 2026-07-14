@@ -286,9 +286,11 @@ test('auditReportIds: resolves from env and THROWS on a missing var (no fallback
   assert.throws(() => auditReportIds('IP', { CMD_IP_AUDIT_REPORT_ID: '1', CMD_IP_AUDIT_FILTER_ID: ' ' }));
 });
 
-test('rosters: locked per-scope shapes (8 IP / 11 OP), all BXR-stamped, disjoint', () => {
+test('rosters: locked per-scope shapes (8 IP / 9 OP), all BXR-stamped, disjoint', () => {
   assert.equal(AUDIT_IP_CUSTOMERS.length, 8);
-  assert.equal(AUDIT_OP_CUSTOMERS.length, 11);
+  assert.equal(AUDIT_OP_CUSTOMERS.length, 9);
+  // HOUSTON_MH (10035976) + TREAT_CO (10035974) excluded (INVALID CRITERIA, 2026-07-14).
+  assert.ok(!AUDIT_OP_CUSTOMERS.some((c) => c.customerId === '10035976' || c.customerId === '10035974'));
   const ip = new Set(AUDIT_IP_CUSTOMERS.map((c) => c.customerId));
   for (const c of AUDIT_OP_CUSTOMERS) assert.ok(!ip.has(c.customerId), `customer ${c.customerId} in both rosters`);
   for (const c of [...AUDIT_IP_CUSTOMERS, ...AUDIT_OP_CUSTOMERS]) assert.equal(c.businessEntityId, BXR_ENTITY_ID);

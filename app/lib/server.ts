@@ -617,10 +617,16 @@ async function handleBillingAuditCronForScope(
           customerId,
           reportId: ids.reportId,
           filterId: ids.filterId,
-          // Poll tuning shared with the explorer crons (same CMD partner session).
-          pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 3_000,
-          maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 8,
-          emptyGraceAttempts: Number(process.env.CMD_EXPLORER_EMPTY_GRACE) || 4,
+          // DEDICATED audit poll tuning (NOT the explorer's 8×3s=24s). The 46/39-col audit
+          // reports are heavier to generate than the collections explorer report; the fast
+          // explorer ceiling poll-timed-out the largest facilities (CAMH/NASH/TBH,
+          // 2026-07-14). 18×5s = 90s ceiling per customer, empty-grace 6 (also absorbs the
+          // SUCCESS-empty poll race that made PCMH read empty despite having data). The 270s
+          // wall-clock guard still caps total run time — a customer that can't finish inside
+          // the budget budget-skips and catches up next run (idempotent upsert).
+          pollIntervalMs: Number(process.env.CMD_AUDIT_POLL_INTERVAL_MS) || 5_000,
+          maxPollAttempts: Number(process.env.CMD_AUDIT_POLL_ATTEMPTS) || 18,
+          emptyGraceAttempts: Number(process.env.CMD_AUDIT_EMPTY_GRACE) || 6,
         }),
       zipToCsvTexts: (zip) => readZipEntries(zip).map((e) => e.data.toString('utf8')),
       writeDb: auditWriterDb(),
@@ -643,7 +649,7 @@ export function handleBillingAuditIpCron(req: {
   return handleBillingAuditCronForScope(req, 'IP');
 }
 
-/** OP audit ingest cron (/api/cron/billing-audit-op). Roster = AUDIT_OP_CUSTOMERS (11). */
+/** OP audit ingest cron (/api/cron/billing-audit-op). Roster = AUDIT_OP_CUSTOMERS (9). */
 export function handleBillingAuditOpCron(req: {
   method?: string;
   authorization?: string | null;
