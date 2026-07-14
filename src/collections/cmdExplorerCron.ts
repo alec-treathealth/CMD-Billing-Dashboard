@@ -35,9 +35,12 @@ import { replaceCmdDailyForFacility, type Db } from './db.js';
 /** Marks rows that arrived via the live API (vs a seed CSV filename). */
 const CRON_SOURCE = 'cmd_api';
 
-/** Default wall-clock budget before the loop stops launching NEW customers (ms). Leaves
- *  headroom under a 300s Vercel function for the final write + revalidate. */
-const DEFAULT_BUDGET_MS = 270_000;
+/** Default wall-clock budget before the loop stops launching NEW customers (ms). Leaves ~90s
+ *  headroom under the 300s Vercel function for the post-loop work: the ~58s CONCURRENTLY
+ *  charge-rollup refresh (measured 2026-07-13, 481k logical charges) + cache revalidate. Unfinished
+ *  customers catch up next run (idempotent + self-healing), so a tighter budget only lengthens the
+ *  tail on the heaviest days — it never drops data. */
+const DEFAULT_BUDGET_MS = 210_000;
 
 /** Non-fatal freshness/expiry thresholds (logged as warnings; never fail the run). */
 const STALE_AFTER_DAYS = 10; // newest payment_date this far behind `now` ⇒ pipeline may be stalled
@@ -127,6 +130,13 @@ export interface CmdExplorerCronDeps {
    *  wins is stamped on every insert and scoped into every delete + the transaction GUC
    *  (withTenant) — never inferred from the data. */
   businessEntityId: string;
+  /**
+   * Refresh the 0050 charge-grain matview after inserts (the aggregate read surface — see the
+   * migration header). In prod: writer-pool `select collections.refresh_cmd_explorer_charge_rollup()`.
+   * NON-FATAL by contract: a failed/timed-out refresh leaves the matview stale-but-correct and the
+   * next run heals it, so it must never fail the money-path ingest.
+   */
+  refreshChargeRollup?: () => void | Promise<void>;
   /** Bust the explorer's non-PHI cache after a successful pass. In prod: () => revalidateTag('cmd-explorer'). */
   revalidate?: () => void | Promise<void>;
   /** Bust the dashboard aggregate cache (Master BXR chart). In prod: () => revalidateTag('dashboard-aggregates'). */
@@ -161,6 +171,15 @@ export interface CmdExplorerCronStats {
   daily_rows_inserted: number;
   /** Prior source_tag='cmd' daily rows deleted (per-facility replace). */
   daily_rows_deleted: number;
+  /**
+   * Wall-clock ms of the post-insert charge-rollup REFRESH ... CONCURRENTLY (0050), or null when
+   * no refresh ran this pass (deposit-only / no-op — charge_inserted was 0). NEVER 0 for "didn't
+   * run": 0 would misread as "refreshed instantly", null correctly means "no refresh this pass".
+   * Set on BOTH the success AND the caught-failure path, so a slow/timed-out refresh surfaces as a
+   * large number here (never null), matching the log line. Feeds the cron wall-clock budget check
+   * (DEFAULT_BUDGET_MS) — CONCURRENTLY is diff-based and slower than a plain refresh.
+   */
+  charge_rollup_refresh_ms: number | null;
   /** Newest payment_date ingested this run (ISO 'YYYY-MM-DD'), or null if nothing landed. */
   max_payment_date: string | null;
   /** Non-fatal operational warnings (stale data / filter-window expiry). Empty ⇒ healthy. */
@@ -192,6 +211,7 @@ export async function cmdExplorerCron(deps: CmdExplorerCronDeps): Promise<CmdExp
     charge_inserted: 0,
     daily_rows_inserted: 0,
     daily_rows_deleted: 0,
+    charge_rollup_refresh_ms: null,
     max_payment_date: null,
     freshness_warnings: [],
   };
@@ -252,6 +272,31 @@ export async function cmdExplorerCron(deps: CmdExplorerCronDeps): Promise<CmdExp
       stats.customers_failed += 1;
       console.error(
         `cmd-explorer cron: customer ${customerId} (${facilityCode}) failed: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+  }
+
+  // Refresh the charge-grain matview BEFORE busting caches (a re-primed cache must see the new
+  // rollup, not the stale one). Only when charge rows actually landed — a no-op pass changes
+  // nothing the matview summarizes. Non-fatal: ingest already committed; a missed refresh is
+  // stale-but-correct and the next run heals it.
+  if (stats.charge_inserted > 0 && deps.refreshChargeRollup) {
+    const refreshStarted = now();
+    try {
+      await deps.refreshChargeRollup();
+      stats.charge_rollup_refresh_ms = now() - refreshStarted;
+      console.log(
+        `cmd-explorer cron: charge-rollup refresh ok in ${stats.charge_rollup_refresh_ms}ms ` +
+          `(${stats.charge_inserted} charge rows inserted)`,
+      );
+    } catch (err) {
+      // Record elapsed ms even on failure BEFORE swallowing, so a timeout surfaces as a large
+      // number in the JSON return (not null) and the field never disagrees with the log line.
+      stats.charge_rollup_refresh_ms = now() - refreshStarted;
+      console.error(
+        `cmd-explorer cron: charge-rollup refresh FAILED after ${stats.charge_rollup_refresh_ms}ms ` +
+          `(non-fatal, matview stale until next run heals): ` +
           (err instanceof Error ? err.message : String(err)),
       );
     }

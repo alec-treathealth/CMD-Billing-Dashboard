@@ -40,7 +40,9 @@ import {
   loadCmdExplorerNonPhi,
   loadCmdSearchSummary as loadCmdSearchSummary_,
   loadCohortCurve as loadCohortCurve_,
+  loadCohortDrilldown as loadCohortDrilldown_,
   cmdExplorerFacilities,
+  cmdExplorerPayers,
   recordAccess,
   revealCmdExplorerRow,
   revealCmdExplorerRows,
@@ -61,6 +63,9 @@ import {
   type CmdFacilityOption,
   type CohortCurve,
   type CohortCurvePoint,
+  type CohortDrilldownAggregate,
+  type CohortDrilldownTable,
+  type CohortDrilldownResult,
   type GridViewRow,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
@@ -201,6 +206,9 @@ export type {
   CmdFacilityOption,
   CohortCurve,
   CohortCurvePoint,
+  CohortDrilldownAggregate,
+  CohortDrilldownTable,
+  CohortDrilldownResult,
   GridViewRow,
 };
 
@@ -723,6 +731,8 @@ export interface CmdReportFilter {
   cpt_code?: string;
   revenue_code?: string;
   primary_payer?: string;
+  /** Multi-select payer tags (guided payer search) — set membership; empty/absent = all payers. */
+  primary_payers?: string[];
   /**
    * Searchable-PHI terms (raw). Resolved SERVER-SIDE to blind-index tokens, gated to
    * PHI-entitled roles, and audited — the raw terms are never stored, logged, or sent to SQL.
@@ -804,6 +814,28 @@ function applyFacilityFilter(filter: CmdReportFilter, readerFilter: { facility?:
     if (typeof f !== 'string' || f.length === 0 || f.length > CMD_FACILITY_NAME_MAX) return false;
   }
   readerFilter.facility = facilities;
+  return true;
+}
+
+/** Max payers in one multi-select (bounded input; a tenant has ~260 distinct today). */
+const CMD_PAYER_SET_MAX = 300;
+/** Max length of a single payer string (payer names are short; matches the exact-match discipline). */
+const CMD_PAYER_NAME_MAX = 200;
+
+/**
+ * Validate + copy the payer multi-select into the reader filter — the payer analogue of
+ * applyFacilityFilter. An empty/absent array is a no-op ("all payers", the reader omits the
+ * condition), NOT a match-nothing filter. Bounds the set size and each element's length. Returns
+ * false on a hard rejection.
+ */
+function applyPayerFilter(filter: CmdReportFilter, readerFilter: { primary_payers?: string[] }): boolean {
+  if (!Array.isArray(filter.primary_payers) || filter.primary_payers.length === 0) return true;
+  const payers = filter.primary_payers;
+  if (payers.length > CMD_PAYER_SET_MAX) return false;
+  for (const p of payers) {
+    if (typeof p !== 'string' || p.length === 0 || p.length > CMD_PAYER_NAME_MAX) return false;
+  }
+  readerFilter.primary_payers = payers;
   return true;
 }
 
@@ -929,9 +961,11 @@ export async function loadCmdReport(
     cpt_code?: string;
     revenue_code?: string;
     primary_payer?: string;
+    primary_payers?: string[];
     phiIndex?: PhiIndexTokens;
   } = {};
   if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
+  if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
   if (!applySearchFilter(filter, readerFilter)) {
     return { ok: false, error: 'Invalid search.' };
   }
@@ -973,9 +1007,11 @@ export async function loadCmdSearchSummary(
     cpt_code?: string;
     revenue_code?: string;
     primary_payer?: string;
+    primary_payers?: string[];
     phiIndex?: PhiIndexTokens;
   } = {};
   if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
+  if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
   if (!applySearchFilter(filter, readerFilter)) return { ok: false, error: 'Invalid search.' };
   if (!applyDateWindow(filter, readerFilter)) return { ok: false, error: 'Invalid date window.' };
   // PHI search: gate (canRevealPhi) + resolve tokens; audit happens in loadCmdReport (the
@@ -1024,6 +1060,46 @@ export async function loadCohortCurve(
   }
 }
 
+export type CohortDrilldownActionResult =
+  | { ok: true; drilldown: CohortDrilldownResult }
+  | { ok: false; error: string };
+
+/**
+ * Drilldown for ONE clicked cohort-curve point (Session G) — an aggregate breakdown (payer mix,
+ * CPT/rev mix) for that exact bucket, plus an optional patient table gated by a stricter, separate
+ * floor (COHORT_DRILLDOWN_TABLE_MIN_PATIENTS). Same gate+audit shape as loadCohortCurve, but audited
+ * as its OWN distinct access (`reveal_cmd_explorer_row(s)`-style, not piggybacked on the curve's
+ * audit) — this is new disclosure surface (per-point breakdown, potentially per-row PHI-masked
+ * data), so it gets its own audit trail entry independent of the curve fetch that preceded it.
+ *
+ * Tenant-scoped SERVER-SIDE from the RBAC-clamped view (same `entityIds` derivation as every other
+ * collections reader); the reader independently re-derives `patients` for this exact bucket and
+ * fails closed (null) if it doesn't clear COHORT_MIN_PATIENTS — a forged/stale bucket argument gets
+ * nothing, never a partial answer.
+ */
+export async function loadCohortDrilldown(
+  alphaPrefix: string,
+  axis: 'position' | 'days',
+  bucket: number,
+  view?: DashboardView,
+): Promise<CohortDrilldownActionResult> {
+  const entityIds = await viewEntityScope(view);
+  if (entityIds === null) return { ok: false, error: 'The point detail could not be loaded right now.' };
+  if (axis !== 'position' && axis !== 'days') return { ok: false, error: 'Invalid point.' };
+  if (!Number.isInteger(bucket) || bucket < 0) return { ok: false, error: 'Invalid point.' };
+  const phi = await resolvePhiSearch({ alphaPrefix }, view, true);
+  if (!phi.ok) return { ok: false, error: phi.error };
+  const token = phi.phiIndex?.memberIdPrefixBidx;
+  if (!token) return { ok: false, error: 'That point is no longer available — try again.' };
+  try {
+    const drilldown = await loadCohortDrilldown_(token, entityIds, axis, bucket);
+    if (!drilldown) return { ok: false, error: 'That point is no longer available — try again.' };
+    return { ok: true, drilldown };
+  } catch {
+    return { ok: false, error: 'The point detail could not be loaded right now.' };
+  }
+}
+
 export type CmdFacilitiesResult = { ok: true; facilities: CmdFacilityOption[] } | { ok: false };
 
 /**
@@ -1038,6 +1114,23 @@ export async function loadCmdExplorerFacilities(view?: DashboardView): Promise<C
   if (entityIds === null) return { ok: false };
   try {
     return { ok: true, facilities: await cmdExplorerFacilities(entityIds) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export type CmdPayersResult = { ok: true; payers: string[] } | { ok: false };
+
+/**
+ * Payer options for the guided payer search (non-PHI): the distinct payer names present in the
+ * caller's tenant, RBAC-clamped by `view` (server-derived entity scope). Cached reader-only; the
+ * client loads this once and filters it as the user types. Never returns PHI.
+ */
+export async function loadCmdExplorerPayers(view?: DashboardView): Promise<CmdPayersResult> {
+  const entityIds = await viewEntityScope(view);
+  if (entityIds === null) return { ok: false };
+  try {
+    return { ok: true, payers: await cmdExplorerPayers(entityIds) };
   } catch {
     return { ok: false };
   }

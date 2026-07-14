@@ -25,22 +25,21 @@ import {
   ArrowUp,
   ArrowUpDown,
   Bookmark,
+  Building2,
   Check,
   ChevronDown,
   Columns3,
   CreditCard,
   Eye,
   EyeOff,
-  Filter,
   Fingerprint,
   GripVertical,
   Layers,
   Lock,
   RotateCcw,
   Save,
-  Search,
   Star,
-  Stethoscope,
+  Table2,
   Trash2,
   TrendingDown,
   X,
@@ -86,7 +85,9 @@ import {
   loadCmdReport,
   loadCmdSearchSummary,
   loadCmdExplorerFacilities,
+  loadCmdExplorerPayers,
   loadCohortCurve,
+  loadCohortDrilldown,
   revealCmdReportRows,
   listGridViews,
   saveGridView,
@@ -103,6 +104,8 @@ import {
   type GridViewsResult,
   type CohortCurve,
   type CohortCurvePoint,
+  type CohortDrilldownResult,
+  type CohortDrilldownTable,
   type GridViewRow,
 } from '@/lib/actions';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../../src/collections/cmdExplorer';
@@ -157,19 +160,6 @@ const SORTABLE_KEYS = new Set<string>([
 // (right-aligned, sortable) — this set only overrides how cellText formats them.
 const IS_PERCENT = new Set<string>(['pct_allowed', 'pct_paid']);
 
-// Search scope FOLLOWS the visible columns — one unified "columns" concept, no separate search-scope
-// picker. The free-text term matches only the 4 TEXT columns currently shown: facility / payer / CPT
-// code / revenue code. The money + date columns are deliberately NOT substring-searchable (a leading-
-// wildcard ILIKE on them can't be indexed and doubled the per-keystroke cost — the date window, sort
-// headers, and drill chips cover money/date); the pct_* ratios and the 3 encrypted PHI columns are
-// out too. This set mirrors the server's CMD_EXPLORER_SEARCH_COLUMNS exactly; the server independently
-// re-enforces it, so hiding a column narrows search but can never widen it beyond these four.
-const SEARCHABLE_KEYS = new Set<string>(['facility', 'primary_payer', 'cpt_code', 'revenue_code']);
-
-// Minimum free-text term length before a search fires (mirrors the server's CMD_SEARCH_TERM_MIN). A
-// 1–2 char prefix matches a huge slice of the table and is a throwaway mid-typing query, so the UI
-// stays in browse mode until the term is long enough — the server re-enforces the same floor.
-const MIN_SEARCH_LEN = 3;
 
 /**
  * Reconstruct a saved view into this component's { order, hidden } layout. Thin typed wrapper over the
@@ -266,6 +256,15 @@ type CohortState =
   | { kind: 'ready'; data: CohortCurve }
   | { kind: 'refreshing'; data: CohortCurve };
 
+/** One clicked cohort-curve point — which axis + which bucket on that axis. */
+type CohortPoint = { axis: 'position' | 'days'; bucket: number };
+
+/** Fetch state for the drilldown of the currently-selected cohort point (Session G). */
+type DrilldownState =
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string }
+  | { kind: 'ready'; data: CohortDrilldownResult };
+
 /**
  * Keep a conditionally-rendered node mounted through its exit animation. Returns `rendered` (mount
  * flag) and `exiting` (true during the exit window) so the caller can swap enter/exit animations.
@@ -323,15 +322,10 @@ export function CmdCollectionsExplorer({
     seededReport ? 'ready' : 'loading',
   );
 
-  // Smart search. `searchInput` is the raw box; `term` is its debounced value (drives fetches).
-  // The term matches the SEARCHABLE columns that are currently SHOWN (see `searchCols`, derived from
-  // `order` below) — there is no separate search-scope picker. `refinement` is an exact filter
-  // applied by clicking a summary chip. Month/Year window is retained.
-  const [searchInput, setSearchInput] = useState('');
-  // 550ms (was 350): the free-text term drives the 5-query aggregate summary burst, so a longer
-  // debounce collapses more of a fast typist's keystrokes into a single fetch. The exact-match PHI
-  // lookups below stay at 350ms — they're cheap indexed equality, not the expensive substring scan.
-  const term = useDebouncedValue(searchInput, 550);
+  // Guided search (replaces the old free-text bar): Facility + Payer are multi-select tag pickers
+  // (facilitySelection / payerSelection below). `refinement` is now ONLY the (CPT × Revenue-code)
+  // combo drill from the summary combo table — facility/payer summary clicks add tags instead of
+  // setting a single refinement (see applyRefinement).
   const [refinement, setRefinement] = useState<Refinement | null>(null);
   const [year, setYear] = useState(YEAR_OPTIONS[0]!);
   const [month, setMonth] = useState(0); // 0 = All months
@@ -348,7 +342,10 @@ export function CmdCollectionsExplorer({
     () => seededFacilities ?? [],
   );
   const [facilitySelection, setFacilitySelection] = useState<string[]>([]);
-  const [facilityPickerOpen, setFacilityPickerOpen] = useState(false);
+  // Payer multi-select (guided payer search). The distinct-payer vocabulary is near-static, so it's
+  // loaded once per view (like facilities) and filtered client-side as the user types.
+  const [payerOptions, setPayerOptions] = useState<string[]>([]);
+  const [payerSelection, setPayerSelection] = useState<string[]>([]);
 
   // Searchable PHI (gated to canRevealPhi + audited server-side). These are matched via keyed
   // blind indexes (exact member ID / 3-char alpha prefix / exact group #) — the raw value is
@@ -377,6 +374,11 @@ export function CmdCollectionsExplorer({
   // while it fades OUT — by exit time the live `cohort` state has already reset to idle.
   const cohortSnapshotRef = useRef<{ data: CohortCurve; prefix: string } | null>(null);
 
+  // Cohort-point drilldown (Session G): which point is selected (null = none), and its fetch state.
+  // Independent of `cohort`/`cohortPresence` above — selecting a point does not affect the curve.
+  const [drilldownPoint, setDrilldownPoint] = useState<CohortPoint | null>(null);
+  const [drilldown, setDrilldown] = useState<DrilldownState | null>(null);
+
   // A facility/payer refinement AND the facility multi-select are tenant-specific; a term is generic.
   // Reset both when the view (tenant) changes so a stale drill-down / facility set doesn't filter the
   // new tenant to zero rows. (React "adjust state on prop change" — runs once before the reload effect.)
@@ -385,6 +387,7 @@ export function CmdCollectionsExplorer({
     setPrevView(view);
     setRefinement(null);
     setFacilitySelection([]);
+    setPayerSelection([]);
   }
 
   // Server-side sort. Default: most-recent Payment Received first.
@@ -458,21 +461,36 @@ export function CmdCollectionsExplorer({
   const reqRef = useRef(0);
   const gridRef = useRef<HTMLDivElement>(null);
 
-  // Search scope FOLLOWS visibility: the term matches the searchable columns currently shown (in
-  // display order). Hiding a column removes it from search too; there is one "columns" concept.
-  // Derived from `visibleOrder` (NOT the full `order`) so hidden columns never widen the search.
-  const searchCols = visibleOrder.filter((k) => SEARCHABLE_KEYS.has(k));
-  const trimmedTerm = term.trim();
-  const hasSearch = trimmedTerm.length >= MIN_SEARCH_LEN && searchCols.length > 0;
-  const hasAnySearch = hasSearch || hasPhiSearch;
-  // The user has started typing but hasn't reached the minimum yet (and isn't doing a PHI lookup) —
-  // show a gentle hint instead of silently doing nothing. Driven by the RAW input (not the debounced
-  // term) so it appears/clears as they type rather than 550ms later.
-  const rawTerm = searchInput.trim();
-  const belowMinTerm = !hasPhiSearch && rawTerm.length > 0 && rawTerm.length < MIN_SEARCH_LEN;
-  // Stable dep keys for the sets (array identity changes on every toggle otherwise).
-  const searchColsKey = searchCols.join(',');
+  // A "search" is now any active guided selection: facility tags, payer tags, or a PHI lookup.
+  // (The free-text term + column-scoped substring search were removed with the search bar.)
+  const hasAnySearch = facilitySelection.length > 0 || payerSelection.length > 0 || hasPhiSearch;
+  // Stable dep keys for the selection sets (array identity changes on every toggle otherwise).
+  const payerKey = payerSelection.join('\n');
   const facilityKey = facilitySelection.join(''); // control char can't appear in a facility name
+
+  // Raw CMD facility text → curated friendly name from the already-loaded dimension options, for
+  // DISPLAY only (the Top facilities summary card). Drill/filter values stay the raw facility text
+  // the grid matches on, so no server change is needed. Falls back to raw when unmapped.
+  const facilityDisplayName = useMemo(() => {
+    const m = new Map(facilityOptions.map((o) => [o.facility, o.facility_name ?? o.facility]));
+    return (raw: string) => m.get(raw) ?? raw;
+  }, [facilityOptions]);
+
+  // Options for the guided pickers. Facility carries a friendly display name + IP/OP/Both badge;
+  // payer is a plain name. `value` (raw facility text / payer name) is what the grid filters on.
+  const facilityPickerOptions = useMemo<PickerOption[]>(
+    () =>
+      facilityOptions.map((o) => ({
+        value: o.facility,
+        display: o.facility_name ?? o.facility,
+        badge: o.care_setting,
+      })),
+    [facilityOptions],
+  );
+  const payerPickerOptions = useMemo<PickerOption[]>(
+    () => payerOptions.map((p) => ({ value: p, display: p })),
+    [payerOptions],
+  );
 
   // Load the tenant-scoped facility options for the multi-select whenever the view changes.
   useEffect(() => {
@@ -488,6 +506,22 @@ export function CmdCollectionsExplorer({
       })
       .catch(() => {
         if (live) setFacilityOptions([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [view]);
+
+  // Load the tenant-scoped payer options for the guided payer search whenever the view changes.
+  // No server seed for payers (unlike facilities), so this always fetches on mount + view change.
+  useEffect(() => {
+    let live = true;
+    loadCmdExplorerPayers(view)
+      .then((r) => {
+        if (live) setPayerOptions(r.ok ? r.payers : []);
+      })
+      .catch(() => {
+        if (live) setPayerOptions([]);
       });
     return () => {
       live = false;
@@ -557,10 +591,9 @@ export function CmdCollectionsExplorer({
       year?: number;
       month?: number;
       recencyDays?: number;
-      q?: string;
-      searchColumns?: string[];
       facility?: string[];
       primary_payer?: string;
+      primary_payers?: string[];
       cpt_code?: string;
       revenue_code?: string;
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
@@ -572,10 +605,7 @@ export function CmdCollectionsExplorer({
       f.year = year;
       f.month = month;
     }
-    if (hasSearch) {
-      f.q = term.trim();
-      f.searchColumns = searchCols;
-    }
+    if (payerSelection.length > 0) f.primary_payers = payerSelection;
     // Facility multi-select is a top-level scope; a facility drill-down chip narrows to that ONE
     // facility (overriding the dropdown). Payer/CPT chips stay exact single-value refinements.
     if (facilitySelection.length > 0) f.facility = facilitySelection;
@@ -608,7 +638,7 @@ export function CmdCollectionsExplorer({
     // year only matters when a specific month is chosen (see original rationale); facilityKey is the
     // stable proxy for facilitySelection's contents.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [term, searchColsKey, hasSearch, recencyDays, month, month > 0 ? year : 0, facilityKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
+  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
 
   const loadPage = useCallback(
     async (
@@ -684,18 +714,14 @@ export function CmdCollectionsExplorer({
       prev.kind === 'ready' || prev.kind === 'refreshing' ? { kind: 'refreshing', data: prev.data } : { kind: 'loading' },
     );
     const f: {
-      q?: string;
-      searchColumns?: string[];
       year?: number;
       month?: number;
       recencyDays?: number;
       facility?: string[];
+      primary_payers?: string[];
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
     } = {};
-    if (hasSearch) {
-      f.q = term.trim();
-      f.searchColumns = searchCols;
-    }
+    if (payerSelection.length > 0) f.primary_payers = payerSelection;
     // Top-level scope (date window + facility set) applies to the summary too — so the drill lists
     // describe the SAME population the grid shows. The chip refinement does NOT (it's a within-
     // results drill; the chips stay a stable facet navigator while drilling).
@@ -725,12 +751,15 @@ export function CmdCollectionsExplorer({
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [term, searchColsKey, hasSearch, hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, view]);
+  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, view]);
 
   // Fetch the alpha-prefix cohort curve when a ≥3-char alpha-prefix search is active (PHI-gated).
   // Independent of the term/window/facility filters: the cohort is defined solely by the prefix +
   // tenant, so a patient's full lifetime sequence stays intact (not truncated to the grid window).
   useEffect(() => {
+    // A changed prefix/tenant invalidates any drilldown selection from the PRIOR curve — a bucket
+    // number from one cohort means nothing against another.
+    setDrilldownPoint(null);
     if (!cohortActive) {
       setCohort({ kind: 'idle' });
       return;
@@ -751,6 +780,27 @@ export function CmdCollectionsExplorer({
       live = false;
     };
   }, [cohortActive, dAlpha, view]);
+
+  // Fetch the drilldown for the currently-selected cohort point (Session G). Independent of the
+  // curve fetch above — re-fires only when the SELECTED POINT changes, not on every curve refresh.
+  useEffect(() => {
+    if (!drilldownPoint) {
+      setDrilldown(null);
+      return;
+    }
+    let live = true;
+    setDrilldown({ kind: 'loading' });
+    loadCohortDrilldown(dAlpha, drilldownPoint.axis, drilldownPoint.bucket, view)
+      .then((r) => {
+        if (live) setDrilldown(r.ok ? { kind: 'ready', data: r.drilldown } : { kind: 'error', message: r.error });
+      })
+      .catch(() => {
+        if (live) setDrilldown({ kind: 'error', message: 'The point detail could not be loaded right now.' });
+      });
+    return () => {
+      live = false;
+    };
+  }, [drilldownPoint, dAlpha, view]);
 
   // Snapshot the last resolved cohort so the panel can render it while fading out (by exit time the
   // live state has reset to idle). Presentation only — no fetch involvement.
@@ -815,28 +865,22 @@ export function CmdCollectionsExplorer({
     if (res.ok) await refreshViews();
   }
 
-  // --- facility multi-select handlers ---------------------------------------
+  // --- facility + payer multi-select handlers (guided search) ---------------
   function toggleFacility(value: string) {
     setFacilitySelection((prev) =>
       prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
     );
   }
-  function selectAllFacilities() {
-    setFacilitySelection(facilityOptions.map((o) => o.facility));
-  }
   function clearFacilities() {
     setFacilitySelection([]);
   }
-  /**
-   * Add every facility in a care-setting group to the selection (union — composes with other
-   * groups). A facility classified 'BOTH' matches BOTH the IP and OP groups, mirroring migration
-   * 0035's chart semantics. Facilities with no care_setting (Unclassified) join no group.
-   */
-  function selectCareSettingGroup(cs: 'IP' | 'OP') {
-    const matches = facilityOptions
-      .filter((o) => o.care_setting === cs || o.care_setting === 'BOTH')
-      .map((o) => o.facility);
-    setFacilitySelection((prev) => [...new Set([...prev, ...matches])]);
+  function togglePayer(value: string) {
+    setPayerSelection((prev) =>
+      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
+    );
+  }
+  function clearPayers() {
+    setPayerSelection([]);
   }
 
   /** Pick a rolling recency window (toggle off if re-clicked); clears any Month/Year selection. */
@@ -847,9 +891,18 @@ export function CmdCollectionsExplorer({
 
   /** Apply (or toggle off) a single-field drill-down refinement from a summary chip. */
   function applyRefinement(kind: RefineKind, value: string) {
-    setRefinement((prev) =>
-      prev && prev.kind === kind && 'value' in prev && prev.value === value ? null : { kind, value },
-    );
+    // Facility/payer summary clicks ADD a tag to the guided search (dedup) — unifying the drill with
+    // the pickers. Any other kind falls back to the single refinement (none is emitted today; the CPT
+    // card was replaced by facilities). The CPT×Rev combo table uses applyComboRefinement, not this.
+    if (kind === 'facility') {
+      setFacilitySelection((prev) => (prev.includes(value) ? prev : [...prev, value]));
+    } else if (kind === 'primary_payer') {
+      setPayerSelection((prev) => (prev.includes(value) ? prev : [...prev, value]));
+    } else {
+      setRefinement((prev) =>
+        prev && prev.kind === kind && 'value' in prev && prev.value === value ? null : { kind, value },
+      );
+    }
     requestAnimationFrame(() => gridRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
   }
 
@@ -864,6 +917,14 @@ export function CmdCollectionsExplorer({
         : { kind: 'combo', cpt, revenue },
     );
     requestAnimationFrame(() => gridRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
+  }
+
+  /**
+   * Select (or toggle off) a cohort-curve point to open its drilldown. Purely a UI selection — it
+   * does not touch the grid's `refinement`/search state, unlike applyRefinement above.
+   */
+  function selectDrilldownPoint(axis: 'position' | 'days', bucket: number) {
+    setDrilldownPoint((prev) => (prev && prev.axis === axis && prev.bucket === bucket ? null : { axis, bucket }));
   }
 
   // Decrypt the CURRENT page's PHI via the audited server action. Unchanged reveal logic — just
@@ -929,59 +990,37 @@ export function CmdCollectionsExplorer({
     facilitySelection.length === 0
       ? 'All facilities'
       : `${facilitySelection.length} facilit${facilitySelection.length === 1 ? 'y' : 'ies'}`;
+  const payerLabel =
+    payerSelection.length === 0
+      ? 'All payers'
+      : `${payerSelection.length} payer${payerSelection.length === 1 ? '' : 's'}`;
 
   return (
     <div className="space-y-4">
       {/* ---- Search hero -------------------------------------------------- */}
       <div className="rounded-xl border border-line bg-card p-4 shadow-ths">
-        <div className="flex flex-wrap items-center gap-3">
-          {/* Search box — grows to fill the row. */}
-          <div className="relative min-w-[16rem] flex-1">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink400" aria-hidden />
-            <input
-              type="search"
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              placeholder="Search collections — facility, payer, CPT, revenue code…"
-              aria-label="Search collections"
-              maxLength={120}
-              className="h-10 w-full rounded-lg border border-line bg-surface pl-9 pr-3 text-sm text-ink900 outline-none transition-colors placeholder:text-ink400 focus:border-[var(--brand-accent)] focus:ring-2 focus:ring-[var(--brand-accent)]/25"
-            />
-          </div>
-
-          {/* Facility multi-select — scopes WHICH facilities' rows show. Empty = all facilities. */}
-          <div className="relative">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              aria-expanded={facilityPickerOpen}
-              aria-haspopup="true"
-              onClick={() => setFacilityPickerOpen((o) => !o)}
-              className={[
-                'border-line bg-[var(--brand-soft)]/50 text-ink900 hover:bg-[var(--brand-soft)]',
-                facilityPickerOpen ? 'bg-[var(--brand-soft)] ring-1 ring-[var(--brand-accent)]/40' : '',
-              ].join(' ')}
-            >
-              <Filter className="h-4 w-4" aria-hidden />
-              Facilities
-              <span className="ml-1 rounded-full bg-[var(--brand-soft)] px-1.5 text-[11px] font-semibold text-[var(--brand-ink)]">
-                {facilitySelection.length === 0 ? 'All' : facilitySelection.length}
-              </span>
-              <ChevronDown className="h-3.5 w-3.5 opacity-60" aria-hidden />
-            </Button>
-            {facilityPickerOpen && (
-              <FacilityFilter
-                options={facilityOptions}
-                selected={facilitySelection}
-                onToggle={toggleFacility}
-                onSelectAll={selectAllFacilities}
-                onClear={clearFacilities}
-                onSelectGroup={selectCareSettingGroup}
-                onClose={() => setFacilityPickerOpen(false)}
-              />
-            )}
-          </div>
+        <div className="flex flex-wrap items-end gap-3">
+          {/* Guided search — Facility + Payer multi-select tag pickers (replaces the old free-text
+              bar + facility dropdown). Both scope the grid AND the summary; empty = no restriction.
+              Options load once per tenant and filter client-side as the user types. */}
+          <MultiSelectTagPicker
+            label="Facility"
+            placeholder="Type to find facilities…"
+            icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
+            options={facilityPickerOptions}
+            selected={facilitySelection}
+            onToggle={toggleFacility}
+            onClear={clearFacilities}
+          />
+          <MultiSelectTagPicker
+            label="Payer"
+            placeholder="Type to find payers…"
+            icon={<CreditCard className="h-3.5 w-3.5" aria-hidden />}
+            options={payerPickerOptions}
+            selected={payerSelection}
+            onToggle={togglePayer}
+            onClear={clearPayers}
+          />
 
           {/* Unified time window (A): ONE segmented control — [7d][14d][30d][Month/Year ▾] — with an
               "All months" REST STATE (no segment active). Each segment drives the SAME state setters
@@ -1093,10 +1132,8 @@ export function CmdCollectionsExplorer({
         <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span>
             {hasAnySearch
-              ? `${hasSearch ? `Searching ${searchCols.length} shown column${searchCols.length === 1 ? '' : 's'}` : 'Patient lookup'} · ${facilityLabel} · ${windowLabel}`
-              : belowMinTerm
-                ? `Type at least ${MIN_SEARCH_LEN} characters to search · Browsing ${facilityLabel} · ${windowLabel}`
-                : `Browsing ${facilityLabel} · ${windowLabel} — type to search`}
+              ? `${facilityLabel} · ${payerLabel} · ${windowLabel}`
+              : `Browsing ${facilityLabel} · ${payerLabel} · ${windowLabel} — pick a facility or payer to search`}
           </span>
           {refinement && (
             <button
@@ -1115,10 +1152,11 @@ export function CmdCollectionsExplorer({
       {hasAnySearch && (
         <SearchSummaryPanel
           state={summary}
-          label={hasSearch ? `“${term.trim()}”` : 'your search'}
+          label="your selection"
           refinement={refinement}
           onDrill={applyRefinement}
           onDrillCombo={applyComboRefinement}
+          facilityDisplayName={facilityDisplayName}
         />
       )}
 
@@ -1128,12 +1166,29 @@ export function CmdCollectionsExplorer({
       {cohortPresence.rendered && (
         <div className={cohortPresence.exiting ? 'animate-ths-exit' : 'animate-ths-reveal'}>
           {cohortPresence.exiting && cohortSnapshotRef.current ? (
+            // Frozen snapshot fading out — drilldownPoint is already cleared by the effect above
+            // (it resets on any cohortActive/prefix change), so no live selection to render here.
             <CohortCurvePanel
               state={{ kind: 'ready', data: cohortSnapshotRef.current.data }}
               prefix={cohortSnapshotRef.current.prefix}
+              selectedPoint={null}
+              drilldown={null}
+              onSelectPoint={() => {}}
+              onCloseDrilldown={() => {}}
             />
           ) : (
-            <CohortCurvePanel state={cohort} prefix={dAlpha} />
+            <CohortCurvePanel
+              state={cohort}
+              prefix={dAlpha}
+              // P1 scope disclosure: with an exact Member-ID lookup active the grid narrows to
+              // (usually) one patient while this panel still shows the whole prefix cohort — the
+              // panel de-emphasizes itself and says so.
+              memberIdActive={dMember !== ''}
+              selectedPoint={drilldownPoint}
+              drilldown={drilldown}
+              onSelectPoint={selectDrilldownPoint}
+              onCloseDrilldown={() => setDrilldownPoint(null)}
+            />
           )}
         </div>
       )}
@@ -1141,8 +1196,12 @@ export function CmdCollectionsExplorer({
       {/* ---- Detail grid -------------------------------------------------- */}
       <div ref={gridRef} className="space-y-3">
         <div className="flex items-center justify-between gap-3">
+          {/* The grid pages SNAPSHOT/POSTING rows (full history — one charge line can appear once
+              per payment posting/state change), while the summary above counts logical charge
+              lines on the 0050 rollup. Two grains, two labels — on purpose. */}
           <p className="text-sm text-muted-foreground">
-            {hasAnySearch ? 'Matching charge lines' : 'Charge lines'} · {rows.length.toLocaleString()} on this page
+            {hasAnySearch ? 'Matching posting rows' : 'Posting rows'} · {rows.length.toLocaleString()} on this
+            page · one charge line may appear once per payment posting
           </p>
           <div className="flex items-center gap-2">
             {/* Column layout + saved views — a GRID control (lives on the grid toolbar, not the search
@@ -1309,120 +1368,173 @@ export function CmdCollectionsExplorer({
  * exists — a facility classified BOTH counts for both), and individual checkboxes with a care-setting
  * badge. A full-screen invisible backdrop closes it on outside click.
  */
-function FacilityFilter({
+/** One option in a guided picker. `value` is the raw filter value the grid matches on; `display`
+ *  is the friendly label shown; `badge` (facility only) shows the IP/OP/Both care setting. */
+type PickerOption = { value: string; display: string; badge?: 'IP' | 'OP' | 'BOTH' | null };
+
+/**
+ * Guided multi-select "type-ahead + tags" picker — the search primitive that replaces the old
+ * free-text bar + facility dropdown. The parent loads the full option list ONCE (facility ~30,
+ * payer ~260 per tenant), so filtering is instant client-side as the user types — no per-keystroke
+ * server round-trip. Selected values render as removable tags inside the control; a filtered list
+ * drops below on focus/typing (capped, with a "keep typing" hint past the cap). Matches the
+ * dashboard token system — no new design language.
+ */
+function MultiSelectTagPicker({
+  label,
+  placeholder,
+  icon,
   options,
   selected,
   onToggle,
-  onSelectAll,
   onClear,
-  onSelectGroup,
-  onClose,
 }: {
-  options: CmdFacilityOption[];
+  label: string;
+  placeholder: string;
+  icon: React.ReactNode;
+  options: PickerOption[];
   selected: string[];
   onToggle: (value: string) => void;
-  onSelectAll: () => void;
   onClear: () => void;
-  onSelectGroup: (cs: 'IP' | 'OP') => void;
-  onClose: () => void;
 }) {
-  const selectedSet = new Set(selected);
-  const hasIp = options.some((o) => o.care_setting === 'IP' || o.care_setting === 'BOTH');
-  const hasOp = options.some((o) => o.care_setting === 'OP' || o.care_setting === 'BOTH');
-  return (
-    <>
-      <button
-        type="button"
-        aria-label="Close facility filter"
-        className="fixed inset-0 z-40 cursor-default"
-        onClick={onClose}
-      />
-      <div
-        role="dialog"
-        aria-label="Filter by facility"
-        className="absolute left-0 top-full z-50 mt-2 w-80 animate-ths-reveal rounded-lg border border-line bg-surface p-3 shadow-ths"
-      >
-        <div className="mb-1 flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          <span>Show facilities</span>
-          <span className="font-normal normal-case">
-            {selected.length === 0 ? 'All facilities' : `${selected.length} selected`}
-          </span>
-        </div>
-        {selected.length === 0 && (
-          <p className="mb-2 text-[11px] text-ink400">
-            No filter — showing every facility. Check any below to narrow.
-          </p>
-        )}
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const displayOf = useMemo(() => new Map(options.map((o) => [o.value, o.display])), [options]);
 
-        <div className="mb-2 flex flex-wrap items-center gap-1.5 border-b border-line pb-2">
-          <button
-            type="button"
-            onClick={onSelectAll}
-            disabled={options.length === 0}
-            className="rounded-md border border-line px-2 py-0.5 text-xs text-ink900 transition-colors hover:bg-[var(--brand-soft)] disabled:opacity-40"
-          >
-            Select all
-          </button>
+  // Dismiss on outside pointer-down or Escape (same pattern as the Month/Year + view-switcher popovers).
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e: PointerEvent) {
+      if (!boxRef.current?.contains(e.target as Node)) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false);
+    }
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const q = query.trim().toLowerCase();
+  const CAP = 50;
+  const matches = useMemo(
+    () => (q === '' ? options : options.filter((o) => o.display.toLowerCase().includes(q))),
+    [options, q],
+  );
+  const shown = matches.slice(0, CAP);
+
+  return (
+    <div ref={boxRef} className="relative min-w-[15rem] flex-1">
+      <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        {icon}
+        {label}
+        {selected.length > 0 && (
           <button
             type="button"
             onClick={onClear}
-            disabled={selected.length === 0}
-            className="rounded-md border border-line px-2 py-0.5 text-xs text-ink900 transition-colors hover:bg-[var(--brand-soft)] disabled:opacity-40"
+            className="ml-auto font-normal normal-case text-ink400 underline-offset-2 transition-colors hover:text-[var(--brand-ink)] hover:underline"
           >
-            Clear
+            Clear {selected.length}
           </button>
-          {hasIp && (
-            <button
-              type="button"
-              onClick={() => onSelectGroup('IP')}
-              className="rounded-md border border-line px-2 py-0.5 text-xs text-ink900 transition-colors hover:bg-[var(--brand-soft)]"
-            >
-              + All IP
-            </button>
-          )}
-          {hasOp && (
-            <button
-              type="button"
-              onClick={() => onSelectGroup('OP')}
-              className="rounded-md border border-line px-2 py-0.5 text-xs text-ink900 transition-colors hover:bg-[var(--brand-soft)]"
-            >
-              + All OP
-            </button>
-          )}
-        </div>
-
-        {options.length === 0 ? (
-          <p className="py-4 text-center text-sm text-muted-foreground">No facilities available.</p>
-        ) : (
-          <div className="max-h-72 space-y-0.5 overflow-y-auto">
-            {options.map((o) => (
-              <label
-                key={o.facility}
-                className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm text-ink900 hover:bg-[var(--brand-soft)]"
-              >
-                <input
-                  type="checkbox"
-                  checked={selectedSet.has(o.facility)}
-                  onChange={() => onToggle(o.facility)}
-                  className="h-4 w-4 shrink-0 accent-[var(--brand-accent)]"
-                />
-                <span className="flex-1 truncate">{o.facility_name ?? o.facility}</span>
-                <span
-                  className={[
-                    'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium',
-                    o.care_setting
-                      ? 'bg-[var(--brand-soft)] text-[var(--brand-ink)]'
-                      : 'text-ink400',
-                  ].join(' ')}
-                >
-                  {o.care_setting ?? 'Other'}
-                </span>
-              </label>
-            ))}
-          </div>
         )}
       </div>
-    </>
+      <div
+        onClick={() => {
+          setOpen(true);
+          inputRef.current?.focus();
+        }}
+        className={[
+          'flex min-h-10 w-full flex-wrap items-center gap-1 rounded-lg border bg-surface px-2 py-1.5 text-sm transition-colors',
+          open ? 'border-[var(--brand-accent)] ring-2 ring-[var(--brand-accent)]/25' : 'border-line',
+        ].join(' ')}
+      >
+        {selected.map((v) => (
+          <span
+            key={v}
+            className="inline-flex max-w-[16rem] items-center gap-1 rounded-md bg-[var(--brand-soft)] py-0.5 pl-2 pr-1 text-xs font-medium text-[var(--brand-ink)]"
+          >
+            <span className="truncate">{displayOf.get(v) ?? v}</span>
+            <button
+              type="button"
+              aria-label={`Remove ${displayOf.get(v) ?? v}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggle(v);
+              }}
+              className="shrink-0 rounded transition-colors hover:text-[var(--brand-accent)]"
+            >
+              <X className="h-3 w-3" aria-hidden />
+            </button>
+          </span>
+        ))}
+        <input
+          ref={inputRef}
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setOpen(true);
+          }}
+          onFocus={() => setOpen(true)}
+          placeholder={selected.length === 0 ? placeholder : 'Add more…'}
+          aria-label={label}
+          className="h-6 min-w-[6rem] flex-1 bg-transparent text-sm text-ink900 outline-none placeholder:text-ink400"
+        />
+      </div>
+      {open && (
+        <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-64 overflow-y-auto rounded-lg border border-line bg-surface p-1 shadow-ths animate-ths-reveal">
+          {options.length === 0 ? (
+            <p className="px-2 py-2 text-xs text-ink400">Loading…</p>
+          ) : shown.length === 0 ? (
+            <p className="px-2 py-2 text-xs text-ink400">No matches for “{query.trim()}”.</p>
+          ) : (
+            shown.map((o) => {
+              const on = selectedSet.has(o.value);
+              return (
+                <button
+                  key={o.value}
+                  type="button"
+                  onClick={() => onToggle(o.value)}
+                  aria-pressed={on}
+                  className={[
+                    'flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
+                    on ? 'bg-[var(--brand-soft)]' : 'hover:bg-[var(--brand-soft)]',
+                  ].join(' ')}
+                >
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <Check
+                      className={['h-3.5 w-3.5 shrink-0 text-[var(--brand-accent)]', on ? '' : 'opacity-0'].join(' ')}
+                      aria-hidden
+                    />
+                    <span className="truncate text-ink900">{o.display}</span>
+                  </span>
+                  {o.badge !== undefined && (
+                    <span
+                      className={[
+                        'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium',
+                        o.badge ? 'bg-[var(--brand-soft)] text-[var(--brand-ink)]' : 'text-ink400',
+                      ].join(' ')}
+                    >
+                      {o.badge ?? 'Other'}
+                    </span>
+                  )}
+                </button>
+              );
+            })
+          )}
+          {matches.length > CAP && (
+            <p className="px-2 py-1.5 text-[11px] text-ink400">
+              Showing first {CAP} of {matches.length.toLocaleString()} — keep typing to narrow.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1776,6 +1888,7 @@ function DrillList({
   activeValue,
   onDrill,
   revealDelayMs = 0,
+  displayFor,
 }: {
   title: string;
   icon: React.ReactNode;
@@ -1784,6 +1897,9 @@ function DrillList({
   activeValue: string | null;
   onDrill: (kind: RefineKind, value: string) => void;
   revealDelayMs?: number;
+  /** Optional map from a group's raw label (the drill/filter value) to a friendlier DISPLAY
+   *  string — e.g. facility raw CMD text → curated dimension name. Drill value stays `g.label`. */
+  displayFor?: (rawLabel: string) => string;
 }) {
   if (groups.length === 0) return null;
   const max = Math.max(...groups.map((g) => g.charge), 1);
@@ -1796,6 +1912,9 @@ function DrillList({
       <ul className="space-y-1">
         {groups.map((g) => {
           const label = g.label ?? '(blank)';
+          // DISPLAY may differ from the drill value (e.g. facility friendly name); the raw label is
+          // still what drills/filters. Blank stays '(blank)'.
+          const display = g.label && displayFor ? displayFor(g.label) : label;
           // A NULL/blank value can't be exact-matched through the filter, so it's shown as a
           // non-interactive stat rather than a drill link that would silently no-op.
           const drillable = g.label !== null && g.label !== '';
@@ -1803,7 +1922,7 @@ function DrillList({
           const pct = Math.max(2, Math.round((g.charge / max) * 100));
           const stats = (
             <span className="relative flex items-center justify-between gap-2">
-              <span className="truncate text-ink900">{label}</span>
+              <span className="truncate text-ink900" title={display}>{display}</span>
               <span className="shrink-0 tabular-nums text-xs text-muted-foreground">
                 {g.count.toLocaleString()} · {MONEY0.format(g.charge)}
               </span>
@@ -1890,12 +2009,15 @@ function SearchSummaryPanel({
   refinement,
   onDrill,
   onDrillCombo,
+  facilityDisplayName,
 }: {
   state: SummaryState;
   label: string;
   refinement: Refinement | null;
   onDrill: (kind: RefineKind, value: string) => void;
   onDrillCombo: (cpt: string, revenue: string) => void;
+  /** Raw facility text → curated friendly name, for the Top facilities card display only. */
+  facilityDisplayName?: (raw: string) => string;
 }) {
   // Fold/unfold the panel body below the header (Session F). Local, resets each session — not a
   // saved-view mechanism. Conditional render (not a max-height transition) so the drill buttons
@@ -1968,10 +2090,13 @@ function SearchSummaryPanel({
             <StatTile label="Patient Balance" value={MONEY0.format(s.total_balance)} />
           </div>
 
-          {/* Top Results groups (B): Payer + CPT single-dimension lists, then the full-width CPT×Rev
-              combo below. The Facility drill list was removed here — facility stays filterable via the
-              Facilities dropdown. This is a render-only removal: the summary object still returns
-              by_facility (unused now), so its shape and the server groups are unchanged. */}
+          {/* Top Results groups: Payer + Facility single-dimension lists, then the full-width CPT×Rev
+              combo below. The standalone CPT list was dropped here — the CPT×Rev combo table below
+              already carries CPT (with its revenue code + dollar-weighted %s), so a top-facilities
+              list is the more useful second card. Render-only: the summary still returns by_cpt
+              (unused now, mirroring how by_facility used to be), so its shape and the server groups
+              are unchanged; facility drill reuses the existing refinement path (case 'facility' →
+              filter.facility). */}
           <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
             <DrillList
               title="Top payers"
@@ -1983,13 +2108,14 @@ function SearchSummaryPanel({
               revealDelayMs={60}
             />
             <DrillList
-              title="Top CPT codes"
-              icon={<Stethoscope className="h-3.5 w-3.5" aria-hidden />}
-              kind="cpt_code"
-              groups={s.by_cpt}
-              activeValue={refinement?.kind === 'cpt_code' ? refinement.value : null}
+              title="Top facilities"
+              icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
+              kind="facility"
+              groups={s.by_facility}
+              activeValue={refinement?.kind === 'facility' ? refinement.value : null}
               onDrill={onDrill}
               revealDelayMs={120}
+              displayFor={facilityDisplayName}
             />
           </div>
 
@@ -2094,16 +2220,63 @@ function ComboDrillList({
 
 // Functional multi-series colors (per the design system, charts keep their own colors):
 // Allowed = teal, Paid = violet, Dollars = amber. All read in light + dark, and amber stays
-// distinct from the red degradation marker line.
+// distinct from the red degradation marker line. Selected-point highlight = blue (Session G) —
+// distinct from all of the above, deliberately NOT --brand-accent (charts keep fixed functional
+// colors regardless of tenant, so the selection marker reads the same for every view).
 const COHORT_ALLOWED_COLOR = '#0d9488';
 const COHORT_PAID_COLOR = '#7c3aed';
 const COHORT_DOLLARS_COLOR = '#d97706';
+const COHORT_SELECTED_COLOR = '#2563eb';
 
 /** A cohort point plus the client-side dollar derivations (Phase 2). */
 type CohortDollarPoint = CohortCurvePoint & {
   paid_per_patient: number;
   cum_paid_per_start: number | null;
 };
+
+/**
+ * What the mini charts actually plot: a real (suppressed-floor-clearing) point OR an explicit GAP
+ * placeholder for an interior bucket the server suppressed (<5 patients). Gap points carry null
+ * metrics so the lines BREAK there (no connectNulls — a drawn line through missing data is a lie)
+ * and patients: 0 so the exposure bar renders nothing; `suppressed` drives the tooltip's
+ * "< 5 patients (suppressed)" read and blocks click-to-drilldown (the server would refuse anyway).
+ */
+type CohortChartDatum = {
+  bucket: number;
+  patients: number;
+  pct_allowed: number | null;
+  pct_paid: number | null;
+  paid_per_patient: number | null;
+  cum_paid_per_start: number | null;
+  pct_zero_paid: number | null;
+  suppressed?: boolean;
+};
+
+/**
+ * Fill INTERIOR suppressed buckets with explicit gap points so the x-axis is truthful (a missing
+ * bucket used to silently vanish and the line connected straight across it). Only interior gaps:
+ * leading/trailing suppressed buckets stay absent — we know nothing about where the axis "ends".
+ */
+function densifyBuckets(points: CohortDollarPoint[], step: number): CohortChartDatum[] {
+  if (points.length === 0 || step <= 0) return points;
+  const byBucket = new Map<number, CohortDollarPoint>(points.map((p) => [p.bucket, p]));
+  const out: CohortChartDatum[] = [];
+  for (let b = points[0]!.bucket; b <= points[points.length - 1]!.bucket; b += step) {
+    out.push(
+      byBucket.get(b) ?? {
+        bucket: b,
+        patients: 0,
+        pct_allowed: null,
+        pct_paid: null,
+        paid_per_patient: null,
+        cum_paid_per_start: null,
+        pct_zero_paid: null,
+        suppressed: true,
+      },
+    );
+  }
+  return out;
+}
 
 /**
  * Derive the dollar series from the suppressed buckets. `paid_per_patient` = the point's insurance $
@@ -2148,13 +2321,15 @@ function cohortDegradation(
 }
 
 /**
- * One SINGLE-SERIES cohort mini chart. The two %-series live on very different scales (~10% allowed
- * vs 50–140% paid), so sharing one axis squashed the allowed line flat — each metric now gets its own
- * chart + y-domain. %-allowed auto-scales to its data; %-paid keeps an axis anchored at ≥100
- * (`forceHundredMax`) since it legitimately exceeds 100 out-of-network. A faint patients-per-bucket
- * bar on a hidden secondary axis (~quarter height) shows cohort EXPOSURE, so a thinning tail reads
- * as exactly that; the tooltip names the patient count per bucket. Self-labeled (name in its color)
- * — no per-chart legend needed for one series.
+ * One SINGLE-SERIES cohort mini chart. The two %-series live on very different scales (~25% allowed
+ * vs ~85% paid), so sharing one axis squashed the allowed line flat — each metric gets its own chart
+ * + y-domain. `yMax` (when given) PINS the top of the axis: the same metric shown on both x-axes
+ * side by side must share ONE scale, or the pair visually lies (the parent computes the max across
+ * both). A faint patients-per-bucket bar on a hidden secondary axis (~quarter height) shows cohort
+ * EXPOSURE, so a thinning tail reads as exactly that; the tooltip names the patient count per
+ * bucket. The x-axis is NUMERIC and the data carries explicit gap points for suppressed interior
+ * buckets (see densifyBuckets) — lines break at gaps instead of interpolating through missing data.
+ * Self-labeled (name in its color) — no per-chart legend needed for one series.
  */
 function CohortMiniChart({
   data,
@@ -2163,15 +2338,25 @@ function CohortMiniChart({
   color,
   xLabel,
   markerBucket,
-  forceHundredMax = false,
+  yMax,
+  onPointClick,
+  selectedBucket,
 }: {
-  data: CohortCurvePoint[];
+  data: CohortChartDatum[];
   dataKey: 'pct_allowed' | 'pct_paid';
   name: string;
   color: string;
   xLabel: string;
   markerBucket?: number | null;
-  forceHundredMax?: boolean;
+  /** Pinned y-axis top shared across this metric's sibling charts (see doc above). */
+  yMax?: number;
+  /** Session G: clicking anywhere on the chart opens that bucket's drilldown. Optional — the days-
+   * axis %-paid chart etc. all pass it identically; only omitted where a click wouldn't make sense.
+   * The parent guards against clicks on suppressed gap buckets. */
+  onPointClick?: (bucket: number) => void;
+  /** The currently-selected drilldown bucket, if it's on THIS chart's axis — drawn as a highlight
+   * line distinct from the red degradation marker. */
+  selectedBucket?: number | null;
 }) {
   // Scale the hidden volume axis so the tallest exposure bar fills ~1/4 of the chart height.
   const maxPatients = Math.max(...data.map((p) => p.patients), 1);
@@ -2182,17 +2367,37 @@ function CohortMiniChart({
       </div>
       <div className="h-28 w-full">
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={data} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
+          <ComposedChart
+            data={data}
+            margin={{ top: 4, right: 12, bottom: 0, left: 0 }}
+            onClick={
+              onPointClick
+                ? (s) => {
+                    if (s?.activeLabel !== undefined && s.activeLabel !== null) onPointClick(Number(s.activeLabel));
+                  }
+                : undefined
+            }
+            style={onPointClick ? { cursor: 'pointer' } : undefined}
+          >
             <CartesianGrid vertical={false} stroke="#E4E9E6" />
-            {/* No inline axis label — the section heading above each column ("By claim number" / "By
-                days since first claim") already names the axis; xLabel names it in the tooltip. */}
-            <XAxis dataKey="bucket" tick={{ fontSize: 10 }} stroke="#E4E9E6" tickLine={false} />
+            {/* No inline axis label — the section heading above each column ("By visit number" / "By
+                days since first visit") already names the axis; xLabel names it in the tooltip.
+                Numeric axis: bucket spacing is real (gap points make interior suppression visible). */}
+            <XAxis
+              dataKey="bucket"
+              type="number"
+              domain={['dataMin', 'dataMax']}
+              allowDecimals={false}
+              tick={{ fontSize: 10 }}
+              stroke="#E4E9E6"
+              tickLine={false}
+            />
             <YAxis
               domain={[
                 0,
                 (dataMax: number) => {
                   const top = Math.max(Math.ceil((dataMax || 0) / 10) * 10, 20);
-                  return forceHundredMax ? Math.max(100, top) : top;
+                  return yMax !== undefined ? Math.max(yMax, 20) : top;
                 },
               ]}
               tick={{ fontSize: 10 }}
@@ -2203,16 +2408,23 @@ function CohortMiniChart({
             />
             <YAxis yAxisId="vol" hide domain={[0, maxPatients * 4]} />
             <Tooltip
-              formatter={(v: number | string, n: string) =>
-                n === 'Patients'
-                  ? [Number(v).toLocaleString(), 'Patients']
-                  : [v === null || v === undefined ? '—' : `${v}%`, n]
-              }
+              formatter={(v: number | string, n: string, item: { payload?: CohortChartDatum }) => {
+                if (n === 'Patients') {
+                  return item.payload?.suppressed
+                    ? ['< 5 (suppressed)', 'Patients']
+                    : [Number(v).toLocaleString(), 'Patients'];
+                }
+                return [v === null || v === undefined ? '—' : `${v}%`, n];
+              }}
               labelFormatter={(l) => `${xLabel}: ${l}`}
             />
             {markerBucket != null && <ReferenceLine x={markerBucket} stroke="#dc2626" strokeDasharray="4 3" />}
+            {selectedBucket != null && (
+              <ReferenceLine x={selectedBucket} stroke={COHORT_SELECTED_COLOR} strokeWidth={2} strokeDasharray="2 2" />
+            )}
             <Bar yAxisId="vol" dataKey="patients" name="Patients" fill={color} fillOpacity={0.12} isAnimationActive={false} />
-            <Line type="monotone" dataKey={dataKey} name={name} stroke={color} strokeWidth={2} dot={false} connectNulls />
+            {/* NO connectNulls: a gap in the data must read as a gap, not an interpolated guess. */}
+            <Line type="monotone" dataKey={dataKey} name={name} stroke={color} strokeWidth={2} dot={false} />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
@@ -2222,33 +2434,61 @@ function CohortMiniChart({
 
 /**
  * The Phase 2 dollar mini — per-bucket avg insurance $ per patient, in the same frame (grid, hidden
- * exposure bars, red drop marker) as the % minis. The cumulative-$/starting-patient and zero-pay
- * reads ride the tooltip as INVISIBLE series (stroke "none", pinned to the hidden volume axis so
- * their large values can't stretch the $ axis) — each hover tells the whole dollar story without a
- * fourth chart. The $ axis floors at 0 but follows the data down if a reversal-heavy bucket nets
- * negative, so no point is ever clipped away.
+ * exposure bars, red drop marker) as the % minis. `name` states the UNIT per axis ("per visit" vs
+ * "per 30 days") — the two axes measure different things and must say so. The cumulative-$ and
+ * zero-pay reads moved OUT of the tooltip (they were invisible stroke-"none" series — four metrics
+ * in a 112px chart's hover) into the caption below the chart and the point drilldown. The $ axis
+ * floors at 0 but follows the data down if a reversal-heavy bucket nets negative, so no point is
+ * ever clipped away.
  */
 function CohortDollarMiniChart({
   data,
+  name,
   xLabel,
   markerBucket,
+  onPointClick,
+  selectedBucket,
 }: {
-  data: CohortDollarPoint[];
+  data: CohortChartDatum[];
+  /** Unit-bearing series label, e.g. "$ Paid / patient / visit" — differs per axis. */
+  name: string;
   xLabel: string;
   markerBucket?: number | null;
+  /** Session G: same click-to-drilldown affordance as CohortMiniChart. */
+  onPointClick?: (bucket: number) => void;
+  selectedBucket?: number | null;
 }) {
   const maxPatients = Math.max(...data.map((p) => p.patients), 1);
   const usd = (v: number) => `$${Math.round(v).toLocaleString()}`;
   return (
     <div>
       <div className="text-[10px] font-semibold" style={{ color: COHORT_DOLLARS_COLOR }}>
-        $ Paid / patient
+        {name}
       </div>
       <div className="h-28 w-full">
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={data} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
+          <ComposedChart
+            data={data}
+            margin={{ top: 4, right: 12, bottom: 0, left: 0 }}
+            onClick={
+              onPointClick
+                ? (s) => {
+                    if (s?.activeLabel !== undefined && s.activeLabel !== null) onPointClick(Number(s.activeLabel));
+                  }
+                : undefined
+            }
+            style={onPointClick ? { cursor: 'pointer' } : undefined}
+          >
             <CartesianGrid vertical={false} stroke="#E4E9E6" />
-            <XAxis dataKey="bucket" tick={{ fontSize: 10 }} stroke="#E4E9E6" tickLine={false} />
+            <XAxis
+              dataKey="bucket"
+              type="number"
+              domain={['dataMin', 'dataMax']}
+              allowDecimals={false}
+              tick={{ fontSize: 10 }}
+              stroke="#E4E9E6"
+              tickLine={false}
+            />
             <YAxis
               domain={[
                 (dataMin: number) => Math.min(0, dataMin),
@@ -2262,17 +2502,20 @@ function CohortDollarMiniChart({
             />
             <YAxis yAxisId="vol" hide domain={[0, maxPatients * 4]} />
             <Tooltip
-              formatter={(v: number | string, n: string, item: { payload?: CohortDollarPoint }) => {
-                if (n === 'Patients') return [Number(v).toLocaleString(), 'Patients'];
-                if (n === 'Zero-paid lines') {
-                  const shifted = item.payload?.pct_patient_shifted ?? 0;
-                  return [`${v}%${shifted > 0 ? ` (${shifted}% → patient balance)` : ''}`, n];
+              formatter={(v: number | string, n: string, item: { payload?: CohortChartDatum }) => {
+                if (n === 'Patients') {
+                  return item.payload?.suppressed
+                    ? ['< 5 (suppressed)', 'Patients']
+                    : [Number(v).toLocaleString(), 'Patients'];
                 }
                 return [v === null || v === undefined ? '—' : usd(Number(v)), n];
               }}
               labelFormatter={(l) => `${xLabel}: ${l}`}
             />
             {markerBucket != null && <ReferenceLine x={markerBucket} stroke="#dc2626" strokeDasharray="4 3" />}
+            {selectedBucket != null && (
+              <ReferenceLine x={selectedBucket} stroke={COHORT_SELECTED_COLOR} strokeWidth={2} strokeDasharray="2 2" />
+            )}
             <Bar
               yAxisId="vol"
               dataKey="patients"
@@ -2281,39 +2524,88 @@ function CohortDollarMiniChart({
               fillOpacity={0.12}
               isAnimationActive={false}
             />
+            {/* NO connectNulls — gaps in the data render as gaps (see CohortMiniChart). */}
             <Line
               type="monotone"
               dataKey="paid_per_patient"
-              name="$ Paid / patient"
+              name={name}
               stroke={COHORT_DOLLARS_COLOR}
               strokeWidth={2}
               dot={false}
-              connectNulls
-            />
-            {/* Tooltip-only series (invisible; hidden axis so their scale can't distort the $ axis). */}
-            <Line
-              yAxisId="vol"
-              dataKey="cum_paid_per_start"
-              name="Cumulative $ / starting patient"
-              stroke="none"
-              dot={false}
-              activeDot={false}
-              legendType="none"
-              isAnimationActive={false}
-            />
-            <Line
-              yAxisId="vol"
-              dataKey="pct_zero_paid"
-              name="Zero-paid lines"
-              stroke="none"
-              dot={false}
-              activeDot={false}
-              legendType="none"
-              isAnimationActive={false}
             />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The chart-free view of ONE axis's buckets — the keyboard + screen-reader path to the same numbers
+ * and to the point drilldown (each row's Detail button mirrors clicking the chart point). Renders
+ * only real (floor-clearing) buckets; suppressed buckets are absent here exactly as on the curve.
+ */
+function CohortBucketTable({
+  points,
+  bucketLabel,
+  usd,
+  selectedBucket,
+  onSelectBucket,
+}: {
+  points: CohortDollarPoint[];
+  bucketLabel: (bucket: number) => string;
+  usd: (n: number) => string;
+  selectedBucket: number | null;
+  onSelectBucket: (bucket: number) => void;
+}) {
+  const pct = (v: number | null) => (v === null ? '—' : `${v}%`);
+  return (
+    <div className="overflow-x-auto rounded-md border border-line bg-surface">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            <th className="px-2 py-1 text-left font-medium">Point</th>
+            <th className="px-2 py-1 text-right font-medium">Patients</th>
+            <th className="px-2 py-1 text-right font-medium">Charge lines</th>
+            <th className="px-2 py-1 text-right font-medium">% Allowed</th>
+            <th className="px-2 py-1 text-right font-medium">% Paid</th>
+            <th className="px-2 py-1 text-right font-medium">$ Paid / patient</th>
+            <th className="px-2 py-1 text-right font-medium">Cum $ / start</th>
+            <th className="px-2 py-1 text-right font-medium">Zero-paid</th>
+            <th className="px-2 py-1 text-right font-medium">
+              <span className="sr-only">Point detail</span>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {points.map((p) => (
+            <tr
+              key={p.bucket}
+              className={`border-t border-line/60 tabular-nums ${
+                selectedBucket === p.bucket ? 'bg-[var(--brand-soft)]' : ''
+              }`}
+            >
+              <td className="px-2 py-1 text-left text-ink900">{bucketLabel(p.bucket)}</td>
+              <td className="px-2 py-1 text-right">{p.patients.toLocaleString()}</td>
+              <td className="px-2 py-1 text-right">{p.claims.toLocaleString()}</td>
+              <td className="px-2 py-1 text-right">{pct(p.pct_allowed)}</td>
+              <td className="px-2 py-1 text-right">{pct(p.pct_paid)}</td>
+              <td className="px-2 py-1 text-right">{usd(p.paid_per_patient)}</td>
+              <td className="px-2 py-1 text-right">{p.cum_paid_per_start === null ? '—' : usd(p.cum_paid_per_start)}</td>
+              <td className="px-2 py-1 text-right">{p.pct_zero_paid}%</td>
+              <td className="px-2 py-1 text-right">
+                <button
+                  type="button"
+                  onClick={() => onSelectBucket(p.bucket)}
+                  className="rounded px-1.5 py-0.5 text-[11px] text-[var(--brand-ink)] underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--brand-accent)]"
+                >
+                  Detail
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -2327,11 +2619,36 @@ function CohortDollarMiniChart({
  * suppression — no single patient's figures reach here. When the whole cohort is too small (all
  * buckets suppressed), it shows a "not enough data" notice, never a partial (re-identifiable) curve.
  */
-function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: string }) {
-  // Fold/unfold the panel body below the header (Session F). Local, resets each session. Declared
-  // before the early returns (rules-of-hooks) even though the collapse control only renders in the
-  // 'ready'/'refreshing' branch below.
+function CohortCurvePanel({
+  state,
+  prefix,
+  memberIdActive = false,
+  selectedPoint,
+  drilldown,
+  onSelectPoint,
+  onCloseDrilldown,
+}: {
+  state: CohortState;
+  prefix: string;
+  /**
+   * An exact Member-ID lookup is ALSO active: the grid below is narrowed to (usually) one patient
+   * while this panel still describes the whole prefix cohort. The panel then de-emphasizes itself
+   * and says so explicitly — the "136 patients vs 1-patient grid" misread was a real product-owner
+   * incident (2026-07-13), not a hypothetical.
+   */
+  memberIdActive?: boolean;
+  /** Session G: the currently-selected cohort-curve point (null = none selected). */
+  selectedPoint: CohortPoint | null;
+  drilldown: DrilldownState | null;
+  onSelectPoint: (axis: 'position' | 'days', bucket: number) => void;
+  onCloseDrilldown: () => void;
+}) {
+  // Fold/unfold the panel body below the header (Session F) + the chart/table view toggle (the
+  // table is the keyboard + screen-reader path to per-bucket values and drilldown). Local, resets
+  // each session. Declared before the early returns (rules-of-hooks) even though the controls only
+  // render in the 'ready'/'refreshing' branch below.
   const [collapsed, setCollapsed] = useState(false);
+  const [showTable, setShowTable] = useState(false);
   const bodyId = useId();
 
   if (state.kind === 'idle') return null;
@@ -2372,15 +2689,47 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
   // Client-side dollar derivations (Phase 2) — per-bucket $/patient + cumulative-$/starting-patient.
   const posDollars = withDollarSeries(c.by_position, c.cohort_patients);
   const daysDollars = withDollarSeries(c.by_days, c.cohort_patients);
-  // Claims-weighted zero-pay share over a run of buckets (never avg-of-shares).
+  // Day-bucket width read from the data (never hardcoded, so copy/labels can't drift from the
+  // server's bucketing); falls back to 30 when only one day bucket survives.
+  const dayBucketWidth =
+    c.by_days.length >= 2 ? c.by_days[1]!.bucket - c.by_days[0]!.bucket : 30;
+  // Chart data with explicit interior gap points (suppressed buckets break the line, not bridge it),
+  // plus the REAL bucket sets so a click on a gap can't fire a doomed drilldown request.
+  const posChart = densifyBuckets(posDollars, 1);
+  const daysChart = densifyBuckets(daysDollars, dayBucketWidth);
+  const posBuckets = new Set(c.by_position.map((p) => p.bucket));
+  const dayBuckets = new Set(c.by_days.map((p) => p.bucket));
+  const clickReal = (axis: 'position' | 'days', real: Set<number>) => (bucket: number) => {
+    if (real.has(bucket)) onSelectPoint(axis, bucket);
+  };
+  // ONE y-scale per metric across BOTH x-axes — side-by-side charts of the same metric with
+  // different y-maxes read as a comparison and lie. Headroom-rounded to the next 10.
+  const metricYMax = (pick: (p: CohortCurvePoint) => number | null, floor: number) =>
+    Math.max(
+      floor,
+      Math.ceil(
+        Math.max(0, ...c.by_position.map((p) => pick(p) ?? 0), ...c.by_days.map((p) => pick(p) ?? 0)) / 10,
+      ) * 10,
+    );
+  const allowedYMax = metricYMax((p) => p.pct_allowed, 20);
+  const paidYMax = metricYMax((p) => p.pct_paid, 100);
+  // End-state cumulative $/starting patient per axis — surfaced as a caption now that the invisible
+  // tooltip series are gone.
+  const lastCum = (pts: CohortDollarPoint[]) =>
+    pts.length > 0 ? pts[pts.length - 1]!.cum_paid_per_start : null;
+  const posCum = lastCum(posDollars);
+  const daysCum = lastCum(daysDollars);
+  // Charge-line-weighted zero-pay share over a run of buckets (never avg-of-shares). `claims` is
+  // the API field name; each unit is a logical CHARGE LINE (0050 rollup grain).
   const zeroPayOver = (pts: CohortDollarPoint[], pick: (p: CohortDollarPoint) => number) => {
-    const claims = pts.reduce((s, p) => s + p.claims, 0);
-    return claims > 0 ? round((pts.reduce((s, p) => s + (pick(p) / 100) * p.claims, 0) / claims) * 100) : 0;
+    const lines = pts.reduce((s, p) => s + p.claims, 0);
+    return lines > 0 ? round((pts.reduce((s, p) => s + (pick(p) / 100) * p.claims, 0) / lines) * 100) : 0;
   };
 
   // Callout leads with dollars + zero-pay (Phase 2); %-allowed demoted to the trailing clause. The
   // dollar read is anchored to the SAME drop bucket the %-allowed rule found, so the red marker
-  // line and the copy tell one story.
+  // line and the copy tell one story. Units are explicit: the position axis measures $ per patient
+  // PER VISIT (a "visit" = one distinct service date), never mixed with the days axis's per-window $.
   let callout: string;
   if (deg && deg.dropAt !== null && deg.dropTo !== null) {
     const at = posDollars.find((p) => p.bucket >= deg.dropAt!) ?? posDollars[posDollars.length - 1]!;
@@ -2388,27 +2737,27 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
     const zeroPct = zeroPayOver(fromDrop, (p) => p.pct_zero_paid);
     const shiftPct = zeroPayOver(fromDrop, (p) => p.pct_patient_shifted);
     callout =
-      `Insurance paid ~${usd(posDollars[0]!.paid_per_patient)} per patient on the 1st claim, falling to ~${usd(at.paid_per_patient)} by claim ${deg.dropAt}. ` +
-      `${zeroPct}% of charge lines from claim ${deg.dropAt} on were zero-paid${shiftPct > 0 ? ` (${shiftPct} pts moved to patient balance)` : ''}. ` +
+      `Insurance paid ~${usd(posDollars[0]!.paid_per_patient)} per patient on the 1st visit, falling to ~${usd(at.paid_per_patient)} by visit ${deg.dropAt}. ` +
+      `${zeroPct}% of charge lines from visit ${deg.dropAt} on were zero-paid${shiftPct > 0 ? ` (${shiftPct} pts moved to patient balance)` : ''}. ` +
       `Allowed fell from ~${round(deg.baseline)}% to ~${round(deg.dropTo)}%.`;
   } else if (deg) {
     const zeroPct = zeroPayOver(posDollars, (p) => p.pct_zero_paid);
     callout =
-      `Insurance payments hold steady (~${usd(posDollars[0]!.paid_per_patient)} per patient per claim, ~${round(deg.baseline)}% allowed) ` +
-      `across the first ${deg.lastBucket} claims; ${zeroPct}% of charge lines were zero-paid — no clear degradation in this cohort.`;
+      `Insurance payments hold steady (~${usd(posDollars[0]!.paid_per_patient)} per patient per visit, ~${round(deg.baseline)}% allowed) ` +
+      `across the first ${deg.lastBucket} visits; ${zeroPct}% of charge lines were zero-paid — no clear degradation in this cohort.`;
   } else {
-    callout = 'Not enough sequenced claims to read a degradation trend for this cohort.';
+    callout = 'Not enough sequenced visits to read a degradation trend for this cohort.';
   }
 
-  // Days-framing one-liner (Alec's "how long does full authorization last"), now led by the
-  // cumulative-$ plateau: what a starting patient is ultimately worth by the last surviving day
-  // bucket. bucketWidth is read from the data (bucket start-days) so copy never drifts.
+  // Days-framing one-liner (Alec's "how long does full authorization last"), led by the
+  // cumulative-$ plateau: what a starting patient is ultimately worth THROUGH the last surviving
+  // day bucket. A bucket is a dayBucketWidth-wide WINDOW ("days 210–239"), never an open-ended
+  // "day 210+" — that mislabel was a confirmed copy defect.
   const days = c.by_days.filter((p) => p.pct_allowed !== null);
-  const bucketWidth = days.length >= 2 ? days[1]!.bucket - days[0]!.bucket : 30;
-  const lastCum = daysDollars.length > 0 ? daysDollars[daysDollars.length - 1]!.cum_paid_per_start : null;
+  const lastDay = days.length > 0 ? days[days.length - 1]! : null;
   const daysLine =
-    days.length >= 2
-      ? `By elapsed time: ${lastCum !== null ? `~${usd(lastCum)} collected per starting patient by day ${daysDollars[daysDollars.length - 1]!.bucket}+; ` : ''}~${round(days[0]!.pct_allowed!)}% allowed in the first ${bucketWidth} days, ~${round(days[days.length - 1]!.pct_allowed!)}% by day ${days[days.length - 1]!.bucket}+.`
+    days.length >= 2 && lastDay
+      ? `By elapsed time: ${daysCum !== null ? `~${usd(daysCum)} collected per starting patient through day ${daysDollars[daysDollars.length - 1]!.bucket + dayBucketWidth - 1}; ` : ''}~${round(days[0]!.pct_allowed!)}% allowed in the first ${dayBucketWidth} days, ~${round(lastDay.pct_allowed!)}% in days ${lastDay.bucket}–${lastDay.bucket + dayBucketWidth - 1}.`
       : null;
 
   return (
@@ -2422,13 +2771,30 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
         <div className="absolute inset-x-0 top-0 h-0.5 animate-pulse rounded-t-xl bg-[var(--brand-accent)]" aria-hidden />
       )}
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink900">
+        <h3 className="flex flex-wrap items-center gap-1.5 text-sm font-semibold text-ink900">
           <Activity className="h-4 w-4 text-[var(--brand-ink)]" aria-hidden />
           Cohort payer behavior — “{prefix}”
+          {/* Scope pill: this panel deliberately IGNORES the grid's narrower filters (see the fetch
+              effect) — say so at the point of reading, not only in the fine print. */}
+          <span className="rounded-full border border-line bg-surface px-2 py-0.5 text-[10px] font-medium normal-case text-muted-foreground">
+            prefix-wide · ignores Member ID, facility &amp; date filters
+          </span>
         </h3>
         <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
           <Lock className="h-3 w-3" aria-hidden />
           {c.cohort_patients.toLocaleString()} patients · dollar-weighted · min 5/bucket
+          <button
+            type="button"
+            aria-pressed={showTable}
+            aria-label={showTable ? 'Show charts' : 'Show data as table'}
+            title={showTable ? 'Show charts' : 'Show data as table'}
+            onClick={() => setShowTable((v) => !v)}
+            className={`ml-1 shrink-0 rounded-md p-1 transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)] ${
+              showTable ? 'text-[var(--brand-ink)]' : 'text-ink400'
+            }`}
+          >
+            <Table2 className="h-4 w-4" aria-hidden />
+          </button>
           <button
             type="button"
             aria-expanded={!collapsed}
@@ -2436,7 +2802,7 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
             aria-label={collapsed ? 'Expand cohort payer behavior' : 'Collapse cohort payer behavior'}
             title={collapsed ? 'Expand' : 'Collapse'}
             onClick={() => setCollapsed((v) => !v)}
-            className="ml-1 shrink-0 rounded-md p-1 text-ink400 transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)]"
+            className="shrink-0 rounded-md p-1 text-ink400 transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)]"
           >
             <ChevronDown className={`h-4 w-4 transition-transform ${collapsed ? '-rotate-90' : ''}`} aria-hidden />
           </button>
@@ -2444,11 +2810,18 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
       </div>
       <p className="mt-1 text-xs text-muted-foreground">
         All {c.cohort_patients.toLocaleString()} patients whose insurance member ID begins with “{prefix}” —
-        curves are dollar-weighted cohort averages, never one patient.
+        not just the patients shown in the grid below. Curves are dollar-weighted cohort averages, never
+        one patient.
       </p>
+      {memberIdActive && (
+        <p className="mt-1 rounded-md border border-amber-300/60 bg-amber-50 px-2 py-1 text-xs text-amber-900 dark:border-amber-400/30 dark:bg-amber-950/40 dark:text-amber-200">
+          Your grid is filtered to one member ID; this panel still describes the full{' '}
+          {c.cohort_patients.toLocaleString()}-patient “{prefix}” cohort.
+        </p>
+      )}
 
       {!collapsed && (
-        <div id={bodyId}>
+        <div id={bodyId} className={memberIdActive ? 'opacity-70' : undefined}>
           {/* Plain-language degradation callout (Derek's framing) + days summary (Alec's framing). */}
           <div className="mt-3 flex items-start gap-2 rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink900">
             <TrendingDown className="mt-0.5 h-4 w-4 shrink-0 text-[var(--brand-ink)]" aria-hidden />
@@ -2458,70 +2831,391 @@ function CohortCurvePanel({ state, prefix }: { state: CohortState; prefix: strin
             </div>
           </div>
 
-          {/* Both axes, side by side — no toggle. */}
+          {/* Both axes, side by side — no toggle between them; the chart/table switch (header) is
+              the keyboard + screen-reader path to the same per-bucket values and drilldown. */}
           <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
             <div>
               <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                By claim number
+                By visit number
               </div>
-              <div className="mb-1 text-[11px] text-ink400">Each patient’s visits in order · 1 = first visit</div>
-              <div className="space-y-2">
-                <CohortMiniChart
-                  data={c.by_position}
-                  dataKey="pct_allowed"
-                  name="% Allowed"
-                  color={COHORT_ALLOWED_COLOR}
-                  xLabel="Claim #"
-                  markerBucket={deg?.dropAt ?? null}
-                />
-                <CohortMiniChart
-                  data={c.by_position}
-                  dataKey="pct_paid"
-                  name="% Paid"
-                  color={COHORT_PAID_COLOR}
-                  xLabel="Claim #"
-                  forceHundredMax
-                />
-                <CohortDollarMiniChart data={posDollars} xLabel="Claim #" markerBucket={deg?.dropAt ?? null} />
+              <div className="mb-1 text-[11px] text-ink400">
+                Each patient’s visits in order · 1 = first visit · click a point for details
               </div>
+              {showTable ? (
+                <CohortBucketTable
+                  points={posDollars}
+                  bucketLabel={(b) => `Visit ${b}`}
+                  usd={usd}
+                  selectedBucket={selectedPoint?.axis === 'position' ? selectedPoint.bucket : null}
+                  onSelectBucket={(b) => onSelectPoint('position', b)}
+                />
+              ) : (
+                <div className="space-y-2">
+                  <CohortMiniChart
+                    data={posChart}
+                    dataKey="pct_allowed"
+                    name="% Allowed"
+                    color={COHORT_ALLOWED_COLOR}
+                    xLabel="Visit #"
+                    markerBucket={deg?.dropAt ?? null}
+                    yMax={allowedYMax}
+                    onPointClick={clickReal('position', posBuckets)}
+                    selectedBucket={selectedPoint?.axis === 'position' ? selectedPoint.bucket : null}
+                  />
+                  <CohortMiniChart
+                    data={posChart}
+                    dataKey="pct_paid"
+                    name="% Paid"
+                    color={COHORT_PAID_COLOR}
+                    xLabel="Visit #"
+                    yMax={paidYMax}
+                    onPointClick={clickReal('position', posBuckets)}
+                    selectedBucket={selectedPoint?.axis === 'position' ? selectedPoint.bucket : null}
+                  />
+                  <CohortDollarMiniChart
+                    data={posChart}
+                    name="$ Paid / patient / visit"
+                    xLabel="Visit #"
+                    markerBucket={deg?.dropAt ?? null}
+                    onPointClick={clickReal('position', posBuckets)}
+                    selectedBucket={selectedPoint?.axis === 'position' ? selectedPoint.bucket : null}
+                  />
+                  {posCum !== null && (
+                    <p className="text-[10px] text-ink400">
+                      Cumulative: ~{usd(posCum)} paid per starting patient through visit{' '}
+                      {posDollars[posDollars.length - 1]!.bucket} (suppressed points excluded — a floor).
+                    </p>
+                  )}
+                </div>
+              )}
+              {selectedPoint?.axis === 'position' && drilldown && (
+                <CohortDrilldownPanel
+                  axis="position"
+                  bucket={selectedPoint.bucket}
+                  state={drilldown}
+                  onClose={onCloseDrilldown}
+                />
+              )}
             </div>
             <div>
               <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                By days since first claim
+                By days since first visit
               </div>
-              <div className="mb-1 text-[11px] text-ink400">Days elapsed from each patient’s first visit</div>
-              <div className="space-y-2">
-                <CohortMiniChart
-                  data={c.by_days}
-                  dataKey="pct_allowed"
-                  name="% Allowed"
-                  color={COHORT_ALLOWED_COLOR}
-                  xLabel="Day"
-                />
-                <CohortMiniChart
-                  data={c.by_days}
-                  dataKey="pct_paid"
-                  name="% Paid"
-                  color={COHORT_PAID_COLOR}
-                  xLabel="Day"
-                  forceHundredMax
-                />
-                <CohortDollarMiniChart data={daysDollars} xLabel="Day" />
+              <div className="mb-1 text-[11px] text-ink400">
+                {dayBucketWidth}-day windows from each patient’s first visit · click a point for details
               </div>
+              {showTable ? (
+                <CohortBucketTable
+                  points={daysDollars}
+                  bucketLabel={(b) => `Days ${b}–${b + dayBucketWidth - 1}`}
+                  usd={usd}
+                  selectedBucket={selectedPoint?.axis === 'days' ? selectedPoint.bucket : null}
+                  onSelectBucket={(b) => onSelectPoint('days', b)}
+                />
+              ) : (
+                <div className="space-y-2">
+                  <CohortMiniChart
+                    data={daysChart}
+                    dataKey="pct_allowed"
+                    name="% Allowed"
+                    color={COHORT_ALLOWED_COLOR}
+                    xLabel="Day window start"
+                    yMax={allowedYMax}
+                    onPointClick={clickReal('days', dayBuckets)}
+                    selectedBucket={selectedPoint?.axis === 'days' ? selectedPoint.bucket : null}
+                  />
+                  <CohortMiniChart
+                    data={daysChart}
+                    dataKey="pct_paid"
+                    name="% Paid"
+                    color={COHORT_PAID_COLOR}
+                    xLabel="Day window start"
+                    yMax={paidYMax}
+                    onPointClick={clickReal('days', dayBuckets)}
+                    selectedBucket={selectedPoint?.axis === 'days' ? selectedPoint.bucket : null}
+                  />
+                  <CohortDollarMiniChart
+                    data={daysChart}
+                    name={`$ Paid / patient / ${dayBucketWidth} days`}
+                    xLabel="Day window start"
+                    onPointClick={clickReal('days', dayBuckets)}
+                    selectedBucket={selectedPoint?.axis === 'days' ? selectedPoint.bucket : null}
+                  />
+                  {daysCum !== null && (
+                    <p className="text-[10px] text-ink400">
+                      Cumulative: ~{usd(daysCum)} paid per starting patient through day{' '}
+                      {daysDollars[daysDollars.length - 1]!.bucket + dayBucketWidth - 1} (suppressed
+                      points excluded — a floor).
+                    </p>
+                  )}
+                </div>
+              )}
+              {selectedPoint?.axis === 'days' && drilldown && (
+                <CohortDrilldownPanel
+                  axis="days"
+                  bucket={selectedPoint.bucket}
+                  dayBucketWidth={dayBucketWidth}
+                  state={drilldown}
+                  onClose={onCloseDrilldown}
+                />
+              )}
             </div>
           </div>
           <p className="mt-2 text-[11px] leading-relaxed text-ink400">
-            % Allowed = allowed ÷ charged. % Paid = insurance paid ÷ allowed — can exceed 100% when
-            insurance pays above the plan’s allowed amount (common out-of-network). $ Paid / patient =
-            the point’s insurance dollars ÷ its patients; the tooltip’s cumulative $ divides by the
-            full starting cohort and skips suppressed points, so it reads as a floor. Zero-paid =
-            charge lines with no insurance payment; “→ patient balance” means the amount moved to
-            patient responsibility (often deductible), not necessarily a denial. Shaded bars show
-            patients per point; later points reflect only patients whose claims continued — early
-            drop-offs leave the tail, which can flatter it.
+            Points aggregate logical charge lines (payment-posting history deduplicated), dollar-weighted.
+            % Allowed = allowed ÷ charged. % Paid = insurance paid ÷ allowed; a “—” means the point’s
+            netted allowed is too small to be a meaningful denominator (usually reversal-heavy postings).
+            $ Paid / patient = the point’s insurance dollars ÷ its patients, per visit on the left and
+            per {dayBucketWidth}-day window on the right — different units, don’t compare across columns.
+            Zero-paid = charge lines with no insurance payment; “→ patient balance” means the amount moved
+            to patient responsibility (often deductible), not necessarily a denial. Shaded bars show
+            patients per point; later points reflect only patients whose care continued — early drop-offs
+            leave the tail, which can flatter it. Breaks in a line are suppressed points (fewer than 5
+            patients).
           </p>
         </div>
       )}
+    </div>
+  );
+}
+
+// --- cohort-point drilldown (Session G) -------------------------------------
+
+/**
+ * The drilldown for ONE clicked cohort-curve point — an aggregate breakdown (payer mix, CPT ×
+ * Revenue-code mix, allowed/paid/zero-paid) for that exact bucket, plus an OPTIONAL masked patient
+ * table gated by a stricter, separate floor (COHORT_DRILLDOWN_TABLE_MIN_PATIENTS). The aggregate is
+ * a pure SQL aggregate — no row egress, non-PHI; the table (when shown) reuses the SAME masking +
+ * audited per-row reveal as the main grid, never a new PHI surface. `state` is fetch state owned by
+ * the parent (CmdCollectionsExplorer) — this component is purely presentational.
+ */
+function CohortDrilldownPanel({
+  axis,
+  bucket,
+  dayBucketWidth = 30,
+  state,
+  onClose,
+}: {
+  axis: 'position' | 'days';
+  bucket: number;
+  /** Width of a days-axis bucket, read from the curve data by the parent — a days bucket is a
+   * WINDOW ("Days 210–239"), never an open-ended "Day 210+" (that mislabel was a confirmed defect). */
+  dayBucketWidth?: number;
+  state: DrilldownState;
+  onClose: () => void;
+}) {
+  const label = axis === 'position' ? `Visit ${bucket}` : `Days ${bucket}–${bucket + dayBucketWidth - 1}`;
+  return (
+    <div className="mt-2 animate-ths-reveal rounded-lg border border-line bg-card p-3 shadow-ths">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-ink900">{label} detail</div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close point detail"
+          className="shrink-0 rounded p-1 text-ink400 transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)]"
+        >
+          <X className="h-3.5 w-3.5" aria-hidden />
+        </button>
+      </div>
+      {state.kind === 'loading' && (
+        <div className="space-y-2" aria-hidden>
+          <Skeleton className="h-14 w-full" />
+          <Skeleton className="h-20 w-full" />
+        </div>
+      )}
+      {state.kind === 'error' && <p className="text-sm text-destructive">{state.message}</p>}
+      {state.kind === 'ready' && <CohortDrilldownContent data={state.data} />}
+    </div>
+  );
+}
+
+/**
+ * One read-only payer bar row. Deliberately NOT DrillList — that component's rows apply a GRID-WIDE
+ * refinement on click, which would be the wrong behavior here (this is informational context for
+ * ONE point, not a search-level filter), so this is a small, non-interactive, visually-matching twin.
+ */
+function DrilldownPayerRow({ group, max }: { group: CmdSearchGroup; max: number }) {
+  const pct = Math.max(2, Math.round((group.charge / max) * 100));
+  return (
+    <div className="relative overflow-hidden rounded-md px-2 py-1 text-sm">
+      <span aria-hidden className="absolute inset-y-0 left-0 bg-[var(--brand-accent)]/10" style={{ width: `${pct}%` }} />
+      <span className="relative flex items-center justify-between gap-2">
+        <span className="truncate text-ink900">{group.label ?? '(blank)'}</span>
+        <span className="shrink-0 tabular-nums text-xs text-muted-foreground">
+          {group.count.toLocaleString()} · {MONEY0.format(group.charge)}
+        </span>
+      </span>
+    </div>
+  );
+}
+
+/** The read-only breakdown: patient/claims/%-stats + payer mix + CPT×Rev mix + the patient table. */
+function CohortDrilldownContent({ data }: { data: CohortDrilldownResult }) {
+  const { aggregate: a, table } = data;
+  const maxPayerCharge = Math.max(...a.by_payer.map((g) => g.charge), 1);
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <StatTile label="Patients" value={a.patients.toLocaleString()} />
+        <StatTile label="Charge lines" value={a.claims.toLocaleString()} />
+        <StatTile label="% Allowed" value={formatPercentNum(a.pct_allowed)} />
+        <StatTile label="% Paid" value={formatPercentNum(a.pct_paid)} />
+      </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="rounded-md border border-line bg-surface p-2">
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            By payer
+          </div>
+          {a.by_payer.length === 0 ? (
+            <p className="px-2 py-1 text-xs text-ink400">No payer data for this point.</p>
+          ) : (
+            <div className="space-y-0.5">
+              {a.by_payer.map((g) => (
+                <DrilldownPayerRow key={g.label ?? '(blank)'} group={g} max={maxPayerCharge} />
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="rounded-md border border-line bg-surface p-2">
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            By CPT × Revenue code
+          </div>
+          {a.by_cpt_revenue.length === 0 ? (
+            <p className="px-2 py-1 text-xs text-ink400">No CPT/revenue data for this point.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                    <th className="px-2 py-1 text-left font-medium">CPT</th>
+                    <th className="px-2 py-1 text-left font-medium">Revenue</th>
+                    <th className="px-2 py-1 text-right font-medium">Lines</th>
+                    <th className="px-2 py-1 text-right font-medium">Charged</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {a.by_cpt_revenue.map((g, i) => (
+                    <tr key={`${g.cpt ?? '∅'}|${g.revenue ?? '∅'}|${i}`} className="border-t border-line/60 tabular-nums">
+                      <td className="px-2 py-1 text-left text-ink900">{g.cpt ?? '(blank)'}</td>
+                      <td className="px-2 py-1 text-left text-ink900">{g.revenue ?? '(blank)'}</td>
+                      <td className="px-2 py-1 text-right">{g.count.toLocaleString()}</td>
+                      <td className="px-2 py-1 text-right">{MONEY0.format(g.charge)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+      <p className="text-[11px] text-ink400">
+        {a.pct_zero_paid}% of charge lines were zero-paid
+        {a.pct_patient_shifted > 0 ? ` (${a.pct_patient_shifted}% → patient balance)` : ''}; {MONEY0.format(a.paid_total)}{' '}
+        total insurance paid at this point.
+      </p>
+      <CohortDrilldownTableView table={table} />
+    </div>
+  );
+}
+
+/**
+ * The patient table (masked, audited reveal — reusing revealCmdReportRows verbatim, the SAME action
+ * the main grid's "Reveal all" uses) or the suppression notice. Never a partial table: `table` is
+ * already one or the other by construction (the reader never returns a truncated row set).
+ */
+function CohortDrilldownTableView({ table }: { table: CohortDrilldownTable }) {
+  const [phi, setPhi] = useState<Map<number, CmdExplorerPhi>>(() => new Map());
+  const [revealed, setRevealed] = useState(false);
+  const [revealing, setRevealing] = useState(false);
+  const [revealError, setRevealError] = useState<string | null>(null);
+
+  if (table.kind === 'suppressed') {
+    return (
+      <div className="rounded-md border border-line bg-surface p-2 text-xs text-muted-foreground">
+        Fewer than {table.floor} patients back this point — the patient list is hidden to protect
+        identifiability. The breakdown above is still a full, dollar-weighted aggregate.
+      </div>
+    );
+  }
+
+  const rows = table.rows;
+
+  async function reveal() {
+    setRevealing(true);
+    setRevealError(null);
+    try {
+      const res = await revealCmdReportRows(rows.map((r) => r.id));
+      if (res.ok) {
+        const map = new Map<number, CmdExplorerPhi>();
+        for (const r of res.rows) {
+          const { id, ...phiFields } = r;
+          map.set(id, phiFields);
+        }
+        setPhi(map);
+        setRevealed(true);
+      } else {
+        setRevealError(res.error);
+      }
+    } catch {
+      setRevealError('The identifiers could not be revealed right now.');
+    } finally {
+      setRevealing(false);
+    }
+  }
+
+  function maskedCell(key: 'patient_name' | 'member_id_raw', row: CmdExplorerRow): string {
+    if (!revealed) return PHI_MASK;
+    return phi.get(row.id)?.[key] ?? '—';
+  }
+
+  return (
+    <div className="rounded-md border border-line bg-surface p-2">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Patients at this point ({rows.length})
+        </div>
+        <Button type="button" variant="outline" size="sm" disabled={revealing} onClick={() => void reveal()}>
+          {revealing ? 'Revealing…' : revealed ? 'Hide identifiers' : 'Reveal identifiers'}
+        </Button>
+      </div>
+      {revealError && <p className="mb-1 text-xs text-destructive">{revealError}</p>}
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-[10px] uppercase tracking-wide text-muted-foreground">
+              <th className="px-2 py-1 text-left font-medium">Charge date</th>
+              <th className="px-2 py-1 text-left font-medium">CPT</th>
+              <th className="px-2 py-1 text-left font-medium">Revenue</th>
+              <th className="px-2 py-1 text-left font-medium">Payer</th>
+              <th className="px-2 py-1 text-right font-medium">Charge</th>
+              <th className="px-2 py-1 text-right font-medium">Allowed</th>
+              <th className="px-2 py-1 text-right font-medium">Paid</th>
+              <th className="px-2 py-1 text-left font-medium">Patient</th>
+              <th className="px-2 py-1 text-left font-medium">Member ID</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.id} className="border-t border-line/60 tabular-nums">
+                <td className="px-2 py-1 text-left">{row.charge_date}</td>
+                <td className="px-2 py-1 text-left">{row.cpt_code}</td>
+                <td className="px-2 py-1 text-left">{row.revenue_code ?? '—'}</td>
+                <td className="px-2 py-1 text-left">{row.primary_payer ?? '—'}</td>
+                <td className="px-2 py-1 text-right">{formatMoney(row.charge_amount)}</td>
+                <td className="px-2 py-1 text-right">{formatMoney(row.allowed_amount)}</td>
+                <td className="px-2 py-1 text-right">{formatMoney(row.insurance_payments)}</td>
+                <td className={`px-2 py-1 text-left ${revealed ? '' : 'text-muted-foreground'}`}>
+                  {maskedCell('patient_name', row)}
+                </td>
+                <td className={`px-2 py-1 text-left ${revealed ? '' : 'text-muted-foreground'}`}>
+                  {maskedCell('member_id_raw', row)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

@@ -1147,8 +1147,47 @@ another session's WIP claim is usually an untracked file. Current reservations:
 |---|---|---|
 | 0024 | ANOTHER session | 0024-related WIP (per Alec, 2026-07-13 — listed in the parallel-WIP set; 0024 itself is applied on origin/main) |
 | 0049 | billing-audit branch (`feat/billing-audit-plane`) | `0049_billing_audit_plane` — APPLIED live + committed on that branch |
-| 0050 | ANOTHER session (collections) | `0050_cmd_explorer_charge_rollup` — untracked WIP in the main checkout |
+| 0050 | collections session | `0050_cmd_explorer_charge_rollup` — LANDED on origin/main (fed5930) |
 | 0051 | billing-audit branch | `0051_payer_alias_seed` — DRAFT, not applied, pending Alec's ruling |
 
 Record new claims here when made; remove rows once the file is on origin/main
 (the tree then speaks for itself).
+
+---
+
+## Collections aggregate grain — `cmd_explorer_rows` is POSTING grain; aggregate ONLY over `cmd_explorer_charge_rollup` (2026-07-13)
+
+`collections.cmd_explorer_rows` is append-only **payment-posting-snapshot grain**, NOT charge grain:
+each cron re-pull inserts a new row whenever a charge's payment fields evolve (`ON CONFLICT
+(row_fingerprint) DO NOTHING`), so one logical charge line carries many rows — BXR ~2.14×, 89.9% of
+charges duplicated (read-only probe, W29 cohort, 2026-07-13). Summing that grain corrupted every
+dollar aggregate: **BEFORE migration 0050**, BXR tenant %-paid read **197%** and cohort buckets up to
+**292%**. These are PRE-FIX figures — once 0050 ships and the reads move to the rollup they are gone,
+not a live problem. The verified per-field netting rules:
+
+- **`charge_amount`** is charge-level, repeated on every snapshot → count it ONCE per logical charge,
+  never `sum()` across rows.
+- **`insurance_payments`** is a charge-CUMULATIVE running total → take `max()` per charge, **NEVER
+  `sum()`** across posting rows. Where a charge's posting history is nondecreasing, `max()` == the
+  latest value and is exactly correct. Where it is NOT (a payment then a within-history DECREASE —
+  a takeback/reversal), `max()` returns the PEAK, so it can slightly OVERSTATE paid vs a
+  latest-snapshot rule (only when the dip does not fully recover). **INSPECTED 2026-07-13** (read-only
+  probe, per logical charge, dollars only): BXR has 17 non-monotone charges of 66,178 (0.026%), 14 of
+  which leave `max` > `latest`, for $12,684.66 overstatement = **0.017% of $74.77M paid**; Indigo 299
+  of 415,068 (0.072%), 241 overstating, $297,283.33 = **0.063% of $474.46M paid**. Both far under 0.1%
+  of paid (rounding-scale) → **`max()` retained** (order-independent, robust). Documented remedy IF it
+  ever grows material: switch this ONE field to latest-snapshot-by-`(payment_received desc, id desc)`
+  — the rule already backing the rollup's other point-in-time columns. Do NOT switch on the
+  non-monotone count alone; re-run the max-vs-latest dollar probe first.
+- **`allowed_amount`** is per payment posting with explicit ± reversal rows → sum over DISTINCT
+  `(payment_received, allowed_amount)` postings per charge (reversals net out).
+
+Migration **0050** encapsulates all three in the materialized view
+`collections.cmd_explorer_charge_rollup` (one row per logical charge, `REFRESH … CONCURRENTLY` after
+each ingest). **EVERY aggregate read MUST go through the rollup** (`src/collections/cmdExplorerQuery.ts`:
+search summary, combo, cohort curves, drilldown stats) — never write a new aggregate that sums
+`cmd_explorer_rows` directly. The row-browsing grid and the audited PHI reveal deliberately stay on
+`cmd_explorer_rows` (row grain is what they display; the rollup's `id` is the latest snapshot's row id,
+so joins back still land). **Expected grain disagreement (BY DESIGN, not a bug):** the search summary
+reports logical-charge counts (~66k for BXR) while the browsing grid pages posting rows (~141k for
+BXR) — the two surfaces intentionally display different grains, so those two counts will not match.

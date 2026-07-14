@@ -28,10 +28,15 @@ import {
   buildCmdExplorerQuery,
   buildCmdSearchSummaryQueries,
   buildCmdFacilityOptionsQuery,
+  buildCmdPayerOptionsQuery,
   buildCohortCurveQueries,
+  buildCohortDrilldownQueries,
   cmdExplorerSortValue,
   CMD_EXPLORER_PAGE_SIZE,
   COHORT_MIN_PATIENTS,
+  COHORT_DRILLDOWN_TABLE_MIN_PATIENTS,
+  clearsCohortFloor,
+  clearsDrilldownTableFloor,
   type CmdExplorerFilter,
   type CmdExplorerSort,
   type CmdExplorerCursor,
@@ -42,6 +47,9 @@ import {
   type CmdFacilityOption,
   type CohortCurvePoint,
   type CohortCurve,
+  type CohortDrilldownAggregate,
+  type CohortDrilldownTable,
+  type CohortDrilldownResult,
 } from '../../src/collections/cmdExplorerQuery.js';
 export {
   CMD_EXPLORER_SEARCH_COLUMNS,
@@ -67,6 +75,9 @@ export type {
   CmdFacilityOption,
   CohortCurvePoint,
   CohortCurve,
+  CohortDrilldownAggregate,
+  CohortDrilldownTable,
+  CohortDrilldownResult,
 } from '../../src/collections/cmdExplorerQuery.js';
 import type {
   ClaimFilter,
@@ -491,6 +502,11 @@ async function handleExplorerCronForTenant(
       },
       writeDb: rollupWriterDb(),
       businessEntityId: tenant.businessEntityId,
+      // 0050: rebuild the charge-grain matview after inserts (SECURITY DEFINER function; the
+      // writer role holds EXECUTE only). The cron treats a failure as non-fatal (stale-but-correct).
+      refreshChargeRollup: async () => {
+        await rollupWriterDb().query('select collections.refresh_cmd_explorer_charge_rollup()');
+      },
       revalidate: () => revalidateTag('cmd-explorer'),
       revalidateDashboard: () => revalidateTag(DASHBOARD_CACHE_TAG),
       // Both rosters use a ROLLING (current-month) payment-received window, so there is no fixed
@@ -1124,7 +1140,9 @@ async function loadCmdSearchSummaryData(
 export const loadCmdSearchSummary = unstable_cache(
   (filter: CmdExplorerFilter, entityIds: string[]): Promise<CmdSearchSummary> =>
     loadCmdSearchSummaryData(filter, entityIds),
-  ['cmd-explorer-search-summary'],
+  // -v2: summary moved to the 0050 charge-grain rollup (counts/sums are logical charges) — the key
+  // bump keeps a pre-deploy snapshot-grain summary (up to 15 min old) from reaching the new UI copy.
+  ['cmd-explorer-search-summary-v2'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
 
@@ -1160,9 +1178,85 @@ async function loadCohortCurveData(prefixBidx: string, entityIds: string[]): Pro
  */
 export const loadCohortCurve = unstable_cache(
   (prefixBidx: string, entityIds: string[]): Promise<CohortCurve> => loadCohortCurveData(prefixBidx, entityIds),
-  // -v2: CohortCurvePoint gained paid_total/pct_zero_paid/pct_patient_shifted (Phase 2); the key bump
-  // keeps a pre-deploy cached curve (old shape, up to 15 min) from reaching the new UI.
-  ['cmd-explorer-cohort-curve-v2'],
+  // -v3: cohort queries moved to the 0050 charge-grain rollup (netted dollars, charge-line counts);
+  // the key bump keeps a pre-deploy snapshot-grain curve (up to 15 min old) from reaching the new UI.
+  // (-v2 was the Phase 2 paid_total/pct_zero_paid/pct_patient_shifted shape change.)
+  ['cmd-explorer-cohort-curve-v3'],
+  { revalidate: 900, tags: ['cmd-explorer'] },
+);
+
+// --- cohort-point drilldown (Session G) -------------------------------------
+// Behind ONE clicked cohort-curve point: an aggregate breakdown (payer mix, CPT×Rev mix) for that
+// EXACT bucket, re-deriving `patients` server-side (never trusting the caller's bucket alone) as
+// the authoritative gate — mirrors the curve's OWN COHORT_MIN_PATIENTS floor exactly (a bucket that
+// never rendered on the curve can't be drilled into), plus an OPTIONAL patient table gated by the
+// separate, stricter COHORT_DRILLDOWN_TABLE_MIN_PATIENTS. Returns null when the bucket doesn't clear
+// the aggregate floor (a forged/stale bucket argument) — the action then reports a generic error,
+// never a partial or wrong-shaped answer.
+
+async function loadCohortDrilldownData(
+  prefixBidx: string,
+  entityIds: string[],
+  axis: 'position' | 'days',
+  bucket: number,
+): Promise<CohortDrilldownResult | null> {
+  const { stats, byPayer, byCptRevenue, rows } = buildCohortDrilldownQueries(prefixBidx, entityIds, axis, bucket);
+  const exec = readerExecutor();
+  const statsRes = await exec.query<{
+    patients: number;
+    claims: number;
+    pct_allowed: number | null;
+    pct_paid: number | null;
+    paid_total: number;
+    pct_zero_paid: number;
+    pct_patient_shifted: number;
+  }>(stats.sql, stats.params);
+  const s = statsRes.rows[0];
+  // Fail closed: no rows at all, or below the SAME floor the curve itself enforces.
+  if (!s || !clearsCohortFloor(s.patients)) return null;
+
+  const [payerRes, cptRes] = await Promise.all([
+    exec.query<CmdSearchGroup>(byPayer.sql, byPayer.params),
+    exec.query<CmdComboGroup>(byCptRevenue.sql, byCptRevenue.params),
+  ]);
+
+  const aggregate: CohortDrilldownAggregate = {
+    bucket,
+    patients: s.patients,
+    claims: s.claims,
+    pct_allowed: s.pct_allowed,
+    pct_paid: s.pct_paid,
+    paid_total: s.paid_total,
+    pct_zero_paid: s.pct_zero_paid,
+    pct_patient_shifted: s.pct_patient_shifted,
+    by_payer: payerRes.rows,
+    by_cpt_revenue: cptRes.rows,
+  };
+
+  // The patient table is a SEPARATE, stricter gate — row-level disclosure (even PHI-masked) carries
+  // more re-identification risk than an aggregate ratio. Only fetch rows once THIS bucket clears it;
+  // otherwise the client never even receives a row id to reveal.
+  if (!clearsDrilldownTableFloor(s.patients)) {
+    return { aggregate, table: { kind: 'suppressed', floor: COHORT_DRILLDOWN_TABLE_MIN_PATIENTS } };
+  }
+  const rowsRes = await exec.query<CmdExplorerRow>(rows.sql, rows.params);
+  return { aggregate, table: { kind: 'rows', rows: rowsRes.rows } };
+}
+
+/**
+ * Cached drilldown, keyed per (prefix token, axis, bucket, entityIds). Tag-busted with the rest of
+ * the explorer on cron insert. NOTE: the PHI GATE + AUDIT live in the action (loadCohortDrilldown in
+ * actions.ts), which runs on EVERY call before this cache is consulted — a cache hit never skips it.
+ */
+export const loadCohortDrilldown = unstable_cache(
+  (
+    prefixBidx: string,
+    entityIds: string[],
+    axis: 'position' | 'days',
+    bucket: number,
+  ): Promise<CohortDrilldownResult | null> => loadCohortDrilldownData(prefixBidx, entityIds, axis, bucket),
+  // -v2: drilldown aggregates moved to the 0050 charge-grain rollup (same bump rationale as the curve).
+  ['cmd-explorer-cohort-drilldown-v2'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
 
@@ -1200,6 +1294,24 @@ export const cmdExplorerFacilities = unstable_cache(
   // timer means the dropdown is a warm cache hit ~always; a brand-new facility surfaces within the
   // hour (its rows are already in the grid regardless — this only gates the filter dropdown's list).
   { revalidate: 3600, tags: ['cmd-facilities'] },
+);
+
+/**
+ * Payer options for the guided payer search (non-PHI): the distinct payer names present in the
+ * caller's tenant slice (RBAC-clamped `entityIds`, part of the cache key). Like the facility
+ * vocabulary, the payer set is near-static — a new payer name is rare and NOT a daily-refresh
+ * event — so this rides its own 'cmd-payers' tag + 1-hour timer (NOT the 'cmd-explorer' tag the
+ * 30-min cron busts), keeping the ~627k-row DISTINCT scan a warm hit rather than rebuilding it
+ * every ingest. The client loads this once and filters it as the user types. Reader-only, non-PHI.
+ */
+export const cmdExplorerPayers = unstable_cache(
+  async (entityIds: string[]): Promise<string[]> => {
+    const { sql, params } = buildCmdPayerOptionsQuery(entityIds);
+    const { rows } = await readerExecutor().query<{ primary_payer: string }>(sql, params);
+    return rows.map((r) => r.primary_payer);
+  },
+  ['cmd-explorer-payers'],
+  { revalidate: 3600, tags: ['cmd-payers'] },
 );
 
 /**
