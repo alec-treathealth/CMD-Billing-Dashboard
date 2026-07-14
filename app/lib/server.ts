@@ -556,6 +556,34 @@ function auditWriterDb(): Db {
 }
 
 /**
+ * Preflight IDENTITY GUARD — asserts the audit writer pool is a least-privilege
+ * claims_audit_writer identity (has the role, NOT a superuser, NOT claims_admin/postgres)
+ * BEFORE any billing-audit write. A misconfigured CLAIMS_AUDIT_WRITER_DATABASE_URL that
+ * pointed at an admin/superuser would fail the run loudly instead of writing PHI over a
+ * privileged connection. Returns current_user so the (authed) caller can surface exactly
+ * which role wrote. Membership-based (not a hardcoded login name) so it survives a role
+ * rename, while still reporting the concrete user. Throws → the handler's catch → 500.
+ */
+async function assertAuditWriterIdentity(): Promise<string> {
+  const res = await auditWriterDb().query<{
+    u: string; is_super: boolean; has_writer: boolean; is_admin: boolean;
+  }>(
+    `select current_user as u,
+            coalesce((select rolsuper from pg_roles where rolname = current_user), false) as is_super,
+            pg_has_role(current_user, 'claims_audit_writer', 'USAGE') as has_writer,
+            pg_has_role(current_user, 'claims_admin', 'MEMBER') as is_admin`,
+  );
+  const row = res.rows[0];
+  if (!row || !row.has_writer || row.is_super || row.is_admin) {
+    throw new Error(
+      `audit writer identity check failed (user=${row?.u ?? '?'}, super=${row?.is_super}, ` +
+        `has_writer=${row?.has_writer}, is_admin=${row?.is_admin}) — refusing to write`,
+    );
+  }
+  return row.u;
+}
+
+/**
  * Scope-parameterized Billing Audit ingest (Vercel Cron). GET only; CRON_SECRET-gated
  * (constant-time Bearer). Loops the scope's LOCKED roster (auditConfig — scope IS the
  * roster), running the scope's report+filter once per customer, and Option-B-upserts
@@ -578,6 +606,7 @@ async function handleBillingAuditCronForScope(
   }
   try {
     const ids = auditReportIds(scope, process.env); // throws on missing env — fail fast, names only
+    const writerUser = await assertAuditWriterIdentity(); // in-process identity assert BEFORE any write
     const base = cmdApiConfig(); // CMD_API_* credentials + base URL (report/filter overridden below)
     const stats = await billingAuditCron({
       scope,
@@ -599,7 +628,7 @@ async function handleBillingAuditCronForScope(
       sourceReportId: ids.reportId,
       revalidate: () => revalidateTag('billing-audit'),
     });
-    return { status: 200, body: { ok: true, ...stats } };
+    return { status: 200, body: { ok: true, writer_user: writerUser, ...stats } };
   } catch (err) {
     console.error(`billing-audit-${scope.toLowerCase()} cron failed:`, err instanceof Error ? err.message : String(err));
     return { status: 500, body: { error: 'cron_failed' } };
@@ -661,6 +690,7 @@ export async function handleBillingCodeDecisionsCron(req: {
     ]);
     const oauth = new google.auth.OAuth2(clientId, clientSecret);
     oauth.setCredentials({ refresh_token: refreshToken });
+    const writerUser = await assertAuditWriterIdentity(); // in-process identity assert BEFORE any write
     const stats = await decisionSync({
       // readSheet splits off row 1 as "header"; the matrix parser is block-based and
       // needs EVERY row with true 1-based rowNums — reassemble.
@@ -672,7 +702,7 @@ export async function handleBillingCodeDecisionsCron(req: {
       businessEntityId: BXR_TENANT_ID,
     });
     if (stats.status !== 'parse_failed' && stats.upserted > 0) revalidateTag('billing-audit');
-    return { status: 200, body: { ok: stats.status !== 'parse_failed', ...stats } };
+    return { status: 200, body: { ok: stats.status !== 'parse_failed', writer_user: writerUser, ...stats } };
   } catch (err) {
     console.error('billing-code-decisions cron failed:', err instanceof Error ? err.message : String(err));
     return { status: 500, body: { error: 'cron_failed' } };
