@@ -25,6 +25,7 @@ import {
   ArrowUp,
   ArrowUpDown,
   Bookmark,
+  Building2,
   Check,
   ChevronDown,
   Columns3,
@@ -40,7 +41,6 @@ import {
   Save,
   Search,
   Star,
-  Stethoscope,
   Table2,
   Trash2,
   TrendingDown,
@@ -491,6 +491,14 @@ export function CmdCollectionsExplorer({
   // Stable dep keys for the sets (array identity changes on every toggle otherwise).
   const searchColsKey = searchCols.join(',');
   const facilityKey = facilitySelection.join(''); // control char can't appear in a facility name
+
+  // Raw CMD facility text → curated friendly name from the already-loaded dimension options, for
+  // DISPLAY only (the Top facilities summary card). Drill/filter values stay the raw facility text
+  // the grid matches on, so no server change is needed. Falls back to raw when unmapped.
+  const facilityDisplayName = useMemo(() => {
+    const m = new Map(facilityOptions.map((o) => [o.facility, o.facility_name ?? o.facility]));
+    return (raw: string) => m.get(raw) ?? raw;
+  }, [facilityOptions]);
 
   // Load the tenant-scoped facility options for the multi-select whenever the view changes.
   useEffect(() => {
@@ -1169,6 +1177,7 @@ export function CmdCollectionsExplorer({
           refinement={refinement}
           onDrill={applyRefinement}
           onDrillCombo={applyComboRefinement}
+          facilityDisplayName={facilityDisplayName}
         />
       )}
 
@@ -1847,6 +1856,7 @@ function DrillList({
   activeValue,
   onDrill,
   revealDelayMs = 0,
+  displayFor,
 }: {
   title: string;
   icon: React.ReactNode;
@@ -1855,6 +1865,9 @@ function DrillList({
   activeValue: string | null;
   onDrill: (kind: RefineKind, value: string) => void;
   revealDelayMs?: number;
+  /** Optional map from a group's raw label (the drill/filter value) to a friendlier DISPLAY
+   *  string — e.g. facility raw CMD text → curated dimension name. Drill value stays `g.label`. */
+  displayFor?: (rawLabel: string) => string;
 }) {
   if (groups.length === 0) return null;
   const max = Math.max(...groups.map((g) => g.charge), 1);
@@ -1867,6 +1880,9 @@ function DrillList({
       <ul className="space-y-1">
         {groups.map((g) => {
           const label = g.label ?? '(blank)';
+          // DISPLAY may differ from the drill value (e.g. facility friendly name); the raw label is
+          // still what drills/filters. Blank stays '(blank)'.
+          const display = g.label && displayFor ? displayFor(g.label) : label;
           // A NULL/blank value can't be exact-matched through the filter, so it's shown as a
           // non-interactive stat rather than a drill link that would silently no-op.
           const drillable = g.label !== null && g.label !== '';
@@ -1874,7 +1890,7 @@ function DrillList({
           const pct = Math.max(2, Math.round((g.charge / max) * 100));
           const stats = (
             <span className="relative flex items-center justify-between gap-2">
-              <span className="truncate text-ink900">{label}</span>
+              <span className="truncate text-ink900" title={display}>{display}</span>
               <span className="shrink-0 tabular-nums text-xs text-muted-foreground">
                 {g.count.toLocaleString()} · {MONEY0.format(g.charge)}
               </span>
@@ -1961,12 +1977,15 @@ function SearchSummaryPanel({
   refinement,
   onDrill,
   onDrillCombo,
+  facilityDisplayName,
 }: {
   state: SummaryState;
   label: string;
   refinement: Refinement | null;
   onDrill: (kind: RefineKind, value: string) => void;
   onDrillCombo: (cpt: string, revenue: string) => void;
+  /** Raw facility text → curated friendly name, for the Top facilities card display only. */
+  facilityDisplayName?: (raw: string) => string;
 }) {
   // Fold/unfold the panel body below the header (Session F). Local, resets each session — not a
   // saved-view mechanism. Conditional render (not a max-height transition) so the drill buttons
@@ -2039,10 +2058,13 @@ function SearchSummaryPanel({
             <StatTile label="Patient Balance" value={MONEY0.format(s.total_balance)} />
           </div>
 
-          {/* Top Results groups (B): Payer + CPT single-dimension lists, then the full-width CPT×Rev
-              combo below. The Facility drill list was removed here — facility stays filterable via the
-              Facilities dropdown. This is a render-only removal: the summary object still returns
-              by_facility (unused now), so its shape and the server groups are unchanged. */}
+          {/* Top Results groups: Payer + Facility single-dimension lists, then the full-width CPT×Rev
+              combo below. The standalone CPT list was dropped here — the CPT×Rev combo table below
+              already carries CPT (with its revenue code + dollar-weighted %s), so a top-facilities
+              list is the more useful second card. Render-only: the summary still returns by_cpt
+              (unused now, mirroring how by_facility used to be), so its shape and the server groups
+              are unchanged; facility drill reuses the existing refinement path (case 'facility' →
+              filter.facility). */}
           <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
             <DrillList
               title="Top payers"
@@ -2054,13 +2076,14 @@ function SearchSummaryPanel({
               revealDelayMs={60}
             />
             <DrillList
-              title="Top CPT codes"
-              icon={<Stethoscope className="h-3.5 w-3.5" aria-hidden />}
-              kind="cpt_code"
-              groups={s.by_cpt}
-              activeValue={refinement?.kind === 'cpt_code' ? refinement.value : null}
+              title="Top facilities"
+              icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
+              kind="facility"
+              groups={s.by_facility}
+              activeValue={refinement?.kind === 'facility' ? refinement.value : null}
               onDrill={onDrill}
               revealDelayMs={120}
+              displayFor={facilityDisplayName}
             />
           </div>
 
