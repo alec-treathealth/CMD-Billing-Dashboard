@@ -310,3 +310,53 @@ export async function billingAuditCron(deps: BillingAuditCronDeps): Promise<Bill
   );
   return stats;
 }
+
+/** Column order for the observability insert — matches buildIngestRunParams below exactly. */
+const INGEST_RUN_COLS = [
+  'business_entity_id', 'scope', 'source_report_id', 'writer_user', 'status', 'started_at',
+  'customers_total', 'customers_processed', 'customers_failed', 'customers_header_mismatch',
+  'customers_skipped_budget', 'rows_fetched', 'mapped_valid', 'skipped', 'inserted', 'updated',
+  'all_rows_skipped_customers', 'per_customer',
+] as const;
+
+export interface AuditIngestRunMeta {
+  scope: AuditScope;
+  sourceReportId: string;
+  writerUser: string;
+  startedAt: string; // ISO timestamp captured at handler start
+}
+
+/**
+ * Persist ONE ingest-run summary row (claims.audit_ingest_run) — the durable observability
+ * record that closes the soak "log gap" (per_customer + writer_user + counts, straight from the
+ * DB). NON-PHI: counts, labels, the writer role name, and the per_customer array (ids / facility
+ * labels / outcomes / non-PHI reasons). Runs inside withTenant so the GUC-checked writer INSERT
+ * policy (0053) passes. The CALLER wraps this fail-soft — a summary-write failure must never fail
+ * an ingest that already succeeded. `status` is 'partial' when any customer failed / mismatched /
+ * budget-skipped, else 'ok'.
+ */
+export async function recordAuditIngestRun(
+  db: Db,
+  businessEntityId: string,
+  meta: AuditIngestRunMeta,
+  stats: BillingAuditCronStats,
+): Promise<void> {
+  const status =
+    stats.customers_failed + stats.customers_header_mismatch + stats.customers_skipped_budget > 0
+      ? 'partial'
+      : 'ok';
+  const vals: unknown[] = [
+    businessEntityId, meta.scope, meta.sourceReportId, meta.writerUser, status, meta.startedAt,
+    stats.customers_total, stats.customers_processed, stats.customers_failed, stats.customers_header_mismatch,
+    stats.customers_skipped_budget, stats.rows_fetched, stats.mapped_valid, stats.skipped, stats.inserted,
+    stats.updated, stats.all_rows_skipped_customers, JSON.stringify(stats.per_customer),
+  ];
+  await withTenant(db, businessEntityId, async (client) => {
+    const ph = vals.map((_, i) => `$${i + 1}`);
+    ph[ph.length - 1] = `${ph[ph.length - 1]}::jsonb`; // per_customer is the last param
+    await client.query(
+      `insert into claims.audit_ingest_run (${INGEST_RUN_COLS.join(', ')}) values (${ph.join(', ')})`,
+      vals,
+    );
+  });
+}

@@ -150,7 +150,7 @@ import {
 } from '../../src/routes/cmdPayerRefreshHandler.js';
 import { cmdExplorerCron } from '../../src/collections/cmdExplorerCron.js';
 import { cmdRunReportToZip, readZipEntries } from '../../src/collections/cmdPayer.js';
-import { billingAuditCron } from '../../src/billingAudit/auditIngest.js';
+import { billingAuditCron, recordAuditIngestRun } from '../../src/billingAudit/auditIngest.js';
 import { auditCustomersFor, auditReportIds, type AuditScope } from '../../src/billingAudit/auditConfig.js';
 import { isAuthorized } from '../../src/bearerAuth.js';
 
@@ -639,6 +639,7 @@ async function handleBillingAuditCronForScope(
   if (!secret || !isAuthorized(req.authorization, secret)) {
     return { status: 401, body: { error: 'unauthorized' } };
   }
+  const startedAt = new Date().toISOString();
   try {
     const ids = auditReportIds(scope, process.env); // throws on missing env — fail fast, names only
     const writerUser = await assertAuditWriterIdentity(); // in-process identity assert BEFORE any write
@@ -669,6 +670,18 @@ async function handleBillingAuditCronForScope(
       sourceReportId: ids.reportId,
       revalidate: () => revalidateTag('billing-audit'),
     });
+    // Persist the run summary (observability) — FAIL-SOFT: the ingest already succeeded, so a
+    // summary-write failure is logged (label only) and never fails the run. Requires 0053 applied.
+    try {
+      await recordAuditIngestRun(
+        auditWriterDb(),
+        BXR_TENANT_ID,
+        { scope, sourceReportId: ids.reportId, writerUser, startedAt },
+        stats,
+      );
+    } catch (e) {
+      console.error(`billing-audit-${scope.toLowerCase()} cron: audit_ingest_run write failed (non-fatal):`, e instanceof Error ? e.message : String(e));
+    }
     return { status: 200, body: { ok: true, writer_user: writerUser, ...stats } };
   } catch (err) {
     console.error(`billing-audit-${scope.toLowerCase()} cron failed:`, err instanceof Error ? err.message : String(err));
