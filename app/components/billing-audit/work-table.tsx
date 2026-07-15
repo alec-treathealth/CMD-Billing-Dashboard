@@ -67,9 +67,13 @@ export interface AuditWorkTableProps {
   filter: AuditFilter;
   initialPage?: { rows: AuditGridRow[]; nextCursor: AuditCursor | null } | null;
   onOpenDrill?: (row: AuditGridRow) => void;
+  /** Page-level PHI reveal — OWNED by the parent (ScopePanel) so the patient drill shares it and
+   *  can auto-reveal on open. revealAll gates DISPLAY; onToggleRevealAll flips it. */
+  revealAll: boolean;
+  onToggleRevealAll: () => void;
 }
 
-export function AuditWorkTable({ scope, view, canRevealPhi, filter, initialPage, onOpenDrill }: AuditWorkTableProps) {
+export function AuditWorkTable({ scope, view, canRevealPhi, filter, initialPage, onOpenDrill, revealAll, onToggleRevealAll }: AuditWorkTableProps) {
   const columns = [...BASE_COLS, ...(scope === 'IP' ? IP_EXTRA : OP_EXTRA), ...TAIL_COLS];
   const [rows, setRows] = useState<AuditGridRow[]>(initialPage?.rows ?? []);
   const [cursors, setCursors] = useState<(AuditCursor | null)[]>([null, ...(initialPage?.nextCursor ? [initialPage.nextCursor] : [])]);
@@ -78,9 +82,8 @@ export function AuditWorkTable({ scope, view, canRevealPhi, filter, initialPage,
   const [sort, setSort] = useState<AuditSort>({ column: 'charge_from_date', direction: 'desc' });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Page-level PHI reveal (mirrors the collections "Reveal all"): revealAll gates DISPLAY; the
-  // decrypted names/members are cached per audit_row id so paging/toggling doesn't re-fetch.
-  const [revealAll, setRevealAll] = useState(false);
+  // Decrypted names/members cached per audit_row id so paging/toggling doesn't re-fetch. The
+  // revealAll toggle itself is parent-owned (see props) so the drill can share it.
   const [revealed, setRevealed] = useState<Map<number, { name: string; member: string | null }>>(new Map());
   const seeded = useRef(initialPage != null);
   const filterKey = JSON.stringify(filter);
@@ -143,7 +146,7 @@ export function AuditWorkTable({ scope, view, canRevealPhi, filter, initialPage,
         {canRevealPhi && (
           <button
             type="button"
-            onClick={() => setRevealAll((v) => !v)}
+            onClick={onToggleRevealAll}
             aria-pressed={revealAll}
             className={`ml-auto rounded-md border px-2.5 py-1 text-xs transition-colors ${revealAll ? 'border-teal500 bg-teal50 text-teal700' : 'border-line text-ink600 hover:bg-teal50'}`}
             title="Reveal patient identifiers across this page (audited)"

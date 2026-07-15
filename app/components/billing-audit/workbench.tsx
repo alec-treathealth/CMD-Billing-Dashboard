@@ -117,6 +117,9 @@ function ScopePanel({ scope, view, canRevealPhi, initialFilter, facilities, paye
   const [preset, setPreset] = useState<Preset>(DEFAULT_PRESET);
   const [drillTarget, setDrillTarget] = useState<DrillTarget | null>(null);
   const [searching, setSearching] = useState(false);
+  // Page-level PHI reveal lives HERE (not in the work table) so the work table AND the patient
+  // drill share one toggle — turning it on unmasks the grid AND auto-reveals any drill opened.
+  const [revealAll, setRevealAll] = useState(false);
   const auditScope: AuditScope = scope === 'ip' ? 'IP' : 'OP';
 
   // Drill from a pivot cell: union the patch's array fields into the current filter (so clicking
@@ -159,8 +162,12 @@ function ScopePanel({ scope, view, canRevealPhi, initialFilter, facilities, paye
         searching={searching}
       />
       <PivotStrip scope={auditScope} view={view} filter={filter} onDrill={drillFilter} />
-      <AuditWorkTable scope={auditScope} view={view} canRevealPhi={canRevealPhi} filter={filter} initialPage={initialPage} onOpenDrill={openDrill} />
-      <PatientDrill scope={auditScope} view={view} canRevealPhi={canRevealPhi} target={drillTarget} onClose={() => setDrillTarget(null)} />
+      <AuditWorkTable
+        scope={auditScope} view={view} canRevealPhi={canRevealPhi} filter={filter}
+        initialPage={initialPage} onOpenDrill={openDrill}
+        revealAll={revealAll} onToggleRevealAll={() => setRevealAll((v) => !v)}
+      />
+      <PatientDrill scope={auditScope} view={view} canRevealPhi={canRevealPhi} target={drillTarget} revealAll={revealAll} onClose={() => setDrillTarget(null)} />
     </div>
   );
 }
