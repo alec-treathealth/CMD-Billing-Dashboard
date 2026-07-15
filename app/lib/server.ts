@@ -1273,6 +1273,48 @@ export async function revealAuditPatient(
   return { patient_name, patient_dob, member_id };
 }
 
+export interface AuditRevealedRow {
+  id: number;
+  patient_name: string;
+  member_id: string | null;
+}
+
+/**
+ * Bulk reveal for the work-table "Reveal all" toggle (page-level, mirrors the collections
+ * revealCmdExplorerRows): decrypt patient_name (+ member_id) for a page's audit_row ids in-process
+ * as claims_reader, write ONE fail-closed audit row for the batch, then return the identifiers. Ids
+ * outside the caller's entitled entityIds are silently dropped (a batch can never unmask another
+ * tenant's patients). A decryption failure THROWS (surfaced by the action, never swallowed).
+ */
+export async function revealAuditRows(
+  ids: number[],
+  actor: { email: string; userId: string },
+  entityIds: string[],
+): Promise<AuditRevealedRow[]> {
+  if (ids.length === 0) return [];
+  const { rows } = await readerExecutor().query<{ id: string; patient_name_enc: Buffer; member_id_enc: Buffer | null }>(
+    'select id, patient_name_enc, member_id_enc from claims.audit_row ' +
+      'where id = any($1::bigint[]) and business_entity_id = any($2::uuid[])',
+    [ids, entityIds],
+  );
+  const out: AuditRevealedRow[] = [];
+  for (const row of rows) {
+    const [patient_name, member_id] = await Promise.all([
+      decryptPhi(row.patient_name_enc),
+      row.member_id_enc ? decryptPhi(row.member_id_enc) : Promise.resolve(null),
+    ]);
+    out.push({ id: Number(row.id), patient_name, member_id });
+  }
+  // ONE bulk audit BEFORE returning PHI (fail-closed) — non-PHI synthetic ids + count only.
+  await recordAccess({
+    actorEmail: actor.email,
+    actorUserId: actor.userId,
+    action: 'reveal_audit_rows',
+    detail: { count: out.length, ids: out.map((o) => o.id) },
+  });
+  return out;
+}
+
 // --- Smart search summary ---------------------------------------------------
 // The "search engine" result: instead of paging through noisy rows, the search first returns
 // an AGGREGATE summary of everything matching (count + money totals) plus the top facilities /

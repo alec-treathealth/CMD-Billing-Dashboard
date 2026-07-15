@@ -73,8 +73,10 @@ import {
   loadAuditPivot,
   loadAuditPatientDetail,
   revealAuditPatient,
+  revealAuditRows as revealAuditRowsServer,
   type AuditPivot,
   type AuditRevealedPatient,
+  type AuditRevealedRow,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
 import { dashboardAccess } from '@/lib/access';
@@ -1135,6 +1137,27 @@ export async function revealAuditPatientAction(
     const patient = await revealAuditPatient(safeScope, id, gate.actor, gate.entityIds);
     if (!patient) return { ok: false, error: 'Patient not found in your scope.' };
     return { ok: true, patient };
+  } catch {
+    return { ok: false, error: 'Could not reveal patient identifiers.' };
+  }
+}
+
+export type { AuditRevealedRow };
+export type AuditRevealRowsResult = { ok: true; rows: AuditRevealedRow[] } | { ok: false; error: string };
+
+/**
+ * Bulk-reveal a page's rows for the work-table "Reveal all" toggle (page-level PHI reveal,
+ * mirrors collections revealCmdReportRows) — GATED (canRevealPhi) + AUDITED server-side. Ids are
+ * validated to safe positive ints and bounded (≤200). Tenant scope is the caller's PHI entitlement
+ * (gate.entityIds), so a row outside it is silently dropped — never another tenant's patient.
+ */
+export async function revealAuditRows(ids: number[]): Promise<AuditRevealRowsResult> {
+  const gate = await requirePhiPrincipal();
+  if (!gate.ok) return { ok: false, error: gate.error };
+  const safe = Array.isArray(ids) ? ids.filter((n) => Number.isSafeInteger(n) && n > 0).slice(0, 200) : [];
+  if (safe.length === 0) return { ok: true, rows: [] };
+  try {
+    return { ok: true, rows: await revealAuditRowsServer(safe, gate.actor, gate.entityIds) };
   } catch {
     return { ok: false, error: 'Could not reveal patient identifiers.' };
   }
