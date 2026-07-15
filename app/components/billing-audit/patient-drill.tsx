@@ -15,11 +15,13 @@ import type { DashboardView } from '@/lib/views';
 
 export interface DrillTarget { cmdPatientId: string; facility: string | null; payer: string | null; }
 
-export function PatientDrill({ scope, view, canRevealPhi, target, onClose }: {
+export function PatientDrill({ scope, view, canRevealPhi, target, revealAll, onClose }: {
   scope: AuditScope;
   view: DashboardView;
   canRevealPhi: boolean;
   target: DrillTarget | null;
+  /** Page-level reveal toggle (shared from ScopePanel) — when on, the drill auto-reveals on open. */
+  revealAll: boolean;
   onClose: () => void;
 }) {
   const [rows, setRows] = useState<AuditGridRow[]>([]);
@@ -41,8 +43,18 @@ export function PatientDrill({ scope, view, canRevealPhi, target, onClose }: {
       setRows(res.ok ? res.rows : []);
       setLoading(false);
     });
+    // When the page-level "Reveal all" is on, auto-reveal on open so the drill shows PHI
+    // immediately (no second click) — the SAME gated + audited action as the manual button.
+    if (revealAll && canRevealPhi) {
+      setRevealing(true);
+      revealAuditPatientAction(scope, patientId, view).then((res) => {
+        if (cancelled) return;
+        if (res.ok) setRevealed(res.patient); else setRevealErr(res.error);
+        setRevealing(false);
+      });
+    }
     return () => { cancelled = true; };
-  }, [patientId, scope, view]);
+  }, [patientId, scope, view, revealAll, canRevealPhi]);
 
   useEffect(() => {
     const onEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -81,7 +93,10 @@ export function PatientDrill({ scope, view, canRevealPhi, target, onClose }: {
             <div className="flex items-start gap-2 border-b border-line px-4 py-3">
               <div>
                 <h3 className="ths-h text-base font-semibold">
-                  <span className="font-mono tracking-widest text-ink400">••••••</span> — patient breakdown
+                  {revealed
+                    ? <span>{revealed.patient_name}</span>
+                    : <span className="font-mono tracking-widest text-ink400">••••••</span>}
+                  {' '}— patient breakdown
                 </h3>
                 <div className="mt-0.5 font-mono text-[11px] text-ink400">
                   PT-{target.cmdPatientId} · {target.facility ?? '—'} · {scope}
