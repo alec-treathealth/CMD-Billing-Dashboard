@@ -1,21 +1,25 @@
 'use client';
 
 /**
- * Billing Audit workbench — the client shell that hosts the three subtabs (IP Audit / OP Audit /
- * Flag Queue) as in-page state (one route, no sub-navigation), matching how Collections keeps its
- * surfaces in a single page. Milestone 1 wires the accessible tab shell + panels; the filter bar,
- * work table, pivot strip, and patient drill fill the IP/OP panels in later build steps. The Flag
- * Queue is a REAL destination now, deliberately inert (empty state) until the Phase-3 flag engine
- * computes exceptions into claims.flag after the soak clears.
+ * Billing Audit workbench — the client shell hosting three subtabs (IP Audit / OP Audit / Flag
+ * Queue) as in-page state (one route, no sub-navigation). Each scope panel holds its own filter
+ * state and a keyset-paged work table; the Flag Queue is a real destination, deliberately inert
+ * (empty state) until the Phase-3 flag engine computes exceptions into claims.flag.
  *
- * `canRevealPhi` is threaded down (a plain `user` never sees the reveal control; the reveal action
- * is gated server-side regardless). `view` carries the tenant scope resolved on the server.
+ * `canRevealPhi` threads down (a plain `user` never gets the reveal control; the reveal action is
+ * gated server-side regardless). `view` carries the server-resolved tenant scope. The IP panel is
+ * seeded with a server-rendered first page for the default (YTD) window; OP fetches on first view.
  */
 import { useCallback, useRef, useState } from 'react';
+import { AuditFilterBar } from './filter-bar';
+import { AuditWorkTable } from './work-table';
+import { DEFAULT_PRESET, type Preset } from './date-presets';
+import type { TagOption } from './tag-picker';
+import type { AuditCursor, AuditFilter, AuditGridRow } from '@/lib/actions';
+import type { AuditScope } from '../../../src/billingAudit/auditConfig';
 import type { DashboardView } from '@/lib/views';
 
 type AuditTab = 'ip' | 'op' | 'flags';
-
 const TABS: readonly { id: AuditTab; label: string }[] = [
   { id: 'ip', label: 'IP Audit' },
   { id: 'op', label: 'OP Audit' },
@@ -25,13 +29,20 @@ const TABS: readonly { id: AuditTab; label: string }[] = [
 export interface BillingAuditWorkbenchProps {
   view: DashboardView;
   canRevealPhi: boolean;
+  /** The YTD window the server seeded the IP page with — both panels start here. */
+  initialFilter: AuditFilter;
+  ipPage: { rows: AuditGridRow[]; nextCursor: AuditCursor | null } | null;
+  ipFacilities: TagOption[];
+  ipPayers: TagOption[];
+  opFacilities: TagOption[];
+  opPayers: TagOption[];
 }
 
-export function BillingAuditWorkbench({ view, canRevealPhi }: BillingAuditWorkbenchProps) {
+export function BillingAuditWorkbench(props: BillingAuditWorkbenchProps) {
+  const { view, canRevealPhi, initialFilter } = props;
   const [active, setActive] = useState<AuditTab>('ip');
   const tabRefs = useRef<Record<AuditTab, HTMLButtonElement | null>>({ ip: null, op: null, flags: null });
 
-  // Roving arrow-key navigation across the tablist (no Tabs primitive exists in this app).
   const onKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
     e.preventDefault();
@@ -44,12 +55,7 @@ export function BillingAuditWorkbench({ view, canRevealPhi }: BillingAuditWorkbe
 
   return (
     <section className="space-y-4">
-      <div
-        role="tablist"
-        aria-label="Billing audit scope"
-        onKeyDown={onKeyDown}
-        className="flex items-center gap-1 border-b border-line"
-      >
+      <div role="tablist" aria-label="Billing audit scope" onKeyDown={onKeyDown} className="flex items-center gap-1 border-b border-line">
         {TABS.map((t) => {
           const selected = t.id === active;
           return (
@@ -65,9 +71,7 @@ export function BillingAuditWorkbench({ view, canRevealPhi }: BillingAuditWorkbe
               className={[
                 'ths-h -mb-px border-b-2 px-4 py-2.5 text-[13px] font-semibold transition-colors',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1',
-                selected
-                  ? 'border-[var(--brand-accent)] text-[var(--brand-ink)]'
-                  : 'border-transparent text-ink400 hover:text-ink600',
+                selected ? 'border-[var(--brand-accent)] text-[var(--brand-ink)]' : 'border-transparent text-ink400 hover:text-ink600',
               ].join(' ')}
             >
               {t.label}
@@ -76,39 +80,51 @@ export function BillingAuditWorkbench({ view, canRevealPhi }: BillingAuditWorkbe
         })}
       </div>
 
-      <div
-        role="tabpanel"
-        id={`billing-audit-panel-${active}`}
-        aria-labelledby={`billing-audit-tab-${active}`}
-      >
+      <div role="tabpanel" id={`billing-audit-panel-${active}`} aria-labelledby={`billing-audit-tab-${active}`}>
         {active === 'flags' ? (
           <FlagQueueEmptyState />
+        ) : active === 'ip' ? (
+          <ScopePanel
+            scope="ip" view={view} canRevealPhi={canRevealPhi} initialFilter={initialFilter}
+            facilities={props.ipFacilities} payers={props.ipPayers} initialPage={props.ipPage}
+          />
         ) : (
-          <ScopePanelPlaceholder scope={active} view={view} canRevealPhi={canRevealPhi} />
+          <ScopePanel
+            scope="op" view={view} canRevealPhi={canRevealPhi} initialFilter={initialFilter}
+            facilities={props.opFacilities} payers={props.opPayers} initialPage={null}
+          />
         )}
       </div>
     </section>
   );
 }
 
-/** Placeholder for the IP/OP work-table panel — replaced by the filter bar + work table +
- *  pivot strip + patient drill in the next build milestones. Kept honest, not faked with data. */
-function ScopePanelPlaceholder({ scope, view, canRevealPhi }: { scope: 'ip' | 'op'; view: DashboardView; canRevealPhi: boolean }) {
+function ScopePanel({ scope, view, canRevealPhi, initialFilter, facilities, payers, initialPage }: {
+  scope: 'ip' | 'op';
+  view: DashboardView;
+  canRevealPhi: boolean;
+  initialFilter: AuditFilter;
+  facilities: TagOption[];
+  payers: TagOption[];
+  initialPage: { rows: AuditGridRow[]; nextCursor: AuditCursor | null } | null;
+}) {
+  const [filter, setFilter] = useState<AuditFilter>(initialFilter);
+  const [preset, setPreset] = useState<Preset>(DEFAULT_PRESET);
+  const auditScope: AuditScope = scope === 'ip' ? 'IP' : 'OP';
   return (
-    <div className="rounded-xl border border-dashed border-line bg-card p-10 text-center">
-      <h2 className="ths-h text-lg font-semibold">
-        {scope === 'ip' ? 'IP Audit' : 'OP Audit'} — work table
-      </h2>
-      <p className="mx-auto mt-2 max-w-xl text-sm text-muted-foreground">
-        Filter bar, dense work table, pivot strip, and patient drill are being wired in the next
-        build steps. Scope: <span className="font-medium text-ink600">{view}</span>
-        {canRevealPhi ? ' · reveal enabled for your role' : ' · reveal disabled for your role'}.
-      </p>
+    <div className="space-y-3">
+      <AuditFilterBar
+        facilities={facilities}
+        payers={payers}
+        value={filter}
+        activePreset={preset}
+        onChange={(next, p) => { setFilter(next); setPreset(p); }}
+      />
+      <AuditWorkTable scope={auditScope} view={view} canRevealPhi={canRevealPhi} filter={filter} initialPage={initialPage} />
     </div>
   );
 }
 
-/** Flag Queue — a real tab, empty until Phase 3 switches on the flag engine. */
 function FlagQueueEmptyState() {
   return (
     <div className="rounded-xl border border-line bg-card p-12 text-center">

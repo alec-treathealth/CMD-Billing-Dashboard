@@ -67,12 +67,27 @@ import {
   type CohortDrilldownTable,
   type CohortDrilldownResult,
   type GridViewRow,
+  loadAuditRowsNonPhi,
+  loadAuditFacilityOptions,
+  loadAuditPayerOptions,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
 import { dashboardAccess } from '@/lib/access';
 import { BXR_ENTITY_ID, clampView, viewToEntityIds, type DashboardView } from '@/lib/views';
 import { supabaseAuthConfigured } from '@/lib/supabase/env';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdExplorer';
+import {
+  resolveAuditCursor,
+  resolveAuditSort,
+  resolveAuditFilter,
+  type AuditCursor,
+  type AuditFilter,
+  type AuditSort,
+  type AuditGridRow,
+  type AuditFacilityOption,
+  type AuditPayerOption,
+} from '../../src/billingAudit/auditQuery';
+import type { AuditScope } from '../../src/billingAudit/auditConfig';
 import {
   memberIdBlindIndex,
   alphaPrefixBlindIndex,
@@ -979,6 +994,70 @@ export async function loadCmdReport(
     return { ok: true, rows: page.rows, nextCursor: page.nextCursor };
   } catch {
     return { ok: false, error: 'The collections report could not be loaded right now.' };
+  }
+}
+
+// --- Billing Audit work-table actions ---------------------------------------
+
+export type { AuditCursor, AuditFilter, AuditSort, AuditGridRow, AuditFacilityOption, AuditPayerOption };
+
+export type AuditRowsResult =
+  | { ok: true; rows: AuditGridRow[]; nextCursor: AuditCursor | null }
+  | { ok: false; error: string };
+
+const AUDIT_LOAD_ERROR = 'The billing audit report could not be loaded right now.';
+
+/**
+ * Load ONE keyset page of the billing-audit work table — NON-PHI columns only (cached 15 min per
+ * scope+cursor+filter+sort+tenant). `scope` (IP/OP) is the active subtab; `cursor` is the
+ * {id,value} of the previous page's last row (null = first page); `sort` is allowlisted (default
+ * charge_from_date DESC). Fails closed on an unauthorized principal (viewEntityScope → null).
+ */
+export async function loadAuditRows(
+  scope: AuditScope,
+  cursor: AuditCursor | null = null,
+  filter: AuditFilter = {},
+  sort?: AuditSort,
+  view?: DashboardView,
+): Promise<AuditRowsResult> {
+  const entityIds = await viewEntityScope(view);
+  if (entityIds === null) return { ok: false, error: AUDIT_LOAD_ERROR };
+  const safeScope: AuditScope = scope === 'OP' ? 'OP' : 'IP';
+  const safeCursor = resolveAuditCursor(cursor);
+  const safeSort = resolveAuditSort(sort);
+  const safeFilter = resolveAuditFilter(filter);
+  try {
+    const page = await loadAuditRowsNonPhi(safeCursor, safeFilter, safeSort, safeScope, entityIds);
+    return { ok: true, rows: page.rows, nextCursor: page.nextCursor };
+  } catch {
+    return { ok: false, error: AUDIT_LOAD_ERROR };
+  }
+}
+
+export interface AuditFilterOptions {
+  facilities: AuditFacilityOption[];
+  payers: AuditPayerOption[];
+}
+export type AuditFilterOptionsResult =
+  | { ok: true; options: AuditFilterOptions }
+  | { ok: false; error: string };
+
+/** Facility + payer tag-picker options for the (scope, tenant) slice (non-PHI, cached). */
+export async function loadAuditFilterOptions(
+  scope: AuditScope,
+  view?: DashboardView,
+): Promise<AuditFilterOptionsResult> {
+  const entityIds = await viewEntityScope(view);
+  if (entityIds === null) return { ok: false, error: 'Filter options are unavailable right now.' };
+  const safeScope: AuditScope = scope === 'OP' ? 'OP' : 'IP';
+  try {
+    const [facilities, payers] = await Promise.all([
+      loadAuditFacilityOptions(safeScope, entityIds),
+      loadAuditPayerOptions(safeScope, entityIds),
+    ]);
+    return { ok: true, options: { facilities, payers } };
+  } catch {
+    return { ok: false, error: 'Filter options are unavailable right now.' };
   }
 }
 
