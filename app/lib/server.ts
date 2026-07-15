@@ -12,6 +12,25 @@
  * logic lives in the transport-agnostic handlers under ../../src/routes.
  */
 import { revalidateTag, unstable_cache } from 'next/cache';
+import {
+  AUDIT_PAGE_SIZE,
+  auditSortValue,
+  buildAuditRowsQuery,
+  buildAuditFacilityOptionsQuery,
+  buildAuditPayerOptionsQuery,
+  buildAuditPivotQueries,
+  buildAuditPatientDetailQuery,
+  type AuditCursor,
+  type AuditFilter,
+  type AuditSort,
+  type AuditGridRow,
+  type AuditPage,
+  type AuditFacilityOption,
+  type AuditPayerOption,
+  type AuditOfficePivot,
+  type AuditPayerCptPivot,
+  type AuditRevPivot,
+} from '../../src/billingAudit/auditQuery.js';
 import { DASHBOARD_CACHE_TAG } from '../../src/cacheTags.js';
 import { makeAnthropicClientFromEnv } from '../../src/agent/index.js';
 import type { AnthropicMessagesClient } from '../../src/agent/index.js';
@@ -131,7 +150,7 @@ import {
 } from '../../src/routes/cmdPayerRefreshHandler.js';
 import { cmdExplorerCron } from '../../src/collections/cmdExplorerCron.js';
 import { cmdRunReportToZip, readZipEntries } from '../../src/collections/cmdPayer.js';
-import { billingAuditCron } from '../../src/billingAudit/auditIngest.js';
+import { billingAuditCron, recordAuditIngestRun } from '../../src/billingAudit/auditIngest.js';
 import { auditCustomersFor, auditReportIds, type AuditScope } from '../../src/billingAudit/auditConfig.js';
 import { isAuthorized } from '../../src/bearerAuth.js';
 
@@ -620,6 +639,7 @@ async function handleBillingAuditCronForScope(
   if (!secret || !isAuthorized(req.authorization, secret)) {
     return { status: 401, body: { error: 'unauthorized' } };
   }
+  const startedAt = new Date().toISOString();
   try {
     const ids = auditReportIds(scope, process.env); // throws on missing env — fail fast, names only
     const writerUser = await assertAuditWriterIdentity(); // in-process identity assert BEFORE any write
@@ -650,6 +670,18 @@ async function handleBillingAuditCronForScope(
       sourceReportId: ids.reportId,
       revalidate: () => revalidateTag('billing-audit'),
     });
+    // Persist the run summary (observability) — FAIL-SOFT: the ingest already succeeded, so a
+    // summary-write failure is logged (label only) and never fails the run. Requires 0053 applied.
+    try {
+      await recordAuditIngestRun(
+        auditWriterDb(),
+        BXR_TENANT_ID,
+        { scope, sourceReportId: ids.reportId, writerUser, startedAt },
+        stats,
+      );
+    } catch (e) {
+      console.error(`billing-audit-${scope.toLowerCase()} cron: audit_ingest_run write failed (non-fatal):`, e instanceof Error ? e.message : String(e));
+    }
     return { status: 200, body: { ok: true, writer_user: writerUser, ...stats } };
   } catch (err) {
     console.error(`billing-audit-${scope.toLowerCase()} cron failed:`, err instanceof Error ? err.message : String(err));
@@ -1092,6 +1124,154 @@ export const loadCmdExplorerNonPhi = unstable_cache(
   ['cmd-explorer-nonphi'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
+
+// --- Billing Audit reader (Phase-4 work table) ------------------------------
+// NON-PHI keyset page over claims.audit_row (charge-line grain), tenant + scope pinned in
+// SQL. The encrypted PHI columns are NEVER selected — the grid masks the patient; the drill
+// reveals identifiers through the separate gated + audited path. Cached per (cursor, filter,
+// sort, scope, entityIds); the ingest cron busts the shared 'billing-audit' tag after a write.
+
+interface AuditGridDbRecord extends Omit<AuditGridRow, 'id'> {
+  id: string; // pg returns int8 (id) as a string; toAuditGridRow narrows it to number
+}
+function toAuditGridRow(r: AuditGridDbRecord): AuditGridRow {
+  return { ...r, id: Number(r.id) };
+}
+
+async function loadAuditRowsPage(
+  cursor: AuditCursor | null,
+  filter: AuditFilter,
+  sort: AuditSort,
+  scope: AuditScope,
+  entityIds: string[],
+): Promise<AuditPage> {
+  // Keyset on (sort column, id); default charge_from_date DESC (most-recent DOS first). Over-fetch
+  // one row to detect a next page without a count(*). Tenant + scope are mandatory WHERE predicates.
+  const limit = AUDIT_PAGE_SIZE + 1;
+  const { sql, params } = buildAuditRowsQuery(cursor, filter, sort, limit, scope, entityIds);
+  const { rows } = await readerExecutor().query<AuditGridDbRecord>(sql, params);
+  const hasMore = rows.length > AUDIT_PAGE_SIZE;
+  const page = (hasMore ? rows.slice(0, AUDIT_PAGE_SIZE) : rows).map(toAuditGridRow);
+  const last = page[page.length - 1];
+  const nextCursor: AuditCursor | null =
+    hasMore && last ? { id: last.id, value: auditSortValue(last, sort.column) } : null;
+  return { rows: page, nextCursor };
+}
+
+/** NON-PHI audit page, cached 15 min per (cursor, filter, sort, scope, entityIds). entityIds +
+ *  scope are part of the key so a BXR/IP page is never served to an Indigo/OP request. */
+export const loadAuditRowsNonPhi = unstable_cache(
+  (
+    cursor: AuditCursor | null,
+    filter: AuditFilter,
+    sort: AuditSort,
+    scope: AuditScope,
+    entityIds: string[],
+  ): Promise<AuditPage> => loadAuditRowsPage(cursor, filter, sort, scope, entityIds),
+  ['billing-audit-rows-nonphi'],
+  { revalidate: 900, tags: ['billing-audit'] },
+);
+
+/** Facility tag-picker options for the (scope, tenant) slice — code + friendly label + count. */
+export const loadAuditFacilityOptions = unstable_cache(
+  async (scope: AuditScope, entityIds: string[]): Promise<AuditFacilityOption[]> => {
+    const { sql, params } = buildAuditFacilityOptionsQuery(scope, entityIds);
+    const { rows } = await readerExecutor().query<AuditFacilityOption>(sql, params);
+    return rows;
+  },
+  ['billing-audit-facility-options'],
+  { revalidate: 900, tags: ['billing-audit'] },
+);
+
+/** Payer tag-picker options for the (scope, tenant) slice — payer_name + count, busiest first. */
+export const loadAuditPayerOptions = unstable_cache(
+  async (scope: AuditScope, entityIds: string[]): Promise<AuditPayerOption[]> => {
+    const { sql, params } = buildAuditPayerOptionsQuery(scope, entityIds);
+    const { rows } = await readerExecutor().query<AuditPayerOption>(sql, params);
+    return rows;
+  },
+  ['billing-audit-payer-options'],
+  { revalidate: 900, tags: ['billing-audit'] },
+);
+
+export interface AuditPivot {
+  by_office: AuditOfficePivot[];
+  by_payer_cpt: AuditPayerCptPivot[];
+  by_rev: AuditRevPivot[];
+}
+
+/** Pivot-strip aggregates for the current (scope, tenant, filter) slice — the three click-to-filter
+ *  breakdowns fan out CONCURRENTLY over the same WHERE, so wall-clock stays ~one scan. Non-PHI. */
+export const loadAuditPivot = unstable_cache(
+  async (filter: AuditFilter, scope: AuditScope, entityIds: string[]): Promise<AuditPivot> => {
+    const { byOffice, byPayerCpt, byRev } = buildAuditPivotQueries(filter, scope, entityIds);
+    const exec = readerExecutor();
+    const [office, payerCpt, rev] = await Promise.all([
+      exec.query<AuditOfficePivot>(byOffice.sql, byOffice.params),
+      exec.query<AuditPayerCptPivot>(byPayerCpt.sql, byPayerCpt.params),
+      exec.query<AuditRevPivot>(byRev.sql, byRev.params),
+    ]);
+    return { by_office: office.rows, by_payer_cpt: payerCpt.rows, by_rev: rev.rows };
+  },
+  ['billing-audit-pivot'],
+  { revalidate: 900, tags: ['billing-audit'] },
+);
+
+/** All charge lines for ONE patient (by cmd_patient_id) in a scope — the drill detail. NON-PHI
+ *  (same masked projection as the grid), tenant + scope pinned. Cached per (scope, patient, tenant). */
+export const loadAuditPatientDetail = unstable_cache(
+  async (scope: AuditScope, cmdPatientId: string, entityIds: string[]): Promise<AuditGridRow[]> => {
+    const { sql, params } = buildAuditPatientDetailQuery(cmdPatientId, scope, entityIds);
+    const { rows } = await readerExecutor().query<AuditGridDbRecord>(sql, params);
+    return rows.map(toAuditGridRow);
+  },
+  ['billing-audit-patient-detail'],
+  { revalidate: 900, tags: ['billing-audit'] },
+);
+
+export interface AuditRevealedPatient {
+  patient_name: string;
+  patient_dob: string | null;
+  member_id: string | null;
+}
+
+/**
+ * Reveal ONE patient's encrypted identifiers (name / DOB / member id) for the drill, decrypted
+ * in-process as claims_reader, scoped to the caller's entitled entityIds so a reveal can never
+ * unmask another tenant's patient. Writes ONE fail-closed audit row (action reveal_audit_row,
+ * id-only detail — the cmd_patient_id business key + scope, NEVER the decrypted values) BEFORE
+ * returning. A decryption failure throws (surfaced by the action, never silently swallowed).
+ */
+export async function revealAuditPatient(
+  scope: AuditScope,
+  cmdPatientId: string,
+  actor: { email: string; userId: string },
+  entityIds: string[],
+): Promise<AuditRevealedPatient | null> {
+  const { rows } = await readerExecutor().query<{
+    patient_name_enc: Buffer;
+    patient_dob_enc: Buffer | null;
+    member_id_enc: Buffer | null;
+  }>(
+    'select patient_name_enc, patient_dob_enc, member_id_enc from claims.audit_row ' +
+      'where business_entity_id = any($1::uuid[]) and audit_scope = $2 and cmd_patient_id = $3 limit 1',
+    [entityIds, scope, cmdPatientId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  const [patient_name, patient_dob, member_id] = await Promise.all([
+    decryptPhi(row.patient_name_enc),
+    row.patient_dob_enc ? decryptPhi(row.patient_dob_enc) : Promise.resolve(null),
+    row.member_id_enc ? decryptPhi(row.member_id_enc) : Promise.resolve(null),
+  ]);
+  await recordAccess({
+    actorEmail: actor.email,
+    actorUserId: actor.userId,
+    action: 'reveal_audit_row',
+    detail: { cmd_patient_id: cmdPatientId, scope }, // id-only — never the decrypted values
+  });
+  return { patient_name, patient_dob, member_id };
+}
 
 // --- Smart search summary ---------------------------------------------------
 // The "search engine" result: instead of paging through noisy rows, the search first returns

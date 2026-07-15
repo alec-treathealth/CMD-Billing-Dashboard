@@ -1148,7 +1148,8 @@ another session's WIP claim is usually an untracked file. Current reservations:
 | 0024 | ANOTHER session | 0024-related WIP (per Alec, 2026-07-13 — listed in the parallel-WIP set; 0024 itself is applied on origin/main) |
 | 0049 | billing-audit branch (`feat/billing-audit-plane`) | `0049_billing_audit_plane` — APPLIED live + committed on that branch |
 | 0050 | collections session | `0050_cmd_explorer_charge_rollup` — LANDED on origin/main (fed5930) |
-| 0051 | billing-audit branch | `0051_payer_alias_seed` — DRAFT, not applied, pending Alec's ruling |
+| 0051 | billing-audit branch | `0051_payer_alias_seed` — APPLIED live + merged to origin/main (PR #6, 609dff9) |
+| 0052 | billing-audit facility-resolution branch (`feat/billing-audit-facility-resolution`) | `0052_audit_row_facility_code` — **APPLIED live + verified (24,507/24,507 stamped, 0 NULL); committed on-branch `2386ec8`; TEEN_MH_TX resolved (own distinct code). NOT on origin/main (branch-only, not pushed).** (upd. 2026-07-15) |
 
 Record new claims here when made; remove rows once the file is on origin/main
 (the tree then speaks for itself).
@@ -1191,3 +1192,109 @@ search summary, combo, cohort curves, drilldown stats) — never write a new agg
 so joins back still land). **Expected grain disagreement (BY DESIGN, not a bug):** the search summary
 reports logical-charge counts (~66k for BXR) while the browsing grid pages posting rows (~141k for
 BXR) — the two surfaces intentionally display different grains, so those two counts will not match.
+
+---
+
+## Billing Audit — WS1 facility resolution + Phase 4 UI (builds 1–6) complete (2026-07-15)
+
+CC-executed on `feat/billing-audit-facility-resolution`, relayed + verified by Alec.
+Phases 1–2 already merged to `main` (PR #6, `609dff9`); this entry records the
+facility-resolution work + the full Phase 4 read-only UI — all branch-only
+(not pushed, no PR, not deployed) as of writing.
+
+### Phase 1–2 live baseline (on `main`, for the record)
+
+- Migrations **0049** (audit schema) + **0051** (payer-alias seed, higher-precedence-wins)
+  applied live + merged (PR #6, `609dff9`).
+- **Three daily crons, all BXR-only:** `billing-audit-ip` 02:10 UTC · `billing-audit-op`
+  02:20 UTC · `billing-code-decisions` 02:40 UTC (= 7:10/7:20/7:40 PM PDT).
+- **Writer role `claims_audit_writer_svc`** via `CLAIMS_AUDIT_WRITER_DATABASE_URL`.
+- **GOTCHA (carry forever): the Supavisor pooler host is the ONLY reachable one.**
+  Writer URL uses `aws-1-us-west-1.pooler.supabase.com:6543`. The
+  `db.<ref>.supabase.co` **direct host is IPv6-only and unreachable from Alec's
+  network** — cost a full debugging cycle to isolate. Any new service DB URL for
+  this project MUST use the `aws-1-…pooler…:6543` host, never `db.*.supabase.co`.
+- **`claims.audit_row`: 24,507 BXR rows, zero cross-tenant leakage, zero non-BXR** (verified).
+
+### WS1 — facility-scoped alias resolution (Option B, RATIFIED + applied)
+
+- **Design (Option B):** `facility_code` is **stamped at ingest from the roster's
+  authoritative code**, NOT parsed from the messy `office_name` strings (parsing
+  office_name was the rejected Option A).
+- **Migration 0052** (`0052_audit_row_facility_code`, dashboard sequence) **applied live**;
+  backfill complete: **24,507/24,507 stamped, 0 NULL** (verified). Committed on-branch
+  `2386ec8` (resolver + 0052).
+- **TEEN_MH_TX ruling (customer 10035166):** resolved as **its own distinct
+  `facility_code`** — deliberately **kept distinct from collections' TREAT_TX merge**.
+  Billing-audit and collections diverge here on purpose; do not "reconcile" them.
+- `claims.facility_alias` seeds from `collections.facilities`, used only for
+  decision-matrix matching, not to gate ingest (facility set stays data-driven).
+
+### Phase 4 UI — `/billing-audit`, RBAC-gated, READ-ONLY (builds 1–6 complete)
+
+All six builds done + committed on-branch. Verified read-only against prod: no PHI
+leakage, no page-overlap, correct scope isolation.
+
+- **Builds 1–3** (`c3844d7` route+shell+nav; `42b98ea` filter+table+reader): RBAC-gated
+  route, subtab shell, filter bar, work table with **keyset pagination**.
+- **Build 4 — pivot strip** (`b4e44f9`): collapsible Office / Payer×CPT / Rev
+  click-to-filter accelerators over the **same (scope, tenant, filter) slice** as the
+  table. `loadAuditPivot` reader (non-PHI, cached, **top-8 capped**). Clicking a cell
+  **unions** the value into the filter.
+- **Build 5 — patient drill + reveal + gated search** (`b4e44f9`):
+  - **Drill:** right slide-over, one patient's charge lines by `cmd_patient_id`
+    (non-PHI, **masked**) — `loadAuditPatientDetail`.
+  - **Reveal:** `canRevealPhi`-gated + server-audited — `revealAuditPatient` →
+    `recordAccess('reveal_audit_row', { cmd_patient_id, scope })`, id-only detail,
+    scoped to caller's PHI entitlement. **Mirrors `revealCmdExplorerRow` exactly.**
+  - **Search:** box shown **only to reveal-entitled roles**; resolves term to **opaque
+    blind-index tokens** (≤3 chars → prefix, else exact) via `searchAuditPatients`,
+    gated + audited (`search_audit_phi`, **field names only**); tokens filter
+    `patient_name_bidx` / `_pfx3_bidx` — **no plaintext PHI client-side**.
+    **Mirrors `resolvePhiSearch` exactly.**
+- **Build 6 — Flag Queue:** inert empty-state tab with a `(0)` count (Phase 3 placeholder).
+
+**Verification:** 451/451 unit tests, typecheck clean, app build green
+(`/billing-audit` = 10.6 kB). Read-only prod SQL: pivot 8/8/8, patient-detail drill
+31 lines all-same-patient, PHI-leak NONE. One arg-order bug caught + fixed during the build.
+
+**Branch state:** four commits on `feat/billing-audit-facility-resolution` —
+`2386ec8` (resolver+0052) → `c3844d7` (route+shell) → `42b98ea` (filter+table+reader)
+→ `b4e44f9` (pivot+drill+search). **Not pushed, no PR, not deployed.** 0052 is **already
+applied to the prod DB**, so a future merge just ships the file. Working tree clean
+(only pre-existing `.env.example`).
+
+### Soak gate before Phase 3 (Alec's rule)
+
+**3–5 clean nightly cron cycles required before Phase 3 flag-engine work starts** —
+checked **manually each morning, not automated** (deliberate: new PHI-adjacent infra's
+first unattended week).
+- **Cycle 1 (2026-07-15, 02:10–02:21 UTC): verified CLEAN** via direct SQL — correct
+  row counts, zero non-BXR, **single `source_report_id` per scope (no report-collision
+  recurrence)**, zero null blind-indexes.
+- **≥2 more clean cycles needed.** Pattern: group by `audit_scope, date_trunc('day',
+  ingested_at)`; check row counts / timing / zero-non-BXR / single source_report_id
+  per scope / zero null blind-indexes.
+- Phase 3 flag engine is otherwise **unblocked** (resolver built + tested, TEEN resolved)
+  — starts the moment the soak clears.
+
+### Watch items (recorded, unconfirmed)
+
+- **Stray 2-row OP touch 2026-07-14 08:41 UTC** — pre-dates the `vercel.json` schedule;
+  probably a pre-merge manual invoke, **not confirmed**.
+- **`last_fu_note` PHI classification — OPEN, higher urgency.** Currently displayed
+  **as stored** in the non-PHI reader/table (per the schema's non-PHI classification).
+  **If it can carry free-text PHI this is a live exposure**, and the fix is **ingest-side
+  masking**, not a display change. Confirm field contents against prod before Phase 3.
+
+### Backlog (non-blocking)
+
+- `audit_ingest_run` observability table.
+- Unify the duplicated `MultiSelectTagPicker`.
+- Jess list (consolidate + send): ~19% CAMH IP payers unmatched (Aetna, Kaiser WA, Surest,
+  Western Growers, Halcyon, Carelon, Self Pay) — intentional-gap vs maintenance-gap
+  unconfirmed; HOUSTON_MH + TREAT_CO (BXR OP) return INVALID CRITERIA — defunct vs
+  new-no-data unconfirmed; 9 needs-ruling payer-alias carriers (BCBS AR–Walmart, KWC
+  Blues-vs-Anthems, BCBS MA/OK, BCBS TX MH-vs-SUD, Highmark, bare BCBS, Anthem ALL
+  OTHER/S) — unmatched by design, not permanent; TEEN_MH_TX facility question
+  (distinct vs typo).

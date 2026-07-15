@@ -67,6 +67,14 @@ import {
   type CohortDrilldownTable,
   type CohortDrilldownResult,
   type GridViewRow,
+  loadAuditRowsNonPhi,
+  loadAuditFacilityOptions,
+  loadAuditPayerOptions,
+  loadAuditPivot,
+  loadAuditPatientDetail,
+  revealAuditPatient,
+  type AuditPivot,
+  type AuditRevealedPatient,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
 import { dashboardAccess } from '@/lib/access';
@@ -74,9 +82,27 @@ import { BXR_ENTITY_ID, clampView, viewToEntityIds, type DashboardView } from '@
 import { supabaseAuthConfigured } from '@/lib/supabase/env';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdExplorer';
 import {
+  resolveAuditCursor,
+  resolveAuditSort,
+  resolveAuditFilter,
+  type AuditCursor,
+  type AuditFilter,
+  type AuditSort,
+  type AuditGridRow,
+  type AuditFacilityOption,
+  type AuditPayerOption,
+  type AuditOfficePivot,
+  type AuditPayerCptPivot,
+  type AuditRevPivot,
+} from '../../src/billingAudit/auditQuery';
+import type { AuditScope } from '../../src/billingAudit/auditConfig';
+import {
   memberIdBlindIndex,
   alphaPrefixBlindIndex,
   groupNumberBlindIndex,
+  patientNameBlindIndex,
+  patientNamePrefixBlindIndex,
+  patientNameNormalized,
   BlindIndexError,
 } from '../../src/collections/blindIndex';
 import type {
@@ -980,6 +1006,183 @@ export async function loadCmdReport(
   } catch {
     return { ok: false, error: 'The collections report could not be loaded right now.' };
   }
+}
+
+// --- Billing Audit work-table actions ---------------------------------------
+
+export type { AuditCursor, AuditFilter, AuditSort, AuditGridRow, AuditFacilityOption, AuditPayerOption };
+
+export type AuditRowsResult =
+  | { ok: true; rows: AuditGridRow[]; nextCursor: AuditCursor | null }
+  | { ok: false; error: string };
+
+const AUDIT_LOAD_ERROR = 'The billing audit report could not be loaded right now.';
+
+/**
+ * Load ONE keyset page of the billing-audit work table — NON-PHI columns only (cached 15 min per
+ * scope+cursor+filter+sort+tenant). `scope` (IP/OP) is the active subtab; `cursor` is the
+ * {id,value} of the previous page's last row (null = first page); `sort` is allowlisted (default
+ * charge_from_date DESC). Fails closed on an unauthorized principal (viewEntityScope → null).
+ */
+export async function loadAuditRows(
+  scope: AuditScope,
+  cursor: AuditCursor | null = null,
+  filter: AuditFilter = {},
+  sort?: AuditSort,
+  view?: DashboardView,
+): Promise<AuditRowsResult> {
+  const entityIds = await viewEntityScope(view);
+  if (entityIds === null) return { ok: false, error: AUDIT_LOAD_ERROR };
+  const safeScope: AuditScope = scope === 'OP' ? 'OP' : 'IP';
+  const safeCursor = resolveAuditCursor(cursor);
+  const safeSort = resolveAuditSort(sort);
+  const safeFilter = resolveAuditFilter(filter);
+  try {
+    const page = await loadAuditRowsNonPhi(safeCursor, safeFilter, safeSort, safeScope, entityIds);
+    return { ok: true, rows: page.rows, nextCursor: page.nextCursor };
+  } catch {
+    return { ok: false, error: AUDIT_LOAD_ERROR };
+  }
+}
+
+export interface AuditFilterOptions {
+  facilities: AuditFacilityOption[];
+  payers: AuditPayerOption[];
+}
+export type AuditFilterOptionsResult =
+  | { ok: true; options: AuditFilterOptions }
+  | { ok: false; error: string };
+
+/** Facility + payer tag-picker options for the (scope, tenant) slice (non-PHI, cached). */
+export async function loadAuditFilterOptions(
+  scope: AuditScope,
+  view?: DashboardView,
+): Promise<AuditFilterOptionsResult> {
+  const entityIds = await viewEntityScope(view);
+  if (entityIds === null) return { ok: false, error: 'Filter options are unavailable right now.' };
+  const safeScope: AuditScope = scope === 'OP' ? 'OP' : 'IP';
+  try {
+    const [facilities, payers] = await Promise.all([
+      loadAuditFacilityOptions(safeScope, entityIds),
+      loadAuditPayerOptions(safeScope, entityIds),
+    ]);
+    return { ok: true, options: { facilities, payers } };
+  } catch {
+    return { ok: false, error: 'Filter options are unavailable right now.' };
+  }
+}
+
+export type { AuditPivot, AuditOfficePivot, AuditPayerCptPivot, AuditRevPivot };
+export type AuditPivotResult = { ok: true; pivot: AuditPivot } | { ok: false; error: string };
+
+/** Pivot-strip aggregates (by office / payer×CPT / rev) for the current filtered slice (non-PHI). */
+export async function loadAuditPivotAction(
+  scope: AuditScope,
+  filter: AuditFilter = {},
+  view?: DashboardView,
+): Promise<AuditPivotResult> {
+  const entityIds = await viewEntityScope(view);
+  if (entityIds === null) return { ok: false, error: 'Pivot unavailable right now.' };
+  const safeScope: AuditScope = scope === 'OP' ? 'OP' : 'IP';
+  try {
+    const pivot = await loadAuditPivot(resolveAuditFilter(filter), safeScope, entityIds);
+    return { ok: true, pivot };
+  } catch {
+    return { ok: false, error: 'Pivot unavailable right now.' };
+  }
+}
+
+// --- patient drill + reveal + gated search (PHI touchpoints) -----------------
+
+export type { AuditRevealedPatient };
+export type AuditPatientDetailResult = { ok: true; rows: AuditGridRow[] } | { ok: false; error: string };
+
+/** All charge lines for one patient (by cmd_patient_id) — NON-PHI drill detail (masked). */
+export async function loadAuditPatientDetailAction(
+  scope: AuditScope,
+  cmdPatientId: string,
+  view?: DashboardView,
+): Promise<AuditPatientDetailResult> {
+  const entityIds = await viewEntityScope(view);
+  if (entityIds === null) return { ok: false, error: AUDIT_LOAD_ERROR };
+  const id = (cmdPatientId ?? '').trim();
+  if (id === '' || id.length > 64) return { ok: false, error: AUDIT_LOAD_ERROR };
+  const safeScope: AuditScope = scope === 'OP' ? 'OP' : 'IP';
+  try {
+    const rows = await loadAuditPatientDetail(safeScope, id, entityIds);
+    return { ok: true, rows };
+  } catch {
+    return { ok: false, error: AUDIT_LOAD_ERROR };
+  }
+}
+
+export type AuditRevealResult = { ok: true; patient: AuditRevealedPatient } | { ok: false; error: string };
+
+/** Reveal one patient's identifiers for the drill — gated (canRevealPhi) + audited server-side. */
+export async function revealAuditPatientAction(
+  scope: AuditScope,
+  cmdPatientId: string,
+  view?: DashboardView,
+): Promise<AuditRevealResult> {
+  const gate = await requirePhiPrincipal();
+  if (!gate.ok) return { ok: false, error: gate.error };
+  const id = (cmdPatientId ?? '').trim();
+  if (id === '' || id.length > 64) return { ok: false, error: 'Invalid patient.' };
+  const safeScope: AuditScope = scope === 'OP' ? 'OP' : 'IP';
+  try {
+    // Tenant scope = the caller's PHI entitlement (gate.entityIds), NOT the display view — a reveal
+    // can only ever unmask a patient whose business_entity_id is in that set. view labels the audit.
+    const patient = await revealAuditPatient(safeScope, id, gate.actor, gate.entityIds);
+    if (!patient) return { ok: false, error: 'Patient not found in your scope.' };
+    return { ok: true, patient };
+  } catch {
+    return { ok: false, error: 'Could not reveal patient identifiers.' };
+  }
+}
+
+export type AuditPatientSearchResult =
+  | { ok: true; tokens: { patientNameBidx?: string[]; patientNamePrefixBidx?: string[] } }
+  | { ok: false; error: string };
+
+/**
+ * Resolve a patient-name search term to opaque blind-index tokens the grid filters on — a PHI
+ * operation, so GATED to canRevealPhi roles and AUDITED (search_audit_phi, field names only, never
+ * the term). ≤3 normalized chars → 3-char PREFIX token; longer → EXACT full-name token. Mirrors the
+ * collections resolvePhiSearch precedent. Returns {} (no-op) for an empty term.
+ */
+export async function searchAuditPatients(
+  term: string,
+  scope: AuditScope,
+  view?: DashboardView,
+): Promise<AuditPatientSearchResult> {
+  const t = (term ?? '').trim();
+  if (t === '') return { ok: true, tokens: {} };
+  if (t.length > 120) return { ok: false, error: 'Invalid search.' };
+  const gate = await requirePhiPrincipal();
+  if (!gate.ok) return { ok: false, error: gate.error };
+  const tokens: { patientNameBidx?: string[]; patientNamePrefixBidx?: string[] } = {};
+  try {
+    const norm = patientNameNormalized(t);
+    if (norm && norm.length <= 3) {
+      const pfx = patientNamePrefixBlindIndex(t);
+      if (pfx) tokens.patientNamePrefixBidx = [pfx];
+    } else {
+      const exact = patientNameBlindIndex(t);
+      if (exact) tokens.patientNameBidx = [exact];
+    }
+  } catch (e) {
+    if (e instanceof BlindIndexError) return { ok: false, error: 'Search is temporarily unavailable.' };
+    throw e;
+  }
+  const fields = Object.keys(tokens);
+  if (fields.length === 0) return { ok: true, tokens: {} };
+  await recordAccess({
+    actorEmail: gate.actor.email,
+    actorUserId: gate.actor.userId,
+    action: 'search_audit_phi',
+    detail: { fields, scope, view: view ?? null }, // field NAMES only — never the term/token
+  });
+  return { ok: true, tokens };
 }
 
 export type CmdSearchSummaryResult =

@@ -10,13 +10,15 @@ import { BookOpen, type LucideIcon } from 'lucide-react';
 const LINKS: readonly { href: string; label: string; icon?: LucideIcon }[] = [
   { href: '/dashboard', label: 'Overview' },
   { href: '/dashboard/collections', label: 'Collections' },
+  { href: '/billing-audit', label: 'Billing Audit' },
   { href: '/claims', label: 'Claims' },
   { href: '/code-reference', label: 'Code Reference', icon: BookOpen },
   { href: '/ask', label: 'Ask' },
 ];
 
-/** The two dashboard routes that carry a tenant scope (?view=); the rest are view-agnostic. */
-const VIEW_SCOPED = new Set<string>(['/dashboard', '/dashboard/collections']);
+/** The tenant-scoped routes that carry a ?view= scope; the rest are view-agnostic. Billing
+ *  Audit is PHI + tenant-scoped (BXR-only today), so it carries the view like the dashboard. */
+const VIEW_SCOPED = new Set<string>(['/dashboard', '/dashboard/collections', '/billing-audit']);
 
 export function NavLinks() {
   const pathname = usePathname();

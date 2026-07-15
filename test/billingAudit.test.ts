@@ -20,7 +20,7 @@ const {
   IP_HEADERS, OP_HEADERS, headerMismatch, parsePositionalCsv, normalizeStatus,
   toIsoDate, toCents, toUnits, collapseDiagnoses, mapAuditRow,
 } = await import('../src/billingAudit/auditRowMap.js');
-const { upsertAuditRows, billingAuditCron } = await import('../src/billingAudit/auditIngest.js');
+const { upsertAuditRows, billingAuditCron, recordAuditIngestRun } = await import('../src/billingAudit/auditIngest.js');
 const {
   patientNameNormalized, patientNameBlindIndex, patientNamePrefixBlindIndex,
   auditBlindIndexesForRowSafe,
@@ -333,7 +333,7 @@ test('upsertAuditRows: Option-B SQL shape + inserted/updated split from xmax', a
   const r1 = mapAuditRow('IP', ipRow(IP_BASE));
   const r2 = mapAuditRow('IP', ipRow({ ...IP_BASE, 'Charge Claim ID': '900099', 'Charge Patient ID': '800099' }));
   assert.ok(r1.ok && r2.ok);
-  const counts = await upsertAuditRows(fake.db as never, [r1.row, r2.row], BXR_ENTITY_ID, '10064394');
+  const counts = await upsertAuditRows(fake.db as never, [r1.row, r2.row], BXR_ENTITY_ID, '10064394', 'CAMH');
   assert.equal(fake.sqls.length, 1);
   const sql = fake.sqls[0]!;
   assert.match(sql, /on conflict \(business_entity_id, row_fingerprint\) do update set/);
@@ -344,9 +344,60 @@ test('upsertAuditRows: Option-B SQL shape + inserted/updated split from xmax', a
   assert.ok(!/\bcharge_amount_cents = excluded\./.test(updateClause));
   assert.ok(!/\bcpt_code = excluded\./.test(updateClause));
   assert.ok(!/\brow_fingerprint = excluded\./.test(updateClause));
-  // 39 insert columns × 2 tuples.
-  assert.equal(fake.paramCounts[0], 39 * 2);
+  // facility_code IS re-asserted on conflict — the go-forward roster stamp (0052).
+  assert.ok(/\bfacility_code = excluded\.facility_code/.test(updateClause));
+  // 40 insert columns × 2 tuples (facility_code added in 0052 — the go-forward Option-B stamp).
+  assert.equal(fake.paramCounts[0], 40 * 2);
   assert.deepEqual(counts, { inserted: 1, updated: 1, key_skipped: 0 });
+});
+
+// --- audit_ingest_run observability write (0053) ---------------------------------------
+
+function fakeIngestRunDb(): { db: unknown; inserts: { sql: string; params: unknown[] }[] } {
+  const inserts: { sql: string; params: unknown[] }[] = [];
+  let guc: string | null = null;
+  const client = {
+    query: async (sql: string, params?: unknown[]) => {
+      const s = String(sql).trim();
+      if (/set_config/i.test(s)) { guc = params?.[0] == null ? null : String(params[0]); return { rowCount: 1, rows: [{ set_config: guc }] }; }
+      if (/current_setting/i.test(s)) return { rowCount: 1, rows: [{ v: guc }] };
+      if (/^insert into claims\.audit_ingest_run/i.test(s)) { inserts.push({ sql: s, params: params ?? [] }); return { rowCount: 1, rows: [] }; }
+      return { rowCount: 0, rows: [] };
+    },
+    release: () => {},
+  };
+  return { db: { query: async () => ({ rowCount: 0, rows: [] }), connect: async () => client }, inserts };
+}
+
+const CLEAN_STATS = {
+  scope: 'IP' as const, customers_total: 8, customers_processed: 8, customers_failed: 0,
+  customers_header_mismatch: 0, customers_skipped_budget: 0, rows_fetched: 11500, mapped_valid: 11500,
+  skipped: 0, skipped_by_label: {}, inserted: 200, updated: 11300, all_rows_skipped_customers: 0,
+  per_customer: [{ customer_id: 'C1', facility: 'CAMH', outcome: 'processed' as const, rows_inserted: 1, rows_updated: 2 }],
+};
+
+test('recordAuditIngestRun: non-PHI summary row — per_customer jsonb, writer_user, status ok', async () => {
+  const fake = fakeIngestRunDb();
+  await recordAuditIngestRun(fake.db as never, BXR_ENTITY_ID,
+    { scope: 'IP', sourceReportId: '10064394', writerUser: 'claims_audit_writer_svc', startedAt: '2026-07-15T02:10:00Z' },
+    CLEAN_STATS as never);
+  assert.equal(fake.inserts.length, 1);
+  const { sql, params } = fake.inserts[0]!;
+  assert.match(sql, /insert into claims\.audit_ingest_run \(/);
+  assert.match(sql, /::jsonb\)/); // per_customer cast on the last param
+  assert.equal(params[0], BXR_ENTITY_ID);
+  assert.equal(params[1], 'IP'); // scope
+  assert.equal(params[3], 'claims_audit_writer_svc'); // writer_user
+  assert.equal(params[4], 'ok'); // status — no failures
+  assert.match(String(params[params.length - 1]), /"facility":"CAMH"/); // per_customer serialized
+});
+
+test('recordAuditIngestRun: status=partial when any customer failed/mismatch/budget-skip', async () => {
+  const fake = fakeIngestRunDb();
+  await recordAuditIngestRun(fake.db as never, BXR_ENTITY_ID,
+    { scope: 'OP', sourceReportId: '10073210', writerUser: 'claims_audit_writer_svc', startedAt: '2026-07-15T02:20:00Z' },
+    { ...CLEAN_STATS, scope: 'OP', customers_failed: 1 } as never);
+  assert.equal(fake.inserts[0]!.params[4], 'partial');
 });
 
 // --- cron per-customer observability ---------------------------------------------------
