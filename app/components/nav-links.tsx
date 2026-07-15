@@ -10,11 +10,12 @@ import { BookOpen, type LucideIcon } from 'lucide-react';
 const LINKS: readonly { href: string; label: string; icon?: LucideIcon }[] = [
   { href: '/dashboard', label: 'Overview' },
   { href: '/dashboard/collections', label: 'Collections' },
-  { href: '/billing-audit', label: 'Billing Audit' },
+  // Display label "Claims Audit" (2026-07-15) — the route + internal names stay /billing-audit.
+  { href: '/billing-audit', label: 'Claims Audit' },
   // Claims tab TAKEN DOWN 2026-07-15 (Alec) — /claims routes redirect to home; the Claims
-  // Explorer code stays in git for a quick restore. "Claims" label reserved for future Veris S10.
+  // Explorer code stays in git for a quick restore.
+  // Ask tab REMOVED 2026-07-15 (Alec) — unfinished; /ask route redirects to home (reversible).
   { href: '/code-reference', label: 'Code Reference', icon: BookOpen },
-  { href: '/ask', label: 'Ask' },
 ];
 
 /** The tenant-scoped routes that carry a ?view= scope; the rest are view-agnostic. Billing

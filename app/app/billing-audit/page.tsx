@@ -24,7 +24,7 @@ import { dashboardAccess } from '@/lib/access';
 import { loadAuditRows, loadAuditFilterOptions, type AuditFilter } from '@/lib/actions';
 import { clampView, resolveView } from '@/lib/views';
 
-export const metadata: Metadata = { title: 'Billing Audit | CMD Billing' };
+export const metadata: Metadata = { title: 'Claims Audit | CMD Billing' };
 
 export default async function BillingAuditPage({
   searchParams,
@@ -63,7 +63,7 @@ export default async function BillingAuditPage({
   return (
     <main className="mx-auto max-w-[1800px] space-y-6 p-6 sm:p-10">
       <header>
-        <h1 className="text-2xl font-semibold tracking-tight">Billing Audit</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Claims Audit</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           IP and OP claim-audit workbench. Patient identifiers are masked by default and revealed
           only through an explicit, audited action.
