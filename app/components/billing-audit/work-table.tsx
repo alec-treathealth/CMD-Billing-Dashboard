@@ -24,7 +24,7 @@ const STATUS: Record<string, { label: string; fg: string; bg: string }> = {
   OTHER: { label: 'Other', fg: '#6B7A78', bg: '#ECEFEE' },
 };
 
-function StatusChip({ category, payer }: { category: string; payer: string | null }) {
+export function StatusChip({ category, payer }: { category: string; payer: string | null }) {
   const s = STATUS[category] ?? STATUS.OTHER!;
   return (
     <span className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-semibold" style={{ color: s.fg, backgroundColor: s.bg }}>
@@ -35,7 +35,7 @@ function StatusChip({ category, payer }: { category: string; payer: string | nul
   );
 }
 
-function money(cents: string): string {
+export function money(cents: string): string {
   const n = Number(cents);
   if (!Number.isFinite(n)) return '—';
   return `$${(n / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;

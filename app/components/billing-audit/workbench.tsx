@@ -13,9 +13,11 @@
 import { useCallback, useRef, useState } from 'react';
 import { AuditFilterBar } from './filter-bar';
 import { AuditWorkTable } from './work-table';
+import { PivotStrip } from './pivot-strip';
+import { PatientDrill, type DrillTarget } from './patient-drill';
 import { DEFAULT_PRESET, type Preset } from './date-presets';
 import type { TagOption } from './tag-picker';
-import type { AuditCursor, AuditFilter, AuditGridRow } from '@/lib/actions';
+import { searchAuditPatients, type AuditCursor, type AuditFilter, type AuditGridRow } from '@/lib/actions';
 import type { AuditScope } from '../../../src/billingAudit/auditConfig';
 import type { DashboardView } from '@/lib/views';
 
@@ -75,6 +77,9 @@ export function BillingAuditWorkbench(props: BillingAuditWorkbenchProps) {
               ].join(' ')}
             >
               {t.label}
+              {t.id === 'flags' && (
+                <span className="rounded-full bg-ground px-1.5 font-mono text-[10.5px] font-medium text-ink400" title="No flags until Phase 3">0</span>
+              )}
             </button>
           );
         })}
@@ -110,7 +115,37 @@ function ScopePanel({ scope, view, canRevealPhi, initialFilter, facilities, paye
 }) {
   const [filter, setFilter] = useState<AuditFilter>(initialFilter);
   const [preset, setPreset] = useState<Preset>(DEFAULT_PRESET);
+  const [drillTarget, setDrillTarget] = useState<DrillTarget | null>(null);
+  const [searching, setSearching] = useState(false);
   const auditScope: AuditScope = scope === 'ip' ? 'IP' : 'OP';
+
+  // Drill from a pivot cell: union the patch's array fields into the current filter (so clicking
+  // Office CAMH adds CAMH to any existing facility selection rather than replacing the filter).
+  const drillFilter = useCallback((patch: Partial<AuditFilter>) => {
+    setFilter((prev) => {
+      const next: AuditFilter = { ...prev };
+      for (const key of ['facilityCodes', 'payerNames', 'cptCodes', 'revCodes'] as const) {
+        const add = patch[key];
+        if (add && add.length) next[key] = [...new Set([...(prev[key] ?? []), ...add])];
+      }
+      return next;
+    });
+  }, []);
+
+  // Patient search — resolve the term to blind-index tokens (gated + audited server-side) and set
+  // them on the filter; an empty term clears the tokens. Never handles plaintext PHI client-side.
+  const runPatientSearch = useCallback(async (term: string) => {
+    setSearching(true);
+    const res = await searchAuditPatients(term, auditScope, view);
+    setSearching(false);
+    if (!res.ok) return;
+    setFilter((prev) => ({ ...prev, patientNameBidx: res.tokens.patientNameBidx, patientNamePrefixBidx: res.tokens.patientNamePrefixBidx }));
+  }, [auditScope, view]);
+
+  const openDrill = useCallback((row: AuditGridRow) => {
+    setDrillTarget({ cmdPatientId: row.cmd_patient_id, facility: row.office_name ?? row.facility_code, payer: row.payer_name });
+  }, []);
+
   return (
     <div className="space-y-3">
       <AuditFilterBar
@@ -119,8 +154,13 @@ function ScopePanel({ scope, view, canRevealPhi, initialFilter, facilities, paye
         value={filter}
         activePreset={preset}
         onChange={(next, p) => { setFilter(next); setPreset(p); }}
+        canRevealPhi={canRevealPhi}
+        onPatientSearch={runPatientSearch}
+        searching={searching}
       />
-      <AuditWorkTable scope={auditScope} view={view} canRevealPhi={canRevealPhi} filter={filter} initialPage={initialPage} />
+      <PivotStrip scope={auditScope} view={view} filter={filter} onDrill={drillFilter} />
+      <AuditWorkTable scope={auditScope} view={view} canRevealPhi={canRevealPhi} filter={filter} initialPage={initialPage} onOpenDrill={openDrill} />
+      <PatientDrill scope={auditScope} view={view} canRevealPhi={canRevealPhi} target={drillTarget} onClose={() => setDrillTarget(null)} />
     </div>
   );
 }

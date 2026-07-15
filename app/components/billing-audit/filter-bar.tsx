@@ -5,7 +5,7 @@
  * PHI op and lands with the drill/reveal (build 5); the "has open flags" toggle is inert until
  * the Phase-3 flag engine writes claims.flag. Controlled: emits the full AuditFilter on change.
  */
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { MultiSelectTagPicker, type TagOption } from './tag-picker';
 import { presetWindow, type Preset } from './date-presets';
 import type { AuditFilter } from '@/lib/actions';
@@ -26,10 +26,16 @@ export interface AuditFilterBarProps {
   value: AuditFilter;
   activePreset: Preset;
   onChange: (next: AuditFilter, preset: Preset) => void;
+  /** Patient search is a PHI op — the box is shown only to reveal-entitled roles. */
+  canRevealPhi: boolean;
+  onPatientSearch: (term: string) => void;
+  searching?: boolean;
 }
 
-export function AuditFilterBar({ facilities, payers, value, activePreset, onChange }: AuditFilterBarProps) {
+export function AuditFilterBar({ facilities, payers, value, activePreset, onChange, canRevealPhi, onPatientSearch, searching }: AuditFilterBarProps) {
   const statusValue = value.statusCategories?.[0] ?? '';
+  const [q, setQ] = useState('');
+  const searchActive = Boolean(value.patientNameBidx || value.patientNamePrefixBidx);
   const patch = (p: Partial<AuditFilter>, preset: Preset = activePreset) => onChange({ ...value, ...p }, preset);
   const setPreset = (preset: Preset) => onChange({ ...value, ...presetWindow(preset) }, preset);
 
@@ -116,6 +122,25 @@ export function AuditFilterBar({ facilities, payers, value, activePreset, onChan
       >
         <span className="h-3 w-3 rounded-[3px] border border-line-strong" /> Has open flags
       </span>
+
+      {/* Patient search — PHI op; only reveal-entitled roles see it (gated + audited server-side). */}
+      {canRevealPhi && (
+        <span className="inline-flex items-center gap-1 rounded-lg border border-line bg-card px-2.5 py-1.5 text-xs">
+          <span aria-hidden>🔍</span>
+          <input
+            aria-label="Patient search (exact name or 3-char prefix)"
+            placeholder="Patient (exact / 3-char)"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') onPatientSearch(q.trim()); }}
+            className="w-40 border-0 bg-transparent outline-none placeholder:text-ink400"
+          />
+          {searching ? <span className="text-ink400">…</span> : null}
+          {(searchActive || q) && (
+            <button type="button" aria-label="Clear patient search" onClick={() => { setQ(''); onPatientSearch(''); }} className="text-ink400 hover:text-ink600">×</button>
+          )}
+        </span>
+      )}
     </div>
   );
 }

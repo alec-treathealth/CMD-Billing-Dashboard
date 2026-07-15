@@ -70,6 +70,10 @@ export interface AuditFilter {
   statusPayer?: string | null; // sub-filter when a single AT_PAYER category is selected
   dateFrom?: string | null; //   charge_from_date >= (inclusive, 'YYYY-MM-DD')
   dateTo?: string | null; //     charge_from_date <= (inclusive, 'YYYY-MM-DD')
+  // Patient search — OPAQUE keyed-HMAC blind-index tokens (non-PHI; never a name/plaintext).
+  // Produced only by the gated + audited search action; matched against the stored index columns.
+  patientNameBidx?: string[]; //     exact patient_name_bidx match
+  patientNamePrefixBidx?: string[]; // 3-char patient_name_pfx3_bidx match
 }
 
 const STATUS_CATEGORIES = new Set([
@@ -110,6 +114,9 @@ export function resolveAuditFilter(input: AuditFilter | null | undefined): Audit
     statusPayer,
     dateFrom,
     dateTo,
+    // Blind-index tokens are opaque hex; bound length + count (never an unbounded IN).
+    patientNameBidx: cleanList(input.patientNameBidx, 20, 128),
+    patientNamePrefixBidx: cleanList(input.patientNamePrefixBidx, 20, 128),
   };
 }
 
@@ -132,6 +139,8 @@ export function auditBaseConds(
   if (filter.statusPayer) conds.push(`t.status_payer = ${add(filter.statusPayer)}`);
   if (filter.dateFrom) conds.push(`t.charge_from_date >= ${add(filter.dateFrom)}::date`);
   if (filter.dateTo) conds.push(`t.charge_from_date <= ${add(filter.dateTo)}::date`);
+  if (filter.patientNameBidx) conds.push(`t.patient_name_bidx = any(${add(filter.patientNameBidx)}::text[])`);
+  if (filter.patientNamePrefixBidx) conds.push(`t.patient_name_pfx3_bidx = any(${add(filter.patientNamePrefixBidx)}::text[])`);
   return conds;
 }
 
@@ -255,6 +264,22 @@ export function auditSortValue(row: AuditGridRow, column: AuditSortColumn): stri
   return v ?? null;
 }
 
+/** All charge lines for ONE patient (by cmd_patient_id) in a scope — the drill detail. NON-PHI
+ *  projection (same AUDIT_SELECT); tenant + scope pinned; bounded to 500 lines. */
+export function buildAuditPatientDetailQuery(
+  cmdPatientId: string,
+  scope: AuditScope,
+  entityIds: string[],
+): { sql: string; params: unknown[] } {
+  const params: unknown[] = [entityIds, scope, cmdPatientId];
+  return {
+    sql:
+      `${AUDIT_SELECT} where t.business_entity_id = any($1::uuid[]) and t.audit_scope = $2 ` +
+      'and t.cmd_patient_id = $3 order by t.charge_from_date desc nulls last, t.id desc limit 500',
+    params,
+  };
+}
+
 // --- filter option queries (non-PHI) ----------------------------------------
 
 export interface AuditFacilityOption {
@@ -293,5 +318,48 @@ export function buildAuditPayerOptionsQuery(scope: AuditScope, entityIds: string
       'where audit_scope = $1 and business_entity_id = any($2::uuid[]) and payer_name is not null ' +
       'group by payer_name order by count(*) desc, payer_name',
     params,
+  };
+}
+
+// --- pivot strip aggregates (non-PHI) ---------------------------------------
+// Click-to-filter accelerators: count breakdowns over the SAME (tenant, scope, filter) slice as
+// the grid, so the pivot and the rows it drills into always agree. Top-N capped; all non-PHI.
+
+export const AUDIT_PIVOT_TOP_N = 8;
+
+export interface AuditOfficePivot { facility_code: string; label: string | null; n: number; }
+export interface AuditPayerCptPivot { payer_name: string; cpt_code: string; n: number; }
+export interface AuditRevPivot { rev_code: string; n: number; }
+
+/** The three pivot aggregates (by office, by payer×CPT, by rev code) for the current slice. */
+export function buildAuditPivotQueries(
+  filter: AuditFilter,
+  scope: AuditScope,
+  entityIds: string[],
+): { byOffice: { sql: string; params: unknown[] }; byPayerCpt: { sql: string; params: unknown[] }; byRev: { sql: string; params: unknown[] } } {
+  const mk = (select: string, groupOrder: string, extraWhere = '') => {
+    const params: unknown[] = [];
+    const add: ParamAdder = (v) => { params.push(v); return `$${params.length}`; };
+    const conds = auditBaseConds(filter, scope, entityIds, add);
+    const where = ` where ${[...conds, ...(extraWhere ? [extraWhere] : [])].join(' and ')}`;
+    return { sql: `${select}${where} ${groupOrder}`, params };
+  };
+  return {
+    byOffice: mk(
+      'select t.facility_code, f.facility_name as label, count(*)::int as n from claims.audit_row t ' +
+        'left join collections.facilities f on f.facility_code = t.facility_code',
+      'group by t.facility_code, f.facility_name order by count(*) desc, t.facility_code',
+      't.facility_code is not null',
+    ),
+    byPayerCpt: mk(
+      'select t.payer_name, t.cpt_code, count(*)::int as n from claims.audit_row t',
+      `group by t.payer_name, t.cpt_code order by count(*) desc limit ${AUDIT_PIVOT_TOP_N}`,
+      't.payer_name is not null and t.cpt_code is not null',
+    ),
+    byRev: mk(
+      'select t.rev_code, count(*)::int as n from claims.audit_row t',
+      `group by t.rev_code order by count(*) desc limit ${AUDIT_PIVOT_TOP_N}`,
+      't.rev_code is not null',
+    ),
   };
 }

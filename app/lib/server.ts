@@ -18,6 +18,8 @@ import {
   buildAuditRowsQuery,
   buildAuditFacilityOptionsQuery,
   buildAuditPayerOptionsQuery,
+  buildAuditPivotQueries,
+  buildAuditPatientDetailQuery,
   type AuditCursor,
   type AuditFilter,
   type AuditSort,
@@ -25,6 +27,9 @@ import {
   type AuditPage,
   type AuditFacilityOption,
   type AuditPayerOption,
+  type AuditOfficePivot,
+  type AuditPayerCptPivot,
+  type AuditRevPivot,
 } from '../../src/billingAudit/auditQuery.js';
 import { DASHBOARD_CACHE_TAG } from '../../src/cacheTags.js';
 import { makeAnthropicClientFromEnv } from '../../src/agent/index.js';
@@ -1175,6 +1180,85 @@ export const loadAuditPayerOptions = unstable_cache(
   ['billing-audit-payer-options'],
   { revalidate: 900, tags: ['billing-audit'] },
 );
+
+export interface AuditPivot {
+  by_office: AuditOfficePivot[];
+  by_payer_cpt: AuditPayerCptPivot[];
+  by_rev: AuditRevPivot[];
+}
+
+/** Pivot-strip aggregates for the current (scope, tenant, filter) slice — the three click-to-filter
+ *  breakdowns fan out CONCURRENTLY over the same WHERE, so wall-clock stays ~one scan. Non-PHI. */
+export const loadAuditPivot = unstable_cache(
+  async (filter: AuditFilter, scope: AuditScope, entityIds: string[]): Promise<AuditPivot> => {
+    const { byOffice, byPayerCpt, byRev } = buildAuditPivotQueries(filter, scope, entityIds);
+    const exec = readerExecutor();
+    const [office, payerCpt, rev] = await Promise.all([
+      exec.query<AuditOfficePivot>(byOffice.sql, byOffice.params),
+      exec.query<AuditPayerCptPivot>(byPayerCpt.sql, byPayerCpt.params),
+      exec.query<AuditRevPivot>(byRev.sql, byRev.params),
+    ]);
+    return { by_office: office.rows, by_payer_cpt: payerCpt.rows, by_rev: rev.rows };
+  },
+  ['billing-audit-pivot'],
+  { revalidate: 900, tags: ['billing-audit'] },
+);
+
+/** All charge lines for ONE patient (by cmd_patient_id) in a scope — the drill detail. NON-PHI
+ *  (same masked projection as the grid), tenant + scope pinned. Cached per (scope, patient, tenant). */
+export const loadAuditPatientDetail = unstable_cache(
+  async (scope: AuditScope, cmdPatientId: string, entityIds: string[]): Promise<AuditGridRow[]> => {
+    const { sql, params } = buildAuditPatientDetailQuery(cmdPatientId, scope, entityIds);
+    const { rows } = await readerExecutor().query<AuditGridDbRecord>(sql, params);
+    return rows.map(toAuditGridRow);
+  },
+  ['billing-audit-patient-detail'],
+  { revalidate: 900, tags: ['billing-audit'] },
+);
+
+export interface AuditRevealedPatient {
+  patient_name: string;
+  patient_dob: string | null;
+  member_id: string | null;
+}
+
+/**
+ * Reveal ONE patient's encrypted identifiers (name / DOB / member id) for the drill, decrypted
+ * in-process as claims_reader, scoped to the caller's entitled entityIds so a reveal can never
+ * unmask another tenant's patient. Writes ONE fail-closed audit row (action reveal_audit_row,
+ * id-only detail — the cmd_patient_id business key + scope, NEVER the decrypted values) BEFORE
+ * returning. A decryption failure throws (surfaced by the action, never silently swallowed).
+ */
+export async function revealAuditPatient(
+  scope: AuditScope,
+  cmdPatientId: string,
+  actor: { email: string; userId: string },
+  entityIds: string[],
+): Promise<AuditRevealedPatient | null> {
+  const { rows } = await readerExecutor().query<{
+    patient_name_enc: Buffer;
+    patient_dob_enc: Buffer | null;
+    member_id_enc: Buffer | null;
+  }>(
+    'select patient_name_enc, patient_dob_enc, member_id_enc from claims.audit_row ' +
+      'where business_entity_id = any($1::uuid[]) and audit_scope = $2 and cmd_patient_id = $3 limit 1',
+    [entityIds, scope, cmdPatientId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  const [patient_name, patient_dob, member_id] = await Promise.all([
+    decryptPhi(row.patient_name_enc),
+    row.patient_dob_enc ? decryptPhi(row.patient_dob_enc) : Promise.resolve(null),
+    row.member_id_enc ? decryptPhi(row.member_id_enc) : Promise.resolve(null),
+  ]);
+  await recordAccess({
+    actorEmail: actor.email,
+    actorUserId: actor.userId,
+    action: 'reveal_audit_row',
+    detail: { cmd_patient_id: cmdPatientId, scope }, // id-only — never the decrypted values
+  });
+  return { patient_name, patient_dob, member_id };
+}
 
 // --- Smart search summary ---------------------------------------------------
 // The "search engine" result: instead of paging through noisy rows, the search first returns
