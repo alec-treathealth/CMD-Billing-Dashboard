@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Pager, SortHeaderCell } from '@/components/data-grid';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { loadAuditRows, type AuditCursor, type AuditFilter, type AuditGridRow, type AuditSort } from '@/lib/actions';
+import { loadAuditRows, revealAuditRows, type AuditCursor, type AuditFilter, type AuditGridRow, type AuditSort } from '@/lib/actions';
 import type { AuditScope } from '../../../src/billingAudit/auditConfig';
 import type { DashboardView } from '@/lib/views';
 
@@ -78,8 +78,33 @@ export function AuditWorkTable({ scope, view, canRevealPhi, filter, initialPage,
   const [sort, setSort] = useState<AuditSort>({ column: 'charge_from_date', direction: 'desc' });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Page-level PHI reveal (mirrors the collections "Reveal all"): revealAll gates DISPLAY; the
+  // decrypted names/members are cached per audit_row id so paging/toggling doesn't re-fetch.
+  const [revealAll, setRevealAll] = useState(false);
+  const [revealed, setRevealed] = useState<Map<number, { name: string; member: string | null }>>(new Map());
   const seeded = useRef(initialPage != null);
   const filterKey = JSON.stringify(filter);
+
+  // While "Reveal all" is on, reveal the CURRENT page's not-yet-revealed rows (one gated + audited
+  // bulk call). `revealed` is intentionally omitted from deps — the missing-id check reads it at
+  // run time and pages never overlap (keyset), so each id is revealed exactly once without a loop.
+  useEffect(() => {
+    if (!revealAll) return;
+    const missing = rows.filter((r) => !revealed.has(r.id)).map((r) => r.id);
+    if (missing.length === 0) return;
+    let cancelled = false;
+    revealAuditRows(missing).then((res) => {
+      if (cancelled) return;
+      if (!res.ok) { setError(res.error); return; }
+      setRevealed((prev) => {
+        const next = new Map(prev);
+        for (const row of res.rows) next.set(row.id, { name: row.patient_name, member: row.member_id });
+        return next;
+      });
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealAll, rows]);
 
   const load = useCallback(async (target: number, cursorList: (AuditCursor | null)[]) => {
     setLoading(true);
@@ -115,7 +140,18 @@ export function AuditWorkTable({ scope, view, canRevealPhi, filter, initialPage,
       <div className="flex items-center gap-2 border-b border-line px-3 py-2">
         <span className="ths-h text-sm font-semibold">{scope === 'IP' ? 'IP' : 'OP'} Audit — work table</span>
         <span className="text-xs text-ink400">charge-line grain · sorted by <span className="text-ink600">{sort.column === 'charge_from_date' ? 'DOS' : sort.column}</span> {sort.direction === 'desc' ? '↓' : '↑'}</span>
-        <span className="ml-auto text-xs text-ink400">{loading ? 'Loading…' : `${rows.length} row${rows.length === 1 ? '' : 's'} · page ${page + 1}`}</span>
+        {canRevealPhi && (
+          <button
+            type="button"
+            onClick={() => setRevealAll((v) => !v)}
+            aria-pressed={revealAll}
+            className={`ml-auto rounded-md border px-2.5 py-1 text-xs transition-colors ${revealAll ? 'border-teal500 bg-teal50 text-teal700' : 'border-line text-ink600 hover:bg-teal50'}`}
+            title="Reveal patient identifiers across this page (audited)"
+          >
+            {revealAll ? 'Hide identifiers' : 'Reveal all'}
+          </button>
+        )}
+        <span className={`${canRevealPhi ? 'ml-3' : 'ml-auto'} text-xs text-ink400`}>{loading ? 'Loading…' : `${rows.length} row${rows.length === 1 ? '' : 's'} · page ${page + 1}`}</span>
       </div>
       {error ? (
         <p className="px-4 py-8 text-center text-sm text-[color:var(--status-danger,#C0453B)]">{error}</p>
@@ -153,10 +189,20 @@ export function AuditWorkTable({ scope, view, canRevealPhi, filter, initialPage,
                     className={onOpenDrill ? 'cursor-pointer' : undefined}
                   >
                     <TableCell>
-                      <span className="inline-flex items-center gap-2">
-                        <span className="font-mono tracking-widest text-ink400">••••••</span>
-                      </span>
-                      <div className="font-mono text-[11px] text-ink400">PT-{r.cmd_patient_id}</div>
+                      {(() => {
+                        const rev = revealAll ? revealed.get(r.id) : undefined;
+                        return rev ? (
+                          <>
+                            <div className="font-medium text-ink900">{rev.name}</div>
+                            <div className="font-mono text-[11px] text-ink400">{rev.member ?? `PT-${r.cmd_patient_id}`}</div>
+                          </>
+                        ) : (
+                          <>
+                            <span className="font-mono tracking-widest text-ink400">••••••</span>
+                            <div className="font-mono text-[11px] text-ink400">PT-{r.cmd_patient_id}</div>
+                          </>
+                        );
+                      })()}
                     </TableCell>
                     <TableCell>
                       {r.office_name ?? r.facility_code ?? '—'}
