@@ -10,6 +10,14 @@ import { HeaderGate } from '@/components/header-gate';
 import { dashboardAccess } from '@/lib/access';
 import './globals.css';
 
+// Co-locate every page's server function with the database. The Supabase project is in
+// us-west-1 (N. California); Vercel's default function region is iad1 (Washington DC), so every
+// auth call + DB connection/query was paying a cross-country round trip (the in-function
+// auth/v1/user call measured ~245ms vs ~30ms at the SF edge). sfo1 is the Vercel region next to
+// us-west-1, so functions, DB, and the SF users all sit on the west coast. Inherited by every
+// route segment below (App Router route-segment config).
+export const preferredRegion = 'sfo1';
+
 export const metadata: Metadata = {
   title: 'TreatHealthOS Billing & RCM',
   description: 'Historical out-of-network behavioral-health claims search (PHI — compliance layer on).',
