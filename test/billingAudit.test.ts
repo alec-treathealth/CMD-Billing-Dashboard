@@ -333,7 +333,7 @@ test('upsertAuditRows: Option-B SQL shape + inserted/updated split from xmax', a
   const r1 = mapAuditRow('IP', ipRow(IP_BASE));
   const r2 = mapAuditRow('IP', ipRow({ ...IP_BASE, 'Charge Claim ID': '900099', 'Charge Patient ID': '800099' }));
   assert.ok(r1.ok && r2.ok);
-  const counts = await upsertAuditRows(fake.db as never, [r1.row, r2.row], BXR_ENTITY_ID, '10064394');
+  const counts = await upsertAuditRows(fake.db as never, [r1.row, r2.row], BXR_ENTITY_ID, '10064394', 'CAMH');
   assert.equal(fake.sqls.length, 1);
   const sql = fake.sqls[0]!;
   assert.match(sql, /on conflict \(business_entity_id, row_fingerprint\) do update set/);
@@ -344,8 +344,10 @@ test('upsertAuditRows: Option-B SQL shape + inserted/updated split from xmax', a
   assert.ok(!/\bcharge_amount_cents = excluded\./.test(updateClause));
   assert.ok(!/\bcpt_code = excluded\./.test(updateClause));
   assert.ok(!/\brow_fingerprint = excluded\./.test(updateClause));
-  // 39 insert columns × 2 tuples.
-  assert.equal(fake.paramCounts[0], 39 * 2);
+  // facility_code IS re-asserted on conflict — the go-forward roster stamp (0052).
+  assert.ok(/\bfacility_code = excluded\.facility_code/.test(updateClause));
+  // 40 insert columns × 2 tuples (facility_code added in 0052 — the go-forward Option-B stamp).
+  assert.equal(fake.paramCounts[0], 40 * 2);
   assert.deepEqual(counts, { inserted: 1, updated: 1, key_skipped: 0 });
 });
 

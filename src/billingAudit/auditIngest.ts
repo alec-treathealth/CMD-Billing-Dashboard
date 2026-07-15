@@ -39,8 +39,10 @@ import { headerMismatch, mapAuditRow, parsePositionalCsv, type PlainAuditRow } f
 const DEFAULT_BUDGET_MS = 270_000; // headroom under a 300s Vercel function
 const BATCH = 250; //                39 columns/row — smaller batches than collections' 500
 
-/** INSERT column list — order matches buildParams() exactly. business_entity_id is
- *  stamped EXPLICITLY per customer target (never inferred); the GUC (withTenant) is the
+/** INSERT column list — order matches buildParams() exactly. business_entity_id AND
+ *  facility_code are stamped EXPLICITLY per customer target (never inferred from the row);
+ *  facility_code is the roster's CmdCustomerTarget.facilityCode — the go-forward Option-B
+ *  facility attribution (0052), with NO office-name parsing. The GUC (withTenant) is the
  *  RLS enforcement layer on top. */
 const INSERT_COLS = [
   'business_entity_id', 'audit_scope', 'cmd_claim_id', 'cmd_patient_id', 'claim_type',
@@ -51,18 +53,20 @@ const INSERT_COLS = [
   'cpt_code', 'rev_code', 'modifier_1', 'modifier_2', 'units', 'type_of_bill',
   'charge_amount_cents', 'payer_name', 'auth_number', 'charge_status_raw',
   'status_category', 'status_payer', 'principal_diag', 'diagnoses', 'last_fu_note',
-  'row_fingerprint', 'source_report_id',
+  'row_fingerprint', 'source_report_id', 'facility_code',
 ] as const;
 
 /** VOLATILE columns re-asserted on conflict (Option B) — everything workflow-mutable,
  *  plus the PHI ciphertext/bidx (nonce-fresh ciphertext; deterministic tokens). The
- *  stable-identity fields are inside the fingerprint and never need updating. */
+ *  stable-identity fields are inside the fingerprint and never need updating. facility_code
+ *  is re-asserted so a re-pull progressively stamps any in-window row still carrying the
+ *  0052 backfill NULL, and any future roster re-code propagates. */
 const UPDATE_COLS = [
   'claim_type', 'claim_frequency', 'office_name', 'office_id', 'provider_name',
   'billing_provider_id', 'patient_name_enc', 'patient_name_bidx', 'patient_name_pfx3_bidx',
   'patient_dob_enc', 'member_id_enc', 'member_id_bidx', 'member_id_pfx3_bidx',
   'payer_name', 'auth_number', 'charge_status_raw', 'status_category', 'status_payer',
-  'principal_diag', 'diagnoses', 'last_fu_note', 'source_report_id',
+  'principal_diag', 'diagnoses', 'last_fu_note', 'source_report_id', 'facility_code',
 ] as const;
 
 export interface BillingAuditCronDeps {
@@ -120,8 +124,9 @@ export interface PerCustomerOutcome {
   reason?: string;
 }
 
-/** Encrypt the 3 PHI fields + compute blind indexes → one row's positional params. */
-async function buildParams(row: PlainAuditRow, businessEntityId: string, sourceReportId: string): Promise<unknown[] | null> {
+/** Encrypt the 3 PHI fields + compute blind indexes → one row's positional params.
+ *  facilityCode is the roster's authoritative code for this customer (stamped, not parsed). */
+async function buildParams(row: PlainAuditRow, businessEntityId: string, sourceReportId: string, facilityCode: string): Promise<unknown[] | null> {
   const [nameEnc, dobEnc, memberEnc] = await Promise.all([
     encryptPhi(row.patient_name),
     row.patient_dob === null ? Promise.resolve(null) : encryptPhi(row.patient_dob),
@@ -141,7 +146,7 @@ async function buildParams(row: PlainAuditRow, businessEntityId: string, sourceR
     row.cpt_code, row.rev_code, row.modifier_1, row.modifier_2, row.units, row.type_of_bill,
     row.charge_amount_cents, row.payer_name, row.auth_number, row.charge_status_raw,
     row.status_category, row.status_payer, row.principal_diag, JSON.stringify(row.diagnoses), row.last_fu_note,
-    row.row_fingerprint, sourceReportId,
+    row.row_fingerprint, sourceReportId, facilityCode,
   ];
 }
 
@@ -152,6 +157,7 @@ export async function upsertAuditRows(
   rows: PlainAuditRow[],
   businessEntityId: string,
   sourceReportId: string,
+  facilityCode: string,
 ): Promise<{ inserted: number; updated: number; key_skipped: number }> {
   let inserted = 0;
   let updated = 0;
@@ -159,7 +165,7 @@ export async function upsertAuditRows(
   for (let i = 0; i < rows.length; i += BATCH) {
     const batch = rows.slice(i, i + BATCH);
     // Encrypt OUTSIDE the transaction — never hold a pooled connection across libsodium work.
-    const paramRows = (await Promise.all(batch.map((r) => buildParams(r, businessEntityId, sourceReportId))))
+    const paramRows = (await Promise.all(batch.map((r) => buildParams(r, businessEntityId, sourceReportId, facilityCode))))
       .filter((p): p is unknown[] => {
         if (p === null) keySkipped += 1;
         return p !== null;
@@ -274,7 +280,7 @@ export async function billingAuditCron(deps: BillingAuditCronDeps): Promise<Bill
       // later row is the fresher status snapshot for the same charge line).
       const byFingerprint = new Map<string, PlainAuditRow>();
       for (const row of rows) byFingerprint.set(row.row_fingerprint, row);
-      const counts = await upsertAuditRows(deps.writeDb, [...byFingerprint.values()], entityId, deps.sourceReportId);
+      const counts = await upsertAuditRows(deps.writeDb, [...byFingerprint.values()], entityId, deps.sourceReportId, target.facilityCode);
       stats.inserted += counts.inserted;
       stats.updated += counts.updated;
       stats.customers_processed += 1;

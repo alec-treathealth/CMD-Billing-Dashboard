@@ -1148,7 +1148,8 @@ another session's WIP claim is usually an untracked file. Current reservations:
 | 0024 | ANOTHER session | 0024-related WIP (per Alec, 2026-07-13 — listed in the parallel-WIP set; 0024 itself is applied on origin/main) |
 | 0049 | billing-audit branch (`feat/billing-audit-plane`) | `0049_billing_audit_plane` — APPLIED live + committed on that branch |
 | 0050 | collections session | `0050_cmd_explorer_charge_rollup` — LANDED on origin/main (fed5930) |
-| 0051 | billing-audit branch | `0051_payer_alias_seed` — DRAFT, not applied, pending Alec's ruling |
+| 0051 | billing-audit branch | `0051_payer_alias_seed` — APPLIED live + merged to origin/main (PR #6, 609dff9) |
+| 0052 | billing-audit facility-resolution branch (`feat/billing-audit-facility-resolution`) | `0052_audit_row_facility_code` — DRAFT, NOT applied, pending Alec's TEEN-conflict ruling + go (2026-07-14). Checked unclaimed on origin/main + all worktrees + untracked. |
 
 Record new claims here when made; remove rows once the file is on origin/main
 (the tree then speaks for itself).
