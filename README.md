@@ -96,7 +96,7 @@ cd app && npm run typecheck && npm run build
 ## Verification & conventions
 
 - `npm test` → 171 pass / 0 fail; both typechecks clean; `app` build succeeds.
-- Tests are hermetic (faked Anthropic + DB) — no live LLM/DB in the suite.
+- Tests are hermetic, no live LLM/DB in the suite.
   `src/liveProbe.ts` is the separate, manually-run live probe.
 - Run the suite and both typechecks before any commit; hold before push/deploy.
 - The standing PHI/compliance invariants and the "do not regress" list are in
