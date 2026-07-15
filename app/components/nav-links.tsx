@@ -11,7 +11,8 @@ const LINKS: readonly { href: string; label: string; icon?: LucideIcon }[] = [
   { href: '/dashboard', label: 'Overview' },
   { href: '/dashboard/collections', label: 'Collections' },
   { href: '/billing-audit', label: 'Billing Audit' },
-  { href: '/claims', label: 'Claims' },
+  // Claims tab TAKEN DOWN 2026-07-15 (Alec) — /claims routes redirect to home; the Claims
+  // Explorer code stays in git for a quick restore. "Claims" label reserved for future Veris S10.
   { href: '/code-reference', label: 'Code Reference', icon: BookOpen },
   { href: '/ask', label: 'Ask' },
 ];
