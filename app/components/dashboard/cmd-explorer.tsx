@@ -2229,6 +2229,19 @@ function ComboDrillList({
 const COHORT_ALLOWED_COLOR = '#0d9488';
 const COHORT_PAID_COLOR = '#7c3aed';
 const COHORT_DOLLARS_COLOR = '#d97706';
+// Stat-card background: one green step per 20% band (higher % = heavier green). Semi-transparent
+// emerald reads correctly over the card in BOTH light and dark themes (no per-mode variants needed).
+const CARD_GREEN_SHADES = [
+  'bg-emerald-500/15',
+  'bg-emerald-500/25',
+  'bg-emerald-500/35',
+  'bg-emerald-500/45',
+  'bg-emerald-500/55',
+] as const;
+function cardGreen(pct: number | null): string {
+  const lvl = pct == null || !Number.isFinite(pct) ? 0 : Math.min(4, Math.max(0, Math.floor(pct / 20)));
+  return CARD_GREEN_SHADES[lvl]!;
+}
 const COHORT_SELECTED_COLOR = '#2563eb';
 
 /** A cohort point plus the client-side dollar derivations (Phase 2). */
@@ -2339,6 +2352,7 @@ function CohortMiniChart({
   dataKey,
   name,
   def,
+  defTone = 'neutral',
   color,
   xLabel,
   markerBucket,
@@ -2351,6 +2365,8 @@ function CohortMiniChart({
   name: string;
   /** Optional small "definition" chip beside the series name, e.g. "allowed ÷ billed". */
   def?: string;
+  /** Chip color: 'neutral' (muted grey) or 'paid' (violet, matching the % Paid by payer series). */
+  defTone?: 'neutral' | 'paid';
   color: string;
   xLabel: string;
   markerBucket?: number | null;
@@ -2370,7 +2386,17 @@ function CohortMiniChart({
     <div>
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="text-[10px] font-semibold" style={{ color }}>{name}</span>
-        {def && <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{def}</span>}
+        {def && (
+          <span
+            className={`rounded px-1.5 py-0.5 text-[10px] ${
+              defTone === 'paid'
+                ? 'bg-violet-100 text-violet-700 dark:bg-violet-500/20 dark:text-violet-300'
+                : 'bg-muted text-muted-foreground'
+            }`}
+          >
+            {def}
+          </span>
+        )}
       </div>
       <div className="h-28 w-full">
         <ResponsiveContainer width="100%" height="100%">
@@ -2837,23 +2863,29 @@ function CohortCurvePanel({
           {c.totals && (
             <div className="mt-3">
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                <div className="rounded-lg bg-muted/40 p-3">
+                <div className={`rounded-lg p-3 ${cardGreen(c.totals.pct_allowed)}`}>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">% allowed of billed</span>
+                    <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">allowed ÷ billed</span>
+                  </div>
+                  <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(c.totals.pct_allowed)}</div>
+                  <div className="text-[11px] text-ink400">what payer agreed to</div>
+                </div>
+                <div className={`rounded-lg p-3 ${cardGreen(c.totals.pct_paid)}`}>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">% paid by payer</span>
+                    <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] text-violet-700 dark:bg-violet-500/20 dark:text-violet-300">payer paid ÷ allowed</span>
+                  </div>
+                  <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(c.totals.pct_paid)}</div>
+                  <div className="text-[11px] text-ink400">of what was allowed</div>
+                </div>
+                <div className={`rounded-lg p-3 ${cardGreen(c.totals.pct_collected)}`}>
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">% collected of billed</span>
                     <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">paid ÷ billed</span>
                   </div>
                   <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(c.totals.pct_collected)}</div>
                   <div className="text-[11px] text-ink400">net yield end to end</div>
-                </div>
-                <div className="rounded-lg bg-muted/40 p-3">
-                  <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">% allowed of billed</span>
-                  <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(c.totals.pct_allowed)}</div>
-                  <div className="text-[11px] text-ink400">what payer agreed to</div>
-                </div>
-                <div className="rounded-lg bg-muted/40 p-3">
-                  <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">% paid by payer</span>
-                  <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(c.totals.pct_paid)}</div>
-                  <div className="text-[11px] text-ink400">of what was allowed</div>
                 </div>
               </div>
               {c.totals.pct_allowed !== null && c.totals.pct_paid !== null && c.totals.pct_collected !== null && (
@@ -2900,6 +2932,7 @@ function CohortCurvePanel({
                     dataKey="pct_paid"
                     name="% Paid by payer"
                     def="payer paid ÷ allowed"
+                    defTone="paid"
                     color={COHORT_PAID_COLOR}
                     xLabel="Visit #"
                     yMax={paidYMax}
@@ -2962,6 +2995,7 @@ function CohortCurvePanel({
                     dataKey="pct_paid"
                     name="% Paid by payer"
                     def="payer paid ÷ allowed"
+                    defTone="paid"
                     color={COHORT_PAID_COLOR}
                     xLabel="Day window start"
                     yMax={paidYMax}
