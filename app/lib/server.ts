@@ -152,6 +152,11 @@ import {
   handleCmdPayerRefreshRequest,
   type CmdPayerRefreshHttpRequest,
 } from '../../src/routes/cmdPayerRefreshHandler.js';
+import {
+  handleRefreshChargeRollupRequest,
+  type RefreshChargeRollupHttpRequest,
+} from '../../src/routes/refreshChargeRollupHandler.js';
+import { refreshChargeRollup } from '../../src/collections/refreshChargeRollup.js';
 import { cmdExplorerCron } from '../../src/collections/cmdExplorerCron.js';
 import { cmdRunReportToZip, readZipEntries } from '../../src/collections/cmdPayer.js';
 import { billingAuditCron, recordAuditIngestRun } from '../../src/billingAudit/auditIngest.js';
@@ -473,6 +478,21 @@ export function handleCmdPayerRefresh(req: CmdPayerRefreshHttpRequest) {
         writeDb: rollupWriterDb(),
         businessEntityId: BXR_TENANT_ID, // BXR-only report config (cmdApiConfig)
       }),
+  });
+}
+
+/**
+ * Dedicated charge-rollup refresh route (Vercel Cron, hourly at :45 — after the :00 BXR and :30
+ * Indigo explorer ingests settle). GET only; gated on CRON_SECRET with the same constant-time
+ * Bearer check. Calls the 0050 SECURITY-DEFINER refresh function UNCONDITIONALLY as the
+ * least-privilege cmd_rollup_writer and writes one collections.rollup_refresh_run row per attempt —
+ * the durable, queryable freshness record that replaces the swallowed inline refresh (removed from
+ * cmdExplorerCron). No PHI crosses this boundary; only non-PHI run stats are returned.
+ */
+export function handleRefreshChargeRollup(req: RefreshChargeRollupHttpRequest) {
+  return handleRefreshChargeRollupRequest(req, {
+    secret: process.env.CRON_SECRET,
+    refresh: () => refreshChargeRollup({ db: rollupWriterDb(), triggeredBy: 'cron' }),
   });
 }
 
