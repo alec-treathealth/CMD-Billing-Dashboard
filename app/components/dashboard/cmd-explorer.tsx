@@ -133,9 +133,9 @@ const COLUMNS: readonly { key: ColKey; label: string; phi: boolean; numeric: boo
   { key: 'facility', label: 'Facility', phi: false, numeric: false },
   { key: 'charge_amount', label: 'Charge Amount', phi: false, numeric: true },
   { key: 'allowed_amount', label: 'Allowed Amount', phi: false, numeric: true },
-  { key: 'pct_allowed', label: '% Allowed', phi: false, numeric: true },
+  { key: 'pct_allowed', label: '% Allowed of Billed', phi: false, numeric: true },
   { key: 'insurance_payments', label: 'Insurance Payments', phi: false, numeric: true },
-  { key: 'pct_paid', label: '% Paid', phi: false, numeric: true },
+  { key: 'pct_paid', label: '% Paid by Payer', phi: false, numeric: true },
   { key: 'adjustments', label: 'Adjustments', phi: false, numeric: true },
   { key: 'patient_balance_due', label: 'Patient Balance Due', phi: false, numeric: true },
 ];
@@ -143,6 +143,9 @@ const COLUMN_LABEL: Record<string, string> = Object.fromEntries(COLUMNS.map((c) 
 const IS_PHI = new Set<string>(COLUMNS.filter((c) => c.phi).map((c) => c.key));
 const IS_NUMERIC = new Set<string>(COLUMNS.filter((c) => c.numeric).map((c) => c.key));
 const DEFAULT_ORDER: ColKey[] = COLUMNS.map((c) => c.key);
+// Columns hidden by default for users WITHOUT a saved view — data kept, re-showable via the column
+// picker. A user's saved view carries its own explicit visibility (hidden_columns) and still governs.
+const DEFAULT_HIDDEN = new Set<ColKey>(['adjustments']);
 // Columns the grid can sort by (server-side; mirrors CMD_EXPLORER_SORTABLE_COLUMNS): the two
 // date columns + every money column. Everything else (codes, facility, payer, PHI) is unsorted.
 const SORTABLE_KEYS = new Set<string>([
@@ -409,7 +412,7 @@ export function CmdCollectionsExplorer({
     seededDefaultView ? deriveLayout(seededDefaultView).order : [...DEFAULT_ORDER],
   );
   const [hidden, setHidden] = useState<Set<ColKey>>(() =>
-    seededDefaultView ? deriveLayout(seededDefaultView).hidden : new Set(),
+    seededDefaultView ? deriveLayout(seededDefaultView).hidden : new Set(DEFAULT_HIDDEN),
   );
   const visibleOrder = order.filter((k) => !hidden.has(k));
 
@@ -2167,8 +2170,8 @@ function ComboDrillList({
               <th className="px-2 py-1 text-left font-medium">Revenue</th>
               <th className="px-2 py-1 text-right font-medium">Lines</th>
               <th className="px-2 py-1 text-right font-medium">Charged</th>
-              <th className="px-2 py-1 text-right font-medium">% Allowed</th>
-              <th className="px-2 py-1 text-right font-medium">% Paid</th>
+              <th className="px-2 py-1 text-right font-medium">% Allowed of Billed</th>
+              <th className="px-2 py-1 text-right font-medium">% Paid by Payer</th>
             </tr>
           </thead>
           <tbody>
@@ -2567,8 +2570,8 @@ function CohortBucketTable({
             <th className="px-2 py-1 text-left font-medium">Point</th>
             <th className="px-2 py-1 text-right font-medium">Patients</th>
             <th className="px-2 py-1 text-right font-medium">Charge lines</th>
-            <th className="px-2 py-1 text-right font-medium">% Allowed</th>
-            <th className="px-2 py-1 text-right font-medium">% Paid</th>
+            <th className="px-2 py-1 text-right font-medium">% Allowed of Billed</th>
+            <th className="px-2 py-1 text-right font-medium">% Paid by Payer</th>
             <th className="px-2 py-1 text-right font-medium">$ Paid / patient</th>
             <th className="px-2 py-1 text-right font-medium">Cum $ / start</th>
             <th className="px-2 py-1 text-right font-medium">Zero-paid</th>
@@ -3059,8 +3062,8 @@ function CohortDrilldownContent({ data }: { data: CohortDrilldownResult }) {
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <StatTile label="Patients" value={a.patients.toLocaleString()} />
         <StatTile label="Charge lines" value={a.claims.toLocaleString()} />
-        <StatTile label="% Allowed" value={formatPercentNum(a.pct_allowed)} />
-        <StatTile label="% Paid" value={formatPercentNum(a.pct_paid)} />
+        <StatTile label="% Allowed of Billed" value={formatPercentNum(a.pct_allowed)} />
+        <StatTile label="% Paid by Payer" value={formatPercentNum(a.pct_paid)} />
       </div>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="rounded-md border border-line bg-surface p-2">
