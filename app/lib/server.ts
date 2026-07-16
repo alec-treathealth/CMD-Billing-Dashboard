@@ -545,11 +545,6 @@ async function handleExplorerCronForTenant(
       },
       writeDb: rollupWriterDb(),
       businessEntityId: tenant.businessEntityId,
-      // 0050: rebuild the charge-grain matview after inserts (SECURITY DEFINER function; the
-      // writer role holds EXECUTE only). The cron treats a failure as non-fatal (stale-but-correct).
-      refreshChargeRollup: async () => {
-        await rollupWriterDb().query('select collections.refresh_cmd_explorer_charge_rollup()');
-      },
       revalidate: () => revalidateTag('cmd-explorer'),
       revalidateDashboard: () => revalidateTag(DASHBOARD_CACHE_TAG),
       // Both rosters use a ROLLING (current-month) payment-received window, so there is no fixed
