@@ -617,15 +617,33 @@ export interface CohortCurveOptions {
 }
 
 /**
+ * Whole-cohort END-TO-END payer yield — dollar-weighted over the ENTIRE prefix cohort's charge lines
+ * (0050 rollup), with NO position cap and NO per-bucket suppression: the honest lifetime total,
+ * deliberately free of the curve's survivorship bias. Each ratio is null when its denominator is <= 0.
+ * The whole object is null when the cohort is below COHORT_MIN_PATIENTS (the cards then read "not
+ * enough data", never a false-precision stat).
+ */
+export interface CohortTotals {
+  /** paid ÷ billed — net collected of billed (end-to-end yield). */
+  pct_collected: number | null;
+  /** allowed ÷ billed — what the payer agreed to. */
+  pct_allowed: number | null;
+  /** paid ÷ allowed — paid of what was allowed. */
+  pct_paid: number | null;
+}
+
+/**
  * The cohort-curve response: both suppressed x-axes plus the cohort's distinct-patient count
  * (derived from the position-1 bucket, since every patient has a first visit). When the whole
  * cohort is below the floor, EVERY bucket is suppressed → both arrays are empty and
  * `cohort_patients` is 0 (the panel then shows "not enough data", never a partial disclosure).
+ * `totals` is the whole-cohort end-to-end yield (see CohortTotals) — null below the floor.
  */
 export interface CohortCurve {
   by_position: CohortCurvePoint[];
   by_days: CohortCurvePoint[];
   cohort_patients: number;
+  totals: CohortTotals | null;
 }
 
 // --- cohort-point drilldown (Session G) -------------------------------------
@@ -783,6 +801,41 @@ export function buildCohortCurveQueries(
   })();
 
   return { byPosition, byDays };
+}
+
+/** Raw dollar sums returned by buildCohortTotalsQuery (the caller derives the guarded ratios). */
+export interface CohortTotalsRow {
+  billed: number | null;
+  allowed: number | null;
+  paid: number | null;
+}
+
+/**
+ * Whole-cohort END-TO-END yield aggregate for one alpha-prefix cohort — the honest lifetime totals,
+ * scoped IDENTICALLY to buildCohortCurveQueries (tenant + prefix token, 0050 charge grain) but with
+ * NO position cap, NO day cap, and NO per-bucket suppression, so it never inherits the curve's
+ * survivorship bias. Returns raw dollar sums (billed / allowed / paid); the caller derives the three
+ * guarded ratios and applies the COHORT_MIN_PATIENTS gate (see loadCohortCurveData). Every value is a
+ * bound parameter; every identifier a fixed literal; no raw PHI reaches this module (prefixBidx is an
+ * opaque keyed-HMAC token).
+ */
+export function buildCohortTotalsQuery(
+  prefixBidx: string,
+  entityIds: string[],
+): { sql: string; params: unknown[] } {
+  const params: unknown[] = [];
+  const add: ParamAdder = (v) => {
+    params.push(v);
+    return `$${params.length}`;
+  };
+  const ent = add(entityIds);
+  const pref = add(prefixBidx);
+  const sql =
+    'select sum(charge_amount)::float8 as billed, sum(allowed_amount)::float8 as allowed, ' +
+    'sum(insurance_payments)::float8 as paid ' +
+    `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
+    `where business_entity_id = any(${ent}::uuid[]) and member_id_prefix_bidx = ${pref} and charge_date is not null`;
+  return { sql, params };
 }
 
 /**

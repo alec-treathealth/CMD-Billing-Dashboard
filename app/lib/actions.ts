@@ -1278,7 +1278,7 @@ export async function loadCohortCurve(
   if (!phi.ok) return { ok: false, error: phi.error };
   const token = phi.phiIndex?.memberIdPrefixBidx;
   // No usable token (prefix < 3 chars, or nothing entitled/resolvable) → empty curve, not an error.
-  if (!token) return { ok: true, curve: { by_position: [], by_days: [], cohort_patients: 0 } };
+  if (!token) return { ok: true, curve: { by_position: [], by_days: [], cohort_patients: 0, totals: null } };
   try {
     return { ok: true, curve: await loadCohortCurve_(token, entityIds) };
   } catch {

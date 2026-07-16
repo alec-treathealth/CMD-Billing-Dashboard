@@ -36,6 +36,7 @@ import {
   GripVertical,
   Layers,
   Lock,
+  Minus,
   RotateCcw,
   Save,
   Star,
@@ -46,7 +47,6 @@ import {
 } from 'lucide-react';
 import {
   Bar,
-  CartesianGrid,
   ComposedChart,
   Line,
   ReferenceLine,
@@ -2338,6 +2338,7 @@ function CohortMiniChart({
   data,
   dataKey,
   name,
+  def,
   color,
   xLabel,
   markerBucket,
@@ -2348,6 +2349,8 @@ function CohortMiniChart({
   data: CohortChartDatum[];
   dataKey: 'pct_allowed' | 'pct_paid';
   name: string;
+  /** Optional small "definition" chip beside the series name, e.g. "allowed ÷ billed". */
+  def?: string;
   color: string;
   xLabel: string;
   markerBucket?: number | null;
@@ -2365,8 +2368,9 @@ function CohortMiniChart({
   const maxPatients = Math.max(...data.map((p) => p.patients), 1);
   return (
     <div>
-      <div className="text-[10px] font-semibold" style={{ color }}>
-        {name}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-[10px] font-semibold" style={{ color }}>{name}</span>
+        {def && <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{def}</span>}
       </div>
       <div className="h-28 w-full">
         <ResponsiveContainer width="100%" height="100%">
@@ -2382,19 +2386,10 @@ function CohortMiniChart({
             }
             style={onPointClick ? { cursor: 'pointer' } : undefined}
           >
-            <CartesianGrid vertical={false} stroke="#E4E9E6" />
-            {/* No inline axis label — the section heading above each column ("By visit number" / "By
-                days since first visit") already names the axis; xLabel names it in the tooltip.
-                Numeric axis: bucket spacing is real (gap points make interior suppression visible). */}
-            <XAxis
-              dataKey="bucket"
-              type="number"
-              domain={['dataMin', 'dataMax']}
-              allowDecimals={false}
-              tick={{ fontSize: 10 }}
-              stroke="#E4E9E6"
-              tickLine={false}
-            />
+            {/* Compact summary sparkline: no gridlines / axis chrome (the stat cards, the takeaway
+                line, the hover tooltip, and the table toggle carry the numbers). The numeric axes are
+                KEPT but hidden so bucket spacing + the ReferenceLine markers still map correctly. */}
+            <XAxis dataKey="bucket" type="number" domain={['dataMin', 'dataMax']} allowDecimals={false} hide />
             <YAxis
               domain={[
                 0,
@@ -2403,11 +2398,7 @@ function CohortMiniChart({
                   return yMax !== undefined ? Math.max(yMax, 20) : top;
                 },
               ]}
-              tick={{ fontSize: 10 }}
-              stroke="#E4E9E6"
-              tickLine={false}
-              width={52}
-              unit="%"
+              hide
             />
             <YAxis yAxisId="vol" hide domain={[0, maxPatients * 4]} />
             <Tooltip
@@ -2482,26 +2473,14 @@ function CohortDollarMiniChart({
             }
             style={onPointClick ? { cursor: 'pointer' } : undefined}
           >
-            <CartesianGrid vertical={false} stroke="#E4E9E6" />
-            <XAxis
-              dataKey="bucket"
-              type="number"
-              domain={['dataMin', 'dataMax']}
-              allowDecimals={false}
-              tick={{ fontSize: 10 }}
-              stroke="#E4E9E6"
-              tickLine={false}
-            />
+            {/* Compact summary sparkline — see CohortMiniChart; axes kept but hidden. */}
+            <XAxis dataKey="bucket" type="number" domain={['dataMin', 'dataMax']} allowDecimals={false} hide />
             <YAxis
               domain={[
                 (dataMin: number) => Math.min(0, dataMin),
                 (dataMax: number) => Math.max(Math.ceil((dataMax || 0) / 50) * 50, 50),
               ]}
-              tick={{ fontSize: 10 }}
-              stroke="#E4E9E6"
-              tickLine={false}
-              width={52}
-              tickFormatter={usd}
+              hide
             />
             <YAxis yAxisId="vol" hide domain={[0, maxPatients * 4]} />
             <Tooltip
@@ -2616,9 +2595,10 @@ function CohortBucketTable({
 /**
  * The alpha-prefix cohort payer-behavior curve — the MERGED attrition-rate / days-authorized metric.
  * Renders only for PHI-entitled roles with an active ≥3-char alpha-prefix search (gated by the
- * caller). Shows BOTH x-axes (claim/visit position + days since first claim) side by side, no toggle,
- * plus a plain-language degradation callout (Derek's framing) and a days-framing summary line
- * (Alec's). Every value is a cohort AGGREGATE that already passed server-side min-5-patient
+ * caller). A header status chip summarizes the degradation read; three whole-cohort yield cards
+ * (collected / allowed / paid of billed) sit under it; then BOTH x-axes (claim/visit position + days
+ * since first claim) side by side in one bordered card, each with a plain-language takeaway line and
+ * compact sparklines. Every value is a cohort AGGREGATE that already passed server-side min-5-patient
  * suppression — no single patient's figures reach here. When the whole cohort is too small (all
  * buckets suppressed), it shows a "not enough data" notice, never a partial (re-identifiable) curve.
  */
@@ -2729,39 +2709,51 @@ function CohortCurvePanel({
     return lines > 0 ? round((pts.reduce((s, p) => s + (pick(p) / 100) * p.claims, 0) / lines) * 100) : 0;
   };
 
-  // Callout leads with dollars + zero-pay (Phase 2); %-allowed demoted to the trailing clause. The
-  // dollar read is anchored to the SAME drop bucket the %-allowed rule found, so the red marker
-  // line and the copy tell one story. Units are explicit: the position axis measures $ per patient
-  // PER VISIT (a "visit" = one distinct service date), never mixed with the days axis's per-window $.
-  let callout: string;
+  // Header status chip: the degradation read (cohortDegradation) reduced to ONE label — a >=10-pt
+  // %-allowed drop from the cohort's own first-visit baseline is "degrading" (amber, the drop size +
+  // where it hit), a surviving-but-steady curve is "no degradation" (green), too few sequenced buckets
+  // is "not enough data" (grey). Same threshold that drove the old callout; no new rule invented.
+  const status: { tone: 'good' | 'warn' | 'muted'; label: string } =
+    deg && deg.dropAt !== null && deg.dropTo !== null
+      ? { tone: 'warn', label: `Allowed dropped ${round(deg.baseline - deg.dropTo)} pts by visit ${deg.dropAt}` }
+      : deg
+        ? { tone: 'good', label: 'No degradation detected' }
+        : { tone: 'muted', label: 'Not enough data yet' };
+
+  // Per-column takeaway lines: SHORTER restatements of exactly what the old callout / days line
+  // asserted for each axis — no new statistic. The survivorship caveat (#10) is appended to BOTH
+  // columns: each x-axis thins toward the right by the SAME attrition mechanism (a patient who stops
+  // early contributes only to their early visits / early day-windows), so late points on either axis
+  // reflect continuing patients only. Zero-pay (#9) folds in only when it's actually present.
+  const SURVIVORSHIP = ' Tracks continuing patients only — early drop-offs aren’t reflected in later points.';
+  let visitTakeaway: string;
   if (deg && deg.dropAt !== null && deg.dropTo !== null) {
     const at = posDollars.find((p) => p.bucket >= deg.dropAt!) ?? posDollars[posDollars.length - 1]!;
     const fromDrop = posDollars.filter((p) => p.bucket >= deg.dropAt!);
     const zeroPct = zeroPayOver(fromDrop, (p) => p.pct_zero_paid);
-    const shiftPct = zeroPayOver(fromDrop, (p) => p.pct_patient_shifted);
-    callout =
-      `Insurance paid ~${usd(posDollars[0]!.paid_per_patient)} per patient on the 1st visit, falling to ~${usd(at.paid_per_patient)} by visit ${deg.dropAt}. ` +
-      `${zeroPct}% of charge lines from visit ${deg.dropAt} on were zero-paid${shiftPct > 0 ? ` (${shiftPct} pts moved to patient balance)` : ''}. ` +
-      `Allowed fell from ~${round(deg.baseline)}% to ~${round(deg.dropTo)}%.`;
+    visitTakeaway =
+      `Allowed slips ~${round(deg.baseline)}% → ~${round(deg.dropTo)}% by visit ${deg.dropAt}, $/visit ~${usd(posDollars[0]!.paid_per_patient)} → ~${usd(at.paid_per_patient)}.` +
+      (zeroPct > 0 ? ` ${zeroPct}% of later charge lines zero-paid → moved to patient balance, not necessarily denied.` : '') +
+      SURVIVORSHIP;
   } else if (deg) {
     const zeroPct = zeroPayOver(posDollars, (p) => p.pct_zero_paid);
-    callout =
-      `Insurance payments hold steady (~${usd(posDollars[0]!.paid_per_patient)} per patient per visit, ~${round(deg.baseline)}% allowed) ` +
-      `across the first ${deg.lastBucket} visits; ${zeroPct}% of charge lines were zero-paid — no clear degradation in this cohort.`;
+    visitTakeaway =
+      `Stable across visits — ~${round(deg.baseline)}% allowed, ~${usd(posDollars[0]!.paid_per_patient)}/visit, flat through visit ${deg.lastBucket}.` +
+      (zeroPct > 0 ? ` ${zeroPct}% of charge lines zero-paid → patient balance, not necessarily denied.` : '') +
+      SURVIVORSHIP;
   } else {
-    callout = 'Not enough sequenced visits to read a degradation trend for this cohort.';
+    visitTakeaway = 'Not enough sequenced visits to read a trend yet.';
   }
 
-  // Days-framing one-liner (Alec's "how long does full authorization last"), led by the
-  // cumulative-$ plateau: what a starting patient is ultimately worth THROUGH the last surviving
-  // day bucket. A bucket is a dayBucketWidth-wide WINDOW ("days 210–239"), never an open-ended
-  // "day 210+" — that mislabel was a confirmed copy defect.
+  // Days axis (Alec's "how long does full authorization last"): cumulative-$ through the last surviving
+  // WINDOW ("days 210–239", never an open-ended "day 210+") + first-vs-last %-allowed. Same assertion
+  // the old days line made, shortened, plus the survivorship caveat.
   const days = c.by_days.filter((p) => p.pct_allowed !== null);
   const lastDay = days.length > 0 ? days[days.length - 1]! : null;
-  const daysLine =
+  const daysTakeaway =
     days.length >= 2 && lastDay
-      ? `By elapsed time: ${daysCum !== null ? `~${usd(daysCum)} collected per starting patient through day ${daysDollars[daysDollars.length - 1]!.bucket + dayBucketWidth - 1}; ` : ''}~${round(days[0]!.pct_allowed!)}% allowed in the first ${dayBucketWidth} days, ~${round(lastDay.pct_allowed!)}% in days ${lastDay.bucket}–${lastDay.bucket + dayBucketWidth - 1}.`
-      : null;
+      ? `${daysCum !== null ? `~${usd(daysCum)} collected per starting patient through day ${daysDollars[daysDollars.length - 1]!.bucket + dayBucketWidth - 1}; ` : ''}~${round(days[0]!.pct_allowed!)}% allowed in the first ${dayBucketWidth} days, ~${round(lastDay.pct_allowed!)}% by days ${lastDay.bucket}–${lastDay.bucket + dayBucketWidth - 1}.` + SURVIVORSHIP
+      : 'Not enough elapsed time to read a trend yet.';
 
   return (
     <div
@@ -2783,9 +2775,22 @@ function CohortCurvePanel({
             prefix-wide · ignores Member ID, facility &amp; date filters
           </span>
         </h3>
-        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-          <Lock className="h-3 w-3" aria-hidden />
-          {c.cohort_patients.toLocaleString()} patients · dollar-weighted · min 5/bucket
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <span
+            className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+              status.tone === 'warn'
+                ? 'border-amber-300/60 bg-amber-50 text-amber-800 dark:border-amber-400/30 dark:bg-amber-950/40 dark:text-amber-200'
+                : status.tone === 'good'
+                  ? 'border-emerald-300/60 bg-emerald-50 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-950/40 dark:text-emerald-300'
+                  : 'border-line bg-surface text-muted-foreground'
+            }`}
+          >
+            {status.tone === 'warn' ? <TrendingDown className="h-3 w-3" aria-hidden /> : <Minus className="h-3 w-3" aria-hidden />}
+            {status.label}
+          </span>
+          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+            <Lock className="h-3 w-3" aria-hidden />
+            {c.cohort_patients.toLocaleString()} patients · dollar-weighted · min 5/bucket
           <button
             type="button"
             aria-pressed={showTable}
@@ -2809,7 +2814,8 @@ function CohortCurvePanel({
           >
             <ChevronDown className={`h-4 w-4 transition-transform ${collapsed ? '-rotate-90' : ''}`} aria-hidden />
           </button>
-        </span>
+          </span>
+        </div>
       </div>
       <p className="mt-1 text-xs text-muted-foreground">
         All {c.cohort_patients.toLocaleString()} patients whose insurance member ID begins with “{prefix}” —
@@ -2825,25 +2831,48 @@ function CohortCurvePanel({
 
       {!collapsed && (
         <div id={bodyId} className={memberIdActive ? 'opacity-70' : undefined}>
-          {/* Plain-language degradation callout (Derek's framing) + days summary (Alec's framing). */}
-          <div className="mt-3 flex items-start gap-2 rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink900">
-            <TrendingDown className="mt-0.5 h-4 w-4 shrink-0 text-[var(--brand-ink)]" aria-hidden />
-            <div>
-              <p>{callout}</p>
-              {daysLine && <p className="mt-0.5 text-muted-foreground">{daysLine}</p>}
+          {/* Whole-cohort END-TO-END yield (item 2) — three dollar-weighted stat cards + the identity
+              caveat. Every number is from c.totals (the server aggregate); the block is absent below the
+              min-patient floor (c.totals === null), the same gate the curve uses. */}
+          {c.totals && (
+            <div className="mt-3">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <div className="rounded-lg bg-muted/40 p-3">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">% collected of billed</span>
+                    <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">paid ÷ billed</span>
+                  </div>
+                  <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(c.totals.pct_collected)}</div>
+                  <div className="text-[11px] text-ink400">net yield end to end</div>
+                </div>
+                <div className="rounded-lg bg-muted/40 p-3">
+                  <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">% allowed of billed</span>
+                  <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(c.totals.pct_allowed)}</div>
+                  <div className="text-[11px] text-ink400">what payer agreed to</div>
+                </div>
+                <div className="rounded-lg bg-muted/40 p-3">
+                  <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">% paid by payer</span>
+                  <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(c.totals.pct_paid)}</div>
+                  <div className="text-[11px] text-ink400">of what was allowed</div>
+                </div>
+              </div>
+              {c.totals.pct_allowed !== null && c.totals.pct_paid !== null && c.totals.pct_collected !== null && (
+                <p className="mt-1.5 text-[10px] text-ink400">
+                  ¹ {round(c.totals.pct_allowed)}% × {round(c.totals.pct_paid)}% ≈ {round(c.totals.pct_collected)}% — most of the gap
+                  is expected contractual write-off, not lost revenue. Compare across payers/facilities rather than as a target.
+                </p>
+              )}
             </div>
-          </div>
+          )}
 
           {/* Both axes, side by side — no toggle between them; the chart/table switch (header) is
               the keyboard + screen-reader path to the same per-bucket values and drilldown. */}
-          <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <div>
+          <div className="mt-3 grid grid-cols-1 overflow-hidden rounded-lg border border-line lg:grid-cols-2">
+            <div className="p-3 lg:border-r lg:border-line">
               <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 By visit number
               </div>
-              <div className="mb-1 text-[11px] text-ink400">
-                Each patient’s visits in order · 1 = first visit · click a point for details
-              </div>
+              <div className="mb-1 text-[11px] text-ink400">{visitTakeaway} Click a point for details.</div>
               {showTable ? (
                 <CohortBucketTable
                   points={posDollars}
@@ -2857,7 +2886,8 @@ function CohortCurvePanel({
                   <CohortMiniChart
                     data={posChart}
                     dataKey="pct_allowed"
-                    name="% Allowed"
+                    name="% Allowed of billed"
+                    def="allowed ÷ billed"
                     color={COHORT_ALLOWED_COLOR}
                     xLabel="Visit #"
                     markerBucket={deg?.dropAt ?? null}
@@ -2868,7 +2898,8 @@ function CohortCurvePanel({
                   <CohortMiniChart
                     data={posChart}
                     dataKey="pct_paid"
-                    name="% Paid"
+                    name="% Paid by payer"
+                    def="payer paid ÷ allowed"
                     color={COHORT_PAID_COLOR}
                     xLabel="Visit #"
                     yMax={paidYMax}
@@ -2877,7 +2908,7 @@ function CohortCurvePanel({
                   />
                   <CohortDollarMiniChart
                     data={posChart}
-                    name="$ Paid / patient / visit ¹"
+                    name="$ Paid / patient / visit ²"
                     xLabel="Visit #"
                     markerBucket={deg?.dropAt ?? null}
                     onPointClick={clickReal('position', posBuckets)}
@@ -2885,7 +2916,7 @@ function CohortCurvePanel({
                   />
                   {posCum !== null && (
                     <p className="text-[10px] text-ink400">
-                      ¹ Cumulative: ~{usd(posCum)} paid per starting patient through visit{' '}
+                      ² Cumulative: ~{usd(posCum)} paid per starting patient through visit{' '}
                       {posDollars[posDollars.length - 1]!.bucket} (suppressed points excluded — a floor).
                     </p>
                   )}
@@ -2900,13 +2931,11 @@ function CohortCurvePanel({
                 />
               )}
             </div>
-            <div>
+            <div className="p-3">
               <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 By days since first visit
               </div>
-              <div className="mb-1 text-[11px] text-ink400">
-                {dayBucketWidth}-day windows from each patient’s first visit · click a point for details
-              </div>
+              <div className="mb-1 text-[11px] text-ink400">{daysTakeaway} Click a point for details.</div>
               {showTable ? (
                 <CohortBucketTable
                   points={daysDollars}
@@ -2920,7 +2949,8 @@ function CohortCurvePanel({
                   <CohortMiniChart
                     data={daysChart}
                     dataKey="pct_allowed"
-                    name="% Allowed"
+                    name="% Allowed of billed"
+                    def="allowed ÷ billed"
                     color={COHORT_ALLOWED_COLOR}
                     xLabel="Day window start"
                     yMax={allowedYMax}
@@ -2930,7 +2960,8 @@ function CohortCurvePanel({
                   <CohortMiniChart
                     data={daysChart}
                     dataKey="pct_paid"
-                    name="% Paid"
+                    name="% Paid by payer"
+                    def="payer paid ÷ allowed"
                     color={COHORT_PAID_COLOR}
                     xLabel="Day window start"
                     yMax={paidYMax}
@@ -2939,14 +2970,14 @@ function CohortCurvePanel({
                   />
                   <CohortDollarMiniChart
                     data={daysChart}
-                    name={`$ Paid / patient / ${dayBucketWidth} days ²`}
+                    name={`$ Paid / patient / ${dayBucketWidth} days ³`}
                     xLabel="Day window start"
                     onPointClick={clickReal('days', dayBuckets)}
                     selectedBucket={selectedPoint?.axis === 'days' ? selectedPoint.bucket : null}
                   />
                   {daysCum !== null && (
                     <p className="text-[10px] text-ink400">
-                      ² Cumulative: ~{usd(daysCum)} paid per starting patient through day{' '}
+                      ³ Cumulative: ~{usd(daysCum)} paid per starting patient through day{' '}
                       {daysDollars[daysDollars.length - 1]!.bucket + dayBucketWidth - 1} (suppressed
                       points excluded — a floor).
                     </p>
@@ -2964,18 +2995,21 @@ function CohortCurvePanel({
               )}
             </div>
           </div>
-          <p className="mt-2 text-[11px] leading-relaxed text-ink400">
-            Points aggregate logical charge lines (payment-posting history deduplicated), dollar-weighted.
-            % Allowed = allowed ÷ charged. % Paid = insurance paid ÷ allowed; a “—” means the point’s
-            netted allowed is too small to be a meaningful denominator (usually reversal-heavy postings).
-            $ Paid / patient = the point’s insurance dollars ÷ its patients, per visit on the left and
-            per {dayBucketWidth}-day window on the right — different units, don’t compare across columns.
-            Zero-paid = charge lines with no insurance payment; “→ patient balance” means the amount moved
-            to patient responsibility (often deductible), not necessarily a denial. Shaded bars show
-            patients per point; later points reflect only patients whose care continued — early drop-offs
-            leave the tail, which can flatter it. Breaks in a line are suppressed points (fewer than 5
-            patients).
-          </p>
+          {/* Legend strip (item 4) — replaces the old 8-sentence footnote. Def-of-metric text lives on
+              the card / row def chips now; the surviving glossary is exactly these four reading aids.
+              The grain/dollar-weighted note (#7) and $/patient definition (#8) were intentionally dropped
+              from visible copy (per rulings); zero-paid (#9) + survivorship (#10) live in the takeaways. */}
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-ink400">
+            <span className="inline-flex items-center gap-1">
+              <span className="inline-block h-2 w-2 rounded-[1px] bg-current opacity-30" aria-hidden />
+              bar = patients at point
+            </span>
+            <span>· gap = &lt;5 patients (suppressed)</span>
+            <span>· “—” = allowed too small to divide</span>
+            <span className="inline-flex items-center gap-1">
+              · <Columns3 className="h-3 w-3" aria-hidden /> left vs right = different units, don’t compare $
+            </span>
+          </div>
         </div>
       )}
     </div>

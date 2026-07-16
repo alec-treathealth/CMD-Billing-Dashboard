@@ -49,6 +49,7 @@ import {
   buildCmdFacilityOptionsQuery,
   buildCmdPayerOptionsQuery,
   buildCohortCurveQueries,
+  buildCohortTotalsQuery,
   buildCohortDrilldownQueries,
   cmdExplorerSortValue,
   CMD_EXPLORER_PAGE_SIZE,
@@ -66,6 +67,8 @@ import {
   type CmdFacilityOption,
   type CohortCurvePoint,
   type CohortCurve,
+  type CohortTotals,
+  type CohortTotalsRow,
   type CohortDrilldownAggregate,
   type CohortDrilldownTable,
   type CohortDrilldownResult,
@@ -94,6 +97,7 @@ export type {
   CmdFacilityOption,
   CohortCurvePoint,
   CohortCurve,
+  CohortTotals,
   CohortDrilldownAggregate,
   CohortDrilldownTable,
   CohortDrilldownResult,
@@ -1378,18 +1382,31 @@ export const loadCmdSearchSummary = unstable_cache(
 
 async function loadCohortCurveData(prefixBidx: string, entityIds: string[]): Promise<CohortCurve> {
   const { byPosition, byDays } = buildCohortCurveQueries(prefixBidx, entityIds);
+  const totalsQ = buildCohortTotalsQuery(prefixBidx, entityIds);
   const exec = readerExecutor();
-  const [pos, days] = await Promise.all([
+  const [pos, days, tot] = await Promise.all([
     exec.query<CohortCurvePoint>(byPosition.sql, byPosition.params),
     exec.query<CohortCurvePoint>(byDays.sql, byDays.params),
+    exec.query<CohortTotalsRow>(totalsQ.sql, totalsQ.params),
   ]);
   const safe = (rows: CohortCurvePoint[]) => rows.filter((r) => r.patients >= COHORT_MIN_PATIENTS);
   const by_position = safe(pos.rows);
-  return {
-    by_position,
-    by_days: safe(days.rows),
-    cohort_patients: by_position[0]?.patients ?? 0,
-  };
+  const cohort_patients = by_position[0]?.patients ?? 0;
+  // Whole-cohort end-to-end yield: TRUE unbounded totals (no position cap / suppression), gated by the
+  // SAME min-patient floor as the curve so a sub-threshold prefix can't render a false-precision stat.
+  // A guarded ratio is null when its denominator is <= 0 (never a divide-by-zero or a negative).
+  const t = tot.rows[0];
+  const ratio = (num: number | null, den: number | null): number | null =>
+    num != null && den != null && den > 0 ? Math.round((num / den) * 10000) / 100 : null;
+  const totals: CohortTotals | null =
+    cohort_patients >= COHORT_MIN_PATIENTS && t
+      ? {
+          pct_collected: ratio(t.paid, t.billed),
+          pct_allowed: ratio(t.allowed, t.billed),
+          pct_paid: ratio(t.paid, t.allowed),
+        }
+      : null;
+  return { by_position, by_days: safe(days.rows), cohort_patients, totals };
 }
 
 /**
@@ -1400,10 +1417,12 @@ async function loadCohortCurveData(prefixBidx: string, entityIds: string[]): Pro
  */
 export const loadCohortCurve = unstable_cache(
   (prefixBidx: string, entityIds: string[]): Promise<CohortCurve> => loadCohortCurveData(prefixBidx, entityIds),
+  // -v4: added whole-cohort `totals` (end-to-end yield) to the payload — bump so a cached v3 curve
+  //      (no totals) can't reach the new stat cards.
   // -v3: cohort queries moved to the 0050 charge-grain rollup (netted dollars, charge-line counts);
   // the key bump keeps a pre-deploy snapshot-grain curve (up to 15 min old) from reaching the new UI.
   // (-v2 was the Phase 2 paid_total/pct_zero_paid/pct_patient_shifted shape change.)
-  ['cmd-explorer-cohort-curve-v3'],
+  ['cmd-explorer-cohort-curve-v4'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
 
