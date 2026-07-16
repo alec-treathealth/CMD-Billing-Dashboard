@@ -2874,7 +2874,7 @@ function CohortCurvePanel({
                   />
                   <CohortDollarMiniChart
                     data={posChart}
-                    name="$ Paid / patient / visit"
+                    name="$ Paid / patient / visit ¹"
                     xLabel="Visit #"
                     markerBucket={deg?.dropAt ?? null}
                     onPointClick={clickReal('position', posBuckets)}
@@ -2882,7 +2882,7 @@ function CohortCurvePanel({
                   />
                   {posCum !== null && (
                     <p className="text-[10px] text-ink400">
-                      Cumulative: ~{usd(posCum)} paid per starting patient through visit{' '}
+                      ¹ Cumulative: ~{usd(posCum)} paid per starting patient through visit{' '}
                       {posDollars[posDollars.length - 1]!.bucket} (suppressed points excluded — a floor).
                     </p>
                   )}
@@ -2936,14 +2936,14 @@ function CohortCurvePanel({
                   />
                   <CohortDollarMiniChart
                     data={daysChart}
-                    name={`$ Paid / patient / ${dayBucketWidth} days`}
+                    name={`$ Paid / patient / ${dayBucketWidth} days ²`}
                     xLabel="Day window start"
                     onPointClick={clickReal('days', dayBuckets)}
                     selectedBucket={selectedPoint?.axis === 'days' ? selectedPoint.bucket : null}
                   />
                   {daysCum !== null && (
                     <p className="text-[10px] text-ink400">
-                      Cumulative: ~{usd(daysCum)} paid per starting patient through day{' '}
+                      ² Cumulative: ~{usd(daysCum)} paid per starting patient through day{' '}
                       {daysDollars[daysDollars.length - 1]!.bucket + dayBucketWidth - 1} (suppressed
                       points excluded — a floor).
                     </p>
