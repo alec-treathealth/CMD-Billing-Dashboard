@@ -22,9 +22,11 @@ function initialsFromEmail(email: string): string {
 export function UserMenu({
   email,
   canManageUsers = false,
+  canViewUserLogs = false,
 }: {
   email: string;
   canManageUsers?: boolean;
+  canViewUserLogs?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -78,6 +80,16 @@ export function UserMenu({
               className="block border-b border-line px-3 py-2 text-left text-sm text-ink900 transition-colors hover:bg-teal50"
             >
               Manage users
+            </Link>
+          )}
+          {canViewUserLogs && (
+            <Link
+              href="/admin/user-logs"
+              role="menuitem"
+              onClick={() => setOpen(false)}
+              className="block border-b border-line px-3 py-2 text-left text-sm text-ink900 transition-colors hover:bg-teal50"
+            >
+              User logs
             </Link>
           )}
           <form action={signOut}>

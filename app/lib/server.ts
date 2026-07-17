@@ -248,6 +248,82 @@ export async function recordAccess(entry: AccessAuditEntry): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
+// Alec-only user log dashboard read path (migration 0056).
+//
+// `claims.access_audit` remains directly unreadable to claims_reader; this calls the bounded
+// SECURITY DEFINER projection `claims.list_access_audit()`. The page/action layer is the authority
+// for the Alec-only app-user gate. Rows are non-PHI by 0017 contract: staff identity, action,
+// timestamp, and a detail blob that must contain only operational metadata/counts.
+// ---------------------------------------------------------------------------
+export interface AccessAuditRow {
+  id: string;
+  createdAt: string;
+  actorEmail: string;
+  actorUserId: string;
+  action: string;
+  detail: Record<string, unknown>;
+}
+
+export interface ListAccessAuditInput {
+  limit?: number;
+  offset?: number;
+  actorEmail?: string | null;
+  action?: string | null;
+  fromIso?: string | null;
+  toIso?: string | null;
+}
+
+export interface ListAccessAuditResult {
+  rows: AccessAuditRow[];
+  total: number;
+}
+
+function boundedInt(value: number | undefined, fallback: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(Math.max(Math.trunc(value as number), min), max);
+}
+
+function jsonObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+export async function listAccessAudit(input: ListAccessAuditInput = {}): Promise<ListAccessAuditResult> {
+  const limit = boundedInt(input.limit, 50, 1, 200);
+  const offset = boundedInt(input.offset, 0, 0, 100_000);
+  const { rows } = await readerExecutor().query<{
+    id: string;
+    created_at: Date | string;
+    actor_email: string;
+    actor_user_id: string;
+    action: string;
+    detail: unknown;
+    total_count: string | number | null;
+  }>(
+    'select id, created_at, actor_email, actor_user_id, action, detail, total_count ' +
+      'from claims.list_access_audit($1, $2, $3, $4, $5::timestamptz, $6::timestamptz)',
+    [
+      limit,
+      offset,
+      input.actorEmail?.trim() || null,
+      input.action?.trim() || null,
+      input.fromIso ?? null,
+      input.toIso ?? null,
+    ],
+  );
+  return {
+    total: Number(rows[0]?.total_count ?? 0),
+    rows: rows.map((r) => ({
+      id: r.id,
+      createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+      actorEmail: r.actor_email,
+      actorUserId: r.actor_user_id,
+      action: r.action,
+      detail: jsonObject(r.detail),
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Per-user RBAC lookup (claims.app_user, migration 0025).
 //
 // Resolves a signed-in Supabase user's role row by their verified auth uid. Read on the SAME
