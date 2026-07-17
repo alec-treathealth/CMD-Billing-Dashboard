@@ -1154,6 +1154,15 @@ another session's WIP claim is usually an untracked file. Current reservations:
 Record new claims here when made; remove rows once the file is on origin/main
 (the tree then speaks for itself).
 
+**Applied high-water mark (2026-07-17):** 0053 (`audit_ingest_run`), 0054 (`collections_rollup_refresh_run`),
+0055 (`admissions_seat_role`), 0056 (`access_audit_reader`) are all **APPLIED + on origin/main** — so per the
+remove-when-on-main rule they need no reservation row (the tree is authoritative). **Next free dashboard
+migration = 0057.** Live-verified applied this session: **0055** (`claims.app_user` `app_user_role_ck`
+includes `admissions_seat`; migration widened both role CHECKs + recreated `upsert_app_user`) and **0056**
+(`claims.list_access_audit` exists, SECURITY DEFINER owned by `claims_admin`, EXECUTE→`claims_reader`,
+public/anon/authenticated/service_role revoked). The stale 0049/0050/0051 rows above are also on
+origin/main and removable under the same rule.
+
 ---
 
 ## Collections aggregate grain — `cmd_explorer_rows` is POSTING grain; aggregate ONLY over `cmd_explorer_charge_rollup` (2026-07-13)
