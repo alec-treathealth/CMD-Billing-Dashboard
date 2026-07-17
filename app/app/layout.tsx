@@ -8,6 +8,7 @@ import { UserMenu } from '@/components/user-menu';
 import { BrandTheme } from '@/components/brand-theme';
 import { HeaderGate } from '@/components/header-gate';
 import { dashboardAccess } from '@/lib/access';
+import { isAlecOwnerEmail } from '@/lib/alec-only';
 import './globals.css';
 
 // Co-locate every page's server function with the database. The Supabase project is in
@@ -53,6 +54,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       : null;
   const allowedViews = access.ok ? access.access.allowedViews : undefined;
   const canManageUsers = access.ok ? access.access.canManageUsers : false;
+  const canViewUserLogs = access.ok ? isAlecOwnerEmail(access.access.user?.email) : false;
   // A single-entitled-tenant user (entity admin OR entity user — anyone who is NOT a super-admin
   // and has an entity) is branded by their fixed entity, server-side, LEFT of the avatar on every
   // route. A super-admin's tenant is view-dependent (?view=) and is handled client-side by the
@@ -108,7 +110,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             </Suspense>
             {/* single-tenant user: their entity's logo immediately LEFT of the avatar (server-side). */}
             {singleTenantSlug ? <TenantLogo slug={singleTenantSlug} /> : null}
-            {email ? <UserMenu email={email} canManageUsers={canManageUsers} /> : null}
+            {email ? <UserMenu email={email} canManageUsers={canManageUsers} canViewUserLogs={canViewUserLogs} /> : null}
           </div>
         </header>
         </HeaderGate>
