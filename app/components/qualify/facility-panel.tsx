@@ -38,8 +38,8 @@ export function FacilityPanel({
   return (
     <section className="rounded-xl border bg-card shadow-sm">
       <div className="flex items-baseline justify-between px-4 pb-2.5 pt-4">
-        <h2 className="font-head text-base font-semibold">Top facilities</h2>
-        <span className="text-xs font-semibold text-muted-foreground">by reimbursement rating</span>
+        <h2 className="font-head text-base font-semibold">Heating up</h2>
+        <span className="text-xs font-semibold text-muted-foreground">by reimbursement rating · top 10</span>
       </div>
 
       <div className={['px-2.5 pb-3', heatOn ? 'q-heat' : ''].join(' ')}>
@@ -48,7 +48,7 @@ export function FacilityPanel({
             No facilities for this payer in the selected window.
           </p>
         ) : (
-          facilities.map((f) => {
+          facilities.slice(0, 10).map((f) => {
             const bucket = ratingBucket(f.rating);
             const pct = f.pctAllowedOfBilled;
             const width = pct === null ? 0 : Math.max(0, Math.min(100, pct));

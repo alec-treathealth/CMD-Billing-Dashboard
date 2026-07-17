@@ -14,11 +14,12 @@
  */
 import { useCallback, useMemo, useState, useTransition } from 'react';
 import { Search } from 'lucide-react';
-import { getQualifySnapshot } from '@/lib/qualify/actions';
+import { getQualifySnapshot, revealQualifyRow } from '@/lib/qualify/actions';
 import {
   QUALIFY_WINDOW_OPTIONS,
   type QualifySnapshot,
   type QualifyWindowDays,
+  type QualifyPhi,
 } from '@/lib/qualify/contract';
 import { buildFacilityBucketMap } from '@/components/qualify/colors';
 import { FacilityPanel } from '@/components/qualify/facility-panel';
@@ -35,7 +36,13 @@ function formatWindowRange(startIso: string, endExclusiveIso: string): string {
   return `${mo(start)} ${start.getUTCDate()} – ${mo(endIncl)} ${endIncl.getUTCDate()}, ${endIncl.getUTCFullYear()}`;
 }
 
-export function QualifyTab({ viewerHasAmountsCapability }: { viewerHasAmountsCapability: boolean }) {
+export function QualifyTab({
+  viewerHasAmountsCapability,
+  canRevealPhi,
+}: {
+  viewerHasAmountsCapability: boolean;
+  canRevealPhi: boolean;
+}) {
   const [query, setQuery] = useState('');
   const [windowDays, setWindowDays] = useState<QualifyWindowDays>(30);
   const [snapshot, setSnapshot] = useState<QualifySnapshot | null>(null);
@@ -45,6 +52,13 @@ export function QualifyTab({ viewerHasAmountsCapability }: { viewerHasAmountsCap
   const [echo, setEcho] = useState('');
   const [hint, setHint] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
+  // PHI reveal (Prompt 3c): `revealed` caches the FETCHED PHI for the session (never dropped on hide);
+  // `shown` controls visibility. Toggling a revealed row off/on never re-audits — one audited
+  // revealQualifyRow per row per session. All four reset on a new search.
+  const [revealed, setRevealed] = useState<Map<number, QualifyPhi>>(() => new Map());
+  const [shown, setShown] = useState<Set<number>>(() => new Set());
+  const [pendingIds, setPendingIds] = useState<Set<number>>(() => new Set());
+  const [revealErrors, setRevealErrors] = useState<Map<number, string>>(() => new Map());
 
   const hasAmounts = snapshot ? snapshot.viewerHasAmountsCapability : viewerHasAmountsCapability;
   const facilityBuckets = useMemo(
@@ -59,6 +73,11 @@ export function QualifyTab({ viewerHasAmountsCapability }: { viewerHasAmountsCap
       return;
     }
     setHint(null);
+    // New search → discard any revealed PHI from the previous payer.
+    setRevealed(new Map());
+    setShown(new Set());
+    setPendingIds(new Set());
+    setRevealErrors(new Map());
     startTransition(async () => {
       try {
         const snap = await getQualifySnapshot({ query: trimmed, windowDays: w });
@@ -79,6 +98,57 @@ export function QualifyTab({ viewerHasAmountsCapability }: { viewerHasAmountsCap
       }
     });
   }, []);
+
+  const toggleReveal = useCallback(
+    (id: number) => {
+      // Hide (visibility only — keep the fetched PHI cached).
+      if (shown.has(id)) {
+        setShown((s) => {
+          const n = new Set(s);
+          n.delete(id);
+          return n;
+        });
+        return;
+      }
+      // Already fetched this session → just show it again. No re-fetch, no re-audit.
+      if (revealed.has(id)) {
+        setShown((s) => new Set(s).add(id));
+        return;
+      }
+      if (pendingIds.has(id)) return; // in flight
+      // First reveal for this row → the ONE audited fetch.
+      setPendingIds((p) => new Set(p).add(id));
+      setRevealErrors((e) => {
+        const n = new Map(e);
+        n.delete(id);
+        return n;
+      });
+      void (async () => {
+        try {
+          const res = await revealQualifyRow(id);
+          setPendingIds((p) => {
+            const n = new Set(p);
+            n.delete(id);
+            return n;
+          });
+          if (res.ok) {
+            setRevealed((m) => new Map(m).set(id, res.phi));
+            setShown((s) => new Set(s).add(id));
+          } else {
+            setRevealErrors((e) => new Map(e).set(id, res.error));
+          }
+        } catch {
+          setPendingIds((p) => {
+            const n = new Set(p);
+            n.delete(id);
+            return n;
+          });
+          setRevealErrors((e) => new Map(e).set(id, 'Reveal is unavailable right now.'));
+        }
+      })();
+    },
+    [shown, revealed, pendingIds],
+  );
 
   const onWindow = (w: QualifyWindowDays) => {
     setWindowDays(w);
@@ -181,7 +251,18 @@ export function QualifyTab({ viewerHasAmountsCapability }: { viewerHasAmountsCap
       {snapshot && snapshot.resolved ? (
         <div className="grid grid-cols-1 items-start gap-4 min-[960px]:grid-cols-[340px_1fr]">
           <FacilityPanel facilities={snapshot.facilities} hasAmounts={hasAmounts} heatOn={heatOn} />
-          <CasesTable cases={snapshot.cases} hasAmounts={hasAmounts} heatOn={heatOn} facilityBuckets={facilityBuckets} />
+          <CasesTable
+            cases={snapshot.cases}
+            hasAmounts={hasAmounts}
+            heatOn={heatOn}
+            facilityBuckets={facilityBuckets}
+            canReveal={canRevealPhi}
+            revealed={revealed}
+            shown={shown}
+            pendingIds={pendingIds}
+            revealErrors={revealErrors}
+            onToggle={toggleReveal}
+          />
         </div>
       ) : (
         <div className="rounded-xl border border-dashed bg-card p-10 text-center text-sm text-muted-foreground">

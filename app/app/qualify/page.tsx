@@ -36,5 +36,7 @@ export default async function QualifyPage() {
   // admissions_seat never even renders the $ column headers; every snapshot re-confirms it, and the
   // server strips the dollar VALUES regardless (single choke point in the action core).
   const viewerHasAmountsCapability = role !== 'admissions_seat';
-  return <QualifyTab viewerHasAmountsCapability={viewerHasAmountsCapability} />;
+  return (
+    <QualifyTab viewerHasAmountsCapability={viewerHasAmountsCapability} canRevealPhi={access.access.canRevealPhi} />
+  );
 }
