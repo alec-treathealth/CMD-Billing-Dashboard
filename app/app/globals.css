@@ -177,3 +177,55 @@
 .q-heat .q-pctcell {
   background: var(--q-wash);
 }
+
+/*
+ * Qualify nav "NEW" flag — sparkly coral badge on the Qualify top-nav tab (Prompt 3). Decorative
+ * (aria-hidden). The "NEW" text carries a slow coral shimmer (gradient-clipped) and a small ✦ that
+ * twinkles; both animations collapse to static under prefers-reduced-motion (global reset above),
+ * leaving a plain coral "NEW ✦". Positioned inside the link's top-right (the link is `relative`).
+ */
+.q-new-badge {
+  position: absolute;
+  top: 3px;
+  right: 5px;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  pointer-events: none;
+  background: linear-gradient(100deg, #f0917c 0%, #ffe0d5 42%, #e2674f 58%, #f0917c 100%);
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: q-new-shimmer 2.6s linear infinite;
+}
+.q-new-badge::after {
+  content: '\2726'; /* ✦ four-pointed star */
+  margin-left: 1.5px;
+  font-size: 7px;
+  display: inline-block;
+  -webkit-text-fill-color: #f0917c;
+  color: #f0917c;
+  animation: q-new-twinkle 1.9s ease-in-out infinite;
+}
+@keyframes q-new-shimmer {
+  0% {
+    background-position: 220% 0;
+  }
+  100% {
+    background-position: -220% 0;
+  }
+}
+@keyframes q-new-twinkle {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.8) rotate(0deg);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.2) rotate(120deg);
+  }
+}

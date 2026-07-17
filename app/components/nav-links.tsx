@@ -5,7 +5,7 @@ import { usePathname, useSearchParams } from 'next/navigation';
 import { BookOpen, type LucideIcon } from 'lucide-react';
 import type { Role } from '@/lib/rbac';
 
-type NavLink = { href: string; label: string; icon?: LucideIcon };
+type NavLink = { href: string; label: string; icon?: LucideIcon; isNew?: boolean };
 
 // Overview + Collections are the two tenant-scoped dashboard surfaces, promoted to the top bar
 // (they used to live in a secondary sub-nav). They share the ?view= tenant scope; the rest are
@@ -24,7 +24,7 @@ const BASE_LINKS: readonly NavLink[] = [
 // Qualify (Prompt 3): a CROSS-TENANT admissions surface, NOT ?view=-scoped. It sits between Overview
 // and Collections and is visible only to the two roles that may reach it (super_admin +
 // admissions_seat) — RBAC is still enforced server-side at the route; this only controls the nav.
-const QUALIFY_LINK: NavLink = { href: '/qualify', label: 'Qualify' };
+const QUALIFY_LINK: NavLink = { href: '/qualify', label: 'Qualify', isNew: true };
 
 /** The tenant-scoped routes that carry a ?view= scope; the rest are view-agnostic (Qualify included:
  *  it is cross-tenant and pins its own scope). Billing Audit is PHI + tenant-scoped (BXR-only). */
@@ -50,7 +50,7 @@ export function NavLinks({ role }: { role?: Role }) {
   const links = linksFor(role);
   return (
     <nav className="flex items-center justify-center gap-1 text-[13px] font-medium">
-      {links.map(({ href, label, icon: Icon }) => {
+      {links.map(({ href, label, icon: Icon, isNew }) => {
         // '/dashboard' must match EXACTLY — otherwise '/dashboard/collections' (which starts with
         // '/dashboard/') would light up Overview too. Every other link still matches its subroutes.
         const active =
@@ -63,7 +63,7 @@ export function NavLinks({ role }: { role?: Role }) {
             href={linkHref}
             aria-current={active ? 'page' : undefined}
             className={[
-              'inline-flex items-center gap-1.5 rounded-md px-4 py-2 transition-colors',
+              'relative inline-flex items-center gap-1.5 rounded-md px-4 py-2 transition-colors',
               active
                 ? 'bg-white/25 font-semibold text-white ring-1 ring-white/30'
                 : 'bg-white/10 text-white/80 hover:bg-white/20 hover:text-white',
@@ -71,6 +71,13 @@ export function NavLinks({ role }: { role?: Role }) {
           >
             {Icon ? <Icon aria-hidden className="h-4 w-4" /> : null}
             {label}
+            {/* Sparkly coral "NEW" flag (decorative). Shimmer + twinkle auto-disable under
+                prefers-reduced-motion via the global reset in globals.css. */}
+            {isNew ? (
+              <span className="q-new-badge" aria-hidden="true">
+                NEW
+              </span>
+            ) : null}
           </Link>
         );
       })}
