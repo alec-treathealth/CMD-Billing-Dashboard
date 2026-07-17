@@ -128,3 +128,52 @@
     scroll-behavior: auto !important;
   }
 }
+
+/*
+ * ── Qualify tab (Prompt 3) — rating-bucket status colors + heat washes ──────────────────
+ * The 38/26 RATING cutoffs live in app/lib/qualify/rating.ts (ratingBucket) — the ONE shared
+ * source of truth; this block only PAINTS them. A `.q-<bucket>` class sets --q-c (border / bar /
+ * %-text / dot) and --q-wash (the heat fill), so facility rows, case %-cells, and the legend all
+ * share ONE palette (hexes identical to the tailwind `status.*` scale) — and a case row is tinted
+ * by its PARENT FACILITY's bucket, never its own n=1 raw pct. Namespaced `q-` so nothing here
+ * collides with the Tailwind/shadcn utility layer.
+ */
+.q-ok {
+  --q-c: #2e8b6f;
+  --q-wash: #e6f2ec;
+}
+.q-warn {
+  --q-c: #c9881e;
+  --q-wash: #fbf1de;
+}
+.q-danger {
+  --q-c: #c0453b;
+  --q-wash: #fbe7e4;
+}
+.q-neutral {
+  --q-c: #6b7b79;
+  --q-wash: transparent;
+}
+
+.q-fac {
+  border-left: 4px solid var(--q-c, transparent);
+}
+.q-pct {
+  color: var(--q-c);
+}
+.q-bar > span {
+  background: var(--q-c);
+}
+.q-heat .q-fac {
+  background: linear-gradient(90deg, var(--q-wash), transparent 82%);
+}
+
+.q-pctcell {
+  color: var(--q-c);
+}
+.q-dot {
+  background: var(--q-c);
+}
+.q-heat .q-pctcell {
+  background: var(--q-wash);
+}

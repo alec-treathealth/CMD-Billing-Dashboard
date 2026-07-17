@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "TSX_TSCONFIG_PATH=./tsconfig.test.json node --import tsx --test test/qualify-render.test.tsx"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",

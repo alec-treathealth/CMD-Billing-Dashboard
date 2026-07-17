@@ -77,12 +77,12 @@ const IN = { query: 'AETMEMBER123', windowDays: 30 as const }; // long → membe
 // ── #1 RANK ORDER (silent-bug guard): the ACTION returns facilities in RATING order ──────────────
 test('snapshot: a thin high-pct facility sorts BELOW a solid mid-pct one (rating-ordered, not pct)', async () => {
   const snap = await getQualifySnapshotCore(makeDeps(SUPER, cap()), IN);
-  assert.equal(snap.facilities[0].name, '405 RECOVERY'); // 55%@400 → rating ~52 → rank 1
-  assert.equal(snap.facilities[1].name, 'CA MENTAL HEALTH'); // 60%@3 → rating ~32 → rank 2
+  assert.equal(snap.facilities[0]!.name, '405 RECOVERY'); // 55%@400 → rating ~52 → rank 1
+  assert.equal(snap.facilities[1]!.name, 'CA MENTAL HEALTH'); // 60%@3 → rating ~32 → rank 2
   // The higher RAW pct is the one ranked SECOND — proves the sort is rating, not pctAllowedOfBilled.
-  assert.ok((snap.facilities[1].pctAllowedOfBilled ?? 0) > (snap.facilities[0].pctAllowedOfBilled ?? 0));
-  assert.equal(snap.facilities[0].rank, 1);
-  assert.equal(snap.facilities[1].rank, 2);
+  assert.ok((snap.facilities[1]!.pctAllowedOfBilled ?? 0) > (snap.facilities[0]!.pctAllowedOfBilled ?? 0));
+  assert.equal(snap.facilities[0]!.rank, 1);
+  assert.equal(snap.facilities[1]!.rank, 2);
 });
 
 // ── #2 AMOUNTS wire-level, BOTH actions, BOTH states ─────────────────────────────────────────────

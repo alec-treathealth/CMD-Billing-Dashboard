@@ -1,0 +1,10 @@
+{
+  "//": "Test-runner-only tsconfig. tsx (via TSX_TSCONFIG_PATH in the `test` script) reads this so JSX",
+  "//2": "compiles with the AUTOMATIC runtime (react/jsx-runtime) — matching how Next builds — instead of",
+  "//3": "the classic React.createElement transform esbuild picks from the base config's jsx:preserve.",
+  "//4": "Not used by `next build` or `tsc --noEmit` (both read tsconfig.json), so it changes nothing shipped.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "jsx": "react-jsx"
+  }
+}

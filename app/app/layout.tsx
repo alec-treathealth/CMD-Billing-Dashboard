@@ -88,7 +88,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               link) via useSearchParams, so it must be wrapped in Suspense for the static routes
               (/, /code-reference) this shared layout also renders — same as the switcher below. */}
           <Suspense fallback={null}>
-            <NavLinks />
+            <NavLinks role={role} />
           </Suspense>
           {/* col 3: view switcher (dashboard routes only) + user avatar.
               The ViewSwitcher is NON-PHI UI (it just rewrites ?view=) and renders regardless

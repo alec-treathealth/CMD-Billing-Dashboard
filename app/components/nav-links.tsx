@@ -3,11 +3,14 @@
 import Link from 'next/link';
 import { usePathname, useSearchParams } from 'next/navigation';
 import { BookOpen, type LucideIcon } from 'lucide-react';
+import type { Role } from '@/lib/rbac';
+
+type NavLink = { href: string; label: string; icon?: LucideIcon };
 
 // Overview + Collections are the two tenant-scoped dashboard surfaces, promoted to the top bar
 // (they used to live in a secondary sub-nav). They share the ?view= tenant scope; the rest are
-// global. Order matches the reading flow: Overview → Collections → Claims → reference/agent.
-const LINKS: readonly { href: string; label: string; icon?: LucideIcon }[] = [
+// global. Order matches the reading flow: Overview → Collections → Claims → reference.
+const BASE_LINKS: readonly NavLink[] = [
   { href: '/dashboard', label: 'Overview' },
   { href: '/dashboard/collections', label: 'Collections' },
   // Display label "Claims Audit" (2026-07-15) — the route + internal names stay /billing-audit.
@@ -18,19 +21,36 @@ const LINKS: readonly { href: string; label: string; icon?: LucideIcon }[] = [
   { href: '/code-reference', label: 'Code Reference', icon: BookOpen },
 ];
 
-/** The tenant-scoped routes that carry a ?view= scope; the rest are view-agnostic. Billing
- *  Audit is PHI + tenant-scoped (BXR-only today), so it carries the view like the dashboard. */
+// Qualify (Prompt 3): a CROSS-TENANT admissions surface, NOT ?view=-scoped. It sits between Overview
+// and Collections and is visible only to the two roles that may reach it (super_admin +
+// admissions_seat) — RBAC is still enforced server-side at the route; this only controls the nav.
+const QUALIFY_LINK: NavLink = { href: '/qualify', label: 'Qualify' };
+
+/** The tenant-scoped routes that carry a ?view= scope; the rest are view-agnostic (Qualify included:
+ *  it is cross-tenant and pins its own scope). Billing Audit is PHI + tenant-scoped (BXR-only). */
 const VIEW_SCOPED = new Set<string>(['/dashboard', '/dashboard/collections', '/billing-audit']);
 
-export function NavLinks() {
+/**
+ * The visible top-nav links for a role. admissions_seat is a single-surface persona — it sees ONLY
+ * Qualify (every other route redirects it here anyway, so dead links are hidden). super_admin sees
+ * Qualify plus the standard set; admin / user / unknown see the standard set with NO Qualify entry.
+ */
+function linksFor(role: Role | undefined): NavLink[] {
+  if (role === 'admissions_seat') return [QUALIFY_LINK];
+  if (role === 'super_admin') return [BASE_LINKS[0], QUALIFY_LINK, ...BASE_LINKS.slice(1)];
+  return [...BASE_LINKS];
+}
+
+export function NavLinks({ role }: { role?: Role }) {
   const pathname = usePathname();
   // Carry the active dashboard view (?view=) onto the tenant-scoped links so switching surfaces
   // doesn't reset the scope to Consolidated. The value is canonical on any settled dashboard page
   // (each self-redirects to its clamped view) and re-clamped server-side at the destination.
   const view = useSearchParams().get('view');
+  const links = linksFor(role);
   return (
     <nav className="flex items-center justify-center gap-1 text-[13px] font-medium">
-      {LINKS.map(({ href, label, icon: Icon }) => {
+      {links.map(({ href, label, icon: Icon }) => {
         // '/dashboard' must match EXACTLY — otherwise '/dashboard/collections' (which starts with
         // '/dashboard/') would light up Overview too. Every other link still matches its subroutes.
         const active =
