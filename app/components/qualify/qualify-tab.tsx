@@ -163,7 +163,7 @@ export function QualifyTab({
       {/* page head + color-layer toggle */}
       <div className="flex items-end justify-between gap-5">
         <div>
-          <h1 className="font-head text-2xl font-semibold tracking-tight">Qualify</h1>
+          <h1 className="font-display text-2xl font-semibold tracking-tight">Qualify</h1>
           <p className="mt-0.5 text-sm text-muted-foreground">
             Admissions lead qualification · resolve a payer, read facility performance and recent cases
           </p>

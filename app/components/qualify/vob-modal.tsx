@@ -38,7 +38,7 @@ export function VobModal({
             <AlertTriangle aria-hidden className="h-5 w-5" />
           </div>
           <div>
-            <h3 id="qualify-vob-title" className="font-head text-lg font-semibold">
+            <h3 id="qualify-vob-title" className="font-display text-lg font-semibold">
               No matching cases
             </h3>
             <p className="text-xs text-muted-foreground">

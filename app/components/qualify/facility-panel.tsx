@@ -38,7 +38,7 @@ export function FacilityPanel({
   return (
     <section className="rounded-xl border bg-card shadow-sm">
       <div className="flex items-baseline justify-between px-4 pb-2.5 pt-4">
-        <h2 className="font-head text-base font-semibold">Heating up</h2>
+        <h2 className="font-display text-base font-semibold">Heating up</h2>
         <span className="text-xs font-semibold text-muted-foreground">by reimbursement rating · top 10</span>
       </div>
 
