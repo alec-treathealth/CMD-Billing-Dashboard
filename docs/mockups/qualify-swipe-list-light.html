@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+<title>Swipe list prototype — Qualify (light)</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
+  html, body {
+    margin: 0; padding: 0; background: #FBF8F4;
+    height: 100%; overflow: hidden;
+    overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    letter-spacing: -0.006em;
+  }
+  * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+  #root { min-height: 100vh; overscroll-behavior: none; }
+  input::placeholder { color: #859794; }
+  .ths-h { font-family: 'Space Grotesk', sans-serif; letter-spacing: -0.02em; }
+  .ths-num { font-family: 'Space Grotesk', sans-serif; font-variant-numeric: tabular-nums; font-feature-settings: 'tnum'; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+
+const T = {
+  teal900: '#0E3A3A', teal700: '#135E5A', teal500: '#1C8B82', teal50: '#EAF4F2',
+  coral600: '#E2674F',
+  ground: '#FBF8F4', surface: '#FFFFFF', line: '#E4E9E6',
+  ink900: '#1B2B2A', ink600: '#4A5C5A', ink400: '#859794',
+  gold: '#B8862E',
+  danger: '#C0453B', warn: '#C9881E', ok: '#2E8B6F',
+};
+
+const PRIOR = 30, K = 50;
+function rating(pct, lines) {
+  const n = lines;
+  return (n / (n + K)) * pct + (K / (n + K)) * PRIOR;
+}
+function bucket(r) {
+  if (r < 26) return { c: T.danger, bg: '#FBEAEA', label: 'Weak' };
+  if (r < 38) return { c: T.warn, bg: '#FBF1E0', label: 'Typical' };
+  return { c: T.ok, bg: '#EAF3EE', label: 'Strong' };
+}
+
+const RAW = [
+  { name: 'Mental Health Center of San Diego', pct: 61, lines: 812 },
+  { name: 'Crown View Co-Occurring Institute', pct: 55, lines: 402 },
+  { name: 'Opus Health', pct: 47, lines: 266 },
+  { name: 'My Time Recovery, LLC', pct: 38, lines: 540 },
+  { name: 'Healthy Life Recovery', pct: 19, lines: 301 },
+  { name: 'Silicon Valley Recovery, LLC', pct: 44, lines: 233 },
+  { name: '405 Recovery', pct: 52, lines: 198 },
+  { name: 'Hillside Horizon for Teens', pct: 63, lines: 176 },
+  { name: 'Revival Mental Health', pct: 29, lines: 154 },
+  { name: 'Restored Hope Recovery', pct: 41, lines: 140 },
+  { name: 'Saddleback Recovery', pct: 58, lines: 121 },
+  { name: 'Texas Mental Health Services', pct: 22, lines: 98 },
+  { name: 'Postpartum Mental Health', pct: 49, lines: 87 },
+  { name: 'The Edge Treatment Center', pct: 66, lines: 74 },
+  { name: 'Into the Light', pct: 33, lines: 61 },
+];
+
+const RANKED = RAW.map((f, i) => {
+  const r = rating(f.pct, f.lines);
+  return { ...f, id: 'f' + i, rating: r, bucket: bucket(r) };
+}).sort((a, b) => b.rating - a.rating);
+
+const HEATING_UP = [
+  { payer: 'United Healthcare — GEHA', delta: '+18%', cases: 138 },
+  { payer: 'Anthem Blue Cross CA', delta: '+11%', cases: 94 },
+  { payer: 'Aetna', delta: '+7%', cases: 76 },
+];
+
+function svgIcon(name, size, color) {
+  const s = size || 16, c = color || 'currentColor';
+  const paths = {
+    building: '<path d="M6 22V4a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v18Z"></path><path d="M6 12H4a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h2"></path><path d="M18 9h2a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-2"></path><path d="M10 6h4"></path><path d="M10 10h4"></path><path d="M10 14h4"></path><path d="M10 18h4"></path>',
+    check: '<polyline points="20 6 9 17 4 12"></polyline>',
+    x: '<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>',
+    search: '<circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>',
+    flame: '<path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"></path>',
+    refresh: '<polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>',
+    trend: '<polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline>',
+  };
+  return '<svg width="' + s + '" height="' + s + '" viewBox="0 0 24 24" fill="none" stroke="' + c + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + paths[name] + '</svg>';
+}
+
+const root = document.getElementById('root');
+const VISIBLE_COUNT = 5;
+let queue = [];
+let visible = [];
+
+function resetDeck() {
+  queue = RANKED.slice();
+  visible = queue.splice(0, VISIBLE_COUNT);
+  renderShell();
+}
+
+function renderShell() {
+  root.innerHTML = '';
+
+  const header = document.createElement('div');
+  header.style.cssText = 'position:sticky;top:0;z-index:20;padding:16px 16px 12px;background:' + T.teal900 + ';';
+  header.innerHTML =
+    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">' +
+      '<div style="flex:1">' +
+        '<div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:rgba(255,255,255,0.6)">Qualify</div>' +
+        '<div class="ths-h" style="font-size:18px;font-weight:600;color:#fff;">Lead lookup</div>' +
+      '</div>' +
+      '<button id="resetBtn" style="display:flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:999px;background:rgba(255,255,255,0.1);border:none;color:#fff;font-size:12px;font-weight:600;">' +
+        svgIcon('refresh', 14, '#fff') + '<span>Reset</span>' +
+      '</button>' +
+    '</div>' +
+    '<div style="position:relative;">' +
+      '<div style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:rgba(255,255,255,0.4);">' + svgIcon('search', 16, 'rgba(255,255,255,0.4)') + '</div>' +
+      '<input placeholder="Member ID or 3-letter prefix" style="width:100%;height:40px;padding:0 14px 0 36px;border-radius:12px;border:none;background:rgba(255,255,255,0.12);color:#fff;font-size:14px;outline:none;" />' +
+    '</div>';
+  root.appendChild(header);
+
+  const heating = document.createElement('div');
+  heating.style.cssText = 'padding:14px 16px 4px;';
+  heating.innerHTML =
+    '<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">' +
+      svgIcon('flame', 14, T.gold) +
+      '<span class="ths-h" style="font-size:13px;font-weight:600;color:' + T.ink900 + ';">Heating up</span>' +
+      '<span style="font-size:11px;color:' + T.ink400 + ';margin-left:auto;">last 30 days</span>' +
+    '</div>' +
+    '<div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;">' +
+      HEATING_UP.map(function (m) {
+        return '<div style="flex-shrink:0;padding:8px 12px;border-radius:12px;background:' + T.surface + ';border:0.5px solid ' + T.line + ';">' +
+          '<div style="font-size:12px;font-weight:600;color:' + T.ink900 + ';white-space:nowrap;">' + m.payer + '</div>' +
+          '<div style="margin-top:2px;font-size:11px;color:' + T.ok + ';font-weight:600;">' + m.delta + ' · ' + m.cases + ' cases</div>' +
+        '</div>';
+      }).join('') +
+    '</div>';
+  root.appendChild(heating);
+
+  const listWrap = document.createElement('div');
+  listWrap.id = 'listWrap';
+  listWrap.style.cssText = 'position:relative;padding:12px 16px 24px;display:flex;flex-direction:column;gap:10px;touch-action:pan-y;overscroll-behavior:none;';
+  root.appendChild(listWrap);
+
+  const hint = document.createElement('div');
+  hint.style.cssText = 'text-align:center;font-size:12px;color:' + T.ink400 + ';padding:0 16px 16px;';
+  hint.textContent = 'Swipe left to pass · right for why · tap to open';
+  root.appendChild(hint);
+
+  document.getElementById('resetBtn').addEventListener('click', resetDeck);
+
+  renderList();
+}
+
+function renderList() {
+  const listWrap = document.getElementById('listWrap');
+  listWrap.querySelectorAll('.row, .empty-state').forEach(n => n.remove());
+
+  if (visible.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.style.cssText = 'padding:40px 0;text-align:center;';
+    empty.innerHTML =
+      '<div class="ths-h" style="font-size:14px;font-weight:600;color:' + T.ink900 + ';">That is the list</div>' +
+      '<div style="margin-top:4px;font-size:12px;color:' + T.ink400 + ';">Tap reset to reshuffle</div>';
+    listWrap.appendChild(empty);
+    return;
+  }
+
+  visible.forEach(function (f) {
+    const row = buildRow(f);
+    listWrap.appendChild(row);
+    attachRowDrag(row, f);
+  });
+}
+
+function buildRow(f) {
+  const b = f.bucket;
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.dataset.id = f.id;
+  row.style.cssText =
+    'position:relative;height:84px;border-radius:16px;background:' + T.surface + ';' +
+    'border:0.5px solid ' + T.line + ';border-left:3px solid ' + b.c + ';overflow:hidden;' +
+    'box-shadow:0 1px 2px rgba(27,43,42,0.06);';
+
+  row.innerHTML =
+    '<div class="tint-right" style="position:absolute;inset:0;pointer-events:none;opacity:0;background:' + T.teal50 + ';"></div>' +
+    '<div class="tint-left" style="position:absolute;inset:0;pointer-events:none;opacity:0;background:#F1EFE8;"></div>' +
+    '<div class="stamp-right" style="position:absolute;right:10px;top:50%;transform:translateY(-50%) rotate(-6deg);' +
+      'display:flex;align-items:center;gap:4px;padding:4px 8px;border-radius:6px;border:1.5px solid ' + T.teal700 + ';' +
+      'color:' + T.teal700 + ';font-size:10px;font-weight:700;text-transform:uppercase;opacity:0;pointer-events:none;background:#fff;">' +
+      svgIcon('trend', 11, T.teal700) + '<span>Why</span></div>' +
+    '<div class="stamp-left" style="position:absolute;left:10px;top:50%;transform:translateY(-50%) rotate(6deg);' +
+      'display:flex;align-items:center;gap:4px;padding:4px 8px;border-radius:6px;border:1.5px solid ' + T.ink600 + ';' +
+      'color:' + T.ink600 + ';font-size:10px;font-weight:700;text-transform:uppercase;opacity:0;pointer-events:none;background:#fff;">' +
+      svgIcon('x', 11, T.ink600) + '<span>Pass</span></div>' +
+    '<div class="row-content" style="position:relative;z-index:2;display:flex;align-items:center;gap:12px;height:100%;padding:0 16px;pointer-events:none;">' +
+      '<div style="display:flex;height:36px;width:36px;flex-shrink:0;align-items:center;justify-content:center;border-radius:9px;background:' + b.bg + ';">' +
+        svgIcon('building', 16, b.c) +
+      '</div>' +
+      '<div style="min-width:0;flex:1;">' +
+        '<div class="ths-h" style="font-size:13px;font-weight:600;color:' + T.ink900 + ';line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + f.name + '</div>' +
+        '<div style="margin-top:2px;font-size:11px;color:' + T.ink400 + ';">' + f.lines + ' lines this window</div>' +
+      '</div>' +
+      '<div style="text-align:right;flex-shrink:0;">' +
+        '<div class="ths-num" style="font-size:20px;font-weight:700;color:' + b.c + ';line-height:1;">' + Math.round(f.rating) + '</div>' +
+        '<div style="margin-top:2px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;color:' + b.c + ';">' + b.label + '</div>' +
+      '</div>' +
+    '</div>';
+
+  return row;
+}
+
+function pointFromEvent(e) {
+  if (e.touches && e.touches.length) return { x: e.touches[0].clientX, t: performance.now() };
+  return { x: e.clientX, t: performance.now() };
+}
+
+function attachRowDrag(row, facilityData) {
+  let active = false, startX = 0, startY = 0, dx = 0, lockedHorizontal = false;
+  const history = [];
+
+  const content = row.querySelector('.row-content');
+  const tintR = row.querySelector('.tint-right');
+  const tintL = row.querySelector('.tint-left');
+  const stampR = row.querySelector('.stamp-right');
+  const stampL = row.querySelector('.stamp-left');
+
+  function updateVisuals(x) {
+    content.style.transform = 'translateX(' + x + 'px)';
+    const rightAmt = Math.max(0, Math.min(x / 90, 1));
+    const leftAmt = Math.max(0, Math.min(-x / 90, 1));
+    tintR.style.opacity = rightAmt;
+    tintL.style.opacity = leftAmt;
+    stampR.style.opacity = rightAmt;
+    stampL.style.opacity = leftAmt;
+  }
+
+  function onDown(e) {
+    const p = pointFromEvent(e);
+    startX = p.x; startY = (e.touches ? e.touches[0].clientY : e.clientY);
+    dx = 0; active = true; lockedHorizontal = false;
+    history.length = 0;
+    history.push({ x: p.x, t: p.t });
+    content.style.transition = 'none';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('touchmove', onMove, { passive: false });
+    window.addEventListener('touchend', onUp);
+  }
+
+  function onMove(e) {
+    if (!active) return;
+    const p = pointFromEvent(e);
+    const curY = e.touches ? e.touches[0].clientY : e.clientY;
+    const rawDx = p.x - startX;
+    const rawDy = curY - startY;
+
+    if (!lockedHorizontal) {
+      if (Math.abs(rawDx) < 8 && Math.abs(rawDy) < 8) return;
+      lockedHorizontal = Math.abs(rawDx) > Math.abs(rawDy);
+      if (!lockedHorizontal) { active = false; return; }
+    }
+    if (e.cancelable) e.preventDefault();
+    dx = rawDx;
+    history.push({ x: p.x, t: p.t });
+    if (history.length > 6) history.shift();
+    updateVisuals(dx);
+  }
+
+  function velocity() {
+    if (history.length < 2) return 0;
+    const recent = history[history.length - 1];
+    const prior = history[Math.max(0, history.length - 4)];
+    const dt = recent.t - prior.t;
+    if (dt <= 0) return 0;
+    return (recent.x - prior.x) / dt;
+  }
+
+  function onUp() {
+    if (!active) { cleanup(); return; }
+    active = false;
+    cleanup();
+    if (!lockedHorizontal) return;
+
+    const v = velocity();
+    const DIST_THRESHOLD = 85;
+    const VELOCITY_THRESHOLD = 0.5;
+    const shouldResolve = Math.abs(dx) > DIST_THRESHOLD || Math.abs(v) > VELOCITY_THRESHOLD;
+
+    if (shouldResolve) {
+      const goingRight = dx > 0 || (dx === 0 && v > 0);
+      resolveRow(goingRight, v);
+    } else if (Math.abs(dx) < 5) {
+      openFacility(facilityData);
+      springBack();
+    } else {
+      springBack();
+    }
+  }
+
+  function cleanup() {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('touchmove', onMove);
+    window.removeEventListener('touchend', onUp);
+  }
+
+  function springBack() {
+    content.style.transition = 'transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)';
+    content.style.transform = 'translateX(0px)';
+    [tintR, tintL, stampR, stampL].forEach(function (el) {
+      el.style.transition = 'opacity 0.2s ease-out';
+      el.style.opacity = 0;
+    });
+  }
+
+  function resolveRow(goingRight, v) {
+    const speed = Math.max(Math.abs(v), 0.35);
+    const duration = Math.max(160, Math.min(300, 240 - speed * 100));
+    const exitDistance = window.innerWidth * 1.2 * (goingRight ? 1 : -1);
+
+    content.style.transition = 'transform ' + duration + 'ms cubic-bezier(0.22, 1, 0.36, 1)';
+    content.style.transform = 'translateX(' + exitDistance + 'px)';
+    row.style.transition = 'max-height ' + (duration + 80) + 'ms ease-in, opacity ' + (duration + 80) + 'ms ease-in, margin-bottom ' + (duration + 80) + 'ms ease-in';
+    row.style.pointerEvents = 'none';
+
+    setTimeout(function () {
+      row.style.maxHeight = '84px';
+      row.offsetHeight;
+      row.style.overflow = 'hidden';
+      row.style.maxHeight = '0px';
+      row.style.opacity = '0';
+      row.style.marginBottom = '-10px';
+    }, duration * 0.4);
+
+    setTimeout(function () {
+      if (goingRight) {
+        showTrendDetails(facilityData, function () { advanceQueue(facilityData.id); });
+      } else {
+        advanceQueue(facilityData.id);
+      }
+    }, duration + 100);
+  }
+
+  row.addEventListener('pointerdown', onDown);
+  row.addEventListener('touchstart', onDown, { passive: true });
+}
+
+function advanceQueue(resolvedId) {
+  visible = visible.filter(function (f) { return f.id !== resolvedId; });
+  if (queue.length > 0) {
+    visible.push(queue.shift());
+  }
+  renderList();
+}
+
+function showTrendDetails(f, onClose) {
+  const b = f.bucket;
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:50;background:rgba(27,43,42,0.45);display:flex;align-items:flex-end;';
+  const sheet = document.createElement('div');
+  sheet.style.cssText = 'width:100%;background:' + T.surface + ';border-radius:20px 20px 0 0;padding:20px;color:' + T.ink900 + ';';
+  sheet.innerHTML =
+    '<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:' + T.ink400 + ';">Why is this rated ' + Math.round(f.rating) + '?</div>' +
+    '<div class="ths-h" style="margin-top:4px;font-size:16px;font-weight:600;color:' + T.ink900 + ';">' + f.name + '</div>' +
+    '<div style="margin-top:16px;display:flex;flex-direction:column;gap:10px;">' +
+      '<div style="display:flex;justify-content:space-between;font-size:13px;">' +
+        '<span style="color:' + T.ink600 + ';">Raw allowed / billed</span><span class="ths-num" style="font-weight:600;color:' + T.ink900 + ';">' + f.pct + '%</span></div>' +
+      '<div style="display:flex;justify-content:space-between;font-size:13px;">' +
+        '<span style="color:' + T.ink600 + ';">Claim lines this window</span><span class="ths-num" style="font-weight:600;color:' + T.ink900 + ';">' + f.lines + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between;font-size:13px;">' +
+        '<span style="color:' + T.ink600 + ';">Confidence adjustment</span><span style="font-weight:600;color:' + T.ink900 + ';">' + (f.lines >= 200 ? 'Minimal (high volume)' : 'Shrunk toward book average') + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between;font-size:13px;border-top:0.5px solid ' + T.line + ';padding-top:10px;">' +
+        '<span style="color:' + T.ink600 + ';">Rating</span><span class="ths-num" style="font-weight:700;color:' + b.c + ';">' + Math.round(f.rating) + ' · ' + f.bucket.label + '</span></div>' +
+    '</div>' +
+    '<button id="closeTrend" style="margin-top:20px;width:100%;height:40px;border-radius:10px;border:0.5px solid ' + T.line + ';background:' + T.surface + ';color:' + T.ink900 + ';font-weight:600;">Close</button>';
+  overlay.appendChild(sheet);
+  root.appendChild(overlay);
+
+  function close() { overlay.remove(); if (onClose) onClose(); }
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+  sheet.querySelector('#closeTrend').addEventListener('click', close);
+}
+
+function openFacility(f) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:50;background:rgba(27,43,42,0.45);display:flex;align-items:flex-end;';
+  const sheet = document.createElement('div');
+  sheet.style.cssText = 'width:100%;background:' + T.surface + ';border-radius:20px 20px 0 0;padding:20px;color:' + T.ink900 + ';';
+  sheet.innerHTML =
+    '<div class="ths-h" style="font-size:16px;font-weight:600;color:' + T.ink900 + ';">' + f.name + '</div>' +
+    '<div style="margin-top:6px;font-size:13px;color:' + T.ink600 + ';">Full detail: recent claims for this payer would render here.</div>' +
+    '<button id="closeSheet" style="margin-top:16px;width:100%;height:40px;border-radius:10px;border:0.5px solid ' + T.line + ';background:' + T.surface + ';color:' + T.ink900 + ';font-weight:600;">Close</button>';
+  overlay.appendChild(sheet);
+  root.appendChild(overlay);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) overlay.remove(); });
+  sheet.querySelector('#closeSheet').addEventListener('click', function () { overlay.remove(); });
+}
+
+resetDeck();
+
+</script>
+</body>
+</html>
