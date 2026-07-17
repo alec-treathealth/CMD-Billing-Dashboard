@@ -18,6 +18,8 @@ import {
   type ManagedUserDto,
 } from '@/lib/admin-actions';
 import type { AppEntity, AppRole } from '@/lib/server';
+import { entityAfterRoleChange, entityForSubmit, isEntityLessRole } from '@/lib/admin/user-form';
+import { ENTITY_LABEL, EntityCell, SELECT_CLASS } from '@/components/admin/entity-cell';
 
 const ROLE_LABEL: Record<AppRole, string> = {
   super_admin: 'Super Admin',
@@ -25,10 +27,6 @@ const ROLE_LABEL: Record<AppRole, string> = {
   user: 'User',
   admissions_seat: 'Admissions Seat',
 };
-const ENTITY_LABEL: Record<AppEntity, string> = { bxr: 'BXR', indigo: 'Indigo' };
-
-const SELECT_CLASS =
-  'h-8 rounded-md border border-line bg-card px-2 text-[13px] text-ink900 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-accent)]';
 
 /** Per-row editable state: '' represents "no role / no entity" (unprovisioned, or N/A for super_admin). */
 interface Draft {
@@ -65,8 +63,8 @@ export function UserManager({ initial }: { initial: ManageContext }) {
       setInviteMsg({ kind: 'err', text: 'Enter an email address.' });
       return;
     }
-    const entity = inviteRole === 'super_admin' ? null : ((inviteEntity || null) as AppEntity | null);
-    if (inviteRole !== 'super_admin' && !entity) {
+    const entity = entityForSubmit(inviteRole, inviteEntity);
+    if (!isEntityLessRole(inviteRole) && !entity) {
       setInviteMsg({ kind: 'err', text: 'Choose an entity for this role.' });
       return;
     }
@@ -90,10 +88,10 @@ export function UserManager({ initial }: { initial: ManageContext }) {
   function patchDraft(userId: string, patch: Partial<Draft>) {
     setDrafts((prev) => {
       const next: Draft = { ...prev[userId]!, ...patch };
-      // Coherence in the UI: super_admin carries no entity; a freshly-chosen entity role gets a default.
+      // Coherence in the UI: entity-less roles (super_admin, admissions_seat) carry no entity, and any
+      // stale selection is dropped on the switch; a freshly-chosen entity role gets a default.
       if (patch.role !== undefined) {
-        if (patch.role === 'super_admin') next.entity = '';
-        else if (patch.role !== '' && next.entity === '') next.entity = assignableEntities[0] ?? '';
+        next.entity = entityAfterRoleChange(patch.role, next.entity, assignableEntities[0] ?? '');
       }
       return { ...prev, [userId]: next };
     });
@@ -107,7 +105,7 @@ export function UserManager({ initial }: { initial: ManageContext }) {
   function canSave(u: ManagedUserDto): boolean {
     const d = drafts[u.userId]!;
     if (!isDirty(u) || d.role === '') return false;
-    return d.role === 'super_admin' || d.entity !== '';
+    return isEntityLessRole(d.role) || d.entity !== '';
   }
 
   function applyResult(userId: string, role: AppRole | null, entity: AppEntity | null) {
@@ -119,7 +117,7 @@ export function UserManager({ initial }: { initial: ManageContext }) {
     const d = drafts[u.userId]!;
     if (d.role === '') return;
     const role = d.role;
-    const entity = role === 'super_admin' ? null : (d.entity || null) as AppEntity | null;
+    const entity = entityForSubmit(role, d.entity);
     setPendingId(u.userId);
     setRowMsg((m) => ({ ...m, [u.userId]: undefined as never }));
     startTransition(async () => {
@@ -181,7 +179,12 @@ export function UserManager({ initial }: { initial: ManageContext }) {
                 value={inviteRole}
                 disabled={inviting}
                 aria-label="Invite role"
-                onChange={(e) => setInviteRole(e.target.value as AppRole)}
+                onChange={(e) => {
+                  const nextRole = e.target.value as AppRole;
+                  setInviteRole(nextRole);
+                  // Keep the entity coherent with the new role (clears it for entity-less roles).
+                  setInviteEntity((prev) => entityAfterRoleChange(nextRole, prev, assignableEntities[0] ?? ''));
+                }}
                 className={`${SELECT_CLASS} font-normal normal-case`}
               >
                 {assignableRoles.map((r) => (
@@ -193,23 +196,15 @@ export function UserManager({ initial }: { initial: ManageContext }) {
             </label>
             <label className="flex flex-col gap-1 text-[11px] font-semibold uppercase tracking-wide text-ink400">
               Entity
-              <select
-                value={inviteRole === 'super_admin' ? '' : inviteEntity}
-                disabled={inviting || inviteRole === 'super_admin'}
-                aria-label="Invite entity"
-                onChange={(e) => setInviteEntity(e.target.value as AppEntity | '')}
+              <EntityCell
+                role={inviteRole}
+                entity={inviteEntity}
+                assignableEntities={assignableEntities}
+                disabled={inviting}
+                ariaLabel="Invite entity"
                 className={`${SELECT_CLASS} font-normal normal-case`}
-              >
-                {inviteRole === 'super_admin' ? (
-                  <option value="">—</option>
-                ) : (
-                  assignableEntities.map((en) => (
-                    <option key={en} value={en}>
-                      {ENTITY_LABEL[en]}
-                    </option>
-                  ))
-                )}
-              </select>
+                onChange={(entity) => setInviteEntity(entity)}
+              />
             </label>
             <Button type="button" size="sm" disabled={inviting} onClick={onInvite}>
               {inviting ? 'Inviting…' : 'Invite user'}
@@ -285,25 +280,14 @@ export function UserManager({ initial }: { initial: ManageContext }) {
                   {/* Entity */}
                   <TableCell>
                     {u.editable ? (
-                      <select
-                        className={SELECT_CLASS}
-                        value={d.entity}
-                        aria-label={`Entity for ${u.email}`}
-                        disabled={busy || d.role === 'super_admin' || d.role === ''}
-                        onChange={(e) =>
-                          patchDraft(u.userId, { entity: e.target.value as AppEntity | '' })
-                        }
-                      >
-                        {d.role === 'super_admin' || d.role === '' ? (
-                          <option value="">—</option>
-                        ) : (
-                          assignableEntities.map((en) => (
-                            <option key={en} value={en}>
-                              {ENTITY_LABEL[en]}
-                            </option>
-                          ))
-                        )}
-                      </select>
+                      <EntityCell
+                        role={d.role}
+                        entity={d.entity}
+                        assignableEntities={assignableEntities}
+                        disabled={busy}
+                        ariaLabel={`Entity for ${u.email}`}
+                        onChange={(entity) => patchDraft(u.userId, { entity })}
+                      />
                     ) : (
                       <span className="text-sm text-ink900">{u.entity ? ENTITY_LABEL[u.entity] : '—'}</span>
                     )}
