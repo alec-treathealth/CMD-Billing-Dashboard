@@ -7,12 +7,24 @@
  * PHI. The page only frames the reference with the standard TreatHealthOS chrome.
  */
 import type { Metadata } from 'next';
+import { redirect } from 'next/navigation';
 import { Info } from 'lucide-react';
 import { CodeReference } from '@/components/code-reference';
+import { dashboardAccess } from '@/lib/access';
+import { isQualifyOnlyRole, QUALIFY_HOME } from '@/lib/rbac';
 
 export const metadata: Metadata = { title: 'Behavioral Health Code Reference | TreatHealthOS' };
 
-export default function CodeReferencePage() {
+// Force per-request render so the admissions_seat route guard ALWAYS runs. Without this, the page
+// (no searchParams; dashboardAccess short-circuits cookies() when auth env is absent at build) can
+// prerender to STATIC and be served without the guard — the guard is a security control, not optional.
+export const dynamic = 'force-dynamic';
+
+export default async function CodeReferencePage() {
+  // This static, non-PHI page stays open to every provisioned role (middleware handles auth) — the
+  // ONLY added gate is the admissions_seat block: it sees ONLY Qualify, so redirect it, server-side.
+  const access = await dashboardAccess();
+  if (access.ok && isQualifyOnlyRole(access.access.role)) redirect(QUALIFY_HOME);
   return (
     <main className="mx-auto max-w-7xl space-y-6 p-6 sm:p-10">
       <header>

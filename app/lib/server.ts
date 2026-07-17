@@ -102,6 +102,19 @@ export type {
   CohortDrilldownTable,
   CohortDrilldownResult,
 } from '../../src/collections/cmdExplorerQuery.js';
+import {
+  buildResolvePayerQuery,
+  buildFacilityRankingQuery,
+  buildCasesQuery,
+  buildMoversQuery,
+} from '../../src/collections/qualifyQuery.js';
+import type {
+  QualifyMatchKind,
+  QualifyResolvePayerRow,
+  QualifyFacilityRow,
+  QualifyCaseRow,
+  QualifyMoverRow,
+} from '../../src/collections/qualifyQuery.js';
 import type {
   ClaimFilter,
   DistributionField,
@@ -244,7 +257,7 @@ export async function recordAccess(entry: AccessAuditEntry): Promise<string> {
 // constraints already bound role/entity to the known values; we re-narrow here so an unexpected
 // value fails closed to null rather than widening access.
 // ---------------------------------------------------------------------------
-export type AppRole = 'super_admin' | 'admin' | 'user';
+export type AppRole = 'super_admin' | 'admin' | 'user' | 'admissions_seat';
 export type AppEntity = 'bxr' | 'indigo';
 
 export interface AppUserRow {
@@ -256,7 +269,9 @@ export interface AppUserRow {
 }
 
 function narrowRole(role: string | null): AppRole | null {
-  return role === 'super_admin' || role === 'admin' || role === 'user' ? role : null;
+  return role === 'super_admin' || role === 'admin' || role === 'user' || role === 'admissions_seat'
+    ? role
+    : null;
 }
 function narrowEntity(entity: string | null): AppEntity | null {
   return entity === 'bxr' || entity === 'indigo' ? entity : null;
@@ -1583,6 +1598,9 @@ export async function revealCmdExplorerRow(
   id: number,
   actor: { email: string; userId: string },
   entityIds: string[],
+  // Audit action label; defaults to the collections surface. The Qualify reveal passes
+  // 'reveal_qualify_row' so the audit trail distinguishes the two surfaces (same audited-decrypt path).
+  action = 'reveal_cmd_explorer_row',
 ): Promise<CmdExplorerPhi | null> {
   const { rows } = await readerExecutor().query<{
     patient_name: Buffer;
@@ -1604,7 +1622,7 @@ export async function revealCmdExplorerRow(
   await recordAccess({
     actorEmail: actor.email,
     actorUserId: actor.userId,
-    action: 'reveal_cmd_explorer_row',
+    action,
     detail: { id }, // non-PHI synthetic id only — never the values
   });
   return { patient_name, member_id_raw, group_number };
@@ -1629,6 +1647,8 @@ export async function revealCmdExplorerRows(
   ids: number[],
   actor: { email: string; userId: string },
   entityIds: string[],
+  // Audit action label; Qualify passes 'reveal_qualify_rows' (default is the collections surface).
+  action = 'reveal_cmd_explorer_rows',
 ): Promise<CmdExplorerRevealedRow[]> {
   if (ids.length === 0) return [];
   const { rows } = await readerExecutor().query<{
@@ -1655,7 +1675,7 @@ export async function revealCmdExplorerRows(
   await recordAccess({
     actorEmail: actor.email,
     actorUserId: actor.userId,
-    action: 'reveal_cmd_explorer_rows',
+    action,
     detail: { count: out.length, ids: out.map((o) => o.id) },
   });
   return out;
@@ -1726,4 +1746,62 @@ export async function revealClaimById(
     { executor: readerExecutor(), createdBy: 'claim-detail-reveal' },
   );
   return { query_id, summary_stats };
+}
+
+// ---------------------------------------------------------------------------
+// Qualify read layer (data loaders). Execute the pure builders in src/collections/qualifyQuery on the
+// least-privilege claims_reader pool. The CROSS-TENANT [BXR, Indigo] scope is supplied by the caller
+// (requireQualifyPrincipal), never derived here; the builders re-assert it via assertEntityScope.
+// These return RAW rows — the action layer (app/lib/qualify/actions.ts) computes rating/rank, attaches
+// city/state, shapes the contract, and strips dollars for admissions_seat. Not cached in v1
+// (per-search, low volume); the search audit + gate live in the action and run on every call.
+// ---------------------------------------------------------------------------
+
+/** Dominant payer for a member/prefix blind-index token (UNWINDOWED identity). null = never-seen id. */
+export async function resolveQualifyPayer(
+  token: string,
+  kind: QualifyMatchKind,
+  entityIds: string[],
+): Promise<string | null> {
+  const q = buildResolvePayerQuery(token, kind, entityIds);
+  const { rows } = await readerExecutor().query<QualifyResolvePayerRow>(q.sql, q.params);
+  return rows[0]?.primary_payer ?? null;
+}
+
+/** Per-facility dollar-weighted ranking rows for a resolved payer, in-window, cross-tenant. */
+export async function loadQualifyFacilities(
+  payer: string,
+  from: string,
+  to: string,
+  entityIds: string[],
+): Promise<QualifyFacilityRow[]> {
+  const q = buildFacilityRankingQuery(payer, from, to, entityIds);
+  const { rows } = await readerExecutor().query<QualifyFacilityRow>(q.sql, q.params);
+  return rows;
+}
+
+/** 15 most-recent DISTINCT patients for a resolved payer, in-window, cross-tenant (masked; reveal via id). */
+export async function loadQualifyCases(
+  payer: string,
+  from: string,
+  to: string,
+  entityIds: string[],
+): Promise<QualifyCaseRow[]> {
+  const q = buildCasesQuery(payer, from, to, entityIds);
+  const { rows } = await readerExecutor().query<QualifyCaseRow>(q.sql, q.params);
+  // bigint `id` (array_agg of the latest snapshot's row id) comes back as a string from pg → coerce.
+  return rows.map((r) => ({ ...r, id: Number(r.id) }));
+}
+
+/** Top PAYER movers by distinct-patient delta across two adjacent windows, cross-tenant. */
+export async function loadQualifyMovers(
+  thisFrom: string,
+  thisTo: string,
+  priorFrom: string,
+  priorTo: string,
+  entityIds: string[],
+): Promise<QualifyMoverRow[]> {
+  const q = buildMoversQuery(thisFrom, thisTo, priorFrom, priorTo, entityIds);
+  const { rows } = await readerExecutor().query<QualifyMoverRow>(q.sql, q.params);
+  return rows;
 }

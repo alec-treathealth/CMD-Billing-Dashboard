@@ -16,6 +16,7 @@ import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice
 import { dashboardAccess } from '@/lib/access';
 import { listGridViews, loadCmdReport } from '@/lib/actions';
 import { clampView, resolveView } from '@/lib/views';
+import { isQualifyOnlyRole, QUALIFY_HOME } from '@/lib/rbac';
 
 export const metadata: Metadata = { title: 'Collections | CMD Billing' };
 
@@ -29,6 +30,8 @@ export default async function CollectionsPage({
     if (access.reason === 'unauthenticated') redirect('/login');
     return <UnprovisionedNotice email={access.user.email} />;
   }
+  // admissions_seat sees ONLY Qualify — block direct-URL access to every other route, server-side.
+  if (isQualifyOnlyRole(access.access.role)) redirect(QUALIFY_HOME);
   // Fail closed: a provisioned role entitled to NO views (entity-scoped role with a null
   // entity — forbidden by the app_user CHECK) must not fall through to clampView's
   // consolidated (cross-tenant) default. Treat it as unprovisioned.

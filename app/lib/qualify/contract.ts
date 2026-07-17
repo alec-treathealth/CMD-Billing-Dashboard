@@ -1,0 +1,130 @@
+/**
+ * Qualify SHARED CONTRACT — the single source of truth for the types + pure helpers that the desktop
+ * tab (Prompt 3) and the mobile PWA (Prompt 4) consume IDENTICALLY, and that the server actions
+ * (actions.ts) produce. This module is NOT 'use server' (such a module may export only async
+ * functions) and imports nothing server-only, so both client surfaces can import these types and the
+ * window math. Semantics are frozen (Prompt 2); adjust field names only with sign-off.
+ */
+
+export type QualifyWindowDays = 7 | 14 | 30 | 60 | 90;
+export const QUALIFY_WINDOW_OPTIONS: readonly QualifyWindowDays[] = [7, 14, 30, 60, 90];
+const WINDOW_SET: ReadonlySet<number> = new Set(QUALIFY_WINDOW_OPTIONS);
+export function isQualifyWindow(n: unknown): n is QualifyWindowDays {
+  return typeof n === 'number' && WINDOW_SET.has(n);
+}
+
+export interface QualifyInput {
+  query: string; // member ID OR alpha prefix — sniffed SERVER-SIDE
+  windowDays: QualifyWindowDays;
+}
+
+/** member-id EXACT vs 3-letter alpha-PREFIX — sniffed SERVER-SIDE, never client-declared. */
+export type QualifyMatchKind = 'member_id' | 'prefix';
+/** <=3 chars ⇒ alpha-prefix, else exact member-id (the searchAuditPatients precedent). Pure. */
+export function sniffQualifyKind(query: string): QualifyMatchKind {
+  return query.trim().length <= 3 ? 'prefix' : 'member_id';
+}
+
+export interface QualifyResolved {
+  payerName: string;
+  matchedOn: QualifyMatchKind;
+  /** Non-PHI alpha-prefix echo (<=3 chars). NEVER the raw member id — the client echoes its own input. */
+  matchedValue: string;
+  totalCharges: number; // logical charges (rollup grain) for the resolved payer, in-window
+  facilityCount: number;
+  windowStart: string; // ISO date (inclusive)
+  windowEnd: string; // ISO date (exclusive)
+}
+
+export interface QualifyFacility {
+  /** 1-based rank over the single cross-tenant list, ORDERED BY `rating` desc (ruling Q-G) — NOT by
+   *  pctAllowedOfBilled. Do not "fix" the sort to pct: rating is the sort key, pct is a displayed value. */
+  rank: number;
+  name: string;
+  city: string | null; // facility-location lookup; null when unmapped (new/unlisted facility) — never fabricated
+  state: string | null;
+  /** Dollar-weighted allowed/billed, 0-100. null only if the guarded denominator collapses (rare). */
+  pctAllowedOfBilled: number | null;
+  /** Volume-dampened rating (rating.ts) — the SORT key AND badge-color source. null → neutral badge. */
+  rating: number | null;
+  /** v1: ALWAYS null (ruling Q-E; the 0050 rollup can't back a faithful monthly trend). No badge. */
+  streakSignal: number | null;
+  billedAmount: number | null; // null unless viewerHasAmountsCapability (stripped server-side)
+  allowedAmount: number | null;
+  lineCount: number; // logical charge lines (rating weight; non-dollar)
+}
+
+export interface QualifyCase {
+  id: number; // rollup id of the patient's most-recent charge — drives the audited reveal
+  memberIdMasked: string; // '••••••' until an audited reveal (revealQualifyRow); standard PHI cell
+  facilityName: string;
+  program: 'IP' | 'OP' | 'BOTH' | null; // := care_setting; null when the facility text is unresolved
+  lastDos: string | null; // ISO date, display only
+  pctAllowedOfBilled: number | null;
+  billedAmount: number | null;
+  allowedAmount: number | null;
+}
+
+export const QUALIFY_TENANT_SCOPE = 'cross-tenant-bxr-indigo' as const;
+export const QUALIFY_MEMBER_ID_MASK = '••••••';
+
+export interface QualifySnapshot {
+  /** null ⇒ never-seen-this-identifier (VOB path). A non-null resolved with facilities:[] is the
+   *  distinct "payer has no facilities in this window" state — frontends key VOB off resolved===null. */
+  resolved: QualifyResolved | null;
+  facilities: QualifyFacility[];
+  cases: QualifyCase[];
+  viewerHasAmountsCapability: boolean; // === (role !== 'admissions_seat')
+  tenantScope: typeof QUALIFY_TENANT_SCOPE; // always the literal — impossible to forget
+}
+
+export interface QualifyMover {
+  rank: number;
+  label: string; // dominant/plaintext primary_payer (non-PHI); taps into the primary_payers filter
+  thisWindowPatients: number;
+  priorWindowPatients: number;
+  deltaPatients: number; // signed (this - prior); list is gainers-first
+  deltaPct: number | null; // null when priorWindowPatients === 0 (a NEW payer)
+}
+
+export interface QualifyMovers {
+  windowStart: string;
+  windowEnd: string;
+  priorWindowStart: string;
+  priorWindowEnd: string;
+  movers: QualifyMover[];
+  viewerHasAmountsCapability: boolean; // movers carries NO dollar fields in v1 — informational
+  tenantScope: typeof QUALIFY_TENANT_SCOPE;
+}
+
+/** PHI unmasked by an audited Qualify reveal (mirrors the collections CmdExplorerPhi shape exactly —
+ *  all three are nullable: decryptPhi returns null for an absent ciphertext). */
+export interface QualifyPhi {
+  patient_name: string | null;
+  member_id_raw: string | null;
+  group_number: string | null;
+}
+export type RevealQualifyRowResult = { ok: true; phi: QualifyPhi } | { ok: false; error: string };
+export interface QualifyRevealedRow extends QualifyPhi {
+  id: number;
+}
+export type RevealQualifyRowsResult = { ok: true; rows: QualifyRevealedRow[] } | { ok: false; error: string };
+
+/**
+ * SERVER-CLOCK window bounds. this=[from,to) is `windowDays` days ending today (today included);
+ * prior=[priorFrom,priorTo) is the adjacent equal-length window. All UTC ISO dates. `today`
+ * is injectable so the math is unit-testable without a live clock.
+ */
+export function qualifyWindowBounds(
+  windowDays: number,
+  today: Date,
+): { from: string; to: string; priorFrom: string; priorTo: string } {
+  const shift = (base: Date, days: number) =>
+    new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate() + days));
+  const iso = (x: Date) => x.toISOString().slice(0, 10);
+  const to = shift(today, 1); // exclusive upper = tomorrow, so all of today is in-window
+  const from = shift(today, -(windowDays - 1)); // inclusive lower → exactly windowDays days
+  const priorTo = from; // adjacent, non-overlapping
+  const priorFrom = shift(from, -windowDays);
+  return { from: iso(from), to: iso(to), priorFrom: iso(priorFrom), priorTo: iso(priorTo) };
+}

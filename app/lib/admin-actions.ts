@@ -31,8 +31,12 @@ import type { Entity, Role } from '@/lib/rbac';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const ROLES: readonly AppRole[] = ['super_admin', 'admin', 'user'];
+const ROLES: readonly AppRole[] = ['super_admin', 'admin', 'user', 'admissions_seat'];
 const ENTITIES: readonly AppEntity[] = ['bxr', 'indigo'];
+
+// Roles that can be a MANAGER (caller of these actions). admissions_seat + user have
+// canManageUsers=false, so they can never reach past requireManage — the type excludes them.
+type ManagerRole = Exclude<Role, 'user' | 'admissions_seat'>;
 
 export interface ManagedUserDto extends ManagedUser {
   /** Whether the CURRENT caller may edit this row (UI affordance; the action re-checks server-side). */
@@ -40,7 +44,7 @@ export interface ManagedUserDto extends ManagedUser {
 }
 
 export interface ManageContext {
-  callerRole: Exclude<Role, 'user'>;
+  callerRole: ManagerRole;
   callerEntity: Entity | null;
   callerUserId: string;
   /** Entities this caller may assign (all for super_admin; just their own for an entity admin). */
@@ -56,7 +60,7 @@ export type InviteUserResult = { ok: true; user: ManagedUserDto } | { ok: false;
 
 interface ManageGate {
   user: ExecutiveUser;
-  role: Exclude<Role, 'user'>;
+  role: ManagerRole;
   entity: Entity | null;
 }
 
@@ -73,7 +77,15 @@ async function requireManage(): Promise<{ ok: true; gate: ManageGate } | { ok: f
     };
   }
   const { access } = result;
-  if (!access.user || !access.canManageUsers || access.role === 'user') {
+  // canManageUsers is the semantic gate (super_admin|admin); the explicit role checks also NARROW
+  // access.role to ManagerRole for the type system (a non-manager role — user or admissions_seat —
+  // must never become gate.role).
+  if (
+    !access.user ||
+    !access.canManageUsers ||
+    access.role === 'user' ||
+    access.role === 'admissions_seat'
+  ) {
     return { ok: false, error: 'You do not have permission to manage users.' };
   }
   return { ok: true, gate: { user: access.user, role: access.role, entity: access.entity } };
@@ -88,14 +100,15 @@ function inScope(gate: ManageGate, target: ManagedUser): boolean {
 
 /** May the caller assign this (role, entity) combination? */
 function canAssign(gate: ManageGate, role: AppRole, entity: AppEntity | null): boolean {
-  // Coherence first: super_admin has no entity; admin/user require one.
-  const coherent =
-    (role === 'super_admin' && entity === null) ||
-    (role !== 'super_admin' && entity !== null);
+  // Coherence first: entity-less roles (super_admin, admissions_seat) take NO entity; admin/user
+  // require one. Mirrors the DB app_user_role_entity_ck + upsert_app_user checks (migrations 0025/0055).
+  const entityLess = role === 'super_admin' || role === 'admissions_seat';
+  const coherent = (entityLess && entity === null) || (!entityLess && entity !== null);
   if (!coherent) return false;
   if (gate.role === 'super_admin') return true;
-  // Entity admin: only admin/user within their OWN entity.
-  return role !== 'super_admin' && entity === gate.entity;
+  // Entity admin: only admin/user within their OWN entity — never super_admin, never admissions_seat
+  // (admissions_seat is cross-tenant and provisioned by super_admins only).
+  return (role === 'admin' || role === 'user') && entity === gate.entity;
 }
 
 function toDto(gate: ManageGate, u: ManagedUser): ManagedUserDto {

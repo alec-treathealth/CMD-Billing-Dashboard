@@ -42,6 +42,11 @@ export async function resolveVerisAccess(requestedView?: DashboardView): Promise
   // grants nothing on the PHI plane.
   if (!access.user) return { ok: false, reason: 'unauthenticated' };
 
+  // admissions_seat is a Qualify (collections-plane) role, NOT a Veris/staging tenant role — it never
+  // resolves to a staging.* tenant scope. Fail closed here (and narrow access.role to VerisRole). The
+  // Veris claims plane is paused regardless; admissions_seat has no business on it.
+  if (access.role === 'admissions_seat') return { ok: false, reason: 'no_tenant' };
+
   const resolved = resolveVerisScope(access.role, access.entity, requestedView);
   if (!resolved.ok) return { ok: false, reason: 'no_tenant' };
 

@@ -7,14 +7,18 @@
  * The actual session resolution + DB lookup lives in `access.ts` (impure); the row shape comes from
  * `server.ts` (`AppUserRow`). Keep policy HERE so there is one place to reason about "who can do what".
  *
- * Roles (migration 0025):
+ * Roles (migrations 0025, 0055):
  *   • super_admin        — all three views; may reveal PHI; may manage users.
  *   • admin   + entity   — that entity's view only; may reveal PHI; may manage users.
  *   • user    + entity   — that entity's view only; NON-PHI only (no PHI reveal, no user mgmt).
+ *   • admissions_seat    — NO dashboard views (Qualify tab ONLY, nav/route enforced in app code);
+ *                          entity-less (cross-tenant); MAY reveal PHI (audited, on Qualify);
+ *                          may NOT manage users. Amounts-gating is handled in the Qualify contract
+ *                          (viewerHasAmountsCapability = role !== 'admissions_seat'), not here.
  */
 import { ALL_VIEWS, type DashboardView } from './views';
 
-export type Role = 'super_admin' | 'admin' | 'user';
+export type Role = 'super_admin' | 'admin' | 'user' | 'admissions_seat';
 export type Entity = 'bxr' | 'indigo';
 
 /** The view an entity maps to (1:1 today). */
@@ -33,16 +37,35 @@ const ENTITY_VIEW: Record<Entity, DashboardView> = {
  */
 export function allowedViewsFor(role: Role, entity: Entity | null): DashboardView[] {
   if (role === 'super_admin') return [...ALL_VIEWS];
+  // admissions_seat sees NO dashboard views — its only surface is the cross-tenant Qualify tab
+  // (nav + route enforced in app code; scope pinned by requireQualifyPrincipal). It is deliberately
+  // NOT view-scoped, so it must never fall through to an entity/default view.
+  if (role === 'admissions_seat') return [];
   if (entity) return [ENTITY_VIEW[entity]];
   return [];
 }
 
-/** Admins and super-admins may unmask patient identifiers; plain users may not. */
+/**
+ * Who may unmask patient identifiers. super_admin + admin (dashboard), and admissions_seat (Qualify:
+ * masked-by-default with an audited reveal, per ruling R-PHI). Plain `user` may not.
+ */
 export function canRevealPhi(role: Role): boolean {
-  return role === 'super_admin' || role === 'admin';
+  return role === 'super_admin' || role === 'admin' || role === 'admissions_seat';
 }
 
 /** Admins and super-admins may provision/manage users (in-app UI deferred). */
 export function canManageUsers(role: Role): boolean {
   return role === 'super_admin' || role === 'admin';
+}
+
+/** Where an admissions_seat is sent when it hits any non-Qualify protected route. */
+export const QUALIFY_HOME = '/qualify';
+
+/**
+ * admissions_seat sees ONLY the Qualify tab (nav-hidden AND route-blocked). Every non-Qualify
+ * protected route calls this and redirects to QUALIFY_HOME when true — server-side, not just
+ * nav-hiding. Pure so the guard is unit-testable without a live session.
+ */
+export function isQualifyOnlyRole(role: Role): boolean {
+  return role === 'admissions_seat';
 }

@@ -23,6 +23,7 @@ import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice
 import { dashboardAccess } from '@/lib/access';
 import { loadAuditRows, loadAuditFilterOptions, type AuditFilter } from '@/lib/actions';
 import { clampView, resolveView } from '@/lib/views';
+import { isQualifyOnlyRole, QUALIFY_HOME } from '@/lib/rbac';
 
 export const metadata: Metadata = { title: 'Claims Audit | CMD Billing' };
 
@@ -36,6 +37,8 @@ export default async function BillingAuditPage({
     if (access.reason === 'unauthenticated') redirect('/login');
     return <UnprovisionedNotice email={access.user.email} />;
   }
+  // admissions_seat sees ONLY Qualify — block direct-URL access to every other route, server-side.
+  if (isQualifyOnlyRole(access.access.role)) redirect(QUALIFY_HOME);
   if (access.access.allowedViews.length === 0) {
     return <UnprovisionedNotice email={access.access.user?.email} />;
   }

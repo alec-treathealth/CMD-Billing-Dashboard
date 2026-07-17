@@ -23,6 +23,7 @@ const ROLE_LABEL: Record<AppRole, string> = {
   super_admin: 'Super Admin',
   admin: 'Admin',
   user: 'User',
+  admissions_seat: 'Admissions Seat',
 };
 const ENTITY_LABEL: Record<AppEntity, string> = { bxr: 'BXR', indigo: 'Indigo' };
 
