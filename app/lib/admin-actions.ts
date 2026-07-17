@@ -296,7 +296,11 @@ export async function inviteUser(
     );
     if (error) throw error;
     userId = data.user?.id ?? null;
-  } catch {
+  } catch (err) {
+    // Surface the real reason (rate limit, invalid address, GoTrue error) in the server logs — the
+    // Admin API error is otherwise swallowed here and invisible in Vercel logs. Staff email/uid only,
+    // no patient PHI.
+    console.error('[inviteUser] admin.inviteUserByEmail failed:', err);
     // Most likely the email already has an account — fall back to assigning the role to that user.
     try {
       userId = (await listAppUsers()).find((u) => u.email.toLowerCase() === normEmail)?.userId ?? null;

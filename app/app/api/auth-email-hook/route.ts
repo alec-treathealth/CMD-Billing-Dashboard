@@ -26,6 +26,7 @@
  *     GoTrue treats 400/403 as 500; 429/503 are the only retry-able codes (need a `retry-after`).
  */
 import { Webhook } from 'standardwebhooks';
+import { appOrigin } from '@/lib/auth/email-link';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -55,9 +56,10 @@ function nextFor(actionType: string): string {
   return actionType === 'invite' || actionType === 'recovery' ? '/set-password' : '/dashboard';
 }
 
-/** Build the app's token-hash confirm URL (NOT GoTrue's /verify) — mirrors auth/confirm/route.ts. */
-function confirmUrl(siteUrl: string, tokenHash: string, actionType: string): string {
-  const base = siteUrl.replace(/\/+$/, '');
+/** Build the app's token-hash confirm URL (NOT GoTrue's /verify) — mirrors auth/confirm/route.ts.
+ *  `origin` is the app's public origin from appOrigin(), never GoTrue's email_data.site_url. */
+function confirmUrl(origin: string, tokenHash: string, actionType: string): string {
+  const base = origin.replace(/\/+$/, '');
   const params = new URLSearchParams({
     token_hash: tokenHash,
     type: actionType,
@@ -229,6 +231,8 @@ export async function POST(req: Request): Promise<Response> {
 
     const { user, email_data } = payload;
     const type = email_data.email_action_type;
+    // App origin for confirm links — from redirect_to (signed payload), NOT email_data.site_url.
+    const origin = appOrigin(email_data.redirect_to);
     console.log(`[auth-email-hook] verified request type=${type}`);
 
     if (type === 'reauthentication') {
@@ -241,21 +245,21 @@ export async function POST(req: Request): Promise<Response> {
       // field mapping: current email uses token_hash_new; new email uses token_hash.
       const secure = Boolean(email_data.token_hash_new) && Boolean(user.new_email);
       if (secure) {
-        const toCurrent = confirmUrl(email_data.site_url, email_data.token_hash_new!, type);
-        const toNew = confirmUrl(email_data.site_url, email_data.token_hash, type);
+        const toCurrent = confirmUrl(origin, email_data.token_hash_new!, type);
+        const toNew = confirmUrl(origin, email_data.token_hash, type);
         const a = await sendLogged(user.email, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: toCurrent }), type);
         const b = await sendLogged(user.new_email!, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: toNew }), type);
         if (!a || !b) return hookError(500, 'Failed to send email', 500);
       } else {
         const to = user.new_email || user.email;
-        const url = confirmUrl(email_data.site_url, email_data.token_hash, type);
+        const url = confirmUrl(origin, email_data.token_hash, type);
         if (!(await sendLogged(to, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: url }), type))) {
           return hookError(500, 'Failed to send email', 500);
         }
       }
     } else {
       // Link-based: invite | recovery | magiclink | signup (+ safe default).
-      const url = confirmUrl(email_data.site_url, email_data.token_hash, type);
+      const url = confirmUrl(origin, email_data.token_hash, type);
       if (!(await sendLogged(user.email, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: url }), type))) {
         return hookError(500, 'Failed to send email', 500);
       }
