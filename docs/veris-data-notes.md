@@ -1298,3 +1298,65 @@ first unattended week).
   Blues-vs-Anthems, BCBS MA/OK, BCBS TX MH-vs-SUD, Highmark, bare BCBS, Anthem ALL
   OTHER/S) — unmatched by design, not permanent; TEEN_MH_TX facility question
   (distinct vs typo).
+
+---
+
+## Qualify — Prompt 3 (desktop `/qualify` tab shipped, 2026-07-17)
+
+**SHIPPED** (commit `485a1a3` → main, Vercel deploy GREEN). Desktop `/qualify` tab is live:
+top-level route (`force-dynamic`), gated to `{super_admin, admissions_seat}` (admin/user
+redirect to `/dashboard`), wired to the Prompt-2 `getQualifySnapshot` contract. Facility
+color AND rank from `rating` (38/26 cutoffs in `app/lib/qualify/rating.ts`); cases inherit
+their PARENT FACILITY's bucket (name-keyed map; collision-disagreement & not-found → neutral,
+so no n=1 case fakes green); dollars OMITTED from the DOM (not CSS-hidden) when
+`!viewerHasAmountsCapability`; role-aware nav (admissions_seat sees Qualify only); window
+7/14/30/60/90 (mock's "Month" dropped — different window shape). VOB modal on
+`resolved===null`, "Start VOB" inert with a `TODO(qualify-vob)` seam. Files:
+`app/app/qualify/page.tsx`, `app/components/qualify/{colors,facility-panel,cases-table,
+qualify-tab,vob-modal}`, `app/components/nav-links.tsx` (role-threaded from `layout.tsx`),
+`app/app/globals.css` (`.q-*` paint), tests `app/test/qualify-render.test.tsx` +
+`test/qualifyColors.test.ts`. Prompts 4 (mobile PWA) still pending; movers + reveal actions
+exist but are NOT wired on this desktop tab (out of Prompt-3 scope).
+
+### RESOLVED tribal knowledge — ROOT vs APP tsconfig strict-flag divergence (carry forever)
+
+The two packages have DIFFERENT tsconfig strictness, and three "green" signals do NOT agree:
+- **Root `tsconfig.json` sets `noUncheckedIndexedAccess: true`; app `tsconfig.json` does
+  NOT.** So `arr[0].x` is an error under root `tsc` but fine under app `tsc`.
+- **The runtime suite never type-checks.** `npm test` = `node --import tsx --test`;
+  tsx/esbuild strips types, so a test with `snap.facilities[0].name` PASSES `npm test`
+  while FAILING root `tsc`.
+- **`next build` uses the APP tsconfig** (no flag) → also green.
+- **Consequence:** a file under `test/**` can pass `npm test` AND `cd app && npm run build`
+  while the standing "both typechecks clean" gate is actually RED. This is exactly how
+  Prompt 2's `test/qualifyCore.test.ts` shipped with 6 latent root-`tsc` errors
+  (`noUncheckedIndexedAccess` on `snap.facilities[0]/[1]`). Prompt 3 fixed them (non-null
+  assertions on the known-present indices, in `485a1a3`).
+- **RULE for every session:** run BOTH `npm run typecheck` (root) AND `cd app && npm run
+  typecheck`. `npm test` + `next build` alone can be green over a root-`tsc`-red tree. Root
+  `tsc` is the only signal enforcing `noUncheckedIndexedAccess` across `test/**` + `src/**`.
+
+### tsx + JSX-runtime gotcha (recorded)
+
+`tsx` maps the app tsconfig's `jsx: "preserve"` to esbuild's CLASSIC transform
+(`React.createElement`), so a React render test under tsx throws **"React is not defined"**
+(the app's components use the AUTOMATIC runtime and import no React — correct for `next
+build`). Fix: a test-only `app/tsconfig.test.json` with `jsx: "react-jsx"`, selected via
+`TSX_TSCONFIG_PATH` in the app `test` script. It does NOT affect `next build`/`tsc` (both
+read `tsconfig.json`), so nothing shipped changes.
+
+### Live verification — no browser driver, so DATA substitutes for the visual pass
+
+This env can't authenticate a Supabase session, so the authenticated visual/pixel pass is a
+HUMAN task. Verified on the live deploy + prod DB (read-only):
+- `/qualify` unauth → **307 → `/login?next=%2Fqualify`** (route live + gated, not 404).
+- **Rating colors read sensibly under the strict 38 cutoff** (answers "is anything green
+  that shouldn't be"): 90d, 538 payer×facility cells → **14.9% green** (predicted 11–15%
+  band), lowest raw pct earning green = **40.2%**, thinnest green facility = **9 lines**,
+  only **3** greens at ≤10 lines (all needing pct ≳78% to clear 38). No thin-volume /
+  mediocre-pct green — the dampening works on real data.
+- **VOB genuine-miss path sound:** a bogus blind-index token → **0 rollup rows** (→
+  `resolvePayer` null → `resolved:null` → modal), against a real population of 10,421
+  members / 2,638 prefixes / 460 payers that a valid token resolves within.
+- **STILL A HUMAN TASK:** pixel-fidelity vs `docs/mockups/qualify-tab-layout-proposal.html`,
+  and the modal actually firing on a UI click, signed in as super_admin.

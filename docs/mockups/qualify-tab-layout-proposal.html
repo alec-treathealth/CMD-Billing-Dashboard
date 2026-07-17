@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qualify — Layout Proposal (CMD-Billing-Dashboard)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..600&family=Hanken+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --tmh-teal-900:#0E3A3A; --tmh-teal-700:#135E5A; --tmh-teal-500:#1C8B82;
+  --tmh-teal-200:#B7DAD5; --tmh-teal-50:#EAF4F2;
+  --tmh-coral-600:#E2674F; --tmh-coral-400:#F0917C; --tmh-coral-50:#FCEDE8;
+  --tmh-ground:#FBF8F4; --tmh-surface:#FFFFFF;
+  --tmh-ink-900:#1B2B2A; --tmh-ink-600:#4A5C5A; --tmh-ink-400:#859794;
+  --tmh-line:#E4E9E6;
+  --tmh-ok:#2E8B6F; --tmh-warn:#C9881E; --tmh-danger:#C0453B;
+  --tmh-info:#2D7393; --tmh-neutral:#6B7B79;
+  --tmh-radius-sm:6px; --tmh-radius:10px; --tmh-radius-lg:16px;
+  --tmh-shadow-sm:0 1px 2px rgba(27,43,42,.05),0 1px 1px rgba(27,43,42,.04);
+  --tmh-shadow:0 4px 16px -6px rgba(14,58,58,.12);
+  --tmh-shadow-lg:0 18px 40px -12px rgba(14,58,58,.18);
+  /* heat washes */
+  --heat-ok-bg:#E6F2EC; --heat-warn-bg:#FBF1DE; --heat-danger-bg:#FBE7E4;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--tmh-ground);color:var(--tmh-ink-900);
+  font-family:'Hanken Grotesk',system-ui,sans-serif;font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+h1,h2,h3{font-family:'Fraunces',Georgia,serif;font-weight:500;margin:0}
+.num,.tabular{font-variant-numeric:tabular-nums}
+.mono{font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums}
+.muted{color:var(--tmh-ink-400)}
+.label{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--tmh-ink-600)}
+
+/* proposal ribbon */
+.ribbon{background:repeating-linear-gradient(45deg,#22403f,#22403f 12px,#1e3a39 12px,#1e3a39 24px);
+  color:#dbe9e6;font-size:12px;padding:7px 20px;display:flex;gap:10px;align-items:center;letter-spacing:.01em}
+.ribbon b{color:#fff}
+.ribbon .tag{background:var(--tmh-coral-600);color:#fff;font-weight:700;font-size:10px;letter-spacing:.06em;
+  text-transform:uppercase;padding:2px 8px;border-radius:999px}
+
+/* top bar */
+.topbar{height:56px;background:var(--tmh-teal-900);color:#fff;display:flex;align-items:center;gap:26px;padding:0 20px}
+.wordmark{font-family:'Fraunces',serif;font-weight:500;font-size:16px;letter-spacing:.01em;color:#fff;white-space:nowrap;display:flex;align-items:center;gap:9px}
+.hex{width:16px;height:18px;display:inline-block}
+.nav{display:flex;gap:2px;align-items:center;height:100%}
+.nav a{position:relative;height:100%;display:flex;align-items:center;padding:0 14px;color:#a9c6c2;
+  font-size:13.5px;font-weight:600;text-decoration:none;letter-spacing:.005em}
+.nav a:hover{color:#eaf4f2}
+.nav a.active{color:#fff}
+.nav a.active::after{content:'';position:absolute;left:12px;right:12px;bottom:0;height:3px;border-radius:3px 3px 0 0;background:var(--tmh-coral-600)}
+.nav a.new::before{content:'NEW';position:absolute;top:8px;right:-2px;font-size:8px;font-weight:700;letter-spacing:.06em;color:var(--tmh-coral-400)}
+.topbar .right{margin-left:auto;display:flex;align-items:center;gap:14px}
+.viewas{display:flex;align-items:center;gap:0;background:rgba(255,255,255,.08);border-radius:999px;padding:3px}
+.viewas button{font:inherit;font-size:11.5px;font-weight:600;letter-spacing:.02em;color:#bcd6d2;background:transparent;
+  border:0;padding:5px 12px;border-radius:999px;cursor:pointer;white-space:nowrap}
+.viewas button.on{background:#fff;color:var(--tmh-teal-900)}
+.avatar{width:30px;height:30px;border-radius:50%;background:var(--tmh-teal-500);color:#fff;display:flex;align-items:center;
+  justify-content:center;font-size:12px;font-weight:700}
+
+/* page shell */
+.wrap{max-width:1280px;margin:0 auto;padding:22px 24px 60px}
+.pagehead{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:16px}
+.pagehead h1{font-size:26px;line-height:1.1}
+.pagehead .sub{color:var(--tmh-ink-600);font-size:13.5px;margin-top:3px}
+.headctrls{display:flex;align-items:center;gap:14px}
+
+/* toggle switch */
+.switch{display:inline-flex;align-items:center;gap:9px;font-size:12.5px;font-weight:600;color:var(--tmh-ink-600);cursor:pointer;user-select:none}
+.track{width:38px;height:22px;border-radius:999px;background:var(--tmh-line);position:relative;transition:.18s}
+.track::after{content:'';position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;
+  box-shadow:var(--tmh-shadow-sm);transition:.18s}
+.switch.on .track{background:var(--tmh-teal-700)}
+.switch.on .track::after{transform:translateX(16px)}
+
+/* search / filter bar */
+.card{background:var(--tmh-surface);border:1px solid var(--tmh-line);border-radius:var(--tmh-radius);box-shadow:var(--tmh-shadow-sm)}
+.filterbar{padding:14px 16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:16px;border-top:2px solid var(--tmh-teal-700)}
+.searchbox{position:relative;flex:1;min-width:280px;max-width:460px}
+.searchbox svg{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--tmh-ink-400)}
+.searchbox input{width:100%;height:40px;border:1px solid var(--tmh-line);border-radius:var(--tmh-radius);
+  padding:0 12px 0 38px;font:inherit;font-size:14px;color:var(--tmh-ink-900);background:var(--tmh-ground)}
+.searchbox input:focus{outline:none;border-color:var(--tmh-teal-500);background:#fff;box-shadow:0 0 0 3px var(--tmh-teal-50)}
+.btn{font:inherit;font-weight:600;font-size:13px;border-radius:var(--tmh-radius);padding:9px 16px;border:1px solid transparent;cursor:pointer;transition:.15s;white-space:nowrap}
+.btn-teal{background:var(--tmh-teal-50);color:var(--tmh-teal-700);border-color:var(--tmh-teal-200)}
+.btn-teal:hover{background:var(--tmh-teal-200)}
+.btn-primary{background:var(--tmh-coral-600);color:#fff;box-shadow:var(--tmh-shadow-sm)}
+.btn-primary:hover{background:#CF5B44}
+
+/* time segmented control */
+.seg{display:inline-flex;background:var(--tmh-ground);border:1px solid var(--tmh-line);border-radius:999px;padding:3px}
+.seg button{font:inherit;font-size:12.5px;font-weight:600;color:var(--tmh-ink-600);background:transparent;border:0;
+  padding:6px 13px;border-radius:999px;cursor:pointer}
+.seg button.on{background:var(--tmh-teal-700);color:#fff}
+.divider{width:1px;height:26px;background:var(--tmh-line)}
+
+/* resolved context */
+.resolved{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px;padding:0 2px}
+.payerchip{display:inline-flex;align-items:center;gap:8px;background:var(--tmh-teal-900);color:#fff;
+  padding:7px 14px 7px 12px;border-radius:999px;font-weight:600;font-size:13.5px}
+.payerchip .k{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tmh-teal-200)}
+.ctxmeta{color:var(--tmh-ink-600);font-size:13px}
+.ctxmeta .mono{color:var(--tmh-ink-900)}
+
+/* layout grid */
+.grid{display:grid;grid-template-columns:340px 1fr;gap:16px;align-items:start}
+@media(max-width:960px){.grid{grid-template-columns:1fr}}
+
+.panelhead{display:flex;align-items:baseline;justify-content:space-between;padding:15px 16px 10px}
+.panelhead h2{font-size:16px}
+.panelhead .cnt{font-size:12px;color:var(--tmh-ink-400);font-weight:600}
+
+/* facility rows */
+.facs{padding:2px 10px 12px}
+.fac{display:block;padding:11px 8px;border-radius:var(--tmh-radius);border-left:4px solid transparent;margin-bottom:2px}
+.fac:hover{background:var(--tmh-teal-50)}
+.fac .top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.fac .name{font-weight:600;font-size:13.5px;color:var(--tmh-ink-900);display:flex;align-items:center;gap:8px}
+.fac .rank{width:18px;height:18px;border-radius:5px;background:var(--tmh-teal-50);color:var(--tmh-teal-700);
+  font-size:11px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
+.fac .pct{font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums;font-weight:600;font-size:15px}
+.fac .meta{display:flex;align-items:center;justify-content:space-between;margin-top:5px;font-size:11.5px}
+.fac .loc{color:var(--tmh-ink-400)}
+.fac .dollars{font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums;color:var(--tmh-ink-600)}
+.bar{height:5px;border-radius:999px;background:var(--tmh-line);margin-top:7px;overflow:hidden}
+.bar>span{display:block;height:100%;border-radius:999px}
+/* heat variants */
+.h-ok{border-left-color:var(--tmh-ok)} .h-ok .pct{color:var(--tmh-ok)} .h-ok .bar>span{background:var(--tmh-ok)}
+.h-warn{border-left-color:var(--tmh-warn)} .h-warn .pct{color:var(--tmh-warn)} .h-warn .bar>span{background:var(--tmh-warn)}
+.h-danger{border-left-color:var(--tmh-danger)} .h-danger .pct{color:var(--tmh-danger)} .h-danger .bar>span{background:var(--tmh-danger)}
+
+.legend{display:flex;gap:14px;padding:12px 18px;border-top:1px solid var(--tmh-line);font-size:11.5px;color:var(--tmh-ink-600);flex-wrap:wrap}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+
+/* table */
+table{width:100%;border-collapse:collapse}
+thead th{background:var(--tmh-teal-50);color:var(--tmh-ink-600);font-size:11px;font-weight:600;letter-spacing:.04em;
+  text-transform:uppercase;text-align:left;padding:10px 14px;border-bottom:1px solid var(--tmh-line);white-space:nowrap}
+tbody td{padding:10px 14px;border-bottom:1px solid var(--tmh-line);font-size:13px;vertical-align:middle}
+tbody tr:hover{background:var(--tmh-teal-50)}
+th.num,td.num{text-align:right;font-variant-numeric:tabular-nums;font-family:'IBM Plex Mono',monospace}
+.masked{font-family:'IBM Plex Mono',monospace;letter-spacing:.06em;color:var(--tmh-ink-400)}
+.mid{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--tmh-ink-600)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;padding:2px 8px;border-radius:999px}
+.pill-prog{background:#E4F0F5;color:var(--tmh-info)}
+/* pct cell heat */
+.pctcell{font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums;font-weight:600;
+  display:inline-flex;align-items:center;gap:7px;padding:3px 9px;border-radius:var(--tmh-radius-sm)}
+.pctcell .d{width:8px;height:8px;border-radius:50%}
+.p-ok .d{background:var(--tmh-ok)} .p-ok{color:var(--tmh-ok)}
+.p-warn .d{background:var(--tmh-warn)} .p-warn{color:var(--tmh-warn)}
+.p-danger .d{background:var(--tmh-danger)} .p-danger{color:var(--tmh-danger)}
+/* heat-on fills the pct cell + fac rows */
+.heat-on .p-ok{background:var(--heat-ok-bg)} .heat-on .p-warn{background:var(--heat-warn-bg)} .heat-on .p-danger{background:var(--heat-danger-bg)}
+.heat-on .h-ok{background:linear-gradient(90deg,var(--heat-ok-bg),transparent 82%)}
+.heat-on .h-warn{background:linear-gradient(90deg,var(--heat-warn-bg),transparent 82%)}
+.heat-on .h-danger{background:linear-gradient(90deg,var(--heat-danger-bg),transparent 82%)}
+
+/* dollar columns hidden when not amounts-viewer */
+body.no-amounts .amt{display:none}
+
+/* modal */
+.scrim{position:fixed;inset:0;background:rgba(14,44,44,.42);display:none;align-items:center;justify-content:center;padding:20px;z-index:50}
+.scrim.open{display:flex}
+.modal{background:var(--tmh-surface);border-radius:var(--tmh-radius-lg);box-shadow:var(--tmh-shadow-lg);max-width:440px;width:100%;overflow:hidden}
+.modal .mh{padding:22px 24px 6px;display:flex;gap:14px;align-items:flex-start}
+.modal .ic{width:40px;height:40px;border-radius:10px;background:var(--tmh-coral-50);color:var(--tmh-coral-600);display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.modal h3{font-size:19px;margin-bottom:3px}
+.modal .mb{padding:4px 24px 4px 78px;color:var(--tmh-ink-600);font-size:13.5px}
+.echo{margin:10px 0 4px;background:var(--tmh-ground);border:1px solid var(--tmh-line);border-radius:var(--tmh-radius);
+  padding:10px 12px;font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--tmh-ink-900)}
+.echo .k{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--tmh-ink-400);display:block;margin-bottom:2px;font-family:'Hanken Grotesk',sans-serif;font-weight:600}
+.modal .mf{padding:16px 24px 20px 78px;display:flex;gap:10px;align-items:center}
+.todo{font-size:11px;color:var(--tmh-warn);font-weight:600;margin-left:auto}
+
+/* proposal notes */
+.notes{margin-top:26px;border:1px dashed var(--tmh-teal-200);border-radius:var(--tmh-radius);background:#fff;padding:18px 20px}
+.notes h2{font-size:15px;font-family:'Hanken Grotesk',sans-serif;font-weight:700;color:var(--tmh-teal-900);text-transform:uppercase;letter-spacing:.04em;font-size:12px;margin-bottom:12px}
+.notes ul{margin:0;padding-left:0;list-style:none}
+.notes li{position:relative;padding:6px 0 6px 26px;font-size:13px;color:var(--tmh-ink-600);border-bottom:1px solid var(--tmh-line)}
+.notes li:last-child{border-bottom:0}
+.notes li b{color:var(--tmh-ink-900)}
+.notes .n{position:absolute;left:0;top:6px;width:19px;height:19px;border-radius:5px;background:var(--tmh-teal-700);color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.notes .hold{background:var(--tmh-coral-600)}
+</style>
+</head>
+<body class="">
+
+<!-- PROPOSAL CONTEXT RIBBON -->
+<div class="ribbon">
+  <span class="tag">Layout proposal</span>
+  <span><b>Static mock</b> — not wired to data or auth. The <b>View as</b> switch (top-right) only <b>simulates the two server responses</b>. In production, dollar fields are <b>stripped server-side</b> for non-capability users — frontend hiding is <b>not</b> the control.</span>
+</div>
+
+<!-- TOP BAR + NAV (Qualify sits BETWEEN Overview and Collections, RBAC-gated like siblings) -->
+<div class="topbar">
+  <span class="wordmark">
+    <svg class="hex" viewBox="0 0 20 22" fill="none"><path d="M10 1l7.8 4.5v9L10 21l-7.8-6.5v-9L10 1z" stroke="#7FBFB7" stroke-width="1.6"/><path d="M10 1l7.8 4.5-7.8 4.5L2.2 5.5 10 1z" fill="#E2674F" opacity=".9"/></svg>
+    Treat Mental Health
+  </span>
+  <nav class="nav">
+    <a href="#">Overview</a>
+    <a href="#" class="active new">Qualify</a>
+    <a href="#">Collections</a>
+    <a href="#">Claims Audit</a>
+    <a href="#">Code Reference</a>
+  </nav>
+  <div class="right">
+    <div class="viewas" title="Mock only — simulates the server response for each capability">
+      <button id="asViewer" class="on">Amounts viewer</button>
+      <button id="asAdmissions">Admissions&nbsp;·&nbsp;no $</button>
+    </div>
+    <div class="avatar">RL</div>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <!-- PAGE HEAD + color-layer toggle -->
+  <div class="pagehead">
+    <div>
+      <h1>Qualify</h1>
+      <div class="sub">Admissions lead qualification · resolve a payer, read facility performance and recent cases</div>
+    </div>
+    <div class="headctrls">
+      <label class="switch on" id="heatToggle">
+        <span>Color layer</span><span class="track"></span>
+      </label>
+    </div>
+  </div>
+
+  <!-- FILTER / SEARCH BAR (reuses the 7/14/30/Month control, default 30d) -->
+  <div class="card filterbar">
+    <div class="searchbox">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input id="q" placeholder="3-letter alpha prefix or member ID  (try “AET” · or “ZZZ” for no-data)" spellcheck="false">
+    </div>
+    <button class="btn btn-teal" id="searchBtn">Resolve payer</button>
+    <div class="divider"></div>
+    <div class="seg" role="group" aria-label="Time window">
+      <button>7d</button><button>14d</button><button class="on">30d</button><button>Month</button>
+    </div>
+  </div>
+
+  <!-- RESOLVED CONTEXT -->
+  <div class="resolved" id="resolved">
+    <span class="payerchip"><span class="k">Resolved payer</span> Aetna</span>
+    <span class="ctxmeta">matched on prefix <span class="mono">AET</span> · <span class="mono">312</span> charges across <span class="mono">6</span> facilities · window <span class="mono">Jun 16 – Jul 16, 2026</span></span>
+  </div>
+
+  <div class="grid">
+
+    <!-- FACILITY PANEL (color-coded by dollar-weighted % allowed of billed) -->
+    <div class="card">
+      <div class="panelhead"><h2>Top facilities</h2><span class="cnt">by % allowed of billed</span></div>
+      <div class="facs">
+        <div class="fac h-ok">
+          <div class="top"><span class="name"><span class="rank">1</span>Summit Ridge Recovery</span><span class="pct">61%</span></div>
+          <div class="meta"><span class="loc">Orem, UT</span><span class="dollars amt">$251,500 / $412,300</span></div>
+          <div class="bar"><span style="width:61%"></span></div>
+        </div>
+        <div class="fac h-ok">
+          <div class="top"><span class="name"><span class="rank">2</span>Cedar Point Behavioral</span><span class="pct">54%</span></div>
+          <div class="meta"><span class="loc">Boulder, CO</span><span class="dollars amt">$166,800 / $308,900</span></div>
+          <div class="bar"><span style="width:54%"></span></div>
+        </div>
+        <div class="fac h-warn">
+          <div class="top"><span class="name"><span class="rank">3</span>Harbor Vista Health</span><span class="pct">47%</span></div>
+          <div class="meta"><span class="loc">San Diego, CA</span><span class="dollars amt">$245,100 / $521,400</span></div>
+          <div class="bar"><span style="width:47%"></span></div>
+        </div>
+        <div class="fac h-warn">
+          <div class="top"><span class="name"><span class="rank">4</span>Blue Mesa Wellness</span><span class="pct">38%</span></div>
+          <div class="meta"><span class="loc">Reno, NV</span><span class="dollars amt">$104,300 / $274,600</span></div>
+          <div class="bar"><span style="width:38%"></span></div>
+        </div>
+        <div class="fac h-danger">
+          <div class="top"><span class="name"><span class="rank">5</span>Lakeview Behavioral</span><span class="pct">22%</span></div>
+          <div class="meta"><span class="loc">Spokane, WA</span><span class="dollars amt">$43,600 / $198,050</span></div>
+          <div class="bar"><span style="width:22%"></span></div>
+        </div>
+        <div class="fac h-danger">
+          <div class="top"><span class="name"><span class="rank">6</span>Pinecrest Recovery</span><span class="pct">18%</span></div>
+          <div class="meta"><span class="loc">Franklin, TN</span><span class="dollars amt">$34,900 / $193,900</span></div>
+          <div class="bar"><span style="width:18%"></span></div>
+        </div>
+      </div>
+      <div class="legend">
+        <span><span class="dot" style="background:var(--tmh-ok)"></span>50%+ allowed</span>
+        <span><span class="dot" style="background:var(--tmh-warn)"></span>25–49%</span>
+        <span><span class="dot" style="background:var(--tmh-danger)"></span>0–24%</span>
+      </div>
+    </div>
+
+    <!-- TOP-15 RECENT DISTINCT PATIENTS (masked; no reveal on this tab) -->
+    <div class="card">
+      <div class="panelhead"><h2>Recent cases</h2><span class="cnt">15 most-recent distinct patients · masked</span></div>
+      <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>Patient</th>
+            <th>Member ID</th>
+            <th>Facility</th>
+            <th>Program</th>
+            <th>Last DOS</th>
+            <th class="num">% allowed</th>
+            <th class="num amt">Billed</th>
+            <th class="num amt">Allowed</th>
+          </tr>
+        </thead>
+        <tbody id="cases"></tbody>
+      </table>
+      </div>
+    </div>
+
+  </div><!-- /grid -->
+
+  <!-- PROPOSAL NOTES -->
+  <div class="notes">
+    <h2>Proposal notes — read before “go”</h2>
+    <ul>
+      <li><span class="n">2</span><b>Nav placement.</b> “Qualify” registered between Overview and Collections, active styling per design-system.md, RBAC-gated exactly like the sibling tabs. <i>Exact component (NavLinks vs other) pending repo read.</i></li>
+      <li><span class="n">3</span><b>Amounts capability (load-bearing).</b> Dollars (billed / allowed / insurance_payments) are stripped <b>server-side</b> at the source; the route omits them from JSON unless the session carries the capability. Ratios (% allowed) are server-computed and returned to all authorized users — they are not dollars. <i>Mechanism (reuse executive/access hook vs new claims.app_user boolean) is a recommendation pending repo read → migration would HOLD.</i></li>
+      <li><span class="n">4</span><b>Search.</b> Member-ID exact (blind-index, audited) OR 3-letter alpha prefix only — reuses the existing lookup/cohort resolver. No name / substring path.</li>
+      <li><span class="n">5</span><b>Facilities.</b> Ranked & colored by dollar-weighted SUM(allowed)/SUM(billed) from cmd_explorer_charge_rollup — posting-grain correct, never SUM of raw rows. Thresholds 0–24 / 25–49 / 50+.</li>
+      <li><span class="n">6</span><b>Recent cases.</b> 15 most-recent DISTINCT patients, masked by default, no reveal button on this tab, color on the % cell. Keyset/limited, parameterized, tenant WHERE from session.</li>
+      <li><span class="n">7</span><b>Color-layer toggle.</b> Pure view state — flips heatmap fills on/off, data unchanged.</li>
+      <li><span class="n hold">8</span><b>No-data → VOB modal.</b> Echoes the searched identifier; “Start VOB” ships <b>inert</b> with a marked TODO seam unless you give a target (Monday VOB board / n8n webhook).</li>
+      <li><span class="n hold">1</span><b>Blocked / needs repo.</b> Prerequisite findings (nav component, rbac/access/executive surface, collections read path + migration 0050, lib/phi.ts masking, existing lookup/cohort, time control) require reading the private repo + the four docs. Not fabricated here.</li>
+    </ul>
+  </div>
+
+</div><!-- /wrap -->
+
+<!-- NO-DATA VOB MODAL -->
+<div class="scrim" id="scrim">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="mh">
+      <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.3l-8 13.9A2 2 0 0 0 4 20.2h16a2 2 0 0 0 1.7-3L13.7 3.3a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></div>
+      <div><h3 id="modalTitle">No matching cases</h3><div class="muted" style="font-size:12.5px">Nothing resolved for this identifier in the selected window.</div></div>
+    </div>
+    <div class="mb">
+      <div class="echo"><span class="k">Searched</span><span id="echoVal">ZZZ</span></div>
+      Start a verification of benefits to open this lead.
+    </div>
+    <div class="mf">
+      <button class="btn btn-primary" id="startVob">Start VOB</button>
+      <button class="btn btn-teal" id="closeModal">Close</button>
+      <span class="todo">CTA inert · TODO seam</span>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ---- synthetic recent-cases data (fully fabricated — no real PHI) ---- */
+const heat = p => p >= 50 ? 'ok' : p >= 25 ? 'warn' : 'danger';
+const cases = [
+  ['AET•••4471','Summit Ridge Recovery','PHP','Jul 15',63,18400,11592],
+  ['AET•••2210','Harbor Vista Health','RES','Jul 15',44,32100,14124],
+  ['AET•••8813','Cedar Point Behavioral','IOP','Jul 14',57,9750,5558],
+  ['AET•••1902','Lakeview Behavioral','PHP','Jul 14',21,16900,3549],
+  ['AET•••6655','Blue Mesa Wellness','OP','Jul 13',39,6300,2457],
+  ['AET•••3077','Summit Ridge Recovery','RES','Jul 13',66,28700,18942],
+  ['AET•••4420','Pinecrest Recovery','IOP','Jul 12',16,11200,1792],
+  ['AET•••9981','Harbor Vista Health','PHP','Jul 12',49,19600,9604],
+  ['AET•••5534','Cedar Point Behavioral','PHP','Jul 11',52,17850,9282],
+  ['AET•••7126','Blue Mesa Wellness','IOP','Jul 10',34,8900,3026],
+  ['AET•••2048','Summit Ridge Recovery','OP','Jul 10',58,5400,3132],
+  ['AET•••8890','Lakeview Behavioral','RES','Jul 09',24,30500,7320],
+  ['AET•••3361','Harbor Vista Health','IOP','Jul 08',46,10100,4646],
+  ['AET•••7702','Pinecrest Recovery','PHP','Jul 08',19,15300,2907],
+  ['AET•••5219','Cedar Point Behavioral','RES','Jul 07',55,26400,14520],
+];
+const usd = n => '$'+n.toLocaleString('en-US');
+document.getElementById('cases').innerHTML = cases.map(c=>{
+  const h = heat(c[4]);
+  return `<tr>
+    <td><span class="masked">••••••</span></td>
+    <td><span class="mid">${c[0]}</span></td>
+    <td>${c[1]}</td>
+    <td><span class="pill pill-prog">${c[2]}</span></td>
+    <td class="muted">${c[3]}</td>
+    <td class="num"><span class="pctcell p-${h}"><span class="d"></span>${c[4]}%</span></td>
+    <td class="num amt">${usd(c[5])}</td>
+    <td class="num amt">${usd(c[6])}</td>
+  </tr>`;
+}).join('');
+
+/* ---- color-layer toggle (pure view state) ---- */
+const body = document.body, heatToggle = document.getElementById('heatToggle');
+const applyHeat = on => { document.querySelectorAll('.grid .card').forEach(el=>el.classList.toggle('heat-on', on)); heatToggle.classList.toggle('on', on); };
+applyHeat(true);
+heatToggle.addEventListener('click', ()=> applyHeat(!heatToggle.classList.contains('on')));
+
+/* ---- View-as: simulate the two server responses (mock only) ---- */
+const asViewer = document.getElementById('asViewer'), asAdm = document.getElementById('asAdmissions');
+function setRole(viewer){
+  body.classList.toggle('no-amounts', !viewer);
+  asViewer.classList.toggle('on', viewer); asAdm.classList.toggle('on', !viewer);
+}
+asViewer.onclick = ()=>setRole(true); asAdm.onclick = ()=>setRole(false);
+
+/* ---- no-data VOB modal ---- */
+const scrim = document.getElementById('scrim'), echoVal = document.getElementById('echoVal');
+function resolve(){
+  const v = (document.getElementById('q').value || '').trim();
+  const known = /^AET/i.test(v) || v === '';
+  if(known){ scrim.classList.remove('open'); return; }
+  echoVal.textContent = v; scrim.classList.add('open');
+}
+document.getElementById('searchBtn').onclick = resolve;
+document.getElementById('q').addEventListener('keydown', e=>{ if(e.key==='Enter') resolve(); });
+document.getElementById('closeModal').onclick = ()=> scrim.classList.remove('open');
+scrim.addEventListener('click', e=>{ if(e.target===scrim) scrim.classList.remove('open'); });
+document.getElementById('startVob').onclick = ()=> alert('Inert in this proposal — TODO seam for Monday VOB board / n8n webhook once you confirm the target.');
+</script>
+</body>
+</html>
