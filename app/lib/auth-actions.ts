@@ -16,6 +16,7 @@ import { redirect } from 'next/navigation';
 import { headers } from 'next/headers';
 import { z } from 'zod';
 import { createSupabaseServerClient } from './supabase/server';
+import { passwordUpdateErrorMessage } from './auth/password';
 
 const credentialsSchema = z.object({
   email: z.string().trim().toLowerCase().email().max(320),
@@ -85,7 +86,13 @@ export async function setPassword(formData: FormData): Promise<SetPasswordResult
 
   const { error } = await supabase.auth.updateUser({ password: parsed.data.password });
   if (error) {
-    return { error: 'Could not set your password. Please try again.' };
+    // Otherwise-swallowed reason (weak/pwned password, etc.) — no PHI, staff-facing auth flow.
+    console.error('[setPassword] updateUser failed:', error);
+    const rawReasons = (error as unknown as { reasons?: unknown }).reasons;
+    const reasons = Array.isArray(rawReasons)
+      ? rawReasons.filter((r): r is string => typeof r === 'string')
+      : undefined;
+    return { error: passwordUpdateErrorMessage({ code: error.code, status: error.status, reasons }) };
   }
 
   redirect('/dashboard');

@@ -45,7 +45,10 @@ export function SetPasswordForm() {
           minLength={8}
           className="h-auto rounded-lg border-[#E5E1D6] bg-white px-3.5 py-2.5 text-sm text-[#16211C] shadow-sm focus-visible:border-[#0D5C4D] focus-visible:ring-0 focus-visible:ring-offset-0"
         />
-        <p className="mt-1 text-xs text-[#75847D]">At least 8 characters.</p>
+        <p className="mt-1 text-xs text-[#75847D]">
+          At least 8 characters. Pick a unique password you don’t use on other sites — passwords
+          found in known data breaches are rejected.
+        </p>
       </div>
       {error ? (
         <p role="alert" className="text-sm text-destructive">
