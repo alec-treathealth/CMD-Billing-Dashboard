@@ -152,17 +152,30 @@ export function SwipeRow({
     }
     d.active = false;
     cleanup();
-    if (!d.locked) return;
+    if (!d.locked) {
+      // Never crossed the 8px axis-lock threshold → this was a tap, not a swipe: open detail (no
+      // consume). Previously this returned early, so the tap-to-open branch below was unreachable
+      // and DetailSheet could never be opened from the list.
+      onOpen(facility);
+      return;
+    }
     const v = velocity();
     const shouldResolve = Math.abs(d.dx) > DIST_THRESHOLD || Math.abs(v) > VELOCITY_THRESHOLD;
     if (shouldResolve) {
       resolveRow(d.dx > 0 || (d.dx === 0 && v > 0), v);
     } else if (Math.abs(d.dx) < 5) {
+      // Locked but barely moved — treat as a tap too.
       onOpen(facility);
       springBack();
     } else {
       springBack();
     }
+  }
+
+  function onCancel() {
+    // A pointer cancel (OS gesture takeover, etc.) is NEVER a tap — abort without opening detail.
+    drag.current.active = false;
+    cleanup();
   }
 
   function onPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
@@ -178,7 +191,7 @@ export function SwipeRow({
     d.ac = ac;
     window.addEventListener('pointermove', onMove, { passive: false, signal: ac.signal });
     window.addEventListener('pointerup', onUp, { signal: ac.signal });
-    window.addEventListener('pointercancel', onUp, { signal: ac.signal });
+    window.addEventListener('pointercancel', onCancel, { signal: ac.signal });
   }
 
   const b = mobileBucketStyle(facility.rating);
