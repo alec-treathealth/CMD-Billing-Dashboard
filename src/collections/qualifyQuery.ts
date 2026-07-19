@@ -181,14 +181,16 @@ export function buildCasesQuery(
     'select member_id_bidx, ' +
     '(array_agg(id order by payment_received desc nulls last, charge_date desc nulls last, id desc))[1] as id, ' +
     '(array_agg(facility order by payment_received desc nulls last, charge_date desc nulls last, id desc))[1] as facility, ' +
-    "to_char(max(charge_date), 'YYYY-MM-DD') as last_dos, max(payment_received) as last_payment, " +
+    "to_char(max(charge_date), 'YYYY-MM-DD') as last_dos, " +
     'sum(charge_amount)::float8 as billed, sum(allowed_amount)::float8 as allowed, ' +
     PCT_RATIO_SELECT + ' ' +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
     `where business_entity_id = any(${e}::uuid[]) and primary_payer = ${p} ` +
     `and payment_received >= ${f}::date and payment_received < ${t}::date ` +
     'group by member_id_bidx';
-  // `agg` alias so FACILITY_DIM_JOINS (which references agg.facility) applies unchanged.
+  // `agg` alias so FACILITY_DIM_JOINS (which references agg.facility) applies unchanged. ORDER BY the
+  // DISPLAYED date (last_dos = max charge_date, DOS) so the list reads in the order it shows — the window
+  // still filters on payment_received, but recency here is service date, which is what admissions reads.
   const sql =
     'select agg.id, agg.facility, ' +
     'coalesce(max(f.facility_name), agg.facility) as facility_name, ' +
@@ -196,8 +198,8 @@ export function buildCasesQuery(
     'agg.last_dos, agg.pct_allowed, agg.billed, agg.allowed ' +
     `from (${inner}) agg ` +
     FACILITY_DIM_JOINS +
-    'group by agg.id, agg.facility, agg.last_dos, agg.pct_allowed, agg.billed, agg.allowed, agg.last_payment ' +
-    `order by agg.last_payment desc nulls last, agg.id desc limit ${lim}`;
+    'group by agg.id, agg.facility, agg.last_dos, agg.pct_allowed, agg.billed, agg.allowed ' +
+    `order by agg.last_dos desc nulls last, agg.id desc limit ${lim}`;
   return { sql, params };
 }
 
@@ -230,14 +232,16 @@ export function buildFacilityCasesQuery(
     'select member_id_bidx, ' +
     '(array_agg(id order by payment_received desc nulls last, charge_date desc nulls last, id desc))[1] as id, ' +
     '(array_agg(facility order by payment_received desc nulls last, charge_date desc nulls last, id desc))[1] as facility, ' +
-    "to_char(max(charge_date), 'YYYY-MM-DD') as last_dos, max(payment_received) as last_payment, " +
+    "to_char(max(charge_date), 'YYYY-MM-DD') as last_dos, " +
     'sum(charge_amount)::float8 as billed, sum(allowed_amount)::float8 as allowed, ' +
     PCT_RATIO_SELECT + ' ' +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
     `where business_entity_id = any(${e}::uuid[]) and primary_payer = ${p} and facility = ${fac} ` +
     `and payment_received >= ${f}::date and payment_received < ${t}::date ` +
     'group by member_id_bidx';
-  // `agg` alias so FACILITY_DIM_JOINS (which references agg.facility) applies unchanged.
+  // `agg` alias so FACILITY_DIM_JOINS (which references agg.facility) applies unchanged. ORDER BY the
+  // DISPLAYED date (last_dos = max charge_date, DOS) so the list reads in the order it shows — identical
+  // discipline to buildCasesQuery.
   const sql =
     'select agg.id, agg.facility, ' +
     'coalesce(max(f.facility_name), agg.facility) as facility_name, ' +
@@ -245,8 +249,8 @@ export function buildFacilityCasesQuery(
     'agg.last_dos, agg.pct_allowed, agg.billed, agg.allowed ' +
     `from (${inner}) agg ` +
     FACILITY_DIM_JOINS +
-    'group by agg.id, agg.facility, agg.last_dos, agg.pct_allowed, agg.billed, agg.allowed, agg.last_payment ' +
-    `order by agg.last_payment desc nulls last, agg.id desc limit ${lim}`;
+    'group by agg.id, agg.facility, agg.last_dos, agg.pct_allowed, agg.billed, agg.allowed ' +
+    `order by agg.last_dos desc nulls last, agg.id desc limit ${lim}`;
   return { sql, params };
 }
 

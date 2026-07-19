@@ -95,7 +95,7 @@ test('buildCasesQuery: 15 distinct patients, reveal id, program from care_settin
   assert.match(sql, /array_agg\(id order by payment_received desc/, 'latest-charge id for the audited reveal');
   assert.match(sql, /care_setting\) as program/, 'program := resolved care_setting (Q-D)');
   assert.ok(!/agg\.member_id_bidx/.test(sql), 'opaque token is NOT projected to the caller');
-  assert.match(sql, /order by agg\.last_payment desc nulls last/, 'recency = max(payment_received)');
+  assert.match(sql, /order by agg\.last_dos desc nulls last/, 'ordered by the DISPLAYED date (max charge_date / DOS)');
   assert.equal(params[4], QUALIFY_CASES_LIMIT, 'defaults to 15 cases');
   assert.deepEqual(params.slice(0, 4), [BOTH, 'AETNA', '2026-06-17', '2026-07-17']);
 });
@@ -111,7 +111,7 @@ test('buildFacilityCasesQuery: adds a bound raw-facility predicate, keeps distin
   assert.match(sql, /array_agg\(id order by payment_received desc/, 'latest-charge id for the audited reveal');
   assert.ok(!/agg\.member_id_bidx/.test(sql), 'opaque token is NOT projected to the caller');
   assert.match(sql, /care_setting\) as program/, 'program := resolved care_setting');
-  assert.match(sql, /order by agg\.last_payment desc nulls last/, 'recency = max(payment_received)');
+  assert.match(sql, /order by agg\.last_dos desc nulls last/, 'ordered by the DISPLAYED date (max charge_date / DOS)');
   assert.equal(params[5], QUALIFY_CASES_LIMIT, 'defaults to 15 cases');
   assert.deepEqual(params.slice(0, 5), [BOTH, 'AETNA', '405 recovery', '2026-06-17', '2026-07-17']);
 });
