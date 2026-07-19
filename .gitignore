@@ -42,3 +42,6 @@ secrets/
 
 # Supabase CLI scratch
 supabase/.temp/
+
+# Vercel CLI local project link (README.txt + project.json — link metadata only, no secrets)
+.vercel/
