@@ -13,6 +13,12 @@
  * both values are non-null — the elements are OMITTED from the DOM otherwise (the server has already
  * nulled them; this is belt-and-suspenders, never CSS-hiding a shipped value).
  *
+ * SELECTION: each facility row is a button that drives the per-facility cases drill (ruling Q-4 /
+ * Prompt-4 finding #4 — "last 15 claims" is scoped to the SELECTED facility, not the payer overall).
+ * `selectedKey` (matched against `facilityKey`, the raw rollup join text) marks the active row;
+ * `onSelect(facilityKey)` re-scopes the cases panel. Both are optional so the render test can mount
+ * the panel hermetically with no handler; the container always supplies them.
+ *
  * Pure/presentational (no hooks) so it renders hermetically under renderToStaticMarkup. Imports are
  * relative + type-only where possible so the render test runs under tsx without `@/` resolution.
  */
@@ -30,10 +36,16 @@ export function FacilityPanel({
   facilities,
   hasAmounts,
   heatOn,
+  selectedKey = null,
+  onSelect,
 }: {
   facilities: readonly QualifyFacility[];
   hasAmounts: boolean;
   heatOn: boolean;
+  /** facilityKey of the row currently driving the cases panel (null before any select). */
+  selectedKey?: string | null;
+  /** Re-scope the cases panel to this facility (its raw rollup facilityKey). Optional for tests. */
+  onSelect?: (facilityKey: string) => void;
 }) {
   return (
     <section className="rounded-xl border bg-card shadow-sm">
@@ -53,10 +65,20 @@ export function FacilityPanel({
             const pct = f.pctAllowedOfBilled;
             const width = pct === null ? 0 : Math.max(0, Math.min(100, pct));
             const loc = [f.city, f.state].filter(Boolean).join(', ');
+            const selected = selectedKey !== null && f.facilityKey === selectedKey;
             return (
-              <div
+              <button
                 key={f.rank}
-                className={['q-fac', bucketClass(bucket), 'mb-0.5 rounded-lg px-2 py-2.5'].join(' ')}
+                type="button"
+                onClick={() => onSelect?.(f.facilityKey)}
+                aria-pressed={selected}
+                className={[
+                  'q-fac',
+                  bucketClass(bucket),
+                  'mb-0.5 block w-full rounded-lg px-2 py-2.5 text-left transition-colors',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40',
+                  selected ? 'bg-teal50 ring-2 ring-teal500' : 'hover:bg-surface',
+                ].join(' ')}
                 title={f.rating === null ? 'No rating — insufficient data' : `Rating ${Math.round(f.rating)} · rank ${f.rank}`}
               >
                 <div className="flex items-center justify-between gap-2.5">
@@ -81,7 +103,7 @@ export function FacilityPanel({
                 <div className="q-bar mt-[7px] h-[5px] overflow-hidden rounded-full bg-line">
                   <span className="block h-full rounded-full" style={{ width: `${width}%` }} />
                 </div>
-              </div>
+              </button>
             );
           })
         )}

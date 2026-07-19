@@ -7,6 +7,15 @@
  * hands plain, already-shaped data to the pure presentational children (facility panel, cases table,
  * VOB modal).
  *
+ * PER-FACILITY CASES (ruling Q-4 / Prompt-4 finding #4): the "Recent cases" panel shows the 15
+ * most-recent distinct patients for the resolved payer FILTERED TO THE SELECTED FACILITY — never the
+ * payer-wide set (the mockup's "same 15 regardless of facility" bug). Selecting a facility row calls
+ * the existing getQualifyFacilityCases action (same server path the mobile card-tap uses; cross-tenant,
+ * masked, amounts stripped server-side). On every resolve we auto-select the rank-1 facility so the
+ * tab lands populated. A facility switch discards any revealed PHI — the same scope-change rule a new
+ * search follows (each drill is its own audited access). snapshot.cases (payer-wide) is intentionally
+ * left fetched-but-unrendered here — dropping it would change the shared getQualifySnapshot contract.
+ *
  * ON LOAD it auto-resolves the top "Heating up" payer so the tab lands POPULATED (matching the
  * mockup's populated-on-load feel) instead of an empty search prompt. The user can then search or
  * change the window to switch payers; a manual search clears the by-payer default.
@@ -20,11 +29,18 @@
  */
 import { useCallback, useEffect, useMemo, useState, useTransition } from 'react';
 import { Search } from 'lucide-react';
-import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyMovers, revealQualifyRow } from '@/lib/qualify/actions';
+import {
+  getQualifySnapshot,
+  getQualifySnapshotByPayer,
+  getQualifyFacilityCases,
+  getQualifyMovers,
+  revealQualifyRow,
+} from '@/lib/qualify/actions';
 import {
   QUALIFY_WINDOW_OPTIONS,
   type QualifySnapshot,
   type QualifyWindowDays,
+  type QualifyCase,
   type QualifyPhi,
 } from '@/lib/qualify/contract';
 import { buildFacilityBucketMap } from '@/components/qualify/colors';
@@ -53,6 +69,12 @@ export function QualifyTab({
   const [windowDays, setWindowDays] = useState<QualifyWindowDays>(30);
   const [snapshot, setSnapshot] = useState<QualifySnapshot | null>(null);
   const [isPending, startTransition] = useTransition();
+  // Per-facility cases drill (ruling Q-4): the raw facilityKey currently scoping the cases panel, and
+  // that facility's 15 most-recent distinct patients (from getQualifyFacilityCases). A dedicated
+  // transition so a facility-to-facility switch doesn't co-mingle with the payer-resolve pending state.
+  const [selectedFacilityKey, setSelectedFacilityKey] = useState<string | null>(null);
+  const [facilityCases, setFacilityCases] = useState<QualifyCase[]>([]);
+  const [isFacilityPending, startFacilityTransition] = useTransition();
   const [heatOn, setHeatOn] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
   const [echo, setEcho] = useState('');
@@ -78,6 +100,29 @@ export function QualifyTab({
     [snapshot],
   );
 
+  // Discard any revealed PHI — used on every scope change (new search, new payer, facility switch).
+  const resetReveal = useCallback(() => {
+    setRevealed(new Map());
+    setShown(new Set());
+    setPendingIds(new Set());
+    setRevealErrors(new Map());
+  }, []);
+
+  // Auto-select the rank-1 facility of a fresh snapshot and fetch ITS cases, so the tab lands with the
+  // cases panel already scoped to a facility (never the payer-wide set). Returns key+cases so the caller
+  // sets snapshot/selection/cases together (one paint, no empty-cases flash). Throws propagate to the
+  // resolve transition's catch — a facility-cases failure is surfaced as a resolve failure, not silently
+  // swallowed into a good-snapshot-with-no-cases state.
+  const seedFacility = useCallback(
+    async (snap: QualifySnapshot, w: QualifyWindowDays): Promise<{ key: string | null; cases: QualifyCase[] }> => {
+      const top = snap.resolved ? snap.facilities[0] : undefined;
+      if (!snap.resolved || !top) return { key: null, cases: [] };
+      const res = await getQualifyFacilityCases({ payer: snap.resolved.payerName, facility: top.facilityKey, windowDays: w });
+      return { key: top.facilityKey, cases: res.cases };
+    },
+    [],
+  );
+
   const runSearch = useCallback((rawQuery: string, w: QualifyWindowDays) => {
     const trimmed = rawQuery.trim();
     if (trimmed.length < MIN_QUERY_LEN) {
@@ -86,14 +131,16 @@ export function QualifyTab({
     }
     setHint(null);
     // New search → discard any revealed PHI from the previous payer.
-    setRevealed(new Map());
-    setShown(new Set());
-    setPendingIds(new Set());
-    setRevealErrors(new Map());
+    resetReveal();
     startTransition(async () => {
       try {
         const snap = await getQualifySnapshot({ query: trimmed, windowDays: w });
+        // Seed the rank-1 facility's cases BEFORE committing state, so snapshot + selection + cases
+        // land in one paint (ruling Q-4: the cases panel is always facility-scoped, never payer-wide).
+        const seed = await seedFacility(snap, w);
         setSnapshot(snap);
+        setSelectedFacilityKey(seed.key);
+        setFacilityCases(seed.cases);
         setHasSearched(true);
         setByPayer(null); // an explicit search supersedes the by-payer default
         if (snap.resolved === null) {
@@ -110,20 +157,20 @@ export function QualifyTab({
         setHint('Qualify is unavailable right now. Please try again.');
       }
     });
-  }, []);
+  }, [resetReveal, seedFacility]);
 
   // Resolve directly by payer label (the on-load default; reuses the resolve-by-payer action). Mirrors
   // runSearch's reveal-state reset. Sets `byPayer` so a window change re-resolves this payer.
   const resolveByPayer = useCallback((payer: string, w: QualifyWindowDays) => {
     setHint(null);
-    setRevealed(new Map());
-    setShown(new Set());
-    setPendingIds(new Set());
-    setRevealErrors(new Map());
+    resetReveal();
     startTransition(async () => {
       try {
         const snap = await getQualifySnapshotByPayer({ payer, windowDays: w });
+        const seed = await seedFacility(snap, w); // auto-select rank-1 facility (see runSearch)
         setSnapshot(snap);
+        setSelectedFacilityKey(seed.key);
+        setFacilityCases(seed.cases);
         setHasSearched(true);
         setByPayer(payer);
         setModalOpen(false);
@@ -131,7 +178,27 @@ export function QualifyTab({
         setHint('Qualify is unavailable right now. Please try again.');
       }
     });
-  }, []);
+  }, [resetReveal, seedFacility]);
+
+  // Facility row click → re-scope the cases panel to that facility. Highlights instantly; discards any
+  // revealed PHI (scope change, re-audited); no-ops on the already-selected row so it can't re-audit.
+  const selectFacility = useCallback(
+    (facilityKey: string) => {
+      const payer = snapshot?.resolved?.payerName;
+      if (!payer || facilityKey === selectedFacilityKey) return;
+      setSelectedFacilityKey(facilityKey);
+      resetReveal();
+      startFacilityTransition(async () => {
+        try {
+          const res = await getQualifyFacilityCases({ payer, facility: facilityKey, windowDays });
+          setFacilityCases(res.cases);
+        } catch {
+          setHint('Qualify is unavailable right now. Please try again.');
+        }
+      });
+    },
+    [snapshot, selectedFacilityKey, windowDays, resetReveal],
+  );
 
   // On load, land POPULATED: resolve the top "Heating up" payer (highest distinct-patient mover). If
   // there are no movers or the fetch fails, fall through to the empty search prompt. Runs once.
@@ -214,6 +281,9 @@ export function QualifyTab({
   };
 
   const resolved = snapshot?.resolved ?? null;
+  // Human name of the selected facility, for the cases-panel scope label (display only, never PHI).
+  const selectedFacilityLabel =
+    snapshot?.facilities.find((f) => f.facilityKey === selectedFacilityKey)?.name ?? null;
 
   return (
     <main className="mx-auto max-w-[1280px] space-y-4 p-6 sm:p-8">
@@ -309,19 +379,31 @@ export function QualifyTab({
       {/* grid or empty prompt */}
       {snapshot && snapshot.resolved ? (
         <div className="grid grid-cols-1 items-start gap-4 min-[960px]:grid-cols-[340px_1fr]">
-          <FacilityPanel facilities={snapshot.facilities} hasAmounts={hasAmounts} heatOn={heatOn} />
-          <CasesTable
-            cases={snapshot.cases}
+          <FacilityPanel
+            facilities={snapshot.facilities}
             hasAmounts={hasAmounts}
             heatOn={heatOn}
-            facilityBuckets={facilityBuckets}
-            canReveal={canRevealPhi}
-            revealed={revealed}
-            shown={shown}
-            pendingIds={pendingIds}
-            revealErrors={revealErrors}
-            onToggle={toggleReveal}
+            selectedKey={selectedFacilityKey}
+            onSelect={selectFacility}
           />
+          <div
+            aria-busy={isFacilityPending}
+            className={['transition-opacity', isFacilityPending ? 'opacity-60' : ''].join(' ')}
+          >
+            <CasesTable
+              cases={facilityCases}
+              hasAmounts={hasAmounts}
+              heatOn={heatOn}
+              facilityBuckets={facilityBuckets}
+              facilityLabel={selectedFacilityLabel}
+              canReveal={canRevealPhi}
+              revealed={revealed}
+              shown={shown}
+              pendingIds={pendingIds}
+              revealErrors={revealErrors}
+              onToggle={toggleReveal}
+            />
+          </div>
         </div>
       ) : initializing || isPending ? (
         <div className="rounded-xl border border-dashed bg-card p-10 text-center text-sm text-muted-foreground">

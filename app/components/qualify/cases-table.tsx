@@ -11,6 +11,8 @@
  *
  * COLOR: the % cell is tinted by the case's PARENT FACILITY rating bucket (never the case's own pct).
  * AMOUNTS: Billed/Allowed columns are OMITTED from the DOM when !viewerHasAmountsCapability.
+ * SCOPE: `facilityLabel` names the facility these 15 belong to (ruling Q-4 — the list is scoped to the
+ * SELECTED facility, so the scope must be visible). Facility name only; never PHI.
  */
 import { bucketClass, caseBucket, type RatingBucket } from './colors';
 import { PHI_MASK } from '../../lib/phi';
@@ -35,6 +37,7 @@ export function CasesTable({
   hasAmounts,
   heatOn,
   facilityBuckets,
+  facilityLabel = null,
   canReveal,
   revealed,
   shown,
@@ -46,6 +49,8 @@ export function CasesTable({
   hasAmounts: boolean;
   heatOn: boolean;
   facilityBuckets: Map<string, RatingBucket>;
+  /** Human name of the selected facility these cases are scoped to (display only; never PHI). */
+  facilityLabel?: string | null;
   canReveal: boolean;
   /** Fetched PHI, cached for the session (never dropped on hide). */
   revealed: Map<number, QualifyPhi>;
@@ -60,9 +65,12 @@ export function CasesTable({
   const colSpan = 7 + (hasAmounts ? 2 : 0) + (canReveal ? 1 : 0);
   return (
     <section className="rounded-xl border bg-card shadow-sm">
-      <div className="flex items-baseline justify-between px-4 pb-2.5 pt-4">
-        <h2 className="font-display text-base font-semibold">Recent cases</h2>
-        <span className="text-xs font-semibold text-muted-foreground">
+      <div className="flex items-baseline justify-between gap-3 px-4 pb-2.5 pt-4">
+        <h2 className="font-display text-base font-semibold">
+          Recent cases
+          {facilityLabel ? <span className="ml-2 text-sm font-medium text-muted-foreground">· {facilityLabel}</span> : null}
+        </h2>
+        <span className="whitespace-nowrap text-xs font-semibold text-muted-foreground">
           {cases.length} most-recent distinct patients{canReveal ? '' : ' · masked'}
         </span>
       </div>
