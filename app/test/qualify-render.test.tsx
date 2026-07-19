@@ -15,9 +15,10 @@ import { test } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { FacilityPanel } from '../components/qualify/facility-panel';
 import { CasesTable } from '../components/qualify/cases-table';
+import { HeatingUpBar } from '../components/qualify/heating-up-bar';
 import { buildFacilityBucketMap } from '../components/qualify/colors';
 import { qualifyRating, ratingBucket } from '../lib/qualify/rating';
-import type { QualifyFacility, QualifyCase, QualifyPhi } from '../lib/qualify/contract';
+import type { QualifyFacility, QualifyCase, QualifyMover, QualifyPhi } from '../lib/qualify/contract';
 
 const solidRating = qualifyRating(55)!; // 55 → ok
 const thinHighRating = qualifyRating(90)!; // 90 → ok (value-first: a small high-% facility reads GREEN)
@@ -208,4 +209,34 @@ test('cases table — a facility-scoped set still omits dollars for a no-amounts
   assert.ok(!html.includes('$'), 'no "$" in a no-amounts facility-scoped cases table');
   assert.ok(!html.includes('Billed') && !html.includes('Allowed'), 'no $ column headers when !hasAmounts');
   for (const v of ['1,000', '2,000', '1,100', '1,200']) assert.ok(!html.includes(v), `dollar ${v} absent even though the fixture carries it`);
+});
+
+// ── "Heating up" desktop payer quick-pick (parity with mobile HeatingUp chips) ──────────────────────
+const MOVERS: QualifyMover[] = [
+  { rank: 1, label: 'AETNA', thisWindowPatients: 41, priorWindowPatients: 31, deltaPatients: 10, deltaPct: 32 },
+  { rank: 2, label: 'UNITEDHEALTHCARE', thisWindowPatients: 63, priorWindowPatients: 0, deltaPatients: 63, deltaPct: null },
+  { rank: 3, label: 'FLAT PAYER', thisWindowPatients: 20, priorWindowPatients: 20, deltaPatients: 0, deltaPct: 0 }, // not trending → excluded
+  { rank: 4, label: 'SHRINKING PAYER', thisWindowPatients: 5, priorWindowPatients: 12, deltaPatients: -7, deltaPct: -58 }, // down → excluded
+];
+
+test('heating-up bar — renders ONLY trending-up payers as clickable chips (delta<=0 excluded)', () => {
+  const html = renderToStaticMarkup(<HeatingUpBar movers={MOVERS} windowDays={30} onOpen={() => {}} />);
+  assert.ok(html.includes('AETNA') && html.includes('UNITEDHEALTHCARE'), 'trending-up payers appear');
+  assert.ok(!html.includes('FLAT PAYER') && !html.includes('SHRINKING PAYER'), 'flat/declining payers are excluded');
+  assert.ok(html.includes('+32%'), 'a payer with a prior window shows its % growth');
+  assert.ok(html.includes('+63 new'), 'a brand-new payer (no prior) shows "+N new"');
+  assert.ok(html.includes('<button'), 'each chip is a clickable button (auto-resolve on click)');
+});
+
+test('heating-up bar — marks the active (currently-resolved) payer chip', () => {
+  const html = renderToStaticMarkup(<HeatingUpBar movers={MOVERS} windowDays={30} activeLabel="AETNA" onOpen={() => {}} />);
+  assert.ok(html.includes('aria-pressed="true"'), 'the active payer chip is marked pressed');
+  assert.equal(html.split('aria-pressed="true"').length - 1, 1, 'exactly one chip is active');
+});
+
+test('heating-up bar — renders nothing when no payer is trending up', () => {
+  const flat: QualifyMover[] = [
+    { rank: 1, label: 'FLAT', thisWindowPatients: 10, priorWindowPatients: 10, deltaPatients: 0, deltaPct: 0 },
+  ];
+  assert.equal(renderToStaticMarkup(<HeatingUpBar movers={flat} windowDays={30} onOpen={() => {}} />), '', 'empty render when nothing trends up');
 });

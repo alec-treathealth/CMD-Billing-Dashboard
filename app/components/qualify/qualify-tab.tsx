@@ -27,7 +27,7 @@
  * Window control is 7/14/30/60/90 (contract QUALIFY_WINDOW_OPTIONS) — the mock's "Month" was
  * dropped (Alec) because it is a different window shape than the contract's trailing-N-days math.
  */
-import { useCallback, useEffect, useMemo, useState, useTransition } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import { Search } from 'lucide-react';
 import {
   getQualifySnapshot,
@@ -41,11 +41,13 @@ import {
   type QualifySnapshot,
   type QualifyWindowDays,
   type QualifyCase,
+  type QualifyMover,
   type QualifyPhi,
 } from '@/lib/qualify/contract';
 import { buildFacilityBucketMap } from '@/components/qualify/colors';
 import { FacilityPanel } from '@/components/qualify/facility-panel';
 import { CasesTable } from '@/components/qualify/cases-table';
+import { HeatingUpBar } from '@/components/qualify/heating-up-bar';
 import { VobModal } from '@/components/qualify/vob-modal';
 
 const MIN_QUERY_LEN = 3;
@@ -75,6 +77,9 @@ export function QualifyTab({
   const [selectedFacilityKey, setSelectedFacilityKey] = useState<string | null>(null);
   const [facilityCases, setFacilityCases] = useState<QualifyCase[]>([]);
   const [isFacilityPending, startFacilityTransition] = useTransition();
+  // "Heating up" payer quick-pick (desktop parity with mobile): trending payers for the current window,
+  // rendered as a click-to-resolve chip row. Fetched on load + re-fetched on window change.
+  const [movers, setMovers] = useState<QualifyMover[]>([]);
   const [heatOn, setHeatOn] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
   const [echo, setEcho] = useState('');
@@ -200,15 +205,18 @@ export function QualifyTab({
     [snapshot, selectedFacilityKey, windowDays, resetReveal],
   );
 
-  // On load, land POPULATED: resolve the top "Heating up" payer (highest distinct-patient mover). If
-  // there are no movers or the fetch fails, fall through to the empty search prompt. Runs once.
+  // On load, land POPULATED: fetch the "Heating up" movers (for the quick-pick chip row) and resolve
+  // the top one (highest distinct-patient mover). If there are no movers or the fetch fails, fall
+  // through to the empty search prompt. Runs once.
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
         const m = await getQualifyMovers(windowDays);
+        if (!alive) return;
+        setMovers(m.movers);
         const top = m.movers[0]?.label;
-        if (alive && top) resolveByPayer(top, windowDays);
+        if (top) resolveByPayer(top, windowDays);
       } catch {
         // leave the empty prompt — the user can still search
       } finally {
@@ -220,6 +228,28 @@ export function QualifyTab({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Keep the "Heating up" chip row tracking the window: re-fetch movers whenever windowDays changes
+  // (the initial window is covered by the on-load effect above; skip the mount run to avoid a double
+  // fetch). Chip-row only — does NOT re-resolve; onWindow already re-resolves the active payer/search.
+  const moversInitDone = useRef(false);
+  useEffect(() => {
+    if (!moversInitDone.current) {
+      moversInitDone.current = true;
+      return;
+    }
+    let alive = true;
+    getQualifyMovers(windowDays)
+      .then((m) => {
+        if (alive) setMovers(m.movers);
+      })
+      .catch(() => {
+        /* stale/failed movers just leave the prior chips — never blocks search */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [windowDays]);
 
   const toggleReveal = useCallback(
     (id: number) => {
@@ -351,6 +381,14 @@ export function QualifyTab({
         </div>
       </div>
       {hint ? <p className="px-1 text-xs text-status-warn">{hint}</p> : null}
+
+      {/* "Heating up" payer quick-pick — click a chip to resolve that payer (parity with mobile) */}
+      <HeatingUpBar
+        movers={movers}
+        windowDays={windowDays}
+        activeLabel={byPayer}
+        onOpen={(label) => resolveByPayer(label, windowDays)}
+      />
 
       {/* resolved context */}
       {resolved ? (
