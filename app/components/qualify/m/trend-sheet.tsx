@@ -2,10 +2,12 @@
 
 /**
  * Qualify mobile — "why is this rated X" trend sheet (right-swipe). Renders entirely from the facility
- * object already in hand (no query): raw pctAllowedOfBilled, lineCount, a plain-language dampening
- * note, then the final rating + bucket. Carries NO dollar fields by design. Light bottom-sheet.
+ * object already in hand (no query): raw pctAllowedOfBilled, lineCount, the DYNAMIC per-facility
+ * explanation (explainRating — weight on real data + a generated sentence), then the final rating +
+ * bucket. Carries NO dollar fields by design. Light bottom-sheet.
  */
 import { mobileBucketStyle } from './colors';
+import { explainRating } from '../../../lib/qualify/rating';
 import type { QualifyFacility } from '../../../lib/qualify/contract';
 
 const INK900 = '#1B2B2A';
@@ -25,9 +27,8 @@ function StatRow({ label, value, mono }: { label: string; value: string; mono?: 
 
 export function TrendSheet({ facility, onClose }: { facility: QualifyFacility; onClose: () => void }) {
   const b = mobileBucketStyle(facility.rating);
-  const pct = facility.pctAllowedOfBilled;
+  const ex = explainRating(facility.pctAllowedOfBilled, facility.lineCount);
   const ratingText = facility.rating === null ? '—' : String(Math.round(facility.rating));
-  const confidence = facility.lineCount >= 200 ? 'Minimal (high volume)' : 'Shrunk toward book average';
   return (
     <div
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
@@ -39,9 +40,10 @@ export function TrendSheet({ facility, onClose }: { facility: QualifyFacility; o
         </div>
         <div className="ths-h" style={{ marginTop: 4, fontSize: 16, fontWeight: 600, color: INK900 }}>{facility.name}</div>
         <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <StatRow label="Raw allowed / billed" value={pct === null ? '—' : `${Math.round(pct)}%`} mono />
-          <StatRow label="Claim lines this window" value={String(facility.lineCount)} mono />
-          <StatRow label="Confidence adjustment" value={confidence} />
+          <StatRow label="Raw allowed / billed" value={ex.rawPct === null ? '—' : `${Math.round(ex.rawPct)}%`} mono />
+          <StatRow label="Claim lines this window" value={String(ex.lineCount)} mono />
+          <StatRow label="Weight on real data" value={`${Math.round(ex.volumeWeight * 100)}%`} mono />
+          <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5, color: INK600 }}>{ex.sentence}</p>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, borderTop: `0.5px solid ${LINE}`, paddingTop: 10 }}>
             <span style={{ color: INK600 }}>Rating</span>
             <span className="ths-num" style={{ fontWeight: 700, color: b.color }}>{ratingText} · {b.label}</span>

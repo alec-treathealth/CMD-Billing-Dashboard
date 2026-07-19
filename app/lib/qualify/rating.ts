@@ -93,3 +93,52 @@ export function ratingBucket(rating: number | null): RatingBucket {
   if (rating >= RATING_WARN_MIN) return 'warn';
   return 'danger';
 }
+
+/**
+ * A DYNAMIC, per-facility explanation of WHY the rating landed where it did — derived from that
+ * facility's own numbers, NOT a fixed string. Same purity/client-safety as qualifyRating (no dollars),
+ * so both surfaces can render it and the amounts gate is satisfied by construction. Exposes the three
+ * levers the shrinkage actually turns:
+ *   - volumeWeight = n/(n+K): how much of the score is real observed data vs the book prior (0..1)
+ *   - priorPullPts = rawPct − rating: SIGNED points the prior moved the score (+ = pulled down toward
+ *     a below-observed baseline; − = lifted up). 0 when the observed ratio already equals the prior.
+ * `sentence` is generated from those so a high-volume facility, a thin-volume-above-prior facility,
+ * and a thin-volume-below-prior facility each read differently. Mirrors qualifyRating's null-handling.
+ */
+export interface RatingExplanation {
+  rawPct: number | null; // observed dollar-weighted allowed/billed (null → neutral)
+  lineCount: number; // clamped to >= 0 (same as qualifyRating)
+  volumeWeight: number; // n/(n+K), 0..1 — the share of the score that is real data
+  priorPullPts: number; // rawPct - rating, signed; 0 when rawPct is null
+  sentence: string; // plain-language, generated from the values above
+}
+
+export function explainRating(pctAllowed: number | null, lineCount: number): RatingExplanation {
+  const n = Number.isFinite(lineCount) && lineCount > 0 ? lineCount : 0;
+  const volumeWeight = n / (n + QUALIFY_RATING_K);
+  const wPct = Math.round(volumeWeight * 100);
+  const rating = qualifyRating(pctAllowed, lineCount);
+  if (pctAllowed === null || rating === null) {
+    return {
+      rawPct: null,
+      lineCount: n,
+      volumeWeight,
+      priorPullPts: 0,
+      sentence: 'No allowed / billed ratio is available for this facility yet, so it carries a neutral rating.',
+    };
+  }
+  const priorPullPts = pctAllowed - rating; // + ⇒ prior pulled the score DOWN; − ⇒ lifted it UP
+  const rawR = Math.round(pctAllowed);
+  const pull = Math.abs(Math.round(priorPullPts));
+  let sentence: string;
+  if (volumeWeight >= 0.8) {
+    sentence = `Backed by ${n} claim lines, so the score reflects the observed ${rawR}% allowed almost as-is (${wPct}% of the score is real data).`;
+  } else if (pull === 0) {
+    sentence = `The observed ${rawR}% already sits at the ${QUALIFY_RATING_PRIOR}% book baseline, so volume doesn't move the score.`;
+  } else if (priorPullPts > 0) {
+    sentence = `Only ${n} claim lines back this, so the observed ${rawR}% is trimmed ${pull} pts toward the ${QUALIFY_RATING_PRIOR}% book baseline until more volume confirms it (${wPct}% real data).`;
+  } else {
+    sentence = `Only ${n} claim lines back this, so the observed ${rawR}% is lifted ${pull} pts toward the ${QUALIFY_RATING_PRIOR}% book baseline (${wPct}% real data).`;
+  }
+  return { rawPct: pctAllowed, lineCount: n, volumeWeight, priorPullPts, sentence };
+}
