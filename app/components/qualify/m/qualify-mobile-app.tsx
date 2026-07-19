@@ -17,6 +17,7 @@ import { SwipeRow } from '@/components/qualify/m/swipe-row';
 import { TrendSheet } from '@/components/qualify/m/trend-sheet';
 import { DetailSheet } from '@/components/qualify/m/detail-sheet';
 import { ClaimDetailSheet } from '@/components/qualify/m/claim-detail-sheet';
+import { AreaChips, deriveAreaChips, facilitiesInArea, AREA_ALL } from '@/components/qualify/m/area-chips';
 import { HeatingUp } from '@/components/qualify/m/heating-up';
 import { SwRegister } from '@/components/qualify/m/sw-register';
 import { SearchIcon, RefreshIcon } from '@/components/qualify/m/icons';
@@ -38,6 +39,9 @@ function EmptyState({ children }: { children: ReactNode }) {
 export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmountsCapability: boolean }) {
   const [query, setQuery] = useState('');
   const [windowDays, setWindowDays] = useState<QualifyWindowDays>(30);
+  // Area (state) filter over the resolved deck, alongside windowDays. Resets to AREA_ALL on any new
+  // resolution (search / payer tap) and on a window change (which re-resolves) — see runSearch/resolveByPayer.
+  const [areaFilter, setAreaFilter] = useState<string>(AREA_ALL);
   const [snapshot, setSnapshot] = useState<QualifySnapshot | null>(null);
   const [movers, setMovers] = useState<QualifyMover[]>([]);
   const [deck, setDeck] = useState<{ visible: QualifyFacility[]; queue: QualifyFacility[] }>({ visible: [], queue: [] });
@@ -99,6 +103,7 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
         setSearched(true);
         setByPayer(null); // resolved via the PHI path, not by payer
         setLastSearch(t); // remember the term so a window change re-ranks this same search
+        setAreaFilter(AREA_ALL); // a fresh resolution starts unfiltered
         if (snap.resolved === null) {
           setEcho(t);
           setDeck({ visible: [], queue: [] });
@@ -124,6 +129,7 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
         setSearched(true);
         setByPayer(label); // remember it so a window change re-ranks this same payer
         setLastSearch(null); // resolved by payer, not via a PHI term
+        setAreaFilter(AREA_ALL); // a fresh resolution starts unfiltered
         setEcho('');
         setDeck({ visible: snap.facilities.slice(0, VISIBLE), queue: snap.facilities.slice(VISIBLE) });
       } catch {
@@ -144,8 +150,20 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
 
   function resetDeck() {
     if (snapshot?.resolved) {
-      setDeck({ visible: snapshot.facilities.slice(0, VISIBLE), queue: snapshot.facilities.slice(VISIBLE) });
+      // Re-seed from the top of the CURRENTLY-filtered set (keeps the active area chip). With
+      // areaFilter === AREA_ALL the filtered set is the full list — identical to the pre-area behavior.
+      const list = facilitiesInArea(snapshot.facilities, areaFilter);
+      setDeck({ visible: list.slice(0, VISIBLE), queue: list.slice(VISIBLE) });
     }
+  }
+
+  // Area chip tap → narrow the deck to that state WITHOUT re-resolving. Re-seeds from the filtered set
+  // (rating order preserved); the SwipeRow gesture model is untouched.
+  function onSelectArea(key: string) {
+    if (!snapshot?.resolved) return;
+    setAreaFilter(key);
+    const list = facilitiesInArea(snapshot.facilities, key);
+    setDeck({ visible: list.slice(0, VISIBLE), queue: list.slice(VISIBLE) });
   }
 
   // Facility-card tap → open the detail sheet and fetch THAT facility's claim lines (facility-scoped,
@@ -206,6 +224,10 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
   }
 
   const showHint = deck.visible.length > 0;
+  // Area chips only when a payer is resolved AND there are >=2 real buckets (>2 chips incl. "All") — a
+  // single-state payer with no unmapped facilities gets no pointless "All / CA" row.
+  const areaChips = snapshot?.resolved ? deriveAreaChips(snapshot.facilities) : [];
+  const showAreaChips = areaChips.length > 2;
 
   return (
     <div style={{ minHeight: '100vh', background: GROUND }}>
@@ -271,6 +293,8 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
       <SwRegister />
 
       {hint ? <div style={{ padding: '0 16px', fontSize: 12, color: '#C9881E' }}>{hint}</div> : null}
+
+      {showAreaChips ? <AreaChips chips={areaChips} active={areaFilter} onSelect={onSelectArea} /> : null}
 
       <div style={{ position: 'relative', padding: '12px 16px 24px', display: 'flex', flexDirection: 'column', gap: 10, touchAction: 'pan-y', opacity: isPending ? 0.6 : 1, transition: 'opacity 0.15s' }}>
         {renderBody()}

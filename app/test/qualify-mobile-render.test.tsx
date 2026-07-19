@@ -11,6 +11,7 @@ import { SwipeRow } from '../components/qualify/m/swipe-row';
 import { TrendSheet } from '../components/qualify/m/trend-sheet';
 import { DetailSheet } from '../components/qualify/m/detail-sheet';
 import { ClaimDetailSheet } from '../components/qualify/m/claim-detail-sheet';
+import { AreaChips, deriveAreaChips, facilitiesInArea, AREA_ALL, AREA_OTHER } from '../components/qualify/m/area-chips';
 import { qualifyRating } from '../lib/qualify/rating';
 import type { QualifyFacility, QualifyCase } from '../lib/qualify/contract';
 
@@ -95,4 +96,36 @@ test('claim detail — WITH amounts: Billed/Allowed present, member id stays mas
   assert.ok(html.includes('Billed') && html.includes('Allowed'), 'amounts labels present for a capable viewer');
   assert.ok(html.includes('$18,400') && html.includes('$11,592'), 'amounts present for a capable viewer');
   assert.ok(html.includes('••••••'), 'member id remains masked in the claim popup');
+});
+
+// ── Area filter chips ────────────────────────────────────────────────────────────────────────────
+const facAt = (state: string | null, rank: number): QualifyFacility => ({
+  ...FAC, rank, name: `FAC ${rank}`, facilityKey: `fac-${rank}`, state, city: state ? 'City' : null,
+});
+const MIXED = [facAt('TX', 1), facAt('CA', 2), facAt(null, 3), facAt('CA', 4)];
+
+test('deriveAreaChips: All first, distinct states sorted, Other only when a null-state facility exists', () => {
+  const chips = deriveAreaChips(MIXED);
+  assert.deepEqual(chips.map((c) => c.key), [AREA_ALL, 'CA', 'TX', AREA_OTHER]); // states alpha-sorted, Other last
+  assert.equal(chips[0]!.label, 'All');
+});
+
+test('deriveAreaChips: no Other bucket when every facility has a state; single-state ⇒ 2 chips (parent hides)', () => {
+  const chips = deriveAreaChips([facAt('CA', 1), facAt('CA', 2)]);
+  assert.deepEqual(chips.map((c) => c.key), [AREA_ALL, 'CA']);
+  assert.ok(chips.length <= 2, 'parent hides the row when <2 real buckets');
+});
+
+test('facilitiesInArea: All returns everything; a state returns only that state; Other returns null-state only', () => {
+  assert.equal(facilitiesInArea(MIXED, AREA_ALL).length, 4);
+  assert.deepEqual(facilitiesInArea(MIXED, 'CA').map((f) => f.rank), [2, 4]);
+  assert.deepEqual(facilitiesInArea(MIXED, 'TX').map((f) => f.rank), [1]);
+  assert.deepEqual(facilitiesInArea(MIXED, AREA_OTHER).map((f) => f.rank), [3]); // the null-state facility is NOT dropped
+});
+
+test('AreaChips: renders every chip label and marks the active one pressed', () => {
+  const html = renderToStaticMarkup(<AreaChips chips={deriveAreaChips(MIXED)} active="CA" onSelect={noop} />);
+  for (const label of ['All', 'CA', 'TX', 'Other']) assert.ok(html.includes(`>${label}</button>`), `chip ${label} present`);
+  assert.match(html, /aria-pressed="true"[^>]*>CA<\/button>/, 'the active (CA) chip is pressed');
+  assert.match(html, /aria-pressed="false"[^>]*>TX<\/button>/, 'an inactive chip (TX) is not pressed');
 });
