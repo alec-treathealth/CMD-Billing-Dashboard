@@ -40,6 +40,9 @@ export function DetailSheet({
       <div style={{ width: '100%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', background: SURFACE, borderRadius: '20px 20px 0 0', color: INK900 }}>
         <div style={{ padding: '20px 20px 12px' }}>
           <div className="ths-h" style={{ fontSize: 16, fontWeight: 600, color: INK900 }}>{facility.name}</div>
+          {facility.city && facility.state ? (
+            <div style={{ marginTop: 2, fontSize: 12, color: INK400 }}>{facility.city}, {facility.state}</div>
+          ) : null}
           <div style={{ marginTop: 6, fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: INK400 }}>
             Recent claims for this payer
           </div>

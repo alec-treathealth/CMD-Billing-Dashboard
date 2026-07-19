@@ -195,6 +195,8 @@ export function SwipeRow({
   }
 
   const b = mobileBucketStyle(facility.rating);
+  // "City, ST" only when BOTH are present — partial (city-only / state-only) omits cleanly, never "City, " or ", ST".
+  const loc = facility.city && facility.state ? `${facility.city}, ${facility.state}` : null;
   const overlay = 'absolute inset-0 pointer-events-none opacity-0';
   const stampBase = 'absolute top-1/2 flex items-center gap-1 rounded-md border-[1.5px] bg-white px-2 py-1 text-[10px] font-bold uppercase opacity-0 pointer-events-none';
 
@@ -236,8 +238,8 @@ export function SwipeRow({
           <div className="ths-h truncate text-[13px] font-semibold leading-tight" style={{ color: INK900 }}>
             {facility.name}
           </div>
-          <div className="mt-0.5 text-[11px]" style={{ color: INK400 }}>
-            {facility.lineCount} lines this window
+          <div className="mt-0.5 truncate text-[11px]" style={{ color: INK400 }}>
+            {loc ? `${loc} · ` : ''}{facility.lineCount} lines this window
           </div>
         </div>
         <div className="flex-shrink-0 text-right">
