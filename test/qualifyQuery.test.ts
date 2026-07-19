@@ -5,6 +5,7 @@ import {
   buildResolvePayerQuery,
   buildFacilityRankingQuery,
   buildCasesQuery,
+  buildFacilityCasesQuery,
   buildMoversQuery,
   QUALIFY_CASES_LIMIT,
   QUALIFY_MOVERS_MIN_PATIENTS,
@@ -20,6 +21,7 @@ test('cross-tenant: every builder scopes business_entity_id = any($1::uuid[]) wi
     buildResolvePayerQuery(TOKEN, 'member_id', BOTH),
     buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH),
     buildCasesQuery('AETNA', '2026-06-17', '2026-07-17', BOTH),
+    buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH),
     buildMoversQuery('2026-06-17', '2026-07-17', '2026-05-18', '2026-06-17', BOTH),
   ];
   for (const { sql, params } of built) {
@@ -35,6 +37,7 @@ test('grain: aggregate builders read the charge rollup, never raw cmd_explorer_r
     buildResolvePayerQuery(TOKEN, 'prefix', BOTH),
     buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH),
     buildCasesQuery('AETNA', '2026-06-17', '2026-07-17', BOTH),
+    buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH),
     buildMoversQuery('2026-06-17', '2026-07-17', '2026-05-18', '2026-06-17', BOTH),
   ]) {
     assert.ok(sql.includes('collections.cmd_explorer_charge_rollup'), 'reads the rollup');
@@ -47,6 +50,10 @@ test('every builder routes through assertEntityScope (throws on empty scope)', (
   assert.throws(() => buildResolvePayerQuery(TOKEN, 'member_id', []), /entityIds required/);
   assert.throws(() => buildFacilityRankingQuery('X', '2026-01-01', '2026-02-01', []), /entityIds required/);
   assert.throws(() => buildCasesQuery('X', '2026-01-01', '2026-02-01', []), /entityIds required/);
+  assert.throws(
+    () => buildFacilityCasesQuery('X', 'F', '2026-01-01', '2026-02-01', []),
+    /entityIds required/,
+  );
   assert.throws(
     () => buildMoversQuery('2026-01-01', '2026-02-01', '2025-12-01', '2026-01-01', []),
     /entityIds required/,
@@ -91,6 +98,22 @@ test('buildCasesQuery: 15 distinct patients, reveal id, program from care_settin
   assert.match(sql, /order by agg\.last_payment desc nulls last/, 'recency = max(payment_received)');
   assert.equal(params[4], QUALIFY_CASES_LIMIT, 'defaults to 15 cases');
   assert.deepEqual(params.slice(0, 4), [BOTH, 'AETNA', '2026-06-17', '2026-07-17']);
+});
+
+// ── buildFacilityCasesQuery: buildCasesQuery + one raw-facility-text predicate, same grain/limit. ─
+test('buildFacilityCasesQuery: adds a bound raw-facility predicate, keeps distinct-patient grain + 15 cap', () => {
+  const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH);
+  // The ONLY new axis vs buildCasesQuery: an equality on the RAW facility text, as a bound param.
+  assert.match(sql, /primary_payer = \$2 and facility = \$3/, 'raw facility text is a bound predicate');
+  assert.equal(params[2], '405 recovery', 'facility bound as $3 (raw text, never interpolated)');
+  // Same discipline as buildCasesQuery: distinct patients, reveal id, opaque token never projected.
+  assert.match(sql, /group by member_id_bidx/, 'distinct patients keyed on the blind index');
+  assert.match(sql, /array_agg\(id order by payment_received desc/, 'latest-charge id for the audited reveal');
+  assert.ok(!/agg\.member_id_bidx/.test(sql), 'opaque token is NOT projected to the caller');
+  assert.match(sql, /care_setting\) as program/, 'program := resolved care_setting');
+  assert.match(sql, /order by agg\.last_payment desc nulls last/, 'recency = max(payment_received)');
+  assert.equal(params[5], QUALIFY_CASES_LIMIT, 'defaults to 15 cases');
+  assert.deepEqual(params.slice(0, 5), [BOTH, 'AETNA', '405 recovery', '2026-06-17', '2026-07-17']);
 });
 
 // ── buildMoversQuery: distinct-patient delta + both suppression floors + clamp. ──────────────────

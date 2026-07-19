@@ -9,6 +9,7 @@ function fac(name: string, pct: number | null, lineCount: number, rank = 1): Qua
   return {
     rank,
     name,
+    facilityKey: name.toLowerCase(),
     city: null,
     state: null,
     pctAllowedOfBilled: pct,

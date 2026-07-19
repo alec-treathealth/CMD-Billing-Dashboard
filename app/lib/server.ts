@@ -106,6 +106,7 @@ import {
   buildResolvePayerQuery,
   buildFacilityRankingQuery,
   buildCasesQuery,
+  buildFacilityCasesQuery,
   buildMoversQuery,
 } from '../../src/collections/qualifyQuery.js';
 import type {
@@ -1864,6 +1865,20 @@ export async function loadQualifyCases(
   entityIds: string[],
 ): Promise<QualifyCaseRow[]> {
   const q = buildCasesQuery(payer, from, to, entityIds);
+  const { rows } = await readerExecutor().query<QualifyCaseRow>(q.sql, q.params);
+  // bigint `id` (array_agg of the latest snapshot's row id) comes back as a string from pg → coerce.
+  return rows.map((r) => ({ ...r, id: Number(r.id) }));
+}
+
+/** 15 most-recent DISTINCT patients for a resolved payer AT ONE FACILITY, in-window (masked; reveal via id). */
+export async function loadQualifyFacilityCases(
+  payer: string,
+  facility: string,
+  from: string,
+  to: string,
+  entityIds: string[],
+): Promise<QualifyCaseRow[]> {
+  const q = buildFacilityCasesQuery(payer, facility, from, to, entityIds);
   const { rows } = await readerExecutor().query<QualifyCaseRow>(q.sql, q.params);
   // bigint `id` (array_agg of the latest snapshot's row id) comes back as a string from pg → coerce.
   return rows.map((r) => ({ ...r, id: Number(r.id) }));

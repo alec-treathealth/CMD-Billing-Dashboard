@@ -12,6 +12,7 @@ import {
   resolveQualifyPayer,
   loadQualifyFacilities,
   loadQualifyCases,
+  loadQualifyFacilityCases,
   loadQualifyMovers,
   recordAccess,
   revealCmdExplorerRow,
@@ -21,6 +22,7 @@ import { memberIdBlindIndex, alphaPrefixBlindIndex } from '../../../src/collecti
 import {
   getQualifySnapshotCore,
   getQualifySnapshotByPayerCore,
+  getQualifyFacilityCasesCore,
   getQualifyMoversCore,
   revealQualifyRowCore,
   revealQualifyRowsCore,
@@ -29,6 +31,8 @@ import {
 import type {
   QualifyInput,
   QualifyPayerInput,
+  QualifyFacilityCasesInput,
+  QualifyFacilityCases,
   QualifySnapshot,
   QualifyMovers,
   QualifyWindowDays,
@@ -42,6 +46,7 @@ const realDeps: QualifyDeps = {
   resolvePayer: resolveQualifyPayer,
   loadFacilities: loadQualifyFacilities,
   loadCases: loadQualifyCases,
+  loadFacilityCases: loadQualifyFacilityCases,
   loadMovers: loadQualifyMovers,
   recordAccess,
   revealRow: (id, actor, entityIds, action) => revealCmdExplorerRow(id, actor, entityIds, action),
@@ -56,6 +61,11 @@ export async function getQualifySnapshot(input: QualifyInput): Promise<QualifySn
 /** Resolve-by-payer: load a payer's facilities/cases directly from its label (the Heating-up path). */
 export async function getQualifySnapshotByPayer(input: QualifyPayerInput): Promise<QualifySnapshot> {
   return getQualifySnapshotByPayerCore(realDeps, input);
+}
+
+/** Facility drill: the resolved payer's cases narrowed to ONE facility (the mobile facility-card tap). */
+export async function getQualifyFacilityCases(input: QualifyFacilityCasesInput): Promise<QualifyFacilityCases> {
+  return getQualifyFacilityCasesCore(realDeps, input);
 }
 
 export async function getQualifyMovers(windowDays: QualifyWindowDays): Promise<QualifyMovers> {

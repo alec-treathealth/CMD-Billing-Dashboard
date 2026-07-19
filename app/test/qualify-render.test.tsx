@@ -23,12 +23,12 @@ const solidRating = qualifyRating(55, 400)!; // ≈52 → ok
 const thinHighRating = qualifyRating(90, 1)!; // ≈31.7 → warn (dampened; a 90% pct is NOT green on n=1)
 
 const SOLID: QualifyFacility = {
-  rank: 1, name: 'SOLID', city: 'Boulder', state: 'CO',
+  rank: 1, name: 'SOLID', facilityKey: 'solid', city: 'Boulder', state: 'CO',
   pctAllowedOfBilled: 55, rating: solidRating, streakSignal: null,
   billedAmount: 308900, allowedAmount: 166800, lineCount: 400,
 };
 const THIN_HIGH: QualifyFacility = {
-  rank: 2, name: 'THIN HIGH', city: 'Reno', state: 'NV',
+  rank: 2, name: 'THIN HIGH', facilityKey: 'thin high', city: 'Reno', state: 'NV',
   pctAllowedOfBilled: 90, rating: thinHighRating, streakSignal: null,
   billedAmount: 412300, allowedAmount: 251500, lineCount: 1,
 };

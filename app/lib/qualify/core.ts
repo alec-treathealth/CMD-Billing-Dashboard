@@ -16,6 +16,8 @@ import {
   QUALIFY_MEMBER_ID_MASK,
   type QualifyInput,
   type QualifyPayerInput,
+  type QualifyFacilityCasesInput,
+  type QualifyFacilityCases,
   type QualifyMatchKind,
   type QualifySnapshot,
   type QualifyResolved,
@@ -40,6 +42,8 @@ import type {
 export const SEARCH_QUALIFY_PHI = 'search_qualify_phi';
 /** Resolve-by-payer audit — a payer LABEL was looked up (non-PHI, distinct from the PHI-term search). */
 export const SEARCH_QUALIFY_PAYER = 'search_qualify_payer';
+/** Facility drill audit — a payer's cases were narrowed to ONE facility (distinct, more-granular access). */
+export const SEARCH_QUALIFY_FACILITY = 'search_qualify_facility';
 export const REVEAL_QUALIFY_ROW = 'reveal_qualify_row';
 export const REVEAL_QUALIFY_ROWS = 'reveal_qualify_rows';
 
@@ -53,6 +57,13 @@ export interface QualifyDeps {
   resolvePayer: (token: string, kind: QualifyMatchKind, entityIds: string[]) => Promise<string | null>;
   loadFacilities: (payer: string, from: string, to: string, entityIds: string[]) => Promise<QualifyFacilityRow[]>;
   loadCases: (payer: string, from: string, to: string, entityIds: string[]) => Promise<QualifyCaseRow[]>;
+  loadFacilityCases: (
+    payer: string,
+    facility: string,
+    from: string,
+    to: string,
+    entityIds: string[],
+  ) => Promise<QualifyCaseRow[]>;
   loadMovers: (
     thisFrom: string,
     thisTo: string,
@@ -107,6 +118,7 @@ function assembleFacilities(rows: QualifyFacilityRow[]): QualifyFacility[] {
     .map((r) => ({
       rank: 0,
       name: r.facility_name ?? r.facility,
+      facilityKey: r.facility, // raw rollup text — the join key for the facility-scoped cases drill
       city: facilityLocation(r.facility_code)?.city ?? null,
       state: facilityLocation(r.facility_code)?.state ?? null,
       pctAllowedOfBilled: r.pct_allowed,
@@ -253,6 +265,56 @@ export async function getQualifySnapshotByPayerCore(
     tenantScope: QUALIFY_TENANT_SCOPE,
   };
   return gate.hasAmounts ? snap : stripSnapshotAmounts(snap); // stripAmounts LAST
+}
+
+/**
+ * Facility drill: the resolved payer's cases narrowed to ONE facility (the mobile facility-card tap).
+ * Reuses the SAME masking (assembleCases), tenancy scope, and amounts choke point (stripSnapshotAmounts)
+ * as the payer-wide cases path — the only new axis is the raw-facility-text filter in the loader. A
+ * distinct SEARCH_QUALIFY_FACILITY audit records the more-granular access (payer + facility are non-PHI).
+ * Never touches the payer-wide buildCasesQuery / snapshot.cases path.
+ */
+export async function getQualifyFacilityCasesCore(
+  deps: QualifyDeps,
+  input: QualifyFacilityCasesInput,
+): Promise<QualifyFacilityCases> {
+  const gate = await deps.requirePrincipal();
+  if (!gate.ok) throw new Error(gate.error); // fail-closed backstop (route guards are the primary gate)
+
+  const windowDays: QualifyWindowDays = input.windowDays;
+  if (!isQualifyWindow(windowDays)) throw new Error('Invalid window.');
+
+  const payer = (input.payer ?? '').trim();
+  const facility = (input.facility ?? '').trim();
+  const empty: QualifyFacilityCases = {
+    cases: [],
+    viewerHasAmountsCapability: gate.hasAmounts,
+    tenantScope: QUALIFY_TENANT_SCOPE,
+  };
+  if (payer === '' || payer.length > 120 || facility === '' || facility.length > 200) return empty;
+
+  // Narrowing a payer to one facility is a distinct, more-granular access → its own audit action.
+  await deps.recordAccess({
+    actorEmail: gate.actor.email,
+    actorUserId: gate.actor.userId,
+    action: SEARCH_QUALIFY_FACILITY,
+    detail: { payer, facility, window: windowDays },
+  });
+
+  const { from, to } = qualifyWindowBounds(windowDays, deps.now());
+  const caseRows = await deps.loadFacilityCases(payer, facility, from, to, gate.entityIds);
+  const cases = assembleCases(caseRows);
+
+  // Route through the ONE amounts choke point: strip via a facilities-empty snapshot, then take cases.
+  const carrier: QualifySnapshot = {
+    resolved: null,
+    facilities: [],
+    cases,
+    viewerHasAmountsCapability: gate.hasAmounts,
+    tenantScope: QUALIFY_TENANT_SCOPE,
+  };
+  const gated = gate.hasAmounts ? carrier : stripSnapshotAmounts(carrier); // stripAmounts LAST
+  return { cases: gated.cases, viewerHasAmountsCapability: gate.hasAmounts, tenantScope: QUALIFY_TENANT_SCOPE };
 }
 
 export async function getQualifyMoversCore(deps: QualifyDeps, windowDays: QualifyWindowDays): Promise<QualifyMovers> {

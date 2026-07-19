@@ -28,6 +28,25 @@ export interface QualifyPayerInput {
   windowDays: QualifyWindowDays;
 }
 
+/**
+ * Drill a resolved payer's cases down to ONE facility (the facility-card tap on mobile). `payer` is the
+ * resolved primary_payer label (from QualifySnapshot.resolved.payerName — works for both the PHI-search
+ * and resolve-by-payer entry paths); `facility` is the tapped card's QualifyFacility.facilityKey (raw
+ * rollup text). Both non-PHI; the query is re-gated + re-scoped server-side under the same principal.
+ */
+export interface QualifyFacilityCasesInput {
+  payer: string;
+  facility: string; // raw rollup facility text (QualifyFacility.facilityKey)
+  windowDays: QualifyWindowDays;
+}
+
+/** Facility-scoped claim lines + the amounts-capability flag (dollar fields already stripped when false). */
+export interface QualifyFacilityCases {
+  cases: QualifyCase[];
+  viewerHasAmountsCapability: boolean;
+  tenantScope: typeof QUALIFY_TENANT_SCOPE;
+}
+
 /** member-id EXACT vs 3-letter alpha-PREFIX — the SNIFFED PHI-token kind (sniffed SERVER-SIDE, never
  *  client-declared). This is the kind mintToken/resolvePayer operate on; 'payer' is NOT one of them. */
 export type QualifyMatchKind = 'member_id' | 'prefix';
@@ -55,6 +74,11 @@ export interface QualifyFacility {
    *  pctAllowedOfBilled. Do not "fix" the sort to pct: rating is the sort key, pct is a displayed value. */
   rank: number;
   name: string;
+  /** RAW rollup facility text — the stable join key for the facility-scoped claim-lines drill
+   *  (getQualifyFacilityCases). NON-PHI (facility identity already flows via `name`); always present
+   *  (the ranking query filters out null/blank facility). Distinct from `name`, which may be the
+   *  resolved dimension name and cannot be matched back to the rollup. */
+  facilityKey: string;
   city: string | null; // facility-location lookup; null when unmapped (new/unlisted facility) — never fabricated
   state: string | null;
   /** Dollar-weighted allowed/billed, 0-100. null only if the guarded denominator collapses (rare). */

@@ -10,12 +10,13 @@
  * facilities back to the top of rating order — it does NOT clear the search or re-resolve.
  */
 import { useEffect, useRef, useState, useTransition, type ReactNode } from 'react';
-import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyMovers } from '@/lib/qualify/actions';
+import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyMovers } from '@/lib/qualify/actions';
 import { QUALIFY_WINDOW_OPTIONS } from '@/lib/qualify/contract';
-import type { QualifySnapshot, QualifyFacility, QualifyMover, QualifyWindowDays } from '@/lib/qualify/contract';
+import type { QualifySnapshot, QualifyFacility, QualifyCase, QualifyMover, QualifyWindowDays } from '@/lib/qualify/contract';
 import { SwipeRow } from '@/components/qualify/m/swipe-row';
 import { TrendSheet } from '@/components/qualify/m/trend-sheet';
 import { DetailSheet } from '@/components/qualify/m/detail-sheet';
+import { ClaimDetailSheet } from '@/components/qualify/m/claim-detail-sheet';
 import { HeatingUp } from '@/components/qualify/m/heating-up';
 import { SwRegister } from '@/components/qualify/m/sw-register';
 import { SearchIcon, RefreshIcon } from '@/components/qualify/m/icons';
@@ -42,6 +43,10 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
   const [deck, setDeck] = useState<{ visible: QualifyFacility[]; queue: QualifyFacility[] }>({ visible: [], queue: [] });
   const [trend, setTrend] = useState<QualifyFacility | null>(null);
   const [detail, setDetail] = useState<QualifyFacility | null>(null);
+  // Facility-scoped claim lines for the open detail sheet: null === loading, [] === none. `claim` is the
+  // single claim line whose ClaimDetailSheet is layered above the list (null === none open).
+  const [facilityCases, setFacilityCases] = useState<QualifyCase[] | null>(null);
+  const [claim, setClaim] = useState<QualifyCase | null>(null);
   const [searched, setSearched] = useState(false);
   // How the CURRENT snapshot was resolved, so a window change re-ranks via the SAME path (window is
   // orthogonal to resolution). byPayer = the Heating-up label (chip tap or on-load auto-resolve);
@@ -143,6 +148,27 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
     }
   }
 
+  // Facility-card tap → open the detail sheet and fetch THAT facility's claim lines (facility-scoped,
+  // most-recent-first, capped at 15). payer comes from resolved.payerName so it works for BOTH the
+  // PHI-search and resolve-by-payer entry paths. The sheet is a full overlay, so no second card can be
+  // tapped until it closes → no in-flight-response race to guard.
+  function openFacility(f: QualifyFacility) {
+    setClaim(null);
+    setFacilityCases(null); // loading
+    setDetail(f);
+    const payer = snapshot?.resolved?.payerName;
+    if (!payer) { setFacilityCases([]); return; }
+    getQualifyFacilityCases({ payer, facility: f.facilityKey, windowDays })
+      .then((r) => setFacilityCases(r.cases))
+      .catch(() => setFacilityCases([]));
+  }
+
+  function closeFacility() {
+    setDetail(null);
+    setFacilityCases(null);
+    setClaim(null);
+  }
+
   function advance(f: QualifyFacility) {
     setDeck(({ visible, queue }) => {
       const nv = visible.filter((x) => x.rank !== f.rank);
@@ -175,7 +201,7 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
       );
     }
     return deck.visible.map((f) => (
-      <SwipeRow key={f.rank} facility={f} onPass={advance} onWhy={(x) => setTrend(x)} onOpen={(x) => setDetail(x)} />
+      <SwipeRow key={f.rank} facility={f} onPass={advance} onWhy={(x) => setTrend(x)} onOpen={openFacility} />
     ));
   }
 
@@ -257,7 +283,17 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
       ) : null}
 
       {trend ? <TrendSheet facility={trend} onClose={() => { const f = trend; setTrend(null); advance(f); }} /> : null}
-      {detail ? <DetailSheet facility={detail} cases={snapshot?.cases ?? []} hasAmounts={hasAmounts} onClose={() => setDetail(null)} /> : null}
+      {detail ? (
+        <DetailSheet
+          facility={detail}
+          cases={facilityCases ?? []}
+          loading={facilityCases === null}
+          hasAmounts={hasAmounts}
+          onOpenClaim={(c) => setClaim(c)}
+          onClose={closeFacility}
+        />
+      ) : null}
+      {claim ? <ClaimDetailSheet claim={claim} hasAmounts={hasAmounts} onClose={() => setClaim(null)} /> : null}
     </div>
   );
 }

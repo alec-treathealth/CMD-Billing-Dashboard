@@ -3,11 +3,13 @@ import { test } from 'node:test';
 import {
   getQualifySnapshotCore,
   getQualifySnapshotByPayerCore,
+  getQualifyFacilityCasesCore,
   getQualifyMoversCore,
   revealQualifyRowCore,
   revealQualifyRowsCore,
   SEARCH_QUALIFY_PHI,
   SEARCH_QUALIFY_PAYER,
+  SEARCH_QUALIFY_FACILITY,
   REVEAL_QUALIFY_ROW,
   REVEAL_QUALIFY_ROWS,
   type QualifyDeps,
@@ -38,9 +40,10 @@ interface Cap {
   audits: Array<{ action: string; detail: Record<string, unknown> }>;
   facilityEntityIds: string[][];
   revealActions: string[];
+  facilityCasesArgs: Array<{ payer: string; facility: string; entityIds: string[] }>;
 }
 function cap(): Cap {
-  return { audits: [], facilityEntityIds: [], revealActions: [] };
+  return { audits: [], facilityEntityIds: [], revealActions: [], facilityCasesArgs: [] };
 }
 
 const SUPER = () => requireQualifyPrincipalFromAccess({ ok: true, access: { user: { email: 's@t.ai', id: 's' }, role: 'super_admin' } });
@@ -57,6 +60,10 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
       return FAC_ROWS;
     },
     loadCases: async () => CASE_ROWS,
+    loadFacilityCases: async (payer, facility, _f, _t, entityIds) => {
+      c.facilityCasesArgs.push({ payer, facility, entityIds });
+      return CASE_ROWS;
+    },
     loadMovers: async () => MOVER_ROWS,
     recordAccess: async (e) => {
       c.audits.push({ action: e.action, detail: e.detail });
@@ -258,6 +265,64 @@ test('by-payer: a blank payer → empty snapshot and NO audit (nothing looked up
   assert.equal(snap.resolved, null);
   assert.deepEqual(snap.facilities, []);
   assert.equal(c.audits.length, 0);
+});
+
+// ── FACILITY DRILL (facility-card tap) ───────────────────────────────────────────────────────────
+const FAC_CASES_IN = { payer: 'AETNA', facility: '405 recovery', windowDays: 30 as const };
+
+test('facility-drill: returns masked cases (never a raw member id) for the resolved payer + facility', async () => {
+  const res = await getQualifyFacilityCasesCore(makeDeps(SUPER, cap()), FAC_CASES_IN);
+  assert.ok(res.cases.length > 0);
+  for (const c of res.cases) assert.equal(c.memberIdMasked, '••••••');
+});
+
+test('facility-drill: passes the RAW facility text + resolved payer + pinned tenancy to the loader', async () => {
+  const c = cap();
+  await getQualifyFacilityCasesCore(makeDeps(SUPER, c), FAC_CASES_IN);
+  assert.equal(c.facilityCasesArgs[0]!.payer, 'AETNA');
+  assert.equal(c.facilityCasesArgs[0]!.facility, '405 recovery');
+  assert.deepEqual(c.facilityCasesArgs[0]!.entityIds, [BXR_ENTITY_ID, INDIGO_ENTITY_ID]);
+});
+
+test('facility-drill: writes the DISTINCT search_qualify_facility audit (payer + facility + window)', async () => {
+  const c = cap();
+  await getQualifyFacilityCasesCore(makeDeps(SUPER, c), FAC_CASES_IN);
+  const audit = c.audits.find((a) => a.action === SEARCH_QUALIFY_FACILITY);
+  assert.ok(audit, 'a search_qualify_facility audit was written');
+  assert.deepEqual(Object.keys(audit!.detail).sort(), ['facility', 'payer', 'window']);
+  assert.equal(audit!.detail.payer, 'AETNA');
+  assert.equal(audit!.detail.facility, '405 recovery');
+  assert.ok(!c.audits.some((a) => a.action === SEARCH_QUALIFY_PHI), 'no PHI-term audit on the facility drill');
+});
+
+test('facility-drill: admissions_seat payload has ZERO dollar values (wire-level, same choke point)', async () => {
+  const res = await getQualifyFacilityCasesCore(makeDeps(SEAT, cap()), FAC_CASES_IN);
+  const wire = JSON.stringify(res);
+  for (const v of [CB, CA]) {
+    assert.ok(!wire.includes(String(v)), `dollar ${v} must NOT appear in an admissions_seat facility-drill payload`);
+  }
+  for (const c of res.cases) {
+    assert.equal(c.billedAmount, null);
+    assert.equal(c.allowedAmount, null);
+  }
+  assert.equal(res.viewerHasAmountsCapability, false);
+});
+
+test('facility-drill: a blank payer or facility → empty cases and NO audit (nothing looked up)', async () => {
+  const c = cap();
+  const a = await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { payer: '  ', facility: 'x', windowDays: 30 });
+  const b = await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { payer: 'AETNA', facility: '  ', windowDays: 30 });
+  assert.deepEqual(a.cases, []);
+  assert.deepEqual(b.cases, []);
+  assert.equal(c.audits.length, 0);
+  assert.equal(c.facilityCasesArgs.length, 0);
+});
+
+test('facility-drill: an entity admin is denied fail-closed', async () => {
+  await assert.rejects(
+    () => getQualifyFacilityCasesCore(makeDeps(ADMIN, cap()), FAC_CASES_IN),
+    /does not have access to Qualify/,
+  );
 });
 
 // ── window math ──────────────────────────────────────────────────────────────────────────────────

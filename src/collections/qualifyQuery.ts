@@ -202,6 +202,55 @@ export function buildCasesQuery(
 }
 
 /**
+ * FACILITY-SCOPED variant of buildCasesQuery: the 15 most-recent DISTINCT patients for the resolved
+ * payer AT ONE FACILITY, in-window, cross-tenant. Identical grain, ordering, masking discipline, and
+ * dimension enrichment as buildCasesQuery — the ONLY difference is the extra `and facility = $facility`
+ * predicate in the inner aggregate. `facility` is the RAW rollup facility text (the same value
+ * buildFacilityRankingQuery groups by, and the same value carried to the client as QualifyFacility.
+ * facilityKey), NOT the resolved facility_code — a single code can alias multiple raw texts that rank
+ * as SEPARATE cards, so scoping by raw text keeps each card's claim list grain-consistent with its rank.
+ */
+export function buildFacilityCasesQuery(
+  payer: string,
+  facility: string,
+  from: string,
+  to: string,
+  entityIds: string[],
+  limit: number = QUALIFY_CASES_LIMIT,
+): { sql: string; params: unknown[] } {
+  const ent = assertEntityScope(entityIds, 'buildFacilityCasesQuery');
+  const { params, add } = paramList();
+  const e = add(ent);
+  const p = add(payer);
+  const fac = add(facility);
+  const f = add(from);
+  const t = add(to);
+  const lim = add(limit);
+  const inner =
+    'select member_id_bidx, ' +
+    '(array_agg(id order by payment_received desc nulls last, charge_date desc nulls last, id desc))[1] as id, ' +
+    '(array_agg(facility order by payment_received desc nulls last, charge_date desc nulls last, id desc))[1] as facility, ' +
+    "to_char(max(charge_date), 'YYYY-MM-DD') as last_dos, max(payment_received) as last_payment, " +
+    'sum(charge_amount)::float8 as billed, sum(allowed_amount)::float8 as allowed, ' +
+    PCT_RATIO_SELECT + ' ' +
+    `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
+    `where business_entity_id = any(${e}::uuid[]) and primary_payer = ${p} and facility = ${fac} ` +
+    `and payment_received >= ${f}::date and payment_received < ${t}::date ` +
+    'group by member_id_bidx';
+  // `agg` alias so FACILITY_DIM_JOINS (which references agg.facility) applies unchanged.
+  const sql =
+    'select agg.id, agg.facility, ' +
+    'coalesce(max(f.facility_name), agg.facility) as facility_name, ' +
+    'max(f.care_setting) as program, ' +
+    'agg.last_dos, agg.pct_allowed, agg.billed, agg.allowed ' +
+    `from (${inner}) agg ` +
+    FACILITY_DIM_JOINS +
+    'group by agg.id, agg.facility, agg.last_dos, agg.pct_allowed, agg.billed, agg.allowed, agg.last_payment ' +
+    `order by agg.last_payment desc nulls last, agg.id desc limit ${lim}`;
+  return { sql, params };
+}
+
+/**
  * Top PAYER movers by DISTINCT-PATIENT delta across two adjacent windows on payment_received,
  * cross-tenant (ruling Q-B, Option B). this=[thisFrom,thisTo), prior=[priorFrom,priorTo).
  * count(distinct member_id_bidx) dampens one-high-frequency-patient skew. Suppression:
