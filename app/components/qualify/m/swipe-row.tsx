@@ -173,9 +173,13 @@ export function SwipeRow({
   }
 
   function onCancel() {
-    // A pointer cancel (OS gesture takeover, etc.) is NEVER a tap — abort without opening detail.
-    drag.current.active = false;
+    // A pointer cancel (OS gesture takeover, etc.) is NEVER a tap — abort without opening detail. If the
+    // gesture had already locked and moved (e.g. iOS edge-swipe-back takes over mid-drag), updateVisuals
+    // has left a partial transform/stamp on the row; spring it back so it doesn't stick offset.
+    const d = drag.current;
+    d.active = false;
     cleanup();
+    if (d.locked) springBack();
   }
 
   function onPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
