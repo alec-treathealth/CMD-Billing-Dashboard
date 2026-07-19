@@ -7,7 +7,7 @@
  * constants — NEVER dollar amounts. So an admissions_seat session (which the server strips of all
  * dollar fields) computes the identical badge with zero dependency on billed/allowed.
  *
- * WHAT IT IS (ruling R-RATING + the distribution-approved constants, 2026-07-17):
+ * WHAT IT IS (ruling R-RATING + the distribution-approved constants, 2026-07-17; reweighted 2026-07-18):
  *   `rating` is a confidence-DAMPENED version of `pctAllowedOfBilled`, DISTINCT from it. Under ruling
  *   Q-G it is BOTH the list SORT key AND the badge-color source; the raw `pctAllowedOfBilled` is a
  *   displayed value only. rating shrinks the observed dollar-weighted allowed/billed ratio toward a
@@ -20,43 +20,62 @@
  *
  *       n         = lineCount (logical charge lines for this facility×payer, in-window)
  *       pctAllowed= pctAllowedOfBilled, 0-100, dollar-weighted allowed/billed
- *       K         = QUALIFY_RATING_K  = 50   (credibility crossover: observed and prior weigh 50/50 at n=50)
+ *       K         = QUALIFY_RATING_K  = 25   (credibility crossover: observed and prior weigh 50/50 at n=25)
  *       PRIOR     = QUALIFY_RATING_PRIOR = 30 (fixed conservative allowed/billed baseline, %)
+ *
+ * REWEIGHT toward the allowed amount (ruling 2026-07-18): K was halved 50→25 so the REAL dollar-weighted
+ * allowed/billed ratio dominates the score from ~25 charge lines instead of ~50 — the shrinkage toward
+ * PRIOR fades twice as fast, i.e. the score leans harder on what a facility actually collects. PRIOR
+ * stays 30 (the anchor is unchanged; K is the ONLY reweight lever). The color cutoffs were recalibrated
+ * in the same ruling (below) so "green still means green" on the reweighted distribution.
  *
  * WHY prior = 30 (NOT the 38.66% book dollar-weighted mean): the prior anchors UNPROVEN / tiny-volume
  * facilities, so it must sit in the amber band — an unproven facility must read "typical / limited
- * data", never green. 38.66% is dollar-weighted (inflated by a few high-volume facilities); the
- * typical FACILITY (unweighted median) is ~29%, so 30 is the right anchor. It is also safely below
- * the ordering-invariant bound (~54.7 at K=50): rating(60,3)=31.7 < rating(55,400)=52.2, so a
- * tiny-volume 60% neither outranks nor out-colors a solid 55%.
+ * data", never green. 38.66% is dollar-weighted (inflated by a few high-volume facilities); the typical
+ * FACILITY sits far lower (unweighted median ~29%; cross-tenant windowed raw-pct p50 ≈ 25), so 30 is the
+ * right anchor. The ordering invariant STILL holds under K=25: rating(60,3)=33.2 (amber) <
+ * rating(55,400)=53.5 (green) — a tiny-volume 60% neither outranks nor out-colors a solid 55%. That
+ * property is pinned by an EXECUTABLE assertion in test/qualifyRating.test.ts (asserts via ratingBucket,
+ * which reads these constants, so it fails the build if K or the cutoffs ever regress it) — NOT by prose.
  *
- * COLOR CUTOFFS (applied to the RATING, never raw pct) — calibrated to the real cross-tenant WINDOWED
- * rating distribution (90d: p25≈25, p50≈29, p75≈34.5, p90≈41): danger < 26 · warn 26–38 · ok ≥ 38.
- * DELIBERATELY STRICT green (ruling 2026-07-17): this is a lead-qualification surface where rating
- * drives both the sort (Q-G) and the color an admissions rep reads as "lean into this lead." A false
- * GREEN is costlier than a false AMBER — amber just means "verify" (which admissions does anyway),
- * while green says "this payer/facility pays, pursue." So green must be trustworthy WITHOUT
- * re-checking; the ≥38 cutoff (≈ the 38.66% book dollar-weighted mean) means "at or above what this
- * book actually collects, earned on real volume." Green lands at ~11–15% of facilities per window —
- * NOT a bug: on a 38% book most facilities are legitimately "typical", only a minority genuinely
- * strong. amber = the prior/unproven middle; red = clearly below typical.
+ * COLOR CUTOFFS (applied to the RATING, never raw pct) — recalibrated 2026-07-18 to the reweighted
+ * (K=25) cross-tenant WINDOWED rating distribution: danger < 25 · warn 25–40 · ok ≥ 40. Red floor ≈ p25,
+ * green ceiling ≈ p83 of that distribution, and STABLE across BOTH the mobile 30d window and desktop's
+ * wider 90d window (this module is shared by both surfaces, so the recolor was signed off on both):
+ *
+ *     window   scored   🟢 ≥40         🟡 25–40        🔴 <25
+ *     30d       393     52  (13.2%)    233 (59.3%)    108 (27.5%)
+ *     90d       539     97  (18.0%)    264 (49.0%)    178 (33.0%)
+ *
+ *   (K=25 pctiles — 30d: p25≈24.5 p50≈28.8 p75≈34.1 p90≈42.6 · 90d: p25≈22.9 p50≈28.7 p75≈36.5 p90≈45.7.)
+ * DELIBERATELY STRICT green: this is a lead-qualification surface where rating drives both the sort (Q-G)
+ * and the color an admissions rep reads as "lean into this lead." A false GREEN is costlier than a false
+ * AMBER — amber just means "verify" (which admissions does anyway), while green says "this payer/facility
+ * pays, pursue." The reweight's MAIN effect is that genuinely-weak facilities the old 30-prior used to
+ * rescue up into amber now correctly read red (30d red 21%→27%); green stays a strict ~13–18% minority.
+ * amber = the prior/unproven middle; red = clearly below typical.
  *
  * v1 does NOT fold any second signal (denial rate, recency, streak, …) into rating — a second term
  * would silently reweight the SORT (rating drives rank under Q-G) and destroy sort explainability.
  * Any future factor is an explicit v2 decision.
  */
 
-/** Fixed conservative allowed/billed prior (%) the rating shrinks toward. */
+/** Fixed conservative allowed/billed prior (%) the rating shrinks toward. Unchanged by the 2026-07-18
+ *  reweight — the anchor stays put; K is the only reweight lever. */
 export const QUALIFY_RATING_PRIOR = 30;
 
-/** Credibility crossover in charge lines: observed and prior weigh 50/50 at lineCount = K. */
-export const QUALIFY_RATING_K = 50;
+/** Credibility crossover in charge lines: observed and prior weigh 50/50 at lineCount = K. Halved
+ *  50→25 on 2026-07-18 so the real allowed/billed ratio dominates from ~25 lines (reweight toward the
+ *  allowed amount). See the module doc. */
+export const QUALIFY_RATING_K = 25;
 
-/** Rating >= this is "ok" (green). Deliberately strict (≈ book mean) — green must mean green on a
- *  lead-qualification surface (a false green is costlier than a false amber). See the module doc. */
-export const RATING_OK_MIN = 38;
-/** Rating in [RATING_WARN_MIN, RATING_OK_MIN) is "warn" (amber); below is "danger" (red). */
-export const RATING_WARN_MIN = 26;
+/** Rating >= this is "ok" (green). Recalibrated 38→40 on 2026-07-18 to ≈ p83 of the reweighted (K=25)
+ *  distribution — green must mean green on a lead surface (a false green is costlier than a false
+ *  amber). See the module doc. */
+export const RATING_OK_MIN = 40;
+/** Rating in [RATING_WARN_MIN, RATING_OK_MIN) is "warn" (amber); below is "danger" (red). Recalibrated
+ *  26→25 on 2026-07-18 to ≈ p25 of the reweighted distribution. */
+export const RATING_WARN_MIN = 25;
 
 export type RatingBucket = 'ok' | 'warn' | 'danger' | 'neutral';
 
