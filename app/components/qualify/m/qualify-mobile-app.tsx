@@ -63,6 +63,11 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
   // Auto-resolve the top mover ONCE, on first load only. A manual search/tap trips this so the on-load
   // resolve can never clobber user intent; a window change never re-trips it (guarded in Effect B).
   const initialResolveDone = useRef(false);
+  // Monotonic request tokens: server-action responses can land out of order (search→search, rapid window
+  // pills, close→reopen a facility), so each async path stamps its issue order and only the LATEST commits
+  // state. Two independent streams: deck resolution (search / payer / window) and the facility-drill fetch.
+  const resolveSeq = useRef(0);
+  const facilitySeq = useRef(0);
 
   const hasAmounts = snapshot ? snapshot.viewerHasAmountsCapability : viewerHasAmountsCapability;
 
@@ -96,9 +101,11 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
     }
     setHint(null);
     initialResolveDone.current = true; // a manual search supersedes the on-load auto-resolve
+    const seq = ++resolveSeq.current;
     startTransition(async () => {
       try {
         const snap = await getQualifySnapshot({ query: t, windowDays: w });
+        if (seq !== resolveSeq.current) return; // a newer resolve superseded this one — drop it
         setSnapshot(snap);
         setSearched(true);
         setByPayer(null); // resolved via the PHI path, not by payer
@@ -112,6 +119,7 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
           setDeck({ visible: snap.facilities.slice(0, VISIBLE), queue: snap.facilities.slice(VISIBLE) });
         }
       } catch {
+        if (seq !== resolveSeq.current) return;
         setHint('Qualify is unavailable right now. Please try again.');
       }
     });
@@ -122,9 +130,11 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
   function resolveByPayer(label: string, w: QualifyWindowDays) {
     setHint(null);
     initialResolveDone.current = true; // a chip tap supersedes the on-load auto-resolve
+    const seq = ++resolveSeq.current;
     startTransition(async () => {
       try {
         const snap = await getQualifySnapshotByPayer({ payer: label, windowDays: w });
+        if (seq !== resolveSeq.current) return; // a newer resolve superseded this one — drop it
         setSnapshot(snap);
         setSearched(true);
         setByPayer(label); // remember it so a window change re-ranks this same payer
@@ -133,6 +143,7 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
         setEcho('');
         setDeck({ visible: snap.facilities.slice(0, VISIBLE), queue: snap.facilities.slice(VISIBLE) });
       } catch {
+        if (seq !== resolveSeq.current) return;
         setHint('Qualify is unavailable right now. Please try again.');
       }
     });
@@ -168,20 +179,23 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
 
   // Facility-card tap → open the detail sheet and fetch THAT facility's claim lines (facility-scoped,
   // most-recent-first, capped at 15). payer comes from resolved.payerName so it works for BOTH the
-  // PHI-search and resolve-by-payer entry paths. The sheet is a full overlay, so no second card can be
-  // tapped until it closes → no in-flight-response race to guard.
+  // PHI-search and resolve-by-payer entry paths. A close→reopen-a-different-card can leave two fetches in
+  // flight; the facilitySeq token ensures only the latest open's response paints (and a close invalidates
+  // any pending one), so a slow prior fetch can never land under the wrong facility's header.
   function openFacility(f: QualifyFacility) {
     setClaim(null);
     setFacilityCases(null); // loading
     setDetail(f);
+    const seq = ++facilitySeq.current;
     const payer = snapshot?.resolved?.payerName;
     if (!payer) { setFacilityCases([]); return; }
     getQualifyFacilityCases({ payer, facility: f.facilityKey, windowDays })
-      .then((r) => setFacilityCases(r.cases))
-      .catch(() => setFacilityCases([]));
+      .then((r) => { if (seq === facilitySeq.current) setFacilityCases(r.cases); })
+      .catch(() => { if (seq === facilitySeq.current) setFacilityCases([]); });
   }
 
   function closeFacility() {
+    facilitySeq.current++; // invalidate any in-flight drill so it can't paint after the sheet is gone
     setDetail(null);
     setFacilityCases(null);
     setClaim(null);
