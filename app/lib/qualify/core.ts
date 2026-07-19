@@ -15,6 +15,7 @@ import {
   QUALIFY_TENANT_SCOPE,
   QUALIFY_MEMBER_ID_MASK,
   type QualifyInput,
+  type QualifyPayerInput,
   type QualifyMatchKind,
   type QualifySnapshot,
   type QualifyResolved,
@@ -37,6 +38,8 @@ import type {
 
 /** Distinct audit action labels (post reveal-audit-action fix) — Qualify surfaces are attributable. */
 export const SEARCH_QUALIFY_PHI = 'search_qualify_phi';
+/** Resolve-by-payer audit — a payer LABEL was looked up (non-PHI, distinct from the PHI-term search). */
+export const SEARCH_QUALIFY_PAYER = 'search_qualify_payer';
 export const REVEAL_QUALIFY_ROW = 'reveal_qualify_row';
 export const REVEAL_QUALIFY_ROWS = 'reveal_qualify_rows';
 
@@ -182,6 +185,61 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
     payerName,
     matchedOn: kind,
     matchedValue: alphaEcho(raw),
+    totalCharges: facilities.reduce((s, f) => s + f.lineCount, 0),
+    facilityCount: facilities.length,
+    windowStart: from,
+    windowEnd: to,
+  };
+  const snap: QualifySnapshot = {
+    resolved,
+    facilities,
+    cases,
+    viewerHasAmountsCapability: gate.hasAmounts,
+    tenantScope: QUALIFY_TENANT_SCOPE,
+  };
+  return gate.hasAmounts ? snap : stripSnapshotAmounts(snap); // stripAmounts LAST
+}
+
+/**
+ * Resolve-by-primary-payer: load a payer's facilities + cases DIRECTLY from its label (a QualifyMover's
+ * `label`, i.e. a primary_payer value), bypassing the member-id/prefix PHI resolve. Reuses the SAME
+ * facility/case loaders, assembly, tenancy scope, and amounts choke point as getQualifySnapshotCore.
+ * No mintToken, no resolvePayer, no SEARCH_QUALIFY_PHI — no PHI term is searched. A real payer with no
+ * in-window facilities yields the non-null resolved + facilities:[] state (never the VOB null state).
+ */
+export async function getQualifySnapshotByPayerCore(
+  deps: QualifyDeps,
+  input: QualifyPayerInput,
+): Promise<QualifySnapshot> {
+  const gate = await deps.requirePrincipal();
+  if (!gate.ok) throw new Error(gate.error); // fail-closed backstop (route guards are the primary gate)
+
+  const windowDays: QualifyWindowDays = input.windowDays;
+  if (!isQualifyWindow(windowDays)) throw new Error('Invalid window.');
+
+  const payer = (input.payer ?? '').trim();
+  if (payer === '' || payer.length > 120) return emptySnapshot(gate.hasAmounts);
+
+  // Non-PHI lookup (payer label, not a member term) → distinct audit action; payer name is not PHI.
+  await deps.recordAccess({
+    actorEmail: gate.actor.email,
+    actorUserId: gate.actor.userId,
+    action: SEARCH_QUALIFY_PAYER,
+    detail: { payer, window: windowDays },
+  });
+
+  const { from, to } = qualifyWindowBounds(windowDays, deps.now());
+  const [facRows, caseRows] = await Promise.all([
+    deps.loadFacilities(payer, from, to, gate.entityIds),
+    deps.loadCases(payer, from, to, gate.entityIds),
+  ]);
+
+  const facilities = assembleFacilities(facRows);
+  const cases = assembleCases(caseRows);
+  const resolved: QualifyResolved = {
+    payerName: payer,
+    matchedOn: 'payer',
+    matchedValue: '', // no PHI prefix echo on the resolve-by-payer path
     totalCharges: facilities.reduce((s, f) => s + f.lineCount, 0),
     facilityCount: facilities.length,
     windowStart: from,

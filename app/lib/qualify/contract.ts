@@ -18,8 +18,22 @@ export interface QualifyInput {
   windowDays: QualifyWindowDays;
 }
 
-/** member-id EXACT vs 3-letter alpha-PREFIX — sniffed SERVER-SIDE, never client-declared. */
+/**
+ * Resolve a payer's facilities DIRECTLY by its primary_payer label (the same value a QualifyMover
+ * carries), skipping the member-id/prefix PHI step. Deliberately a SEPARATE type from QualifyInput so
+ * a member id can never structurally flow down this non-PHI path.
+ */
+export interface QualifyPayerInput {
+  payer: string; // plaintext primary_payer label (non-PHI) — matched exactly against the rollup column
+  windowDays: QualifyWindowDays;
+}
+
+/** member-id EXACT vs 3-letter alpha-PREFIX — the SNIFFED PHI-token kind (sniffed SERVER-SIDE, never
+ *  client-declared). This is the kind mintToken/resolvePayer operate on; 'payer' is NOT one of them. */
 export type QualifyMatchKind = 'member_id' | 'prefix';
+/** How a RESOLVED payer was matched: a sniffed PHI token (member_id | prefix), OR 'payer' — the
+ *  resolve-by-primary-payer label path (no PHI token; the movers/Heating-up tap). matchedOn uses this. */
+export type QualifyResolvedKind = QualifyMatchKind | 'payer';
 /** <=3 chars ⇒ alpha-prefix, else exact member-id (the searchAuditPatients precedent). Pure. */
 export function sniffQualifyKind(query: string): QualifyMatchKind {
   return query.trim().length <= 3 ? 'prefix' : 'member_id';
@@ -27,7 +41,7 @@ export function sniffQualifyKind(query: string): QualifyMatchKind {
 
 export interface QualifyResolved {
   payerName: string;
-  matchedOn: QualifyMatchKind;
+  matchedOn: QualifyResolvedKind;
   /** Non-PHI alpha-prefix echo (<=3 chars). NEVER the raw member id — the client echoes its own input. */
   matchedValue: string;
   totalCharges: number; // logical charges (rollup grain) for the resolved payer, in-window

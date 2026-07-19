@@ -1,9 +1,15 @@
 'use client';
 
 /**
- * Qualify tab — the interactive container. Owns search/window/toggle/modal state and is the only
- * caller of the getQualifySnapshot Server Action (the browser's sole data path). It hands plain,
- * already-shaped data to the pure presentational children (facility panel, cases table, VOB modal).
+ * Qualify tab — the interactive container. Owns search/window/toggle/modal state and is the caller of
+ * the Qualify Server Actions (the browser's sole data path): getQualifySnapshot (member/prefix search),
+ * getQualifySnapshotByPayer (resolve-by-payer), and getQualifyMovers (for the on-load default). It
+ * hands plain, already-shaped data to the pure presentational children (facility panel, cases table,
+ * VOB modal).
+ *
+ * ON LOAD it auto-resolves the top "Heating up" payer so the tab lands POPULATED (matching the
+ * mockup's populated-on-load feel) instead of an empty search prompt. The user can then search or
+ * change the window to switch payers; a manual search clears the by-payer default.
  *
  * Amounts capability is server-authoritative: it comes from the snapshot once one exists, and is
  * seeded before the first search by the server-derived prop so an admissions_seat never renders the
@@ -12,9 +18,9 @@
  * Window control is 7/14/30/60/90 (contract QUALIFY_WINDOW_OPTIONS) — the mock's "Month" was
  * dropped (Alec) because it is a different window shape than the contract's trailing-N-days math.
  */
-import { useCallback, useMemo, useState, useTransition } from 'react';
+import { useCallback, useEffect, useMemo, useState, useTransition } from 'react';
 import { Search } from 'lucide-react';
-import { getQualifySnapshot, revealQualifyRow } from '@/lib/qualify/actions';
+import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyMovers, revealQualifyRow } from '@/lib/qualify/actions';
 import {
   QUALIFY_WINDOW_OPTIONS,
   type QualifySnapshot,
@@ -52,6 +58,12 @@ export function QualifyTab({
   const [echo, setEcho] = useState('');
   const [hint, setHint] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
+  // Non-null when the CURRENT resolution came from the by-payer path (the on-load default or a future
+  // payer tap), so a window change re-resolves by payer instead of re-running an (empty) search.
+  const [byPayer, setByPayer] = useState<string | null>(null);
+  // True until the on-load auto-resolve of the top payer settles (so we show "Resolving…", not the
+  // empty search prompt, on first paint).
+  const [initializing, setInitializing] = useState(true);
   // PHI reveal (Prompt 3c): `revealed` caches the FETCHED PHI for the session (never dropped on hide);
   // `shown` controls visibility. Toggling a revealed row off/on never re-audits — one audited
   // revealQualifyRow per row per session. All four reset on a new search.
@@ -83,6 +95,7 @@ export function QualifyTab({
         const snap = await getQualifySnapshot({ query: trimmed, windowDays: w });
         setSnapshot(snap);
         setHasSearched(true);
+        setByPayer(null); // an explicit search supersedes the by-payer default
         if (snap.resolved === null) {
           setEcho(trimmed);
           setModalOpen(true);
@@ -97,6 +110,48 @@ export function QualifyTab({
         setHint('Qualify is unavailable right now. Please try again.');
       }
     });
+  }, []);
+
+  // Resolve directly by payer label (the on-load default; reuses the resolve-by-payer action). Mirrors
+  // runSearch's reveal-state reset. Sets `byPayer` so a window change re-resolves this payer.
+  const resolveByPayer = useCallback((payer: string, w: QualifyWindowDays) => {
+    setHint(null);
+    setRevealed(new Map());
+    setShown(new Set());
+    setPendingIds(new Set());
+    setRevealErrors(new Map());
+    startTransition(async () => {
+      try {
+        const snap = await getQualifySnapshotByPayer({ payer, windowDays: w });
+        setSnapshot(snap);
+        setHasSearched(true);
+        setByPayer(payer);
+        setModalOpen(false);
+      } catch {
+        setHint('Qualify is unavailable right now. Please try again.');
+      }
+    });
+  }, []);
+
+  // On load, land POPULATED: resolve the top "Heating up" payer (highest distinct-patient mover). If
+  // there are no movers or the fetch fails, fall through to the empty search prompt. Runs once.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const m = await getQualifyMovers(windowDays);
+        const top = m.movers[0]?.label;
+        if (alive && top) resolveByPayer(top, windowDays);
+      } catch {
+        // leave the empty prompt — the user can still search
+      } finally {
+        if (alive) setInitializing(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const toggleReveal = useCallback(
@@ -152,8 +207,10 @@ export function QualifyTab({
 
   const onWindow = (w: QualifyWindowDays) => {
     setWindowDays(w);
-    // Re-run only when a payer is already resolved, so the panels track the new window.
-    if (snapshot?.resolved) runSearch(query, w);
+    // Re-resolve so the panels track the new window — by payer if that's how we resolved, else by the
+    // search query. (Only when something is already resolved.)
+    if (byPayer) resolveByPayer(byPayer, w);
+    else if (snapshot?.resolved) runSearch(query, w);
   };
 
   const resolved = snapshot?.resolved ?? null;
@@ -237,6 +294,8 @@ export function QualifyTab({
               <>
                 matched on prefix <span className="font-mono text-ink900">{resolved.matchedValue}</span>
               </>
+            ) : resolved.matchedOn === 'payer' ? (
+              <>top payer this window</>
             ) : (
               <>matched on member ID</>
             )}{' '}
@@ -263,6 +322,10 @@ export function QualifyTab({
             revealErrors={revealErrors}
             onToggle={toggleReveal}
           />
+        </div>
+      ) : initializing || isPending ? (
+        <div className="rounded-xl border border-dashed bg-card p-10 text-center text-sm text-muted-foreground">
+          Resolving…
         </div>
       ) : (
         <div className="rounded-xl border border-dashed bg-card p-10 text-center text-sm text-muted-foreground">

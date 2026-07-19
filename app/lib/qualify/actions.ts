@@ -20,6 +20,7 @@ import {
 import { memberIdBlindIndex, alphaPrefixBlindIndex } from '../../../src/collections/blindIndex';
 import {
   getQualifySnapshotCore,
+  getQualifySnapshotByPayerCore,
   getQualifyMoversCore,
   revealQualifyRowCore,
   revealQualifyRowsCore,
@@ -27,6 +28,7 @@ import {
 } from '@/lib/qualify/core';
 import type {
   QualifyInput,
+  QualifyPayerInput,
   QualifySnapshot,
   QualifyMovers,
   QualifyWindowDays,
@@ -49,6 +51,11 @@ const realDeps: QualifyDeps = {
 
 export async function getQualifySnapshot(input: QualifyInput): Promise<QualifySnapshot> {
   return getQualifySnapshotCore(realDeps, input);
+}
+
+/** Resolve-by-payer: load a payer's facilities/cases directly from its label (the Heating-up path). */
+export async function getQualifySnapshotByPayer(input: QualifyPayerInput): Promise<QualifySnapshot> {
+  return getQualifySnapshotByPayerCore(realDeps, input);
 }
 
 export async function getQualifyMovers(windowDays: QualifyWindowDays): Promise<QualifyMovers> {

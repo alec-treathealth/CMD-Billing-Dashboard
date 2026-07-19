@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   getQualifySnapshotCore,
+  getQualifySnapshotByPayerCore,
   getQualifyMoversCore,
   revealQualifyRowCore,
   revealQualifyRowsCore,
   SEARCH_QUALIFY_PHI,
+  SEARCH_QUALIFY_PAYER,
   REVEAL_QUALIFY_ROW,
   REVEAL_QUALIFY_ROWS,
   type QualifyDeps,
@@ -195,6 +197,66 @@ test('unusable query (no token) → resolved:null and NO audit (nothing was sear
   const c = cap();
   const snap = await getQualifySnapshotCore(makeDeps(SUPER, c, { mintToken: () => null }), { query: 'ab', windowDays: 7 });
   assert.equal(snap.resolved, null);
+  assert.equal(c.audits.length, 0);
+});
+
+// ── RESOLVE-BY-PAYER (Heating-up tap path) ───────────────────────────────────────────────────────
+const PAYER_IN = { payer: 'AETNA', windowDays: 30 as const };
+
+test('by-payer: resolves facilities in rating order WITHOUT the PHI resolve (mintToken/resolvePayer never called)', async () => {
+  const deps = makeDeps(SUPER, cap(), {
+    mintToken: () => {
+      throw new Error('mintToken must not run on the payer path');
+    },
+    resolvePayer: async () => {
+      throw new Error('resolvePayer must not run on the payer path');
+    },
+  });
+  const snap = await getQualifySnapshotByPayerCore(deps, PAYER_IN);
+  assert.equal(snap.resolved?.payerName, 'AETNA');
+  assert.equal(snap.resolved?.matchedOn, 'payer');
+  assert.equal(snap.resolved?.matchedValue, ''); // no PHI prefix echo on this path
+  assert.equal(snap.facilities[0]!.name, '405 RECOVERY'); // rating order preserved (same as PHI path)
+  assert.equal(snap.facilities[1]!.name, 'CA MENTAL HEALTH');
+});
+
+test('by-payer: writes the distinct search_qualify_payer audit (payer label) — never search_qualify_phi', async () => {
+  const c = cap();
+  await getQualifySnapshotByPayerCore(makeDeps(SUPER, c), PAYER_IN);
+  const audit = c.audits.find((a) => a.action === SEARCH_QUALIFY_PAYER);
+  assert.ok(audit, 'a search_qualify_payer audit was written');
+  assert.deepEqual(Object.keys(audit!.detail).sort(), ['payer', 'window']);
+  assert.equal(audit!.detail.payer, 'AETNA');
+  assert.ok(!c.audits.some((a) => a.action === SEARCH_QUALIFY_PHI), 'no PHI-term audit on the payer path');
+});
+
+test('by-payer: admissions_seat payload has ZERO dollar values (wire-level)', async () => {
+  const snap = await getQualifySnapshotByPayerCore(makeDeps(SEAT, cap()), PAYER_IN);
+  const wire = JSON.stringify(snap);
+  for (const v of [B1, A1, B2, A2, CB, CA]) {
+    assert.ok(!wire.includes(String(v)), `dollar ${v} must NOT appear in an admissions_seat payer payload`);
+  }
+  assert.equal(snap.viewerHasAmountsCapability, false);
+});
+
+test('by-payer: loader receives the pinned [BXR,Indigo] tenancy scope', async () => {
+  const c = cap();
+  await getQualifySnapshotByPayerCore(makeDeps(SUPER, c), PAYER_IN);
+  assert.deepEqual(c.facilityEntityIds[0], [BXR_ENTITY_ID, INDIGO_ENTITY_ID]);
+});
+
+test('by-payer: an entity admin is denied fail-closed', async () => {
+  await assert.rejects(
+    () => getQualifySnapshotByPayerCore(makeDeps(ADMIN, cap()), PAYER_IN),
+    /does not have access to Qualify/,
+  );
+});
+
+test('by-payer: a blank payer → empty snapshot and NO audit (nothing looked up)', async () => {
+  const c = cap();
+  const snap = await getQualifySnapshotByPayerCore(makeDeps(SUPER, c), { payer: '  ', windowDays: 30 });
+  assert.equal(snap.resolved, null);
+  assert.deepEqual(snap.facilities, []);
   assert.equal(c.audits.length, 0);
 });
 
