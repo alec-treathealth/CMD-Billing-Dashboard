@@ -148,20 +148,36 @@ export interface QualifyRevealedRow extends QualifyPhi {
 }
 export type RevealQualifyRowsResult = { ok: true; rows: QualifyRevealedRow[] } | { ok: false; error: string };
 
+/** The billing/admissions team's calendar zone — the ops "today" that anchors every window. Matches the
+ *  business timezone the admin log surface already renders in (America/Los_Angeles). */
+export const QUALIFY_BUSINESS_TZ = 'America/Los_Angeles';
+
 /**
- * SERVER-CLOCK window bounds. this=[from,to) is `windowDays` days ending today (today included);
- * prior=[priorFrom,priorTo) is the adjacent equal-length window. All UTC ISO dates. `today`
- * is injectable so the math is unit-testable without a live clock.
+ * BUSINESS-DAY window bounds. this=[from,to) is `windowDays` days ending today (today included);
+ * prior=[priorFrom,priorTo) is the adjacent equal-length window. All are calendar (date-only) ISO
+ * strings. `today` is anchored to the ops calendar day in QUALIFY_BUSINESS_TZ, NOT the server's UTC
+ * day: Vercel runs TZ=UTC, so from ~afternoon-to-midnight Pacific the raw UTC date is already tomorrow
+ * and every window would silently slide forward a day. We take the civil Y-M-D in the business zone,
+ * then do plain calendar arithmetic on it. `now` is injectable so the math is unit-testable.
  */
 export function qualifyWindowBounds(
   windowDays: number,
-  today: Date,
+  now: Date,
 ): { from: string; to: string; priorFrom: string; priorTo: string } {
+  // Civil year/month/day in the business zone (formatToParts is locale-format-independent).
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: QUALIFY_BUSINESS_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+  const part = (t: string) => Number(parts.find((p) => p.type === t)!.value);
+  const anchor = new Date(Date.UTC(part('year'), part('month') - 1, part('day')));
   const shift = (base: Date, days: number) =>
     new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate() + days));
   const iso = (x: Date) => x.toISOString().slice(0, 10);
-  const to = shift(today, 1); // exclusive upper = tomorrow, so all of today is in-window
-  const from = shift(today, -(windowDays - 1)); // inclusive lower → exactly windowDays days
+  const to = shift(anchor, 1); // exclusive upper = tomorrow, so all of today is in-window
+  const from = shift(anchor, -(windowDays - 1)); // inclusive lower → exactly windowDays days
   const priorTo = from; // adjacent, non-overlapping
   const priorFrom = shift(from, -windowDays);
   return { from: iso(from), to: iso(to), priorFrom: iso(priorFrom), priorTo: iso(priorTo) };

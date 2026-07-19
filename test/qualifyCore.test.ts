@@ -327,9 +327,20 @@ test('facility-drill: an entity admin is denied fail-closed', async () => {
 
 // ── window math ──────────────────────────────────────────────────────────────────────────────────
 test('qualifyWindowBounds: this + prior windows are adjacent, equal-length, non-overlapping', () => {
-  const b = qualifyWindowBounds(30, new Date('2026-07-17T00:00:00Z'));
+  // Noon UTC = 5am Pacific → business day is unambiguously 2026-07-17 in either zone.
+  const b = qualifyWindowBounds(30, new Date('2026-07-17T12:00:00Z'));
   assert.equal(b.to, '2026-07-18'); // exclusive upper = tomorrow (today included)
   assert.equal(b.from, '2026-06-18'); // 30 days ending today
   assert.equal(b.priorTo, b.from); // adjacent
   assert.equal(b.priorFrom, '2026-05-19'); // prior 30 days
+});
+
+test('qualifyWindowBounds: anchors to the business (Pacific) calendar day, not the UTC day', () => {
+  // 2026-07-18T04:00:00Z is 2026-07-17 21:00 Pacific — still the 17th for the ops team even though the
+  // server's UTC date has already rolled to the 18th. The window must reflect the 17th, matching the
+  // mid-day instant above; a UTC-naive anchor would slide every bound forward a day.
+  const evening = qualifyWindowBounds(30, new Date('2026-07-18T04:00:00Z'));
+  assert.equal(evening.to, '2026-07-18');
+  assert.equal(evening.from, '2026-06-18');
+  assert.equal(evening.priorFrom, '2026-05-19');
 });
