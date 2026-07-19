@@ -15,6 +15,7 @@ import {
   type QualifyDeps,
 } from '../app/lib/qualify/core.js';
 import { requireQualifyPrincipalFromAccess } from '../app/lib/qualify/principal.js';
+import { QUALIFY_MIN_LINES } from '../app/lib/qualify/rating.js';
 import { qualifyWindowBounds } from '../app/lib/qualify/contract.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../app/lib/views.js';
 
@@ -83,15 +84,30 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
 
 const IN = { query: 'AETMEMBER123', windowDays: 30 as const }; // long → member_id kind
 
-// ── #1 RANK ORDER (silent-bug guard): the ACTION returns facilities in RATING order ──────────────
-test('snapshot: a thin high-pct facility sorts BELOW a solid mid-pct one (rating-ordered, not pct)', async () => {
+// ── #1 RANK ORDER (silent-bug guard): value-first — higher allowed% ranks first, volume never demotes ─
+test('snapshot: a small high-% facility RANKS ABOVE a large mid-% one (value-first, ruling 2026-07-19b)', async () => {
   const snap = await getQualifySnapshotCore(makeDeps(SUPER, cap()), IN);
-  assert.equal(snap.facilities[0]!.name, '405 RECOVERY'); // 55%@400 → rating ~52 → rank 1
-  assert.equal(snap.facilities[1]!.name, 'CA MENTAL HEALTH'); // 60%@3 → rating ~32 → rank 2
-  // The higher RAW pct is the one ranked SECOND — proves the sort is rating, not pctAllowedOfBilled.
-  assert.ok((snap.facilities[1]!.pctAllowedOfBilled ?? 0) > (snap.facilities[0]!.pctAllowedOfBilled ?? 0));
+  assert.equal(snap.facilities[0]!.name, 'CA MENTAL HEALTH'); // 60% (3 lines, ≥ floor) → rank 1 on merit
+  assert.equal(snap.facilities[1]!.name, '405 RECOVERY'); // 55% (400 lines) → rank 2
+  // The higher allowed% ranks FIRST despite far less volume — rating = allowed%, no volume drag.
+  assert.ok((snap.facilities[0]!.pctAllowedOfBilled ?? 0) > (snap.facilities[1]!.pctAllowedOfBilled ?? 0));
+  assert.equal(snap.facilities[0]!.rating, 60); // rating IS the allowed%
   assert.equal(snap.facilities[0]!.rank, 1);
   assert.equal(snap.facilities[1]!.rank, 2);
+});
+
+// ── #1b FLOOR: a below-QUALIFY_MIN_LINES fluke never surfaces (but genuinely small facilities do) ────
+test('snapshot: a below-floor facility (< QUALIFY_MIN_LINES charge lines) is suppressed from the list', async () => {
+  const deps = makeDeps(SUPER, cap(), {
+    loadFacilities: async () => [
+      { facility: 'fluke', facility_name: 'FLUKE 100%', facility_code: null, line_count: QUALIFY_MIN_LINES - 1, billed: 100, allowed: 100, pct_allowed: 100 },
+      ...FAC_ROWS,
+    ],
+  });
+  const snap = await getQualifySnapshotCore(deps, IN);
+  assert.ok(!snap.facilities.some((f) => f.name === 'FLUKE 100%'), 'a 100%-on-1-line fluke is filtered out (below floor)');
+  assert.equal(snap.facilities.length, 2); // only the two genuine facilities remain
+  assert.equal(snap.facilities[0]!.name, 'CA MENTAL HEALTH'); // still value-first ranked (60% > 55%)
 });
 
 // ── #2 AMOUNTS wire-level, BOTH actions, BOTH states ─────────────────────────────────────────────
@@ -223,8 +239,8 @@ test('by-payer: resolves facilities in rating order WITHOUT the PHI resolve (min
   assert.equal(snap.resolved?.payerName, 'AETNA');
   assert.equal(snap.resolved?.matchedOn, 'payer');
   assert.equal(snap.resolved?.matchedValue, ''); // no PHI prefix echo on this path
-  assert.equal(snap.facilities[0]!.name, '405 RECOVERY'); // rating order preserved (same as PHI path)
-  assert.equal(snap.facilities[1]!.name, 'CA MENTAL HEALTH');
+  assert.equal(snap.facilities[0]!.name, 'CA MENTAL HEALTH'); // value-first order preserved (same as PHI path)
+  assert.equal(snap.facilities[1]!.name, '405 RECOVERY');
 });
 
 test('by-payer: writes the distinct search_qualify_payer audit (payer label) — never search_qualify_phi', async () => {

@@ -1,9 +1,9 @@
 'use client';
 
 /**
- * Qualify mobile — "why is this rated X" trend sheet (right-swipe). Renders entirely from the facility
- * object already in hand (no query): raw pctAllowedOfBilled, lineCount, the DYNAMIC per-facility
- * explanation (explainRating — weight on real data + a generated sentence), then the final rating +
+ * Qualify mobile — "why is this rated X" trend sheet (right-swipe peek). Renders entirely from the
+ * facility object already in hand (no query): raw pctAllowedOfBilled, lineCount, the DYNAMIC per-facility
+ * explanation (explainRating — the value-first sentence + limited-data flag), then the final rating +
  * bucket. Carries NO dollar fields by design. Light bottom-sheet.
  */
 import { mobileBucketStyle } from './colors';
@@ -40,9 +40,8 @@ export function TrendSheet({ facility, onClose }: { facility: QualifyFacility; o
         </div>
         <div className="ths-h" style={{ marginTop: 4, fontSize: 16, fontWeight: 600, color: INK900 }}>{facility.name}</div>
         <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <StatRow label="Raw allowed / billed" value={ex.rawPct === null ? '—' : `${Math.round(ex.rawPct)}%`} mono />
+          <StatRow label="Allowed / billed" value={ex.rawPct === null ? '—' : `${Math.round(ex.rawPct)}%`} mono />
           <StatRow label="Claim lines this window" value={String(ex.lineCount)} mono />
-          <StatRow label="Weight on real data" value={`${Math.round(ex.volumeWeight * 100)}%`} mono />
           <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5, color: INK600 }}>{ex.sentence}</p>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, borderTop: `0.5px solid ${LINE}`, paddingTop: 10 }}>
             <span style={{ color: INK600 }}>Rating</span>

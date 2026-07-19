@@ -1,15 +1,15 @@
 /**
- * Qualify color mapping — PURE, client-safe, no React. The 38/26 RATING cutoffs live in
- * app/lib/qualify/rating.ts (ratingBucket) — the ONE shared source both the desktop tab (Prompt 3)
+ * Qualify color mapping — PURE, client-safe, no React. The 50/30 RATING cutoffs (on the allowed%) live
+ * in app/lib/qualify/rating.ts (ratingBucket) — the ONE shared source both the desktop tab (Prompt 3)
  * and the mobile PWA (Prompt 4) import; this module only maps a bucket → the CSS class the surface
  * paints with, and builds the facility-name → bucket map the cases panel tints from.
  *
  * Imports are RELATIVE (not the `@/` alias) so this and its consumers load under `tsx` in the
  * hermetic render test without depending on tsconfig path-alias resolution.
  *
- * CASE-COLOR RULE (ruling 2026-07-17): a case row is tinted by its PARENT FACILITY's dampened rating
- * bucket — NEVER by the case's own n=1 raw pct (raw pct on the thinnest possible volume is exactly
- * what the dampening exists to correct). Same "green means green" everywhere; no case can fake green.
+ * CASE-COLOR RULE (ruling 2026-07-17): a case row is tinted by its PARENT FACILITY's rating bucket —
+ * NEVER by the case's own pct. A single case's ratio is anecdotal; the facility's allowed% (the rating)
+ * is the payer-behavior signal. Same "green means green" everywhere; no single case can fake a color.
  */
 import { ratingBucket, type RatingBucket } from '../../lib/qualify/rating';
 import type { QualifyFacility } from '../../lib/qualify/contract';

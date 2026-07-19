@@ -6,7 +6,7 @@
  * This module has NO server-only runtime import (only pure app modules + type-only imports), so tests
  * can load it hermetically. All PHI/DB/crypto reach it only through the injected QualifyDeps.
  */
-import { qualifyRating } from './rating';
+import { qualifyRating, QUALIFY_MIN_LINES } from './rating';
 import { facilityLocation } from './facilityLocations';
 import {
   isQualifyWindow,
@@ -112,9 +112,15 @@ function alphaEcho(raw: string): string {
   return raw.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 3);
 }
 
-/** Shape + rate + sort the facility rows. Q-G: rank by rating desc (nulls last), tiebreak pct then name. */
+/**
+ * Shape + rate + sort the facility rows. VALUE-FIRST (ruling 2026-07-19b): rank by rating = allowed%
+ * desc (nulls last), tiebreak name. FLOOR: drop facilities under QUALIFY_MIN_LINES charge lines first, so
+ * a degenerate "100% on 1 line" fluke never surfaces — but a genuinely small facility (>= the floor)
+ * ranks on its merit, never demoted for being small.
+ */
 function assembleFacilities(rows: QualifyFacilityRow[]): QualifyFacility[] {
   return rows
+    .filter((r) => r.line_count >= QUALIFY_MIN_LINES)
     .map((r) => ({
       rank: 0,
       name: r.facility_name ?? r.facility,
@@ -122,7 +128,7 @@ function assembleFacilities(rows: QualifyFacilityRow[]): QualifyFacility[] {
       city: facilityLocation(r.facility_code)?.city ?? null,
       state: facilityLocation(r.facility_code)?.state ?? null,
       pctAllowedOfBilled: r.pct_allowed,
-      rating: qualifyRating(r.pct_allowed, r.line_count),
+      rating: qualifyRating(r.pct_allowed),
       streakSignal: null, // Q-E: always null in v1
       billedAmount: r.billed,
       allowedAmount: r.allowed,

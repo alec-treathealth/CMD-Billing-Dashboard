@@ -1,8 +1,8 @@
 /**
  * Qualify MOBILE bucket presentation (Prompt 4b) — PURE, client-safe, light-scheme, matching the
  * approved prototype (docs/mockups/qualify-swipe-list-light.html). Derives the bucket from
- * `ratingBucket` (rating.ts — the ONE source of the 26/38 cutoffs); this maps bucket → the mobile
- * tint / color / short label only. It does NOT re-derive the rating formula.
+ * `ratingBucket` (rating.ts — the ONE source of the 50/30 cutoffs, on the allowed%); this maps bucket →
+ * the mobile tint / color / short label only. It does NOT re-derive the rating formula.
  *
  * These tints are the mobile-specific values from the prototype (light backgrounds behind the
  * facility icon), deliberately distinct from desktop's `.q-*-wash`. Relative imports so this and its

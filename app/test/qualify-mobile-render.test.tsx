@@ -22,7 +22,7 @@ const FAC: QualifyFacility = {
   city: 'San Diego',
   state: 'CA',
   pctAllowedOfBilled: 61,
-  rating: qualifyRating(61, 812)!,
+  rating: qualifyRating(61)!,
   streakSignal: null,
   billedAmount: 412300,
   allowedAmount: 251500,

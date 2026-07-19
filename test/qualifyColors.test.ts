@@ -13,7 +13,7 @@ function fac(name: string, pct: number | null, lineCount: number, rank = 1): Qua
     city: null,
     state: null,
     pctAllowedOfBilled: pct,
-    rating: qualifyRating(pct, lineCount),
+    rating: qualifyRating(pct),
     streakSignal: null,
     billedAmount: null,
     allowedAmount: null,
@@ -28,13 +28,15 @@ test('bucketClass maps each bucket to its namespaced status class', () => {
   assert.equal(bucketClass('neutral'), 'q-neutral');
 });
 
-test('buildFacilityBucketMap keys by facility name → its RATING bucket (dampened, not raw pct)', () => {
-  const solid = fac('SOLID', 55, 400); // rating ≈52 → ok
-  const thin = fac('THIN', 90, 1); // rating ≈31.7 → warn — a 90% pct does NOT earn green on n=1
-  const map = buildFacilityBucketMap([solid, thin]);
+test('buildFacilityBucketMap keys by facility name → its rating bucket (= allowed% band, value-first)', () => {
+  const solid = fac('SOLID', 55, 400); // 55% → ok
+  const high = fac('HIGH', 90, 4); // 90% → ok — value-first: a small high-% facility still reads GREEN
+  const mid = fac('MID', 42, 200); // 42% → warn
+  const map = buildFacilityBucketMap([solid, high, mid]);
   assert.equal(map.get('SOLID'), 'ok');
-  assert.equal(map.get('THIN'), 'warn');
-  assert.equal(ratingBucket(thin.rating), 'warn'); // the dampening in action
+  assert.equal(map.get('HIGH'), 'ok');
+  assert.equal(map.get('MID'), 'warn');
+  assert.equal(ratingBucket(high.rating), 'ok'); // 90% is green regardless of volume
 });
 
 test('a case inherits its parent facility bucket; unknown/absent parent → neutral (never raw pct)', () => {
