@@ -55,14 +55,14 @@ const CASE_AT_LOW: QualifyCase = {
 
 const PHI: QualifyPhi = { patient_name: 'DOE, JANE', member_id_raw: 'AETMEMBER123', group_number: 'GRP9' };
 
-/** Default (no-reveal) props for the cases table. */
+/** Default (no-reveal) props for the cases table — single header-toggle API. */
 const noReveal = {
   canReveal: false,
   revealed: new Map<number, QualifyPhi>(),
-  shown: new Set<number>(),
-  pendingIds: new Set<number>(),
-  revealErrors: new Map<number, string>(),
-  onToggle: () => {},
+  revealAll: false,
+  revealing: false,
+  revealError: null,
+  onToggleRevealAll: () => {},
 };
 
 test('sanity: the rating buckets (= allowed% bands) are what these tests assume', () => {
@@ -115,18 +115,18 @@ test('case % cell is tinted by the PARENT FACILITY bucket, not the case’s own 
   assert.ok(!html.includes('q-pctcell q-ok'), 'the case’s own 95% pct did NOT color it green');
 });
 
-// ── 3c: PHI reveal ────────────────────────────────────────────────────────────────────────────────
-test('cases reveal — masked by default; per-row Reveal control shown to a canReveal viewer', () => {
+// ── PHI reveal (single header toggle) ───────────────────────────────────────────────────────────────
+test('cases reveal — masked by default; the header Reveal-all toggle is shown to a canReveal viewer', () => {
   const html = renderToStaticMarkup(
     <CasesTable cases={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal />,
   );
-  assert.ok(html.includes('Reveal'), 'a per-row Reveal control is present');
+  assert.ok(html.includes('Reveal all'), 'the header reveal-all toggle is present');
   for (const v of ['AETMEMBER123', 'DOE, JANE', 'GRP9']) {
-    assert.ok(!html.includes(v), `no real PHI (${v}) before reveal resolves`);
+    assert.ok(!html.includes(v), `no real PHI (${v}) before reveal is toggled on`);
   }
 });
 
-test('cases reveal — real PHI shown ONLY after reveal resolves (revealed + shown)', () => {
+test('cases reveal — real PHI shown ONLY when revealAll is on AND the PHI is cached', () => {
   const html = renderToStaticMarkup(
     <CasesTable
       cases={[CASE_AT_THIN]}
@@ -135,14 +135,35 @@ test('cases reveal — real PHI shown ONLY after reveal resolves (revealed + sho
       facilityBuckets={buildFacilityBucketMap([THIN_HIGH])}
       canReveal
       revealed={new Map<number, QualifyPhi>([[1, PHI]])}
-      shown={new Set<number>([1])}
-      pendingIds={new Set<number>()}
-      revealErrors={new Map<number, string>()}
-      onToggle={() => {}}
+      revealAll
+      revealing={false}
+      revealError={null}
+      onToggleRevealAll={() => {}}
     />,
   );
-  assert.ok(html.includes('AETMEMBER123') && html.includes('DOE, JANE') && html.includes('GRP9'), 'real PHI shown after reveal');
-  assert.ok(html.includes('Hide'), 'toggle flips to Hide when the row is shown');
+  assert.ok(html.includes('AETMEMBER123') && html.includes('DOE, JANE') && html.includes('GRP9'), 'real PHI shown when cached + toggled on');
+  assert.ok(html.includes('Hide identifiers'), 'the header toggle flips to "Hide identifiers" when revealAll is on');
+});
+
+test('cases reveal — cached PHI stays masked while revealAll is OFF (DOM omission, not CSS-hide)', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable
+      cases={[CASE_AT_THIN]}
+      hasAmounts
+      heatOn
+      facilityBuckets={buildFacilityBucketMap([THIN_HIGH])}
+      canReveal
+      revealed={new Map<number, QualifyPhi>([[1, PHI]])}
+      revealAll={false}
+      revealing={false}
+      revealError={null}
+      onToggleRevealAll={() => {}}
+    />,
+  );
+  for (const v of ['AETMEMBER123', 'DOE, JANE', 'GRP9']) {
+    assert.ok(!html.includes(v), `cached PHI (${v}) is absent from the DOM while the toggle is off`);
+  }
+  assert.ok(html.includes('Reveal all') && !html.includes('Hide identifiers'), 'the toggle reads "Reveal all" when off');
 });
 
 test('reveal is INDEPENDENT of the amounts gate: an admissions_seat reveal shows PHI but ZERO dollars', () => {
@@ -154,10 +175,10 @@ test('reveal is INDEPENDENT of the amounts gate: an admissions_seat reveal shows
       facilityBuckets={buildFacilityBucketMap([THIN_HIGH])}
       canReveal
       revealed={new Map<number, QualifyPhi>([[1, PHI]])}
-      shown={new Set<number>([1])}
-      pendingIds={new Set<number>()}
-      revealErrors={new Map<number, string>()}
-      onToggle={() => {}}
+      revealAll
+      revealing={false}
+      revealError={null}
+      onToggleRevealAll={() => {}}
     />,
   );
   assert.ok(html.includes('AETMEMBER123') && html.includes('DOE, JANE'), 'PHI reveal works without amounts capability');

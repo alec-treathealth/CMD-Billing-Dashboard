@@ -3,11 +3,12 @@
 /**
  * Qualify — recent cases table. The 15 most-recent DISTINCT patients for the resolved payer.
  *
- * PHI reveal (Prompt 3c): masked by default; a per-row toggle unmasks Patient / Member ID / Group #
- * via the audited revealQualifyRow action. Fetch-once-per-session — `revealed` caches the PHI and
- * `shown` controls visibility, so toggling a revealed row off/on never re-audits (one audited reveal
- * per row per session). Masking reuses lib/phi's PHI_MASK convention. Reveal is ORTHOGONAL to the
- * amounts gate: an admissions_seat can reveal PHI but still sees zero dollars.
+ * PHI reveal: masked by default; a SINGLE parent-owned header toggle ("Reveal all" ⇄ "Hide
+ * identifiers") unmasks Patient / Member ID / Group # for every row at once (parity with the
+ * collections grid + billing-audit work-table). The parent (qualify-tab) owns the `revealAll` flag and
+ * fetches the scope's PHI in ONE audited revealQualifyRows call; `revealed` caches it, so toggling
+ * off/on re-masks DISPLAY only and never re-audits. Masking reuses lib/phi's PHI_MASK convention.
+ * Reveal is ORTHOGONAL to the amounts gate: an admissions_seat can reveal PHI but still sees zero dollars.
  *
  * COLOR: the % cell is tinted by the case's PARENT FACILITY rating bucket (never the case's own pct).
  * AMOUNTS: Billed/Allowed columns are OMITTED from the DOM when !viewerHasAmountsCapability.
@@ -40,10 +41,10 @@ export function CasesTable({
   facilityLabel = null,
   canReveal,
   revealed,
-  shown,
-  pendingIds,
-  revealErrors,
-  onToggle,
+  revealAll,
+  revealing,
+  revealError,
+  onToggleRevealAll,
 }: {
   cases: readonly QualifyCase[];
   hasAmounts: boolean;
@@ -52,17 +53,17 @@ export function CasesTable({
   /** Human name of the selected facility these cases are scoped to (display only; never PHI). */
   facilityLabel?: string | null;
   canReveal: boolean;
-  /** Fetched PHI, cached for the session (never dropped on hide). */
+  /** Fetched PHI for the current scope, keyed by row id (cleared on scope change; never dropped on hide). */
   revealed: Map<number, QualifyPhi>;
-  /** Rows currently unmasked. */
-  shown: Set<number>;
-  /** Rows with an in-flight reveal. */
-  pendingIds: Set<number>;
-  /** Last reveal error per row. */
-  revealErrors: Map<number, string>;
-  onToggle: (id: number) => void;
+  /** Parent-owned reveal toggle — gates DISPLAY of the cached PHI; there is no per-row state. */
+  revealAll: boolean;
+  /** A bulk reveal is in flight (the toggle shows "Revealing…"). */
+  revealing: boolean;
+  /** Last bulk-reveal error for the current scope, if any. */
+  revealError: string | null;
+  onToggleRevealAll: () => void;
 }) {
-  const colSpan = 7 + (hasAmounts ? 2 : 0) + (canReveal ? 1 : 0);
+  const colSpan = 7 + (hasAmounts ? 2 : 0);
   return (
     <section className="rounded-xl border bg-card shadow-sm">
       <div className="flex items-baseline justify-between gap-3 px-4 pb-2.5 pt-4">
@@ -70,10 +71,30 @@ export function CasesTable({
           Recent cases
           {facilityLabel ? <span className="ml-2 text-sm font-medium text-muted-foreground">· {facilityLabel}</span> : null}
         </h2>
-        <span className="whitespace-nowrap text-xs font-semibold text-muted-foreground">
-          {cases.length} most-recent distinct patients{canReveal ? '' : ' · masked'}
-        </span>
+        <div className="flex items-center gap-3">
+          {canReveal ? (
+            <button
+              type="button"
+              onClick={onToggleRevealAll}
+              disabled={revealing}
+              aria-pressed={revealAll}
+              title="Reveal patient identifiers for these cases (audited)"
+              className={[
+                'rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors disabled:opacity-60',
+                revealAll ? 'border-teal500 bg-teal50 text-teal700' : 'border-teal200 bg-teal50 text-teal700 hover:bg-teal200',
+              ].join(' ')}
+            >
+              {revealing ? 'Revealing…' : revealAll ? 'Hide identifiers' : 'Reveal all'}
+            </button>
+          ) : null}
+          <span className="whitespace-nowrap text-xs font-semibold text-muted-foreground">
+            {cases.length} most-recent distinct patients{canReveal ? '' : ' · masked'}
+          </span>
+        </div>
       </div>
+      {canReveal && revealError ? (
+        <p className="px-4 pb-1 text-[11px] font-medium text-status-danger">{revealError}</p>
+      ) : null}
       <div className="overflow-x-auto">
         <table className={['w-full border-collapse', heatOn ? 'q-heat' : ''].join(' ')}>
           <thead>
@@ -87,7 +108,6 @@ export function CasesTable({
               <th className={TH_NUM}>% allowed</th>
               {hasAmounts ? <th className={TH_NUM}>Billed</th> : null}
               {hasAmounts ? <th className={TH_NUM}>Allowed</th> : null}
-              {canReveal ? <th className={`${TH} text-right`}>PHI</th> : null}
             </tr>
           </thead>
           <tbody>
@@ -101,10 +121,8 @@ export function CasesTable({
               cases.map((c) => {
                 const bucket = caseBucket(facilityBuckets, c.facilityName);
                 const pct = c.pctAllowedOfBilled;
-                const phi = shown.has(c.id) ? revealed.get(c.id) : undefined;
+                const phi = revealAll ? revealed.get(c.id) : undefined;
                 const isShown = phi !== undefined;
-                const isPending = pendingIds.has(c.id);
-                const err = revealErrors.get(c.id);
                 const maskedCls = 'font-mono tracking-widest text-ink400';
                 const realCls = 'font-mono text-ink900';
                 return (
@@ -149,20 +167,6 @@ export function CasesTable({
                     ) : null}
                     {hasAmounts ? (
                       <td className={`${TD} text-right tabular-nums`}>{c.allowedAmount === null ? '—' : usd0(c.allowedAmount)}</td>
-                    ) : null}
-                    {canReveal ? (
-                      <td className={`${TD} text-right`}>
-                        <button
-                          type="button"
-                          onClick={() => onToggle(c.id)}
-                          disabled={isPending}
-                          aria-pressed={isShown}
-                          className="rounded-md border border-teal200 bg-teal50 px-2 py-1 text-[11px] font-semibold text-teal700 transition-colors hover:bg-teal200 disabled:opacity-60"
-                        >
-                          {isPending ? '…' : isShown ? 'Hide' : 'Reveal'}
-                        </button>
-                        {err ? <div className="mt-1 text-[10px] font-medium text-status-danger">{err}</div> : null}
-                      </td>
                     ) : null}
                   </tr>
                 );

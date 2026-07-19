@@ -34,7 +34,7 @@ import {
   getQualifySnapshotByPayer,
   getQualifyFacilityCases,
   getQualifyMovers,
-  revealQualifyRow,
+  revealQualifyRows,
 } from '@/lib/qualify/actions';
 import {
   QUALIFY_WINDOW_OPTIONS,
@@ -91,13 +91,21 @@ export function QualifyTab({
   // True until the on-load auto-resolve of the top payer settles (so we show "Resolving…", not the
   // empty search prompt, on first paint).
   const [initializing, setInitializing] = useState(true);
-  // PHI reveal (Prompt 3c): `revealed` caches the FETCHED PHI for the session (never dropped on hide);
-  // `shown` controls visibility. Toggling a revealed row off/on never re-audits — one audited
-  // revealQualifyRow per row per session. All four reset on a new search.
+  // PHI reveal: a SINGLE parent-owned toggle (`revealAll`) unmasks the whole scoped set at once via one
+  // audited revealQualifyRows bulk call — parity with the collections grid + billing-audit work-table.
+  // `revealed` caches the fetched PHI for the CURRENT scope; `revealing`/`revealError` drive the toggle.
+  // `revealAll` is STICKY across facility switches (Alec's painpoint — don't re-click every drill); the
+  // PHI cache resets on every scope change (resetReveal), so each facility re-reveals with its own
+  // audited call. Toggling revealAll off/on re-masks DISPLAY only and never re-audits.
+  const [revealAll, setRevealAll] = useState(false);
   const [revealed, setRevealed] = useState<Map<number, QualifyPhi>>(() => new Map());
-  const [shown, setShown] = useState<Set<number>>(() => new Set());
-  const [pendingIds, setPendingIds] = useState<Set<number>>(() => new Set());
-  const [revealErrors, setRevealErrors] = useState<Map<number, string>>(() => new Map());
+  const [revealing, setRevealing] = useState(false);
+  const [revealError, setRevealError] = useState<string | null>(null);
+  // The facilityCases array identity the auto-reveal has already CLAIMED. The effect claims the current
+  // array synchronously before awaiting, so (a) it fires exactly once per scope, and (b) a stale-scope
+  // commit — facilityCases still lagging the previous facility for one render right after a switch — is
+  // deduped instead of revealing the wrong scope. A new resolution/facility always yields a fresh array.
+  const revealedForRef = useRef<QualifyCase[] | null>(null);
   // Resolution identity (search-is-authority). Every resolution entry point (runSearch / resolveByPayer /
   // selectFacility) bumps-and-captures this at entry; every post-await write guards `genRef.current === gen`
   // and bails otherwise. So a newer resolution DISCARDS any in-flight older chip/facility/reveal write —
@@ -112,12 +120,14 @@ export function QualifyTab({
     [snapshot],
   );
 
-  // Discard any revealed PHI — used on every scope change (new search, new payer, facility switch).
+  // Discard the current scope's revealed PHI — used on every scope change (new search, new payer,
+  // facility switch). Clears the PHI cache, but NOT `revealAll` (sticky toggle) and NOT `revealedForRef`
+  // (resetting it would let the effect re-fire against the still-lagging previous facilityCases); the
+  // fresh facilityCases identity from the new resolution is what re-arms the auto-reveal.
   const resetReveal = useCallback(() => {
     setRevealed(new Map());
-    setShown(new Set());
-    setPendingIds(new Set());
-    setRevealErrors(new Map());
+    setRevealing(false);
+    setRevealError(null);
   }, []);
 
   // Auto-select the rank-1 facility of a fresh snapshot and fetch ITS cases, so the tab lands with the
@@ -267,62 +277,48 @@ export function QualifyTab({
     };
   }, [windowDays]);
 
-  const toggleReveal = useCallback(
-    (id: number) => {
-      // Hide (visibility only — keep the fetched PHI cached).
-      if (shown.has(id)) {
-        setShown((s) => {
-          const n = new Set(s);
-          n.delete(id);
-          return n;
-        });
-        return;
-      }
-      // Already fetched this session → just show it again. No re-fetch, no re-audit.
-      if (revealed.has(id)) {
-        setShown((s) => new Set(s).add(id));
-        return;
-      }
-      if (pendingIds.has(id)) return; // in flight
-      // First reveal for this row → the ONE audited fetch.
-      setPendingIds((p) => new Set(p).add(id));
-      setRevealErrors((e) => {
-        const n = new Map(e);
-        n.delete(id);
-        return n;
-      });
-      // CAPTURE (don't bump) the current resolution identity: if a newer resolution lands while this
-      // reveal is in flight, its resetReveal() has already cleared PHI state — bail so this stale reveal
-      // can't re-populate revealed/shown for a row that no longer belongs to the visible resolution.
-      const gen = genRef.current;
-      void (async () => {
-        try {
-          const res = await revealQualifyRow(id);
-          if (genRef.current !== gen) return; // stale reveal — a newer resolution superseded it
-          setPendingIds((p) => {
-            const n = new Set(p);
-            n.delete(id);
+  // Auto-reveal the current scope in ONE audited bulk call while "Reveal all" is on — parity with the
+  // collections grid + billing-audit work-table. It re-fires whenever facilityCases changes (a new
+  // resolution/facility yields a fresh array), revealing each facility exactly once with its own audit.
+  // Gated on canRevealPhi so a non-entitled role can never trigger a reveal. `revealedForRef` is claimed
+  // SYNCHRONOUSLY before the await, which (a) dedupes a given scope to one fetch and (b) makes a
+  // stale-scope commit — facilityCases still lagging the previous facility for one render after a switch
+  // — a no-op instead of revealing the wrong facility. The write also CAPTURES the resolution identity
+  // (genRef) WITHOUT bumping it and bails if a newer resolution superseded, so a stale reveal can't
+  // repopulate PHI after a newer scope's resetReveal().
+  useEffect(() => {
+    if (!canRevealPhi || !revealAll) return;
+    if (facilityCases.length === 0) return;
+    if (revealedForRef.current === facilityCases) return; // this exact scope is already claimed
+    revealedForRef.current = facilityCases; // claim BEFORE awaiting (see note above)
+    const gen = genRef.current; // capture (don't bump) — same discipline as a per-scope resolve
+    const ids = facilityCases.map((c) => c.id);
+    setRevealing(true);
+    setRevealError(null);
+    void (async () => {
+      try {
+        const res = await revealQualifyRows(ids);
+        if (genRef.current !== gen) return; // stale reveal — a newer resolution superseded it
+        setRevealing(false);
+        if (res.ok) {
+          setRevealed((m) => {
+            const n = new Map(m);
+            for (const row of res.rows) {
+              const { id, ...phi } = row;
+              n.set(id, phi);
+            }
             return n;
           });
-          if (res.ok) {
-            setRevealed((m) => new Map(m).set(id, res.phi));
-            setShown((s) => new Set(s).add(id));
-          } else {
-            setRevealErrors((e) => new Map(e).set(id, res.error));
-          }
-        } catch {
-          if (genRef.current !== gen) return; // stale reveal — a newer resolution superseded it
-          setPendingIds((p) => {
-            const n = new Set(p);
-            n.delete(id);
-            return n;
-          });
-          setRevealErrors((e) => new Map(e).set(id, 'Reveal is unavailable right now.'));
+        } else {
+          setRevealError(res.error);
         }
-      })();
-    },
-    [shown, revealed, pendingIds],
-  );
+      } catch {
+        if (genRef.current !== gen) return; // stale reveal — a newer resolution superseded it
+        setRevealing(false);
+        setRevealError('Reveal is unavailable right now.');
+      }
+    })();
+  }, [canRevealPhi, revealAll, facilityCases]);
 
   const onWindow = (w: QualifyWindowDays) => {
     setWindowDays(w);
@@ -458,10 +454,10 @@ export function QualifyTab({
               facilityLabel={selectedFacilityLabel}
               canReveal={canRevealPhi}
               revealed={revealed}
-              shown={shown}
-              pendingIds={pendingIds}
-              revealErrors={revealErrors}
-              onToggle={toggleReveal}
+              revealAll={revealAll}
+              revealing={revealing}
+              revealError={revealError}
+              onToggleRevealAll={() => setRevealAll((v) => !v)}
             />
           </div>
         </div>
