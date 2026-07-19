@@ -3,12 +3,13 @@
 /**
  * Qualify mobile — single claim-line detail (tap a claim in DetailSheet). Layered ABOVE DetailSheet
  * (higher z-index); dismissing returns to the facility's claim list, which stays mounted underneath.
- * Renders ONLY existing QualifyCase fields — no new data is fetched or exposed here.
+ * Renders existing QualifyCase fields; PHI is fetched by the parent's audited "Reveal all" and passed in
+ * via `phi` (null when masked) — this sheet fetches nothing itself.
  *
  * AMOUNTS GATE: the Billed/Allowed block is OMITTED from the DOM (not CSS-hidden) when
  * !hasAmounts — the server has already nulled the values; this is belt-and-suspenders.
  */
-import type { QualifyCase } from '../../../lib/qualify/contract';
+import type { QualifyCase, QualifyPhi } from '../../../lib/qualify/contract';
 
 const INK900 = '#1B2B2A';
 const INK600 = '#4A5C5A';
@@ -33,10 +34,12 @@ function Row({ label, value }: { label: string; value: string }) {
 export function ClaimDetailSheet({
   claim,
   hasAmounts,
+  phi,
   onClose,
 }: {
   claim: QualifyCase;
   hasAmounts: boolean;
+  phi: QualifyPhi | null;
   onClose: () => void;
 }) {
   return (
@@ -46,7 +49,7 @@ export function ClaimDetailSheet({
     >
       <div style={{ width: '100%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', background: SURFACE, borderRadius: '20px 20px 0 0', color: INK900 }}>
         <div style={{ padding: '20px 20px 4px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-          <div className="ths-num" style={{ fontSize: 16, fontWeight: 600, letterSpacing: '0.06em', color: INK900 }}>{claim.memberIdMasked}</div>
+          <div className="ths-num" style={{ fontSize: 16, fontWeight: 600, letterSpacing: '0.06em', color: INK900 }}>{phi ? (phi.member_id_raw ?? '—') : claim.memberIdMasked}</div>
           {claim.program ? (
             <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', color: '#2D7393', background: '#E4F0F5', borderRadius: 999, padding: '2px 8px' }}>{claim.program}</span>
           ) : null}
@@ -55,6 +58,8 @@ export function ClaimDetailSheet({
           Claim detail
         </div>
         <div style={{ overflowY: 'auto', padding: '8px 20px 4px', background: GROUND, margin: '12px 16px', borderRadius: 12 }}>
+          {phi ? <Row label="Patient" value={phi.patient_name ?? '—'} /> : null}
+          {phi ? <Row label="Group #" value={phi.group_number ?? '—'} /> : null}
           <Row label="Facility" value={claim.facilityName ?? '—'} />
           <Row label="Last DOS" value={claim.lastDos ?? '—'} />
           <Row label="% Allowed" value={claim.pctAllowedOfBilled === null ? '—' : `${Math.round(claim.pctAllowedOfBilled)}%`} />

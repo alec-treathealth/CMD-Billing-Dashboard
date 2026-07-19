@@ -1,8 +1,9 @@
 /**
  * Qualify mobile PWA route (Prompt 4b) at /qualify/m. Same Q-A gate as desktop /qualify — admit
  * {super_admin, admissions_seat}; admin/user → /dashboard; unauth → /login; unprovisioned → notice.
- * Same session, no separate login. Amounts capability is server-derived and passed to the client app
- * (snapshots re-confirm it; the server strips dollar VALUES regardless).
+ * Same session, no separate login. Amounts + PHI-reveal capabilities are server-derived and passed to
+ * the client app (snapshots re-confirm amounts; the server strips dollar VALUES regardless, and the
+ * reveal action re-gates + audits every unmask — canRevealPhi only gates whether the affordance shows).
  */
 import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
@@ -24,5 +25,10 @@ export default async function QualifyMobilePage() {
   const role = access.access.role;
   if (role !== 'super_admin' && role !== 'admissions_seat') redirect('/dashboard');
 
-  return <QualifyMobileApp viewerHasAmountsCapability={role !== 'admissions_seat'} />;
+  return (
+    <QualifyMobileApp
+      viewerHasAmountsCapability={role !== 'admissions_seat'}
+      canRevealPhi={access.access.canRevealPhi}
+    />
+  );
 }

@@ -13,7 +13,7 @@ import { DetailSheet } from '../components/qualify/m/detail-sheet';
 import { ClaimDetailSheet } from '../components/qualify/m/claim-detail-sheet';
 import { AreaChips, deriveAreaChips, facilitiesInArea, AREA_ALL, AREA_OTHER } from '../components/qualify/m/area-chips';
 import { qualifyRating } from '../lib/qualify/rating';
-import type { QualifyFacility, QualifyCase } from '../lib/qualify/contract';
+import type { QualifyFacility, QualifyCase, QualifyPhi } from '../lib/qualify/contract';
 
 const FAC: QualifyFacility = {
   rank: 1,
@@ -44,6 +44,19 @@ const CASES: QualifyCase[] = [
 
 const noop = () => {};
 
+// Default reveal props for a MASKED DetailSheet (no reveal capability / nothing revealed).
+const noReveal = {
+  canReveal: false,
+  revealed: new Map<number, QualifyPhi>(),
+  phiShown: false,
+  revealPending: false,
+  revealError: null as string | null,
+  onRevealAll: noop,
+};
+// A revealed-PHI fixture keyed by case id, used to prove the unmasked render.
+const PHI: QualifyPhi = { patient_name: 'DOE, JANE', member_id_raw: 'AETMEM777', group_number: 'GRP42' };
+const REVEALED = new Map<number, QualifyPhi>([[1, PHI]]);
+
 test('swipe row markup carries NO dollar values (rating + line count only)', () => {
   const html = renderToStaticMarkup(<SwipeRow facility={FAC} onPass={noop} onWhy={noop} onOpen={noop} />);
   assert.ok(!html.includes('$'), 'no dollar sign in a swipe row');
@@ -59,31 +72,55 @@ test('trend sheet markup carries NO dollar values (percent + lines only)', () =>
 });
 
 test('detail — NO amounts: Billed/Allowed columns omitted from the DOM', () => {
-  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts={false} onOpenClaim={noop} onClose={noop} />);
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts={false} onOpenClaim={noop} onClose={noop} {...noReveal} />);
   assert.ok(!html.includes('Billed') && !html.includes('Allowed'), 'no $ labels when !hasAmounts');
   assert.ok(!html.includes('$'), 'no dollar sign when !hasAmounts');
   for (const v of ['18,400', '11,592']) assert.ok(!html.includes(v), `dollar value ${v} must be absent`);
 });
 
 test('detail — WITH amounts: Billed/Allowed present', () => {
-  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} />);
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />);
   assert.ok(html.includes('Billed') && html.includes('Allowed'), 'amounts labels present for a capable viewer');
   assert.ok(html.includes('$18,400') && html.includes('$11,592'), 'amounts present for a capable viewer');
 });
 
 test('detail — facility-scoped label + tappable claim rows (button per case)', () => {
-  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} />);
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />);
   assert.ok(html.includes('Recent claims at this facility'), 'header is facility-scoped, not payer-wide');
   assert.ok(html.includes('<button'), 'each claim line is a tappable button');
 });
 
 test('detail — loading state shows a placeholder, no case rows', () => {
-  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={[]} loading hasAmounts onOpenClaim={noop} onClose={noop} />);
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={[]} loading hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />);
   assert.ok(html.includes('Loading claims'), 'loading placeholder while the facility fetch is in flight');
 });
 
+test('detail — NOT reveal-capable: no Reveal button, member id stays masked, no PHI in the DOM', () => {
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts={false} onOpenClaim={noop} onClose={noop} {...noReveal} />);
+  assert.ok(!html.includes('Reveal all'), 'no reveal affordance when !canReveal');
+  assert.ok(html.includes('••••••'), 'member id masked');
+  for (const v of ['AETMEM777', 'DOE, JANE', 'GRP42']) assert.ok(!html.includes(v), `PHI ${v} absent when not revealed`);
+});
+
+test('detail — reveal-capable but not yet shown: Reveal button present, ids still masked', () => {
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts={false} onOpenClaim={noop} onClose={noop} {...noReveal} canReveal />);
+  assert.ok(html.includes('Reveal all'), 'reveal affordance shows for a capable viewer');
+  assert.ok(html.includes('••••••'), 'ids remain masked until revealed');
+  for (const v of ['AETMEM777', 'DOE, JANE']) assert.ok(!html.includes(v), `PHI ${v} absent before reveal`);
+});
+
+test('detail — revealed: rows show the real member id + patient, button flips to Hide', () => {
+  const html = renderToStaticMarkup(
+    <DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts={false} onOpenClaim={noop} onClose={noop} {...noReveal} canReveal revealed={REVEALED} phiShown />,
+  );
+  assert.ok(html.includes('AETMEM777'), 'real member id shown when revealed');
+  assert.ok(html.includes('DOE, JANE'), 'patient name shown when revealed');
+  assert.ok(html.includes('Hide IDs'), 'button flips to Hide once shown');
+  assert.ok(!html.includes('••••••'), 'the mask is gone for the revealed row');
+});
+
 test('claim detail — NO amounts: Billed/Allowed dollar block omitted from the DOM', () => {
-  const html = renderToStaticMarkup(<ClaimDetailSheet claim={CASES[0]!} hasAmounts={false} onClose={noop} />);
+  const html = renderToStaticMarkup(<ClaimDetailSheet claim={CASES[0]!} hasAmounts={false} phi={null} onClose={noop} />);
   // "Billed" is unique to the gated dollar block; "Allowed" alone is NOT a valid probe here because the
   // always-shown percent row is labeled "% Allowed". Prove the gated block is gone via Billed + $ + values.
   assert.ok(!html.includes('Billed'), 'no Billed row when !hasAmounts');
@@ -91,11 +128,19 @@ test('claim detail — NO amounts: Billed/Allowed dollar block omitted from the 
   for (const v of ['18,400', '11,592']) assert.ok(!html.includes(v), `dollar value ${v} must be absent`);
 });
 
-test('claim detail — WITH amounts: Billed/Allowed present, member id stays masked', () => {
-  const html = renderToStaticMarkup(<ClaimDetailSheet claim={CASES[0]!} hasAmounts onClose={noop} />);
+test('claim detail — WITH amounts, phi null: Billed/Allowed present, member id stays masked', () => {
+  const html = renderToStaticMarkup(<ClaimDetailSheet claim={CASES[0]!} hasAmounts phi={null} onClose={noop} />);
   assert.ok(html.includes('Billed') && html.includes('Allowed'), 'amounts labels present for a capable viewer');
   assert.ok(html.includes('$18,400') && html.includes('$11,592'), 'amounts present for a capable viewer');
-  assert.ok(html.includes('••••••'), 'member id remains masked in the claim popup');
+  assert.ok(html.includes('••••••'), 'member id remains masked in the claim popup when phi is null');
+});
+
+test('claim detail — revealed phi: shows the real member id, patient, and group #', () => {
+  const html = renderToStaticMarkup(<ClaimDetailSheet claim={CASES[0]!} hasAmounts={false} phi={PHI} onClose={noop} />);
+  assert.ok(html.includes('AETMEM777'), 'real member id shown');
+  assert.ok(html.includes('DOE, JANE'), 'patient name shown');
+  assert.ok(html.includes('GRP42'), 'group number shown');
+  assert.ok(!html.includes('••••••'), 'no mask once revealed');
 });
 
 // ── Area filter chips ────────────────────────────────────────────────────────────────────────────

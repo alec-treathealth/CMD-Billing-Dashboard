@@ -2,13 +2,17 @@
 
 /**
  * Qualify mobile — facility detail (tap). Renders the FACILITY-SCOPED claim lines for the tapped card
- * (getQualifyFacilityCases, keyed on QualifyFacility.facilityKey), most-recent-first, capped at 15.
+ * (getQualifyFacilityCases, keyed on QualifyFacility.facilityKey), by service date, capped at 15.
  * Each claim line is tappable → onOpenClaim opens the single-claim ClaimDetailSheet above this list.
  *
  * AMOUNTS GATE: the Billed/Allowed block is OMITTED from the DOM (not CSS-hidden) when
  * !hasAmounts — the server has already nulled the values; this is belt-and-suspenders.
+ *
+ * PHI REVEAL: masked member IDs by default. "Reveal all" (shown only when canReveal) runs one audited
+ * revealQualifyRows in the parent; when phiShown, each row swaps its mask for the real member id +
+ * patient name from `revealed` (keyed by case id). Reveal is ORTHOGONAL to the amounts gate.
  */
-import type { QualifyCase, QualifyFacility } from '../../../lib/qualify/contract';
+import type { QualifyCase, QualifyFacility, QualifyPhi } from '../../../lib/qualify/contract';
 
 const INK900 = '#1B2B2A';
 const INK600 = '#4A5C5A';
@@ -16,6 +20,9 @@ const INK400 = '#859794';
 const LINE = '#E4E9E6';
 const SURFACE = '#FFFFFF';
 const GROUND = '#FBF8F4';
+const TEAL700 = '#135E5A';
+const TEAL_TINT = '#EAF4F2';
+const DANGER = '#C0453B';
 
 function usd0(n: number): string {
   return `$${Math.round(n).toLocaleString('en-US')}`;
@@ -26,6 +33,12 @@ export function DetailSheet({
   cases,
   loading,
   hasAmounts,
+  canReveal,
+  revealed,
+  phiShown,
+  revealPending,
+  revealError,
+  onRevealAll,
   onOpenClaim,
   onClose,
 }: {
@@ -33,6 +46,12 @@ export function DetailSheet({
   cases: readonly QualifyCase[];
   loading: boolean;
   hasAmounts: boolean;
+  canReveal: boolean;
+  revealed: Map<number, QualifyPhi>;
+  phiShown: boolean;
+  revealPending: boolean;
+  revealError: string | null;
+  onRevealAll: () => void;
   onOpenClaim: (c: QualifyCase) => void;
   onClose: () => void;
 }) {
@@ -47,9 +66,23 @@ export function DetailSheet({
           {facility.city && facility.state ? (
             <div style={{ marginTop: 2, fontSize: 12, color: INK400 }}>{facility.city}, {facility.state}</div>
           ) : null}
-          <div style={{ marginTop: 6, fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: INK400 }}>
-            Recent claims at this facility
+          <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+            <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: INK400 }}>
+              Recent claims at this facility
+            </span>
+            {canReveal && cases.length > 0 ? (
+              <button
+                type="button"
+                onClick={onRevealAll}
+                disabled={revealPending}
+                aria-pressed={phiShown}
+                style={{ fontSize: 11, fontWeight: 700, color: TEAL700, background: TEAL_TINT, border: 'none', borderRadius: 999, padding: '5px 12px', cursor: 'pointer', opacity: revealPending ? 0.6 : 1 }}
+              >
+                {revealPending ? 'Revealing…' : phiShown ? 'Hide IDs' : 'Reveal all'}
+              </button>
+            ) : null}
           </div>
+          {revealError ? <div style={{ marginTop: 6, fontSize: 11, color: DANGER }}>{revealError}</div> : null}
         </div>
         <div style={{ overflowY: 'auto', padding: '0 16px 8px', display: 'flex', flexDirection: 'column', gap: 8 }}>
           {loading ? (
@@ -61,7 +94,9 @@ export function DetailSheet({
               No recent claims at this facility in this window.
             </div>
           ) : (
-            cases.map((c) => (
+            cases.map((c) => {
+              const phi = phiShown ? revealed.get(c.id) : undefined;
+              return (
               <button
                 key={c.id}
                 type="button"
@@ -69,11 +104,18 @@ export function DetailSheet({
                 style={{ display: 'block', width: '100%', textAlign: 'left', cursor: 'pointer', border: `0.5px solid ${LINE}`, borderRadius: 12, background: GROUND, padding: '10px 12px', font: 'inherit', color: 'inherit' }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                  <span className="ths-num" style={{ fontSize: 12, letterSpacing: '0.06em', color: INK400 }}>{c.memberIdMasked}</span>
+                  <span className="ths-num" style={{ fontSize: 12, letterSpacing: '0.06em', color: phi ? INK900 : INK400, fontWeight: phi ? 600 : 400 }}>
+                    {phi ? (phi.member_id_raw ?? '—') : c.memberIdMasked}
+                  </span>
                   {c.program ? (
                     <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', color: '#2D7393', background: '#E4F0F5', borderRadius: 999, padding: '2px 8px' }}>{c.program}</span>
                   ) : null}
                 </div>
+                {phi ? (
+                  <div style={{ marginTop: 3, fontSize: 11, color: INK600 }}>
+                    {phi.patient_name ?? '—'}{phi.group_number ? ` · Grp ${phi.group_number}` : ''}
+                  </div>
+                ) : null}
                 <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 11, color: INK600 }}>
                   <span>{c.lastDos ?? '—'}</span>
                   <span className="ths-num">{c.pctAllowedOfBilled === null ? '—' : `${Math.round(c.pctAllowedOfBilled)}% allowed`}</span>
@@ -85,7 +127,8 @@ export function DetailSheet({
                   </div>
                 ) : null}
               </button>
-            ))
+              );
+            })
           )}
         </div>
         <div style={{ padding: 16 }}>

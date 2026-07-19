@@ -11,9 +11,9 @@
  * facilities back to the top of rating order — it does NOT clear the search or re-resolve.
  */
 import { useEffect, useRef, useState, useTransition, type ReactNode } from 'react';
-import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyMovers } from '@/lib/qualify/actions';
+import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyMovers, revealQualifyRows } from '@/lib/qualify/actions';
 import { QUALIFY_WINDOW_OPTIONS } from '@/lib/qualify/contract';
-import type { QualifySnapshot, QualifyFacility, QualifyCase, QualifyMover, QualifyWindowDays } from '@/lib/qualify/contract';
+import type { QualifySnapshot, QualifyFacility, QualifyCase, QualifyMover, QualifyWindowDays, QualifyPhi } from '@/lib/qualify/contract';
 import { SwipeRow } from '@/components/qualify/m/swipe-row';
 import { TrendSheet } from '@/components/qualify/m/trend-sheet';
 import { DetailSheet } from '@/components/qualify/m/detail-sheet';
@@ -37,7 +37,13 @@ function EmptyState({ children }: { children: ReactNode }) {
   );
 }
 
-export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmountsCapability: boolean }) {
+export function QualifyMobileApp({
+  viewerHasAmountsCapability,
+  canRevealPhi,
+}: {
+  viewerHasAmountsCapability: boolean;
+  canRevealPhi: boolean;
+}) {
   const [query, setQuery] = useState('');
   const [windowDays, setWindowDays] = useState<QualifyWindowDays>(30);
   // Area (state) filter over the resolved deck, alongside windowDays. Resets to AREA_ALL on any new
@@ -52,6 +58,13 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
   // single claim line whose ClaimDetailSheet is layered above the list (null === none open).
   const [facilityCases, setFacilityCases] = useState<QualifyCase[] | null>(null);
   const [claim, setClaim] = useState<QualifyCase | null>(null);
+  // PHI reveal (facility-scoped, audited): `revealedPhi` caches the fetched identifiers for the OPEN
+  // facility's claims (keyed by case id); `phiShown` toggles their visibility WITHOUT re-auditing (one
+  // revealQualifyRows call per facility view). All reset when a facility opens/closes. Gated by canRevealPhi.
+  const [revealedPhi, setRevealedPhi] = useState<Map<number, QualifyPhi>>(() => new Map());
+  const [phiShown, setPhiShown] = useState(false);
+  const [revealPending, setRevealPending] = useState(false);
+  const [revealError, setRevealError] = useState<string | null>(null);
   const [searched, setSearched] = useState(false);
   // How the CURRENT snapshot was resolved, so a window change re-ranks via the SAME path (window is
   // orthogonal to resolution). byPayer = the Heating-up label (chip tap or on-load auto-resolve);
@@ -183,10 +196,21 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
   // PHI-search and resolve-by-payer entry paths. A close→reopen-a-different-card can leave two fetches in
   // flight; the facilitySeq token ensures only the latest open's response paints (and a close invalidates
   // any pending one), so a slow prior fetch can never land under the wrong facility's header.
+  // Each facility view starts fully masked — clear any PHI revealed for the previous facility. Resets
+  // revealPending too: a close/reopen while a reveal is in flight makes the response drop on the seq guard
+  // (before it clears the flag), so without this reset the button would stay stuck "Revealing…" all session.
+  function clearReveal() {
+    setRevealedPhi(new Map());
+    setPhiShown(false);
+    setRevealPending(false);
+    setRevealError(null);
+  }
+
   function openFacility(f: QualifyFacility) {
     setClaim(null);
     setFacilityCases(null); // loading
     setDetail(f);
+    clearReveal();
     const seq = ++facilitySeq.current;
     const payer = snapshot?.resolved?.payerName;
     if (!payer) { setFacilityCases([]); return; }
@@ -196,10 +220,49 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
   }
 
   function closeFacility() {
-    facilitySeq.current++; // invalidate any in-flight drill so it can't paint after the sheet is gone
+    facilitySeq.current++; // invalidate any in-flight drill (and reveal) so nothing paints after the sheet is gone
     setDetail(null);
     setFacilityCases(null);
     setClaim(null);
+    clearReveal();
+  }
+
+  // "Reveal all" on the open facility sheet → ONE audited revealQualifyRows over the visible claim ids
+  // (≤15, well under the 50 batch cap). Hide is visibility-only (keeps the cache) so re-showing never
+  // re-audits, matching the desktop discipline of one audited reveal per view. Gated by canRevealPhi.
+  function toggleRevealAll() {
+    if (!canRevealPhi) return;
+    const rows = facilityCases;
+    if (!rows || rows.length === 0) return;
+    if (phiShown) { setPhiShown(false); return; } // hide (cache retained)
+    const ids = rows.map((c) => c.id);
+    if (ids.every((id) => revealedPhi.has(id))) { setPhiShown(true); return; } // already fetched → just show
+    if (revealPending) return;
+    const seq = facilitySeq.current; // drop the response if the facility changes/closes before it lands
+    setRevealPending(true);
+    setRevealError(null);
+    revealQualifyRows(ids)
+      .then((res) => {
+        if (seq !== facilitySeq.current) return;
+        setRevealPending(false);
+        if (res.ok) {
+          setRevealedPhi(() => {
+            const m = new Map<number, QualifyPhi>();
+            for (const r of res.rows) {
+              m.set(r.id, { patient_name: r.patient_name, member_id_raw: r.member_id_raw, group_number: r.group_number });
+            }
+            return m;
+          });
+          setPhiShown(true);
+        } else {
+          setRevealError(res.error);
+        }
+      })
+      .catch(() => {
+        if (seq !== facilitySeq.current) return;
+        setRevealPending(false);
+        setRevealError('Reveal is unavailable right now.');
+      });
   }
 
   function advance(f: QualifyFacility) {
@@ -328,11 +391,24 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
           cases={facilityCases ?? []}
           loading={facilityCases === null}
           hasAmounts={hasAmounts}
+          canReveal={canRevealPhi}
+          revealed={revealedPhi}
+          phiShown={phiShown}
+          revealPending={revealPending}
+          revealError={revealError}
+          onRevealAll={toggleRevealAll}
           onOpenClaim={(c) => setClaim(c)}
           onClose={closeFacility}
         />
       ) : null}
-      {claim ? <ClaimDetailSheet claim={claim} hasAmounts={hasAmounts} onClose={() => setClaim(null)} /> : null}
+      {claim ? (
+        <ClaimDetailSheet
+          claim={claim}
+          hasAmounts={hasAmounts}
+          phi={phiShown ? revealedPhi.get(claim.id) ?? null : null}
+          onClose={() => setClaim(null)}
+        />
+      ) : null}
     </div>
   );
 }
