@@ -81,9 +81,11 @@ test('detail — loading state shows a placeholder, no case rows', () => {
   assert.ok(html.includes('Loading claims'), 'loading placeholder while the facility fetch is in flight');
 });
 
-test('claim detail — NO amounts: Billed/Allowed omitted from the DOM', () => {
+test('claim detail — NO amounts: Billed/Allowed dollar block omitted from the DOM', () => {
   const html = renderToStaticMarkup(<ClaimDetailSheet claim={CASES[0]!} hasAmounts={false} onClose={noop} />);
-  assert.ok(!html.includes('Billed') && !html.includes('Allowed'), 'no $ labels when !hasAmounts');
+  // "Billed" is unique to the gated dollar block; "Allowed" alone is NOT a valid probe here because the
+  // always-shown percent row is labeled "% Allowed". Prove the gated block is gone via Billed + $ + values.
+  assert.ok(!html.includes('Billed'), 'no Billed row when !hasAmounts');
   assert.ok(!html.includes('$'), 'no dollar sign when !hasAmounts');
   for (const v of ['18,400', '11,592']) assert.ok(!html.includes(v), `dollar value ${v} must be absent`);
 });
