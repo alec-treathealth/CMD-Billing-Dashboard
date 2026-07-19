@@ -17,6 +17,7 @@ import { headers } from 'next/headers';
 import { z } from 'zod';
 import { createSupabaseServerClient } from './supabase/server';
 import { passwordUpdateErrorMessage } from './auth/password';
+import { safeInternalPath } from './auth/safe-path';
 
 const credentialsSchema = z.object({
   email: z.string().trim().toLowerCase().email().max(320),
@@ -95,7 +96,9 @@ export async function setPassword(formData: FormData): Promise<SetPasswordResult
     return { error: passwordUpdateErrorMessage({ code: error.code, status: error.status, reasons }) };
   }
 
-  redirect('/dashboard');
+  // Land on the invite's chosen surface (/qualify/m or /qualify) when supplied + safe; else /dashboard.
+  // The destination page enforces its own role gate, so a stale/wrong `after` just bounces there.
+  redirect(safeInternalPath(formData.get('after')) ?? '/dashboard');
 }
 
 const emailSchema = z.object({

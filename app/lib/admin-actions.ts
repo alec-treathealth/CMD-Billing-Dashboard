@@ -25,7 +25,7 @@ import {
 } from '@/lib/server';
 import { dashboardAccess } from '@/lib/access';
 import { supabaseAdminClient } from '@/lib/supabase/admin';
-import { headers } from 'next/headers';
+import { canonicalAppOrigin } from '@/lib/auth/email-link';
 import type { ExecutiveUser } from '@/lib/executive';
 import type { Entity, Role } from '@/lib/rbac';
 
@@ -261,8 +261,14 @@ export async function deleteUser(targetUserId: string): Promise<MutateUserResult
  * Invite a brand-new user (SUPER_ADMIN only): create their Supabase Auth account + email the invite via
  * the admin API (service-role, server-side ONLY), then assign their dashboard role. If the email already
  * has an account, falls back to assigning the role to that existing user. Audited; role/entity coherence
- * enforced. Invite emails use Supabase's configured templates/SMTP (default sender is rate-limited to
- * external domains — custom SMTP recommended for reliable delivery).
+ * enforced.
+ *
+ * Invite emails are rendered + sent by THIS app's Send Email hook (app/app/api/auth-email-hook/route.ts)
+ * via Resend — NOT Supabase's built-in templates/SMTP. The link is built on the CANONICAL app origin
+ * (never the request host, which may be a preview deploy) so it resolves in prod and the installed PWA
+ * stays same-origin. For an admissions_seat we pass `seat=admissions` in redirect_to; the hook reads it
+ * and sends a two-choice invite ("Set up on mobile" → /qualify/m, "Set up on web" → /qualify), each of
+ * which still passes through /set-password first.
  */
 export async function inviteUser(
   email: string,
@@ -286,13 +292,17 @@ export async function inviteUser(
     return { ok: false, error: 'That role/entity combination is not valid.' };
   }
 
-  const origin = (await headers()).get('origin') ?? undefined;
+  // Always build the invite link on the canonical prod origin (not the request host). For an
+  // admissions_seat, flag the two-choice (mobile / web) invite the Send Email hook renders.
+  const origin = canonicalAppOrigin();
+  const seatParam = role === 'admissions_seat' ? '&seat=admissions' : '';
+  const redirectTo = `${origin}/auth/confirm?next=/set-password${seatParam}`;
 
   let userId: string | null = null;
   try {
     const { data, error } = await supabaseAdminClient().auth.admin.inviteUserByEmail(
       normEmail,
-      origin ? { redirectTo: `${origin}/auth/confirm?next=/set-password` } : undefined,
+      { redirectTo },
     );
     if (error) throw error;
     userId = data.user?.id ?? null;

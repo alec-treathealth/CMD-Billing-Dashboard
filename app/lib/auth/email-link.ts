@@ -28,3 +28,20 @@ export function appOrigin(redirectTo: string | undefined): string {
     );
   }
 }
+
+/**
+ * The canonical PUBLIC origin for outbound invite links and the installed Qualify PWA's identity.
+ * Invites must always point at one stable host (not the request host, which can be an ephemeral
+ * preview deploy) so (a) the confirm link resolves in prod and (b) an installed PWA is always the
+ * same-origin app — installing from two different hosts yields two distinct home-screen apps.
+ *
+ * Configurable via APP_CANONICAL_ORIGIN (host or full URL; scheme forced to https, trailing slash
+ * trimmed); defaults to the ratified prod alias. Not a secret — a public URL, safe as a default.
+ */
+const DEFAULT_CANONICAL_ORIGIN = 'https://cmd-billing-dashboard.vercel.app';
+
+export function canonicalAppOrigin(): string {
+  const env = process.env.APP_CANONICAL_ORIGIN?.trim();
+  if (!env) return DEFAULT_CANONICAL_ORIGIN;
+  return `https://${env.replace(/^https?:\/\//, '')}`.replace(/\/+$/, '');
+}

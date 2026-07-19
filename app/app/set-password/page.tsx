@@ -10,13 +10,22 @@ import { redirect } from 'next/navigation';
 import { SetPasswordForm } from '@/components/set-password-form';
 import { Wordmark } from '@/components/wordmark';
 import { requireExecutive } from '@/lib/executive';
+import { safeInternalPath } from '@/lib/auth/safe-path';
 
 export const metadata: Metadata = { title: 'Set your password · TreatHealthOS' };
 export const dynamic = 'force-dynamic';
 
-export default async function SetPasswordPage() {
+export default async function SetPasswordPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ after?: string }>;
+}) {
   const gate = await requireExecutive();
   if (!gate.ok) redirect('/login?next=/set-password');
+
+  // Two-choice seat invite: land on the chosen surface (/qualify/m or /qualify) after saving the
+  // password. Safe-path validated here AND re-validated in the action; the destination self-gates.
+  const after = safeInternalPath((await searchParams)?.after) ?? undefined;
 
   return (
     <main className="flex min-h-screen flex-col bg-[#F6F4EF] p-8">
@@ -33,7 +42,7 @@ export default async function SetPasswordPage() {
             now on.
           </p>
           <div className="mt-7">
-            <SetPasswordForm />
+            <SetPasswordForm after={after} />
           </div>
           <p className="mt-8 text-center text-xs text-[#75847D]">
             © 2026 TreatHealth · Access restricted to authorized staff.

@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { setPassword } from '@/lib/auth-actions';
 
-export function SetPasswordForm() {
+export function SetPasswordForm({ after }: { after?: string }) {
   const [error, setError] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
 
@@ -32,6 +32,7 @@ export function SetPasswordForm() {
 
   return (
     <form onSubmit={onSubmit} className="space-y-4" noValidate>
+      {after ? <input type="hidden" name="after" value={after} /> : null}
       <div>
         <label htmlFor="password" className="mb-1 block text-[13px] font-medium text-[#44544D]">
           New password

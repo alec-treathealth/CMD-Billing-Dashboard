@@ -57,14 +57,17 @@ function nextFor(actionType: string): string {
 }
 
 /** Build the app's token-hash confirm URL (NOT GoTrue's /verify) — mirrors auth/confirm/route.ts.
- *  `origin` is the app's public origin from appOrigin(), never GoTrue's email_data.site_url. */
-function confirmUrl(origin: string, tokenHash: string, actionType: string): string {
+ *  `origin` is the app's public origin from appOrigin(), never GoTrue's email_data.site_url.
+ *  `after` (optional) is the internal path to land on AFTER /set-password — /auth/confirm carries it
+ *  through and /set-password redirects there (safe-path validated). Used by the two-choice seat invite. */
+function confirmUrl(origin: string, tokenHash: string, actionType: string, after?: string): string {
   const base = origin.replace(/\/+$/, '');
   const params = new URLSearchParams({
     token_hash: tokenHash,
     type: actionType,
     next: nextFor(actionType),
   });
+  if (after) params.set('after', after);
   return `${base}/auth/confirm?${params.toString()}`;
 }
 
@@ -138,6 +141,44 @@ function renderActionEmail(opts: { subject: string; intro: string; ctaLabel: str
           <p style="margin:20px 0 0;font-size:12px;line-height:1.5;color:#66807e;">Or paste this link into your browser:<br/>
             <a href="${ctaUrl}" style="color:#1C8B82;word-break:break-all;">${ctaUrl}</a></p>
           <p style="margin:16px 0 0;font-size:11px;color:#8aa19f;">This link handles PHI-adjacent access and is single-use. Every access is audited.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+}
+
+/** Two-choice invite body for an admissions_seat: one shared single-use token, two destinations —
+ *  "Set up on mobile" (installs to the phone home screen) and "Set up on web". Both pass through
+ *  /set-password first (a password must be chosen before either surface loads). Mirrors renderActionEmail. */
+function renderDualActionEmail(opts: {
+  subject: string;
+  intro: string;
+  primary: { label: string; url: string };
+  secondary: { label: string; url: string };
+  note: string;
+}): string {
+  const { subject, intro, primary, secondary, note } = opts;
+  const button = (label: string, url: string, filled: boolean) =>
+    `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 10px;"><tr><td style="border-radius:8px;${filled ? 'background:#1C8B82;' : 'background:#ffffff;border:1px solid #1C8B82;'}">
+      <a href="${url}" style="display:inline-block;padding:11px 20px;font-size:14px;font-weight:600;color:${filled ? '#ffffff' : '#1C8B82'};text-decoration:none;border-radius:8px;">${label}</a>
+    </td></tr></table>`;
+  return `<!doctype html>
+<html><body style="margin:0;background:#f4f6f6;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f2a29;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f6;padding:24px 0;">
+    <tr><td align="center">
+      <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="max-width:480px;background:#ffffff;border:1px solid #e2e8e7;border-radius:12px;overflow:hidden;">
+        <tr><td style="background:#1C8B82;padding:18px 24px;">
+          <div style="font-size:16px;font-weight:700;color:#ffffff;letter-spacing:-0.2px;">TreatHealthOS</div>
+          <div style="font-size:9px;font-weight:600;letter-spacing:1.5px;color:rgba(255,255,255,0.75);margin-top:2px;">POWERED BY TREAT HEALTH AI · BILLING &amp; RCM</div>
+        </td></tr>
+        <tr><td style="padding:28px 24px;">
+          <h1 style="margin:0 0 12px;font-size:18px;font-weight:600;">${subject}</h1>
+          <p style="margin:0 0 20px;font-size:14px;line-height:1.5;color:#334e4c;">${intro}</p>
+          ${button(primary.label, primary.url, true)}
+          ${button(secondary.label, secondary.url, false)}
+          <p style="margin:16px 0 0;font-size:12px;line-height:1.5;color:#66807e;">${note}</p>
+          <p style="margin:16px 0 0;font-size:11px;color:#8aa19f;">These links handle PHI-adjacent access and are single-use. Every access is audited.</p>
         </td></tr>
       </table>
     </td></tr>
@@ -233,7 +274,15 @@ export async function POST(req: Request): Promise<Response> {
     const type = email_data.email_action_type;
     // App origin for confirm links — from redirect_to (signed payload), NOT email_data.site_url.
     const origin = appOrigin(email_data.redirect_to);
-    console.log(`[auth-email-hook] verified request type=${type}`);
+    // Seat flag (set by inviteUser in redirect_to) → an admissions_seat invite gets the two-choice
+    // (mobile / web) body. Non-PHI query flag; absent for every other invite/action.
+    let seat: string | null = null;
+    try {
+      seat = new URL(email_data.redirect_to).searchParams.get('seat');
+    } catch {
+      seat = null;
+    }
+    console.log(`[auth-email-hook] verified request type=${type}${seat ? ` seat=${seat}` : ''}`);
 
     if (type === 'reauthentication') {
       // No link — send the OTP code.
@@ -256,6 +305,22 @@ export async function POST(req: Request): Promise<Response> {
         if (!(await sendLogged(to, subjectFor(type), renderActionEmail({ subject: subjectFor(type), intro: introFor(type), ctaLabel: ctaLabelFor(type), ctaUrl: url }), type))) {
           return hookError(500, 'Failed to send email', 500);
         }
+      }
+    } else if (type === 'invite' && seat === 'admissions') {
+      // Admissions_seat invite → two choices off ONE token: set up on mobile (lands on the /qualify/m
+      // PWA with an install prompt) or on the web (/qualify). Both still route through /set-password.
+      const mobileUrl = confirmUrl(origin, email_data.token_hash, type, '/qualify/m?welcome=1');
+      const webUrl = confirmUrl(origin, email_data.token_hash, type, '/qualify');
+      const html = renderDualActionEmail({
+        subject: subjectFor(type),
+        intro:
+          'You’ve been invited to Qualify — the TreatHealthOS admissions lead-lookup tool. Choose how to set up: on your phone (recommended — add Lead lookup to your home screen for one-tap access) or in your web browser. Either way you’ll set a password first.',
+        primary: { label: 'Download mobile & set up account', url: mobileUrl },
+        secondary: { label: 'Open web app & set up account', url: webUrl },
+        note: 'On a phone, after you sign in add Lead lookup to your home screen — tap Share → “Add to Home Screen” (iPhone/Safari) or the “Install” prompt (Android/Chrome).',
+      });
+      if (!(await sendLogged(user.email, subjectFor(type), html, type))) {
+        return hookError(500, 'Failed to send email', 500);
       }
     } else {
       // Link-based: invite | recovery | magiclink | signup (+ safe default).

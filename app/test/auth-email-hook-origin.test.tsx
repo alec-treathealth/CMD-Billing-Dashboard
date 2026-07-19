@@ -10,7 +10,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { appOrigin } from '../lib/auth/email-link';
+import { appOrigin, canonicalAppOrigin } from '../lib/auth/email-link';
 
 const PROD = 'cmd-billing-dashboard.vercel.app';
 
@@ -58,5 +58,35 @@ test('appOrigin: missing/invalid redirect_to falls back to VERCEL_PROJECT_PRODUC
 test('appOrigin: throws when it cannot resolve an origin at all (no redirect_to, no prod env)', () => {
   withProdEnv(undefined, () => {
     assert.throws(() => appOrigin(undefined), /cannot resolve app origin/);
+  });
+});
+
+function withCanonicalEnv<T>(value: string | undefined, fn: () => T): T {
+  const prev = process.env.APP_CANONICAL_ORIGIN;
+  if (value === undefined) delete process.env.APP_CANONICAL_ORIGIN;
+  else process.env.APP_CANONICAL_ORIGIN = value;
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env.APP_CANONICAL_ORIGIN;
+    else process.env.APP_CANONICAL_ORIGIN = prev;
+  }
+}
+
+test('canonicalAppOrigin: defaults to the ratified prod alias when unset', () => {
+  withCanonicalEnv(undefined, () => {
+    assert.equal(canonicalAppOrigin(), `https://${PROD}`);
+  });
+});
+
+test('canonicalAppOrigin: env override accepts a bare host, forces https, trims trailing slash', () => {
+  withCanonicalEnv('app.treathealth.ai', () => {
+    assert.equal(canonicalAppOrigin(), 'https://app.treathealth.ai');
+  });
+  withCanonicalEnv('http://app.treathealth.ai/', () => {
+    assert.equal(canonicalAppOrigin(), 'https://app.treathealth.ai');
+  });
+  withCanonicalEnv('https://app.treathealth.ai', () => {
+    assert.equal(canonicalAppOrigin(), 'https://app.treathealth.ai');
   });
 });
