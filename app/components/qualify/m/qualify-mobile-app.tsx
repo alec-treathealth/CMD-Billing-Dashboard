@@ -5,8 +5,9 @@
  * and the 5-row sliding-window swipe list; it is the only caller of getQualifySnapshot /
  * getQualifyMovers. Facilities render in the contract's rating-desc order (never re-sorted here).
  *
- * Left-swipe → advance (pass). Right-swipe → open the trend sheet, advance on its close. Tap → open
- * the payer-wide detail (no advance). Reset re-seeds the deck from the SAME resolved payer's
+ * Left-swipe → advance (pass, removes the facility). Right-swipe → peek the rating "why" sheet,
+ * NON-destructive (the facility stays in the deck; closing the sheet does NOT advance). Tap → open
+ * the facility detail (no advance). Reset re-seeds the deck from the SAME resolved payer's
  * facilities back to the top of rating order — it does NOT clear the search or re-resolve.
  */
 import { useEffect, useRef, useState, useTransition, type ReactNode } from 'react';
@@ -320,7 +321,7 @@ export function QualifyMobileApp({ viewerHasAmountsCapability }: { viewerHasAmou
         </div>
       ) : null}
 
-      {trend ? <TrendSheet facility={trend} onClose={() => { const f = trend; setTrend(null); advance(f); }} /> : null}
+      {trend ? <TrendSheet facility={trend} onClose={() => setTrend(null)} /> : null}
       {detail ? (
         <DetailSheet
           facility={detail}

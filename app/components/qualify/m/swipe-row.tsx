@@ -4,8 +4,9 @@
  * Qualify mobile — a single swipe-list row (Prompt 4b). Physics replicate the approved prototype
  * EXACTLY: 8px axis-lock, tint/stamp ramp over 90px, resolve on |dx|>85 OR |v|>0.5, overshoot
  * spring-back cubic-bezier(0.34,1.56,0.64,1), speed-scaled translateX-only fly-off (NO rotation) with
- * collapse-in-place, tap (|dx|<5) opens detail without consuming. Left→onPass (consume immediately),
- * right→onWhy (consume on sheet close, handled by the container), tap→onOpen (no consume).
+ * collapse-in-place, tap (|dx|<5) opens detail without consuming. Left→onPass (consume: fly-off +
+ * collapse, removes the facility), right→onWhy (peek the rating; NON-destructive — springs back and
+ * KEEPS the row in the deck), tap→onOpen (no consume). Only a LEFT swipe removes a facility.
  *
  * Drag runs on refs (no re-render mid-gesture); window listeners are tied to an AbortController so
  * cleanup is identity-independent. The row markup carries NO dollar fields (rating + line count only),
@@ -95,11 +96,20 @@ export function SwipeRow({
   }
 
   function resolveRow(goingRight: boolean, v: number) {
+    if (goingRight) {
+      // Right-swipe is a NON-DESTRUCTIVE peek: open the "why" sheet and spring the row back into place.
+      // The facility STAYS in the deck — only a left-swipe (onPass) removes it. springBack() is the same
+      // tested sub-threshold return path; onWhy fires immediately as the row settles.
+      springBack();
+      onWhy(facility);
+      return;
+    }
+    // Only a LEFT swipe reaches here (right returned above), so this is always the destructive pass path.
     const c = contentRef.current;
     const row = rowRef.current;
     const speed = Math.max(Math.abs(v), 0.35);
     const duration = Math.max(160, Math.min(300, 240 - speed * 100));
-    const exit = (typeof window !== 'undefined' ? window.innerWidth : 400) * 1.2 * (goingRight ? 1 : -1);
+    const exit = -(typeof window !== 'undefined' ? window.innerWidth : 400) * 1.2; // fly off to the left
     if (c) {
       c.style.transition = `transform ${duration}ms cubic-bezier(0.22, 1, 0.36, 1)`;
       c.style.transform = `translateX(${exit}px)`;
@@ -117,10 +127,7 @@ export function SwipeRow({
       row.style.opacity = '0';
       row.style.marginBottom = '-10px';
     }, duration * 0.4);
-    window.setTimeout(() => {
-      if (goingRight) onWhy(facility);
-      else onPass(facility);
-    }, duration + 100);
+    window.setTimeout(() => onPass(facility), duration + 100);
   }
 
   function onMove(e: PointerEvent) {
