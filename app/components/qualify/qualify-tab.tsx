@@ -98,6 +98,13 @@ export function QualifyTab({
   const [shown, setShown] = useState<Set<number>>(() => new Set());
   const [pendingIds, setPendingIds] = useState<Set<number>>(() => new Set());
   const [revealErrors, setRevealErrors] = useState<Map<number, string>>(() => new Map());
+  // Resolution identity (search-is-authority). Every resolution entry point (runSearch / resolveByPayer /
+  // selectFacility) bumps-and-captures this at entry; every post-await write guards `genRef.current === gen`
+  // and bails otherwise. So a newer resolution DISCARDS any in-flight older chip/facility/reveal write —
+  // the header (snapshot) and the rows (facilityCases) can never be sourced from two different resolutions.
+  // A reveal CAPTURES the current gen (without bumping) so a stale reveal can't re-populate PHI after a
+  // newer resolution's resetReveal(). Window changes don't touch this ref (independent control).
+  const genRef = useRef(0);
 
   const hasAmounts = snapshot ? snapshot.viewerHasAmountsCapability : viewerHasAmountsCapability;
   const facilityBuckets = useMemo(
@@ -137,12 +144,14 @@ export function QualifyTab({
     setHint(null);
     // New search → discard any revealed PHI from the previous payer.
     resetReveal();
+    const gen = ++genRef.current; // this search is now the authoritative resolution
     startTransition(async () => {
       try {
         const snap = await getQualifySnapshot({ query: trimmed, windowDays: w });
         // Seed the rank-1 facility's cases BEFORE committing state, so snapshot + selection + cases
         // land in one paint (ruling Q-4: the cases panel is always facility-scoped, never payer-wide).
         const seed = await seedFacility(snap, w);
+        if (genRef.current !== gen) return; // a newer resolution superseded this search — discard
         setSnapshot(snap);
         setSelectedFacilityKey(seed.key);
         setFacilityCases(seed.cases);
@@ -159,6 +168,7 @@ export function QualifyTab({
         // (e.g. the no-auth staged-rollout fallback) or on a transient error — surface a friendly
         // hint rather than an uncaught rejection. Never echoes the underlying error (could name a
         // field/config).
+        if (genRef.current !== gen) return; // don't surface a stale error over a newer resolution
         setHint('Qualify is unavailable right now. Please try again.');
       }
     });
@@ -169,10 +179,12 @@ export function QualifyTab({
   const resolveByPayer = useCallback((payer: string, w: QualifyWindowDays) => {
     setHint(null);
     resetReveal();
+    const gen = ++genRef.current; // this chip resolve is now the authoritative resolution
     startTransition(async () => {
       try {
         const snap = await getQualifySnapshotByPayer({ payer, windowDays: w });
         const seed = await seedFacility(snap, w); // auto-select rank-1 facility (see runSearch)
+        if (genRef.current !== gen) return; // a newer resolution (e.g. a search) superseded this — discard
         setSnapshot(snap);
         setSelectedFacilityKey(seed.key);
         setFacilityCases(seed.cases);
@@ -180,6 +192,7 @@ export function QualifyTab({
         setByPayer(payer);
         setModalOpen(false);
       } catch {
+        if (genRef.current !== gen) return; // don't surface a stale error over a newer resolution
         setHint('Qualify is unavailable right now. Please try again.');
       }
     });
@@ -191,13 +204,16 @@ export function QualifyTab({
     (facilityKey: string) => {
       const payer = snapshot?.resolved?.payerName;
       if (!payer || facilityKey === selectedFacilityKey) return;
+      const gen = ++genRef.current; // a facility drill is a new resolution identity for the cases panel
       setSelectedFacilityKey(facilityKey);
       resetReveal();
       startFacilityTransition(async () => {
         try {
           const res = await getQualifyFacilityCases({ payer, facility: facilityKey, windowDays });
+          if (genRef.current !== gen) return; // a newer resolution/drill superseded this fetch — discard
           setFacilityCases(res.cases);
         } catch {
+          if (genRef.current !== gen) return; // don't surface a stale error over a newer resolution
           setHint('Qualify is unavailable right now. Please try again.');
         }
       });
@@ -275,9 +291,14 @@ export function QualifyTab({
         n.delete(id);
         return n;
       });
+      // CAPTURE (don't bump) the current resolution identity: if a newer resolution lands while this
+      // reveal is in flight, its resetReveal() has already cleared PHI state — bail so this stale reveal
+      // can't re-populate revealed/shown for a row that no longer belongs to the visible resolution.
+      const gen = genRef.current;
       void (async () => {
         try {
           const res = await revealQualifyRow(id);
+          if (genRef.current !== gen) return; // stale reveal — a newer resolution superseded it
           setPendingIds((p) => {
             const n = new Set(p);
             n.delete(id);
@@ -290,6 +311,7 @@ export function QualifyTab({
             setRevealErrors((e) => new Map(e).set(id, res.error));
           }
         } catch {
+          if (genRef.current !== gen) return; // stale reveal — a newer resolution superseded it
           setPendingIds((p) => {
             const n = new Set(p);
             n.delete(id);
