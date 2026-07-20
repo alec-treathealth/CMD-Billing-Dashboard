@@ -42,6 +42,9 @@ export function DetailSheet({
   onRevealAll,
   onOpenClaim,
   onClose,
+  prefix = '',
+  onPrefixChange,
+  onApplyPrefix,
 }: {
   facility: QualifyFacility;
   cases: readonly QualifyCase[];
@@ -55,7 +58,22 @@ export function DetailSheet({
   onRevealAll: () => void;
   onOpenClaim: (c: QualifyCase) => void;
   onClose: () => void;
+  /** Cases-prefix filter (Stage 3b), scoped to THIS facility's claims — distinct from the top payer
+   *  search. Typed BUFFER; the applied narrow lives in the parent's cohort.prefix, committed on Enter.
+   *  Optional so the render tests can mount the sheet without the filter wiring. */
+  prefix?: string;
+  onPrefixChange?: (value: string) => void;
+  onApplyPrefix?: () => void;
 }) {
+  // STARTS-WITH, never contains. A 1-2 char entry mints no token server-side (shows all) — the hint reads
+  // "not yet filtering"; filtering activates at 3. Mirrors the desktop cases-table affordance.
+  const trimmedPrefix = prefix.trim();
+  const prefixHint =
+    trimmedPrefix.length === 0
+      ? null
+      : trimmedPrefix.length < 3
+        ? 'Enter 3 characters to filter'
+        : 'Matches member IDs starting with these — press Enter';
   return (
     <div
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
@@ -84,6 +102,25 @@ export function DetailSheet({
             ) : null}
           </div>
           {revealError ? <div style={{ marginTop: 6, fontSize: 11, color: DANGER }}>{revealError}</div> : null}
+          {/* Cases-prefix filter (Stage 3b), scoped to THIS facility's claims — NOT the payer search.
+              Gated on canReveal (parity with desktop). Carries only the user's typed prefix, HMAC'd
+              server-side; never row PHI. Explicit submit (Enter). */}
+          {canReveal ? (
+            <div style={{ marginTop: 8 }}>
+              <input
+                value={prefix}
+                onChange={(e) => onPrefixChange?.(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') onApplyPrefix?.(); }}
+                enterKeyHint="search"
+                spellCheck={false}
+                maxLength={3}
+                placeholder="Filter this facility's claims by ID prefix"
+                aria-label="Filter these claims by member ID prefix (starts with)"
+                style={{ width: '100%', height: 34, padding: '0 12px', borderRadius: 10, border: `0.5px solid ${LINE}`, background: GROUND, color: INK900, fontSize: 13, outline: 'none' }}
+              />
+              {prefixHint ? <div style={{ marginTop: 4, fontSize: 11, color: INK400 }}>{prefixHint}</div> : null}
+            </div>
+          ) : null}
         </div>
         <div style={{ overflowY: 'auto', padding: '0 16px 8px', display: 'flex', flexDirection: 'column', gap: 8 }}>
           {loading ? (

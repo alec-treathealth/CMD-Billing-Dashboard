@@ -171,6 +171,25 @@ test('claim detail — % Allowed value colored by the claim OWN pct (danger at 2
   assert.ok(html.includes(mobileBucketStyle(20).color), 'the % Allowed value is danger-colored by its own pct');
 });
 
+// ── Cases-prefix filter (Stage 3b) — a facility-scoped narrow in the drill sheet, distinct from the top
+//    payer search, gated on canReveal (desktop parity). Container dispatch/threading is covered by code
+//    review + the qualifyGuards identity guard; here we assert the presented affordance. ───────────────
+test('detail — prefix filter input shows for reveal-capable viewers, facility-scoped + distinctly labeled', () => {
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} canReveal />);
+  assert.match(html, /aria-label="Filter these claims by member ID prefix \(starts with\)"/, 'a facility-scoped cases-prefix input is present');
+  assert.ok(html.includes("Filter this facility&#x27;s claims by ID prefix"), 'placeholder names the scope (this facility), not the payer search');
+});
+
+test('detail — NOT reveal-capable: no prefix filter input (parity with desktop gating)', () => {
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />);
+  assert.ok(!html.includes('Filter this facility'), 'no prefix affordance when !canReveal');
+});
+
+test('detail — sub-3 prefix reads as "not yet filtering" (mints no token server-side)', () => {
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} canReveal prefix="ab" />);
+  assert.ok(html.includes('Enter 3 characters to filter'), 'sub-3 entry reads as not-yet-filtering');
+});
+
 // ── Area filter chips ────────────────────────────────────────────────────────────────────────────
 const facAt = (state: string | null, rank: number): QualifyFacility => ({
   ...FAC, rank, name: `FAC ${rank}`, facilityKey: `fac-${rank}`, state, city: state ? 'City' : null,

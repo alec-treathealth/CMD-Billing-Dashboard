@@ -67,6 +67,9 @@ export function QualifyMobileApp({
   const [phiShown, setPhiShown] = useState(false);
   const [revealPending, setRevealPending] = useState(false);
   const [revealError, setRevealError] = useState<string | null>(null);
+  // Cases-prefix filter (Stage 3b) — the typed BUFFER for the open sheet; the APPLIED narrow lives in
+  // cohort.prefix (committed on Enter via CHANGE_PREFIX). Reset to '' on every facility open (fresh drill).
+  const [prefix, setPrefix] = useState('');
   const [searched, setSearched] = useState(false);
   // How the CURRENT snapshot was resolved, so a window change re-ranks via the SAME path (window is
   // orthogonal to resolution). byPayer = the Heating-up label (chip tap or on-load auto-resolve);
@@ -236,9 +239,19 @@ export function QualifyMobileApp({
     const seq = ++facilitySeq.current;
     const key = cohortKey(c);
     if (!c.payer || !c.facility) { setFacilityCases([]); return; }
-    getQualifyFacilityCases({ payer: c.payer, facility: c.facility, windowDays: c.window })
+    // Thread the APPLIED prefix (cohort.prefix, already trimmed by CHANGE_PREFIX) — HMAC'd server-side;
+    // omit the filter entirely when empty (mirrors desktop; the server no-ops a <3-char narrow anyway).
+    getQualifyFacilityCases({ payer: c.payer, facility: c.facility, windowDays: c.window, ...(c.prefix ? { filter: { prefix: c.prefix } } : {}) })
       .then((r) => { if (drillLandingWins(seq, facilitySeq.current, key, cohortKey(cohortRef.current))) setFacilityCases(r.cases); })
       .catch(() => { if (drillLandingWins(seq, facilitySeq.current, key, cohortKey(cohortRef.current))) setFacilityCases([]); });
+  }
+
+  // Commit the typed prefix buffer onto the drill cohort (explicit Enter). CHANGE_PREFIX keeps
+  // payer/facility/window and resets page:0/cursors — the reset is free from the reducer. The refetch
+  // rides the SAME facilitySeq as any in-flight drill; cohortKey (identity) is what distinguishes them
+  // (the same-token/different-identity guard 3a added) — so a stale pre-prefix landing is discarded.
+  function applyPrefix() {
+    fetchDrill(apply({ type: 'CHANGE_PREFIX', prefix: prefix.trim() }));
   }
 
   // Fold a LANDED resolution into the drill cohort + open sheet — the ONLY coupling between the two streams,
@@ -260,8 +273,11 @@ export function QualifyMobileApp({
     setFacilityCases(null); // loading
     setDetail(f);
     clearReveal();
-    // SWITCH_FACILITY (keeps payer/window/prefix); the drill fetch reads payer/facility/window from the cohort.
-    fetchDrill(apply({ type: 'SWITCH_FACILITY', facility: f.facilityKey }));
+    setPrefix(''); // fresh drill: reset the typed prefix buffer
+    // SWITCH_FACILITY keeps prefix (desktop semantics); mobile opens each facility FRESH, so clear any
+    // carried-over applied prefix via the reducer's own CHANGE_PREFIX (no reducer edit).
+    const switched = apply({ type: 'SWITCH_FACILITY', facility: f.facilityKey });
+    fetchDrill(switched.prefix === '' ? switched : apply({ type: 'CHANGE_PREFIX', prefix: '' }));
   }
 
   function closeFacility() {
@@ -444,6 +460,9 @@ export function QualifyMobileApp({
           onRevealAll={toggleRevealAll}
           onOpenClaim={(c) => setClaim(c)}
           onClose={closeFacility}
+          prefix={prefix}
+          onPrefixChange={setPrefix}
+          onApplyPrefix={applyPrefix}
         />
       ) : null}
       {claim ? (
