@@ -10,10 +10,12 @@
  * the facility detail (no advance). Reset re-seeds the deck from the SAME resolved payer's
  * facilities back to the top of rating order — it does NOT clear the search or re-resolve.
  */
-import { useEffect, useRef, useState, useTransition, type ReactNode } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState, useTransition, type ReactNode } from 'react';
 import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyMovers, revealQualifyRows } from '@/lib/qualify/actions';
 import { QUALIFY_WINDOW_OPTIONS } from '@/lib/qualify/contract';
 import type { QualifySnapshot, QualifyFacility, QualifyCase, QualifyMover, QualifyWindowDays, QualifyPhi } from '@/lib/qualify/contract';
+import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
+import { resolveLandingWins, drillLandingWins, isPayerChange } from '@/lib/qualify/qualifyGuards';
 import { SwipeRow } from '@/components/qualify/m/swipe-row';
 import { TrendSheet } from '@/components/qualify/m/trend-sheet';
 import { DetailSheet } from '@/components/qualify/m/detail-sheet';
@@ -82,6 +84,23 @@ export function QualifyMobileApp({
   // state. Two independent streams: deck resolution (search / payer / window) and the facility-drill fetch.
   const resolveSeq = useRef(0);
   const facilitySeq = useRef(0);
+  // Drill cases COHORT (payer/facility/window/prefix + page/cursors), reducer-owned (the SAME shared,
+  // root-tested cohortReducer desktop uses). Every drill transition DISPATCHES; `apply` returns the
+  // resulting cohort so the fetch can read it + stamp its cohortKey. `cohortRef` lets an async cases
+  // landing check the cohort changed underneath (the identity guard). This stage leaves prefix='' /
+  // page=0 (no input/pager UI until 3b/3c) — the reducer carries the fields, unused for now.
+  const [cohort, dispatch] = useReducer(cohortReducer, INITIAL_COHORT);
+  const cohortRef = useRef(cohort);
+  cohortRef.current = cohort;
+  const apply = useCallback((action: Parameters<typeof cohortReducer>[1]): QualifyCohort => {
+    const next = cohortReducer(cohortRef.current, action);
+    dispatch(action);
+    return next;
+  }, []);
+  // Mirror of `detail` for async closures: a resolution landing must read the CURRENTLY-open sheet (not the
+  // stale closure value) to decide the payer-change sheet-close.
+  const detailRef = useRef(detail);
+  detailRef.current = detail;
 
   const hasAmounts = snapshot ? snapshot.viewerHasAmountsCapability : viewerHasAmountsCapability;
 
@@ -119,7 +138,7 @@ export function QualifyMobileApp({
     startTransition(async () => {
       try {
         const snap = await getQualifySnapshot({ query: t, windowDays: w });
-        if (seq !== resolveSeq.current) return; // a newer resolve superseded this one — drop it
+        if (!resolveLandingWins(seq, resolveSeq.current)) return; // a newer resolve superseded this one — drop it
         setSnapshot(snap);
         setSearched(true);
         setByPayer(null); // resolved via the PHI path, not by payer
@@ -132,8 +151,9 @@ export function QualifyMobileApp({
           setEcho('');
           setDeck({ visible: snap.facilities.slice(0, VISIBLE), queue: snap.facilities.slice(VISIBLE) });
         }
+        syncCohortForResolution(snap.resolved?.payerName ?? null, w);
       } catch {
-        if (seq !== resolveSeq.current) return;
+        if (!resolveLandingWins(seq, resolveSeq.current)) return;
         setHint('Qualify is unavailable right now. Please try again.');
       }
     });
@@ -148,7 +168,7 @@ export function QualifyMobileApp({
     startTransition(async () => {
       try {
         const snap = await getQualifySnapshotByPayer({ payer: label, windowDays: w });
-        if (seq !== resolveSeq.current) return; // a newer resolve superseded this one — drop it
+        if (!resolveLandingWins(seq, resolveSeq.current)) return; // a newer resolve superseded this one — drop it
         setSnapshot(snap);
         setSearched(true);
         setByPayer(label); // remember it so a window change re-ranks this same payer
@@ -156,8 +176,10 @@ export function QualifyMobileApp({
         setAreaFilter(AREA_ALL); // a fresh resolution starts unfiltered
         setEcho('');
         setDeck({ visible: snap.facilities.slice(0, VISIBLE), queue: snap.facilities.slice(VISIBLE) });
+        // Authoritative identity is the RESOLVED payer name (not the tapped label), matching desktop.
+        syncCohortForResolution(snap.resolved?.payerName ?? null, w);
       } catch {
-        if (seq !== resolveSeq.current) return;
+        if (!resolveLandingWins(seq, resolveSeq.current)) return;
         setHint('Qualify is unavailable right now. Please try again.');
       }
     });
@@ -206,17 +228,40 @@ export function QualifyMobileApp({
     setRevealError(null);
   }
 
+  // The DRILL stream: fetch cohort `c`'s facility cases and paint ONLY if the landing still wins BOTH drill
+  // guards — facilitySeq (recency: close/reopen + future pager races) AND cohortKey (identity: the cohort
+  // didn't change underneath). Writes ONLY facilityCases (+ bumps facilitySeq) — never resolution state.
+  // Shared by the tap-open and the same-payer window refresh; payer/facility/window all come from `c`.
+  function fetchDrill(c: QualifyCohort) {
+    const seq = ++facilitySeq.current;
+    const key = cohortKey(c);
+    if (!c.payer || !c.facility) { setFacilityCases([]); return; }
+    getQualifyFacilityCases({ payer: c.payer, facility: c.facility, windowDays: c.window })
+      .then((r) => { if (drillLandingWins(seq, facilitySeq.current, key, cohortKey(cohortRef.current))) setFacilityCases(r.cases); })
+      .catch(() => { if (drillLandingWins(seq, facilitySeq.current, key, cohortKey(cohortRef.current))) setFacilityCases([]); });
+  }
+
+  // Fold a LANDED resolution into the drill cohort + open sheet — the ONLY coupling between the two streams,
+  // and exactly what removes the stuck-loading regression. Payer CHANGE → close any open sheet + reset the
+  // cohort (RESOLVE_PAYER); SAME payer (a window change re-resolving the same payer) → keep the sheet,
+  // CHANGE_WINDOW (keeps facility+prefix, resets cursor) and refresh the open drill for the new window.
+  function syncCohortForResolution(nextPayer: string | null, w: QualifyWindowDays) {
+    if (isPayerChange(cohortRef.current.payer, nextPayer)) {
+      if (detailRef.current) closeFacility(); // strands nothing: closeFacility bumps facilitySeq
+      apply({ type: 'RESOLVE_PAYER', payer: nextPayer, facility: null, window: w });
+    } else {
+      const next = apply({ type: 'CHANGE_WINDOW', window: w });
+      if (detailRef.current) fetchDrill(next);
+    }
+  }
+
   function openFacility(f: QualifyFacility) {
     setClaim(null);
     setFacilityCases(null); // loading
     setDetail(f);
     clearReveal();
-    const seq = ++facilitySeq.current;
-    const payer = snapshot?.resolved?.payerName;
-    if (!payer) { setFacilityCases([]); return; }
-    getQualifyFacilityCases({ payer, facility: f.facilityKey, windowDays })
-      .then((r) => { if (seq === facilitySeq.current) setFacilityCases(r.cases); })
-      .catch(() => { if (seq === facilitySeq.current) setFacilityCases([]); });
+    // SWITCH_FACILITY (keeps payer/window/prefix); the drill fetch reads payer/facility/window from the cohort.
+    fetchDrill(apply({ type: 'SWITCH_FACILITY', facility: f.facilityKey }));
   }
 
   function closeFacility() {
