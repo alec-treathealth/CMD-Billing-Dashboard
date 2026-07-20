@@ -48,19 +48,29 @@ export function FacilityPanel({
   onSelect?: (facilityKey: string) => void;
 }) {
   return (
-    <section className="rounded-xl border bg-card shadow-sm">
+    <section className="relative rounded-xl border bg-card shadow-sm">
+      {/* Co-height with the "Recent cases" panel BY CONSTRUCTION, no magic number: at the two-column
+          breakpoint this wrapper is an absolute-inset flex column, so the (tall, all-facilities) list is
+          taken OUT of grid-track sizing — the shorter cases panel drives the row height and the list
+          scrolls within it (flex-1/min-h-0). Below the breakpoint (stacked) it is `display:contents`, so
+          the panel flows at its natural full height with no scroll cap. Header + legend stay pinned. */}
+      <div className="contents min-[960px]:absolute min-[960px]:inset-0 min-[960px]:flex min-[960px]:flex-col min-[960px]:overflow-hidden min-[960px]:rounded-xl">
       <div className="flex items-baseline justify-between px-4 pb-2.5 pt-4">
         <h2 className="font-display text-base font-semibold">Heating up</h2>
-        <span className="text-xs font-semibold text-muted-foreground">by reimbursement rating · top 10</span>
+        <span className="text-xs font-semibold text-muted-foreground">
+          by reimbursement rating
+          {facilities.length > 0 ? ` · ${facilities.length} ${facilities.length === 1 ? 'facility' : 'facilities'}` : ''}
+        </span>
       </div>
 
-      <div className={['px-2.5 pb-3', heatOn ? 'q-heat' : ''].join(' ')}>
+      {/* ALL facilities render (server returns the full set, no LIMIT); the cap is gone. */}
+      <div className={['px-2.5 pb-3 min-[960px]:flex-1 min-[960px]:min-h-0 min-[960px]:overflow-y-auto', heatOn ? 'q-heat' : ''].join(' ')}>
         {facilities.length === 0 ? (
           <p className="px-2 py-6 text-center text-sm text-muted-foreground">
             No facilities for this payer in the selected window.
           </p>
         ) : (
-          facilities.slice(0, 10).map((f) => {
+          facilities.map((f) => {
             const bucket = ratingBucket(f.rating);
             const pct = f.pctAllowedOfBilled;
             const width = pct === null ? 0 : Math.max(0, Math.min(100, pct));
@@ -118,6 +128,7 @@ export function FacilityPanel({
         ))}
       </div>
       <p className="px-4 pb-3 text-[11px] text-muted-foreground">{RATING_LEGEND.description}</p>
+      </div>
     </section>
   );
 }
