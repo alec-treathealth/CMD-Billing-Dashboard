@@ -45,6 +45,12 @@ export function DetailSheet({
   prefix = '',
   onPrefixChange,
   onApplyPrefix,
+  page = 1,
+  hasPrev = false,
+  hasNext = false,
+  paging = false,
+  onPrevPage,
+  onNextPage,
 }: {
   facility: QualifyFacility;
   cases: readonly QualifyCase[];
@@ -64,6 +70,15 @@ export function DetailSheet({
   prefix?: string;
   onPrefixChange?: (value: string) => void;
   onApplyPrefix?: () => void;
+  /** Cases PAGER (Stage 3c) — paged replace over the drill's cursor stack. `page` is 1-based (display);
+   *  hasPrev/hasNext gate the buttons; `paging` disables both during an in-flight page fetch. Optional so
+   *  the render tests can mount the sheet without the pager wiring. */
+  page?: number;
+  hasPrev?: boolean;
+  hasNext?: boolean;
+  paging?: boolean;
+  onPrevPage?: () => void;
+  onNextPage?: () => void;
 }) {
   // STARTS-WITH, never contains. A 1-2 char entry mints no token server-side (shows all) — the hint reads
   // "not yet filtering"; filtering activates at 3. Mirrors the desktop cases-table affordance.
@@ -122,7 +137,7 @@ export function DetailSheet({
             </div>
           ) : null}
         </div>
-        <div style={{ overflowY: 'auto', padding: '0 16px 8px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ overflowY: 'auto', padding: '0 16px 8px', display: 'flex', flexDirection: 'column', gap: 8, opacity: paging ? 0.6 : 1, transition: 'opacity 0.15s' }}>
           {loading ? (
             <div style={{ padding: '24px 0', textAlign: 'center', fontSize: 12, color: INK400 }}>
               Loading claims…
@@ -171,6 +186,31 @@ export function DetailSheet({
             })
           )}
         </div>
+        {/* Cursor pager (Stage 3c) — paged REPLACE; shown only when pagination is relevant. Next gates on
+            hasNext, Prev on hasPrev (page>0); both disabled during an in-flight page fetch. */}
+        {!loading && (hasNext || page > 1) ? (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '10px 16px', borderTop: `0.5px solid ${LINE}` }}>
+            <button
+              type="button"
+              onClick={onPrevPage}
+              disabled={!hasPrev || paging}
+              aria-label="Previous page"
+              style={{ fontSize: 12, fontWeight: 700, color: TEAL700, background: TEAL_TINT, border: 'none', borderRadius: 999, padding: '6px 14px', cursor: !hasPrev || paging ? 'default' : 'pointer', opacity: !hasPrev || paging ? 0.5 : 1 }}
+            >
+              ← Prev
+            </button>
+            <span style={{ fontSize: 12, color: INK400 }}>Page {page}</span>
+            <button
+              type="button"
+              onClick={onNextPage}
+              disabled={!hasNext || paging}
+              aria-label="Next page"
+              style={{ fontSize: 12, fontWeight: 700, color: TEAL700, background: TEAL_TINT, border: 'none', borderRadius: 999, padding: '6px 14px', cursor: !hasNext || paging ? 'default' : 'pointer', opacity: !hasNext || paging ? 0.5 : 1 }}
+            >
+              Next →
+            </button>
+          </div>
+        ) : null}
         <div style={{ padding: 16 }}>
           <button
             onClick={onClose}

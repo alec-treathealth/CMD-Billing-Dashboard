@@ -190,6 +190,30 @@ test('detail — sub-3 prefix reads as "not yet filtering" (mints no token serve
   assert.ok(html.includes('Enter 3 characters to filter'), 'sub-3 entry reads as not-yet-filtering');
 });
 
+// ── Cases pager (Stage 3c) — paged Next/Prev; shown only when pagination is relevant; hasNext gates
+//    Next, page>0 gates Prev, both disabled while a page fetch is in flight. ─────────────────────────
+test('detail — pager hidden on a single page (no hasNext, page 1 default)', () => {
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />);
+  assert.ok(!html.includes('aria-label="Next page"'), 'no pager when there is only one page');
+});
+
+test('detail — page 1 with more: both buttons render, Prev disabled, Next enabled, Page 1 shown', () => {
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} hasNext page={1} />);
+  assert.ok(html.includes('aria-label="Next page"') && html.includes('aria-label="Previous page"'), 'both pager buttons present');
+  assert.ok(html.includes('Page 1'), 'current page shown');
+  assert.match(html, /disabled=""[^>]*aria-label="Previous page"/, 'Prev disabled on page 1 (no hasPrev)');
+  assert.ok(!/disabled=""[^>]*aria-label="Next page"/.test(html), 'Next enabled when hasNext');
+});
+
+test('detail — page 2: Prev enabled; an in-flight page fetch disables both', () => {
+  const p2 = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} hasPrev hasNext page={2} />);
+  assert.ok(!/disabled=""[^>]*aria-label="Previous page"/.test(p2), 'Prev enabled on page 2');
+  assert.ok(p2.includes('Page 2'), 'shows page 2');
+  const busy = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} hasPrev hasNext page={2} paging />);
+  assert.match(busy, /disabled=""[^>]*aria-label="Previous page"/, 'Prev disabled while paging');
+  assert.match(busy, /disabled=""[^>]*aria-label="Next page"/, 'Next disabled while paging');
+});
+
 // ── Area filter chips ────────────────────────────────────────────────────────────────────────────
 const facAt = (state: string | null, rank: number): QualifyFacility => ({
   ...FAC, rank, name: `FAC ${rank}`, facilityKey: `fac-${rank}`, state, city: state ? 'City' : null,
