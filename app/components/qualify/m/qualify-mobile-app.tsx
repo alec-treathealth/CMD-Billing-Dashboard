@@ -15,7 +15,7 @@ import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases,
 import { QUALIFY_WINDOW_OPTIONS, sniffQualifyKind } from '@/lib/qualify/contract';
 import type { QualifySnapshot, QualifyFacility, QualifyClaim, QualifyMover, QualifyWindowDays, QualifyPhi } from '@/lib/qualify/contract';
 import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
-import { resolveLandingWins, drillLandingWins, isPayerChange } from '@/lib/qualify/qualifyGuards';
+import { resolveLandingWins, drillLandingWins, isPayerChange, leadFacilities, isIdentifierEmpty, identifierEmptyTerm } from '@/lib/qualify/qualifyGuards';
 import { SwipeRow } from '@/components/qualify/m/swipe-row';
 import { TrendSheet } from '@/components/qualify/m/trend-sheet';
 import { DetailSheet } from '@/components/qualify/m/detail-sheet';
@@ -158,7 +158,11 @@ export function QualifyMobileApp({
           setDeck({ visible: [], queue: [] });
         } else {
           setEcho('');
-          setDeck({ visible: snap.facilities.slice(0, VISIBLE), queue: snap.facilities.slice(VISIBLE) });
+          // Fix A: LEAD the deck with the searched identifier's most-recent-claim facility (server-computed;
+          // no-op when null / below-floor). The rest keep rating order. Honest-empty (renderBody) covers the
+          // null case, so the ordering only matters when the identifier did land.
+          const ordered = leadFacilities(snap.facilities, snap.identifierLandingFacility);
+          setDeck({ visible: ordered.slice(0, VISIBLE), queue: ordered.slice(VISIBLE) });
         }
         syncCohortForResolution(snap.resolved?.payerName ?? null, w);
       } catch {
@@ -359,6 +363,18 @@ export function QualifyMobileApp({
     if (snapshot && snapshot.facilities.length === 0) {
       return <EmptyState>No facilities for this payer in this window.</EmptyState>;
     }
+    // Fix A honest-empty: an identifier search resolved but has no claim at any ranked in-window facility.
+    // Distinct from resolved===null (VOB) above — the payer exists, the searched member just has no recent
+    // in-window activity. Nudge toward a wider window. Term is the ≤3 echo, or 'this member' for an exact id.
+    if (snapshot && isIdentifierEmpty(snapshot.resolved, snapshot.identifierLandingFacility)) {
+      return (
+        <EmptyState>
+          No in-window claims for{' '}
+          <span className="ths-num" style={{ color: INK900, fontWeight: 600 }}>{identifierEmptyTerm(snapshot.resolved)}</span>
+          {' '}— try a wider window.
+        </EmptyState>
+      );
+    }
     if (deck.visible.length === 0) {
       return (
         <div style={{ padding: '40px 0', textAlign: 'center' }}>
@@ -385,7 +401,10 @@ export function QualifyMobileApp({
   // Area chips only when a payer is resolved AND there are >=2 real buckets (>2 chips incl. "All") — a
   // single-state payer with no unmapped facilities gets no pointless "All / CA" row.
   const areaChips = snapshot?.resolved ? deriveAreaChips(snapshot.facilities) : [];
-  const showAreaChips = areaChips.length > 2;
+  // Hide the area chips on the honest-empty state (identifier resolved with no ranked in-window claims) — the
+  // deck isn't shown there, so a filter row above it would be dead chrome.
+  const identifierEmpty = isIdentifierEmpty(snapshot?.resolved ?? null, snapshot?.identifierLandingFacility ?? null);
+  const showAreaChips = areaChips.length > 2 && !identifierEmpty;
 
   return (
     <div style={{ minHeight: '100vh', background: GROUND }}>

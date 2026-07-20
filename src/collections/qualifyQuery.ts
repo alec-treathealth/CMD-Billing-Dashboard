@@ -157,6 +157,47 @@ export function buildFacilityRankingQuery(
 }
 
 /**
+ * Fix A landing lookup: the RAW facility text of the searched identifier's MOST-RECENT in-window claim under
+ * the resolved payer, cross-tenant. Returns 0 or 1 row. Scoped by `primary_payer = $payer` so the returned
+ * facility is guaranteed non-empty under the single-payer desktop drill. The blind-index column matches the
+ * sniffed kind (exact → member_id_bidx; prefix → member_id_prefix_bidx) — the SAME columns the drill/resolve
+ * use; no new mint. NO floor here — the CORE drops the candidate if it isn't a ranked (floor-clearing) facility
+ * (approach ii), so this stays a single indexed lookup and the floor logic lives in ONE place (assembleFacilities).
+ *
+ * ORDER BY IS BYTE-IDENTICAL to buildFacilityCasesQuery's claim ordering (`agg.dos = to_char(charge_date) desc
+ * nulls last, agg.id desc`): here `charge_date desc nulls last, id desc` — the 'YYYY-MM-DD' lexical order is
+ * chronological, so this selects the exact same "most recent" claim the drill would surface first. Ordered on
+ * charge_date, NOT payment_received, so the landed facility and the drill's top claim can never disagree.
+ */
+export function buildIdentifierLandingFacilityQuery(
+  token: string,
+  kind: QualifyMatchKind,
+  payer: string,
+  from: string,
+  to: string,
+  entityIds: string[],
+): { sql: string; params: unknown[] } {
+  const ent = assertEntityScope(entityIds, 'buildIdentifierLandingFacilityQuery');
+  const { params, add } = paramList();
+  const e = add(ent);
+  const p = add(payer);
+  const f = add(from);
+  const t = add(to);
+  const col = kind === 'member_id' ? 'member_id_bidx' : 'member_id_prefix_bidx';
+  const tok = add(token);
+  const sql =
+    'select facility ' +
+    `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
+    `where business_entity_id = any(${e}::uuid[]) and primary_payer = ${p} ` +
+    `and payment_received >= ${f}::date and payment_received < ${t}::date ` +
+    `and ${col} = ${tok} ` +
+    "and facility is not null and btrim(facility) <> '' " +
+    'order by charge_date desc nulls last, id desc ' +
+    'limit 1';
+  return { sql, params };
+}
+
+/**
  * FACILITY-SCOPED recent CLAIMS for the resolved payer AT ONE FACILITY, in-window, cross-tenant. CLAIM
  * GRAIN (Direction B, ruling 1): ONE row per charge from the 0050 rollup — NO member_id_bidx dedup — so a
  * patient with several claims shows each one; per-claim DOS = that charge's own charge_date (not a max);

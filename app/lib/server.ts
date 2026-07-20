@@ -105,6 +105,7 @@ export type {
 import {
   buildResolvePayerQuery,
   buildFacilityRankingQuery,
+  buildIdentifierLandingFacilityQuery,
   buildFacilityCasesQuery,
   buildMoversQuery,
 } from '../../src/collections/qualifyQuery.js';
@@ -1854,6 +1855,22 @@ export async function loadQualifyFacilities(
   const q = buildFacilityRankingQuery(payer, from, to, entityIds);
   const { rows } = await readerExecutor().query<QualifyFacilityRow>(q.sql, q.params);
   return rows;
+}
+
+/** Fix A: the raw facility text of the searched identifier's most-recent in-window claim under the resolved
+ *  payer, or null when the identifier has no in-window claim (the core then also drops it if it isn't a
+ *  ranked facility). Reader-scoped, cross-tenant. The token is opaque (minted upstream); never logged. */
+export async function loadQualifyIdentifierLandingFacility(
+  token: string,
+  kind: QualifyMatchKind,
+  payer: string,
+  from: string,
+  to: string,
+  entityIds: string[],
+): Promise<string | null> {
+  const q = buildIdentifierLandingFacilityQuery(token, kind, payer, from, to, entityIds);
+  const { rows } = await readerExecutor().query<{ facility: string }>(q.sql, q.params);
+  return rows[0]?.facility ?? null;
 }
 
 /** One page of recent CLAIMS (claim grain) for a resolved payer AT ONE FACILITY, in-window (masked; reveal

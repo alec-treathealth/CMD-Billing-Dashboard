@@ -58,6 +58,7 @@ import {
   type QualifyPhi,
 } from '@/lib/qualify/contract';
 import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
+import { isIdentifierEmpty, identifierEmptyTerm } from '@/lib/qualify/qualifyGuards';
 import { buildFacilityBucketMap } from '@/components/qualify/colors';
 import { FacilityPanel } from '@/components/qualify/facility-panel';
 import { CasesTable } from '@/components/qualify/cases-table';
@@ -262,7 +263,10 @@ export function QualifyTab({
       try {
         const snap = await getQualifySnapshot({ query: trimmed, windowDays: w });
         const payerName = snap.resolved?.payerName ?? null;
-        const rank1 = snap.resolved ? snap.facilities[0]?.facilityKey ?? null : null;
+        // Fix A: LAND ON the searched identifier's most-recent-claim facility (server-computed, already dropped
+        // to null if it isn't a ranked facility), NOT rating rank-1. null → honest-empty (no ranked in-window
+        // claims for this identifier).
+        const landing = snap.identifierLandingFacility;
         // Direction B: a ≤3-char alpha-prefix search prefills the starts-with narrow with the raw ≤3 term (a
         // ≤3 alpha prefix is itself non-PHI, and reusing it — not the display echo — makes the drill's prefix
         // blind index IDENTICAL to the one resolvePayer used). An exact member-id search narrows the drill by
@@ -271,10 +275,10 @@ export function QualifyTab({
         const isExact = snap.resolved?.matchedOn === 'member_id';
         const echo = isPrefix ? trimmed : ''; // sniffQualifyKind('prefix') ⇒ trimmed is already ≤3 chars
         const seedFilter: DrillFilter = isPrefix ? { prefix: echo } : isExact ? { memberId: trimmed } : undefined;
-        const seed = payerName && rank1 ? await fetchSeed(payerName, rank1, w, seedFilter) : EMPTY_PAGE;
+        const seed = payerName && landing ? await fetchSeed(payerName, landing, w, seedFilter) : EMPTY_PAGE;
         if (genRef.current !== gen) return; // a newer resolution superseded this search — discard
         exactMemberRef.current = isExact ? trimmed : null; // set AFTER the recency check (never on a stale search)
-        commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: rank1, window: w, prefix: echo }, seed);
+        commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: landing, window: w, prefix: echo }, seed);
         setPrefix(echo); // prefill the input with the searched prefix echo ('' for exact / unresolved)
         setHasSearched(true);
         setByPayer(null); // an explicit search supersedes the by-payer default
@@ -322,13 +326,11 @@ export function QualifyTab({
     });
   }, [resetReveal, fetchSeed, commitResolved]);
 
-  // Window change — re-resolve the snapshot for the new window (facility ratings are window-dependent) while
-  // KEEPING the selected facility + prefix (facility-persist: no rank-1 teleport). The reducer's CHANGE_WINDOW
-  // resets the cursor stack but keeps facility+prefix; we dispatch it immediately so the control + movers
-  // track the new window, then re-fetch. If the re-resolve lands on the SAME payer we seed the kept facility
-  // (which may be EMPTY in the new window — we render that honestly, no fallback). If a (prefix) search
-  // resolves to a DIFFERENT payer in this window, the kept facility no longer belongs to it, so we treat it
-  // as a fresh resolve: rank-1 + cleared prefix.
+  // Window change — re-resolve for the new window (ratings + the identifier's landing facility are window-
+  // dependent). TWO paths: the PAYER path (Heating-up chip / on-load) keeps the selected facility across the
+  // window change (facility-persist, no rank-1 teleport); the SEARCH path RE-LANDS on the identifier's facility
+  // for the new window (Fix A — a member's activity, and thus its landing facility, can move between windows),
+  // or shows honest-empty when it has no ranked in-window claims.
   const onWindow = (w: QualifyWindowDays) => {
     const prev = cohortRef.current;
     const next = apply({ type: 'CHANGE_WINDOW', window: w }); // window + reset now; keeps facility+prefix (optimistic)
@@ -337,32 +339,41 @@ export function QualifyTab({
     const gen = ++genRef.current;
     startTransition(async () => {
       try {
-        const snap = byPayer
-          ? await getQualifySnapshotByPayer({ payer: byPayer, windowDays: w })
-          : await getQualifySnapshot({ query, windowDays: w });
-        const payerName = snap.resolved?.payerName ?? null;
-        if (genRef.current !== gen) return;
-        if (payerName && payerName === prev.payer && next.facility) {
-          // SAME payer → keep the facility + prefix + any identifier narrow; seed the kept facility for the new
-          // window. drillFilter reads the kept prefix + the persisted exactMemberRef (unchanged on same-payer).
-          const seed = await fetchSeed(payerName, next.facility, w, drillFilter(next.prefix));
+        if (byPayer) {
+          // PAYER path: re-resolve by payer; same payer → keep facility + prefix; changed → rank-1.
+          const snap = await getQualifySnapshotByPayer({ payer: byPayer, windowDays: w });
+          const payerName = snap.resolved?.payerName ?? null;
           if (genRef.current !== gen) return;
-          setSnapshot(snap);
-          setFacilityCases(seed.claims);
-          setHasMore(seed.hasMore);
-          setNextCursor(seed.nextCursor);
+          if (payerName && payerName === prev.payer && next.facility) {
+            const seed = await fetchSeed(payerName, next.facility, w, drillFilter(next.prefix));
+            if (genRef.current !== gen) return;
+            setSnapshot(snap);
+            setFacilityCases(seed.claims);
+            setHasMore(seed.hasMore);
+            setNextCursor(seed.nextCursor);
+          } else {
+            const rank1 = snap.resolved ? snap.facilities[0]?.facilityKey ?? null : null;
+            const seed = payerName && rank1 ? await fetchSeed(payerName, rank1, w, undefined) : EMPTY_PAGE;
+            if (genRef.current !== gen) return;
+            exactMemberRef.current = null;
+            commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: rank1, window: w }, seed);
+            setPrefix('');
+          }
         } else {
-          // Payer changed (or unresolved) → the kept facility is no longer valid: fresh resolve to rank-1, and
-          // recompute the identifier narrow for THIS resolution (prefix echo / exact / none — see runSearch).
-          const rank1 = snap.resolved ? snap.facilities[0]?.facilityKey ?? null : null;
+          // SEARCH path: re-resolve the identifier and RE-LAND on its facility for the new window (Fix A), or
+          // honest-empty (landing null). Recompute the narrow (prefix echo / exact) for THIS window's resolution.
+          const snap = await getQualifySnapshot({ query, windowDays: w });
+          const payerName = snap.resolved?.payerName ?? null;
+          if (genRef.current !== gen) return;
+          const landing = snap.identifierLandingFacility;
           const isPrefix = snap.resolved?.matchedOn === 'prefix';
           const isExact = snap.resolved?.matchedOn === 'member_id';
           const echo = isPrefix ? query.trim() : ''; // raw ≤3 prefix (non-PHI) → same blind index resolvePayer used
           const seedFilter: DrillFilter = isPrefix ? { prefix: echo } : isExact ? { memberId: query.trim() } : undefined;
-          const seed = payerName && rank1 ? await fetchSeed(payerName, rank1, w, seedFilter) : EMPTY_PAGE;
+          const seed = payerName && landing ? await fetchSeed(payerName, landing, w, seedFilter) : EMPTY_PAGE;
           if (genRef.current !== gen) return;
           exactMemberRef.current = isExact ? query.trim() : null;
-          commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: rank1, window: w, prefix: echo }, seed);
+          commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: landing, window: w, prefix: echo }, seed);
           setPrefix(echo);
         }
         setModalOpen(false);
@@ -499,6 +510,12 @@ export function QualifyTab({
   // the kept facility has no row in the current window's snapshot (e.g. zero volume after a window change).
   const selectedFacilityLabel =
     snapshot?.facilities.find((f) => f.facilityKey === cohort.facility)?.name ?? null;
+  // Fix A honest-empty: an identifier search resolved but has no claim at any ranked in-window facility. The
+  // claims panel reads "No in-window claims for <term> — try a wider window" (term = the ≤3 echo, or the
+  // generic 'this member' for an exact search). null on the payer path / when the identifier DID land.
+  const emptyIdentifierLabel = isIdentifierEmpty(resolved, snapshot?.identifierLandingFacility ?? null)
+    ? identifierEmptyTerm(resolved)
+    : null;
 
   return (
     <main className="mx-auto max-w-[1280px] space-y-4 p-6 sm:p-8">
@@ -634,6 +651,7 @@ export function QualifyTab({
               paging={isFacilityPending}
               onPrevPage={goPrevPage}
               onNextPage={goNextPage}
+              emptyIdentifierLabel={emptyIdentifierLabel}
             />
           </div>
         </div>

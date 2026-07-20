@@ -62,6 +62,7 @@ export function CasesTable({
   paging,
   onPrevPage,
   onNextPage,
+  emptyIdentifierLabel = null,
 }: {
   claims: readonly QualifyClaim[];
   hasAmounts: boolean;
@@ -95,6 +96,10 @@ export function CasesTable({
   paging: boolean;
   onPrevPage: () => void;
   onNextPage: () => void;
+  /** Fix A honest-empty: when set (an identifier search resolved with no in-window claims at any ranked
+   *  facility), the empty row reads "No in-window claims for <label> — try a wider window" instead of the
+   *  payer-wide copy. NON-PHI (a ≤3 prefix echo, or 'this member' for an exact search). Null = payer-path copy. */
+  emptyIdentifierLabel?: string | null;
 }) {
   const colSpan = 7 + (hasAmounts ? 2 : 0);
   // Prefix affordance — STARTS-WITH, never "contains". A 1-2 char entry mints no token server-side
@@ -173,7 +178,9 @@ export function CasesTable({
             {claims.length === 0 ? (
               <tr>
                 <td className="px-3.5 py-6 text-center text-sm text-muted-foreground" colSpan={colSpan}>
-                  No claims for this payer in the selected window.
+                  {emptyIdentifierLabel
+                    ? `No in-window claims for ${emptyIdentifierLabel} — try a wider window.`
+                    : 'No claims for this payer in the selected window.'}
                 </td>
               </tr>
             ) : (

@@ -42,6 +42,7 @@ const REVEAL_PHI = { patient_name: 'DOE, JANE', member_id_raw: 'AETMEMBER123', g
 interface Cap {
   audits: Array<{ action: string; detail: Record<string, unknown> }>;
   facilityEntityIds: string[][];
+  landingArgs: Array<{ kind: string; payer: string; entityIds: string[] }>;
   revealActions: string[];
   facilityCasesArgs: Array<{
     payer: string;
@@ -55,7 +56,7 @@ interface Cap {
   }>;
 }
 function cap(): Cap {
-  return { audits: [], facilityEntityIds: [], revealActions: [], facilityCasesArgs: [] };
+  return { audits: [], facilityEntityIds: [], landingArgs: [], revealActions: [], facilityCasesArgs: [] };
 }
 
 const SUPER = () => requireQualifyPrincipalFromAccess({ ok: true, access: { user: { email: 's@t.ai', id: 's' }, role: 'super_admin' } });
@@ -70,6 +71,12 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
     loadFacilities: async (_p, _f, _t, entityIds) => {
       c.facilityEntityIds.push(entityIds);
       return FAC_ROWS;
+    },
+    // Fix A: default fake lands the identifier on '405 recovery' (a ranked FAC_ROWS facility) so the core
+    // keeps it (it clears the floor). Tests override this to model below-floor / no-in-window cases.
+    loadIdentifierLandingFacility: async (_tok, kind, payer, _f, _t, entityIds) => {
+      c.landingArgs.push({ kind, payer, entityIds });
+      return '405 recovery';
     },
     loadFacilityCases: async (payer, facility, _f, _t, entityIds, opts) => {
       c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, memberToken: opts.memberToken, cursor: opts.cursor, limit: opts.limit, allPayers: opts.allPayers });
@@ -163,6 +170,49 @@ test('snapshot: a single result contains BOTH tenants, and the loader gets the p
   assert.deepEqual(c.facilityEntityIds[0], [BXR_ENTITY_ID, INDIGO_ENTITY_ID], 'reads BOTH tenants in one query');
   // city/state crosswalk applied (bonus): CAMH → San Martin, CA.
   assert.equal(snap.facilities.find((f) => f.name === 'CA MENTAL HEALTH')?.state, 'CA');
+});
+
+// ── Fix A — identifierLandingFacility (land on the searched member's facility, not rating rank-1) ────
+test('snapshot: identifierLandingFacility = the loader facility when it is a RANKED facility (kept)', async () => {
+  const c = cap();
+  const snap = await getQualifySnapshotCore(makeDeps(SUPER, c), IN);
+  assert.equal(snap.identifierLandingFacility, '405 recovery', 'the landing facility (a floor-clearing FAC_ROWS row) is kept');
+  // The landing loader is scoped to the RESOLVED payer + pinned tenancy, with the sniffed kind.
+  assert.equal(c.landingArgs[0]!.kind, 'member_id'); // IN query is long → member_id
+  assert.equal(c.landingArgs[0]!.payer, 'AETNA');
+  assert.deepEqual(c.landingArgs[0]!.entityIds, [BXR_ENTITY_ID, INDIGO_ENTITY_ID]);
+});
+
+test('snapshot: a BELOW-FLOOR (non-ranked) landing candidate is DROPPED to null (approach ii, honest-empty)', async () => {
+  // Loader returns a facility that is NOT in the assembled facilities[] (below QUALIFY_MIN_LINES) → dropped.
+  const snap = await getQualifySnapshotCore(
+    makeDeps(SUPER, cap(), { loadIdentifierLandingFacility: async () => 'tiny below-floor facility' }),
+    IN,
+  );
+  assert.equal(snap.identifierLandingFacility, null, 'a landing facility absent from facilities[] collapses to null');
+  assert.ok(snap.facilities.length > 0, 'the payer still has ranked facilities — this is honest-empty, not no-facilities');
+});
+
+test('snapshot: no in-window claim for the identifier (loader null) → identifierLandingFacility null', async () => {
+  const snap = await getQualifySnapshotCore(
+    makeDeps(SUPER, cap(), { loadIdentifierLandingFacility: async () => null }),
+    IN,
+  );
+  assert.equal(snap.identifierLandingFacility, null);
+});
+
+test('by-payer: identifierLandingFacility is null (no identifier on the payer path — ruling 3, stays payer-wide)', async () => {
+  const c = cap();
+  const snap = await getQualifySnapshotByPayerCore(
+    makeDeps(SUPER, c, {
+      loadIdentifierLandingFacility: async () => {
+        throw new Error('landing lookup must NOT run on the resolve-by-payer path');
+      },
+    }),
+    PAYER_IN,
+  );
+  assert.equal(snap.identifierLandingFacility, null);
+  assert.equal(c.landingArgs.length, 0, 'the landing loader is never called on the payer path');
 });
 
 // ── #4 Q-A DENIAL for an entity ADMIN at ALL FOUR entry points (admin-fails, explicitly) ─────────

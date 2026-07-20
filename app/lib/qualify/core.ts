@@ -65,6 +65,15 @@ export interface QualifyDeps {
   mintToken: (query: string, kind: QualifyMatchKind) => string | null;
   resolvePayer: (token: string, kind: QualifyMatchKind, entityIds: string[]) => Promise<string | null>;
   loadFacilities: (payer: string, from: string, to: string, entityIds: string[]) => Promise<QualifyFacilityRow[]>;
+  /** Fix A: raw facility of the searched identifier's most-recent in-window claim under the payer (or null). */
+  loadIdentifierLandingFacility: (
+    token: string,
+    kind: QualifyMatchKind,
+    payer: string,
+    from: string,
+    to: string,
+    entityIds: string[],
+  ) => Promise<string | null>;
   loadFacilityCases: (
     payer: string,
     facility: string,
@@ -117,7 +126,7 @@ function stripClaimsAmounts(claims: QualifyClaim[]): QualifyClaim[] {
 }
 
 function emptySnapshot(hasAmounts: boolean): QualifySnapshot {
-  return { resolved: null, facilities: [], viewerHasAmountsCapability: hasAmounts, tenantScope: QUALIFY_TENANT_SCOPE };
+  return { resolved: null, facilities: [], identifierLandingFacility: null, viewerHasAmountsCapability: hasAmounts, tenantScope: QUALIFY_TENANT_SCOPE };
 }
 
 /** Non-PHI alpha-prefix echo (≤3 chars) — never the raw member id. */
@@ -216,9 +225,19 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
   if (!payerName) return emptySnapshot(gate.hasAmounts); // known-nothing → VOB (resolved stays null)
 
   const { from, to } = qualifyWindowBounds(windowDays, deps.now());
-  const facRows = await deps.loadFacilities(payerName, from, to, gate.entityIds);
+  // Fix A: alongside the payer-wide ranking, look up WHERE the searched identifier's most-recent in-window
+  // claim is (token already minted above). The claim ordering is byte-identical to the drill's.
+  const [facRows, landingRaw] = await Promise.all([
+    deps.loadFacilities(payerName, from, to, gate.entityIds),
+    deps.loadIdentifierLandingFacility(token, kind, payerName, from, to, gate.entityIds),
+  ]);
 
   const facilities = assembleFacilities(facRows);
+  // Approach (ii): keep the landing facility ONLY if it is a ranked (floor-clearing) facility — i.e. present
+  // in the assembled facilities[] set (same floor as assembleFacilities, no duplication). A below-floor-only
+  // identifier (or none in-window) collapses to null → the frontends render the honest "widen the window" state.
+  const identifierLandingFacility =
+    landingRaw !== null && facilities.some((f) => f.facilityKey === landingRaw) ? landingRaw : null;
   const resolved: QualifyResolved = {
     payerName,
     matchedOn: kind,
@@ -231,6 +250,7 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
   const snap: QualifySnapshot = {
     resolved,
     facilities,
+    identifierLandingFacility,
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
   };
@@ -282,6 +302,7 @@ export async function getQualifySnapshotByPayerCore(
   const snap: QualifySnapshot = {
     resolved,
     facilities,
+    identifierLandingFacility: null, // resolve-by-payer carries NO identifier → payer-wide (ruling 3)
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
   };

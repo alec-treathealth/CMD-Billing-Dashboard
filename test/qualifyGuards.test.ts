@@ -10,8 +10,17 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { resolveLandingWins, drillLandingWins, isPayerChange } from '../app/lib/qualify/qualifyGuards.js';
+import {
+  resolveLandingWins,
+  drillLandingWins,
+  isPayerChange,
+  isIdentifierResolution,
+  isIdentifierEmpty,
+  identifierEmptyTerm,
+  leadFacilities,
+} from '../app/lib/qualify/qualifyGuards.js';
 import { cohortKey, cohortReducer, INITIAL_COHORT } from '../app/lib/qualify/qualifyCohort.js';
+import type { QualifyFacility, QualifyResolved } from '../app/lib/qualify/contract.js';
 
 // ── Resolution stream (resolveSeq recency) ──────────────────────────────────────────────────────────
 
@@ -72,4 +81,50 @@ test('drillLandingWins: a window change underneath also flips identity (cohortKe
   const windowed = cohortKey(cohortReducer(DRILL, { type: 'CHANGE_WINDOW', window: 90 }));
   assert.notEqual(captured, windowed, 'window is part of the cohort key');
   assert.equal(drillLandingWins(7, 7, captured, windowed), false, 'stale-window drill landing is dropped');
+});
+
+// ── Fix A — identifier-landing helpers (shared by desktop + mobile) ──────────────────────────────────
+const resolved = (over: Partial<QualifyResolved>): QualifyResolved => ({
+  payerName: 'AETNA', matchedOn: 'prefix', matchedValue: 'W29', totalCharges: 10, facilityCount: 3,
+  windowStart: '2026-06-17', windowEnd: '2026-07-17', ...over,
+});
+
+test('isIdentifierResolution: true for a prefix/member search, false for the payer path / null', () => {
+  assert.equal(isIdentifierResolution(resolved({ matchedOn: 'prefix' })), true);
+  assert.equal(isIdentifierResolution(resolved({ matchedOn: 'member_id' })), true);
+  assert.equal(isIdentifierResolution(resolved({ matchedOn: 'payer' })), false, 'resolve-by-payer is not an identifier');
+  assert.equal(isIdentifierResolution(null), false);
+});
+
+test('isIdentifierEmpty: identifier resolved + null landing → honest-empty; a landing or the payer path → not', () => {
+  assert.equal(isIdentifierEmpty(resolved({ matchedOn: 'prefix' }), null), true, 'prefix search, no ranked in-window claim → honest-empty');
+  assert.equal(isIdentifierEmpty(resolved({ matchedOn: 'member_id' }), null), true, 'exact search, none in-window → honest-empty');
+  assert.equal(isIdentifierEmpty(resolved({ matchedOn: 'prefix' }), '405 recovery'), false, 'a landing facility → NOT empty');
+  assert.equal(isIdentifierEmpty(resolved({ matchedOn: 'payer' }), null), false, 'payer path is payer-wide, never honest-empty (ruling 3)');
+  assert.equal(isIdentifierEmpty(null, null), false, 'unresolved (VOB) is a different state');
+});
+
+test('identifierEmptyTerm: the ≤3 echo for a prefix search; generic "this member" for exact (never the raw id)', () => {
+  assert.equal(identifierEmptyTerm(resolved({ matchedOn: 'prefix', matchedValue: 'W29' })), 'W29');
+  assert.equal(identifierEmptyTerm(resolved({ matchedOn: 'member_id', matchedValue: 'AET' })), 'this member', 'exact never echoes any member-id chars');
+  assert.equal(identifierEmptyTerm(resolved({ matchedOn: 'payer' })), '');
+  assert.equal(identifierEmptyTerm(null), '');
+});
+
+const fac = (key: string, rank: number): QualifyFacility => ({
+  rank, name: key.toUpperCase(), facilityKey: key, city: null, state: null,
+  pctAllowedOfBilled: 50, rating: 50, streakSignal: null, billedAmount: null, allowedAmount: null, lineCount: 10,
+});
+const DECK = [fac('a', 1), fac('b', 2), fac('c', 3)];
+
+test('leadFacilities: moves the landing facility to the front, preserving the rest in order', () => {
+  assert.deepEqual(leadFacilities(DECK, 'c').map((f) => f.facilityKey), ['c', 'a', 'b'], 'landing leads, rest keep rating order');
+  assert.deepEqual(leadFacilities(DECK, 'a').map((f) => f.facilityKey), ['a', 'b', 'c'], 'already-leading → unchanged');
+});
+
+test('leadFacilities: null landing or a not-present key → unchanged order (and never mutates the input)', () => {
+  const frozen = DECK.map((f) => f.facilityKey);
+  assert.deepEqual(leadFacilities(DECK, null).map((f) => f.facilityKey), ['a', 'b', 'c']);
+  assert.deepEqual(leadFacilities(DECK, 'ghost').map((f) => f.facilityKey), ['a', 'b', 'c'], 'a below-floor/absent key never reorders');
+  assert.deepEqual(DECK.map((f) => f.facilityKey), frozen, 'input array untouched');
 });

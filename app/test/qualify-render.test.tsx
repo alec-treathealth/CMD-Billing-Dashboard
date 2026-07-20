@@ -257,6 +257,24 @@ test('cases pager — hidden on a single page (no hasNext, page 1)', () => {
   assert.ok(!html.includes('Next →') && !html.includes('← Previous'), 'no pager when there is only one page');
 });
 
+// ── Fix A: honest-empty copy (identifier search with no ranked in-window claims) ────────────────────
+test('cases table — identifier honest-empty: empty + emptyIdentifierLabel shows "No in-window claims for <term> — try a wider window"', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable claims={[]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([])} {...noReveal} emptyIdentifierLabel="W29" />,
+  );
+  assert.ok(html.includes('No in-window claims for W29'), 'names the searched (non-PHI) term');
+  assert.ok(/try a wider window/i.test(html), 'nudges toward widening the window');
+  assert.ok(!html.includes('No claims for this payer'), 'NOT the payer-wide copy');
+});
+
+test('cases table — without emptyIdentifierLabel, an empty panel keeps the payer-wide copy (browse/payer path)', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable claims={[]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([])} {...noReveal} />,
+  );
+  assert.ok(html.includes('No claims for this payer in the selected window.'), 'payer-path empty copy unchanged');
+  assert.ok(!/try a wider window/i.test(html), 'no identifier honest-empty copy when the label is absent');
+});
+
 // ── Q-4: per-facility cases scoping (desktop wiring of the existing getQualifyFacilityCases path) ────
 // These fixtures are deliberately self-contained (they do NOT reuse the rating-const fixtures above) so
 // the block stays independent of the parallel scoring-track edits to this file.

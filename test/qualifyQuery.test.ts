@@ -4,6 +4,7 @@ import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../src/tenants.js';
 import {
   buildResolvePayerQuery,
   buildFacilityRankingQuery,
+  buildIdentifierLandingFacilityQuery,
   buildFacilityCasesQuery,
   buildMoversQuery,
   QUALIFY_CASES_LIMIT,
@@ -19,6 +20,7 @@ test('cross-tenant: every builder scopes business_entity_id = any($1::uuid[]) wi
   const built = [
     buildResolvePayerQuery(TOKEN, 'member_id', BOTH),
     buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH),
+    buildIdentifierLandingFacilityQuery(TOKEN, 'prefix', 'AETNA', '2026-06-17', '2026-07-17', BOTH),
     buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH),
     buildMoversQuery('2026-06-17', '2026-07-17', '2026-05-18', '2026-06-17', BOTH),
   ];
@@ -34,6 +36,7 @@ test('grain: aggregate builders read the charge rollup, never raw cmd_explorer_r
   for (const { sql } of [
     buildResolvePayerQuery(TOKEN, 'prefix', BOTH),
     buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH),
+    buildIdentifierLandingFacilityQuery(TOKEN, 'prefix', 'AETNA', '2026-06-17', '2026-07-17', BOTH),
     buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH),
     buildMoversQuery('2026-06-17', '2026-07-17', '2026-05-18', '2026-06-17', BOTH),
   ]) {
@@ -46,6 +49,7 @@ test('grain: aggregate builders read the charge rollup, never raw cmd_explorer_r
 test('every builder routes through assertEntityScope (throws on empty scope)', () => {
   assert.throws(() => buildResolvePayerQuery(TOKEN, 'member_id', []), /entityIds required/);
   assert.throws(() => buildFacilityRankingQuery('X', '2026-01-01', '2026-02-01', []), /entityIds required/);
+  assert.throws(() => buildIdentifierLandingFacilityQuery(TOKEN, 'prefix', 'X', '2026-01-01', '2026-02-01', []), /entityIds required/);
   assert.throws(
     () => buildFacilityCasesQuery('X', 'F', '2026-01-01', '2026-02-01', []),
     /entityIds required/,
@@ -82,6 +86,35 @@ test('buildFacilityRankingQuery: reuses PCT_RATIO_SELECT, resolves facility_code
   assert.match(sql, /as facility_code/, 'returns facility_code for the city/state lookup');
   assert.match(sql, /count\(\*\)::int as line_count/, 'line_count = rating dampening weight (non-dollar)');
   assert.deepEqual(params, [BOTH, 'AETNA', '2026-06-17', '2026-07-17']);
+});
+
+// ── buildIdentifierLandingFacilityQuery (Fix A): kind→column, payer+window scope, recency limit 1. ───
+test('buildIdentifierLandingFacilityQuery: prefix→prefix column, member→exact column, payer+window scoped, limit 1', () => {
+  const pfx = buildIdentifierLandingFacilityQuery(TOKEN, 'prefix', 'AETNA', '2026-06-17', '2026-07-17', BOTH);
+  assert.match(pfx.sql, /member_id_prefix_bidx = \$5/, 'prefix kind → prefix blind index');
+  assert.ok(!pfx.sql.includes('member_id_bidx = '), 'prefix mode does NOT touch the exact-member column');
+  assert.match(pfx.sql, /primary_payer = \$2/, 'scoped to the resolved payer (so the single-payer drill is non-empty)');
+  assert.match(pfx.sql, /payment_received >= \$3::date and payment_received < \$4::date/, 'in-window (half-open)');
+  assert.match(pfx.sql, /limit 1$/, 'returns 0 or 1 facility');
+  assert.deepEqual(pfx.params, [BOTH, 'AETNA', '2026-06-17', '2026-07-17', TOKEN]);
+
+  const exact = buildIdentifierLandingFacilityQuery(TOKEN, 'member_id', 'AETNA', '2026-06-17', '2026-07-17', BOTH);
+  assert.match(exact.sql, /member_id_bidx = \$5/, 'member_id kind → exact blind index');
+  assert.ok(!exact.sql.includes('member_id_prefix_bidx'), 'exact mode does NOT touch the prefix column');
+});
+
+// ── ORDER-BY PARITY (the land-on-the-wrong-facility guard): the landing lookup's "most recent" ordering
+//    MUST match the drill's claim ordering — charge_date desc nulls last, id desc (NOT payment_received). ──
+test('buildIdentifierLandingFacilityQuery: ORDER BY matches the drill (charge_date desc nulls last, id desc — not payment_received)', () => {
+  const landing = buildIdentifierLandingFacilityQuery(TOKEN, 'prefix', 'AETNA', '2026-06-17', '2026-07-17', BOTH);
+  const drill = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH);
+  // Landing orders on the raw column; the drill orders its projected alias agg.dos (= to_char(charge_date)).
+  assert.match(landing.sql, /order by charge_date desc nulls last, id desc/, 'landing: charge_date desc nulls last, id desc');
+  assert.match(drill.sql, /order by agg\.dos desc nulls last, agg\.id desc/, 'drill: agg.dos (= to_char(charge_date)) desc nulls last, agg.id desc');
+  assert.match(drill.sql, /to_char\(charge_date, 'YYYY-MM-DD'\) as dos/, 'agg.dos IS charge_date (lexical YYYY-MM-DD == chronological) — same key as landing');
+  // The claim ordering must NOT key on payment_received on EITHER side (that column only WINDOWS, never orders claims).
+  assert.ok(!/order by charge_date desc nulls last, id desc[\s\S]*payment_received/.test(landing.sql), 'landing ORDER BY has no payment_received');
+  assert.ok(!/order by agg\.dos[\s\S]*payment_received/.test(drill.sql), 'drill ORDER BY has no payment_received');
 });
 
 // ── buildFacilityCasesQuery: CLAIM GRAIN (one row per charge), raw-facility predicate, over-fetch. ─────

@@ -144,6 +144,12 @@ export interface QualifySnapshot {
    *  distinct "payer has no facilities in this window" state — frontends key VOB off resolved===null. */
   resolved: QualifyResolved | null;
   facilities: QualifyFacility[];
+  /** Fix A: raw facility text (== QualifyFacility.facilityKey) of the searched identifier's MOST-RECENT
+   *  in-window claim under the resolved payer, for auto-selecting the claims panel instead of rating rank-1.
+   *  null when the resolution carried NO identifier (resolve-by-payer path) OR the identifier has no claim
+   *  at any RANKED (floor-clearing) facility in-window — the honest-empty trigger. Guaranteed to be present
+   *  in facilities[] when non-null (the core drops a below-floor candidate to null). NON-PHI (facility text). */
+  identifierLandingFacility: string | null;
   viewerHasAmountsCapability: boolean; // === (role !== 'admissions_seat')
   tenantScope: typeof QUALIFY_TENANT_SCOPE; // always the literal — impossible to forget
 }
