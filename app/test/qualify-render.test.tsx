@@ -55,14 +55,24 @@ const CASE_AT_LOW: QualifyCase = {
 
 const PHI: QualifyPhi = { patient_name: 'DOE, JANE', member_id_raw: 'AETMEMBER123', group_number: 'GRP9' };
 
-/** Default (no-reveal) props for the cases table — single header-toggle API. */
+const noop = () => {};
+/** Default (no-reveal) props for the cases table — single header-toggle + prefix filter + cursor pager API. */
 const noReveal = {
   canReveal: false,
   revealed: new Map<number, QualifyPhi>(),
   revealAll: false,
   revealing: false,
   revealError: null,
-  onToggleRevealAll: () => {},
+  onToggleRevealAll: noop,
+  prefix: '',
+  onPrefixChange: noop,
+  onApplyPrefix: noop,
+  page: 1,
+  hasPrev: false,
+  hasNext: false,
+  paging: false,
+  onPrevPage: noop,
+  onNextPage: noop,
 };
 
 test('sanity: the rating buckets (= allowed% bands) are what these tests assume', () => {
@@ -133,12 +143,10 @@ test('cases reveal — real PHI shown ONLY when revealAll is on AND the PHI is c
       hasAmounts
       heatOn
       facilityBuckets={buildFacilityBucketMap([THIN_HIGH])}
+      {...noReveal}
       canReveal
       revealed={new Map<number, QualifyPhi>([[1, PHI]])}
       revealAll
-      revealing={false}
-      revealError={null}
-      onToggleRevealAll={() => {}}
     />,
   );
   assert.ok(html.includes('AETMEMBER123') && html.includes('DOE, JANE') && html.includes('GRP9'), 'real PHI shown when cached + toggled on');
@@ -152,12 +160,9 @@ test('cases reveal — cached PHI stays masked while revealAll is OFF (DOM omiss
       hasAmounts
       heatOn
       facilityBuckets={buildFacilityBucketMap([THIN_HIGH])}
+      {...noReveal}
       canReveal
       revealed={new Map<number, QualifyPhi>([[1, PHI]])}
-      revealAll={false}
-      revealing={false}
-      revealError={null}
-      onToggleRevealAll={() => {}}
     />,
   );
   for (const v of ['AETMEMBER123', 'DOE, JANE', 'GRP9']) {
@@ -173,17 +178,69 @@ test('reveal is INDEPENDENT of the amounts gate: an admissions_seat reveal shows
       hasAmounts={false}
       heatOn
       facilityBuckets={buildFacilityBucketMap([THIN_HIGH])}
+      {...noReveal}
       canReveal
       revealed={new Map<number, QualifyPhi>([[1, PHI]])}
       revealAll
-      revealing={false}
-      revealError={null}
-      onToggleRevealAll={() => {}}
     />,
   );
   assert.ok(html.includes('AETMEMBER123') && html.includes('DOE, JANE'), 'PHI reveal works without amounts capability');
   assert.ok(!html.includes('$') && !html.includes('Billed') && !html.includes('Allowed'), 'but ZERO dollars — the two gates are independent');
   for (const v of ['18,400', '11,592']) assert.ok(!html.includes(v), `dollar ${v} absent even when PHI is revealed`);
+});
+
+// ── prefix filter + cursor pager (Stage 2 desktop UI) ───────────────────────────────────────────────
+test('cases prefix — the header filter input is present and labeled STARTS-WITH, never "contains"', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable cases={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal />,
+  );
+  assert.ok(html.includes('Filter by ID prefix'), 'the prefix input placeholder is present');
+  assert.ok(/starts with/i.test(html), 'the control is labeled as a starts-with / prefix match');
+  assert.ok(!/contains/i.test(html), 'never labeled "contains" — starts-with only (the mixed-ID guard)');
+});
+
+test('cases prefix — a sub-3-char entry shows the "activates at 3" affordance (mints no filter)', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable cases={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal prefix="ab" />,
+  );
+  assert.ok(html.includes('Enter 3 characters to filter'), 'sub-3-char affordance: not yet filtering');
+});
+
+test('cases prefix — a 3-char entry shows the starts-with helper (ready to apply)', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable cases={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal prefix="ABC" />,
+  );
+  assert.ok(/starting with/i.test(html), 'active-prefix helper says "starting with"');
+  assert.ok(!/contains/i.test(html), 'never "contains"');
+});
+
+test('cases pager — Next is ENABLED when hasNext (more pages to walk)', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable cases={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} hasNext page={1} />,
+  );
+  const nextTag = html.match(/<button([^>]*)>Next →<\/button>/)?.[1] ?? '';
+  assert.ok(nextTag.length > 0, 'the Next control renders when hasNext');
+  // `disabled=""` is the ATTRIBUTE; the className's `disabled:opacity-50` is a Tailwind variant, not it.
+  assert.ok(!nextTag.includes('disabled=""'), 'Next is enabled when hasNext');
+});
+
+test('cases pager — Next is DISABLED at the end of the walk (!hasNext); Prev enabled off page 1', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable cases={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} hasNext={false} hasPrev page={2} />,
+  );
+  const nextTag = html.match(/<button([^>]*)>Next →<\/button>/)?.[1] ?? '';
+  const prevTag = html.match(/<button([^>]*)>← Previous<\/button>/)?.[1] ?? '';
+  // `disabled=""` is the ATTRIBUTE; the className's `disabled:opacity-50` is a Tailwind variant, not it.
+  assert.ok(nextTag.includes('disabled=""'), 'Next is disabled at the end of the walk');
+  assert.ok(!prevTag.includes('disabled=""'), 'Prev is enabled once past page 1');
+  assert.ok(html.includes('Page 2'), 'shows the current page');
+});
+
+test('cases pager — hidden on a single page (no hasNext, page 1)', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable cases={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal />,
+  );
+  assert.ok(!html.includes('Next →') && !html.includes('← Previous'), 'no pager when there is only one page');
 });
 
 // ── Q-4: per-facility cases scoping (desktop wiring of the existing getQualifyFacilityCases path) ────

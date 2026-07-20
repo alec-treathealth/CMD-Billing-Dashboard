@@ -7,14 +7,22 @@
  * hands plain, already-shaped data to the pure presentational children (facility panel, cases table,
  * VOB modal).
  *
+ * COHORT STATE (qualifyCohort.ts): the cases panel's identity — payer / facility / window / prefix — and
+ * its cursor stack (page + cursors[]) live in ONE atomic object driven by a pure reducer. Every handler
+ * DISPATCHES an action; it never hand-resets page/cursors/prefix. The reducer owns the invariants:
+ *   - any cohort change (payer/facility/window/prefix) resets to page 0 with a fresh cursor stack;
+ *   - RESOLVE_PAYER is the ONLY action that clears the prefix;
+ *   - CHANGE_WINDOW keeps the facility + prefix — a window change is the same selection re-fetched for the
+ *     new window, NOT a teleport back to rank-1.
+ *
  * PER-FACILITY CASES (ruling Q-4 / Prompt-4 finding #4): the "Recent cases" panel shows the 15
  * most-recent distinct patients for the resolved payer FILTERED TO THE SELECTED FACILITY — never the
  * payer-wide set (the mockup's "same 15 regardless of facility" bug). Selecting a facility row calls
  * the existing getQualifyFacilityCases action (same server path the mobile card-tap uses; cross-tenant,
- * masked, amounts stripped server-side). On every resolve we auto-select the rank-1 facility so the
- * tab lands populated. A facility switch discards any revealed PHI — the same scope-change rule a new
- * search follows (each drill is its own audited access). snapshot.cases (payer-wide) is intentionally
- * left fetched-but-unrendered here — dropping it would change the shared getQualifySnapshot contract.
+ * masked, amounts stripped server-side). On a NEW payer we auto-select the rank-1 facility so the tab
+ * lands populated. A facility switch discards any revealed PHI — the same scope-change rule a new search
+ * follows (each drill is its own audited access). snapshot.cases (payer-wide) is intentionally left
+ * fetched-but-unrendered here — dropping it would change the shared getQualifySnapshot contract.
  *
  * ON LOAD it auto-resolves the top "Heating up" payer so the tab lands POPULATED (matching the
  * mockup's populated-on-load feel) instead of an empty search prompt. The user can then search or
@@ -24,10 +32,10 @@
  * seeded before the first search by the server-derived prop so an admissions_seat never renders the
  * $ column headers even on the empty state.
  *
- * Window control is 7/14/30/60/90 (contract QUALIFY_WINDOW_OPTIONS) — the mock's "Month" was
+ * Window control is 30/60/90/180 (contract QUALIFY_WINDOW_OPTIONS) — the mock's "Month" was
  * dropped (Alec) because it is a different window shape than the contract's trailing-N-days math.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useTransition } from 'react';
 import { Search } from 'lucide-react';
 import {
   getQualifySnapshot,
@@ -41,9 +49,11 @@ import {
   type QualifySnapshot,
   type QualifyWindowDays,
   type QualifyCase,
+  type QualifyCasesCursor,
   type QualifyMover,
   type QualifyPhi,
 } from '@/lib/qualify/contract';
+import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
 import { buildFacilityBucketMap } from '@/components/qualify/colors';
 import { FacilityPanel } from '@/components/qualify/facility-panel';
 import { CasesTable } from '@/components/qualify/cases-table';
@@ -60,6 +70,10 @@ function formatWindowRange(startIso: string, endExclusiveIso: string): string {
   return `${mo(start)} ${start.getUTCDate()} – ${mo(endIncl)} ${endIncl.getUTCDate()}, ${endIncl.getUTCFullYear()}`;
 }
 
+/** The page-0 slice fetched for a facility (seed) — the shape both the resolve paths and the pager write. */
+type CasesPage = { cases: QualifyCase[]; nextCursor: QualifyCasesCursor | null; hasMore: boolean };
+const EMPTY_PAGE: CasesPage = { cases: [], nextCursor: null, hasMore: false };
+
 export function QualifyTab({
   viewerHasAmountsCapability,
   canRevealPhi,
@@ -68,15 +82,31 @@ export function QualifyTab({
   canRevealPhi: boolean;
 }) {
   const [query, setQuery] = useState('');
-  const [windowDays, setWindowDays] = useState<QualifyWindowDays>(30);
   const [snapshot, setSnapshot] = useState<QualifySnapshot | null>(null);
   const [isPending, startTransition] = useTransition();
-  // Per-facility cases drill (ruling Q-4): the raw facilityKey currently scoping the cases panel, and
-  // that facility's 15 most-recent distinct patients (from getQualifyFacilityCases). A dedicated
-  // transition so a facility-to-facility switch doesn't co-mingle with the payer-resolve pending state.
-  const [selectedFacilityKey, setSelectedFacilityKey] = useState<string | null>(null);
+  // The cases panel's atomic COHORT (payer/facility/window/prefix + page/cursors), reducer-owned. Every
+  // transition goes through `apply` (dispatch + return the resulting cohort so the fetch can read it). A ref
+  // mirrors the latest cohort so an async cases landing can check it changed underneath (the cohort-key guard).
+  const [cohort, dispatch] = useReducer(cohortReducer, INITIAL_COHORT);
+  const cohortRef = useRef(cohort);
+  cohortRef.current = cohort;
+  const apply = useCallback((action: Parameters<typeof cohortReducer>[1]): QualifyCohort => {
+    const next = cohortReducer(cohortRef.current, action);
+    dispatch(action);
+    return next;
+  }, []);
+  // The current facility's page of cases + the last fetch's pagination result. facilityCases is the rendered
+  // rows; hasMore gates Next; nextCursor is the cursor a PAGE_NEXT will push. (These are fetch RESULTS, not
+  // cohort identity, so they live outside the reducer.) A dedicated transition so a facility/pager fetch
+  // doesn't co-mingle with the payer-resolve pending state.
   const [facilityCases, setFacilityCases] = useState<QualifyCase[]>([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<QualifyCasesCursor | null>(null);
   const [isFacilityPending, startFacilityTransition] = useTransition();
+  // The cases-panel PREFIX INPUT buffer (what the user is typing). The APPLIED prefix lives in cohort.prefix;
+  // Enter commits the buffer via CHANGE_PREFIX. On a scope change that keeps the prefix (facility switch) the
+  // buffer is re-synced to cohort.prefix; on a payer resolution both are cleared. STARTS-WITH, never contains.
+  const [prefix, setPrefix] = useState('');
   // "Heating up" payer quick-pick (desktop parity with mobile): trending payers for the current window,
   // rendered as a click-to-resolve chip row. Fetched on load + re-fetched on window change.
   const [movers, setMovers] = useState<QualifyMover[]>([]);
@@ -85,8 +115,8 @@ export function QualifyTab({
   const [echo, setEcho] = useState('');
   const [hint, setHint] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
-  // Non-null when the CURRENT resolution came from the by-payer path (the on-load default or a future
-  // payer tap), so a window change re-resolves by payer instead of re-running an (empty) search.
+  // Non-null when the CURRENT resolution came from the by-payer path (the on-load default or a payer chip),
+  // so a window change re-resolves by payer instead of re-running an (empty) search.
   const [byPayer, setByPayer] = useState<string | null>(null);
   // True until the on-load auto-resolve of the top payer settles (so we show "Resolving…", not the
   // empty search prompt, on first paint).
@@ -106,12 +136,12 @@ export function QualifyTab({
   // commit — facilityCases still lagging the previous facility for one render right after a switch — is
   // deduped instead of revealing the wrong scope. A new resolution/facility always yields a fresh array.
   const revealedForRef = useRef<QualifyCase[] | null>(null);
-  // Resolution identity (search-is-authority). Every resolution entry point (runSearch / resolveByPayer /
-  // selectFacility) bumps-and-captures this at entry; every post-await write guards `genRef.current === gen`
-  // and bails otherwise. So a newer resolution DISCARDS any in-flight older chip/facility/reveal write —
-  // the header (snapshot) and the rows (facilityCases) can never be sourced from two different resolutions.
-  // A reveal CAPTURES the current gen (without bumping) so a stale reveal can't re-populate PHI after a
-  // newer resolution's resetReveal(). Window changes don't touch this ref (independent control).
+  // Resolution identity (search-is-authority). Every fetch entry point bumps-and-captures this at entry;
+  // every post-await write guards `genRef.current === gen` and bails otherwise. So a newer fetch DISCARDS
+  // any in-flight older write — the header (snapshot) and the rows (facilityCases) can never be sourced from
+  // two different resolutions. This is the RECENCY guard (it also catches pagination races). A reveal
+  // CAPTURES the current gen (without bumping) so a stale reveal can't re-populate PHI after a newer scope's
+  // resetReveal(). See cohortKey for the complementary IDENTITY guard on standalone cases fetches.
   const genRef = useRef(0);
 
   const hasAmounts = snapshot ? snapshot.viewerHasAmountsCapability : viewerHasAmountsCapability;
@@ -121,30 +151,83 @@ export function QualifyTab({
   );
 
   // Discard the current scope's revealed PHI — used on every scope change (new search, new payer,
-  // facility switch). Clears the PHI cache, but NOT `revealAll` (sticky toggle) and NOT `revealedForRef`
-  // (resetting it would let the effect re-fire against the still-lagging previous facilityCases); the
-  // fresh facilityCases identity from the new resolution is what re-arms the auto-reveal.
+  // facility switch, window change, prefix, page). Clears the PHI cache, but NOT `revealAll` (sticky toggle)
+  // and NOT `revealedForRef` (resetting it would let the effect re-fire against the still-lagging previous
+  // facilityCases); the fresh facilityCases identity from the new fetch is what re-arms the auto-reveal.
   const resetReveal = useCallback(() => {
     setRevealed(new Map());
     setRevealing(false);
     setRevealError(null);
   }, []);
 
-  // Auto-select the rank-1 facility of a fresh snapshot and fetch ITS cases, so the tab lands with the
-  // cases panel already scoped to a facility (never the payer-wide set). Returns key+cases so the caller
-  // sets snapshot/selection/cases together (one paint, no empty-cases flash). Throws propagate to the
-  // resolve transition's catch — a facility-cases failure is surfaced as a resolve failure, not silently
-  // swallowed into a good-snapshot-with-no-cases state.
-  const seedFacility = useCallback(
-    async (snap: QualifySnapshot, w: QualifyWindowDays): Promise<{ key: string | null; cases: QualifyCase[] }> => {
-      const top = snap.resolved ? snap.facilities[0] : undefined;
-      if (!snap.resolved || !top) return { key: null, cases: [] };
-      const res = await getQualifyFacilityCases({ payer: snap.resolved.payerName, facility: top.facilityKey, windowDays: w });
-      return { key: top.facilityKey, cases: res.cases };
+  // Fetch page 0 of ONE facility's cases (the "seed" a resolve/window-change commits atomically with the
+  // snapshot, so header + selection + cases land in one paint — no empty-cases flash). `facility` is rank-1
+  // for a new payer, or the RETAINED facility for a window change; `prefixVal` is '' for a new payer or the
+  // retained prefix for a window change. Throws propagate to the caller's transition catch.
+  const fetchSeed = useCallback(
+    async (payer: string, facility: string, w: QualifyWindowDays, prefixVal: string): Promise<CasesPage> => {
+      const trimmed = prefixVal.trim();
+      const res = await getQualifyFacilityCases({
+        payer,
+        facility,
+        windowDays: w,
+        ...(trimmed ? { filter: { prefix: trimmed } } : {}),
+      });
+      return { cases: res.cases, nextCursor: res.nextCursor, hasMore: res.hasMore };
     },
     [],
   );
 
+  // Fetch the cases for a given cohort (a standalone cases fetch — facility switch / prefix apply / pager
+  // step; NOT a snapshot re-resolve). Derives the cursor from cohort.cursors[cohort.page]. Guarded twice:
+  // genRef (recency — catches pagination races + supersession) AND cohortKey (identity — discards a landing
+  // whose cohort changed underneath, belt-and-suspenders over the reducer's structural reset).
+  const fetchCases = useCallback(
+    (c: QualifyCohort) => {
+      const payer = c.payer;
+      const facility = c.facility;
+      if (!payer || !facility) return;
+      const gen = ++genRef.current;
+      const key = cohortKey(c);
+      resetReveal();
+      const cursor = c.cursors[c.page] ?? null;
+      const trimmed = c.prefix.trim();
+      startFacilityTransition(async () => {
+        try {
+          const res = await getQualifyFacilityCases({
+            payer,
+            facility,
+            windowDays: c.window,
+            ...(trimmed ? { filter: { prefix: trimmed } } : {}),
+            cursor,
+          });
+          if (genRef.current !== gen) return; // superseded by a newer fetch (recency / pagination guard)
+          if (cohortKey(cohortRef.current) !== key) return; // cohort changed underneath — stale landing
+          setFacilityCases(res.cases);
+          setHasMore(res.hasMore);
+          setNextCursor(res.nextCursor);
+        } catch {
+          if (genRef.current !== gen) return;
+          if (cohortKey(cohortRef.current) !== key) return;
+          setHint('Qualify is unavailable right now. Please try again.');
+        }
+      });
+    },
+    [resetReveal],
+  );
+
+  // Commit a fresh snapshot + its seeded page-0 cases atomically (one paint). Shared by runSearch /
+  // resolveByPayer / onWindow after they've fetched the snapshot + seed under a captured `gen`.
+  const commitResolved = useCallback((snap: QualifySnapshot, action: Parameters<typeof cohortReducer>[1], seed: CasesPage) => {
+    setSnapshot(snap);
+    apply(action);
+    setFacilityCases(seed.cases);
+    setHasMore(seed.hasMore);
+    setNextCursor(seed.nextCursor);
+  }, [apply]);
+
+  // Resolve by member-id / alpha-prefix SEARCH → a brand-new payer cohort: auto-select rank-1, clear the
+  // prefix. Seeds rank-1's page 0 BEFORE committing so snapshot + selection + cases land together.
   const runSearch = useCallback((rawQuery: string, w: QualifyWindowDays) => {
     const trimmed = rawQuery.trim();
     if (trimmed.length < MIN_QUERY_LEN) {
@@ -152,19 +235,17 @@ export function QualifyTab({
       return;
     }
     setHint(null);
-    // New search → discard any revealed PHI from the previous payer.
     resetReveal();
     const gen = ++genRef.current; // this search is now the authoritative resolution
     startTransition(async () => {
       try {
         const snap = await getQualifySnapshot({ query: trimmed, windowDays: w });
-        // Seed the rank-1 facility's cases BEFORE committing state, so snapshot + selection + cases
-        // land in one paint (ruling Q-4: the cases panel is always facility-scoped, never payer-wide).
-        const seed = await seedFacility(snap, w);
+        const payerName = snap.resolved?.payerName ?? null;
+        const rank1 = snap.resolved ? snap.facilities[0]?.facilityKey ?? null : null;
+        const seed = payerName && rank1 ? await fetchSeed(payerName, rank1, w, '') : EMPTY_PAGE;
         if (genRef.current !== gen) return; // a newer resolution superseded this search — discard
-        setSnapshot(snap);
-        setSelectedFacilityKey(seed.key);
-        setFacilityCases(seed.cases);
+        commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: rank1, window: w }, seed);
+        setPrefix(''); // sync the input buffer to the cleared cohort prefix
         setHasSearched(true);
         setByPayer(null); // an explicit search supersedes the by-payer default
         if (snap.resolved === null) {
@@ -182,10 +263,10 @@ export function QualifyTab({
         setHint('Qualify is unavailable right now. Please try again.');
       }
     });
-  }, [resetReveal, seedFacility]);
+  }, [resetReveal, fetchSeed, commitResolved]);
 
-  // Resolve directly by payer label (the on-load default; reuses the resolve-by-payer action). Mirrors
-  // runSearch's reveal-state reset. Sets `byPayer` so a window change re-resolves this payer.
+  // Resolve directly by payer label (the on-load default + the "Heating up" chips). A brand-new payer
+  // cohort: rank-1, cleared prefix. Sets `byPayer` so a window change re-resolves this payer.
   const resolveByPayer = useCallback((payer: string, w: QualifyWindowDays) => {
     setHint(null);
     resetReveal();
@@ -193,11 +274,12 @@ export function QualifyTab({
     startTransition(async () => {
       try {
         const snap = await getQualifySnapshotByPayer({ payer, windowDays: w });
-        const seed = await seedFacility(snap, w); // auto-select rank-1 facility (see runSearch)
+        const payerName = snap.resolved?.payerName ?? null;
+        const rank1 = snap.resolved ? snap.facilities[0]?.facilityKey ?? null : null;
+        const seed = payerName && rank1 ? await fetchSeed(payerName, rank1, w, '') : EMPTY_PAGE;
         if (genRef.current !== gen) return; // a newer resolution (e.g. a search) superseded this — discard
-        setSnapshot(snap);
-        setSelectedFacilityKey(seed.key);
-        setFacilityCases(seed.cases);
+        commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: rank1, window: w }, seed);
+        setPrefix('');
         setHasSearched(true);
         setByPayer(payer);
         setModalOpen(false);
@@ -206,43 +288,96 @@ export function QualifyTab({
         setHint('Qualify is unavailable right now. Please try again.');
       }
     });
-  }, [resetReveal, seedFacility]);
+  }, [resetReveal, fetchSeed, commitResolved]);
 
-  // Facility row click → re-scope the cases panel to that facility. Highlights instantly; discards any
-  // revealed PHI (scope change, re-audited); no-ops on the already-selected row so it can't re-audit.
+  // Window change — re-resolve the snapshot for the new window (facility ratings are window-dependent) while
+  // KEEPING the selected facility + prefix (facility-persist: no rank-1 teleport). The reducer's CHANGE_WINDOW
+  // resets the cursor stack but keeps facility+prefix; we dispatch it immediately so the control + movers
+  // track the new window, then re-fetch. If the re-resolve lands on the SAME payer we seed the kept facility
+  // (which may be EMPTY in the new window — we render that honestly, no fallback). If a (prefix) search
+  // resolves to a DIFFERENT payer in this window, the kept facility no longer belongs to it, so we treat it
+  // as a fresh resolve: rank-1 + cleared prefix.
+  const onWindow = (w: QualifyWindowDays) => {
+    const prev = cohortRef.current;
+    const next = apply({ type: 'CHANGE_WINDOW', window: w }); // window + reset now; keeps facility+prefix (optimistic)
+    if (!prev.payer) return; // nothing resolved yet — just track the window (the movers effect refreshes chips)
+    resetReveal();
+    const gen = ++genRef.current;
+    startTransition(async () => {
+      try {
+        const snap = byPayer
+          ? await getQualifySnapshotByPayer({ payer: byPayer, windowDays: w })
+          : await getQualifySnapshot({ query, windowDays: w });
+        const payerName = snap.resolved?.payerName ?? null;
+        if (genRef.current !== gen) return;
+        if (payerName && payerName === prev.payer && next.facility) {
+          // SAME payer → keep the facility + prefix; seed the kept facility for the new window.
+          const seed = await fetchSeed(payerName, next.facility, w, next.prefix);
+          if (genRef.current !== gen) return;
+          setSnapshot(snap);
+          setFacilityCases(seed.cases);
+          setHasMore(seed.hasMore);
+          setNextCursor(seed.nextCursor);
+        } else {
+          // Payer changed (or unresolved) → the kept facility is no longer valid: fresh resolve to rank-1.
+          const rank1 = snap.resolved ? snap.facilities[0]?.facilityKey ?? null : null;
+          const seed = payerName && rank1 ? await fetchSeed(payerName, rank1, w, '') : EMPTY_PAGE;
+          if (genRef.current !== gen) return;
+          commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: rank1, window: w }, seed);
+          setPrefix('');
+        }
+        setModalOpen(false);
+      } catch {
+        if (genRef.current !== gen) return;
+        setHint('Qualify is unavailable right now. Please try again.');
+      }
+    });
+  };
+
+  // Facility row click → SWITCH_FACILITY (keeps payer+window+prefix, resets the cursor stack). No-ops on the
+  // already-selected row. Syncs the input buffer to the retained prefix, then fetches page 0.
   const selectFacility = useCallback(
     (facilityKey: string) => {
-      const payer = snapshot?.resolved?.payerName;
-      if (!payer || facilityKey === selectedFacilityKey) return;
-      const gen = ++genRef.current; // a facility drill is a new resolution identity for the cases panel
-      setSelectedFacilityKey(facilityKey);
-      resetReveal();
-      startFacilityTransition(async () => {
-        try {
-          const res = await getQualifyFacilityCases({ payer, facility: facilityKey, windowDays });
-          if (genRef.current !== gen) return; // a newer resolution/drill superseded this fetch — discard
-          setFacilityCases(res.cases);
-        } catch {
-          if (genRef.current !== gen) return; // don't surface a stale error over a newer resolution
-          setHint('Qualify is unavailable right now. Please try again.');
-        }
-      });
+      const c = cohortRef.current;
+      if (!c.payer || facilityKey === c.facility) return;
+      const next = apply({ type: 'SWITCH_FACILITY', facility: facilityKey });
+      setPrefix(next.prefix); // keep the visible input in step with the retained applied prefix
+      fetchCases(next);
     },
-    [snapshot, selectedFacilityKey, windowDays, resetReveal],
+    [apply, fetchCases],
   );
+
+  // Apply the typed prefix to the CURRENT facility (explicit submit — Enter). No-op until a facility is
+  // selected. CHANGE_PREFIX commits the buffer → cohort.prefix and resets the cursor stack.
+  const applyPrefix = useCallback(() => {
+    if (!cohortRef.current.facility) return;
+    fetchCases(apply({ type: 'CHANGE_PREFIX', prefix }));
+  }, [apply, fetchCases, prefix]);
+
+  // Pager steps — walk the SAME cohort's cursor stack. PAGE_PREV steps back to the stored cursor; PAGE_NEXT
+  // advances, pushing the last fetch's nextCursor. Guarded by hasPrev/hasMore at the call.
+  const goPrevPage = useCallback(() => {
+    const c = cohortRef.current;
+    if (c.page > 0 && c.facility) fetchCases(apply({ type: 'PAGE_PREV' }));
+  }, [apply, fetchCases]);
+  const goNextPage = useCallback(() => {
+    const c = cohortRef.current;
+    if (hasMore && c.facility) fetchCases(apply({ type: 'PAGE_NEXT', nextCursor }));
+  }, [apply, fetchCases, hasMore, nextCursor]);
 
   // On load, land POPULATED: fetch the "Heating up" movers (for the quick-pick chip row) and resolve
   // the top one (highest distinct-patient mover). If there are no movers or the fetch fails, fall
   // through to the empty search prompt. Runs once.
   useEffect(() => {
     let alive = true;
+    const w = cohortRef.current.window;
     (async () => {
       try {
-        const m = await getQualifyMovers(windowDays);
+        const m = await getQualifyMovers(w);
         if (!alive) return;
         setMovers(m.movers);
         const top = m.movers[0]?.label;
-        if (top) resolveByPayer(top, windowDays);
+        if (top) resolveByPayer(top, w);
       } catch {
         // leave the empty prompt — the user can still search
       } finally {
@@ -255,7 +390,7 @@ export function QualifyTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Keep the "Heating up" chip row tracking the window: re-fetch movers whenever windowDays changes
+  // Keep the "Heating up" chip row tracking the window: re-fetch movers whenever the window changes
   // (the initial window is covered by the on-load effect above; skip the mount run to avoid a double
   // fetch). Chip-row only — does NOT re-resolve; onWindow already re-resolves the active payer/search.
   const moversInitDone = useRef(false);
@@ -265,7 +400,7 @@ export function QualifyTab({
       return;
     }
     let alive = true;
-    getQualifyMovers(windowDays)
+    getQualifyMovers(cohort.window)
       .then((m) => {
         if (alive) setMovers(m.movers);
       })
@@ -275,7 +410,7 @@ export function QualifyTab({
     return () => {
       alive = false;
     };
-  }, [windowDays]);
+  }, [cohort.window]);
 
   // Auto-reveal the current scope in ONE audited bulk call while "Reveal all" is on — parity with the
   // collections grid + billing-audit work-table. It re-fires whenever facilityCases changes (a new
@@ -320,18 +455,11 @@ export function QualifyTab({
     })();
   }, [canRevealPhi, revealAll, facilityCases]);
 
-  const onWindow = (w: QualifyWindowDays) => {
-    setWindowDays(w);
-    // Re-resolve so the panels track the new window — by payer if that's how we resolved, else by the
-    // search query. (Only when something is already resolved.)
-    if (byPayer) resolveByPayer(byPayer, w);
-    else if (snapshot?.resolved) runSearch(query, w);
-  };
-
   const resolved = snapshot?.resolved ?? null;
-  // Human name of the selected facility, for the cases-panel scope label (display only, never PHI).
+  // Human name of the selected facility, for the cases-panel scope label (display only, never PHI). Null when
+  // the kept facility has no row in the current window's snapshot (e.g. zero volume after a window change).
   const selectedFacilityLabel =
-    snapshot?.facilities.find((f) => f.facilityKey === selectedFacilityKey)?.name ?? null;
+    snapshot?.facilities.find((f) => f.facilityKey === cohort.facility)?.name ?? null;
 
   return (
     <main className="mx-auto max-w-[1280px] space-y-4 p-6 sm:p-8">
@@ -367,7 +495,7 @@ export function QualifyTab({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') runSearch(query, windowDays);
+              if (e.key === 'Enter') runSearch(query, cohort.window);
             }}
             spellCheck={false}
             placeholder="3-letter alpha prefix or member ID"
@@ -377,7 +505,7 @@ export function QualifyTab({
         </div>
         <button
           type="button"
-          onClick={() => runSearch(query, windowDays)}
+          onClick={() => runSearch(query, cohort.window)}
           disabled={isPending}
           className="rounded-xl border border-teal200 bg-teal50 px-4 py-2 text-[13px] font-semibold text-teal700 transition-colors hover:bg-teal200 disabled:opacity-60"
         >
@@ -390,8 +518,8 @@ export function QualifyTab({
               key={w}
               type="button"
               onClick={() => onWindow(w)}
-              aria-pressed={windowDays === w}
-              className={['rounded-full px-3 py-1.5 text-xs font-semibold transition-colors', windowDays === w ? 'bg-teal700 text-white' : 'text-muted-foreground hover:text-ink900'].join(' ')}
+              aria-pressed={cohort.window === w}
+              className={['rounded-full px-3 py-1.5 text-xs font-semibold transition-colors', cohort.window === w ? 'bg-teal700 text-white' : 'text-muted-foreground hover:text-ink900'].join(' ')}
             >
               {w}d
             </button>
@@ -403,9 +531,9 @@ export function QualifyTab({
       {/* "Heating up" payer quick-pick — click a chip to resolve that payer (parity with mobile) */}
       <HeatingUpBar
         movers={movers}
-        windowDays={windowDays}
+        windowDays={cohort.window}
         activeLabel={byPayer}
-        onOpen={(label) => resolveByPayer(label, windowDays)}
+        onOpen={(label) => resolveByPayer(label, cohort.window)}
       />
 
       {/* resolved context */}
@@ -439,7 +567,7 @@ export function QualifyTab({
             facilities={snapshot.facilities}
             hasAmounts={hasAmounts}
             heatOn={heatOn}
-            selectedKey={selectedFacilityKey}
+            selectedKey={cohort.facility}
             onSelect={selectFacility}
           />
           <div
@@ -458,6 +586,15 @@ export function QualifyTab({
               revealing={revealing}
               revealError={revealError}
               onToggleRevealAll={() => setRevealAll((v) => !v)}
+              prefix={prefix}
+              onPrefixChange={setPrefix}
+              onApplyPrefix={applyPrefix}
+              page={cohort.page + 1}
+              hasPrev={cohort.page > 0}
+              hasNext={hasMore}
+              paging={isFacilityPending}
+              onPrevPage={goPrevPage}
+              onNextPage={goNextPage}
             />
           </div>
         </div>

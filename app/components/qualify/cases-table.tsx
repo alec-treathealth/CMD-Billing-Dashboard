@@ -14,6 +14,9 @@
  * AMOUNTS: Billed/Allowed columns are OMITTED from the DOM when !viewerHasAmountsCapability.
  * SCOPE: `facilityLabel` names the facility these 15 belong to (ruling Q-4 — the list is scoped to the
  * SELECTED facility, so the scope must be visible). Facility name only; never PHI.
+ * FILTER (Stage 2): an optional member-ID PREFIX narrow (STARTS-WITH, ≤3 chars) in the header. The parent
+ * applies it server-side (member_id_prefix_bidx), so the input carries only the user's own typed prefix,
+ * never row PHI. A <3-char entry mints no token (shows all) — the affordance says filtering starts at 3.
  */
 import { bucketClass, caseBucket, type RatingBucket } from './colors';
 import { PHI_MASK } from '../../lib/phi';
@@ -45,6 +48,15 @@ export function CasesTable({
   revealing,
   revealError,
   onToggleRevealAll,
+  prefix,
+  onPrefixChange,
+  onApplyPrefix,
+  page,
+  hasPrev,
+  hasNext,
+  paging,
+  onPrevPage,
+  onNextPage,
 }: {
   cases: readonly QualifyCase[];
   hasAmounts: boolean;
@@ -62,8 +74,30 @@ export function CasesTable({
   /** Last bulk-reveal error for the current scope, if any. */
   revealError: string | null;
   onToggleRevealAll: () => void;
+  /** Member-ID PREFIX filter (STARTS-WITH). The user's own typed term — HMAC'd server-side, never row PHI. */
+  prefix: string;
+  onPrefixChange: (value: string) => void;
+  /** Apply the prefix (explicit submit — mirrors the top-bar's Enter-to-resolve). */
+  onApplyPrefix: () => void;
+  /** Cursor-pagination controls (1-based page for display), matching the collections <Pager> idiom. */
+  page: number;
+  hasPrev: boolean;
+  hasNext: boolean;
+  /** A page fetch is in flight — disables the pager (mirrors collections' `disabled={busy}`). */
+  paging: boolean;
+  onPrevPage: () => void;
+  onNextPage: () => void;
 }) {
   const colSpan = 7 + (hasAmounts ? 2 : 0);
+  // Prefix affordance — STARTS-WITH, never "contains". A 1-2 char entry mints no token server-side
+  // (Stage 1), so it must read as "not yet filtering"; filtering activates at 3 characters.
+  const trimmedPrefix = prefix.trim();
+  const prefixHint =
+    trimmedPrefix.length === 0
+      ? null
+      : trimmedPrefix.length < 3
+        ? 'Enter 3 characters to filter'
+        : 'Matches member IDs starting with these characters — press Enter';
   return (
     <section className="rounded-xl border bg-card shadow-sm">
       <div className="flex items-baseline justify-between gap-3 px-4 pb-2.5 pt-4">
@@ -72,6 +106,20 @@ export function CasesTable({
           {facilityLabel ? <span className="ml-2 text-sm font-medium text-muted-foreground">· {facilityLabel}</span> : null}
         </h2>
         <div className="flex items-center gap-3">
+          {canReveal ? (
+            <input
+              value={prefix}
+              onChange={(e) => onPrefixChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') onApplyPrefix();
+              }}
+              spellCheck={false}
+              maxLength={3}
+              placeholder="Filter by ID prefix…"
+              aria-label="Filter cases by member ID prefix (starts with)"
+              className="h-8 w-40 rounded-md border bg-background px-2.5 text-[13px] text-ink900 outline-none focus:border-teal500 focus:ring-2 focus:ring-teal50"
+            />
+          ) : null}
           {canReveal ? (
             <button
               type="button"
@@ -92,6 +140,9 @@ export function CasesTable({
           </span>
         </div>
       </div>
+      {canReveal && prefixHint ? (
+        <p className="px-4 pb-1 text-[11px] text-muted-foreground">{prefixHint}</p>
+      ) : null}
       {canReveal && revealError ? (
         <p className="px-4 pb-1 text-[11px] font-medium text-status-danger">{revealError}</p>
       ) : null}
@@ -175,6 +226,31 @@ export function CasesTable({
           </tbody>
         </table>
       </div>
+      {/* Cursor pager — collections' "← Previous / Page N / Next →" idiom (inline to keep this
+          render-tested leaf free of the data-grid/@/ deps). Shown only when pagination is relevant. */}
+      {hasNext || page > 1 ? (
+        <div className="flex items-center justify-between border-t px-4 py-3">
+          <button
+            type="button"
+            onClick={onPrevPage}
+            disabled={!hasPrev || paging}
+            aria-label="Previous page"
+            className="rounded-md border border-teal200 bg-teal50 px-3 py-1 text-[12px] font-semibold text-teal700 transition-colors hover:bg-teal200 disabled:opacity-50"
+          >
+            ← Previous
+          </button>
+          <span className="text-xs text-muted-foreground">Page {page}</span>
+          <button
+            type="button"
+            onClick={onNextPage}
+            disabled={!hasNext || paging}
+            aria-label="Next page"
+            className="rounded-md border border-teal200 bg-teal50 px-3 py-1 text-[12px] font-semibold text-teal700 transition-colors hover:bg-teal200 disabled:opacity-50"
+          >
+            Next →
+          </button>
+        </div>
+      ) : null}
     </section>
   );
 }
