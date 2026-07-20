@@ -154,7 +154,17 @@ export function DetailSheet({
             stable regardless of the active filter. Selected chip = active filter; tap toggles it. */}
         {!loading && chips.length > 0 ? (
           <>
-            <div style={{ display: 'flex', gap: 8, overflowX: 'auto', padding: '4px 20px 2px', WebkitOverflowScrolling: 'touch' }}>
+            {/* Fixed-height row: minHeight fully contains the 28px chips with vertical padding; overflowY
+                hidden kills any vertical clip; alignItems centers the chips. Horizontal scroll snaps to
+                chip starts (scroll-snap) so the strip never rests mid-chip. The 20px inline padding makes
+                the first chip flush with the header's content padding and leaves trailing room after the last. */}
+            <div
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8, minHeight: 44, padding: '8px 20px', boxSizing: 'border-box',
+                overflowX: 'auto', overflowY: 'hidden', scrollSnapType: 'x proximity', scrollPaddingLeft: 20,
+                WebkitOverflowScrolling: 'touch',
+              }}
+            >
               {chips.map((ch) => {
                 const selected = activeFilter === ch.payer;
                 return (
@@ -164,14 +174,17 @@ export function DetailSheet({
                     onClick={() => onChip(ch.payer)}
                     aria-pressed={selected}
                     style={{
-                      flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 5, height: 28, padding: '0 11px',
+                      flexShrink: 0, scrollSnapAlign: 'start', display: 'inline-flex', alignItems: 'center', gap: 5,
+                      maxWidth: 220, height: 28, boxSizing: 'border-box', padding: '0 11px',
                       borderRadius: 999, border: `0.5px solid ${selected ? TEAL700 : LINE}`, background: selected ? TEAL_TINT : GROUND,
                       color: INK900, fontSize: 11, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
                     }}
                   >
-                    <span style={{ maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis' }}>{ch.payer}</span>
-                    <span style={{ color: INK400, fontWeight: 500 }}>· {ch.count} ·</span>
-                    <span className="ths-num" style={{ color: ch.avg === null ? INK400 : mobileBucketStyle(ch.avg).color }}>
+                    {/* Only the payer name shrinks + ellipsizes (needs minWidth:0 + block-level overflow in a
+                        flex child); the `· count · avg%` suffix is flexShrink:0 so it is never clipped/pushed. */}
+                    <span style={{ minWidth: 0, flex: '0 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ch.payer}</span>
+                    <span style={{ flexShrink: 0, color: INK400, fontWeight: 500 }}>· {ch.count} ·</span>
+                    <span className="ths-num" style={{ flexShrink: 0, color: ch.avg === null ? INK400 : mobileBucketStyle(ch.avg).color }}>
                       {ch.avg === null ? '—' : `${Math.round(ch.avg)}%`} avg
                     </span>
                   </button>

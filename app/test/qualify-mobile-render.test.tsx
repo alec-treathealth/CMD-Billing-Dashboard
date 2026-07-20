@@ -212,6 +212,21 @@ test('detail — chip avg% is colored by the same thresholds as the rows (ANTHEM
   assert.ok(html.includes(mobileBucketStyle(20).color), 'a 20% avg reads danger');
 });
 
+// ── Chip strip LAYOUT (device clipping/snap regression) — the strip contains chips with vertical room and
+//    snaps to chip boundaries; the payer name ellipsizes while the count/avg suffix is never clipped. ────
+test('detail — chip strip is a snap scroller with vertical containment; every payer chip renders', () => {
+  const FOUR: QualifyCase[] = ['AETNA', 'CIGNA', 'ANTHEM BLUE CROSS OF CALIFORNIA', 'BCBS'].map((p, i) => ({
+    id: 20 + i, memberIdMasked: '••••••', payerName: p, facilityName: 'MHC', program: 'OP',
+    lastDos: '2026-07-15', pctAllowedOfBilled: 55, billedAmount: 100, allowedAmount: 55,
+  }));
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={FOUR} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />);
+  for (const p of ['AETNA', 'CIGNA', 'ANTHEM BLUE CROSS OF CALIFORNIA', 'BCBS']) assert.ok(html.includes(p), `chip ${p} present`);
+  assert.match(html, /scroll-snap-type:\s*x proximity/, 'the strip is a horizontal snap scroller');
+  assert.match(html, /scroll-snap-align:\s*start/, 'chips snap to their start edge');
+  assert.match(html, /overflow-y:\s*hidden/, 'no vertical scroll/clip on the strip');
+  assert.match(html, /text-overflow:\s*ellipsis/, 'the payer name truncates with an ellipsis');
+});
+
 // ── Search-context banner — seeded only when opened from a prefix search; drives the initial filter ──
 test('detail — search context banner shows the term + a Show-all count', () => {
   const html = renderToStaticMarkup(
