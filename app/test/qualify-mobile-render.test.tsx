@@ -13,6 +13,7 @@ import { DetailSheet } from '../components/qualify/m/detail-sheet';
 import { ClaimDetailSheet } from '../components/qualify/m/claim-detail-sheet';
 import { AreaChips, deriveAreaChips, facilitiesInArea, AREA_ALL, AREA_OTHER } from '../components/qualify/m/area-chips';
 import { qualifyRating } from '../lib/qualify/rating';
+import { mobileBucketStyle } from '../components/qualify/m/colors';
 import type { QualifyFacility, QualifyCase, QualifyPhi } from '../lib/qualify/contract';
 
 const FAC: QualifyFacility = {
@@ -141,6 +142,33 @@ test('claim detail — revealed phi: shows the real member id, patient, and grou
   assert.ok(html.includes('DOE, JANE'), 'patient name shown');
   assert.ok(html.includes('GRP42'), 'group number shown');
   assert.ok(!html.includes('••••••'), 'no mask once revealed');
+});
+
+// ── Case-% color parity (Stage 3-color) — the % cell follows the ROW'S OWN pct via mobileBucketStyle
+//    (ratingBucket 50/30), NOT the parent facility rating; mirrors the desktop fix (900e084). The detail
+//    sheet colors NOTHING by facility rating, so any bucket color in its markup comes from the case %. ─
+test('detail — case % cell colored by the case OWN pct: 63% reads ok, 20% reads danger (not the facility)', () => {
+  const okHtml = renderToStaticMarkup(
+    <DetailSheet facility={FAC} cases={[{ ...CASES[0]!, pctAllowedOfBilled: 63 }]} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />,
+  );
+  assert.ok(okHtml.includes(mobileBucketStyle(63).color), 'a 63% case reads favorable (ok color)');
+  const dangerHtml = renderToStaticMarkup(
+    <DetailSheet facility={FAC} cases={[{ ...CASES[0]!, pctAllowedOfBilled: 20 }]} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />,
+  );
+  assert.ok(dangerHtml.includes(mobileBucketStyle(20).color), 'a 20% case reads unfavorable (danger color) — its own pct, not the facility');
+});
+
+test('detail — null case pct stays neutral (no favorable/unfavorable tint)', () => {
+  const html = renderToStaticMarkup(
+    <DetailSheet facility={FAC} cases={[{ ...CASES[0]!, pctAllowedOfBilled: null }]} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />,
+  );
+  assert.ok(html.includes(mobileBucketStyle(null).color), 'null pct → neutral color');
+  assert.ok(!html.includes(mobileBucketStyle(63).color), 'a null pct never reads as favorable');
+});
+
+test('claim detail — % Allowed value colored by the claim OWN pct (danger at 20%)', () => {
+  const html = renderToStaticMarkup(<ClaimDetailSheet claim={{ ...CASES[0]!, pctAllowedOfBilled: 20 }} hasAmounts={false} phi={null} onClose={noop} />);
+  assert.ok(html.includes(mobileBucketStyle(20).color), 'the % Allowed value is danger-colored by its own pct');
 });
 
 // ── Area filter chips ────────────────────────────────────────────────────────────────────────────

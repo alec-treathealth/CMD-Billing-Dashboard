@@ -10,6 +10,7 @@
  * !hasAmounts — the server has already nulled the values; this is belt-and-suspenders.
  */
 import type { QualifyCase, QualifyPhi } from '../../../lib/qualify/contract';
+import { mobileBucketStyle } from './colors';
 
 const INK900 = '#1B2B2A';
 const INK600 = '#4A5C5A';
@@ -22,11 +23,11 @@ function usd0(n: number): string {
   return `$${Math.round(n).toLocaleString('en-US')}`;
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({ label, value, valueColor = INK900 }: { label: string; value: string; valueColor?: string }) {
   return (
     <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, padding: '10px 0', borderBottom: `0.5px solid ${LINE}` }}>
       <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: INK400 }}>{label}</span>
-      <span className="ths-num" style={{ fontSize: 13, fontWeight: 600, color: INK900, textAlign: 'right' }}>{value}</span>
+      <span className="ths-num" style={{ fontSize: 13, fontWeight: 600, color: valueColor, textAlign: 'right' }}>{value}</span>
     </div>
   );
 }
@@ -62,7 +63,9 @@ export function ClaimDetailSheet({
           {phi ? <Row label="Group #" value={phi.group_number ?? '—'} /> : null}
           <Row label="Facility" value={claim.facilityName ?? '—'} />
           <Row label="Last DOS" value={claim.lastDos ?? '—'} />
-          <Row label="% Allowed" value={claim.pctAllowedOfBilled === null ? '—' : `${Math.round(claim.pctAllowedOfBilled)}%`} />
+          {/* Color by the claim's OWN allowed% (mobileBucketStyle → ratingBucket 50/30), not the facility
+              rating — desktop parity (900e084). null → neutral. Other rows keep the default INK900. */}
+          <Row label="% Allowed" value={claim.pctAllowedOfBilled === null ? '—' : `${Math.round(claim.pctAllowedOfBilled)}%`} valueColor={mobileBucketStyle(claim.pctAllowedOfBilled).color} />
           {hasAmounts ? (
             <>
               <Row label="Billed" value={claim.billedAmount === null ? '—' : usd0(claim.billedAmount)} />

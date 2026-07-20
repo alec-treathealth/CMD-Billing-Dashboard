@@ -13,6 +13,7 @@
  * patient name from `revealed` (keyed by case id). Reveal is ORTHOGONAL to the amounts gate.
  */
 import type { QualifyCase, QualifyFacility, QualifyPhi } from '../../../lib/qualify/contract';
+import { mobileBucketStyle } from './colors';
 
 const INK900 = '#1B2B2A';
 const INK600 = '#4A5C5A';
@@ -118,7 +119,9 @@ export function DetailSheet({
                 ) : null}
                 <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 11, color: INK600 }}>
                   <span>{c.lastDos ?? '—'}</span>
-                  <span className="ths-num">{c.pctAllowedOfBilled === null ? '—' : `${Math.round(c.pctAllowedOfBilled)}% allowed`}</span>
+                  {/* Color by the ROW'S OWN allowed% (mobileBucketStyle → ratingBucket 50/30), NOT the
+                      parent facility rating — desktop parity (900e084). null → neutral. */}
+                  <span className="ths-num" style={{ color: mobileBucketStyle(c.pctAllowedOfBilled).color }}>{c.pctAllowedOfBilled === null ? '—' : `${Math.round(c.pctAllowedOfBilled)}% allowed`}</span>
                 </div>
                 {hasAmounts ? (
                   <div className="ths-num" style={{ marginTop: 4, display: 'flex', justifyContent: 'flex-end', gap: 12, fontSize: 11, color: INK600 }}>
