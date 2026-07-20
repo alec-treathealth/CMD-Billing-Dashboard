@@ -54,6 +54,10 @@ const REVEAL_BATCH_CAP = 50;
  *  (buildFacilityCasesQuery binds limit+1) so hasMore is a length check here, never a count query. */
 const QUALIFY_CASES_PAGE_SIZE = 15;
 
+/** All-payers facility view (mobile) page size: one larger page, capped at the reveal batch cap so a
+ *  single "Reveal all" stays within REVEAL_BATCH_CAP. hasMore over this cap drives the "N recent" label. */
+const QUALIFY_ALL_PAYERS_PAGE_SIZE = REVEAL_BATCH_CAP;
+
 /** Everything the cores touch that isn't pure — injected so tests can fake it. */
 export interface QualifyDeps {
   requirePrincipal: () => Promise<QualifyPrincipal>;
@@ -68,7 +72,7 @@ export interface QualifyDeps {
     from: string,
     to: string,
     entityIds: string[],
-    opts: { prefixToken: string | null; cursor: QualifyCasesCursor | null; limit: number },
+    opts: { prefixToken: string | null; cursor: QualifyCasesCursor | null; limit: number; allPayers?: boolean },
   ) => Promise<QualifyCaseRow[]>;
   loadMovers: (
     thisFrom: string,
@@ -166,6 +170,7 @@ function assembleCases(rows: QualifyCaseRow[]): QualifyCase[] {
   return rows.map((r) => ({
     id: r.id,
     memberIdMasked: QUALIFY_MEMBER_ID_MASK,
+    payerName: r.primary_payer, // non-PHI; the SAME rollup column the payer card resolves on (no re-lookup)
     facilityName: r.facility_name ?? r.facility,
     program: r.program,
     lastDos: r.last_dos,
@@ -339,16 +344,20 @@ export async function getQualifyFacilityCasesCore(
     detail: { payer, facility, window: windowDays, ...(prefixToken ? { fields: ['prefix'] } : {}) },
   });
 
-  const cursor = clampCasesCursor(input.cursor);
+  // All-payers (mobile) loads ONE larger page with no cursor/prefix — the sheet groups + filters client-side.
+  const allPayers = input.allPayers === true;
+  const pageSize = allPayers ? QUALIFY_ALL_PAYERS_PAGE_SIZE : QUALIFY_CASES_PAGE_SIZE;
+  const cursor = allPayers ? null : clampCasesCursor(input.cursor);
   const { from, to } = qualifyWindowBounds(windowDays, deps.now());
   // Ask for one page; the builder over-fetches by one (limit+1) so hasMore is a length check, not a count.
   const caseRows = await deps.loadFacilityCases(payer, facility, from, to, gate.entityIds, {
     prefixToken,
     cursor,
-    limit: QUALIFY_CASES_PAGE_SIZE,
+    limit: pageSize,
+    allPayers,
   });
-  const hasMore = caseRows.length > QUALIFY_CASES_PAGE_SIZE;
-  const pageRows = hasMore ? caseRows.slice(0, QUALIFY_CASES_PAGE_SIZE) : caseRows;
+  const hasMore = caseRows.length > pageSize;
+  const pageRows = hasMore ? caseRows.slice(0, pageSize) : caseRows;
   const cases = assembleCases(pageRows);
 
   // Route through the ONE amounts choke point: strip via a facilities-empty snapshot, then take cases.

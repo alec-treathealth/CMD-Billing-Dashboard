@@ -34,6 +34,7 @@ const CASES: QualifyCase[] = [
   {
     id: 1,
     memberIdMasked: '••••••',
+    payerName: 'ANTHEM BLUE CROSS CA',
     facilityName: 'MENTAL HEALTH CENTER OF SAN DIEGO',
     program: 'OP',
     lastDos: '2026-07-15',
@@ -41,6 +42,14 @@ const CASES: QualifyCase[] = [
     billedAmount: 18400,
     allowedAmount: 11592,
   },
+];
+
+// A mixed-payer facility set for the chip-strip / per-row payer / banner tests: ANTHEM ×2 (avg 50%),
+// CIGNA ×1 (20%). Distinct ids so the reveal map / keys stay unique.
+const MIXED_CASES: QualifyCase[] = [
+  { id: 11, memberIdMasked: '••••••', payerName: 'ANTHEM BLUE CROSS CA', facilityName: 'MHC', program: 'OP', lastDos: '2026-07-15', pctAllowedOfBilled: 60, billedAmount: 1000, allowedAmount: 600 },
+  { id: 12, memberIdMasked: '••••••', payerName: 'ANTHEM BLUE CROSS CA', facilityName: 'MHC', program: 'OP', lastDos: '2026-07-14', pctAllowedOfBilled: 40, billedAmount: 2000, allowedAmount: 800 },
+  { id: 13, memberIdMasked: '••••••', payerName: 'CIGNA', facilityName: 'MHC', program: 'IP', lastDos: '2026-07-13', pctAllowedOfBilled: 20, billedAmount: 3000, allowedAmount: 600 },
 ];
 
 const noop = () => {};
@@ -144,6 +153,13 @@ test('claim detail — revealed phi: shows the real member id, patient, and grou
   assert.ok(!html.includes('••••••'), 'no mask once revealed');
 });
 
+test('claim detail — payer shown with the member id, whether masked or revealed', () => {
+  const masked = renderToStaticMarkup(<ClaimDetailSheet claim={CASES[0]!} hasAmounts={false} phi={null} onClose={noop} />);
+  assert.ok(masked.includes('••••••') && masked.includes('ANTHEM BLUE CROSS CA'), 'masked id + payer both present');
+  const revealed = renderToStaticMarkup(<ClaimDetailSheet claim={CASES[0]!} hasAmounts={false} phi={PHI} onClose={noop} />);
+  assert.ok(revealed.includes('AETMEM777') && revealed.includes('ANTHEM BLUE CROSS CA'), 'revealed id + payer coexist (payer is not PHI)');
+});
+
 // ── Case-% color parity (Stage 3-color) — the % cell follows the ROW'S OWN pct via mobileBucketStyle
 //    (ratingBucket 50/30), NOT the parent facility rating; mirrors the desktop fix (900e084). The detail
 //    sheet colors NOTHING by facility rating, so any bucket color in its markup comes from the case %. ─
@@ -171,47 +187,51 @@ test('claim detail — % Allowed value colored by the claim OWN pct (danger at 2
   assert.ok(html.includes(mobileBucketStyle(20).color), 'the % Allowed value is danger-colored by its own pct');
 });
 
-// ── Cases-prefix filter (Stage 3b) — a facility-scoped narrow in the drill sheet, distinct from the top
-//    payer search, gated on canReveal (desktop parity). Container dispatch/threading is covered by code
-//    review + the qualifyGuards identity guard; here we assert the presented affordance. ───────────────
-test('detail — prefix filter input shows for reveal-capable viewers, facility-scoped + distinctly labeled', () => {
-  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} canReveal />);
-  assert.match(html, /aria-label="Filter these claims by member ID prefix \(starts with\)"/, 'a facility-scoped cases-prefix input is present');
-  assert.ok(html.includes("Filter this facility&#x27;s claims by ID prefix"), 'placeholder names the scope (this facility), not the payer search');
-});
-
-test('detail — NOT reveal-capable: no prefix filter input (parity with desktop gating)', () => {
+// ── Per-row payer + payer chip strip (all-payers facility drill) ───────────────────────────────────
+test('detail — each claim row shows the payer next to the (masked) member id', () => {
   const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />);
-  assert.ok(!html.includes('Filter this facility'), 'no prefix affordance when !canReveal');
+  assert.ok(html.includes('••••••') && html.includes('ANTHEM BLUE CROSS CA'), 'masked id + payer both present on the row');
 });
 
-test('detail — sub-3 prefix reads as "not yet filtering" (mints no token server-side)', () => {
-  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} canReveal prefix="ab" />);
-  assert.ok(html.includes('Enter 3 characters to filter'), 'sub-3 entry reads as not-yet-filtering');
+test('detail — payer stays visible when IDs are revealed (real id · payer)', () => {
+  const revealedAnthem = new Map<number, QualifyPhi>([[1, { patient_name: 'DOE, JANE', member_id_raw: 'EAZ8567', group_number: 'G1' }]]);
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} canReveal revealed={revealedAnthem} phiShown />);
+  assert.ok(html.includes('EAZ8567') && html.includes('ANTHEM BLUE CROSS CA'), 'revealed id and payer coexist (payer is not PHI)');
 });
 
-// ── Cases pager (Stage 3c) — paged Next/Prev; shown only when pagination is relevant; hasNext gates
-//    Next, page>0 gates Prev, both disabled while a page fetch is in flight. ─────────────────────────
-test('detail — pager hidden on a single page (no hasNext, page 1 default)', () => {
-  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />);
-  assert.ok(!html.includes('aria-label="Next page"'), 'no pager when there is only one page');
+test('detail — payer chip strip groups by payer: name · count · avg%, one chip per payer', () => {
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={MIXED_CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />);
+  assert.ok(html.includes('ANTHEM BLUE CROSS CA') && html.includes('CIGNA'), 'every payer at the facility gets a chip');
+  assert.ok(html.includes('· 2 ·') && html.includes('· 1 ·'), 'chips carry per-payer claim counts (ANTHEM 2, CIGNA 1)');
+  assert.ok(html.includes('50%') && html.includes('20%'), 'chips carry avg allowed% (ANTHEM 50, CIGNA 20)');
 });
 
-test('detail — page 1 with more: both buttons render, Prev disabled, Next enabled, Page 1 shown', () => {
-  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} hasNext page={1} />);
-  assert.ok(html.includes('aria-label="Next page"') && html.includes('aria-label="Previous page"'), 'both pager buttons present');
-  assert.ok(html.includes('Page 1'), 'current page shown');
-  assert.match(html, /disabled=""[^>]*aria-label="Previous page"/, 'Prev disabled on page 1 (no hasPrev)');
-  assert.ok(!/disabled=""[^>]*aria-label="Next page"/.test(html), 'Next enabled when hasNext');
+test('detail — chip avg% is colored by the same thresholds as the rows (ANTHEM 50 ok, CIGNA 20 danger)', () => {
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={MIXED_CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />);
+  assert.ok(html.includes(mobileBucketStyle(50).color), 'a 50% avg reads ok');
+  assert.ok(html.includes(mobileBucketStyle(20).color), 'a 20% avg reads danger');
 });
 
-test('detail — page 2: Prev enabled; an in-flight page fetch disables both', () => {
-  const p2 = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} hasPrev hasNext page={2} />);
-  assert.ok(!/disabled=""[^>]*aria-label="Previous page"/.test(p2), 'Prev enabled on page 2');
-  assert.ok(p2.includes('Page 2'), 'shows page 2');
-  const busy = renderToStaticMarkup(<DetailSheet facility={FAC} cases={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} hasPrev hasNext page={2} paging />);
-  assert.match(busy, /disabled=""[^>]*aria-label="Previous page"/, 'Prev disabled while paging');
-  assert.match(busy, /disabled=""[^>]*aria-label="Next page"/, 'Next disabled while paging');
+// ── Search-context banner — seeded only when opened from a prefix search; drives the initial filter ──
+test('detail — search context banner shows the term + a Show-all count', () => {
+  const html = renderToStaticMarkup(
+    <DetailSheet facility={FAC} cases={MIXED_CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} searchContext={{ term: 'EAZ', payer: 'ANTHEM BLUE CROSS CA' }} />,
+  );
+  assert.ok(html.includes('EAZ') && html.includes('claims'), 'banner names the search term');
+  assert.ok(html.includes('Show all 3'), 'Show-all count is the full (all-payers) total');
+});
+
+test('detail — no search context: no banner (opened from the strength list directly)', () => {
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} cases={MIXED_CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />);
+  assert.ok(!html.includes('Show all'), 'no banner when opened without a search term');
+});
+
+test('detail — capped: counts read "N recent" so they are not mistaken for the facility total', () => {
+  const html = renderToStaticMarkup(
+    <DetailSheet facility={FAC} cases={MIXED_CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} capped searchContext={{ term: 'EAZ', payer: 'ANTHEM BLUE CROSS CA' }} />,
+  );
+  assert.ok(html.includes('Show all 3 recent'), 'the Show-all count is labeled recent when capped');
+  assert.ok(html.includes('most recent claims across payers'), 'a caption states the loaded set is the recent cap');
 });
 
 // ── Area filter chips ────────────────────────────────────────────────────────────────────────────

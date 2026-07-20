@@ -37,7 +37,7 @@ const THIN_HIGH: QualifyFacility = {
 const FACILITIES = [SOLID, THIN_HIGH];
 
 const CASE_AT_THIN: QualifyCase = {
-  id: 1, memberIdMasked: '••••••', facilityName: 'THIN HIGH', program: 'OP',
+  id: 1, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'THIN HIGH', program: 'OP',
   lastDos: '2026-07-15', pctAllowedOfBilled: 95, billedAmount: 18400, allowedAmount: 11592,
 };
 
@@ -49,7 +49,7 @@ const LOW: QualifyFacility = {
   billedAmount: 500000, allowedAmount: 120000, lineCount: 300,
 };
 const CASE_AT_LOW: QualifyCase = {
-  id: 2, memberIdMasked: '••••••', facilityName: 'LOW YIELD', program: 'OP',
+  id: 2, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'LOW YIELD', program: 'OP',
   lastDos: '2026-07-10', pctAllowedOfBilled: 95, billedAmount: 9000, allowedAmount: 8550,
 };
 
@@ -261,11 +261,11 @@ test('cases pager — hidden on a single page (no hasNext, page 1)', () => {
 // These fixtures are deliberately self-contained (they do NOT reuse the rating-const fixtures above) so
 // the block stays independent of the parallel scoring-track edits to this file.
 const CASES_FACILITY_A: QualifyCase[] = [
-  { id: 101, memberIdMasked: '••••••', facilityName: 'ALPHA CLINIC', program: 'IP', lastDos: '2026-07-15', pctAllowedOfBilled: 60, billedAmount: 1000, allowedAmount: 600 },
-  { id: 102, memberIdMasked: '••••••', facilityName: 'ALPHA CLINIC', program: 'OP', lastDos: '2026-07-14', pctAllowedOfBilled: 55, billedAmount: 2000, allowedAmount: 1100 },
+  { id: 101, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'ALPHA CLINIC', program: 'IP', lastDos: '2026-07-15', pctAllowedOfBilled: 60, billedAmount: 1000, allowedAmount: 600 },
+  { id: 102, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'ALPHA CLINIC', program: 'OP', lastDos: '2026-07-14', pctAllowedOfBilled: 55, billedAmount: 2000, allowedAmount: 1100 },
 ];
 const CASES_FACILITY_B: QualifyCase[] = [
-  { id: 201, memberIdMasked: '••••••', facilityName: 'BETA CENTER', program: 'OP', lastDos: '2026-06-02', pctAllowedOfBilled: 40, billedAmount: 3000, allowedAmount: 1200 },
+  { id: 201, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'BETA CENTER', program: 'OP', lastDos: '2026-06-02', pctAllowedOfBilled: 40, billedAmount: 3000, allowedAmount: 1200 },
 ];
 
 test('cases table — per-facility scope: two facilities yield DIFFERENT case sets (the "same 15 regardless" bug is gone)', () => {

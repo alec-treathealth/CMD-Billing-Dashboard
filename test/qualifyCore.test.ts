@@ -31,7 +31,7 @@ const FAC_ROWS = [
   { facility: '405 recovery', facility_name: '405 RECOVERY', facility_code: '10026460', line_count: 400, billed: B2, allowed: A2, pct_allowed: 55 }, // Indigo, solid mid pct
 ];
 const CASE_ROWS = [
-  { id: 123, facility: '405 recovery', facility_name: '405 RECOVERY', program: 'OP' as const, last_dos: '2026-07-01', pct_allowed: 80, billed: CB, allowed: CA },
+  { id: 123, facility: '405 recovery', facility_name: '405 RECOVERY', primary_payer: 'AETNA', program: 'OP' as const, last_dos: '2026-07-01', pct_allowed: 80, billed: CB, allowed: CA },
 ];
 const MOVER_ROWS = [
   { primary_payer: 'AETNA', this_patients: 40, prior_patients: 10, delta_patients: 30 },
@@ -50,6 +50,7 @@ interface Cap {
     prefixToken: string | null;
     cursor: QualifyCasesCursor | null;
     limit: number;
+    allPayers: boolean | undefined;
   }>;
 }
 function cap(): Cap {
@@ -71,7 +72,7 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
     },
     loadCases: async () => CASE_ROWS,
     loadFacilityCases: async (payer, facility, _f, _t, entityIds, opts) => {
-      c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, cursor: opts.cursor, limit: opts.limit });
+      c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, cursor: opts.cursor, limit: opts.limit, allPayers: opts.allPayers });
       return CASE_ROWS;
     },
     loadMovers: async () => MOVER_ROWS,
@@ -301,6 +302,33 @@ test('facility-drill: returns masked cases (never a raw member id) for the resol
   for (const c of res.cases) assert.equal(c.memberIdMasked, '••••••');
 });
 
+test('facility-drill: maps each row primary_payer → payerName (the payer chip/label source, not a re-lookup)', async () => {
+  const res = await getQualifyFacilityCasesCore(makeDeps(SUPER, cap()), FAC_CASES_IN);
+  assert.equal(res.cases[0]!.payerName, 'AETNA'); // CASE_ROWS carries primary_payer: 'AETNA'
+});
+
+test('facility-drill allPayers: threads the flag + 50-cap page size (no cursor/prefix) and tags each row its own payer', async () => {
+  const c = cap();
+  const MIXED = [
+    { ...CASE_ROWS[0]!, id: 1, primary_payer: 'AETNA' },
+    { ...CASE_ROWS[0]!, id: 2, primary_payer: 'CIGNA' },
+  ];
+  const res = await getQualifyFacilityCasesCore(
+    makeDeps(SUPER, c, {
+      loadFacilityCases: async (payer, facility, _from, _to, entityIds, opts) => {
+        c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, cursor: opts.cursor, limit: opts.limit, allPayers: opts.allPayers });
+        return MIXED;
+      },
+    }),
+    { ...FAC_CASES_IN, allPayers: true },
+  );
+  assert.equal(c.facilityCasesArgs[0]!.allPayers, true, 'allPayers reaches the loader');
+  assert.equal(c.facilityCasesArgs[0]!.limit, 50, 'the all-payers view loads the 50-cap page');
+  assert.equal(c.facilityCasesArgs[0]!.cursor, null, 'no cursor on the all-payers single page');
+  assert.equal(c.facilityCasesArgs[0]!.prefixToken, null, 'no server-side prefix narrow on the all-payers view');
+  assert.deepEqual(res.cases.map((x) => x.payerName), ['AETNA', 'CIGNA'], 'each row carries its OWN payer');
+});
+
 test('facility-drill: passes the RAW facility text + resolved payer + pinned tenancy to the loader', async () => {
   const c = cap();
   await getQualifyFacilityCasesCore(makeDeps(SUPER, c), FAC_CASES_IN);
@@ -331,6 +359,28 @@ test('facility-drill: admissions_seat payload has ZERO dollar values (wire-level
     assert.equal(c.allowedAmount, null);
   }
   assert.equal(res.viewerHasAmountsCapability, false);
+});
+
+test('facility-drill allPayers: admissions_seat gets ZERO dollar values (SAME choke point as single-payer)', async () => {
+  const MIXED = [
+    { ...CASE_ROWS[0]!, id: 1, primary_payer: 'AETNA', billed: 12345, allowed: 6789 },
+    { ...CASE_ROWS[0]!, id: 2, primary_payer: 'CIGNA', billed: 22222, allowed: 3333 },
+  ];
+  const res = await getQualifyFacilityCasesCore(
+    makeDeps(SEAT, cap(), { loadFacilityCases: async () => MIXED }),
+    { ...FAC_CASES_IN, allPayers: true },
+  );
+  const wire = JSON.stringify(res);
+  for (const v of [12345, 6789, 22222, 3333]) {
+    assert.ok(!wire.includes(String(v)), `dollar ${v} must NOT appear in an admissions_seat all-payers payload`);
+  }
+  for (const c of res.cases) {
+    assert.equal(c.billedAmount, null);
+    assert.equal(c.allowedAmount, null);
+  }
+  assert.equal(res.viewerHasAmountsCapability, false);
+  // The strip nulls dollars but leaves the (non-dollar) payer label — the chip/label source survives.
+  assert.deepEqual(res.cases.map((x) => x.payerName), ['AETNA', 'CIGNA']);
 });
 
 test('facility-drill: a blank payer or facility → empty cases and NO audit (nothing looked up)', async () => {
@@ -394,6 +444,7 @@ const WALK_ROWS: QualifyCaseRow[] = Array.from({ length: 35 }, (_, i) => ({
   id: 1000 - i, // strictly descending → matches `id desc` within the pre-sorted array
   facility: '405 recovery',
   facility_name: '405 RECOVERY',
+  primary_payer: 'AETNA',
   program: 'OP' as const,
   last_dos: i < 20 ? `2026-07-${String(31 - i).padStart(2, '0')}` : null, // 20 dated (desc), then a null tail
   pct_allowed: 50,

@@ -2,16 +2,30 @@
 
 /**
  * Qualify mobile — facility detail (tap). Renders the FACILITY-SCOPED claim lines for the tapped card
- * (getQualifyFacilityCases, keyed on QualifyFacility.facilityKey), by service date, capped at 15.
+ * (getQualifyFacilityCases with allPayers), by service date. The drill returns EVERY payer's recent
+ * patients at the facility (each row carries its own payerName), capped at 50 (the reveal batch cap);
+ * `capped` is true when more exist, which the UI labels honestly ("N recent").
+ *
  * Each claim line is tappable → onOpenClaim opens the single-claim ClaimDetailSheet above this list.
  *
- * AMOUNTS GATE: the Billed/Allowed block is OMITTED from the DOM (not CSS-hidden) when
- * !hasAmounts — the server has already nulled the values; this is belt-and-suspenders.
+ * FILTER MODEL (no free-text input): filtering is driven by exactly two things —
+ *   1) SEARCH CONTEXT — when the sheet is opened from a prefix/alpha search, `searchContext` seeds the
+ *      active filter to the resolved payer and a banner ("Showing EAZ claims · Show all N") lets the user
+ *      clear it. Opened with no search term → starts unfiltered, no banner.
+ *   2) PAYER CHIPS — a horizontally scrollable strip (built from the FULL, unfiltered case set, so it
+ *      ALWAYS shows every payer regardless of the active filter) with payer · count · avg allowed%. The
+ *      chip matching the active filter is selected; tapping another switches the filter; tapping the
+ *      selected chip clears it (== Show all). The avg% is tinted by the same green/amber/red thresholds
+ *      the claim rows use (mobileBucketStyle → ratingBucket 50/30).
+ *
+ * AMOUNTS GATE: the Billed/Allowed block is OMITTED from the DOM (not CSS-hidden) when !hasAmounts.
  *
  * PHI REVEAL: masked member IDs by default. "Reveal all" (shown only when canReveal) runs one audited
  * revealQualifyRows in the parent; when phiShown, each row swaps its mask for the real member id +
- * patient name from `revealed` (keyed by case id). Reveal is ORTHOGONAL to the amounts gate.
+ * patient name from `revealed` (keyed by case id). Payer names are NON-PHI and stay visible regardless
+ * of the reveal/Hide-IDs state.
  */
+import { useMemo, useState } from 'react';
 import type { QualifyCase, QualifyFacility, QualifyPhi } from '../../../lib/qualify/contract';
 import { mobileBucketStyle } from './colors';
 
@@ -29,11 +43,24 @@ function usd0(n: number): string {
   return `$${Math.round(n).toLocaleString('en-US')}`;
 }
 
+/** The payer this row groups under; blank rollup payer collapses to a stable placeholder key. */
+function payerKey(c: QualifyCase): string {
+  return c.payerName ?? '—';
+}
+
+interface PayerChip {
+  payer: string;
+  count: number;
+  /** Mean of the group's non-null allowed% (null when the whole group is null). */
+  avg: number | null;
+}
+
 export function DetailSheet({
   facility,
   cases,
   loading,
   hasAmounts,
+  capped = false,
   canReveal,
   revealed,
   phiShown,
@@ -42,20 +69,16 @@ export function DetailSheet({
   onRevealAll,
   onOpenClaim,
   onClose,
-  prefix = '',
-  onPrefixChange,
-  onApplyPrefix,
-  page = 1,
-  hasPrev = false,
-  hasNext = false,
-  paging = false,
-  onPrevPage,
-  onNextPage,
+  searchContext = null,
 }: {
   facility: QualifyFacility;
+  /** FULL loaded set for the facility (all payers, ≤50). The chip strip is built from this, unfiltered. */
   cases: readonly QualifyCase[];
   loading: boolean;
   hasAmounts: boolean;
+  /** True when the facility has more claims than the loaded cap — labels read "N recent" so no one reads
+   *  the counts as the facility total. */
+  capped?: boolean;
   canReveal: boolean;
   revealed: Map<number, QualifyPhi>;
   phiShown: boolean;
@@ -64,38 +87,46 @@ export function DetailSheet({
   onRevealAll: () => void;
   onOpenClaim: (c: QualifyCase) => void;
   onClose: () => void;
-  /** Cases-prefix filter (Stage 3b), scoped to THIS facility's claims — distinct from the top payer
-   *  search. Typed BUFFER; the applied narrow lives in the parent's cohort.prefix, committed on Enter.
-   *  Optional so the render tests can mount the sheet without the filter wiring. */
-  prefix?: string;
-  onPrefixChange?: (value: string) => void;
-  onApplyPrefix?: () => void;
-  /** Cases PAGER (Stage 3c) — paged replace over the drill's cursor stack. `page` is 1-based (display);
-   *  hasPrev/hasNext gate the buttons; `paging` disables both during an in-flight page fetch. Optional so
-   *  the render tests can mount the sheet without the pager wiring. */
-  page?: number;
-  hasPrev?: boolean;
-  hasNext?: boolean;
-  paging?: boolean;
-  onPrevPage?: () => void;
-  onNextPage?: () => void;
+  /** When the sheet was opened from a prefix/alpha search, the non-PHI term the user typed and the payer it
+   *  resolved to — seeds the active filter + banner. Null when opened directly (e.g. from the strength list). */
+  searchContext?: { term: string; payer: string } | null;
 }) {
-  // STARTS-WITH, never contains. A 1-2 char entry mints no token server-side (shows all) — the hint reads
-  // "not yet filtering"; filtering activates at 3. Mirrors the desktop cases-table affordance.
-  const trimmedPrefix = prefix.trim();
-  const prefixHint =
-    trimmedPrefix.length === 0
-      ? null
-      : trimmedPrefix.length < 3
-        ? 'Enter 3 characters to filter'
-        : 'Matches member IDs starting with these — press Enter';
+  // Filter state is driven ONLY by the search context (seed) and chip taps — never a text input.
+  const [activeFilter, setActiveFilter] = useState<string | null>(searchContext?.payer ?? null);
+
+  // Chips are built from the FULL set so the strip always shows every payer regardless of the active filter.
+  const chips = useMemo<PayerChip[]>(() => {
+    const groups = new Map<string, { count: number; pctSum: number; pctN: number }>();
+    for (const c of cases) {
+      const key = payerKey(c);
+      const g = groups.get(key) ?? { count: 0, pctSum: 0, pctN: 0 };
+      g.count += 1;
+      if (c.pctAllowedOfBilled !== null) {
+        g.pctSum += c.pctAllowedOfBilled;
+        g.pctN += 1;
+      }
+      groups.set(key, g);
+    }
+    return [...groups.entries()]
+      .map(([payer, g]) => ({ payer, count: g.count, avg: g.pctN > 0 ? g.pctSum / g.pctN : null }))
+      .sort((a, b) => b.count - a.count || (b.avg ?? -1) - (a.avg ?? -1) || a.payer.localeCompare(b.payer));
+  }, [cases]);
+
+  const visible = activeFilter === null ? cases : cases.filter((c) => payerKey(c) === activeFilter);
+  // The banner reflects the search context only while its payer is the active filter (clearing or switching
+  // chips takes the user out of that context). `term` is the non-PHI alpha echo (≤3 chars), never a raw id.
+  const showBanner = searchContext !== null && activeFilter === searchContext.payer;
+  const totalLabel = capped ? `${cases.length} recent` : `${cases.length}`;
+
+  const onChip = (payer: string) => setActiveFilter((cur) => (cur === payer ? null : payer));
+
   return (
     <div
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
       style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(27,43,42,0.45)', display: 'flex', alignItems: 'flex-end' }}
     >
       <div style={{ width: '100%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', background: SURFACE, borderRadius: '20px 20px 0 0', color: INK900 }}>
-        <div style={{ padding: '20px 20px 12px' }}>
+        <div style={{ padding: '20px 20px 8px' }}>
           <div className="ths-h" style={{ fontSize: 16, fontWeight: 600, color: INK900 }}>{facility.name}</div>
           {facility.city && facility.state ? (
             <div style={{ marginTop: 2, fontSize: 12, color: INK400 }}>{facility.city}, {facility.state}</div>
@@ -117,27 +148,61 @@ export function DetailSheet({
             ) : null}
           </div>
           {revealError ? <div style={{ marginTop: 6, fontSize: 11, color: DANGER }}>{revealError}</div> : null}
-          {/* Cases-prefix filter (Stage 3b), scoped to THIS facility's claims — NOT the payer search.
-              Gated on canReveal (parity with desktop). Carries only the user's typed prefix, HMAC'd
-              server-side; never row PHI. Explicit submit (Enter). */}
-          {canReveal ? (
-            <div style={{ marginTop: 8 }}>
-              <input
-                value={prefix}
-                onChange={(e) => onPrefixChange?.(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') onApplyPrefix?.(); }}
-                enterKeyHint="search"
-                spellCheck={false}
-                maxLength={3}
-                placeholder="Filter this facility's claims by ID prefix"
-                aria-label="Filter these claims by member ID prefix (starts with)"
-                style={{ width: '100%', height: 34, padding: '0 12px', borderRadius: 10, border: `0.5px solid ${LINE}`, background: GROUND, color: INK900, fontSize: 13, outline: 'none' }}
-              />
-              {prefixHint ? <div style={{ marginTop: 4, fontSize: 11, color: INK400 }}>{prefixHint}</div> : null}
-            </div>
-          ) : null}
         </div>
-        <div style={{ overflowY: 'auto', padding: '0 16px 8px', display: 'flex', flexDirection: 'column', gap: 8, opacity: paging ? 0.6 : 1, transition: 'opacity 0.15s' }}>
+
+        {/* Payer rollup chips — built from the FULL set (every payer at the facility), so the strip is
+            stable regardless of the active filter. Selected chip = active filter; tap toggles it. */}
+        {!loading && chips.length > 0 ? (
+          <>
+            <div style={{ display: 'flex', gap: 8, overflowX: 'auto', padding: '4px 20px 2px', WebkitOverflowScrolling: 'touch' }}>
+              {chips.map((ch) => {
+                const selected = activeFilter === ch.payer;
+                return (
+                  <button
+                    key={ch.payer}
+                    type="button"
+                    onClick={() => onChip(ch.payer)}
+                    aria-pressed={selected}
+                    style={{
+                      flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 5, height: 28, padding: '0 11px',
+                      borderRadius: 999, border: `0.5px solid ${selected ? TEAL700 : LINE}`, background: selected ? TEAL_TINT : GROUND,
+                      color: INK900, fontSize: 11, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+                    }}
+                  >
+                    <span style={{ maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis' }}>{ch.payer}</span>
+                    <span style={{ color: INK400, fontWeight: 500 }}>· {ch.count} ·</span>
+                    <span className="ths-num" style={{ color: ch.avg === null ? INK400 : mobileBucketStyle(ch.avg).color }}>
+                      {ch.avg === null ? '—' : `${Math.round(ch.avg)}%`} avg
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            {capped ? (
+              <div style={{ padding: '2px 20px 0', fontSize: 11, color: INK400 }}>
+                Showing the {cases.length} most recent claims across payers
+              </div>
+            ) : null}
+          </>
+        ) : null}
+
+        {/* Search-context banner — only while the search's payer is the active filter. */}
+        {showBanner ? (
+          <div style={{ margin: '8px 16px 0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '8px 12px', borderRadius: 10, background: TEAL_TINT, border: `0.5px solid ${LINE}` }}>
+            <span style={{ fontSize: 12, color: INK900 }}>
+              Showing <span className="ths-num" style={{ fontWeight: 700 }}>{searchContext!.term}</span> claims
+            </span>
+            <button
+              type="button"
+              onClick={() => setActiveFilter(null)}
+              style={{ flexShrink: 0, fontSize: 11, fontWeight: 700, color: TEAL700, background: 'transparent', border: 'none', cursor: 'pointer' }}
+            >
+              Show all {totalLabel}
+            </button>
+          </div>
+        ) : null}
+
+        <div style={{ overflowY: 'auto', padding: '8px 16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
           {loading ? (
             <div style={{ padding: '24px 0', textAlign: 'center', fontSize: 12, color: INK400 }}>
               Loading claims…
@@ -147,7 +212,7 @@ export function DetailSheet({
               No recent claims at this facility in this window.
             </div>
           ) : (
-            cases.map((c) => {
+            visible.map((c) => {
               const phi = phiShown ? revealed.get(c.id) : undefined;
               return (
               <button
@@ -157,11 +222,16 @@ export function DetailSheet({
                 style={{ display: 'block', width: '100%', textAlign: 'left', cursor: 'pointer', border: `0.5px solid ${LINE}`, borderRadius: 12, background: GROUND, padding: '10px 12px', font: 'inherit', color: 'inherit' }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                  <span className="ths-num" style={{ fontSize: 12, letterSpacing: '0.06em', color: phi ? INK900 : INK400, fontWeight: phi ? 600 : 400 }}>
-                    {phi ? (phi.member_id_raw ?? '—') : c.memberIdMasked}
+                  {/* Member id · payer — the payer reads at a glance so a mixed-alpha facility is legible.
+                      Payer is NON-PHI and stays visible whether or not IDs are revealed. */}
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <span className="ths-num" style={{ fontSize: 12, letterSpacing: '0.06em', color: phi ? INK900 : INK400, fontWeight: phi ? 600 : 400 }}>
+                      {phi ? (phi.member_id_raw ?? '—') : c.memberIdMasked}
+                    </span>
+                    {c.payerName ? <span style={{ fontSize: 11, color: INK600 }}> · {c.payerName}</span> : null}
                   </span>
                   {c.program ? (
-                    <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', color: '#2D7393', background: '#E4F0F5', borderRadius: 999, padding: '2px 8px' }}>{c.program}</span>
+                    <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, textTransform: 'uppercase', color: '#2D7393', background: '#E4F0F5', borderRadius: 999, padding: '2px 8px' }}>{c.program}</span>
                   ) : null}
                 </div>
                 {phi ? (
@@ -186,31 +256,6 @@ export function DetailSheet({
             })
           )}
         </div>
-        {/* Cursor pager (Stage 3c) — paged REPLACE; shown only when pagination is relevant. Next gates on
-            hasNext, Prev on hasPrev (page>0); both disabled during an in-flight page fetch. */}
-        {!loading && (hasNext || page > 1) ? (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '10px 16px', borderTop: `0.5px solid ${LINE}` }}>
-            <button
-              type="button"
-              onClick={onPrevPage}
-              disabled={!hasPrev || paging}
-              aria-label="Previous page"
-              style={{ fontSize: 12, fontWeight: 700, color: TEAL700, background: TEAL_TINT, border: 'none', borderRadius: 999, padding: '6px 14px', cursor: !hasPrev || paging ? 'default' : 'pointer', opacity: !hasPrev || paging ? 0.5 : 1 }}
-            >
-              ← Prev
-            </button>
-            <span style={{ fontSize: 12, color: INK400 }}>Page {page}</span>
-            <button
-              type="button"
-              onClick={onNextPage}
-              disabled={!hasNext || paging}
-              aria-label="Next page"
-              style={{ fontSize: 12, fontWeight: 700, color: TEAL700, background: TEAL_TINT, border: 'none', borderRadius: 999, padding: '6px 14px', cursor: !hasNext || paging ? 'default' : 'pointer', opacity: !hasNext || paging ? 0.5 : 1 }}
-            >
-              Next →
-            </button>
-          </div>
-        ) : null}
         <div style={{ padding: 16 }}>
           <button
             onClick={onClose}

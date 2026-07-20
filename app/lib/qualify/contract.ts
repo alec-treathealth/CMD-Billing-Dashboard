@@ -43,6 +43,12 @@ export interface QualifyFacilityCasesInput {
   filter?: { prefix?: string };
   /** Forward keyset cursor for page N>0 (null/omitted = first page). Carries no PHI — see QualifyCasesCursor. */
   cursor?: QualifyCasesCursor | null;
+  /** ALL-PAYERS facility view (mobile detail sheet): when true, the drill drops the `primary_payer = $payer`
+   *  filter and returns EVERY payer's recent patients at the facility, each row tagged with its own payerName.
+   *  `payer` is still passed (audit context) but not used to filter. Loads a single larger page (cap 50, the
+   *  reveal batch cap) — no cursor — so the sheet can group/chip client-side. Omitted/false = the legacy
+   *  single-payer, paged, prefix-filterable drill the desktop cases table uses (UNCHANGED). */
+  allPayers?: boolean;
 }
 
 /** Forward keyset cursor for the cases panel: the last returned row's DOS + synthetic id — both NON-PHI
@@ -111,6 +117,11 @@ export interface QualifyFacility {
 export interface QualifyCase {
   id: number; // rollup id of the patient's most-recent charge — drives the audited reveal
   memberIdMasked: string; // '••••••' until an audited reveal (revealQualifyRow); standard PHI cell
+  /** Resolved primary_payer for this patient's most-recent charge (the SAME rollup column the payer
+   *  card resolves on — never a per-member re-lookup). NON-PHI. On the payer-scoped drill this equals
+   *  the resolved payer for every row; on the mobile all-payers facility drill it varies per row, so a
+   *  facility that serves several payers reads at a glance. Null only if the rollup payer is blank. */
+  payerName: string | null;
   facilityName: string;
   program: 'IP' | 'OP' | 'BOTH' | null; // := care_setting; null when the facility text is unresolved
   lastDos: string | null; // ISO date, display only

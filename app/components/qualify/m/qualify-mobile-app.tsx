@@ -13,7 +13,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState, useTransition, type ReactNode } from 'react';
 import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyMovers, revealQualifyRows } from '@/lib/qualify/actions';
 import { QUALIFY_WINDOW_OPTIONS } from '@/lib/qualify/contract';
-import type { QualifySnapshot, QualifyFacility, QualifyCase, QualifyMover, QualifyWindowDays, QualifyPhi, QualifyCasesCursor } from '@/lib/qualify/contract';
+import type { QualifySnapshot, QualifyFacility, QualifyCase, QualifyMover, QualifyWindowDays, QualifyPhi } from '@/lib/qualify/contract';
 import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
 import { resolveLandingWins, drillLandingWins, isPayerChange } from '@/lib/qualify/qualifyGuards';
 import { SwipeRow } from '@/components/qualify/m/swipe-row';
@@ -59,12 +59,10 @@ export function QualifyMobileApp({
   // Facility-scoped claim lines for the open detail sheet: null === loading, [] === none. `claim` is the
   // single claim line whose ClaimDetailSheet is layered above the list (null === none open).
   const [facilityCases, setFacilityCases] = useState<QualifyCase[] | null>(null);
-  // Drill PAGER (Stage 3c) — fetch RESULTS (not cohort identity, so outside the reducer): `hasMore` gates
-  // Next, `nextCursor` is the cursor a PAGE_NEXT pushes onto the stack, `paging` disables the pager while a
-  // page fetch is in flight. Paged REPLACE (≤15 rows/page) keeps the set under the 50-row reveal cap.
-  const [hasMore, setHasMore] = useState(false);
-  const [nextCursor, setNextCursor] = useState<QualifyCasesCursor | null>(null);
-  const [paging, setPaging] = useState(false);
+  // The facility drill loads ALL payers at the facility in ONE page (cap 50 = the reveal batch cap);
+  // `casesCapped` records that more exist so the sheet labels its counts "N recent", never the facility
+  // total. There is no cursor pager on mobile — the sheet groups + filters the loaded set client-side.
+  const [casesCapped, setCasesCapped] = useState(false);
   const [claim, setClaim] = useState<QualifyCase | null>(null);
   // PHI reveal (facility-scoped, audited): `revealedPhi` caches the fetched identifiers for the OPEN
   // facility's claims (keyed by case id); `phiShown` toggles their visibility WITHOUT re-auditing (one
@@ -73,9 +71,6 @@ export function QualifyMobileApp({
   const [phiShown, setPhiShown] = useState(false);
   const [revealPending, setRevealPending] = useState(false);
   const [revealError, setRevealError] = useState<string | null>(null);
-  // Cases-prefix filter (Stage 3b) — the typed BUFFER for the open sheet; the APPLIED narrow lives in
-  // cohort.prefix (committed on Enter via CHANGE_PREFIX). Reset to '' on every facility open (fresh drill).
-  const [prefix, setPrefix] = useState('');
   const [searched, setSearched] = useState(false);
   // How the CURRENT snapshot was resolved, so a window change re-ranks via the SAME path (window is
   // orthogonal to resolution). byPayer = the Heating-up label (chip tap or on-load auto-resolve);
@@ -237,60 +232,27 @@ export function QualifyMobileApp({
     setRevealError(null);
   }
 
-  // The DRILL stream: fetch cohort `c`'s facility cases and paint ONLY if the landing still wins BOTH drill
-  // guards — facilitySeq (recency: close/reopen + future pager races) AND cohortKey (identity: the cohort
-  // didn't change underneath). Writes ONLY facilityCases (+ bumps facilitySeq) — never resolution state.
-  // Shared by the tap-open and the same-payer window refresh; payer/facility/window all come from `c`.
+  // The DRILL stream: fetch cohort `c`'s facility cases (ALL payers at the facility, one page ≤50) and paint
+  // ONLY if the landing still wins BOTH drill guards — facilitySeq (recency: close/reopen races) AND cohortKey
+  // (identity: the cohort didn't change underneath). Writes ONLY facilityCases + casesCapped (+ bumps
+  // facilitySeq) — never resolution state. Shared by the tap-open and the same-payer window refresh;
+  // payer/facility/window all come from `c`. No cursor/prefix is threaded: the sheet groups + filters the
+  // loaded set client-side, so there is no server pager or server-side prefix narrow on mobile.
   function fetchDrill(c: QualifyCohort) {
     const seq = ++facilitySeq.current;
     const key = cohortKey(c);
-    if (!c.payer || !c.facility) { setFacilityCases([]); setHasMore(false); setNextCursor(null); setPaging(false); return; }
-    setPaging(true);
-    // Thread the APPLIED prefix (cohort.prefix, already trimmed by CHANGE_PREFIX) — HMAC'd server-side;
-    // omit when empty. Thread the cursor for the CURRENT page (cursors[0] is null = page 0). Both the
-    // prefix-apply and the pager ride the SAME facilitySeq as any in-flight drill; cohortKey (identity,
-    // and it includes page? no — page is excluded from cohortKey by design, so RECENCY/facilitySeq is
-    // what orders same-cohort page races, identity catches a payer/facility/window/prefix change) discards
-    // a stale landing. Capture nextCursor/hasMore so PAGE_NEXT can push the cursor (desktop's stack).
-    getQualifyFacilityCases({ payer: c.payer, facility: c.facility, windowDays: c.window, cursor: c.cursors[c.page] ?? null, ...(c.prefix ? { filter: { prefix: c.prefix } } : {}) })
+    if (!c.payer || !c.facility) { setFacilityCases([]); setCasesCapped(false); return; }
+    getQualifyFacilityCases({ payer: c.payer, facility: c.facility, windowDays: c.window, allPayers: true })
       .then((r) => {
         if (!drillLandingWins(seq, facilitySeq.current, key, cohortKey(cohortRef.current))) return;
         setFacilityCases(r.cases);
-        setHasMore(r.hasMore);
-        setNextCursor(r.nextCursor);
-        setPaging(false);
+        setCasesCapped(r.hasMore);
       })
       .catch(() => {
         if (!drillLandingWins(seq, facilitySeq.current, key, cohortKey(cohortRef.current))) return;
         setFacilityCases([]);
-        setHasMore(false);
-        setNextCursor(null);
-        setPaging(false);
+        setCasesCapped(false);
       });
-  }
-
-  // Commit the typed prefix buffer onto the drill cohort (explicit Enter). CHANGE_PREFIX keeps
-  // payer/facility/window and resets page:0/cursors — the reset is free from the reducer. The refetch
-  // rides the SAME facilitySeq as any in-flight drill; cohortKey (identity) is what distinguishes them
-  // (the same-token/different-identity guard 3a added) — so a stale pre-prefix landing is discarded.
-  function applyPrefix() {
-    fetchDrill(apply({ type: 'CHANGE_PREFIX', prefix: prefix.trim() }));
-  }
-
-  // Pager (Stage 3c) — walk the SAME cohort's cursor stack, paged REPLACE (each page swaps ≤15 rows, never
-  // appends, so the set stays under the 50-row reveal cap). PAGE_NEXT pushes the last fetch's nextCursor
-  // (cursors[page+1]); PAGE_PREV steps back to a cursor already in the stack. Each page is a fresh ≤15-row
-  // set, so clearReveal() re-masks it — one audited "Reveal all" re-fires per page over that page's ids.
-  // Guarded by fetchDrill's drillLandingWins, unchanged — this IS the fetch 3a's cohortKey was built for.
-  function goNextPage() {
-    if (!hasMore || paging) return;
-    clearReveal();
-    fetchDrill(apply({ type: 'PAGE_NEXT', nextCursor }));
-  }
-  function goPrevPage() {
-    if (cohortRef.current.page === 0 || paging) return;
-    clearReveal();
-    fetchDrill(apply({ type: 'PAGE_PREV' }));
   }
 
   // Fold a LANDED resolution into the drill cohort + open sheet — the ONLY coupling between the two streams,
@@ -312,11 +274,8 @@ export function QualifyMobileApp({
     setFacilityCases(null); // loading
     setDetail(f);
     clearReveal();
-    setPrefix(''); // fresh drill: reset the typed prefix buffer
-    // SWITCH_FACILITY keeps prefix (desktop semantics); mobile opens each facility FRESH, so clear any
-    // carried-over applied prefix via the reducer's own CHANGE_PREFIX (no reducer edit).
-    const switched = apply({ type: 'SWITCH_FACILITY', facility: f.facilityKey });
-    fetchDrill(switched.prefix === '' ? switched : apply({ type: 'CHANGE_PREFIX', prefix: '' }));
+    // SWITCH_FACILITY keeps payer/window; the drill loads all payers at this facility fresh.
+    fetchDrill(apply({ type: 'SWITCH_FACILITY', facility: f.facilityKey }));
   }
 
   function closeFacility() {
@@ -324,9 +283,7 @@ export function QualifyMobileApp({
     setDetail(null);
     setFacilityCases(null);
     setClaim(null);
-    setHasMore(false);
-    setNextCursor(null);
-    setPaging(false);
+    setCasesCapped(false);
     clearReveal();
   }
 
@@ -403,6 +360,15 @@ export function QualifyMobileApp({
       <SwipeRow key={f.rank} facility={f} onPass={advance} onWhy={(x) => setTrend(x)} onOpen={openFacility} />
     ));
   }
+
+  // When the CURRENT resolution came from a prefix/alpha search, the open detail sheet seeds its filter to
+  // that payer and shows a "Showing EAZ claims" banner. matchedValue is the non-PHI alpha echo (≤3 chars);
+  // resolve-by-payer (matchedOn 'payer') and exact member-id searches carry no banner term (no PHI leaks).
+  const resolvedForSheet = snapshot?.resolved ?? null;
+  const searchContext =
+    resolvedForSheet && resolvedForSheet.matchedOn === 'prefix' && resolvedForSheet.matchedValue
+      ? { term: resolvedForSheet.matchedValue, payer: resolvedForSheet.payerName }
+      : null;
 
   const showHint = deck.visible.length > 0;
   // Area chips only when a payer is resolved AND there are >=2 real buckets (>2 chips incl. "All") — a
@@ -490,10 +456,12 @@ export function QualifyMobileApp({
       {trend ? <TrendSheet facility={trend} onClose={() => setTrend(null)} /> : null}
       {detail ? (
         <DetailSheet
+          key={detail.facilityKey}
           facility={detail}
           cases={facilityCases ?? []}
           loading={facilityCases === null}
           hasAmounts={hasAmounts}
+          capped={casesCapped}
           canReveal={canRevealPhi}
           revealed={revealedPhi}
           phiShown={phiShown}
@@ -502,15 +470,7 @@ export function QualifyMobileApp({
           onRevealAll={toggleRevealAll}
           onOpenClaim={(c) => setClaim(c)}
           onClose={closeFacility}
-          prefix={prefix}
-          onPrefixChange={setPrefix}
-          onApplyPrefix={applyPrefix}
-          page={cohort.page + 1}
-          hasPrev={cohort.page > 0}
-          hasNext={hasMore}
-          paging={paging}
-          onPrevPage={goPrevPage}
-          onNextPage={goNextPage}
+          searchContext={searchContext}
         />
       ) : null}
       {claim ? (

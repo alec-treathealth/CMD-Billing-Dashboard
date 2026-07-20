@@ -50,9 +50,15 @@ export function ClaimDetailSheet({
     >
       <div style={{ width: '100%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', background: SURFACE, borderRadius: '20px 20px 0 0', color: INK900 }}>
         <div style={{ padding: '20px 20px 4px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-          <div className="ths-num" style={{ fontSize: 16, fontWeight: 600, letterSpacing: '0.06em', color: INK900 }}>{phi ? (phi.member_id_raw ?? '—') : claim.memberIdMasked}</div>
+          <div style={{ minWidth: 0 }}>
+            <div className="ths-num" style={{ fontSize: 16, fontWeight: 600, letterSpacing: '0.06em', color: INK900 }}>{phi ? (phi.member_id_raw ?? '—') : claim.memberIdMasked}</div>
+            {/* Payer sits with the member id (NON-PHI — visible whether or not the id is revealed). */}
+            {claim.payerName ? (
+              <div style={{ marginTop: 2, fontSize: 12, color: INK600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{claim.payerName}</div>
+            ) : null}
+          </div>
           {claim.program ? (
-            <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', color: '#2D7393', background: '#E4F0F5', borderRadius: 999, padding: '2px 8px' }}>{claim.program}</span>
+            <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, textTransform: 'uppercase', color: '#2D7393', background: '#E4F0F5', borderRadius: 999, padding: '2px 8px' }}>{claim.program}</span>
           ) : null}
         </div>
         <div style={{ padding: '0 20px', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: INK400 }}>

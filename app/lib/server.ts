@@ -1879,7 +1879,7 @@ export async function loadQualifyFacilityCases(
   from: string,
   to: string,
   entityIds: string[],
-  opts: { prefixToken: string | null; cursor: { lastDos: string | null; id: number } | null; limit: number },
+  opts: { prefixToken: string | null; cursor: { lastDos: string | null; id: number } | null; limit: number; allPayers?: boolean },
 ): Promise<QualifyCaseRow[]> {
   const q = buildFacilityCasesQuery(payer, facility, from, to, entityIds, opts);
   const { rows } = await readerExecutor().query<QualifyCaseRow>(q.sql, q.params);
