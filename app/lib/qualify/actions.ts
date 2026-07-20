@@ -11,7 +11,6 @@ import { requireQualifyPrincipal } from '@/lib/qualify/gate';
 import {
   resolveQualifyPayer,
   loadQualifyFacilities,
-  loadQualifyCases,
   loadQualifyFacilityCases,
   loadQualifyMovers,
   recordAccess,
@@ -45,7 +44,6 @@ const realDeps: QualifyDeps = {
   mintToken: (query, kind) => (kind === 'prefix' ? alphaPrefixBlindIndex(query) : memberIdBlindIndex(query)),
   resolvePayer: resolveQualifyPayer,
   loadFacilities: loadQualifyFacilities,
-  loadCases: loadQualifyCases,
   loadFacilityCases: loadQualifyFacilityCases,
   loadMovers: loadQualifyMovers,
   recordAccess,

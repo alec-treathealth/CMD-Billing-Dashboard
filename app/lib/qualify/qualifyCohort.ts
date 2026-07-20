@@ -9,7 +9,8 @@
  * and routing every change through cohortReducer makes the reset STRUCTURAL: every action except
  * PAGE_NEXT/PAGE_PREV returns a fresh page:0 / cursors:[null], so a handler cannot forget. The persistence
  * rules live in one place too:
- *   - RESOLVE_PAYER is the ONLY action that clears the prefix (a brand-new cohort).
+ *   - RESOLVE_PAYER is the ONLY action that (re)sets the prefix from resolution — normally to '' (a brand-new
+ *     cohort), or to the searched echo when a ≤3-char alpha-prefix SEARCH prefills the starts-with narrow.
  *   - CHANGE_WINDOW keeps the facility AND the prefix — a window change is the same selection re-fetched for
  *     a new window, NOT a teleport back to rank-1.
  */
@@ -31,9 +32,11 @@ export interface QualifyCohort {
 }
 
 export type QualifyCohortAction =
-  /** A payer resolved (search / chip / on-load) — a brand-new cohort. Clears the prefix. `facility` is the
-   *  auto-selected rank-1, or null when the payer resolved with no facilities / the search was unresolved. */
-  | { type: 'RESOLVE_PAYER'; payer: string | null; facility: string | null; window: QualifyWindowDays }
+  /** A payer resolved (search / chip / on-load) — a brand-new cohort. `facility` is the auto-selected rank-1,
+   *  or null when the payer resolved with no facilities / the search was unresolved. `prefix` PREFILLS the
+   *  starts-with narrow: a ≤3-char alpha-prefix SEARCH seeds it with the searched echo (Direction B, so the
+   *  drill lands identifier-narrowed); omitted/'' on the exact-member, resolve-by-payer, and unresolved paths. */
+  | { type: 'RESOLVE_PAYER'; payer: string | null; facility: string | null; window: QualifyWindowDays; prefix?: string }
   /** Facility drill within the SAME payer. Keeps payer + window + prefix. */
   | { type: 'SWITCH_FACILITY'; facility: string }
   /** Window change on the SAME payer + facility. Keeps facility + prefix (no rank-1 teleport). */
@@ -76,13 +79,14 @@ export function cohortKey(c: QualifyCohort): string {
 export function cohortReducer(state: QualifyCohort, action: QualifyCohortAction): QualifyCohort {
   switch (action.type) {
     case 'RESOLVE_PAYER':
-      // New cohort: set payer/facility/window, CLEAR the prefix (the only action that does), reset paging.
+      // New cohort: set payer/facility/window, (re)set the prefix to the PREFILL (a prefix-search echo) or ''
+      // — the only action that sets the prefix from resolution — reset paging.
       return resetPaging({
         ...state,
         payer: action.payer,
         facility: action.facility,
         window: action.window,
-        prefix: '',
+        prefix: action.prefix ?? '',
       });
     case 'SWITCH_FACILITY':
       // Same payer, new facility: keep window + prefix, reset paging.

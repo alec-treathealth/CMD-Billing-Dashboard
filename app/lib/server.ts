@@ -105,7 +105,6 @@ export type {
 import {
   buildResolvePayerQuery,
   buildFacilityRankingQuery,
-  buildCasesQuery,
   buildFacilityCasesQuery,
   buildMoversQuery,
 } from '../../src/collections/qualifyQuery.js';
@@ -113,7 +112,7 @@ import type {
   QualifyMatchKind,
   QualifyResolvePayerRow,
   QualifyFacilityRow,
-  QualifyCaseRow,
+  QualifyClaimRow,
   QualifyMoverRow,
 } from '../../src/collections/qualifyQuery.js';
 import type {
@@ -1857,33 +1856,27 @@ export async function loadQualifyFacilities(
   return rows;
 }
 
-/** 15 most-recent DISTINCT patients for a resolved payer, in-window, cross-tenant (masked; reveal via id). */
-export async function loadQualifyCases(
-  payer: string,
-  from: string,
-  to: string,
-  entityIds: string[],
-): Promise<QualifyCaseRow[]> {
-  const q = buildCasesQuery(payer, from, to, entityIds);
-  const { rows } = await readerExecutor().query<QualifyCaseRow>(q.sql, q.params);
-  // bigint `id` (array_agg of the latest snapshot's row id) comes back as a string from pg → coerce.
-  return rows.map((r) => ({ ...r, id: Number(r.id) }));
-}
-
-/** One page of DISTINCT patients for a resolved payer AT ONE FACILITY, in-window (masked; reveal via id).
- *  `opts` carries the optional prefix blind-index token, the forward keyset cursor, and the page size; the
- *  builder over-fetches by one (limit+1) so the core computes hasMore without a count. */
+/** One page of recent CLAIMS (claim grain) for a resolved payer AT ONE FACILITY, in-window (masked; reveal
+ *  via id). `opts` carries the optional identifier blind-index tokens (prefix or exact member), the forward
+ *  keyset cursor, and the page size; the builder over-fetches by one (limit+1) so the core computes hasMore
+ *  without a count. */
 export async function loadQualifyFacilityCases(
   payer: string,
   facility: string,
   from: string,
   to: string,
   entityIds: string[],
-  opts: { prefixToken: string | null; cursor: { lastDos: string | null; id: number } | null; limit: number; allPayers?: boolean },
-): Promise<QualifyCaseRow[]> {
+  opts: {
+    prefixToken: string | null;
+    memberToken: string | null;
+    cursor: { lastDos: string | null; id: number } | null;
+    limit: number;
+    allPayers?: boolean;
+  },
+): Promise<QualifyClaimRow[]> {
   const q = buildFacilityCasesQuery(payer, facility, from, to, entityIds, opts);
-  const { rows } = await readerExecutor().query<QualifyCaseRow>(q.sql, q.params);
-  // bigint `id` (array_agg of the latest snapshot's row id) comes back as a string from pg → coerce.
+  const { rows } = await readerExecutor().query<QualifyClaimRow>(q.sql, q.params);
+  // bigint `id` (the rollup charge id) comes back as a string from pg → coerce.
   return rows.map((r) => ({ ...r, id: Number(r.id) }));
 }
 

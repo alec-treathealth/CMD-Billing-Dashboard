@@ -3,13 +3,13 @@
 /**
  * Qualify mobile — single claim-line detail (tap a claim in DetailSheet). Layered ABOVE DetailSheet
  * (higher z-index); dismissing returns to the facility's claim list, which stays mounted underneath.
- * Renders existing QualifyCase fields; PHI is fetched by the parent's audited "Reveal all" and passed in
+ * Renders QualifyClaim fields; PHI is fetched by the parent's audited "Reveal all" and passed in
  * via `phi` (null when masked) — this sheet fetches nothing itself.
  *
  * AMOUNTS GATE: the Billed/Allowed block is OMITTED from the DOM (not CSS-hidden) when
  * !hasAmounts — the server has already nulled the values; this is belt-and-suspenders.
  */
-import type { QualifyCase, QualifyPhi } from '../../../lib/qualify/contract';
+import type { QualifyClaim, QualifyPhi } from '../../../lib/qualify/contract';
 import { mobileBucketStyle } from './colors';
 
 const INK900 = '#1B2B2A';
@@ -38,7 +38,7 @@ export function ClaimDetailSheet({
   phi,
   onClose,
 }: {
-  claim: QualifyCase;
+  claim: QualifyClaim;
   hasAmounts: boolean;
   phi: QualifyPhi | null;
   onClose: () => void;
@@ -68,7 +68,7 @@ export function ClaimDetailSheet({
           {phi ? <Row label="Patient" value={phi.patient_name ?? '—'} /> : null}
           {phi ? <Row label="Group #" value={phi.group_number ?? '—'} /> : null}
           <Row label="Facility" value={claim.facilityName ?? '—'} />
-          <Row label="Last DOS" value={claim.lastDos ?? '—'} />
+          <Row label="DOS" value={claim.dos ?? '—'} />
           {/* Color by the claim's OWN allowed% (mobileBucketStyle → ratingBucket 50/30), not the facility
               rating — desktop parity (900e084). null → neutral. Other rows keep the default INK900. */}
           <Row label="% Allowed" value={claim.pctAllowedOfBilled === null ? '—' : `${Math.round(claim.pctAllowedOfBilled)}%`} valueColor={mobileBucketStyle(claim.pctAllowedOfBilled).color} />

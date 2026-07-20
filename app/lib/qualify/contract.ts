@@ -38,9 +38,13 @@ export interface QualifyFacilityCasesInput {
   payer: string;
   facility: string; // raw rollup facility text (QualifyFacility.facilityKey)
   windowDays: QualifyWindowDays;
-  /** Optional prefix narrow: leading ≤3 chars → member_id_prefix_bidx, HMAC'd SERVER-SIDE (the caller's
-   *  own typed term, never row PHI). A prefix mapping to a different payer returns 0 rows by design. */
-  filter?: { prefix?: string };
+  /** Optional IDENTIFIER narrow carried from the resolving search (Direction B) OR the manual prefix input.
+   *  Both terms are the caller's OWN typed value (never row PHI); the blind index is minted SERVER-SIDE and
+   *  the raw term is never logged/URL'd. Mutually exclusive in practice; when both arrive, `memberId` (exact)
+   *  wins. A term mapping to a different payer returns 0 rows by design.
+   *   - `prefix`  : leading ≤3-char alpha prefix  → member_id_prefix_bidx  (the STARTS-WITH narrow).
+   *   - `memberId`: a full member-id term (exact) → member_id_bidx         (claims for that member only). */
+  filter?: { prefix?: string; memberId?: string };
   /** Forward keyset cursor for page N>0 (null/omitted = first page). Carries no PHI — see QualifyCasesCursor. */
   cursor?: QualifyCasesCursor | null;
   /** ALL-PAYERS facility view (mobile detail sheet): when true, the drill drops the `primary_payer = $payer`
@@ -51,8 +55,8 @@ export interface QualifyFacilityCasesInput {
   allPayers?: boolean;
 }
 
-/** Forward keyset cursor for the cases panel: the last returned row's DOS + synthetic id — both NON-PHI
- *  (lastDos = max(charge_date), a service date; id = the rollup/reveal synthetic key). Never carries PHI. */
+/** Forward keyset cursor for the claims panel: the last returned claim's DOS + synthetic id — both NON-PHI
+ *  (lastDos = that claim's charge_date, a service date; id = the rollup/reveal synthetic key). No PHI. */
 export interface QualifyCasesCursor {
   lastDos: string | null;
   id: number;
@@ -60,7 +64,7 @@ export interface QualifyCasesCursor {
 
 /** Facility-scoped claim lines + the amounts-capability flag (dollar fields already stripped when false). */
 export interface QualifyFacilityCases {
-  cases: QualifyCase[];
+  claims: QualifyClaim[];
   viewerHasAmountsCapability: boolean;
   tenantScope: typeof QUALIFY_TENANT_SCOPE;
   /** Keyset cursor to fetch the next page, or null at the end of the walk. */
@@ -114,17 +118,19 @@ export interface QualifyFacility {
   lineCount: number; // logical charge lines (rating weight; non-dollar)
 }
 
-export interface QualifyCase {
-  id: number; // rollup id of the patient's most-recent charge — drives the audited reveal
+/** ONE claim (charge) line — claim grain (Direction B, ruling 1): one row per charge from the 0050 rollup,
+ *  NOT the former distinct-patient dedup. `dos` is the claim's OWN service date (charge_date), not a max. */
+export interface QualifyClaim {
+  id: number; // rollup id of THIS charge — drives the audited reveal
   memberIdMasked: string; // '••••••' until an audited reveal (revealQualifyRow); standard PHI cell
-  /** Resolved primary_payer for this patient's most-recent charge (the SAME rollup column the payer
-   *  card resolves on — never a per-member re-lookup). NON-PHI. On the payer-scoped drill this equals
-   *  the resolved payer for every row; on the mobile all-payers facility drill it varies per row, so a
-   *  facility that serves several payers reads at a glance. Null only if the rollup payer is blank. */
+  /** primary_payer on THIS claim (the SAME rollup column the payer card resolves on — never a per-member
+   *  re-lookup). NON-PHI. On the payer-scoped drill this equals the resolved payer for every row; on the
+   *  mobile all-payers facility drill it varies per row, so a facility that serves several payers reads at
+   *  a glance. Null only if the rollup payer is blank. */
   payerName: string | null;
   facilityName: string;
   program: 'IP' | 'OP' | 'BOTH' | null; // := care_setting; null when the facility text is unresolved
-  lastDos: string | null; // ISO date, display only
+  dos: string | null; // this claim's service date (charge_date), ISO, display only
   pctAllowedOfBilled: number | null;
   billedAmount: number | null;
   allowedAmount: number | null;
@@ -138,7 +144,6 @@ export interface QualifySnapshot {
    *  distinct "payer has no facilities in this window" state — frontends key VOB off resolved===null. */
   resolved: QualifyResolved | null;
   facilities: QualifyFacility[];
-  cases: QualifyCase[];
   viewerHasAmountsCapability: boolean; // === (role !== 'admissions_seat')
   tenantScope: typeof QUALIFY_TENANT_SCOPE; // always the literal — impossible to forget
 }

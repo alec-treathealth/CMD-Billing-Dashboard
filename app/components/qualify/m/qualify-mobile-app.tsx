@@ -12,8 +12,8 @@
  */
 import { useCallback, useEffect, useReducer, useRef, useState, useTransition, type ReactNode } from 'react';
 import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyMovers, revealQualifyRows } from '@/lib/qualify/actions';
-import { QUALIFY_WINDOW_OPTIONS } from '@/lib/qualify/contract';
-import type { QualifySnapshot, QualifyFacility, QualifyCase, QualifyMover, QualifyWindowDays, QualifyPhi } from '@/lib/qualify/contract';
+import { QUALIFY_WINDOW_OPTIONS, sniffQualifyKind } from '@/lib/qualify/contract';
+import type { QualifySnapshot, QualifyFacility, QualifyClaim, QualifyMover, QualifyWindowDays, QualifyPhi } from '@/lib/qualify/contract';
 import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
 import { resolveLandingWins, drillLandingWins, isPayerChange } from '@/lib/qualify/qualifyGuards';
 import { SwipeRow } from '@/components/qualify/m/swipe-row';
@@ -58,12 +58,12 @@ export function QualifyMobileApp({
   const [detail, setDetail] = useState<QualifyFacility | null>(null);
   // Facility-scoped claim lines for the open detail sheet: null === loading, [] === none. `claim` is the
   // single claim line whose ClaimDetailSheet is layered above the list (null === none open).
-  const [facilityCases, setFacilityCases] = useState<QualifyCase[] | null>(null);
+  const [facilityCases, setFacilityCases] = useState<QualifyClaim[] | null>(null);
   // The facility drill loads ALL payers at the facility in ONE page (cap 50 = the reveal batch cap);
   // `casesCapped` records that more exist so the sheet labels its counts "N recent", never the facility
   // total. There is no cursor pager on mobile — the sheet groups + filters the loaded set client-side.
   const [casesCapped, setCasesCapped] = useState(false);
-  const [claim, setClaim] = useState<QualifyCase | null>(null);
+  const [claim, setClaim] = useState<QualifyClaim | null>(null);
   // PHI reveal (facility-scoped, audited): `revealedPhi` caches the fetched identifiers for the OPEN
   // facility's claims (keyed by case id); `phiShown` toggles their visibility WITHOUT re-auditing (one
   // revealQualifyRows call per facility view). All reset when a facility opens/closes. Gated by canRevealPhi.
@@ -77,6 +77,10 @@ export function QualifyMobileApp({
   // lastSearch = the PHI term (member id / prefix). At most one is non-null once resolved.
   const [byPayer, setByPayer] = useState<string | null>(null);
   const [lastSearch, setLastSearch] = useState<string | null>(null);
+  // Synchronous mirror of the resolving SEARCH term (Direction B): drives the drill's identifier narrow
+  // inside the same resolve callback where setLastSearch hasn't applied yet. Null on the resolve-by-payer
+  // path (payer-wide, ruling 3). Held ONLY here — never persisted to storage/URL, never logged.
+  const lastSearchRef = useRef<string | null>(null);
   const [echo, setEcho] = useState('');
   const [hint, setHint] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -146,6 +150,7 @@ export function QualifyMobileApp({
         setSnapshot(snap);
         setSearched(true);
         setByPayer(null); // resolved via the PHI path, not by payer
+        lastSearchRef.current = t; // sync mirror — read by the drill narrow within THIS callback
         setLastSearch(t); // remember the term so a window change re-ranks this same search
         setAreaFilter(AREA_ALL); // a fresh resolution starts unfiltered
         if (snap.resolved === null) {
@@ -176,6 +181,7 @@ export function QualifyMobileApp({
         setSnapshot(snap);
         setSearched(true);
         setByPayer(label); // remember it so a window change re-ranks this same payer
+        lastSearchRef.current = null; // no identifier narrow on the payer path (ruling 3)
         setLastSearch(null); // resolved by payer, not via a PHI term
         setAreaFilter(AREA_ALL); // a fresh resolution starts unfiltered
         setEcho('');
@@ -242,10 +248,15 @@ export function QualifyMobileApp({
     const seq = ++facilitySeq.current;
     const key = cohortKey(c);
     if (!c.payer || !c.facility) { setFacilityCases([]); setCasesCapped(false); return; }
-    getQualifyFacilityCases({ payer: c.payer, facility: c.facility, windowDays: c.window, allPayers: true })
+    // Direction B (ruling 5): when the session arrived via an identifier SEARCH, the same token narrow applies
+    // WITHIN the sheet (alongside allPayers) — prefix vs exact is sniffed server-side. Payer-tap sessions carry
+    // no term → payer-wide/all-payers, unchanged. The raw term stays in lastSearchRef (never logged/URL'd).
+    const term = lastSearchRef.current;
+    const filter = term ? (sniffQualifyKind(term) === 'member_id' ? { memberId: term } : { prefix: term }) : undefined;
+    getQualifyFacilityCases({ payer: c.payer, facility: c.facility, windowDays: c.window, allPayers: true, ...(filter ? { filter } : {}) })
       .then((r) => {
         if (!drillLandingWins(seq, facilitySeq.current, key, cohortKey(cohortRef.current))) return;
-        setFacilityCases(r.cases);
+        setFacilityCases(r.claims);
         setCasesCapped(r.hasMore);
       })
       .catch(() => {
@@ -458,7 +469,7 @@ export function QualifyMobileApp({
         <DetailSheet
           key={detail.facilityKey}
           facility={detail}
-          cases={facilityCases ?? []}
+          claims={facilityCases ?? []}
           loading={facilityCases === null}
           hasAmounts={hasAmounts}
           capped={casesCapped}

@@ -1,7 +1,9 @@
 'use client';
 
 /**
- * Qualify — recent cases table. The 15 most-recent DISTINCT patients for the resolved payer.
+ * Qualify — recent CLAIMS table (claim grain). The most-recent claims for the resolved payer at the
+ * selected facility; when the session arrived via an identifier search the list is narrowed to that
+ * identifier server-side (Direction B) and the prefix input is prefilled with the searched echo.
  *
  * PHI reveal: masked by default; a SINGLE parent-owned header toggle ("Reveal all" ⇄ "Hide
  * identifiers") unmasks Patient / Member ID / Group # for every row at once (parity with the
@@ -24,7 +26,7 @@
 import { bucketClass, type RatingBucket } from './colors';
 import { ratingBucket } from '../../lib/qualify/rating';
 import { PHI_MASK } from '../../lib/phi';
-import type { QualifyCase, QualifyPhi } from '../../lib/qualify/contract';
+import type { QualifyClaim, QualifyPhi } from '../../lib/qualify/contract';
 
 function usd0(n: number): string {
   return `$${Math.round(n).toLocaleString('en-US')}`;
@@ -41,7 +43,7 @@ function phiText(shownReal: boolean, real: string | null, mask: string): string 
 }
 
 export function CasesTable({
-  cases,
+  claims,
   hasAmounts,
   heatOn,
   facilityLabel = null,
@@ -61,7 +63,7 @@ export function CasesTable({
   onPrevPage,
   onNextPage,
 }: {
-  cases: readonly QualifyCase[];
+  claims: readonly QualifyClaim[];
   hasAmounts: boolean;
   heatOn: boolean;
   /** Facility-name → rating bucket map. RETAINED in the contract (callers still pass it), but the %
@@ -108,7 +110,7 @@ export function CasesTable({
     <section className="rounded-xl border bg-card shadow-sm">
       <div className="flex items-baseline justify-between gap-3 px-4 pb-2.5 pt-4">
         <h2 className="font-display text-base font-semibold">
-          Recent cases
+          Recent Claims
           {facilityLabel ? <span className="ml-2 text-sm font-medium text-muted-foreground">· {facilityLabel}</span> : null}
         </h2>
         <div className="flex items-center gap-3">
@@ -142,7 +144,7 @@ export function CasesTable({
             </button>
           ) : null}
           <span className="whitespace-nowrap text-xs font-semibold text-muted-foreground">
-            {cases.length} most-recent distinct patients{canReveal ? '' : ' · masked'}
+            {claims.length} recent claims{canReveal ? '' : ' · masked'}
           </span>
         </div>
       </div>
@@ -161,21 +163,21 @@ export function CasesTable({
               <th className={TH}>Group #</th>
               <th className={TH}>Facility</th>
               <th className={TH}>Program</th>
-              <th className={TH}>Last DOS</th>
+              <th className={TH}>DOS</th>
               <th className={TH_NUM}>% allowed</th>
               {hasAmounts ? <th className={TH_NUM}>Billed</th> : null}
               {hasAmounts ? <th className={TH_NUM}>Allowed</th> : null}
             </tr>
           </thead>
           <tbody>
-            {cases.length === 0 ? (
+            {claims.length === 0 ? (
               <tr>
                 <td className="px-3.5 py-6 text-center text-sm text-muted-foreground" colSpan={colSpan}>
-                  No cases for this payer in the selected window.
+                  No claims for this payer in the selected window.
                 </td>
               </tr>
             ) : (
-              cases.map((c) => {
+              claims.map((c) => {
                 const pct = c.pctAllowedOfBilled;
                 // Color by the ROW'S OWN allowed% through the shared ratingBucket helper (rating.ts
                 // cutoffs 50/30): ≥50 green, ≥30 amber, else red; null → neutral. NOT the parent
@@ -212,7 +214,7 @@ export function CasesTable({
                         <span className="text-muted-foreground">—</span>
                       )}
                     </td>
-                    <td className={`${TD} text-muted-foreground`}>{c.lastDos ?? '—'}</td>
+                    <td className={`${TD} text-muted-foreground`}>{c.dos ?? '—'}</td>
                     <td className={`${TD} text-right`}>
                       <span
                         className={['q-pctcell', bucketClass(bucket), 'inline-flex items-center gap-1.5 rounded px-2 py-0.5 tabular-nums font-semibold'].join(' ')}

@@ -26,7 +26,7 @@
  * of the reveal/Hide-IDs state.
  */
 import { useMemo, useState } from 'react';
-import type { QualifyCase, QualifyFacility, QualifyPhi } from '../../../lib/qualify/contract';
+import type { QualifyClaim, QualifyFacility, QualifyPhi } from '../../../lib/qualify/contract';
 import { mobileBucketStyle } from './colors';
 
 const INK900 = '#1B2B2A';
@@ -44,7 +44,7 @@ function usd0(n: number): string {
 }
 
 /** The payer this row groups under; blank rollup payer collapses to a stable placeholder key. */
-function payerKey(c: QualifyCase): string {
+function payerKey(c: QualifyClaim): string {
   return c.payerName ?? '—';
 }
 
@@ -57,7 +57,7 @@ interface PayerChip {
 
 export function DetailSheet({
   facility,
-  cases,
+  claims,
   loading,
   hasAmounts,
   capped = false,
@@ -73,7 +73,7 @@ export function DetailSheet({
 }: {
   facility: QualifyFacility;
   /** FULL loaded set for the facility (all payers, ≤50). The chip strip is built from this, unfiltered. */
-  cases: readonly QualifyCase[];
+  claims: readonly QualifyClaim[];
   loading: boolean;
   hasAmounts: boolean;
   /** True when the facility has more claims than the loaded cap — labels read "N recent" so no one reads
@@ -85,7 +85,7 @@ export function DetailSheet({
   revealPending: boolean;
   revealError: string | null;
   onRevealAll: () => void;
-  onOpenClaim: (c: QualifyCase) => void;
+  onOpenClaim: (c: QualifyClaim) => void;
   onClose: () => void;
   /** When the sheet was opened from a prefix/alpha search, the non-PHI term the user typed and the payer it
    *  resolved to — seeds the active filter + banner. Null when opened directly (e.g. from the strength list). */
@@ -97,7 +97,7 @@ export function DetailSheet({
   // Chips are built from the FULL set so the strip always shows every payer regardless of the active filter.
   const chips = useMemo<PayerChip[]>(() => {
     const groups = new Map<string, { count: number; pctSum: number; pctN: number }>();
-    for (const c of cases) {
+    for (const c of claims) {
       const key = payerKey(c);
       const g = groups.get(key) ?? { count: 0, pctSum: 0, pctN: 0 };
       g.count += 1;
@@ -110,13 +110,13 @@ export function DetailSheet({
     return [...groups.entries()]
       .map(([payer, g]) => ({ payer, count: g.count, avg: g.pctN > 0 ? g.pctSum / g.pctN : null }))
       .sort((a, b) => b.count - a.count || (b.avg ?? -1) - (a.avg ?? -1) || a.payer.localeCompare(b.payer));
-  }, [cases]);
+  }, [claims]);
 
-  const visible = activeFilter === null ? cases : cases.filter((c) => payerKey(c) === activeFilter);
+  const visible = activeFilter === null ? claims : claims.filter((c) => payerKey(c) === activeFilter);
   // The banner reflects the search context only while its payer is the active filter (clearing or switching
   // chips takes the user out of that context). `term` is the non-PHI alpha echo (≤3 chars), never a raw id.
   const showBanner = searchContext !== null && activeFilter === searchContext.payer;
-  const totalLabel = capped ? `${cases.length} recent` : `${cases.length}`;
+  const totalLabel = capped ? `${claims.length} recent` : `${claims.length}`;
 
   const onChip = (payer: string) => setActiveFilter((cur) => (cur === payer ? null : payer));
 
@@ -135,7 +135,7 @@ export function DetailSheet({
             <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: INK400 }}>
               Recent claims at this facility
             </span>
-            {canReveal && cases.length > 0 ? (
+            {canReveal && claims.length > 0 ? (
               <button
                 type="button"
                 onClick={onRevealAll}
@@ -193,7 +193,7 @@ export function DetailSheet({
             </div>
             {capped ? (
               <div style={{ padding: '2px 20px 0', fontSize: 11, color: INK400 }}>
-                Showing the {cases.length} most recent claims across payers
+                Showing the {claims.length} most recent claims across payers
               </div>
             ) : null}
           </>
@@ -220,7 +220,7 @@ export function DetailSheet({
             <div style={{ padding: '24px 0', textAlign: 'center', fontSize: 12, color: INK400 }}>
               Loading claims…
             </div>
-          ) : cases.length === 0 ? (
+          ) : claims.length === 0 ? (
             <div style={{ padding: '24px 0', textAlign: 'center', fontSize: 12, color: INK400 }}>
               No recent claims at this facility in this window.
             </div>
@@ -253,7 +253,7 @@ export function DetailSheet({
                   </div>
                 ) : null}
                 <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 11, color: INK600 }}>
-                  <span>{c.lastDos ?? '—'}</span>
+                  <span>{c.dos ?? '—'}</span>
                   {/* Color by the ROW'S OWN allowed% (mobileBucketStyle → ratingBucket 50/30), NOT the
                       parent facility rating — desktop parity (900e084). null → neutral. */}
                   <span className="ths-num" style={{ color: mobileBucketStyle(c.pctAllowedOfBilled).color }}>{c.pctAllowedOfBilled === null ? '—' : `${Math.round(c.pctAllowedOfBilled)}% allowed`}</span>

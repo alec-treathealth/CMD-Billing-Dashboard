@@ -4,7 +4,6 @@ import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../src/tenants.js';
 import {
   buildResolvePayerQuery,
   buildFacilityRankingQuery,
-  buildCasesQuery,
   buildFacilityCasesQuery,
   buildMoversQuery,
   QUALIFY_CASES_LIMIT,
@@ -20,7 +19,6 @@ test('cross-tenant: every builder scopes business_entity_id = any($1::uuid[]) wi
   const built = [
     buildResolvePayerQuery(TOKEN, 'member_id', BOTH),
     buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH),
-    buildCasesQuery('AETNA', '2026-06-17', '2026-07-17', BOTH),
     buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH),
     buildMoversQuery('2026-06-17', '2026-07-17', '2026-05-18', '2026-06-17', BOTH),
   ];
@@ -36,7 +34,6 @@ test('grain: aggregate builders read the charge rollup, never raw cmd_explorer_r
   for (const { sql } of [
     buildResolvePayerQuery(TOKEN, 'prefix', BOTH),
     buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH),
-    buildCasesQuery('AETNA', '2026-06-17', '2026-07-17', BOTH),
     buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH),
     buildMoversQuery('2026-06-17', '2026-07-17', '2026-05-18', '2026-06-17', BOTH),
   ]) {
@@ -49,7 +46,6 @@ test('grain: aggregate builders read the charge rollup, never raw cmd_explorer_r
 test('every builder routes through assertEntityScope (throws on empty scope)', () => {
   assert.throws(() => buildResolvePayerQuery(TOKEN, 'member_id', []), /entityIds required/);
   assert.throws(() => buildFacilityRankingQuery('X', '2026-01-01', '2026-02-01', []), /entityIds required/);
-  assert.throws(() => buildCasesQuery('X', '2026-01-01', '2026-02-01', []), /entityIds required/);
   assert.throws(
     () => buildFacilityCasesQuery('X', 'F', '2026-01-01', '2026-02-01', []),
     /entityIds required/,
@@ -88,80 +84,85 @@ test('buildFacilityRankingQuery: reuses PCT_RATIO_SELECT, resolves facility_code
   assert.deepEqual(params, [BOTH, 'AETNA', '2026-06-17', '2026-07-17']);
 });
 
-// ── buildCasesQuery: distinct patients, opaque token never projected, program := care_setting. ───
-test('buildCasesQuery: 15 distinct patients, reveal id, program from care_setting, token stays server-side', () => {
-  const { sql, params } = buildCasesQuery('AETNA', '2026-06-17', '2026-07-17', BOTH);
-  assert.match(sql, /group by member_id_bidx/, 'distinct patients keyed on the blind index');
-  assert.match(sql, /array_agg\(id order by payment_received desc/, 'latest-charge id for the audited reveal');
-  assert.match(sql, /care_setting\) as program/, 'program := resolved care_setting (Q-D)');
-  assert.ok(!/agg\.member_id_bidx/.test(sql), 'opaque token is NOT projected to the caller');
-  assert.match(sql, /order by agg\.last_dos desc nulls last/, 'ordered by the DISPLAYED date (max charge_date / DOS)');
-  assert.equal(params[4], QUALIFY_CASES_LIMIT, 'defaults to 15 cases');
-  assert.deepEqual(params.slice(0, 4), [BOTH, 'AETNA', '2026-06-17', '2026-07-17']);
-});
-
-// ── buildFacilityCasesQuery: buildCasesQuery + one raw-facility-text predicate, same grain; over-fetch. ─
-test('buildFacilityCasesQuery: adds a bound raw-facility predicate, keeps distinct-patient grain + over-fetches', () => {
+// ── buildFacilityCasesQuery: CLAIM GRAIN (one row per charge), raw-facility predicate, over-fetch. ─────
+test('buildFacilityCasesQuery: claim grain (NO member_id_bidx dedup), raw-facility predicate, per-claim dos, over-fetch', () => {
   const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH);
-  // The base axis vs buildCasesQuery: an equality on the RAW facility text, as a bound param.
   assert.match(sql, /primary_payer = \$2 and facility = \$3/, 'raw facility text is a bound predicate');
   assert.equal(params[2], '405 recovery', 'facility bound as $3 (raw text, never interpolated)');
-  // Same discipline as buildCasesQuery: distinct patients, reveal id, opaque token never projected.
-  assert.match(sql, /group by member_id_bidx/, 'distinct patients keyed on the blind index');
-  assert.match(sql, /array_agg\(id order by payment_received desc/, 'latest-charge id for the audited reveal');
-  assert.ok(!/agg\.member_id_bidx/.test(sql), 'opaque token is NOT projected to the caller');
+  // CLAIM GRAIN: no distinct-patient dedup, no latest-charge array_agg — one row per charge.
+  assert.ok(!/group by member_id_bidx/.test(sql), 'NO member_id_bidx dedup — claim grain');
+  assert.ok(!/array_agg/.test(sql), 'no per-patient latest-charge collapse — each claim is its own row');
+  assert.match(sql, /to_char\(charge_date, 'YYYY-MM-DD'\) as dos/, 'per-claim DOS = the charge_date (not a max)');
+  assert.ok(!/agg\.member_id_bidx/.test(sql), 'the blind index is NOT projected to the caller');
   assert.match(sql, /care_setting\) as program/, 'program := resolved care_setting');
-  assert.match(sql, /order by agg\.last_dos desc nulls last/, 'ordered by the DISPLAYED date (max charge_date / DOS)');
+  assert.match(sql, /order by agg\.dos desc nulls last/, 'ordered by the per-claim DOS');
   // Pagination OVER-FETCH: with no explicit limit the query binds QUALIFY_CASES_LIMIT + 1 (fetch 16, keep 15).
   assert.equal(params[5], QUALIFY_CASES_LIMIT + 1, 'over-fetches by one (limit+1) so the caller computes hasMore');
   assert.deepEqual(params.slice(0, 5), [BOTH, 'AETNA', '405 recovery', '2026-06-17', '2026-07-17']);
-  // No filter / no cursor by default: no prefix predicate, no outer keyset WHERE.
-  assert.ok(!sql.includes('member_id_prefix_bidx'), 'no prefix predicate when none supplied');
-  assert.ok(!/agg\.last_dos </.test(sql) && !/agg\.last_dos is null and agg\.id </.test(sql), 'no keyset WHERE on page 0');
+  // No filter / no cursor by default: no identifier predicate, no outer keyset WHERE.
+  assert.ok(!sql.includes('member_id_prefix_bidx') && !sql.includes('member_id_bidx'), 'no identifier predicate when none supplied');
+  assert.ok(!/agg\.dos </.test(sql) && !/agg\.dos is null and agg\.id </.test(sql), 'no keyset WHERE on page 0');
 });
 
-// ── buildFacilityCasesQuery: prefix narrow lives in the INNER WHERE (grouping column, pre-GROUP BY). ─
-test('buildFacilityCasesQuery: a prefix token adds member_id_prefix_bidx to the INNER aggregate WHERE', () => {
+// ── buildFacilityCasesQuery: PREFIX narrow → member_id_prefix_bidx (the STARTS-WITH bleed guard). ─────
+test('buildFacilityCasesQuery: a prefix token adds member_id_prefix_bidx to the INNER WHERE', () => {
   const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
     prefixToken: TOKEN,
   });
-  // Inner WHERE: after the payment_received window, before GROUP BY — rides cmd_charge_rollup_prefix.
-  assert.match(sql, /payment_received < \$5::date and member_id_prefix_bidx = \$6 group by member_id_bidx/, 'prefix predicate is the last inner condition, pre-GROUP BY');
+  assert.match(sql, /payment_received < \$5::date and member_id_prefix_bidx = \$6\)? agg/, 'prefix predicate is the last inner condition');
+  assert.ok(!sql.includes('member_id_bidx = '), 'prefix mode does NOT touch the exact-member column');
   assert.equal(params[5], TOKEN, 'prefix token bound (opaque; never the raw prefix)');
   assert.equal(params[6], QUALIFY_CASES_LIMIT + 1, 'limit+1 follows the prefix param');
 });
 
-// ── buildFacilityCasesQuery: keyset lives in the OUTER WHERE (last_dos/id are aggregates). ────────
+// ── buildFacilityCasesQuery: EXACT MEMBER narrow → member_id_bidx (claims for that member only). ──────
+test('buildFacilityCasesQuery: a member token adds member_id_bidx to the INNER WHERE (exact, wins over prefix)', () => {
+  const exact = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
+    memberToken: TOKEN,
+  });
+  assert.match(exact.sql, /payment_received < \$5::date and member_id_bidx = \$6\)? agg/, 'exact member predicate in the inner WHERE');
+  assert.ok(!exact.sql.includes('member_id_prefix_bidx'), 'exact mode does NOT touch the prefix column');
+  assert.equal(exact.params[5], TOKEN, 'member token bound (opaque; never the raw member id)');
+  // Precedence: when BOTH tokens are somehow supplied, EXACT member wins (mutually exclusive in practice).
+  const both = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
+    memberToken: TOKEN,
+    prefixToken: 'b'.repeat(64),
+  });
+  assert.match(both.sql, /member_id_bidx = \$6/, 'member token wins');
+  assert.ok(!both.sql.includes('member_id_prefix_bidx'), 'the prefix token is not applied when the member token is present');
+});
+
+// ── buildFacilityCasesQuery: keyset lives in the OUTER WHERE (agg.dos/id). ─────────────────────────────
 test('buildFacilityCasesQuery: a non-null cursor adds the NULLS-LAST keyset to the OUTER WHERE, before ORDER BY', () => {
   const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
     cursor: { lastDos: '2026-07-01', id: 500 },
   });
   assert.match(
     sql,
-    /where \(agg\.last_dos < \$6 or \(agg\.last_dos = \$6 and agg\.id < \$7\) or agg\.last_dos is null\) group by/,
+    /where \(agg\.dos < \$6 or \(agg\.dos = \$6 and agg\.id < \$7\) or agg\.dos is null\) group by/,
     'DESC keyset: past the cursor, id tiebreak, plus the whole NULL tail — then GROUP BY',
   );
   assert.equal(params[5], '2026-07-01', 'cursor lastDos bound as $6');
   assert.equal(params[6], 500, 'cursor id bound as $7');
   assert.equal(params[7], QUALIFY_CASES_LIMIT + 1, 'limit+1 last');
-  assert.match(sql, /order by agg\.last_dos desc nulls last, agg\.id desc/, 'ORDER BY unchanged');
+  assert.match(sql, /order by agg\.dos desc nulls last, agg\.id desc/, 'ORDER BY on the per-claim DOS');
 });
 
 test('buildFacilityCasesQuery: a null-lastDos cursor uses the IS NULL AND id branch (null-tail walk)', () => {
   const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
     cursor: { lastDos: null, id: 500 },
   });
-  assert.match(sql, /where \(agg\.last_dos is null and agg\.id < \$6\) group by/, 'null-tail branch ties by id only');
+  assert.match(sql, /where \(agg\.dos is null and agg\.id < \$6\) group by/, 'null-tail branch ties by id only');
   assert.equal(params[5], 500, 'cursor id bound as $6');
 });
 
-test('buildFacilityCasesQuery: prefix + cursor COEXIST (inner prefix WHERE + outer keyset WHERE)', () => {
+test('buildFacilityCasesQuery: prefix + cursor COEXIST (inner identifier WHERE + outer keyset WHERE)', () => {
   const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
     prefixToken: TOKEN,
     cursor: { lastDos: '2026-07-01', id: 500 },
   });
-  assert.match(sql, /and member_id_prefix_bidx = \$6 group by member_id_bidx/, 'prefix in the inner WHERE');
-  assert.match(sql, /where \(agg\.last_dos < \$7 or \(agg\.last_dos = \$7 and agg\.id < \$8\) or agg\.last_dos is null\) group by/, 'keyset in the outer WHERE');
+  assert.match(sql, /and member_id_prefix_bidx = \$6\)? agg/, 'prefix in the inner WHERE');
+  assert.match(sql, /where \(agg\.dos < \$7 or \(agg\.dos = \$7 and agg\.id < \$8\) or agg\.dos is null\) group by/, 'keyset in the outer WHERE');
   assert.equal(params[5], TOKEN);
   assert.equal(params[6], '2026-07-01');
   assert.equal(params[7], 500);

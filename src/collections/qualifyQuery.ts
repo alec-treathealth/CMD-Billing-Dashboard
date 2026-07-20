@@ -14,11 +14,11 @@
  * └────────────────────────────────────────────────────────────────────────────────────────────────┘
  *
  * PHI: member/prefix identity enters ONLY as an opaque keyed-HMAC blind-index token (member_id_bidx /
- * member_id_prefix_bidx); raw PHI never reaches this module. member_id_bidx is used for grouping /
- * distinct-patient counting but is NEVER projected to the caller (opaque token stays server-side); a
- * patient row carries the rollup `id` (latest snapshot's real cmd_explorer_rows id) so the audited
- * reveal can join back. Dollar columns are returned raw — the amounts-capability gate strips them in
- * the action layer (single choke point), never here.
+ * member_id_prefix_bidx); raw PHI never reaches this module. Those blind indexes are matched in a WHERE
+ * (movers still group by member_id_bidx for distinct-patient counts) but are NEVER projected to the caller
+ * (opaque token stays server-side); a claim row carries the rollup `id` (the real cmd_explorer_rows id) so
+ * the audited reveal can join back. Dollar columns are returned raw — the amounts-capability gate strips
+ * them in the action layer (single choke point), never here.
  */
 import { assertEntityScope } from './entityScope.js';
 import { CMD_EXPLORER_CHARGE_ROLLUP, PCT_RATIO_SELECT, type ParamAdder } from './cmdExplorerQuery.js';
@@ -26,7 +26,7 @@ import { CMD_EXPLORER_CHARGE_ROLLUP, PCT_RATIO_SELECT, type ParamAdder } from '.
 /** A member-id EXACT match vs a 3-letter alpha-PREFIX match — sniffed server-side, never client-declared. */
 export type QualifyMatchKind = 'member_id' | 'prefix';
 
-/** 15 most-recent distinct patients on the cases panel (ruling: no separate cohort floor — mask + audited reveal is the control). */
+/** Page size for the recent-claims panel (claim grain; ruling: no separate cohort floor — mask + audited reveal is the control). */
 export const QUALIFY_CASES_LIMIT = 15;
 
 /** Movers suppression floors + cap (ruling Q-B). */
@@ -47,14 +47,14 @@ export interface QualifyFacilityRow {
   allowed: number | null; // sum(allowed_amount) — stripped in the action for admissions_seat
   pct_allowed: number | null; // dollar-weighted allowed/billed, 0-100 (guarded); the displayed value
 }
-export interface QualifyCaseRow {
-  id: number; // rollup id of the patient's MOST-RECENT charge — drives the audited reveal join
+export interface QualifyClaimRow {
+  id: number; // rollup id of THIS charge — drives the audited reveal join
   facility: string;
   facility_name: string | null;
-  primary_payer: string | null; // this patient's most-recent-charge primary_payer (non-PHI); the payer chip/label
+  primary_payer: string | null; // THIS claim's primary_payer (non-PHI); the payer chip/label
   program: 'IP' | 'OP' | 'BOTH' | null; // := resolved care_setting; null when facility text unresolved (Q-D)
-  last_dos: string | null; // max(charge_date) — display only
-  pct_allowed: number | null; // per-patient dollar-weighted allowed/billed
+  dos: string | null; // THIS claim's charge_date — display only (per-claim, not a max)
+  pct_allowed: number | null; // per-claim allowed/billed
   billed: number | null;
   allowed: number | null;
 }
@@ -157,62 +157,20 @@ export function buildFacilityRankingQuery(
 }
 
 /**
- * The 15 most-recent DISTINCT patients (member_id_bidx) for the resolved payer, in-window,
- * cross-tenant. Per patient: the id of their MOST-RECENT charge (audited-reveal join key), that
- * charge's facility + resolved program (care_setting), last DOS (max charge_date), and per-patient
- * dollar-weighted pct_allowed + dollar sums. Recency ordering = max(payment_received) desc. NO cohort
- * floor (ruling Q-F: masked-by-default + audited reveal is the control). member_id_bidx is used only
- * for grouping — it is NEVER projected (opaque token stays server-side).
- */
-export function buildCasesQuery(
-  payer: string,
-  from: string,
-  to: string,
-  entityIds: string[],
-  limit: number = QUALIFY_CASES_LIMIT,
-): { sql: string; params: unknown[] } {
-  const ent = assertEntityScope(entityIds, 'buildCasesQuery');
-  const { params, add } = paramList();
-  const e = add(ent);
-  const p = add(payer);
-  const f = add(from);
-  const t = add(to);
-  const lim = add(limit);
-  const inner =
-    'select member_id_bidx, ' +
-    '(array_agg(id order by payment_received desc nulls last, charge_date desc nulls last, id desc))[1] as id, ' +
-    '(array_agg(facility order by payment_received desc nulls last, charge_date desc nulls last, id desc))[1] as facility, ' +
-    '(array_agg(primary_payer order by payment_received desc nulls last, charge_date desc nulls last, id desc))[1] as primary_payer, ' +
-    "to_char(max(charge_date), 'YYYY-MM-DD') as last_dos, " +
-    'sum(charge_amount)::float8 as billed, sum(allowed_amount)::float8 as allowed, ' +
-    PCT_RATIO_SELECT + ' ' +
-    `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
-    `where business_entity_id = any(${e}::uuid[]) and primary_payer = ${p} ` +
-    `and payment_received >= ${f}::date and payment_received < ${t}::date ` +
-    'group by member_id_bidx';
-  // `agg` alias so FACILITY_DIM_JOINS (which references agg.facility) applies unchanged. ORDER BY the
-  // DISPLAYED date (last_dos = max charge_date, DOS) so the list reads in the order it shows — the window
-  // still filters on payment_received, but recency here is service date, which is what admissions reads.
-  const sql =
-    'select agg.id, agg.facility, agg.primary_payer, ' +
-    'coalesce(max(f.facility_name), agg.facility) as facility_name, ' +
-    'max(f.care_setting) as program, ' +
-    'agg.last_dos, agg.pct_allowed, agg.billed, agg.allowed ' +
-    `from (${inner}) agg ` +
-    FACILITY_DIM_JOINS +
-    'group by agg.id, agg.facility, agg.primary_payer, agg.last_dos, agg.pct_allowed, agg.billed, agg.allowed ' +
-    `order by agg.last_dos desc nulls last, agg.id desc limit ${lim}`;
-  return { sql, params };
-}
-
-/**
- * FACILITY-SCOPED variant of buildCasesQuery: the 15 most-recent DISTINCT patients for the resolved
- * payer AT ONE FACILITY, in-window, cross-tenant. Identical grain, ordering, masking discipline, and
- * dimension enrichment as buildCasesQuery — the ONLY difference is the extra `and facility = $facility`
- * predicate in the inner aggregate. `facility` is the RAW rollup facility text (the same value
- * buildFacilityRankingQuery groups by, and the same value carried to the client as QualifyFacility.
- * facilityKey), NOT the resolved facility_code — a single code can alias multiple raw texts that rank
- * as SEPARATE cards, so scoping by raw text keeps each card's claim list grain-consistent with its rank.
+ * FACILITY-SCOPED recent CLAIMS for the resolved payer AT ONE FACILITY, in-window, cross-tenant. CLAIM
+ * GRAIN (Direction B, ruling 1): ONE row per charge from the 0050 rollup — NO member_id_bidx dedup — so a
+ * patient with several claims shows each one; per-claim DOS = that charge's own charge_date (not a max);
+ * per-claim pct_allowed = allowed/charge (guarded), and the row's own billed/allowed. `facility` is the RAW
+ * rollup facility text (the same value buildFacilityRankingQuery groups by, and carried to the client as
+ * QualifyFacility.facilityKey), NOT the resolved facility_code — a single code can alias multiple raw texts
+ * that rank as SEPARATE cards, so scoping by raw text keeps each card's claim list grain-consistent with its
+ * rank. NO cohort floor (masked-by-default + audited reveal is the control).
+ *
+ * IDENTIFIER NARROW (Direction B): the searched identifier (or the manual prefix input) narrows the rows to
+ * that member exactly — `member_id_bidx = $tok` (exact member-id search) or `member_id_prefix_bidx = $tok`
+ * (≤3 alpha prefix). Mutually exclusive; `memberToken` (exact) wins if both are somehow set. The token is
+ * opaque (HMAC'd upstream); a term mapping to a different payer simply yields 0 rows (NEVER re-resolves). A
+ * charge-grain rollup index rides these columns, so the equality lives in the WHERE (no GROUP BY now).
  */
 export function buildFacilityCasesQuery(
   payer: string,
@@ -221,14 +179,16 @@ export function buildFacilityCasesQuery(
   to: string,
   entityIds: string[],
   opts: {
-    /** Opaque member_id_prefix_bidx token (already HMAC'd upstream) — adds a prefix narrow when set. */
+    /** Opaque member_id_prefix_bidx token (already HMAC'd upstream) — adds a STARTS-WITH prefix narrow. */
     prefixToken?: string | null;
+    /** Opaque member_id_bidx token (already HMAC'd upstream) — adds an EXACT member-id narrow (wins over prefix). */
+    memberToken?: string | null;
     /** Forward keyset cursor (previous page's {lastDos, id}); null/omitted = first page. */
     cursor?: { lastDos: string | null; id: number } | null;
     /** Page size; the query OVER-FETCHES by one (binds limit+1) so the caller computes hasMore, not a count. */
     limit?: number;
     /** ALL-PAYERS view (mobile detail sheet): drop the `primary_payer = $payer` filter so EVERY payer's
-     *  patients at the facility come back (each row tagged with its own primary_payer). `payer` is then
+     *  claims at the facility come back (each row tagged with its own primary_payer). `payer` is then
      *  UNUSED here (not bound). Blank payers are excluded so every row groups under a real payer chip. */
     allPayers?: boolean;
   } = {},
@@ -245,58 +205,53 @@ export function buildFacilityCasesQuery(
   const fac = add(facility);
   const f = add(from);
   const t = add(to);
-  // Prefix narrow (inner WHERE, pre-GROUP BY): member_id_prefix_bidx is a grouping column of the 0050
-  // rollup grain, so the equality rides cmd_charge_rollup_prefix. The token is opaque (HMAC'd upstream);
-  // omitted when no/short prefix (no token minted). Payer stays the passed-in top-bar payer — a prefix
-  // mapping to a different payer simply yields 0 rows (NEVER re-resolves; buildResolvePayerQuery unused).
-  const prefixCond = opts.prefixToken ? ` and member_id_prefix_bidx = ${add(opts.prefixToken)}` : '';
+  // Identifier narrow (inner WHERE): exact member wins over prefix (mutually exclusive in practice). Both
+  // ride a charge-grain rollup index; the token is opaque (HMAC'd upstream), never the raw term.
+  const idCond = opts.memberToken
+    ? ` and member_id_bidx = ${add(opts.memberToken)}`
+    : opts.prefixToken
+      ? ` and member_id_prefix_bidx = ${add(opts.prefixToken)}`
+      : '';
+  // CLAIM GRAIN: one row per charge (the 0050 rollup is already charge-grain, so no aggregation) — the outer
+  // GROUP BY agg.id only collapses FACILITY_DIM_JOINS fan-out (facility_name is not unique-constrained).
   const inner =
-    'select member_id_bidx, ' +
-    '(array_agg(id order by payment_received desc nulls last, charge_date desc nulls last, id desc))[1] as id, ' +
-    '(array_agg(facility order by payment_received desc nulls last, charge_date desc nulls last, id desc))[1] as facility, ' +
-    // The patient's payer = the primary_payer on their MOST-RECENT charge (same ordering as id/facility),
-    // so a patient who switched payers reads under their current one. Projected on BOTH paths (constant on
-    // the single-payer drill; varies on the all-payers drill).
-    '(array_agg(primary_payer order by payment_received desc nulls last, charge_date desc nulls last, id desc))[1] as primary_payer, ' +
-    "to_char(max(charge_date), 'YYYY-MM-DD') as last_dos, " +
-    'sum(charge_amount)::float8 as billed, sum(allowed_amount)::float8 as allowed, ' +
-    PCT_RATIO_SELECT + ' ' +
+    'select id, facility, primary_payer, ' +
+    "to_char(charge_date, 'YYYY-MM-DD') as dos, " +
+    'charge_amount::float8 as billed, allowed_amount::float8 as allowed, ' +
+    'case when charge_amount > 0 then round(allowed_amount / charge_amount * 100, 2)::float8 end as pct_allowed ' +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
     `where business_entity_id = any(${e}::uuid[])${payerCond} and facility = ${fac} ` +
     `and payment_received >= ${f}::date and payment_received < ${t}::date` +
-    prefixCond + ' ' +
-    'group by member_id_bidx';
-  // Keyset pagination (OUTER WHERE on the agg subquery — last_dos/id are aggregates, unavailable inner).
-  // Ported from cmdExplorerQuery.buildCmdExplorerQuery: DESC order ⇒ walk STRICTLY past the cursor, ties
-  // broken by the globally-unique id (cmd_charge_rollup_id), and the NULLS-LAST tail handled explicitly so
-  // the walk never stalls. `agg.last_dos` is 'YYYY-MM-DD' text (lexical == chronological).
+    idCond;
+  // Keyset pagination (OUTER WHERE on the agg subquery). DESC order ⇒ walk STRICTLY past the cursor, ties
+  // broken by the globally-unique charge id, and the NULLS-LAST tail handled explicitly so the walk never
+  // stalls. `agg.dos` is 'YYYY-MM-DD' text (lexical == chronological).
   const cursor = opts.cursor ?? null;
   let keyset = '';
   if (cursor) {
     if (cursor.lastDos !== null) {
       const cv = add(cursor.lastDos);
       const ci = add(cursor.id);
-      keyset = `where (agg.last_dos < ${cv} or (agg.last_dos = ${cv} and agg.id < ${ci}) or agg.last_dos is null) `;
+      keyset = `where (agg.dos < ${cv} or (agg.dos = ${cv} and agg.id < ${ci}) or agg.dos is null) `;
     } else {
       const ci = add(cursor.id);
-      keyset = `where (agg.last_dos is null and agg.id < ${ci}) `;
+      keyset = `where (agg.dos is null and agg.id < ${ci}) `;
     }
   }
   // OVER-FETCH by one (limit+1): the caller trims to `limit` and infers hasMore from the extra row.
   const lim = add((opts.limit ?? QUALIFY_CASES_LIMIT) + 1);
   // `agg` alias so FACILITY_DIM_JOINS (which references agg.facility) applies unchanged. ORDER BY the
-  // DISPLAYED date (last_dos = max charge_date, DOS) so the list reads in the order it shows — identical
-  // discipline to buildCasesQuery.
+  // DISPLAYED per-claim date (dos = charge_date) so the list reads in the order it shows.
   const sql =
     'select agg.id, agg.facility, agg.primary_payer, ' +
     'coalesce(max(f.facility_name), agg.facility) as facility_name, ' +
     'max(f.care_setting) as program, ' +
-    'agg.last_dos, agg.pct_allowed, agg.billed, agg.allowed ' +
+    'agg.dos, agg.pct_allowed, agg.billed, agg.allowed ' +
     `from (${inner}) agg ` +
     FACILITY_DIM_JOINS +
     keyset +
-    'group by agg.id, agg.facility, agg.primary_payer, agg.last_dos, agg.pct_allowed, agg.billed, agg.allowed ' +
-    `order by agg.last_dos desc nulls last, agg.id desc limit ${lim}`;
+    'group by agg.id, agg.facility, agg.primary_payer, agg.dos, agg.pct_allowed, agg.billed, agg.allowed ' +
+    `order by agg.dos desc nulls last, agg.id desc limit ${lim}`;
   return { sql, params };
 }
 

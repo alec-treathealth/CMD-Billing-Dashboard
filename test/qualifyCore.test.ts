@@ -18,7 +18,7 @@ import { requireQualifyPrincipalFromAccess } from '../app/lib/qualify/principal.
 import { QUALIFY_MIN_LINES } from '../app/lib/qualify/rating.js';
 import { qualifyWindowBounds } from '../app/lib/qualify/contract.js';
 import type { QualifyCasesCursor, QualifyFacilityCases } from '../app/lib/qualify/contract.js';
-import type { QualifyCaseRow } from '../src/collections/qualifyQuery.js';
+import type { QualifyClaimRow } from '../src/collections/qualifyQuery.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../app/lib/views.js';
 
 // Sentinel DOLLAR values — distinctive so a wire-level scan can prove they never appear when stripped.
@@ -31,7 +31,7 @@ const FAC_ROWS = [
   { facility: '405 recovery', facility_name: '405 RECOVERY', facility_code: '10026460', line_count: 400, billed: B2, allowed: A2, pct_allowed: 55 }, // Indigo, solid mid pct
 ];
 const CASE_ROWS = [
-  { id: 123, facility: '405 recovery', facility_name: '405 RECOVERY', primary_payer: 'AETNA', program: 'OP' as const, last_dos: '2026-07-01', pct_allowed: 80, billed: CB, allowed: CA },
+  { id: 123, facility: '405 recovery', facility_name: '405 RECOVERY', primary_payer: 'AETNA', program: 'OP' as const, dos: '2026-07-01', pct_allowed: 80, billed: CB, allowed: CA },
 ];
 const MOVER_ROWS = [
   { primary_payer: 'AETNA', this_patients: 40, prior_patients: 10, delta_patients: 30 },
@@ -48,6 +48,7 @@ interface Cap {
     facility: string;
     entityIds: string[];
     prefixToken: string | null;
+    memberToken: string | null;
     cursor: QualifyCasesCursor | null;
     limit: number;
     allPayers: boolean | undefined;
@@ -70,9 +71,8 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
       c.facilityEntityIds.push(entityIds);
       return FAC_ROWS;
     },
-    loadCases: async () => CASE_ROWS,
     loadFacilityCases: async (payer, facility, _f, _t, entityIds, opts) => {
-      c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, cursor: opts.cursor, limit: opts.limit, allPayers: opts.allPayers });
+      c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, memberToken: opts.memberToken, cursor: opts.cursor, limit: opts.limit, allPayers: opts.allPayers });
       return CASE_ROWS;
     },
     loadMovers: async () => MOVER_ROWS,
@@ -127,12 +127,10 @@ test('snapshot: admissions_seat payload has ZERO dollar values anywhere (wire-le
     assert.equal(f.billedAmount, null);
     assert.equal(f.allowedAmount, null);
   }
-  for (const cse of snap.cases) {
-    assert.equal(cse.billedAmount, null);
-    assert.equal(cse.allowedAmount, null);
-  }
+  // The snapshot no longer carries claims (Direction B: the recent-claims panel is the facility drill) —
+  // prove the facility dollars are stripped at the wire.
   const wire = JSON.stringify(snap);
-  for (const v of [B1, A1, B2, A2, CB, CA]) {
+  for (const v of [B1, A1, B2, A2]) {
     assert.ok(!wire.includes(String(v)), `dollar ${v} must NOT appear in an admissions_seat payload`);
   }
   assert.equal(snap.viewerHasAmountsCapability, false);
@@ -266,7 +264,7 @@ test('by-payer: writes the distinct search_qualify_payer audit (payer label) —
 test('by-payer: admissions_seat payload has ZERO dollar values (wire-level)', async () => {
   const snap = await getQualifySnapshotByPayerCore(makeDeps(SEAT, cap()), PAYER_IN);
   const wire = JSON.stringify(snap);
-  for (const v of [B1, A1, B2, A2, CB, CA]) {
+  for (const v of [B1, A1, B2, A2]) {
     assert.ok(!wire.includes(String(v)), `dollar ${v} must NOT appear in an admissions_seat payer payload`);
   }
   assert.equal(snap.viewerHasAmountsCapability, false);
@@ -298,13 +296,13 @@ const FAC_CASES_IN = { payer: 'AETNA', facility: '405 recovery', windowDays: 30 
 
 test('facility-drill: returns masked cases (never a raw member id) for the resolved payer + facility', async () => {
   const res = await getQualifyFacilityCasesCore(makeDeps(SUPER, cap()), FAC_CASES_IN);
-  assert.ok(res.cases.length > 0);
-  for (const c of res.cases) assert.equal(c.memberIdMasked, '••••••');
+  assert.ok(res.claims.length > 0);
+  for (const c of res.claims) assert.equal(c.memberIdMasked, '••••••');
 });
 
 test('facility-drill: maps each row primary_payer → payerName (the payer chip/label source, not a re-lookup)', async () => {
   const res = await getQualifyFacilityCasesCore(makeDeps(SUPER, cap()), FAC_CASES_IN);
-  assert.equal(res.cases[0]!.payerName, 'AETNA'); // CASE_ROWS carries primary_payer: 'AETNA'
+  assert.equal(res.claims[0]!.payerName, 'AETNA'); // CASE_ROWS carries primary_payer: 'AETNA'
 });
 
 test('facility-drill allPayers: threads the flag + 50-cap page size (no cursor/prefix) and tags each row its own payer', async () => {
@@ -316,7 +314,7 @@ test('facility-drill allPayers: threads the flag + 50-cap page size (no cursor/p
   const res = await getQualifyFacilityCasesCore(
     makeDeps(SUPER, c, {
       loadFacilityCases: async (payer, facility, _from, _to, entityIds, opts) => {
-        c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, cursor: opts.cursor, limit: opts.limit, allPayers: opts.allPayers });
+        c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, memberToken: opts.memberToken, cursor: opts.cursor, limit: opts.limit, allPayers: opts.allPayers });
         return MIXED;
       },
     }),
@@ -325,8 +323,9 @@ test('facility-drill allPayers: threads the flag + 50-cap page size (no cursor/p
   assert.equal(c.facilityCasesArgs[0]!.allPayers, true, 'allPayers reaches the loader');
   assert.equal(c.facilityCasesArgs[0]!.limit, 50, 'the all-payers view loads the 50-cap page');
   assert.equal(c.facilityCasesArgs[0]!.cursor, null, 'no cursor on the all-payers single page');
-  assert.equal(c.facilityCasesArgs[0]!.prefixToken, null, 'no server-side prefix narrow on the all-payers view');
-  assert.deepEqual(res.cases.map((x) => x.payerName), ['AETNA', 'CIGNA'], 'each row carries its OWN payer');
+  assert.equal(c.facilityCasesArgs[0]!.prefixToken, null, 'no server-side prefix narrow on the all-payers view (no search term here)');
+  assert.equal(c.facilityCasesArgs[0]!.memberToken, null, 'no exact-member narrow on the all-payers view (no search term here)');
+  assert.deepEqual(res.claims.map((x) => x.payerName), ['AETNA', 'CIGNA'], 'each row carries its OWN payer');
 });
 
 test('facility-drill: passes the RAW facility text + resolved payer + pinned tenancy to the loader', async () => {
@@ -354,11 +353,24 @@ test('facility-drill: admissions_seat payload has ZERO dollar values (wire-level
   for (const v of [CB, CA]) {
     assert.ok(!wire.includes(String(v)), `dollar ${v} must NOT appear in an admissions_seat facility-drill payload`);
   }
-  for (const c of res.cases) {
+  for (const c of res.claims) {
     assert.equal(c.billedAmount, null);
     assert.equal(c.allowedAmount, null);
   }
   assert.equal(res.viewerHasAmountsCapability, false);
+});
+
+// PAIRED POSITIVE (regression teeth for core.ts's `gate.hasAmounts ? assembleClaims : stripClaimsAmounts`):
+// a capability session's DRILL response MUST carry the claim dollars. Without this, a strip-for-everyone
+// regression would leave every drill test green (the negative wants them gone; nothing proves they survive).
+// The default fake returns CASE_ROWS (one row, id 123, billed CB / allowed CA) → res.claims[0] is that row.
+test('facility-drill: a capability session DOES carry the claim dollars (wire + structural, the paired positive)', async () => {
+  const res = await getQualifyFacilityCasesCore(makeDeps(SUPER, cap()), FAC_CASES_IN);
+  const wire = JSON.stringify(res);
+  assert.ok(wire.includes(String(CB)) && wire.includes(String(CA)), 'super_admin sees the claim dollars at the wire');
+  assert.equal(res.claims[0]!.billedAmount, CB, 'billed survives the choke point for a capable viewer');
+  assert.equal(res.claims[0]!.allowedAmount, CA, 'allowed survives the choke point for a capable viewer');
+  assert.equal(res.viewerHasAmountsCapability, true);
 });
 
 test('facility-drill allPayers: admissions_seat gets ZERO dollar values (SAME choke point as single-payer)', async () => {
@@ -374,21 +386,21 @@ test('facility-drill allPayers: admissions_seat gets ZERO dollar values (SAME ch
   for (const v of [12345, 6789, 22222, 3333]) {
     assert.ok(!wire.includes(String(v)), `dollar ${v} must NOT appear in an admissions_seat all-payers payload`);
   }
-  for (const c of res.cases) {
+  for (const c of res.claims) {
     assert.equal(c.billedAmount, null);
     assert.equal(c.allowedAmount, null);
   }
   assert.equal(res.viewerHasAmountsCapability, false);
   // The strip nulls dollars but leaves the (non-dollar) payer label — the chip/label source survives.
-  assert.deepEqual(res.cases.map((x) => x.payerName), ['AETNA', 'CIGNA']);
+  assert.deepEqual(res.claims.map((x) => x.payerName), ['AETNA', 'CIGNA']);
 });
 
 test('facility-drill: a blank payer or facility → empty cases and NO audit (nothing looked up)', async () => {
   const c = cap();
   const a = await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { payer: '  ', facility: 'x', windowDays: 30 });
   const b = await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { payer: 'AETNA', facility: '  ', windowDays: 30 });
-  assert.deepEqual(a.cases, []);
-  assert.deepEqual(b.cases, []);
+  assert.deepEqual(a.claims, []);
+  assert.deepEqual(b.claims, []);
   assert.equal(c.audits.length, 0);
   assert.equal(c.facilityCasesArgs.length, 0);
 });
@@ -406,11 +418,74 @@ test('facility-drill prefix: mints the alpha-prefix token, passes it to the load
   // Prefix chosen so it is NOT a substring of the (legitimately-audited) payer 'AETNA' / facility text.
   await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { ...FAC_CASES_IN, filter: { prefix: 'ZQX' } });
   assert.equal(c.facilityCasesArgs[0]!.prefixToken, 'HMAC_TOKEN', 'the minted (opaque) token reaches the loader');
+  assert.equal(c.facilityCasesArgs[0]!.memberToken, null, 'prefix mode does NOT set the exact-member token');
   const audit = c.audits.find((a) => a.action === SEARCH_QUALIFY_FACILITY)!;
   assert.deepEqual(audit.detail.fields, ['prefix'], 'audits the FIELD NAME only');
   const wire = JSON.stringify(audit);
   assert.ok(!wire.includes('ZQX'), 'raw prefix never audited');
   assert.ok(!wire.includes('HMAC_TOKEN'), 'token never audited');
+});
+
+test('facility-drill EXACT member: mints the member token, passes it (NOT the prefix), audits fields:[member_id] (never the term)', async () => {
+  const c = cap();
+  // A full member-id term (> 3 chars → exact narrow). Chosen so it is NOT a substring of payer/facility text.
+  await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { ...FAC_CASES_IN, filter: { memberId: 'ZQX998877' } });
+  assert.equal(c.facilityCasesArgs[0]!.memberToken, 'HMAC_TOKEN', 'the minted (opaque) member token reaches the loader');
+  assert.equal(c.facilityCasesArgs[0]!.prefixToken, null, 'exact mode does NOT set the prefix token');
+  const audit = c.audits.find((a) => a.action === SEARCH_QUALIFY_FACILITY)!;
+  assert.deepEqual(audit.detail.fields, ['member_id'], 'audits the FIELD NAME only');
+  const wire = JSON.stringify(audit);
+  assert.ok(!wire.includes('ZQX998877'), 'raw member id never audited');
+  assert.ok(!wire.includes('HMAC_TOKEN'), 'token never audited');
+});
+
+test('facility-drill: EXACT member wins when both memberId + prefix are supplied (mutually exclusive in practice)', async () => {
+  const c = cap();
+  await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { ...FAC_CASES_IN, filter: { memberId: 'ZQX998877', prefix: 'ZQX' } });
+  assert.equal(c.facilityCasesArgs[0]!.memberToken, 'HMAC_TOKEN', 'the member token is applied');
+  assert.equal(c.facilityCasesArgs[0]!.prefixToken, null, 'the prefix token is NOT applied when a member id is present');
+  const audit = c.audits.find((a) => a.action === SEARCH_QUALIFY_FACILITY)!;
+  assert.deepEqual(audit.detail.fields, ['member_id'], 'the audited field is member_id');
+});
+
+// ── DIRECTION B — the headline UX bug this build kills (task 4: prefix-exactness on the FACILITY DRILL). ──
+// Hermetic proxy for the DB: three prefixes (W29/W27/W23) resolve to the SAME payer at the SAME facility.
+// The loader fake honors the `member_id_prefix_bidx = $tok` equality the real builder emits (a keyed HMAC:
+// distinct per prefix), so a W29 search can only match W29* rows — proving W27/W23 never bleed through.
+const prefixRow = (id: number): QualifyClaimRow => ({
+  id, facility: 'shared facility', facility_name: 'SHARED', primary_payer: 'AETNA', program: 'OP' as const,
+  dos: `2026-07-${String(id).padStart(2, '0')}`, pct_allowed: 50, billed: 100, allowed: 50,
+});
+const PREFIX_OF = new Map<number, string>([[1, 'W29'], [2, 'W29'], [3, 'W27'], [4, 'W23']]);
+const PREFIX_ROWS: QualifyClaimRow[] = [prefixRow(4), prefixRow(3), prefixRow(2), prefixRow(1)];
+function prefixExactDeps(c: Cap): QualifyDeps {
+  return makeDeps(SUPER, c, {
+    // Deterministic, term-distinct, opaque-shaped token — models the keyed-HMAC blind index per prefix.
+    mintToken: (term, kind) => `tok:${kind}:${term.toUpperCase()}`,
+    loadFacilityCases: async (_p, _f, _from, _to, _e, opts) => {
+      c.facilityCasesArgs.push({ payer: _p, facility: _f, entityIds: _e, prefixToken: opts.prefixToken, memberToken: opts.memberToken, cursor: opts.cursor, limit: opts.limit, allPayers: opts.allPayers });
+      // Simulate the DB predicate member_id_prefix_bidx = $tok (equality on the prefix's own blind index).
+      if (opts.prefixToken) {
+        const want = opts.prefixToken.replace('tok:prefix:', '');
+        return PREFIX_ROWS.filter((r) => PREFIX_OF.get(r.id) === want);
+      }
+      return PREFIX_ROWS; // no narrow ⇒ payer-wide (all three prefixes)
+    },
+  });
+}
+
+test('facility-drill prefix-exactness: a W29 search returns ONLY W29 claims — never W27/W23 (the payer-wide bleed is killed)', async () => {
+  const res = await getQualifyFacilityCasesCore(prefixExactDeps(cap()), { ...FAC_CASES_IN, filter: { prefix: 'W29' } });
+  assert.deepEqual(
+    res.claims.map((x) => x.id).sort((a, b) => a - b),
+    [1, 2],
+    'only the two W29 claims — the sibling W27/W23 rows on the same payer are gone',
+  );
+});
+
+test('facility-drill prefix-exactness: NO narrow (resolve-by-payer path) stays payer-wide — all prefixes (ruling 3)', async () => {
+  const res = await getQualifyFacilityCasesCore(prefixExactDeps(cap()), FAC_CASES_IN); // no filter
+  assert.equal(res.claims.length, 4, 'payer-wide: every prefix at the facility, unfiltered');
 });
 
 test('facility-drill prefix: a sub-3-char prefix mints NO token → no filter, no audit field', async () => {
@@ -433,20 +508,20 @@ test('facility-drill pagination: a single-row result → hasMore false, nextCurs
   const res = await getQualifyFacilityCasesCore(makeDeps(SUPER, cap()), FAC_CASES_IN); // default fake returns 1 row
   assert.equal(res.hasMore, false);
   assert.equal(res.nextCursor, null);
-  assert.equal(res.cases.length, 1);
+  assert.equal(res.claims.length, 1);
 });
 
-// A synthetic cohort strictly larger than one page, PRE-SORTED in the query order (last_dos desc nulls
-// last, id desc): 20 dated rows then a 15-row null-DOS tail. The fake models keyset pagination over this
-// total order (find the cursor row by its unique id, return the slice after it, over-fetching by one like
-// the real builder) so the CORE's cursor→nextCursor→trim→hasMore threading is exercised end to end.
-const WALK_ROWS: QualifyCaseRow[] = Array.from({ length: 35 }, (_, i) => ({
+// A synthetic cohort strictly larger than one page, PRE-SORTED in the query order (dos desc nulls last,
+// id desc): 20 dated rows then a 15-row null-DOS tail. The fake models keyset pagination over this total
+// order (find the cursor row by its unique id, return the slice after it, over-fetching by one like the
+// real builder) so the CORE's cursor→nextCursor→trim→hasMore threading is exercised end to end.
+const WALK_ROWS: QualifyClaimRow[] = Array.from({ length: 35 }, (_, i) => ({
   id: 1000 - i, // strictly descending → matches `id desc` within the pre-sorted array
   facility: '405 recovery',
   facility_name: '405 RECOVERY',
   primary_payer: 'AETNA',
   program: 'OP' as const,
-  last_dos: i < 20 ? `2026-07-${String(31 - i).padStart(2, '0')}` : null, // 20 dated (desc), then a null tail
+  dos: i < 20 ? `2026-07-${String(31 - i).padStart(2, '0')}` : null, // 20 dated (desc), then a null tail
   pct_allowed: 50,
   billed: 100,
   allowed: 50,
@@ -467,8 +542,8 @@ test('facility-drill pagination: cursor walk over a >15-row cohort covers every 
   let pages = 0;
   for (;;) {
     const res: QualifyFacilityCases = await getQualifyFacilityCasesCore(walkDeps(cap()), { ...FAC_CASES_IN, cursor });
-    assert.ok(res.cases.length <= 15, 'never returns more than one page');
-    seen.push(...res.cases.map((x) => x.id));
+    assert.ok(res.claims.length <= 15, 'never returns more than one page');
+    seen.push(...res.claims.map((x) => x.id));
     pages += 1;
     if (!res.hasMore) {
       assert.equal(res.nextCursor, null, 'no cursor once the walk is done');

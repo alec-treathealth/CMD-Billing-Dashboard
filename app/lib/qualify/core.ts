@@ -23,7 +23,7 @@ import {
   type QualifySnapshot,
   type QualifyResolved,
   type QualifyFacility,
-  type QualifyCase,
+  type QualifyClaim,
   type QualifyMovers,
   type QualifyMover,
   type QualifyWindowDays,
@@ -35,7 +35,7 @@ import {
 import type { QualifyPrincipal } from './principal';
 import type {
   QualifyFacilityRow,
-  QualifyCaseRow,
+  QualifyClaimRow,
   QualifyMoverRow,
 } from '../../../src/collections/qualifyQuery';
 
@@ -65,15 +65,14 @@ export interface QualifyDeps {
   mintToken: (query: string, kind: QualifyMatchKind) => string | null;
   resolvePayer: (token: string, kind: QualifyMatchKind, entityIds: string[]) => Promise<string | null>;
   loadFacilities: (payer: string, from: string, to: string, entityIds: string[]) => Promise<QualifyFacilityRow[]>;
-  loadCases: (payer: string, from: string, to: string, entityIds: string[]) => Promise<QualifyCaseRow[]>;
   loadFacilityCases: (
     payer: string,
     facility: string,
     from: string,
     to: string,
     entityIds: string[],
-    opts: { prefixToken: string | null; cursor: QualifyCasesCursor | null; limit: number; allPayers?: boolean },
-  ) => Promise<QualifyCaseRow[]>;
+    opts: { prefixToken: string | null; memberToken: string | null; cursor: QualifyCasesCursor | null; limit: number; allPayers?: boolean },
+  ) => Promise<QualifyClaimRow[]>;
   loadMovers: (
     thisFrom: string,
     thisTo: string,
@@ -109,12 +108,16 @@ function stripSnapshotAmounts(snap: QualifySnapshot): QualifySnapshot {
   return {
     ...snap,
     facilities: snap.facilities.map((f) => ({ ...f, billedAmount: null, allowedAmount: null })),
-    cases: snap.cases.map((c) => ({ ...c, billedAmount: null, allowedAmount: null })),
   };
 }
 
+/** The claims analog of stripSnapshotAmounts — the facility-drill choke point (R-AMOUNTS). Runs LAST. */
+function stripClaimsAmounts(claims: QualifyClaim[]): QualifyClaim[] {
+  return claims.map((c) => ({ ...c, billedAmount: null, allowedAmount: null }));
+}
+
 function emptySnapshot(hasAmounts: boolean): QualifySnapshot {
-  return { resolved: null, facilities: [], cases: [], viewerHasAmountsCapability: hasAmounts, tenantScope: QUALIFY_TENANT_SCOPE };
+  return { resolved: null, facilities: [], viewerHasAmountsCapability: hasAmounts, tenantScope: QUALIFY_TENANT_SCOPE };
 }
 
 /** Non-PHI alpha-prefix echo (≤3 chars) — never the raw member id. */
@@ -166,14 +169,14 @@ function assembleFacilities(rows: QualifyFacilityRow[]): QualifyFacility[] {
     .map((f, i) => ({ ...f, rank: i + 1 }));
 }
 
-function assembleCases(rows: QualifyCaseRow[]): QualifyCase[] {
+function assembleClaims(rows: QualifyClaimRow[]): QualifyClaim[] {
   return rows.map((r) => ({
     id: r.id,
     memberIdMasked: QUALIFY_MEMBER_ID_MASK,
     payerName: r.primary_payer, // non-PHI; the SAME rollup column the payer card resolves on (no re-lookup)
     facilityName: r.facility_name ?? r.facility,
     program: r.program,
-    lastDos: r.last_dos,
+    dos: r.dos,
     pctAllowedOfBilled: r.pct_allowed,
     billedAmount: r.billed,
     allowedAmount: r.allowed,
@@ -213,13 +216,9 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
   if (!payerName) return emptySnapshot(gate.hasAmounts); // known-nothing → VOB (resolved stays null)
 
   const { from, to } = qualifyWindowBounds(windowDays, deps.now());
-  const [facRows, caseRows] = await Promise.all([
-    deps.loadFacilities(payerName, from, to, gate.entityIds),
-    deps.loadCases(payerName, from, to, gate.entityIds),
-  ]);
+  const facRows = await deps.loadFacilities(payerName, from, to, gate.entityIds);
 
   const facilities = assembleFacilities(facRows);
-  const cases = assembleCases(caseRows);
   const resolved: QualifyResolved = {
     payerName,
     matchedOn: kind,
@@ -232,7 +231,6 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
   const snap: QualifySnapshot = {
     resolved,
     facilities,
-    cases,
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
   };
@@ -240,11 +238,12 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
 }
 
 /**
- * Resolve-by-primary-payer: load a payer's facilities + cases DIRECTLY from its label (a QualifyMover's
- * `label`, i.e. a primary_payer value), bypassing the member-id/prefix PHI resolve. Reuses the SAME
- * facility/case loaders, assembly, tenancy scope, and amounts choke point as getQualifySnapshotCore.
- * No mintToken, no resolvePayer, no SEARCH_QUALIFY_PHI — no PHI term is searched. A real payer with no
- * in-window facilities yields the non-null resolved + facilities:[] state (never the VOB null state).
+ * Resolve-by-primary-payer: load a payer's facilities DIRECTLY from its label (a QualifyMover's `label`,
+ * i.e. a primary_payer value), bypassing the member-id/prefix PHI resolve. Reuses the SAME facility loader,
+ * assembly, tenancy scope, and amounts choke point as getQualifySnapshotCore. No mintToken, no resolvePayer,
+ * no SEARCH_QUALIFY_PHI — no PHI term is searched, so there is NO identifier to be exact about: the claims
+ * panel on this path stays payer-wide (ruling 3), driven by the facility drill with no identifier narrow. A
+ * real payer with no in-window facilities yields the non-null resolved + facilities:[] state (never VOB null).
  */
 export async function getQualifySnapshotByPayerCore(
   deps: QualifyDeps,
@@ -268,13 +267,9 @@ export async function getQualifySnapshotByPayerCore(
   });
 
   const { from, to } = qualifyWindowBounds(windowDays, deps.now());
-  const [facRows, caseRows] = await Promise.all([
-    deps.loadFacilities(payer, from, to, gate.entityIds),
-    deps.loadCases(payer, from, to, gate.entityIds),
-  ]);
+  const facRows = await deps.loadFacilities(payer, from, to, gate.entityIds);
 
   const facilities = assembleFacilities(facRows);
-  const cases = assembleCases(caseRows);
   const resolved: QualifyResolved = {
     payerName: payer,
     matchedOn: 'payer',
@@ -287,7 +282,6 @@ export async function getQualifySnapshotByPayerCore(
   const snap: QualifySnapshot = {
     resolved,
     facilities,
-    cases,
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
   };
@@ -295,11 +289,11 @@ export async function getQualifySnapshotByPayerCore(
 }
 
 /**
- * Facility drill: the resolved payer's cases narrowed to ONE facility (the mobile facility-card tap).
- * Reuses the SAME masking (assembleCases), tenancy scope, and amounts choke point (stripSnapshotAmounts)
- * as the payer-wide cases path — the only new axis is the raw-facility-text filter in the loader. A
- * distinct SEARCH_QUALIFY_FACILITY audit records the more-granular access (payer + facility are non-PHI).
- * Never touches the payer-wide buildCasesQuery / snapshot.cases path.
+ * Facility drill (THE rendered recent-claims panel on both surfaces): the resolved payer's CLAIMS at ONE
+ * facility (the desktop facility row + mobile facility-card tap), claim grain. Masking (assembleClaims),
+ * tenancy scope, and the amounts choke point (stripClaimsAmounts) run here; the axes are the raw-facility-text
+ * filter plus the optional identifier narrow (prefix/exact member). A distinct SEARCH_QUALIFY_FACILITY audit
+ * records the more-granular access (payer + facility are non-PHI; the narrow's field NAME only, never the term).
  */
 export async function getQualifyFacilityCasesCore(
   deps: QualifyDeps,
@@ -314,7 +308,7 @@ export async function getQualifyFacilityCasesCore(
   const payer = (input.payer ?? '').trim();
   const facility = (input.facility ?? '').trim();
   const empty: QualifyFacilityCases = {
-    cases: [],
+    claims: [],
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
     nextCursor: null,
@@ -322,59 +316,61 @@ export async function getQualifyFacilityCasesCore(
   };
   if (payer === '' || payer.length > 120 || facility === '' || facility.length > 200) return empty;
 
-  // Prefix narrow (Stage 1): mint the SAME alpha-prefix blind index the resolve path uses — server-side,
-  // opaque. The raw prefix (the caller's own typed term, never row PHI) never reaches SQL or the audit. A
-  // <3-char prefix yields no token → no filter (parity with collections' alpha-prefix behavior).
+  // IDENTIFIER narrow (Direction B): mint the SAME blind index the resolve path uses — server-side, opaque.
+  // The raw term (the caller's own typed value: the resolving search OR the manual prefix input — never row
+  // PHI) reaches neither SQL nor the audit. EXACT member-id (member_id_bidx) takes precedence over the ≤3
+  // alpha-PREFIX (member_id_prefix_bidx); mutually exclusive in practice. A term minting no token (e.g. a
+  // <3-char prefix) yields no filter (parity with collections' alpha-prefix behavior).
+  const memberId = (input.filter?.memberId ?? '').trim();
   const prefix = (input.filter?.prefix ?? '').trim();
+  let memberToken: string | null = null;
   let prefixToken: string | null = null;
-  if (prefix !== '' && prefix.length <= 40) {
-    try {
+  let narrowField: QualifyMatchKind | null = null;
+  try {
+    if (memberId !== '' && memberId.length <= 120) {
+      memberToken = deps.mintToken(memberId, 'member_id');
+      if (memberToken) narrowField = 'member_id';
+    } else if (prefix !== '' && prefix.length <= 40) {
       prefixToken = deps.mintToken(prefix, 'prefix');
-    } catch {
-      throw new Error('Qualify search is temporarily unavailable.'); // key/config error, never PHI
+      if (prefixToken) narrowField = 'prefix';
     }
+  } catch {
+    throw new Error('Qualify search is temporarily unavailable.'); // key/config error, never PHI
   }
 
-  // Narrowing a payer to one facility is a distinct, more-granular access → its own audit action. When a
-  // prefix filter is actually applied, record the FIELD NAME only (never the term/token).
+  // Narrowing a payer to one facility is a distinct, more-granular access → its own audit action. When an
+  // identifier narrow is actually applied, record the FIELD NAME only (never the term/token).
   await deps.recordAccess({
     actorEmail: gate.actor.email,
     actorUserId: gate.actor.userId,
     action: SEARCH_QUALIFY_FACILITY,
-    detail: { payer, facility, window: windowDays, ...(prefixToken ? { fields: ['prefix'] } : {}) },
+    detail: { payer, facility, window: windowDays, ...(narrowField ? { fields: [narrowField] } : {}) },
   });
 
-  // All-payers (mobile) loads ONE larger page with no cursor/prefix — the sheet groups + filters client-side.
+  // All-payers (mobile) loads ONE larger page with no cursor — the sheet groups + filters client-side. The
+  // identifier narrow (when the session arrived via a search) still applies (ruling 5).
   const allPayers = input.allPayers === true;
   const pageSize = allPayers ? QUALIFY_ALL_PAYERS_PAGE_SIZE : QUALIFY_CASES_PAGE_SIZE;
   const cursor = allPayers ? null : clampCasesCursor(input.cursor);
   const { from, to } = qualifyWindowBounds(windowDays, deps.now());
   // Ask for one page; the builder over-fetches by one (limit+1) so hasMore is a length check, not a count.
-  const caseRows = await deps.loadFacilityCases(payer, facility, from, to, gate.entityIds, {
+  const claimRows = await deps.loadFacilityCases(payer, facility, from, to, gate.entityIds, {
     prefixToken,
+    memberToken,
     cursor,
     limit: pageSize,
     allPayers,
   });
-  const hasMore = caseRows.length > pageSize;
-  const pageRows = hasMore ? caseRows.slice(0, pageSize) : caseRows;
-  const cases = assembleCases(pageRows);
-
-  // Route through the ONE amounts choke point: strip via a facilities-empty snapshot, then take cases.
-  const carrier: QualifySnapshot = {
-    resolved: null,
-    facilities: [],
-    cases,
-    viewerHasAmountsCapability: gate.hasAmounts,
-    tenantScope: QUALIFY_TENANT_SCOPE,
-  };
-  const gated = gate.hasAmounts ? carrier : stripSnapshotAmounts(carrier); // stripAmounts LAST
+  const hasMore = claimRows.length > pageSize;
+  const pageRows = hasMore ? claimRows.slice(0, pageSize) : claimRows;
+  // Route through the ONE amounts choke point (stripClaimsAmounts) — stripAmounts LAST.
+  const claims = gate.hasAmounts ? assembleClaims(pageRows) : stripClaimsAmounts(assembleClaims(pageRows));
   // nextCursor from the LAST kept row — non-PHI (DOS + synthetic id). Null at the end of the walk.
-  const last = gated.cases[gated.cases.length - 1];
+  const last = claims[claims.length - 1];
   const nextCursor: QualifyCasesCursor | null =
-    hasMore && last ? { lastDos: last.lastDos, id: last.id } : null;
+    hasMore && last ? { lastDos: last.dos, id: last.id } : null;
   return {
-    cases: gated.cases,
+    claims,
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
     nextCursor,
