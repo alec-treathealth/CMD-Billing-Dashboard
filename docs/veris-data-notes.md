@@ -1369,3 +1369,12 @@ HUMAN task. Verified on the live deploy + prod DB (read-only):
   members / 2,638 prefixes / 460 payers that a valid token resolves within.
 - **STILL A HUMAN TASK:** pixel-fidelity vs `docs/mockups/qualify-tab-layout-proposal.html`,
   and the modal actually firing on a UI click, signed in as super_admin.
+
+### Mobile qualify container — no async-interaction test coverage (Stage 3a follow-up, 2026-07-20)
+
+Mobile qualify container (`qualify-mobile-app.tsx`) has no async-interaction test coverage —
+app suite is `renderToStaticMarkup`-only, no jsdom/act/server-action mock. Guard decision-logic
+is covered via pure predicates (`qualifyGuards.ts`, root suite); the full mount-and-drive-async
+flow (payer-change closes sheet, drill-not-dropped, right-swipe deck advance) is untested.
+Follow-up: add jsdom + testing-library + server-action mock as a dedicated infra task; closes
+both the 3a async gap and the pre-existing right-swipe gap.
