@@ -18,6 +18,7 @@ import {
   type QualifyPayerInput,
   type QualifyFacilityCasesInput,
   type QualifyFacilityCases,
+  type QualifyCasesCursor,
   type QualifyMatchKind,
   type QualifySnapshot,
   type QualifyResolved,
@@ -49,6 +50,10 @@ export const REVEAL_QUALIFY_ROWS = 'reveal_qualify_rows';
 
 const REVEAL_BATCH_CAP = 50;
 
+/** Cases page size (mirrors QUALIFY_CASES_LIMIT in qualifyQuery.ts). The loader OVER-FETCHES by one
+ *  (buildFacilityCasesQuery binds limit+1) so hasMore is a length check here, never a count query. */
+const QUALIFY_CASES_PAGE_SIZE = 15;
+
 /** Everything the cores touch that isn't pure — injected so tests can fake it. */
 export interface QualifyDeps {
   requirePrincipal: () => Promise<QualifyPrincipal>;
@@ -63,6 +68,7 @@ export interface QualifyDeps {
     from: string,
     to: string,
     entityIds: string[],
+    opts: { prefixToken: string | null; cursor: QualifyCasesCursor | null; limit: number },
   ) => Promise<QualifyCaseRow[]>;
   loadMovers: (
     thisFrom: string,
@@ -110,6 +116,16 @@ function emptySnapshot(hasAmounts: boolean): QualifySnapshot {
 /** Non-PHI alpha-prefix echo (≤3 chars) — never the raw member id. */
 function alphaEcho(raw: string): string {
   return raw.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 3);
+}
+
+/** Shape-clamp an untrusted client cursor (mirrors resolveCmdExplorerCursor): a malformed cursor
+ *  becomes null (first page) rather than reaching SQL. id must be a safe int ≥ 1; lastDos null|string. */
+function clampCasesCursor(cursor: QualifyCasesCursor | null | undefined): QualifyCasesCursor | null {
+  if (cursor === null || cursor === undefined) return null;
+  if (!Number.isSafeInteger(cursor.id) || cursor.id < 1) return null;
+  const ld = cursor.lastDos;
+  if (ld !== null && typeof ld !== 'string') return null;
+  return { lastDos: ld ?? null, id: cursor.id };
 }
 
 /**
@@ -296,20 +312,44 @@ export async function getQualifyFacilityCasesCore(
     cases: [],
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
+    nextCursor: null,
+    hasMore: false,
   };
   if (payer === '' || payer.length > 120 || facility === '' || facility.length > 200) return empty;
 
-  // Narrowing a payer to one facility is a distinct, more-granular access → its own audit action.
+  // Prefix narrow (Stage 1): mint the SAME alpha-prefix blind index the resolve path uses — server-side,
+  // opaque. The raw prefix (the caller's own typed term, never row PHI) never reaches SQL or the audit. A
+  // <3-char prefix yields no token → no filter (parity with collections' alpha-prefix behavior).
+  const prefix = (input.filter?.prefix ?? '').trim();
+  let prefixToken: string | null = null;
+  if (prefix !== '' && prefix.length <= 40) {
+    try {
+      prefixToken = deps.mintToken(prefix, 'prefix');
+    } catch {
+      throw new Error('Qualify search is temporarily unavailable.'); // key/config error, never PHI
+    }
+  }
+
+  // Narrowing a payer to one facility is a distinct, more-granular access → its own audit action. When a
+  // prefix filter is actually applied, record the FIELD NAME only (never the term/token).
   await deps.recordAccess({
     actorEmail: gate.actor.email,
     actorUserId: gate.actor.userId,
     action: SEARCH_QUALIFY_FACILITY,
-    detail: { payer, facility, window: windowDays },
+    detail: { payer, facility, window: windowDays, ...(prefixToken ? { fields: ['prefix'] } : {}) },
   });
 
+  const cursor = clampCasesCursor(input.cursor);
   const { from, to } = qualifyWindowBounds(windowDays, deps.now());
-  const caseRows = await deps.loadFacilityCases(payer, facility, from, to, gate.entityIds);
-  const cases = assembleCases(caseRows);
+  // Ask for one page; the builder over-fetches by one (limit+1) so hasMore is a length check, not a count.
+  const caseRows = await deps.loadFacilityCases(payer, facility, from, to, gate.entityIds, {
+    prefixToken,
+    cursor,
+    limit: QUALIFY_CASES_PAGE_SIZE,
+  });
+  const hasMore = caseRows.length > QUALIFY_CASES_PAGE_SIZE;
+  const pageRows = hasMore ? caseRows.slice(0, QUALIFY_CASES_PAGE_SIZE) : caseRows;
+  const cases = assembleCases(pageRows);
 
   // Route through the ONE amounts choke point: strip via a facilities-empty snapshot, then take cases.
   const carrier: QualifySnapshot = {
@@ -320,7 +360,17 @@ export async function getQualifyFacilityCasesCore(
     tenantScope: QUALIFY_TENANT_SCOPE,
   };
   const gated = gate.hasAmounts ? carrier : stripSnapshotAmounts(carrier); // stripAmounts LAST
-  return { cases: gated.cases, viewerHasAmountsCapability: gate.hasAmounts, tenantScope: QUALIFY_TENANT_SCOPE };
+  // nextCursor from the LAST kept row — non-PHI (DOS + synthetic id). Null at the end of the walk.
+  const last = gated.cases[gated.cases.length - 1];
+  const nextCursor: QualifyCasesCursor | null =
+    hasMore && last ? { lastDos: last.lastDos, id: last.id } : null;
+  return {
+    cases: gated.cases,
+    viewerHasAmountsCapability: gate.hasAmounts,
+    tenantScope: QUALIFY_TENANT_SCOPE,
+    nextCursor,
+    hasMore,
+  };
 }
 
 export async function getQualifyMoversCore(deps: QualifyDeps, windowDays: QualifyWindowDays): Promise<QualifyMovers> {

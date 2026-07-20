@@ -17,6 +17,8 @@ import {
 import { requireQualifyPrincipalFromAccess } from '../app/lib/qualify/principal.js';
 import { QUALIFY_MIN_LINES } from '../app/lib/qualify/rating.js';
 import { qualifyWindowBounds } from '../app/lib/qualify/contract.js';
+import type { QualifyCasesCursor, QualifyFacilityCases } from '../app/lib/qualify/contract.js';
+import type { QualifyCaseRow } from '../src/collections/qualifyQuery.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../app/lib/views.js';
 
 // Sentinel DOLLAR values — distinctive so a wire-level scan can prove they never appear when stripped.
@@ -41,7 +43,14 @@ interface Cap {
   audits: Array<{ action: string; detail: Record<string, unknown> }>;
   facilityEntityIds: string[][];
   revealActions: string[];
-  facilityCasesArgs: Array<{ payer: string; facility: string; entityIds: string[] }>;
+  facilityCasesArgs: Array<{
+    payer: string;
+    facility: string;
+    entityIds: string[];
+    prefixToken: string | null;
+    cursor: QualifyCasesCursor | null;
+    limit: number;
+  }>;
 }
 function cap(): Cap {
   return { audits: [], facilityEntityIds: [], revealActions: [], facilityCasesArgs: [] };
@@ -61,8 +70,8 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
       return FAC_ROWS;
     },
     loadCases: async () => CASE_ROWS,
-    loadFacilityCases: async (payer, facility, _f, _t, entityIds) => {
-      c.facilityCasesArgs.push({ payer, facility, entityIds });
+    loadFacilityCases: async (payer, facility, _f, _t, entityIds, opts) => {
+      c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, cursor: opts.cursor, limit: opts.limit });
       return CASE_ROWS;
     },
     loadMovers: async () => MOVER_ROWS,
@@ -218,7 +227,7 @@ test('unknown identifier → resolved:null (VOB), still audited', async () => {
 
 test('unusable query (no token) → resolved:null and NO audit (nothing was searched)', async () => {
   const c = cap();
-  const snap = await getQualifySnapshotCore(makeDeps(SUPER, c, { mintToken: () => null }), { query: 'ab', windowDays: 7 });
+  const snap = await getQualifySnapshotCore(makeDeps(SUPER, c, { mintToken: () => null }), { query: 'ab', windowDays: 30 });
   assert.equal(snap.resolved, null);
   assert.equal(c.audits.length, 0);
 });
@@ -339,6 +348,98 @@ test('facility-drill: an entity admin is denied fail-closed', async () => {
     () => getQualifyFacilityCasesCore(makeDeps(ADMIN, cap()), FAC_CASES_IN),
     /does not have access to Qualify/,
   );
+});
+
+// ── FACILITY DRILL — prefix narrow + cursor pagination (Stage 1) ─────────────────────────────────
+test('facility-drill prefix: mints the alpha-prefix token, passes it to the loader, audits fields:[prefix] (never the term)', async () => {
+  const c = cap();
+  // Prefix chosen so it is NOT a substring of the (legitimately-audited) payer 'AETNA' / facility text.
+  await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { ...FAC_CASES_IN, filter: { prefix: 'ZQX' } });
+  assert.equal(c.facilityCasesArgs[0]!.prefixToken, 'HMAC_TOKEN', 'the minted (opaque) token reaches the loader');
+  const audit = c.audits.find((a) => a.action === SEARCH_QUALIFY_FACILITY)!;
+  assert.deepEqual(audit.detail.fields, ['prefix'], 'audits the FIELD NAME only');
+  const wire = JSON.stringify(audit);
+  assert.ok(!wire.includes('ZQX'), 'raw prefix never audited');
+  assert.ok(!wire.includes('HMAC_TOKEN'), 'token never audited');
+});
+
+test('facility-drill prefix: a sub-3-char prefix mints NO token → no filter, no audit field', async () => {
+  const c = cap();
+  // Real alphaPrefixBlindIndex returns null for < 3 chars; model that with a null-minting dep.
+  await getQualifyFacilityCasesCore(makeDeps(SUPER, c, { mintToken: () => null }), { ...FAC_CASES_IN, filter: { prefix: 'ab' } });
+  assert.equal(c.facilityCasesArgs[0]!.prefixToken, null, 'no token → no prefix predicate downstream');
+  const audit = c.audits.find((a) => a.action === SEARCH_QUALIFY_FACILITY)!;
+  assert.ok(!('fields' in audit.detail), 'no fields recorded when no filter is applied');
+});
+
+test('facility-drill cursor: a malformed cursor is clamped to the first page (never reaches the loader raw)', async () => {
+  const c = cap();
+  // id 0 is invalid (must be ≥ 1) → clamped to null.
+  await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { ...FAC_CASES_IN, cursor: { lastDos: '2026-07-01', id: 0 } });
+  assert.equal(c.facilityCasesArgs[0]!.cursor, null, 'malformed cursor → first page');
+});
+
+test('facility-drill pagination: a single-row result → hasMore false, nextCursor null', async () => {
+  const res = await getQualifyFacilityCasesCore(makeDeps(SUPER, cap()), FAC_CASES_IN); // default fake returns 1 row
+  assert.equal(res.hasMore, false);
+  assert.equal(res.nextCursor, null);
+  assert.equal(res.cases.length, 1);
+});
+
+// A synthetic cohort strictly larger than one page, PRE-SORTED in the query order (last_dos desc nulls
+// last, id desc): 20 dated rows then a 15-row null-DOS tail. The fake models keyset pagination over this
+// total order (find the cursor row by its unique id, return the slice after it, over-fetching by one like
+// the real builder) so the CORE's cursor→nextCursor→trim→hasMore threading is exercised end to end.
+const WALK_ROWS: QualifyCaseRow[] = Array.from({ length: 35 }, (_, i) => ({
+  id: 1000 - i, // strictly descending → matches `id desc` within the pre-sorted array
+  facility: '405 recovery',
+  facility_name: '405 RECOVERY',
+  program: 'OP' as const,
+  last_dos: i < 20 ? `2026-07-${String(31 - i).padStart(2, '0')}` : null, // 20 dated (desc), then a null tail
+  pct_allowed: 50,
+  billed: 100,
+  allowed: 50,
+}));
+function walkDeps(c: Cap): QualifyDeps {
+  return makeDeps(SUPER, c, {
+    loadFacilityCases: async (_p, _f, _from, _to, _e, opts) => {
+      const cur = opts.cursor;
+      const start = cur ? WALK_ROWS.findIndex((r) => r.id === cur.id) + 1 : 0;
+      return WALK_ROWS.slice(start, start + opts.limit + 1); // over-fetch by one, mirrors buildFacilityCasesQuery
+    },
+  });
+}
+
+test('facility-drill pagination: cursor walk over a >15-row cohort covers every row EXACTLY once (no repeats/gaps)', async () => {
+  const seen: number[] = [];
+  let cursor: QualifyCasesCursor | null = null;
+  let pages = 0;
+  for (;;) {
+    const res: QualifyFacilityCases = await getQualifyFacilityCasesCore(walkDeps(cap()), { ...FAC_CASES_IN, cursor });
+    assert.ok(res.cases.length <= 15, 'never returns more than one page');
+    seen.push(...res.cases.map((x) => x.id));
+    pages += 1;
+    if (!res.hasMore) {
+      assert.equal(res.nextCursor, null, 'no cursor once the walk is done');
+      break;
+    }
+    assert.ok(res.nextCursor, 'hasMore ⇒ a nextCursor');
+    cursor = res.nextCursor;
+    assert.ok(pages < 10, 'walk terminates');
+  }
+  assert.equal(pages, 3, '35 rows / 15 per page → 3 pages (15 + 15 + 5)');
+  assert.equal(seen.length, WALK_ROWS.length, 'every row seen');
+  assert.equal(new Set(seen).size, WALK_ROWS.length, 'NO repeats');
+  assert.deepEqual(seen, WALK_ROWS.map((r) => r.id), 'walk order == the sorted set — no gaps, no reordering');
+});
+
+test('facility-drill pagination: the second page boundary produces AND consumes a null-lastDos cursor', async () => {
+  const p0 = await getQualifyFacilityCasesCore(walkDeps(cap()), FAC_CASES_IN);
+  assert.equal(p0.nextCursor!.lastDos, '2026-07-17', 'page-0 cursor is the 15th row (a dated DOS)');
+  const p1 = await getQualifyFacilityCasesCore(walkDeps(cap()), { ...FAC_CASES_IN, cursor: p0.nextCursor });
+  assert.equal(p1.nextCursor!.lastDos, null, 'page-1 boundary falls in the null-DOS tail → null-lastDos cursor');
+  const p2 = await getQualifyFacilityCasesCore(walkDeps(cap()), { ...FAC_CASES_IN, cursor: p1.nextCursor });
+  assert.equal(p2.hasMore, false, 'page 2 finishes the walk');
 });
 
 // ── window math ──────────────────────────────────────────────────────────────────────────────────

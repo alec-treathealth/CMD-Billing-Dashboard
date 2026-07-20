@@ -1870,15 +1870,18 @@ export async function loadQualifyCases(
   return rows.map((r) => ({ ...r, id: Number(r.id) }));
 }
 
-/** 15 most-recent DISTINCT patients for a resolved payer AT ONE FACILITY, in-window (masked; reveal via id). */
+/** One page of DISTINCT patients for a resolved payer AT ONE FACILITY, in-window (masked; reveal via id).
+ *  `opts` carries the optional prefix blind-index token, the forward keyset cursor, and the page size; the
+ *  builder over-fetches by one (limit+1) so the core computes hasMore without a count. */
 export async function loadQualifyFacilityCases(
   payer: string,
   facility: string,
   from: string,
   to: string,
   entityIds: string[],
+  opts: { prefixToken: string | null; cursor: { lastDos: string | null; id: number } | null; limit: number },
 ): Promise<QualifyCaseRow[]> {
-  const q = buildFacilityCasesQuery(payer, facility, from, to, entityIds);
+  const q = buildFacilityCasesQuery(payer, facility, from, to, entityIds, opts);
   const { rows } = await readerExecutor().query<QualifyCaseRow>(q.sql, q.params);
   // bigint `id` (array_agg of the latest snapshot's row id) comes back as a string from pg → coerce.
   return rows.map((r) => ({ ...r, id: Number(r.id) }));

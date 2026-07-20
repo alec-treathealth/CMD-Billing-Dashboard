@@ -6,8 +6,8 @@
  * window math. Semantics are frozen (Prompt 2); adjust field names only with sign-off.
  */
 
-export type QualifyWindowDays = 7 | 14 | 30 | 60 | 90;
-export const QUALIFY_WINDOW_OPTIONS: readonly QualifyWindowDays[] = [7, 14, 30, 60, 90];
+export type QualifyWindowDays = 30 | 60 | 90 | 180;
+export const QUALIFY_WINDOW_OPTIONS: readonly QualifyWindowDays[] = [30, 60, 90, 180];
 const WINDOW_SET: ReadonlySet<number> = new Set(QUALIFY_WINDOW_OPTIONS);
 export function isQualifyWindow(n: unknown): n is QualifyWindowDays {
   return typeof n === 'number' && WINDOW_SET.has(n);
@@ -38,6 +38,18 @@ export interface QualifyFacilityCasesInput {
   payer: string;
   facility: string; // raw rollup facility text (QualifyFacility.facilityKey)
   windowDays: QualifyWindowDays;
+  /** Optional prefix narrow: leading ≤3 chars → member_id_prefix_bidx, HMAC'd SERVER-SIDE (the caller's
+   *  own typed term, never row PHI). A prefix mapping to a different payer returns 0 rows by design. */
+  filter?: { prefix?: string };
+  /** Forward keyset cursor for page N>0 (null/omitted = first page). Carries no PHI — see QualifyCasesCursor. */
+  cursor?: QualifyCasesCursor | null;
+}
+
+/** Forward keyset cursor for the cases panel: the last returned row's DOS + synthetic id — both NON-PHI
+ *  (lastDos = max(charge_date), a service date; id = the rollup/reveal synthetic key). Never carries PHI. */
+export interface QualifyCasesCursor {
+  lastDos: string | null;
+  id: number;
 }
 
 /** Facility-scoped claim lines + the amounts-capability flag (dollar fields already stripped when false). */
@@ -45,6 +57,10 @@ export interface QualifyFacilityCases {
   cases: QualifyCase[];
   viewerHasAmountsCapability: boolean;
   tenantScope: typeof QUALIFY_TENANT_SCOPE;
+  /** Keyset cursor to fetch the next page, or null at the end of the walk. */
+  nextCursor: QualifyCasesCursor | null;
+  /** True when rows exist beyond this page (computed via a limit+1 over-fetch, never a count). */
+  hasMore: boolean;
 }
 
 /** member-id EXACT vs 3-letter alpha-PREFIX — the SNIFFED PHI-token kind (sniffed SERVER-SIDE, never

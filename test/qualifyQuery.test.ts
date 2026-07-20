@@ -100,10 +100,10 @@ test('buildCasesQuery: 15 distinct patients, reveal id, program from care_settin
   assert.deepEqual(params.slice(0, 4), [BOTH, 'AETNA', '2026-06-17', '2026-07-17']);
 });
 
-// ── buildFacilityCasesQuery: buildCasesQuery + one raw-facility-text predicate, same grain/limit. ─
-test('buildFacilityCasesQuery: adds a bound raw-facility predicate, keeps distinct-patient grain + 15 cap', () => {
+// ── buildFacilityCasesQuery: buildCasesQuery + one raw-facility-text predicate, same grain; over-fetch. ─
+test('buildFacilityCasesQuery: adds a bound raw-facility predicate, keeps distinct-patient grain + over-fetches', () => {
   const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH);
-  // The ONLY new axis vs buildCasesQuery: an equality on the RAW facility text, as a bound param.
+  // The base axis vs buildCasesQuery: an equality on the RAW facility text, as a bound param.
   assert.match(sql, /primary_payer = \$2 and facility = \$3/, 'raw facility text is a bound predicate');
   assert.equal(params[2], '405 recovery', 'facility bound as $3 (raw text, never interpolated)');
   // Same discipline as buildCasesQuery: distinct patients, reveal id, opaque token never projected.
@@ -112,8 +112,60 @@ test('buildFacilityCasesQuery: adds a bound raw-facility predicate, keeps distin
   assert.ok(!/agg\.member_id_bidx/.test(sql), 'opaque token is NOT projected to the caller');
   assert.match(sql, /care_setting\) as program/, 'program := resolved care_setting');
   assert.match(sql, /order by agg\.last_dos desc nulls last/, 'ordered by the DISPLAYED date (max charge_date / DOS)');
-  assert.equal(params[5], QUALIFY_CASES_LIMIT, 'defaults to 15 cases');
+  // Pagination OVER-FETCH: with no explicit limit the query binds QUALIFY_CASES_LIMIT + 1 (fetch 16, keep 15).
+  assert.equal(params[5], QUALIFY_CASES_LIMIT + 1, 'over-fetches by one (limit+1) so the caller computes hasMore');
   assert.deepEqual(params.slice(0, 5), [BOTH, 'AETNA', '405 recovery', '2026-06-17', '2026-07-17']);
+  // No filter / no cursor by default: no prefix predicate, no outer keyset WHERE.
+  assert.ok(!sql.includes('member_id_prefix_bidx'), 'no prefix predicate when none supplied');
+  assert.ok(!/agg\.last_dos </.test(sql) && !/agg\.last_dos is null and agg\.id </.test(sql), 'no keyset WHERE on page 0');
+});
+
+// ── buildFacilityCasesQuery: prefix narrow lives in the INNER WHERE (grouping column, pre-GROUP BY). ─
+test('buildFacilityCasesQuery: a prefix token adds member_id_prefix_bidx to the INNER aggregate WHERE', () => {
+  const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
+    prefixToken: TOKEN,
+  });
+  // Inner WHERE: after the payment_received window, before GROUP BY — rides cmd_charge_rollup_prefix.
+  assert.match(sql, /payment_received < \$5::date and member_id_prefix_bidx = \$6 group by member_id_bidx/, 'prefix predicate is the last inner condition, pre-GROUP BY');
+  assert.equal(params[5], TOKEN, 'prefix token bound (opaque; never the raw prefix)');
+  assert.equal(params[6], QUALIFY_CASES_LIMIT + 1, 'limit+1 follows the prefix param');
+});
+
+// ── buildFacilityCasesQuery: keyset lives in the OUTER WHERE (last_dos/id are aggregates). ────────
+test('buildFacilityCasesQuery: a non-null cursor adds the NULLS-LAST keyset to the OUTER WHERE, before ORDER BY', () => {
+  const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
+    cursor: { lastDos: '2026-07-01', id: 500 },
+  });
+  assert.match(
+    sql,
+    /where \(agg\.last_dos < \$6 or \(agg\.last_dos = \$6 and agg\.id < \$7\) or agg\.last_dos is null\) group by/,
+    'DESC keyset: past the cursor, id tiebreak, plus the whole NULL tail — then GROUP BY',
+  );
+  assert.equal(params[5], '2026-07-01', 'cursor lastDos bound as $6');
+  assert.equal(params[6], 500, 'cursor id bound as $7');
+  assert.equal(params[7], QUALIFY_CASES_LIMIT + 1, 'limit+1 last');
+  assert.match(sql, /order by agg\.last_dos desc nulls last, agg\.id desc/, 'ORDER BY unchanged');
+});
+
+test('buildFacilityCasesQuery: a null-lastDos cursor uses the IS NULL AND id branch (null-tail walk)', () => {
+  const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
+    cursor: { lastDos: null, id: 500 },
+  });
+  assert.match(sql, /where \(agg\.last_dos is null and agg\.id < \$6\) group by/, 'null-tail branch ties by id only');
+  assert.equal(params[5], 500, 'cursor id bound as $6');
+});
+
+test('buildFacilityCasesQuery: prefix + cursor COEXIST (inner prefix WHERE + outer keyset WHERE)', () => {
+  const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
+    prefixToken: TOKEN,
+    cursor: { lastDos: '2026-07-01', id: 500 },
+  });
+  assert.match(sql, /and member_id_prefix_bidx = \$6 group by member_id_bidx/, 'prefix in the inner WHERE');
+  assert.match(sql, /where \(agg\.last_dos < \$7 or \(agg\.last_dos = \$7 and agg\.id < \$8\) or agg\.last_dos is null\) group by/, 'keyset in the outer WHERE');
+  assert.equal(params[5], TOKEN);
+  assert.equal(params[6], '2026-07-01');
+  assert.equal(params[7], 500);
+  assert.equal(params[8], QUALIFY_CASES_LIMIT + 1);
 });
 
 // ── buildMoversQuery: distinct-patient delta + both suppression floors + clamp. ──────────────────

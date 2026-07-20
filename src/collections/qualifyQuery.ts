@@ -218,7 +218,14 @@ export function buildFacilityCasesQuery(
   from: string,
   to: string,
   entityIds: string[],
-  limit: number = QUALIFY_CASES_LIMIT,
+  opts: {
+    /** Opaque member_id_prefix_bidx token (already HMAC'd upstream) — adds a prefix narrow when set. */
+    prefixToken?: string | null;
+    /** Forward keyset cursor (previous page's {lastDos, id}); null/omitted = first page. */
+    cursor?: { lastDos: string | null; id: number } | null;
+    /** Page size; the query OVER-FETCHES by one (binds limit+1) so the caller computes hasMore, not a count. */
+    limit?: number;
+  } = {},
 ): { sql: string; params: unknown[] } {
   const ent = assertEntityScope(entityIds, 'buildFacilityCasesQuery');
   const { params, add } = paramList();
@@ -227,7 +234,11 @@ export function buildFacilityCasesQuery(
   const fac = add(facility);
   const f = add(from);
   const t = add(to);
-  const lim = add(limit);
+  // Prefix narrow (inner WHERE, pre-GROUP BY): member_id_prefix_bidx is a grouping column of the 0050
+  // rollup grain, so the equality rides cmd_charge_rollup_prefix. The token is opaque (HMAC'd upstream);
+  // omitted when no/short prefix (no token minted). Payer stays the passed-in top-bar payer — a prefix
+  // mapping to a different payer simply yields 0 rows (NEVER re-resolves; buildResolvePayerQuery unused).
+  const prefixCond = opts.prefixToken ? ` and member_id_prefix_bidx = ${add(opts.prefixToken)}` : '';
   const inner =
     'select member_id_bidx, ' +
     '(array_agg(id order by payment_received desc nulls last, charge_date desc nulls last, id desc))[1] as id, ' +
@@ -237,8 +248,27 @@ export function buildFacilityCasesQuery(
     PCT_RATIO_SELECT + ' ' +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
     `where business_entity_id = any(${e}::uuid[]) and primary_payer = ${p} and facility = ${fac} ` +
-    `and payment_received >= ${f}::date and payment_received < ${t}::date ` +
+    `and payment_received >= ${f}::date and payment_received < ${t}::date` +
+    prefixCond + ' ' +
     'group by member_id_bidx';
+  // Keyset pagination (OUTER WHERE on the agg subquery — last_dos/id are aggregates, unavailable inner).
+  // Ported from cmdExplorerQuery.buildCmdExplorerQuery: DESC order ⇒ walk STRICTLY past the cursor, ties
+  // broken by the globally-unique id (cmd_charge_rollup_id), and the NULLS-LAST tail handled explicitly so
+  // the walk never stalls. `agg.last_dos` is 'YYYY-MM-DD' text (lexical == chronological).
+  const cursor = opts.cursor ?? null;
+  let keyset = '';
+  if (cursor) {
+    if (cursor.lastDos !== null) {
+      const cv = add(cursor.lastDos);
+      const ci = add(cursor.id);
+      keyset = `where (agg.last_dos < ${cv} or (agg.last_dos = ${cv} and agg.id < ${ci}) or agg.last_dos is null) `;
+    } else {
+      const ci = add(cursor.id);
+      keyset = `where (agg.last_dos is null and agg.id < ${ci}) `;
+    }
+  }
+  // OVER-FETCH by one (limit+1): the caller trims to `limit` and infers hasMore from the extra row.
+  const lim = add((opts.limit ?? QUALIFY_CASES_LIMIT) + 1);
   // `agg` alias so FACILITY_DIM_JOINS (which references agg.facility) applies unchanged. ORDER BY the
   // DISPLAYED date (last_dos = max charge_date, DOS) so the list reads in the order it shows — identical
   // discipline to buildCasesQuery.
@@ -249,6 +279,7 @@ export function buildFacilityCasesQuery(
     'agg.last_dos, agg.pct_allowed, agg.billed, agg.allowed ' +
     `from (${inner}) agg ` +
     FACILITY_DIM_JOINS +
+    keyset +
     'group by agg.id, agg.facility, agg.last_dos, agg.pct_allowed, agg.billed, agg.allowed ' +
     `order by agg.last_dos desc nulls last, agg.id desc limit ${lim}`;
   return { sql, params };
