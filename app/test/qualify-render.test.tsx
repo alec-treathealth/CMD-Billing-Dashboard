@@ -2,8 +2,8 @@
  * Qualify — RENDERED-HTML tests (DoD, Prompts 3 + 3c). Render the actual components to markup and
  * assert on the real HTML:
  *   1) amounts capability gates every dollar element via DOM OMISSION (absent, not CSS-hidden),
- *   2) color derives from RATING, not raw pct (a 90%/n=1 facility is 'warn'; a case inherits its
- *      parent facility's bucket), and
+ *   2) facility color derives from its rating (= its allowed%); the % ALLOWED case cell derives from the
+ *      CASE'S OWN allowed% via the same ratingBucket helper (50/30) — the two scales don't cross-contaminate, and
  *   3) PHI reveal (3c): masked by default, real only after reveal — and reveal is INDEPENDENT of the
  *      amounts gate (revealing PHI never surfaces dollars).
  *
@@ -41,8 +41,8 @@ const CASE_AT_THIN: QualifyCase = {
   lastDos: '2026-07-15', pctAllowedOfBilled: 95, billedAmount: 18400, allowedAmount: 11592,
 };
 
-// A weak-reimbursement facility (24% → danger) with a HIGH-pct case, to prove a case inherits its
-// PARENT facility's bucket, not its own pct.
+// A weak-reimbursement facility (24% → danger) with a HIGH-pct case, to prove the % ALLOWED cell
+// follows the case's OWN pct (95% → green), NOT the parent facility's danger bucket.
 const LOW: QualifyFacility = {
   rank: 3, name: 'LOW YIELD', facilityKey: 'low yield', city: 'Fresno', state: 'CA',
   pctAllowedOfBilled: 24, rating: lowRating, streakSignal: null,
@@ -117,12 +117,26 @@ test('facility color = the allowed% bucket (value-first): a 90% facility reads G
   assert.ok(!html.includes('q-fac q-warn'), 'not amber — volume no longer demotes a high %');
 });
 
-test('case % cell is tinted by the PARENT FACILITY bucket, not the case’s own pct', () => {
+test('case % cell is tinted by the case’s OWN allowed%, NOT the parent facility bucket', () => {
+  // Parent facility LOW YIELD is 24% → danger, but CASE_AT_LOW's own pct is 95% → ok. The cell must
+  // follow the case's own value; the facility rating scale must NOT bleed into it.
   const html = renderToStaticMarkup(
     <CasesTable cases={[CASE_AT_LOW]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([LOW])} {...noReveal} />,
   );
-  assert.ok(html.includes('q-pctcell q-danger'), "case inherits the parent facility's danger bucket (24%)");
-  assert.ok(!html.includes('q-pctcell q-ok'), 'the case’s own 95% pct did NOT color it green');
+  assert.ok(html.includes('q-pctcell q-ok'), "the case's own 95% pct colors the cell green");
+  assert.ok(!html.includes('q-pctcell q-danger'), 'the parent facility’s 24% danger bucket does NOT cross-contaminate the cell');
+});
+
+test('case % cell — a LOW own-pct reads red even at a GREEN facility (cutoffs 50/30, no cross-contamination)', () => {
+  const weakCase: QualifyCase = { ...CASE_AT_THIN, id: 9, pctAllowedOfBilled: 18 }; // 18% → danger
+  const midCase: QualifyCase = { ...CASE_AT_THIN, id: 10, pctAllowedOfBilled: 42 }; // 42% → warn
+  // Facility THIN HIGH is 90% → ok (green); the cells must still follow each case's own pct.
+  const html = renderToStaticMarkup(
+    <CasesTable cases={[weakCase, midCase]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} />,
+  );
+  assert.ok(html.includes('q-pctcell q-danger'), 'the 18% case reads red');
+  assert.ok(html.includes('q-pctcell q-warn'), 'the 42% case reads amber');
+  assert.ok(!html.includes('q-pctcell q-ok'), 'neither low/mid case borrows the facility’s green rating');
 });
 
 // ── PHI reveal (single header toggle) ───────────────────────────────────────────────────────────────

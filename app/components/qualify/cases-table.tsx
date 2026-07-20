@@ -10,7 +10,10 @@
  * off/on re-masks DISPLAY only and never re-audits. Masking reuses lib/phi's PHI_MASK convention.
  * Reveal is ORTHOGONAL to the amounts gate: an admissions_seat can reveal PHI but still sees zero dollars.
  *
- * COLOR: the % cell is tinted by the case's PARENT FACILITY rating bucket (never the case's own pct).
+ * COLOR: the % ALLOWED cell is tinted by the case's OWN allowed% (pctAllowedOfBilled) through the shared
+ * ratingBucket helper (rating.ts cutoffs 50/30) — the same green/amber/red allowed-% scale the facility
+ * rating uses, but keyed to this row's value. The facility rating color stays on the facility list (q-fac);
+ * the two never cross-contaminate. (Was: inherited the parent facility's rating bucket.)
  * AMOUNTS: Billed/Allowed columns are OMITTED from the DOM when !viewerHasAmountsCapability.
  * SCOPE: `facilityLabel` names the facility these 15 belong to (ruling Q-4 — the list is scoped to the
  * SELECTED facility, so the scope must be visible). Facility name only; never PHI.
@@ -18,7 +21,8 @@
  * applies it server-side (member_id_prefix_bidx), so the input carries only the user's own typed prefix,
  * never row PHI. A <3-char entry mints no token (shows all) — the affordance says filtering starts at 3.
  */
-import { bucketClass, caseBucket, type RatingBucket } from './colors';
+import { bucketClass, type RatingBucket } from './colors';
+import { ratingBucket } from '../../lib/qualify/rating';
 import { PHI_MASK } from '../../lib/phi';
 import type { QualifyCase, QualifyPhi } from '../../lib/qualify/contract';
 
@@ -40,7 +44,6 @@ export function CasesTable({
   cases,
   hasAmounts,
   heatOn,
-  facilityBuckets,
   facilityLabel = null,
   canReveal,
   revealed,
@@ -61,6 +64,9 @@ export function CasesTable({
   cases: readonly QualifyCase[];
   hasAmounts: boolean;
   heatOn: boolean;
+  /** Facility-name → rating bucket map. RETAINED in the contract (callers still pass it), but the %
+   *  ALLOWED cell no longer colors from it — it now uses the row's own pct via ratingBucket. Kept to
+   *  avoid touching every caller in this surgical change; a later cleanup can drop it. */
   facilityBuckets: Map<string, RatingBucket>;
   /** Human name of the selected facility these cases are scoped to (display only; never PHI). */
   facilityLabel?: string | null;
@@ -170,8 +176,11 @@ export function CasesTable({
               </tr>
             ) : (
               cases.map((c) => {
-                const bucket = caseBucket(facilityBuckets, c.facilityName);
                 const pct = c.pctAllowedOfBilled;
+                // Color by the ROW'S OWN allowed% through the shared ratingBucket helper (rating.ts
+                // cutoffs 50/30): ≥50 green, ≥30 amber, else red; null → neutral. NOT the parent
+                // facility's rating bucket — this cell reports this case's reimbursement, not the site's.
+                const bucket = ratingBucket(pct);
                 const phi = revealAll ? revealed.get(c.id) : undefined;
                 const isShown = phi !== undefined;
                 const maskedCls = 'font-mono tracking-widest text-ink400';
@@ -207,7 +216,7 @@ export function CasesTable({
                     <td className={`${TD} text-right`}>
                       <span
                         className={['q-pctcell', bucketClass(bucket), 'inline-flex items-center gap-1.5 rounded px-2 py-0.5 tabular-nums font-semibold'].join(' ')}
-                        title="Colored by the facility's reimbursement rating"
+                        title="Colored by this case's % allowed of billed"
                       >
                         <span className="q-dot inline-block h-2 w-2 rounded-full" />
                         {pct === null ? '—' : `${Math.round(pct)}%`}
