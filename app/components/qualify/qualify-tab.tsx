@@ -562,7 +562,7 @@ export function QualifyTab({
 
       {/* grid or empty prompt */}
       {snapshot && snapshot.resolved ? (
-        <div className="grid grid-cols-1 items-stretch gap-4 min-[960px]:grid-cols-[340px_1fr]">
+        <div className="grid grid-cols-1 items-start gap-4 min-[960px]:grid-cols-[340px_1fr]">
           <FacilityPanel
             facilities={snapshot.facilities}
             hasAmounts={hasAmounts}

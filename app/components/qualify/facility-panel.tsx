@@ -48,13 +48,12 @@ export function FacilityPanel({
   onSelect?: (facilityKey: string) => void;
 }) {
   return (
-    <section className="relative rounded-xl border bg-card shadow-sm">
-      {/* Co-height with the "Recent cases" panel BY CONSTRUCTION, no magic number: at the two-column
-          breakpoint this wrapper is an absolute-inset flex column, so the (tall, all-facilities) list is
-          taken OUT of grid-track sizing — the shorter cases panel drives the row height and the list
-          scrolls within it (flex-1/min-h-0). Below the breakpoint (stacked) it is `display:contents`, so
-          the panel flows at its natural full height with no scroll cap. Header + legend stay pinned. */}
-      <div className="contents min-[960px]:absolute min-[960px]:inset-0 min-[960px]:flex min-[960px]:flex-col min-[960px]:overflow-hidden min-[960px]:rounded-xl">
+    <section className="rounded-xl border bg-card shadow-sm">
+      {/* The panel sizes to its OWN content and is NOT co-height with the "Recent cases" panel: the grid
+          cell is `items-start`, so this card's height is driven by its facility list, never capped to the
+          cases panel. All facilities render inline with no internal scroll — you never have to scroll
+          within the card to reach a facility that the shorter neighboring panel would otherwise hide. */}
+      <div className="contents">
       <div className="flex items-baseline justify-between px-4 pb-2.5 pt-4">
         <h2 className="font-display text-base font-semibold">Heating up</h2>
         <span className="text-xs font-semibold text-muted-foreground">
@@ -64,7 +63,7 @@ export function FacilityPanel({
       </div>
 
       {/* ALL facilities render (server returns the full set, no LIMIT); the cap is gone. */}
-      <div className={['px-2.5 pb-3 min-[960px]:flex-1 min-[960px]:min-h-0 min-[960px]:overflow-y-auto', heatOn ? 'q-heat' : ''].join(' ')}>
+      <div className={['px-2.5 pb-3', heatOn ? 'q-heat' : ''].join(' ')}>
         {facilities.length === 0 ? (
           <p className="px-2 py-6 text-center text-sm text-muted-foreground">
             No facilities for this payer in the selected window.
