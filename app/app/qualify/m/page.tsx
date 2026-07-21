@@ -9,6 +9,8 @@ import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { dashboardAccess } from '@/lib/access';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
+import { QualifyMaintenanceNotice } from '@/components/qualify/qualify-maintenance-notice';
+import { qualifyMaintenanceBlocks } from '@/lib/qualify/maintenance';
 import { QualifyMobileApp } from '@/components/qualify/m/qualify-mobile-app';
 
 export const metadata: Metadata = { title: 'Lead lookup | Qualify' };
@@ -24,6 +26,9 @@ export default async function QualifyMobilePage() {
   }
   const role = access.access.role;
   if (role !== 'super_admin' && role !== 'admissions_seat') redirect('/dashboard');
+
+  // Maintenance gate: every viewer sees the notice except the bypass allowlist (alec@treathealth.ai).
+  if (qualifyMaintenanceBlocks(access.access.user?.email)) return <QualifyMaintenanceNotice />;
 
   return (
     <QualifyMobileApp

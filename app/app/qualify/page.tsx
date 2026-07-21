@@ -12,6 +12,8 @@ import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { dashboardAccess } from '@/lib/access';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
+import { QualifyMaintenanceNotice } from '@/components/qualify/qualify-maintenance-notice';
+import { qualifyMaintenanceBlocks } from '@/lib/qualify/maintenance';
 import { QualifyTab } from '@/components/qualify/qualify-tab';
 
 export const metadata: Metadata = { title: 'Qualify | CMD Billing' };
@@ -31,6 +33,10 @@ export default async function QualifyPage() {
   // Q-A: only super_admin + admissions_seat. admin/user have a dashboard home → send them there.
   const role = access.access.role;
   if (role !== 'super_admin' && role !== 'admissions_seat') redirect('/dashboard');
+
+  // Maintenance gate: every viewer sees the notice except the bypass allowlist (alec@treathealth.ai),
+  // so improvements can be verified live while everyone else is held out.
+  if (qualifyMaintenanceBlocks(access.access.user?.email)) return <QualifyMaintenanceNotice />;
 
   // Server-derived amounts capability seeds the initial (pre-search) column layout so an
   // admissions_seat never even renders the $ column headers; every snapshot re-confirms it, and the
