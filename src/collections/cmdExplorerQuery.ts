@@ -259,23 +259,25 @@ export function sanitizeGridColumns(input: unknown): CmdExplorerColumnKey[] {
 // --- sort + cursor ----------------------------------------------------------
 
 /**
- * Columns the explorer grid may sort by — a CLOSED allowlist of fixed SQL literals (the two
- * dates + the five money columns + the two payer-gap ratio columns). Anything else falls back to
- * the default sort. These are the raw cmd_explorer_rows columns (dates sort chronologically, money
- * + ratios numerically), which is why ORDER BY uses them directly rather than the to_char text
- * aliases in the SELECT. pct_allowed / pct_paid are GENERATED STORED numerics (migration 0038), so
- * they sort and keyset-cursor exactly like charge_amount — no pagination-strategy change.
+ * Columns the explorer grid may sort by — a CLOSED allowlist of fixed SQL literals (the two dates +
+ * the four rollup-MATERIALIZED money columns). Anything else falls back to the default sort. These
+ * are all values the 0050 charge-grain rollup carries per charge, so keyset paging drives off the
+ * rollup's indexes (see buildCmdExplorerQuery).
+ *
+ * NOT sortable (deliberately dropped): allowed_amount, pct_allowed, pct_paid. The grid now COLLAPSES
+ * to charge grain and SELECTS the displayed allowed per page from the base snapshots (tiered rule),
+ * re-deriving the two pct columns from it — so those three values are computed per page, never
+ * materialized, and there is nothing to keyset-paginate on. They stay VISIBLE columns; they just
+ * carry no sort header. (Restoring their sort is the rollup rebuild's job — it materializes
+ * allowed_reliable + the pcts; see docs/veris-data-notes.md.)
  */
 export const CMD_EXPLORER_SORTABLE_COLUMNS = [
   'payment_received',
   'charge_date',
   'charge_amount',
-  'allowed_amount',
   'insurance_payments',
   'adjustments',
   'patient_balance_due',
-  'pct_allowed',
-  'pct_paid',
 ] as const;
 export type CmdExplorerSortColumn = (typeof CMD_EXPLORER_SORTABLE_COLUMNS)[number];
 const CMD_EXPLORER_SORTABLE = new Set<string>(CMD_EXPLORER_SORTABLE_COLUMNS);
@@ -354,16 +356,44 @@ export const CMD_EXPLORER_SELECT =
   'from collections.cmd_explorer_rows t';
 
 /**
- * Build the keyset page query with optional filters + an allowlisted sort. Column/table names
- * are fixed literals; every VALUE (entity ids, facility, dates, cursor value/id, limit) is a bound
- * $n parameter — no interpolation, no SELECT *. The order is `<sortcol> <dir> NULLS LAST, id <dir>`,
- * and the cursor boundary continues STRICTLY after the previous page's last row in that ordering
- * (the NULLS-LAST block is handled explicitly for both directions), so paging walks the FILTERED,
- * SORTED set consistently.
+ * Build the CHARGE-GRAIN keyset page for the "All Collections" grid.
  *
- * `entityIds` is the TENANT SCOPE — the business_entity_id(s) the caller may see, derived
- * SERVER-SIDE from the RBAC-clamped view (never client input). It is applied as a mandatory WHERE
- * so a page never crosses tenants.
+ * WHY THIS SHAPE: cmd_explorer_rows is POSTING-snapshot grain (BXR ~2.14 rows/charge, up to 8), so
+ * paging it raw rendered one logical charge as 2–8 near-duplicate rows — a saturated, unreadable
+ * grid. This collapses to ONE row per logical charge. An inline GROUP-BY collapse over the base
+ * table was measured at ~29s on the unfiltered default page (a full ~490k-row aggregate with no
+ * LIMIT push-down) — unshippable — so:
+ *
+ *  - PAGINATION runs over the 0050 charge-grain matview (CMD_EXPLORER_CHARGE_ROLLUP): one row per
+ *    logical charge, indexed, so keyset paging + filters stay sub-second (measured ~0.9s unfiltered
+ *    worst case, faster with any filter). Every column the page CTE reads/sorts/filters on is one
+ *    the rollup carries correctly (grain, id = latest snapshot's real row id, payment_received=max,
+ *    charge_amount, the point-in-time fields).
+ *  - allowed_amount is NOT taken from the rollup: the rollup SUMS restated allowed postings, which
+ *    over-states restated charges (133.88% on the reference fixture). The DISPLAYED allowed is
+ *    SELECTED per page from the base snapshots by the tiered rule below — every number shown is one
+ *    CMD actually adjudicated, never a summed/computed one. pct_allowed / pct_paid are RE-DERIVED
+ *    from the selected allowed via the exact 0038 formula (the rollup does not carry them).
+ *
+ * TIERED ALLOWED (per charge, over its base snapshots; target = max(insurance_payments) +
+ * latest(patient_balance_due)):
+ *   a. single distinct non-zero allowed         → that value.
+ *   b. single distinct allowed == 0 WITH paid>0  → NULL (the CMD "phantom $0"; renders "—").
+ *   c/d. restated: the snapshot allowed within $0.01 of target (latest by payment_received,id on ties).
+ *   e. restated, none reconciles                 → latest POSITIVE allowed, else NULL.
+ * A NULL allowed yields NULL pct (renders "—"), never 0% — nothing downstream reads it as zero.
+ *
+ * GRAIN SEAM (kept exact): the base-override join (snaps) matches the SAME 8-column key the rollup
+ * groups on, so a charge is overridden by exactly the snapshots that formed its rollup row (the two
+ * known 0050 grain limits — same-day dup collapse, charge-amount-revision split — resolve identically
+ * on both sides). member_id_bidx (never NULL in this data) leads the join → index nested-loop.
+ *
+ * Column/table names are fixed literals; every VALUE (entity ids, facility, dates, cursor value/id,
+ * limit) is a bound $n — no interpolation, no SELECT *. `col` is an allowlisted literal
+ * (CMD_EXPLORER_SORTABLE_COLUMNS — a rollup-materialized column; allowed/pct are intentionally not
+ * sortable). The cursor boundary continues STRICTLY after the previous page's last row in the
+ * `<sortcol> <dir> NULLS LAST, id <dir>` order. `entityIds` is the server-derived RBAC tenant scope,
+ * applied as a mandatory WHERE so a page never crosses tenants.
  */
 export function buildCmdExplorerQuery(
   cursor: CmdExplorerCursor | null,
@@ -377,7 +407,8 @@ export function buildCmdExplorerQuery(
     params.push(v);
     return `$${params.length}`;
   };
-  // Tenant scope + the exact/window/substring filters (shared with the search summary).
+  // Tenant scope + the exact/window/substring filters (shared with the search summary). Every column
+  // referenced here exists on the rollup, so the same conds apply unchanged to the page CTE below.
   const conds = cmdExplorerBaseConds(filter, entityIds, add);
 
   const col = sort.column; // allowlisted fixed literal (see CMD_EXPLORER_SORTABLE_COLUMNS)
@@ -399,12 +430,66 @@ export function buildCmdExplorerQuery(
 
   const where = conds.length > 0 ? ` where ${conds.join(' and ')}` : '';
   const dir = sort.direction === 'asc' ? 'asc' : 'desc';
-  // Table-qualified (`t.`) ON PURPOSE — see CMD_EXPLORER_SELECT: an unqualified `order by <col>`
-  // would bind to the `to_char(...) AS <date>` output alias (a text sort no index serves). `t.<col>`
-  // + `t.id` target the raw columns so the keyset indexes drive the sort and LIMIT stops at the page.
-  const orderClause = ` order by t.${col} ${dir} nulls last, t.id ${dir}`;
   const limitClause = ` limit ${add(limit)}`;
-  return { sql: `${CMD_EXPLORER_SELECT}${where}${orderClause}${limitClause}`, params };
+
+  // page: one row per logical charge from the 0050 matview, filtered + keyset-paged. `t.<col>` /
+  // `t.id` bind the RAW (indexed) columns so the sort is index-driven. Projects the 8-column grain
+  // key (+ point-in-time fields) so the base override re-joins on exactly the rollup's grain.
+  const page =
+    `page as (select id, business_entity_id, member_id_bidx, member_id_prefix_bidx, charge_date, ` +
+    `payment_received, cpt_code, revenue_code, facility, charge_amount, insurance_payments, ` +
+    `adjustments, patient_balance_due, primary_payer, ingested_at ` +
+    `from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where} order by t.${col} ${dir} nulls last, t.id ${dir}${limitClause})`;
+
+  // snaps: every base snapshot of the paged charges, matched on the SAME 8-col grain key the rollup
+  // groups on (member_id_bidx leads → index nested-loop). target = paid(max) + balance(latest), a
+  // per-charge constant used to identify the reconciling snapshot.
+  const snaps =
+    `snaps as (select p.id as page_id, ` +
+    `coalesce(p.insurance_payments, 0) + coalesce(p.patient_balance_due, 0) as target, ` +
+    `r.allowed_amount as av, r.payment_received as pr, r.id as rid ` +
+    `from page p join collections.cmd_explorer_rows r ` +
+    `on r.member_id_bidx = p.member_id_bidx and r.business_entity_id = p.business_entity_id ` +
+    `and r.member_id_prefix_bidx = p.member_id_prefix_bidx and r.charge_date = p.charge_date ` +
+    `and r.cpt_code = p.cpt_code and coalesce(r.revenue_code, '') = coalesce(p.revenue_code, '') ` +
+    `and r.facility = p.facility and r.charge_amount = p.charge_amount)`;
+
+  // sel: the tiered-allowed inputs per charge. distinct_allowed + single_val drive tiers a/b; the
+  // reconciling snapshot (latest-first so [1] is the latest match) drives tiers c/d; latest_pos is
+  // tier e. Group by (page_id, target) — target is a per-charge constant, a free grouping key.
+  const sel =
+    `sel as (select page_id, count(distinct av) as distinct_allowed, ` +
+    `min(av) filter (where av is not null) as single_val, ` +
+    `(array_agg(av order by pr desc nulls last, rid desc) filter (where av is not null and abs(av - target) <= 0.01))[1] as recon_val, ` +
+    `(array_agg(av order by pr desc nulls last, rid desc) filter (where av > 0))[1] as latest_pos ` +
+    `from snaps group by page_id, target)`;
+
+  // picked: attach the single tiered-allowed value per charge (computed ONCE here, so pct derives
+  // from the same value). LEFT JOIN is defensive — every paged charge has base snapshots, but a
+  // missing sel row degrades to NULL allowed rather than dropping the row.
+  const picked =
+    `picked as (select p.*, ` +
+    `(case when s.distinct_allowed = 1 ` +
+    `then (case when s.single_val = 0 and coalesce(p.insurance_payments, 0) > 0 then null else s.single_val end) ` +
+    `when s.recon_val is not null then s.recon_val else s.latest_pos end) as allowed_amount ` +
+    `from page p left join sel s on s.page_id = p.id)`;
+
+  // Final projection = the CmdExplorerRow shape (same output names/casts the grid has always
+  // returned). Dates/ingested_at to_char'd to stable strings; pct re-derived from the selected
+  // allowed via the exact 0038 formula (NULL allowed → NULL pct). Order by the RAW column (`pk.`),
+  // never the to_char text alias, so the sort stays numeric/chronological.
+  const finalSelect =
+    `select pk.id, to_char(pk.charge_date, 'YYYY-MM-DD') as charge_date, ` +
+    `to_char(pk.payment_received, 'YYYY-MM-DD') as payment_received, pk.cpt_code, pk.revenue_code, ` +
+    `pk.facility, pk.charge_amount, pk.allowed_amount, pk.insurance_payments, pk.adjustments, ` +
+    `pk.patient_balance_due, pk.primary_payer, ` +
+    `case when pk.charge_amount > 0 then round(pk.allowed_amount / pk.charge_amount * 100, 2) end as pct_allowed, ` +
+    `case when pk.allowed_amount > 0 then round(pk.insurance_payments / pk.allowed_amount * 100, 2) end as pct_paid, ` +
+    `to_char(pk.ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
+    `from picked pk order by pk.${col} ${dir} nulls last, pk.id ${dir}`;
+
+  const sql = `with ${page}, ${snaps}, ${sel}, ${picked} ${finalSelect}`;
+  return { sql, params };
 }
 
 /** A row's sort-column value as a JSON-safe cursor scalar (all sortable columns are text/null). */

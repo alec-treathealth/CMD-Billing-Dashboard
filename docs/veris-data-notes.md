@@ -1499,3 +1499,90 @@ TYPECHECK ALONE, not by an assertion on rendered output — if that render path 
 catch it. **Desktop honest-empty DOES have a render test** (`app/test/qualify-render.test.tsx` →
 "identifier honest-empty: … No in-window claims for <term>"). Known gap, not new — logged so the next
 reader knows mobile is the thinner surface here.
+
+---
+
+## Collections grid — charge-grain collapse + tiered-allowed selection (BUILD X, 2026-07-21)
+
+### Roadmap ledger — the data-trust ladder (where this work sits)
+
+**North Star:** the PMF signal — *a biller changes pre-submission behavior in response to the risk
+score* (PG-A, §3.3 assumption 1). Everything below is the ladder that has to hold before that score
+is worth trusting.
+
+**The pivot (2026-07-06 ADR amendment, recorded above).** CMD-Billing-Dashboard's COLLECTIONS plane
+went multi-tenant (BXR + Indigo); the Veris CLAIMS plane (`staging.*`, brains 1/2/3) is PAUSED, S4
+deferred, brains OFF. So the active work is the data-trust ladder, not the model:
+
+1. **Trustworthy collections grain.** `cmd_explorer_rows` is posting-snapshot grain; 0050 fixed
+   *aggregate* reads, and **BUILD X (this entry) fixes the *display* grain** on the Collections grid
+   Derek works from.
+2. **Qualify v2 census / survival.** The Feed-2 charge census (②a ramp VERIFIED firing 2026-07-21,
+   charge_id populating on new postings; ②b ingest is the next build) supplies the charge-EXISTENCE
+   denominator (`openCount`) a never-paid charge can't get from the payment-event log — the input the
+   survival/retention view needs.
+3. **Brain 1 — the ENGINE behind the score.** P(paid) / P(denied) / days-to-pay. Explicitly PARKED
+   per the 2026-07-06 ADR (CLAIMS plane + brains 1–3 OFF, S4 deferred). It is what ultimately drives
+   the North Star behavior change, but it does not run today.
+
+**Brain-1 engine detail — parked design, preserved so it isn't lost (NOT active work; plumbing for
+when the engine unparks):**
+- *Survival head* — the time-to-event model (days-to-pay / retention), the "Phase 3 = LOC/survival"
+  line on the cohort roadmap.
+- *As-of CV / leakage guard* — training splits respect as-of time (time-based split, never random;
+  features submission-time-knowable, labels post-adjudication kept separate). CLAUDE.md §17.
+- *Census→survival dependency* — the Qualify v2 census (rung 2) is the charge-existence plumbing the
+  survival curves consume; built now so the engine has clean input when it unparks, not because the
+  engine is live.
+- *PHI-free features* — the PHI denylist is absolute in features/embeddings (leakage firewall, §17).
+- *Calibration gate* — a parked-design acceptance rule: the predictor must pass backtested
+  calibration (predicted P(pay) matches realized frequency, on a time-based CV holdout) before its
+  score renders for any seat. Design intent per Alec; no in-repo mechanism yet.
+
+**Amounts gate — LIVE TODAY, not parked.** `viewerHasAmountsCapability = role !== 'admissions_seat'`
+(rbac.ts; qualify/page.tsx + qualify/m/page.tsx). An `admissions_seat` sees percentages / ranks only,
+never dollars — enforced server-side by DOM OMISSION (not CSS-hiding; proven in qualify render tests,
+cases-table.tsx omits Billed/Allowed cells). Brain 1's expected-$ outputs INHERIT this existing gate:
+a seat routing admissions sees rank + rating, never the dollar figure.
+
+### Tiered-allowed — the reference implementation (BUILD X)
+
+The Collections grid (`buildCmdExplorerQuery`) now COLLAPSES to charge grain instead of paging 2–8
+posting snapshots per logical charge. Shape: paginate the 0050 rollup (fast, indexed), then OVERRIDE
+`allowed`+`pct` per page from the base snapshots — the rollup's summed `allowed` over-states restated
+charges (133.88% on the reference fixture) and is never displayed. Inline collapse over the base table
+measured **~29s** unfiltered (unshippable); rollup-paginate + index-nested-loop override is **~1.07s**
+unfiltered worst case, sub-second with any filter.
+
+**Tiered `allowed` rule (per charge, over its base snapshots; target = max(insurance_payments) +
+latest(patient_balance_due)):**
+- a. single distinct non-zero allowed → that value.
+- b. single distinct allowed == 0 WITH paid>0 → NULL ("—", the CMD phantom $0).
+- c/d. restated: the snapshot allowed within $0.01 of target (latest by payment_received,id on ties).
+- e. restated, none reconciles → latest POSITIVE allowed, else NULL.
+- pct follows the displayed allowed via the exact 0038 formula; NULL allowed → NULL pct, never 0%.
+
+**`allowed = paid + patient_balance` is a SELECTOR-where-it-fires, NOT the allowed identity.** The
+Phase-0b probe proved it does NOT generalize: ~32k charges legitimately break it (Indigo ~7.3%, BXR
+~2.7%), 85–87% off by >$100 — three real modes: (1) insurance underpays the allowed; (2) patient owes
+charge−allowed so paid+balance ≈ *charge*, not allowed; (3) payment reversals inflate cumulative paid
+above every stored allowed. So the identity only VALIDATES which restated snapshot to select; it never
+gates/blanks a single real adjudicated value (that would hide ~20k correct alloweds — a worse
+regression than the phantom). This select-and-validate rule is the **reference implementation for the
+rollup rebuild's `allowed_reliable`** — the rebuild materializes it (not the current SUM), restores the
+sorts dropped here, and fixes Qualify's inherited summed-allowed bug (Qualify reads the rollup directly).
+
+### Tier-e residual (parked, known)
+
+The reversal-heavy restated tail (~12k charges, mostly Aetna H0017/H0018) has NO reconciling snapshot;
+tier-e displays the latest POSITIVE allowed as honest best-effort. Because reversals can push cumulative
+paid above every stored allowed, the re-derived **pct_paid can exceed 100%** (reference: charge 786560,
+paid $1,143.53 vs selected allowed $326.72 → 350%). NOT guarded (the ruling scoped tier-e pct as "the
+exact 0038 formula on the best-effort allowed"). Real fix = the rollup rebuild's reversal-netting, for
+BOTH this grid and Qualify. Do not paper over it with a display-only >100% clamp without re-opening the rule.
+
+### Sorting note
+
+`allowed_amount` / `pct_allowed` / `pct_paid` dropped from `CMD_EXPLORER_SORTABLE_COLUMNS` (and the
+client `SORTABLE_KEYS` mirror): selected/derived per page, not materialized, so nothing to keyset on.
+Columns stay VISIBLE, just no sort header. The rebuild restores them.

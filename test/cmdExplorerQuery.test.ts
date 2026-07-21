@@ -183,16 +183,23 @@ test('search summary honors the facility multi-select the same way (empty = no r
   assertAllBound(empty.totals.sql, empty.totals.params);
 });
 
-test('pct_allowed / pct_paid are sortable and selected (payer-gap columns)', () => {
-  // both generated columns are in the sort allowlist
-  assert.ok((CMD_EXPLORER_SORTABLE_COLUMNS as readonly string[]).includes('pct_allowed'));
-  assert.ok((CMD_EXPLORER_SORTABLE_COLUMNS as readonly string[]).includes('pct_paid'));
-  // a sort by pct_allowed drives ORDER BY the raw generated column (keyset-compatible)
-  const { sql } = buildCmdExplorerQuery(null, {}, { column: 'pct_allowed', direction: 'desc' }, 51, ENTITY);
-  assert.match(sql, /order by t\.pct_allowed desc nulls last, t\.id desc/);
-  // both columns are projected by the grid SELECT
-  assert.match(sql, /pct_allowed/);
-  assert.match(sql, /pct_paid/);
+test('allowed_amount / pct_allowed / pct_paid are NOT keyset-sortable (selected/derived per page) but stay projected', () => {
+  // Post-collapse these three are SELECTED/re-derived per page from the base snapshots, not
+  // materialized — so there is nothing to keyset on. They are dropped from the sort allowlist and a
+  // client request to sort by one clamps back to the Payment-Received-DESC default.
+  for (const c of ['allowed_amount', 'pct_allowed', 'pct_paid'] as const) {
+    assert.ok(!(CMD_EXPLORER_SORTABLE_COLUMNS as readonly string[]).includes(c), `${c} must not be sortable`);
+    assert.deepEqual(resolveCmdExplorerSort({ column: c as never, direction: 'desc' }), CMD_EXPLORER_DEFAULT_SORT);
+  }
+  // The two dates + the four rollup-materialized money columns REMAIN sortable.
+  for (const c of ['payment_received', 'charge_date', 'charge_amount', 'insurance_payments', 'adjustments', 'patient_balance_due']) {
+    assert.ok((CMD_EXPLORER_SORTABLE_COLUMNS as readonly string[]).includes(c), `${c} must stay sortable`);
+  }
+  // All three are still PROJECTED by the grid (visible columns, just without a sort header).
+  const { sql } = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
+  assert.match(sql, /as allowed_amount/);
+  assert.match(sql, /as pct_allowed/);
+  assert.match(sql, /as pct_paid/);
 });
 
 test('facility options query is tenant-scoped and its only bound value is entityIds', () => {
@@ -427,10 +434,12 @@ test('combo drill-down narrows the grid by BOTH cpt_code AND revenue_code togeth
   assert.match(both.sql, /revenue_code = \$3/);
   assert.deepEqual(both.params.slice(1, 3), ['90853', '0900']);
   assertAllBound(both.sql, both.params);
-  // Clearing the combo (neither field) drops BOTH predicates — back to the search-level result set.
+  // Clearing the combo (neither field) drops BOTH bound FILTER predicates — back to the search-level
+  // result set. (Match on `= $n`, the filter form: the charge-grain collapse's grain-JOIN references
+  // `cpt_code = p.cpt_code` / `coalesce(revenue_code,'') = …` structurally, which is not a filter.)
   const cleared = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
-  assert.doesNotMatch(cleared.sql, /cpt_code =/);
-  assert.doesNotMatch(cleared.sql, /revenue_code =/);
+  assert.doesNotMatch(cleared.sql, /cpt_code = \$/);
+  assert.doesNotMatch(cleared.sql, /revenue_code = \$/);
   assertAllBound(cleared.sql, cleared.params);
 });
 
@@ -462,10 +471,12 @@ test('grain: every aggregate reads the 0050 charge rollup; row-browsing reads st
     // latest-row ids) — the audited reveal path needs real row ids.
     assert.match(dd.rows.sql, /from collections\.cmd_explorer_rows t/);
   }
-  // Grid page query: snapshot rows on purpose (posting history is what it displays).
+  // Grid page query: COLLAPSES to charge grain — paginates the 0050 rollup, then SELECTS the
+  // displayed allowed per page from the base snapshots (tiered rule). So it reads BOTH: the rollup
+  // (pagination substrate) and the base table (the per-page allowed override join).
   const grid = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
-  assert.match(grid.sql, /from collections\.cmd_explorer_rows t/);
-  assert.doesNotMatch(grid.sql, /charge_rollup/);
+  assert.match(grid.sql, /from collections\.cmd_explorer_charge_rollup t/);
+  assert.match(grid.sql, /join collections\.cmd_explorer_rows r/);
 });
 
 test('grain: the %-paid denominator floor is the SHARED select everywhere ratios render', () => {
