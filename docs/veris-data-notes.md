@@ -1378,3 +1378,72 @@ is covered via pure predicates (`qualifyGuards.ts`, root suite); the full mount-
 flow (payer-change closes sheet, drill-not-dropped, right-swipe deck advance) is untested.
 Follow-up: add jsdom + testing-library + server-action mock as a dedicated infra task; closes
 both the 3a async gap and the pre-existing right-swipe gap.
+
+## Qualify — cases→claims rename + identifier-exact landing (Fix A) (2026-07-20)
+
+**SHIPPED** (commits `e0ae24f` [cases→claims + identifier-exact drill] and `de9b008` [Fix A
+landing] on `main`). The Recent Claims panel now filters to the SEARCHED identifier on the
+facility-drill path (prefix → `member_id_prefix_bidx`, exact → `member_id_bidx`), killing the
+payer-wide bleed (a `W29` search no longer returns `W27`/`W23` rows that merely share the resolved
+payer), and lands on the facility where the searched member ACTUALLY is instead of the payer's
+rating rank-1. Four DoD gates green at each commit (root `npm test` 549→560, app render suite,
+BOTH typechecks, `next build`).
+
+### Qualify "…Cases…" symbols now serve claim-grain `claims[]` (naming debt, deliberate)
+
+The cases→claims work (`e0ae24f`) renamed the ROW TYPE + ARRAY FIELDS to claims
+(`QualifyCase`→`QualifyClaim`, `QualifyCaseRow`→`QualifyClaimRow`, snapshot/drill `.cases`→`.claims`,
+`lastDos`→`dos`, `assembleCases`→`assembleClaims`) but DELIBERATELY KEPT the feature/function/RPC/
+component names:
+- `getQualifyFacilityCases` (server action — renaming changes the `createServerReference` RPC id),
+- `buildFacilityCasesQuery` / `loadQualifyFacilityCases`,
+- `QualifyFacilityCases` / `QualifyFacilityCasesInput` / `QualifyCasesCursor`,
+- the desktop `CasesTable` component + `cases-table.tsx` file.
+
+Renaming those churns the RPC id + import graph + file names for ZERO user-facing gain. **So: any
+symbol named "…Cases…" in the qualify scope now serves/renders claim-grain `claims[]`.** Not a bug —
+a bounded-risk naming decision. Note **`snapshot.cases` was DELETED, not renamed** — there is no
+`cases` field on `QualifySnapshot` anymore (the payer-wide, never-rendered field is gone; the
+rendered panel is the facility drill).
+
+### ⚠️ `identifierLandingFacility` + the ORDER-BY-PARITY INVARIANT (do NOT break)
+
+Fix A (`de9b008`) added `QualifySnapshot.identifierLandingFacility` (one required field) and a
+server-side landing lookup `buildIdentifierLandingFacilityQuery` (`src/collections/qualifyQuery.ts`)
+that returns the facility of the searched identifier's MOST-RECENT in-window claim under the resolved
+payer — so the claims panel lands where the member actually is instead of the payer's rating rank-1
+facility (which frequently holds NONE of the searched member's claims → the "ranking 915, drill 0 for
+the same prefix/window" report that triggered this fix).
+
+**INVARIANT — DO NOT BREAK:** the landing lookup's `ORDER BY` MUST stay byte-identical to
+`buildFacilityCasesQuery`'s (the drill's) claim ordering — currently **`charge_date desc nulls last,
+id desc`**. It is DELIBERATELY **NOT `payment_received`** (the drill WINDOWS on `payment_received` but
+ORDERS claims on `charge_date`; the landing query does the same). If the landing query and the drill
+disagree on "most recent," the panel lands on one facility while the drill's top claim points at
+another — a latent land-on-the-wrong-facility bug that NO test catches unless it specifically compares
+the two orderings. **There IS such a cross-query parity test** (`test/qualifyQuery.test.ts` →
+"buildIdentifierLandingFacilityQuery: ORDER BY matches the drill … not payment_received") — KEEP IT.
+Do not "optimize" the landing query to `payment_received` (or any other order) without changing the
+drill in lockstep, and vice-versa.
+
+Below-floor / zero-in-window (approach ii): the core keeps the landing candidate ONLY if it is present
+in the already-assembled `facilities[]` set (`app/lib/qualify/core.ts` —
+`facilities.some(f => f.facilityKey === landingRaw)`), reusing the EXACT `assembleFacilities` floor
+(`line_count >= QUALIFY_MIN_LINES`) with NO SQL floor duplication. A below-floor-only (or none-in-window)
+identifier collapses to `null` → the honest empty state ("No in-window claims for <term> — try a wider
+window"), kept DISTINCT from the `resolved===null` / VOB path. Resolve-by-payer (Heating-up chips /
+on-load) sets the field `null` and keeps rank-1 selection unchanged (no identifier there → payer-wide).
+
+### Mobile qualify honest-empty has THINNER coverage than desktop
+
+Mobile's Fix-A honest-empty rendering + deck-lead are verified via PURE HELPERS
+(`app/lib/qualify/qualifyGuards.ts`: `isIdentifierEmpty` / `identifierEmptyTerm` / `leadFacilities`,
+root-unit-tested in `test/qualifyGuards.test.ts`) + the core `identifierLandingFacility === null` data
++ typecheck/build — NOT a mounted-container render test. The mobile container
+(`qualify-mobile-app.tsx`) pulls the `'use server'` action graph, which the app test harness can't
+mount (same documented constraint as the existing guard tests + the Stage-3a async gap above).
+**Consequence:** the wiring from helper output to the correct `renderBody` branch is covered by
+TYPECHECK ALONE, not by an assertion on rendered output — if that render path regresses, tests won't
+catch it. **Desktop honest-empty DOES have a render test** (`app/test/qualify-render.test.tsx` →
+"identifier honest-empty: … No in-window claims for <term>"). Known gap, not new — logged so the next
+reader knows mobile is the thinner surface here.
