@@ -1149,7 +1149,9 @@ another session's WIP claim is usually an untracked file. Current reservations:
 | 0049 | billing-audit branch (`feat/billing-audit-plane`) | `0049_billing_audit_plane` — APPLIED live + committed on that branch |
 | 0050 | collections session | `0050_cmd_explorer_charge_rollup` — LANDED on origin/main (fed5930) |
 | 0051 | billing-audit branch | `0051_payer_alias_seed` — APPLIED live + merged to origin/main (PR #6, 609dff9) |
-| 0052 | billing-audit facility-resolution branch (`feat/billing-audit-facility-resolution`) | `0052_audit_row_facility_code` — **APPLIED live + verified (24,507/24,507 stamped, 0 NULL); committed on-branch `2386ec8`; TEEN_MH_TX resolved (own distinct code). NOT on origin/main (branch-only, not pushed).** (upd. 2026-07-15) |
+| 0052 | billing-audit facility-resolution branch (`feat/billing-audit-facility-resolution`) | `0052_audit_row_facility_code` — **APPLIED live + verified (24,507/24,507 stamped, 0 NULL); committed on-branch `2386ec8`; TEEN_MH_TX resolved (own distinct code). NOW ALSO ON origin/main** (git ls-tree origin/main confirms `0052_audit_row_facility_code.sql` present, 2026-07-21 — the "branch-only" note above is superseded). (upd. 2026-07-21) |
+| 0057 | qualify-v2-feed ① session | `0057_cmd_explorer_feed1_dimensions` — DRAFTED (Gate 1 hold); NOT applied, NOT committed. Feed-1 dimension cols on cmd_explorer_rows. (claimed 2026-07-21) |
+| 0058 | qualify-v2-feed ① session | `0058_cmd_charge_census` (+ `cmd_census_run`) — DRAFTED (Gate 1 hold); NOT applied, NOT committed. (claimed 2026-07-21) |
 
 Record new claims here when made; remove rows once the file is on origin/main
 (the tree then speaks for itself).
@@ -1157,7 +1159,8 @@ Record new claims here when made; remove rows once the file is on origin/main
 **Applied high-water mark (2026-07-17):** 0053 (`audit_ingest_run`), 0054 (`collections_rollup_refresh_run`),
 0055 (`admissions_seat_role`), 0056 (`access_audit_reader`) are all **APPLIED + on origin/main** — so per the
 remove-when-on-main rule they need no reservation row (the tree is authoritative). **Next free dashboard
-migration = 0057.** Live-verified applied this session: **0055** (`claims.app_user` `app_user_role_ck`
+migration = 0059** (0057 + 0058 claimed 2026-07-21 by the qualify-v2-feed ① session — see the rows above;
+DRAFTED, not yet applied/committed). Live-verified applied this session: **0055** (`claims.app_user` `app_user_role_ck`
 includes `admissions_seat`; migration widened both role CHECKs + recreated `upsert_app_user`) and **0056**
 (`claims.list_access_audit` exists, SECURITY DEFINER owned by `claims_admin`, EXECUTE→`claims_reader`,
 public/anon/authenticated/service_role revoked). The stale 0049/0050/0051 rows above are also on
