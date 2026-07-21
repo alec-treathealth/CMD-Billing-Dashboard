@@ -113,7 +113,7 @@ test('headerDiff: simultaneous missing + extra both reported', () => {
 
 type RowOverride = Partial<Omit<CmdExplorerFullRow, 'phi'>> & { phi?: Partial<CmdExplorerPhi> };
 
-/** A valid Derek-14-column row (as mapReportRows would emit), with overrides. */
+/** A valid 21-column report row (as mapReportRows would emit), with overrides. */
 function fullRow(override: RowOverride = {}): CmdExplorerFullRow {
   const { phi: phiOverride, ...rest } = override;
   return {
@@ -129,6 +129,11 @@ function fullRow(override: RowOverride = {}): CmdExplorerFullRow {
     adjustments: '$200.00',
     patient_balance_due: '$34.56',
     primary_payer: 'ANTHEM',
+    // Feed-1 dimension columns (②a) — the 4 picked raw values.
+    charge_id: 'CHG-0001',
+    charge_entered_date: '6/20/2026',
+    charge_to_date: '6/21/2026',
+    claim_status_raw: 'PAID',
     ...rest,
     phi: {
       patient_name: 'SMITH, JOHN',

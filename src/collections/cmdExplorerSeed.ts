@@ -35,6 +35,9 @@ import { mapReportRows } from './cmdExplorer.js';
 import type { CmdExplorerFullRow } from './cmdExplorer.js';
 import { parseReportCsv } from './cmdPayer.js';
 import { normalizeDate, normalizeMoney, type Coerced } from './normalize.js';
+// Status taxonomy from the shared module AT SOURCE (NOT via billingAudit/auditRowMap's re-export —
+// reaching through the audit plane would recreate the cross-plane dependency ②a's extraction removed).
+import { normalizeStatus } from './claimStatus.js';
 import { normalizeMemberId } from '../queries/identity.js';
 import { encryptPhi, fingerprintRow } from './phiCrypto.js';
 import { blindIndexesForRowSafe } from './blindIndex.js';
@@ -43,12 +46,20 @@ import { withTenant } from '../veris/withTenant.js';
 import { BXR_ENTITY_ID } from '../tenants.js';
 
 /**
- * The exact 14 headers of Derek's CMD batch export. A file whose header set does not
- * match these EXACTLY (no missing, no extra) is skipped — we never partially map a
- * report of an unknown shape into PHI rows.
+ * The exact 21 headers of the CMD batch export (report-level shape, Step-0-proved 2026-07-21 on
+ * BOTH tenants' canonical feeds). A file whose header set does not match these EXACTLY (no missing,
+ * no extra) is skipped — we never partially map a report of an unknown shape into PHI rows. This is
+ * the SEED-path guard only (processFile); the live cron path uses tolerant pick() and is unaffected.
+ * Includes the 3 columns the mapper does NOT persist (Check/EFT → daily_collections; Charge Patient
+ * Payments dropped, R5) so the set-equality "extra" check passes on a real 21-col export.
+ * (Order mirrors the live export; "Facility Name" is BXR's label — the Indigo cron aliases
+ * "Customer Name"→"Facility Name" before mapping and does not run this seed guard.)
  */
 export const EXPECTED_HEADERS = [
+  'Charge ID',
+  'Charge Entered Date',
   'Charge From Date',
+  'Charge To Date',
   'Payment Received',
   'Charge CPT Code',
   'Revenue Code',
@@ -62,6 +73,10 @@ export const EXPECTED_HEADERS = [
   'Charge Balance Due Pat',
   'Charge Primary Payer Name',
   'Facility Name',
+  'Check Payment',
+  'EFT Payment',
+  'Charge Patient Payments',
+  'Claim Status',
 ] as const;
 
 /**
@@ -93,6 +108,9 @@ const INSERT_COLS = [
   // the plaintext; safe to store + index. Absent when INDEX_HMAC_KEY is unset (search degrades
   // gracefully — see blindIndex.ts) or the source value is blank.
   'member_id_bidx', 'member_id_prefix_bidx', 'group_number_bidx',
+  // Feed-1 dimension columns (②a, migration 0057) — non-PHI, appended LAST. buildInsertParams
+  // pushes their values in this exact order. NOT encrypted, NOT in the fingerprint.
+  'charge_id', 'charge_entered_date', 'charge_to_date', 'claim_status_raw', 'claim_status_category',
 ] as const;
 
 const BATCH = 500;
@@ -115,6 +133,12 @@ export interface PlainRow {
   adjustments: string | null;
   patient_balance_due: string | null;
   primary_payer: string | null;
+  // Feed-1 dimension columns (②a) — non-PHI; NOT part of row_fingerprint (see mapRow).
+  charge_id: string | null;
+  charge_entered_date: string | null;
+  charge_to_date: string | null;
+  claim_status_raw: string | null;
+  claim_status_category: string | null; // derived: normalizeStatus(claim_status_raw).category
   source_file: string;
   row_fingerprint: string;
 }
@@ -185,8 +209,24 @@ export function mapRow(full: CmdExplorerFullRow, sourceFile: string): MapResult 
   const revenue = full.revenue_code;
   const payer = full.primary_payer;
 
+  // Feed-1 dimension columns (②a), all NON-PHI + all NULLABLE on the table. The two new dates use
+  // the SAME optional-date convention as payment_received above: unparseable → skip (never null a
+  // real-but-malformed value), blank → null. charge_id / claim_status_raw are text (pick() already
+  // trimmed; blank → null). claim_status_category is DERIVED via the shared normalizeStatus, and is
+  // null when the raw status is blank (so "no status" stays distinct from the OTHER category).
+  const chargeEntered = toIsoDate(full.charge_entered_date ?? '');
+  if (!chargeEntered.ok) return { ok: false, label: 'charge_entered_date: invalid' };
+  const chargeTo = toIsoDate(full.charge_to_date ?? '');
+  if (!chargeTo.ok) return { ok: false, label: 'charge_to_date: invalid' };
+  const chargeId = full.charge_id;
+  const claimStatusRaw = full.claim_status_raw;
+  const claimStatusCategory = claimStatusRaw === null ? null : normalizeStatus(claimStatusRaw).category;
+
   // LOCKED fingerprint field order — see the comment block above. Mirrors the real
   // CMD report's 14-column order exactly (Facility Name is the last/14th column).
+  // ②a FENCE: the 5 new Feed-1 columns are DELIBERATELY ABSENT from this 14-element array. The
+  // dedup key is byte-unchanged, so a re-ingest of a pre-②a posting yields the identical fingerprint
+  // and ON CONFLICT DO NOTHING fires (no double-count). charge_id stays out (fenced ②-or-never).
   const fingerprint = fingerprintRow([
     chargeDate.value, //                          1  Charge From Date
     paymentReceived.value ?? '', //               2  Payment Received
@@ -221,6 +261,11 @@ export function mapRow(full: CmdExplorerFullRow, sourceFile: string): MapResult 
       adjustments: adjustments.value,
       patient_balance_due: balance.value,
       primary_payer: payer,
+      charge_id: chargeId,
+      charge_entered_date: chargeEntered.value,
+      charge_to_date: chargeTo.value,
+      claim_status_raw: claimStatusRaw,
+      claim_status_category: claimStatusCategory,
       source_file: sourceFile,
       row_fingerprint: fingerprint,
     },
@@ -311,6 +356,8 @@ async function buildInsertParams(row: PlainRow, businessEntityId: string): Promi
     row.insurance_payments, row.adjustments, row.patient_balance_due, row.primary_payer,
     row.source_file, row.row_fingerprint, businessEntityId,
     bidx.member_id_bidx, bidx.member_id_prefix_bidx, bidx.group_number_bidx,
+    // Feed-1 dimension columns (②a) — non-PHI plaintext, positional order matches INSERT_COLS.
+    row.charge_id, row.charge_entered_date, row.charge_to_date, row.claim_status_raw, row.claim_status_category,
   ];
 }
 

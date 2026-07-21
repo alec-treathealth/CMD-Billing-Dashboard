@@ -36,6 +36,13 @@ const HEADERS = {
   adjustments: ['Charge Total Adjustments w/o Transfers'],
   patient_balance_due: ['Charge Balance Due Pat'],
   primary_payer: ['Charge Primary Payer Name'],
+  // Feed-1 dimension columns (Qualify v2, artifact ②a) — non-PHI. Present on the 21-col report
+  // for BOTH tenants (Step-0 header proof, 2026-07-21). claim_status_category is NOT here — it is
+  // DERIVED from claim_status_raw in mapRow (cmdExplorerSeed.ts), not picked from a CSV column.
+  charge_id: ['Charge ID'],
+  charge_entered_date: ['Charge Entered Date'],
+  charge_to_date: ['Charge To Date'],
+  claim_status_raw: ['Claim Status'],
 } as const;
 
 /** The 3 PHI fields surfaced only behind the audited per-row reveal. */
@@ -60,6 +67,12 @@ export interface CmdExplorerNonPhiRow {
   adjustments: string | null;
   patient_balance_due: string | null;
   primary_payer: string | null;
+  // Feed-1 dimension columns (②a) — the 4 PICKED raw values. claim_status_category is derived
+  // downstream in mapRow (it is not a CSV column), so it lands on PlainRow, not here.
+  charge_id: string | null;
+  charge_entered_date: string | null;
+  charge_to_date: string | null;
+  claim_status_raw: string | null;
 }
 
 /** Full row = non-PHI projection + its PHI. Held only in volatile server memory. */
@@ -129,6 +142,10 @@ export function mapReportRows(rows: CmdReportRow[]): CmdExplorerFullRow[] {
       adjustments: pick(row, HEADERS.adjustments),
       patient_balance_due: pick(row, HEADERS.patient_balance_due),
       primary_payer: pick(row, HEADERS.primary_payer),
+      charge_id: pick(row, HEADERS.charge_id),
+      charge_entered_date: pick(row, HEADERS.charge_entered_date),
+      charge_to_date: pick(row, HEADERS.charge_to_date),
+      claim_status_raw: pick(row, HEADERS.claim_status_raw),
     };
     const phi: CmdExplorerPhi = {
       patient_name: pick(row, HEADERS.patient_name),

@@ -1159,12 +1159,61 @@ Record new claims here when made; remove rows once the file is on origin/main
 **Applied high-water mark (2026-07-17):** 0053 (`audit_ingest_run`), 0054 (`collections_rollup_refresh_run`),
 0055 (`admissions_seat_role`), 0056 (`access_audit_reader`) are all **APPLIED + on origin/main** — so per the
 remove-when-on-main rule they need no reservation row (the tree is authoritative). **Next free dashboard
-migration = 0059** (0057 + 0058 claimed 2026-07-21 by the qualify-v2-feed ① session — see the rows above;
-DRAFTED, not yet applied/committed). Live-verified applied this session: **0055** (`claims.app_user` `app_user_role_ck`
+migration = 0059** (0057 + 0058 — qualify-v2-feed ① — are now APPLIED live + on origin/main, commit
+77818e4; the 0057/0058 reservation rows above are stale under the remove-when-on-main rule). Live-verified applied this session: **0055** (`claims.app_user` `app_user_role_ck`
 includes `admissions_seat`; migration widened both role CHECKs + recreated `upsert_app_user`) and **0056**
 (`claims.list_access_audit` exists, SECURITY DEFINER owned by `claims_admin`, EXECUTE→`claims_reader`,
 public/anon/authenticated/service_role revoked). The stale 0049/0050/0051 rows above are also on
 origin/main and removable under the same rule.
+
+---
+
+## Qualify v2 feed series — ②a LANDED (2026-07-21): canonical 21-col feed populates feed-1 dims
+
+- **Canonical feeds now emit 21 columns and populate the feed-1 dimension columns** on
+  `collections.cmd_explorer_rows` (`charge_id`, `charge_entered_date`, `charge_to_date`,
+  `claim_status_raw`, `claim_status_category`). PROVED report-level 2026-07-21: BOTH tenants' CANONICAL
+  filters return 21/21 (BXR report 10091971 / filter 10147530; Indigo 10092391 / 10147669), Charge ID
+  first + Claim Status last. So the canonical hourly cron is the SINGLE deterministic writer — the
+  resolution of ②a-recon's fingerprint-collision finding (there is NO separate parallel Feed 1).
+  **Feed-1 filters 10148126 (BXR) / 10148128 (Indigo) are RETIRED UNUSED** (columns are report-level,
+  not filter-level). Feed-2 census filters 10148130 / 10148129 remain reserved for ②b.
+- **Fingerprint invariant proven LIVE** (the one silent-double-count risk): `fingerprintRow`'s
+  14-element array is unchanged and the 5 new columns are excluded (fenced ②-or-never). A re-ingest of
+  1,434 current-month postings through the new 21-col mapper inserted 0 rows (all `ON CONFLICT
+  (row_fingerprint) DO NOTHING`): BXR 4150→4150, Indigo 7632→7632, 0 populated → 0 added.
+- **Status taxonomy extracted to `src/collections/claimStatus.ts`** (single source of truth):
+  `normalizeStatus` / `StatusCategory` / `NormalizedStatus`. `src/billingAudit/auditRowMap.ts` imports +
+  RE-EXPORTS it (audit plane byte-identical, tests green); the collections mapper imports it AT SOURCE
+  (no collections→billingAudit cross-plane import). No SQL enum — TS is the only taxonomy. Live sample
+  categories all in-set: PAID / BALANCE_DUE_PATIENT / NEEDS_RENEGOTIATING / AT_PAYER / ON_HOLD.
+
+### SEED-PATH NOTE — the on-disk seed corpus is STALE vs the 21-col guard (regenerate before manual re-seed)
+
+`EXPECTED_HEADERS` (cmdExplorerSeed.ts) is now the full 21-column set, matching what CMD emits today.
+But the on-disk seed corpus at `CMD_EXPLORER_SEED_DIR` (`Derek Historical Report Data/Derek Automation.csv`)
+is **16 columns** (the 14 + Check Payment + EFT Payment) — it predates the 21-col report change and now
+FAILS `headerDiff` (`missing [Charge ID, Charge Entered Date, Charge To Date, Charge Patient Payments,
+Claim Status]`). This is CORRECT strict-guard behavior, not a bug: the seed must never partial-map an
+unknown shape into PHI rows. **Before running the manual re-seed path (`npm run ingest:cmd-explorer`),
+regenerate the corpus from a current 21-col export.** The live hourly cron is UNAFFECTED (tolerant
+`pick()`, not the seed guard).
+
+### A8 ORACLE — `Totals By Payer.csv` in the seed dir is NOT a dead file
+
+The 7-column `Totals By Payer.csv` in `CMD_EXPLORER_SEED_DIR` is the **validation oracle** from the
+Qualify-v2 recon (payer-grain Charge/Allowed/Insurance sums + %-allowed / %-paid). It is correctly
+SKIPPED by the seed's `headerDiff` (it is not a charge-line export) — do NOT "clean it up" as a stray
+file. Reconciling the charge-grain rollup summed by payer against it is the A8 recon check (a mismatch
+would flag a max()-not-sum() posting-grain regression). Net-new harness; not built.
+
+### ②b HANDOFF MARKER (Feed 2 census ingest)
+
+Canonical feeds populate feed-1 dims **going forward only**; every row ingested BEFORE ②a deployed
+carries `charge_id = NULL` permanently (fingerprint dedup + no UPDATE grant on the append-only table).
+**②b recon owes: (1) the count of in-census-window postings with `charge_id IS NULL`, and (2) the
+backfill-vs-ramp ruling on that number** (backfill the NULL-charge_id history into the census join, or
+let it ramp as new postings arrive). Feed-2 filters: BXR 10148130, Indigo 10148129.
 
 ---
 

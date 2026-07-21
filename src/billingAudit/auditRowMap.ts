@@ -50,6 +50,12 @@
 import { normalizeDate, normalizeMoney, type Coerced } from '../collections/normalize.js';
 import { fingerprintRow } from '../collections/phiCrypto.js';
 import type { AuditScope } from './auditConfig.js';
+// Status taxonomy now lives in ONE shared module (src/collections/claimStatus.ts) so the
+// collections CMD ingest and this audit plane share it. Imported for internal use (below) and
+// RE-EXPORTED so this module's public surface — and test/billingAudit.test.ts — stay unchanged.
+import { normalizeStatus, type StatusCategory, type NormalizedStatus } from '../collections/claimStatus.js';
+export { normalizeStatus };
+export type { StatusCategory, NormalizedStatus };
 
 // --- locked headers (live-verified 2026-07-13) -------------------------------------
 
@@ -130,41 +136,10 @@ export function parsePositionalCsv(text: string): { header: string[]; rows: stri
   return { header: header ?? [], rows };
 }
 
-// --- status normalization (24-value live vocabulary, 2026-07-13) --------------------
-
-export type StatusCategory =
-  | 'PAID' | 'BALANCE_DUE_PATIENT' | 'AT_PAYER' | 'APPROVED_HIGHER'
-  | 'NEEDS_RENEGOTIATING' | 'ON_HOLD' | 'OTHER';
-
-export interface NormalizedStatus {
-  category: StatusCategory;
-  /** The <X> from 'CLAIM AT <X>[ - SECONDARY]'; null for every other category. */
-  statusPayer: string | null;
-}
-
-/**
- * Map a raw Charge Status to its category. Exact fixed labels first; the 'CLAIM AT <X>'
- * family (with an optional ' - SECONDARY' suffix, which is stripped INTO the payer —
- * the raw string is preserved separately) → AT_PAYER; everything else → OTHER with the
- * raw preserved by the caller ('PENDING FOR HIGHER PAYMENT' lands here by ruling —
- * pending ≠ approved). Case/whitespace tolerant; never throws.
- */
-export function normalizeStatus(raw: string | null): NormalizedStatus {
-  const t = (raw ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
-  if (t === 'PAID') return { category: 'PAID', statusPayer: null };
-  if (t === 'BALANCE DUE PATIENT') return { category: 'BALANCE_DUE_PATIENT', statusPayer: null };
-  if (t === 'APPROVED FOR HIGHER PAYMENT') return { category: 'APPROVED_HIGHER', statusPayer: null };
-  if (t === 'NEEDS RENEGOTIATING') return { category: 'NEEDS_RENEGOTIATING', statusPayer: null };
-  if (t === 'ON HOLD') return { category: 'ON_HOLD', statusPayer: null };
-  if (t.startsWith('CLAIM AT ')) {
-    let payer = t.slice('CLAIM AT '.length).trim();
-    if (payer.endsWith(' - SECONDARY')) payer = payer.slice(0, -' - SECONDARY'.length).trim();
-    return payer === ''
-      ? { category: 'OTHER', statusPayer: null }
-      : { category: 'AT_PAYER', statusPayer: payer };
-  }
-  return { category: 'OTHER', statusPayer: null };
-}
+// --- status normalization ------------------------------------------------------------
+// The 24→7 taxonomy (StatusCategory / NormalizedStatus / normalizeStatus) moved VERBATIM to
+// src/collections/claimStatus.ts and is imported + re-exported at the top of this file. Behavior
+// unchanged; the call site below (mapAuditRow) uses the imported normalizeStatus.
 
 // --- field coercion ------------------------------------------------------------------
 
