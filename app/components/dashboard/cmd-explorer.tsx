@@ -147,21 +147,24 @@ const DEFAULT_ORDER: ColKey[] = COLUMNS.map((c) => c.key);
 // picker. A user's saved view carries its own explicit visibility (hidden_columns) and still governs.
 const DEFAULT_HIDDEN = new Set<ColKey>(['adjustments']);
 // Columns the grid can sort by (server-side; mirrors CMD_EXPLORER_SORTABLE_COLUMNS): the two date
-// columns + the four rollup-materialized money columns. allowed_amount / pct_allowed / pct_paid are
-// deliberately NOT sortable: the grid collapses to charge grain and SELECTS the displayed allowed
-// (and re-derives the pcts) PER PAGE, so those values aren't materialized and there's nothing to
-// keyset on. They stay VISIBLE columns — they just carry no sort header. Everything else (codes,
-// facility, payer, PHI) is unsorted as before.
+// columns + all seven money/ratio columns. allowed_amount / pct_allowed / pct_paid are SORTABLE
+// AGAIN (0059 repoint ③): the rollup materializes allowed_reliable + both pcts, so there is a real
+// column to keyset on — the server maps the allowed_amount sort onto the physical allowed_reliable
+// column (the value this grid actually displays). Everything else (codes, facility, payer, PHI) is
+// unsorted as before.
 const SORTABLE_KEYS = new Set<string>([
   'charge_date',
   'payment_received',
   'charge_amount',
+  'allowed_amount',
+  'pct_allowed',
+  'pct_paid',
   'insurance_payments',
   'adjustments',
   'patient_balance_due',
 ]);
 // The two payer-gap columns render as percentages (formatPercent), not currency. They ARE numeric
-// (right-aligned) — this set only overrides how cellText formats them (they are no longer sortable).
+// (right-aligned) — this set only overrides how cellText formats them.
 const IS_PERCENT = new Set<string>(['pct_allowed', 'pct_paid']);
 
 

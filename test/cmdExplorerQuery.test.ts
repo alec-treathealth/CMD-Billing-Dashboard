@@ -183,23 +183,36 @@ test('search summary honors the facility multi-select the same way (empty = no r
   assertAllBound(empty.totals.sql, empty.totals.params);
 });
 
-test('allowed_amount / pct_allowed / pct_paid are NOT keyset-sortable (selected/derived per page) but stay projected', () => {
-  // Post-collapse these three are SELECTED/re-derived per page from the base snapshots, not
-  // materialized — so there is nothing to keyset on. They are dropped from the sort allowlist and a
-  // client request to sort by one clamps back to the Payment-Received-DESC default.
-  for (const c of ['allowed_amount', 'pct_allowed', 'pct_paid'] as const) {
-    assert.ok(!(CMD_EXPLORER_SORTABLE_COLUMNS as readonly string[]).includes(c), `${c} must not be sortable`);
-    assert.deepEqual(resolveCmdExplorerSort({ column: c as never, direction: 'desc' }), CMD_EXPLORER_DEFAULT_SORT);
+test('allowed_amount / pct_allowed / pct_paid are SORTABLE AGAIN (0059 ③) — allowed_amount maps to allowed_reliable', () => {
+  // 0059 materialized allowed_reliable + both pcts, so all nine columns keyset-sort for real.
+  for (const c of [
+    'payment_received', 'charge_date', 'charge_amount', 'allowed_amount', 'pct_allowed', 'pct_paid',
+    'insurance_payments', 'adjustments', 'patient_balance_due',
+  ] as const) {
+    assert.ok((CMD_EXPLORER_SORTABLE_COLUMNS as readonly string[]).includes(c), `${c} must be sortable`);
+    assert.deepEqual(
+      resolveCmdExplorerSort({ column: c, direction: 'asc' }),
+      { column: c, direction: 'asc' },
+      `${c} must resolve as itself, not clamp to the default`,
+    );
   }
-  // The two dates + the four rollup-materialized money columns REMAIN sortable.
-  for (const c of ['payment_received', 'charge_date', 'charge_amount', 'insurance_payments', 'adjustments', 'patient_balance_due']) {
-    assert.ok((CMD_EXPLORER_SORTABLE_COLUMNS as readonly string[]).includes(c), `${c} must stay sortable`);
-  }
-  // All three are still PROJECTED by the grid (visible columns, just without a sort header).
+  // THE REMAP: the grid displays allowed_reliable AS allowed_amount, so the allowed_amount sort +
+  // keyset must bind the PHYSICAL allowed_reliable column — never the raw netted allowed_amount.
+  const byAllowed = buildCmdExplorerQuery(
+    { id: 42, value: '250.00' }, {}, { column: 'allowed_amount', direction: 'desc' }, 51, ENTITY,
+  );
+  assert.match(byAllowed.sql, /order by t\.allowed_reliable desc nulls last, t\.id desc/);
+  assert.doesNotMatch(byAllowed.sql, /order by t\.allowed_amount/);
+  assert.match(byAllowed.sql, /\(allowed_reliable < \$\d+ or \(allowed_reliable = \$\d+ and id < \$\d+\) or allowed_reliable is null\)/,
+    'keyset walks allowed_reliable too');
+  // The pct sorts bind their own materialized columns.
+  const byPct = buildCmdExplorerQuery(null, {}, { column: 'pct_paid', direction: 'asc' }, 51, ENTITY);
+  assert.match(byPct.sql, /order by t\.pct_paid asc nulls last, t\.id asc/);
+  // Projection: displayed allowed IS the tiered value; pcts read straight off the matview.
   const { sql } = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
-  assert.match(sql, /as allowed_amount/);
-  assert.match(sql, /as pct_allowed/);
-  assert.match(sql, /as pct_paid/);
+  assert.match(sql, /allowed_reliable as allowed_amount/);
+  assert.match(sql, /pct_allowed, pct_paid/);
+  assert.doesNotMatch(sql, /round\(/, 'no per-page pct re-derivation left');
 });
 
 test('facility options query is tenant-scoped and its only bound value is entityIds', () => {
@@ -471,12 +484,12 @@ test('grain: every aggregate reads the 0050 charge rollup; row-browsing reads st
     // latest-row ids) — the audited reveal path needs real row ids.
     assert.match(dd.rows.sql, /from collections\.cmd_explorer_rows t/);
   }
-  // Grid page query: COLLAPSES to charge grain — paginates the 0050 rollup, then SELECTS the
-  // displayed allowed per page from the base snapshots (tiered rule). So it reads BOTH: the rollup
-  // (pagination substrate) and the base table (the per-page allowed override join).
+  // Grid page query (0059 ③): ONE select over the matview — BUILD X's per-page base-table override
+  // (snaps/sel/picked) is DELETED; allowed_reliable/pct_allowed/pct_paid are read materialized.
   const grid = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
   assert.match(grid.sql, /from collections\.cmd_explorer_charge_rollup t/);
-  assert.match(grid.sql, /join collections\.cmd_explorer_rows r/);
+  assert.doesNotMatch(grid.sql, /cmd_explorer_rows/);
+  assert.doesNotMatch(grid.sql, /snaps|picked|recon_val|latest_pos/, 'the X-era override CTEs are gone');
 });
 
 test('grain: the %-paid denominator floor is the SHARED select everywhere ratios render', () => {
