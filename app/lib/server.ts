@@ -138,7 +138,7 @@ import { aliasIndigoFacilityColumn } from '../../src/collections/cmdExplorer.js'
 import { decryptPhi } from '../../src/collections/phiCrypto.js';
 import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
 import { refreshCmdPayerRollup } from '../../src/collections/cmdPayerRefresh.js';
-import { CMD_EXPLORER_CUSTOMERS, INDIGO_CUSTOMERS, type CmdCustomer } from '../../src/collections/cmdCustomers.js';
+import { CMD_EXPLORER_CUSTOMERS, INDIGO_CUSTOMERS, BXR_CUSTOMERS, type CmdCustomer } from '../../src/collections/cmdCustomers.js';
 // src-side canonical tenant ids (agree with app/lib/views.ts — dual-declaration note in
 // src/tenants.ts). Each cron's writes are stamped + GUC-scoped to its tenant explicitly
 // (migration-B era), never inferred; the Indigo roster also carries per-customer ids.
@@ -172,6 +172,7 @@ import {
 } from '../../src/routes/refreshChargeRollupHandler.js';
 import { refreshChargeRollup } from '../../src/collections/refreshChargeRollup.js';
 import { cmdExplorerCron } from '../../src/collections/cmdExplorerCron.js';
+import { cmdCensusCron } from '../../src/collections/cmdCensusCron.js';
 import { cmdRunReportToZip, readZipEntries } from '../../src/collections/cmdPayer.js';
 import { billingAuditCron, recordAuditIngestRun } from '../../src/billingAudit/auditIngest.js';
 import { auditCustomersFor, auditReportIds, type AuditScope } from '../../src/billingAudit/auditConfig.js';
@@ -687,6 +688,77 @@ export function handleIndigoExplorerCron(req: {
   });
 }
 
+/**
+ * Tenant-parameterized CMD charge-CENSUS ingest (Vercel Cron, Qualify v2 ②b). Sibling of
+ * handleExplorerCronForTenant, same auth (GET only + constant-time CRON_SECRET Bearer), same
+ * least-privilege writer (cmd_rollup_writer). It pulls the CENSUS saved-filter per customer and
+ * UPSERTs charges into collections.cmd_charge_census (the openCount denominator), recording each
+ * per-customer pull in collections.cmd_census_run. Freshness-gated (a customer a prior run completed
+ * OK inside the staleness window is skipped) + budget-guarded, so a full sweep amortizes over
+ * however many hourly invocations it takes. cmdCensusCron stays transport-agnostic; auth + compose
+ * live here. NO cache revalidate: Qualify reads the census LIVE (no unstable_cache tag). Returns
+ * non-PHI counts only; the tenant label attributes a hard failure to the right cron in the log stream.
+ */
+async function handleCensusCronForTenant(
+  req: { method?: string; authorization?: string | null },
+  tenant: {
+    /** Human label for the failure log line — distinct per tenant for log attribution. */
+    label: string;
+    /** The CMD customer accounts to loop (each entry carries its owning businessEntityId). */
+    customers: readonly CmdCustomer[];
+    /** Per-customer live-fetch config (report/CENSUS-filter/poll) for this tenant. */
+    configFor: (customerId: string) => CmdApiConfig;
+    /** Optional per-fetch row transform (Indigo: alias "Customer Name" → "Facility Name"). */
+    transformRows?: (rows: CmdReportRow[]) => CmdReportRow[];
+  },
+): Promise<{ status: number; body: unknown }> {
+  if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
+    return { status: 405, body: { error: 'method_not_allowed' } };
+  }
+  const secret = process.env.CRON_SECRET;
+  if (!secret || !isAuthorized(req.authorization, secret)) {
+    return { status: 401, body: { error: 'unauthorized' } };
+  }
+  try {
+    const stats = await cmdCensusCron({
+      customers: tenant.customers,
+      fetchRows: (customerId) => cmdReportRows(tenant.configFor(customerId)),
+      writeDb: rollupWriterDb(),
+      transformRows: tenant.transformRows,
+      stalenessMs: censusStalenessMs(),
+    });
+    return { status: 200, body: { ok: true, ...stats } };
+  } catch (err) {
+    console.error(`${tenant.label} cron failed:`, err instanceof Error ? err.message : String(err));
+    return { status: 500, body: { error: 'cron_failed' } };
+  }
+}
+
+/** BXR census cron (/api/cron/cmd-census). Roster = BXR_CUSTOMERS (BXR's 15). */
+export function handleCmdCensusCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  return handleCensusCronForTenant(req, {
+    label: 'cmd-census',
+    customers: BXR_CUSTOMERS,
+    configFor: cmdBxrCensusConfigFor,
+  });
+}
+
+/** Indigo census cron (/api/cron/indigo-census). Roster = INDIGO_CUSTOMERS (32); facility-column alias. */
+export function handleIndigoCensusCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  return handleCensusCronForTenant(req, {
+    label: 'indigo-census',
+    customers: INDIGO_CUSTOMERS,
+    configFor: cmdIndigoCensusConfigFor,
+    transformRows: aliasIndigoFacilityColumn,
+  });
+}
+
 // Least-privilege writer pool for the BILLING AUDIT plane (claims.audit_row /
 // billing_code_decision / flag) — the dedicated claims_audit_writer role (migration
 // 0049), NEVER cmd_rollup_writer (collections blast radius stays untouched), NEVER
@@ -1186,6 +1258,44 @@ function cmdIndigoConfigFor(customerId: string): CmdApiConfig {
     maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 8,
     emptyGraceAttempts: Number(process.env.CMD_EXPLORER_EMPTY_GRACE) || 4,
   };
+}
+
+// ---------------------------------------------------------------------------
+// CMD charge-CENSUS (Qualify v2 ②b) — Feed 2 live-fetch config.
+//
+// The census reuses each tenant's EXISTING explorer report/poll/creds and swaps ONLY the saved
+// filter: the census filter is a TRAILING CHARGE CENSUS (all payment states), not the explorer's
+// payment-received window. The census filter id has NO hardcoded default (no-fallback-throw): a
+// census pull against the wrong filter would silently mis-populate the openCount DENOMINATOR, so a
+// missing env var must fail the run loudly rather than fall back to the explorer's payment filter.
+// Env (set in Vercel, never hardcoded/logged): CMD_BXR_CENSUS_FILTER_ID, CMD_INDIGO_CENSUS_FILTER_ID.
+// ---------------------------------------------------------------------------
+
+/** The census saved-filter id — REQUIRED from env, no default (see the block comment above). */
+function requiredCensusFilterId(envVar: 'CMD_BXR_CENSUS_FILTER_ID' | 'CMD_INDIGO_CENSUS_FILTER_ID'): string {
+  const v = process.env[envVar]?.trim();
+  if (!v) throw new Error(`Missing ${envVar} (the CMD census saved-filter id; set in env, no default)`);
+  return v;
+}
+
+/** BXR census config: the explorer's report/poll/creds with the CENSUS filter (env, no fallback). */
+function cmdBxrCensusConfigFor(customerId: string): CmdApiConfig {
+  return { ...cmdExplorerConfigFor(customerId), filterId: requiredCensusFilterId('CMD_BXR_CENSUS_FILTER_ID') };
+}
+
+/** Indigo census config: cmdIndigoConfigFor's report/poll with the CENSUS filter (env, no fallback).
+ *  The "Customer Name" → "Facility Name" alias is applied by the cron wrapper (transformRows), not here. */
+function cmdIndigoCensusConfigFor(customerId: string): CmdApiConfig {
+  return { ...cmdIndigoConfigFor(customerId), filterId: requiredCensusFilterId('CMD_INDIGO_CENSUS_FILTER_ID') };
+}
+
+/** Optional freshness-window override for the census cron, in HOURS. Unset ⇒ the cron's 24h default;
+ *  "0" forces a full re-pull (nothing counts fresh — a manual catch-up). Bad/negative values ignored. */
+function censusStalenessMs(): number | undefined {
+  const raw = process.env.CMD_CENSUS_STALENESS_HOURS?.trim();
+  if (!raw) return undefined;
+  const h = Number(raw);
+  return Number.isFinite(h) && h >= 0 ? h * 3_600_000 : undefined;
 }
 
 /** Raw DB shape — pg returns int8 (id) as a string; toExplorerRow narrows it to number. */

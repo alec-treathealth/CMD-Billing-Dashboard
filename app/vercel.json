@@ -4,6 +4,8 @@
   "crons": [
     { "path": "/api/cron/cmd-explorer", "schedule": "0 * * * *" },
     { "path": "/api/cron/indigo-explorer", "schedule": "30 * * * *" },
+    { "path": "/api/cron/cmd-census", "schedule": "15 * * * *" },
+    { "path": "/api/cron/indigo-census", "schedule": "35 * * * *" },
     { "path": "/api/cron/refresh-charge-rollup", "schedule": "45 * * * *" },
     { "path": "/api/cron/cms-hcpcs-sync", "schedule": "0 6 2 1,4,7,10 *" },
     { "path": "/api/cron/billing-audit-ip", "schedule": "10 2 * * *" },

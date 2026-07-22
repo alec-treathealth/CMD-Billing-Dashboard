@@ -1215,6 +1215,92 @@ carries `charge_id = NULL` permanently (fingerprint dedup + no UPDATE grant on t
 backfill-vs-ramp ruling on that number** (backfill the NULL-charge_id history into the census join, or
 let it ramp as new postings arrive). Feed-2 filters: BXR 10148130, Indigo 10148129.
 
+**→ SHIPPED 2026-07-21 — see "Feed 2 charge-census ingest — SHIPPED (②b)" below; the two owes are
+carried forward as the ②c standing gate.**
+
+---
+
+## Feed 2 charge-census ingest — SHIPPED (Qualify v2 ②b, 2026-07-21)
+
+Feed 2 (the charge-EXISTENCE census, `collections.cmd_charge_census`) now has a live ingest.
+①/0058 created the tables inert; ②b wires pull + upsert + run-log. **No migration** — 0058 is
+pre-existing and already carries every column this build needs (any DDL urge = STOP).
+
+**Shape (transport-agnostic in `src/`, composed in `app/lib/server.ts`; touches NEITHER
+`cmd-explorer.tsx` nor `actions.ts`):**
+- `src/collections/cmdCensus.ts` — census-OWN mapper + batched UPSERT writer (deliberately NOT
+  `cmdExplorerSeed.mapRow`). Required = **charge_id + patient_name ONLY**; every other field
+  blank/unparseable → NULL, row KEPT (a blank member_id is a self-pay census row — the openCount
+  denominator must not drop it). PHI via the exact `encryptPhi` + `blindIndexesForRowSafe` path
+  (member/group null → null ciphertext + null bidx). Upsert = `ON CONFLICT (business_entity_id,
+  charge_id) DO UPDATE SET last_seen_at=now() + dims`, `RETURNING (xmax = 0) AS inserted` to split
+  rows_new vs rows_refreshed. Every write inside `withTenant` (0058 writer RLS is GUC-scoped).
+- `src/collections/cmdCensusCron.ts` — catch-up loop: per-customer freshness cursor + wall-clock
+  budget + per-customer failure isolation + run-log lifecycle.
+- Routes `app/app/api/cron/cmd-census` (BXR) + `indigo-census` (Indigo, `transformRows:
+  aliasIndigoFacilityColumn`). Node runtime, force-dynamic, maxDuration 300, GET-only +
+  constant-time `CRON_SECRET` Bearer (same `isAuthorized` as the explorer crons).
+- `app/vercel.json`: **cmd-census `15 * * * *`, indigo-census `35 * * * *`** — off the explorer
+  :00/:30 and rollup :45 to stay clear of the shared one-report-at-a-time CMD partner session.
+
+**Config — report reuse (ruled + live-proven).** The census inherits each tenant's EXISTING
+explorer report/poll/creds and swaps ONLY the saved filter: BXR report 10091971 / census filter
+**10148130**; Indigo report 10092391 / census filter **10148129**. Live per-tenant first-pull
+(2026-07-21, real `insertCensusRows`/`cmdCensusCron` via the `cmd_rollup_writer` pool through the
+6543 pooler) fetched 1805→1009 charges (BXR/DMH) and 2311→1400 (Indigo/HEALTHY LIFE) with **0
+required-field skips** → the 21-col shape is intact under both explorer reports and the census
+filters ARE saved there. There is NO `CMD_*_CENSUS_REPORT_ID` — do not add one.
+
+**⚠ DEPLOY ORDERING (hard constraint, not a flag).** The census filter id resolves with NO
+fallback (`requiredCensusFilterId` throws if the env var is unset) — a pull against the wrong
+filter would silently mis-populate the openCount DENOMINATOR, so a missing var must fail LOUDLY.
+Consequence: **set `CMD_BXR_CENSUS_FILTER_ID=10148130` + `CMD_INDIGO_CENSUS_FILTER_ID=10148129`
+in Vercel prod FIRST, THEN push.** Push before setting them and the first scheduled cron run
+500s — the SAFE failure (loud, not silent-wrong-window), but still a failed run. These vars are
+NOT needed in the repo.
+
+**Freshness cursor + retry model.** Before pulling customer C, the cron reads `cmd_census_run`
+for `(entity, C)` where `finished_at IS NOT NULL AND status='ok' AND started_at >= now() -
+staleness` (default **24h**; override `CMD_CENSUS_STALENESS_HOURS`, "0" forces a full re-pull).
+Fresh ⇒ skip, so a full BXR (15) / Indigo (32) sweep amortizes over however many hourly runs it
+takes; the wall-clock budget (**210s**) stops LAUNCHING new customers near the deadline and the
+rest catch up next run (idempotent, self-healing). The **`status='ok'` clause is a deliberate
+strengthening** of the bare `finished_at IS NOT NULL` gate: a run killed mid-pull (finished_at
+NULL) OR one that errored (status='error') is NOT fresh → it re-pulls next run instead of waiting
+out 24h. Transient failures recover in 15 min; a persistently-failing customer (e.g. one without
+the census filter → INVALID CRITERIA) logs exactly one clean `status='error'` run-row per
+invocation (PHI-safe `error_label` = stage token `fetch_failed`/`write_failed`, never a
+message/URL) and nothing noisier — verified live 2026-07-21.
+
+**Blank-charge_id skip metric (watch this).** `census_skipped` + `skips_by_label['charge_id:
+missing']` in the returned stats count charges dropped for a missing charge_id (the census's only
+hard gate besides patient_name). Live first-pulls were 0. A spike = an upstream charge_id gap in
+the census export and directly shrinks the openCount denominator — treat as a data-quality alarm.
+
+**0058-comment nuance (correction).** 0058's header claims a write outside `withTenant` raises
+"unrecognized configuration parameter" (1-arg `current_setting`). Live, the writer INSERT with the
+GUC unset instead raised **`invalid input syntax for type uuid: ""`** — `app.business_entity_id`
+resolves to an empty string when unset here, so the cast fails rather than the lookup. Either way
+the write **fails closed** (verified 2026-07-21); the comment's mechanism is slightly off, the
+safety property holds.
+
+### Roadmap ledger — ②b SHIPPED
+Advancing the data-trust ladder (see the BUILD X ledger below): 0050 fixed aggregate reads, BUILD
+X fixed the grid display grain, **②a** ramped `charge_id` onto new payment postings, and **②b
+(this entry) ships the Feed-2 census ingest** — the charge-EXISTENCE denominator a never-paid
+charge can't get from the payment-event log. Feed 2 is now LIVE and self-populating hourly.
+Remaining on the Qualify-v2 line: **②c** (openCount join wiring into contract-v2) and the rollup
+rebuild (materialize `allowed_reliable`, still parked).
+
+**⚠ ②c STANDING GATE (do before contract-v2 openCount ships).** openCount joins
+`cmd_charge_census.charge_id` ↔ `cmd_explorer_rows.charge_id`. Every payment-event row ingested
+BEFORE ②a deployed (2026-07-21 ~10:05 UTC) carries `charge_id = NULL` permanently (fingerprint
+dedup + no UPDATE grant on the append-only log) and CANNOT join to the census. **②c owes: (1)
+re-count the payment-event rows still carrying `charge_id IS NULL` per tenant, and (2) rule
+backfill-vs-ramp on that number** before openCount goes live — else the denominator silently
+under-joins the pre-②a history. (Distinct from the Feed-2 blank-charge_id skip metric above:
+that's the census export's own gaps; this is the payment-event log's pre-ramp NULLs.)
+
 ---
 
 ## Collections aggregate grain — `cmd_explorer_rows` is POSTING grain; aggregate ONLY over `cmd_explorer_charge_rollup` (2026-07-13)
