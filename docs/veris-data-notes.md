@@ -1152,6 +1152,7 @@ another session's WIP claim is usually an untracked file. Current reservations:
 | 0052 | billing-audit facility-resolution branch (`feat/billing-audit-facility-resolution`) | `0052_audit_row_facility_code` — **APPLIED live + verified (24,507/24,507 stamped, 0 NULL); committed on-branch `2386ec8`; TEEN_MH_TX resolved (own distinct code). NOW ALSO ON origin/main** (git ls-tree origin/main confirms `0052_audit_row_facility_code.sql` present, 2026-07-21 — the "branch-only" note above is superseded). (upd. 2026-07-21) |
 | 0057 | qualify-v2-feed ① session | `0057_cmd_explorer_feed1_dimensions` — DRAFTED (Gate 1 hold); NOT applied, NOT committed. Feed-1 dimension cols on cmd_explorer_rows. (claimed 2026-07-21) |
 | 0058 | qualify-v2-feed ① session | `0058_cmd_charge_census` (+ `cmd_census_run`) — DRAFTED (Gate 1 hold); NOT applied, NOT committed. (claimed 2026-07-21) |
+| 0059 | rollup-rebuild session | `0059_cmd_charge_rollup_allowed_reliable` (+ rollback) — **APPLIED LIVE 2026-07-22 07:14 UTC** (ledger 20260722071405), post-apply gates green, first autonomous :45 refresh ok=true 74.9s (run 131); NOT yet committed/pushed (commit HOLD pending — remove this row once on main). (claimed 2026-07-22) |
 
 Record new claims here when made; remove rows once the file is on origin/main
 (the tree then speaks for itself).
@@ -1672,6 +1673,63 @@ BOTH this grid and Qualify. Do not paper over it with a display-only >100% clamp
 `allowed_amount` / `pct_allowed` / `pct_paid` dropped from `CMD_EXPLORER_SORTABLE_COLUMNS` (and the
 client `SORTABLE_KEYS` mirror): selected/derived per page, not materialized, so nothing to keyset on.
 Columns stay VISIBLE, just no sort header. The rebuild restores them.
+
+---
+
+## Rollup rebuild 0059 — allowed_reliable materialized (APPLIED 2026-07-22)
+
+**Migration 0059 (`0059_cmd_charge_rollup_allowed_reliable` + rollback) APPLIED LIVE 2026-07-22
+07:14 UTC** — the parked "rollup rebuild" from the BUILD X ledger. The 0050 matview now carries four
+NEW columns (19–22): `allowed_reliable` (X's tiered rule, materialized), `allowed_tier`
+(a/b/cd/e1/e2/none), `pct_allowed`, `pct_paid` — columns 1–18 unchanged byte-for-byte;
+`allowed_amount` KEEPS its netted-sum meaning (ruling: ADDITIVE; it is the e1 input, not dead).
+**NO consumer reads the new columns yet** — each repoint is its own HOLD (Alec's hard line):
+① `buildFacilityRankingQuery` (the rating fix — MUST filter `allowed_tier <> 'e2'`, not merely
+allowed-non-null: the value-first rating's clamp0to100 would turn an unreconciled >100% into a false
+"Strong" green), ② `buildFacilityCasesQuery` (per-claim allowed), ③ the grid's snaps/sel/picked
+override deletion + restore the 3 dropped sorts (NOTE: e1 CHANGES displayed grid values by design —
+5,412 charges show the netted sum instead of X's latest-positive), ④ cohort/`PCT_RATIO_SELECT`
+readers (the pct_paid 2%/$100 floor re-ruling is DEFERRED until real allowed_reliable numbers exist —
+do not fold it into a repoint).
+
+**Tier rule as shipped** (target = max(insurance_payments)+latest(patient_balance_due)): a single
+non-zero → itself · b single $0-with-paid → NULL · cd reconciling snapshot (±$0.01, latest on ties) ·
+**e1 = signed-delta NETTED sum when IT reconciles target (±$0.01) — the reversal-aware upgrade over
+X's latest-positive, ruled by Alec (recovers 122 BXR + 5,290 Indigo of the 11,952 tier-e tail
+penny-exact)** · e2 latest-positive (else NULL) · none NULL. Live tier census: BXR a 4,134 / b 139 /
+cd 56,333 / e1 122 / e2 1,272 / none 4,741; Indigo a 377,443 / cd 29,938 / e1 5,290 / e2 5,268.
+
+**Verification (scratch + post-apply live, both all-green):** row parity EXACT vs base-grain
+expectation (66,741 / 417,939); X-parity 100% on a/b/cd/e2/none (478,268 rows, IS NOT DISTINCT FROM);
+all 5,412 e1 = netted & differ from X's pick; fixtures — charge 786560 (the 350% tell) → e1,
+pct_paid 100.00; the 133.88% netted fixture → cd, pct_allowed 33.88; zero NULL-allowed-with-pct,
+zero coerced 0%. Suite 581/581 + both tsc + next build green (0059 = no observable behavior).
+
+**Shape lesson (carry):** the first draft computed tiers via a SECOND join of the 635k-row base
+against the grain — build >120s (killed twice at the MCP session's **2-minute statement_timeout**)
+and was REJECTED; the shipped single-scan shape folds tier inputs into 0050's existing grouped pass
+and picks the reconciling snapshot from a per-charge ordered array (CREATE 62s). MCP gotchas: lead
+long applies with `set statement_timeout` in-artifact; backends SURVIVE the HTTP timeout (poll,
+don't re-fire); guard against transport retries with `pg_advisory_xact_lock` + an already-applied
+check (0059 carries both, forward + rollback). Cluster is PG 17.6 now.
+
+**⚠ GRANT INCIDENT (root-caused + fixed same session):** DROP MATERIALIZED VIEW destroys the ACL;
+0059's first apply re-granted claims_reader (0050) but missed **cmd_rollup_writer's SELECT (0054)**
+— the run-log's freshness read (`max(payment_received)`, refreshChargeRollup step 3) runs as the
+writer, so the next cron-path refresh failed `permission denied for materialized view` (run 130;
+the refresh itself had SUCCEEDED in 62s — only the freshness read broke, fail-safe). Grant restored
+by hand 2026-07-22, folded into BOTH 0059 files. **Rule: any future matview DROP+CREATE must
+re-grant BOTH claims_reader AND cmd_rollup_writer.**
+
+**Refresh cost + maxDuration:** cron-path CONCURRENT refresh on the new definition = **62–75s**
+(run 130's refresh leg 62s; run 131 — the first fully-autonomous :45 cycle — **ok=true, 74.9s**,
+freshness 2026-07-22; a cold-cache manual smoke hit 113s). The refresh route's `maxDuration` is
+bumped **120 → 180** in the same push as 0059 (Alec's ruling: operational headroom for the matview's
+own refresh, not a consumer repoint — 120 left as little as ~7s under the cold-cache reading).
+
+**②c mid-window recount (ledgered per Alec):** ~Aug/Sep, **CHARGE-grain** — count distinct logical
+charges with NO charge_id-bearing snapshot row (not row-grain NULL postings) — the openCount
+prerequisite for contract-v2; unrelated to 0059 (allowed_reliable never touches charge_id).
 
 ---
 
