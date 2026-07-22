@@ -142,6 +142,12 @@ test('buildFacilityCasesQuery: claim grain (NO member_id_bidx dedup), raw-facili
   assert.ok(!/agg\.member_id_bidx/.test(sql), 'the blind index is NOT projected to the caller');
   assert.match(sql, /care_setting\) as program/, 'program := resolved care_setting');
   assert.match(sql, /order by agg\.dos desc nulls last/, 'ordered by the per-claim DOS');
+  // 0059 repoint ②: per-claim allowed/pct come from the materialized tiered columns.
+  assert.match(sql, /allowed_reliable::float8 as allowed/, 'per-claim allowed = 0059 allowed_reliable, not the netted sum');
+  assert.ok(!/allowed_amount/.test(sql), 'the netted allowed_amount no longer appears in the drill');
+  assert.match(sql, /pct_allowed::float8 as pct_allowed/, 'pct read from the materialized 0059 column (identical formula, NULL-safe)');
+  assert.ok(!/round\(/.test(sql), 'no inline pct derivation left in the drill');
+  assert.ok(!sql.includes('allowed_tier'), 'NO tier filter on the drill — e2 claims stay visible (display surface, ruling Q2a)');
   // Pagination OVER-FETCH: with no explicit limit the query binds QUALIFY_CASES_LIMIT + 1 (fetch 16, keep 15).
   assert.equal(params[5], QUALIFY_CASES_LIMIT + 1, 'over-fetches by one (limit+1) so the caller computes hasMore');
   assert.deepEqual(params.slice(0, 5), [BOTH, 'AETNA', '405 recovery', '2026-06-17', '2026-07-17']);

@@ -56,9 +56,9 @@ export interface QualifyClaimRow {
   primary_payer: string | null; // THIS claim's primary_payer (non-PHI); the payer chip/label
   program: 'IP' | 'OP' | 'BOTH' | null; // := resolved care_setting; null when facility text unresolved (Q-D)
   dos: string | null; // THIS claim's charge_date — display only (per-claim, not a max)
-  pct_allowed: number | null; // per-claim allowed/billed
+  pct_allowed: number | null; // per-claim reliable-allowed/billed (materialized 0059 pct_allowed; NULL = unknown, never 0%)
   billed: number | null;
-  allowed: number | null;
+  allowed: number | null; // per-claim 0059 allowed_reliable (tiered; e2's latest-positive KEPT on this display surface)
 }
 export interface QualifyMoverRow {
   primary_payer: string; // plaintext, non-PHI — the mover LABEL, tappable into the primary_payers filter
@@ -235,7 +235,9 @@ export function buildIdentifierLandingFacilityQuery(
  * FACILITY-SCOPED recent CLAIMS for the resolved payer AT ONE FACILITY, in-window, cross-tenant. CLAIM
  * GRAIN (Direction B, ruling 1): ONE row per charge from the 0050 rollup — NO member_id_bidx dedup — so a
  * patient with several claims shows each one; per-claim DOS = that charge's own charge_date (not a max);
- * per-claim pct_allowed = allowed/charge (guarded), and the row's own billed/allowed. `facility` is the RAW
+ * per-claim allowed = the 0059 `allowed_reliable` and pct_allowed = the materialized 0059 ratio (repoint ②
+ * — restated charges now show the adjudicated/reconciling value, not the netted sum: the 133.88% fixture
+ * reads 33.88%; e1 claims show the reconciling netted sum; e2 stays visible unfiltered). `facility` is the RAW
  * rollup facility text (the same value buildFacilityRankingQuery groups by, and carried to the client as
  * QualifyFacility.facilityKey), NOT the resolved facility_code — a single code can alias multiple raw texts
  * that rank as SEPARATE cards, so scoping by raw text keeps each card's claim list grain-consistent with its
@@ -292,8 +294,14 @@ export function buildFacilityCasesQuery(
   const inner =
     'select id, facility, primary_payer, ' +
     "to_char(charge_date, 'YYYY-MM-DD') as dos, " +
-    'charge_amount::float8 as billed, allowed_amount::float8 as allowed, ' +
-    'case when charge_amount > 0 then round(allowed_amount / charge_amount * 100, 2)::float8 end as pct_allowed ' +
+    // 0059 repoint ②: per-claim allowed = the materialized tiered `allowed_reliable` (a value CMD
+    // actually adjudicated — never the restatement-summed netted total this read before), and pct =
+    // the materialized `pct_allowed` (0059 computes the IDENTICAL round(allowed/charge*100,2) with the
+    // same >0 + non-null guards — NULL when allowed is unknown, never 0%). NO allowed_tier filter here:
+    // this is a DISPLAY surface, so e2's latest-positive stays visible (X's tell; the e2 exclusion is
+    // rating-evidence-only, ruling Q2a — see RANKING_RELIABLE_SELECT above).
+    'charge_amount::float8 as billed, allowed_reliable::float8 as allowed, ' +
+    'pct_allowed::float8 as pct_allowed ' +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
     `where business_entity_id = any(${e}::uuid[])${payerCond} and facility = ${fac} ` +
     `and payment_received >= ${f}::date and payment_received < ${t}::date` +

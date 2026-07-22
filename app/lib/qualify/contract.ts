@@ -134,9 +134,12 @@ export interface QualifyClaim {
   facilityName: string;
   program: 'IP' | 'OP' | 'BOTH' | null; // := care_setting; null when the facility text is unresolved
   dos: string | null; // this claim's service date (charge_date), ISO, display only
+  /** Per-claim reliable-allowed/billed — the materialized 0059 pct_allowed (repoint ②). NULL when the
+   *  claim's allowed is unknown (tiers b/none) — never 0%. e2 claims stay visible here unfiltered
+   *  (display surface; the e2 exclusion is rating-evidence-only). */
   pctAllowedOfBilled: number | null;
-  billedAmount: number | null;
-  allowedAmount: number | null;
+  billedAmount: number | null; // null unless viewerHasAmountsCapability (stripped server-side)
+  allowedAmount: number | null; // per-claim 0059 allowed_reliable (tiered value, not the netted sum); null = unknown or stripped
 }
 
 export const QUALIFY_TENANT_SCOPE = 'cross-tenant-bxr-indigo' as const;
