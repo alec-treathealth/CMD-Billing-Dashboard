@@ -87,7 +87,6 @@ export function FacilityPanel({
           facilities.map((f) => {
             const bucket = ratingBucket(f.rating);
             const pct = f.pctAllowedOfBilled;
-            const width = pct === null ? 0 : Math.max(0, Math.min(100, pct));
             const loc = [f.city, f.state].filter(Boolean).join(', ');
             const selected = selectedKey !== null && f.facilityKey === selectedKey;
             return (
@@ -137,14 +136,12 @@ export function FacilityPanel({
                     </span>
                   ) : null}
                 </div>
-                <div className="q-bar mt-[7px] h-[5px] overflow-hidden rounded-full bg-line">
-                  <span className="block h-full rounded-full" style={{ width: `${width}%` }} />
-                </div>
-                {/* Coverage bar (0059 trust signal): confirmed / estimate / unknown segments. The
-                    rating above already EXCLUDES the estimate segment (ruling Q2a) — this bar shows
-                    that honestly instead of hiding it. Segments reuse the q-class palette (amber
-                    estimate is never green). */}
-                <div className="mt-[5px] flex h-[4px] overflow-hidden rounded-full bg-line" aria-hidden>
+                {/* ONE bar per card (Alec's surgical ruling, 2026-07-22 — the old pct-width q-bar is
+                    REMOVED; two stacked bars was too much for the end user). The surviving bar is the
+                    0059 COVERAGE bar: confirmed / estimate / unknown segments, captioned below. The
+                    rating already EXCLUDES the estimate segment (ruling Q2a) — this shows that
+                    honestly. The pct itself lives in the top-right number (q-pct, rating-colored). */}
+                <div className="mt-[7px] flex h-[5px] overflow-hidden rounded-full bg-line" aria-hidden>
                   <CoverageSegment conf="confirmed" count={f.confirmedClaims} total={f.lineCount} />
                   <CoverageSegment conf="estimate" count={f.estimateClaims} total={f.lineCount} />
                   <CoverageSegment conf="unknown" count={f.unknownClaims} total={f.lineCount} />
