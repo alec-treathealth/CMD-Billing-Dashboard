@@ -1,32 +1,26 @@
 /**
- * Qualify cases-panel COHORT STATE — the single atomic object describing WHICH cases the desktop tab shows,
- * plus a pure reducer that owns every transition. Colocated with the contract/core (the pure Qualify logic
- * lives here). No React, no async — unit-tested directly in the root suite.
+ * Qualify cases-panel COHORT STATE — the single atomic object describing WHICH cases the drill shows, plus a
+ * pure reducer that owns every transition. Colocated with the contract/core (the pure Qualify logic lives
+ * here). No React, no async — unit-tested directly in the root suite.
  *
- * WHY a reducer. The cases panel's "reset to page 0 on any cohort change" rule was previously enforced by
- * remembering to call setPage(0)/setCursors([null]) in every handler — easy to forget, and impossible to
- * exercise in the static render harness. Folding payer/facility/window/page/cursors into ONE object
- * and routing every change through cohortReducer makes the reset STRUCTURAL: every action except
- * PAGE_NEXT/PAGE_PREV returns a fresh page:0 / cursors:[null], so a handler cannot forget.
- *
- * IDENTITY = (payer, facility, window) — NOTHING ELSE (ruling: the main top-bar search is the ONE
- * place an identifier is typed; the claims panel is a PURE DISPLAY of the landed facility, so the
- * in-panel prefix + group narrows — and their cohort fields — are GONE). CHANGE_WINDOW keeps the
- * facility — a window change is the same selection re-fetched, NOT a teleport back to rank-1.
+ * IDENTITY = (payer, facility, window) — NOTHING ELSE. Two prior fields are GONE:
+ *   - the in-panel prefix + group narrows (ruling: the main top-bar search is the ONE identifier entry;
+ *     the panel is a PURE display of the landed facility);
+ *   - the keyset PAGER (page + cursors[]): the facility drill now returns the WHOLE (facility, payer, window)
+ *     set in one shot (bounded, capped at QUALIFY_CASES_MAX), grouped by patient — there is no page to track.
+ * The reducer's remaining job is the identity transitions + the cohortKey the async-landing guard compares
+ * (a facility/window change under an in-flight fetch must be caught). CHANGE_WINDOW keeps the facility — a
+ * window change is the same selection re-fetched, NOT a teleport back to rank-1.
  */
-import type { QualifyWindowDays, QualifyCasesCursor } from './contract';
+import type { QualifyWindowDays } from './contract';
 
-/** The cases panel's full cohort identity + the keyset cursor stack that walks it. */
+/** The cases panel's full cohort identity. */
 export interface QualifyCohort {
   /** Resolved payer label. null before the first resolve, or after an unresolved search. */
   payer: string | null;
   /** Selected facility key (raw rollup text = QualifyFacility.facilityKey). null = none selected. */
   facility: string | null;
   window: QualifyWindowDays;
-  /** 0-based page index into the cursor stack. */
-  page: number;
-  /** cursors[p] = the keyset cursor that fetches page p; cursors[0] is always null (the first page). */
-  cursors: (QualifyCasesCursor | null)[];
 }
 
 export type QualifyCohortAction =
@@ -36,34 +30,21 @@ export type QualifyCohortAction =
   /** Facility drill within the SAME payer. Keeps payer + window. */
   | { type: 'SWITCH_FACILITY'; facility: string }
   /** Window change on the SAME payer + facility. Keeps facility (no rank-1 teleport). */
-  | { type: 'CHANGE_WINDOW'; window: QualifyWindowDays }
-  /** Pager forward: advance one page, pushing the cursor that fetches it. The only step that grows the stack. */
-  | { type: 'PAGE_NEXT'; nextCursor: QualifyCasesCursor | null }
-  /** Pager back: step back one page in the SAME stack (the target page's cursor is already stored). */
-  | { type: 'PAGE_PREV' };
+  | { type: 'CHANGE_WINDOW'; window: QualifyWindowDays };
 
 /** The default cohort — nothing resolved yet, window at the product default (QUALIFY_WINDOW_OPTIONS[0]). */
 export const INITIAL_COHORT: QualifyCohort = {
   payer: null,
   facility: null,
   window: 30,
-  page: 0,
-  cursors: [null],
 };
-
-/** The structural invariant: ANY cohort-identity change returns to page 0 with a single-null cursor stack.
- *  Applied by every action except PAGE_NEXT/PAGE_PREV, so no handler can forget to reset the pager. A fresh
- *  array each call — no two cohorts ever share a cursors reference. */
-function resetPaging(base: QualifyCohort): QualifyCohort {
-  return { ...base, page: 0, cursors: [null] };
-}
 
 /**
  * The cohort's FETCH IDENTITY — payer|facility|window. Stamp a cases fetch with this at issue; if it
  * no longer equals the current cohort's key when the response lands, the cohort changed under us and the
- * write is a stale wrong-cohort landing → discard it. The cohort analog of the genRef recency guard. `page`
- * is deliberately EXCLUDED: page races are caught by genRef's monotonic bump, not by identity. JSON-encoded
- * (not a delimiter join) so a payer/facility label containing spaces or pipes can't forge a key collision.
+ * write is a stale wrong-cohort landing → discard it. The cohort analog of the genRef recency guard.
+ * JSON-encoded (not a delimiter join) so a payer/facility label containing spaces or pipes can't forge a
+ * key collision.
  */
 export function cohortKey(c: QualifyCohort): string {
   return JSON.stringify([c.payer, c.facility, c.window]);
@@ -72,29 +53,14 @@ export function cohortKey(c: QualifyCohort): string {
 export function cohortReducer(state: QualifyCohort, action: QualifyCohortAction): QualifyCohort {
   switch (action.type) {
     case 'RESOLVE_PAYER':
-      // New cohort: set payer/facility/window, reset paging.
-      return resetPaging({
-        ...state,
-        payer: action.payer,
-        facility: action.facility,
-        window: action.window,
-      });
+      // New cohort: set payer/facility/window.
+      return { ...state, payer: action.payer, facility: action.facility, window: action.window };
     case 'SWITCH_FACILITY':
-      // Same payer, new facility: keep window, reset paging.
-      return resetPaging({ ...state, facility: action.facility });
+      // Same payer, new facility: keep window.
+      return { ...state, facility: action.facility };
     case 'CHANGE_WINDOW':
-      // Same payer + facility: keep facility (no rank-1 teleport), set window, reset paging.
-      return resetPaging({ ...state, window: action.window });
-    case 'PAGE_NEXT': {
-      // Forward one page; record the cursor that fetches it (= the prior page's nextCursor). Stack preserved.
-      const page = state.page + 1;
-      const cursors = state.cursors.slice();
-      cursors[page] = action.nextCursor;
-      return { ...state, page, cursors };
-    }
-    case 'PAGE_PREV':
-      // Back one page; the target page's cursor is already in the stack. Never below page 0.
-      return { ...state, page: Math.max(0, state.page - 1) };
+      // Same payer + facility: keep facility (no rank-1 teleport), set window.
+      return { ...state, window: action.window };
     default:
       return state;
   }

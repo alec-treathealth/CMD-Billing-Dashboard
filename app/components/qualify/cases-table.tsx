@@ -61,12 +61,7 @@ export function CasesTable({
   revealError,
   onToggleRevealAll,
   onViewCohort,
-  page,
-  hasPrev,
-  hasNext,
-  paging,
-  onPrevPage,
-  onNextPage,
+  capped = false,
   emptyIdentifierLabel = null,
 }: {
   claims: readonly QualifyClaim[];
@@ -92,14 +87,10 @@ export function CasesTable({
    *  group (non-PHI synthetic id — the server re-derives the cohort token) + the MASKED group label.
    *  Optional so render tests mount without it (the chip is omitted when absent). */
   onViewCohort?: (claimId: number, patientLabel: string) => void;
-  /** Cursor-pagination controls (1-based page for display), matching the collections <Pager> idiom. */
-  page: number;
-  hasPrev: boolean;
-  hasNext: boolean;
-  /** A page fetch is in flight — disables the pager (mirrors collections' `disabled={busy}`). */
-  paging: boolean;
-  onPrevPage: () => void;
-  onNextPage: () => void;
+  /** True when the window held MORE than QUALIFY_CASES_MAX (500) claims and the list was truncated to the
+   *  most recent by payment date — shows an honest "narrow the window" nudge. No pager (the drill is the
+   *  whole window, grouped by patient). */
+  capped?: boolean;
   /** Fix A honest-empty: when set (an identifier search resolved with no in-window claims at any ranked
    *  facility), the empty row reads "No in-window claims for <label> — try a wider window" instead of the
    *  payer-wide copy. NON-PHI (a ≤3 prefix echo, or 'this member' for an exact search). Null = payer-path copy. */
@@ -359,30 +350,12 @@ export function CasesTable({
           </tbody>
         </table>
       </div>
-      {/* Cursor pager — collections' "← Previous / Page N / Next →" idiom (inline to keep this
-          render-tested leaf free of the data-grid/@/ deps). Shown only when pagination is relevant. */}
-      {hasNext || page > 1 ? (
-        <div className="flex items-center justify-between border-t px-4 py-3">
-          <button
-            type="button"
-            onClick={onPrevPage}
-            disabled={!hasPrev || paging}
-            aria-label="Previous page"
-            className="rounded-md border border-teal200 bg-teal50 px-3 py-1 text-[12px] font-semibold text-teal700 transition-colors hover:bg-teal200 disabled:opacity-50"
-          >
-            ← Previous
-          </button>
-          <span className="text-xs text-muted-foreground">Page {page}</span>
-          <button
-            type="button"
-            onClick={onNextPage}
-            disabled={!hasNext || paging}
-            aria-label="Next page"
-            className="rounded-md border border-teal200 bg-teal50 px-3 py-1 text-[12px] font-semibold text-teal700 transition-colors hover:bg-teal200 disabled:opacity-50"
-          >
-            Next →
-          </button>
-        </div>
+      {/* Whole-window honesty: the drill shows every in-window claim (grouped by patient) — no pager. Only
+          when a facility exceeds the 500 safety cap do we say so, mirroring the server's `capped` flag. */}
+      {capped ? (
+        <p className="border-t px-4 py-3 text-center text-[12px] text-muted-foreground">
+          Showing the 500 most recent by payment date — narrow the window to see fewer.
+        </p>
       ) : null}
     </section>
   );

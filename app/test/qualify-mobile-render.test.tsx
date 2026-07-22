@@ -337,12 +337,24 @@ test('detail — no search context: no banner (opened from the strength list dir
   assert.ok(!html.includes('Show all'), 'no banner when opened without a search term');
 });
 
-test('detail — capped: counts read "N recent" so they are not mistaken for the facility total', () => {
-  const html = renderToStaticMarkup(
-    <DetailSheet facility={FAC} claims={MIXED_CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} capped searchContext={{ term: 'EAZ', payer: 'ANTHEM BLUE CROSS CA' }} />,
+test('detail — capped (>500 window): honest "narrow the window" nudge; NOT shown for a small set', () => {
+  const capped = renderToStaticMarkup(
+    <DetailSheet facility={FAC} claims={MIXED_CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} capped />,
   );
-  assert.ok(html.includes('Show all 3 recent'), 'the Show-all count is labeled recent when capped');
-  assert.ok(html.includes('most recent claims across payers'), 'a caption states the loaded set is the recent cap');
+  assert.ok(capped.includes('Showing the 500 most recent by payment date') && capped.includes('narrow the window'), 'the cap nudge shows when truncated');
+  const full = renderToStaticMarkup(
+    <DetailSheet facility={FAC} claims={MIXED_CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />,
+  );
+  assert.ok(!full.includes('narrow the window'), 'no nudge for a set under the cap (the whole window fits)');
+});
+
+test('detail — the full loaded window renders (no 50-cap truncation): every claim row shows', () => {
+  const html = renderToStaticMarkup(
+    <DetailSheet facility={FAC} claims={MIXED_CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />,
+  );
+  // MIXED_CASES = 3 claims across 2 payers; all three render as tappable rows (grouped by payer chips).
+  const rows = (html.match(/type="button"/g) || []).length;
+  assert.ok(rows >= 3, 'every loaded claim renders — nothing hidden behind a page');
 });
 
 // ── Area filter chips ────────────────────────────────────────────────────────────────────────────

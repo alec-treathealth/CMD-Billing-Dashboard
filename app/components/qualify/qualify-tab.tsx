@@ -7,12 +7,11 @@
  * hands plain, already-shaped data to the pure presentational children (facility panel, cases table,
  * VOB modal).
  *
- * COHORT STATE (qualifyCohort.ts): the cases panel's identity — payer / facility / window — and
- * its cursor stack (page + cursors[]) live in ONE atomic object driven by a pure reducer. Every handler
- * DISPATCHES an action; it never hand-resets page/cursors. The reducer owns the invariants:
- *   - any cohort change (payer/facility/window) resets to page 0 with a fresh cursor stack;
- *   - CHANGE_WINDOW keeps the facility — a window change is the same selection re-fetched for the
- *     new window, NOT a teleport back to rank-1.
+ * COHORT STATE (qualifyCohort.ts): the cases panel's identity — payer / facility / window — lives in ONE
+ * atomic object driven by a pure reducer. Every handler DISPATCHES an action. The drill returns the WHOLE
+ * (facility, payer, window) window in one shot (no keyset pager — capped at QUALIFY_CASES_MAX), so there is
+ * no page/cursor state; CHANGE_WINDOW keeps the facility (a window change is the same selection re-fetched,
+ * NOT a teleport back to rank-1).
  *
  * RECENT CLAIMS (ruling Q-4 + Direction B): the "Recent Claims" panel shows the most-recent CLAIMS (claim
  * grain — one row per charge) for the resolved payer FILTERED TO THE SELECTED FACILITY — never the payer-wide
@@ -54,7 +53,6 @@ import {
   type QualifySnapshot,
   type QualifyWindowDays,
   type QualifyClaim,
-  type QualifyCasesCursor,
   type QualifyMover,
   type QualifyPhi,
   type QualifyPatientCohort,
@@ -79,9 +77,10 @@ function formatWindowRange(startIso: string, endExclusiveIso: string): string {
   return `${mo(start)} ${start.getUTCDate()} – ${mo(endIncl)} ${endIncl.getUTCDate()}, ${endIncl.getUTCFullYear()}`;
 }
 
-/** The page-0 slice fetched for a facility (seed) — the shape both the resolve paths and the pager write. */
-type CasesPage = { claims: QualifyClaim[]; nextCursor: QualifyCasesCursor | null; hasMore: boolean };
-const EMPTY_PAGE: CasesPage = { claims: [], nextCursor: null, hasMore: false };
+/** The whole-window cases set fetched for a facility (seed) — the shape both resolve paths + a facility
+ *  switch write. `capped` = truncated at QUALIFY_CASES_MAX (drives the "narrow the window" nudge). */
+type CasesPage = { claims: QualifyClaim[]; capped: boolean };
+const EMPTY_PAGE: CasesPage = { claims: [], capped: false };
 
 
 export function QualifyTab({
@@ -105,13 +104,12 @@ export function QualifyTab({
     dispatch(action);
     return next;
   }, []);
-  // The current facility's page of cases + the last fetch's pagination result. facilityCases is the rendered
-  // rows; hasMore gates Next; nextCursor is the cursor a PAGE_NEXT will push. (These are fetch RESULTS, not
-  // cohort identity, so they live outside the reducer.) A dedicated transition so a facility/pager fetch
-  // doesn't co-mingle with the payer-resolve pending state.
+  // The selected facility's WHOLE-window cases (claim grain) + whether the set was truncated at the cap.
+  // facilityCases is the rendered rows; `capped` drives the "narrow the window" nudge. (Fetch RESULTS, not
+  // cohort identity, so they live outside the reducer.) A dedicated transition so a facility fetch doesn't
+  // co-mingle with the payer-resolve pending state.
   const [facilityCases, setFacilityCases] = useState<QualifyClaim[]>([]);
-  const [hasMore, setHasMore] = useState(false);
-  const [nextCursor, setNextCursor] = useState<QualifyCasesCursor | null>(null);
+  const [capped, setCapped] = useState(false);
   const [isFacilityPending, startFacilityTransition] = useTransition();
   // LOC filter chips (IP / OP / Both) — pure client-side view filter over the facility panel.
   const [locFilter, setLocFilter] = useState<QualifyLocFilter>(null);
@@ -181,15 +179,15 @@ export function QualifyTab({
   const fetchSeed = useCallback(
     async (payer: string, facility: string, w: QualifyWindowDays): Promise<CasesPage> => {
       const res = await getQualifyFacilityCases({ payer, facility, windowDays: w });
-      return { claims: res.claims, nextCursor: res.nextCursor, hasMore: res.hasMore };
+      return { claims: res.claims, capped: res.capped };
     },
     [],
   );
 
-  // Fetch the cases for a given cohort (a standalone cases fetch — facility switch / pager step; NOT a
-  // snapshot re-resolve). Derives the cursor from cohort.cursors[cohort.page]. Guarded twice:
-  // genRef (recency — catches pagination races + supersession) AND cohortKey (identity — discards a landing
-  // whose cohort changed underneath, belt-and-suspenders over the reducer's structural reset).
+  // Fetch the WHOLE-window cases for a given cohort (a standalone fetch — a facility switch; NOT a snapshot
+  // re-resolve). No cursor: the drill returns the full set (capped at QUALIFY_CASES_MAX). Guarded twice:
+  // genRef (recency — catches supersession) AND cohortKey (identity — discards a landing whose cohort changed
+  // underneath, belt-and-suspenders over the reducer).
   const fetchCases = useCallback(
     (c: QualifyCohort) => {
       const payer = c.payer;
@@ -198,20 +196,13 @@ export function QualifyTab({
       const gen = ++genRef.current;
       const key = cohortKey(c);
       resetReveal();
-      const cursor = c.cursors[c.page] ?? null;
       startFacilityTransition(async () => {
         try {
-          const res = await getQualifyFacilityCases({
-            payer,
-            facility,
-            windowDays: c.window,
-            cursor,
-          });
-          if (genRef.current !== gen) return; // superseded by a newer fetch (recency / pagination guard)
+          const res = await getQualifyFacilityCases({ payer, facility, windowDays: c.window });
+          if (genRef.current !== gen) return; // superseded by a newer fetch (recency guard)
           if (cohortKey(cohortRef.current) !== key) return; // cohort changed underneath — stale landing
           setFacilityCases(res.claims);
-          setHasMore(res.hasMore);
-          setNextCursor(res.nextCursor);
+          setCapped(res.capped);
         } catch {
           if (genRef.current !== gen) return;
           if (cohortKey(cohortRef.current) !== key) return;
@@ -228,8 +219,7 @@ export function QualifyTab({
     setSnapshot(snap);
     apply(action);
     setFacilityCases(seed.claims);
-    setHasMore(seed.hasMore);
-    setNextCursor(seed.nextCursor);
+    setCapped(seed.capped);
   }, [apply]);
 
   // Resolve by member-id / alpha-prefix SEARCH → a brand-new payer cohort landing on the searched
@@ -322,8 +312,7 @@ export function QualifyTab({
             if (genRef.current !== gen) return;
             setSnapshot(snap);
             setFacilityCases(seed.claims);
-            setHasMore(seed.hasMore);
-            setNextCursor(seed.nextCursor);
+            setCapped(seed.capped);
           } else {
             const rank1 = snap.resolved ? snap.facilities[0]?.facilityKey ?? null : null;
             const seed = payerName && rank1 ? await fetchSeed(payerName, rank1, w) : EMPTY_PAGE;
@@ -381,17 +370,6 @@ export function QualifyTab({
       }
     })();
   }, []);
-
-  // Pager steps — walk the SAME cohort's cursor stack. PAGE_PREV steps back to the stored cursor; PAGE_NEXT
-  // advances, pushing the last fetch's nextCursor. Guarded by hasPrev/hasMore at the call.
-  const goPrevPage = useCallback(() => {
-    const c = cohortRef.current;
-    if (c.page > 0 && c.facility) fetchCases(apply({ type: 'PAGE_PREV' }));
-  }, [apply, fetchCases]);
-  const goNextPage = useCallback(() => {
-    const c = cohortRef.current;
-    if (hasMore && c.facility) fetchCases(apply({ type: 'PAGE_NEXT', nextCursor }));
-  }, [apply, fetchCases, hasMore, nextCursor]);
 
   // On load, land POPULATED: fetch the "Heating up" movers (for the quick-pick chip row) and resolve
   // the top one (highest distinct-patient mover). If there are no movers or the fetch fails, fall
@@ -640,12 +618,7 @@ export function QualifyTab({
               revealError={revealError}
               onToggleRevealAll={() => setRevealAll((v) => !v)}
               onViewCohort={viewCohort}
-              page={cohort.page + 1}
-              hasPrev={cohort.page > 0}
-              hasNext={hasMore}
-              paging={isFacilityPending}
-              onPrevPage={goPrevPage}
-              onNextPage={goNextPage}
+              capped={capped}
               emptyIdentifierLabel={emptyIdentifierLabel}
             />
           </div>

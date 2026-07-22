@@ -50,13 +50,11 @@ export interface QualifyFacilityCasesInput {
    *                 index is materialized (0036/0059); a prefix index would be its own migration.
    *                 Composable with the member narrows (ANDed). */
   filter?: { prefix?: string; memberId?: string; group?: string };
-  /** Forward keyset cursor for page N>0 (null/omitted = first page). Carries no PHI — see QualifyCasesCursor. */
-  cursor?: QualifyCasesCursor | null;
   /** ALL-PAYERS facility view (mobile detail sheet): when true, the drill drops the `primary_payer = $payer`
    *  filter and returns EVERY payer's recent patients at the facility, each row tagged with its own payerName.
-   *  `payer` is still passed (audit context) but not used to filter. Loads a single larger page (cap 50, the
-   *  reveal batch cap) — no cursor — so the sheet can group/chip client-side. Omitted/false = the legacy
-   *  single-payer, paged, prefix-filterable drill the desktop cases table uses (UNCHANGED). */
+   *  `payer` is still passed (audit context) but not used to filter. Omitted/false = the single-payer drill
+   *  the desktop cases table uses. Both paths now return the WHOLE window (capped at QUALIFY_CASES_MAX), no
+   *  keyset pager — the panel groups by patient client-side and reveals per patient. */
   allPayers?: boolean;
 }
 
@@ -94,23 +92,15 @@ export interface QualifyPatientCohort {
   tenantScope: typeof QUALIFY_TENANT_SCOPE;
 }
 
-/** Forward keyset cursor for the claims panel: the last returned claim's PAYMENT date + synthetic id — both
- *  NON-PHI (lastPaymentReceived = that claim's payment_received, the sort axis; id = the rollup/reveal
- *  synthetic key). The drill sorts by payment date, so the cursor keys on it (was lastDos/charge_date). No PHI. */
-export interface QualifyCasesCursor {
-  lastPaymentReceived: string | null;
-  id: number;
-}
-
-/** Facility-scoped claim lines + the amounts-capability flag (dollar fields already stripped when false). */
+/** Facility-scoped claim lines + the amounts-capability flag (dollar fields already stripped when false).
+ *  The drill returns the WHOLE (facility, payer, window) set (no keyset pager), capped at QUALIFY_CASES_MAX. */
 export interface QualifyFacilityCases {
   claims: QualifyClaim[];
   viewerHasAmountsCapability: boolean;
   tenantScope: typeof QUALIFY_TENANT_SCOPE;
-  /** Keyset cursor to fetch the next page, or null at the end of the walk. */
-  nextCursor: QualifyCasesCursor | null;
-  /** True when rows exist beyond this page (computed via a limit+1 over-fetch, never a count). */
-  hasMore: boolean;
+  /** True when the window held MORE than QUALIFY_CASES_MAX claims and the list was truncated to the most
+   *  recent (by payment date) — drives the honest "narrow the window" nudge (limit+1 over-fetch, never a count). */
+  capped: boolean;
 }
 
 /** member-id EXACT vs 3-letter alpha-PREFIX — the SNIFFED PHI-token kind (sniffed SERVER-SIDE, never

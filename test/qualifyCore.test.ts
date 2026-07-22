@@ -19,8 +19,7 @@ import {
 import { requireQualifyPrincipalFromAccess } from '../app/lib/qualify/principal.js';
 import { QUALIFY_MIN_LINES } from '../app/lib/qualify/rating.js';
 import { qualifyWindowBounds } from '../app/lib/qualify/contract.js';
-import type { QualifyCasesCursor, QualifyFacilityCases } from '../app/lib/qualify/contract.js';
-import type { QualifyClaimRow } from '../src/collections/qualifyQuery.js';
+import { QUALIFY_CASES_MAX, type QualifyClaimRow } from '../src/collections/qualifyQuery.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../app/lib/views.js';
 
 // Sentinel DOLLAR values — distinctive so a wire-level scan can prove they never appear when stripped.
@@ -52,7 +51,6 @@ interface Cap {
     entityIds: string[];
     prefixToken: string | null;
     memberToken: string | null;
-    cursor: QualifyCasesCursor | null;
     limit: number;
     allPayers: boolean | undefined;
   }>;
@@ -82,7 +80,7 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
       return '405 recovery';
     },
     loadFacilityCases: async (payer, facility, _f, _t, entityIds, opts) => {
-      c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, memberToken: opts.memberToken, cursor: opts.cursor, limit: opts.limit, allPayers: opts.allPayers });
+      c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, memberToken: opts.memberToken, limit: opts.limit, allPayers: opts.allPayers });
       return CASE_ROWS;
     },
     // Phase 3 fakes: a known claim id resolves to a prefix token; the cohort clears the floor.
@@ -368,7 +366,7 @@ test('facility-drill: maps each row primary_payer → payerName (the payer chip/
   assert.equal(res.claims[0]!.payerName, 'AETNA'); // CASE_ROWS carries primary_payer: 'AETNA'
 });
 
-test('facility-drill allPayers: threads the flag + 50-cap page size (no cursor/prefix) and tags each row its own payer', async () => {
+test('facility-drill allPayers: threads the flag + the whole-window cap (no prefix) and tags each row its own payer', async () => {
   const c = cap();
   const MIXED = [
     { ...CASE_ROWS[0]!, id: 1, primary_payer: 'AETNA' },
@@ -377,15 +375,14 @@ test('facility-drill allPayers: threads the flag + 50-cap page size (no cursor/p
   const res = await getQualifyFacilityCasesCore(
     makeDeps(SUPER, c, {
       loadFacilityCases: async (payer, facility, _from, _to, entityIds, opts) => {
-        c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, memberToken: opts.memberToken, cursor: opts.cursor, limit: opts.limit, allPayers: opts.allPayers });
+        c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, memberToken: opts.memberToken, limit: opts.limit, allPayers: opts.allPayers });
         return MIXED;
       },
     }),
     { ...FAC_CASES_IN, allPayers: true },
   );
   assert.equal(c.facilityCasesArgs[0]!.allPayers, true, 'allPayers reaches the loader');
-  assert.equal(c.facilityCasesArgs[0]!.limit, 50, 'the all-payers view loads the 50-cap page');
-  assert.equal(c.facilityCasesArgs[0]!.cursor, null, 'no cursor on the all-payers single page');
+  assert.equal(c.facilityCasesArgs[0]!.limit, QUALIFY_CASES_MAX, 'both paths load the whole window (QUALIFY_CASES_MAX), not a 50-cap page');
   assert.equal(c.facilityCasesArgs[0]!.prefixToken, null, 'no server-side prefix narrow on the all-payers view (no search term here)');
   assert.equal(c.facilityCasesArgs[0]!.memberToken, null, 'no exact-member narrow on the all-payers view (no search term here)');
   assert.deepEqual(res.claims.map((x) => x.payerName), ['AETNA', 'CIGNA'], 'each row carries its OWN payer');
@@ -526,7 +523,7 @@ function prefixExactDeps(c: Cap): QualifyDeps {
     // Deterministic, term-distinct, opaque-shaped token — models the keyed-HMAC blind index per prefix.
     mintToken: (term, kind) => `tok:${kind}:${term.toUpperCase()}`,
     loadFacilityCases: async (_p, _f, _from, _to, _e, opts) => {
-      c.facilityCasesArgs.push({ payer: _p, facility: _f, entityIds: _e, prefixToken: opts.prefixToken, memberToken: opts.memberToken, cursor: opts.cursor, limit: opts.limit, allPayers: opts.allPayers });
+      c.facilityCasesArgs.push({ payer: _p, facility: _f, entityIds: _e, prefixToken: opts.prefixToken, memberToken: opts.memberToken, limit: opts.limit, allPayers: opts.allPayers });
       // Simulate the DB predicate member_id_prefix_bidx = $tok (equality on the prefix's own blind index).
       if (opts.prefixToken) {
         const want = opts.prefixToken.replace('tok:prefix:', '');
@@ -560,79 +557,39 @@ test('facility-drill prefix: a sub-3-char prefix mints NO token → no filter, n
   assert.ok(!('fields' in audit.detail), 'no fields recorded when no filter is applied');
 });
 
-test('facility-drill cursor: a malformed cursor is clamped to the first page (never reaches the loader raw)', async () => {
-  const c = cap();
-  // id 0 is invalid (must be ≥ 1) → clamped to null.
-  await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { ...FAC_CASES_IN, cursor: { lastPaymentReceived: '2026-07-01', id: 0 } });
-  assert.equal(c.facilityCasesArgs[0]!.cursor, null, 'malformed cursor → first page');
-});
-
-test('facility-drill pagination: a single-row result → hasMore false, nextCursor null', async () => {
+// ── FACILITY DRILL — whole window, no pager, safety cap (Part 1: keyset pager retired) ───────────────
+test('facility-drill: the whole window returns in one shot — a small set is NOT capped', async () => {
   const res = await getQualifyFacilityCasesCore(makeDeps(SUPER, cap()), FAC_CASES_IN); // default fake returns 1 row
-  assert.equal(res.hasMore, false);
-  assert.equal(res.nextCursor, null);
+  assert.equal(res.capped, false, 'under the cap → not capped');
   assert.equal(res.claims.length, 1);
+  assert.ok(!('nextCursor' in res) && !('hasMore' in res), 'the pager fields are gone from the contract');
 });
 
-// A synthetic cohort strictly larger than one page, PRE-SORTED in the query order (payment_date desc nulls
-// last, id desc): 20 payment-dated rows then a 15-row null-payment-date tail. The fake models keyset
-// pagination over this total order (find the cursor row by its unique id, return the slice after it,
-// over-fetching by one like the real builder) so the CORE's cursor→nextCursor→trim→hasMore threading is
-// exercised end to end. dos is a fixed service date — it is NOT the sort axis anymore (payment_date is).
-const WALK_ROWS: QualifyClaimRow[] = Array.from({ length: 35 }, (_, i) => ({
-  id: 1000 - i, // strictly descending → matches `id desc` within the pre-sorted array
-  member_id_bidx: 'WALKER',
+// A fake facility that OVER-FETCHES by one past the cap (the builder binds limit+1): the core must set
+// `capped` and TRIM to QUALIFY_CASES_MAX, keeping the most recent (the loader already returns payment-desc).
+const overCapRows: QualifyClaimRow[] = Array.from({ length: QUALIFY_CASES_MAX + 1 }, (_, i) => ({
+  id: 100000 - i, // strictly descending, mirrors payment_date desc, id desc
+  member_id_bidx: `M_${i}`,
   facility: '405 recovery',
   facility_name: '405 RECOVERY',
   primary_payer: 'AETNA',
   program: 'OP' as const,
-  dos: '2026-06-15', // service date — displayed only; sorting keys on payment_date below
-  payment_date: i < 20 ? `2026-07-${String(31 - i).padStart(2, '0')}` : null, // 20 dated (desc), then a null tail
+  dos: '2026-06-15',
+  payment_date: `2026-07-01`,
   pct_allowed: 50,
   billed: 100,
   allowed: 50,
   allowed_tier: 'cd',
 }));
-function walkDeps(c: Cap): QualifyDeps {
-  return makeDeps(SUPER, c, {
-    loadFacilityCases: async (_p, _f, _from, _to, _e, opts) => {
-      const cur = opts.cursor;
-      const start = cur ? WALK_ROWS.findIndex((r) => r.id === cur.id) + 1 : 0;
-      return WALK_ROWS.slice(start, start + opts.limit + 1); // over-fetch by one, mirrors buildFacilityCasesQuery
-    },
-  });
-}
 
-test('facility-drill pagination: cursor walk over a >15-row cohort covers every row EXACTLY once (no repeats/gaps)', async () => {
-  const seen: number[] = [];
-  let cursor: QualifyCasesCursor | null = null;
-  let pages = 0;
-  for (;;) {
-    const res: QualifyFacilityCases = await getQualifyFacilityCasesCore(walkDeps(cap()), { ...FAC_CASES_IN, cursor });
-    assert.ok(res.claims.length <= 15, 'never returns more than one page');
-    seen.push(...res.claims.map((x) => x.id));
-    pages += 1;
-    if (!res.hasMore) {
-      assert.equal(res.nextCursor, null, 'no cursor once the walk is done');
-      break;
-    }
-    assert.ok(res.nextCursor, 'hasMore ⇒ a nextCursor');
-    cursor = res.nextCursor;
-    assert.ok(pages < 10, 'walk terminates');
-  }
-  assert.equal(pages, 3, '35 rows / 15 per page → 3 pages (15 + 15 + 5)');
-  assert.equal(seen.length, WALK_ROWS.length, 'every row seen');
-  assert.equal(new Set(seen).size, WALK_ROWS.length, 'NO repeats');
-  assert.deepEqual(seen, WALK_ROWS.map((r) => r.id), 'walk order == the sorted set — no gaps, no reordering');
-});
-
-test('facility-drill pagination: the second page boundary produces AND consumes a null-lastPaymentReceived cursor', async () => {
-  const p0 = await getQualifyFacilityCasesCore(walkDeps(cap()), FAC_CASES_IN);
-  assert.equal(p0.nextCursor!.lastPaymentReceived, '2026-07-17', 'page-0 cursor is the 15th row (a dated payment date)');
-  const p1 = await getQualifyFacilityCasesCore(walkDeps(cap()), { ...FAC_CASES_IN, cursor: p0.nextCursor });
-  assert.equal(p1.nextCursor!.lastPaymentReceived, null, 'page-1 boundary falls in the null-payment-date tail → null cursor');
-  const p2 = await getQualifyFacilityCasesCore(walkDeps(cap()), { ...FAC_CASES_IN, cursor: p1.nextCursor });
-  assert.equal(p2.hasMore, false, 'page 2 finishes the walk');
+test('facility-drill: a window over the cap sets `capped` and truncates to QUALIFY_CASES_MAX (most recent kept)', async () => {
+  const res = await getQualifyFacilityCasesCore(
+    makeDeps(SUPER, cap(), { loadFacilityCases: async () => overCapRows }),
+    FAC_CASES_IN,
+  );
+  assert.equal(res.capped, true, 'more than the cap → capped');
+  assert.equal(res.claims.length, QUALIFY_CASES_MAX, 'trimmed to exactly the cap');
+  assert.equal(res.claims[0]!.id, overCapRows[0]!.id, 'the most-recent row is kept (the over-fetch tail is dropped)');
 });
 
 // ── window math ──────────────────────────────────────────────────────────────────────────────────

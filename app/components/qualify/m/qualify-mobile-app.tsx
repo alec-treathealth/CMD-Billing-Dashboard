@@ -70,9 +70,9 @@ export function QualifyMobileApp({
   // Facility-scoped claim lines for the open detail sheet: null === loading, [] === none. `claim` is the
   // single claim line whose ClaimDetailSheet is layered above the list (null === none open).
   const [facilityCases, setFacilityCases] = useState<QualifyClaim[] | null>(null);
-  // The facility drill loads ALL payers at the facility in ONE page (cap 50 = the reveal batch cap);
-  // `casesCapped` records that more exist so the sheet labels its counts "N recent", never the facility
-  // total. There is no cursor pager on mobile — the sheet groups + filters the loaded set client-side.
+  // The facility drill loads ALL payers at the facility for the WHOLE window (capped at QUALIFY_CASES_MAX
+  // = 500, not the 50 reveal cap anymore); `casesCapped` is true only when that safety cap truncated the
+  // set, driving an honest "narrow the window" nudge. No pager — the sheet groups + filters client-side.
   const [casesCapped, setCasesCapped] = useState(false);
   const [claim, setClaim] = useState<QualifyClaim | null>(null);
   // PHI reveal (facility-scoped, audited): `revealedPhi` caches the fetched identifiers for the OPEN
@@ -258,12 +258,12 @@ export function QualifyMobileApp({
     setRevealError(null);
   }
 
-  // The DRILL stream: fetch cohort `c`'s facility cases (ALL payers at the facility, one page ≤50) and paint
-  // ONLY if the landing still wins BOTH drill guards — facilitySeq (recency: close/reopen races) AND cohortKey
-  // (identity: the cohort didn't change underneath). Writes ONLY facilityCases + casesCapped (+ bumps
-  // facilitySeq) — never resolution state. Shared by the tap-open and the same-payer window refresh;
-  // payer/facility/window all come from `c`. No cursor/prefix is threaded: the sheet groups + filters the
-  // loaded set client-side, so there is no server pager or server-side prefix narrow on mobile.
+  // The DRILL stream: fetch cohort `c`'s facility cases (ALL payers at the facility, the WHOLE window capped
+  // at 500) and paint ONLY if the landing still wins BOTH drill guards — facilitySeq (recency: close/reopen
+  // races) AND cohortKey (identity: the cohort didn't change underneath). Writes ONLY facilityCases +
+  // casesCapped (+ bumps facilitySeq) — never resolution state. Shared by the tap-open and the same-payer
+  // window refresh; payer/facility/window all come from `c`. No cursor is threaded (no server pager); the
+  // sheet groups + filters the loaded set client-side.
   function fetchDrill(c: QualifyCohort) {
     const seq = ++facilitySeq.current;
     const key = cohortKey(c);
@@ -277,7 +277,7 @@ export function QualifyMobileApp({
       .then((r) => {
         if (!drillLandingWins(seq, facilitySeq.current, key, cohortKey(cohortRef.current))) return;
         setFacilityCases(r.claims);
-        setCasesCapped(r.hasMore);
+        setCasesCapped(r.capped);
       })
       .catch(() => {
         if (!drillLandingWins(seq, facilitySeq.current, key, cohortKey(cohortRef.current))) return;

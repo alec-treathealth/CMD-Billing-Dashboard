@@ -28,8 +28,12 @@ import { CMD_EXPLORER_CHARGE_ROLLUP, type ParamAdder } from './cmdExplorerQuery.
 /** A member-id EXACT match vs a 3-letter alpha-PREFIX match — sniffed server-side, never client-declared. */
 export type QualifyMatchKind = 'member_id' | 'prefix';
 
-/** Page size for the recent-claims panel (claim grain; ruling: no separate cohort floor — mask + audited reveal is the control). */
-export const QUALIFY_CASES_LIMIT = 15;
+/** Safety CAP for the facility recent-claims drill (claim grain). The drill is (facility, payer, window)-
+ *  bounded — a bounded set, not an unbounded scan — so it returns the WHOLE window, not a keyset page. This
+ *  is only a backstop: a facility with more than QUALIFY_CASES_MAX in-window claims is truncated to the most
+ *  recent (by payment date) and the UI shows an honest "narrow the window" nudge (the `capped` flag). No
+ *  cohort floor — mask + per-patient audited reveal is the PHI control. */
+export const QUALIFY_CASES_MAX = 500;
 
 /** Movers suppression floors + cap (ruling Q-B). */
 export const QUALIFY_MOVERS_MIN_PATIENTS = 5; // thisWindow distinct patients >= this to appear at all
@@ -285,10 +289,9 @@ export function buildFacilityCasesQuery(
     /** Opaque group_number_bidx token (already HMAC'd upstream) — EXACT group-number narrow (the employer
      *  proxy; Phase 2). Composable: ANDs with the member narrows rather than competing with them. */
     groupToken?: string | null;
-    /** Forward keyset cursor (previous page's {lastPaymentReceived, id}); null/omitted = first page. The
-     *  drill sorts by PAYMENT date, so the cursor keys on payment_date (not the service date). */
-    cursor?: { lastPaymentReceived: string | null; id: number } | null;
-    /** Page size; the query OVER-FETCHES by one (binds limit+1) so the caller computes hasMore, not a count. */
+    /** Safety cap (default QUALIFY_CASES_MAX). The query OVER-FETCHES by one (binds limit+1) so the caller
+     *  detects truncation (`capped`) from the extra row, never a count. NO keyset cursor — the drill returns
+     *  the whole (facility, payer, window) set in one shot (bounded), ordered payment_date desc. */
     limit?: number;
     /** ALL-PAYERS view (mobile detail sheet): drop the `primary_payer = $payer` filter so EVERY payer's
      *  claims at the facility come back (each row tagged with its own primary_payer). `payer` is then
@@ -343,26 +346,14 @@ export function buildFacilityCasesQuery(
     `and payment_received >= ${f}::date and payment_received < ${t}::date` +
     idCond +
     grpCond;
-  // Keyset pagination (OUTER WHERE on the agg subquery). DESC order ⇒ walk STRICTLY past the cursor, ties
-  // broken by the globally-unique charge id, and the NULLS-LAST tail handled explicitly so the walk never
-  // stalls. `agg.payment_date` is 'YYYY-MM-DD' text (lexical == chronological) — the sort/keyset axis.
-  const cursor = opts.cursor ?? null;
-  let keyset = '';
-  if (cursor) {
-    if (cursor.lastPaymentReceived !== null) {
-      const cv = add(cursor.lastPaymentReceived);
-      const ci = add(cursor.id);
-      keyset = `where (agg.payment_date < ${cv} or (agg.payment_date = ${cv} and agg.id < ${ci}) or agg.payment_date is null) `;
-    } else {
-      const ci = add(cursor.id);
-      keyset = `where (agg.payment_date is null and agg.id < ${ci}) `;
-    }
-  }
-  // OVER-FETCH by one (limit+1): the caller trims to `limit` and infers hasMore from the extra row.
-  const lim = add((opts.limit ?? QUALIFY_CASES_LIMIT) + 1);
+  // NO keyset cursor: the drill returns the WHOLE (facility, payer, window) set in one shot (bounded). We
+  // OVER-FETCH by one (limit+1) purely so the caller detects truncation at the QUALIFY_CASES_MAX safety cap
+  // (the `capped` flag) from the extra row — never a count.
+  const lim = add((opts.limit ?? QUALIFY_CASES_MAX) + 1);
   // `agg` alias so FACILITY_DIM_JOINS (which references agg.facility) applies unchanged. ORDER BY the
   // PAYMENT date (payment_date = payment_received, the window axis) so the list reads most-recently-paid
-  // first and the order matches the keyset cursor. dos (service date) rides along as a displayed column.
+  // first; the safety cap therefore keeps the MOST RECENT when a facility exceeds it. dos (service date)
+  // rides along as a displayed column.
   const sql =
     'select agg.id, agg.member_id_bidx, agg.facility, agg.primary_payer, ' +
     'coalesce(max(f.facility_name), agg.facility) as facility_name, ' +
@@ -370,7 +361,6 @@ export function buildFacilityCasesQuery(
     'agg.dos, agg.payment_date, agg.pct_allowed, agg.billed, agg.allowed, agg.allowed_tier ' +
     `from (${inner}) agg ` +
     FACILITY_DIM_JOINS +
-    keyset +
     'group by agg.id, agg.member_id_bidx, agg.facility, agg.primary_payer, agg.dos, agg.payment_date, agg.pct_allowed, agg.billed, agg.allowed, agg.allowed_tier ' +
     `order by agg.payment_date desc nulls last, agg.id desc limit ${lim}`;
   return { sql, params };

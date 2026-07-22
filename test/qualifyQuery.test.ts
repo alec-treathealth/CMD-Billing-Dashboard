@@ -7,7 +7,7 @@ import {
   buildIdentifierLandingFacilityQuery,
   buildFacilityCasesQuery,
   buildMoversQuery,
-  QUALIFY_CASES_LIMIT,
+  QUALIFY_CASES_MAX,
   QUALIFY_MOVERS_MIN_PATIENTS,
   QUALIFY_MOVERS_MIN_CHARGES,
 } from '../src/collections/qualifyQuery.js';
@@ -169,12 +169,13 @@ test('buildFacilityCasesQuery: claim grain (NO member_id_bidx dedup), raw-facili
     'NO tier FILTER on the drill — e2 claims stay visible (projection only, ruling Q2a)',
   );
   assert.match(sql, /agg\.allowed_tier/, 'the raw tier IS projected for the server-side confidence collapse');
-  // Pagination OVER-FETCH: with no explicit limit the query binds QUALIFY_CASES_LIMIT + 1 (fetch 16, keep 15).
-  assert.equal(params[5], QUALIFY_CASES_LIMIT + 1, 'over-fetches by one (limit+1) so the caller computes hasMore');
+  // OVER-FETCH: with no explicit limit the query binds QUALIFY_CASES_MAX + 1 (the safety-cap backstop, so
+  // the caller detects truncation from the extra row — NOT a 15/page pager).
+  assert.equal(params[5], QUALIFY_CASES_MAX + 1, 'over-fetches by one (cap+1) so the caller detects `capped`');
   assert.deepEqual(params.slice(0, 5), [BOTH, 'AETNA', '405 recovery', '2026-06-17', '2026-07-17']);
-  // No filter / no cursor by default: no identifier predicate, no outer keyset WHERE.
+  // No filter by default: no identifier predicate. And NO keyset WHERE ever exists now (the pager is gone).
   assert.ok(!/member_id_prefix_bidx = /.test(sql) && !/member_id_bidx = /.test(sql), 'no identifier PREDICATE when none supplied (projection is fine)');
-  assert.ok(!/agg\.payment_date </.test(sql) && !/agg\.payment_date is null and agg\.id </.test(sql), 'no keyset WHERE on page 0');
+  assert.ok(!/agg\.payment_date </.test(sql) && !/agg\.payment_date is null and agg\.id </.test(sql), 'no keyset WHERE — the whole window returns in one shot');
 });
 
 // ── buildFacilityCasesQuery: PREFIX narrow → member_id_prefix_bidx (the STARTS-WITH bleed guard). ─────
@@ -185,7 +186,7 @@ test('buildFacilityCasesQuery: a prefix token adds member_id_prefix_bidx to the 
   assert.match(sql, /payment_received < \$5::date and member_id_prefix_bidx = \$6\)? agg/, 'prefix predicate is the last inner condition');
   assert.ok(!sql.includes('member_id_bidx = '), 'prefix mode does NOT touch the exact-member column');
   assert.equal(params[5], TOKEN, 'prefix token bound (opaque; never the raw prefix)');
-  assert.equal(params[6], QUALIFY_CASES_LIMIT + 1, 'limit+1 follows the prefix param');
+  assert.equal(params[6], QUALIFY_CASES_MAX + 1, 'cap+1 follows the prefix param');
 });
 
 // ── buildFacilityCasesQuery: EXACT MEMBER narrow → member_id_bidx (claims for that member only). ──────
@@ -205,41 +206,13 @@ test('buildFacilityCasesQuery: a member token adds member_id_bidx to the INNER W
   assert.ok(!both.sql.includes('member_id_prefix_bidx'), 'the prefix token is not applied when the member token is present');
 });
 
-// ── buildFacilityCasesQuery: keyset lives in the OUTER WHERE (agg.payment_date/id — the payment-date axis). ─
-test('buildFacilityCasesQuery: a non-null cursor adds the NULLS-LAST keyset to the OUTER WHERE, before ORDER BY', () => {
-  const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
-    cursor: { lastPaymentReceived: '2026-07-01', id: 500 },
-  });
-  assert.match(
-    sql,
-    /where \(agg\.payment_date < \$6 or \(agg\.payment_date = \$6 and agg\.id < \$7\) or agg\.payment_date is null\) group by/,
-    'DESC keyset: past the cursor, id tiebreak, plus the whole NULL tail — then GROUP BY',
-  );
-  assert.equal(params[5], '2026-07-01', 'cursor lastPaymentReceived bound as $6');
-  assert.equal(params[6], 500, 'cursor id bound as $7');
-  assert.equal(params[7], QUALIFY_CASES_LIMIT + 1, 'limit+1 last');
-  assert.match(sql, /order by agg\.payment_date desc nulls last, agg\.id desc/, 'ORDER BY on the per-claim PAYMENT date');
-});
-
-test('buildFacilityCasesQuery: a null-lastPaymentReceived cursor uses the IS NULL AND id branch (null-tail walk)', () => {
-  const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
-    cursor: { lastPaymentReceived: null, id: 500 },
-  });
-  assert.match(sql, /where \(agg\.payment_date is null and agg\.id < \$6\) group by/, 'null-tail branch ties by id only');
-  assert.equal(params[5], 500, 'cursor id bound as $6');
-});
-
-test('buildFacilityCasesQuery: prefix + cursor COEXIST (inner identifier WHERE + outer keyset WHERE)', () => {
-  const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
-    prefixToken: TOKEN,
-    cursor: { lastPaymentReceived: '2026-07-01', id: 500 },
-  });
-  assert.match(sql, /and member_id_prefix_bidx = \$6\)? agg/, 'prefix in the inner WHERE');
-  assert.match(sql, /where \(agg\.payment_date < \$7 or \(agg\.payment_date = \$7 and agg\.id < \$8\) or agg\.payment_date is null\) group by/, 'keyset in the outer WHERE');
-  assert.equal(params[5], TOKEN);
-  assert.equal(params[6], '2026-07-01');
-  assert.equal(params[7], 500);
-  assert.equal(params[8], QUALIFY_CASES_LIMIT + 1);
+// ── buildFacilityCasesQuery: NO keyset pager — the whole window returns in one shot (cap+1 over-fetch). ────
+test('buildFacilityCasesQuery: no cursor param exists — no keyset WHERE, single capped fetch', () => {
+  const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH);
+  assert.ok(!/agg\.payment_date </.test(sql), 'no keyset comparison anywhere');
+  assert.ok(!/where \(agg\./.test(sql), 'no OUTER keyset WHERE on the agg subquery');
+  assert.match(sql, /order by agg\.payment_date desc nulls last, agg\.id desc/, 'ORDER BY the payment-date axis, cap keeps the most recent');
+  assert.equal(params[params.length - 1], QUALIFY_CASES_MAX + 1, 'the last bind is the cap+1 over-fetch');
 });
 
 // ── buildMoversQuery: distinct-patient delta + both suppression floors + clamp. ──────────────────

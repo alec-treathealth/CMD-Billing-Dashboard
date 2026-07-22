@@ -21,7 +21,6 @@ import {
   type QualifyFacilityCases,
   type QualifyPatientCohortInput,
   type QualifyPatientCohort,
-  type QualifyCasesCursor,
   type QualifyMatchKind,
   type QualifySnapshot,
   type QualifyResolved,
@@ -36,10 +35,11 @@ import {
   type RevealQualifyRowsResult,
 } from './contract';
 import type { QualifyPrincipal } from './principal';
-import type {
-  QualifyFacilityRow,
-  QualifyClaimRow,
-  QualifyMoverRow,
+import {
+  QUALIFY_CASES_MAX,
+  type QualifyFacilityRow,
+  type QualifyClaimRow,
+  type QualifyMoverRow,
 } from '../../../src/collections/qualifyQuery';
 import { COHORT_MIN_PATIENTS } from '../../../src/collections/cmdExplorerQuery';
 
@@ -55,14 +55,6 @@ export const REVEAL_QUALIFY_ROW = 'reveal_qualify_row';
 export const REVEAL_QUALIFY_ROWS = 'reveal_qualify_rows';
 
 const REVEAL_BATCH_CAP = 50;
-
-/** Cases page size (mirrors QUALIFY_CASES_LIMIT in qualifyQuery.ts). The loader OVER-FETCHES by one
- *  (buildFacilityCasesQuery binds limit+1) so hasMore is a length check here, never a count query. */
-const QUALIFY_CASES_PAGE_SIZE = 15;
-
-/** All-payers facility view (mobile) page size: one larger page, capped at the reveal batch cap so a
- *  single "Reveal all" stays within REVEAL_BATCH_CAP. hasMore over this cap drives the "N recent" label. */
-const QUALIFY_ALL_PAYERS_PAGE_SIZE = REVEAL_BATCH_CAP;
 
 /** Everything the cores touch that isn't pure — injected so tests can fake it. */
 export interface QualifyDeps {
@@ -89,7 +81,7 @@ export interface QualifyDeps {
     from: string,
     to: string,
     entityIds: string[],
-    opts: { prefixToken: string | null; memberToken: string | null; groupToken: string | null; cursor: QualifyCasesCursor | null; limit: number; allPayers?: boolean },
+    opts: { prefixToken: string | null; memberToken: string | null; groupToken: string | null; limit: number; allPayers?: boolean },
   ) => Promise<QualifyClaimRow[]>;
   /** Phase 3: tenant-scoped lookup of ONE claim's alpha-prefix cohort token. Null = unknown/foreign
    *  claim id (fails closed to suppressed). The token never reaches the client. */
@@ -158,16 +150,6 @@ function emptySnapshot(hasAmounts: boolean): QualifySnapshot {
 /** Non-PHI alpha-prefix echo (≤3 chars) — never the raw member id. */
 function alphaEcho(raw: string): string {
   return raw.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 3);
-}
-
-/** Shape-clamp an untrusted client cursor (mirrors resolveCmdExplorerCursor): a malformed cursor
- *  becomes null (first page) rather than reaching SQL. id must be a safe int ≥ 1; lastPaymentReceived null|string. */
-function clampCasesCursor(cursor: QualifyCasesCursor | null | undefined): QualifyCasesCursor | null {
-  if (cursor === null || cursor === undefined) return null;
-  if (!Number.isSafeInteger(cursor.id) || cursor.id < 1) return null;
-  const lp = cursor.lastPaymentReceived;
-  if (lp !== null && typeof lp !== 'string') return null;
-  return { lastPaymentReceived: lp ?? null, id: cursor.id };
 }
 
 /**
@@ -380,8 +362,7 @@ export async function getQualifyFacilityCasesCore(
     claims: [],
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
-    nextCursor: null,
-    hasMore: false,
+    capped: false,
   };
   if (payer === '' || payer.length > 120 || facility === '' || facility.length > 200) return empty;
 
@@ -426,36 +407,28 @@ export async function getQualifyFacilityCasesCore(
     detail: { payer, facility, window: windowDays, ...(narrowFields.length ? { fields: narrowFields } : {}) },
   });
 
-  // All-payers (mobile) loads ONE larger page with no cursor — the sheet groups + filters client-side. The
-  // identifier narrow (when the session arrived via a search) still applies (ruling 5).
+  // The drill returns the WHOLE (facility, payer, window) set — no keyset pager — capped at QUALIFY_CASES_MAX.
+  // allPayers (mobile) only drops the single-payer filter. The identifier narrow (when the session arrived via
+  // a search) still applies (ruling 5). The builder over-fetches by one (limit+1) so `capped` is a length
+  // check, not a count.
   const allPayers = input.allPayers === true;
-  const pageSize = allPayers ? QUALIFY_ALL_PAYERS_PAGE_SIZE : QUALIFY_CASES_PAGE_SIZE;
-  const cursor = allPayers ? null : clampCasesCursor(input.cursor);
   const { from, to } = qualifyWindowBounds(windowDays, deps.now());
-  // Ask for one page; the builder over-fetches by one (limit+1) so hasMore is a length check, not a count.
   const claimRows = await deps.loadFacilityCases(payer, facility, from, to, gate.entityIds, {
     prefixToken,
     memberToken,
     groupToken,
-    cursor,
-    limit: pageSize,
+    limit: QUALIFY_CASES_MAX,
     allPayers,
   });
-  const hasMore = claimRows.length > pageSize;
-  const pageRows = hasMore ? claimRows.slice(0, pageSize) : claimRows;
+  const capped = claimRows.length > QUALIFY_CASES_MAX;
+  const pageRows = capped ? claimRows.slice(0, QUALIFY_CASES_MAX) : claimRows; // keep the MOST RECENT (payment desc)
   // Route through the ONE amounts choke point (stripClaimsAmounts) — stripAmounts LAST.
   const claims = gate.hasAmounts ? assembleClaims(pageRows) : stripClaimsAmounts(assembleClaims(pageRows));
-  // nextCursor from the LAST kept row — non-PHI (payment date + synthetic id), keyed on the sort axis
-  // (payment_received), NOT the service date. Null at the end of the walk.
-  const last = claims[claims.length - 1];
-  const nextCursor: QualifyCasesCursor | null =
-    hasMore && last ? { lastPaymentReceived: last.paymentDate, id: last.id } : null;
   return {
     claims,
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
-    nextCursor,
-    hasMore,
+    capped,
   };
 }
 

@@ -62,8 +62,8 @@ const CASE_AT_LOW: QualifyClaim = {
 const PHI: QualifyPhi = { patient_name: 'DOE, JANE', member_id_raw: 'AETMEMBER123', group_number: 'GRP9' };
 
 const noop = () => {};
-/** Default (no-reveal) props for the cases table — header reveal-toggle + cursor pager API (the former
- *  in-panel prefix/group filter props are GONE — ruling: the main bar is the one identifier entry). */
+/** Default (no-reveal) props for the cases table. The keyset PAGER props are GONE — the drill shows the
+ *  whole window (grouped by patient), so there is no page/cursor UI. */
 const noReveal = {
   canReveal: false,
   revealed: new Map<number, QualifyPhi>(),
@@ -71,12 +71,6 @@ const noReveal = {
   revealing: false,
   revealError: null,
   onToggleRevealAll: noop,
-  page: 1,
-  hasPrev: false,
-  hasNext: false,
-  paging: false,
-  onPrevPage: noop,
-  onNextPage: noop,
 };
 
 test('sanity: the rating buckets (= allowed% bands) are what these tests assume', () => {
@@ -216,34 +210,30 @@ test('cases header — NO in-panel filter inputs (ruling: the main bar is the on
   assert.ok(html.includes('Reveal all'), 'the reveal toggle (NOT a filter) remains');
 });
 
-// ── cursor pager (Stage 2 desktop UI) ────────────────────────────────────────────────────────────────
-test('cases pager — Next is ENABLED when hasNext (more pages to walk)', () => {
+// ── Whole window, NO pager (Part 1: the keyset pager is retired) ───────────────────────────────────────
+test('cases table — ALL in-window patients render at once; NO Previous/Next pager', () => {
+  // 12 distinct single-claim patients — more than the old 15/page would ever have split, but well under the
+  // 500 cap. Every one must render, and no pager chrome.
+  const many: QualifyClaim[] = Array.from({ length: 12 }, (_, i) => ({
+    ...CASE_AT_THIN, id: 900 + i, patientKey: i + 1, memberIdMasked: '••••••',
+  }));
   const html = renderToStaticMarkup(
-    <CasesTable claims={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} hasNext page={1} />,
+    <CasesTable claims={many} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal />,
   );
-  const nextTag = html.match(/<button([^>]*)>Next →<\/button>/)?.[1] ?? '';
-  assert.ok(nextTag.length > 0, 'the Next control renders when hasNext');
-  // `disabled=""` is the ATTRIBUTE; the className's `disabled:opacity-50` is a Tailwind variant, not it.
-  assert.ok(!nextTag.includes('disabled=""'), 'Next is enabled when hasNext');
+  assert.ok(!html.includes('Next →') && !html.includes('← Previous'), 'no cursor pager — the whole window shows');
+  assert.ok(!html.includes('>Page '), 'no page indicator');
+  assert.equal(html.includes('12 recent claims'), true, 'the count reflects the whole loaded set');
 });
 
-test('cases pager — Next is DISABLED at the end of the walk (!hasNext); Prev enabled off page 1', () => {
-  const html = renderToStaticMarkup(
-    <CasesTable claims={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} hasNext={false} hasPrev page={2} />,
+test('cases table — the capped nudge shows ONLY when the window exceeded the 500 safety cap', () => {
+  const under = renderToStaticMarkup(
+    <CasesTable claims={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} />,
   );
-  const nextTag = html.match(/<button([^>]*)>Next →<\/button>/)?.[1] ?? '';
-  const prevTag = html.match(/<button([^>]*)>← Previous<\/button>/)?.[1] ?? '';
-  // `disabled=""` is the ATTRIBUTE; the className's `disabled:opacity-50` is a Tailwind variant, not it.
-  assert.ok(nextTag.includes('disabled=""'), 'Next is disabled at the end of the walk');
-  assert.ok(!prevTag.includes('disabled=""'), 'Prev is enabled once past page 1');
-  assert.ok(html.includes('Page 2'), 'shows the current page');
-});
-
-test('cases pager — hidden on a single page (no hasNext, page 1)', () => {
-  const html = renderToStaticMarkup(
-    <CasesTable claims={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal />,
+  assert.ok(!under.includes('narrow the window'), 'no nudge under the cap');
+  const capped = renderToStaticMarkup(
+    <CasesTable claims={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} capped />,
   );
-  assert.ok(!html.includes('Next →') && !html.includes('← Previous'), 'no pager when there is only one page');
+  assert.ok(capped.includes('Showing the 500 most recent by payment date') && capped.includes('narrow the window'), 'honest nudge when capped');
 });
 
 // ── Fix A: honest-empty copy (identifier search with no ranked in-window claims) ────────────────────

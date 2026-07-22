@@ -2,9 +2,10 @@
 
 /**
  * Qualify mobile — facility detail (tap). Renders the FACILITY-SCOPED claim lines for the tapped card
- * (getQualifyFacilityCases with allPayers), by service date. The drill returns EVERY payer's recent
- * patients at the facility (each row carries its own payerName), capped at 50 (the reveal batch cap);
- * `capped` is true when more exist, which the UI labels honestly ("N recent").
+ * (getQualifyFacilityCases with allPayers), payment-date desc. The drill returns EVERY payer's claims at
+ * the facility for the WHOLE window (each row carries its own payerName), capped at QUALIFY_CASES_MAX (500)
+ * as a safety backstop; `capped` is true only when that cap truncated the set → an honest "narrow the
+ * window" nudge.
  *
  * Each claim line is tappable → onOpenClaim opens the single-claim ClaimDetailSheet above this list.
  *
@@ -76,8 +77,8 @@ export function DetailSheet({
   claims: readonly QualifyClaim[];
   loading: boolean;
   hasAmounts: boolean;
-  /** True when the facility has more claims than the loaded cap — labels read "N recent" so no one reads
-   *  the counts as the facility total. */
+  /** True only when the window exceeded the 500 safety cap and the set was truncated to the most recent
+   *  by payment date — drives an honest "narrow the window" nudge. */
   capped?: boolean;
   canReveal: boolean;
   revealed: Map<number, QualifyPhi>;
@@ -193,7 +194,7 @@ export function DetailSheet({
             </div>
             {capped ? (
               <div style={{ padding: '2px 20px 0', fontSize: 11, color: INK400 }}>
-                Showing the {claims.length} most recent claims across payers
+                Showing the 500 most recent by payment date — narrow the window to see fewer
               </div>
             ) : null}
           </>
