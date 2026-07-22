@@ -181,8 +181,13 @@ const MONTH_NAMES = [
 ];
 const YEAR_OPTIONS = [2026, 2025, 2024];
 /** Rolling recency quick-filters (days). Mutually exclusive with the Month/Year window. */
-const RECENCY_OPTIONS = [7, 14, 30] as const;
-const RECENCY_LABEL: Record<number, string> = { 7: 'Past 7 days', 14: 'Past 14 days', 30: 'Past 30 days' };
+const RECENCY_OPTIONS = [7, 14, 30, 90] as const;
+const RECENCY_LABEL: Record<number, string> = {
+  7: 'Past 7 days',
+  14: 'Past 14 days',
+  30: 'Past 30 days',
+  90: 'Past 90 days',
+};
 
 const MONEY = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const MONEY0 = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
@@ -333,9 +338,13 @@ export function CmdCollectionsExplorer({
   const [refinement, setRefinement] = useState<Refinement | null>(null);
   const [year, setYear] = useState(YEAR_OPTIONS[0]!);
   const [month, setMonth] = useState(0); // 0 = All months
-  // Recency quick-filter: 0 = off (default — the grid still shows ALL months, an additive control,
-  // not a changed default), or a rolling window of 7/14/30 days. Mutually exclusive with Month/Year.
-  const [recencyDays, setRecencyDays] = useState(0);
+  // Recency quick-filter: a rolling window of 7/14/30/90 days, or 0 = off (all months). DEFAULT 90 —
+  // the default nav carries a payment_received window so the summary aggregates hit the
+  // (business_entity_id, payment_received) index path instead of an all-time seq scan of the whole
+  // charge-rollup slice (measured: all-time Consolidated summary ~148–220ms/panel warm → ~80ms
+  // worst-case with a 90d window). Re-clicking the active chip (or picking a Month/Year) still
+  // returns to all-time. Mutually exclusive with Month/Year.
+  const [recencyDays, setRecencyDays] = useState(90);
   // Month/Year picker popover — the [Month/Year ▾] segment of the unified time control (A).
   const [monthYearOpen, setMonthYearOpen] = useState(false);
   const monthYearRef = useRef<HTMLDivElement>(null);
@@ -1026,13 +1035,15 @@ export function CmdCollectionsExplorer({
             onClear={clearPayers}
           />
 
-          {/* Unified time window (A): ONE segmented control — [7d][14d][30d][Month/Year ▾] — with an
-              "All months" REST STATE (no segment active). Each segment drives the SAME state setters
-              the three old controls did (selectRecency for the chips; the Month/Year selects' unchanged
-              onChange), preserving the exact recency⇄Month/Year mutual exclusion. Because neither
-              filterArg nor the summary effect is touched, the wire payload is byte-identical to the old
-              three controls for any given selection — a presentational consolidation, not a behavior
-              change. Reaching "All months": re-click the active chip (toggles off) or pick "All months"
+          {/* Unified time window (A): ONE segmented control — [7d][14d][30d][90d][Month/Year ▾].
+              DEFAULT is 90d (see recencyDays init) so the first-load summary hits the index path;
+              re-clicking the active chip or picking a Month/Year reaches the "All months" state (no
+              segment active). Each segment drives the SAME state setters the three old controls did
+              (selectRecency for the chips; the Month/Year selects' unchanged onChange), preserving the
+              exact recency⇄Month/Year mutual exclusion. Because neither filterArg nor the summary
+              effect is touched, the wire payload is byte-identical to the old three controls for any
+              given selection — a presentational consolidation, plus the 90d default window.
+              Reaching "All months": re-click the active chip (toggles off) or pick "All months"
               in the Month select — exactly as before. */}
           <div
             className="inline-flex items-center gap-0.5 rounded-lg border border-line bg-surface p-0.5"

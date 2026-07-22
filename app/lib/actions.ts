@@ -741,7 +741,7 @@ export type CmdReportResult =
  * Filters for the "All Collections" grid (non-PHI). `facility` is a SET of facilities from the
  * explorer's own facility vocabulary (see loadCmdExplorerFacilities) — the multi-select dropdown
  * and a single-facility drill-down chip both feed it; an empty/absent array means "all facilities".
- * `year`/`month` window payment_received to that calendar month; `recencyDays` (7/14/30) is a
+ * `year`/`month` window payment_received to that calendar month; `recencyDays` (7/14/30/90) is a
  * mutually-exclusive rolling window ending today, computed from the SERVER clock. All values are
  * re-validated here and bound as parameters in the reader.
  */
@@ -749,7 +749,7 @@ export interface CmdReportFilter {
   facility?: string[];
   year?: number;
   month?: number; // 1-12; requires year
-  recencyDays?: number; // 7 | 14 | 30 — rolling window (server clock); overrides year/month
+  recencyDays?: number; // 7 | 14 | 30 | 90 — rolling window (server clock); overrides year/month
   /** Smart-search substring term (matched literally, ILIKE) across `searchColumns`. */
   q?: string;
   /** Which NON-PHI columns `q` searches (allowlisted server-side; PHI columns are rejected). */
@@ -827,7 +827,7 @@ const CMD_FACILITY_SET_MAX = 200;
 /** Max length of a single facility string (matches the exact-match bound used elsewhere). */
 const CMD_FACILITY_NAME_MAX = 200;
 /** Rolling recency windows offered by the quick-filter chips (server-computed; closed allowlist). */
-const CMD_RECENCY_DAYS = new Set([7, 14, 30]);
+const CMD_RECENCY_DAYS = new Set([7, 14, 30, 90]);
 
 /**
  * Validate + copy the facility multi-select into the reader filter. An empty/absent array is a
@@ -869,7 +869,7 @@ function applyPayerFilter(filter: CmdReportFilter, readerFilter: { primary_payer
 
 /**
  * Resolve the payment_received window into the reader's `from`/`to` (ISO 'YYYY-MM-DD'). A
- * `recencyDays` chip (7/14/30) takes precedence and is computed from the SERVER clock — the client
+ * `recencyDays` chip (7/14/30/90) takes precedence and is computed from the SERVER clock — the client
  * never supplies the date, so the window can't be spoofed — as an open-ended "on or after
  * today − N days" (future-dated rows are already dropped at ingest). Otherwise a year+month selects
  * that calendar month ([from, to) exclusive upper). Returns false on invalid input. `today` is
