@@ -21,10 +21,11 @@
  *
  * AMOUNTS GATE: the Billed/Allowed block is OMITTED from the DOM (not CSS-hidden) when !hasAmounts.
  *
- * PHI REVEAL: masked member IDs by default. "Reveal all" (shown only when canReveal) runs one audited
- * revealQualifyRows in the parent; when phiShown, each row swaps its mask for the real member id +
- * patient name from `revealed` (keyed by case id). Payer names are NON-PHI and stay visible regardless
- * of the reveal/Hide-IDs state.
+ * PHI REVEAL: PER-PATIENT (not the whole loaded set). Masked by default; tapping a claim opens the popup
+ * (ClaimDetailSheet) whose "Reveal identifiers" reveals THAT claim's patient in one audited call. A list
+ * row then swaps its mask for the real member id + patient name from `revealed` (keyed by claim id) iff its
+ * id is cached. "Hide identifiers" (onHideIdentifiers) is a per-session mask reset. Payer names are NON-PHI
+ * and stay visible regardless.
  */
 import { useMemo, useState } from 'react';
 import type { QualifyClaim, QualifyFacility, QualifyPhi } from '../../../lib/qualify/contract';
@@ -64,16 +65,14 @@ export function DetailSheet({
   capped = false,
   canReveal,
   revealed,
-  phiShown,
-  revealPending,
   revealError,
-  onRevealAll,
+  onHideIdentifiers,
   onOpenClaim,
   onClose,
   searchContext = null,
 }: {
   facility: QualifyFacility;
-  /** FULL loaded set for the facility (all payers, ≤50). The chip strip is built from this, unfiltered. */
+  /** FULL loaded window for the facility (all payers, capped at 500). The chip strip is built from this, unfiltered. */
   claims: readonly QualifyClaim[];
   loading: boolean;
   hasAmounts: boolean;
@@ -81,11 +80,12 @@ export function DetailSheet({
    *  by payment date — drives an honest "narrow the window" nudge. */
   capped?: boolean;
   canReveal: boolean;
+  /** Per-patient PHI cache, keyed by claim id. A row shows real identifiers iff its id is here. Reveal is
+   *  triggered PER-PATIENT from the claim popup (ClaimDetailSheet); this sheet only DISPLAYS the cache. */
   revealed: Map<number, QualifyPhi>;
-  phiShown: boolean;
-  revealPending: boolean;
   revealError: string | null;
-  onRevealAll: () => void;
+  /** "Hide identifiers" — per-session mask reset (clears the cache). */
+  onHideIdentifiers: () => void;
   onOpenClaim: (c: QualifyClaim) => void;
   onClose: () => void;
   /** When the sheet was opened from a prefix/alpha search, the non-PHI term the user typed and the payer it
@@ -136,16 +136,18 @@ export function DetailSheet({
             <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: INK400 }}>
               Recent claims at this facility
             </span>
-            {canReveal && claims.length > 0 ? (
+            {/* Reveal is PER-PATIENT — tap a claim to reveal that patient. The only header control is
+                "Hide identifiers" (a session mask reset), shown once something IS revealed. */}
+            {canReveal && revealed.size > 0 ? (
               <button
                 type="button"
-                onClick={onRevealAll}
-                disabled={revealPending}
-                aria-pressed={phiShown}
-                style={{ fontSize: 11, fontWeight: 700, color: TEAL700, background: TEAL_TINT, border: 'none', borderRadius: 999, padding: '5px 12px', cursor: 'pointer', opacity: revealPending ? 0.6 : 1 }}
+                onClick={onHideIdentifiers}
+                style={{ fontSize: 11, fontWeight: 700, color: TEAL700, background: TEAL_TINT, border: 'none', borderRadius: 999, padding: '5px 12px', cursor: 'pointer' }}
               >
-                {revealPending ? 'Revealing…' : phiShown ? 'Hide IDs' : 'Reveal all'}
+                Hide IDs
               </button>
+            ) : canReveal && claims.length > 0 ? (
+              <span style={{ fontSize: 11, color: INK400 }}>Tap a claim to reveal</span>
             ) : null}
           </div>
           {revealError ? <div style={{ marginTop: 6, fontSize: 11, color: DANGER }}>{revealError}</div> : null}
@@ -227,7 +229,7 @@ export function DetailSheet({
             </div>
           ) : (
             visible.map((c) => {
-              const phi = phiShown ? revealed.get(c.id) : undefined;
+              const phi = revealed.get(c.id); // shows PHI iff this claim's patient was revealed
               return (
               <button
                 key={c.id}

@@ -18,7 +18,7 @@
  */
 import { useCallback, useEffect, useReducer, useRef, useState, useTransition, type ReactNode } from 'react';
 import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyMovers, revealQualifyRows } from '@/lib/qualify/actions';
-import { QUALIFY_WINDOW_OPTIONS, sniffQualifyKind } from '@/lib/qualify/contract';
+import { QUALIFY_WINDOW_OPTIONS, QUALIFY_REVEAL_BATCH_CAP, sniffQualifyKind } from '@/lib/qualify/contract';
 import type { QualifySnapshot, QualifyFacility, QualifyClaim, QualifyMover, QualifyWindowDays, QualifyPhi } from '@/lib/qualify/contract';
 import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
 import { resolveLandingWins, drillLandingWins, isPayerChange, scopeFacilitiesForList, isIdentifierResolution, isIdentifierEmpty, identifierEmptyTerm } from '@/lib/qualify/qualifyGuards';
@@ -75,11 +75,12 @@ export function QualifyMobileApp({
   // set, driving an honest "narrow the window" nudge. No pager — the sheet groups + filters client-side.
   const [casesCapped, setCasesCapped] = useState(false);
   const [claim, setClaim] = useState<QualifyClaim | null>(null);
-  // PHI reveal (facility-scoped, audited): `revealedPhi` caches the fetched identifiers for the OPEN
-  // facility's claims (keyed by case id); `phiShown` toggles their visibility WITHOUT re-auditing (one
-  // revealQualifyRows call per facility view). All reset when a facility opens/closes. Gated by canRevealPhi.
+  // PHI reveal (facility-scoped, audited): PER-PATIENT (not the whole loaded set — the old blanket reveal
+  // can't honor the 50-cap over a whole-window drill). `revealedPhi` caches the fetched identifiers keyed by
+  // case id; a row shows PHI iff its id is cached. The per-patient reveal is triggered from the claim popup
+  // ("Reveal identifiers" reveals that claim's patient across the loaded set). `revealPending` = a reveal is
+  // in flight. All reset when a facility opens/closes; "Hide identifiers" clears the cache. Gated by canRevealPhi.
   const [revealedPhi, setRevealedPhi] = useState<Map<number, QualifyPhi>>(() => new Map());
-  const [phiShown, setPhiShown] = useState(false);
   const [revealPending, setRevealPending] = useState(false);
   const [revealError, setRevealError] = useState<string | null>(null);
   const [searched, setSearched] = useState(false);
@@ -253,7 +254,6 @@ export function QualifyMobileApp({
   // (before it clears the flag), so without this reset the button would stay stuck "Revealing…" all session.
   function clearReveal() {
     setRevealedPhi(new Map());
-    setPhiShown(false);
     setRevealPending(false);
     setRevealError(null);
   }
@@ -318,16 +318,16 @@ export function QualifyMobileApp({
     clearReveal();
   }
 
-  // "Reveal all" on the open facility sheet → ONE audited revealQualifyRows over the visible claim ids
-  // (≤15, well under the 50 batch cap). Hide is visibility-only (keeps the cache) so re-showing never
-  // re-audits, matching the desktop discipline of one audited reveal per view. Gated by canRevealPhi.
-  function toggleRevealAll() {
+  // PER-PATIENT reveal (from the claim popup): ONE audited revealQualifyRows over the tapped claim's PATIENT
+  // — every loaded claim sharing its patientKey — sliced to the 50 batch cap (a rare high-frequency patient
+  // reveals its most-recent 50). Deduped (already-cached ids → no re-audit) + facilitySeq-guarded (a
+  // close/reopen drops a stale response). Merges into the cache without dropping other revealed patients.
+  function revealPatient(patientKey: number) {
     if (!canRevealPhi) return;
-    const rows = facilityCases;
-    if (!rows || rows.length === 0) return;
-    if (phiShown) { setPhiShown(false); return; } // hide (cache retained)
-    const ids = rows.map((c) => c.id);
-    if (ids.every((id) => revealedPhi.has(id))) { setPhiShown(true); return; } // already fetched → just show
+    const rows = facilityCases ?? [];
+    const ids = rows.filter((c) => c.patientKey === patientKey).map((c) => c.id).slice(0, QUALIFY_REVEAL_BATCH_CAP);
+    if (ids.length === 0) return;
+    if (ids.every((id) => revealedPhi.has(id))) return; // already revealed → no re-audit
     if (revealPending) return;
     const seq = facilitySeq.current; // drop the response if the facility changes/closes before it lands
     setRevealPending(true);
@@ -337,14 +337,13 @@ export function QualifyMobileApp({
         if (seq !== facilitySeq.current) return;
         setRevealPending(false);
         if (res.ok) {
-          setRevealedPhi(() => {
-            const m = new Map<number, QualifyPhi>();
+          setRevealedPhi((prev) => {
+            const m = new Map(prev); // keep previously-revealed patients
             for (const r of res.rows) {
               m.set(r.id, { patient_name: r.patient_name, member_id_raw: r.member_id_raw, group_number: r.group_number });
             }
             return m;
           });
-          setPhiShown(true);
         } else {
           setRevealError(res.error);
         }
@@ -551,10 +550,8 @@ export function QualifyMobileApp({
           capped={casesCapped}
           canReveal={canRevealPhi}
           revealed={revealedPhi}
-          phiShown={phiShown}
-          revealPending={revealPending}
           revealError={revealError}
-          onRevealAll={toggleRevealAll}
+          onHideIdentifiers={clearReveal}
           onOpenClaim={(c) => setClaim(c)}
           onClose={closeFacility}
           searchContext={searchContext}
@@ -564,7 +561,11 @@ export function QualifyMobileApp({
         <ClaimDetailSheet
           claim={claim}
           hasAmounts={hasAmounts}
-          phi={phiShown ? revealedPhi.get(claim.id) ?? null : null}
+          phi={revealedPhi.get(claim.id) ?? null}
+          canReveal={canRevealPhi}
+          revealing={revealPending}
+          revealError={revealError}
+          onReveal={() => revealPatient(claim.patientKey)}
           onClose={() => setClaim(null)}
         />
       ) : null}

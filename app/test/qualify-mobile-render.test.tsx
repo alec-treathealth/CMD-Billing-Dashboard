@@ -59,14 +59,13 @@ const MIXED_CASES: QualifyClaim[] = [
 
 const noop = () => {};
 
-// Default reveal props for a MASKED DetailSheet (no reveal capability / nothing revealed).
+// Default reveal props for a MASKED DetailSheet (no reveal capability / nothing revealed). Per-patient
+// reveal (Part 2): the sheet only DISPLAYS the `revealed` cache; the trigger lives in the claim popup.
 const noReveal = {
   canReveal: false,
   revealed: new Map<number, QualifyPhi>(),
-  phiShown: false,
-  revealPending: false,
   revealError: null as string | null,
-  onRevealAll: noop,
+  onHideIdentifiers: noop,
 };
 // A revealed-PHI fixture keyed by case id, used to prove the unmasked render.
 const PHI: QualifyPhi = { patient_name: 'DOE, JANE', member_id_raw: 'AETMEM777', group_number: 'GRP42' };
@@ -193,27 +192,28 @@ test('detail — loading state shows a placeholder, no case rows', () => {
   assert.ok(html.includes('Loading claims'), 'loading placeholder while the facility fetch is in flight');
 });
 
-test('detail — NOT reveal-capable: no Reveal button, member id stays masked, no PHI in the DOM', () => {
+test('detail — NOT reveal-capable: no reveal chrome, member id stays masked, no PHI in the DOM', () => {
   const html = renderToStaticMarkup(<DetailSheet facility={FAC} claims={CASES} loading={false} hasAmounts={false} onOpenClaim={noop} onClose={noop} {...noReveal} />);
-  assert.ok(!html.includes('Reveal all'), 'no reveal affordance when !canReveal');
+  assert.ok(!html.includes('Reveal all') && !html.includes('Hide IDs') && !html.includes('Tap a claim to reveal'), 'no reveal chrome when !canReveal');
   assert.ok(html.includes('••••••'), 'member id masked');
   for (const v of ['AETMEM777', 'DOE, JANE', 'GRP42']) assert.ok(!html.includes(v), `PHI ${v} absent when not revealed`);
 });
 
-test('detail — reveal-capable but not yet shown: Reveal button present, ids still masked', () => {
+test('detail — reveal-capable, nothing revealed: the "Tap a claim to reveal" hint (NO blanket toggle); ids masked', () => {
   const html = renderToStaticMarkup(<DetailSheet facility={FAC} claims={CASES} loading={false} hasAmounts={false} onOpenClaim={noop} onClose={noop} {...noReveal} canReveal />);
-  assert.ok(html.includes('Reveal all'), 'reveal affordance shows for a capable viewer');
-  assert.ok(html.includes('••••••'), 'ids remain masked until revealed');
+  assert.ok(!html.includes('Reveal all'), 'the blanket "Reveal all" is GONE');
+  assert.ok(html.includes('Tap a claim to reveal'), 'the per-patient reveal is triggered from the claim popup — the header hints so');
+  assert.ok(html.includes('••••••'), 'ids remain masked until a patient is revealed');
   for (const v of ['AETMEM777', 'DOE, JANE']) assert.ok(!html.includes(v), `PHI ${v} absent before reveal`);
 });
 
-test('detail — revealed: rows show the real member id + patient, button flips to Hide', () => {
+test('detail — a CACHED patient renders real id + patient on its row; the header shows the Hide reset', () => {
   const html = renderToStaticMarkup(
-    <DetailSheet facility={FAC} claims={CASES} loading={false} hasAmounts={false} onOpenClaim={noop} onClose={noop} {...noReveal} canReveal revealed={REVEALED} phiShown />,
+    <DetailSheet facility={FAC} claims={CASES} loading={false} hasAmounts={false} onOpenClaim={noop} onClose={noop} {...noReveal} canReveal revealed={REVEALED} />,
   );
-  assert.ok(html.includes('AETMEM777'), 'real member id shown when revealed');
-  assert.ok(html.includes('DOE, JANE'), 'patient name shown when revealed');
-  assert.ok(html.includes('Hide IDs'), 'button flips to Hide once shown');
+  assert.ok(html.includes('AETMEM777'), 'real member id shown for the cached patient');
+  assert.ok(html.includes('DOE, JANE'), 'patient name shown for the cached patient');
+  assert.ok(html.includes('Hide IDs'), 'the per-session Hide reset shows once something is revealed');
   assert.ok(!html.includes('••••••'), 'the mask is gone for the revealed row');
 });
 
@@ -289,8 +289,26 @@ test('detail — each claim row shows the payer next to the (masked) member id',
 
 test('detail — payer stays visible when IDs are revealed (real id · payer)', () => {
   const revealedAnthem = new Map<number, QualifyPhi>([[1, { patient_name: 'DOE, JANE', member_id_raw: 'EAZ8567', group_number: 'G1' }]]);
-  const html = renderToStaticMarkup(<DetailSheet facility={FAC} claims={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} canReveal revealed={revealedAnthem} phiShown />);
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} claims={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} canReveal revealed={revealedAnthem} />);
   assert.ok(html.includes('EAZ8567') && html.includes('ANTHEM BLUE CROSS CA'), 'revealed id and payer coexist (payer is not PHI)');
+});
+
+// ── ClaimDetailSheet — the PER-PATIENT reveal trigger (Part 2) ───────────────────────────────────────
+test('claim detail — canReveal + no phi: a "Reveal identifiers" button renders; ids masked', () => {
+  const html = renderToStaticMarkup(<ClaimDetailSheet claim={CASES[0]!} hasAmounts={false} phi={null} canReveal onReveal={noop} onClose={noop} />);
+  assert.ok(html.includes('Reveal identifiers'), 'the per-patient reveal button shows for a capable viewer with nothing revealed');
+  assert.ok(html.includes('••••••'), 'the member id stays masked until revealed');
+});
+
+test('claim detail — once phi is present: NO reveal button (the patient is revealed)', () => {
+  const html = renderToStaticMarkup(<ClaimDetailSheet claim={CASES[0]!} hasAmounts={false} phi={PHI} canReveal onReveal={noop} onClose={noop} />);
+  assert.ok(!html.includes('Reveal identifiers'), 'the reveal button is gone once the patient is revealed');
+  assert.ok(html.includes('AETMEM777'), 'the real member id shows');
+});
+
+test('claim detail — NOT reveal-capable: no reveal button at all', () => {
+  const html = renderToStaticMarkup(<ClaimDetailSheet claim={CASES[0]!} hasAmounts={false} phi={null} onClose={noop} />);
+  assert.ok(!html.includes('Reveal identifiers'), 'no reveal affordance when !canReveal');
 });
 
 test('detail — payer chip strip groups by payer: name · count · avg%, one chip per payer', () => {

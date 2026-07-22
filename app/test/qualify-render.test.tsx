@@ -62,15 +62,16 @@ const CASE_AT_LOW: QualifyClaim = {
 const PHI: QualifyPhi = { patient_name: 'DOE, JANE', member_id_raw: 'AETMEMBER123', group_number: 'GRP9' };
 
 const noop = () => {};
-/** Default (no-reveal) props for the cases table. The keyset PAGER props are GONE — the drill shows the
- *  whole window (grouped by patient), so there is no page/cursor UI. */
+/** Default (no-reveal) props for the cases table. PER-PATIENT reveal (Part 2): the blanket revealAll toggle
+ *  is gone; reveal is triggered per patient (group expand / singleton button). The keyset PAGER props are
+ *  also gone — the drill shows the whole window grouped by patient. */
 const noReveal = {
   canReveal: false,
   revealed: new Map<number, QualifyPhi>(),
-  revealAll: false,
-  revealing: false,
+  revealingKeys: new Set<number>(),
   revealError: null,
-  onToggleRevealAll: noop,
+  onRevealPatient: noop,
+  onHideIdentifiers: noop,
 };
 
 test('sanity: the rating buckets (= allowed% bands) are what these tests assume', () => {
@@ -137,77 +138,63 @@ test('case % cell — a LOW own-pct reads red even at a GREEN facility (cutoffs 
   assert.ok(!html.includes('q-pctcell q-ok'), 'neither low/mid case borrows the facility’s green rating');
 });
 
-// ── PHI reveal (single header toggle) ───────────────────────────────────────────────────────────────
-test('cases reveal — masked by default; the header Reveal-all toggle is shown to a canReveal viewer', () => {
+// ── PHI reveal (PER-PATIENT — Part 2; the blanket "Reveal all" is retired) ────────────────────────────
+test('cases reveal — masked by default; a canReveal viewer sees the per-patient Reveal button + hint, NO blanket toggle', () => {
   const html = renderToStaticMarkup(
     <CasesTable claims={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal />,
   );
-  assert.ok(html.includes('Reveal all'), 'the header reveal-all toggle is present');
-  for (const v of ['AETMEMBER123', 'DOE, JANE', 'GRP9']) {
-    assert.ok(!html.includes(v), `no real PHI (${v}) before reveal is toggled on`);
-  }
+  assert.ok(!html.includes('Reveal all'), 'the blanket "Reveal all" toggle is GONE');
+  assert.ok(html.includes('>Reveal</button>'), 'a single-claim patient row carries a per-patient Reveal button');
+  assert.ok(html.includes('Reveal IDs per patient'), 'the header hint explains the per-patient model');
+  for (const v of ['AETMEMBER123', 'DOE, JANE', 'GRP9']) assert.ok(!html.includes(v), `no real PHI (${v}) before reveal`);
 });
 
-test('cases reveal — real PHI shown ONLY when revealAll is on AND the PHI is cached', () => {
+test('cases reveal — a claim whose id is CACHED shows real PHI; "Hide identifiers" appears; its Reveal button is gone', () => {
   const html = renderToStaticMarkup(
-    <CasesTable
-      claims={[CASE_AT_THIN]}
-      hasAmounts
-      heatOn
-      facilityBuckets={buildFacilityBucketMap([THIN_HIGH])}
-      {...noReveal}
-      canReveal
-      revealed={new Map<number, QualifyPhi>([[1, PHI]])}
-      revealAll
-    />,
+    <CasesTable claims={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal revealed={new Map<number, QualifyPhi>([[1, PHI]])} />,
   );
-  assert.ok(html.includes('AETMEMBER123') && html.includes('DOE, JANE') && html.includes('GRP9'), 'real PHI shown when cached + toggled on');
-  assert.ok(html.includes('Hide identifiers'), 'the header toggle flips to "Hide identifiers" when revealAll is on');
+  assert.ok(html.includes('AETMEMBER123') && html.includes('DOE, JANE') && html.includes('GRP9'), 'real PHI shown when the claim id is cached');
+  assert.ok(html.includes('Hide identifiers'), 'the per-session Hide reset appears once something is revealed');
+  assert.ok(!html.includes('>Reveal</button>'), 'the revealed row no longer offers its Reveal button');
 });
 
-test('cases reveal — cached PHI stays masked while revealAll is OFF (DOM omission, not CSS-hide)', () => {
+test('cases reveal — a NON-cached sibling stays masked (DOM omission) while the cached patient is revealed', () => {
+  const other: QualifyClaim = { ...CASE_AT_THIN, id: 2, patientKey: 2 };
   const html = renderToStaticMarkup(
-    <CasesTable
-      claims={[CASE_AT_THIN]}
-      hasAmounts
-      heatOn
-      facilityBuckets={buildFacilityBucketMap([THIN_HIGH])}
-      {...noReveal}
-      canReveal
-      revealed={new Map<number, QualifyPhi>([[1, PHI]])}
-    />,
+    <CasesTable claims={[CASE_AT_THIN, other]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal revealed={new Map<number, QualifyPhi>([[1, PHI]])} />,
   );
-  for (const v of ['AETMEMBER123', 'DOE, JANE', 'GRP9']) {
-    assert.ok(!html.includes(v), `cached PHI (${v}) is absent from the DOM while the toggle is off`);
-  }
-  assert.ok(html.includes('Reveal all') && !html.includes('Hide identifiers'), 'the toggle reads "Reveal all" when off');
+  assert.ok(html.includes('AETMEMBER123'), 'the cached patient is revealed');
+  assert.ok(html.includes('>Reveal</button>'), 'the un-revealed sibling still offers Reveal (it stayed masked)');
 });
 
-test('reveal is INDEPENDENT of the amounts gate: an admissions_seat reveal shows PHI but ZERO dollars', () => {
+test('cases reveal — a MULTI-claim patient group is an expandable control (expand triggers the per-patient reveal), NOT a Reveal button', () => {
+  const grp: QualifyClaim[] = [
+    { ...CASE_AT_THIN, id: 11, patientKey: 5 },
+    { ...CASE_AT_THIN, id: 12, patientKey: 5, dos: '2026-07-14' },
+  ];
   const html = renderToStaticMarkup(
-    <CasesTable
-      claims={[CASE_AT_THIN]}
-      hasAmounts={false}
-      heatOn
-      facilityBuckets={buildFacilityBucketMap([THIN_HIGH])}
-      {...noReveal}
-      canReveal
-      revealed={new Map<number, QualifyPhi>([[1, PHI]])}
-      revealAll
-    />,
+    <CasesTable claims={grp} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal />,
+  );
+  assert.ok(html.includes('2 claims'), 'the two claims collapse into one patient group');
+  assert.ok(html.includes('aria-expanded="false"'), 'the group is expandable — expanding is its reveal trigger');
+});
+
+test('reveal is INDEPENDENT of the amounts gate: a cached-PHI admissions_seat row shows PHI but ZERO dollars', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable claims={[CASE_AT_THIN]} hasAmounts={false} heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal revealed={new Map<number, QualifyPhi>([[1, PHI]])} />,
   );
   assert.ok(html.includes('AETMEMBER123') && html.includes('DOE, JANE'), 'PHI reveal works without amounts capability');
   assert.ok(!html.includes('$') && !html.includes('Billed') && !html.includes('Allowed'), 'but ZERO dollars — the two gates are independent');
   for (const v of ['18,400', '11,592']) assert.ok(!html.includes(v), `dollar ${v} absent even when PHI is revealed`);
 });
 
-test('cases header — NO in-panel filter inputs (ruling: the main bar is the one identifier entry); reveal toggle stays', () => {
+test('cases header — NO in-panel filter inputs (ruling: the main bar is the one identifier entry); the per-patient reveal affordance stays', () => {
   const html = renderToStaticMarkup(
     <CasesTable claims={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal />,
   );
   assert.ok(!html.includes('Filter by ID prefix'), 'the prefix input is gone');
   assert.ok(!html.includes('Group # (employer proxy)'), 'the group-# input is gone');
-  assert.ok(html.includes('Reveal all'), 'the reveal toggle (NOT a filter) remains');
+  assert.ok(html.includes('>Reveal</button>'), 'the per-patient reveal affordance (NOT a filter) remains');
 });
 
 // ── Whole window, NO pager (Part 1: the keyset pager is retired) ───────────────────────────────────────

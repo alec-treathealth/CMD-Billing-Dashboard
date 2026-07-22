@@ -198,6 +198,12 @@ export interface QualifyClaim {
 export const QUALIFY_TENANT_SCOPE = 'cross-tenant-bxr-indigo' as const;
 export const QUALIFY_MEMBER_ID_MASK = '••••••';
 
+/** Hard PHI-audit cap for ONE audited reveal batch (revealQualifyRows). The per-patient reveal slices a
+ *  patient's claim ids to this before the call, so a rare high-frequency patient (>50 in-window claims)
+ *  reveals its most-recent 50 with an honest note rather than failing the batch. The SERVER enforces the
+ *  same cap (core.ts) — this shared const keeps client + server in lockstep. */
+export const QUALIFY_REVEAL_BATCH_CAP = 50;
+
 export interface QualifySnapshot {
   /** null ⇒ never-seen-this-identifier (VOB path). A non-null resolved with facilities:[] is the
    *  distinct "payer has no facilities in this window" state — frontends key VOB off resolved===null. */

@@ -50,6 +50,7 @@ import {
 } from '@/lib/qualify/actions';
 import {
   QUALIFY_WINDOW_OPTIONS,
+  QUALIFY_REVEAL_BATCH_CAP,
   type QualifySnapshot,
   type QualifyWindowDays,
   type QualifyClaim,
@@ -133,21 +134,18 @@ export function QualifyTab({
   // True until the on-load auto-resolve of the top payer settles (so we show "Resolving…", not the
   // empty search prompt, on first paint).
   const [initializing, setInitializing] = useState(true);
-  // PHI reveal: a SINGLE parent-owned toggle (`revealAll`) unmasks the whole scoped set at once via one
-  // audited revealQualifyRows bulk call — parity with the collections grid + billing-audit work-table.
-  // `revealed` caches the fetched PHI for the CURRENT scope; `revealing`/`revealError` drive the toggle.
-  // `revealAll` is STICKY across facility switches (Alec's painpoint — don't re-click every drill); the
-  // PHI cache resets on every scope change (resetReveal), so each facility re-reveals with its own
-  // audited call. Toggling revealAll off/on re-masks DISPLAY only and never re-audits.
-  const [revealAll, setRevealAll] = useState(false);
+  // PHI reveal: PER-PATIENT (not per-page). Expanding a patient group (or the singleton "Reveal" button)
+  // reveals THAT patient's claims via ONE audited revealQualifyRows call scoped to the patient (a patient's
+  // claim count is always << REVEAL_BATCH_CAP, so the cap is never hit). This replaces the blanket
+  // "Reveal all", which can't honor the 50-cap over a whole-window set and over-reveals patients the user
+  // never opened (worse least-privilege). `revealed` caches the fetched PHI for the CURRENT scope (keyed by
+  // claim id); `revealingKeys` tracks the patientKeys whose reveal is in flight; "Hide identifiers" clears
+  // the cache (a per-session mask reset). The cache resets on every scope change (resetReveal).
   const [revealed, setRevealed] = useState<Map<number, QualifyPhi>>(() => new Map());
-  const [revealing, setRevealing] = useState(false);
+  const revealedRef = useRef(revealed);
+  revealedRef.current = revealed;
+  const [revealingKeys, setRevealingKeys] = useState<ReadonlySet<number>>(() => new Set());
   const [revealError, setRevealError] = useState<string | null>(null);
-  // The facilityCases array identity the auto-reveal has already CLAIMED. The effect claims the current
-  // array synchronously before awaiting, so (a) it fires exactly once per scope, and (b) a stale-scope
-  // commit — facilityCases still lagging the previous facility for one render right after a switch — is
-  // deduped instead of revealing the wrong scope. A new resolution/facility always yields a fresh array.
-  const revealedForRef = useRef<QualifyClaim[] | null>(null);
   // Resolution identity (search-is-authority). Every fetch entry point bumps-and-captures this at entry;
   // every post-await write guards `genRef.current === gen` and bails otherwise. So a newer fetch DISCARDS
   // any in-flight older write — the header (snapshot) and the rows (facilityCases) can never be sourced from
@@ -162,13 +160,12 @@ export function QualifyTab({
     [snapshot],
   );
 
-  // Discard the current scope's revealed PHI — used on every scope change (new search, new payer,
-  // facility switch, window change, page). Clears the PHI cache, but NOT `revealAll` (sticky toggle)
-  // and NOT `revealedForRef` (resetting it would let the effect re-fire against the still-lagging previous
-  // facilityCases); the fresh facilityCases identity from the new fetch is what re-arms the auto-reveal.
+  // Discard the current scope's revealed PHI — used on every scope change (new search, new payer, facility
+  // switch, window change) AND as the user-facing "Hide identifiers" per-session mask reset. Clears the PHI
+  // cache + any in-flight reveal + error; no patient stays revealed across it.
   const resetReveal = useCallback(() => {
     setRevealed(new Map());
-    setRevealing(false);
+    setRevealingKeys(new Set());
     setRevealError(null);
   }, []);
 
@@ -418,48 +415,47 @@ export function QualifyTab({
     };
   }, [cohort.window]);
 
-  // Auto-reveal the current scope in ONE audited bulk call while "Reveal all" is on — parity with the
-  // collections grid + billing-audit work-table. It re-fires whenever facilityCases changes (a new
-  // resolution/facility yields a fresh array), revealing each facility exactly once with its own audit.
-  // Gated on canRevealPhi so a non-entitled role can never trigger a reveal. `revealedForRef` is claimed
-  // SYNCHRONOUSLY before the await, which (a) dedupes a given scope to one fetch and (b) makes a
-  // stale-scope commit — facilityCases still lagging the previous facility for one render after a switch
-  // — a no-op instead of revealing the wrong facility. The write also CAPTURES the resolution identity
-  // (genRef) WITHOUT bumping it and bails if a newer resolution superseded, so a stale reveal can't
-  // repopulate PHI after a newer scope's resetReveal().
-  useEffect(() => {
-    if (!canRevealPhi || !revealAll) return;
-    if (facilityCases.length === 0) return;
-    if (revealedForRef.current === facilityCases) return; // this exact scope is already claimed
-    revealedForRef.current = facilityCases; // claim BEFORE awaiting (see note above)
-    const gen = genRef.current; // capture (don't bump) — same discipline as a per-scope resolve
-    const ids = facilityCases.map((c) => c.id);
-    setRevealing(true);
-    setRevealError(null);
-    void (async () => {
-      try {
-        const res = await revealQualifyRows(ids);
-        if (genRef.current !== gen) return; // stale reveal — a newer resolution superseded it
-        setRevealing(false);
-        if (res.ok) {
-          setRevealed((m) => {
-            const n = new Map(m);
-            for (const row of res.rows) {
-              const { id, ...phi } = row;
-              n.set(id, phi);
-            }
-            return n;
-          });
-        } else {
-          setRevealError(res.error);
+  // PER-PATIENT reveal: expanding a patient group (or the singleton "Reveal" button) reveals THAT patient's
+  // claims in ONE audited revealQualifyRows call. The ids are sliced to QUALIFY_REVEAL_BATCH_CAP so a rare
+  // high-frequency patient (>50 in-window claims) reveals its most-recent 50 rather than failing the batch.
+  // Deduped (a re-expand of an already-revealed patient is a no-op) and gen-guarded (a stale reveal can't
+  // repopulate PHI after a newer scope's resetReveal). Gated on canRevealPhi so a non-entitled role never
+  // triggers a reveal.
+  const revealPatient = useCallback(
+    (patientKey: number, claimIds: number[]) => {
+      if (!canRevealPhi || claimIds.length === 0) return;
+      const ids = claimIds.slice(0, QUALIFY_REVEAL_BATCH_CAP); // honor the audit cap (most-recent first)
+      if (ids.every((id) => revealedRef.current.has(id))) return; // already revealed → no re-audit
+      const gen = genRef.current; // capture (don't bump)
+      setRevealingKeys((s) => new Set(s).add(patientKey));
+      setRevealError(null);
+      const clearKey = () => setRevealingKeys((s) => { const n = new Set(s); n.delete(patientKey); return n; });
+      void (async () => {
+        try {
+          const res = await revealQualifyRows(ids);
+          if (genRef.current !== gen) return; // stale reveal — a newer resolution superseded it
+          clearKey();
+          if (res.ok) {
+            setRevealed((m) => {
+              const n = new Map(m);
+              for (const row of res.rows) {
+                const { id, ...phi } = row;
+                n.set(id, phi);
+              }
+              return n;
+            });
+          } else {
+            setRevealError(res.error);
+          }
+        } catch {
+          if (genRef.current !== gen) return;
+          clearKey();
+          setRevealError('Reveal is unavailable right now.');
         }
-      } catch {
-        if (genRef.current !== gen) return; // stale reveal — a newer resolution superseded it
-        setRevealing(false);
-        setRevealError('Reveal is unavailable right now.');
-      }
-    })();
-  }, [canRevealPhi, revealAll, facilityCases]);
+      })();
+    },
+    [canRevealPhi],
+  );
 
   const resolved = snapshot?.resolved ?? null;
   // Human name of the selected facility, for the cases-panel scope label (display only, never PHI). Null when
@@ -613,10 +609,10 @@ export function QualifyTab({
               facilityLabel={selectedFacilityLabel}
               canReveal={canRevealPhi}
               revealed={revealed}
-              revealAll={revealAll}
-              revealing={revealing}
+              revealingKeys={revealingKeys}
               revealError={revealError}
-              onToggleRevealAll={() => setRevealAll((v) => !v)}
+              onRevealPatient={revealPatient}
+              onHideIdentifiers={resetReveal}
               onViewCohort={viewCohort}
               capped={capped}
               emptyIdentifierLabel={emptyIdentifierLabel}

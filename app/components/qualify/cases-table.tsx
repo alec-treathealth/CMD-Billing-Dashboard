@@ -8,12 +8,15 @@
  * place an identifier is ever typed — it LANDS on the searched member's facility (Fix A), and this panel
  * is a PURE DISPLAY of that facility (the searched member present in context among its patients).
  *
- * PHI reveal: masked by default; a SINGLE parent-owned header toggle ("Reveal all" ⇄ "Hide
- * identifiers") unmasks Patient / Member ID / Group # for every row at once (parity with the
- * collections grid + billing-audit work-table). The parent (qualify-tab) owns the `revealAll` flag and
- * fetches the scope's PHI in ONE audited revealQualifyRows call; `revealed` caches it, so toggling
- * off/on re-masks DISPLAY only and never re-audits. Masking reuses lib/phi's PHI_MASK convention.
- * Reveal is ORTHOGONAL to the amounts gate: an admissions_seat can reveal PHI but still sees zero dollars.
+ * PHI reveal: PER-PATIENT (not per-page). Masked by default. EXPANDING a patient group reveals THAT
+ * patient's claims in ONE audited revealQualifyRows call (onRevealPatient); a single-claim patient gets a
+ * small "Reveal" button that does the same for its one claim. A patient's claim count is always <<
+ * REVEAL_BATCH_CAP, so the cap is never hit — and only patients the user actually opens are unmasked
+ * (least-privilege; the old blanket "Reveal all" is GONE — it couldn't honor the 50-cap over a whole
+ * window and over-revealed). `revealed` (parent-owned, keyed by claim id) caches the PHI; a claim shows
+ * real identifiers iff its id is cached. "Hide identifiers" (onHideIdentifiers) is a per-session mask reset
+ * that clears the cache. Masking reuses lib/phi's PHI_MASK. Reveal is ORTHOGONAL to the amounts gate: an
+ * admissions_seat can reveal PHI but still sees zero dollars.
  *
  * COLOR (0059 trust signal — CONFIDENCE-FIRST via confidenceOf; supersedes both prior rules): a
  * `confirmed` claim's % ALLOWED cell grades by its own pct through ratingBucket (50/30 cutoffs); an
@@ -33,7 +36,7 @@ import { ratingBucket } from '../../lib/qualify/rating';
 import { CONFIDENCE_LEGEND } from '../../lib/qualify/confidence';
 import { groupClaimsByPatient, type QualifyClaimGroup } from '../../lib/qualify/groupClaims';
 import { PHI_MASK } from '../../lib/phi';
-import type { QualifyClaim, QualifyPhi } from '../../lib/qualify/contract';
+import { QUALIFY_REVEAL_BATCH_CAP, type QualifyClaim, type QualifyPhi } from '../../lib/qualify/contract';
 
 function usd0(n: number): string {
   return `$${Math.round(n).toLocaleString('en-US')}`;
@@ -56,10 +59,10 @@ export function CasesTable({
   facilityLabel = null,
   canReveal,
   revealed,
-  revealAll,
-  revealing,
+  revealingKeys,
   revealError,
-  onToggleRevealAll,
+  onRevealPatient,
+  onHideIdentifiers,
   onViewCohort,
   capped = false,
   emptyIdentifierLabel = null,
@@ -74,15 +77,17 @@ export function CasesTable({
   /** Human name of the selected facility these cases are scoped to (display only; never PHI). */
   facilityLabel?: string | null;
   canReveal: boolean;
-  /** Fetched PHI for the current scope, keyed by row id (cleared on scope change; never dropped on hide). */
+  /** Fetched PHI for the current scope, keyed by claim id. A claim shows PHI iff its id is here. */
   revealed: Map<number, QualifyPhi>;
-  /** Parent-owned reveal toggle — gates DISPLAY of the cached PHI; there is no per-row state. */
-  revealAll: boolean;
-  /** A bulk reveal is in flight (the toggle shows "Revealing…"). */
-  revealing: boolean;
-  /** Last bulk-reveal error for the current scope, if any. */
+  /** patientKeys whose per-patient reveal is in flight (drives the row "Revealing…" state). */
+  revealingKeys: ReadonlySet<number>;
+  /** Last reveal error for the current scope, if any. */
   revealError: string | null;
-  onToggleRevealAll: () => void;
+  /** PER-PATIENT reveal: reveal THIS patient's claims (one audited call). Fired on group EXPAND + the
+   *  singleton "Reveal" button. `patientKey` is the per-response ordinal; `claimIds` are that patient's rows. */
+  onRevealPatient: (patientKey: number, claimIds: number[]) => void;
+  /** "Hide identifiers" — a per-session mask reset (clears the whole revealed cache). */
+  onHideIdentifiers: () => void;
   /** Phase 3: open the patient's LIFETIME prefix-cohort slide-over. Called with ONE claim id of the
    *  group (non-PHI synthetic id — the server re-derives the cohort token) + the MASKED group label.
    *  Optional so render tests mount without it (the chip is omitted when absent). */
@@ -133,7 +138,7 @@ export function CasesTable({
     // unknown → neutral. See the header comment + colors.ts history.
     const bucket: RatingBucket =
       c.confidence === 'confirmed' ? ratingBucket(pct) : c.confidence === 'estimate' ? 'warn' : 'neutral';
-    const phi = revealAll ? revealed.get(c.id) : undefined;
+    const phi = revealed.get(c.id); // a claim shows PHI iff its id is in the cache (no page-level gate)
     const isShown = phi !== undefined;
     const maskedCls = 'font-mono tracking-widest text-ink400';
     const realCls = 'font-mono text-ink900';
@@ -145,6 +150,18 @@ export function CasesTable({
             {phiText(isShown, phi?.patient_name ?? null, PHI_MASK)}
           </span>
           {withCohortChip ? cohortChip(c.id, c.patientKey) : null}
+          {/* Singleton-patient reveal (there's no group to expand): one audited call for this one claim. */}
+          {withCohortChip && canReveal && !isShown ? (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onRevealPatient(c.patientKey, [c.id]); }}
+              disabled={revealingKeys.has(c.patientKey)}
+              title="Reveal this patient's identifiers (audited)"
+              className="ml-1 rounded-full border border-teal200 bg-teal50 px-1.5 py-px text-[10px] font-semibold text-teal700 hover:bg-teal200 disabled:opacity-60"
+            >
+              {revealingKeys.has(c.patientKey) ? 'Revealing…' : 'Reveal'}
+            </button>
+          ) : null}
         </td>
         <td className={TD}>
           <span className={isShown ? realCls : maskedCls}>
@@ -206,8 +223,16 @@ export function CasesTable({
     const first = g.claims[0]!;
     // Group-row PHI: the first claim of the group whose PHI is in the reveal cache (all claims of a
     // patient share identity, so any revealed member works).
-    const phi = revealAll ? g.claims.map((c) => revealed.get(c.id)).find((p) => p !== undefined) : undefined;
+    const phi = g.claims.map((c) => revealed.get(c.id)).find((p) => p !== undefined);
     const isShown = phi !== undefined;
+    const revealingThis = revealingKeys.has(g.patientKey);
+    // EXPAND = reveal (audited, this patient only). Toggle the day rows; on OPEN, reveal the patient's
+    // claims (deduped in the parent, so a re-expand never re-audits). Collapsing keeps the PHI cached.
+    const onToggle = () => {
+      const opening = !open;
+      togglePatient(g.patientKey);
+      if (opening && canReveal && !isShown) onRevealPatient(g.patientKey, g.claims.map((c) => c.id));
+    };
     const programs = [...new Set(g.claims.map((c) => c.program).filter(Boolean))].join('·');
     const bucket: RatingBucket =
       g.confidence === 'confirmed' ? ratingBucket(g.avgPct) : g.confidence === 'estimate' ? 'warn' : 'neutral';
@@ -219,10 +244,10 @@ export function CasesTable({
           <td className={TD}>
             <button
               type="button"
-              onClick={() => togglePatient(g.patientKey)}
+              onClick={onToggle}
               aria-expanded={open}
               className="inline-flex items-center gap-1.5 font-semibold text-ink900"
-              title={open ? 'Collapse this patient’s claims' : 'Expand to day-by-day claims'}
+              title={open ? 'Collapse this patient’s claims' : canReveal ? 'Expand to reveal + see day-by-day claims (audited)' : 'Expand to day-by-day claims'}
             >
               <span aria-hidden className="text-[10px] text-ink400">{open ? '▾' : '▸'}</span>
               <span className={isShown ? 'text-ink900' : 'text-ink400'}>
@@ -231,8 +256,14 @@ export function CasesTable({
               <span className="rounded-full bg-teal50 px-1.5 py-px text-[10px] font-bold text-teal700">
                 {g.claimCount} claims
               </span>
+              {revealingThis ? <span className="text-[10px] font-medium text-ink400">Revealing…</span> : null}
             </button>
             {cohortChip(first.id, g.patientKey)}
+            {/* Rare high-frequency patient: a single audited batch caps at REVEAL_BATCH_CAP, so IDs beyond
+                the 50 most recent stay masked — say so honestly. */}
+            {isShown && g.claimCount > QUALIFY_REVEAL_BATCH_CAP ? (
+              <span className="ml-1 text-[10px] text-ink400">IDs shown for the 50 most recent</span>
+            ) : null}
           </td>
           <td className={TD}>
             <span className={isShown ? 'font-mono text-ink900' : 'font-mono tracking-widest text-ink400'}>
@@ -294,20 +325,19 @@ export function CasesTable({
           {facilityLabel ? <span className="ml-2 text-sm font-medium text-muted-foreground">· {facilityLabel}</span> : null}
         </h2>
         <div className="flex items-center gap-3">
-          {canReveal ? (
+          {/* PER-PATIENT reveal is inline (expand a group / the singleton "Reveal" button). The only header
+              control is "Hide identifiers" — shown once something IS revealed — plus a discovery hint. */}
+          {canReveal && revealed.size > 0 ? (
             <button
               type="button"
-              onClick={onToggleRevealAll}
-              disabled={revealing}
-              aria-pressed={revealAll}
-              title="Reveal patient identifiers for these cases (audited)"
-              className={[
-                'rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors disabled:opacity-60',
-                revealAll ? 'border-teal500 bg-teal50 text-teal700' : 'border-teal200 bg-teal50 text-teal700 hover:bg-teal200',
-              ].join(' ')}
+              onClick={onHideIdentifiers}
+              title="Re-mask every revealed patient (this session)"
+              className="rounded-md border border-teal500 bg-teal50 px-2.5 py-1 text-[11px] font-semibold text-teal700 transition-colors hover:bg-teal200"
             >
-              {revealing ? 'Revealing…' : revealAll ? 'Hide identifiers' : 'Reveal all'}
+              Hide identifiers
             </button>
+          ) : canReveal ? (
+            <span className="whitespace-nowrap text-[11px] text-muted-foreground">Reveal IDs per patient (audited)</span>
           ) : null}
           <span className="whitespace-nowrap text-xs font-semibold text-muted-foreground">
             {claims.length} recent claims{canReveal ? '' : ' · masked'}

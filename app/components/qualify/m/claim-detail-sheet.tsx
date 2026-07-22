@@ -3,8 +3,10 @@
 /**
  * Qualify mobile — single claim-line detail (tap a claim in DetailSheet). Layered ABOVE DetailSheet
  * (higher z-index); dismissing returns to the facility's claim list, which stays mounted underneath.
- * Renders QualifyClaim fields; PHI is fetched by the parent's audited "Reveal all" and passed in
- * via `phi` (null when masked) — this sheet fetches nothing itself.
+ * Renders QualifyClaim fields. This is the PER-PATIENT reveal trigger: "Reveal identifiers" (shown when
+ * canReveal && the patient isn't revealed yet) fires the parent's audited reveal for THIS claim's patient
+ * (onReveal); once `phi` arrives the sheet swaps its mask for the real values and the list row underneath
+ * reflects it too. The mobile list has no patient-group expander, so this popup is the reveal affordance.
  *
  * AMOUNTS GATE: the Billed/Allowed block is OMITTED from the DOM (not CSS-hidden) when
  * !hasAmounts — the server has already nulled the values; this is belt-and-suspenders.
@@ -18,6 +20,9 @@ const INK400 = '#859794';
 const LINE = '#E4E9E6';
 const SURFACE = '#FFFFFF';
 const GROUND = '#FBF8F4';
+const TEAL700 = '#135E5A';
+const TEAL_TINT = '#EAF4F2';
+const DANGER = '#C0453B';
 
 function usd0(n: number): string {
   return `$${Math.round(n).toLocaleString('en-US')}`;
@@ -36,11 +41,20 @@ export function ClaimDetailSheet({
   claim,
   hasAmounts,
   phi,
+  canReveal = false,
+  revealing = false,
+  revealError = null,
+  onReveal,
   onClose,
 }: {
   claim: QualifyClaim;
   hasAmounts: boolean;
   phi: QualifyPhi | null;
+  /** PER-PATIENT reveal affordance (this claim's patient). Omitted/false → no reveal button (e.g. tests). */
+  canReveal?: boolean;
+  revealing?: boolean;
+  revealError?: string | null;
+  onReveal?: () => void;
   onClose: () => void;
 }) {
   return (
@@ -80,6 +94,21 @@ export function ClaimDetailSheet({
             </>
           ) : null}
         </div>
+        {/* PER-PATIENT reveal: one audited call for THIS claim's patient (across the loaded set). Hidden
+            once revealed (phi present) or for a non-entitled viewer. */}
+        {canReveal && !phi ? (
+          <div style={{ padding: '0 16px' }}>
+            <button
+              type="button"
+              onClick={() => onReveal?.()}
+              disabled={revealing}
+              style={{ width: '100%', height: 40, borderRadius: 10, border: 'none', background: TEAL_TINT, color: TEAL700, fontWeight: 700, cursor: 'pointer', opacity: revealing ? 0.6 : 1 }}
+            >
+              {revealing ? 'Revealing…' : 'Reveal identifiers'}
+            </button>
+            {revealError ? <div style={{ marginTop: 6, fontSize: 11, color: DANGER, textAlign: 'center' }}>{revealError}</div> : null}
+          </div>
+        ) : null}
         <div style={{ padding: 16 }}>
           <button
             onClick={onClose}

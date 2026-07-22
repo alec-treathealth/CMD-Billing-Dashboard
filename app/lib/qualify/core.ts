@@ -15,6 +15,7 @@ import {
   qualifyWindowBounds,
   QUALIFY_TENANT_SCOPE,
   QUALIFY_MEMBER_ID_MASK,
+  QUALIFY_REVEAL_BATCH_CAP,
   type QualifyInput,
   type QualifyPayerInput,
   type QualifyFacilityCasesInput,
@@ -54,7 +55,7 @@ export const SEARCH_QUALIFY_COHORT = 'search_qualify_cohort';
 export const REVEAL_QUALIFY_ROW = 'reveal_qualify_row';
 export const REVEAL_QUALIFY_ROWS = 'reveal_qualify_rows';
 
-const REVEAL_BATCH_CAP = 50;
+const REVEAL_BATCH_CAP = QUALIFY_REVEAL_BATCH_CAP;
 
 /** Everything the cores touch that isn't pure — injected so tests can fake it. */
 export interface QualifyDeps {
