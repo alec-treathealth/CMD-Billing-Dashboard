@@ -396,8 +396,8 @@ test('combo grouping: SQL is dollar-weighted ratio-of-SUMS, never avg-of-ratios 
   const { combo } = buildCmdSearchSummaryQueries({}, ENTITY);
   // pct_allowed = sum(allowed)/sum(charge); pct_paid = sum(insurance)/sum(allowed) — ratio of SUMS
   // (each wrapped in a guarded CASE … END and aliased to the pct_* output column).
-  assert.match(combo.sql, /round\(sum\(allowed_amount\) \/ sum\(charge_amount\) \* 100, 2\)::float8 end as pct_allowed/);
-  assert.match(combo.sql, /round\(sum\(insurance_payments\) \/ sum\(allowed_amount\) \* 100, 2\)::float8 end as pct_paid/);
+  assert.match(combo.sql, /round\(sum\(allowed_reliable\) \/ sum\(charge_amount\) \* 100, 2\)::float8 end as pct_allowed/);
+  assert.match(combo.sql, /round\(sum\(insurance_payments\) \/ sum\(allowed_reliable\) \* 100, 2\)::float8 end as pct_paid/);
   // The trap it must NOT fall into: no averaging of any kind, and never aggregating the per-row
   // generated ratio columns (which would be avg/sum-of-per-row-ratios, not ratio-of-sums).
   assert.doesNotMatch(combo.sql, /avg\(/);
@@ -414,7 +414,7 @@ test('combo grouping: tenant-scoped, groups by BOTH keys, denominators guarded, 
   // %-allowed guarded by `sum(charge) > 0`; %-paid guarded by the DENOMINATOR FLOOR (netted allowed
   // must be ≥ 2% of billed and ≥ $100) → NULL on a meaningless denominator, never a 1900% artifact.
   assert.match(combo.sql, /case when sum\(charge_amount\) > 0 then/);
-  assert.match(combo.sql, /case when sum\(allowed_amount\) >= greatest\(sum\(charge_amount\) \* 0\.02, 100\) then/);
+  assert.match(combo.sql, /case when sum\(allowed_reliable\) >= greatest\(sum\(charge_amount\) \* 0\.02, 100\) then/);
   // labels carried as cpt + revenue (distinct shape, two labels)
   assert.match(combo.sql, /cpt_code as cpt, revenue_code as revenue/);
   assertAllBound(combo.sql, combo.params);
@@ -493,7 +493,9 @@ test('grain: every aggregate reads the 0050 charge rollup; row-browsing reads st
 });
 
 test('grain: the %-paid denominator floor is the SHARED select everywhere ratios render', () => {
-  const guard = /case when sum\(allowed_amount\) >= greatest\(sum\(charge_amount\) \* 0\.02, 100\) then/;
+  // 0059 ④: the floor's denominator is the RELIABLE sum; the guard shape/constants are UNCHANGED
+  // (the 2%/$100 re-ruling is deferred until real allowed_reliable numbers — do not touch here).
+  const guard = /case when sum\(allowed_reliable\) >= greatest\(sum\(charge_amount\) \* 0\.02, 100\) then/;
   const { combo } = buildCmdSearchSummaryQueries({}, ENTITY);
   assert.match(combo.sql, guard);
   const { byPosition, byDays } = buildCohortCurveQueries('deadbeefcafe0011', ENTITY);
@@ -504,7 +506,9 @@ test('grain: the %-paid denominator floor is the SHARED select everywhere ratios
   assert.match(dd.byCptRevenue.sql, guard);
   // The UNGUARDED division must not survive anywhere a %-paid is computed.
   for (const q of [combo, byPosition, byDays, dd.stats, dd.byCptRevenue]) {
-    assert.doesNotMatch(q.sql, /case when sum\(allowed_amount\) > 0 then/);
+    assert.doesNotMatch(q.sql, /case when sum\(allowed_(amount|reliable)\) > 0 then/);
+    // 0059 ④: the netted posting sum is BANNED from every ratio aggregate — reliable only.
+    assert.doesNotMatch(q.sql, /sum\(allowed_amount\)/);
   }
 });
 
@@ -521,8 +525,8 @@ test('cohort curve: BOTH queries tenant-scoped + prefix-token bound, sequenced, 
     assert.deepEqual(q.params[0], ENTITY);
     assert.equal(q.params[1], PREFIX_TOKEN);
     // Dollar-weighted ratio-of-sums (same discipline as the combo grouping) — never avg-of-ratios.
-    assert.match(q.sql, /round\(sum\(allowed_amount\) \/ sum\(charge_amount\) \* 100, 2\)::float8 end as pct_allowed/);
-    assert.match(q.sql, /round\(sum\(insurance_payments\) \/ sum\(allowed_amount\) \* 100, 2\)::float8 end as pct_paid/);
+    assert.match(q.sql, /round\(sum\(allowed_reliable\) \/ sum\(charge_amount\) \* 100, 2\)::float8 end as pct_allowed/);
+    assert.match(q.sql, /round\(sum\(insurance_payments\) \/ sum\(allowed_reliable\) \* 100, 2\)::float8 end as pct_paid/);
     assert.doesNotMatch(q.sql, /avg\(/);
     assertAllBound(q.sql, q.params);
   }
@@ -590,7 +594,7 @@ test('cohort curve: Phase 2 dollars + zero-pay ride the SAME suppressed select, 
     );
     // The zero-pay signal is PAYMENTS, deliberately never allowed_amount (~85% of allowed<=0/null
     // lines in this dataset carry real payments — allowed<=0 is not a denial signal).
-    assert.doesNotMatch(q.sql, /allowed_amount <= /);
+    assert.doesNotMatch(q.sql, /allowed_(amount|reliable) <= /);
     // The metric fields sit in the FINAL suppressed select (immediately before `from seq`, whose
     // rollup carries the HAVING floor) — no second unsuppressed projection exists.
     assert.match(q.sql, /as pct_patient_shifted from seq/);
@@ -688,7 +692,7 @@ test('drilldown queries: byPayer / byCptRevenue are top-N, dollar-weighted, and 
     /group by cpt_code, revenue_code order by charge desc nulls last, count desc limit \$4/,
   );
   assert.equal(def.byCptRevenue.params[3], CMD_SEARCH_TOP_N);
-  assert.match(def.byCptRevenue.sql, /round\(sum\(allowed_amount\) \/ sum\(charge_amount\) \* 100, 2\)::float8 end as pct_allowed/);
+  assert.match(def.byCptRevenue.sql, /round\(sum\(allowed_reliable\) \/ sum\(charge_amount\) \* 100, 2\)::float8 end as pct_allowed/);
 
   const custom = buildCohortDrilldownQueries(PREFIX_TOKEN, ENTITY, 'position', 3, { topN: 3 });
   assert.equal(custom.byPayer.params[3], 3);

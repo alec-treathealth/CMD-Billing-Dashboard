@@ -494,9 +494,15 @@ export const CMD_EXPLORER_CHARGE_ROLLUP = 'collections.cmd_explorer_charge_rollu
  * zero and turn the ratio into a 500–1900% artifact (the pre-0050 readings the footnote used to
  * rationalize as out-of-network). Below the floor the ratio is NULL ("—"), never a huge number.
  */
+// 0059 repoint ④: the allowed aggregate is sum(allowed_reliable) — the materialized tiered value —
+// not the netted posting sum (which over-states restatements and nets reversal-heavy groups toward
+// zero). The pct_paid FLOOR (>= greatest(2% of billed, $100)) is DELIBERATELY UNCHANGED: its
+// original netted-toward-zero rationale weakens under allowed_reliable, but re-ruling it is a
+// product decision DEFERRED until real allowed_reliable numbers have been observed (Alec,
+// 2026-07-22) — do not loosen/drop it inside a repoint diff.
 export const PCT_RATIO_SELECT =
-  'case when sum(charge_amount) > 0 then round(sum(allowed_amount) / sum(charge_amount) * 100, 2)::float8 end as pct_allowed, ' +
-  'case when sum(allowed_amount) >= greatest(sum(charge_amount) * 0.02, 100) then round(sum(insurance_payments) / sum(allowed_amount) * 100, 2)::float8 end as pct_paid';
+  'case when sum(charge_amount) > 0 then round(sum(allowed_reliable) / sum(charge_amount) * 100, 2)::float8 end as pct_allowed, ' +
+  'case when sum(allowed_reliable) >= greatest(sum(charge_amount) * 0.02, 100) then round(sum(insurance_payments) / sum(allowed_reliable) * 100, 2)::float8 end as pct_paid';
 
 /** One grouped bucket (facility / payer / cpt): its label + match count + charged total. */
 export interface CmdSearchGroup {
@@ -511,7 +517,7 @@ export interface CmdSearchGroup {
  * "how does this payer treat this exact CPT×revenue-code pairing", which one label can't express.
  *
  * `pct_allowed` / `pct_paid` are DOLLAR-WEIGHTED ratios of the bucket's SUMS —
- * sum(allowed_amount)/sum(charge_amount) and sum(insurance_payments)/sum(allowed_amount), each ×100
+ * sum(allowed_reliable)/sum(charge_amount) and sum(insurance_payments)/sum(allowed_reliable), each ×100
  * rounded to 2 dp — NEVER an average of each row's individual ratio (avg-of-ratios over-weights
  * small claims and misstates the actual dollar recovery rate, which is the number admissions must
  * trust). NULL when the denominator is 0 / negative / null (guarded in SQL, never an error). `count`
@@ -818,7 +824,7 @@ export function buildCohortCurveQueries(
     const sql =
       'with seq as (select member_id_bidx, ' +
       'dense_rank() over (partition by member_id_bidx order by charge_date) as pos, ' +
-      'charge_amount, allowed_amount, insurance_payments, patient_balance_due ' +
+      'charge_amount, allowed_reliable, insurance_payments, patient_balance_due ' +
       `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
       `where business_entity_id = any(${ent}::uuid[]) and member_id_prefix_bidx = ${pref} and charge_date is not null) ` +
       'select pos::int as bucket, count(distinct member_id_bidx)::int as patients, count(*)::int as claims, ' +
@@ -841,10 +847,10 @@ export function buildCohortCurveQueries(
     // Bucket by whole `dayBucketDays`-wide windows measured from each patient's OWN first claim
     // (days_since = charge_date − first_dt, an integer). Same HAVING suppression on the rollup.
     const sql =
-      'with base as (select member_id_bidx, charge_date, charge_amount, allowed_amount, insurance_payments, patient_balance_due ' +
+      'with base as (select member_id_bidx, charge_date, charge_amount, allowed_reliable, insurance_payments, patient_balance_due ' +
       `from ${CMD_EXPLORER_CHARGE_ROLLUP} where business_entity_id = any(${ent}::uuid[]) and member_id_prefix_bidx = ${pref} and charge_date is not null), ` +
       'firstdt as (select member_id_bidx, min(charge_date) as first_dt from base group by member_id_bidx), ' +
-      'seq as (select b.member_id_bidx, (b.charge_date - f.first_dt) as days_since, b.charge_amount, b.allowed_amount, b.insurance_payments, b.patient_balance_due ' +
+      'seq as (select b.member_id_bidx, (b.charge_date - f.first_dt) as days_since, b.charge_amount, b.allowed_reliable, b.insurance_payments, b.patient_balance_due ' +
       'from base b join firstdt f using (member_id_bidx)) ' +
       `select (floor(days_since::numeric / ${bucket}) * ${bucket})::int as bucket, count(distinct member_id_bidx)::int as patients, count(*)::int as claims, ` +
       COHORT_METRIC_SELECT + ' ' +
@@ -883,7 +889,8 @@ export function buildCohortTotalsQuery(
   const ent = add(entityIds);
   const pref = add(prefixBidx);
   const sql =
-    'select sum(charge_amount)::float8 as billed, sum(allowed_amount)::float8 as allowed, ' +
+    // 0059 ④: end-to-end yield's allowed = the reliable tiered sum, matching the curve's ratios.
+    'select sum(charge_amount)::float8 as billed, sum(allowed_reliable)::float8 as allowed, ' +
     'sum(insurance_payments)::float8 as paid ' +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
     `where business_entity_id = any(${ent}::uuid[]) and member_id_prefix_bidx = ${pref} and charge_date is not null`;
