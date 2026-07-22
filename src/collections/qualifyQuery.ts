@@ -44,7 +44,11 @@ export interface QualifyFacilityRow {
   facility: string; // raw rollup facility text (fallback display when facility_name is null)
   facility_name: string | null; // resolved dimension name (crosswalk)
   facility_code: string | null; // resolved facility_code — join key to the in-code city/state lookup
+  care_setting: 'IP' | 'OP' | 'BOTH' | null; // resolved dimension level-of-care; null when unresolved
   line_count: number; // ALL in-window logical charge lines (volume context: floor + "limited data") — NOT tier-filtered
+  confirmed_claims: number; // count of tiers a/cd/e1 (SQL mirror of confidence.ts — parity-tested)
+  estimate_claims: number; // count of tier e2
+  unknown_claims: number; // count of tiers b/none — the three sum to line_count
   billed: number | null; // sum(charge_amount), ALL lines — stripped in the action for admissions_seat
   allowed: number | null; // sum(allowed_reliable) EXCLUDING tier e2 (0059 evidence sum; null when zero reliable evidence) — stripped for admissions_seat
   pct_allowed: number | null; // dollar-weighted reliable-allowed/billed, 0-100 (guarded); null → neutral rating
@@ -59,6 +63,7 @@ export interface QualifyClaimRow {
   pct_allowed: number | null; // per-claim reliable-allowed/billed (materialized 0059 pct_allowed; NULL = unknown, never 0%)
   billed: number | null;
   allowed: number | null; // per-claim 0059 allowed_reliable (tiered; e2's latest-positive KEPT on this display surface)
+  allowed_tier: string | null; // raw 0059 tier — the core collapses it via confidenceOf (never sent to the client raw)
 }
 export interface QualifyMoverRow {
   primary_payer: string; // plaintext, non-PHI — the mover LABEL, tappable into the primary_payers filter
@@ -170,8 +175,15 @@ export function buildFacilityRankingQuery(
   const p = add(payer);
   const f = add(from);
   const t = add(to);
+  // Coverage triple (0059 trust signal): the three FILTER sets are the SQL MIRROR of
+  // confidence.ts's buckets (confirmed = a/cd/e1 · estimate = e2 · unknown = b/none) — SQL cannot
+  // import TS, so test/qualifyConfidence.test.ts asserts the two stay in lockstep. They sum to
+  // line_count (the tier taxonomy is exhaustive). Counts only — no ratio/rating math changes here.
   const inner =
     'select facility, count(*)::int as line_count, ' +
+    "count(*) filter (where allowed_tier in ('a','cd','e1'))::int as confirmed_claims, " +
+    "count(*) filter (where allowed_tier = 'e2')::int as estimate_claims, " +
+    "count(*) filter (where allowed_tier in ('b','none'))::int as unknown_claims, " +
     'sum(charge_amount)::float8 as billed, ' +
     RANKING_RELIABLE_SELECT + ' ' +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
@@ -180,12 +192,15 @@ export function buildFacilityRankingQuery(
     "and facility is not null and btrim(facility) <> '' " +
     'group by facility';
   const sql =
-    'select agg.facility, agg.line_count, agg.billed, agg.allowed, agg.pct_allowed, ' +
+    'select agg.facility, agg.line_count, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
+    'agg.billed, agg.allowed, agg.pct_allowed, ' +
     'max(f.facility_name) as facility_name, ' +
+    'max(f.care_setting) as care_setting, ' +
     'max(coalesce(fe.facility_code, a.facility_code)) as facility_code ' +
     `from (${inner}) agg ` +
     FACILITY_DIM_JOINS +
-    'group by agg.facility, agg.line_count, agg.billed, agg.allowed, agg.pct_allowed ' +
+    'group by agg.facility, agg.line_count, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
+    'agg.billed, agg.allowed, agg.pct_allowed ' +
     'order by agg.pct_allowed desc nulls last, agg.facility';
   return { sql, params };
 }
@@ -301,7 +316,9 @@ export function buildFacilityCasesQuery(
     // this is a DISPLAY surface, so e2's latest-positive stays visible (X's tell; the e2 exclusion is
     // rating-evidence-only, ruling Q2a — see RANKING_RELIABLE_SELECT above).
     'charge_amount::float8 as billed, allowed_reliable::float8 as allowed, ' +
-    'pct_allowed::float8 as pct_allowed ' +
+    // allowed_tier rides along RAW for the core's confidenceOf collapse (contract carries only the
+    // derived confidence — the six-value tier vocabulary never reaches the client).
+    'pct_allowed::float8 as pct_allowed, allowed_tier ' +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
     `where business_entity_id = any(${e}::uuid[])${payerCond} and facility = ${fac} ` +
     `and payment_received >= ${f}::date and payment_received < ${t}::date` +
@@ -329,11 +346,11 @@ export function buildFacilityCasesQuery(
     'select agg.id, agg.facility, agg.primary_payer, ' +
     'coalesce(max(f.facility_name), agg.facility) as facility_name, ' +
     'max(f.care_setting) as program, ' +
-    'agg.dos, agg.pct_allowed, agg.billed, agg.allowed ' +
+    'agg.dos, agg.pct_allowed, agg.billed, agg.allowed, agg.allowed_tier ' +
     `from (${inner}) agg ` +
     FACILITY_DIM_JOINS +
     keyset +
-    'group by agg.id, agg.facility, agg.primary_payer, agg.dos, agg.pct_allowed, agg.billed, agg.allowed ' +
+    'group by agg.id, agg.facility, agg.primary_payer, agg.dos, agg.pct_allowed, agg.billed, agg.allowed, agg.allowed_tier ' +
     `order by agg.dos desc nulls last, agg.id desc limit ${lim}`;
   return { sql, params };
 }

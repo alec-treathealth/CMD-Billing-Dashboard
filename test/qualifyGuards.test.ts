@@ -114,6 +114,7 @@ test('identifierEmptyTerm: the ≤3 echo for a prefix search; generic "this memb
 const fac = (key: string, rank: number): QualifyFacility => ({
   rank, name: key.toUpperCase(), facilityKey: key, city: null, state: null,
   pctAllowedOfBilled: 50, rating: 50, streakSignal: null, billedAmount: null, allowedAmount: null, lineCount: 10,
+  confirmedClaims: 10, estimateClaims: 0, unknownClaims: 0, careSetting: null,
 });
 const DECK = [fac('a', 1), fac('b', 2), fac('c', 3)];
 

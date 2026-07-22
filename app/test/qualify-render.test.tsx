@@ -28,17 +28,20 @@ const SOLID: QualifyFacility = {
   rank: 1, name: 'SOLID', facilityKey: 'solid', city: 'Boulder', state: 'CO',
   pctAllowedOfBilled: 55, rating: solidRating, streakSignal: null,
   billedAmount: 308900, allowedAmount: 166800, lineCount: 400,
+  confirmedClaims: 380, estimateClaims: 15, unknownClaims: 5, careSetting: 'OP',
 };
 const THIN_HIGH: QualifyFacility = {
   rank: 2, name: 'THIN HIGH', facilityKey: 'thin high', city: 'Reno', state: 'NV',
   pctAllowedOfBilled: 90, rating: thinHighRating, streakSignal: null,
   billedAmount: 412300, allowedAmount: 251500, lineCount: 1,
+  confirmedClaims: 1, estimateClaims: 0, unknownClaims: 0, careSetting: null,
 };
 const FACILITIES = [SOLID, THIN_HIGH];
 
 const CASE_AT_THIN: QualifyClaim = {
   id: 1, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'THIN HIGH', program: 'OP',
   dos: '2026-07-15', pctAllowedOfBilled: 95, billedAmount: 18400, allowedAmount: 11592,
+  confidence: 'confirmed',
 };
 
 // A weak-reimbursement facility (24% → danger) with a HIGH-pct case, to prove the % ALLOWED cell
@@ -47,10 +50,12 @@ const LOW: QualifyFacility = {
   rank: 3, name: 'LOW YIELD', facilityKey: 'low yield', city: 'Fresno', state: 'CA',
   pctAllowedOfBilled: 24, rating: lowRating, streakSignal: null,
   billedAmount: 500000, allowedAmount: 120000, lineCount: 300,
+  confirmedClaims: 290, estimateClaims: 8, unknownClaims: 2, careSetting: 'IP',
 };
 const CASE_AT_LOW: QualifyClaim = {
   id: 2, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'LOW YIELD', program: 'OP',
   dos: '2026-07-10', pctAllowedOfBilled: 95, billedAmount: 9000, allowedAmount: 8550,
+  confidence: 'confirmed',
 };
 
 const PHI: QualifyPhi = { patient_name: 'DOE, JANE', member_id_raw: 'AETMEMBER123', group_number: 'GRP9' };
@@ -279,11 +284,11 @@ test('cases table — without emptyIdentifierLabel, an empty panel keeps the pay
 // These fixtures are deliberately self-contained (they do NOT reuse the rating-const fixtures above) so
 // the block stays independent of the parallel scoring-track edits to this file.
 const CASES_FACILITY_A: QualifyClaim[] = [
-  { id: 101, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'ALPHA CLINIC', program: 'IP', dos: '2026-07-15', pctAllowedOfBilled: 60, billedAmount: 1000, allowedAmount: 600 },
-  { id: 102, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'ALPHA CLINIC', program: 'OP', dos: '2026-07-14', pctAllowedOfBilled: 55, billedAmount: 2000, allowedAmount: 1100 },
+  { id: 101, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'ALPHA CLINIC', program: 'IP', dos: '2026-07-15', pctAllowedOfBilled: 60, billedAmount: 1000, allowedAmount: 600, confidence: 'confirmed' },
+  { id: 102, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'ALPHA CLINIC', program: 'OP', dos: '2026-07-14', pctAllowedOfBilled: 55, billedAmount: 2000, allowedAmount: 1100, confidence: 'confirmed' },
 ];
 const CASES_FACILITY_B: QualifyClaim[] = [
-  { id: 201, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'BETA CENTER', program: 'OP', dos: '2026-06-02', pctAllowedOfBilled: 40, billedAmount: 3000, allowedAmount: 1200 },
+  { id: 201, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'BETA CENTER', program: 'OP', dos: '2026-06-02', pctAllowedOfBilled: 40, billedAmount: 3000, allowedAmount: 1200, confidence: 'confirmed' },
 ];
 
 test('cases table — per-facility scope: two facilities yield DIFFERENT case sets (the "same 15 regardless" bug is gone)', () => {

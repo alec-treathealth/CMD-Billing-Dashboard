@@ -98,6 +98,12 @@ test('buildFacilityRankingQuery: rates on allowed_reliable with tier e2 excluded
   assert.match(sql, /as facility_code/, 'returns facility_code for the city/state lookup');
   assert.match(sql, /count\(\*\)::int as line_count/, 'line_count = ALL in-window lines (volume context, not tier-filtered)');
   assert.match(sql, /sum\(charge_amount\)::float8 as billed/, 'billed = ALL in-window lines (e2 stays in the denominator — unknown-like)');
+  // Phase 0 (0059 trust signal): the coverage triple + level-of-care ride the SAME query — counts
+  // only, no ratio/rating math change (bucket parity with confidence.ts: qualifyConfidence.test.ts).
+  assert.match(sql, /as confirmed_claims/, 'coverage: confirmed count projected');
+  assert.match(sql, /as estimate_claims/, 'coverage: estimate count projected');
+  assert.match(sql, /as unknown_claims/, 'coverage: unknown count projected');
+  assert.match(sql, /max\(f\.care_setting\) as care_setting/, 'level-of-care from the existing dimension join');
   assert.deepEqual(params, [BOTH, 'AETNA', '2026-06-17', '2026-07-17']);
 });
 
@@ -147,7 +153,13 @@ test('buildFacilityCasesQuery: claim grain (NO member_id_bidx dedup), raw-facili
   assert.ok(!/allowed_amount/.test(sql), 'the netted allowed_amount no longer appears in the drill');
   assert.match(sql, /pct_allowed::float8 as pct_allowed/, 'pct read from the materialized 0059 column (identical formula, NULL-safe)');
   assert.ok(!/round\(/.test(sql), 'no inline pct derivation left in the drill');
-  assert.ok(!sql.includes('allowed_tier'), 'NO tier filter on the drill — e2 claims stay visible (display surface, ruling Q2a)');
+  // Phase 0 PROJECTS allowed_tier (the core collapses it via confidenceOf) — but it must never be
+  // a PREDICATE here: the drill is a display surface, e2 claims stay visible (ruling Q2a).
+  assert.ok(
+    !/allowed_tier\s*(=|<>|in\s*\()/.test(sql),
+    'NO tier FILTER on the drill — e2 claims stay visible (projection only, ruling Q2a)',
+  );
+  assert.match(sql, /agg\.allowed_tier/, 'the raw tier IS projected for the server-side confidence collapse');
   // Pagination OVER-FETCH: with no explicit limit the query binds QUALIFY_CASES_LIMIT + 1 (fetch 16, keep 15).
   assert.equal(params[5], QUALIFY_CASES_LIMIT + 1, 'over-fetches by one (limit+1) so the caller computes hasMore');
   assert.deepEqual(params.slice(0, 5), [BOTH, 'AETNA', '405 recovery', '2026-06-17', '2026-07-17']);

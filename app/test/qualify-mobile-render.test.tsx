@@ -28,6 +28,7 @@ const FAC: QualifyFacility = {
   billedAmount: 412300,
   allowedAmount: 251500,
   lineCount: 812,
+  confirmedClaims: 700, estimateClaims: 100, unknownClaims: 12, careSetting: 'BOTH',
 };
 
 const CASES: QualifyClaim[] = [
@@ -41,15 +42,16 @@ const CASES: QualifyClaim[] = [
     pctAllowedOfBilled: 63,
     billedAmount: 18400,
     allowedAmount: 11592,
+    confidence: 'confirmed',
   },
 ];
 
 // A mixed-payer facility set for the chip-strip / per-row payer / banner tests: ANTHEM ×2 (avg 50%),
 // CIGNA ×1 (20%). Distinct ids so the reveal map / keys stay unique.
 const MIXED_CASES: QualifyClaim[] = [
-  { id: 11, memberIdMasked: '••••••', payerName: 'ANTHEM BLUE CROSS CA', facilityName: 'MHC', program: 'OP', dos: '2026-07-15', pctAllowedOfBilled: 60, billedAmount: 1000, allowedAmount: 600 },
-  { id: 12, memberIdMasked: '••••••', payerName: 'ANTHEM BLUE CROSS CA', facilityName: 'MHC', program: 'OP', dos: '2026-07-14', pctAllowedOfBilled: 40, billedAmount: 2000, allowedAmount: 800 },
-  { id: 13, memberIdMasked: '••••••', payerName: 'CIGNA', facilityName: 'MHC', program: 'IP', dos: '2026-07-13', pctAllowedOfBilled: 20, billedAmount: 3000, allowedAmount: 600 },
+  { id: 11, memberIdMasked: '••••••', payerName: 'ANTHEM BLUE CROSS CA', facilityName: 'MHC', program: 'OP', dos: '2026-07-15', pctAllowedOfBilled: 60, billedAmount: 1000, allowedAmount: 600, confidence: 'confirmed' },
+  { id: 12, memberIdMasked: '••••••', payerName: 'ANTHEM BLUE CROSS CA', facilityName: 'MHC', program: 'OP', dos: '2026-07-14', pctAllowedOfBilled: 40, billedAmount: 2000, allowedAmount: 800, confidence: 'confirmed' },
+  { id: 13, memberIdMasked: '••••••', payerName: 'CIGNA', facilityName: 'MHC', program: 'IP', dos: '2026-07-13', pctAllowedOfBilled: 20, billedAmount: 3000, allowedAmount: 600, confidence: 'confirmed' },
 ];
 
 const noop = () => {};
@@ -218,6 +220,7 @@ test('detail — chip strip is a snap scroller with vertical containment; every 
   const FOUR: QualifyClaim[] = ['AETNA', 'CIGNA', 'ANTHEM BLUE CROSS OF CALIFORNIA', 'BCBS'].map((p, i) => ({
     id: 20 + i, memberIdMasked: '••••••', payerName: p, facilityName: 'MHC', program: 'OP',
     dos: '2026-07-15', pctAllowedOfBilled: 55, billedAmount: 100, allowedAmount: 55,
+    confidence: 'confirmed' as const,
   }));
   const html = renderToStaticMarkup(<DetailSheet facility={FAC} claims={FOUR} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />);
   for (const p of ['AETNA', 'CIGNA', 'ANTHEM BLUE CROSS OF CALIFORNIA', 'BCBS']) assert.ok(html.includes(p), `chip ${p} present`);

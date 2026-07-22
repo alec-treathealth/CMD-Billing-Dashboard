@@ -7,6 +7,7 @@
  * can load it hermetically. All PHI/DB/crypto reach it only through the injected QualifyDeps.
  */
 import { qualifyRating, QUALIFY_MIN_LINES } from './rating';
+import { confidenceOf } from './confidence';
 import { facilityLocation } from './facilityLocations';
 import {
   isQualifyWindow,
@@ -165,6 +166,11 @@ function assembleFacilities(rows: QualifyFacilityRow[]): QualifyFacility[] {
       billedAmount: r.billed,
       allowedAmount: r.allowed,
       lineCount: r.line_count,
+      // 0059 trust signal (non-dollar — survives the amounts strip for admissions_seat).
+      confirmedClaims: r.confirmed_claims,
+      estimateClaims: r.estimate_claims,
+      unknownClaims: r.unknown_claims,
+      careSetting: r.care_setting,
     }))
     .sort((a, b) => {
       if (a.rating === null && b.rating !== null) return 1;
@@ -189,6 +195,8 @@ function assembleClaims(rows: QualifyClaimRow[]): QualifyClaim[] {
     pctAllowedOfBilled: r.pct_allowed,
     billedAmount: r.billed,
     allowedAmount: r.allowed,
+    // The six-value tier collapses HERE (confidence.ts) — the client only ever sees the 3 states.
+    confidence: confidenceOf(r.allowed_tier),
   }));
 }
 

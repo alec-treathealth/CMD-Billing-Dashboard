@@ -18,6 +18,10 @@ function fac(name: string, pct: number | null, lineCount: number, rank = 1): Qua
     billedAmount: null,
     allowedAmount: null,
     lineCount,
+    confirmedClaims: lineCount, // neutral coverage: everything confirmed (Phase-1 tests vary this)
+    estimateClaims: 0,
+    unknownClaims: 0,
+    careSetting: null,
   };
 }
 

@@ -27,11 +27,11 @@ const B2 = 777777.77, A2 = 666666.66; // solid/mid-pct facility (Indigo)
 const CB = 555555.55, CA = 444444.44; // a case's dollars
 
 const FAC_ROWS = [
-  { facility: 'ca mental health', facility_name: 'CA MENTAL HEALTH', facility_code: 'CAMH', line_count: 3, billed: B1, allowed: A1, pct_allowed: 60 }, // BXR, thin high pct
-  { facility: '405 recovery', facility_name: '405 RECOVERY', facility_code: '10026460', line_count: 400, billed: B2, allowed: A2, pct_allowed: 55 }, // Indigo, solid mid pct
+  { facility: 'ca mental health', facility_name: 'CA MENTAL HEALTH', facility_code: 'CAMH', care_setting: null, line_count: 3, confirmed_claims: 3, estimate_claims: 0, unknown_claims: 0, billed: B1, allowed: A1, pct_allowed: 60 }, // BXR, thin high pct
+  { facility: '405 recovery', facility_name: '405 RECOVERY', facility_code: '10026460', care_setting: 'OP' as const, line_count: 400, confirmed_claims: 380, estimate_claims: 15, unknown_claims: 5, billed: B2, allowed: A2, pct_allowed: 55 }, // Indigo, solid mid pct
 ];
 const CASE_ROWS = [
-  { id: 123, facility: '405 recovery', facility_name: '405 RECOVERY', primary_payer: 'AETNA', program: 'OP' as const, dos: '2026-07-01', pct_allowed: 80, billed: CB, allowed: CA },
+  { id: 123, facility: '405 recovery', facility_name: '405 RECOVERY', primary_payer: 'AETNA', program: 'OP' as const, dos: '2026-07-01', pct_allowed: 80, billed: CB, allowed: CA, allowed_tier: 'cd' },
 ];
 const MOVER_ROWS = [
   { primary_payer: 'AETNA', this_patients: 40, prior_patients: 10, delta_patients: 30 },
@@ -117,7 +117,7 @@ test('snapshot: a small high-% facility RANKS ABOVE a large mid-% one (value-fir
 test('snapshot: a below-floor facility (< QUALIFY_MIN_LINES charge lines) is suppressed from the list', async () => {
   const deps = makeDeps(SUPER, cap(), {
     loadFacilities: async () => [
-      { facility: 'fluke', facility_name: 'FLUKE 100%', facility_code: null, line_count: QUALIFY_MIN_LINES - 1, billed: 100, allowed: 100, pct_allowed: 100 },
+      { facility: 'fluke', facility_name: 'FLUKE 100%', facility_code: null, care_setting: null, line_count: QUALIFY_MIN_LINES - 1, confirmed_claims: QUALIFY_MIN_LINES - 1, estimate_claims: 0, unknown_claims: 0, billed: 100, allowed: 100, pct_allowed: 100 },
       ...FAC_ROWS,
     ],
   });
@@ -504,7 +504,7 @@ test('facility-drill: EXACT member wins when both memberId + prefix are supplied
 // distinct per prefix), so a W29 search can only match W29* rows — proving W27/W23 never bleed through.
 const prefixRow = (id: number): QualifyClaimRow => ({
   id, facility: 'shared facility', facility_name: 'SHARED', primary_payer: 'AETNA', program: 'OP' as const,
-  dos: `2026-07-${String(id).padStart(2, '0')}`, pct_allowed: 50, billed: 100, allowed: 50,
+  dos: `2026-07-${String(id).padStart(2, '0')}`, pct_allowed: 50, billed: 100, allowed: 50, allowed_tier: 'cd',
 });
 const PREFIX_OF = new Map<number, string>([[1, 'W29'], [2, 'W29'], [3, 'W27'], [4, 'W23']]);
 const PREFIX_ROWS: QualifyClaimRow[] = [prefixRow(4), prefixRow(3), prefixRow(2), prefixRow(1)];
@@ -575,6 +575,7 @@ const WALK_ROWS: QualifyClaimRow[] = Array.from({ length: 35 }, (_, i) => ({
   pct_allowed: 50,
   billed: 100,
   allowed: 50,
+  allowed_tier: 'cd',
 }));
 function walkDeps(c: Cap): QualifyDeps {
   return makeDeps(SUPER, c, {

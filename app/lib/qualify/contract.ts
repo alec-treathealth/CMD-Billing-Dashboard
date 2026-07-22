@@ -5,6 +5,7 @@
  * functions) and imports nothing server-only, so both client surfaces can import these types and the
  * window math. Semantics are frozen (Prompt 2); adjust field names only with sign-off.
  */
+import type { QualifyConfidence } from './confidence';
 
 export type QualifyWindowDays = 30 | 60 | 90 | 180;
 export const QUALIFY_WINDOW_OPTIONS: readonly QualifyWindowDays[] = [30, 60, 90, 180];
@@ -119,6 +120,16 @@ export interface QualifyFacility {
   billedAmount: number | null; // ALL in-window lines; null unless viewerHasAmountsCapability (stripped server-side)
   allowedAmount: number | null; // reliable-evidence sum (e2 excluded); null when zero reliable evidence OR stripped
   lineCount: number; // ALL in-window logical charge lines (volume context: floor + "limited data"; non-dollar, not tier-filtered)
+  /** Coverage triple (0059 trust signal): per-facility in-window claim counts by confidence bucket
+   *  (confidence.ts — confirmed = a/cd/e1, estimate = e2, unknown = b/none). Sums to lineCount.
+   *  NON-DOLLAR: renders for admissions_seat; never stripped. Backs the coverage bar + the
+   *  "Rated on {confirmed} of {total} claims" caption (the rating already excludes estimate). */
+  confirmedClaims: number;
+  estimateClaims: number;
+  unknownClaims: number;
+  /** Level of care from the facility dimension (care_setting). null when the facility text is
+   *  unresolved — render no tag, never a fabricated one. */
+  careSetting: 'IP' | 'OP' | 'BOTH' | null;
 }
 
 /** ONE claim (charge) line — claim grain (Direction B, ruling 1): one row per charge from the 0050 rollup,
@@ -140,6 +151,10 @@ export interface QualifyClaim {
   pctAllowedOfBilled: number | null;
   billedAmount: number | null; // null unless viewerHasAmountsCapability (stripped server-side)
   allowedAmount: number | null; // per-claim 0059 allowed_reliable (tiered value, not the netted sum); null = unknown or stripped
+  /** THIS claim's confidence state (confidence.ts, derived server-side from 0059's allowed_tier —
+   *  the raw tier never reaches the client). NON-DOLLAR: renders for admissions_seat. Drives the
+   *  confidence-first %-allowed tint: estimate is NEVER green regardless of its number. */
+  confidence: QualifyConfidence;
 }
 
 export const QUALIFY_TENANT_SCOPE = 'cross-tenant-bxr-indigo' as const;
