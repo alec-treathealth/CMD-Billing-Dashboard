@@ -1672,3 +1672,41 @@ BOTH this grid and Qualify. Do not paper over it with a display-only >100% clamp
 `allowed_amount` / `pct_allowed` / `pct_paid` dropped from `CMD_EXPLORER_SORTABLE_COLUMNS` (and the
 client `SORTABLE_KEYS` mirror): selected/derived per page, not materialized, so nothing to keyset on.
 Columns stay VISIBLE, just no sort header. The rebuild restores them.
+
+---
+
+## 90d Explorer first-load default (2026-07-21) — landed WIP + mechanism correction
+
+Landed the standing 90d-recency WIP (built + GO'd 2026-07-20, dirty on the tree since; committed
+2026-07-21). Change: Explorer `recencyDays` defaults to **90** (was `useState(0)` = all-time) so the
+first-load summary applies a `payment_received >= today−90d` predicate. All-time stays reachable
+(re-click the active chip → `recencyDays=0` → unbounded; Month/Year sets its own calendar window,
+mutual exclusion preserved via `setMonth(0)`). Files: `cmd-explorer.tsx` (chip option + label +
+`useState(90)` default) + `actions.ts` (`CMD_RECENCY_DAYS` allowlist admits 90). Source-level
+regression guard added (`app/test/cmd-recency-default.test.tsx`) — a true render test is impossible
+because `cmd-explorer.tsx`'s import graph pulls `@/lib/actions → @/lib/access`, whose RSC `cache()`
+crashes the `node:test` runtime.
+
+### ⚠️ MECHANISM CORRECTION — the all-time path is NO LONGER a seq scan (X changed the grain)
+
+The 2026-07-20 review recorded the all-time first-load as a **Seq Scan** over ~483k rows
+(~148–220ms/panel warm), and the perf fix's original justification was "90d takes the index instead
+of that seq scan." **That description is now stale, and the shipped commit message deliberately does
+NOT repeat it** — anyone reading the old note against the new commit should not be confused by the
+discrepancy. What changed: **Build X (1586f8c) collapsed the Explorer to charge grain** and the summary
+reads the `collections.cmd_explorer_charge_rollup` matview, so the BXR slice is now **66,741
+charge-grain rows**, not ~483k row-grain. Live EXPLAIN (prod, 2026-07-21, warm) on the CURRENT query
+shape:
+
+- **90d first-load** → `Index Scan using cmd_charge_rollup_entity_payment`, Index Cond on **BOTH**
+  `business_entity_id` AND `payment_received` (12,106 rows / 9,445 buffers) → **~20ms** totals,
+  **~16ms** facility group-by.
+- **all-time** → **also an Index Scan** on `cmd_charge_rollup_entity_payment`, but Index Cond on the
+  **leading column only** (`business_entity_id`), 66,741 rows / 57,541 buffers → **~107ms**.
+
+So all-time is an **index-scan-on-leading-column over charge grain**, NOT a seq scan — X's collapse
+shrank the table enough that the planner index-scans even unwindowed. The perf premise still holds
+DECISIVELY (90d reads ~18% of the rows/buffers → ~5× faster warm, 107ms → 20ms); only the *mechanism*
+changed (fewer rows scanned, not seq→index). Cold first-touch was ~5.7s pure disk I/O — irrelevant to
+steady-state; warms on first hit. The failure mode Alec flagged (planner picks seq scan even with the
+90d window → 90d slower) did NOT occur.
