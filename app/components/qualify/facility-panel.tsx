@@ -22,8 +22,9 @@
  * Pure/presentational (no hooks) so it renders hermetically under renderToStaticMarkup. Imports are
  * relative + type-only where possible so the render test runs under tsx without `@/` resolution.
  */
-import { ratingBucket, RATING_LEGEND, type RatingBucket } from '../../lib/qualify/rating';
-import { bucketClass } from './colors';
+import { ratingBucket, RATING_LEGEND, QUALIFY_LIMITED_DATA_LINES, type RatingBucket } from '../../lib/qualify/rating';
+import { CONFIDENCE_LEGEND, type QualifyConfidence } from '../../lib/qualify/confidence';
+import { bucketClass, confidenceClass } from './colors';
 import type { QualifyFacility } from '../../lib/qualify/contract';
 
 function usd0(n: number): string {
@@ -31,6 +32,20 @@ function usd0(n: number): string {
 }
 
 const LEGEND_BUCKETS: readonly Exclude<RatingBucket, 'neutral'>[] = ['ok', 'warn', 'danger'];
+const LEGEND_CONFIDENCE: readonly QualifyConfidence[] = ['confirmed', 'estimate', 'unknown'];
+/** careSetting → the tag text (BOTH renders as "Both" — a tag, not shouting). */
+const LOC_LABEL: Record<'IP' | 'OP' | 'BOTH', string> = { IP: 'IP', OP: 'OP', BOTH: 'Both' };
+
+/** One segment of the 3-part coverage bar — q-dot paints from the confidence q-class's --q-c. */
+function CoverageSegment({ conf, count, total }: { conf: QualifyConfidence; count: number; total: number }) {
+  if (count <= 0 || total <= 0) return null;
+  return (
+    <span
+      className={['q-dot', confidenceClass(conf), 'block h-full'].join(' ')}
+      style={{ width: `${(count / total) * 100}%` }}
+    />
+  );
+}
 
 export function FacilityPanel({
   facilities,
@@ -96,6 +111,19 @@ export function FacilityPanel({
                       {f.rank}
                     </span>
                     {f.name}
+                    {f.careSetting ? (
+                      <span className="inline-flex shrink-0 items-center rounded-full bg-[#e4f0f5] px-1.5 py-px text-[10px] font-bold uppercase tracking-wide text-status-info">
+                        {LOC_LABEL[f.careSetting]}
+                      </span>
+                    ) : null}
+                    {f.lineCount < QUALIFY_LIMITED_DATA_LINES ? (
+                      <span
+                        className="inline-flex shrink-0 items-center rounded-full border border-line bg-surface px-1.5 py-px text-[10px] font-semibold text-ink400"
+                        title={`Only ${f.lineCount} claim line${f.lineCount === 1 ? '' : 's'} back this rating — treat as an early signal`}
+                      >
+                        thin sample
+                      </span>
+                    ) : null}
                   </span>
                   <span className="q-pct tabular-nums text-[15px] font-semibold">
                     {pct === null ? '—' : `${Math.round(pct)}%`}
@@ -112,6 +140,18 @@ export function FacilityPanel({
                 <div className="q-bar mt-[7px] h-[5px] overflow-hidden rounded-full bg-line">
                   <span className="block h-full rounded-full" style={{ width: `${width}%` }} />
                 </div>
+                {/* Coverage bar (0059 trust signal): confirmed / estimate / unknown segments. The
+                    rating above already EXCLUDES the estimate segment (ruling Q2a) — this bar shows
+                    that honestly instead of hiding it. Segments reuse the q-class palette (amber
+                    estimate is never green). */}
+                <div className="mt-[5px] flex h-[4px] overflow-hidden rounded-full bg-line" aria-hidden>
+                  <CoverageSegment conf="confirmed" count={f.confirmedClaims} total={f.lineCount} />
+                  <CoverageSegment conf="estimate" count={f.estimateClaims} total={f.lineCount} />
+                  <CoverageSegment conf="unknown" count={f.unknownClaims} total={f.lineCount} />
+                </div>
+                <p className="mt-1 text-[10.5px] text-ink400">
+                  Rated on {f.confirmedClaims} of {f.lineCount} claims
+                </p>
               </button>
             );
           })
@@ -126,7 +166,17 @@ export function FacilityPanel({
           </span>
         ))}
       </div>
-      <p className="px-4 pb-3 text-[11px] text-muted-foreground">{RATING_LEGEND.description}</p>
+      <p className="px-4 pb-2 text-[11px] text-muted-foreground">{RATING_LEGEND.description}</p>
+      {/* Confidence legend (0059): the coverage-bar vocabulary, shared verbatim with mobile. */}
+      <div className="flex flex-wrap gap-3.5 px-4 pb-1 text-[11.5px] text-muted-foreground">
+        {LEGEND_CONFIDENCE.map((k) => (
+          <span key={k} className="inline-flex items-center gap-1.5">
+            <span className={['q-dot', confidenceClass(k), 'inline-block h-2.5 w-2.5 rounded-full'].join(' ')} />
+            {CONFIDENCE_LEGEND.labels[k]}
+          </span>
+        ))}
+      </div>
+      <p className="px-4 pb-3 text-[11px] text-muted-foreground">{CONFIDENCE_LEGEND.description}</p>
       </div>
     </section>
   );

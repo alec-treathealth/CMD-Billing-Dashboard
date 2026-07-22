@@ -355,3 +355,54 @@ test('heating-up bar — renders nothing when no payer is trending up', () => {
   ];
   assert.equal(renderToStaticMarkup(<HeatingUpBar movers={flat} windowDays={30} onOpen={() => {}} />), '', 'empty render when nothing trends up');
 });
+
+// ── Phase 1 (0059 trust signal): confidence-first tint, coverage bar, LOC tag, thin-sample pill ──────
+const ESTIMATE_CLAIM: QualifyClaim = {
+  id: 301, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'REVERSAL HOUSE', program: 'OP',
+  dos: '2026-07-12', pctAllowedOfBilled: 95, billedAmount: 4000, allowedAmount: 3800,
+  confidence: 'estimate', // 95% but UNVERIFIED — must never read green
+};
+const UNKNOWN_CLAIM: QualifyClaim = {
+  id: 302, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'REVERSAL HOUSE', program: 'OP',
+  dos: '2026-07-11', pctAllowedOfBilled: null, billedAmount: 500, allowedAmount: null,
+  confidence: 'unknown',
+};
+
+test('cases table — an ESTIMATE claim is amber with ~ prefix and caption, NEVER green (however high its pct)', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable claims={[ESTIMATE_CLAIM]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([])} facilityLabel="REVERSAL HOUSE" {...noReveal} />,
+  );
+  assert.ok(html.includes('q-warn'), 'estimate cell wears q-warn (amber)');
+  assert.ok(!html.includes('q-ok'), 'a 95% estimate must NOT wear the green class');
+  assert.ok(html.includes('~95%'), 'estimate pct carries the ~ prefix');
+  assert.ok(html.includes('estimate · reversals'), 'estimate caption present');
+});
+
+test('cases table — an UNKNOWN claim is neutral and reads "no allowed on file", never 0%', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable claims={[UNKNOWN_CLAIM]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([])} facilityLabel="REVERSAL HOUSE" {...noReveal} />,
+  );
+  assert.ok(html.includes('q-neutral'), 'unknown cell is neutral');
+  assert.ok(html.includes('no allowed on file'), 'unknown caption present');
+  assert.ok(!html.includes('0%'), 'an unknown allowed never renders as a zero percent');
+});
+
+test('cases table — a CONFIRMED claim still grades by its own pct (95% → green), unchanged', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable claims={[CASE_AT_LOW]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([LOW])} facilityLabel="LOW YIELD" {...noReveal} />,
+  );
+  assert.ok(html.includes('q-ok'), 'confirmed 95% grades green via ratingBucket');
+  assert.ok(!html.includes('~95%'), 'no ~ prefix on a confirmed value');
+});
+
+test('facility panel — coverage bar caption, LOC tag, thin-sample pill, confidence legend', () => {
+  const html = renderToStaticMarkup(
+    <FacilityPanel facilities={[SOLID, THIN_HIGH]} hasAmounts heatOn={false} />,
+  );
+  assert.ok(html.includes('Rated on 380 of 400 claims'), 'coverage caption shows the rating evidence honestly');
+  assert.ok(html.includes('Rated on 1 of 1 claims'), 'full-coverage facility still captions');
+  assert.ok(html.includes('>OP<'), 'careSetting renders as the LOC tag (SOLID = OP)');
+  assert.ok(html.includes('thin sample'), 'THIN_HIGH (1 line < limited-data floor) wears the thin-sample pill');
+  assert.ok(html.includes('No allowed on file'), 'confidence legend labels render');
+  assert.ok(html.includes('Estimate'), 'estimate legend label present');
+});

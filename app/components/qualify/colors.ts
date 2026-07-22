@@ -7,11 +7,17 @@
  * Imports are RELATIVE (not the `@/` alias) so this and its consumers load under `tsx` in the
  * hermetic render test without depending on tsconfig path-alias resolution.
  *
- * CASE-COLOR RULE (ruling 2026-07-17): a case row is tinted by its PARENT FACILITY's rating bucket —
- * NEVER by the case's own pct. A single case's ratio is anecdotal; the facility's allowed% (the rating)
- * is the payer-behavior signal. Same "green means green" everywhere; no single case can fake a color.
+ * CASE-COLOR RULE — HISTORY, current rule last (this comment has been retired twice):
+ *   1. (2026-07-17) tinted by the PARENT FACILITY's rating bucket — retired;
+ *   2. then by the row's OWN pct through ratingBucket — retired;
+ *   3. (CURRENT, 0059 trust signal) CONFIDENCE-FIRST: a `confirmed` claim colors by its own pct's
+ *      ratingBucket; an `estimate` (tier e2 — reversals we couldn't verify) is ALWAYS amber (q-warn)
+ *      no matter how high its number reads — X's reversal tell, never painted green; an `unknown`
+ *      (no allowed on file) is neutral. confidenceClass below is the one mapping.
+ * buildFacilityBucketMap/caseBucket remain for the legacy tint consumers (mobile) until their own phase.
  */
 import { ratingBucket, type RatingBucket } from '../../lib/qualify/rating';
+import type { QualifyConfidence } from '../../lib/qualify/confidence';
 import type { QualifyFacility } from '../../lib/qualify/contract';
 
 export type { RatingBucket };
@@ -19,6 +25,16 @@ export type { RatingBucket };
 /** Bucket → the namespaced status class. `.q-<bucket>` sets --q-c / --q-wash in globals.css. */
 export function bucketClass(bucket: RatingBucket): `q-${RatingBucket}` {
   return `q-${bucket}`;
+}
+
+/**
+ * Confidence → the q-class its UI wears (coverage-bar segments, legend dots, the estimate %-cell):
+ * confirmed → q-ok · estimate → q-warn (amber — NEVER green, regardless of the number) ·
+ * unknown → q-neutral. The pct INSIDE a confirmed cell still grades by ratingBucket; this class
+ * only governs the confidence vocabulary itself.
+ */
+export function confidenceClass(c: QualifyConfidence): 'q-ok' | 'q-warn' | 'q-neutral' {
+  return c === 'confirmed' ? 'q-ok' : c === 'estimate' ? 'q-warn' : 'q-neutral';
 }
 
 /**

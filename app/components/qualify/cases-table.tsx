@@ -12,10 +12,12 @@
  * off/on re-masks DISPLAY only and never re-audits. Masking reuses lib/phi's PHI_MASK convention.
  * Reveal is ORTHOGONAL to the amounts gate: an admissions_seat can reveal PHI but still sees zero dollars.
  *
- * COLOR: the % ALLOWED cell is tinted by the case's OWN allowed% (pctAllowedOfBilled) through the shared
- * ratingBucket helper (rating.ts cutoffs 50/30) — the same green/amber/red allowed-% scale the facility
- * rating uses, but keyed to this row's value. The facility rating color stays on the facility list (q-fac);
- * the two never cross-contaminate. (Was: inherited the parent facility's rating bucket.)
+ * COLOR (0059 trust signal — CONFIDENCE-FIRST via confidenceOf; supersedes both prior rules): a
+ * `confirmed` claim's % ALLOWED cell grades by its own pct through ratingBucket (50/30 cutoffs); an
+ * `estimate` (tier e2 — reversals we couldn't verify, excluded from the facility rating) is ALWAYS
+ * amber with a "~" prefix and an "estimate · reversals" caption — NEVER green, however high the
+ * number (X's reversal tell); an `unknown` is neutral and reads "no allowed on file". (History: was
+ * parent-facility bucket, then row-pct — see colors.ts.)
  * AMOUNTS: Billed/Allowed columns are OMITTED from the DOM when !viewerHasAmountsCapability.
  * SCOPE: `facilityLabel` names the facility these 15 belong to (ruling Q-4 — the list is scoped to the
  * SELECTED facility, so the scope must be visible). Facility name only; never PHI.
@@ -25,6 +27,7 @@
  */
 import { bucketClass, type RatingBucket } from './colors';
 import { ratingBucket } from '../../lib/qualify/rating';
+import { CONFIDENCE_LEGEND } from '../../lib/qualify/confidence';
 import { PHI_MASK } from '../../lib/phi';
 import type { QualifyClaim, QualifyPhi } from '../../lib/qualify/contract';
 
@@ -186,10 +189,11 @@ export function CasesTable({
             ) : (
               claims.map((c) => {
                 const pct = c.pctAllowedOfBilled;
-                // Color by the ROW'S OWN allowed% through the shared ratingBucket helper (rating.ts
-                // cutoffs 50/30): ≥50 green, ≥30 amber, else red; null → neutral. NOT the parent
-                // facility's rating bucket — this cell reports this case's reimbursement, not the site's.
-                const bucket = ratingBucket(pct);
+                // CONFIDENCE-FIRST (0059): confirmed → grade by this row's own pct (ratingBucket
+                // 50/30); estimate → ALWAYS amber (never green, however high the number — the
+                // reversal tell); unknown → neutral. See the header comment + colors.ts history.
+                const bucket: RatingBucket =
+                  c.confidence === 'confirmed' ? ratingBucket(pct) : c.confidence === 'estimate' ? 'warn' : 'neutral';
                 const phi = revealAll ? revealed.get(c.id) : undefined;
                 const isShown = phi !== undefined;
                 const maskedCls = 'font-mono tracking-widest text-ink400';
@@ -225,11 +229,23 @@ export function CasesTable({
                     <td className={`${TD} text-right`}>
                       <span
                         className={['q-pctcell', bucketClass(bucket), 'inline-flex items-center gap-1.5 rounded px-2 py-0.5 tabular-nums font-semibold'].join(' ')}
-                        title="Colored by this case's % allowed of billed"
+                        title={
+                          c.confidence === 'estimate'
+                            ? CONFIDENCE_LEGEND.captions.estimate
+                            : c.confidence === 'unknown'
+                              ? CONFIDENCE_LEGEND.captions.unknown
+                              : "Colored by this case's % allowed of billed"
+                        }
                       >
                         <span className="q-dot inline-block h-2 w-2 rounded-full" />
-                        {pct === null ? '—' : `${Math.round(pct)}%`}
+                        {pct === null ? '—' : c.confidence === 'estimate' ? `~${Math.round(pct)}%` : `${Math.round(pct)}%`}
                       </span>
+                      {c.confidence === 'estimate' ? (
+                        <span className="block text-[10px] leading-tight text-ink400">estimate · reversals</span>
+                      ) : null}
+                      {c.confidence === 'unknown' ? (
+                        <span className="block text-[10px] leading-tight text-ink400">no allowed on file</span>
+                      ) : null}
                     </td>
                     {hasAmounts ? (
                       <td className={`${TD} text-right tabular-nums`}>{c.billedAmount === null ? '—' : usd0(c.billedAmount)}</td>
