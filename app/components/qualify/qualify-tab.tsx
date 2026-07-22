@@ -45,6 +45,7 @@ import {
   getQualifySnapshot,
   getQualifySnapshotByPayer,
   getQualifyFacilityCases,
+  getQualifyPatientCohort,
   getQualifyMovers,
   revealQualifyRows,
 } from '@/lib/qualify/actions';
@@ -56,6 +57,7 @@ import {
   type QualifyCasesCursor,
   type QualifyMover,
   type QualifyPhi,
+  type QualifyPatientCohort,
 } from '@/lib/qualify/contract';
 import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
 import { isIdentifierEmpty, identifierEmptyTerm } from '@/lib/qualify/qualifyGuards';
@@ -63,6 +65,7 @@ import { buildFacilityBucketMap } from '@/components/qualify/colors';
 import { FacilityPanel } from '@/components/qualify/facility-panel';
 import { filterFacilitiesByLoc, type QualifyLocFilter } from '@/lib/qualify/groupClaims';
 import { CasesTable } from '@/components/qualify/cases-table';
+import { CohortSheet } from '@/components/qualify/cohort-sheet';
 import { HeatingUpBar } from '@/components/qualify/heating-up-bar';
 import { VobModal } from '@/components/qualify/vob-modal';
 
@@ -122,6 +125,12 @@ export function QualifyTab({
   const [group, setGroup] = useState('');
   // LOC filter chips (IP / OP / Both) — pure client-side view filter over the facility panel.
   const [locFilter, setLocFilter] = useState<QualifyLocFilter>(null);
+  // Phase 3: the patient-cohort slide-over (masked label + fetched context). Null = closed.
+  const [cohortSheet, setCohortSheet] = useState<{
+    label: string;
+    data: QualifyPatientCohort | null;
+    loading: boolean;
+  } | null>(null);
   // "Heating up" payer quick-pick (desktop parity with mobile): trending payers for the current window,
   // rendered as a click-to-resolve chip row. Fetched on load + re-fetched on window change.
   const [movers, setMovers] = useState<QualifyMover[]>([]);
@@ -417,6 +426,28 @@ export function QualifyTab({
     fetchCases(apply({ type: 'CHANGE_PREFIX', prefix }));
   }, [apply, fetchCases, prefix]);
 
+  // Phase 3: open the cohort slide-over for one patient group. The claim id is the non-PHI synthetic
+  // rollup id; the server re-derives the cohort token, audits, floor-gates, and strips dollars.
+  const viewCohort = useCallback((claimId: number, label: string) => {
+    const c = cohortRef.current;
+    if (!c.payer || !c.facility) return;
+    setCohortSheet({ label, data: null, loading: true });
+    void (async () => {
+      try {
+        const res = await getQualifyPatientCohort({
+          payer: c.payer!,
+          facility: c.facility!,
+          windowDays: c.window,
+          claimId,
+        });
+        setCohortSheet((cur) => (cur && cur.label === label ? { ...cur, data: res, loading: false } : cur));
+      } catch {
+        setCohortSheet(null);
+        setHint('Qualify is unavailable right now. Please try again.');
+      }
+    })();
+  }, []);
+
   // Apply the typed group-# narrow (explicit Enter; EXACT match — the employer proxy). Mirrors applyPrefix.
   const applyGroup = useCallback(() => {
     if (!cohortRef.current.facility) return;
@@ -686,6 +717,7 @@ export function QualifyTab({
               group={group}
               onGroupChange={setGroup}
               onApplyGroup={applyGroup}
+              onViewCohort={viewCohort}
               page={cohort.page + 1}
               hasPrev={cohort.page > 0}
               hasNext={hasMore}
@@ -695,6 +727,12 @@ export function QualifyTab({
               emptyIdentifierLabel={emptyIdentifierLabel}
             />
           </div>
+          <CohortSheet
+            data={cohortSheet?.data ?? null}
+            loading={cohortSheet?.loading ?? false}
+            patientLabel={cohortSheet?.label ?? null}
+            onClose={() => setCohortSheet(null)}
+          />
         </div>
       ) : initializing || isPending ? (
         <div className="rounded-xl border border-dashed bg-card p-10 text-center text-sm text-muted-foreground">

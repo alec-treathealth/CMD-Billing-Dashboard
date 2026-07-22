@@ -19,6 +19,8 @@ import {
   type QualifyPayerInput,
   type QualifyFacilityCasesInput,
   type QualifyFacilityCases,
+  type QualifyPatientCohortInput,
+  type QualifyPatientCohort,
   type QualifyCasesCursor,
   type QualifyMatchKind,
   type QualifySnapshot,
@@ -39,6 +41,7 @@ import type {
   QualifyClaimRow,
   QualifyMoverRow,
 } from '../../../src/collections/qualifyQuery';
+import { COHORT_MIN_PATIENTS } from '../../../src/collections/cmdExplorerQuery';
 
 /** Distinct audit action labels (post reveal-audit-action fix) — Qualify surfaces are attributable. */
 export const SEARCH_QUALIFY_PHI = 'search_qualify_phi';
@@ -46,6 +49,8 @@ export const SEARCH_QUALIFY_PHI = 'search_qualify_phi';
 export const SEARCH_QUALIFY_PAYER = 'search_qualify_payer';
 /** Facility drill audit — a payer's cases were narrowed to ONE facility (distinct, more-granular access). */
 export const SEARCH_QUALIFY_FACILITY = 'search_qualify_facility';
+/** Phase 3: a patient-group's lifetime prefix-cohort context was opened (distinct granular access). */
+export const SEARCH_QUALIFY_COHORT = 'search_qualify_cohort';
 export const REVEAL_QUALIFY_ROW = 'reveal_qualify_row';
 export const REVEAL_QUALIFY_ROWS = 'reveal_qualify_rows';
 
@@ -86,6 +91,12 @@ export interface QualifyDeps {
     entityIds: string[],
     opts: { prefixToken: string | null; memberToken: string | null; groupToken: string | null; cursor: QualifyCasesCursor | null; limit: number; allPayers?: boolean },
   ) => Promise<QualifyClaimRow[]>;
+  /** Phase 3: tenant-scoped lookup of ONE claim's alpha-prefix cohort token. Null = unknown/foreign
+   *  claim id (fails closed to suppressed). The token never reaches the client. */
+  loadClaimPrefixToken: (claimId: number, entityIds: string[]) => Promise<string | null>;
+  /** Phase 3: the LIFETIME prefix-cohort context, already gated by the collections cohort floor —
+   *  null = below COHORT_MIN_PATIENTS (the caller renders "not enough data"). */
+  loadPatientCohort: (prefixBidx: string, entityIds: string[]) => Promise<QualifyPatientCohortRaw | null>;
   loadMovers: (
     thisFrom: string,
     thisTo: string,
@@ -112,6 +123,17 @@ export interface QualifyDeps {
     action: string,
   ) => Promise<QualifyRevealedRow[]>;
   now: () => Date;
+}
+
+/** Raw, un-stripped lifetime cohort context the server loader returns (dollar sums intact — the
+ *  CORE strips them for non-amounts viewers; the one choke-point pattern). */
+export interface QualifyPatientCohortRaw {
+  patients: number;
+  billed: number | null;
+  allowed: number | null;
+  paid: number | null;
+  byPayer: { label: string | null; count: number; charge: number }[];
+  byCpt: { label: string | null; count: number; charge: number }[];
 }
 
 // ── pure assembly helpers ────────────────────────────────────────────────────
@@ -432,6 +454,73 @@ export async function getQualifyFacilityCasesCore(
     tenantScope: QUALIFY_TENANT_SCOPE,
     nextCursor,
     hasMore,
+  };
+}
+
+/**
+ * Phase 3 — the patient-group "View cohort" slide-over: the member's LIFETIME alpha-prefix cohort
+ * (payer-behavior peer group). Flow: gate → audit (field-level, non-PHI) → re-derive the prefix
+ * token SERVER-SIDE from one claim id (never from the client) → load the floor-gated context →
+ * strip dollars for non-amounts viewers. Every failure path (bad id, foreign id, below-floor
+ * cohort) collapses to the SAME suppressed shape — a caller can't distinguish "not yours" from
+ * "too small" (no oracle).
+ */
+export async function getQualifyPatientCohortCore(
+  deps: QualifyDeps,
+  input: QualifyPatientCohortInput,
+): Promise<QualifyPatientCohort> {
+  const gate = await deps.requirePrincipal();
+  if (!gate.ok) throw new Error(gate.error); // fail-closed backstop
+
+  const windowDays: QualifyWindowDays = input.windowDays;
+  if (!isQualifyWindow(windowDays)) throw new Error('Invalid window.');
+  const suppressed: QualifyPatientCohort = {
+    suppressed: true,
+    floor: COHORT_MIN_PATIENTS,
+    patients: null,
+    pctCollected: null,
+    pctAllowed: null,
+    pctPaid: null,
+    byPayer: [],
+    byCpt: [],
+    viewerHasAmountsCapability: gate.hasAmounts,
+    tenantScope: QUALIFY_TENANT_SCOPE,
+  };
+  if (!Number.isSafeInteger(input.claimId) || input.claimId < 1) return suppressed;
+
+  // Audit BEFORE any data (the cohort context is a distinct, more-granular access). Non-PHI detail:
+  // labels + window + the synthetic claim id (the reveal-audit precedent) — never a term or token.
+  await deps.recordAccess({
+    actorEmail: gate.actor.email,
+    actorUserId: gate.actor.userId,
+    action: SEARCH_QUALIFY_COHORT,
+    detail: {
+      payer: (input.payer ?? '').slice(0, 120),
+      facility: (input.facility ?? '').slice(0, 200),
+      window: windowDays,
+      claimId: input.claimId,
+    },
+  });
+
+  const token = await deps.loadClaimPrefixToken(input.claimId, gate.entityIds);
+  if (!token) return suppressed; // unknown / cross-tenant claim id — fail closed, same shape
+  const raw = await deps.loadPatientCohort(token, gate.entityIds);
+  if (!raw) return suppressed; // below the collections cohort floor — same shape
+
+  const ratio = (num: number | null, den: number | null): number | null =>
+    num != null && den != null && den > 0 ? Math.round((num / den) * 10000) / 100 : null;
+  const strip = !gate.hasAmounts;
+  return {
+    suppressed: false,
+    floor: COHORT_MIN_PATIENTS,
+    patients: raw.patients,
+    pctCollected: ratio(raw.paid, raw.billed),
+    pctAllowed: ratio(raw.allowed, raw.billed),
+    pctPaid: ratio(raw.paid, raw.allowed),
+    byPayer: raw.byPayer.map((g) => ({ label: g.label, count: g.count, charge: strip ? null : g.charge })),
+    byCpt: raw.byCpt.map((g) => ({ label: g.label, count: g.count, charge: strip ? null : g.charge })),
+    viewerHasAmountsCapability: gate.hasAmounts,
+    tenantScope: QUALIFY_TENANT_SCOPE,
   };
 }
 

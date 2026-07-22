@@ -5,11 +5,13 @@ import {
   getQualifySnapshotByPayerCore,
   getQualifyFacilityCasesCore,
   getQualifyMoversCore,
+  getQualifyPatientCohortCore,
   revealQualifyRowCore,
   revealQualifyRowsCore,
   SEARCH_QUALIFY_PHI,
   SEARCH_QUALIFY_PAYER,
   SEARCH_QUALIFY_FACILITY,
+  SEARCH_QUALIFY_COHORT,
   REVEAL_QUALIFY_ROW,
   REVEAL_QUALIFY_ROWS,
   type QualifyDeps,
@@ -83,6 +85,16 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
       c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, memberToken: opts.memberToken, cursor: opts.cursor, limit: opts.limit, allPayers: opts.allPayers });
       return CASE_ROWS;
     },
+    // Phase 3 fakes: a known claim id resolves to a prefix token; the cohort clears the floor.
+    loadClaimPrefixToken: async (claimId) => (claimId === 123 ? 'PREFIX_TOKEN_X' : null),
+    loadPatientCohort: async () => ({
+      patients: 12,
+      billed: 100000,
+      allowed: 40000,
+      paid: 30000,
+      byPayer: [{ label: 'AETNA', count: 30, charge: 60000 }],
+      byCpt: [{ label: 'H0015', count: 18, charge: 40000 }],
+    }),
     loadMovers: async () => MOVER_ROWS,
     recordAccess: async (e) => {
       c.audits.push({ action: e.action, detail: e.detail });
@@ -679,4 +691,54 @@ test('facility-drill: patientKey aliases same-member rows per response; the bidx
     !wire.includes('TOK_X') && !wire.includes('TOK_Y') && !wire.includes('member_id_bidx'),
     'the opaque token AND its field name never reach the client',
   );
+});
+
+// ── Phase 3: the patient-cohort core (audit → token re-derivation → floor gate → dollar strip) ───────
+test('patient-cohort: audits BEFORE data, re-derives the token server-side, returns the lifetime context', async () => {
+  const c = cap();
+  const res = await getQualifyPatientCohortCore(makeDeps(SUPER, c), {
+    payer: 'AETNA', facility: '405 recovery', windowDays: 30, claimId: 123,
+  });
+  assert.equal(res.suppressed, false);
+  assert.equal(res.patients, 12);
+  assert.equal(res.pctAllowed, 40, 'lifetime allowed/billed from the raw sums');
+  assert.equal(res.pctPaid, 75);
+  assert.equal(res.pctCollected, 30);
+  assert.equal(res.byPayer[0]!.charge, 60000, 'amounts viewer keeps mix dollars');
+  const audit = c.audits.find((a) => a.action === SEARCH_QUALIFY_COHORT)!;
+  assert.equal(audit.detail.claimId, 123, 'audited with the synthetic claim id (non-PHI)');
+  assert.ok(!JSON.stringify(res).includes('PREFIX_TOKEN_X'), 'the cohort token never reaches the wire');
+});
+
+test('patient-cohort: admissions_seat gets counts + pcts but ZERO dollars (mix charge nulled)', async () => {
+  const res = await getQualifyPatientCohortCore(makeDeps(SEAT, cap()), {
+    payer: 'AETNA', facility: '405 recovery', windowDays: 30, claimId: 123,
+  });
+  assert.equal(res.suppressed, false);
+  assert.equal(res.pctAllowed, 40, 'pcts survive the strip');
+  assert.equal(res.byPayer[0]!.charge, null, 'mix dollars stripped');
+  assert.equal(res.byCpt[0]!.charge, null);
+  const wire = JSON.stringify(res);
+  for (const v of [100000, 40000, 30000, 60000]) assert.ok(!wire.includes(String(v)), `dollar ${v} absent`);
+});
+
+test('patient-cohort: unknown/foreign claim id AND a below-floor cohort BOTH collapse to the SAME suppressed shape', async () => {
+  const foreign = await getQualifyPatientCohortCore(makeDeps(SUPER, cap()), {
+    payer: 'AETNA', facility: '405 recovery', windowDays: 30, claimId: 999, // loadClaimPrefixToken fake → null
+  });
+  const thin = await getQualifyPatientCohortCore(
+    makeDeps(SUPER, cap(), { loadPatientCohort: async () => null }),
+    { payer: 'AETNA', facility: '405 recovery', windowDays: 30, claimId: 123 },
+  );
+  for (const r of [foreign, thin]) {
+    assert.equal(r.suppressed, true);
+    assert.equal(r.patients, null);
+    assert.deepEqual(r.byPayer, []);
+  }
+  assert.deepEqual({ ...foreign, viewerHasAmountsCapability: true }, { ...thin, viewerHasAmountsCapability: true },
+    'no oracle: "not yours" is indistinguishable from "too small"');
+  const bad = await getQualifyPatientCohortCore(makeDeps(SUPER, cap()), {
+    payer: 'AETNA', facility: '405 recovery', windowDays: 30, claimId: -1,
+  });
+  assert.equal(bad.suppressed, true, 'malformed id fails closed without reaching any loader');
 });

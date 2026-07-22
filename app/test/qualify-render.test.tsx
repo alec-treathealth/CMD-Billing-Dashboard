@@ -15,6 +15,7 @@ import { test } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { FacilityPanel } from '../components/qualify/facility-panel';
 import { CasesTable } from '../components/qualify/cases-table';
+import { CohortSheet } from '../components/qualify/cohort-sheet';
 import { HeatingUpBar } from '../components/qualify/heating-up-bar';
 import { buildFacilityBucketMap } from '../components/qualify/colors';
 import { qualifyRating, ratingBucket } from '../lib/qualify/rating';
@@ -445,4 +446,43 @@ test('cases table — the group-# filter renders for reveal-capable viewers, lab
   );
   assert.ok(html.includes('Group # (employer proxy)'), 'labeled as the proxy — never "employer" (that data does not exist)');
   assert.ok(!html.includes('>Employer<'), 'no fabricated employer field');
+});
+
+// ── Phase 3: the cohort slide-over (suppression-first; dollars stripped for seats) ───────────────────
+test('cohort sheet — suppressed state renders the honest floor copy, nothing else', () => {
+  const html = renderToStaticMarkup(
+    <CohortSheet
+      data={{ suppressed: true, floor: 5, patients: null, pctCollected: null, pctAllowed: null, pctPaid: null, byPayer: [], byCpt: [], viewerHasAmountsCapability: true, tenantScope: 'cross-tenant-bxr-indigo' }}
+      loading={false}
+      patientLabel="Patient 3"
+      onClose={() => {}}
+    />,
+  );
+  assert.ok(html.includes('cohort context is shown only for groups of 5+ patients'), 'floor copy');
+  assert.ok(!html.includes('Payer mix'), 'no partial data below the floor');
+});
+
+test('cohort sheet — populated: pcts + mixes; NO dollars for a stripped (seat) payload', () => {
+  const data = {
+    suppressed: false, floor: 5, patients: 12, pctCollected: 30, pctAllowed: 40, pctPaid: 75,
+    byPayer: [{ label: 'AETNA', count: 30, charge: null }],
+    byCpt: [{ label: 'H0015', count: 18, charge: null }],
+    viewerHasAmountsCapability: false, tenantScope: 'cross-tenant-bxr-indigo' as const,
+  };
+  const html = renderToStaticMarkup(<CohortSheet data={data} loading={false} patientLabel="Patient 3" onClose={() => {}} />);
+  assert.ok(html.includes('12</span>-patient'), 'patient count renders');
+  assert.ok(html.includes('40%') && html.includes('75%'), 'yield pcts render');
+  assert.ok(html.includes('AETNA') && html.includes('H0015'), 'mix rows render');
+  assert.ok(!html.includes('$'), 'zero dollar signs for a non-amounts viewer (DOM omission)');
+});
+
+test('cases table — the cohort chip renders on patient rows only when the handler is wired', () => {
+  const withHandler = renderToStaticMarkup(
+    <CasesTable claims={[CASE_AT_LOW]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([])} {...noReveal} onViewCohort={() => {}} />,
+  );
+  assert.ok(withHandler.includes('>cohort<'), 'chip present with a handler');
+  const without = renderToStaticMarkup(
+    <CasesTable claims={[CASE_AT_LOW]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([])} {...noReveal} />,
+  );
+  assert.ok(!without.includes('>cohort<'), 'chip omitted without a handler (hermetic mounts unchanged)');
 });

@@ -60,6 +60,40 @@ export interface QualifyFacilityCasesInput {
   allPayers?: boolean;
 }
 
+/**
+ * Phase 3 — the patient-group "View cohort" slide-over input. `claimId` is ONE claim of the group
+ * (the rollup's synthetic id, non-PHI); the SERVER re-derives the member's alpha-prefix cohort token
+ * from it (tenant-scoped lookup — a foreign/unknown id fails closed to suppressed). payer/facility/
+ * window ride along for AUDIT CONTEXT only — the cohort itself is LIFETIME (cohort semantics are
+ * deliberately unwindowed, matching the collections cohort curve).
+ */
+export interface QualifyPatientCohortInput {
+  payer: string;
+  facility: string;
+  windowDays: QualifyWindowDays;
+  claimId: number;
+}
+
+/**
+ * The patient's alpha-prefix cohort context (payer-behavior peer group), suppression-gated by the
+ * SAME COHORT_MIN_PATIENTS floor the collections cohort curve enforces — `suppressed: true` renders
+ * "not enough data", never a thin identifiable slice. `charge` dollars in the mixes and the raw
+ * dollar sums are STRIPPED (null) for viewers without the amounts capability; counts + pcts stay.
+ */
+export interface QualifyPatientCohort {
+  suppressed: boolean;
+  /** The min-patient floor (copy: "shown only for cohorts of {floor}+ patients"). */
+  floor: number;
+  patients: number | null; // null when suppressed
+  pctCollected: number | null; // lifetime paid ÷ billed
+  pctAllowed: number | null; // lifetime allowed ÷ billed
+  pctPaid: number | null; // lifetime paid ÷ allowed
+  byPayer: { label: string | null; count: number; charge: number | null }[];
+  byCpt: { label: string | null; count: number; charge: number | null }[];
+  viewerHasAmountsCapability: boolean;
+  tenantScope: typeof QUALIFY_TENANT_SCOPE;
+}
+
 /** Forward keyset cursor for the claims panel: the last returned claim's DOS + synthetic id — both NON-PHI
  *  (lastDos = that claim's charge_date, a service date; id = the rollup/reveal synthetic key). No PHI. */
 export interface QualifyCasesCursor {

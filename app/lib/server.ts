@@ -109,6 +109,7 @@ import {
   buildFacilityCasesQuery,
   buildMoversQuery,
 } from '../../src/collections/qualifyQuery.js';
+import type { QualifyPatientCohortRaw } from './qualify/core';
 import type {
   QualifyMatchKind,
   QualifyResolvePayerRow,
@@ -2019,4 +2020,56 @@ export async function loadQualifyMovers(
   const q = buildMoversQuery(thisFrom, thisTo, priorFrom, priorTo, entityIds);
   const { rows } = await readerExecutor().query<QualifyMoverRow>(q.sql, q.params);
   return rows;
+}
+
+/** Phase 3 (qualify cohort sheet): ONE claim's alpha-prefix cohort token, TENANT-SCOPED — a foreign
+ *  or unknown rollup id returns null (the core fails closed to the suppressed shape). Fixed-literal
+ *  columns, bound values; the token goes to the CORE only, never the client. */
+export async function loadQualifyClaimPrefixToken(claimId: number, entityIds: string[]): Promise<string | null> {
+  const { rows } = await readerExecutor().query<{ member_id_prefix_bidx: string | null }>(
+    'select member_id_prefix_bidx from collections.cmd_explorer_charge_rollup ' +
+      'where id = $1 and business_entity_id = any($2::uuid[]) limit 1',
+    [claimId, entityIds],
+  );
+  return rows[0]?.member_id_prefix_bidx ?? null;
+}
+
+/**
+ * Phase 3 (qualify cohort sheet): the LIFETIME prefix-cohort context — patients gate + end-to-end
+ * dollar sums + payer/CPT mixes — REUSING the collections cohort machinery wholesale:
+ *  - gate: buildCohortDrilldownQueries(…,'position',1).stats — the position-1 bucket's distinct
+ *    patients IS the cohort's patient count (every patient has a first visit), re-derived
+ *    server-side exactly like the collections drilldown (never trusted from the caller);
+ *  - yield: buildCohortTotalsQuery (unbounded lifetime sums, the same source as the curve's cards);
+ *  - mixes: buildCmdSearchSummaryQueries scoped by the prefix blind index (the hardened top-N
+ *    group builders; charge dollars stripped in the CORE for non-amounts viewers).
+ * Returns null when the cohort is below COHORT_MIN_PATIENTS — the SAME floor the cohort curve
+ * enforces, so this sheet can never render a slice the curve itself would suppress.
+ */
+export async function loadQualifyPatientCohort(
+  prefixBidx: string,
+  entityIds: string[],
+): Promise<QualifyPatientCohortRaw | null> {
+  const exec = readerExecutor();
+  const gateQ = buildCohortDrilldownQueries(prefixBidx, entityIds, 'position', 1).stats;
+  const gateRes = await exec.query<{ patients: number }>(gateQ.sql, gateQ.params);
+  const patients = gateRes.rows[0]?.patients ?? 0;
+  if (patients < COHORT_MIN_PATIENTS) return null;
+
+  const totalsQ = buildCohortTotalsQuery(prefixBidx, entityIds);
+  const { groups } = buildCmdSearchSummaryQueries({ phiIndex: { memberIdPrefixBidx: prefixBidx } }, entityIds);
+  const [tot, payer, cpt] = await Promise.all([
+    exec.query<CohortTotalsRow>(totalsQ.sql, totalsQ.params),
+    exec.query<CmdSearchGroup>(groups.primary_payer.sql, groups.primary_payer.params),
+    exec.query<CmdSearchGroup>(groups.cpt_code.sql, groups.cpt_code.params),
+  ]);
+  const t = tot.rows[0];
+  return {
+    patients,
+    billed: t?.billed ?? null,
+    allowed: t?.allowed ?? null,
+    paid: t?.paid ?? null,
+    byPayer: payer.rows.map((g) => ({ label: g.label, count: g.count, charge: g.charge })),
+    byCpt: cpt.rows.map((g) => ({ label: g.label, count: g.count, charge: g.charge })),
+  };
 }

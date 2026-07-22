@@ -14,6 +14,8 @@ import {
   loadQualifyIdentifierLandingFacility,
   loadQualifyFacilityCases,
   loadQualifyMovers,
+  loadQualifyClaimPrefixToken,
+  loadQualifyPatientCohort,
   recordAccess,
   revealCmdExplorerRow,
   revealCmdExplorerRows,
@@ -24,6 +26,7 @@ import {
   getQualifySnapshotByPayerCore,
   getQualifyFacilityCasesCore,
   getQualifyMoversCore,
+  getQualifyPatientCohortCore,
   revealQualifyRowCore,
   revealQualifyRowsCore,
   type QualifyDeps,
@@ -33,6 +36,8 @@ import type {
   QualifyPayerInput,
   QualifyFacilityCasesInput,
   QualifyFacilityCases,
+  QualifyPatientCohortInput,
+  QualifyPatientCohort,
   QualifySnapshot,
   QualifyMovers,
   QualifyWindowDays,
@@ -48,6 +53,8 @@ const realDeps: QualifyDeps = {
   loadFacilities: loadQualifyFacilities,
   loadIdentifierLandingFacility: loadQualifyIdentifierLandingFacility,
   loadFacilityCases: loadQualifyFacilityCases,
+  loadClaimPrefixToken: loadQualifyClaimPrefixToken,
+  loadPatientCohort: loadQualifyPatientCohort,
   loadMovers: loadQualifyMovers,
   recordAccess,
   revealRow: (id, actor, entityIds, action) => revealCmdExplorerRow(id, actor, entityIds, action),
@@ -71,6 +78,11 @@ export async function getQualifyFacilityCases(input: QualifyFacilityCasesInput):
 
 export async function getQualifyMovers(windowDays: QualifyWindowDays): Promise<QualifyMovers> {
   return getQualifyMoversCore(realDeps, windowDays);
+}
+
+/** Phase 3: the patient-group "View cohort" slide-over — audited, floor-gated, dollar-stripped in core. */
+export async function getQualifyPatientCohort(input: QualifyPatientCohortInput): Promise<QualifyPatientCohort> {
+  return getQualifyPatientCohortCore(realDeps, input);
 }
 
 export async function revealQualifyRow(id: number): Promise<RevealQualifyRowResult> {

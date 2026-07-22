@@ -64,6 +64,7 @@ export function CasesTable({
   group,
   onGroupChange,
   onApplyGroup,
+  onViewCohort,
   page,
   hasPrev,
   hasNext,
@@ -101,6 +102,10 @@ export function CasesTable({
   group: string;
   onGroupChange: (value: string) => void;
   onApplyGroup: () => void;
+  /** Phase 3: open the patient's LIFETIME prefix-cohort slide-over. Called with ONE claim id of the
+   *  group (non-PHI synthetic id — the server re-derives the cohort token) + the MASKED group label.
+   *  Optional so render tests mount without it (the chip is omitted when absent). */
+  onViewCohort?: (claimId: number, patientLabel: string) => void;
   /** Cursor-pagination controls (1-based page for display), matching the collections <Pager> idiom. */
   page: number;
   hasPrev: boolean;
@@ -126,8 +131,25 @@ export function CasesTable({
     });
   const groups = groupClaimsByPatient(claims);
 
-  /** ONE claim row (claim grain) — `indented` marks a day-by-day row under an expanded patient group. */
-  const renderClaimRow = (c: QualifyClaim, indented = false) => {
+  /** Small "cohort" chip — opens the patient's prefix-cohort slide-over (Phase 3). */
+  const cohortChip = (claimId: number, patientKey: number) =>
+    onViewCohort ? (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onViewCohort(claimId, `Patient ${patientKey}`);
+        }}
+        title="View this patient's cohort context (lifetime peer group; aggregates only)"
+        className="ml-1 rounded-full border border-teal200 bg-teal50 px-1.5 py-px text-[10px] font-semibold text-teal700 hover:bg-teal200"
+      >
+        cohort
+      </button>
+    ) : null;
+
+  /** ONE claim row (claim grain) — `indented` marks a day-by-day row under an expanded patient group;
+   *  `withCohortChip` adds the Phase-3 affordance on singleton patient rows. */
+  const renderClaimRow = (c: QualifyClaim, indented = false, withCohortChip = false) => {
     const pct = c.pctAllowedOfBilled;
     // CONFIDENCE-FIRST (0059): confirmed → grade by this row's own pct (ratingBucket 50/30);
     // estimate → ALWAYS amber (never green, however high the number — the reversal tell);
@@ -145,6 +167,7 @@ export function CasesTable({
             {indented ? '↳ ' : ''}
             {phiText(isShown, phi?.patient_name ?? null, PHI_MASK)}
           </span>
+          {withCohortChip ? cohortChip(c.id, c.patientKey) : null}
         </td>
         <td className={TD}>
           <span className={isShown ? realCls : maskedCls}>
@@ -200,7 +223,7 @@ export function CasesTable({
 
   /** ONE patient group: header row (chevron · patient label · count · roll-up pct) + optional day rows. */
   const renderGroup = (g: QualifyClaimGroup) => {
-    if (g.claimCount === 1) return renderClaimRow(g.claims[0]!, false);
+    if (g.claimCount === 1) return renderClaimRow(g.claims[0]!, false, true);
     const open = expandedPatients.has(g.patientKey);
     const first = g.claims[0]!;
     // Group-row PHI: the first claim of the group whose PHI is in the reveal cache (all claims of a
@@ -231,6 +254,7 @@ export function CasesTable({
                 {g.claimCount} claims
               </span>
             </button>
+            {cohortChip(first.id, g.patientKey)}
           </td>
           <td className={TD}>
             <span className={isShown ? 'font-mono text-ink900' : 'font-mono tracking-widest text-ink400'}>
