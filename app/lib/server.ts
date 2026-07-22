@@ -1998,7 +1998,7 @@ export async function loadQualifyFacilityCases(
     prefixToken: string | null;
     memberToken: string | null;
     groupToken: string | null;
-    cursor: { lastDos: string | null; id: number } | null;
+    cursor: { lastPaymentReceived: string | null; id: number } | null;
     limit: number;
     allPayers?: boolean;
   },

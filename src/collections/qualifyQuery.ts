@@ -62,7 +62,8 @@ export interface QualifyClaimRow {
   facility_name: string | null;
   primary_payer: string | null; // THIS claim's primary_payer (non-PHI); the payer chip/label
   program: 'IP' | 'OP' | 'BOTH' | null; // := resolved care_setting; null when facility text unresolved (Q-D)
-  dos: string | null; // THIS claim's charge_date — display only (per-claim, not a max)
+  dos: string | null; // THIS claim's charge_date (service date) — display only (per-claim, not a max)
+  payment_date: string | null; // THIS claim's payment_received — the SORT axis + a displayed column (day-grain 'YYYY-MM-DD')
   pct_allowed: number | null; // per-claim reliable-allowed/billed (materialized 0059 pct_allowed; NULL = unknown, never 0%)
   billed: number | null;
   allowed: number | null; // per-claim 0059 allowed_reliable (tiered; e2's latest-positive KEPT on this display surface)
@@ -216,10 +217,13 @@ export function buildFacilityRankingQuery(
  * use; no new mint. NO floor here — the CORE drops the candidate if it isn't a ranked (floor-clearing) facility
  * (approach ii), so this stays a single indexed lookup and the floor logic lives in ONE place (assembleFacilities).
  *
- * ORDER BY IS BYTE-IDENTICAL to buildFacilityCasesQuery's claim ordering (`agg.dos = to_char(charge_date) desc
- * nulls last, agg.id desc`): here `charge_date desc nulls last, id desc` — the 'YYYY-MM-DD' lexical order is
- * chronological, so this selects the exact same "most recent" claim the drill would surface first. Ordered on
- * charge_date, NOT payment_received, so the landed facility and the drill's top claim can never disagree.
+ * ORDER BY IS BYTE-IDENTICAL to buildFacilityCasesQuery's claim ordering (`agg.payment_date =
+ * to_char(payment_received) desc nulls last, agg.id desc`): here `payment_received desc nulls last, id desc`.
+ * payment_received is a DATE (0019 — day-grain), so the 'YYYY-MM-DD' text the drill orders on is lexical ==
+ * chronological == the raw column order here — the two select the EXACT same "most recent" claim, and the
+ * landed facility can never disagree with the drill's top claim. This axis change (charge_date → payment_received)
+ * is the point: the window is already payment_received, so BOTH surfaces now rank on the same axis. LOCKSTEP —
+ * the parity test (qualifyQuery.test.ts) asserts both order on payment_received; keep them moving together.
  */
 export function buildIdentifierLandingFacilityQuery(
   token: string,
@@ -244,7 +248,7 @@ export function buildIdentifierLandingFacilityQuery(
     `and payment_received >= ${f}::date and payment_received < ${t}::date ` +
     `and ${col} = ${tok} ` +
     "and facility is not null and btrim(facility) <> '' " +
-    'order by charge_date desc nulls last, id desc ' +
+    'order by payment_received desc nulls last, id desc ' +
     'limit 1';
   return { sql, params };
 }
@@ -281,8 +285,9 @@ export function buildFacilityCasesQuery(
     /** Opaque group_number_bidx token (already HMAC'd upstream) — EXACT group-number narrow (the employer
      *  proxy; Phase 2). Composable: ANDs with the member narrows rather than competing with them. */
     groupToken?: string | null;
-    /** Forward keyset cursor (previous page's {lastDos, id}); null/omitted = first page. */
-    cursor?: { lastDos: string | null; id: number } | null;
+    /** Forward keyset cursor (previous page's {lastPaymentReceived, id}); null/omitted = first page. The
+     *  drill sorts by PAYMENT date, so the cursor keys on payment_date (not the service date). */
+    cursor?: { lastPaymentReceived: string | null; id: number } | null;
     /** Page size; the query OVER-FETCHES by one (binds limit+1) so the caller computes hasMore, not a count. */
     limit?: number;
     /** ALL-PAYERS view (mobile detail sheet): drop the `primary_payer = $payer` filter so EVERY payer's
@@ -318,7 +323,11 @@ export function buildFacilityCasesQuery(
     // member_id_bidx rides to the SERVER CORE only (per-response patientKey aliasing) — the token is
     // dropped in assembleClaims and never reaches the client (wire-tested).
     'select id, member_id_bidx, facility, primary_payer, ' +
+    // BOTH dates are DISPLAYED: dos = charge_date (service date); payment_date = payment_received (the
+    // SORT axis — the window is already payment_received, so ordering by it makes the axis visible + the
+    // list order consistent with the window). Both 'YYYY-MM-DD' text; payment_received is a DATE (0019).
     "to_char(charge_date, 'YYYY-MM-DD') as dos, " +
+    "to_char(payment_received, 'YYYY-MM-DD') as payment_date, " +
     // 0059 repoint ②: per-claim allowed = the materialized tiered `allowed_reliable` (a value CMD
     // actually adjudicated — never the restatement-summed netted total this read before), and pct =
     // the materialized `pct_allowed` (0059 computes the IDENTICAL round(allowed/charge*100,2) with the
@@ -336,33 +345,34 @@ export function buildFacilityCasesQuery(
     grpCond;
   // Keyset pagination (OUTER WHERE on the agg subquery). DESC order ⇒ walk STRICTLY past the cursor, ties
   // broken by the globally-unique charge id, and the NULLS-LAST tail handled explicitly so the walk never
-  // stalls. `agg.dos` is 'YYYY-MM-DD' text (lexical == chronological).
+  // stalls. `agg.payment_date` is 'YYYY-MM-DD' text (lexical == chronological) — the sort/keyset axis.
   const cursor = opts.cursor ?? null;
   let keyset = '';
   if (cursor) {
-    if (cursor.lastDos !== null) {
-      const cv = add(cursor.lastDos);
+    if (cursor.lastPaymentReceived !== null) {
+      const cv = add(cursor.lastPaymentReceived);
       const ci = add(cursor.id);
-      keyset = `where (agg.dos < ${cv} or (agg.dos = ${cv} and agg.id < ${ci}) or agg.dos is null) `;
+      keyset = `where (agg.payment_date < ${cv} or (agg.payment_date = ${cv} and agg.id < ${ci}) or agg.payment_date is null) `;
     } else {
       const ci = add(cursor.id);
-      keyset = `where (agg.dos is null and agg.id < ${ci}) `;
+      keyset = `where (agg.payment_date is null and agg.id < ${ci}) `;
     }
   }
   // OVER-FETCH by one (limit+1): the caller trims to `limit` and infers hasMore from the extra row.
   const lim = add((opts.limit ?? QUALIFY_CASES_LIMIT) + 1);
   // `agg` alias so FACILITY_DIM_JOINS (which references agg.facility) applies unchanged. ORDER BY the
-  // DISPLAYED per-claim date (dos = charge_date) so the list reads in the order it shows.
+  // PAYMENT date (payment_date = payment_received, the window axis) so the list reads most-recently-paid
+  // first and the order matches the keyset cursor. dos (service date) rides along as a displayed column.
   const sql =
     'select agg.id, agg.member_id_bidx, agg.facility, agg.primary_payer, ' +
     'coalesce(max(f.facility_name), agg.facility) as facility_name, ' +
     'max(f.care_setting) as program, ' +
-    'agg.dos, agg.pct_allowed, agg.billed, agg.allowed, agg.allowed_tier ' +
+    'agg.dos, agg.payment_date, agg.pct_allowed, agg.billed, agg.allowed, agg.allowed_tier ' +
     `from (${inner}) agg ` +
     FACILITY_DIM_JOINS +
     keyset +
-    'group by agg.id, agg.member_id_bidx, agg.facility, agg.primary_payer, agg.dos, agg.pct_allowed, agg.billed, agg.allowed, agg.allowed_tier ' +
-    `order by agg.dos desc nulls last, agg.id desc limit ${lim}`;
+    'group by agg.id, agg.member_id_bidx, agg.facility, agg.primary_payer, agg.dos, agg.payment_date, agg.pct_allowed, agg.billed, agg.allowed, agg.allowed_tier ' +
+    `order by agg.payment_date desc nulls last, agg.id desc limit ${lim}`;
   return { sql, params };
 }
 

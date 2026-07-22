@@ -14,8 +14,8 @@ import type { QualifyCasesCursor } from '../app/lib/qualify/contract.js';
 // search is the one identifier entry point, and the claims panel is a pure display of the landed
 // facility. These tests pin the slimmer identity + the structural page-reset invariant.
 
-const C1: QualifyCasesCursor = { lastDos: '2026-07-10', id: 500 };
-const C2: QualifyCasesCursor = { lastDos: '2026-07-05', id: 480 };
+const C1: QualifyCasesCursor = { lastPaymentReceived: '2026-07-10', id: 500 };
+const C2: QualifyCasesCursor = { lastPaymentReceived: '2026-07-05', id: 480 };
 
 // A fully-populated, mid-walk cohort — so each action can be proven to touch ONLY its own field(s).
 const RESOLVED: QualifyCohort = {

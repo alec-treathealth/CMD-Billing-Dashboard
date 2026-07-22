@@ -1555,15 +1555,20 @@ facility (which frequently holds NONE of the searched member's claims → the "r
 the same prefix/window" report that triggered this fix).
 
 **INVARIANT — DO NOT BREAK:** the landing lookup's `ORDER BY` MUST stay byte-identical to
-`buildFacilityCasesQuery`'s (the drill's) claim ordering — currently **`charge_date desc nulls last,
-id desc`**. It is DELIBERATELY **NOT `payment_received`** (the drill WINDOWS on `payment_received` but
-ORDERS claims on `charge_date`; the landing query does the same). If the landing query and the drill
-disagree on "most recent," the panel lands on one facility while the drill's top claim points at
-another — a latent land-on-the-wrong-facility bug that NO test catches unless it specifically compares
-the two orderings. **There IS such a cross-query parity test** (`test/qualifyQuery.test.ts` →
-"buildIdentifierLandingFacilityQuery: ORDER BY matches the drill … not payment_received") — KEEP IT.
-Do not "optimize" the landing query to `payment_received` (or any other order) without changing the
-drill in lockstep, and vice-versa.
+`buildFacilityCasesQuery`'s (the drill's) claim ordering — **AXIS CHANGED 2026-07-22: now
+`payment_received desc nulls last, id desc`** (was `charge_date`). The window is already
+`payment_received` on every builder, so surfacing + sorting on the payment-date axis makes the list
+order consistent with the window; BOTH surfaces moved in lockstep in ONE commit. Byte-identical holds
+because `payment_received` is a DATE (0019, day-grain): the drill orders on its projected alias
+`agg.payment_date = to_char(payment_received,'YYYY-MM-DD')` (lexical == chronological), the landing
+orders on the raw column — same row order, same "most recent" claim. If the two disagree, the panel
+lands on one facility while the drill's top claim points at another — a latent land-on-the-wrong-facility
+bug that NO test catches unless it specifically compares the two orderings. **There IS such a
+cross-query parity test** (`test/qualifyQuery.test.ts` → "buildIdentifierLandingFacilityQuery: ORDER BY
+matches the drill … the payment-date axis") — KEEP IT. Do not re-point either query to a different
+order (back to `charge_date`, or anything else) without changing the other in the SAME commit. NOTE:
+`dos` (= `charge_date`) is STILL projected + displayed on both surfaces — it just isn't the sort key
+anymore; the drill's keyset cursor also moved to `payment_date` (`QualifyCasesCursor.lastPaymentReceived`).
 
 Below-floor / zero-in-window (approach ii): the core keeps the landing candidate ONLY if it is present
 in the already-assembled `facilities[]` set (`app/lib/qualify/core.ts` —

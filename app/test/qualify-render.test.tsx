@@ -41,7 +41,7 @@ const FACILITIES = [SOLID, THIN_HIGH];
 
 const CASE_AT_THIN: QualifyClaim = {
   id: 1, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'THIN HIGH', program: 'OP',
-  dos: '2026-07-15', pctAllowedOfBilled: 95, billedAmount: 18400, allowedAmount: 11592,
+  dos: '2026-07-15', paymentDate: '2026-07-20', pctAllowedOfBilled: 95, billedAmount: 18400, allowedAmount: 11592,
   confidence: 'confirmed', patientKey: 1,
 };
 
@@ -55,7 +55,7 @@ const LOW: QualifyFacility = {
 };
 const CASE_AT_LOW: QualifyClaim = {
   id: 2, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'LOW YIELD', program: 'OP',
-  dos: '2026-07-10', pctAllowedOfBilled: 95, billedAmount: 9000, allowedAmount: 8550,
+  dos: '2026-07-10', paymentDate: '2026-07-16', pctAllowedOfBilled: 95, billedAmount: 9000, allowedAmount: 8550,
   confidence: 'confirmed', patientKey: 1,
 };
 
@@ -268,11 +268,11 @@ test('cases table — without emptyIdentifierLabel, an empty panel keeps the pay
 // These fixtures are deliberately self-contained (they do NOT reuse the rating-const fixtures above) so
 // the block stays independent of the parallel scoring-track edits to this file.
 const CASES_FACILITY_A: QualifyClaim[] = [
-  { id: 101, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'ALPHA CLINIC', program: 'IP', dos: '2026-07-15', pctAllowedOfBilled: 60, billedAmount: 1000, allowedAmount: 600, confidence: 'confirmed', patientKey: 1 },
-  { id: 102, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'ALPHA CLINIC', program: 'OP', dos: '2026-07-14', pctAllowedOfBilled: 55, billedAmount: 2000, allowedAmount: 1100, confidence: 'confirmed', patientKey: 2 },
+  { id: 101, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'ALPHA CLINIC', program: 'IP', dos: '2026-07-15', paymentDate: '2026-07-20', pctAllowedOfBilled: 60, billedAmount: 1000, allowedAmount: 600, confidence: 'confirmed', patientKey: 1 },
+  { id: 102, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'ALPHA CLINIC', program: 'OP', dos: '2026-07-14', paymentDate: '2026-07-19', pctAllowedOfBilled: 55, billedAmount: 2000, allowedAmount: 1100, confidence: 'confirmed', patientKey: 2 },
 ];
 const CASES_FACILITY_B: QualifyClaim[] = [
-  { id: 201, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'BETA CENTER', program: 'OP', dos: '2026-06-02', pctAllowedOfBilled: 40, billedAmount: 3000, allowedAmount: 1200, confidence: 'confirmed', patientKey: 1 },
+  { id: 201, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'BETA CENTER', program: 'OP', dos: '2026-06-02', paymentDate: '2026-06-10', pctAllowedOfBilled: 40, billedAmount: 3000, allowedAmount: 1200, confidence: 'confirmed', patientKey: 1 },
 ];
 
 test('cases table — per-facility scope: two facilities yield DIFFERENT case sets (the "same 15 regardless" bug is gone)', () => {
@@ -343,12 +343,12 @@ test('heating-up bar — renders nothing when no payer is trending up', () => {
 // ── Phase 1 (0059 trust signal): confidence-first tint, coverage bar, LOC tag, thin-sample pill ──────
 const ESTIMATE_CLAIM: QualifyClaim = {
   id: 301, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'REVERSAL HOUSE', program: 'OP',
-  dos: '2026-07-12', pctAllowedOfBilled: 95, billedAmount: 4000, allowedAmount: 3800,
+  dos: '2026-07-12', paymentDate: '2026-07-18', pctAllowedOfBilled: 95, billedAmount: 4000, allowedAmount: 3800,
   confidence: 'estimate', patientKey: 1, // 95% but UNVERIFIED — must never read green
 };
 const UNKNOWN_CLAIM: QualifyClaim = {
   id: 302, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'REVERSAL HOUSE', program: 'OP',
-  dos: '2026-07-11', pctAllowedOfBilled: null, billedAmount: 500, allowedAmount: null,
+  dos: '2026-07-11', paymentDate: '2026-07-17', pctAllowedOfBilled: null, billedAmount: 500, allowedAmount: null,
   confidence: 'unknown', patientKey: 2,
 };
 

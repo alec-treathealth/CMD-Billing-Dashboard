@@ -94,10 +94,11 @@ export interface QualifyPatientCohort {
   tenantScope: typeof QUALIFY_TENANT_SCOPE;
 }
 
-/** Forward keyset cursor for the claims panel: the last returned claim's DOS + synthetic id — both NON-PHI
- *  (lastDos = that claim's charge_date, a service date; id = the rollup/reveal synthetic key). No PHI. */
+/** Forward keyset cursor for the claims panel: the last returned claim's PAYMENT date + synthetic id — both
+ *  NON-PHI (lastPaymentReceived = that claim's payment_received, the sort axis; id = the rollup/reveal
+ *  synthetic key). The drill sorts by payment date, so the cursor keys on it (was lastDos/charge_date). No PHI. */
 export interface QualifyCasesCursor {
-  lastDos: string | null;
+  lastPaymentReceived: string | null;
   id: number;
 }
 
@@ -183,6 +184,9 @@ export interface QualifyClaim {
   facilityName: string;
   program: 'IP' | 'OP' | 'BOTH' | null; // := care_setting; null when the facility text is unresolved
   dos: string | null; // this claim's service date (charge_date), ISO, display only
+  /** This claim's PAYMENT date (payment_received), ISO 'YYYY-MM-DD' or null. Display + the drill's sort
+   *  axis (the panel windows AND now orders on payment date). NON-PHI. Shown alongside dos on both surfaces. */
+  paymentDate: string | null;
   /** Per-claim reliable-allowed/billed — the materialized 0059 pct_allowed (repoint ②). NULL when the
    *  claim's allowed is unknown (tiers b/none) — never 0%. e2 claims stay visible here unfiltered
    *  (display surface; the e2 exclusion is rating-evidence-only). */

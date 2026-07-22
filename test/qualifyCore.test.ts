@@ -33,7 +33,7 @@ const FAC_ROWS = [
   { facility: '405 recovery', facility_name: '405 RECOVERY', facility_code: '10026460', care_setting: 'OP' as const, line_count: 400, confirmed_claims: 380, estimate_claims: 15, unknown_claims: 5, billed: B2, allowed: A2, pct_allowed: 55 }, // Indigo, solid mid pct
 ];
 const CASE_ROWS = [
-  { id: 123, member_id_bidx: 'BIDX_A', facility: '405 recovery', facility_name: '405 RECOVERY', primary_payer: 'AETNA', program: 'OP' as const, dos: '2026-07-01', pct_allowed: 80, billed: CB, allowed: CA, allowed_tier: 'cd' },
+  { id: 123, member_id_bidx: 'BIDX_A', facility: '405 recovery', facility_name: '405 RECOVERY', primary_payer: 'AETNA', program: 'OP' as const, dos: '2026-07-01', payment_date: '2026-07-05', pct_allowed: 80, billed: CB, allowed: CA, allowed_tier: 'cd' },
 ];
 const MOVER_ROWS = [
   { primary_payer: 'AETNA', this_patients: 40, prior_patients: 10, delta_patients: 30 },
@@ -517,7 +517,7 @@ test('facility-drill: EXACT member wins when both memberId + prefix are supplied
 // distinct per prefix), so a W29 search can only match W29* rows — proving W27/W23 never bleed through.
 const prefixRow = (id: number): QualifyClaimRow => ({
   id, member_id_bidx: `PBIDX_${id}`, facility: 'shared facility', facility_name: 'SHARED', primary_payer: 'AETNA', program: 'OP' as const,
-  dos: `2026-07-${String(id).padStart(2, '0')}`, pct_allowed: 50, billed: 100, allowed: 50, allowed_tier: 'cd',
+  dos: `2026-07-${String(id).padStart(2, '0')}`, payment_date: `2026-07-${String(id).padStart(2, '0')}`, pct_allowed: 50, billed: 100, allowed: 50, allowed_tier: 'cd',
 });
 const PREFIX_OF = new Map<number, string>([[1, 'W29'], [2, 'W29'], [3, 'W27'], [4, 'W23']]);
 const PREFIX_ROWS: QualifyClaimRow[] = [prefixRow(4), prefixRow(3), prefixRow(2), prefixRow(1)];
@@ -563,7 +563,7 @@ test('facility-drill prefix: a sub-3-char prefix mints NO token → no filter, n
 test('facility-drill cursor: a malformed cursor is clamped to the first page (never reaches the loader raw)', async () => {
   const c = cap();
   // id 0 is invalid (must be ≥ 1) → clamped to null.
-  await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { ...FAC_CASES_IN, cursor: { lastDos: '2026-07-01', id: 0 } });
+  await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { ...FAC_CASES_IN, cursor: { lastPaymentReceived: '2026-07-01', id: 0 } });
   assert.equal(c.facilityCasesArgs[0]!.cursor, null, 'malformed cursor → first page');
 });
 
@@ -574,10 +574,11 @@ test('facility-drill pagination: a single-row result → hasMore false, nextCurs
   assert.equal(res.claims.length, 1);
 });
 
-// A synthetic cohort strictly larger than one page, PRE-SORTED in the query order (dos desc nulls last,
-// id desc): 20 dated rows then a 15-row null-DOS tail. The fake models keyset pagination over this total
-// order (find the cursor row by its unique id, return the slice after it, over-fetching by one like the
-// real builder) so the CORE's cursor→nextCursor→trim→hasMore threading is exercised end to end.
+// A synthetic cohort strictly larger than one page, PRE-SORTED in the query order (payment_date desc nulls
+// last, id desc): 20 payment-dated rows then a 15-row null-payment-date tail. The fake models keyset
+// pagination over this total order (find the cursor row by its unique id, return the slice after it,
+// over-fetching by one like the real builder) so the CORE's cursor→nextCursor→trim→hasMore threading is
+// exercised end to end. dos is a fixed service date — it is NOT the sort axis anymore (payment_date is).
 const WALK_ROWS: QualifyClaimRow[] = Array.from({ length: 35 }, (_, i) => ({
   id: 1000 - i, // strictly descending → matches `id desc` within the pre-sorted array
   member_id_bidx: 'WALKER',
@@ -585,7 +586,8 @@ const WALK_ROWS: QualifyClaimRow[] = Array.from({ length: 35 }, (_, i) => ({
   facility_name: '405 RECOVERY',
   primary_payer: 'AETNA',
   program: 'OP' as const,
-  dos: i < 20 ? `2026-07-${String(31 - i).padStart(2, '0')}` : null, // 20 dated (desc), then a null tail
+  dos: '2026-06-15', // service date — displayed only; sorting keys on payment_date below
+  payment_date: i < 20 ? `2026-07-${String(31 - i).padStart(2, '0')}` : null, // 20 dated (desc), then a null tail
   pct_allowed: 50,
   billed: 100,
   allowed: 50,
@@ -624,11 +626,11 @@ test('facility-drill pagination: cursor walk over a >15-row cohort covers every 
   assert.deepEqual(seen, WALK_ROWS.map((r) => r.id), 'walk order == the sorted set — no gaps, no reordering');
 });
 
-test('facility-drill pagination: the second page boundary produces AND consumes a null-lastDos cursor', async () => {
+test('facility-drill pagination: the second page boundary produces AND consumes a null-lastPaymentReceived cursor', async () => {
   const p0 = await getQualifyFacilityCasesCore(walkDeps(cap()), FAC_CASES_IN);
-  assert.equal(p0.nextCursor!.lastDos, '2026-07-17', 'page-0 cursor is the 15th row (a dated DOS)');
+  assert.equal(p0.nextCursor!.lastPaymentReceived, '2026-07-17', 'page-0 cursor is the 15th row (a dated payment date)');
   const p1 = await getQualifyFacilityCasesCore(walkDeps(cap()), { ...FAC_CASES_IN, cursor: p0.nextCursor });
-  assert.equal(p1.nextCursor!.lastDos, null, 'page-1 boundary falls in the null-DOS tail → null-lastDos cursor');
+  assert.equal(p1.nextCursor!.lastPaymentReceived, null, 'page-1 boundary falls in the null-payment-date tail → null cursor');
   const p2 = await getQualifyFacilityCasesCore(walkDeps(cap()), { ...FAC_CASES_IN, cursor: p1.nextCursor });
   assert.equal(p2.hasMore, false, 'page 2 finishes the walk');
 });

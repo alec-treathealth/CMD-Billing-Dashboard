@@ -161,13 +161,13 @@ function alphaEcho(raw: string): string {
 }
 
 /** Shape-clamp an untrusted client cursor (mirrors resolveCmdExplorerCursor): a malformed cursor
- *  becomes null (first page) rather than reaching SQL. id must be a safe int ≥ 1; lastDos null|string. */
+ *  becomes null (first page) rather than reaching SQL. id must be a safe int ≥ 1; lastPaymentReceived null|string. */
 function clampCasesCursor(cursor: QualifyCasesCursor | null | undefined): QualifyCasesCursor | null {
   if (cursor === null || cursor === undefined) return null;
   if (!Number.isSafeInteger(cursor.id) || cursor.id < 1) return null;
-  const ld = cursor.lastDos;
-  if (ld !== null && typeof ld !== 'string') return null;
-  return { lastDos: ld ?? null, id: cursor.id };
+  const lp = cursor.lastPaymentReceived;
+  if (lp !== null && typeof lp !== 'string') return null;
+  return { lastPaymentReceived: lp ?? null, id: cursor.id };
 }
 
 /**
@@ -231,6 +231,7 @@ function assembleClaims(rows: QualifyClaimRow[]): QualifyClaim[] {
     facilityName: r.facility_name ?? r.facility,
     program: r.program,
     dos: r.dos,
+    paymentDate: r.payment_date,
     pctAllowedOfBilled: r.pct_allowed,
     billedAmount: r.billed,
     allowedAmount: r.allowed,
@@ -444,10 +445,11 @@ export async function getQualifyFacilityCasesCore(
   const pageRows = hasMore ? claimRows.slice(0, pageSize) : claimRows;
   // Route through the ONE amounts choke point (stripClaimsAmounts) — stripAmounts LAST.
   const claims = gate.hasAmounts ? assembleClaims(pageRows) : stripClaimsAmounts(assembleClaims(pageRows));
-  // nextCursor from the LAST kept row — non-PHI (DOS + synthetic id). Null at the end of the walk.
+  // nextCursor from the LAST kept row — non-PHI (payment date + synthetic id), keyed on the sort axis
+  // (payment_received), NOT the service date. Null at the end of the walk.
   const last = claims[claims.length - 1];
   const nextCursor: QualifyCasesCursor | null =
-    hasMore && last ? { lastDos: last.dos, id: last.id } : null;
+    hasMore && last ? { lastPaymentReceived: last.paymentDate, id: last.id } : null;
   return {
     claims,
     viewerHasAmountsCapability: gate.hasAmounts,

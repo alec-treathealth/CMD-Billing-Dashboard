@@ -15,6 +15,7 @@ const claim = (over: Partial<QualifyClaim> & { id: number; patientKey: number })
   facilityName: 'F',
   program: 'OP',
   dos: '2026-07-15',
+  paymentDate: '2026-07-20',
   pctAllowedOfBilled: 50,
   billedAmount: 100,
   allowedAmount: 50,

@@ -123,17 +123,22 @@ test('buildIdentifierLandingFacilityQuery: prefix→prefix column, member→exac
 });
 
 // ── ORDER-BY PARITY (the land-on-the-wrong-facility guard): the landing lookup's "most recent" ordering
-//    MUST match the drill's claim ordering — charge_date desc nulls last, id desc (NOT payment_received). ──
-test('buildIdentifierLandingFacilityQuery: ORDER BY matches the drill (charge_date desc nulls last, id desc — not payment_received)', () => {
+//    MUST match the drill's claim ordering — NOW on the PAYMENT-date axis (payment_received desc nulls last,
+//    id desc). payment_received is a DATE (0019), so the drill's to_char('YYYY-MM-DD') alias is lexical ==
+//    chronological == the landing's raw-column order → the two select the SAME "most recent" claim. LOCKSTEP. ──
+test('buildIdentifierLandingFacilityQuery: ORDER BY matches the drill (payment_received desc nulls last, id desc — the payment-date axis)', () => {
   const landing = buildIdentifierLandingFacilityQuery(TOKEN, 'prefix', 'AETNA', '2026-06-17', '2026-07-17', BOTH);
   const drill = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH);
-  // Landing orders on the raw column; the drill orders its projected alias agg.dos (= to_char(charge_date)).
-  assert.match(landing.sql, /order by charge_date desc nulls last, id desc/, 'landing: charge_date desc nulls last, id desc');
-  assert.match(drill.sql, /order by agg\.dos desc nulls last, agg\.id desc/, 'drill: agg.dos (= to_char(charge_date)) desc nulls last, agg.id desc');
-  assert.match(drill.sql, /to_char\(charge_date, 'YYYY-MM-DD'\) as dos/, 'agg.dos IS charge_date (lexical YYYY-MM-DD == chronological) — same key as landing');
-  // The claim ordering must NOT key on payment_received on EITHER side (that column only WINDOWS, never orders claims).
-  assert.ok(!/order by charge_date desc nulls last, id desc[\s\S]*payment_received/.test(landing.sql), 'landing ORDER BY has no payment_received');
-  assert.ok(!/order by agg\.dos[\s\S]*payment_received/.test(drill.sql), 'drill ORDER BY has no payment_received');
+  // Landing orders on the raw payment_received column; the drill orders its projected alias agg.payment_date
+  // (= to_char(payment_received,'YYYY-MM-DD')). Same axis, byte-identical row order (date column, day-grain).
+  assert.match(landing.sql, /order by payment_received desc nulls last, id desc/, 'landing: payment_received desc nulls last, id desc');
+  assert.match(drill.sql, /order by agg\.payment_date desc nulls last, agg\.id desc/, 'drill: agg.payment_date desc nulls last, agg.id desc');
+  assert.match(drill.sql, /to_char\(payment_received, 'YYYY-MM-DD'\) as payment_date/, 'agg.payment_date IS payment_received — the SAME axis as landing');
+  // The claim ordering must key on payment_received on BOTH sides now, and NOT on charge_date/dos.
+  assert.ok(!/order by charge_date/.test(landing.sql), 'landing no longer orders by charge_date');
+  assert.ok(!/order by agg\.dos/.test(drill.sql), 'drill no longer orders by agg.dos (service date)');
+  // dos (service date) is STILL projected for display — it just isn't the sort key anymore.
+  assert.match(drill.sql, /to_char\(charge_date, 'YYYY-MM-DD'\) as dos/, 'dos (charge_date) still projected as a displayed column');
 });
 
 // ── buildFacilityCasesQuery: CLAIM GRAIN (one row per charge), raw-facility predicate, over-fetch. ─────
@@ -145,12 +150,13 @@ test('buildFacilityCasesQuery: claim grain (NO member_id_bidx dedup), raw-facili
   assert.ok(!/group by member_id_bidx/.test(sql), 'NO member_id_bidx dedup — claim grain');
   assert.ok(!/array_agg/.test(sql), 'no per-patient latest-charge collapse — each claim is its own row');
   assert.match(sql, /to_char\(charge_date, 'YYYY-MM-DD'\) as dos/, 'per-claim DOS = the charge_date (not a max)');
+  assert.match(sql, /to_char\(payment_received, 'YYYY-MM-DD'\) as payment_date/, 'per-claim payment_date = payment_received (the sort axis + a displayed column)');
   // Phase 2: member_id_bidx IS projected — to the SERVER CORE only (patientKey aliasing; wire-tested
   // in qualifyCore.test.ts that it never reaches the client). It must never be a bare predicate here
   // beyond the explicit identifier narrows tested below.
   assert.match(sql, /agg\.member_id_bidx/, 'bidx projected for the server-side patient aliasing');
   assert.match(sql, /care_setting\) as program/, 'program := resolved care_setting');
-  assert.match(sql, /order by agg\.dos desc nulls last/, 'ordered by the per-claim DOS');
+  assert.match(sql, /order by agg\.payment_date desc nulls last/, 'ordered by the per-claim PAYMENT date');
   // 0059 repoint ②: per-claim allowed/pct come from the materialized tiered columns.
   assert.match(sql, /allowed_reliable::float8 as allowed/, 'per-claim allowed = 0059 allowed_reliable, not the netted sum');
   assert.ok(!/allowed_amount/.test(sql), 'the netted allowed_amount no longer appears in the drill');
@@ -168,7 +174,7 @@ test('buildFacilityCasesQuery: claim grain (NO member_id_bidx dedup), raw-facili
   assert.deepEqual(params.slice(0, 5), [BOTH, 'AETNA', '405 recovery', '2026-06-17', '2026-07-17']);
   // No filter / no cursor by default: no identifier predicate, no outer keyset WHERE.
   assert.ok(!/member_id_prefix_bidx = /.test(sql) && !/member_id_bidx = /.test(sql), 'no identifier PREDICATE when none supplied (projection is fine)');
-  assert.ok(!/agg\.dos </.test(sql) && !/agg\.dos is null and agg\.id </.test(sql), 'no keyset WHERE on page 0');
+  assert.ok(!/agg\.payment_date </.test(sql) && !/agg\.payment_date is null and agg\.id </.test(sql), 'no keyset WHERE on page 0');
 });
 
 // ── buildFacilityCasesQuery: PREFIX narrow → member_id_prefix_bidx (the STARTS-WITH bleed guard). ─────
@@ -199,37 +205,37 @@ test('buildFacilityCasesQuery: a member token adds member_id_bidx to the INNER W
   assert.ok(!both.sql.includes('member_id_prefix_bidx'), 'the prefix token is not applied when the member token is present');
 });
 
-// ── buildFacilityCasesQuery: keyset lives in the OUTER WHERE (agg.dos/id). ─────────────────────────────
+// ── buildFacilityCasesQuery: keyset lives in the OUTER WHERE (agg.payment_date/id — the payment-date axis). ─
 test('buildFacilityCasesQuery: a non-null cursor adds the NULLS-LAST keyset to the OUTER WHERE, before ORDER BY', () => {
   const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
-    cursor: { lastDos: '2026-07-01', id: 500 },
+    cursor: { lastPaymentReceived: '2026-07-01', id: 500 },
   });
   assert.match(
     sql,
-    /where \(agg\.dos < \$6 or \(agg\.dos = \$6 and agg\.id < \$7\) or agg\.dos is null\) group by/,
+    /where \(agg\.payment_date < \$6 or \(agg\.payment_date = \$6 and agg\.id < \$7\) or agg\.payment_date is null\) group by/,
     'DESC keyset: past the cursor, id tiebreak, plus the whole NULL tail — then GROUP BY',
   );
-  assert.equal(params[5], '2026-07-01', 'cursor lastDos bound as $6');
+  assert.equal(params[5], '2026-07-01', 'cursor lastPaymentReceived bound as $6');
   assert.equal(params[6], 500, 'cursor id bound as $7');
   assert.equal(params[7], QUALIFY_CASES_LIMIT + 1, 'limit+1 last');
-  assert.match(sql, /order by agg\.dos desc nulls last, agg\.id desc/, 'ORDER BY on the per-claim DOS');
+  assert.match(sql, /order by agg\.payment_date desc nulls last, agg\.id desc/, 'ORDER BY on the per-claim PAYMENT date');
 });
 
-test('buildFacilityCasesQuery: a null-lastDos cursor uses the IS NULL AND id branch (null-tail walk)', () => {
+test('buildFacilityCasesQuery: a null-lastPaymentReceived cursor uses the IS NULL AND id branch (null-tail walk)', () => {
   const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
-    cursor: { lastDos: null, id: 500 },
+    cursor: { lastPaymentReceived: null, id: 500 },
   });
-  assert.match(sql, /where \(agg\.dos is null and agg\.id < \$6\) group by/, 'null-tail branch ties by id only');
+  assert.match(sql, /where \(agg\.payment_date is null and agg\.id < \$6\) group by/, 'null-tail branch ties by id only');
   assert.equal(params[5], 500, 'cursor id bound as $6');
 });
 
 test('buildFacilityCasesQuery: prefix + cursor COEXIST (inner identifier WHERE + outer keyset WHERE)', () => {
   const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
     prefixToken: TOKEN,
-    cursor: { lastDos: '2026-07-01', id: 500 },
+    cursor: { lastPaymentReceived: '2026-07-01', id: 500 },
   });
   assert.match(sql, /and member_id_prefix_bidx = \$6\)? agg/, 'prefix in the inner WHERE');
-  assert.match(sql, /where \(agg\.dos < \$7 or \(agg\.dos = \$7 and agg\.id < \$8\) or agg\.dos is null\) group by/, 'keyset in the outer WHERE');
+  assert.match(sql, /where \(agg\.payment_date < \$7 or \(agg\.payment_date = \$7 and agg\.id < \$8\) or agg\.payment_date is null\) group by/, 'keyset in the outer WHERE');
   assert.equal(params[5], TOKEN);
   assert.equal(params[6], '2026-07-01');
   assert.equal(params[7], 500);
