@@ -181,6 +181,13 @@ test('detail — facility-scoped label + tappable claim rows (button per case)',
   assert.ok(html.includes('<button'), 'each claim line is a tappable button');
 });
 
+test('detail — a claim row shows BOTH the payment date (sort axis) and the service date (DOS)', () => {
+  // CASES[0]: paymentDate 2026-07-20, dos 2026-07-15 — both must render, labeled, same as desktop.
+  const html = renderToStaticMarkup(<DetailSheet facility={FAC} claims={CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />);
+  assert.ok(html.includes('Paid 2026-07-20'), 'the payment date renders on the sheet claim row');
+  assert.ok(html.includes('DOS 2026-07-15'), 'the service date (DOS) renders alongside it');
+});
+
 test('detail — loading state shows a placeholder, no case rows', () => {
   const html = renderToStaticMarkup(<DetailSheet facility={FAC} claims={[]} loading hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} />);
   assert.ok(html.includes('Loading claims'), 'loading placeholder while the facility fetch is in flight');
@@ -224,6 +231,12 @@ test('claim detail — WITH amounts, phi null: Billed/Allowed present, member id
   assert.ok(html.includes('Billed') && html.includes('Allowed'), 'amounts labels present for a capable viewer');
   assert.ok(html.includes('$18,400') && html.includes('$11,592'), 'amounts present for a capable viewer');
   assert.ok(html.includes('••••••'), 'member id remains masked in the claim popup when phi is null');
+});
+
+test('claim detail — shows a Payment date row alongside DOS (parity with the list + desktop)', () => {
+  const html = renderToStaticMarkup(<ClaimDetailSheet claim={CASES[0]!} hasAmounts={false} phi={null} onClose={noop} />);
+  assert.ok(html.includes('Payment date') && html.includes('2026-07-20'), 'the claim popup shows the payment date (sort axis)');
+  assert.ok(html.includes('DOS') && html.includes('2026-07-15'), 'DOS (service date) stays');
 });
 
 test('claim detail — revealed phi: shows the real member id, patient, and group #', () => {

@@ -252,11 +252,16 @@ export function DetailSheet({
                     {phi.patient_name ?? '—'}{phi.group_number ? ` · Grp ${phi.group_number}` : ''}
                   </div>
                 ) : null}
-                <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 11, color: INK600 }}>
-                  <span>{c.dos ?? '—'}</span>
+                <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: 11, color: INK600 }}>
+                  {/* Payment date (the sort axis) leads; DOS (service date) follows, de-emphasized — same
+                      two dates the desktop table shows, so the payment-date order reads plainly. */}
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <span className="ths-num">Paid {c.paymentDate ?? '—'}</span>
+                    <span style={{ color: INK400 }}> · DOS {c.dos ?? '—'}</span>
+                  </span>
                   {/* Color by the ROW'S OWN allowed% (mobileBucketStyle → ratingBucket 50/30), NOT the
                       parent facility rating — desktop parity (900e084). null → neutral. */}
-                  <span className="ths-num" style={{ color: mobileBucketStyle(c.pctAllowedOfBilled).color }}>{c.pctAllowedOfBilled === null ? '—' : `${Math.round(c.pctAllowedOfBilled)}% allowed`}</span>
+                  <span className="ths-num" style={{ flexShrink: 0, color: mobileBucketStyle(c.pctAllowedOfBilled).color }}>{c.pctAllowedOfBilled === null ? '—' : `${Math.round(c.pctAllowedOfBilled)}% allowed`}</span>
                 </div>
                 {hasAmounts ? (
                   <div className="ths-num" style={{ marginTop: 4, display: 'flex', justifyContent: 'flex-end', gap: 12, fontSize: 11, color: INK600 }}>

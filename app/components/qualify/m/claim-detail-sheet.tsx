@@ -68,6 +68,7 @@ export function ClaimDetailSheet({
           {phi ? <Row label="Patient" value={phi.patient_name ?? '—'} /> : null}
           {phi ? <Row label="Group #" value={phi.group_number ?? '—'} /> : null}
           <Row label="Facility" value={claim.facilityName ?? '—'} />
+          <Row label="Payment date" value={claim.paymentDate ?? '—'} />
           <Row label="DOS" value={claim.dos ?? '—'} />
           {/* Color by the claim's OWN allowed% (mobileBucketStyle → ratingBucket 50/30), not the facility
               rating — desktop parity (900e084). null → neutral. Other rows keep the default INK900. */}
