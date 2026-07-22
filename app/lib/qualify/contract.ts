@@ -107,15 +107,18 @@ export interface QualifyFacility {
   facilityKey: string;
   city: string | null; // facility-location lookup; null when unmapped (new/unlisted facility) — never fabricated
   state: string | null;
-  /** Dollar-weighted allowed/billed, 0-100. null only if the guarded denominator collapses (rare). */
+  /** Dollar-weighted RELIABLE allowed/billed, 0-100 (0059 repoint: sums `allowed_reliable`, tier e2
+   *  excluded — see qualifyQuery.ts RANKING_RELIABLE_SELECT). null when the guarded denominator
+   *  collapses OR the facility has ZERO reliable evidence in-window → neutral badge, never 0%. */
   pctAllowedOfBilled: number | null;
-  /** Volume-dampened rating (rating.ts) — the SORT key AND badge-color source. null → neutral badge. */
+  /** Value-first rating (rating.ts, ruling 2026-07-19b) = clamp0to100(pctAllowedOfBilled) — the SORT
+   *  key AND badge-color source. null → neutral badge. */
   rating: number | null;
   /** v1: ALWAYS null (ruling Q-E; the 0050 rollup can't back a faithful monthly trend). No badge. */
   streakSignal: number | null;
-  billedAmount: number | null; // null unless viewerHasAmountsCapability (stripped server-side)
-  allowedAmount: number | null;
-  lineCount: number; // logical charge lines (rating weight; non-dollar)
+  billedAmount: number | null; // ALL in-window lines; null unless viewerHasAmountsCapability (stripped server-side)
+  allowedAmount: number | null; // reliable-evidence sum (e2 excluded); null when zero reliable evidence OR stripped
+  lineCount: number; // ALL in-window logical charge lines (volume context: floor + "limited data"; non-dollar, not tier-filtered)
 }
 
 /** ONE claim (charge) line — claim grain (Direction B, ruling 1): one row per charge from the 0050 rollup,

@@ -75,16 +75,29 @@ test('buildResolvePayerQuery: member_id vs prefix selects the right blind-index 
   assert.deepEqual(exact.params, [BOTH, TOKEN]);
 });
 
-// ── buildFacilityRankingQuery: dollar-weighted ratio + crosswalk + rating-order note. ────────────
-test('buildFacilityRankingQuery: reuses PCT_RATIO_SELECT, resolves facility_code, windows payment_received', () => {
+// ── buildFacilityRankingQuery: reliable-evidence ratio (0059 repoint) + crosswalk + rating-order note. ──
+test('buildFacilityRankingQuery: rates on allowed_reliable with tier e2 excluded, resolves facility_code, windows payment_received', () => {
   const { sql, params } = buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH);
-  assert.match(sql, /as pct_allowed/, 'dollar-weighted allowed/billed via shared PCT_RATIO_SELECT');
+  // THE RATING FIX (ruling Q2a): evidence = materialized allowed_reliable, e2 excluded BY TIER.
+  assert.match(
+    sql,
+    /sum\(allowed_reliable\) filter \(where allowed_tier <> 'e2'\)/,
+    'reliable-evidence sum with the e2 tier filter',
+  );
+  assert.ok(!/sum\(allowed_amount\)/.test(sql), 'the netted posting sum no longer feeds the rating');
+  assert.ok(
+    !/allowed_reliable is not null/.test(sql),
+    'exclusion is BY TIER, never a non-null check — e2 IS non-null and would clamp to a false green',
+  );
+  assert.match(sql, /as pct_allowed/, 'dollar-weighted reliable-allowed / billed');
+  assert.ok(!sql.includes('pct_paid'), 'no pct_paid here — PCT_RATIO_SELECT + its floor stay with combo/cohort (re-rule deferred)');
   assert.match(sql, /primary_payer = \$2/);
   assert.match(sql, /payment_received >= \$3::date and payment_received < \$4::date/, 'half-open window');
   assert.ok(sql.includes('collections.facilities'), 'facility_name/care_setting crosswalk');
   assert.ok(sql.includes('cmd_facility_aliases'), 'alias crosswalk');
   assert.match(sql, /as facility_code/, 'returns facility_code for the city/state lookup');
-  assert.match(sql, /count\(\*\)::int as line_count/, 'line_count = rating dampening weight (non-dollar)');
+  assert.match(sql, /count\(\*\)::int as line_count/, 'line_count = ALL in-window lines (volume context, not tier-filtered)');
+  assert.match(sql, /sum\(charge_amount\)::float8 as billed/, 'billed = ALL in-window lines (e2 stays in the denominator — unknown-like)');
   assert.deepEqual(params, [BOTH, 'AETNA', '2026-06-17', '2026-07-17']);
 });
 

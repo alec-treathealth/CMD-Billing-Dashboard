@@ -3,7 +3,9 @@
  * contract (getQualifySnapshot / getQualifyMovers). Mirrors the discipline of cmdExplorerQuery.ts:
  * every value is a bound $n param, every identifier a fixed literal, all aggregate reads go through
  * the 0050 charge-grain rollup (NEVER raw cmd_explorer_rows — that grain double-counts ~2.14×), and
- * the dollar-weighted ratio reuses the shared, hardened PCT_RATIO_SELECT verbatim.
+ * the ranking's dollar-weighted ratio rates on the 0059 `allowed_reliable` evidence
+ * (RANKING_RELIABLE_SELECT below) — deliberately NOT the shared PCT_RATIO_SELECT, which still sums
+ * the netted `allowed_amount` for its own consumers (combo/cohort; their repoint is a separate diff).
  *
  * ┌─ CROSS-TENANT EXCEPTION (Prompt-1 finding 2a / ruling 1a) ────────────────────────────────────┐
  * │ Every builder here scopes `business_entity_id = any($ent::uuid[])` where $ent is the caller's   │
@@ -21,7 +23,7 @@
  * them in the action layer (single choke point), never here.
  */
 import { assertEntityScope } from './entityScope.js';
-import { CMD_EXPLORER_CHARGE_ROLLUP, PCT_RATIO_SELECT, type ParamAdder } from './cmdExplorerQuery.js';
+import { CMD_EXPLORER_CHARGE_ROLLUP, type ParamAdder } from './cmdExplorerQuery.js';
 
 /** A member-id EXACT match vs a 3-letter alpha-PREFIX match — sniffed server-side, never client-declared. */
 export type QualifyMatchKind = 'member_id' | 'prefix';
@@ -42,10 +44,10 @@ export interface QualifyFacilityRow {
   facility: string; // raw rollup facility text (fallback display when facility_name is null)
   facility_name: string | null; // resolved dimension name (crosswalk)
   facility_code: string | null; // resolved facility_code — join key to the in-code city/state lookup
-  line_count: number; // logical charge lines (rating-dampening weight; NON-dollar)
-  billed: number | null; // sum(charge_amount)  — stripped in the action for admissions_seat
-  allowed: number | null; // sum(allowed_amount) — stripped in the action for admissions_seat
-  pct_allowed: number | null; // dollar-weighted allowed/billed, 0-100 (guarded); the displayed value
+  line_count: number; // ALL in-window logical charge lines (volume context: floor + "limited data") — NOT tier-filtered
+  billed: number | null; // sum(charge_amount), ALL lines — stripped in the action for admissions_seat
+  allowed: number | null; // sum(allowed_reliable) EXCLUDING tier e2 (0059 evidence sum; null when zero reliable evidence) — stripped for admissions_seat
+  pct_allowed: number | null; // dollar-weighted reliable-allowed/billed, 0-100 (guarded); null → neutral rating
 }
 export interface QualifyClaimRow {
   id: number; // rollup id of THIS charge — drives the audited reveal join
@@ -117,12 +119,44 @@ export function buildResolvePayerQuery(
 }
 
 /**
- * Per-facility dollar-weighted allowed/billed for the resolved payer, windowed on payment_received,
- * cross-tenant. Facilities from BOTH tenants interleave in ONE result set — never grouped/split by
- * entity. Returns line_count (rating weight), dollar sums, pct_allowed (PCT_RATIO_SELECT), and the
- * resolved facility_name/facility_code (facility_code is the join key to the in-code city/state
- * lookup). ORDER BY is a DETERMINISTIC base (pct desc, facility) only — the FINAL rank is by `rating`
- * (app/lib/qualify/rating.ts), applied in the data loader (ruling Q-G). [from, to) is half-open.
+ * The RANKING's reliable-evidence ratio (0059 repoint, ruling Q2a 2026-07-22) — the rating fix.
+ *
+ * `allowed` = sum of the materialized `allowed_reliable` EXCLUDING tier 'e2' — the tier filter, NOT
+ * a bare non-null check: e2 (restated, nothing reconciles) carries a non-null latest-positive value
+ * whose pct can exceed 100%, and the value-first rating's clamp0to100 (rating.ts) would silently
+ * turn that into a false "Strong" green in the exact surface admissions acts on. The grid keeps
+ * showing e2 unclamped (X's deliberate tell) — the exclusion is rating-evidence-only.
+ *
+ * e2 thereby behaves like the existing unknown tiers (b/none): its charge_amount stays in the billed
+ * denominator, it contributes no allowed — an e2-heavy (reversal-chaos) facility rates LOW, not
+ * falsely green (the conservative failure direction for an admissions decision). A facility with
+ * ZERO reliable evidence gets a NULL numerator → NULL pct → NEUTRAL badge, never 0% → danger.
+ * Displayed allowed ÷ displayed billed == displayed pct (internally consistent card).
+ *
+ * Deliberately NOT PCT_RATIO_SELECT: that shared select still sums the netted `allowed_amount` and
+ * carries the pct_paid 2%/$100 floor — both stay with the combo/cohort consumers until their own
+ * repoint diff (the floor re-ruling is DEFERRED until real allowed_reliable numbers exist). The
+ * ranking never consumed pct_paid, so none is computed here.
+ */
+const RANKING_RELIABLE_SELECT =
+  "(sum(allowed_reliable) filter (where allowed_tier <> 'e2'))::float8 as allowed, " +
+  'case when sum(charge_amount) > 0 then ' +
+  "round((sum(allowed_reliable) filter (where allowed_tier <> 'e2')) / sum(charge_amount) * 100, 2)::float8 " +
+  'end as pct_allowed';
+
+/**
+ * Per-facility dollar-weighted RELIABLE allowed/billed for the resolved payer, windowed on
+ * payment_received, cross-tenant. Facilities from BOTH tenants interleave in ONE result set — never
+ * grouped/split by entity. Returns line_count (ALL in-window lines — volume context, not
+ * tier-filtered), billed (all lines), allowed + pct_allowed (RANKING_RELIABLE_SELECT above — the
+ * 0059 `allowed_reliable` evidence, tier e2 excluded), and the resolved facility_name/facility_code
+ * (facility_code is the join key to the in-code city/state lookup). ORDER BY is a DETERMINISTIC
+ * base (pct desc, facility) only — the FINAL rank is by `rating` (app/lib/qualify/rating.ts),
+ * applied in the data loader (ruling Q-G). [from, to) is half-open.
+ *
+ * DISPLAY DELTA (by design, ruled): e1 charges (netted-sum-reconciles) contribute the netted sum —
+ * a DIFFERENT number than BUILD X's latest-positive — so facility allowed/pct values shift for the
+ * 5,412 e1 charges' facilities vs the pre-0059 panel. That is the fix, not a regression.
  */
 export function buildFacilityRankingQuery(
   payer: string,
@@ -138,8 +172,8 @@ export function buildFacilityRankingQuery(
   const t = add(to);
   const inner =
     'select facility, count(*)::int as line_count, ' +
-    'sum(charge_amount)::float8 as billed, sum(allowed_amount)::float8 as allowed, ' +
-    PCT_RATIO_SELECT + ' ' +
+    'sum(charge_amount)::float8 as billed, ' +
+    RANKING_RELIABLE_SELECT + ' ' +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
     `where business_entity_id = any(${e}::uuid[]) and primary_payer = ${p} ` +
     `and payment_received >= ${f}::date and payment_received < ${t}::date ` +
