@@ -3,7 +3,8 @@
 /**
  * Qualify mobile — "why is this rated X" trend sheet (right-swipe peek). Renders entirely from the
  * facility object already in hand (no query): raw pctAllowedOfBilled, lineCount, the DYNAMIC per-facility
- * explanation (explainRating — the value-first sentence + limited-data flag), then the final rating +
+ * explanation (explainRating — the value-first sentence + limited-data flag), the 0059 coverage
+ * breakdown (confirmed / estimate / unknown + the reversal note — Phase 4), then the final rating +
  * bucket. Carries NO dollar fields by design. Light bottom-sheet.
  */
 import { mobileBucketStyle } from './colors';
@@ -42,6 +43,22 @@ export function TrendSheet({ facility, onClose }: { facility: QualifyFacility; o
         <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
           <StatRow label="Allowed / billed" value={ex.rawPct === null ? '—' : `${Math.round(ex.rawPct)}%`} mono />
           <StatRow label="Claim lines this window" value={String(ex.lineCount)} mono />
+          {/* 0059 coverage breakdown (Phase 4): what the rating is — and is not — based on. */}
+          <StatRow label="Confirmed claims" value={String(facility.confirmedClaims)} mono />
+          <StatRow label="Estimates (excluded)" value={String(facility.estimateClaims)} mono />
+          <StatRow label="No allowed on file" value={String(facility.unknownClaims)} mono />
+          <div style={{ display: 'flex', height: 4, borderRadius: 999, overflow: 'hidden', background: LINE }} aria-hidden>
+            {facility.confirmedClaims > 0 ? (
+              <span style={{ width: `${(facility.confirmedClaims / Math.max(1, facility.lineCount)) * 100}%`, background: '#2e8b6f' }} />
+            ) : null}
+            {facility.estimateClaims > 0 ? (
+              <span style={{ width: `${(facility.estimateClaims / Math.max(1, facility.lineCount)) * 100}%`, background: '#c9881e' }} />
+            ) : null}
+          </div>
+          <p style={{ margin: 0, fontSize: 11, lineHeight: 1.5, color: INK400 }}>
+            Rated on {facility.confirmedClaims} of {facility.lineCount} claims. Estimate = payer reversals we
+            couldn&rsquo;t verify — shown in the claims list, excluded from this rating.
+          </p>
           <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5, color: INK600 }}>{ex.sentence}</p>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, borderTop: `0.5px solid ${LINE}`, paddingTop: 10 }}>
             <span style={{ color: INK600 }}>Rating</span>

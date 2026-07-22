@@ -5,10 +5,12 @@
  * and the 5-row sliding-window swipe list; it is the only caller of getQualifySnapshot /
  * getQualifyMovers. Facilities render in the contract's rating-desc order (never re-sorted here).
  *
- * Left-swipe → advance (pass, removes the facility). Right-swipe → peek the rating "why" sheet,
- * NON-destructive (the facility stays in the deck; closing the sheet does NOT advance). Tap → open
- * the facility detail (no advance). Reset re-seeds the deck from the SAME resolved payer's
- * facilities back to the top of rating order — it does NOT clear the search or re-resolve.
+ * INTERACTION CONTRACT (Phase 4 — REPLACES the pass-deck): a 5-up PAGED list over the full ranked
+ * set. Left-swipe → the NEXT page of 5 (non-destructive; clamps at the last page). Right-swipe →
+ * that row's "why this rating" sheet (coverage breakdown included). Tap → the facility detail
+ * (grouped claims). NOTHING is ever removed — the old destructive pass gesture is GONE. "Top"
+ * (formerly Reset) returns to page 1 of the SAME resolved list; LOC chips (IP/OP/Both) join the
+ * area chips as pure client filters (both reset the page).
  */
 import { useCallback, useEffect, useReducer, useRef, useState, useTransition, type ReactNode } from 'react';
 import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyMovers, revealQualifyRows } from '@/lib/qualify/actions';
@@ -16,6 +18,8 @@ import { QUALIFY_WINDOW_OPTIONS, sniffQualifyKind } from '@/lib/qualify/contract
 import type { QualifySnapshot, QualifyFacility, QualifyClaim, QualifyMover, QualifyWindowDays, QualifyPhi } from '@/lib/qualify/contract';
 import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
 import { resolveLandingWins, drillLandingWins, isPayerChange, leadFacilities, isIdentifierEmpty, identifierEmptyTerm } from '@/lib/qualify/qualifyGuards';
+import { filterFacilitiesByLoc, type QualifyLocFilter } from '@/lib/qualify/groupClaims';
+import { pageSlice, pageCount, pageLabel, clampPage } from '@/lib/qualify/pagination';
 import { SwipeRow } from '@/components/qualify/m/swipe-row';
 import { TrendSheet } from '@/components/qualify/m/trend-sheet';
 import { DetailSheet } from '@/components/qualify/m/detail-sheet';
@@ -29,7 +33,6 @@ const TEAL900 = '#0E3A3A';
 const GROUND = '#FBF8F4';
 const INK900 = '#1B2B2A';
 const INK400 = '#859794';
-const VISIBLE = 5;
 
 function EmptyState({ children }: { children: ReactNode }) {
   return (
@@ -53,7 +56,11 @@ export function QualifyMobileApp({
   const [areaFilter, setAreaFilter] = useState<string>(AREA_ALL);
   const [snapshot, setSnapshot] = useState<QualifySnapshot | null>(null);
   const [movers, setMovers] = useState<QualifyMover[]>([]);
-  const [deck, setDeck] = useState<{ visible: QualifyFacility[]; queue: QualifyFacility[] }>({ visible: [], queue: [] });
+  // Phase 4: the FULL ranked list (post-lead) + the current 5-up page. Filters (area + LOC) apply at
+  // render; the page clamps to the filtered length so a filter change can never strand the view.
+  const [list, setList] = useState<QualifyFacility[]>([]);
+  const [page, setPage] = useState(0);
+  const [locFilter, setLocFilter] = useState<QualifyLocFilter>(null);
   const [trend, setTrend] = useState<QualifyFacility | null>(null);
   const [detail, setDetail] = useState<QualifyFacility | null>(null);
   // Facility-scoped claim lines for the open detail sheet: null === loading, [] === none. `claim` is the
@@ -155,14 +162,18 @@ export function QualifyMobileApp({
         setAreaFilter(AREA_ALL); // a fresh resolution starts unfiltered
         if (snap.resolved === null) {
           setEcho(t);
-          setDeck({ visible: [], queue: [] });
+          setList([]);
+          setPage(0);
+          setLocFilter(null);
         } else {
           setEcho('');
           // Fix A: LEAD the deck with the searched identifier's most-recent-claim facility (server-computed;
           // no-op when null / below-floor). The rest keep rating order. Honest-empty (renderBody) covers the
           // null case, so the ordering only matters when the identifier did land.
           const ordered = leadFacilities(snap.facilities, snap.identifierLandingFacility);
-          setDeck({ visible: ordered.slice(0, VISIBLE), queue: ordered.slice(VISIBLE) });
+          setList(ordered);
+          setPage(0);
+          setLocFilter(null);
         }
         syncCohortForResolution(snap.resolved?.payerName ?? null, w);
       } catch {
@@ -189,7 +200,9 @@ export function QualifyMobileApp({
         setLastSearch(null); // resolved by payer, not via a PHI term
         setAreaFilter(AREA_ALL); // a fresh resolution starts unfiltered
         setEcho('');
-        setDeck({ visible: snap.facilities.slice(0, VISIBLE), queue: snap.facilities.slice(VISIBLE) });
+        setList(snap.facilities);
+        setPage(0);
+        setLocFilter(null);
         // Authoritative identity is the RESOLVED payer name (not the tapped label), matching desktop.
         syncCohortForResolution(snap.resolved?.payerName ?? null, w);
       } catch {
@@ -209,22 +222,22 @@ export function QualifyMobileApp({
     else if (lastSearch) runSearch(lastSearch, w);
   }
 
+  // "Top" (formerly Reset): back to page 1 of the SAME filtered list — filters + resolution kept.
   function resetDeck() {
-    if (snapshot?.resolved) {
-      // Re-seed from the top of the CURRENTLY-filtered set (keeps the active area chip). With
-      // areaFilter === AREA_ALL the filtered set is the full list — identical to the pre-area behavior.
-      const list = facilitiesInArea(snapshot.facilities, areaFilter);
-      setDeck({ visible: list.slice(0, VISIBLE), queue: list.slice(VISIBLE) });
-    }
+    setPage(0);
   }
 
-  // Area chip tap → narrow the deck to that state WITHOUT re-resolving. Re-seeds from the filtered set
-  // (rating order preserved); the SwipeRow gesture model is untouched.
+  // Area chip tap → narrow to that state WITHOUT re-resolving (filters apply at render); page resets.
   function onSelectArea(key: string) {
     if (!snapshot?.resolved) return;
     setAreaFilter(key);
-    const list = facilitiesInArea(snapshot.facilities, key);
-    setDeck({ visible: list.slice(0, VISIBLE), queue: list.slice(VISIBLE) });
+    setPage(0);
+  }
+
+  // LOC chip tap (Phase 4): IP / OP / Both, inclusive semantics (groupClaims.filterFacilitiesByLoc).
+  function onSelectLoc(loc: QualifyLocFilter) {
+    setLocFilter((cur) => (cur === loc ? null : loc));
+    setPage(0);
   }
 
   // Facility-card tap → open the detail sheet and fetch THAT facility's claim lines (facility-scoped,
@@ -340,13 +353,15 @@ export function QualifyMobileApp({
       });
   }
 
-  function advance(f: QualifyFacility) {
-    setDeck(({ visible, queue }) => {
-      const nv = visible.filter((x) => x.rank !== f.rank);
-      const [next, ...rest] = queue;
-      if (next) return { visible: [...nv, next], queue: rest };
-      return { visible: nv, queue };
-    });
+  // The filtered, ranked list the pages walk (lead order preserved; filters never re-sort).
+  const filteredList = filterFacilitiesByLoc(facilitiesInArea(list, areaFilter), locFilter);
+  const totalPages = pageCount(filteredList.length);
+  const safePage = clampPage(page, filteredList.length);
+  const visibleRows = pageSlice(filteredList, safePage);
+
+  // Left-swipe on any row: advance the WHOLE list one page of 5 (clamped — no wrap).
+  function pageNext() {
+    setPage((p) => Math.min(clampPage(p, filteredList.length) + 1, Math.max(0, totalPages - 1)));
   }
 
   function renderBody(): ReactNode {
@@ -375,16 +390,16 @@ export function QualifyMobileApp({
         </EmptyState>
       );
     }
-    if (deck.visible.length === 0) {
+    if (visibleRows.length === 0) {
       return (
         <div style={{ padding: '40px 0', textAlign: 'center' }}>
-          <div className="ths-h" style={{ fontSize: 14, fontWeight: 600, color: INK900 }}>That&rsquo;s the list</div>
-          <div style={{ marginTop: 4, fontSize: 12, color: INK400 }}>Tap Reset to reshuffle</div>
+          <div className="ths-h" style={{ fontSize: 14, fontWeight: 600, color: INK900 }}>No facilities match these filters</div>
+          <div style={{ marginTop: 4, fontSize: 12, color: INK400 }}>Clear a chip or tap Top</div>
         </div>
       );
     }
-    return deck.visible.map((f) => (
-      <SwipeRow key={f.rank} facility={f} onPass={advance} onWhy={(x) => setTrend(x)} onOpen={openFacility} />
+    return visibleRows.map((f) => (
+      <SwipeRow key={f.rank} facility={f} onPageNext={pageNext} onWhy={(x) => setTrend(x)} onOpen={openFacility} />
     ));
   }
 
@@ -397,7 +412,7 @@ export function QualifyMobileApp({
       ? { term: resolvedForSheet.matchedValue, payer: resolvedForSheet.payerName }
       : null;
 
-  const showHint = deck.visible.length > 0;
+  const showHint = visibleRows.length > 0;
   // Area chips only when a payer is resolved AND there are >=2 real buckets (>2 chips incl. "All") — a
   // single-state payer with no unmapped facilities gets no pointless "All / CA" row.
   const areaChips = snapshot?.resolved ? deriveAreaChips(snapshot.facilities) : [];
@@ -420,7 +435,7 @@ export function QualifyMobileApp({
             style={{ display: 'flex', alignItems: 'center', gap: 6, height: 32, padding: '0 12px', borderRadius: 999, background: 'rgba(255,255,255,0.1)', border: 'none', color: '#fff', fontSize: 12, fontWeight: 600 }}
           >
             <RefreshIcon size={14} color="#fff" />
-            <span>Reset</span>
+            <span>Top</span>
           </button>
         </div>
         <div style={{ position: 'relative' }}>
@@ -472,14 +487,63 @@ export function QualifyMobileApp({
       {hint ? <div style={{ padding: '0 16px', fontSize: 12, color: '#C9881E' }}>{hint}</div> : null}
 
       {showAreaChips ? <AreaChips chips={areaChips} active={areaFilter} onSelect={onSelectArea} /> : null}
+      {snapshot?.resolved && !identifierEmpty ? (
+        <div style={{ display: 'flex', gap: 6, padding: '8px 16px 0' }} role="group" aria-label="Level of care">
+          {(['IP', 'OP', 'BOTH'] as const).map((locOpt) => {
+            const active = locFilter === locOpt;
+            return (
+              <button
+                key={locOpt}
+                type="button"
+                aria-pressed={active}
+                onClick={() => onSelectLoc(locOpt)}
+                style={{
+                  padding: '4px 12px',
+                  borderRadius: 999,
+                  border: 'none',
+                  fontSize: 11,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  background: active ? TEAL900 : '#EEF2F0',
+                  color: active ? '#fff' : INK400,
+                }}
+              >
+                {locOpt === 'BOTH' ? 'Both' : locOpt}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
 
       <div style={{ position: 'relative', padding: '12px 16px 24px', display: 'flex', flexDirection: 'column', gap: 10, touchAction: 'pan-y', opacity: isPending ? 0.6 : 1, transition: 'opacity 0.15s' }}>
         {renderBody()}
       </div>
 
+      {showHint && totalPages > 0 ? (
+        <div style={{ textAlign: 'center', padding: '0 16px 8px' }} aria-label={`Page ${safePage + 1} of ${totalPages}`}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: INK400 }} className="ths-num">
+            {pageLabel(safePage, filteredList.length)}
+          </div>
+          {totalPages > 1 && totalPages <= 10 ? (
+            <div style={{ display: 'flex', justifyContent: 'center', gap: 5, marginTop: 6 }} aria-hidden>
+              {Array.from({ length: totalPages }, (_, i) => (
+                <span
+                  key={i}
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: 999,
+                    background: i === safePage ? TEAL900 : '#D8DFDC',
+                  }}
+                />
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {showHint ? (
         <div style={{ textAlign: 'center', fontSize: 12, color: INK400, padding: '0 16px 24px' }}>
-          Swipe left to pass · right for why · tap to open
+          Swipe left for the next 5 · right for why · tap to open
         </div>
       ) : null}
 

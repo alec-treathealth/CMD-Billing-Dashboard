@@ -70,11 +70,21 @@ const noReveal = {
 const PHI: QualifyPhi = { patient_name: 'DOE, JANE', member_id_raw: 'AETMEM777', group_number: 'GRP42' };
 const REVEALED = new Map<number, QualifyPhi>([[1, PHI]]);
 
-test('swipe row markup carries NO dollar values (rating + line count only)', () => {
-  const html = renderToStaticMarkup(<SwipeRow facility={FAC} onPass={noop} onWhy={noop} onOpen={noop} />);
-  assert.ok(!html.includes('$'), 'no dollar sign in a swipe row');
+// Phase 4 NOTE — the destructive pass-deck contract is GONE: SwipeRow's left-swipe now pages the
+// list (onPageNext) and removes nothing. The old deck-interaction behaviors were NEVER mountable
+// under this harness (documented Stage-3a limit), so no async test is voided — this markup test is
+// UPDATED for the new row content (rank chip · LOC tag · coverage micro-bar), and the pass stamp
+// assertion is inverted (the "Pass" vocabulary must be gone).
+test('list row (Phase 4) — no dollars; rank + LOC tag + coverage bar render; the Pass stamp is gone', () => {
+  const html = renderToStaticMarkup(<SwipeRow facility={FAC} onPageNext={noop} onWhy={noop} onOpen={noop} />);
+  assert.ok(!html.includes('$'), 'no dollar sign in a list row');
   for (const v of ['412,300', '251,500', '412300', '251500']) assert.ok(!html.includes(v), `dollar value ${v} must be absent`);
   assert.ok(html.includes('812 lines this window'), 'shows non-dollar volume');
+  assert.ok(html.includes('>Both<'), 'careSetting renders as the LOC tag');
+  assert.ok(html.includes('Next 5'), 'left stamp reads Next 5 (paging), not Pass');
+  assert.ok(!html.includes('>Pass<'), 'the destructive pass vocabulary is gone');
+  assert.ok(html.includes('#2e8b6f') || html.includes('rgb(46, 139, 111)'), 'confirmed coverage segment painted');
+  assert.ok(html.includes('#c9881e') || html.includes('rgb(201, 136, 30)'), 'estimate segment amber — never green');
 });
 
 test('trend sheet markup carries NO dollar values (percent + lines only)', () => {
@@ -82,6 +92,14 @@ test('trend sheet markup carries NO dollar values (percent + lines only)', () =>
   assert.ok(!html.includes('$'), 'no dollar sign in the trend sheet');
   for (const v of ['412,300', '251,500']) assert.ok(!html.includes(v), `dollar value ${v} must be absent`);
   assert.ok(html.includes('61%'), 'shows raw pct (non-dollar)');
+});
+
+test('trend sheet (Phase 4) — the why-sheet carries the coverage breakdown + the reversal note', () => {
+  const html = renderToStaticMarkup(<TrendSheet facility={FAC} onClose={noop} />);
+  assert.ok(html.includes('Confirmed claims'), 'confirmed count row');
+  assert.ok(html.includes('Estimates (excluded)'), 'estimate count row, labeled excluded');
+  assert.ok(html.includes('Rated on 700 of 812 claims'), 'coverage caption from the Phase-0 counts');
+  assert.ok(html.includes('payer reversals we'), 'the estimate explanation note renders');
 });
 
 test('detail — NO amounts: Billed/Allowed columns omitted from the DOM', () => {

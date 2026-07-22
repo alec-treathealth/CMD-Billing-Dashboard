@@ -1,20 +1,20 @@
 'use client';
 
 /**
- * Qualify mobile — a single swipe-list row (Prompt 4b). Physics replicate the approved prototype
- * EXACTLY: 8px axis-lock, tint/stamp ramp over 90px, resolve on |dx|>85 OR |v|>0.5, overshoot
- * spring-back cubic-bezier(0.34,1.56,0.64,1), speed-scaled translateX-only fly-off (NO rotation) with
- * collapse-in-place, tap (|dx|<5) opens detail without consuming. Left→onPass (consume: fly-off +
- * collapse, removes the facility), right→onWhy (peek the rating; NON-destructive — springs back and
- * KEEPS the row in the deck), tap→onOpen (no consume). Only a LEFT swipe removes a facility.
- *
- * Drag runs on refs (no re-render mid-gesture); window listeners are tied to an AbortController so
- * cleanup is identity-independent. The row markup carries NO dollar fields (rating + line count only),
- * so the amounts gate is satisfied by construction here.
+ * Qualify mobile — one row of the 5-up PAGED list (Phase 4 — REPLACES the pass-deck contract).
+ * Gesture physics are UNCHANGED from the approved prototype (8px axis-lock, tint/stamp ramp over
+ * 90px, resolve on |dx|>85 OR |v|>0.5, overshoot spring-back), but the SEMANTICS changed:
+ *   left-swipe  → onPageNext (advance the LIST to the next 5 — NON-destructive; the row springs
+ *                 back; nothing is ever removed. The old destructive "pass" gesture is GONE).
+ *   right-swipe → onWhy (the why-this-rating sheet; non-destructive, as before).
+ *   tap         → onOpen (facility detail — the grouped claims).
+ * Row content (Phase 4): rank chip · name · LOC tag · location + volume line · 0059 COVERAGE
+ * micro-bar (confirmed/estimate/unknown — amber estimate is never green) · rating number/label.
+ * Still NO dollar fields by construction (amounts gate satisfied structurally).
  */
 import { useEffect, useRef, type PointerEvent as ReactPointerEvent } from 'react';
 import { mobileBucketStyle } from './colors';
-import { BuildingIcon, TrendIcon, XIcon } from './icons';
+import { BuildingIcon, TrendIcon } from './icons';
 import type { QualifyFacility } from '../../../lib/qualify/contract';
 
 const DIST_THRESHOLD = 85;
@@ -30,12 +30,13 @@ const SURFACE = '#FFFFFF';
 
 export function SwipeRow({
   facility,
-  onPass,
+  onPageNext,
   onWhy,
   onOpen,
 }: {
   facility: QualifyFacility;
-  onPass: (f: QualifyFacility) => void;
+  /** Left-swipe: advance the list one page (5 rows). Column-wide effect; the row itself stays. */
+  onPageNext: () => void;
   onWhy: (f: QualifyFacility) => void;
   onOpen: (f: QualifyFacility) => void;
 }) {
@@ -95,39 +96,12 @@ export function SwipeRow({
     });
   }
 
-  function resolveRow(goingRight: boolean, v: number) {
-    if (goingRight) {
-      // Right-swipe is a NON-DESTRUCTIVE peek: open the "why" sheet and spring the row back into place.
-      // The facility STAYS in the deck — only a left-swipe (onPass) removes it. springBack() is the same
-      // tested sub-threshold return path; onWhy fires immediately as the row settles.
-      springBack();
-      onWhy(facility);
-      return;
-    }
-    // Only a LEFT swipe reaches here (right returned above), so this is always the destructive pass path.
-    const c = contentRef.current;
-    const row = rowRef.current;
-    const speed = Math.max(Math.abs(v), 0.35);
-    const duration = Math.max(160, Math.min(300, 240 - speed * 100));
-    const exit = -(typeof window !== 'undefined' ? window.innerWidth : 400) * 1.2; // fly off to the left
-    if (c) {
-      c.style.transition = `transform ${duration}ms cubic-bezier(0.22, 1, 0.36, 1)`;
-      c.style.transform = `translateX(${exit}px)`;
-    }
-    if (row) {
-      row.style.transition = `max-height ${duration + 80}ms ease-in, opacity ${duration + 80}ms ease-in, margin-bottom ${duration + 80}ms ease-in`;
-      row.style.pointerEvents = 'none';
-    }
-    window.setTimeout(() => {
-      if (!row) return;
-      row.style.maxHeight = '84px';
-      void row.offsetHeight; // force reflow so the collapse transition fires
-      row.style.overflow = 'hidden';
-      row.style.maxHeight = '0px';
-      row.style.opacity = '0';
-      row.style.marginBottom = '-10px';
-    }, duration * 0.4);
-    window.setTimeout(() => onPass(facility), duration + 100);
+  function resolveRow(goingRight: boolean, _v: number) {
+    // BOTH directions are NON-DESTRUCTIVE now (Phase 4): the row always springs back into place.
+    // Right → the why-this-rating sheet; left → advance the whole list to the next page of 5.
+    springBack();
+    if (goingRight) onWhy(facility);
+    else onPageNext();
   }
 
   function onMove(e: PointerEvent) {
@@ -217,7 +191,7 @@ export function SwipeRow({
       onPointerDown={onPointerDown}
       style={{
         position: 'relative',
-        height: 84,
+        height: 96,
         borderRadius: 16,
         background: SURFACE,
         border: `0.5px solid ${LINE}`,
@@ -234,23 +208,42 @@ export function SwipeRow({
         <span>Why</span>
       </div>
       <div ref={stampLRef} className={stampBase} style={{ left: 10, transform: 'translateY(-50%) rotate(6deg)', borderColor: INK600, color: INK600 }}>
-        <XIcon size={11} color={INK600} />
-        <span>Pass</span>
+        <span>Next 5</span>
       </div>
       <div
         ref={contentRef}
         className="relative z-[2] flex h-full items-center gap-3 px-4"
         style={{ pointerEvents: 'none' }}
       >
-        <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[9px]" style={{ background: b.tint }}>
-          <BuildingIcon size={16} color={b.color} />
+        <div className="flex h-9 w-9 flex-shrink-0 flex-col items-center justify-center rounded-[9px]" style={{ background: b.tint }}>
+          <span className="ths-num text-[13px] font-bold leading-none" style={{ color: b.color }}>{facility.rank}</span>
+          <BuildingIcon size={11} color={b.color} />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="ths-h truncate text-[13px] font-semibold leading-tight" style={{ color: INK900 }}>
-            {facility.name}
+          <div className="flex items-center gap-1.5">
+            <div className="ths-h truncate text-[13px] font-semibold leading-tight" style={{ color: INK900 }}>
+              {facility.name}
+            </div>
+            {facility.careSetting ? (
+              <span
+                className="flex-shrink-0 rounded-full px-1.5 py-px text-[9px] font-bold uppercase tracking-wide"
+                style={{ background: '#e4f0f5', color: '#2C6E8A' }}
+              >
+                {facility.careSetting === 'BOTH' ? 'Both' : facility.careSetting}
+              </span>
+            ) : null}
           </div>
           <div className="mt-0.5 truncate text-[11px]" style={{ color: INK400 }}>
             {loc ? `${loc} · ` : ''}{facility.lineCount} lines this window
+          </div>
+          {/* 0059 coverage micro-bar: confirmed / estimate / unknown (estimate amber, never green). */}
+          <div className="mt-1 flex h-[3px] overflow-hidden rounded-full" style={{ background: LINE }} aria-hidden>
+            {facility.confirmedClaims > 0 ? (
+              <span style={{ width: `${(facility.confirmedClaims / Math.max(1, facility.lineCount)) * 100}%`, background: '#2e8b6f' }} />
+            ) : null}
+            {facility.estimateClaims > 0 ? (
+              <span style={{ width: `${(facility.estimateClaims / Math.max(1, facility.lineCount)) * 100}%`, background: '#c9881e' }} />
+            ) : null}
           </div>
         </div>
         <div className="flex-shrink-0 text-right">
