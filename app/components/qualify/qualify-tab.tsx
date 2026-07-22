@@ -61,6 +61,7 @@ import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/
 import { isIdentifierEmpty, identifierEmptyTerm } from '@/lib/qualify/qualifyGuards';
 import { buildFacilityBucketMap } from '@/components/qualify/colors';
 import { FacilityPanel } from '@/components/qualify/facility-panel';
+import { filterFacilitiesByLoc, type QualifyLocFilter } from '@/lib/qualify/groupClaims';
 import { CasesTable } from '@/components/qualify/cases-table';
 import { HeatingUpBar } from '@/components/qualify/heating-up-bar';
 import { VobModal } from '@/components/qualify/vob-modal';
@@ -79,8 +80,9 @@ function formatWindowRange(startIso: string, endExclusiveIso: string): string {
 type CasesPage = { claims: QualifyClaim[]; nextCursor: QualifyCasesCursor | null; hasMore: boolean };
 const EMPTY_PAGE: CasesPage = { claims: [], nextCursor: null, hasMore: false };
 
-/** The identifier narrow the facility drill applies, built from the applied prefix + the exact-member ref. */
-type DrillFilter = { prefix?: string; memberId?: string } | undefined;
+/** The narrow the facility drill applies: applied prefix + exact-member ref + the group-# narrow (the
+ *  employer proxy — EXACT match; Phase 2). */
+type DrillFilter = { prefix?: string; memberId?: string; group?: string } | undefined;
 
 export function QualifyTab({
   viewerHasAmountsCapability,
@@ -115,6 +117,11 @@ export function QualifyTab({
   // Enter commits the buffer via CHANGE_PREFIX. On a scope change that keeps the prefix (facility switch) the
   // buffer is re-synced to cohort.prefix; on a payer resolution both are cleared. STARTS-WITH, never contains.
   const [prefix, setPrefix] = useState('');
+  // The GROUP-# INPUT buffer (the employer proxy; EXACT match). Applied value lives in cohort.group;
+  // Enter commits via CHANGE_GROUP. Cleared with the prefix on a payer resolution.
+  const [group, setGroup] = useState('');
+  // LOC filter chips (IP / OP / Both) — pure client-side view filter over the facility panel.
+  const [locFilter, setLocFilter] = useState<QualifyLocFilter>(null);
   // "Heating up" payer quick-pick (desktop parity with mobile): trending payers for the current window,
   // rendered as a click-to-resolve chip row. Fetched on load + re-fetched on window change.
   const [movers, setMovers] = useState<QualifyMover[]>([]);
@@ -180,11 +187,12 @@ export function QualifyTab({
   // The identifier narrow (Direction B): the applied prefix wins; else the exact-member ref (when the cohort
   // resolved via an exact member-id search); else no narrow (payer-wide at the facility). Reads the ref, so
   // it always reflects the latest resolution.
-  const drillFilter = useCallback((cohortPrefix: string): DrillFilter => {
+  const drillFilter = useCallback((cohortPrefix: string, cohortGroup: string): DrillFilter => {
     const p = cohortPrefix.trim();
-    if (p) return { prefix: p };
-    if (exactMemberRef.current) return { memberId: exactMemberRef.current };
-    return undefined;
+    const g = cohortGroup.trim();
+    const member: DrillFilter = p ? { prefix: p } : exactMemberRef.current ? { memberId: exactMemberRef.current } : undefined;
+    if (!g) return member;
+    return { ...(member ?? {}), group: g }; // composable — the group narrow ANDs with the member narrow
   }, []);
 
   const fetchSeed = useCallback(
@@ -213,7 +221,7 @@ export function QualifyTab({
       const key = cohortKey(c);
       resetReveal();
       const cursor = c.cursors[c.page] ?? null;
-      const filter = drillFilter(c.prefix);
+      const filter = drillFilter(c.prefix, c.group);
       startFacilityTransition(async () => {
         try {
           const res = await getQualifyFacilityCases({
@@ -280,6 +288,7 @@ export function QualifyTab({
         exactMemberRef.current = isExact ? trimmed : null; // set AFTER the recency check (never on a stale search)
         commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: landing, window: w, prefix: echo }, seed);
         setPrefix(echo); // prefill the input with the searched prefix echo ('' for exact / unresolved)
+        setGroup(''); // new cohort — the group narrow resets with the prefix
         setHasSearched(true);
         setByPayer(null); // an explicit search supersedes the by-payer default
         if (snap.resolved === null) {
@@ -316,6 +325,7 @@ export function QualifyTab({
         exactMemberRef.current = null; // no identifier narrow on the payer path
         commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: rank1, window: w }, seed);
         setPrefix('');
+        setGroup('');
         setHasSearched(true);
         setByPayer(payer);
         setModalOpen(false);
@@ -345,7 +355,7 @@ export function QualifyTab({
           const payerName = snap.resolved?.payerName ?? null;
           if (genRef.current !== gen) return;
           if (payerName && payerName === prev.payer && next.facility) {
-            const seed = await fetchSeed(payerName, next.facility, w, drillFilter(next.prefix));
+            const seed = await fetchSeed(payerName, next.facility, w, drillFilter(next.prefix, next.group));
             if (genRef.current !== gen) return;
             setSnapshot(snap);
             setFacilityCases(seed.claims);
@@ -358,6 +368,7 @@ export function QualifyTab({
             exactMemberRef.current = null;
             commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: rank1, window: w }, seed);
             setPrefix('');
+            setGroup('');
           }
         } else {
           // SEARCH path: re-resolve the identifier and RE-LAND on its facility for the new window (Fix A), or
@@ -375,6 +386,7 @@ export function QualifyTab({
           exactMemberRef.current = isExact ? query.trim() : null;
           commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: landing, window: w, prefix: echo }, seed);
           setPrefix(echo);
+          setGroup('');
         }
         setModalOpen(false);
       } catch {
@@ -392,6 +404,7 @@ export function QualifyTab({
       if (!c.payer || facilityKey === c.facility) return;
       const next = apply({ type: 'SWITCH_FACILITY', facility: facilityKey });
       setPrefix(next.prefix); // keep the visible input in step with the retained applied prefix
+      setGroup(next.group); // same for the retained group narrow
       fetchCases(next);
     },
     [apply, fetchCases],
@@ -403,6 +416,12 @@ export function QualifyTab({
     if (!cohortRef.current.facility) return;
     fetchCases(apply({ type: 'CHANGE_PREFIX', prefix }));
   }, [apply, fetchCases, prefix]);
+
+  // Apply the typed group-# narrow (explicit Enter; EXACT match — the employer proxy). Mirrors applyPrefix.
+  const applyGroup = useCallback(() => {
+    if (!cohortRef.current.facility) return;
+    fetchCases(apply({ type: 'CHANGE_GROUP', group }));
+  }, [apply, fetchCases, group]);
 
   // Pager steps — walk the SAME cohort's cursor stack. PAGE_PREV steps back to the stored cursor; PAGE_NEXT
   // advances, pushing the last fetch's nextCursor. Guarded by hasPrev/hasMore at the call.
@@ -619,8 +638,27 @@ export function QualifyTab({
       {/* grid or empty prompt */}
       {snapshot && snapshot.resolved ? (
         <div className="grid grid-cols-1 items-start gap-4 min-[960px]:grid-cols-[340px_1fr]">
+          <div className="min-[960px]:col-span-2 -mb-2 flex items-center gap-2">
+            <span className="text-[11.5px] font-semibold text-muted-foreground">Level of care</span>
+            {(['IP', 'OP', 'BOTH'] as const).map((loc) => (
+              <button
+                key={loc}
+                type="button"
+                aria-pressed={locFilter === loc}
+                onClick={() => setLocFilter((cur) => (cur === loc ? null : loc))}
+                className={[
+                  'rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition-colors',
+                  locFilter === loc
+                    ? 'border-teal500 bg-teal50 text-teal700'
+                    : 'border-teal200 bg-card text-muted-foreground hover:bg-teal50',
+                ].join(' ')}
+              >
+                {loc === 'BOTH' ? 'Both' : loc}
+              </button>
+            ))}
+          </div>
           <FacilityPanel
-            facilities={snapshot.facilities}
+            facilities={filterFacilitiesByLoc(snapshot.facilities, locFilter)}
             hasAmounts={hasAmounts}
             heatOn={heatOn}
             selectedKey={cohort.facility}
@@ -645,6 +683,9 @@ export function QualifyTab({
               prefix={prefix}
               onPrefixChange={setPrefix}
               onApplyPrefix={applyPrefix}
+              group={group}
+              onGroupChange={setGroup}
+              onApplyGroup={applyGroup}
               page={cohort.page + 1}
               hasPrev={cohort.page > 0}
               hasNext={hasMore}

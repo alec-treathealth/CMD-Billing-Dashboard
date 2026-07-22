@@ -41,7 +41,7 @@ const FACILITIES = [SOLID, THIN_HIGH];
 const CASE_AT_THIN: QualifyClaim = {
   id: 1, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'THIN HIGH', program: 'OP',
   dos: '2026-07-15', pctAllowedOfBilled: 95, billedAmount: 18400, allowedAmount: 11592,
-  confidence: 'confirmed',
+  confidence: 'confirmed', patientKey: 1,
 };
 
 // A weak-reimbursement facility (24% → danger) with a HIGH-pct case, to prove the % ALLOWED cell
@@ -55,7 +55,7 @@ const LOW: QualifyFacility = {
 const CASE_AT_LOW: QualifyClaim = {
   id: 2, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'LOW YIELD', program: 'OP',
   dos: '2026-07-10', pctAllowedOfBilled: 95, billedAmount: 9000, allowedAmount: 8550,
-  confidence: 'confirmed',
+  confidence: 'confirmed', patientKey: 1,
 };
 
 const PHI: QualifyPhi = { patient_name: 'DOE, JANE', member_id_raw: 'AETMEMBER123', group_number: 'GRP9' };
@@ -72,6 +72,9 @@ const noReveal = {
   prefix: '',
   onPrefixChange: noop,
   onApplyPrefix: noop,
+  group: '',
+  onGroupChange: noop,
+  onApplyGroup: noop,
   page: 1,
   hasPrev: false,
   hasNext: false,
@@ -133,8 +136,8 @@ test('case % cell is tinted by the case’s OWN allowed%, NOT the parent facilit
 });
 
 test('case % cell — a LOW own-pct reads red even at a GREEN facility (cutoffs 50/30, no cross-contamination)', () => {
-  const weakCase: QualifyClaim = { ...CASE_AT_THIN, id: 9, pctAllowedOfBilled: 18 }; // 18% → danger
-  const midCase: QualifyClaim = { ...CASE_AT_THIN, id: 10, pctAllowedOfBilled: 42 }; // 42% → warn
+  const weakCase: QualifyClaim = { ...CASE_AT_THIN, id: 9, pctAllowedOfBilled: 18, patientKey: 9 }; // 18% → danger
+  const midCase: QualifyClaim = { ...CASE_AT_THIN, id: 10, pctAllowedOfBilled: 42, patientKey: 10 }; // 42% → warn
   // Facility THIN HIGH is 90% → ok (green); the cells must still follow each case's own pct.
   const html = renderToStaticMarkup(
     <CasesTable claims={[weakCase, midCase]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} />,
@@ -284,11 +287,11 @@ test('cases table — without emptyIdentifierLabel, an empty panel keeps the pay
 // These fixtures are deliberately self-contained (they do NOT reuse the rating-const fixtures above) so
 // the block stays independent of the parallel scoring-track edits to this file.
 const CASES_FACILITY_A: QualifyClaim[] = [
-  { id: 101, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'ALPHA CLINIC', program: 'IP', dos: '2026-07-15', pctAllowedOfBilled: 60, billedAmount: 1000, allowedAmount: 600, confidence: 'confirmed' },
-  { id: 102, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'ALPHA CLINIC', program: 'OP', dos: '2026-07-14', pctAllowedOfBilled: 55, billedAmount: 2000, allowedAmount: 1100, confidence: 'confirmed' },
+  { id: 101, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'ALPHA CLINIC', program: 'IP', dos: '2026-07-15', pctAllowedOfBilled: 60, billedAmount: 1000, allowedAmount: 600, confidence: 'confirmed', patientKey: 1 },
+  { id: 102, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'ALPHA CLINIC', program: 'OP', dos: '2026-07-14', pctAllowedOfBilled: 55, billedAmount: 2000, allowedAmount: 1100, confidence: 'confirmed', patientKey: 2 },
 ];
 const CASES_FACILITY_B: QualifyClaim[] = [
-  { id: 201, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'BETA CENTER', program: 'OP', dos: '2026-06-02', pctAllowedOfBilled: 40, billedAmount: 3000, allowedAmount: 1200, confidence: 'confirmed' },
+  { id: 201, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'BETA CENTER', program: 'OP', dos: '2026-06-02', pctAllowedOfBilled: 40, billedAmount: 3000, allowedAmount: 1200, confidence: 'confirmed', patientKey: 1 },
 ];
 
 test('cases table — per-facility scope: two facilities yield DIFFERENT case sets (the "same 15 regardless" bug is gone)', () => {
@@ -360,12 +363,12 @@ test('heating-up bar — renders nothing when no payer is trending up', () => {
 const ESTIMATE_CLAIM: QualifyClaim = {
   id: 301, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'REVERSAL HOUSE', program: 'OP',
   dos: '2026-07-12', pctAllowedOfBilled: 95, billedAmount: 4000, allowedAmount: 3800,
-  confidence: 'estimate', // 95% but UNVERIFIED — must never read green
+  confidence: 'estimate', patientKey: 1, // 95% but UNVERIFIED — must never read green
 };
 const UNKNOWN_CLAIM: QualifyClaim = {
   id: 302, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'REVERSAL HOUSE', program: 'OP',
   dos: '2026-07-11', pctAllowedOfBilled: null, billedAmount: 500, allowedAmount: null,
-  confidence: 'unknown',
+  confidence: 'unknown', patientKey: 2,
 };
 
 test('cases table — an ESTIMATE claim is amber with ~ prefix and caption, NEVER green (however high its pct)', () => {
@@ -405,4 +408,41 @@ test('facility panel — coverage bar caption, LOC tag, thin-sample pill, confid
   assert.ok(html.includes('thin sample'), 'THIN_HIGH (1 line < limited-data floor) wears the thin-sample pill');
   assert.ok(html.includes('No allowed on file'), 'confidence legend labels render');
   assert.ok(html.includes('Estimate'), 'estimate legend label present');
+});
+
+// ── Phase 2: patient grouping (one row per patient) + the group-# filter affordance ──────────────────
+test('cases table — same-patient claims fold into ONE expandable group row (collapsed by default)', () => {
+  const dayRun: QualifyClaim[] = [
+    { ...CASE_AT_LOW, id: 501, patientKey: 42, dos: '2026-07-15', pctAllowedOfBilled: 80 },
+    { ...CASE_AT_LOW, id: 502, patientKey: 42, dos: '2026-07-14', pctAllowedOfBilled: 40 },
+  ];
+  const html = renderToStaticMarkup(
+    <CasesTable claims={dayRun} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([])} {...noReveal} />,
+  );
+  assert.ok(html.includes('Patient 42'), 'group row labels by the per-response ordinal (masked identity)');
+  assert.ok(html.includes('2 claims'), 'claim-count badge');
+  assert.ok(html.includes('60% avg'), 'roll-up pct = plain mean of the per-claim pcts');
+  assert.ok(!html.includes('↳'), 'day-by-day rows are collapsed by default');
+  assert.ok(html.includes('aria-expanded="false"'), 'the chevron reads collapsed');
+});
+
+test('cases table — a group with ANY estimate claim rolls up amber with ~avg, never green', () => {
+  const mix: QualifyClaim[] = [
+    { ...CASE_AT_LOW, id: 601, patientKey: 5, pctAllowedOfBilled: 95 },
+    { ...CASE_AT_LOW, id: 602, patientKey: 5, pctAllowedOfBilled: 95, confidence: 'estimate' },
+  ];
+  const html = renderToStaticMarkup(
+    <CasesTable claims={mix} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([])} {...noReveal} />,
+  );
+  assert.ok(html.includes('~95% avg'), 'estimate-tainted roll-up carries the ~ prefix');
+  assert.ok(html.includes('q-warn'), 'amber');
+  assert.ok(!html.includes('q-pctcell q-ok'), 'one unverified reversal means the roll-up can never read green');
+});
+
+test('cases table — the group-# filter renders for reveal-capable viewers, labeled as the employer PROXY', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable claims={[CASE_AT_LOW]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([])} {...noReveal} canReveal />,
+  );
+  assert.ok(html.includes('Group # (employer proxy)'), 'labeled as the proxy — never "employer" (that data does not exist)');
+  assert.ok(!html.includes('>Employer<'), 'no fabricated employer field');
 });

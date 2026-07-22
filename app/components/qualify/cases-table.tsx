@@ -25,9 +25,11 @@
  * applies it server-side (member_id_prefix_bidx), so the input carries only the user's own typed prefix,
  * never row PHI. A <3-char entry mints no token (shows all) — the affordance says filtering starts at 3.
  */
+import { Fragment, useState } from 'react';
 import { bucketClass, type RatingBucket } from './colors';
 import { ratingBucket } from '../../lib/qualify/rating';
 import { CONFIDENCE_LEGEND } from '../../lib/qualify/confidence';
+import { groupClaimsByPatient, type QualifyClaimGroup } from '../../lib/qualify/groupClaims';
 import { PHI_MASK } from '../../lib/phi';
 import type { QualifyClaim, QualifyPhi } from '../../lib/qualify/contract';
 
@@ -59,6 +61,9 @@ export function CasesTable({
   prefix,
   onPrefixChange,
   onApplyPrefix,
+  group,
+  onGroupChange,
+  onApplyGroup,
   page,
   hasPrev,
   hasNext,
@@ -91,6 +96,11 @@ export function CasesTable({
   onPrefixChange: (value: string) => void;
   /** Apply the prefix (explicit submit — mirrors the top-bar's Enter-to-resolve). */
   onApplyPrefix: () => void;
+  /** Group-# narrow (EXACT — the employer proxy; real employer names do not exist in this data).
+   *  The user's own typed term; HMAC'd server-side (group_number_bidx), never row PHI. */
+  group: string;
+  onGroupChange: (value: string) => void;
+  onApplyGroup: () => void;
   /** Cursor-pagination controls (1-based page for display), matching the collections <Pager> idiom. */
   page: number;
   hasPrev: boolean;
@@ -105,6 +115,174 @@ export function CasesTable({
   emptyIdentifierLabel?: string | null;
 }) {
   const colSpan = 7 + (hasAmounts ? 2 : 0);
+  // Patient groups expanded to their day-by-day claims (collapsed by default; per-response keys).
+  const [expandedPatients, setExpandedPatients] = useState<ReadonlySet<number>>(new Set());
+  const togglePatient = (key: number) =>
+    setExpandedPatients((cur) => {
+      const next = new Set(cur);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  const groups = groupClaimsByPatient(claims);
+
+  /** ONE claim row (claim grain) — `indented` marks a day-by-day row under an expanded patient group. */
+  const renderClaimRow = (c: QualifyClaim, indented = false) => {
+    const pct = c.pctAllowedOfBilled;
+    // CONFIDENCE-FIRST (0059): confirmed → grade by this row's own pct (ratingBucket 50/30);
+    // estimate → ALWAYS amber (never green, however high the number — the reversal tell);
+    // unknown → neutral. See the header comment + colors.ts history.
+    const bucket: RatingBucket =
+      c.confidence === 'confirmed' ? ratingBucket(pct) : c.confidence === 'estimate' ? 'warn' : 'neutral';
+    const phi = revealAll ? revealed.get(c.id) : undefined;
+    const isShown = phi !== undefined;
+    const maskedCls = 'font-mono tracking-widest text-ink400';
+    const realCls = 'font-mono text-ink900';
+    return (
+      <tr key={c.id} className={indented ? 'bg-surface' : undefined}>
+        <td className={TD}>
+          <span className={[indented ? 'pl-6' : '', isShown ? 'text-ink900' : 'text-ink400'].join(' ')}>
+            {indented ? '↳ ' : ''}
+            {phiText(isShown, phi?.patient_name ?? null, PHI_MASK)}
+          </span>
+        </td>
+        <td className={TD}>
+          <span className={isShown ? realCls : maskedCls}>
+            {isShown ? phiText(true, phi?.member_id_raw ?? null, PHI_MASK) : c.memberIdMasked}
+          </span>
+        </td>
+        <td className={TD}>
+          <span className={isShown ? realCls : maskedCls}>
+            {phiText(isShown, phi?.group_number ?? null, PHI_MASK)}
+          </span>
+        </td>
+        <td className={TD}>{c.facilityName ?? '—'}</td>
+        <td className={TD}>
+          {c.program ? (
+            <span className="inline-flex items-center rounded-full bg-[#e4f0f5] px-2 py-0.5 text-[10.5px] font-bold uppercase tracking-wide text-status-info">
+              {c.program}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </td>
+        <td className={`${TD} text-muted-foreground`}>{c.dos ?? '—'}</td>
+        <td className={`${TD} text-right`}>
+          <span
+            className={['q-pctcell', bucketClass(bucket), 'inline-flex items-center gap-1.5 rounded px-2 py-0.5 tabular-nums font-semibold'].join(' ')}
+            title={
+              c.confidence === 'estimate'
+                ? CONFIDENCE_LEGEND.captions.estimate
+                : c.confidence === 'unknown'
+                  ? CONFIDENCE_LEGEND.captions.unknown
+                  : "Colored by this case's % allowed of billed"
+            }
+          >
+            <span className="q-dot inline-block h-2 w-2 rounded-full" />
+            {pct === null ? '—' : c.confidence === 'estimate' ? `~${Math.round(pct)}%` : `${Math.round(pct)}%`}
+          </span>
+          {c.confidence === 'estimate' ? (
+            <span className="block text-[10px] leading-tight text-ink400">estimate · reversals</span>
+          ) : null}
+          {c.confidence === 'unknown' ? (
+            <span className="block text-[10px] leading-tight text-ink400">no allowed on file</span>
+          ) : null}
+        </td>
+        {hasAmounts ? (
+          <td className={`${TD} text-right tabular-nums`}>{c.billedAmount === null ? '—' : usd0(c.billedAmount)}</td>
+        ) : null}
+        {hasAmounts ? (
+          <td className={`${TD} text-right tabular-nums`}>{c.allowedAmount === null ? '—' : usd0(c.allowedAmount)}</td>
+        ) : null}
+      </tr>
+    );
+  };
+
+  /** ONE patient group: header row (chevron · patient label · count · roll-up pct) + optional day rows. */
+  const renderGroup = (g: QualifyClaimGroup) => {
+    if (g.claimCount === 1) return renderClaimRow(g.claims[0]!, false);
+    const open = expandedPatients.has(g.patientKey);
+    const first = g.claims[0]!;
+    // Group-row PHI: the first claim of the group whose PHI is in the reveal cache (all claims of a
+    // patient share identity, so any revealed member works).
+    const phi = revealAll ? g.claims.map((c) => revealed.get(c.id)).find((p) => p !== undefined) : undefined;
+    const isShown = phi !== undefined;
+    const programs = [...new Set(g.claims.map((c) => c.program).filter(Boolean))].join('·');
+    const bucket: RatingBucket =
+      g.confidence === 'confirmed' ? ratingBucket(g.avgPct) : g.confidence === 'estimate' ? 'warn' : 'neutral';
+    const billedSum = g.claims.reduce<number | null>((a, c) => (c.billedAmount === null ? a : (a ?? 0) + c.billedAmount), null);
+    const allowedSum = g.claims.reduce<number | null>((a, c) => (c.allowedAmount === null ? a : (a ?? 0) + c.allowedAmount), null);
+    return (
+      <Fragment key={`p${g.patientKey}`}>
+        <tr>
+          <td className={TD}>
+            <button
+              type="button"
+              onClick={() => togglePatient(g.patientKey)}
+              aria-expanded={open}
+              className="inline-flex items-center gap-1.5 font-semibold text-ink900"
+              title={open ? 'Collapse this patient’s claims' : 'Expand to day-by-day claims'}
+            >
+              <span aria-hidden className="text-[10px] text-ink400">{open ? '▾' : '▸'}</span>
+              <span className={isShown ? 'text-ink900' : 'text-ink400'}>
+                {isShown ? (phi?.patient_name ?? '—') : `Patient ${g.patientKey}`}
+              </span>
+              <span className="rounded-full bg-teal50 px-1.5 py-px text-[10px] font-bold text-teal700">
+                {g.claimCount} claims
+              </span>
+            </button>
+          </td>
+          <td className={TD}>
+            <span className={isShown ? 'font-mono text-ink900' : 'font-mono tracking-widest text-ink400'}>
+              {isShown ? (phi?.member_id_raw ?? '—') : first.memberIdMasked}
+            </span>
+          </td>
+          <td className={TD}>
+            <span className={isShown ? 'font-mono text-ink900' : 'font-mono tracking-widest text-ink400'}>
+              {phiText(isShown, phi?.group_number ?? null, PHI_MASK)}
+            </span>
+          </td>
+          <td className={TD}>{first.facilityName ?? '—'}</td>
+          <td className={TD}>
+            {programs ? (
+              <span className="inline-flex items-center rounded-full bg-[#e4f0f5] px-2 py-0.5 text-[10.5px] font-bold uppercase tracking-wide text-status-info">
+                {programs}
+              </span>
+            ) : (
+              <span className="text-muted-foreground">—</span>
+            )}
+          </td>
+          <td className={`${TD} text-muted-foreground`}>{first.dos ?? '—'}</td>
+          <td className={`${TD} text-right`}>
+            <span
+              className={['q-pctcell', bucketClass(bucket), 'inline-flex items-center gap-1.5 rounded px-2 py-0.5 tabular-nums font-semibold'].join(' ')}
+              title={
+                g.confidence === 'estimate'
+                  ? CONFIDENCE_LEGEND.captions.estimate
+                  : `Mean of this patient's ${g.claimCount} per-claim % allowed values`
+              }
+            >
+              <span className="q-dot inline-block h-2 w-2 rounded-full" />
+              {g.avgPct === null ? '—' : g.confidence === 'estimate' ? `~${g.avgPct}% avg` : `${g.avgPct}% avg`}
+            </span>
+            {g.confidence === 'estimate' ? (
+              <span className="block text-[10px] leading-tight text-ink400">estimate · reversals</span>
+            ) : null}
+            {g.confidence === 'unknown' ? (
+              <span className="block text-[10px] leading-tight text-ink400">no allowed on file</span>
+            ) : null}
+          </td>
+          {hasAmounts ? (
+            <td className={`${TD} text-right tabular-nums`}>{billedSum === null ? '—' : usd0(billedSum)}</td>
+          ) : null}
+          {hasAmounts ? (
+            <td className={`${TD} text-right tabular-nums`}>{allowedSum === null ? '—' : usd0(allowedSum)}</td>
+          ) : null}
+        </tr>
+        {open ? g.claims.map((c) => renderClaimRow(c, true)) : null}
+      </Fragment>
+    );
+  };
   // Prefix affordance — STARTS-WITH, never "contains". A 1-2 char entry mints no token server-side
   // (Stage 1), so it must read as "not yet filtering"; filtering activates at 3 characters.
   const trimmedPrefix = prefix.trim();
@@ -134,6 +312,21 @@ export function CasesTable({
               placeholder="Filter by ID prefix…"
               aria-label="Filter cases by member ID prefix (starts with)"
               className="h-8 w-40 rounded-md border bg-background px-2.5 text-[13px] text-ink900 outline-none focus:border-teal500 focus:ring-2 focus:ring-teal50"
+            />
+          ) : null}
+          {canReveal ? (
+            <input
+              value={group}
+              onChange={(e) => onGroupChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') onApplyGroup();
+              }}
+              spellCheck={false}
+              maxLength={40}
+              placeholder="Group # (employer proxy)…"
+              aria-label="Filter cases by exact group number — the employer proxy"
+              title="Exact group-number match — the closest thing to an employer filter in this data (employer names do not exist here)"
+              className="h-8 w-44 rounded-md border bg-background px-2.5 text-[13px] text-ink900 outline-none focus:border-teal500 focus:ring-2 focus:ring-teal50"
             />
           ) : null}
           {canReveal ? (
@@ -187,75 +380,9 @@ export function CasesTable({
                 </td>
               </tr>
             ) : (
-              claims.map((c) => {
-                const pct = c.pctAllowedOfBilled;
-                // CONFIDENCE-FIRST (0059): confirmed → grade by this row's own pct (ratingBucket
-                // 50/30); estimate → ALWAYS amber (never green, however high the number — the
-                // reversal tell); unknown → neutral. See the header comment + colors.ts history.
-                const bucket: RatingBucket =
-                  c.confidence === 'confirmed' ? ratingBucket(pct) : c.confidence === 'estimate' ? 'warn' : 'neutral';
-                const phi = revealAll ? revealed.get(c.id) : undefined;
-                const isShown = phi !== undefined;
-                const maskedCls = 'font-mono tracking-widest text-ink400';
-                const realCls = 'font-mono text-ink900';
-                return (
-                  <tr key={c.id}>
-                    <td className={TD}>
-                      <span className={isShown ? 'text-ink900' : 'text-ink400'}>
-                        {phiText(isShown, phi?.patient_name ?? null, PHI_MASK)}
-                      </span>
-                    </td>
-                    <td className={TD}>
-                      <span className={isShown ? realCls : maskedCls}>
-                        {isShown ? phiText(true, phi?.member_id_raw ?? null, PHI_MASK) : c.memberIdMasked}
-                      </span>
-                    </td>
-                    <td className={TD}>
-                      <span className={isShown ? realCls : maskedCls}>
-                        {phiText(isShown, phi?.group_number ?? null, PHI_MASK)}
-                      </span>
-                    </td>
-                    <td className={TD}>{c.facilityName ?? '—'}</td>
-                    <td className={TD}>
-                      {c.program ? (
-                        <span className="inline-flex items-center rounded-full bg-[#e4f0f5] px-2 py-0.5 text-[10.5px] font-bold uppercase tracking-wide text-status-info">
-                          {c.program}
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )}
-                    </td>
-                    <td className={`${TD} text-muted-foreground`}>{c.dos ?? '—'}</td>
-                    <td className={`${TD} text-right`}>
-                      <span
-                        className={['q-pctcell', bucketClass(bucket), 'inline-flex items-center gap-1.5 rounded px-2 py-0.5 tabular-nums font-semibold'].join(' ')}
-                        title={
-                          c.confidence === 'estimate'
-                            ? CONFIDENCE_LEGEND.captions.estimate
-                            : c.confidence === 'unknown'
-                              ? CONFIDENCE_LEGEND.captions.unknown
-                              : "Colored by this case's % allowed of billed"
-                        }
-                      >
-                        <span className="q-dot inline-block h-2 w-2 rounded-full" />
-                        {pct === null ? '—' : c.confidence === 'estimate' ? `~${Math.round(pct)}%` : `${Math.round(pct)}%`}
-                      </span>
-                      {c.confidence === 'estimate' ? (
-                        <span className="block text-[10px] leading-tight text-ink400">estimate · reversals</span>
-                      ) : null}
-                      {c.confidence === 'unknown' ? (
-                        <span className="block text-[10px] leading-tight text-ink400">no allowed on file</span>
-                      ) : null}
-                    </td>
-                    {hasAmounts ? (
-                      <td className={`${TD} text-right tabular-nums`}>{c.billedAmount === null ? '—' : usd0(c.billedAmount)}</td>
-                    ) : null}
-                    {hasAmounts ? (
-                      <td className={`${TD} text-right tabular-nums`}>{c.allowedAmount === null ? '—' : usd0(c.allowedAmount)}</td>
-                    ) : null}
-                  </tr>
-                );
-              })
+              // ONE row per patient (multi-claim patients get the expandable group row; single-claim
+              // patients render as plain claim rows). Presentation-only over the server's claim page.
+              groups.map((g) => renderGroup(g))
             )}
           </tbody>
         </table>

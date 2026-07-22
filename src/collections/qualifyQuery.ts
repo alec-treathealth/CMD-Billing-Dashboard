@@ -55,6 +55,9 @@ export interface QualifyFacilityRow {
 }
 export interface QualifyClaimRow {
   id: number; // rollup id of THIS charge — drives the audited reveal join
+  /** Opaque keyed-HMAC member token — SERVER-SIDE ONLY: the core collapses it to a per-response
+   *  ordinal patientKey and NEVER forwards it to the client (wire-tested in qualifyCore.test.ts). */
+  member_id_bidx: string | null;
   facility: string;
   facility_name: string | null;
   primary_payer: string | null; // THIS claim's primary_payer (non-PHI); the payer chip/label
@@ -275,6 +278,9 @@ export function buildFacilityCasesQuery(
     prefixToken?: string | null;
     /** Opaque member_id_bidx token (already HMAC'd upstream) — adds an EXACT member-id narrow (wins over prefix). */
     memberToken?: string | null;
+    /** Opaque group_number_bidx token (already HMAC'd upstream) — EXACT group-number narrow (the employer
+     *  proxy; Phase 2). Composable: ANDs with the member narrows rather than competing with them. */
+    groupToken?: string | null;
     /** Forward keyset cursor (previous page's {lastDos, id}); null/omitted = first page. */
     cursor?: { lastDos: string | null; id: number } | null;
     /** Page size; the query OVER-FETCHES by one (binds limit+1) so the caller computes hasMore, not a count. */
@@ -304,10 +310,14 @@ export function buildFacilityCasesQuery(
     : opts.prefixToken
       ? ` and member_id_prefix_bidx = ${add(opts.prefixToken)}`
       : '';
+  // Group-number narrow (EXACT; the employer proxy) — independent of the member narrow, so both can apply.
+  const grpCond = opts.groupToken ? ` and group_number_bidx = ${add(opts.groupToken)}` : '';
   // CLAIM GRAIN: one row per charge (the 0050 rollup is already charge-grain, so no aggregation) — the outer
   // GROUP BY agg.id only collapses FACILITY_DIM_JOINS fan-out (facility_name is not unique-constrained).
   const inner =
-    'select id, facility, primary_payer, ' +
+    // member_id_bidx rides to the SERVER CORE only (per-response patientKey aliasing) — the token is
+    // dropped in assembleClaims and never reaches the client (wire-tested).
+    'select id, member_id_bidx, facility, primary_payer, ' +
     "to_char(charge_date, 'YYYY-MM-DD') as dos, " +
     // 0059 repoint ②: per-claim allowed = the materialized tiered `allowed_reliable` (a value CMD
     // actually adjudicated — never the restatement-summed netted total this read before), and pct =
@@ -322,7 +332,8 @@ export function buildFacilityCasesQuery(
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
     `where business_entity_id = any(${e}::uuid[])${payerCond} and facility = ${fac} ` +
     `and payment_received >= ${f}::date and payment_received < ${t}::date` +
-    idCond;
+    idCond +
+    grpCond;
   // Keyset pagination (OUTER WHERE on the agg subquery). DESC order ⇒ walk STRICTLY past the cursor, ties
   // broken by the globally-unique charge id, and the NULLS-LAST tail handled explicitly so the walk never
   // stalls. `agg.dos` is 'YYYY-MM-DD' text (lexical == chronological).
@@ -343,14 +354,14 @@ export function buildFacilityCasesQuery(
   // `agg` alias so FACILITY_DIM_JOINS (which references agg.facility) applies unchanged. ORDER BY the
   // DISPLAYED per-claim date (dos = charge_date) so the list reads in the order it shows.
   const sql =
-    'select agg.id, agg.facility, agg.primary_payer, ' +
+    'select agg.id, agg.member_id_bidx, agg.facility, agg.primary_payer, ' +
     'coalesce(max(f.facility_name), agg.facility) as facility_name, ' +
     'max(f.care_setting) as program, ' +
     'agg.dos, agg.pct_allowed, agg.billed, agg.allowed, agg.allowed_tier ' +
     `from (${inner}) agg ` +
     FACILITY_DIM_JOINS +
     keyset +
-    'group by agg.id, agg.facility, agg.primary_payer, agg.dos, agg.pct_allowed, agg.billed, agg.allowed, agg.allowed_tier ' +
+    'group by agg.id, agg.member_id_bidx, agg.facility, agg.primary_payer, agg.dos, agg.pct_allowed, agg.billed, agg.allowed, agg.allowed_tier ' +
     `order by agg.dos desc nulls last, agg.id desc limit ${lim}`;
   return { sql, params };
 }

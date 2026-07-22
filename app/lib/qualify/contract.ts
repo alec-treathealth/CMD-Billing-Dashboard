@@ -44,8 +44,12 @@ export interface QualifyFacilityCasesInput {
    *  the raw term is never logged/URL'd. Mutually exclusive in practice; when both arrive, `memberId` (exact)
    *  wins. A term mapping to a different payer returns 0 rows by design.
    *   - `prefix`  : leading ≤3-char alpha prefix  → member_id_prefix_bidx  (the STARTS-WITH narrow).
-   *   - `memberId`: a full member-id term (exact) → member_id_bidx         (claims for that member only). */
-  filter?: { prefix?: string; memberId?: string };
+   *   - `memberId`: a full member-id term (exact) → member_id_bidx         (claims for that member only).
+   *   - `group`   : a group-number term (EXACT — the employer PROXY; real employer names do not exist
+   *                 in this data) → group_number_bidx. No prefix variant: only the exact group blind
+   *                 index is materialized (0036/0059); a prefix index would be its own migration.
+   *                 Composable with the member narrows (ANDed). */
+  filter?: { prefix?: string; memberId?: string; group?: string };
   /** Forward keyset cursor for page N>0 (null/omitted = first page). Carries no PHI — see QualifyCasesCursor. */
   cursor?: QualifyCasesCursor | null;
   /** ALL-PAYERS facility view (mobile detail sheet): when true, the drill drops the `primary_payer = $payer`
@@ -155,6 +159,12 @@ export interface QualifyClaim {
    *  the raw tier never reaches the client). NON-DOLLAR: renders for admissions_seat. Drives the
    *  confidence-first %-allowed tint: estimate is NEVER green regardless of its number. */
   confidence: QualifyConfidence;
+  /** PER-RESPONSE patient ordinal (1, 2, 3… in first-seen order), minted server-side from the
+   *  blind index WHICH NEVER LEAVES THE SERVER. Two claims share a patientKey iff they belong to
+   *  the same member WITHIN THIS RESPONSE; keys are NOT stable across responses/pages by design
+   *  (a stable cross-response key would be a linkage exposure). Non-PHI. Drives the client-side
+   *  one-row-per-patient grouping only. */
+  patientKey: number;
 }
 
 export const QUALIFY_TENANT_SCOPE = 'cross-tenant-bxr-indigo' as const;

@@ -64,6 +64,9 @@ export interface QualifyDeps {
   requirePrincipal: () => Promise<QualifyPrincipal>;
   /** Mint the opaque blind-index token (may throw if the key is unavailable → caught as "unavailable"). */
   mintToken: (query: string, kind: QualifyMatchKind) => string | null;
+  /** Mint the EXACT group-number blind index (the employer proxy, Phase 2). Same key discipline as
+   *  mintToken; null when the term normalizes to nothing. */
+  mintGroupToken: (raw: string) => string | null;
   resolvePayer: (token: string, kind: QualifyMatchKind, entityIds: string[]) => Promise<string | null>;
   loadFacilities: (payer: string, from: string, to: string, entityIds: string[]) => Promise<QualifyFacilityRow[]>;
   /** Fix A: raw facility of the searched identifier's most-recent in-window claim under the payer (or null). */
@@ -81,7 +84,7 @@ export interface QualifyDeps {
     from: string,
     to: string,
     entityIds: string[],
-    opts: { prefixToken: string | null; memberToken: string | null; cursor: QualifyCasesCursor | null; limit: number; allPayers?: boolean },
+    opts: { prefixToken: string | null; memberToken: string | null; groupToken: string | null; cursor: QualifyCasesCursor | null; limit: number; allPayers?: boolean },
   ) => Promise<QualifyClaimRow[]>;
   loadMovers: (
     thisFrom: string,
@@ -185,8 +188,22 @@ function assembleFacilities(rows: QualifyFacilityRow[]): QualifyFacility[] {
 }
 
 function assembleClaims(rows: QualifyClaimRow[]): QualifyClaim[] {
+  // PER-RESPONSE patient aliasing: first-seen ordinal per member_id_bidx. The opaque token itself
+  // NEVER leaves this function (wire-tested); a null/absent bidx gets its own singleton key so no
+  // two unknown-member claims ever merge into a fake patient.
+  const aliasByToken = new Map<string, number>();
+  let nextAlias = 0;
+  const aliasOf = (bidx: string | null): number => {
+    if (bidx === null) return ++nextAlias; // singleton — never grouped
+    const existing = aliasByToken.get(bidx);
+    if (existing !== undefined) return existing;
+    nextAlias += 1;
+    aliasByToken.set(bidx, nextAlias);
+    return nextAlias;
+  };
   return rows.map((r) => ({
     id: r.id,
+    patientKey: aliasOf(r.member_id_bidx),
     memberIdMasked: QUALIFY_MEMBER_ID_MASK,
     payerName: r.primary_payer, // non-PHI; the SAME rollup column the payer card resolves on (no re-lookup)
     facilityName: r.facility_name ?? r.facility,
@@ -366,14 +383,24 @@ export async function getQualifyFacilityCasesCore(
   } catch {
     throw new Error('Qualify search is temporarily unavailable.'); // key/config error, never PHI
   }
+  // Group-number narrow (EXACT — the employer proxy; Phase 2). Independent of the member narrow
+  // (ANDed in SQL). Same mint discipline: server-side, opaque, raw term never logged.
+  const groupTerm = (input.filter?.group ?? '').trim();
+  let groupToken: string | null = null;
+  try {
+    if (groupTerm !== '' && groupTerm.length <= 40) groupToken = deps.mintGroupToken(groupTerm);
+  } catch {
+    throw new Error('Qualify search is temporarily unavailable.'); // key/config error, never PHI
+  }
 
-  // Narrowing a payer to one facility is a distinct, more-granular access → its own audit action. When an
-  // identifier narrow is actually applied, record the FIELD NAME only (never the term/token).
+  // Narrowing a payer to one facility is a distinct, more-granular access → its own audit action. When a
+  // narrow is actually applied, record the FIELD NAME(S) only (never the term/token).
+  const narrowFields = [...(narrowField ? [narrowField] : []), ...(groupToken ? ['group_number'] : [])];
   await deps.recordAccess({
     actorEmail: gate.actor.email,
     actorUserId: gate.actor.userId,
     action: SEARCH_QUALIFY_FACILITY,
-    detail: { payer, facility, window: windowDays, ...(narrowField ? { fields: [narrowField] } : {}) },
+    detail: { payer, facility, window: windowDays, ...(narrowFields.length ? { fields: narrowFields } : {}) },
   });
 
   // All-payers (mobile) loads ONE larger page with no cursor — the sheet groups + filters client-side. The
@@ -386,6 +413,7 @@ export async function getQualifyFacilityCasesCore(
   const claimRows = await deps.loadFacilityCases(payer, facility, from, to, gate.entityIds, {
     prefixToken,
     memberToken,
+    groupToken,
     cursor,
     limit: pageSize,
     allPayers,

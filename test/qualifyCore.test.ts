@@ -31,7 +31,7 @@ const FAC_ROWS = [
   { facility: '405 recovery', facility_name: '405 RECOVERY', facility_code: '10026460', care_setting: 'OP' as const, line_count: 400, confirmed_claims: 380, estimate_claims: 15, unknown_claims: 5, billed: B2, allowed: A2, pct_allowed: 55 }, // Indigo, solid mid pct
 ];
 const CASE_ROWS = [
-  { id: 123, facility: '405 recovery', facility_name: '405 RECOVERY', primary_payer: 'AETNA', program: 'OP' as const, dos: '2026-07-01', pct_allowed: 80, billed: CB, allowed: CA, allowed_tier: 'cd' },
+  { id: 123, member_id_bidx: 'BIDX_A', facility: '405 recovery', facility_name: '405 RECOVERY', primary_payer: 'AETNA', program: 'OP' as const, dos: '2026-07-01', pct_allowed: 80, billed: CB, allowed: CA, allowed_tier: 'cd' },
 ];
 const MOVER_ROWS = [
   { primary_payer: 'AETNA', this_patients: 40, prior_patients: 10, delta_patients: 30 },
@@ -67,6 +67,7 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
   return {
     requirePrincipal: async () => principal(),
     mintToken: () => 'HMAC_TOKEN', // never the raw query
+    mintGroupToken: () => 'GROUP_HMAC_TOKEN', // never the raw group #
     resolvePayer: async () => 'AETNA',
     loadFacilities: async (_p, _f, _t, entityIds) => {
       c.facilityEntityIds.push(entityIds);
@@ -503,7 +504,7 @@ test('facility-drill: EXACT member wins when both memberId + prefix are supplied
 // The loader fake honors the `member_id_prefix_bidx = $tok` equality the real builder emits (a keyed HMAC:
 // distinct per prefix), so a W29 search can only match W29* rows — proving W27/W23 never bleed through.
 const prefixRow = (id: number): QualifyClaimRow => ({
-  id, facility: 'shared facility', facility_name: 'SHARED', primary_payer: 'AETNA', program: 'OP' as const,
+  id, member_id_bidx: `PBIDX_${id}`, facility: 'shared facility', facility_name: 'SHARED', primary_payer: 'AETNA', program: 'OP' as const,
   dos: `2026-07-${String(id).padStart(2, '0')}`, pct_allowed: 50, billed: 100, allowed: 50, allowed_tier: 'cd',
 });
 const PREFIX_OF = new Map<number, string>([[1, 'W29'], [2, 'W29'], [3, 'W27'], [4, 'W23']]);
@@ -567,6 +568,7 @@ test('facility-drill pagination: a single-row result → hasMore false, nextCurs
 // real builder) so the CORE's cursor→nextCursor→trim→hasMore threading is exercised end to end.
 const WALK_ROWS: QualifyClaimRow[] = Array.from({ length: 35 }, (_, i) => ({
   id: 1000 - i, // strictly descending → matches `id desc` within the pre-sorted array
+  member_id_bidx: 'WALKER',
   facility: '405 recovery',
   facility_name: '405 RECOVERY',
   primary_payer: 'AETNA',
@@ -637,4 +639,44 @@ test('qualifyWindowBounds: anchors to the business (Pacific) calendar day, not t
   assert.equal(evening.to, '2026-07-18');
   assert.equal(evening.from, '2026-06-18');
   assert.equal(evening.priorFrom, '2026-05-19');
+});
+
+// ── Phase 2: group-# narrow threading + per-response patientKey aliasing ─────────────────────────────
+test('facility-drill: filter.group mints server-side, threads the TOKEN, audits the FIELD NAME only', async () => {
+  const c = cap();
+  let seenGroupToken: string | null | undefined;
+  const deps = makeDeps(SUPER, c, {
+    loadFacilityCases: async (_p, _f, _from, _to, _e, opts) => {
+      seenGroupToken = opts.groupToken;
+      return CASE_ROWS;
+    },
+  });
+  const res = await getQualifyFacilityCasesCore(deps, { ...FAC_CASES_IN, filter: { group: 'GRP42' } });
+  assert.equal(seenGroupToken, 'GROUP_HMAC_TOKEN', 'only the minted token reaches the loader');
+  const audit = c.audits.find((a) => a.action === SEARCH_QUALIFY_FACILITY)!;
+  assert.deepEqual(audit.detail.fields, ['group_number'], 'audit carries the field NAME, never the term/token');
+  assert.ok(!JSON.stringify(res).includes('GRP42'), 'the raw group term never appears on the wire');
+});
+
+test('facility-drill: patientKey aliases same-member rows per response; the bidx NEVER reaches the wire', async () => {
+  const rows = [
+    { ...CASE_ROWS[0]!, id: 1, member_id_bidx: 'TOK_X' },
+    { ...CASE_ROWS[0]!, id: 2, member_id_bidx: 'TOK_Y' },
+    { ...CASE_ROWS[0]!, id: 3, member_id_bidx: 'TOK_X' },
+    { ...CASE_ROWS[0]!, id: 4, member_id_bidx: null },
+    { ...CASE_ROWS[0]!, id: 5, member_id_bidx: null },
+  ];
+  const res = await getQualifyFacilityCasesCore(
+    makeDeps(SUPER, cap(), { loadFacilityCases: async () => rows }),
+    FAC_CASES_IN,
+  );
+  const keys = res.claims.map((cl) => cl.patientKey);
+  assert.equal(keys[0], keys[2], 'same bidx → same per-response patientKey (the grouping key)');
+  assert.notEqual(keys[0], keys[1], 'different bidx → different key');
+  assert.notEqual(keys[3], keys[4], 'null-bidx rows are singletons — never merged into a fake patient');
+  const wire = JSON.stringify(res);
+  assert.ok(
+    !wire.includes('TOK_X') && !wire.includes('TOK_Y') && !wire.includes('member_id_bidx'),
+    'the opaque token AND its field name never reach the client',
+  );
 });

@@ -18,7 +18,7 @@ import {
   revealCmdExplorerRow,
   revealCmdExplorerRows,
 } from '@/lib/server';
-import { memberIdBlindIndex, alphaPrefixBlindIndex } from '../../../src/collections/blindIndex';
+import { memberIdBlindIndex, alphaPrefixBlindIndex, groupNumberBlindIndex } from '../../../src/collections/blindIndex';
 import {
   getQualifySnapshotCore,
   getQualifySnapshotByPayerCore,
@@ -43,6 +43,7 @@ import type {
 const realDeps: QualifyDeps = {
   requirePrincipal: requireQualifyPrincipal,
   mintToken: (query, kind) => (kind === 'prefix' ? alphaPrefixBlindIndex(query) : memberIdBlindIndex(query)),
+  mintGroupToken: (raw) => groupNumberBlindIndex(raw),
   resolvePayer: resolveQualifyPayer,
   loadFacilities: loadQualifyFacilities,
   loadIdentifierLandingFacility: loadQualifyIdentifierLandingFacility,

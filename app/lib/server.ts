@@ -1996,6 +1996,7 @@ export async function loadQualifyFacilityCases(
   opts: {
     prefixToken: string | null;
     memberToken: string | null;
+    groupToken: string | null;
     cursor: { lastDos: string | null; id: number } | null;
     limit: number;
     allPayers?: boolean;

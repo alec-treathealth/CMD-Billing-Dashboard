@@ -25,6 +25,9 @@ export interface QualifyCohort {
   window: QualifyWindowDays;
   /** APPLIED member-ID prefix narrow (STARTS-WITH). '' = no narrow. Cleared ONLY by RESOLVE_PAYER. */
   prefix: string;
+  /** APPLIED group-number narrow (EXACT — the employer proxy; Phase 2). '' = no narrow. Cleared ONLY by
+   *  RESOLVE_PAYER, symmetric with `prefix` (facility/window changes keep it). */
+  group: string;
   /** 0-based page index into the cursor stack. */
   page: number;
   /** cursors[p] = the keyset cursor that fetches page p; cursors[0] is always null (the first page). */
@@ -43,6 +46,8 @@ export type QualifyCohortAction =
   | { type: 'CHANGE_WINDOW'; window: QualifyWindowDays }
   /** Apply a new prefix narrow (explicit Enter). Keeps payer + facility + window. */
   | { type: 'CHANGE_PREFIX'; prefix: string }
+  /** Apply a new group-number narrow (explicit Enter). Keeps payer + facility + window + prefix. */
+  | { type: 'CHANGE_GROUP'; group: string }
   /** Pager forward: advance one page, pushing the cursor that fetches it. The only step that grows the stack. */
   | { type: 'PAGE_NEXT'; nextCursor: QualifyCasesCursor | null }
   /** Pager back: step back one page in the SAME stack (the target page's cursor is already stored). */
@@ -54,6 +59,7 @@ export const INITIAL_COHORT: QualifyCohort = {
   facility: null,
   window: 30,
   prefix: '',
+  group: '',
   page: 0,
   cursors: [null],
 };
@@ -73,7 +79,7 @@ function resetPaging(base: QualifyCohort): QualifyCohort {
  * (not a delimiter join) so a payer/facility label containing spaces or pipes can't forge a key collision.
  */
 export function cohortKey(c: QualifyCohort): string {
-  return JSON.stringify([c.payer, c.facility, c.window, c.prefix]);
+  return JSON.stringify([c.payer, c.facility, c.window, c.prefix, c.group]);
 }
 
 export function cohortReducer(state: QualifyCohort, action: QualifyCohortAction): QualifyCohort {
@@ -87,6 +93,7 @@ export function cohortReducer(state: QualifyCohort, action: QualifyCohortAction)
         facility: action.facility,
         window: action.window,
         prefix: action.prefix ?? '',
+        group: '', // new cohort — the group narrow resets with the prefix
       });
     case 'SWITCH_FACILITY':
       // Same payer, new facility: keep window + prefix, reset paging.
@@ -97,6 +104,9 @@ export function cohortReducer(state: QualifyCohort, action: QualifyCohortAction)
     case 'CHANGE_PREFIX':
       // Same payer + facility + window: set the applied prefix, reset paging.
       return resetPaging({ ...state, prefix: action.prefix });
+    case 'CHANGE_GROUP':
+      // Same payer + facility + window + prefix: set the applied group narrow, reset paging.
+      return resetPaging({ ...state, group: action.group });
     case 'PAGE_NEXT': {
       // Forward one page; record the cursor that fetches it (= the prior page's nextCursor). Stack preserved.
       const page = state.page + 1;

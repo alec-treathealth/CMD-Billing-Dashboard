@@ -145,7 +145,10 @@ test('buildFacilityCasesQuery: claim grain (NO member_id_bidx dedup), raw-facili
   assert.ok(!/group by member_id_bidx/.test(sql), 'NO member_id_bidx dedup — claim grain');
   assert.ok(!/array_agg/.test(sql), 'no per-patient latest-charge collapse — each claim is its own row');
   assert.match(sql, /to_char\(charge_date, 'YYYY-MM-DD'\) as dos/, 'per-claim DOS = the charge_date (not a max)');
-  assert.ok(!/agg\.member_id_bidx/.test(sql), 'the blind index is NOT projected to the caller');
+  // Phase 2: member_id_bidx IS projected — to the SERVER CORE only (patientKey aliasing; wire-tested
+  // in qualifyCore.test.ts that it never reaches the client). It must never be a bare predicate here
+  // beyond the explicit identifier narrows tested below.
+  assert.match(sql, /agg\.member_id_bidx/, 'bidx projected for the server-side patient aliasing');
   assert.match(sql, /care_setting\) as program/, 'program := resolved care_setting');
   assert.match(sql, /order by agg\.dos desc nulls last/, 'ordered by the per-claim DOS');
   // 0059 repoint ②: per-claim allowed/pct come from the materialized tiered columns.
@@ -164,7 +167,7 @@ test('buildFacilityCasesQuery: claim grain (NO member_id_bidx dedup), raw-facili
   assert.equal(params[5], QUALIFY_CASES_LIMIT + 1, 'over-fetches by one (limit+1) so the caller computes hasMore');
   assert.deepEqual(params.slice(0, 5), [BOTH, 'AETNA', '405 recovery', '2026-06-17', '2026-07-17']);
   // No filter / no cursor by default: no identifier predicate, no outer keyset WHERE.
-  assert.ok(!sql.includes('member_id_prefix_bidx') && !sql.includes('member_id_bidx'), 'no identifier predicate when none supplied');
+  assert.ok(!/member_id_prefix_bidx = /.test(sql) && !/member_id_bidx = /.test(sql), 'no identifier PREDICATE when none supplied (projection is fine)');
   assert.ok(!/agg\.dos </.test(sql) && !/agg\.dos is null and agg\.id </.test(sql), 'no keyset WHERE on page 0');
 });
 
@@ -258,4 +261,22 @@ test('buildMoversQuery: suppression floor is clamped — a caller can only make 
     minPatients: 20,
   });
   assert.equal(strict.params[5], 20, 'a stricter floor is honored');
+});
+
+// ── Phase 2: the EXACT group-number narrow (the employer proxy) — composable, opaque-token-only ──────
+test('buildFacilityCasesQuery: a group token adds an EXACT group_number_bidx predicate, composable with the member narrow', () => {
+  const only = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
+    groupToken: TOKEN,
+  });
+  assert.match(only.sql, /and group_number_bidx = \$6/, 'group narrow is an exact bidx equality');
+  assert.equal(only.params[5], TOKEN, 'opaque token bound (never the raw group #)');
+
+  const both = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
+    prefixToken: 'b'.repeat(64),
+    groupToken: TOKEN,
+  });
+  assert.match(both.sql, /member_id_prefix_bidx = \$6 and group_number_bidx = \$7/, 'ANDs with the member narrow — composable, not competing');
+
+  const none = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH);
+  assert.ok(!/group_number_bidx = /.test(none.sql), 'no group predicate when no token');
 });
