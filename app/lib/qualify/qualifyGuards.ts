@@ -66,13 +66,23 @@ export function identifierEmptyTerm(resolved: QualifyResolved | null): string {
   return resolved!.matchedOn === 'prefix' && resolved!.matchedValue ? resolved!.matchedValue : 'this member';
 }
 
-/** Fix A (mobile lead-the-deck): reorder facilities so `landingKey` leads, the rest keeping their (rating)
- *  order. No-op when landingKey is null or not present in the list (a below-floor landing never reaches here
- *  because the core nulls it, but the guard keeps this pure function total). Never mutates the input. */
-export function leadFacilities(facilities: readonly QualifyFacility[], landingKey: string | null): QualifyFacility[] {
-  if (landingKey === null) return facilities.slice();
-  const idx = facilities.findIndex((f) => f.facilityKey === landingKey);
-  if (idx <= 0) return facilities.slice(); // not present (-1) or already leading (0)
-  const lead = facilities[idx]!;
-  return [lead, ...facilities.slice(0, idx), ...facilities.slice(idx + 1)];
+/** PART A (mobile list SCOPE): decide WHICH facilities the ranked list shows for the current resolution.
+ *  Supersedes the former lead-the-deck reorder (leadFacilities) — an identifier search no longer merely
+ *  leads with the landing facility, it SCOPES to it:
+ *   - IDENTIFIER search (isIdentifierResolution) that LANDED → ONLY the landing facility (the searched
+ *     member's most-recent in-window claim facility). The search answered a specific question; the rest of
+ *     the payer's ranked set is not that answer. Honest-empty (landingKey === null) → [] — the caller's
+ *     isIdentifierEmpty branch renders the widen-window nudge, so a below-floor id never shows a random card.
+ *   - BROWSE (resolve-by-payer / matchedOn 'payer', or no resolution) → the FULL ranked list (rating order),
+ *     which the area/LOC filters + 5-up pager then operate on.
+ *  Pure + total; never mutates the input; returns a fresh array. */
+export function scopeFacilitiesForList(
+  facilities: readonly QualifyFacility[],
+  resolved: QualifyResolved | null,
+  landingKey: string | null,
+): QualifyFacility[] {
+  if (!isIdentifierResolution(resolved)) return facilities.slice(); // browse — the full ranked set
+  if (landingKey === null) return []; // identifier honest-empty — caller shows the widen-window nudge
+  const landing = facilities.find((f) => f.facilityKey === landingKey);
+  return landing ? [landing] : []; // scope to the single landing facility (guaranteed present when non-null)
 }

@@ -5,22 +5,26 @@
  * and the 5-row sliding-window swipe list; it is the only caller of getQualifySnapshot /
  * getQualifyMovers. Facilities render in the contract's rating-desc order (never re-sorted here).
  *
- * INTERACTION CONTRACT (Phase 4 — REPLACES the pass-deck): a 5-up PAGED list over the full ranked
- * set. Left-swipe → the NEXT page of 5 (non-destructive; clamps at the last page). Right-swipe →
- * that row's "why this rating" sheet (coverage breakdown included). Tap → the facility detail
- * (grouped claims). NOTHING is ever removed — the old destructive pass gesture is GONE. "Top"
- * (formerly Reset) returns to page 1 of the SAME resolved list; LOC chips (IP/OP/Both) join the
- * area chips as pure client filters (both reset the page).
+ * INTERACTION CONTRACT (Phase 4b):
+ *   - An IDENTIFIER search (member id / prefix) SCOPES the list to the searched member's landing facility
+ *     — ONE card (scopeFacilitiesForList); a payer-chip BROWSE keeps the FULL ranked list.
+ *   - The horizontal gesture lives on the LIST CONTAINER (facility-list.tsx), not per-row: the 5-up column
+ *     slides as a unit — left-swipe → next page, right-swipe → PREVIOUS page (clamped, no wrap). Paging
+ *     applies in browse mode only (the scoped single card has nothing to page).
+ *   - Tap a card → the facility detail (grouped claims). A dedicated on-card WHY control → the
+ *     why-this-rating sheet (coverage breakdown + reversals). "Top" returns to page 1 of the browse list;
+ *     LOC chips (IP/OP/Both) join the area chips as pure client filters (both reset the page). Area/LOC
+ *     chips + the pager are BROWSE affordances — hidden on the scoped identifier view.
  */
 import { useCallback, useEffect, useReducer, useRef, useState, useTransition, type ReactNode } from 'react';
 import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyMovers, revealQualifyRows } from '@/lib/qualify/actions';
 import { QUALIFY_WINDOW_OPTIONS, sniffQualifyKind } from '@/lib/qualify/contract';
 import type { QualifySnapshot, QualifyFacility, QualifyClaim, QualifyMover, QualifyWindowDays, QualifyPhi } from '@/lib/qualify/contract';
 import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
-import { resolveLandingWins, drillLandingWins, isPayerChange, leadFacilities, isIdentifierEmpty, identifierEmptyTerm } from '@/lib/qualify/qualifyGuards';
+import { resolveLandingWins, drillLandingWins, isPayerChange, scopeFacilitiesForList, isIdentifierResolution, isIdentifierEmpty, identifierEmptyTerm } from '@/lib/qualify/qualifyGuards';
 import { filterFacilitiesByLoc, type QualifyLocFilter } from '@/lib/qualify/groupClaims';
-import { pageSlice, pageCount, pageLabel, clampPage } from '@/lib/qualify/pagination';
-import { SwipeRow } from '@/components/qualify/m/swipe-row';
+import { nextPage, prevPage } from '@/lib/qualify/pagination';
+import { MobileFacilityList } from '@/components/qualify/m/facility-list';
 import { TrendSheet } from '@/components/qualify/m/trend-sheet';
 import { DetailSheet } from '@/components/qualify/m/detail-sheet';
 import { ClaimDetailSheet } from '@/components/qualify/m/claim-detail-sheet';
@@ -36,7 +40,7 @@ const INK400 = '#859794';
 
 function EmptyState({ children }: { children: ReactNode }) {
   return (
-    <div style={{ padding: '40px 0', textAlign: 'center' }}>
+    <div style={{ padding: '40px 16px', textAlign: 'center' }}>
       <div style={{ fontSize: 13, color: INK400, lineHeight: 1.5 }}>{children}</div>
     </div>
   );
@@ -167,11 +171,10 @@ export function QualifyMobileApp({
           setLocFilter(null);
         } else {
           setEcho('');
-          // Fix A: LEAD the deck with the searched identifier's most-recent-claim facility (server-computed;
-          // no-op when null / below-floor). The rest keep rating order. Honest-empty (renderBody) covers the
-          // null case, so the ordering only matters when the identifier did land.
-          const ordered = leadFacilities(snap.facilities, snap.identifierLandingFacility);
-          setList(ordered);
+          // Part A: keep the FULL ranked set in state (unmutated); the render SCOPES it to the searched
+          // identifier's landing facility (scopeFacilitiesForList) — one card. Honest-empty (renderBody)
+          // covers the null-landing case, so a below-floor id never shows a random facility.
+          setList(snap.facilities);
           setPage(0);
           setLocFilter(null);
         }
@@ -353,16 +356,23 @@ export function QualifyMobileApp({
       });
   }
 
-  // The filtered, ranked list the pages walk (lead order preserved; filters never re-sort).
-  const filteredList = filterFacilitiesByLoc(facilitiesInArea(list, areaFilter), locFilter);
-  const totalPages = pageCount(filteredList.length);
-  const safePage = clampPage(page, filteredList.length);
-  const visibleRows = pageSlice(filteredList, safePage);
+  // Part A — how the CURRENT resolution scopes the list. Mirrors `lastSearch !== null` (both set in the same
+  // resolve callback), but derives from the snapshot so it can't drift: an identifier search (matchedOn is a
+  // PHI kind) SCOPES to the landing facility; a payer BROWSE keeps the full ranked list.
+  const resolvedSnap = snapshot?.resolved ?? null;
+  const landingKey = snapshot?.identifierLandingFacility ?? null;
+  const isIdentifierPath = isIdentifierResolution(resolvedSnap);
+  const identifierEmpty = isIdentifierEmpty(resolvedSnap, landingKey); // identifier resolved, no ranked in-window claim
+  const isIdentifierScoped = isIdentifierPath && landingKey !== null; // identifier landed → ONE card, no pager/filters
+  // Browse pages + filters the full ranked set; the scoped identifier view is the single landing facility
+  // (area/LOC never apply to it). scopeFacilitiesForList returns [] on identifier-empty — renderBody's
+  // honest-empty branch shows the widen-window nudge before we ever read this list.
+  const scopedList = scopeFacilitiesForList(list, resolvedSnap, landingKey);
+  const filteredList = isIdentifierScoped ? scopedList : filterFacilitiesByLoc(facilitiesInArea(scopedList, areaFilter), locFilter);
 
-  // Left-swipe on any row: advance the WHOLE list one page of 5 (clamped — no wrap).
-  function pageNext() {
-    setPage((p) => Math.min(clampPage(p, filteredList.length) + 1, Math.max(0, totalPages - 1)));
-  }
+  // The container pager (facility-list.tsx) drives these; both clamp with no wrap in the pure helper.
+  const goNext = () => setPage((p) => nextPage(p, filteredList.length));
+  const goPrev = () => setPage((p) => prevPage(p, filteredList.length));
 
   function renderBody(): ReactNode {
     if (!searched) {
@@ -381,26 +391,39 @@ export function QualifyMobileApp({
     // Fix A honest-empty: an identifier search resolved but has no claim at any ranked in-window facility.
     // Distinct from resolved===null (VOB) above — the payer exists, the searched member just has no recent
     // in-window activity. Nudge toward a wider window. Term is the ≤3 echo, or 'this member' for an exact id.
-    if (snapshot && isIdentifierEmpty(snapshot.resolved, snapshot.identifierLandingFacility)) {
+    if (identifierEmpty) {
       return (
         <EmptyState>
           No in-window claims for{' '}
-          <span className="ths-num" style={{ color: INK900, fontWeight: 600 }}>{identifierEmptyTerm(snapshot.resolved)}</span>
+          <span className="ths-num" style={{ color: INK900, fontWeight: 600 }}>{identifierEmptyTerm(resolvedSnap)}</span>
           {' '}— try a wider window.
         </EmptyState>
       );
     }
-    if (visibleRows.length === 0) {
+    // Browse only: every facility filtered out by the area/LOC chips. The scoped identifier view always has
+    // its one landing card, so this can't trigger there.
+    if (!isIdentifierScoped && filteredList.length === 0) {
       return (
-        <div style={{ padding: '40px 0', textAlign: 'center' }}>
+        <div style={{ padding: '40px 16px', textAlign: 'center' }}>
           <div className="ths-h" style={{ fontSize: 14, fontWeight: 600, color: INK900 }}>No facilities match these filters</div>
           <div style={{ marginTop: 4, fontSize: 12, color: INK400 }}>Clear a chip or tap Top</div>
         </div>
       );
     }
-    return visibleRows.map((f) => (
-      <SwipeRow key={f.rank} facility={f} onPageNext={pageNext} onWhy={(x) => setTrend(x)} onOpen={openFacility} />
-    ));
+    // The list container owns the page gesture + the visible page + the indicator/hint; `scoped` shows the
+    // single identifier card with none of that. Tap → openFacility; the on-card WHY control → the trend sheet.
+    return (
+      <MobileFacilityList
+        facilities={filteredList}
+        page={page}
+        scoped={isIdentifierScoped}
+        dimmed={isPending}
+        onPageNext={goNext}
+        onPagePrev={goPrev}
+        onWhy={(x) => setTrend(x)}
+        onOpen={openFacility}
+      />
+    );
   }
 
   // When the CURRENT resolution came from a prefix/alpha search, the open detail sheet seeds its filter to
@@ -412,14 +435,12 @@ export function QualifyMobileApp({
       ? { term: resolvedForSheet.matchedValue, payer: resolvedForSheet.payerName }
       : null;
 
-  const showHint = visibleRows.length > 0;
   // Area chips only when a payer is resolved AND there are >=2 real buckets (>2 chips incl. "All") — a
-  // single-state payer with no unmapped facilities gets no pointless "All / CA" row.
+  // single-state payer with no unmapped facilities gets no pointless "All / CA" row. Area + LOC chips are
+  // BROWSE affordances: hidden on the identifier path (both the scoped single card and the honest-empty
+  // state), where there is nothing to filter.
   const areaChips = snapshot?.resolved ? deriveAreaChips(snapshot.facilities) : [];
-  // Hide the area chips on the honest-empty state (identifier resolved with no ranked in-window claims) — the
-  // deck isn't shown there, so a filter row above it would be dead chrome.
-  const identifierEmpty = isIdentifierEmpty(snapshot?.resolved ?? null, snapshot?.identifierLandingFacility ?? null);
-  const showAreaChips = areaChips.length > 2 && !identifierEmpty;
+  const showAreaChips = areaChips.length > 2 && !isIdentifierPath;
 
   return (
     <div style={{ minHeight: '100vh', background: GROUND }}>
@@ -487,7 +508,7 @@ export function QualifyMobileApp({
       {hint ? <div style={{ padding: '0 16px', fontSize: 12, color: '#C9881E' }}>{hint}</div> : null}
 
       {showAreaChips ? <AreaChips chips={areaChips} active={areaFilter} onSelect={onSelectArea} /> : null}
-      {snapshot?.resolved && !identifierEmpty ? (
+      {snapshot?.resolved && !isIdentifierPath ? (
         <div style={{ display: 'flex', gap: 6, padding: '8px 16px 0' }} role="group" aria-label="Level of care">
           {(['IP', 'OP', 'BOTH'] as const).map((locOpt) => {
             const active = locFilter === locOpt;
@@ -515,37 +536,9 @@ export function QualifyMobileApp({
         </div>
       ) : null}
 
-      <div style={{ position: 'relative', padding: '12px 16px 24px', display: 'flex', flexDirection: 'column', gap: 10, touchAction: 'pan-y', opacity: isPending ? 0.6 : 1, transition: 'opacity 0.15s' }}>
-        {renderBody()}
-      </div>
-
-      {showHint && totalPages > 0 ? (
-        <div style={{ textAlign: 'center', padding: '0 16px 8px' }} aria-label={`Page ${safePage + 1} of ${totalPages}`}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: INK400 }} className="ths-num">
-            {pageLabel(safePage, filteredList.length)}
-          </div>
-          {totalPages > 1 && totalPages <= 10 ? (
-            <div style={{ display: 'flex', justifyContent: 'center', gap: 5, marginTop: 6 }} aria-hidden>
-              {Array.from({ length: totalPages }, (_, i) => (
-                <span
-                  key={i}
-                  style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: 999,
-                    background: i === safePage ? TEAL900 : '#D8DFDC',
-                  }}
-                />
-              ))}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-      {showHint ? (
-        <div style={{ textAlign: 'center', fontSize: 12, color: INK400, padding: '0 16px 24px' }}>
-          Swipe left for the next 5 · right for why · tap to open
-        </div>
-      ) : null}
+      {/* The list container (facility-list.tsx) owns the page gesture, the visible page, and — in browse mode —
+          the page indicator + swipe hint. Empty states bring their own padding. */}
+      {renderBody()}
 
       {trend ? <TrendSheet facility={trend} onClose={() => setTrend(null)} /> : null}
       {detail ? (

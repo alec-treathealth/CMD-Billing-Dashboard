@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { SwipeRow } from '../components/qualify/m/swipe-row';
+import { MobileFacilityList } from '../components/qualify/m/facility-list';
 import { TrendSheet } from '../components/qualify/m/trend-sheet';
 import { DetailSheet } from '../components/qualify/m/detail-sheet';
 import { ClaimDetailSheet } from '../components/qualify/m/claim-detail-sheet';
@@ -70,21 +71,79 @@ const noReveal = {
 const PHI: QualifyPhi = { patient_name: 'DOE, JANE', member_id_raw: 'AETMEM777', group_number: 'GRP42' };
 const REVEALED = new Map<number, QualifyPhi>([[1, PHI]]);
 
-// Phase 4 NOTE — the destructive pass-deck contract is GONE: SwipeRow's left-swipe now pages the
-// list (onPageNext) and removes nothing. The old deck-interaction behaviors were NEVER mountable
-// under this harness (documented Stage-3a limit), so no async test is voided — this markup test is
-// UPDATED for the new row content (rank chip · LOC tag · coverage micro-bar), and the pass stamp
-// assertion is inverted (the "Pass" vocabulary must be gone).
-test('list row (Phase 4) — no dollars; rank + LOC tag + coverage bar render; the Pass stamp is gone', () => {
-  const html = renderToStaticMarkup(<SwipeRow facility={FAC} onPageNext={noop} onWhy={noop} onOpen={noop} />);
-  assert.ok(!html.includes('$'), 'no dollar sign in a list row');
+// Phase 4b NOTE — the per-row swipe GESTURE is retired: paging moved to the list CONTAINER
+// (facility-list.tsx). SwipeRow is a plain tappable card again (tap → open; on-card WHY control → the
+// trend sheet). The former per-row gesture was NEVER mountable under this harness (documented Stage-3a
+// limit), so no async test is voided; this markup test drops the pass/stamp assertions (stamps are gone)
+// and adds the tap-to-open + WHY-control aria-labels.
+test('list card (Phase 4b) — no dollars; rank + LOC tag + coverage bar; tap-to-open + WHY control; no swipe stamps', () => {
+  const html = renderToStaticMarkup(<SwipeRow facility={FAC} onWhy={noop} onOpen={noop} />);
+  assert.ok(!html.includes('$'), 'no dollar sign in a list card');
   for (const v of ['412,300', '251,500', '412300', '251500']) assert.ok(!html.includes(v), `dollar value ${v} must be absent`);
   assert.ok(html.includes('812 lines this window'), 'shows non-dollar volume');
   assert.ok(html.includes('>Both<'), 'careSetting renders as the LOC tag');
-  assert.ok(html.includes('Next 5'), 'left stamp reads Next 5 (paging), not Pass');
-  assert.ok(!html.includes('>Pass<'), 'the destructive pass vocabulary is gone');
+  // the per-row swipe stamps are GONE (no "Next 5" / "Pass" vocabulary — paging is a container gesture now).
+  assert.ok(!html.includes('Next 5') && !html.includes('>Pass<'), 'no per-row swipe stamps remain');
+  // Part C: the card body is the tap-to-open target; the dedicated WHY control renders with its aria-label.
+  assert.ok(html.includes('aria-label="Open MENTAL HEALTH CENTER OF SAN DIEGO claims"'), 'card body opens the detail on tap');
+  assert.ok(html.includes('aria-label="Why this rating for MENTAL HEALTH CENTER OF SAN DIEGO"'), 'the WHY control renders with its aria-label');
   assert.ok(html.includes('#2e8b6f') || html.includes('rgb(46, 139, 111)'), 'confirmed coverage segment painted');
   assert.ok(html.includes('#c9881e') || html.includes('rgb(201, 136, 30)'), 'estimate segment amber — never green');
+});
+
+// ── List container (Phase 4b) — Part A scope + Part B paging, rendered ───────────────────────────────
+// N distinct-rank facilities off the base fixture (rank drives the SwipeRow key + is unique per card).
+const facN = (n: number): QualifyFacility[] =>
+  Array.from({ length: n }, (_, i) => ({ ...FAC, rank: i + 1, name: `FAC ${i + 1}`, facilityKey: `fac-${i + 1}` }));
+const whyCount = (html: string) => (html.match(/aria-label="Why this rating for /g) || []).length;
+
+test('facility list — an identifier-search scope shows exactly ONE card, no pager / indicator / hint', () => {
+  const html = renderToStaticMarkup(
+    <MobileFacilityList
+      facilities={[{ ...FAC, rank: 4, name: 'LANDING FAC', facilityKey: 'landing' }]}
+      page={0} scoped onPageNext={noop} onPagePrev={noop} onWhy={noop} onOpen={noop}
+    />,
+  );
+  assert.equal(whyCount(html), 1, 'the scoped identifier view is a single card');
+  assert.ok(html.includes('LANDING FAC'), 'the landing facility renders');
+  assert.ok(!html.includes('Page 1 of'), 'no page indicator on the single scoped card');
+  assert.ok(!html.includes('Swipe left or right'), 'no swipe hint on the scoped view');
+});
+
+test('facility list — a payer-browse of 7 shows UP TO 5 cards + a page indicator (page 1 of 2)', () => {
+  const html = renderToStaticMarkup(
+    <MobileFacilityList
+      facilities={facN(7)} page={0} scoped={false}
+      onPageNext={noop} onPagePrev={noop} onWhy={noop} onOpen={noop}
+    />,
+  );
+  assert.equal(whyCount(html), 5, 'the 5-up window renders, not all 7');
+  assert.ok(html.includes('aria-label="Page 1 of 2"'), 'the page indicator reflects 2 pages');
+  assert.ok(html.includes('1–5 of 7'), 'the page label counts the full filtered set');
+  assert.ok(html.includes('Swipe left or right to page'), 'the browse swipe hint renders');
+});
+
+test('facility list — page 1 of a 7-list shows the remainder (cards 6–7) and the label advances', () => {
+  const html = renderToStaticMarkup(
+    <MobileFacilityList
+      facilities={facN(7)} page={1} scoped={false}
+      onPageNext={noop} onPagePrev={noop} onWhy={noop} onOpen={noop}
+    />,
+  );
+  assert.equal(whyCount(html), 2, 'the last page carries the 2-card remainder');
+  assert.ok(html.includes('aria-label="Page 2 of 2"') && html.includes('6–7 of 7'), 'the indicator + label reflect the second page');
+});
+
+test('facility list — a short browse list (<=5) shows every card and NO swipe hint (single page)', () => {
+  const html = renderToStaticMarkup(
+    <MobileFacilityList
+      facilities={facN(3)} page={0} scoped={false}
+      onPageNext={noop} onPagePrev={noop} onWhy={noop} onOpen={noop}
+    />,
+  );
+  assert.equal(whyCount(html), 3);
+  assert.ok(!html.includes('Swipe left or right'), 'no swipe hint when there is only one page');
+  assert.ok(html.includes('1–3 of 3'), 'the single-page label still shows the count');
 });
 
 test('trend sheet markup carries NO dollar values (percent + lines only)', () => {

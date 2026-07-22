@@ -17,7 +17,7 @@ import {
   isIdentifierResolution,
   isIdentifierEmpty,
   identifierEmptyTerm,
-  leadFacilities,
+  scopeFacilitiesForList,
 } from '../app/lib/qualify/qualifyGuards.js';
 import { cohortKey, cohortReducer, INITIAL_COHORT } from '../app/lib/qualify/qualifyCohort.js';
 import type { QualifyFacility, QualifyResolved } from '../app/lib/qualify/contract.js';
@@ -118,14 +118,46 @@ const fac = (key: string, rank: number): QualifyFacility => ({
 });
 const DECK = [fac('a', 1), fac('b', 2), fac('c', 3)];
 
-test('leadFacilities: moves the landing facility to the front, preserving the rest in order', () => {
-  assert.deepEqual(leadFacilities(DECK, 'c').map((f) => f.facilityKey), ['c', 'a', 'b'], 'landing leads, rest keep rating order');
-  assert.deepEqual(leadFacilities(DECK, 'a').map((f) => f.facilityKey), ['a', 'b', 'c'], 'already-leading → unchanged');
+// Part A — scopeFacilitiesForList (replaces leadFacilities: an identifier search now SCOPES to the landing
+// facility rather than merely leading with it). Browse keeps the full ranked list.
+test('scopeFacilitiesForList: an identifier search that LANDED shows ONLY the landing facility', () => {
+  assert.deepEqual(
+    scopeFacilitiesForList(DECK, resolved({ matchedOn: 'prefix' }), 'c').map((f) => f.facilityKey),
+    ['c'],
+    'prefix search + landing → the single landing card, not the full ranked set',
+  );
+  assert.deepEqual(
+    scopeFacilitiesForList(DECK, resolved({ matchedOn: 'member_id' }), 'a').map((f) => f.facilityKey),
+    ['a'],
+    'exact member-id search scopes the same way',
+  );
 });
 
-test('leadFacilities: null landing or a not-present key → unchanged order (and never mutates the input)', () => {
+test('scopeFacilitiesForList: identifier honest-empty (null landing) → [] (caller shows the widen nudge, never a random card)', () => {
+  assert.deepEqual(scopeFacilitiesForList(DECK, resolved({ matchedOn: 'prefix' }), null), []);
+  assert.deepEqual(scopeFacilitiesForList(DECK, resolved({ matchedOn: 'member_id' }), null), []);
+});
+
+test('scopeFacilitiesForList: BROWSE (payer path / no resolution) → the FULL ranked list, order preserved', () => {
+  assert.deepEqual(
+    scopeFacilitiesForList(DECK, resolved({ matchedOn: 'payer' }), null).map((f) => f.facilityKey),
+    ['a', 'b', 'c'],
+    'resolve-by-payer keeps the full ranked set',
+  );
+  assert.deepEqual(
+    scopeFacilitiesForList(DECK, null, null).map((f) => f.facilityKey),
+    ['a', 'b', 'c'],
+    'no resolution → full set (never scoped)',
+  );
+  assert.equal(
+    scopeFacilitiesForList(DECK, resolved({ matchedOn: 'payer' }), 'c').length,
+    3,
+    'the payer path never scopes even if a landing key is somehow present',
+  );
+});
+
+test('scopeFacilitiesForList: a landing key absent from the list → [] (never a wrong card); input untouched', () => {
   const frozen = DECK.map((f) => f.facilityKey);
-  assert.deepEqual(leadFacilities(DECK, null).map((f) => f.facilityKey), ['a', 'b', 'c']);
-  assert.deepEqual(leadFacilities(DECK, 'ghost').map((f) => f.facilityKey), ['a', 'b', 'c'], 'a below-floor/absent key never reorders');
+  assert.deepEqual(scopeFacilitiesForList(DECK, resolved({ matchedOn: 'prefix' }), 'ghost'), []);
   assert.deepEqual(DECK.map((f) => f.facilityKey), frozen, 'input array untouched');
 });

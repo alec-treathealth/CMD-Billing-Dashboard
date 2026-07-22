@@ -18,6 +18,18 @@ export function clampPage(page: number, total: number, size: number = QUALIFY_MO
   return Math.min(Math.floor(page), n - 1);
 }
 
+/** Advance one page toward the end, clamped to the LAST page — NO wrap (a left-swipe past the end is a
+ *  no-op; the gesture rubber-bands). The container-pager gesture (Phase 4b) calls this on a left-swipe. */
+export function nextPage(page: number, total: number, size: number = QUALIFY_MOBILE_PAGE_SIZE): number {
+  return clampPage(clampPage(page, total, size) + 1, total, size);
+}
+
+/** Step one page toward the start, floored at page 0 — NO wrap (a right-swipe on page 0 is a no-op).
+ *  The container-pager gesture calls this on a right-swipe (right = PREVIOUS page, not "why"). */
+export function prevPage(page: number, total: number, size: number = QUALIFY_MOBILE_PAGE_SIZE): number {
+  return clampPage(clampPage(page, total, size) - 1, total, size);
+}
+
 export function pageSlice<T>(list: readonly T[], page: number, size: number = QUALIFY_MOBILE_PAGE_SIZE): T[] {
   const p = clampPage(page, list.length, size);
   return list.slice(p * size, p * size + size);
