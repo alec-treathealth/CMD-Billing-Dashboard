@@ -2,9 +2,11 @@
 
 /**
  * Qualify — recent CLAIMS table (claim grain). The most-recent claims for the resolved payer at the
- * selected facility, grouped by patient. RULING (settled): the MAIN top-bar search is the ONE place an
- * identifier is ever typed — it LANDS on the searched member's facility (Fix A), and this panel is a
- * PURE DISPLAY of that facility (the searched member present in context among its patients).
+ * selected facility, grouped by patient. SORT/COLUMNS: the panel windows AND sorts on PAYMENT date
+ * (payment_received) — both the Payment date and DOS (service date) columns render so the order reads
+ * plainly (the sort axis is visible, not implied). RULING (settled): the MAIN top-bar search is the ONE
+ * place an identifier is ever typed — it LANDS on the searched member's facility (Fix A), and this panel
+ * is a PURE DISPLAY of that facility (the searched member present in context among its patients).
  *
  * PHI reveal: masked by default; a SINGLE parent-owned header toggle ("Reveal all" ⇄ "Hide
  * identifiers") unmasks Patient / Member ID / Group # for every row at once (parity with the
@@ -103,7 +105,7 @@ export function CasesTable({
    *  payer-wide copy. NON-PHI (a ≤3 prefix echo, or 'this member' for an exact search). Null = payer-path copy. */
   emptyIdentifierLabel?: string | null;
 }) {
-  const colSpan = 7 + (hasAmounts ? 2 : 0);
+  const colSpan = 8 + (hasAmounts ? 2 : 0); // Patient·Member·Group·Facility·Program·Payment date·DOS·%allowed (+Billed·Allowed)
   // Patient groups expanded to their day-by-day claims (collapsed by default; per-response keys).
   const [expandedPatients, setExpandedPatients] = useState<ReadonlySet<number>>(new Set());
   const togglePatient = (key: number) =>
@@ -173,10 +175,11 @@ export function CasesTable({
             <span className="text-muted-foreground">—</span>
           )}
         </td>
+        <td className={`${TD} whitespace-nowrap text-muted-foreground`}>{c.paymentDate ?? '—'}</td>
         <td className={`${TD} whitespace-nowrap text-muted-foreground`}>{c.dos ?? '—'}</td>
-        <td className={`${TD} text-right`}>
+        <td className={`${TD} min-w-[116px] text-right`}>
           <span
-            className={['q-pctcell', bucketClass(bucket), 'inline-flex items-center gap-1.5 rounded px-2 py-0.5 tabular-nums font-semibold'].join(' ')}
+            className={['q-pctcell', bucketClass(bucket), 'inline-flex items-center gap-1.5 whitespace-nowrap rounded px-2 py-0.5 tabular-nums font-semibold'].join(' ')}
             title={
               c.confidence === 'estimate'
                 ? CONFIDENCE_LEGEND.captions.estimate
@@ -260,10 +263,11 @@ export function CasesTable({
               <span className="text-muted-foreground">—</span>
             )}
           </td>
+          <td className={`${TD} whitespace-nowrap text-muted-foreground`}>{first.paymentDate ?? '—'}</td>
           <td className={`${TD} whitespace-nowrap text-muted-foreground`}>{first.dos ?? '—'}</td>
-          <td className={`${TD} text-right`}>
+          <td className={`${TD} min-w-[116px] text-right`}>
             <span
-              className={['q-pctcell', bucketClass(bucket), 'inline-flex items-center gap-1.5 rounded px-2 py-0.5 tabular-nums font-semibold'].join(' ')}
+              className={['q-pctcell', bucketClass(bucket), 'inline-flex items-center gap-1.5 whitespace-nowrap rounded px-2 py-0.5 tabular-nums font-semibold'].join(' ')}
               title={
                 g.confidence === 'estimate'
                   ? CONFIDENCE_LEGEND.captions.estimate
@@ -331,8 +335,9 @@ export function CasesTable({
               <th className={TH}>Group #</th>
               <th className={TH}>Facility</th>
               <th className={TH}>Program</th>
+              <th className={TH}>Payment date</th>
               <th className={TH}>DOS</th>
-              <th className={TH_NUM}>% allowed</th>
+              <th className={`${TH_NUM} min-w-[116px]`}>% allowed</th>
               {hasAmounts ? <th className={TH_NUM}>Billed</th> : null}
               {hasAmounts ? <th className={TH_NUM}>Allowed</th> : null}
             </tr>

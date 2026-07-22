@@ -496,7 +496,7 @@ export function QualifyTab({
     : null;
 
   return (
-    <main className="mx-auto max-w-[1560px] space-y-4 p-6 sm:p-8">
+    <main className="mx-auto max-w-[1680px] space-y-4 p-6 sm:p-8">
       {/* page head + color-layer toggle */}
       <div className="flex items-end justify-between gap-5">
         <div>

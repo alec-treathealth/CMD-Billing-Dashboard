@@ -292,6 +292,37 @@ test('cases table — per-facility scope: two facilities yield DIFFERENT case se
   );
 });
 
+// ── Payment-date axis (the sort is now visible): Payment date + DOS columns + the single-line % pill ──
+test('cases table — Payment date + DOS columns both render, distinct values, in that order', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable claims={CASES_FACILITY_A} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([])} facilityLabel="ALPHA CLINIC" {...noReveal} />,
+  );
+  assert.ok(html.includes('>Payment date</th>'), 'the Payment date column header renders');
+  assert.ok(html.includes('>DOS</th>'), 'the DOS (service date) column stays');
+  assert.ok(html.indexOf('>Payment date</th>') < html.indexOf('>DOS</th>'), 'Payment date sits beside/left of DOS');
+  // CASES_FACILITY_A[0]: paymentDate 2026-07-20, dos 2026-07-15 — BOTH dates visible on the row.
+  assert.ok(html.includes('2026-07-20') && html.includes('2026-07-15'), 'both the payment date and the service date render on a claim row');
+});
+
+test('cases table — the % pill is single-line (whitespace-nowrap) so "~x% avg" never wraps', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable claims={CASES_FACILITY_A} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([])} {...noReveal} />,
+  );
+  assert.match(html, /q-pctcell[^"]*whitespace-nowrap/, 'the q-pctcell pill carries whitespace-nowrap (the actual wrap fix)');
+});
+
+test('cases table — a patient GROUP row shows the payment date of its most-recent (first) claim', () => {
+  const grp: QualifyClaim[] = [
+    { ...CASE_AT_THIN, id: 701, patientKey: 3, paymentDate: '2026-07-22', dos: '2026-07-15' },
+    { ...CASE_AT_THIN, id: 702, patientKey: 3, paymentDate: '2026-07-21', dos: '2026-07-14' },
+  ];
+  const html = renderToStaticMarkup(
+    <CasesTable claims={grp} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([])} {...noReveal} />,
+  );
+  assert.ok(html.includes('2 claims'), 'the two claims collapse into one patient group row');
+  assert.ok(html.includes('2026-07-22'), 'the group row shows the first (most-recently-paid) claim’s payment date');
+});
+
 test('facility panel — rows are interactive buttons and the selected row is marked (Q-4 selection)', () => {
   const html = renderToStaticMarkup(<FacilityPanel facilities={FACILITIES} hasAmounts={false} heatOn selectedKey="solid" />);
   assert.ok(html.includes('<button'), 'facility rows are interactive buttons (the desktop equivalent of a card tap)');
