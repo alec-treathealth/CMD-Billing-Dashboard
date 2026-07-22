@@ -5,14 +5,14 @@
  *
  * WHY a reducer. The cases panel's "reset to page 0 on any cohort change" rule was previously enforced by
  * remembering to call setPage(0)/setCursors([null]) in every handler — easy to forget, and impossible to
- * exercise in the static render harness. Folding payer/facility/window/prefix/page/cursors into ONE object
+ * exercise in the static render harness. Folding payer/facility/window/page/cursors into ONE object
  * and routing every change through cohortReducer makes the reset STRUCTURAL: every action except
- * PAGE_NEXT/PAGE_PREV returns a fresh page:0 / cursors:[null], so a handler cannot forget. The persistence
- * rules live in one place too:
- *   - RESOLVE_PAYER is the ONLY action that (re)sets the prefix from resolution — normally to '' (a brand-new
- *     cohort), or to the searched echo when a ≤3-char alpha-prefix SEARCH prefills the starts-with narrow.
- *   - CHANGE_WINDOW keeps the facility AND the prefix — a window change is the same selection re-fetched for
- *     a new window, NOT a teleport back to rank-1.
+ * PAGE_NEXT/PAGE_PREV returns a fresh page:0 / cursors:[null], so a handler cannot forget.
+ *
+ * IDENTITY = (payer, facility, window) — NOTHING ELSE (ruling: the main top-bar search is the ONE
+ * place an identifier is typed; the claims panel is a PURE DISPLAY of the landed facility, so the
+ * in-panel prefix + group narrows — and their cohort fields — are GONE). CHANGE_WINDOW keeps the
+ * facility — a window change is the same selection re-fetched, NOT a teleport back to rank-1.
  */
 import type { QualifyWindowDays, QualifyCasesCursor } from './contract';
 
@@ -23,11 +23,6 @@ export interface QualifyCohort {
   /** Selected facility key (raw rollup text = QualifyFacility.facilityKey). null = none selected. */
   facility: string | null;
   window: QualifyWindowDays;
-  /** APPLIED member-ID prefix narrow (STARTS-WITH). '' = no narrow. Cleared ONLY by RESOLVE_PAYER. */
-  prefix: string;
-  /** APPLIED group-number narrow (EXACT — the employer proxy; Phase 2). '' = no narrow. Cleared ONLY by
-   *  RESOLVE_PAYER, symmetric with `prefix` (facility/window changes keep it). */
-  group: string;
   /** 0-based page index into the cursor stack. */
   page: number;
   /** cursors[p] = the keyset cursor that fetches page p; cursors[0] is always null (the first page). */
@@ -35,19 +30,13 @@ export interface QualifyCohort {
 }
 
 export type QualifyCohortAction =
-  /** A payer resolved (search / chip / on-load) — a brand-new cohort. `facility` is the auto-selected rank-1,
-   *  or null when the payer resolved with no facilities / the search was unresolved. `prefix` PREFILLS the
-   *  starts-with narrow: a ≤3-char alpha-prefix SEARCH seeds it with the searched echo (Direction B, so the
-   *  drill lands identifier-narrowed); omitted/'' on the exact-member, resolve-by-payer, and unresolved paths. */
-  | { type: 'RESOLVE_PAYER'; payer: string | null; facility: string | null; window: QualifyWindowDays; prefix?: string }
-  /** Facility drill within the SAME payer. Keeps payer + window + prefix. */
+  /** A payer resolved (search / chip / on-load) — a brand-new cohort. `facility` is the auto-selected
+   *  landing (Fix A) or rank-1, or null when the payer resolved with no facilities / unresolved. */
+  | { type: 'RESOLVE_PAYER'; payer: string | null; facility: string | null; window: QualifyWindowDays }
+  /** Facility drill within the SAME payer. Keeps payer + window. */
   | { type: 'SWITCH_FACILITY'; facility: string }
-  /** Window change on the SAME payer + facility. Keeps facility + prefix (no rank-1 teleport). */
+  /** Window change on the SAME payer + facility. Keeps facility (no rank-1 teleport). */
   | { type: 'CHANGE_WINDOW'; window: QualifyWindowDays }
-  /** Apply a new prefix narrow (explicit Enter). Keeps payer + facility + window. */
-  | { type: 'CHANGE_PREFIX'; prefix: string }
-  /** Apply a new group-number narrow (explicit Enter). Keeps payer + facility + window + prefix. */
-  | { type: 'CHANGE_GROUP'; group: string }
   /** Pager forward: advance one page, pushing the cursor that fetches it. The only step that grows the stack. */
   | { type: 'PAGE_NEXT'; nextCursor: QualifyCasesCursor | null }
   /** Pager back: step back one page in the SAME stack (the target page's cursor is already stored). */
@@ -58,8 +47,6 @@ export const INITIAL_COHORT: QualifyCohort = {
   payer: null,
   facility: null,
   window: 30,
-  prefix: '',
-  group: '',
   page: 0,
   cursors: [null],
 };
@@ -72,41 +59,32 @@ function resetPaging(base: QualifyCohort): QualifyCohort {
 }
 
 /**
- * The cohort's FETCH IDENTITY — payer|facility|window|prefix. Stamp a cases fetch with this at issue; if it
+ * The cohort's FETCH IDENTITY — payer|facility|window. Stamp a cases fetch with this at issue; if it
  * no longer equals the current cohort's key when the response lands, the cohort changed under us and the
  * write is a stale wrong-cohort landing → discard it. The cohort analog of the genRef recency guard. `page`
  * is deliberately EXCLUDED: page races are caught by genRef's monotonic bump, not by identity. JSON-encoded
  * (not a delimiter join) so a payer/facility label containing spaces or pipes can't forge a key collision.
  */
 export function cohortKey(c: QualifyCohort): string {
-  return JSON.stringify([c.payer, c.facility, c.window, c.prefix, c.group]);
+  return JSON.stringify([c.payer, c.facility, c.window]);
 }
 
 export function cohortReducer(state: QualifyCohort, action: QualifyCohortAction): QualifyCohort {
   switch (action.type) {
     case 'RESOLVE_PAYER':
-      // New cohort: set payer/facility/window, (re)set the prefix to the PREFILL (a prefix-search echo) or ''
-      // — the only action that sets the prefix from resolution — reset paging.
+      // New cohort: set payer/facility/window, reset paging.
       return resetPaging({
         ...state,
         payer: action.payer,
         facility: action.facility,
         window: action.window,
-        prefix: action.prefix ?? '',
-        group: '', // new cohort — the group narrow resets with the prefix
       });
     case 'SWITCH_FACILITY':
-      // Same payer, new facility: keep window + prefix, reset paging.
+      // Same payer, new facility: keep window, reset paging.
       return resetPaging({ ...state, facility: action.facility });
     case 'CHANGE_WINDOW':
-      // Same payer + facility: keep facility + prefix (no rank-1 teleport), set window, reset paging.
+      // Same payer + facility: keep facility (no rank-1 teleport), set window, reset paging.
       return resetPaging({ ...state, window: action.window });
-    case 'CHANGE_PREFIX':
-      // Same payer + facility + window: set the applied prefix, reset paging.
-      return resetPaging({ ...state, prefix: action.prefix });
-    case 'CHANGE_GROUP':
-      // Same payer + facility + window + prefix: set the applied group narrow, reset paging.
-      return resetPaging({ ...state, group: action.group });
     case 'PAGE_NEXT': {
       // Forward one page; record the cursor that fetches it (= the prior page's nextCursor). Stack preserved.
       const page = state.page + 1;

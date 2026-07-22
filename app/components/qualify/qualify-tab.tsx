@@ -7,12 +7,11 @@
  * hands plain, already-shaped data to the pure presentational children (facility panel, cases table,
  * VOB modal).
  *
- * COHORT STATE (qualifyCohort.ts): the cases panel's identity — payer / facility / window / prefix — and
+ * COHORT STATE (qualifyCohort.ts): the cases panel's identity — payer / facility / window — and
  * its cursor stack (page + cursors[]) live in ONE atomic object driven by a pure reducer. Every handler
- * DISPATCHES an action; it never hand-resets page/cursors/prefix. The reducer owns the invariants:
- *   - any cohort change (payer/facility/window/prefix) resets to page 0 with a fresh cursor stack;
- *   - RESOLVE_PAYER is the ONLY action that clears the prefix;
- *   - CHANGE_WINDOW keeps the facility + prefix — a window change is the same selection re-fetched for the
+ * DISPATCHES an action; it never hand-resets page/cursors. The reducer owns the invariants:
+ *   - any cohort change (payer/facility/window) resets to page 0 with a fresh cursor stack;
+ *   - CHANGE_WINDOW keeps the facility — a window change is the same selection re-fetched for the
  *     new window, NOT a teleport back to rank-1.
  *
  * RECENT CLAIMS (ruling Q-4 + Direction B): the "Recent Claims" panel shows the most-recent CLAIMS (claim
@@ -22,10 +21,11 @@
  * we auto-select the rank-1 facility so the tab lands populated. A facility switch discards any revealed PHI —
  * the same scope-change rule a new search follows (each drill is its own audited access).
  *
- * IDENTIFIER NARROW (Direction B): arriving via an identifier SEARCH narrows this list to that identifier
- * server-side. A ≤3-char alpha-prefix search PREFILLS the prefix input with its echo (the input drives the
- * member_id_prefix_bidx narrow; edit/clear to widen). An exact member-id search narrows by member_id_bidx —
- * held only in `exactMemberRef` (never the ≤3 input, never persisted/logged). The resolve-by-payer path
+ * IDENTIFIER ENTRY — RULING (settled): the MAIN top-bar search is the ONE place an identifier is ever typed —
+ * it resolves the payer, ranks facilities, and LANDS on the searched member's facility (Fix A, untouched).
+ * The Recent Claims panel is a PURE DISPLAY of that landed facility (grouped by patient, the searched
+ * member present in context) — the former in-panel prefix + group-# re-narrows are REMOVED. The
+ * resolve-by-payer path
  * (Heating-up chips / on-load) carries NO identifier → the list stays payer-wide (ruling 3).
  *
  * ON LOAD it auto-resolves the top "Heating up" payer so the tab lands POPULATED (matching the
@@ -83,9 +83,6 @@ function formatWindowRange(startIso: string, endExclusiveIso: string): string {
 type CasesPage = { claims: QualifyClaim[]; nextCursor: QualifyCasesCursor | null; hasMore: boolean };
 const EMPTY_PAGE: CasesPage = { claims: [], nextCursor: null, hasMore: false };
 
-/** The narrow the facility drill applies: applied prefix + exact-member ref + the group-# narrow (the
- *  employer proxy — EXACT match; Phase 2). */
-type DrillFilter = { prefix?: string; memberId?: string; group?: string } | undefined;
 
 export function QualifyTab({
   viewerHasAmountsCapability,
@@ -97,7 +94,7 @@ export function QualifyTab({
   const [query, setQuery] = useState('');
   const [snapshot, setSnapshot] = useState<QualifySnapshot | null>(null);
   const [isPending, startTransition] = useTransition();
-  // The cases panel's atomic COHORT (payer/facility/window/prefix + page/cursors), reducer-owned. Every
+  // The cases panel's atomic COHORT (payer/facility/window + page/cursors), reducer-owned. Every
   // transition goes through `apply` (dispatch + return the resulting cohort so the fetch can read it). A ref
   // mirrors the latest cohort so an async cases landing can check it changed underneath (the cohort-key guard).
   const [cohort, dispatch] = useReducer(cohortReducer, INITIAL_COHORT);
@@ -116,13 +113,6 @@ export function QualifyTab({
   const [hasMore, setHasMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<QualifyCasesCursor | null>(null);
   const [isFacilityPending, startFacilityTransition] = useTransition();
-  // The cases-panel PREFIX INPUT buffer (what the user is typing). The APPLIED prefix lives in cohort.prefix;
-  // Enter commits the buffer via CHANGE_PREFIX. On a scope change that keeps the prefix (facility switch) the
-  // buffer is re-synced to cohort.prefix; on a payer resolution both are cleared. STARTS-WITH, never contains.
-  const [prefix, setPrefix] = useState('');
-  // The GROUP-# INPUT buffer (the employer proxy; EXACT match). Applied value lives in cohort.group;
-  // Enter commits via CHANGE_GROUP. Cleared with the prefix on a payer resolution.
-  const [group, setGroup] = useState('');
   // LOC filter chips (IP / OP / Both) — pure client-side view filter over the facility panel.
   const [locFilter, setLocFilter] = useState<QualifyLocFilter>(null);
   // Phase 3: the patient-cohort slide-over (masked label + fetched context). Null = closed.
@@ -160,11 +150,6 @@ export function QualifyTab({
   // commit — facilityCases still lagging the previous facility for one render right after a switch — is
   // deduped instead of revealing the wrong scope. A new resolution/facility always yields a fresh array.
   const revealedForRef = useRef<QualifyClaim[] | null>(null);
-  // The raw EXACT member-id term of the current resolution (null unless the cohort resolved via an exact
-  // member-id search). Direction B: drives the drill's member_id_bidx narrow. Held ONLY in this ref — never
-  // in the ≤3-char prefix input, never persisted to storage/URL, never logged. Set AFTER each resolve's
-  // recency (gen) check; cleared on the resolve-by-payer path and on a prefix search.
-  const exactMemberRef = useRef<string | null>(null);
   // Resolution identity (search-is-authority). Every fetch entry point bumps-and-captures this at entry;
   // every post-await write guards `genRef.current === gen` and bails otherwise. So a newer fetch DISCARDS
   // any in-flight older write — the header (snapshot) and the rows (facilityCases) can never be sourced from
@@ -180,7 +165,7 @@ export function QualifyTab({
   );
 
   // Discard the current scope's revealed PHI — used on every scope change (new search, new payer,
-  // facility switch, window change, prefix, page). Clears the PHI cache, but NOT `revealAll` (sticky toggle)
+  // facility switch, window change, page). Clears the PHI cache, but NOT `revealAll` (sticky toggle)
   // and NOT `revealedForRef` (resetting it would let the effect re-fire against the still-lagging previous
   // facilityCases); the fresh facilityCases identity from the new fetch is what re-arms the auto-reveal.
   const resetReveal = useCallback(() => {
@@ -190,35 +175,19 @@ export function QualifyTab({
   }, []);
 
   // Fetch page 0 of ONE facility's cases (the "seed" a resolve/window-change commits atomically with the
-  // snapshot, so header + selection + cases land in one paint — no empty-cases flash). `facility` is rank-1
-  // for a new payer, or the RETAINED facility for a window change; `prefixVal` is '' for a new payer or the
-  // retained prefix for a window change. Throws propagate to the caller's transition catch.
-  // The identifier narrow (Direction B): the applied prefix wins; else the exact-member ref (when the cohort
-  // resolved via an exact member-id search); else no narrow (payer-wide at the facility). Reads the ref, so
-  // it always reflects the latest resolution.
-  const drillFilter = useCallback((cohortPrefix: string, cohortGroup: string): DrillFilter => {
-    const p = cohortPrefix.trim();
-    const g = cohortGroup.trim();
-    const member: DrillFilter = p ? { prefix: p } : exactMemberRef.current ? { memberId: exactMemberRef.current } : undefined;
-    if (!g) return member;
-    return { ...(member ?? {}), group: g }; // composable — the group narrow ANDs with the member narrow
-  }, []);
-
+  // snapshot, so header + selection + cases land in one paint — no empty-cases flash). `facility` is the
+  // landing (Fix A) or rank-1 for a new payer, or the RETAINED facility for a window change. PURE facility
+  // display (ruling): no identifier/group narrow — the main-bar search already LANDED us here.
   const fetchSeed = useCallback(
-    async (payer: string, facility: string, w: QualifyWindowDays, filter: DrillFilter): Promise<CasesPage> => {
-      const res = await getQualifyFacilityCases({
-        payer,
-        facility,
-        windowDays: w,
-        ...(filter ? { filter } : {}),
-      });
+    async (payer: string, facility: string, w: QualifyWindowDays): Promise<CasesPage> => {
+      const res = await getQualifyFacilityCases({ payer, facility, windowDays: w });
       return { claims: res.claims, nextCursor: res.nextCursor, hasMore: res.hasMore };
     },
     [],
   );
 
-  // Fetch the cases for a given cohort (a standalone cases fetch — facility switch / prefix apply / pager
-  // step; NOT a snapshot re-resolve). Derives the cursor from cohort.cursors[cohort.page]. Guarded twice:
+  // Fetch the cases for a given cohort (a standalone cases fetch — facility switch / pager step; NOT a
+  // snapshot re-resolve). Derives the cursor from cohort.cursors[cohort.page]. Guarded twice:
   // genRef (recency — catches pagination races + supersession) AND cohortKey (identity — discards a landing
   // whose cohort changed underneath, belt-and-suspenders over the reducer's structural reset).
   const fetchCases = useCallback(
@@ -230,14 +199,12 @@ export function QualifyTab({
       const key = cohortKey(c);
       resetReveal();
       const cursor = c.cursors[c.page] ?? null;
-      const filter = drillFilter(c.prefix, c.group);
       startFacilityTransition(async () => {
         try {
           const res = await getQualifyFacilityCases({
             payer,
             facility,
             windowDays: c.window,
-            ...(filter ? { filter } : {}),
             cursor,
           });
           if (genRef.current !== gen) return; // superseded by a newer fetch (recency / pagination guard)
@@ -252,7 +219,7 @@ export function QualifyTab({
         }
       });
     },
-    [resetReveal, drillFilter],
+    [resetReveal],
   );
 
   // Commit a fresh snapshot + its seeded page-0 cases atomically (one paint). Shared by runSearch /
@@ -265,8 +232,8 @@ export function QualifyTab({
     setNextCursor(seed.nextCursor);
   }, [apply]);
 
-  // Resolve by member-id / alpha-prefix SEARCH → a brand-new payer cohort: auto-select rank-1, clear the
-  // prefix. Seeds rank-1's page 0 BEFORE committing so snapshot + selection + cases land together.
+  // Resolve by member-id / alpha-prefix SEARCH → a brand-new payer cohort landing on the searched
+  // member's facility. Seeds page 0 BEFORE committing so snapshot + selection + cases land together.
   const runSearch = useCallback((rawQuery: string, w: QualifyWindowDays) => {
     const trimmed = rawQuery.trim();
     if (trimmed.length < MIN_QUERY_LEN) {
@@ -284,20 +251,11 @@ export function QualifyTab({
         // to null if it isn't a ranked facility), NOT rating rank-1. null → honest-empty (no ranked in-window
         // claims for this identifier).
         const landing = snap.identifierLandingFacility;
-        // Direction B: a ≤3-char alpha-prefix search prefills the starts-with narrow with the raw ≤3 term (a
-        // ≤3 alpha prefix is itself non-PHI, and reusing it — not the display echo — makes the drill's prefix
-        // blind index IDENTICAL to the one resolvePayer used). An exact member-id search narrows the drill by
-        // member id (via exactMemberRef, never the ≤3 input).
-        const isPrefix = snap.resolved?.matchedOn === 'prefix';
-        const isExact = snap.resolved?.matchedOn === 'member_id';
-        const echo = isPrefix ? trimmed : ''; // sniffQualifyKind('prefix') ⇒ trimmed is already ≤3 chars
-        const seedFilter: DrillFilter = isPrefix ? { prefix: echo } : isExact ? { memberId: trimmed } : undefined;
-        const seed = payerName && landing ? await fetchSeed(payerName, landing, w, seedFilter) : EMPTY_PAGE;
+        // RULING: the panel is a PURE display of the landed facility — no drill narrow is derived from
+        // the search; landing on the right facility (Fix A, above) is the whole identifier story here.
+        const seed = payerName && landing ? await fetchSeed(payerName, landing, w) : EMPTY_PAGE;
         if (genRef.current !== gen) return; // a newer resolution superseded this search — discard
-        exactMemberRef.current = isExact ? trimmed : null; // set AFTER the recency check (never on a stale search)
-        commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: landing, window: w, prefix: echo }, seed);
-        setPrefix(echo); // prefill the input with the searched prefix echo ('' for exact / unresolved)
-        setGroup(''); // new cohort — the group narrow resets with the prefix
+        commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: landing, window: w }, seed);
         setHasSearched(true);
         setByPayer(null); // an explicit search supersedes the by-payer default
         if (snap.resolved === null) {
@@ -318,7 +276,7 @@ export function QualifyTab({
   }, [resetReveal, fetchSeed, commitResolved]);
 
   // Resolve directly by payer label (the on-load default + the "Heating up" chips). A brand-new payer
-  // cohort: rank-1, cleared prefix. Sets `byPayer` so a window change re-resolves this payer.
+  // cohort: rank-1. Sets `byPayer` so a window change re-resolves this payer.
   const resolveByPayer = useCallback((payer: string, w: QualifyWindowDays) => {
     setHint(null);
     resetReveal();
@@ -328,13 +286,9 @@ export function QualifyTab({
         const snap = await getQualifySnapshotByPayer({ payer, windowDays: w });
         const payerName = snap.resolved?.payerName ?? null;
         const rank1 = snap.resolved ? snap.facilities[0]?.facilityKey ?? null : null;
-        // Resolve-by-payer carries NO identifier → payer-wide (ruling 3): no seed narrow.
-        const seed = payerName && rank1 ? await fetchSeed(payerName, rank1, w, undefined) : EMPTY_PAGE;
+        const seed = payerName && rank1 ? await fetchSeed(payerName, rank1, w) : EMPTY_PAGE;
         if (genRef.current !== gen) return; // a newer resolution (e.g. a search) superseded this — discard
-        exactMemberRef.current = null; // no identifier narrow on the payer path
         commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: rank1, window: w }, seed);
-        setPrefix('');
-        setGroup('');
         setHasSearched(true);
         setByPayer(payer);
         setModalOpen(false);
@@ -352,19 +306,19 @@ export function QualifyTab({
   // or shows honest-empty when it has no ranked in-window claims.
   const onWindow = (w: QualifyWindowDays) => {
     const prev = cohortRef.current;
-    const next = apply({ type: 'CHANGE_WINDOW', window: w }); // window + reset now; keeps facility+prefix (optimistic)
+    const next = apply({ type: 'CHANGE_WINDOW', window: w }); // window + reset now; keeps facility (optimistic)
     if (!prev.payer) return; // nothing resolved yet — just track the window (the movers effect refreshes chips)
     resetReveal();
     const gen = ++genRef.current;
     startTransition(async () => {
       try {
         if (byPayer) {
-          // PAYER path: re-resolve by payer; same payer → keep facility + prefix; changed → rank-1.
+          // PAYER path: re-resolve by payer; same payer → keep facility; changed → rank-1.
           const snap = await getQualifySnapshotByPayer({ payer: byPayer, windowDays: w });
           const payerName = snap.resolved?.payerName ?? null;
           if (genRef.current !== gen) return;
           if (payerName && payerName === prev.payer && next.facility) {
-            const seed = await fetchSeed(payerName, next.facility, w, drillFilter(next.prefix, next.group));
+            const seed = await fetchSeed(payerName, next.facility, w);
             if (genRef.current !== gen) return;
             setSnapshot(snap);
             setFacilityCases(seed.claims);
@@ -372,30 +326,20 @@ export function QualifyTab({
             setNextCursor(seed.nextCursor);
           } else {
             const rank1 = snap.resolved ? snap.facilities[0]?.facilityKey ?? null : null;
-            const seed = payerName && rank1 ? await fetchSeed(payerName, rank1, w, undefined) : EMPTY_PAGE;
+            const seed = payerName && rank1 ? await fetchSeed(payerName, rank1, w) : EMPTY_PAGE;
             if (genRef.current !== gen) return;
-            exactMemberRef.current = null;
             commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: rank1, window: w }, seed);
-            setPrefix('');
-            setGroup('');
           }
         } else {
           // SEARCH path: re-resolve the identifier and RE-LAND on its facility for the new window (Fix A), or
-          // honest-empty (landing null). Recompute the narrow (prefix echo / exact) for THIS window's resolution.
+          // honest-empty (landing null). Pure display — no drill narrow to recompute.
           const snap = await getQualifySnapshot({ query, windowDays: w });
           const payerName = snap.resolved?.payerName ?? null;
           if (genRef.current !== gen) return;
           const landing = snap.identifierLandingFacility;
-          const isPrefix = snap.resolved?.matchedOn === 'prefix';
-          const isExact = snap.resolved?.matchedOn === 'member_id';
-          const echo = isPrefix ? query.trim() : ''; // raw ≤3 prefix (non-PHI) → same blind index resolvePayer used
-          const seedFilter: DrillFilter = isPrefix ? { prefix: echo } : isExact ? { memberId: query.trim() } : undefined;
-          const seed = payerName && landing ? await fetchSeed(payerName, landing, w, seedFilter) : EMPTY_PAGE;
+          const seed = payerName && landing ? await fetchSeed(payerName, landing, w) : EMPTY_PAGE;
           if (genRef.current !== gen) return;
-          exactMemberRef.current = isExact ? query.trim() : null;
-          commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: landing, window: w, prefix: echo }, seed);
-          setPrefix(echo);
-          setGroup('');
+          commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: landing, window: w }, seed);
         }
         setModalOpen(false);
       } catch {
@@ -405,26 +349,16 @@ export function QualifyTab({
     });
   };
 
-  // Facility row click → SWITCH_FACILITY (keeps payer+window+prefix, resets the cursor stack). No-ops on the
-  // already-selected row. Syncs the input buffer to the retained prefix, then fetches page 0.
+  // Facility row click → SWITCH_FACILITY (keeps payer+window, resets the cursor stack). No-ops on the
+  // already-selected row, then fetches page 0.
   const selectFacility = useCallback(
     (facilityKey: string) => {
       const c = cohortRef.current;
       if (!c.payer || facilityKey === c.facility) return;
-      const next = apply({ type: 'SWITCH_FACILITY', facility: facilityKey });
-      setPrefix(next.prefix); // keep the visible input in step with the retained applied prefix
-      setGroup(next.group); // same for the retained group narrow
-      fetchCases(next);
+      fetchCases(apply({ type: 'SWITCH_FACILITY', facility: facilityKey }));
     },
     [apply, fetchCases],
   );
-
-  // Apply the typed prefix to the CURRENT facility (explicit submit — Enter). No-op until a facility is
-  // selected. CHANGE_PREFIX commits the buffer → cohort.prefix and resets the cursor stack.
-  const applyPrefix = useCallback(() => {
-    if (!cohortRef.current.facility) return;
-    fetchCases(apply({ type: 'CHANGE_PREFIX', prefix }));
-  }, [apply, fetchCases, prefix]);
 
   // Phase 3: open the cohort slide-over for one patient group. The claim id is the non-PHI synthetic
   // rollup id; the server re-derives the cohort token, audits, floor-gates, and strips dollars.
@@ -447,12 +381,6 @@ export function QualifyTab({
       }
     })();
   }, []);
-
-  // Apply the typed group-# narrow (explicit Enter; EXACT match — the employer proxy). Mirrors applyPrefix.
-  const applyGroup = useCallback(() => {
-    if (!cohortRef.current.facility) return;
-    fetchCases(apply({ type: 'CHANGE_GROUP', group }));
-  }, [apply, fetchCases, group]);
 
   // Pager steps — walk the SAME cohort's cursor stack. PAGE_PREV steps back to the stored cursor; PAGE_NEXT
   // advances, pushing the last fetch's nextCursor. Guarded by hasPrev/hasMore at the call.
@@ -568,7 +496,7 @@ export function QualifyTab({
     : null;
 
   return (
-    <main className="mx-auto max-w-[1280px] space-y-4 p-6 sm:p-8">
+    <main className="mx-auto max-w-[1560px] space-y-4 p-6 sm:p-8">
       {/* page head + color-layer toggle */}
       <div className="flex items-end justify-between gap-5">
         <div>
@@ -711,12 +639,6 @@ export function QualifyTab({
               revealing={revealing}
               revealError={revealError}
               onToggleRevealAll={() => setRevealAll((v) => !v)}
-              prefix={prefix}
-              onPrefixChange={setPrefix}
-              onApplyPrefix={applyPrefix}
-              group={group}
-              onGroupChange={setGroup}
-              onApplyGroup={applyGroup}
               onViewCohort={viewCohort}
               page={cohort.page + 1}
               hasPrev={cohort.page > 0}

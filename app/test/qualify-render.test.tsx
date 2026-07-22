@@ -62,7 +62,8 @@ const CASE_AT_LOW: QualifyClaim = {
 const PHI: QualifyPhi = { patient_name: 'DOE, JANE', member_id_raw: 'AETMEMBER123', group_number: 'GRP9' };
 
 const noop = () => {};
-/** Default (no-reveal) props for the cases table — single header-toggle + prefix filter + cursor pager API. */
+/** Default (no-reveal) props for the cases table — header reveal-toggle + cursor pager API (the former
+ *  in-panel prefix/group filter props are GONE — ruling: the main bar is the one identifier entry). */
 const noReveal = {
   canReveal: false,
   revealed: new Map<number, QualifyPhi>(),
@@ -70,12 +71,6 @@ const noReveal = {
   revealing: false,
   revealError: null,
   onToggleRevealAll: noop,
-  prefix: '',
-  onPrefixChange: noop,
-  onApplyPrefix: noop,
-  group: '',
-  onGroupChange: noop,
-  onApplyGroup: noop,
   page: 1,
   hasPrev: false,
   hasNext: false,
@@ -212,31 +207,16 @@ test('reveal is INDEPENDENT of the amounts gate: an admissions_seat reveal shows
   for (const v of ['18,400', '11,592']) assert.ok(!html.includes(v), `dollar ${v} absent even when PHI is revealed`);
 });
 
-// ── prefix filter + cursor pager (Stage 2 desktop UI) ───────────────────────────────────────────────
-test('cases prefix — the header filter input is present and labeled STARTS-WITH, never "contains"', () => {
+test('cases header — NO in-panel filter inputs (ruling: the main bar is the one identifier entry); reveal toggle stays', () => {
   const html = renderToStaticMarkup(
     <CasesTable claims={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal />,
   );
-  assert.ok(html.includes('Filter by ID prefix'), 'the prefix input placeholder is present');
-  assert.ok(/starts with/i.test(html), 'the control is labeled as a starts-with / prefix match');
-  assert.ok(!/contains/i.test(html), 'never labeled "contains" — starts-with only (the mixed-ID guard)');
+  assert.ok(!html.includes('Filter by ID prefix'), 'the prefix input is gone');
+  assert.ok(!html.includes('Group # (employer proxy)'), 'the group-# input is gone');
+  assert.ok(html.includes('Reveal all'), 'the reveal toggle (NOT a filter) remains');
 });
 
-test('cases prefix — a sub-3-char entry shows the "activates at 3" affordance (mints no filter)', () => {
-  const html = renderToStaticMarkup(
-    <CasesTable claims={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal prefix="ab" />,
-  );
-  assert.ok(html.includes('Enter 3 characters to filter'), 'sub-3-char affordance: not yet filtering');
-});
-
-test('cases prefix — a 3-char entry shows the starts-with helper (ready to apply)', () => {
-  const html = renderToStaticMarkup(
-    <CasesTable claims={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal prefix="ABC" />,
-  );
-  assert.ok(/starting with/i.test(html), 'active-prefix helper says "starting with"');
-  assert.ok(!/contains/i.test(html), 'never "contains"');
-});
-
+// ── cursor pager (Stage 2 desktop UI) ────────────────────────────────────────────────────────────────
 test('cases pager — Next is ENABLED when hasNext (more pages to walk)', () => {
   const html = renderToStaticMarkup(
     <CasesTable claims={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} hasNext page={1} />,
@@ -438,14 +418,6 @@ test('cases table — a group with ANY estimate claim rolls up amber with ~avg, 
   assert.ok(html.includes('~95% avg'), 'estimate-tainted roll-up carries the ~ prefix');
   assert.ok(html.includes('q-warn'), 'amber');
   assert.ok(!html.includes('q-pctcell q-ok'), 'one unverified reversal means the roll-up can never read green');
-});
-
-test('cases table — the group-# filter renders for reveal-capable viewers, labeled as the employer PROXY', () => {
-  const html = renderToStaticMarkup(
-    <CasesTable claims={[CASE_AT_LOW]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([])} {...noReveal} canReveal />,
-  );
-  assert.ok(html.includes('Group # (employer proxy)'), 'labeled as the proxy — never "employer" (that data does not exist)');
-  assert.ok(!html.includes('>Employer<'), 'no fabricated employer field');
 });
 
 // ── Phase 3: the cohort slide-over (suppression-first; dollars stripped for seats) ───────────────────
