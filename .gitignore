@@ -40,6 +40,16 @@ secrets/
 !.claude/hooks/
 .claude/settings.local.json
 
+# VOB ETL (etl/vob/) — Python + PHI-adjacent. PDFs/CSVs are PHI (patient VOB docs); loader.env
+# holds the INDEX_HMAC_KEY + DB URLs. Data + PDFs live OUTSIDE the repo, but guard defensively.
+# (Incident 2026-07-23: PHI/AWS-key was found in the old public VOB-scripts repo — never again.)
+__pycache__/
+*.pyc
+*.pdf
+loader.env
+*.env
+!.env.example
+
 # Supabase CLI scratch
 supabase/.temp/
 

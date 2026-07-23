@@ -1,0 +1,50 @@
+# DRAFT — the schedule is DISABLED. Daily incremental Monday -> vob.indigo_vob sync.
+#
+# HELD until the cron is provisioned. Before enabling the `schedule:` trigger below:
+#   1. apply supabase/migrations/0062_vob_sync_state.sql (watermark + deactivated_at soft-delete + sync_state);
+#   2. add the GitHub Actions secrets to THIS repo (Settings -> Secrets and variables -> Actions):
+#        MONDAY_API_TOKEN               (board 1606316049 read + files/assets)
+#        INDEX_HMAC_KEY                 (64-hex; MUST match the app's key so bidx tokens align)
+#        CMD_ROLLUP_WRITER_DATABASE_URL (Supavisor pooler:6543, user cmd_rollup_writer_login)
+#   3. run once via workflow_dispatch (supervised) and confirm vob.sync_state looks sane;
+#   4. then uncomment the `schedule:` block.
+# Until then this workflow only runs on manual dispatch, so merging it never fires the cron.
+#
+# TLS: the writer URL is sslmode=verify-full. In CI (no CA file) the sync script transparently
+# downgrades to sslmode=require (encrypted, no cert verify). To keep full verification, commit the
+# Supabase CA and set SUPABASE_CA_PATH.
+#
+# SECURITY: only secrets.* are referenced, and only inside env:. No untrusted github.event.* input
+# is used anywhere, so there is no workflow-injection surface.
+
+name: vob-sync
+
+on:
+  # schedule:                    # DISABLED until provisioned (see header). Enable AFTER a supervised dispatch run.
+  #   - cron: '17 9 * * *'       # daily 09:17 UTC
+  workflow_dispatch: {}          # manual trigger only, for now
+
+concurrency:
+  group: vob-sync
+  cancel-in-progress: false      # never overlap runs
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install "psycopg[binary]" pypdf requests
+      - name: Run incremental sync
+        env:
+          MONDAY_API_TOKEN: ${{ secrets.MONDAY_API_TOKEN }}
+          INDEX_HMAC_KEY: ${{ secrets.INDEX_HMAC_KEY }}
+          CMD_ROLLUP_WRITER_DATABASE_URL: ${{ secrets.CMD_ROLLUP_WRITER_DATABASE_URL }}
+        run: python etl/vob/vob_cron_sync.py
