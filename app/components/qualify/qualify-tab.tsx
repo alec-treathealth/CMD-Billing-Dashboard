@@ -372,6 +372,25 @@ export function QualifyTab({
     [apply, fetchCases],
   );
 
+  // Clear the current resolution → back to the neutral search prompt (never trapped on a payer). Bumps
+  // genRef FIRST so any in-flight resolve/search is discarded and can't re-populate after we clear.
+  // Keeps the "Heating up" chips, the window, and the market filters — only the resolved payer/cases go.
+  const clearSearch = useCallback(() => {
+    genRef.current += 1;
+    setQuery('');
+    setHint(null);
+    setEcho('');
+    setModalOpen(false);
+    setLocFilter(null);
+    resetReveal();
+    setSnapshot(null);
+    setFacilityCases([]);
+    setCapped(false);
+    setHasSearched(false);
+    setByPayer(null);
+    apply({ type: 'RESOLVE_PAYER', payer: null, facility: null, window: cohortRef.current.window });
+  }, [apply, resetReveal]);
+
   // Phase 3: open the cohort slide-over for one patient group. The claim id is the non-PHI synthetic
   // rollup id; the server re-derives the cohort token, audits, floor-gates, and strips dollars.
   const viewCohort = useCallback((claimId: number, label: string) => {
@@ -642,6 +661,17 @@ export function QualifyTab({
         >
           {isPending ? 'Resolving…' : 'Resolve payer'}
         </button>
+        {/* Clear: reset to the neutral prompt (keeps the Heating-up chips + window + market) so a
+            search never traps you on a resolved payer. Shown once there's anything to clear. */}
+        {(query.trim() !== '' || resolved || hasSearched) && (
+          <button
+            type="button"
+            onClick={clearSearch}
+            className="rounded-xl border border-line bg-background px-3 py-2 text-[13px] font-semibold text-muted-foreground transition-colors hover:bg-surface hover:text-ink900"
+          >
+            Clear
+          </button>
+        )}
         <div className="h-6 w-px bg-line" />
         <div className="inline-flex rounded-full border bg-background p-0.5" role="group" aria-label="Time window">
           {QUALIFY_WINDOW_OPTIONS.map((w) => (
