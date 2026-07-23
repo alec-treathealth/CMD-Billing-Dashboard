@@ -42,7 +42,7 @@ import {
   type QualifyClaimRow,
   type QualifyMoverRow,
 } from '../../../src/collections/qualifyQuery';
-import { COHORT_MIN_PATIENTS } from '../../../src/collections/cmdExplorerQuery';
+import { COHORT_MIN_PATIENTS, type VobMarketFilter } from '../../../src/collections/cmdExplorerQuery';
 
 /** Distinct audit action labels (post reveal-audit-action fix) — Qualify surfaces are attributable. */
 export const SEARCH_QUALIFY_PHI = 'search_qualify_phi';
@@ -66,7 +66,13 @@ export interface QualifyDeps {
    *  mintToken; null when the term normalizes to nothing. */
   mintGroupToken: (raw: string) => string | null;
   resolvePayer: (token: string, kind: QualifyMatchKind, entityIds: string[]) => Promise<string | null>;
-  loadFacilities: (payer: string, from: string, to: string, entityIds: string[]) => Promise<QualifyFacilityRow[]>;
+  loadFacilities: (
+    payer: string,
+    from: string,
+    to: string,
+    entityIds: string[],
+    market?: VobMarketFilter,
+  ) => Promise<QualifyFacilityRow[]>;
   /** Fix A: raw facility of the searched identifier's most-recent in-window claim under the payer (or null). */
   loadIdentifierLandingFacility: (
     token: string,
@@ -82,7 +88,14 @@ export interface QualifyDeps {
     from: string,
     to: string,
     entityIds: string[],
-    opts: { prefixToken: string | null; memberToken: string | null; groupToken: string | null; limit: number; allPayers?: boolean },
+    opts: {
+      prefixToken: string | null;
+      memberToken: string | null;
+      groupToken: string | null;
+      limit: number;
+      allPayers?: boolean;
+      market?: VobMarketFilter;
+    },
   ) => Promise<QualifyClaimRow[]>;
   /** Phase 3: tenant-scoped lookup of ONE claim's alpha-prefix cohort token. Null = unknown/foreign
    *  claim id (fails closed to suppressed). The token never reaches the client. */
@@ -96,6 +109,7 @@ export interface QualifyDeps {
     priorFrom: string,
     priorTo: string,
     entityIds: string[],
+    market?: VobMarketFilter,
   ) => Promise<QualifyMoverRow[]>;
   recordAccess: (entry: {
     actorEmail: string;
@@ -259,7 +273,7 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
   // Fix A: alongside the payer-wide ranking, look up WHERE the searched identifier's most-recent in-window
   // claim is (token already minted above). The claim ordering is byte-identical to the drill's.
   const [facRows, landingRaw] = await Promise.all([
-    deps.loadFacilities(payerName, from, to, gate.entityIds),
+    deps.loadFacilities(payerName, from, to, gate.entityIds, input.market),
     deps.loadIdentifierLandingFacility(token, kind, payerName, from, to, gate.entityIds),
   ]);
 
@@ -318,7 +332,7 @@ export async function getQualifySnapshotByPayerCore(
   });
 
   const { from, to } = qualifyWindowBounds(windowDays, deps.now());
-  const facRows = await deps.loadFacilities(payer, from, to, gate.entityIds);
+  const facRows = await deps.loadFacilities(payer, from, to, gate.entityIds, input.market);
 
   const facilities = assembleFacilities(facRows);
   const resolved: QualifyResolved = {
@@ -420,6 +434,7 @@ export async function getQualifyFacilityCasesCore(
     groupToken,
     limit: QUALIFY_CASES_MAX,
     allPayers,
+    market: input.market,
   });
   const capped = claimRows.length > QUALIFY_CASES_MAX;
   const pageRows = capped ? claimRows.slice(0, QUALIFY_CASES_MAX) : claimRows; // keep the MOST RECENT (payment desc)
@@ -500,13 +515,17 @@ export async function getQualifyPatientCohortCore(
   };
 }
 
-export async function getQualifyMoversCore(deps: QualifyDeps, windowDays: QualifyWindowDays): Promise<QualifyMovers> {
+export async function getQualifyMoversCore(
+  deps: QualifyDeps,
+  windowDays: QualifyWindowDays,
+  market?: VobMarketFilter,
+): Promise<QualifyMovers> {
   const gate = await deps.requirePrincipal();
   if (!gate.ok) throw new Error(gate.error);
   if (!isQualifyWindow(windowDays)) throw new Error('Invalid window.');
 
   const { from, to, priorFrom, priorTo } = qualifyWindowBounds(windowDays, deps.now());
-  const rows = await deps.loadMovers(from, to, priorFrom, priorTo, gate.entityIds);
+  const rows = await deps.loadMovers(from, to, priorFrom, priorTo, gate.entityIds, market);
   const movers: QualifyMover[] = rows.map((r, i) => ({
     rank: i + 1,
     label: r.primary_payer,

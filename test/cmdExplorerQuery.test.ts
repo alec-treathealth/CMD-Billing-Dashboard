@@ -6,6 +6,8 @@ import {
   buildCmdSearchSummaryQueries,
   buildCmdFacilityOptionsQuery,
   buildCmdPayerOptionsQuery,
+  buildCmdEmployerOptionsQuery,
+  CMD_FUNDING_MARKETS,
   buildCohortCurveQueries,
   buildCohortDrilldownQueries,
   sanitizeGridColumns,
@@ -743,4 +745,68 @@ test('drilldown queries: the patient-table row projection reuses CMD_EXPLORER_SE
   for (const q of [stats, byPayer, byCptRevenue, rows]) {
     assert.doesNotMatch(q.sql, /member_id_raw|patient_name|group_number/);
   }
+});
+
+test('VOB market: employer + funding emit ONE member_id_bidx semi-join into member_benefits_latest, values bound', () => {
+  const { sql, params } = buildCmdExplorerQuery(
+    null,
+    { employers: ['BOEING', 'KAISER'], funding: ['Self-Funded'] },
+    SORT,
+    51,
+    ENTITY,
+  );
+  // both sub-conditions live in the SAME subquery (one latest VOB row per member), semi-join not JOIN
+  assert.match(
+    sql,
+    /member_id_bidx in \(select member_id_bidx from vob\.member_benefits_latest where funding = any\(\$\d+::text\[\]\) and employer_norm = any\(\$\d+::text\[\]\)\)/,
+  );
+  assert.equal((sql.match(/vob\.member_benefits_latest/g) || []).length, 1);
+  assert.doesNotMatch(sql, /join vob\.member_benefits_latest/i);
+  // funding binds before employers (cond order); tenant is $1, limit is last.
+  assert.deepEqual(params, [ENTITY, ['Self-Funded'], ['BOEING', 'KAISER'], 51]);
+});
+
+test('VOB market: only funding present emits a semi-join with just the funding condition', () => {
+  const { sql, params } = buildCmdExplorerQuery(null, { funding: ['Self-Funded', 'Fully Insured'] }, SORT, 51, ENTITY);
+  assert.match(
+    sql,
+    /member_id_bidx in \(select member_id_bidx from vob\.member_benefits_latest where funding = any\(\$2::text\[\]\)\)/,
+  );
+  assert.doesNotMatch(sql, /employer_norm/);
+  assert.deepEqual(params, [ENTITY, ['Self-Funded', 'Fully Insured'], 51]);
+});
+
+test('VOB market: EMPTY / null employer+funding arrays are NO restriction (no semi-join, not zero rows)', () => {
+  for (const v of [[], null, undefined] as (string[] | null | undefined)[]) {
+    const { sql } = buildCmdExplorerQuery(null, { employers: v, funding: v }, SORT, 51, ENTITY);
+    assert.doesNotMatch(sql, /vob\.member_benefits_latest/, `employers/funding=${JSON.stringify(v)} must emit no VOB clause`);
+  }
+});
+
+test('search summary honors the VOB market filters the same way (grid + summary agree)', () => {
+  const nonEmpty = buildCmdSearchSummaryQueries({ funding: ['Self-Funded'] }, ENTITY);
+  assert.match(
+    nonEmpty.totals.sql,
+    /member_id_bidx in \(select member_id_bidx from vob\.member_benefits_latest where funding = any\(\$2::text\[\]\)\)/,
+  );
+  const empty = buildCmdSearchSummaryQueries({ employers: [], funding: [] }, ENTITY);
+  assert.doesNotMatch(empty.totals.sql, /vob\.member_benefits_latest/);
+});
+
+test('funding markets vocabulary is exactly the two stored values', () => {
+  assert.deepEqual([...CMD_FUNDING_MARKETS], ['Self-Funded', 'Fully Insured']);
+});
+
+test('employer options query: tenant-scoped, ILIKE on employer_norm, term escaped + bound ($1/$2/$3)', () => {
+  const { sql, params } = buildCmdEmployerOptionsQuery(ENTITY, 'boe%ing', 25);
+  assert.match(sql, /from vob\.member_benefits_latest/);
+  assert.match(sql, /employer_norm ilike \$2/);
+  assert.match(
+    sql,
+    /member_id_bidx in \(select member_id_bidx from collections\.cmd_explorer_rows where business_entity_id = any\(\$1::uuid\[\]\)\)/,
+  );
+  // returns the filter value (employer_norm) + a representative display name
+  assert.match(sql, /select employer_norm, max\(employer_name\) as employer_name/);
+  // LIKE metacharacter in the term is escaped, never interpolated
+  assert.deepEqual(params, [ENTITY, '%boe\\%ing%', 25]);
 });

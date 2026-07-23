@@ -63,6 +63,7 @@ import {
   buildCmdSearchSummaryQueries,
   buildCmdFacilityOptionsQuery,
   buildCmdPayerOptionsQuery,
+  buildCmdEmployerOptionsQuery,
   buildCohortCurveQueries,
   buildCohortTotalsQuery,
   buildCohortDrilldownQueries,
@@ -81,6 +82,8 @@ import {
   type CmdSearchGroup,
   type CmdComboGroup,
   type CmdFacilityOption,
+  type CmdEmployerOption,
+  type VobMarketFilter,
   type CohortCurvePoint,
   type CohortCurve,
   type CohortTotals,
@@ -95,6 +98,7 @@ export {
   CMD_EXPLORER_DEFAULT_SORT,
   CMD_SEARCH_TOP_N,
   CMD_EXPLORER_COLUMN_KEYS,
+  CMD_FUNDING_MARKETS,
   sanitizeGridColumns,
   resolveCmdExplorerSort,
   resolveCmdExplorerCursor,
@@ -111,6 +115,7 @@ export type {
   CmdComboGroup,
   CmdSearchSummary,
   CmdFacilityOption,
+  CmdEmployerOption,
   CohortCurvePoint,
   CohortCurve,
   CohortTotals,
@@ -1884,6 +1889,26 @@ export const cmdExplorerPayers = unstable_cache(
 );
 
 /**
+ * Employer options for the guided EMPLOYER type-ahead (non-PHI). UNLIKE facility/payer (~260 each,
+ * loaded whole and filtered client-side), there are ~11.6k distinct employers, so this is a
+ * SERVER-SIDE, per-keystroke search: the action passes the typed `term` (gated to >= min length) and
+ * a `limit`. Scoped to employers that actually appear for the caller's own members via the
+ * VOB↔collections member_id_bidx link (part of the cache key through entityIds), so a picked option
+ * always has rows. Employer is a plan-level dimension stored plaintext (like payer/facility) — NOT
+ * PHI. Rides its own 'cmd-employers' tag (the VOB set changes only on the VOB sync, not the payment
+ * cron), each (entityIds, term, limit) a separate warm entry. Reader-only.
+ */
+export const cmdExplorerEmployers = unstable_cache(
+  async (entityIds: string[], term: string, limit: number): Promise<CmdEmployerOption[]> => {
+    const { sql, params } = buildCmdEmployerOptionsQuery(entityIds, term, limit);
+    const { rows } = await readerExecutor().query<CmdEmployerOption>(sql, params);
+    return rows;
+  },
+  ['cmd-explorer-employers'],
+  { revalidate: 3600, tags: ['cmd-employers'] },
+);
+
+/**
  * Resolve ONE row's PHI by bigserial id: decrypt the 3 ciphertext columns in-process,
  * write a synchronous (fail-closed) audit record, then return the identifiers. The PHI
  * is never cached and never logged; absent id → null. Runs as claims_reader.
@@ -2072,8 +2097,9 @@ export async function loadQualifyFacilities(
   from: string,
   to: string,
   entityIds: string[],
+  market: VobMarketFilter = {},
 ): Promise<QualifyFacilityRow[]> {
-  const q = buildFacilityRankingQuery(payer, from, to, entityIds);
+  const q = buildFacilityRankingQuery(payer, from, to, entityIds, market);
   const { rows } = await readerExecutor().query<QualifyFacilityRow>(q.sql, q.params);
   return rows;
 }
@@ -2110,6 +2136,7 @@ export async function loadQualifyFacilityCases(
     groupToken: string | null;
     limit: number;
     allPayers?: boolean;
+    market?: VobMarketFilter;
   },
 ): Promise<QualifyClaimRow[]> {
   const q = buildFacilityCasesQuery(payer, facility, from, to, entityIds, opts);
@@ -2125,8 +2152,9 @@ export async function loadQualifyMovers(
   priorFrom: string,
   priorTo: string,
   entityIds: string[],
+  market: VobMarketFilter = {},
 ): Promise<QualifyMoverRow[]> {
-  const q = buildMoversQuery(thisFrom, thisTo, priorFrom, priorTo, entityIds);
+  const q = buildMoversQuery(thisFrom, thisTo, priorFrom, priorTo, entityIds, { market });
   const { rows } = await readerExecutor().query<QualifyMoverRow>(q.sql, q.params);
   return rows;
 }

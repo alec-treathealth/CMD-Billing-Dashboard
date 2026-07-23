@@ -68,6 +68,18 @@ export interface CmdExplorerFilter {
    * explorer UI now feeds this array.
    */
   primary_payers?: string[] | null;
+  /**
+   * VOB MARKET filters — the member's verified employer / funding, matched through the
+   * vob.member_benefits_current view on member_id_bidx (member-level; the bidx is tenant-agnostic).
+   * Set membership like `facility`/`primary_payers`: a NON-EMPTY array narrows, empty/absent is no
+   * restriction. `employers` matches employer_norm (the normalized, indexed employer key the
+   * type-ahead picker supplies); `funding` matches the market tag ('Self-Funded' / 'Fully Insured').
+   * SEMANTICS: the match is a SEMI-JOIN into the VOB set, so a charge whose member has NO VOB (or
+   * whose VOB doesn't match) is EXCLUDED whenever either filter is active — "no-VOB excluded" is
+   * intrinsic to the predicate, not a separate flag.
+   */
+  employers?: string[] | null;
+  funding?: string[] | null;
   from?: string | null; // 'YYYY-MM-DD' inclusive (payment_received >= from)
   to?: string | null; // 'YYYY-MM-DD' exclusive (payment_received < to)
   q?: string | null; // substring term (matched literally; LIKE metachars escaped)
@@ -93,6 +105,37 @@ export type ParamAdder = (v: unknown) => string;
 export function likeContains(term: string): string {
   const escaped = term.replace(/([\\%_])/g, '\\$1');
   return `%${escaped}%`;
+}
+
+/** The employer / funding market filter (the member's verified VOB employer + funding). */
+export interface VobMarketFilter {
+  employers?: string[] | null; // selected employer_norm values (type-ahead picker vocabulary)
+  funding?: string[] | null; // market tags: 'Self-Funded' / 'Fully Insured'
+}
+
+/**
+ * The VOB employer/funding market predicate, as a SEMI-JOIN on member_id_bidx:
+ *   `member_id_bidx in (select member_id_bidx from vob.member_benefits_current where <conds>)`
+ * Returns null when neither filter is active (a no-op). Shared by the collections grid/summary AND
+ * the qualify builders so the predicate and its column names (funding / employer_norm) live in ONE
+ * place. A SEMI-JOIN, not a JOIN: vob.member_benefits_current also has member_id_bidx, so joining it
+ * would make the callers' UNQUALIFIED member_id_bidx conditions ambiguous and force a FROM change.
+ * Both sub-conditions target the SAME (latest) VOB row per member. "No-VOB excluded" is intrinsic —
+ * a member absent from the subquery cannot satisfy the IN. Every value is bound via `add`.
+ */
+export function buildVobMarketSemiJoin(filter: VobMarketFilter, add: ParamAdder): string | null {
+  const vobConds: string[] = [];
+  if (Array.isArray(filter.funding) && filter.funding.length > 0) {
+    vobConds.push(`funding = any(${add(filter.funding)}::text[])`);
+  }
+  if (Array.isArray(filter.employers) && filter.employers.length > 0) {
+    vobConds.push(`employer_norm = any(${add(filter.employers)}::text[])`);
+  }
+  if (vobConds.length === 0) return null;
+  // vob.member_benefits_latest is the MATERIALIZED latest-per-member set (migration 0063), refreshed on
+  // each VOB load. It supersedes the plain vob.member_benefits_current view here: that view recomputed
+  // latest-per-member (~0.7–1.1s sort+DISTINCT over the whole table) on EVERY market-filtered query.
+  return `member_id_bidx in (select member_id_bidx from vob.member_benefits_latest where ${vobConds.join(' and ')})`;
 }
 
 /**
@@ -123,6 +166,11 @@ export function cmdExplorerBaseConds(
   if (Array.isArray(filter.primary_payers) && filter.primary_payers.length > 0) {
     conds.push(`primary_payer = any(${add(filter.primary_payers)}::text[])`);
   }
+  // VOB employer / funding market filters — shared semi-join helper (member_id_bidx IN (…); see
+  // buildVobMarketSemiJoin for why it's a semi-join, not a JOIN). Applies identically to the grid and
+  // every summary aggregate; "no-VOB excluded" is intrinsic when either filter is active.
+  const vobMarket = buildVobMarketSemiJoin(filter, add);
+  if (vobMarket) conds.push(vobMarket);
   if (filter.from) conds.push(`payment_received >= ${add(filter.from)}::date`);
   if (filter.to) conds.push(`payment_received < ${add(filter.to)}::date`);
   const term = typeof filter.q === 'string' ? filter.q.trim() : '';
@@ -202,6 +250,48 @@ export function buildCmdPayerOptionsQuery(entityIds: string[]): { sql: string; p
     'select distinct primary_payer from collections.cmd_explorer_rows ' +
     "where business_entity_id = any($1::uuid[]) and primary_payer is not null and btrim(primary_payer) <> '' " +
     'order by primary_payer';
+  return { sql, params };
+}
+
+/** The funding-market vocabulary — the exact stored values the `funding` filter matches. Static (a
+ *  two-value enum), so the UI renders a fixed toggle/tag set with no query. */
+export const CMD_FUNDING_MARKETS = ['Self-Funded', 'Fully Insured'] as const;
+
+/**
+ * One employer choice for the guided employer type-ahead. `employer_norm` is the EXACT filter value
+ * (what the grid/qualify `employers` filter matches — the normalized, indexed key); `employer_name`
+ * is a representative raw display name (several raw spellings can collapse to one norm), or null.
+ */
+export interface CmdEmployerOption {
+  employer_norm: string;
+  employer_name: string | null;
+}
+
+/**
+ * Distinct EMPLOYER options for the guided employer type-ahead. UNLIKE facility/payer (loaded once at
+ * ~260 each), there are ~11.6k distinct employers, so this is a SERVER-SIDE, per-keystroke search:
+ * the caller passes the typed `term` (gate a sub-CMD_SEARCH_TERM_MIN term client-side) and a `limit`.
+ * Tenant-scoped to employers that actually appear for the caller's own members (via the VOB↔collections
+ * member_id_bidx link) so a picked option always has rows. Returns the FILTER value (`employer_norm` —
+ * what the grid/qualify `employers` filter matches) plus a representative display `employer_name`
+ * (multiple raw names can share one norm). `term` is a LITERAL substring (LIKE metachars escaped);
+ * every value is bound ($1 entityIds, $2 pattern, $3 limit), every identifier a fixed literal.
+ */
+export function buildCmdEmployerOptionsQuery(
+  entityIds: string[],
+  term: string,
+  limit: number,
+): { sql: string; params: unknown[] } {
+  const params: unknown[] = [entityIds, likeContains(term), limit];
+  const sql =
+    'select employer_norm, max(employer_name) as employer_name ' +
+    // Materialized latest-per-member set (0063): the employer_norm trigram GIN index serves the
+    // leading-wildcard ILIKE, and the set is deduped once per load — not recomputed per keystroke.
+    'from vob.member_benefits_latest ' +
+    'where employer_norm is not null and employer_norm ilike $2 ' +
+    'and member_id_bidx in (select member_id_bidx from collections.cmd_explorer_rows ' +
+    'where business_entity_id = any($1::uuid[])) ' +
+    'group by employer_norm order by employer_norm limit $3';
   return { sql, params };
 }
 
