@@ -292,6 +292,29 @@ export function QualifyMobileApp({
     setPage(0);
   }
 
+  // Clear the current resolution → back to the neutral search prompt (never trapped on a payer). Bump
+  // resolveSeq FIRST so any in-flight resolve is discarded. Keeps the Heating-up chips + window; drops
+  // the resolved payer, list, filters, and any open sheet.
+  function clearSearch() {
+    resolveSeq.current += 1;
+    setQuery('');
+    setHint(null);
+    setEcho('');
+    setSnapshot(null);
+    setSearched(false);
+    setByPayer(null);
+    setLastSearch(null);
+    lastSearchRef.current = null;
+    setList([]);
+    setPage(0);
+    setAreaFilter(AREA_ALL);
+    setLocFilter(null);
+    setDetail(null);
+    setClaim(null);
+    clearReveal();
+    apply({ type: 'RESOLVE_PAYER', payer: null, facility: null, window: windowDays });
+  }
+
   // Area chip tap → narrow to that state WITHOUT re-resolving (filters apply at render); page resets.
   function onSelectArea(key: string) {
     if (!snapshot?.resolved) return;
@@ -510,6 +533,15 @@ export function QualifyMobileApp({
             <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'rgba(255,255,255,0.6)' }}>Qualify</div>
             <div className="ths-h" style={{ fontSize: 18, fontWeight: 600, color: '#fff' }}>Lead lookup</div>
           </div>
+          {(searched || query.trim() !== '') && (
+            <button
+              type="button"
+              onClick={clearSearch}
+              style={{ display: 'flex', alignItems: 'center', gap: 6, height: 32, padding: '0 12px', borderRadius: 999, background: 'rgba(255,255,255,0.1)', border: 'none', color: '#fff', fontSize: 12, fontWeight: 600 }}
+            >
+              <span>Clear</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={resetDeck}
