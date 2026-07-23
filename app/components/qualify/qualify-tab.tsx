@@ -39,13 +39,14 @@
  * dropped (Alec) because it is a different window shape than the contract's trailing-N-days math.
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useTransition } from 'react';
-import { Search } from 'lucide-react';
+import { Briefcase, Landmark, Search } from 'lucide-react';
 import {
   getQualifySnapshot,
   getQualifySnapshotByPayer,
   getQualifyFacilityCases,
   getQualifyPatientCohort,
   getQualifyMovers,
+  loadQualifyEmployers,
   revealQualifyRows,
 } from '@/lib/qualify/actions';
 import {
@@ -57,7 +58,10 @@ import {
   type QualifyMover,
   type QualifyPhi,
   type QualifyPatientCohort,
+  type QualifyMarket,
 } from '@/lib/qualify/contract';
+import type { CmdEmployerOption } from '@/lib/actions';
+import { MultiSelectTagPicker, type PickerOption } from '@/components/ui/multi-select-tag-picker';
 import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
 import { isIdentifierEmpty, identifierEmptyTerm } from '@/lib/qualify/qualifyGuards';
 import { buildFacilityBucketMap } from '@/components/qualify/colors';
@@ -131,6 +135,27 @@ export function QualifyTab({
   // Non-null when the CURRENT resolution came from the by-payer path (the on-load default or a payer chip),
   // so a window change re-resolves by payer instead of re-running an (empty) search.
   const [byPayer, setByPayer] = useState<string | null>(null);
+  // VOB MARKET narrows (employer / funding) enriched from the Indigo VOB benefits set. They scope the
+  // facility ranking, the cases drill, AND the "Heating up" movers — whenever either is active the read
+  // semi-joins into VOB (members with no matching VOB drop out). Employer is a SERVER type-ahead (the
+  // ~11.6k vocabulary is too large to load whole); funding is a static two-value tag set. `marketRef`
+  // lets the many fetch callbacks read the latest market without threading it through every dep array;
+  // a dedicated effect (keyed by marketKey) re-resolves the active view when the market changes.
+  const [employerSelection, setEmployerSelection] = useState<string[]>([]);
+  const [fundingSelection, setFundingSelection] = useState<string[]>([]);
+  const [employerOptions, setEmployerOptions] = useState<CmdEmployerOption[]>([]);
+  const [employerLoading, setEmployerLoading] = useState(false);
+  const [employerQuery, setEmployerQuery] = useState('');
+  const [employerDisplay, setEmployerDisplay] = useState<Map<string, string>>(() => new Map());
+  const market = useMemo<QualifyMarket | undefined>(() => {
+    const m: QualifyMarket = {};
+    if (employerSelection.length > 0) m.employers = employerSelection;
+    if (fundingSelection.length > 0) m.funding = fundingSelection;
+    return m.employers || m.funding ? m : undefined;
+  }, [employerSelection, fundingSelection]);
+  const marketRef = useRef(market);
+  marketRef.current = market;
+  const marketKey = `${employerSelection.join('\n')}|${fundingSelection.join('\n')}`;
   // True until the on-load auto-resolve of the top payer settles (so we show "Resolving…", not the
   // empty search prompt, on first paint).
   const [initializing, setInitializing] = useState(true);
@@ -175,7 +200,7 @@ export function QualifyTab({
   // display (ruling): no identifier/group narrow — the main-bar search already LANDED us here.
   const fetchSeed = useCallback(
     async (payer: string, facility: string, w: QualifyWindowDays): Promise<CasesPage> => {
-      const res = await getQualifyFacilityCases({ payer, facility, windowDays: w });
+      const res = await getQualifyFacilityCases({ payer, facility, windowDays: w, market: marketRef.current });
       return { claims: res.claims, capped: res.capped };
     },
     [],
@@ -195,7 +220,7 @@ export function QualifyTab({
       resetReveal();
       startFacilityTransition(async () => {
         try {
-          const res = await getQualifyFacilityCases({ payer, facility, windowDays: c.window });
+          const res = await getQualifyFacilityCases({ payer, facility, windowDays: c.window, market: marketRef.current });
           if (genRef.current !== gen) return; // superseded by a newer fetch (recency guard)
           if (cohortKey(cohortRef.current) !== key) return; // cohort changed underneath — stale landing
           setFacilityCases(res.claims);
@@ -232,7 +257,7 @@ export function QualifyTab({
     const gen = ++genRef.current; // this search is now the authoritative resolution
     startTransition(async () => {
       try {
-        const snap = await getQualifySnapshot({ query: trimmed, windowDays: w });
+        const snap = await getQualifySnapshot({ query: trimmed, windowDays: w, market: marketRef.current });
         const payerName = snap.resolved?.payerName ?? null;
         // Fix A: LAND ON the searched identifier's most-recent-claim facility (server-computed, already dropped
         // to null if it isn't a ranked facility), NOT rating rank-1. null → honest-empty (no ranked in-window
@@ -270,7 +295,7 @@ export function QualifyTab({
     const gen = ++genRef.current; // this chip resolve is now the authoritative resolution
     startTransition(async () => {
       try {
-        const snap = await getQualifySnapshotByPayer({ payer, windowDays: w });
+        const snap = await getQualifySnapshotByPayer({ payer, windowDays: w, market: marketRef.current });
         const payerName = snap.resolved?.payerName ?? null;
         const rank1 = snap.resolved ? snap.facilities[0]?.facilityKey ?? null : null;
         const seed = payerName && rank1 ? await fetchSeed(payerName, rank1, w) : EMPTY_PAGE;
@@ -301,7 +326,7 @@ export function QualifyTab({
       try {
         if (byPayer) {
           // PAYER path: re-resolve by payer; same payer → keep facility; changed → rank-1.
-          const snap = await getQualifySnapshotByPayer({ payer: byPayer, windowDays: w });
+          const snap = await getQualifySnapshotByPayer({ payer: byPayer, windowDays: w, market: marketRef.current });
           const payerName = snap.resolved?.payerName ?? null;
           if (genRef.current !== gen) return;
           if (payerName && payerName === prev.payer && next.facility) {
@@ -319,7 +344,7 @@ export function QualifyTab({
         } else {
           // SEARCH path: re-resolve the identifier and RE-LAND on its facility for the new window (Fix A), or
           // honest-empty (landing null). Pure display — no drill narrow to recompute.
-          const snap = await getQualifySnapshot({ query, windowDays: w });
+          const snap = await getQualifySnapshot({ query, windowDays: w, market: marketRef.current });
           const payerName = snap.resolved?.payerName ?? null;
           if (genRef.current !== gen) return;
           const landing = snap.identifierLandingFacility;
@@ -376,7 +401,7 @@ export function QualifyTab({
     const w = cohortRef.current.window;
     (async () => {
       try {
-        const m = await getQualifyMovers(w);
+        const m = await getQualifyMovers(w, marketRef.current);
         if (!alive) return;
         setMovers(m.movers);
         const top = m.movers[0]?.label;
@@ -403,7 +428,7 @@ export function QualifyTab({
       return;
     }
     let alive = true;
-    getQualifyMovers(cohort.window)
+    getQualifyMovers(cohort.window, marketRef.current)
       .then((m) => {
         if (alive) setMovers(m.movers);
       })
@@ -414,6 +439,72 @@ export function QualifyTab({
       alive = false;
     };
   }, [cohort.window]);
+
+  // Employer type-ahead: SERVER-side per-keystroke search (the ~11.6k vocabulary is too large to load
+  // whole). Debounced inline; a sub-3-char term yields an empty list without a round-trip. Results feed
+  // the picker AND accumulate into employerDisplay so a selected employer's tag keeps its friendly name.
+  useEffect(() => {
+    const q = employerQuery.trim();
+    if (q.length < 3) {
+      setEmployerOptions([]);
+      setEmployerLoading(false);
+      return;
+    }
+    let alive = true;
+    setEmployerLoading(true);
+    const t = setTimeout(() => {
+      loadQualifyEmployers(q)
+        .then((r) => {
+          if (!alive) return;
+          const opts = r.ok ? r.employers : [];
+          setEmployerOptions(opts);
+          if (opts.length > 0) {
+            setEmployerDisplay((prev) => {
+              const next = new Map(prev);
+              for (const o of opts) next.set(o.employer_norm, o.employer_name ?? o.employer_norm);
+              return next;
+            });
+          }
+          setEmployerLoading(false);
+        })
+        .catch(() => {
+          if (!alive) return;
+          setEmployerOptions([]);
+          setEmployerLoading(false);
+        });
+    }, 250);
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
+  }, [employerQuery]);
+
+  // Market change → re-resolve the ACTIVE view under the new employer/funding narrow (skip the mount run;
+  // the on-load effect already resolves). Refreshes the "Heating up" chips too, so they reflect the same
+  // market. Re-resolves by payer (chip/default) or re-runs the search — matching onWindow's two paths.
+  const marketInitDone = useRef(false);
+  useEffect(() => {
+    if (!marketInitDone.current) {
+      marketInitDone.current = true;
+      return;
+    }
+    let alive = true;
+    const w = cohortRef.current.window;
+    getQualifyMovers(w, marketRef.current)
+      .then((m) => {
+        if (alive) setMovers(m.movers);
+      })
+      .catch(() => {});
+    if (byPayer) {
+      resolveByPayer(byPayer, w);
+    } else if (hasSearched && query.trim().length >= MIN_QUERY_LEN) {
+      runSearch(query, w);
+    }
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [marketKey]);
 
   // PER-PATIENT reveal: expanding a patient group (or the singleton "Reveal" button) reveals THAT patient's
   // claims in ONE audited revealQualifyRows call. The ids are sliced to QUALIFY_REVEAL_BATCH_CAP so a rare
@@ -455,6 +546,27 @@ export function QualifyTab({
       })();
     },
     [canRevealPhi],
+  );
+
+  // --- VOB market picker handlers + options (employer type-ahead + funding tags) ------------------
+  const toggleEmployer = useCallback((value: string) => {
+    setEmployerSelection((prev) => (prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value]));
+  }, []);
+  const clearEmployers = useCallback(() => setEmployerSelection([]), []);
+  const toggleFunding = useCallback((value: string) => {
+    setFundingSelection((prev) => (prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value]));
+  }, []);
+  const clearFunding = useCallback(() => setFundingSelection([]), []);
+  const employerPickerOptions = useMemo<PickerOption[]>(
+    () => employerOptions.map((o) => ({ value: o.employer_norm, display: o.employer_name ?? o.employer_norm })),
+    [employerOptions],
+  );
+  const fundingPickerOptions = useMemo<PickerOption[]>(
+    () => [
+      { value: 'Self-Funded', display: 'Self-funded' },
+      { value: 'Fully Insured', display: 'Fully insured' },
+    ],
+    [],
   );
 
   const resolved = snapshot?.resolved ?? null;
@@ -532,6 +644,33 @@ export function QualifyTab({
               {w}d
             </button>
           ))}
+        </div>
+        {/* VOB market narrows (employer + funding), enriched from the Indigo VOB benefits set. On their
+            own row (w-full forces the wrap). Employer is a SERVER type-ahead; funding is a fixed tag set.
+            Both scope the ranking, the cases drill, AND the Heating-up chips via the VOB semi-join. */}
+        <div className="flex w-full flex-wrap items-end gap-3.5 border-t border-line pt-3">
+          <MultiSelectTagPicker
+            label="Employer"
+            placeholder="Type to find employers…"
+            icon={<Briefcase className="h-3.5 w-3.5" aria-hidden />}
+            options={employerPickerOptions}
+            selected={employerSelection}
+            onToggle={toggleEmployer}
+            onClear={clearEmployers}
+            onQueryChange={setEmployerQuery}
+            loading={employerLoading}
+            minChars={3}
+            displayOverride={employerDisplay}
+          />
+          <MultiSelectTagPicker
+            label="Funding"
+            placeholder="Self-funded / Fully insured…"
+            icon={<Landmark className="h-3.5 w-3.5" aria-hidden />}
+            options={fundingPickerOptions}
+            selected={fundingSelection}
+            onToggle={toggleFunding}
+            onClear={clearFunding}
+          />
         </div>
       </div>
       {hint ? <p className="px-1 text-xs text-status-warn">{hint}</p> : null}

@@ -19,7 +19,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState, useTransition, type ReactNode } from 'react';
 import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyMovers, revealQualifyRows } from '@/lib/qualify/actions';
 import { QUALIFY_WINDOW_OPTIONS, QUALIFY_REVEAL_BATCH_CAP, sniffQualifyKind } from '@/lib/qualify/contract';
-import type { QualifySnapshot, QualifyFacility, QualifyClaim, QualifyMover, QualifyWindowDays, QualifyPhi } from '@/lib/qualify/contract';
+import type { QualifySnapshot, QualifyFacility, QualifyClaim, QualifyMover, QualifyWindowDays, QualifyPhi, QualifyMarket } from '@/lib/qualify/contract';
 import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
 import { resolveLandingWins, drillLandingWins, isPayerChange, scopeFacilitiesForList, isIdentifierResolution, isIdentifierEmpty, identifierEmptyTerm } from '@/lib/qualify/qualifyGuards';
 import { filterFacilitiesByLoc, type QualifyLocFilter } from '@/lib/qualify/groupClaims';
@@ -30,6 +30,7 @@ import { DetailSheet } from '@/components/qualify/m/detail-sheet';
 import { ClaimDetailSheet } from '@/components/qualify/m/claim-detail-sheet';
 import { AreaChips, deriveAreaChips, facilitiesInArea, AREA_ALL } from '@/components/qualify/m/area-chips';
 import { HeatingUp } from '@/components/qualify/m/heating-up';
+import { MobileMarketFilter } from '@/components/qualify/m/market-filter';
 import { SwRegister } from '@/components/qualify/m/sw-register';
 import { SearchIcon, RefreshIcon } from '@/components/qualify/m/icons';
 
@@ -93,6 +94,20 @@ export function QualifyMobileApp({
   // inside the same resolve callback where setLastSearch hasn't applied yet. Null on the resolve-by-payer
   // path (payer-wide, ruling 3). Held ONLY here — never persisted to storage/URL, never logged.
   const lastSearchRef = useRef<string | null>(null);
+  // VOB MARKET narrows (employer / funding). They scope the ranking, the drill, AND the movers via the
+  // VOB semi-join. `marketRef` lets the async resolve/drill/movers paths read the latest market without
+  // threading it through every closure; a dedicated effect (keyed by marketKey) re-resolves on change.
+  const [employerSelection, setEmployerSelection] = useState<string[]>([]);
+  const [fundingSelection, setFundingSelection] = useState<string[]>([]);
+  const market = ((): QualifyMarket | undefined => {
+    const m: QualifyMarket = {};
+    if (employerSelection.length > 0) m.employers = employerSelection;
+    if (fundingSelection.length > 0) m.funding = fundingSelection;
+    return m.employers || m.funding ? m : undefined;
+  })();
+  const marketRef = useRef(market);
+  marketRef.current = market;
+  const marketKey = `${employerSelection.join('\n')}|${fundingSelection.join('\n')}`;
   const [echo, setEcho] = useState('');
   const [hint, setHint] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -127,7 +142,7 @@ export function QualifyMobileApp({
   // Effect A — keep the Heating-up movers in sync with the selected window (mount + every change).
   useEffect(() => {
     let alive = true;
-    getQualifyMovers(windowDays)
+    getQualifyMovers(windowDays, marketRef.current)
       .then((r) => { if (alive) setMovers(r.movers); })
       .catch(() => {});
     return () => { alive = false; };
@@ -146,6 +161,25 @@ export function QualifyMobileApp({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [movers]);
 
+  // Effect C — market change → re-resolve the ACTIVE view under the new employer/funding narrow (skip
+  // the mount run). Refreshes the Heating-up movers too (Effect A only re-fires on windowDays). Mirrors
+  // onWindow's two paths: re-resolve by payer (chip/default) or re-run the last search.
+  const marketInitDone = useRef(false);
+  useEffect(() => {
+    if (!marketInitDone.current) {
+      marketInitDone.current = true;
+      return;
+    }
+    let alive = true;
+    getQualifyMovers(windowDays, marketRef.current)
+      .then((r) => { if (alive) setMovers(r.movers); })
+      .catch(() => {});
+    if (byPayer) resolveByPayer(byPayer, windowDays);
+    else if (lastSearch) runSearch(lastSearch, windowDays);
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [marketKey]);
+
   function runSearch(raw: string, w: QualifyWindowDays) {
     const t = raw.trim();
     if (t.length < 3) {
@@ -157,7 +191,7 @@ export function QualifyMobileApp({
     const seq = ++resolveSeq.current;
     startTransition(async () => {
       try {
-        const snap = await getQualifySnapshot({ query: t, windowDays: w });
+        const snap = await getQualifySnapshot({ query: t, windowDays: w, market: marketRef.current });
         if (!resolveLandingWins(seq, resolveSeq.current)) return; // a newer resolve superseded this one — drop it
         setSnapshot(snap);
         setSearched(true);
@@ -195,7 +229,7 @@ export function QualifyMobileApp({
     const seq = ++resolveSeq.current;
     startTransition(async () => {
       try {
-        const snap = await getQualifySnapshotByPayer({ payer: label, windowDays: w });
+        const snap = await getQualifySnapshotByPayer({ payer: label, windowDays: w, market: marketRef.current });
         if (!resolveLandingWins(seq, resolveSeq.current)) return; // a newer resolve superseded this one — drop it
         setSnapshot(snap);
         setSearched(true);
@@ -273,7 +307,7 @@ export function QualifyMobileApp({
     // no term → payer-wide/all-payers, unchanged. The raw term stays in lastSearchRef (never logged/URL'd).
     const term = lastSearchRef.current;
     const filter = term ? (sniffQualifyKind(term) === 'member_id' ? { memberId: term } : { prefix: term }) : undefined;
-    getQualifyFacilityCases({ payer: c.payer, facility: c.facility, windowDays: c.window, allPayers: true, ...(filter ? { filter } : {}) })
+    getQualifyFacilityCases({ payer: c.payer, facility: c.facility, windowDays: c.window, allPayers: true, market: marketRef.current, ...(filter ? { filter } : {}) })
       .then((r) => {
         if (!drillLandingWins(seq, facilitySeq.current, key, cohortKey(cohortRef.current))) return;
         setFacilityCases(r.claims);
@@ -500,6 +534,13 @@ export function QualifyMobileApp({
           })}
         </div>
       </div>
+
+      <MobileMarketFilter
+        employers={employerSelection}
+        funding={fundingSelection}
+        onEmployersChange={setEmployerSelection}
+        onFundingChange={setFundingSelection}
+      />
 
       <HeatingUp movers={movers} windowDays={windowDays} onOpen={(label) => resolveByPayer(label, windowDays)} />
       <SwRegister />

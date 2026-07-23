@@ -259,3 +259,47 @@ test('buildFacilityCasesQuery: a group token adds an EXACT group_number_bidx pre
   const none = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH);
   assert.ok(!/group_number_bidx = /.test(none.sql), 'no group predicate when no token');
 });
+
+// ── VOB employer/funding MARKET filter mirrored into the qualify builders (shared semi-join) ──────────
+test('buildFacilityRankingQuery: a market funding filter adds the shared member_id_bidx semi-join, values bound', () => {
+  const { sql, params } = buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH, {
+    funding: ['Self-Funded'],
+  });
+  assert.match(
+    sql,
+    /member_id_bidx in \(select member_id_bidx from vob\.member_benefits_latest where funding = any\(\$5::text\[\]\)\) group by facility/,
+  );
+  assert.deepEqual(params[4], ['Self-Funded']);
+  assert.doesNotMatch(sql, /join vob\.member_benefits_latest/i, 'semi-join, never a JOIN into the FROM');
+});
+
+test('buildFacilityCasesQuery: a market employer filter narrows the inner WHERE via the semi-join', () => {
+  const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
+    market: { employers: ['BOEING'] },
+  });
+  assert.match(
+    sql,
+    /member_id_bidx in \(select member_id_bidx from vob\.member_benefits_latest where employer_norm = any\(\$6::text\[\]\)\)/,
+  );
+  assert.deepEqual(params[5], ['BOEING']);
+});
+
+test('buildMoversQuery: a market funding filter scopes the two-window population before the payer rollup', () => {
+  const { sql, params } = buildMoversQuery('2026-06-17', '2026-07-17', '2026-05-18', '2026-06-17', BOTH, {
+    market: { funding: ['Fully Insured'] },
+  });
+  assert.match(
+    sql,
+    /member_id_bidx in \(select member_id_bidx from vob\.member_benefits_latest where funding = any\(\$9::text\[\]\)\) group by primary_payer/,
+  );
+  assert.deepEqual(params[8], ['Fully Insured']);
+});
+
+test('qualify builders: NO market filter emits NO VOB clause (unchanged behavior)', () => {
+  const rank = buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH);
+  const cases = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH);
+  const movers = buildMoversQuery('2026-06-17', '2026-07-17', '2026-05-18', '2026-06-17', BOTH);
+  for (const q of [rank, cases, movers]) {
+    assert.doesNotMatch(q.sql, /vob\.member_benefits_latest/, 'no VOB clause without a market filter');
+  }
+});

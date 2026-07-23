@@ -14,9 +14,25 @@ export function isQualifyWindow(n: unknown): n is QualifyWindowDays {
   return typeof n === 'number' && WINDOW_SET.has(n);
 }
 
+/**
+ * VOB MARKET narrow — the member's verified employer(s) and/or funding market, from the Indigo VOB
+ * benefits set matched on member_id_bidx. `employers` are normalized employer_norm keys (the
+ * type-ahead's own values); `funding` are the market tags ('Self-Funded' / 'Fully Insured'). Both
+ * set-membership; empty/absent = no restriction. When either is active the underlying query is a
+ * SEMI-JOIN into VOB, so members with no matching VOB row drop out ("no-VOB excluded" is intrinsic).
+ * Structurally a VobMarketFilter (src/collections/cmdExplorerQuery) — kept dependency-free here so
+ * the client bundles no SQL builder. Sanitized (bounded + funding intersected) at the action boundary.
+ */
+export interface QualifyMarket {
+  employers?: string[];
+  funding?: string[];
+}
+
 export interface QualifyInput {
   query: string; // member ID OR alpha prefix — sniffed SERVER-SIDE
   windowDays: QualifyWindowDays;
+  /** Optional VOB employer/funding narrow applied to the facility ranking (see QualifyMarket). */
+  market?: QualifyMarket;
 }
 
 /**
@@ -27,6 +43,8 @@ export interface QualifyInput {
 export interface QualifyPayerInput {
   payer: string; // plaintext primary_payer label (non-PHI) — matched exactly against the rollup column
   windowDays: QualifyWindowDays;
+  /** Optional VOB employer/funding narrow applied to the facility ranking (see QualifyMarket). */
+  market?: QualifyMarket;
 }
 
 /**
@@ -50,6 +68,9 @@ export interface QualifyFacilityCasesInput {
    *                 index is materialized (0036/0059); a prefix index would be its own migration.
    *                 Composable with the member narrows (ANDed). */
   filter?: { prefix?: string; memberId?: string; group?: string };
+  /** Optional VOB employer/funding narrow — carried from the snapshot so the cases drill filters the
+   *  SAME market the ranking did (see QualifyMarket). Composable with the identifier/group narrows. */
+  market?: QualifyMarket;
   /** ALL-PAYERS facility view (mobile detail sheet): when true, the drill drops the `primary_payer = $payer`
    *  filter and returns EVERY payer's recent patients at the facility, each row tagged with its own payerName.
    *  `payer` is still passed (audit context) but not used to filter. Omitted/false = the single-payer drill

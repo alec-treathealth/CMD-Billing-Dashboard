@@ -25,11 +25,12 @@ import {
   ArrowUp,
   ArrowUpDown,
   Bookmark,
+  Briefcase,
   Building2,
-  Check,
   ChevronDown,
   Columns3,
   CreditCard,
+  Landmark,
   Eye,
   EyeOff,
   Fingerprint,
@@ -70,12 +71,14 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ControlSelect, Pager } from '@/components/data-grid';
+import { MultiSelectTagPicker, type PickerOption } from '@/components/ui/multi-select-tag-picker';
 import { PHI_MASK } from '@/lib/phi';
 import {
   loadCmdReport,
   loadCmdSearchSummary,
   loadCmdExplorerFacilities,
   loadCmdExplorerPayers,
+  loadCmdExplorerEmployers,
   loadCohortCurve,
   loadCohortDrilldown,
   generateCollectionsAiAnalysis,
@@ -93,6 +96,7 @@ import {
   type CmdExplorerSort,
   type CmdFacilityOption,
   type CmdFacilitiesResult,
+  type CmdEmployerOption,
   type GridViewsResult,
   type CohortCurve,
   type CohortCurvePoint,
@@ -361,6 +365,18 @@ export function CmdCollectionsExplorer({
   // loaded once per view (like facilities) and filtered client-side as the user types.
   const [payerOptions, setPayerOptions] = useState<string[]>([]);
   const [payerSelection, setPayerSelection] = useState<string[]>([]);
+  // VOB MARKET narrows (enrichment from the Indigo VOB benefits set, matched on member_id_bidx).
+  // Employer is a SERVER-side type-ahead (~11.6k distinct → too many to load whole): the picker's
+  // query is debounced and re-fetched per keystroke. `employerDisplay` remembers value→friendly-name
+  // for the selected tags (the current query's options may not include an already-picked employer).
+  // Funding is a STATIC two-value market ('Self-Funded' / 'Fully Insured'). Both scope grid + summary;
+  // whenever either is active the read is a semi-join into VOB → members with no matching VOB drop out.
+  const [employerSelection, setEmployerSelection] = useState<string[]>([]);
+  const [employerOptions, setEmployerOptions] = useState<CmdEmployerOption[]>([]);
+  const [employerLoading, setEmployerLoading] = useState(false);
+  const [employerQuery, setEmployerQuery] = useState('');
+  const [employerDisplay, setEmployerDisplay] = useState<Map<string, string>>(() => new Map());
+  const [fundingSelection, setFundingSelection] = useState<string[]>([]);
 
   // Searchable PHI (gated to canRevealPhi + audited server-side). These are matched via keyed
   // blind indexes (exact member ID / 3-char alpha prefix / exact group #) — the raw value is
@@ -403,6 +419,10 @@ export function CmdCollectionsExplorer({
     setRefinement(null);
     setFacilitySelection([]);
     setPayerSelection([]);
+    setEmployerSelection([]);
+    setFundingSelection([]);
+    setEmployerQuery('');
+    setEmployerOptions([]);
   }
 
   // Server-side sort. Default: most-recent Payment Received first.
@@ -478,9 +498,16 @@ export function CmdCollectionsExplorer({
 
   // A "search" is now any active guided selection: facility tags, payer tags, or a PHI lookup.
   // (The free-text term + column-scoped substring search were removed with the search bar.)
-  const hasAnySearch = facilitySelection.length > 0 || payerSelection.length > 0 || hasPhiSearch;
+  const hasAnySearch =
+    facilitySelection.length > 0 ||
+    payerSelection.length > 0 ||
+    employerSelection.length > 0 ||
+    fundingSelection.length > 0 ||
+    hasPhiSearch;
   // Stable dep keys for the selection sets (array identity changes on every toggle otherwise).
   const payerKey = payerSelection.join('\n');
+  const employerKey = employerSelection.join('\n');
+  const fundingKey = fundingSelection.join('\n');
   const facilityKey = facilitySelection.join(''); // control char can't appear in a facility name
 
   // --- dual-mode yield + AI-analysis input assembly ------------------------
@@ -564,6 +591,20 @@ export function CmdCollectionsExplorer({
     () => payerOptions.map((p) => ({ value: p, display: p })),
     [payerOptions],
   );
+  // Employer options are SERVER-fetched per query (see the type-ahead effect); value = employer_norm
+  // (the exact filter value), display = a representative raw employer name.
+  const employerPickerOptions = useMemo<PickerOption[]>(
+    () => employerOptions.map((o) => ({ value: o.employer_norm, display: o.employer_name ?? o.employer_norm })),
+    [employerOptions],
+  );
+  // Funding is a STATIC two-value market vocabulary (the exact stored `funding` values).
+  const fundingPickerOptions = useMemo<PickerOption[]>(
+    () => [
+      { value: 'Self-Funded', display: 'Self-funded' },
+      { value: 'Fully Insured', display: 'Fully insured' },
+    ],
+    [],
+  );
 
   // Load the tenant-scoped facility options for the multi-select whenever the view changes.
   useEffect(() => {
@@ -600,6 +641,43 @@ export function CmdCollectionsExplorer({
       live = false;
     };
   }, [view]);
+
+  // Employer type-ahead: SERVER-side per-keystroke search (the ~11.6k vocabulary is too large to load
+  // whole). The debounced query drives loadCmdExplorerEmployers; a sub-3-char term yields an empty list
+  // server-side. Results feed the picker's dropdown AND accumulate into employerDisplay so an
+  // already-selected employer's tag keeps its friendly name even after the query (options) moves on.
+  const dEmployerQuery = useDebouncedValue(employerQuery, 250).trim();
+  useEffect(() => {
+    if (dEmployerQuery.length < 3) {
+      setEmployerOptions([]);
+      setEmployerLoading(false);
+      return;
+    }
+    let live = true;
+    setEmployerLoading(true);
+    loadCmdExplorerEmployers(dEmployerQuery, view)
+      .then((r) => {
+        if (!live) return;
+        const opts = r.ok ? r.employers : [];
+        setEmployerOptions(opts);
+        if (opts.length > 0) {
+          setEmployerDisplay((prev) => {
+            const next = new Map(prev);
+            for (const o of opts) next.set(o.employer_norm, o.employer_name ?? o.employer_norm);
+            return next;
+          });
+        }
+        setEmployerLoading(false);
+      })
+      .catch(() => {
+        if (!live) return;
+        setEmployerOptions([]);
+        setEmployerLoading(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [dEmployerQuery, view]);
 
   // Dismiss the Month/Year popover on outside pointer-down or Escape — the SAME dismiss behavior as
   // the view-switcher dropdown (D). Listeners attach only while it's open. (The popover holds
@@ -667,6 +745,8 @@ export function CmdCollectionsExplorer({
       facility?: string[];
       primary_payer?: string;
       primary_payers?: string[];
+      employers?: string[];
+      funding?: string[];
       cpt_code?: string;
       revenue_code?: string;
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
@@ -679,6 +759,10 @@ export function CmdCollectionsExplorer({
       f.month = month;
     }
     if (payerSelection.length > 0) f.primary_payers = payerSelection;
+    // VOB market narrows (employer / funding) — top-level scope like facility/payer; a non-empty set
+    // narrows via the server semi-join into VOB (members with no matching VOB drop out).
+    if (employerSelection.length > 0) f.employers = employerSelection;
+    if (fundingSelection.length > 0) f.funding = fundingSelection;
     // Facility multi-select is a top-level scope; a facility drill-down chip narrows to that ONE
     // facility (overriding the dropdown). Payer/CPT chips stay exact single-value refinements.
     if (facilitySelection.length > 0) f.facility = facilitySelection;
@@ -709,9 +793,9 @@ export function CmdCollectionsExplorer({
     }
     return f;
     // year only matters when a specific month is chosen (see original rationale); facilityKey is the
-    // stable proxy for facilitySelection's contents.
+    // stable proxy for facilitySelection's contents (employerKey/fundingKey likewise).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
+  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, fundingKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
 
   const loadPage = useCallback(
     async (
@@ -792,9 +876,15 @@ export function CmdCollectionsExplorer({
       recencyDays?: number;
       facility?: string[];
       primary_payers?: string[];
+      employers?: string[];
+      funding?: string[];
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
     } = {};
     if (payerSelection.length > 0) f.primary_payers = payerSelection;
+    // VOB market narrows scope the summary identically to the grid, so the drill lists describe the
+    // SAME (VOB-narrowed) population the grid shows.
+    if (employerSelection.length > 0) f.employers = employerSelection;
+    if (fundingSelection.length > 0) f.funding = fundingSelection;
     // Top-level scope (date window + facility set) applies to the summary too — so the drill lists
     // describe the SAME population the grid shows. The chip refinement does NOT (it's a within-
     // results drill; the chips stay a stable facet navigator while drilling).
@@ -824,7 +914,7 @@ export function CmdCollectionsExplorer({
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, view]);
+  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, fundingKey, view]);
 
   // Fetch the alpha-prefix cohort curve when a ≥3-char alpha-prefix search is active (PHI-gated).
   // Independent of the term/window/facility filters: the cohort is defined solely by the prefix +
@@ -954,6 +1044,22 @@ export function CmdCollectionsExplorer({
   }
   function clearPayers() {
     setPayerSelection([]);
+  }
+  function toggleEmployer(value: string) {
+    setEmployerSelection((prev) =>
+      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
+    );
+  }
+  function clearEmployers() {
+    setEmployerSelection([]);
+  }
+  function toggleFunding(value: string) {
+    setFundingSelection((prev) =>
+      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
+    );
+  }
+  function clearFunding() {
+    setFundingSelection([]);
   }
 
   /** Pick a rolling recency window (toggle off if re-clicked); clears any Month/Year selection. */
@@ -1093,6 +1199,32 @@ export function CmdCollectionsExplorer({
             selected={payerSelection}
             onToggle={togglePayer}
             onClear={clearPayers}
+          />
+          {/* VOB market narrows (employer + funding), enriched from the Indigo VOB benefits set.
+              Employer is a SERVER-side type-ahead (onQueryChange + loading) — the vocabulary is far too
+              large to load whole; funding is a fixed two-value tag set. Both semi-join into VOB, so an
+              active narrow drops any charge whose member has no matching VOB row. */}
+          <MultiSelectTagPicker
+            label="Employer"
+            placeholder="Type to find employers…"
+            icon={<Briefcase className="h-3.5 w-3.5" aria-hidden />}
+            options={employerPickerOptions}
+            selected={employerSelection}
+            onToggle={toggleEmployer}
+            onClear={clearEmployers}
+            onQueryChange={setEmployerQuery}
+            loading={employerLoading}
+            minChars={3}
+            displayOverride={employerDisplay}
+          />
+          <MultiSelectTagPicker
+            label="Funding"
+            placeholder="Self-funded / Fully insured…"
+            icon={<Landmark className="h-3.5 w-3.5" aria-hidden />}
+            options={fundingPickerOptions}
+            selected={fundingSelection}
+            onToggle={toggleFunding}
+            onClear={clearFunding}
           />
 
           {/* Unified time window (A): ONE segmented control — [7d][14d][30d][90d][Month/Year ▾].
@@ -1437,184 +1569,6 @@ export function CmdCollectionsExplorer({
           }}
         />
       </div>
-    </div>
-  );
-}
-
-/**
- * The facility multi-select popover — the "which facilities' rows do I see" control. Empty selection
- * = ALL facilities, communicated explicitly at the top so the empty state never reads as
- * "broken / nothing selected". Offers
- * Select all / Clear, per-care-setting group selects (All IP / All OP, shown only when that group
- * exists — a facility classified BOTH counts for both), and individual checkboxes with a care-setting
- * badge. A full-screen invisible backdrop closes it on outside click.
- */
-/** One option in a guided picker. `value` is the raw filter value the grid matches on; `display`
- *  is the friendly label shown; `badge` (facility only) shows the IP/OP/Both care setting. */
-type PickerOption = { value: string; display: string; badge?: 'IP' | 'OP' | 'BOTH' | null };
-
-/**
- * Guided multi-select "type-ahead + tags" picker — the search primitive that replaces the old
- * free-text bar + facility dropdown. The parent loads the full option list ONCE (facility ~30,
- * payer ~260 per tenant), so filtering is instant client-side as the user types — no per-keystroke
- * server round-trip. Selected values render as removable tags inside the control; a filtered list
- * drops below on focus/typing (capped, with a "keep typing" hint past the cap). Matches the
- * dashboard token system — no new design language.
- */
-function MultiSelectTagPicker({
-  label,
-  placeholder,
-  icon,
-  options,
-  selected,
-  onToggle,
-  onClear,
-}: {
-  label: string;
-  placeholder: string;
-  icon: React.ReactNode;
-  options: PickerOption[];
-  selected: string[];
-  onToggle: (value: string) => void;
-  onClear: () => void;
-}) {
-  const [query, setQuery] = useState('');
-  const [open, setOpen] = useState(false);
-  const boxRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const selectedSet = useMemo(() => new Set(selected), [selected]);
-  const displayOf = useMemo(() => new Map(options.map((o) => [o.value, o.display])), [options]);
-
-  // Dismiss on outside pointer-down or Escape (same pattern as the Month/Year + view-switcher popovers).
-  useEffect(() => {
-    if (!open) return;
-    function onDown(e: PointerEvent) {
-      if (!boxRef.current?.contains(e.target as Node)) setOpen(false);
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setOpen(false);
-    }
-    document.addEventListener('pointerdown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('pointerdown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
-
-  const q = query.trim().toLowerCase();
-  const CAP = 50;
-  const matches = useMemo(
-    () => (q === '' ? options : options.filter((o) => o.display.toLowerCase().includes(q))),
-    [options, q],
-  );
-  const shown = matches.slice(0, CAP);
-
-  return (
-    <div ref={boxRef} className="relative min-w-[15rem] flex-1">
-      <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-        {icon}
-        {label}
-        {selected.length > 0 && (
-          <button
-            type="button"
-            onClick={onClear}
-            className="ml-auto font-normal normal-case text-ink400 underline-offset-2 transition-colors hover:text-[var(--brand-ink)] hover:underline"
-          >
-            Clear {selected.length}
-          </button>
-        )}
-      </div>
-      <div
-        onClick={() => {
-          setOpen(true);
-          inputRef.current?.focus();
-        }}
-        className={[
-          'flex min-h-10 w-full flex-wrap items-center gap-1 rounded-lg border bg-surface px-2 py-1.5 text-sm transition-colors',
-          open ? 'border-[var(--brand-accent)] ring-2 ring-[var(--brand-accent)]/25' : 'border-line',
-        ].join(' ')}
-      >
-        {selected.map((v) => (
-          <span
-            key={v}
-            className="inline-flex max-w-[16rem] items-center gap-1 rounded-md bg-[var(--brand-soft)] py-0.5 pl-2 pr-1 text-xs font-medium text-[var(--brand-ink)]"
-          >
-            <span className="truncate">{displayOf.get(v) ?? v}</span>
-            <button
-              type="button"
-              aria-label={`Remove ${displayOf.get(v) ?? v}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                onToggle(v);
-              }}
-              className="shrink-0 rounded transition-colors hover:text-[var(--brand-accent)]"
-            >
-              <X className="h-3 w-3" aria-hidden />
-            </button>
-          </span>
-        ))}
-        <input
-          ref={inputRef}
-          value={query}
-          onChange={(e) => {
-            setQuery(e.target.value);
-            setOpen(true);
-          }}
-          onFocus={() => setOpen(true)}
-          placeholder={selected.length === 0 ? placeholder : 'Add more…'}
-          aria-label={label}
-          className="h-6 min-w-[6rem] flex-1 bg-transparent text-sm text-ink900 outline-none placeholder:text-ink400"
-        />
-      </div>
-      {open && (
-        <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-64 overflow-y-auto rounded-lg border border-line bg-surface p-1 shadow-ths animate-ths-reveal">
-          {options.length === 0 ? (
-            <p className="px-2 py-2 text-xs text-ink400">Loading…</p>
-          ) : shown.length === 0 ? (
-            <p className="px-2 py-2 text-xs text-ink400">No matches for “{query.trim()}”.</p>
-          ) : (
-            shown.map((o) => {
-              const on = selectedSet.has(o.value);
-              return (
-                <button
-                  key={o.value}
-                  type="button"
-                  onClick={() => onToggle(o.value)}
-                  aria-pressed={on}
-                  className={[
-                    'flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
-                    on ? 'bg-[var(--brand-soft)]' : 'hover:bg-[var(--brand-soft)]',
-                  ].join(' ')}
-                >
-                  <span className="flex min-w-0 items-center gap-1.5">
-                    <Check
-                      className={['h-3.5 w-3.5 shrink-0 text-[var(--brand-accent)]', on ? '' : 'opacity-0'].join(' ')}
-                      aria-hidden
-                    />
-                    <span className="truncate text-ink900">{o.display}</span>
-                  </span>
-                  {o.badge !== undefined && (
-                    <span
-                      className={[
-                        'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium',
-                        o.badge ? 'bg-[var(--brand-soft)] text-[var(--brand-ink)]' : 'text-ink400',
-                      ].join(' ')}
-                    >
-                      {o.badge ?? 'Other'}
-                    </span>
-                  )}
-                </button>
-              );
-            })
-          )}
-          {matches.length > CAP && (
-            <p className="px-2 py-1.5 text-[11px] text-ink400">
-              Showing first {CAP} of {matches.length.toLocaleString()} — keep typing to narrow.
-            </p>
-          )}
-        </div>
-      )}
     </div>
   );
 }

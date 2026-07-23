@@ -23,7 +23,12 @@
  * them in the action layer (single choke point), never here.
  */
 import { assertEntityScope } from './entityScope.js';
-import { CMD_EXPLORER_CHARGE_ROLLUP, type ParamAdder } from './cmdExplorerQuery.js';
+import {
+  CMD_EXPLORER_CHARGE_ROLLUP,
+  buildVobMarketSemiJoin,
+  type ParamAdder,
+  type VobMarketFilter,
+} from './cmdExplorerQuery.js';
 
 /** A member-id EXACT match vs a 3-letter alpha-PREFIX match — sniffed server-side, never client-declared. */
 export type QualifyMatchKind = 'member_id' | 'prefix';
@@ -176,6 +181,7 @@ export function buildFacilityRankingQuery(
   from: string,
   to: string,
   entityIds: string[],
+  market: VobMarketFilter = {},
 ): { sql: string; params: unknown[] } {
   const ent = assertEntityScope(entityIds, 'buildFacilityRankingQuery');
   const { params, add } = paramList();
@@ -183,6 +189,9 @@ export function buildFacilityRankingQuery(
   const p = add(payer);
   const f = add(from);
   const t = add(to);
+  // VOB employer/funding market narrow (semi-join; no-VOB excluded when active). Same helper the
+  // collections grid uses, so the two surfaces filter the market identically.
+  const mj = buildVobMarketSemiJoin(market, add);
   // Coverage triple (0059 trust signal): the three FILTER sets are the SQL MIRROR of
   // confidence.ts's buckets (confirmed = a/cd/e1 · estimate = e2 · unknown = b/none) — SQL cannot
   // import TS, so test/qualifyConfidence.test.ts asserts the two stay in lockstep. They sum to
@@ -198,6 +207,7 @@ export function buildFacilityRankingQuery(
     `where business_entity_id = any(${e}::uuid[]) and primary_payer = ${p} ` +
     `and payment_received >= ${f}::date and payment_received < ${t}::date ` +
     "and facility is not null and btrim(facility) <> '' " +
+    (mj ? `and ${mj} ` : '') +
     'group by facility';
   const sql =
     'select agg.facility, agg.line_count, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
@@ -297,6 +307,10 @@ export function buildFacilityCasesQuery(
      *  claims at the facility come back (each row tagged with its own primary_payer). `payer` is then
      *  UNUSED here (not bound). Blank payers are excluded so every row groups under a real payer chip. */
     allPayers?: boolean;
+    /** VOB employer/funding market narrow (real verified employer + funding). Composable with the
+     *  member/prefix/group narrows above; a semi-join, so a claim whose member has no matching VOB is
+     *  excluded when this is active. Complements the older group_number "employer proxy". */
+    market?: VobMarketFilter;
   } = {},
 ): { sql: string; params: unknown[] } {
   const ent = assertEntityScope(entityIds, 'buildFacilityCasesQuery');
@@ -320,6 +334,8 @@ export function buildFacilityCasesQuery(
       : '';
   // Group-number narrow (EXACT; the employer proxy) — independent of the member narrow, so both can apply.
   const grpCond = opts.groupToken ? ` and group_number_bidx = ${add(opts.groupToken)}` : '';
+  // VOB employer/funding market narrow (real employer data; complements the group_number proxy above).
+  const marketCond = buildVobMarketSemiJoin(opts.market ?? {}, add);
   // CLAIM GRAIN: one row per charge (the 0050 rollup is already charge-grain, so no aggregation) — the outer
   // GROUP BY agg.id only collapses FACILITY_DIM_JOINS fan-out (facility_name is not unique-constrained).
   const inner =
@@ -345,7 +361,8 @@ export function buildFacilityCasesQuery(
     `where business_entity_id = any(${e}::uuid[])${payerCond} and facility = ${fac} ` +
     `and payment_received >= ${f}::date and payment_received < ${t}::date` +
     idCond +
-    grpCond;
+    grpCond +
+    (marketCond ? ` and ${marketCond}` : '');
   // NO keyset cursor: the drill returns the WHOLE (facility, payer, window) set in one shot (bounded). We
   // OVER-FETCH by one (limit+1) purely so the caller detects truncation at the QUALIFY_CASES_MAX safety cap
   // (the `capped` flag) from the extra row — never a count.
@@ -382,7 +399,7 @@ export function buildMoversQuery(
   priorFrom: string,
   priorTo: string,
   entityIds: string[],
-  opts: { minPatients?: number; minCharges?: number; topN?: number } = {},
+  opts: { minPatients?: number; minCharges?: number; topN?: number; market?: VobMarketFilter } = {},
 ): { sql: string; params: unknown[] } {
   const ent = assertEntityScope(entityIds, 'buildMoversQuery');
   const minPatients = Math.max(QUALIFY_MOVERS_MIN_PATIENTS, opts.minPatients ?? QUALIFY_MOVERS_MIN_PATIENTS);
@@ -397,6 +414,9 @@ export function buildMoversQuery(
   const minp = add(minPatients);
   const minc = add(minCharges);
   const lim = add(topN);
+  // VOB employer/funding market narrow — scopes the whole two-window population before the payer
+  // rollup (semi-join; no-VOB members excluded when active).
+  const mj = buildVobMarketSemiJoin(opts.market ?? {}, add);
   // Scan ONCE across the union [priorFrom, thisTo); FILTER splits the two windows. The outer WHERE
   // uses CTE column names (aliases can't appear in HAVING, so the floor lives in the outer query).
   const sql =
@@ -409,6 +429,7 @@ export function buildMoversQuery(
     `where business_entity_id = any(${e}::uuid[]) ` +
     "and primary_payer is not null and btrim(primary_payer) <> '' " +
     `and payment_received >= ${pf}::date and payment_received < ${tt}::date ` +
+    (mj ? `and ${mj} ` : '') +
     'group by primary_payer' +
     ') ' +
     'select primary_payer, this_patients, prior_patients, (this_patients - prior_patients) as delta_patients ' +
