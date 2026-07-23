@@ -259,6 +259,23 @@ export interface QualifyMovers {
   tenantScope: typeof QUALIFY_TENANT_SCOPE;
 }
 
+/**
+ * The combined ON-LOAD payload (perf): the "Heating up" movers + the auto-resolved top payer's
+ * snapshot + its rank-1 facility's seed cases, computed in ONE server round-trip instead of the
+ * client waterfall (movers → resolve-by-payer → seed cases = 3 serial round-trips). The server runs
+ * the SAME three cores back-to-back, so audits + gating + amounts-stripping are identical; only the
+ * client hops between them are removed. `snapshot`/`topPayer`/`seedFacility` are null when there are
+ * no movers (empty board) — the client then shows the empty search prompt.
+ */
+export interface QualifyInitial {
+  movers: QualifyMover[];
+  topPayer: string | null; // the auto-resolved mover label (drives byPayer for window re-resolves)
+  snapshot: QualifySnapshot | null;
+  seedFacility: string | null; // rank-1 facilityKey the cases were seeded for
+  seedCases: QualifyClaim[];
+  seedCapped: boolean;
+}
+
 /** PHI unmasked by an audited Qualify reveal (mirrors the collections CmdExplorerPhi shape exactly —
  *  all three are nullable: decryptPhi returns null for an absent ciphertext). */
 export interface QualifyPhi {

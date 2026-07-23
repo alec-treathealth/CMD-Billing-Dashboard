@@ -29,6 +29,7 @@ import {
   getQualifySnapshotByPayerCore,
   getQualifyFacilityCasesCore,
   getQualifyMoversCore,
+  getQualifyInitialCore,
   getQualifyPatientCohortCore,
   revealQualifyRowCore,
   revealQualifyRowsCore,
@@ -43,6 +44,7 @@ import type {
   QualifyPatientCohort,
   QualifySnapshot,
   QualifyMovers,
+  QualifyInitial,
   QualifyMarket,
   QualifyWindowDays,
   RevealQualifyRowResult,
@@ -115,6 +117,14 @@ export async function getQualifyMovers(
   market?: QualifyMarket,
 ): Promise<QualifyMovers> {
   return getQualifyMoversCore(realDeps, windowDays, sanitizeMarket(market));
+}
+
+/** Combined on-load: movers + auto-resolved top-payer snapshot + rank-1 seed cases in ONE round-trip. */
+export async function getQualifyInitial(
+  windowDays: QualifyWindowDays,
+  market?: QualifyMarket,
+): Promise<QualifyInitial> {
+  return getQualifyInitialCore(realDeps, windowDays, sanitizeMarket(market));
 }
 
 /** Phase 3: the patient-group "View cohort" slide-over — audited, floor-gated, dollar-stripped in core. */

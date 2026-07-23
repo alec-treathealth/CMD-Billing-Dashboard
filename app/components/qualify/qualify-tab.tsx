@@ -46,6 +46,7 @@ import {
   getQualifyFacilityCases,
   getQualifyPatientCohort,
   getQualifyMovers,
+  getQualifyInitial,
   loadQualifyEmployers,
   revealQualifyRows,
 } from '@/lib/qualify/actions';
@@ -393,19 +394,29 @@ export function QualifyTab({
     })();
   }, []);
 
-  // On load, land POPULATED: fetch the "Heating up" movers (for the quick-pick chip row) and resolve
-  // the top one (highest distinct-patient mover). If there are no movers or the fetch fails, fall
-  // through to the empty search prompt. Runs once.
+  // On load, land POPULATED in ONE round-trip: getQualifyInitial returns the "Heating up" movers +
+  // the auto-resolved top payer's snapshot + its rank-1 seed cases together (replacing the old
+  // movers → resolve → seed client waterfall — the perf fix). Commit atomically like resolveByPayer
+  // does. No movers / failure → the empty search prompt. Guarded by genRef so a user search issued
+  // before this lands is not clobbered. Runs once.
   useEffect(() => {
     let alive = true;
     const w = cohortRef.current.window;
+    const gen = ++genRef.current; // the on-load resolution is authoritative until a user action supersedes it
     (async () => {
       try {
-        const m = await getQualifyMovers(w, marketRef.current);
-        if (!alive) return;
-        setMovers(m.movers);
-        const top = m.movers[0]?.label;
-        if (top) resolveByPayer(top, w);
+        const init = await getQualifyInitial(w, marketRef.current);
+        if (!alive || genRef.current !== gen) return;
+        setMovers(init.movers);
+        if (init.snapshot && init.topPayer) {
+          commitResolved(
+            init.snapshot,
+            { type: 'RESOLVE_PAYER', payer: init.snapshot.resolved?.payerName ?? null, facility: init.seedFacility, window: w },
+            { claims: init.seedCases, capped: init.seedCapped },
+          );
+          setHasSearched(true);
+          setByPayer(init.topPayer);
+        }
       } catch {
         // leave the empty prompt — the user can still search
       } finally {
