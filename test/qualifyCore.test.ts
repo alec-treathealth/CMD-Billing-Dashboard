@@ -5,6 +5,7 @@ import {
   getQualifySnapshotByPayerCore,
   getQualifyFacilityCasesCore,
   getQualifyMoversCore,
+  getQualifyInitialCore,
   getQualifyPatientCohortCore,
   revealQualifyRowCore,
   revealQualifyRowsCore,
@@ -169,6 +170,38 @@ test('movers: carries NO dollar fields for either capability state', async () =>
     assert.ok(!wire.includes('billedAmount') && !wire.includes('allowedAmount'), 'no dollar keys in movers');
     assert.ok(!wire.includes(String(B1)) && !wire.includes(String(A2)), 'no dollar values in movers');
   }
+});
+
+// ── on-load combined action (perf): movers + top-payer snapshot + rank-1 seed cases in ONE call ──────
+test('initial: combines movers + top-payer snapshot + rank-1 seed cases, preserving BOTH audits', async () => {
+  const c = cap();
+  const init = await getQualifyInitialCore(makeDeps(SUPER, c), 30);
+  assert.equal(init.movers.length, 2); // AETNA, CIGNA
+  assert.equal(init.topPayer, 'AETNA'); // top mover (delta 30)
+  assert.equal(init.snapshot?.resolved?.payerName, 'AETNA');
+  assert.equal(init.snapshot?.facilities.length, 2);
+  // seeded the rank-1 facility's cases (facilityKey of facilities[0], the value-first winner)
+  assert.equal(init.seedFacility, init.snapshot?.facilities[0]?.facilityKey);
+  assert.ok(init.seedFacility);
+  assert.equal(init.seedCases.length, 1);
+  assert.equal(init.seedCapped, false);
+  // composition preserves the SAME audits the un-combined waterfall emitted: resolve + drill.
+  const actions = c.audits.map((a) => a.action);
+  assert.ok(actions.includes(SEARCH_QUALIFY_PAYER), 'resolve-by-payer audited');
+  assert.ok(actions.includes(SEARCH_QUALIFY_FACILITY), 'seed-cases (facility drill) audited');
+});
+
+test('initial: no movers → empty-prompt shape (all nulls); no resolve or seed happens', async () => {
+  const c = cap();
+  const init = await getQualifyInitialCore(makeDeps(SUPER, c, { loadMovers: async () => [] }), 30);
+  assert.equal(init.movers.length, 0);
+  assert.equal(init.topPayer, null);
+  assert.equal(init.snapshot, null);
+  assert.equal(init.seedFacility, null);
+  assert.equal(init.seedCases.length, 0);
+  assert.equal(init.seedCapped, false);
+  assert.equal(c.audits.filter((a) => a.action === SEARCH_QUALIFY_PAYER).length, 0, 'no resolve → no payer audit');
+  assert.equal(c.facilityCasesArgs.length, 0, 'no seed → no cases fetch');
 });
 
 // ── #3 CROSS-TENANT dual-entity end-to-end (finding 2a) ──────────────────────────────────────────
