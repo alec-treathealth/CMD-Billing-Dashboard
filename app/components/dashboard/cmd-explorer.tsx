@@ -39,22 +39,12 @@ import {
   Minus,
   RotateCcw,
   Save,
+  Sparkles,
   Star,
-  Table2,
   Trash2,
   TrendingDown,
   X,
 } from 'lucide-react';
-import {
-  Bar,
-  ComposedChart,
-  Line,
-  ReferenceLine,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
 import {
   DndContext,
   KeyboardSensor,
@@ -88,6 +78,8 @@ import {
   loadCmdExplorerPayers,
   loadCohortCurve,
   loadCohortDrilldown,
+  generateCollectionsAiAnalysis,
+  type CollectionsAiAnalysisResult,
   revealCmdReportRows,
   listGridViews,
   saveGridView,
@@ -110,6 +102,13 @@ import {
 } from '@/lib/actions';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../../src/collections/cmdExplorer';
 import { deriveGridLayout } from '../../../src/collections/gridViewLayout';
+import {
+  isSufficientForAi,
+  parseAiSections,
+  INSUFFICIENT_COPY,
+  AI_SECTIONS,
+  type CollectionsAiInput,
+} from '../../../src/collections/aiAnalysis';
 import type { DashboardView } from '@/lib/views';
 
 type ColKey =
@@ -483,6 +482,64 @@ export function CmdCollectionsExplorer({
   // Stable dep keys for the selection sets (array identity changes on every toggle otherwise).
   const payerKey = payerSelection.join('\n');
   const facilityKey = facilitySelection.join(''); // control char can't appear in a facility name
+
+  // --- dual-mode yield + AI-analysis input assembly ------------------------
+  // A prefix cohort is "resolved" when the alpha-prefix search is active AND the curve returned
+  // whole-cohort totals (i.e., it cleared COHORT_MIN_PATIENTS). Then the green cards + AI read the
+  // COHORT yield; otherwise the SELECTION yield (this summary's tile aggregate — never a new query).
+  const cohortData = cohort.kind === 'ready' || cohort.kind === 'refreshing' ? cohort.data : null;
+  const cohortResolved = cohortActive && cohortData !== null && cohortData.totals !== null;
+  const cohortYield =
+    cohortResolved && cohortData
+      ? { pct: cohortData.totals!, cohortPatients: cohortData.cohort_patients, prefix: dAlpha }
+      : null;
+
+  const summaryData = summary.kind === 'ready' || summary.kind === 'refreshing' ? summary.data : null;
+  // The non-PHI aggregate the AI panel analyzes — mirrors EXACTLY what's on screen (tiles + green
+  // cards + drill lists). No field can carry a member id / alpha-prefix / patient name (the server
+  // schema is strict). Cohort mode adds the N + the deleted curves' per-bucket VALUES; selection
+  // mode carries the tile scalars incl. the zero-allowed scalar (total_allowed) for the gate.
+  const aiInput = useMemo<CollectionsAiInput | null>(() => {
+    if (!summaryData) return null;
+    const s = summaryData;
+    const top_payers = s.by_payer.slice(0, 25).map((g) => ({ name: g.label, count: g.count, charge: g.charge }));
+    const top_facilities = s.by_facility.slice(0, 25).map((g) => ({ name: g.label, count: g.count, charge: g.charge }));
+    const top_cpt_rev = s.by_combo
+      .slice(0, 25)
+      .map((g) => ({ cpt: g.cpt, revenue: g.revenue, lines: g.count, pct_allowed: g.pct_allowed, pct_paid: g.pct_paid }));
+    const scope = {
+      charge_lines: s.total_count,
+      total_charge: s.total_charge,
+      total_allowed: s.total_allowed,
+      total_paid: s.total_paid,
+      total_balance: s.total_balance,
+    };
+    if (cohortResolved && cohortData && cohortData.totals) {
+      const c = cohortData;
+      const pt = (p: CohortCurvePoint) => ({
+        bucket: p.bucket,
+        patients: p.patients,
+        charge_lines: p.claims,
+        pct_allowed: p.pct_allowed,
+        pct_paid: p.pct_paid,
+      });
+      return {
+        mode: 'cohort',
+        yield_pct: c.totals!,
+        scope: { ...scope, cohort_patients: c.cohort_patients },
+        top_payers,
+        top_facilities,
+        top_cpt_rev,
+        series: { by_visit: c.by_position.slice(0, 40).map(pt), by_days: c.by_days.slice(0, 40).map(pt) },
+      };
+    }
+    return { mode: 'selection', yield_pct: s.yield_pct, scope, top_payers, top_facilities, top_cpt_rev };
+  }, [summaryData, cohortResolved, cohortData]);
+
+  // Invalidation key: any filter / search / prefix / view change remounts the AI panel (→ idle, and
+  // its unmount cleanup aborts an in-flight stream), so a stale summary can never describe a new
+  // selection. Mirrors the summary-fetch dep tuple.
+  const aiKey = [view, recencyDays, month > 0 ? year : 0, month, facilityKey, payerKey, dMember, dAlpha, dGroup].join('|');
 
   // Raw CMD facility text → curated friendly name from the already-loaded dimension options, for
   // DISPLAY only (the Top facilities summary card). Drill/filter values stay the raw facility text
@@ -1175,6 +1232,7 @@ export function CmdCollectionsExplorer({
           onDrill={applyRefinement}
           onDrillCombo={applyComboRefinement}
           facilityDisplayName={facilityDisplayName}
+          cohortYield={cohortYield}
         />
       )}
 
@@ -1210,6 +1268,11 @@ export function CmdCollectionsExplorer({
           )}
         </div>
       )}
+
+      {/* ---- AI analysis (streamed, where the curves were; both modes) ------ */}
+      {/* Keyed on the search signature: any filter/search/prefix/view change remounts it to idle and
+          its unmount cleanup aborts an in-flight stream, so a stale summary can't linger. */}
+      {hasAnySearch && <CollectionsAiPanel key={aiKey} input={aiInput} view={view} />}
 
       {/* ---- Detail grid -------------------------------------------------- */}
       <div ref={gridRef} className="space-y-3">
@@ -1897,6 +1960,241 @@ function StatTile({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** The three payer-behavior percentages both modes share (0–100 or null → "—"). */
+type YieldPct = { pct_allowed: number | null; pct_paid: number | null; pct_collected: number | null };
+
+/**
+ * DUAL-MODE green cards, rendered directly beneath the money tiles. COHORT mode (a prefix cohort is
+ * resolved) shows the prefix-wide, N-patient cohort yield; SELECTION mode shows the filter-wide yield
+ * derived from the same rollup that feeds the CHARGED / INSURANCE PAID / PATIENT BALANCE tiles. The
+ * header/scope pill make the population explicit so a biller never mistakes a cohort-of-N for the
+ * whole filtered selection. Visual treatment (cardGreen + formatPercentNum) is byte-identical to the
+ * retired cohort-panel cards — only POSITION and (in selection mode) the header label changed.
+ */
+type YieldMode =
+  | { mode: 'cohort'; pct: YieldPct; cohortPatients: number; prefix: string }
+  | { mode: 'selection'; pct: YieldPct; chargeLines: number };
+
+function YieldCardsPanel({ view }: { view: YieldMode }) {
+  const pct = view.pct;
+  const round = (n: number) => Math.round(n);
+  return (
+    <div className="mt-3">
+      <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
+        {view.mode === 'cohort' ? (
+          <>
+            <span className="text-xs font-semibold text-ink900">Cohort payer behavior — “{view.prefix}”</span>
+            <span className="rounded-full border border-line bg-surface px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+              prefix-wide · ignores Member ID, facility &amp; date filters
+            </span>
+          </>
+        ) : (
+          <>
+            <span className="text-xs font-semibold text-ink900">Selection payer behavior — all filtered charge lines</span>
+            <span className="rounded-full border border-line bg-surface px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+              matches the {view.chargeLines.toLocaleString()} charge lines &amp; filters above
+            </span>
+          </>
+        )}
+      </div>
+      <p className="mb-2 text-[11px] text-muted-foreground">
+        {view.mode === 'cohort'
+          ? `All ${view.cohortPatients.toLocaleString()} patients whose insurance member ID begins with “${view.prefix}” — dollar-weighted cohort averages, never one patient.`
+          : 'Dollar-weighted across every charge line in the current selection (facility · payer · date · search) — a filtered aggregate, not a patient cohort.'}
+      </p>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        <div className={`rounded-lg p-3 ${cardGreen(pct.pct_allowed)}`}>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">% allowed of billed</span>
+            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">allowed ÷ billed</span>
+          </div>
+          <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(pct.pct_allowed)}</div>
+          <div className="text-[11px] text-ink400">what payer agreed to</div>
+        </div>
+        <div className={`rounded-lg p-3 ${cardGreen(pct.pct_paid)}`}>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">% paid by payer</span>
+            <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] text-violet-700 dark:bg-violet-500/20 dark:text-violet-300">payer paid ÷ allowed</span>
+          </div>
+          <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(pct.pct_paid)}</div>
+          <div className="text-[11px] text-ink400">of what was allowed</div>
+        </div>
+        <div className={`rounded-lg p-3 ${cardGreen(pct.pct_collected)}`}>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">% collected of billed</span>
+            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">paid ÷ billed</span>
+          </div>
+          <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(pct.pct_collected)}</div>
+          <div className="text-[11px] text-ink400">net yield end to end</div>
+        </div>
+      </div>
+      {pct.pct_allowed !== null && pct.pct_paid !== null && pct.pct_collected !== null && (
+        <p className="mt-1.5 text-[10px] text-ink400">
+          ¹ {round(pct.pct_allowed)}% × {round(pct.pct_paid)}% ≈ {round(pct.pct_collected)}% — most of the gap is
+          expected contractual write-off, not lost revenue. Compare across payers/facilities rather than as a target.
+        </p>
+      )}
+    </div>
+  );
+}
+
+type AiState =
+  | { kind: 'idle' }
+  | { kind: 'loading' } // request sent, awaiting first token
+  | { kind: 'streaming'; text: string }
+  | { kind: 'ready'; text: string }
+  | { kind: 'error' }
+  | { kind: 'insufficient' };
+
+/** Render one parsed section (TL;DR as prose; Signals/Risks as bullets, tolerant of streaming text). */
+function AiSection({ title, body }: { title: string; body: string }) {
+  if (!body.trim()) return null;
+  const bullets = body
+    .split('\n')
+    .map((l) => l.replace(/^[-*]\s+/, '').trim())
+    .filter(Boolean);
+  const asList = title !== 'TL;DR' && bullets.length > 0;
+  return (
+    <div>
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</div>
+      {asList ? (
+        <ul className="mt-0.5 list-disc space-y-0.5 pl-4 text-sm text-ink900">
+          {bullets.map((b, i) => (
+            <li key={i}>{b}</li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-0.5 whitespace-pre-wrap text-sm text-ink900">{body.trim()}</p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The AI analysis panel — where the deleted curves were, in BOTH modes. Manual "Generate AI Analysis"
+ * trigger (no auto-regen). Streams the model's TL;DR / Signals / Risks back through the server action
+ * and renders each section progressively. Five states: idle (button) / loading (skeleton) /
+ * streaming+ready (sections) / error (generic notice) / insufficient (fixed sentence, button
+ * disabled). The panel is KEYED on the search signature by the parent, so any filter/search change
+ * remounts it to idle and its unmount cleanup aborts an in-flight stream — a stale summary describing
+ * a different selection can never linger.
+ */
+function CollectionsAiPanel({ input, view }: { input: CollectionsAiInput | null; view: DashboardView }) {
+  const [state, setState] = useState<AiState>({ kind: 'idle' });
+  // A mutable guard read inside the async stream loop; flipped on unmount so a superseded stream
+  // stops updating state (and cancels its reader) after a filter/search-change remount.
+  const guardRef = useRef({ cancelled: false });
+  useEffect(() => {
+    const guard = guardRef.current;
+    return () => {
+      guard.cancelled = true;
+    };
+  }, []);
+
+  const sufficient = input != null && isSufficientForAi(input);
+  const mode = input?.mode ?? 'selection';
+  const busy = state.kind === 'loading' || state.kind === 'streaming';
+
+  async function generate() {
+    if (!input || !sufficient) return;
+    setState({ kind: 'loading' });
+    let result: CollectionsAiAnalysisResult;
+    try {
+      result = await generateCollectionsAiAnalysis(input, view);
+    } catch {
+      if (!guardRef.current.cancelled) setState({ kind: 'error' });
+      return;
+    }
+    if (guardRef.current.cancelled) return;
+    if (!result.ok) {
+      setState({ kind: result.reason === 'insufficient' ? 'insufficient' : 'error' });
+      return;
+    }
+    const reader = result.stream.getReader();
+    let acc = '';
+    setState({ kind: 'streaming', text: '' });
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (guardRef.current.cancelled) {
+          await reader.cancel();
+          return;
+        }
+        if (done) break;
+        acc += value;
+        setState({ kind: 'streaming', text: acc });
+      }
+    } catch {
+      if (!guardRef.current.cancelled) setState({ kind: 'error' });
+      return;
+    }
+    if (!guardRef.current.cancelled) setState(acc.trim() ? { kind: 'ready', text: acc } : { kind: 'error' });
+  }
+
+  const text = state.kind === 'streaming' || state.kind === 'ready' ? state.text : '';
+  const sections = text ? parseAiSections(text) : null;
+
+  return (
+    <div className="rounded-xl border border-line bg-card p-4 shadow-ths">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink900">
+          <Sparkles className="h-4 w-4 text-[var(--brand-ink)]" aria-hidden />
+          AI analysis
+          <span className="rounded-full border border-line bg-surface px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+            {mode === 'cohort' ? 'cohort' : 'selection'} · aggregates only
+          </span>
+        </h3>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={!sufficient || busy}
+          aria-busy={busy}
+          onClick={generate}
+          className="border-line bg-[var(--brand-soft)]/50 text-ink900 hover:bg-[var(--brand-soft)]"
+        >
+          <Sparkles className="h-4 w-4" aria-hidden />
+          {state.kind === 'ready' ? 'Regenerate' : busy ? 'Generating…' : 'Generate AI Analysis'}
+        </Button>
+      </div>
+
+      <div className="relative mt-3">
+        {busy && (
+          <div className="absolute inset-x-0 top-0 h-0.5 animate-pulse rounded-t bg-[var(--brand-accent)]" aria-hidden />
+        )}
+        {state.kind === 'idle' && (
+          <p className="text-sm text-muted-foreground">
+            {sufficient
+              ? 'Generate a short AI read (TL;DR, signals, risks) of the percentages, payers, facilities and CPT×Rev rows above. Aggregates only — no patient data leaves the server.'
+              : INSUFFICIENT_COPY[mode]}
+          </p>
+        )}
+        {state.kind === 'insufficient' && <p className="text-sm text-muted-foreground">{INSUFFICIENT_COPY[mode]}</p>}
+        {state.kind === 'loading' && (
+          <div className="space-y-2" aria-live="polite">
+            <Skeleton className="h-4 w-2/3" />
+            <Skeleton className="h-3 w-full" />
+            <Skeleton className="h-3 w-5/6" />
+          </div>
+        )}
+        {state.kind === 'error' && (
+          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            The AI analysis could not be generated. Try again.
+          </div>
+        )}
+        {sections && (
+          <div className="space-y-3" aria-live="polite">
+            {AI_SECTIONS.map((s) => (
+              <AiSection key={s} title={s} body={sections[s]} />
+            ))}
+            {state.kind === 'streaming' && <span className="inline-block h-3 w-2 animate-pulse bg-ink400 align-middle" aria-hidden />}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /** One ranked drill-down list (Top facilities / payers / CPTs) — each row refines the grid. */
 function DrillList({
   title,
@@ -2028,6 +2326,7 @@ function SearchSummaryPanel({
   onDrill,
   onDrillCombo,
   facilityDisplayName,
+  cohortYield,
 }: {
   state: SummaryState;
   label: string;
@@ -2036,6 +2335,9 @@ function SearchSummaryPanel({
   onDrillCombo: (cpt: string, revenue: string) => void;
   /** Raw facility text → curated friendly name, for the Top facilities card display only. */
   facilityDisplayName?: (raw: string) => string;
+  /** When a prefix cohort is resolved, the green cards render its COHORT yield (+ framing) instead
+   *  of the selection yield. Null → SELECTION mode (cards derive from this summary's tile aggregate). */
+  cohortYield?: { pct: YieldPct; cohortPatients: number; prefix: string } | null;
 }) {
   // Fold/unfold the panel body below the header (Session F). Local, resets each session — not a
   // saved-view mechanism. Conditional render (not a max-height transition) so the drill buttons
@@ -2107,6 +2409,16 @@ function SearchSummaryPanel({
             <StatTile label="Insurance Paid" value={MONEY0.format(s.total_paid)} />
             <StatTile label="Patient Balance" value={MONEY0.format(s.total_balance)} />
           </div>
+
+          {/* Green payer-behavior cards — directly beneath the money tiles. Dual-mode: cohort yield
+              (prefix cohort resolved) or filter-wide yield (this summary's tile aggregate). */}
+          <YieldCardsPanel
+            view={
+              cohortYield
+                ? { mode: 'cohort', pct: cohortYield.pct, cohortPatients: cohortYield.cohortPatients, prefix: cohortYield.prefix }
+                : { mode: 'selection', pct: s.yield_pct, chargeLines: s.total_count }
+            }
+          />
 
           {/* Top Results groups: Payer + Facility single-dimension lists, then the full-width CPT×Rev
               combo below. The standalone CPT list was dropped here — the CPT×Rev combo table below
@@ -2236,14 +2548,6 @@ function ComboDrillList({
 
 // --- alpha-prefix cohort payer-behavior curve (Session D) -------------------
 
-// Functional multi-series colors (per the design system, charts keep their own colors):
-// Allowed = teal, Paid = violet, Dollars = amber. All read in light + dark, and amber stays
-// distinct from the red degradation marker line. Selected-point highlight = blue (Session G) —
-// distinct from all of the above, deliberately NOT --brand-accent (charts keep fixed functional
-// colors regardless of tenant, so the selection marker reads the same for every view).
-const COHORT_ALLOWED_COLOR = '#0d9488';
-const COHORT_PAID_COLOR = '#7c3aed';
-const COHORT_DOLLARS_COLOR = '#d97706';
 // Stat-card background: one green step per 20% band (higher % = heavier green). Semi-transparent
 // emerald reads correctly over the card in BOTH light and dark themes (no per-mode variants needed).
 const CARD_GREEN_SHADES = [
@@ -2257,57 +2561,12 @@ function cardGreen(pct: number | null): string {
   const lvl = pct == null || !Number.isFinite(pct) ? 0 : Math.min(4, Math.max(0, Math.floor(pct / 20)));
   return CARD_GREEN_SHADES[lvl]!;
 }
-const COHORT_SELECTED_COLOR = '#2563eb';
 
 /** A cohort point plus the client-side dollar derivations (Phase 2). */
 type CohortDollarPoint = CohortCurvePoint & {
   paid_per_patient: number;
   cum_paid_per_start: number | null;
 };
-
-/**
- * What the mini charts actually plot: a real (suppressed-floor-clearing) point OR an explicit GAP
- * placeholder for an interior bucket the server suppressed (<5 patients). Gap points carry null
- * metrics so the lines BREAK there (no connectNulls — a drawn line through missing data is a lie)
- * and patients: 0 so the exposure bar renders nothing; `suppressed` drives the tooltip's
- * "< 5 patients (suppressed)" read and blocks click-to-drilldown (the server would refuse anyway).
- */
-type CohortChartDatum = {
-  bucket: number;
-  patients: number;
-  pct_allowed: number | null;
-  pct_paid: number | null;
-  paid_per_patient: number | null;
-  cum_paid_per_start: number | null;
-  pct_zero_paid: number | null;
-  suppressed?: boolean;
-};
-
-/**
- * Fill INTERIOR suppressed buckets with explicit gap points so the x-axis is truthful (a missing
- * bucket used to silently vanish and the line connected straight across it). Only interior gaps:
- * leading/trailing suppressed buckets stay absent — we know nothing about where the axis "ends".
- */
-function densifyBuckets(points: CohortDollarPoint[], step: number): CohortChartDatum[] {
-  if (points.length === 0 || step <= 0) return points;
-  const byBucket = new Map<number, CohortDollarPoint>(points.map((p) => [p.bucket, p]));
-  const out: CohortChartDatum[] = [];
-  for (let b = points[0]!.bucket; b <= points[points.length - 1]!.bucket; b += step) {
-    out.push(
-      byBucket.get(b) ?? {
-        bucket: b,
-        patients: 0,
-        pct_allowed: null,
-        pct_paid: null,
-        paid_per_patient: null,
-        cum_paid_per_start: null,
-        pct_zero_paid: null,
-        suppressed: true,
-      },
-    );
-  }
-  return out;
-}
 
 /**
  * Derive the dollar series from the suppressed buckets. `paid_per_patient` = the point's insurance $
@@ -2349,218 +2608,6 @@ function cohortDegradation(
     dropTo: hit ? hit.pct_allowed! : null,
     lastBucket: withPct[withPct.length - 1]!.bucket,
   };
-}
-
-/**
- * One SINGLE-SERIES cohort mini chart. The two %-series live on very different scales (~25% allowed
- * vs ~85% paid), so sharing one axis squashed the allowed line flat — each metric gets its own chart
- * + y-domain. `yMax` (when given) PINS the top of the axis: the same metric shown on both x-axes
- * side by side must share ONE scale, or the pair visually lies (the parent computes the max across
- * both). A faint patients-per-bucket bar on a hidden secondary axis (~quarter height) shows cohort
- * EXPOSURE, so a thinning tail reads as exactly that; the tooltip names the patient count per
- * bucket. The x-axis is NUMERIC and the data carries explicit gap points for suppressed interior
- * buckets (see densifyBuckets) — lines break at gaps instead of interpolating through missing data.
- * Self-labeled (name in its color) — no per-chart legend needed for one series.
- */
-function CohortMiniChart({
-  data,
-  dataKey,
-  name,
-  def,
-  defTone = 'neutral',
-  color,
-  xLabel,
-  markerBucket,
-  yMax,
-  onPointClick,
-  selectedBucket,
-}: {
-  data: CohortChartDatum[];
-  dataKey: 'pct_allowed' | 'pct_paid';
-  name: string;
-  /** Optional small "definition" chip beside the series name, e.g. "allowed ÷ billed". */
-  def?: string;
-  /** Chip color: 'neutral' (muted grey) or 'paid' (violet, matching the % Paid by payer series). */
-  defTone?: 'neutral' | 'paid';
-  color: string;
-  xLabel: string;
-  markerBucket?: number | null;
-  /** Pinned y-axis top shared across this metric's sibling charts (see doc above). */
-  yMax?: number;
-  /** Session G: clicking anywhere on the chart opens that bucket's drilldown. Optional — the days-
-   * axis %-paid chart etc. all pass it identically; only omitted where a click wouldn't make sense.
-   * The parent guards against clicks on suppressed gap buckets. */
-  onPointClick?: (bucket: number) => void;
-  /** The currently-selected drilldown bucket, if it's on THIS chart's axis — drawn as a highlight
-   * line distinct from the red degradation marker. */
-  selectedBucket?: number | null;
-}) {
-  // Scale the hidden volume axis so the tallest exposure bar fills ~1/4 of the chart height.
-  const maxPatients = Math.max(...data.map((p) => p.patients), 1);
-  return (
-    <div>
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-[10px] font-semibold" style={{ color }}>{name}</span>
-        {def && (
-          <span
-            className={`rounded px-1.5 py-0.5 text-[10px] ${
-              defTone === 'paid'
-                ? 'bg-violet-100 text-violet-700 dark:bg-violet-500/20 dark:text-violet-300'
-                : 'bg-muted text-muted-foreground'
-            }`}
-          >
-            {def}
-          </span>
-        )}
-      </div>
-      <div className="h-28 w-full">
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart
-            data={data}
-            margin={{ top: 4, right: 12, bottom: 0, left: 0 }}
-            onClick={
-              onPointClick
-                ? (s) => {
-                    if (s?.activeLabel !== undefined && s.activeLabel !== null) onPointClick(Number(s.activeLabel));
-                  }
-                : undefined
-            }
-            style={onPointClick ? { cursor: 'pointer' } : undefined}
-          >
-            {/* Compact summary sparkline: no gridlines / axis chrome (the stat cards, the takeaway
-                line, the hover tooltip, and the table toggle carry the numbers). The numeric axes are
-                KEPT but hidden so bucket spacing + the ReferenceLine markers still map correctly. */}
-            <XAxis dataKey="bucket" type="number" domain={['dataMin', 'dataMax']} allowDecimals={false} hide />
-            <YAxis
-              domain={[
-                0,
-                (dataMax: number) => {
-                  const top = Math.max(Math.ceil((dataMax || 0) / 10) * 10, 20);
-                  return yMax !== undefined ? Math.max(yMax, 20) : top;
-                },
-              ]}
-              hide
-            />
-            <YAxis yAxisId="vol" hide domain={[0, maxPatients * 4]} />
-            <Tooltip
-              formatter={(v: number | string, n: string, item: { payload?: CohortChartDatum }) => {
-                if (n === 'Patients') {
-                  return item.payload?.suppressed
-                    ? ['< 5 (suppressed)', 'Patients']
-                    : [Number(v).toLocaleString(), 'Patients'];
-                }
-                return [v === null || v === undefined ? '—' : `${v}%`, n];
-              }}
-              labelFormatter={(l) => `${xLabel}: ${l}`}
-            />
-            {markerBucket != null && <ReferenceLine x={markerBucket} stroke="#dc2626" strokeDasharray="4 3" />}
-            {selectedBucket != null && (
-              <ReferenceLine x={selectedBucket} stroke={COHORT_SELECTED_COLOR} strokeWidth={2} strokeDasharray="2 2" />
-            )}
-            <Bar yAxisId="vol" dataKey="patients" name="Patients" fill={color} fillOpacity={0.12} isAnimationActive={false} />
-            {/* NO connectNulls: a gap in the data must read as a gap, not an interpolated guess. */}
-            <Line type="monotone" dataKey={dataKey} name={name} stroke={color} strokeWidth={2} dot={false} />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
-    </div>
-  );
-}
-
-/**
- * The Phase 2 dollar mini — per-bucket avg insurance $ per patient, in the same frame (grid, hidden
- * exposure bars, red drop marker) as the % minis. `name` states the UNIT per axis ("per visit" vs
- * "per 30 days") — the two axes measure different things and must say so. The cumulative-$ and
- * zero-pay reads moved OUT of the tooltip (they were invisible stroke-"none" series — four metrics
- * in a 112px chart's hover) into the caption below the chart and the point drilldown. The $ axis
- * floors at 0 but follows the data down if a reversal-heavy bucket nets negative, so no point is
- * ever clipped away.
- */
-function CohortDollarMiniChart({
-  data,
-  name,
-  xLabel,
-  markerBucket,
-  onPointClick,
-  selectedBucket,
-}: {
-  data: CohortChartDatum[];
-  /** Unit-bearing series label, e.g. "$ Paid / patient / visit" — differs per axis. */
-  name: string;
-  xLabel: string;
-  markerBucket?: number | null;
-  /** Session G: same click-to-drilldown affordance as CohortMiniChart. */
-  onPointClick?: (bucket: number) => void;
-  selectedBucket?: number | null;
-}) {
-  const maxPatients = Math.max(...data.map((p) => p.patients), 1);
-  const usd = (v: number) => `$${Math.round(v).toLocaleString()}`;
-  return (
-    <div>
-      <div className="text-[10px] font-semibold" style={{ color: COHORT_DOLLARS_COLOR }}>
-        {name}
-      </div>
-      <div className="h-28 w-full">
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart
-            data={data}
-            margin={{ top: 4, right: 12, bottom: 0, left: 0 }}
-            onClick={
-              onPointClick
-                ? (s) => {
-                    if (s?.activeLabel !== undefined && s.activeLabel !== null) onPointClick(Number(s.activeLabel));
-                  }
-                : undefined
-            }
-            style={onPointClick ? { cursor: 'pointer' } : undefined}
-          >
-            {/* Compact summary sparkline — see CohortMiniChart; axes kept but hidden. */}
-            <XAxis dataKey="bucket" type="number" domain={['dataMin', 'dataMax']} allowDecimals={false} hide />
-            <YAxis
-              domain={[
-                (dataMin: number) => Math.min(0, dataMin),
-                (dataMax: number) => Math.max(Math.ceil((dataMax || 0) / 50) * 50, 50),
-              ]}
-              hide
-            />
-            <YAxis yAxisId="vol" hide domain={[0, maxPatients * 4]} />
-            <Tooltip
-              formatter={(v: number | string, n: string, item: { payload?: CohortChartDatum }) => {
-                if (n === 'Patients') {
-                  return item.payload?.suppressed
-                    ? ['< 5 (suppressed)', 'Patients']
-                    : [Number(v).toLocaleString(), 'Patients'];
-                }
-                return [v === null || v === undefined ? '—' : usd(Number(v)), n];
-              }}
-              labelFormatter={(l) => `${xLabel}: ${l}`}
-            />
-            {markerBucket != null && <ReferenceLine x={markerBucket} stroke="#dc2626" strokeDasharray="4 3" />}
-            {selectedBucket != null && (
-              <ReferenceLine x={selectedBucket} stroke={COHORT_SELECTED_COLOR} strokeWidth={2} strokeDasharray="2 2" />
-            )}
-            <Bar
-              yAxisId="vol"
-              dataKey="patients"
-              name="Patients"
-              fill={COHORT_DOLLARS_COLOR}
-              fillOpacity={0.12}
-              isAnimationActive={false}
-            />
-            {/* NO connectNulls — gaps in the data render as gaps (see CohortMiniChart). */}
-            <Line
-              type="monotone"
-              dataKey="paid_per_patient"
-              name={name}
-              stroke={COHORT_DOLLARS_COLOR}
-              strokeWidth={2}
-              dot={false}
-            />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
-    </div>
-  );
 }
 
 /**
@@ -2667,12 +2714,11 @@ function CohortCurvePanel({
   onSelectPoint: (axis: 'position' | 'days', bucket: number) => void;
   onCloseDrilldown: () => void;
 }) {
-  // Fold/unfold the panel body below the header (Session F) + the chart/table view toggle (the
-  // table is the keyboard + screen-reader path to per-bucket values and drilldown). Local, resets
-  // each session. Declared before the early returns (rules-of-hooks) even though the controls only
-  // render in the 'ready'/'refreshing' branch below.
+  // Fold/unfold the panel body below the header (Session F). Local, resets each session. Declared
+  // before the early returns (rules-of-hooks) even though the control only renders in the
+  // 'ready'/'refreshing' branch below. (The chart/table toggle is gone — the curves were removed;
+  // the panel now shows the per-bucket tables directly.)
   const [collapsed, setCollapsed] = useState(false);
-  const [showTable, setShowTable] = useState(false);
   const bodyId = useId();
 
   if (state.kind === 'idle') return null;
@@ -2717,31 +2763,9 @@ function CohortCurvePanel({
   // server's bucketing); falls back to 30 when only one day bucket survives.
   const dayBucketWidth =
     c.by_days.length >= 2 ? c.by_days[1]!.bucket - c.by_days[0]!.bucket : 30;
-  // Chart data with explicit interior gap points (suppressed buckets break the line, not bridge it),
-  // plus the REAL bucket sets so a click on a gap can't fire a doomed drilldown request.
-  const posChart = densifyBuckets(posDollars, 1);
-  const daysChart = densifyBuckets(daysDollars, dayBucketWidth);
-  const posBuckets = new Set(c.by_position.map((p) => p.bucket));
-  const dayBuckets = new Set(c.by_days.map((p) => p.bucket));
-  const clickReal = (axis: 'position' | 'days', real: Set<number>) => (bucket: number) => {
-    if (real.has(bucket)) onSelectPoint(axis, bucket);
-  };
-  // ONE y-scale per metric across BOTH x-axes — side-by-side charts of the same metric with
-  // different y-maxes read as a comparison and lie. Headroom-rounded to the next 10.
-  const metricYMax = (pick: (p: CohortCurvePoint) => number | null, floor: number) =>
-    Math.max(
-      floor,
-      Math.ceil(
-        Math.max(0, ...c.by_position.map((p) => pick(p) ?? 0), ...c.by_days.map((p) => pick(p) ?? 0)) / 10,
-      ) * 10,
-    );
-  const allowedYMax = metricYMax((p) => p.pct_allowed, 20);
-  const paidYMax = metricYMax((p) => p.pct_paid, 100);
-  // End-state cumulative $/starting patient per axis — surfaced as a caption now that the invisible
-  // tooltip series are gone.
+  // End-state cumulative $/starting patient for the days axis — surfaced in the days takeaway.
   const lastCum = (pts: CohortDollarPoint[]) =>
     pts.length > 0 ? pts[pts.length - 1]!.cum_paid_per_start : null;
-  const posCum = lastCum(posDollars);
   const daysCum = lastCum(daysDollars);
   // Charge-line-weighted zero-pay share over a run of buckets (never avg-of-shares). `claims` is
   // the API field name; each unit is a logical CHARGE LINE (0050 rollup grain).
@@ -2834,18 +2858,6 @@ function CohortCurvePanel({
             {c.cohort_patients.toLocaleString()} patients · dollar-weighted · min 5/bucket
           <button
             type="button"
-            aria-pressed={showTable}
-            aria-label={showTable ? 'Show charts' : 'Show data as table'}
-            title={showTable ? 'Show charts' : 'Show data as table'}
-            onClick={() => setShowTable((v) => !v)}
-            className={`ml-1 shrink-0 rounded-md p-1 transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)] ${
-              showTable ? 'text-[var(--brand-ink)]' : 'text-ink400'
-            }`}
-          >
-            <Table2 className="h-4 w-4" aria-hidden />
-          </button>
-          <button
-            type="button"
             aria-expanded={!collapsed}
             aria-controls={bodyId}
             aria-label={collapsed ? 'Expand cohort payer behavior' : 'Collapse cohort payer behavior'}
@@ -2860,7 +2872,7 @@ function CohortCurvePanel({
       </div>
       <p className="mt-1 text-xs text-muted-foreground">
         All {c.cohort_patients.toLocaleString()} patients whose insurance member ID begins with “{prefix}” —
-        not just the patients shown in the grid below. Curves are dollar-weighted cohort averages, never
+        not just the patients shown in the grid below. These are dollar-weighted cohort averages, never
         one patient.
       </p>
       {memberIdActive && (
@@ -2872,104 +2884,22 @@ function CohortCurvePanel({
 
       {!collapsed && (
         <div id={bodyId} className={memberIdActive ? 'opacity-70' : undefined}>
-          {/* Whole-cohort END-TO-END yield (item 2) — three dollar-weighted stat cards + the identity
-              caveat. Every number is from c.totals (the server aggregate); the block is absent below the
-              min-patient floor (c.totals === null), the same gate the curve uses. */}
-          {c.totals && (
-            <div className="mt-3">
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                <div className={`rounded-lg p-3 ${cardGreen(c.totals.pct_allowed)}`}>
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">% allowed of billed</span>
-                    <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">allowed ÷ billed</span>
-                  </div>
-                  <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(c.totals.pct_allowed)}</div>
-                  <div className="text-[11px] text-ink400">what payer agreed to</div>
-                </div>
-                <div className={`rounded-lg p-3 ${cardGreen(c.totals.pct_paid)}`}>
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">% paid by payer</span>
-                    <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] text-violet-700 dark:bg-violet-500/20 dark:text-violet-300">payer paid ÷ allowed</span>
-                  </div>
-                  <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(c.totals.pct_paid)}</div>
-                  <div className="text-[11px] text-ink400">of what was allowed</div>
-                </div>
-                <div className={`rounded-lg p-3 ${cardGreen(c.totals.pct_collected)}`}>
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">% collected of billed</span>
-                    <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">paid ÷ billed</span>
-                  </div>
-                  <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(c.totals.pct_collected)}</div>
-                  <div className="text-[11px] text-ink400">net yield end to end</div>
-                </div>
-              </div>
-              {c.totals.pct_allowed !== null && c.totals.pct_paid !== null && c.totals.pct_collected !== null && (
-                <p className="mt-1.5 text-[10px] text-ink400">
-                  ¹ {round(c.totals.pct_allowed)}% × {round(c.totals.pct_paid)}% ≈ {round(c.totals.pct_collected)}% — most of the gap
-                  is expected contractual write-off, not lost revenue. Compare across payers/facilities rather than as a target.
-                </p>
-              )}
-            </div>
-          )}
-
-          {/* Both axes, side by side — no toggle between them; the chart/table switch (header) is
-              the keyboard + screen-reader path to the same per-bucket values and drilldown. */}
+          {/* Two axes side by side — per-bucket TABLES (the recharts curves were removed; the tables
+              carry the same values + the click-to-drilldown affordance). The whole-cohort yield cards
+              moved UP into the summary panel above, deduplicated across cohort + selection modes. */}
           <div className="mt-3 grid grid-cols-1 overflow-hidden rounded-lg border border-line lg:grid-cols-2">
             <div className="p-3 lg:border-r lg:border-line">
               <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 By visit number
               </div>
-              <div className="mb-1 text-[11px] text-ink400">{visitTakeaway} Click a point for details.</div>
-              {showTable ? (
-                <CohortBucketTable
-                  points={posDollars}
-                  bucketLabel={(b) => `Visit ${b}`}
-                  usd={usd}
-                  selectedBucket={selectedPoint?.axis === 'position' ? selectedPoint.bucket : null}
-                  onSelectBucket={(b) => onSelectPoint('position', b)}
-                />
-              ) : (
-                <div className="space-y-2">
-                  <CohortMiniChart
-                    data={posChart}
-                    dataKey="pct_allowed"
-                    name="% Allowed of billed"
-                    def="allowed ÷ billed"
-                    color={COHORT_ALLOWED_COLOR}
-                    xLabel="Visit #"
-                    markerBucket={deg?.dropAt ?? null}
-                    yMax={allowedYMax}
-                    onPointClick={clickReal('position', posBuckets)}
-                    selectedBucket={selectedPoint?.axis === 'position' ? selectedPoint.bucket : null}
-                  />
-                  <CohortMiniChart
-                    data={posChart}
-                    dataKey="pct_paid"
-                    name="% Paid by payer"
-                    def="payer paid ÷ allowed"
-                    defTone="paid"
-                    color={COHORT_PAID_COLOR}
-                    xLabel="Visit #"
-                    yMax={paidYMax}
-                    onPointClick={clickReal('position', posBuckets)}
-                    selectedBucket={selectedPoint?.axis === 'position' ? selectedPoint.bucket : null}
-                  />
-                  <CohortDollarMiniChart
-                    data={posChart}
-                    name="$ Paid / patient / visit ²"
-                    xLabel="Visit #"
-                    markerBucket={deg?.dropAt ?? null}
-                    onPointClick={clickReal('position', posBuckets)}
-                    selectedBucket={selectedPoint?.axis === 'position' ? selectedPoint.bucket : null}
-                  />
-                  {posCum !== null && (
-                    <p className="text-[10px] text-ink400">
-                      ² Cumulative: ~{usd(posCum)} paid per starting patient through visit{' '}
-                      {posDollars[posDollars.length - 1]!.bucket} (suppressed points excluded — a floor).
-                    </p>
-                  )}
-                </div>
-              )}
+              <div className="mb-1 text-[11px] text-ink400">{visitTakeaway} Click a row for details.</div>
+              <CohortBucketTable
+                points={posDollars}
+                bucketLabel={(b) => `Visit ${b}`}
+                usd={usd}
+                selectedBucket={selectedPoint?.axis === 'position' ? selectedPoint.bucket : null}
+                onSelectBucket={(b) => onSelectPoint('position', b)}
+              />
               {selectedPoint?.axis === 'position' && drilldown && (
                 <CohortDrilldownPanel
                   axis="position"
@@ -2983,56 +2913,14 @@ function CohortCurvePanel({
               <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 By days since first visit
               </div>
-              <div className="mb-1 text-[11px] text-ink400">{daysTakeaway} Click a point for details.</div>
-              {showTable ? (
-                <CohortBucketTable
-                  points={daysDollars}
-                  bucketLabel={(b) => `Days ${b}–${b + dayBucketWidth - 1}`}
-                  usd={usd}
-                  selectedBucket={selectedPoint?.axis === 'days' ? selectedPoint.bucket : null}
-                  onSelectBucket={(b) => onSelectPoint('days', b)}
-                />
-              ) : (
-                <div className="space-y-2">
-                  <CohortMiniChart
-                    data={daysChart}
-                    dataKey="pct_allowed"
-                    name="% Allowed of billed"
-                    def="allowed ÷ billed"
-                    color={COHORT_ALLOWED_COLOR}
-                    xLabel="Day window start"
-                    yMax={allowedYMax}
-                    onPointClick={clickReal('days', dayBuckets)}
-                    selectedBucket={selectedPoint?.axis === 'days' ? selectedPoint.bucket : null}
-                  />
-                  <CohortMiniChart
-                    data={daysChart}
-                    dataKey="pct_paid"
-                    name="% Paid by payer"
-                    def="payer paid ÷ allowed"
-                    defTone="paid"
-                    color={COHORT_PAID_COLOR}
-                    xLabel="Day window start"
-                    yMax={paidYMax}
-                    onPointClick={clickReal('days', dayBuckets)}
-                    selectedBucket={selectedPoint?.axis === 'days' ? selectedPoint.bucket : null}
-                  />
-                  <CohortDollarMiniChart
-                    data={daysChart}
-                    name={`$ Paid / patient / ${dayBucketWidth} days ³`}
-                    xLabel="Day window start"
-                    onPointClick={clickReal('days', dayBuckets)}
-                    selectedBucket={selectedPoint?.axis === 'days' ? selectedPoint.bucket : null}
-                  />
-                  {daysCum !== null && (
-                    <p className="text-[10px] text-ink400">
-                      ³ Cumulative: ~{usd(daysCum)} paid per starting patient through day{' '}
-                      {daysDollars[daysDollars.length - 1]!.bucket + dayBucketWidth - 1} (suppressed
-                      points excluded — a floor).
-                    </p>
-                  )}
-                </div>
-              )}
+              <div className="mb-1 text-[11px] text-ink400">{daysTakeaway} Click a row for details.</div>
+              <CohortBucketTable
+                points={daysDollars}
+                bucketLabel={(b) => `Days ${b}–${b + dayBucketWidth - 1}`}
+                usd={usd}
+                selectedBucket={selectedPoint?.axis === 'days' ? selectedPoint.bucket : null}
+                onSelectBucket={(b) => onSelectPoint('days', b)}
+              />
               {selectedPoint?.axis === 'days' && drilldown && (
                 <CohortDrilldownPanel
                   axis="days"
@@ -3044,20 +2932,9 @@ function CohortCurvePanel({
               )}
             </div>
           </div>
-          {/* Legend strip (item 4) — replaces the old 8-sentence footnote. Def-of-metric text lives on
-              the card / row def chips now; the surviving glossary is exactly these four reading aids.
-              The grain/dollar-weighted note (#7) and $/patient definition (#8) were intentionally dropped
-              from visible copy (per rulings); zero-paid (#9) + survivorship (#10) live in the takeaways. */}
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-ink400">
-            <span className="inline-flex items-center gap-1">
-              <span className="inline-block h-2 w-2 rounded-[1px] bg-current opacity-30" aria-hidden />
-              bar = patients at point
-            </span>
-            <span>· gap = &lt;5 patients (suppressed)</span>
+            <span>&lt;5-patient buckets are suppressed</span>
             <span>· “—” = allowed too small to divide</span>
-            <span className="inline-flex items-center gap-1">
-              · <Columns3 className="h-3 w-3" aria-hidden /> left vs right = different units, don’t compare $
-            </span>
           </div>
         </div>
       )}

@@ -537,8 +537,18 @@ export interface CmdSearchSummary {
    *  page count can exceed this; the UI labels the two grains differently on purpose. */
   total_count: number;
   total_charge: number;
+  /** sum(allowed_reliable) over the filtered set — the SAME reliable tiered value the cohort totals
+   *  and the combo ratios use, so the selection-mode green cards reconcile with cohort mode and the
+   *  CPT×Rev %s. Added so SELECTION-MODE %-allowed / %-paid derive from this one aggregate (no new
+   *  query) — see `yield_pct`. */
+  total_allowed: number;
   total_paid: number;
   total_balance: number;
+  /** SELECTION-MODE payer-behavior percentages, derived server-side from the totals above via the
+   *  shared {@link deriveYield} helper — the SAME formula/rounding/guards the cohort whole-cohort
+   *  cards use, so the two modes can never drift. %Collected = total_paid/total_charge reconciles
+   *  exactly with the Insurance Paid ÷ Charged tiles. */
+  yield_pct: CohortTotals;
   by_facility: CmdSearchGroup[];
   by_payer: CmdSearchGroup[];
   by_cpt: CmdSearchGroup[];
@@ -584,6 +594,9 @@ export function buildCmdSearchSummaryQueries(
   const totals = build(
     'select count(*)::int as total_count, ' +
       'coalesce(sum(charge_amount), 0)::float8 as total_charge, ' +
+      // Reliable tiered allowed (0059) — the SAME column the combo ratios + cohort totals sum, so
+      // SELECTION-MODE %-allowed / %-paid derive from the tile aggregate with NO new query.
+      'coalesce(sum(allowed_reliable), 0)::float8 as total_allowed, ' +
       'coalesce(sum(insurance_payments), 0)::float8 as total_paid, ' +
       'coalesce(sum(patient_balance_due), 0)::float8 as total_balance',
     () => '',
@@ -688,6 +701,30 @@ export interface CohortTotals {
   pct_allowed: number | null;
   /** paid ÷ allowed — paid of what was allowed. */
   pct_paid: number | null;
+}
+
+/** Raw dollar sums a yield is derived from — `null`/`0` denominators guard to a `null` ratio. */
+export interface YieldInput {
+  billed: number | null;
+  allowed: number | null;
+  paid: number | null;
+}
+
+/**
+ * THE single derivation of the three payer-behavior percentages from raw dollar sums — the one
+ * place BOTH the whole-cohort yield cards (cohort mode) AND the filter-wide green cards (selection
+ * mode) read, so the two modes can never drift. Each ratio guards a null/zero/negative denominator
+ * to `null` ("—") and rounds to 2 dp — byte-identical to the inline cohort-totals ratio it replaces
+ * (Math.round(x*10000)/100). Pure; no PHI; unit-tested in the hermetic suite.
+ */
+export function deriveYield({ billed, allowed, paid }: YieldInput): CohortTotals {
+  const ratio = (num: number | null, den: number | null): number | null =>
+    num != null && den != null && den > 0 ? Math.round((num / den) * 10000) / 100 : null;
+  return {
+    pct_collected: ratio(paid, billed), // paid ÷ billed
+    pct_allowed: ratio(allowed, billed), // allowed ÷ billed
+    pct_paid: ratio(paid, allowed), // paid ÷ allowed
+  };
 }
 
 /**

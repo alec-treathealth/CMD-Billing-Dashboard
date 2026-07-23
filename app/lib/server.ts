@@ -31,9 +31,24 @@ import {
   type AuditPayerCptPivot,
   type AuditRevPivot,
 } from '../../src/billingAudit/auditQuery.js';
+import Anthropic from '@anthropic-ai/sdk';
 import { DASHBOARD_CACHE_TAG } from '../../src/cacheTags.js';
 import { makeAnthropicClientFromEnv } from '../../src/agent/index.js';
 import type { AnthropicMessagesClient } from '../../src/agent/index.js';
+import {
+  AI_MAX_TOKENS,
+  buildAiMessages,
+  isSufficientForAi,
+  type CollectionsAiInput,
+} from '../../src/collections/aiAnalysis.js';
+export {
+  CollectionsAiInputSchema,
+  INSUFFICIENT_COPY,
+  SELECTION_MIN_CHARGES,
+  AI_SECTIONS,
+  parseAiSections,
+  type CollectionsAiInput,
+} from '../../src/collections/aiAnalysis.js';
 import { distribution, searchClaims } from '../../src/queries/index.js';
 import {
   distributionCountFromMatview,
@@ -52,6 +67,7 @@ import {
   buildCohortTotalsQuery,
   buildCohortDrilldownQueries,
   cmdExplorerSortValue,
+  deriveYield,
   CMD_EXPLORER_PAGE_SIZE,
   COHORT_MIN_PATIENTS,
   COHORT_DRILLDOWN_TABLE_MIN_PATIENTS,
@@ -1555,21 +1571,31 @@ async function loadCmdSearchSummaryData(
   // parallel), not the sum. Each is the same cost class (parallel seq scan → hashaggregate over
   // the tenant slice); the combo groups by two keys but is otherwise identical.
   const [t, byFacility, byPayer, byCpt, byCombo] = await Promise.all([
-    exec.query<{ total_count: number; total_charge: number; total_paid: number; total_balance: number }>(
-      totals.sql,
-      totals.params,
-    ),
+    exec.query<{
+      total_count: number;
+      total_charge: number;
+      total_allowed: number;
+      total_paid: number;
+      total_balance: number;
+    }>(totals.sql, totals.params),
     exec.query<CmdSearchGroup>(groups.facility.sql, groups.facility.params),
     exec.query<CmdSearchGroup>(groups.primary_payer.sql, groups.primary_payer.params),
     exec.query<CmdSearchGroup>(groups.cpt_code.sql, groups.cpt_code.params),
     exec.query<CmdComboGroup>(combo.sql, combo.params),
   ]);
   const row = t.rows[0];
+  const total_charge = row?.total_charge ?? 0;
+  const total_allowed = row?.total_allowed ?? 0;
+  const total_paid = row?.total_paid ?? 0;
   return {
     total_count: row?.total_count ?? 0,
-    total_charge: row?.total_charge ?? 0,
-    total_paid: row?.total_paid ?? 0,
+    total_charge,
+    total_allowed,
+    total_paid,
     total_balance: row?.total_balance ?? 0,
+    // SELECTION-MODE green cards — derived from the SAME totals via the shared helper (no new query),
+    // so %Collected == total_paid/total_charge reconciles with the Insurance Paid ÷ Charged tiles.
+    yield_pct: deriveYield({ billed: total_charge, allowed: total_allowed, paid: total_paid }),
     by_facility: byFacility.rows,
     by_payer: byPayer.rows,
     by_cpt: byCpt.rows,
@@ -1584,11 +1610,98 @@ async function loadCmdSearchSummaryData(
 export const loadCmdSearchSummary = unstable_cache(
   (filter: CmdExplorerFilter, entityIds: string[]): Promise<CmdSearchSummary> =>
     loadCmdSearchSummaryData(filter, entityIds),
+  // -v3: widened the payload with total_allowed + server-derived yield_pct (selection-mode green
+  //      cards) — bump so a cached v2 summary (no allowed / no yield) can't reach the new UI.
   // -v2: summary moved to the 0050 charge-grain rollup (counts/sums are logical charges) — the key
   // bump keeps a pre-deploy snapshot-grain summary (up to 15 min old) from reaching the new UI copy.
-  ['cmd-explorer-search-summary-v2'],
+  ['cmd-explorer-search-summary-v3'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
+
+// --- Collections AI analysis (server-only Anthropic stream) -----------------
+// The green-card panel's "Generate AI Analysis" action. Streams a short TL;DR / Signals / Risks
+// read of the ALREADY-computed non-PHI aggregate (cohort OR selection). Server-only: the API key
+// never leaves this process, and the input is validated by the aiAnalysis PHI firewall before it
+// reaches this layer (the action calls CollectionsAiInputSchema.parse). No tools → no
+// tool_choice/thinking conflict. NOT cached — every run is a fresh, user-initiated analysis.
+
+export type CollectionsAiStreamResult =
+  | { ok: false; reason: 'insufficient' | 'error' }
+  | { ok: true; stream: ReadableStream<string> };
+
+/**
+ * Stream one collections AI analysis. Enforces the data-sufficiency gate server-side (defense in
+ * depth — the UI also gates the button), then streams Anthropic text deltas back through a
+ * ReadableStream the Server Action forwards to the client. Token counts + model + tenant land in a
+ * PHI-free cost-governance log line on finish (mirrors the agent's emitAgentAudit); a durable audit
+ * row names the invoker. Any model/transport failure closes the stream with a GENERIC error — the
+ * real cause is logged server-side only, never surfaced to the client.
+ */
+export async function streamCollectionsAiAnalysis(
+  input: CollectionsAiInput,
+  actor: { email: string; userId: string },
+  businessEntityIds: string[],
+): Promise<CollectionsAiStreamResult> {
+  if (!isSufficientForAi(input)) return { ok: false, reason: 'insufficient' };
+
+  const model = process.env.ANTHROPIC_MODEL || 'claude-opus-4-8';
+  let sdk: Anthropic;
+  try {
+    sdk = new Anthropic(); // reads ANTHROPIC_API_KEY from env; never logged
+  } catch (err) {
+    console.error('collections_ai_analysis: client init failed:', err instanceof Error ? err.message : String(err));
+    return { ok: false, reason: 'error' };
+  }
+  const { system, user } = buildAiMessages(input);
+
+  // Durable audit of the invocation (best-effort: a transient audit failure must not kill a non-PHI,
+  // already-on-screen aggregate analysis). Detail is non-PHI: mode + entity scope + model only.
+  try {
+    await recordAccess({
+      actorEmail: actor.email,
+      actorUserId: actor.userId,
+      action: 'collections_ai_analysis',
+      detail: { mode: input.mode, entity_ids: businessEntityIds, model },
+    });
+  } catch (err) {
+    console.error('collections_ai_analysis: audit write failed (non-fatal):', err instanceof Error ? err.message : String(err));
+  }
+
+  const stream = new ReadableStream<string>({
+    async start(controller) {
+      try {
+        const ms = sdk.messages.stream({
+          model,
+          max_tokens: AI_MAX_TOKENS,
+          system,
+          messages: [{ role: 'user', content: user }],
+        });
+        for await (const event of ms) {
+          if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+            controller.enqueue(event.delta.text);
+          }
+        }
+        const final = await ms.finalMessage();
+        // PHI-free cost-governance line (mirrors emitAgentAudit): mode + tenant + model + tokens.
+        console.log(
+          JSON.stringify({
+            kind: 'collections_ai_analysis',
+            mode: input.mode,
+            business_entity_ids: businessEntityIds,
+            model,
+            input_tokens: final.usage?.input_tokens,
+            output_tokens: final.usage?.output_tokens,
+          }),
+        );
+        controller.close();
+      } catch (err) {
+        console.error('collections_ai_analysis: stream failed:', err instanceof Error ? err.message : String(err));
+        controller.error(new Error('ai_analysis_failed')); // generic to the client
+      }
+    },
+  });
+  return { ok: true, stream };
+}
 
 // --- alpha-prefix cohort payer-behavior curve (Session D) -------------------
 // Reads BOTH cohort rollups (claim/visit position + days-since-first) for one alpha-prefix
@@ -1614,15 +1727,12 @@ async function loadCohortCurveData(prefixBidx: string, entityIds: string[]): Pro
   // SAME min-patient floor as the curve so a sub-threshold prefix can't render a false-precision stat.
   // A guarded ratio is null when its denominator is <= 0 (never a divide-by-zero or a negative).
   const t = tot.rows[0];
-  const ratio = (num: number | null, den: number | null): number | null =>
-    num != null && den != null && den > 0 ? Math.round((num / den) * 10000) / 100 : null;
+  // Same derivation the SELECTION-MODE cards use (shared deriveYield) — one formula, one rounding,
+  // one guard, so cohort and selection percentages can never drift. Output is byte-identical to the
+  // inline ratio this replaced.
   const totals: CohortTotals | null =
     cohort_patients >= COHORT_MIN_PATIENTS && t
-      ? {
-          pct_collected: ratio(t.paid, t.billed),
-          pct_allowed: ratio(t.allowed, t.billed),
-          pct_paid: ratio(t.paid, t.allowed),
-        }
+      ? deriveYield({ billed: t.billed, allowed: t.allowed, paid: t.paid })
       : null;
   return { by_position, by_days: safe(days.rows), cohort_patients, totals };
 }

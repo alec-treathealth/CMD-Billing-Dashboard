@@ -41,6 +41,9 @@ import {
   loadCmdSearchSummary as loadCmdSearchSummary_,
   loadCohortCurve as loadCohortCurve_,
   loadCohortDrilldown as loadCohortDrilldown_,
+  streamCollectionsAiAnalysis as streamCollectionsAiAnalysis_,
+  CollectionsAiInputSchema,
+  type CollectionsAiInput,
   cmdExplorerFacilities,
   cmdExplorerPayers,
   recordAccess,
@@ -1250,6 +1253,42 @@ export async function loadCmdSearchSummary(
   } catch {
     return { ok: false, error: 'The search could not be run right now.' };
   }
+}
+
+export type CollectionsAiAnalysisResult =
+  | { ok: true; stream: ReadableStream<string> }
+  | { ok: false; reason: 'insufficient' | 'error' | 'unauthorized' };
+
+/**
+ * Stream an AI analysis of the current green-card panel (cohort OR selection mode). The client
+ * passes the SAME non-PHI aggregate it already rendered; {@link CollectionsAiInputSchema} is the PHI
+ * firewall (strict — unknown keys are stripped, so no member id / alpha-prefix / patient name can
+ * ride in). This is a NON-PHI aggregate → the model, so it uses the summary-read gate
+ * (viewEntityScope), NOT the stricter PHI-reveal gate; tenant scope is derived server-side. The
+ * real principal is resolved for the audit. Returns a text stream the panel renders progressively,
+ * or a coarse, non-leaky reason (insufficient → fixed sentence; error/unauthorized → generic
+ * notice). Every filter/search change makes the panel drop a prior summary and re-invoke — there is
+ * no server-side caching here (each analysis is fresh + user-initiated).
+ */
+export async function generateCollectionsAiAnalysis(
+  input: unknown,
+  view?: DashboardView,
+): Promise<CollectionsAiAnalysisResult> {
+  // PHI firewall + shape validation FIRST — a malformed/oversized object never reaches the model.
+  const parsed = CollectionsAiInputSchema.safeParse(input);
+  if (!parsed.success) return { ok: false, reason: 'error' };
+  // Non-PHI tenant scope (same gate as the summary read), clamped server-side to the entitlement.
+  const entityIds = await viewEntityScope(view);
+  if (entityIds === null) return { ok: false, reason: 'unauthorized' };
+  // Real principal for the durable audit (viewEntityScope already fails closed on no-auth).
+  const access = await dashboardAccess();
+  const user = access.ok ? access.access.user : null;
+  if (!user) return { ok: false, reason: 'unauthorized' };
+  return streamCollectionsAiAnalysis_(
+    parsed.data satisfies CollectionsAiInput,
+    { email: user.email, userId: user.id },
+    entityIds,
+  );
 }
 
 export type CohortCurveResult =

@@ -22,6 +22,7 @@ import {
   COHORT_DRILLDOWN_TABLE_MIN_PATIENTS,
   clearsCohortFloor,
   clearsDrilldownTableFloor,
+  deriveYield,
   type CmdExplorerFilter,
   type CmdExplorerSort,
 } from '../src/collections/cmdExplorerQuery.js';
@@ -302,6 +303,33 @@ test('search summary: totals + 3 group queries, tenant-scoped, group cols are li
     assert.equal(g.params[g.params.length - 1], CMD_SEARCH_TOP_N);
     assertAllBound(g.sql, g.params);
   }
+});
+
+test('search summary totals expose total_allowed (SELECTION-MODE %s derive from it, no new query)', () => {
+  // The tile aggregate MUST sum allowed_reliable — the SAME column the combo ratios + cohort totals
+  // use — so %Allowed/%Paid can be derived filter-wide from this one query. Guard against a
+  // regression that drops it (which would silently break selection-mode green cards).
+  const { totals } = buildCmdSearchSummaryQueries({ q: 'BCBS', searchColumns: ['facility'] }, ENTITY);
+  assert.match(totals.sql, /coalesce\(sum\(allowed_reliable\), 0\)::float8 as total_allowed/);
+  assert.match(totals.sql, /coalesce\(sum\(charge_amount\), 0\)::float8 as total_charge/);
+  assert.match(totals.sql, /coalesce\(sum\(insurance_payments\), 0\)::float8 as total_paid/);
+});
+
+test('deriveYield: shared cohort/selection derivation — mapping, 2dp rounding, guarded denominators', () => {
+  // Field mapping: %allowed = allowed/billed, %paid = paid/allowed, %collected = paid/billed.
+  const y = deriveYield({ billed: 1000, allowed: 600, paid: 450 });
+  assert.equal(y.pct_allowed, 60); // 600/1000
+  assert.equal(y.pct_paid, 75); // 450/600
+  assert.equal(y.pct_collected, 45); // 450/1000
+
+  // 2-dp rounding is byte-identical to the inline ratio it replaced (Math.round(x*10000)/100).
+  assert.equal(deriveYield({ billed: 3, allowed: 1, paid: null }).pct_allowed, 33.33);
+
+  // Guarded denominators → null ("—"), never a divide-by-zero / negative / NaN.
+  assert.equal(deriveYield({ billed: 0, allowed: 500, paid: 100 }).pct_allowed, null);
+  assert.equal(deriveYield({ billed: 1000, allowed: 0, paid: 100 }).pct_paid, null);
+  assert.equal(deriveYield({ billed: -10, allowed: 5, paid: 5 }).pct_collected, null);
+  assert.equal(deriveYield({ billed: null, allowed: null, paid: null }).pct_allowed, null);
 });
 
 test('PHI blind-index tokens add ANDed equality predicates, all bound (raw PHI never here)', () => {
