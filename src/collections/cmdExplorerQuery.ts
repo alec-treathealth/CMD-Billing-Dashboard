@@ -284,8 +284,11 @@ export function buildCmdEmployerOptionsQuery(
 ): { sql: string; params: unknown[] } {
   const params: unknown[] = [entityIds, likeContains(term), limit];
   const sql =
-    'select employer_norm, max(employer_name) as employer_name ' +
-    // Materialized latest-per-member set (0063): the employer_norm trigram GIN index serves the
+    // DISPLAY the normalized key itself (not a raw variant): employer_norm is the aggressive
+    // canonical key (0064), so "GOOGLE" — the value AND the label — reads clean and matches what the
+    // filter narrows by. (Before 0064's collapse, max(employer_name) surfaced ugly raw variants.)
+    'select employer_norm, employer_norm as employer_name ' +
+    // Materialized latest-per-member set (0063/0064): the employer_norm trigram GIN index serves the
     // leading-wildcard ILIKE, and the set is deduped once per load — not recomputed per keystroke.
     'from vob.member_benefits_latest ' +
     'where employer_norm is not null and employer_norm ilike $2 ' +
