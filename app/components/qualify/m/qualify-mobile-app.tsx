@@ -17,7 +17,7 @@
  *     chips + the pager are BROWSE affordances — hidden on the scoped identifier view.
  */
 import { useCallback, useEffect, useReducer, useRef, useState, useTransition, type ReactNode } from 'react';
-import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyMovers, revealQualifyRows } from '@/lib/qualify/actions';
+import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyMovers, getQualifyInitial, revealQualifyRows } from '@/lib/qualify/actions';
 import { QUALIFY_WINDOW_OPTIONS, QUALIFY_REVEAL_BATCH_CAP, sniffQualifyKind } from '@/lib/qualify/contract';
 import type { QualifySnapshot, QualifyFacility, QualifyClaim, QualifyMover, QualifyWindowDays, QualifyPhi, QualifyMarket } from '@/lib/qualify/contract';
 import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
@@ -139,8 +139,12 @@ export function QualifyMobileApp({
 
   const hasAmounts = snapshot ? snapshot.viewerHasAmountsCapability : viewerHasAmountsCapability;
 
-  // Effect A — keep the Heating-up movers in sync with the selected window (mount + every change).
+  // Effect A — keep the Heating-up movers in sync with the selected window. SKIPS the mount run: the
+  // combined on-load effect (Effect B) fetches the initial movers alongside the auto-resolve in ONE
+  // round-trip. Window CHANGES still refresh the chip row here.
+  const moversInitDone = useRef(false);
   useEffect(() => {
+    if (!moversInitDone.current) { moversInitDone.current = true; return; }
     let alive = true;
     getQualifyMovers(windowDays, marketRef.current)
       .then((r) => { if (alive) setMovers(r.movers); })
@@ -148,18 +152,41 @@ export function QualifyMobileApp({
     return () => { alive = false; };
   }, [windowDays]);
 
-  // Effect B — land POPULATED: auto-resolve the top mover the first time movers arrive. The ref makes it
-  // fire at most once, so a movers refresh (window change) never re-resolves; runSearch/resolveByPayer
-  // trip the ref first, so a manual search or chip tap issued before movers land is never clobbered. If
-  // movers is empty (no data), this no-ops and the search-prompt empty state stands.
+  // Effect B — land POPULATED in ONE round-trip (perf): getQualifyInitial returns the movers + the
+  // auto-resolved top payer's snapshot together, replacing the old movers→resolve waterfall. Commits
+  // exactly like resolveByPayer (list + cohort + sync). Mount-only; the resolveSeq guard discards it
+  // if a manual search/tap superseded before it lands. Empty movers / failure → the search prompt.
   useEffect(() => {
-    if (initialResolveDone.current) return;
-    const top = movers[0];
-    if (!top) return;
     initialResolveDone.current = true;
-    resolveByPayer(top.label, windowDays);
+    let alive = true;
+    const w = windowDays;
+    const seq = ++resolveSeq.current;
+    (async () => {
+      try {
+        const init = await getQualifyInitial(w, marketRef.current);
+        if (!alive || !resolveLandingWins(seq, resolveSeq.current)) return;
+        setMovers(init.movers);
+        const snap = init.snapshot;
+        if (snap && init.topPayer) {
+          setSnapshot(snap);
+          setSearched(true);
+          setByPayer(init.topPayer);
+          lastSearchRef.current = null;
+          setLastSearch(null);
+          setAreaFilter(AREA_ALL);
+          setEcho('');
+          setList(snap.facilities);
+          setPage(0);
+          setLocFilter(null);
+          syncCohortForResolution(snap.resolved?.payerName ?? null, w);
+        }
+      } catch {
+        // leave the empty prompt — the user can still search
+      }
+    })();
+    return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [movers]);
+  }, []);
 
   // Effect C — market change → re-resolve the ACTIVE view under the new employer/funding narrow (skip
   // the mount run). Refreshes the Heating-up movers too (Effect A only re-fires on windowDays). Mirrors

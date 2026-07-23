@@ -29,6 +29,8 @@ import {
   type QualifyClaim,
   type QualifyMovers,
   type QualifyMover,
+  type QualifyInitial,
+  type QualifyMarket,
   type QualifyWindowDays,
   type QualifyPhi,
   type QualifyRevealedRow,
@@ -543,6 +545,47 @@ export async function getQualifyMoversCore(
     movers,
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
+  };
+}
+
+/**
+ * Combined ON-LOAD resolution (perf): movers + the auto-resolved top payer's snapshot + its rank-1
+ * facility's seed cases, in ONE server round-trip. Composes the THREE existing cores back-to-back, so
+ * gating, audits (SEARCH_QUALIFY_PAYER on the resolve, SEARCH_QUALIFY_FACILITY on the seed), and the
+ * amounts choke points are byte-identical to the old client waterfall — only the client hops between
+ * them are removed. No movers → the empty-prompt shape (all nulls). Mirrors the client's on-load logic:
+ * resolve the top mover by payer, seed rank-1's cases (payer-wide; no identifier narrow on this path).
+ */
+export async function getQualifyInitialCore(
+  deps: QualifyDeps,
+  windowDays: QualifyWindowDays,
+  market?: QualifyMarket,
+): Promise<QualifyInitial> {
+  const movers = await getQualifyMoversCore(deps, windowDays, market);
+  const top = movers.movers[0]?.label ?? null;
+  const empty: QualifyInitial = {
+    movers: movers.movers, topPayer: top, snapshot: null,
+    seedFacility: null, seedCases: [], seedCapped: false,
+  };
+  if (!top) return empty;
+
+  const snapshot = await getQualifySnapshotByPayerCore(deps, { payer: top, windowDays, market });
+  const rank1 = snapshot.resolved ? snapshot.facilities[0]?.facilityKey ?? null : null;
+  if (!snapshot.resolved || !rank1) return { ...empty, snapshot };
+
+  const cases = await getQualifyFacilityCasesCore(deps, {
+    payer: snapshot.resolved.payerName,
+    facility: rank1,
+    windowDays,
+    market,
+  });
+  return {
+    movers: movers.movers,
+    topPayer: top,
+    snapshot,
+    seedFacility: rank1,
+    seedCases: cases.claims,
+    seedCapped: cases.capped,
   };
 }
 
