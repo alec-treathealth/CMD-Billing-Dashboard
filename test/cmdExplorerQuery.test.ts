@@ -805,8 +805,8 @@ test('employer options query: tenant-scoped, ILIKE on employer_norm, term escape
     sql,
     /member_id_bidx in \(select member_id_bidx from collections\.cmd_explorer_rows where business_entity_id = any\(\$1::uuid\[\]\)\)/,
   );
-  // returns the filter value (employer_norm) + a representative display name
-  assert.match(sql, /select employer_norm, max\(employer_name\) as employer_name/);
+  // returns the normalized key as BOTH the filter value and the display label (0064 canonical key)
+  assert.match(sql, /select employer_norm, employer_norm as employer_name/);
   // LIKE metacharacter in the term is escaped, never interpolated
   assert.deepEqual(params, [ENTITY, '%boe\\%ing%', 25]);
 });
