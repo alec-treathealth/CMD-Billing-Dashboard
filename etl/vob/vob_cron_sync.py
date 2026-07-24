@@ -208,8 +208,8 @@ def main():
     print(f"board items: {len(board)} | admitted: {len(admitted)}")
 
     ci, u = conninfo(getenv("CMD_ROLLUP_WRITER_DATABASE_URL"), getenv("SUPABASE_CA_PATH"))
-    upserted = deactivated = reactivated = errors = 0
-    note = ""
+    upserted = deactivated = reactivated = errors = no_pdf = download_fail = 0
+    note_parts = []
 
     with psycopg.connect(ci, connect_timeout=30, prepare_threshold=None) as conn:
         with conn.cursor() as cur:
@@ -244,17 +244,20 @@ def main():
                 for iid, fac, upd in to_process:
                     url = urls.get(iid)
                     if not url:
-                        errors += 1; continue                    # no downloadable PDF this run
+                        no_pdf += 1; continue                    # no files4 attachment yet — retried next run
                     try:
-                        raw = download_and_extract(url)
-                        row = build_row(raw, iid, fac, board[iid][2], upd)   # board[iid][2] = created_at date
-                        batch.append(tuple(row[c] for c in COLS))
+                        raw = download_and_extract(url)          # extract_pdf never raises (a bad PDF returns a
+                        row = build_row(raw, iid, fac, board[iid][2], upd)   # row w/ extraction_flag), so this
+                        batch.append(tuple(row[c] for c in COLS))           # except is a DOWNLOAD failure only.
                     except Exception:
-                        errors += 1                              # never log the exception payload
+                        download_fail += 1                       # never log the exception payload (may echo PHI)
                     if len(batch) >= 200:
                         cur.executemany(sql, batch); upserted += len(batch); batch = []
                 if batch:
                     cur.executemany(sql, batch); upserted += len(batch)
+            errors = no_pdf + download_fail
+            if errors:
+                note_parts.append(f"errors={no_pdf} no_pdf/{download_fail} download_fail")
 
             # SOFT-delete de-admitted / off-board (guarded). Mark deactivated_at instead of DELETE so
             # the benefit row is retained (it still enriches the member's historical collections
@@ -263,7 +266,7 @@ def main():
             stale = [iid for iid in db if iid not in admitted and deact.get(iid) is None]
             cap = max(50, int(DELETE_SAFETY_FRAC * len(db)))
             if len(stale) > cap:
-                note = f"soft-delete skipped: {len(stale)} stale > cap {cap}"
+                note_parts.append(f"soft-delete skipped: {len(stale)} stale > cap {cap}")
             elif stale:
                 cur.executemany(
                     "update vob.indigo_vob set deactivated_at=now() where monday_item_id=%s and deactivated_at is null",
@@ -279,6 +282,7 @@ def main():
                     [(iid,) for iid in readmit])
                 reactivated = len(readmit)
 
+            note = "; ".join(note_parts)
             cur.execute(
                 "insert into vob.sync_state "
                 "(source,last_run_at,board_items,admitted,upserted,deactivated,reactivated,errors,note) "
@@ -300,7 +304,8 @@ def main():
             conn.commit()
 
     print(f"upserted={upserted} watermark_backfill={len(to_touch)} "
-          f"deactivated={deactivated} reactivated={reactivated} errors={errors} note={note or '-'}")
+          f"deactivated={deactivated} reactivated={reactivated} "
+          f"errors={errors} (no_pdf={no_pdf} download_fail={download_fail}) note={note or '-'}")
 
 if __name__ == "__main__":
     main()
