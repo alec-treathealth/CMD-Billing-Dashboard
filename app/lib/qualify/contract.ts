@@ -212,6 +212,16 @@ export interface QualifyFacilityCases {
   capped: boolean;
 }
 
+/**
+ * Change C (client-name search) is DATA-GATED. It reads patient_name_bidx off the charge rollup, which
+ * requires BOTH: (1) migration 0067 applied (adds the column to the matview — a ~90s rebuild/outage),
+ * and (2) the historical name backfill run as the table OWNER (postgres; claims_reader has no UPDATE
+ * policy in prod). Until both complete, the Client Name tab is HIDDEN so a name search can never hit a
+ * missing column (500) or an always-empty result (confusing). The full code path ships behind this
+ * flag; flip to true after the ops runbook (docs/qualify-redesign-cc-prompt.md / handoff) completes.
+ */
+export const QUALIFY_CLIENT_NAME_ENABLED = false;
+
 /** member-id EXACT vs 3-letter alpha-PREFIX — the SNIFFED PHI-token kind (sniffed SERVER-SIDE, never
  *  client-declared). This is the kind mintToken/resolvePayer operate on; 'payer' is NOT one of them. */
 export type QualifyMatchKind = 'member_id' | 'prefix';

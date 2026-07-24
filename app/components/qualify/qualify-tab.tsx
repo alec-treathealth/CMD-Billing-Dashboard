@@ -57,6 +57,7 @@ import {
   revealQualifyRows,
 } from '@/lib/qualify/actions';
 import {
+  QUALIFY_CLIENT_NAME_ENABLED,
   QUALIFY_REVEAL_BATCH_CAP,
   qualifyWindowLabel,
   serializeQualifyWindow,
@@ -93,7 +94,8 @@ type SearchType = 'id' | 'client' | 'employer';
 
 const SEARCH_TABS: { key: SearchType; label: string }[] = [
   { key: 'id', label: 'Member ID / Prefix' },
-  { key: 'client', label: 'Client Name' },
+  // Client Name is data-gated (QUALIFY_CLIENT_NAME_ENABLED) — hidden until 0067 + the name backfill land.
+  ...(QUALIFY_CLIENT_NAME_ENABLED ? [{ key: 'client' as const, label: 'Client Name' }] : []),
   { key: 'employer', label: 'Employer' },
 ];
 
