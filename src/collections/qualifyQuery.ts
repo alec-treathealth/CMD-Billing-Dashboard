@@ -487,12 +487,17 @@ export function buildBookKpisQuery(
   to: string,
   entityIds: string[],
   market: VobMarketFilter = {},
+  payer: string | null = null,
 ): { sql: string; params: unknown[] } {
   const ent = assertEntityScope(entityIds, 'buildBookKpisQuery');
   const { params, add } = paramList();
   const e = add(ent);
   const f = add(from);
   const t = add(to);
+  // Optional payer scope: the SAME three ratios narrowed to one resolved payer (so the tiles + the
+  // resolved-band stat can reflect the resolved subject, not just the book). Non-PHI (payer label,
+  // like buildResolvePayerQuery); a null payer keeps the book-wide behavior byte-for-byte.
+  const payerCond = payer ? ` and primary_payer = ${add(payer)}` : '';
   const mj = buildVobMarketSemiJoin(market, add);
   const reliable = "sum(allowed_reliable) filter (where allowed_tier <> 'e2')";
   const sql =
@@ -503,6 +508,7 @@ export function buildBookKpisQuery(
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
     `where business_entity_id = any(${e}::uuid[]) ` +
     `and payment_received >= ${f}::date and payment_received < ${t}::date` +
+    payerCond +
     (mj ? ` and ${mj}` : '');
   return { sql, params };
 }
@@ -523,7 +529,7 @@ export interface QualifyFacilityTrendRow {
   facility_name: string | null;
   facility_code: string | null;
   care_setting: 'IP' | 'OP' | 'BOTH' | null;
-  dominant_payer: string | null; // most-charges payer in-window — the Heating-Up hybrid resolve target
+  dominant_payer: string | null; // top payer by reliable ALLOWED $ in-window — the Heating-Up hybrid resolve target
   entity_ids: string[]; // distinct business_entity_id(s) of the current-window rows → BXR/Indigo/Mixed label
   line_count: number; // ALL current-window charge lines backing the rating (the UI's defined "n")
   cur_rating: number | null; // current-window reliable allowed% (ex-e2), 0-100
@@ -536,8 +542,9 @@ export interface QualifyFacilityTrendRow {
  * cards + their sparklines. ONE scan over [priorFrom, to): the prior window is exactly the rows with
  * payment_received < from (priorTo == from, adjacent windows). Per facility it returns the
  * current-window rating, the prior-window rating (for the delta the caller computes), the dominant
- * payer (mode over charges — same "most charges" heuristic as buildResolvePayerQuery, the hybrid
- * click target), a small entity-id set (→ BXR/Indigo/Mixed label), the current-window line_count
+ * payer (the payer bringing the most reliable ALLOWED dollars at this facility in-window — the hybrid
+ * click target; ties fall back to line count then name), a small entity-id set (→ BXR/Indigo/Mixed
+ * label), the current-window line_count
  * (the "n"), and `points` — the current window sliced into QUALIFY_TREND_BUCKETS even sub-windows,
  * each a reliable allowed% (thin buckets dropped so no point is fabricated). Floor: only facilities
  * with >= QUALIFY_MIN_LINES current-window lines rank (kills 1–2-line flukes). ORDER BY the rating
@@ -580,15 +587,28 @@ export function buildFacilityTrendQuery(
     "and facility is not null and btrim(facility) <> ''" +
     payerCond +
     (mj ? ` and ${mj}` : '');
-  // fac: per-facility current + prior aggregates + dominant payer + entity set.
+  // fac: per-facility current + prior aggregates + entity set (dominant payer is computed in `dom`).
   const fac =
     'select facility, ' +
     'count(*) filter (where is_cur)::int as line_count, ' +
-    "mode() within group (order by primary_payer) filter (where is_cur and primary_payer is not null and btrim(primary_payer) <> '') as dominant_payer, " +
     'array_agg(distinct business_entity_id::text) filter (where is_cur) as entity_ids, ' +
     `case when sum(charge_amount) filter (where is_cur) > 0 then round((${reliable('is_cur and ')}) / sum(charge_amount) filter (where is_cur) * 100, 2)::float8 end as cur_rating, ` +
     `case when sum(charge_amount) filter (where not is_cur) > 0 then round((${reliable('not is_cur and ')}) / sum(charge_amount) filter (where not is_cur) * 100, 2)::float8 end as prior_rating ` +
     'from span group by facility';
+  // pay/dom: DOMINANT PAYER = the payer bringing the most reliable ALLOWED dollars (ex-e2) at the
+  // facility in the CURRENT window — the Heating-Up hybrid resolve target. `distinct on (facility)` +
+  // `allowed_sum desc nulls last` picks that payer; ties (or an all-e2 facility with no reliable
+  // allowed → null sums) fall back to line count, then payer name, so the choice is deterministic and
+  // a facility that serves several payers still resolves to a real one.
+  const pay =
+    'select facility, primary_payer, ' +
+    `sum(allowed_reliable) filter (where allowed_tier <> 'e2') as allowed_sum, ` +
+    'count(*)::int as pay_lines ' +
+    "from span where is_cur and primary_payer is not null and btrim(primary_payer) <> '' " +
+    'group by facility, primary_payer';
+  const dom =
+    'select distinct on (facility) facility, primary_payer as dominant_payer ' +
+    'from pay order by facility, allowed_sum desc nulls last, pay_lines desc, primary_payer';
   // bkt_agg: per-facility current-window sparkline — per-bucket rating, thin buckets dropped, oldest→newest.
   const bktAgg =
     'select facility, ' +
@@ -598,13 +618,13 @@ export function buildFacilityTrendQuery(
     "then round((sum(allowed_reliable) filter (where allowed_tier <> 'e2')) / sum(charge_amount) * 100, 2)::float8 end as bkt_rating " +
     'from span where is_cur group by facility, bkt) b group by facility';
   const sql =
-    `with span as (${span}), fac as (${fac}), bkt_agg as (${bktAgg}) ` +
+    `with span as (${span}), fac as (${fac}), pay as (${pay}), dom as (${dom}), bkt_agg as (${bktAgg}) ` +
     'select agg.facility, agg.line_count, agg.dominant_payer, agg.entity_ids, agg.cur_rating, agg.prior_rating, ' +
     "coalesce(agg.points, array[]::float8[]) as points, " +
     'max(f.facility_name) as facility_name, ' +
     'max(f.care_setting) as care_setting, ' +
     'max(coalesce(fe.facility_code, a.facility_code)) as facility_code ' +
-    'from (select fac.*, bkt_agg.points from fac left join bkt_agg using (facility)) agg ' +
+    'from (select fac.*, dom.dominant_payer, bkt_agg.points from fac left join dom using (facility) left join bkt_agg using (facility)) agg ' +
     FACILITY_DIM_JOINS +
     `where agg.line_count >= ${ml} ` +
     'group by agg.facility, agg.line_count, agg.dominant_payer, agg.entity_ids, agg.cur_rating, agg.prior_rating, agg.points ' +

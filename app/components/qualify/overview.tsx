@@ -32,28 +32,40 @@ function pctText(v: number | null): string {
   return v === null ? '—' : `${Math.round(v)}`;
 }
 
-export function BookKpiTiles({ kpis, locActive }: { kpis: QualifyBookKpis | null; locActive: boolean }) {
+export function BookKpiTiles({
+  kpis,
+  locActive,
+  scopeLabel = null,
+}: {
+  kpis: QualifyBookKpis | null;
+  locActive: boolean;
+  /** When set (a resolved payer), the tiles are scoped to that subject — the caption names it instead
+   *  of "book-wide". Null = the fresh, unresolved landing (book-wide). */
+  scopeLabel?: string | null;
+}) {
+  // The tiles either read book-wide (landing) or are scoped to the resolved payer (a click/search).
+  const scope = scopeLabel ?? 'book-wide';
   const tiles: { key: string; tone: 'g' | 'a'; label: string; value: number | null; caption: string }[] = [
     {
       key: 'allowed',
       tone: 'g',
       label: '% allowed of billed',
       value: kpis?.pctAllowedOfBilled ?? null,
-      caption: 'book-wide · reliable allowed ÷ billed',
+      caption: `${scope} · reliable allowed ÷ billed`,
     },
     {
       key: 'paid-of-allowed',
       tone: 'a',
       label: '% paid of allowed',
       value: kpis?.pctPaidOfAllowed ?? null,
-      caption: 'book-wide · payer paid ÷ allowed',
+      caption: `${scope} · payer paid ÷ allowed`,
     },
     {
       key: 'paid-of-billed',
       tone: 'a',
       label: '% paid of billed',
       value: kpis?.pctPaidOfBilled ?? null,
-      caption: 'book-wide · net realization',
+      caption: `${scope} · net realization`,
     },
   ];
   return (

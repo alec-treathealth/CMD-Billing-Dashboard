@@ -147,12 +147,16 @@ export async function getQualifyInitial(
   return getQualifyInitialCore(realDeps, window, sanitizeMarket(market));
 }
 
-/** Redesign overview: book-wide KPI percentages (allowed/paid ratios) for the window, in-plane. */
+/** Redesign overview: KPI percentages (allowed/paid ratios) for the window, in-plane. `payer` null =
+ *  book-wide (the landing tiles); a payer label narrows the SAME ratios to the resolved subject so the
+ *  tiles + the resolved-band stat reflect what the user resolved. Non-PHI aggregate (payer label only;
+ *  no member term/token) — gate-only, parity with the book-wide KPI + movers path. */
 export async function getQualifyBookKpis(
   window: QualifyWindow,
   market?: QualifyMarket,
+  payer?: string | null,
 ): Promise<QualifyBookKpis> {
-  return getQualifyBookKpisCore(realDeps, window, sanitizeMarket(market));
+  return getQualifyBookKpisCore(realDeps, window, sanitizeMarket(market), payer ?? null);
 }
 
 /** Redesign overview: per-facility rating trend + delta (Heating-Up + sparklines). payer null = book-wide. */
