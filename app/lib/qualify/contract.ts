@@ -180,6 +180,10 @@ export interface QualifyFacility {
   /** Level of care from the facility dimension (care_setting). null when the facility text is
    *  unresolved — render no tag, never a fabricated one. */
   careSetting: 'IP' | 'OP' | 'BOTH' | null;
+  /** Small NON-PHI tenant LABEL — which book this facility's rows belong to. 'Mixed' when a raw
+   *  facility text carries rows from both tenants (cross-tenant interleave is intended; this is a
+   *  label only, never a grouping/split). null when the rows carried no resolvable entity. */
+  entity: 'BXR' | 'Indigo' | 'Mixed' | null;
 }
 
 /** ONE claim (charge) line — claim grain (Direction B, ruling 1): one row per charge from the 0050 rollup,
@@ -272,6 +276,64 @@ export interface QualifyInitial {
   topPayer: string | null; // the auto-resolved mover label (drives byPayer for window re-resolves)
   snapshot: QualifySnapshot | null;
   seedFacility: string | null; // rank-1 facilityKey the cases were seeded for
+  seedCases: QualifyClaim[];
+  seedCapped: boolean;
+}
+
+/**
+ * Book-wide KPI percentages (redesign overview). Cross-tenant, windowed on payment_received, derived
+ * IN-PLANE from the charge rollup (NO external collections join). Dollars are summed server-side and
+ * NEVER returned — only these three ratios cross the wire, so an admissions_seat reads them safely
+ * (non-dollar). Any ratio is null when its guarded denominator collapses (never a coerced 0%).
+ */
+export interface QualifyBookKpis {
+  /** reliable allowed (tier e2 excluded) ÷ billed, 0-100 — the contracted-rate signal. */
+  pctAllowedOfBilled: number | null;
+  /** insurance_payments ÷ reliable allowed, 0-100 — collection yield ON what was allowed. */
+  pctPaidOfAllowed: number | null;
+  /** insurance_payments ÷ billed, 0-100 — net realization. */
+  pctPaidOfBilled: number | null;
+  windowStart: string;
+  windowEnd: string;
+  tenantScope: typeof QUALIFY_TENANT_SCOPE;
+}
+
+/**
+ * Per-facility rating TREND + prior-window delta (redesign "Facilities Heating Up" + the per-facility
+ * sparklines). NON-DOLLAR (ratings only) → admissions_seat-safe. `points` is the current window sliced
+ * into evenly-spaced sub-windows, each a reliable allowed% (thin buckets dropped — never fabricated),
+ * oldest→newest. `deltaPts` = currentRating − priorRating (null when there is no prior-window evidence —
+ * a NEW facility, sorted last). `dominantPayer` powers the Heating-Up hybrid click: resolve that payer,
+ * then scope to this facility. `lineCount` is the UI's defined "n" (claim lines backing the rating).
+ */
+export interface QualifyFacilityTrend {
+  facilityKey: string; // raw rollup facility text — the join key (== QualifyFacility.facilityKey)
+  name: string;
+  city: string | null;
+  state: string | null;
+  careSetting: 'IP' | 'OP' | 'BOTH' | null;
+  entity: 'BXR' | 'Indigo' | 'Mixed' | null;
+  dominantPayer: string | null; // most-charges payer in-window — the hybrid-resolve target
+  lineCount: number; // ALL current-window charge lines backing the rating (the "n")
+  currentRating: number | null; // current-window reliable allowed% (0-100)
+  priorRating: number | null; // prior equal-window rating (null → no prior evidence)
+  deltaPts: number | null; // currentRating − priorRating (null when priorRating is null)
+  points: number[]; // per-bucket ratings, oldest→newest (thin buckets dropped)
+}
+
+/**
+ * Combined ON-LOAD overview payload (ONE round-trip, perf): the book-wide KPI tiles + the trending
+ * facilities + the hybrid-resolved top facility's payer snapshot + that facility's seed cases. Mirrors
+ * getQualifyInitial's role but overview-shaped (facility-centric, not payer-centric). `topFacility`/
+ * `topPayer`/`snapshot` are null when nothing is trending (empty book) — the client shows the prompt.
+ */
+export interface QualifyOverview {
+  kpis: QualifyBookKpis;
+  trends: QualifyFacilityTrend[];
+  topFacility: string | null; // trends[0].facilityKey — the hybrid focus
+  topPayer: string | null; // trends[0].dominantPayer — resolved on load
+  snapshot: QualifySnapshot | null;
+  seedFacility: string | null;
   seedCases: QualifyClaim[];
   seedCapped: boolean;
 }

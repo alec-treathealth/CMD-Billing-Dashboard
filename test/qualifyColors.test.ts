@@ -22,6 +22,7 @@ function fac(name: string, pct: number | null, lineCount: number, rank = 1): Qua
     estimateClaims: 0,
     unknownClaims: 0,
     careSetting: null,
+    entity: null,
   };
 }
 

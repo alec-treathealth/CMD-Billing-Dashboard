@@ -69,7 +69,7 @@ test('groupClaimsByPatient: all-unknown → unknown; otherwise confirmed; empty 
 const fac = (key: string, careSetting: QualifyFacility['careSetting']): QualifyFacility => ({
   rank: 1, name: key.toUpperCase(), facilityKey: key, city: null, state: null,
   pctAllowedOfBilled: 50, rating: 50, streakSignal: null, billedAmount: null, allowedAmount: null,
-  lineCount: 10, confirmedClaims: 10, estimateClaims: 0, unknownClaims: 0, careSetting,
+  lineCount: 10, confirmedClaims: 10, estimateClaims: 0, unknownClaims: 0, careSetting, entity: null,
 });
 
 test('filterFacilitiesByLoc: INCLUSIVE chips — IP shows IP+BOTH; OP shows OP+BOTH; Both shows only BOTH', () => {

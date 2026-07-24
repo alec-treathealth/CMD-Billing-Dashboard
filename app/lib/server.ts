@@ -129,6 +129,8 @@ import {
   buildIdentifierLandingFacilityQuery,
   buildFacilityCasesQuery,
   buildMoversQuery,
+  buildBookKpisQuery,
+  buildFacilityTrendQuery,
 } from '../../src/collections/qualifyQuery.js';
 import type { QualifyPatientCohortRaw } from './qualify/core';
 import type {
@@ -137,6 +139,8 @@ import type {
   QualifyFacilityRow,
   QualifyClaimRow,
   QualifyMoverRow,
+  QualifyBookKpisRow,
+  QualifyFacilityTrendRow,
 } from '../../src/collections/qualifyQuery.js';
 import type {
   ClaimFilter,
@@ -2156,6 +2160,36 @@ export async function loadQualifyMovers(
 ): Promise<QualifyMoverRow[]> {
   const q = buildMoversQuery(thisFrom, thisTo, priorFrom, priorTo, entityIds, { market });
   const { rows } = await readerExecutor().query<QualifyMoverRow>(q.sql, q.params);
+  return rows;
+}
+
+/** Redesign overview: book-wide KPI percentages for the window, cross-tenant (dollars summed + dropped
+ *  in SQL — only the three ratios come back). Returns one row (or null on an empty book). */
+export async function loadQualifyBookKpis(
+  from: string,
+  to: string,
+  entityIds: string[],
+  market: VobMarketFilter = {},
+): Promise<QualifyBookKpisRow | null> {
+  const q = buildBookKpisQuery(from, to, entityIds, market);
+  const { rows } = await readerExecutor().query<QualifyBookKpisRow>(q.sql, q.params);
+  return rows[0] ?? null;
+}
+
+/** Redesign overview: per-facility rating trend rows (ratings only), cross-tenant. `payer` null =
+ *  book-wide (the Heating-Up row); a payer = the resolved panel's per-facility sparklines. */
+export async function loadQualifyFacilityTrends(
+  from: string,
+  to: string,
+  priorFrom: string,
+  entityIds: string[],
+  opts: { payer?: string | null; market?: VobMarketFilter } = {},
+): Promise<QualifyFacilityTrendRow[]> {
+  const q = buildFacilityTrendQuery(from, to, priorFrom, entityIds, {
+    payer: opts.payer ?? null,
+    market: opts.market ?? {},
+  });
+  const { rows } = await readerExecutor().query<QualifyFacilityTrendRow>(q.sql, q.params);
   return rows;
 }
 

@@ -29,7 +29,7 @@ const FAC: QualifyFacility = {
   billedAmount: 412300,
   allowedAmount: 251500,
   lineCount: 812,
-  confirmedClaims: 700, estimateClaims: 100, unknownClaims: 12, careSetting: 'BOTH',
+  confirmedClaims: 700, estimateClaims: 100, unknownClaims: 12, careSetting: 'BOTH', entity: 'Indigo',
 };
 
 const CASES: QualifyClaim[] = [

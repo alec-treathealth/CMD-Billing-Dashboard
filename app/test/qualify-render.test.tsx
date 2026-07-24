@@ -29,13 +29,13 @@ const SOLID: QualifyFacility = {
   rank: 1, name: 'SOLID', facilityKey: 'solid', city: 'Boulder', state: 'CO',
   pctAllowedOfBilled: 55, rating: solidRating, streakSignal: null,
   billedAmount: 308900, allowedAmount: 166800, lineCount: 400,
-  confirmedClaims: 380, estimateClaims: 15, unknownClaims: 5, careSetting: 'OP',
+  confirmedClaims: 380, estimateClaims: 15, unknownClaims: 5, careSetting: 'OP', entity: 'BXR',
 };
 const THIN_HIGH: QualifyFacility = {
   rank: 2, name: 'THIN HIGH', facilityKey: 'thin high', city: 'Reno', state: 'NV',
   pctAllowedOfBilled: 90, rating: thinHighRating, streakSignal: null,
   billedAmount: 412300, allowedAmount: 251500, lineCount: 1,
-  confirmedClaims: 1, estimateClaims: 0, unknownClaims: 0, careSetting: null,
+  confirmedClaims: 1, estimateClaims: 0, unknownClaims: 0, careSetting: null, entity: 'Indigo',
 };
 const FACILITIES = [SOLID, THIN_HIGH];
 
@@ -51,7 +51,7 @@ const LOW: QualifyFacility = {
   rank: 3, name: 'LOW YIELD', facilityKey: 'low yield', city: 'Fresno', state: 'CA',
   pctAllowedOfBilled: 24, rating: lowRating, streakSignal: null,
   billedAmount: 500000, allowedAmount: 120000, lineCount: 300,
-  confirmedClaims: 290, estimateClaims: 8, unknownClaims: 2, careSetting: 'IP',
+  confirmedClaims: 290, estimateClaims: 8, unknownClaims: 2, careSetting: 'IP', entity: 'BXR',
 };
 const CASE_AT_LOW: QualifyClaim = {
   id: 2, memberIdMasked: '••••••', payerName: 'AETNA', facilityName: 'LOW YIELD', program: 'OP',

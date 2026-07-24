@@ -61,6 +61,7 @@ export interface QualifyFacilityRow {
   billed: number | null; // sum(charge_amount), ALL lines — stripped in the action for admissions_seat
   allowed: number | null; // sum(allowed_reliable) EXCLUDING tier e2 (0059 evidence sum; null when zero reliable evidence) — stripped for admissions_seat
   pct_allowed: number | null; // dollar-weighted reliable-allowed/billed, 0-100 (guarded); null → neutral rating
+  entity_ids: string[]; // distinct tenant uuid(s) backing this facility — core maps to a BXR/Indigo/Mixed label
 }
 export interface QualifyClaimRow {
   id: number; // rollup id of THIS charge — drives the audited reveal join
@@ -202,6 +203,10 @@ export function buildFacilityRankingQuery(
     "count(*) filter (where allowed_tier = 'e2')::int as estimate_claims, " +
     "count(*) filter (where allowed_tier in ('b','none'))::int as unknown_claims, " +
     'sum(charge_amount)::float8 as billed, ' +
+    // entity_ids: the distinct tenant(s) whose rows back this facility card. The core maps it to a
+    // small non-PHI 'BXR' / 'Indigo' / 'Mixed' LABEL — never used to GROUP or SPLIT (cross-tenant
+    // interleave stays; grouping-by-entity is banned). A facility text under both tenants → 'Mixed'.
+    'array_agg(distinct business_entity_id::text) as entity_ids, ' +
     RANKING_RELIABLE_SELECT + ' ' +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
     `where business_entity_id = any(${e}::uuid[]) and primary_payer = ${p} ` +
@@ -211,14 +216,14 @@ export function buildFacilityRankingQuery(
     'group by facility';
   const sql =
     'select agg.facility, agg.line_count, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
-    'agg.billed, agg.allowed, agg.pct_allowed, ' +
+    'agg.billed, agg.allowed, agg.pct_allowed, agg.entity_ids, ' +
     'max(f.facility_name) as facility_name, ' +
     'max(f.care_setting) as care_setting, ' +
     'max(coalesce(fe.facility_code, a.facility_code)) as facility_code ' +
     `from (${inner}) agg ` +
     FACILITY_DIM_JOINS +
     'group by agg.facility, agg.line_count, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
-    'agg.billed, agg.allowed, agg.pct_allowed ' +
+    'agg.billed, agg.allowed, agg.pct_allowed, agg.entity_ids ' +
     'order by agg.pct_allowed desc nulls last, agg.facility';
   return { sql, params };
 }
@@ -436,5 +441,156 @@ export function buildMoversQuery(
     'from w ' +
     `where this_patients >= ${minp} and this_charges >= ${minc} ` +
     `order by delta_patients desc, this_patients desc, primary_payer limit ${lim}`;
+  return { sql, params };
+}
+
+// ── Redesign overview aggregates (book KPIs + per-facility rating trend) ──────────────────────────
+// Both read the SAME 0059 charge rollup the ranking does (grain-safe, cross-tenant); both return
+// ONLY percentages / ratings — dollars are summed inside SQL and never projected, so an
+// admissions_seat consumes them unchanged. The reliable-allowed evidence excludes tier 'e2' exactly
+// like RANKING_RELIABLE_SELECT (ruling Q2a) so the rating scale is identical everywhere.
+
+/** Book-wide KPI row (percentages only — the underlying dollar sums never leave SQL). */
+export interface QualifyBookKpisRow {
+  pct_allowed_of_billed: number | null; // reliable allowed (ex-e2) ÷ billed — the contract rate
+  pct_paid_of_allowed: number | null; // insurance_payments ÷ reliable allowed — collection yield on allowed
+  pct_paid_of_billed: number | null; // insurance_payments ÷ billed — net realization
+}
+
+/**
+ * Book-wide KPI percentages for the resolved window, cross-tenant. Derived IN-PLANE from the charge
+ * rollup (insurance_payments = the per-charge max payer payment; allowed_reliable ex-e2; charge_amount)
+ * — NO external collections join. Each ratio is guarded (>0 denominator) and rounds to 2 dp; a
+ * collapsed denominator yields NULL (never a coerced 0%). Optional VOB market narrow (semi-join). One
+ * row out.
+ */
+export function buildBookKpisQuery(
+  from: string,
+  to: string,
+  entityIds: string[],
+  market: VobMarketFilter = {},
+): { sql: string; params: unknown[] } {
+  const ent = assertEntityScope(entityIds, 'buildBookKpisQuery');
+  const { params, add } = paramList();
+  const e = add(ent);
+  const f = add(from);
+  const t = add(to);
+  const mj = buildVobMarketSemiJoin(market, add);
+  const reliable = "sum(allowed_reliable) filter (where allowed_tier <> 'e2')";
+  const sql =
+    'select ' +
+    `case when sum(charge_amount) > 0 then round((${reliable}) / sum(charge_amount) * 100, 2)::float8 end as pct_allowed_of_billed, ` +
+    `case when (${reliable}) > 0 then round(sum(insurance_payments) / (${reliable}) * 100, 2)::float8 end as pct_paid_of_allowed, ` +
+    'case when sum(charge_amount) > 0 then round(sum(insurance_payments) / sum(charge_amount) * 100, 2)::float8 end as pct_paid_of_billed ' +
+    `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
+    `where business_entity_id = any(${e}::uuid[]) ` +
+    `and payment_received >= ${f}::date and payment_received < ${t}::date` +
+    (mj ? ` and ${mj}` : '');
+  return { sql, params };
+}
+
+/** Number of evenly-spaced sub-window buckets in a facility sparkline (fixed so density is consistent
+ *  across 30/60/90 and calendar windows — weekly buckets would give only ~4 points at 30d). */
+export const QUALIFY_TREND_BUCKETS = 8;
+/** Default "Facilities Heating Up" size (top-N by rating delta). */
+export const QUALIFY_TREND_TOP_N = 8;
+/** Trend floor — a facility needs at least this many CURRENT-window lines to rank (kills 1–2-line
+ *  flukes). Mirrors rating.ts QUALIFY_MIN_LINES; kept as a local literal so this src/ module never
+ *  imports from app/ (the dependency points the wrong way). Keep the two values in lockstep. */
+export const QUALIFY_TREND_MIN_LINES = 3;
+
+/** Per-facility trend row (ratings only — no dollars projected). */
+export interface QualifyFacilityTrendRow {
+  facility: string; // raw rollup facility text (the join key / QualifyFacility.facilityKey)
+  facility_name: string | null;
+  facility_code: string | null;
+  care_setting: 'IP' | 'OP' | 'BOTH' | null;
+  dominant_payer: string | null; // most-charges payer in-window — the Heating-Up hybrid resolve target
+  entity_ids: string[]; // distinct business_entity_id(s) of the current-window rows → BXR/Indigo/Mixed label
+  line_count: number; // ALL current-window charge lines backing the rating (the UI's defined "n")
+  cur_rating: number | null; // current-window reliable allowed% (ex-e2), 0-100
+  prior_rating: number | null; // prior equal-window rating (null → no prior evidence, a NEW facility)
+  points: number[]; // per-bucket ratings, oldest→newest; thin buckets dropped (never fabricated)
+}
+
+/**
+ * Per-facility rating TREND + prior-window delta, cross-tenant — powers the "Facilities Heating Up"
+ * cards + their sparklines. ONE scan over [priorFrom, to): the prior window is exactly the rows with
+ * payment_received < from (priorTo == from, adjacent windows). Per facility it returns the
+ * current-window rating, the prior-window rating (for the delta the caller computes), the dominant
+ * payer (mode over charges — same "most charges" heuristic as buildResolvePayerQuery, the hybrid
+ * click target), a small entity-id set (→ BXR/Indigo/Mixed label), the current-window line_count
+ * (the "n"), and `points` — the current window sliced into QUALIFY_TREND_BUCKETS even sub-windows,
+ * each a reliable allowed% (thin buckets dropped so no point is fabricated). Floor: only facilities
+ * with >= QUALIFY_MIN_LINES current-window lines rank (kills 1–2-line flukes). ORDER BY the rating
+ * delta desc (biggest improvers first) — NULL prior (new facilities) sinks last. Optional single-payer
+ * scope (`payer`) for the resolved panel's per-facility sparklines; omitted = book-wide (the overview).
+ */
+export function buildFacilityTrendQuery(
+  from: string,
+  to: string,
+  priorFrom: string,
+  entityIds: string[],
+  opts: { payer?: string | null; buckets?: number; minLines?: number; topN?: number; market?: VobMarketFilter } = {},
+): { sql: string; params: unknown[] } {
+  const ent = assertEntityScope(entityIds, 'buildFacilityTrendQuery');
+  const buckets = Math.max(1, Math.min(24, Math.trunc(opts.buckets ?? QUALIFY_TREND_BUCKETS)));
+  const minLines = Math.max(QUALIFY_TREND_MIN_LINES, Math.trunc(opts.minLines ?? QUALIFY_TREND_MIN_LINES));
+  const topN = Math.max(1, Math.trunc(opts.topN ?? QUALIFY_TREND_TOP_N));
+  const { params, add } = paramList();
+  const e = add(ent);
+  const pf = add(priorFrom);
+  const f = add(from);
+  const t = add(to);
+  const payerCond = opts.payer ? ` and primary_payer = ${add(opts.payer)}` : '';
+  const mj = buildVobMarketSemiJoin(opts.market ?? {}, add);
+  const nb = add(buckets);
+  const ml = add(minLines);
+  const lim = add(topN);
+  const reliable = (pfx: string) => `sum(allowed_reliable) filter (where ${pfx}allowed_tier <> 'e2')`;
+  // span: one scan over [priorFrom, to). is_cur splits the current window ([from, to)) from the prior
+  // ([priorFrom, from) == the adjacent prior window). Facility text is filtered non-blank here.
+  const span =
+    'select facility, primary_payer, business_entity_id, charge_amount, allowed_reliable, allowed_tier, ' +
+    `(payment_received >= ${f}::date) as is_cur, ` +
+    // bucket index over the CURRENT window only (0..nb-1); null for prior rows.
+    `case when payment_received >= ${f}::date then ` +
+    `least(${nb} - 1, greatest(0, floor(${nb}::float8 * (payment_received - ${f}::date) / nullif(${t}::date - ${f}::date, 0))::int)) end as bkt ` +
+    `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
+    `where business_entity_id = any(${e}::uuid[]) ` +
+    `and payment_received >= ${pf}::date and payment_received < ${t}::date ` +
+    "and facility is not null and btrim(facility) <> ''" +
+    payerCond +
+    (mj ? ` and ${mj}` : '');
+  // fac: per-facility current + prior aggregates + dominant payer + entity set.
+  const fac =
+    'select facility, ' +
+    'count(*) filter (where is_cur)::int as line_count, ' +
+    "mode() within group (order by primary_payer) filter (where is_cur and primary_payer is not null and btrim(primary_payer) <> '') as dominant_payer, " +
+    'array_agg(distinct business_entity_id::text) filter (where is_cur) as entity_ids, ' +
+    `case when sum(charge_amount) filter (where is_cur) > 0 then round((${reliable('is_cur and ')}) / sum(charge_amount) filter (where is_cur) * 100, 2)::float8 end as cur_rating, ` +
+    `case when sum(charge_amount) filter (where not is_cur) > 0 then round((${reliable('not is_cur and ')}) / sum(charge_amount) filter (where not is_cur) * 100, 2)::float8 end as prior_rating ` +
+    'from span group by facility';
+  // bkt_agg: per-facility current-window sparkline — per-bucket rating, thin buckets dropped, oldest→newest.
+  const bktAgg =
+    'select facility, ' +
+    'array_remove(array_agg(bkt_rating order by bkt), null) as points ' +
+    'from (select facility, bkt, ' +
+    "case when sum(charge_amount) > 0 and sum(allowed_reliable) filter (where allowed_tier <> 'e2') is not null " +
+    "then round((sum(allowed_reliable) filter (where allowed_tier <> 'e2')) / sum(charge_amount) * 100, 2)::float8 end as bkt_rating " +
+    'from span where is_cur group by facility, bkt) b group by facility';
+  const sql =
+    `with span as (${span}), fac as (${fac}), bkt_agg as (${bktAgg}) ` +
+    'select agg.facility, agg.line_count, agg.dominant_payer, agg.entity_ids, agg.cur_rating, agg.prior_rating, ' +
+    "coalesce(agg.points, array[]::float8[]) as points, " +
+    'max(f.facility_name) as facility_name, ' +
+    'max(f.care_setting) as care_setting, ' +
+    'max(coalesce(fe.facility_code, a.facility_code)) as facility_code ' +
+    'from (select fac.*, bkt_agg.points from fac left join bkt_agg using (facility)) agg ' +
+    FACILITY_DIM_JOINS +
+    `where agg.line_count >= ${ml} ` +
+    'group by agg.facility, agg.line_count, agg.dominant_payer, agg.entity_ids, agg.cur_rating, agg.prior_rating, agg.points ' +
+    'order by (agg.cur_rating - agg.prior_rating) desc nulls last, agg.cur_rating desc nulls last, agg.facility ' +
+    `limit ${lim}`;
   return { sql, params };
 }
