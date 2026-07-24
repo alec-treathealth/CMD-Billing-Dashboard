@@ -7,11 +7,80 @@
  */
 import type { QualifyConfidence } from './confidence';
 
-export type QualifyWindowDays = 30 | 60 | 90 | 180;
-export const QUALIFY_WINDOW_OPTIONS: readonly QualifyWindowDays[] = [30, 60, 90, 180];
+/** Trailing-window day counts (redesign: 180 DROPPED per ruling; Month/Year replaces it). */
+export type QualifyTrailingDays = 30 | 60 | 90;
+export const QUALIFY_WINDOW_OPTIONS: readonly QualifyTrailingDays[] = [30, 60, 90];
 const WINDOW_SET: ReadonlySet<number> = new Set(QUALIFY_WINDOW_OPTIONS);
-export function isQualifyWindow(n: unknown): n is QualifyWindowDays {
-  return typeof n === 'number' && WINDOW_SET.has(n);
+
+/**
+ * THE window shape (redesign): trailing-N-days OR a CALENDAR month/year (a different window shape,
+ * not trailing-N — ruled 2026-07-24). Calendar prior window for every Δ = the previous equivalent
+ * calendar period (previous month / previous year), NOT prior-year-same-month.
+ */
+export type QualifyWindow =
+  | { kind: 'trailing'; days: QualifyTrailingDays }
+  | { kind: 'month'; year: number; month: number } // month 1-12
+  | { kind: 'year'; year: number };
+
+/** Calendar-window year bounds (data begins 2024; generous forward cap — bounded input, not policy). */
+export const QUALIFY_CAL_YEAR_MIN = 2024;
+export const QUALIFY_CAL_YEAR_MAX = 2035;
+
+/** Convenience constructor for the common trailing shape. */
+export function trailingWindow(days: QualifyTrailingDays): QualifyWindow {
+  return { kind: 'trailing', days };
+}
+
+/** Structural + range validation of a client-supplied window (the trust-boundary check). */
+export function isQualifyWindow(w: unknown): w is QualifyWindow {
+  if (typeof w !== 'object' || w === null) return false;
+  const o = w as { kind?: unknown; days?: unknown; year?: unknown; month?: unknown };
+  if (o.kind === 'trailing') return typeof o.days === 'number' && WINDOW_SET.has(o.days);
+  const yearOk = typeof o.year === 'number' && Number.isInteger(o.year) && o.year >= QUALIFY_CAL_YEAR_MIN && o.year <= QUALIFY_CAL_YEAR_MAX;
+  if (o.kind === 'month') return yearOk && typeof o.month === 'number' && Number.isInteger(o.month) && o.month >= 1 && o.month <= 12;
+  if (o.kind === 'year') return yearOk;
+  return false;
+}
+
+/** Compact NON-PHI token — audit detail, cohortKey, and the Change-F URL param share it:
+ *  '30d' | '2026-07' | '2026'. Total over QualifyWindow. */
+export function serializeQualifyWindow(w: QualifyWindow): string {
+  if (w.kind === 'trailing') return `${w.days}d`;
+  if (w.kind === 'month') return `${w.year}-${String(w.month).padStart(2, '0')}`;
+  return String(w.year);
+}
+
+/** Parse a serialized window token (URL param). Returns null for anything malformed/out-of-range —
+ *  the caller falls back to the default window, never trusts the string. */
+export function parseQualifyWindow(s: string | null | undefined): QualifyWindow | null {
+  if (typeof s !== 'string') return null;
+  const t = s.trim();
+  const trailing = t.match(/^(\d{2,3})d$/);
+  if (trailing) {
+    const days = Number(trailing[1]);
+    return WINDOW_SET.has(days) ? { kind: 'trailing', days: days as QualifyTrailingDays } : null;
+  }
+  const month = t.match(/^(\d{4})-(\d{2})$/);
+  if (month) {
+    const cand = { kind: 'month' as const, year: Number(month[1]), month: Number(month[2]) };
+    return isQualifyWindow(cand) ? cand : null;
+  }
+  const year = t.match(/^(\d{4})$/);
+  if (year) {
+    const cand = { kind: 'year' as const, year: Number(year[1]) };
+    return isQualifyWindow(cand) ? cand : null;
+  }
+  return null;
+}
+
+/** Human window label for captions/chips: '30d' · 'Jul 2026' · '2026'. */
+export function qualifyWindowLabel(w: QualifyWindow): string {
+  if (w.kind === 'trailing') return `${w.days}d`;
+  if (w.kind === 'month') {
+    const name = new Date(Date.UTC(w.year, w.month - 1, 1)).toLocaleString('en-US', { month: 'short', timeZone: 'UTC' });
+    return `${name} ${w.year}`;
+  }
+  return String(w.year);
 }
 
 /**
@@ -30,7 +99,7 @@ export interface QualifyMarket {
 
 export interface QualifyInput {
   query: string; // member ID OR alpha prefix — sniffed SERVER-SIDE
-  windowDays: QualifyWindowDays;
+  window: QualifyWindow;
   /** Optional VOB employer/funding narrow applied to the facility ranking (see QualifyMarket). */
   market?: QualifyMarket;
 }
@@ -42,7 +111,7 @@ export interface QualifyInput {
  */
 export interface QualifyPayerInput {
   payer: string; // plaintext primary_payer label (non-PHI) — matched exactly against the rollup column
-  windowDays: QualifyWindowDays;
+  window: QualifyWindow;
   /** Optional VOB employer/funding narrow applied to the facility ranking (see QualifyMarket). */
   market?: QualifyMarket;
 }
@@ -58,7 +127,7 @@ export interface QualifyPayerInput {
  */
 export interface QualifyNameInput {
   name: string; // client name (PHI IN TRANSIT ONLY — HMAC'd at the action boundary, never stored/logged)
-  windowDays: QualifyWindowDays;
+  window: QualifyWindow;
   /** Optional VOB employer/funding narrow applied to the facility ranking (see QualifyMarket). */
   market?: QualifyMarket;
 }
@@ -72,7 +141,7 @@ export interface QualifyNameInput {
 export interface QualifyFacilityCasesInput {
   payer: string;
   facility: string; // raw rollup facility text (QualifyFacility.facilityKey)
-  windowDays: QualifyWindowDays;
+  window: QualifyWindow;
   /** Optional IDENTIFIER narrow carried from the resolving search (Direction B) OR the manual prefix input.
    *  Both terms are the caller's OWN typed value (never row PHI); the blind index is minted SERVER-SIDE and
    *  the raw term is never logged/URL'd. Mutually exclusive in practice; when both arrive, `memberId` (exact)
@@ -108,7 +177,7 @@ export interface QualifyFacilityCasesInput {
 export interface QualifyPatientCohortInput {
   payer: string;
   facility: string;
-  windowDays: QualifyWindowDays;
+  window: QualifyWindow;
   claimId: number;
 }
 
@@ -376,17 +445,35 @@ export type RevealQualifyRowsResult = { ok: true; rows: QualifyRevealedRow[] } |
 export const QUALIFY_BUSINESS_TZ = 'America/Los_Angeles';
 
 /**
- * BUSINESS-DAY window bounds. this=[from,to) is `windowDays` days ending today (today included);
- * prior=[priorFrom,priorTo) is the adjacent equal-length window. All are calendar (date-only) ISO
- * strings. `today` is anchored to the ops calendar day in QUALIFY_BUSINESS_TZ, NOT the server's UTC
- * day: Vercel runs TZ=UTC, so from ~afternoon-to-midnight Pacific the raw UTC date is already tomorrow
- * and every window would silently slide forward a day. We take the civil Y-M-D in the business zone,
- * then do plain calendar arithmetic on it. `now` is injectable so the math is unit-testable.
+ * Window bounds for EVERY QualifyWindow shape. this=[from,to); prior=[priorFrom,priorTo) is the
+ * previous EQUIVALENT period (trailing: the adjacent equal-length window; month: the previous
+ * calendar month; year: the previous calendar year — the ruled Δ semantics). All calendar
+ * (date-only) ISO strings.
+ *
+ * TRAILING windows anchor "today" to the ops calendar day in QUALIFY_BUSINESS_TZ, NOT the server's
+ * UTC day: Vercel runs TZ=UTC, so from ~afternoon-to-midnight Pacific the raw UTC date is already
+ * tomorrow and every window would silently slide forward a day. We take the civil Y-M-D in the
+ * business zone, then do plain calendar arithmetic on it. CALENDAR windows are explicit — no
+ * anchoring needed. `now` is injectable so the math is unit-testable.
  */
 export function qualifyWindowBounds(
-  windowDays: number,
+  window: QualifyWindow,
   now: Date,
 ): { from: string; to: string; priorFrom: string; priorTo: string } {
+  const iso = (x: Date) => x.toISOString().slice(0, 10);
+  if (window.kind === 'month') {
+    const from = new Date(Date.UTC(window.year, window.month - 1, 1));
+    const to = new Date(Date.UTC(window.year, window.month, 1)); // 1st of next month (Date.UTC normalizes month 12)
+    const priorFrom = new Date(Date.UTC(window.year, window.month - 2, 1)); // previous month
+    return { from: iso(from), to: iso(to), priorFrom: iso(priorFrom), priorTo: iso(from) };
+  }
+  if (window.kind === 'year') {
+    const from = new Date(Date.UTC(window.year, 0, 1));
+    const to = new Date(Date.UTC(window.year + 1, 0, 1));
+    const priorFrom = new Date(Date.UTC(window.year - 1, 0, 1)); // previous year
+    return { from: iso(from), to: iso(to), priorFrom: iso(priorFrom), priorTo: iso(from) };
+  }
+  const windowDays = window.days;
   // Civil year/month/day in the business zone (formatToParts is locale-format-independent).
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: QUALIFY_BUSINESS_TZ,
@@ -398,7 +485,6 @@ export function qualifyWindowBounds(
   const anchor = new Date(Date.UTC(part('year'), part('month') - 1, part('day')));
   const shift = (base: Date, days: number) =>
     new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate() + days));
-  const iso = (x: Date) => x.toISOString().slice(0, 10);
   const to = shift(anchor, 1); // exclusive upper = tomorrow, so all of today is in-window
   const from = shift(anchor, -(windowDays - 1)); // inclusive lower → exactly windowDays days
   const priorTo = from; // adjacent, non-overlapping

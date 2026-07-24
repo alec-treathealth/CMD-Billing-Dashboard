@@ -24,9 +24,11 @@ import {
 } from '../app/lib/qualify/core.js';
 import { requireQualifyPrincipalFromAccess } from '../app/lib/qualify/principal.js';
 import { QUALIFY_MIN_LINES } from '../app/lib/qualify/rating.js';
-import { qualifyWindowBounds } from '../app/lib/qualify/contract.js';
+import { qualifyWindowBounds, trailingWindow } from '../app/lib/qualify/contract.js';
 import { QUALIFY_CASES_MAX, type QualifyClaimRow } from '../src/collections/qualifyQuery.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../app/lib/views.js';
+
+const W30 = trailingWindow(30);
 
 // Sentinel DOLLAR values — distinctive so a wire-level scan can prove they never appear when stripped.
 const B1 = 999999.99, A1 = 888888.88; // thin/high-pct facility (BXR)
@@ -125,7 +127,7 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
   };
 }
 
-const IN = { query: 'AETMEMBER123', windowDays: 30 as const }; // long → member_id kind
+const IN = { query: 'AETMEMBER123', window: W30 }; // long → member_id kind
 
 // ── #1 RANK ORDER (silent-bug guard): value-first — higher allowed% ranks first, volume never demotes ─
 test('snapshot: a small high-% facility RANKS ABOVE a large mid-% one (value-first, ruling 2026-07-19b)', async () => {
@@ -179,7 +181,7 @@ test('snapshot: a non-admissions_seat payload DOES carry the dollar values', asy
 
 test('movers: carries NO dollar fields for either capability state', async () => {
   for (const who of [SEAT, SUPER]) {
-    const m = await getQualifyMoversCore(makeDeps(who, cap()), 30);
+    const m = await getQualifyMoversCore(makeDeps(who, cap()), W30);
     const wire = JSON.stringify(m);
     assert.ok(!wire.includes('billedAmount') && !wire.includes('allowedAmount'), 'no dollar keys in movers');
     assert.ok(!wire.includes(String(B1)) && !wire.includes(String(A2)), 'no dollar values in movers');
@@ -189,7 +191,7 @@ test('movers: carries NO dollar fields for either capability state', async () =>
 // ── on-load combined action (perf): movers + top-payer snapshot + rank-1 seed cases in ONE call ──────
 test('initial: combines movers + top-payer snapshot + rank-1 seed cases, preserving BOTH audits', async () => {
   const c = cap();
-  const init = await getQualifyInitialCore(makeDeps(SUPER, c), 30);
+  const init = await getQualifyInitialCore(makeDeps(SUPER, c), W30);
   assert.equal(init.movers.length, 2); // AETNA, CIGNA
   assert.equal(init.topPayer, 'AETNA'); // top mover (delta 30)
   assert.equal(init.snapshot?.resolved?.payerName, 'AETNA');
@@ -207,7 +209,7 @@ test('initial: combines movers + top-payer snapshot + rank-1 seed cases, preserv
 
 test('initial: no movers → empty-prompt shape (all nulls); no resolve or seed happens', async () => {
   const c = cap();
-  const init = await getQualifyInitialCore(makeDeps(SUPER, c, { loadMovers: async () => [] }), 30);
+  const init = await getQualifyInitialCore(makeDeps(SUPER, c, { loadMovers: async () => [] }), W30);
   assert.equal(init.movers.length, 0);
   assert.equal(init.topPayer, null);
   assert.equal(init.snapshot, null);
@@ -277,7 +279,7 @@ test('by-payer: identifierLandingFacility is null (no identifier on the payer pa
 test('an entity admin is denied fail-closed at getQualifySnapshot / getQualifyMovers / revealQualifyRow(s)', async () => {
   const deps = makeDeps(ADMIN, cap());
   await assert.rejects(() => getQualifySnapshotCore(deps, IN), /does not have access to Qualify/);
-  await assert.rejects(() => getQualifyMoversCore(deps, 30), /does not have access to Qualify/);
+  await assert.rejects(() => getQualifyMoversCore(deps, W30), /does not have access to Qualify/);
   assert.deepEqual(await revealQualifyRowCore(deps, 1), { ok: false, error: 'Your role does not have access to Qualify.' });
   const rows = await revealQualifyRowsCore(deps, [1]);
   assert.equal(rows.ok, false);
@@ -334,13 +336,13 @@ test('unknown identifier → resolved:null (VOB), still audited', async () => {
 
 test('unusable query (no token) → resolved:null and NO audit (nothing was searched)', async () => {
   const c = cap();
-  const snap = await getQualifySnapshotCore(makeDeps(SUPER, c, { mintToken: () => null }), { query: 'ab', windowDays: 30 });
+  const snap = await getQualifySnapshotCore(makeDeps(SUPER, c, { mintToken: () => null }), { query: 'ab', window: W30 });
   assert.equal(snap.resolved, null);
   assert.equal(c.audits.length, 0);
 });
 
 // ── RESOLVE-BY-PAYER (Heating-up tap path) ───────────────────────────────────────────────────────
-const PAYER_IN = { payer: 'AETNA', windowDays: 30 as const };
+const PAYER_IN = { payer: 'AETNA', window: W30 };
 
 test('by-payer: resolves facilities in rating order WITHOUT the PHI resolve (mintToken/resolvePayer never called)', async () => {
   const deps = makeDeps(SUPER, cap(), {
@@ -393,14 +395,14 @@ test('by-payer: an entity admin is denied fail-closed', async () => {
 
 test('by-payer: a blank payer → empty snapshot and NO audit (nothing looked up)', async () => {
   const c = cap();
-  const snap = await getQualifySnapshotByPayerCore(makeDeps(SUPER, c), { payer: '  ', windowDays: 30 });
+  const snap = await getQualifySnapshotByPayerCore(makeDeps(SUPER, c), { payer: '  ', window: W30 });
   assert.equal(snap.resolved, null);
   assert.deepEqual(snap.facilities, []);
   assert.equal(c.audits.length, 0);
 });
 
 // ── FACILITY DRILL (facility-card tap) ───────────────────────────────────────────────────────────
-const FAC_CASES_IN = { payer: 'AETNA', facility: '405 recovery', windowDays: 30 as const };
+const FAC_CASES_IN = { payer: 'AETNA', facility: '405 recovery', window: W30 };
 
 test('facility-drill: returns masked cases (never a raw member id) for the resolved payer + facility', async () => {
   const res = await getQualifyFacilityCasesCore(makeDeps(SUPER, cap()), FAC_CASES_IN);
@@ -504,8 +506,8 @@ test('facility-drill allPayers: admissions_seat gets ZERO dollar values (SAME ch
 
 test('facility-drill: a blank payer or facility → empty cases and NO audit (nothing looked up)', async () => {
   const c = cap();
-  const a = await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { payer: '  ', facility: 'x', windowDays: 30 });
-  const b = await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { payer: 'AETNA', facility: '  ', windowDays: 30 });
+  const a = await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { payer: '  ', facility: 'x', window: W30 });
+  const b = await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { payer: 'AETNA', facility: '  ', window: W30 });
   assert.deepEqual(a.claims, []);
   assert.deepEqual(b.claims, []);
   assert.equal(c.audits.length, 0);
@@ -642,7 +644,7 @@ test('facility-drill: a window over the cap sets `capped` and truncates to QUALI
 // ── window math ──────────────────────────────────────────────────────────────────────────────────
 test('qualifyWindowBounds: this + prior windows are adjacent, equal-length, non-overlapping', () => {
   // Noon UTC = 5am Pacific → business day is unambiguously 2026-07-17 in either zone.
-  const b = qualifyWindowBounds(30, new Date('2026-07-17T12:00:00Z'));
+  const b = qualifyWindowBounds(W30, new Date('2026-07-17T12:00:00Z'));
   assert.equal(b.to, '2026-07-18'); // exclusive upper = tomorrow (today included)
   assert.equal(b.from, '2026-06-18'); // 30 days ending today
   assert.equal(b.priorTo, b.from); // adjacent
@@ -653,7 +655,7 @@ test('qualifyWindowBounds: anchors to the business (Pacific) calendar day, not t
   // 2026-07-18T04:00:00Z is 2026-07-17 21:00 Pacific — still the 17th for the ops team even though the
   // server's UTC date has already rolled to the 18th. The window must reflect the 17th, matching the
   // mid-day instant above; a UTC-naive anchor would slide every bound forward a day.
-  const evening = qualifyWindowBounds(30, new Date('2026-07-18T04:00:00Z'));
+  const evening = qualifyWindowBounds(W30, new Date('2026-07-18T04:00:00Z'));
   assert.equal(evening.to, '2026-07-18');
   assert.equal(evening.from, '2026-06-18');
   assert.equal(evening.priorFrom, '2026-05-19');
@@ -703,7 +705,7 @@ test('facility-drill: patientKey aliases same-member rows per response; the bidx
 test('patient-cohort: audits BEFORE data, re-derives the token server-side, returns the lifetime context', async () => {
   const c = cap();
   const res = await getQualifyPatientCohortCore(makeDeps(SUPER, c), {
-    payer: 'AETNA', facility: '405 recovery', windowDays: 30, claimId: 123,
+    payer: 'AETNA', facility: '405 recovery', window: W30, claimId: 123,
   });
   assert.equal(res.suppressed, false);
   assert.equal(res.patients, 12);
@@ -718,7 +720,7 @@ test('patient-cohort: audits BEFORE data, re-derives the token server-side, retu
 
 test('patient-cohort: admissions_seat gets counts + pcts but ZERO dollars (mix charge nulled)', async () => {
   const res = await getQualifyPatientCohortCore(makeDeps(SEAT, cap()), {
-    payer: 'AETNA', facility: '405 recovery', windowDays: 30, claimId: 123,
+    payer: 'AETNA', facility: '405 recovery', window: W30, claimId: 123,
   });
   assert.equal(res.suppressed, false);
   assert.equal(res.pctAllowed, 40, 'pcts survive the strip');
@@ -730,11 +732,11 @@ test('patient-cohort: admissions_seat gets counts + pcts but ZERO dollars (mix c
 
 test('patient-cohort: unknown/foreign claim id AND a below-floor cohort BOTH collapse to the SAME suppressed shape', async () => {
   const foreign = await getQualifyPatientCohortCore(makeDeps(SUPER, cap()), {
-    payer: 'AETNA', facility: '405 recovery', windowDays: 30, claimId: 999, // loadClaimPrefixToken fake → null
+    payer: 'AETNA', facility: '405 recovery', window: W30, claimId: 999, // loadClaimPrefixToken fake → null
   });
   const thin = await getQualifyPatientCohortCore(
     makeDeps(SUPER, cap(), { loadPatientCohort: async () => null }),
-    { payer: 'AETNA', facility: '405 recovery', windowDays: 30, claimId: 123 },
+    { payer: 'AETNA', facility: '405 recovery', window: W30, claimId: 123 },
   );
   for (const r of [foreign, thin]) {
     assert.equal(r.suppressed, true);
@@ -744,14 +746,14 @@ test('patient-cohort: unknown/foreign claim id AND a below-floor cohort BOTH col
   assert.deepEqual({ ...foreign, viewerHasAmountsCapability: true }, { ...thin, viewerHasAmountsCapability: true },
     'no oracle: "not yours" is indistinguishable from "too small"');
   const bad = await getQualifyPatientCohortCore(makeDeps(SUPER, cap()), {
-    payer: 'AETNA', facility: '405 recovery', windowDays: 30, claimId: -1,
+    payer: 'AETNA', facility: '405 recovery', window: W30, claimId: -1,
   });
   assert.equal(bad.suppressed, true, 'malformed id fails closed without reaching any loader');
 });
 
 // ── Redesign overview cores: book KPIs, facility trend (entity label + delta), the on-load hybrid ────
 test('book KPIs core: returns the three ratios + window; runs for an admissions_seat (no dollars anywhere)', async () => {
-  const kpis = await getQualifyBookKpisCore(makeDeps(SEAT, cap()), 30);
+  const kpis = await getQualifyBookKpisCore(makeDeps(SEAT, cap()), W30);
   assert.equal(kpis.pctAllowedOfBilled, 44);
   assert.equal(kpis.pctPaidOfAllowed, 82);
   assert.equal(kpis.pctPaidOfBilled, 36);
@@ -762,7 +764,7 @@ test('book KPIs core: returns the three ratios + window; runs for an admissions_
 });
 
 test('facility trend core: maps entity label + computes deltaPts; a null-prior facility gets a null delta (NEW)', async () => {
-  const trends = await getQualifyFacilityTrendsCore(makeDeps(SUPER, cap()), 30);
+  const trends = await getQualifyFacilityTrendsCore(makeDeps(SUPER, cap()), W30);
   const solid = trends.find((t) => t.facilityKey === '405 recovery')!;
   assert.equal(solid.entity, 'Indigo', 'entity_ids [Indigo uuid] → Indigo label');
   assert.equal(solid.currentRating, 55);
@@ -778,7 +780,7 @@ test('facility trend core: maps entity label + computes deltaPts; a null-prior f
 
 test('overview core (hybrid): resolves the top trend facility’s dominant payer AND seeds THAT facility, not rank-1', async () => {
   const c = cap();
-  const ov = await getQualifyOverviewCore(makeDeps(SUPER, c), 30);
+  const ov = await getQualifyOverviewCore(makeDeps(SUPER, c), W30);
   assert.equal(ov.kpis.pctAllowedOfBilled, 44, 'KPIs included');
   assert.equal(ov.trends.length, 2, 'trends included');
   assert.equal(ov.topPayer, 'AETNA', 'resolved the top trend facility’s dominant payer');
@@ -795,7 +797,7 @@ test('overview core (hybrid): resolves the top trend facility’s dominant payer
 });
 
 test('overview core: an empty book (no trends) returns KPIs + empty trends + a null snapshot (prompt state)', async () => {
-  const ov = await getQualifyOverviewCore(makeDeps(SUPER, cap(), { loadFacilityTrends: async () => [] }), 30);
+  const ov = await getQualifyOverviewCore(makeDeps(SUPER, cap(), { loadFacilityTrends: async () => [] }), W30);
   assert.deepEqual(ov.trends, []);
   assert.equal(ov.snapshot, null);
   assert.equal(ov.topFacility, null);
@@ -804,7 +806,7 @@ test('overview core: an empty book (no trends) returns KPIs + empty trends + a n
 });
 
 // ── Change C: the client-name resolve core (getQualifySnapshotByNameCore) ────────────────────────────
-const NAME_IN = { name: 'Jane Q Doe', windowDays: 30 as const };
+const NAME_IN = { name: 'Jane Q Doe', window: W30 };
 
 test('name resolve: audits SEARCH_QUALIFY_NAME with the FIELD NAME only — the raw name appears NOWHERE in the audit', async () => {
   const c = cap();
@@ -847,7 +849,7 @@ test('name resolve: an unknown name (resolver null) yields the VOB shape; a seat
 test('cases drill: a clientName filter mints the name token, narrows the drill, and audits field "client_name"', async () => {
   const c = cap();
   await getQualifyFacilityCasesCore(makeDeps(SUPER, c), {
-    payer: 'AETNA', facility: '405 recovery', windowDays: 30, filter: { clientName: 'Jane Q Doe' },
+    payer: 'AETNA', facility: '405 recovery', window: W30, filter: { clientName: 'Jane Q Doe' },
   });
   const audit = c.audits.find((a) => a.action === SEARCH_QUALIFY_FACILITY)!;
   assert.deepEqual(audit.detail.fields, ['client_name'], 'narrow recorded by FIELD NAME only');
