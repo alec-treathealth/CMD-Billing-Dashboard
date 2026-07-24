@@ -1,15 +1,9 @@
-# DRAFT — the schedule is DISABLED. Daily incremental Monday -> vob.indigo_vob sync.
+# LIVE — daily incremental Monday -> vob.indigo_vob sync (enabled 2026-07-24 after 2 green supervised runs).
 #
-# HELD until the cron is provisioned. Before enabling the `schedule:` trigger below:
-#   1. apply supabase/migrations/0062_vob_sync_state.sql (watermark + deactivated_at soft-delete + sync_state);
-#   2. add these 2 GitHub Actions secrets to THIS repo (Settings -> Secrets and variables -> Actions):
-#        INDEX_HMAC_KEY                 (64-hex; MUST match the app's key so bidx tokens align)
-#        CMD_ROLLUP_WRITER_DATABASE_URL (Supavisor pooler:6543, user cmd_rollup_writer_login)
-#      (The Monday token is already present as secret MONDAY_API_SECRET_KEY and is reused below —
-#       it must be a board 1606316049 read token with files/assets scope.)
-#   3. run once via workflow_dispatch (supervised) and confirm vob.sync_state looks sane;
-#   4. then uncomment the `schedule:` block.
-# Until then this workflow only runs on manual dispatch, so merging it never fires the cron.
+# Provisioned: 0062 + 0065 applied; secrets INDEX_HMAC_KEY + CMD_ROLLUP_WRITER_DATABASE_URL set; the
+# Monday token is reused from the existing MONDAY_API_SECRET_KEY secret (board 1606316049 read + files).
+# Health/telemetry: each run writes vob.sync_state (upserted/deactivated/reactivated/errors + a note
+# splitting errors into no_pdf vs download_fail). Also runnable on demand via workflow_dispatch.
 #
 # TLS: the writer URL is sslmode=verify-full. In CI (no CA file) the sync script transparently
 # downgrades to sslmode=require (encrypted, no cert verify). To keep full verification, commit the
@@ -21,9 +15,9 @@
 name: vob-sync
 
 on:
-  # schedule:                    # DISABLED until provisioned (see header). Enable AFTER a supervised dispatch run.
-  #   - cron: '17 9 * * *'       # daily 09:17 UTC
-  workflow_dispatch: {}          # manual trigger only, for now
+  schedule:
+    - cron: '17 9 * * *'         # daily 09:17 UTC
+  workflow_dispatch: {}          # also runnable on demand
 
 concurrency:
   group: vob-sync
