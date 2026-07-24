@@ -797,6 +797,7 @@ export async function getQualifyOverviewCore(
   deps: QualifyDeps,
   window: QualifyWindow,
   market?: QualifyMarket,
+  opts?: { resolve?: boolean },
 ): Promise<QualifyOverview> {
   const [kpis, trends] = await Promise.all([
     getQualifyBookKpisCore(deps, window, market),
@@ -805,6 +806,9 @@ export async function getQualifyOverviewCore(
   const empty: QualifyOverview = {
     kpis, trends, topFacility: null, topPayer: null, snapshot: null, seedFacility: null, seedCases: [], seedCapped: false,
   };
+  // resolve:false (a URL-restore load) → the caller resolves its OWN subject; return the strip only,
+  // skipping the hybrid resolve + its audits entirely (no wasted resolve-by-payer audit row).
+  if (opts?.resolve === false) return empty;
   // The hybrid focus is the FIRST trending facility that carries a resolvable dominant payer.
   const top = trends.find((t) => t.dominantPayer) ?? null;
   if (!top || !top.dominantPayer) return empty;

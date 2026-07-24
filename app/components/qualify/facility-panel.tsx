@@ -53,6 +53,8 @@ export function FacilityPanel({
   heatOn,
   selectedKey = null,
   onSelect,
+  pinned = false,
+  onClearPin,
 }: {
   facilities: readonly QualifyFacility[];
   hasAmounts: boolean;
@@ -61,30 +63,54 @@ export function FacilityPanel({
   selectedKey?: string | null;
   /** Re-scope the cases panel to this facility (its raw rollup facilityKey). Optional for tests. */
   onSelect?: (facilityKey: string) => void;
+  /** Change E — FACILITY-SCOPED mode: render ONLY the selected facility as a pinned summary card
+   *  (name, rating, coverage) with the "× All facilities" clear pill — never a fully-collapsed panel. */
+  pinned?: boolean;
+  /** Clear the Change-E facility scope → back to the full ranked list (payer-wide). */
+  onClearPin?: () => void;
 }) {
+  // Pinned mode shows ONLY the scoped facility; the full ranked list otherwise.
+  const visible = pinned && selectedKey !== null ? facilities.filter((f) => f.facilityKey === selectedKey) : facilities;
   return (
-    <section className="rounded-xl border bg-card shadow-sm">
+    <section className="rounded-2xl border bg-card shadow-ths-sm">
       {/* The panel sizes to its OWN content and is NOT co-height with the "Recent cases" panel: the grid
           cell is `items-start`, so this card's height is driven by its facility list, never capped to the
           cases panel. All facilities render inline with no internal scroll — you never have to scroll
           within the card to reach a facility that the shorter neighboring panel would otherwise hide. */}
       <div className="contents">
-      <div className="flex items-baseline justify-between px-4 pb-2.5 pt-4">
-        <h2 className="font-display text-base font-semibold">Heating up</h2>
-        <span className="text-xs font-semibold text-muted-foreground">
-          by reimbursement rating
-          {facilities.length > 0 ? ` · ${facilities.length} ${facilities.length === 1 ? 'facility' : 'facilities'}` : ''}
-        </span>
+      <div className="flex items-center justify-between gap-2 px-4 pb-2.5 pt-4">
+        <h2 className="font-head text-base font-semibold tracking-tight">Facilities</h2>
+        {pinned && selectedKey !== null ? (
+          /* Change E clear-scope affordance: visible pill, ≥44px hit target, focus ring, labeled. */
+          <button
+            type="button"
+            onClick={onClearPin}
+            aria-label="Clear facility filter, show all facilities"
+            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-full border border-teal200 bg-teal50 px-3.5 text-[12px] font-semibold text-teal700 transition-colors hover:bg-teal200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/50"
+          >
+            <span aria-hidden>×</span> All facilities
+          </button>
+        ) : (
+          <span className="text-xs font-semibold text-muted-foreground">
+            by reimbursement rating
+            {facilities.length > 0 ? ` · ${facilities.length} ${facilities.length === 1 ? 'facility' : 'facilities'}` : ''}
+          </span>
+        )}
       </div>
+      {pinned && selectedKey !== null ? (
+        <p className="px-4 pb-1 text-[11px] text-muted-foreground">
+          Scoped to this facility — cases at right are its recent claims only.
+        </p>
+      ) : null}
 
       {/* ALL facilities render (server returns the full set, no LIMIT); the cap is gone. */}
       <div className={['px-2.5 pb-3', heatOn ? 'q-heat' : ''].join(' ')}>
-        {facilities.length === 0 ? (
+        {visible.length === 0 ? (
           <p className="px-2 py-6 text-center text-sm text-muted-foreground">
             No facilities for this payer in the selected window.
           </p>
         ) : (
-          facilities.map((f) => {
+          visible.map((f) => {
             const bucket = ratingBucket(f.rating);
             const pct = f.pctAllowedOfBilled;
             const loc = [f.city, f.state].filter(Boolean).join(', ');
@@ -129,7 +155,7 @@ export function FacilityPanel({
                   </span>
                 </div>
                 <div className="mt-1.5 flex items-center justify-between text-[11.5px]">
-                  <span className="text-ink400">{loc || ' '}</span>
+                  <span className="text-ink400">{loc || ' '}{f.entity ? <span className="ml-1 text-[10px] font-semibold">· {f.entity}</span> : null}</span>
                   {hasAmounts && f.allowedAmount !== null && f.billedAmount !== null ? (
                     <span className="tabular-nums text-muted-foreground">
                       {usd0(f.allowedAmount)} / {usd0(f.billedAmount)}

@@ -16,10 +16,12 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { FacilityPanel } from '../components/qualify/facility-panel';
 import { CasesTable } from '../components/qualify/cases-table';
 import { CohortSheet } from '../components/qualify/cohort-sheet';
-import { HeatingUpBar } from '../components/qualify/heating-up-bar';
+import { BookKpiTiles, HeatingUpCards } from '../components/qualify/overview';
+import { Spark } from '../components/qualify/spark';
 import { buildFacilityBucketMap } from '../components/qualify/colors';
-import { qualifyRating, ratingBucket } from '../lib/qualify/rating';
-import type { QualifyFacility, QualifyClaim, QualifyMover, QualifyPhi } from '../lib/qualify/contract';
+import { qualifyRating, ratingBucket, RATING_LEGEND } from '../lib/qualify/rating';
+import { trailingWindow } from '../lib/qualify/contract';
+import type { QualifyFacility, QualifyClaim, QualifyBookKpis, QualifyFacilityTrend, QualifyPhi } from '../lib/qualify/contract';
 
 const solidRating = qualifyRating(55)!; // 55 → ok
 const thinHighRating = qualifyRating(90)!; // 90 → ok (value-first: a small high-% facility reads GREEN)
@@ -318,34 +320,104 @@ test('cases table — a facility-scoped set still omits dollars for a no-amounts
   for (const v of ['1,000', '2,000', '1,100', '1,200']) assert.ok(!html.includes(v), `dollar ${v} absent even though the fixture carries it`);
 });
 
-// ── "Heating up" desktop payer quick-pick (parity with mobile HeatingUp chips) ──────────────────────
-const MOVERS: QualifyMover[] = [
-  { rank: 1, label: 'AETNA', thisWindowPatients: 41, priorWindowPatients: 31, deltaPatients: 10, deltaPct: 32 },
-  { rank: 2, label: 'UNITEDHEALTHCARE', thisWindowPatients: 63, priorWindowPatients: 0, deltaPatients: 63, deltaPct: null },
-  { rank: 3, label: 'FLAT PAYER', thisWindowPatients: 20, priorWindowPatients: 20, deltaPatients: 0, deltaPct: 0 }, // not trending → excluded
-  { rank: 4, label: 'SHRINKING PAYER', thisWindowPatients: 5, priorWindowPatients: 12, deltaPatients: -7, deltaPct: -58 }, // down → excluded
+// ── Redesign OVERVIEW: book KPI tiles + "Facilities Heating Up" trend cards ─────────────────────────
+const W30 = trailingWindow(30);
+const KPIS: QualifyBookKpis = {
+  pctAllowedOfBilled: 44.4, pctPaidOfAllowed: 82.1, pctPaidOfBilled: 36.2,
+  windowStart: '2026-06-18', windowEnd: '2026-07-18', tenantScope: 'cross-tenant-bxr-indigo',
+};
+const TRENDS: QualifyFacilityTrend[] = [
+  {
+    facilityKey: 'summit ridge', name: 'SUMMIT RIDGE RECOVERY', city: 'Scottsdale', state: 'AZ',
+    careSetting: 'IP', entity: 'BXR', dominantPayer: 'AETNA', lineCount: 210,
+    currentRating: 68, priorRating: 62.9, deltaPts: 5.1, points: [61, 62, 64, 63, 66, 67, 68, 68],
+  },
+  {
+    facilityKey: 'valley springs', name: 'VALLEY SPRINGS', city: 'Boise', state: 'ID',
+    careSetting: 'OP', entity: 'Indigo', dominantPayer: 'CIGNA', lineCount: 96,
+    currentRating: 22, priorRating: 26.5, deltaPts: -4.5, points: [27, 26, 25, 24, 23, 22],
+  },
+  {
+    facilityKey: 'fresh face', name: 'FRESH FACE BH', city: null, state: null,
+    careSetting: null, entity: null, dominantPayer: 'AETNA', lineCount: 12,
+    currentRating: 55, priorRating: null, deltaPts: null, points: [55],
+  },
 ];
 
-test('heating-up bar — renders ONLY trending-up payers as clickable chips (delta<=0 excluded)', () => {
-  const html = renderToStaticMarkup(<HeatingUpBar movers={MOVERS} windowDays={30} onOpen={() => {}} />);
-  assert.ok(html.includes('AETNA') && html.includes('UNITEDHEALTHCARE'), 'trending-up payers appear');
-  assert.ok(!html.includes('FLAT PAYER') && !html.includes('SHRINKING PAYER'), 'flat/declining payers are excluded');
-  assert.ok(html.includes('+32%'), 'a payer with a prior window shows its % growth');
-  assert.ok(html.includes('+63 new'), 'a brand-new payer (no prior) shows "+N new"');
-  assert.ok(html.includes('<button'), 'each chip is a clickable button (auto-resolve on click)');
+test('KPI tiles — three percentage tiles, ZERO dollars, null renders "—" (never a coerced 0%)', () => {
+  const html = renderToStaticMarkup(<BookKpiTiles kpis={KPIS} locActive={false} />);
+  assert.ok(html.includes('% allowed of billed') && html.includes('% paid of allowed') && html.includes('% paid of billed'), 'all three tiles');
+  assert.ok(html.includes('44') && html.includes('82') && html.includes('36'), 'rounded percentages render');
+  assert.ok(!html.includes('$'), 'the KPI strip carries NO dollars for any role');
+  const nulled = renderToStaticMarkup(<BookKpiTiles kpis={{ ...KPIS, pctPaidOfBilled: null }} locActive={false} />);
+  assert.ok(nulled.includes('—'), 'a collapsed denominator renders — (never 0%)');
 });
 
-test('heating-up bar — marks the active (currently-resolved) payer chip', () => {
-  const html = renderToStaticMarkup(<HeatingUpBar movers={MOVERS} windowDays={30} activeLabel="AETNA" onOpen={() => {}} />);
-  assert.ok(html.includes('aria-pressed="true"'), 'the active payer chip is marked pressed');
-  assert.equal(html.split('aria-pressed="true"').length - 1, 1, 'exactly one chip is active');
+test('KPI tiles — the LOC lens does not silently re-scope them: locActive adds the "not LOC-scoped" caption', () => {
+  const html = renderToStaticMarkup(<BookKpiTiles kpis={KPIS} locActive />);
+  assert.equal(html.split('not LOC-scoped').length - 1, 3, 'every tile captions the book-wide scope under an active lens');
 });
 
-test('heating-up bar — renders nothing when no payer is trending up', () => {
-  const flat: QualifyMover[] = [
-    { rank: 1, label: 'FLAT', thisWindowPatients: 10, priorWindowPatients: 10, deltaPatients: 0, deltaPct: 0 },
-  ];
-  assert.equal(renderToStaticMarkup(<HeatingUpBar movers={flat} windowDays={30} onOpen={() => {}} />), '', 'empty render when nothing trends up');
+test('heating-up cards — defined "n" (claim lines), Δpts ticker (+/−), NEW for null-prior, sparkline present', () => {
+  const html = renderToStaticMarkup(<HeatingUpCards trends={TRENDS} window={W30} onOpen={() => {}} />);
+  assert.ok(html.includes('Facilities Heating Up'), 'section title');
+  assert.ok(html.includes('210 claim lines'), 'Change A: n is DEFINED as claim lines, never a bare n=');
+  assert.ok(!/\bn=\d/.test(html), 'no bare "n=" anywhere');
+  assert.ok(html.includes('+5.1 pts'), 'positive delta ticker');
+  assert.ok(html.includes('-4.5 pts'), 'negative delta ticker');
+  assert.ok(html.includes('NEW'), 'a facility with no prior-window evidence reads NEW');
+  assert.ok(html.includes('q-spark'), 'the sparkline draw-in svg renders');
+  assert.ok(html.includes('BXR') && html.includes('Indigo'), 'entity labels render');
+  assert.ok(html.includes('aria-pressed'), 'cards are toggleable buttons (hybrid click)');
+});
+
+test('heating-up cards — active (scoped) card is marked pressed; renders nothing on an empty book', () => {
+  const html = renderToStaticMarkup(<HeatingUpCards trends={TRENDS} window={W30} activeKey="summit ridge" onOpen={() => {}} />);
+  assert.equal(html.split('aria-pressed="true"').length - 1, 1, 'exactly one active card');
+  assert.equal(renderToStaticMarkup(<HeatingUpCards trends={[]} window={W30} onOpen={() => {}} />), '', 'empty render with no trends');
+});
+
+test('spark — draws a path for ≥2 points, renders NOTHING for a single point (no fabricated trend)', () => {
+  const two = renderToStaticMarkup(<Spark points={[40, 60]} hex="#2E8B6F" />);
+  assert.ok(two.includes('<path') && two.includes('q-spark'), 'a 2-point line renders');
+  assert.equal(renderToStaticMarkup(<Spark points={[40]} hex="#2E8B6F" />), '', 'a 1-point spark renders nothing');
+});
+
+test('rating legend — the ruled vocabulary: Strong / Watch / Weak (Typical is gone)', () => {
+  assert.deepEqual(RATING_LEGEND.labels, { ok: 'Strong', warn: 'Watch', danger: 'Weak' });
+  const html = renderToStaticMarkup(<FacilityPanel facilities={FACILITIES} hasAmounts={false} heatOn />);
+  assert.ok(html.includes('Watch'), 'the legend renders Watch');
+  assert.ok(!html.includes('Typical'), 'Typical is gone');
+});
+
+// ── Change E: the pinned (facility-scoped) panel + the "× All facilities" clear pill ────────────────
+test('facility panel — PINNED mode shows ONLY the scoped facility + the labeled clear pill (never a collapsed panel)', () => {
+  const html = renderToStaticMarkup(
+    <FacilityPanel facilities={FACILITIES} hasAmounts={false} heatOn selectedKey="solid" pinned onClearPin={() => {}} />,
+  );
+  assert.ok(html.includes('SOLID'), 'the scoped facility renders');
+  assert.ok(!html.includes('THIN HIGH'), 'other facilities are hidden while pinned');
+  assert.ok(html.includes('aria-label="Clear facility filter, show all facilities"'), 'the accessible clear pill');
+  assert.ok(html.includes('All facilities'), 'clear pill copy');
+  assert.ok(html.includes('min-h-[44px]'), '≥44px hit target');
+  assert.ok(html.includes('Scoped to this facility'), 'the scope caption explains the narrowed cases');
+});
+
+test('facility panel — LIST mode (not pinned) still renders every facility and no clear pill', () => {
+  const html = renderToStaticMarkup(
+    <FacilityPanel facilities={FACILITIES} hasAmounts={false} heatOn selectedKey="solid" />,
+  );
+  assert.ok(html.includes('SOLID') && html.includes('THIN HIGH'), 'full list in payer-wide mode');
+  assert.ok(!html.includes('Clear facility filter'), 'no clear pill when not scoped');
+});
+
+// ── Change B: the global persistent reveal header state ─────────────────────────────────────────────
+test('cases table — globalRevealOn shows the standing "identifiers revealed (audited)" hint instead of the per-patient nudge', () => {
+  const html = renderToStaticMarkup(
+    <CasesTable claims={[CASE_AT_THIN]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([THIN_HIGH])} {...noReveal} canReveal globalRevealOn revealed={new Map<number, QualifyPhi>([[1, PHI]])} />,
+  );
+  assert.ok(html.includes('identifiers revealed (audited)'), 'the standing-reveal hint renders');
+  assert.ok(!html.includes('Reveal IDs per patient'), 'the per-patient nudge is replaced while global reveal is on');
 });
 
 // ── Phase 1 (0059 trust signal): confidence-first tint, coverage bar, LOC tag, thin-sample pill ──────

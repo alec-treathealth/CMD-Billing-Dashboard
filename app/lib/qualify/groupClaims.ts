@@ -58,16 +58,27 @@ export function groupClaimsByPatient(claims: readonly QualifyClaim[]): QualifyCl
 export type QualifyLocFilter = 'IP' | 'OP' | 'BOTH' | null;
 
 /**
- * LOC chip filtering (INCLUSIVE semantics): the IP chip shows facilities that serve IP — careSetting
- * 'IP' or 'BOTH'; likewise OP; the Both chip shows only 'BOTH'. A facility with an unresolved
- * careSetting (null) appears ONLY when no chip is active — a chip is a positive assertion and an
- * unknown LOC can't satisfy it.
+ * LOC lens filtering (INCLUSIVE semantics — Change D lifts this to the search bar as the ONE lens):
+ * the IP lens shows rows that serve IP — careSetting 'IP' or 'BOTH'; likewise OP; the Both lens shows
+ * only 'BOTH'. A row with an unresolved careSetting (null) appears ONLY when no lens is active — the
+ * lens is a positive assertion and an unknown LOC can't satisfy it. GENERIC over anything carrying a
+ * careSetting (QualifyFacility, QualifyFacilityTrend) so every surface filters with the SAME rule.
  */
-export function filterFacilitiesByLoc(
-  facilities: readonly QualifyFacility[],
+export function filterFacilitiesByLoc<T extends { careSetting: QualifyFacility['careSetting'] }>(
+  facilities: readonly T[],
   loc: QualifyLocFilter,
-): QualifyFacility[] {
+): T[] {
   if (loc === null) return [...facilities];
   if (loc === 'BOTH') return facilities.filter((f) => f.careSetting === 'BOTH');
   return facilities.filter((f) => f.careSetting === loc || f.careSetting === 'BOTH');
+}
+
+/**
+ * The CLAIMS analog of the LOC lens (same inclusive semantics over QualifyClaim.program): one lens,
+ * everywhere — the cases panel filters with the identical rule the facility panels use.
+ */
+export function filterClaimsByLoc(claims: readonly QualifyClaim[], loc: QualifyLocFilter): QualifyClaim[] {
+  if (loc === null) return [...claims];
+  if (loc === 'BOTH') return claims.filter((c) => c.program === 'BOTH');
+  return claims.filter((c) => c.program === loc || c.program === 'BOTH');
 }
