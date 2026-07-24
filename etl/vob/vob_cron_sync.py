@@ -98,20 +98,23 @@ def monday(query, variables=None, tries=5):
     raise last
 
 def scan_board():
-    """Return {item_id: (facility, updated_at_dt)} — NON-PHI."""
+    """Return {item_id: (facility, updated_at_dt, created_at_date)} — NON-PHI.
+    created_at_date feeds vob_created_at, the matview's latest-per-member recency key;
+    it matches the initial load, which sourced vob_created_at from the Monday item created_at."""
     out = {}
     def take(items):
         for it in items:
             fac = ""
             for cv in it.get("column_values", []):
                 fac = (cv.get("text") or "").strip()
-            out[it["id"]] = (fac, parse_ts(it.get("updated_at")))
+            cr = parse_ts(it.get("created_at"))
+            out[it["id"]] = (fac, parse_ts(it.get("updated_at")), cr.date() if cr else None)
     q0 = ('query { boards(ids:["%s"]) { items_page(limit:500) '
-          '{ cursor items { id updated_at column_values(ids:["status60"]) { text } } } } }' % BOARD_ID)
+          '{ cursor items { id created_at updated_at column_values(ids:["status60"]) { text } } } } }' % BOARD_ID)
     page = monday(q0)["boards"][0]["items_page"]
     take(page["items"]); cur = page["cursor"]
     qn = ('query($c:String!) { next_items_page(limit:500, cursor:$c) '
-          '{ cursor items { id updated_at column_values(ids:["status60"]) { text } } } }')
+          '{ cursor items { id created_at updated_at column_values(ids:["status60"]) { text } } } }')
     while cur:
         np = monday(qn, {"c": cur})["next_items_page"]
         take(np["items"]); cur = np["cursor"]
@@ -216,7 +219,7 @@ def main():
             deact = {r[0]: r[2] for r in rows_db}     # iid -> deactivated_at (None = active)
 
             to_process, to_touch = [], []
-            for iid, (fac, upd) in admitted.items():
+            for iid, (fac, upd, _cr) in admitted.items():
                 if iid not in db:
                     to_process.append((iid, fac, upd))          # NEW
                 elif db[iid] is None:
@@ -244,7 +247,7 @@ def main():
                         errors += 1; continue                    # no downloadable PDF this run
                     try:
                         raw = download_and_extract(url)
-                        row = build_row(raw, iid, fac, board[iid][0], upd)
+                        row = build_row(raw, iid, fac, board[iid][2], upd)   # board[iid][2] = created_at date
                         batch.append(tuple(row[c] for c in COLS))
                     except Exception:
                         errors += 1                              # never log the exception payload
