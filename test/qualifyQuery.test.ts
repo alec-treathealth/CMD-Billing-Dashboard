@@ -7,9 +7,12 @@ import {
   buildIdentifierLandingFacilityQuery,
   buildFacilityCasesQuery,
   buildMoversQuery,
+  buildBookKpisQuery,
+  buildFacilityTrendQuery,
   QUALIFY_CASES_MAX,
   QUALIFY_MOVERS_MIN_PATIENTS,
   QUALIFY_MOVERS_MIN_CHARGES,
+  QUALIFY_TREND_BUCKETS,
 } from '../src/collections/qualifyQuery.js';
 
 const BOTH = [BXR_ENTITY_ID, INDIGO_ENTITY_ID];
@@ -302,4 +305,60 @@ test('qualify builders: NO market filter emits NO VOB clause (unchanged behavior
   for (const q of [rank, cases, movers]) {
     assert.doesNotMatch(q.sql, /vob\.member_benefits_latest/, 'no VOB clause without a market filter');
   }
+});
+
+// ── Redesign overview aggregates: buildBookKpisQuery + buildFacilityTrendQuery ────────────────────
+test('overview aggregates: cross-tenant + read the rollup + route through assertEntityScope', () => {
+  const kpis = buildBookKpisQuery('2026-06-17', '2026-07-17', BOTH);
+  const trend = buildFacilityTrendQuery('2026-06-17', '2026-07-17', '2026-05-18', BOTH);
+  for (const { sql, params } of [kpis, trend]) {
+    assert.match(sql, /business_entity_id = any\(\$1::uuid\[\]\)/, 'tenant predicate present');
+    assert.deepEqual(params[0], BOTH, 'first param is the pinned [BXR, Indigo] array');
+    assert.ok(sql.includes('collections.cmd_explorer_charge_rollup'), 'reads the rollup');
+    assert.ok(!sql.includes('cmd_explorer_rows'), 'never reads raw posting-grain rows');
+  }
+  assert.throws(() => buildBookKpisQuery('2026-01-01', '2026-02-01', []), /entityIds required/);
+  assert.throws(() => buildFacilityTrendQuery('2026-01-01', '2026-02-01', '2025-12-01', []), /entityIds required/);
+});
+
+test('book KPIs: three guarded ratio columns, e2 excluded from the reliable-allowed evidence, NO raw dollars projected', () => {
+  const { sql } = buildBookKpisQuery('2026-06-17', '2026-07-17', BOTH);
+  assert.ok(sql.includes('as pct_allowed_of_billed'), 'allowed/billed ratio');
+  assert.ok(sql.includes('as pct_paid_of_allowed'), 'paid/allowed ratio (collection yield)');
+  assert.ok(sql.includes('as pct_paid_of_billed'), 'paid/billed ratio (net realization)');
+  assert.ok(sql.includes("allowed_tier <> 'e2'"), 'reliable-allowed excludes tier e2 (ruling Q2a — parity with the rating)');
+  assert.ok(sql.includes('case when'), 'every ratio is denominator-guarded (null, never a coerced 0%)');
+  // Only the three pct columns are PROJECTED (dollars are summed as denominators, never returned).
+  const selectList = sql.slice(sql.indexOf('select ') + 7, sql.indexOf(' from '));
+  assert.equal((selectList.match(/ as /g) ?? []).length, 3, 'exactly three output columns');
+  assert.ok(!/as .*(billed_amount|charge_total|insurance_payments) /.test(sql), 'no raw dollar column leaves SQL');
+});
+
+test('facility trend: rating-delta order, dominant-payer via mode(), e2-excluded ratings, bucket math, book-wide by default', () => {
+  const { sql } = buildFacilityTrendQuery('2026-06-17', '2026-07-17', '2026-05-18', BOTH);
+  assert.match(sql, /order by \(agg\.cur_rating - agg\.prior_rating\) desc nulls last/, 'sorts by the rating delta, new (null-prior) last');
+  assert.ok(sql.includes('mode() within group (order by primary_payer)'), 'dominant payer = the most-charges payer (mode)');
+  assert.ok(sql.includes("allowed_tier <> 'e2'"), 'ratings exclude tier e2 (parity with the value-first rating)');
+  assert.ok(sql.includes('least(') && sql.includes('greatest(0'), 'bucket index is clamped to [0, N-1]');
+  assert.ok(sql.includes('array_remove(array_agg'), 'sparkline points drop thin buckets (never fabricated)');
+  assert.ok(!sql.includes('primary_payer = $'), 'book-wide by default — no single-payer filter');
+});
+
+test('facility trend: a payer-scoped variant adds the single-payer filter (per-facility panel sparklines)', () => {
+  const { sql, params } = buildFacilityTrendQuery('2026-06-17', '2026-07-17', '2026-05-18', BOTH, { payer: 'AETNA' });
+  assert.ok(sql.includes('and primary_payer = $'), 'payer-scoped adds the filter');
+  assert.ok(params.includes('AETNA'), 'the payer value is a bound param');
+});
+
+test('facility trend: bucket count is bounded and defaults to QUALIFY_TREND_BUCKETS', () => {
+  const def = buildFacilityTrendQuery('2026-06-17', '2026-07-17', '2026-05-18', BOTH);
+  assert.ok(def.params.includes(QUALIFY_TREND_BUCKETS), 'default bucket count is bound');
+  const clamped = buildFacilityTrendQuery('2026-06-17', '2026-07-17', '2026-05-18', BOTH, { buckets: 999 });
+  assert.ok(clamped.params.includes(24), 'an absurd bucket count clamps to 24');
+});
+
+test('facility ranking now returns entity_ids (the BXR/Indigo/Mixed label source), still grouped by facility', () => {
+  const { sql } = buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH);
+  assert.ok(sql.includes('array_agg(distinct business_entity_id::text) as entity_ids'), 'entity_ids aggregated per facility');
+  assert.ok(sql.includes('agg.entity_ids'), 'projected + grouped in the outer query');
 });

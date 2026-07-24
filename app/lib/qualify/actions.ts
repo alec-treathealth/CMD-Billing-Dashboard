@@ -14,6 +14,8 @@ import {
   loadQualifyIdentifierLandingFacility,
   loadQualifyFacilityCases,
   loadQualifyMovers,
+  loadQualifyBookKpis,
+  loadQualifyFacilityTrends,
   loadQualifyClaimPrefixToken,
   loadQualifyPatientCohort,
   cmdExplorerEmployers,
@@ -30,6 +32,9 @@ import {
   getQualifyFacilityCasesCore,
   getQualifyMoversCore,
   getQualifyInitialCore,
+  getQualifyBookKpisCore,
+  getQualifyFacilityTrendsCore,
+  getQualifyOverviewCore,
   getQualifyPatientCohortCore,
   revealQualifyRowCore,
   revealQualifyRowsCore,
@@ -45,6 +50,9 @@ import type {
   QualifySnapshot,
   QualifyMovers,
   QualifyInitial,
+  QualifyBookKpis,
+  QualifyFacilityTrend,
+  QualifyOverview,
   QualifyMarket,
   QualifyWindowDays,
   RevealQualifyRowResult,
@@ -62,6 +70,8 @@ const realDeps: QualifyDeps = {
   loadClaimPrefixToken: loadQualifyClaimPrefixToken,
   loadPatientCohort: loadQualifyPatientCohort,
   loadMovers: loadQualifyMovers,
+  loadBookKpis: loadQualifyBookKpis,
+  loadFacilityTrends: loadQualifyFacilityTrends,
   recordAccess,
   revealRow: (id, actor, entityIds, action) => revealCmdExplorerRow(id, actor, entityIds, action),
   revealRows: (ids, actor, entityIds, action) => revealCmdExplorerRows(ids, actor, entityIds, action),
@@ -125,6 +135,33 @@ export async function getQualifyInitial(
   market?: QualifyMarket,
 ): Promise<QualifyInitial> {
   return getQualifyInitialCore(realDeps, windowDays, sanitizeMarket(market));
+}
+
+/** Redesign overview: book-wide KPI percentages (allowed/paid ratios) for the window, in-plane. */
+export async function getQualifyBookKpis(
+  windowDays: QualifyWindowDays,
+  market?: QualifyMarket,
+): Promise<QualifyBookKpis> {
+  return getQualifyBookKpisCore(realDeps, windowDays, sanitizeMarket(market));
+}
+
+/** Redesign overview: per-facility rating trend + delta (Heating-Up + sparklines). payer null = book-wide. */
+export async function getQualifyFacilityTrends(
+  windowDays: QualifyWindowDays,
+  opts?: { payer?: string | null; market?: QualifyMarket },
+): Promise<QualifyFacilityTrend[]> {
+  return getQualifyFacilityTrendsCore(realDeps, windowDays, {
+    payer: opts?.payer ?? null,
+    market: sanitizeMarket(opts?.market),
+  });
+}
+
+/** Redesign combined on-load overview: KPIs + trends + the hybrid-resolved top facility, ONE round-trip. */
+export async function getQualifyOverview(
+  windowDays: QualifyWindowDays,
+  market?: QualifyMarket,
+): Promise<QualifyOverview> {
+  return getQualifyOverviewCore(realDeps, windowDays, sanitizeMarket(market));
 }
 
 /** Phase 3: the patient-group "View cohort" slide-over — audited, floor-gated, dollar-stripped in core. */

@@ -36,6 +36,9 @@ import {
   type QualifyRevealedRow,
   type RevealQualifyRowResult,
   type RevealQualifyRowsResult,
+  type QualifyBookKpis,
+  type QualifyFacilityTrend,
+  type QualifyOverview,
 } from './contract';
 import type { QualifyPrincipal } from './principal';
 import {
@@ -43,8 +46,11 @@ import {
   type QualifyFacilityRow,
   type QualifyClaimRow,
   type QualifyMoverRow,
+  type QualifyBookKpisRow,
+  type QualifyFacilityTrendRow,
 } from '../../../src/collections/qualifyQuery';
 import { COHORT_MIN_PATIENTS, type VobMarketFilter } from '../../../src/collections/cmdExplorerQuery';
+import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../../../src/tenants';
 
 /** Distinct audit action labels (post reveal-audit-action fix) — Qualify surfaces are attributable. */
 export const SEARCH_QUALIFY_PHI = 'search_qualify_phi';
@@ -113,6 +119,21 @@ export interface QualifyDeps {
     entityIds: string[],
     market?: VobMarketFilter,
   ) => Promise<QualifyMoverRow[]>;
+  /** Redesign overview: book-wide KPI percentages (dollars summed + dropped in SQL). One row. */
+  loadBookKpis: (
+    from: string,
+    to: string,
+    entityIds: string[],
+    market?: VobMarketFilter,
+  ) => Promise<QualifyBookKpisRow | null>;
+  /** Redesign overview: per-facility rating trend rows (ratings only). payer null = book-wide. */
+  loadFacilityTrends: (
+    from: string,
+    to: string,
+    priorFrom: string,
+    entityIds: string[],
+    opts?: { payer?: string | null; market?: VobMarketFilter },
+  ) => Promise<QualifyFacilityTrendRow[]>;
   recordAccess: (entry: {
     actorEmail: string;
     actorUserId: string;
@@ -170,6 +191,22 @@ function alphaEcho(raw: string): string {
 }
 
 /**
+ * Map a facility's distinct tenant uuid(s) to a small NON-PHI label. Both tenants present → 'Mixed'
+ * (a raw facility text served under both books — cross-tenant interleave is intended; the label never
+ * groups or splits). An unrecognized/empty set → null (never fabricate a label). The canonical uuids
+ * are the SAME two the cross-tenant scope pins.
+ */
+function entityLabel(entityIds: string[] | null | undefined): 'BXR' | 'Indigo' | 'Mixed' | null {
+  if (!entityIds || entityIds.length === 0) return null;
+  const hasBxr = entityIds.includes(BXR_ENTITY_ID);
+  const hasIndigo = entityIds.includes(INDIGO_ENTITY_ID);
+  if (hasBxr && hasIndigo) return 'Mixed';
+  if (hasBxr) return 'BXR';
+  if (hasIndigo) return 'Indigo';
+  return null;
+}
+
+/**
  * Shape + rate + sort the facility rows. VALUE-FIRST (ruling 2026-07-19b): rank by rating = allowed%
  * desc (nulls last), tiebreak name. FLOOR: drop facilities under QUALIFY_MIN_LINES charge lines first, so
  * a degenerate "100% on 1 line" fluke never surfaces — but a genuinely small facility (>= the floor)
@@ -195,6 +232,7 @@ function assembleFacilities(rows: QualifyFacilityRow[]): QualifyFacility[] {
       estimateClaims: r.estimate_claims,
       unknownClaims: r.unknown_claims,
       careSetting: r.care_setting,
+      entity: entityLabel(r.entity_ids),
     }))
     .sort((a, b) => {
       if (a.rating === null && b.rating !== null) return 1;
@@ -584,6 +622,124 @@ export async function getQualifyInitialCore(
     topPayer: top,
     snapshot,
     seedFacility: rank1,
+    seedCases: cases.claims,
+    seedCapped: cases.capped,
+  };
+}
+
+// ── Redesign overview cores (book KPIs + facility trend + the combined on-load payload) ──────────
+
+/** Shape a raw trend row → the client contract: attach city/state + entity label, compute the delta. */
+function assembleTrend(r: QualifyFacilityTrendRow): QualifyFacilityTrend {
+  const loc = facilityLocation(r.facility_code);
+  const cur = r.cur_rating;
+  const prior = r.prior_rating;
+  return {
+    facilityKey: r.facility,
+    name: r.facility_name ?? r.facility,
+    city: loc?.city ?? null,
+    state: loc?.state ?? null,
+    careSetting: r.care_setting,
+    entity: entityLabel(r.entity_ids),
+    dominantPayer: r.dominant_payer,
+    lineCount: r.line_count,
+    currentRating: cur,
+    priorRating: prior,
+    // Delta in whole-tenth points; null when there is no prior-window evidence (a NEW facility).
+    deltaPts: cur !== null && prior !== null ? Math.round((cur - prior) * 10) / 10 : null,
+    points: Array.isArray(r.points) ? r.points : [],
+  };
+}
+
+/**
+ * Book-wide KPI percentages for the window (redesign overview tiles). Gate-only (non-PHI aggregate,
+ * parity with movers — no per-fetch PHI audit). Returns percentages only; the SQL never projects the
+ * dollar sums, so this is admissions_seat-safe by construction.
+ */
+export async function getQualifyBookKpisCore(
+  deps: QualifyDeps,
+  windowDays: QualifyWindowDays,
+  market?: QualifyMarket,
+): Promise<QualifyBookKpis> {
+  const gate = await deps.requirePrincipal();
+  if (!gate.ok) throw new Error(gate.error);
+  if (!isQualifyWindow(windowDays)) throw new Error('Invalid window.');
+  const { from, to } = qualifyWindowBounds(windowDays, deps.now());
+  const row = await deps.loadBookKpis(from, to, gate.entityIds, market);
+  return {
+    pctAllowedOfBilled: row?.pct_allowed_of_billed ?? null,
+    pctPaidOfAllowed: row?.pct_paid_of_allowed ?? null,
+    pctPaidOfBilled: row?.pct_paid_of_billed ?? null,
+    windowStart: from,
+    windowEnd: to,
+    tenantScope: QUALIFY_TENANT_SCOPE,
+  };
+}
+
+/**
+ * Per-facility rating trend rows (redesign "Facilities Heating Up" + sparklines). Gate-only (ratings
+ * only, non-PHI). `payer` null = book-wide (the overview row); set = the resolved payer's facilities
+ * (per-facility sparklines in the panel). Order is preserved from SQL (rating-delta desc, new last).
+ */
+export async function getQualifyFacilityTrendsCore(
+  deps: QualifyDeps,
+  windowDays: QualifyWindowDays,
+  opts?: { payer?: string | null; market?: QualifyMarket },
+): Promise<QualifyFacilityTrend[]> {
+  const gate = await deps.requirePrincipal();
+  if (!gate.ok) throw new Error(gate.error);
+  if (!isQualifyWindow(windowDays)) throw new Error('Invalid window.');
+  const { from, to, priorFrom } = qualifyWindowBounds(windowDays, deps.now());
+  const rows = await deps.loadFacilityTrends(from, to, priorFrom, gate.entityIds, {
+    payer: opts?.payer ?? null,
+    market: opts?.market,
+  });
+  return rows.map(assembleTrend);
+}
+
+/**
+ * Combined ON-LOAD overview (ONE round-trip): book KPIs + trending facilities in parallel, then the
+ * HYBRID resolve — the top trending facility's dominant payer is resolved and the cases are seeded to
+ * THAT facility (not rank-1), so the surface lands showing the exact facility the top card names.
+ * Composes the existing cores, so every gate/audit/strip is byte-identical to the manual flow. No
+ * trend / no dominant payer → the KPIs + trends still return, with a null snapshot (empty prompt).
+ */
+export async function getQualifyOverviewCore(
+  deps: QualifyDeps,
+  windowDays: QualifyWindowDays,
+  market?: QualifyMarket,
+): Promise<QualifyOverview> {
+  const [kpis, trends] = await Promise.all([
+    getQualifyBookKpisCore(deps, windowDays, market),
+    getQualifyFacilityTrendsCore(deps, windowDays, { payer: null, market }),
+  ]);
+  const empty: QualifyOverview = {
+    kpis, trends, topFacility: null, topPayer: null, snapshot: null, seedFacility: null, seedCases: [], seedCapped: false,
+  };
+  // The hybrid focus is the FIRST trending facility that carries a resolvable dominant payer.
+  const top = trends.find((t) => t.dominantPayer) ?? null;
+  if (!top || !top.dominantPayer) return empty;
+
+  const snapshot = await getQualifySnapshotByPayerCore(deps, { payer: top.dominantPayer, windowDays, market });
+  if (!snapshot.resolved) return { ...empty, topPayer: top.dominantPayer, topFacility: top.facilityKey, snapshot };
+  // Scope to the trend facility IF it ranks under its dominant payer this window; else the payer's rank-1.
+  const focus = snapshot.facilities.some((f) => f.facilityKey === top.facilityKey)
+    ? top.facilityKey
+    : snapshot.facilities[0]?.facilityKey ?? null;
+  if (!focus) return { ...empty, topPayer: top.dominantPayer, topFacility: top.facilityKey, snapshot };
+
+  const cases = await getQualifyFacilityCasesCore(deps, {
+    payer: snapshot.resolved.payerName,
+    facility: focus,
+    windowDays,
+    market,
+  });
+  return {
+    kpis, trends,
+    topFacility: focus,
+    topPayer: top.dominantPayer,
+    snapshot,
+    seedFacility: focus,
     seedCases: cases.claims,
     seedCapped: cases.capped,
   };

@@ -6,6 +6,9 @@ import {
   getQualifyFacilityCasesCore,
   getQualifyMoversCore,
   getQualifyInitialCore,
+  getQualifyBookKpisCore,
+  getQualifyFacilityTrendsCore,
+  getQualifyOverviewCore,
   getQualifyPatientCohortCore,
   revealQualifyRowCore,
   revealQualifyRowsCore,
@@ -29,8 +32,8 @@ const B2 = 777777.77, A2 = 666666.66; // solid/mid-pct facility (Indigo)
 const CB = 555555.55, CA = 444444.44; // a case's dollars
 
 const FAC_ROWS = [
-  { facility: 'ca mental health', facility_name: 'CA MENTAL HEALTH', facility_code: 'CAMH', care_setting: null, line_count: 3, confirmed_claims: 3, estimate_claims: 0, unknown_claims: 0, billed: B1, allowed: A1, pct_allowed: 60 }, // BXR, thin high pct
-  { facility: '405 recovery', facility_name: '405 RECOVERY', facility_code: '10026460', care_setting: 'OP' as const, line_count: 400, confirmed_claims: 380, estimate_claims: 15, unknown_claims: 5, billed: B2, allowed: A2, pct_allowed: 55 }, // Indigo, solid mid pct
+  { facility: 'ca mental health', facility_name: 'CA MENTAL HEALTH', facility_code: 'CAMH', care_setting: null, line_count: 3, confirmed_claims: 3, estimate_claims: 0, unknown_claims: 0, billed: B1, allowed: A1, pct_allowed: 60, entity_ids: [BXR_ENTITY_ID] }, // BXR, thin high pct
+  { facility: '405 recovery', facility_name: '405 RECOVERY', facility_code: '10026460', care_setting: 'OP' as const, line_count: 400, confirmed_claims: 380, estimate_claims: 15, unknown_claims: 5, billed: B2, allowed: A2, pct_allowed: 55, entity_ids: [INDIGO_ENTITY_ID] }, // Indigo, solid mid pct
 ];
 const CASE_ROWS = [
   { id: 123, member_id_bidx: 'BIDX_A', facility: '405 recovery', facility_name: '405 RECOVERY', primary_payer: 'AETNA', program: 'OP' as const, dos: '2026-07-01', payment_date: '2026-07-05', pct_allowed: 80, billed: CB, allowed: CA, allowed_tier: 'cd' },
@@ -38,6 +41,12 @@ const CASE_ROWS = [
 const MOVER_ROWS = [
   { primary_payer: 'AETNA', this_patients: 40, prior_patients: 10, delta_patients: 30 },
   { primary_payer: 'CIGNA', this_patients: 8, prior_patients: 0, delta_patients: 8 },
+];
+// Trend rows for the redesign overview cores. '405 recovery' is dominant-payer AETNA so the overview
+// hybrid resolves AETNA and (since FAC_ROWS ranks '405 recovery') seeds THAT facility, not rank-1.
+const TREND_ROWS = [
+  { facility: '405 recovery', facility_name: '405 RECOVERY', facility_code: '10026460', care_setting: 'OP' as const, dominant_payer: 'AETNA', entity_ids: [INDIGO_ENTITY_ID], line_count: 400, cur_rating: 55, prior_rating: 40, points: [40, 45, 50, 55] },
+  { facility: 'ca mental health', facility_name: 'CA MENTAL HEALTH', facility_code: 'CAMH', care_setting: null, dominant_payer: 'AETNA', entity_ids: [BXR_ENTITY_ID], line_count: 3, cur_rating: 60, prior_rating: null, points: [60] },
 ];
 const REVEAL_PHI = { patient_name: 'DOE, JANE', member_id_raw: 'AETMEMBER123', group_number: 'GRP9' };
 
@@ -95,6 +104,8 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
       byCpt: [{ label: 'H0015', count: 18, charge: 40000 }],
     }),
     loadMovers: async () => MOVER_ROWS,
+    loadBookKpis: async () => ({ pct_allowed_of_billed: 44, pct_paid_of_allowed: 82, pct_paid_of_billed: 36 }),
+    loadFacilityTrends: async () => TREND_ROWS,
     recordAccess: async (e) => {
       c.audits.push({ action: e.action, detail: e.detail });
     },
@@ -129,7 +140,7 @@ test('snapshot: a small high-% facility RANKS ABOVE a large mid-% one (value-fir
 test('snapshot: a below-floor facility (< QUALIFY_MIN_LINES charge lines) is suppressed from the list', async () => {
   const deps = makeDeps(SUPER, cap(), {
     loadFacilities: async () => [
-      { facility: 'fluke', facility_name: 'FLUKE 100%', facility_code: null, care_setting: null, line_count: QUALIFY_MIN_LINES - 1, confirmed_claims: QUALIFY_MIN_LINES - 1, estimate_claims: 0, unknown_claims: 0, billed: 100, allowed: 100, pct_allowed: 100 },
+      { facility: 'fluke', facility_name: 'FLUKE 100%', facility_code: null, care_setting: null, line_count: QUALIFY_MIN_LINES - 1, confirmed_claims: QUALIFY_MIN_LINES - 1, estimate_claims: 0, unknown_claims: 0, billed: 100, allowed: 100, pct_allowed: 100, entity_ids: [BXR_ENTITY_ID] },
       ...FAC_ROWS,
     ],
   });
@@ -733,4 +744,58 @@ test('patient-cohort: unknown/foreign claim id AND a below-floor cohort BOTH col
     payer: 'AETNA', facility: '405 recovery', windowDays: 30, claimId: -1,
   });
   assert.equal(bad.suppressed, true, 'malformed id fails closed without reaching any loader');
+});
+
+// ── Redesign overview cores: book KPIs, facility trend (entity label + delta), the on-load hybrid ────
+test('book KPIs core: returns the three ratios + window; runs for an admissions_seat (no dollars anywhere)', async () => {
+  const kpis = await getQualifyBookKpisCore(makeDeps(SEAT, cap()), 30);
+  assert.equal(kpis.pctAllowedOfBilled, 44);
+  assert.equal(kpis.pctPaidOfAllowed, 82);
+  assert.equal(kpis.pctPaidOfBilled, 36);
+  assert.ok(kpis.windowStart && kpis.windowEnd, 'window bounds attached');
+  assert.equal(kpis.tenantScope, 'cross-tenant-bxr-indigo');
+  // The KPIs are percentages only — the shape carries no dollar field to strip.
+  assert.ok(!('billed' in kpis) && !('allowed' in kpis), 'no raw dollar fields on the KPI contract');
+});
+
+test('facility trend core: maps entity label + computes deltaPts; a null-prior facility gets a null delta (NEW)', async () => {
+  const trends = await getQualifyFacilityTrendsCore(makeDeps(SUPER, cap()), 30);
+  const solid = trends.find((t) => t.facilityKey === '405 recovery')!;
+  assert.equal(solid.entity, 'Indigo', 'entity_ids [Indigo uuid] → Indigo label');
+  assert.equal(solid.currentRating, 55);
+  assert.equal(solid.priorRating, 40);
+  assert.equal(solid.deltaPts, 15, 'delta = current - prior');
+  assert.equal(solid.dominantPayer, 'AETNA');
+  assert.deepEqual(solid.points, [40, 45, 50, 55], 'sparkline points passed through');
+  const newFac = trends.find((t) => t.facilityKey === 'ca mental health')!;
+  assert.equal(newFac.entity, 'BXR', 'entity_ids [BXR uuid] → BXR label');
+  assert.equal(newFac.priorRating, null);
+  assert.equal(newFac.deltaPts, null, 'no prior evidence → null delta (a NEW facility)');
+});
+
+test('overview core (hybrid): resolves the top trend facility’s dominant payer AND seeds THAT facility, not rank-1', async () => {
+  const c = cap();
+  const ov = await getQualifyOverviewCore(makeDeps(SUPER, c), 30);
+  assert.equal(ov.kpis.pctAllowedOfBilled, 44, 'KPIs included');
+  assert.equal(ov.trends.length, 2, 'trends included');
+  assert.equal(ov.topPayer, 'AETNA', 'resolved the top trend facility’s dominant payer');
+  // '405 recovery' is trends[0] and ranks under AETNA (FAC_ROWS), so the hybrid focuses IT (not the
+  // rating rank-1 'ca mental health'), and seeds its cases.
+  assert.equal(ov.topFacility, '405 recovery');
+  assert.equal(ov.seedFacility, '405 recovery');
+  assert.equal(ov.seedCases.length, 1, 'seed cases loaded for the focused facility');
+  const seededDrill = c.facilityCasesArgs.at(-1)!;
+  assert.equal(seededDrill.facility, '405 recovery', 'the drill was scoped to the trend facility');
+  // The overview composes the resolve-by-payer + facility-drill cores, so their audits fire.
+  assert.ok(c.audits.some((a) => a.action === SEARCH_QUALIFY_PAYER), 'resolve-by-payer audited');
+  assert.ok(c.audits.some((a) => a.action === SEARCH_QUALIFY_FACILITY), 'facility drill audited');
+});
+
+test('overview core: an empty book (no trends) returns KPIs + empty trends + a null snapshot (prompt state)', async () => {
+  const ov = await getQualifyOverviewCore(makeDeps(SUPER, cap(), { loadFacilityTrends: async () => [] }), 30);
+  assert.deepEqual(ov.trends, []);
+  assert.equal(ov.snapshot, null);
+  assert.equal(ov.topFacility, null);
+  assert.equal(ov.seedCases.length, 0);
+  assert.ok(ov.kpis, 'KPIs still returned even with no trending facilities');
 });
