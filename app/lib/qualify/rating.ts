@@ -40,10 +40,11 @@ export const RATING_WARN_MIN = 30;
 
 export type RatingBucket = 'ok' | 'warn' | 'danger' | 'neutral';
 
-/** Shared legend copy (both surfaces render this). */
+/** Shared legend copy (both surfaces render this). Labels ruled 2026-07-24: Strong / Watch / Weak.
+ *  The description also defines the UI's "n" (Change A): n = claim lines backing the rating. */
 export const RATING_LEGEND: { description: string; labels: Record<Exclude<RatingBucket, 'neutral'>, string> } = {
-  description: 'Reimbursement rating — the facility’s allowed ÷ billed. Small facilities rank on merit; “limited data” flags a thin sample.',
-  labels: { ok: 'Strong', warn: 'Typical', danger: 'Weak' },
+  description: 'Reimbursement rating — the facility’s allowed ÷ billed. Small facilities rank on merit; “thin sample” flags a small claim count. n = claim lines backing the rating.',
+  labels: { ok: 'Strong', warn: 'Watch', danger: 'Weak' },
 };
 
 function clamp0to100(v: number): number {
@@ -98,7 +99,7 @@ export function explainRating(pctAllowed: number | null, lineCount: number): Rat
   }
   const rawR = Math.round(pctAllowed);
   const sentence = limitedData
-    ? `Ranked on its ${rawR}% allowed ÷ billed. Only ${n} claim line${n === 1 ? '' : 's'} back it so far — a small sample, so treat it as an early signal.`
+    ? `Ranked on its ${rawR}% allowed ÷ billed. Only ${n} claim line${n === 1 ? '' : 's'} back it so far — a thin sample, so treat it as an early signal.`
     : `Ranked on its ${rawR}% allowed ÷ billed, backed by ${n} claim lines.`;
   return { rawPct: pctAllowed, lineCount: n, limitedData, sentence };
 }

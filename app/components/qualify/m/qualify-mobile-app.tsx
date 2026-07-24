@@ -1,28 +1,41 @@
 'use client';
 
 /**
- * Qualify mobile PWA — the interactive shell (Prompt 4b). Owns the search, the "Heating up" module,
- * and the 5-row sliding-window swipe list; it is the only caller of getQualifySnapshot /
- * getQualifyMovers. Facilities render in the contract's rating-desc order (never re-sorted here).
+ * Qualify mobile PWA — the redesigned interactive shell (overview-first, autosearch; the approved
+ * comp is docs/mockups/qualify-redesign-mockup.html, mobile toggle). Owns the search, the compact
+ * KPI strip + "Facilities Heating Up" chips, and the 5-row sliding-window swipe list; the only
+ * caller of the Qualify Server Actions on this surface. Facilities render in the contract's
+ * rating-desc order (never re-sorted here).
  *
- * INTERACTION CONTRACT (Phase 4b):
- *   - An IDENTIFIER search (member id / prefix) SCOPES the list to the searched member's landing facility
- *     — ONE card (scopeFacilitiesForList); a payer-chip BROWSE keeps the FULL ranked list.
- *   - The horizontal gesture lives on the LIST CONTAINER (facility-list.tsx), not per-row: the 5-up column
- *     slides as a unit — left-swipe → next page, right-swipe → PREVIOUS page (clamped, no wrap). Paging
- *     applies in browse mode only (the scoped single card has nothing to page).
- *   - Tap a card → the facility detail (grouped claims). A dedicated on-card WHY control → the
- *     why-this-rating sheet (coverage breakdown + reversals). "Top" returns to page 1 of the browse list;
- *     LOC chips (IP/OP/Both) join the area chips as pure client filters (both reset the page). Area/LOC
- *     chips + the pager are BROWSE affordances — hidden on the scoped identifier view.
+ * REDESIGN (mirrors desktop Phase 1):
+ *  - AUTOSEARCH: debounced ~380ms at ≥3 chars + Enter (no resolve button). Member-id/prefix only on
+ *    mobile (the comp's mobile surface); the raw term lives in memory only.
+ *  - WINDOW: 30d/60d/90d + M/Y (the calendar QualifyWindow shape; Month/Year selects reveal).
+ *  - OVERVIEW: getQualifyOverview lands the surface populated in ONE round-trip — KPI strip + trend
+ *    chips + the HYBRID subject (top trend facility's dominant payer, Change E). The old hardcoded
+ *    top-mover auto-resolve is gone.
+ *  - HEATING-UP CHIPS: facility-shaped (rating + Δpts + defined n). Tap = the hybrid: resolve the
+ *    chip's dominant payer AND open that facility's detail sheet.
+ *  - CHANGE G: a persistent BREADCRUMB strip (Payer › Facility › Claim) pinned above the deck/sheets,
+ *    each crumb tappable to jump straight to that level (not one-back-at-a-time).
+ *  - CHANGE B: super_admin/admin (canRevealPhi && amounts capability) get the surface-wide "Reveal
+ *    identifiers" switch — in-memory only; every scope still fires the SAME audited reveal path
+ *    (chunked to the 50 cap). admissions_seat keeps the per-patient reveal + zero dollars.
+ *  - CHANGE D: the LOC lens row scopes the deck AND the detail sheet's claims (inclusive semantics,
+ *    shared helpers — one lens, everywhere).
+ *
+ * INTERACTION CONTRACT (unchanged): an IDENTIFIER search SCOPES the list to the landing facility;
+ * a browse (chip/hybrid) keeps the FULL ranked list. The horizontal gesture lives on the LIST
+ * CONTAINER; paging is a browse affordance. All async landings ride the resolveSeq/facilitySeq +
+ * cohortKey guards — the race-safety core is untouched.
  */
 import { useCallback, useEffect, useReducer, useRef, useState, useTransition, type ReactNode } from 'react';
-import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyMovers, getQualifyInitial, revealQualifyRows } from '@/lib/qualify/actions';
-import { QUALIFY_WINDOW_OPTIONS, QUALIFY_REVEAL_BATCH_CAP, sniffQualifyKind } from '@/lib/qualify/contract';
-import type { QualifySnapshot, QualifyFacility, QualifyClaim, QualifyMover, QualifyWindowDays, QualifyPhi, QualifyMarket } from '@/lib/qualify/contract';
+import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyOverview, revealQualifyRows } from '@/lib/qualify/actions';
+import { QUALIFY_WINDOW_OPTIONS, QUALIFY_CAL_YEAR_MIN, QUALIFY_REVEAL_BATCH_CAP, sniffQualifyKind, trailingWindow } from '@/lib/qualify/contract';
+import type { QualifySnapshot, QualifyFacility, QualifyFacilityTrend, QualifyBookKpis, QualifyClaim, QualifyWindow, QualifyPhi, QualifyMarket } from '@/lib/qualify/contract';
 import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
 import { resolveLandingWins, drillLandingWins, isPayerChange, scopeFacilitiesForList, isIdentifierResolution, isIdentifierEmpty, identifierEmptyTerm } from '@/lib/qualify/qualifyGuards';
-import { filterFacilitiesByLoc, type QualifyLocFilter } from '@/lib/qualify/groupClaims';
+import { filterFacilitiesByLoc, filterClaimsByLoc, type QualifyLocFilter } from '@/lib/qualify/groupClaims';
 import { nextPage, prevPage } from '@/lib/qualify/pagination';
 import { MobileFacilityList } from '@/components/qualify/m/facility-list';
 import { TrendSheet } from '@/components/qualify/m/trend-sheet';
@@ -33,11 +46,15 @@ import { HeatingUp } from '@/components/qualify/m/heating-up';
 import { MobileMarketFilter } from '@/components/qualify/m/market-filter';
 import { SwRegister } from '@/components/qualify/m/sw-register';
 import { SearchIcon, RefreshIcon } from '@/components/qualify/m/icons';
+import { QUALIFY_PALETTE, RATING_HEX } from '@/components/qualify/tokens';
 
-const TEAL900 = '#0E3A3A';
-const GROUND = '#FBF8F4';
-const INK900 = '#1B2B2A';
-const INK400 = '#859794';
+const TEAL900 = QUALIFY_PALETTE.teal900;
+const GROUND = QUALIFY_PALETTE.ground;
+const INK900 = QUALIFY_PALETTE.ink900;
+const INK400 = QUALIFY_PALETTE.ink400;
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const AUTOSEARCH_DEBOUNCE_MS = 380;
 
 function EmptyState({ children }: { children: ReactNode }) {
   return (
@@ -55,48 +72,40 @@ export function QualifyMobileApp({
   canRevealPhi: boolean;
 }) {
   const [query, setQuery] = useState('');
-  const [windowDays, setWindowDays] = useState<QualifyWindowDays>(30);
-  // Area (state) filter over the resolved deck, alongside windowDays. Resets to AREA_ALL on any new
-  // resolution (search / payer tap) and on a window change (which re-resolves) — see runSearch/resolveByPayer.
+  const [win, setWin] = useState<QualifyWindow>(trailingWindow(30));
+  const winRef = useRef(win);
+  winRef.current = win;
+  // Area (state) filter over the resolved deck. Resets on any new resolution / window change.
   const [areaFilter, setAreaFilter] = useState<string>(AREA_ALL);
   const [snapshot, setSnapshot] = useState<QualifySnapshot | null>(null);
-  const [movers, setMovers] = useState<QualifyMover[]>([]);
-  // Phase 4: the FULL ranked list (post-lead) + the current 5-up page. Filters (area + LOC) apply at
-  // render; the page clamps to the filtered length so a filter change can never strand the view.
+  // Overview strip: the book KPI percentages + the facility trend chips (window/market-tracked).
+  const [kpis, setKpis] = useState<QualifyBookKpis | null>(null);
+  const [trends, setTrends] = useState<QualifyFacilityTrend[]>([]);
+  // The FULL ranked list (post-lead) + the current 5-up page. Filters (area + LOC) apply at render.
   const [list, setList] = useState<QualifyFacility[]>([]);
   const [page, setPage] = useState(0);
   const [locFilter, setLocFilter] = useState<QualifyLocFilter>(null);
-  const [trend, setTrend] = useState<QualifyFacility | null>(null);
+  const [trendSheet, setTrendSheet] = useState<QualifyFacility | null>(null);
   const [detail, setDetail] = useState<QualifyFacility | null>(null);
-  // Facility-scoped claim lines for the open detail sheet: null === loading, [] === none. `claim` is the
-  // single claim line whose ClaimDetailSheet is layered above the list (null === none open).
+  // Facility-scoped claim lines for the open detail sheet: null === loading, [] === none.
   const [facilityCases, setFacilityCases] = useState<QualifyClaim[] | null>(null);
-  // The facility drill loads ALL payers at the facility for the WHOLE window (capped at QUALIFY_CASES_MAX
-  // = 500, not the 50 reveal cap anymore); `casesCapped` is true only when that safety cap truncated the
-  // set, driving an honest "narrow the window" nudge. No pager — the sheet groups + filters client-side.
   const [casesCapped, setCasesCapped] = useState(false);
   const [claim, setClaim] = useState<QualifyClaim | null>(null);
-  // PHI reveal (facility-scoped, audited): PER-PATIENT (not the whole loaded set — the old blanket reveal
-  // can't honor the 50-cap over a whole-window drill). `revealedPhi` caches the fetched identifiers keyed by
-  // case id; a row shows PHI iff its id is cached. The per-patient reveal is triggered from the claim popup
-  // ("Reveal identifiers" reveals that claim's patient across the loaded set). `revealPending` = a reveal is
-  // in flight. All reset when a facility opens/closes; "Hide identifiers" clears the cache. Gated by canRevealPhi.
+  // PHI reveal (facility-scoped, audited) — per-patient cache keyed by case id; the Change-B global
+  // toggle auto-fires the SAME audited path per scope. In-memory only, never storage.
   const [revealedPhi, setRevealedPhi] = useState<Map<number, QualifyPhi>>(() => new Map());
+  const revealedRef = useRef(revealedPhi);
+  revealedRef.current = revealedPhi;
   const [revealPending, setRevealPending] = useState(false);
   const [revealError, setRevealError] = useState<string | null>(null);
+  const [globalReveal, setGlobalReveal] = useState(false);
+  const canGlobalReveal = canRevealPhi && viewerHasAmountsCapability; // ⇔ super_admin/admin exactly
   const [searched, setSearched] = useState(false);
-  // How the CURRENT snapshot was resolved, so a window change re-ranks via the SAME path (window is
-  // orthogonal to resolution). byPayer = the Heating-up label (chip tap or on-load auto-resolve);
-  // lastSearch = the PHI term (member id / prefix). At most one is non-null once resolved.
+  // How the CURRENT snapshot was resolved (window changes re-rank via the same path).
   const [byPayer, setByPayer] = useState<string | null>(null);
   const [lastSearch, setLastSearch] = useState<string | null>(null);
-  // Synchronous mirror of the resolving SEARCH term (Direction B): drives the drill's identifier narrow
-  // inside the same resolve callback where setLastSearch hasn't applied yet. Null on the resolve-by-payer
-  // path (payer-wide, ruling 3). Held ONLY here — never persisted to storage/URL, never logged.
   const lastSearchRef = useRef<string | null>(null);
-  // VOB MARKET narrows (employer / funding). They scope the ranking, the drill, AND the movers via the
-  // VOB semi-join. `marketRef` lets the async resolve/drill/movers paths read the latest market without
-  // threading it through every closure; a dedicated effect (keyed by marketKey) re-resolves on change.
+  // VOB market narrows.
   const [employerSelection, setEmployerSelection] = useState<string[]>([]);
   const [fundingSelection, setFundingSelection] = useState<string[]>([]);
   const market = ((): QualifyMarket | undefined => {
@@ -111,19 +120,11 @@ export function QualifyMobileApp({
   const [echo, setEcho] = useState('');
   const [hint, setHint] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
-  // Auto-resolve the top mover ONCE, on first load only. A manual search/tap trips this so the on-load
-  // resolve can never clobber user intent; a window change never re-trips it (guarded in Effect B).
   const initialResolveDone = useRef(false);
-  // Monotonic request tokens: server-action responses can land out of order (search→search, rapid window
-  // pills, close→reopen a facility), so each async path stamps its issue order and only the LATEST commits
-  // state. Two independent streams: deck resolution (search / payer / window) and the facility-drill fetch.
+  // Monotonic request tokens (the race-safety core): deck resolution + the facility-drill fetch.
   const resolveSeq = useRef(0);
   const facilitySeq = useRef(0);
-  // Drill cases COHORT (payer/facility/window/prefix + page/cursors), reducer-owned (the SAME shared,
-  // root-tested cohortReducer desktop uses). Every drill transition DISPATCHES; `apply` returns the
-  // resulting cohort so the fetch can read it + stamp its cohortKey. `cohortRef` lets an async cases
-  // landing check the cohort changed underneath (the identity guard). This stage leaves prefix='' /
-  // page=0 (no input/pager UI until 3b/3c) — the reducer carries the fields, unused for now.
+  // Drill cases COHORT (shared, root-tested reducer).
   const [cohort, dispatch] = useReducer(cohortReducer, INITIAL_COHORT);
   const cohortRef = useRef(cohort);
   cohortRef.current = cohort;
@@ -132,45 +133,39 @@ export function QualifyMobileApp({
     dispatch(action);
     return next;
   }, []);
-  // Mirror of `detail` for async closures: a resolution landing must read the CURRENTLY-open sheet (not the
-  // stale closure value) to decide the payer-change sheet-close.
   const detailRef = useRef(detail);
   detailRef.current = detail;
 
   const hasAmounts = snapshot ? snapshot.viewerHasAmountsCapability : viewerHasAmountsCapability;
 
-  // Effect A — keep the Heating-up movers in sync with the selected window. SKIPS the mount run: the
-  // combined on-load effect (Effect B) fetches the initial movers alongside the auto-resolve in ONE
-  // round-trip. Window CHANGES still refresh the chip row here.
-  const moversInitDone = useRef(false);
-  useEffect(() => {
-    if (!moversInitDone.current) { moversInitDone.current = true; return; }
-    let alive = true;
-    getQualifyMovers(windowDays, marketRef.current)
-      .then((r) => { if (alive) setMovers(r.movers); })
+  /** Refresh the overview strip (KPI tiles + trend chips) — non-blocking, resolve:false. */
+  function refreshOverview(w: QualifyWindow) {
+    getQualifyOverview(w, marketRef.current, { resolve: false })
+      .then((ov) => {
+        setKpis(ov.kpis);
+        setTrends(ov.trends);
+      })
       .catch(() => {});
-    return () => { alive = false; };
-  }, [windowDays]);
+  }
 
-  // Effect B — land POPULATED in ONE round-trip (perf): getQualifyInitial returns the movers + the
-  // auto-resolved top payer's snapshot together, replacing the old movers→resolve waterfall. Commits
-  // exactly like resolveByPayer (list + cohort + sync). Mount-only; the resolveSeq guard discards it
-  // if a manual search/tap superseded before it lands. Empty movers / failure → the search prompt.
+  // Effect B — land POPULATED in ONE round-trip: the overview HYBRID (KPIs + trend chips + the top
+  // trend facility's dominant payer, cases scoped to that facility). Mount-only; resolveSeq-guarded.
   useEffect(() => {
     initialResolveDone.current = true;
     let alive = true;
-    const w = windowDays;
+    const w = winRef.current;
     const seq = ++resolveSeq.current;
     (async () => {
       try {
-        const init = await getQualifyInitial(w, marketRef.current);
+        const ov = await getQualifyOverview(w, marketRef.current);
         if (!alive || !resolveLandingWins(seq, resolveSeq.current)) return;
-        setMovers(init.movers);
-        const snap = init.snapshot;
-        if (snap && init.topPayer) {
+        setKpis(ov.kpis);
+        setTrends(ov.trends);
+        const snap = ov.snapshot;
+        if (snap && ov.topPayer) {
           setSnapshot(snap);
           setSearched(true);
-          setByPayer(init.topPayer);
+          setByPayer(ov.topPayer);
           lastSearchRef.current = null;
           setLastSearch(null);
           setAreaFilter(AREA_ALL);
@@ -179,6 +174,9 @@ export function QualifyMobileApp({
           setPage(0);
           setLocFilter(null);
           syncCohortForResolution(snap.resolved?.payerName ?? null, w);
+          // The hybrid: open the focused facility's sheet so the first paint IS the trending facility.
+          const focus = ov.seedFacility ? snap.facilities.find((f) => f.facilityKey === ov.seedFacility) : undefined;
+          if (focus) openFacility(focus);
         }
       } catch {
         // leave the empty prompt — the user can still search
@@ -188,44 +186,51 @@ export function QualifyMobileApp({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Effect C — market change → re-resolve the ACTIVE view under the new employer/funding narrow (skip
-  // the mount run). Refreshes the Heating-up movers too (Effect A only re-fires on windowDays). Mirrors
-  // onWindow's two paths: re-resolve by payer (chip/default) or re-run the last search.
+  // Effect C — market change → refresh the strip + re-resolve the ACTIVE view (skip mount).
   const marketInitDone = useRef(false);
   useEffect(() => {
     if (!marketInitDone.current) {
       marketInitDone.current = true;
       return;
     }
-    let alive = true;
-    getQualifyMovers(windowDays, marketRef.current)
-      .then((r) => { if (alive) setMovers(r.movers); })
-      .catch(() => {});
-    if (byPayer) resolveByPayer(byPayer, windowDays);
-    else if (lastSearch) runSearch(lastSearch, windowDays);
-    return () => { alive = false; };
+    refreshOverview(winRef.current);
+    if (byPayer) resolveByPayer(byPayer, winRef.current);
+    else if (lastSearch) runSearch(lastSearch, winRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [marketKey]);
 
-  function runSearch(raw: string, w: QualifyWindowDays) {
+  // AUTOSEARCH — debounced resolve at ≥3 chars (Enter fires immediately via onKeyDown).
+  const autoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const v = query.trim();
+    if (v.length < 3) return;
+    if (autoTimer.current) clearTimeout(autoTimer.current);
+    autoTimer.current = setTimeout(() => runSearch(v, winRef.current), AUTOSEARCH_DEBOUNCE_MS);
+    return () => {
+      if (autoTimer.current) clearTimeout(autoTimer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query]);
+
+  function runSearch(raw: string, w: QualifyWindow) {
     const t = raw.trim();
     if (t.length < 3) {
       setHint('Enter at least a 3-letter prefix or a member ID.');
       return;
     }
     setHint(null);
-    initialResolveDone.current = true; // a manual search supersedes the on-load auto-resolve
+    initialResolveDone.current = true;
     const seq = ++resolveSeq.current;
     startTransition(async () => {
       try {
-        const snap = await getQualifySnapshot({ query: t, windowDays: w, market: marketRef.current });
-        if (!resolveLandingWins(seq, resolveSeq.current)) return; // a newer resolve superseded this one — drop it
+        const snap = await getQualifySnapshot({ query: t, window: w, market: marketRef.current });
+        if (!resolveLandingWins(seq, resolveSeq.current)) return;
         setSnapshot(snap);
         setSearched(true);
-        setByPayer(null); // resolved via the PHI path, not by payer
-        lastSearchRef.current = t; // sync mirror — read by the drill narrow within THIS callback
-        setLastSearch(t); // remember the term so a window change re-ranks this same search
-        setAreaFilter(AREA_ALL); // a fresh resolution starts unfiltered
+        setByPayer(null);
+        lastSearchRef.current = t;
+        setLastSearch(t);
+        setAreaFilter(AREA_ALL);
         if (snap.resolved === null) {
           setEcho(t);
           setList([]);
@@ -233,9 +238,6 @@ export function QualifyMobileApp({
           setLocFilter(null);
         } else {
           setEcho('');
-          // Part A: keep the FULL ranked set in state (unmutated); the render SCOPES it to the searched
-          // identifier's landing facility (scopeFacilitiesForList) — one card. Honest-empty (renderBody)
-          // covers the null-landing case, so a below-floor id never shows a random facility.
           setList(snap.facilities);
           setPage(0);
           setLocFilter(null);
@@ -248,28 +250,29 @@ export function QualifyMobileApp({
     });
   }
 
-  // Resolve directly from a "Heating up" payer label (non-PHI) — the on-load auto-resolve AND chip taps.
-  // Seeds the deck the same way a search would. No member-id/prefix term is involved on this path.
-  function resolveByPayer(label: string, w: QualifyWindowDays) {
+  /** Resolve by payer label (chips = the Change-E HYBRID via focusKey; window changes re-rank). */
+  function resolveByPayer(label: string, w: QualifyWindow, focusKey: string | null = null) {
     setHint(null);
-    initialResolveDone.current = true; // a chip tap supersedes the on-load auto-resolve
+    initialResolveDone.current = true;
     const seq = ++resolveSeq.current;
     startTransition(async () => {
       try {
-        const snap = await getQualifySnapshotByPayer({ payer: label, windowDays: w, market: marketRef.current });
-        if (!resolveLandingWins(seq, resolveSeq.current)) return; // a newer resolve superseded this one — drop it
+        const snap = await getQualifySnapshotByPayer({ payer: label, window: w, market: marketRef.current });
+        if (!resolveLandingWins(seq, resolveSeq.current)) return;
         setSnapshot(snap);
         setSearched(true);
-        setByPayer(label); // remember it so a window change re-ranks this same payer
-        lastSearchRef.current = null; // no identifier narrow on the payer path (ruling 3)
-        setLastSearch(null); // resolved by payer, not via a PHI term
-        setAreaFilter(AREA_ALL); // a fresh resolution starts unfiltered
+        setByPayer(label);
+        lastSearchRef.current = null;
+        setLastSearch(null);
+        setAreaFilter(AREA_ALL);
         setEcho('');
         setList(snap.facilities);
         setPage(0);
         setLocFilter(null);
-        // Authoritative identity is the RESOLVED payer name (not the tapped label), matching desktop.
         syncCohortForResolution(snap.resolved?.payerName ?? null, w);
+        // HYBRID (Change E): when the tapped chip's facility ranks under its payer, open it directly.
+        const focus = focusKey ? snap.facilities.find((f) => f.facilityKey === focusKey) : undefined;
+        if (focus) openFacility(focus);
       } catch {
         if (!resolveLandingWins(seq, resolveSeq.current)) return;
         setHint('Qualify is unavailable right now. Please try again.');
@@ -277,24 +280,18 @@ export function QualifyMobileApp({
     });
   }
 
-  // Window is orthogonal to resolution: re-fetch movers (Effect A, via setWindowDays) and re-rank
-  // whatever is CURRENTLY resolved via its own path. Never auto-resolves and never clears — it only
-  // re-resolves when something is already resolved.
-  function onWindow(w: QualifyWindowDays) {
-    if (w === windowDays) return;
-    setWindowDays(w);
+  // Window is orthogonal to resolution: refresh the strip + re-rank whatever is CURRENTLY resolved.
+  function onWindow(w: QualifyWindow) {
+    setWin(w);
+    refreshOverview(w);
     if (byPayer) resolveByPayer(byPayer, w);
     else if (lastSearch) runSearch(lastSearch, w);
   }
 
-  // "Top" (formerly Reset): back to page 1 of the SAME filtered list — filters + resolution kept.
   function resetDeck() {
     setPage(0);
   }
 
-  // Clear the current resolution → back to the neutral search prompt (never trapped on a payer). Bump
-  // resolveSeq FIRST so any in-flight resolve is discarded. Keeps the Heating-up chips + window; drops
-  // the resolved payer, list, filters, and any open sheet.
   function clearSearch() {
     resolveSeq.current += 1;
     setQuery('');
@@ -312,52 +309,34 @@ export function QualifyMobileApp({
     setDetail(null);
     setClaim(null);
     clearReveal();
-    apply({ type: 'RESOLVE_PAYER', payer: null, facility: null, window: windowDays });
+    apply({ type: 'RESOLVE_PAYER', payer: null, facility: null, window: winRef.current });
   }
 
-  // Area chip tap → narrow to that state WITHOUT re-resolving (filters apply at render); page resets.
   function onSelectArea(key: string) {
     if (!snapshot?.resolved) return;
     setAreaFilter(key);
     setPage(0);
   }
 
-  // LOC chip tap (Phase 4): IP / OP / Both, inclusive semantics (groupClaims.filterFacilitiesByLoc).
   function onSelectLoc(loc: QualifyLocFilter) {
     setLocFilter((cur) => (cur === loc ? null : loc));
     setPage(0);
   }
 
-  // Facility-card tap → open the detail sheet and fetch THAT facility's claim lines (facility-scoped,
-  // most-recent-first, capped at 15). payer comes from resolved.payerName so it works for BOTH the
-  // PHI-search and resolve-by-payer entry paths. A close→reopen-a-different-card can leave two fetches in
-  // flight; the facilitySeq token ensures only the latest open's response paints (and a close invalidates
-  // any pending one), so a slow prior fetch can never land under the wrong facility's header.
-  // Each facility view starts fully masked — clear any PHI revealed for the previous facility. Resets
-  // revealPending too: a close/reopen while a reveal is in flight makes the response drop on the seq guard
-  // (before it clears the flag), so without this reset the button would stay stuck "Revealing…" all session.
   function clearReveal() {
     setRevealedPhi(new Map());
     setRevealPending(false);
     setRevealError(null);
   }
 
-  // The DRILL stream: fetch cohort `c`'s facility cases (ALL payers at the facility, the WHOLE window capped
-  // at 500) and paint ONLY if the landing still wins BOTH drill guards — facilitySeq (recency: close/reopen
-  // races) AND cohortKey (identity: the cohort didn't change underneath). Writes ONLY facilityCases +
-  // casesCapped (+ bumps facilitySeq) — never resolution state. Shared by the tap-open and the same-payer
-  // window refresh; payer/facility/window all come from `c`. No cursor is threaded (no server pager); the
-  // sheet groups + filters the loaded set client-side.
+  // The DRILL stream (facilitySeq recency + cohortKey identity) — untouched race core.
   function fetchDrill(c: QualifyCohort) {
     const seq = ++facilitySeq.current;
     const key = cohortKey(c);
     if (!c.payer || !c.facility) { setFacilityCases([]); setCasesCapped(false); return; }
-    // Direction B (ruling 5): when the session arrived via an identifier SEARCH, the same token narrow applies
-    // WITHIN the sheet (alongside allPayers) — prefix vs exact is sniffed server-side. Payer-tap sessions carry
-    // no term → payer-wide/all-payers, unchanged. The raw term stays in lastSearchRef (never logged/URL'd).
     const term = lastSearchRef.current;
     const filter = term ? (sniffQualifyKind(term) === 'member_id' ? { memberId: term } : { prefix: term }) : undefined;
-    getQualifyFacilityCases({ payer: c.payer, facility: c.facility, windowDays: c.window, allPayers: true, market: marketRef.current, ...(filter ? { filter } : {}) })
+    getQualifyFacilityCases({ payer: c.payer, facility: c.facility, window: c.window, allPayers: true, market: marketRef.current, ...(filter ? { filter } : {}) })
       .then((r) => {
         if (!drillLandingWins(seq, facilitySeq.current, key, cohortKey(cohortRef.current))) return;
         setFacilityCases(r.claims);
@@ -370,13 +349,9 @@ export function QualifyMobileApp({
       });
   }
 
-  // Fold a LANDED resolution into the drill cohort + open sheet — the ONLY coupling between the two streams,
-  // and exactly what removes the stuck-loading regression. Payer CHANGE → close any open sheet + reset the
-  // cohort (RESOLVE_PAYER); SAME payer (a window change re-resolving the same payer) → keep the sheet,
-  // CHANGE_WINDOW (keeps facility+prefix, resets cursor) and refresh the open drill for the new window.
-  function syncCohortForResolution(nextPayer: string | null, w: QualifyWindowDays) {
+  function syncCohortForResolution(nextPayer: string | null, w: QualifyWindow) {
     if (isPayerChange(cohortRef.current.payer, nextPayer)) {
-      if (detailRef.current) closeFacility(); // strands nothing: closeFacility bumps facilitySeq
+      if (detailRef.current) closeFacility();
       apply({ type: 'RESOLVE_PAYER', payer: nextPayer, facility: null, window: w });
     } else {
       const next = apply({ type: 'CHANGE_WINDOW', window: w });
@@ -389,12 +364,11 @@ export function QualifyMobileApp({
     setFacilityCases(null); // loading
     setDetail(f);
     clearReveal();
-    // SWITCH_FACILITY keeps payer/window; the drill loads all payers at this facility fresh.
     fetchDrill(apply({ type: 'SWITCH_FACILITY', facility: f.facilityKey }));
   }
 
   function closeFacility() {
-    facilitySeq.current++; // invalidate any in-flight drill (and reveal) so nothing paints after the sheet is gone
+    facilitySeq.current++;
     setDetail(null);
     setFacilityCases(null);
     setClaim(null);
@@ -402,18 +376,15 @@ export function QualifyMobileApp({
     clearReveal();
   }
 
-  // PER-PATIENT reveal (from the claim popup): ONE audited revealQualifyRows over the tapped claim's PATIENT
-  // — every loaded claim sharing its patientKey — sliced to the 50 batch cap (a rare high-frequency patient
-  // reveals its most-recent 50). Deduped (already-cached ids → no re-audit) + facilitySeq-guarded (a
-  // close/reopen drops a stale response). Merges into the cache without dropping other revealed patients.
+  // PER-PATIENT reveal (audited) — unchanged for every role.
   function revealPatient(patientKey: number) {
     if (!canRevealPhi) return;
     const rows = facilityCases ?? [];
     const ids = rows.filter((c) => c.patientKey === patientKey).map((c) => c.id).slice(0, QUALIFY_REVEAL_BATCH_CAP);
     if (ids.length === 0) return;
-    if (ids.every((id) => revealedPhi.has(id))) return; // already revealed → no re-audit
+    if (ids.every((id) => revealedPhi.has(id))) return;
     if (revealPending) return;
-    const seq = facilitySeq.current; // drop the response if the facility changes/closes before it lands
+    const seq = facilitySeq.current;
     setRevealPending(true);
     setRevealError(null);
     revealQualifyRows(ids)
@@ -422,7 +393,7 @@ export function QualifyMobileApp({
         setRevealPending(false);
         if (res.ok) {
           setRevealedPhi((prev) => {
-            const m = new Map(prev); // keep previously-revealed patients
+            const m = new Map(prev);
             for (const r of res.rows) {
               m.set(r.id, { patient_name: r.patient_name, member_id_raw: r.member_id_raw, group_number: r.group_number });
             }
@@ -439,27 +410,68 @@ export function QualifyMobileApp({
       });
   }
 
-  // Part A — how the CURRENT resolution scopes the list. Mirrors `lastSearch !== null` (both set in the same
-  // resolve callback), but derives from the snapshot so it can't drift: an identifier search (matchedOn is a
-  // PHI kind) SCOPES to the landing facility; a payer BROWSE keeps the full ranked list.
+  // CHANGE B — the global persistent reveal: when ON, every loaded drill scope re-reveals through the
+  // SAME audited path, chunked to the 50 cap (facilitySeq-guarded so a close/reopen drops landings).
+  useEffect(() => {
+    if (!globalReveal || !canGlobalReveal || !facilityCases || facilityCases.length === 0) return;
+    const ids = facilityCases.map((c) => c.id).filter((id) => !revealedRef.current.has(id));
+    if (ids.length === 0) return;
+    const seq = facilitySeq.current;
+    let alive = true;
+    void (async () => {
+      for (let i = 0; i < ids.length; i += QUALIFY_REVEAL_BATCH_CAP) {
+        const chunk = ids.slice(i, i + QUALIFY_REVEAL_BATCH_CAP);
+        try {
+          const res = await revealQualifyRows(chunk);
+          if (!alive || seq !== facilitySeq.current) return;
+          if (res.ok) {
+            setRevealedPhi((prev) => {
+              const m = new Map(prev);
+              for (const r of res.rows) {
+                m.set(r.id, { patient_name: r.patient_name, member_id_raw: r.member_id_raw, group_number: r.group_number });
+              }
+              return m;
+            });
+          } else {
+            setRevealError(res.error);
+            return;
+          }
+        } catch {
+          if (!alive || seq !== facilitySeq.current) return;
+          setRevealError('Reveal is unavailable right now.');
+          return;
+        }
+      }
+    })();
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [globalReveal, canGlobalReveal, facilityCases]);
+
+  function toggleGlobalReveal() {
+    setGlobalReveal((on) => {
+      if (on) clearReveal(); // OFF re-masks
+      return !on;
+    });
+  }
+
+  // Resolution-derived view state (identifier scoping — unchanged).
   const resolvedSnap = snapshot?.resolved ?? null;
   const landingKey = snapshot?.identifierLandingFacility ?? null;
   const isIdentifierPath = isIdentifierResolution(resolvedSnap);
-  const identifierEmpty = isIdentifierEmpty(resolvedSnap, landingKey); // identifier resolved, no ranked in-window claim
-  const isIdentifierScoped = isIdentifierPath && landingKey !== null; // identifier landed → ONE card, no pager/filters
-  // Browse pages + filters the full ranked set; the scoped identifier view is the single landing facility
-  // (area/LOC never apply to it). scopeFacilitiesForList returns [] on identifier-empty — renderBody's
-  // honest-empty branch shows the widen-window nudge before we ever read this list.
+  const identifierEmpty = isIdentifierEmpty(resolvedSnap, landingKey);
+  const isIdentifierScoped = isIdentifierPath && landingKey !== null;
   const scopedList = scopeFacilitiesForList(list, resolvedSnap, landingKey);
   const filteredList = isIdentifierScoped ? scopedList : filterFacilitiesByLoc(facilitiesInArea(scopedList, areaFilter), locFilter);
 
-  // The container pager (facility-list.tsx) drives these; both clamp with no wrap in the pure helper.
   const goNext = () => setPage((p) => nextPage(p, filteredList.length));
   const goPrev = () => setPage((p) => prevPage(p, filteredList.length));
 
+  // Change D on the drill: the LOC lens filters the open sheet's claims too (one lens, everywhere).
+  const sheetClaims = facilityCases === null ? null : filterClaimsByLoc(facilityCases, locFilter);
+
   function renderBody(): ReactNode {
     if (!searched) {
-      return <EmptyState>Search a member ID or 3-letter prefix to pull a payer&rsquo;s facilities.</EmptyState>;
+      return <EmptyState>Search a member ID or 3-letter prefix — or tap a heating-up facility.</EmptyState>;
     }
     if (snapshot && snapshot.resolved === null) {
       return (
@@ -471,9 +483,6 @@ export function QualifyMobileApp({
     if (snapshot && snapshot.facilities.length === 0) {
       return <EmptyState>No facilities for this payer in this window.</EmptyState>;
     }
-    // Fix A honest-empty: an identifier search resolved but has no claim at any ranked in-window facility.
-    // Distinct from resolved===null (VOB) above — the payer exists, the searched member just has no recent
-    // in-window activity. Nudge toward a wider window. Term is the ≤3 echo, or 'this member' for an exact id.
     if (identifierEmpty) {
       return (
         <EmptyState>
@@ -483,8 +492,6 @@ export function QualifyMobileApp({
         </EmptyState>
       );
     }
-    // Browse only: every facility filtered out by the area/LOC chips. The scoped identifier view always has
-    // its one landing card, so this can't trigger there.
     if (!isIdentifierScoped && filteredList.length === 0) {
       return (
         <div style={{ padding: '40px 16px', textAlign: 'center' }}>
@@ -493,8 +500,6 @@ export function QualifyMobileApp({
         </div>
       );
     }
-    // The list container owns the page gesture + the visible page + the indicator/hint; `scoped` shows the
-    // single identifier card with none of that. Tap → openFacility; the on-card WHY control → the trend sheet.
     return (
       <MobileFacilityList
         facilities={filteredList}
@@ -503,27 +508,37 @@ export function QualifyMobileApp({
         dimmed={isPending}
         onPageNext={goNext}
         onPagePrev={goPrev}
-        onWhy={(x) => setTrend(x)}
+        onWhy={(x) => setTrendSheet(x)}
         onOpen={openFacility}
       />
     );
   }
 
-  // When the CURRENT resolution came from a prefix/alpha search, the open detail sheet seeds its filter to
-  // that payer and shows a "Showing EAZ claims" banner. matchedValue is the non-PHI alpha echo (≤3 chars);
-  // resolve-by-payer (matchedOn 'payer') and exact member-id searches carry no banner term (no PHI leaks).
   const resolvedForSheet = snapshot?.resolved ?? null;
   const searchContext =
     resolvedForSheet && resolvedForSheet.matchedOn === 'prefix' && resolvedForSheet.matchedValue
       ? { term: resolvedForSheet.matchedValue, payer: resolvedForSheet.payerName }
       : null;
 
-  // Area chips only when a payer is resolved AND there are >=2 real buckets (>2 chips incl. "All") — a
-  // single-state payer with no unmapped facilities gets no pointless "All / CA" row. Area + LOC chips are
-  // BROWSE affordances: hidden on the identifier path (both the scoped single card and the honest-empty
-  // state), where there is nothing to filter.
   const areaChips = snapshot?.resolved ? deriveAreaChips(snapshot.facilities) : [];
   const showAreaChips = areaChips.length > 2 && !isIdentifierPath;
+
+  // Window control state (M/Y selects).
+  const calendar = win.kind !== 'trailing';
+  const nowYear = new Date().getFullYear();
+  const years: number[] = [];
+  for (let y = nowYear; y >= QUALIFY_CAL_YEAR_MIN; y--) years.push(y);
+  const selYear = win.kind === 'trailing' ? nowYear : win.year;
+  const selMonth = win.kind === 'month' ? win.month : 0;
+
+  // CHANGE G — the breadcrumb levels currently live (payer › facility › claim).
+  const crumbPayer = snapshot?.resolved?.payerName ?? null;
+  const crumbs: { key: string; label: string; onTap: (() => void) | null }[] = [];
+  if (crumbPayer) {
+    crumbs.push({ key: 'payer', label: crumbPayer, onTap: detail || claim ? () => { setClaim(null); closeFacility(); } : null });
+    if (detail) crumbs.push({ key: 'facility', label: detail.name, onTap: claim ? () => setClaim(null) : null });
+    if (claim) crumbs.push({ key: 'claim', label: 'Claim', onTap: null });
+  }
 
   return (
     <div style={{ minHeight: '100vh', background: GROUND }}>
@@ -533,6 +548,18 @@ export function QualifyMobileApp({
             <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'rgba(255,255,255,0.6)' }}>Qualify</div>
             <div className="ths-h" style={{ fontSize: 18, fontWeight: 600, color: '#fff' }}>Lead lookup</div>
           </div>
+          {canGlobalReveal ? (
+            <button
+              type="button"
+              role="switch"
+              aria-checked={globalReveal}
+              onClick={toggleGlobalReveal}
+              title="Reveal identifiers across the whole surface (audited per scope)"
+              style={{ display: 'flex', alignItems: 'center', gap: 6, height: 32, padding: '0 12px', borderRadius: 999, background: globalReveal ? '#fff' : 'rgba(255,255,255,0.1)', border: 'none', color: globalReveal ? TEAL900 : '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
+            >
+              <span>{globalReveal ? 'IDs shown' : 'Reveal IDs'}</span>
+            </button>
+          ) : null}
           {(searched || query.trim() !== '') && (
             <button
               type="button"
@@ -558,22 +585,27 @@ export function QualifyMobileApp({
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') runSearch(query, windowDays); }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                if (autoTimer.current) clearTimeout(autoTimer.current);
+                runSearch(query, win);
+              }
+            }}
             enterKeyHint="search"
             spellCheck={false}
-            placeholder="Member ID or 3-letter prefix"
+            placeholder="Member ID or 3-letter prefix · auto-resolves"
             aria-label="Member ID or alpha prefix"
             style={{ width: '100%', height: 40, padding: '0 14px 0 36px', borderRadius: 12, border: 'none', background: 'rgba(255,255,255,0.12)', color: '#fff', fontSize: 14, outline: 'none' }}
           />
         </div>
         <div style={{ display: 'flex', gap: 6, marginTop: 10 }} role="group" aria-label="Time window">
-          {QUALIFY_WINDOW_OPTIONS.map((w) => {
-            const active = w === windowDays;
+          {QUALIFY_WINDOW_OPTIONS.map((d) => {
+            const active = win.kind === 'trailing' && win.days === d;
             return (
               <button
-                key={w}
+                key={d}
                 type="button"
-                onClick={() => onWindow(w)}
+                onClick={() => onWindow(trailingWindow(d))}
                 aria-pressed={active}
                 style={{
                   flex: 1,
@@ -587,11 +619,85 @@ export function QualifyMobileApp({
                   color: active ? TEAL900 : 'rgba(255,255,255,0.7)',
                 }}
               >
-                {w}d
+                {d}d
               </button>
             );
           })}
+          <button
+            type="button"
+            onClick={() => {
+              if (!calendar) onWindow({ kind: 'month', year: nowYear, month: new Date().getUTCMonth() + 1 });
+            }}
+            aria-pressed={calendar}
+            style={{
+              flex: 1,
+              height: 30,
+              borderRadius: 999,
+              border: 'none',
+              cursor: 'pointer',
+              fontSize: 12,
+              fontWeight: 600,
+              background: calendar ? '#fff' : 'rgba(255,255,255,0.1)',
+              color: calendar ? TEAL900 : 'rgba(255,255,255,0.7)',
+            }}
+          >
+            M/Y
+          </button>
         </div>
+        {calendar ? (
+          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+            <select
+              value={selMonth}
+              aria-label="Month"
+              onChange={(e) => {
+                const m = Number(e.target.value);
+                onWindow(m === 0 ? { kind: 'year', year: selYear } : { kind: 'month', year: selYear, month: m });
+              }}
+              style={{ flex: 1, height: 32, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.12)', color: '#fff', fontSize: 13, padding: '0 8px' }}
+            >
+              <option value={0}>All months</option>
+              {MONTHS.map((m, i) => (
+                <option key={m} value={i + 1}>{m}</option>
+              ))}
+            </select>
+            <select
+              value={selYear}
+              aria-label="Year"
+              onChange={(e) => {
+                const y = Number(e.target.value);
+                onWindow(selMonth === 0 ? { kind: 'year', year: y } : { kind: 'month', year: y, month: selMonth });
+              }}
+              style={{ flex: 1, height: 32, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.12)', color: '#fff', fontSize: 13, padding: '0 8px' }}
+            >
+              {years.map((y) => (
+                <option key={y} value={y}>{y}</option>
+              ))}
+            </select>
+          </div>
+        ) : null}
+        {/* CHANGE G — the breadcrumb strip: Payer › Facility › Claim, each live level tappable. */}
+        {crumbs.length > 0 ? (
+          <nav aria-label="Drilldown breadcrumb" style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 10, overflowX: 'auto' }}>
+            {crumbs.map((c, i) => (
+              <span key={c.key} style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                {i > 0 ? <span aria-hidden style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11 }}>›</span> : null}
+                {c.onTap ? (
+                  <button
+                    type="button"
+                    onClick={c.onTap}
+                    style={{ border: 'none', cursor: 'pointer', background: 'rgba(255,255,255,0.12)', color: '#fff', fontSize: 11, fontWeight: 600, padding: '4px 10px', borderRadius: 999, whiteSpace: 'nowrap', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis' }}
+                  >
+                    {c.label}
+                  </button>
+                ) : (
+                  <span style={{ color: '#fff', fontSize: 11, fontWeight: 700, padding: '4px 10px', borderRadius: 999, background: 'rgba(255,255,255,0.24)', whiteSpace: 'nowrap', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {c.label}
+                  </span>
+                )}
+              </span>
+            ))}
+          </nav>
+        ) : null}
       </div>
 
       <MobileMarketFilter
@@ -601,7 +707,28 @@ export function QualifyMobileApp({
         onFundingChange={setFundingSelection}
       />
 
-      <HeatingUp movers={movers} windowDays={windowDays} onOpen={(label) => resolveByPayer(label, windowDays)} />
+      {/* Compact KPI strip (book-wide; the LOC lens does not re-scope it — ruled view-only v1). */}
+      <div style={{ display: 'flex', gap: 8, padding: '12px 16px 2px' }}>
+        {(
+          [
+            { key: 'allowed', label: 'allowed / billed', v: kpis?.pctAllowedOfBilled ?? null, color: RATING_HEX.ok, bg: '#E6F2EC' },
+            { key: 'paidAllowed', label: 'paid / allowed', v: kpis?.pctPaidOfAllowed ?? null, color: RATING_HEX.warn, bg: '#FBF1DE' },
+            { key: 'paidBilled', label: 'paid / billed', v: kpis?.pctPaidOfBilled ?? null, color: RATING_HEX.warn, bg: '#FBF1DE' },
+          ] as const
+        ).map((t) => (
+          <div key={t.key} style={{ flex: 1, borderRadius: 12, border: `1px solid ${QUALIFY_PALETTE.line}`, padding: '9px 11px', background: t.bg }}>
+            <div className="ths-num" style={{ fontSize: 20, fontWeight: 600, color: t.color }}>
+              {t.v === null ? '—' : `${Math.round(t.v)}%`}
+            </div>
+            <div style={{ fontSize: 9.5, color: QUALIFY_PALETTE.ink600, fontWeight: 600, marginTop: 2 }}>
+              {t.label}
+              {locFilter !== null ? ' · book-wide' : ''}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <HeatingUp trends={trends} window={win} onOpen={(t) => { if (t.dominantPayer) resolveByPayer(t.dominantPayer, winRef.current, t.facilityKey); }} />
       <SwRegister />
 
       {hint ? <div style={{ padding: '0 16px', fontSize: 12, color: '#C9881E' }}>{hint}</div> : null}
@@ -635,17 +762,15 @@ export function QualifyMobileApp({
         </div>
       ) : null}
 
-      {/* The list container (facility-list.tsx) owns the page gesture, the visible page, and — in browse mode —
-          the page indicator + swipe hint. Empty states bring their own padding. */}
       {renderBody()}
 
-      {trend ? <TrendSheet facility={trend} onClose={() => setTrend(null)} /> : null}
+      {trendSheet ? <TrendSheet facility={trendSheet} onClose={() => setTrendSheet(null)} /> : null}
       {detail ? (
         <DetailSheet
           key={detail.facilityKey}
           facility={detail}
-          claims={facilityCases ?? []}
-          loading={facilityCases === null}
+          claims={sheetClaims ?? []}
+          loading={sheetClaims === null}
           hasAmounts={hasAmounts}
           capped={casesCapped}
           canReveal={canRevealPhi}

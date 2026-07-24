@@ -166,12 +166,15 @@ export async function getQualifyFacilityTrends(
   });
 }
 
-/** Redesign combined on-load overview: KPIs + trends + the hybrid-resolved top facility, ONE round-trip. */
+/** Redesign combined on-load overview: KPIs + trends + the hybrid-resolved top facility, ONE round-trip.
+ *  `opts.resolve === false` (a URL-restore load) returns the strip only — the caller resolves its own
+ *  subject, so no wasted hybrid resolve/audit. */
 export async function getQualifyOverview(
   window: QualifyWindow,
   market?: QualifyMarket,
+  opts?: { resolve?: boolean },
 ): Promise<QualifyOverview> {
-  return getQualifyOverviewCore(realDeps, window, sanitizeMarket(market));
+  return getQualifyOverviewCore(realDeps, window, sanitizeMarket(market), { resolve: opts?.resolve !== false });
 }
 
 /** Phase 3: the patient-group "View cohort" slide-over — audited, floor-gated, dollar-stripped in core. */

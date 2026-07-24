@@ -406,3 +406,30 @@ test('AreaChips: renders every chip label and marks the active one pressed', () 
   assert.match(html, /aria-pressed="true"[^>]*>CA<\/button>/, 'the active (CA) chip is pressed');
   assert.match(html, /aria-pressed="false"[^>]*>TX<\/button>/, 'an inactive chip (TX) is not pressed');
 });
+
+// ── Redesign: the mobile "Facilities heating up" chips (facility-shaped, defined n, hybrid tap) ──────
+test('mobile heating-up chips — facility-shaped with rating, Δpts, and the DEFINED n (claim lines)', async () => {
+  const { HeatingUp } = await import('../components/qualify/m/heating-up');
+  const { trailingWindow } = await import('../lib/qualify/contract');
+  const trends = [
+    {
+      facilityKey: 'summit ridge', name: 'SUMMIT RIDGE RECOVERY', city: 'Scottsdale', state: 'AZ',
+      careSetting: 'IP' as const, entity: 'BXR' as const, dominantPayer: 'AETNA', lineCount: 210,
+      currentRating: 68, priorRating: 62.9, deltaPts: 5.1, points: [61, 64, 66, 68],
+    },
+    {
+      facilityKey: 'fresh face', name: 'FRESH FACE BH', city: null, state: null,
+      careSetting: null, entity: null, dominantPayer: null, lineCount: 12,
+      currentRating: 55, priorRating: null, deltaPts: null, points: [55],
+    },
+  ];
+  const html = renderToStaticMarkup(<HeatingUp trends={trends} window={trailingWindow(30)} onOpen={() => {}} />);
+  assert.ok(html.includes('Facilities heating up'), 'facility-shaped module title');
+  assert.ok(html.includes('SUMMIT RIDGE RECOVERY'), 'facility name renders');
+  assert.ok(html.includes('210 claim lines'), 'Change A: n defined as claim lines on mobile too');
+  assert.ok(!/\bn=\d/.test(html), 'no bare n=');
+  assert.ok(html.includes('+5.1 pts'), 'delta ticker');
+  assert.ok(html.includes('· new'), 'null-prior facility reads new');
+  assert.ok(html.includes('disabled'), 'a chip with no dominant payer is not tappable (never a dead resolve)');
+  assert.equal(renderToStaticMarkup(<HeatingUp trends={[]} window={trailingWindow(30)} onOpen={() => {}} />), '', 'empty render with no trends');
+});

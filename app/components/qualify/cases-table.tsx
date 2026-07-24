@@ -66,6 +66,7 @@ export function CasesTable({
   onViewCohort,
   capped = false,
   emptyIdentifierLabel = null,
+  globalRevealOn = false,
 }: {
   claims: readonly QualifyClaim[];
   hasAmounts: boolean;
@@ -100,6 +101,10 @@ export function CasesTable({
    *  facility), the empty row reads "No in-window claims for <label> — try a wider window" instead of the
    *  payer-wide copy. NON-PHI (a ≤3 prefix echo, or 'this member' for an exact search). Null = payer-path copy. */
   emptyIdentifierLabel?: string | null;
+  /** Change B — the surface-wide persistent reveal is ON (super_admin/admin): the container is
+   *  auto-revealing every loaded scope through the SAME audited path, so the header hint reads
+   *  "identifiers revealed (audited)" instead of the per-patient nudge. Display-only. */
+  globalRevealOn?: boolean;
 }) {
   const colSpan = 8 + (hasAmounts ? 2 : 0); // Patient·Member·Group·Facility·Program·Payment date·DOS·%allowed (+Billed·Allowed)
   // Patient groups expanded to their day-by-day claims (collapsed by default; per-response keys).
@@ -326,8 +331,11 @@ export function CasesTable({
         </h2>
         <div className="flex items-center gap-3">
           {/* PER-PATIENT reveal is inline (expand a group / the singleton "Reveal" button). The only header
-              control is "Hide identifiers" — shown once something IS revealed — plus a discovery hint. */}
-          {canReveal && revealed.size > 0 ? (
+              control is "Hide identifiers" — shown once something IS revealed — plus a discovery hint.
+              Under the Change-B GLOBAL toggle the hint states the standing reveal instead. */}
+          {globalRevealOn ? (
+            <span className="whitespace-nowrap text-[11px] font-medium text-teal700">identifiers revealed (audited)</span>
+          ) : canReveal && revealed.size > 0 ? (
             <button
               type="button"
               onClick={onHideIdentifiers}
