@@ -136,6 +136,10 @@ export function QualifyTab({
   cohortRef.current = cohort;
   const apply = useCallback((action: Parameters<typeof cohortReducer>[1]): QualifyCohort => {
     const next = cohortReducer(cohortRef.current, action);
+    // Sync the ref IMMEDIATELY (not just at render): two same-tick applies (e.g. the Change-E hybrid's
+    // RESOLVE_PAYER → SWITCH_FACILITY) must each see the prior one's result, or the second computes
+    // from a stale cohort and the drill fetches under the WRONG payer.
+    cohortRef.current = next;
     dispatch(action);
     return next;
   }, []);
@@ -189,6 +193,13 @@ export function QualifyTab({
   // Resolution recency guard — every fetch entry point bumps-and-captures; every post-await write
   // checks it. A reveal CAPTURES (never bumps) so a stale reveal can't repopulate after a reset.
   const genRef = useRef(0);
+  // The RESOLVED manual-search term + path (mirror of mobile's lastSearch). A window/market change
+  // re-resolves from THIS, not the live input box — so editing the box after a resolve never leaves
+  // a stale subject (review finding). Null on the by-payer / URL-restore path (byPayer drives those).
+  const lastResolvedRef = useRef<{ term: string; type: 'id' | 'client' } | null>(null);
+  // Overview-strip recency guard — independent of genRef so a slow earlier window/market strip
+  // response can't overwrite a newer one's KPI tiles + Heating-Up cards.
+  const overviewGenRef = useRef(0);
 
   const hasAmounts = snapshot ? snapshot.viewerHasAmountsCapability : viewerHasAmountsCapability;
   const facilityBuckets = useMemo(() => buildFacilityBucketMap(snapshot?.facilities ?? []), [snapshot]);
@@ -245,10 +256,13 @@ export function QualifyTab({
     [apply],
   );
 
-  /** Refresh the overview strip (KPIs + trend cards) for a window/market — resolve:false (strip only). */
+  /** Refresh the overview strip (KPIs + trend cards) for a window/market — resolve:false (strip only).
+   *  Recency-guarded (overviewGenRef): an out-of-order earlier response can't overwrite newer tiles. */
   const refreshOverview = useCallback((w: QualifyWindow) => {
+    const ogen = ++overviewGenRef.current;
     getQualifyOverview(w, marketRef.current, { resolve: false })
       .then((ov) => {
+        if (overviewGenRef.current !== ogen) return; // superseded by a newer window/market strip fetch
         setKpis(ov.kpis);
         setTrends(ov.trends);
       })
@@ -258,8 +272,10 @@ export function QualifyTab({
   }, []);
 
   // Member-id / alpha-prefix search (server-side sniff). Lands payer-wide on the Fix-A landing facility.
+  // `explicit` = an Enter/submit (vs a debounced autosearch keystroke): the VOB no-match modal opens
+  // ONLY on an explicit submit, so it never pops mid-typing on every debounced intermediate term.
   const runSearch = useCallback(
-    (rawQuery: string, w: QualifyWindow) => {
+    (rawQuery: string, w: QualifyWindow, explicit = false) => {
       const trimmed = rawQuery.trim();
       if (trimmed.length < MIN_QUERY_LEN) {
         setHint(`Enter at least a ${MIN_QUERY_LEN}-letter alpha prefix or a full member ID.`);
@@ -279,9 +295,10 @@ export function QualifyTab({
           setScoped(false); // a search lands payer-wide (Change E)
           setHasSearched(true);
           setByPayer(null);
+          lastResolvedRef.current = { term: trimmed, type: 'id' }; // window/market re-resolve reads THIS
           if (snap.resolved === null) {
             setEcho(trimmed);
-            setModalOpen(true);
+            if (explicit) setModalOpen(true); // never pop the full-screen modal on a debounced keystroke
           } else {
             setModalOpen(false);
           }
@@ -297,7 +314,7 @@ export function QualifyTab({
   // Client-name search (Change C) — the exact-name blind-index path. Same landing flow; the raw name
   // never leaves this closure except as the action argument (HMAC'd at the server boundary).
   const runNameSearch = useCallback(
-    (rawName: string, w: QualifyWindow) => {
+    (rawName: string, w: QualifyWindow, explicit = false) => {
       const trimmed = rawName.trim();
       if (trimmed.length < MIN_QUERY_LEN) {
         setHint('Enter at least 3 characters of the client name.');
@@ -317,9 +334,10 @@ export function QualifyTab({
           setScoped(false);
           setHasSearched(true);
           setByPayer(null);
+          lastResolvedRef.current = { term: trimmed, type: 'client' };
           if (snap.resolved === null) {
             setEcho(trimmed);
-            setModalOpen(true);
+            if (explicit) setModalOpen(true);
           } else {
             setModalOpen(false);
           }
@@ -354,6 +372,7 @@ export function QualifyTab({
           setScoped(ranked); // hybrid: scoped iff the clicked facility actually ranks here
           setHasSearched(true);
           setByPayer(payer);
+          lastResolvedRef.current = null; // the by-payer path owns re-resolution now (not a stored term)
           setModalOpen(false);
         } catch {
           if (genRef.current !== gen) return;
@@ -372,11 +391,14 @@ export function QualifyTab({
     refreshOverview(w);
     if (!prev.payer) return;
     setScoped(false);
+    // Re-resolve the ACTUAL resolved subject (byPayer, or the STORED search term) — never the live
+    // input box, which the user may have edited since resolving (review finding).
     if (byPayer) {
       resolveByPayer(byPayer, w);
-    } else if (query.trim().length >= MIN_QUERY_LEN) {
-      if (searchType === 'client') runNameSearch(query, w);
-      else runSearch(query, w);
+    } else if (lastResolvedRef.current) {
+      const { term, type } = lastResolvedRef.current;
+      if (type === 'client') runNameSearch(term, w);
+      else runSearch(term, w);
     }
   };
 
@@ -426,6 +448,7 @@ export function QualifyTab({
     setCapped(false);
     setHasSearched(false);
     setByPayer(null);
+    lastResolvedRef.current = null;
     setScoped(false);
     apply({ type: 'RESOLVE_PAYER', payer: null, facility: null, window: cohortRef.current.window });
   }, [apply, resetReveal]);
@@ -480,6 +503,7 @@ export function QualifyTab({
           setScoped(ranked);
           setHasSearched(true);
           setByPayer(url.payer);
+          lastResolvedRef.current = null; // URL restore is a by-payer resolution, not a stored term
         } else {
           // Fresh load: the overview HYBRID — strip + the top trend facility's payer, scoped to it.
           const ov = await getQualifyOverview(w, marketRef.current);
@@ -587,11 +611,13 @@ export function QualifyTab({
     }
     const w = cohortRef.current.window;
     refreshOverview(w);
+    // Re-resolve the resolved subject (byPayer, or the STORED term) — not the live input box.
     if (byPayer) {
       resolveByPayer(byPayer, w);
-    } else if (hasSearched && query.trim().length >= MIN_QUERY_LEN) {
-      if (searchType === 'client') runNameSearch(query, w);
-      else runSearch(query, w);
+    } else if (lastResolvedRef.current) {
+      const { term, type } = lastResolvedRef.current;
+      if (type === 'client') runNameSearch(term, w);
+      else runSearch(term, w);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [marketKey]);
@@ -714,8 +740,19 @@ export function QualifyTab({
     : null;
   // Change D — ONE lens, everywhere (inclusive semantics; view-only v1).
   const visibleTrends = filterFacilitiesByLoc(trends, locFilter);
-  const visibleFacilities = filterFacilitiesByLoc(snapshot?.facilities ?? [], locFilter);
-  const visibleCases = filterClaimsByLoc(facilityCases, locFilter);
+  const lensFacilities = filterFacilitiesByLoc(snapshot?.facilities ?? [], locFilter);
+  // When SCOPED, the pinned facility is the explicit subject — it must survive the lens even if its
+  // careSetting doesn't match (else FacilityPanel pins an empty card + the cases panel empties, a
+  // self-contradictory dead-end; review finding). In list mode the lens filters normally.
+  const pinnedFacility = scoped ? snapshot?.facilities.find((f) => f.facilityKey === cohort.facility) ?? null : null;
+  const visibleFacilities =
+    pinnedFacility && !lensFacilities.some((f) => f.facilityKey === pinnedFacility.facilityKey)
+      ? [pinnedFacility, ...lensFacilities]
+      : lensFacilities;
+  // The cases panel is scoped to ONE facility server-side; the LOC lens must NOT empty it when the
+  // pinned facility itself is off-lens (its own claims are the subject). Only filter cases by LOC in
+  // payer-wide (unscoped) mode — where the lens is a genuine cross-facility view filter.
+  const visibleCases = scoped ? facilityCases : filterClaimsByLoc(facilityCases, locFilter);
   // Live branch hint (mirror of the server sniff — display only; the server still decides).
   const branchHint =
     searchType === 'employer' || query.trim().length === 0
@@ -822,8 +859,9 @@ export function QualifyTab({
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     if (autoTimer.current) clearTimeout(autoTimer.current);
-                    if (searchType === 'client') runNameSearch(query, cohort.window);
-                    else runSearch(query, cohort.window);
+                    // explicit=true: Enter is the one place the VOB no-match modal may open.
+                    if (searchType === 'client') runNameSearch(query, cohort.window, true);
+                    else runSearch(query, cohort.window, true);
                   }
                 }}
                 spellCheck={false}

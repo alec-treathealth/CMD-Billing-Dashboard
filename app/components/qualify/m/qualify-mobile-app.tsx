@@ -124,12 +124,18 @@ export function QualifyMobileApp({
   // Monotonic request tokens (the race-safety core): deck resolution + the facility-drill fetch.
   const resolveSeq = useRef(0);
   const facilitySeq = useRef(0);
+  // Overview-strip recency: an out-of-order window/market strip response can't overwrite newer tiles.
+  const overviewSeq = useRef(0);
   // Drill cases COHORT (shared, root-tested reducer).
   const [cohort, dispatch] = useReducer(cohortReducer, INITIAL_COHORT);
   const cohortRef = useRef(cohort);
   cohortRef.current = cohort;
   const apply = useCallback((action: Parameters<typeof cohortReducer>[1]): QualifyCohort => {
     const next = cohortReducer(cohortRef.current, action);
+    // Sync the ref IMMEDIATELY (not just at render): two same-tick applies (e.g. the Change-E hybrid's
+    // RESOLVE_PAYER → SWITCH_FACILITY) must each see the prior one's result, or the second computes
+    // from a stale cohort and the drill fetches under the WRONG payer.
+    cohortRef.current = next;
     dispatch(action);
     return next;
   }, []);
@@ -138,10 +144,13 @@ export function QualifyMobileApp({
 
   const hasAmounts = snapshot ? snapshot.viewerHasAmountsCapability : viewerHasAmountsCapability;
 
-  /** Refresh the overview strip (KPI tiles + trend chips) — non-blocking, resolve:false. */
+  /** Refresh the overview strip (KPI tiles + trend chips) — non-blocking, resolve:false. Recency-guarded
+   *  (overviewSeq) so a slow earlier window/market response can't overwrite newer tiles. */
   function refreshOverview(w: QualifyWindow) {
+    const oseq = ++overviewSeq.current;
     getQualifyOverview(w, marketRef.current, { resolve: false })
       .then((ov) => {
+        if (oseq !== overviewSeq.current) return; // superseded by a newer strip fetch
         setKpis(ov.kpis);
         setTrends(ov.trends);
       })
@@ -173,9 +182,9 @@ export function QualifyMobileApp({
           setList(snap.facilities);
           setPage(0);
           setLocFilter(null);
-          syncCohortForResolution(snap.resolved?.payerName ?? null, w);
           // The hybrid: open the focused facility's sheet so the first paint IS the trending facility.
           const focus = ov.seedFacility ? snap.facilities.find((f) => f.facilityKey === ov.seedFacility) : undefined;
+          syncCohortForResolution(snap.resolved?.payerName ?? null, w, !!focus);
           if (focus) openFacility(focus);
         }
       } catch {
@@ -269,9 +278,12 @@ export function QualifyMobileApp({
         setList(snap.facilities);
         setPage(0);
         setLocFilter(null);
-        syncCohortForResolution(snap.resolved?.payerName ?? null, w);
         // HYBRID (Change E): when the tapped chip's facility ranks under its payer, open it directly.
         const focus = focusKey ? snap.facilities.find((f) => f.facilityKey === focusKey) : undefined;
+        // Skip syncCohort's own drill when a focus open follows — openFacility issues the single
+        // authoritative (audited) drill; without this the same-payer path double-fetches the OLD
+        // facility's cases for a sheet we're about to replace (review finding).
+        syncCohortForResolution(snap.resolved?.payerName ?? null, w, !!focus);
         if (focus) openFacility(focus);
       } catch {
         if (!resolveLandingWins(seq, resolveSeq.current)) return;
@@ -349,13 +361,15 @@ export function QualifyMobileApp({
       });
   }
 
-  function syncCohortForResolution(nextPayer: string | null, w: QualifyWindow) {
+  function syncCohortForResolution(nextPayer: string | null, w: QualifyWindow, skipDrill = false) {
     if (isPayerChange(cohortRef.current.payer, nextPayer)) {
       if (detailRef.current) closeFacility();
       apply({ type: 'RESOLVE_PAYER', payer: nextPayer, facility: null, window: w });
     } else {
       const next = apply({ type: 'CHANGE_WINDOW', window: w });
-      if (detailRef.current) fetchDrill(next);
+      // skipDrill: a focus openFacility() will fire the authoritative drill right after — don't
+      // double-fetch the currently-open (old) facility's cases here.
+      if (detailRef.current && !skipDrill) fetchDrill(next);
     }
   }
 

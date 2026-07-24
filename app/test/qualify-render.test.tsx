@@ -538,3 +538,24 @@ test('cases table — the cohort chip renders on patient rows only when the hand
   );
   assert.ok(!without.includes('>cohort<'), 'chip omitted without a handler (hermetic mounts unchanged)');
 });
+
+// ── Review fixes (locked in) ────────────────────────────────────────────────────────────────────────
+test('facility panel — PINNED with an off-lens facility: the container exempts it, so pinned shows the card, NOT an empty dead-end', () => {
+  // The container computes visibleFacilities so the pinned facility survives the LOC lens; the panel
+  // then renders it. Here we hand the panel the (exempted) facility + a foreign one and pin the IP one.
+  const html = renderToStaticMarkup(
+    <FacilityPanel facilities={[LOW /* IP */, SOLID /* OP */]} hasAmounts={false} heatOn selectedKey="low yield" pinned onClearPin={() => {}} />,
+  );
+  assert.ok(html.includes('LOW YIELD'), 'the pinned (off-lens) facility still renders — no empty dead-end');
+  assert.ok(!html.includes('No facilities for this payer'), 'the contradictory empty body does not appear');
+  assert.ok(html.includes('Clear facility filter'), 'the clear pill is present to exit the scope');
+});
+
+test('heating-up cards — a null-dominant-payer card is DISABLED (inert), not a silent-no-op button', () => {
+  const html = renderToStaticMarkup(<HeatingUpCards trends={TRENDS} window={W30} onOpen={() => {}} />);
+  // TRENDS[2] 'FRESH FACE BH' has dominantPayer 'AETNA' — make a payer-less one to prove the disable.
+  const noPayer = [{ ...TRENDS[2]!, facilityKey: 'orphan', name: 'ORPHAN FAC', dominantPayer: null }];
+  const orphanHtml = renderToStaticMarkup(<HeatingUpCards trends={noPayer} window={W30} onOpen={() => {}} />);
+  assert.ok(orphanHtml.includes('disabled'), 'a card with no dominant payer is disabled (never a dead click)');
+  assert.ok(!html.includes('role="listitem"'), 'cards are native buttons (no role=listitem clobbering aria-pressed)');
+});
