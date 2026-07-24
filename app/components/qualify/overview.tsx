@@ -125,30 +125,36 @@ export function HeatingUpCards({
           Trending · {range}
         </span>
       </div>
-      <div className="flex gap-3 overflow-x-auto pb-2.5 pl-0.5 pr-0.5 pt-0.5" role="list">
+      {/* Plain scroll row (no role=list): native <button> semantics + aria-pressed must survive for AT. */}
+      <div className="flex gap-3 overflow-x-auto pb-2.5 pl-0.5 pr-0.5 pt-0.5">
         {trends.map((t, i) => {
           const bucket = ratingBucket(t.currentRating);
           const hex = RATING_HEX[bucket];
           const active = activeKey !== null && t.facilityKey === activeKey;
           const loc = [t.city, t.state].filter(Boolean).join(', ');
+          // A card with no resolvable dominant payer can't drive the hybrid — render it inert (no
+          // hover-lift, default cursor, disabled) rather than a button whose click silently no-ops.
+          const openable = !!t.dominantPayer;
           return (
             <button
               key={t.facilityKey}
               type="button"
-              role="listitem"
               aria-pressed={active}
+              disabled={!openable}
               onClick={() => onOpen?.(t)}
               title={
-                t.dominantPayer
+                openable
                   ? `Open ${t.name} — resolves ${t.dominantPayer} and scopes the cases to this facility`
-                  : t.name
+                  : `${t.name} — no dominant payer to resolve this window`
               }
               className={[
                 'animate-ths-reveal w-[272px] flex-none rounded-2xl border bg-card px-4 py-3.5 text-left',
                 'transition-[box-shadow,transform] duration-150 ease-out',
                 active
                   ? 'border-teal500 shadow-ths ring-2 ring-teal500/40'
-                  : 'border-line shadow-ths-sm hover:-translate-y-0.5 hover:shadow-ths',
+                  : openable
+                    ? 'border-line shadow-ths-sm hover:-translate-y-0.5 hover:shadow-ths'
+                    : 'border-line shadow-ths-sm cursor-default',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40',
               ].join(' ')}
               style={{ animationDelay: `${staggerDelayMs(i)}ms` }}
