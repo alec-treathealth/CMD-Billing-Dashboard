@@ -66,6 +66,7 @@ export function CasesTable({
   onViewCohort,
   capped = false,
   emptyIdentifierLabel = null,
+  filterCaption = null,
   globalRevealOn = false,
 }: {
   claims: readonly QualifyClaim[];
@@ -101,6 +102,12 @@ export function CasesTable({
    *  facility), the empty row reads "No in-window claims for <label> — try a wider window" instead of the
    *  payer-wide copy. NON-PHI (a ≤3 prefix echo, or 'this member' for an exact search). Null = payer-path copy. */
   emptyIdentifierLabel?: string | null;
+  /** Fix 1 — when the resolving search was an identifier (prefix/member/client name), the drill is
+   *  narrowed to it server-side, so this panel lists only matching claims. This NON-PHI caption (a ≤3
+   *  alpha-prefix echo, or a generic "this member" / "this client name" — never the raw term) names the
+   *  narrow in the header AND switches the empty row to the "no matching claims here" copy, so a
+   *  payer-wide facility with no matching members reads as intentional. Null = no identifier narrow. */
+  filterCaption?: string | null;
   /** Change B — the surface-wide persistent reveal is ON (super_admin/admin): the container is
    *  auto-revealing every loaded scope through the SAME audited path, so the header hint reads
    *  "identifiers revealed (audited)" instead of the per-patient nudge. Display-only. */
@@ -352,6 +359,11 @@ export function CasesTable({
           </span>
         </div>
       </div>
+      {filterCaption ? (
+        <p className="px-4 pb-1.5 text-[11.5px] font-medium text-teal700">
+          Showing claims matching {filterCaption}
+        </p>
+      ) : null}
       {canReveal && revealError ? (
         <p className="px-4 pb-1 text-[11px] font-medium text-status-danger">{revealError}</p>
       ) : null}
@@ -377,7 +389,9 @@ export function CasesTable({
                 <td className="px-3.5 py-6 text-center text-sm text-muted-foreground" colSpan={colSpan}>
                   {emptyIdentifierLabel
                     ? `No in-window claims for ${emptyIdentifierLabel} — try a wider window.`
-                    : 'No claims for this payer in the selected window.'}
+                    : filterCaption
+                      ? 'No matching claims at this facility for this search.'
+                      : 'No claims for this payer in the selected window.'}
                 </td>
               </tr>
             ) : (
