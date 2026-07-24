@@ -22,11 +22,14 @@ alter table collections.cmd_explorer_rows
 create index if not exists cmd_explorer_patient_name_bidx_idx
   on collections.cmd_explorer_rows (patient_name_bidx);
 
--- Backfill write path (mirror of 0037): claims_reader already SELECTs + decrypts every row for the
--- audited reveal, so it is the natural one-shot backfill actor. The UPDATE is COLUMN-SCOPED to the
--- new bidx column only — the reader can never modify PHI ciphertext, money, tenancy, or the
--- fingerprint. The 0037 policy (cmd_explorer_reader_bidx_update, FOR UPDATE USING/WITH CHECK true)
--- already row-authorizes reader updates on this table; column privilege is the actual constraint,
--- so no new policy is required — just the column grant.
+-- Backfill write path. The column-scoped UPDATE grant below lets a writer touch ONLY this bidx token
+-- (never PHI ciphertext / money / tenancy / fingerprint). NOTE (verified against prod 2026-07-24):
+-- migration 0037's reader UPDATE *policy* was NEVER applied to this project — the member/group bidx
+-- backfill ran as the table OWNER (postgres, BYPASSRLS; force_rls=false), NOT as claims_reader. So a
+-- grant ALONE does not let claims_reader write (RLS default-denies with no permissive UPDATE policy).
+-- RUN THE NAME BACKFILL (cmdNameBidxBackfill.ts) AS THE OWNER — set BLIND_INDEX_DB_URL to a postgres
+-- connection — matching how member/group were populated. (A reviewed alternative is to apply 0037's
+-- reader UPDATE policy first and run as claims_reader; prod does not use that path.) The grant is kept
+-- for that reviewed alternative + defense-in-depth; it is inert without a matching policy.
 grant update (patient_name_bidx)
   on collections.cmd_explorer_rows to claims_reader;
