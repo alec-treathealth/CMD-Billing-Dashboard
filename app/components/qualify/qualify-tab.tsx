@@ -46,7 +46,7 @@
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { Briefcase, Landmark, Search } from 'lucide-react';
+import { Briefcase, Eye, EyeOff, Landmark, RotateCcw, Search } from 'lucide-react';
 import {
   getQualifySnapshot,
   getQualifySnapshotByPayer,
@@ -83,7 +83,7 @@ import { FacilityPanel } from '@/components/qualify/facility-panel';
 import { filterFacilitiesByLoc, filterClaimsByLoc, type QualifyLocFilter } from '@/lib/qualify/groupClaims';
 import { CasesTable } from '@/components/qualify/cases-table';
 import { CohortSheet } from '@/components/qualify/cohort-sheet';
-import { BookKpiTiles, HeatingUpCards } from '@/components/qualify/overview';
+import { BookKpiTiles, HeatingUpCards, HeatingUpSkeleton } from '@/components/qualify/overview';
 import { WindowControl } from '@/components/qualify/window-control';
 import { VobModal } from '@/components/qualify/vob-modal';
 
@@ -777,6 +777,20 @@ export function QualifyTab({
         </p>
       </div>
 
+      {/* ── OVERVIEW TICKER: Facilities Heating Up — auto-scrolling, ABOVE the finder (stock-ticker
+          placement). The skeleton holds the strip's space while the book-wide trend query resolves, so
+          the finder below never jumps; LOC-lensed via visibleTrends. ── */}
+      {visibleTrends.length > 0 ? (
+        <HeatingUpCards
+          trends={visibleTrends}
+          window={cohort.window}
+          activeKey={scoped ? cohort.facility : null}
+          onOpen={openTrendCard}
+        />
+      ) : initializing ? (
+        <HeatingUpSkeleton />
+      ) : null}
+
       {/* ── FINDER: search-type tabs · autosearch · window · LOC lens · global reveal ── */}
       <div className="rounded-2xl border border-t-[3px] border-t-teal700 bg-card p-4 shadow-ths-sm">
         <div className="mb-2.5 flex flex-wrap items-center gap-1" role="tablist" aria-label="Search type">
@@ -798,32 +812,6 @@ export function QualifyTab({
               {t.label}
             </button>
           ))}
-          {/* Change B: the global persistent reveal switch — super_admin/admin only. */}
-          {canGlobalReveal ? (
-            <button
-              type="button"
-              role="switch"
-              aria-checked={globalReveal}
-              onClick={toggleGlobalReveal}
-              title="Reveal identifiers across the whole surface — persists across searches and facility switches; every scope's reveal is audited"
-              className="ml-auto inline-flex items-center gap-2 text-xs font-semibold text-muted-foreground"
-            >
-              <span>Reveal identifiers</span>
-              <span
-                className={[
-                  'relative h-[22px] w-[38px] rounded-full transition-colors',
-                  globalReveal ? 'bg-teal700' : 'bg-line',
-                ].join(' ')}
-              >
-                <span
-                  className={[
-                    'absolute top-0.5 h-[18px] w-[18px] rounded-full bg-white shadow-ths transition-all',
-                    globalReveal ? 'left-[18px]' : 'left-0.5',
-                  ].join(' ')}
-                />
-              </span>
-            </button>
-          ) : null}
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -884,9 +872,11 @@ export function QualifyTab({
             <button
               type="button"
               onClick={clearSearch}
-              className="rounded-xl border border-line bg-background px-3 py-2 text-[13px] font-semibold text-muted-foreground transition-colors hover:bg-surface hover:text-ink900"
+              aria-label="Clear search and return to the overview"
+              className="inline-flex h-12 items-center gap-2 rounded-xl bg-teal700 px-4 text-[13px] font-bold text-white shadow-ths-sm transition-colors hover:bg-teal900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/50"
             >
-              Clear
+              <RotateCcw aria-hidden className="h-4 w-4" />
+              Clear Search
             </button>
           )}
           <div className="h-7 w-px bg-line" />
@@ -912,6 +902,42 @@ export function QualifyTab({
               </button>
             ))}
           </div>
+          {/* Change B: the GLOBAL persistent reveal switch — super_admin/admin only. Lifted OUT of the
+              tab strip and INLINE into the search bar (ml-auto → far right), enlarged for visibility.
+              The coral ON-state signals PHI is currently exposed. Behavior + per-scope audit path are
+              unchanged (toggleGlobalReveal). */}
+          {canGlobalReveal ? (
+            <button
+              type="button"
+              role="switch"
+              aria-checked={globalReveal}
+              onClick={toggleGlobalReveal}
+              title="Reveal PHI identifiers across the whole surface — persists across searches and facility switches; every scope's reveal is audited"
+              className={[
+                'ml-auto inline-flex h-12 items-center gap-2.5 rounded-xl border px-3.5 text-[13px] font-semibold transition-colors',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40',
+                globalReveal
+                  ? 'border-coral400 bg-coral50 text-coral600'
+                  : 'border-line bg-background text-ink600 hover:bg-surface hover:text-ink900',
+              ].join(' ')}
+            >
+              {globalReveal ? <Eye aria-hidden className="h-4 w-4" /> : <EyeOff aria-hidden className="h-4 w-4" />}
+              <span>Reveal PHI Identifiers</span>
+              <span
+                className={[
+                  'relative h-[22px] w-[38px] rounded-full transition-colors',
+                  globalReveal ? 'bg-coral600' : 'bg-line',
+                ].join(' ')}
+              >
+                <span
+                  className={[
+                    'absolute top-0.5 h-[18px] w-[18px] rounded-full bg-white shadow-ths transition-all',
+                    globalReveal ? 'left-[18px]' : 'left-0.5',
+                  ].join(' ')}
+                />
+              </span>
+            </button>
+          ) : null}
         </div>
         {searchType === 'client' ? (
           <p className="mt-2 text-[11.5px] text-muted-foreground">
@@ -921,13 +947,7 @@ export function QualifyTab({
       </div>
       {hint ? <p className="px-1 text-xs text-status-warn">{hint}</p> : null}
 
-      {/* ── OVERVIEW: Facilities Heating Up + book KPIs ── */}
-      <HeatingUpCards
-        trends={visibleTrends}
-        window={cohort.window}
-        activeKey={scoped ? cohort.facility : null}
-        onOpen={openTrendCard}
-      />
+      {/* ── OVERVIEW: book KPIs (the Facilities Heating Up ticker now sits ABOVE the finder) ── */}
       <BookKpiTiles kpis={kpis} locActive={locFilter !== null} />
 
       {/* ── RESOLVED SUBJECT + GRID ── */}

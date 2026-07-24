@@ -15,14 +15,16 @@
  *      the Change-E hybrid (resolve the facility's dominant payer + scope to the facility) — wired
  *      by the container via onOpen(trend).
  *
- * Pure/presentational (no hooks) so both render hermetically under renderToStaticMarkup. Imports are
- * relative so the render test runs under tsx without `@/` resolution.
+ * Mostly pure/presentational; the ONLY hook is HeatingUpCards' useAutoScroll, whose effect never runs
+ * under renderToStaticMarkup (effects don't fire there) — so every component still renders hermetically
+ * in the tests. Imports are relative so the render test runs under tsx without `@/` resolution.
  */
 import { ratingBucket } from '../../lib/qualify/rating';
 import { qualifyWindowLabel } from '../../lib/qualify/contract';
 import type { QualifyBookKpis, QualifyFacilityTrend, QualifyWindow } from '../../lib/qualify/contract';
 import { RATING_HEX, staggerDelayMs } from './tokens';
 import { Spark } from './spark';
+import { useAutoScroll } from './useAutoScroll';
 
 const LOC_LABEL: Record<'IP' | 'OP' | 'BOTH', string> = { IP: 'IP', OP: 'OP', BOTH: 'Both' };
 
@@ -115,18 +117,22 @@ export function HeatingUpCards({
   /** The Change-E hybrid: resolve trend.dominantPayer AND scope to trend.facilityKey. Optional for tests. */
   onOpen?: (trend: QualifyFacilityTrend) => void;
 }) {
+  const scrollRef = useAutoScroll<HTMLDivElement>();
   if (trends.length === 0) return null;
   const range = qualifyWindowLabel(window);
   return (
     <section>
-      <div className="mb-3 flex items-center gap-2.5 px-0.5">
-        <h2 className="font-head text-[17px] font-semibold tracking-tight">Facilities Heating Up</h2>
-        <span className="text-[10px] font-extrabold uppercase tracking-widest text-ink400">
+      <div className="mb-2.5 flex items-center gap-2 px-0.5">
+        <h2 className="font-head text-[15px] font-semibold tracking-tight">Facilities Heating Up</h2>
+        <span className="inline-flex items-center gap-1.5 text-[10px] font-extrabold uppercase tracking-widest text-ink400">
+          <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-status-ok" />
           Trending · {range}
         </span>
       </div>
-      {/* Plain scroll row (no role=list): native <button> semantics + aria-pressed must survive for AT. */}
-      <div className="flex gap-3 overflow-x-auto pb-2.5 pl-0.5 pr-0.5 pt-0.5">
+      {/* Auto-scrolling ticker (useAutoScroll): a plain scroll row (no role=list) so native <button>
+       *  semantics + aria-pressed survive for AT; the ref drives a slow ping-pong that pauses on any
+       *  interaction and resumes 5s after the pointer leaves (reduced-motion → no motion at all). */}
+      <div ref={scrollRef} className="flex gap-2.5 overflow-x-auto pb-2 pl-0.5 pr-0.5 pt-0.5">
         {trends.map((t, i) => {
           const bucket = ratingBucket(t.currentRating);
           const hex = RATING_HEX[bucket];
@@ -148,7 +154,7 @@ export function HeatingUpCards({
                   : `${t.name} — no dominant payer to resolve this window`
               }
               className={[
-                'animate-ths-reveal w-[272px] flex-none rounded-2xl border bg-card px-4 py-3.5 text-left',
+                'animate-ths-reveal w-[216px] flex-none rounded-xl border bg-card px-3.5 py-3 text-left',
                 'transition-[box-shadow,transform] duration-150 ease-out',
                 active
                   ? 'border-teal500 shadow-ths ring-2 ring-teal500/40'
@@ -159,9 +165,9 @@ export function HeatingUpCards({
               ].join(' ')}
               style={{ animationDelay: `${staggerDelayMs(i)}ms` }}
             >
-              <div className="flex items-center gap-2 text-[13.5px] font-semibold text-ink900">
-                <span className="text-[10.5px] font-bold text-ink400">#{i + 1}</span>
-                <span aria-hidden className="q-dot inline-block h-2 w-2 rounded-full" style={{ background: hex }} />
+              <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-ink900">
+                <span className="text-[10px] font-bold text-ink400">#{i + 1}</span>
+                <span aria-hidden className="q-dot inline-block h-1.5 w-1.5 rounded-full" style={{ background: hex }} />
                 <span className="truncate">{t.name}</span>
                 {t.careSetting ? (
                   <span className="ml-auto inline-flex shrink-0 items-center rounded-full bg-[#eef4f6] px-2 py-px text-[9px] font-extrabold uppercase tracking-wide text-status-info">
@@ -169,15 +175,15 @@ export function HeatingUpCards({
                   </span>
                 ) : null}
               </div>
-              <div className="mt-2 flex items-baseline gap-2 font-mono text-[30px] font-semibold leading-none text-ink900 tabular-nums">
+              <div className="mt-1.5 flex items-baseline gap-1.5 font-mono text-[24px] font-semibold leading-none text-ink900 tabular-nums">
                 {t.currentRating === null ? '—' : Math.round(t.currentRating)}
-                <span className="text-[15px] text-ink400">%</span>
+                <span className="text-[13px] text-ink400">%</span>
                 <DeltaTicker deltaPts={t.deltaPts} />
               </div>
-              <div className="my-2">
-                <Spark points={t.points} hex={hex} width={232} height={32} />
+              <div className="my-1.5">
+                <Spark points={t.points} hex={hex} width={184} height={26} />
               </div>
-              <div className="flex items-center justify-between gap-2 text-[10.5px] text-ink400">
+              <div className="flex items-center justify-between gap-2 text-[10px] text-ink400">
                 {/* Change A: "n" is DEFINED — claim lines backing the rating, never a bare n=. */}
                 <span>
                   {t.lineCount.toLocaleString('en-US')} claim lines · {range}
@@ -190,6 +196,36 @@ export function HeatingUpCards({
             </button>
           );
         })}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Loading placeholder for the ticker. Because the strip now sits ABOVE the finder, its (book-wide,
+ * ~2.5–5s) trend query resolving must not shove the primary search control down the page — this holds
+ * the strip's vertical space with the same header + card footprint until real cards replace it.
+ * aria-hidden (ghost content is not announced); collapses to static under prefers-reduced-motion.
+ */
+export function HeatingUpSkeleton() {
+  return (
+    <section aria-hidden>
+      <div className="mb-2.5 flex items-center gap-2 px-0.5">
+        <h2 className="font-head text-[15px] font-semibold tracking-tight text-ink400">Facilities Heating Up</h2>
+        <span className="text-[10px] font-extrabold uppercase tracking-widest text-ink400">Loading trends…</span>
+      </div>
+      <div className="flex gap-2.5 overflow-hidden pb-2 pl-0.5 pr-0.5 pt-0.5">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <div key={i} className="w-[216px] flex-none rounded-xl border border-line bg-card px-3.5 py-3">
+            <div className="flex items-center gap-1.5">
+              <div className="h-2.5 w-6 animate-pulse rounded bg-line" />
+              <div className="h-2.5 w-24 animate-pulse rounded bg-line" />
+            </div>
+            <div className="mt-2 h-6 w-20 animate-pulse rounded bg-line" />
+            <div className="my-1.5 h-[26px] w-full animate-pulse rounded bg-line" />
+            <div className="h-2.5 w-28 animate-pulse rounded bg-line" />
+          </div>
+        ))}
       </div>
     </section>
   );
