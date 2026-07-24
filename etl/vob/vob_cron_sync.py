@@ -123,7 +123,7 @@ def asset_urls(item_ids):
     """{item_id: public_url} for the latest file in files4. Signed URLs expire ~1h -> use promptly."""
     out = {}
     qf = 'query($ids:[ID!]) { items(ids:$ids) { id column_values(ids:["files4"]) { value } } }'
-    qa = 'query($ids:[ID!]) { assets(ids:$ids) { id public_url } }'
+    qa = 'query($ids:[ID!]!) { assets(ids:$ids) { id public_url } }'   # assets(ids:) requires non-null [ID!]!
     for i in range(0, len(item_ids), 50):
         chunk = item_ids[i:i+50]
         d = monday(qf, {"ids": chunk})
