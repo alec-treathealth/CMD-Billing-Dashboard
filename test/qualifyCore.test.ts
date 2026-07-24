@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   getQualifySnapshotCore,
   getQualifySnapshotByPayerCore,
+  getQualifySnapshotByNameCore,
   getQualifyFacilityCasesCore,
   getQualifyMoversCore,
   getQualifyInitialCore,
@@ -13,6 +14,7 @@ import {
   revealQualifyRowCore,
   revealQualifyRowsCore,
   SEARCH_QUALIFY_PHI,
+  SEARCH_QUALIFY_NAME,
   SEARCH_QUALIFY_PAYER,
   SEARCH_QUALIFY_FACILITY,
   SEARCH_QUALIFY_COHORT,
@@ -78,6 +80,7 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
     requirePrincipal: async () => principal(),
     mintToken: () => 'HMAC_TOKEN', // never the raw query
     mintGroupToken: () => 'GROUP_HMAC_TOKEN', // never the raw group #
+    mintNameToken: () => 'NAME_HMAC_TOKEN', // never the raw name
     resolvePayer: async () => 'AETNA',
     loadFacilities: async (_p, _f, _t, entityIds) => {
       c.facilityEntityIds.push(entityIds);
@@ -798,4 +801,55 @@ test('overview core: an empty book (no trends) returns KPIs + empty trends + a n
   assert.equal(ov.topFacility, null);
   assert.equal(ov.seedCases.length, 0);
   assert.ok(ov.kpis, 'KPIs still returned even with no trending facilities');
+});
+
+// ── Change C: the client-name resolve core (getQualifySnapshotByNameCore) ────────────────────────────
+const NAME_IN = { name: 'Jane Q Doe', windowDays: 30 as const };
+
+test('name resolve: audits SEARCH_QUALIFY_NAME with the FIELD NAME only — the raw name appears NOWHERE in the audit', async () => {
+  const c = cap();
+  const snap = await getQualifySnapshotByNameCore(makeDeps(SUPER, c), NAME_IN);
+  const audit = c.audits.find((a) => a.action === SEARCH_QUALIFY_NAME);
+  assert.ok(audit, 'the name search is audited');
+  assert.equal(audit!.detail.field, 'client_name', 'field label only');
+  const serialized = JSON.stringify(c.audits);
+  assert.ok(!serialized.includes('Jane') && !serialized.includes('Doe'), 'raw name never reaches any audit detail');
+  assert.ok(!serialized.includes('NAME_HMAC_TOKEN'), 'even the token stays out of the audit');
+  assert.equal(snap.resolved?.matchedOn, 'client_name');
+});
+
+test('name resolve: matchedValue is ALWAYS empty — a name is never echoed back (unlike the ≤3 alpha prefix)', async () => {
+  const snap = await getQualifySnapshotByNameCore(makeDeps(SUPER, cap()), NAME_IN);
+  assert.equal(snap.resolved?.matchedValue, '', 'no PHI echo on the name path');
+  assert.ok(!JSON.stringify(snap).includes('Jane'), 'the raw name appears nowhere in the snapshot wire shape');
+});
+
+test('name resolve: resolves via the client_name token kind + lands on the client’s facility (Fix A parity)', async () => {
+  const c = cap();
+  const snap = await getQualifySnapshotByNameCore(makeDeps(SUPER, c), NAME_IN);
+  assert.equal(snap.resolved?.payerName, 'AETNA');
+  const landing = c.landingArgs.at(-1)!;
+  assert.equal(landing.kind, 'client_name', 'the landing lookup uses the name token kind');
+  assert.equal(snap.identifierLandingFacility, '405 recovery', 'lands on the client’s most-recent ranked facility');
+});
+
+test('name resolve: an unknown name (resolver null) yields the VOB shape; a seat gets dollars stripped', async () => {
+  const unknown = await getQualifySnapshotByNameCore(makeDeps(SUPER, cap(), { resolvePayer: async () => null }), NAME_IN);
+  assert.equal(unknown.resolved, null, 'never-seen name → resolved null (VOB path)');
+  const seat = await getQualifySnapshotByNameCore(makeDeps(SEAT, cap()), NAME_IN);
+  assert.equal(seat.viewerHasAmountsCapability, false);
+  for (const f of seat.facilities) {
+    assert.equal(f.billedAmount, null);
+    assert.equal(f.allowedAmount, null);
+  }
+});
+
+test('cases drill: a clientName filter mints the name token, narrows the drill, and audits field "client_name"', async () => {
+  const c = cap();
+  await getQualifyFacilityCasesCore(makeDeps(SUPER, c), {
+    payer: 'AETNA', facility: '405 recovery', windowDays: 30, filter: { clientName: 'Jane Q Doe' },
+  });
+  const audit = c.audits.find((a) => a.action === SEARCH_QUALIFY_FACILITY)!;
+  assert.deepEqual(audit.detail.fields, ['client_name'], 'narrow recorded by FIELD NAME only');
+  assert.ok(!JSON.stringify(c.audits).includes('Jane'), 'raw name never in the audit');
 });

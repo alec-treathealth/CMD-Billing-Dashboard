@@ -48,6 +48,22 @@ export interface QualifyPayerInput {
 }
 
 /**
+ * Resolve by CLIENT NAME (Change C — supersedes the Prompt-2 "no name search" ruling; Alec
+ * 2026-07-24). Deliberately a SEPARATE type from QualifyInput (the QualifyPayerInput discipline) so
+ * a name can never structurally flow down the member-id sniff path: the name is HMAC'd server-side
+ * against the EXACT normalized-name blind index (patient_name_bidx, 0066/0067 — no prefix variant),
+ * resolves to the dominant payer among matching rows, then the normal facility + cases drill. The
+ * raw name is never logged, never in a URL, never echoed back (matchedValue stays '').
+ * NOTE: names are not unique — an exact-name match may span multiple patients (the UI captions this).
+ */
+export interface QualifyNameInput {
+  name: string; // client name (PHI IN TRANSIT ONLY — HMAC'd at the action boundary, never stored/logged)
+  windowDays: QualifyWindowDays;
+  /** Optional VOB employer/funding narrow applied to the facility ranking (see QualifyMarket). */
+  market?: QualifyMarket;
+}
+
+/**
  * Drill a resolved payer's cases down to ONE facility (the facility-card tap on mobile). `payer` is the
  * resolved primary_payer label (from QualifySnapshot.resolved.payerName — works for both the PHI-search
  * and resolve-by-payer entry paths); `facility` is the tapped card's QualifyFacility.facilityKey (raw
@@ -66,8 +82,11 @@ export interface QualifyFacilityCasesInput {
    *   - `group`   : a group-number term (EXACT — the employer PROXY; real employer names do not exist
    *                 in this data) → group_number_bidx. No prefix variant: only the exact group blind
    *                 index is materialized (0036/0059); a prefix index would be its own migration.
-   *                 Composable with the member narrows (ANDed). */
-  filter?: { prefix?: string; memberId?: string; group?: string };
+   *                 Composable with the member narrows (ANDed).
+   *   - `clientName`: a client-name term (EXACT, Change C) → patient_name_bidx (0066/0067). Carried
+   *                 from a name-resolving search so the drill narrows to that name's rows. Precedence
+   *                 among the identifier narrows: memberId > prefix > clientName. */
+  filter?: { prefix?: string; memberId?: string; group?: string; clientName?: string };
   /** Optional VOB employer/funding narrow — carried from the snapshot so the cases drill filters the
    *  SAME market the ranking did (see QualifyMarket). Composable with the identifier/group narrows. */
   market?: QualifyMarket;
@@ -127,9 +146,10 @@ export interface QualifyFacilityCases {
 /** member-id EXACT vs 3-letter alpha-PREFIX — the SNIFFED PHI-token kind (sniffed SERVER-SIDE, never
  *  client-declared). This is the kind mintToken/resolvePayer operate on; 'payer' is NOT one of them. */
 export type QualifyMatchKind = 'member_id' | 'prefix';
-/** How a RESOLVED payer was matched: a sniffed PHI token (member_id | prefix), OR 'payer' — the
+/** How a RESOLVED payer was matched: a sniffed PHI token (member_id | prefix), 'client_name' — the
+ *  exact-name blind-index path (Change C; the name itself is NEVER echoed back), OR 'payer' — the
  *  resolve-by-primary-payer label path (no PHI token; the movers/Heating-up tap). matchedOn uses this. */
-export type QualifyResolvedKind = QualifyMatchKind | 'payer';
+export type QualifyResolvedKind = QualifyMatchKind | 'payer' | 'client_name';
 /** <=3 chars ⇒ alpha-prefix, else exact member-id (the searchAuditPatients precedent). Pure. */
 export function sniffQualifyKind(query: string): QualifyMatchKind {
   return query.trim().length <= 3 ? 'prefix' : 'member_id';

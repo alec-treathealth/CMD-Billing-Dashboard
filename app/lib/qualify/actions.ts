@@ -25,10 +25,11 @@ import {
   revealCmdExplorerRows,
   type CmdEmployerOption,
 } from '@/lib/server';
-import { memberIdBlindIndex, alphaPrefixBlindIndex, groupNumberBlindIndex } from '../../../src/collections/blindIndex';
+import { memberIdBlindIndex, alphaPrefixBlindIndex, groupNumberBlindIndex, patientNameBlindIndex } from '../../../src/collections/blindIndex';
 import {
   getQualifySnapshotCore,
   getQualifySnapshotByPayerCore,
+  getQualifySnapshotByNameCore,
   getQualifyFacilityCasesCore,
   getQualifyMoversCore,
   getQualifyInitialCore,
@@ -43,6 +44,7 @@ import {
 import type {
   QualifyInput,
   QualifyPayerInput,
+  QualifyNameInput,
   QualifyFacilityCasesInput,
   QualifyFacilityCases,
   QualifyPatientCohortInput,
@@ -63,6 +65,7 @@ const realDeps: QualifyDeps = {
   requirePrincipal: requireQualifyPrincipal,
   mintToken: (query, kind) => (kind === 'prefix' ? alphaPrefixBlindIndex(query) : memberIdBlindIndex(query)),
   mintGroupToken: (raw) => groupNumberBlindIndex(raw),
+  mintNameToken: (raw) => patientNameBlindIndex(raw),
   resolvePayer: resolveQualifyPayer,
   loadFacilities: loadQualifyFacilities,
   loadIdentifierLandingFacility: loadQualifyIdentifierLandingFacility,
@@ -115,6 +118,13 @@ export async function getQualifySnapshot(input: QualifyInput): Promise<QualifySn
 /** Resolve-by-payer: load a payer's facilities/cases directly from its label (the Heating-up path). */
 export async function getQualifySnapshotByPayer(input: QualifyPayerInput): Promise<QualifySnapshot> {
   return getQualifySnapshotByPayerCore(realDeps, { ...input, market: sanitizeMarket(input.market) });
+}
+
+/** Change C — resolve by CLIENT NAME: exact normalized-name blind index → dominant payer → the
+ *  standard facility + cases drill. Audited (SEARCH_QUALIFY_NAME, field name only); the raw name is
+ *  HMAC'd here at the boundary and never logged, URL'd, or echoed back. */
+export async function getQualifySnapshotByName(input: QualifyNameInput): Promise<QualifySnapshot> {
+  return getQualifySnapshotByNameCore(realDeps, { ...input, market: sanitizeMarket(input.market) });
 }
 
 /** Facility drill: the resolved payer's cases narrowed to ONE facility (the mobile facility-card tap). */
