@@ -33,9 +33,24 @@ TreatHealthOS visual system applied to an internal PHI-aware billing dashboard.
 | Headings (`ths-h`) | Space Grotesk | 500–700 | `tracking-tight` (`-0.02em`) |
 | Body | Inter | 400–600 | `tracking-[-0.006em]` |
 | Numeric / tabular (`ths-num`) | IBM Plex Mono | 400–500 | `tabular-nums` |
+| Display (`font-display`) | Fraunces | 400–600 | editorial serif — the Qualify page `<h1>`, the resolved-payer hero name, big KPI/stat numerals. `letter-spacing:-.01em`. Defined in `tailwind.config.ts` `fontFamily.display` (Fraunces → Georgia → serif). |
 
-Page `<h1>` always uses `text-2xl font-semibold tracking-tight`.
+Page `<h1>` always uses `text-2xl font-semibold tracking-tight` (Qualify uses `font-display`).
 Card titles use `text-base font-semibold` (via `CardTitle`).
+
+---
+
+## Elevation
+
+A 3-tier shadow scale (`tailwind.config.ts` `boxShadow`), applied by resting state, not decoration:
+
+| Token | Use |
+|---|---|
+| `shadow-ths-sm` | a card **at rest** — barely lifted off the ground (finder bar, KPI tiles, Heating-Up cards, facility rows) |
+| `shadow-ths` | **raised** — hover, the active/selected panel, a card the pointer is over |
+| `shadow-ths-lg` | **floating** — sheets, modals, the mobile phone frame, the cohort slide-over |
+
+A card lifts one tier on hover (`ths-sm → ths`) as the standard affordance; never jump straight to `ths-lg` on hover.
 
 ---
 
@@ -99,7 +114,12 @@ One easing everywhere: **`ease-out`**. Two durations:
   delayed-unmount so conditionally-rendered panels don't pop (keyframes in `tailwind.config.ts`).
 - **Staged reveal:** for a group of sibling panels, apply `animate-ths-reveal` with a small
   per-item `animationDelay`, **capped** (≈`min(i, 3) * 60ms`) so the total stagger stays bounded no
-  matter how many panels are present — a quick settle, not a slow cascade.
+  matter how many panels are present — a quick settle, not a slow cascade. The cap lives in ONE
+  place: `staggerDelayMs(i)` in `app/components/qualify/tokens.ts` — use it rather than re-deriving.
+- **Sparkline draw-in:** a rating sparkline draws itself on mount by animating `stroke-dashoffset`
+  → 0 (`.q-spark path.ln` / `@keyframes q-draw` in `globals.css`, ~900ms `ease-out`). The
+  prefers-reduced-motion block force-sets `.q-spark path { stroke-dashoffset: 0 }` so it renders
+  fully drawn (never stuck mid-draw) when motion is reduced.
 - **Refresh (non-blocking):** during an in-flight refetch of content that's already on screen, keep
   it rendered at `opacity-60 transition-opacity duration-150` with a thin top progress bar — never
   blank it to a skeleton on every interaction.

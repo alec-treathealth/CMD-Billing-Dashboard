@@ -127,11 +127,16 @@
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+  /* A sparkline draws itself by animating stroke-dashoffset → 0; the global reset above zeroes the
+   * DURATION but the line could be left mid-draw (offset != 0). Force it fully drawn under reduce. */
+  .q-spark path {
+    stroke-dashoffset: 0 !important;
+  }
 }
 
 /*
  * ── Qualify tab (Prompt 3) — rating-bucket status colors + heat washes ──────────────────
- * The 38/26 RATING cutoffs live in app/lib/qualify/rating.ts (ratingBucket) — the ONE shared
+ * The 50/30 RATING cutoffs live in app/lib/qualify/rating.ts (ratingBucket) — the ONE shared
  * source of truth; this block only PAINTS them. A `.q-<bucket>` class sets --q-c (border / bar /
  * %-text / dot) and --q-wash (the heat fill), so facility rows, case %-cells, and the legend all
  * share ONE palette (hexes identical to the tailwind `status.*` scale) — and a case row is tinted
@@ -176,6 +181,49 @@
 }
 .q-heat .q-pctcell {
   background: var(--q-wash);
+}
+
+/*
+ * ── Qualify OVERVIEW (redesign) — sparkline draw-in, KPI gradient tiles, subject hero ────────
+ * The "stock-market" overview surface: a per-facility rating sparkline that draws itself on mount,
+ * the book-wide KPI gradient tiles, and the resolved-payer hero band. Named `q-*` so nothing here
+ * collides with the Tailwind/shadcn utility layer; both surfaces share these (mobile via inline
+ * <svg class="q-spark">). All motion collapses under the prefers-reduced-motion reset above.
+ */
+.q-spark path.ln {
+  stroke-dasharray: 600;
+  stroke-dashoffset: 600;
+  animation: q-draw 900ms ease-out forwards;
+}
+@keyframes q-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* Book-wide KPI tiles — a soft diagonal wash keyed to the metric's tone (g = green/allowed,
+ * a = amber/collections). The value color is set by the component (status-ok / status-warn). */
+.q-kpi-g {
+  background: linear-gradient(120deg, #e6f2ec, #f2f9f5);
+}
+.q-kpi-a {
+  background: linear-gradient(120deg, #fbf1de, #fdf7ec);
+}
+
+/* Resolved-payer hero band — the dark teal gradient the subject sits on, with a coral radial glow. */
+.q-subject {
+  background: linear-gradient(120deg, #0e3a3a 0%, #124b47 55%, #135e5a 100%);
+}
+.q-subject::after {
+  content: '';
+  position: absolute;
+  right: -40px;
+  top: -60px;
+  width: 240px;
+  height: 240px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(226, 103, 79, 0.3), transparent 70%);
+  pointer-events: none;
 }
 
 /*

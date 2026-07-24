@@ -26,7 +26,10 @@ const config: Config = {
         mono: ['IBM Plex Mono', 'ui-monospace', 'monospace'],
       },
       boxShadow: {
-        // TreatHealthOS card shadow
+        // TreatHealthOS 3-tier elevation scale (see docs/design-system.md §Elevation):
+        //   ths-sm = card AT REST (barely lifted) · ths = RAISED (hover / active panel) ·
+        //   ths-lg = FLOATING (sheets, modals, the mobile phone frame).
+        'ths-sm': '0 1px 2px rgba(27,43,42,.05), 0 1px 1px rgba(27,43,42,.04)',
         ths: '0 4px 16px -6px rgba(14,58,58,.12)',
         'ths-lg': '0 18px 40px -12px rgba(14,58,58,.18)',
       },
