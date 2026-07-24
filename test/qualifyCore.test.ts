@@ -65,6 +65,7 @@ interface Cap {
     entityIds: string[];
     prefixToken: string | null;
     memberToken: string | null;
+    nameToken: string | null;
     limit: number;
     allPayers: boolean | undefined;
   }>;
@@ -95,7 +96,7 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
       return '405 recovery';
     },
     loadFacilityCases: async (payer, facility, _f, _t, entityIds, opts) => {
-      c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, memberToken: opts.memberToken, limit: opts.limit, allPayers: opts.allPayers });
+      c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, memberToken: opts.memberToken, nameToken: opts.nameToken, limit: opts.limit, allPayers: opts.allPayers });
       return CASE_ROWS;
     },
     // Phase 3 fakes: a known claim id resolves to a prefix token; the cohort clears the floor.
@@ -424,7 +425,7 @@ test('facility-drill allPayers: threads the flag + the whole-window cap (no pref
   const res = await getQualifyFacilityCasesCore(
     makeDeps(SUPER, c, {
       loadFacilityCases: async (payer, facility, _from, _to, entityIds, opts) => {
-        c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, memberToken: opts.memberToken, limit: opts.limit, allPayers: opts.allPayers });
+        c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, memberToken: opts.memberToken, nameToken: opts.nameToken, limit: opts.limit, allPayers: opts.allPayers });
         return MIXED;
       },
     }),
@@ -557,6 +558,20 @@ test('facility-drill: EXACT member wins when both memberId + prefix are supplied
   assert.deepEqual(audit.detail.fields, ['member_id'], 'the audited field is member_id');
 });
 
+test('facility-drill CLIENT NAME: mints the name token, passes it (NOT prefix/member), audits fields:[client_name] (never the term)', async () => {
+  const c = cap();
+  // Fix 1: a client-name-resolving search carries its exact-name narrow into the drill (nameToken).
+  await getQualifyFacilityCasesCore(makeDeps(SUPER, c), { ...FAC_CASES_IN, filter: { clientName: 'DOE, JANE' } });
+  assert.equal(c.facilityCasesArgs[0]!.nameToken, 'NAME_HMAC_TOKEN', 'the minted (opaque) name token reaches the loader');
+  assert.equal(c.facilityCasesArgs[0]!.prefixToken, null, 'name mode does NOT set the prefix token');
+  assert.equal(c.facilityCasesArgs[0]!.memberToken, null, 'name mode does NOT set the member token');
+  const audit = c.audits.find((a) => a.action === SEARCH_QUALIFY_FACILITY)!;
+  assert.deepEqual(audit.detail.fields, ['client_name'], 'audits the FIELD NAME only');
+  const wire = JSON.stringify(audit);
+  assert.ok(!wire.includes('DOE, JANE'), 'raw client name never audited');
+  assert.ok(!wire.includes('NAME_HMAC_TOKEN'), 'token never audited');
+});
+
 // ── DIRECTION B — the headline UX bug this build kills (task 4: prefix-exactness on the FACILITY DRILL). ──
 // Hermetic proxy for the DB: three prefixes (W29/W27/W23) resolve to the SAME payer at the SAME facility.
 // The loader fake honors the `member_id_prefix_bidx = $tok` equality the real builder emits (a keyed HMAC:
@@ -572,7 +587,7 @@ function prefixExactDeps(c: Cap): QualifyDeps {
     // Deterministic, term-distinct, opaque-shaped token — models the keyed-HMAC blind index per prefix.
     mintToken: (term, kind) => `tok:${kind}:${term.toUpperCase()}`,
     loadFacilityCases: async (_p, _f, _from, _to, _e, opts) => {
-      c.facilityCasesArgs.push({ payer: _p, facility: _f, entityIds: _e, prefixToken: opts.prefixToken, memberToken: opts.memberToken, limit: opts.limit, allPayers: opts.allPayers });
+      c.facilityCasesArgs.push({ payer: _p, facility: _f, entityIds: _e, prefixToken: opts.prefixToken, memberToken: opts.memberToken, nameToken: opts.nameToken, limit: opts.limit, allPayers: opts.allPayers });
       // Simulate the DB predicate member_id_prefix_bidx = $tok (equality on the prefix's own blind index).
       if (opts.prefixToken) {
         const want = opts.prefixToken.replace('tok:prefix:', '');

@@ -22,7 +22,10 @@
  * surface to that facility (the panel pins the selected card + "× All facilities" clears). Heating-Up
  * click = the HYBRID: resolve the card's dominant payer AND scope to the card's facility. A window
  * change RESETS scope to payer-wide (ruling). All case sets are SERVER-scoped via
- * getQualifyFacilityCases — never a client filter over a global list.
+ * getQualifyFacilityCases (no client-side filtering over a global list). When the resolving search was
+ * an IDENTIFIER (prefix / member id / client name), that identifier narrow is carried into the drill as
+ * a server-side `filter` — so Recent Claims shows only matching claims, on the seed AND every facility
+ * switch (ruling 5). The raw term lives only in an in-memory ref (never state / URL / log).
  *
  * CHANGE B (global persistent reveal): super_admin/admin (derived as canRevealPhi &&
  * viewerHasAmountsCapability — exactly those two roles) get a surface-wide "Reveal identifiers"
@@ -199,6 +202,13 @@ export function QualifyTab({
   // re-resolves from THIS, not the live input box — so editing the box after a resolve never leaves
   // a stale subject (review finding). Null on the by-payer / URL-restore path (byPayer drives those).
   const lastResolvedRef = useRef<{ term: string; type: 'id' | 'client' } | null>(null);
+  // Fix 1 — the identifier narrow carried from the resolving search into the facility DRILL (ruling 5):
+  // Recent Claims shows only claims matching the searched prefix/member/client name, on the seed AND
+  // every facility switch. The RAW term lives ONLY here (in-memory ref) — never state, never a URL,
+  // never a log; the server mints the blind index from it. Null on every non-identifier resolution
+  // (resolve-by-payer, on-load hybrid, URL restore, clear). fetchSeed/fetchCases read it at call time —
+  // same trust boundary as the term already sent to getQualifySnapshot.
+  const activeFilterRef = useRef<{ prefix?: string } | { memberId?: string } | { clientName?: string } | null>(null);
   // Overview-strip recency guard — independent of genRef so a slow earlier window/market strip
   // response can't overwrite a newer one's KPI tiles + Heating-Up cards.
   const overviewGenRef = useRef(0);
@@ -216,7 +226,13 @@ export function QualifyTab({
 
   const fetchSeed = useCallback(
     async (payer: string, facility: string, w: QualifyWindow): Promise<CasesPage> => {
-      const res = await getQualifyFacilityCases({ payer, facility, window: w, market: marketRef.current });
+      const res = await getQualifyFacilityCases({
+        payer,
+        facility,
+        window: w,
+        market: marketRef.current,
+        filter: activeFilterRef.current ?? undefined, // Fix 1: carry the resolving search's identifier narrow
+      });
       return { claims: res.claims, capped: res.capped };
     },
     [],
@@ -233,7 +249,13 @@ export function QualifyTab({
       resetReveal();
       startFacilityTransition(async () => {
         try {
-          const res = await getQualifyFacilityCases({ payer, facility, window: c.window, market: marketRef.current });
+          const res = await getQualifyFacilityCases({
+            payer,
+            facility,
+            window: c.window,
+            market: marketRef.current,
+            filter: activeFilterRef.current ?? undefined, // Fix 1: the identifier narrow persists across facility switches
+          });
           if (genRef.current !== gen) return; // superseded (recency)
           if (cohortKey(cohortRef.current) !== key) return; // cohort changed underneath (identity)
           setFacilityCases(res.claims);
@@ -285,6 +307,9 @@ export function QualifyTab({
       }
       setHint(null);
       resetReveal();
+      // Fix 1: carry this identifier into the drill (prefix vs exact member — the server sniffs the kind
+      // on resolve, but the drill filter must be explicit). Raw term stays in this ref only.
+      activeFilterRef.current = sniffQualifyKind(trimmed) === 'prefix' ? { prefix: trimmed } : { memberId: trimmed };
       const gen = ++genRef.current;
       startTransition(async () => {
         try {
@@ -324,6 +349,7 @@ export function QualifyTab({
       }
       setHint(null);
       resetReveal();
+      activeFilterRef.current = { clientName: trimmed }; // Fix 1: carry the exact-name narrow into the drill
       const gen = ++genRef.current;
       startTransition(async () => {
         try {
@@ -361,6 +387,7 @@ export function QualifyTab({
     (payer: string, w: QualifyWindow, focusFacility: string | null = null) => {
       setHint(null);
       resetReveal();
+      activeFilterRef.current = null; // Fix 1: by-payer resolutions are payer-wide (ruling 3) — no identifier narrow
       const gen = ++genRef.current;
       startTransition(async () => {
         try {
@@ -451,6 +478,7 @@ export function QualifyTab({
     setHasSearched(false);
     setByPayer(null);
     lastResolvedRef.current = null;
+    activeFilterRef.current = null; // Fix 1: drop the drill identifier narrow on clear
     setScoped(false);
     apply({ type: 'RESOLVE_PAYER', payer: null, facility: null, window: cohortRef.current.window });
   }, [apply, resetReveal]);
@@ -485,6 +513,7 @@ export function QualifyTab({
     }
     if (url.loc) setLocFilter(url.loc);
     const gen = ++genRef.current;
+    activeFilterRef.current = null; // Fix 1: on-load (URL restore + fresh hybrid) are both by-payer / payer-wide
     (async () => {
       try {
         if (url.payer) {
@@ -740,6 +769,20 @@ export function QualifyTab({
   const emptyIdentifierLabel = isIdentifierEmpty(resolved, snapshot?.identifierLandingFacility ?? null)
     ? identifierEmptyTerm(resolved)
     : null;
+  // Fix 1 — when the resolving search was an identifier, the drill is narrowed to it (activeFilterRef),
+  // so Recent Claims shows only matching claims. Derive a NON-PHI caption from the resolved match so a
+  // payer-wide facility with no matching members reads as intentional, not broken: the ≤3 alpha prefix
+  // echoes (matchedValue); an exact member / client name becomes a generic word (never the raw term).
+  // Equivalent to "activeFilterRef is set" by construction (identifier resolves set it; payer resolves
+  // clear it), and derives from state so render stays reactive.
+  const drillFilterCaption =
+    resolved === null || resolved.matchedOn === 'payer'
+      ? null
+      : resolved.matchedOn === 'prefix' && resolved.matchedValue
+        ? `prefix ${resolved.matchedValue}`
+        : resolved.matchedOn === 'client_name'
+          ? 'this client name'
+          : 'this member';
   // Change D — ONE lens, everywhere (inclusive semantics; view-only v1).
   const visibleTrends = filterFacilitiesByLoc(trends, locFilter);
   const lensFacilities = filterFacilitiesByLoc(snapshot?.facilities ?? [], locFilter);
@@ -1019,6 +1062,7 @@ export function QualifyTab({
               onViewCohort={viewCohort}
               capped={capped}
               emptyIdentifierLabel={emptyIdentifierLabel}
+              filterCaption={drillFilterCaption}
               globalRevealOn={globalReveal && canGlobalReveal}
             />
           </div>
