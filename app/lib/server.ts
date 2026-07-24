@@ -2171,8 +2171,9 @@ export async function loadQualifyBookKpis(
   to: string,
   entityIds: string[],
   market: VobMarketFilter = {},
+  payer: string | null = null,
 ): Promise<QualifyBookKpisRow | null> {
-  const q = buildBookKpisQuery(from, to, entityIds, market);
+  const q = buildBookKpisQuery(from, to, entityIds, market, payer);
   const { rows } = await readerExecutor().query<QualifyBookKpisRow>(q.sql, q.params);
   return rows[0] ?? null;
 }

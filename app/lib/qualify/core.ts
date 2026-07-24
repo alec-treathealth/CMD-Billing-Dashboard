@@ -129,12 +129,14 @@ export interface QualifyDeps {
     entityIds: string[],
     market?: VobMarketFilter,
   ) => Promise<QualifyMoverRow[]>;
-  /** Redesign overview: book-wide KPI percentages (dollars summed + dropped in SQL). One row. */
+  /** Redesign overview: KPI percentages (dollars summed + dropped in SQL). One row. `payer` null =
+   *  book-wide; a payer label narrows the SAME ratios to the resolved subject (non-PHI). */
   loadBookKpis: (
     from: string,
     to: string,
     entityIds: string[],
     market?: VobMarketFilter,
+    payer?: string | null,
   ) => Promise<QualifyBookKpisRow | null>;
   /** Redesign overview: per-facility rating trend rows (ratings only). payer null = book-wide. */
   loadFacilityTrends: (
@@ -749,12 +751,14 @@ export async function getQualifyBookKpisCore(
   deps: QualifyDeps,
   window: QualifyWindow,
   market?: QualifyMarket,
+  payer?: string | null,
 ): Promise<QualifyBookKpis> {
   const gate = await deps.requirePrincipal();
   if (!gate.ok) throw new Error(gate.error);
   if (!isQualifyWindow(window)) throw new Error('Invalid window.');
   const { from, to } = qualifyWindowBounds(window, deps.now());
-  const row = await deps.loadBookKpis(from, to, gate.entityIds, market);
+  const scopePayer = typeof payer === 'string' && payer.trim() !== '' ? payer.trim() : null;
+  const row = await deps.loadBookKpis(from, to, gate.entityIds, market, scopePayer);
   return {
     pctAllowedOfBilled: row?.pct_allowed_of_billed ?? null,
     pctPaidOfAllowed: row?.pct_paid_of_allowed ?? null,

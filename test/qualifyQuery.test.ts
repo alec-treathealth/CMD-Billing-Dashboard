@@ -334,10 +334,19 @@ test('book KPIs: three guarded ratio columns, e2 excluded from the reliable-allo
   assert.ok(!/as .*(billed_amount|charge_total|insurance_payments) /.test(sql), 'no raw dollar column leaves SQL');
 });
 
-test('facility trend: rating-delta order, dominant-payer via mode(), e2-excluded ratings, bucket math, book-wide by default', () => {
+test('book KPIs: book-wide by default; an optional payer scope narrows the SAME ratios to one payer', () => {
+  const wide = buildBookKpisQuery('2026-06-17', '2026-07-17', BOTH);
+  assert.ok(!wide.sql.includes('primary_payer ='), 'book-wide by default — no payer filter');
+  const scoped = buildBookKpisQuery('2026-06-17', '2026-07-17', BOTH, {}, 'CIGNA');
+  assert.ok(scoped.sql.includes('and primary_payer = $'), 'payer scope adds the bound filter');
+  assert.ok(scoped.params.includes('CIGNA'), 'the payer value is a bound param');
+  assert.ok(scoped.sql.includes('as pct_allowed_of_billed'), 'still projects the same three ratios');
+});
+
+test('facility trend: rating-delta order, dominant-payer by allowed $, e2-excluded ratings, bucket math, book-wide by default', () => {
   const { sql } = buildFacilityTrendQuery('2026-06-17', '2026-07-17', '2026-05-18', BOTH);
   assert.match(sql, /order by \(agg\.cur_rating - agg\.prior_rating\) desc nulls last/, 'sorts by the rating delta, new (null-prior) last');
-  assert.ok(sql.includes('mode() within group (order by primary_payer)'), 'dominant payer = the most-charges payer (mode)');
+  assert.ok(sql.includes('distinct on (facility)') && sql.includes('allowed_sum desc nulls last'), 'dominant payer = top payer by reliable allowed $ (ties → line count → name)');
   assert.ok(sql.includes("allowed_tier <> 'e2'"), 'ratings exclude tier e2 (parity with the value-first rating)');
   assert.ok(sql.includes('least(') && sql.includes('greatest(0'), 'bucket index is clamped to [0, N-1]');
   assert.ok(sql.includes('array_remove(array_agg'), 'sparkline points drop thin buckets (never fabricated)');

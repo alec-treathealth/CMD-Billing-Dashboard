@@ -57,6 +57,7 @@ import {
   getQualifyFacilityCases,
   getQualifyPatientCohort,
   getQualifyOverview,
+  getQualifyBookKpis,
   revealQualifyRows,
 } from '@/lib/qualify/actions';
 import {
@@ -135,6 +136,14 @@ export function QualifyTab({
   // Overview strip (book KPIs + trend cards) — window/market-tracked, independent of the subject.
   const [kpis, setKpis] = useState<QualifyBookKpis | null>(null);
   const [trends, setTrends] = useState<QualifyFacilityTrend[]>([]);
+  // The SAME three KPI ratios narrowed to the RESOLVED payer (drives the scoped tiles + the resolved
+  // band's "avg allowed ÷ billed" stat). Null until a payer resolves; reset on Clear.
+  const [scopedKpis, setScopedKpis] = useState<QualifyBookKpis | null>(null);
+  // True once the USER actively resolved a subject (typed a search, clicked a Heating-Up card, or a
+  // facility row) or restored one via URL — NOT the fresh on-load overview hybrid. Gates the "Clear
+  // Search" button + whether the tiles show the scoped (vs book-wide) numbers, so a fresh landing
+  // reads as unsearched.
+  const [userSearched, setUserSearched] = useState(false);
   // The cases panel's atomic COHORT (payer/facility/window), reducer-owned (identity guards intact).
   const [cohort, dispatch] = useReducer(cohortReducer, INITIAL_COHORT);
   const cohortRef = useRef(cohort);
@@ -212,6 +221,8 @@ export function QualifyTab({
   // Overview-strip recency guard — independent of genRef so a slow earlier window/market strip
   // response can't overwrite a newer one's KPI tiles + Heating-Up cards.
   const overviewGenRef = useRef(0);
+  // Scoped-KPI recency guard — a slow earlier payer/window scoped-KPI response can't overwrite a newer.
+  const scopedKpiGenRef = useRef(0);
 
   const hasAmounts = snapshot ? snapshot.viewerHasAmountsCapability : viewerHasAmountsCapability;
   const facilityBuckets = useMemo(() => buildFacilityBucketMap(snapshot?.facilities ?? []), [snapshot]);
@@ -295,6 +306,25 @@ export function QualifyTab({
       });
   }, []);
 
+  /** Fetch the three KPI ratios narrowed to the RESOLVED payer (the scoped tiles + the band stat).
+   *  Recency-guarded so a slow earlier payer/window response can't overwrite a newer one. A null/blank
+   *  payer clears the scope (back to book-wide tiles). Non-blocking (a failed fetch leaves stale). */
+  const refreshScopedKpis = useCallback((payer: string | null, w: QualifyWindow) => {
+    const sgen = ++scopedKpiGenRef.current;
+    if (!payer) {
+      setScopedKpis(null);
+      return;
+    }
+    getQualifyBookKpis(w, marketRef.current, payer)
+      .then((k) => {
+        if (scopedKpiGenRef.current !== sgen) return; // superseded by a newer scoped fetch
+        setScopedKpis(k);
+      })
+      .catch(() => {
+        /* non-blocking — a failed scoped fetch leaves the prior tiles/stat */
+      });
+  }, []);
+
   // Member-id / alpha-prefix search (server-side sniff). Lands payer-wide on the Fix-A landing facility.
   // `explicit` = an Enter/submit (vs a debounced autosearch keystroke): the VOB no-match modal opens
   // ONLY on an explicit submit, so it never pops mid-typing on every debounced intermediate term.
@@ -321,7 +351,9 @@ export function QualifyTab({
           commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: landing, window: w }, seed);
           setScoped(false); // a search lands payer-wide (Change E)
           setHasSearched(true);
+          setUserSearched(true); // an explicit user search → tiles scope + Clear Search shows
           setByPayer(null);
+          refreshScopedKpis(payerName, w); // scope the KPI tiles + band stat to the resolved payer
           lastResolvedRef.current = { term: trimmed, type: 'id' }; // window/market re-resolve reads THIS
           if (snap.resolved === null) {
             setEcho(trimmed);
@@ -335,7 +367,7 @@ export function QualifyTab({
         }
       });
     },
-    [resetReveal, fetchSeed, commitResolved],
+    [resetReveal, fetchSeed, commitResolved, refreshScopedKpis],
   );
 
   // Client-name search (Change C) — the exact-name blind-index path. Same landing flow; the raw name
@@ -361,7 +393,9 @@ export function QualifyTab({
           commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: landing, window: w }, seed);
           setScoped(false);
           setHasSearched(true);
+          setUserSearched(true); // an explicit user search → tiles scope + Clear Search shows
           setByPayer(null);
+          refreshScopedKpis(payerName, w); // scope the KPI tiles + band stat to the resolved payer
           lastResolvedRef.current = { term: trimmed, type: 'client' };
           if (snap.resolved === null) {
             setEcho(trimmed);
@@ -375,7 +409,7 @@ export function QualifyTab({
         }
       });
     },
-    [resetReveal, fetchSeed, commitResolved],
+    [resetReveal, fetchSeed, commitResolved, refreshScopedKpis],
   );
 
   /**
@@ -401,6 +435,7 @@ export function QualifyTab({
           setScoped(ranked); // hybrid: scoped iff the clicked facility actually ranks here
           setHasSearched(true);
           setByPayer(payer);
+          refreshScopedKpis(payerName, w); // scope the KPI tiles + band stat to the resolved payer
           lastResolvedRef.current = null; // the by-payer path owns re-resolution now (not a stored term)
           setModalOpen(false);
         } catch {
@@ -409,7 +444,7 @@ export function QualifyTab({
         }
       });
     },
-    [resetReveal, fetchSeed, commitResolved],
+    [resetReveal, fetchSeed, commitResolved, refreshScopedKpis],
   );
 
   // Window change: refresh the strip AND re-resolve the subject for the new window. Ruling (Change E):
@@ -436,6 +471,7 @@ export function QualifyTab({
     (facilityKey: string) => {
       const c = cohortRef.current;
       if (!c.payer) return;
+      setUserSearched(true); // a facility-row click is a user resolution → tiles scope + Clear Search shows
       if (facilityKey === c.facility) {
         setScoped(true); // clicking the selected row in list mode just pins it
         return;
@@ -459,6 +495,7 @@ export function QualifyTab({
   const openTrendCard = useCallback(
     (t: QualifyFacilityTrend) => {
       if (!t.dominantPayer) return;
+      setUserSearched(true); // a Heating-Up card click is a user resolution → tiles scope + Clear Search shows
       resolveByPayer(t.dominantPayer, cohortRef.current.window, t.facilityKey);
     },
     [resolveByPayer],
@@ -476,6 +513,8 @@ export function QualifyTab({
     setFacilityCases([]);
     setCapped(false);
     setHasSearched(false);
+    setUserSearched(false);
+    setScopedKpis(null); // back to book-wide tiles + no band stat
     setByPayer(null);
     lastResolvedRef.current = null;
     activeFilterRef.current = null; // Fix 1: drop the drill identifier narrow on clear
@@ -533,7 +572,9 @@ export function QualifyTab({
           commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility, window: w }, seed);
           setScoped(ranked);
           setHasSearched(true);
+          setUserSearched(true); // a shared/restored resolved link IS a resolved subject → show Clear + scoped tiles
           setByPayer(url.payer);
+          refreshScopedKpis(url.payer, w); // scope the KPI tiles + band stat to the restored payer
           lastResolvedRef.current = null; // URL restore is a by-payer resolution, not a stored term
         } else {
           // Fresh load: the overview HYBRID — strip + the top trend facility's payer, scoped to it.
@@ -550,6 +591,10 @@ export function QualifyTab({
             setScoped(ov.seedFacility !== null && ov.seedFacility === ov.topFacility);
             setHasSearched(true);
             setByPayer(ov.topPayer);
+            // Fresh landing: fetch the scoped ratios so the resolved band shows its "avg allowed ÷
+            // billed" stat, but leave userSearched FALSE — the tiles stay book-wide and no Clear Search
+            // button appears until the user actually resolves something.
+            refreshScopedKpis(ov.topPayer, w);
           }
         }
       } catch {
@@ -798,6 +843,15 @@ export function QualifyTab({
   // pinned facility itself is off-lens (its own claims are the subject). Only filter cases by LOC in
   // payer-wide (unscoped) mode — where the lens is a genuine cross-facility view filter.
   const visibleCases = scoped ? facilityCases : filterClaimsByLoc(facilityCases, locFilter);
+  // KPI tiles: scoped to the resolved payer once the USER resolves a subject; book-wide on the fresh
+  // landing (userSearched false) so it reads as unsearched (ruling: tiles follow what the user clicked).
+  const tilesScoped = userSearched && resolved !== null && scopedKpis !== null;
+  const displayKpis = tilesScoped ? scopedKpis : kpis;
+  const kpiScopeLabel = tilesScoped ? resolved!.payerName : null;
+  // Resolved-band "avg allowed ÷ billed" stat: the PINNED facility's own reliable allowed÷billed when
+  // scoped (non-dollar, already on the facility row — role-safe), else the payer-wide dollar-weighted
+  // ratio from the scoped KPIs. Null → "—" (a collapsed denominator is never a fabricated 0%).
+  const bandPct = scoped && pinnedFacility ? pinnedFacility.pctAllowedOfBilled : scopedKpis?.pctAllowedOfBilled ?? null;
   // Live branch hint (mirror of the server sniff — display only; the server still decides).
   const branchHint =
     searchType === 'employer' || query.trim().length === 0
@@ -911,7 +965,11 @@ export function QualifyTab({
               ) : null}
             </div>
           )}
-          {(query.trim() !== '' || resolved || hasSearched) && (
+          {/* Clear Search: shows only once the USER has typed or resolved a subject — NOT on the fresh
+              landing (userSearched false), so a just-landed page reads as unsearched. Prominent solid
+              GREEN with a loop/reset icon beside the words (all inside the button) — an obvious,
+              eye-catching way out of a resolved view. */}
+          {(query.trim() !== '' || userSearched) && (
             <button
               type="button"
               onClick={clearSearch}
@@ -991,11 +1049,22 @@ export function QualifyTab({
       {hint ? <p className="px-1 text-xs text-status-warn">{hint}</p> : null}
 
       {/* ── OVERVIEW: book KPIs (the Facilities Heating Up ticker now sits ABOVE the finder) ── */}
-      <BookKpiTiles kpis={kpis} locActive={locFilter !== null} />
+      <BookKpiTiles kpis={displayKpis} locActive={locFilter !== null} scopeLabel={kpiScopeLabel} />
 
       {/* ── RESOLVED SUBJECT + GRID ── */}
       {resolved ? (
-        <div className="q-subject animate-ths-reveal relative overflow-hidden rounded-2xl px-6 py-5 text-white shadow-ths">
+        <div className="q-subject animate-ths-reveal relative overflow-hidden rounded-2xl px-6 py-5 text-white shadow-ths sm:pr-44">
+          {/* avg allowed ÷ billed — the facility's own % when a card/facility is pinned, else the
+              payer's dollar-weighted %. Restored from the approved mockup's right-side stat. */}
+          <div className="pointer-events-none absolute right-6 top-1/2 hidden -translate-y-1/2 text-right sm:block">
+            <div className="font-mono text-[42px] font-medium leading-none tabular-nums">
+              {bandPct === null ? '—' : Math.round(bandPct)}
+              {bandPct !== null ? <span className="text-2xl">%</span> : null}
+            </div>
+            <div className="mt-1 text-[10.5px] tracking-wide text-teal200">
+              {scoped && pinnedFacility ? 'facility allowed ÷ billed' : 'avg allowed ÷ billed'}
+            </div>
+          </div>
           <div className="text-[10px] font-extrabold uppercase tracking-widest text-teal200">Resolved payer</div>
           <div className="mt-0.5 flex flex-wrap items-center gap-3 font-display text-2xl font-medium">
             {resolved.payerName}
