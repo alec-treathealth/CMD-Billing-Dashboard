@@ -12,6 +12,7 @@ import { facilityLocation } from './facilityLocations';
 import {
   isQualifyWindow,
   sniffQualifyKind,
+  serializeQualifyWindow,
   qualifyWindowBounds,
   QUALIFY_TENANT_SCOPE,
   QUALIFY_MEMBER_ID_MASK,
@@ -32,7 +33,7 @@ import {
   type QualifyMover,
   type QualifyInitial,
   type QualifyMarket,
-  type QualifyWindowDays,
+  type QualifyWindow,
   type QualifyPhi,
   type QualifyRevealedRow,
   type RevealQualifyRowResult,
@@ -292,8 +293,8 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
   const gate = await deps.requirePrincipal();
   if (!gate.ok) throw new Error(gate.error); // fail-closed backstop (route guards are the primary gate)
 
-  const windowDays: QualifyWindowDays = input.windowDays;
-  if (!isQualifyWindow(windowDays)) throw new Error('Invalid window.');
+  const window: QualifyWindow = input.window;
+  if (!isQualifyWindow(window)) throw new Error('Invalid window.');
 
   const raw = (input.query ?? '').trim();
   if (raw === '' || raw.length > 120) return emptySnapshot(gate.hasAmounts);
@@ -312,13 +313,13 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
     actorEmail: gate.actor.email,
     actorUserId: gate.actor.userId,
     action: SEARCH_QUALIFY_PHI,
-    detail: { field: kind, window: windowDays },
+    detail: { field: kind, window: serializeQualifyWindow(window) },
   });
 
   const payerName = await deps.resolvePayer(token, kind, gate.entityIds);
   if (!payerName) return emptySnapshot(gate.hasAmounts); // known-nothing → VOB (resolved stays null)
 
-  const { from, to } = qualifyWindowBounds(windowDays, deps.now());
+  const { from, to } = qualifyWindowBounds(window, deps.now());
   // Fix A: alongside the payer-wide ranking, look up WHERE the searched identifier's most-recent in-window
   // claim is (token already minted above). The claim ordering is byte-identical to the drill's.
   const [facRows, landingRaw] = await Promise.all([
@@ -366,8 +367,8 @@ export async function getQualifySnapshotByPayerCore(
   const gate = await deps.requirePrincipal();
   if (!gate.ok) throw new Error(gate.error); // fail-closed backstop (route guards are the primary gate)
 
-  const windowDays: QualifyWindowDays = input.windowDays;
-  if (!isQualifyWindow(windowDays)) throw new Error('Invalid window.');
+  const window: QualifyWindow = input.window;
+  if (!isQualifyWindow(window)) throw new Error('Invalid window.');
 
   const payer = (input.payer ?? '').trim();
   if (payer === '' || payer.length > 120) return emptySnapshot(gate.hasAmounts);
@@ -377,10 +378,10 @@ export async function getQualifySnapshotByPayerCore(
     actorEmail: gate.actor.email,
     actorUserId: gate.actor.userId,
     action: SEARCH_QUALIFY_PAYER,
-    detail: { payer, window: windowDays },
+    detail: { payer, window: serializeQualifyWindow(window) },
   });
 
-  const { from, to } = qualifyWindowBounds(windowDays, deps.now());
+  const { from, to } = qualifyWindowBounds(window, deps.now());
   const facRows = await deps.loadFacilities(payer, from, to, gate.entityIds, input.market);
 
   const facilities = assembleFacilities(facRows);
@@ -421,8 +422,8 @@ export async function getQualifySnapshotByNameCore(
   const gate = await deps.requirePrincipal();
   if (!gate.ok) throw new Error(gate.error); // fail-closed backstop (route guards are the primary gate)
 
-  const windowDays: QualifyWindowDays = input.windowDays;
-  if (!isQualifyWindow(windowDays)) throw new Error('Invalid window.');
+  const window: QualifyWindow = input.window;
+  if (!isQualifyWindow(window)) throw new Error('Invalid window.');
 
   const raw = (input.name ?? '').trim();
   if (raw === '' || raw.length > 120) return emptySnapshot(gate.hasAmounts);
@@ -440,13 +441,13 @@ export async function getQualifySnapshotByNameCore(
     actorEmail: gate.actor.email,
     actorUserId: gate.actor.userId,
     action: SEARCH_QUALIFY_NAME,
-    detail: { field: 'client_name', window: windowDays },
+    detail: { field: 'client_name', window: serializeQualifyWindow(window) },
   });
 
   const payerName = await deps.resolvePayer(token, 'client_name', gate.entityIds);
   if (!payerName) return emptySnapshot(gate.hasAmounts); // never-seen name → VOB (resolved stays null)
 
-  const { from, to } = qualifyWindowBounds(windowDays, deps.now());
+  const { from, to } = qualifyWindowBounds(window, deps.now());
   const [facRows, landingRaw] = await Promise.all([
     deps.loadFacilities(payerName, from, to, gate.entityIds, input.market),
     deps.loadIdentifierLandingFacility(token, 'client_name', payerName, from, to, gate.entityIds),
@@ -488,8 +489,8 @@ export async function getQualifyFacilityCasesCore(
   const gate = await deps.requirePrincipal();
   if (!gate.ok) throw new Error(gate.error); // fail-closed backstop (route guards are the primary gate)
 
-  const windowDays: QualifyWindowDays = input.windowDays;
-  if (!isQualifyWindow(windowDays)) throw new Error('Invalid window.');
+  const window: QualifyWindow = input.window;
+  if (!isQualifyWindow(window)) throw new Error('Invalid window.');
 
   const payer = (input.payer ?? '').trim();
   const facility = (input.facility ?? '').trim();
@@ -546,7 +547,7 @@ export async function getQualifyFacilityCasesCore(
     actorEmail: gate.actor.email,
     actorUserId: gate.actor.userId,
     action: SEARCH_QUALIFY_FACILITY,
-    detail: { payer, facility, window: windowDays, ...(narrowFields.length ? { fields: narrowFields } : {}) },
+    detail: { payer, facility, window: serializeQualifyWindow(window), ...(narrowFields.length ? { fields: narrowFields } : {}) },
   });
 
   // The drill returns the WHOLE (facility, payer, window) set — no keyset pager — capped at QUALIFY_CASES_MAX.
@@ -554,7 +555,7 @@ export async function getQualifyFacilityCasesCore(
   // a search) still applies (ruling 5). The builder over-fetches by one (limit+1) so `capped` is a length
   // check, not a count.
   const allPayers = input.allPayers === true;
-  const { from, to } = qualifyWindowBounds(windowDays, deps.now());
+  const { from, to } = qualifyWindowBounds(window, deps.now());
   const claimRows = await deps.loadFacilityCases(payer, facility, from, to, gate.entityIds, {
     prefixToken,
     memberToken,
@@ -591,8 +592,8 @@ export async function getQualifyPatientCohortCore(
   const gate = await deps.requirePrincipal();
   if (!gate.ok) throw new Error(gate.error); // fail-closed backstop
 
-  const windowDays: QualifyWindowDays = input.windowDays;
-  if (!isQualifyWindow(windowDays)) throw new Error('Invalid window.');
+  const window: QualifyWindow = input.window;
+  if (!isQualifyWindow(window)) throw new Error('Invalid window.');
   const suppressed: QualifyPatientCohort = {
     suppressed: true,
     floor: COHORT_MIN_PATIENTS,
@@ -616,7 +617,7 @@ export async function getQualifyPatientCohortCore(
     detail: {
       payer: (input.payer ?? '').slice(0, 120),
       facility: (input.facility ?? '').slice(0, 200),
-      window: windowDays,
+      window: serializeQualifyWindow(window),
       claimId: input.claimId,
     },
   });
@@ -645,14 +646,14 @@ export async function getQualifyPatientCohortCore(
 
 export async function getQualifyMoversCore(
   deps: QualifyDeps,
-  windowDays: QualifyWindowDays,
+  window: QualifyWindow,
   market?: VobMarketFilter,
 ): Promise<QualifyMovers> {
   const gate = await deps.requirePrincipal();
   if (!gate.ok) throw new Error(gate.error);
-  if (!isQualifyWindow(windowDays)) throw new Error('Invalid window.');
+  if (!isQualifyWindow(window)) throw new Error('Invalid window.');
 
-  const { from, to, priorFrom, priorTo } = qualifyWindowBounds(windowDays, deps.now());
+  const { from, to, priorFrom, priorTo } = qualifyWindowBounds(window, deps.now());
   const rows = await deps.loadMovers(from, to, priorFrom, priorTo, gate.entityIds, market);
   const movers: QualifyMover[] = rows.map((r, i) => ({
     rank: i + 1,
@@ -684,10 +685,10 @@ export async function getQualifyMoversCore(
  */
 export async function getQualifyInitialCore(
   deps: QualifyDeps,
-  windowDays: QualifyWindowDays,
+  window: QualifyWindow,
   market?: QualifyMarket,
 ): Promise<QualifyInitial> {
-  const movers = await getQualifyMoversCore(deps, windowDays, market);
+  const movers = await getQualifyMoversCore(deps, window, market);
   const top = movers.movers[0]?.label ?? null;
   const empty: QualifyInitial = {
     movers: movers.movers, topPayer: top, snapshot: null,
@@ -695,14 +696,14 @@ export async function getQualifyInitialCore(
   };
   if (!top) return empty;
 
-  const snapshot = await getQualifySnapshotByPayerCore(deps, { payer: top, windowDays, market });
+  const snapshot = await getQualifySnapshotByPayerCore(deps, { payer: top, window, market });
   const rank1 = snapshot.resolved ? snapshot.facilities[0]?.facilityKey ?? null : null;
   if (!snapshot.resolved || !rank1) return { ...empty, snapshot };
 
   const cases = await getQualifyFacilityCasesCore(deps, {
     payer: snapshot.resolved.payerName,
     facility: rank1,
-    windowDays,
+    window,
     market,
   });
   return {
@@ -746,13 +747,13 @@ function assembleTrend(r: QualifyFacilityTrendRow): QualifyFacilityTrend {
  */
 export async function getQualifyBookKpisCore(
   deps: QualifyDeps,
-  windowDays: QualifyWindowDays,
+  window: QualifyWindow,
   market?: QualifyMarket,
 ): Promise<QualifyBookKpis> {
   const gate = await deps.requirePrincipal();
   if (!gate.ok) throw new Error(gate.error);
-  if (!isQualifyWindow(windowDays)) throw new Error('Invalid window.');
-  const { from, to } = qualifyWindowBounds(windowDays, deps.now());
+  if (!isQualifyWindow(window)) throw new Error('Invalid window.');
+  const { from, to } = qualifyWindowBounds(window, deps.now());
   const row = await deps.loadBookKpis(from, to, gate.entityIds, market);
   return {
     pctAllowedOfBilled: row?.pct_allowed_of_billed ?? null,
@@ -771,13 +772,13 @@ export async function getQualifyBookKpisCore(
  */
 export async function getQualifyFacilityTrendsCore(
   deps: QualifyDeps,
-  windowDays: QualifyWindowDays,
+  window: QualifyWindow,
   opts?: { payer?: string | null; market?: QualifyMarket },
 ): Promise<QualifyFacilityTrend[]> {
   const gate = await deps.requirePrincipal();
   if (!gate.ok) throw new Error(gate.error);
-  if (!isQualifyWindow(windowDays)) throw new Error('Invalid window.');
-  const { from, to, priorFrom } = qualifyWindowBounds(windowDays, deps.now());
+  if (!isQualifyWindow(window)) throw new Error('Invalid window.');
+  const { from, to, priorFrom } = qualifyWindowBounds(window, deps.now());
   const rows = await deps.loadFacilityTrends(from, to, priorFrom, gate.entityIds, {
     payer: opts?.payer ?? null,
     market: opts?.market,
@@ -794,12 +795,12 @@ export async function getQualifyFacilityTrendsCore(
  */
 export async function getQualifyOverviewCore(
   deps: QualifyDeps,
-  windowDays: QualifyWindowDays,
+  window: QualifyWindow,
   market?: QualifyMarket,
 ): Promise<QualifyOverview> {
   const [kpis, trends] = await Promise.all([
-    getQualifyBookKpisCore(deps, windowDays, market),
-    getQualifyFacilityTrendsCore(deps, windowDays, { payer: null, market }),
+    getQualifyBookKpisCore(deps, window, market),
+    getQualifyFacilityTrendsCore(deps, window, { payer: null, market }),
   ]);
   const empty: QualifyOverview = {
     kpis, trends, topFacility: null, topPayer: null, snapshot: null, seedFacility: null, seedCases: [], seedCapped: false,
@@ -808,7 +809,7 @@ export async function getQualifyOverviewCore(
   const top = trends.find((t) => t.dominantPayer) ?? null;
   if (!top || !top.dominantPayer) return empty;
 
-  const snapshot = await getQualifySnapshotByPayerCore(deps, { payer: top.dominantPayer, windowDays, market });
+  const snapshot = await getQualifySnapshotByPayerCore(deps, { payer: top.dominantPayer, window, market });
   if (!snapshot.resolved) return { ...empty, topPayer: top.dominantPayer, topFacility: top.facilityKey, snapshot };
   // Scope to the trend facility IF it ranks under its dominant payer this window; else the payer's rank-1.
   const focus = snapshot.facilities.some((f) => f.facilityKey === top.facilityKey)
@@ -819,7 +820,7 @@ export async function getQualifyOverviewCore(
   const cases = await getQualifyFacilityCasesCore(deps, {
     payer: snapshot.resolved.payerName,
     facility: focus,
-    windowDays,
+    window,
     market,
   });
   return {

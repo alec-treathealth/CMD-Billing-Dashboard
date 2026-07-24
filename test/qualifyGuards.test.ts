@@ -52,7 +52,7 @@ test('isPayerChange: unresolved→unresolved is NOT a change; resolve/unresolve 
 // ── Drill stream (facilitySeq recency AND cohortKey identity) ────────────────────────────────────────
 
 // A live drill cohort: payer resolved (RESOLVE_PAYER), then a facility tapped (SWITCH_FACILITY).
-const RESOLVED = cohortReducer(INITIAL_COHORT, { type: 'RESOLVE_PAYER', payer: 'AETNA', facility: null, window: 30 });
+const RESOLVED = cohortReducer(INITIAL_COHORT, { type: 'RESOLVE_PAYER', payer: 'AETNA', facility: null, window: { kind: 'trailing', days: 30 } });
 const DRILL = cohortReducer(RESOLVED, { type: 'SWITCH_FACILITY', facility: 'fac-a' });
 
 test('drillLandingWins: a same-payer background resolution does NOT drop the open sheet drill', () => {
@@ -78,7 +78,7 @@ test('drillLandingWins: a wrong-cohort landing is dropped by identity even when 
 
 test('drillLandingWins: a window change underneath also flips identity (cohortKey includes window)', () => {
   const captured = cohortKey(DRILL);
-  const windowed = cohortKey(cohortReducer(DRILL, { type: 'CHANGE_WINDOW', window: 90 }));
+  const windowed = cohortKey(cohortReducer(DRILL, { type: 'CHANGE_WINDOW', window: { kind: 'trailing', days: 90 } }));
   assert.notEqual(captured, windowed, 'window is part of the cohort key');
   assert.equal(drillLandingWins(7, 7, captured, windowed), false, 'stale-window drill landing is dropped');
 });

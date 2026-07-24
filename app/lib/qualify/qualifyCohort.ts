@@ -12,7 +12,7 @@
  * (a facility/window change under an in-flight fetch must be caught). CHANGE_WINDOW keeps the facility — a
  * window change is the same selection re-fetched, NOT a teleport back to rank-1.
  */
-import type { QualifyWindowDays } from './contract';
+import { serializeQualifyWindow, trailingWindow, type QualifyWindow } from './contract';
 
 /** The cases panel's full cohort identity. */
 export interface QualifyCohort {
@@ -20,23 +20,23 @@ export interface QualifyCohort {
   payer: string | null;
   /** Selected facility key (raw rollup text = QualifyFacility.facilityKey). null = none selected. */
   facility: string | null;
-  window: QualifyWindowDays;
+  window: QualifyWindow;
 }
 
 export type QualifyCohortAction =
   /** A payer resolved (search / chip / on-load) — a brand-new cohort. `facility` is the auto-selected
    *  landing (Fix A) or rank-1, or null when the payer resolved with no facilities / unresolved. */
-  | { type: 'RESOLVE_PAYER'; payer: string | null; facility: string | null; window: QualifyWindowDays }
+  | { type: 'RESOLVE_PAYER'; payer: string | null; facility: string | null; window: QualifyWindow }
   /** Facility drill within the SAME payer. Keeps payer + window. */
   | { type: 'SWITCH_FACILITY'; facility: string }
   /** Window change on the SAME payer + facility. Keeps facility (no rank-1 teleport). */
-  | { type: 'CHANGE_WINDOW'; window: QualifyWindowDays };
+  | { type: 'CHANGE_WINDOW'; window: QualifyWindow };
 
 /** The default cohort — nothing resolved yet, window at the product default (QUALIFY_WINDOW_OPTIONS[0]). */
 export const INITIAL_COHORT: QualifyCohort = {
   payer: null,
   facility: null,
-  window: 30,
+  window: trailingWindow(30),
 };
 
 /**
@@ -47,7 +47,7 @@ export const INITIAL_COHORT: QualifyCohort = {
  * key collision.
  */
 export function cohortKey(c: QualifyCohort): string {
-  return JSON.stringify([c.payer, c.facility, c.window]);
+  return JSON.stringify([c.payer, c.facility, serializeQualifyWindow(c.window)]);
 }
 
 export function cohortReducer(state: QualifyCohort, action: QualifyCohortAction): QualifyCohort {
