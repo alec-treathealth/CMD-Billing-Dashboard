@@ -2,10 +2,11 @@
 #
 # HELD until the cron is provisioned. Before enabling the `schedule:` trigger below:
 #   1. apply supabase/migrations/0062_vob_sync_state.sql (watermark + deactivated_at soft-delete + sync_state);
-#   2. add the GitHub Actions secrets to THIS repo (Settings -> Secrets and variables -> Actions):
-#        MONDAY_API_TOKEN               (board 1606316049 read + files/assets)
+#   2. add these 2 GitHub Actions secrets to THIS repo (Settings -> Secrets and variables -> Actions):
 #        INDEX_HMAC_KEY                 (64-hex; MUST match the app's key so bidx tokens align)
 #        CMD_ROLLUP_WRITER_DATABASE_URL (Supavisor pooler:6543, user cmd_rollup_writer_login)
+#      (The Monday token is already present as secret MONDAY_API_SECRET_KEY and is reused below —
+#       it must be a board 1606316049 read token with files/assets scope.)
 #   3. run once via workflow_dispatch (supervised) and confirm vob.sync_state looks sane;
 #   4. then uncomment the `schedule:` block.
 # Until then this workflow only runs on manual dispatch, so merging it never fires the cron.
@@ -44,7 +45,7 @@ jobs:
         run: pip install "psycopg[binary]" pypdf requests
       - name: Run incremental sync
         env:
-          MONDAY_API_TOKEN: ${{ secrets.MONDAY_API_TOKEN }}
+          MONDAY_API_TOKEN: ${{ secrets.MONDAY_API_SECRET_KEY }}  # reuse the existing repo secret
           INDEX_HMAC_KEY: ${{ secrets.INDEX_HMAC_KEY }}
           CMD_ROLLUP_WRITER_DATABASE_URL: ${{ secrets.CMD_ROLLUP_WRITER_DATABASE_URL }}
         run: python etl/vob/vob_cron_sync.py
