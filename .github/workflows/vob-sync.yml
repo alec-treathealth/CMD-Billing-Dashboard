@@ -1,9 +1,12 @@
-# LIVE — daily incremental Monday -> vob.indigo_vob sync (enabled 2026-07-24 after 2 green supervised runs).
+# LIVE — daily incremental Monday -> vob.indigo_vob sync. This is the WORKER; the SCHEDULER is Vercel
+# Cron (/api/cron/vob-sync in app/vercel.json) so the job appears + is runnable alongside the other
+# crons in one control plane. Vercel fires daily 09:17 UTC and POSTs a workflow_dispatch here.
+# There is intentionally NO `schedule:` trigger — that would double-fire against the Vercel cron.
 #
 # Provisioned: 0062 + 0065 applied; secrets INDEX_HMAC_KEY + CMD_ROLLUP_WRITER_DATABASE_URL set; the
 # Monday token is reused from the existing MONDAY_API_SECRET_KEY secret (board 1606316049 read + files).
 # Health/telemetry: each run writes vob.sync_state (upserted/deactivated/reactivated/errors + a note
-# splitting errors into no_pdf vs download_fail). Also runnable on demand via workflow_dispatch.
+# splitting errors into no_pdf vs download_fail).
 #
 # TLS: the writer URL is sslmode=verify-full. In CI (no CA file) the sync script transparently
 # downgrades to sslmode=require (encrypted, no cert verify). To keep full verification, commit the
@@ -15,9 +18,7 @@
 name: vob-sync
 
 on:
-  schedule:
-    - cron: '17 9 * * *'         # daily 09:17 UTC
-  workflow_dispatch: {}          # also runnable on demand
+  workflow_dispatch: {}          # triggered by the Vercel cron (/api/cron/vob-sync); also runnable by hand
 
 concurrency:
   group: vob-sync
