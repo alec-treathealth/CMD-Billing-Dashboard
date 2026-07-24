@@ -613,16 +613,21 @@ export function QualifyTab({
   const resolvedPayerName = snapshot?.resolved?.payerName ?? null;
   useEffect(() => {
     if (initializing) return;
+    // Persist the payer/facility ONLY for a real USER resolution (search / card / facility click / URL
+    // restore → userSearched). The fresh AUTO-resolved landing must NOT write ?payer: otherwise a refresh
+    // reloads via the URL-restore branch (userSearched=true) and the Clear Search button appears, while a
+    // clean SPA-nav landing shows none — the two must agree. Window/LOC are view prefs and always persist
+    // (a payer-less ?window never triggers the restore branch, so it can't resurface the button).
     const qs = buildQualifySearchParams({
-      payer: resolvedPayerName,
-      facility: scoped ? cohort.facility : null,
+      payer: userSearched ? resolvedPayerName : null,
+      facility: userSearched && scoped ? cohort.facility : null,
       window: cohort.window,
       loc: locFilter,
     });
     router.replace(qs ? `?${qs}` : globalThis.location?.pathname ?? '/qualify', { scroll: false });
     // serializeQualifyWindow(cohort.window) is covered by cohort.window identity in the dep array.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initializing, resolvedPayerName, scoped, cohort.facility, cohort.window, locFilter, router]);
+  }, [initializing, userSearched, resolvedPayerName, scoped, cohort.facility, cohort.window, locFilter, router]);
 
   // ── AUTOSEARCH: debounced resolve on the id/client tabs (≥3 chars); Enter resolves immediately ──
   const autoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
