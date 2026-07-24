@@ -33,6 +33,18 @@ import {
 /** A member-id EXACT match vs a 3-letter alpha-PREFIX match — sniffed server-side, never client-declared. */
 export type QualifyMatchKind = 'member_id' | 'prefix';
 
+/** Every PHI blind-index a RESOLUTION can equality-match on: the two member kinds + the exact
+ *  client-name token (Change C, migration 0066/0067). The raw term is HMAC'd upstream — only the
+ *  opaque token and this kind label reach the builders. */
+export type QualifyTokenKind = QualifyMatchKind | 'client_name';
+
+/** kind → the rollup blind-index COLUMN it matches (fixed literals — never caller-supplied). */
+const TOKEN_COLUMN: Record<QualifyTokenKind, string> = {
+  member_id: 'member_id_bidx',
+  prefix: 'member_id_prefix_bidx',
+  client_name: 'patient_name_bidx',
+};
+
 /** Safety CAP for the facility recent-claims drill (claim grain). The drill is (facility, payer, window)-
  *  bounded — a bounded set, not an unbounded scan — so it returns the WHOLE window, not a keyset page. This
  *  is only a backstop: a facility with more than QUALIFY_CASES_MAX in-window claims is truncated to the most
@@ -118,14 +130,14 @@ const FACILITY_DIM_JOINS =
  */
 export function buildResolvePayerQuery(
   token: string,
-  kind: QualifyMatchKind,
+  kind: QualifyTokenKind,
   entityIds: string[],
 ): { sql: string; params: unknown[] } {
   const ent = assertEntityScope(entityIds, 'buildResolvePayerQuery');
   const { params, add } = paramList();
   const e = add(ent);
   const tok = add(token);
-  const col = kind === 'member_id' ? 'member_id_bidx' : 'member_id_prefix_bidx';
+  const col = TOKEN_COLUMN[kind];
   const sql =
     'select primary_payer ' +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
@@ -246,7 +258,7 @@ export function buildFacilityRankingQuery(
  */
 export function buildIdentifierLandingFacilityQuery(
   token: string,
-  kind: QualifyMatchKind,
+  kind: QualifyTokenKind,
   payer: string,
   from: string,
   to: string,
@@ -258,7 +270,7 @@ export function buildIdentifierLandingFacilityQuery(
   const p = add(payer);
   const f = add(from);
   const t = add(to);
-  const col = kind === 'member_id' ? 'member_id_bidx' : 'member_id_prefix_bidx';
+  const col = TOKEN_COLUMN[kind];
   const tok = add(token);
   const sql =
     'select facility ' +
@@ -301,6 +313,10 @@ export function buildFacilityCasesQuery(
     prefixToken?: string | null;
     /** Opaque member_id_bidx token (already HMAC'd upstream) — adds an EXACT member-id narrow (wins over prefix). */
     memberToken?: string | null;
+    /** Opaque patient_name_bidx token (already HMAC'd upstream) — the EXACT client-name narrow
+     *  (Change C). The identifier narrows are mutually exclusive in practice; precedence when
+     *  several arrive: member > prefix > name. */
+    nameToken?: string | null;
     /** Opaque group_number_bidx token (already HMAC'd upstream) — EXACT group-number narrow (the employer
      *  proxy; Phase 2). Composable: ANDs with the member narrows rather than competing with them. */
     groupToken?: string | null;
@@ -330,13 +346,15 @@ export function buildFacilityCasesQuery(
   const fac = add(facility);
   const f = add(from);
   const t = add(to);
-  // Identifier narrow (inner WHERE): exact member wins over prefix (mutually exclusive in practice). Both
-  // ride a charge-grain rollup index; the token is opaque (HMAC'd upstream), never the raw term.
+  // Identifier narrow (inner WHERE): member > prefix > client-name (mutually exclusive in practice).
+  // All ride charge-grain rollup indexes; the token is opaque (HMAC'd upstream), never the raw term.
   const idCond = opts.memberToken
     ? ` and member_id_bidx = ${add(opts.memberToken)}`
     : opts.prefixToken
       ? ` and member_id_prefix_bidx = ${add(opts.prefixToken)}`
-      : '';
+      : opts.nameToken
+        ? ` and patient_name_bidx = ${add(opts.nameToken)}`
+        : '';
   // Group-number narrow (EXACT; the employer proxy) — independent of the member narrow, so both can apply.
   const grpCond = opts.groupToken ? ` and group_number_bidx = ${add(opts.groupToken)}` : '';
   // VOB employer/funding market narrow (real employer data; complements the group_number proxy above).

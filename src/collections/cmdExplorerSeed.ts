@@ -40,7 +40,7 @@ import { normalizeDate, normalizeMoney, type Coerced } from './normalize.js';
 import { normalizeStatus } from './claimStatus.js';
 import { normalizeMemberId } from '../queries/identity.js';
 import { encryptPhi, fingerprintRow } from './phiCrypto.js';
-import { blindIndexesForRowSafe } from './blindIndex.js';
+import { blindIndexesForRowSafe, patientNameBlindIndexSafe } from './blindIndex.js';
 import { makeClient } from './db.js';
 import { withTenant } from '../veris/withTenant.js';
 import { BXR_ENTITY_ID } from '../tenants.js';
@@ -103,11 +103,11 @@ const INSERT_COLS = [
   'patient_name', 'member_id', 'group_number', 'charge_amount', 'allowed_amount',
   'insurance_payments', 'adjustments', 'patient_balance_due', 'primary_payer',
   'source_file', 'row_fingerprint', 'business_entity_id',
-  // Searchable PHI blind indexes (migration 0036) — keyed HMAC of the normalized member id /
-  // alpha prefix / group number, computed from plaintext here (before it's encrypted). Never
-  // the plaintext; safe to store + index. Absent when INDEX_HMAC_KEY is unset (search degrades
-  // gracefully — see blindIndex.ts) or the source value is blank.
-  'member_id_bidx', 'member_id_prefix_bidx', 'group_number_bidx',
+  // Searchable PHI blind indexes (migrations 0036 + 0066) — keyed HMAC of the normalized member
+  // id / alpha prefix / group number / patient name, computed from plaintext here (before it's
+  // encrypted). Never the plaintext; safe to store + index. Absent when INDEX_HMAC_KEY is unset
+  // (search degrades gracefully — see blindIndex.ts) or the source value is blank.
+  'member_id_bidx', 'member_id_prefix_bidx', 'group_number_bidx', 'patient_name_bidx',
   // Feed-1 dimension columns (②a, migration 0057) — non-PHI, appended LAST. buildInsertParams
   // pushes their values in this exact order. NOT encrypted, NOT in the fingerprint.
   'charge_id', 'charge_entered_date', 'charge_to_date', 'claim_status_raw', 'claim_status_category',
@@ -347,15 +347,17 @@ async function buildInsertParams(row: PlainRow, businessEntityId: string): Promi
     encryptPhi(row.member_id),
     row.group_number === null ? Promise.resolve(null) : encryptPhi(row.group_number),
   ]);
-  // Blind indexes from PLAINTEXT (before it's discarded); safe variant so a missing search key
-  // never breaks ingest (see blindIndex.ts). Same INSERT_COLS order.
+  // Blind indexes from PLAINTEXT (before it's discarded); safe variants so a missing search key
+  // never breaks ingest (see blindIndex.ts). Same INSERT_COLS order. patient_name_bidx (0066) is
+  // the Qualify client-name search token — exact normalized-name HMAC, never the plaintext.
   const bidx = blindIndexesForRowSafe(row.member_id, row.group_number);
+  const nameBidx = patientNameBlindIndexSafe(row.patient_name);
   return [
     row.charge_date, row.payment_received, row.cpt_code, row.revenue_code, row.facility,
     patient, member, group, row.charge_amount, row.allowed_amount,
     row.insurance_payments, row.adjustments, row.patient_balance_due, row.primary_payer,
     row.source_file, row.row_fingerprint, businessEntityId,
-    bidx.member_id_bidx, bidx.member_id_prefix_bidx, bidx.group_number_bidx,
+    bidx.member_id_bidx, bidx.member_id_prefix_bidx, bidx.group_number_bidx, nameBidx,
     // Feed-1 dimension columns (②a) — non-PHI plaintext, positional order matches INSERT_COLS.
     row.charge_id, row.charge_entered_date, row.charge_to_date, row.claim_status_raw, row.claim_status_category,
   ];

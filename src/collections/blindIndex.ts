@@ -116,6 +116,21 @@ export function patientNamePrefixBlindIndex(raw: string | null | undefined): str
   return hmac(norm.slice(0, ALPHA_PREFIX_LEN));
 }
 
+/**
+ * Ingest-safe patient-name blind index (Qualify client-name search, migration 0066): a missing/
+ * invalid INDEX_HMAC_KEY returns null instead of breaking the money-path ingest — rows simply
+ * aren't name-searchable until the key is set and cmdNameBidxBackfill.ts runs. Query paths use the
+ * throwing patientNameBlindIndex above so misconfiguration is visible, never silent nulls.
+ */
+export function patientNameBlindIndexSafe(raw: string | null | undefined): string | null {
+  try {
+    return patientNameBlindIndex(raw);
+  } catch (e) {
+    if (e instanceof BlindIndexError) return null;
+    throw e;
+  }
+}
+
 export interface RowBlindIndexes {
   member_id_bidx: string | null;
   member_id_prefix_bidx: string | null;

@@ -362,3 +362,25 @@ test('facility ranking now returns entity_ids (the BXR/Indigo/Mixed label source
   assert.ok(sql.includes('array_agg(distinct business_entity_id::text) as entity_ids'), 'entity_ids aggregated per facility');
   assert.ok(sql.includes('agg.entity_ids'), 'projected + grouped in the outer query');
 });
+
+// ── Change C: client-name blind-index resolution (patient_name_bidx, 0066/0067) ──────────────────
+test('client-name kind: resolve + landing match patient_name_bidx; the member kinds are untouched', () => {
+  const byName = buildResolvePayerQuery(TOKEN, 'client_name', BOTH);
+  assert.ok(byName.sql.includes('patient_name_bidx = $2'), 'name resolve equality-matches the name token column');
+  assert.ok(byName.params.includes(TOKEN), 'the opaque token is a bound param');
+  const landing = buildIdentifierLandingFacilityQuery(TOKEN, 'client_name', 'AETNA', '2026-06-17', '2026-07-17', BOTH);
+  assert.ok(landing.sql.includes('patient_name_bidx = $'), 'name landing matches the same column');
+  // Regression: the member kinds still hit their own columns.
+  assert.ok(buildResolvePayerQuery(TOKEN, 'member_id', BOTH).sql.includes('member_id_bidx = $2'));
+  assert.ok(buildResolvePayerQuery(TOKEN, 'prefix', BOTH).sql.includes('member_id_prefix_bidx = $2'));
+});
+
+test('cases drill: nameToken adds the exact-name narrow; member/prefix take precedence over it', () => {
+  const nameOnly = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, { nameToken: TOKEN });
+  assert.ok(nameOnly.sql.includes('patient_name_bidx = $'), 'name narrow applied');
+  const memberWins = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
+    memberToken: 'M'.repeat(64), nameToken: TOKEN,
+  });
+  assert.ok(memberWins.sql.includes('member_id_bidx = $'), 'member narrow applied');
+  assert.ok(!memberWins.sql.includes('patient_name_bidx'), 'name narrow yields to the member narrow');
+});

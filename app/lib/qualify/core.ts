@@ -18,6 +18,7 @@ import {
   QUALIFY_REVEAL_BATCH_CAP,
   type QualifyInput,
   type QualifyPayerInput,
+  type QualifyNameInput,
   type QualifyFacilityCasesInput,
   type QualifyFacilityCases,
   type QualifyPatientCohortInput,
@@ -43,6 +44,7 @@ import {
 import type { QualifyPrincipal } from './principal';
 import {
   QUALIFY_CASES_MAX,
+  type QualifyTokenKind,
   type QualifyFacilityRow,
   type QualifyClaimRow,
   type QualifyMoverRow,
@@ -54,6 +56,9 @@ import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../../../src/tenants';
 
 /** Distinct audit action labels (post reveal-audit-action fix) — Qualify surfaces are attributable. */
 export const SEARCH_QUALIFY_PHI = 'search_qualify_phi';
+/** Client-name search audit (Change C) — a name term was HMAC-resolved. Field NAME only; the raw
+ *  name never reaches the audit detail, a log line, or a URL. */
+export const SEARCH_QUALIFY_NAME = 'search_qualify_name';
 /** Resolve-by-payer audit — a payer LABEL was looked up (non-PHI, distinct from the PHI-term search). */
 export const SEARCH_QUALIFY_PAYER = 'search_qualify_payer';
 /** Facility drill audit — a payer's cases were narrowed to ONE facility (distinct, more-granular access). */
@@ -73,7 +78,10 @@ export interface QualifyDeps {
   /** Mint the EXACT group-number blind index (the employer proxy, Phase 2). Same key discipline as
    *  mintToken; null when the term normalizes to nothing. */
   mintGroupToken: (raw: string) => string | null;
-  resolvePayer: (token: string, kind: QualifyMatchKind, entityIds: string[]) => Promise<string | null>;
+  /** Mint the EXACT normalized-name blind index (Change C). Same key discipline; null when the
+   *  term normalizes to nothing. The raw name never leaves this call's argument. */
+  mintNameToken: (raw: string) => string | null;
+  resolvePayer: (token: string, kind: QualifyTokenKind, entityIds: string[]) => Promise<string | null>;
   loadFacilities: (
     payer: string,
     from: string,
@@ -84,7 +92,7 @@ export interface QualifyDeps {
   /** Fix A: raw facility of the searched identifier's most-recent in-window claim under the payer (or null). */
   loadIdentifierLandingFacility: (
     token: string,
-    kind: QualifyMatchKind,
+    kind: QualifyTokenKind,
     payer: string,
     from: string,
     to: string,
@@ -99,6 +107,7 @@ export interface QualifyDeps {
     opts: {
       prefixToken: string | null;
       memberToken: string | null;
+      nameToken: string | null;
       groupToken: string | null;
       limit: number;
       allPayers?: boolean;
@@ -395,6 +404,77 @@ export async function getQualifySnapshotByPayerCore(
 }
 
 /**
+ * Resolve by CLIENT NAME (Change C): HMAC the typed name against the EXACT normalized-name blind
+ * index (patient_name_bidx), resolve the dominant payer among matching rows, then the standard
+ * facility ranking + Fix-A landing (the client's most-recent in-window facility). Mirrors
+ * getQualifySnapshotCore's flow with three deliberate differences: (1) the token is minted by
+ * mintNameToken (patientNameBlindIndex — the 0049-parity normalization), never the member-id sniff;
+ * (2) the audit action is SEARCH_QUALIFY_NAME with field NAME only — the raw name reaches neither
+ * the audit detail nor any log/URL; (3) matchedValue is ALWAYS '' — a name is PHI and is never
+ * echoed back (unlike the ≤3-char alpha prefix). Names are not unique: the resolution spans every
+ * same-named patient cross-tenant (dominant payer wins) — the UI captions this.
+ */
+export async function getQualifySnapshotByNameCore(
+  deps: QualifyDeps,
+  input: QualifyNameInput,
+): Promise<QualifySnapshot> {
+  const gate = await deps.requirePrincipal();
+  if (!gate.ok) throw new Error(gate.error); // fail-closed backstop (route guards are the primary gate)
+
+  const windowDays: QualifyWindowDays = input.windowDays;
+  if (!isQualifyWindow(windowDays)) throw new Error('Invalid window.');
+
+  const raw = (input.name ?? '').trim();
+  if (raw === '' || raw.length > 120) return emptySnapshot(gate.hasAmounts);
+
+  let token: string | null;
+  try {
+    token = deps.mintNameToken(raw);
+  } catch {
+    throw new Error('Qualify search is temporarily unavailable.'); // key/config error, never PHI
+  }
+  if (!token) return emptySnapshot(gate.hasAmounts); // normalizes to nothing → nothing searched → no audit
+
+  // A real PHI search executed → audit BEFORE any data (field NAME only; never the term/token).
+  await deps.recordAccess({
+    actorEmail: gate.actor.email,
+    actorUserId: gate.actor.userId,
+    action: SEARCH_QUALIFY_NAME,
+    detail: { field: 'client_name', window: windowDays },
+  });
+
+  const payerName = await deps.resolvePayer(token, 'client_name', gate.entityIds);
+  if (!payerName) return emptySnapshot(gate.hasAmounts); // never-seen name → VOB (resolved stays null)
+
+  const { from, to } = qualifyWindowBounds(windowDays, deps.now());
+  const [facRows, landingRaw] = await Promise.all([
+    deps.loadFacilities(payerName, from, to, gate.entityIds, input.market),
+    deps.loadIdentifierLandingFacility(token, 'client_name', payerName, from, to, gate.entityIds),
+  ]);
+
+  const facilities = assembleFacilities(facRows);
+  const identifierLandingFacility =
+    landingRaw !== null && facilities.some((f) => f.facilityKey === landingRaw) ? landingRaw : null;
+  const resolved: QualifyResolved = {
+    payerName,
+    matchedOn: 'client_name',
+    matchedValue: '', // NEVER echo a name (PHI) — unlike the ≤3-char alpha prefix
+    totalCharges: facilities.reduce((s, f) => s + f.lineCount, 0),
+    facilityCount: facilities.length,
+    windowStart: from,
+    windowEnd: to,
+  };
+  const snap: QualifySnapshot = {
+    resolved,
+    facilities,
+    identifierLandingFacility,
+    viewerHasAmountsCapability: gate.hasAmounts,
+    tenantScope: QUALIFY_TENANT_SCOPE,
+  };
+  return gate.hasAmounts ? snap : stripSnapshotAmounts(snap); // stripAmounts LAST
+}
+
+/**
  * Facility drill (THE rendered recent-claims panel on both surfaces): the resolved payer's CLAIMS at ONE
  * facility (the desktop facility row + mobile facility-card tap), claim grain. Masking (assembleClaims),
  * tenancy scope, and the amounts choke point (stripClaimsAmounts) run here; the axes are the raw-facility-text
@@ -428,9 +508,11 @@ export async function getQualifyFacilityCasesCore(
   // <3-char prefix) yields no filter (parity with collections' alpha-prefix behavior).
   const memberId = (input.filter?.memberId ?? '').trim();
   const prefix = (input.filter?.prefix ?? '').trim();
+  const clientName = (input.filter?.clientName ?? '').trim();
   let memberToken: string | null = null;
   let prefixToken: string | null = null;
-  let narrowField: QualifyMatchKind | null = null;
+  let nameToken: string | null = null;
+  let narrowField: QualifyTokenKind | null = null;
   try {
     if (memberId !== '' && memberId.length <= 120) {
       memberToken = deps.mintToken(memberId, 'member_id');
@@ -438,6 +520,11 @@ export async function getQualifyFacilityCasesCore(
     } else if (prefix !== '' && prefix.length <= 40) {
       prefixToken = deps.mintToken(prefix, 'prefix');
       if (prefixToken) narrowField = 'prefix';
+    } else if (clientName !== '' && clientName.length <= 120) {
+      // Change C: the EXACT client-name narrow (carried from a name-resolving search). Same mint
+      // discipline — server-side, opaque, the raw name never logged.
+      nameToken = deps.mintNameToken(clientName);
+      if (nameToken) narrowField = 'client_name';
     }
   } catch {
     throw new Error('Qualify search is temporarily unavailable.'); // key/config error, never PHI
@@ -471,6 +558,7 @@ export async function getQualifyFacilityCasesCore(
   const claimRows = await deps.loadFacilityCases(payer, facility, from, to, gate.entityIds, {
     prefixToken,
     memberToken,
+    nameToken,
     groupToken,
     limit: QUALIFY_CASES_MAX,
     allPayers,

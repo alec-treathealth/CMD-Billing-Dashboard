@@ -134,7 +134,7 @@ import {
 } from '../../src/collections/qualifyQuery.js';
 import type { QualifyPatientCohortRaw } from './qualify/core';
 import type {
-  QualifyMatchKind,
+  QualifyTokenKind,
   QualifyResolvePayerRow,
   QualifyFacilityRow,
   QualifyClaimRow,
@@ -2087,7 +2087,7 @@ export async function revealClaimById(
 /** Dominant payer for a member/prefix blind-index token (UNWINDOWED identity). null = never-seen id. */
 export async function resolveQualifyPayer(
   token: string,
-  kind: QualifyMatchKind,
+  kind: QualifyTokenKind,
   entityIds: string[],
 ): Promise<string | null> {
   const q = buildResolvePayerQuery(token, kind, entityIds);
@@ -2113,7 +2113,7 @@ export async function loadQualifyFacilities(
  *  ranked facility). Reader-scoped, cross-tenant. The token is opaque (minted upstream); never logged. */
 export async function loadQualifyIdentifierLandingFacility(
   token: string,
-  kind: QualifyMatchKind,
+  kind: QualifyTokenKind,
   payer: string,
   from: string,
   to: string,
@@ -2137,6 +2137,7 @@ export async function loadQualifyFacilityCases(
   opts: {
     prefixToken: string | null;
     memberToken: string | null;
+    nameToken: string | null;
     groupToken: string | null;
     limit: number;
     allPayers?: boolean;
