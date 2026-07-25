@@ -152,7 +152,11 @@ export function HeatingUpCards({
       <button
         key={dup ? `dup-${t.facilityKey}` : t.facilityKey}
         type="button"
-        aria-pressed={active}
+        // Only the REAL card carries interactive state; the aria-hidden marquee duplicate is
+        // decorative (its pressed look comes from `active` in className below), so it must not
+        // advertise aria-pressed to AT or the DOM — otherwise an active card exposes the pressed
+        // state twice. `undefined` omits the attribute entirely on the duplicate.
+        aria-pressed={dup ? undefined : active}
         disabled={!openable}
         onClick={() => onOpen?.(t)}
         // The duplicate half is decorative: hide it from AT + the tab order (each facility appears once).
