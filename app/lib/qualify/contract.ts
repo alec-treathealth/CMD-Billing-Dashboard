@@ -239,10 +239,17 @@ export interface QualifyResolved {
   matchedOn: QualifyResolvedKind;
   /** Non-PHI alpha-prefix echo (<=3 chars). NEVER the raw member id — the client echoes its own input. */
   matchedValue: string;
-  totalCharges: number; // logical charges (rollup grain) for the resolved payer, in-window
+  totalCharges: number; // logical charges (rollup grain) — for an identifier search this is the SEARCHED
+  // identifier's footprint (only its matched rows), NOT the whole payer's book; for the by-payer path it
+  // is the payer's book. `identifierScoped` says which.
   facilityCount: number;
   windowStart: string; // ISO date (inclusive)
   windowEnd: string; // ISO date (exclusive)
+  /** True when the facility ranking + counts + ratings are narrowed to the SEARCHED identifier
+   *  (prefix/member/client-name) — only facilities that billed it in-window, rated on its matched claims.
+   *  False on the resolve-by-payer path (Heating-Up card / on-load / URL restore), which stays payer-wide.
+   *  Lets the UI caption the scope without re-deriving it from matchedOn. */
+  identifierScoped: boolean;
 }
 
 export interface QualifyFacility {

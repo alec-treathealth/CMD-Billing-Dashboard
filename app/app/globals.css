@@ -407,3 +407,39 @@
     transform: translateY(-6px);
   }
 }
+
+/*
+ * ── Qualify "Facilities Heating Up" MARQUEE — a seamless, always-moving ticker (brand-scroller style).
+ *    The track holds the card set TWICE and loops translateX to -50% (exactly one set), so it never
+ *    sits still (unlike the old rAF ping-pong that stalled when the strip barely overflowed). Pauses on
+ *    hover / keyboard focus so a card can be clicked while stationary. Under prefers-reduced-motion it
+ *    becomes a plain, manually-scrollable row (no auto motion) with the decorative duplicate hidden. The
+ *    per-instance speed is set inline (animation-duration) so it's steady regardless of card count. ──
+ */
+.q-marquee-track {
+  animation: q-marquee linear infinite;
+  will-change: transform;
+}
+.q-marquee:hover .q-marquee-track,
+.q-marquee:focus-within .q-marquee-track {
+  animation-play-state: paused;
+}
+@keyframes q-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .q-marquee {
+    overflow-x: auto;
+  }
+  .q-marquee-track {
+    animation-name: none;
+  }
+  .q-marquee-track [data-dup='true'] {
+    display: none;
+  }
+}

@@ -86,7 +86,7 @@ test('drillLandingWins: a window change underneath also flips identity (cohortKe
 // ── Fix A — identifier-landing helpers (shared by desktop + mobile) ──────────────────────────────────
 const resolved = (over: Partial<QualifyResolved>): QualifyResolved => ({
   payerName: 'AETNA', matchedOn: 'prefix', matchedValue: 'W29', totalCharges: 10, facilityCount: 3,
-  windowStart: '2026-06-17', windowEnd: '2026-07-17', ...over,
+  windowStart: '2026-06-17', windowEnd: '2026-07-17', identifierScoped: true, ...over,
 });
 
 test('isIdentifierResolution: true for a prefix/member search, false for the payer path / null', () => {

@@ -276,6 +276,26 @@ test('buildFacilityRankingQuery: a market funding filter adds the shared member_
   assert.doesNotMatch(sql, /join vob\.member_benefits_latest/i, 'semi-join, never a JOIN into the FROM');
 });
 
+// ── IDENTIFIER-SCOPED ranking: a prefix/member/name search narrows the ranking to that blind index, so the
+//    facility SET + line_count/billed/allowed/pct reflect ONLY the searched id's rows (not the payer book). ──
+test('buildFacilityRankingQuery: an identifier token narrows the ranking on the right blind index (bound param)', () => {
+  const pfx = buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH, {}, 'HMAC_PFX', 'prefix');
+  assert.ok(pfx.sql.includes('and member_id_prefix_bidx = $'), 'prefix → member_id_prefix_bidx equality');
+  assert.ok(pfx.params.includes('HMAC_PFX'), 'the token is a bound param, never inlined');
+
+  const mem = buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH, {}, 'HMAC_MEM', 'member_id');
+  assert.ok(mem.sql.includes('and member_id_bidx = $'), 'exact member → member_id_bidx equality');
+
+  const nm = buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH, {}, 'HMAC_NAME', 'client_name');
+  assert.ok(nm.sql.includes('and patient_name_bidx = $'), 'client name → patient_name_bidx equality');
+});
+
+test('buildFacilityRankingQuery: no identifier token → payer-wide, no blind-index predicate (byte-for-byte)', () => {
+  const wide = buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH);
+  assert.ok(!/(member_id_prefix_bidx|patient_name_bidx)/.test(wide.sql), 'no identifier predicate when payer-wide');
+  assert.ok(!wide.sql.includes('member_id_bidx = $'), 'no exact-member equality when payer-wide');
+});
+
 test('buildFacilityCasesQuery: a market employer filter narrows the inner WHERE via the semi-join', () => {
   const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
     market: { employers: ['BOEING'] },

@@ -24,7 +24,6 @@ import { qualifyWindowLabel } from '../../lib/qualify/contract';
 import type { QualifyBookKpis, QualifyFacilityTrend, QualifyWindow } from '../../lib/qualify/contract';
 import { RATING_HEX, staggerDelayMs } from './tokens';
 import { Spark } from './spark';
-import { useAutoScroll } from './useAutoScroll';
 
 const LOC_LABEL: Record<'IP' | 'OP' | 'BOTH', string> = { IP: 'IP', OP: 'OP', BOTH: 'Both' };
 
@@ -129,9 +128,81 @@ export function HeatingUpCards({
   /** The Change-E hybrid: resolve trend.dominantPayer AND scope to trend.facilityKey. Optional for tests. */
   onOpen?: (trend: QualifyFacilityTrend) => void;
 }) {
-  const scrollRef = useAutoScroll<HTMLDivElement>();
   if (trends.length === 0) return null;
   const range = qualifyWindowLabel(window);
+  // Continuous marquee (brand-scroller style): the set renders TWICE and the track loops translateX to
+  // -50%, so it reads as one seamless, always-moving strip (never the old ping-pong that could sit still
+  // when the strip barely overflowed). The duplicate copy is aria-hidden + tabIndex -1 + data-dup, so AT
+  // and keyboard see each facility ONCE. Hover / keyboard-focus pauses the loop so a card can be clicked
+  // while stationary; prefers-reduced-motion turns it into a plain, manually-scrollable row (globals.css
+  // `.q-marquee`). Duration scales with the card count so the speed is steady whether 3 or 15 cards.
+  const durationSec = Math.max(24, Math.round(trends.length * 4.2));
+
+  const card = (t: QualifyFacilityTrend, i: number, dup: boolean) => {
+    const bucket = ratingBucket(t.currentRating);
+    const hex = RATING_HEX[bucket];
+    const active = activeKey !== null && t.facilityKey === activeKey;
+    const loc = [t.city, t.state].filter(Boolean).join(', ');
+    // A card with no resolvable dominant payer can't drive the hybrid — render it inert (no hover-lift,
+    // default cursor, disabled) rather than a button whose click silently no-ops.
+    const openable = !!t.dominantPayer;
+    return (
+      <button
+        key={dup ? `dup-${t.facilityKey}` : t.facilityKey}
+        type="button"
+        aria-pressed={active}
+        disabled={!openable}
+        onClick={() => onOpen?.(t)}
+        // The duplicate half is decorative: hide it from AT + the tab order (each facility appears once).
+        {...(dup ? ({ 'aria-hidden': true, tabIndex: -1, 'data-dup': 'true' } as const) : {})}
+        title={
+          openable
+            ? `Open ${t.name} — resolves ${t.dominantPayer} and scopes the cases to this facility`
+            : `${t.name} — no dominant payer to resolve this window`
+        }
+        className={[
+          'w-[216px] flex-none rounded-xl border bg-card px-3.5 py-3 text-left',
+          'transition-[box-shadow,transform] duration-150 ease-out',
+          active
+            ? 'border-teal500 shadow-ths ring-2 ring-teal500/40'
+            : openable
+              ? 'border-line shadow-ths-sm hover:-translate-y-0.5 hover:shadow-ths'
+              : 'border-line shadow-ths-sm cursor-default',
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40',
+        ].join(' ')}
+      >
+        <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-ink900">
+          <span className="text-[10px] font-bold text-ink400">#{i + 1}</span>
+          <span aria-hidden className="q-dot inline-block h-1.5 w-1.5 rounded-full" style={{ background: hex }} />
+          <span className="truncate">{t.name}</span>
+          {t.careSetting ? (
+            <span className="ml-auto inline-flex shrink-0 items-center rounded-full bg-[#eef4f6] px-2 py-px text-[9px] font-extrabold uppercase tracking-wide text-status-info">
+              {LOC_LABEL[t.careSetting]}
+            </span>
+          ) : null}
+        </div>
+        <div className="mt-1.5 flex items-baseline gap-1.5 font-mono text-[24px] font-semibold leading-none text-ink900 tabular-nums">
+          {t.currentRating === null ? '—' : Math.round(t.currentRating)}
+          <span className="text-[13px] text-ink400">%</span>
+          <DeltaTicker deltaPts={t.deltaPts} />
+        </div>
+        <div className="my-1.5">
+          <Spark points={t.points} hex={hex} width={184} height={26} />
+        </div>
+        <div className="flex items-center justify-between gap-2 text-[10px] text-ink400">
+          {/* Change A: "n" is DEFINED — claim lines backing the rating, never a bare n=. */}
+          <span>
+            {t.lineCount.toLocaleString('en-US')} claim lines · {range}
+          </span>
+          <span className="truncate text-right">
+            {loc}
+            {t.entity ? `${loc ? ' · ' : ''}${t.entity}` : ''}
+          </span>
+        </div>
+      </button>
+    );
+  };
+
   return (
     <section>
       <div className="mb-2.5 flex items-center gap-2 px-0.5">
@@ -141,73 +212,16 @@ export function HeatingUpCards({
           Trending · {range}
         </span>
       </div>
-      {/* Auto-scrolling ticker (useAutoScroll): a plain scroll row (no role=list) so native <button>
-       *  semantics + aria-pressed survive for AT; the ref drives a slow ping-pong that pauses on any
-       *  interaction and resumes 5s after the pointer leaves (reduced-motion → no motion at all). */}
-      <div ref={scrollRef} className="flex gap-2.5 overflow-x-auto pb-2 pl-0.5 pr-0.5 pt-0.5">
-        {trends.map((t, i) => {
-          const bucket = ratingBucket(t.currentRating);
-          const hex = RATING_HEX[bucket];
-          const active = activeKey !== null && t.facilityKey === activeKey;
-          const loc = [t.city, t.state].filter(Boolean).join(', ');
-          // A card with no resolvable dominant payer can't drive the hybrid — render it inert (no
-          // hover-lift, default cursor, disabled) rather than a button whose click silently no-ops.
-          const openable = !!t.dominantPayer;
-          return (
-            <button
-              key={t.facilityKey}
-              type="button"
-              aria-pressed={active}
-              disabled={!openable}
-              onClick={() => onOpen?.(t)}
-              title={
-                openable
-                  ? `Open ${t.name} — resolves ${t.dominantPayer} and scopes the cases to this facility`
-                  : `${t.name} — no dominant payer to resolve this window`
-              }
-              className={[
-                'animate-ths-reveal w-[216px] flex-none rounded-xl border bg-card px-3.5 py-3 text-left',
-                'transition-[box-shadow,transform] duration-150 ease-out',
-                active
-                  ? 'border-teal500 shadow-ths ring-2 ring-teal500/40'
-                  : openable
-                    ? 'border-line shadow-ths-sm hover:-translate-y-0.5 hover:shadow-ths'
-                    : 'border-line shadow-ths-sm cursor-default',
-                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40',
-              ].join(' ')}
-              style={{ animationDelay: `${staggerDelayMs(i)}ms` }}
-            >
-              <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-ink900">
-                <span className="text-[10px] font-bold text-ink400">#{i + 1}</span>
-                <span aria-hidden className="q-dot inline-block h-1.5 w-1.5 rounded-full" style={{ background: hex }} />
-                <span className="truncate">{t.name}</span>
-                {t.careSetting ? (
-                  <span className="ml-auto inline-flex shrink-0 items-center rounded-full bg-[#eef4f6] px-2 py-px text-[9px] font-extrabold uppercase tracking-wide text-status-info">
-                    {LOC_LABEL[t.careSetting]}
-                  </span>
-                ) : null}
-              </div>
-              <div className="mt-1.5 flex items-baseline gap-1.5 font-mono text-[24px] font-semibold leading-none text-ink900 tabular-nums">
-                {t.currentRating === null ? '—' : Math.round(t.currentRating)}
-                <span className="text-[13px] text-ink400">%</span>
-                <DeltaTicker deltaPts={t.deltaPts} />
-              </div>
-              <div className="my-1.5">
-                <Spark points={t.points} hex={hex} width={184} height={26} />
-              </div>
-              <div className="flex items-center justify-between gap-2 text-[10px] text-ink400">
-                {/* Change A: "n" is DEFINED — claim lines backing the rating, never a bare n=. */}
-                <span>
-                  {t.lineCount.toLocaleString('en-US')} claim lines · {range}
-                </span>
-                <span className="truncate text-right">
-                  {loc}
-                  {t.entity ? `${loc ? ' · ' : ''}${t.entity}` : ''}
-                </span>
-              </div>
-            </button>
-          );
-        })}
+      {/* Marquee viewport — pauses on hover / keyboard focus (globals.css). role/list omitted so native
+       *  <button> semantics + aria-pressed survive for AT; the aria-hidden duplicate keeps that clean. */}
+      <div className="q-marquee group relative overflow-hidden pb-2">
+        <div
+          className="q-marquee-track flex w-max gap-2.5 pl-0.5 pr-0.5 pt-0.5"
+          style={{ animationDuration: `${durationSec}s` }}
+        >
+          {trends.map((t, i) => card(t, i, false))}
+          {trends.map((t, i) => card(t, i, true))}
+        </div>
       </div>
     </section>
   );

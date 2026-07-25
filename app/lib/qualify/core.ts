@@ -89,6 +89,10 @@ export interface QualifyDeps {
     to: string,
     entityIds: string[],
     market?: VobMarketFilter,
+    /** Optional identifier narrow (prefix/member/client-name blind-index token + its kind): scopes the
+     *  ranking to that identifier's footprint. Null (the by-payer path) = the payer-wide book. */
+    token?: string | null,
+    kind?: QualifyTokenKind | null,
   ) => Promise<QualifyFacilityRow[]>;
   /** Fix A: raw facility of the searched identifier's most-recent in-window claim under the payer (or null). */
   loadIdentifierLandingFacility: (
@@ -224,9 +228,12 @@ function entityLabel(entityIds: string[] | null | undefined): 'BXR' | 'Indigo' |
  * a degenerate "100% on 1 line" fluke never surfaces — but a genuinely small facility (>= the floor)
  * ranks on its merit, never demoted for being small.
  */
-function assembleFacilities(rows: QualifyFacilityRow[]): QualifyFacility[] {
+function assembleFacilities(rows: QualifyFacilityRow[], applyFloor = true): QualifyFacility[] {
   return rows
-    .filter((r) => r.line_count >= QUALIFY_MIN_LINES)
+    // FLOOR (payer-wide only): drop < QUALIFY_MIN_LINES flukes. An IDENTIFIER-scoped ranking passes
+    // applyFloor=false — every facility the searched id billed is relevant (even a single claim), and the
+    // "thin sample" flag (lineCount) communicates the small n instead of hiding the facility.
+    .filter((r) => !applyFloor || r.line_count >= QUALIFY_MIN_LINES)
     .map((r) => ({
       rank: 0,
       name: r.facility_name ?? r.facility,
@@ -324,15 +331,18 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
   const { from, to } = qualifyWindowBounds(window, deps.now());
   // Fix A: alongside the payer-wide ranking, look up WHERE the searched identifier's most-recent in-window
   // claim is (token already minted above). The claim ordering is byte-identical to the drill's.
+  // Identifier-scoped ranking: the ranking is narrowed to the SEARCHED token's footprint (only facilities
+  // that billed it in-window; counts/ratings over its matched rows), so the left panel + band counts +
+  // Recent Claims all describe the same identifier — not the whole payer book (ruling: the payer is step 1
+  // of the drilldown, the facilities the user sees must be the ones that billed what they searched).
   const [facRows, landingRaw] = await Promise.all([
-    deps.loadFacilities(payerName, from, to, gate.entityIds, input.market),
+    deps.loadFacilities(payerName, from, to, gate.entityIds, input.market, token, kind),
     deps.loadIdentifierLandingFacility(token, kind, payerName, from, to, gate.entityIds),
   ]);
 
-  const facilities = assembleFacilities(facRows);
-  // Approach (ii): keep the landing facility ONLY if it is a ranked (floor-clearing) facility — i.e. present
-  // in the assembled facilities[] set (same floor as assembleFacilities, no duplication). A below-floor-only
-  // identifier (or none in-window) collapses to null → the frontends render the honest "widen the window" state.
+  const facilities = assembleFacilities(facRows, false); // no floor — every facility the id billed is relevant
+  // The landing facility is guaranteed present in the identifier-scoped set when it billed in-window; keep
+  // it only if so (a never-in-window identifier collapses to null → the honest "widen the window" state).
   const identifierLandingFacility =
     landingRaw !== null && facilities.some((f) => f.facilityKey === landingRaw) ? landingRaw : null;
   const resolved: QualifyResolved = {
@@ -343,6 +353,7 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
     facilityCount: facilities.length,
     windowStart: from,
     windowEnd: to,
+    identifierScoped: true,
   };
   const snap: QualifySnapshot = {
     resolved,
@@ -395,6 +406,7 @@ export async function getQualifySnapshotByPayerCore(
     facilityCount: facilities.length,
     windowStart: from,
     windowEnd: to,
+    identifierScoped: false, // by-payer stays payer-wide (no identifier narrow)
   };
   const snap: QualifySnapshot = {
     resolved,
@@ -450,12 +462,13 @@ export async function getQualifySnapshotByNameCore(
   if (!payerName) return emptySnapshot(gate.hasAmounts); // never-seen name → VOB (resolved stays null)
 
   const { from, to } = qualifyWindowBounds(window, deps.now());
+  // Identifier-scoped ranking (same as the member/prefix path) — narrowed to the searched name's footprint.
   const [facRows, landingRaw] = await Promise.all([
-    deps.loadFacilities(payerName, from, to, gate.entityIds, input.market),
+    deps.loadFacilities(payerName, from, to, gate.entityIds, input.market, token, 'client_name'),
     deps.loadIdentifierLandingFacility(token, 'client_name', payerName, from, to, gate.entityIds),
   ]);
 
-  const facilities = assembleFacilities(facRows);
+  const facilities = assembleFacilities(facRows, false); // no floor — every facility the name billed is relevant
   const identifierLandingFacility =
     landingRaw !== null && facilities.some((f) => f.facilityKey === landingRaw) ? landingRaw : null;
   const resolved: QualifyResolved = {
@@ -466,6 +479,7 @@ export async function getQualifySnapshotByNameCore(
     facilityCount: facilities.length,
     windowStart: from,
     windowEnd: to,
+    identifierScoped: true,
   };
   const snap: QualifySnapshot = {
     resolved,
