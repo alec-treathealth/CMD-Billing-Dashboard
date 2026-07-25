@@ -22,7 +22,14 @@ function isPublicPath(pathname: string): boolean {
     pathname === '/login' ||
     pathname === '/forgot-password' ||
     pathname.startsWith('/auth/') ||
-    pathname.startsWith('/api/')
+    pathname.startsWith('/api/') ||
+    // Mobile-PWA install assets must be fetchable WITHOUT a session: browsers request the manifest
+    // without credentials, and a service-worker script cannot sit behind an auth redirect (both
+    // would otherwise 307 → /login and the PWA silently fails to install). Neither carries PHI —
+    // the manifest is static app metadata; sw.js is a shell-cache script. (The .svg icon is
+    // already excluded by the middleware matcher.)
+    pathname === '/qualify/m/manifest.webmanifest' ||
+    pathname === '/qualify/m/sw.js'
   );
 }
 

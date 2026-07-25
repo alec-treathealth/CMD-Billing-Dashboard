@@ -15,6 +15,8 @@
  * place of `<HeroMark/>` if you'd rather show actual logos.
  */
 
+import { QUALIFY_CLIENT_NAME_ENABLED } from '@/lib/qualify/contract';
+
 function HeroMark() {
   return (
     <span
@@ -51,11 +53,18 @@ export function QualifyLandingHero() {
           Search to qualify a lead
         </h2>
         <p className="mt-2 text-sm leading-relaxed text-ink600">
-          Enter a member ID, a 3-letter alpha prefix, or a client name — or tap a{' '}
-          <span className="font-semibold text-teal700">Facility Heating Up</span> above to resolve its payer.
+          Enter{' '}
+          {QUALIFY_CLIENT_NAME_ENABLED
+            ? 'a member ID, a 3-letter alpha prefix, or a client name'
+            : 'a member ID or a 3-letter alpha prefix'}{' '}
+          — or tap a <span className="font-semibold text-teal700">Facility Heating Up</span> above to resolve its
+          payer.
         </p>
         <div className="mt-5 flex flex-wrap items-center justify-center gap-2 text-[11px] font-semibold">
-          {['Member ID', 'Alpha prefix', 'Client name'].map((t) => (
+          {(QUALIFY_CLIENT_NAME_ENABLED
+            ? ['Member ID', 'Alpha prefix', 'Client name']
+            : ['Member ID', 'Alpha prefix']
+          ).map((t) => (
             <span key={t} className="rounded-full border border-teal200 bg-teal50/70 px-2.5 py-1 text-teal700">
               {t}
             </span>

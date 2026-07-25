@@ -195,6 +195,7 @@ export function QualifyTab({
   marketRef.current = market;
   const marketKey = `${employerSelection.join('\n')}|${fundingSelection.join('\n')}`;
   const [initializing, setInitializing] = useState(true);
+  const [overviewError, setOverviewError] = useState(false); // book overview strip (KPIs + trends) failed to load
   // PHI reveal cache (per-patient, audited) + the Change-B global toggle. In-memory ONLY.
   const [revealed, setRevealed] = useState<Map<number, QualifyPhi>>(() => new Map());
   const revealedRef = useRef(revealed);
@@ -301,9 +302,13 @@ export function QualifyTab({
         if (overviewGenRef.current !== ogen) return; // superseded by a newer window/market strip fetch
         setKpis(ov.kpis);
         setTrends(ov.trends);
+        setOverviewError(false);
       })
       .catch(() => {
-        /* strip refresh is non-blocking — stale tiles beat a broken search */
+        // strip refresh is non-blocking — stale tiles beat a broken search — but surface a retry
+        // affordance (guarded so a superseded failure can't flag a newer, successful load).
+        if (overviewGenRef.current !== ogen) return;
+        setOverviewError(true);
       });
   }, []);
 
@@ -589,7 +594,8 @@ export function QualifyTab({
           setTrends(ov.trends);
         }
       } catch {
-        // leave the empty prompt — the user can still search
+        // initial strip/restore failed — surface a retry (the user can still search meanwhile).
+        if (alive && genRef.current === gen) setOverviewError(true);
       } finally {
         if (alive) setInitializing(false);
       }
@@ -869,6 +875,22 @@ export function QualifyTab({
           Admissions lead qualification · the book at a glance, and the resolved payer below
         </p>
       </div>
+
+      {overviewError ? (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-card px-4 py-3 text-sm"
+        >
+          <span className="text-status-danger">Couldn’t load the book overview — your search still works.</span>
+          <button
+            type="button"
+            onClick={() => refreshOverview(cohort.window)}
+            className="rounded-lg border border-line px-3 py-1 text-[13px] font-semibold text-ink900 transition-colors hover:bg-background"
+          >
+            Retry
+          </button>
+        </div>
+      ) : null}
 
       {/* ── OVERVIEW TICKER: Facilities Heating Up — auto-scrolling, ABOVE the finder (stock-ticker
           placement). The skeleton holds the strip's space while the book-wide trend query resolves, so
