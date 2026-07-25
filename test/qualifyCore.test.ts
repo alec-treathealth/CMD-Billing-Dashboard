@@ -57,6 +57,7 @@ const REVEAL_PHI = { patient_name: 'DOE, JANE', member_id_raw: 'AETMEMBER123', g
 interface Cap {
   audits: Array<{ action: string; detail: Record<string, unknown> }>;
   facilityEntityIds: string[][];
+  facilitiesArgs: Array<{ payer: string; token: string | null; kind: string | null; entityIds: string[] }>;
   landingArgs: Array<{ kind: string; payer: string; entityIds: string[] }>;
   revealActions: string[];
   facilityCasesArgs: Array<{
@@ -71,7 +72,7 @@ interface Cap {
   }>;
 }
 function cap(): Cap {
-  return { audits: [], facilityEntityIds: [], landingArgs: [], revealActions: [], facilityCasesArgs: [] };
+  return { audits: [], facilityEntityIds: [], facilitiesArgs: [], landingArgs: [], revealActions: [], facilityCasesArgs: [] };
 }
 
 const SUPER = () => requireQualifyPrincipalFromAccess({ ok: true, access: { user: { email: 's@t.ai', id: 's' }, role: 'super_admin' } });
@@ -85,8 +86,9 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
     mintGroupToken: () => 'GROUP_HMAC_TOKEN', // never the raw group #
     mintNameToken: () => 'NAME_HMAC_TOKEN', // never the raw name
     resolvePayer: async () => 'AETNA',
-    loadFacilities: async (_p, _f, _t, entityIds) => {
+    loadFacilities: async (payer, _f, _t, entityIds, _market, token, kind) => {
       c.facilityEntityIds.push(entityIds);
+      c.facilitiesArgs.push({ payer, token: token ?? null, kind: kind ?? null, entityIds });
       return FAC_ROWS;
     },
     // Fix A: default fake lands the identifier on '405 recovery' (a ranked FAC_ROWS facility) so the core
@@ -142,18 +144,56 @@ test('snapshot: a small high-% facility RANKS ABOVE a large mid-% one (value-fir
   assert.equal(snap.facilities[1]!.rank, 2);
 });
 
-// ── #1b FLOOR: a below-QUALIFY_MIN_LINES fluke never surfaces (but genuinely small facilities do) ────
-test('snapshot: a below-floor facility (< QUALIFY_MIN_LINES charge lines) is suppressed from the list', async () => {
-  const deps = makeDeps(SUPER, cap(), {
-    loadFacilities: async () => [
-      { facility: 'fluke', facility_name: 'FLUKE 100%', facility_code: null, care_setting: null, line_count: QUALIFY_MIN_LINES - 1, confirmed_claims: QUALIFY_MIN_LINES - 1, estimate_claims: 0, unknown_claims: 0, billed: 100, allowed: 100, pct_allowed: 100, entity_ids: [BXR_ENTITY_ID] },
-      ...FAC_ROWS,
-    ],
-  });
-  const snap = await getQualifySnapshotCore(deps, IN);
-  assert.ok(!snap.facilities.some((f) => f.name === 'FLUKE 100%'), 'a 100%-on-1-line fluke is filtered out (below floor)');
+const BELOW_FLOOR_ROW = { facility: 'fluke', facility_name: 'FLUKE 100%', facility_code: null, care_setting: null, line_count: QUALIFY_MIN_LINES - 1, confirmed_claims: QUALIFY_MIN_LINES - 1, estimate_claims: 0, unknown_claims: 0, billed: 100, allowed: 100, pct_allowed: 100, entity_ids: [BXR_ENTITY_ID] };
+
+// ── #1b FLOOR: applies on the PAYER-WIDE (by-payer) path — a fluke never surfaces in the payer's book. ──
+test('snapshot by-payer: a below-floor facility (< QUALIFY_MIN_LINES) is suppressed from the payer-wide list', async () => {
+  const deps = makeDeps(SUPER, cap(), { loadFacilities: async () => [BELOW_FLOOR_ROW, ...FAC_ROWS] });
+  const snap = await getQualifySnapshotByPayerCore(deps, { payer: 'AETNA', window: W30 });
+  assert.ok(!snap.facilities.some((f) => f.name === 'FLUKE 100%'), 'a 100%-on-1-line fluke is filtered out (payer-wide floor)');
   assert.equal(snap.facilities.length, 2); // only the two genuine facilities remain
-  assert.equal(snap.facilities[0]!.name, 'CA MENTAL HEALTH'); // still value-first ranked (60% > 55%)
+});
+
+// ── #1c IDENTIFIER SCOPE: the floor is BYPASSED on a search — every facility the searched id billed is
+//     shown (even 1 line), because that IS the answer the user asked for; "thin sample" flags the small n. ──
+test('snapshot (identifier search): below-floor facilities are KEPT — the floor is bypassed for the searched footprint', async () => {
+  const deps = makeDeps(SUPER, cap(), { loadFacilities: async () => [BELOW_FLOOR_ROW, ...FAC_ROWS] });
+  const snap = await getQualifySnapshotCore(deps, IN); // member_id search
+  assert.ok(snap.facilities.some((f) => f.name === 'FLUKE 100%'), 'a 1-line facility the identifier billed is shown (no floor on identifier scope)');
+  assert.equal(snap.resolved?.identifierScoped, true, 'the ranking is flagged identifier-scoped');
+});
+
+// The token + kind reach the ranking loader so ONLY facilities that billed the searched id rank
+// (fixes the "22 facilities / 1,976 lines" payer-wide leak on a prefix search).
+test('snapshot (member search): passes the token + kind=member_id to the ranking loader', async () => {
+  const c = cap();
+  await getQualifySnapshotCore(makeDeps(SUPER, c), { query: 'ZQX998877', window: W30 }); // long → member_id
+  assert.equal(c.facilitiesArgs[0]!.token, 'HMAC_TOKEN', 'the minted token narrows the ranking');
+  assert.equal(c.facilitiesArgs[0]!.kind, 'member_id', 'the sniffed kind reaches the ranking loader');
+});
+
+test('snapshot (prefix search): passes the token + kind=prefix to the ranking loader; identifierScoped true', async () => {
+  const c = cap();
+  const snap = await getQualifySnapshotCore(makeDeps(SUPER, c), { query: 'ZQX', window: W30 }); // 3 chars → prefix
+  assert.equal(c.facilitiesArgs[0]!.kind, 'prefix');
+  assert.equal(c.facilitiesArgs[0]!.token, 'HMAC_TOKEN');
+  assert.equal(snap.resolved?.identifierScoped, true);
+});
+
+test('snapshot by client name: passes the name token + kind=client_name to the ranking loader; identifierScoped true', async () => {
+  const c = cap();
+  const snap = await getQualifySnapshotByNameCore(makeDeps(SUPER, c), { name: 'DOE, JANE', window: W30 });
+  assert.equal(c.facilitiesArgs[0]!.token, 'NAME_HMAC_TOKEN');
+  assert.equal(c.facilitiesArgs[0]!.kind, 'client_name');
+  assert.equal(snap.resolved?.identifierScoped, true);
+});
+
+test('snapshot by-payer: passes NO token to the ranking loader (payer-wide); identifierScoped false', async () => {
+  const c = cap();
+  const snap = await getQualifySnapshotByPayerCore(makeDeps(SUPER, c), { payer: 'AETNA', window: W30 });
+  assert.equal(c.facilitiesArgs[0]!.token, null, 'by-payer never narrows the ranking');
+  assert.equal(c.facilitiesArgs[0]!.kind, null);
+  assert.equal(snap.resolved?.identifierScoped, false);
 });
 
 // ── #2 AMOUNTS wire-level, BOTH actions, BOTH states ─────────────────────────────────────────────

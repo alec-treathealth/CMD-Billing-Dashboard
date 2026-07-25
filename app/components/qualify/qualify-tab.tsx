@@ -1084,9 +1084,11 @@ export function QualifyTab({
           <div className="mt-2 flex flex-wrap gap-4 text-[13px] text-[#cfe4e0]">
             <span>
               <b className="font-mono text-white">{resolved.totalCharges.toLocaleString('en-US')}</b> claim lines
+              {resolved.identifierScoped && drillFilterCaption ? ` matching ${drillFilterCaption}` : ''}
             </span>
             <span>
-              across <b className="font-mono text-white">{resolved.facilityCount}</b> facilities
+              across <b className="font-mono text-white">{resolved.facilityCount}</b>{' '}
+              {resolved.facilityCount === 1 ? 'facility' : 'facilities'}
             </span>
             <span>
               window <b className="font-mono text-white">{formatWindowRange(resolved.windowStart, resolved.windowEnd)}</b>{' '}
@@ -1110,6 +1112,11 @@ export function QualifyTab({
             onSelect={selectFacility}
             pinned={scoped}
             onClearPin={clearFacilityScope}
+            scopeNote={
+              resolved?.identifierScoped && drillFilterCaption
+                ? `Only facilities that billed ${drillFilterCaption} in this window`
+                : null
+            }
           />
           <div aria-busy={isFacilityPending} className={['transition-opacity', isFacilityPending ? 'opacity-60' : ''].join(' ')}>
             <CasesTable

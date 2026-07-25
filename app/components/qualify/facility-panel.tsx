@@ -55,6 +55,7 @@ export function FacilityPanel({
   onSelect,
   pinned = false,
   onClearPin,
+  scopeNote = null,
 }: {
   facilities: readonly QualifyFacility[];
   hasAmounts: boolean;
@@ -63,6 +64,10 @@ export function FacilityPanel({
   selectedKey?: string | null;
   /** Re-scope the cases panel to this facility (its raw rollup facilityKey). Optional for tests. */
   onSelect?: (facilityKey: string) => void;
+  /** When set (an identifier search), a NON-PHI note that this list is the SEARCHED identifier's
+   *  footprint — only facilities that billed it in-window — not the payer's whole book. Shown in list
+   *  mode (not when a single facility is pinned). Null on the payer-wide path. */
+  scopeNote?: string | null;
   /** Change E — FACILITY-SCOPED mode: render ONLY the selected facility as a pinned summary card
    *  (name, rating, coverage) with the "× All facilities" clear pill — never a fully-collapsed panel. */
   pinned?: boolean;
@@ -101,6 +106,8 @@ export function FacilityPanel({
         <p className="px-4 pb-1 text-[11px] text-muted-foreground">
           Scoped to this facility — cases at right are its recent claims only.
         </p>
+      ) : scopeNote ? (
+        <p className="px-4 pb-1 text-[11px] font-medium text-teal700">{scopeNote}</p>
       ) : null}
 
       {/* ALL facilities render (server returns the full set, no LIMIT); the cap is gone. */}

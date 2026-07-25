@@ -195,6 +195,8 @@ export function buildFacilityRankingQuery(
   to: string,
   entityIds: string[],
   market: VobMarketFilter = {},
+  token: string | null = null,
+  kind: QualifyTokenKind | null = null,
 ): { sql: string; params: unknown[] } {
   const ent = assertEntityScope(entityIds, 'buildFacilityRankingQuery');
   const { params, add } = paramList();
@@ -202,6 +204,15 @@ export function buildFacilityRankingQuery(
   const p = add(payer);
   const f = add(from);
   const t = add(to);
+  // Optional IDENTIFIER narrow: a prefix/member/client-name search scopes the ranking to that
+  // identifier's FOOTPRINT — only facilities that billed it in-window rank, and each facility's
+  // line_count / billed / allowed / pct are computed over ONLY the matched rows (applied inside the
+  // per-facility aggregate below, so the returned facility SET and every count follow). The blind-index
+  // column is a fixed literal from TOKEN_COLUMN (never caller text); the token is a bound param. Both
+  // null (the by-payer resolve path) = the payer-wide ranking, byte-for-byte unchanged. Hits the rollup's
+  // member_id_bidx / member_id_prefix_bidx index (0059) — additive to the existing payer+window filter,
+  // so it only narrows the scan (never a regression).
+  const idNarrow = token && kind ? `and ${TOKEN_COLUMN[kind]} = ${add(token)} ` : '';
   // VOB employer/funding market narrow (semi-join; no-VOB excluded when active). Same helper the
   // collections grid uses, so the two surfaces filter the market identically.
   const mj = buildVobMarketSemiJoin(market, add);
@@ -224,6 +235,7 @@ export function buildFacilityRankingQuery(
     `where business_entity_id = any(${e}::uuid[]) and primary_payer = ${p} ` +
     `and payment_received >= ${f}::date and payment_received < ${t}::date ` +
     "and facility is not null and btrim(facility) <> '' " +
+    idNarrow +
     (mj ? `and ${mj} ` : '') +
     'group by facility';
   const sql =
@@ -516,8 +528,9 @@ export function buildBookKpisQuery(
 /** Number of evenly-spaced sub-window buckets in a facility sparkline (fixed so density is consistent
  *  across 30/60/90 and calendar windows — weekly buckets would give only ~4 points at 30d). */
 export const QUALIFY_TREND_BUCKETS = 8;
-/** Default "Facilities Heating Up" size (top-N by rating delta). */
-export const QUALIFY_TREND_TOP_N = 8;
+/** Default "Facilities Heating Up" size (top-N by rating delta). 15 — the ticker is a continuous
+ *  marquee, so more cards just make a longer, richer loop (was 8). */
+export const QUALIFY_TREND_TOP_N = 15;
 /** Trend floor — a facility needs at least this many CURRENT-window lines to rank (kills 1–2-line
  *  flukes). Mirrors rating.ts QUALIFY_MIN_LINES; kept as a local literal so this src/ module never
  *  imports from app/ (the dependency points the wrong way). Keep the two values in lockstep. */

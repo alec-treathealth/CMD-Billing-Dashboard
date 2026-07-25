@@ -2102,8 +2102,10 @@ export async function loadQualifyFacilities(
   to: string,
   entityIds: string[],
   market: VobMarketFilter = {},
+  token: string | null = null,
+  kind: QualifyTokenKind | null = null,
 ): Promise<QualifyFacilityRow[]> {
-  const q = buildFacilityRankingQuery(payer, from, to, entityIds, market);
+  const q = buildFacilityRankingQuery(payer, from, to, entityIds, market, token, kind);
   const { rows } = await readerExecutor().query<QualifyFacilityRow>(q.sql, q.params);
   return rows;
 }
