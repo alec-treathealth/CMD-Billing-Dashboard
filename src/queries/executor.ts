@@ -18,6 +18,18 @@ export function makeReaderPool(connectionString: string): pg.Pool {
     ssl: verifyFullSsl(),
     max: 4,
     application_name: 'claims-query',
+    // Safety ceilings so a runaway/stalled read can't pin a connection in this SHARED reader pool
+    // forever (a saturated {max:4} pool otherwise blocks unrelated app reads — collections,
+    // dashboard, qualify — with NO upper bound). These are GENEROUS on purpose: one pool serves
+    // every app read, INCLUDING known-slow aggregates (collections summary, ~30s cohort curve), so
+    // the cap kills only pathological pins, not legitimate slow queries. statement_timeout →
+    // Postgres cancels server-side (clean, connection reusable); query_timeout (slightly higher) →
+    // a client-side backstop that still fires over the Supavisor transaction pooler if the
+    // server-side SET didn't stick; connectionTimeoutMillis → bounds how long we wait to acquire a
+    // connection when the pool is momentarily saturated. Tighten per-surface later if needed.
+    statement_timeout: 120_000,
+    query_timeout: 125_000,
+    connectionTimeoutMillis: 10_000,
   });
 }
 
