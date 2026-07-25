@@ -277,3 +277,133 @@
     transform: scale(1.2) rotate(120deg);
   }
 }
+
+/*
+ * ── Qualify LANDING HERO — the animated brand atmosphere that fills the resolved-subject area on a
+ *    FRESH landing (see components/qualify/landing-hero.tsx). Warm-clinical teal: slow-drifting radial
+ *    glows, a faint payer↔facility↔member constellation whose links flow + nodes breathe, and a
+ *    breathing monogram. Decorative only (aria-hidden layers). ALL motion collapses to static under the
+ *    global prefers-reduced-motion reset above (universal `*` rule — no per-component opt-out needed). ──
+ */
+.q-hero-glow {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(56px);
+  opacity: 0.5;
+  will-change: transform;
+}
+.q-hero-glow--a {
+  width: 340px;
+  height: 340px;
+  left: 6%;
+  top: -10%;
+  background: radial-gradient(circle, rgba(28, 139, 130, 0.4), transparent 68%);
+  animation: q-hero-drift-a 22s ease-in-out infinite;
+}
+.q-hero-glow--b {
+  width: 300px;
+  height: 300px;
+  right: 3%;
+  top: 26%;
+  background: radial-gradient(circle, rgba(183, 218, 213, 0.6), transparent 70%);
+  animation: q-hero-drift-b 27s ease-in-out infinite;
+}
+.q-hero-glow--c {
+  width: 260px;
+  height: 260px;
+  left: 33%;
+  bottom: -16%;
+  background: radial-gradient(circle, rgba(240, 145, 124, 0.26), transparent 70%);
+  animation: q-hero-drift-c 31s ease-in-out infinite;
+}
+@keyframes q-hero-drift-a {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(42px, 26px) scale(1.12);
+  }
+}
+@keyframes q-hero-drift-b {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(-34px, -22px) scale(1.08);
+  }
+}
+@keyframes q-hero-drift-c {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(24px, -30px) scale(1.15);
+  }
+}
+
+/* Constellation: the whole group floats slowly; links flow a dash; nodes breathe (staggered per node). */
+.q-hero-net .net-grp {
+  animation: q-hero-float 26s ease-in-out infinite;
+}
+.q-hero-net .net-link {
+  stroke: #1c8b82;
+  stroke-opacity: 0.3;
+  stroke-width: 1.25;
+  stroke-dasharray: 4 8;
+  animation: q-hero-dash 5s linear infinite;
+}
+.q-hero-net .net-node {
+  fill: #135e5a;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: q-hero-pulse 4s ease-in-out infinite;
+}
+.q-hero-net .net-node.hub {
+  fill: #0e3a3a;
+}
+.q-hero-net .net-node.warm {
+  fill: #e2674f;
+}
+@keyframes q-hero-dash {
+  to {
+    stroke-dashoffset: -48;
+  }
+}
+@keyframes q-hero-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.35);
+  }
+}
+@keyframes q-hero-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+/* Breathing brand monogram. */
+.q-hero-mark {
+  animation: q-hero-breathe 6s ease-in-out infinite;
+  box-shadow: 0 12px 30px -12px rgba(14, 58, 58, 0.45);
+}
+@keyframes q-hero-breathe {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
