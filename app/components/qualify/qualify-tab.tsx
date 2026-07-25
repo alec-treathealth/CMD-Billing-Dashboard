@@ -90,6 +90,7 @@ import { CohortSheet } from '@/components/qualify/cohort-sheet';
 import { BookKpiTiles, HeatingUpCards, HeatingUpSkeleton } from '@/components/qualify/overview';
 import { WindowControl } from '@/components/qualify/window-control';
 import { VobModal } from '@/components/qualify/vob-modal';
+import { QualifyLandingHero } from '@/components/qualify/landing-hero';
 
 const MIN_QUERY_LEN = 3;
 const AUTOSEARCH_DEBOUNCE_MS = 380;
@@ -577,25 +578,15 @@ export function QualifyTab({
           refreshScopedKpis(url.payer, w); // scope the KPI tiles + band stat to the restored payer
           lastResolvedRef.current = null; // URL restore is a by-payer resolution, not a stored term
         } else {
-          // Fresh load: the overview HYBRID — strip + the top trend facility's payer, scoped to it.
-          const ov = await getQualifyOverview(w, marketRef.current);
+          // Fresh landing: load the OVERVIEW STRIP ONLY — book-wide KPI tiles + Heating-Up trends. NO
+          // auto-resolve (resolve:false): the subject / facilities / Recent-Claims area stays empty (the
+          // animated landing hero) until the user actually searches or taps a Heating-Up card. This is
+          // the intended clean start, and skipping the book-wide hybrid resolve also makes the landing
+          // paint fast (no ~2.5–5s aggregate on first load).
+          const ov = await getQualifyOverview(w, marketRef.current, { resolve: false });
           if (!alive || genRef.current !== gen) return;
           setKpis(ov.kpis);
           setTrends(ov.trends);
-          if (ov.snapshot && ov.topPayer) {
-            commitResolved(
-              ov.snapshot,
-              { type: 'RESOLVE_PAYER', payer: ov.snapshot.resolved?.payerName ?? null, facility: ov.seedFacility, window: w },
-              { claims: ov.seedCases, capped: ov.seedCapped },
-            );
-            setScoped(ov.seedFacility !== null && ov.seedFacility === ov.topFacility);
-            setHasSearched(true);
-            setByPayer(ov.topPayer);
-            // Fresh landing: fetch the scoped ratios so the resolved band shows its "avg allowed ÷
-            // billed" stat, but leave userSearched FALSE — the tiles stay book-wide and no Clear Search
-            // button appears until the user actually resolves something.
-            refreshScopedKpis(ov.topPayer, w);
-          }
         }
       } catch {
         // leave the empty prompt — the user can still search
@@ -1147,16 +1138,18 @@ export function QualifyTab({
             onClose={() => setCohortSheet(null)}
           />
         </div>
-      ) : initializing || isPending ? (
+      ) : isPending ? (
         <div className="rounded-2xl border border-dashed bg-card p-10 text-center text-sm text-muted-foreground">
           Resolving…
         </div>
-      ) : (
+      ) : hasSearched ? (
         <div className="rounded-2xl border border-dashed bg-card p-10 text-center text-sm text-muted-foreground">
-          {hasSearched
-            ? 'No payer resolved for that search in the selected window.'
-            : 'Search a member ID, 3-letter alpha prefix, or client name — or tap a Heating-Up facility above.'}
+          No payer resolved for that search in the selected window.
         </div>
+      ) : (
+        // Fresh landing (no user search yet): the animated brand hero fills the space until a search or
+        // a Heating-Up tap resolves a subject. Purely decorative + the search guidance — no data, no PHI.
+        <QualifyLandingHero />
       )}
 
       <VobModal open={modalOpen} query={echo} onClose={() => setModalOpen(false)} />
