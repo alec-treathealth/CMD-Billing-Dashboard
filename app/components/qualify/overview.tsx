@@ -20,10 +20,11 @@
  * in the tests. Imports are relative so the render test runs under tsx without `@/` resolution.
  */
 import { ratingBucket } from '../../lib/qualify/rating';
-import { qualifyWindowLabel } from '../../lib/qualify/contract';
+import { qualifyWindowLabel, serializeQualifyWindow } from '../../lib/qualify/contract';
 import type { QualifyBookKpis, QualifyFacilityTrend, QualifyWindow } from '../../lib/qualify/contract';
 import { RATING_HEX, staggerDelayMs } from './tokens';
 import { Spark } from './spark';
+import { useMarquee } from './useMarquee';
 
 const LOC_LABEL: Record<'IP' | 'OP' | 'BOTH', string> = { IP: 'IP', OP: 'OP', BOTH: 'Both' };
 
@@ -128,15 +129,16 @@ export function HeatingUpCards({
   /** The Change-E hybrid: resolve trend.dominantPayer AND scope to trend.facilityKey. Optional for tests. */
   onOpen?: (trend: QualifyFacilityTrend) => void;
 }) {
+  // Continuous, MANUALLY-SCROLLABLE marquee (useMarquee): a real scroll container the user can drag /
+  // wheel left↔right, that keeps auto-scrolling and loops seamlessly (the set renders TWICE; the hook
+  // wraps scrollLeft at the first duplicate). Pauses on hover / focus / active scroll and resumes
+  // shortly after; SNAPS BACK to the start when the window filter changes (resetKey). The duplicate copy
+  // is aria-hidden + tabIndex -1 + data-dup so AT and keyboard see each facility ONCE. Reduced-motion →
+  // no auto-motion, still hand-scrollable (globals.css `.q-marquee`). Hook BEFORE the early return
+  // (rules of hooks — the call must run on every render).
+  const scrollRef = useMarquee<HTMLDivElement>(serializeQualifyWindow(window), trends.length);
   if (trends.length === 0) return null;
   const range = qualifyWindowLabel(window);
-  // Continuous marquee (brand-scroller style): the set renders TWICE and the track loops translateX to
-  // -50%, so it reads as one seamless, always-moving strip (never the old ping-pong that could sit still
-  // when the strip barely overflowed). The duplicate copy is aria-hidden + tabIndex -1 + data-dup, so AT
-  // and keyboard see each facility ONCE. Hover / keyboard-focus pauses the loop so a card can be clicked
-  // while stationary; prefers-reduced-motion turns it into a plain, manually-scrollable row (globals.css
-  // `.q-marquee`). Duration scales with the card count so the speed is steady whether 3 or 15 cards.
-  const durationSec = Math.max(24, Math.round(trends.length * 4.2));
 
   const card = (t: QualifyFacilityTrend, i: number, dup: boolean) => {
     const bucket = ratingBucket(t.currentRating);
@@ -212,16 +214,12 @@ export function HeatingUpCards({
           Trending · {range}
         </span>
       </div>
-      {/* Marquee viewport — pauses on hover / keyboard focus (globals.css). role/list omitted so native
-       *  <button> semantics + aria-pressed survive for AT; the aria-hidden duplicate keeps that clean. */}
-      <div className="q-marquee group relative overflow-hidden pb-2">
-        <div
-          className="q-marquee-track flex w-max gap-2.5 pl-0.5 pr-0.5 pt-0.5"
-          style={{ animationDuration: `${durationSec}s` }}
-        >
-          {trends.map((t, i) => card(t, i, false))}
-          {trends.map((t, i) => card(t, i, true))}
-        </div>
+      {/* Marquee = a real horizontal scroll container (useMarquee drives scrollLeft). role/list omitted
+       *  so native <button> semantics + aria-pressed survive for AT; the aria-hidden duplicate half keeps
+       *  that clean. Scrollbar hidden via `.q-marquee` (still fully scrollable). */}
+      <div ref={scrollRef} className="q-marquee group relative flex gap-2.5 pb-2 pl-0.5 pr-0.5 pt-0.5">
+        {trends.map((t, i) => card(t, i, false))}
+        {trends.map((t, i) => card(t, i, true))}
       </div>
     </section>
   );

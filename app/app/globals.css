@@ -344,52 +344,41 @@
   }
 }
 
-/* Constellation: the whole group floats slowly; links flow a dash; nodes breathe (staggered per node). */
-.q-hero-net .net-grp {
-  animation: q-hero-float 26s ease-in-out infinite;
+/* Moving "green line" on the FRAME: a soft teal comet travels the box's edge (replaces the old inner
+ * constellation) — simpler, and the motion sits on the OUTSIDE, not behind the text. @property animates
+ * the conic angle; the padding + mask-composite trick paints only the ~1.5px ring. Freezes to a static
+ * gradient border under the global prefers-reduced-motion reset. (If a browser lacks @property, the
+ * angle simply doesn't animate — a still gradient border, no breakage.) */
+@property --q-hero-a {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
 }
-.q-hero-net .net-link {
-  stroke: #1c8b82;
-  stroke-opacity: 0.3;
-  stroke-width: 1.25;
-  stroke-dasharray: 4 8;
-  animation: q-hero-dash 5s linear infinite;
+.q-hero-border::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: conic-gradient(
+    from var(--q-hero-a),
+    transparent 0deg 205deg,
+    rgba(28, 139, 130, 0.12) 250deg,
+    #1c8b82 300deg,
+    #135e5a 332deg,
+    transparent 360deg
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+  animation: q-hero-spin 5.5s linear infinite;
 }
-.q-hero-net .net-node {
-  fill: #135e5a;
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: q-hero-pulse 4s ease-in-out infinite;
-}
-.q-hero-net .net-node.hub {
-  fill: #0e3a3a;
-}
-.q-hero-net .net-node.warm {
-  fill: #e2674f;
-}
-@keyframes q-hero-dash {
+@keyframes q-hero-spin {
   to {
-    stroke-dashoffset: -48;
-  }
-}
-@keyframes q-hero-pulse {
-  0%,
-  100% {
-    opacity: 0.5;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1.35);
-  }
-}
-@keyframes q-hero-float {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-10px);
+    --q-hero-a: 360deg;
   }
 }
 
@@ -409,37 +398,23 @@
 }
 
 /*
- * ── Qualify "Facilities Heating Up" MARQUEE — a seamless, always-moving ticker (brand-scroller style).
- *    The track holds the card set TWICE and loops translateX to -50% (exactly one set), so it never
- *    sits still (unlike the old rAF ping-pong that stalled when the strip barely overflowed). Pauses on
- *    hover / keyboard focus so a card can be clicked while stationary. Under prefers-reduced-motion it
- *    becomes a plain, manually-scrollable row (no auto motion) with the decorative duplicate hidden. The
- *    per-instance speed is set inline (animation-duration) so it's steady regardless of card count. ──
+ * ── Qualify "Facilities Heating Up" MARQUEE — a real horizontal SCROLL container (useMarquee drives
+ *    scrollLeft), so it's continuous AND hand-scrollable: drag / wheel it left↔right and it resumes.
+ *    The card set renders twice and the hook wraps scrollLeft at the first duplicate for a seamless
+ *    loop; it pauses on hover / focus / active scroll, resumes shortly after, and snaps to the start on
+ *    a window-filter change. Scrollbar hidden here for a clean ticker (still fully scrollable); under
+ *    prefers-reduced-motion the hook bails (no auto motion) and the decorative duplicate is hidden. ──
  */
-.q-marquee-track {
-  animation: q-marquee linear infinite;
-  will-change: transform;
+.q-marquee {
+  overflow-x: auto;
+  scrollbar-width: none; /* Firefox — clean ticker, still fully scrollable */
 }
-.q-marquee:hover .q-marquee-track,
-.q-marquee:focus-within .q-marquee-track {
-  animation-play-state: paused;
-}
-@keyframes q-marquee {
-  from {
-    transform: translateX(0);
-  }
-  to {
-    transform: translateX(-50%);
-  }
+.q-marquee::-webkit-scrollbar {
+  display: none; /* WebKit */
 }
 @media (prefers-reduced-motion: reduce) {
-  .q-marquee {
-    overflow-x: auto;
-  }
-  .q-marquee-track {
-    animation-name: none;
-  }
-  .q-marquee-track [data-dup='true'] {
+  /* No auto-motion (the hook bails); hide the decorative duplicate so the manual scroll shows each once. */
+  .q-marquee [data-dup='true'] {
     display: none;
   }
 }
