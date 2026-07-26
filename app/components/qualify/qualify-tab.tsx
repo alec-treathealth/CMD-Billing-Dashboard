@@ -14,7 +14,7 @@
  * SEARCH TYPES: Member ID/Prefix (server-side sniff — the client never declares the kind) · Client
  * Name (Change C — the exact-name blind-index path; captioned "may match multiple patients") ·
  * Employer (the existing QualifyMarket.employers narrow — a filter, not a resolver, per ruling). The
- * Facility "payer board" tab is DE-SCOPED (later phase). AUTOSEARCH: debounced ~380ms at ≥3 chars +
+ * Facility "payer board" tab is DE-SCOPED (later phase). AUTOSEARCH: debounced ~650ms at ≥3 chars +
  * Enter; no "Resolve payer" button. The raw term stays in memory only — never a URL, never a log.
  *
  * CHANGE E (facility drilldown): a search-driven resolve lands payer-wide (full facility list; cases
@@ -93,7 +93,7 @@ import { VobModal } from '@/components/qualify/vob-modal';
 import { QualifyLandingHero } from '@/components/qualify/landing-hero';
 
 const MIN_QUERY_LEN = 3;
-const AUTOSEARCH_DEBOUNCE_MS = 380;
+const AUTOSEARCH_DEBOUNCE_MS = 650;
 
 type SearchType = 'id' | 'client' | 'employer';
 
@@ -854,6 +854,15 @@ export function QualifyTab({
   // scoped (non-dollar, already on the facility row — role-safe), else the payer-wide dollar-weighted
   // ratio from the scoped KPIs. Null → "—" (a collapsed denominator is never a fabricated 0%).
   const bandPct = scoped && pinnedFacility ? pinnedFacility.pctAllowedOfBilled : scopedKpis?.pctAllowedOfBilled ?? null;
+
+  // SR-only announcement for the autosearch flow (no submit button → results would appear silently).
+  const liveMessage = isPending
+    ? 'Resolving…'
+    : resolved
+      ? `Resolved ${resolved.payerName} — ${resolved.facilityCount} ${resolved.facilityCount === 1 ? 'facility' : 'facilities'}`
+      : hasSearched
+        ? 'No payer resolved for that search'
+        : '';
   // Live branch hint (mirror of the server sniff — display only; the server still decides).
   const branchHint =
     searchType === 'employer' || query.trim().length === 0
@@ -874,6 +883,12 @@ export function QualifyTab({
         <p className="mt-0.5 text-sm text-muted-foreground">
           Admissions lead qualification · the book at a glance, and the resolved payer below
         </p>
+      </div>
+
+      {/* SR-only live region: announces resolution outcomes to assistive tech (autosearch has no
+          submit button, so results would otherwise appear silently). */}
+      <div role="status" aria-live="polite" className="sr-only">
+        {liveMessage}
       </div>
 
       {overviewError ? (
@@ -1064,14 +1079,20 @@ export function QualifyTab({
           </p>
         ) : null}
       </div>
-      {hint ? <p className="px-1 text-xs text-status-warn">{hint}</p> : null}
+      {hint ? <p role="alert" className="px-1 text-xs text-status-warn">{hint}</p> : null}
 
       {/* ── OVERVIEW: book KPIs (the Facilities Heating Up ticker now sits ABOVE the finder) ── */}
       <BookKpiTiles kpis={displayKpis} locActive={locFilter !== null} scopeLabel={kpiScopeLabel} />
 
       {/* ── RESOLVED SUBJECT + GRID ── */}
       {resolved ? (
-        <div className="q-subject animate-ths-reveal relative overflow-hidden rounded-2xl px-6 py-5 text-white shadow-ths sm:pr-44">
+        <div
+          aria-busy={isPending}
+          className={[
+            'q-subject animate-ths-reveal relative overflow-hidden rounded-2xl px-6 py-5 text-white shadow-ths transition-opacity sm:pr-44',
+            isPending ? 'opacity-70' : '',
+          ].join(' ')}
+        >
           {/* avg allowed ÷ billed — the facility's own % when a card/facility is pinned, else the
               payer's dollar-weighted %. Restored from the approved mockup's right-side stat. */}
           <div className="pointer-events-none absolute right-6 top-1/2 hidden -translate-y-1/2 text-right sm:block">
@@ -1083,7 +1104,14 @@ export function QualifyTab({
               {scoped && pinnedFacility ? 'facility allowed ÷ billed' : 'avg allowed ÷ billed'}
             </div>
           </div>
-          <div className="text-[10px] font-extrabold uppercase tracking-widest text-teal200">Resolved payer</div>
+          <div className="text-[10px] font-extrabold uppercase tracking-widest text-teal200">
+            Resolved payer
+            {isPending ? (
+              <span className="ml-2 rounded-full bg-white/20 px-1.5 py-0.5 text-[9px] normal-case tracking-normal">
+                updating…
+              </span>
+            ) : null}
+          </div>
           <div className="mt-0.5 flex flex-wrap items-center gap-3 font-display text-2xl font-medium">
             {resolved.payerName}
             <span className="rounded-full bg-white/15 px-2.5 py-1 text-[11px] font-bold tracking-wide">
@@ -1125,7 +1153,13 @@ export function QualifyTab({
       ) : null}
 
       {snapshot && snapshot.resolved ? (
-        <div className="grid grid-cols-1 items-start gap-4 min-[960px]:grid-cols-[380px_1fr]">
+        <div
+          aria-busy={isPending}
+          className={[
+            'grid grid-cols-1 items-start gap-4 transition-opacity min-[960px]:grid-cols-[380px_1fr]',
+            isPending ? 'opacity-50' : '',
+          ].join(' ')}
+        >
           <FacilityPanel
             facilities={visibleFacilities}
             hasAmounts={hasAmounts}
