@@ -8,7 +8,7 @@
  * rating-desc order (never re-sorted here).
  *
  * REDESIGN (mirrors desktop Phase 1):
- *  - AUTOSEARCH: debounced ~380ms at ≥3 chars + Enter (no resolve button). Member-id/prefix only on
+ *  - AUTOSEARCH: debounced ~650ms at ≥3 chars + Enter (no resolve button). Member-id/prefix only on
  *    mobile (the comp's mobile surface); the raw term lives in memory only.
  *  - WINDOW: 30d/60d/90d + M/Y (the calendar QualifyWindow shape; Month/Year selects reveal).
  *  - OVERVIEW: getQualifyOverview lands the surface populated in ONE round-trip — KPI strip + trend
@@ -54,7 +54,7 @@ const INK900 = QUALIFY_PALETTE.ink900;
 const INK400 = QUALIFY_PALETTE.ink400;
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const AUTOSEARCH_DEBOUNCE_MS = 380;
+const AUTOSEARCH_DEBOUNCE_MS = 650;
 
 function EmptyState({ children }: { children: ReactNode }) {
   return (
@@ -569,7 +569,7 @@ export function QualifyMobileApp({
               aria-checked={globalReveal}
               onClick={toggleGlobalReveal}
               title="Reveal identifiers across the whole surface (audited per scope)"
-              style={{ display: 'flex', alignItems: 'center', gap: 6, height: 32, padding: '0 12px', borderRadius: 999, background: globalReveal ? '#fff' : 'rgba(255,255,255,0.1)', border: 'none', color: globalReveal ? TEAL900 : '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
+              style={{ display: 'flex', alignItems: 'center', gap: 6, height: 40, padding: '0 12px', borderRadius: 999, background: globalReveal ? '#fff' : 'rgba(255,255,255,0.1)', border: 'none', color: globalReveal ? TEAL900 : '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
             >
               <span>{globalReveal ? 'IDs shown' : 'Reveal IDs'}</span>
             </button>
@@ -578,7 +578,7 @@ export function QualifyMobileApp({
             <button
               type="button"
               onClick={clearSearch}
-              style={{ display: 'flex', alignItems: 'center', gap: 6, height: 32, padding: '0 12px', borderRadius: 999, background: 'rgba(255,255,255,0.1)', border: 'none', color: '#fff', fontSize: 12, fontWeight: 600 }}
+              style={{ display: 'flex', alignItems: 'center', gap: 6, height: 40, padding: '0 12px', borderRadius: 999, background: 'rgba(255,255,255,0.1)', border: 'none', color: '#fff', fontSize: 12, fontWeight: 600 }}
             >
               <span>Clear</span>
             </button>
@@ -586,7 +586,7 @@ export function QualifyMobileApp({
           <button
             type="button"
             onClick={resetDeck}
-            style={{ display: 'flex', alignItems: 'center', gap: 6, height: 32, padding: '0 12px', borderRadius: 999, background: 'rgba(255,255,255,0.1)', border: 'none', color: '#fff', fontSize: 12, fontWeight: 600 }}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, height: 40, padding: '0 12px', borderRadius: 999, background: 'rgba(255,255,255,0.1)', border: 'none', color: '#fff', fontSize: 12, fontWeight: 600 }}
           >
             <RefreshIcon size={14} color="#fff" />
             <span>Top</span>
@@ -623,7 +623,7 @@ export function QualifyMobileApp({
                 aria-pressed={active}
                 style={{
                   flex: 1,
-                  height: 30,
+                  height: 44,
                   borderRadius: 999,
                   border: 'none',
                   cursor: 'pointer',
@@ -645,7 +645,7 @@ export function QualifyMobileApp({
             aria-pressed={calendar}
             style={{
               flex: 1,
-              height: 30,
+              height: 44,
               borderRadius: 999,
               border: 'none',
               cursor: 'pointer',
@@ -667,7 +667,7 @@ export function QualifyMobileApp({
                 const m = Number(e.target.value);
                 onWindow(m === 0 ? { kind: 'year', year: selYear } : { kind: 'month', year: selYear, month: m });
               }}
-              style={{ flex: 1, height: 32, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.12)', color: '#fff', fontSize: 13, padding: '0 8px' }}
+              style={{ flex: 1, height: 40, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.12)', color: '#fff', fontSize: 13, padding: '0 8px' }}
             >
               <option value={0}>All months</option>
               {MONTHS.map((m, i) => (
@@ -681,7 +681,7 @@ export function QualifyMobileApp({
                 const y = Number(e.target.value);
                 onWindow(selMonth === 0 ? { kind: 'year', year: y } : { kind: 'month', year: y, month: selMonth });
               }}
-              style={{ flex: 1, height: 32, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.12)', color: '#fff', fontSize: 13, padding: '0 8px' }}
+              style={{ flex: 1, height: 40, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.12)', color: '#fff', fontSize: 13, padding: '0 8px' }}
             >
               {years.map((y) => (
                 <option key={y} value={y}>{y}</option>
@@ -762,7 +762,10 @@ export function QualifyMobileApp({
                 aria-pressed={active}
                 onClick={() => onSelectLoc(locOpt)}
                 style={{
-                  padding: '4px 12px',
+                  minHeight: 44,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  padding: '0 16px',
                   borderRadius: 999,
                   border: 'none',
                   fontSize: 11,

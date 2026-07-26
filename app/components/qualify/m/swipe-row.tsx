@@ -106,7 +106,7 @@ export function SwipeRow({
         type="button"
         aria-label={`Why this rating for ${facility.name}`}
         onClick={(e) => { e.stopPropagation(); onWhy(facility); }}
-        className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-[9px]"
+        className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-[9px]"
         style={{ border: `0.5px solid ${LINE}`, background: '#F5F8F7' }}
       >
         <TrendIcon size={14} color={TEAL700} />
