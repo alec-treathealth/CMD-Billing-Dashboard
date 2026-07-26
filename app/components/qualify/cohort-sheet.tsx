@@ -9,10 +9,11 @@
  * (core choke point); this component additionally omits the dollar column from the DOM when
  * !data.viewerHasAmountsCapability (belt-and-suspenders, the FacilityPanel pattern).
  *
- * Pure/presentational (props only, no hooks) → hermetic under renderToStaticMarkup. Relative
- * imports so it loads under tsx without `@/` resolution.
+ * Presentational + the useDialog a11y hook (Escape-to-close / focus management; SSR-inert, so still
+ * hermetic under renderToStaticMarkup). Relative imports so it loads under tsx without `@/` resolution.
  */
 import type { QualifyPatientCohort } from '../../lib/qualify/contract';
+import { useDialog } from './useDialog';
 
 function usd0(n: number): string {
   return `$${Math.round(n).toLocaleString('en-US')}`;
@@ -70,13 +71,18 @@ export function CohortSheet({
   patientLabel: string | null;
   onClose: () => void;
 }) {
+  // Non-modal slide-over: focus-in + Escape + focus-restore, but NO focus trap (the rest of the page
+  // stays reachable). `active` mirrors the null early-return condition below.
+  const dialogRef = useDialog<HTMLElement>(onClose, { trap: false, active: loading || data !== null });
   if (!loading && data === null) return null;
   const showDollars = data?.viewerHasAmountsCapability === true;
   return (
     <aside
+      ref={dialogRef}
+      tabIndex={-1}
       role="dialog"
       aria-label="Patient cohort context"
-      className="fixed inset-y-0 right-0 z-50 flex w-[360px] max-w-full flex-col border-l bg-card shadow-xl"
+      className="fixed inset-y-0 right-0 z-50 flex w-[360px] max-w-full flex-col border-l bg-card shadow-xl focus:outline-none"
     >
       <div className="flex items-center justify-between border-b px-4 py-3">
         <h2 className="font-display text-[15px] font-semibold">

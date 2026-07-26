@@ -9,6 +9,7 @@
  * inert-with-seam). Do not silently point it anywhere.
  */
 import { AlertTriangle } from 'lucide-react';
+import { useDialog } from './useDialog';
 
 export function VobModal({
   open,
@@ -19,6 +20,7 @@ export function VobModal({
   query: string;
   onClose: () => void;
 }) {
+  const dialogRef = useDialog<HTMLDivElement>(onClose, { active: open });
   if (!open) return null;
   return (
     <div
@@ -28,10 +30,12 @@ export function VobModal({
       }}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-labelledby="qualify-vob-title"
-        className="w-full max-w-md overflow-hidden rounded-2xl bg-card shadow-ths-lg"
+        className="w-full max-w-md overflow-hidden rounded-2xl bg-card shadow-ths-lg focus:outline-none"
       >
         <div className="flex items-start gap-3.5 px-6 pb-1.5 pt-5">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[10px] bg-coral50 text-coral600">
