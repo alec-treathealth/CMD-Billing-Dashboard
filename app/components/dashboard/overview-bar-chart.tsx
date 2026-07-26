@@ -205,7 +205,7 @@ function FacilityGrossBars({
               type="number"
               tickFormatter={moneyAxis}
               width={64}
-              tick={{ fontSize: 11, fill: '#859794' }}
+              tick={{ fontSize: 11, fill: '#63756E' }}
               stroke="#E4E9E6"
             />
             <Tooltip content={<FacilityGrossTooltip monthLabel={monthLabel} />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />

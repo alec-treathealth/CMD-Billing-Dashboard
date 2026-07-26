@@ -22,7 +22,7 @@ import { pageCount, clampPage, pageSlice, pageLabel } from '../../../lib/qualify
 import type { QualifyFacility } from '../../../lib/qualify/contract';
 
 const TEAL900 = '#0E3A3A';
-const INK400 = '#859794';
+const INK400 = '#63756E';
 const DIST_THRESHOLD = 85;
 const VELOCITY_THRESHOLD = 0.5;
 const BOUND_DAMP = 0.35; // rubber-band: travel past a bound moves at 0.35× so the column visibly resists.

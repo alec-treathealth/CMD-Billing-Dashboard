@@ -19,7 +19,7 @@ import type { QualifyFacility } from '../../../lib/qualify/contract';
 
 const TEAL700 = '#135E5A';
 const INK900 = '#1B2B2A';
-const INK400 = '#859794';
+const INK400 = '#63756E';
 const LINE = '#E4E9E6';
 const SURFACE = '#FFFFFF';
 

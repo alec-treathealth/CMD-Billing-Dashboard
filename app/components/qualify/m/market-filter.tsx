@@ -14,7 +14,7 @@ import { loadQualifyEmployers } from '@/lib/qualify/actions';
 import type { CmdEmployerOption } from '@/lib/actions';
 
 const INK900 = '#1B2B2A';
-const INK400 = '#859794';
+const INK400 = '#63756E';
 const TEAL900 = '#0E3A3A';
 const CHIP_BG = '#EEF2F0';
 const BORDER = '#E2E8E5';
