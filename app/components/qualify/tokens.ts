@@ -25,7 +25,7 @@ export const QUALIFY_PALETTE = {
   surface: '#FFFFFF',
   ink900: '#1B2B2A',
   ink600: '#4A5C5A',
-  ink400: '#859794',
+  ink400: '#63756E', // secondary/meta text — WCAG AA (≥4.5:1 on white); was #859794
   line: '#E4E9E6',
   info: '#2D7393',
 } as const;

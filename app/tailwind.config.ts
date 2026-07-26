@@ -48,7 +48,7 @@ const config: Config = {
         surface: '#FFFFFF',
         ink900: '#1B2B2A',
         ink600: '#4A5C5A',
-        ink400: '#859794',
+        ink400: '#63756E', // muted secondary/meta text — meets WCAG AA (≥4.5:1 on white); was #859794 (~3:1)
         line: '#E4E9E6',
         status: {
           ok: '#2E8B6F',

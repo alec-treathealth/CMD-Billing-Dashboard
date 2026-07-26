@@ -13,7 +13,7 @@ import type { QualifyFacility } from '../../../lib/qualify/contract';
 
 const INK900 = '#1B2B2A';
 const INK600 = '#4A5C5A';
-const INK400 = '#859794';
+const INK400 = '#63756E';
 const LINE = '#E4E9E6';
 const SURFACE = '#FFFFFF';
 
