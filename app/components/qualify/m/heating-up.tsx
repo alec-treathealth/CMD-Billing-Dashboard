@@ -30,7 +30,7 @@ export function HeatingUp({
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
         <FlameIcon size={14} color={GOLD} />
         <span className="ths-h" style={{ fontSize: 13, fontWeight: 600, color: QUALIFY_PALETTE.ink900 }}>
-          Facilities heating up
+          Facilities Heating Up
         </span>
         <span style={{ fontSize: 11, color: QUALIFY_PALETTE.ink400, marginLeft: 'auto' }}>{qualifyWindowLabel(win)}</span>
       </div>

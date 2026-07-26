@@ -40,6 +40,11 @@ export function TrendSheet({ facility, onClose }: { facility: QualifyFacility; o
           Why is this rated {ratingText}?
         </div>
         <div className="ths-h" style={{ marginTop: 4, fontSize: 16, fontWeight: 600, color: INK900 }}>{facility.name}</div>
+        {facility.city && facility.state ? (
+          <div style={{ marginTop: 2, fontSize: 12, color: INK400 }}>
+            {facility.city}, {facility.state}
+          </div>
+        ) : null}
         <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
           <StatRow label="Allowed / billed" value={ex.rawPct === null ? '—' : `${Math.round(ex.rawPct)}%`} mono />
           <StatRow label="Claim lines this window" value={String(ex.lineCount)} mono />
