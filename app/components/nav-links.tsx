@@ -5,7 +5,7 @@ import { usePathname, useSearchParams } from 'next/navigation';
 import { BookOpen, type LucideIcon } from 'lucide-react';
 import type { Role } from '@/lib/rbac';
 
-type NavLink = { href: string; label: string; icon?: LucideIcon; isNew?: boolean };
+type NavLink = { href: string; label: string; icon?: LucideIcon; isBeta?: boolean };
 
 // Overview + Collections are the two tenant-scoped dashboard surfaces, promoted to the top bar
 // (they used to live in a secondary sub-nav). They share the ?view= tenant scope; the rest are
@@ -14,7 +14,7 @@ const BASE_LINKS: readonly NavLink[] = [
   { href: '/dashboard', label: 'Overview' },
   { href: '/dashboard/collections', label: 'Collections' },
   // Display label "Claims Audit" (2026-07-15) — the route + internal names stay /billing-audit.
-  { href: '/billing-audit', label: 'Claims Audit' },
+  { href: '/billing-audit', label: 'Claims Audit', isBeta: true },
   // Claims tab TAKEN DOWN 2026-07-15 (Alec) — /claims routes redirect to home; the Claims
   // Explorer code stays in git for a quick restore.
   // Ask tab REMOVED 2026-07-15 (Alec) — unfinished; /ask route redirects to home (reversible).
@@ -24,7 +24,7 @@ const BASE_LINKS: readonly NavLink[] = [
 // Qualify (Prompt 3): a CROSS-TENANT admissions surface, NOT ?view=-scoped. It sits between Overview
 // and Collections and is visible only to the two roles that may reach it (super_admin +
 // admissions_seat) — RBAC is still enforced server-side at the route; this only controls the nav.
-const QUALIFY_LINK: NavLink = { href: '/qualify', label: 'Qualify', isNew: true };
+const QUALIFY_LINK: NavLink = { href: '/qualify', label: 'Qualify', isBeta: true };
 
 /** The tenant-scoped routes that carry a ?view= scope; the rest are view-agnostic (Qualify included:
  *  it is cross-tenant and pins its own scope). Billing Audit is PHI + tenant-scoped (BXR-only). */
@@ -50,7 +50,7 @@ export function NavLinks({ role }: { role?: Role }) {
   const links = linksFor(role);
   return (
     <nav className="flex items-center justify-center gap-1 text-[13px] font-medium">
-      {links.map(({ href, label, icon: Icon, isNew }) => {
+      {links.map(({ href, label, icon: Icon, isBeta }) => {
         // '/dashboard' must match EXACTLY — otherwise '/dashboard/collections' (which starts with
         // '/dashboard/') would light up Overview too. Every other link still matches its subroutes.
         const active =
@@ -71,11 +71,11 @@ export function NavLinks({ role }: { role?: Role }) {
           >
             {Icon ? <Icon aria-hidden className="h-4 w-4" /> : null}
             {label}
-            {/* Sparkly coral "NEW" flag (decorative). Shimmer + twinkle auto-disable under
+            {/* Sparkly coral "Beta" flag (decorative). Shimmer + twinkle auto-disable under
                 prefers-reduced-motion via the global reset in globals.css. */}
-            {isNew ? (
-              <span className="q-new-badge" aria-hidden="true">
-                NEW
+            {isBeta ? (
+              <span className="q-beta-badge" aria-hidden="true">
+                Beta
               </span>
             ) : null}
           </Link>
