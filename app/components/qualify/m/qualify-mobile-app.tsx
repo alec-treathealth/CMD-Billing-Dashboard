@@ -30,7 +30,7 @@
  * cohortKey guards — the race-safety core is untouched.
  */
 import { useCallback, useEffect, useReducer, useRef, useState, useTransition, type ReactNode } from 'react';
-import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyOverview, revealQualifyRows } from '@/lib/qualify/actions';
+import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyOverview, getQualifyBookKpis, revealQualifyRows } from '@/lib/qualify/actions';
 import { QUALIFY_WINDOW_OPTIONS, QUALIFY_CAL_YEAR_MIN, QUALIFY_REVEAL_BATCH_CAP, sniffQualifyKind, trailingWindow } from '@/lib/qualify/contract';
 import type { QualifySnapshot, QualifyFacility, QualifyFacilityTrend, QualifyBookKpis, QualifyClaim, QualifyWindow, QualifyPhi, QualifyMarket } from '@/lib/qualify/contract';
 import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
@@ -81,6 +81,8 @@ export function QualifyMobileApp({
   // Overview strip: the book KPI percentages + the facility trend chips (window/market-tracked).
   const [kpis, setKpis] = useState<QualifyBookKpis | null>(null);
   const [trends, setTrends] = useState<QualifyFacilityTrend[]>([]);
+  // KPI tiles narrowed to the resolved payer (null = book-wide). Mirrors desktop's scoped tiles.
+  const [scopedKpis, setScopedKpis] = useState<QualifyBookKpis | null>(null);
   // The FULL ranked list (post-lead) + the current 5-up page. Filters (area + LOC) apply at render.
   const [list, setList] = useState<QualifyFacility[]>([]);
   const [page, setPage] = useState(0);
@@ -126,6 +128,8 @@ export function QualifyMobileApp({
   const facilitySeq = useRef(0);
   // Overview-strip recency: an out-of-order window/market strip response can't overwrite newer tiles.
   const overviewSeq = useRef(0);
+  // Scoped-KPI recency: a slow earlier payer/window response can't overwrite newer scoped tiles.
+  const scopedKpiSeq = useRef(0);
   // Drill cases COHORT (shared, root-tested reducer).
   const [cohort, dispatch] = useReducer(cohortReducer, INITIAL_COHORT);
   const cohortRef = useRef(cohort);
@@ -157,41 +161,29 @@ export function QualifyMobileApp({
       .catch(() => {});
   }
 
-  // Effect B — land POPULATED in ONE round-trip: the overview HYBRID (KPIs + trend chips + the top
-  // trend facility's dominant payer, cases scoped to that facility). Mount-only; resolveSeq-guarded.
+  /** Fetch the three KPI ratios narrowed to the RESOLVED payer (the scoped tiles). Recency-guarded
+   *  (scopedKpiSeq): a slow earlier payer/window response can't overwrite newer tiles. A null/blank
+   *  payer clears the scope (back to book-wide). Non-blocking — a failed fetch leaves the prior tiles. */
+  function refreshScopedKpis(payer: string | null, w: QualifyWindow) {
+    const sseq = ++scopedKpiSeq.current;
+    if (!payer) {
+      setScopedKpis(null);
+      return;
+    }
+    getQualifyBookKpis(w, marketRef.current, payer)
+      .then((k) => {
+        if (sseq !== scopedKpiSeq.current) return; // superseded by a newer scoped fetch
+        setScopedKpis(k);
+      })
+      .catch(() => {});
+  }
+
+  // Effect B — mount: load the OVERVIEW STRIP ONLY (book KPI tiles + Heating-Up chips), resolve:false.
+  // NO auto-resolve / auto-open sheet: the deck shows the clean search prompt until the user searches
+  // or taps a Heating-Up chip (mirrors desktop's clean landing, 2f81846/046336e). This also skips the
+  // ~2.5–5s hybrid aggregate on first paint. overviewSeq-guarded like every other strip fetch.
   useEffect(() => {
-    initialResolveDone.current = true;
-    let alive = true;
-    const w = winRef.current;
-    const seq = ++resolveSeq.current;
-    (async () => {
-      try {
-        const ov = await getQualifyOverview(w, marketRef.current);
-        if (!alive || !resolveLandingWins(seq, resolveSeq.current)) return;
-        setKpis(ov.kpis);
-        setTrends(ov.trends);
-        const snap = ov.snapshot;
-        if (snap && ov.topPayer) {
-          setSnapshot(snap);
-          setSearched(true);
-          setByPayer(ov.topPayer);
-          lastSearchRef.current = null;
-          setLastSearch(null);
-          setAreaFilter(AREA_ALL);
-          setEcho('');
-          setList(snap.facilities);
-          setPage(0);
-          setLocFilter(null);
-          // The hybrid: open the focused facility's sheet so the first paint IS the trending facility.
-          const focus = ov.seedFacility ? snap.facilities.find((f) => f.facilityKey === ov.seedFacility) : undefined;
-          syncCohortForResolution(snap.resolved?.payerName ?? null, w, !!focus);
-          if (focus) openFacility(focus);
-        }
-      } catch {
-        // leave the empty prompt — the user can still search
-      }
-    })();
-    return () => { alive = false; };
+    refreshOverview(winRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -251,6 +243,7 @@ export function QualifyMobileApp({
           setPage(0);
           setLocFilter(null);
         }
+        refreshScopedKpis(snap.resolved?.payerName ?? null, w); // scope the KPI tiles to the resolved payer
         syncCohortForResolution(snap.resolved?.payerName ?? null, w);
       } catch {
         if (!resolveLandingWins(seq, resolveSeq.current)) return;
@@ -278,6 +271,7 @@ export function QualifyMobileApp({
         setList(snap.facilities);
         setPage(0);
         setLocFilter(null);
+        refreshScopedKpis(snap.resolved?.payerName ?? null, w); // scope the KPI tiles to the resolved payer
         // HYBRID (Change E): when the tapped chip's facility ranks under its payer, open it directly.
         const focus = focusKey ? snap.facilities.find((f) => f.facilityKey === focusKey) : undefined;
         // Skip syncCohort's own drill when a focus open follows — openFacility issues the single
@@ -314,6 +308,7 @@ export function QualifyMobileApp({
     setByPayer(null);
     setLastSearch(null);
     lastSearchRef.current = null;
+    refreshScopedKpis(null, winRef.current); // back to book-wide tiles
     setList([]);
     setPage(0);
     setAreaFilter(AREA_ALL);
@@ -482,6 +477,11 @@ export function QualifyMobileApp({
 
   // Change D on the drill: the LOC lens filters the open sheet's claims too (one lens, everywhere).
   const sheetClaims = facilityCases === null ? null : filterClaimsByLoc(facilityCases, locFilter);
+
+  // KPI tiles: scoped to the resolved payer once a subject resolves; book-wide on the clean landing.
+  const kpiScopePayer = snapshot?.resolved?.payerName ?? null;
+  const tilesScoped = searched && kpiScopePayer !== null && scopedKpis !== null;
+  const shownKpis = tilesScoped ? scopedKpis : kpis;
 
   function renderBody(): ReactNode {
     if (!searched) {
@@ -721,25 +721,28 @@ export function QualifyMobileApp({
         onFundingChange={setFundingSelection}
       />
 
-      {/* Compact KPI strip (book-wide; the LOC lens does not re-scope it — ruled view-only v1). */}
+      {/* Compact KPI strip — book-wide on the clean landing, re-scoped to the resolved payer once a
+          subject resolves (mirrors desktop). The LOC lens never re-scopes these; the caption below
+          always states what the numbers are (payer vs book-wide) so they can't be misread. */}
       <div style={{ display: 'flex', gap: 8, padding: '12px 16px 2px' }}>
         {(
           [
-            { key: 'allowed', label: 'allowed / billed', v: kpis?.pctAllowedOfBilled ?? null, color: RATING_HEX.ok, bg: '#E6F2EC' },
-            { key: 'paidAllowed', label: 'paid / allowed', v: kpis?.pctPaidOfAllowed ?? null, color: RATING_HEX.warn, bg: '#FBF1DE' },
-            { key: 'paidBilled', label: 'paid / billed', v: kpis?.pctPaidOfBilled ?? null, color: RATING_HEX.warn, bg: '#FBF1DE' },
+            { key: 'allowed', label: 'allowed / billed', v: shownKpis?.pctAllowedOfBilled ?? null, color: RATING_HEX.ok, bg: '#E6F2EC' },
+            { key: 'paidAllowed', label: 'paid / allowed', v: shownKpis?.pctPaidOfAllowed ?? null, color: RATING_HEX.warn, bg: '#FBF1DE' },
+            { key: 'paidBilled', label: 'paid / billed', v: shownKpis?.pctPaidOfBilled ?? null, color: RATING_HEX.warn, bg: '#FBF1DE' },
           ] as const
         ).map((t) => (
           <div key={t.key} style={{ flex: 1, borderRadius: 12, border: `1px solid ${QUALIFY_PALETTE.line}`, padding: '9px 11px', background: t.bg }}>
             <div className="ths-num" style={{ fontSize: 20, fontWeight: 600, color: t.color }}>
               {t.v === null ? '—' : `${Math.round(t.v)}%`}
             </div>
-            <div style={{ fontSize: 9.5, color: QUALIFY_PALETTE.ink600, fontWeight: 600, marginTop: 2 }}>
-              {t.label}
-              {locFilter !== null ? ' · book-wide' : ''}
-            </div>
+            <div style={{ fontSize: 9.5, color: QUALIFY_PALETTE.ink600, fontWeight: 600, marginTop: 2 }}>{t.label}</div>
           </div>
         ))}
+      </div>
+      <div style={{ padding: '4px 16px 0', fontSize: 10, fontWeight: 600, color: INK400, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {tilesScoped ? kpiScopePayer : 'book-wide'}
+        {locFilter !== null ? ' · not LOC-scoped' : ''}
       </div>
 
       <HeatingUp trends={trends} window={win} onOpen={(t) => { if (t.dominantPayer) resolveByPayer(t.dominantPayer, winRef.current, t.facilityKey); }} />
