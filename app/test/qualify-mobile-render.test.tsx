@@ -161,6 +161,11 @@ test('trend sheet (Phase 4) — the why-sheet carries the coverage breakdown + t
   assert.ok(html.includes('payer reversals we'), 'the estimate explanation note renders');
 });
 
+test('trend sheet — shows the facility City, ST under the name (parity with the card + detail)', () => {
+  const html = renderToStaticMarkup(<TrendSheet facility={FAC} onClose={noop} />);
+  assert.ok(html.includes('San Diego, CA'), 'the trend sheet header carries City, ST like the card and detail sheet');
+});
+
 test('detail — NO amounts: Billed/Allowed columns omitted from the DOM', () => {
   const html = renderToStaticMarkup(<DetailSheet facility={FAC} claims={CASES} loading={false} hasAmounts={false} onOpenClaim={noop} onClose={noop} {...noReveal} />);
   assert.ok(!html.includes('Billed') && !html.includes('Allowed'), 'no $ labels when !hasAmounts');
@@ -424,7 +429,7 @@ test('mobile heating-up chips — facility-shaped with rating, Δpts, and the DE
     },
   ];
   const html = renderToStaticMarkup(<HeatingUp trends={trends} window={trailingWindow(30)} onOpen={() => {}} />);
-  assert.ok(html.includes('Facilities heating up'), 'facility-shaped module title');
+  assert.ok(html.includes('Facilities Heating Up'), 'facility-shaped module title');
   assert.ok(html.includes('SUMMIT RIDGE RECOVERY'), 'facility name renders');
   assert.ok(html.includes('210 claim lines'), 'Change A: n defined as claim lines on mobile too');
   assert.ok(!/\bn=\d/.test(html), 'no bare n=');
