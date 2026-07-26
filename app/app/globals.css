@@ -227,12 +227,12 @@
 }
 
 /*
- * Qualify nav "NEW" flag — sparkly coral badge on the Qualify top-nav tab (Prompt 3). Decorative
- * (aria-hidden). The "NEW" text carries a slow coral shimmer (gradient-clipped) and a small ✦ that
+ * Beta nav flag — sparkly coral badge on beta top-nav tabs (Qualify + Claims Audit). Decorative
+ * (aria-hidden). The "Beta" text carries a slow coral shimmer (gradient-clipped) and a small ✦ that
  * twinkles; both animations collapse to static under prefers-reduced-motion (global reset above),
- * leaving a plain coral "NEW ✦". Positioned inside the link's top-right (the link is `relative`).
+ * leaving a plain coral "Beta ✦". Positioned inside the link's top-right (the link is `relative`).
  */
-.q-new-badge {
+.q-beta-badge {
   position: absolute;
   top: 3px;
   right: 5px;
@@ -247,18 +247,18 @@
   background-clip: text;
   -webkit-text-fill-color: transparent;
   color: transparent;
-  animation: q-new-shimmer 2.6s linear infinite;
+  animation: q-beta-shimmer 2.6s linear infinite;
 }
-.q-new-badge::after {
+.q-beta-badge::after {
   content: '\2726'; /* ✦ four-pointed star */
   margin-left: 1.5px;
   font-size: 7px;
   display: inline-block;
   -webkit-text-fill-color: #f0917c;
   color: #f0917c;
-  animation: q-new-twinkle 1.9s ease-in-out infinite;
+  animation: q-beta-twinkle 1.9s ease-in-out infinite;
 }
-@keyframes q-new-shimmer {
+@keyframes q-beta-shimmer {
   0% {
     background-position: 220% 0;
   }
@@ -266,7 +266,7 @@
     background-position: -220% 0;
   }
 }
-@keyframes q-new-twinkle {
+@keyframes q-beta-twinkle {
   0%,
   100% {
     opacity: 0.35;
