@@ -132,9 +132,11 @@ export function QualifyTab({
   const [tickerPinned, setTickerPinned] = useState(false);
 
   // ── FACILITY PANEL — the payer-wide ranking, fetched ONLY when EXACTLY ONE payer is selected (decision
-  //    4). Market is deliberately NOT passed ({} ) so employer/funding never narrow the ranking (the
-  //    rating is volume-dampened; a market slice would collapse every facility toward the prior and turn
-  //    the ranking to noise). Highlights the selected facilities; never intersects. ────────────────────
+  //    4). Market is deliberately NOT passed ({} ) so employer/funding never narrow the ranking: the
+  //    value-first rating (rating.ts) is the raw allowed% with no volume term, so a thin employer/funding
+  //    slice — median ~2 distinct patients — would render a confident color off sampling noise (the
+  //    ranking's own distinct-patient sample gate, sampleGate.ts, is the guard). Highlights the selected
+  //    facilities; never intersects. ────────────────────────────────────────────────────────────────
   const [panelSnapshot, setPanelSnapshot] = useState<QualifySnapshot | null>(null);
   const panelGenRef = useRef(0);
   // When the user searches a single PHI identifier (alpha prefix / member id) with NO payer chip, we
@@ -372,7 +374,8 @@ export function QualifyTab({
   // ── FACILITY PANEL fetch: the payer-wide ranking for the panel's payer — either the ONE selected payer
   //    OR the payer derived from a single-identifier search. 0/2+ payers with no resolvable identifier ⇒
   //    no fetch (panel hidden behind a note). Market is NOT passed — the ranking stays market-blind so a
-  //    thin employer/funding slice can't collapse the volume-dampened rating into noise (decision 4 + B2). ─
+  //    thin employer/funding slice can't drive the value-first rating below a reliable sample (the raw
+  //    allowed% has no volume term; the distinct-patient sample gate handles thinness — decision 4 + B2). ─
   const panelPayer = payerSelection.length === 1 ? payerSelection[0]! : singleIdentifier ? derivedPayer : null;
   useEffect(() => {
     if (!panelPayer) {

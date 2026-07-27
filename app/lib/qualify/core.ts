@@ -248,6 +248,7 @@ function assembleFacilities(rows: QualifyFacilityRow[], applyFloor = true): Qual
       billedAmount: r.billed,
       allowedAmount: r.allowed,
       lineCount: r.line_count,
+      distinctPatients: r.distinct_patients, // rating sample-gate unit (sampleGate.ts) — non-dollar, non-PHI count
       // 0059 trust signal (non-dollar — survives the amounts strip for admissions_seat).
       confirmedClaims: r.confirmed_claims,
       estimateClaims: r.estimate_claims,

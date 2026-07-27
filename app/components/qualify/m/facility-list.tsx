@@ -164,7 +164,7 @@ export function MobileFacilityList({
       >
         <div ref={colRef} style={{ display: 'flex', flexDirection: 'column', gap: 10, willChange: 'transform' }}>
           {visible.map((f) => (
-            <SwipeRow key={f.rank} facility={f} onWhy={onWhy} onOpen={onOpen} />
+            <SwipeRow key={f.rank} facility={f} onWhy={onWhy} onOpen={onOpen} sampleGated={!scoped} />
           ))}
         </div>
       </div>

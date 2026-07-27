@@ -21,7 +21,9 @@ new session should need zero re-discovery. Companion tribal-knowledge lives in
 `admissions_seat` role (migration 0055, applied). One frozen backend contract —
 `getQualifySnapshot` / `getQualifyMovers` — reads BXR + Indigo pinned (Finding 2a), gated to
 `{super_admin, admissions_seat}` (Q-A). **Desktop `/qualify`:** rating-ranked **"Heating up"** facility
-panel (top 10; volume-dampened rating, cutoffs 26/38 from `rating.ts`), cases table with per-row
+panel (top 10; rating from `rating.ts` — NOTE: this doc is SUPERSEDED; the rating is now **value-first**
+= `clamp0to100(pctAllowed)`, cutoffs **50/30**, NOT the volume-dampened 26/38 model described here — see
+docs/veris-data-notes.md "Qualify rating — value-first model + the thin-slice sample gate"), cases table with per-row
 **audited PHI reveal** (fetch-once-per-session → one audit per row per session; toggle hides only),
 amounts DOM-omitted for `admissions_seat`. **Mobile PWA `/qualify/m`:** 5-row sliding **swipe-list**
 (left = pass, right = trend-details sheet, tap = payer-wide detail), light theme, **"Heating up"**

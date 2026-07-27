@@ -1503,11 +1503,45 @@ HUMAN task. Verified on the live deploy + prod DB (read-only):
   band), lowest raw pct earning green = **40.2%**, thinnest green facility = **9 lines**,
   only **3** greens at ≤10 lines (all needing pct ≳78% to clear 38). No thin-volume /
   mediocre-pct green — the dampening works on real data.
+  > ⚠️ **SUPERSEDED (2026-07-27).** This bullet describes the OLD volume-dampened rating
+  > (shrinkage toward a prior, cutoff 38). That model was REVERTED on 2026-07-19b — the
+  > shipped rating is **value-first**: `qualifyRating(pctAllowed) = clamp0to100(pctAllowed)`
+  > (rating.ts), NO volume term, cutoffs **50 / 30**. There is no "dampening" in the code
+  > anymore; any doc/comment saying so is stale. See the thin-slice note appended below.
 - **VOB genuine-miss path sound:** a bogus blind-index token → **0 rollup rows** (→
   `resolvePayer` null → `resolved:null` → modal), against a real population of 10,421
   members / 2,638 prefixes / 460 payers that a valid token resolves within.
 - **STILL A HUMAN TASK:** pixel-fidelity vs `docs/mockups/qualify-tab-layout-proposal.html`,
   and the modal actually firing on a UI click, signed in as super_admin.
+
+### Qualify rating — value-first model + the thin-slice sample gate (hotfix 2026-07-27)
+
+TRIBAL KNOWLEDGE — the measurement that justified the sample gate; do NOT rediscover it.
+
+- **The rating is value-first, not dampened.** `qualifyRating(pctAllowed) = clamp0to100(pctAllowed)`
+  (rating.ts, ruling 2026-07-19b). No `n`, no `K`, no prior. Cutoffs `RATING_OK_MIN=50` /
+  `RATING_WARN_MIN=30`. The shrinkage model (K=50→25, cutoffs 25/40, commit `e0ca5c7`) was
+  superseded by `f25743d`. Any "volume-dampened" comment/doc is stale.
+- **Because volume no longer enters the score, a thin slice renders a CONFIDENT color off sampling
+  noise.** Measured on prod (`cmd_explorer_charge_rollup`, 2026-07-27, cross-tenant [BXR, Indigo],
+  aggregate/non-PHI):
+  - **Facility × single payer @90d (545 slices): median 2 distinct patients, p25 1, p75 4;
+    61.3% of rows < 3 patients, 89.2% < 10.** ~23 charge lines per patient (median 34 lines masks
+    ~2 patients — why the gate keys on patients, not lines).
+  - Of the **86 "Strong" (≥50%) rows, 64 (74%) rest on 1-2 patients; only 3 have ≥10.**
+  - **Per PAYER (all facilities) @90d: also median 2 patients; 63.7% of payers < 3.** So the
+    mobile payer-scoped KPI tiles are in the same thin regime.
+  - Ticker delta (cur/prior split): only 34% of slices have ≥2 patients both sides, 13% ≥5 — the
+    delta breaks before a single tile does (Phase 2 concern).
+- **The fix (this hotfix):** a distinct-patient SAMPLE GATE on the facility ranking only
+  (`sampleGate.ts`, `count(distinct member_id_bidx)` added to `buildFacilityRankingQuery`,
+  surfaced as `QualifyFacility.distinctPatients`). Desktop `facility-panel` + mobile
+  `swipe-row`/`trend-sheet`: **< 3 patients → no bucket color / no confident % (explicit
+  "insufficient data"); 3-9 → rating shown, flagged thin sample; ≥ 10 → unchanged.** rating.ts is
+  NOT reopened — suppression is display-only. Thresholds 3/10 (movers uses 5/10; different idiom,
+  same patient-based discipline). Identifier-scoped rankings are EXEMPT (one known patient by
+  construction). Mobile's payer-scoped KPI tiles fail SAFE to book-wide (`SCOPED_TILES_ENABLED=false`)
+  until Phase 2 wires a patient count into `buildBookKpisQuery`.
 
 ### Mobile qualify container — no async-interaction test coverage (Stage 3a follow-up, 2026-07-20)
 

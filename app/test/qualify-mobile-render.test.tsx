@@ -29,6 +29,7 @@ const FAC: QualifyFacility = {
   billedAmount: 412300,
   allowedAmount: 251500,
   lineCount: 812,
+  distinctPatients: 60,
   confirmedClaims: 700, estimateClaims: 100, unknownClaims: 12, careSetting: 'BOTH', entity: 'Indigo',
 };
 
@@ -80,7 +81,8 @@ test('list card (Phase 4b) — no dollars; rank + LOC tag + coverage bar; tap-to
   const html = renderToStaticMarkup(<SwipeRow facility={FAC} onWhy={noop} onOpen={noop} />);
   assert.ok(!html.includes('$'), 'no dollar sign in a list card');
   for (const v of ['412,300', '251,500', '412300', '251500']) assert.ok(!html.includes(v), `dollar value ${v} must be absent`);
-  assert.ok(html.includes('812 lines this window'), 'shows non-dollar volume');
+  assert.ok(html.includes('812 lines'), 'shows non-dollar line volume');
+  assert.ok(html.includes('60 patients'), 'shows the distinct-patient count (the sample-gate unit)');
   assert.ok(html.includes('>Both<'), 'careSetting renders as the LOC tag');
   // the per-row swipe stamps are GONE (no "Next 5" / "Pass" vocabulary — paging is a container gesture now).
   assert.ok(!html.includes('Next 5') && !html.includes('>Pass<'), 'no per-row swipe stamps remain');
@@ -89,6 +91,30 @@ test('list card (Phase 4b) — no dollars; rank + LOC tag + coverage bar; tap-to
   assert.ok(html.includes('aria-label="Why this rating for MENTAL HEALTH CENTER OF SAN DIEGO"'), 'the WHY control renders with its aria-label');
   assert.ok(html.includes('#2e8b6f') || html.includes('rgb(46, 139, 111)'), 'confirmed coverage segment painted');
   assert.ok(html.includes('#c9881e') || html.includes('rgb(201, 136, 30)'), 'estimate segment amber — never green');
+});
+
+test('SAMPLE GATE (mobile) — a 1-patient card is neutral + "Insufficient", rating suppressed; ≥10 keeps its color', () => {
+  const thin = { ...FAC, distinctPatients: 1 };
+  const thinHtml = renderToStaticMarkup(<SwipeRow facility={thin} onWhy={noop} onOpen={noop} />);
+  assert.ok(thinHtml.includes('Insufficient'), 'a <3-patient card labels "Insufficient"');
+  assert.ok(thinHtml.includes('#6B7B79') || thinHtml.includes('rgb(107, 123, 121)'), 'neutral gray, not a rating color');
+  assert.ok(!/>61<\/div>/.test(thinHtml), 'the confident rating number is suppressed');
+  assert.ok(/1 patient\b/.test(thinHtml), 'patient count visible');
+  // Adequate sample → color + rating intact (the gate suppresses thin slices, not the rating).
+  const okHtml = renderToStaticMarkup(<SwipeRow facility={{ ...FAC, distinctPatients: 12 }} onWhy={noop} onOpen={noop} />);
+  assert.ok(okHtml.includes('>61<') && okHtml.includes('Strong'), 'a well-sampled card keeps its rating + Strong label');
+});
+
+// An identifier-scoped list (scoped) is EXEMPT from the gate — one known patient by construction.
+test('SAMPLE GATE (mobile) — an identifier-scoped list is EXEMPT (keeps the raw rating on 1 patient)', () => {
+  const html = renderToStaticMarkup(
+    <MobileFacilityList
+      facilities={[{ ...FAC, rank: 1, distinctPatients: 1 }]}
+      page={0} scoped onPageNext={noop} onPagePrev={noop} onWhy={noop} onOpen={noop}
+    />,
+  );
+  assert.ok(html.includes('>61<'), 'scoped (identifier) view keeps the rating even at 1 patient');
+  assert.ok(!html.includes('Insufficient'), 'no insufficient-data suppression on the identifier-scoped path');
 });
 
 // ── List container (Phase 4b) — Part A scope + Part B paging, rendered ───────────────────────────────

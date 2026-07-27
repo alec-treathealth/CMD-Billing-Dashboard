@@ -331,6 +331,12 @@ export interface QualifyFacility {
   billedAmount: number | null; // ALL in-window lines; null unless viewerHasAmountsCapability (stripped server-side)
   allowedAmount: number | null; // reliable-evidence sum (e2 excluded); null when zero reliable evidence OR stripped
   lineCount: number; // ALL in-window logical charge lines (volume context: floor + "limited data"; non-dollar, not tier-filtered)
+  /** Distinct patients (count(distinct member_id_bidx)) backing this facility slice in-window — the
+   *  RATING SAMPLE GATE unit (sampleGate.ts, hotfix 2026-07-27). Non-dollar + non-PHI (a count, the
+   *  token never leaves the server) → survives the amounts strip for admissions_seat. Under a payer
+   *  slice the median facility has ~2 patients, so the UI suppresses the bucket color below 3 and
+   *  flags 3-9 as a thin sample; charge lines overstate the sample ~23×, hence the patient unit. */
+  distinctPatients: number;
   /** Coverage triple (0059 trust signal): per-facility in-window claim counts by confidence bucket
    *  (confidence.ts — confirmed = a/cd/e1, estimate = e2, unknown = b/none). Sums to lineCount.
    *  NON-DOLLAR: renders for admissions_seat; never stripped. Backs the coverage bar + the

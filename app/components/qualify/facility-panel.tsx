@@ -4,10 +4,18 @@
  * Qualify — facility panel. Ranked cross-tenant facility list for the resolved payer.
  *
  * COLOR = RATING (rulings Q-G / R-RATING): the left border, %-number tint, and bar fill all derive
- * from `ratingBucket(f.rating)` — the volume-dampened value — NOT the raw pct. The displayed number
- * and bar width ARE the raw pctAllowedOfBilled (the human-meaningful "% allowed of billed"), so a
- * high pct on tiny volume can legitimately show a big number in an amber/red row; the row title
- * surfaces the rating so the rank order is explainable. Legend copy comes from RATING_LEGEND.
+ * from `ratingBucket(f.rating)` — the value-first allowed% (rating.ts) — NOT the raw pct. The
+ * displayed number and bar width ARE the raw pctAllowedOfBilled (the human-meaningful "% allowed of
+ * billed"); the row title surfaces the rating so the rank order is explainable. Legend copy comes
+ * from RATING_LEGEND.
+ *
+ * SAMPLE GATE (hotfix 2026-07-27, sampleGate.ts): the rating carries NO volume term, but under a
+ * payer slice the median facility rests on ~2 distinct patients — a confident color on 1-2 patients
+ * is sampling noise dressed as signal. So the DISPLAY (not the score) is tiered by distinct patients:
+ * < 3 → no bucket color / no confident %, an explicit "insufficient data" state (the row is still
+ * listed, since dropping it reads as "no data at all"); 3-9 → the rating shows, flagged a thin
+ * sample; >= 10 → unchanged. The patient count is surfaced so the user sees what the judgment rests
+ * on. This panel is always payer-wide (never identifier-scoped), so the gate always applies here.
  *
  * AMOUNTS: the `$allowed / $billed` line renders ONLY when the viewer has the amounts capability AND
  * both values are non-null — the elements are OMITTED from the DOM otherwise (the server has already
@@ -23,7 +31,8 @@
  * Pure/presentational (no hooks) so it renders hermetically under renderToStaticMarkup. Imports are
  * relative + type-only where possible so the render test runs under tsx without `@/` resolution.
  */
-import { ratingBucket, RATING_LEGEND, QUALIFY_LIMITED_DATA_LINES, type RatingBucket } from '../../lib/qualify/rating';
+import { ratingBucket, RATING_LEGEND, type RatingBucket } from '../../lib/qualify/rating';
+import { ratingSampleTier } from '../../lib/qualify/sampleGate';
 import { CONFIDENCE_LEGEND, type QualifyConfidence } from '../../lib/qualify/confidence';
 import { bucketClass, confidenceClass } from './colors';
 import type { QualifyFacility } from '../../lib/qualify/contract';
@@ -100,7 +109,11 @@ export function FacilityPanel({
           </p>
         ) : (
           visible.map((f) => {
-            const bucket = ratingBucket(f.rating);
+            // SAMPLE GATE (hotfix 2026-07-27): tier by distinct patients, then suppress the color at
+            // 'insufficient'. The score (f.rating) is untouched — only the DISPLAY bucket + pct are gated.
+            const tier = ratingSampleTier(f.distinctPatients);
+            const bucket = tier === 'insufficient' ? 'neutral' : ratingBucket(f.rating);
+            const showPct = tier !== 'insufficient';
             const pct = f.pctAllowedOfBilled;
             const loc = [f.city, f.state].filter(Boolean).join(', ');
             const selected = selectedKeys.has(f.facilityKey);
@@ -117,7 +130,13 @@ export function FacilityPanel({
                   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40',
                   selected ? 'bg-teal50 ring-2 ring-teal500' : 'hover:bg-surface',
                 ].join(' ')}
-                title={f.rating === null ? 'No rating — insufficient data' : `Rating ${Math.round(f.rating)} · rank ${f.rank}`}
+                title={
+                  tier === 'insufficient'
+                    ? `Insufficient data — only ${f.distinctPatients} patient${f.distinctPatients === 1 ? '' : 's'} in this slice`
+                    : f.rating === null
+                      ? 'No rating — insufficient data'
+                      : `Rating ${Math.round(f.rating)} · rank ${f.rank}`
+                }
               >
                 <div className="flex items-center justify-between gap-2.5">
                   <span className="flex items-center gap-2 text-[13.5px] font-semibold text-ink900">
@@ -130,17 +149,24 @@ export function FacilityPanel({
                         {LOC_LABEL[f.careSetting]}
                       </span>
                     ) : null}
-                    {f.lineCount < QUALIFY_LIMITED_DATA_LINES ? (
+                    {tier === 'insufficient' ? (
                       <span
                         className="inline-flex shrink-0 items-center rounded-full border border-line bg-surface px-1.5 py-px text-[10px] font-semibold text-ink400"
-                        title={`Only ${f.lineCount} claim line${f.lineCount === 1 ? '' : 's'} back this rating — treat as an early signal`}
+                        title={`Only ${f.distinctPatients} patient${f.distinctPatients === 1 ? '' : 's'} back this rating — not enough to score this slice`}
+                      >
+                        insufficient data
+                      </span>
+                    ) : tier === 'thin' ? (
+                      <span
+                        className="inline-flex shrink-0 items-center rounded-full border border-line bg-surface px-1.5 py-px text-[10px] font-semibold text-ink400"
+                        title={`Only ${f.distinctPatients} patients back this rating — treat as an early signal`}
                       >
                         thin sample
                       </span>
                     ) : null}
                   </span>
                   <span className="q-pct tabular-nums text-[15px] font-semibold">
-                    {pct === null ? '—' : `${Math.round(pct)}%`}
+                    {showPct && pct !== null ? `${Math.round(pct)}%` : '—'}
                   </span>
                 </div>
                 <div className="mt-1.5 flex items-center justify-between text-[11.5px]">
@@ -162,7 +188,7 @@ export function FacilityPanel({
                   <CoverageSegment conf="unknown" count={f.unknownClaims} total={f.lineCount} />
                 </div>
                 <p className="mt-1 text-[10.5px] text-ink400">
-                  Rated on {f.confirmedClaims} of {f.lineCount} claims
+                  Rated on {f.confirmedClaims} of {f.lineCount} claims · {f.distinctPatients} patient{f.distinctPatients === 1 ? '' : 's'}
                 </p>
               </button>
             );

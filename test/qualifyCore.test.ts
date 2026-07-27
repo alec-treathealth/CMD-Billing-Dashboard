@@ -41,8 +41,8 @@ const B2 = 777777.77, A2 = 666666.66; // solid/mid-pct facility (Indigo)
 const CB = 555555.55, CA = 444444.44; // a case's dollars
 
 const FAC_ROWS = [
-  { facility: 'ca mental health', facility_name: 'CA MENTAL HEALTH', facility_code: 'CAMH', care_setting: null, line_count: 3, confirmed_claims: 3, estimate_claims: 0, unknown_claims: 0, billed: B1, allowed: A1, pct_allowed: 60, entity_ids: [BXR_ENTITY_ID] }, // BXR, thin high pct
-  { facility: '405 recovery', facility_name: '405 RECOVERY', facility_code: '10026460', care_setting: 'OP' as const, line_count: 400, confirmed_claims: 380, estimate_claims: 15, unknown_claims: 5, billed: B2, allowed: A2, pct_allowed: 55, entity_ids: [INDIGO_ENTITY_ID] }, // Indigo, solid mid pct
+  { facility: 'ca mental health', facility_name: 'CA MENTAL HEALTH', facility_code: 'CAMH', care_setting: null, line_count: 3, distinct_patients: 3, confirmed_claims: 3, estimate_claims: 0, unknown_claims: 0, billed: B1, allowed: A1, pct_allowed: 60, entity_ids: [BXR_ENTITY_ID] }, // BXR, thin high pct
+  { facility: '405 recovery', facility_name: '405 RECOVERY', facility_code: '10026460', care_setting: 'OP' as const, line_count: 400, distinct_patients: 40, confirmed_claims: 380, estimate_claims: 15, unknown_claims: 5, billed: B2, allowed: A2, pct_allowed: 55, entity_ids: [INDIGO_ENTITY_ID] }, // Indigo, solid mid pct
 ];
 const CASE_ROWS = [
   { id: 123, member_id_bidx: 'BIDX_A', facility: '405 recovery', facility_name: '405 RECOVERY', primary_payer: 'AETNA', program: 'OP' as const, dos: '2026-07-01', payment_date: '2026-07-05', pct_allowed: 80, billed: CB, allowed: CA, allowed_tier: 'cd' },
@@ -159,7 +159,7 @@ test('snapshot: a small high-% facility RANKS ABOVE a large mid-% one (value-fir
   assert.equal(snap.facilities[1]!.rank, 2);
 });
 
-const BELOW_FLOOR_ROW = { facility: 'fluke', facility_name: 'FLUKE 100%', facility_code: null, care_setting: null, line_count: QUALIFY_MIN_LINES - 1, confirmed_claims: QUALIFY_MIN_LINES - 1, estimate_claims: 0, unknown_claims: 0, billed: 100, allowed: 100, pct_allowed: 100, entity_ids: [BXR_ENTITY_ID] };
+const BELOW_FLOOR_ROW = { facility: 'fluke', facility_name: 'FLUKE 100%', facility_code: null, care_setting: null, line_count: QUALIFY_MIN_LINES - 1, distinct_patients: 1, confirmed_claims: QUALIFY_MIN_LINES - 1, estimate_claims: 0, unknown_claims: 0, billed: 100, allowed: 100, pct_allowed: 100, entity_ids: [BXR_ENTITY_ID] };
 
 // ── #1b FLOOR: applies on the PAYER-WIDE (by-payer) path — a fluke never surfaces in the payer's book. ──
 test('snapshot by-payer: a below-floor facility (< QUALIFY_MIN_LINES) is suppressed from the payer-wide list', async () => {

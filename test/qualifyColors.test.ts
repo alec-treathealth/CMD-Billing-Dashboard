@@ -18,6 +18,7 @@ function fac(name: string, pct: number | null, lineCount: number, rank = 1): Qua
     billedAmount: null,
     allowedAmount: null,
     lineCount,
+    distinctPatients: lineCount, // colors.ts keys off rating only; value immaterial here
     confirmedClaims: lineCount, // neutral coverage: everything confirmed (Phase-1 tests vary this)
     estimateClaims: 0,
     unknownClaims: 0,

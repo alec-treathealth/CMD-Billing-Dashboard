@@ -37,13 +37,15 @@ const lowRating = qualifyRating(24)!; // 24 → danger (a genuinely weak reimbur
 const SOLID: QualifyFacility = {
   rank: 1, name: 'SOLID', facilityKey: 'solid', city: 'Boulder', state: 'CO',
   pctAllowedOfBilled: 55, rating: solidRating, streakSignal: null,
-  billedAmount: 308900, allowedAmount: 166800, lineCount: 400,
+  billedAmount: 308900, allowedAmount: 166800, lineCount: 400, distinctPatients: 40,
   confirmedClaims: 380, estimateClaims: 15, unknownClaims: 5, careSetting: 'OP', entity: 'BXR',
 };
+// THIN_HIGH: 90% on ONE patient — the sample gate (hotfix 2026-07-27) suppresses its color to
+// neutral ("insufficient data"), even though the value-first rating itself is 90 (→ ratingBucket ok).
 const THIN_HIGH: QualifyFacility = {
   rank: 2, name: 'THIN HIGH', facilityKey: 'thin high', city: 'Reno', state: 'NV',
   pctAllowedOfBilled: 90, rating: thinHighRating, streakSignal: null,
-  billedAmount: 412300, allowedAmount: 251500, lineCount: 1,
+  billedAmount: 412300, allowedAmount: 251500, lineCount: 1, distinctPatients: 1,
   confirmedClaims: 1, estimateClaims: 0, unknownClaims: 0, careSetting: null, entity: 'Indigo',
 };
 const FACILITIES = [SOLID, THIN_HIGH];
@@ -59,7 +61,7 @@ const CASE_AT_THIN: QualifyClaim = {
 const LOW: QualifyFacility = {
   rank: 3, name: 'LOW YIELD', facilityKey: 'low yield', city: 'Fresno', state: 'CA',
   pctAllowedOfBilled: 24, rating: lowRating, streakSignal: null,
-  billedAmount: 500000, allowedAmount: 120000, lineCount: 300,
+  billedAmount: 500000, allowedAmount: 120000, lineCount: 300, distinctPatients: 30,
   confirmedClaims: 290, estimateClaims: 8, unknownClaims: 2, careSetting: 'IP', entity: 'BXR',
 };
 const CASE_AT_LOW: QualifyClaim = {
@@ -119,10 +121,33 @@ test('cases table — WITH amounts: Billed/Allowed columns + values are present'
   assert.ok(html.includes('$18,400') && html.includes('$11,592'), 'values present for an amounts viewer');
 });
 
-test('facility color = the allowed% bucket (value-first): a 90% facility reads GREEN', () => {
+test('SAMPLE GATE — a 90% facility on ONE patient is SUPPRESSED (neutral + "insufficient data", no confident %)', () => {
+  // THIN_HIGH is value-first 90% (ratingBucket ok) but rests on 1 distinct patient. The gate
+  // (hotfix 2026-07-27) must render it NEUTRAL, not green — a confident color on 1 patient is noise.
   const html = renderToStaticMarkup(<FacilityPanel facilities={[THIN_HIGH]} hasAmounts heatOn />);
-  assert.ok(html.includes('q-fac q-ok'), 'the 90% row is green — the rating IS its allowed%');
-  assert.ok(!html.includes('q-fac q-warn'), 'not amber — volume no longer demotes a high %');
+  assert.ok(html.includes('q-fac q-neutral'), 'a <3-patient row is neutral — no confident bucket color');
+  assert.ok(!html.includes('q-fac q-ok'), 'NOT green — the sample gate suppresses the color under 3 patients');
+  assert.ok(html.includes('insufficient data'), 'shows the explicit insufficient-data state');
+  assert.ok(!html.includes('90%'), 'the confident % is suppressed (— instead)');
+  assert.ok(/1 patient\b/.test(html), 'the patient count the judgment rests on is visible');
+});
+
+test('SAMPLE GATE — value-first color is INTACT once the sample is adequate (90% on ≥10 patients reads GREEN)', () => {
+  const ample = { ...THIN_HIGH, distinctPatients: 12 };
+  const html = renderToStaticMarkup(<FacilityPanel facilities={[ample]} hasAmounts heatOn />);
+  assert.ok(html.includes('q-fac q-ok'), 'a well-sampled 90% row is green — the gate suppresses only thin slices, not the rating');
+  assert.ok(html.includes('90%'), 'the confident % renders');
+  // NB: RATING_LEGEND.description mentions "thin sample" prose — assert on the PILL element, not the substring.
+  assert.ok(!html.includes('>thin sample<') && !html.includes('>insufficient data<'), 'no thin/insufficient PILL at ≥10 patients');
+});
+
+test('SAMPLE GATE — a 3-9 patient facility shows the rating but is flagged a THIN SAMPLE', () => {
+  const thin = { ...THIN_HIGH, distinctPatients: 5 };
+  const html = renderToStaticMarkup(<FacilityPanel facilities={[thin]} hasAmounts heatOn />);
+  assert.ok(html.includes('q-fac q-ok'), 'the rating still colors at 3-9 patients (not suppressed)');
+  assert.ok(html.includes('90%'), 'the % renders');
+  assert.ok(html.includes('>thin sample<'), 'but the thin-sample PILL is present');
+  assert.ok(/5 patients/.test(html), 'patient count visible');
 });
 
 test('case % cell is tinted by the case’s OWN allowed%, NOT the parent facility bucket', () => {

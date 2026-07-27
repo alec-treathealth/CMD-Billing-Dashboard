@@ -69,6 +69,7 @@ export interface QualifyFacilityRow {
   facility_code: string | null; // resolved facility_code — join key to the in-code city/state lookup
   care_setting: 'IP' | 'OP' | 'BOTH' | null; // resolved dimension level-of-care; null when unresolved
   line_count: number; // ALL in-window logical charge lines (volume context: floor + "limited data") — NOT tier-filtered
+  distinct_patients: number; // count(distinct member_id_bidx) in-window — the sample-gate unit (rating suppression, hotfix 2026-07-27); the token is COUNTED, never projected
   confirmed_claims: number; // count of tiers a/cd/e1 (SQL mirror of confidence.ts — parity-tested)
   estimate_claims: number; // count of tier e2
   unknown_claims: number; // count of tiers b/none — the three sum to line_count
@@ -235,6 +236,10 @@ export function buildFacilityRankingQuery(
   // line_count (the tier taxonomy is exhaustive). Counts only — no ratio/rating math changes here.
   const inner =
     'select facility, count(*)::int as line_count, ' +
+    // distinct patients backing this facility slice — the rating sample gate's unit (hotfix
+    // 2026-07-27). member_id_bidx is an opaque keyed-HMAC token: COUNTED here, NEVER projected (no
+    // PHI leaves), exactly like the movers query's distinct-patient floor.
+    'count(distinct member_id_bidx)::int as distinct_patients, ' +
     "count(*) filter (where allowed_tier in ('a','cd','e1'))::int as confirmed_claims, " +
     "count(*) filter (where allowed_tier = 'e2')::int as estimate_claims, " +
     "count(*) filter (where allowed_tier in ('b','none'))::int as unknown_claims, " +
@@ -252,14 +257,14 @@ export function buildFacilityRankingQuery(
     (mj ? `and ${mj} ` : '') +
     'group by facility';
   const sql =
-    'select agg.facility, agg.line_count, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
+    'select agg.facility, agg.line_count, agg.distinct_patients, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
     'agg.billed, agg.allowed, agg.pct_allowed, agg.entity_ids, ' +
     'max(f.facility_name) as facility_name, ' +
     'max(f.care_setting) as care_setting, ' +
     'max(coalesce(fe.facility_code, a.facility_code)) as facility_code ' +
     `from (${inner}) agg ` +
     FACILITY_DIM_JOINS +
-    'group by agg.facility, agg.line_count, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
+    'group by agg.facility, agg.line_count, agg.distinct_patients, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
     'agg.billed, agg.allowed, agg.pct_allowed, agg.entity_ids ' +
     'order by agg.pct_allowed desc nulls last, agg.facility';
   return { sql, params };

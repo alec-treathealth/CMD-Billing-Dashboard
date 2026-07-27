@@ -9,6 +9,7 @@
  */
 import { mobileBucketStyle } from './colors';
 import { explainRating } from '../../../lib/qualify/rating';
+import { ratingSampleTier } from '../../../lib/qualify/sampleGate';
 import type { QualifyFacility } from '../../../lib/qualify/contract';
 
 const INK900 = '#1B2B2A';
@@ -26,10 +27,23 @@ function StatRow({ label, value, mono }: { label: string; value: string; mono?: 
   );
 }
 
-export function TrendSheet({ facility, onClose }: { facility: QualifyFacility; onClose: () => void }) {
-  const b = mobileBucketStyle(facility.rating);
+export function TrendSheet({
+  facility,
+  onClose,
+  sampleGated = true,
+}: {
+  facility: QualifyFacility;
+  onClose: () => void;
+  /** Apply the distinct-patient sample gate (sampleGate.ts). True for the payer-wide ranking; false
+   *  for an identifier-scoped facility (one known patient — keeps the raw rating). Default true. */
+  sampleGated?: boolean;
+}) {
+  // SAMPLE GATE (hotfix 2026-07-27): suppress the confident rating below 3 distinct patients.
+  const tier = sampleGated ? ratingSampleTier(facility.distinctPatients) : 'full';
+  const insufficient = tier === 'insufficient';
+  const b = insufficient ? mobileBucketStyle(null) : mobileBucketStyle(facility.rating);
   const ex = explainRating(facility.pctAllowedOfBilled, facility.lineCount);
-  const ratingText = facility.rating === null ? '—' : String(Math.round(facility.rating));
+  const ratingText = insufficient || facility.rating === null ? '—' : String(Math.round(facility.rating));
   return (
     <div
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
@@ -46,7 +60,8 @@ export function TrendSheet({ facility, onClose }: { facility: QualifyFacility; o
           </div>
         ) : null}
         <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <StatRow label="Allowed / billed" value={ex.rawPct === null ? '—' : `${Math.round(ex.rawPct)}%`} mono />
+          <StatRow label="Allowed / billed" value={insufficient ? '—' : ex.rawPct === null ? '—' : `${Math.round(ex.rawPct)}%`} mono />
+          <StatRow label="Distinct patients" value={String(facility.distinctPatients)} mono />
           <StatRow label="Claim lines this window" value={String(ex.lineCount)} mono />
           {/* 0059 coverage breakdown (Phase 4): what the rating is — and is not — based on. */}
           <StatRow label="Confirmed claims" value={String(facility.confirmedClaims)} mono />
@@ -64,10 +79,21 @@ export function TrendSheet({ facility, onClose }: { facility: QualifyFacility; o
             Rated on {facility.confirmedClaims} of {facility.lineCount} claims. Estimate = payer reversals we
             couldn&rsquo;t verify — shown in the claims list, excluded from this rating.
           </p>
+          {/* SAMPLE GATE note (hotfix 2026-07-27): patient-based, above the line-based ex.sentence. */}
+          {tier === 'insufficient' ? (
+            <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5, color: INK600 }}>
+              Only {facility.distinctPatients} patient{facility.distinctPatients === 1 ? '' : 's'} in this slice — not
+              enough to score, so no rating is shown. Widen the window or the payer to build a reliable sample.
+            </p>
+          ) : tier === 'thin' ? (
+            <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5, color: INK600 }}>
+              Backed by only {facility.distinctPatients} patients — treat this rating as an early signal.
+            </p>
+          ) : null}
           <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5, color: INK600 }}>{ex.sentence}</p>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, borderTop: `0.5px solid ${LINE}`, paddingTop: 10 }}>
             <span style={{ color: INK600 }}>Rating</span>
-            <span className="ths-num" style={{ fontWeight: 700, color: b.color }}>{ratingText} · {b.label}</span>
+            <span className="ths-num" style={{ fontWeight: 700, color: b.color }}>{insufficient ? 'Insufficient data' : `${ratingText} · ${b.label}`}</span>
           </div>
         </div>
         <button

@@ -480,8 +480,15 @@ export function QualifyMobileApp({
   const sheetClaims = facilityCases === null ? null : filterClaimsByLoc(facilityCases, locFilter);
 
   // KPI tiles: scoped to the resolved payer once a subject resolves; book-wide on the clean landing.
+  // HOTFIX 2026-07-27 (thin-slice suppression): the payer-scoped KPI tiles rest on a median of 2
+  // distinct patients per payer (prod @90d: 63.7% of payers < 3 patients) — the SAME thin-slice
+  // regime as the ranking, but these tiles carry NO distinct-patient count to gate on (that count
+  // lives in buildBookKpisQuery, frozen this hotfix). So they FAIL SAFE to book-wide until Phase 2
+  // wires a patient count into the KPI builder — flip SCOPED_TILES_ENABLED to true then. The
+  // refreshScopedKpis fetch is left intact (harmless) so re-enabling is a one-line change.
+  const SCOPED_TILES_ENABLED = false;
   const kpiScopePayer = snapshot?.resolved?.payerName ?? null;
-  const tilesScoped = searched && kpiScopePayer !== null && scopedKpis !== null;
+  const tilesScoped = SCOPED_TILES_ENABLED && searched && kpiScopePayer !== null && scopedKpis !== null;
   const shownKpis = tilesScoped ? scopedKpis : kpis;
 
   function renderBody(): ReactNode {
@@ -824,7 +831,7 @@ export function QualifyMobileApp({
 
       {renderBody()}
 
-      {trendSheet ? <TrendSheet facility={trendSheet} onClose={() => setTrendSheet(null)} /> : null}
+      {trendSheet ? <TrendSheet facility={trendSheet} onClose={() => setTrendSheet(null)} sampleGated={!isIdentifierScoped} /> : null}
       {detail ? (
         <DetailSheet
           key={detail.facilityKey}

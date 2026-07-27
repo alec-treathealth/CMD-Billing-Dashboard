@@ -14,6 +14,7 @@
  */
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { mobileBucketStyle } from './colors';
+import { ratingSampleTier } from '../../../lib/qualify/sampleGate';
 import { BuildingIcon, TrendIcon } from './icons';
 import type { QualifyFacility } from '../../../lib/qualify/contract';
 
@@ -27,10 +28,15 @@ export function SwipeRow({
   facility,
   onWhy,
   onOpen,
+  sampleGated = true,
 }: {
   facility: QualifyFacility;
   onWhy: (f: QualifyFacility) => void;
   onOpen: (f: QualifyFacility) => void;
+  /** Apply the distinct-patient sample gate (sampleGate.ts, hotfix 2026-07-27). True for the payer-wide
+   *  ranking; FALSE for an identifier-scoped list (one known patient by construction — its thinness is
+   *  self-evident and intended, so it keeps the raw rating). Default true. */
+  sampleGated?: boolean;
 }) {
   function onKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
     if (e.key === 'Enter' || e.key === ' ') {
@@ -39,7 +45,13 @@ export function SwipeRow({
     }
   }
 
-  const b = mobileBucketStyle(facility.rating);
+  // SAMPLE GATE: < 3 distinct patients → neutral (no confident color / number); 3-9 → thin flag.
+  const tier = sampleGated ? ratingSampleTier(facility.distinctPatients) : 'full';
+  const insufficient = tier === 'insufficient';
+  const b = insufficient ? mobileBucketStyle(null) : mobileBucketStyle(facility.rating);
+  const ratingText = insufficient || facility.rating === null ? '—' : String(Math.round(facility.rating));
+  const label = insufficient ? 'Insufficient' : b.label;
+  const patients = `${facility.distinctPatients} patient${facility.distinctPatients === 1 ? '' : 's'}`;
   // "City, ST" only when BOTH are present — partial (city-only / state-only) omits cleanly, never "City, " or ", ST".
   const loc = facility.city && facility.state ? `${facility.city}, ${facility.state}` : null;
 
@@ -80,7 +92,7 @@ export function SwipeRow({
           ) : null}
         </div>
         <div className="mt-0.5 truncate text-[11px]" style={{ color: INK400 }}>
-          {loc ? `${loc} · ` : ''}{facility.lineCount} lines this window
+          {loc ? `${loc} · ` : ''}{patients} · {facility.lineCount} lines{tier === 'thin' ? ' · thin sample' : ''}
         </div>
         {/* 0059 coverage micro-bar: confirmed / estimate / unknown (estimate amber, never green). */}
         <div className="mt-1 flex h-[3px] overflow-hidden rounded-full" style={{ background: LINE }} aria-hidden>
@@ -94,10 +106,10 @@ export function SwipeRow({
       </div>
       <div className="flex-shrink-0 text-right">
         <div className="ths-num text-[20px] font-bold leading-none" style={{ color: b.color }}>
-          {facility.rating === null ? '—' : Math.round(facility.rating)}
+          {ratingText}
         </div>
         <div className="mt-0.5 text-[9px] font-bold uppercase tracking-wide" style={{ color: b.color }}>
-          {b.label}
+          {label}
         </div>
       </div>
       {/* Dedicated WHY control (Phase 4b): right-swipe no longer opens "why" — this button does. stopPropagation

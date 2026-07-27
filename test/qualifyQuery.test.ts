@@ -148,6 +148,9 @@ test('buildFacilityRankingQuery: rates on allowed_reliable with tier e2 excluded
   assert.ok(sql.includes('cmd_facility_aliases'), 'alias crosswalk');
   assert.match(sql, /as facility_code/, 'returns facility_code for the city/state lookup');
   assert.match(sql, /count\(\*\)::int as line_count/, 'line_count = ALL in-window lines (volume context, not tier-filtered)');
+  assert.match(sql, /count\(distinct member_id_bidx\)::int as distinct_patients/, 'sample gate: distinct-patient count projected');
+  // The opaque token is ONLY ever counted, NEVER selected as a column (no PHI leaves this builder).
+  assert.ok(!sql.replace(/count\(distinct member_id_bidx\)/g, '').includes('member_id_bidx'), 'member_id_bidx is counted, never projected');
   assert.match(sql, /sum\(charge_amount\)::float8 as billed/, 'billed = ALL in-window lines (e2 stays in the denominator — unknown-like)');
   // Phase 0 (0059 trust signal): the coverage triple + level-of-care ride the SAME query — counts
   // only, no ratio/rating math change (bucket parity with confidence.ts: qualifyConfidence.test.ts).
