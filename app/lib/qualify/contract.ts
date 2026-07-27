@@ -7,10 +7,23 @@
  */
 import type { QualifyConfidence } from './confidence';
 
-/** Trailing-window day counts (redesign: 180 DROPPED per ruling; Month/Year replaces it). */
-export type QualifyTrailingDays = 30 | 60 | 90;
+/** Trailing-window day counts. 30/60/90 are the quick PILLS; 180/270/365 (6/9/12 months) are the
+ *  longer ROLLING spans in the Range ▾ menu — capped at 12 months so the widest scan stays ~1 year.
+ *  Day-count months (180/270/365), NOT calendar months, so the existing trailing engine + prior-window
+ *  math generalize unchanged. The 12-month book-wide aggregate rides an index-only scan (mig 0068). */
+export type QualifyTrailingDays = 30 | 60 | 90 | 180 | 270 | 365;
 export const QUALIFY_WINDOW_OPTIONS: readonly QualifyTrailingDays[] = [30, 60, 90];
-const WINDOW_SET: ReadonlySet<number> = new Set(QUALIFY_WINDOW_OPTIONS);
+/** Longer rolling spans surfaced in the Range menu (NOT quick pills). 6 / 9 / 12 months. */
+export const QUALIFY_ROLLING_OPTIONS: readonly QualifyTrailingDays[] = [180, 270, 365];
+/** days -> whole months, for the friendly rolling labels ("6mo" chip / "Last 6 months" menu). */
+const ROLLING_MONTHS: Readonly<Record<number, number>> = { 180: 6, 270: 9, 365: 12 };
+const WINDOW_SET: ReadonlySet<number> = new Set([...QUALIFY_WINDOW_OPTIONS, ...QUALIFY_ROLLING_OPTIONS]);
+
+/** Menu label for a rolling span: "Last 6 months". */
+export function qualifyRollingLabel(days: QualifyTrailingDays): string {
+  const m = ROLLING_MONTHS[days];
+  return m ? `Last ${m} months` : `Last ${days} days`;
+}
 
 /**
  * THE window shape (redesign): trailing-N-days OR a CALENDAR month/year (a different window shape,
@@ -73,9 +86,12 @@ export function parseQualifyWindow(s: string | null | undefined): QualifyWindow 
   return null;
 }
 
-/** Human window label for captions/chips: '30d' · 'Jul 2026' · '2026'. */
+/** Human window label for captions/chips: '30d' · '6mo' · 'Jul 2026' · '2026'. */
 export function qualifyWindowLabel(w: QualifyWindow): string {
-  if (w.kind === 'trailing') return `${w.days}d`;
+  if (w.kind === 'trailing') {
+    const m = ROLLING_MONTHS[w.days];
+    return m ? `${m}mo` : `${w.days}d`;
+  }
   if (w.kind === 'month') {
     const name = new Date(Date.UTC(w.year, w.month - 1, 1)).toLocaleString('en-US', { month: 'short', timeZone: 'UTC' });
     return `${name} ${w.year}`;
