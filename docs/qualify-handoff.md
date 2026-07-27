@@ -1,5 +1,13 @@
 # Qualify — session handoff (2026-07-17)
 
+> **SUPERSEDED (2026-07-26).** This 2026-07-17 handoff predates the overview-first redesign.
+> For current state read **`docs/qualify-redesign-HANDOFF.md`** first — it is the live runbook.
+> Two specifics this older doc gets wrong or leaves stale:
+> - **Facility tap-nav shipped** — via the Change-E facility drill (row/card/Facility-tab click →
+>   `resolveByPayer` scope), not the de-scoped "payer board" tab this doc describes.
+> - **`streakSignal` is still `null`** in v1 (ruling Q-E; the rollup can't back a faithful monthly
+>   trend) — do not wire a streak badge expecting data.
+
 Paste-ready continuation prompt for a fresh session. Everything below the rule is self-contained; a
 new session should need zero re-discovery. Companion tribal-knowledge lives in
 `docs/veris-data-notes.md` (Qualify entry + the migration reservations ledger) and the auto-memory
