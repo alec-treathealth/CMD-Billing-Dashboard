@@ -97,10 +97,20 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
       c.landingArgs.push({ kind, payer, entityIds });
       return '405 recovery';
     },
-    loadFacilityCases: async (payer, facility, _f, _t, entityIds, opts) => {
-      c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, memberToken: opts.memberToken, nameToken: opts.nameToken, limit: opts.limit, allPayers: opts.allPayers });
+    loadFacilityCases: async (filter, entityIds, opts) => {
+      c.facilityCasesArgs.push({
+        payer: filter.primary_payers?.[0] ?? '',
+        facility: filter.facility?.[0] ?? '',
+        entityIds,
+        prefixToken: filter.phiIndex?.memberIdPrefixBidx ?? null,
+        memberToken: filter.phiIndex?.memberIdBidx ?? null,
+        nameToken: opts.nameToken ?? null,
+        limit: opts.limit ?? QUALIFY_CASES_MAX,
+        allPayers: opts.allPayers,
+      });
       return CASE_ROWS;
     },
+    loadMatchSummary: async () => ({ total_count: 0, total_charge: 0, total_allowed: 0, total_paid: 0, total_balance: 0 }),
     // Phase 3 fakes: a known claim id resolves to a prefix token; the cohort clears the floor.
     loadClaimPrefixToken: async (claimId) => (claimId === 123 ? 'PREFIX_TOKEN_X' : null),
     loadPatientCohort: async () => ({
@@ -464,8 +474,17 @@ test('facility-drill allPayers: threads the flag + the whole-window cap (no pref
   ];
   const res = await getQualifyFacilityCasesCore(
     makeDeps(SUPER, c, {
-      loadFacilityCases: async (payer, facility, _from, _to, entityIds, opts) => {
-        c.facilityCasesArgs.push({ payer, facility, entityIds, prefixToken: opts.prefixToken, memberToken: opts.memberToken, nameToken: opts.nameToken, limit: opts.limit, allPayers: opts.allPayers });
+      loadFacilityCases: async (filter, entityIds, opts) => {
+        c.facilityCasesArgs.push({
+          payer: filter.primary_payers?.[0] ?? '',
+          facility: filter.facility?.[0] ?? '',
+          entityIds,
+          prefixToken: filter.phiIndex?.memberIdPrefixBidx ?? null,
+          memberToken: filter.phiIndex?.memberIdBidx ?? null,
+          nameToken: opts.nameToken ?? null,
+          limit: opts.limit ?? QUALIFY_CASES_MAX,
+          allPayers: opts.allPayers,
+        });
         return MIXED;
       },
     }),
@@ -626,11 +645,21 @@ function prefixExactDeps(c: Cap): QualifyDeps {
   return makeDeps(SUPER, c, {
     // Deterministic, term-distinct, opaque-shaped token — models the keyed-HMAC blind index per prefix.
     mintToken: (term, kind) => `tok:${kind}:${term.toUpperCase()}`,
-    loadFacilityCases: async (_p, _f, _from, _to, _e, opts) => {
-      c.facilityCasesArgs.push({ payer: _p, facility: _f, entityIds: _e, prefixToken: opts.prefixToken, memberToken: opts.memberToken, nameToken: opts.nameToken, limit: opts.limit, allPayers: opts.allPayers });
+    loadFacilityCases: async (filter, entityIds, opts) => {
+      const prefixToken = filter.phiIndex?.memberIdPrefixBidx ?? null;
+      c.facilityCasesArgs.push({
+        payer: filter.primary_payers?.[0] ?? '',
+        facility: filter.facility?.[0] ?? '',
+        entityIds,
+        prefixToken,
+        memberToken: filter.phiIndex?.memberIdBidx ?? null,
+        nameToken: opts.nameToken ?? null,
+        limit: opts.limit ?? QUALIFY_CASES_MAX,
+        allPayers: opts.allPayers,
+      });
       // Simulate the DB predicate member_id_prefix_bidx = $tok (equality on the prefix's own blind index).
-      if (opts.prefixToken) {
-        const want = opts.prefixToken.replace('tok:prefix:', '');
+      if (prefixToken) {
+        const want = prefixToken.replace('tok:prefix:', '');
         return PREFIX_ROWS.filter((r) => PREFIX_OF.get(r.id) === want);
       }
       return PREFIX_ROWS; // no narrow ⇒ payer-wide (all three prefixes)
@@ -721,8 +750,8 @@ test('facility-drill: filter.group mints server-side, threads the TOKEN, audits 
   const c = cap();
   let seenGroupToken: string | null | undefined;
   const deps = makeDeps(SUPER, c, {
-    loadFacilityCases: async (_p, _f, _from, _to, _e, opts) => {
-      seenGroupToken = opts.groupToken;
+    loadFacilityCases: async (filter) => {
+      seenGroupToken = filter.phiIndex?.groupNumberBidx;
       return CASE_ROWS;
     },
   });

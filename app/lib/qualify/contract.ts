@@ -184,6 +184,45 @@ export interface QualifyFacilityCasesInput {
 }
 
 /**
+ * COMPOSE-BAR input (Phase 1) — an AND-composed filter SET, the Qualify-shaped mirror of Collections'
+ * CmdExplorerFilter (raw PHI terms here; HMAC'd to blind indexes at the action boundary). An empty/absent
+ * field = NO restriction (never match-nothing). Non-PHI arrays are set-membership; the four PHI terms are
+ * equality narrows. `clientName` is Qualify's admissions-first name narrow (Change C) — DORMANT until
+ * QUALIFY_CLIENT_NAME_ENABLED, and a cases-ONLY narrow (the shared summary builder can't express it, so
+ * the live count is name-blind; harmless while the flag is off — see the compose-bar PHI row comment).
+ * Drives BOTH getQualifyMatchSummary (the live count) and getQualifyComposedCases (the claims list).
+ */
+export interface QualifyComposeInput {
+  facilities?: string[]; // raw rollup facility text (== QualifyFacility.facilityKey)
+  payers?: string[]; // plaintext primary_payer labels
+  employers?: string[]; // employer_norm keys (VOB semi-join)
+  funding?: string[]; // 'Self-Funded' | 'Fully Insured'
+  memberId?: string; // raw PHI — HMAC'd server-side → member_id_bidx
+  alphaPrefix?: string; // raw PHI — HMAC'd → member_id_prefix_bidx
+  group?: string; // raw PHI — HMAC'd → group_number_bidx
+  clientName?: string; // raw PHI (Change C) — HMAC'd → patient_name_bidx (cases-only; dormant behind the flag)
+  window: QualifyWindow;
+}
+
+/**
+ * Live "N charge lines match" summary for the compose bar. `count` + the two percentages are NON-DOLLAR
+ * (admissions_seat-safe); the raw dollar sums are null unless the viewer has the amounts capability
+ * (stripped at the CORE choke point). Percentages are derived server-side from the sums BEFORE stripping,
+ * so admissions_seat still gets them. A collapsed denominator yields null (never a coerced 0%).
+ */
+export interface QualifyMatchSummary {
+  count: number;
+  totalCharge: number | null;
+  totalAllowed: number | null;
+  totalPaid: number | null;
+  totalBalance: number | null;
+  pctAllowedOfBilled: number | null;
+  pctPaidOfBilled: number | null;
+  viewerHasAmountsCapability: boolean;
+  tenantScope: typeof QUALIFY_TENANT_SCOPE;
+}
+
+/**
  * Phase 3 — the patient-group "View cohort" slide-over input. `claimId` is ONE claim of the group
  * (the rollup's synthetic id, non-PHI); the SERVER re-derives the member's alpha-prefix cohort token
  * from it (tenant-scoped lookup — a foreign/unknown id fails closed to suppressed). payer/facility/

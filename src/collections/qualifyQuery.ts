@@ -26,6 +26,8 @@ import { assertEntityScope } from './entityScope.js';
 import {
   CMD_EXPLORER_CHARGE_ROLLUP,
   buildVobMarketSemiJoin,
+  cmdExplorerBaseConds,
+  type CmdExplorerFilter,
   type ParamAdder,
   type VobMarketFilter,
 } from './cmdExplorerQuery.js';
@@ -96,6 +98,17 @@ export interface QualifyMoverRow {
   this_patients: number;
   prior_patients: number;
   delta_patients: number; // this - prior (signed; ranked desc = biggest gainers first)
+}
+
+/** The `totals` row shape of Collections' `buildCmdSearchSummaryQueries` (the compose-bar live match
+ *  count). Qualify consumes ONLY this row (not the grouped aggregates); the CORE derives the two
+ *  percentages then strips the raw dollar sums for non-amounts viewers (the one choke point). */
+export interface QualifyMatchSummaryRow {
+  total_count: number;
+  total_charge: number;
+  total_allowed: number;
+  total_paid: number;
+  total_balance: number;
 }
 
 function paramList(): { params: unknown[]; add: ParamAdder } {
@@ -297,115 +310,69 @@ export function buildIdentifierLandingFacilityQuery(
 }
 
 /**
- * FACILITY-SCOPED recent CLAIMS for the resolved payer AT ONE FACILITY, in-window, cross-tenant. CLAIM
- * GRAIN (Direction B, ruling 1): ONE row per charge from the 0050 rollup — NO member_id_bidx dedup — so a
+ * COMPOSED recent CLAIMS for a filter SET (the compose-bar model), in-window, cross-tenant. CLAIM GRAIN
+ * (Direction B, ruling 1): ONE row per charge from the 0050 rollup — NO member_id_bidx dedup — so a
  * patient with several claims shows each one; per-claim DOS = that charge's own charge_date (not a max);
- * per-claim allowed = the 0059 `allowed_reliable` and pct_allowed = the materialized 0059 ratio (repoint ②
- * — restated charges now show the adjudicated/reconciling value, not the netted sum: the 133.88% fixture
- * reads 33.88%; e1 claims show the reconciling netted sum; e2 stays visible unfiltered). `facility` is the RAW
- * rollup facility text (the same value buildFacilityRankingQuery groups by, and carried to the client as
- * QualifyFacility.facilityKey), NOT the resolved facility_code — a single code can alias multiple raw texts
- * that rank as SEPARATE cards, so scoping by raw text keeps each card's claim list grain-consistent with its
- * rank. NO cohort floor (masked-by-default + audited reveal is the control).
+ * per-claim allowed = the 0059 `allowed_reliable`, pct_allowed = the materialized 0059 ratio (e2 stays
+ * visible unfiltered — display surface). `facility` is the RAW rollup facility text (the join key the
+ * ranking groups by / QualifyFacility.facilityKey), never the facility_code.
  *
- * IDENTIFIER NARROW (Direction B): the searched identifier (or the manual prefix input) narrows the rows to
- * that member exactly — `member_id_bidx = $tok` (exact member-id search) or `member_id_prefix_bidx = $tok`
- * (≤3 alpha prefix). Mutually exclusive; `memberToken` (exact) wins if both are somehow set. The token is
- * opaque (HMAC'd upstream); a term mapping to a different payer simply yields 0 rows (NEVER re-resolves). A
- * charge-grain rollup index rides these columns, so the equality lives in the WHERE (no GROUP BY now).
+ * FILTER PREDICATE: adopts Collections' shared `cmdExplorerBaseConds` (facility[] / primary_payers[] /
+ * employer+funding VOB semi-join / [from,to) window / member+prefix+group blind-index equality) — the
+ * SAME predicate the Collections grid + summary use, so the two surfaces filter identically. Qualify
+ * CONSUMES it (never forks it) and passes its cross-tenant [BXR, Indigo] entity array exactly where
+ * Collections passes one tenant. The single-facility / single-payer drill (desktop rows, mobile detail)
+ * is just a one-element `facility` / `primary_payers` array. The SELECT, masking columns, and
+ * payment-date ordering below are Qualify's own — only the WHERE is shared.
  */
 export function buildFacilityCasesQuery(
-  payer: string,
-  facility: string,
-  from: string,
-  to: string,
+  filter: CmdExplorerFilter,
   entityIds: string[],
   opts: {
-    /** Opaque member_id_prefix_bidx token (already HMAC'd upstream) — adds a STARTS-WITH prefix narrow. */
-    prefixToken?: string | null;
-    /** Opaque member_id_bidx token (already HMAC'd upstream) — adds an EXACT member-id narrow (wins over prefix). */
-    memberToken?: string | null;
-    /** Opaque patient_name_bidx token (already HMAC'd upstream) — the EXACT client-name narrow
-     *  (Change C). The identifier narrows are mutually exclusive in practice; precedence when
-     *  several arrive: member > prefix > name. */
+    /** Opaque patient_name_bidx token (Change C) — the EXACT client-name narrow. CmdExplorerFilter.phiIndex
+     *  carries no patientNameBidx (Collections has no name search), so this is Qualify's OWN extra AND rather
+     *  than a fork of the shared builder — the PERMANENT shape of Qualify's admissions-first name divergence.
+     *  Dormant until QUALIFY_CLIENT_NAME_ENABLED flips. */
     nameToken?: string | null;
-    /** Opaque group_number_bidx token (already HMAC'd upstream) — EXACT group-number narrow (the employer
-     *  proxy; Phase 2). Composable: ANDs with the member narrows rather than competing with them. */
-    groupToken?: string | null;
-    /** Safety cap (default QUALIFY_CASES_MAX). The query OVER-FETCHES by one (binds limit+1) so the caller
-     *  detects truncation (`capped`) from the extra row, never a count. NO keyset cursor — the drill returns
-     *  the whole (facility, payer, window) set in one shot (bounded), ordered payment_date desc. */
-    limit?: number;
-    /** ALL-PAYERS view (mobile detail sheet): drop the `primary_payer = $payer` filter so EVERY payer's
-     *  claims at the facility come back (each row tagged with its own primary_payer). `payer` is then
-     *  UNUSED here (not bound). Blank payers are excluded so every row groups under a real payer chip. */
+    /** ALL-PAYERS view (mobile detail sheet): the filter carries NO primary_payers, so drop the payer
+     *  restriction but still exclude blank payers so every row groups under a real payer chip. */
     allPayers?: boolean;
-    /** VOB employer/funding market narrow (real verified employer + funding). Composable with the
-     *  member/prefix/group narrows above; a semi-join, so a claim whose member has no matching VOB is
-     *  excluded when this is active. Complements the older group_number "employer proxy". */
-    market?: VobMarketFilter;
+    /** Safety cap (default QUALIFY_CASES_MAX). OVER-FETCHES by one (binds limit+1) so the caller detects
+     *  truncation (`capped`) from the extra row, never a count. NO keyset cursor — the whole set in one shot. */
+    limit?: number;
   } = {},
 ): { sql: string; params: unknown[] } {
   const ent = assertEntityScope(entityIds, 'buildFacilityCasesQuery');
   const { params, add } = paramList();
-  const e = add(ent);
-  // Single-payer drill (desktop) binds + filters on the resolved payer; the all-payers drill (mobile)
-  // filters it out entirely and only excludes blank payers. `payer` is bound ONLY on the single-payer path
-  // so an unused bind never reaches Postgres.
-  const payerCond = opts.allPayers
-    ? " and primary_payer is not null and btrim(primary_payer) <> ''"
-    : ` and primary_payer = ${add(payer)}`;
-  const fac = add(facility);
-  const f = add(from);
-  const t = add(to);
-  // Identifier narrow (inner WHERE): member > prefix > client-name (mutually exclusive in practice).
-  // All ride charge-grain rollup indexes; the token is opaque (HMAC'd upstream), never the raw term.
-  const idCond = opts.memberToken
-    ? ` and member_id_bidx = ${add(opts.memberToken)}`
-    : opts.prefixToken
-      ? ` and member_id_prefix_bidx = ${add(opts.prefixToken)}`
-      : opts.nameToken
-        ? ` and patient_name_bidx = ${add(opts.nameToken)}`
-        : '';
-  // Group-number narrow (EXACT; the employer proxy) — independent of the member narrow, so both can apply.
-  const grpCond = opts.groupToken ? ` and group_number_bidx = ${add(opts.groupToken)}` : '';
-  // VOB employer/funding market narrow (real employer data; complements the group_number proxy above).
-  const marketCond = buildVobMarketSemiJoin(opts.market ?? {}, add);
-  // CLAIM GRAIN: one row per charge (the 0050 rollup is already charge-grain, so no aggregation) — the outer
-  // GROUP BY agg.id only collapses FACILITY_DIM_JOINS fan-out (facility_name is not unique-constrained).
+  // Adopt Collections' shared filter-predicate builder for the WHERE — Qualify CONSUMES it, never forks
+  // it. cmdExplorerBaseConds emits the tenant scope FIRST as any($ent::uuid[]); Qualify passes its
+  // cross-tenant array exactly where Collections passes one tenant.
+  const conds = cmdExplorerBaseConds(filter, ent, add);
+  // Qualify-owned EXTRA ANDs cmdExplorerBaseConds does not express (permanent, by design):
+  //  - patient_name_bidx: Qualify's admissions-first client-name narrow (Change C). No patientNameBidx in
+  //    CmdExplorerFilter.phiIndex (Collections has no name search) → ANDed here, not a builder fork.
+  if (opts.nameToken) conds.push(`patient_name_bidx = ${add(opts.nameToken)}`);
+  //  - all-payers view: the filter omits primary_payers, so exclude only blank payers.
+  if (opts.allPayers) conds.push("primary_payer is not null and btrim(primary_payer) <> ''");
+  const where = conds.join(' and ');
+  // NO keyset cursor: the whole composed set in one shot (bounded). OVER-FETCH by one (limit+1) so the
+  // caller detects truncation at the QUALIFY_CASES_MAX safety cap (`capped`) from the extra row.
+  const lim = add((opts.limit ?? QUALIFY_CASES_MAX) + 1);
+  // CLAIM GRAIN: one row per charge (the 0050 rollup is already charge-grain). The outer GROUP BY agg.id
+  // only collapses FACILITY_DIM_JOINS fan-out (facility_name is not unique-constrained). member_id_bidx
+  // rides to the SERVER CORE only (per-response patientKey aliasing) — dropped in assembleClaims, never
+  // sent to the client (wire-tested). allowed_tier rides raw for the core's confidenceOf collapse.
   const inner =
-    // member_id_bidx rides to the SERVER CORE only (per-response patientKey aliasing) — the token is
-    // dropped in assembleClaims and never reaches the client (wire-tested).
     'select id, member_id_bidx, facility, primary_payer, ' +
-    // BOTH dates are DISPLAYED: dos = charge_date (service date); payment_date = payment_received (the
-    // SORT axis — the window is already payment_received, so ordering by it makes the axis visible + the
-    // list order consistent with the window). Both 'YYYY-MM-DD' text; payment_received is a DATE (0019).
     "to_char(charge_date, 'YYYY-MM-DD') as dos, " +
     "to_char(payment_received, 'YYYY-MM-DD') as payment_date, " +
-    // 0059 repoint ②: per-claim allowed = the materialized tiered `allowed_reliable` (a value CMD
-    // actually adjudicated — never the restatement-summed netted total this read before), and pct =
-    // the materialized `pct_allowed` (0059 computes the IDENTICAL round(allowed/charge*100,2) with the
-    // same >0 + non-null guards — NULL when allowed is unknown, never 0%). NO allowed_tier filter here:
-    // this is a DISPLAY surface, so e2's latest-positive stays visible (X's tell; the e2 exclusion is
-    // rating-evidence-only, ruling Q2a — see RANKING_RELIABLE_SELECT above).
     'charge_amount::float8 as billed, allowed_reliable::float8 as allowed, ' +
-    // allowed_tier rides along RAW for the core's confidenceOf collapse (contract carries only the
-    // derived confidence — the six-value tier vocabulary never reaches the client).
     'pct_allowed::float8 as pct_allowed, allowed_tier ' +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
-    `where business_entity_id = any(${e}::uuid[])${payerCond} and facility = ${fac} ` +
-    `and payment_received >= ${f}::date and payment_received < ${t}::date` +
-    idCond +
-    grpCond +
-    (marketCond ? ` and ${marketCond}` : '');
-  // NO keyset cursor: the drill returns the WHOLE (facility, payer, window) set in one shot (bounded). We
-  // OVER-FETCH by one (limit+1) purely so the caller detects truncation at the QUALIFY_CASES_MAX safety cap
-  // (the `capped` flag) from the extra row — never a count.
-  const lim = add((opts.limit ?? QUALIFY_CASES_MAX) + 1);
+    `where ${where}`;
   // `agg` alias so FACILITY_DIM_JOINS (which references agg.facility) applies unchanged. ORDER BY the
-  // PAYMENT date (payment_date = payment_received, the window axis) so the list reads most-recently-paid
-  // first; the safety cap therefore keeps the MOST RECENT when a facility exceeds it. dos (service date)
-  // rides along as a displayed column.
+  // PAYMENT date (the window axis) so the list reads most-recently-paid first; the safety cap keeps the
+  // MOST RECENT when the set exceeds it. dos (service date) rides along as a displayed column.
   const sql =
     'select agg.id, agg.member_id_bidx, agg.facility, agg.primary_payer, ' +
     'coalesce(max(f.facility_name), agg.facility) as facility_name, ' +

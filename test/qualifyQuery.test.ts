@@ -14,9 +14,21 @@ import {
   QUALIFY_MOVERS_MIN_CHARGES,
   QUALIFY_TREND_BUCKETS,
 } from '../src/collections/qualifyQuery.js';
+import type { CmdExplorerFilter } from '../src/collections/cmdExplorerQuery.js';
 
 const BOTH = [BXR_ENTITY_ID, INDIGO_ENTITY_ID];
 const TOKEN = 'a'.repeat(64); // opaque HMAC-shaped token
+
+/** The single-facility/single-payer drill as a one-element compose set — the shape
+ *  buildFacilityCasesQuery now takes after adopting cmdExplorerBaseConds. `extra` supplies phiIndex /
+ *  employer / funding narrows (the shared-predicate axes); nameToken/allPayers stay as the 3rd-arg opts. */
+const casesFilter = (
+  payer: string,
+  facility: string,
+  from: string,
+  to: string,
+  extra: Partial<CmdExplorerFilter> = {},
+): CmdExplorerFilter => ({ primary_payers: [payer], facility: [facility], from, to, ...extra });
 
 // ── The headline invariant: every builder targets BOTH tenants in ONE query. ─────────────────────
 test('cross-tenant: every builder scopes business_entity_id = any($1::uuid[]) with BOTH tenant ids', () => {
@@ -24,7 +36,7 @@ test('cross-tenant: every builder scopes business_entity_id = any($1::uuid[]) wi
     buildResolvePayerQuery(TOKEN, 'member_id', BOTH),
     buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH),
     buildIdentifierLandingFacilityQuery(TOKEN, 'prefix', 'AETNA', '2026-06-17', '2026-07-17', BOTH),
-    buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH),
+    buildFacilityCasesQuery(casesFilter('AETNA', '405 recovery', '2026-06-17', '2026-07-17'), BOTH),
     buildMoversQuery('2026-06-17', '2026-07-17', '2026-05-18', '2026-06-17', BOTH),
   ];
   for (const { sql, params } of built) {
@@ -40,7 +52,7 @@ test('grain: aggregate builders read the charge rollup, never raw cmd_explorer_r
     buildResolvePayerQuery(TOKEN, 'prefix', BOTH),
     buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH),
     buildIdentifierLandingFacilityQuery(TOKEN, 'prefix', 'AETNA', '2026-06-17', '2026-07-17', BOTH),
-    buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH),
+    buildFacilityCasesQuery(casesFilter('AETNA', '405 recovery', '2026-06-17', '2026-07-17'), BOTH),
     buildMoversQuery('2026-06-17', '2026-07-17', '2026-05-18', '2026-06-17', BOTH),
   ]) {
     assert.ok(sql.includes('collections.cmd_explorer_charge_rollup'), 'reads the rollup');
@@ -54,7 +66,7 @@ test('every builder routes through assertEntityScope (throws on empty scope)', (
   assert.throws(() => buildFacilityRankingQuery('X', '2026-01-01', '2026-02-01', []), /entityIds required/);
   assert.throws(() => buildIdentifierLandingFacilityQuery(TOKEN, 'prefix', 'X', '2026-01-01', '2026-02-01', []), /entityIds required/);
   assert.throws(
-    () => buildFacilityCasesQuery('X', 'F', '2026-01-01', '2026-02-01', []),
+    () => buildFacilityCasesQuery(casesFilter('X', 'F', '2026-01-01', '2026-02-01'), []),
     /entityIds required/,
   );
   assert.throws(
@@ -131,7 +143,7 @@ test('buildIdentifierLandingFacilityQuery: prefix→prefix column, member→exac
 //    chronological == the landing's raw-column order → the two select the SAME "most recent" claim. LOCKSTEP. ──
 test('buildIdentifierLandingFacilityQuery: ORDER BY matches the drill (payment_received desc nulls last, id desc — the payment-date axis)', () => {
   const landing = buildIdentifierLandingFacilityQuery(TOKEN, 'prefix', 'AETNA', '2026-06-17', '2026-07-17', BOTH);
-  const drill = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH);
+  const drill = buildFacilityCasesQuery(casesFilter('AETNA', '405 recovery', '2026-06-17', '2026-07-17'), BOTH);
   // Landing orders on the raw payment_received column; the drill orders its projected alias agg.payment_date
   // (= to_char(payment_received,'YYYY-MM-DD')). Same axis, byte-identical row order (date column, day-grain).
   assert.match(landing.sql, /order by payment_received desc nulls last, id desc/, 'landing: payment_received desc nulls last, id desc');
@@ -146,9 +158,9 @@ test('buildIdentifierLandingFacilityQuery: ORDER BY matches the drill (payment_r
 
 // ── buildFacilityCasesQuery: CLAIM GRAIN (one row per charge), raw-facility predicate, over-fetch. ─────
 test('buildFacilityCasesQuery: claim grain (NO member_id_bidx dedup), raw-facility predicate, per-claim dos, over-fetch', () => {
-  const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH);
-  assert.match(sql, /primary_payer = \$2 and facility = \$3/, 'raw facility text is a bound predicate');
-  assert.equal(params[2], '405 recovery', 'facility bound as $3 (raw text, never interpolated)');
+  const { sql, params } = buildFacilityCasesQuery(casesFilter('AETNA', '405 recovery', '2026-06-17', '2026-07-17'), BOTH);
+  assert.match(sql, /facility = any\(\$2::text\[\]\) and primary_payer = any\(\$3::text\[\]\)/, 'facility + payer set-membership (shared cmdExplorerBaseConds order)');
+  assert.deepEqual(params[1], ['405 recovery'], 'facility bound as the $2 array (raw text, never interpolated)');
   // CLAIM GRAIN: no distinct-patient dedup, no latest-charge array_agg — one row per charge.
   assert.ok(!/group by member_id_bidx/.test(sql), 'NO member_id_bidx dedup — claim grain');
   assert.ok(!/array_agg/.test(sql), 'no per-patient latest-charge collapse — each claim is its own row');
@@ -175,7 +187,7 @@ test('buildFacilityCasesQuery: claim grain (NO member_id_bidx dedup), raw-facili
   // OVER-FETCH: with no explicit limit the query binds QUALIFY_CASES_MAX + 1 (the safety-cap backstop, so
   // the caller detects truncation from the extra row — NOT a 15/page pager).
   assert.equal(params[5], QUALIFY_CASES_MAX + 1, 'over-fetches by one (cap+1) so the caller detects `capped`');
-  assert.deepEqual(params.slice(0, 5), [BOTH, 'AETNA', '405 recovery', '2026-06-17', '2026-07-17']);
+  assert.deepEqual(params.slice(0, 5), [BOTH, ['405 recovery'], ['AETNA'], '2026-06-17', '2026-07-17']);
   // No filter by default: no identifier predicate. And NO keyset WHERE ever exists now (the pager is gone).
   assert.ok(!/member_id_prefix_bidx = /.test(sql) && !/member_id_bidx = /.test(sql), 'no identifier PREDICATE when none supplied (projection is fine)');
   assert.ok(!/agg\.payment_date </.test(sql) && !/agg\.payment_date is null and agg\.id </.test(sql), 'no keyset WHERE — the whole window returns in one shot');
@@ -183,9 +195,10 @@ test('buildFacilityCasesQuery: claim grain (NO member_id_bidx dedup), raw-facili
 
 // ── buildFacilityCasesQuery: PREFIX narrow → member_id_prefix_bidx (the STARTS-WITH bleed guard). ─────
 test('buildFacilityCasesQuery: a prefix token adds member_id_prefix_bidx to the INNER WHERE', () => {
-  const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
-    prefixToken: TOKEN,
-  });
+  const { sql, params } = buildFacilityCasesQuery(
+    casesFilter('AETNA', '405 recovery', '2026-06-17', '2026-07-17', { phiIndex: { memberIdPrefixBidx: TOKEN } }),
+    BOTH,
+  );
   assert.match(sql, /payment_received < \$5::date and member_id_prefix_bidx = \$6\)? agg/, 'prefix predicate is the last inner condition');
   assert.ok(!sql.includes('member_id_bidx = '), 'prefix mode does NOT touch the exact-member column');
   assert.equal(params[5], TOKEN, 'prefix token bound (opaque; never the raw prefix)');
@@ -193,25 +206,30 @@ test('buildFacilityCasesQuery: a prefix token adds member_id_prefix_bidx to the 
 });
 
 // ── buildFacilityCasesQuery: EXACT MEMBER narrow → member_id_bidx (claims for that member only). ──────
-test('buildFacilityCasesQuery: a member token adds member_id_bidx to the INNER WHERE (exact, wins over prefix)', () => {
-  const exact = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
-    memberToken: TOKEN,
-  });
+test('buildFacilityCasesQuery: a member token adds member_id_bidx to the INNER WHERE (independent AND with prefix)', () => {
+  const exact = buildFacilityCasesQuery(
+    casesFilter('AETNA', '405 recovery', '2026-06-17', '2026-07-17', { phiIndex: { memberIdBidx: TOKEN } }),
+    BOTH,
+  );
   assert.match(exact.sql, /payment_received < \$5::date and member_id_bidx = \$6\)? agg/, 'exact member predicate in the inner WHERE');
   assert.ok(!exact.sql.includes('member_id_prefix_bidx'), 'exact mode does NOT touch the prefix column');
   assert.equal(exact.params[5], TOKEN, 'member token bound (opaque; never the raw member id)');
-  // Precedence: when BOTH tokens are somehow supplied, EXACT member wins (mutually exclusive in practice).
-  const both = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
-    memberToken: TOKEN,
-    prefixToken: 'b'.repeat(64),
-  });
-  assert.match(both.sql, /member_id_bidx = \$6/, 'member token wins');
-  assert.ok(!both.sql.includes('member_id_prefix_bidx'), 'the prefix token is not applied when the member token is present');
+  // COMPOSE semantics (the shared cmdExplorerBaseConds predicate): the member + prefix PHI fields are
+  // INDEPENDENT and AND together — no precedence. In practice only one is set per search, but if both
+  // arrive both narrow (member_id_bidx first, then member_id_prefix_bidx, per the builder's order).
+  const both = buildFacilityCasesQuery(
+    casesFilter('AETNA', '405 recovery', '2026-06-17', '2026-07-17', {
+      phiIndex: { memberIdBidx: TOKEN, memberIdPrefixBidx: 'b'.repeat(64) },
+    }),
+    BOTH,
+  );
+  assert.match(both.sql, /member_id_bidx = \$6/, 'exact member narrow applied');
+  assert.match(both.sql, /member_id_prefix_bidx = \$7/, 'prefix narrow ALSO applied (independent AND)');
 });
 
 // ── buildFacilityCasesQuery: NO keyset pager — the whole window returns in one shot (cap+1 over-fetch). ────
 test('buildFacilityCasesQuery: no cursor param exists — no keyset WHERE, single capped fetch', () => {
-  const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH);
+  const { sql, params } = buildFacilityCasesQuery(casesFilter('AETNA', '405 recovery', '2026-06-17', '2026-07-17'), BOTH);
   assert.ok(!/agg\.payment_date </.test(sql), 'no keyset comparison anywhere');
   assert.ok(!/where \(agg\./.test(sql), 'no OUTER keyset WHERE on the agg subquery');
   assert.match(sql, /order by agg\.payment_date desc nulls last, agg\.id desc/, 'ORDER BY the payment-date axis, cap keeps the most recent');
@@ -247,19 +265,22 @@ test('buildMoversQuery: suppression floor is clamped — a caller can only make 
 
 // ── Phase 2: the EXACT group-number narrow (the employer proxy) — composable, opaque-token-only ──────
 test('buildFacilityCasesQuery: a group token adds an EXACT group_number_bidx predicate, composable with the member narrow', () => {
-  const only = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
-    groupToken: TOKEN,
-  });
+  const only = buildFacilityCasesQuery(
+    casesFilter('AETNA', '405 recovery', '2026-06-17', '2026-07-17', { phiIndex: { groupNumberBidx: TOKEN } }),
+    BOTH,
+  );
   assert.match(only.sql, /and group_number_bidx = \$6/, 'group narrow is an exact bidx equality');
   assert.equal(only.params[5], TOKEN, 'opaque token bound (never the raw group #)');
 
-  const both = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
-    prefixToken: 'b'.repeat(64),
-    groupToken: TOKEN,
-  });
+  const both = buildFacilityCasesQuery(
+    casesFilter('AETNA', '405 recovery', '2026-06-17', '2026-07-17', {
+      phiIndex: { memberIdPrefixBidx: 'b'.repeat(64), groupNumberBidx: TOKEN },
+    }),
+    BOTH,
+  );
   assert.match(both.sql, /member_id_prefix_bidx = \$6 and group_number_bidx = \$7/, 'ANDs with the member narrow — composable, not competing');
 
-  const none = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH);
+  const none = buildFacilityCasesQuery(casesFilter('AETNA', '405 recovery', '2026-06-17', '2026-07-17'), BOTH);
   assert.ok(!/group_number_bidx = /.test(none.sql), 'no group predicate when no token');
 });
 
@@ -297,14 +318,16 @@ test('buildFacilityRankingQuery: no identifier token → payer-wide, no blind-in
 });
 
 test('buildFacilityCasesQuery: a market employer filter narrows the inner WHERE via the semi-join', () => {
-  const { sql, params } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
-    market: { employers: ['BOEING'] },
-  });
+  const { sql, params } = buildFacilityCasesQuery(
+    casesFilter('AETNA', '405 recovery', '2026-06-17', '2026-07-17', { employers: ['BOEING'] }),
+    BOTH,
+  );
+  // cmdExplorerBaseConds emits the VOB semi-join BEFORE the from/to window → employer param is $4 here.
   assert.match(
     sql,
-    /member_id_bidx in \(select member_id_bidx from vob\.member_benefits_latest where employer_norm = any\(\$6::text\[\]\)\)/,
+    /member_id_bidx in \(select member_id_bidx from vob\.member_benefits_latest where employer_norm = any\(\$4::text\[\]\)\)/,
   );
-  assert.deepEqual(params[5], ['BOEING']);
+  assert.deepEqual(params[3], ['BOEING']);
 });
 
 test('buildMoversQuery: a market funding filter scopes the two-window population before the payer rollup', () => {
@@ -320,7 +343,7 @@ test('buildMoversQuery: a market funding filter scopes the two-window population
 
 test('qualify builders: NO market filter emits NO VOB clause (unchanged behavior)', () => {
   const rank = buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH);
-  const cases = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH);
+  const cases = buildFacilityCasesQuery(casesFilter('AETNA', '405 recovery', '2026-06-17', '2026-07-17'), BOTH);
   const movers = buildMoversQuery('2026-06-17', '2026-07-17', '2026-05-18', '2026-06-17', BOTH);
   for (const q of [rank, cases, movers]) {
     assert.doesNotMatch(q.sql, /vob\.member_benefits_latest/, 'no VOB clause without a market filter');
@@ -404,12 +427,18 @@ test('client-name kind: resolve + landing match patient_name_bidx; the member ki
   assert.ok(buildResolvePayerQuery(TOKEN, 'prefix', BOTH).sql.includes('member_id_prefix_bidx = $2'));
 });
 
-test('cases drill: nameToken adds the exact-name narrow; member/prefix take precedence over it', () => {
-  const nameOnly = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, { nameToken: TOKEN });
-  assert.ok(nameOnly.sql.includes('patient_name_bidx = $'), 'name narrow applied');
-  const memberWins = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH, {
-    memberToken: 'M'.repeat(64), nameToken: TOKEN,
+test('cases drill: nameToken adds the exact-name narrow as Qualify’s own extra AND (independent of member/prefix)', () => {
+  const nameOnly = buildFacilityCasesQuery(casesFilter('AETNA', '405 recovery', '2026-06-17', '2026-07-17'), BOTH, {
+    nameToken: TOKEN,
   });
-  assert.ok(memberWins.sql.includes('member_id_bidx = $'), 'member narrow applied');
-  assert.ok(!memberWins.sql.includes('patient_name_bidx'), 'name narrow yields to the member narrow');
+  assert.ok(nameOnly.sql.includes('patient_name_bidx = $'), 'name narrow applied');
+  // patient_name_bidx is Qualify's OWN extra AND (not in cmdExplorerBaseConds' phiIndex), so it composes
+  // WITH the member narrow rather than yielding to it — no precedence.
+  const memberAndName = buildFacilityCasesQuery(
+    casesFilter('AETNA', '405 recovery', '2026-06-17', '2026-07-17', { phiIndex: { memberIdBidx: 'M'.repeat(64) } }),
+    BOTH,
+    { nameToken: TOKEN },
+  );
+  assert.ok(memberAndName.sql.includes('member_id_bidx = $'), 'member narrow applied');
+  assert.ok(memberAndName.sql.includes('patient_name_bidx = $'), 'name narrow ALSO applied (independent AND, not precedence)');
 });
