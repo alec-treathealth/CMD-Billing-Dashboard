@@ -10,6 +10,8 @@ import {
   getQualifyBookKpisCore,
   getQualifyFacilityTrendsCore,
   getQualifyOverviewCore,
+  getQualifyComposedCasesCore,
+  getQualifyMatchSummaryCore,
   getQualifyPatientCohortCore,
   revealQualifyRowCore,
   revealQualifyRowsCore,
@@ -228,6 +230,84 @@ test('snapshot: a non-admissions_seat payload DOES carry the dollar values', asy
   assert.ok(wire.includes(String(B2)) && wire.includes(String(A2)), 'super_admin sees dollars');
   assert.equal(snap.facilities.find((f) => f.name === '405 RECOVERY')?.billedAmount, B2);
   assert.equal(snap.viewerHasAmountsCapability, true);
+});
+
+// ── COMPOSE BAR (Phase 1): match count + composed cases — amounts choke point + audit discipline ─────
+// Distinctive sentinel sums so a wire scan proves the strip.
+const SC = 333333.33, SA = 222222.22, SP = 111111.11, SBAL = 12121.21;
+const summaryDeps = (who: () => ReturnType<typeof SUPER>, c: Cap) =>
+  makeDeps(who, c, {
+    loadMatchSummary: async () => ({ total_count: 4242, total_charge: SC, total_allowed: SA, total_paid: SP, total_balance: SBAL }),
+  });
+
+test('match summary: admissions_seat gets count + percentages with ZERO dollars (wire-level)', async () => {
+  const c = cap();
+  const s = await getQualifyMatchSummaryCore(summaryDeps(SEAT, c), { payers: ['AETNA'], window: W30 });
+  assert.equal(s.count, 4242, 'count is non-dollar → always present');
+  // Percentages are derived from the sums BEFORE the strip, so admissions_seat still gets them.
+  assert.equal(s.pctAllowedOfBilled, Math.round((SA / SC) * 10000) / 100);
+  assert.equal(s.pctPaidOfBilled, Math.round((SP / SC) * 10000) / 100);
+  // Every raw dollar total is null, and NONE of the sentinel sums appears anywhere on the wire.
+  assert.equal(s.totalCharge, null);
+  assert.equal(s.totalAllowed, null);
+  assert.equal(s.totalPaid, null);
+  assert.equal(s.totalBalance, null);
+  assert.equal(s.viewerHasAmountsCapability, false);
+  const wire = JSON.stringify(s);
+  for (const v of [SC, SA, SP, SBAL]) assert.ok(!wire.includes(String(v)), `dollar ${v} must NOT reach an admissions_seat`);
+  // The debounced count must NOT re-audit (the row-returning cases core owns the PHI audit).
+  assert.equal(c.audits.length, 0, 'match summary is gate-only, never audits');
+});
+
+test('match summary: super_admin carries the raw dollar totals', async () => {
+  const s = await getQualifyMatchSummaryCore(summaryDeps(SUPER, cap()), { payers: ['AETNA'], window: W30 });
+  assert.equal(s.totalCharge, SC);
+  assert.equal(s.totalAllowed, SA);
+  assert.equal(s.totalPaid, SP);
+  assert.equal(s.viewerHasAmountsCapability, true);
+});
+
+test('composed cases: admissions_seat rows carry ZERO dollars (wire-level); audit is counts + field-names only', async () => {
+  const c = cap();
+  const res = await getQualifyComposedCasesCore(makeDeps(SEAT, c), {
+    facilities: ['405 recovery'],
+    payers: ['AETNA'],
+    memberId: 'AETMEMBER123',
+    window: W30,
+  });
+  assert.equal(res.claims.length, 1);
+  for (const cl of res.claims) {
+    assert.equal(cl.billedAmount, null);
+    assert.equal(cl.allowedAmount, null);
+  }
+  const wire = JSON.stringify(res);
+  for (const v of [CB, CA]) assert.ok(!wire.includes(String(v)), `case dollar ${v} must NOT reach an admissions_seat`);
+  assert.equal(res.viewerHasAmountsCapability, false);
+  // Audit: exactly one SEARCH_QUALIFY_FACILITY with SELECTION CARDINALITIES + PHI field NAMES only —
+  // never a raw payer/facility/member value or token.
+  const audit = c.audits.find((a) => a.action === SEARCH_QUALIFY_FACILITY);
+  assert.ok(audit, 'the row-returning access audits');
+  assert.equal(audit!.detail.facilities, 1);
+  assert.equal(audit!.detail.payers, 1);
+  assert.deepEqual(audit!.detail.fields, ['member_id']);
+  const auditWire = JSON.stringify(audit!.detail);
+  assert.ok(!auditWire.includes('AETNA') && !auditWire.includes('405 recovery') && !auditWire.includes('AETMEMBER123'), 'no raw values in the audit');
+  assert.ok(!auditWire.includes('HMAC_TOKEN'), 'no blind-index token in the audit');
+});
+
+test('composed cases: super_admin rows DO carry the dollar values', async () => {
+  const res = await getQualifyComposedCasesCore(makeDeps(SUPER, cap()), { payers: ['AETNA'], window: W30 });
+  const wire = JSON.stringify(res);
+  assert.ok(wire.includes(String(CB)) && wire.includes(String(CA)), 'super_admin sees case dollars');
+  assert.equal(res.viewerHasAmountsCapability, true);
+});
+
+test('composed cases: an EMPTY filter short-circuits to empty (never a whole-book fetch) and does NOT audit', async () => {
+  const c = cap();
+  const res = await getQualifyComposedCasesCore(makeDeps(SUPER, c), { window: W30 });
+  assert.deepEqual(res.claims, []);
+  assert.equal(c.facilityCasesArgs.length, 0, 'no case fetch on an unrestricted filter');
+  assert.equal(c.audits.length, 0, 'no PHI access → no audit');
 });
 
 test('movers: carries NO dollar fields for either capability state', async () => {

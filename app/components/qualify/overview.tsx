@@ -19,10 +19,11 @@
  * under renderToStaticMarkup (effects don't fire there) — so every component still renders hermetically
  * in the tests. Imports are relative so the render test runs under tsx without `@/` resolution.
  */
+import { memo } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { ratingBucket } from '../../lib/qualify/rating';
 import { qualifyWindowLabel, serializeQualifyWindow } from '../../lib/qualify/contract';
-import type { QualifyBookKpis, QualifyFacilityTrend, QualifyWindow } from '../../lib/qualify/contract';
+import type { QualifyBookKpis, QualifyFacilityTrend, QualifyMatchSummary, QualifyWindow } from '../../lib/qualify/contract';
 import { RATING_HEX, staggerDelayMs } from './tokens';
 import { Spark } from './spark';
 import { useMarquee } from './useMarquee';
@@ -117,21 +118,26 @@ function DeltaTicker({ deltaPts }: { deltaPts: number | null }) {
   );
 }
 
-export function HeatingUpCards({
+const EMPTY_KEYS: ReadonlySet<string> = new Set();
+
+export const HeatingUpCards = memo(function HeatingUpCards({
   trends,
   window,
-  activeKey = null,
+  activeFacilityKeys = EMPTY_KEYS,
   pinned = false,
   onOpen,
 }: {
   trends: readonly QualifyFacilityTrend[];
   window: QualifyWindow;
-  /** facilityKey of the card whose facility is the current Change-E scope (marked pressed). */
-  activeKey?: string | null;
-  /** A facility is the scoped subject (`scoped`) → force-pause the marquee so the pressed card can't
-   *  slide away; pointer/focus/scroll can't resume it, only unpinning (Clear Search / × All facilities). */
+  /** facilityKeys of the cards whose facility is currently in the compose selection (marked pressed).
+   *  A SET — the compose bar can select several facilities, so more than one card can read pressed. */
+  activeFacilityKeys?: ReadonlySet<string>;
+  /** tickerPinned — force-pause the marquee (a card click set it). A DISTINCT flag owned by the
+   *  container, NOT derived from the facility selection; pointer/focus/scroll can't resume it, only the
+   *  container's clear actions clear it. */
   pinned?: boolean;
-  /** The Change-E hybrid: resolve trend.dominantPayer AND scope to trend.facilityKey. Optional for tests. */
+  /** Ticker-card click — the container REPLACES the whole filter set with {this facility, its dominant
+   *  payer}. Optional for tests. */
   onOpen?: (trend: QualifyFacilityTrend) => void;
 }) {
   // Continuous, MANUALLY-SCROLLABLE marquee (useMarquee): a real scroll container the user can drag /
@@ -154,7 +160,7 @@ export function HeatingUpCards({
   const card = (t: QualifyFacilityTrend, i: number, dup: boolean) => {
     const bucket = ratingBucket(t.currentRating);
     const hex = RATING_HEX[bucket];
-    const active = activeKey !== null && t.facilityKey === activeKey;
+    const active = activeFacilityKeys.has(t.facilityKey);
     const loc = [t.city, t.state].filter(Boolean).join(', ');
     // A card with no resolvable dominant payer can't drive the hybrid — render it inert (no hover-lift,
     // default cursor, disabled) rather than a button whose click silently no-ops.
@@ -174,8 +180,8 @@ export function HeatingUpCards({
         {...(dup ? ({ 'aria-hidden': true, tabIndex: -1, 'data-dup': 'true' } as const) : {})}
         title={
           openable
-            ? `Open ${t.name} — resolves ${t.dominantPayer} and scopes the cases to this facility`
-            : `${t.name} — no dominant payer to resolve this window`
+            ? `Filter to ${t.name} + ${t.dominantPayer}`
+            : `${t.name} — no dominant payer to filter on this window`
         }
         className={[
           'w-[216px] flex-none rounded-xl border bg-card px-3.5 py-3 text-left',
@@ -253,7 +259,7 @@ export function HeatingUpCards({
       </div>
     </section>
   );
-}
+});
 
 /**
  * Loading placeholder for the ticker. Because the strip now sits ABOVE the finder, its (book-wide,
@@ -282,5 +288,50 @@ export function HeatingUpSkeleton() {
         ))}
       </div>
     </section>
+  );
+}
+
+/**
+ * The compose-bar LIVE MATCH COUNT readout — "N charge lines match" + the two NON-DOLLAR percentages
+ * (allowed÷billed · paid÷billed). Dollar totals appear ONLY for a viewer with the amounts capability;
+ * an admissions_seat sees the count + percentages with ZERO dollars (the server already stripped them —
+ * `summary.totalCharge` is null — and this gates on `hasAmounts` too, defense-in-depth). A null ratio
+ * renders "—" (a collapsed denominator is never a fabricated 0%). Presentational leaf (hermetic).
+ */
+export function MatchCountReadout({
+  summary,
+  loading,
+  hasAmounts,
+}: {
+  summary: QualifyMatchSummary | null;
+  loading: boolean;
+  hasAmounts: boolean;
+}) {
+  const pct = (v: number | null) => (v === null ? '—' : `${Math.round(v)}%`);
+  const money = (v: number | null) =>
+    v === null ? '—' : v.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 rounded-2xl border border-line bg-card px-5 py-3.5 shadow-ths-sm">
+      <span className="font-mono text-[26px] font-semibold leading-none tabular-nums text-ink900">
+        {loading && !summary ? '…' : (summary?.count ?? 0).toLocaleString('en-US')}
+      </span>
+      <span className="text-[13px] font-semibold text-ink600">charge lines match</span>
+      {summary ? (
+        <span className="ml-1 flex flex-wrap items-baseline gap-x-4 text-[12px] text-ink400">
+          <span>
+            allowed <b className="font-mono text-ink600">{pct(summary.pctAllowedOfBilled)}</b> of billed
+          </span>
+          <span>
+            paid <b className="font-mono text-ink600">{pct(summary.pctPaidOfBilled)}</b> of billed
+          </span>
+          {hasAmounts ? (
+            <span>
+              billed <b className="font-mono text-ink600">{money(summary.totalCharge)}</b>
+            </span>
+          ) : null}
+        </span>
+      ) : null}
+      {loading ? <span className="text-[11px] uppercase tracking-wide text-teal600">updating…</span> : null}
+    </div>
   );
 }

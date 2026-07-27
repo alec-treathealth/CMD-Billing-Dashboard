@@ -1,18 +1,18 @@
 /**
- * Qualify URL STATE (Change F) — shareable / refresh-surviving drilldown state, encoded as query
+ * Qualify URL STATE (compose-bar era) — shareable / refresh-surviving FILTER state, encoded as query
  * params. PURE (no React/Next imports) so the allowlist is enforced + root-tested here, not implied.
  *
  * ┌─ PHI ALLOWLIST (HARD CONSTRAINT — "PHI never in URLs") ────────────────────────────────────────┐
- * │ EXACTLY four keys may appear: payer · facility · window · loc. All four are RESOLVED, non-PHI  │
- * │ values (payer label, raw rollup facility text, the serialized window token, the LOC lens).     │
- * │ NEVER the raw search query, a member id, a client name, matchedValue, or a patientKey — the    │
- * │ builder takes only these four fields BY TYPE, and the parser ignores every other param. A      │
- * │ shared link re-resolves via resolveByPayer(payerName) (the non-PHI label path); the original   │
- * │ search term is never replayed and never leaves the searcher's browser.                         │
+ * │ ONLY the NON-PHI compose selections may appear: facility · payer · employer · funding (each a   │
+ * │ repeated key), plus window · loc. These are all resolved, non-PHI values (raw rollup facility    │
+ * │ text, payer/employer/funding labels, the serialized window token, the LOC lens). NEVER a member  │
+ * │ id, alpha prefix, group number, or client name — the compose bar's PHI terms have NO field here  │
+ * │ BY TYPE, and the parser ignores every other param. A shared link restores the selection arrays;  │
+ * │ the PHI narrows never leave the searcher's browser.                                              │
  * └─────────────────────────────────────────────────────────────────────────────────────────────────┘
  *
- * Writes ride router.replace (never push) and fire only on RESOLVED-state change — never per
- * keystroke (the autosearch debounce is a separate concern).
+ * Writes ride router.replace (never push) and fire on selection/window/loc change — never on a PHI
+ * keystroke (PHI has no field here, so it structurally cannot be written).
  */
 import {
   parseQualifyWindow,
@@ -22,16 +22,19 @@ import {
 } from './contract';
 import type { QualifyLocFilter } from './groupClaims';
 
-/** The four (and ONLY four) URL-encodable fields. */
+/** The URL-encodable fields — the NON-PHI compose selections + view prefs. NO PHI field exists. */
 export interface QualifyUrlState {
-  payer: string | null; // resolved payer LABEL (non-PHI) — never a search term
-  facility: string | null; // Change-E scope: QualifyFacility.facilityKey (raw rollup text, non-PHI)
+  facilities: string[]; // raw rollup facility text (== QualifyFacility.facilityKey), non-PHI
+  payers: string[]; // plaintext primary_payer labels, non-PHI
+  employers: string[]; // employer_norm keys, non-PHI
+  funding: string[]; // 'Self-Funded' | 'Fully Insured', non-PHI
   window: QualifyWindow;
   loc: QualifyLocFilter;
 }
 
-/** Bounded label lengths (defense-in-depth on the parse side; real values are far shorter). */
+/** Bounded label length + array count (defense-in-depth; real values are far shorter/fewer). */
 const MAX_LABEL = 200;
+const MAX_ITEMS = 200;
 
 const LOC_TOKENS: Record<string, Exclude<QualifyLocFilter, null>> = {
   ip: 'IP',
@@ -39,33 +42,53 @@ const LOC_TOKENS: Record<string, Exclude<QualifyLocFilter, null>> = {
   both: 'BOTH',
 };
 
+/** Trim, drop blanks/overlong, dedupe, cap count — the URL mirror of the core's boundArray. */
+function boundLabels(raw: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const v of raw) {
+    const s = typeof v === 'string' ? v.trim() : '';
+    if (s === '' || s.length > MAX_LABEL || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+    if (out.length >= MAX_ITEMS) break;
+  }
+  return out;
+}
+
 /**
- * Serialize resolved state → the query string (ONLY the four allowlisted keys; empty/default fields
- * are omitted so the URL stays clean). Returns '' when there is nothing shareable (no resolved payer).
+ * Serialize the NON-PHI selections + view prefs → the query string (repeated keys for the arrays;
+ * empty/default fields omitted so the URL stays clean). Returns '' when there is nothing shareable
+ * (no selection AND no LOC lens) — a bare window is not worth a URL.
  */
 export function buildQualifySearchParams(s: QualifyUrlState): string {
-  if (!s.payer) return ''; // nothing resolved → no URL state (never encode a bare window/loc)
+  const facilities = boundLabels(s.facilities);
+  const payers = boundLabels(s.payers);
+  const employers = boundLabels(s.employers);
+  const funding = boundLabels(s.funding);
+  const anySelection = facilities.length + payers.length + employers.length + funding.length > 0;
+  if (!anySelection && !s.loc) return ''; // nothing shareable → clean URL
   const p = new URLSearchParams();
-  p.set('payer', s.payer.slice(0, MAX_LABEL));
-  if (s.facility) p.set('facility', s.facility.slice(0, MAX_LABEL));
+  for (const v of facilities) p.append('facility', v);
+  for (const v of payers) p.append('payer', v);
+  for (const v of employers) p.append('employer', v);
+  for (const v of funding) p.append('funding', v);
   p.set('window', serializeQualifyWindow(s.window));
   if (s.loc) p.set('loc', s.loc.toLowerCase());
   return p.toString();
 }
 
 /**
- * Parse (and VALIDATE) URL params → state. Fail-closed everywhere: an unknown loc/window token or an
- * over-long label collapses to the default rather than being trusted. Every non-allowlisted param is
- * ignored. Never throws.
+ * Parse (and VALIDATE) URL params → state. Fail-closed everywhere: unknown loc/window tokens collapse to
+ * the default; over-long/blank labels are dropped; every non-allowlisted param is ignored. Never throws.
  */
 export function parseQualifySearchParams(params: URLSearchParams): QualifyUrlState {
-  const rawPayer = params.get('payer');
-  const payer = rawPayer && rawPayer.trim() !== '' && rawPayer.length <= MAX_LABEL ? rawPayer.trim() : null;
-  const rawFacility = params.get('facility');
-  const facility =
-    payer && rawFacility && rawFacility.trim() !== '' && rawFacility.length <= MAX_LABEL ? rawFacility.trim() : null;
+  const facilities = boundLabels(params.getAll('facility'));
+  const payers = boundLabels(params.getAll('payer'));
+  const employers = boundLabels(params.getAll('employer'));
+  const funding = boundLabels(params.getAll('funding'));
   const window = parseQualifyWindow(params.get('window')) ?? trailingWindow(30);
   const locToken = (params.get('loc') ?? '').toLowerCase();
   const loc: QualifyLocFilter = LOC_TOKENS[locToken] ?? null;
-  return { payer, facility, window, loc };
+  return { facilities, payers, employers, funding, window, loc };
 }
