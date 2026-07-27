@@ -45,6 +45,7 @@ import {
   getQualifyComposedCases,
   getQualifySnapshotByPayer,
   getQualifyPayerEverBilled,
+  getQualifyResolvePayer,
   getQualifyPatientCohort,
   getQualifyOverview,
   loadQualifyFacilityOptions,
@@ -136,6 +137,12 @@ export function QualifyTab({
   //    the ranking to noise). Highlights the selected facilities; never intersects. ────────────────────
   const [panelSnapshot, setPanelSnapshot] = useState<QualifySnapshot | null>(null);
   const panelGenRef = useRef(0);
+  // When the user searches a single PHI identifier (alpha prefix / member id) with NO payer chip, we
+  // resolve its dominant payer server-side and rank against THAT — so an identifier search doesn't force a
+  // manual payer pick. `derivedPayer` null = not applicable OR the identifier was never seen.
+  const [derivedPayer, setDerivedPayer] = useState<string | null>(null);
+  const [derivedLoading, setDerivedLoading] = useState(false);
+  const resolveGenRef = useRef(0);
 
   // ── VOB PATH — the payer we've PROVEN is never-billed (unwindowed probe); null = no VOB. `vobDismissed`
   //    remembers the payer the user closed the modal for, so it doesn't re-pop until the payer changes. ─
@@ -206,6 +213,13 @@ export function QualifyTab({
   const facilityKey = facilitySelection.join('');
   const activeFacilityKeys = useMemo(() => new Set(facilitySelection), [facilityKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const hasAmounts = viewerHasAmountsCapability;
+
+  // A single PHI identifier (alpha prefix / member id) with NO payer chip → we resolve its dominant payer
+  // for the ranking (so an identifier search doesn't force a manual payer pick). Exactly one of the two,
+  // and only when no payer is selected; group/client-name don't drive this derive.
+  const identifierTerm = alphaPrefix.trim() || memberId.trim();
+  const bothIdentifiers = alphaPrefix.trim() !== '' && memberId.trim() !== '';
+  const singleIdentifier = payerSelection.length === 0 && identifierTerm !== '' && !bothIdentifiers ? identifierTerm : null;
 
   // ── OVERVIEW STRIP: book-wide KPIs + Heating-Up trends for a window (NO market — Phase 1 the compose
   //    pickers never re-scope the strip; only the window control does, keeping tiles + ticker in lockstep). ─
@@ -332,17 +346,41 @@ export function QualifyTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [facilitySelection, payerSelection, employerSelection, fundingSelection, memberId, alphaPrefix, groupNumber, clientName, windowSel, hasAnyFilter, resetReveal]);
 
-  // ── FACILITY PANEL fetch: the payer-wide ranking for the ONE selected payer (decision 4). 0 or 2+
-  //    payers ⇒ no fetch, panel hidden behind a note. Market is NOT passed — the ranking stays market-
-  //    blind so a thin employer/funding slice can't collapse the volume-dampened rating into noise. ─────
+  // ── IDENTIFIER → PAYER resolve: when the user searched a single PHI identifier with no payer chip,
+  //    resolve its dominant payer so the ranking can render without forcing a manual payer pick. ────────
   useEffect(() => {
-    if (payerSelection.length !== 1) {
+    if (!singleIdentifier) {
+      setDerivedPayer(null);
+      setDerivedLoading(false);
+      return;
+    }
+    const rgen = ++resolveGenRef.current;
+    setDerivedLoading(true);
+    getQualifyResolvePayer(singleIdentifier)
+      .then((r) => {
+        if (resolveGenRef.current !== rgen) return;
+        setDerivedPayer(r.ok ? r.payer : null);
+        setDerivedLoading(false);
+      })
+      .catch(() => {
+        if (resolveGenRef.current !== rgen) return;
+        setDerivedPayer(null);
+        setDerivedLoading(false);
+      });
+  }, [singleIdentifier]);
+
+  // ── FACILITY PANEL fetch: the payer-wide ranking for the panel's payer — either the ONE selected payer
+  //    OR the payer derived from a single-identifier search. 0/2+ payers with no resolvable identifier ⇒
+  //    no fetch (panel hidden behind a note). Market is NOT passed — the ranking stays market-blind so a
+  //    thin employer/funding slice can't collapse the volume-dampened rating into noise (decision 4 + B2). ─
+  const panelPayer = payerSelection.length === 1 ? payerSelection[0]! : singleIdentifier ? derivedPayer : null;
+  useEffect(() => {
+    if (!panelPayer) {
       setPanelSnapshot(null);
       return;
     }
-    const payer = payerSelection[0]!;
     const pgen = ++panelGenRef.current;
-    getQualifySnapshotByPayer({ payer, window: windowSel })
+    getQualifySnapshotByPayer({ payer: panelPayer, window: windowSel })
       .then((snap) => {
         if (panelGenRef.current !== pgen) return;
         setPanelSnapshot(snap);
@@ -351,7 +389,7 @@ export function QualifyTab({
         if (panelGenRef.current !== pgen) return;
         setPanelSnapshot(null);
       });
-  }, [payerSelection, windowSel]);
+  }, [panelPayer, windowSel]);
 
   // ── URL STATE: persist the NON-PHI selection arrays + window + LOC (replace, never push). PHI is
   //    excluded by construction — buildQualifySearchParams has no field for it. ─────────────────────────
@@ -603,15 +641,17 @@ export function QualifyTab({
 
   const summaryHasAmounts = summary?.viewerHasAmountsCapability ?? hasAmounts;
   // ── Lighter CONTEXT LINE (replaces the removed hero band): window · payer(s) · facility count · total
-  //    charges. Total charges is null for admissions_seat (server-stripped) so it's simply omitted. ─────
-  const singlePayer = payerSelection.length === 1 ? payerSelection[0]! : null;
+  //    charges. Total charges is null for admissions_seat (server-stripped) so it's simply omitted. When
+  //    the payer was DERIVED from an identifier search, name it as such rather than "all payers". ────────
   const payerSummary =
-    payerSelection.length === 0
-      ? 'all payers'
-      : payerSelection.length === 1
-        ? payerSelection[0]!
-        : `${payerSelection.length} payers`;
-  const contextFacilityCount = singlePayer ? panelSnapshot?.facilities.length ?? null : null;
+    payerSelection.length === 1
+      ? payerSelection[0]!
+      : payerSelection.length > 1
+        ? `${payerSelection.length} payers`
+        : panelPayer
+          ? `${panelPayer} · from your search`
+          : 'all payers';
+  const contextFacilityCount = panelPayer ? panelSnapshot?.facilities.length ?? null : null;
   const billedText =
     summaryHasAmounts && summary?.totalCharge != null
       ? summary.totalCharge.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })
@@ -822,26 +862,33 @@ export function QualifyTab({
           <MatchCountReadout summary={summary} loading={summaryLoading} hasAmounts={summaryHasAmounts} />
 
           <div className="grid grid-cols-1 items-start gap-4 min-[960px]:grid-cols-[380px_1fr]">
-            {/* LEFT: the payer-wide facility ranking (exactly one payer), else a one-line note. */}
+            {/* LEFT: the payer-wide facility ranking — for the ONE selected payer, or the payer DERIVED
+                from a single-identifier search (so an alpha/member search never forces a payer pick).
+                0/2+ payers with no resolvable identifier → a one-line note. */}
             <div>
-              {singlePayer ? (
-                panelSnapshot ? (
+              {payerSelection.length === 1 || singleIdentifier ? (
+                panelPayer && panelSnapshot ? (
                   <FacilityPanel
                     facilities={panelFacilities}
                     hasAmounts={hasAmounts}
                     heatOn
                     selectedKeys={activeFacilityKeys}
                     onToggle={toggleFacility}
-                    payerLabel={singlePayer}
+                    payerLabel={panelPayer}
                   />
-                ) : (
+                ) : derivedLoading || (panelPayer && !panelSnapshot) ? (
                   <div className="rounded-2xl border bg-card p-6 text-center text-sm text-muted-foreground shadow-ths-sm">
-                    Loading facility ranking…
+                    {derivedLoading ? 'Resolving payer…' : 'Loading facility ranking…'}
+                  </div>
+                ) : (
+                  // An identifier was searched but resolved to no payer (never seen / misspelled).
+                  <div className="rounded-2xl border border-dashed bg-card p-6 text-center text-[13px] text-muted-foreground">
+                    No payer on file for that identifier — it may be new or misspelled.
                   </div>
                 )
               ) : (
                 <div className="rounded-2xl border border-dashed bg-card p-6 text-center text-[13px] text-muted-foreground">
-                  Select a single payer to see its facility ranking across the book.
+                  Select a single payer — or search a member ID / alpha prefix — to see the facility ranking.
                 </div>
               )}
             </div>
