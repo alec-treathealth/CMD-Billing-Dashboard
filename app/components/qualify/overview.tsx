@@ -226,10 +226,7 @@ export function HeatingUpCards({
           <span>
             {t.lineCount.toLocaleString('en-US')} claim lines · {range}
           </span>
-          <span className="truncate text-right">
-            {loc}
-            {t.entity ? `${loc ? ' · ' : ''}${t.entity}` : ''}
-          </span>
+          <span className="truncate text-right">{loc}</span>
         </div>
       </button>
     );
