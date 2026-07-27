@@ -7,6 +7,7 @@ import type { Db } from '../src/collections/db.js';
 function classify(sql: string): string {
   if (/insert into collections\.rollup_refresh_run/i.test(sql)) return 'insert_start';
   if (/refresh_cmd_explorer_charge_rollup/i.test(sql)) return 'refresh';
+  if (/^\s*vacuum/i.test(sql)) return 'vacuum';
   if (/max\(payment_received\)/i.test(sql)) return 'read_max';
   if (/update collections\.rollup_refresh_run/i.test(sql)) return 'update_finish';
   return 'other';
@@ -110,13 +111,35 @@ test('happy path: refresh runs, freshness read, row closed ok=true with duration
   });
   assert.deepEqual(
     fake.calls.map((c) => classify(c.sql)),
-    ['insert_start', 'refresh', 'read_max', 'update_finish'],
+    ['insert_start', 'refresh', 'vacuum', 'read_max', 'update_finish'],
   );
-  const update = fake.calls[3]!;
+  const update = fake.calls[4]!;
   assert.match(update.sql, /ok = true/i);
   assert.equal(update.params?.[0], 58000);
   assert.equal(update.params?.[1], '2026-07-16');
   assert.equal(update.params?.[2], 41);
+});
+
+// --- post-refresh maintenance (VACUUM/ANALYZE) is best-effort ------------------------------------
+
+test('post-refresh VACUUM failure is swallowed — the refresh still records ok=true', async () => {
+  const calls: string[] = [];
+  const db = {
+    async query(sql: string) {
+      calls.push(sql);
+      if (/insert into collections\.rollup_refresh_run/i.test(sql)) return { rowCount: 1, rows: [{ id: '9' }] };
+      if (/refresh_cmd_explorer_charge_rollup/i.test(sql)) return { rowCount: 1, rows: [{}] };
+      if (/^\s*vacuum/i.test(sql)) throw new Error('permission denied to vacuum'); // e.g. a missing MAINTAIN grant
+      if (/max\(payment_received\)/i.test(sql)) return { rowCount: 1, rows: [{ max_pay: '2026-07-16' }] };
+      if (/update collections\.rollup_refresh_run/i.test(sql)) return { rowCount: 1, rows: [] };
+      return { rowCount: 0, rows: [] };
+    },
+  } as unknown as Db;
+
+  const stats = await refreshChargeRollup({ db, now: () => 0 });
+  assert.equal(stats.ok, true, 'a post-refresh vacuum failure must NOT fail the refresh');
+  // The vacuum ran (and threw), but the freshness read + ok=true close-out still happened after it.
+  assert.deepEqual(calls.map(classify), ['insert_start', 'refresh', 'vacuum', 'read_max', 'update_finish']);
 });
 
 // --- best-effort failure recording must not mask the original error -----------------------------
@@ -180,7 +203,7 @@ test('overlap: with a prior run still ok IS NULL, a new run writes its OWN start
   assert.equal(stats.run_id, 42);
   // Statement sequence is the plain 4-step path — there is NO guard/dedupe SELECT against the
   // run-log before the insert; the start-row write is unconditional.
-  assert.deepEqual(calls.map(classify), ['insert_start', 'refresh', 'read_max', 'update_finish']);
+  assert.deepEqual(calls.map(classify), ['insert_start', 'refresh', 'vacuum', 'read_max', 'update_finish']);
   // The prior overlapping run is left untouched — still ok IS NULL / unfinished — so it stays
   // visible in the morning health check as the earlier unfinished row preceding this newer one.
   assert.deepEqual(table.get(41), { ok: null, finished: false });
