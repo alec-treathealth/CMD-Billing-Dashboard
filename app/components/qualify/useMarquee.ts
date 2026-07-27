@@ -33,6 +33,14 @@ export function useMarquee<T extends HTMLElement>(resetKey: unknown, itemsPerSet
   // set overflows the strip — otherwise a filtered-down list that fits shows every facility twice.
   const [isOverflowing, setIsOverflowing] = useState(false);
 
+  // Interaction state lives in REFS so it survives every rAF-effect re-run (pin toggle, window change,
+  // overflow re-measure). If it were closure-local, a re-run WHILE the pointer is over the strip would
+  // forget that fact — pointerenter won't re-fire without a boundary crossing — and the ticker would
+  // auto-scroll out from under a stationary cursor. Refs + a stable listener effect keep hover authoritative.
+  const hoveringRef = useRef(false);
+  const focusedRef = useRef(false);
+  const gestureUntilRef = useRef(0); // rAF-clock timestamp: an explicit scroll gesture holds until here
+
   // Snap to the start when the window filter changes (skip the initial mount — same key).
   useEffect(() => {
     if (resetKeyRef.current !== resetKey) {
@@ -40,6 +48,53 @@ export function useMarquee<T extends HTMLElement>(resetKey: unknown, itemsPerSet
       if (ref.current) ref.current.scrollLeft = 0;
     }
   }, [resetKey]);
+
+  // Hover / focus / gesture tracking — attached ONCE while the strip is scrollable, independent of the rAF
+  // lifecycle so a pin/window change never drops the "pointer is inside" fact. Uses pointerOVER/pointerMOVE
+  // (not just boundary pointerenter): those fire even when the cursor is ALREADY over the strip at init and
+  // re-fire as cards scroll beneath a stationary cursor, so hover pausing is reliable no matter where the
+  // cursor happened to be when the ticker mounted. pointerleave (a true exit) clears it.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof window === 'undefined' || !isOverflowing) return;
+    const markHover = () => {
+      hoveringRef.current = true;
+    };
+    const clearHover = () => {
+      hoveringRef.current = false;
+    };
+    const focusIn = () => {
+      focusedRef.current = true;
+    };
+    const focusOut = () => {
+      focusedRef.current = false;
+    };
+    const gesture = () => {
+      gestureUntilRef.current = performance.now() + RESUME_AFTER_MS;
+    };
+    el.addEventListener('pointerover', markHover);
+    el.addEventListener('pointermove', markHover);
+    el.addEventListener('pointerleave', clearHover);
+    el.addEventListener('pointercancel', clearHover);
+    el.addEventListener('focusin', focusIn);
+    el.addEventListener('focusout', focusOut);
+    el.addEventListener('wheel', gesture, { passive: true });
+    el.addEventListener('touchstart', gesture, { passive: true });
+    el.addEventListener('touchmove', gesture, { passive: true });
+    el.addEventListener('keydown', gesture);
+    return () => {
+      el.removeEventListener('pointerover', markHover);
+      el.removeEventListener('pointermove', markHover);
+      el.removeEventListener('pointerleave', clearHover);
+      el.removeEventListener('pointercancel', clearHover);
+      el.removeEventListener('focusin', focusIn);
+      el.removeEventListener('focusout', focusOut);
+      el.removeEventListener('wheel', gesture);
+      el.removeEventListener('touchstart', gesture);
+      el.removeEventListener('touchmove', gesture);
+      el.removeEventListener('keydown', gesture);
+    };
+  }, [isOverflowing]);
 
   // Measure whether ONE set overflows the visible strip. Reads only the real set's children
   // (0..itemsPerSet-1) so it's correct whether or not the duplicate is currently rendered. Re-measures on
@@ -67,21 +122,17 @@ export function useMarquee<T extends HTMLElement>(resetKey: unknown, itemsPerSet
     const el = ref.current;
     if (!el || typeof window === 'undefined') return;
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
-    // Nothing to auto-scroll when the real set fits, and a hard stop while pinned: skip the rAF loop and
-    // its listeners entirely (no useless spin, and `pinned` bypasses the resume timer completely).
+    // Nothing to auto-scroll when the real set fits, and a hard stop while pinned: skip the rAF loop
+    // entirely (no useless spin, and `pinned` can never be overridden by hover/gesture).
     if (!isOverflowing || pinned) return;
     el.style.scrollBehavior = 'auto'; // our rAF owns the position — never smooth-animate against it
 
     let raf = 0;
-    let last = 0; // 0 = re-seed dt + position on the next frame (prevents a jump after any pause)
-    let paused = false;
-    let inside = false; // pointer over the strip → hold paused (no auto-resume while reading)
-    let resumeTimer: ReturnType<typeof setTimeout> | null = null;
-
+    let last = 0; // 0 = re-seed dt + position on the next frame (prevents a jump after any hold)
     // Position is tracked in JS and only WRITTEN to el.scrollLeft each frame — never read back — so the
     // hot loop forces ZERO synchronous layouts per frame (reading scrollLeft/offsetLeft every frame was a
     // double reflow that stuttered once the cards grew heavier). We re-sync `pos` from the real scrollLeft
-    // only on resume (last === 0), so a manual hand-scroll while paused is respected.
+    // only when resuming from a hold (last === 0), so a manual hand-scroll while paused is respected.
     let pos = el.scrollLeft;
     // Seamless loop distance = where the first DUPLICATE card starts (one set + its trailing gap). Cards
     // are fixed-width, so this is effectively static per set — measure once (lazily until non-zero, since
@@ -93,7 +144,11 @@ export function useMarquee<T extends HTMLElement>(resetKey: unknown, itemsPerSet
     };
 
     const step = (ts: number) => {
-      if (!paused) {
+      // Hold (don't advance) while the pointer is over the strip, it has focus, or a recent scroll gesture
+      // is still within its idle window. All three read from refs the stable listener effect maintains, so
+      // this survives rAF re-runs and never resumes under a stationary cursor.
+      const holding = hoveringRef.current || focusedRef.current || ts < gestureUntilRef.current;
+      if (!holding) {
         if (last === 0) {
           last = ts;
           pos = el.scrollLeft; // one read, only on (re)start — sync to wherever the user left it
@@ -112,60 +167,8 @@ export function useMarquee<T extends HTMLElement>(resetKey: unknown, itemsPerSet
       raf = requestAnimationFrame(step);
     };
 
-    const clearResume = () => {
-      if (resumeTimer) clearTimeout(resumeTimer);
-      resumeTimer = null;
-    };
-    const doResume = () => {
-      resumeTimer = null;
-      if (!inside) {
-        paused = false;
-        last = 0;
-      }
-    };
-    const scheduleResume = () => {
-      clearResume();
-      resumeTimer = setTimeout(doResume, RESUME_AFTER_MS);
-    };
-    const pauseHold = () => {
-      paused = true;
-      clearResume(); // stay paused while the pointer/focus is inside
-    };
-    const pauseDefer = () => {
-      paused = true;
-      scheduleResume(); // an explicit scroll gesture defers resumption by the idle window
-    };
-    const onEnter = () => {
-      inside = true;
-      pauseHold();
-    };
-    const onLeave = () => {
-      inside = false;
-      scheduleResume();
-    };
-
-    el.addEventListener('pointerenter', onEnter);
-    el.addEventListener('pointerleave', onLeave);
-    el.addEventListener('focusin', pauseHold);
-    el.addEventListener('focusout', scheduleResume);
-    el.addEventListener('wheel', pauseDefer, { passive: true });
-    el.addEventListener('touchstart', pauseDefer, { passive: true });
-    el.addEventListener('touchmove', pauseDefer, { passive: true });
-    el.addEventListener('keydown', pauseDefer);
-
     raf = requestAnimationFrame(step);
-    return () => {
-      cancelAnimationFrame(raf);
-      clearResume();
-      el.removeEventListener('pointerenter', onEnter);
-      el.removeEventListener('pointerleave', onLeave);
-      el.removeEventListener('focusin', pauseHold);
-      el.removeEventListener('focusout', scheduleResume);
-      el.removeEventListener('wheel', pauseDefer);
-      el.removeEventListener('touchstart', pauseDefer);
-      el.removeEventListener('touchmove', pauseDefer);
-      el.removeEventListener('keydown', pauseDefer);
-    };
+    return () => cancelAnimationFrame(raf);
     // `resetKey` IS a dep: the snap-back effect zeroes el.scrollLeft on a window change, but since we now
     // track position in JS (write-only) rather than reading scrollLeft each frame, a window swap with the
     // SAME item count wouldn't otherwise re-run this effect — the stale `pos` would clobber the reset on
