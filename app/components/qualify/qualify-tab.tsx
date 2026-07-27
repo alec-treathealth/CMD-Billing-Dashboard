@@ -48,6 +48,7 @@ import {
   getQualifyResolvePayer,
   getQualifyPatientCohort,
   getQualifyOverview,
+  getQualifyBookKpis,
   loadQualifyFacilityOptions,
   loadQualifyPayerOptions,
   loadQualifyEmployers,
@@ -175,9 +176,11 @@ export function QualifyTab({
     null,
   );
 
-  // Recency guards — one for the compose fetch (count + cases + reveal), one for the overview strip.
+  // Recency guards — one for the compose fetch (count + cases + reveal), one for the overview ticker,
+  // one for the payer+facility-scoped KPI tiles (Phase 2).
   const composeGenRef = useRef(0);
   const overviewGenRef = useRef(0);
+  const kpiGenRef = useRef(0);
 
   const resetReveal = useCallback(() => {
     setRevealed(new Map());
@@ -223,14 +226,14 @@ export function QualifyTab({
   const bothIdentifiers = alphaPrefix.trim() !== '' && memberId.trim() !== '';
   const singleIdentifier = payerSelection.length === 0 && identifierTerm !== '' && !bothIdentifiers ? identifierTerm : null;
 
-  // ── OVERVIEW STRIP: book-wide KPIs + Heating-Up trends for a window (NO market — Phase 1 the compose
-  //    pickers never re-scope the strip; only the window control does, keeping tiles + ticker in lockstep). ─
+  // ── OVERVIEW TICKER: book-wide Heating-Up trends for a window. Phase 2: this owns TRENDS only — the
+  //    KPI TILES are owned by their own payer+facility-scoped effect below (Design B). The ticker stays
+  //    book-wide-within-payer in Phase 2 Commit B; here in Commit A it remains book-wide (window-only). ─
   const refreshOverview = useCallback((w: QualifyWindow) => {
     const ogen = ++overviewGenRef.current;
     getQualifyOverview(w, undefined, { resolve: false })
       .then((ov) => {
         if (overviewGenRef.current !== ogen) return;
-        setKpis(ov.kpis);
         setTrends(ov.trends);
         setOverviewError(false);
       })
@@ -266,8 +269,7 @@ export function QualifyTab({
     getQualifyOverview(url.window, undefined, { resolve: false })
       .then((ov) => {
         if (!alive || overviewGenRef.current !== ogen) return;
-        setKpis(ov.kpis);
-        setTrends(ov.trends);
+        setTrends(ov.trends); // KPI tiles are filled by the payer+facility-scoped effect below
       })
       .catch(() => {
         if (alive && overviewGenRef.current === ogen) setOverviewError(true);
@@ -280,6 +282,30 @@ export function QualifyTab({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── KPI TILES (Phase 2, Design B): re-scoped on PAYER + FACILITY selection (+ window) ONLY. Employer/
+  //    funding are deliberately EXCLUDED — they'd shred the slice to ~1 patient; they narrow the count +
+  //    cases list, never the tiles. Debounced + gen-guarded like the compose fetch; this effect is the
+  //    SOLE owner of `kpis` (the ticker fetch above no longer sets it). Empty selections → book-wide.
+  //    Refetch frequency: one fetch per payer/facility tag toggle or window change; ZERO on
+  //    employer/funding/PHI/typing (those aren't deps). ────────────────────────────────────────────────
+  useEffect(() => {
+    const kgen = ++kpiGenRef.current;
+    const t = setTimeout(() => {
+      getQualifyBookKpis(windowSel, {
+        payers: payerSelection.length > 0 ? payerSelection : undefined,
+        facilities: facilitySelection.length > 0 ? facilitySelection : undefined,
+      })
+        .then((k) => {
+          if (kpiGenRef.current !== kgen) return;
+          setKpis(k);
+        })
+        .catch(() => {
+          // leave the prior tiles in place; the strip-level error is surfaced by the ticker fetch.
+        });
+    }, COMPOSE_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [payerSelection, facilitySelection, windowSel]);
 
   // ── COMPOSE FETCH: the live match count + the composed claim rows, debounced + recency-guarded. No
   //    filter ⇒ clear + no fetch (the landing hero shows). ──────────────────────────────────────────────
@@ -655,6 +681,27 @@ export function QualifyTab({
           ? `${panelPayer} · from your search`
           : 'all payers';
   const contextFacilityCount = panelPayer ? panelSnapshot?.facilities.length ?? null : null;
+  // KPI-tile scope caption (Design B: payer + facility only). Null = book-wide.
+  const kpiScopeLabel =
+    payerSelection.length === 0 && facilitySelection.length === 0
+      ? null
+      : [
+          payerSelection.length === 1
+            ? payerSelection[0]!
+            : payerSelection.length > 1
+              ? `${payerSelection.length} payers`
+              : null,
+          facilitySelection.length === 1
+            ? '1 facility'
+            : facilitySelection.length > 1
+              ? `${facilitySelection.length} facilities`
+              : null,
+        ]
+          .filter(Boolean)
+          .join(' · ') || null;
+  // Design B affordance: employer/funding narrow the list, NOT the tiles — say so when they're active,
+  // so a non-moving tile reads as intentional, not a bug.
+  const marketNarrowActive = employerSelection.length > 0 || fundingSelection.length > 0;
   const billedText =
     summaryHasAmounts && summary?.totalCharge != null
       ? summary.totalCharge.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })
@@ -833,8 +880,14 @@ export function QualifyTab({
         </div>
       </div>
 
-      {/* ── BOOK KPI TILES (book-wide; unchanged in Phase 1) ── */}
-      <BookKpiTiles kpis={kpis} locActive={locFilter !== null} />
+      {/* ── KPI TILES (Phase 2: scoped to payer + facility; sample-gated) ── */}
+      <BookKpiTiles kpis={kpis} locActive={locFilter !== null} scopeLabel={kpiScopeLabel} />
+      {marketNarrowActive ? (
+        <p className="mt-2 text-[11px] text-ink400">
+          Tiles &amp; ratings reflect <b className="font-semibold text-ink600">payer + facility</b>. Employer &amp;
+          funding filter the matching claims below — they don’t re-scope these tiles.
+        </p>
+      ) : null}
 
       {/* ── CONTEXT LINE + LIVE MATCH COUNT + FACILITY RANKING + COMPOSED CASES ── */}
       {hasAnyFilter ? (

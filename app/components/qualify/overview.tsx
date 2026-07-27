@@ -22,6 +22,7 @@
 import { memo } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { ratingBucket } from '../../lib/qualify/rating';
+import { ratingSampleTier } from '../../lib/qualify/sampleGate';
 import { qualifyWindowLabel, serializeQualifyWindow } from '../../lib/qualify/contract';
 import type { QualifyBookKpis, QualifyFacilityTrend, QualifyMatchSummary, QualifyWindow } from '../../lib/qualify/contract';
 import { RATING_HEX, staggerDelayMs } from './tokens';
@@ -45,8 +46,20 @@ export function BookKpiTiles({
    *  of "book-wide". Null = the fresh, unresolved landing (book-wide). */
   scopeLabel?: string | null;
 }) {
-  // The tiles either read book-wide (landing) or are scoped to the resolved payer (a click/search).
+  // The tiles either read book-wide (landing) or are scoped to the composed payer + facility set.
   const scope = scopeLabel ?? 'book-wide';
+  // SAMPLE GATE (Phase 2, sampleGate.ts): the composed slice can be thin (median ~2 patients under a
+  // payer). Gate the tiles by distinct patients so a confident % never renders off 1-2 people. Only once
+  // kpis has LOADED (null = still fetching → keep the '—' skeleton, never a false "insufficient" flash).
+  const tier = kpis ? ratingSampleTier(kpis.distinctPatients) : 'full';
+  const patients = kpis?.distinctPatients ?? 0;
+  const insufficient = tier === 'insufficient';
+  const tierNote =
+    tier === 'insufficient'
+      ? ` · insufficient data (${patients} patient${patients === 1 ? '' : 's'})`
+      : tier === 'thin'
+        ? ` · thin sample (${patients} patient${patients === 1 ? '' : 's'})`
+        : '';
   const tiles: { key: string; tone: 'g' | 'a'; label: string; value: number | null; caption: string }[] = [
     {
       key: 'allowed',
@@ -85,14 +98,16 @@ export function BookKpiTiles({
           <div
             className={[
               'mt-2 flex items-baseline font-mono text-4xl font-semibold leading-none tabular-nums',
-              t.tone === 'g' ? 'text-status-ok' : 'text-status-warn',
+              // Insufficient sample → neutral (no confident color/number); else the tone color.
+              insufficient ? 'text-ink400' : t.tone === 'g' ? 'text-status-ok' : 'text-status-warn',
             ].join(' ')}
           >
-            {pctText(t.value)}
-            {t.value !== null ? <span className="ml-0.5 text-lg">%</span> : null}
+            {insufficient ? '—' : pctText(t.value)}
+            {!insufficient && t.value !== null ? <span className="ml-0.5 text-lg">%</span> : null}
           </div>
           <div className="mt-2 text-[11px] text-ink400">
             {t.caption}
+            {tierNote}
             {locActive ? ' · not LOC-scoped' : ''}
           </div>
         </div>

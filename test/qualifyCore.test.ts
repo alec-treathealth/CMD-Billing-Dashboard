@@ -127,7 +127,7 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
       byCpt: [{ label: 'H0015', count: 18, charge: 40000 }],
     }),
     loadMovers: async () => MOVER_ROWS,
-    loadBookKpis: async () => ({ pct_allowed_of_billed: 44, pct_paid_of_allowed: 82, pct_paid_of_billed: 36 }),
+    loadBookKpis: async () => ({ pct_allowed_of_billed: 44, pct_paid_of_allowed: 82, pct_paid_of_billed: 36, distinct_patients: 120 }),
     loadFacilityTrends: async () => TREND_ROWS,
     recordAccess: async (e) => {
       c.audits.push({ action: e.action, detail: e.detail });

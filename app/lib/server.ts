@@ -140,6 +140,7 @@ import type {
   QualifyClaimRow,
   QualifyMoverRow,
   QualifyBookKpisRow,
+  QualifyOrientationScope,
   QualifyFacilityTrendRow,
   QualifyMatchSummaryRow,
 } from '../../src/collections/qualifyQuery.js';
@@ -2168,16 +2169,14 @@ export async function loadQualifyMovers(
   return rows;
 }
 
-/** Redesign overview: book-wide KPI percentages for the window, cross-tenant (dollars summed + dropped
- *  in SQL — only the three ratios come back). Returns one row (or null on an empty book). */
+/** Phase 2 overview: KPI percentages + distinct-patient count for the composed orientation slice
+ *  (payer + facility + window; NO employer/funding — Design B), cross-tenant. Dollars are summed +
+ *  dropped in SQL — only the three ratios + the count come back. One row (or null on an empty slice). */
 export async function loadQualifyBookKpis(
-  from: string,
-  to: string,
+  scope: QualifyOrientationScope,
   entityIds: string[],
-  market: VobMarketFilter = {},
-  payer: string | null = null,
 ): Promise<QualifyBookKpisRow | null> {
-  const q = buildBookKpisQuery(from, to, entityIds, market, payer);
+  const q = buildBookKpisQuery(scope, entityIds);
   const { rows } = await readerExecutor().query<QualifyBookKpisRow>(q.sql, q.params);
   return rows[0] ?? null;
 }

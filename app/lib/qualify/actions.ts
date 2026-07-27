@@ -209,16 +209,29 @@ export async function getQualifyInitial(
   return getQualifyInitialCore(realDeps, window, sanitizeMarket(market));
 }
 
-/** Redesign overview: KPI percentages (allowed/paid ratios) for the window, in-plane. `payer` null =
- *  book-wide (the landing tiles); a payer label narrows the SAME ratios to the resolved subject so the
- *  tiles + the resolved-band stat reflect what the user resolved. Non-PHI aggregate (payer label only;
- *  no member term/token) — gate-only, parity with the book-wide KPI + movers path. */
+/** Bound a client-supplied scope label list (payer/facility) at the 'use server' trust boundary: cap
+ *  count + element length. Values are bound params downstream; the core re-normalizes (defense in
+ *  depth). Design B: ONLY payer + facility lists exist here — there is no employer/funding channel. */
+function sanitizeLabelList(xs?: string[]): string[] | undefined {
+  if (!Array.isArray(xs)) return undefined;
+  const out = xs
+    .filter((x): x is string => typeof x === 'string' && x.length > 0 && x.length <= QUALIFY_EMPLOYER_NAME_MAX)
+    .slice(0, QUALIFY_EMPLOYER_SET_MAX);
+  return out.length > 0 ? out : undefined;
+}
+
+/** Phase 2 overview: KPI percentages + the slice's distinct-patient count for the window, in-plane.
+ *  DESIGN B: scope is payer + facility ONLY (employer/funding never scope the tiles — they'd shred the
+ *  slice to ~1 patient). No scope = book-wide (the landing tiles). Non-PHI aggregate (payer/facility
+ *  labels only; no member term/token) — gate-only, parity with the movers path. */
 export async function getQualifyBookKpis(
   window: QualifyWindow,
-  market?: QualifyMarket,
-  payer?: string | null,
+  scope?: { payers?: string[]; facilities?: string[] },
 ): Promise<QualifyBookKpis> {
-  return getQualifyBookKpisCore(realDeps, window, sanitizeMarket(market), payer ?? null);
+  return getQualifyBookKpisCore(realDeps, window, {
+    payers: sanitizeLabelList(scope?.payers),
+    facilities: sanitizeLabelList(scope?.facilities),
+  });
 }
 
 /** Redesign overview: per-facility rating trend + delta (Heating-Up + sparklines). payer null = book-wide. */

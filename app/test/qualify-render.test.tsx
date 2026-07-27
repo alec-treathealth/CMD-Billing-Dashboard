@@ -367,7 +367,7 @@ test('cases table — a facility-scoped set still omits dollars for a no-amounts
 // ── Redesign OVERVIEW: book KPI tiles + "Facilities Heating Up" trend cards ─────────────────────────
 const W30 = trailingWindow(30);
 const KPIS: QualifyBookKpis = {
-  pctAllowedOfBilled: 44.4, pctPaidOfAllowed: 82.1, pctPaidOfBilled: 36.2,
+  pctAllowedOfBilled: 44.4, pctPaidOfAllowed: 82.1, pctPaidOfBilled: 36.2, distinctPatients: 120,
   windowStart: '2026-06-18', windowEnd: '2026-07-18', tenantScope: 'cross-tenant-bxr-indigo',
 };
 const TRENDS: QualifyFacilityTrend[] = [
@@ -400,6 +400,28 @@ test('KPI tiles — three percentage tiles, ZERO dollars, null renders "—" (ne
 test('KPI tiles — the LOC lens does not silently re-scope them: locActive adds the "not LOC-scoped" caption', () => {
   const html = renderToStaticMarkup(<BookKpiTiles kpis={KPIS} locActive />);
   assert.equal(html.split('not LOC-scoped').length - 1, 3, 'every tile captions the book-wide scope under an active lens');
+});
+
+test('KPI tiles — SAMPLE GATE: a <3-patient slice SUPPRESSES the confident % (— + "insufficient data")', () => {
+  const html = renderToStaticMarkup(<BookKpiTiles kpis={{ ...KPIS, distinctPatients: 2 }} locActive={false} />);
+  assert.equal(html.split('insufficient data').length - 1, 3, 'every tile flags insufficient data');
+  assert.ok(/2 patients/.test(html), 'the patient count the slice rests on is visible');
+  for (const pct of ['44', '82', '36']) assert.ok(!html.includes(pct), `the confident % ${pct} is suppressed`);
+  assert.ok(html.includes('—'), 'tiles render — instead of a number');
+});
+
+test('KPI tiles — SAMPLE GATE: a 3-9 patient slice shows the % but flags a thin sample', () => {
+  const html = renderToStaticMarkup(<BookKpiTiles kpis={{ ...KPIS, distinctPatients: 5 }} locActive={false} />);
+  assert.ok(html.includes('44'), 'the % still renders at 3-9 patients');
+  assert.equal(html.split('thin sample').length - 1, 3, 'every tile flags a thin sample');
+  assert.ok(/5 patients/.test(html), 'patient count visible');
+  assert.ok(!html.includes('insufficient data'), 'not the insufficient state (that is <3)');
+});
+
+test('KPI tiles — SAMPLE GATE: >=10 patients renders unchanged (no thin/insufficient flag)', () => {
+  const html = renderToStaticMarkup(<BookKpiTiles kpis={{ ...KPIS, distinctPatients: 10 }} locActive={false} />);
+  assert.ok(html.includes('44') && html.includes('82'), 'confident %s render');
+  assert.ok(!html.includes('thin sample') && !html.includes('insufficient data'), 'no gate flag at full confidence');
 });
 
 test('heating-up cards — defined "n" (claim lines), Δpts ticker (+/−), NEW for null-prior, sparkline present', () => {
