@@ -13,6 +13,7 @@ import {
   getQualifyComposedCasesCore,
   getQualifyMatchSummaryCore,
   getQualifyPayerEverBilledCore,
+  getQualifyResolvePayerCore,
   getQualifyPatientCohortCore,
   revealQualifyRowCore,
   revealQualifyRowsCore,
@@ -343,6 +344,20 @@ test('vob probe: a non-zero count means the payer IS billed → the caller must 
 
 test('vob probe: a BLANK payer throws (fail LOUD) — never a false "never billed"', async () => {
   await assert.rejects(() => getQualifyPayerEverBilledCore(makeDeps(SUPER, cap()), '   '));
+});
+
+// ── IDENTIFIER → PAYER resolve (compose bar shows the ranking on an identifier search, no payer chip) ─
+test('resolve payer: derives the identifier’s dominant payer WITHOUT auditing (the cases path owns the audit)', async () => {
+  const c = cap();
+  const payer = await getQualifyResolvePayerCore(makeDeps(SUPER, c), 'ZQX'); // 3 chars → prefix
+  assert.equal(payer, 'AETNA', 'returns the dep-resolved dominant payer');
+  assert.equal(c.audits.length, 0, 'resolve returns only a non-PHI payer label → no audit here (no double-count)');
+});
+
+test('resolve payer: an unmintable/blank term resolves to null (no false payer, no throw)', async () => {
+  assert.equal(await getQualifyResolvePayerCore(makeDeps(SUPER, cap()), '   '), null, 'blank → null');
+  const noMint = makeDeps(SUPER, cap(), { mintToken: () => null });
+  assert.equal(await getQualifyResolvePayerCore(noMint, 'ab'), null, 'a <3-char/unmintable term → null, never a resolve');
 });
 
 test('movers: carries NO dollar fields for either capability state', async () => {

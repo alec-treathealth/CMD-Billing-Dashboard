@@ -790,6 +790,34 @@ export async function getQualifyPayerEverBilledCore(deps: QualifyDeps, payer: st
 }
 
 /**
+ * Resolve the DOMINANT payer for a single PHI identifier (member id / alpha prefix), so the compose bar
+ * can show the facility ranking when the user has searched an identifier but selected no payer chip —
+ * without forcing them to pick one. The server sniffs the kind (never client-declared), mints the blind
+ * index, and resolves the identifier's dominant payer (unwindowed, cross-tenant — buildResolvePayerQuery).
+ * Returns the payer LABEL (non-PHI) or null when the identifier was never seen.
+ *
+ * NO audit here on purpose: this returns only a non-PHI payer label, and the row-returning composed-cases
+ * access for the SAME identifier already audits SEARCH_QUALIFY_FACILITY (fields: ['prefix'|'member_id']).
+ * Adding an audit here would double-count the same access. A blank/oversize term or an unmintable token
+ * yields null (no resolution), never an error the UI must special-case.
+ */
+export async function getQualifyResolvePayerCore(deps: QualifyDeps, term: string): Promise<string | null> {
+  const gate = await deps.requirePrincipal();
+  if (!gate.ok) throw new Error(gate.error);
+  const raw = typeof term === 'string' ? term.trim() : '';
+  if (raw === '' || raw.length > 120) return null;
+  const kind = sniffQualifyKind(raw); // 'member_id' | 'prefix' (server-side; <=3 chars ⇒ prefix)
+  let token: string | null;
+  try {
+    token = deps.mintToken(raw, kind);
+  } catch {
+    throw new Error('Qualify search is temporarily unavailable.'); // key/config error, never PHI
+  }
+  if (!token) return null; // e.g. a <3-char prefix → nothing to resolve
+  return deps.resolvePayer(token, kind, gate.entityIds);
+}
+
+/**
  * Phase 3 — the patient-group "View cohort" slide-over: the member's LIFETIME alpha-prefix cohort
  * (payer-behavior peer group). Flow: gate → audit (field-level, non-PHI) → re-derive the prefix
  * token SERVER-SIDE from one claim id (never from the client) → load the floor-gated context →

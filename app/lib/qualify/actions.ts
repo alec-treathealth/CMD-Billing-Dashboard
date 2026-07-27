@@ -38,6 +38,7 @@ import {
   getQualifyComposedCasesCore,
   getQualifyMatchSummaryCore,
   getQualifyPayerEverBilledCore,
+  getQualifyResolvePayerCore,
   getQualifyMoversCore,
   getQualifyInitialCore,
   getQualifyBookKpisCore,
@@ -175,6 +176,19 @@ export async function getQualifyPayerEverBilled(payer: string): Promise<{ ok: tr
   if (p === '') return { ok: false };
   try {
     return { ok: true, count: await getQualifyPayerEverBilledCore(realDeps, p) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** COMPOSE BAR — derive the dominant payer for a single PHI identifier (member id / alpha prefix) so the
+ *  facility ranking can render on an identifier search with no payer chip selected. `payer` is null when
+ *  the identifier was never seen. Non-PHI return (payer label only); fail-closed to `{ ok: false }`. */
+export async function getQualifyResolvePayer(term: string): Promise<{ ok: true; payer: string | null } | { ok: false }> {
+  const t = typeof term === 'string' ? term.trim() : '';
+  if (t === '') return { ok: false };
+  try {
+    return { ok: true, payer: await getQualifyResolvePayerCore(realDeps, t) };
   } catch {
     return { ok: false };
   }
