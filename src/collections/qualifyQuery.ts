@@ -518,6 +518,13 @@ export const QUALIFY_TREND_TOP_N = 15;
  *  flukes). Mirrors rating.ts QUALIFY_MIN_LINES; kept as a local literal so this src/ module never
  *  imports from app/ (the dependency points the wrong way). Keep the two values in lockstep. */
 export const QUALIFY_TREND_MIN_LINES = 3;
+/** DELTA gate (Phase 2, ruling 2026-07-27): a card needs at least this many DISTINCT PATIENTS in BOTH
+ *  the current AND the prior sub-window to rank — else its "biggest improver" delta is computed on
+ *  noise (measured: under a single payer only ~13% of slices clear >=5 both sides). Mirrors the movers
+ *  patient discipline (5). Cards failing it are DROPPED rather than ranked on a noisy delta — including
+ *  NEW facilities (no prior window), which cannot show a trustworthy improvement. Book-wide, rich
+ *  facilities clear it easily; it bites only the thin (payer-scoped) slices it is meant to protect. */
+export const QUALIFY_TREND_MIN_PATIENTS = 5;
 
 /** Per-facility trend row (ratings only — no dollars projected). */
 export interface QualifyFacilityTrendRow {
@@ -543,20 +550,24 @@ export interface QualifyFacilityTrendRow {
  * label), the current-window line_count
  * (the "n"), and `points` — the current window sliced into QUALIFY_TREND_BUCKETS even sub-windows,
  * each a reliable allowed% (thin buckets dropped so no point is fabricated). Floor: only facilities
- * with >= QUALIFY_MIN_LINES current-window lines rank (kills 1–2-line flukes). ORDER BY the rating
- * delta desc (biggest improvers first) — NULL prior (new facilities) sinks last. Optional single-payer
- * scope (`payer`) for the resolved panel's per-facility sparklines; omitted = book-wide (the overview).
+ * with >= QUALIFY_MIN_LINES current-window lines AND >= QUALIFY_TREND_MIN_PATIENTS distinct patients in
+ * BOTH windows rank (kills 1–2-line flukes AND noisy-delta thin slices; see the constant). ORDER BY the
+ * rating delta desc (biggest improvers first). Optional single-payer scope (`payer`): fed only when
+ * exactly one payer is selected (Design B — the ticker is book-wide-within-payer); omitted = book-wide.
+ * DESIGN B: NO market (employer/funding) scope — the type carries none, so the ticker can never be
+ * employer/funding-narrowed (that shreds the delta before it shreds the rating).
  */
 export function buildFacilityTrendQuery(
   from: string,
   to: string,
   priorFrom: string,
   entityIds: string[],
-  opts: { payer?: string | null; buckets?: number; minLines?: number; topN?: number; market?: VobMarketFilter } = {},
+  opts: { payer?: string | null; buckets?: number; minLines?: number; minPatients?: number; topN?: number } = {},
 ): { sql: string; params: unknown[] } {
   const ent = assertEntityScope(entityIds, 'buildFacilityTrendQuery');
   const buckets = Math.max(1, Math.min(24, Math.trunc(opts.buckets ?? QUALIFY_TREND_BUCKETS)));
   const minLines = Math.max(QUALIFY_TREND_MIN_LINES, Math.trunc(opts.minLines ?? QUALIFY_TREND_MIN_LINES));
+  const minPatients = Math.max(QUALIFY_TREND_MIN_PATIENTS, Math.trunc(opts.minPatients ?? QUALIFY_TREND_MIN_PATIENTS));
   const topN = Math.max(1, Math.trunc(opts.topN ?? QUALIFY_TREND_TOP_N));
   const { params, add } = paramList();
   const e = add(ent);
@@ -564,15 +575,16 @@ export function buildFacilityTrendQuery(
   const f = add(from);
   const t = add(to);
   const payerCond = opts.payer ? ` and primary_payer = ${add(opts.payer)}` : '';
-  const mj = buildVobMarketSemiJoin(opts.market ?? {}, add);
   const nb = add(buckets);
   const ml = add(minLines);
+  const mp = add(minPatients);
   const lim = add(topN);
   const reliable = (pfx: string) => `sum(allowed_reliable) filter (where ${pfx}allowed_tier <> 'e2')`;
   // span: one scan over [priorFrom, to). is_cur splits the current window ([from, to)) from the prior
   // ([priorFrom, from) == the adjacent prior window). Facility text is filtered non-blank here.
+  // member_id_bidx rides along ONLY to be COUNTED (the delta gate) — never projected to the caller.
   const span =
-    'select facility, primary_payer, business_entity_id, charge_amount, allowed_reliable, allowed_tier, ' +
+    'select facility, primary_payer, business_entity_id, member_id_bidx, charge_amount, allowed_reliable, allowed_tier, ' +
     `(payment_received >= ${f}::date) as is_cur, ` +
     // bucket index over the CURRENT window only (0..nb-1); null for prior rows.
     `case when payment_received >= ${f}::date then ` +
@@ -581,12 +593,14 @@ export function buildFacilityTrendQuery(
     `where business_entity_id = any(${e}::uuid[]) ` +
     `and payment_received >= ${pf}::date and payment_received < ${t}::date ` +
     "and facility is not null and btrim(facility) <> ''" +
-    payerCond +
-    (mj ? ` and ${mj}` : '');
-  // fac: per-facility current + prior aggregates + entity set (dominant payer is computed in `dom`).
+    payerCond;
+  // fac: per-facility current + prior aggregates + entity set + BOTH-window distinct-patient counts
+  // (the delta gate). member_id_bidx is COUNTED here, never projected.
   const fac =
     'select facility, ' +
     'count(*) filter (where is_cur)::int as line_count, ' +
+    'count(distinct member_id_bidx) filter (where is_cur)::int as cur_patients, ' +
+    'count(distinct member_id_bidx) filter (where not is_cur)::int as prior_patients, ' +
     'array_agg(distinct business_entity_id::text) filter (where is_cur) as entity_ids, ' +
     `case when sum(charge_amount) filter (where is_cur) > 0 then round((${reliable('is_cur and ')}) / sum(charge_amount) filter (where is_cur) * 100, 2)::float8 end as cur_rating, ` +
     `case when sum(charge_amount) filter (where not is_cur) > 0 then round((${reliable('not is_cur and ')}) / sum(charge_amount) filter (where not is_cur) * 100, 2)::float8 end as prior_rating ` +
@@ -622,7 +636,10 @@ export function buildFacilityTrendQuery(
     'max(coalesce(fe.facility_code, a.facility_code)) as facility_code ' +
     'from (select fac.*, dom.dominant_payer, bkt_agg.points from fac left join dom using (facility) left join bkt_agg using (facility)) agg ' +
     FACILITY_DIM_JOINS +
-    `where agg.line_count >= ${ml} ` +
+    // line floor (fluke-killer) AND the both-window distinct-patient delta gate (Phase 2): both
+    // sub-windows must carry >= mp patients or the "improver" delta is noise. cur/prior_patients are
+    // used ONLY here (pre-GROUP BY), never projected — so no GROUP BY entry is needed for them.
+    `where agg.line_count >= ${ml} and agg.cur_patients >= ${mp} and agg.prior_patients >= ${mp} ` +
     'group by agg.facility, agg.line_count, agg.dominant_payer, agg.entity_ids, agg.cur_rating, agg.prior_rating, agg.points ' +
     'order by (agg.cur_rating - agg.prior_rating) desc nulls last, agg.cur_rating desc nulls last, agg.facility ' +
     `limit ${lim}`;

@@ -138,12 +138,16 @@ const EMPTY_KEYS: ReadonlySet<string> = new Set();
 export const HeatingUpCards = memo(function HeatingUpCards({
   trends,
   window,
+  scopePayer = null,
   activeFacilityKeys = EMPTY_KEYS,
   pinned = false,
   onOpen,
 }: {
   trends: readonly QualifyFacilityTrend[];
   window: QualifyWindow;
+  /** Design B ticker scope: a payer name → the ticker is that payer's improvers; null → book-wide.
+   *  Labeled next to the title so the scope is legible (the ticker is book-wide-within-payer). */
+  scopePayer?: string | null;
   /** facilityKeys of the cards whose facility is currently in the compose selection (marked pressed).
    *  A SET — the compose bar can select several facilities, so more than one card can read pressed. */
   activeFacilityKeys?: ReadonlySet<string>;
@@ -259,7 +263,7 @@ export const HeatingUpCards = memo(function HeatingUpCards({
         <h2 className="font-head text-[15px] font-semibold tracking-tight">Facilities Heating Up</h2>
         <span className="inline-flex items-center gap-1.5 text-[10px] font-extrabold uppercase tracking-widest text-ink400">
           <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-status-ok" />
-          Trending · {range}
+          Trending · {range} · {scopePayer ?? 'across the book'}
         </span>
       </div>
       {/* Marquee = a real horizontal scroll container (useMarquee drives scrollLeft). role/list omitted

@@ -1543,6 +1543,39 @@ TRIBAL KNOWLEDGE — the measurement that justified the sample gate; do NOT redi
   construction). Mobile's payer-scoped KPI tiles fail SAFE to book-wide (`SCOPED_TILES_ENABLED=false`)
   until Phase 2 wires a patient count into `buildBookKpisQuery`.
 
+### Qualify Phase 2 — filter-aware orientation layer, Design B ASYMMETRY (2026-07-27)
+
+TRIBAL KNOWLEDGE — why the orientation layer scopes ASYMMETRICALLY. A future session MUST NOT
+"complete" this into symmetric full-filter scoping; that silently reintroduces the ~1-patient rating.
+
+- **Tiles + ratings scope on PAYER + FACILITY only. Employer + funding scope ONLY the match count +
+  cases list, never the tiles/ratings/ticker.** Measured (prod @90d): employer is the slice-shredder —
+  facility × payer × employer approaches **1 distinct patient** (1,606 slices, thinner than the already
+  thin facility × payer median of 2). Per-row facts (count, cases) stay truthful at any n; a rating does
+  not. Funding is ~80% populated and near-binary (Self-Funded 29,145 / Fully Insured 6,169) so it barely
+  shreds on its own — but it's grouped with employer for a simple, defensible rule.
+- **Structural enforcement (not call-site discipline):** `buildBookKpisQuery` takes a
+  `QualifyOrientationScope = Pick<CmdExplorerFilter,'facility'|'primary_payers'|'from'|'to'>` — a type
+  that CANNOT express employer/funding. Fed through the shared `cmdExplorerBaseConds`, so it emits no VOB
+  market semi-join. A regression test (`qualifyQuery.test.ts`) fails loudly if `employer_norm` /
+  `member_benefits_latest` / `funding =` ever appears in the tiles predicate. The ticker builder simply
+  has no market param.
+- **Ticker stays BOOK-WIDE-WITHIN-PAYER** (not fully compose-aware): payer-scoped at exactly one payer,
+  book-wide at 0 or 2+; facility/employer/funding never scope it. Why not full: splitting single-payer
+  slices cur-45d/prior-45d, only **34% have >=2 patients both sides and 13% have >=5 both** — a
+  filter-aware ticker would be empty/near-empty most of the time. A `both-window >= 5 distinct patients`
+  DELTA GATE (`QUALIFY_TREND_MIN_PATIENTS`) drops cards whose "improver" delta would be computed on
+  noise. Consequence (deliberate): NEW facilities (no prior window) no longer appear in the ticker —
+  they can't show a trustworthy delta. Sparkline is fine: surviving cards carry ~215 current-window
+  lines → median 8/8 buckets populated (buckets fill on lines, not patients).
+- **Suppression thresholds are the hotfix's — 3 / 10 distinct patients (`sampleGate.ts`,
+  `ratingSampleTier`)** — reused verbatim by tiles + ranking on BOTH surfaces; there is exactly one gate
+  idiom. Desktop refetch: one fetch per payer/facility tag toggle or window change; ZERO on
+  employer/funding/PHI/typing. Ticker refetches on payer/window only (facility never touches the marquee).
+- **Mobile reconciled onto Design B:** its former market-scoping of the strip is REMOVED (employer/funding
+  re-run only the cases/snapshot, not the tiles); its payer-scoped tiles (hotfix-disabled) are restored
+  and sample-gated identically to desktop.
+
 ### Mobile qualify container — no async-interaction test coverage (Stage 3a follow-up, 2026-07-20)
 
 Mobile qualify container (`qualify-mobile-app.tsx`) has no async-interaction test coverage —

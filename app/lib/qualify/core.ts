@@ -139,13 +139,14 @@ export interface QualifyDeps {
   /** Phase 2 overview: KPI percentages + distinct-patient count (dollars summed + dropped in SQL). One
    *  row. Scope is payer + facility + window (QualifyOrientationScope) — NO employer/funding (Design B). */
   loadBookKpis: (scope: QualifyOrientationScope, entityIds: string[]) => Promise<QualifyBookKpisRow | null>;
-  /** Redesign overview: per-facility rating trend rows (ratings only). payer null = book-wide. */
+  /** Phase 2 overview: per-facility rating trend rows (ratings only). payer null = book-wide; a single
+   *  payer = the payer-scoped ticker (Design B — NO market). The builder enforces the delta gate. */
   loadFacilityTrends: (
     from: string,
     to: string,
     priorFrom: string,
     entityIds: string[],
-    opts?: { payer?: string | null; market?: VobMarketFilter },
+    opts?: { payer?: string | null },
   ) => Promise<QualifyFacilityTrendRow[]>;
   recordAccess: (entry: {
     actorEmail: string;
@@ -1032,16 +1033,14 @@ export async function getQualifyBookKpisCore(
 export async function getQualifyFacilityTrendsCore(
   deps: QualifyDeps,
   window: QualifyWindow,
-  opts?: { payer?: string | null; market?: QualifyMarket },
+  opts?: { payer?: string | null },
 ): Promise<QualifyFacilityTrend[]> {
   const gate = await deps.requirePrincipal();
   if (!gate.ok) throw new Error(gate.error);
   if (!isQualifyWindow(window)) throw new Error('Invalid window.');
   const { from, to, priorFrom } = qualifyWindowBounds(window, deps.now());
-  const rows = await deps.loadFacilityTrends(from, to, priorFrom, gate.entityIds, {
-    payer: opts?.payer ?? null,
-    market: opts?.market,
-  });
+  // Design B: payer-only scope (exactly-one-payer → payer-scoped ticker; null → book-wide). No market.
+  const rows = await deps.loadFacilityTrends(from, to, priorFrom, gate.entityIds, { payer: opts?.payer ?? null });
   return rows.map(assembleTrend);
 }
 
@@ -1062,7 +1061,7 @@ export async function getQualifyOverviewCore(
     // On-load strip is book-wide: no orientation scope (Design B — employer/funding never scope tiles;
     // the compose-driven refetch supplies payer + facility via getQualifyBookKpis directly).
     getQualifyBookKpisCore(deps, window),
-    getQualifyFacilityTrendsCore(deps, window, { payer: null, market }),
+    getQualifyFacilityTrendsCore(deps, window, { payer: null }),
   ]);
   const empty: QualifyOverview = {
     kpis, trends, topFacility: null, topPayer: null, snapshot: null, seedFacility: null, seedCases: [], seedCapped: false,

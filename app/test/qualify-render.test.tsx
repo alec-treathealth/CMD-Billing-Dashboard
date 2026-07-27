@@ -447,6 +447,14 @@ test('heating-up cards — active (scoped) card is marked pressed; renders nothi
   assert.equal(renderToStaticMarkup(<HeatingUpCards trends={[]} window={W30} onOpen={() => {}} />), '', 'empty render with no trends');
 });
 
+test('heating-up cards — Design B scope LABEL: "across the book" by default, the payer name when payer-scoped', () => {
+  const wide = renderToStaticMarkup(<HeatingUpCards trends={TRENDS} window={W30} onOpen={() => {}} />);
+  assert.ok(wide.includes('across the book'), 'book-wide ticker labels its scope');
+  const scoped = renderToStaticMarkup(<HeatingUpCards trends={TRENDS} window={W30} scopePayer="AETNA" onOpen={() => {}} />);
+  assert.ok(scoped.includes('AETNA'), 'payer-scoped ticker names the payer');
+  assert.ok(!scoped.includes('across the book'), 'not both scopes at once');
+});
+
 // ── Compose-bar match count: admissions_seat sees count + percentages, ZERO dollars — in the MARKUP,
 //    not just the wire (the known past failure mode: a stripped value that still renders). ─────────────
 const SEAT_SUMMARY: QualifyMatchSummary = {

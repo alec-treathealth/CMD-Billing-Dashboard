@@ -234,15 +234,14 @@ export async function getQualifyBookKpis(
   });
 }
 
-/** Redesign overview: per-facility rating trend + delta (Heating-Up + sparklines). payer null = book-wide. */
+/** Phase 2 overview: per-facility rating trend + delta (Heating-Up ticker + sparklines). Design B:
+ *  payer-only scope — exactly-one-payer → payer-scoped ticker, null → book-wide. NO market (employer/
+ *  funding never scope the ticker). The builder enforces the both-window distinct-patient delta gate. */
 export async function getQualifyFacilityTrends(
   window: QualifyWindow,
-  opts?: { payer?: string | null; market?: QualifyMarket },
+  opts?: { payer?: string | null },
 ): Promise<QualifyFacilityTrend[]> {
-  return getQualifyFacilityTrendsCore(realDeps, window, {
-    payer: opts?.payer ?? null,
-    market: sanitizeMarket(opts?.market),
-  });
+  return getQualifyFacilityTrendsCore(realDeps, window, { payer: opts?.payer ?? null });
 }
 
 /** Redesign combined on-load overview: KPIs + trends + the hybrid-resolved top facility, ONE round-trip.

@@ -44,6 +44,7 @@ import { ClaimDetailSheet } from '@/components/qualify/m/claim-detail-sheet';
 import { AreaChips, deriveAreaChips, facilitiesInArea, AREA_ALL } from '@/components/qualify/m/area-chips';
 import { HeatingUp } from '@/components/qualify/m/heating-up';
 import { MobileMarketFilter } from '@/components/qualify/m/market-filter';
+import { ratingSampleTier } from '@/lib/qualify/sampleGate';
 import { SwRegister } from '@/components/qualify/m/sw-register';
 import { SearchIcon, RefreshIcon } from '@/components/qualify/m/icons';
 import { QUALIFY_PALETTE, RATING_HEX } from '@/components/qualify/tokens';
@@ -149,11 +150,12 @@ export function QualifyMobileApp({
 
   const hasAmounts = snapshot ? snapshot.viewerHasAmountsCapability : viewerHasAmountsCapability;
 
-  /** Refresh the overview strip (KPI tiles + trend chips) — non-blocking, resolve:false. Recency-guarded
-   *  (overviewSeq) so a slow earlier window/market response can't overwrite newer tiles. */
+  /** Refresh the overview strip's TRENDS (Heating-Up chips) + the book-wide KPI fallback — non-blocking,
+   *  resolve:false. Design B (Phase 2): NO market — employer/funding never scope the strip; the tiles are
+   *  re-scoped to the resolved PAYER by refreshScopedKpis (gated). Recency-guarded (overviewSeq). */
   function refreshOverview(w: QualifyWindow) {
     const oseq = ++overviewSeq.current;
-    getQualifyOverview(w, marketRef.current, { resolve: false })
+    getQualifyOverview(w, undefined, { resolve: false })
       .then((ov) => {
         if (oseq !== overviewSeq.current) return; // superseded by a newer strip fetch
         setKpis(ov.kpis);
@@ -190,14 +192,15 @@ export function QualifyMobileApp({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Effect C — market change → refresh the strip + re-resolve the ACTIVE view (skip mount).
+  // Effect C — market change → re-resolve the ACTIVE view only (skip mount). Design B (Phase 2): market
+  // (employer/funding) scopes the CASES/count, NOT the strip — so the strip is NOT refreshed here; only
+  // the resolved snapshot (facility cards + claims) re-runs under the new market narrow.
   const marketInitDone = useRef(false);
   useEffect(() => {
     if (!marketInitDone.current) {
       marketInitDone.current = true;
       return;
     }
-    refreshOverview(winRef.current);
     if (byPayer) resolveByPayer(byPayer, winRef.current);
     else if (lastSearch) runSearch(lastSearch, winRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -481,17 +484,25 @@ export function QualifyMobileApp({
   // Change D on the drill: the LOC lens filters the open sheet's claims too (one lens, everywhere).
   const sheetClaims = facilityCases === null ? null : filterClaimsByLoc(facilityCases, locFilter);
 
-  // KPI tiles: scoped to the resolved payer once a subject resolves; book-wide on the clean landing.
-  // HOTFIX 2026-07-27 (thin-slice suppression): the payer-scoped KPI tiles rest on a median of 2
-  // distinct patients per payer (prod @90d: 63.7% of payers < 3 patients) — the SAME thin-slice
-  // regime as the ranking, but these tiles carry NO distinct-patient count to gate on (that count
-  // lives in buildBookKpisQuery, frozen this hotfix). So they FAIL SAFE to book-wide until Phase 2
-  // wires a patient count into the KPI builder — flip SCOPED_TILES_ENABLED to true then. The
-  // refreshScopedKpis fetch is left intact (harmless) so re-enabling is a one-line change.
-  const SCOPED_TILES_ENABLED = false;
+  // KPI tiles: scoped to the resolved PAYER once a subject resolves; book-wide on the clean landing.
+  // Phase 2 (Design B): the hotfix's fail-safe is LIFTED — scoped tiles are restored, now that the KPI
+  // builder returns a distinct-patient count, and the tile display is SAMPLE-GATED below (a <3-patient
+  // slice renders no confident %, matching the ranking + desktop). Employer/funding still never scope
+  // these tiles (that's why refreshScopedKpis passes { payers } only, no market).
   const kpiScopePayer = snapshot?.resolved?.payerName ?? null;
-  const tilesScoped = SCOPED_TILES_ENABLED && searched && kpiScopePayer !== null && scopedKpis !== null;
+  const tilesScoped = searched && kpiScopePayer !== null && scopedKpis !== null;
   const shownKpis = tilesScoped ? scopedKpis : kpis;
+  // SAMPLE GATE (Design B parity with desktop): tier the tiles by the slice's distinct-patient count.
+  // Only once shownKpis has loaded (null → keep the '—' skeleton, never a false "insufficient").
+  const tileTier = shownKpis ? ratingSampleTier(shownKpis.distinctPatients) : 'full';
+  const tileInsufficient = tileTier === 'insufficient';
+  const tilePatients = shownKpis?.distinctPatients ?? 0;
+  const tileTierNote =
+    tileTier === 'insufficient'
+      ? ` · insufficient data (${tilePatients} patient${tilePatients === 1 ? '' : 's'})`
+      : tileTier === 'thin'
+        ? ` · thin sample (${tilePatients} patient${tilePatients === 1 ? '' : 's'})`
+        : '';
 
   function renderBody(): ReactNode {
     if (!searched) {
@@ -771,8 +782,9 @@ export function QualifyMobileApp({
       />
 
       {/* Compact KPI strip — book-wide on the clean landing, re-scoped to the resolved payer once a
-          subject resolves (mirrors desktop). The LOC lens never re-scopes these; the caption below
-          always states what the numbers are (payer vs book-wide) so they can't be misread. */}
+          subject resolves (mirrors desktop). SAMPLE-GATED (Design B): a <3-patient slice renders no
+          confident % ("insufficient data"); 3-9 shows the % with a thin-sample caption. The LOC lens
+          never re-scopes these. */}
       <div style={{ display: 'flex', gap: 8, padding: '12px 16px 2px' }}>
         {(
           [
@@ -781,9 +793,9 @@ export function QualifyMobileApp({
             { key: 'paidBilled', label: 'paid / billed', v: shownKpis?.pctPaidOfBilled ?? null, color: RATING_HEX.warn, bg: '#FBF1DE' },
           ] as const
         ).map((t) => (
-          <div key={t.key} style={{ flex: 1, borderRadius: 12, border: `1px solid ${QUALIFY_PALETTE.line}`, padding: '9px 11px', background: t.bg }}>
-            <div className="ths-num" style={{ fontSize: 20, fontWeight: 600, color: t.color }}>
-              {t.v === null ? '—' : `${Math.round(t.v)}%`}
+          <div key={t.key} style={{ flex: 1, borderRadius: 12, border: `1px solid ${QUALIFY_PALETTE.line}`, padding: '9px 11px', background: tileInsufficient ? '#F1F3F2' : t.bg }}>
+            <div className="ths-num" style={{ fontSize: 20, fontWeight: 600, color: tileInsufficient ? INK400 : t.color }}>
+              {tileInsufficient || t.v === null ? '—' : `${Math.round(t.v)}%`}
             </div>
             <div style={{ fontSize: 9.5, color: QUALIFY_PALETTE.ink600, fontWeight: 600, marginTop: 2 }}>{t.label}</div>
           </div>
@@ -791,6 +803,7 @@ export function QualifyMobileApp({
       </div>
       <div style={{ padding: '4px 16px 0', fontSize: 10, fontWeight: 600, color: INK400, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {tilesScoped ? kpiScopePayer : 'book-wide'}
+        {tileTierNote}
         {locFilter !== null ? ' · not LOC-scoped' : ''}
       </div>
 
