@@ -171,7 +171,9 @@ export function QualifyMobileApp({
       setScopedKpis(null);
       return;
     }
-    getQualifyBookKpis(w, marketRef.current, payer)
+    // Design B (Phase 2): tiles scope on payer (+ facility) ONLY — no market. Full mobile
+    // reconciliation lands in Phase 2 Commit B; this keeps the signature correct meanwhile.
+    getQualifyBookKpis(w, { payers: [payer] })
       .then((k) => {
         if (sseq !== scopedKpiSeq.current) return; // superseded by a newer scoped fetch
         setScopedKpis(k);

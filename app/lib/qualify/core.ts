@@ -52,6 +52,7 @@ import {
   type QualifyClaimRow,
   type QualifyMoverRow,
   type QualifyBookKpisRow,
+  type QualifyOrientationScope,
   type QualifyFacilityTrendRow,
   type QualifyMatchSummaryRow,
 } from '../../../src/collections/qualifyQuery';
@@ -135,15 +136,9 @@ export interface QualifyDeps {
     entityIds: string[],
     market?: VobMarketFilter,
   ) => Promise<QualifyMoverRow[]>;
-  /** Redesign overview: KPI percentages (dollars summed + dropped in SQL). One row. `payer` null =
-   *  book-wide; a payer label narrows the SAME ratios to the resolved subject (non-PHI). */
-  loadBookKpis: (
-    from: string,
-    to: string,
-    entityIds: string[],
-    market?: VobMarketFilter,
-    payer?: string | null,
-  ) => Promise<QualifyBookKpisRow | null>;
+  /** Phase 2 overview: KPI percentages + distinct-patient count (dollars summed + dropped in SQL). One
+   *  row. Scope is payer + facility + window (QualifyOrientationScope) — NO employer/funding (Design B). */
+  loadBookKpis: (scope: QualifyOrientationScope, entityIds: string[]) => Promise<QualifyBookKpisRow | null>;
   /** Redesign overview: per-facility rating trend rows (ratings only). payer null = book-wide. */
   loadFacilityTrends: (
     from: string,
@@ -986,22 +981,43 @@ function assembleTrend(r: QualifyFacilityTrendRow): QualifyFacilityTrend {
  * parity with movers — no per-fetch PHI audit). Returns percentages only; the SQL never projects the
  * dollar sums, so this is admissions_seat-safe by construction.
  */
+/** Bound a client-supplied scope list (payer/facility labels): trim, drop blanks, cap count + element
+ *  length; null when nothing survives (= no restriction). Every value is a bound param downstream. */
+const QUALIFY_SCOPE_SET_MAX = 100;
+const QUALIFY_SCOPE_ELEM_MAX = 200;
+function normalizeScopeList(xs?: string[] | null): string[] | null {
+  if (!Array.isArray(xs)) return null;
+  const out = xs
+    .filter((x): x is string => typeof x === 'string')
+    .map((x) => x.trim())
+    .filter((x) => x.length > 0 && x.length <= QUALIFY_SCOPE_ELEM_MAX)
+    .slice(0, QUALIFY_SCOPE_SET_MAX);
+  return out.length > 0 ? out : null;
+}
+
 export async function getQualifyBookKpisCore(
   deps: QualifyDeps,
   window: QualifyWindow,
-  market?: QualifyMarket,
-  payer?: string | null,
+  scope?: { payers?: string[] | null; facilities?: string[] | null },
 ): Promise<QualifyBookKpis> {
   const gate = await deps.requirePrincipal();
   if (!gate.ok) throw new Error(gate.error);
   if (!isQualifyWindow(window)) throw new Error('Invalid window.');
   const { from, to } = qualifyWindowBounds(window, deps.now());
-  const scopePayer = typeof payer === 'string' && payer.trim() !== '' ? payer.trim() : null;
-  const row = await deps.loadBookKpis(from, to, gate.entityIds, market, scopePayer);
+  // DESIGN B (Phase 2): payer + facility scope ONLY. QualifyOrientationScope structurally excludes
+  // employer/funding, so they can never reach the tile aggregate — the asymmetry is enforced by the type.
+  const orientation: QualifyOrientationScope = {
+    from,
+    to,
+    primary_payers: normalizeScopeList(scope?.payers),
+    facility: normalizeScopeList(scope?.facilities),
+  };
+  const row = await deps.loadBookKpis(orientation, gate.entityIds);
   return {
     pctAllowedOfBilled: row?.pct_allowed_of_billed ?? null,
     pctPaidOfAllowed: row?.pct_paid_of_allowed ?? null,
     pctPaidOfBilled: row?.pct_paid_of_billed ?? null,
+    distinctPatients: row?.distinct_patients ?? 0,
     windowStart: from,
     windowEnd: to,
     tenantScope: QUALIFY_TENANT_SCOPE,
@@ -1043,7 +1059,9 @@ export async function getQualifyOverviewCore(
   opts?: { resolve?: boolean },
 ): Promise<QualifyOverview> {
   const [kpis, trends] = await Promise.all([
-    getQualifyBookKpisCore(deps, window, market),
+    // On-load strip is book-wide: no orientation scope (Design B — employer/funding never scope tiles;
+    // the compose-driven refetch supplies payer + facility via getQualifyBookKpis directly).
+    getQualifyBookKpisCore(deps, window),
     getQualifyFacilityTrendsCore(deps, window, { payer: null, market }),
   ]);
   const empty: QualifyOverview = {

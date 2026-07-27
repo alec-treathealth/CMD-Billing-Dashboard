@@ -391,7 +391,7 @@ test('qualify builders: NO market filter emits NO VOB clause (unchanged behavior
 
 // ── Redesign overview aggregates: buildBookKpisQuery + buildFacilityTrendQuery ────────────────────
 test('overview aggregates: cross-tenant + read the rollup + route through assertEntityScope', () => {
-  const kpis = buildBookKpisQuery('2026-06-17', '2026-07-17', BOTH);
+  const kpis = buildBookKpisQuery({ from: '2026-06-17', to: '2026-07-17' }, BOTH);
   const trend = buildFacilityTrendQuery('2026-06-17', '2026-07-17', '2026-05-18', BOTH);
   for (const { sql, params } of [kpis, trend]) {
     assert.match(sql, /business_entity_id = any\(\$1::uuid\[\]\)/, 'tenant predicate present');
@@ -399,30 +399,52 @@ test('overview aggregates: cross-tenant + read the rollup + route through assert
     assert.ok(sql.includes('collections.cmd_explorer_charge_rollup'), 'reads the rollup');
     assert.ok(!sql.includes('cmd_explorer_rows'), 'never reads raw posting-grain rows');
   }
-  assert.throws(() => buildBookKpisQuery('2026-01-01', '2026-02-01', []), /entityIds required/);
+  assert.throws(() => buildBookKpisQuery({ from: '2026-01-01', to: '2026-02-01' }, []), /entityIds required/);
   assert.throws(() => buildFacilityTrendQuery('2026-01-01', '2026-02-01', '2025-12-01', []), /entityIds required/);
 });
 
-test('book KPIs: three guarded ratio columns, e2 excluded from the reliable-allowed evidence, NO raw dollars projected', () => {
-  const { sql } = buildBookKpisQuery('2026-06-17', '2026-07-17', BOTH);
+test('book KPIs: three guarded ratios + distinct-patient count, e2 excluded, NO raw dollars projected', () => {
+  const { sql } = buildBookKpisQuery({ from: '2026-06-17', to: '2026-07-17' }, BOTH);
   assert.ok(sql.includes('as pct_allowed_of_billed'), 'allowed/billed ratio');
   assert.ok(sql.includes('as pct_paid_of_allowed'), 'paid/allowed ratio (collection yield)');
   assert.ok(sql.includes('as pct_paid_of_billed'), 'paid/billed ratio (net realization)');
+  assert.match(sql, /count\(distinct member_id_bidx\)::int as distinct_patients/, 'tile sample gate: distinct-patient count');
   assert.ok(sql.includes("allowed_tier <> 'e2'"), 'reliable-allowed excludes tier e2 (ruling Q2a — parity with the rating)');
   assert.ok(sql.includes('case when'), 'every ratio is denominator-guarded (null, never a coerced 0%)');
-  // Only the three pct columns are PROJECTED (dollars are summed as denominators, never returned).
+  // Only the three ratios + the count are PROJECTED (dollars are summed as denominators, never returned).
   const selectList = sql.slice(sql.indexOf('select ') + 7, sql.indexOf(' from '));
-  assert.equal((selectList.match(/ as /g) ?? []).length, 3, 'exactly three output columns');
+  assert.equal((selectList.match(/ as /g) ?? []).length, 4, 'exactly four output columns (3 ratios + patient count)');
   assert.ok(!/as .*(billed_amount|charge_total|insurance_payments) /.test(sql), 'no raw dollar column leaves SQL');
+  // member_id_bidx is COUNTED, never projected as a column (no PHI leaves).
+  assert.ok(!sql.replace(/count\(distinct member_id_bidx\)/g, '').includes('member_id_bidx'), 'bidx counted, never projected');
 });
 
-test('book KPIs: book-wide by default; an optional payer scope narrows the SAME ratios to one payer', () => {
-  const wide = buildBookKpisQuery('2026-06-17', '2026-07-17', BOTH);
+// DESIGN B ASYMMETRY (Phase 2): payer + facility scope the tiles; employer/funding NEVER do. This is
+// the load-bearing regression — if a future edit lets market into the tiles predicate, it fails LOUDLY.
+test('book KPIs (Design B): book-wide by default; payer[]/facility[] scope; employer/funding structurally ABSENT', () => {
+  const wide = buildBookKpisQuery({ from: '2026-06-17', to: '2026-07-17' }, BOTH);
   assert.ok(!wide.sql.includes('primary_payer ='), 'book-wide by default — no payer filter');
-  const scoped = buildBookKpisQuery('2026-06-17', '2026-07-17', BOTH, {}, 'CIGNA');
-  assert.ok(scoped.sql.includes('and primary_payer = $'), 'payer scope adds the bound filter');
-  assert.ok(scoped.params.includes('CIGNA'), 'the payer value is a bound param');
-  assert.ok(scoped.sql.includes('as pct_allowed_of_billed'), 'still projects the same three ratios');
+  assert.ok(!wide.sql.includes('facility ='), 'book-wide by default — no facility filter');
+
+  const scoped = buildBookKpisQuery(
+    { from: '2026-06-17', to: '2026-07-17', primary_payers: ['CIGNA', 'AETNA'], facility: ['405 recovery'] },
+    BOTH,
+  );
+  assert.match(scoped.sql, /primary_payer = any\(\$\d+::text\[\]\)/, 'payer[] scope via the shared set-membership predicate');
+  assert.match(scoped.sql, /facility = any\(\$\d+::text\[\]\)/, 'facility[] scope via the shared set-membership predicate');
+  // Set-membership binds the whole array as ONE param (…= any($n::text[])), so the values live inside
+  // array params — assert they're bound, not string-concatenated into the SQL.
+  const paramArrays = scoped.params.filter((p): p is string[] => Array.isArray(p));
+  assert.ok(paramArrays.some((a) => a.includes('CIGNA')), 'payer values are bound (array param)');
+  assert.ok(paramArrays.some((a) => a.includes('405 recovery')), 'facility values are bound (array param)');
+  assert.ok(!scoped.sql.includes('CIGNA') && !scoped.sql.includes('405 recovery'), 'no scope value is concatenated into the SQL');
+  assert.ok(scoped.sql.includes('as pct_allowed_of_billed'), 'still projects the same ratios');
+
+  // THE GUARD: the tiles predicate can NEVER carry a VOB employer/funding semi-join. QualifyOrientationScope
+  // has no employer/funding fields, so even a caller that tries is a type error — and the SQL proves it.
+  assert.ok(!scoped.sql.includes('vob.member_benefits_latest'), 'no VOB market semi-join in the tiles predicate');
+  assert.ok(!scoped.sql.includes('employer_norm'), 'employer never scopes the tiles (Design B)');
+  assert.ok(!scoped.sql.includes('funding ='), 'funding never scopes the tiles (Design B)');
 });
 
 test('facility trend: rating-delta order, dominant-payer by allowed $, e2-excluded ratings, bucket math, book-wide by default', () => {

@@ -457,43 +457,54 @@ export interface QualifyBookKpisRow {
   pct_allowed_of_billed: number | null; // reliable allowed (ex-e2) ÷ billed — the contract rate
   pct_paid_of_allowed: number | null; // insurance_payments ÷ reliable allowed — collection yield on allowed
   pct_paid_of_billed: number | null; // insurance_payments ÷ billed — net realization
+  distinct_patients: number; // count(distinct member_id_bidx) in the slice — the tile sample-gate unit (Phase 2); COUNTED, never projected
 }
 
 /**
- * Book-wide KPI percentages for the resolved window, cross-tenant. Derived IN-PLANE from the charge
- * rollup (insurance_payments = the per-charge max payer payment; allowed_reliable ex-e2; charge_amount)
- * — NO external collections join. Each ratio is guarded (>0 denominator) and rounds to 2 dp; a
- * collapsed denominator yields NULL (never a coerced 0%). Optional VOB market narrow (semi-join). One
- * row out.
+ * DESIGN B ORIENTATION SCOPE (Phase 2, ruling 2026-07-27) — the ONLY shape the KPI-tile aggregate
+ * accepts. It is a `Pick` of `CmdExplorerFilter` restricted to **payer + facility + window** and
+ * STRUCTURALLY cannot carry `employers`/`funding` (or cpt/phi/q). That is the whole enforcement of the
+ * Design B asymmetry: employer + funding narrow the match count + cases list (per-row facts, truthful
+ * at any n), but they must NEVER scope the tiles/ratings — employer shreds a slice to ~1 distinct
+ * patient (measured), and a rating on 1 patient is noise. Widening this to a full `CmdExplorerFilter`
+ * is a loud, deliberate type change AND trips the employer-absent regression test in qualifyQuery.test.ts.
+ */
+export type QualifyOrientationScope = Pick<CmdExplorerFilter, 'facility' | 'primary_payers' | 'from' | 'to'>;
+
+/**
+ * KPI percentages for the composed orientation slice (payer + facility + window), cross-tenant. Derived
+ * IN-PLANE from the charge rollup (insurance_payments = the per-charge max payer payment; allowed_reliable
+ * ex-e2; charge_amount) — NO external collections join. Each ratio is guarded (>0 denominator) and rounds
+ * to 2 dp; a collapsed denominator yields NULL (never a coerced 0%). One row out.
+ *
+ * SCOPE is a `QualifyOrientationScope` (payer + facility + window only) fed through the SHARED
+ * `cmdExplorerBaseConds` — the same predicate the grid/summary/cases use, so it emits the cross-tenant
+ * `business_entity_id = any($ent::uuid[])` FIRST and handles facility[]/primary_payers[]/window
+ * identically. Because the scope TYPE has no employer/funding fields, `cmdExplorerBaseConds` never emits
+ * a VOB market semi-join here — Design B asymmetry enforced by construction, not by call-site discipline.
+ * Returns the three ratios PLUS `distinct_patients` (the tile sample gate); dollars are summed inside
+ * SQL and NEVER projected, so an admissions_seat consumes this unchanged.
  */
 export function buildBookKpisQuery(
-  from: string,
-  to: string,
+  scope: QualifyOrientationScope,
   entityIds: string[],
-  market: VobMarketFilter = {},
-  payer: string | null = null,
 ): { sql: string; params: unknown[] } {
   const ent = assertEntityScope(entityIds, 'buildBookKpisQuery');
   const { params, add } = paramList();
-  const e = add(ent);
-  const f = add(from);
-  const t = add(to);
-  // Optional payer scope: the SAME three ratios narrowed to one resolved payer (so the tiles + the
-  // resolved-band stat can reflect the resolved subject, not just the book). Non-PHI (payer label,
-  // like buildResolvePayerQuery); a null payer keeps the book-wide behavior byte-for-byte.
-  const payerCond = payer ? ` and primary_payer = ${add(payer)}` : '';
-  const mj = buildVobMarketSemiJoin(market, add);
+  // Shared predicate (cross-tenant array first). `scope` cannot express employer/funding, so no market
+  // semi-join is emitted — the Design B asymmetry is structural. Do NOT swap this for a full filter.
+  const where = cmdExplorerBaseConds(scope, ent, add).join(' and ');
   const reliable = "sum(allowed_reliable) filter (where allowed_tier <> 'e2')";
   const sql =
     'select ' +
     `case when sum(charge_amount) > 0 then round((${reliable}) / sum(charge_amount) * 100, 2)::float8 end as pct_allowed_of_billed, ` +
     `case when (${reliable}) > 0 then round(sum(insurance_payments) / (${reliable}) * 100, 2)::float8 end as pct_paid_of_allowed, ` +
-    'case when sum(charge_amount) > 0 then round(sum(insurance_payments) / sum(charge_amount) * 100, 2)::float8 end as pct_paid_of_billed ' +
+    'case when sum(charge_amount) > 0 then round(sum(insurance_payments) / sum(charge_amount) * 100, 2)::float8 end as pct_paid_of_billed, ' +
+    // Tile sample gate (Phase 2): distinct patients in the slice. member_id_bidx is COUNTED, never
+    // projected (no PHI leaves) — mirrors the ranking + movers discipline.
+    'count(distinct member_id_bidx)::int as distinct_patients ' +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
-    `where business_entity_id = any(${e}::uuid[]) ` +
-    `and payment_received >= ${f}::date and payment_received < ${t}::date` +
-    payerCond +
-    (mj ? ` and ${mj}` : '');
+    `where ${where}`;
   return { sql, params };
 }
 

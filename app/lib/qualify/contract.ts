@@ -460,6 +460,11 @@ export interface QualifyBookKpis {
   pctPaidOfAllowed: number | null;
   /** insurance_payments ÷ billed, 0-100 — net realization. */
   pctPaidOfBilled: number | null;
+  /** Distinct patients (count(distinct member_id_bidx)) in the composed slice — the TILE sample gate
+   *  (Phase 2, sampleGate.ts). Non-dollar, non-PHI count (token never leaves the server) → admissions_seat
+   *  safe. Book-wide it's large (full confidence); under a payer/facility slice it can fall below the
+   *  tier thresholds, at which point the tiles suppress the confident % (see BookKpiTiles). */
+  distinctPatients: number;
   windowStart: string;
   windowEnd: string;
   tenantScope: typeof QUALIFY_TENANT_SCOPE;
