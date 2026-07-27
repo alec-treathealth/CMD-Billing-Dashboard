@@ -73,27 +73,38 @@ export function useMarquee<T extends HTMLElement>(resetKey: unknown, itemsPerSet
     el.style.scrollBehavior = 'auto'; // our rAF owns the position — never smooth-animate against it
 
     let raf = 0;
-    let last = 0; // 0 = re-seed dt on the next frame (prevents a jump after any pause)
+    let last = 0; // 0 = re-seed dt + position on the next frame (prevents a jump after any pause)
     let paused = false;
     let inside = false; // pointer over the strip → hold paused (no auto-resume while reading)
     let resumeTimer: ReturnType<typeof setTimeout> | null = null;
 
-    // Seamless loop distance = where the first DUPLICATE card starts (== one set + its trailing gap).
-    const loopWidth = () => {
+    // Position is tracked in JS and only WRITTEN to el.scrollLeft each frame — never read back — so the
+    // hot loop forces ZERO synchronous layouts per frame (reading scrollLeft/offsetLeft every frame was a
+    // double reflow that stuttered once the cards grew heavier). We re-sync `pos` from the real scrollLeft
+    // only on resume (last === 0), so a manual hand-scroll while paused is respected.
+    let pos = el.scrollLeft;
+    // Seamless loop distance = where the first DUPLICATE card starts (one set + its trailing gap). Cards
+    // are fixed-width, so this is effectively static per set — measure once (lazily until non-zero, since
+    // the dup may not be laid out on the very first frame); itemsPerSet changes re-run this whole effect.
+    let loopW = 0;
+    const measureLoop = () => {
       const dup = el.children[itemsPerSet] as HTMLElement | undefined;
-      return dup ? dup.offsetLeft : el.scrollWidth / 2;
+      loopW = dup ? dup.offsetLeft : el.scrollWidth / 2;
     };
 
     const step = (ts: number) => {
       if (!paused) {
-        if (last === 0) last = ts;
+        if (last === 0) {
+          last = ts;
+          pos = el.scrollLeft; // one read, only on (re)start — sync to wherever the user left it
+        }
         const dt = ts - last;
         last = ts;
-        const lw = loopWidth();
-        if (lw > 0) {
-          let next = el.scrollLeft + (SPEED_PX_PER_SEC * dt) / 1000;
-          if (next >= lw) next -= lw; // wrap seamlessly back into the first set
-          el.scrollLeft = next;
+        if (loopW <= 0) measureLoop(); // measure until we have a real distance, then never read again
+        if (loopW > 0) {
+          pos += (SPEED_PX_PER_SEC * dt) / 1000;
+          if (pos >= loopW) pos -= loopW; // wrap seamlessly back into the first set
+          el.scrollLeft = pos; // write-only
         }
       } else {
         last = 0;

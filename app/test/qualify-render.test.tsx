@@ -367,7 +367,9 @@ test('heating-up cards — defined "n" (claim lines), Δpts ticker (+/−), NEW 
   assert.ok(html.includes('-4.5 pts'), 'negative delta ticker');
   assert.ok(html.includes('NEW'), 'a facility with no prior-window evidence reads NEW');
   assert.ok(html.includes('q-spark'), 'the sparkline draw-in svg renders');
-  assert.ok(html.includes('BXR') && html.includes('Indigo'), 'entity labels render');
+  // Entity labels (BXR/Indigo) were intentionally removed from the card footer — they cluttered the
+  // ticker and added nothing next to the location; the footer now shows only "City, ST".
+  assert.ok(!html.includes('BXR') && !html.includes('Indigo'), 'entity label no longer clutters the card');
   assert.ok(html.includes('aria-pressed'), 'cards are toggleable buttons (hybrid click)');
 });
 
