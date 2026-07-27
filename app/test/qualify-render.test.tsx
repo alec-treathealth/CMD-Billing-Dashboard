@@ -16,17 +16,16 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { FacilityPanel } from '../components/qualify/facility-panel';
 import { CasesTable } from '../components/qualify/cases-table';
 import { CohortSheet } from '../components/qualify/cohort-sheet';
-import { BookKpiTiles, EvidenceGauge, HeatingUpCards, MatchCountReadout } from '../components/qualify/overview';
+import { BookKpiTiles, EvidenceGauge, HeatingUpCards } from '../components/qualify/overview';
 import { Spark } from '../components/qualify/spark';
 import { buildFacilityBucketMap } from '../components/qualify/colors';
 import { qualifyRating, ratingBucket, RATING_LEGEND } from '../lib/qualify/rating';
-import { trailingWindow, QUALIFY_TENANT_SCOPE } from '../lib/qualify/contract';
+import { trailingWindow } from '../lib/qualify/contract';
 import type {
   QualifyFacility,
   QualifyClaim,
   QualifyBookKpis,
   QualifyFacilityTrend,
-  QualifyMatchSummary,
   QualifyPhi,
 } from '../lib/qualify/contract';
 
@@ -455,41 +454,10 @@ test('heating-up cards — Design B scope LABEL: "across the book" by default, t
   assert.ok(!scoped.includes('across the book'), 'not both scopes at once');
 });
 
-// ── Compose-bar match count: admissions_seat sees count + percentages, ZERO dollars — in the MARKUP,
-//    not just the wire (the known past failure mode: a stripped value that still renders). ─────────────
-const SEAT_SUMMARY: QualifyMatchSummary = {
-  count: 4242,
-  distinctPatients: 41,
-  totalCharge: null,
-  totalAllowed: null,
-  totalPaid: null,
-  totalBalance: null,
-  pctAllowedOfBilled: 67,
-  pctPaidOfBilled: 33,
-  viewerHasAmountsCapability: false,
-  tenantScope: QUALIFY_TENANT_SCOPE,
-};
-const AMOUNTS_SUMMARY: QualifyMatchSummary = {
-  ...SEAT_SUMMARY,
-  totalCharge: 987654,
-  totalAllowed: 654321,
-  totalPaid: 321098,
-  totalBalance: 111111,
-  viewerHasAmountsCapability: true,
-};
-
-test('match count — admissions_seat markup: count + percentages present, NO dollar sign anywhere', () => {
-  const html = renderToStaticMarkup(<MatchCountReadout summary={SEAT_SUMMARY} loading={false} hasAmounts={false} />);
-  assert.ok(html.includes('4,242'), 'the count renders');
-  assert.ok(html.includes('67%') && html.includes('33%'), 'both non-dollar percentages render');
-  assert.ok(!html.includes('$'), 'a dollar sign must NEVER appear for an admissions_seat (DOM omission, not CSS-hidden)');
-});
-
-test('match count — amounts-capable markup DOES carry the dollar total', () => {
-  const html = renderToStaticMarkup(<MatchCountReadout summary={AMOUNTS_SUMMARY} loading={false} hasAmounts={true} />);
-  assert.ok(html.includes('$'), 'the billed dollar total renders for an amounts-capable viewer');
-  assert.ok(html.includes('4,242'), 'the count still renders');
-});
+// NB: the compose-bar match count + its NON-DOLLAR percentages now render inline in qualify-tab's dark
+// readout bar / context line (MatchCountReadout was deleted). The amounts-strip guard for that data
+// lives at the authoritative CORE boundary — test/qualifyCore.test.ts ("admissions_seat gets count +
+// percentages with ZERO dollars (wire-level)" + the sentinel-dollar wire scan) — not here.
 
 // ── EVIDENCE GAUGE (readout) — fill-state only, ZERO tier hues ───────────────────────────────────────
 // The dark variant paints a SOLID pip as `bg-teal200` and a HOLLOW pip as `border-dashed`, so counting

@@ -906,6 +906,13 @@ export function QualifyTab({
               <PhiInput label="Member ID" value={memberId} onChange={setMemberId} placeholder="e.g. W2740…" />
               <PhiInput label="Alpha prefix" value={alphaPrefix} onChange={setAlphaPrefix} placeholder="3 letters" />
               <PhiInput label="Group #" value={groupNumber} onChange={setGroupNumber} placeholder="Group" />
+              {/* FOURTH field (Client name) is INTENTIONALLY ABSENT here — this three-field state is not
+                  an oversight. It is DATA-GATED behind QUALIFY_CLIENT_NAME_ENABLED (Part 2, deferred):
+                  as of 2026-07-27 the cmd_explorer_charge_rollup matview has NO patient_name_bidx column
+                  and coverage is ~0.07%, so wiring name search today would 500 / silently miss ~99.9% of
+                  patients. Do NOT "complete" this by enabling the flag against the current matview — that
+                  needs the (recommended build-alongside-and-swap) rebuild + the owner-run backfill FIRST.
+                  See docs/veris-data-notes.md → "0067 ops analysis" and contract.ts QUALIFY_CLIENT_NAME_ENABLED. */}
               {QUALIFY_CLIENT_NAME_ENABLED ? (
                 <PhiInput label="Client name" value={clientName} onChange={setClientName} placeholder="Last, First" />
               ) : null}

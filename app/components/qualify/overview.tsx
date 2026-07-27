@@ -24,7 +24,7 @@ import { ChevronRight } from 'lucide-react';
 import { ratingBucket } from '../../lib/qualify/rating';
 import { ratingSampleTier, ratingEvidencePips } from '../../lib/qualify/sampleGate';
 import { qualifyWindowLabel, serializeQualifyWindow } from '../../lib/qualify/contract';
-import type { QualifyBookKpis, QualifyFacilityTrend, QualifyMatchSummary, QualifyWindow } from '../../lib/qualify/contract';
+import type { QualifyBookKpis, QualifyFacilityTrend, QualifyWindow } from '../../lib/qualify/contract';
 import { RATING_HEX, staggerDelayMs } from './tokens';
 import { Spark } from './spark';
 import { useMarquee } from './useMarquee';
@@ -366,50 +366,5 @@ export function HeatingUpSkeleton() {
         ))}
       </div>
     </section>
-  );
-}
-
-/**
- * The compose-bar LIVE MATCH COUNT readout — "N charge lines match" + the two NON-DOLLAR percentages
- * (allowed÷billed · paid÷billed). Dollar totals appear ONLY for a viewer with the amounts capability;
- * an admissions_seat sees the count + percentages with ZERO dollars (the server already stripped them —
- * `summary.totalCharge` is null — and this gates on `hasAmounts` too, defense-in-depth). A null ratio
- * renders "—" (a collapsed denominator is never a fabricated 0%). Presentational leaf (hermetic).
- */
-export function MatchCountReadout({
-  summary,
-  loading,
-  hasAmounts,
-}: {
-  summary: QualifyMatchSummary | null;
-  loading: boolean;
-  hasAmounts: boolean;
-}) {
-  const pct = (v: number | null) => (v === null ? '—' : `${Math.round(v)}%`);
-  const money = (v: number | null) =>
-    v === null ? '—' : v.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
-  return (
-    <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 rounded-2xl border border-line bg-card px-5 py-3.5 shadow-ths-sm">
-      <span className="font-mono text-[26px] font-semibold leading-none tabular-nums text-ink900">
-        {loading && !summary ? '…' : (summary?.count ?? 0).toLocaleString('en-US')}
-      </span>
-      <span className="text-[13px] font-semibold text-ink600">charge lines match</span>
-      {summary ? (
-        <span className="ml-1 flex flex-wrap items-baseline gap-x-4 text-[12px] text-ink400">
-          <span>
-            allowed <b className="font-mono text-ink600">{pct(summary.pctAllowedOfBilled)}</b> of billed
-          </span>
-          <span>
-            paid <b className="font-mono text-ink600">{pct(summary.pctPaidOfBilled)}</b> of billed
-          </span>
-          {hasAmounts ? (
-            <span>
-              billed <b className="font-mono text-ink600">{money(summary.totalCharge)}</b>
-            </span>
-          ) : null}
-        </span>
-      ) : null}
-      {loading ? <span className="text-[11px] uppercase tracking-wide text-teal600">updating…</span> : null}
-    </div>
   );
 }
