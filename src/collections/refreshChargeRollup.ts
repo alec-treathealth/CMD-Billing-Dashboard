@@ -85,6 +85,22 @@ export async function refreshChargeRollup(deps: RefreshChargeRollupDeps): Promis
     // 2. The refresh itself — SECURITY DEFINER (owner-privileged), CONCURRENTLY (~58s, non-blocking).
     await deps.db.query('select collections.refresh_cmd_explorer_charge_rollup()');
 
+    // 2b. Post-refresh maintenance (BEST-EFFORT). REFRESH ... CONCURRENTLY updates rows in place, which
+    //     clears the visibility map's all-visible bits on changed pages and drifts planner stats. Left
+    //     alone, the book-wide KPI index-only scan (mig 0068) reverts to heap fetches and the planner
+    //     can flip off it. VACUUM re-sets the VM (it skips unchanged pages, so it is fast right after a
+    //     refresh) and ANALYZE refreshes the stats. Its OWN autocommit statement (VACUUM cannot run
+    //     inside a transaction), as cmd_rollup_writer (GRANT MAINTAIN, mig 0069). NON-FATAL: a vacuum
+    //     failure must NOT fail an otherwise-successful refresh — it is logged, the run still closes ok.
+    try {
+      await deps.db.query('vacuum (analyze) collections.cmd_explorer_charge_rollup');
+    } catch (vacErr) {
+      console.error(
+        'refresh-charge-rollup: post-refresh VACUUM (ANALYZE) failed (refresh still succeeded):',
+        vacErr instanceof Error ? vacErr.message : String(vacErr),
+      );
+    }
+
     // 3. Freshness proof: newest payment_received now visible in the rollup (non-PHI date).
     const freshRes = await deps.db.query<{ max_pay: string | null }>(
       `select max(payment_received)::text as max_pay from collections.cmd_explorer_charge_rollup`,
