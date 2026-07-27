@@ -1,9 +1,11 @@
 'use client';
 
 /**
- * Qualify — no-data VOB modal. Opens when a real search resolved to nothing (snapshot.resolved ===
- * null after a >= 3-char query). Echoes the searched identifier (non-PHI: the user's own input) and
- * offers to start a verification of benefits.
+ * Qualify — no-billing-history VOB modal. Opens ONLY when the compose bar narrows to exactly one payer,
+ * no PHI narrow is active, AND the unwindowed cross-tenant probe proves that payer has NEVER been billed
+ * (getQualifyPayerEverBilled → 0). `query` carries the payer LABEL (non-PHI). Every OTHER empty result
+ * (multi-payer, over-narrow combos, or a payer billed in a different window) is a plain empty state, not
+ * this modal.
  *
  * "Start VOB" ships INERT with a marked TODO seam — no endpoint is wired yet (Alec confirmed:
  * inert-with-seam). Do not silently point it anywhere.
@@ -43,10 +45,10 @@ export function VobModal({
           </div>
           <div>
             <h3 id="qualify-vob-title" className="font-display text-lg font-semibold">
-              No matching cases
+              No billing history
             </h3>
             <p className="text-xs text-muted-foreground">
-              Nothing resolved for this identifier in the selected window.
+              We have never billed this payer, in any window — a genuinely new payer, not a windowing gap.
             </p>
           </div>
         </div>
@@ -54,7 +56,7 @@ export function VobModal({
         <div className="px-6 pb-1 pl-[78px] text-[13.5px] text-muted-foreground">
           <div className="my-2.5 rounded-lg border bg-background px-3 py-2.5 font-mono text-[13px] text-ink900">
             <span className="mb-0.5 block font-sans text-[10px] font-semibold uppercase tracking-wider text-ink400">
-              Searched
+              Payer
             </span>
             {query}
           </div>

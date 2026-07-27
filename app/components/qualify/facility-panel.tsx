@@ -13,11 +13,12 @@
  * both values are non-null — the elements are OMITTED from the DOM otherwise (the server has already
  * nulled them; this is belt-and-suspenders, never CSS-hiding a shipped value).
  *
- * SELECTION: each facility row is a button that drives the per-facility cases drill (ruling Q-4 /
- * Prompt-4 finding #4 — "last 15 claims" is scoped to the SELECTED facility, not the payer overall).
- * `selectedKey` (matched against `facilityKey`, the raw rollup join text) marks the active row;
- * `onSelect(facilityKey)` re-scopes the cases panel. Both are optional so the render test can mount
- * the panel hermetically with no handler; the container always supplies them.
+ * SELECTION (compose bar): each facility row toggles that facility in the COMPOSE FILTER. Selecting a
+ * row HIGHLIGHTS it (adds it to the filter set at right); it NEVER filters/intersects this ranking. The
+ * ranking stays PAYER-WIDE ACROSS THE BOOK on purpose — restricting it to facilities the user already
+ * picked could only show them what they already chose. `selectedKeys` (matched against `facilityKey`,
+ * the raw rollup join text) marks EVERY selected row pressed (several can be pressed at once);
+ * `onToggle(facilityKey)` adds/removes it. Both optional so the render test can mount hermetically.
  *
  * Pure/presentational (no hooks) so it renders hermetically under renderToStaticMarkup. Imports are
  * relative + type-only where possible so the render test runs under tsx without `@/` resolution.
@@ -47,35 +48,29 @@ function CoverageSegment({ conf, count, total }: { conf: QualifyConfidence; coun
   );
 }
 
+const EMPTY_KEYS: ReadonlySet<string> = new Set();
+
 export function FacilityPanel({
   facilities,
   hasAmounts,
   heatOn,
-  selectedKey = null,
-  onSelect,
-  pinned = false,
-  onClearPin,
-  scopeNote = null,
+  selectedKeys = EMPTY_KEYS,
+  onToggle,
+  payerLabel = null,
 }: {
   facilities: readonly QualifyFacility[];
   hasAmounts: boolean;
   heatOn: boolean;
-  /** facilityKey of the row currently driving the cases panel (null before any select). */
-  selectedKey?: string | null;
-  /** Re-scope the cases panel to this facility (its raw rollup facilityKey). Optional for tests. */
-  onSelect?: (facilityKey: string) => void;
-  /** When set (an identifier search), a NON-PHI note that this list is the SEARCHED identifier's
-   *  footprint — only facilities that billed it in-window — not the payer's whole book. Shown in list
-   *  mode (not when a single facility is pinned). Null on the payer-wide path. */
-  scopeNote?: string | null;
-  /** Change E — FACILITY-SCOPED mode: render ONLY the selected facility as a pinned summary card
-   *  (name, rating, coverage) with the "× All facilities" clear pill — never a fully-collapsed panel. */
-  pinned?: boolean;
-  /** Clear the Change-E facility scope → back to the full ranked list (payer-wide). */
-  onClearPin?: () => void;
+  /** facilityKeys currently in the compose filter — EVERY matching row reads pressed (several at once).
+   *  Selecting HIGHLIGHTS; it never filters this ranking (which stays payer-wide across the book). */
+  selectedKeys?: ReadonlySet<string>;
+  /** Toggle this facility in the compose filter (add/remove its raw rollup facilityKey). Optional for tests. */
+  onToggle?: (facilityKey: string) => void;
+  /** The single resolved payer this ranking is for — named in the header next to "payer-wide across the
+   *  book" so the ranking is never mistaken for the filtered match count above it. */
+  payerLabel?: string | null;
 }) {
-  // Pinned mode shows ONLY the scoped facility; the full ranked list otherwise.
-  const visible = pinned && selectedKey !== null ? facilities.filter((f) => f.facilityKey === selectedKey) : facilities;
+  const visible = facilities; // ALWAYS the full payer-wide ranking — selection highlights, never filters
   return (
     <section className="rounded-2xl border bg-card shadow-ths-sm">
       {/* The panel sizes to its OWN content and is NOT co-height with the "Recent cases" panel: the grid
@@ -85,30 +80,17 @@ export function FacilityPanel({
       <div className="contents">
       <div className="flex items-center justify-between gap-2 px-4 pb-2.5 pt-4">
         <h2 className="font-head text-base font-semibold tracking-tight">Facilities</h2>
-        {pinned && selectedKey !== null ? (
-          /* Change E clear-scope affordance: visible pill, ≥44px hit target, focus ring, labeled. */
-          <button
-            type="button"
-            onClick={onClearPin}
-            aria-label="Clear facility filter, show all facilities"
-            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-full border border-teal200 bg-teal50 px-3.5 text-[12px] font-semibold text-teal700 transition-colors hover:bg-teal200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/50"
-          >
-            <span aria-hidden>×</span> All facilities
-          </button>
-        ) : (
-          <span className="text-xs font-semibold text-muted-foreground">
-            by reimbursement rating
-            {facilities.length > 0 ? ` · ${facilities.length} ${facilities.length === 1 ? 'facility' : 'facilities'}` : ''}
-          </span>
-        )}
+        <span className="text-xs font-semibold text-muted-foreground">
+          by reimbursement rating
+          {facilities.length > 0 ? ` · ${facilities.length} ${facilities.length === 1 ? 'facility' : 'facilities'}` : ''}
+        </span>
       </div>
-      {pinned && selectedKey !== null ? (
-        <p className="px-4 pb-1 text-[11px] text-muted-foreground">
-          Scoped to this facility — cases at right are its recent claims only.
-        </p>
-      ) : scopeNote ? (
-        <p className="px-4 pb-1 text-[11px] font-medium text-teal700">{scopeNote}</p>
-      ) : null}
+      {/* This ranking is PAYER-WIDE across the whole book — NOT the filtered match count above. Tapping a
+          row adds that facility to the filter (highlight), it never narrows this list. */}
+      <p className="px-4 pb-1 text-[11px] text-muted-foreground">
+        {payerLabel ? <b className="font-semibold text-ink600">{payerLabel}</b> : 'This payer'} · payer-wide across the
+        book · tap a facility to add it to your filter
+      </p>
 
       {/* ALL facilities render (server returns the full set, no LIMIT); the cap is gone. */}
       <div className={['px-2.5 pb-3', heatOn ? 'q-heat' : ''].join(' ')}>
@@ -121,12 +103,12 @@ export function FacilityPanel({
             const bucket = ratingBucket(f.rating);
             const pct = f.pctAllowedOfBilled;
             const loc = [f.city, f.state].filter(Boolean).join(', ');
-            const selected = selectedKey !== null && f.facilityKey === selectedKey;
+            const selected = selectedKeys.has(f.facilityKey);
             return (
               <button
                 key={f.rank}
                 type="button"
-                onClick={() => onSelect?.(f.facilityKey)}
+                onClick={() => onToggle?.(f.facilityKey)}
                 aria-pressed={selected}
                 className={[
                   'q-fac',

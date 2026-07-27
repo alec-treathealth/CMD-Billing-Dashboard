@@ -43,6 +43,8 @@ import { Briefcase, Building2, Eye, EyeOff, Landmark, RotateCcw, ShieldCheck } f
 import {
   getQualifyMatchSummary,
   getQualifyComposedCases,
+  getQualifySnapshotByPayer,
+  getQualifyPayerEverBilled,
   getQualifyPatientCohort,
   getQualifyOverview,
   loadQualifyFacilityOptions,
@@ -53,6 +55,7 @@ import {
 import {
   QUALIFY_CLIENT_NAME_ENABLED,
   QUALIFY_REVEAL_BATCH_CAP,
+  qualifyWindowLabel,
   trailingWindow,
   type QualifyBookKpis,
   type QualifyClaim,
@@ -61,6 +64,7 @@ import {
   type QualifyMatchSummary,
   type QualifyPhi,
   type QualifyPatientCohort,
+  type QualifySnapshot,
   type QualifyWindow,
 } from '@/lib/qualify/contract';
 import type { CmdEmployerOption } from '@/lib/actions';
@@ -70,8 +74,10 @@ import { filterFacilitiesByLoc, filterClaimsByLoc, type QualifyLocFilter } from 
 import type { RatingBucket } from '@/lib/qualify/rating';
 import { CasesTable } from '@/components/qualify/cases-table';
 import { CohortSheet } from '@/components/qualify/cohort-sheet';
+import { FacilityPanel } from '@/components/qualify/facility-panel';
 import { BookKpiTiles, HeatingUpCards, HeatingUpSkeleton, MatchCountReadout } from '@/components/qualify/overview';
 import { WindowControl } from '@/components/qualify/window-control';
+import { VobModal } from '@/components/qualify/vob-modal';
 import { QualifyLandingHero } from '@/components/qualify/landing-hero';
 
 /** Debounce for the composed count + cases fetch (covers PHI-input keystrokes; picker clicks too). */
@@ -123,6 +129,18 @@ export function QualifyTab({
   //    derived from the facility selection (deriving it would freeze the marquee whenever someone picks a
   //    facility in the picker or restores a filtered URL — a pause with no visible cause). ─────────────
   const [tickerPinned, setTickerPinned] = useState(false);
+
+  // ── FACILITY PANEL — the payer-wide ranking, fetched ONLY when EXACTLY ONE payer is selected (decision
+  //    4). Market is deliberately NOT passed ({} ) so employer/funding never narrow the ranking (the
+  //    rating is volume-dampened; a market slice would collapse every facility toward the prior and turn
+  //    the ranking to noise). Highlights the selected facilities; never intersects. ────────────────────
+  const [panelSnapshot, setPanelSnapshot] = useState<QualifySnapshot | null>(null);
+  const panelGenRef = useRef(0);
+
+  // ── VOB PATH — the payer we've PROVEN is never-billed (unwindowed probe); null = no VOB. `vobDismissed`
+  //    remembers the payer the user closed the modal for, so it doesn't re-pop until the payer changes. ─
+  const [vobPayer, setVobPayer] = useState<string | null>(null);
+  const vobDismissedRef = useRef<string | null>(null);
 
   // ── PICKER OPTION VOCABULARIES ────────────────────────────────────────────────────────────────────
   const [facilityOptions, setFacilityOptions] = useState<PickerOption[]>([]);
@@ -268,11 +286,29 @@ export function QualifyTab({
           if (composeGenRef.current !== gen) return;
           setSummary(s);
           setSummaryLoading(false);
+          // ── VOB PATH — fire the "never billed, ever" probe ONLY when the composed count is 0 AND
+          //    exactly one payer is selected AND NO PHI narrow is active. A name/member/prefix/group
+          //    zero must read as "no match", never "never billed" — so PHI presence hard-blocks the
+          //    probe. Every other empty (multi-payer, over-narrow combo, wrong window) falls through to
+          //    the plain empty state. The probe itself is unwindowed + cross-tenant (server-side). ─────
+          const onePayer = payerSelection.length === 1;
+          const noPhi =
+            memberId.trim() === '' && alphaPrefix.trim() === '' && groupNumber.trim() === '' && clientName.trim() === '';
+          const payer = payerSelection[0];
+          if (s.count === 0 && onePayer && noPhi && payer && vobDismissedRef.current !== payer) {
+            void getQualifyPayerEverBilled(payer).then((r) => {
+              if (composeGenRef.current !== gen) return;
+              setVobPayer(r.ok && r.count === 0 ? payer : null);
+            });
+          } else {
+            setVobPayer(null);
+          }
         })
         .catch(() => {
           if (composeGenRef.current !== gen) return;
           setSummary(null);
           setSummaryLoading(false);
+          setVobPayer(null);
         });
       getQualifyComposedCases(composeInput)
         .then((r) => {
@@ -295,6 +331,27 @@ export function QualifyTab({
     // composeInput is recomposed each render; depend on its inputs (stable state identities) instead.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [facilitySelection, payerSelection, employerSelection, fundingSelection, memberId, alphaPrefix, groupNumber, clientName, windowSel, hasAnyFilter, resetReveal]);
+
+  // ── FACILITY PANEL fetch: the payer-wide ranking for the ONE selected payer (decision 4). 0 or 2+
+  //    payers ⇒ no fetch, panel hidden behind a note. Market is NOT passed — the ranking stays market-
+  //    blind so a thin employer/funding slice can't collapse the volume-dampened rating into noise. ─────
+  useEffect(() => {
+    if (payerSelection.length !== 1) {
+      setPanelSnapshot(null);
+      return;
+    }
+    const payer = payerSelection[0]!;
+    const pgen = ++panelGenRef.current;
+    getQualifySnapshotByPayer({ payer, window: windowSel })
+      .then((snap) => {
+        if (panelGenRef.current !== pgen) return;
+        setPanelSnapshot(snap);
+      })
+      .catch(() => {
+        if (panelGenRef.current !== pgen) return;
+        setPanelSnapshot(null);
+      });
+  }, [payerSelection, windowSel]);
 
   // ── URL STATE: persist the NON-PHI selection arrays + window + LOC (replace, never push). PHI is
   //    excluded by construction — buildQualifySearchParams has no field for it. ─────────────────────────
@@ -529,14 +586,36 @@ export function QualifyTab({
     setComposedCases([]);
     setCapped(false);
     setCasesError(false);
+    setPanelSnapshot(null);
+    setVobPayer(null);
+    vobDismissedRef.current = null;
     resetReveal();
   }, [resetReveal]);
 
-  // ── Change D: the ONE LOC lens (client-side view filter) — scopes the ticker + the case rows. ─────
+  // ── Change D: the ONE LOC lens (client-side view filter) — scopes the ticker, the facility ranking,
+  //    and the case rows. ─────────────────────────────────────────────────────────────────────────────
   const visibleTrends = useMemo(() => filterFacilitiesByLoc(trends, locFilter), [trends, locFilter]);
   const visibleCases = useMemo(() => filterClaimsByLoc(composedCases, locFilter), [composedCases, locFilter]);
+  const panelFacilities = useMemo(
+    () => filterFacilitiesByLoc(panelSnapshot?.facilities ?? [], locFilter),
+    [panelSnapshot, locFilter],
+  );
 
   const summaryHasAmounts = summary?.viewerHasAmountsCapability ?? hasAmounts;
+  // ── Lighter CONTEXT LINE (replaces the removed hero band): window · payer(s) · facility count · total
+  //    charges. Total charges is null for admissions_seat (server-stripped) so it's simply omitted. ─────
+  const singlePayer = payerSelection.length === 1 ? payerSelection[0]! : null;
+  const payerSummary =
+    payerSelection.length === 0
+      ? 'all payers'
+      : payerSelection.length === 1
+        ? payerSelection[0]!
+        : `${payerSelection.length} payers`;
+  const contextFacilityCount = singlePayer ? panelSnapshot?.facilities.length ?? null : null;
+  const billedText =
+    summaryHasAmounts && summary?.totalCharge != null
+      ? summary.totalCharge.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })
+      : null;
 
   // SR-only announcement (the compose count updates silently otherwise).
   const liveMessage = !hasAnyFilter
@@ -714,41 +793,95 @@ export function QualifyTab({
       {/* ── BOOK KPI TILES (book-wide; unchanged in Phase 1) ── */}
       <BookKpiTiles kpis={kpis} locActive={locFilter !== null} />
 
-      {/* ── LIVE MATCH COUNT + COMPOSED CASES ── */}
+      {/* ── CONTEXT LINE + LIVE MATCH COUNT + FACILITY RANKING + COMPOSED CASES ── */}
       {hasAnyFilter ? (
         <>
+          {/* Lighter context line (the old resolved-payer hero band is gone). Non-dollar for admissions_seat. */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-2xl border border-line bg-surface px-4 py-2.5 text-[12px] text-ink600">
+            <span className="font-semibold text-ink900">{qualifyWindowLabel(windowSel)}</span>
+            <span aria-hidden className="text-ink300">·</span>
+            <span>{payerSummary}</span>
+            {contextFacilityCount !== null ? (
+              <>
+                <span aria-hidden className="text-ink300">·</span>
+                <span>
+                  {contextFacilityCount.toLocaleString('en-US')} {contextFacilityCount === 1 ? 'facility' : 'facilities'}
+                </span>
+              </>
+            ) : null}
+            {billedText ? (
+              <>
+                <span aria-hidden className="text-ink300">·</span>
+                <span>{billedText} billed</span>
+              </>
+            ) : null}
+            <span aria-hidden className="text-ink300">·</span>
+            <span className="text-[#7fae9f]">BXR + Indigo</span>
+          </div>
+
           <MatchCountReadout summary={summary} loading={summaryLoading} hasAmounts={summaryHasAmounts} />
-          {casesError ? (
-            <div className="rounded-2xl border border-dashed bg-card p-10 text-center text-sm text-status-danger">
-              Qualify is unavailable right now. Please try again.
+
+          <div className="grid grid-cols-1 items-start gap-4 min-[960px]:grid-cols-[380px_1fr]">
+            {/* LEFT: the payer-wide facility ranking (exactly one payer), else a one-line note. */}
+            <div>
+              {singlePayer ? (
+                panelSnapshot ? (
+                  <FacilityPanel
+                    facilities={panelFacilities}
+                    hasAmounts={hasAmounts}
+                    heatOn
+                    selectedKeys={activeFacilityKeys}
+                    onToggle={toggleFacility}
+                    payerLabel={singlePayer}
+                  />
+                ) : (
+                  <div className="rounded-2xl border bg-card p-6 text-center text-sm text-muted-foreground shadow-ths-sm">
+                    Loading facility ranking…
+                  </div>
+                )
+              ) : (
+                <div className="rounded-2xl border border-dashed bg-card p-6 text-center text-[13px] text-muted-foreground">
+                  Select a single payer to see its facility ranking across the book.
+                </div>
+              )}
             </div>
-          ) : summary && summary.count === 0 && !casesLoading ? (
-            // Plain empty state. The VOB single-payer "never billed" probe lands in the next commit; until
-            // then EVERY empty result reads as a widen-your-filters nudge (window-widen hinted per ruling).
-            <div className="rounded-2xl border border-dashed bg-card p-10 text-center text-sm text-muted-foreground">
-              No charge lines match these filters.
-              <div className="mt-1 text-[13px] text-ink400">Try removing a filter, or choose a longer window.</div>
+
+            {/* RIGHT: the composed claim rows (or the plain empty state). */}
+            <div>
+              {casesError ? (
+                <div className="rounded-2xl border border-dashed bg-card p-10 text-center text-sm text-status-danger">
+                  Qualify is unavailable right now. Please try again.
+                </div>
+              ) : summary && summary.count === 0 && !casesLoading ? (
+                // Plain empty state. When the single-payer "never billed" probe confirms, the VobModal
+                // overlays this; otherwise this widen-your-filters nudge (window-widen hinted) stands.
+                <div className="rounded-2xl border border-dashed bg-card p-10 text-center text-sm text-muted-foreground">
+                  No charge lines match these filters.
+                  <div className="mt-1 text-[13px] text-ink400">Try removing a filter, or choose a longer window.</div>
+                </div>
+              ) : (
+                <div aria-busy={casesLoading} className={['transition-opacity', casesLoading ? 'opacity-60' : ''].join(' ')}>
+                  <CasesTable
+                    claims={visibleCases}
+                    hasAmounts={hasAmounts}
+                    heatOn
+                    facilityBuckets={NO_FACILITY_BUCKETS}
+                    facilityLabel={null}
+                    canReveal={canRevealPhi}
+                    revealed={revealed}
+                    revealingKeys={revealingKeys}
+                    revealError={revealError}
+                    onRevealPatient={revealPatient}
+                    onHideIdentifiers={resetReveal}
+                    onViewCohort={viewCohort}
+                    capped={capped}
+                    globalRevealOn={globalReveal && canGlobalReveal}
+                  />
+                </div>
+              )}
             </div>
-          ) : (
-            <div aria-busy={casesLoading} className={['transition-opacity', casesLoading ? 'opacity-60' : ''].join(' ')}>
-              <CasesTable
-                claims={visibleCases}
-                hasAmounts={hasAmounts}
-                heatOn
-                facilityBuckets={NO_FACILITY_BUCKETS}
-                facilityLabel={null}
-                canReveal={canRevealPhi}
-                revealed={revealed}
-                revealingKeys={revealingKeys}
-                revealError={revealError}
-                onRevealPatient={revealPatient}
-                onHideIdentifiers={resetReveal}
-                onViewCohort={viewCohort}
-                capped={capped}
-                globalRevealOn={globalReveal && canGlobalReveal}
-              />
-            </div>
-          )}
+          </div>
+
           <CohortSheet
             data={cohortSheet?.data ?? null}
             loading={cohortSheet?.loading ?? false}
@@ -761,6 +894,16 @@ export function QualifyTab({
         // composes a query. Purely decorative + guidance — no data, no PHI.
         <QualifyLandingHero />
       )}
+
+      {/* VOB — opens ONLY when the single-payer unwindowed probe proved the payer is never-billed. */}
+      <VobModal
+        open={vobPayer !== null}
+        query={vobPayer ?? ''}
+        onClose={() => {
+          vobDismissedRef.current = vobPayer;
+          setVobPayer(null);
+        }}
+      />
     </main>
   );
 }

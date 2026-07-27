@@ -771,6 +771,25 @@ export async function getQualifyMatchSummaryCore(
 }
 
 /**
+ * VOB single-payer probe (Phase 1): is this payer billed ANYWHERE, EVER? Reuses the shared summary
+ * `totals` with a WINDOWLESS `{primary_payers:[payer]}` filter (no from/to ⇒ cmdExplorerBaseConds emits
+ * no window predicate) — the SAME deliberate unwindowed semantics as buildResolvePayerQuery: a zero
+ * count means "never billed, ever", NOT "not in the selected window". The caller (the compose bar) fires
+ * this ONLY when the composed count is 0 AND exactly one payer is selected AND no PHI narrow is active,
+ * so a name-only or window-only empty can never be mistaken for "never billed". NON-PHI (payer label
+ * only), gate-only, NO audit — parity with the live count. Returns the charge-line count (0 ⇒ VOB path).
+ */
+export async function getQualifyPayerEverBilledCore(deps: QualifyDeps, payer: string): Promise<number> {
+  const gate = await deps.requirePrincipal();
+  if (!gate.ok) throw new Error(gate.error);
+  const p = typeof payer === 'string' ? payer.trim().slice(0, 200) : '';
+  if (p === '') throw new Error('A payer is required for the VOB probe.'); // fail LOUD, never a false "never billed"
+  const filter: CmdExplorerFilter = { primary_payers: [p] }; // NO from/to ⇒ unwindowed, cross-tenant
+  const row = await deps.loadMatchSummary(filter, gate.entityIds);
+  return row?.total_count ?? 0;
+}
+
+/**
  * Phase 3 — the patient-group "View cohort" slide-over: the member's LIFETIME alpha-prefix cohort
  * (payer-behavior peer group). Flow: gate → audit (field-level, non-PHI) → re-derive the prefix
  * token SERVER-SIDE from one claim id (never from the client) → load the floor-gated context →
