@@ -77,7 +77,7 @@ import type { RatingBucket } from '@/lib/qualify/rating';
 import { CasesTable } from '@/components/qualify/cases-table';
 import { CohortSheet } from '@/components/qualify/cohort-sheet';
 import { FacilityPanel } from '@/components/qualify/facility-panel';
-import { BookKpiTiles, HeatingUpCards, HeatingUpSkeleton } from '@/components/qualify/overview';
+import { BookKpiTiles, EvidenceGauge, HeatingUpCards, HeatingUpSkeleton } from '@/components/qualify/overview';
 import { WindowControl } from '@/components/qualify/window-control';
 import { VobModal } from '@/components/qualify/vob-modal';
 import { QualifyLandingHero } from '@/components/qualify/landing-hero';
@@ -929,7 +929,9 @@ export function QualifyTab({
             ) : null}
           </div>
 
-          {/* Evidence gauge slot — Part 1b inserts the composed distinct-client pips here. */}
+          {/* EVIDENCE GAUGE — distinct clients behind the composed match (same population as the count),
+              fill-state only. Shown once a match exists; the count block already carries "—" at landing. */}
+          {hasAnyFilter && summary ? <EvidenceGauge distinctPatients={summary.distinctPatients} /> : null}
 
           <div className="flex flex-wrap items-center gap-2.5 min-[560px]:ml-auto">
             <WindowControl window={windowSel} currentYear={new Date().getFullYear()} onChange={onWindow} tone="dark" />

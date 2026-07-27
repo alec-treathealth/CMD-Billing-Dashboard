@@ -131,6 +131,7 @@ import {
   buildMoversQuery,
   buildBookKpisQuery,
   buildFacilityTrendQuery,
+  buildQualifyMatchClientCountQuery,
 } from '../../src/collections/qualifyQuery.js';
 import type { QualifyPatientCohortRaw } from './qualify/core';
 import type {
@@ -143,6 +144,7 @@ import type {
   QualifyOrientationScope,
   QualifyFacilityTrendRow,
   QualifyMatchSummaryRow,
+  QualifyMatchClientCountRow,
 } from '../../src/collections/qualifyQuery.js';
 import type {
   ClaimFilter,
@@ -2153,6 +2155,16 @@ export async function loadQualifyMatchSummary(
   const { totals } = buildCmdSearchSummaryQueries(filter, entityIds);
   const { rows } = await readerExecutor().query<QualifyMatchSummaryRow>(totals.sql, totals.params);
   return rows[0] ?? null;
+}
+
+/** Compose-bar EVIDENCE count: distinct clients backing the composed match (readout gauge). Qualify-OWNED
+ *  count over the SAME cmdExplorerBaseConds predicate as the match count (buildQualifyMatchClientCountQuery
+ *  — does NOT touch Collections' summary builder). member_id_bidx is COUNTED, never projected. Cross-tenant
+ *  via entityIds. 0 on empty (never null → the gauge always has a number). */
+export async function loadQualifyMatchClientCount(filter: CmdExplorerFilter, entityIds: string[]): Promise<number> {
+  const { sql, params } = buildQualifyMatchClientCountQuery(filter, entityIds);
+  const { rows } = await readerExecutor().query<QualifyMatchClientCountRow>(sql, params);
+  return rows[0]?.distinct_patients ?? 0;
 }
 
 /** Top PAYER movers by distinct-patient delta across two adjacent windows, cross-tenant. */

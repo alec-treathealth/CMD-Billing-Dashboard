@@ -212,6 +212,10 @@ export interface QualifyComposeInput {
  */
 export interface QualifyMatchSummary {
   count: number;
+  /** Distinct CLIENTS backing the composed match — count(distinct member_id_bidx) over the SAME
+   *  predicate as `count`. NON-DOLLAR (admissions_seat sees it). Drives the readout EVIDENCE gauge via
+   *  ratingSampleTier / ratingEvidencePips (sampleGate.ts): more distinct clients ⇒ more solid pips. */
+  distinctPatients: number;
   totalCharge: number | null;
   totalAllowed: number | null;
   totalPaid: number | null;
@@ -268,12 +272,26 @@ export interface QualifyFacilityCases {
 }
 
 /**
- * Change C (client-name search) is DATA-GATED. It reads patient_name_bidx off the charge rollup, which
- * requires BOTH: (1) migration 0067 applied (adds the column to the matview — a ~90s rebuild/outage),
- * and (2) the historical name backfill run as the table OWNER (postgres; claims_reader has no UPDATE
- * policy in prod). Until both complete, the Client Name tab is HIDDEN so a name search can never hit a
- * missing column (500) or an always-empty result (confusing). The full code path ships behind this
- * flag; flip to true after the ops runbook (docs/qualify-redesign-cc-prompt.md / handoff) completes.
+ * Change C (client-name search) is DATA-GATED and STAYS OFF this session — Part 2 (name activation) is
+ * DEFERRED pending ops. Verified 2026-07-27 (live DB): NEITHER prerequisite is met — the
+ * cmd_explorer_charge_rollup matview has NO patient_name_bidx column (migration 0067 NOT applied), and
+ * patient_name_bidx coverage on cmd_explorer_rows is ~0.07% (backfill effectively not run). Flipping the
+ * flag today would 500 every name search (missing column) and, once fixed, silently miss ~99.9% of
+ * patients. It requires BOTH: (1) patient_name_bidx present on the matview, and (2) the historical name
+ * backfill run as the table OWNER (postgres; claims_reader has no UPDATE policy).
+ *
+ * ⚠ Do NOT apply migration 0067 as-authored — it is STALE (drops 0068's covering index + 0069's MAINTAIN
+ * grant). The full ops analysis + the RECOMMENDED build-alongside-and-swap approach (sub-second lock, no
+ * outage — supersedes the old "~90s rebuild/outage" plan) live in docs/veris-data-notes.md → "0067 ops
+ * analysis". Until Part 2 lands, the Client Name field + its divergence note are HIDDEN in the compose
+ * console (3 PHI fields, not 4).
+ *
+ * The full code path ships behind this flag. Flipping it ALSO requires making the live count name-aware —
+ * and now the readout EVIDENCE count too: BOTH QualifyMatchSummary.count (Collections' shared summary
+ * builder) AND QualifyMatchSummary.distinctPatients (buildQualifyMatchClientCountQuery) run the
+ * cmdExplorerBaseConds predicate, which cannot express patient_name_bidx, so both must gain the name AND
+ * in lockstep or the count + gauge would over-count a name-narrowed search. See docs/veris-data-notes.md
+ * → "Qualify Client-Name (Change C) activation".
  */
 export const QUALIFY_CLIENT_NAME_ENABLED = false;
 

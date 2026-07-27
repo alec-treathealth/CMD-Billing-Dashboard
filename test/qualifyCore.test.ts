@@ -116,6 +116,7 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
       return CASE_ROWS;
     },
     loadMatchSummary: async () => ({ total_count: 0, total_charge: 0, total_allowed: 0, total_paid: 0, total_balance: 0 }),
+    loadMatchClientCount: async () => 0,
     // Phase 3 fakes: a known claim id resolves to a prefix token; the cohort clears the floor.
     loadClaimPrefixToken: async (claimId) => (claimId === 123 ? 'PREFIX_TOKEN_X' : null),
     loadPatientCohort: async () => ({
@@ -238,15 +239,18 @@ test('snapshot: a non-admissions_seat payload DOES carry the dollar values', asy
 // ── COMPOSE BAR (Phase 1): match count + composed cases — amounts choke point + audit discipline ─────
 // Distinctive sentinel sums so a wire scan proves the strip.
 const SC = 333333.33, SA = 222222.22, SP = 111111.11, SBAL = 12121.21;
+const SEVIDENCE = 41; // distinct-client sentinel (non-dollar) — must survive the strip for admissions_seat
 const summaryDeps = (who: () => ReturnType<typeof SUPER>, c: Cap) =>
   makeDeps(who, c, {
     loadMatchSummary: async () => ({ total_count: 4242, total_charge: SC, total_allowed: SA, total_paid: SP, total_balance: SBAL }),
+    loadMatchClientCount: async () => SEVIDENCE,
   });
 
 test('match summary: admissions_seat gets count + percentages with ZERO dollars (wire-level)', async () => {
   const c = cap();
   const s = await getQualifyMatchSummaryCore(summaryDeps(SEAT, c), { payers: ['AETNA'], window: W30 });
   assert.equal(s.count, 4242, 'count is non-dollar → always present');
+  assert.equal(s.distinctPatients, SEVIDENCE, 'distinct-client evidence count is non-dollar → present for admissions_seat');
   // Percentages are derived from the sums BEFORE the strip, so admissions_seat still gets them.
   assert.equal(s.pctAllowedOfBilled, Math.round((SA / SC) * 10000) / 100);
   assert.equal(s.pctPaidOfBilled, Math.round((SP / SC) * 10000) / 100);

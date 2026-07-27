@@ -22,7 +22,7 @@
 import { memo } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { ratingBucket } from '../../lib/qualify/rating';
-import { ratingSampleTier } from '../../lib/qualify/sampleGate';
+import { ratingSampleTier, ratingEvidencePips } from '../../lib/qualify/sampleGate';
 import { qualifyWindowLabel, serializeQualifyWindow } from '../../lib/qualify/contract';
 import type { QualifyBookKpis, QualifyFacilityTrend, QualifyMatchSummary, QualifyWindow } from '../../lib/qualify/contract';
 import { RATING_HEX, staggerDelayMs } from './tokens';
@@ -112,6 +112,65 @@ export function BookKpiTiles({
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * EVIDENCE GAUGE — four ascending pips that FILL as the composed match's distinct-CLIENT count climbs
+ * (ratingEvidencePips, sampleGate.ts), beside a plain-text count. ONE COLOUR: evidence is how many pips
+ * are SOLID vs HOLLOW (dashed edge), NEVER a hue — so it reads in greyscale, for colour-blind viewers,
+ * and on the dark bar. `variant`: 'dark' = the teal900 readout bar (teal200 solids on a divided cell);
+ * 'ink' = a light surface (teal700 solids). The <div> is role=img with the count + verdict as its label;
+ * the pips are decorative (aria-hidden) since the same facts are in the adjacent text. Pure/hermetic.
+ */
+const PIP_HEIGHT = ['h-[7px]', 'h-[10px]', 'h-[13.5px]', 'h-[17px]'] as const;
+
+export function EvidenceGauge({
+  distinctPatients,
+  variant = 'dark',
+}: {
+  distinctPatients: number;
+  variant?: 'dark' | 'ink';
+}) {
+  const n = Number.isFinite(distinctPatients) && distinctPatients > 0 ? Math.trunc(distinctPatients) : 0;
+  const pips = ratingEvidencePips(n);
+  const tier = ratingSampleTier(n);
+  const verdict = n === 0 ? 'no matches yet' : tier === 'full' ? 'enough to rate' : tier === 'thin' ? 'directional only' : 'not enough to rate';
+  const ink = variant === 'ink';
+  return (
+    <div
+      className={['flex items-center gap-2.5', ink ? '' : 'border-l border-white/15 pl-4'].join(' ')}
+      role="img"
+      aria-label={`${n.toLocaleString('en-US')} distinct client${n === 1 ? '' : 's'} — ${verdict}`}
+    >
+      <div aria-hidden className="flex h-[17px] items-end gap-[3px]">
+        {[0, 1, 2, 3].map((i) => {
+          const on = i < pips;
+          return (
+            <span
+              key={i}
+              className={[
+                'w-[5px] rounded-[1.5px] border',
+                PIP_HEIGHT[i],
+                on
+                  ? ink
+                    ? 'border-teal700 bg-teal700'
+                    : 'border-teal200 bg-teal200'
+                  : ink
+                    ? 'border-dashed border-ink400/40 bg-transparent'
+                    : 'border-dashed border-white/35 bg-transparent',
+              ].join(' ')}
+            />
+          );
+        })}
+      </div>
+      <span className={['text-[11.5px] leading-tight', ink ? 'text-ink400' : 'text-white/70'].join(' ')}>
+        <b className={['block text-[12px] font-semibold', ink ? 'text-ink900' : 'text-white'].join(' ')}>
+          {n.toLocaleString('en-US')} client{n === 1 ? '' : 's'}
+        </b>
+        {verdict}
+      </span>
     </div>
   );
 }
