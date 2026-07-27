@@ -2188,12 +2188,11 @@ export async function loadQualifyFacilityTrends(
   to: string,
   priorFrom: string,
   entityIds: string[],
-  opts: { payer?: string | null; market?: VobMarketFilter } = {},
+  opts: { payer?: string | null } = {},
 ): Promise<QualifyFacilityTrendRow[]> {
-  const q = buildFacilityTrendQuery(from, to, priorFrom, entityIds, {
-    payer: opts.payer ?? null,
-    market: opts.market ?? {},
-  });
+  // Phase 2 (Design B): payer-only scope (exactly-one-payer) — NO market; the ticker is never
+  // employer/funding-narrowed. The builder also enforces the both-window distinct-patient delta gate.
+  const q = buildFacilityTrendQuery(from, to, priorFrom, entityIds, { payer: opts.payer ?? null });
   const { rows } = await readerExecutor().query<QualifyFacilityTrendRow>(q.sql, q.params);
   return rows;
 }

@@ -13,6 +13,7 @@ import {
   QUALIFY_MOVERS_MIN_PATIENTS,
   QUALIFY_MOVERS_MIN_CHARGES,
   QUALIFY_TREND_BUCKETS,
+  QUALIFY_TREND_MIN_PATIENTS,
 } from '../src/collections/qualifyQuery.js';
 import {
   buildCmdSearchSummaryQueries,
@@ -457,10 +458,29 @@ test('facility trend: rating-delta order, dominant-payer by allowed $, e2-exclud
   assert.ok(!sql.includes('primary_payer = $'), 'book-wide by default — no single-payer filter');
 });
 
-test('facility trend: a payer-scoped variant adds the single-payer filter (per-facility panel sparklines)', () => {
+test('facility trend: a payer-scoped variant adds the single-payer filter (the payer-scoped ticker)', () => {
   const { sql, params } = buildFacilityTrendQuery('2026-06-17', '2026-07-17', '2026-05-18', BOTH, { payer: 'AETNA' });
   assert.ok(sql.includes('and primary_payer = $'), 'payer-scoped adds the filter');
   assert.ok(params.includes('AETNA'), 'the payer value is a bound param');
+});
+
+// PHASE 2 (Design B): the ticker gets a both-window distinct-patient delta gate, is NEVER
+// employer/funding-scoped, and projects ratings only (no dollars, no PHI).
+test('facility trend (Design B): both-window >=5-patient delta gate; NO market; patient count NOT projected; no dollars', () => {
+  const { sql, params } = buildFacilityTrendQuery('2026-06-17', '2026-07-17', '2026-05-18', BOTH);
+  assert.match(sql, /count\(distinct member_id_bidx\) filter \(where is_cur\)::int as cur_patients/, 'current-window distinct patients');
+  assert.match(sql, /count\(distinct member_id_bidx\) filter \(where not is_cur\)::int as prior_patients/, 'prior-window distinct patients');
+  assert.match(sql, /agg\.cur_patients >= \$\d+ and agg\.prior_patients >= \$\d+/, 'BOTH windows gated at >= min patients (delta not ranked on noise)');
+  assert.ok(params.includes(QUALIFY_TREND_MIN_PATIENTS), 'the min-patients floor is a bound param');
+  // Design B: no market param exists on the builder, so the ticker can never be employer/funding-scoped.
+  assert.ok(!sql.includes('vob.member_benefits_latest'), 'no VOB market semi-join in the ticker');
+  assert.ok(!sql.includes('employer_norm') && !sql.includes('funding ='), 'employer/funding never scope the ticker');
+  // member_id_bidx rides ONLY inside the internal `span` CTE (so `fac` can COUNT it) — it is never
+  // projected to the caller: `fac` selects the counts, not the token, so `agg` carries no bidx.
+  assert.ok(!sql.includes('agg.member_id_bidx'), 'the opaque token never reaches the outer projection (no PHI leaves)');
+  assert.ok(!/as member_id_bidx/.test(sql), 'bidx is never aliased into an output column');
+  // Ratings only — no raw dollar column is projected (admissions_seat safe by construction).
+  assert.ok(!/ as (billed|allowed|charge|paid|insurance_payments)\b/.test(sql), 'no raw dollar column projected');
 });
 
 test('facility trend: bucket count is bounded and defaults to QUALIFY_TREND_BUCKETS', () => {

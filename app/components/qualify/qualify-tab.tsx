@@ -47,8 +47,8 @@ import {
   getQualifyPayerEverBilled,
   getQualifyResolvePayer,
   getQualifyPatientCohort,
-  getQualifyOverview,
   getQualifyBookKpis,
+  getQualifyFacilityTrends,
   loadQualifyFacilityOptions,
   loadQualifyPayerOptions,
   loadQualifyEmployers,
@@ -226,20 +226,24 @@ export function QualifyTab({
   const bothIdentifiers = alphaPrefix.trim() !== '' && memberId.trim() !== '';
   const singleIdentifier = payerSelection.length === 0 && identifierTerm !== '' && !bothIdentifiers ? identifierTerm : null;
 
-  // ── OVERVIEW TICKER: book-wide Heating-Up trends for a window. Phase 2: this owns TRENDS only — the
-  //    KPI TILES are owned by their own payer+facility-scoped effect below (Design B). The ticker stays
-  //    book-wide-within-payer in Phase 2 Commit B; here in Commit A it remains book-wide (window-only). ─
-  const refreshOverview = useCallback((w: QualifyWindow) => {
+  // ── OVERVIEW TICKER: Heating-Up trends. Phase 2 (Design B): BOOK-WIDE-WITHIN-PAYER — payer-scoped when
+  //    EXACTLY ONE payer is selected, book-wide at 0 or 2+. Facility/employer/funding NEVER scope it
+  //    (only payer + window are inputs). Owns TRENDS only; the KPI tiles are owned by their own effect.
+  //    Also clears `initializing` on first settle (the mount effect no longer fetches the strip). ────────
+  const refreshOverview = useCallback((w: QualifyWindow, payer: string | null) => {
     const ogen = ++overviewGenRef.current;
-    getQualifyOverview(w, undefined, { resolve: false })
-      .then((ov) => {
+    getQualifyFacilityTrends(w, { payer })
+      .then((tr) => {
         if (overviewGenRef.current !== ogen) return;
-        setTrends(ov.trends);
+        setTrends(tr);
         setOverviewError(false);
       })
       .catch(() => {
         if (overviewGenRef.current !== ogen) return;
         setOverviewError(true);
+      })
+      .finally(() => {
+        if (overviewGenRef.current === ogen) setInitializing(false);
       });
   }, []);
 
@@ -264,19 +268,9 @@ export function QualifyTab({
       if (!alive || !r.ok) return;
       setPayerOptions(r.payers.map((p) => ({ value: p, display: p })));
     });
-
-    const ogen = ++overviewGenRef.current;
-    getQualifyOverview(url.window, undefined, { resolve: false })
-      .then((ov) => {
-        if (!alive || overviewGenRef.current !== ogen) return;
-        setTrends(ov.trends); // KPI tiles are filled by the payer+facility-scoped effect below
-      })
-      .catch(() => {
-        if (alive && overviewGenRef.current === ogen) setOverviewError(true);
-      })
-      .finally(() => {
-        if (alive) setInitializing(false);
-      });
+    // The overview strip (ticker + KPI tiles) is fetched by the dedicated effects below, which fire on
+    // mount with the restored selections — no strip fetch here, and `initializing` clears when the
+    // ticker fetch (refreshOverview) first settles.
     return () => {
       alive = false;
     };
@@ -306,6 +300,16 @@ export function QualifyTab({
     }, COMPOSE_DEBOUNCE_MS);
     return () => clearTimeout(t);
   }, [payerSelection, facilitySelection, windowSel]);
+
+  // ── HEATING-UP TICKER (Phase 2, Design B): refetch trends on PAYER + WINDOW only. FACILITY, employer,
+  //    and funding are NOT deps — they never scope the ticker (facility especially: keeping it out means
+  //    a facility toggle can't refetch/remount the marquee mid-scroll). Payer-scoped at exactly one payer,
+  //    book-wide at 0 or 2+. Debounced + gen-guarded (refreshOverview bumps overviewGenRef); fires on mount. ─
+  useEffect(() => {
+    const payer = payerSelection.length === 1 ? payerSelection[0]! : null;
+    const t = setTimeout(() => refreshOverview(windowSel, payer), COMPOSE_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [payerSelection, windowSel, refreshOverview]);
 
   // ── COMPOSE FETCH: the live match count + the composed claim rows, debounced + recency-guarded. No
   //    filter ⇒ clear + no fetch (the landing hero shows). ──────────────────────────────────────────────
@@ -590,14 +594,11 @@ export function QualifyTab({
     [composedCases, windowSel],
   );
 
-  // ── Window change: refetch the book-wide strip + re-run the composed reads (via the compose effect). ─
-  const onWindow = useCallback(
-    (w: QualifyWindow) => {
-      setWindowSel(w);
-      refreshOverview(w);
-    },
-    [refreshOverview],
-  );
+  // ── Window change: just set the window — the KPI-tiles, ticker, and compose effects all key on
+  //    windowSel and refetch themselves (no imperative strip refresh needed). ─────────────────────────
+  const onWindow = useCallback((w: QualifyWindow) => {
+    setWindowSel(w);
+  }, []);
 
   // ── Ticker-card click — REPLACE the whole filter set with exactly {that facility, its dominant payer}
   //    (never append: a second click must not push the payer count to 2+) and PIN the marquee. The
@@ -702,6 +703,8 @@ export function QualifyTab({
   // Design B affordance: employer/funding narrow the list, NOT the tiles — say so when they're active,
   // so a non-moving tile reads as intentional, not a bug.
   const marketNarrowActive = employerSelection.length > 0 || fundingSelection.length > 0;
+  // Ticker scope (Design B): payer-scoped at exactly one payer, book-wide otherwise.
+  const tickerScopePayer = payerSelection.length === 1 ? payerSelection[0]! : null;
   const billedText =
     summaryHasAmounts && summary?.totalCharge != null
       ? summary.totalCharge.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })
@@ -737,7 +740,7 @@ export function QualifyTab({
           <span className="text-status-danger">Couldn’t load the book overview — your filters still work.</span>
           <button
             type="button"
-            onClick={() => refreshOverview(windowSel)}
+            onClick={() => refreshOverview(windowSel, tickerScopePayer)}
             className="rounded-lg border border-line px-3 py-1 text-[13px] font-semibold text-ink900 transition-colors hover:bg-background"
           >
             Retry
@@ -745,12 +748,14 @@ export function QualifyTab({
         </div>
       ) : null}
 
-      {/* ── OVERVIEW TICKER: Facilities Heating Up — auto-scrolling, ABOVE the compose bar. Memoized +
-          book-wide: only the window control refetches it; a card click REPLACES the filter set + pins. ── */}
+      {/* ── OVERVIEW TICKER: Facilities Heating Up — auto-scrolling, ABOVE the compose bar. Phase 2
+          (Design B): book-wide-within-payer — payer-scoped at exactly one payer, book-wide otherwise;
+          facility/employer/funding never rescope it. A card click REPLACES the filter set + pins. ── */}
       {visibleTrends.length > 0 ? (
         <HeatingUpCards
           trends={visibleTrends}
           window={windowSel}
+          scopePayer={tickerScopePayer}
           activeFacilityKeys={activeFacilityKeys}
           pinned={tickerPinned}
           onOpen={openTrendCard}
