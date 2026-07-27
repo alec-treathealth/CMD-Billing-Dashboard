@@ -44,6 +44,47 @@ export class PgExecutor implements QueryExecutor {
     return { rows: res.rows as T[], rowCount: res.rowCount ?? res.rows.length };
   }
 
+  /**
+   * Run ONE parameterized query inside a transaction with a TRANSACTION-SCOPED work_mem override.
+   * Used by the Qualify facility-trend read, whose per-facility distinct-patient sort spills to disk
+   * even at the shortest window (the pooler's default work_mem is well under the sort's footprint).
+   *
+   * Leak-safety on the Supavisor transaction pooler (6543): `SET LOCAL` is reset at COMMIT/ROLLBACK by
+   * Postgres itself — atomically with the transaction ending — so the override applies to exactly the
+   * SELECT below and CANNOT leak to another query that later reuses the same pooled backend. (Only a
+   * session-level `SET`, which this deliberately is not, could leak.) BEGIN/SET/SELECT/COMMIT all run
+   * on ONE checked-out client, so they share the one backend the pooler binds for the transaction.
+   *
+   * `workMem` is a FIXED internal literal (SET cannot take a bound parameter); it is validated against a
+   * strict units pattern so a caller can never inject SQL through it. Never pass user input here.
+   */
+  async queryWithWorkMem<T = Record<string, unknown>>(
+    workMem: string,
+    sql: string,
+    params: readonly unknown[],
+  ): Promise<ExecResult<T>> {
+    if (!/^\d{1,6}(kB|MB|GB)$/.test(workMem)) {
+      throw new Error('queryWithWorkMem: invalid work_mem literal (fixed internal value only)');
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      await client.query(`set local work_mem = '${workMem}'`);
+      const res = await client.query(sql, params as unknown[]);
+      await client.query('commit');
+      return { rows: res.rows as T[], rowCount: res.rowCount ?? res.rows.length };
+    } catch (err) {
+      try {
+        await client.query('rollback');
+      } catch {
+        // the connection is being discarded on release; ignore a rollback failure
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
   async end(): Promise<void> {
     await this.pool.end();
   }
