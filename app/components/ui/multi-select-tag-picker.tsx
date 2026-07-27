@@ -32,6 +32,8 @@ export function MultiSelectTagPicker({
   loading = false,
   minChars = 0,
   displayOverride,
+  tone,
+  derivedValues,
 }: {
   label: string;
   placeholder: string;
@@ -50,7 +52,18 @@ export function MultiSelectTagPicker({
   /** value→display for selected tags whose value isn't in the CURRENT `options` (server mode: a picked
    *  employer stays labeled after the query moves on). Merged under the options-derived display map. */
   displayOverride?: Map<string, string>;
+  /** Qualify compose-console zone (Design B made visible): 'score' = payer/facility (tinted zone,
+   *  teal200 control border); 'list' = employer/funding (plain zone, line border). Both use teal chips
+   *  + teal focus. UNSET (Collections + everywhere else) = the tenant `--brand-*` styling, unchanged. */
+  tone?: 'score' | 'list';
+  /** CHIP PROVENANCE: values that were added by a Heating-Up ticker-card click rather than hand-picked.
+   *  Those chips render dashed with a small ↳ prefix — behaviourally identical (removable the same way),
+   *  only visually marked. Omitted everywhere except the Qualify console. */
+  derivedValues?: ReadonlySet<string>;
 }) {
+  // Qualify zones share teal chips + teal focus; they differ only in the RESTING control border
+  // (score = teal200, list = line). Unset tone keeps the brand-themed control (Collections parity).
+  const tealTone = tone === 'score' || tone === 'list';
   const serverDriven = typeof onQueryChange === 'function';
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
@@ -125,28 +138,53 @@ export function MultiSelectTagPicker({
         }}
         className={[
           'flex min-h-10 w-full flex-wrap items-center gap-1 rounded-lg border bg-surface px-2 py-1.5 text-sm transition-colors',
-          open ? 'border-[var(--brand-accent)] ring-2 ring-[var(--brand-accent)]/25' : 'border-line',
+          open
+            ? tealTone
+              ? 'border-teal700 ring-2 ring-teal500/25'
+              : 'border-[var(--brand-accent)] ring-2 ring-[var(--brand-accent)]/25'
+            : tone === 'score'
+              ? 'border-teal200 hover:border-teal500'
+              : tone === 'list'
+                ? 'border-line hover:border-teal500'
+                : 'border-line',
         ].join(' ')}
       >
-        {selected.map((v) => (
-          <span
-            key={v}
-            className="inline-flex max-w-[16rem] items-center gap-1 rounded-md bg-[var(--brand-soft)] py-0.5 pl-2 pr-1 text-xs font-medium text-[var(--brand-ink)]"
-          >
-            <span className="truncate">{displayOf.get(v) ?? v}</span>
-            <button
-              type="button"
-              aria-label={`Remove ${displayOf.get(v) ?? v}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                onToggle(v);
-              }}
-              className="shrink-0 rounded transition-colors hover:text-[var(--brand-accent)]"
+        {selected.map((v) => {
+          const derived = derivedValues?.has(v) ?? false;
+          return (
+            <span
+              key={v}
+              className={[
+                'inline-flex max-w-[16rem] items-center gap-1 rounded-md py-0.5 pl-2 pr-1 text-xs font-medium',
+                tealTone ? 'border-teal200 bg-teal50 text-teal700' : 'bg-[var(--brand-soft)] text-[var(--brand-ink)]',
+                // Derived (ticker-click) chips read dashed + ↳; else solid. tealTone already draws a border;
+                // default tone has none, so a derived default-tone chip picks up a line border for the dash.
+                derived ? (tealTone ? 'border border-dashed' : 'border border-dashed border-line') : tealTone ? 'border' : '',
+              ].join(' ')}
             >
-              <X className="h-3 w-3" aria-hidden />
-            </button>
-          </span>
-        ))}
+              {derived ? (
+                <span aria-hidden className="-mr-0.5 font-mono text-[10px] leading-none opacity-60">
+                  ↳
+                </span>
+              ) : null}
+              <span className="truncate">{displayOf.get(v) ?? v}</span>
+              <button
+                type="button"
+                aria-label={`Remove ${displayOf.get(v) ?? v}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggle(v);
+                }}
+                className={[
+                  'shrink-0 rounded transition-colors',
+                  tealTone ? 'text-teal700 hover:text-teal900' : 'hover:text-[var(--brand-accent)]',
+                ].join(' ')}
+              >
+                <X className="h-3 w-3" aria-hidden />
+              </button>
+            </span>
+          );
+        })}
         <input
           ref={inputRef}
           value={query}

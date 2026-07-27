@@ -317,8 +317,11 @@ ATTACHED REFERENCE: Alec is providing the file
 `qualify-tab-layout-proposal.html` — an approved static mock. This is
 your VISUAL AND STRUCTURAL SPEC. Match it closely: the ribbon-free
 production version of this exact layout — top bar nav slot between
-Overview and Collections, the teal-900/coral-600/Fraunces+Hanken
-Grotesk+IBM Plex Mono TreatHealthOS design-system tokens, the filter bar
+Overview and Collections, the teal-900/coral-600/Fraunces (display) + Space
+Grotesk (headings) + Inter (body) + IBM Plex Mono (numeric) TreatHealthOS
+design-system tokens [corrected 2026-07-27: the app loads NO Hanken Grotesk
+— globals.css @imports Inter/Space Grotesk/IBM Plex Mono/Fraunces; body font
+is Inter, headings Space Grotesk, matching docs/design-system.md], the filter bar
 (search + Resolve payer button + 7/14/30/Month segmented control — note:
 confirm with Alec whether Qualify's window control should be
 7/14/30/60/90 to match the mobile build, since the proposal shows

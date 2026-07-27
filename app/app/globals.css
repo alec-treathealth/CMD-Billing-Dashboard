@@ -210,6 +210,17 @@
   background: linear-gradient(120deg, #fbf1de, #fdf7ec);
 }
 
+/* Qualify compose-console PHI row — a faint diagonal hatch so an IDENTIFIED (person-level) search
+ * always looks materially different from the aggregate zones above it. Paired in markup with a dashed
+ * teal top border + the "Identified" lock badge. Purely decorative (aggregate zones stay flat). */
+.q-phi-hatch {
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(234, 244, 242, 0.5) 0 10px,
+    rgba(234, 244, 242, 0.24) 10px 20px
+  );
+}
+
 /* Resolved-payer hero band — the dark teal gradient the subject sits on, with a coral radial glow. */
 .q-subject {
   background: linear-gradient(120deg, #0e3a3a 0%, #124b47 55%, #135e5a 100%);
