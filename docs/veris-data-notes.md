@@ -1153,6 +1153,7 @@ another session's WIP claim is usually an untracked file. Current reservations:
 | 0057 | qualify-v2-feed ① session | `0057_cmd_explorer_feed1_dimensions` — DRAFTED (Gate 1 hold); NOT applied, NOT committed. Feed-1 dimension cols on cmd_explorer_rows. (claimed 2026-07-21) |
 | 0058 | qualify-v2-feed ① session | `0058_cmd_charge_census` (+ `cmd_census_run`) — DRAFTED (Gate 1 hold); NOT applied, NOT committed. (claimed 2026-07-21) |
 | 0059 | rollup-rebuild session | `0059_cmd_charge_rollup_allowed_reliable` (+ rollback) — **APPLIED LIVE 2026-07-22 07:14 UTC** (ledger 20260722071405), post-apply gates green, first autonomous :45 refresh ok=true 74.9s (run 131); NOT yet committed/pushed (commit HOLD pending — remove this row once on main). (claimed 2026-07-22) |
+| 0070 | qualify-latency session | `0070_cmd_charge_rollup_kpi_cov_member` (+ rollback) — **DRAFTED, NOT applied** (Alec applies; CONCURRENTLY, outside a txn). Restores the book-wide KPI index-only scan Phase 2 broke by appending `member_id_bidx` to the covering index's INCLUDE (new name `_cov_m`, supersedes 0068's `_cov`). Must be applied BEFORE 0067 (0067's swap carries `_cov_m` forward + gates on live indexes). See "0070 index fix" below. (claimed 2026-07-27) |
 
 Record new claims here when made; remove rows once the file is on origin/main
 (the tree then speaks for itself).
@@ -1951,3 +1952,109 @@ removes the maintenance window and the cron-pause, and largely dissolves the col
 cost of transient double disk and a slightly longer migration (index renames + the pre-swap diff).
 The in-place rebuild's only advantage is simplicity, which does not justify a ~2 min production
 outage on a matview two live surfaces read.
+
+## 0070 index fix — restore the book-wide KPI index-only scan Phase 2 broke (2026-07-27)
+
+**Migration `0070_cmd_charge_rollup_kpi_cov_member` (+ rollback). DRAFTED, NOT applied — Alec applies.**
+
+### Cause
+0068 built `cmd_charge_rollup_entity_payment_cov` as a covering index so the book-wide Qualify KPI
+aggregate (`buildBookKpisQuery`) ran INDEX-ONLY (`Heap Fetches: 0`). Phase 2 (Design B tiles) added
+`count(distinct member_id_bidx)` to that same query; `member_id_bidx` is neither a key nor in 0068's
+INCLUDE, so the planner abandons the covering index and does a plain Index Scan + full-window heap read.
+
+### Measured (live, entity=[BXR,Indigo], trailing-30 ≈ 14.6k rows)
+| query shape | plan | buffers | exec |
+|---|---|---|---|
+| with `count(distinct member_id_bidx)` (today) | Index Scan `entity_payment`, **no index-only** | 10,837 | ~52 ms |
+| same, minus the distinct (0068 target) | **Index Only Scan `_cov`, Heap Fetches: 0** | 122 | ~16.5 ms |
+
+~3.2× time / ~89× buffers at 30d; scales ~linearly with the window (the Range control allows up to
+12 months ≈ 10× rows → the ~8.3 s → ~40 ms class 0068 was built to prevent). Runs on **every** mount.
+Scoped (payer / payer+facility) refetches read ≤2.3k rows and are cheap regardless — the regression is
+book-wide-only.
+
+### Fix
+Rebuild the covering index with `member_id_bidx` appended to INCLUDE, under a new permanent name
+`cmd_charge_rollup_entity_payment_cov_m` (supersedes 0068's `_cov`, which 0070 drops). `member_id_bidx`
+is COUNTED, never projected — it sits in the INCLUDE payload only so the `count(distinct)` is answerable
+from the index. Built CONCURRENTLY alongside the live index (no coverage gap), old one dropped after,
+then `VACUUM (ANALYZE)` to re-arm the all-visible visibility map. Idempotent; must run outside a txn.
+
+### Size cost (measured / estimated)
+Live `_cov` = **29 MB** over ~486k rows (~63 B/entry). `member_id_bidx` is `text`, avg 65 B → per-entry
+roughly doubles → `_cov_m` estimated **~60 MB** (delta **~+31 MB**; matview total 222 MB → ~253 MB,
++~14%). Accepted for a per-mount query.
+
+### Deliberately NOT included
+- **`patient_balance_due`** — would only make the `count(*)` totals index-only, but that query never
+  runs book-wide (the compose bar always scopes it to a payer/facility, ≤5 ms). Not on any hot path.
+- **A `facility` index** — every measured path uses `entity_payment` / `entity_payer_payment`;
+  `facility` is always a cheap residual filter (≤2k rows removed on a payer-scoped scan). Unwarranted.
+
+### Ordering
+Apply **0070 before 0067**. 0067's build-alongside-swap carries the `_cov_m` definition forward and its
+pre-swap raise-on-loss gate enumerates indexes from the LIVE object, so `_cov_m` must already be live.
+
+## 0067 swap apply procedure — build-alongside-and-swap (2026-07-27)
+
+**Both `0067_cmd_charge_rollup_patient_name_bidx.sql` and its rollback were rewritten from the naive
+in-place DROP+CREATE into build-alongside-and-swap. DRAFTED, NOT applied — Alec applies.**
+
+### What changed vs the original 0067 (the three regressions it silently carried)
+The original in-place 0067 (a) held ~90–150s ACCESS EXCLUSIVE (production stall), (b) **dropped 0068's
+covering index**, and (c) **dropped 0069's MAINTAIN grant**. The rewrite fixes all three: sub-second
+swap; index set + grants **enumerated from the LIVE object** (not a hand list) so 0070's `…_cov_m` and
+every 0059 index carry forward automatically; MAINTAIN re-asserted; and a **pre-swap gate that RAISES**
+on any column/index/grant loss (fails the txn, live untouched). The rollback got the same treatment —
+it preserves `…_cov_m`/MAINTAIN and only removes the name column + index.
+
+### Index count — EIGHT, not nine (reconciliation)
+The build prompt anticipated nine indexes. It is **eight**, because Step 3 (0070) *replaces* 0068's
+`…_cov` in place (drops it, creates `…_cov_m`) rather than adding a parallel index. Post-0070+0067 live
+set: 0059's six + `…_cov_m` + `cmd_charge_rollup_patient_name` = **8**. The migration never hardcodes a
+count — it enumerates `pg_indexes` at apply time — so the gate is correct regardless; this note is just
+to explain the arithmetic.
+
+### Ordering (hard)
+1. **0070 first** (adds `…_cov_m`). 0067 enumerates live indexes, so `…_cov_m` must be live before 0067
+   builds `_next`, else you swap in the pre-0070 covering index. The gate still passes either way.
+2. 0067 after **0066** (base column, verified live) and ideally after the **name backfill**
+   (`cmdNameBidxBackfill.ts`) so `_next` carries historical tokens in one build.
+
+### Apply steps
+1. Apply off the cron ticks (:00/:15/:30/:35/:45) — ideally in the post-:45 gap. The build does NOT need
+   the cron paused (it is a different object), but starting off-tick avoids racing the swap against :45.
+2. Run the file **outside a wrapping tool that imposes its own short statement/transaction limits** —
+   the single txn runs ~60–95s (the `_next` WITH DATA build). `apply_migration` is fine (it wraps in one
+   txn, which is exactly what this file expects; a failure or gate RAISE rolls the whole thing back).
+3. On a gate RAISE, read the message — it names the missing column/index/grant. Nothing shipped; fix and
+   re-run.
+
+### Timings, locks, disk
+- `_next` build: **~60–95s** (WITH DATA over ~486k rows), no lock on the live matview.
+- Swap: **sub-second** ACCESS EXCLUSIVE (two RENAMEs + DROP _old), guarded by `lock_timeout='5s'` — a
+  collision with a running :45 REFRESH (SHARE UPDATE EXCLUSIVE) fails the swap fast and rolls back;
+  re-run in the next gap. (No reader pile-up, unlike the original's ~2 min.)
+- Transient disk: **~222 MB** while `_next` coexists with live (a second full copy) until the swap drops
+  `_old`.
+- Freshness: the swapped-in data is a **build-time snapshot (~2 min stale)** until the next :45 REFRESH
+  (non-issue at hourly cadence). Run one REFRESH immediately after if you want it hot sooner.
+
+### Post-apply checks
+```sql
+-- 23 columns incl patient_name_bidx; 8 indexes incl _cov_m + patient_name; grants incl MAINTAIN.
+select count(*) from pg_attribute where attrelid='collections.cmd_explorer_charge_rollup'::regclass and attnum>0 and not attisdropped;  -- 23
+select indexname from pg_indexes where schemaname='collections' and tablename='cmd_explorer_charge_rollup' order by 1;  -- 8, none named *_nxt/_next
+select relacl from pg_class where oid='collections.cmd_explorer_charge_rollup'::regclass;  -- claims_reader=r, cmd_rollup_writer=rm
+-- no orphan left behind:
+select count(*) from pg_class where relname in ('cmd_explorer_charge_rollup_next','cmd_explorer_charge_rollup_old');  -- 0
+```
+Then confirm the next :45 refresh logs ok=true and the KPI index-only scan still shows `Heap Fetches: 0`.
+
+### Aborting mid-build
+Because it is one transaction, `SELECT pg_cancel_backend(<pid>)` (or Ctrl-C) during the `_next` build
+rolls everything back — `_next` never persists, live is untouched. If a run is killed OUTSIDE txn control
+(rare), a `_next` orphan may remain; the next apply's defensive `drop materialized view if exists …_next`
+clears it, or drop it manually. Never drop `…_old` by hand unless a swap half-completed (it won't under
+the single-txn design).
