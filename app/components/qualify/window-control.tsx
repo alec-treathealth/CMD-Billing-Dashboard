@@ -24,12 +24,17 @@ export function WindowControl({
   window: win,
   currentYear,
   onChange,
+  tone = 'light',
 }: {
   window: QualifyWindow;
   /** The ops "today" year (server-derived upstream; injectable so tests are deterministic). */
   currentYear: number;
   onChange: (w: QualifyWindow) => void;
+  /** 'dark' restyles the trigger pills for the teal900 readout bar (white-on-dark segmented control);
+   *  the dropdown popover stays a light card. 'light' (default) = the original standalone appearance. */
+  tone?: 'light' | 'dark';
 }) {
+  const dark = tone === 'dark';
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -62,7 +67,11 @@ export function WindowControl({
 
   return (
     <div ref={wrapRef} className="relative flex flex-wrap items-center gap-2">
-      <div className="inline-flex rounded-full border bg-background p-0.5" role="group" aria-label="Time window">
+      <div
+        className={['inline-flex p-0.5', dark ? 'rounded-lg bg-white/10' : 'rounded-full border bg-background'].join(' ')}
+        role="group"
+        aria-label="Time window"
+      >
         {QUALIFY_WINDOW_OPTIONS.map((d) => {
           const active = win.kind === 'trailing' && win.days === d;
           return (
@@ -75,8 +84,15 @@ export function WindowControl({
               }}
               aria-pressed={active}
               className={[
-                'rounded-full px-3 py-1.5 text-xs font-semibold transition-colors',
-                active ? 'bg-teal700 text-white shadow-ths-sm' : 'text-muted-foreground hover:text-ink900',
+                'px-3 py-1.5 text-xs font-semibold transition-colors',
+                dark ? 'rounded-md' : 'rounded-full',
+                active
+                  ? dark
+                    ? 'bg-white text-teal900'
+                    : 'bg-teal700 text-white shadow-ths-sm'
+                  : dark
+                    ? 'text-white/70 hover:text-white'
+                    : 'text-muted-foreground hover:text-ink900',
               ].join(' ')}
             >
               {d}d
@@ -90,8 +106,15 @@ export function WindowControl({
           aria-expanded={open}
           aria-pressed={rangeActive}
           className={[
-            'flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors',
-            rangeActive ? 'bg-teal700 text-white shadow-ths-sm' : 'text-muted-foreground hover:text-ink900',
+            'flex items-center gap-1 px-3 py-1.5 text-xs font-semibold transition-colors',
+            dark ? 'rounded-md' : 'rounded-full',
+            rangeActive
+              ? dark
+                ? 'bg-white text-teal900'
+                : 'bg-teal700 text-white shadow-ths-sm'
+              : dark
+                ? 'text-white/70 hover:text-white'
+                : 'text-muted-foreground hover:text-ink900',
           ].join(' ')}
         >
           {rangeLabel}

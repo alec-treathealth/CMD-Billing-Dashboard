@@ -44,3 +44,25 @@ export function ratingSampleTier(distinctPatients: number): RatingSampleTier {
   if (n < QUALIFY_RATING_CONFIDENT_PATIENTS) return 'thin';
   return 'full';
 }
+
+/**
+ * Number of SOLID pips (0–4) in the readout EVIDENCE GAUGE for a distinct-client count. Evidence is
+ * signalled by FILL COUNT ONLY — one colour, solid vs hollow — NEVER by hue, so it survives greyscale
+ * and colour-blindness (the standing "no severity in colour alone" rule). Breakpoints DERIVE from the two
+ * gate thresholds, so the pips move in lockstep with rating suppression rather than inventing a scale:
+ *   0             → 0 pips (no matches)
+ *   1 .. 2        → 1 pip   (insufficient — a rating is withheld)
+ *   3 .. 9        → 2 pips  (thin — directional only)
+ *   10 .. 29      → 3 pips  (full)
+ *   >= 30         → 4 pips  (amply evidenced — 3× the confident floor)
+ * The 4th-pip line (3× QUALIFY_RATING_CONFIDENT_PATIENTS) is PRESENTATION ONLY — it gates no rating;
+ * ratingSampleTier still owns suppression at 3 / 10. Non-finite / negative → 0. Pure + total.
+ */
+export function ratingEvidencePips(distinctPatients: number): 0 | 1 | 2 | 3 | 4 {
+  const n = Number.isFinite(distinctPatients) && distinctPatients > 0 ? Math.trunc(distinctPatients) : 0;
+  if (n === 0) return 0;
+  if (n < QUALIFY_RATING_MIN_PATIENTS) return 1;
+  if (n < QUALIFY_RATING_CONFIDENT_PATIENTS) return 2;
+  if (n < QUALIFY_RATING_CONFIDENT_PATIENTS * 3) return 3;
+  return 4;
+}

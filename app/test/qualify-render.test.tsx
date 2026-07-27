@@ -16,17 +16,16 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { FacilityPanel } from '../components/qualify/facility-panel';
 import { CasesTable } from '../components/qualify/cases-table';
 import { CohortSheet } from '../components/qualify/cohort-sheet';
-import { BookKpiTiles, HeatingUpCards, MatchCountReadout } from '../components/qualify/overview';
+import { BookKpiTiles, EvidenceGauge, HeatingUpCards } from '../components/qualify/overview';
 import { Spark } from '../components/qualify/spark';
 import { buildFacilityBucketMap } from '../components/qualify/colors';
 import { qualifyRating, ratingBucket, RATING_LEGEND } from '../lib/qualify/rating';
-import { trailingWindow, QUALIFY_TENANT_SCOPE } from '../lib/qualify/contract';
+import { trailingWindow } from '../lib/qualify/contract';
 import type {
   QualifyFacility,
   QualifyClaim,
   QualifyBookKpis,
   QualifyFacilityTrend,
-  QualifyMatchSummary,
   QualifyPhi,
 } from '../lib/qualify/contract';
 
@@ -455,39 +454,54 @@ test('heating-up cards — Design B scope LABEL: "across the book" by default, t
   assert.ok(!scoped.includes('across the book'), 'not both scopes at once');
 });
 
-// ── Compose-bar match count: admissions_seat sees count + percentages, ZERO dollars — in the MARKUP,
-//    not just the wire (the known past failure mode: a stripped value that still renders). ─────────────
-const SEAT_SUMMARY: QualifyMatchSummary = {
-  count: 4242,
-  totalCharge: null,
-  totalAllowed: null,
-  totalPaid: null,
-  totalBalance: null,
-  pctAllowedOfBilled: 67,
-  pctPaidOfBilled: 33,
-  viewerHasAmountsCapability: false,
-  tenantScope: QUALIFY_TENANT_SCOPE,
-};
-const AMOUNTS_SUMMARY: QualifyMatchSummary = {
-  ...SEAT_SUMMARY,
-  totalCharge: 987654,
-  totalAllowed: 654321,
-  totalPaid: 321098,
-  totalBalance: 111111,
-  viewerHasAmountsCapability: true,
-};
+// NB: the compose-bar match count + its NON-DOLLAR percentages now render inline in qualify-tab's dark
+// readout bar / context line (MatchCountReadout was deleted). The amounts-strip guard for that data
+// lives at the authoritative CORE boundary — test/qualifyCore.test.ts ("admissions_seat gets count +
+// percentages with ZERO dollars (wire-level)" + the sentinel-dollar wire scan) — not here.
 
-test('match count — admissions_seat markup: count + percentages present, NO dollar sign anywhere', () => {
-  const html = renderToStaticMarkup(<MatchCountReadout summary={SEAT_SUMMARY} loading={false} hasAmounts={false} />);
-  assert.ok(html.includes('4,242'), 'the count renders');
-  assert.ok(html.includes('67%') && html.includes('33%'), 'both non-dollar percentages render');
-  assert.ok(!html.includes('$'), 'a dollar sign must NEVER appear for an admissions_seat (DOM omission, not CSS-hidden)');
+// ── EVIDENCE GAUGE (readout) — fill-state only, ZERO tier hues ───────────────────────────────────────
+// The dark variant paints a SOLID pip as `bg-teal200` and a HOLLOW pip as `border-dashed`, so counting
+// those class occurrences counts the pips. Evidence must NEVER be a hue — assert no amber/red anywhere.
+const solidPips = (html: string) => html.split('bg-teal200').length - 1;
+const hollowPips = (html: string) => html.split('border-dashed').length - 1;
+
+test('evidence gauge — 41 clients (full) → 4 solid pips, 0 hollow, plain count + "enough to rate"', () => {
+  const html = renderToStaticMarkup(<EvidenceGauge distinctPatients={41} />);
+  assert.equal(solidPips(html), 4, 'four solid pips at an amply-evidenced count');
+  assert.equal(hollowPips(html), 0, 'no hollow pips');
+  assert.ok(html.includes('41 clients'), 'the count is stated plainly as text, not only as pips');
+  assert.ok(html.includes('enough to rate'), 'the verdict text is present');
 });
 
-test('match count — amounts-capable markup DOES carry the dollar total', () => {
-  const html = renderToStaticMarkup(<MatchCountReadout summary={AMOUNTS_SUMMARY} loading={false} hasAmounts={true} />);
-  assert.ok(html.includes('$'), 'the billed dollar total renders for an amounts-capable viewer');
-  assert.ok(html.includes('4,242'), 'the count still renders');
+test('evidence gauge — 1 client → 1 solid + 3 hollow pips, "not enough to rate"', () => {
+  const html = renderToStaticMarkup(<EvidenceGauge distinctPatients={1} />);
+  assert.equal(solidPips(html), 1, 'one solid pip');
+  assert.equal(hollowPips(html), 3, 'three hollow pips');
+  assert.ok(html.includes('1 client') && !html.includes('1 clients'), 'singular "client"');
+  assert.ok(html.includes('not enough to rate'), 'withheld-rating verdict');
+});
+
+test('evidence gauge — 3 clients (thin) → 2 solid + 2 hollow, "directional only"', () => {
+  const html = renderToStaticMarkup(<EvidenceGauge distinctPatients={3} />);
+  assert.equal(solidPips(html), 2);
+  assert.equal(hollowPips(html), 2);
+  assert.ok(html.includes('directional only'));
+});
+
+test('evidence gauge — signals by FILL ONLY: no amber / red / tier hue anywhere in the markup', () => {
+  for (const n of [0, 1, 3, 10, 41]) {
+    const html = renderToStaticMarkup(<EvidenceGauge distinctPatients={n} />);
+    assert.ok(
+      !html.includes('status-warn') && !html.includes('status-danger') && !html.includes('amber') && !html.includes('coral'),
+      `no severity hue at ${n} clients — evidence is fill-state only`,
+    );
+  }
+});
+
+test('evidence gauge — carries a text alternative (role=img + count/verdict aria-label)', () => {
+  const html = renderToStaticMarkup(<EvidenceGauge distinctPatients={41} />);
+  assert.ok(html.includes('role="img"'), 'the pip cluster exposes a role');
+  assert.ok(html.includes('41 distinct clients'), 'the aria-label states the count for AT');
 });
 
 test('spark — draws a path for ≥2 points, renders NOTHING for a single point (no fabricated trend)', () => {

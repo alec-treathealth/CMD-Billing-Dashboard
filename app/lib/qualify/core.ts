@@ -122,6 +122,11 @@ export interface QualifyDeps {
   /** Compose-bar live match count: the `totals` row of Collections' buildCmdSearchSummaryQueries over the
    *  SAME cmdExplorerBaseConds predicate. One row (or null on empty). Dollars are stripped in the CORE. */
   loadMatchSummary: (filter: CmdExplorerFilter, entityIds: string[]) => Promise<QualifyMatchSummaryRow | null>;
+  /** Compose-bar EVIDENCE count: distinct clients (count(distinct member_id_bidx)) over the SAME composed
+   *  predicate as the match count. Qualify-OWNED (does NOT touch Collections' buildCmdSearchSummaryQueries,
+   *  which is patient-count-blind) — reuses the shared cmdExplorerBaseConds predicate like the cases drill.
+   *  member_id_bidx is COUNTED, never projected. Drives the readout evidence gauge (sampleGate tiers). */
+  loadMatchClientCount: (filter: CmdExplorerFilter, entityIds: string[]) => Promise<number>;
   /** Phase 3: tenant-scoped lookup of ONE claim's alpha-prefix cohort token. Null = unknown/foreign
    *  claim id (fails closed to suppressed). The token never reaches the client. */
   loadClaimPrefixToken: (claimId: number, entityIds: string[]) => Promise<string | null>;
@@ -747,7 +752,13 @@ export async function getQualifyMatchSummaryCore(
   if (!isQualifyWindow(window)) throw new Error('Invalid window.');
   const { from, to } = qualifyWindowBounds(window, deps.now());
   const { filter } = buildComposeFilter(deps, input, from, to);
-  const row = await deps.loadMatchSummary(filter, gate.entityIds);
+  // The count-of-charge-lines + dollar totals (Collections' shared builder) and the distinct-client
+  // EVIDENCE count (Qualify-owned) run concurrently over the SAME composed predicate — the evidence
+  // gauge and the "N charge lines match" number therefore describe the identical population.
+  const [row, distinctPatients] = await Promise.all([
+    deps.loadMatchSummary(filter, gate.entityIds),
+    deps.loadMatchClientCount(filter, gate.entityIds),
+  ]);
   const charge = row?.total_charge ?? 0;
   const allowed = row?.total_allowed ?? 0;
   const paid = row?.total_paid ?? 0;
@@ -756,6 +767,8 @@ export async function getQualifyMatchSummaryCore(
   const strip = !gate.hasAmounts;
   return {
     count: row?.total_count ?? 0,
+    // Distinct clients (count(distinct member_id_bidx)) — NON-DOLLAR, so never stripped for admissions_seat.
+    distinctPatients,
     totalCharge: strip ? null : charge,
     totalAllowed: strip ? null : allowed,
     totalPaid: strip ? null : paid,

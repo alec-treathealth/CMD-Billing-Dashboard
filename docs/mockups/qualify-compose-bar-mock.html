@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qualify — compose bar redesign</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --teal900:#0E3A3A; --teal700:#135E5A; --teal500:#1C8B82;
+  --teal200:#B7DAD5; --teal50:#EAF4F2;
+  --coral600:#E2674F;
+  --ground:#FBF8F4; --surface:#FFF;
+  --ink900:#1B2B2A; --ink600:#4A5C5A; --ink400:#859794;
+  --line:#E4E9E6;
+  --ok:#2E8B6F; --warn:#C9881E; --danger:#C0453B;
+
+  --r:10px;
+  --shadow:0 1px 2px rgba(14,58,58,.04), 0 8px 24px -12px rgba(14,58,58,.16);
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--ground); color:var(--ink900);
+  font:400 14px/1.5 Inter, system-ui, sans-serif;
+  letter-spacing:-.006em;
+  padding:28px 20px 80px;
+}
+.wrap{max-width:1120px;margin:0 auto}
+.h{font-family:'Space Grotesk',sans-serif;letter-spacing:-.02em}
+.num{font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums}
+
+/* ---------- page context ---------- */
+.pagehead{margin-bottom:18px}
+.pagehead h1{margin:0;font-size:24px;font-weight:600}
+.pagehead p{margin:4px 0 0;font-size:13px;color:var(--ink600)}
+
+/* ---------- the console ---------- */
+.console{
+  background:var(--surface);
+  border:1px solid var(--line);
+  border-radius:14px;
+  box-shadow:var(--shadow);
+  overflow:hidden;
+}
+/* teal cap = the existing finder-card chrome, kept */
+.console::before{
+  content:""; display:block; height:3px;
+  background:linear-gradient(90deg,var(--teal700) 0%,var(--teal500) 62%,var(--teal200) 100%);
+}
+
+/* --- SIGNATURE: the two-zone split --- */
+.zones{display:grid;grid-template-columns:1fr auto 1fr}
+.zone{padding:16px 18px 18px}
+.zone--score{background:linear-gradient(180deg,rgba(234,244,242,.62),rgba(234,244,242,.22))}
+.zone--list{background:var(--surface)}
+
+.zonehead{display:flex;align-items:baseline;gap:8px;margin-bottom:12px}
+.zonelabel{
+  font-family:'Space Grotesk',sans-serif;
+  font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--teal700);
+}
+.zone--list .zonelabel{color:var(--ink400)}
+.zonenote{font-size:11.5px;color:var(--ink600)}
+.zone--list .zonenote{color:var(--ink400)}
+
+/* the divider carries the meaning */
+.seam{
+  width:1px;background:var(--line);position:relative;margin:14px 0;
+}
+.seam span{
+  position:absolute;top:50%;left:50%;transform:translate(-50%,-50%) rotate(180deg);
+  writing-mode:vertical-rl;
+  background:var(--surface);padding:10px 3px;
+  font-family:'IBM Plex Mono',monospace;
+  font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink400);
+  white-space:nowrap;
+}
+
+.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+
+/* ---------- field ---------- */
+.field label{
+  display:flex;align-items:center;gap:6px;
+  font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--ink600);margin-bottom:6px;
+}
+.field label .ico{width:12px;height:12px;flex:none;color:var(--ink400)}
+.field label .clr{
+  margin-left:auto;font-weight:500;letter-spacing:0;text-transform:none;
+  font-size:11px;color:var(--teal700);cursor:pointer;border:0;background:none;padding:0;
+}
+.field label .clr:hover{text-decoration:underline}
+
+.control{
+  min-height:40px;border:1px solid var(--line);border-radius:var(--r);
+  background:var(--surface);
+  display:flex;flex-wrap:wrap;align-items:center;gap:5px;
+  padding:5px 8px;
+  transition:border-color .14s, box-shadow .14s;
+  cursor:text;
+}
+.zone--score .control{border-color:var(--teal200)}
+.control:hover{border-color:var(--teal500)}
+.control.is-focus{border-color:var(--teal700);box-shadow:0 0 0 3px rgba(28,139,130,.14)}
+.control input{
+  border:0;outline:0;background:none;font:inherit;color:inherit;
+  min-width:56px;flex:1;padding:3px 2px;
+}
+.control input::placeholder{color:var(--ink400)}
+
+/* chips */
+.chip{
+  display:inline-flex;align-items:center;gap:5px;
+  background:var(--teal50);border:1px solid var(--teal200);
+  color:var(--teal700);
+  border-radius:7px;padding:2px 4px 2px 8px;
+  font-size:12px;font-weight:500;line-height:1.5;
+  max-width:220px;
+}
+.chip b{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip button{
+  border:0;background:none;color:var(--teal700);opacity:.55;
+  cursor:pointer;padding:0 2px;line-height:1;font-size:14px;border-radius:4px;
+}
+.chip button:hover{opacity:1;background:rgba(19,94,90,.1)}
+/* derived chip = added by a ticker click, not typed */
+.chip--derived{border-style:dashed}
+.chip--derived::before{
+  content:"↳";font-family:'IBM Plex Mono',monospace;font-size:10px;opacity:.6;margin-right:-2px;
+}
+
+/* ---------- PHI row ---------- */
+.phi{
+  border-top:1px dashed var(--teal200);
+  background:repeating-linear-gradient(135deg,rgba(234,244,242,.5) 0 10px,rgba(234,244,242,.24) 10px 20px);
+  padding:14px 18px 16px;
+}
+.phihead{display:flex;align-items:center;gap:8px;margin-bottom:11px;flex-wrap:wrap}
+.phihead .zonelabel{color:var(--teal900)}
+.lock{
+  display:inline-flex;align-items:center;gap:5px;
+  font-size:10.5px;font-weight:600;letter-spacing:.04em;
+  background:var(--teal900);color:#fff;border-radius:20px;padding:3px 9px;
+}
+.phinote{font-size:11.5px;color:var(--ink600);margin-left:auto}
+.phifields{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.phifields .control{background:rgba(255,255,255,.92)}
+.divergence{
+  grid-column:4;margin-top:5px;
+  font-size:10.5px;color:var(--ink400);
+}
+
+/* ---------- readout ---------- */
+.readout{
+  border-top:1px solid var(--line);
+  background:var(--teal900);
+  color:#fff;
+  display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+  padding:12px 18px;
+}
+.count{display:flex;align-items:baseline;gap:8px}
+.count .n{font-family:'IBM Plex Mono',monospace;font-size:26px;font-weight:500;letter-spacing:-.02em}
+.count .lbl{font-size:12px;color:rgba(255,255,255,.72)}
+
+/* SIGNATURE pt2: evidence weight as a real object */
+.evidence{display:flex;align-items:center;gap:10px;padding-left:18px;border-left:1px solid rgba(255,255,255,.16)}
+/* fill gauge — one colour only. Evidence is how many pips are SOLID.
+   Empty pips stay hollow with a dashed edge: visibly "not yet filled",
+   never a different hue. Works in greyscale and for colour-blind viewers. */
+.pips{display:flex;gap:3px;align-items:flex-end;height:17px}
+.pip{width:5px;border-radius:1.5px;box-sizing:border-box}
+.pip{border:1px dashed rgba(255,255,255,.34);background:transparent}
+.pip.on{border:1px solid var(--teal200);background:var(--teal200)}
+.pip:nth-child(1){height:7px}.pip:nth-child(2){height:10px}
+.pip:nth-child(3){height:13.5px}.pip:nth-child(4){height:17px}
+.evidence .txt{font-size:11.5px;color:rgba(255,255,255,.72);line-height:1.35}
+.evidence .txt b{display:block;font-weight:600;color:#fff;font-size:12px}
+/* light-surface variant, for the state cards */
+.pips--ink .pip{border-color:rgba(74,92,90,.34)}
+.pips--ink .pip.on{border-color:var(--teal700);background:var(--teal700)}
+
+.spacer{flex:1}
+.seg{display:inline-flex;background:rgba(255,255,255,.1);border-radius:9px;padding:3px}
+.seg button{
+  border:0;background:none;color:rgba(255,255,255,.72);
+  font:500 12px/1 Inter,sans-serif;padding:7px 11px;border-radius:6px;cursor:pointer;
+}
+.seg button[aria-pressed="true"]{background:#fff;color:var(--teal900);font-weight:600}
+.reset{
+  border:1px solid rgba(255,255,255,.24);background:none;color:#fff;
+  font:500 12px/1 Inter,sans-serif;padding:8px 12px;border-radius:8px;cursor:pointer;
+}
+.reset:hover{background:rgba(255,255,255,.1)}
+
+/* ---------- states shown below ---------- */
+.states{margin-top:26px;display:grid;gap:14px;grid-template-columns:1fr 1fr}
+.state{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.state h3{margin:0 0 3px;font-size:12.5px;font-weight:600;font-family:'Space Grotesk',sans-serif}
+.state p{margin:0;font-size:12.5px;color:var(--ink600)}
+.state{display:flex;gap:14px;align-items:flex-start}
+.state .gauge{padding-top:3px}
+.state .body{flex:1}
+.state .tag{
+  display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:10px;
+  letter-spacing:.08em;text-transform:uppercase;color:var(--ink400);margin-bottom:7px;
+}
+
+.caption{margin-top:22px;font-size:12px;color:var(--ink400);max-width:760px;line-height:1.6}
+.caption b{color:var(--ink600);font-weight:600}
+
+@media (max-width:900px){
+  .zones{grid-template-columns:1fr}
+  .seam{width:auto;height:1px;margin:0 14px}
+  .seam span{writing-mode:horizontal-tb;transform:translate(-50%,-50%);padding:3px 10px}
+  .phifields{grid-template-columns:1fr 1fr}
+  .divergence{grid-column:1/-1}
+  .states{grid-template-columns:1fr}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="pagehead">
+    <h1 class="h">Qualify</h1>
+    <p>Where payers pay best, across BXR + Indigo.</p>
+  </div>
+
+  <!-- ================= CONSOLE ================= -->
+  <div class="console">
+
+    <div class="zones">
+      <!-- ZONE 1: scopes the score -->
+      <div class="zone zone--score">
+        <div class="zonehead">
+          <span class="zonelabel">Scores read this</span>
+          <span class="zonenote">Ratings, tiles and the ticker follow these two.</span>
+        </div>
+        <div class="fields">
+          <div class="field">
+            <label>
+              <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="5" width="11" height="9" rx="1"/><path d="M5 5V3h6v2M6 8h4M6 11h4"/></svg>
+              Payer
+              <button class="clr">Clear 1</button>
+            </label>
+            <div class="control is-focus">
+              <span class="chip"><b>CIGNA</b><button aria-label="Remove CIGNA">×</button></span>
+              <input placeholder="Add a payer…">
+            </div>
+          </div>
+          <div class="field">
+            <label>
+              <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 14V4l5-2 5 2v10M6.5 14v-3h3v3M6 7h1M9 7h1"/></svg>
+              Facility
+              <button class="clr">Clear 1</button>
+            </label>
+            <div class="control">
+              <span class="chip chip--derived"><b>TREAT MENTAL HEALTH TN</b><button aria-label="Remove">×</button></span>
+              <input placeholder="Add a facility…">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- the seam states the rule -->
+      <div class="seam"><span>narrows the list only ↓</span></div>
+
+      <!-- ZONE 2: filters the list -->
+      <div class="zone zone--list">
+        <div class="zonehead">
+          <span class="zonelabel">List only</span>
+          <span class="zonenote">Too thin to score — these filter claims, not ratings.</span>
+        </div>
+        <div class="fields">
+          <div class="field">
+            <label>
+              <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="5.5" width="11" height="8" rx="1"/><path d="M6 5.5V3.5h4v2"/></svg>
+              Employer
+            </label>
+            <div class="control">
+              <input placeholder="Type to search…">
+            </div>
+          </div>
+          <div class="field">
+            <label>
+              <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 6.5 8 3l5.5 3.5M4 7v6.5h8V7M2.5 13.5h11"/></svg>
+              Funding
+            </label>
+            <div class="control">
+              <span class="chip"><b>Self-funded</b><button aria-label="Remove Self-funded">×</button></span>
+              <input placeholder="Add…">
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PHI row -->
+    <div class="phi">
+      <div class="phihead">
+        <span class="lock">
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3.5" y="7" width="9" height="6.5" rx="1.2"/><path d="M5.75 7V5a2.25 2.25 0 0 1 4.5 0v2"/></svg>
+          Identified
+        </span>
+        <span class="zonelabel">Find one client</span>
+        <span class="phinote">Audited on use. Never written to the URL.</span>
+      </div>
+      <div class="phifields">
+        <div class="field">
+          <label>Member ID</label>
+          <div class="control"><input placeholder="e.g. W2740…"></div>
+        </div>
+        <div class="field">
+          <label>Alpha prefix</label>
+          <div class="control"><input placeholder="3 letters"></div>
+        </div>
+        <div class="field">
+          <label>Group #</label>
+          <div class="control"><input placeholder="Group"></div>
+        </div>
+        <div class="field">
+          <label>Client name</label>
+          <div class="control"><input placeholder="Last, First"></div>
+        </div>
+        <p class="divergence">Qualify only — Collections has no name lookup.</p>
+      </div>
+    </div>
+
+    <!-- readout -->
+    <div class="readout">
+      <div class="count">
+        <span class="n">1,284</span>
+        <span class="lbl">charge lines match</span>
+      </div>
+
+      <div class="evidence">
+        <div class="pips"><i class="pip on"></i><i class="pip on"></i><i class="pip on"></i><i class="pip on"></i></div>
+        <span class="txt"><b>41 clients</b>enough to rate</span>
+      </div>
+
+      <div class="spacer"></div>
+
+      <div class="seg">
+        <button aria-pressed="false">30d</button>
+        <button aria-pressed="true">60d</button>
+        <button aria-pressed="false">90d</button>
+        <button aria-pressed="false">Range</button>
+      </div>
+      <div class="seg">
+        <button aria-pressed="true">IP</button>
+        <button aria-pressed="false">OP</button>
+        <button aria-pressed="false">Both</button>
+      </div>
+      <button class="reset">Clear all</button>
+    </div>
+
+  </div>
+
+  <!-- the same readout in its other two truths -->
+  <div class="states">
+    <div class="state">
+      <div class="gauge">
+        <div class="pips pips--ink"><i class="pip on"></i><i class="pip on"></i><i class="pip"></i><i class="pip"></i></div>
+      </div>
+      <div class="body">
+        <span class="tag">readout · thin sample</span>
+        <h3 class="h">3 clients · directional only</h3>
+        <p>Two pips filled, two still hollow. The rating renders, but the gauge shows plainly that it is
+        resting on very little. No second colour needed to say so.</p>
+      </div>
+    </div>
+    <div class="state">
+      <div class="gauge">
+        <div class="pips pips--ink"><i class="pip on"></i><i class="pip"></i><i class="pip"></i><i class="pip"></i></div>
+      </div>
+      <div class="body">
+        <span class="tag">readout · not enough to rate</span>
+        <h3 class="h">1 client · no rating</h3>
+        <p>One pip. The percentage is withheld rather than greyed out — withholding is honest, greying
+        implies a number exists behind it. Claims below still list; those are facts, not estimates.</p>
+      </div>
+    </div>
+  </div>
+
+  <p class="caption">
+    <b>What changed and why.</b> The bar is one console instead of four floating pickers. The vertical seam
+    is the whole idea: <b>Payer and Facility sit in a tinted zone because they move the scores; Employer and
+    Funding sit on plain white because they only narrow the list.</b> That's Design B made visible, so the
+    hint line Phase&nbsp;2 owed becomes unnecessary. The dark readout bar anchors the console and gives the
+    match count somewhere to live with real weight, alongside the <b>evidence gauge</b> — four pips that fill as client count climbs. One colour throughout:
+    evidence is signalled by how many pips are <b>solid versus hollow</b>, never by hue, so it survives
+    greyscale, colour-blindness, and the dark bar. Patient count is what the last two sessions proved
+    actually governs whether a number is honest, so it gets a physical form rather than a footnote. The PHI row is hatched and lock-badged so identified search always looks different from
+    aggregate search. A dashed chip with <b>↳</b> marks a filter added by a ticker click rather than typed.
+  </p>
+
+</div>
+</body>
+</html>

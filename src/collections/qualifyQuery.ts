@@ -112,6 +112,11 @@ export interface QualifyMatchSummaryRow {
   total_balance: number;
 }
 
+/** The distinct-CLIENT evidence count for the composed match (readout gauge). ONE row. */
+export interface QualifyMatchClientCountRow {
+  distinct_patients: number;
+}
+
 function paramList(): { params: unknown[]; add: ParamAdder } {
   const params: unknown[] = [];
   const add: ParamAdder = (v) => {
@@ -387,6 +392,34 @@ export function buildFacilityCasesQuery(
     FACILITY_DIM_JOINS +
     'group by agg.id, agg.member_id_bidx, agg.facility, agg.primary_payer, agg.dos, agg.payment_date, agg.pct_allowed, agg.billed, agg.allowed, agg.allowed_tier ' +
     `order by agg.payment_date desc nulls last, agg.id desc limit ${lim}`;
+  return { sql, params };
+}
+
+/**
+ * COMPOSED distinct-CLIENT count — the readout EVIDENCE gauge's number, over the SAME filter set as the
+ * live "N charge lines match" count, so the gauge and the count describe the identical population.
+ *
+ * Qualify-OWNED, deliberately SEPARATE from Collections' `buildCmdSearchSummaryQueries`: that shared
+ * `totals` builder is patient-count-blind and Collections consumes it, so it MUST NOT be edited to add a
+ * count. Instead this ANDs the SAME shared `cmdExplorerBaseConds` predicate (CONSUMED, never forked —
+ * exactly the buildFacilityCasesQuery pattern) and counts distinct clients. `member_id_bidx` is an opaque
+ * keyed-HMAC token: COUNTED here, NEVER projected (no PHI leaves). Charge-grain 0050 rollup only.
+ *
+ * NAME-BLIND, same as the match count: `cmdExplorerBaseConds` cannot express `patient_name_bidx`, so
+ * when QUALIFY_CLIENT_NAME_ENABLED flips (Part 2) BOTH this and the summary count will need the name AND
+ * added in lockstep — else the gauge and count would over-count a name-narrowed search. Harmless today.
+ */
+export function buildQualifyMatchClientCountQuery(
+  filter: CmdExplorerFilter,
+  entityIds: string[],
+): { sql: string; params: unknown[] } {
+  const ent = assertEntityScope(entityIds, 'buildQualifyMatchClientCountQuery');
+  const { params, add } = paramList();
+  const conds = cmdExplorerBaseConds(filter, ent, add);
+  const sql =
+    'select count(distinct member_id_bidx)::int as distinct_patients ' +
+    `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
+    `where ${conds.join(' and ')}`;
   return { sql, params };
 }
 

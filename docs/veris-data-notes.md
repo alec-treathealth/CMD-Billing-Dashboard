@@ -1866,3 +1866,88 @@ match," and must NOT satisfy the VOB single-payer "never billed" probe (the prob
 any PHI narrow — keep it that way); (2) verify `SEARCH_QUALIFY_NAME`/`SEARCH_QUALIFY_FACILITY` audit
 fires with field NAMES only (`fields: ['client_name']`), never the name value, on an `admissions_seat`
 session specifically. Runbook: `docs/qualify-redesign-cc-prompt.md` / the redesign handoff.
+
+---
+
+## 0067 ops analysis — applying `patient_name_bidx` to the charge rollup (read-only, 2026-07-27)
+
+Pre-flight for the Part-2 (client-name) activation. **Nothing here has been executed.** Migration
+`0067` is authored but must NOT be applied as-is — it is STALE (see hazards below). All figures are
+live-DB reads taken 2026-07-27.
+
+### The object
+`collections.cmd_explorer_charge_rollup` — a **materialized view** (`relkind='m'`), **222 MB** total
+(162 MB heap + ~60 MB indexes), **~486k rows**, owner `postgres`, ACL `claims_reader=r` +
+`cmd_rollup_writer=rm` (SELECT + MAINTAIN). Read by **both** Qualify (ranking, KPI tiles, ticker,
+cases) **and** Collections (All-Collections grid + summary). Refreshed hourly at **:45**
+(`/api/cron/refresh-charge-rollup`, `REFRESH … CONCURRENTLY` via a SECURITY-DEFINER fn, 76–113s
+measured post-0059, `maxDuration=180`, **no `lock_timeout` set**). No dependent views/matviews
+reference it (`pg_depend` = empty), and the refresh function references it **by name** (re-resolves
+after a rename — no edit needed on a swap).
+
+### 0067 as authored = in-place `DROP` + `CREATE … WITH DATA`
+Matviews can't `ADD COLUMN`, so 0067 drops and recreates the object, then rebuilds indexes.
+- **Downtime:** ~90–150s where the matview holds `ACCESS EXCLUSIVE`. Because Postgres queues new lock
+  requests behind a pending `ACCESS EXCLUSIVE`, reads start stalling the instant 0067 requests the
+  lock, not when it acquires it → ~1.5–2.5 min of stalled/errored Qualify + Collections reads.
+- **Cron collision (the main risk):** the :45 `REFRESH … CONCURRENTLY` (`SHARE UPDATE EXCLUSIVE`)
+  conflicts with 0067's `ACCESS EXCLUSIVE`, and the refresh path sets no `lock_timeout`, so nothing
+  fails fast. Cron-running-when-0067-starts → outage stretches to ~4 min; 0067-running-when-:45-fires
+  → the refresh blocks and may be killed at `maxDuration=180` (leaves an `ok/finished_at=NULL`
+  run-log row, self-heals next hour). The advisory lock in 0067 only serializes 0067-vs-0067 retries,
+  NOT the cron.
+- **Needs a maintenance window:** apply in the post-:45 gap (~:48–:57) at a low-traffic hour; ideally
+  pause the refresh cron for the window. There is **no concurrent path** for the initial rebuild.
+- **Rollback on mid-way failure:** the `DROP`+`CREATE`+index build is one `DO` block = one
+  transaction; a failure rolls back atomically, leaving the pre-0067 matview intact (no partial
+  state, no manual repair). `0067_…_rollback.sql` restores the 0059 definition; since Part-2 app code
+  is NOT shipping (flag stays `false`, nothing reads the column), rollback is app-safe with no
+  ordering constraint.
+
+### ⚠️ 0067 IS STALE — it silently regresses two later migrations. DO NOT apply as-is.
+0067 was authored **before** 0068/0069, which both modified this same matview. Its full DROP+CREATE
+recreates only "0059's six indexes + the new name index" and re-asserts only the `SELECT` grants:
+1. **Drops 0068's covering index** `cmd_charge_rollup_entity_payment_cov` (confirmed live). 0068's own
+   NOTE 3 says a future full rebuild "should re-create this index alongside" — 0067 does not. Result:
+   the book-KPI index-only scan regresses (**the ~8.3s → ~40ms win is lost**).
+2. **Drops 0069's `MAINTAIN` grant.** `GRANT MAINTAIN … TO cmd_rollup_writer` is an object ACL that
+   `DROP MATERIALIZED VIEW` destroys, exactly like the `SELECT` ACL 0067 re-asserts. 0067 does NOT
+   re-assert `MAINTAIN`. Result: the post-refresh `VACUUM (ANALYZE)` (`refreshChargeRollup.ts`) starts
+   failing "permission denied" → degrades quietly to no-vacuum (non-fatal, only a logged warning), and
+   the covering index's `Heap Fetches: 0` decays between autovacuums.
+
+**Required 0067 amendments before it is ever applied:** (a) also create
+`cmd_charge_rollup_entity_payment_cov`; (b) re-assert `GRANT MAINTAIN … TO cmd_rollup_writer`;
+(c) add `set lock_timeout = '5s';` so a cron collision fails fast instead of stalling all readers.
+
+### RECOMMENDED instead: build-alongside-and-swap (sub-second lock, no window)
+Rather than the in-place rebuild, build a `_next` matview and swap by rename:
+1. `create materialized view collections.cmd_explorer_charge_rollup_next as <0067 def> with data;` —
+   no lock on the live object; the :45 cron keeps refreshing the live matview during the ~60–95s build
+   (different object, no conflict).
+2. Build **all eight** indexes on `_next` (0059's six + the 0067 name index + **0068's covering
+   index**), with `_next`-suffixed names (index names are unique per schema).
+3. Assert grants + ownership on `_next`: `SELECT` to `claims_reader`, `SELECT` + **`MAINTAIN`** to
+   `cmd_rollup_writer`, revoke public/anon/authenticated/service_role (owner `postgres`).
+4. **Pre-swap verification (in the same migration, before the rename):** diff `pg_indexes` and the
+   `relacl` of `_next` vs the live matview and RAISE EXCEPTION on any missing index or grant, so a
+   rename can never ship a matview that lost an index or ACL.
+5. Swap in ONE transaction with `set lock_timeout='5s'`: `ALTER MATERIALIZED VIEW … RENAME` live →
+   `_old`, then `_next` → canonical name. Sub-second `ACCESS EXCLUSIVE`.
+6. After verifying, `DROP MATERIALIZED VIEW … _old` and rename the `_next`-suffixed indexes back to
+   canonical names (cosmetic).
+
+**Blocker check (all clear):** no dependent views (empty `pg_depend`); the refresh function refers to
+the matview by name and re-resolves post-rename (plpgsql cached plan invalidates on DDL — no OID
+pin); Supavisor txn pooler forbids named prepared statements so nothing holds a stale OID;
+`rollup_refresh_run` is a separate table, unaffected. Costs: transient ~222 MB extra disk during the
+build; the swapped-in data is a build-time snapshot (~2 min stale) until the next :45 refresh (or run
+one refresh immediately after the swap). A swap landing exactly during a :45 refresh waits on that
+refresh's `SHARE UPDATE EXCLUSIVE` — the `lock_timeout='5s'` makes it fail fast and retry rather than
+pile readers up.
+
+**Recommendation: use the swap.** It cuts the `ACCESS EXCLUSIVE` window from ~90–150s to sub-second,
+removes the maintenance window and the cron-pause, and largely dissolves the collision risk — at the
+cost of transient double disk and a slightly longer migration (index renames + the pre-swap diff).
+The in-place rebuild's only advantage is simplicity, which does not justify a ~2 min production
+outage on a matview two live surfaces read.

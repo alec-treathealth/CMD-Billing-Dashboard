@@ -39,7 +39,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Briefcase, Building2, Eye, EyeOff, Landmark, RotateCcw, ShieldCheck } from 'lucide-react';
+import { Briefcase, Building2, Eye, EyeOff, Landmark, Lock, ShieldCheck } from 'lucide-react';
 import {
   getQualifyMatchSummary,
   getQualifyComposedCases,
@@ -77,7 +77,7 @@ import type { RatingBucket } from '@/lib/qualify/rating';
 import { CasesTable } from '@/components/qualify/cases-table';
 import { CohortSheet } from '@/components/qualify/cohort-sheet';
 import { FacilityPanel } from '@/components/qualify/facility-panel';
-import { BookKpiTiles, HeatingUpCards, HeatingUpSkeleton, MatchCountReadout } from '@/components/qualify/overview';
+import { BookKpiTiles, EvidenceGauge, HeatingUpCards, HeatingUpSkeleton } from '@/components/qualify/overview';
 import { WindowControl } from '@/components/qualify/window-control';
 import { VobModal } from '@/components/qualify/vob-modal';
 import { QualifyLandingHero } from '@/components/qualify/landing-hero';
@@ -131,6 +131,12 @@ export function QualifyTab({
   //    derived from the facility selection (deriving it would freeze the marquee whenever someone picks a
   //    facility in the picker or restores a filtered URL — a pause with no visible cause). ─────────────
   const [tickerPinned, setTickerPinned] = useState(false);
+
+  // ── CHIP PROVENANCE — the facility + payer values a ticker-card click PUT into the filter set, so
+  //    their chips render dashed + ↳ (distinct from hand-typed picks). Set ONLY by a card click, cleared
+  //    by the clear actions; a value stops reading derived the moment it leaves the selection (the
+  //    pickers intersect this with `selected`). Purely visual — behaviour is identical to a typed chip. ─
+  const [derivedValues, setDerivedValues] = useState<ReadonlySet<string>>(() => new Set());
 
   // ── FACILITY PANEL — the payer-wide ranking, fetched ONLY when EXACTLY ONE payer is selected (decision
   //    4). Market is deliberately NOT passed ({} ) so employer/funding never narrow the ranking: the
@@ -443,8 +449,11 @@ export function QualifyTab({
   // Safety: if every filter is cleared (incl. a manual chip removal down to empty), drop the pin so the
   // marquee doesn't stay paused with nothing selected. The explicit clear actions also drop it directly.
   useEffect(() => {
-    if (!hasAnyFilter && tickerPinned) setTickerPinned(false);
-  }, [hasAnyFilter, tickerPinned]);
+    if (!hasAnyFilter) {
+      if (tickerPinned) setTickerPinned(false);
+      if (derivedValues.size > 0) setDerivedValues(new Set());
+    }
+  }, [hasAnyFilter, tickerPinned, derivedValues]);
 
   // ── EMPLOYER type-ahead (server-side; ≥3 chars, debounced). ──────────────────────────────────────
   useEffect(() => {
@@ -608,6 +617,9 @@ export function QualifyTab({
     setTickerPinned(true);
     setFacilitySelection([t.facilityKey]);
     setPayerSelection([t.dominantPayer]);
+    // Mark exactly these two as ticker-DERIVED so their chips read dashed + ↳ (a hand-picked chip stays
+    // solid). Namespaces don't collide, so one set feeds both the facility and payer pickers.
+    setDerivedValues(new Set([t.facilityKey, t.dominantPayer]));
     setEmployerSelection([]);
     setFundingSelection([]);
     setMemberId('');
@@ -650,6 +662,7 @@ export function QualifyTab({
     setGroupNumber('');
     setClientName('');
     setTickerPinned(false);
+    setDerivedValues(new Set());
     setSummary(null);
     setComposedCases([]);
     setCapped(false);
@@ -700,9 +713,6 @@ export function QualifyTab({
         ]
           .filter(Boolean)
           .join(' · ') || null;
-  // Design B affordance: employer/funding narrow the list, NOT the tiles — say so when they're active,
-  // so a non-moving tile reads as intentional, not a bug.
-  const marketNarrowActive = employerSelection.length > 0 || fundingSelection.length > 0;
   // Ticker scope (Design B): payer-scoped at exactly one payer, book-wide otherwise.
   const tickerScopePayer = payerSelection.length === 1 ? payerSelection[0]! : null;
   const billedText =
@@ -764,135 +774,206 @@ export function QualifyTab({
         <HeatingUpSkeleton />
       ) : null}
 
-      {/* ── COMPOSE BAR: four pickers + PHI row + window + LOC + reveal, in the teal finder card ── */}
-      <div className="rounded-2xl border border-t-[3px] border-t-teal700 bg-card p-4 shadow-ths-sm">
-        <div className="flex flex-wrap items-start gap-3.5">
-          <MultiSelectTagPicker
-            label="Facility"
-            placeholder="Filter by facility…"
-            icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
-            options={facilityOptions}
-            selected={facilitySelection}
-            onToggle={toggleFacility}
-            onClear={clearFacilities}
-          />
-          <MultiSelectTagPicker
-            label="Payer"
-            placeholder="Filter by payer…"
-            icon={<ShieldCheck className="h-3.5 w-3.5" aria-hidden />}
-            options={payerOptions}
-            selected={payerSelection}
-            onToggle={togglePayer}
-            onClear={clearPayers}
-          />
-          <MultiSelectTagPicker
-            label="Employer"
-            placeholder="Type to find employers…"
-            icon={<Briefcase className="h-3.5 w-3.5" aria-hidden />}
-            options={employerPickerOptions}
-            selected={employerSelection}
-            onToggle={toggleEmployer}
-            onClear={clearEmployers}
-            onQueryChange={setEmployerQuery}
-            loading={employerLoading}
-            minChars={EMPLOYER_MIN_CHARS}
-            displayOverride={employerDisplay}
-          />
-          {/* Funding stays a PICKER (Collections parity) — the earlier two-toggle-pill plan is dropped. */}
-          <MultiSelectTagPicker
-            label="Funding"
-            placeholder="Self-funded / Fully insured…"
-            icon={<Landmark className="h-3.5 w-3.5" aria-hidden />}
-            options={fundingPickerOptions}
-            selected={fundingSelection}
-            onToggle={toggleFunding}
-            onClear={clearFunding}
-          />
+      {/* ── COMPOSE CONSOLE (Design B, made VISIBLE): a two-zone split — Payer + Facility SCORE the book
+          (tinted zone, teal controls); Employer + Funding narrow the LIST only (plain zone) — over the
+          hatched PHI row and the dark readout bar. The seam states the rule, so the layout itself now
+          says what the old "employer/funding don't move the tiles" hint line used to spell out (removed).
+          Interaction model unchanged: AND-composed filter, drill-not-filter, tickerPinned distinct from
+          selection, canRevealPhi gating, amounts choke-point — visual only. ── */}
+      <div className="overflow-hidden rounded-2xl border border-line bg-surface shadow-ths-sm">
+        {/* teal cap — the finder-card chrome, kept */}
+        <div aria-hidden className="h-[3px] bg-gradient-to-r from-teal700 via-teal500 to-teal200" />
+
+        <div className="grid grid-cols-1 min-[900px]:grid-cols-[1fr_auto_1fr]">
+          {/* ZONE 1 — SCORES READ THIS: payer + facility (they move ratings / tiles / ticker). */}
+          <div className="bg-gradient-to-b from-teal50/60 to-teal50/20 px-4 py-4 sm:px-5">
+            <div className="mb-3 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+              <span className="font-head text-[10.5px] font-bold uppercase tracking-[0.1em] text-teal700">
+                Scores read this
+              </span>
+              <span className="text-[11.5px] text-ink600">Ratings, tiles and the ticker follow these two.</span>
+            </div>
+            <div className="grid grid-cols-1 gap-3 min-[560px]:grid-cols-2">
+              <MultiSelectTagPicker
+                label="Payer"
+                placeholder="Filter by payer…"
+                icon={<ShieldCheck className="h-3.5 w-3.5" aria-hidden />}
+                options={payerOptions}
+                selected={payerSelection}
+                onToggle={togglePayer}
+                onClear={clearPayers}
+                tone="score"
+                derivedValues={derivedValues}
+              />
+              <MultiSelectTagPicker
+                label="Facility"
+                placeholder="Filter by facility…"
+                icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
+                options={facilityOptions}
+                selected={facilitySelection}
+                onToggle={toggleFacility}
+                onClear={clearFacilities}
+                tone="score"
+                derivedValues={derivedValues}
+              />
+            </div>
+          </div>
+
+          {/* SEAM — carries the rule. Vertical divider on desktop; a horizontal one when the zones stack
+              (<900px). The label background masks the line behind it. */}
+          <div className="relative flex items-center justify-center min-[900px]:items-stretch">
+            <div className="h-px w-full bg-line min-[900px]:my-3.5 min-[900px]:h-auto min-[900px]:w-px" />
+            <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap bg-surface px-2.5 py-[3px] font-mono text-[9.5px] uppercase tracking-[0.14em] text-ink400 min-[900px]:rotate-180 min-[900px]:px-[3px] min-[900px]:py-2.5 min-[900px]:[writing-mode:vertical-rl]">
+              narrows the list only →
+            </span>
+          </div>
+
+          {/* ZONE 2 — LIST ONLY: employer + funding (they filter the matching claims, never the ratings). */}
+          <div className="px-4 py-4 sm:px-5">
+            <div className="mb-3 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+              <span className="font-head text-[10.5px] font-bold uppercase tracking-[0.1em] text-ink400">List only</span>
+              <span className="text-[11.5px] text-ink400">Too thin to score — these filter claims, not ratings.</span>
+            </div>
+            <div className="grid grid-cols-1 gap-3 min-[560px]:grid-cols-2">
+              <MultiSelectTagPicker
+                label="Employer"
+                placeholder="Type to find employers…"
+                icon={<Briefcase className="h-3.5 w-3.5" aria-hidden />}
+                options={employerPickerOptions}
+                selected={employerSelection}
+                onToggle={toggleEmployer}
+                onClear={clearEmployers}
+                onQueryChange={setEmployerQuery}
+                loading={employerLoading}
+                minChars={EMPLOYER_MIN_CHARS}
+                displayOverride={employerDisplay}
+                tone="list"
+              />
+              {/* Funding stays a PICKER (Collections parity) — the earlier two-toggle-pill plan is dropped. */}
+              <MultiSelectTagPicker
+                label="Funding"
+                placeholder="Self-funded / Fully insured…"
+                icon={<Landmark className="h-3.5 w-3.5" aria-hidden />}
+                options={fundingPickerOptions}
+                selected={fundingSelection}
+                onToggle={toggleFunding}
+                onClear={clearFunding}
+                tone="list"
+              />
+            </div>
+          </div>
         </div>
 
-        {/* PHI ROW — canRevealPhi-gated. Qualify carries a FOURTH input (Client Name) that Collections
-            deliberately does NOT — the admissions-first person lookup (Change C). Do NOT "fix" this into
-            Collections parity. Client Name is additionally behind QUALIFY_CLIENT_NAME_ENABLED (dormant
-            until migration 0067 + the name backfill); raw terms are state-only (never URL/log). */}
+        {/* PHI ROW — hatched + dashed-teal top border + "Identified" lock badge so an IDENTIFIED (person-
+            level) search always looks materially different from the aggregate zones. canRevealPhi-gated.
+            Qualify carries a FOURTH input (Client Name) Collections deliberately does NOT — the
+            admissions-first person lookup (Change C); do NOT "fix" to Collections parity. Client Name is
+            additionally behind QUALIFY_CLIENT_NAME_ENABLED (dormant until migration 0067 + the owner-run
+            name backfill — Part 2, deferred), so it and its divergence note render only when the flag is
+            on. Raw terms are state-only (never URL/log). */}
         {canRevealPhi ? (
-          <div className="mt-3 flex flex-wrap items-end gap-3 border-t border-dashed border-line pt-3">
-            <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-              <Eye className="h-3.5 w-3.5" aria-hidden />
-              PHI narrows
+          <div className="q-phi-hatch border-t border-dashed border-teal200 px-4 py-4 sm:px-5">
+            <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-teal900 px-2.5 py-1 text-[10.5px] font-semibold tracking-wide text-white">
+                <Lock className="h-2.5 w-2.5" aria-hidden />
+                Identified
+              </span>
+              <span className="font-head text-[10.5px] font-bold uppercase tracking-[0.1em] text-teal900">
+                Find one client
+              </span>
+              <span className="text-[11.5px] text-ink600 min-[560px]:ml-auto">Audited on use. Never written to the URL.</span>
+              {canGlobalReveal ? (
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={globalReveal}
+                  onClick={toggleGlobalReveal}
+                  title="Reveal PHI identifiers across the results — every reveal is audited"
+                  className={[
+                    'inline-flex h-8 items-center gap-2 rounded-lg border px-3 text-[12px] font-semibold transition-colors',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40',
+                    globalReveal
+                      ? 'border-coral400 bg-coral50 text-coral600'
+                      : 'border-line bg-surface text-ink600 hover:text-ink900',
+                  ].join(' ')}
+                >
+                  {globalReveal ? <Eye aria-hidden className="h-3.5 w-3.5" /> : <EyeOff aria-hidden className="h-3.5 w-3.5" />}
+                  Reveal PHI identifiers
+                </button>
+              ) : null}
             </div>
-            <PhiInput label="Member ID" value={memberId} onChange={setMemberId} placeholder="Exact member ID" />
-            <PhiInput label="Alpha prefix" value={alphaPrefix} onChange={setAlphaPrefix} placeholder="3-letter prefix" />
-            <PhiInput label="Group #" value={groupNumber} onChange={setGroupNumber} placeholder="Group number" />
+            <div className="grid grid-cols-2 gap-3 min-[720px]:grid-cols-4">
+              <PhiInput label="Member ID" value={memberId} onChange={setMemberId} placeholder="e.g. W2740…" />
+              <PhiInput label="Alpha prefix" value={alphaPrefix} onChange={setAlphaPrefix} placeholder="3 letters" />
+              <PhiInput label="Group #" value={groupNumber} onChange={setGroupNumber} placeholder="Group" />
+              {/* FOURTH field (Client name) is INTENTIONALLY ABSENT here — this three-field state is not
+                  an oversight. It is DATA-GATED behind QUALIFY_CLIENT_NAME_ENABLED (Part 2, deferred):
+                  as of 2026-07-27 the cmd_explorer_charge_rollup matview has NO patient_name_bidx column
+                  and coverage is ~0.07%, so wiring name search today would 500 / silently miss ~99.9% of
+                  patients. Do NOT "complete" this by enabling the flag against the current matview — that
+                  needs the (recommended build-alongside-and-swap) rebuild + the owner-run backfill FIRST.
+                  See docs/veris-data-notes.md → "0067 ops analysis" and contract.ts QUALIFY_CLIENT_NAME_ENABLED. */}
+              {QUALIFY_CLIENT_NAME_ENABLED ? (
+                <PhiInput label="Client name" value={clientName} onChange={setClientName} placeholder="Last, First" />
+              ) : null}
+            </div>
             {QUALIFY_CLIENT_NAME_ENABLED ? (
-              <PhiInput label="Client name" value={clientName} onChange={setClientName} placeholder="Exact client name · audited" />
+              <p className="mt-2 text-[10.5px] text-ink400">Qualify only — Collections has no name lookup.</p>
             ) : null}
           </div>
         ) : null}
 
-        {/* Controls row: window · LOC lens · clear · global reveal */}
-        <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3">
-          <WindowControl window={windowSel} currentYear={new Date().getFullYear()} onChange={onWindow} />
-          <div className="h-7 w-px bg-line" />
-          <div className="inline-flex items-center gap-1.5" role="group" aria-label="Level of care">
-            <span className="text-[11.5px] font-semibold text-muted-foreground">LOC</span>
-            {(['IP', 'OP', 'BOTH'] as const).map((loc) => (
-              <button
-                key={loc}
-                type="button"
-                aria-pressed={locFilter === loc}
-                onClick={() => setLocFilter((cur) => (cur === loc ? null : loc))}
-                className={[
-                  'rounded-full border px-2.5 py-1 text-[11px] font-bold transition-colors',
-                  locFilter === loc
-                    ? 'border-teal500 bg-teal50 text-teal700'
-                    : 'border-teal200 bg-card text-muted-foreground hover:bg-teal50',
-                ].join(' ')}
-              >
-                {loc === 'BOTH' ? 'Both' : loc}
-              </button>
-            ))}
+        {/* READOUT BAR — anchors the console on the dark teal bar: the live match count, then [evidence
+            gauge — wired in Part 1b], then the window + LOC segmented controls + Clear all. */}
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-line bg-teal900 px-4 py-3 sm:px-5">
+          <div className="flex items-baseline gap-2">
+            <span className="font-mono text-[26px] font-semibold leading-none tracking-tight text-white tabular-nums">
+              {!hasAnyFilter ? '—' : summaryLoading && !summary ? '…' : (summary?.count ?? 0).toLocaleString('en-US')}
+            </span>
+            <span className="text-[12px] text-white/70">charge lines match</span>
+            {hasAnyFilter && summaryLoading ? (
+              <span className="text-[10.5px] uppercase tracking-wide text-teal200">updating…</span>
+            ) : null}
           </div>
-          {hasAnyFilter ? (
-            <button
-              type="button"
-              onClick={clearAll}
-              aria-label="Clear all filters"
-              className="inline-flex h-9 items-center gap-2 rounded-xl bg-teal700 px-3.5 text-[13px] font-bold text-white shadow-ths-sm transition-colors hover:bg-teal900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/50"
-            >
-              <RotateCcw aria-hidden className="h-4 w-4" />
-              Clear filters
-            </button>
-          ) : null}
-          {canGlobalReveal ? (
-            <button
-              type="button"
-              role="switch"
-              aria-checked={globalReveal}
-              onClick={toggleGlobalReveal}
-              title="Reveal PHI identifiers across the results — every reveal is audited"
-              className={[
-                'ml-auto inline-flex h-9 items-center gap-2.5 rounded-xl border px-3.5 text-[13px] font-semibold transition-colors',
-                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40',
-                globalReveal
-                  ? 'border-coral400 bg-coral50 text-coral600'
-                  : 'border-line bg-background text-ink600 hover:bg-surface hover:text-ink900',
-              ].join(' ')}
-            >
-              {globalReveal ? <Eye aria-hidden className="h-4 w-4" /> : <EyeOff aria-hidden className="h-4 w-4" />}
-              <span>Reveal PHI Identifiers</span>
-            </button>
-          ) : null}
+
+          {/* EVIDENCE GAUGE — distinct clients behind the composed match (same population as the count),
+              fill-state only. Shown once a match exists; the count block already carries "—" at landing. */}
+          {hasAnyFilter && summary ? <EvidenceGauge distinctPatients={summary.distinctPatients} /> : null}
+
+          <div className="flex flex-wrap items-center gap-2.5 min-[560px]:ml-auto">
+            <WindowControl window={windowSel} currentYear={new Date().getFullYear()} onChange={onWindow} tone="dark" />
+            <div className="inline-flex rounded-lg bg-white/10 p-0.5" role="group" aria-label="Level of care">
+              {(['IP', 'OP', 'BOTH'] as const).map((loc) => (
+                <button
+                  key={loc}
+                  type="button"
+                  aria-pressed={locFilter === loc}
+                  onClick={() => setLocFilter((cur) => (cur === loc ? null : loc))}
+                  className={[
+                    'rounded-md px-3 py-1.5 text-xs font-semibold transition-colors',
+                    locFilter === loc ? 'bg-white text-teal900' : 'text-white/70 hover:text-white',
+                  ].join(' ')}
+                >
+                  {loc === 'BOTH' ? 'Both' : loc}
+                </button>
+              ))}
+            </div>
+            {hasAnyFilter ? (
+              <button
+                type="button"
+                onClick={clearAll}
+                aria-label="Clear all filters"
+                className="rounded-lg border border-white/25 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+              >
+                Clear all
+              </button>
+            ) : null}
+          </div>
         </div>
       </div>
 
       {/* ── KPI TILES (Phase 2: scoped to payer + facility; sample-gated) ── */}
       <BookKpiTiles kpis={kpis} locActive={locFilter !== null} scopeLabel={kpiScopeLabel} />
-      {marketNarrowActive ? (
-        <p className="mt-2 text-[11px] text-ink400">
-          Tiles &amp; ratings reflect <b className="font-semibold text-ink600">payer + facility</b>. Employer &amp;
-          funding filter the matching claims below — they don’t re-scope these tiles.
-        </p>
-      ) : null}
 
       {/* ── CONTEXT LINE + LIVE MATCH COUNT + FACILITY RANKING + COMPOSED CASES ── */}
       {hasAnyFilter ? (
@@ -916,11 +997,31 @@ export function QualifyTab({
                 <span>{billedText} billed</span>
               </>
             ) : null}
+            {/* Composed-match realization (non-dollar; relocated here from the old readout card — the dark
+                readout bar now carries only the count + gauge + controls). "—" for a collapsed denominator. */}
+            {summary ? (
+              <>
+                <span aria-hidden className="text-ink300">·</span>
+                <span>
+                  allowed{' '}
+                  <b className="font-mono font-semibold text-ink900">
+                    {summary.pctAllowedOfBilled === null ? '—' : `${Math.round(summary.pctAllowedOfBilled)}%`}
+                  </b>{' '}
+                  of billed
+                </span>
+                <span aria-hidden className="text-ink300">·</span>
+                <span>
+                  paid{' '}
+                  <b className="font-mono font-semibold text-ink900">
+                    {summary.pctPaidOfBilled === null ? '—' : `${Math.round(summary.pctPaidOfBilled)}%`}
+                  </b>{' '}
+                  of billed
+                </span>
+              </>
+            ) : null}
             <span aria-hidden className="text-ink300">·</span>
             <span className="text-[#7fae9f]">BXR + Indigo</span>
           </div>
-
-          <MatchCountReadout summary={summary} loading={summaryLoading} hasAmounts={summaryHasAmounts} />
 
           <div className="grid grid-cols-1 items-start gap-4 min-[960px]:grid-cols-[380px_1fr]">
             {/* LEFT: the payer-wide facility ranking — for the ONE selected payer, or the payer DERIVED

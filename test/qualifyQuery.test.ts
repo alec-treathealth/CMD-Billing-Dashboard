@@ -6,6 +6,7 @@ import {
   buildFacilityRankingQuery,
   buildIdentifierLandingFacilityQuery,
   buildFacilityCasesQuery,
+  buildQualifyMatchClientCountQuery,
   buildMoversQuery,
   buildBookKpisQuery,
   buildFacilityTrendQuery,
@@ -65,6 +66,30 @@ test('shared predicate: Qualify cases + Collections summary derive the SAME WHER
   const summary = normParams(buildCmdSearchSummaryQueries(filter, BOTH).totals.sql);
   assert.ok(cases.includes(expected), 'Qualify cases query uses the shared predicate verbatim');
   assert.ok(summary.includes(expected), 'Collections summary totals uses the SAME shared predicate');
+
+  // The evidence-gauge client count (Qualify-owned) ALSO derives the SAME predicate — so the gauge and
+  // the "N charge lines match" count describe the identical population. It does NOT touch the Collections
+  // summary builder (which is patient-count-blind); it reuses cmdExplorerBaseConds like the cases drill.
+  const evidence = normParams(buildQualifyMatchClientCountQuery(filter, BOTH).sql);
+  assert.ok(evidence.includes(expected), 'evidence client-count uses the SAME shared predicate as the match count');
+});
+
+// ── EVIDENCE GAUGE client-count builder: counts distinct clients, NEVER projects the token. ───────────
+test('buildQualifyMatchClientCountQuery: counts distinct member_id_bidx off the rollup, never projects it', () => {
+  const { sql, params } = buildQualifyMatchClientCountQuery(
+    casesFilter('AETNA', '405 recovery', '2026-06-17', '2026-07-17'),
+    BOTH,
+  );
+  assert.match(sql, /count\(distinct member_id_bidx\)::int as distinct_patients/, 'counts distinct clients');
+  // member_id_bidx appears ONLY inside the count() — never projected/selected/grouped bare.
+  assert.ok(
+    !sql.replace(/count\(distinct member_id_bidx\)/g, '').includes('member_id_bidx'),
+    'member_id_bidx is COUNTED, never projected (no PHI token on the wire)',
+  );
+  assert.match(sql, /from collections\.cmd_explorer_charge_rollup/, 'charge-grain rollup, never raw rows');
+  assert.match(sql, /business_entity_id = any\(\$1::uuid\[\]\)/, 'cross-tenant scoped');
+  assert.deepEqual(params[0], BOTH, 'pinned [BXR, Indigo]');
+  assert.throws(() => buildQualifyMatchClientCountQuery(casesFilter('X', 'F', '2026-01-01', '2026-02-01'), []), /entityIds required/);
 });
 
 // ── The headline invariant: every builder targets BOTH tenants in ONE query. ─────────────────────
