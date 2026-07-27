@@ -2205,7 +2205,13 @@ export async function loadQualifyFacilityTrends(
   // Phase 2 (Design B): payer-only scope (exactly-one-payer) — NO market; the ticker is never
   // employer/funding-narrowed. The builder also enforces the both-window distinct-patient delta gate.
   const q = buildFacilityTrendQuery(from, to, priorFrom, entityIds, { payer: opts.payer ?? null });
-  const { rows } = await readerExecutor().query<QualifyFacilityTrendRow>(q.sql, q.params);
+  // The per-facility distinct-patient sort in this CTE spills to disk even at the 30-day window (the
+  // pooler's ~3.5MB work_mem < the sort's footprint); at the 12-month window it spills ~34MB. A
+  // TRANSACTION-SCOPED work_mem bump keeps the short-window sort in memory and roughly halves the
+  // 12-month one — zero query-shape change. SET LOCAL is reset at COMMIT, so it cannot leak across the
+  // transaction pooler (see PgExecutor.queryWithWorkMem). 32MB × the pool's max:4 concurrency = a
+  // bounded worst case. This is the SOLE query granted the override.
+  const { rows } = await readerExecutor().queryWithWorkMem<QualifyFacilityTrendRow>('32MB', q.sql, q.params);
   return rows;
 }
 

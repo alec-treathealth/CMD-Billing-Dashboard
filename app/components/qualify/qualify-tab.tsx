@@ -49,6 +49,7 @@ import {
   getQualifyPatientCohort,
   getQualifyBookKpis,
   getQualifyFacilityTrends,
+  getQualifyOverview,
   loadQualifyFacilityOptions,
   loadQualifyPayerOptions,
   loadQualifyEmployers,
@@ -188,6 +189,17 @@ export function QualifyTab({
   const overviewGenRef = useRef(0);
   const kpiGenRef = useRef(0);
 
+  // ── MOUNT PERF (Step 2): on a clean mount (no restored payer/facility) the book-wide KPI tiles +
+  //    Heating-Up trends are fetched in ONE getQualifyOverview action (it Promise.alls both queries
+  //    server-side) — saving a Server-Action round-trip (~100–200 ms invocation+network) and running
+  //    the two rollup reads concurrently (max(~298,~52) ms) instead of the two SEPARATE, SERIALIZED
+  //    actions the dedicated effects would otherwise fire. `combinedOwnedInitialRef` marks that the
+  //    combined fetch owns the initial strip; the dedicated KPI + ticker effects skip their auto-run
+  //    while it does, and resume the instant the user interacts (`userDrivenRef`). A URL that restored a
+  //    payer/facility scope leaves the initial fetch to the dedicated (scoped) effects, exactly as before.
+  const userDrivenRef = useRef(false);
+  const combinedOwnedInitialRef = useRef(false);
+
   const resetReveal = useCallback(() => {
     setRevealed(new Map());
     setRevealingKeys(new Set());
@@ -274,9 +286,35 @@ export function QualifyTab({
       if (!alive || !r.ok) return;
       setPayerOptions(r.payers.map((p) => ({ value: p, display: p })));
     });
-    // The overview strip (ticker + KPI tiles) is fetched by the dedicated effects below, which fire on
-    // mount with the restored selections — no strip fetch here, and `initializing` clears when the
-    // ticker fetch (refreshOverview) first settles.
+    // MOUNT PERF (Step 2): when NOTHING scopes the strip (no restored payer/facility), fetch the
+    // book-wide KPI tiles + Heating-Up trends in ONE getQualifyOverview action (resolve:false →
+    // strip only, no hybrid resolve, no seed cases, no extra audit — identical to today's mount) that
+    // Promise.alls both queries server-side. This REPLACES the two separate, serialized actions the
+    // dedicated effects below would otherwise fire on mount; they skip their initial auto-run while
+    // this owns it (combinedOwnedInitialRef) and resume on first user interaction (userDrivenRef). It
+    // participates in kpiGenRef/overviewGenRef so a fast user action supersedes it. When the URL DID
+    // restore a payer/facility, this is skipped and the dedicated (scoped) effects own the initial
+    // load exactly as before — so a facility-only restore still gets book-wide trends via the ticker.
+    if (url.payers.length === 0 && url.facilities.length === 0) {
+      combinedOwnedInitialRef.current = true;
+      const kgen = ++kpiGenRef.current;
+      const ogen = ++overviewGenRef.current;
+      getQualifyOverview(url.window, undefined, { resolve: false })
+        .then((ov) => {
+          if (!alive) return;
+          if (kpiGenRef.current === kgen) setKpis(ov.kpis);
+          if (overviewGenRef.current === ogen) {
+            setTrends(ov.trends);
+            setOverviewError(false);
+          }
+        })
+        .catch(() => {
+          if (alive && overviewGenRef.current === ogen) setOverviewError(true);
+        })
+        .finally(() => {
+          if (alive && overviewGenRef.current === ogen) setInitializing(false);
+        });
+    }
     return () => {
       alive = false;
     };
@@ -290,6 +328,9 @@ export function QualifyTab({
   //    Refetch frequency: one fetch per payer/facility tag toggle or window change; ZERO on
   //    employer/funding/PHI/typing (those aren't deps). ────────────────────────────────────────────────
   useEffect(() => {
+    // Step 2: the combined mount fetch owns the initial book-wide tiles until the user first interacts;
+    // skip the auto-run so mount's own URL-restore/window setState re-renders don't double-fetch.
+    if (combinedOwnedInitialRef.current && !userDrivenRef.current) return;
     const kgen = ++kpiGenRef.current;
     const t = setTimeout(() => {
       getQualifyBookKpis(windowSel, {
@@ -312,6 +353,10 @@ export function QualifyTab({
   //    a facility toggle can't refetch/remount the marquee mid-scroll). Payer-scoped at exactly one payer,
   //    book-wide at 0 or 2+. Debounced + gen-guarded (refreshOverview bumps overviewGenRef); fires on mount. ─
   useEffect(() => {
+    // Step 2: skip the initial auto-run while the combined mount fetch owns the strip (resumes on first
+    // user interaction). facilitySelection is deliberately NOT read here or added to deps — the ticker
+    // must never refetch/remount on a facility change (Phase 2 marquee invariant, unchanged).
+    if (combinedOwnedInitialRef.current && !userDrivenRef.current) return;
     const payer = payerSelection.length === 1 ? payerSelection[0]! : null;
     const t = setTimeout(() => refreshOverview(windowSel, payer), COMPOSE_DEBOUNCE_MS);
     return () => clearTimeout(t);
@@ -606,6 +651,7 @@ export function QualifyTab({
   // ── Window change: just set the window — the KPI-tiles, ticker, and compose effects all key on
   //    windowSel and refetch themselves (no imperative strip refresh needed). ─────────────────────────
   const onWindow = useCallback((w: QualifyWindow) => {
+    userDrivenRef.current = true; // Step 2: hand strip ownership back to the dedicated effects
     setWindowSel(w);
   }, []);
 
@@ -614,6 +660,7 @@ export function QualifyTab({
   //    auto-added payer chip is behaviorally/visually identical to a hand-picked one (same picker state). ─
   const openTrendCard = useCallback((t: QualifyFacilityTrend) => {
     if (!t.dominantPayer) return;
+    userDrivenRef.current = true; // Step 2: a ticker-card click is a user interaction
     setTickerPinned(true);
     setFacilitySelection([t.facilityKey]);
     setPayerSelection([t.dominantPayer]);
@@ -629,14 +676,22 @@ export function QualifyTab({
   }, []);
 
   // ── Picker plumbing ───────────────────────────────────────────────────────────────────────────────
-  const toggleIn = (setter: React.Dispatch<React.SetStateAction<string[]>>) => (value: string) =>
+  const toggleIn = (setter: React.Dispatch<React.SetStateAction<string[]>>) => (value: string) => {
+    userDrivenRef.current = true; // Step 2: any picker toggle hands strip ownership to the dedicated effects
     setter((prev) => (prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value]));
+  };
   const toggleFacility = useCallback(toggleIn(setFacilitySelection), []);
   const togglePayer = useCallback(toggleIn(setPayerSelection), []);
   const toggleEmployer = useCallback(toggleIn(setEmployerSelection), []);
   const toggleFunding = useCallback(toggleIn(setFundingSelection), []);
-  const clearFacilities = useCallback(() => setFacilitySelection([]), []);
-  const clearPayers = useCallback(() => setPayerSelection([]), []);
+  const clearFacilities = useCallback(() => {
+    userDrivenRef.current = true; // Step 2
+    setFacilitySelection([]);
+  }, []);
+  const clearPayers = useCallback(() => {
+    userDrivenRef.current = true; // Step 2
+    setPayerSelection([]);
+  }, []);
   const clearEmployers = useCallback(() => setEmployerSelection([]), []);
   const clearFunding = useCallback(() => setFundingSelection([]), []);
   const employerPickerOptions = useMemo<PickerOption[]>(
@@ -652,6 +707,7 @@ export function QualifyTab({
   );
 
   const clearAll = useCallback(() => {
+    userDrivenRef.current = true; // Step 2: clearing filters resumes the dedicated (book-wide) strip effects
     composeGenRef.current += 1;
     setFacilitySelection([]);
     setPayerSelection([]);
