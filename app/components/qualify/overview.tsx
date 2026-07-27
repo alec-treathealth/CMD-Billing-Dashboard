@@ -19,6 +19,7 @@
  * under renderToStaticMarkup (effects don't fire there) — so every component still renders hermetically
  * in the tests. Imports are relative so the render test runs under tsx without `@/` resolution.
  */
+import { ChevronRight } from 'lucide-react';
 import { ratingBucket } from '../../lib/qualify/rating';
 import { qualifyWindowLabel, serializeQualifyWindow } from '../../lib/qualify/contract';
 import type { QualifyBookKpis, QualifyFacilityTrend, QualifyWindow } from '../../lib/qualify/contract';
@@ -120,23 +121,33 @@ export function HeatingUpCards({
   trends,
   window,
   activeKey = null,
+  pinned = false,
   onOpen,
 }: {
   trends: readonly QualifyFacilityTrend[];
   window: QualifyWindow;
   /** facilityKey of the card whose facility is the current Change-E scope (marked pressed). */
   activeKey?: string | null;
+  /** A facility is the scoped subject (`scoped`) → force-pause the marquee so the pressed card can't
+   *  slide away; pointer/focus/scroll can't resume it, only unpinning (Clear Search / × All facilities). */
+  pinned?: boolean;
   /** The Change-E hybrid: resolve trend.dominantPayer AND scope to trend.facilityKey. Optional for tests. */
   onOpen?: (trend: QualifyFacilityTrend) => void;
 }) {
   // Continuous, MANUALLY-SCROLLABLE marquee (useMarquee): a real scroll container the user can drag /
-  // wheel left↔right, that keeps auto-scrolling and loops seamlessly (the set renders TWICE; the hook
-  // wraps scrollLeft at the first duplicate). Pauses on hover / focus / active scroll and resumes
-  // shortly after; SNAPS BACK to the start when the window filter changes (resetKey). The duplicate copy
-  // is aria-hidden + tabIndex -1 + data-dup so AT and keyboard see each facility ONCE. Reduced-motion →
-  // no auto-motion, still hand-scrollable (globals.css `.q-marquee`). Hook BEFORE the early return
-  // (rules of hooks — the call must run on every render).
-  const scrollRef = useMarquee<HTMLDivElement>(serializeQualifyWindow(window), trends.length);
+  // wheel left↔right, that keeps auto-scrolling and loops seamlessly. The set renders TWICE ONLY WHEN it
+  // overflows the strip (`isOverflowing`) — the hook wraps scrollLeft at the first duplicate; when a
+  // filtered list already fits, one static set renders (no phantom duplicate, no useless rAF). Pauses on
+  // hover / focus / active scroll and resumes shortly after; FORCE-PAUSED while `pinned`; SNAPS BACK to
+  // the start when the window filter changes (resetKey). The duplicate copy is aria-hidden + tabIndex -1
+  // + data-dup so AT and keyboard see each facility ONCE. Reduced-motion → no auto-motion, still
+  // hand-scrollable (globals.css `.q-marquee`). Hook BEFORE the early return (rules of hooks — the call
+  // must run on every render).
+  const { ref: scrollRef, isOverflowing } = useMarquee<HTMLDivElement>(
+    serializeQualifyWindow(window),
+    trends.length,
+    pinned,
+  );
   if (trends.length === 0) return null;
   const range = qualifyWindowLabel(window);
 
@@ -177,15 +188,30 @@ export function HeatingUpCards({
           'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40',
         ].join(' ')}
       >
+        {/* Meta row: rank + rating dot + LOC pill, and — on OPENABLE cards only — an always-visible
+            chevron in the top-right corner signalling the card is clickable (hover-lift + focus ring are
+            secondary confirmation). Inert cards get no glyph. The name moves to its own row below so a
+            2-line clamp never fights the pill. */}
         <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-ink900">
           <span className="text-[10px] font-bold text-ink400">#{i + 1}</span>
           <span aria-hidden className="q-dot inline-block h-1.5 w-1.5 rounded-full" style={{ background: hex }} />
-          <span className="truncate">{t.name}</span>
           {t.careSetting ? (
             <span className="ml-auto inline-flex shrink-0 items-center rounded-full bg-[#eef4f6] px-2 py-px text-[9px] font-extrabold uppercase tracking-wide text-status-info">
               {LOC_LABEL[t.careSetting]}
             </span>
           ) : null}
+          {openable ? (
+            <ChevronRight
+              aria-hidden
+              className={`h-3 w-3 shrink-0 text-teal500 ${t.careSetting ? '' : 'ml-auto'}`}
+              strokeWidth={2.5}
+            />
+          ) : null}
+        </div>
+        <div className="mt-1 min-h-[2.25rem]">
+          <span className="line-clamp-2 break-words text-[12.5px] font-semibold leading-[1.15] text-ink900">
+            {t.name}
+          </span>
         </div>
         <div className="mt-1.5 flex items-baseline gap-1.5 font-mono text-[24px] font-semibold leading-none text-ink900 tabular-nums">
           {t.currentRating === null ? '—' : Math.round(t.currentRating)}
@@ -223,7 +249,10 @@ export function HeatingUpCards({
        *  that clean. Scrollbar hidden via `.q-marquee` (still fully scrollable). */}
       <div ref={scrollRef} className="q-marquee group relative flex gap-2.5 pb-2 pl-0.5 pr-0.5 pt-0.5">
         {trends.map((t, i) => card(t, i, false))}
-        {trends.map((t, i) => card(t, i, true))}
+        {/* The aria-hidden duplicate set exists ONLY to make the auto-scroll loop seamless — render it
+            solely when the real set overflows the strip (useMarquee measured it). When the LOC lens /
+            search shrinks the list enough to fit, one static set shows and each facility appears once. */}
+        {isOverflowing ? trends.map((t, i) => card(t, i, true)) : null}
       </div>
     </section>
   );

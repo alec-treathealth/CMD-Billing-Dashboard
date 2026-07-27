@@ -59,7 +59,22 @@ export function HeatingUp({
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span aria-hidden style={{ width: 7, height: 7, borderRadius: '50%', background: hex }} />
-                <span style={{ fontSize: 12, fontWeight: 600, color: QUALIFY_PALETTE.ink900, whiteSpace: 'nowrap', maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                <span
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: QUALIFY_PALETTE.ink900,
+                    maxWidth: 180,
+                    // 2-line clamp (mobile has less width to spare): multi-word names wrap instead of
+                    // clipping; overflowWrap breaks a single over-long token so it can't spill.
+                    display: '-webkit-box',
+                    WebkitLineClamp: 2,
+                    WebkitBoxOrient: 'vertical',
+                    whiteSpace: 'normal',
+                    overflow: 'hidden',
+                    overflowWrap: 'anywhere',
+                  }}
+                >
                   {t.name}
                 </span>
               </div>
