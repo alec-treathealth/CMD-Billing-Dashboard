@@ -166,7 +166,13 @@ export function useMarquee<T extends HTMLElement>(resetKey: unknown, itemsPerSet
       el.removeEventListener('touchmove', pauseDefer);
       el.removeEventListener('keydown', pauseDefer);
     };
-  }, [itemsPerSet, isOverflowing, pinned]);
+    // `resetKey` IS a dep: the snap-back effect zeroes el.scrollLeft on a window change, but since we now
+    // track position in JS (write-only) rather than reading scrollLeft each frame, a window swap with the
+    // SAME item count wouldn't otherwise re-run this effect — the stale `pos` would clobber the reset on
+    // the next frame. Re-running here tears down + re-seeds `pos` from the freshly-zeroed scrollLeft. React
+    // runs the earlier-declared snap-back effect's body before this one on the same commit, so we re-seed
+    // from 0, not the old position.
+  }, [itemsPerSet, isOverflowing, pinned, resetKey]);
 
   return { ref, isOverflowing };
 }
