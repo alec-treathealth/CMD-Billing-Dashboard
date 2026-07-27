@@ -41,6 +41,8 @@ import {
   type QualifyBookKpis,
   type QualifyFacilityTrend,
   type QualifyOverview,
+  type QualifyComposeInput,
+  type QualifyMatchSummary,
 } from './contract';
 import type { QualifyPrincipal } from './principal';
 import {
@@ -51,8 +53,13 @@ import {
   type QualifyMoverRow,
   type QualifyBookKpisRow,
   type QualifyFacilityTrendRow,
+  type QualifyMatchSummaryRow,
 } from '../../../src/collections/qualifyQuery';
-import { COHORT_MIN_PATIENTS, type VobMarketFilter } from '../../../src/collections/cmdExplorerQuery';
+import {
+  COHORT_MIN_PATIENTS,
+  type CmdExplorerFilter,
+  type VobMarketFilter,
+} from '../../../src/collections/cmdExplorerQuery';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../../../src/tenants';
 
 /** Distinct audit action labels (post reveal-audit-action fix) — Qualify surfaces are attributable. */
@@ -103,22 +110,17 @@ export interface QualifyDeps {
     to: string,
     entityIds: string[],
   ) => Promise<string | null>;
+  /** Composed claims for a filter SET (compose bar; the single-facility/single-payer drill is a
+   *  one-element array). WHERE = Collections' shared cmdExplorerBaseConds (built in buildFacilityCasesQuery);
+   *  `nameToken` is Qualify's own patient_name_bidx extra AND (Change C, dormant). */
   loadFacilityCases: (
-    payer: string,
-    facility: string,
-    from: string,
-    to: string,
+    filter: CmdExplorerFilter,
     entityIds: string[],
-    opts: {
-      prefixToken: string | null;
-      memberToken: string | null;
-      nameToken: string | null;
-      groupToken: string | null;
-      limit: number;
-      allPayers?: boolean;
-      market?: VobMarketFilter;
-    },
+    opts: { nameToken?: string | null; allPayers?: boolean; limit?: number },
   ) => Promise<QualifyClaimRow[]>;
+  /** Compose-bar live match count: the `totals` row of Collections' buildCmdSearchSummaryQueries over the
+   *  SAME cmdExplorerBaseConds predicate. One row (or null on empty). Dollars are stripped in the CORE. */
+  loadMatchSummary: (filter: CmdExplorerFilter, entityIds: string[]) => Promise<QualifyMatchSummaryRow | null>;
   /** Phase 3: tenant-scoped lookup of ONE claim's alpha-prefix cohort token. Null = unknown/foreign
    *  claim id (fails closed to suppressed). The token never reaches the client. */
   loadClaimPrefixToken: (claimId: number, entityIds: string[]) => Promise<string | null>;
@@ -572,14 +574,21 @@ export async function getQualifyFacilityCasesCore(
   // check, not a count.
   const allPayers = input.allPayers === true;
   const { from, to } = qualifyWindowBounds(window, deps.now());
-  const claimRows = await deps.loadFacilityCases(payer, facility, from, to, gate.entityIds, {
-    prefixToken,
-    memberToken,
+  // Build the shared-predicate filter (one-element facility/payer arrays — the single-facility drill is
+  // just a degenerate compose set). member/prefix/group ride phiIndex; nameToken is the Qualify extra AND.
+  const cmdFilter: CmdExplorerFilter = {
+    facility: [facility],
+    primary_payers: allPayers ? null : [payer],
+    employers: input.market?.employers ?? null,
+    funding: input.market?.funding ?? null,
+    from,
+    to,
+    phiIndex: { memberIdBidx: memberToken, memberIdPrefixBidx: prefixToken, groupNumberBidx: groupToken },
+  };
+  const claimRows = await deps.loadFacilityCases(cmdFilter, gate.entityIds, {
     nameToken,
-    groupToken,
-    limit: QUALIFY_CASES_MAX,
     allPayers,
-    market: input.market,
+    limit: QUALIFY_CASES_MAX,
   });
   const capped = claimRows.length > QUALIFY_CASES_MAX;
   const pageRows = capped ? claimRows.slice(0, QUALIFY_CASES_MAX) : claimRows; // keep the MOST RECENT (payment desc)
@@ -590,6 +599,174 @@ export async function getQualifyFacilityCasesCore(
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
     capped,
+  };
+}
+
+// ── Compose-bar cores (Phase 1) ──────────────────────────────────────────────────────────────────
+
+/** String-array sanitizer for the compose filter: trim, drop blanks/overlong, cap count → null when empty
+ *  (an EMPTY array must be "no restriction", never `= any(ARRAY[])` which matches nothing). */
+function boundArray(a?: string[]): string[] | null {
+  if (!Array.isArray(a)) return null;
+  const cleaned = a
+    .map((s) => (typeof s === 'string' ? s.trim() : ''))
+    .filter((s) => s !== '' && s.length <= 200)
+    .slice(0, 200);
+  return cleaned.length > 0 ? cleaned : null;
+}
+
+/**
+ * Bound + HMAC a compose-bar input into the shared-predicate CmdExplorerFilter (+ Qualify's name-token
+ * extra). Every raw PHI term is minted server-side (deps.mint*), never logged; non-PHI arrays are trimmed
+ * + capped. `phiFields` lists which PHI narrows actually fired (field NAMES only) for the audit.
+ */
+function buildComposeFilter(
+  deps: QualifyDeps,
+  input: QualifyComposeInput,
+  from: string,
+  to: string,
+): { filter: CmdExplorerFilter; nameToken: string | null; phiFields: string[] } {
+  const term = (s: string | undefined, max: number): string =>
+    typeof s === 'string' ? s.trim().slice(0, max) : '';
+  const memberId = term(input.memberId, 120);
+  const alphaPrefix = term(input.alphaPrefix, 40);
+  const group = term(input.group, 40);
+  const clientName = term(input.clientName, 120);
+  let memberToken: string | null = null;
+  let prefixToken: string | null = null;
+  let groupToken: string | null = null;
+  let nameToken: string | null = null;
+  const phiFields: string[] = [];
+  try {
+    if (memberId) {
+      memberToken = deps.mintToken(memberId, 'member_id');
+      if (memberToken) phiFields.push('member_id');
+    }
+    if (alphaPrefix) {
+      prefixToken = deps.mintToken(alphaPrefix, 'prefix');
+      if (prefixToken) phiFields.push('prefix');
+    }
+    if (group) {
+      groupToken = deps.mintGroupToken(group);
+      if (groupToken) phiFields.push('group_number');
+    }
+    if (clientName) {
+      // Change C — the admissions-first name narrow. Cases-only (the summary can't express it); dormant
+      // until QUALIFY_CLIENT_NAME_ENABLED, so clientName is always empty in Phase 1.
+      nameToken = deps.mintNameToken(clientName);
+      if (nameToken) phiFields.push('client_name');
+    }
+  } catch {
+    throw new Error('Qualify search is temporarily unavailable.'); // key/config error, never PHI
+  }
+  const filter: CmdExplorerFilter = {
+    facility: boundArray(input.facilities),
+    primary_payers: boundArray(input.payers),
+    employers: boundArray(input.employers),
+    funding: boundArray(input.funding),
+    from,
+    to,
+    phiIndex: { memberIdBidx: memberToken, memberIdPrefixBidx: prefixToken, groupNumberBidx: groupToken },
+  };
+  return { filter, nameToken, phiFields };
+}
+
+/** True when a compose filter carries at least one restriction (else it's the whole-book window — the
+ *  Qualify landing shows the hero for that, so the cores return empty rather than fetch the whole book). */
+function composeHasAny(filter: CmdExplorerFilter, nameToken: string | null): boolean {
+  const p = filter.phiIndex;
+  return !!(
+    filter.facility ||
+    filter.primary_payers ||
+    filter.employers ||
+    filter.funding ||
+    p?.memberIdBidx ||
+    p?.memberIdPrefixBidx ||
+    p?.groupNumberBidx ||
+    nameToken
+  );
+}
+
+/**
+ * COMPOSE-BAR claims (Phase 1): the charge lines matching an AND-composed filter SET, claim grain,
+ * cross-tenant. Same masking (assembleClaims) + amounts choke point (stripClaimsAmounts) as the
+ * single-facility drill, but the axes are the whole set. This IS the row-returning PHI access, so it
+ * audits SEARCH_QUALIFY_FACILITY with the active PHI field NAMES + non-PHI selection cardinalities only
+ * (never a term/token/label). An empty filter (no restriction) short-circuits to empty — never a
+ * whole-book fetch.
+ */
+export async function getQualifyComposedCasesCore(
+  deps: QualifyDeps,
+  input: QualifyComposeInput,
+): Promise<QualifyFacilityCases> {
+  const gate = await deps.requirePrincipal();
+  if (!gate.ok) throw new Error(gate.error); // fail-closed backstop
+  const window: QualifyWindow = input.window;
+  if (!isQualifyWindow(window)) throw new Error('Invalid window.');
+  const { from, to } = qualifyWindowBounds(window, deps.now());
+  const { filter, nameToken, phiFields } = buildComposeFilter(deps, input, from, to);
+  const empty: QualifyFacilityCases = {
+    claims: [],
+    viewerHasAmountsCapability: gate.hasAmounts,
+    tenantScope: QUALIFY_TENANT_SCOPE,
+    capped: false,
+  };
+  if (!composeHasAny(filter, nameToken)) return empty;
+
+  await deps.recordAccess({
+    actorEmail: gate.actor.email,
+    actorUserId: gate.actor.userId,
+    action: SEARCH_QUALIFY_FACILITY,
+    detail: {
+      facilities: (filter.facility ?? []).length,
+      payers: (filter.primary_payers ?? []).length,
+      window: serializeQualifyWindow(window),
+      ...(phiFields.length ? { fields: phiFields } : {}),
+    },
+  });
+
+  const claimRows = await deps.loadFacilityCases(filter, gate.entityIds, { nameToken, limit: QUALIFY_CASES_MAX });
+  const capped = claimRows.length > QUALIFY_CASES_MAX;
+  const pageRows = capped ? claimRows.slice(0, QUALIFY_CASES_MAX) : claimRows; // keep the MOST RECENT (payment desc)
+  const claims = gate.hasAmounts ? assembleClaims(pageRows) : stripClaimsAmounts(assembleClaims(pageRows));
+  return { claims, viewerHasAmountsCapability: gate.hasAmounts, tenantScope: QUALIFY_TENANT_SCOPE, capped };
+}
+
+/**
+ * COMPOSE-BAR live match count (Phase 1). Gate-only (NON-PHI aggregate, parity with the book KPIs +
+ * movers) — the row-returning claims core owns the PHI audit, so the debounced count does NOT re-audit
+ * per keystroke. Percentages are derived from the sums BEFORE the amounts strip, so admissions_seat gets
+ * count + percentages with ZERO dollars. The client-name narrow is deliberately NOT applied here (the
+ * shared summary builder can't express patient_name_bidx) — harmless while QUALIFY_CLIENT_NAME_ENABLED is
+ * off; flipping that flag will also require making this count name-aware.
+ */
+export async function getQualifyMatchSummaryCore(
+  deps: QualifyDeps,
+  input: QualifyComposeInput,
+): Promise<QualifyMatchSummary> {
+  const gate = await deps.requirePrincipal();
+  if (!gate.ok) throw new Error(gate.error);
+  const window: QualifyWindow = input.window;
+  if (!isQualifyWindow(window)) throw new Error('Invalid window.');
+  const { from, to } = qualifyWindowBounds(window, deps.now());
+  const { filter } = buildComposeFilter(deps, input, from, to);
+  const row = await deps.loadMatchSummary(filter, gate.entityIds);
+  const charge = row?.total_charge ?? 0;
+  const allowed = row?.total_allowed ?? 0;
+  const paid = row?.total_paid ?? 0;
+  const pct = (num: number, den: number): number | null =>
+    den > 0 ? Math.round((num / den) * 10000) / 100 : null;
+  const strip = !gate.hasAmounts;
+  return {
+    count: row?.total_count ?? 0,
+    totalCharge: strip ? null : charge,
+    totalAllowed: strip ? null : allowed,
+    totalPaid: strip ? null : paid,
+    totalBalance: strip ? null : row?.total_balance ?? 0,
+    pctAllowedOfBilled: pct(allowed, charge),
+    pctPaidOfBilled: pct(paid, charge),
+    viewerHasAmountsCapability: gate.hasAmounts,
+    tenantScope: QUALIFY_TENANT_SCOPE,
   };
 }
 

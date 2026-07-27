@@ -64,7 +64,10 @@ test('SQL parity: the ranking coverage FILTERs are derived-identical to the conf
 });
 
 test('the cases drill projects the RAW tier for the server-side collapse (never a per-surface mapping)', () => {
-  const { sql } = buildFacilityCasesQuery('AETNA', '405 recovery', '2026-06-17', '2026-07-17', BOTH);
+  const { sql } = buildFacilityCasesQuery(
+    { primary_payers: ['AETNA'], facility: ['405 recovery'], from: '2026-06-17', to: '2026-07-17' },
+    BOTH,
+  );
   assert.match(sql, /pct_allowed, allowed_tier /, 'inner projects allowed_tier');
   assert.match(sql, /agg\.allowed_tier/, 'outer carries it through');
 });

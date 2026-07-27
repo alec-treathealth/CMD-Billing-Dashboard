@@ -13,24 +13,30 @@ import {
   loadQualifyFacilities,
   loadQualifyIdentifierLandingFacility,
   loadQualifyFacilityCases,
+  loadQualifyMatchSummary,
   loadQualifyMovers,
   loadQualifyBookKpis,
   loadQualifyFacilityTrends,
   loadQualifyClaimPrefixToken,
   loadQualifyPatientCohort,
   cmdExplorerEmployers,
+  cmdExplorerFacilities,
+  cmdExplorerPayers,
   CMD_FUNDING_MARKETS,
   recordAccess,
   revealCmdExplorerRow,
   revealCmdExplorerRows,
   type CmdEmployerOption,
 } from '@/lib/server';
+import type { CmdFacilityOption } from '../../../src/collections/cmdExplorerQuery';
 import { memberIdBlindIndex, alphaPrefixBlindIndex, groupNumberBlindIndex, patientNameBlindIndex } from '../../../src/collections/blindIndex';
 import {
   getQualifySnapshotCore,
   getQualifySnapshotByPayerCore,
   getQualifySnapshotByNameCore,
   getQualifyFacilityCasesCore,
+  getQualifyComposedCasesCore,
+  getQualifyMatchSummaryCore,
   getQualifyMoversCore,
   getQualifyInitialCore,
   getQualifyBookKpisCore,
@@ -47,6 +53,8 @@ import type {
   QualifyNameInput,
   QualifyFacilityCasesInput,
   QualifyFacilityCases,
+  QualifyComposeInput,
+  QualifyMatchSummary,
   QualifyPatientCohortInput,
   QualifyPatientCohort,
   QualifySnapshot,
@@ -70,6 +78,7 @@ const realDeps: QualifyDeps = {
   loadFacilities: loadQualifyFacilities,
   loadIdentifierLandingFacility: loadQualifyIdentifierLandingFacility,
   loadFacilityCases: loadQualifyFacilityCases,
+  loadMatchSummary: loadQualifyMatchSummary,
   loadClaimPrefixToken: loadQualifyClaimPrefixToken,
   loadPatientCohort: loadQualifyPatientCohort,
   loadMovers: loadQualifyMovers,
@@ -130,6 +139,30 @@ export async function getQualifySnapshotByName(input: QualifyNameInput): Promise
 /** Facility drill: the resolved payer's cases narrowed to ONE facility (the mobile facility-card tap). */
 export async function getQualifyFacilityCases(input: QualifyFacilityCasesInput): Promise<QualifyFacilityCases> {
   return getQualifyFacilityCasesCore(realDeps, { ...input, market: sanitizeMarket(input.market) });
+}
+
+/** Intersect client-supplied funding with the closed vocabulary (defense-in-depth; the core also bounds
+ *  the arrays + trims/HMACs the PHI terms). Funding values are bound params downstream regardless. */
+function sanitizeCompose(input: QualifyComposeInput): QualifyComposeInput {
+  const funding = Array.isArray(input.funding)
+    ? input.funding.filter(
+        (f): f is (typeof CMD_FUNDING_MARKETS)[number] =>
+          typeof f === 'string' && (CMD_FUNDING_MARKETS as readonly string[]).includes(f),
+      )
+    : undefined;
+  return { ...input, funding: funding && funding.length > 0 ? funding : undefined };
+}
+
+/** COMPOSE BAR — the live "N charge lines match" count over the AND-composed filter set. Count +
+ *  percentages are non-dollar (admissions_seat-safe); the CORE strips dollar totals for that role. */
+export async function getQualifyMatchSummary(input: QualifyComposeInput): Promise<QualifyMatchSummary> {
+  return getQualifyMatchSummaryCore(realDeps, sanitizeCompose(input));
+}
+
+/** COMPOSE BAR — the charge lines matching the AND-composed filter set (the recent-claims panel).
+ *  This is the row-returning PHI access; the core audits it (field names + selection cardinalities only). */
+export async function getQualifyComposedCases(input: QualifyComposeInput): Promise<QualifyFacilityCases> {
+  return getQualifyComposedCasesCore(realDeps, sanitizeCompose(input));
 }
 
 export async function getQualifyMovers(
@@ -219,6 +252,36 @@ export async function loadQualifyEmployers(term: string): Promise<QualifyEmploye
   if (t.length > QUALIFY_EMPLOYER_TERM_MAX) return { ok: false };
   try {
     return { ok: true, employers: await cmdExplorerEmployers(gate.entityIds, t, QUALIFY_EMPLOYER_OPTIONS_LIMIT) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export type QualifyFacilityOptionsResult = { ok: true; facilities: CmdFacilityOption[] } | { ok: false };
+export type QualifyPayerOptionsResult = { ok: true; payers: string[] } | { ok: false };
+
+/**
+ * Facility + payer options for Qualify's compose-bar pickers (non-PHI). CLIENT-mode vocabularies (loaded
+ * once, filtered client-side as the user types), gated by requireQualifyPrincipal and scoped to that
+ * principal's PINNED cross-tenant [BXR, Indigo] entityIds — Qualify is deliberately cross-tenant, so the
+ * option sets span both books. Reuse the SAME collections option loaders (same rollup, same dimension
+ * crosswalk) with Qualify's entity array where collections passes one tenant. Never PHI.
+ */
+export async function loadQualifyFacilityOptions(): Promise<QualifyFacilityOptionsResult> {
+  const gate = await requireQualifyPrincipal();
+  if (!gate.ok) return { ok: false };
+  try {
+    return { ok: true, facilities: await cmdExplorerFacilities(gate.entityIds) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function loadQualifyPayerOptions(): Promise<QualifyPayerOptionsResult> {
+  const gate = await requireQualifyPrincipal();
+  if (!gate.ok) return { ok: false };
+  try {
+    return { ok: true, payers: await cmdExplorerPayers(gate.entityIds) };
   } catch {
     return { ok: false };
   }

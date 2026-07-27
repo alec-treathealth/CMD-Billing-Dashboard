@@ -141,6 +141,7 @@ import type {
   QualifyMoverRow,
   QualifyBookKpisRow,
   QualifyFacilityTrendRow,
+  QualifyMatchSummaryRow,
 } from '../../src/collections/qualifyQuery.js';
 import type {
   ClaimFilter,
@@ -2131,25 +2132,26 @@ export async function loadQualifyIdentifierLandingFacility(
  *  keyset cursor, and the page size; the builder over-fetches by one (limit+1) so the core computes hasMore
  *  without a count. */
 export async function loadQualifyFacilityCases(
-  payer: string,
-  facility: string,
-  from: string,
-  to: string,
+  filter: CmdExplorerFilter,
   entityIds: string[],
-  opts: {
-    prefixToken: string | null;
-    memberToken: string | null;
-    nameToken: string | null;
-    groupToken: string | null;
-    limit: number;
-    allPayers?: boolean;
-    market?: VobMarketFilter;
-  },
+  opts: { nameToken?: string | null; allPayers?: boolean; limit?: number },
 ): Promise<QualifyClaimRow[]> {
-  const q = buildFacilityCasesQuery(payer, facility, from, to, entityIds, opts);
+  const q = buildFacilityCasesQuery(filter, entityIds, opts);
   const { rows } = await readerExecutor().query<QualifyClaimRow>(q.sql, q.params);
   // bigint `id` (the rollup charge id) comes back as a string from pg → coerce.
   return rows.map((r) => ({ ...r, id: Number(r.id) }));
+}
+
+/** Compose-bar live match count: the `totals` row of Collections' shared summary builder over the SAME
+ *  cmdExplorerBaseConds predicate Qualify's cases query uses (so count + list agree). Cross-tenant via the
+ *  entityIds array. One row (or null on empty). Dollars ride raw; the CORE strips them for non-amounts. */
+export async function loadQualifyMatchSummary(
+  filter: CmdExplorerFilter,
+  entityIds: string[],
+): Promise<QualifyMatchSummaryRow | null> {
+  const { totals } = buildCmdSearchSummaryQueries(filter, entityIds);
+  const { rows } = await readerExecutor().query<QualifyMatchSummaryRow>(totals.sql, totals.params);
+  return rows[0] ?? null;
 }
 
 /** Top PAYER movers by distinct-patient delta across two adjacent windows, cross-tenant. */
