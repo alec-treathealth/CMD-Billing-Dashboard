@@ -37,6 +37,7 @@ import {
   getQualifyFacilityCasesCore,
   getQualifyComposedCasesCore,
   getQualifyMatchSummaryCore,
+  getQualifyPayerEverBilledCore,
   getQualifyMoversCore,
   getQualifyInitialCore,
   getQualifyBookKpisCore,
@@ -163,6 +164,20 @@ export async function getQualifyMatchSummary(input: QualifyComposeInput): Promis
  *  This is the row-returning PHI access; the core audits it (field names + selection cardinalities only). */
 export async function getQualifyComposedCases(input: QualifyComposeInput): Promise<QualifyFacilityCases> {
   return getQualifyComposedCasesCore(realDeps, sanitizeCompose(input));
+}
+
+/** VOB PROBE — is this payer billed anywhere, EVER (unwindowed, cross-tenant)? The compose bar calls this
+ *  ONLY when the composed count is 0 AND exactly one payer is selected AND no PHI narrow is active; a
+ *  `count` of 0 means "provably never billed" → the VOB path. Non-PHI (payer label only); fail-closed to
+ *  `{ ok: false }` on a blank payer or any error so a probe failure never renders a false "never billed". */
+export async function getQualifyPayerEverBilled(payer: string): Promise<{ ok: true; count: number } | { ok: false }> {
+  const p = typeof payer === 'string' ? payer.trim() : '';
+  if (p === '') return { ok: false };
+  try {
+    return { ok: true, count: await getQualifyPayerEverBilledCore(realDeps, p) };
+  } catch {
+    return { ok: false };
+  }
 }
 
 export async function getQualifyMovers(

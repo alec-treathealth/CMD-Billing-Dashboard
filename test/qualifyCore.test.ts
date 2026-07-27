@@ -12,6 +12,7 @@ import {
   getQualifyOverviewCore,
   getQualifyComposedCasesCore,
   getQualifyMatchSummaryCore,
+  getQualifyPayerEverBilledCore,
   getQualifyPatientCohortCore,
   revealQualifyRowCore,
   revealQualifyRowsCore,
@@ -28,6 +29,7 @@ import { requireQualifyPrincipalFromAccess } from '../app/lib/qualify/principal.
 import { QUALIFY_MIN_LINES } from '../app/lib/qualify/rating.js';
 import { qualifyWindowBounds, trailingWindow } from '../app/lib/qualify/contract.js';
 import { QUALIFY_CASES_MAX, type QualifyClaimRow } from '../src/collections/qualifyQuery.js';
+import type { CmdExplorerFilter } from '../src/collections/cmdExplorerQuery.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../app/lib/views.js';
 
 const W30 = trailingWindow(30);
@@ -308,6 +310,39 @@ test('composed cases: an EMPTY filter short-circuits to empty (never a whole-boo
   assert.deepEqual(res.claims, []);
   assert.equal(c.facilityCasesArgs.length, 0, 'no case fetch on an unrestricted filter');
   assert.equal(c.audits.length, 0, 'no PHI access → no audit');
+});
+
+// ── VOB PROBE: "is this payer billed anywhere, EVER?" — UNWINDOWED, cross-tenant, gate-only ──────────
+test('vob probe: uses an UNWINDOWED single-payer filter (no from/to) and returns the count; no audit', async () => {
+  const c = cap();
+  let seen: CmdExplorerFilter | null = null;
+  const deps = makeDeps(SUPER, c, {
+    loadMatchSummary: async (filter) => {
+      seen = filter;
+      return { total_count: 0, total_charge: 0, total_allowed: 0, total_paid: 0, total_balance: 0 };
+    },
+  });
+  const count = await getQualifyPayerEverBilledCore(deps, 'NEWCO HEALTH');
+  assert.equal(count, 0, 'a zero count means provably never billed (→ VOB path)');
+  assert.deepEqual(seen!.primary_payers, ['NEWCO HEALTH'], 'the probe scopes to exactly the one payer');
+  // UNWINDOWED is the whole point (buildResolvePayerQuery semantics): no window bound, so zero can't be a
+  // windowing artifact. No facility/employer/funding/PHI narrow either.
+  assert.equal(seen!.from ?? null, null, 'no from bound — unwindowed');
+  assert.equal(seen!.to ?? null, null, 'no to bound — unwindowed');
+  assert.equal(seen!.facility ?? null, null);
+  assert.equal(seen!.phiIndex ?? null, null, 'the probe carries NO PHI narrow');
+  assert.equal(c.audits.length, 0, 'the probe is a non-PHI aggregate — never audits');
+});
+
+test('vob probe: a non-zero count means the payer IS billed → the caller must NOT show VOB', async () => {
+  const deps = makeDeps(SUPER, cap(), {
+    loadMatchSummary: async () => ({ total_count: 37, total_charge: 0, total_allowed: 0, total_paid: 0, total_balance: 0 }),
+  });
+  assert.equal(await getQualifyPayerEverBilledCore(deps, 'AETNA'), 37);
+});
+
+test('vob probe: a BLANK payer throws (fail LOUD) — never a false "never billed"', async () => {
+  await assert.rejects(() => getQualifyPayerEverBilledCore(makeDeps(SUPER, cap()), '   '));
 });
 
 test('movers: carries NO dollar fields for either capability state', async () => {

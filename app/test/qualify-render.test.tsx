@@ -309,13 +309,25 @@ test('cases table — a patient GROUP row shows the payment date of its most-rec
   assert.ok(html.includes('2026-07-22'), 'the group row shows the first (most-recently-paid) claim’s payment date');
 });
 
-test('facility panel — rows are interactive buttons and the selected row is marked (Q-4 selection)', () => {
-  const html = renderToStaticMarkup(<FacilityPanel facilities={FACILITIES} hasAmounts={false} heatOn selectedKey="solid" />);
-  assert.ok(html.includes('<button'), 'facility rows are interactive buttons (the desktop equivalent of a card tap)');
+test('facility panel — rows are interactive buttons; ONE selected key marks exactly one row pressed', () => {
+  const html = renderToStaticMarkup(
+    <FacilityPanel facilities={FACILITIES} hasAmounts={false} heatOn selectedKeys={new Set(['solid'])} payerLabel="AETNA" />,
+  );
+  assert.ok(html.includes('<button'), 'facility rows are interactive buttons (add-to-filter)');
   assert.ok(html.includes('aria-pressed="true"'), 'the selected facility is marked pressed');
   assert.ok(html.includes('ring-teal500'), 'the selected facility carries the selection ring');
-  const selectedCount = html.split('aria-pressed="true"').length - 1;
-  assert.equal(selectedCount, 1, 'exactly one facility row is selected at a time');
+  assert.equal(html.split('aria-pressed="true"').length - 1, 1, 'one selected key → one pressed row');
+  assert.ok(html.includes('payer-wide across the'), 'the header states the ranking is payer-wide across the book');
+  assert.ok(html.includes('AETNA'), 'the payer label names the ranking subject');
+  // Highlighting NEVER filters — both facilities still render even though only one is selected.
+  assert.ok(html.includes('SOLID') && html.includes('THIN HIGH'), 'selection highlights, it does not filter the ranking');
+});
+
+test('facility panel — MULTI-highlight: several selected keys mark several rows pressed at once', () => {
+  const html = renderToStaticMarkup(
+    <FacilityPanel facilities={FACILITIES} hasAmounts={false} heatOn selectedKeys={new Set(['solid', 'thin high'])} payerLabel="AETNA" />,
+  );
+  assert.equal(html.split('aria-pressed="true"').length - 1, 2, 'two selected keys → two pressed rows (the compose bar can select several facilities)');
 });
 
 test('cases table — a facility-scoped set still omits dollars for a no-amounts viewer (DOM omission)', () => {
@@ -436,25 +448,15 @@ test('rating legend — the ruled vocabulary: Strong / Watch / Weak (Typical is 
   assert.ok(!html.includes('Typical'), 'Typical is gone');
 });
 
-// ── Change E: the pinned (facility-scoped) panel + the "× All facilities" clear pill ────────────────
-test('facility panel — PINNED mode shows ONLY the scoped facility + the labeled clear pill (never a collapsed panel)', () => {
+// ── Compose bar: the panel is ALWAYS the full payer-wide ranking — selection highlights, never filters
+//    or collapses (the old Change-E pinned/collapse mode is gone). ─────────────────────────────────────
+test('facility panel — always renders the full ranking (selection highlights; no pinned collapse, no clear pill)', () => {
   const html = renderToStaticMarkup(
-    <FacilityPanel facilities={FACILITIES} hasAmounts={false} heatOn selectedKey="solid" pinned onClearPin={() => {}} />,
+    <FacilityPanel facilities={FACILITIES} hasAmounts={false} heatOn selectedKeys={new Set(['solid'])} payerLabel="AETNA" />,
   );
-  assert.ok(html.includes('SOLID'), 'the scoped facility renders');
-  assert.ok(!html.includes('THIN HIGH'), 'other facilities are hidden while pinned');
-  assert.ok(html.includes('aria-label="Clear facility filter, show all facilities"'), 'the accessible clear pill');
-  assert.ok(html.includes('All facilities'), 'clear pill copy');
-  assert.ok(html.includes('min-h-[44px]'), '≥44px hit target');
-  assert.ok(html.includes('Scoped to this facility'), 'the scope caption explains the narrowed cases');
-});
-
-test('facility panel — LIST mode (not pinned) still renders every facility and no clear pill', () => {
-  const html = renderToStaticMarkup(
-    <FacilityPanel facilities={FACILITIES} hasAmounts={false} heatOn selectedKey="solid" />,
-  );
-  assert.ok(html.includes('SOLID') && html.includes('THIN HIGH'), 'full list in payer-wide mode');
-  assert.ok(!html.includes('Clear facility filter'), 'no clear pill when not scoped');
+  assert.ok(html.includes('SOLID') && html.includes('THIN HIGH'), 'the full payer-wide list renders even with a facility selected');
+  assert.ok(!html.includes('Clear facility filter'), 'no pinned-mode clear pill exists anymore');
+  assert.ok(!html.includes('Scoped to this facility'), 'no pinned-mode scope caption anymore');
 });
 
 // ── Change B: the global persistent reveal header state ─────────────────────────────────────────────
@@ -583,18 +585,6 @@ test('cases table — the cohort chip renders on patient rows only when the hand
     <CasesTable claims={[CASE_AT_LOW]} hasAmounts heatOn facilityBuckets={buildFacilityBucketMap([])} {...noReveal} />,
   );
   assert.ok(!without.includes('>cohort<'), 'chip omitted without a handler (hermetic mounts unchanged)');
-});
-
-// ── Review fixes (locked in) ────────────────────────────────────────────────────────────────────────
-test('facility panel — PINNED with an off-lens facility: the container exempts it, so pinned shows the card, NOT an empty dead-end', () => {
-  // The container computes visibleFacilities so the pinned facility survives the LOC lens; the panel
-  // then renders it. Here we hand the panel the (exempted) facility + a foreign one and pin the IP one.
-  const html = renderToStaticMarkup(
-    <FacilityPanel facilities={[LOW /* IP */, SOLID /* OP */]} hasAmounts={false} heatOn selectedKey="low yield" pinned onClearPin={() => {}} />,
-  );
-  assert.ok(html.includes('LOW YIELD'), 'the pinned (off-lens) facility still renders — no empty dead-end');
-  assert.ok(!html.includes('No facilities for this payer'), 'the contradictory empty body does not appear');
-  assert.ok(html.includes('Clear facility filter'), 'the clear pill is present to exit the scope');
 });
 
 test('heating-up cards — a null-dominant-payer card is DISABLED (inert), not a silent-no-op button', () => {
