@@ -31,7 +31,7 @@
  */
 import { useCallback, useEffect, useReducer, useRef, useState, useTransition, type ReactNode } from 'react';
 import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyOverview, getQualifyBookKpis, revealQualifyRows } from '@/lib/qualify/actions';
-import { QUALIFY_WINDOW_OPTIONS, QUALIFY_CAL_YEAR_MIN, QUALIFY_REVEAL_BATCH_CAP, sniffQualifyKind, trailingWindow } from '@/lib/qualify/contract';
+import { QUALIFY_WINDOW_OPTIONS, QUALIFY_ROLLING_OPTIONS, QUALIFY_CAL_YEAR_MIN, QUALIFY_REVEAL_BATCH_CAP, qualifyRollingLabel, qualifyWindowLabel, sniffQualifyKind, trailingWindow } from '@/lib/qualify/contract';
 import type { QualifySnapshot, QualifyFacility, QualifyFacilityTrend, QualifyBookKpis, QualifyClaim, QualifyWindow, QualifyPhi, QualifyMarket } from '@/lib/qualify/contract';
 import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
 import { resolveLandingWins, drillLandingWins, isPayerChange, scopeFacilitiesForList, isIdentifierResolution, isIdentifierEmpty, identifierEmptyTerm } from '@/lib/qualify/qualifyGuards';
@@ -73,6 +73,7 @@ export function QualifyMobileApp({
 }) {
   const [query, setQuery] = useState('');
   const [win, setWin] = useState<QualifyWindow>(trailingWindow(30));
+  const [rangeOpen, setRangeOpen] = useState(false); // the Range ▾ panel (rolling months + calendar)
   const winRef = useRef(win);
   winRef.current = win;
   // Area (state) filter over the resolved deck. Resets on any new resolution / window change.
@@ -538,7 +539,7 @@ export function QualifyMobileApp({
   const showAreaChips = areaChips.length > 2 && !isIdentifierPath;
 
   // Window control state (M/Y selects).
-  const calendar = win.kind !== 'trailing';
+  const rangeActive = !(win.kind === 'trailing' && (QUALIFY_WINDOW_OPTIONS as readonly number[]).includes(win.days));
   const nowYear = new Date().getFullYear();
   const years: number[] = [];
   for (let y = nowYear; y >= QUALIFY_CAL_YEAR_MIN; y--) years.push(y);
@@ -639,54 +640,93 @@ export function QualifyMobileApp({
           })}
           <button
             type="button"
-            onClick={() => {
-              if (!calendar) onWindow({ kind: 'month', year: nowYear, month: new Date().getUTCMonth() + 1 });
-            }}
-            aria-pressed={calendar}
+            onClick={() => setRangeOpen((o) => !o)}
+            aria-haspopup="menu"
+            aria-expanded={rangeOpen}
+            aria-pressed={rangeActive}
             style={{
-              flex: 1,
+              flex: 1.4,
               height: 44,
               borderRadius: 999,
               border: 'none',
               cursor: 'pointer',
               fontSize: 12,
               fontWeight: 600,
-              background: calendar ? '#fff' : 'rgba(255,255,255,0.1)',
-              color: calendar ? TEAL900 : 'rgba(255,255,255,0.7)',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 4,
+              whiteSpace: 'nowrap',
+              background: rangeActive ? '#fff' : 'rgba(255,255,255,0.1)',
+              color: rangeActive ? TEAL900 : 'rgba(255,255,255,0.7)',
             }}
           >
-            M/Y
+            {rangeActive ? qualifyWindowLabel(win) : 'Range'} ▾
           </button>
         </div>
-        {calendar ? (
-          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-            <select
-              value={selMonth}
-              aria-label="Month"
-              onChange={(e) => {
-                const m = Number(e.target.value);
-                onWindow(m === 0 ? { kind: 'year', year: selYear } : { kind: 'month', year: selYear, month: m });
-              }}
-              style={{ flex: 1, height: 40, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.12)', color: '#fff', fontSize: 13, padding: '0 8px' }}
-            >
-              <option value={0}>All months</option>
-              {MONTHS.map((m, i) => (
-                <option key={m} value={i + 1}>{m}</option>
-              ))}
-            </select>
-            <select
-              value={selYear}
-              aria-label="Year"
-              onChange={(e) => {
-                const y = Number(e.target.value);
-                onWindow(selMonth === 0 ? { kind: 'year', year: y } : { kind: 'month', year: y, month: selMonth });
-              }}
-              style={{ flex: 1, height: 40, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.12)', color: '#fff', fontSize: 13, padding: '0 8px' }}
-            >
-              {years.map((y) => (
-                <option key={y} value={y}>{y}</option>
-              ))}
-            </select>
+        {rangeOpen ? (
+          <div style={{ marginTop: 8, borderRadius: 12, background: 'rgba(255,255,255,0.08)', padding: 8 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.55)', padding: '2px 4px 6px' }}>
+              Rolling (from today)
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {QUALIFY_ROLLING_OPTIONS.map((d) => {
+                const active = win.kind === 'trailing' && win.days === d;
+                return (
+                  <button
+                    key={d}
+                    type="button"
+                    onClick={() => { onWindow(trailingWindow(d)); setRangeOpen(false); }}
+                    aria-pressed={active}
+                    style={{
+                      flex: 1,
+                      minHeight: 44,
+                      borderRadius: 10,
+                      border: 'none',
+                      cursor: 'pointer',
+                      fontSize: 12,
+                      fontWeight: 600,
+                      background: active ? '#fff' : 'rgba(255,255,255,0.12)',
+                      color: active ? TEAL900 : '#fff',
+                    }}
+                  >
+                    {qualifyRollingLabel(d).replace('Last ', '')}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.55)', padding: '10px 4px 6px' }}>
+              Specific period
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <select
+                value={selMonth}
+                aria-label="Month"
+                onChange={(e) => {
+                  const m = Number(e.target.value);
+                  onWindow(m === 0 ? { kind: 'year', year: selYear } : { kind: 'month', year: selYear, month: m });
+                }}
+                style={{ flex: 1, height: 44, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.12)', color: '#fff', fontSize: 13, padding: '0 8px' }}
+              >
+                <option value={0}>All months</option>
+                {MONTHS.map((m, i) => (
+                  <option key={m} value={i + 1}>{m}</option>
+                ))}
+              </select>
+              <select
+                value={selYear}
+                aria-label="Year"
+                onChange={(e) => {
+                  const y = Number(e.target.value);
+                  onWindow(selMonth === 0 ? { kind: 'year', year: y } : { kind: 'month', year: y, month: selMonth });
+                }}
+                style={{ flex: 1, height: 44, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.12)', color: '#fff', fontSize: 13, padding: '0 8px' }}
+              >
+                {years.map((y) => (
+                  <option key={y} value={y}>{y}</option>
+                ))}
+              </select>
+            </div>
           </div>
         ) : null}
         {/* CHANGE G — the breadcrumb strip: Payer › Facility › Claim, each live level tappable. */}

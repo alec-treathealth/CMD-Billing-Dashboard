@@ -4,7 +4,8 @@
  *      Δ semantics — previous equivalent period, NOT prior-year-same-month);
  *   2) year bounds are [Jan 1, Jan 1) with the previous year prior; December/January roll over;
  *   3) serialize/parse round-trip for every shape; malformed/out-of-range parse → null (fail closed);
- *   4) isQualifyWindow validates structure + ranges at the trust boundary (180 is GONE).
+ *   4) isQualifyWindow validates structure + ranges at the trust boundary (rolling 180/270/365 =
+ *      6/9/12mo are VALID; quick pills stay 30/60/90; day-counts off the allowed set fail closed).
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -14,8 +15,10 @@ import {
   serializeQualifyWindow,
   qualifyWindowBounds,
   qualifyWindowLabel,
+  qualifyRollingLabel,
   trailingWindow,
   QUALIFY_WINDOW_OPTIONS,
+  QUALIFY_ROLLING_OPTIONS,
 } from '../app/lib/qualify/contract.js';
 
 const NOW = new Date('2026-07-17T12:00:00Z');
@@ -46,27 +49,36 @@ test('trailing bounds are unchanged by the refactor (business-TZ anchored, adjac
 });
 
 test('serialize/parse round-trips every shape; labels are human', () => {
-  const shapes = [trailingWindow(60), { kind: 'month' as const, year: 2026, month: 7 }, { kind: 'year' as const, year: 2025 }];
+  const shapes = [trailingWindow(60), trailingWindow(180), trailingWindow(365), { kind: 'month' as const, year: 2026, month: 7 }, { kind: 'year' as const, year: 2025 }];
   for (const w of shapes) {
     assert.deepEqual(parseQualifyWindow(serializeQualifyWindow(w)), w, `round-trip ${serializeQualifyWindow(w)}`);
   }
   assert.equal(serializeQualifyWindow(trailingWindow(60)), '60d');
+  assert.equal(serializeQualifyWindow(trailingWindow(365)), '365d', 'rolling spans serialize as day-count tokens');
   assert.equal(serializeQualifyWindow({ kind: 'month', year: 2026, month: 7 }), '2026-07');
   assert.equal(qualifyWindowLabel({ kind: 'month', year: 2026, month: 7 }), 'Jul 2026');
   assert.equal(qualifyWindowLabel(trailingWindow(90)), '90d');
+  // Rolling spans: compact chip label is months; menu label is "Last N months"; day-token round-trips.
+  assert.equal(qualifyWindowLabel(trailingWindow(180)), '6mo');
+  assert.equal(qualifyWindowLabel(trailingWindow(365)), '12mo');
+  assert.deepEqual(parseQualifyWindow('180d'), trailingWindow(180), '180d now parses (rolling 6-month)');
+  assert.equal(qualifyRollingLabel(180), 'Last 6 months');
+  assert.equal(qualifyRollingLabel(365), 'Last 12 months');
 });
 
 test('parse fails CLOSED on malformed / out-of-range tokens (never trusts the URL)', () => {
-  for (const bad of ['180d', '15d', '2026-13', '2026-00', '1999-05', '2099', 'abc', '', '30', '30d; drop table x']) {
+  for (const bad of ['15d', '200d', '2026-13', '2026-00', '1999-05', '2099', 'abc', '', '30', '30d; drop table x']) {
     assert.equal(parseQualifyWindow(bad), null, `"${bad}" must not parse`);
   }
   assert.equal(parseQualifyWindow(null), null);
   assert.equal(parseQualifyWindow(undefined), null);
 });
 
-test('isQualifyWindow: structural + range validation; 180 is DROPPED; junk objects fail', () => {
+test('isQualifyWindow: structural + range validation; rolling 6/9/12mo valid; junk objects fail', () => {
   assert.equal(isQualifyWindow(trailingWindow(30)), true);
-  assert.equal(isQualifyWindow({ kind: 'trailing', days: 180 }), false, '180d is gone (ruling)');
+  assert.equal(isQualifyWindow({ kind: 'trailing', days: 180 }), true, '6-month rolling is valid');
+  assert.equal(isQualifyWindow({ kind: 'trailing', days: 365 }), true, '12-month rolling is valid');
+  assert.equal(isQualifyWindow({ kind: 'trailing', days: 200 }), false, 'a day-count off the allowed set fails closed');
   assert.equal(isQualifyWindow({ kind: 'month', year: 2026, month: 7 }), true);
   assert.equal(isQualifyWindow({ kind: 'month', year: 2026, month: 13 }), false);
   assert.equal(isQualifyWindow({ kind: 'month', year: 2023, month: 5 }), false, 'below the data floor');
@@ -75,5 +87,6 @@ test('isQualifyWindow: structural + range validation; 180 is DROPPED; junk objec
   assert.equal(isQualifyWindow(30), false, 'the old bare-number shape no longer validates');
   assert.equal(isQualifyWindow(null), false);
   assert.equal(isQualifyWindow({ kind: 'nope' }), false);
-  assert.deepEqual([...QUALIFY_WINDOW_OPTIONS], [30, 60, 90], 'the trailing options lost 180');
+  assert.deepEqual([...QUALIFY_WINDOW_OPTIONS], [30, 60, 90], 'quick pills stay 30/60/90');
+  assert.deepEqual([...QUALIFY_ROLLING_OPTIONS], [180, 270, 365], 'rolling menu = 6/9/12 months');
 });
