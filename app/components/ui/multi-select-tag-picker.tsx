@@ -91,6 +91,18 @@ export function MultiSelectTagPicker({
   // SERVER mode: the query is still too short to have searched (mirror the parent's floor).
   const belowMinChars = serverDriven && query.trim().length < minChars;
 
+  // Select-to-add clears the typed draft immediately, so the filtered list resets for the next add
+  // (rapid multi-add unaffected — the dropdown stays open). Clearing happens ONLY on ADD, never on
+  // removal: the chip-× calls onToggle directly and bypasses this handler. Server mode also resets the
+  // parent query so its fetched option list clears too.
+  const handleOption = (value: string, isSelected: boolean) => {
+    onToggle(value);
+    if (!isSelected) {
+      setQuery('');
+      onQueryChange?.('');
+    }
+  };
+
   return (
     <div ref={boxRef} className="relative min-w-[15rem] flex-1">
       <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
@@ -166,7 +178,7 @@ export function MultiSelectTagPicker({
                 <button
                   key={o.value}
                   type="button"
-                  onClick={() => onToggle(o.value)}
+                  onClick={() => handleOption(o.value, on)}
                   aria-pressed={on}
                   className={[
                     'flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
