@@ -16,12 +16,19 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { FacilityPanel } from '../components/qualify/facility-panel';
 import { CasesTable } from '../components/qualify/cases-table';
 import { CohortSheet } from '../components/qualify/cohort-sheet';
-import { BookKpiTiles, HeatingUpCards } from '../components/qualify/overview';
+import { BookKpiTiles, HeatingUpCards, MatchCountReadout } from '../components/qualify/overview';
 import { Spark } from '../components/qualify/spark';
 import { buildFacilityBucketMap } from '../components/qualify/colors';
 import { qualifyRating, ratingBucket, RATING_LEGEND } from '../lib/qualify/rating';
-import { trailingWindow } from '../lib/qualify/contract';
-import type { QualifyFacility, QualifyClaim, QualifyBookKpis, QualifyFacilityTrend, QualifyPhi } from '../lib/qualify/contract';
+import { trailingWindow, QUALIFY_TENANT_SCOPE } from '../lib/qualify/contract';
+import type {
+  QualifyFacility,
+  QualifyClaim,
+  QualifyBookKpis,
+  QualifyFacilityTrend,
+  QualifyMatchSummary,
+  QualifyPhi,
+} from '../lib/qualify/contract';
 
 const solidRating = qualifyRating(55)!; // 55 → ok
 const thinHighRating = qualifyRating(90)!; // 90 → ok (value-first: a small high-% facility reads GREEN)
@@ -374,9 +381,46 @@ test('heating-up cards — defined "n" (claim lines), Δpts ticker (+/−), NEW 
 });
 
 test('heating-up cards — active (scoped) card is marked pressed; renders nothing on an empty book', () => {
-  const html = renderToStaticMarkup(<HeatingUpCards trends={TRENDS} window={W30} activeKey="summit ridge" onOpen={() => {}} />);
+  const html = renderToStaticMarkup(
+    <HeatingUpCards trends={TRENDS} window={W30} activeFacilityKeys={new Set(['summit ridge'])} onOpen={() => {}} />,
+  );
   assert.equal(html.split('aria-pressed="true"').length - 1, 1, 'exactly one active card');
   assert.equal(renderToStaticMarkup(<HeatingUpCards trends={[]} window={W30} onOpen={() => {}} />), '', 'empty render with no trends');
+});
+
+// ── Compose-bar match count: admissions_seat sees count + percentages, ZERO dollars — in the MARKUP,
+//    not just the wire (the known past failure mode: a stripped value that still renders). ─────────────
+const SEAT_SUMMARY: QualifyMatchSummary = {
+  count: 4242,
+  totalCharge: null,
+  totalAllowed: null,
+  totalPaid: null,
+  totalBalance: null,
+  pctAllowedOfBilled: 67,
+  pctPaidOfBilled: 33,
+  viewerHasAmountsCapability: false,
+  tenantScope: QUALIFY_TENANT_SCOPE,
+};
+const AMOUNTS_SUMMARY: QualifyMatchSummary = {
+  ...SEAT_SUMMARY,
+  totalCharge: 987654,
+  totalAllowed: 654321,
+  totalPaid: 321098,
+  totalBalance: 111111,
+  viewerHasAmountsCapability: true,
+};
+
+test('match count — admissions_seat markup: count + percentages present, NO dollar sign anywhere', () => {
+  const html = renderToStaticMarkup(<MatchCountReadout summary={SEAT_SUMMARY} loading={false} hasAmounts={false} />);
+  assert.ok(html.includes('4,242'), 'the count renders');
+  assert.ok(html.includes('67%') && html.includes('33%'), 'both non-dollar percentages render');
+  assert.ok(!html.includes('$'), 'a dollar sign must NEVER appear for an admissions_seat (DOM omission, not CSS-hidden)');
+});
+
+test('match count — amounts-capable markup DOES carry the dollar total', () => {
+  const html = renderToStaticMarkup(<MatchCountReadout summary={AMOUNTS_SUMMARY} loading={false} hasAmounts={true} />);
+  assert.ok(html.includes('$'), 'the billed dollar total renders for an amounts-capable viewer');
+  assert.ok(html.includes('4,242'), 'the count still renders');
 });
 
 test('spark — draws a path for ≥2 points, renders NOTHING for a single point (no fabricated trend)', () => {

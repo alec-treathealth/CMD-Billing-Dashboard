@@ -14,7 +14,12 @@ import {
   QUALIFY_MOVERS_MIN_CHARGES,
   QUALIFY_TREND_BUCKETS,
 } from '../src/collections/qualifyQuery.js';
-import type { CmdExplorerFilter } from '../src/collections/cmdExplorerQuery.js';
+import {
+  buildCmdSearchSummaryQueries,
+  cmdExplorerBaseConds,
+  type CmdExplorerFilter,
+  type ParamAdder,
+} from '../src/collections/cmdExplorerQuery.js';
 
 const BOTH = [BXR_ENTITY_ID, INDIGO_ENTITY_ID];
 const TOKEN = 'a'.repeat(64); // opaque HMAC-shaped token
@@ -29,6 +34,37 @@ const casesFilter = (
   to: string,
   extra: Partial<CmdExplorerFilter> = {},
 ): CmdExplorerFilter => ({ primary_payers: [payer], facility: [facility], from, to, ...extra });
+
+/** Param numbers ($1,$2…) differ between two independently-built queries; normalize them away so a
+ *  predicate FRAGMENT can be compared structurally across queries. */
+const normParams = (sql: string) => sql.replace(/\$\d+/g, '$?');
+
+// ── COLLECTIONS-SHARED FILTER LAYER (compose-bar regression) — the whole point of the rework is that
+//    Qualify's composed cases + its live match count filter on the SAME predicate the Collections grid +
+//    summary use. Prove it: for one composed filter, cmdExplorerBaseConds' conjunction appears
+//    byte-for-byte (param-normalized) in BOTH Qualify's cases query AND Collections' summary totals. If
+//    anyone forks the shared builder for one surface, this fails. ────────────────────────────────────
+test('shared predicate: Qualify cases + Collections summary derive the SAME WHERE from cmdExplorerBaseConds', () => {
+  const filter: CmdExplorerFilter = {
+    facility: ['405 recovery', 'harbor light'],
+    primary_payers: ['AETNA', 'CIGNA'],
+    from: '2026-06-17',
+    to: '2026-07-17',
+    phiIndex: { memberIdBidx: TOKEN },
+  };
+  // The canonical conjunction the shared builder emits (its own fresh param sequence).
+  const params: unknown[] = [];
+  const add: ParamAdder = (v) => {
+    params.push(v);
+    return `$${params.length}`;
+  };
+  const expected = normParams(cmdExplorerBaseConds(filter, BOTH, add).join(' and '));
+
+  const cases = normParams(buildFacilityCasesQuery(filter, BOTH).sql);
+  const summary = normParams(buildCmdSearchSummaryQueries(filter, BOTH).totals.sql);
+  assert.ok(cases.includes(expected), 'Qualify cases query uses the shared predicate verbatim');
+  assert.ok(summary.includes(expected), 'Collections summary totals uses the SAME shared predicate');
+});
 
 // ── The headline invariant: every builder targets BOTH tenants in ONE query. ─────────────────────
 test('cross-tenant: every builder scopes business_entity_id = any($1::uuid[]) with BOTH tenant ids', () => {

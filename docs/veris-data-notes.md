@@ -1773,3 +1773,29 @@ DECISIVELY (90d reads ~18% of the rows/buffers → ~5× faster warm, 107ms → 2
 changed (fewer rows scanned, not seq→index). Cold first-touch was ~5.7s pure disk I/O — irrelevant to
 steady-state; warms on first hit. The failure mode Alec flagged (planner picks seq scan even with the
 90d window → 90d slower) did NOT occur.
+
+## Qualify Client-Name (Change C) activation — NOT a one-line flip (compose-bar era, 2026-07-27)
+
+`QUALIFY_CLIENT_NAME_ENABLED` lives at **`app/lib/qualify/contract.ts:278`** (corrected — an earlier
+handoff propagated `:239`, which is a doc comment, not the constant; a future session should grep the
+symbol, not the line). It stays `false` until BOTH data-ops steps land: migration **0067** (adds
+`patient_name_bidx` to the `cmd_explorer_charge_rollup` matview — a ~90s rebuild/outage) AND the
+historical name backfill run as the table OWNER (`postgres`; `claims_reader` has no UPDATE policy).
+Alec runs those on his own timeline.
+
+**Why flipping the flag is not sufficient (the compose-bar trap).** The Qualify compose bar's live
+"N charge lines match" count runs through Collections' shared `buildCmdSearchSummaryQueries` totals,
+and `CmdExplorerFilter.phiIndex` has **no** `patientNameBidx` field (Collections has no name search) —
+so the summary/count is structurally **name-blind**. The client-name narrow is applied ONLY in
+`buildFacilityCasesQuery` (Qualify's own `opts.nameToken` extra AND) — i.e. the claims LIST is
+name-aware but the COUNT is not. While the flag is off this is harmless (clientName is always empty).
+**The moment the flag flips, the count and the claims list will DISAGREE** on any name-narrowed search
+(count too high). So activation ALSO requires making the count name-aware — either extend the shared
+filter with a Qualify-only name predicate at the summary layer, or give Qualify its own count builder
+that ANDs `patient_name_bidx`. Do NOT flip the flag without that, or the surface silently lies.
+
+**Activation QA (whenever the flag flips):** (1) a name-only search returning zero must read as "no
+match," and must NOT satisfy the VOB single-payer "never billed" probe (the probe gate already excludes
+any PHI narrow — keep it that way); (2) verify `SEARCH_QUALIFY_NAME`/`SEARCH_QUALIFY_FACILITY` audit
+fires with field NAMES only (`fields: ['client_name']`), never the name value, on an `admissions_seat`
+session specifically. Runbook: `docs/qualify-redesign-cc-prompt.md` / the redesign handoff.

@@ -1,126 +1,86 @@
 'use client';
 
 /**
- * Qualify tab — the redesigned interactive container (overview-first, autosearch; the approved comp
- * is docs/mockups/qualify-redesign-mockup.html). Owns search/window/lens/reveal/URL state and is the
- * caller of the Qualify Server Actions (the browser's sole data path). It hands plain, already-shaped
- * data to the pure presentational children (BookKpiTiles, HeatingUpCards, FacilityPanel, CasesTable,
- * CohortSheet, VobModal).
+ * Qualify tab — the COMPOSE-BAR container (Phase 1 of the compose-bar rework). Replaces the old
+ * tab-based single-mode resolver with a Collections-style AND-composed multi-filter bar, while KEEPING
+ * Qualify's own outputs (the Heating-Up ticker, the live match count, the recent-claims panel). The
+ * browser's sole data path is the Qualify Server Actions (this component is the only caller).
  *
- * STRUCTURE (top → bottom): finder (search-type tabs · autosearch input · window control · LOC lens ·
- * global-reveal toggle) → Facilities Heating Up (trend cards + sparklines) → book KPI tiles → the
- * resolved subject band (hero) → FacilityPanel + CasesTable grid.
+ * INPUT MODEL (the swap): four MultiSelectTagPickers — Facility · Payer · Employer · Funding — plus a
+ * PHI row (Member ID · Alpha prefix · Group # · Client Name) all AND-compose into ONE CmdExplorer-shaped
+ * filter (the Qualify-side QualifyComposeInput). An empty field = NO restriction (never match-nothing).
+ * The derived filter drives TWO reads: getQualifyMatchSummary (the live "N charge lines match" count +
+ * non-dollar percentages) and getQualifyComposedCases (the claim rows for the panel). Both run through
+ * Qualify's amounts choke point server-side, so an admissions_seat sees the count + percentages with
+ * ZERO dollars. Debounced + recency-guarded (genRef) so a slow earlier response can't overwrite a newer.
  *
- * SEARCH TYPES: Member ID/Prefix (server-side sniff — the client never declares the kind) · Client
- * Name (Change C — the exact-name blind-index path; captioned "may match multiple patients") ·
- * Employer (the existing QualifyMarket.employers narrow — a filter, not a resolver, per ruling). The
- * Facility "payer board" tab is DE-SCOPED (later phase). AUTOSEARCH: debounced ~650ms at ≥3 chars +
- * Enter; no "Resolve payer" button. The raw term stays in memory only — never a URL, never a log.
+ * PHI ROW (Change C divergence — do NOT "fix" to Collections parity): Qualify is the admissions-facing
+ * surface where person-first lookup is the natural entry, so it carries a FOURTH PHI input — Client Name —
+ * that Collections deliberately has no equivalent for. All four PHI inputs are canRevealPhi-gated; Client
+ * Name is ADDITIONALLY behind QUALIFY_CLIENT_NAME_ENABLED (contract.ts) and stays hidden until migration
+ * 0067 + the owner-run name backfill land. The raw PHI terms live in component state only — never a URL,
+ * never a log; the server mints the blind indexes from them. See docs/veris-data-notes.md ("Qualify
+ * Client-Name (Change C) activation") — flipping the flag ALSO requires making the live count name-aware.
  *
- * CHANGE E (facility drilldown): a search-driven resolve lands payer-wide (full facility list; cases
- * seeded to the Fix-A landing or rank-1). A facility-row click or a Heating-Up card click SCOPES the
- * surface to that facility (the panel pins the selected card + "× All facilities" clears). Heating-Up
- * click = the HYBRID: resolve the card's dominant payer AND scope to the card's facility. A window
- * change RESETS scope to payer-wide (ruling). All case sets are SERVER-scoped via
- * getQualifyFacilityCases (no client-side filtering over a global list). When the resolving search was
- * an IDENTIFIER (prefix / member id / client name), that identifier narrow is carried into the drill as
- * a server-side `filter` — so Recent Claims shows only matching claims, on the seed AND every facility
- * switch (ruling 5). The raw term lives only in an in-memory ref (never state / URL / log).
+ * TICKER (Facilities Heating Up): stays BOOK-WIDE in Phase 1 — only the window control refetches it (the
+ * compose pickers do NOT re-scope the ticker or the KPI tiles; employer/funding are pure filter
+ * dimensions now, a deliberate behavior change from the pre-compose tab). A ticker-card click REPLACES
+ * the whole filter set with exactly {that facility, its dominant payer} and PINS the marquee
+ * (tickerPinned — a flag set ONLY by a card click and cleared only by the clear actions, NEVER derived
+ * from the facility selection). Cards whose facility is currently selected read pressed (activeFacilityKeys).
  *
- * CHANGE B (global persistent reveal): super_admin/admin (derived as canRevealPhi &&
- * viewerHasAmountsCapability — exactly those two roles) get a surface-wide "Reveal identifiers"
- * switch. UI-state-only persistence (in-memory; NEVER localStorage): each scope's newly-loaded rows
- * still fire the SAME audited revealQualifyRows path (chunked to the 50 batch cap) — the toggle
- * changes when we re-reveal, not whether we audit (audit volume rises by design; accepted).
- * admissions_seat keeps the per-patient reveal unchanged and still sees zero dollars.
+ * URL STATE: the NON-PHI selection arrays (facilities/payers/employers/funding) + window + LOC survive
+ * refresh and are shareable (router.replace, never push). PHI terms NEVER touch the URL — enforced
+ * structurally in urlState.ts (no field exists for them).
  *
- * CHANGE D (LOC lens): ONE segmented IP·OP·Both lens on the bar scopes the Heating-Up cards, the
- * facility list, AND the case rows (inclusive semantics via the shared groupClaims helpers) —
- * client-side view filter (ruled v1); the KPI tiles stay book-wide and caption it.
- *
- * CHANGE F (URL state): payer/facility/window/loc survive refresh + are shareable — router.replace on
- * resolved-state change only, via the allowlist-enforcing urlState.ts (PHI never in URLs; a shared
- * link re-resolves by payer label, never a replayed search term).
- *
- * RACE GUARDS (unchanged from the pre-redesign container — they are the correctness core): genRef
- * recency on every resolution, cohortKey identity on standalone cases fetches, atomic
- * snapshot+seed commits (one paint), marketRef for the VOB narrows, per-patient reveal cache keyed by
- * claim id with in-flight tracking.
+ * OUT OF SCOPE (Phase 2, frozen): the FacilityPanel single-payer ranking + the lighter context line +
+ * the VOB single-payer probe land in the NEXT commit. The book KPI tiles + ticker keep their current
+ * book-wide behavior — buildBookKpisQuery / buildFacilityTrendQuery are untouched.
  */
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useTransition } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Briefcase, Eye, EyeOff, Landmark, RotateCcw, Search } from 'lucide-react';
+import { Briefcase, Building2, Eye, EyeOff, Landmark, RotateCcw, ShieldCheck } from 'lucide-react';
 import {
-  getQualifySnapshot,
-  getQualifySnapshotByPayer,
-  getQualifySnapshotByName,
-  getQualifyFacilityCases,
+  getQualifyMatchSummary,
+  getQualifyComposedCases,
   getQualifyPatientCohort,
   getQualifyOverview,
-  getQualifyBookKpis,
+  loadQualifyFacilityOptions,
+  loadQualifyPayerOptions,
+  loadQualifyEmployers,
   revealQualifyRows,
 } from '@/lib/qualify/actions';
 import {
   QUALIFY_CLIENT_NAME_ENABLED,
   QUALIFY_REVEAL_BATCH_CAP,
-  qualifyWindowLabel,
-  serializeQualifyWindow,
-  sniffQualifyKind,
   trailingWindow,
   type QualifyBookKpis,
   type QualifyClaim,
+  type QualifyComposeInput,
   type QualifyFacilityTrend,
-  type QualifyMarket,
+  type QualifyMatchSummary,
   type QualifyPhi,
   type QualifyPatientCohort,
-  type QualifySnapshot,
   type QualifyWindow,
 } from '@/lib/qualify/contract';
 import type { CmdEmployerOption } from '@/lib/actions';
-import { loadQualifyEmployers } from '@/lib/qualify/actions';
 import { MultiSelectTagPicker, type PickerOption } from '@/components/ui/multi-select-tag-picker';
-import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
-import { isIdentifierEmpty, identifierEmptyTerm } from '@/lib/qualify/qualifyGuards';
 import { buildQualifySearchParams, parseQualifySearchParams } from '@/lib/qualify/urlState';
-import { buildFacilityBucketMap } from '@/components/qualify/colors';
-import { FacilityPanel } from '@/components/qualify/facility-panel';
 import { filterFacilitiesByLoc, filterClaimsByLoc, type QualifyLocFilter } from '@/lib/qualify/groupClaims';
+import type { RatingBucket } from '@/lib/qualify/rating';
 import { CasesTable } from '@/components/qualify/cases-table';
 import { CohortSheet } from '@/components/qualify/cohort-sheet';
-import { BookKpiTiles, HeatingUpCards, HeatingUpSkeleton } from '@/components/qualify/overview';
+import { BookKpiTiles, HeatingUpCards, HeatingUpSkeleton, MatchCountReadout } from '@/components/qualify/overview';
 import { WindowControl } from '@/components/qualify/window-control';
-import { VobModal } from '@/components/qualify/vob-modal';
 import { QualifyLandingHero } from '@/components/qualify/landing-hero';
 
-const MIN_QUERY_LEN = 3;
-const AUTOSEARCH_DEBOUNCE_MS = 650;
+/** Debounce for the composed count + cases fetch (covers PHI-input keystrokes; picker clicks too). */
+const COMPOSE_DEBOUNCE_MS = 350;
+/** Employer type-ahead: min chars + debounce (server-driven, mirrors Collections). */
+const EMPLOYER_MIN_CHARS = 3;
 
-type SearchType = 'id' | 'client' | 'employer';
-
-const SEARCH_TABS: { key: SearchType; label: string }[] = [
-  { key: 'id', label: 'Member ID / Prefix' },
-  // Client Name is data-gated (QUALIFY_CLIENT_NAME_ENABLED) — hidden until 0067 + the name backfill land.
-  ...(QUALIFY_CLIENT_NAME_ENABLED ? [{ key: 'client' as const, label: 'Client Name' }] : []),
-  { key: 'employer', label: 'Employer' },
-];
-
-const PLACEHOLDER: Record<Exclude<SearchType, 'employer'>, string> = {
-  id: 'Member ID or 3-letter alpha prefix — resolves as you type',
-  client: 'Client name (exact) — resolves as you type · audited',
-};
-
-/** windowStart (inclusive) .. windowEnd (EXCLUSIVE) → "Jun 18 – Jul 17, 2026" (inclusive last day). */
-function formatWindowRange(startIso: string, endExclusiveIso: string): string {
-  const start = new Date(`${startIso}T00:00:00Z`);
-  const endIncl = new Date(new Date(`${endExclusiveIso}T00:00:00Z`).getTime() - 86_400_000);
-  const mo = (d: Date) => d.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' });
-  return `${mo(start)} ${start.getUTCDate()} – ${mo(endIncl)} ${endIncl.getUTCDate()}, ${endIncl.getUTCFullYear()}`;
-}
-
-/** The whole-window cases set fetched for a facility (seed) — what both resolve paths + a facility
- *  switch write. `capped` = truncated at QUALIFY_CASES_MAX (drives the "narrow the window" nudge). */
-type CasesPage = { claims: QualifyClaim[]; capped: boolean };
-const EMPTY_PAGE: CasesPage = { claims: [], capped: false };
+/** An empty facility-bucket map — CasesTable retains the prop but no longer colors from it. */
+const NO_FACILITY_BUCKETS: Map<string, RatingBucket> = new Map();
 
 export function QualifyTab({
   viewerHasAmountsCapability,
@@ -130,104 +90,67 @@ export function QualifyTab({
   canRevealPhi: boolean;
 }) {
   const router = useRouter();
-  const [searchType, setSearchType] = useState<SearchType>('id');
-  const [query, setQuery] = useState('');
-  const [snapshot, setSnapshot] = useState<QualifySnapshot | null>(null);
-  const [isPending, startTransition] = useTransition();
-  // Overview strip (book KPIs + trend cards) — window/market-tracked, independent of the subject.
-  const [kpis, setKpis] = useState<QualifyBookKpis | null>(null);
-  const [trends, setTrends] = useState<QualifyFacilityTrend[]>([]);
-  // The SAME three KPI ratios narrowed to the RESOLVED payer (drives the scoped tiles + the resolved
-  // band's "avg allowed ÷ billed" stat). Null until a payer resolves; reset on Clear.
-  const [scopedKpis, setScopedKpis] = useState<QualifyBookKpis | null>(null);
-  // True once the USER actively resolved a subject (typed a search, clicked a Heating-Up card, or a
-  // facility row) or restored one via URL — NOT the fresh on-load overview hybrid. Gates the "Clear
-  // Search" button + whether the tiles show the scoped (vs book-wide) numbers, so a fresh landing
-  // reads as unsearched.
-  const [userSearched, setUserSearched] = useState(false);
-  // The cases panel's atomic COHORT (payer/facility/window), reducer-owned (identity guards intact).
-  const [cohort, dispatch] = useReducer(cohortReducer, INITIAL_COHORT);
-  const cohortRef = useRef(cohort);
-  cohortRef.current = cohort;
-  const apply = useCallback((action: Parameters<typeof cohortReducer>[1]): QualifyCohort => {
-    const next = cohortReducer(cohortRef.current, action);
-    // Sync the ref IMMEDIATELY (not just at render): two same-tick applies (e.g. the Change-E hybrid's
-    // RESOLVE_PAYER → SWITCH_FACILITY) must each see the prior one's result, or the second computes
-    // from a stale cohort and the drill fetches under the WRONG payer.
-    cohortRef.current = next;
-    dispatch(action);
-    return next;
-  }, []);
-  const [facilityCases, setFacilityCases] = useState<QualifyClaim[]>([]);
-  const [capped, setCapped] = useState(false);
-  const [isFacilityPending, startFacilityTransition] = useTransition();
-  // Change E: facility-SCOPED mode (panel pins the selected card). Payer-wide keeps the full list.
-  const [scoped, setScoped] = useState(false);
-  // Change D: the ONE LOC lens (bar-level, view-only v1) — scopes trends + facilities + case rows.
-  const [locFilter, setLocFilter] = useState<QualifyLocFilter>(null);
-  // Phase 3: the patient-cohort slide-over (masked label + fetched context). Null = closed.
-  const [cohortSheet, setCohortSheet] = useState<{
-    label: string;
-    data: QualifyPatientCohort | null;
-    loading: boolean;
-  } | null>(null);
-  const [modalOpen, setModalOpen] = useState(false);
-  const [echo, setEcho] = useState('');
-  const [hint, setHint] = useState<string | null>(null);
-  const [hasSearched, setHasSearched] = useState(false);
-  // Non-null when the CURRENT resolution came from the by-payer path (on-load hybrid, a Heating-Up
-  // card, a URL restore) — a window change then re-resolves by payer. A manual search clears it.
-  const [byPayer, setByPayer] = useState<string | null>(null);
-  // VOB market narrows (employer/funding) — scope the ranking, the drill, the overview strip.
+
+  // ── COMPOSE SELECTIONS (non-PHI, set-membership; the URL persists these) ──────────────────────────
+  const [facilitySelection, setFacilitySelection] = useState<string[]>([]);
+  const [payerSelection, setPayerSelection] = useState<string[]>([]);
   const [employerSelection, setEmployerSelection] = useState<string[]>([]);
   const [fundingSelection, setFundingSelection] = useState<string[]>([]);
+  // ── PHI TERMS (raw; state-only, NEVER a URL/log — the server HMACs them to blind indexes) ─────────
+  const [memberId, setMemberId] = useState('');
+  const [alphaPrefix, setAlphaPrefix] = useState('');
+  const [groupNumber, setGroupNumber] = useState('');
+  const [clientName, setClientName] = useState(''); // Change C — dormant until QUALIFY_CLIENT_NAME_ENABLED
+
+  const [windowSel, setWindowSel] = useState<QualifyWindow>(() => trailingWindow(30));
+  const [locFilter, setLocFilter] = useState<QualifyLocFilter>(null);
+
+  // ── OVERVIEW STRIP (book KPIs + Heating-Up trends) — window-tracked, book-wide (NOT compose-scoped) ─
+  const [kpis, setKpis] = useState<QualifyBookKpis | null>(null);
+  const [trends, setTrends] = useState<QualifyFacilityTrend[]>([]);
+  const [overviewError, setOverviewError] = useState(false);
+  const [initializing, setInitializing] = useState(true);
+
+  // ── COMPOSED READS (live count + claim rows) ───────────────────────────────────────────────────
+  const [summary, setSummary] = useState<QualifyMatchSummary | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [composedCases, setComposedCases] = useState<QualifyClaim[]>([]);
+  const [capped, setCapped] = useState(false);
+  const [casesLoading, setCasesLoading] = useState(false);
+  const [casesError, setCasesError] = useState(false);
+
+  // ── TICKER PIN — a DISTINCT flag, set ONLY by a card click, cleared ONLY by the clear actions. NEVER
+  //    derived from the facility selection (deriving it would freeze the marquee whenever someone picks a
+  //    facility in the picker or restores a filtered URL — a pause with no visible cause). ─────────────
+  const [tickerPinned, setTickerPinned] = useState(false);
+
+  // ── PICKER OPTION VOCABULARIES ────────────────────────────────────────────────────────────────────
+  const [facilityOptions, setFacilityOptions] = useState<PickerOption[]>([]);
+  const [payerOptions, setPayerOptions] = useState<PickerOption[]>([]);
+  // Employer is a SERVER type-ahead (the ~11.6k vocabulary is too large to load whole).
   const [employerOptions, setEmployerOptions] = useState<CmdEmployerOption[]>([]);
   const [employerLoading, setEmployerLoading] = useState(false);
   const [employerQuery, setEmployerQuery] = useState('');
   const [employerDisplay, setEmployerDisplay] = useState<Map<string, string>>(() => new Map());
-  const market = useMemo<QualifyMarket | undefined>(() => {
-    const m: QualifyMarket = {};
-    if (employerSelection.length > 0) m.employers = employerSelection;
-    if (fundingSelection.length > 0) m.funding = fundingSelection;
-    return m.employers || m.funding ? m : undefined;
-  }, [employerSelection, fundingSelection]);
-  const marketRef = useRef(market);
-  marketRef.current = market;
-  const marketKey = `${employerSelection.join('\n')}|${fundingSelection.join('\n')}`;
-  const [initializing, setInitializing] = useState(true);
-  const [overviewError, setOverviewError] = useState(false); // book overview strip (KPIs + trends) failed to load
-  // PHI reveal cache (per-patient, audited) + the Change-B global toggle. In-memory ONLY.
+
+  // ── PHI reveal (per-patient, audited) + the Change-B global toggle. In-memory ONLY (never localStorage). ─
   const [revealed, setRevealed] = useState<Map<number, QualifyPhi>>(() => new Map());
   const revealedRef = useRef(revealed);
   revealedRef.current = revealed;
   const [revealingKeys, setRevealingKeys] = useState<ReadonlySet<number>>(() => new Set());
   const [revealError, setRevealError] = useState<string | null>(null);
   const [globalReveal, setGlobalReveal] = useState(false);
-  // Change B eligibility: canRevealPhi && amounts capability ⇔ super_admin/admin exactly
-  // (admissions_seat is the one Q-A role without the amounts capability; 'user' lacks canRevealPhi).
+  // Change B eligibility: canRevealPhi && amounts ⇔ super_admin/admin exactly (admissions_seat lacks amounts).
   const canGlobalReveal = canRevealPhi && viewerHasAmountsCapability;
-  // Resolution recency guard — every fetch entry point bumps-and-captures; every post-await write
-  // checks it. A reveal CAPTURES (never bumps) so a stale reveal can't repopulate after a reset.
-  const genRef = useRef(0);
-  // The RESOLVED manual-search term + path (mirror of mobile's lastSearch). A window/market change
-  // re-resolves from THIS, not the live input box — so editing the box after a resolve never leaves
-  // a stale subject (review finding). Null on the by-payer / URL-restore path (byPayer drives those).
-  const lastResolvedRef = useRef<{ term: string; type: 'id' | 'client' } | null>(null);
-  // Fix 1 — the identifier narrow carried from the resolving search into the facility DRILL (ruling 5):
-  // Recent Claims shows only claims matching the searched prefix/member/client name, on the seed AND
-  // every facility switch. The RAW term lives ONLY here (in-memory ref) — never state, never a URL,
-  // never a log; the server mints the blind index from it. Null on every non-identifier resolution
-  // (resolve-by-payer, on-load hybrid, URL restore, clear). fetchSeed/fetchCases read it at call time —
-  // same trust boundary as the term already sent to getQualifySnapshot.
-  const activeFilterRef = useRef<{ prefix?: string } | { memberId?: string } | { clientName?: string } | null>(null);
-  // Overview-strip recency guard — independent of genRef so a slow earlier window/market strip
-  // response can't overwrite a newer one's KPI tiles + Heating-Up cards.
-  const overviewGenRef = useRef(0);
-  // Scoped-KPI recency guard — a slow earlier payer/window scoped-KPI response can't overwrite a newer.
-  const scopedKpiGenRef = useRef(0);
 
-  const hasAmounts = snapshot ? snapshot.viewerHasAmountsCapability : viewerHasAmountsCapability;
-  const facilityBuckets = useMemo(() => buildFacilityBucketMap(snapshot?.facilities ?? []), [snapshot]);
+  // Phase 3 patient-cohort slide-over (masked label + fetched context). Null = closed.
+  const [cohortSheet, setCohortSheet] = useState<{ label: string; data: QualifyPatientCohort | null; loading: boolean } | null>(
+    null,
+  );
+
+  // Recency guards — one for the compose fetch (count + cases + reveal), one for the overview strip.
+  const composeGenRef = useRef(0);
+  const overviewGenRef = useRef(0);
 
   const resetReveal = useCallback(() => {
     setRevealed(new Map());
@@ -235,418 +158,170 @@ export function QualifyTab({
     setRevealError(null);
   }, []);
 
-  // ── data fetch helpers (all server-scoped; every commit is atomic) ────────────────────────────
-
-  const fetchSeed = useCallback(
-    async (payer: string, facility: string, w: QualifyWindow): Promise<CasesPage> => {
-      const res = await getQualifyFacilityCases({
-        payer,
-        facility,
-        window: w,
-        market: marketRef.current,
-        filter: activeFilterRef.current ?? undefined, // Fix 1: carry the resolving search's identifier narrow
-      });
-      return { claims: res.claims, capped: res.capped };
-    },
-    [],
+  // ── DERIVED: the compose filter + whether any restriction is active (client mirror of composeHasAny) ─
+  const composeInput = useMemo<QualifyComposeInput>(
+    () => ({
+      facilities: facilitySelection.length > 0 ? facilitySelection : undefined,
+      payers: payerSelection.length > 0 ? payerSelection : undefined,
+      employers: employerSelection.length > 0 ? employerSelection : undefined,
+      funding: fundingSelection.length > 0 ? fundingSelection : undefined,
+      memberId: memberId.trim() || undefined,
+      alphaPrefix: alphaPrefix.trim() || undefined,
+      group: groupNumber.trim() || undefined,
+      clientName: clientName.trim() || undefined,
+      window: windowSel,
+    }),
+    [facilitySelection, payerSelection, employerSelection, fundingSelection, memberId, alphaPrefix, groupNumber, clientName, windowSel],
   );
+  const hasAnyFilter =
+    facilitySelection.length > 0 ||
+    payerSelection.length > 0 ||
+    employerSelection.length > 0 ||
+    fundingSelection.length > 0 ||
+    memberId.trim() !== '' ||
+    alphaPrefix.trim() !== '' ||
+    groupNumber.trim() !== '' ||
+    (QUALIFY_CLIENT_NAME_ENABLED && clientName.trim() !== '');
 
-  // Standalone cases fetch for a facility switch (gen + cohortKey double-guarded).
-  const fetchCases = useCallback(
-    (c: QualifyCohort) => {
-      const payer = c.payer;
-      const facility = c.facility;
-      if (!payer || !facility) return;
-      const gen = ++genRef.current;
-      const key = cohortKey(c);
-      resetReveal();
-      startFacilityTransition(async () => {
-        try {
-          const res = await getQualifyFacilityCases({
-            payer,
-            facility,
-            window: c.window,
-            market: marketRef.current,
-            filter: activeFilterRef.current ?? undefined, // Fix 1: the identifier narrow persists across facility switches
-          });
-          if (genRef.current !== gen) return; // superseded (recency)
-          if (cohortKey(cohortRef.current) !== key) return; // cohort changed underneath (identity)
-          setFacilityCases(res.claims);
-          setCapped(res.capped);
-        } catch {
-          if (genRef.current !== gen) return;
-          if (cohortKey(cohortRef.current) !== key) return;
-          setHint('Qualify is unavailable right now. Please try again.');
-        }
-      });
-    },
-    [resetReveal],
-  );
+  // Cards whose facility is currently selected read pressed. STABLE identity while the selection is
+  // unchanged (so the memoized ticker subtree below doesn't re-render on unrelated count updates).
+  const facilityKey = facilitySelection.join('');
+  const activeFacilityKeys = useMemo(() => new Set(facilitySelection), [facilityKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const hasAmounts = viewerHasAmountsCapability;
 
-  const commitResolved = useCallback(
-    (snap: QualifySnapshot, action: Parameters<typeof cohortReducer>[1], seed: CasesPage) => {
-      setSnapshot(snap);
-      apply(action);
-      setFacilityCases(seed.claims);
-      setCapped(seed.capped);
-    },
-    [apply],
-  );
-
-  /** Refresh the overview strip (KPIs + trend cards) for a window/market — resolve:false (strip only).
-   *  Recency-guarded (overviewGenRef): an out-of-order earlier response can't overwrite newer tiles. */
+  // ── OVERVIEW STRIP: book-wide KPIs + Heating-Up trends for a window (NO market — Phase 1 the compose
+  //    pickers never re-scope the strip; only the window control does, keeping tiles + ticker in lockstep). ─
   const refreshOverview = useCallback((w: QualifyWindow) => {
     const ogen = ++overviewGenRef.current;
-    getQualifyOverview(w, marketRef.current, { resolve: false })
+    getQualifyOverview(w, undefined, { resolve: false })
       .then((ov) => {
-        if (overviewGenRef.current !== ogen) return; // superseded by a newer window/market strip fetch
+        if (overviewGenRef.current !== ogen) return;
         setKpis(ov.kpis);
         setTrends(ov.trends);
         setOverviewError(false);
       })
       .catch(() => {
-        // strip refresh is non-blocking — stale tiles beat a broken search — but surface a retry
-        // affordance (guarded so a superseded failure can't flag a newer, successful load).
         if (overviewGenRef.current !== ogen) return;
         setOverviewError(true);
       });
   }, []);
 
-  /** Fetch the three KPI ratios narrowed to the RESOLVED payer (the scoped tiles + the band stat).
-   *  Recency-guarded so a slow earlier payer/window response can't overwrite a newer one. A null/blank
-   *  payer clears the scope (back to book-wide tiles). Non-blocking (a failed fetch leaves stale). */
-  const refreshScopedKpis = useCallback((payer: string | null, w: QualifyWindow) => {
-    const sgen = ++scopedKpiGenRef.current;
-    if (!payer) {
-      setScopedKpis(null);
-      return;
-    }
-    getQualifyBookKpis(w, marketRef.current, payer)
-      .then((k) => {
-        if (scopedKpiGenRef.current !== sgen) return; // superseded by a newer scoped fetch
-        setScopedKpis(k);
-      })
-      .catch(() => {
-        /* non-blocking — a failed scoped fetch leaves the prior tiles/stat */
-      });
-  }, []);
-
-  // Member-id / alpha-prefix search (server-side sniff). Lands payer-wide on the Fix-A landing facility.
-  // `explicit` = an Enter/submit (vs a debounced autosearch keystroke): the VOB no-match modal opens
-  // ONLY on an explicit submit, so it never pops mid-typing on every debounced intermediate term.
-  const runSearch = useCallback(
-    (rawQuery: string, w: QualifyWindow, explicit = false) => {
-      const trimmed = rawQuery.trim();
-      if (trimmed.length < MIN_QUERY_LEN) {
-        setHint(`Enter at least a ${MIN_QUERY_LEN}-letter alpha prefix or a full member ID.`);
-        return;
-      }
-      setHint(null);
-      resetReveal();
-      // Fix 1: carry this identifier into the drill (prefix vs exact member — the server sniffs the kind
-      // on resolve, but the drill filter must be explicit). Raw term stays in this ref only.
-      activeFilterRef.current = sniffQualifyKind(trimmed) === 'prefix' ? { prefix: trimmed } : { memberId: trimmed };
-      const gen = ++genRef.current;
-      startTransition(async () => {
-        try {
-          const snap = await getQualifySnapshot({ query: trimmed, window: w, market: marketRef.current });
-          const payerName = snap.resolved?.payerName ?? null;
-          const landing = snap.identifierLandingFacility;
-          const seed = payerName && landing ? await fetchSeed(payerName, landing, w) : EMPTY_PAGE;
-          if (genRef.current !== gen) return;
-          commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: landing, window: w }, seed);
-          setScoped(false); // a search lands payer-wide (Change E)
-          setHasSearched(true);
-          setUserSearched(true); // an explicit user search → tiles scope + Clear Search shows
-          setByPayer(null);
-          refreshScopedKpis(payerName, w); // scope the KPI tiles + band stat to the resolved payer
-          lastResolvedRef.current = { term: trimmed, type: 'id' }; // window/market re-resolve reads THIS
-          if (snap.resolved === null) {
-            setEcho(trimmed);
-            if (explicit) setModalOpen(true); // never pop the full-screen modal on a debounced keystroke
-          } else {
-            setModalOpen(false);
-          }
-        } catch {
-          if (genRef.current !== gen) return;
-          setHint('Qualify is unavailable right now. Please try again.');
-        }
-      });
-    },
-    [resetReveal, fetchSeed, commitResolved, refreshScopedKpis],
-  );
-
-  // Client-name search (Change C) — the exact-name blind-index path. Same landing flow; the raw name
-  // never leaves this closure except as the action argument (HMAC'd at the server boundary).
-  const runNameSearch = useCallback(
-    (rawName: string, w: QualifyWindow, explicit = false) => {
-      const trimmed = rawName.trim();
-      if (trimmed.length < MIN_QUERY_LEN) {
-        setHint('Enter at least 3 characters of the client name.');
-        return;
-      }
-      setHint(null);
-      resetReveal();
-      activeFilterRef.current = { clientName: trimmed }; // Fix 1: carry the exact-name narrow into the drill
-      const gen = ++genRef.current;
-      startTransition(async () => {
-        try {
-          const snap = await getQualifySnapshotByName({ name: trimmed, window: w, market: marketRef.current });
-          const payerName = snap.resolved?.payerName ?? null;
-          const landing = snap.identifierLandingFacility;
-          const seed = payerName && landing ? await fetchSeed(payerName, landing, w) : EMPTY_PAGE;
-          if (genRef.current !== gen) return;
-          commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility: landing, window: w }, seed);
-          setScoped(false);
-          setHasSearched(true);
-          setUserSearched(true); // an explicit user search → tiles scope + Clear Search shows
-          setByPayer(null);
-          refreshScopedKpis(payerName, w); // scope the KPI tiles + band stat to the resolved payer
-          lastResolvedRef.current = { term: trimmed, type: 'client' };
-          if (snap.resolved === null) {
-            setEcho(trimmed);
-            if (explicit) setModalOpen(true);
-          } else {
-            setModalOpen(false);
-          }
-        } catch {
-          if (genRef.current !== gen) return;
-          setHint('Qualify is unavailable right now. Please try again.');
-        }
-      });
-    },
-    [resetReveal, fetchSeed, commitResolved, refreshScopedKpis],
-  );
-
-  /**
-   * Resolve by payer label (Heating-Up hybrid / URL restore / window re-resolve). `focusFacility`
-   * (Change E) scopes to that facility WHEN it ranks under the payer this window (else rank-1
-   * payer-wide — never a fabricated scope).
-   */
-  const resolveByPayer = useCallback(
-    (payer: string, w: QualifyWindow, focusFacility: string | null = null) => {
-      setHint(null);
-      resetReveal();
-      activeFilterRef.current = null; // Fix 1: by-payer resolutions are payer-wide (ruling 3) — no identifier narrow
-      const gen = ++genRef.current;
-      startTransition(async () => {
-        try {
-          const snap = await getQualifySnapshotByPayer({ payer, window: w, market: marketRef.current });
-          const payerName = snap.resolved?.payerName ?? null;
-          const ranked = focusFacility !== null && snap.facilities.some((f) => f.facilityKey === focusFacility);
-          const facility = payerName ? (ranked ? focusFacility : snap.facilities[0]?.facilityKey ?? null) : null;
-          const seed = payerName && facility ? await fetchSeed(payerName, facility, w) : EMPTY_PAGE;
-          if (genRef.current !== gen) return;
-          commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility, window: w }, seed);
-          setScoped(ranked); // hybrid: scoped iff the clicked facility actually ranks here
-          setHasSearched(true);
-          setByPayer(payer);
-          refreshScopedKpis(payerName, w); // scope the KPI tiles + band stat to the resolved payer
-          lastResolvedRef.current = null; // the by-payer path owns re-resolution now (not a stored term)
-          setModalOpen(false);
-        } catch {
-          if (genRef.current !== gen) return;
-          setHint('Qualify is unavailable right now. Please try again.');
-        }
-      });
-    },
-    [resetReveal, fetchSeed, commitResolved, refreshScopedKpis],
-  );
-
-  // Window change: refresh the strip AND re-resolve the subject for the new window. Ruling (Change E):
-  // a window change RESETS the facility scope back to payer-wide — cleared in the SAME resolve flow.
-  const onWindow = (w: QualifyWindow) => {
-    const prev = cohortRef.current;
-    apply({ type: 'CHANGE_WINDOW', window: w });
-    refreshOverview(w);
-    if (!prev.payer) return;
-    setScoped(false);
-    // Re-resolve the ACTUAL resolved subject (byPayer, or the STORED search term) — never the live
-    // input box, which the user may have edited since resolving (review finding).
-    if (byPayer) {
-      resolveByPayer(byPayer, w);
-    } else if (lastResolvedRef.current) {
-      const { term, type } = lastResolvedRef.current;
-      if (type === 'client') runNameSearch(term, w);
-      else runSearch(term, w);
-    }
-  };
-
-  // Facility row click → server-scoped drill + pin (Change E). No-op on the already-selected row.
-  const selectFacility = useCallback(
-    (facilityKey: string) => {
-      const c = cohortRef.current;
-      if (!c.payer) return;
-      setUserSearched(true); // a facility-row click is a user resolution → tiles scope + Clear Search shows
-      if (facilityKey === c.facility) {
-        setScoped(true); // clicking the selected row in list mode just pins it
-        return;
-      }
-      setScoped(true);
-      fetchCases(apply({ type: 'SWITCH_FACILITY', facility: facilityKey }));
-    },
-    [apply, fetchCases],
-  );
-
-  // "× All facilities" (Change E): back to payer-wide — full list + rank-1 seed, one server-scoped fetch.
-  const clearFacilityScope = useCallback(() => {
-    const c = cohortRef.current;
-    setScoped(false);
-    const rank1 = snapshot?.facilities[0]?.facilityKey ?? null;
-    if (!c.payer || !rank1 || rank1 === c.facility) return;
-    fetchCases(apply({ type: 'SWITCH_FACILITY', facility: rank1 }));
-  }, [apply, fetchCases, snapshot]);
-
-  // Heating-Up card click — the Change-E HYBRID: resolve the card's dominant payer AND scope to it.
-  const openTrendCard = useCallback(
-    (t: QualifyFacilityTrend) => {
-      if (!t.dominantPayer) return;
-      setUserSearched(true); // a Heating-Up card click is a user resolution → tiles scope + Clear Search shows
-      resolveByPayer(t.dominantPayer, cohortRef.current.window, t.facilityKey);
-    },
-    [resolveByPayer],
-  );
-
-  const clearSearch = useCallback(() => {
-    genRef.current += 1;
-    setQuery('');
-    setHint(null);
-    setEcho('');
-    setModalOpen(false);
-    setLocFilter(null);
-    resetReveal();
-    setSnapshot(null);
-    setFacilityCases([]);
-    setCapped(false);
-    setHasSearched(false);
-    setUserSearched(false);
-    setScopedKpis(null); // back to book-wide tiles + no band stat
-    setByPayer(null);
-    lastResolvedRef.current = null;
-    activeFilterRef.current = null; // Fix 1: drop the drill identifier narrow on clear
-    setScoped(false);
-    apply({ type: 'RESOLVE_PAYER', payer: null, facility: null, window: cohortRef.current.window });
-  }, [apply, resetReveal]);
-
-  const viewCohort = useCallback((claimId: number, label: string) => {
-    const c = cohortRef.current;
-    if (!c.payer || !c.facility) return;
-    setCohortSheet({ label, data: null, loading: true });
-    void (async () => {
-      try {
-        const res = await getQualifyPatientCohort({
-          payer: c.payer!,
-          facility: c.facility!,
-          window: c.window,
-          claimId,
-        });
-        setCohortSheet((cur) => (cur && cur.label === label ? { ...cur, data: res, loading: false } : cur));
-      } catch {
-        setCohortSheet(null);
-        setHint('Qualify is unavailable right now. Please try again.');
-      }
-    })();
-  }, []);
-
-  // ── ON LOAD: URL restore (Change F) or the overview HYBRID (Change E) — one decision, one paint ──
+  // ── ON LOAD: restore non-PHI selections + window + LOC from the URL, load the option vocabularies, and
+  //    fetch the book-wide overview strip. One paint. The compose fetch effect below fires naturally once
+  //    the restored selections land (no separate restore fetch). ────────────────────────────────────────
   useEffect(() => {
     let alive = true;
     const url = parseQualifySearchParams(new URLSearchParams(globalThis.location?.search ?? ''));
-    const w = url.window;
-    if (cohortKey(cohortRef.current) !== cohortKey({ ...cohortRef.current, window: w })) {
-      apply({ type: 'CHANGE_WINDOW', window: w });
-    }
+    if (url.facilities.length) setFacilitySelection(url.facilities);
+    if (url.payers.length) setPayerSelection(url.payers);
+    if (url.employers.length) setEmployerSelection(url.employers);
+    if (url.funding.length) setFundingSelection(url.funding);
+    setWindowSel(url.window);
     if (url.loc) setLocFilter(url.loc);
-    const gen = ++genRef.current;
-    activeFilterRef.current = null; // Fix 1: on-load (URL restore + fresh hybrid) are both by-payer / payer-wide
-    (async () => {
-      try {
-        if (url.payer) {
-          // URL restore: strip (no hybrid resolve) + re-resolve via the NON-PHI payer path.
-          const [ov, snap] = await Promise.all([
-            getQualifyOverview(w, marketRef.current, { resolve: false }),
-            getQualifySnapshotByPayer({ payer: url.payer, window: w, market: marketRef.current }),
-          ]);
-          if (!alive || genRef.current !== gen) return;
-          setKpis(ov.kpis);
-          setTrends(ov.trends);
-          const payerName = snap.resolved?.payerName ?? null;
-          const ranked = url.facility !== null && snap.facilities.some((f) => f.facilityKey === url.facility);
-          const facility = payerName ? (ranked ? url.facility : snap.facilities[0]?.facilityKey ?? null) : null;
-          const seed = payerName && facility ? await fetchSeed(payerName, facility, w) : EMPTY_PAGE;
-          if (!alive || genRef.current !== gen) return;
-          commitResolved(snap, { type: 'RESOLVE_PAYER', payer: payerName, facility, window: w }, seed);
-          setScoped(ranked);
-          setHasSearched(true);
-          setUserSearched(true); // a shared/restored resolved link IS a resolved subject → show Clear + scoped tiles
-          setByPayer(url.payer);
-          refreshScopedKpis(url.payer, w); // scope the KPI tiles + band stat to the restored payer
-          lastResolvedRef.current = null; // URL restore is a by-payer resolution, not a stored term
-        } else {
-          // Fresh landing: load the OVERVIEW STRIP ONLY — book-wide KPI tiles + Heating-Up trends. NO
-          // auto-resolve (resolve:false): the subject / facilities / Recent-Claims area stays empty (the
-          // animated landing hero) until the user actually searches or taps a Heating-Up card. This is
-          // the intended clean start, and skipping the book-wide hybrid resolve also makes the landing
-          // paint fast (no ~2.5–5s aggregate on first load).
-          const ov = await getQualifyOverview(w, marketRef.current, { resolve: false });
-          if (!alive || genRef.current !== gen) return;
-          setKpis(ov.kpis);
-          setTrends(ov.trends);
-        }
-      } catch {
-        // initial strip/restore failed — surface a retry (the user can still search meanwhile).
-        if (alive && genRef.current === gen) setOverviewError(true);
-      } finally {
+
+    void loadQualifyFacilityOptions().then((r) => {
+      if (!alive || !r.ok) return;
+      setFacilityOptions(r.facilities.map((f) => ({ value: f.facility, display: f.facility_name ?? f.facility, badge: f.care_setting })));
+    });
+    void loadQualifyPayerOptions().then((r) => {
+      if (!alive || !r.ok) return;
+      setPayerOptions(r.payers.map((p) => ({ value: p, display: p })));
+    });
+
+    const ogen = ++overviewGenRef.current;
+    getQualifyOverview(url.window, undefined, { resolve: false })
+      .then((ov) => {
+        if (!alive || overviewGenRef.current !== ogen) return;
+        setKpis(ov.kpis);
+        setTrends(ov.trends);
+      })
+      .catch(() => {
+        if (alive && overviewGenRef.current === ogen) setOverviewError(true);
+      })
+      .finally(() => {
         if (alive) setInitializing(false);
-      }
-    })();
+      });
     return () => {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Change F: write resolved (non-PHI) state to the URL — replace, never push; never a keystroke ──
-  const resolvedPayerName = snapshot?.resolved?.payerName ?? null;
+  // ── COMPOSE FETCH: the live match count + the composed claim rows, debounced + recency-guarded. No
+  //    filter ⇒ clear + no fetch (the landing hero shows). ──────────────────────────────────────────────
+  useEffect(() => {
+    if (!hasAnyFilter) {
+      setSummary(null);
+      setComposedCases([]);
+      setCapped(false);
+      setCasesError(false);
+      setSummaryLoading(false);
+      setCasesLoading(false);
+      return;
+    }
+    setSummaryLoading(true);
+    setCasesLoading(true);
+    const gen = ++composeGenRef.current;
+    const t = setTimeout(() => {
+      getQualifyMatchSummary(composeInput)
+        .then((s) => {
+          if (composeGenRef.current !== gen) return;
+          setSummary(s);
+          setSummaryLoading(false);
+        })
+        .catch(() => {
+          if (composeGenRef.current !== gen) return;
+          setSummary(null);
+          setSummaryLoading(false);
+        });
+      getQualifyComposedCases(composeInput)
+        .then((r) => {
+          if (composeGenRef.current !== gen) return;
+          resetReveal(); // new result set → drop the prior scope's reveal cache (globalReveal re-reveals below)
+          setComposedCases(r.claims);
+          setCapped(r.capped);
+          setCasesError(false);
+          setCasesLoading(false);
+        })
+        .catch(() => {
+          if (composeGenRef.current !== gen) return;
+          setComposedCases([]);
+          setCapped(false);
+          setCasesError(true);
+          setCasesLoading(false);
+        });
+    }, COMPOSE_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+    // composeInput is recomposed each render; depend on its inputs (stable state identities) instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [facilitySelection, payerSelection, employerSelection, fundingSelection, memberId, alphaPrefix, groupNumber, clientName, windowSel, hasAnyFilter, resetReveal]);
+
+  // ── URL STATE: persist the NON-PHI selection arrays + window + LOC (replace, never push). PHI is
+  //    excluded by construction — buildQualifySearchParams has no field for it. ─────────────────────────
   useEffect(() => {
     if (initializing) return;
-    // Persist the payer/facility ONLY for a real USER resolution (search / card / facility click / URL
-    // restore → userSearched). The fresh AUTO-resolved landing must NOT write ?payer: otherwise a refresh
-    // reloads via the URL-restore branch (userSearched=true) and the Clear Search button appears, while a
-    // clean SPA-nav landing shows none — the two must agree. Window/LOC are view prefs and always persist
-    // (a payer-less ?window never triggers the restore branch, so it can't resurface the button).
     const qs = buildQualifySearchParams({
-      payer: userSearched ? resolvedPayerName : null,
-      facility: userSearched && scoped ? cohort.facility : null,
-      window: cohort.window,
+      facilities: facilitySelection,
+      payers: payerSelection,
+      employers: employerSelection,
+      funding: fundingSelection,
+      window: windowSel,
       loc: locFilter,
     });
     router.replace(qs ? `?${qs}` : globalThis.location?.pathname ?? '/qualify', { scroll: false });
-    // serializeQualifyWindow(cohort.window) is covered by cohort.window identity in the dep array.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initializing, userSearched, resolvedPayerName, scoped, cohort.facility, cohort.window, locFilter, router]);
+  }, [initializing, facilitySelection, payerSelection, employerSelection, fundingSelection, windowSel, locFilter]);
 
-  // ── AUTOSEARCH: debounced resolve on the id/client tabs (≥3 chars); Enter resolves immediately ──
-  const autoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Safety: if every filter is cleared (incl. a manual chip removal down to empty), drop the pin so the
+  // marquee doesn't stay paused with nothing selected. The explicit clear actions also drop it directly.
   useEffect(() => {
-    if (searchType === 'employer') return;
-    const v = query.trim();
-    if (v.length < MIN_QUERY_LEN) return;
-    if (autoTimer.current) clearTimeout(autoTimer.current);
-    autoTimer.current = setTimeout(() => {
-      if (searchType === 'client') runNameSearch(v, cohortRef.current.window);
-      else runSearch(v, cohortRef.current.window);
-    }, AUTOSEARCH_DEBOUNCE_MS);
-    return () => {
-      if (autoTimer.current) clearTimeout(autoTimer.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, searchType]);
+    if (!hasAnyFilter && tickerPinned) setTickerPinned(false);
+  }, [hasAnyFilter, tickerPinned]);
 
-  // Employer type-ahead (server-side; ≥3 chars).
+  // ── EMPLOYER type-ahead (server-side; ≥3 chars, debounced). ──────────────────────────────────────
   useEffect(() => {
     const q = employerQuery.trim();
-    if (q.length < 3) {
+    if (q.length < EMPLOYER_MIN_CHARS) {
       setEmployerOptions([]);
       setEmployerLoading(false);
       return;
@@ -680,33 +355,13 @@ export function QualifyTab({
     };
   }, [employerQuery]);
 
-  // Market change → refresh the strip + re-resolve the active view under the new narrow.
-  const marketInitDone = useRef(false);
-  useEffect(() => {
-    if (!marketInitDone.current) {
-      marketInitDone.current = true;
-      return;
-    }
-    const w = cohortRef.current.window;
-    refreshOverview(w);
-    // Re-resolve the resolved subject (byPayer, or the STORED term) — not the live input box.
-    if (byPayer) {
-      resolveByPayer(byPayer, w);
-    } else if (lastResolvedRef.current) {
-      const { term, type } = lastResolvedRef.current;
-      if (type === 'client') runNameSearch(term, w);
-      else runSearch(term, w);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [marketKey]);
-
-  // PER-PATIENT reveal (audited; unchanged for every role).
+  // ── PER-PATIENT reveal (audited; unchanged for every role). ───────────────────────────────────────
   const revealPatient = useCallback(
     (patientKey: number, claimIds: number[]) => {
       if (!canRevealPhi || claimIds.length === 0) return;
       const ids = claimIds.slice(0, QUALIFY_REVEAL_BATCH_CAP);
       if (ids.every((id) => revealedRef.current.has(id))) return;
-      const gen = genRef.current; // capture (don't bump)
+      const gen = composeGenRef.current; // capture (don't bump) — a newer compose fetch discards this
       setRevealingKeys((s) => new Set(s).add(patientKey));
       setRevealError(null);
       const clearKey = () =>
@@ -718,7 +373,7 @@ export function QualifyTab({
       void (async () => {
         try {
           const res = await revealQualifyRows(ids);
-          if (genRef.current !== gen) return;
+          if (composeGenRef.current !== gen) return;
           clearKey();
           if (res.ok) {
             setRevealed((m) => {
@@ -733,7 +388,7 @@ export function QualifyTab({
             setRevealError(res.error);
           }
         } catch {
-          if (genRef.current !== gen) return;
+          if (composeGenRef.current !== gen) return;
           clearKey();
           setRevealError('Reveal is unavailable right now.');
         }
@@ -742,22 +397,20 @@ export function QualifyTab({
     [canRevealPhi],
   );
 
-  // ── CHANGE B: the GLOBAL persistent reveal. When ON, every scope's newly-loaded rows re-reveal
-  // through the SAME audited path, chunked to the 50 batch cap (sequential; gen-guarded). The cache
-  // reset on scope change still happens — this effect re-fires after the new rows land, so the audit
-  // trail records every scope's reveal (the intended, accepted volume increase). Toggle OFF = re-mask.
+  // ── CHANGE B: the GLOBAL persistent reveal. When ON, each new result set's rows re-reveal through the
+  //    SAME audited path, chunked to the 50 batch cap (gen-guarded). ──────────────────────────────────
   useEffect(() => {
-    if (!globalReveal || !canGlobalReveal || facilityCases.length === 0) return;
-    const ids = facilityCases.map((c) => c.id).filter((id) => !revealedRef.current.has(id));
+    if (!globalReveal || !canGlobalReveal || composedCases.length === 0) return;
+    const ids = composedCases.map((c) => c.id).filter((id) => !revealedRef.current.has(id));
     if (ids.length === 0) return;
-    const gen = genRef.current; // capture — a newer scope discards these landings
+    const gen = composeGenRef.current; // capture — a newer result set discards these landings
     let alive = true;
     void (async () => {
       for (let i = 0; i < ids.length; i += QUALIFY_REVEAL_BATCH_CAP) {
         const chunk = ids.slice(i, i + QUALIFY_REVEAL_BATCH_CAP);
         try {
           const res = await revealQualifyRows(chunk);
-          if (!alive || genRef.current !== gen) return;
+          if (!alive || composeGenRef.current !== gen) return;
           if (res.ok) {
             setRevealed((m) => {
               const n = new Map(m);
@@ -772,7 +425,7 @@ export function QualifyTab({
             return;
           }
         } catch {
-          if (!alive || genRef.current !== gen) return;
+          if (!alive || composeGenRef.current !== gen) return;
           setRevealError('Reveal is unavailable right now.');
           return;
         }
@@ -781,7 +434,7 @@ export function QualifyTab({
     return () => {
       alive = false;
     };
-  }, [globalReveal, canGlobalReveal, facilityCases]);
+  }, [globalReveal, canGlobalReveal, composedCases]);
 
   const toggleGlobalReveal = useCallback(() => {
     setGlobalReveal((on) => {
@@ -790,14 +443,64 @@ export function QualifyTab({
     });
   }, [resetReveal]);
 
-  // Market picker plumbing.
-  const toggleEmployer = useCallback((value: string) => {
-    setEmployerSelection((prev) => (prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value]));
+  // ── Phase 3 cohort slide-over — derive the payer/facility AUDIT CONTEXT from the clicked claim (the
+  //    cohort itself is re-derived server-side from claimId; payer/facility are context only). ───────────
+  const viewCohort = useCallback(
+    (claimId: number, label: string) => {
+      const claim = composedCases.find((c) => c.id === claimId);
+      setCohortSheet({ label, data: null, loading: true });
+      void (async () => {
+        try {
+          const res = await getQualifyPatientCohort({
+            payer: claim?.payerName ?? '',
+            facility: claim?.facilityName ?? '',
+            window: windowSel,
+            claimId,
+          });
+          setCohortSheet((cur) => (cur && cur.label === label ? { ...cur, data: res, loading: false } : cur));
+        } catch {
+          setCohortSheet(null);
+        }
+      })();
+    },
+    [composedCases, windowSel],
+  );
+
+  // ── Window change: refetch the book-wide strip + re-run the composed reads (via the compose effect). ─
+  const onWindow = useCallback(
+    (w: QualifyWindow) => {
+      setWindowSel(w);
+      refreshOverview(w);
+    },
+    [refreshOverview],
+  );
+
+  // ── Ticker-card click — REPLACE the whole filter set with exactly {that facility, its dominant payer}
+  //    (never append: a second click must not push the payer count to 2+) and PIN the marquee. The
+  //    auto-added payer chip is behaviorally/visually identical to a hand-picked one (same picker state). ─
+  const openTrendCard = useCallback((t: QualifyFacilityTrend) => {
+    if (!t.dominantPayer) return;
+    setTickerPinned(true);
+    setFacilitySelection([t.facilityKey]);
+    setPayerSelection([t.dominantPayer]);
+    setEmployerSelection([]);
+    setFundingSelection([]);
+    setMemberId('');
+    setAlphaPrefix('');
+    setGroupNumber('');
+    setClientName('');
   }, []);
+
+  // ── Picker plumbing ───────────────────────────────────────────────────────────────────────────────
+  const toggleIn = (setter: React.Dispatch<React.SetStateAction<string[]>>) => (value: string) =>
+    setter((prev) => (prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value]));
+  const toggleFacility = useCallback(toggleIn(setFacilitySelection), []);
+  const togglePayer = useCallback(toggleIn(setPayerSelection), []);
+  const toggleEmployer = useCallback(toggleIn(setEmployerSelection), []);
+  const toggleFunding = useCallback(toggleIn(setFundingSelection), []);
+  const clearFacilities = useCallback(() => setFacilitySelection([]), []);
+  const clearPayers = useCallback(() => setPayerSelection([]), []);
   const clearEmployers = useCallback(() => setEmployerSelection([]), []);
-  const toggleFunding = useCallback((value: string) => {
-    setFundingSelection((prev) => (prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value]));
-  }, []);
   const clearFunding = useCallback(() => setFundingSelection([]), []);
   const employerPickerOptions = useMemo<PickerOption[]>(
     () => employerOptions.map((o) => ({ value: o.employer_norm, display: o.employer_name ?? o.employer_norm })),
@@ -811,82 +514,48 @@ export function QualifyTab({
     [],
   );
 
-  const resolved = snapshot?.resolved ?? null;
-  const selectedFacilityLabel = snapshot?.facilities.find((f) => f.facilityKey === cohort.facility)?.name ?? null;
-  const emptyIdentifierLabel = isIdentifierEmpty(resolved, snapshot?.identifierLandingFacility ?? null)
-    ? identifierEmptyTerm(resolved)
-    : null;
-  // Fix 1 — when the resolving search was an identifier, the drill is narrowed to it (activeFilterRef),
-  // so Recent Claims shows only matching claims. Derive a NON-PHI caption from the resolved match so a
-  // payer-wide facility with no matching members reads as intentional, not broken: the ≤3 alpha prefix
-  // echoes (matchedValue); an exact member / client name becomes a generic word (never the raw term).
-  // Equivalent to "activeFilterRef is set" by construction (identifier resolves set it; payer resolves
-  // clear it), and derives from state so render stays reactive.
-  const drillFilterCaption =
-    resolved === null || resolved.matchedOn === 'payer'
-      ? null
-      : resolved.matchedOn === 'prefix' && resolved.matchedValue
-        ? `prefix ${resolved.matchedValue}`
-        : resolved.matchedOn === 'client_name'
-          ? 'this client name'
-          : 'this member';
-  // Change D — ONE lens, everywhere (inclusive semantics; view-only v1).
-  const visibleTrends = filterFacilitiesByLoc(trends, locFilter);
-  const lensFacilities = filterFacilitiesByLoc(snapshot?.facilities ?? [], locFilter);
-  // When SCOPED, the pinned facility is the explicit subject — it must survive the lens even if its
-  // careSetting doesn't match (else FacilityPanel pins an empty card + the cases panel empties, a
-  // self-contradictory dead-end; review finding). In list mode the lens filters normally.
-  const pinnedFacility = scoped ? snapshot?.facilities.find((f) => f.facilityKey === cohort.facility) ?? null : null;
-  const visibleFacilities =
-    pinnedFacility && !lensFacilities.some((f) => f.facilityKey === pinnedFacility.facilityKey)
-      ? [pinnedFacility, ...lensFacilities]
-      : lensFacilities;
-  // The cases panel is scoped to ONE facility server-side; the LOC lens must NOT empty it when the
-  // pinned facility itself is off-lens (its own claims are the subject). Only filter cases by LOC in
-  // payer-wide (unscoped) mode — where the lens is a genuine cross-facility view filter.
-  const visibleCases = scoped ? facilityCases : filterClaimsByLoc(facilityCases, locFilter);
-  // KPI tiles: scoped to the resolved payer once the USER resolves a subject; book-wide on the fresh
-  // landing (userSearched false) so it reads as unsearched (ruling: tiles follow what the user clicked).
-  const tilesScoped = userSearched && resolved !== null && scopedKpis !== null;
-  const displayKpis = tilesScoped ? scopedKpis : kpis;
-  const kpiScopeLabel = tilesScoped ? resolved!.payerName : null;
-  // Resolved-band "avg allowed ÷ billed" stat: the PINNED facility's own reliable allowed÷billed when
-  // scoped (non-dollar, already on the facility row — role-safe), else the payer-wide dollar-weighted
-  // ratio from the scoped KPIs. Null → "—" (a collapsed denominator is never a fabricated 0%).
-  const bandPct = scoped && pinnedFacility ? pinnedFacility.pctAllowedOfBilled : scopedKpis?.pctAllowedOfBilled ?? null;
+  const clearAll = useCallback(() => {
+    composeGenRef.current += 1;
+    setFacilitySelection([]);
+    setPayerSelection([]);
+    setEmployerSelection([]);
+    setFundingSelection([]);
+    setMemberId('');
+    setAlphaPrefix('');
+    setGroupNumber('');
+    setClientName('');
+    setTickerPinned(false);
+    setSummary(null);
+    setComposedCases([]);
+    setCapped(false);
+    setCasesError(false);
+    resetReveal();
+  }, [resetReveal]);
 
-  // SR-only announcement for the autosearch flow (no submit button → results would appear silently).
-  const liveMessage = isPending
-    ? 'Resolving…'
-    : resolved
-      ? `Resolved ${resolved.payerName} — ${resolved.facilityCount} ${resolved.facilityCount === 1 ? 'facility' : 'facilities'}`
-      : hasSearched
-        ? 'No payer resolved for that search'
-        : '';
-  // Live branch hint (mirror of the server sniff — display only; the server still decides).
-  const branchHint =
-    searchType === 'employer' || query.trim().length === 0
-      ? null
-      : searchType === 'client'
-        ? 'resolving as: client name (exact)'
-        : query.trim().length < MIN_QUERY_LEN
-          ? 'keep typing…'
-          : sniffQualifyKind(query.trim()) === 'prefix'
-            ? 'resolving as: alpha prefix'
-            : 'resolving as: member ID';
+  // ── Change D: the ONE LOC lens (client-side view filter) — scopes the ticker + the case rows. ─────
+  const visibleTrends = useMemo(() => filterFacilitiesByLoc(trends, locFilter), [trends, locFilter]);
+  const visibleCases = useMemo(() => filterClaimsByLoc(composedCases, locFilter), [composedCases, locFilter]);
+
+  const summaryHasAmounts = summary?.viewerHasAmountsCapability ?? hasAmounts;
+
+  // SR-only announcement (the compose count updates silently otherwise).
+  const liveMessage = !hasAnyFilter
+    ? ''
+    : summaryLoading
+      ? 'Matching…'
+      : summary
+        ? `${summary.count.toLocaleString('en-US')} charge lines match`
+        : 'Match count unavailable';
 
   return (
     <main className="mx-auto max-w-[1680px] space-y-4 p-6 sm:p-8">
-      {/* page head */}
       <div>
         <h1 className="font-display text-3xl font-medium tracking-tight">Qualify</h1>
         <p className="mt-0.5 text-sm text-muted-foreground">
-          Admissions lead qualification · the book at a glance, and the resolved payer below
+          Admissions lead qualification · compose filters below · the book at a glance above
         </p>
       </div>
 
-      {/* SR-only live region: announces resolution outcomes to assistive tech (autosearch has no
-          submit button, so results would otherwise appear silently). */}
       <div role="status" aria-live="polite" className="sr-only">
         {liveMessage}
       </div>
@@ -896,10 +565,10 @@ export function QualifyTab({
           role="alert"
           className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-card px-4 py-3 text-sm"
         >
-          <span className="text-status-danger">Couldn’t load the book overview — your search still works.</span>
+          <span className="text-status-danger">Couldn’t load the book overview — your filters still work.</span>
           <button
             type="button"
-            onClick={() => refreshOverview(cohort.window)}
+            onClick={() => refreshOverview(windowSel)}
             className="rounded-lg border border-line px-3 py-1 text-[13px] font-semibold text-ink900 transition-colors hover:bg-background"
           >
             Retry
@@ -907,117 +576,89 @@ export function QualifyTab({
         </div>
       ) : null}
 
-      {/* ── OVERVIEW TICKER: Facilities Heating Up — auto-scrolling, ABOVE the finder (stock-ticker
-          placement). The skeleton holds the strip's space while the book-wide trend query resolves, so
-          the finder below never jumps; LOC-lensed via visibleTrends. ── */}
+      {/* ── OVERVIEW TICKER: Facilities Heating Up — auto-scrolling, ABOVE the compose bar. Memoized +
+          book-wide: only the window control refetches it; a card click REPLACES the filter set + pins. ── */}
       {visibleTrends.length > 0 ? (
         <HeatingUpCards
           trends={visibleTrends}
-          window={cohort.window}
-          activeKey={scoped ? cohort.facility : null}
-          pinned={scoped}
+          window={windowSel}
+          activeFacilityKeys={activeFacilityKeys}
+          pinned={tickerPinned}
           onOpen={openTrendCard}
         />
       ) : initializing ? (
         <HeatingUpSkeleton />
       ) : null}
 
-      {/* ── FINDER: search-type tabs · autosearch · window · LOC lens · global reveal ── */}
+      {/* ── COMPOSE BAR: four pickers + PHI row + window + LOC + reveal, in the teal finder card ── */}
       <div className="rounded-2xl border border-t-[3px] border-t-teal700 bg-card p-4 shadow-ths-sm">
-        <div className="mb-2.5 flex flex-wrap items-center gap-1" role="tablist" aria-label="Search type">
-          {SEARCH_TABS.map((t) => (
-            <button
-              key={t.key}
-              type="button"
-              role="tab"
-              aria-selected={searchType === t.key}
-              onClick={() => {
-                setSearchType(t.key);
-                setHint(null);
-              }}
-              className={[
-                'rounded-lg px-3.5 py-1.5 text-[13px] font-semibold transition-colors',
-                searchType === t.key ? 'bg-teal900 text-white shadow-ths-sm' : 'text-ink600 hover:bg-background',
-              ].join(' ')}
-            >
-              {t.label}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-start gap-3.5">
+          <MultiSelectTagPicker
+            label="Facility"
+            placeholder="Filter by facility…"
+            icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
+            options={facilityOptions}
+            selected={facilitySelection}
+            onToggle={toggleFacility}
+            onClear={clearFacilities}
+          />
+          <MultiSelectTagPicker
+            label="Payer"
+            placeholder="Filter by payer…"
+            icon={<ShieldCheck className="h-3.5 w-3.5" aria-hidden />}
+            options={payerOptions}
+            selected={payerSelection}
+            onToggle={togglePayer}
+            onClear={clearPayers}
+          />
+          <MultiSelectTagPicker
+            label="Employer"
+            placeholder="Type to find employers…"
+            icon={<Briefcase className="h-3.5 w-3.5" aria-hidden />}
+            options={employerPickerOptions}
+            selected={employerSelection}
+            onToggle={toggleEmployer}
+            onClear={clearEmployers}
+            onQueryChange={setEmployerQuery}
+            loading={employerLoading}
+            minChars={EMPLOYER_MIN_CHARS}
+            displayOverride={employerDisplay}
+          />
+          {/* Funding stays a PICKER (Collections parity) — the earlier two-toggle-pill plan is dropped. */}
+          <MultiSelectTagPicker
+            label="Funding"
+            placeholder="Self-funded / Fully insured…"
+            icon={<Landmark className="h-3.5 w-3.5" aria-hidden />}
+            options={fundingPickerOptions}
+            selected={fundingSelection}
+            onToggle={toggleFunding}
+            onClear={clearFunding}
+          />
         </div>
 
-        <div className="flex flex-wrap items-center gap-3">
-          {searchType === 'employer' ? (
-            <div className="flex min-w-[300px] flex-1 flex-wrap items-end gap-3.5">
-              <MultiSelectTagPicker
-                label="Employer"
-                placeholder="Type to find employers…"
-                icon={<Briefcase className="h-3.5 w-3.5" aria-hidden />}
-                options={employerPickerOptions}
-                selected={employerSelection}
-                onToggle={toggleEmployer}
-                onClear={clearEmployers}
-                onQueryChange={setEmployerQuery}
-                loading={employerLoading}
-                minChars={3}
-                displayOverride={employerDisplay}
-              />
-              <MultiSelectTagPicker
-                label="Funding"
-                placeholder="Self-funded / Fully insured…"
-                icon={<Landmark className="h-3.5 w-3.5" aria-hidden />}
-                options={fundingPickerOptions}
-                selected={fundingSelection}
-                onToggle={toggleFunding}
-                onClear={clearFunding}
-              />
+        {/* PHI ROW — canRevealPhi-gated. Qualify carries a FOURTH input (Client Name) that Collections
+            deliberately does NOT — the admissions-first person lookup (Change C). Do NOT "fix" this into
+            Collections parity. Client Name is additionally behind QUALIFY_CLIENT_NAME_ENABLED (dormant
+            until migration 0067 + the name backfill); raw terms are state-only (never URL/log). */}
+        {canRevealPhi ? (
+          <div className="mt-3 flex flex-wrap items-end gap-3 border-t border-dashed border-line pt-3">
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <Eye className="h-3.5 w-3.5" aria-hidden />
+              PHI narrows
             </div>
-          ) : (
-            <div className="relative min-w-[300px] max-w-[520px] flex-1">
-              <Search aria-hidden className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-ink400" />
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    if (autoTimer.current) clearTimeout(autoTimer.current);
-                    // explicit=true: Enter is the one place the VOB no-match modal may open.
-                    if (searchType === 'client') runNameSearch(query, cohort.window, true);
-                    else runSearch(query, cohort.window, true);
-                  }
-                }}
-                spellCheck={false}
-                autoComplete="off"
-                placeholder={PLACEHOLDER[searchType]}
-                aria-label={searchType === 'client' ? 'Client name' : 'Member ID or alpha prefix'}
-                className="h-12 w-full rounded-xl border-[1.5px] border-line bg-background pl-10 pr-40 text-[15px] text-ink900 outline-none transition-colors focus:border-teal500 focus:bg-card focus:ring-4 focus:ring-teal50"
-              />
-              {branchHint ? (
-                <span className="pointer-events-none absolute right-2.5 top-1/2 inline-flex -translate-y-1/2 items-center gap-1.5 whitespace-nowrap rounded-full bg-teal50 px-2.5 py-1 text-[10.5px] font-bold text-teal700">
-                  <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
-                  {branchHint}
-                </span>
-              ) : null}
-            </div>
-          )}
-          {/* Clear Search: shows only once the USER has typed or resolved a subject — NOT on the fresh
-              landing (userSearched false), so a just-landed page reads as unsearched. Prominent solid
-              GREEN with a loop/reset icon beside the words (all inside the button) — an obvious,
-              eye-catching way out of a resolved view. */}
-          {(query.trim() !== '' || userSearched) && (
-            <button
-              type="button"
-              onClick={clearSearch}
-              aria-label="Clear search and return to the overview"
-              className="inline-flex h-12 items-center gap-2 rounded-xl bg-teal700 px-4 text-[13px] font-bold text-white shadow-ths-sm transition-colors hover:bg-teal900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/50"
-            >
-              <RotateCcw aria-hidden className="h-4 w-4" />
-              Clear Search
-            </button>
-          )}
+            <PhiInput label="Member ID" value={memberId} onChange={setMemberId} placeholder="Exact member ID" />
+            <PhiInput label="Alpha prefix" value={alphaPrefix} onChange={setAlphaPrefix} placeholder="3-letter prefix" />
+            <PhiInput label="Group #" value={groupNumber} onChange={setGroupNumber} placeholder="Group number" />
+            {QUALIFY_CLIENT_NAME_ENABLED ? (
+              <PhiInput label="Client name" value={clientName} onChange={setClientName} placeholder="Exact client name · audited" />
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* Controls row: window · LOC lens · clear · global reveal */}
+        <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3">
+          <WindowControl window={windowSel} currentYear={new Date().getFullYear()} onChange={onWindow} />
           <div className="h-7 w-px bg-line" />
-          <WindowControl window={cohort.window} currentYear={new Date().getFullYear()} onChange={onWindow} />
-          <div className="h-7 w-px bg-line" />
-          {/* Change D: the ONE LOC lens (view-only v1) — scopes trends + facilities + cases. */}
           <div className="inline-flex items-center gap-1.5" role="group" aria-label="Level of care">
             <span className="text-[11.5px] font-semibold text-muted-foreground">LOC</span>
             {(['IP', 'OP', 'BOTH'] as const).map((loc) => (
@@ -1037,19 +678,26 @@ export function QualifyTab({
               </button>
             ))}
           </div>
-          {/* Change B: the GLOBAL persistent reveal switch — super_admin/admin only. Lifted OUT of the
-              tab strip and INLINE into the search bar (ml-auto → far right), enlarged for visibility.
-              The coral ON-state signals PHI is currently exposed. Behavior + per-scope audit path are
-              unchanged (toggleGlobalReveal). */}
+          {hasAnyFilter ? (
+            <button
+              type="button"
+              onClick={clearAll}
+              aria-label="Clear all filters"
+              className="inline-flex h-9 items-center gap-2 rounded-xl bg-teal700 px-3.5 text-[13px] font-bold text-white shadow-ths-sm transition-colors hover:bg-teal900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/50"
+            >
+              <RotateCcw aria-hidden className="h-4 w-4" />
+              Clear filters
+            </button>
+          ) : null}
           {canGlobalReveal ? (
             <button
               type="button"
               role="switch"
               aria-checked={globalReveal}
               onClick={toggleGlobalReveal}
-              title="Reveal PHI identifiers across the whole surface — persists across searches and facility switches; every scope's reveal is audited"
+              title="Reveal PHI identifiers across the results — every reveal is audited"
               className={[
-                'ml-auto inline-flex h-12 items-center gap-2.5 rounded-xl border px-3.5 text-[13px] font-semibold transition-colors',
+                'ml-auto inline-flex h-9 items-center gap-2.5 rounded-xl border px-3.5 text-[13px] font-semibold transition-colors',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40',
                 globalReveal
                   ? 'border-coral400 bg-coral50 text-coral600'
@@ -1058,165 +706,90 @@ export function QualifyTab({
             >
               {globalReveal ? <Eye aria-hidden className="h-4 w-4" /> : <EyeOff aria-hidden className="h-4 w-4" />}
               <span>Reveal PHI Identifiers</span>
-              <span
-                className={[
-                  'relative h-[22px] w-[38px] rounded-full transition-colors',
-                  globalReveal ? 'bg-coral600' : 'bg-line',
-                ].join(' ')}
-              >
-                <span
-                  className={[
-                    'absolute top-0.5 h-[18px] w-[18px] rounded-full bg-white shadow-ths transition-all',
-                    globalReveal ? 'left-[18px]' : 'left-0.5',
-                  ].join(' ')}
-                />
-              </span>
             </button>
           ) : null}
         </div>
-        {searchType === 'client' ? (
-          <p className="mt-2 text-[11.5px] text-muted-foreground">
-            Exact client name · a name may match multiple patients — resolves their dominant payer. Audited.
-          </p>
-        ) : null}
       </div>
-      {hint ? <p role="alert" className="px-1 text-xs text-status-warn">{hint}</p> : null}
 
-      {/* ── OVERVIEW: book KPIs (the Facilities Heating Up ticker now sits ABOVE the finder) ── */}
-      <BookKpiTiles kpis={displayKpis} locActive={locFilter !== null} scopeLabel={kpiScopeLabel} />
+      {/* ── BOOK KPI TILES (book-wide; unchanged in Phase 1) ── */}
+      <BookKpiTiles kpis={kpis} locActive={locFilter !== null} />
 
-      {/* ── RESOLVED SUBJECT + GRID ── */}
-      {resolved ? (
-        <div
-          aria-busy={isPending}
-          className={[
-            'q-subject animate-ths-reveal relative overflow-hidden rounded-2xl px-6 py-5 text-white shadow-ths transition-opacity sm:pr-44',
-            isPending ? 'opacity-70' : '',
-          ].join(' ')}
-        >
-          {/* avg allowed ÷ billed — the facility's own % when a card/facility is pinned, else the
-              payer's dollar-weighted %. Restored from the approved mockup's right-side stat. */}
-          <div className="pointer-events-none absolute right-6 top-1/2 hidden -translate-y-1/2 text-right sm:block">
-            <div className="font-mono text-[42px] font-medium leading-none tabular-nums">
-              {bandPct === null ? '—' : Math.round(bandPct)}
-              {bandPct !== null ? <span className="text-2xl">%</span> : null}
+      {/* ── LIVE MATCH COUNT + COMPOSED CASES ── */}
+      {hasAnyFilter ? (
+        <>
+          <MatchCountReadout summary={summary} loading={summaryLoading} hasAmounts={summaryHasAmounts} />
+          {casesError ? (
+            <div className="rounded-2xl border border-dashed bg-card p-10 text-center text-sm text-status-danger">
+              Qualify is unavailable right now. Please try again.
             </div>
-            <div className="mt-1 text-[10.5px] tracking-wide text-teal200">
-              {scoped && pinnedFacility ? 'facility allowed ÷ billed' : 'avg allowed ÷ billed'}
+          ) : summary && summary.count === 0 && !casesLoading ? (
+            // Plain empty state. The VOB single-payer "never billed" probe lands in the next commit; until
+            // then EVERY empty result reads as a widen-your-filters nudge (window-widen hinted per ruling).
+            <div className="rounded-2xl border border-dashed bg-card p-10 text-center text-sm text-muted-foreground">
+              No charge lines match these filters.
+              <div className="mt-1 text-[13px] text-ink400">Try removing a filter, or choose a longer window.</div>
             </div>
-          </div>
-          <div className="text-[10px] font-extrabold uppercase tracking-widest text-teal200">
-            Resolved payer
-            {isPending ? (
-              <span className="ml-2 rounded-full bg-white/20 px-1.5 py-0.5 text-[9px] normal-case tracking-normal">
-                updating…
-              </span>
-            ) : null}
-          </div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-3 font-display text-2xl font-medium">
-            {resolved.payerName}
-            <span className="rounded-full bg-white/15 px-2.5 py-1 text-[11px] font-bold tracking-wide">
-              {resolved.matchedOn === 'prefix' ? (
-                <>matched on prefix {resolved.matchedValue}</>
-              ) : resolved.matchedOn === 'member_id' ? (
-                <>matched on member ID</>
-              ) : resolved.matchedOn === 'client_name' ? (
-                <>matched on client name</>
-              ) : (
-                <>top facility&rsquo;s payer this window</>
-              )}
-            </span>
-            {scoped && selectedFacilityLabel ? (
-              <span className="rounded-full bg-coral600/90 px-2.5 py-1 text-[11px] font-bold tracking-wide">
-                scoped · {selectedFacilityLabel}
-              </span>
-            ) : null}
-          </div>
-          <div className="mt-2 flex flex-wrap gap-4 text-[13px] text-[#cfe4e0]">
-            <span>
-              <b className="font-mono text-white">{resolved.totalCharges.toLocaleString('en-US')}</b> claim lines
-              {resolved.identifierScoped && drillFilterCaption ? ` matching ${drillFilterCaption}` : ''}
-            </span>
-            <span>
-              across <b className="font-mono text-white">{resolved.facilityCount}</b>{' '}
-              {resolved.facilityCount === 1 ? 'facility' : 'facilities'}
-            </span>
-            <span>
-              window <b className="font-mono text-white">{formatWindowRange(resolved.windowStart, resolved.windowEnd)}</b>{' '}
-              ({qualifyWindowLabel(cohort.window)})
-            </span>
-            <span className="text-[#9fc7c1]">BXR + Indigo</span>
-            {resolved.matchedOn === 'client_name' ? (
-              <span className="text-[#9fc7c1]">name may span multiple patients</span>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-
-      {snapshot && snapshot.resolved ? (
-        <div
-          aria-busy={isPending}
-          className={[
-            'grid grid-cols-1 items-start gap-4 transition-opacity min-[960px]:grid-cols-[380px_1fr]',
-            isPending ? 'opacity-50' : '',
-          ].join(' ')}
-        >
-          <FacilityPanel
-            facilities={visibleFacilities}
-            hasAmounts={hasAmounts}
-            heatOn
-            selectedKey={cohort.facility}
-            onSelect={selectFacility}
-            pinned={scoped}
-            onClearPin={clearFacilityScope}
-            scopeNote={
-              resolved?.identifierScoped && drillFilterCaption
-                ? `Only facilities that billed ${drillFilterCaption} in this window`
-                : null
-            }
-          />
-          <div aria-busy={isFacilityPending} className={['transition-opacity', isFacilityPending ? 'opacity-60' : ''].join(' ')}>
-            <CasesTable
-              claims={visibleCases}
-              hasAmounts={hasAmounts}
-              heatOn
-              facilityBuckets={facilityBuckets}
-              facilityLabel={selectedFacilityLabel}
-              canReveal={canRevealPhi}
-              revealed={revealed}
-              revealingKeys={revealingKeys}
-              revealError={revealError}
-              onRevealPatient={revealPatient}
-              onHideIdentifiers={resetReveal}
-              onViewCohort={viewCohort}
-              capped={capped}
-              emptyIdentifierLabel={emptyIdentifierLabel}
-              filterCaption={drillFilterCaption}
-              globalRevealOn={globalReveal && canGlobalReveal}
-            />
-          </div>
+          ) : (
+            <div aria-busy={casesLoading} className={['transition-opacity', casesLoading ? 'opacity-60' : ''].join(' ')}>
+              <CasesTable
+                claims={visibleCases}
+                hasAmounts={hasAmounts}
+                heatOn
+                facilityBuckets={NO_FACILITY_BUCKETS}
+                facilityLabel={null}
+                canReveal={canRevealPhi}
+                revealed={revealed}
+                revealingKeys={revealingKeys}
+                revealError={revealError}
+                onRevealPatient={revealPatient}
+                onHideIdentifiers={resetReveal}
+                onViewCohort={viewCohort}
+                capped={capped}
+                globalRevealOn={globalReveal && canGlobalReveal}
+              />
+            </div>
+          )}
           <CohortSheet
             data={cohortSheet?.data ?? null}
             loading={cohortSheet?.loading ?? false}
             patientLabel={cohortSheet?.label ?? null}
             onClose={() => setCohortSheet(null)}
           />
-        </div>
-      ) : isPending ? (
-        <div className="rounded-2xl border border-dashed bg-card p-10 text-center text-sm text-muted-foreground">
-          Resolving…
-        </div>
-      ) : hasSearched ? (
-        <div className="rounded-2xl border border-dashed bg-card p-10 text-center text-sm text-muted-foreground">
-          No payer resolved for that search in the selected window.
-        </div>
+        </>
       ) : (
-        // Fresh landing (no user search yet): the animated brand hero fills the space until a search or
-        // a Heating-Up tap resolves a subject. Purely decorative + the search guidance — no data, no PHI.
+        // No filter yet: the animated brand hero fills the space until a filter (or a Heating-Up tap)
+        // composes a query. Purely decorative + guidance — no data, no PHI.
         <QualifyLandingHero />
       )}
-
-      <VobModal open={modalOpen} query={echo} onClose={() => setModalOpen(false)} />
     </main>
   );
 }
+
+/** One PHI narrow input — a plain equality filter on a blind index (results stay masked regardless). */
+function PhiInput({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder: string;
+}) {
+  return (
+    <label className="flex min-w-[9rem] flex-1 flex-col gap-1">
+      <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</span>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        spellCheck={false}
+        autoComplete="off"
+        placeholder={placeholder}
+        aria-label={label}
+        className="h-10 rounded-lg border border-line bg-surface px-2.5 text-sm text-ink900 outline-none transition-colors focus:border-teal500 focus:ring-2 focus:ring-teal500/25"
+      />
+    </label>
+  );
+}
+
