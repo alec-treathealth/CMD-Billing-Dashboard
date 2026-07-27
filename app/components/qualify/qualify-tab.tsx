@@ -915,6 +915,7 @@ export function QualifyTab({
           trends={visibleTrends}
           window={cohort.window}
           activeKey={scoped ? cohort.facility : null}
+          pinned={scoped}
           onOpen={openTrendCard}
         />
       ) : initializing ? (
