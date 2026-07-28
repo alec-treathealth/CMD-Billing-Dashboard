@@ -1,11 +1,14 @@
 /**
  * Maintenance interstitial for the Qualify surface (desktop /qualify + mobile /qualify/m). Shown in
  * place of the tab when QUALIFY_MAINTENANCE is enabled. super_admin bypasses the gate (see the route
- * pages) so improvements can still be verified live while admissions_seat users see this notice.
+ * pages) so improvements can still be verified live while everyone else sees this notice.
  *
- * Server component: no client JS. Sign out posts the existing server action.
+ * Server component: no client JS. Two links let the viewer jump to a working surface (Overview /
+ * Collections) instead of signing out. NOTE: an admissions_seat has no dashboard access, so these
+ * links bounce back to /qualify for that persona — they're aimed at the (super_)admin viewers who
+ * actually have those surfaces.
  */
-import { signOut } from '@/lib/auth-actions';
+import Link from 'next/link';
 
 export function QualifyMaintenanceNotice() {
   return (
@@ -18,14 +21,20 @@ export function QualifyMaintenanceNotice() {
         This tab is currently being refactored into an AI system. Hang tight, new functionalities
         coming soon!
       </p>
-      <form action={signOut}>
-        <button
-          type="submit"
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <Link
+          href="/dashboard"
           className="rounded-md border border-line px-4 py-2 text-sm font-medium text-ink900 transition-colors hover:bg-teal50"
         >
-          Sign out
-        </button>
-      </form>
+          Go to Overview
+        </Link>
+        <Link
+          href="/dashboard/collections"
+          className="rounded-md border border-line px-4 py-2 text-sm font-medium text-ink900 transition-colors hover:bg-teal50"
+        >
+          Go to Collections
+        </Link>
+      </div>
     </main>
   );
 }
