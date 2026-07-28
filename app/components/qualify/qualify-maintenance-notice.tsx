@@ -11,12 +11,12 @@ export function QualifyMaintenanceNotice() {
   return (
     <main className="mx-auto flex min-h-[60vh] max-w-xl flex-col items-center justify-center gap-4 p-10 text-center">
       <span className="text-3xl" aria-hidden>
-        🛠️
+        🤖
       </span>
-      <h1 className="text-2xl font-semibold tracking-tight">Down for maintenance</h1>
+      <h1 className="text-2xl font-semibold tracking-tight">Qualify is being rebuilt</h1>
       <p className="text-sm text-muted-foreground">
-        Qualify is temporarily offline while we ship some improvements. We expect to be back within
-        24&nbsp;hours. Thanks for your patience.
+        This tab is currently being refactored into an AI system. Hang tight, new functionalities
+        coming soon!
       </p>
       <form action={signOut}>
         <button

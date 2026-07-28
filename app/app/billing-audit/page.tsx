@@ -17,6 +17,8 @@
 import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { BillingAuditWorkbench } from '@/components/billing-audit/workbench';
+import { ClaimsAuditMaintenanceNotice } from '@/components/billing-audit/maintenance-notice';
+import { claimsAuditMaintenanceBlocks } from '@/lib/billing-audit/maintenance';
 import { presetWindow, DEFAULT_PRESET } from '@/components/billing-audit/date-presets';
 import type { TagOption } from '@/components/billing-audit/tag-picker';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
@@ -42,6 +44,11 @@ export default async function BillingAuditPage({
   if (access.access.allowedViews.length === 0) {
     return <UnprovisionedNotice email={access.access.user?.email} />;
   }
+
+  // Refactor gate: every viewer sees the notice except the bypass allowlist (alec@treathealth.ai),
+  // so the AI rebuild can be worked/verified live while everyone else is held out. Placed before the
+  // audit-row fetch so blocked viewers never trigger the PHI queries.
+  if (claimsAuditMaintenanceBlocks(access.access.user?.email)) return <ClaimsAuditMaintenanceNotice />;
 
   const requested = resolveView(await searchParams);
   const view = clampView(requested, access.access.allowedViews);

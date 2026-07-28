@@ -1,11 +1,11 @@
 /**
- * Qualify maintenance-mode flag. When enabled, /qualify and /qualify/m render a "Down for
- * maintenance" notice instead of the tab for EVERY user except the bypass allowlist below — so
- * improvements can be verified live while everyone else sees the notice.
+ * Qualify maintenance-mode flag. While the Qualify surface is being refactored into an AI system,
+ * /qualify and /qualify/m render a "being rebuilt" notice instead of the tab for EVERY user except
+ * the bypass allowlist below — so the rebuild can be verified live while everyone else sees the notice.
  *
- * TOGGLE: set env QUALIFY_MAINTENANCE to "1" / "true" / "on" to enable; unset (or any other value)
- * to disable. Changing it on Vercel requires a redeploy. To fully revert, `git revert` the commit
- * that added this flag — nothing else references it.
+ * ON BY DEFAULT during the refactor. KILL SWITCH: set env QUALIFY_MAINTENANCE to "0" / "false" /
+ * "off" to disable and restore the live tab for everyone. Changing it on Vercel requires a redeploy.
+ * To fully revert, `git revert` the commit that added this flag — nothing else references it.
  */
 
 // Only these emails bypass the maintenance notice and reach the live Qualify surface.
@@ -13,7 +13,7 @@ const MAINTENANCE_BYPASS_EMAILS = new Set(['alec@treathealth.ai']);
 
 function maintenanceEnabled(): boolean {
   const v = (process.env.QUALIFY_MAINTENANCE ?? '').trim().toLowerCase();
-  return v === '1' || v === 'true' || v === 'on';
+  return v !== '0' && v !== 'false' && v !== 'off';
 }
 
 /** True when this viewer should see the maintenance notice instead of the Qualify surface. */
