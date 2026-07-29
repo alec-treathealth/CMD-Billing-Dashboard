@@ -462,6 +462,10 @@ export interface PlainConsolidatedRow extends PlainAuditRow {
   legacy_fingerprint: string | null;
   /** Revenue-code corroboration outcome (logged consistency counter, never a gate). */
   rev_scope_consistent: boolean;
+  /** Scope-derivation provenance (0074): 'tob' = Type of Bill prefix;
+   *  'roster_fallback' = TOB+rev both blank (professional claim, ruling 2026-07-29)
+   *  scoped by the customer's roster membership. */
+  scope_source: 'tob' | 'roster_fallback';
 }
 
 export type ConsolidatedMapResult =
@@ -489,12 +493,27 @@ function ccell(row: string[], name: (typeof CONSOLIDATED_HEADERS)[number], dupIn
  * discipline as mapAuditRow (labels only, never a cell value), plus:
  *   - charge_debit_id REQUIRED (the identity key; digits — 100% fill measured);
  *   - audit_scope DERIVED from TOB (unrecognised prefix → quarantine, fail-loud);
+ *   - PROFESSIONAL-CLAIM FALLBACK (Alec's ruling 2026-07-29): CMS-1500/837P claims
+ *     structurally carry NO Type of Bill and NO revenue code (institutional-only
+ *     fields) — TOB derivation is inapplicable, not degraded. When BOTH are blank,
+ *     scope falls back to `rosterFallbackScope` (the customer's roster membership,
+ *     entity-level; CPT REJECTED as a signal — H2018 spans both scopes, measured).
+ *     scope_source records which path derived the scope (the 0074 audit trail).
+ *     FAIL-LOUD STAYS, narrowed: blank TOB with a revenue code PRESENT, a non-blank
+ *     unrecognised TOB, or a both-blank row with no single-roster customer all still
+ *     QUARANTINE — the ruling narrows the condition, it does not remove it;
  *   - claim_date_entered / claim_first_billed_date parsed (first-billed null =
  *     entered-never-billed, 1.3% measured — a real state, not an error).
  * The fingerprint recipe is FIELD-FOR-FIELD the locked Option-B one (mapAuditRow), so
  * legacy IP rows match for the backfill; see PlainConsolidatedRow.legacy_fingerprint.
  */
-export function mapConsolidatedRow(row: string[]): ConsolidatedMapResult {
+export function mapConsolidatedRow(
+  row: string[],
+  /** The row's customer's roster scope (auditConfig.rosterScopeForCustomer): IP or OP
+   *  when the customer sits in exactly one roster, null otherwise. Used ONLY for the
+   *  both-blank professional-claim fallback — never overrides a recognisable TOB. */
+  rosterFallbackScope: AuditScope | null = null,
+): ConsolidatedMapResult {
   const claimId = opt(ccell(row, 'Charge Claim ID'));
   if (claimId === null) return { kind: 'skip', label: 'cmd_claim_id: missing' };
   const patientId = opt(ccell(row, 'Charge Patient ID'));
@@ -507,10 +526,27 @@ export function mapConsolidatedRow(row: string[]): ConsolidatedMapResult {
   if (!/^\d+$/.test(chargeDebitId)) return { kind: 'skip', label: 'charge_debit_id: invalid' };
 
   const tob = opt(ccell(row, 'Type of Bill'));
-  const scope = deriveScopeFromTob(tob);
-  if (scope === null) {
+  const revRaw = opt(ccell(row, 'Charge Billed Revenue Code'));
+  const tobScope = deriveScopeFromTob(tob);
+  let scope: AuditScope;
+  let scopeSource: 'tob' | 'roster_fallback';
+  if (tobScope !== null) {
+    scope = tobScope;
+    scopeSource = 'tob';
+  } else if (tob === null && revRaw === null) {
+    // Professional claim (both institutional fields blank) — the ruled roster fallback.
+    if (rosterFallbackScope === null) {
+      return { kind: 'quarantine', label: 'type_of_bill: blank (customer not in a single-scope roster)' };
+    }
+    scope = rosterFallbackScope;
+    scopeSource = 'roster_fallback';
+  } else if (tob === null) {
+    // Blank TOB but a revenue code present — an institutional-shaped row missing its
+    // TOB, NOT the ruled professional signature. Fail-loud.
+    return { kind: 'quarantine', label: 'type_of_bill: blank with revenue code present' };
+  } else {
     // TOB is a billing form code (non-PHI) — safe and necessary in the label.
-    return { kind: 'quarantine', label: `type_of_bill: unrecognized "${tob ?? ''}"` };
+    return { kind: 'quarantine', label: `type_of_bill: unrecognized "${tob}"` };
   }
 
   const chargeFrom = toIsoDate(ccell(row, 'Charge From Date'));
@@ -536,7 +572,7 @@ export function mapConsolidatedRow(row: string[]): ConsolidatedMapResult {
   if (!units.ok) return { kind: 'skip', label: 'units: invalid' };
 
   const cpt = opt(ccell(row, 'Charge CPT Code'));
-  const rev = opt(ccell(row, 'Charge Billed Revenue Code'));
+  const rev = revRaw;
   const mod1 = opt(ccell(row, 'Charge Modifier 1'));
   const mod2 = opt(ccell(row, 'Charge Modifier 2')); // header index 28 — after Modifier 3; ccell resolves by NAME
   const statusRaw = opt(ccell(row, 'Charge Status')); // [39] Claim Status is an identical duplicate
@@ -603,6 +639,7 @@ export function mapConsolidatedRow(row: string[]): ConsolidatedMapResult {
       claim_first_billed_date: firstBilled.value,
       legacy_fingerprint: legacyFingerprint,
       rev_scope_consistent: revCodeConsistentWithScope(scope, rev),
+      scope_source: scopeSource,
     },
   };
 }

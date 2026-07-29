@@ -67,12 +67,14 @@ export function auditCustomersFor(scope: AuditScope): readonly CmdCustomerTarget
  * this feed — it is TOB-derived per row — so this is simply the union, IP-first (during
  * the OP soak only IP-scope rows write, so budget pressure lands on the writing head).
  *
- * STILL EXCLUDED — reconfirmed INVALID CRITERIA against the consolidated pair in a clean
- * CMD window 2026-07-29 (probe): 10035976 HOUSTON_MH, 10035974 TREAT_CO. "Defunct vs
- * new-no-data" stays unconfirmed at the business level; operationally unreachable.
- * 10036125 TREAT MENTAL HEALTH VIRGINIA (new customer): also INVALID CRITERIA — the
- * saved filter is not shared/valid under it yet; add ONLY after a CMD-side fix + a
- * rows-bearing probe shown at a gate.
+ * STILL EXCLUDED — reconfirmed INVALID CRITERIA in a clean CMD window 2026-07-29; two
+ * DISTINCT cases (Alec's ruling, same date — do not collapse):
+ *   - 10035976 HOUSTON_MH + 10035974 TREAT_CO: NOT YET OPEN (supersedes "defunct vs
+ *     new-no-data"); filters change when they open; re-add only after a rows-bearing
+ *     probe at a gate.
+ *   - 10036125 TREAT MENTAL HEALTH VIRGINIA: brand-new PRE-LAUNCH facility — an
+ *     operational resolution, not a diagnostic one: switch the filters when it opens,
+ *     do NOT re-probe. Not defunct-class; it predates its own launch.
  */
 export const AUDIT_CONSOLIDATED_CUSTOMERS: readonly CmdCustomerTarget[] = [
   ...AUDIT_IP_CUSTOMERS,
@@ -82,6 +84,22 @@ export const AUDIT_CONSOLIDATED_CUSTOMERS: readonly CmdCustomerTarget[] = [
 /** Customers whose SUCCESS-empty report is EXPECTED and never marks a run partial:
  *  WRC 10033951 (documented empty/defunct; SUCCESS-empty ×3 on the recon sweep). */
 export const EXPECTED_EMPTY_AUDIT_CUSTOMERS: ReadonlySet<string> = new Set(['10033951']);
+
+/**
+ * A customer's roster scope for the PROFESSIONAL-CLAIM FALLBACK (ruling 2026-07-29):
+ * IP/OP when the customer sits in exactly ONE of the two rosters, null when in
+ * neither or (defensively) both — the caller quarantines both-blank rows for a null.
+ * Entity-level, deliberately NOT row-level: professional claims (CMS-1500) carry no
+ * TOB/rev code by construction, so the customer's care setting is the only honest
+ * signal left (CPT rejected — H2018 spans both scopes, measured).
+ */
+export function rosterScopeForCustomer(customerId: string): AuditScope | null {
+  const inIp = AUDIT_IP_CUSTOMERS.some((c) => c.customerId === customerId);
+  const inOp = AUDIT_OP_CUSTOMERS.some((c) => c.customerId === customerId);
+  if (inIp && !inOp) return 'IP';
+  if (inOp && !inIp) return 'OP';
+  return null;
+}
 
 export interface AuditReportIds {
   reportId: string;

@@ -1156,6 +1156,7 @@ another session's WIP claim is usually an untracked file. Current reservations:
 | 0070 | qualify-latency session | `0070_cmd_charge_rollup_kpi_cov_member` (+ rollback) — **DRAFTED, NOT applied** (Alec applies; CONCURRENTLY, outside a txn). Restores the book-wide KPI index-only scan Phase 2 broke by appending `member_id_bidx` to the covering index's INCLUDE (new name `_cov_m`, supersedes 0068's `_cov`). Must be applied BEFORE 0067 (0067's swap carries `_cov_m` forward + gates on live indexes). See "0070 index fix" below. (claimed 2026-07-27) |
 | 0071 | CMD AR Automation session | `0071_cmd_charge_census_aging_index` (+ rollback) — UNTRACKED WIP in the main checkout alongside `src/collections/ageBucket.ts`/`arAging.ts`. Not committed, apply state unknown to this table. (observed 2026-07-29) |
 | 0072 | CMD AR Automation session (presumed — the Phase-0 Teen-MH-TX pre-req) | `0072_teen_mh_tx_facility` (+ rollback) — UNTRACKED WIP in the main checkout. Not committed, apply state unknown to this table. NOTE: CLAUDE.md's "Next number 0072" is STALE against this file. (observed 2026-07-29) |
+| 0074 | consolidated-audit session (scope-source ruling) | `0074_audit_row_scope_source` (+ rollback) — CLAIMED 2026-07-29; `scope_source` provenance column (tob \| roster_fallback) + backfill 'tob' on keyed rows. Checked origin/main (high-water 0073), worktrees, untracked (0071/0072 still AR WIP). |
 | 0073 | consolidated-audit build session | `0073_audit_row_consolidated` (+ rollback) — **APPLIED LIVE 2026-07-29 ~08:57 UTC** (base + a same-session `_amend_source_filter` re-run of the idempotent file adding `source_filter_id`; the on-disk file carries both). audit_row: `charge_debit_id` / `claim_date_entered` / `claim_first_billed_date` / `cmd_customer_id` / `source_filter_id` + partial UNIQUE `(business_entity_id, charge_debit_id)`; audit_ingest_run: `customers_empty` + scope CHECK widened to CONSOLIDATED. Post-apply verified (4 cols + counter + index + CHECK + fingerprint-unique retained). Remove this row once the file is on origin/main. |
 
 Record new claims here when made; remove rows once the file is on origin/main
@@ -2344,6 +2345,50 @@ HOUSTON_MH `10035976` → INVALID CRITERIA · TREAT_CO `10035974` → INVALID CR
 TREAT_VA `10036125` → INVALID CRITERIA (new customer; filter not shared CMD-side; also
 absent from the 2026-07-03 `core.cmd_customer` seed). Rule file
 (`.claude/rules/billing-audit.md`) updated to the ruled reality the same session.
+
+### RULING — professional-claim scope fallback (Alec, 2026-07-29; 0074)
+
+**The 301 quarantined blank-TOB rows are STRUCTURAL, not a data gap:** professional
+claims (CMS-1500/837P) never carry Type of Bill or revenue codes — institutional
+(UB-04/837I) fields. TOB derivation is INAPPLICABLE to them, not degraded.
+
+- **Verified before implementing** (shapes-only probe, all 8 affected customers, B+C,
+  16:43 UTC): **308 both-blank rows** (up from the morning's 301 — daily drift), **ZERO
+  rows with TOB blank but rev present, ZERO with TOB present but rev blank**, and every
+  both-blank row is `Claim Type=Professional`. No split — the rule applies cleanly.
+- **Fallback rule (implemented):** TOB AND revenue code BOTH blank → scope from the
+  customer's roster membership (`rosterScopeForCustomer` — AUDIT_IP vs AUDIT_OP,
+  entity-level not row-level). **CPT rejected as a signal** (H2018 spans both scopes,
+  recon-measured). A recognisable TOB always wins over the roster.
+- **Provenance:** `audit_row.scope_source` ('tob' | 'roster_fallback', migration
+  **0074 APPLIED 2026-07-29**; pre-0074 keyed rows backfilled 'tob' — all were
+  TOB-derived by construction). The audit trail if a customer ever returns mixed scope.
+- **Fail-loud STAYS, narrowed:** blank TOB with a revenue code PRESENT, a non-blank
+  unrecognised TOB, and a both-blank row from a customer not in exactly one roster all
+  still QUARANTINE. The ruling narrows the condition; it does not remove it.
+- **Soak clock (stated per Alec's ask):** RESTARTS from the first night on the
+  corrected logic — nothing is actually lost, because no scheduled night has run yet
+  (env vars pending) and the one manual run recorded `partial` *because of* these rows,
+  which was correct behavior, not an anomaly. Night 1 of 5 = the first scheduled run
+  with env vars + this fix deployed.
+- **Re-run PROVEN (16:50 UTC, 8 affected customers, post-0074 code):** quarantined
+  **0** (was 301/308), `roster-fallback 308`, 8/8 processed, 0 failures/empties → run
+  row recorded **status='ok'** (DB-verified; the 09:39 run's 'partial' stands as
+  correct history). All 308 fallback rows are OP-scope → DEFERRED under the soak
+  (inserted/updated 0 by design); they write at cutover. TREAT_NV +81 / TREAT_WA +75
+  vs the morning sweep = intraday feed growth (matches the 16:43 probe exactly).
+
+**Excluded-customer resolutions (Alec, same date — TWO DISTINCT CASES, do not collapse):**
+
+- **HOUSTON_MH `10035976` + TREAT_CO `10035974`: not yet open.** Supersedes "defunct vs
+  new-no-data unconfirmed" (backlog item closed — they are pre-open, NOT defunct).
+  Filters will be changed once they open; re-add to the roster only after a
+  rows-bearing probe at a gate, as already ruled.
+- **TREAT_VA `10036125`: a DIFFERENT case — brand-new pre-launch facility, not open
+  yet.** Resolution is OPERATIONAL, not diagnostic: **switch/share the filters when it
+  opens, do NOT re-probe** (Alec, 2026-07-29). Nothing about this facility is unknown
+  or suspect — do not read its INVALID CRITERIA as defunct-class; it simply predates
+  its own launch.
 
 ### ⚠ CMD-QUIET-WINDOW RULE (learned the hard way this session)
 

@@ -38,7 +38,7 @@ import { auditBlindIndexesForRowSafe, patientNameBlindIndex } from '../collectio
 import { withTenant } from '../veris/withTenant.js';
 import type { Db } from '../collections/db.js';
 import type { CmdCustomerTarget } from '../collections/cmdExplorerCron.js';
-import type { AuditScope } from './auditConfig.js';
+import { rosterScopeForCustomer, type AuditScope } from './auditConfig.js';
 import {
   consolidatedHeaderMismatch,
   mapConsolidatedRow,
@@ -64,7 +64,7 @@ const INSERT_COLS = [
   'status_category', 'status_payer', 'principal_diag', 'diagnoses', 'last_fu_note',
   'row_fingerprint', 'source_report_id', 'facility_code',
   'charge_debit_id', 'claim_date_entered', 'claim_first_billed_date', 'cmd_customer_id',
-  'source_filter_id',
+  'source_filter_id', 'scope_source',
 ] as const;
 
 /** Columns re-asserted on conflict — everything the 42-col feed CARRIES (under key
@@ -82,7 +82,7 @@ const UPDATE_COLS = [
   'status_category', 'status_payer', 'principal_diag', 'diagnoses',
   'source_report_id', 'facility_code',
   'charge_debit_id', 'claim_date_entered', 'claim_first_billed_date', 'cmd_customer_id',
-  'source_filter_id',
+  'source_filter_id', 'scope_source',
 ] as const;
 
 // --- batch classification (pure — unit-tested) ---------------------------------------
@@ -180,7 +180,7 @@ async function buildConsolidatedParams(
     row.status_category, row.status_payer, row.principal_diag, JSON.stringify(row.diagnoses), row.last_fu_note,
     fingerprintOverride ?? row.row_fingerprint, sourceReportId, facilityCode,
     row.charge_debit_id, row.claim_date_entered, row.claim_first_billed_date, cmdCustomerId,
-    sourceFilterId,
+    sourceFilterId, row.scope_source,
   ];
 }
 
@@ -353,6 +353,8 @@ export interface ConsolidatedCronStats extends BillingAuditCronStats {
   rows_scope_op: number;
   /** Rows whose revenue code disagreed with the TOB-derived scope (logged check). */
   rev_code_inconsistent: number;
+  /** Professional-claim rows scoped via the roster fallback (ruling 2026-07-29). */
+  rows_scope_fallback: number;
   stamped_legacy: number;
   identity_conflicts: number;
 }
@@ -390,6 +392,7 @@ export async function consolidatedAuditCron(deps: ConsolidatedCronDeps): Promise
     rows_scope_ip: 0,
     rows_scope_op: 0,
     rev_code_inconsistent: 0,
+    rows_scope_fallback: 0,
     stamped_legacy: 0,
     identity_conflicts: 0,
   };
@@ -401,6 +404,9 @@ export async function consolidatedAuditCron(deps: ConsolidatedCronDeps): Promise
       continue;
     }
     const entityId = target.businessEntityId ?? deps.businessEntityId;
+    // Professional-claim fallback scope (ruling 2026-07-29): the customer's roster
+    // membership, resolved once per customer; null quarantines both-blank rows.
+    const rosterScope = rosterScopeForCustomer(target.customerId);
     try {
       let customerInserted = 0;
       let customerUpdated = 0;
@@ -425,7 +431,7 @@ export async function consolidatedAuditCron(deps: ConsolidatedCronDeps): Promise
           if (mismatch !== null) break; // reject the customer whole — never guess columns into PHI rows
           fetched += parsed.rows.length;
           for (const raw of parsed.rows) {
-            const result = mapConsolidatedRow(raw);
+            const result = mapConsolidatedRow(raw, rosterScope);
             if (result.kind === 'ok') {
               rows.push(result.row);
             } else if (result.kind === 'quarantine') {
@@ -447,6 +453,7 @@ export async function consolidatedAuditCron(deps: ConsolidatedCronDeps): Promise
         stats.rows_scope_ip += ipRows.length;
         stats.rows_scope_op += opRows.length;
         stats.rev_code_inconsistent += rows.filter((r) => !r.rev_scope_consistent).length;
+        stats.rows_scope_fallback += rows.filter((r) => r.scope_source === 'roster_fallback').length;
         const writable = deps.writeOpScopeRows ? rows : ipRows;
         if (!deps.writeOpScopeRows) stats.rows_op_scope_deferred += opRows.length;
         stats.mapped_valid += rows.length;
@@ -533,7 +540,8 @@ export async function consolidatedAuditCron(deps: ConsolidatedCronDeps): Promise
       `fetched ${stats.rows_fetched} (IP ${stats.rows_scope_ip} / OP ${stats.rows_scope_op}` +
       `${stats.rows_op_scope_deferred > 0 ? `, OP deferred ${stats.rows_op_scope_deferred}` : ''}), ` +
       `valid ${stats.mapped_valid}, skipped ${stats.skipped}, quarantined ${stats.rows_quarantined}, ` +
-      `rev-inconsistent ${stats.rev_code_inconsistent}, inserted ${stats.inserted}, updated ${stats.updated}, ` +
+      `rev-inconsistent ${stats.rev_code_inconsistent}, roster-fallback ${stats.rows_scope_fallback}, ` +
+      `inserted ${stats.inserted}, updated ${stats.updated}, ` +
       `stamped-legacy ${stats.stamped_legacy}, identity-conflicts ${stats.identity_conflicts}`,
   );
   return stats;

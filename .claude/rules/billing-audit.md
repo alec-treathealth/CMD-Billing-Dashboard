@@ -21,11 +21,19 @@ is reserved for Veris S10.
 
 **The consolidated feed (report 10064394, filters B `10148376` + C `10148377`,
 live 2026-07-29) derives IP/OP per row from the Type of Bill first-two-digit
-prefix** — `{11,86}→IP`, `{13,89,76}→OP`, measured zero-overlap; an unrecognised
-prefix QUARANTINES the row and marks the run partial, never defaults a scope
+prefix** — `{11,86}→IP`, `{13,89,76}→OP`, measured zero-overlap
 (`deriveScopeFromTob`, `auditRowMap.ts`). One roster
 (`AUDIT_CONSOLIDATED_CUSTOMERS`, 17 = 16 data-bearing + WRC expected-empty)
 serves both scopes; each customer runs B then C sequentially.
+
+**Professional-claim fallback (ruled 2026-07-29, 0074):** CMS-1500/837P rows carry
+NO TOB and NO revenue code by construction — when BOTH are blank, scope derives
+from the customer's roster membership (`rosterScopeForCustomer`), recorded as
+`scope_source='roster_fallback'` (TOB-derived rows are `'tob'`). CPT is NEVER a
+scope signal (H2018 spans both scopes, measured). Fail-loud stays for everything
+else: an unrecognised non-blank TOB, a blank TOB with a revenue code present, or
+a both-blank row from a customer not in exactly one roster all QUARANTINE the
+row and mark the run partial — never a defaulted scope.
 
 The LEGACY rule — "a row is IP or OP because of which roster its customer sits
 in" — now applies only to the still-soaking OP pair (`10073210`/`10147817`,
@@ -36,14 +44,15 @@ consolidated ingest FETCHES but does not WRITE OP-scope rows
 (`CMD_AUDIT_CONSOLIDATED_OP_WRITE`, default off) so the two feeds never
 co-write a charge.
 
-**Roster exclusions (ruled reality, probes reconfirmed 2026-07-29):**
-HOUSTON_MH `10035976` and TREAT_CO `10035974` return INVALID CRITERIA under the
-audit filters — operationally unreachable, excluded from every audit roster
-("defunct vs new-no-data" unconfirmed at the business level). TEEN MH TX and
-WELLNESS RECOVERY are collections-cron exclusions but ARE valid audit customers
-(WRC is allowlisted expected-empty). TREAT MENTAL HEALTH VIRGINIA `10036125`
-(new customer): INVALID CRITERIA until the saved filters are shared CMD-side —
-add only after a rows-bearing probe shown at a gate.
+**Roster exclusions (ruled reality, probes reconfirmed 2026-07-29 — two distinct
+cases, do not collapse):** HOUSTON_MH `10035976` and TREAT_CO `10035974` are **not
+yet open** (Alec, 2026-07-29 — supersedes "defunct vs new-no-data"); INVALID
+CRITERIA under the audit filters until they open; re-add only after a rows-bearing
+probe at a gate. TREAT MENTAL HEALTH VIRGINIA `10036125` is a **brand-new
+pre-launch facility** — a different case with an operational resolution: switch
+the filters when it opens, do NOT re-probe (it is not defunct-class; it predates
+its own launch). TEEN MH TX and WELLNESS RECOVERY are collections-cron exclusions
+but ARE valid audit customers (WRC is allowlisted expected-empty).
 
 **Row identity (ruled 2026-07-29):** the consolidated ingest upserts on
 `(business_entity_id, charge_debit_id)` — the feed's true unique row key — with

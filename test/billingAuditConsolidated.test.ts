@@ -20,7 +20,7 @@ process.env.LIBSODIUM_KEY = TEST_SODIUM_KEY;
 
 const {
   AUDIT_CONSOLIDATED_CUSTOMERS, EXPECTED_EMPTY_AUDIT_CUSTOMERS,
-  consolidatedAuditReportIds, consolidatedOpWriteEnabled,
+  consolidatedAuditReportIds, consolidatedOpWriteEnabled, rosterScopeForCustomer,
   AUDIT_IP_CUSTOMERS, AUDIT_OP_CUSTOMERS,
 } = await import('../src/billingAudit/auditConfig.js');
 const {
@@ -148,6 +148,7 @@ test('mapConsolidatedRow: full happy path — derived scope, key, new date colum
   assert.equal(res.row.last_fu_note, null); //     PHI-surface reduction
   assert.deepEqual(res.row.diagnoses.map((d) => [d.code, d.poa, d.pos]), [['F33.1', 'Y', 1], ['F41.1', 'N', 2]]);
   assert.equal(res.row.rev_scope_consistent, true);
+  assert.equal(res.row.scope_source, 'tob');
 });
 
 test('mapConsolidatedRow: entered-never-billed (blank first-billed) is a VALID state, not a skip', () => {
@@ -157,11 +158,62 @@ test('mapConsolidatedRow: entered-never-billed (blank first-billed) is a VALID s
 });
 
 test('mapConsolidatedRow: unrecognised TOB quarantines (fail-loud), never defaults a scope', () => {
-  const res = mapConsolidatedRow(cRow({ ...C_BASE, 'Type of Bill': '999' }));
+  // A roster fallback being AVAILABLE must not rescue a non-blank unrecognised TOB.
+  const res = mapConsolidatedRow(cRow({ ...C_BASE, 'Type of Bill': '999' }), 'OP');
   assert.equal(res.kind, 'quarantine');
   if (res.kind === 'quarantine') assert.match(res.label, /type_of_bill: unrecognized "999"/);
-  const blank = mapConsolidatedRow(cRow({ ...C_BASE, 'Type of Bill': '' }));
-  assert.equal(blank.kind, 'quarantine');
+});
+
+// --- professional-claim roster fallback (ruling 2026-07-29) ------------------------------
+
+/** A professional (CMS-1500) row: TOB and revenue code both structurally blank. */
+const PROF_ROW: Record<string, string> = {
+  ...C_BASE, 'Type of Bill': '', 'Charge Billed Revenue Code': '',
+  'Claim Type': 'Professional', 'Charge CPT Code': '90853', 'Charge Units': '1',
+};
+
+test('fallback: TOB+rev both blank scopes from the roster with scope_source provenance', () => {
+  const op = mapConsolidatedRow(cRow(PROF_ROW), 'OP');
+  assert.equal(op.kind, 'ok');
+  if (op.kind === 'ok') {
+    assert.equal(op.row.audit_scope, 'OP');
+    assert.equal(op.row.scope_source, 'roster_fallback');
+    assert.equal(op.row.rev_code, null);
+  }
+  const ip = mapConsolidatedRow(cRow(PROF_ROW), 'IP');
+  assert.equal(ip.kind, 'ok');
+  if (ip.kind === 'ok') {
+    assert.equal(ip.row.audit_scope, 'IP');
+    assert.equal(ip.row.scope_source, 'roster_fallback');
+  }
+});
+
+test('fallback: a recognisable TOB always wins over the roster (never overridden)', () => {
+  const res = mapConsolidatedRow(cRow(C_BASE), 'OP'); // TOB 863 → IP even under an OP roster
+  assert.equal(res.kind, 'ok');
+  if (res.kind === 'ok') {
+    assert.equal(res.row.audit_scope, 'IP');
+    assert.equal(res.row.scope_source, 'tob');
+  }
+});
+
+test('fail-loud STAYS (narrowed): both-blank without a single-roster customer quarantines', () => {
+  const res = mapConsolidatedRow(cRow(PROF_ROW), null);
+  assert.equal(res.kind, 'quarantine');
+  if (res.kind === 'quarantine') assert.match(res.label, /not in a single-scope roster/);
+});
+
+test('fail-loud STAYS: blank TOB with a revenue code PRESENT is not the professional signature', () => {
+  const res = mapConsolidatedRow(cRow({ ...C_BASE, 'Type of Bill': '' }), 'OP'); // rev 0156 present
+  assert.equal(res.kind, 'quarantine');
+  if (res.kind === 'quarantine') assert.match(res.label, /blank with revenue code present/);
+});
+
+test('rosterScopeForCustomer: exactly-one-roster membership, else null', () => {
+  assert.equal(rosterScopeForCustomer('10027973'), 'IP'); // CAMH
+  assert.equal(rosterScopeForCustomer('10029722'), 'OP'); // TREAT_TX
+  assert.equal(rosterScopeForCustomer('10035976'), null); // HOUSTON_MH — not rostered
+  assert.equal(rosterScopeForCustomer(''), null);
 });
 
 test('mapConsolidatedRow: required-field skips carry column labels only', () => {
@@ -390,11 +442,13 @@ test('billingAuditCron (OP path): SUCCESS-empty counts + unexpected detection vi
 
 // --- the consolidated cron loop -----------------------------------------------------------
 
-test('consolidatedAuditCron: B+C per customer, scope split, OP soak deferral, quarantine marking', async () => {
+test('consolidatedAuditCron: B+C per customer, scope split, OP soak deferral, quarantine marking, roster fallback', async () => {
   const ipRow = cRow(C_BASE); //                                        863 → IP
   const opRow = cRow({ ...C_BASE, 'Charge/Debit ID': '778812346', 'Type of Bill': '893', 'Charge Billed Revenue Code': '0912', 'Charge Claim ID': '900002' });
   const badTobRow = cRow({ ...C_BASE, 'Charge/Debit ID': '778812347', 'Type of Bill': '999' });
-  const csvB = toCsv(CONSOLIDATED_HEADERS, [ipRow, opRow, badTobRow]);
+  // Professional row (both blank) — CAMH is IP-rostered, so it scopes IP via fallback and WRITES.
+  const profRow = cRow({ ...C_BASE, 'Charge/Debit ID': '778812348', 'Type of Bill': '', 'Charge Billed Revenue Code': '', 'Claim Type': 'Professional', 'Charge Claim ID': '900004' });
+  const csvB = toCsv(CONSOLIDATED_HEADERS, [ipRow, opRow, badTobRow, profRow]);
   const fake = fakeConsolidatedDb();
   const zipSentinel = Buffer.from('zip');
 
@@ -419,19 +473,21 @@ test('consolidatedAuditCron: B+C per customer, scope split, OP soak deferral, qu
   });
 
   assert.equal(stats.scope, 'CONSOLIDATED');
-  assert.equal(stats.rows_fetched, 3);
-  assert.equal(stats.rows_scope_ip, 1);
+  assert.equal(stats.rows_fetched, 4);
+  assert.equal(stats.rows_scope_ip, 2); //                 863 row + the fallback-scoped professional row
   assert.equal(stats.rows_scope_op, 1);
   assert.equal(stats.rows_op_scope_deferred, 1); //        OP row counted, NOT written
-  assert.equal(stats.rows_quarantined, 1); //              the 999 TOB row
+  assert.equal(stats.rows_scope_fallback, 1); //           the professional row (provenance counter)
+  assert.equal(stats.rows_quarantined, 1); //              the 999 TOB row (fail-loud stays)
   assert.match(Object.keys(stats.quarantined_by_label).join(' '), /type_of_bill: unrecognized "999"/);
   assert.equal(stats.customers_empty, 1); //               WRC (allowlisted → not unexpected)
   assert.equal(stats.customers_empty_unexpected, 0);
   assert.equal(stats.customers_processed, 2);
-  // Only the IP row reached the writer: one upsert statement, one tuple.
+  // The IP row AND the fallback professional row reached the writer: one statement, two tuples.
   assert.equal(fake.upserts.length, 1);
+  assert.equal(fake.upserts[0]!.params.length, 46 * 2);
   const camh = stats.per_customer.find((c) => c.facility === 'CAMH');
-  assert.match(camh?.reason ?? '', /B:3 C:0 quarantined:1/);
+  assert.match(camh?.reason ?? '', /B:4 C:0 quarantined:1/);
 });
 
 test('consolidatedAuditCron: writeOpScopeRows=true writes both scopes (the cutover mode)', async () => {
@@ -453,8 +509,8 @@ test('consolidatedAuditCron: writeOpScopeRows=true writes both scopes (the cutov
   });
   assert.equal(stats.rows_op_scope_deferred, 0);
   assert.equal(fake.upserts.length, 1);
-  // Both rows in one statement: 45 insert columns × 2 tuples.
-  assert.equal(fake.upserts[0]!.params.length, 45 * 2);
+  // Both rows in one statement: 46 insert columns (scope_source added by 0074) × 2 tuples.
+  assert.equal(fake.upserts[0]!.params.length, 46 * 2);
 });
 
 // --- config ---------------------------------------------------------------------------------
