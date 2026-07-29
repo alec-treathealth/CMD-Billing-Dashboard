@@ -91,8 +91,79 @@ export const OP_HEADERS = [
   'Provider Full Name', 'Office Name', 'Charge Status',
 ] as const;
 
+/**
+ * CONSOLIDATED feed headers — report 10064394, filters B 10148376 / C 10148377 (identical
+ * projections, recon record 2026-07-29). LOCKED positional list; Charge/Debit ID at
+ * position 4 (index 3). ⚠ Modifier column order is 1, 3, 2 (indexes 26/27/28) — the
+ * report really does emit them out of order; do not "fix" it. Claim Status [39] duplicates
+ * Charge Status [14] (identical values, probe-verified) — [14] is the one we read.
+ * Columns with no audit_row destination (Facility NPI, Facility Address 1, Claim PPS,
+ * Charge Modifier 3, Occurrence/Condition codes, Claim Remarks 1–3) are validated
+ * positionally but not stored — all were 0%-fill on the CAMH sample except NPI/address.
+ */
+export const CONSOLIDATED_HEADERS = [
+  'Patient Full Name', 'Patient Birthday', 'Claim Primary Member ID', 'Charge/Debit ID',
+  'Facility NPI', 'Facility Address 1', 'Type of Bill',
+  'Statement Covers From Date', 'Statement Covers To Date', 'Charge From Date',
+  'Charge To Date', 'Charge CPT Code', 'Charge Billed Revenue Code', 'Charge Units',
+  'Charge Status', 'Patient Admission Date',
+  'Claim Principal Diag', 'Claim Principal Diag POA',
+  'Claim Diag 2', 'Claim Diag 2 POA', 'Claim Diag 3', 'Claim Diag 3 POA',
+  'Claim PPS', 'Primary Auth #', 'Claim Type', 'Charge Primary Payer Name',
+  'Charge Modifier 1', 'Charge Modifier 3', 'Charge Modifier 2', 'Charge Amount',
+  'Occurrence Code 1', 'Condition Code 1', 'Claim Remark 1', 'Claim Remark 2',
+  'Claim Remark 3', 'Charge Claim ID', 'Charge Patient ID', 'Provider Full Name',
+  'Office Name', 'Claim Status', 'Claim Date Entered', 'Claim First Billed Date',
+] as const;
+
 export function expectedHeaders(scope: AuditScope): readonly string[] {
   return scope === 'IP' ? IP_HEADERS : OP_HEADERS;
+}
+
+/** Exact positional header check for the consolidated 42-col projection (labels only). */
+export function consolidatedHeaderMismatch(actual: readonly string[]): string | null {
+  if (actual.length !== CONSOLIDATED_HEADERS.length) {
+    return `column count ${actual.length} != expected ${CONSOLIDATED_HEADERS.length}`;
+  }
+  for (let i = 0; i < CONSOLIDATED_HEADERS.length; i++) {
+    const got = (actual[i] ?? '').trim();
+    if (got !== CONSOLIDATED_HEADERS[i]) return `column ${i}: "${got}" != "${CONSOLIDATED_HEADERS[i]}"`;
+  }
+  return null;
+}
+
+// --- TOB scope derivation (consolidated feed) ---------------------------------------
+// Measured 2026-07-29, zero overlap across 8,225 rows / 16 customers:
+//   first-two-digit prefix {11,86} → IP · {13,89,76} → OP.
+// 763 (TREAT_TX) is why the rule reads TWO digits — a second-digit rule fails on it.
+// The revenue-code partition (01xx/10xx IP-only, 09xx OP-only) corroborates as a LOGGED
+// consistency check, never a second gate. An unrecognised prefix returns null and the
+// caller QUARANTINES the row + marks the run — never defaults a scope.
+
+const TOB_IP_PREFIXES = new Set(['11', '86']);
+const TOB_OP_PREFIXES = new Set(['13', '89', '76']);
+
+/** TOB → scope, or null (unrecognised → caller quarantines). Accepts the report's 3-digit
+ *  form and the official 4-digit leading-zero form; anything else is unrecognised. */
+export function deriveScopeFromTob(tob: string | null): AuditScope | null {
+  const t = (tob ?? '').trim();
+  const digits = /^0\d{3}$/.test(t) ? t.slice(1) : t;
+  if (!/^\d{3}$/.test(digits)) return null;
+  const prefix = digits.slice(0, 2);
+  if (TOB_IP_PREFIXES.has(prefix)) return 'IP';
+  if (TOB_OP_PREFIXES.has(prefix)) return 'OP';
+  return null;
+}
+
+/** Revenue-code corroboration for the derived scope (consistency COUNTER, not a gate):
+ *  01xx/10xx are IP-only, 09xx OP-only (measured). Unknown/absent patterns → true. */
+export function revCodeConsistentWithScope(scope: AuditScope, revCode: string | null): boolean {
+  const r = (revCode ?? '').trim();
+  if (!/^\d{3,4}$/.test(r)) return true;
+  const padded = r.padStart(4, '0');
+  if (padded.startsWith('01') || padded.startsWith('10')) return scope === 'IP';
+  if (padded.startsWith('09')) return scope === 'OP';
+  return true;
 }
 
 /** Exact positional header comparison → first mismatch (safe to log: labels only). */
@@ -370,6 +441,168 @@ export function mapAuditRow(scope: AuditScope, row: string[]): AuditMapResult {
       diagnoses,
       last_fu_note: opt(cell(row, scope, 'Last Public FU Note')),
       row_fingerprint: fingerprint,
+    },
+  };
+}
+
+// --- consolidated-feed mapping (report 10064394, filters B/C — 42 cols) --------------
+
+/** PlainAuditRow + the consolidated feed's identity + date columns. `legacy_fingerprint`
+ *  is the OLD-IP-recipe variant (modifier_2 forced blank — the 46-col IP report had no
+ *  modifier 2, so every legacy IP fingerprint hashed it as ''); null when it would equal
+ *  `row_fingerprint`. The ingest matches legacy rows on EITHER, per the ruled
+ *  fingerprint-match backfill. Feed-absent columns (claim_frequency,
+ *  billing_provider_id, last_fu_note) are null here and deliberately NOT in the
+ *  consolidated volatile-update set — an upsert must never null-overwrite legacy values
+ *  the new feed simply doesn't carry. */
+export interface PlainConsolidatedRow extends PlainAuditRow {
+  charge_debit_id: string;
+  claim_date_entered: string | null;
+  claim_first_billed_date: string | null;
+  legacy_fingerprint: string | null;
+  /** Revenue-code corroboration outcome (logged consistency counter, never a gate). */
+  rev_scope_consistent: boolean;
+}
+
+export type ConsolidatedMapResult =
+  | { kind: 'ok'; row: PlainConsolidatedRow }
+  | { kind: 'skip'; label: string }
+  /** Unrecognised TOB prefix — the row is quarantined (counted + run marked), NEVER
+   *  defaulted into a scope. Label carries the TOB code only (a billing form code,
+   *  not PHI). */
+  | { kind: 'quarantine'; label: string };
+
+/** Positional reader bound to the consolidated header list. */
+function ccell(row: string[], name: (typeof CONSOLIDATED_HEADERS)[number], dupIndex = 0): string {
+  let seen = 0;
+  for (let i = 0; i < CONSOLIDATED_HEADERS.length; i++) {
+    if (CONSOLIDATED_HEADERS[i] === name) {
+      if (seen === dupIndex) return row[i] ?? '';
+      seen++;
+    }
+  }
+  return '';
+}
+
+/**
+ * Map one consolidated positional data row. Same required-field + fail-on-malformed
+ * discipline as mapAuditRow (labels only, never a cell value), plus:
+ *   - charge_debit_id REQUIRED (the identity key; digits — 100% fill measured);
+ *   - audit_scope DERIVED from TOB (unrecognised prefix → quarantine, fail-loud);
+ *   - claim_date_entered / claim_first_billed_date parsed (first-billed null =
+ *     entered-never-billed, 1.3% measured — a real state, not an error).
+ * The fingerprint recipe is FIELD-FOR-FIELD the locked Option-B one (mapAuditRow), so
+ * legacy IP rows match for the backfill; see PlainConsolidatedRow.legacy_fingerprint.
+ */
+export function mapConsolidatedRow(row: string[]): ConsolidatedMapResult {
+  const claimId = opt(ccell(row, 'Charge Claim ID'));
+  if (claimId === null) return { kind: 'skip', label: 'cmd_claim_id: missing' };
+  const patientId = opt(ccell(row, 'Charge Patient ID'));
+  if (patientId === null) return { kind: 'skip', label: 'cmd_patient_id: missing' };
+  const patientName = opt(ccell(row, 'Patient Full Name'));
+  if (patientName === null) return { kind: 'skip', label: 'patient_name: missing' };
+
+  const chargeDebitId = opt(ccell(row, 'Charge/Debit ID'));
+  if (chargeDebitId === null) return { kind: 'skip', label: 'charge_debit_id: missing' };
+  if (!/^\d+$/.test(chargeDebitId)) return { kind: 'skip', label: 'charge_debit_id: invalid' };
+
+  const tob = opt(ccell(row, 'Type of Bill'));
+  const scope = deriveScopeFromTob(tob);
+  if (scope === null) {
+    // TOB is a billing form code (non-PHI) — safe and necessary in the label.
+    return { kind: 'quarantine', label: `type_of_bill: unrecognized "${tob ?? ''}"` };
+  }
+
+  const chargeFrom = toIsoDate(ccell(row, 'Charge From Date'));
+  if (!chargeFrom.ok) return { kind: 'skip', label: 'charge_from_date: invalid' };
+  if (chargeFrom.value === null) return { kind: 'skip', label: 'charge_from_date: missing' };
+  const chargeTo = toIsoDate(ccell(row, 'Charge To Date'));
+  if (!chargeTo.ok) return { kind: 'skip', label: 'charge_to_date: invalid' };
+  const stmtFrom = toIsoDate(ccell(row, 'Statement Covers From Date'));
+  if (!stmtFrom.ok) return { kind: 'skip', label: 'stmt_from_date: invalid' };
+  const stmtTo = toIsoDate(ccell(row, 'Statement Covers To Date'));
+  if (!stmtTo.ok) return { kind: 'skip', label: 'stmt_to_date: invalid' };
+  const admission = toIsoDate(ccell(row, 'Patient Admission Date'));
+  if (!admission.ok) return { kind: 'skip', label: 'admission_date: invalid' };
+  const dateEntered = toIsoDate(ccell(row, 'Claim Date Entered'));
+  if (!dateEntered.ok) return { kind: 'skip', label: 'claim_date_entered: invalid' };
+  const firstBilled = toIsoDate(ccell(row, 'Claim First Billed Date'));
+  if (!firstBilled.ok) return { kind: 'skip', label: 'claim_first_billed_date: invalid' };
+
+  const cents = toCents(ccell(row, 'Charge Amount'));
+  if (!cents.ok) return { kind: 'skip', label: 'charge_amount: invalid' };
+  if (cents.value === null) return { kind: 'skip', label: 'charge_amount: missing' };
+  const units = toUnits(ccell(row, 'Charge Units'));
+  if (!units.ok) return { kind: 'skip', label: 'units: invalid' };
+
+  const cpt = opt(ccell(row, 'Charge CPT Code'));
+  const rev = opt(ccell(row, 'Charge Billed Revenue Code'));
+  const mod1 = opt(ccell(row, 'Charge Modifier 1'));
+  const mod2 = opt(ccell(row, 'Charge Modifier 2')); // header index 28 — after Modifier 3; ccell resolves by NAME
+  const statusRaw = opt(ccell(row, 'Charge Status')); // [39] Claim Status is an identical duplicate
+  const status = normalizeStatus(statusRaw);
+
+  // Diagnoses: principal + 2–3 (+POA; the 42-col projection carries no descriptions).
+  const diagnoses: DiagEntry[] = [];
+  const principal = opt(ccell(row, 'Claim Principal Diag'));
+  if (principal !== null) diagnoses.push({ code: principal, poa: opt(ccell(row, 'Claim Principal Diag POA')), desc: null, pos: 1 });
+  for (const pos of [2, 3] as const) {
+    const code = opt(ccell(row, `Claim Diag ${pos}` as (typeof CONSOLIDATED_HEADERS)[number]));
+    if (code !== null) diagnoses.push({ code, poa: opt(ccell(row, `Claim Diag ${pos} POA` as (typeof CONSOLIDATED_HEADERS)[number])), desc: null, pos });
+  }
+
+  // LOCKED Option-B fingerprint — field order + normalization IDENTICAL to mapAuditRow.
+  const fpFields = (m2: string | null, u: string | null): string[] => [
+    scope, claimId, patientId, chargeFrom.value as string,
+    chargeTo.value ?? '', stmtFrom.value ?? '', stmtTo.value ?? '', admission.value ?? '',
+    low(cpt), low(rev), low(mod1), low(m2), u ?? '', low(tob), String(cents.value),
+  ];
+  const fingerprint = fingerprintRow(fpFields(mod2, units.value));
+  // Legacy 46-col IP recipe: no modifier-2 column existed → hashed as ''. Only differs
+  // from the primary when this feed actually carries a modifier 2 (0%-fill measured).
+  const legacyFingerprint =
+    scope === 'IP' && mod2 !== null ? fingerprintRow(fpFields(null, units.value)) : null;
+
+  return {
+    kind: 'ok',
+    row: {
+      audit_scope: scope,
+      cmd_claim_id: claimId,
+      cmd_patient_id: patientId,
+      claim_type: opt(ccell(row, 'Claim Type')),
+      claim_frequency: null, //         not on the 42-col projection — never null-overwritten
+      office_name: opt(ccell(row, 'Office Name')),
+      provider_name: opt(ccell(row, 'Provider Full Name')),
+      billing_provider_id: null, //     not on the 42-col projection
+      patient_name: patientName,
+      patient_dob: opt(ccell(row, 'Patient Birthday')),
+      member_id: opt(ccell(row, 'Claim Primary Member ID')),
+      charge_from_date: chargeFrom.value,
+      charge_to_date: chargeTo.value,
+      stmt_from_date: stmtFrom.value,
+      stmt_to_date: stmtTo.value,
+      admission_date: admission.value,
+      cpt_code: cpt,
+      rev_code: rev,
+      modifier_1: mod1,
+      modifier_2: mod2,
+      units: units.value,
+      type_of_bill: tob,
+      charge_amount_cents: cents.value,
+      payer_name: opt(ccell(row, 'Charge Primary Payer Name')),
+      auth_number: opt(ccell(row, 'Primary Auth #')),
+      charge_status_raw: statusRaw,
+      status_category: status.category,
+      status_payer: status.statusPayer,
+      principal_diag: principal,
+      diagnoses,
+      last_fu_note: null, //            not on the 42-col projection (PHI-surface reduction)
+      row_fingerprint: fingerprint,
+      charge_debit_id: chargeDebitId,
+      claim_date_entered: dateEntered.value,
+      claim_first_billed_date: firstBilled.value,
+      legacy_fingerprint: legacyFingerprint,
+      rev_scope_consistent: revCodeConsistentWithScope(scope, rev),
     },
   };
 }

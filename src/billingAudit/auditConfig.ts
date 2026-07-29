@@ -61,6 +61,28 @@ export function auditCustomersFor(scope: AuditScope): readonly CmdCustomerTarget
   return scope === 'IP' ? AUDIT_IP_CUSTOMERS : AUDIT_OP_CUSTOMERS;
 }
 
+/**
+ * CONSOLIDATED-feed roster (report 10064394, filters B/C — recon 2026-07-29): the 16
+ * data-bearing customers + WRC (expected-empty). Scope is NO LONGER roster-implied on
+ * this feed — it is TOB-derived per row — so this is simply the union, IP-first (during
+ * the OP soak only IP-scope rows write, so budget pressure lands on the writing head).
+ *
+ * STILL EXCLUDED — reconfirmed INVALID CRITERIA against the consolidated pair in a clean
+ * CMD window 2026-07-29 (probe): 10035976 HOUSTON_MH, 10035974 TREAT_CO. "Defunct vs
+ * new-no-data" stays unconfirmed at the business level; operationally unreachable.
+ * 10036125 TREAT MENTAL HEALTH VIRGINIA (new customer): also INVALID CRITERIA — the
+ * saved filter is not shared/valid under it yet; add ONLY after a CMD-side fix + a
+ * rows-bearing probe shown at a gate.
+ */
+export const AUDIT_CONSOLIDATED_CUSTOMERS: readonly CmdCustomerTarget[] = [
+  ...AUDIT_IP_CUSTOMERS,
+  ...AUDIT_OP_CUSTOMERS,
+] as const;
+
+/** Customers whose SUCCESS-empty report is EXPECTED and never marks a run partial:
+ *  WRC 10033951 (documented empty/defunct; SUCCESS-empty ×3 on the recon sweep). */
+export const EXPECTED_EMPTY_AUDIT_CUSTOMERS: ReadonlySet<string> = new Set(['10033951']);
+
 export interface AuditReportIds {
   reportId: string;
   filterId: string;
@@ -81,4 +103,35 @@ export function auditReportIds(scope: AuditScope, env: Record<string, string | u
     throw new Error(`Billing-audit env not configured: set ${reportKey} and ${filterKey}`);
   }
   return { reportId, filterId };
+}
+
+export interface ConsolidatedAuditIds {
+  reportId: string;
+  filterBId: string;
+  filterCId: string;
+}
+
+/**
+ * Consolidated-feed ids from env — same env-var-only, no-fallback discipline as
+ * auditReportIds (a missing var throws at compose time, names only). B = YTD all
+ * statuses except paid/balance-due-patient; C = balance-due-patient ~90d.
+ */
+export function consolidatedAuditReportIds(env: Record<string, string | undefined>): ConsolidatedAuditIds {
+  const reportId = env.CMD_AUDIT_CONSOLIDATED_REPORT_ID?.trim();
+  const filterBId = env.CMD_AUDIT_CONSOLIDATED_FILTER_B_ID?.trim();
+  const filterCId = env.CMD_AUDIT_CONSOLIDATED_FILTER_C_ID?.trim();
+  if (!reportId || !filterBId || !filterCId) {
+    throw new Error(
+      'Billing-audit env not configured: set CMD_AUDIT_CONSOLIDATED_REPORT_ID, CMD_AUDIT_CONSOLIDATED_FILTER_B_ID and CMD_AUDIT_CONSOLIDATED_FILTER_C_ID',
+    );
+  }
+  return { reportId, filterBId, filterCId };
+}
+
+/** The soak flag: OP-scope rows write only when CMD_AUDIT_CONSOLIDATED_OP_WRITE is
+ *  affirmatively on. Off (default) = fetch/derive/count OP rows, write IP only —
+ *  flipped at OP-pair decommission after 5 clean consolidated nights. */
+export function consolidatedOpWriteEnabled(env: Record<string, string | undefined>): boolean {
+  const v = env.CMD_AUDIT_CONSOLIDATED_OP_WRITE?.trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'on';
 }

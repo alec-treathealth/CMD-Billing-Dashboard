@@ -204,8 +204,18 @@ import { refreshChargeRollup } from '../../src/collections/refreshChargeRollup.j
 import { cmdExplorerCron } from '../../src/collections/cmdExplorerCron.js';
 import { cmdCensusCron } from '../../src/collections/cmdCensusCron.js';
 import { cmdRunReportToZip, readZipEntries } from '../../src/collections/cmdPayer.js';
-import { billingAuditCron, recordAuditIngestRun } from '../../src/billingAudit/auditIngest.js';
-import { auditCustomersFor, auditReportIds, type AuditScope } from '../../src/billingAudit/auditConfig.js';
+import { billingAuditCron, recordAuditIngestRun, type PerCustomerOutcome } from '../../src/billingAudit/auditIngest.js';
+import {
+  auditCustomersFor,
+  auditReportIds,
+  consolidatedAuditReportIds,
+  consolidatedOpWriteEnabled,
+  AUDIT_CONSOLIDATED_CUSTOMERS,
+  EXPECTED_EMPTY_AUDIT_CUSTOMERS,
+  type AuditScope,
+} from '../../src/billingAudit/auditConfig.js';
+import { consolidatedAuditCron } from '../../src/billingAudit/auditConsolidated.js';
+import { withTenant } from '../../src/veris/withTenant.js';
 import { isAuthorized } from '../../src/bearerAuth.js';
 
 let cachedExecutor: PgExecutor | undefined;
@@ -838,8 +848,10 @@ async function assertAuditWriterIdentity(): Promise<string> {
  * charge lines into claims.audit_row as claims_audit_writer. Report/filter ids are
  * ENV-VAR-ONLY (auditReportIds throws on a missing var — no hardcoded fallback, a
  * deliberate break from the collections pattern). Non-PHI counts only. Each scope gets
- * its own thin wrapper + route (/api/cron/billing-audit-ip, /api/cron/billing-audit-op)
- * for log/Cron-tab attribution, mirroring the explorer crons.
+ * its own thin wrapper + route for log/Cron-tab attribution, mirroring the explorer
+ * crons. (The IP wrapper/route were decommissioned 2026-07-29 with the dead IP pair —
+ * only OP remains on this path, soaking until the consolidated feed proves 5 clean
+ * nights; see handleBillingAuditConsolidatedCron.)
  */
 async function handleBillingAuditCronForScope(
   req: { method?: string; authorization?: string | null },
@@ -881,6 +893,10 @@ async function handleBillingAuditCronForScope(
       writeDb: auditWriterDb(),
       businessEntityId: BXR_TENANT_ID,
       sourceReportId: ids.reportId,
+      // Honest-empty accounting (recon item 6, 2026-07-29): WRC is expected-empty; any
+      // other SUCCESS-empty customer that has landed rows before marks the run partial.
+      expectedEmptyCustomerIds: EXPECTED_EMPTY_AUDIT_CUSTOMERS,
+      hasPriorRows: (facilityCode) => auditFacilityHasRows(facilityCode),
       revalidate: () => revalidateTag('billing-audit'),
     });
     // Persist the run summary (observability) — FAIL-SOFT: the ingest already succeeded, so a
@@ -902,20 +918,123 @@ async function handleBillingAuditCronForScope(
   }
 }
 
-/** IP audit ingest cron (/api/cron/billing-audit-ip). Roster = AUDIT_IP_CUSTOMERS (8). */
-export function handleBillingAuditIpCron(req: {
-  method?: string;
-  authorization?: string | null;
-}): Promise<{ status: number; body: unknown }> {
-  return handleBillingAuditCronForScope(req, 'IP');
-}
-
-/** OP audit ingest cron (/api/cron/billing-audit-op). Roster = AUDIT_OP_CUSTOMERS (9). */
+/** OP audit ingest cron (/api/cron/billing-audit-op). Roster = AUDIT_OP_CUSTOMERS (9).
+ *  Stays live until the consolidated feed proves 5 clean nights (cutover ruling
+ *  2026-07-29); the dead IP pair's cron was decommissioned the same day. */
 export function handleBillingAuditOpCron(req: {
   method?: string;
   authorization?: string | null;
 }): Promise<{ status: number; body: unknown }> {
   return handleBillingAuditCronForScope(req, 'OP');
+}
+
+/** Has this facility EVER landed audit rows? — the honest-empty seed (recon item 6).
+ *  Runs on the writer pool inside withTenant (the 0049 writer SELECT policy is
+ *  GUC-scoped). Non-PHI: a boolean over facility_code. */
+async function auditFacilityHasRows(facilityCode: string): Promise<boolean> {
+  return withTenant(auditWriterDb(), BXR_TENANT_ID, async (client) => {
+    const res = await client.query<{ has: boolean }>(
+      'select exists(select 1 from claims.audit_row where business_entity_id = $1 and facility_code = $2) as has',
+      [BXR_TENANT_ID, facilityCode],
+    );
+    return res.rows[0]?.has ?? false;
+  });
+}
+
+/** Customer ids already processed (or legitimately empty) by an earlier CONSOLIDATED
+ *  run TODAY (UTC) — the multi-pass nightly design: the schedule fires the route
+ *  several times (the 17-customer × 2-filter sweep exceeds one 300s invocation) and
+ *  each pass skips work a prior pass finished. Budget-skipped / failed customers are
+ *  NOT in the set, so they retry on the next pass. */
+async function consolidatedProcessedToday(): Promise<Set<string>> {
+  return withTenant(auditWriterDb(), BXR_TENANT_ID, async (client) => {
+    const res = await client.query<{ per_customer: PerCustomerOutcome[] }>(
+      "select per_customer from claims.audit_ingest_run " +
+        "where business_entity_id = $1 and scope = 'CONSOLIDATED' and started_at >= date_trunc('day', now())",
+      [BXR_TENANT_ID],
+    );
+    const done = new Set<string>();
+    for (const run of res.rows) {
+      for (const c of run.per_customer ?? []) {
+        if (c.outcome === 'processed' || c.outcome === 'empty') done.add(c.customer_id);
+      }
+    }
+    return done;
+  });
+}
+
+/**
+ * CONSOLIDATED audit ingest cron (/api/cron/billing-audit-consolidated) — report
+ * 10064394, filter B then C per customer, scope TOB-derived per row (recon 2026-07-29).
+ * Multi-pass nightly: vercel.json fires this route more than once; each pass processes
+ * roster customers no earlier pass finished today. OP-scope rows are fetched + counted
+ * but written only when CMD_AUDIT_CONSOLIDATED_OP_WRITE is on (the soak deferral —
+ * see auditConsolidated.ts). Env-var-only ids; CRON_SECRET-gated; non-PHI counts only.
+ */
+export async function handleBillingAuditConsolidatedCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
+    return { status: 405, body: { error: 'method_not_allowed' } };
+  }
+  const secret = process.env.CRON_SECRET;
+  if (!secret || !isAuthorized(req.authorization, secret)) {
+    return { status: 401, body: { error: 'unauthorized' } };
+  }
+  const startedAt = new Date().toISOString();
+  try {
+    const ids = consolidatedAuditReportIds(process.env); // throws on missing env — names only
+    const writerUser = await assertAuditWriterIdentity();
+    const base = cmdApiConfig();
+    const done = await consolidatedProcessedToday();
+    const remaining = AUDIT_CONSOLIDATED_CUSTOMERS.filter((c) => !done.has(c.customerId));
+    if (remaining.length === 0) {
+      // A prior pass finished the roster — a quick no-op, deliberately NOT recorded as
+      // an ingest run (nothing was ingested; the run rows that did the work exist).
+      console.log('billing-audit consolidated cron: roster already completed today — no-op pass');
+      return { status: 200, body: { ok: true, noop: true, completed_today: done.size } };
+    }
+    const stats = await consolidatedAuditCron({
+      customers: remaining,
+      fetchZip: (customerId, filterId) =>
+        cmdRunReportToZip({
+          ...base,
+          customerId,
+          reportId: ids.reportId,
+          filterId,
+          // Same dedicated audit poll tuning as the per-scope crons (heavier reports
+          // than the collections explorer; ceiling 18×5s=90s, empty-grace 6).
+          pollIntervalMs: Number(process.env.CMD_AUDIT_POLL_INTERVAL_MS) || 5_000,
+          maxPollAttempts: Number(process.env.CMD_AUDIT_POLL_ATTEMPTS) || 18,
+          emptyGraceAttempts: Number(process.env.CMD_AUDIT_EMPTY_GRACE) || 6,
+        }),
+      filterBId: ids.filterBId,
+      filterCId: ids.filterCId,
+      zipToCsvTexts: (zip) => readZipEntries(zip).map((e) => e.data.toString('utf8')),
+      writeDb: auditWriterDb(),
+      businessEntityId: BXR_TENANT_ID,
+      sourceReportId: ids.reportId,
+      writeOpScopeRows: consolidatedOpWriteEnabled(process.env),
+      expectedEmptyCustomerIds: EXPECTED_EMPTY_AUDIT_CUSTOMERS,
+      hasPriorRows: (facilityCode) => auditFacilityHasRows(facilityCode),
+      revalidate: () => revalidateTag('billing-audit'),
+    });
+    try {
+      await recordAuditIngestRun(
+        auditWriterDb(),
+        BXR_TENANT_ID,
+        { scope: 'CONSOLIDATED', sourceReportId: ids.reportId, writerUser, startedAt },
+        stats,
+      );
+    } catch (e) {
+      console.error('billing-audit consolidated cron: audit_ingest_run write failed (non-fatal):', e instanceof Error ? e.message : String(e));
+    }
+    return { status: 200, body: { ok: true, writer_user: writerUser, ...stats } };
+  } catch (err) {
+    console.error('billing-audit consolidated cron failed:', err instanceof Error ? err.message : String(err));
+    return { status: 500, body: { error: 'cron_failed' } };
+  }
 }
 
 /**

@@ -84,6 +84,13 @@ export interface BillingAuditCronDeps {
   businessEntityId: string;
   /** Recorded on every row (claims.audit_row.source_report_id). */
   sourceReportId: string;
+  /** Customers whose empty report is EXPECTED (e.g. WRC 10033951, documented
+   *  empty/defunct) — counted in customers_empty but never marks the run partial. */
+  expectedEmptyCustomerIds?: ReadonlySet<string>;
+  /** Honest-empty seed: has this customer EVER landed audit rows? (facility_code probe,
+   *  injected by the composition root.) When absent, unexpected-empty detection is off
+   *  (customers_empty still counts). */
+  hasPriorRows?: (facilityCode: string) => Promise<boolean>;
   now?: () => number;
   budgetMs?: number;
   revalidate?: () => void | Promise<void>;
@@ -91,13 +98,19 @@ export interface BillingAuditCronDeps {
 
 /** Non-PHI run summary — safe to log and return to the (CRON_SECRET-authed) caller. */
 export interface BillingAuditCronStats {
-  scope: AuditScope;
+  scope: AuditScope | 'CONSOLIDATED';
   customers_total: number;
   customers_processed: number;
   customers_failed: number;
   customers_skipped_budget: number;
   /** Customers whose report header did not match the scope's locked list (rejected whole). */
   customers_header_mismatch: number;
+  /** Customers whose report returned SUCCESS-empty (post grace) — honest-empty accounting
+   *  (recon 2026-07-29: a raced empty night previously recorded status='ok'). */
+  customers_empty: number;
+  /** Empty customers that are NOT allowlisted expected-empty AND have prior audit rows —
+   *  each marks the run status='partial' (the SUCCESS-empty race signal). */
+  customers_empty_unexpected: number;
   rows_fetched: number;
   mapped_valid: number;
   /** Rows skipped for a missing/invalid required field (labels aggregated, counts only). */
@@ -216,6 +229,8 @@ export async function billingAuditCron(deps: BillingAuditCronDeps): Promise<Bill
     customers_failed: 0,
     customers_skipped_budget: 0,
     customers_header_mismatch: 0,
+    customers_empty: 0,
+    customers_empty_unexpected: 0,
     rows_fetched: 0,
     mapped_valid: 0,
     skipped: 0,
@@ -237,8 +252,19 @@ export async function billingAuditCron(deps: BillingAuditCronDeps): Promise<Bill
       const zip = await deps.fetchZip(target.customerId);
       if (zip === null) {
         // Genuinely-empty report (post empty-grace) — processed, nothing to write.
+        // HONEST-EMPTY ACCOUNTING (recon item 6, 2026-07-29): counted, and — unless the
+        // customer is allowlisted expected-empty (WRC) or has never landed rows — the
+        // run is marked partial via customers_empty_unexpected (recordAuditIngestRun).
         stats.customers_processed += 1;
-        stats.per_customer.push({ customer_id: target.customerId, facility: target.facilityCode, outcome: 'empty' });
+        stats.customers_empty += 1;
+        const expected = deps.expectedEmptyCustomerIds?.has(target.customerId) ?? false;
+        let unexpected = false;
+        if (!expected && deps.hasPriorRows) unexpected = await deps.hasPriorRows(target.facilityCode);
+        if (unexpected) stats.customers_empty_unexpected += 1;
+        stats.per_customer.push({
+          customer_id: target.customerId, facility: target.facilityCode, outcome: 'empty',
+          reason: expected ? 'expected-empty (allowlisted)' : unexpected ? 'UNEXPECTED — customer has prior rows' : undefined,
+        });
         continue;
       }
       let customerFetched = 0;
@@ -315,12 +341,14 @@ export async function billingAuditCron(deps: BillingAuditCronDeps): Promise<Bill
 const INGEST_RUN_COLS = [
   'business_entity_id', 'scope', 'source_report_id', 'writer_user', 'status', 'started_at',
   'customers_total', 'customers_processed', 'customers_failed', 'customers_header_mismatch',
-  'customers_skipped_budget', 'rows_fetched', 'mapped_valid', 'skipped', 'inserted', 'updated',
-  'all_rows_skipped_customers', 'per_customer',
+  'customers_skipped_budget', 'customers_empty', 'rows_fetched', 'mapped_valid', 'skipped',
+  'inserted', 'updated', 'all_rows_skipped_customers', 'per_customer',
 ] as const;
 
 export interface AuditIngestRunMeta {
-  scope: AuditScope;
+  /** 'CONSOLIDATED' = the one-run-covers-both-scopes feed (0073 widened the CHECK);
+   *  per-row scope is TOB-derived and stays IP|OP on audit_row. */
+  scope: AuditScope | 'CONSOLIDATED';
   sourceReportId: string;
   writerUser: string;
   startedAt: string; // ISO timestamp captured at handler start
@@ -339,17 +367,21 @@ export async function recordAuditIngestRun(
   db: Db,
   businessEntityId: string,
   meta: AuditIngestRunMeta,
-  stats: BillingAuditCronStats,
+  stats: BillingAuditCronStats & { rows_quarantined?: number },
 ): Promise<void> {
+  // 'partial' on any failure/mismatch/budget-skip (as before) PLUS the honest-empty rule
+  // (an unexpected SUCCESS-empty for a data-bearing customer) PLUS any quarantined row
+  // (the consolidated feed's fail-loud TOB/fingerprint path) — recon item 6, 2026-07-29.
   const status =
-    stats.customers_failed + stats.customers_header_mismatch + stats.customers_skipped_budget > 0
+    stats.customers_failed + stats.customers_header_mismatch + stats.customers_skipped_budget
+      + stats.customers_empty_unexpected + (stats.rows_quarantined ?? 0) > 0
       ? 'partial'
       : 'ok';
   const vals: unknown[] = [
     businessEntityId, meta.scope, meta.sourceReportId, meta.writerUser, status, meta.startedAt,
     stats.customers_total, stats.customers_processed, stats.customers_failed, stats.customers_header_mismatch,
-    stats.customers_skipped_budget, stats.rows_fetched, stats.mapped_valid, stats.skipped, stats.inserted,
-    stats.updated, stats.all_rows_skipped_customers, JSON.stringify(stats.per_customer),
+    stats.customers_skipped_budget, stats.customers_empty, stats.rows_fetched, stats.mapped_valid, stats.skipped,
+    stats.inserted, stats.updated, stats.all_rows_skipped_customers, JSON.stringify(stats.per_customer),
   ];
   await withTenant(db, businessEntityId, async (client) => {
     const ph = vals.map((_, i) => `$${i + 1}`);

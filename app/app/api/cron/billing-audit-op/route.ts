@@ -7,9 +7,12 @@
  * (CMD_OP_AUDIT_REPORT_ID / _FILTER_ID, env-var-only, no fallbacks) once per customer.
  * The OP report is a DIFFERENT 39-column projection (duplicate "Charge Status" header,
  * member id under "Current Payer Member ID") — parsed positionally against the locked
- * header list; a mismatched header rejects that customer whole. See
- * /api/cron/billing-audit-ip for the shared behavior notes. NOT scheduled in
- * vercel.json yet — schedule entries land as their OWN commit after manual verify.
+ * header list; a mismatched header rejects that customer whole.
+ *
+ * SOAK STATUS (2026-07-29): the IP sibling route was decommissioned with its dead
+ * report pair; this OP cron stays live UNTOUCHED until the consolidated feed
+ * (/api/cron/billing-audit-consolidated) proves 5 clean nights, then decommissions the
+ * same way. Shared behavior notes now live on the consolidated route.
  */
 import { handleBillingAuditOpCron } from '@/lib/server';
 

@@ -1154,6 +1154,9 @@ another session's WIP claim is usually an untracked file. Current reservations:
 | 0058 | qualify-v2-feed ① session | `0058_cmd_charge_census` (+ `cmd_census_run`) — DRAFTED (Gate 1 hold); NOT applied, NOT committed. (claimed 2026-07-21) |
 | 0059 | rollup-rebuild session | `0059_cmd_charge_rollup_allowed_reliable` (+ rollback) — **APPLIED LIVE 2026-07-22 07:14 UTC** (ledger 20260722071405), post-apply gates green, first autonomous :45 refresh ok=true 74.9s (run 131); NOT yet committed/pushed (commit HOLD pending — remove this row once on main). (claimed 2026-07-22) |
 | 0070 | qualify-latency session | `0070_cmd_charge_rollup_kpi_cov_member` (+ rollback) — **DRAFTED, NOT applied** (Alec applies; CONCURRENTLY, outside a txn). Restores the book-wide KPI index-only scan Phase 2 broke by appending `member_id_bidx` to the covering index's INCLUDE (new name `_cov_m`, supersedes 0068's `_cov`). Must be applied BEFORE 0067 (0067's swap carries `_cov_m` forward + gates on live indexes). See "0070 index fix" below. (claimed 2026-07-27) |
+| 0071 | CMD AR Automation session | `0071_cmd_charge_census_aging_index` (+ rollback) — UNTRACKED WIP in the main checkout alongside `src/collections/ageBucket.ts`/`arAging.ts`. Not committed, apply state unknown to this table. (observed 2026-07-29) |
+| 0072 | CMD AR Automation session (presumed — the Phase-0 Teen-MH-TX pre-req) | `0072_teen_mh_tx_facility` (+ rollback) — UNTRACKED WIP in the main checkout. Not committed, apply state unknown to this table. NOTE: CLAUDE.md's "Next number 0072" is STALE against this file. (observed 2026-07-29) |
+| 0073 | consolidated-audit build session | `0073_audit_row_consolidated` (+ rollback) — **APPLIED LIVE 2026-07-29 ~08:57 UTC** (base + a same-session `_amend_source_filter` re-run of the idempotent file adding `source_filter_id`; the on-disk file carries both). audit_row: `charge_debit_id` / `claim_date_entered` / `claim_first_billed_date` / `cmd_customer_id` / `source_filter_id` + partial UNIQUE `(business_entity_id, charge_debit_id)`; audit_ingest_run: `customers_empty` + scope CHECK widened to CONSOLIDATED. Post-apply verified (4 cols + counter + index + CHECK + fingerprint-unique retained). Remove this row once the file is on origin/main. |
 
 Record new claims here when made; remove rows once the file is on origin/main
 (the tree then speaks for itself).
@@ -2058,3 +2061,304 @@ rolls everything back — `_next` never persists, live is untouched. If a run is
 (rare), a `_next` orphan may remain; the next apply's defensive `drop materialized view if exists …_next`
 clears it, or drop it manually. Never drop `…_old` by hand unless a swap half-completed (it won't under
 the single-txn design).
+
+---
+
+## Consolidated audit report recon — measured (2026-07-29)
+
+**Provenance:** the recon series' outputs were never persisted (process failure, confirmed by
+Alec 2026-07-29); this record was assembled by Alec from the recon session transcripts and is
+ruled **measured ground truth**. Measured 2026-07-28/29, customer 10027973 (CAMH) unless noted.
+
+### Report/filter pairs
+
+- **B: report `10064394` / filter `10148376`** — YTD, all statuses EXCEPT paid and
+  balance-due-patient. Windows on Claim Date Entered >= Jan 1 (consistent with payload;
+  01-15..07-28 observed).
+- **C: report `10064394` / filter `10148377`** — BALANCE DUE PATIENT only, ~90d; exact date
+  criterion NOT determinable from payload, CMD-side inspection required. B and C are
+  **complementary status slices, not nested windows**. Split exists to avoid the extract
+  timeout (ruled).
+- **A: report `10051337` / filter `10147960`** — AR Aging Summary. 10 columns, NO key, NO
+  date, NO dollar columns; 220 rows collapse to 25 distinct tuples; joins the audit plane at
+  patient grain only (Patient ID len-8 = `audit_row.cmd_patient_id`). **Not ingestible
+  idempotently.**
+- **Old IP pair `10064394`/`10147816`: dead since 2026-07-17** — INVALID CRITERIA nightly
+  (13 nights, all 8 IP customers, 104 failures); presumed displaced by creation of the
+  1014837x filters. Being DECOMMISSIONED, not restored.
+- **OP pair `10073210`/`10147817`: healthy**, untouched by the projection change (different
+  report). Stays live until the consolidated feed proves 5 clean nights.
+
+### The 42-column positional header set (B and C, identical, verified)
+
+```
+ 1 Patient Full Name            22 Claim Diag 3 POA
+ 2 Patient Birthday             23 Claim PPS
+ 3 Claim Primary Member ID      24 Primary Auth #
+ 4 Charge/Debit ID              25 Claim Type
+ 5 Facility NPI                 26 Charge Primary Payer Name
+ 6 Facility Address 1           27 Charge Modifier 1
+ 7 Type of Bill                 28 Charge Modifier 3
+ 8 Statement Covers From Date   29 Charge Modifier 2
+ 9 Statement Covers To Date     30 Charge Amount
+10 Charge From Date             31 Occurrence Code 1
+11 Charge To Date               32 Condition Code 1
+12 Charge CPT Code              33 Claim Remark 1
+13 Charge Billed Revenue Code   34 Claim Remark 2
+14 Charge Units                 35 Claim Remark 3
+15 Charge Status                36 Charge Claim ID
+16 Patient Admission Date       37 Charge Patient ID
+17 Claim Principal Diag         38 Provider Full Name
+18 Claim Principal Diag POA     39 Office Name
+19 Claim Diag 2                 40 Claim Status
+20 Claim Diag 2 POA             41 Claim Date Entered
+21 Claim Diag 3                 42 Claim First Billed Date
+```
+
+Charge/Debit ID inserted at position 4 on 2026-07-29; every prior column from 4 onward
+shifted +1; nothing renamed/dropped/reordered. Observed 0%-fill columns (CAMH sample):
+Claim PPS, Charge Modifier 1/2/3, Occurrence Code 1, Condition Code 1, Claim Remark 1/2/3.
+Note the modifier column ORDER is 1, **3**, 2 (positions 27/28/29) — positional parsing must
+not assume 1/2/3.
+
+### Key & grain
+
+- **Grain: one row per charge line.** CAMH B: 469 rows / 441 claims, one 29-line per-diem
+  stay; Charge Units always 1.
+- **Charge/Debit ID: digits, len 9, 100% fill, UNIQUE PER ROW across all 16 data-bearing
+  customers.** Same identifier space as the census feed's "Charge ID" (C→census join 100%)
+  and as `staging.payment_residual.charge_debit_id`.
+- Claim Status and Charge Status are **duplicate columns** (identical 18 values; CLAIM AT
+  <payer> family plus NEEDS RENEGOTIATING / APPROVED FOR HIGHER PAYMENT / PENDING FOR HIGHER
+  PAYMENT / ON HOLD).
+- **Claim First Billed Date is the ONLY status-change anchor; 1.3% null =
+  entered-never-billed.** NO as-of timestamp exists for current status;
+  time-in-current-status is NOT derivable.
+- **Patient Admission Date is a real episode anchor** (precedes service window) — the
+  collections plane has no admission date anywhere.
+
+### Coverage sweep (filter 10148376, all 17 audit-roster customers, grace 4 first attempt, 2026-07-29)
+
+| scope | facility | customer | rows | patients | claims | TOB set |
+|---|---|---|---|---|---|---|
+| IP | CAMH | 10027973 | 469 | 30 | 441 | 863,113,861,862,112 |
+| IP | DMH | 10033950 | 532 | 37 | 429 | 863,861,862,867,868 |
+| IP | KWC | 10034908 | 740 | 42 | 513 | 863,862,868,867,861 |
+| IP | LSMH | 10031977 | 443 | 38 | 369 | 863,861,862,867,117,864,113,868 |
+| IP | LAMH | 10033690 | 223 | 20 | 223 | 863,862,861 |
+| IP | NASH | 10030911 | 842 | 57 | 596 | 863,867,117,862,861 |
+| IP | PCMH | 10030471 | 268 | 17 | 235 | 863,111,113,862,112,861 |
+| IP | TBH | 10029105 | 420 | 29 | 343 | 863,867,861,862,868 |
+| OP | FRCA | 10032340 | 117 | 10 | 92 | 893,133,897,132 |
+| OP | TELEHEALTH_MH | 10034666 | 749 | 54 | 387 | 893,892,897 |
+| OP | TREAT_CA | 10030101 | 791 | 69 | 434 | 893,133,897,892,137 |
+| OP | TREAT_NV | 10034671 | 980 | 50 | 517 | 893,892,133 |
+| OP | TREAT_TN | 10029905 | 235 | 26 | 126 | 893,897,892 |
+| OP | TREAT_TX | 10029722 | 481 | 50 | 220 | 893,137,892,763,133 |
+| OP | TREAT_WA | 10031212 | 676 | 43 | 635 | 893,892,898,897 |
+| OP | TEEN_MH_TX | 10035166 | 259 | 12 | 142 | 893,892 |
+| OP | WRC | 10033951 | 0 | 0 | 0 | (SUCCESS-empty ×3, documented empty/defunct account) |
+
+Totals: **8,225 rows, 584 patients, 5,202 claims.** 42 columns and unique Charge/Debit ID
+confirmed in every data-bearing customer. **TEEN_MH_TX is LIVE on the audit plane despite
+collections exclusion** (separate-legal-entity ruling 2026-07-28). TEEN_MH_TX and WRC are
+audit-roster only — NOT in `BXR_CUSTOMERS`; audit rows there have no collections/rollup
+counterpart.
+
+### Scope derivation (measured, zero overlap)
+
+- **Type of Bill first-two-digit prefix: {11,86}=IP, {13,89,76}=OP.** 763 (TREAT_TX, 6 rows)
+  is why the PAIR is required — a second-digit rule fails on it.
+- Corroboration: Charge Billed Revenue Code partitions identically — 01xx/10xx IP-only,
+  09xx OP-only.
+- Claim Type does NOT discriminate (Institutional appears in both). CPT does NOT
+  discriminate (H2018 spans both scopes). maxLinesPerClaim > 4 ⇒ IP is sound but the
+  converse fails (LAMH IP max=1) — directional only.
+- NO customer returns mixed scopes — strict partition holds empirically on this window.
+  **Derivation must FAIL LOUDLY (quarantine + run flag) on any unrecognised TOB prefix,
+  never default.**
+- One-customer==one-facility does NOT hold universally: report A showed 2 Facility
+  Names/NPIs under CAMH; B shows 2 offices for TBH and TREAT_TN, 2 NPIs for
+  CAMH/NASH/TELEHEALTH_MH/TREAT_CA.
+
+### Join reachability (measured)
+
+- `cmd_explorer_charge_rollup` has **NO charge_id column**. Only path to a rated row:
+  `audit.charge_debit_id → cmd_explorer_rows.charge_id → rows.id → rollup.id`.
+- `cmd_explorer_rows.charge_id` fill: **0.86% all-time / 2.48% trailing 365d.** Ramp
+  healthy: 0% before 2026-07-21, 70.2% on 07-21, 100% from 07-22 (~600–1,600 rows/day).
+  History permanently NULL (append-only, fingerprint dedup, no UPDATE grant) — ledger gate
+  ②c, now quantified.
+- B → census 69.9% (population difference, YTD vs census window); **C → census 100.0%
+  (proves shared identifier space)**; B → explorer_rows 1.1% — **STRUCTURAL, not ramp**:
+  B's population is unpaid claims, which have no payment postings by definition;
+  C → explorer_rows 36.6% (adjudicated claims).
+- **Consequence (ruled):** factor-3-style metrics are slice-level ratios permanently;
+  universe = B + C + rollup, valid only on the audit-roster ∩ `BXR_CUSTOMERS` set.
+
+### SUCCESS-empty race
+
+- Observed once in ~19 runs of B (~5%/call, tiny sample); 0/17 on the sweep. Prior art:
+  the 2026-07-02 explorer outage entry (S1 watch items above).
+- **Recording defect (code-confirmed, auditIngest.ts:238,345):** a SUCCESS-empty customer
+  increments `customers_processed` and touches none of the partial terms — a raced night
+  records `status='ok'`. Grace values in flight: library default 4; audit path
+  `CMD_AUDIT_EMPTY_GRACE||6`; the one observed race needed 10.
+
+### Projection delta vs the dead 46-col IP_HEADERS (pre-Charge/Debit ID comparison)
+
++14 net-new incl. Facility NPI, Claim Status, Claim Date Entered, Claim First Billed Date;
+−19 dropped incl. **Last Public FU Note (the open PHI free-text watch item — its removal is
+a PHI-surface REDUCTION)**, Claim Diag 4/5/6 (+POA +descriptions), Claim Admit Code.
+Positional parser: the old header set cannot read the new projection.
+
+### Rulings on this record (Alec, 2026-07-29)
+
+1. **Ingest identity = OPTION B**: upsert on charge_debit_id, with the ruled transition —
+   one-time fingerprint-match backfill of `charge_debit_id` onto legacy rows, then flip the
+   conflict key. Key shape (cmd_customer_id column vs `(business_entity_id,
+   charge_debit_id)` after verifying global uniqueness) decided at the 0073 gate.
+2. **Status history: current-state-only.** The append-only status-transition table is
+   FUTURE WORK — recorded here, not built. (Today's `ON CONFLICT … DO UPDATE` already
+   overwrites status history; option B loses only the accidental near-dupe "history" of
+   stranded identity-field changes.)
+3. **HOUSTON_MH / TREAT_CO: the two-run probes were never actually run.** Probes ordered
+   (read-only, shapes-only) before any roster/rule-file change.
+
+### Outstanding (recorded, does NOT gate the consolidated-ingest build)
+
+- **Item 4 a–d — the B+C+rollup slice reconciliation** remains OWED; it gates the Qualify
+  aggregate-view session, not this build.
+- Future work (ledger note only, per ruling 2): append-only status-transition table if the
+  desk ever needs status HISTORY rather than current state.
+
+---
+
+## Consolidated audit ingest — BUILT + CUTOVER (2026-07-29 overnight build session)
+
+Alec delegated gate authority to senior-engineer discipline for this session ("no HOLDs
+for me"); every gate decision below is recorded as it would have been presented.
+
+### What shipped
+
+- **Migration 0073 APPLIED** (see the reservation table above): the five audit_row
+  columns, the `(business_entity_id, charge_debit_id)` partial-unique identity key,
+  `audit_ingest_run.customers_empty`, scope CHECK widened to `CONSOLIDATED`.
+- **Consolidated ingest** (`src/billingAudit/auditConsolidated.ts` + `mapConsolidatedRow`
+  in `auditRowMap.ts` + `handleBillingAuditConsolidatedCron` in `app/lib/server.ts` +
+  `/api/cron/billing-audit-consolidated`): per customer B (`10148376`) then C
+  (`10148377`) sequentially; 42-col locked positional headers (modifier order 1/**3**/2);
+  scope TOB-derived per row, unrecognised prefix → row QUARANTINED + run `partial`;
+  rev-code partition logged as a consistency counter; every row stamped
+  `cmd_customer_id` + `source_filter_id`.
+- **Identity (ruling B, 2026-07-29):** upsert on the key; legacy NULL-key rows
+  fingerprint-matched (primary recipe or the legacy-IP variant with modifier-2 blank)
+  and stamped THROUGH the old fingerprint arbiter; `row_fingerprint` is WRITE-ONCE; the
+  fingerprint UNIQUE constraint is retained while the OP pair soaks (it is the OP cron's
+  arbiter) — a same-fingerprint-different-key row quarantines (`fingerprint_conflict`,
+  measured zero) until the decommission migration relaxes it.
+- **Honest run recording (item 6):** `customers_empty` counted on BOTH loops (OP too);
+  a SUCCESS-empty customer that has prior rows and is not allowlisted (WRC `10033951`)
+  → `customers_empty_unexpected` → run `partial`. "Prior-night rows > 0" implemented as
+  "has EVER landed rows" (`facility_code` existence probe) — equivalent seed on this
+  append-only current-state table, deliberately minimal. Grace untouched
+  (`CMD_AUDIT_EMPTY_GRACE || 6`; the one observed race needed 10 — recorded, not tuned).
+- **Nightly shape:** 3 passes (02:40 / 03:10 / 03:40 UTC — clear of the 02:20 OP cron
+  on the shared one-report-at-a-time CMD partner session); each pass skips customers an
+  earlier CONSOLIDATED run finished today (UTC, read from `audit_ingest_run.per_customer`);
+  a pass with nothing left is a no-op that records no run row. The 17×2 sweep (~34
+  report runs ≈ 9–12 min) cannot fit one 300s invocation — that is WHY multi-pass.
+
+### OP-scope soak deferral (gate decision, recorded)
+
+While the OP pair (`10073210`/`10147817`) soaks, the consolidated ingest FETCHES,
+derives and counts OP-scope rows but does NOT write them
+(`CMD_AUDIT_CONSOLIDATED_OP_WRITE`, default off). Writing would (a) near-dupe ~14k OP
+rows — the two recipes necessarily fingerprint OP rows differently (units populated vs
+never-hashed) so the backfill cannot match them, and (b) let two feeds co-write the same
+charges, contaminating the very soak we are grading. Consequence accepted: C's OP-scope
+balance-due-patient rows also defer until cutover. Fetch-side reconciliation still
+proves the feed on all 17 customers nightly.
+
+### IP cutover + the 07-16 → 07-29 gap
+
+The dead IP pair (`10064394`/`10147816`, INVALID CRITERIA nightly since 2026-07-17) is
+DECOMMISSIONED: vercel.json entry removed, route deleted, `handleBillingAuditIpCron`
+removed; `audit_ingest_run` history intact. **The YTD B refetch closes the IP gap at
+current-status grain on the first consolidated run** (under identity B the backfill
+stamps matching legacy rows and inserts the rest — no near-dupes); the 13 dead nights'
+intermediate status flips are unrecoverable (current-state-only model). Corrected
+Phase-3 status: soak restarts on the CONSOLIDATED feed; the OP pair decommissions after
+5 clean consolidated nights (then: drop the fingerprint UNIQUE → plain index, flip
+CMD_AUDIT_CONSOLIDATED_OP_WRITE, delete OP route/config, one-time cleanup of any
+OP-sourced NULL-key twin rows).
+
+### ⚠ OPERATOR STEP REQUIRED BEFORE THE FIRST SCHEDULED RUN (02:40 UTC)
+
+Session tooling denied `vercel env add` (correct per the permission gate) — **Alec must
+set, in Vercel Production: `CMD_AUDIT_CONSOLIDATED_REPORT_ID=10064394`,
+`CMD_AUDIT_CONSOLIDATED_FILTER_B_ID=10148376`, `CMD_AUDIT_CONSOLIDATED_FILTER_C_ID=10148377`**,
+then redeploy (env changes are inert until a deploy). Until then the consolidated cron
+500s LOUDLY at compose time (env-var-only, no fallback — the safe failure); the OP cron
+is unaffected. `CMD_AUDIT_CONSOLIDATED_OP_WRITE` stays UNSET during the soak.
+
+### Feed-population caveat (carry for every audit_row consumer)
+
+B excludes PAID and BALANCE-DUE-PATIENT; C covers balance-due-patient (~90d). A claim
+that transitions to PAID simply STOPS APPEARING — its audit_row keeps its last non-paid
+status forever. audit_row is a WORKLIST, not claim-state truth for paid-ness (the
+collections plane owns payments). This predates the consolidated feed but the YTD
+refetch makes it systematic; do not "fix" it by inferring PAID from absence.
+
+### First consolidated run — EXECUTED MANUALLY, RECONCILED (2026-07-29 09:39–09:45 UTC)
+
+17/17 customers, failed 0, header-mismatch 0; **B fetched counts matched the recon sweep
+with ZERO drift on all 16 data-bearing customers** (469/532/740/443/223/842/268/420/117/
+749/791/980/235/481/676/259); WRC expected-empty (allowlisted, run status ok). Fetched
+11,092 (IP 4,779 / OP 6,012 deferred); **inserted 960 + stamped 3,819 legacy IP rows,
+identity_conflicts 0, rev_code_inconsistent 0** — DB-verified post-run: IP keyed rows =
+4,779 exactly (= 960+3,819), OP keyed = 0 (deferral held), 14,539 legacy OP + 7,742
+legacy IP rows untouched at NULL key (not re-sent by B/C — resolved/paid statuses fell
+out of the feed population, expected). Run row recorded scope=CONSOLIDATED.
+
+**⚠ FINDING — 301 rows quarantined, ALL blank TOB, ALL OP-side customers = PROFESSIONAL
+CLAIMS (needs Alec's scope ruling).** Shapes-only probe (TREAT_TX B+C): every blank-TOB
+row is `Claim Type=Professional` with NO revenue code (CPTs 90853×97, 90837×4, 90791×2
+— group therapy/psychotherapy); every institutional row carries TOB+rev. Professional
+1500-form claims have no Type of Bill BY DEFINITION, so TOB derivation cannot scope them
+— the fail-loud quarantine worked exactly as ruled (counted, labelled, run marked
+partial; rows are NOT lost — B/C refetch nightly and they ingest the moment a rule
+lands). Note some professional claims DO carry a TOB (19 on TREAT_TX B) and scope fine.
+**Decision owed: scope rule for TOB-less professional claims** (candidates: OP-by-claim-type,
+or a professional third scope — not invented overnight). The DoD's "zero quarantined
+rows on today's data" is therefore NOT met — deliberately, honestly.
+
+**Dated correction to the recon record above:** B's `Claim Date Entered` spans back to
+**2025-04-24** live (min over the ingested IP slice), not ">= Jan 1" — that observation
+was CAMH-sample-only. B's real window criterion is looser than YTD-entered or varies by
+customer; CMD-side inspection still owed.
+
+### Probe results (2026-07-29, clean CMD window, CAMH positive control 469×42 green)
+
+HOUSTON_MH `10035976` → INVALID CRITERIA · TREAT_CO `10035974` → INVALID CRITERIA ·
+TREAT_VA `10036125` → INVALID CRITERIA (new customer; filter not shared CMD-side; also
+absent from the 2026-07-03 `core.cmd_customer` seed). Rule file
+(`.claude/rules/billing-audit.md`) updated to the ruled reality the same session.
+
+### ⚠ CMD-QUIET-WINDOW RULE (learned the hard way this session)
+
+Any ad-hoc CMD API work (probes, manual ingest runs) must run in the **:41–:59 window**.
+The CMD partner session runs ONE report at a time and `cmdRunReport` returns an
+already-running report's identifier — a probe fired during the :00/:15/:30/:35 cron
+ticks can consume a production cron's results poll. Demonstrated live: this session's
+first probe batch ran through the :30/:35 ticks and its CAMH positive control falsely
+read SUCCESS-empty (the same control returned 469 rows in the :41–:59 window minutes
+later). The 02:40/03:10/03:40 consolidated schedule respects the same constraint.
+
+**Separate WATCH ITEM (morning): indigo-census customer `10033859` (INTO THE LIGHT)
+began failing `fetch_failed` at 08:35 UTC 2026-07-29** — initially suspected as this
+session's probe collision, but the 09:35 recurrence happened with NO ad-hoc CMD work
+running (identical ~22s-then-fail signature), so it looks upstream/CMD-side (same class
+as the recurring `10036020`/`10036030` failures). If it persists into the day, inspect
+that customer's census filter CMD-side; the census cron correctly logs one clean error
+row per invocation and re-pulls hourly.

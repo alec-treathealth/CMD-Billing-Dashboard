@@ -371,7 +371,8 @@ function fakeIngestRunDb(): { db: unknown; inserts: { sql: string; params: unkno
 
 const CLEAN_STATS = {
   scope: 'IP' as const, customers_total: 8, customers_processed: 8, customers_failed: 0,
-  customers_header_mismatch: 0, customers_skipped_budget: 0, rows_fetched: 11500, mapped_valid: 11500,
+  customers_header_mismatch: 0, customers_skipped_budget: 0, customers_empty: 0,
+  customers_empty_unexpected: 0, rows_fetched: 11500, mapped_valid: 11500,
   skipped: 0, skipped_by_label: {}, inserted: 200, updated: 11300, all_rows_skipped_customers: 0,
   per_customer: [{ customer_id: 'C1', facility: 'CAMH', outcome: 'processed' as const, rows_inserted: 1, rows_updated: 2 }],
 };
