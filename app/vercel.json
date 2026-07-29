@@ -9,8 +9,10 @@
     { "path": "/api/cron/refresh-charge-rollup", "schedule": "45 * * * *" },
     { "path": "/api/cron/vob-sync", "schedule": "17 9 * * *" },
     { "path": "/api/cron/cms-hcpcs-sync", "schedule": "0 6 2 1,4,7,10 *" },
-    { "path": "/api/cron/billing-audit-ip", "schedule": "10 2 * * *" },
     { "path": "/api/cron/billing-audit-op", "schedule": "20 2 * * *" },
+    { "path": "/api/cron/billing-audit-consolidated", "schedule": "40 2 * * *" },
+    { "path": "/api/cron/billing-audit-consolidated", "schedule": "10 3 * * *" },
+    { "path": "/api/cron/billing-audit-consolidated", "schedule": "40 3 * * *" },
     { "path": "/api/cron/billing-code-decisions", "schedule": "40 2 * * *" }
   ]
 }
