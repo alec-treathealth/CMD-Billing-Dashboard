@@ -2464,8 +2464,25 @@ Threat model is low — an authenticated CMD endpoint, not user-supplied upload 
 was deliberately NOT treated as a blocker. The fix is a decompressed-bytes cap, and the
 place to add it is `read835Files` / `readZipEntries` the next time either is open.
 
-**Not probed live.** No CMD call was made for this work — the contract above is from
-documentation, and the client is covered by hermetic tests only
-(`test/cmd835Transport.test.ts`). Whether the CMD user behind `CMD_API_USERNAME` actually
-carries the Payment role is **unconfirmed** (see the 401/403 path, which now says so in
-its error message rather than reading as a network fault).
+**VERIFIED LIVE 2026-07-30 08:41 UTC** (supersedes this section's original "not probed
+live" note). One dry-run, read-only pull inside the :41–:59 quiet window — customer
+`10030911` (NASH, BXR), date `2026-07-24`, no `--commit`, no DB connection opened:
+
+```
+pulls 1 (failed 0, empty 0, zero-file zips 0, budget-skipped 0);
+files 2, claims 3, adjustments 16, remarks 16; in-set dups 0; inserted 0
+```
+
+Four things this settles at once: (1) the single `date` param is **accepted** — no 4xx;
+(2) the response was **application/zip**, i.e. the documented success shape; (3) the
+`{ kind: 'zip' }` branch fired and magic-byte classification held against a real body —
+`readZipEntries` found 2 entries, both ISA-prefixed (`zero-file zips 0`); and (4) the CMD
+user behind `CMD_API_USERNAME` **does carry the Payment role** — a 403 would have said so
+explicitly. The rewritten contract is verified end to end.
+
+**Still unproven by this pull:** that CMD *honours* `date` rather than defaulting. A
+single successful pull cannot distinguish "returned 2026-07-24" from "ignored the param
+and returned its default day" — the old `startDate`/`endDate` bug had exactly that
+signature. Closing it costs one more call: pull a date that should be empty (e.g. Sunday
+`2026-07-26`) and confirm the sentinel/`empty` branch fires. That would prove the date is
+honoured AND exercise the empty path live.
