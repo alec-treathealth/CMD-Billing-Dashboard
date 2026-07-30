@@ -332,6 +332,16 @@ export async function insertEra835Rows(
   }
 }
 
+/**
+ * One pull's outcome, as the ingest loop needs to see it. `empty` (CMD's documented
+ * no-ERAs response) and `files: []` (a real ZIP holding no ISA segments) are BOTH
+ * zero-row outcomes but mean different things, so they cannot share a representation
+ * — that collapse is exactly what hid the original silent failure.
+ */
+export type Era835DownloadResult =
+  | { kind: 'empty' }
+  | { kind: 'files'; files: Era835File[] };
+
 export interface Era835IngestDeps {
   /** CMD customer accounts to pull (one report per customer per date). Each carries its
    *  own businessEntityId — the tenant is resolved PER CUSTOMER, never a global constant. */
@@ -340,7 +350,7 @@ export interface Era835IngestDeps {
   dates: string[];
   ingestedBy: string;
   /** Download + normalize the 835 file(s) for ONE customer + date. Injected. */
-  download: (customerId: string, date: string) => Promise<Era835File[]>;
+  download: (customerId: string, date: string) => Promise<Era835DownloadResult>;
   /** Least-privilege writer pool; omit for DRY-RUN (no DB connection). */
   writeDb?: Db;
   /** Monotonic clock for the wall-clock guard (tests). Default Date.now. */
@@ -356,6 +366,22 @@ export interface Era835IngestStats {
   pulls_attempted: number;
   pulls_failed: number;
   pulls_skipped_budget: number;
+  /**
+   * CMD returned its documented "no 835 ERA files were received on that date"
+   * response. A NORMAL outcome, tracked separately so a quiet day is visibly distinct
+   * from a failed one — the distinction the old transport could not express. If this
+   * equals pulls_attempted across a whole run, suspect the credential's Payment role
+   * or the date axis (ERA receipt date, not payment date) before concluding there was
+   * genuinely no business.
+   */
+  pulls_empty: number;
+  /**
+   * CMD returned a REAL ZIP that parsed to zero 835 files — an archive with no ISA
+   * segment in it. Distinct from pulls_empty on purpose: this should be ~never, so a
+   * non-zero value is a SIGNAL (an archive of manifests/readmes, an encoding change, a
+   * truncated download), not noise. It is deliberately not an error — see read835Files.
+   */
+  pulls_zero_files: number;
   files_parsed: number;
   claims: number;
   adjustments_mapped: number;
@@ -381,6 +407,8 @@ export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835Ing
     pulls_attempted: 0,
     pulls_failed: 0,
     pulls_skipped_budget: 0,
+    pulls_empty: 0,
+    pulls_zero_files: 0,
     files_parsed: 0,
     claims: 0,
     adjustments_mapped: 0,
@@ -398,7 +426,13 @@ export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835Ing
       }
       stats.pulls_attempted += 1;
       try {
-        const files = await deps.download(customer.customerId, date);
+        const result = await deps.download(customer.customerId, date);
+        // Two different zero-row outcomes, counted apart. 'empty' is CMD saying there
+        // were no ERAs (normal). A real ZIP that yields no ISA files is a SIGNAL that
+        // should be ~never — neither is a failure, and neither may be silently merged.
+        const files = result.kind === 'empty' ? [] : result.files;
+        if (result.kind === 'empty') stats.pulls_empty += 1;
+        else if (files.length === 0) stats.pulls_zero_files += 1;
         const byFingerprint = new Map<string, Era835IngestRow>();
         for (const file of files) {
           const parsed = parseEra835(file.edi);
@@ -439,7 +473,8 @@ export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835Ing
 
   console.log(
     `era-835 ingest: dates ${stats.dates}, customers ${stats.customers}; ` +
-      `pulls ${stats.pulls_attempted} (failed ${stats.pulls_failed}, budget-skipped ${stats.pulls_skipped_budget}); ` +
+      `pulls ${stats.pulls_attempted} (failed ${stats.pulls_failed}, empty ${stats.pulls_empty}, ` +
+      `zero-file zips ${stats.pulls_zero_files}, budget-skipped ${stats.pulls_skipped_budget}); ` +
       `files ${stats.files_parsed}, claims ${stats.claims}, adjustments ${stats.adjustments_mapped}, ` +
       `remarks ${stats.remark_codes_seen}; in-set dups ${stats.in_set_duplicates}; inserted ${stats.rows_inserted}`,
   );
@@ -572,9 +607,14 @@ async function main(): Promise<void> {
       `customers ${customers.length}`,
   );
 
-  const download = async (cid: string, date: string): Promise<Era835File[]> => {
-    const bytes = await cmdDownload835(cmdEra835ConfigFor(cid), { date });
-    return read835Files(bytes, `${cid}_${date}`);
+  // Transport now distinguishes a genuinely quiet day from an undecodable body: 'empty'
+  // is the documented no-ERAs response and maps to zero files, while anything
+  // unrecognized throws a typed CmdEra835Error and is counted as a FAILED pull rather
+  // than a silent zero. Do not collapse the two back together.
+  const download = async (cid: string, date: string): Promise<Era835DownloadResult> => {
+    const res = await cmdDownload835(cmdEra835ConfigFor(cid), { date });
+    if (res.kind === 'empty') return { kind: 'empty' };
+    return { kind: 'files', files: read835Files(res.bytes, `${cid}_${date}`) };
   };
 
   const writeDb = commit ? makeClient(writerUrl!) : undefined;

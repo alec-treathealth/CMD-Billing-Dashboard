@@ -2425,3 +2425,47 @@ running (identical ~22s-then-fail signature), so it looks upstream/CMD-side (sam
 as the recurring `10036020`/`10036030` failures). If it persists into the day, inspect
 that customer's census filter CMD-side; the census cron correctly logs one clean error
 row per invocation and re-pulls hourly.
+
+## CMD 835 download — contract caveats (2026-07-30, documented contract, no live probe)
+
+Verified the `download-835` wire contract against CMD's documentation and rewrote the
+client (`src/collections/cmd835.ts`) around it. The endpoint is
+`GET /v1/customer/{customer}/payment/download-835?date=YYYY-MM-DD` — **one** `date`
+param (the previous `startDate`/`endDate` pair was a guess; CMD ignores unknown params,
+so it silently served the wrong day). Success is `application/zip`; a day with no ERAs
+is **HTTP 200** with the text body "No 835 ERA files were received on that date." — not
+204, not 404. Requires the CMD **Payment** role.
+
+Two caveats below have operational consequences beyond the client. The code comment in
+`cmd835.ts` points here rather than duplicating them.
+
+**(a) `date` is the ERA RECEIPT date at CMD, not BPR16.** It is a different axis from
+the stored `payment_date`: a remit *received* on the 3rd can carry a payment date of the
+1st. Consequence for scheduling — **a daily cron must re-pull a 3–5 day lookback, not
+just yesterday**, because ERAs land late and a strict yesterday-only pull will
+permanently miss them. Re-pulling is free: `era835Fingerprint` dedups at the row level
+and `insertEra835Rows` is idempotent, so an overlapping window costs bandwidth and
+nothing else. Do not "optimize" the lookback away.
+
+**(b) The endpoint excludes deleted 835s and returns a full-day snapshot.** It reports
+the *current* set of non-deleted ERAs for that date, not an append-only log. So a
+re-pull of the same date can legitimately return **fewer** files than the first pull, if
+someone deleted a remit at CMD in between. Because `staging.era_835_adjustment` is
+append-only, rows from a since-deleted 835 stay in our table forever. This is a
+**reconciliation caveat, not a bug**: our totals for a historical date can exceed what
+CMD would hand back today. Anyone diffing our stored 835 rows against a fresh CMD pull
+must expect our side to be a superset, and must not "fix" the gap by deleting rows.
+
+**(c) The byte cap bounds the COMPRESSED download only — decompression is still
+unbounded.** `MAX_RESPONSE_BYTES` (32 MiB, `cmd835.ts`) is enforced while streaming the
+response, but `readZipEntries` then inflates without a ceiling, so a well-formed ~900 KB
+ZIP that expands to several GB passes the cap and dies in memory instead of throwing.
+Threat model is low — an authenticated CMD endpoint, not user-supplied upload — so this
+was deliberately NOT treated as a blocker. The fix is a decompressed-bytes cap, and the
+place to add it is `read835Files` / `readZipEntries` the next time either is open.
+
+**Not probed live.** No CMD call was made for this work — the contract above is from
+documentation, and the client is covered by hermetic tests only
+(`test/cmd835Transport.test.ts`). Whether the CMD user behind `CMD_API_USERNAME` actually
+carries the Payment role is **unconfirmed** (see the 401/403 path, which now says so in
+its error message rather than reading as a network fault).
