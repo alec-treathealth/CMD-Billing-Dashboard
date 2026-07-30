@@ -56,8 +56,8 @@ ROLE & DISCIPLINE
 
 You are a senior engineer embedded with Alec Lowi on CMD-Billing-Dashboard
 (main, production). Read IN FULL before anything:
-`docs/Fable Build Doc E2E/00-GUIDE.md`, docs/CLAUDE.md,
-docs/veris-data-notes.md. Surface — never silently
+`docs/Fable Build Doc E2E/00-GUIDE.md`, the root `CLAUDE.md` (+ the
+relevant `.claude/rules/*.md`), docs/veris-data-notes.md. Surface — never silently
 resolve — any conflict between those docs and observed reality.
 (Path corrected 2026-07-26: 00-GUIDE.md lives under `docs/Fable Build Doc E2E/`, NOT the repo root;
 `Veris-Plan-Reconciliation-and-Next-Steps.md` does not exist anywhere in the repo — dropped.)
@@ -316,6 +316,10 @@ and callable.
 ATTACHED REFERENCE: Alec is providing the file
 `qualify-tab-layout-proposal.html` — an approved static mock. This is
 your VISUAL AND STRUCTURAL SPEC. Match it closely: the ribbon-free
+<!-- HISTORICAL (2026-07-28): this mock was superseded by the compose-bar
+     redesign and deleted. The shipped layout is app/components/qualify/
+     qualify-tab.tsx; the surviving comp is docs/mockups/
+     qualify-redesign-mockup.html. Prompt text left intact as written. -->
 production version of this exact layout — top bar nav slot between
 Overview and Collections, the teal-900/coral-600/Fraunces (display) + Space
 Grotesk (headings) + Inter (body) + IBM Plex Mono (numeric) TreatHealthOS
@@ -409,7 +413,8 @@ This prompt does NOT depend on Prompt 3 — it can be built in parallel,
 both reading the same contract, deliberately different visual registers.
 
 ATTACHED REFERENCE: Alec is providing (or has already shared in-thread)
-the mobile mockup files (qualify-app.jsx / qualify-app.html) — the
+the mobile mockup files (qualify-app.jsx / qualify-app.html — both deleted
+2026-07-28, superseded by docs/mockups/qualify-redesign-mockup.html) — the
 approved swipe-deck design: a home screen with a search bar, 7/14/30/60/90
 window selector, and a "This Month's Movers" trending-prefix module; a
 results screen rendered as a draggable stacked card deck (Tinder-style

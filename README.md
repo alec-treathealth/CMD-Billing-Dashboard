@@ -20,10 +20,13 @@ run as a least-privilege reader role; TLS is verify-full.
 Live scale: **320,116 claims (2024–2026)** plus a collections domain (~58k raw
 rows). Deployed to Vercel.
 
-> **Read [`docs/CLAUDE.md`](docs/CLAUDE.md) before working on this project** — it
-> is the single source of truth (architecture, PHI boundary, schema, query
-> library, API contracts, phase history, known issues). The TreatHealthOS visual
-> system is in [`docs/design-system.md`](docs/design-system.md).
+> **Read [`CLAUDE.md`](CLAUDE.md) before working on this project** — the standing
+> rules, the verification gate, and an index of where everything lives. Deeper
+> per-area detail lives in [`.claude/rules/`](.claude/rules/) and loads
+> automatically when you touch the matching files. The live tribal-knowledge
+> ledger is [`docs/veris-data-notes.md`](docs/veris-data-notes.md) (it wins on
+> conflicts); the visual system is
+> [`docs/design-system.md`](docs/design-system.md).
 
 ## Architecture at a glance
 
@@ -50,10 +53,14 @@ This is a monorepo-style two-package repo:
   (`src/collections/`).
 - **`app/`** — Next.js 15 App Router app (TS, Tailwind, shadcn/ui, recharts) that
   imports the library from `../src` and is the production transport + UI on Vercel.
-- **`supabase/migrations/`** — `0001`–`0011` (claims schema, RLS + roles,
-  collections, materialized aggregates, VOB foundation).
+- **`supabase/migrations/`** — the product plane (`claims`, `collections`):
+  schema, RLS + roles, collections, materialized aggregates, VOB. Through `0071`.
+- **`SQL Schemas/`** — the separate Veris ML plane (`staging`, `ref`, `core`).
+  Through `020`. Never mix the two directories.
 - **`certs/supabase-ca.crt`** — public Supabase Root CA for verify-full TLS.
-- **`docs/`** — `CLAUDE.md` (project source of truth) + `design-system.md`.
+- **`.claude/rules/`** — path-scoped engineering rules Claude Code loads on demand.
+- **`docs/`** — `veris-data-notes.md` (live ledger), `design-system.md`, build
+  docs, and `archive/` (frozen historical context).
 
 ## Tech stack
 
@@ -84,21 +91,28 @@ export $(cat .env | grep -v '^#' | grep -v '^$' | xargs)
 # root library
 npm run ingest      # load the 3 Google Sheets -> claims_raw + claims (idempotent)
 npm run dbcheck     # DB smoke (counts only)
-npm test            # hermetic suite — 171 pass, 0 fail
+npm test            # hermetic suite — 697 pass, 0 fail
 npm run typecheck   # tsc --noEmit (clean)
 
 # app
 export SUPABASE_CA_PEM="$(cat certs/supabase-ca.crt)"   # required locally
 cd app && npm install && npm run dev                     # http://localhost:3000
-cd app && npm run typecheck && npm run build
+cd app && npm test && npm run typecheck && npm run build
 ```
+
+Local `app` dev also needs `app/.env.local` (`INDEX_HMAC_KEY` + the DB URLs) —
+`next dev` does not read the repo-root `.env`.
 
 ## Verification & conventions
 
-- `npm test` → 171 pass / 0 fail; both typechecks clean; `app` build succeeds.
+- Full gate before any commit: `npm test` (697/0), `npm run typecheck`,
+  `cd app && npm test` (127/0), `cd app && npm run typecheck`, `cd app && npm run build`.
+- Root `tsc` is stricter than app `tsc` (`noUncheckedIndexedAccess`) — a change
+  can be green in `app/` and red at the root. Run both.
+- `next build` is the only step that catches bundler-only failures.
 - Tests are hermetic, no live LLM/DB in the suite.
   `src/liveProbe.ts` is the separate, manually-run live probe.
-- Run the suite and both typechecks before any commit; hold before push/deploy.
+- Hold before any push, deploy, or migration apply.
 - The standing PHI/compliance invariants and the "do not regress" list are in
-  [`docs/CLAUDE.md`](docs/CLAUDE.md) §2 — follow them exactly.
+  [`CLAUDE.md`](CLAUDE.md) — follow them exactly.
 </content>

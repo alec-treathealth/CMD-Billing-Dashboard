@@ -9,6 +9,7 @@
 --   (FOR SELECT USING(true)) policy, mirroring ref.remittance_code (already
 --   gated in 001). This closes the master plan's original 0013_rls_remediation
 --   thread AND the get_advisors/veris-runbook.md §50 "RLS disabled" flag.
+--   (veris-runbook.md moved to docs/archive/veris-runbook.md on 2026-07-28.)
 --
 -- SCOPE — all 12 ungated ref tables (ref.remittance_code already gated, excluded):
 --   claims_admin-owned (7): payer_alias, carc_code, rarc_code, cms_pfs_rate,

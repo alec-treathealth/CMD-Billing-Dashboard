@@ -34,10 +34,11 @@ npm-debug.log*
 .idea/
 .vscode/
 secrets/
-# Claude Code — keep shared config + hooks, ignore local-only overrides
+# Claude Code — keep shared config, hooks + project rules; ignore local-only overrides
 .claude/*
 !.claude/settings.json
 !.claude/hooks/
+!.claude/rules/
 .claude/settings.local.json
 
 # VOB ETL (etl/vob/) — Python + PHI-adjacent. PDFs/CSVs are PHI (patient VOB docs); loader.env

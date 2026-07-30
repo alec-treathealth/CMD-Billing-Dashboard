@@ -1,6 +1,8 @@
 /**
- * Qualify MOBILE bucket presentation (Prompt 4b) — PURE, client-safe, light-scheme, matching the
- * approved prototype (docs/mockups/qualify-swipe-list-light.html). Derives the bucket from
+ * Qualify MOBILE bucket presentation (Prompt 4b) — PURE, client-safe, light-scheme. The tints below
+ * originated in the light swipe-list prototype, which was DELETED 2026-07-28: the per-row swipe
+ * gesture it demonstrated was reverted (see swipe-row.tsx — the row is a plain tappable card again),
+ * so the mock no longer described shipped behaviour. The tints survived the revert. Derives the bucket from
  * `ratingBucket` (rating.ts — the ONE source of the 50/30 cutoffs, on the allowed%); this maps bucket →
  * the mobile tint / color / short label only. It does NOT re-derive the rating formula.
  *

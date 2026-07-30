@@ -100,7 +100,7 @@ corrupted data in production. Each was corrected:
 ## 4. Architecture-alignment decisions (why this differs from the draft)
 
 - **No `@supabase/supabase-js` service-role client.** Your compliance model
-  (`docs/CLAUDE.md` §2) forbids the service-role key / `claims_admin` on the app path.
+  (root `CLAUDE.md`, "Standing rules") forbids the service-role key / `claims_admin` on the app path.
   The sync writes as a **new least-privilege `code_intel_writer` role** over
   node-postgres with verify-full TLS, exactly like `cmd_rollup_writer` (0013). Reads use
   the existing `claims_reader` path + `PgExecutor`.

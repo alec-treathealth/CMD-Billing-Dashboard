@@ -13,7 +13,8 @@
  *
  * The GUC is transaction-local (`set_config(..., true)`), so it dies with the
  * transaction — nothing can leak to whichever session the pooler hands the
- * backend to next. This restores the veris-runbook §96 standard and replaces
+ * backend to next. This restores the veris-runbook §96 standard (the runbook is
+ * archived at docs/archive/veris-runbook.md as of 2026-07-28) and replaces
  * the session-scoped `set_config(..., false)` drift in veris_agent.ts /
  * hybrid_search.ts.
  *

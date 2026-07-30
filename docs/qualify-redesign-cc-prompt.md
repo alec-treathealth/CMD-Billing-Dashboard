@@ -9,7 +9,8 @@ before every commit. Never add a `Co-Authored-By: Claude` trailer.
 ## ROLE & DISCIPLINE
 
 You are a senior engineer embedded with Alec on CMD-Billing-Dashboard (main, production).
-Read IN FULL before touching anything: `docs/CLAUDE.md`, `docs/design-system.md`,
+Read IN FULL before touching anything: the root `CLAUDE.md` (+ `.claude/rules/qualify.md`),
+`docs/design-system.md`,
 `docs/qualify-build-series.md`, and the RULINGS section of this file.
 `docs/Fable Build Doc E2E/00-GUIDE.md` and `docs/veris-data-notes.md` are the standing
 operator / reconciliation guides — skim for conventions; they do NOT govern this Qualify
@@ -33,7 +34,7 @@ Non-negotiable (HIPAA / SOC 2 / OWASP, always on):
 
 `docs/mockups/qualify-redesign-mockup.html` is the approved comp (open it — desktop + mobile
 via the top toggle; fictional data only). Match its structure and feel, adapting field names
-to the real contract. It supersedes the older `qualify-tab-layout-proposal.html`.
+to the real contract. It supersedes the older `qualify-tab-layout-proposal.html` (deleted 2026-07-28).
 
 Canonical fonts (already in `tailwind.config.ts` / `globals.css`): **Inter** body ·
 **Space Grotesk** head · **Fraunces** display · **IBM Plex Mono** numeric. ("Hanken Grotesk"

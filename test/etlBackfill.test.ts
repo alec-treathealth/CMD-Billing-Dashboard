@@ -27,7 +27,7 @@ import {
 } from '../src/veris/etl_backfill.js';
 
 /**
- * The absolute four (docs/CLAUDE.md PHI denylist for staging.brain1_features)
+ * The absolute four (the CLAUDE.md PHI denylist for staging.brain1_features)
  * plus the wider set of PHI-bearing names in this schema. Matched as
  * whole-word, case-insensitive.
  */

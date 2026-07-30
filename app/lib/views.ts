@@ -4,8 +4,8 @@
  * A view selects WHICH business entity's data the overview renders. All three
  * views render the IDENTICAL UI — only the data scope differs. The view lives in
  * the URL (`?view=`), read server-side in the overview page (survives refresh,
- * shareable) — never in localStorage/cookies (CLAUDE.md §2: nothing app-state in
- * browser storage; also keeps it server-readable). The view param is non-PHI and
+ * shareable) — never in localStorage/cookies (CLAUDE.md standing rules: nothing
+ * app-state in browser storage; also keeps it server-readable). The view param is non-PHI and
  * is fine in the URL.
  *
  * This module is pure and side-effect-free: it holds no secrets, touches no DB,

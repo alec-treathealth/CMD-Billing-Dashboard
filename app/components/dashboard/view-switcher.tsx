@@ -11,7 +11,7 @@
  * returns null. The `allowedViews` prop comes from the server layout (the signed-in user's
  * RBAC entitlement); the dropdown lists only those, and hides entirely when the user is
  * entitled to a single view (nothing to switch). Reads the ACTIVE view from the URL, clamped
- * to the allowlist. No localStorage/cookies (CLAUDE.md §2); the param is non-PHI. This control
+ * to the allowlist. No localStorage/cookies (CLAUDE.md standing rules); the param is non-PHI. This control
  * never touches data or any auth gate — it only rewrites the URL (the page re-clamps + scopes).
  *
  * PRESENTATION: a custom brand-styled dropdown (not a native <select>), following the WAI-ARIA
