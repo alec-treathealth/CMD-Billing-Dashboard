@@ -92,14 +92,24 @@ export const OP_HEADERS = [
 ] as const;
 
 /**
- * CONSOLIDATED feed headers — report 10064394, filters B 10148376 / C 10148377 (identical
- * projections, recon record 2026-07-29). LOCKED positional list; Charge/Debit ID at
- * position 4 (index 3). ⚠ Modifier column order is 1, 3, 2 (indexes 26/27/28) — the
- * report really does emit them out of order; do not "fix" it. Claim Status [39] duplicates
- * Charge Status [14] (identical values, probe-verified) — [14] is the one we read.
- * Columns with no audit_row destination (Facility NPI, Facility Address 1, Claim PPS,
- * Charge Modifier 3, Occurrence/Condition codes, Claim Remarks 1–3) are validated
- * positionally but not stored — all were 0%-fill on the CAMH sample except NPI/address.
+ * CONSOLIDATED feed headers — report 10064394, filters B 10148376 / C 10148377
+ * (identical projections). This is the expected NAME SET (43 names), validated as a
+ * SET, not a sequence (Alec's ruling 2026-07-30): fail loud on any name added,
+ * dropped, or duplicated — ignore order. Rationale: the report is actively tuned
+ * upstream (two projection edits in ~30h: Charge/Debit ID inserted 07-29; Claim Admit
+ * Code inserted + the modifier trio moved 07-30) and each PURE REORDER cost a soak
+ * night under the old positional lock. This projection has NO duplicate column names,
+ * so set comparison is unambiguous — unlike the legacy OP report (duplicate "Charge
+ * Status"), which is exactly why the OP path STAYS positional.
+ *
+ * Cell reads resolve BY NAME against the ACTUAL file's header (resolveConsolidatedHeader
+ * builds the per-file name→index map), so a reordered file maps to identical values and
+ * an identical fingerprint. The order below is the canonical fixture/documentation
+ * order (as measured 2026-07-30), not a contract. Columns with no audit_row destination
+ * (Facility NPI, Facility Address 1, Claim Admit Code, Claim PPS, Charge Modifier 3,
+ * Occurrence/Condition codes, Claim Remarks 1–3) are validated as present, not stored.
+ * 'Claim Status' duplicates 'Charge Status' (identical values, probe-verified) —
+ * 'Charge Status' is the one we read.
  */
 export const CONSOLIDATED_HEADERS = [
   'Patient Full Name', 'Patient Birthday', 'Claim Primary Member ID', 'Charge/Debit ID',
@@ -107,10 +117,11 @@ export const CONSOLIDATED_HEADERS = [
   'Statement Covers From Date', 'Statement Covers To Date', 'Charge From Date',
   'Charge To Date', 'Charge CPT Code', 'Charge Billed Revenue Code', 'Charge Units',
   'Charge Status', 'Patient Admission Date',
-  'Claim Principal Diag', 'Claim Principal Diag POA',
+  'Claim Principal Diag', 'Claim Principal Diag POA', 'Claim Admit Code',
   'Claim Diag 2', 'Claim Diag 2 POA', 'Claim Diag 3', 'Claim Diag 3 POA',
+  'Charge Modifier 1', 'Charge Modifier 3', 'Charge Modifier 2',
   'Claim PPS', 'Primary Auth #', 'Claim Type', 'Charge Primary Payer Name',
-  'Charge Modifier 1', 'Charge Modifier 3', 'Charge Modifier 2', 'Charge Amount',
+  'Charge Amount',
   'Occurrence Code 1', 'Condition Code 1', 'Claim Remark 1', 'Claim Remark 2',
   'Claim Remark 3', 'Charge Claim ID', 'Charge Patient ID', 'Provider Full Name',
   'Office Name', 'Claim Status', 'Claim Date Entered', 'Claim First Billed Date',
@@ -120,16 +131,44 @@ export function expectedHeaders(scope: AuditScope): readonly string[] {
   return scope === 'IP' ? IP_HEADERS : OP_HEADERS;
 }
 
-/** Exact positional header check for the consolidated 42-col projection (labels only). */
+/**
+ * NAME-SET header guard + per-file index resolution (ruling 2026-07-30). One pass:
+ * validates the actual header is EXACTLY the expected 43-name set (any missing,
+ * unexpected, or duplicated name fails loud — labels only, column names are non-PHI)
+ * and, on success, returns the name→index map cell reads resolve through. Order is
+ * deliberately NOT checked — a pure reorder is a non-event.
+ */
+export function resolveConsolidatedHeader(
+  actual: readonly string[],
+): { ok: true; index: ReadonlyMap<string, number> } | { ok: false; mismatch: string } {
+  const index = new Map<string, number>();
+  const duplicates: string[] = [];
+  const unexpected: string[] = [];
+  const expected = new Set<string>(CONSOLIDATED_HEADERS);
+  for (let i = 0; i < actual.length; i++) {
+    const name = (actual[i] ?? '').trim();
+    if (index.has(name)) {
+      duplicates.push(name); // a duplicate makes name-resolution ambiguous — always fatal
+      continue;
+    }
+    index.set(name, i);
+    if (!expected.has(name)) unexpected.push(name);
+  }
+  const missing = [...expected].filter((n) => !index.has(n));
+  if (duplicates.length + unexpected.length + missing.length > 0) {
+    const parts: string[] = [];
+    if (missing.length > 0) parts.push(`missing [${missing.join(', ')}]`);
+    if (unexpected.length > 0) parts.push(`unexpected [${unexpected.join(', ')}]`);
+    if (duplicates.length > 0) parts.push(`duplicated [${duplicates.join(', ')}]`);
+    return { ok: false, mismatch: `header name-set mismatch: ${parts.join('; ')}` };
+  }
+  return { ok: true, index };
+}
+
+/** Thin wrapper kept for guard-only callers/tests: null = the name set matches. */
 export function consolidatedHeaderMismatch(actual: readonly string[]): string | null {
-  if (actual.length !== CONSOLIDATED_HEADERS.length) {
-    return `column count ${actual.length} != expected ${CONSOLIDATED_HEADERS.length}`;
-  }
-  for (let i = 0; i < CONSOLIDATED_HEADERS.length; i++) {
-    const got = (actual[i] ?? '').trim();
-    if (got !== CONSOLIDATED_HEADERS[i]) return `column ${i}: "${got}" != "${CONSOLIDATED_HEADERS[i]}"`;
-  }
-  return null;
+  const res = resolveConsolidatedHeader(actual);
+  return res.ok ? null : res.mismatch;
 }
 
 // --- TOB scope derivation (consolidated feed) ---------------------------------------
@@ -445,7 +484,7 @@ export function mapAuditRow(scope: AuditScope, row: string[]): AuditMapResult {
   };
 }
 
-// --- consolidated-feed mapping (report 10064394, filters B/C — 42 cols) --------------
+// --- consolidated-feed mapping (report 10064394, filters B/C — name-set validated) -----
 
 /** PlainAuditRow + the consolidated feed's identity + date columns. `legacy_fingerprint`
  *  is the OLD-IP-recipe variant (modifier_2 forced blank — the 46-col IP report had no
@@ -476,16 +515,21 @@ export type ConsolidatedMapResult =
    *  not PHI). */
   | { kind: 'quarantine'; label: string };
 
-/** Positional reader bound to the consolidated header list. */
-function ccell(row: string[], name: (typeof CONSOLIDATED_HEADERS)[number], dupIndex = 0): string {
-  let seen = 0;
-  for (let i = 0; i < CONSOLIDATED_HEADERS.length; i++) {
-    if (CONSOLIDATED_HEADERS[i] === name) {
-      if (seen === dupIndex) return row[i] ?? '';
-      seen++;
-    }
-  }
-  return '';
+/** The canonical name→index map (fixture order) — the default when no per-file index
+ *  is supplied (tests build rows in canonical order; the cron ALWAYS passes the
+ *  resolved per-file index from resolveConsolidatedHeader). */
+const CANONICAL_CONSOLIDATED_INDEX: ReadonlyMap<string, number> = new Map(
+  CONSOLIDATED_HEADERS.map((h, i) => [h, i]),
+);
+
+/** Name-resolved cell reader over the (per-file) header index. */
+function ccell(
+  row: string[],
+  index: ReadonlyMap<string, number>,
+  name: (typeof CONSOLIDATED_HEADERS)[number],
+): string {
+  const i = index.get(name);
+  return i === undefined ? '' : row[i] ?? '';
 }
 
 /**
@@ -513,20 +557,24 @@ export function mapConsolidatedRow(
    *  when the customer sits in exactly one roster, null otherwise. Used ONLY for the
    *  both-blank professional-claim fallback — never overrides a recognisable TOB. */
   rosterFallbackScope: AuditScope | null = null,
+  /** The per-file name→index map from resolveConsolidatedHeader — REQUIRED for real
+   *  report files (their column order is not a contract); defaults to the canonical
+   *  fixture order for tests that build rows against CONSOLIDATED_HEADERS. */
+  idx: ReadonlyMap<string, number> = CANONICAL_CONSOLIDATED_INDEX,
 ): ConsolidatedMapResult {
-  const claimId = opt(ccell(row, 'Charge Claim ID'));
+  const claimId = opt(ccell(row, idx, 'Charge Claim ID'));
   if (claimId === null) return { kind: 'skip', label: 'cmd_claim_id: missing' };
-  const patientId = opt(ccell(row, 'Charge Patient ID'));
+  const patientId = opt(ccell(row, idx, 'Charge Patient ID'));
   if (patientId === null) return { kind: 'skip', label: 'cmd_patient_id: missing' };
-  const patientName = opt(ccell(row, 'Patient Full Name'));
+  const patientName = opt(ccell(row, idx, 'Patient Full Name'));
   if (patientName === null) return { kind: 'skip', label: 'patient_name: missing' };
 
-  const chargeDebitId = opt(ccell(row, 'Charge/Debit ID'));
+  const chargeDebitId = opt(ccell(row, idx, 'Charge/Debit ID'));
   if (chargeDebitId === null) return { kind: 'skip', label: 'charge_debit_id: missing' };
   if (!/^\d+$/.test(chargeDebitId)) return { kind: 'skip', label: 'charge_debit_id: invalid' };
 
-  const tob = opt(ccell(row, 'Type of Bill'));
-  const revRaw = opt(ccell(row, 'Charge Billed Revenue Code'));
+  const tob = opt(ccell(row, idx, 'Type of Bill'));
+  const revRaw = opt(ccell(row, idx, 'Charge Billed Revenue Code'));
   const tobScope = deriveScopeFromTob(tob);
   let scope: AuditScope;
   let scopeSource: 'tob' | 'roster_fallback';
@@ -549,42 +597,42 @@ export function mapConsolidatedRow(
     return { kind: 'quarantine', label: `type_of_bill: unrecognized "${tob}"` };
   }
 
-  const chargeFrom = toIsoDate(ccell(row, 'Charge From Date'));
+  const chargeFrom = toIsoDate(ccell(row, idx, 'Charge From Date'));
   if (!chargeFrom.ok) return { kind: 'skip', label: 'charge_from_date: invalid' };
   if (chargeFrom.value === null) return { kind: 'skip', label: 'charge_from_date: missing' };
-  const chargeTo = toIsoDate(ccell(row, 'Charge To Date'));
+  const chargeTo = toIsoDate(ccell(row, idx, 'Charge To Date'));
   if (!chargeTo.ok) return { kind: 'skip', label: 'charge_to_date: invalid' };
-  const stmtFrom = toIsoDate(ccell(row, 'Statement Covers From Date'));
+  const stmtFrom = toIsoDate(ccell(row, idx, 'Statement Covers From Date'));
   if (!stmtFrom.ok) return { kind: 'skip', label: 'stmt_from_date: invalid' };
-  const stmtTo = toIsoDate(ccell(row, 'Statement Covers To Date'));
+  const stmtTo = toIsoDate(ccell(row, idx, 'Statement Covers To Date'));
   if (!stmtTo.ok) return { kind: 'skip', label: 'stmt_to_date: invalid' };
-  const admission = toIsoDate(ccell(row, 'Patient Admission Date'));
+  const admission = toIsoDate(ccell(row, idx, 'Patient Admission Date'));
   if (!admission.ok) return { kind: 'skip', label: 'admission_date: invalid' };
-  const dateEntered = toIsoDate(ccell(row, 'Claim Date Entered'));
+  const dateEntered = toIsoDate(ccell(row, idx, 'Claim Date Entered'));
   if (!dateEntered.ok) return { kind: 'skip', label: 'claim_date_entered: invalid' };
-  const firstBilled = toIsoDate(ccell(row, 'Claim First Billed Date'));
+  const firstBilled = toIsoDate(ccell(row, idx, 'Claim First Billed Date'));
   if (!firstBilled.ok) return { kind: 'skip', label: 'claim_first_billed_date: invalid' };
 
-  const cents = toCents(ccell(row, 'Charge Amount'));
+  const cents = toCents(ccell(row, idx, 'Charge Amount'));
   if (!cents.ok) return { kind: 'skip', label: 'charge_amount: invalid' };
   if (cents.value === null) return { kind: 'skip', label: 'charge_amount: missing' };
-  const units = toUnits(ccell(row, 'Charge Units'));
+  const units = toUnits(ccell(row, idx, 'Charge Units'));
   if (!units.ok) return { kind: 'skip', label: 'units: invalid' };
 
-  const cpt = opt(ccell(row, 'Charge CPT Code'));
+  const cpt = opt(ccell(row, idx, 'Charge CPT Code'));
   const rev = revRaw;
-  const mod1 = opt(ccell(row, 'Charge Modifier 1'));
-  const mod2 = opt(ccell(row, 'Charge Modifier 2')); // header index 28 — after Modifier 3; ccell resolves by NAME
-  const statusRaw = opt(ccell(row, 'Charge Status')); // [39] Claim Status is an identical duplicate
+  const mod1 = opt(ccell(row, idx, 'Charge Modifier 1'));
+  const mod2 = opt(ccell(row, idx, 'Charge Modifier 2')); // emitted after Modifier 3 (1/3/2 order); ccell resolves by NAME
+  const statusRaw = opt(ccell(row, idx, 'Charge Status')); // [39] Claim Status is an identical duplicate
   const status = normalizeStatus(statusRaw);
 
-  // Diagnoses: principal + 2–3 (+POA; the 42-col projection carries no descriptions).
+  // Diagnoses: principal + 2–3 (+POA; this projection carries no descriptions).
   const diagnoses: DiagEntry[] = [];
-  const principal = opt(ccell(row, 'Claim Principal Diag'));
-  if (principal !== null) diagnoses.push({ code: principal, poa: opt(ccell(row, 'Claim Principal Diag POA')), desc: null, pos: 1 });
+  const principal = opt(ccell(row, idx, 'Claim Principal Diag'));
+  if (principal !== null) diagnoses.push({ code: principal, poa: opt(ccell(row, idx, 'Claim Principal Diag POA')), desc: null, pos: 1 });
   for (const pos of [2, 3] as const) {
-    const code = opt(ccell(row, `Claim Diag ${pos}` as (typeof CONSOLIDATED_HEADERS)[number]));
-    if (code !== null) diagnoses.push({ code, poa: opt(ccell(row, `Claim Diag ${pos} POA` as (typeof CONSOLIDATED_HEADERS)[number])), desc: null, pos });
+    const code = opt(ccell(row, idx, `Claim Diag ${pos}` as (typeof CONSOLIDATED_HEADERS)[number]));
+    if (code !== null) diagnoses.push({ code, poa: opt(ccell(row, idx, `Claim Diag ${pos} POA` as (typeof CONSOLIDATED_HEADERS)[number])), desc: null, pos });
   }
 
   // LOCKED Option-B fingerprint — field order + normalization IDENTICAL to mapAuditRow.
@@ -605,14 +653,14 @@ export function mapConsolidatedRow(
       audit_scope: scope,
       cmd_claim_id: claimId,
       cmd_patient_id: patientId,
-      claim_type: opt(ccell(row, 'Claim Type')),
-      claim_frequency: null, //         not on the 42-col projection — never null-overwritten
-      office_name: opt(ccell(row, 'Office Name')),
-      provider_name: opt(ccell(row, 'Provider Full Name')),
-      billing_provider_id: null, //     not on the 42-col projection
+      claim_type: opt(ccell(row, idx, 'Claim Type')),
+      claim_frequency: null, //         not on this projection — never null-overwritten
+      office_name: opt(ccell(row, idx, 'Office Name')),
+      provider_name: opt(ccell(row, idx, 'Provider Full Name')),
+      billing_provider_id: null, //     not on this projection
       patient_name: patientName,
-      patient_dob: opt(ccell(row, 'Patient Birthday')),
-      member_id: opt(ccell(row, 'Claim Primary Member ID')),
+      patient_dob: opt(ccell(row, idx, 'Patient Birthday')),
+      member_id: opt(ccell(row, idx, 'Claim Primary Member ID')),
       charge_from_date: chargeFrom.value,
       charge_to_date: chargeTo.value,
       stmt_from_date: stmtFrom.value,
@@ -625,14 +673,14 @@ export function mapConsolidatedRow(
       units: units.value,
       type_of_bill: tob,
       charge_amount_cents: cents.value,
-      payer_name: opt(ccell(row, 'Charge Primary Payer Name')),
-      auth_number: opt(ccell(row, 'Primary Auth #')),
+      payer_name: opt(ccell(row, idx, 'Charge Primary Payer Name')),
+      auth_number: opt(ccell(row, idx, 'Primary Auth #')),
       charge_status_raw: statusRaw,
       status_category: status.category,
       status_payer: status.statusPayer,
       principal_diag: principal,
       diagnoses,
-      last_fu_note: null, //            not on the 42-col projection (PHI-surface reduction)
+      last_fu_note: null, //            not on this projection (PHI-surface reduction)
       row_fingerprint: fingerprint,
       charge_debit_id: chargeDebitId,
       claim_date_entered: dateEntered.value,

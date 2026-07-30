@@ -1,7 +1,7 @@
 /**
  * Hermetic tests for the CONSOLIDATED billing-audit ingest (report 10064394, filters
  * B/C — recon record 2026-07-29). No real DB, no network, no live keys; all PHI-shaped
- * values are SYNTHETIC. Covers: the 42-col locked header set (Charge/Debit ID at
+ * values are SYNTHETIC. Covers: the 43-name set-validated header (Charge/Debit ID at
  * position 4, modifier order 1/3/2), TOB scope derivation incl. the FAIL-LOUD
  * quarantine on an unrecognised prefix, the revenue-code corroboration check,
  * mapConsolidatedRow (required fields, new date columns, entered-never-billed),
@@ -24,8 +24,8 @@ const {
   AUDIT_IP_CUSTOMERS, AUDIT_OP_CUSTOMERS,
 } = await import('../src/billingAudit/auditConfig.js');
 const {
-  CONSOLIDATED_HEADERS, IP_HEADERS, consolidatedHeaderMismatch, deriveScopeFromTob,
-  revCodeConsistentWithScope, mapConsolidatedRow, mapAuditRow,
+  CONSOLIDATED_HEADERS, IP_HEADERS, consolidatedHeaderMismatch, resolveConsolidatedHeader,
+  deriveScopeFromTob, revCodeConsistentWithScope, mapConsolidatedRow, mapAuditRow,
 } = await import('../src/billingAudit/auditRowMap.js');
 const { classifyConsolidatedBatch, upsertConsolidatedRows, consolidatedAuditCron } =
   await import('../src/billingAudit/auditConsolidated.js');
@@ -34,7 +34,7 @@ const { BXR_ENTITY_ID } = await import('../src/tenants.js');
 
 // --- fixtures -------------------------------------------------------------------------
 
-/** Positional 42-col row from a name→value map (header names are unique on this feed). */
+/** Canonical-order row from a name→value map (header names are unique on this feed). */
 function cRow(values: Record<string, string>): string[] {
   return CONSOLIDATED_HEADERS.map((h) => values[h] ?? '');
 }
@@ -77,24 +77,59 @@ function toCsv(header: readonly string[], rows: string[][]): string {
 
 // --- header set -----------------------------------------------------------------------
 
-test('CONSOLIDATED_HEADERS: 42 columns, Charge/Debit ID at position 4, modifiers 1/3/2', () => {
-  assert.equal(CONSOLIDATED_HEADERS.length, 42);
+test('CONSOLIDATED_HEADERS: 43 columns (re-locked 2026-07-30), Charge/Debit ID at position 4, modifiers 1/3/2', () => {
+  assert.equal(CONSOLIDATED_HEADERS.length, 43);
   assert.equal(CONSOLIDATED_HEADERS[3], 'Charge/Debit ID');
-  assert.equal(CONSOLIDATED_HEADERS[26], 'Charge Modifier 1');
-  assert.equal(CONSOLIDATED_HEADERS[27], 'Charge Modifier 3'); // the report really emits 1,3,2
-  assert.equal(CONSOLIDATED_HEADERS[28], 'Charge Modifier 2');
-  assert.equal(CONSOLIDATED_HEADERS[40], 'Claim Date Entered');
-  assert.equal(CONSOLIDATED_HEADERS[41], 'Claim First Billed Date');
+  assert.equal(CONSOLIDATED_HEADERS[18], 'Claim Admit Code'); // inserted 2026-07-30 (validated, not stored)
+  assert.equal(CONSOLIDATED_HEADERS[23], 'Charge Modifier 1'); // trio moved 27-29 → 24-26 (1-based)
+  assert.equal(CONSOLIDATED_HEADERS[24], 'Charge Modifier 3'); // the report really emits 1,3,2
+  assert.equal(CONSOLIDATED_HEADERS[25], 'Charge Modifier 2');
+  assert.equal(CONSOLIDATED_HEADERS[41], 'Claim Date Entered');
+  assert.equal(CONSOLIDATED_HEADERS[42], 'Claim First Billed Date');
 });
 
-test('consolidatedHeaderMismatch: exact list passes; count and content mismatches name the column', () => {
+test('name-set guard: exact set passes; REORDER-ONLY input passes (ruling 2026-07-30)', () => {
   assert.equal(consolidatedHeaderMismatch([...CONSOLIDATED_HEADERS]), null);
-  assert.match(consolidatedHeaderMismatch([...CONSOLIDATED_HEADERS.slice(0, 41)])!, /column count 41 != expected 42/);
+  const reversed = [...CONSOLIDATED_HEADERS].reverse();
+  assert.equal(consolidatedHeaderMismatch(reversed), null);
   const swapped = [...CONSOLIDATED_HEADERS];
   [swapped[3], swapped[4]] = [swapped[4]!, swapped[3]!];
-  assert.match(consolidatedHeaderMismatch(swapped)!, /column 3:/);
-  // The dead 46-col IP set must NOT pass — the old projection cannot read this feed.
+  assert.equal(consolidatedHeaderMismatch(swapped), null); // a pure move is a non-event
+});
+
+test('name-set guard: an ADDED name fails loud and is named', () => {
+  const added = [...CONSOLIDATED_HEADERS, 'Brand New Column'];
+  assert.match(consolidatedHeaderMismatch(added)!, /unexpected \[Brand New Column\]/);
+});
+
+test('name-set guard: a DROPPED name fails loud and is named', () => {
+  const dropped = CONSOLIDATED_HEADERS.filter((h) => h !== 'Charge/Debit ID');
+  assert.match(consolidatedHeaderMismatch([...dropped])!, /missing \[Charge\/Debit ID\]/);
+});
+
+test('name-set guard: a DUPLICATED name fails loud (resolution would be ambiguous)', () => {
+  const duped = [...CONSOLIDATED_HEADERS.slice(0, 42), 'Charge Status'];
+  const msg = consolidatedHeaderMismatch(duped)!;
+  assert.match(msg, /duplicated \[Charge Status\]/);
+});
+
+test('name-set guard: the dead 46-col IP set still fails (different name set)', () => {
   assert.notEqual(consolidatedHeaderMismatch([...IP_HEADERS]), null);
+});
+
+test('reordered file maps to IDENTICAL values and fingerprint via the per-file index', () => {
+  const canonical = mapConsolidatedRow(cRow(C_BASE));
+  assert.ok(canonical.kind === 'ok');
+  // Reverse the whole file: header and row cells move together, as in a real reorder.
+  const revHeader = [...CONSOLIDATED_HEADERS].reverse();
+  const revRow = [...cRow(C_BASE)].reverse();
+  const resolved = resolveConsolidatedHeader(revHeader);
+  assert.ok(resolved.ok);
+  if (!resolved.ok || canonical.kind !== 'ok') return;
+  const remapped = mapConsolidatedRow(revRow, null, resolved.index);
+  assert.equal(remapped.kind, 'ok');
+  if (remapped.kind !== 'ok') return;
+  assert.deepEqual(remapped.row, canonical.row); // identical fields INCLUDING row_fingerprint
 });
 
 // --- TOB scope derivation (fail-loud) ---------------------------------------------------

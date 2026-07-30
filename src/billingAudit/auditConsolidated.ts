@@ -40,7 +40,7 @@ import type { Db } from '../collections/db.js';
 import type { CmdCustomerTarget } from '../collections/cmdExplorerCron.js';
 import { rosterScopeForCustomer, type AuditScope } from './auditConfig.js';
 import {
-  consolidatedHeaderMismatch,
+  resolveConsolidatedHeader,
   mapConsolidatedRow,
   parsePositionalCsv,
   type PlainConsolidatedRow,
@@ -67,7 +67,7 @@ const INSERT_COLS = [
   'source_filter_id', 'scope_source',
 ] as const;
 
-/** Columns re-asserted on conflict — everything the 42-col feed CARRIES (under key
+/** Columns re-asserted on conflict — everything the consolidated feed CARRIES (under key
  *  identity, formerly-stable fields like dates/codes/amount are assertable too), plus
  *  the 0073 columns. DELIBERATELY ABSENT: claim_frequency / billing_provider_id /
  *  last_fu_note (not on this projection — never null-overwrite legacy values) and
@@ -427,11 +427,15 @@ export async function consolidatedAuditCron(deps: ConsolidatedCronDeps): Promise
         let fetched = 0;
         for (const text of deps.zipToCsvTexts(zip)) {
           const parsed = parsePositionalCsv(text);
-          mismatch = consolidatedHeaderMismatch(parsed.header);
-          if (mismatch !== null) break; // reject the customer whole — never guess columns into PHI rows
+          // NAME-SET guard (ruling 2026-07-30): exact 43-name set, order ignored — a
+          // reorder is a non-event; any add/drop/duplicate rejects the customer whole
+          // (never guess columns into PHI rows). Cell reads resolve through the
+          // per-FILE index, so values land correctly whatever the column order.
+          const header = resolveConsolidatedHeader(parsed.header);
+          if (!header.ok) { mismatch = header.mismatch; break; }
           fetched += parsed.rows.length;
           for (const raw of parsed.rows) {
-            const result = mapConsolidatedRow(raw, rosterScope);
+            const result = mapConsolidatedRow(raw, rosterScope, header.index);
             if (result.kind === 'ok') {
               rows.push(result.row);
             } else if (result.kind === 'quarantine') {

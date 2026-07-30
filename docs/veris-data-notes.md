@@ -2122,6 +2122,24 @@ Claim PPS, Charge Modifier 1/2/3, Occurrence Code 1, Condition Code 1, Claim Rem
 Note the modifier column ORDER is 1, **3**, 2 (positions 27/28/29) — positional parsing must
 not assume 1/2/3.
 
+> ⚠ **DATED CORRECTION (2026-07-30): the projection changed again — now 43 columns.**
+> CMD-side edit overnight: `Claim Admit Code` INSERTED at position 19 (validated as
+> present, NOT stored — 0049 deliberately dropped it) and the modifier trio MOVED from
+> 27–29 to 24–26 (still 1/3/2 order); everything else order-preserved, nothing dropped.
+> The header guard rejected all 16 data-bearing customers whole on the 02:40/03:10/03:40
+> scheduled passes (runs `partial`, zero bad rows written — exactly its job).
+>
+> **RULING (Alec, 2026-07-30): the consolidated header guard is now a NAME-SET check,
+> not a positional lock** — fail loud on any name added, dropped, or duplicated; ignore
+> order (`resolveConsolidatedHeader`). A pure reorder is a non-event; cell reads resolve
+> through the per-FILE name→index map, so a reordered file maps to identical values and
+> an identical fingerprint (test-proven). Unambiguous here because this projection has
+> NO duplicate names — the legacy OP report (duplicate "Charge Status") is exactly why
+> the OP path STAYS positional. The 43-name canonical list in `CONSOLIDATED_HEADERS` is
+> fixture/documentation order, not a contract. The report is actively tuned upstream —
+> under the set guard only genuine adds/drops cost a night, and they name themselves in
+> the mismatch label.
+
 ### Key & grain
 
 - **Grain: one row per charge line.** CAMH B: 469 rows / 441 claims, one 29-line per-diem
