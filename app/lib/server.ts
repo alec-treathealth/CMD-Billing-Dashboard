@@ -168,6 +168,11 @@ import { aliasIndigoFacilityColumn } from '../../src/collections/cmdExplorer.js'
 import { decryptPhi, encryptPhi } from '../../src/collections/phiCrypto.js';
 import { cmdEra835ConfigFor, expandDateRange, runEra835Ingest } from '../../src/ingest/era_ingest.js';
 import { CmdEra835Error, cmdDownload835, read835Files } from '../../src/collections/cmd835.js';
+import {
+  eraUpcomingPayments,
+  mergeEraUpcoming,
+  type EraUpcomingSummary,
+} from '../../src/veris/era835Upcoming.js';
 import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
 import { refreshCmdPayerRollup } from '../../src/collections/cmdPayerRefresh.js';
 import { CMD_EXPLORER_CUSTOMERS, INDIGO_CUSTOMERS, BXR_CUSTOMERS, type CmdCustomer } from '../../src/collections/cmdCustomers.js';
@@ -800,6 +805,48 @@ export function handleIndigoCensusCron(req: {
     transformRows: aliasIndigoFacilityColumn,
   });
 }
+
+// --- ERA-confirmed upcoming payments (Overview tile, staging.era_835_payment) --------
+
+/**
+ * Dedicated claims_reader pool for the Veris/staging read path. A SECOND pool on
+ * purpose, not the shared PgExecutor: withTenant needs a RAW checked-out client (BEGIN →
+ * transaction-local GUC → queries on that same client — the Supavisor 6543 discipline),
+ * which PgExecutor deliberately does not hand out. Isolating it also means a saturated
+ * shared reader pool (the ~30s collections aggregates) cannot starve this read, and vice
+ * versa. Same verify-full TLS + timeouts via makeReaderPool; max 4, lazily connected.
+ */
+let cachedVerisReaderPool: Db | null = null;
+function verisReaderPool(): Db {
+  cachedVerisReaderPool ??= makeReaderPool(readerConnectionStringFromEnv());
+  return cachedVerisReaderPool;
+}
+
+/**
+ * ERA-confirmed upcoming payments for an ALREADY-CLAMPED entity scope (callers derive
+ * entityIds via viewEntityScope — never from raw client input). One withTenant read per
+ * entity (staging RLS is GUC-scoped, one tenant per transaction); Consolidated = the
+ * per-tenant results merged in exact integer cents. Fails closed on an empty scope.
+ *
+ * LIVE read, deliberately uncached: the table changes only when the 835 ingest writes
+ * (cron not yet scheduled), the read is two indexed aggregates over a small table, and
+ * no cron revalidates a tag for this surface yet — an unstable_cache entry here would
+ * serve stale money for an unbounded time after the first ingest lands.
+ */
+export async function getEraUpcomingPayments(entityIds: string[]): Promise<EraUpcomingSummary> {
+  if (entityIds.length === 0) {
+    // Mirrors assertEntityScope's posture: an empty scope must read NOTHING, loudly.
+    throw new Error('getEraUpcomingPayments: empty entity scope');
+  }
+  const parts: EraUpcomingSummary[] = [];
+  for (const id of entityIds) {
+    // Sequential on purpose: at most 2 entities, and each read is its own short
+    // transaction on the small shared pool — parallelism buys nothing here.
+    parts.push(await eraUpcomingPayments(verisReaderPool(), id));
+  }
+  return mergeEraUpcoming(parts);
+}
+export type { EraUpcomingSummary, EraUpcomingGroup } from '../../src/veris/era835Upcoming.js';
 
 // --- 835 ERA ingest cron (staging.era_835_payment + era_835_adjustment) --------------
 

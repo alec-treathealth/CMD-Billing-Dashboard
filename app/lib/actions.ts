@@ -83,6 +83,8 @@ import {
   type AuditPivot,
   type AuditRevealedPatient,
   type AuditRevealedRow,
+  getEraUpcomingPayments,
+  type EraUpcomingSummary,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
 import { dashboardAccess } from '@/lib/access';
@@ -468,6 +470,26 @@ export async function loadCmdPayerMonth(
   if (!entityIds) return { ok: false };
   try {
     return { ok: true, data: await payerCmdMonth(year, month, entityIds) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * ERA-confirmed upcoming payments (Overview tile) — staging.era_835_payment only, the
+ * payment-grain table where sum(BPR02) is safe by construction. `view` is a display hint;
+ * the tenant scope is clamped SERVER-SIDE to the session's entitlement via viewEntityScope
+ * (fail-closed: no principal / empty entitlement → { ok: false }, never a wide default).
+ * Non-PHI payload: payer, date, method, amounts, counts. The unquantified_remits count
+ * rides along under 013's read-path contract — the UI must surface it when > 0.
+ */
+export async function loadEraUpcoming(
+  view?: DashboardView,
+): Promise<DashboardResult<EraUpcomingSummary>> {
+  try {
+    const entityIds = await viewEntityScope(view);
+    if (!entityIds || entityIds.length === 0) return { ok: false };
+    return { ok: true, data: await getEraUpcomingPayments(entityIds) };
   } catch {
     return { ok: false };
   }
