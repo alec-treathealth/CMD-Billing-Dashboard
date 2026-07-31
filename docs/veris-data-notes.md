@@ -872,8 +872,61 @@ Verified-exact semantics, now canonical in `SQL Schemas/020_etl_backfill.sql` +
 
 The master plan's "0012_etl_backfill" landed as **020** (S1 mapping rule: 0012 takes
 the next free Veris number; 012 was taken/live). Artifacts:
-`SQL Schemas/020_etl_backfill.sql` + `020_etl_backfill_rollback.sql`. Next Veris
-number: **021**.
+`SQL Schemas/020_etl_backfill.sql` + `020_etl_backfill_rollback.sql`. ~~Next Veris
+number: **021**.~~ **021 is now TAKEN + APPLIED** (`021_era_835_member_id_bidx`, see
+below) — **next free Veris number: 022.** Checked before claiming 021 (2026-07-31):
+origin/main high-water 020, all local branches (`git ls-tree` scan for
+`SQL Schemas/021*` → nothing), all 4 worktrees, untracked files in the main checkout,
+and this ledger. Note the numbered reservation table at ~:1144 is **dashboard-sequence
+only**; Veris numbering is tracked here.
+
+### 021 — `staging.era_835_adjustment.member_id_bidx` APPLIED LIVE (2026-07-31)
+
+Closes the deferral 013 recorded. **Landed while the window was open**: the table is
+EMPTY and its ingest cron is built but UNSCHEDULED, so this was a pure `ALTER ADD COLUMN`
+with **no backfill**. The moment the cron writes rows it would have become an HMAC
+backfill over PHI ciphertext (the 0037 / `cmdBlindIndexBackfill.ts` pattern).
+
+**The normalization hazard — resolved, and the resolution is now enforced by test.** Two
+functions named `normalizeMemberId` exist with different semantics:
+`src/collections/normalize.ts` strips ALL internal whitespace + ALL leading hyphens;
+`src/normalize.ts` keeps internal whitespace and strips ONE leading hyphen (`'AB 123'` →
+`AB123` vs `AB 123`). Every live `member_id_bidx` token is minted by
+`src/collections/blindIndex.ts`, which imports the **collections** one. The 835 ingest
+routes through `era835MemberIdBidx()` → `blindIndexesForRowSafe` → `blindIndex.ts`, never
+a re-implemented HMAC. Ingest-**safe** on purpose: a missing `INDEX_HMAC_KEY` yields NULL
+rather than failing the money-path ingest (contrast `LIBSODIUM_KEY`, which throws —
+storing PHI is not optional).
+
+> **PIN TEST, mutation-verified.** `test/era835.test.ts` asserts the 835 token is
+> byte-identical to `memberIdBlindIndex()` for whitespace- and hyphen-bearing inputs,
+> plus an **anti-vacuity guard** (the two normalizers genuinely diverge on the fixtures)
+> and a **discriminator** (a token over the wrong normalization does NOT match). Proven
+> to have teeth: deliberately swapping in the wrong normalizer + a hand-rolled HMAC
+> **fails 7 tests**, including both byte-match pins. Restored → 28/28 green.
+
+**Grants: NONE, resolved from precedent rather than fresh judgement.** 0036 (the
+add-columns migration) contains **zero** grant statements — a new column inherits the
+table's table-level grants. Verified post-apply: `claims_reader` can SELECT the new
+column and `cmd_rollup_writer` can INSERT it, both via inheritance, with **no new
+statements**. 0037's `GRANT UPDATE(bidx…)` existed only to let a one-shot backfill write
+pre-0036 rows; no pre-existing rows here, so it is deliberately not reproduced and 013's
+append-only posture holds (`any_UPDATE_grant` = 0). `cmd_rollup_writer`'s COLUMN-level
+SELECT stays **`row_fingerprint` only** — it exists for the ON CONFLICT arbiter and the
+writer never reads the token back.
+
+**Index deviates from 0036 deliberately**: `(business_entity_id, member_id_bidx)`,
+tenant-LEADING per the 018 rule, because this table's RLS is GUC-based. 0036's
+single-column bidx index is right for `cmd_explorer_rows`, whose RLS qual is `true`
+(tenant scoping applied in the app layer), where a leading tenant column buys nothing.
+
+Post-apply verification green: column `text` / nullable; index
+`btree (business_entity_id, member_id_bidx)`; owner `claims_admin`; RLS on; 3 policies
+unchanged; row count **0**; table grants exactly `claims_reader/SELECT` +
+`cmd_rollup_writer/INSERT`. Artifacts: `SQL Schemas/021_era_835_member_id_bidx.sql` +
+`_rollback.sql` (rollback drops index then column; no data-loss gate — the tokens are
+derived from `member_id_enc`, which it does not touch, so they are re-computable under
+the same key).
 
 ### 020 — APPLIED + LOADER RUN + CONSERVATION GATE GREEN (2026-07-06)
 

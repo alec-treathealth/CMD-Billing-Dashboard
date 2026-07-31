@@ -52,6 +52,7 @@ import { readFileSync } from 'node:fs';
 import { ALL_CMD_CUSTOMERS, type CmdCustomer } from '../collections/cmdCustomers.js';
 import { CmdEra835Error, cmdDownload835, read835Files, type CmdEra835Config, type Era835File } from '../collections/cmd835.js';
 import { encryptPhi, fingerprintRow } from '../collections/phiCrypto.js';
+import { blindIndexesForRowSafe } from '../collections/blindIndex.js';
 import { makeClient, type Db } from '../collections/db.js';
 import { parseEra835, type Era835Claim, type Era835Transaction } from './era835Parser.js';
 
@@ -163,7 +164,7 @@ const INSERT_COLS = [
   'era_control_number', 'payment_method', 'payment_date',
   'patient_control_number', 'payer_claim_control_number', 'claim_status_code', 'claim_charge_amount',
   'claim_paid_amount', 'patient_responsibility_amount', 'claim_filing_indicator',
-  'patient_name_enc', 'member_id_enc',
+  'patient_name_enc', 'member_id_enc', 'member_id_bidx',
   'service_line_number', 'procedure_code', 'line_charge_amount', 'line_paid_amount', 'line_units',
   'service_date', 'line_item_control_number',
   'adjustment_index', 'cas_level', 'group_code', 'carc_code', 'carc_type', 'adjustment_amount', 'adjustment_quantity',
@@ -473,6 +474,29 @@ export function mapTransactionsToRows(
   return mapTransactions(transactions, ctx, skips).flatMap((t) => t.adjustments);
 }
 
+/**
+ * Member-id BLIND INDEX for one 835 row (migration 021).
+ *
+ * Routes through src/collections/blindIndex.ts — the ONE place live member_id_bidx tokens
+ * are minted anywhere in this codebase. NEVER re-implement the HMAC here, and never
+ * normalize the value locally: blindIndex.ts normalizes via src/collections/normalize.ts,
+ * which strips ALL internal whitespace and ALL leading hyphens, whereas the same-named
+ * normalizeMemberId in src/normalize.ts keeps internal whitespace and strips ONE leading
+ * hyphen ('AB 123' → 'AB123' vs 'AB 123'). A token over the wrong normalization is a
+ * valid-looking 64-hex string that silently never matches the collections-side bidx — a
+ * zero-row join with no error. test/era835.test.ts pins byte-equality across both paths.
+ *
+ * INGEST-SAFE by construction (blindIndexesForRowSafe): a missing/invalid INDEX_HMAC_KEY
+ * yields null rather than throwing, so a misconfigured SEARCH key can never break the
+ * MONEY-path ingest — the same posture cmd_explorer's ingest takes. Rows simply are not
+ * member-searchable until the key is set and a backfill runs. (Note LIBSODIUM_KEY is
+ * different: encryptPhi throws, and the cron probes it up front, because storing PHI is
+ * not optional.) The 835 carries no group number, so groupNumber is null.
+ */
+export function era835MemberIdBidx(memberId: string | null): string | null {
+  return blindIndexesForRowSafe(memberId, null).member_id_bidx;
+}
+
 /** Assemble one payment row's positional params (PAYMENT_INSERT_COLS order). No PHI,
  *  so nothing to encrypt and no async work. */
 function buildPaymentParams(row: Era835PaymentRow, ingestedBy: string): unknown[] {
@@ -500,7 +524,7 @@ async function buildInsertParams(
     row.era_control_number, row.payment_method, row.payment_date,
     row.patient_control_number, row.payer_claim_control_number, row.claim_status_code, row.claim_charge_amount,
     row.claim_paid_amount, row.patient_responsibility_amount, row.claim_filing_indicator,
-    patient, member,
+    patient, member, era835MemberIdBidx(row.member_id),
     row.service_line_number, row.procedure_code, row.line_charge_amount, row.line_paid_amount, row.line_units,
     row.service_date, row.line_item_control_number,
     row.adjustment_index, row.cas_level, row.group_code, row.carc_code, row.carc_type,

@@ -10,6 +10,10 @@ import assert from 'node:assert/strict';
 // module load. If that ever becomes a load-time read, this must move to a dynamic
 // `await import()` (which is exactly why billingAudit.test.ts uses one).
 process.env.LIBSODIUM_KEY = 'b'.repeat(64);
+// Throwaway blind-index key, DISTINCT from LIBSODIUM_KEY above — key separation is the
+// whole point of INDEX_HMAC_KEY, and reusing one value in tests would quietly normalize
+// the wrong habit. blindIndex.ts reads it lazily inside getKey(), so placement is safe.
+process.env.INDEX_HMAC_KEY = 'c'.repeat(64);
 
 import {
   detectDelimiters,
@@ -18,6 +22,7 @@ import {
 } from '../src/ingest/era835Parser.js';
 import {
   era835Fingerprint,
+  era835MemberIdBidx,
   era835PaymentFingerprint,
   expandDateRange,
   insertEra835Transactions,
@@ -570,4 +575,102 @@ test('expandDateRange yields inclusive ISO days', () => {
   assert.deepEqual(expandDateRange('2026-01-01', '2026-01-03'), ['2026-01-01', '2026-01-02', '2026-01-03']);
   assert.deepEqual(expandDateRange('2026-06-30', '2026-06-30'), ['2026-06-30']);
   assert.throws(() => expandDateRange('2026-01-03', '2026-01-01'), /on or after/);
+});
+
+// =============================================================================
+// member_id_bidx PIN TEST (migration 021) — the gate that must not be weak
+// =============================================================================
+// TWO functions named normalizeMemberId exist with DIFFERENT semantics:
+//   src/collections/normalize.ts → strips ALL internal whitespace + ALL leading hyphens
+//   src/normalize.ts            → KEEPS internal whitespace, strips ONE leading hyphen
+// Every LIVE member_id_bidx token is minted by src/collections/blindIndex.ts, which imports
+// the COLLECTIONS one. If the 835 ingest ever normalizes with the other, it emits
+// valid-looking 64-hex tokens that NEVER match the collections-side index: a zero-row join
+// with no error and no diagnostic. These tests are what make that unshippable.
+
+const { createHmac } = await import('node:crypto');
+const { memberIdBlindIndex } = await import('../src/collections/blindIndex.js');
+const { normalizeMemberId: collectionsNormalize } = await import('../src/collections/normalize.js');
+const { normalizeMemberId: queriesNormalize } = await import('../src/normalize.js');
+
+/** Inputs chosen for exactly one reason: they are where the two normalizers DIVERGE. */
+const DIVERGENT_MEMBER_IDS = [
+  'AB 123', //      internal whitespace  → collections 'AB123' vs queries 'AB 123'
+  '-XYZ789', //     ONE leading hyphen   → both strip it (control for the case below)
+  '--XYZ789', //    TWO leading hyphens  → collections 'XYZ789' vs queries '-XYZ789'
+  '  A B  C ', //   whitespace everywhere
+  '- QR 456', //    hyphen AND whitespace, the compound case
+];
+
+test('PIN: the two normalizeMemberId implementations REALLY diverge on these inputs', () => {
+  // Anti-vacuity guard. If this fails, the divergence has been resolved upstream and the
+  // byte-match test below has stopped discriminating — do not just delete it; re-derive
+  // which normalizer is canonical and re-pin against that.
+  const diverging = DIVERGENT_MEMBER_IDS.filter(
+    (raw) => collectionsNormalize(raw).norm !== queriesNormalize(raw).norm,
+  );
+  assert.ok(
+    diverging.length >= 3,
+    `expected the fixtures to expose real divergence; only ${diverging.length} differ`,
+  );
+  // Spell out the headline case so the failure message is self-explanatory.
+  assert.equal(collectionsNormalize('AB 123').norm, 'AB123');
+  assert.equal(queriesNormalize('AB 123').norm, 'AB 123');
+});
+
+test('PIN: era835MemberIdBidx is BYTE-IDENTICAL to the collections blind-index path', () => {
+  for (const raw of DIVERGENT_MEMBER_IDS) {
+    assert.equal(
+      era835MemberIdBidx(raw),
+      memberIdBlindIndex(raw),
+      `835 token must byte-match the collections token for ${JSON.stringify(raw)}`,
+    );
+  }
+  // A token really was produced (not two matching nulls — that would pass vacuously).
+  for (const raw of DIVERGENT_MEMBER_IDS) {
+    assert.match(era835MemberIdBidx(raw) ?? '', /^[0-9a-f]{64}$/);
+  }
+});
+
+test('PIN: a token built over the WRONG normalizer does NOT match — the test discriminates', () => {
+  // Proof the assertion above has teeth: HMAC the queries-plane normalization with the same
+  // key and show it differs for the divergent inputs. If someone swaps the import in
+  // era_ingest.ts, the byte-match test fails rather than silently passing.
+  const key = Buffer.from(process.env.INDEX_HMAC_KEY!, 'hex');
+  for (const raw of DIVERGENT_MEMBER_IDS) {
+    const wrongNorm = queriesNormalize(raw).norm;
+    if (wrongNorm === null || wrongNorm === collectionsNormalize(raw).norm) continue;
+    const wrongToken = createHmac('sha256', key).update(wrongNorm, 'utf8').digest('hex');
+    assert.notEqual(
+      era835MemberIdBidx(raw),
+      wrongToken,
+      `${JSON.stringify(raw)}: the 835 token must NOT equal the wrong-normalizer token`,
+    );
+  }
+});
+
+test('PIN: equal member ids share a token; different ones do not (blind-index invariant)', () => {
+  assert.equal(era835MemberIdBidx('MEM123'), era835MemberIdBidx('mem123'), 'case-insensitive');
+  assert.equal(era835MemberIdBidx('MEM123'), era835MemberIdBidx(' MEM123 '), 'trim-insensitive');
+  assert.notEqual(era835MemberIdBidx('MEM123'), era835MemberIdBidx('MEM124'));
+});
+
+test('era835MemberIdBidx: absent member id yields null, never a token over empty string', () => {
+  assert.equal(era835MemberIdBidx(null), null);
+  assert.equal(era835MemberIdBidx(''), null);
+  assert.equal(era835MemberIdBidx('   '), null);
+});
+
+test('era835MemberIdBidx is INGEST-SAFE: a missing INDEX_HMAC_KEY yields null, never a throw', () => {
+  // A misconfigured SEARCH key must never break the MONEY-path ingest (defect-2 lesson:
+  // never let a secondary concern drop remittance rows). Contrast LIBSODIUM_KEY, which
+  // DOES throw — storing PHI is not optional.
+  const saved = process.env.INDEX_HMAC_KEY;
+  try {
+    delete process.env.INDEX_HMAC_KEY;
+    assert.equal(era835MemberIdBidx('MEM123'), null, 'null token, not an exception');
+  } finally {
+    if (saved === undefined) delete process.env.INDEX_HMAC_KEY;
+    else process.env.INDEX_HMAC_KEY = saved;
+  }
 });
