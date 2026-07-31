@@ -2577,7 +2577,14 @@ Four things this settles at once: (1) the single `date` param is **accepted** �
 `{ kind: 'zip' }` branch fired and magic-byte classification held against a real body —
 `readZipEntries` found 2 entries, both ISA-prefixed (`zero-file zips 0`); and (4) the CMD
 user behind `CMD_API_USERNAME` **does carry the Payment role** — a 403 would have said so
-explicitly. The rewritten contract is verified end to end.
+explicitly. ~~The rewritten contract is verified end to end.~~
+
+> **CORRECTION 2026-07-31 — "verified end to end" IS OVERSTATED. Do not rely on it as
+> originally written.** Only the ZIP (has-files) path has been verified against live CMD.
+> **The empty-day path has never been exercised successfully** — not by this pull, and not
+> by either probe run since. See "CMD 835 probe — failure-mode findings (2026-07-31)"
+> at the end of this file, items 3 and 4. The empty-vs-failure split built and committed in
+> `c412535` is therefore only half-verified.
 
 **Still unproven by this pull:** that CMD *honours* `date` rather than defaulting. A
 single successful pull cannot distinguish "returned 2026-07-24" from "ignored the param
@@ -2585,3 +2592,87 @@ and returned its default day" — the old `startDate`/`endDate` bug had exactly 
 signature. Closing it costs one more call: pull a date that should be empty (e.g. Sunday
 `2026-07-26`) and confirm the sentinel/`empty` branch fires. That would prove the date is
 honoured AND exercise the empty path live.
+
+## CMD 835 probe — failure-mode findings (2026-07-31, save-state, no fixes applied)
+
+Two live probe runs of `scripts/probe-era-coverage.ts` (throwaway, untracked, read-only —
+no DB writes, no schema change). Save-state only: **nothing here has been fixed.** Facts as
+observed; open questions marked as open.
+
+### 1. Throttle theory is DEAD — root cause of both failure episodes is UNKNOWN
+
+| Run | Roster | Pacing | Failures | Outcome |
+|---|---|---|---|---|
+| 2026-07-30 20:41 | 47 customers | ~3.5 req/sec | **30%** (60/196) | hard 401, aborted |
+| 2026-07-31 00:41 | 15 BXR | ~0.55 req/sec (6x gentler) | **42%** (25/60) | no 401, completed 60/60 |
+
+**The failure rate went UP with six-times-gentler pacing.** This rules out rate limiting as
+the explanation for either night's failures. **Do not re-introduce "throttling" as an assumed
+root cause in any future prompt or comment without new evidence — it was tested and
+falsified.**
+
+### 2. BLOCKING: the probe's `failed` counter has no per-status/error-code breakdown
+
+42% of tonight's pulls are unexplained and this is the only way to find out what they are.
+This is no longer a hygiene gap. **It must be the first thing fixed next session, before any
+further live run.**
+
+### 3. SUSPECTED INSTRUMENT BUG, UNCONFIRMED — empty-day sentinel matcher
+
+The empty-day sentinel matcher (in the `cmd835` transport — **the same code path as
+production `era_ingest`**) may be misclassifying genuine no-ERA responses as failures.
+
+Evidence: 60 pulls across 15 facilities over 4 weekdays produced **`empty-day 0`** —
+implausible if the sentinel worked. **NOT YET VERIFIED.** Needs one pull against a date
+confirmed to have no ERAs, cross-checked with the per-code breakdown from item 2 once it
+exists.
+
+### 4. IF ITEM 3 CONFIRMS, THIS AFFECTS PRODUCTION, NOT JUST THE PROBE
+
+The empty-vs-failure split was built and committed in `c412535` and described in this
+ledger as "verified end to end". **That claim is now overstated and has been corrected
+in place** in the "CMD 835 download — contract caveats" section above. Only the ZIP
+(has-files) path is verified against live CMD; the empty path has never been exercised
+successfully.
+
+**Documentation was fixed first, deliberately — the code has NOT been changed.** Fix the
+claim so it stops being wrong; fix the code once diagnosed.
+
+### 5. FRCA and TBH — 4/4 pulls failed for both, zero data across the entire run
+
+Different in kind from the other 13 BXR facilities, which all returned at least some data.
+**Do not assume this shares a root cause with the general 42% failure rate** — treat as a
+possible separate structural issue (customer-ID mapping, alias resolution, deactivated
+account) until the per-code breakdown shows otherwise.
+
+Next session: check **FRCA's customer-ID mapping specifically** against the CMD roster
+config. FRCA is already flagged as "classified OP, kept distinct from collections' TREAT_TX
+merge" — a plausible place for an alias/ID mismatch to hide.
+
+### 6. DO NOT compute a coverage rate from tonight's data
+
+The saved `daily_collections` gross covers **07-21..27**. Tonight's run's BPR16 values span
+**07-16..08-04** — a different, wider, not-overlapping-enough window. Any ratio between the
+two would compare mismatched periods and misstate coverage. A real coverage rate requires a
+re-run with matching windows, **after items 1–5 are resolved**.
+
+### 7. The demonstrated feature value is REAL and independent of the above bugs
+
+**$72,986.79 in upcoming ACH payments (BPR16 2026-08-03 / 08-04)** was correctly identified,
+non-suppressed, with single-claim rows flagged via a claims-count column rather than hidden.
+This proves the underlying approach — **BPR16-keyed, claims-count-flagged** — works once the
+instrument is trustworthy. **Do not discard this result.** It is evidence the design is
+right, separate from whether the failure/coverage numbers are trustworthy yet.
+
+### 8. NEW OPEN THREAD, NOT YET SCOPED — a 5th CMD-facing cron
+
+Any production cron that eventually pulls 835s for the Overview "upcoming payments" tile
+must run in the same **:41–:59 quiet window** as the existing four CMD-facing crons
+(`cmd-explorer` :00, `cmd-census` :15, `indigo-explorer` :30, `indigo-census` :35), on
+`CMD_API_USERNAME`, without colliding with them. Raised explicitly by Alec — the dashboard
+tile needs to work "in parallel with my other crons feeding paid claims".
+
+This is a scheduling/design question, separate from and downstream of the coverage work.
+**Do not scope this cron until the coverage rate is known AND the failure-rate mystery
+(items 1–2) is resolved** — a 5th CMD-facing cron should not be designed against an
+instrument that is currently misreporting its own failure modes.
