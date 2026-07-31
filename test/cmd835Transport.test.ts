@@ -8,9 +8,12 @@
  * What these lock:
  *   1) exactly ONE `date` query param reaches the wire — the old startDate/endDate pair
  *      was ignored by CMD, which silently served the wrong day,
- *   2) the documented empty-day 200 is classified as `empty`, NOT as an error,
- *   3) an HTTP 200 whose body is neither a ZIP nor that sentinel THROWS instead of
- *      masquerading as a quiet day (the actual bug),
+ *   2) a quiet day is classified `empty` by EXACT sha256 against KNOWN_EMPTY_DAY_DIGESTS
+ *      — never by prose. The original prose matcher matched a DOCUMENTED sentence CMD
+ *      does not send, so every quiet day counted as a hard failure (found 2026-07-31),
+ *   3) an HTTP 200 whose body is neither a ZIP nor an ALLOWLISTED digest THROWS instead
+ *      of masquerading as a quiet day — including a body that reads exactly like a
+ *      quiet-day message, which is the anti-silent-swallow guarantee,
  *   4) every thrown error is PHI-safe — endpoint label + status + shape, never body,
  *      URL, or credentials,
  *   5) read835Files still returns [] rather than throwing on unparseable content, so
@@ -22,7 +25,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CmdEra835Error,
+  KNOWN_EMPTY_DAY_DIGESTS,
   MAX_RESPONSE_BYTES,
+  bodyDigest,
   classifyBodyShape,
   cmdDownload835,
   read835Files,
@@ -31,6 +36,12 @@ import {
 import { runEra835Ingest, type Era835DownloadResult } from '../src/ingest/era_ingest.js';
 import type { CmdCustomer } from '../src/collections/cmdCustomers.js';
 
+/**
+ * The DOCUMENTED no-data wording. As of 2026-07-31 this is NOT classified as empty: CMD
+ * never actually sends it, and classification is by exact digest. It is kept as the
+ * ideal anti-silent-swallow fixture — a body that reads exactly like a quiet day and
+ * still must fail, because its digest is not allowlisted.
+ */
 const EMPTY_BODY = 'No 835 ERA files were received on that date.';
 
 /** A minimal STORED-mode ZIP. The reader ignores CRC, so the fixture leaves it zero. */
@@ -141,20 +152,27 @@ function stubFetch(reply: () => StubReply) {
   return { urls, impl };
 }
 
-function cfg(fetchImpl: typeof fetch, maxBytes?: number): CmdEra835Config {
+function cfg(
+  fetchImpl: typeof fetch,
+  extra?: number | Partial<CmdEra835Config>,
+): CmdEra835Config {
+  const overrides: Partial<CmdEra835Config> =
+    extra === undefined ? {} : typeof extra === 'number' ? { maxBytes: extra } : extra;
   return {
     baseUrl: 'https://webapi.example.test',
     customerId: '10025030',
     auth: { kind: 'basic', username: 'u', password: 'p' },
     fetchImpl,
-    ...(maxBytes === undefined ? {} : { maxBytes }),
+    ...overrides,
   };
 }
 
 // --- 1. the wire contract ----------------------------------------------------
 
 test('cmdDownload835 sends exactly one `date` param — never startDate/endDate', async () => {
-  const { urls, impl } = stubFetch(() => ({ body: EMPTY_BODY }));
+  // Body is a real ZIP so the call SUCCEEDS: this test is about the query string, and
+  // EMPTY_BODY is no longer a success case (its digest is not allowlisted — see §2).
+  const { urls, impl } = stubFetch(() => ({ body: makeZip([{ name: 'a.835', body: ISA_EDI }]) }));
   await cmdDownload835(cfg(impl), { date: '2026-03-04' });
 
   assert.equal(urls.length, 1);
@@ -179,25 +197,86 @@ test('cmdDownload835 rejects a non-ISO date before opening a connection', async 
   assert.equal(urls.length, 0, 'a malformed date must never reach the wire');
 });
 
-// --- 2. the empty day is NOT an error ---------------------------------------
+// --- 2. the empty day is NOT an error — DIGEST-ANCHORED ---------------------
+// Rewritten 2026-07-31. These previously asserted that the DOCUMENTED prose classifies
+// as `empty`. CMD does not send that wording — its live no-data body is worded
+// differently — so the prose matcher matched nothing real and EVERY QUIET DAY counted as
+// a hard failure. Classification is now by exact sha256 against KNOWN_EMPTY_DAY_DIGESTS,
+// and the prose survives only as a diagnostic flag.
 
-test('cmdDownload835 classifies the documented empty-day 200 as `empty`', async () => {
-  const { impl } = stubFetch(() => ({ status: 200, body: EMPTY_BODY }));
-  assert.deepEqual(await cmdDownload835(cfg(impl), { date: '2026-03-04' }), { kind: 'empty' });
+test('the observed production empty-day digest is allowlisted (locks the seed value)', () => {
+  // Observed 2026-07-31: 44-byte body, byte-identical across FRCA 10032340 + TBH 10029105
+  // over 2026-07-28..31 (8/8 calls, one digest). If this constant is ever edited, the
+  // live quiet-day path breaks silently-loudly (every quiet day starts failing), so the
+  // value is pinned here.
+  assert.ok(
+    KNOWN_EMPTY_DAY_DIGESTS.has('83b3fc6a77ef99a73263d6b1632b4e05edaf32197cc60327ef057e951728f290'),
+    'the empirically observed CMD no-data digest must stay allowlisted',
+  );
 });
 
-test('cmdDownload835 tolerates casing/whitespace drift in the empty-day sentinel', async () => {
-  for (const body of [
-    'no 835 era files were received on that date.',
-    '  No 835 ERA files were received on that date.  ',
-    'No 835 ERA files were received\n on that date.',
-    'NO 835 ERA FILES WERE RECEIVED ON THAT DATE',
-  ]) {
-    const { impl } = stubFetch(() => ({ body }));
-    assert.deepEqual(
-      await cmdDownload835(cfg(impl), { date: '2026-03-04' }),
-      { kind: 'empty' },
-      `should read as empty: ${JSON.stringify(body)}`,
+test('cmdDownload835 classifies an ALLOWLISTED digest as `empty`, not as a failure', async () => {
+  // THE PATH THAT HAD NEVER BEEN EXERCISED. The production digest's preimage is
+  // deliberately not stored anywhere (zero-disclosure), so the allowlist is injected.
+  const body = 'CMD no-data body stand-in — any bytes; the DIGEST is what decides.';
+  const { impl } = stubFetch(() => ({ status: 200, body }));
+  const res = await cmdDownload835(
+    cfg(impl, { knownEmptyDayDigests: new Set([bodyDigest(Buffer.from(body, 'utf8'))]) }),
+    { date: '2026-03-04' },
+  );
+  assert.deepEqual(res, { kind: 'empty' });
+});
+
+test('bodyDigest is stable: identical bytes → identical digest, and it is a full-body hash', () => {
+  const a = Buffer.from('No 835 ERA files were received on that date.', 'utf8');
+  const b = Buffer.from('No 835 ERA files were received on that date.', 'utf8');
+  assert.equal(bodyDigest(a), bodyDigest(b));
+  assert.match(bodyDigest(a), /^[0-9a-f]{64}$/);
+  // A one-byte change must change the digest (so drift cannot slip through).
+  assert.notEqual(bodyDigest(a), bodyDigest(Buffer.from('No 835 ERA files were received on that date', 'utf8')));
+});
+
+test('THE ANTI-SILENT-SWALLOW GUARD: a short printable body with an UNKNOWN digest FAILS', async () => {
+  // The single most important test here. A body that merely LOOKS like a quiet-day
+  // message must NOT be classified empty — otherwise a genuine service error served with
+  // HTTP 200 becomes "no upcoming payments today", which on a money feed reads as good
+  // news. Note this uses the DOCUMENTED sentinel, which is exactly such a body: it reads
+  // like a quiet day and its digest is not allowlisted.
+  const { impl } = stubFetch(() => ({ status: 200, body: EMPTY_BODY }));
+  await assert.rejects(
+    () => cmdDownload835(cfg(impl), { date: '2026-03-04' }),
+    (err: unknown) => {
+      assert.ok(err instanceof CmdEra835Error);
+      assert.equal(err.code, 'unrecognized_short_text');
+      assert.equal(err.status, 200);
+      // The digest is reported so resolving a real drift is a one-line allowlist change.
+      assert.equal(err.digest, bodyDigest(Buffer.from(EMPTY_BODY, 'utf8')));
+      assert.equal(err.byteLength, Buffer.byteLength(EMPTY_BODY, 'utf8'));
+      // …and the prose marker is reported as a DIAGNOSTIC — it did match, and it still
+      // did not make this `empty`. That separation is the whole fix.
+      assert.equal(err.markerMatched, true);
+      return true;
+    },
+  );
+});
+
+test('an error page is NOT put in the drift bucket (it must not invite allowlisting)', async () => {
+  // The drift bucket implies "consider allowlisting this as empty". Service faults must
+  // never land there, or that reflex promotes a 200-with-an-error to "no remittances".
+  for (const [label, body, shape] of [
+    ['HTML session-expired page', '<html><body>Session expired</body></html>', 'looks_like_html'],
+    ['JSON error envelope', '{"error":"insufficient privileges"}', 'looks_like_json'],
+    ['a zero-byte body', '', 'unknown'],
+  ] as const) {
+    const { impl } = stubFetch(() => ({ status: 200, body }));
+    await assert.rejects(
+      () => cmdDownload835(cfg(impl), { date: '2026-03-04' }),
+      (err: unknown) =>
+        err instanceof CmdEra835Error &&
+        err.code === 'unrecognized_body' &&
+        err.shape === shape &&
+        err.markerMatched === false,
+      `${label} must be unrecognized_body, not the drift bucket`,
     );
   }
 });
@@ -233,7 +312,11 @@ test('cmdDownload835 throws on an HTTP 200 whose body is neither ZIP nor the sen
     await assert.rejects(
       () => cmdDownload835(cfg(impl), { date: '2026-03-04' }),
       (err: unknown) =>
-        err instanceof CmdEra835Error && err.code === 'unrecognized_body' && err.status === 200,
+        err instanceof CmdEra835Error &&
+        (err.code === 'unrecognized_body' || err.code === 'unrecognized_short_text') &&
+        err.status === 200 &&
+        // Every unrecognized body reports its digest, so a real drift is one line to fix.
+        /^[0-9a-f]{64}$/.test(err.digest ?? ''),
       `should have thrown for: ${label}`,
     );
   }
@@ -480,22 +563,29 @@ test('classifyBodyShape derives the tag from leading bytes only', () => {
   assert.equal(classifyBodyShape(Buffer.alloc(0)), 'unknown');
 });
 
-test('an unrecognized body carries its shape tag on the error AND in the message', async () => {
-  const cases: Array<[string, string]> = [
-    [ISA_EDI, 'looks_like_edi'],
-    ['<html><body>Session expired</body></html>', 'looks_like_html'],
-    ['{"error":"insufficient privileges"}', 'looks_like_json'],
-    ['UEsDBAoAAAAAA', 'unknown'],
+test('an unrecognized body carries its shape tag, digest and byte count on the error AND in the message', async () => {
+  // Identified shapes go to 'unrecognized_body'; short printable text of UNKNOWN shape is
+  // the drift bucket. Both report shape + sha256 + length, and neither reports content.
+  const cases: Array<[string, string, 'unrecognized_body' | 'unrecognized_short_text']> = [
+    [ISA_EDI, 'looks_like_edi', 'unrecognized_body'],
+    ['<html><body>Session expired</body></html>', 'looks_like_html', 'unrecognized_body'],
+    ['{"error":"insufficient privileges"}', 'looks_like_json', 'unrecognized_body'],
+    ['UEsDBAoAAAAAA', 'unknown', 'unrecognized_short_text'],
   ];
-  for (const [body, shape] of cases) {
+  for (const [body, shape, code] of cases) {
     const { impl } = stubFetch(() => ({ status: 200, body }));
     await assert.rejects(
       () => cmdDownload835(cfg(impl), { date: '2026-03-04' }),
       (err: unknown) => {
         assert.ok(err instanceof CmdEra835Error);
-        assert.equal(err.code, 'unrecognized_body');
+        assert.equal(err.code, code);
         assert.equal(err.shape, shape);
         assert.match(err.message, new RegExp(`shape=${shape}`));
+        assert.equal(err.digest, bodyDigest(Buffer.from(body, 'utf8')));
+        assert.equal(err.byteLength, Buffer.byteLength(body, 'utf8'));
+        assert.match(err.message, /sha256=[0-9a-f]{64}/);
+        // ZERO DISCLOSURE: the body must never appear in the message.
+        assert.ok(!err.message.includes(body), 'the message must not embed the body');
         return true;
       },
     );

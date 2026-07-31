@@ -2593,6 +2593,68 @@ signature. Closing it costs one more call: pull a date that should be empty (e.g
 `2026-07-26`) and confirm the sentinel/`empty` branch fires. That would prove the date is
 honoured AND exercise the empty path live.
 
+### RESOLVED 2026-07-31 — mechanism identified, fix applied (empty path now covered)
+
+The correction above stands as written; this is the resolution appended to it, not a
+replacement. **Do not delete the correction — the history of the wrong claim is the point.**
+
+**Mechanism.** CMD's live no-data response is a **44-byte printable-ASCII body**,
+sha256 `83b3fc6a77ef99a73263d6b1632b4e05edaf32197cc60327ef057e951728f290`, **byte-identical
+across 2 customers × 4 dates** (FRCA `10032340`, TBH `10029105`, 2026-07-28..31 — 8/8 calls,
+one digest). Three compounding causes:
+
+1. **Wording drift.** `isEmptyDayBody()` matched the *documented* sentence; CMD sends
+   different wording, so the matcher never fired and **every quiet day counted as a hard
+   failure**. (Coincidentally the documented sentinel is *also* 44 bytes — length is not
+   evidence of anything, which is one reason the fix keys on the digest.)
+2. **`Content-Type` is a mislabel.** CMD serves that text body as `application/zip`. The
+   header cannot be trusted; `isZip()` correctly rejects it on magic bytes.
+3. **The empty path had never been exercised** — not live, and not in tests. That absence
+   *was* the defect; a prose matcher nobody had ever seen fire was assumed correct.
+
+**Fix (`src/collections/cmd835.ts`).** Three-way digest-anchored classification: ZIP magic
+bytes → data; sha256 ∈ `KNOWN_EMPTY_DAY_DIGESTS` → `empty`; everything else → typed failure
+carrying digest + byte length. Short printable bodies of *unidentified* shape get their own
+bucket `unrecognized_short_text` (the drift queue); HTML/JSON/EDI stay in
+`unrecognized_body` so a service fault can never be mistaken for a candidate no-data
+message. The prose matcher survives as a **diagnostic flag only** (`markerMatched`) and
+must never again decide classification.
+
+> **Why an exact allowlist and NOT "short + printable ⇒ empty".** The heuristic trades a
+> loud bug for a silent one: a genuine error served with HTTP 200 would be swallowed as a
+> quiet day, making "no upcoming payments today" indistinguishable from "the feed broke" —
+> on a money feed, the worst failure mode, because it looks like good news. The allowlist
+> is loud on drift by construction: if CMD reworders, quiet days fail in
+> `unrecognized_short_text` with the **new digest printed**, and the fix is one line here,
+> not another multi-session investigation.
+
+**Zero disclosure**, carried into production code: hashing and byte-length are the *only*
+operations performed on an unrecognized body. No previews, no debug flag, no first-N-bytes
+— same constraint as `scripts/probe-era-coverage.ts`, and stated in-code so it is not
+"helpfully" relaxed later.
+
+**Tests.** The empty path is now covered: allowlisted digest → `empty`; real ZIP → data
+(guards the working path); **short printable body with a different digest → failure, not
+`empty`** (the anti-silent-swallow test, using the documented sentinel as the fixture
+precisely because it *reads* like a quiet day); digest stability; and per-bucket
+shape/digest/length reporting with an assertion that the body never appears in the message.
+`cmdDownload835` accepts a `knownEmptyDayDigests` **test seam** — required because the
+production digest's preimage is deliberately not stored anywhere, so no hermetic test can
+synthesize a matching body. It must never be set in production or wired to an env var.
+
+**Wording NOT recovered.** A timeboxed offline attempt hashed 144,000 candidate phrasings
+(4,845 of them exactly 44 bytes) against the digest with **no match**. The exact sentence
+remains unknown — and does not need to be known, since classification is by digest. Anyone
+retrying: the space not yet covered includes different leading words, embedded customer or
+date substitution, and non-ASCII punctuation.
+
+**Still open:** items 1, 2, 5 and 8 of the findings above are untouched by this fix — the
+root cause of the two failure episodes is still UNKNOWN, the probe's `failed` counter still
+has no per-status breakdown, FRCA/TBH's 4/4 failures are unexplained, and the possible 5th
+CMD-facing cron is unscoped. **This fix addresses item 3/4 only.** It is also still
+LATENT-only in production: no `app/` code imports the 835 ingest and no cron runs it, so
+this lands *before* the ingest cron exists rather than in response to live bleeding.
+
 ## CMD 835 probe — failure-mode findings (2026-07-31, save-state, no fixes applied)
 
 Two live probe runs of `scripts/probe-era-coverage.ts` (throwaway, untracked, read-only —
