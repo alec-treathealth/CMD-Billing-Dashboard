@@ -31,7 +31,13 @@ const BE = 'af504ab6-3dcd-4aa4-a93c-27bc58de4088';
 /** Minimal fake pool satisfying withTenant: BEGIN/set_config/read-back/COMMIT + our two
  *  SELECTs, recording every statement so tests can assert order and shape. */
 function fakePool(fixtures: {
-  totals: { remits: number; total: string; unquantified_remits: number };
+  totals: {
+    remits: number;
+    total: string;
+    unquantified_remits: number;
+    incoming_remits: number;
+    zero_dollar_remits: number;
+  };
   groups: EraUpcomingGroup[];
 }) {
   const statements: Array<{ sql: string; params: unknown[] }> = [];
@@ -61,6 +67,7 @@ function fakePool(fixtures: {
 
 const G = (over: Partial<EraUpcomingGroup>): EraUpcomingGroup => ({
   payment_date: '2026-08-03',
+  facility_code: 'CAMH',
   payer_name: 'ACME HEALTH PLAN',
   payment_method: 'ACH',
   remits: 1,
@@ -71,7 +78,13 @@ const G = (over: Partial<EraUpcomingGroup>): EraUpcomingGroup => ({
 
 test('eraUpcomingPayments: runs under withTenant with the explicit tenant predicate', async () => {
   const { pool, statements } = fakePool({
-    totals: { remits: 2, total: '72986.79', unquantified_remits: 0 },
+    totals: {
+      remits: 2,
+      total: '72986.79',
+      unquantified_remits: 0,
+      incoming_remits: 2,
+      zero_dollar_remits: 0,
+    },
     groups: [G({ remits: 2, amount: '72986.79' })],
   });
   const out = await eraUpcomingPayments(pool, BE);
@@ -84,6 +97,7 @@ test('eraUpcomingPayments: runs under withTenant with the explicit tenant predic
   for (const s of selects) {
     assert.ok(s.sql.includes('business_entity_id = $1::uuid'), 'explicit tenant predicate');
     assert.ok(s.sql.includes('payment_date >= current_date'), 'upcoming window');
+    assert.ok(!s.sql.includes('select *'), 'explicit allowlisted columns only');
     assert.deepEqual(s.params, [BE], 'tenant is the only bound value');
     // THE READ-PATH CONTRACT: no sum without the NULL count over the same filters.
     assert.ok(
@@ -95,6 +109,14 @@ test('eraUpcomingPayments: runs under withTenant with the explicit tenant predic
   assert.equal(out.remits, 2);
   assert.equal(out.unquantified_remits, 0);
   assert.ok(sqls.at(-1)!.includes('COMMIT'), 'committed');
+  // Facility attribution is a property of the QUERY, not just the type: a breakdown that
+  // does not group by facility_code silently blends facilities under one payer row.
+  const groupsSql = selects.find((s) => s.sql.includes('group by'))!.sql;
+  assert.ok(
+    groupsSql.includes('group by payment_date, facility_code, payer_name, payment_method'),
+    'breakdown groups by facility',
+  );
+  assert.ok(groupsSql.includes('facility_code asc'), 'and orders deterministically by it');
 });
 
 test('eraUpcomingPayments: truncation flag from the cap probe row, headline unaffected', async () => {
@@ -102,7 +124,13 @@ test('eraUpcomingPayments: truncation flag from the cap probe row, headline unaf
     G({ payment_date: `2026-08-${String((i % 28) + 1).padStart(2, '0')}`, payer_name: `P${i}` }),
   );
   const { pool } = fakePool({
-    totals: { remits: 200, total: '999.99', unquantified_remits: 3 },
+    totals: {
+      remits: 200,
+      total: '999.99',
+      unquantified_remits: 3,
+      incoming_remits: 188,
+      zero_dollar_remits: 12,
+    },
     groups,
   });
   const out = await eraUpcomingPayments(pool, BE);
@@ -110,6 +138,52 @@ test('eraUpcomingPayments: truncation flag from the cap probe row, headline unaf
   assert.equal(out.groups_truncated, true);
   assert.equal(out.remits, 200, 'headline remits come from the UNCAPPED aggregate');
   assert.equal(out.unquantified_remits, 3);
+  // THE CAP TRAP: the 51 fixture groups are all ACH, so a zero-dollar count derived from
+  // the breakdown would read 0 — and a capped breakdown could never reach 12 anyway.
+  // Both split counts must come from the aggregate, untouched by the cap.
+  assert.equal(out.incoming_remits, 188, 'incoming from the UNCAPPED aggregate');
+  assert.equal(out.zero_dollar_remits, 12, 'zero-dollar from the UNCAPPED aggregate');
+  assert.equal(
+    out.incoming_remits + out.zero_dollar_remits,
+    out.remits,
+    'the two counts partition the window exactly',
+  );
+});
+
+test('TOTALS_SQL splits the remit count by BPR04 in ONE statement, over one window', async () => {
+  const { pool, statements } = fakePool({
+    totals: {
+      remits: 38,
+      total: '331481.42',
+      unquantified_remits: 0,
+      incoming_remits: 34,
+      zero_dollar_remits: 4,
+    },
+    groups: [G({ remits: 38, amount: '331481.42' })],
+  });
+  const out = await eraUpcomingPayments(pool, BE);
+
+  const totalsSql = statements.find((s) => s.sql.includes('coalesce(sum(payment_amount), 0)'))!.sql;
+  // Both partitions live alongside the sum and the read-path NULL count — one statement,
+  // one window, one set of filters. Splitting them across statements or across layers is
+  // how a headline starts disagreeing with itself.
+  assert.ok(
+    totalsSql.includes("filter (where payment_method = 'NON')"),
+    'zero-dollar count is a FILTER on the same aggregate',
+  );
+  assert.ok(
+    totalsSql.includes("payment_method is distinct from 'NON'"),
+    'incoming EXCLUDES NON — and IS DISTINCT FROM keeps a null method on the incoming side',
+  );
+  assert.ok(
+    totalsSql.includes('filter (where payment_amount is null)'),
+    'and the read-path contract count is still in the same statement',
+  );
+  assert.equal(totalsSql.includes('group by'), false, 'the headline aggregate is never grouped');
+
+  assert.equal(out.incoming_remits, 34);
+  assert.equal(out.zero_dollar_remits, 4);
+  assert.equal(out.remits, 38, 'the blended grand total is still available');
 });
 
 test('centsFromNumericText / fixed2FromCents are exact and reject garbage', () => {
@@ -130,14 +204,23 @@ test('centsFromNumericText / fixed2FromCents are exact and reject garbage', () =
   );
 });
 
-const S = (over: Partial<EraUpcomingSummary>): EraUpcomingSummary => ({
-  total: '0.00',
-  remits: 0,
-  unquantified_remits: 0,
-  groups: [],
-  groups_truncated: false,
-  ...over,
-});
+const S = (over: Partial<EraUpcomingSummary>): EraUpcomingSummary => {
+  const remits = over.remits ?? 0;
+  const zeroDollar = over.zero_dollar_remits ?? 0;
+  return {
+    total: '0.00',
+    remits,
+    // Default the split so every fixture satisfies incoming + zero-dollar = remits unless
+    // a test deliberately overrides it — a fixture that violates the invariant would let a
+    // broken merge look correct.
+    incoming_remits: remits - zeroDollar,
+    zero_dollar_remits: zeroDollar,
+    unquantified_remits: 0,
+    groups: [],
+    groups_truncated: false,
+    ...over,
+  };
+};
 
 test('mergeEraUpcoming: single part passes through untouched', () => {
   const one = S({ total: '10.00', remits: 1, groups: [G({})] });
@@ -157,7 +240,7 @@ test('mergeEraUpcoming: exact cents, group collapse, unquantified and truncation
   const indigo = S({
     total: '0.20',
     remits: 1,
-    groups: [G({ amount: '0.20' })], // SAME (date, payer, method) as bxr's first group
+    groups: [G({ amount: '0.20' })], // SAME (date, facility, payer, method) as bxr's first
     groups_truncated: true,
   });
   const merged = mergeEraUpcoming([bxr, indigo]);
@@ -165,13 +248,61 @@ test('mergeEraUpcoming: exact cents, group collapse, unquantified and truncation
   assert.equal(merged.remits, 4);
   assert.equal(merged.unquantified_remits, 1);
   assert.equal(merged.groups_truncated, true, 'any truncated part taints the merge');
-  assert.equal(merged.groups.length, 2, 'identical (date,payer,method) collapsed across tenants');
+  assert.equal(
+    merged.groups.length,
+    2,
+    'identical (date,facility,payer,method) collapsed across tenants',
+  );
   const acme = merged.groups.find((g) => g.payer_name === 'ACME HEALTH PLAN')!;
   assert.equal(acme.amount, '100.30');
   assert.equal(acme.remits, 3);
   const zeta = merged.groups.find((g) => g.payer_name === 'ZETA')!;
   assert.equal(zeta.amount, null, 'an all-unquantified group stays null, never 0.00');
   assert.equal(zeta.unquantified_remits, 1);
+});
+
+test('mergeEraUpcoming: the incoming / zero-dollar split adds per tenant', () => {
+  const bxr = S({ total: '331481.42', remits: 38, zero_dollar_remits: 4, groups: [G({})] });
+  const indigo = S({
+    total: '500.00',
+    remits: 3,
+    zero_dollar_remits: 1,
+    groups: [G({ facility_code: '10026460', amount: '500.00' })],
+  });
+  const merged = mergeEraUpcoming([bxr, indigo]);
+  assert.equal(merged.incoming_remits, 36, '34 + 2 incoming');
+  assert.equal(merged.zero_dollar_remits, 5, '4 + 1 non-payments');
+  assert.equal(merged.remits, 41);
+  assert.equal(
+    merged.incoming_remits + merged.zero_dollar_remits,
+    merged.remits,
+    'the partition survives the Consolidated merge',
+  );
+  // Both parts were capped-eligible; the counts must not be re-derived from merged.groups
+  // (2 rows) which would report 2 incoming and 0 zero-dollar.
+  assert.notEqual(merged.incoming_remits, merged.groups.length);
+});
+
+test('mergeEraUpcoming: facility_code is part of the key — two facilities never blend', () => {
+  // Same date, same payer, same method, DIFFERENT facility. Before facility joined the
+  // group key these collapsed into one row and the tile attributed both deposits to
+  // whichever facility happened to be first — the exact bug the column exists to fix.
+  const a = S({ total: '44625.00', remits: 1, groups: [G({ amount: '44625.00' })] });
+  const b = S({
+    total: '44730.00',
+    remits: 1,
+    groups: [G({ facility_code: 'PCMH', amount: '44730.00' })],
+  });
+  const merged = mergeEraUpcoming([a, b]);
+  assert.equal(merged.groups.length, 2, 'CAMH and PCMH stay distinct rows');
+  assert.deepEqual(
+    merged.groups.map((g) => g.facility_code),
+    ['CAMH', 'PCMH'],
+    'and sort deterministically by facility within the date',
+  );
+  assert.equal(merged.groups[0]!.amount, '44625.00');
+  assert.equal(merged.groups[1]!.amount, '44730.00');
+  assert.equal(merged.total, '89355.00', 'headline still sums both');
 });
 
 test('mergeEraUpcoming: null-amount group merged with a quantified one keeps the money', () => {
