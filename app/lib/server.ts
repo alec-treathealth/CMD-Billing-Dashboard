@@ -165,7 +165,9 @@ import { facilityDimension, type FacilityDimensionRow } from '../../src/collecti
 import { cmdPayerGapForMonth, cmdReportRows, type CmdApiConfig, type CmdReportRow } from '../../src/collections/cmdPayer.js';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdExplorer.js';
 import { aliasIndigoFacilityColumn } from '../../src/collections/cmdExplorer.js';
-import { decryptPhi } from '../../src/collections/phiCrypto.js';
+import { decryptPhi, encryptPhi } from '../../src/collections/phiCrypto.js';
+import { cmdEra835ConfigFor, expandDateRange, runEra835Ingest } from '../../src/ingest/era_ingest.js';
+import { CmdEra835Error, cmdDownload835, read835Files } from '../../src/collections/cmd835.js';
 import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
 import { refreshCmdPayerRollup } from '../../src/collections/cmdPayerRefresh.js';
 import { CMD_EXPLORER_CUSTOMERS, INDIGO_CUSTOMERS, BXR_CUSTOMERS, type CmdCustomer } from '../../src/collections/cmdCustomers.js';
@@ -797,6 +799,112 @@ export function handleIndigoCensusCron(req: {
     configFor: cmdIndigoCensusConfigFor,
     transformRows: aliasIndigoFacilityColumn,
   });
+}
+
+// --- 835 ERA ingest cron (staging.era_835_payment + era_835_adjustment) --------------
+
+/** Wall-clock budget before runEra835Ingest stops launching NEW (date,customer) pulls.
+ *  Mirrors cmdExplorerCron's DEFAULT_BUDGET_MS (210s inside the 300s function): the
+ *  in-flight pull can still run to the 60s CMD timeout after the guard fires, so
+ *  210 + 60 leaves ~30s headroom for the final DB batch + response. Budget-skipped
+ *  pulls are counted (pulls_skipped_budget) and picked up on a later run — dedup by
+ *  fingerprint makes re-pulls free. */
+const ERA835_BUDGET_MS = 210_000;
+
+/** Minimum gap between CMD calls. 1500ms — deliberate: 150ms pacing is what preceded
+ *  the 2026-07-31 probe's 401 episode. NOT a throttle-avoidance tuning (the throttle
+ *  theory was FALSIFIED — gentler pacing produced a HIGHER failure rate; finding 1);
+ *  just a conservative floor while the real failure mode is unknown. */
+const ERA835_INTER_CALL_DELAY_MS = 1_500;
+
+/** ERAs land LATE relative to their receipt date (BPR16 observed spanning 06-18..07-30
+ *  from a 07-21..27 receipt window), so each daily run re-pulls a trailing window.
+ *  5 days; re-pulls are fingerprint-idempotent on both tables. */
+const ERA835_LOOKBACK_DAYS = 5;
+
+/**
+ * Daily BXR 835 ERA ingest (/api/cron/era-835 — NOT SCHEDULED YET, see the route file).
+ * GET only; gated on CRON_SECRET with the same constant-time Bearer check as every other
+ * cron. Downloads each BXR customer's 835s for the trailing window, parses the X12, and
+ * idempotently lands BOTH grains as cmd_rollup_writer: one staging.era_835_payment row
+ * per ST/SE transaction set (written UNCONDITIONALLY — a clean-paid remit with zero CAS
+ * triplets still lands; that was defect 2), then its staging.era_835_adjustment triplets
+ * carrying payment_id. Non-PHI counts only.
+ *
+ * ERROR POSTURE (finding 1 pending): failures are COUNTED PER CODE and never retried —
+ * the root cause of the probe's 30%/42% failure episodes is unknown and the throttle
+ * theory is falsified, so retry/backoff tuned to a wrong theory would only distort the
+ * signal. A 401/403 aborts the WHOLE run via the fatal seam (the CmdEra835Error message
+ * names the credential path: the CMD user behind CMD_API_TOKEN / CMD_API_USERNAME needs
+ * the Payment role); everything else is per-pull isolated.
+ *
+ * BXR ONLY for now (15 customers × 5 dates = 75 sequential pulls). No Indigo route yet.
+ */
+export async function handleEra835IngestCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
+    return { status: 405, body: { error: 'method_not_allowed' } };
+  }
+  const secret = process.env.CRON_SECRET;
+  if (!secret || !isAuthorized(req.authorization, secret)) {
+    return { status: 401, body: { error: 'unauthorized' } };
+  }
+  try {
+    // Fail fast on a misconfigured PHI key (mirrors the CLI's up-front probe) — better a
+    // clean 500 before any CMD call than a mid-run abort after N pulls.
+    await encryptPhi('era-835-cron-key-probe');
+
+    // Trailing window, OLDEST FIRST — expandDateRange returns ascending. Order matters
+    // under the budget guard: a budget-cut tail then skips the NEWEST dates, which stay
+    // in the window for up to 4 more daily runs; newest-first would starve the OLDEST
+    // date on the one run that is its last chance before it leaves the window.
+    const end = new Date().toISOString().slice(0, 10);
+    const start = new Date(Date.now() - (ERA835_LOOKBACK_DAYS - 1) * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    const dates = expandDateRange(start, end);
+
+    // 1500ms floor between CMD calls (before every pull but the first). Inside the
+    // download seam so the budget guard's wall clock naturally includes it.
+    let firstCall = true;
+    const download = async (customerId: string, date: string) => {
+      if (!firstCall) await new Promise((r) => setTimeout(r, ERA835_INTER_CALL_DELAY_MS));
+      firstCall = false;
+      const res = await cmdDownload835(cmdEra835ConfigFor(customerId), { date });
+      if (res.kind === 'empty') return { kind: 'empty' as const };
+      return { kind: 'files' as const, files: read835Files(res.bytes, `${customerId}_${date}`) };
+    };
+
+    const stats = await runEra835Ingest({
+      customers: BXR_CUSTOMERS,
+      dates,
+      ingestedBy: 'era_835_cron',
+      download,
+      writeDb: rollupWriterDb(),
+      budgetMs: ERA835_BUDGET_MS,
+      // Credential/role rejection: abort the run. Retrying 74 more pulls with a rejected
+      // credential cannot succeed and burns the shared one-at-a-time CMD partner session.
+      fatal: (err) =>
+        err instanceof CmdEra835Error &&
+        err.code === 'http_status' &&
+        (err.status === 401 || err.status === 403),
+    });
+    return { status: 200, body: { ok: true, ...stats } };
+  } catch (err) {
+    // Generic to the client; message only to the server log (no PHI, no token, no URL).
+    // The 401/403 CmdEra835Error message already names the credential path explicitly.
+    console.error('era-835 cron failed:', err instanceof Error ? err.message : String(err));
+    if (
+      err instanceof CmdEra835Error &&
+      err.code === 'http_status' &&
+      (err.status === 401 || err.status === 403)
+    ) {
+      return { status: 500, body: { error: 'cron_failed', code: 'credential_rejected' } };
+    }
+    return { status: 500, body: { error: 'cron_failed' } };
+  }
 }
 
 // Least-privilege writer pool for the BILLING AUDIT plane (claims.audit_row /

@@ -650,3 +650,65 @@ test('ingest: empty, zero-file and failed increment independently in one mixed r
   assert.equal(stats.pulls_zero_files, 1);
   assert.equal(stats.pulls_failed, 1);
 });
+
+// --- 11. per-code failure buckets + the fatal (401/403 abort) seam ------------
+// Finding-1 posture: the root cause of the probe's 30%/42% failure episodes is UNKNOWN
+// and the throttle theory is falsified, so the cron does NO retries — it counts failures
+// by the same per-code taxonomy the probe uses, and aborts outright on a credential
+// rejection. These tests pin that instrumentation.
+
+test('ingest: failures are bucketed by CmdEra835Error code, non-typed errors under `other`', async () => {
+  const stats = await ingest(async (customerId, date) => {
+    if (date === '2026-03-04' && customerId === '10027973') {
+      throw new CmdEra835Error('unrecognized_short_text', 'drift bucket', 200, 'unknown');
+    }
+    if (date === '2026-03-04') throw new CmdEra835Error('request_failed', 'network');
+    if (customerId === '10027973') throw new CmdEra835Error('request_failed', 'network');
+    throw new Error('something else entirely'); // not a CmdEra835Error
+  });
+  assert.equal(stats.pulls_failed, 4);
+  assert.deepEqual(stats.pulls_failed_by_code, {
+    unrecognized_short_text: 1,
+    request_failed: 2,
+    other: 1,
+  });
+});
+
+test('ingest: fatal seam aborts the WHOLE run on a matching error and stops calling CMD', async () => {
+  // A 401 credential rejection: every remaining pull would fail identically, so the run
+  // must stop — not iterate 74 more times against a rejected credential.
+  const calls: string[] = [];
+  const authErr = new CmdEra835Error(
+    'http_status',
+    'CMD download-835 failed: HTTP 401 — the CMD credential was rejected or lacks the Payment role',
+    401,
+  );
+  await assert.rejects(
+    () =>
+      runEra835Ingest({
+        customers: CUSTOMERS,
+        dates: ['2026-03-04', '2026-03-05'],
+        ingestedBy: 'test',
+        download: async (customerId, date) => {
+          calls.push(`${customerId}:${date}`);
+          if (calls.length === 2) throw authErr;
+          return { kind: 'empty' };
+        },
+        fatal: (err) =>
+          err instanceof CmdEra835Error &&
+          err.code === 'http_status' &&
+          (err.status === 401 || err.status === 403),
+      }),
+    (err: unknown) => err === authErr, // the ORIGINAL error surfaces, not a wrapper
+  );
+  assert.equal(calls.length, 2, 'no further CMD calls after the fatal failure');
+});
+
+test('ingest: without the fatal seam a 401 still gets per-pull isolation (back-compat)', async () => {
+  const stats = await ingest(async () => {
+    throw new CmdEra835Error('http_status', 'CMD download-835 failed: HTTP 401', 401);
+  });
+  assert.equal(stats.pulls_attempted, 4, 'default behavior unchanged: all pulls attempted');
+  assert.equal(stats.pulls_failed, 4);
+  assert.deepEqual(stats.pulls_failed_by_code, { http_status: 4 });
+});

@@ -50,7 +50,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { ALL_CMD_CUSTOMERS, type CmdCustomer } from '../collections/cmdCustomers.js';
-import { cmdDownload835, read835Files, type CmdEra835Config, type Era835File } from '../collections/cmd835.js';
+import { CmdEra835Error, cmdDownload835, read835Files, type CmdEra835Config, type Era835File } from '../collections/cmd835.js';
 import { encryptPhi, fingerprintRow } from '../collections/phiCrypto.js';
 import { makeClient, type Db } from '../collections/db.js';
 import { parseEra835, type Era835Claim, type Era835Transaction } from './era835Parser.js';
@@ -636,6 +636,14 @@ export interface Era835IngestDeps {
   now?: () => number;
   /** Wall-clock budget before new (date,customer) pulls stop launching. */
   budgetMs?: number;
+  /**
+   * When a per-pull error matches, ABORT THE WHOLE RUN (rethrow) instead of counting it
+   * and continuing. Intended for 401/403 credential/role failures: every remaining pull
+   * would fail identically, and hammering CMD with a rejected credential helps nobody.
+   * The partial stats line is logged (prefixed ABORTED) before the rethrow so the counts
+   * survive. Default: absent — per-pull isolation, the pre-existing behavior.
+   */
+  fatal?: (err: unknown) => boolean;
 }
 
 /** Non-PHI run summary — safe to log and return to the (authed) caller. */
@@ -644,6 +652,17 @@ export interface Era835IngestStats {
   customers: number;
   pulls_attempted: number;
   pulls_failed: number;
+  /**
+   * pulls_failed BROKEN OUT by CmdEra835Error.code ('http_status',
+   * 'unrecognized_short_text', 'request_failed', …), with non-CmdEra835Error failures
+   * under 'other'. Same taxonomy as the probe's failure buckets so cron logs and probe
+   * reports read the same way. Exists because of finding 1 (2026-07-31): the root cause
+   * of the observed 30%/42% failure episodes is UNKNOWN and the throttle theory is
+   * FALSIFIED — an undifferentiated `failed` counter was exactly what made those
+   * episodes undiagnosable. NO RETRIES by design until the real failure mode is known:
+   * retry/backoff tuned to a wrong theory would just distort the signal.
+   */
+  pulls_failed_by_code: Record<string, number>;
   pulls_skipped_budget: number;
   /**
    * CMD returned its documented "no 835 ERA files were received on that date"
@@ -703,6 +722,7 @@ export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835Ing
     customers: deps.customers.length,
     pulls_attempted: 0,
     pulls_failed: 0,
+    pulls_failed_by_code: {},
     pulls_skipped_budget: 0,
     pulls_empty: 0,
     pulls_zero_files: 0,
@@ -789,7 +809,19 @@ export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835Ing
           stats.rows_inserted += written.adjustments;
         }
       } catch (err) {
+        // Fatal (e.g. 401/403 credential rejection): every remaining pull would fail the
+        // same way. Log the partial counts so they survive, then abort the whole run.
+        if (deps.fatal?.(err)) {
+          console.error(
+            `era-835 ingest ABORTED (fatal pull failure): pulls ${stats.pulls_attempted} ` +
+              `(failed ${stats.pulls_failed}, empty ${stats.pulls_empty}); ` +
+              `inserted ${stats.payments_inserted} payments + ${stats.rows_inserted} adjustments before abort`,
+          );
+          throw err;
+        }
         stats.pulls_failed += 1;
+        const code = err instanceof CmdEra835Error ? err.code : 'other';
+        stats.pulls_failed_by_code[code] = (stats.pulls_failed_by_code[code] ?? 0) + 1;
         // Per-pull isolation: customer + date + message (non-PHI) only.
         console.error(
           `era-835 ingest: customer ${customer.customerId} (${customer.facilityCode}) date ${date} failed: ` +
@@ -807,7 +839,8 @@ export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835Ing
       `(no-adjustment ${stats.payments_without_adjustments}, unquantified BPR02 ${stats.payments_amount_out_of_range}), ` +
       `adjustments ${stats.adjustments_mapped}, remarks ${stats.remark_codes_seen}; ` +
       `in-set dups ${stats.in_set_duplicates} triplet / ${stats.in_set_duplicate_payments} remit; ` +
-      `inserted ${stats.payments_inserted} payments + ${stats.rows_inserted} adjustments`,
+      `inserted ${stats.payments_inserted} payments + ${stats.rows_inserted} adjustments` +
+      (stats.pulls_failed > 0 ? `; failed by code ${JSON.stringify(stats.pulls_failed_by_code)}` : ''),
   );
   return stats;
 }
@@ -894,8 +927,11 @@ function loadDotEnvIfPresent(): void {
   }
 }
 
-/** Build the live CMD 835 download config from env (composition-root pattern). */
-function cmdEra835ConfigFor(customerId: string): CmdEra835Config {
+/** Build the live CMD 835 download config from env (composition-root pattern).
+ *  Exported: app/lib/server.ts (the Vercel cron composition root) reuses it so the CLI
+ *  and the cron share ONE env contract (CMD_API_TOKEN | CMD_API_USERNAME+PASSWORD,
+ *  CMD_API_BASE_URL, CMD_ERA835_TIMEOUT_MS) instead of drifting apart. */
+export function cmdEra835ConfigFor(customerId: string): CmdEra835Config {
   const token = process.env.CMD_API_TOKEN?.trim();
   const username = process.env.CMD_API_USERNAME?.trim();
   const password = process.env.CMD_API_PASSWORD?.trim();
