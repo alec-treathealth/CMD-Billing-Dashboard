@@ -3,7 +3,8 @@
 /**
  * "ERA-Confirmed Upcoming Payments" — the Overview module over staging.era_835_payment
  * (payment grain, migration 013). Sum(BPR02) is safe there by construction: one row per
- * remittance.
+ * remittance. Rendered inside the OverviewKpis toggle panel (next to "All Facilities
+ * Table"), not as a standalone top-of-page card.
  *
  * LABEL IS DELIBERATE: "ERA-Confirmed", never plain "Upcoming Payments". The tile shows
  * remits payers have adjudicated onto an 835 with a future effective date — honest at ANY

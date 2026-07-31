@@ -8,15 +8,12 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { count, percent } from '@/lib/format';
 import {
   loadClaimsByYear,
-  loadEraUpcoming,
   loadTopHcpcs,
   loadTopRevenue,
   type DashboardResult,
   type DistributionSummary,
 } from '@/lib/actions';
 import { MiniBar, useWidget, WidgetCard } from './widgets';
-import { EraUpcomingBody } from './era-upcoming';
-import type { EraUpcomingSummary } from '../../../src/veris/era835Upcoming.js';
 import { OverviewBarChart } from './overview-bar-chart';
 import { OverviewKpis } from './overview-kpis';
 import type { DashboardView } from '@/lib/views';
@@ -116,27 +113,12 @@ export function ClaimsDistributions() {
  * identical UI; the scope flows through the viewToEntityIds seam (app/lib/views.ts).
  * Until Indigo data is ingested, every view resolves to BXR-or-stub data.
  */
-/**
- * "ERA-Confirmed Upcoming Payments" — money payers have adjudicated onto an 835 with an
- * effective date of today or later (staging.era_835_payment, the payment-grain table).
- * Keyed on [view] so switching tenants re-fetches under the new scope; the server action
- * clamps the view to the session's entitlement regardless of what the client sends.
- * Empty until the ERA ingest cron runs — EraUpcomingBody renders that as a calm
- * "nothing scheduled", never as an error or a zero presented as data.
- */
-function EraUpcomingPayments({ view }: { view: DashboardView }) {
-  const state = useWidget<EraUpcomingSummary>(() => loadEraUpcoming(view), [view]);
-  return (
-    <WidgetCard title="ERA-Confirmed Upcoming Payments" state={state}>
-      {state.status === 'ready' && <EraUpcomingBody data={state.data} />}
-    </WidgetCard>
-  );
-}
-
 export function Dashboard({ view }: { view: DashboardView }) {
+  // "ERA-Confirmed Upcoming Payments" moved from a standalone top card into the
+  // OverviewKpis toggle-button row (next to "All Facilities Table") — same data,
+  // now revealed on demand.
   return (
     <section className="space-y-4">
-      <EraUpcomingPayments view={view} />
       <OverviewKpis view={view} />
       <OverviewBarChart scope={view} />
     </section>

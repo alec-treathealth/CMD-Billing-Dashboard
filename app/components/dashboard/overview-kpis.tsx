@@ -5,8 +5,9 @@
  *   • MTD Gross   — month-to-date collections gross, with a MoM trend.
  *   • YTD Gross   — year-to-date gross split IP / OP / IP+OP, with a YoY trend.
  *   • Year Forecast — a live linear-YTD run-rate projection, with a YoY-vs-prior-year trend.
- * Plus an "All Facilities Table" button that opens a paginated, per-facility table for
- * the current month.
+ * Plus a toggle-button row: "All Facilities Table" (per-facility table for a selected
+ * month) and "ERA-Confirmed Upcoming Payments" (the 835 upcoming-remit table, fetched
+ * only when opened). Each button reveals its panel below the row, All-Facilities-style.
  *
  * Data sources (all NON-PHI, reader-only; no row fetch, no LLM):
  *   • MTD/YTD gross, per-facility rows, the anchor date  → loadCollectionsKpis (live
@@ -26,8 +27,8 @@
  * seam note in views.ts), so all three views render BXR data. This is the only component
  * that needs to change scope once the real data layer lands.
  */
-import { useEffect, useMemo, useState } from 'react';
-import { Filter, Table2 } from 'lucide-react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { CalendarClock, Filter, Table2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -39,6 +40,7 @@ import {
   loadCollectionsDailyRange,
   loadCollectionsKpis,
   loadCollectionsYoy,
+  loadEraUpcoming,
   loadFacilityDimension,
   type CollectionsDailyResult,
   type CollectionsKpis,
@@ -46,6 +48,8 @@ import {
   type FacilityDimensionRow,
 } from '@/lib/actions';
 import { type DashboardView } from '@/lib/views';
+import { EraUpcomingBody } from './era-upcoming';
+import type { EraUpcomingSummary } from '../../../src/veris/era835Upcoming.js';
 import { Kpi, useWidget } from './widgets';
 
 const MONTH_NAMES = [
@@ -163,7 +167,40 @@ function KpiSkeletonRow() {
   );
 }
 
+/**
+ * The shared reveal-toggle button (All Facilities / ERA). Filled with the active view's
+ * brand color for discoverability. --brand-ink is dark in all three views (teal/navy/purple),
+ * so white text stays legible everywhere (unlike --brand-accent, which is gold for BXR).
+ * A brand-accent ring marks the expanded state.
+ */
+function PanelToggleButton({
+  open,
+  onToggle,
+  children,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      onClick={onToggle}
+      aria-expanded={open}
+      className={`border-[var(--brand-ink)] bg-[var(--brand-ink)] text-white hover:bg-[var(--brand-ink)] hover:text-white hover:opacity-90 ${
+        open ? 'ring-2 ring-[var(--brand-accent)] ring-offset-1' : ''
+      }`}
+    >
+      {children}
+    </Button>
+  );
+}
+
 export function OverviewKpis({ view }: { view: DashboardView }) {
+  const [facilitiesOpen, setFacilitiesOpen] = useState(false);
+  const [eraOpen, setEraOpen] = useState(false);
   // `view` is the active tenant scope. It is passed to every collections load* action (which
   // re-derives the entitled business_entity_id(s) SERVER-SIDE — the client value is only a hint)
   // and used as the useWidget/effect dependency, so switching the view re-fetches for the new
@@ -296,7 +333,69 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
         />
       </div>
 
-      <AllFacilitiesTable kpis={kpis} dimByCode={dimByCode} asOf={asOf} view={view} />
+      <div className="flex flex-wrap items-center gap-2">
+        <PanelToggleButton open={facilitiesOpen} onToggle={() => setFacilitiesOpen((s) => !s)}>
+          <Table2 className="h-4 w-4" />
+          All Facilities Table
+        </PanelToggleButton>
+        <PanelToggleButton open={eraOpen} onToggle={() => setEraOpen((s) => !s)}>
+          <CalendarClock className="h-4 w-4" />
+          ERA-Confirmed Upcoming Payments
+        </PanelToggleButton>
+      </div>
+
+      <AllFacilitiesTable open={facilitiesOpen} kpis={kpis} dimByCode={dimByCode} asOf={asOf} view={view} />
+      <EraUpcomingPanel open={eraOpen} view={view} />
+    </div>
+  );
+}
+
+/**
+ * "ERA-Confirmed Upcoming Payments" as a reveal panel — same interaction as the All
+ * Facilities table. Fetches only while open (nothing is loaded for users who never
+ * click), re-fetching on each open / view change so the figures are never stale-on-
+ * reveal. The body is the unchanged EraUpcomingBody leaf, so the 013 read-path
+ * contract (floor banner, no fabricated zeros) renders identically here.
+ */
+function EraUpcomingPanel({ open, view }: { open: boolean; view: DashboardView }) {
+  const [status, setStatus] = useState<'idle' | 'loading' | 'error' | 'ready'>('idle');
+  const [data, setData] = useState<EraUpcomingSummary | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    setStatus('loading');
+    setData(null);
+    loadEraUpcoming(view)
+      .then((r) => {
+        if (!live) return;
+        if (r.ok) {
+          setData(r.data);
+          setStatus('ready');
+        } else {
+          setStatus('error');
+        }
+      })
+      .catch(() => {
+        if (live) setStatus('error');
+      });
+    return () => {
+      live = false;
+    };
+  }, [open, view]);
+
+  if (!open) return null;
+  return (
+    <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
+      <h3 className="mb-3 text-sm font-semibold text-ink900">ERA-Confirmed Upcoming Payments</h3>
+      {status === 'error' ? (
+        <div className="rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-sm text-status-danger">
+          Unable to load ERA-confirmed payments.
+        </div>
+      ) : status === 'ready' && data ? (
+        <EraUpcomingBody data={data} />
+      ) : (
+        <div className="py-6 text-center text-sm text-muted-foreground">Loading…</div>
+      )}
     </div>
   );
 }
@@ -321,24 +420,26 @@ interface FacilityMonthTotals {
 }
 
 /**
- * "All Facilities Table" — a toggle that reveals the full (un-paginated) per-facility
- * table summed for a selected month, with an IP/OP setting filter. Aggregate, non-PHI:
+ * "All Facilities Table" — the full (un-paginated) per-facility table summed for a
+ * selected month, with an IP/OP setting filter. `open` is owned by OverviewKpis (the
+ * toggle button lives in its button row). Aggregate, non-PHI:
  * the current month reads the already-loaded MTD KPI rows; a past month fetches that
  * month's daily rows (loadCollectionsDailyRange) and sums them per facility. Joined to
  * the facility dimension for acronym labels + the IP/OP (care_setting) filter.
  */
 function AllFacilitiesTable({
+  open,
   kpis,
   dimByCode,
   asOf,
   view,
 }: {
+  open: boolean;
   kpis: CollectionsKpis;
   dimByCode: Map<string, FacilityDimensionRow>;
   asOf: string | null;
   view: DashboardView;
 }) {
-  const [open, setOpen] = useState(false);
   const [setting, setSetting] = useState<FacilitySetting>('ALL');
 
   const currentYear = asOf ? Number(asOf.slice(0, 4)) : null;
@@ -449,116 +550,96 @@ function AllFacilitiesTable({
   const loadingPast = !isCurrent && pastStatus === 'loading';
   const errorPast = !isCurrent && pastStatus === 'error';
 
+  if (!open) return null;
   return (
-    <div className="space-y-3">
-      {/* Filled with the active view's brand color for discoverability. --brand-ink is dark in all
-          three views (teal/navy/purple), so white text stays legible everywhere (unlike
-          --brand-accent, which is gold for BXR). A brand-accent ring marks the expanded state. */}
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => setOpen((s) => !s)}
-        aria-expanded={open}
-        className={`border-[var(--brand-ink)] bg-[var(--brand-ink)] text-white hover:bg-[var(--brand-ink)] hover:text-white hover:opacity-90 ${
-          open ? 'ring-2 ring-[var(--brand-accent)] ring-offset-1' : ''
-        }`}
-      >
-        <Table2 className="h-4 w-4" />
-        All Facilities Table
-      </Button>
-
-      {open && (
-        <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-            <h3 className="text-sm font-semibold text-ink900">
-              All facilities{monthName && currentYear ? ` — ${monthName} ${currentYear}` : ''}
-              {isCurrent ? (isComplete ? ' (final)' : ' (MTD)') : ''}
-            </h3>
-            <div className="flex flex-wrap items-center gap-3">
-              <ControlSelect
-                label="Month"
-                value={month ?? ''}
-                ariaLabel="Month"
-                onChange={(v) => setMonth(Number(v))}
-              >
-                {monthOptions.map((m) => (
-                  <option key={m} value={m}>
-                    {m === currentMonth
-                      ? `${MONTH_NAMES[m - 1]} ${isComplete ? '(latest)' : '(current)'}`
-                      : MONTH_NAMES[m - 1]}
-                  </option>
-                ))}
-              </ControlSelect>
-              <ControlSelect
-                label="Setting"
-                value={setting}
-                ariaLabel="Inpatient / Outpatient filter"
-                onChange={(v) => setSetting(v as FacilitySetting)}
-              >
-                <option value="ALL">IP &amp; OP</option>
-                <option value="IP">IP only</option>
-                <option value="OP">OP only</option>
-              </ControlSelect>
-            </div>
-          </div>
-
-          {loadingPast ? (
-            <div className="py-6 text-center text-sm text-muted-foreground">Loading…</div>
-          ) : errorPast ? (
-            <div className="rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-sm text-status-danger">
-              Could not load that month.
-            </div>
-          ) : rows.length === 0 ? (
-            setting !== 'ALL' ? (
-              <div className="flex flex-col items-center gap-1.5 py-8 text-center">
-                <Filter className="h-5 w-5 text-muted-foreground" aria-hidden />
-                <div className="text-sm font-medium text-ink900">No {setting} facilities this month</div>
-                <button
-                  type="button"
-                  onClick={() => setSetting('ALL')}
-                  className="text-xs font-medium text-[var(--brand-ink)] underline underline-offset-2"
-                >
-                  Show IP &amp; OP
-                </button>
-              </div>
-            ) : (
-              <div className="py-8 text-center text-sm text-muted-foreground">
-                No collections recorded{monthName ? ` for ${monthName}` : ''} yet.
-              </div>
-            )
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Facility</TableHead>
-                  <TableHead>Setting</TableHead>
-                  <TableHead className="text-right">Checks</TableHead>
-                  <TableHead className="text-right">EFT</TableHead>
-                  <TableHead className="text-right">Gross</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {rows.map((r, i) => (
-                  <TableRow key={`${r.label}-${i}`}>
-                    <TableCell>{r.label}</TableCell>
-                    <TableCell className="text-muted-foreground">{r.careSetting ?? '—'}</TableCell>
-                    <TableCell className="text-right tabular-nums">{money(r.checks)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{money(r.eft)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{money(r.gross)}</TableCell>
-                  </TableRow>
-                ))}
-                <TableRow className="border-t-2 font-semibold">
-                  <TableCell>TOTALS</TableCell>
-                  <TableCell />
-                  <TableCell className="text-right tabular-nums">{money(totals.checks)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{money(totals.eft)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{money(totals.gross)}</TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
-          )}
+    <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-ink900">
+          All facilities{monthName && currentYear ? ` — ${monthName} ${currentYear}` : ''}
+          {isCurrent ? (isComplete ? ' (final)' : ' (MTD)') : ''}
+        </h3>
+        <div className="flex flex-wrap items-center gap-3">
+          <ControlSelect
+            label="Month"
+            value={month ?? ''}
+            ariaLabel="Month"
+            onChange={(v) => setMonth(Number(v))}
+          >
+            {monthOptions.map((m) => (
+              <option key={m} value={m}>
+                {m === currentMonth
+                  ? `${MONTH_NAMES[m - 1]} ${isComplete ? '(latest)' : '(current)'}`
+                  : MONTH_NAMES[m - 1]}
+              </option>
+            ))}
+          </ControlSelect>
+          <ControlSelect
+            label="Setting"
+            value={setting}
+            ariaLabel="Inpatient / Outpatient filter"
+            onChange={(v) => setSetting(v as FacilitySetting)}
+          >
+            <option value="ALL">IP &amp; OP</option>
+            <option value="IP">IP only</option>
+            <option value="OP">OP only</option>
+          </ControlSelect>
         </div>
+      </div>
+
+      {loadingPast ? (
+        <div className="py-6 text-center text-sm text-muted-foreground">Loading…</div>
+      ) : errorPast ? (
+        <div className="rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-sm text-status-danger">
+          Could not load that month.
+        </div>
+      ) : rows.length === 0 ? (
+        setting !== 'ALL' ? (
+          <div className="flex flex-col items-center gap-1.5 py-8 text-center">
+            <Filter className="h-5 w-5 text-muted-foreground" aria-hidden />
+            <div className="text-sm font-medium text-ink900">No {setting} facilities this month</div>
+            <button
+              type="button"
+              onClick={() => setSetting('ALL')}
+              className="text-xs font-medium text-[var(--brand-ink)] underline underline-offset-2"
+            >
+              Show IP &amp; OP
+            </button>
+          </div>
+        ) : (
+          <div className="py-8 text-center text-sm text-muted-foreground">
+            No collections recorded{monthName ? ` for ${monthName}` : ''} yet.
+          </div>
+        )
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Facility</TableHead>
+              <TableHead>Setting</TableHead>
+              <TableHead className="text-right">Checks</TableHead>
+              <TableHead className="text-right">EFT</TableHead>
+              <TableHead className="text-right">Gross</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((r, i) => (
+              <TableRow key={`${r.label}-${i}`}>
+                <TableCell>{r.label}</TableCell>
+                <TableCell className="text-muted-foreground">{r.careSetting ?? '—'}</TableCell>
+                <TableCell className="text-right tabular-nums">{money(r.checks)}</TableCell>
+                <TableCell className="text-right tabular-nums">{money(r.eft)}</TableCell>
+                <TableCell className="text-right tabular-nums">{money(r.gross)}</TableCell>
+              </TableRow>
+            ))}
+            <TableRow className="border-t-2 font-semibold">
+              <TableCell>TOTALS</TableCell>
+              <TableCell />
+              <TableCell className="text-right tabular-nums">{money(totals.checks)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.eft)}</TableCell>
+              <TableCell className="text-right tabular-nums">{money(totals.gross)}</TableCell>
+            </TableRow>
+          </TableBody>
+        </Table>
       )}
     </div>
   );
