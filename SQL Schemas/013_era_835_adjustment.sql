@@ -506,10 +506,33 @@ CREATE TABLE IF NOT EXISTS staging.era_835_adjustment (
   -- PHI — app-layer libsodium ciphertext (nonce‖ct); NEVER plaintext at rest -----
   patient_name_enc         bytea,      -- Loop 2100 NM1*QC (last+first)
   member_id_enc            bytea,      -- Loop 2100 NM1*IL subscriber/member id
+  -- DEFERRED, DELIBERATELY (2026-07-31 — not forgotten): there is NO member_id_bidx
+  -- blind-index column here yet, so member_id_enc is ciphertext-only and NOT searchable
+  -- by member id the way collections rows are. Why deferring is safe: (a) the money
+  -- read path is staging.era_835_payment, which carries no member id at all, so no
+  -- tile/aggregate is blocked; (b) this table is empty and no cron writes it yet, so
+  -- adding the column later is a trivial ALTER, not a backfill. Why it is deferred
+  -- rather than done: the normalization is genuinely undecided — src/normalize.ts and
+  -- src/collections/normalize.ts BOTH export a normalizeMemberId with DIFFERENT
+  -- semantics (the collections one strips ALL internal whitespace and ALL leading
+  -- hyphens; the queries-plane one keeps internal whitespace and strips ONE leading
+  -- hyphen), and an HMAC over the wrong form silently mints tokens that never match
+  -- the collections-side bidx: a zero-row join with no diagnostic. Every LIVE
+  -- member_id_bidx token today is minted via src/collections/blindIndex.ts, which
+  -- imports the COLLECTIONS normalizeMemberId (verified 2026-07-31). When the column
+  -- is added: route the 835 path through blindIndex.ts itself (never a re-implemented
+  -- HMAC), and land a pin test asserting the 835 tokens byte-match blindIndex.ts
+  -- output for whitespace/hyphen-bearing member ids BEFORE any backfill runs.
 
   -- Service line (Loop 2110 SVC) — NULL for claim-level CAS ----------------------
   service_line_number      integer     NOT NULL DEFAULT 0,                                         -- 1-based within claim; 0 = claim-level CAS
-  procedure_code           text                 CHECK (char_length(procedure_code) <= 50),         -- SVC01 (qualifier:code:mods)
+  -- SVC01: the bare procedure CODE component only (e.g. '90837'), NOT the full
+  -- qualifier:code:mods composite the segment carries. The parser splits SVC01 on the
+  -- component separator and keeps the code (2nd component), falling back to the raw
+  -- SVC01 text only when no separator is present (src/ingest/era835Parser.ts, SVC
+  -- handler). An earlier comment here read "SVC01 (qualifier:code:mods)", which
+  -- overstated what is stored — corrected 2026-07-31.
+  procedure_code           text                 CHECK (char_length(procedure_code) <= 50),
   line_charge_amount       numeric(12,2),                                                          -- SVC02
   line_paid_amount         numeric(12,2),                                                          -- SVC03
   line_units               numeric(12,2),                                                          -- SVC05

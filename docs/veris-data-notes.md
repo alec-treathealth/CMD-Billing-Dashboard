@@ -35,11 +35,13 @@ entries with a dated correction line, the way CLAUDE.md §17 corrected CO-45.
   creating a Veris-side CLAUDE.md (ratified).
 - Veris migrations `009–012` were **deployed + verified live 2026-06-23**
   (docs/veris-runbook.md). `013_era_835_adjustment.sql` is **TRACKED on origin/main**
-  (commit `380d566`) — the previous "is untracked" note here was stale, corrected
-  2026-07-30. It remains **UNAPPLIED**: neither `staging.era_835_payment` nor
-  `staging.era_835_adjustment` exists live (re-verified by catalog probe 2026-07-30),
-  which is consistent with 016's scope note. Because it is unapplied it is still freely
-  editable, and it was amended on 2026-07-30 — see the 835 grain-split entry below.
+  (commit `380d566`; grain-split amendment `3671844`) — the previous "is untracked"
+  note here was stale, corrected 2026-07-30. **APPLIED LIVE 2026-07-31** via
+  `apply_migration` after the grain-split amendment + two same-day comment fixes
+  (procedure_code accuracy, member_id_bidx deferral record) — full post-apply
+  verification green; see the 835 grain-split entry below. The 2026-07-30 "unapplied /
+  freely editable" state is superseded: 013 is now live DDL, and any further change to
+  these tables is a NEW migration (next free Veris number), not an edit to 013.
 
 ### 835 ERA grain split — migration 013 amended 2026-07-30 (UNAPPLIED, review hold)
 
@@ -133,8 +135,26 @@ claims_admin` (both tables would have been born owned by `postgres`); it had **n
 `_rollback.sql`**; and it lacked the `core.business_entity` FK that 016 added to the 9 live
 staging tables while explicitly excluding these two. Parser now captures TRN03.
 
-**State: authored, NOT applied, NOT committed** — on review hold with Alec as of
-2026-07-30.
+**State (upd. 2026-07-31): APPLIED LIVE.** Timeline: committed `3671844` + pushed
+2026-07-30 (deploy runtime-inert, build green); comment-only amendments 2026-07-31
+(procedure_code comment corrected to "bare code component, raw-SVC01 fallback" — the
+parser splits the composite; and a member_id_bidx **deferral record** added near
+member_id_enc: deferred deliberately, blocker = `src/normalize.ts` vs
+`src/collections/normalize.ts` export same-named `normalizeMemberId` with DIFFERENT
+semantics (whitespace/hyphen handling), live bidx tokens are minted via
+`src/collections/blindIndex.ts` which imports the COLLECTIONS one — route any future
+835 bidx through blindIndex.ts + a byte-match pin test, never a re-implemented HMAC);
+then **applied 2026-07-31 via `apply_migration`** (executable statements + persisted
+COMMENT ONs verbatim; inline `--` narrative elided — zero DDL effect; repo file is
+canonical). Post-apply verification ALL GREEN: 2 tables owned by `claims_admin`, RLS
+on / FORCE off; `payment_amount`/`check_eft_trace_number` **absent** on adjustment (0)
+and `payment_amount`+`payment_amount_raw`+`trace_originating_company_id` present on
+payment (3); `payment_id` NOT NULL; 4 FKs validated (both →`core.business_entity`,
+adjustment→payment, adjustment→`claim_line`); 6 policies (reader SELECT + writer
+INSERT/WITH CHECK + writer SELECT per table); 15 indexes; grants exact (reader SELECT,
+writer INSERT + column-SELECT on `id`/`row_fingerprint` only — never the PHI
+ciphertext; anon/authenticated/service_role/PUBLIC = 0); both counts 0. Ingest cron
+does NOT exist yet — first live quiet-day and re-pull-idempotency proofs come with it.
 
 ### Migration numbering convention (RATIFIED)
 
