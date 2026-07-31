@@ -34,8 +34,107 @@ entries with a dated correction line, the way CLAUDE.md §17 corrected CO-45.
   context file is `docs/CLAUDE.md`, and the S1 ADR lives there (§18). We are not
   creating a Veris-side CLAUDE.md (ratified).
 - Veris migrations `009–012` were **deployed + verified live 2026-06-23**
-  (docs/veris-runbook.md). `013_era_835_adjustment.sql` is untracked; its
-  live-deployment state was **not** verified in S1 — verify before S8 assumes it.
+  (docs/veris-runbook.md). `013_era_835_adjustment.sql` is **TRACKED on origin/main**
+  (commit `380d566`) — the previous "is untracked" note here was stale, corrected
+  2026-07-30. It remains **UNAPPLIED**: neither `staging.era_835_payment` nor
+  `staging.era_835_adjustment` exists live (re-verified by catalog probe 2026-07-30),
+  which is consistent with 016's scope note. Because it is unapplied it is still freely
+  editable, and it was amended on 2026-07-30 — see the 835 grain-split entry below.
+
+### 835 ERA grain split — migration 013 amended 2026-07-30 (UNAPPLIED, review hold)
+
+A read-only grain audit found 013-as-authored stored the 835 at **adjustment grain only**,
+with all seven BPR/TRN envelope fields denormalized onto every CAS triplet row. Two
+independent money-critical defects:
+
+1. **INFLATION** — `sum(payment_amount)` multiplied each remit's BPR02 by its triplet
+   count: **10-100x, and variable per remit**, so not correctable by any constant. Same
+   class as the posting-vs-charge grain error on `cmd_explorer_rows`, but a much larger
+   multiplier.
+2. **TRUNCATION** — adjustment rows are emitted only from inside `pushAdj()`, so a remit
+   whose claims all adjudicated **clean-paid has zero triplets and its BPR02 never landed
+   at all**. Clean-paid remits carry the most money.
+
+No dedup key fixes defect 2, and none existed for defect 1 either: `row_fingerprint` is
+per-triplet *by construction*, TRN02 is payer-scoped not global (and TRN03, the X12 field
+that qualifies it, was never parsed), and `(payer + BPR16 + BPR02)` collides on per-NPI
+payment splits and reissued checks.
+
+**Resolution — two tables in the one migration.** `staging.era_835_payment` (one row per
+ST/SE set) is now the **only** authoritative source of remitted dollars;
+`staging.era_835_adjustment` FKs to it via `payment_id NOT NULL` and **has no
+`payment_amount` column at all** — the wrong sum is unwritable rather than discouraged.
+`check_eft_trace_number` also moved (stable payer-issued remit id = an attractor for the
+wrong `GROUP BY`); `era_control_number` (ST02) was **deliberately retained** on the
+adjustment table because it is a per-interchange sequence number that resets per file, so
+it cannot identify a remit or mislead a grouping, and it names the source transaction set
+for debugging without dereferencing the FK. The payment row is written **unconditionally
+per parsed transaction**, before and independent of triplet mapping.
+
+> ### ⚠️ READ-PATH CONTRACT — `era_835_payment.payment_amount` is NULLABLE
+>
+> A malformed/out-of-range BPR02 still lands the remit (dropping it is defect 2), so
+> `payment_amount` can be NULL. **`sum()` silently skips NULLs**, so such a remit
+> contributes **$0** to any aggregate and the tile above it understates while looking
+> authoritative. The ingest counter `payments_amount_out_of_range` is in the *ingest*
+> path — a dashboard query cannot see it.
+>
+> **Any query summing `payment_amount` MUST also return, over the same window and
+> filters, `count(*) FILTER (WHERE payment_amount IS NULL)`, and the UI MUST surface that
+> count when it is > 0.** A sum shown without it is a floor, not a total.
+>
+> ```sql
+> SELECT sum(payment_amount)                            AS remitted,
+>        count(*) FILTER (WHERE payment_amount IS NULL) AS unquantified_remits
+>   FROM staging.era_835_payment WHERE ...;
+> ```
+>
+> `payment_amount_raw` holds the original figure, so "unquantified" never means
+> "unknowable".
+
+**Fingerprint correctness fix (same pass).** The remit fingerprint hashes 8 fields and
+coalesces NULLs to an explicit `'\x00absent'` token, never `''`. Hashing only the nullable
+numeric amount meant `BPR02=99999999999.99`, `BPR02=88888888888.88` and BPR02-absent all
+produced **one digest** (verified) — two of the three were silently discarded by
+`ON CONFLICT DO NOTHING` while the insert reported success. An absent-token alone would
+**not** have fixed it (all three would share the token), so `payment_amount_raw` (BPR02
+verbatim) is also a fingerprint input. `era_source_file` is deliberately **excluded**: it
+is a download-time name (`${cid}_${date}` for raw payloads), so hashing it would make a
+re-pull of the same remit insert twice.
+
+**⚠️ Fingerprint stability assumption (standing watch item).** Two of the eight remit-key
+inputs — `era_control_number` (ST02) and `payment_amount_raw` — assume **CMD re-serves a
+date's 835 byte-stably**: same transaction sets, same order, same ST02 assignment, same
+literal BPR02 text. ST02 is a per-interchange sequence number that resets per file, and
+`payment_amount_raw` is literal text (`'100.00'` vs `'100.0'` is the same money, different
+bytes). If that assumption breaks, the same remit hashes differently, inserts a **second
+payment row, and BPR02 is double-counted** — inflation returning by the same route
+excluding `era_source_file` closed.
+
+> **Detection signal:** a re-pull of an already-ingested date **MUST** report
+> `payments_inserted = 0`. Anything above zero there is the duplicate-remit signature,
+> **not** new data. Confirm with:
+> ```sql
+> SELECT check_eft_trace_number, payment_date, count(*)
+>   FROM staging.era_835_payment GROUP BY 1,2 HAVING count(*) > 1;  -- expect zero rows
+> ```
+
+Accepted deliberately: duplication is detectable, attributable and correctable at the read
+path, whereas truncation is not — so where they trade off, 013 errs toward retaining a
+row. ST02 being *useless as a `GROUP BY` dimension* (why keeping it on the adjustment
+table is harmless) and *useful as a fingerprint disambiguator* (separating two otherwise
+identical transaction sets inside one interchange) are the same property at two distances,
+not a contradiction. Also known and deliberate: `payment_amount` is now redundant in the
+fingerprint (a pure function of `payment_amount_raw`) — kept because removing it would
+force a full re-ingest for no gain.
+
+Also fixed while amending: 013 was the **only** Veris migration missing `SET ROLE
+claims_admin` (both tables would have been born owned by `postgres`); it had **no paired
+`_rollback.sql`**; and it lacked the `core.business_entity` FK that 016 added to the 9 live
+staging tables while explicitly excluding these two. Parser now captures TRN03.
+
+**State: authored, NOT applied, NOT committed** — on review hold with Alec as of
+2026-07-30.
 
 ### Migration numbering convention (RATIFIED)
 

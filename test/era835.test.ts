@@ -1,5 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+
+// Throwaway test key (obvious dummy) — the insert-path tests exercise buildInsertParams,
+// which encrypts the two PHI fields. Same convention as test/billingAudit.test.ts. Never
+// a real key; nothing here touches a database.
+//
+// This assignment sits among the imports, which ESM HOISTS above it — that is safe here
+// only because phiCrypto reads LIBSODIUM_KEY lazily inside encryptPhi() rather than at
+// module load. If that ever becomes a load-time read, this must move to a dynamic
+// `await import()` (which is exactly why billingAudit.test.ts uses one).
+process.env.LIBSODIUM_KEY = 'b'.repeat(64);
+
 import {
   detectDelimiters,
   parseCasSegment,
@@ -7,12 +18,16 @@ import {
 } from '../src/ingest/era835Parser.js';
 import {
   era835Fingerprint,
+  era835PaymentFingerprint,
   expandDateRange,
+  insertEra835Transactions,
+  mapTransactions,
   mapTransactionsToRows,
   type Era835IngestRow,
   type Era835SkipCounts,
 } from '../src/ingest/era_ingest.js';
 import type { CmdCustomer } from '../src/collections/cmdCustomers.js';
+import type { Db } from '../src/collections/db.js';
 
 /**
  * Hermetic tests for the 835 ERA parser + ingest mapping. The fixture uses FAKE
@@ -127,9 +142,24 @@ test('parseEra835: envelope, claims, service lines, CAS levels, remark count', (
   assert.equal(line1.adjustments.length, 2);
   assert.deepEqual(line1.remarkCodes, ['N130']);
 
-  // Claim B fully paid, no CAS → no adjustment rows downstream.
+  // Claim B fully paid, no CAS → no ADJUSTMENT rows downstream. That is correct and
+  // unchanged. What must NOT follow from it is the remit being dropped: the BPR02 lands
+  // on staging.era_835_payment regardless. See 'mapTransactions: a remit with ZERO CAS
+  // adjustments still yields exactly one payment row' below — the regression test for
+  // the truncation defect the two-table split fixed.
   assert.equal(b!.claimLevelAdjustments.length, 0);
   assert.equal(b!.serviceLines[0]!.adjustments.length, 0);
+});
+
+test('parseEra835 captures TRN03 (the field that qualifies the payer-scoped TRN02)', () => {
+  const r = parseEra835(sampleEra835());
+  const p = r.transactions[0]!.payment;
+  assert.equal(p.traceNumber, 'CHK123456'); //                TRN02
+  assert.equal(p.traceOriginatingCompanyId, '1999999999'); // TRN03
+  // BPR02 is captured both parsed and verbatim; the raw form is what keeps two
+  // unrepresentable amounts distinguishable in the remit fingerprint.
+  assert.equal(p.paymentAmount, 1250);
+  assert.equal(p.paymentAmountRaw, '1250.00');
 });
 
 test('mapTransactionsToRows: one row per CAS triplet, facility/entity resolved, sign preserved', () => {
@@ -211,6 +241,20 @@ test('mapTransactionsToRows skips an out-of-range CAS amount rather than abortin
   const rows = mapTransactionsToRows(r.transactions, { customer: CUSTOMER, sourceFile: 'f.835' }, skips);
   assert.equal(rows.length, 0);
   assert.equal(skips.amount_out_of_range, 1);
+
+  // …and the remit STILL LANDS. Skipping every triplet must never drop the payment row:
+  // that combination (filtered-to-zero triplets) was one of the two ways a remit used to
+  // disappear entirely under the old single-table shape.
+  const mapped = mapTransactions(
+    r.transactions,
+    { customer: CUSTOMER, sourceFile: 'f.835' },
+    { invalid_group_code: 0, missing_carc_code: 0, amount_out_of_range: 0 },
+  );
+  assert.equal(mapped.length, 1);
+  assert.equal(mapped[0]!.adjustments.length, 0);
+  // BPR02 was '0' — a real zero-dollar (denial-only) remit, landed in full.
+  assert.equal(mapped[0]!.payment.payment_amount, '0.00');
+  assert.equal(mapped[0]!.payment.payment_amount_raw, '0');
 });
 
 test('era835Fingerprint is deterministic, unique per triplet, and PHI-free-stable', () => {
@@ -251,6 +295,275 @@ test('mapTransactionsToRows skips out-of-spec group codes and blank CARCs (count
   // blank CARC is dropped by the parser (blank reason) before mapping, so the map-level
   // missing_carc_code guard is defense-in-depth; assert the parser dropped it:
   assert.equal(r.adjustmentCount, 1); // only the ZZ triplet parsed; blank-CARC never emitted
+});
+
+// =============================================================================
+// Payment grain (staging.era_835_payment) — the two-table split
+// =============================================================================
+
+/** A remit whose EVERY claim adjudicated clean: no CAS anywhere. Under the old
+ *  single-table shape this produced zero rows and its $900 vanished completely. */
+function cleanPaidEra835(): string {
+  return (
+    isaSegment() +
+    'ST*835*0007~' +
+    'BPR*I*900.00*C*ACH*CCP*01*9*DA*1*15**01*9*DA*1*20260731~' +
+    'TRN*1*CLEAN999*1888888888~' +
+    'N1*PR*ACME HEALTH PLAN*XV*12345~' +
+    'CLP*CLEAN-A*1*500.00*500.00*0*12*ICN-CLEAN-A*11~' +
+    'SVC*HC:90837*500.00*500.00**1~' +
+    'DTM*472*20260701~' +
+    'CLP*CLEAN-B*1*400.00*400.00*0*12*ICN-CLEAN-B*11~' +
+    'SVC*HC:H0015*400.00*400.00**1~' +
+    'DTM*472*20260702~' +
+    'SE*10*0007~'
+  );
+}
+
+const NO_SKIPS = (): Era835SkipCounts => ({
+  invalid_group_code: 0,
+  missing_carc_code: 0,
+  amount_out_of_range: 0,
+});
+
+test('mapTransactions: a remit with ZERO CAS adjustments still yields exactly one payment row', () => {
+  // THE regression test for the truncation defect. A clean-paid remit has no CAS
+  // triplets, so it contributes no adjustment rows — and under the old single-table
+  // design that meant its BPR02 was never persisted at all. Clean-paid remits carry the
+  // most money. If this test ever fails, upcoming-payment totals are silently short.
+  const r = parseEra835(cleanPaidEra835());
+  assert.equal(r.adjustmentCount, 0, 'fixture must have no CAS at all');
+
+  const mapped = mapTransactions(r.transactions, { customer: CUSTOMER, sourceFile: 'clean.835' }, NO_SKIPS());
+
+  assert.equal(mapped.length, 1, 'exactly one payment row');
+  assert.equal(mapped[0]!.adjustments.length, 0, 'and zero adjustment rows');
+
+  const p = mapped[0]!.payment;
+  assert.equal(p.payment_amount, '900.00'); //         the money that would have been lost
+  assert.equal(p.payment_amount_raw, '900.00');
+  assert.equal(p.payment_date, '2026-07-31');
+  assert.equal(p.check_eft_trace_number, 'CLEAN999');
+  assert.equal(p.trace_originating_company_id, '1888888888');
+  assert.equal(p.payer_name, 'ACME HEALTH PLAN');
+  assert.equal(p.payer_id, '12345');
+  assert.equal(p.business_entity_id, BE);
+  assert.equal(p.facility_code, 'CAMH');
+  assert.equal(p.cmd_customer_id, '10027973');
+  assert.ok(p.row_fingerprint.length > 0);
+});
+
+test('payment grain: BPR02 appears exactly once for a multi-claim, multi-adjustment remit', () => {
+  // The inflation defect, stated as a test. The sample remit is $1,250.00 and carries 5
+  // CAS triplets. Summing the payment grain gives 1250.00; the old shape would have
+  // reported 5 x 1250.00 = 6250.00 for the same remit.
+  const r = parseEra835(sampleEra835());
+  const mapped = mapTransactions(r.transactions, { customer: CUSTOMER, sourceFile: 'f.835' }, NO_SKIPS());
+
+  assert.equal(mapped.length, 1, 'one remit');
+  assert.equal(mapped[0]!.adjustments.length, 5, 'five triplets');
+
+  const total = mapped.reduce((s, t) => s + Number(t.payment.payment_amount ?? 0), 0);
+  assert.equal(total, 1250, 'sum over payment grain == BPR02, once');
+  assert.notEqual(total, 1250 * 5, 'and NOT multiplied by the triplet count');
+});
+
+test('adjustment rows carry NO payment_amount and NO trace number (the columns are gone)', () => {
+  // Structural guard: if either field is ever re-added to Era835IngestRow, the wrong sum
+  // becomes writable again. Keys are asserted absent, not merely null/undefined.
+  const r = parseEra835(sampleEra835());
+  const rows = mapTransactionsToRows(r.transactions, { customer: CUSTOMER, sourceFile: 'f.835' }, NO_SKIPS());
+  assert.ok(rows.length > 0);
+  for (const row of rows) {
+    assert.equal('payment_amount' in row, false, 'payment_amount must not exist on an adjustment row');
+    assert.equal('check_eft_trace_number' in row, false, 'trace number belongs to the payment grain');
+    // The kept filter context is still there.
+    assert.equal(row.payment_date, '2026-06-30');
+    assert.equal(row.payer_name, 'ACME HEALTH PLAN');
+    assert.equal(row.payment_method, 'ACH');
+  }
+});
+
+test('era835PaymentFingerprint: stable across re-pull, and IGNORES the download-time filename', () => {
+  // era_source_file is deliberately excluded from the remit key. For a raw payload the
+  // ingest passes `${cid}_${date}` as the filename, literally embedding the pull date —
+  // so hashing it would make the SAME remit re-pulled on another date insert twice and
+  // double-count BPR02. This test is what keeps that exclusion honest.
+  const r = parseEra835(sampleEra835());
+  const first = mapTransactions(r.transactions, { customer: CUSTOMER, sourceFile: '10027973_2026-06-30' }, NO_SKIPS());
+  const later = mapTransactions(r.transactions, { customer: CUSTOMER, sourceFile: '10027973_2026-07-14' }, NO_SKIPS());
+
+  assert.equal(
+    first[0]!.payment.row_fingerprint,
+    later[0]!.payment.row_fingerprint,
+    'a re-pull under a different filename must dedup, not double-count',
+  );
+  // Provenance is still recorded, it just does not participate in identity.
+  assert.notEqual(first[0]!.payment.era_source_file, later[0]!.payment.era_source_file);
+  // Recomputed from the row == stored value (no hidden state).
+  assert.equal(era835PaymentFingerprint(first[0]!.payment), first[0]!.payment.row_fingerprint);
+});
+
+test('era835PaymentFingerprint: NULL, "0.00" and "" amounts are three DISTINCT digests', () => {
+  // Regression test for the 2026-07-30 review finding. Coalescing a NULL amount to ''
+  // made "absent" and "blank" the same digest input. An absent BPR02 and a real $0.00
+  // denial-only remit must never be confused, and neither may collide with a blank.
+  const base = mapTransactions(
+    parseEra835(sampleEra835()).transactions,
+    { customer: CUSTOMER, sourceFile: 'f.835' },
+    NO_SKIPS(),
+  )[0]!.payment;
+
+  const withAmount = (payment_amount: string | null, payment_amount_raw: string | null) =>
+    era835PaymentFingerprint({ ...base, payment_amount, payment_amount_raw });
+
+  const digests = [
+    withAmount(null, null), //     BPR02 absent entirely
+    withAmount('0.00', '0'), //    a real zero-dollar (denial-only) remit
+    withAmount('', ''), //         blank — distinct from absent, not merged into it
+  ];
+  assert.equal(new Set(digests).size, 3, 'NULL / "0.00" / "" must be three distinct digests');
+});
+
+test('era835PaymentFingerprint: two DIFFERENT out-of-range BPR02 values stay distinct', () => {
+  // The live half of the same finding, and the reason an ABSENT token alone is not
+  // enough. Both amounts exceed numeric(12,2) so payment_amount is NULL for both; only
+  // payment_amount_raw still separates them. Without it these two remits — and an
+  // absent-BPR02 third — hashed identically and ON CONFLICT DO NOTHING silently dropped
+  // two of the three while reporting success.
+  const mk = (edi: string) =>
+    mapTransactions(parseEra835(edi).transactions, { customer: CUSTOMER, sourceFile: 'f.835' }, NO_SKIPS())[0]!.payment;
+
+  const a = mk(sampleEra835().replace('BPR*I*1250.00*', 'BPR*I*99999999999.99*'));
+  const b = mk(sampleEra835().replace('BPR*I*1250.00*', 'BPR*I*88888888888.88*'));
+  const absent = mk(sampleEra835().replace('BPR*I*1250.00*', 'BPR*I**'));
+
+  // Precondition: all three really are unrepresentable / absent, so the numeric is NULL.
+  assert.equal(a.payment_amount, null);
+  assert.equal(b.payment_amount, null);
+  assert.equal(absent.payment_amount, null);
+  // …but the raw element survives and keeps them apart.
+  assert.equal(a.payment_amount_raw, '99999999999.99');
+  assert.equal(b.payment_amount_raw, '88888888888.88');
+  assert.equal(absent.payment_amount_raw, null);
+
+  const digests = [a.row_fingerprint, b.row_fingerprint, absent.row_fingerprint];
+  assert.equal(new Set(digests).size, 3, 'three different remits must not share one digest');
+});
+
+test('era835PaymentFingerprint: an absent field hashes as the token, never as blank', () => {
+  // Guards the ''-overload class generally, not just for the amount: a NULL trace number
+  // and a blank trace number must not be the same identity.
+  const base = mapTransactions(
+    parseEra835(sampleEra835()).transactions,
+    { customer: CUSTOMER, sourceFile: 'f.835' },
+    NO_SKIPS(),
+  )[0]!.payment;
+  assert.notEqual(
+    era835PaymentFingerprint({ ...base, check_eft_trace_number: null }),
+    era835PaymentFingerprint({ ...base, check_eft_trace_number: '' }),
+  );
+  assert.notEqual(
+    era835PaymentFingerprint({ ...base, payer_id: null }),
+    era835PaymentFingerprint({ ...base, payer_id: '' }),
+  );
+});
+
+test('era835PaymentFingerprint: genuinely different remits do NOT collide', () => {
+  const base = parseEra835(sampleEra835());
+  const mine = mapTransactions(base.transactions, { customer: CUSTOMER, sourceFile: 'f.835' }, NO_SKIPS())[0]!.payment;
+
+  // Same payer, same date, same amount — differing only by trace number. This is the
+  // per-NPI-split / reissued-check case that made (payer + BPR16 + BPR02) unsound.
+  const otherTrace = parseEra835(sampleEra835().replace('CHK123456', 'CHK999999'));
+  const theirs = mapTransactions(otherTrace.transactions, { customer: CUSTOMER, sourceFile: 'f.835' }, NO_SKIPS())[0]!.payment;
+  assert.notEqual(mine.row_fingerprint, theirs.row_fingerprint);
+
+  // Same remit bytes, different FACILITY (cmd_customer_id) — must not collapse.
+  const otherCustomer: CmdCustomer = { customerId: '10029999', facilityCode: 'OTHER', businessEntityId: BE };
+  const elsewhere = mapTransactions(base.transactions, { customer: otherCustomer, sourceFile: 'f.835' }, NO_SKIPS())[0]!.payment;
+  assert.notEqual(mine.row_fingerprint, elsewhere.row_fingerprint);
+});
+
+test('insertEra835Transactions: payment row is written first and its id lands on every triplet', () => {
+  // Hermetic fake pool — asserts the FK wiring and the write ORDER without a DB.
+  const sql: string[] = [];
+  const adjustmentParams: unknown[][] = [];
+  const fakeClient = {
+    query: async (text: string, params?: unknown[]) => {
+      sql.push(text);
+      if (text.startsWith('insert into staging.era_835_payment')) {
+        return { rows: [{ id: 4242 }], rowCount: 1 };
+      }
+      if (text.startsWith('insert into staging.era_835_adjustment')) {
+        adjustmentParams.push(params ?? []);
+        return { rows: [], rowCount: 5 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release: () => {},
+  };
+  const fakeDb = { connect: async () => fakeClient } as unknown as Db;
+
+  const r = parseEra835(sampleEra835());
+  const mapped = mapTransactions(r.transactions, { customer: CUSTOMER, sourceFile: 'f.835' }, NO_SKIPS());
+
+  return insertEra835Transactions(fakeDb, BE, mapped, 'test').then((counts) => {
+    assert.deepEqual(counts, { payments: 1, adjustments: 5 });
+
+    // Write order: tenant GUC, then the payment row, then the adjustments.
+    const payIdx = sql.findIndex((s) => s.startsWith('insert into staging.era_835_payment'));
+    const adjIdx = sql.findIndex((s) => s.startsWith('insert into staging.era_835_adjustment'));
+    assert.ok(sql[0]!.includes('begin'));
+    assert.ok(sql.some((s) => s.includes('app.business_entity_id')));
+    assert.ok(payIdx !== -1 && adjIdx !== -1 && payIdx < adjIdx, 'payment must be inserted before its triplets');
+    assert.ok(sql.some((s) => s.includes('commit')));
+
+    // payment_id is the FIRST positional column, so every 37-param tuple starts with 4242.
+    assert.equal(adjustmentParams.length, 1);
+    const flat = adjustmentParams[0]!;
+    const perRow = flat.length / 5;
+    assert.equal(Number.isInteger(perRow), true, 'params must divide evenly across 5 rows');
+    for (let i = 0; i < 5; i++) {
+      assert.equal(flat[i * perRow], 4242, `triplet ${i} must carry the payment_id`);
+    }
+
+    // Neither table's INSERT may mention the removed column.
+    assert.ok(!sql.some((s) => s.startsWith('insert into staging.era_835_adjustment') && s.includes('payment_amount')));
+  });
+});
+
+test('insertEra835Transactions: a re-pull re-reads the existing payment id instead of duplicating', () => {
+  // ON CONFLICT DO NOTHING RETURNING id yields NO row when the remit is already present,
+  // so the ingest falls back to SELECT ... WHERE row_fingerprint = $1. Idempotency test.
+  const sql: string[] = [];
+  const fakeClient = {
+    query: async (text: string, params?: unknown[]) => {
+      sql.push(text);
+      if (text.startsWith('insert into staging.era_835_payment')) {
+        return { rows: [], rowCount: 0 }; //  conflict → DO NOTHING → no RETURNING row
+      }
+      if (text.startsWith('select id from staging.era_835_payment')) {
+        return { rows: [{ id: 777 }], rowCount: 1 };
+      }
+      if (text.startsWith('insert into staging.era_835_adjustment')) {
+        assert.equal(params?.[0], 777, 'triplets attach to the pre-existing payment row');
+        return { rows: [], rowCount: 0 }; // triplets already present too
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release: () => {},
+  };
+  const fakeDb = { connect: async () => fakeClient } as unknown as Db;
+
+  const r = parseEra835(sampleEra835());
+  const mapped = mapTransactions(r.transactions, { customer: CUSTOMER, sourceFile: 'f.835' }, NO_SKIPS());
+
+  return insertEra835Transactions(fakeDb, BE, mapped, 'test').then((counts) => {
+    assert.deepEqual(counts, { payments: 0, adjustments: 0 }, 're-pull inserts nothing');
+    assert.ok(sql.some((s) => s.startsWith('select id from staging.era_835_payment')));
+    assert.ok(sql.some((s) => s.includes('commit')));
+  });
 });
 
 test('expandDateRange yields inclusive ISO days', () => {

@@ -86,10 +86,25 @@ export interface Era835Payment {
   paymentMethod: string | null;
   /** BPR02 total actual payment amount. */
   paymentAmount: number | null;
+  /**
+   * BPR02 EXACTLY as it appeared in the EDI (trimmed), or null when the element was
+   * absent/blank. Kept alongside the parsed number because numeric(12,2) cannot hold
+   * every value a non-conformant payer might send: when paymentAmount is unrepresentable
+   * this raw string is the ONLY surviving record of the figure, and it is what keeps two
+   * differently-malformed remits distinguishable in the remit fingerprint.
+   */
+  paymentAmountRaw: string | null;
   /** BPR16 effective entry date (ISO YYYY-MM-DD). */
   paymentDate: string | null;
-  /** TRN02 check/EFT trace number. */
+  /** TRN02 check/EFT trace number. Unique per PAYER, not globally — qualify it with
+   *  traceOriginatingCompanyId before using it as an identity key. */
   traceNumber: string | null;
+  /**
+   * TRN03 payer's originating company identifier — the field X12 provides to qualify
+   * TRN02. Captured because staging.era_835_payment's remit fingerprint hashes it:
+   * TRN02 alone is payer-scoped, so without TRN03 two payers' remits can collide.
+   */
+  traceOriginatingCompanyId: string | null;
   /** Loop 1000A N1*PR payer name. */
   payerName: string | null;
   /** Loop 1000A payer identifier (N104 when present). */
@@ -211,8 +226,10 @@ export function parseEra835(edi: string): Era835ParseResult {
   const beginPayment = (): Era835Payment => ({
     paymentMethod: null,
     paymentAmount: null,
+    paymentAmountRaw: null,
     paymentDate: null,
     traceNumber: null,
+    traceOriginatingCompanyId: null,
     payerName: null,
     payerId: null,
     eraControlNumber: null,
@@ -241,13 +258,22 @@ export function parseEra835(edi: string): Era835ParseResult {
       case 'BPR': {
         if (!tx) break;
         tx.payment.paymentAmount = num(el[2]);
+        // Raw BPR02 too: num() returns null for anything unparseable OR out of the range
+        // numeric(12,2) can store, and that null would otherwise erase the figure from
+        // both the record and the remit's identity.
+        tx.payment.paymentAmountRaw = str(el[2]);
         tx.payment.paymentMethod = str(el[4]);
         // BPR16 is the effective entry date (last common element in the 835 BPR).
         tx.payment.paymentDate = x12Date(el[16]);
         break;
       }
       case 'TRN': {
-        if (tx) tx.payment.traceNumber = str(el[2]);
+        // TRN02 = check/EFT trace number; TRN03 = payer's originating company id, which
+        // qualifies TRN02 (payer-scoped on its own). Both feed the remit fingerprint.
+        if (tx) {
+          tx.payment.traceNumber = str(el[2]);
+          tx.payment.traceOriginatingCompanyId = str(el[3]);
+        }
         break;
       }
       case 'N1': {

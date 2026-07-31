@@ -12,8 +12,20 @@
  * group/reason/amount/quantity triplet — src/ingest/era835Parser.ts), resolves
  * facility_code (from the customer) + business_entity_id (per-customer, from
  * cmdCustomers.ts — BXR or Indigo), encrypts
- * the two PHI identifiers in-process, computes a stable row_fingerprint, and
- * idempotently upserts into staging.era_835_adjustment (ON CONFLICT DO NOTHING).
+ * the two PHI identifiers in-process, computes stable fingerprints, and
+ * idempotently upserts into TWO tables (ON CONFLICT DO NOTHING on each).
+ *
+ * TWO GRAINS, TWO TABLES (see SQL Schemas/013 for the full rationale):
+ *   staging.era_835_payment    — ONE row per ST/SE set (the BPR/TRN envelope). The
+ *                                AUTHORITATIVE source of remitted dollars; BPR02 is
+ *                                summable here and ONLY here.
+ *   staging.era_835_adjustment — one row per CAS triplet, FK'd to the payment row.
+ *                                Has NO payment_amount column on purpose.
+ *
+ * The payment row is written UNCONDITIONALLY per parsed transaction, before and
+ * independent of triplet mapping. A clean-paid remit has zero CAS triplets; under the
+ * old single-table shape its BPR02 never landed at all. Never re-gate that write on
+ * adjustments existing.
  *
  * PHI DISCIPLINE (docs/CLAUDE.md §2): patient name + member id are libsodium
  * ciphertext (nonce‖ct) via src/collections/phiCrypto.ts, encrypted only at the
@@ -48,8 +60,51 @@ const BATCH = 500;
 const MAX_RANGE_DAYS = 400; // guard against a runaway --from/--to
 
 /**
+ * One remittance-envelope row — ONE PER ST/SE TRANSACTION SET. Mirrors
+ * staging.era_835_payment (migration 013). Contains NO PHI: the BPR/TRN/N1*PR
+ * envelope is payer-and-money only, so there is nothing here to encrypt.
+ *
+ * This is the AUTHORITATIVE money row. It is written unconditionally per parsed
+ * transaction (see mapTransactions) — never gated on whether any CAS triplet
+ * survived mapping, because a clean-paid remit has zero triplets and would
+ * otherwise never land at all.
+ */
+export interface Era835PaymentRow {
+  business_entity_id: string;
+  facility_code: string;
+  cmd_customer_id: string;
+  payer_name: string | null;
+  payer_id: string | null;
+  era_control_number: string | null;
+  check_eft_trace_number: string | null;
+  trace_originating_company_id: string | null;
+  payment_method: string | null;
+  // Money is a FIXED-2 DECIMAL STRING at the DB boundary (see the note on
+  // Era835IngestRow). null when BPR02 is absent / out of numeric(12,2) range —
+  // the remit still lands (a dropped remit is the defect this table fixes), and
+  // the null is COUNTED in stats.payments_amount_out_of_range so it stays visible.
+  payment_amount: string | null;
+  /**
+   * BPR02 verbatim from the EDI. The ONLY surviving record of the figure when
+   * payment_amount had to go NULL, and a fingerprint input — without it, two
+   * differently-malformed remits hash identically and one is silently dropped.
+   */
+  payment_amount_raw: string | null;
+  payment_date: string | null;
+  era_source_file: string | null;
+  row_fingerprint: string;
+}
+
+/**
  * One fully-mapped adjustment row (PHI held as PLAINTEXT here; encrypted only at the
  * insert boundary). Column set mirrors staging.era_835_adjustment (migration 013).
+ *
+ * NOTE what is deliberately ABSENT: payment_amount and check_eft_trace_number. Both
+ * moved to Era835PaymentRow / staging.era_835_payment. BPR02 denormalized onto every
+ * triplet made sum() overstate each remit by its triplet count (10-100x, variable),
+ * so the column does not exist here — the wrong sum is unwritable, not merely
+ * discouraged. payment_date / payer_name / payer_id / payment_method DO stay: they
+ * are low-cardinality filter dimensions and summing a date is not a failure mode.
  */
 export interface Era835IngestRow {
   business_entity_id: string;
@@ -58,13 +113,11 @@ export interface Era835IngestRow {
   payer_name: string | null;
   payer_id: string | null;
   era_control_number: string | null;
-  check_eft_trace_number: string | null;
   payment_method: string | null;
   // Money is a FIXED-2 DECIMAL STRING at the DB boundary (docs/CLAUDE.md §2, normalize.ts):
   // never a raw JS float (which node-postgres would toString() into float artifacts /
   // scientific notation for a numeric(12,2) column, and which could diverge from the
   // fingerprinted value). null when the source field is absent / out of numeric(12,2) range.
-  payment_amount: string | null;
   payment_date: string | null;
   patient_control_number: string | null;
   payer_claim_control_number: string | null;
@@ -93,10 +146,21 @@ export interface Era835IngestRow {
   row_fingerprint: string;
 }
 
-/** Positional INSERT columns — order MUST match buildInsertParams() exactly. */
-const INSERT_COLS = [
+/** Positional INSERT columns for the PAYMENT table — order MUST match
+ *  buildPaymentParams() exactly. */
+const PAYMENT_INSERT_COLS = [
   'business_entity_id', 'facility_code', 'cmd_customer_id', 'payer_name', 'payer_id',
-  'era_control_number', 'check_eft_trace_number', 'payment_method', 'payment_amount', 'payment_date',
+  'era_control_number', 'check_eft_trace_number', 'trace_originating_company_id',
+  'payment_method', 'payment_amount', 'payment_amount_raw', 'payment_date',
+  'era_source_file', 'source', 'row_fingerprint', 'ingested_by',
+] as const;
+
+/** Positional INSERT columns — order MUST match buildInsertParams() exactly.
+ *  payment_id leads: it is the FK to the authoritative envelope row. */
+const INSERT_COLS = [
+  'payment_id',
+  'business_entity_id', 'facility_code', 'cmd_customer_id', 'payer_name', 'payer_id',
+  'era_control_number', 'payment_method', 'payment_date',
   'patient_control_number', 'payer_claim_control_number', 'claim_status_code', 'claim_charge_amount',
   'claim_paid_amount', 'patient_responsibility_amount', 'claim_filing_indicator',
   'patient_name_enc', 'member_id_enc',
@@ -159,6 +223,85 @@ export function era835Fingerprint(row: Era835IngestRow): string {
   ]);
 }
 
+/**
+ * Explicit ABSENT discriminator for nullable fingerprint fields.
+ *
+ * WHY NOT `?? ''`: an empty string is a REAL possible value for a text field, so
+ * coalescing null to '' overloads one digest input with two meanings ("absent" and
+ * "blank"). Worse, it erases information: every nullable field that goes null
+ * contributes the same zero-information token, so two rows differing ONLY in fields
+ * that both went null hash identically and the second is silently discarded by
+ * ON CONFLICT DO NOTHING. \x00 cannot occur in X12 element text (str() trims, and the
+ * EDI is 7-bit ASCII) nor in any fixed-2 decimal string, so it can never be confused
+ * with a real value.
+ */
+const FP_ABSENT = '\x00absent';
+const fpText = (v: string | null): string =>
+  v === null ? FP_ABSENT : v.trim().toLowerCase();
+
+/**
+ * LOCKED remit-identity fingerprint — SHA-256 over these 8 NON-PHI fields, in EXACTLY
+ * this order. This is the PER-REMIT key; era835Fingerprint above is the PER-TRIPLET key.
+ * They are different grains and must never be interchanged.
+ *   1 cmd_customer_id  2 payer_id  3 trace_originating_company_id (TRN03)
+ *   4 check_eft_trace_number (TRN02)  5 payment_amount(fixed-2 str)
+ *   6 payment_amount_raw (BPR02 verbatim)  7 payment_date(ISO)
+ *   8 era_control_number (ST02)
+ *
+ * WHY BOTH payment_amount AND payment_amount_raw (the 2026-07-30 review finding):
+ * payment_amount is NULL whenever BPR02 is absent OR outside numeric(12,2). Hashing
+ * only the nullable numeric meant THREE genuinely different remits — BPR02
+ * 99999999999.99, BPR02 88888888888.88, and BPR02 absent — produced ONE digest
+ * (verified), so two of the three were silently dropped by ON CONFLICT DO NOTHING:
+ * truncation returning through the same back door that excluding era_source_file
+ * closed, except invisible because the insert reports success. An FP_ABSENT token
+ * alone does NOT fix this (all three would share the token) — the distinguishing
+ * information has to survive, which is what the raw element preserves.
+ *
+ * WHY NOT era_source_file — see the full rationale on
+ * staging.era_835_payment.row_fingerprint in SQL Schemas/013. Short version:
+ * era_source_file is a DOWNLOAD-TIME name (for a raw payload the ingest passes the
+ * fallback `${cid}_${date}`, literally embedding the pull date; for a ZIP it is the
+ * payer's entry name, which can vary between deliveries). Hashing it would make the
+ * SAME remit re-pulled on a different date hash differently, insert twice, and
+ * double-count BPR02 — reintroducing the exact inflation defect the two-table split
+ * exists to eliminate. It is stored for provenance only.
+ *
+ * TRN02 is unique per PAYER, not globally, so it is qualified by payer_id + TRN03
+ * (the X12 field for precisely this purpose) + cmd_customer_id (one customer == one
+ * facility; two facilities can receive the same payer's trace number).
+ *
+ * STABILITY ASSUMPTION (full treatment in SQL Schemas/013's FINGERPRINT STABILITY
+ * ASSUMPTIONS header block — read it before touching this function): era_control_number
+ * (ST02) and payment_amount_raw both assume CMD re-serves a date's 835 BYTE-STABLY —
+ * same transaction sets, same order, same ST02 assignment, same literal BPR02 text. ST02
+ * is a per-file sequence number and payment_amount_raw is literal text ('100.00' vs
+ * '100.0'), so if that breaks the same remit gets a new digest, inserts a SECOND payment
+ * row, and BPR02 is double-counted. DETECTION: a re-pull of an already-ingested date must
+ * report payments_inserted = 0; anything above zero there is the duplicate-remit
+ * signature, not new data. Accepted deliberately — duplication is detectable and
+ * correctable, truncation is not.
+ *
+ * KNOWN REDUNDANCY (not an oversight): payment_amount is a pure function of
+ * payment_amount_raw, so field 5 adds no discriminating power over field 6. Kept because
+ * it is harmless, self-documenting, and dropping it would force a full re-ingest for no
+ * gain.
+ *
+ * Changing the field set or order silently breaks dedup — full re-ingest required.
+ */
+export function era835PaymentFingerprint(row: Era835PaymentRow): string {
+  return fingerprintRow([
+    row.cmd_customer_id.trim().toLowerCase(), //             1
+    fpText(row.payer_id), //                                2
+    fpText(row.trace_originating_company_id), //             3
+    fpText(row.check_eft_trace_number), //                   4
+    row.payment_amount ?? FP_ABSENT, //                      5 (fixed-2 string)
+    fpText(row.payment_amount_raw), //                       6 (BPR02 verbatim)
+    row.payment_date ?? FP_ABSENT, //                        7
+    fpText(row.era_control_number), //                       8
+  ]);
+}
+
 /** Skip counts (labels are field names only — never a cell value). */
 export interface Era835SkipCounts {
   invalid_group_code: number;
@@ -166,20 +309,69 @@ export interface Era835SkipCounts {
   amount_out_of_range: number;
 }
 
+/** One parsed remittance, mapped to its authoritative envelope row plus whatever CAS
+ *  triplets survived filtering. `adjustments` MAY be empty — that is the normal shape
+ *  for a clean-paid remit, and the payment row still stands on its own. */
+export interface Era835MappedTransaction {
+  payment: Era835PaymentRow;
+  adjustments: Era835IngestRow[];
+}
+
 /**
- * Flatten ONE customer's parsed transactions into adjustment rows. Emits one row per
- * CAS triplet (claim-level → service_line_number 0; line-level → the line's number),
- * denormalizing payment/claim/line context. Skips (and counts) triplets with an
- * out-of-spec group code or blank CARC. PHI stays plaintext in the row; fingerprint
- * uses non-PHI keys.
+ * Map ONE parsed transaction's envelope to its payment row. Unconditional — called for
+ * every ST/SE set regardless of CAS content. No PHI is read here.
  */
-export function mapTransactionsToRows(
+export function mapTransactionToPaymentRow(
+  tx: Era835Transaction,
+  ctx: { customer: CmdCustomer; sourceFile: string },
+): Era835PaymentRow {
+  const row: Era835PaymentRow = {
+    business_entity_id: ctx.customer.businessEntityId,
+    facility_code: ctx.customer.facilityCode,
+    cmd_customer_id: ctx.customer.customerId,
+    payer_name: tx.payment.payerName,
+    payer_id: tx.payment.payerId,
+    era_control_number: tx.payment.eraControlNumber,
+    check_eft_trace_number: tx.payment.traceNumber,
+    trace_originating_company_id: tx.payment.traceOriginatingCompanyId,
+    payment_method: tx.payment.paymentMethod,
+    payment_amount: ctxMoney(tx.payment.paymentAmount),
+    payment_amount_raw: tx.payment.paymentAmountRaw,
+    payment_date: tx.payment.paymentDate,
+    era_source_file: ctx.sourceFile,
+    row_fingerprint: '', // set below
+  };
+  row.row_fingerprint = era835PaymentFingerprint(row);
+  return row;
+}
+
+/**
+ * Map ONE customer's parsed transactions to {payment, adjustments} pairs.
+ *
+ * THE INVARIANT THIS FUNCTION EXISTS TO HOLD: every parsed transaction yields EXACTLY
+ * ONE payment row, unconditionally, BEFORE and INDEPENDENT of CAS triplet mapping. A
+ * remit whose claims all adjudicated clean has zero triplets; a remit whose only
+ * triplets are filtered out (blank CARC / out-of-spec group code / out-of-range
+ * amount) also ends with zero. In BOTH cases the payment row still lands, so its BPR02
+ * is never lost. Triplet filtering is unchanged — those rows are still skipped and
+ * counted — but skipping them no longer drops the remit.
+ *
+ * Adjustments are one row per CAS triplet (claim-level → service_line_number 0;
+ * line-level → the line's number), with claim/line context and the low-cardinality
+ * envelope filter fields denormalized. PHI stays plaintext in the row; both
+ * fingerprints use non-PHI keys.
+ */
+export function mapTransactions(
   transactions: Era835Transaction[],
   ctx: { customer: CmdCustomer; sourceFile: string },
   skips: Era835SkipCounts,
-): Era835IngestRow[] {
-  const rows: Era835IngestRow[] = [];
+): Era835MappedTransaction[] {
+  const out: Era835MappedTransaction[] = [];
   for (const tx of transactions) {
+    // Unconditional, and FIRST. Do not move this inside the claim loop or guard it on
+    // rows.length — that is precisely the truncation defect.
+    const payment = mapTransactionToPaymentRow(tx, ctx);
+    const rows: Era835IngestRow[] = [];
     for (const claim of tx.claims) {
       const base = {
         business_entity_id: ctx.customer.businessEntityId,
@@ -188,9 +380,7 @@ export function mapTransactionsToRows(
         payer_name: tx.payment.payerName,
         payer_id: tx.payment.payerId,
         era_control_number: tx.payment.eraControlNumber,
-        check_eft_trace_number: tx.payment.traceNumber,
         payment_method: tx.payment.paymentMethod,
-        payment_amount: ctxMoney(tx.payment.paymentAmount),
         payment_date: tx.payment.paymentDate,
         patient_control_number: claim.patientControlNumber,
         payer_claim_control_number: claim.payerClaimControlNumber,
@@ -264,19 +454,50 @@ export function mapTransactionsToRows(
         sl.adjustments.forEach((adj, i) => pushAdj('LINE', i, adj, lineFields));
       }
     }
+    out.push({ payment, adjustments: rows });
   }
-  return rows;
+  return out;
+}
+
+/**
+ * Adjustment rows only, flattened across transactions — the original signature, kept
+ * for callers/tests that care solely about the triplet grain. Anything that needs
+ * remitted dollars must use mapTransactions() and the payment rows: a flat list of
+ * adjustment rows cannot express a remit total, by design.
+ */
+export function mapTransactionsToRows(
+  transactions: Era835Transaction[],
+  ctx: { customer: CmdCustomer; sourceFile: string },
+  skips: Era835SkipCounts,
+): Era835IngestRow[] {
+  return mapTransactions(transactions, ctx, skips).flatMap((t) => t.adjustments);
+}
+
+/** Assemble one payment row's positional params (PAYMENT_INSERT_COLS order). No PHI,
+ *  so nothing to encrypt and no async work. */
+function buildPaymentParams(row: Era835PaymentRow, ingestedBy: string): unknown[] {
+  return [
+    row.business_entity_id, row.facility_code, row.cmd_customer_id, row.payer_name, row.payer_id,
+    row.era_control_number, row.check_eft_trace_number, row.trace_originating_company_id,
+    row.payment_method, row.payment_amount, row.payment_amount_raw, row.payment_date,
+    row.era_source_file, 'cmd_835_api', row.row_fingerprint, ingestedBy,
+  ];
 }
 
 /** Encrypt the 2 PHI fields and assemble one row's positional params (INSERT_COLS order). */
-async function buildInsertParams(row: Era835IngestRow, ingestedBy: string): Promise<unknown[]> {
+async function buildInsertParams(
+  row: Era835IngestRow,
+  paymentId: number | string,
+  ingestedBy: string,
+): Promise<unknown[]> {
   const [patient, member] = await Promise.all([
     row.patient_name === null ? Promise.resolve(null) : encryptPhi(row.patient_name),
     row.member_id === null ? Promise.resolve(null) : encryptPhi(row.member_id),
   ]);
   return [
+    paymentId,
     row.business_entity_id, row.facility_code, row.cmd_customer_id, row.payer_name, row.payer_id,
-    row.era_control_number, row.check_eft_trace_number, row.payment_method, row.payment_amount, row.payment_date,
+    row.era_control_number, row.payment_method, row.payment_date,
     row.patient_control_number, row.payer_claim_control_number, row.claim_status_code, row.claim_charge_amount,
     row.claim_paid_amount, row.patient_responsibility_amount, row.claim_filing_indicator,
     patient, member,
@@ -288,42 +509,100 @@ async function buildInsertParams(row: Era835IngestRow, ingestedBy: string): Prom
   ];
 }
 
+/** What one pull's insert actually wrote. */
+export interface Era835InsertCounts {
+  payments: number;
+  adjustments: number;
+}
+
 /**
- * Insert rows for ONE tenant on a single checked-out client inside a transaction,
- * with app.business_entity_id SET LOCAL (required by the RLS WITH CHECK on the
- * cmd_rollup_writer policy). Batched, parameterized, ON CONFLICT (row_fingerprint)
- * DO NOTHING. Returns the count actually inserted. Rolls back the whole batch on error.
+ * Insert one tenant's mapped transactions on a single checked-out client inside ONE
+ * transaction, with app.business_entity_id SET LOCAL (required by the RLS WITH CHECK on
+ * the cmd_rollup_writer policies). Rolls back everything on error.
+ *
+ * Per transaction: the PAYMENT row goes first (it is the FK target), then its adjustment
+ * rows carry the resulting payment_id. Both tables use
+ * ON CONFLICT (row_fingerprint) DO NOTHING, at their own grains.
+ *
+ * RESOLVING payment_id ON A RE-PULL: `DO NOTHING ... RETURNING id` returns NO ROW when
+ * the payment already exists, so we fall back to a SELECT by fingerprint. That is why
+ * cmd_rollup_writer holds a column-level SELECT on (id, row_fingerprint). The
+ * alternative — `DO UPDATE SET ... RETURNING id` to force a return — would require
+ * granting UPDATE and give up the strictly append-only posture; not worth it.
+ *
+ * One transaction spans both tables deliberately: era_835_adjustment.payment_id is NOT
+ * NULL, so a partial commit could otherwise leave triplets with no envelope to point at.
  */
-export async function insertEra835Rows(
+export async function insertEra835Transactions(
   db: Db,
   businessEntityId: string,
-  rows: Era835IngestRow[],
+  mapped: Era835MappedTransaction[],
   ingestedBy: string,
-): Promise<number> {
-  if (rows.length === 0) return 0;
+): Promise<Era835InsertCounts> {
+  const counts: Era835InsertCounts = { payments: 0, adjustments: 0 };
+  if (mapped.length === 0) return counts;
   const client = await db.connect();
-  let inserted = 0;
   try {
     await client.query('begin');
-    // SET LOCAL for this transaction so the writer RLS policy sees the tenant.
+    // SET LOCAL for this transaction so the writer RLS policies see the tenant.
     await client.query(`select set_config('app.business_entity_id', $1, true)`, [businessEntityId]);
-    for (let i = 0; i < rows.length; i += BATCH) {
-      const batch = rows.slice(i, i + BATCH);
-      const paramRows = await Promise.all(batch.map((r) => buildInsertParams(r, ingestedBy)));
-      const params: unknown[] = [];
-      const tuples = paramRows.map((vals) => {
-        const b = params.length;
-        params.push(...vals);
-        return `(${vals.map((_, j) => `$${b + j + 1}`).join(', ')})`;
-      });
-      const sql =
-        `insert into staging.era_835_adjustment (${INSERT_COLS.join(', ')}) ` +
-        `values ${tuples.join(', ')} on conflict (row_fingerprint) do nothing`;
-      const res = await client.query(sql, params);
-      inserted += res.rowCount ?? 0;
+
+    for (const { payment, adjustments } of mapped) {
+      // --- 1. the authoritative envelope row (always attempted) ---------------
+      const payRes = await client.query(
+        `insert into staging.era_835_payment (${PAYMENT_INSERT_COLS.join(', ')}) ` +
+          `values (${PAYMENT_INSERT_COLS.map((_, i) => `$${i + 1}`).join(', ')}) ` +
+          `on conflict (row_fingerprint) do nothing returning id`,
+        buildPaymentParams(payment, ingestedBy),
+      );
+      let paymentId: number | string | undefined = payRes.rows[0]?.id;
+      if (paymentId === undefined) {
+        // Already present (idempotent re-pull) — read its id back to attach triplets.
+        // ASSUMES A SINGLE WRITER: this insert-then-re-read seam is race-free only
+        // because the 835 ingest is one cron running sequentially over disjoint customer
+        // sets per tenant. If ingest is ever parallelised across workers sharing a
+        // customer, revisit this (a concurrent inserter's uncommitted row is invisible
+        // here, so both workers could take the insert path and one would 23505).
+        const sel = await client.query<{ id: string }>(
+          `select id from staging.era_835_payment where row_fingerprint = $1`,
+          [payment.row_fingerprint],
+        );
+        paymentId = sel.rows[0]?.id;
+        if (paymentId === undefined) {
+          // Neither inserted nor findable: an RLS/grant misconfiguration, not a data
+          // condition. Fail loudly rather than silently dropping this remit's triplets.
+          throw new Error(
+            'era-835 ingest: payment row neither inserted nor found by fingerprint ' +
+              '(check cmd_rollup_writer SELECT grant on era_835_payment(id, row_fingerprint) ' +
+              'and the writer SELECT policy)',
+          );
+        }
+      } else {
+        counts.payments += 1;
+      }
+
+      // --- 2. its CAS triplets (may legitimately be empty) --------------------
+      for (let i = 0; i < adjustments.length; i += BATCH) {
+        const batch = adjustments.slice(i, i + BATCH);
+        const paramRows = await Promise.all(
+          batch.map((r) => buildInsertParams(r, paymentId!, ingestedBy)),
+        );
+        const params: unknown[] = [];
+        const tuples = paramRows.map((vals) => {
+          const b = params.length;
+          params.push(...vals);
+          return `(${vals.map((_, j) => `$${b + j + 1}`).join(', ')})`;
+        });
+        const sql =
+          `insert into staging.era_835_adjustment (${INSERT_COLS.join(', ')}) ` +
+          `values ${tuples.join(', ')} on conflict (row_fingerprint) do nothing`;
+        const res = await client.query(sql, params);
+        counts.adjustments += res.rowCount ?? 0;
+      }
     }
+
     await client.query('commit');
-    return inserted;
+    return counts;
   } catch (err) {
     await client.query('rollback');
     throw err;
@@ -384,10 +663,28 @@ export interface Era835IngestStats {
   pulls_zero_files: number;
   files_parsed: number;
   claims: number;
+  /** ST/SE transaction sets parsed — i.e. remits seen. One payment row each. */
+  payments_mapped: number;
+  /**
+   * Remits whose BPR02 was absent or outside numeric(12,2) and therefore stored NULL.
+   * The remit still LANDS (dropping it is the truncation defect this design removes),
+   * but a non-zero count means real money is unquantified — investigate the source
+   * file, never ignore it.
+   */
+  payments_amount_out_of_range: number;
+  /**
+   * Remits that mapped to ZERO surviving CAS triplets (all claims clean-paid, or every
+   * triplet filtered). Tracked because under the OLD single-table shape these remits
+   * vanished entirely — this counter is the visible proof they now land.
+   */
+  payments_without_adjustments: number;
   adjustments_mapped: number;
   rows_skipped: Era835SkipCounts;
   remark_codes_seen: number;
   in_set_duplicates: number;
+  /** Same-pull duplicate REMITS collapsed by payment fingerprint (their triplets merge). */
+  in_set_duplicate_payments: number;
+  payments_inserted: number;
   rows_inserted: number;
 }
 
@@ -411,10 +708,15 @@ export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835Ing
     pulls_zero_files: 0,
     files_parsed: 0,
     claims: 0,
+    payments_mapped: 0,
+    payments_amount_out_of_range: 0,
+    payments_without_adjustments: 0,
     adjustments_mapped: 0,
     rows_skipped: { invalid_group_code: 0, missing_carc_code: 0, amount_out_of_range: 0 },
     remark_codes_seen: 0,
     in_set_duplicates: 0,
+    in_set_duplicate_payments: 0,
+    payments_inserted: 0,
     rows_inserted: 0,
   };
 
@@ -433,32 +735,58 @@ export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835Ing
         const files = result.kind === 'empty' ? [] : result.files;
         if (result.kind === 'empty') stats.pulls_empty += 1;
         else if (files.length === 0) stats.pulls_zero_files += 1;
-        const byFingerprint = new Map<string, Era835IngestRow>();
+        // Dedup within the pull at BOTH grains: remits by payment fingerprint, and each
+        // remit's triplets by triplet fingerprint. Keyed this way, the same remit
+        // delivered twice in one zip collapses to one payment row and its triplets merge
+        // under that one row rather than splitting across two.
+        const byPayment = new Map<
+          string,
+          { payment: Era835PaymentRow; adjustments: Map<string, Era835IngestRow> }
+        >();
         for (const file of files) {
           const parsed = parseEra835(file.edi);
           stats.files_parsed += 1;
           stats.claims += parsed.claimCount;
           stats.remark_codes_seen += parsed.remarkCount;
-          const rows = mapTransactionsToRows(
+          const mapped = mapTransactions(
             parsed.transactions,
             { customer, sourceFile: file.name },
             stats.rows_skipped,
           );
-          stats.adjustments_mapped += rows.length;
-          for (const row of rows) {
-            if (byFingerprint.has(row.row_fingerprint)) stats.in_set_duplicates += 1;
-            else byFingerprint.set(row.row_fingerprint, row);
+          for (const { payment, adjustments } of mapped) {
+            stats.payments_mapped += 1;
+            if (payment.payment_amount === null) stats.payments_amount_out_of_range += 1;
+            if (adjustments.length === 0) stats.payments_without_adjustments += 1;
+            stats.adjustments_mapped += adjustments.length;
+
+            let slot = byPayment.get(payment.row_fingerprint);
+            if (slot === undefined) {
+              slot = { payment, adjustments: new Map() };
+              byPayment.set(payment.row_fingerprint, slot);
+            } else {
+              stats.in_set_duplicate_payments += 1;
+            }
+            for (const row of adjustments) {
+              if (slot.adjustments.has(row.row_fingerprint)) stats.in_set_duplicates += 1;
+              else slot.adjustments.set(row.row_fingerprint, row);
+            }
           }
         }
         if (deps.writeDb) {
           // Per-customer tenant: each customer's rows are scoped to ITS businessEntityId
-          // (RLS WITH CHECK sees the GUC set to this value inside insertEra835Rows).
-          stats.rows_inserted += await insertEra835Rows(
+          // (RLS WITH CHECK sees the GUC set to this value inside
+          // insertEra835Transactions).
+          const written = await insertEra835Transactions(
             deps.writeDb,
             customer.businessEntityId,
-            [...byFingerprint.values()],
+            [...byPayment.values()].map(({ payment, adjustments }) => ({
+              payment,
+              adjustments: [...adjustments.values()],
+            })),
             deps.ingestedBy,
           );
+          stats.payments_inserted += written.payments;
+          stats.rows_inserted += written.adjustments;
         }
       } catch (err) {
         stats.pulls_failed += 1;
@@ -475,8 +803,11 @@ export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835Ing
     `era-835 ingest: dates ${stats.dates}, customers ${stats.customers}; ` +
       `pulls ${stats.pulls_attempted} (failed ${stats.pulls_failed}, empty ${stats.pulls_empty}, ` +
       `zero-file zips ${stats.pulls_zero_files}, budget-skipped ${stats.pulls_skipped_budget}); ` +
-      `files ${stats.files_parsed}, claims ${stats.claims}, adjustments ${stats.adjustments_mapped}, ` +
-      `remarks ${stats.remark_codes_seen}; in-set dups ${stats.in_set_duplicates}; inserted ${stats.rows_inserted}`,
+      `files ${stats.files_parsed}, claims ${stats.claims}, remits ${stats.payments_mapped} ` +
+      `(no-adjustment ${stats.payments_without_adjustments}, unquantified BPR02 ${stats.payments_amount_out_of_range}), ` +
+      `adjustments ${stats.adjustments_mapped}, remarks ${stats.remark_codes_seen}; ` +
+      `in-set dups ${stats.in_set_duplicates} triplet / ${stats.in_set_duplicate_payments} remit; ` +
+      `inserted ${stats.payments_inserted} payments + ${stats.rows_inserted} adjustments`,
   );
   return stats;
 }
@@ -629,7 +960,10 @@ async function main(): Promise<void> {
     if (!commit) {
       console.log('DRY-RUN — no database connection made. Re-run with --commit to load.');
     } else {
-      console.log(`COMMIT — inserted ${stats.rows_inserted} new adjustment rows.`);
+      console.log(
+        `COMMIT — inserted ${stats.payments_inserted} new payment rows ` +
+          `+ ${stats.rows_inserted} new adjustment rows.`,
+      );
     }
   } finally {
     if (writeDb) await writeDb.end();
