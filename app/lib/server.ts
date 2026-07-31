@@ -175,7 +175,7 @@ import {
 } from '../../src/veris/era835Upcoming.js';
 import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
 import { refreshCmdPayerRollup } from '../../src/collections/cmdPayerRefresh.js';
-import { CMD_EXPLORER_CUSTOMERS, INDIGO_CUSTOMERS, BXR_CUSTOMERS, type CmdCustomer } from '../../src/collections/cmdCustomers.js';
+import { CMD_EXPLORER_CUSTOMERS, INDIGO_CUSTOMERS, BXR_CUSTOMERS, ALL_CMD_CUSTOMERS, type CmdCustomer } from '../../src/collections/cmdCustomers.js';
 // src-side canonical tenant ids (agree with app/lib/views.ts — dual-declaration note in
 // src/tenants.ts). Each cron's writes are stamped + GUC-scoped to its tenant explicitly
 // (migration-B era), never inferred; the Indigo roster also carries per-customer ids.
@@ -804,6 +804,65 @@ export function handleIndigoCensusCron(req: {
     configFor: cmdIndigoCensusConfigFor,
     transformRows: aliasIndigoFacilityColumn,
   });
+}
+
+/**
+ * 835 ERA rolling-window sync (Vercel Cron, /api/cron/era-835-sync) — the "Step 2"
+ * era_ingest.ts's own header comment referred to and that was never wired up. GET only;
+ * gated on CRON_SECRET with the same constant-time Bearer check (isAuthorized) as every
+ * other cron here.
+ *
+ * Loops ALL_CMD_CUSTOMERS (both BXR and Indigo — era_ingest resolves each customer's
+ * tenant from its own businessEntityId, not a route-level param, so this cron is not
+ * tenant-split the way the explorer/census crons are) across a short trailing window —
+ * today back through ERA835_SYNC_WINDOW_DAYS days (default 3), covering ordinary CMD
+ * posting lag without reprocessing real history on every run. Both target tables use
+ * ON CONFLICT DO NOTHING at their own grain (era_ingest.ts), so re-covering the window
+ * every run is idempotent and cheap.
+ *
+ * Writes staging.era_835_payment (the authoritative money row) + staging.era_835_adjustment
+ * (CAS triplets) as the least-privilege cmd_rollup_writer role. Returns non-PHI counts
+ * only. A full historical backfill is a SEPARATE, manual, --commit CLI run
+ * (src/ingest/era_ingest.ts --from ... --to ... --commit) — this cron only keeps the
+ * rolling window current going forward; it does not backfill history on its own.
+ */
+export async function handleEra835SyncCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
+    return { status: 405, body: { error: 'method_not_allowed' } };
+  }
+  const secret = process.env.CRON_SECRET;
+  if (!secret || !isAuthorized(req.authorization, secret)) {
+    return { status: 401, body: { error: 'unauthorized' } };
+  }
+  try {
+    // Fail fast on a misconfigured PHI key rather than silently mapping/skipping every row.
+    await encryptPhi('era-835-cron-key-probe');
+
+    const windowDays = Number(process.env.ERA835_SYNC_WINDOW_DAYS) || 3;
+    const today = new Date().toISOString().slice(0, 10);
+    const from = new Date(Date.now() - (windowDays - 1) * 86_400_000).toISOString().slice(0, 10);
+    const dates = expandDateRange(from, today);
+
+    const stats = await runEra835Ingest({
+      customers: ALL_CMD_CUSTOMERS,
+      dates,
+      ingestedBy: 'era835_cron',
+      download: async (customerId, date) => {
+        const res = await cmdDownload835(cmdEra835ConfigFor(customerId), { date });
+        if (res.kind === 'empty') return { kind: 'empty' };
+        return { kind: 'files', files: read835Files(res.bytes, `${customerId}_${date}`) };
+      },
+      writeDb: rollupWriterDb(),
+    });
+    return { status: 200, body: { ok: true, ...stats } };
+  } catch (err) {
+    // Generic to the client; message only to the server log (no PHI, no token, no EDI content).
+    console.error('era835-sync cron failed:', err instanceof Error ? err.message : String(err));
+    return { status: 500, body: { error: 'cron_failed' } };
+  }
 }
 
 // --- ERA-confirmed upcoming payments (Overview tile, staging.era_835_payment) --------

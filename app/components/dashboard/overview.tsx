@@ -136,9 +136,9 @@ function EraUpcomingPayments({ view }: { view: DashboardView }) {
 export function Dashboard({ view }: { view: DashboardView }) {
   return (
     <section className="space-y-4">
+      <EraUpcomingPayments view={view} />
       <OverviewKpis view={view} />
       <OverviewBarChart scope={view} />
-      <EraUpcomingPayments view={view} />
     </section>
   );
 }
