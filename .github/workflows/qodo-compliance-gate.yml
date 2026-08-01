@@ -1,0 +1,54 @@
+# .github/workflows/qodo-compliance-gate.yml
+#
+# CMD-Billing-Dashboard / TreatHealthOS RCM
+#
+# Blocks merge when Qodo Merge has flagged the PR with either of its
+# blocking labels. Qodo's GitHub App applies these labels asynchronously
+# after its own review/compliance pass runs, so this job re-checks on
+# every label change, not just at PR open.
+#
+# NOTE: this repo's .github/ directory was previously deleted (the $0
+# GitHub Actions ML-training runtime was removed per the paused-brains
+# ADR). This workflow re-introduces .github/workflows/ for the first
+# time since then — flagging that explicitly rather than silently
+# reviving the directory. It does not touch Python/torch/GPU anything;
+# it's a ~5-second label check with zero minutes cost beyond that.
+#
+# Setup after adding this file:
+#   1. Ensure the Qodo Merge GitHub App is installed on this repo (it
+#      already appears to be, per the portal screenshot).
+#   2. In repo Settings -> Branches -> branch protection rule for main,
+#      add "Qodo Compliance Gate / gate" as a required status check.
+#   3. No secrets required — this job only reads labels already applied
+#      by the Qodo App via the default GITHUB_TOKEN.
+
+name: Qodo Compliance Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  pull-requests: read
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for Qodo blocking labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const blocking = ["Possible security concern", "Failed compliance check"];
+            const labels = context.payload.pull_request.labels.map(l => l.name);
+            const hit = labels.filter(l => blocking.includes(l));
+
+            if (hit.length > 0) {
+              core.setFailed(
+                `Blocked by Qodo label(s): ${hit.join(", ")}. ` +
+                `Resolve the flagged issue(s) or get an explicit override from a reviewer before merging.`
+              );
+            } else {
+              core.info("No blocking Qodo labels present.");
+            }

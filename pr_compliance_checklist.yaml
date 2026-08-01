@@ -1,0 +1,59 @@
+# pr_compliance_checklist.yaml
+# CMD-Billing-Dashboard / TreatHealthOS RCM
+# Drop at repo root. Qodo Merge's compliance tool merges this with any
+# global pr-agent-settings checklist if you set one up later.
+
+pr_compliances:
+  - title: "PHI denylist"
+    compliance_label: true
+    objective: "No PHI (patient name, member_id, DOB, raw claim identifiers) ever enters logs, prompts sent to an LLM, URLs/query strings, or client-reachable bundles."
+    success_criteria: "All logging/telemetry statements touching claims/collections/staging data reference IDs or masked values only. Any LLM prompt construction strips patient-identifying fields before interpolation. No PHI-shaped literal appears in a URL or query string."
+    failure_criteria: "console.log/error, prompt strings, or URL construction includes patient_name, patient_first/last, member_id (raw, non-blind-indexed), dob, or full claim payloads. Includes cases where a template literal interpolates a raw row object without field-level scoping."
+
+  - title: "Tenant isolation via inline literal, not session GUC"
+    compliance_label: true
+    objective: "Every query against collections.* or staging.* carries business_entity_id as an inline UUID literal in the query itself, never relies on a session-level SET app.business_entity_id persisting across calls."
+    success_criteria: "New/modified queries against collections.* or staging.* include a literal business_entity_id (or an explicitly-justified cross-tenant exception, e.g. Qualify) directly in the WHERE clause or parameter list."
+    failure_criteria: "A query depends on a prior SET app.business_entity_id GUC without re-asserting the literal in the same query. Supavisor's transaction-pooling mode (port 6543) does not guarantee GUC persistence across calls, so this is a silent cross-tenant leak risk, not a style issue."
+
+  - title: "Cross-tenant exception must be explicit, not incidental"
+    compliance_label: true
+    objective: "Any query that intentionally reads across both BXR and Indigo (e.g. Qualify) is named and commented as a deliberate exception to the single-tenant RLS pattern used everywhere else."
+    success_criteria: "Cross-tenant query has an inline comment naming it as an explicit, reviewed exception and why (e.g. admissions qualifying against payer behavior book-wide)."
+    failure_criteria: "A query reads rows from multiple business_entity_id values with no comment, no test asserting it's intentional, or no distinction from an accidentally-missing WHERE clause."
+
+  - title: "Posting-grain vs charge-grain aggregation"
+    compliance_label: true
+    objective: "Insurance payment aggregates never sum() posting-grain rows from cmd_explorer_rows; they take max() per charge or read from cmd_explorer_charge_rollup."
+    success_criteria: "New aggregation logic over payment/charge data reads from cmd_explorer_charge_rollup, or explicitly takes max() per charge_debit_id/charge id when reading raw posting rows."
+    failure_criteria: "A new query runs SUM() directly over cmd_explorer_rows (or an equivalent posting-grain table) for payment or %-paid figures. This has previously produced 197–1927% paid and 2x-overstated charge amounts."
+
+  - title: "BPR16 keys upcoming-payment logic, never receipt date"
+    compliance_label: true
+    objective: "Any query surfacing upcoming or pending ACH payments keys on the 835 BPR16 (fund movement date) field, never on ERA receipt date."
+    success_criteria: "Upcoming-payment queries filter/sort on bpr16 or an equivalently named fund-movement-date column."
+    failure_criteria: "Upcoming-payment logic filters on received_at/receipt date or a daily_collections-style ingestion timestamp instead of BPR16. BPR16 can span 5+ weeks outside any receipt window, so this silently drops real upcoming payments."
+
+  - title: "Dollar-amount gating is server-side and DOM-omitted"
+    compliance_label: true
+    objective: "Any surface visible to admissions_seat (or another non-privileged role) never ships dollar amounts to the client, in any form."
+    success_criteria: "Amount fields are stripped/omitted server-side before serialization for non-privileged sessions (keys absent or explicitly null, applied in exactly one place)."
+    failure_criteria: "Amounts are hidden via CSS (display:none, visibility:hidden, conditional className) while still present in the DOM or the JSON payload. Also fails if the strip logic is duplicated per-field instead of centralized."
+
+  - title: "CREATE INDEX CONCURRENTLY uses autocommit, not apply_migration"
+    compliance_label: true
+    objective: "Any migration containing CREATE INDEX CONCURRENTLY is run via an autocommit path (e.g. execute_sql), never through a tool that wraps DDL in a transaction."
+    success_criteria: "CONCURRENTLY index creation is documented/run outside a transaction-wrapping migration runner."
+    failure_criteria: "A migration file mixes CREATE INDEX CONCURRENTLY with other statements inside what will be applied as a single transaction (e.g. via apply_migration), which silently fails or blocks."
+
+  - title: "No silent-empty result recording"
+    compliance_label: true
+    objective: "Any ingestion/report loop that can legitimately return zero rows for a customer/entity distinguishes 'genuinely empty' from 'error/failure' from 'previously had data, now zero' in its counters."
+    success_criteria: "New counters split empty/zero-file/error states (mirroring pulls_empty vs pulls_zero_files, customers_empty patterns already in the codebase) rather than a single pass/fail boolean."
+    failure_criteria: "A new ingest/report loop has one aggregate 'failed' counter with no per-status breakdown, or marks a customer that previously had rows and now returns zero as silently 'success' instead of 'partial'/flagged."
+
+  - title: "No secrets or PHI in client-reachable bundles"
+    compliance_label: true
+    objective: "No API key, service-role credential, or PHI-bearing constant is reachable in any client-side bundle (Next.js client components, public env vars)."
+    success_criteria: "Server-only secrets stay in server components/route handlers/env vars without NEXT_PUBLIC_ prefix; grep for the secret pattern shows no match in client-bundled files."
+    failure_criteria: "A secret, service-role key, or PHI-bearing literal appears in a 'use client' file, a NEXT_PUBLIC_ env var, or any code path that ships to the browser."
