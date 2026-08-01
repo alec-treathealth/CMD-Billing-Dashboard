@@ -175,7 +175,7 @@ import {
 } from '../../src/veris/era835Upcoming.js';
 import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
 import { refreshCmdPayerRollup } from '../../src/collections/cmdPayerRefresh.js';
-import { CMD_EXPLORER_CUSTOMERS, INDIGO_CUSTOMERS, BXR_CUSTOMERS, ALL_CMD_CUSTOMERS, type CmdCustomer } from '../../src/collections/cmdCustomers.js';
+import { CMD_EXPLORER_CUSTOMERS, INDIGO_CUSTOMERS, BXR_CUSTOMERS, type CmdCustomer } from '../../src/collections/cmdCustomers.js';
 // src-side canonical tenant ids (agree with app/lib/views.ts — dual-declaration note in
 // src/tenants.ts). Each cron's writes are stamped + GUC-scoped to its tenant explicitly
 // (migration-B era), never inferred; the Indigo roster also carries per-customer ids.
@@ -749,9 +749,10 @@ export function handleIndigoExplorerCron(req: {
 }
 
 /**
- * BXR LAST-MONTH catch-up explorer run (/api/cron/cmd-explorer-catchup). NOT SCHEDULED — see the
- * route header for the two decisions (schedule hour vs era-835, filter window semantics) that must
- * be resolved before a vercel.json entry is added. Same roster, report, writer, and idempotent
+ * BXR LAST-MONTH catch-up explorer run (/api/cron/cmd-explorer-catchup). SCHEDULED daily at
+ * `52 7 * * *` (2026-08-01) — the route header records why that hour is paired against era-835's
+ * `50 8 * * *` and why the filter MUST be the relative 10148481, never the spent fixed-range
+ * 10148479. Same roster, report, writer, and idempotent
  * daily replace as the hourly BXR explorer cron; the ONLY difference is the saved filter
  * (CMD_EXPLORER_LASTMONTH_FILTER_ID, env-required, no fallback), which windows payment-received on
  * LAST month — so the first runs of a new month re-supply payments that landed after the rolling
@@ -853,65 +854,6 @@ export function handleIndigoCensusCron(req: {
   });
 }
 
-/**
- * 835 ERA rolling-window sync (Vercel Cron, /api/cron/era-835-sync) — the "Step 2"
- * era_ingest.ts's own header comment referred to and that was never wired up. GET only;
- * gated on CRON_SECRET with the same constant-time Bearer check (isAuthorized) as every
- * other cron here.
- *
- * Loops ALL_CMD_CUSTOMERS (both BXR and Indigo — era_ingest resolves each customer's
- * tenant from its own businessEntityId, not a route-level param, so this cron is not
- * tenant-split the way the explorer/census crons are) across a short trailing window —
- * today back through ERA835_SYNC_WINDOW_DAYS days (default 3), covering ordinary CMD
- * posting lag without reprocessing real history on every run. Both target tables use
- * ON CONFLICT DO NOTHING at their own grain (era_ingest.ts), so re-covering the window
- * every run is idempotent and cheap.
- *
- * Writes staging.era_835_payment (the authoritative money row) + staging.era_835_adjustment
- * (CAS triplets) as the least-privilege cmd_rollup_writer role. Returns non-PHI counts
- * only. A full historical backfill is a SEPARATE, manual, --commit CLI run
- * (src/ingest/era_ingest.ts --from ... --to ... --commit) — this cron only keeps the
- * rolling window current going forward; it does not backfill history on its own.
- */
-export async function handleEra835SyncCron(req: {
-  method?: string;
-  authorization?: string | null;
-}): Promise<{ status: number; body: unknown }> {
-  if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
-    return { status: 405, body: { error: 'method_not_allowed' } };
-  }
-  const secret = process.env.CRON_SECRET;
-  if (!secret || !isAuthorized(req.authorization, secret)) {
-    return { status: 401, body: { error: 'unauthorized' } };
-  }
-  try {
-    // Fail fast on a misconfigured PHI key rather than silently mapping/skipping every row.
-    await encryptPhi('era-835-cron-key-probe');
-
-    const windowDays = Number(process.env.ERA835_SYNC_WINDOW_DAYS) || 3;
-    const today = new Date().toISOString().slice(0, 10);
-    const from = new Date(Date.now() - (windowDays - 1) * 86_400_000).toISOString().slice(0, 10);
-    const dates = expandDateRange(from, today);
-
-    const stats = await runEra835Ingest({
-      customers: ALL_CMD_CUSTOMERS,
-      dates,
-      ingestedBy: 'era835_cron',
-      download: async (customerId, date) => {
-        const res = await cmdDownload835(cmdEra835ConfigFor(customerId), { date });
-        if (res.kind === 'empty') return { kind: 'empty' };
-        return { kind: 'files', files: read835Files(res.bytes, `${customerId}_${date}`) };
-      },
-      writeDb: rollupWriterDb(),
-    });
-    return { status: 200, body: { ok: true, ...stats } };
-  } catch (err) {
-    // Generic to the client; message only to the server log (no PHI, no token, no EDI content).
-    console.error('era835-sync cron failed:', err instanceof Error ? err.message : String(err));
-    return { status: 500, body: { error: 'cron_failed' } };
-  }
-}
-
 // --- ERA-confirmed upcoming payments (Overview tile, staging.era_835_payment) --------
 
 /**
@@ -934,10 +876,10 @@ function verisReaderPool(): Db {
  * entity (staging RLS is GUC-scoped, one tenant per transaction); Consolidated = the
  * per-tenant results merged in exact integer cents. Fails closed on an empty scope.
  *
- * LIVE read, deliberately uncached: the table changes only when the 835 ingest writes
- * (cron not yet scheduled), the read is two indexed aggregates over a small table, and
- * no cron revalidates a tag for this surface yet — an unstable_cache entry here would
- * serve stale money for an unbounded time after the first ingest lands.
+ * LIVE read, deliberately uncached: the table changes once daily when the 835 ingest cron
+ * writes (/api/cron/era-835, `50 8 * * *`), the read is two indexed aggregates over a small
+ * table, and no cron revalidates a tag for this surface — an unstable_cache entry here would
+ * serve stale money for an unbounded time after an ingest lands.
  */
 export async function getEraUpcomingPayments(entityIds: string[]): Promise<EraUpcomingSummary> {
   if (entityIds.length === 0) {
@@ -976,7 +918,8 @@ const ERA835_INTER_CALL_DELAY_MS = 1_500;
 const ERA835_LOOKBACK_DAYS = 5;
 
 /**
- * Daily BXR 835 ERA ingest (/api/cron/era-835 — NOT SCHEDULED YET, see the route file).
+ * Daily BXR 835 ERA ingest (/api/cron/era-835 — SCHEDULED `50 8 * * *`, see the route file for
+ * the still-open finding-1 failure-rate risk accepted at enable time).
  * GET only; gated on CRON_SECRET with the same constant-time Bearer check as every other
  * cron. Downloads each BXR customer's 835s for the trailing window, parses the X12, and
  * idempotently lands BOTH grains as cmd_rollup_writer: one staging.era_835_payment row
