@@ -749,6 +749,32 @@ export function handleIndigoExplorerCron(req: {
 }
 
 /**
+ * BXR LAST-MONTH catch-up explorer run (/api/cron/cmd-explorer-catchup). NOT SCHEDULED — see the
+ * route header for the two decisions (schedule hour vs era-835, filter window semantics) that must
+ * be resolved before a vercel.json entry is added. Same roster, report, writer, and idempotent
+ * daily replace as the hourly BXR explorer cron; the ONLY difference is the saved filter
+ * (CMD_EXPLORER_LASTMONTH_FILTER_ID, env-required, no fallback), which windows payment-received on
+ * LAST month — so the first runs of a new month re-supply payments that landed after the rolling
+ * current-month window rolled over (the class of gap the 2026-07-30 FRCA $540 backfill closed by
+ * hand). replaceCmdDailyForFacility's DELETE is span-scoped to the pulled rows, so a last-month
+ * pull rewrites exactly last month's facility-days and cannot touch the current month.
+ */
+export function handleCmdExplorerCatchupCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  return handleExplorerCronForTenant(req, {
+    label: 'cmd-explorer-catchup',
+    customers: CMD_EXPLORER_CUSTOMERS,
+    configFor: cmdExplorerCatchupConfigFor,
+    businessEntityId: BXR_TENANT_ID,
+    // Same report (10093959) as the hourly explorer — column sets belong to the REPORT, the saved
+    // filter only windows rows — so the same header contract applies unchanged.
+    expectedColumns: BXR_REPORT_COLUMNS,
+  });
+}
+
+/**
  * Tenant-parameterized CMD charge-CENSUS ingest (Vercel Cron, Qualify v2 ②b). Sibling of
  * handleExplorerCronForTenant, same auth (GET only + constant-time CRON_SECRET Bearer), same
  * least-privilege writer (cmd_rollup_writer). It pulls the CENSUS saved-filter per customer and
@@ -1649,6 +1675,22 @@ function cmdIndigoConfigFor(customerId: string): CmdApiConfig {
     maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 8,
     emptyGraceAttempts: Number(process.env.CMD_EXPLORER_EMPTY_GRACE) || 4,
   };
+}
+
+/** The catch-up (last-month) saved-filter id — REQUIRED from env, no default. A fallback to the
+ *  explorer's rolling current-month filter would make the catch-up silently re-ingest the CURRENT
+ *  month under a route named "catchup", so a missing env var must fail the run loudly instead. */
+function requiredLastMonthFilterId(): string {
+  const v = process.env.CMD_EXPLORER_LASTMONTH_FILTER_ID?.trim();
+  if (!v) throw new Error('Missing CMD_EXPLORER_LASTMONTH_FILTER_ID (the CMD last-month saved-filter id; set in env, no default)');
+  return v;
+}
+
+/** Catch-up config: the BXR explorer's report/poll/creds with the LAST-MONTH filter (env, no
+ *  fallback). Same report 10093959, so the same daily replace + fingerprint idempotency apply —
+ *  only the payment-received window differs. */
+function cmdExplorerCatchupConfigFor(customerId: string): CmdApiConfig {
+  return { ...cmdExplorerConfigFor(customerId), filterId: requiredLastMonthFilterId() };
 }
 
 // ---------------------------------------------------------------------------
