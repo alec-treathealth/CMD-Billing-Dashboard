@@ -1618,11 +1618,20 @@ first unattended week).
 - Unify the duplicated `MultiSelectTagPicker`.
 - Jess list (consolidate + send): ~19% CAMH IP payers unmatched (Aetna, Kaiser WA, Surest,
   Western Growers, Halcyon, Carelon, Self Pay) — intentional-gap vs maintenance-gap
-  unconfirmed; HOUSTON_MH + TREAT_CO (BXR OP) return INVALID CRITERIA — defunct vs
-  new-no-data unconfirmed; 9 needs-ruling payer-alias carriers (BCBS AR–Walmart, KWC
+  unconfirmed; ~~HOUSTON_MH + TREAT_CO (BXR OP) return INVALID CRITERIA — defunct vs
+  new-no-data unconfirmed~~; 9 needs-ruling payer-alias carriers (BCBS AR–Walmart, KWC
   Blues-vs-Anthems, BCBS MA/OK, BCBS TX MH-vs-SUD, Highmark, bare BCBS, Anthem ALL
   OTHER/S) — unmatched by design, not permanent; TEEN_MH_TX facility question
   (distinct vs typo).
+
+  > **CORRECTION 2026-08-01 — HOUSTON_MH + TREAT_CO are NOT a payer question and NOT
+  > defunct.** Owner-confirmed (Alec): they are **not yet open** — pre-launch, no payments
+  > yet. `INVALID CRITERIA` is the **expected** pre-launch response for an account the saved
+  > filter was never shared under; it is not evidence of a defunct or broken account. Struck
+  > from this payer-alias backlog item because it never belonged here: it is a
+  > **launch-readiness** item, tracked with TREAT_VA `10036125` under "Pre-launch facilities
+  > — the zero-rows launch trap" at the end of this file. The rest of this Jess-list entry
+  > (payer-alias gaps, TEEN_MH_TX) is unaffected and still open.
 
 ---
 
@@ -2579,6 +2588,63 @@ claims (CMS-1500/837P) never carry Type of Bill or revenue codes — institution
   opens, do NOT re-probe** (Alec, 2026-07-29). Nothing about this facility is unknown
   or suspect — do not read its INVALID CRITERIA as defunct-class; it simply predates
   its own launch.
+
+### Pre-launch facilities — the zero-rows launch trap (recorded 2026-08-01, NOT built)
+
+**LAUNCH CHECKLIST ITEM — not a code change now.** This is the failure mode that will
+bite when HOUSTON_MH `10035976`, TREAT_CO `10035974`, or TREAT_VA `10036125` open.
+
+Zero rows from these three is **CORRECT today and BROKEN the day after they open**, and
+nothing in the current logs can tell those two states apart. Today they are not merely
+empty — they are **not in any roster**, so they are never called at all
+(`CMD_EXPLORER_CUSTOMERS` = 15, `AUDIT_CONSOLIDATED_CUSTOMERS` = 17; none of the three
+appears in either). At launch someone adds them to a roster, and from that moment:
+
+- filter never shared under the account → `INVALID CRITERIA` → `customers_failed` → **loud,
+  fine**;
+- filter shared but scoped wrong (wrong window, wrong report, charge-date instead of
+  payment-received) → **zero rows, counted as a success, indistinguishable from the quiet
+  pre-launch facility it was yesterday**.
+
+The second case is the trap, and the cron log cannot surface it. Verified in code, not
+assumed: `stats.customers_processed += 1` is the LAST statement of the per-customer `try`
+(`cmdExplorerCron.ts:280`) and runs regardless of how many rows came back, so
+`customers N/N` counts **customers that did not throw**, never **customers that returned
+rows**. The 2026-08-01 04:00 run logged `customers 15/15 (failed 0)` on `fetched 0`. The
+only aggregate signal is `fetched`, which is summed across the roster — so one silently
+empty facility among fourteen productive ones moves that total by a rounding error and is
+effectively invisible.
+
+**What each facility needs at launch:** an expected-NONZERO marker, so a first run that
+returns nothing fails loudly instead of reading as pre-launch quiet. The inverse pattern
+already exists and is the shape to mirror — `EXPECTED_EMPTY_AUDIT_CUSTOMERS`
+(`src/billingAudit/auditConfig.ts`, currently `{10033951 WRC}`) pins the facilities that
+are *expected* to be empty. A facility is in exactly one of those two sets; being in
+neither is what makes silence ambiguous.
+
+Do NOT build this now — none of the three is open, and an expected-nonzero assertion
+against a pre-launch account would itself fail every run. Build it as part of the launch
+of whichever facility opens first.
+
+### ⚠ Signal-misread pattern — five instances in one session (recorded 2026-08-01)
+
+**Pattern: do not infer health from a signal that is not measuring health.** Five times
+this session an artifact was read as a health signal and produced — or nearly produced —
+a wrong conclusion:
+
+1. `cmd_explorer_rows` is append-only under the daily replace — a zero-new-rows read was
+   taken as a failed run, when the table measures *rows written*, not *run success*.
+2. `cmd_census_run` records errors only — an empty error set was read as success, when
+   the table has nothing to say about a run that never wrote.
+3. A Vercel status-0 log entry was read as a hung function — it was log-ingestion lag,
+   a property of the *log pipeline*, not the function.
+4. A bad `awk` range and a bad index-name probe each nearly produced a wrong conclusion —
+   the output faithfully measured the query as written, not the question being asked.
+5. `customers N/N` counts customers that **did not throw**, never customers that
+   **returned rows** — `stats.customers_processed += 1` is the last statement of the
+   per-customer `try` (`cmdExplorerCron.ts:280`, `cmdCensusCron.ts:306`), proven by the
+   2026-08-01 04:00 run logging `customers 15/15 (failed 0)` on `fetched 0`. Operational
+   consequences under "Pre-launch facilities — the zero-rows launch trap" above.
 
 ### ⚠ CMD-QUIET-WINDOW RULE (learned the hard way this session)
 
