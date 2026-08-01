@@ -21,7 +21,9 @@ import { toAmount, type CmdReportRow } from './cmdPayer.js';
 import { normalizeDate } from './normalize.js';
 
 /** Verified CMD report CSV headers. One alias each for resilience to label edits. */
-const HEADERS = {
+/** Exported so a test can assert BXR_REPORT_COLUMNS still satisfies every field the mapper
+ *  reads — the two lists can otherwise drift apart silently. Not part of the runtime API. */
+export const HEADERS = {
   charge_from_date: ['Charge From Date'],
   payment_received: ['Payment Received'],
   cpt_code: ['Charge CPT Code', 'CPT Code'],
@@ -71,6 +73,65 @@ const HEADERS = {
 // key, ON CONFLICT stops firing, and the cron re-inserts every posting hourly. Never add an alias
 // here from a label match alone — compare values first.
 // ---------------------------------------------------------------------------
+
+/**
+ * The EXACT column-name set BXR's live report (10093959) projects, verified by probing all 15
+ * customer accounts on 2026-08-01. This is the cron path's header contract — see
+ * cmdExplorerCron's expectedColumns.
+ *
+ * WHY A CONTRACT AT ALL: pick() is tolerant by design, and mapRow only rejects a row on
+ * charge_from_date / facility / charge_amount / patient_name / member_id. So a report whose OTHER
+ * columns were renamed still executes cleanly and maps "successfully" — with those fields NULL.
+ * That is not merely bad data: replaceCmdDailyForFacility does a per-facility DELETE+INSERT every
+ * run, so the cron would delete good deposit rows and write nulls over them, hourly, silently.
+ * The 2026-07-31 incident was the LOUD version of this (the report was deleted outright, the cron
+ * failed INVALID CRITERIA, the feed froze and was fully recoverable). Report deletion was human
+ * error, so it will recur; recreating a report yields a NEW id and can yield a NEW projection
+ * (10091971 -> 10093959 did exactly that, and happened to come back correct). This set is what
+ * makes the next recreation safe.
+ *
+ * SET, NOT ORDER. CMD reorders columns freely — 'Charge Entered Date' arrived in a different
+ * position than it left. Only the name set is the contract.
+ *
+ * Includes columns the mapper does NOT read (Payment Patient ID, Payment Entered, Insurance
+ * Adjustment Amount, Patient Total Balance, Insurance Paid Amount): set-equality means an
+ * unexpected column is a mismatch, so every column CMD actually sends has to be listed here even
+ * when nothing consumes it. Adding a column to the report REQUIRES updating this list.
+ */
+export const BXR_REPORT_COLUMNS = [
+  'Payment Patient ID',
+  'Payment Charge ID',
+  'Charge Entered Date',
+  'Payment Entered',
+  'Charge From Date',
+  'Payment Received',
+  'Charge CPT Code',
+  'Revenue Code',
+  'Patient Full Name',
+  'Payer Name',
+  'Claim Primary Member ID',
+  'Primary Group #',
+  'Charge/Debit Amount',
+  'Payment Allowed Amount',
+  'Insurance Adjustment Amount',
+  'Patient Total Balance',
+  'Check Payment',
+  'Charge Total Adjustments w/ Transfers',
+  'EFT Payment',
+  'Insurance Paid Amount',
+  'Charge Insurance Payments',
+  'Charge Balance Due Pat',
+  'Facility Name',
+  'Claim Status',
+] as const;
+
+/** The column names a parsed CMD report actually carries. Empty pull → empty list (the caller
+ *  skips the guard: an empty pull writes nothing and deletes nothing, so there is no shape to
+ *  police and nothing at risk). All rows share the CSV's header keys, so row 0 is representative. */
+export function reportColumns(rows: readonly CmdReportRow[]): string[] {
+  const first = rows[0];
+  return first === undefined ? [] : Object.keys(first);
+}
 
 /** The 3 PHI fields surfaced only behind the audited per-row reveal. */
 export interface CmdExplorerPhi {

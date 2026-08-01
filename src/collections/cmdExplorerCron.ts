@@ -28,8 +28,8 @@
  * lines, per-facility DELETE+INSERT for daily), and each run re-pulls the full filter window, so
  * the data self-heals rather than drifting.
  */
-import { aggregateDailyDeposits, dropFuturePaymentRows, mapReportRows } from './cmdExplorer.js';
-import { insertRows, mapRow, type PlainRow } from './cmdExplorerSeed.js';
+import { aggregateDailyDeposits, dropFuturePaymentRows, mapReportRows, reportColumns } from './cmdExplorer.js';
+import { headerMismatchLabel, insertRows, mapRow, type PlainRow } from './cmdExplorerSeed.js';
 import type { CmdReportRow } from './cmdPayer.js';
 import { replaceCmdDailyForFacility, type Db } from './db.js';
 
@@ -142,6 +142,13 @@ export interface CmdExplorerCronDeps {
   budgetMs?: number;
   /** Saved CMD filter's absolute window-end ('YYYY-MM-DD'). Drives the expiry warning; omit to skip. */
   filterWindowEnd?: string;
+  /**
+   * HEADER CONTRACT — the exact column-name set the report must project (order irrelevant).
+   * When set, a customer whose pull does not match EXACTLY is failed BEFORE any write, so the
+   * per-facility DELETE in replaceCmdDailyForFacility never runs and existing rows survive
+   * untouched. Omit to disable (Indigo runs unguarded until its own set is pinned).
+   */
+  expectedColumns?: readonly string[];
 }
 
 /** Non-PHI summary of a cron run — safe to log and return to the (authed) caller. */
@@ -212,6 +219,25 @@ export async function cmdExplorerCron(deps: CmdExplorerCronDeps): Promise<CmdExp
     }
     try {
       const fetched = await deps.fetchRows(customerId);
+
+      // ── HEADER CONTRACT — must stay the FIRST thing after the fetch. ──────────────────
+      // Everything below this line writes: insertRows() appends charge lines and
+      // replaceCmdDailyForFacility() issues a per-facility DELETE + INSERT. Throwing here
+      // lands in the per-customer catch below, so the customer is counted failed and the
+      // loop continues WITHOUT having touched the database — a shape change freezes the
+      // feed (recoverable) instead of deleting good rows and writing nulls over them
+      // (not recoverable). Never move a write above this check.
+      // fetched.length > 0 is REQUIRED, not an optimisation: an empty pull has no header row to
+      // inspect, so the diff would report every expected column "missing" and fail a perfectly
+      // healthy customer. Empty pulls are routine — the rolling current-month filter returns zero
+      // rows for the first hours of every month — and they are already harmless, because
+      // aggregateDailyDeposits yields [] and replaceCmdDailyForFacility skips its DELETE on [].
+      // Nothing to police, nothing at risk.
+      if (deps.expectedColumns !== undefined && fetched.length > 0) {
+        const mismatch = headerMismatchLabel(reportColumns(fetched), deps.expectedColumns);
+        if (mismatch !== null) throw new Error(mismatch);
+      }
+
       stats.rows_fetched += fetched.length;
 
       // Guard: drop rows whose Payment Received date is in the FUTURE (upstream data-entry

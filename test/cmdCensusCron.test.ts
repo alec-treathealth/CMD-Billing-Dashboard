@@ -289,3 +289,84 @@ test('revalidate fires only when a customer was processed', async () => {
     assert.equal(fired, 0);
   }
 });
+
+// ---------------------------------------------------------------------------
+// HEADER CONTRACT (census). The census has no DELETE, but insertCensusRows upserts with
+// `on conflict … do update set <REFRESH_COLS> = excluded.<c>` — so a renamed-column report
+// would overwrite live rows' good values with NULLs. The guard refuses BEFORE that upsert.
+// ---------------------------------------------------------------------------
+const CENSUS_GUARD_COLUMNS = [
+  'Charge ID', 'Patient Full Name', 'Claim Primary Member ID', 'Charge From Date',
+  'Charge CPT Code', 'Charge/Debit Amount', 'Facility Name', 'Claim Status',
+] as const;
+
+test('census header contract: exact set passes; reordered set also passes; upsert runs', async () => {
+  for (const [label, row] of [
+    ['exact', reportRow('A')],
+    ['reordered', Object.fromEntries(Object.entries(reportRow('A')).reverse())],
+  ] as const) {
+    const { db, calls } = fakeCensusCronDb();
+    const stats = await cmdCensusCron({
+      customers: [target('C1')],
+      writeDb: db,
+      fetchRows: async () => [row as CmdReportRow],
+      expectedColumns: CENSUS_GUARD_COLUMNS,
+    });
+    assert.equal(stats.customers_failed, 0, `${label}: no contract failure`);
+    assert.equal(stats.customers_processed, 1, `${label}: processed`);
+    assert.ok(
+      calls.some((c) => /insert into collections\.cmd_charge_census/i.test(c.sql)),
+      `${label}: the upsert ran`,
+    );
+  }
+});
+
+test('census header contract: a mismatch refuses BEFORE the upsert — no census write at all', async () => {
+  for (const [label, row, expectIn] of [
+    ['extra', { ...reportRow('A'), 'Surprise Column': 'x' }, /extra \[Surprise Column\]/],
+    ['missing', (() => { const r = reportRow('A'); delete r['Claim Status']; return r; })(), /missing \[Claim Status\]/],
+  ] as const) {
+    const { db, calls } = fakeCensusCronDb();
+    const errs: string[] = [];
+    const original = console.error;
+    console.error = (...a: unknown[]) => { errs.push(a.map(String).join(' ')); };
+    let stats;
+    try {
+      stats = await cmdCensusCron({
+        customers: [target('C1')],
+        writeDb: db,
+        fetchRows: async () => [row as CmdReportRow],
+        expectedColumns: CENSUS_GUARD_COLUMNS,
+      });
+    } finally {
+      console.error = original;
+    }
+    assert.equal(stats!.customers_failed, 1, `${label}: refused`);
+    assert.equal(stats!.customers_processed, 0);
+    assert.match(errs.join('\n'), /header mismatch/, `${label}: labelled a header mismatch`);
+    assert.match(errs.join('\n'), expectIn, `${label}: names the offending column`);
+    assert.match(errs.join('\n'), /contract_failed/, `${label}: stage label is contract_failed`);
+    assert.equal(
+      calls.filter((c) => /insert into collections\.cmd_charge_census/i.test(c.sql)).length,
+      0,
+      `${label}: ZERO census upserts — live values never overwritten`,
+    );
+    assert.equal(stats!.rows_fetched, 0, `${label}: a refused pull is not counted as fetched`);
+  }
+});
+
+test('census header contract: empty pull skips the guard (no header to inspect)', async () => {
+  const { db, calls } = fakeCensusCronDb();
+  const stats = await cmdCensusCron({
+    customers: [target('C1')],
+    writeDb: db,
+    fetchRows: async () => [],
+    expectedColumns: CENSUS_GUARD_COLUMNS,
+  });
+  assert.equal(stats.customers_failed, 0, 'an empty pull is not a contract violation');
+  assert.equal(
+    calls.filter((c) => /insert into collections\.cmd_charge_census/i.test(c.sql)).length,
+    0,
+    'and nothing was upserted anyway',
+  );
+});

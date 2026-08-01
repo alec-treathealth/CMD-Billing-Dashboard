@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mapReportRows, toNonPhi } from '../src/collections/cmdExplorer.js';
+import {
+  BXR_REPORT_COLUMNS,
+  HEADERS,
+  mapReportRows,
+  reportColumns,
+  toNonPhi,
+} from '../src/collections/cmdExplorer.js';
 import type { CmdReportRow } from '../src/collections/cmdPayer.js';
 
 const baseRow: CmdReportRow = {
@@ -56,4 +62,42 @@ test('rowId is deterministic and PHI-sensitive (different patient ⇒ different 
   const [c] = mapReportRows([{ ...baseRow, 'Patient Full Name': 'ROE, JOHN' }]);
   assert.ok(c);
   assert.notEqual(a.rowId, c.rowId); // a PHI change flips the fingerprint
+});
+
+// ---------------------------------------------------------------------------
+// BXR_REPORT_COLUMNS must stay in step with what the mapper actually reads. These two can
+// drift independently — someone adds a HEADERS alias for a renamed CMD column but forgets the
+// pinned set (guard rejects a good report), or edits the pinned set without the alias (guard
+// passes a report the mapper silently nulls). Both are caught here.
+// ---------------------------------------------------------------------------
+test('BXR_REPORT_COLUMNS: every field the mapper reads is satisfied by a listed column', () => {
+  const pinned = new Set<string>(BXR_REPORT_COLUMNS);
+
+  // HEADERS candidates are alternatives — at least ONE must be present per field.
+  // charge_to_date is the deliberate exception: CMD retired 'Charge To Date' (it duplicated
+  // 'Charge From Date' on 2,579/2,579 rows) and nothing on this plane reads the column.
+  const fields = Object.entries(HEADERS).filter(([k]) => k !== 'charge_to_date');
+  for (const [field, candidates] of fields) {
+    assert.ok(
+      (candidates as readonly string[]).some((c) => pinned.has(c)),
+      `HEADERS.${field} has no candidate in BXR_REPORT_COLUMNS — the guard would accept a report the mapper cannot read`,
+    );
+  }
+
+  // The deposit columns are read directly by aggregateDailyDeposits, not through HEADERS.
+  for (const c of ['Check Payment', 'EFT Payment', 'Payment Received']) {
+    assert.ok(pinned.has(c), `${c} feeds daily_collections and must be pinned`);
+  }
+
+  assert.equal(
+    pinned.size,
+    BXR_REPORT_COLUMNS.length,
+    'no duplicate column names (a duplicate silently weakens set-equality)',
+  );
+  assert.equal(pinned.has('Charge To Date'), false, 'retired column must NOT be pinned');
+});
+
+test('reportColumns: reads the header keys off row 0, and an empty pull yields no columns', () => {
+  assert.deepEqual(reportColumns([{ b: '2', a: '1' }]), ['b', 'a'], 'insertion order preserved, not sorted');
+  assert.deepEqual(reportColumns([]), [], 'empty pull ⇒ no columns (callers must skip the guard)');
 });

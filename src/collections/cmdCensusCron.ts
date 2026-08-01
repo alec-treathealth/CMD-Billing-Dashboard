@@ -43,6 +43,8 @@
  * and the (env-overridable) staleness window.
  */
 import { mapCensusRows, insertCensusRows } from './cmdCensus.js';
+import { reportColumns } from './cmdExplorer.js';
+import { headerMismatchLabel } from './cmdExplorerSeed.js';
 import type { CmdReportRow } from './cmdPayer.js';
 import type { Db } from './db.js';
 import { withTenant } from '../veris/withTenant.js';
@@ -82,6 +84,13 @@ export interface CmdCensusCronDeps {
   /** Freshness window (ms): a customer whose latest run finished OK within this is skipped. Default 24h.
    *  Env-overridable at the route (Step 3) so a manual re-pull can force staleness to 0. */
   stalenessMs?: number;
+  /**
+   * HEADER CONTRACT — the exact column-name set the census report must project (order irrelevant).
+   * Checked on the RAW fetch, before transformRows / mapCensusRows / insertCensusRows, so a shape
+   * change can never reach the upsert's `do update set … = excluded.…` and null out live rows.
+   * Omit to disable (Indigo runs unguarded until its own set is pinned).
+   */
+  expectedColumns?: readonly string[];
 }
 
 /** Non-PHI summary of a census cron run — safe to log and return to the (authed) caller. */
@@ -109,8 +118,11 @@ export interface CmdCensusCronStats {
   skips_by_label: Record<string, number>;
 }
 
-/** Stage label stored on a failed run row — LABEL ONLY (0058: never a message / URL / criteria / PHI). */
-type CensusFailStage = 'fetch_failed' | 'write_failed';
+/** Stage label stored on a failed run row — LABEL ONLY (0058: never a message / URL / criteria / PHI).
+ *  'contract_failed' = the pull succeeded but the report's COLUMN SET did not match the expected
+ *  projection, so it was refused before any upsert. Safe to persist: error_label is plain nullable
+ *  text with no CHECK constraint (verified against the live schema), and the label carries no PHI. */
+type CensusFailStage = 'fetch_failed' | 'contract_failed' | 'write_failed';
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -252,6 +264,25 @@ export async function cmdCensusCron(deps: CmdCensusCronDeps): Promise<CmdCensusC
     let stage: CensusFailStage = 'fetch_failed';
     try {
       const fetched = await deps.fetchRows(customerId);
+
+      // ── HEADER CONTRACT — before the transform, the map, and the upsert. ─────────────
+      // The census has no DELETE, but insertCensusRows upserts with
+      //   on conflict (business_entity_id, charge_id) do update set <REFRESH_COLS> = excluded.<c>
+      // so a report whose columns were renamed would OVERWRITE existing good values with NULLs on
+      // every matched row. Rows survive; their contents do not. Refusing here leaves the census
+      // exactly as it was.
+      // fetched.length > 0 is REQUIRED — see the same guard in cmdExplorerCron: an empty pull has
+      // no header to inspect and would report every expected column as missing, failing a healthy
+      // customer. An empty pull maps to zero census rows and upserts nothing, so there is nothing
+      // to protect.
+      if (deps.expectedColumns !== undefined && fetched.length > 0) {
+        const mismatch = headerMismatchLabel(reportColumns(fetched), deps.expectedColumns);
+        if (mismatch !== null) {
+          stage = 'contract_failed';
+          throw new Error(mismatch);
+        }
+      }
+
       stage = 'write_failed'; // fetch succeeded; anything past here (transform/map/upsert) is a write-side failure
       const rows = deps.transformRows ? deps.transformRows(fetched) : fetched;
       stats.rows_fetched += rows.length;

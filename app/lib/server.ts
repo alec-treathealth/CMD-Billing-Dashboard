@@ -164,7 +164,7 @@ import type { CollectionsYoy } from '../../src/collections/collectionsYoy.js';
 import { facilityDimension, type FacilityDimensionRow } from '../../src/collections/facilities.js';
 import { cmdPayerGapForMonth, cmdReportRows, type CmdApiConfig, type CmdReportRow } from '../../src/collections/cmdPayer.js';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdExplorer.js';
-import { aliasIndigoFacilityColumn } from '../../src/collections/cmdExplorer.js';
+import { aliasIndigoFacilityColumn, BXR_REPORT_COLUMNS } from '../../src/collections/cmdExplorer.js';
 import { decryptPhi, encryptPhi } from '../../src/collections/phiCrypto.js';
 import { cmdEra835ConfigFor, expandDateRange, runEra835Ingest } from '../../src/ingest/era_ingest.js';
 import { CmdEra835Error, cmdDownload835, read835Files } from '../../src/collections/cmd835.js';
@@ -664,6 +664,8 @@ async function handleExplorerCronForTenant(
     businessEntityId: string;
     /** Optional per-fetch row transform (Indigo: alias "Customer Name" → "Facility Name"). */
     transformRows?: (rows: CmdReportRow[]) => CmdReportRow[];
+    /** Exact column-name set the report must project; omit to run unguarded. */
+    expectedColumns?: readonly string[];
   },
 ): Promise<{ status: number; body: unknown }> {
   // GET only — reject any other verb before touching auth or the live API.
@@ -685,6 +687,7 @@ async function handleExplorerCronForTenant(
       },
       writeDb: rollupWriterDb(),
       businessEntityId: tenant.businessEntityId,
+      expectedColumns: tenant.expectedColumns,
       revalidate: () => revalidateTag('cmd-explorer'),
       revalidateDashboard: () => revalidateTag(DASHBOARD_CACHE_TAG),
       // Both rosters use a ROLLING (current-month) payment-received window, so there is no fixed
@@ -711,6 +714,11 @@ export function handleCmdExplorerCron(req: {
     customers: CMD_EXPLORER_CUSTOMERS,
     configFor: cmdExplorerConfigFor,
     businessEntityId: BXR_TENANT_ID,
+    // HEADER CONTRACT. Verified by probing report 10093959 across all 15 BXR customers on
+    // 2026-08-01. A projection change now fails the customer BEFORE replaceCmdDailyForFacility's
+    // DELETE, so the feed freezes (recoverable) instead of being overwritten with nulls (not).
+    // If you deliberately add/remove a column in CMD, update BXR_REPORT_COLUMNS in the same change.
+    expectedColumns: BXR_REPORT_COLUMNS,
   });
 }
 
@@ -732,6 +740,11 @@ export function handleIndigoExplorerCron(req: {
     configFor: cmdIndigoConfigFor,
     businessEntityId: INDIGO_TENANT_ID,
     transformRows: aliasIndigoFacilityColumn,
+    // expectedColumns DELIBERATELY OMITTED: Indigo runs report 10092391 (a different projection),
+    // and its rows reach the cron POST-transform — aliasIndigoFacilityColumn ADDS 'Facility Name'
+    // while keeping 'Customer Name', so the guarded set is the report's columns PLUS that one.
+    // Pinning it from an unverified list would break a currently-healthy feed, so Indigo stays
+    // unguarded until its set is probed and committed as a deliberate change. Known gap.
   });
 }
 
@@ -757,6 +770,8 @@ async function handleCensusCronForTenant(
     configFor: (customerId: string) => CmdApiConfig;
     /** Optional per-fetch row transform (Indigo: alias "Customer Name" → "Facility Name"). */
     transformRows?: (rows: CmdReportRow[]) => CmdReportRow[];
+    /** Exact column-name set the census report must project; omit to run unguarded. */
+    expectedColumns?: readonly string[];
   },
 ): Promise<{ status: number; body: unknown }> {
   if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
@@ -772,6 +787,7 @@ async function handleCensusCronForTenant(
       fetchRows: (customerId) => cmdReportRows(tenant.configFor(customerId)),
       writeDb: rollupWriterDb(),
       transformRows: tenant.transformRows,
+      expectedColumns: tenant.expectedColumns,
       stalenessMs: censusStalenessMs(),
     });
     return { status: 200, body: { ok: true, ...stats } };
@@ -789,6 +805,11 @@ export function handleCmdCensusCron(req: {
   return handleCensusCronForTenant(req, {
     label: 'cmd-census',
     customers: BXR_CUSTOMERS,
+    // expectedColumns NOT WIRED YET — the guard exists in cmdCensusCron, but the census runs its
+    // OWN saved filter (CMD_BXR_CENSUS_FILTER_ID), whose projection has never been probed. Column
+    // sets belong to the report, so if that filter sits under 10093959 the answer is
+    // `expectedColumns: BXR_REPORT_COLUMNS` — one line. Guessing it wrong would refuse a census
+    // that would otherwise have recovered, so this stays off until one live run proves the shape.
     configFor: cmdBxrCensusConfigFor,
   });
 }

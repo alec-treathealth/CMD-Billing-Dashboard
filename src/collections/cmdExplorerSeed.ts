@@ -293,14 +293,41 @@ function headerColumns(line: string): string[] {
   return line.split(',').map((h) => h.trim().replace(/^"(.*)"$/, '$1'));
 }
 
-/** Set equality check → the missing/extra column names (safe to log; not PHI). */
-export function headerDiff(actual: string[]): { missing: string[]; extra: string[] } {
+/**
+ * Set equality check → the missing/extra column names (safe to log; not PHI).
+ *
+ * NAME-SET, NOT POSITIONAL, and deliberately so: a positional lock was tried on this project
+ * and replaced after two upstream CMD projection edits inside 30 hours. Column ORDER is not
+ * a contract — CMD reorders freely — so reordering the same names must pass.
+ *
+ * `expectedSet` defaults to the SEED's 21-column shape. The live cron paths pass their own
+ * report's projection (see BXR_REPORT_COLUMNS in cmdExplorer.ts): one guard shape, several
+ * expected sets, rather than a second pattern per call site.
+ */
+export function headerDiff(
+  actual: string[],
+  expectedSet: readonly string[] = EXPECTED_HEADERS,
+): { missing: string[]; extra: string[] } {
   const a = new Set(actual);
-  const expected = new Set<string>(EXPECTED_HEADERS);
+  const expected = new Set<string>(expectedSet);
   return {
     missing: [...expected].filter((h) => !a.has(h)),
     extra: [...a].filter((h) => !expected.has(h)),
   };
+}
+
+/** The guard's failure label, or null when the column set matches exactly. Shared by every
+ *  caller so the message shape is identical in the seed log and both cron logs. */
+export function headerMismatchLabel(
+  actual: string[],
+  expectedSet: readonly string[],
+): string | null {
+  const diff = headerDiff(actual, expectedSet);
+  if (diff.missing.length === 0 && diff.extra.length === 0) return null;
+  const parts: string[] = [];
+  if (diff.missing.length) parts.push(`missing [${diff.missing.join(', ')}]`);
+  if (diff.extra.length) parts.push(`extra [${diff.extra.join(', ')}]`);
+  return `header mismatch — ${parts.join('; ')}`;
 }
 
 interface FileOutcome {
@@ -311,14 +338,8 @@ interface FileOutcome {
 
 /** Validate + parse + map one CSV file. Throws only on unreadable file (caller skips). */
 function processFile(path: string): { ok: true; outcome: FileOutcome } | { ok: false; reason: string } {
-  const header = headerColumns(peekHeaderLine(path));
-  const diff = headerDiff(header);
-  if (diff.missing.length > 0 || diff.extra.length > 0) {
-    const parts: string[] = [];
-    if (diff.missing.length) parts.push(`missing [${diff.missing.join(', ')}]`);
-    if (diff.extra.length) parts.push(`extra [${diff.extra.join(', ')}]`);
-    return { ok: false, reason: `header mismatch — ${parts.join('; ')}` };
-  }
+  const mismatch = headerMismatchLabel(headerColumns(peekHeaderLine(path)), EXPECTED_HEADERS);
+  if (mismatch !== null) return { ok: false, reason: mismatch };
 
   const parsed = parseReportCsv(readFileSync(path, 'utf8'));
   if (parsed.length === 0) return { ok: false, reason: 'no data rows' };

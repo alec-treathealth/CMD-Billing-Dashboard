@@ -188,3 +188,155 @@ test('computeFreshnessWarnings: no filterWindowEnd skips expiry; null maxPayment
     'null maxPaymentDate + distant window end ⇒ no warnings',
   );
 });
+
+// ---------------------------------------------------------------------------
+// HEADER CONTRACT — the guard that stands between a shape change and a wiped feed.
+//
+// Ordering is the whole point: the check sits immediately after fetchRows and BEFORE
+// insertRows / replaceCmdDailyForFacility, so a mismatch must leave the database
+// completely untouched. fakeDb() counts DELETEs and INSERTs, so "untouched" is asserted
+// against real call counts rather than inferred from stats.
+// ---------------------------------------------------------------------------
+
+/** The exact column set these tests pin. Small on purpose — this exercises the MECHANISM;
+ *  the real BXR_REPORT_COLUMNS is covered by its own invariant test below. */
+const GUARD_COLUMNS = ['Payment Received', 'Check Payment', 'EFT Payment'] as const;
+
+/** Capture console.error so the failure LABEL can be asserted (it must name the columns). */
+async function withCapturedErrors(fn: () => Promise<void>): Promise<string[]> {
+  const lines: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+  try { await fn(); } finally { console.error = original; }
+  return lines;
+}
+
+const ONE: CmdCustomerTarget[] = [{ customerId: '1', facilityCode: 'CAMH' }];
+
+test('header contract: the exact expected name set passes and writes normally', async () => {
+  const fake = fakeDb();
+  const stats = await cmdExplorerCron({
+    customers: ONE,
+    fetchRows: async () => [depositRow('2026-07-15', '100.00', '50.00')],
+    writeDb: fake.db,
+    businessEntityId: BXR_ENTITY_ID,
+    expectedColumns: GUARD_COLUMNS,
+  });
+  assert.equal(stats.customers_processed, 1);
+  assert.equal(stats.customers_failed, 0);
+  assert.ok(fake.deletes > 0, 'the per-facility replace ran — so a FAILING case losing this is meaningful');
+});
+
+test('header contract: same names in a DIFFERENT ORDER pass (positional-lock regression)', async () => {
+  // A positional lock was tried on this project and replaced after two upstream CMD projection
+  // edits in 30 hours. CMD reorders columns freely — 'Charge Entered Date' moved position between
+  // two probes on 2026-08-01 — so ORDER must never be part of the contract.
+  const reordered: Record<string, string> = {};
+  reordered['EFT Payment'] = '50.00';
+  reordered['Payment Received'] = '2026-07-15';
+  reordered['Check Payment'] = '100.00';
+  assert.notDeepEqual(Object.keys(reordered), [...GUARD_COLUMNS], 'fixture really is reordered');
+
+  const fake = fakeDb();
+  const stats = await cmdExplorerCron({
+    customers: ONE,
+    fetchRows: async () => [reordered],
+    writeDb: fake.db,
+    businessEntityId: BXR_ENTITY_ID,
+    expectedColumns: GUARD_COLUMNS,
+  });
+  assert.equal(stats.customers_failed, 0, 'reordering the same names is NOT a mismatch');
+  assert.equal(stats.customers_processed, 1);
+  assert.ok(fake.deletes > 0);
+});
+
+test('header contract: an UNEXPECTED column fails and the label names it', async () => {
+  const fake = fakeDb();
+  let stats: Awaited<ReturnType<typeof cmdExplorerCron>> | undefined;
+  const logs = await withCapturedErrors(async () => {
+    stats = await cmdExplorerCron({
+      customers: ONE,
+      fetchRows: async () => [{ ...depositRow('2026-07-15', '100.00', '50.00'), 'Surprise Column': 'x' }],
+      writeDb: fake.db,
+      businessEntityId: BXR_ENTITY_ID,
+      expectedColumns: GUARD_COLUMNS,
+    });
+  });
+  assert.equal(stats!.customers_failed, 1);
+  assert.equal(stats!.customers_processed, 0);
+  const joined = logs.join('\n');
+  assert.match(joined, /header mismatch/, 'the failure is identified as a header mismatch');
+  assert.match(joined, /extra \[Surprise Column\]/, 'and NAMES the unexpected column');
+  assert.equal(fake.deletes, 0, 'NO DELETE on the failure path');
+  assert.equal(fake.inserts, 0, 'and nothing inserted either');
+});
+
+test('header contract: a MISSING column fails and the label names it', async () => {
+  const fake = fakeDb();
+  let stats: Awaited<ReturnType<typeof cmdExplorerCron>> | undefined;
+  const logs = await withCapturedErrors(async () => {
+    stats = await cmdExplorerCron({
+      customers: ONE,
+      // 'EFT Payment' dropped — exactly the class of silent projection edit this guard exists for.
+      fetchRows: async () => [{ 'Payment Received': '2026-07-15', 'Check Payment': '100.00' }],
+      writeDb: fake.db,
+      businessEntityId: BXR_ENTITY_ID,
+      expectedColumns: GUARD_COLUMNS,
+    });
+  });
+  assert.equal(stats!.customers_failed, 1);
+  const joined = logs.join('\n');
+  assert.match(joined, /header mismatch/);
+  assert.match(joined, /missing \[EFT Payment\]/, 'and NAMES the missing column');
+  assert.equal(fake.deletes, 0, 'NO DELETE on the failure path');
+});
+
+test('THE ONE THAT MATTERS: a mismatch leaves existing rows intact — zero DELETEs across the roster', async () => {
+  // Without the guard these rows map + aggregate cleanly, so every customer would issue a
+  // per-facility DELETE and re-insert. That is the silent-destruction path: good deposit rows
+  // deleted hourly and replaced with whatever the changed report happens to yield. The guard must
+  // convert that into a frozen feed — recoverable — with the database never touched.
+  const fake = fakeDb();
+  let stats: Awaited<ReturnType<typeof cmdExplorerCron>> | undefined;
+  await withCapturedErrors(async () => {
+    stats = await cmdExplorerCron({
+      customers: CUSTOMERS, // all three facilities
+      fetchRows: async () => [{ ...depositRow('2026-07-15', '900.00', '100.00'), 'Renamed Col': 'x' }],
+      writeDb: fake.db,
+      businessEntityId: BXR_ENTITY_ID,
+      expectedColumns: GUARD_COLUMNS,
+    });
+  });
+  assert.equal(stats!.customers_failed, CUSTOMERS.length, 'every customer refused');
+  assert.equal(stats!.customers_processed, 0);
+  assert.equal(fake.deletes, 0, 'ZERO deletes — nothing was destroyed');
+  assert.equal(fake.inserts, 0, 'ZERO inserts — nothing was written');
+  assert.equal(stats!.daily_rows_deleted, 0);
+  assert.equal(stats!.rows_fetched, 0, 'a refused pull is not counted as fetched');
+});
+
+test('header contract: omitting expectedColumns leaves the path unguarded (Indigo behaviour)', async () => {
+  const fake = fakeDb();
+  const stats = await cmdExplorerCron({
+    customers: ONE,
+    fetchRows: async () => [{ ...depositRow('2026-07-15', '100.00', '50.00'), 'Anything At All': 'x' }],
+    writeDb: fake.db,
+    businessEntityId: BXR_ENTITY_ID,
+  });
+  assert.equal(stats.customers_failed, 0, 'no guard configured ⇒ no shape enforcement');
+  assert.ok(fake.deletes > 0, 'and the normal write path still runs');
+});
+
+test('an EMPTY pull skips the guard and still writes nothing (no shape to police)', async () => {
+  const fake = fakeDb();
+  const stats = await cmdExplorerCron({
+    customers: ONE,
+    fetchRows: async () => [],
+    writeDb: fake.db,
+    businessEntityId: BXR_ENTITY_ID,
+    expectedColumns: GUARD_COLUMNS,
+  });
+  assert.equal(stats.customers_failed, 0, 'an empty month is not a contract violation');
+  assert.equal(stats.customers_processed, 1);
+  assert.equal(fake.deletes, 0, 'and an empty pull never deletes (the rows.length>0 guard in db.ts)');
+});
