@@ -6,8 +6,10 @@
  * 2026-07-13). Hash no-op when the sheet is unchanged; disappeared rows are marked
  * stopped, never deleted; a whole-tab parse failure keeps last good data (ok:false in
  * the JSON, no writes). Output carries per-tab contribution counts + the unmatched /
- * catch-all carrier attribution lists. NOT scheduled in vercel.json yet — schedule
- * entries land as their OWN commit after manual verify (session brief invariant).
+ * catch-all carrier attribution lists. Scheduled in app/vercel.json at `40 2 * * *`
+ * since 2026-07-14 (9f7e254). Schedule entries land as their own commit after manual
+ * verify — but that split is exactly how this header went stale for two weeks, so when
+ * you change the schedule, update this line in the SAME commit.
  */
 import { handleBillingCodeDecisionsCron } from '@/lib/server';
 
