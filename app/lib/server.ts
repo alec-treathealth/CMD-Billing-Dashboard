@@ -1578,8 +1578,8 @@ export async function payerCmdMonth(
 // ---------------------------------------------------------------------------
 
 /**
- * Live-fetch config for ONE CMD customer account. Report 10091971 / filter 10147530 is the
- * batch export (the 14 explorer columns + Check/EFT + Patient Payments) windowed on PAYMENT
+ * Live-fetch config for ONE CMD customer account. Report 10093959 / filter 10148478 is the
+ * batch export (the explorer columns + Check/EFT + Claim Status) windowed on PAYMENT
  * RECEIVED date via a ROLLING window (current-month) — so each run re-supplies the current
  * month's collections and the append-only explorer + span-scoped daily replace self-heal any
  * missed run. (Predecessor 10147499 under-returned per account; a charge-date-windowed 10147430
@@ -1593,8 +1593,15 @@ function cmdExplorerConfigFor(customerId: string): CmdApiConfig {
   return {
     ...cmdApiConfig(),
     customerId,
-    reportId: process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10091971',
-    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147530',
+    // 2026-08-01: report 10091971 / filter 10147530 were LOST in CMD and every pairing under
+    // 10091971 now returns INVALID CRITERIA — the BXR explorer cron ran 0/15 for ~3h. These are
+    // the replacements (10093959 / 10148478), verified saved under all 15 BXR customers and
+    // column-for-column value-matched against the old export before being adopted; see the ALIAS
+    // PROVENANCE block in src/collections/cmdExplorer.ts. The old ids are DEAD — do not restore
+    // them as fallbacks. NOTE: cmdBxrCensusConfigFor spreads this config, so this reportId is the
+    // CENSUS's report too; its saved filter must live under 10093959 as well.
+    reportId: process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10093959',
+    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10148478',
     pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 3_000,
     maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 8,
     emptyGraceAttempts: Number(process.env.CMD_EXPLORER_EMPTY_GRACE) || 4,
@@ -1604,7 +1611,7 @@ function cmdExplorerConfigFor(customerId: string): CmdApiConfig {
 /**
  * Live-fetch config for ONE Indigo CMD customer account (report 10092391 / filter 10147669 —
  * replaced 10147602 after 2 facilities were added to the account; 10147602 was Indigo's own but is
- * being retired). Indigo's equivalent of BXR's 10091971/10147530, on the SAME CMD_API_* partner
+ * being retired). Indigo's equivalent of BXR's 10093959/10148478, on the SAME CMD_API_* partner
  * creds. Overridable
  * via CMD_INDIGO_REPORT_ID / CMD_INDIGO_FILTER_ID without a deploy; poll tuning is shared with the
  * BXR explorer cron (identical CMD batch behavior). customerId varies per call to cover all 36

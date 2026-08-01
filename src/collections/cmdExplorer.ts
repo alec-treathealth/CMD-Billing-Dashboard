@@ -29,21 +29,48 @@ const HEADERS = {
   facility: ['Facility Name'],
   patient_name: ['Patient Full Name'], //               PHI
   member_id_raw: ['Claim Primary Member ID'], //         PHI
-  group_number: ['Primary Group Number'], //             PHI
+  group_number: ['Primary Group Number', 'Primary Group #'], // PHI
   charge_amount: ['Charge/Debit Amount'],
   allowed_amount: ['Payment Allowed Amount'],
   insurance_payments: ['Charge Insurance Payments'],
-  adjustments: ['Charge Total Adjustments w/o Transfers'],
+  // 'w/o Transfers' NO LONGER EXISTS in CMD (owner-confirmed 2026-08-01) — the report builder
+  // now offers only 'w/ Transfers'. Kept first anyway so any surviving export of the old shape
+  // still maps; the live 10093959 report supplies the 'w/' form. MEASURED equivalent, not
+  // assumed: on an exact Charge-ID join over CAMH, 'w/ Transfers' reproduced the value the old
+  // 'w/o Transfers' column had written on 85 of 85 charges (0 mismatches).
+  adjustments: ['Charge Total Adjustments w/o Transfers', 'Charge Total Adjustments w/ Transfers'],
   patient_balance_due: ['Charge Balance Due Pat'],
-  primary_payer: ['Charge Primary Payer Name'],
+  primary_payer: ['Charge Primary Payer Name', 'Payer Name'],
   // Feed-1 dimension columns (Qualify v2, artifact ②a) — non-PHI. Present on the 21-col report
   // for BOTH tenants (Step-0 header proof, 2026-07-21). claim_status_category is NOT here — it is
   // DERIVED from claim_status_raw in mapRow (cmdExplorerSeed.ts), not picked from a CSV column.
-  charge_id: ['Charge ID'],
+  charge_id: ['Charge ID', 'Payment Charge ID'],
   charge_entered_date: ['Charge Entered Date'],
+  // 'Charge To Date' is ABSENT from report 10093959 by design: it duplicated 'Charge From Date'
+  // on every row this plane ever stored (2,579 of 2,579 with both populated, 0 exceptions), and
+  // nothing on the collections plane reads charge_to_date — the readers are all billing_audit_row,
+  // a different table. New rows carry NULL here. Not in the fingerprint, so no dedup impact.
   charge_to_date: ['Charge To Date'],
   claim_status_raw: ['Claim Status'],
 } as const;
+// ---------------------------------------------------------------------------
+// ALIAS PROVENANCE (2026-08-01). CMD report 10091971 was lost; 10093959 replaced it with some
+// columns renamed. Each alias above was accepted ONLY after comparing the new column's VALUES
+// against what the old column had already written to collections.cmd_explorer_rows, joined on
+// Charge ID (itself verified identical first). Byte-equal on every compared charge:
+//   'Payer Name'        == 'Charge Primary Payer Name'              437/437
+//   'Payment Charge ID' == 'Charge ID'                              211/211
+//   'Primary Group #'   == 'Primary Group Number'   (blind index)   433/433
+//   'Charge Total Adjustments w/ Transfers' == 'w/o Transfers'       85/85
+// Two candidates were REJECTED on the same evidence and must never be aliased in: the report
+// still carries 'Patient Total Balance' (0/85 vs patient_balance_due — patient-wide total, not
+// the per-charge portion) and 'Insurance Adjustment Amount' (15/85 vs adjustments — insurance
+// only, not total). They are ignored because pick() matches exact labels and they are not listed.
+// WHY THIS BAR: five of these fields are inside the LOCKED 14-field fingerprint
+// (cmdExplorerSeed.mapRow). Aliasing a same-named-but-different-valued column changes the dedup
+// key, ON CONFLICT stops firing, and the cron re-inserts every posting hourly. Never add an alias
+// here from a label match alone — compare values first.
+// ---------------------------------------------------------------------------
 
 /** The 3 PHI fields surfaced only behind the audited per-row reveal. */
 export interface CmdExplorerPhi {
@@ -159,7 +186,7 @@ export function mapReportRows(rows: CmdReportRow[]): CmdExplorerFullRow[] {
 
 /**
  * Indigo's CMD export (report 10092391) labels the facility column "Customer Name" (CMD: one
- * customer == one facility), where BXR's (10091971) uses "Facility Name". The shared mapReportRows
+ * customer == one facility), where BXR's (10093959) uses "Facility Name". The shared mapReportRows
  * above + the LOCKED fingerprint (cmdExplorerSeed.mapRow) read facility ONLY from "Facility Name"
  * and mapRow treats it as REQUIRED — so an UNALIASED Indigo pull skips EVERY charge line
  * (charge_skipped == rows_fetched). This aliases "Customer Name" → "Facility Name" IN PLACE so both
@@ -186,13 +213,13 @@ export function toNonPhi(rows: CmdExplorerFullRow[]): CmdExplorerNonPhiRow[] {
 
 // ---------------------------------------------------------------------------
 // Daily deposit aggregation — feeds the Master BXR chart (collections.daily_collections,
-// source_tag='cmd'). Report 10091971 / filter 10147499 carries `Check Payment` + `EFT
+// source_tag='cmd'). Report 10093959 / filter 10148478 carries `Check Payment` + `EFT
 // Payment` per charge line; we sum them by Payment-Received DATE for ONE facility (the
 // customer being pulled). NON-PHI by construction: only the date + summed dollars leave
 // here — never a patient cell. Pure + env-free, like the rest of this module.
 // ---------------------------------------------------------------------------
 
-/** Live-report headers for the two deposit columns (only present under filter 10147499). */
+/** Live-report headers for the two deposit columns (present under filter 10148478). */
 const CHECK_KEYS = ['Check Payment'] as const;
 const EFT_KEYS = ['EFT Payment'] as const;
 const PAYMENT_DATE_KEYS = ['Payment Received'] as const;

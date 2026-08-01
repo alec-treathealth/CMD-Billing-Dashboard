@@ -7,11 +7,14 @@
  * `{customerId}` in the URL path (verified live). So to cover ALL facilities the cron runs the
  * same report/filter once per customer below, varying only CMD_CUSTOMER_ID.
  *
- * Report 10091971 / filter 10147530 returns the 17-column batch export (the 14 explorer columns
- * PLUS `Check Payment` + `EFT Payment` + `Charge Patient Payments`) on a ROLLING (current-month)
+ * Report 10093959 / filter 10148478 returns the 23-column batch export (the explorer columns
+ * PLUS `Check Payment` + `EFT Payment` + `Claim Status`) on a ROLLING (current-month)
  * payment-received window, so each run re-supplies the current month and the pipeline self-heals.
- * (Filter 10147530 is valid under all 15 accounts here; it is NOT saved under the excluded
- * accounts below — see EXCLUDED note.)
+ * (Filter 10148478 is verified saved under all 15 accounts here — probed 2026-08-01, all 15
+ * returned rows; it is NOT saved under the excluded accounts below — see EXCLUDED note.)
+ * It REPLACED report 10091971 / filter 10147530, which were lost in CMD on 2026-07-31 and now
+ * return INVALID CRITERIA for every pairing. Some column labels were renamed in the rebuild; the
+ * aliases and the value-equality evidence for each are in src/collections/cmdExplorer.ts.
  *
  * MULTI-TENANT: each entry carries its owning `businessEntityId`, so a per-customer pull
  * tags its rows to the correct tenant (BXR vs Indigo) — the tenant-aware ingest loops
@@ -30,7 +33,7 @@
  *     10035974 TREAT MENTAL HEALTH COLORADO  ·  10033951 WELLNESS RECOVERY CENTER LLC
  *     10035976 HOUSTON MENTAL HEALTH
  *   They carry no data; including the billing umbrella would also double-count. (Note: filter
- *   10147530 isn't even saved under BILLING SERVICE / HOUSTON / TREAT COLORADO — they return
+ *   the explorer filter isn't even saved under BILLING SERVICE / HOUSTON / TREAT COLORADO — they return
  *   INVALID CRITERIA — and TEEN TX / WELLNESS RECOVERY accept it but return no rows. If any of
  *   these becomes active, add its collections.facilities row + the saved filter before listing it.)
  *

@@ -1,7 +1,7 @@
 /**
  * CMD Collections backfill — one-shot loop over all CMD customer accounts to populate
  * collections.daily_collections (source_tag='cmd', Check+EFT by facility/day) AND refresh
- * collections.cmd_explorer_rows from the live report (10091971 / filter 10147499). Run locally
+ * collections.cmd_explorer_rows from the live report (10093959 / filter 10148478). Run locally
  * (no Vercel function deadline); also doubles as the timing check for the cron's wall-clock guard.
  *
  *   node --env-file=.env --import tsx src/collections/cmdDailyBackfill.ts            # DRY-RUN (no DB)
@@ -62,8 +62,15 @@ function baseConfig(): Omit<CmdApiConfig, 'customerId'> {
         })();
   return {
     baseUrl: process.env.CMD_API_BASE_URL?.trim() || 'https://webapi.collaboratemd.com',
-    reportId: process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10091971',
-    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10147499',
+    // 2026-08-01: 10091971/10147499 are DEAD (the whole 10091971 report was lost in CMD; every
+    // pairing under it returns INVALID CRITERIA). Defaults now match the live cron so a recovery
+    // backfill run does not silently fail on a retired report. NOTE the window: 10148478 is the
+    // cron's ROLLING CURRENT-MONTH payment-received filter, so this CLI on its defaults backfills
+    // only the current month. For an older span (e.g. the end-of-July gap this outage opened), pass
+    // CMD_EXPLORER_FILTER_ID pointing at a saved filter windowed on THAT range — never a
+    // charge-date-windowed filter, which undercounts by ~$6.9M.
+    reportId: process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10093959',
+    filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10148478',
     auth,
     pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 5_000,
     maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 40,
