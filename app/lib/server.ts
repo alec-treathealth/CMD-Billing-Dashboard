@@ -1639,12 +1639,24 @@ function cmdExplorerCatchupConfigFor(customerId: string): CmdApiConfig {
 // ---------------------------------------------------------------------------
 // CMD charge-CENSUS (Qualify v2 ②b) — Feed 2 live-fetch config.
 //
-// The census reuses each tenant's EXISTING explorer report/poll/creds and swaps ONLY the saved
-// filter: the census filter is a TRAILING CHARGE CENSUS (all payment states), not the explorer's
-// payment-received window. The census filter id has NO hardcoded default (no-fallback-throw): a
-// census pull against the wrong filter would silently mis-populate the openCount DENOMINATOR, so a
-// missing env var must fail the run loudly rather than fall back to the explorer's payment filter.
-// Env (set in Vercel, never hardcoded/logged): CMD_BXR_CENSUS_FILTER_ID, CMD_INDIGO_CENSUS_FILTER_ID.
+// The census filter is a TRAILING CHARGE CENSUS (all payment states), not the explorer's
+// payment-received window. Neither the census report id nor its filter id has a hardcoded default
+// (no-fallback-throw): a census pull against the wrong pairing would silently mis-populate the
+// openCount DENOMINATOR, so a missing env var must fail the run loudly instead.
+// Env (set in Vercel, never hardcoded/logged): CMD_BXR_CENSUS_REPORT_ID, CMD_BXR_CENSUS_FILTER_ID,
+// CMD_INDIGO_CENSUS_FILTER_ID.
+//
+// BXR NO LONGER SHARES THE EXPLORER'S REPORT (2026-08-01, incident-driven). It used to spread
+// cmdExplorerConfigFor and override only the filter. CMD saved filters are report-SCOPED, so when
+// report 10091971 was lost and the explorer was repointed to 10093959, the census silently inherited
+// the NEW report while still naming a filter saved under the OLD one — every pairing returned
+// INVALID CRITERIA and the BXR census ran 0/15 for ~13h (loud, no data loss: the run ledger keeps
+// status='error', so isCustomerFresh never marks those customers fresh and the cron retries hourly).
+// A fallback to the explorer's report would reintroduce exactly that coupling, hence required-throw.
+//
+// INDIGO DELIBERATELY STILL SPREADS cmdIndigoConfigFor. Its pairing (report 10092391 / census filter
+// 10148129) is live and healthy, so making a report id REQUIRED there would take a working feed down
+// on deploy. Asymmetric on purpose; the follow-up is a dedicated Indigo census report.
 // ---------------------------------------------------------------------------
 
 /** The census saved-filter id — REQUIRED from env, no default (see the block comment above). */
@@ -1654,9 +1666,22 @@ function requiredCensusFilterId(envVar: 'CMD_BXR_CENSUS_FILTER_ID' | 'CMD_INDIGO
   return v;
 }
 
-/** BXR census config: the explorer's report/poll/creds with the CENSUS filter (env, no fallback). */
+/** The census REPORT id — REQUIRED from env, no default. Deliberately NOT defaulted to the explorer's
+ *  report: that coupling is what broke the census on 2026-07-31 (see the block comment above). */
+function requiredCensusReportId(envVar: 'CMD_BXR_CENSUS_REPORT_ID'): string {
+  const v = process.env[envVar]?.trim();
+  if (!v) throw new Error(`Missing ${envVar} (the CMD census report id; set in env, no default)`);
+  return v;
+}
+
+/** BXR census config: the explorer's creds + poll tuning, but its OWN report AND filter (env, no
+ *  fallback on either). Poll tuning stays shared — identical CMD batch behavior, one knob to turn. */
 function cmdBxrCensusConfigFor(customerId: string): CmdApiConfig {
-  return { ...cmdExplorerConfigFor(customerId), filterId: requiredCensusFilterId('CMD_BXR_CENSUS_FILTER_ID') };
+  return {
+    ...cmdExplorerConfigFor(customerId),
+    reportId: requiredCensusReportId('CMD_BXR_CENSUS_REPORT_ID'),
+    filterId: requiredCensusFilterId('CMD_BXR_CENSUS_FILTER_ID'),
+  };
 }
 
 /** Indigo census config: cmdIndigoConfigFor's report/poll with the CENSUS filter (env, no fallback).

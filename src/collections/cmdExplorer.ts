@@ -72,6 +72,17 @@ export const HEADERS = {
 // (cmdExplorerSeed.mapRow). Aliasing a same-named-but-different-valued column changes the dedup
 // key, ON CONFLICT stops firing, and the cron re-inserts every posting hourly. Never add an alias
 // here from a label match alone — compare values first.
+//
+// ⚠ SCOPE CAVEAT on 'Payment Charge ID' (measured 2026-08-01, report 10093963/filter 10148483,
+// customer 10027973). The 211/211 equivalence above could only have been measured on charges that
+// HAVE a payment — the sole population where both labels are populated. 'Payment Charge ID' is
+// PAYMENT-scoped: on an all-payment-states export it is BLANK for every charge with no posting yet.
+// Measured on a 1,215-row census pull: 288 rows blank, and they were exactly the 282 CLAIM AT
+// INSURANCE + 6 ON HOLD rows (927/927 populated on PAID / BALANCE DUE PATIENT / NEEDS RENEGOTIATING /
+// PENDING+APPROVED FOR HIGHER PAYMENT). So the alias is sound for the payment-anchored EXPLORER and
+// UNSAFE as the sole key for the CENSUS, whose only hard required field is charge_id — those rows are
+// dropped 'charge_id: missing', silently shrinking the openCount denominator by the un-adjudicated
+// claims it exists to hold. Any all-payment-states report MUST project plain 'Charge ID'.
 // ---------------------------------------------------------------------------
 
 /**
