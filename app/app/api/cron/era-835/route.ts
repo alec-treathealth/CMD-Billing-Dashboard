@@ -3,27 +3,29 @@
  * staging.era_835_adjustment, migration 013).
  * Auth: Authorization: Bearer <CRON_SECRET>. GET only — any other verb is 405.
  *
- * ⛔ NOT SCHEDULED — DO NOT ADD TO app/vercel.json YET.
- * This route deliberately has NO crons entry (vercel.json is strict JSON, so a
- * commented-out entry is impossible — this header is the note instead). It stays
- * unscheduled until the finding-1 probe re-run confirms the real per-code failure
- * rate: the 2026-07-31 probe saw 30%/42% failure episodes whose root cause is
- * UNKNOWN, and the throttle theory was FALSIFIED (six-times-gentler pacing produced
- * a HIGHER failure rate). Scheduling an ingest whose transport fails ~a third of the
- * time would just spray partial data and noise. Nothing invokes this route until an
- * entry is added — Vercel crons are opt-in per path, and the CRON_SECRET gate stops
- * manual/stray GETs.
- *
- * INTENDED SCHEDULE (when enabled): { "path": "/api/cron/era-835", "schedule": "50 8 * * *" }
+ * SCHEDULED: { "path": "/api/cron/era-835", "schedule": "50 8 * * *" }
+ * Enabled 2026-08-01.
  *   - minute :50 — the only clean slot in the :41-:59 quiet window (:00 cmd-explorer,
  *     :15 cmd-census, :30 indigo-explorer, :35 indigo-census, :45 rollup-refresh all
  *     share the hourly grid; CMD allows one report at a time per partner).
+ *   - hour 8 UTC — clear of the 02-04 UTC billing-audit block and before the 09:17
+ *     vob-sync, and a full hour after cmd-explorer-catchup at `52 7 * * *`. That gap
+ *     is load-bearing: both endpoints share the one-report-at-a-time CMD partner
+ *     session, and this route's 210s budget plus a 4-8 min realistic runtime would
+ *     otherwise overlap the catch-up. Do not move either schedule independently.
  *   - DAILY, not hourly: ERAs do not arrive fast enough to justify 24x the CMD load,
- *     and fingerprint dedup on both tables makes re-pulls free. Hour 8 UTC is a
- *     placeholder (clear of the 02-04 UTC billing-audit block and before the 09:17
- *     vob-sync) — pick deliberately at enable time.
+ *     and fingerprint dedup on both tables makes re-pulls free.
  *   - 5-day lookback per run: ERAs land late relative to receipt date (BPR16 observed
  *     spanning 06-18..07-30 from a 07-21..27 receipt window).
+ *
+ * ⚠ OPEN RISK AT ENABLE TIME (finding 1, still unresolved): the 2026-07-31 probe saw
+ * 30%/42% failure episodes whose root cause is UNKNOWN, and the throttle theory was
+ * FALSIFIED (six-times-gentler pacing produced a HIGHER failure rate). This cron is
+ * now scheduled anyway, deliberately — partial data is tolerable here because BOTH
+ * target tables are ON CONFLICT-idempotent at their own grain and each run re-pulls a
+ * 5-day trailing window, so a failed pull is retried by the next run rather than lost.
+ * WATCH the per-code failure counts in the first several runs; a sustained ~1/3 failure
+ * rate is the signal to de-schedule and finish the probe rather than tune blind.
  *
  * Node runtime (pg + libsodium via ../src — libsodium-wrappers must stay in
  * serverExternalPackages); never statically cached. maxDuration 300 covers 15
