@@ -1,0 +1,167 @@
+# .github/workflows/qodo-compliance-gate.yml
+#
+# CMD-Billing-Dashboard / TreatHealthOS RCM
+#
+# Blocks merge when Qodo Merge has flagged the PR with either of its
+# blocking labels. Qodo's GitHub App applies these labels asynchronously
+# after its own review/compliance pass runs, so this job re-checks on
+# every label change, not just at PR open.
+#
+# NOTE: this repo's .github/ directory was previously deleted (the $0
+# GitHub Actions ML-training runtime was removed per the paused-brains
+# ADR). This workflow re-introduces .github/workflows/ for the first
+# time since then — flagging that explicitly rather than silently
+# reviving the directory. It does not touch Python/torch/GPU anything;
+# it's a ~5-second label check with zero minutes cost beyond that.
+#
+# Setup after adding this file:
+#   1. Ensure the Qodo Merge GitHub App is installed on this repo (it
+#      already appears to be, per the portal screenshot).
+#   2. In repo Settings -> Branches -> branch protection rule for main
+#      (and staging), add the required status check with the EXACT string:
+#
+#          Qodo Compliance Gate / gate
+#
+#      That name is derived from `name:` ("Qodo Compliance Gate") + " / " +
+#      the job key under `jobs:` ("gate"). See docs/qodo-compliance-gate.md
+#      for the full contract.
+#   3. No secrets required — this job only reads labels already applied
+#      by the Qodo App via the default GITHUB_TOKEN.
+#
+# RENAME WARNING — DO NOT edit `name:` below or rename the `gate` job key
+# without simultaneously updating the required-status-check string in
+# branch protection on BOTH `main` and `staging`. If the strings drift,
+# GitHub silently reports the old check name as "expected but never
+# reported" and the branch is un-mergeable until a repo admin either
+# re-adds the new name or removes the stale one. There is no in-repo
+# enforcement of this contract — the only source of truth is the
+# Settings -> Branches UI (or the branch-protection API).
+
+name: Qodo Compliance Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_target:
+    types: [labeled, unlabeled]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to re-check"
+        required: true
+        type: string
+
+permissions:
+  pull-requests: read
+  contents: read
+
+jobs:
+  # Asserts the compliance checklist is at the exact path Qodo Merge looks
+  # for. Qodo's custom-compliance tool hardcodes `pr_compliance_checklist.yaml`
+  # at the repo root — moving/renaming it silently disables the checklist with
+  # no error signal from Qodo. This job runs only on pull_request events (not
+  # on the label-triggered pull_request_target events), because label churn
+  # doesn't touch the file.
+  #
+  # No untrusted event input is interpolated in the run: block below — only
+  # hardcoded string literals — so it is not a workflow-injection surface.
+  #
+  # Not currently a required status check in branch protection — adding it
+  # there is optional. It runs on every PR either way, so a mismatch is
+  # visible in the PR's checks list without gating merges.
+  #
+  # See docs/qodo-compliance-gate.md § "Checklist file discovery" for the
+  # contract this enforces.
+  checklist_discovery:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Assert pr_compliance_checklist.yaml is at repo root
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="pr_compliance_checklist.yaml"
+
+          if [ ! -f "$expected" ]; then
+            echo "::error file=${expected}::Qodo Merge expects '${expected}' at the repo root. See docs/qodo-compliance-gate.md."
+            exit 1
+          fi
+
+          # Qodo's file must declare pr_compliances: at the top level.
+          if ! grep -Eq '^pr_compliances:[[:space:]]*$' "$expected"; then
+            echo "::error file=${expected}::Missing top-level 'pr_compliances:' key. Qodo will not parse this file."
+            exit 1
+          fi
+
+          # Reject decoys anywhere else that could be mistaken for the real one.
+          # (Qodo does NOT look in .qodo/, .github/, or .pr_agent/ — a file there
+          # is dead weight and a rename hazard.)
+          stray=$(find .qodo .github .pr_agent .qodo-merge -type f -name 'pr_compliance_checklist.y*ml' 2>/dev/null || true)
+          if [ -n "${stray}" ]; then
+            echo "::error::Found pr_compliance_checklist.y(a)ml outside repo root:"
+            echo "${stray}"
+            echo "Qodo only reads the repo-root copy. Delete the stray file(s) to avoid confusion."
+            exit 1
+          fi
+
+          echo "OK: ${expected} is at the repo root with a pr_compliances: block."
+
+  # DO NOT rename this job key. The required-status-check string in branch
+  # protection is "Qodo Compliance Gate / gate" — the second half is this key.
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for Qodo blocking labels
+        uses: actions/github-script@v7
+        env:
+          # Override via repo/org variable QODO_BLOCKING_LABELS (comma-separated)
+          # if Qodo renames or namespaces its labels (e.g. "Qodo: Failed compliance check").
+          QODO_BLOCKING_LABELS: ${{ vars.QODO_BLOCKING_LABELS || 'Possible security concern,Failed compliance check' }}
+        with:
+          script: |
+            // Normalize: lowercase, trim, collapse internal whitespace.
+            const norm = s => String(s ?? "").toLowerCase().trim().replace(/\s+/g, " ");
+            // Strip common Qodo namespace prefixes: "Qodo:", "Qodo -", "[Qodo]", etc.
+            const stripNs = s => norm(s).replace(/^\[?qodo\]?\s*[:\-–]\s*/, "").trim();
+
+            const blocking = (process.env.QODO_BLOCKING_LABELS || "")
+              .split(",")
+              .map(norm)
+              .filter(Boolean);
+            if (blocking.length === 0) {
+              core.setFailed("QODO_BLOCKING_LABELS resolved to an empty list; refusing to run open.");
+              return;
+            }
+
+            const prNumber =
+              context.payload.pull_request?.number ??
+              Number(context.payload.inputs?.pr_number);
+            if (!prNumber) {
+              core.setFailed("No PR number in event context.");
+              return;
+            }
+            const { data: labels } = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+
+            const hit = labels
+              .filter(l => {
+                const n = norm(l.name);
+                const stripped = stripNs(l.name);
+                return blocking.some(b => n === b || stripped === b);
+              })
+              .map(l => l.name);
+
+            if (hit.length > 0) {
+              core.setFailed(
+                `Blocked by Qodo label(s): ${hit.join(", ")}. ` +
+                `Resolve the flagged issue(s) or get an explicit override from a reviewer before merging.`
+              );
+            } else {
+              core.info(`No blocking Qodo labels present (checked against: ${blocking.join(", ")}).`);
+            }
