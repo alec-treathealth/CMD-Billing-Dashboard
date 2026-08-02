@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Pager, SortHeaderCell } from '@/components/data-grid';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { loadAuditRows, revealAuditRows, type AuditCursor, type AuditFilter, type AuditGridRow, type AuditSort } from '@/lib/actions';
+import { freshnessDisplayDate, isPageStale, newestIngestOnPage } from '@/lib/billing-audit/freshness';
 import type { AuditScope } from '../../../src/billingAudit/auditConfig';
 import type { DashboardView } from '@/lib/views';
 
@@ -88,6 +89,15 @@ export function AuditWorkTable({ scope, view, canRevealPhi, filter, initialPage,
   const seeded = useRef(initialPage != null);
   const filterKey = JSON.stringify(filter);
 
+  // Freshness stamp (decision logic in @/lib/billing-audit/freshness — pure + unit-tested).
+  // `nowMs` is set AFTER mount and stays null on the server: the seeded IP page renders
+  // server-side, and a server clock would hydrate differently. The DATE is derived from the row
+  // value so it is deterministic; only the stale HIGHLIGHT waits for the client.
+  const [nowMs, setNowMs] = useState<number | null>(null);
+  useEffect(() => { setNowMs(Date.now()); }, [rows]);
+  const freshness = newestIngestOnPage(rows);
+  const isStale = isPageStale(freshness, nowMs);
+
   // While "Reveal all" is on, reveal the CURRENT page's not-yet-revealed rows (one gated + audited
   // bulk call). `revealed` is intentionally omitted from deps — the missing-id check reads it at
   // run time and pages never overlap (keyset), so each id is revealed exactly once without a loop.
@@ -155,6 +165,14 @@ export function AuditWorkTable({ scope, view, canRevealPhi, filter, initialPage,
           </button>
         )}
         <span className={`${canRevealPhi ? 'ml-3' : 'ml-auto'} text-xs text-ink400`}>{loading ? 'Loading…' : `${rows.length} row${rows.length === 1 ? '' : 's'} · page ${page + 1}`}</span>
+        {!loading && freshness ? (
+          <span
+            className={`ml-3 text-xs ${isStale ? 'text-[color:var(--status-warn,#B0741F)]' : 'text-ink400'}`}
+            title={`Newest ingest on this page: ${freshness.iso}. Page-local by design — a table-wide figure would hide a class that has stopped refreshing.`}
+          >
+            {isStale ? '⚠ ' : ''}Updated {freshnessDisplayDate(freshness)}
+          </span>
+        ) : null}
       </div>
       {error ? (
         <p className="px-4 py-8 text-center text-sm text-[color:var(--status-danger,#C0453B)]">{error}</p>
