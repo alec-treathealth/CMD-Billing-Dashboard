@@ -224,6 +224,7 @@ import {
 import { consolidatedAuditCron } from '../../src/billingAudit/auditConsolidated.js';
 import { withTenant } from '../../src/veris/withTenant.js';
 import { isAuthorized } from '../../src/bearerAuth.js';
+import { assertRequiredEnvVars } from './env-preflight';
 
 let cachedExecutor: PgExecutor | undefined;
 function readerExecutor(): PgExecutor {
@@ -795,6 +796,13 @@ async function handleCensusCronForTenant(
     customers: readonly CmdCustomer[];
     /** Per-customer live-fetch config (report/CENSUS-filter/poll) for this tenant. */
     configFor: (customerId: string) => CmdApiConfig;
+    /**
+     * Required-no-fallback env vars this tenant's configFor consumes. Checked ONCE up front so a
+     * missing-env deploy fails BEFORE any CMD call with a single error line listing every gap,
+     * instead of surfacing one at a time through the deep throws in requiredCensusReportId /
+     * requiredCensusFilterId. Those deep throws stay as defense-in-depth for other call paths.
+     */
+    requiredEnvVars: readonly string[];
     /** Optional per-fetch row transform (Indigo: alias "Customer Name" → "Facility Name"). */
     transformRows?: (rows: CmdReportRow[]) => CmdReportRow[];
     /** Exact column-name set the census report must project; omit to run unguarded. */
@@ -809,6 +817,7 @@ async function handleCensusCronForTenant(
     return { status: 401, body: { error: 'unauthorized' } };
   }
   try {
+    assertRequiredEnvVars(tenant.label, tenant.requiredEnvVars);
     const stats = await cmdCensusCron({
       customers: tenant.customers,
       fetchRows: (customerId) => cmdReportRows(tenant.configFor(customerId)),
@@ -838,6 +847,9 @@ export function handleCmdCensusCron(req: {
     // `expectedColumns: BXR_REPORT_COLUMNS` — one line. Guessing it wrong would refuse a census
     // that would otherwise have recovered, so this stays off until one live run proves the shape.
     configFor: cmdBxrCensusConfigFor,
+    // Must match the required-no-fallback throws inside cmdBxrCensusConfigFor. Keep in sync when
+    // adding another env var to the BXR census config builder.
+    requiredEnvVars: ['CMD_BXR_CENSUS_REPORT_ID', 'CMD_BXR_CENSUS_FILTER_ID'],
   });
 }
 
@@ -851,6 +863,9 @@ export function handleIndigoCensusCron(req: {
     customers: INDIGO_CUSTOMERS,
     configFor: cmdIndigoCensusConfigFor,
     transformRows: aliasIndigoFacilityColumn,
+    // Indigo deliberately still spreads cmdIndigoConfigFor's report (see the block comment above
+    // requiredCensusReportId): only the filter is required-no-fallback here.
+    requiredEnvVars: ['CMD_INDIGO_CENSUS_FILTER_ID'],
   });
 }
 
