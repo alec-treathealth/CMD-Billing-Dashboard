@@ -3059,3 +3059,60 @@ the docs become wrong in the other direction. **Resolve by committing or deletin
 untracked `0071`/`0072` files, then set the product number to match.** Until that happens,
 check the filesystem, not the doc, before claiming a product-plane number. (The Veris number
 in both docs IS current: 023.)
+
+---
+
+## Indigo roster — 10036020 / 10036030 are HARD-FAIL, not empty-expected (2026-08-02)
+
+**Dated correction.** Two entries in the "Separate WATCH ITEM (morning)" note above group
+`10036020`/`10036030` with the `10033859` INTO THE LIGHT class as recurring census failures.
+That grouping understated them, and any handoff/memory describing these two as
+**"0-rows EXPECTED" is WRONG** — that phrase belongs to the valid-but-empty class (WRC
+`10033951` on the audit plane, which is why `EXPECTED_EMPTY_AUDIT_CUSTOMERS` exists). These two
+are the OTHER class: a hard fetch failure in which no report ever runs.
+
+**Measured 2026-08-02 08:0x UTC, read-only via Supabase MCP (aggregate counts only, no PHI):**
+
+| customer | total runs | ok | error | `last_ok` | first run | `error_label` |
+|---|---|---|---|---|---|---|
+| 10036020 MADISON RECOVERY CENTER | 270 | **0** | 270 | **NULL** | 2026-07-22 | `fetch_failed` |
+| 10036030 MISSOURI BEHAVIORAL HEALTH | 270 | **0** | 270 | **NULL** | 2026-07-22 | `fetch_failed` |
+
+`rows_seen` totals zero for both. Neither has EVER produced a row: `cmd_charge_census` = 0 rows
+for both facilities, and `cmd_explorer_rows` carries **30 distinct Indigo facilities** out of the
+then-32-entry roster — these two are exactly the gap. So the explorer path fails identically to
+the census path; both crons have burned a CMD report slot per customer per hour since 2026-07-22.
+
+**On the error string — a measurement limit worth carrying.** `cmd_census_run.error_label` stores
+only the PHI-safe STAGE TOKEN (`fetch_failed`), never the message; that is the ②b design (see
+"Freshness cursor + retry model" above) and it is correct. So **the DB cannot confirm
+`INVALID CRITERIA` and never will.** That string is only observable in the Vercel runtime log, e.g.
+`cmd-census cron: customer 10036020 (10036020) fetch_failed: CMD report.run returned no identifier
+(status: INVALID CRITERIA)` and the matching `cmd-explorer cron: … failed:` line — both captured
+live this session on deployment `dpl_EWfCeoczQTPjHctPD8vUA4UC2BE5`. Anyone re-verifying this must
+read the logs, not the run table; the run table proves the failure COUNT, the log proves the KIND.
+
+**Retraction.** `cmdCustomers.ts` annotated both as "(added 2026-07-08, in filter 10147669)". The
+270-run failure record contradicts the "in filter 10147669" half — the filter is evidently not
+saved under either account. The claim is retracted in the file's header block.
+
+**Action taken:** both removed from `INDIGO_CUSTOMERS` (32 → 30) using the Mechanism-1 shape the
+codebase already uses for hard `INVALID CRITERIA` accounts — omit from the array, document the
+reason, the evidence, the date and the re-add condition in the header docblock (mirrors
+`AUDIT_OP_CUSTOMERS`' HOUSTON_MH/TREAT_CO exclusion and Indigo's own `10025030`). Root cause stays
+CMD-side and UNCONFIRMED — Jess/CMD-side confirmation still owed. Re-add only after a rows-bearing
+probe, per the standing pattern.
+
+**Why now:** this is the prerequisite to opening the alerting gate. Two customers failing every
+hour for eleven days is a constant red that makes any NEW failure invisible — the eight BXR
+customers that failed and self-healed on 2026-08-01 (`last_err` 00:15 → `last_ok` 00:26/00:27)
+passed unnoticed in both directions. Alerting turned on over a permanently-red roster gets muted
+within a week.
+
+> ⚠ **FOLLOW-UP, deliberately NOT built here (out of this track's scope).** Removing them puts
+> these two in the state "Pre-launch facilities — the zero-rows launch trap" (2026-08-01) names as
+> the ambiguous one: in NEITHER an active roster NOR an expected-empty allowlist, so they are never
+> called and their silence stops being a signal at all. That entry's own prescription — an
+> expected-NONZERO marker, the inverse of `EXPECTED_EMPTY_AUDIT_CUSTOMERS` — is the right closure
+> and applies to these two exactly as it does to HOUSTON_MH / TREAT_CO / TREAT_VA. Build it with
+> whichever of them re-opens first.

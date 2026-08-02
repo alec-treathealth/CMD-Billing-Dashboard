@@ -733,7 +733,7 @@ export function handleCmdExplorerCron(req: {
 }
 
 /**
- * Indigo daily explorer cron (/api/cron/indigo-explorer). Roster = INDIGO_CUSTOMERS (37).
+ * Indigo daily explorer cron (/api/cron/indigo-explorer). Roster = INDIGO_CUSTOMERS (30).
  * Indigo's report (10092391) labels the facility column "Customer Name"; the shared mapReportRows +
  * LOCKED fingerprint read facility ONLY from "Facility Name" and mapRow REQUIRES it — so an
  * unaliased Indigo pull would skip EVERY charge line (watch charge_skipped == rows_fetched).
@@ -862,7 +862,7 @@ export function handleCmdCensusCron(req: {
   });
 }
 
-/** Indigo census cron (/api/cron/indigo-census). Roster = INDIGO_CUSTOMERS (32); facility-column alias. */
+/** Indigo census cron (/api/cron/indigo-census). Roster = INDIGO_CUSTOMERS (30); facility-column alias. */
 export function handleIndigoCensusCron(req: {
   method?: string;
   authorization?: string | null;
