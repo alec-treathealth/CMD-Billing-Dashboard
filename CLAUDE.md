@@ -129,6 +129,8 @@ These are wrong in the code today. Fix opportunistically; never copy them.
   drops 0068's covering index and 0069's MAINTAIN grant. Leave it alone.
 - The agent still defaults to model `claude-opus-4-8` (`src/agent/agent.ts`).
   Flag before relying on it for new AI work.
-
+## Git workflow
+Open PRs against `staging`, never `main` — use `gh pr create --base staging` explicitly.
+`main` is production; it only receives a PR from `staging` after Vercel and Qodo checks pass.
 <!-- Ground truth re-verified against HEAD 0b69ce0 on 2026-07-28: test counts,
      cron list, roster sizes, migration numbers, and route status all run live. -->

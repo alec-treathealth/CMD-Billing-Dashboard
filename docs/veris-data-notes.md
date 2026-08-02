@@ -2248,6 +2248,93 @@ the single-txn design).
 
 ---
 
+## CMD AR Automation — Phase 0 findings (2026-07-28, probe only, no code applied)
+
+Executing the CMD AR Automation build doc v2, Phase 0. Blockers resolved by a live structure-only
+probe (`npm run probe:cmd`, PHI-safe — headers + row counts, never values) plus owner decision. This
+supersedes two load-bearing assumptions in the build doc's §2.2/§2.6. **Nothing applied.**
+
+### Probe run
+- Target: **report `10091971` / census filter `10148130`** (the BXR census's live pairing *at probe
+  time* — then `cmdExplorerConfigFor` reportId default `10091971` +
+  `requiredCensusFilterId('CMD_BXR_CENSUS_FILTER_ID')`), customer `10030911` (NASH,
+  `src/collections/cmdCustomers.ts:72`).
+- Result: **1 CSV entry** (`Derek Automation.csv`), **2,650 rows**, **21 columns**, ready in 2 polls (~32s).
+- Caveat: probed with `CMD_EXPLORER_REPORT_ID` at its then-code-default `10091971`. If Vercel overrides
+  that env in prod, the live census output could differ — confirm against Vercel env before relying on this.
+- **DRIFT (2026-08-01): report `10091971` is DEAD.** It was lost in CMD on 2026-07-31; every pairing
+  under it returns INVALID CRITERIA. The explorer default is now `10093959`/`10148478`
+  (`cmdExplorerConfigFor`, `app/lib/server.ts:1674-1675`), and the BXR census **no longer inherits the
+  explorer's report** — it requires its OWN `CMD_BXR_CENSUS_REPORT_ID` + `CMD_BXR_CENSUS_FILTER_ID`,
+  both no-fallback-throw (`cmdBxrCensusConfigFor`, `app/lib/server.ts:1760-1766`). The probe's *column
+  findings* below were value-matched when the replacement report was adopted (see the ALIAS PROVENANCE
+  block in `src/collections/cmdExplorer.ts:59`), so §0.2/§0.3 conclusions still stand; the report/filter
+  *ids* above are historical only.
+
+### The 21 census columns (verbatim)
+`Charge ID · Charge Entered Date · Charge From Date · Charge To Date · Payment Received · Charge CPT Code ·
+Revenue Code · Patient Full Name · Claim Primary Member ID · Primary Group Number · Charge/Debit Amount ·
+Payment Allowed Amount · Charge Insurance Payments · Charge Total Adjustments w/o Transfers ·
+Charge Balance Due Pat · Charge Primary Payer Name · Facility Name · Check Payment · EFT Payment ·
+Charge Patient Payments · Claim Status`
+
+### 0.2 — `Charge Fromdate Age` is NOT on the census feed (build-doc §2.2 was wrong)
+The bucketed a–h `Charge Fromdate Age` column lives on report **`10091573`** (the 187-col offline
+sample in `data/cmd_batch_…`), **not** on `10091971`, which is what the census pipeline runs. The doc
+conflated the two reports.
+**But it doesn't matter:** the feed carries `Charge From Date`, and the census **already ingests it** as
+`charge_date` — header mapping `src/collections/cmdExplorer.ts:27` (`charge_from_date: ['Charge From Date']`)
+→ `src/collections/cmdCensus.ts:138` (`charge_date: toIsoDateOrNull(full.charge_from_date)`), persisted via
+`INSERT_COLS` (`cmdCensus.ts:45-49`). Age is therefore derivable today from data already in the
+table (`as_of::date - charge_date`), needing **no CMD-side filter change and no new bucket column to parse**.
+→ Phase 1 gets cheaper: derive age-days + bucket ourselves (own closed set, exact days, live-drifting —
+better for a worklist than a frozen snapshot). No mapper change, migration likely index-only.
+
+### 0.3 — No second summary CSV; no payer-priority balances (build-doc §2.6 hope does not hold)
+Single CSV entry — no summary sheet. None of `Charge Primary/Secondary/Tertiary Balance (Sum)` exist on
+this feed, nor `Charge Balance Due Ins` / `Charge Balance At Collections`. Only `Charge Balance Due Pat`
+(patient balance) is present, and it is **not mapped into the census today**.
+→ Phase 3a's payer-priority rollup **cannot** be sourced from the census filter — it needs the separate
+Sheet-2 report (its own Phase 0 probe when Phase 3 comes up). Per the doc's own instruction, **drop
+`charge_balance` from `0071`** — the feed has no charge-total balance to write.
+
+### 0.4 — Sizing
+NASH alone = 2,650 rows on the **current** window; ~15 BXR customers ≈ **~40k rows**, in line with the
+census's existing footprint, well inside `maxDuration=300`. **Could not** size the *widened* full-history
+pull (no full-history filter id available; headers don't reveal the current window). Phase 1d's "widen the
+filter" stays a CMD-side task whose row impact must be measured against the actual widened filter before enabling.
+
+### 0.1 — Teen MH TX: OWNER DECISION = separate entity (2026-07-28)
+Distinct NPI `1124973086`, own CMD account `10035166`, own profile tab + remittance address ⇒ its own legal
+entity, not a typo of TREAT MENTAL HEALTH TEXAS. The `0042` alias (`TEEN MENTAL HEALTH TEXAS LLC → TREAT_TX`,
+`supabase/migrations/0042_cmd_facility_aliases.sql:67`, header comment at `0042:16` "owner-confirmed typo")
+is therefore **wrong** and must be repointed. Confirmed the census
+stores facility as **raw free-text name** and never touches `cmd_facility_aliases` at ingest, and the BXR
+loop **excludes** `10035166` — so nothing is mis-attributed *today*; the risk is latent until Teen TX is
+ingested. **Phase 1 pre-req (before any widened pull):** (a) add `TEEN_MH_TX` to `collections.facilities` +
+`BXR_CUSTOMERS` (account `10035166`), (b) repoint the `0042` alias off `TREAT_TX`.
+
+### Net effect on the plan
+- Phase 1 aging: **cheaper** — derive from existing `charge_date`; migration likely index-only.
+- Phase 1d (widen to full history) + Phase 3a (payer-priority rollup): **blocked** on CMD-side report/filter
+  work the census filter can't provide.
+
+### Code anchors — verified 2026-08-01 against commit `15e6484`
+Line numbers are as of that commit; if a cited line no longer matches, treat this whole section as
+suspect and re-verify by symbol name before acting on it.
+
+| Claim | Anchor (at `15e6484`) | Status 2026-08-01 |
+|---|---|---|
+| Explorer report default `10091971` | `cmdExplorerConfigFor`, `app/lib/server.ts:1674` | **DRIFTED** — now `10093959` (`10091971` lost in CMD 2026-07-31) |
+| Census filter from `CMD_BXR_CENSUS_FILTER_ID` (no default) | `requiredCensusFilterId`, `app/lib/server.ts:1744-1748` | Holds |
+| Census inherits the explorer's report | — | **DRIFTED** — census now requires its own `CMD_BXR_CENSUS_REPORT_ID` (`requiredCensusReportId` + `cmdBxrCensusConfigFor`, `app/lib/server.ts:1752-1766`) |
+| `Charge From Date` → `charge_date` at ingest | `src/collections/cmdExplorer.ts:27` → `src/collections/cmdCensus.ts:138`, `INSERT_COLS` `cmdCensus.ts:45-49` | Holds |
+| NASH = customer `10030911` | `src/collections/cmdCustomers.ts:72` | Holds |
+| BXR loop excludes `10035166` (Teen TX) | `BXR_CUSTOMERS`, `src/collections/cmdCustomers.ts` (header lists `10035166` among the excluded accounts) | Holds |
+| `0042` alias folds Teen TX → `TREAT_TX` | `supabase/migrations/0042_cmd_facility_aliases.sql:67` | Holds in prod; repoint drafted as migration `0072_teen_mh_tx_facility.sql` (not yet applied) |
+
+---
+
 ## Consolidated audit report recon — measured (2026-07-29)
 
 **Provenance:** the recon series' outputs were never persisted (process failure, confirmed by
