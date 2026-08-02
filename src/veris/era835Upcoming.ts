@@ -19,16 +19,49 @@
  * belt (index-leading filter per the 018 rule) and suspenders (RLS), and it makes the
  * intended scope visible in the SQL itself.
  *
- * NULL payment_date rows are EXCLUDED by `payment_date >= current_date` (SQL null
- * comparison). Correct for THIS tile — a remit with no BPR16 cannot be placed on a
- * timeline, so it is not "upcoming"; it is not lost (it is in the table, and the ingest
- * counts it). A future reconciliation surface can show undated remits separately.
+ * THE UPCOMING WINDOW is `payment_date >= $2::date`, where $2 is the CIVIL DATE IN THE
+ * BUSINESS ZONE (businessTodayIso). NOT Postgres `current_date`: Vercel runs TZ=UTC and so
+ * does the database, so from 17:00 PT to midnight PT `current_date` is already TOMORROW
+ * Pacific and the tile silently drops remits dated TODAY for the people reading it. Bound
+ * param rather than SQL-side `(now() at time zone …)` on purpose — a literal date keeps the
+ * scan sargable on 013's (business_entity_id, payment_date) index, and it makes the DST
+ * math unit-testable instead of only substring-assertable.
+ *
+ * NULL payment_date rows are EXCLUDED by that same comparison (SQL null comparison).
+ * Correct for THIS tile — a remit with no BPR16 cannot be placed on a timeline, so it is
+ * not "upcoming"; it is not lost (it is in the table, and the ingest counts it). A future
+ * reconciliation surface can show undated remits separately.
  *
  * Non-PHI throughout: payer, date, method, amounts, counts. The payment table carries
  * no patient columns at all (013 compliance header).
  */
 import type pg from 'pg';
 import { withTenant } from './withTenant.js';
+
+/**
+ * The ops calendar zone for "today". DELIBERATELY DUPLICATED from
+ * app/lib/qualify/contract.ts (QUALIFY_BUSINESS_TZ) rather than imported: app/ may import
+ * src/, never the reverse, and this module lives in src/. Two constants, one value — if the
+ * business ever moves zones, both change together.
+ */
+export const ERA_BUSINESS_TZ = 'America/Los_Angeles';
+
+/**
+ * Civil Y-M-D in ERA_BUSINESS_TZ as an ISO date string. DST-aware (Intl resolves the offset
+ * for the instant, not a fixed -8/-7), locale-format-independent (formatToParts, not a
+ * formatted string), and clock-injectable so the boundary cases are testable. Same proven
+ * shape as qualifyWindowBounds' trailing-window anchor.
+ */
+export function businessTodayIso(now: Date = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: ERA_BUSINESS_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+  const part = (t: string) => parts.find((p) => p.type === t)!.value;
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
 
 /** One (payment_date, facility, payer, method) group of upcoming remits. */
 export interface EraUpcomingGroup {
@@ -120,7 +153,7 @@ const TOTALS_SQL = `
          (count(*) filter (where payment_method = 'NON'))::int as zero_dollar_remits
     from staging.era_835_payment
    where business_entity_id = $1::uuid
-     and payment_date >= current_date`;
+     and payment_date >= $2::date`;
 
 const GROUPS_SQL = `
   select payment_date::text                                    as payment_date,
@@ -132,7 +165,7 @@ const GROUPS_SQL = `
          (count(*) filter (where payment_amount is null))::int as unquantified_remits
     from staging.era_835_payment
    where business_entity_id = $1::uuid
-     and payment_date >= current_date
+     and payment_date >= $2::date
    group by payment_date, facility_code, payer_name, payment_method
    order by payment_date asc,
             facility_code asc,
@@ -151,14 +184,21 @@ interface TotalsRow {
 /**
  * One tenant's upcoming ERA-confirmed payments. Two queries, one withTenant transaction,
  * one client (never pool.query inside the callback — pooler discipline).
+ *
+ * cutoffIso defaults to today-in-the-business-zone. A MULTI-TENANT caller must compute it
+ * ONCE and pass the same value to every tenant: defaulting per call means a Consolidated
+ * read straddling midnight PT would scope its two tenants to different days. Both
+ * statements here get the SAME value for the same reason — a headline that does not match
+ * its own breakdown is the failure mode.
  */
 export async function eraUpcomingPayments(
   pool: pg.Pool,
   businessEntityId: string,
+  cutoffIso: string = businessTodayIso(),
 ): Promise<EraUpcomingSummary> {
   return withTenant(pool, businessEntityId, async (client) => {
-    const totals = await client.query<TotalsRow>(TOTALS_SQL, [businessEntityId]);
-    const groups = await client.query<EraUpcomingGroup>(GROUPS_SQL, [businessEntityId]);
+    const totals = await client.query<TotalsRow>(TOTALS_SQL, [businessEntityId, cutoffIso]);
+    const groups = await client.query<EraUpcomingGroup>(GROUPS_SQL, [businessEntityId, cutoffIso]);
     const t = totals.rows[0];
     const rows = groups.rows;
     const truncated = rows.length > GROUP_CAP;

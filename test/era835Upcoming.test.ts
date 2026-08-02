@@ -10,7 +10,10 @@
  *      predicate,
  *   3) money math is EXACT integer cents, never floats (0.10 + 0.20 === 0.30),
  *   4) the Consolidated merge collapses identical (date, payer, method) groups across
- *      tenants without losing unquantified counts or the truncation flag.
+ *      tenants without losing unquantified counts or the truncation flag,
+ *   5) the "upcoming" cutoff is the civil day in the BUSINESS zone, passed as a bound
+ *      param — not Postgres current_date, which is UTC on Vercel and therefore drops
+ *      today's remits every evening from 17:00 PT onward.
  *
  * Fake pool only — no DB, no network.
  */
@@ -18,6 +21,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
 import {
+  businessTodayIso,
   centsFromNumericText,
   eraUpcomingPayments,
   fixed2FromCents,
@@ -87,7 +91,7 @@ test('eraUpcomingPayments: runs under withTenant with the explicit tenant predic
     },
     groups: [G({ remits: 2, amount: '72986.79' })],
   });
-  const out = await eraUpcomingPayments(pool, BE);
+  const out = await eraUpcomingPayments(pool, BE, '2026-08-01');
 
   const sqls = statements.map((s) => s.sql);
   assert.ok(sqls[0]!.includes('BEGIN'), 'transaction first');
@@ -96,9 +100,12 @@ test('eraUpcomingPayments: runs under withTenant with the explicit tenant predic
   assert.equal(selects.length, 2, 'totals + groups');
   for (const s of selects) {
     assert.ok(s.sql.includes('business_entity_id = $1::uuid'), 'explicit tenant predicate');
-    assert.ok(s.sql.includes('payment_date >= current_date'), 'upcoming window');
+    // The cutoff is a BOUND PARAM, never SQL-side current_date/now(): sargable on 013's
+    // (business_entity_id, payment_date) index, and the DST math stays unit-testable.
+    assert.ok(s.sql.includes('payment_date >= $2::date'), 'upcoming window is a bound date');
+    assert.ok(!s.sql.includes('current_date'), 'never the UTC server day');
     assert.ok(!s.sql.includes('select *'), 'explicit allowlisted columns only');
-    assert.deepEqual(s.params, [BE], 'tenant is the only bound value');
+    assert.deepEqual(s.params, [BE, '2026-08-01'], 'tenant + cutoff are the bound values');
     // THE READ-PATH CONTRACT: no sum without the NULL count over the same filters.
     assert.ok(
       s.sql.includes('filter (where payment_amount is null)'),
@@ -133,7 +140,7 @@ test('eraUpcomingPayments: truncation flag from the cap probe row, headline unaf
     },
     groups,
   });
-  const out = await eraUpcomingPayments(pool, BE);
+  const out = await eraUpcomingPayments(pool, BE, '2026-08-01');
   assert.equal(out.groups.length, 50, 'display list capped');
   assert.equal(out.groups_truncated, true);
   assert.equal(out.remits, 200, 'headline remits come from the UNCAPPED aggregate');
@@ -161,7 +168,7 @@ test('TOTALS_SQL splits the remit count by BPR04 in ONE statement, over one wind
     },
     groups: [G({ remits: 38, amount: '331481.42' })],
   });
-  const out = await eraUpcomingPayments(pool, BE);
+  const out = await eraUpcomingPayments(pool, BE, '2026-08-01');
 
   const totalsSql = statements.find((s) => s.sql.includes('coalesce(sum(payment_amount), 0)'))!.sql;
   // Both partitions live alongside the sum and the read-path NULL count — one statement,
@@ -184,6 +191,62 @@ test('TOTALS_SQL splits the remit count by BPR04 in ONE statement, over one wind
   assert.equal(out.incoming_remits, 34);
   assert.equal(out.zero_dollar_remits, 4);
   assert.equal(out.remits, 38, 'the blended grand total is still available');
+});
+
+test('businessTodayIso: the tile follows the Pacific ops day, not the UTC server day', () => {
+  // 18:30 PT on 08-01 — THE CASE BROKEN BY current_date TODAY: UTC has already rolled to
+  // 08-02, so a remit dated 08-01 (still today for everyone reading the tile) drops out.
+  assert.equal(businessTodayIso(new Date('2026-08-01T23:30:00Z')), '2026-08-01');
+  // 23:00 PT on 08-01 — one hour before the Pacific day ends, UTC is deep into 08-02.
+  assert.equal(businessTodayIso(new Date('2026-08-02T06:00:00Z')), '2026-08-01');
+  // The Pacific midnight boundary itself, from both sides of one second.
+  assert.equal(businessTodayIso(new Date('2026-08-02T06:59:59Z')), '2026-08-01');
+  assert.equal(businessTodayIso(new Date('2026-08-02T07:00:00Z')), '2026-08-02');
+});
+
+test('businessTodayIso: DST-aware in BOTH directions (a fixed offset would be wrong)', () => {
+  // SPRING FORWARD 2026-03-08 (02:00 PST → 03:00 PDT at 10:00Z): offset -8 before, -7 after.
+  assert.equal(businessTodayIso(new Date('2026-03-08T07:00:00Z')), '2026-03-07', '23:00 PST on 03-07');
+  assert.equal(businessTodayIso(new Date('2026-03-08T08:00:00Z')), '2026-03-08', '00:00 PST — day rolls');
+  assert.equal(
+    businessTodayIso(new Date('2026-03-09T07:00:00Z')),
+    '2026-03-09',
+    '00:00 PDT — a hardcoded -8 would say 03-08',
+  );
+  // FALL BACK 2026-11-01 (02:00 PDT → 01:00 PST at 09:00Z).
+  assert.equal(businessTodayIso(new Date('2026-11-01T06:30:00Z')), '2026-10-31', '23:30 PDT on 10-31');
+  assert.equal(
+    businessTodayIso(new Date('2026-11-02T07:30:00Z')),
+    '2026-11-01',
+    '23:30 PST — a hardcoded -7 would say 11-02',
+  );
+});
+
+test('businessTodayIso: the default clock is real, and the shape is always ISO yyyy-mm-dd', () => {
+  assert.match(businessTodayIso(), /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test('eraUpcomingPayments: BOTH statements get the SAME cutoff', async () => {
+  // A per-statement default would let the headline aggregate and the breakdown straddle
+  // midnight PT and disagree with each other — the total would not match its own rows.
+  const { pool, statements } = fakePool({
+    totals: {
+      remits: 1,
+      total: '1.00',
+      unquantified_remits: 0,
+      incoming_remits: 1,
+      zero_dollar_remits: 0,
+    },
+    groups: [G({})],
+  });
+  await eraUpcomingPayments(pool, BE, '2026-03-07');
+  const selects = statements.filter((s) => s.sql.includes('era_835_payment'));
+  assert.equal(selects.length, 2, 'totals + groups');
+  assert.deepEqual(
+    selects.map((s) => s.params[1]),
+    ['2026-03-07', '2026-03-07'],
+    'one cutoff, both statements',
+  );
 });
 
 test('centsFromNumericText / fixed2FromCents are exact and reject garbage', () => {
