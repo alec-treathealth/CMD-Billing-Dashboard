@@ -3116,3 +3116,93 @@ within a week.
 > expected-NONZERO marker, the inverse of `EXPECTED_EMPTY_AUDIT_CUSTOMERS` — is the right closure
 > and applies to these two exactly as it does to HOUSTON_MH / TREAT_CO / TREAT_VA. Build it with
 > whichever of them re-opens first.
+
+---
+
+## 022 era-835 observability — FIRST SCHEDULED RUN, and what it settles (2026-08-02)
+
+The `50 8 * * *` cron fired at **08:50:21 UTC** and wrote the first
+`staging.era_835_ingest_run` row. Verbatim (aggregate only, no PHI):
+
+```
+status ok · 08:50:21 -> 08:52:21 (2m00s) · window 2026-07-29..2026-08-02 · customers_total 15
+pulls_attempted 75 · pulls_failed 0 · pulls_empty 29 · pulls_zero_files 0 · pulls_skipped_budget 0
+files_parsed 112 · payments_mapped 112 · payments_inserted 0 · payments_duplicate 112
+rows_inserted 0 · rows_skipped_duplicate 1204 · pulls_failed_by_code {} · writer cmd_rollup_writer_login
+```
+
+### The counters are non-degenerate, and they close 013's detector
+
+`payments_duplicate 112` against `payments_inserted 0` is exactly the healthy steady state 022
+predicted for a 5-day trailing window ("four of every five pulled dates are re-pulls"). More
+importantly it **satisfies 013's duplicate-remit detector as written** — "a re-pull of an
+already-ingested date MUST report `payments_inserted = 0`" — for the first time with a record to
+read it from. The remit fingerprint is stable; BPR02 is not being double-counted. This also
+retro-explains the 05:00 manual run (112 parsed / 39 inserted): those 39 are now in the
+already-ingested set, and the 73 that "vanished" were the ON CONFLICT path, now counted.
+
+### Finding 2 (BLOCKING) — structurally resolved, not yet exercised
+
+`pulls_failed_by_code` exists and returned `{}`. The per-status/error-code breakdown the
+2026-07-31 save-state called "the first thing fixed next session, before any further live run"
+is now in the schema. It is **unexercised** — there were no failures to break down — so treat it
+as built-but-unproven until a night with `pulls_failed > 0`.
+
+### Finding 3/4 (empty-day sentinel) — STRONG live evidence the fix works
+
+`pulls_empty 29` of 75, with `pulls_failed 0`. The 2026-07-31 probe recorded "60 pulls across 15
+facilities over 4 weekdays produced **empty-day 0** — implausible if the sentinel worked", and
+that implausibility was the whole basis for suspecting the matcher. Tonight the empty path fired
+on 39% of pulls and nothing was misfiled as a failure. This is the **first production evidence**
+that the digest-anchored classification (`KNOWN_EMPTY_DAY_DIGESTS`, the 2026-07-31 rewrite) is
+live and correct. Recorded as evidence, not proof of every branch: no *unrecognised* short body
+appeared, so the `unrecognized_short_text` drift bucket is still unexercised.
+
+### Finding 5 (FRCA/TBH 4/4 failures) — did not recur, but attribution is unavailable BY DESIGN
+
+`pulls_failed 0` means nobody failed, so FRCA and TBH did not. It does **not** confirm the
+structural theory either way, and it never will from this table: 022 deliberately carries **no
+`per_customer` array** (a per-facility remittance breakdown is a richer disclosure than the
+product plane's row counts). Per-customer attribution for this feed lives only in the Vercel log.
+Do not add a per_customer column to chase this.
+
+### ⚠ 013's duplicate-remit detector returns 2 groups, and they are FALSE POSITIVES
+
+013 documents the check as "expect zero rows":
+
+```sql
+select check_eft_trace_number, payment_date, count(*)
+  from staging.era_835_payment group by 1,2 having count(*) > 1;   -- 013 says: expect 0
+```
+
+Live it returns **2 groups / 5 rows** (3 on 2026-07-29, 2 on 2026-07-24). They are **not**
+double-counted remits. Within each group: `count(distinct row_fingerprint)` = row count,
+`count(distinct payment_amount_raw)` = row count, `count(distinct era_control_number)` = row
+count, one entity, no NULL traces. Different money, different transaction sets — i.e. the
+**per-NPI payment split** case 013's own header predicted when it noted that
+"(payer + BPR16 + BPR02) collides on per-NPI payment splits and reissued checks" and that
+"TRN02 is payer-scoped not global (and TRN03 … was never parsed)".
+
+A genuine fingerprint destabilisation would show the **same** `payment_amount_raw` twice — that
+is the failure mode (same remit re-hashed, same money inserted again). Distinct amounts prove the
+opposite. **So the invariant as written in 013 is overstated**: it cannot be zero while TRN02 is
+unqualified by TRN03. Anyone running it will hit this. The sound version adds the amount:
+
+```sql
+select check_eft_trace_number, payment_date, payment_amount_raw, count(*)
+  from staging.era_835_payment group by 1,2,3 having count(*) > 1;  -- THIS is the one to expect 0 on
+```
+
+Not fixed in code here — recorded so the next reader does not spend a session on a false alarm.
+
+### 4C — secondary baseline for Monday (recorded, NOT chased)
+
+`cmd_explorer_rows` max(`ingested_at`) = **2026-08-01 06:53:30Z**, total **641,549**, with **554**
+rows ingested in the trailing 48h — so the table IS still taking rows, just not since Saturday
+morning; the hourly `charge inserted 0 / charge skipped 0` signature is consistent with
+fingerprint dedup over a quiet weekend on a stable current-month window. `daily_collections`
+max(`payment_date`) = 2026-07-31 and the census max(`last_seen_at`) = 2026-08-02 00:27:18Z, both
+current. Compare Monday's first runs against these four figures. **If Monday still inserts zero
+charge rows, it becomes a real investigation** — per the standing signal-misread rule, note that
+`cmd_explorer_rows` measures ROWS WRITTEN, not run success, so a zero there is not by itself a
+failed run.
