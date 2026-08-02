@@ -166,7 +166,15 @@ import { cmdPayerGapForMonth, cmdReportRows, type CmdApiConfig, type CmdReportRo
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdExplorer.js';
 import { aliasIndigoFacilityColumn, BXR_REPORT_COLUMNS } from '../../src/collections/cmdExplorer.js';
 import { decryptPhi, encryptPhi } from '../../src/collections/phiCrypto.js';
-import { cmdEra835ConfigFor, expandDateRange, runEra835Ingest } from '../../src/ingest/era_ingest.js';
+import {
+  cmdEra835ConfigFor,
+  expandDateRange,
+  newEra835IngestStats,
+  recordEra835IngestRun,
+  runEra835Ingest,
+  seedEra835TenantRoster,
+  type Era835TenantCounts,
+} from '../../src/ingest/era_ingest.js';
 import { CmdEra835Error, cmdDownload835, read835Files } from '../../src/collections/cmd835.js';
 import {
   businessTodayIso,
@@ -939,6 +947,36 @@ const ERA835_INTER_CALL_DELAY_MS = 1_500;
 const ERA835_LOOKBACK_DAYS = 5;
 
 /**
+ * Write the per-tenant run rows for one 835 ingest run (staging.era_835_ingest_run,
+ * migration 022), FAIL-SOFT. A summary-write failure must never fail an ingest that already
+ * succeeded, and must never turn a failed ingest into a different error — so this swallows
+ * everything and logs the message only (0053's stated posture).
+ *
+ * The most likely reason to land in the catch is 022 not being applied yet; that degrades
+ * to one logged line per run, not a broken cron. Do not rely on it — apply 022 first.
+ */
+async function writeEra835RunRow(
+  startedAt: string,
+  dates: string[] | undefined,
+  byEntity: Record<string, Era835TenantCounts>,
+  failure?: { error: string },
+): Promise<void> {
+  try {
+    await recordEra835IngestRun(
+      rollupWriterDb(),
+      { startedAt, windowStart: dates?.[0] ?? null, windowEnd: dates?.at(-1) ?? null },
+      byEntity,
+      failure,
+    );
+  } catch (e) {
+    console.error(
+      'era-835 cron: era_835_ingest_run write failed (non-fatal):',
+      e instanceof Error ? e.message : String(e),
+    );
+  }
+}
+
+/**
  * Daily BXR 835 ERA ingest (/api/cron/era-835 — SCHEDULED `50 8 * * *`, see the route file for
  * the still-open finding-1 failure-rate risk accepted at enable time).
  * GET only; gated on CRON_SECRET with the same constant-time Bearer check as every other
@@ -968,6 +1006,15 @@ export async function handleEra835IngestCron(req: {
   if (!secret || !isAuthorized(req.authorization, secret)) {
     return { status: 401, body: { error: 'unauthorized' } };
   }
+  // Observability state, owned HERE so the catch block can still read real counters after a
+  // mid-run throw (migration 022). runEra835Ingest accumulates into this object rather than
+  // a private one; see its `stats` dep for why a returned-only summary was not enough.
+  const startedAt = new Date().toISOString();
+  const stats = newEra835IngestStats();
+  // Seed the roster BEFORE the first thing that can throw, so a failure that predates the
+  // ingest loop still writes one 'failed' row per tenant instead of none.
+  seedEra835TenantRoster(stats, BXR_CUSTOMERS);
+  let dates: string[] | undefined;
   try {
     // Fail fast on a misconfigured PHI key (mirrors the CLI's up-front probe) — better a
     // clean 500 before any CMD call than a mid-run abort after N pulls.
@@ -981,7 +1028,7 @@ export async function handleEra835IngestCron(req: {
     const start = new Date(Date.now() - (ERA835_LOOKBACK_DAYS - 1) * 86_400_000)
       .toISOString()
       .slice(0, 10);
-    const dates = expandDateRange(start, end);
+    dates = expandDateRange(start, end);
 
     // 1500ms floor between CMD calls (before every pull but the first). Inside the
     // download seam so the budget guard's wall clock naturally includes it.
@@ -994,7 +1041,8 @@ export async function handleEra835IngestCron(req: {
       return { kind: 'files' as const, files: read835Files(res.bytes, `${customerId}_${date}`) };
     };
 
-    const stats = await runEra835Ingest({
+    await runEra835Ingest({
+      stats,
       customers: BXR_CUSTOMERS,
       dates,
       ingestedBy: 'era_835_cron',
@@ -1008,11 +1056,23 @@ export async function handleEra835IngestCron(req: {
         err.code === 'http_status' &&
         (err.status === 401 || err.status === 403),
     });
+    // Persist the run summary, ONE ROW PER TENANT — FAIL-SOFT: the ingest already
+    // succeeded, so a summary-write failure is logged (label only) and never fails the run
+    // (0053's posture). Requires SQL Schemas/022 applied; before that it just logs.
+    await writeEra835RunRow(startedAt, dates, stats.by_entity);
     return { status: 200, body: { ok: true, ...stats } };
   } catch (err) {
     // Generic to the client; message only to the server log (no PHI, no token, no URL).
     // The 401/403 CmdEra835Error message already names the credential path explicitly.
     console.error('era-835 cron failed:', err instanceof Error ? err.message : String(err));
+    // A FAILED run must be as visible as a successful one — a cron that dies every night
+    // and writes nothing is exactly the silence 022 exists to end. Per-tenant attribution
+    // is unavailable here (the throw may predate the loop), so every tenant in the seeded
+    // roster gets a 'failed' row. The COUNTERS ARE REAL, not zeroed: stats is owned by
+    // this handler, so whatever committed before the throw is recorded.
+    await writeEra835RunRow(startedAt, dates, stats.by_entity, {
+      error: err instanceof Error ? err.message : String(err),
+    });
     if (
       err instanceof CmdEra835Error &&
       err.code === 'http_status' &&

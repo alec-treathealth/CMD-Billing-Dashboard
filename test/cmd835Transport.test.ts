@@ -33,7 +33,16 @@ import {
   read835Files,
   type CmdEra835Config,
 } from '../src/collections/cmd835.js';
-import { runEra835Ingest, type Era835DownloadResult } from '../src/ingest/era_ingest.js';
+import {
+  blankEra835TenantCounts,
+  era835RunStatus,
+  newEra835IngestStats,
+  recordEra835IngestRun,
+  runEra835Ingest,
+  seedEra835TenantRoster,
+  type Era835DownloadResult,
+  type Era835TenantCounts,
+} from '../src/ingest/era_ingest.js';
 import type { CmdCustomer } from '../src/collections/cmdCustomers.js';
 
 /**
@@ -711,4 +720,200 @@ test('ingest: without the fatal seam a 401 still gets per-pull isolation (back-c
   assert.equal(stats.pulls_attempted, 4, 'default behavior unchanged: all pulls attempted');
   assert.equal(stats.pulls_failed, 4);
   assert.deepEqual(stats.pulls_failed_by_code, { http_status: 4 });
+});
+
+// --- 12. run-level observability: per-tenant attribution + status derivation ---
+// Migration 022 (staging.era_835_ingest_run). WHY: the 2026-08-02 production run parsed
+// 112 remits and inserted 39 — the other 73 took the ON CONFLICT DO NOTHING path and were
+// recorded NOWHERE. These tests pin the counters and the status vocabulary that make a
+// silent no-op queryable after the fact.
+
+const INDIGO = '141d459c-0000-4000-8000-000000000001';
+/** A two-tenant roster: 2 BXR customers + 1 Indigo. Today's live roster is BXR-only, so
+ *  this is the shape that must keep working the day Indigo joins. */
+const MIXED: CmdCustomer[] = [
+  ...CUSTOMERS,
+  { customerId: '10021230', facilityCode: '10021230', businessEntityId: INDIGO },
+];
+
+test('ingest: by_entity seeds EVERY roster tenant up front, with its customer count', async () => {
+  // Seeded before the first pull, so a tenant whose every pull budget-skips (or a run that
+  // dies early) still records how many customers it should have covered.
+  const stats = await runEra835Ingest({
+    customers: MIXED,
+    dates: ['2026-03-04'],
+    ingestedBy: 'test',
+    download: async () => ({ kind: 'empty' }),
+  });
+  assert.deepEqual(Object.keys(stats.by_entity).sort(), [CUSTOMERS[0]!.businessEntityId, INDIGO].sort());
+  assert.equal(stats.by_entity[CUSTOMERS[0]!.businessEntityId]!.customers_total, 2);
+  assert.equal(stats.by_entity[INDIGO]!.customers_total, 1);
+});
+
+test('ingest: counters attribute to the customer\'s OWN tenant, never blended', async () => {
+  const stats = await runEra835Ingest({
+    customers: MIXED,
+    dates: ['2026-03-04', '2026-03-05'],
+    ingestedBy: 'test',
+    download: async (customerId) => {
+      if (customerId === '10021230') throw new CmdEra835Error('request_failed', 'network');
+      return { kind: 'empty' };
+    },
+  });
+  const bxr = stats.by_entity[CUSTOMERS[0]!.businessEntityId]!;
+  const indigo = stats.by_entity[INDIGO]!;
+  assert.equal(bxr.pulls_attempted, 4, '2 BXR customers x 2 dates');
+  assert.equal(bxr.pulls_empty, 4);
+  assert.equal(bxr.pulls_failed, 0, "Indigo's failures must not land on BXR");
+  assert.equal(indigo.pulls_attempted, 2);
+  assert.equal(indigo.pulls_failed, 2);
+  assert.deepEqual(indigo.pulls_failed_by_code, { request_failed: 2 });
+  // The run-wide counters are unchanged and still the sum — the log line keeps working.
+  assert.equal(stats.pulls_attempted, 6);
+  assert.equal(stats.pulls_failed, 2);
+});
+
+test('ingest: the budget-skip branch attributes to its tenant too', async () => {
+  // Budget already blown, so every pull skips before any download — the branch that is
+  // easiest to forget because it `continue`s before the attempt counter.
+  let t = 0;
+  const stats = await runEra835Ingest({
+    customers: MIXED,
+    dates: ['2026-03-04'],
+    ingestedBy: 'test',
+    download: async () => ({ kind: 'empty' }),
+    budgetMs: 1,
+    now: () => (t += 1_000),
+  });
+  assert.equal(stats.pulls_attempted, 0, 'nothing was attempted');
+  assert.equal(stats.pulls_skipped_budget, 3);
+  assert.equal(stats.by_entity[CUSTOMERS[0]!.businessEntityId]!.pulls_skipped_budget, 2);
+  assert.equal(stats.by_entity[INDIGO]!.pulls_skipped_budget, 1);
+});
+
+test('ingest: a CALLER-OWNED stats object survives a fatal abort with REAL counters', async () => {
+  // FIX for the poisoned-detector case: runEra835Ingest RETURNS its stats, so a mid-run
+  // throw would otherwise discard every counter while the completed pulls' inserts are
+  // already committed. A run that did work and then died must not record zeros — the next
+  // 5-day re-pull would dedupe those rows and the whole sequence would read healthy.
+  const stats = newEra835IngestStats();
+  const authErr = new CmdEra835Error('http_status', 'HTTP 401', 401);
+  await assert.rejects(() =>
+    runEra835Ingest({
+      stats,
+      customers: CUSTOMERS,
+      dates: ['2026-03-04', '2026-03-05'],
+      ingestedBy: 'test',
+      download: async (_c, date) => {
+        if (date === '2026-03-05') throw authErr;
+        return { kind: 'empty' };
+      },
+      fatal: (err) => err instanceof CmdEra835Error && err.status === 401,
+    }),
+  );
+  // The two pulls that completed BEFORE the abort are still on the object the caller holds.
+  assert.equal(stats.pulls_attempted, 3, 'two clean pulls + the one that threw');
+  assert.equal(stats.pulls_empty, 2, 'the completed work is NOT lost');
+  assert.equal(stats.by_entity[CUSTOMERS[0]!.businessEntityId]!.pulls_empty, 2);
+});
+
+test('seedEra835TenantRoster: ASSIGNS customers_total, so seeding twice is a no-op', async () => {
+  // The handler seeds before the PHI probe and runEra835Ingest seeds again on entry; if
+  // this incremented, every run would report double the roster size.
+  const stats = newEra835IngestStats();
+  seedEra835TenantRoster(stats, MIXED);
+  seedEra835TenantRoster(stats, MIXED);
+  assert.equal(stats.by_entity[CUSTOMERS[0]!.businessEntityId]!.customers_total, 2);
+  assert.equal(stats.by_entity[INDIGO]!.customers_total, 1);
+});
+
+test('era835RunStatus: ok / partial / empty, and zero-attempts is NOT ok', () => {
+  const c = (over: Partial<Era835TenantCounts> = {}): Era835TenantCounts => ({
+    ...blankEra835TenantCounts(),
+    ...over,
+  });
+  assert.equal(era835RunStatus(c({ pulls_attempted: 5, pulls_empty: 2 })), 'ok');
+  assert.equal(era835RunStatus(c({ pulls_attempted: 5, pulls_failed: 1 })), 'partial');
+  assert.equal(era835RunStatus(c({ pulls_attempted: 5, pulls_zero_files: 1 })), 'partial');
+  assert.equal(era835RunStatus(c({ pulls_attempted: 5, pulls_skipped_budget: 1 })), 'partial');
+  // THE CREDENTIAL-LOST-PAYMENT-ROLE SIGNATURE: every pull succeeds, every pull is empty.
+  // Today that returns 200 {ok:true} and looks exactly like a quiet day.
+  assert.equal(era835RunStatus(c({ pulls_attempted: 5, pulls_empty: 5 })), 'empty');
+  // Zero attempts has proven NOTHING about the feed's health — reporting 'ok' would be
+  // the same false reassurance as collapsing 'empty' into 'ok'.
+  assert.equal(era835RunStatus(c()), 'empty');
+  assert.equal(era835RunStatus(c({ customers_total: 3 })), 'empty');
+  // 'partial' wins over 'empty' when both could apply — a failure is the louder signal.
+  assert.equal(era835RunStatus(c({ pulls_attempted: 2, pulls_empty: 2, pulls_failed: 1 })), 'partial');
+});
+
+test('recordEra835IngestRun: one GUC-scoped INSERT per tenant, bound params only', async () => {
+  const statements: Array<{ sql: string; params: unknown[] }> = [];
+  const guc: string[] = [];
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      statements.push({ sql, params });
+      if (sql.includes('set_config')) {
+        guc.push(String(params[0]));
+        return { rows: [] };
+      }
+      if (sql.includes('current_setting')) return { rows: [{ v: guc.at(-1) }] };
+      if (sql.includes('current_user')) return { rows: [{ u: 'cmd_rollup_writer' }] };
+      return { rows: [] };
+    },
+    release: () => {},
+  };
+  const db = { connect: async () => client } as unknown as Parameters<typeof recordEra835IngestRun>[0];
+
+  const counts = { ...blankEra835TenantCounts(), pulls_attempted: 4, pulls_empty: 1, payments_inserted: 3 };
+  await recordEra835IngestRun(
+    db,
+    { startedAt: '2026-08-02T08:50:00.000Z', windowStart: '2026-07-29', windowEnd: '2026-08-02' },
+    { [CUSTOMERS[0]!.businessEntityId]: counts, [INDIGO]: blankEra835TenantCounts() },
+  );
+
+  const inserts = statements.filter((s) => s.sql.includes('insert into staging.era_835_ingest_run'));
+  assert.equal(inserts.length, 2, 'ONE ROW PER TENANT — never skipped, never blended');
+  assert.deepEqual(guc, [CUSTOMERS[0]!.businessEntityId, INDIGO], 'each row under its own tenant GUC');
+  for (const ins of inserts) {
+    assert.ok(!ins.sql.includes('select *'), 'explicit allowlisted columns only');
+    // Every value is a bound param: no interpolated literals anywhere in the statement.
+    assert.equal(ins.sql.includes("'"), false, 'no string literals spliced into the SQL');
+    assert.equal(ins.params.length, 20, 'all 20 columns bound positionally');
+    assert.ok(ins.sql.includes('::jsonb'), 'the failure-code map is cast, not concatenated');
+  }
+  // Status derives per tenant from that tenant's own counters.
+  assert.equal(inserts[0]!.params[2], 'ok', '4 attempted, 1 empty, no failures');
+  assert.equal(inserts[1]!.params[2], 'empty', 'the tenant that attempted nothing');
+  assert.equal(inserts[0]!.params[1], 'cmd_rollup_writer', 'writer_user read inside the txn');
+  assert.equal(inserts[0]!.params[19], null, 'error_detail is null on a non-failed run');
+});
+
+test('recordEra835IngestRun: a failure forces status=failed and bounds error_detail', async () => {
+  const statements: Array<{ sql: string; params: unknown[] }> = [];
+  const client = {
+    // withTenant's read-back compares current_setting against the id it just set.
+    query: async (sql: string, params: unknown[] = []) => {
+      statements.push({ sql, params });
+      if (sql.includes('current_setting')) return { rows: [{ v: INDIGO }] };
+      if (sql.includes('current_user')) return { rows: [{ u: 'cmd_rollup_writer' }] };
+      return { rows: [] };
+    },
+    release: () => {},
+  };
+  const db = { connect: async () => client } as unknown as Parameters<typeof recordEra835IngestRun>[0];
+
+  // A failed run that HAD ALREADY INSERTED before it died: the counters must survive.
+  const counts = { ...blankEra835TenantCounts(), pulls_attempted: 9, payments_inserted: 7 };
+  await recordEra835IngestRun(
+    db,
+    { startedAt: '2026-08-02T08:50:00.000Z', windowStart: null, windowEnd: null },
+    { [INDIGO]: counts },
+    { error: 'x'.repeat(900) },
+  );
+  const ins = statements.find((s) => s.sql.includes('insert into staging.era_835_ingest_run'))!;
+  assert.equal(ins.params[2], 'failed');
+  assert.equal(ins.params[14], 7, 'a failed run records what it ACTUALLY inserted, not zero');
+  assert.equal(ins.params[4], null, 'no window when the run died before computing one');
+  assert.equal(String(ins.params[19]).length, 500, 'error_detail is bounded to the CHECK');
 });

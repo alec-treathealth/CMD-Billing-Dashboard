@@ -874,7 +874,9 @@ The master plan's "0012_etl_backfill" landed as **020** (S1 mapping rule: 0012 t
 the next free Veris number; 012 was taken/live). Artifacts:
 `SQL Schemas/020_etl_backfill.sql` + `020_etl_backfill_rollback.sql`. ~~Next Veris
 number: **021**.~~ **021 is now TAKEN + APPLIED** (`021_era_835_member_id_bidx`, see
-below) — **next free Veris number: 022.** Checked before claiming 021 (2026-07-31):
+below). ~~Next free Veris number: **022**.~~ **022 is now TAKEN**
+(`022_era_835_ingest_run`, see below) — **next free Veris number: 023.**
+Checked before claiming 021 (2026-07-31):
 origin/main high-water 020, all local branches (`git ls-tree` scan for
 `SQL Schemas/021*` → nothing), all 4 worktrees, untracked files in the main checkout,
 and this ledger. Note the numbered reservation table at ~:1144 is **dashboard-sequence
@@ -2877,3 +2879,96 @@ This is a scheduling/design question, separate from and downstream of the covera
 **Do not scope this cron until the coverage rate is known AND the failure-rate mystery
 (items 1–2) is resolved** — a 5th CMD-facing cron should not be designed against an
 instrument that is currently misreporting its own failure modes.
+
+### 022 — `staging.era_835_ingest_run` (per-run 835 observability) — 2026-08-02
+
+**Next free Veris number after this: 023.** Checked before claiming 022 (2026-08-02) three
+ways: origin/main + the working tree incl. untracked files (`SQL Schemas/` high-water 021);
+this ledger's own "next free Veris number: 022"; and the LIVE database —
+`staging.era_835_ingest_run` did not exist, and 021 is genuinely applied there
+(`member_id_enc`, `member_id_bidx`, and `era_835_member_id_bidx_idx` all present).
+
+**WHY.** The 2026-08-02 05:00 UTC manual production run of `/api/cron/era-835` parsed **112
+remits and inserted 39**. The other **73 (65%)** were swallowed by `ON CONFLICT DO NOTHING`
+and recorded **nowhere** — run stats lived only in the HTTP response body (discarded by
+Vercel's cron runner) and `console.log` (gone from `vercel logs` by morning). A silent
+no-op had to become queryable after the fact. Same durable-observability fix, and the same
+fail-soft posture, as `supabase/migrations/0053` did for `claims.audit_ingest_run`.
+
+**Grain: ONE ROW PER TENANT PER RUN.** `runEra835Ingest` loops one roster that may span
+tenants and every counter is computed with `customer.businessEntityId` in scope, so
+attribution is exact. The rejected alternative — skip the run row when the roster spans
+tenants — is a silent observability hole: the first time Indigo joins the 835 roster, ERA
+observability would stop with no signal. Today's roster is BXR-only, so one row per run.
+
+**Shape.** Owner `claims_admin` (SET ROLE), RLS on / FORCE off, GUC-checked policies on
+`app.business_entity_id`. `claims_reader` SELECT, `cmd_rollup_writer` **INSERT only** —
+tighter than both 013 and 0053 on purpose: no `ON CONFLICT` arbiter and the ingest never
+reads the table back, so there is no writer SELECT policy and no writer SELECT grant. PK is
+`GENERATED ALWAYS`, so no sequence grant. **Append-only: no role holds UPDATE or DELETE.**
+Recent-lookup index `(business_entity_id, finished_at desc)` per the 018 leadership rule.
+
+**PHI.** Counts, ISO dates, the writer role name, failure CODES, and error MESSAGES only.
+`error_detail` is bounded to 500 chars by CHECK. **Deliberately NO `per_customer` array**
+(unlike `audit_ingest_run`): on this feed that would be a per-facility remittance-activity
+breakdown, a materially richer disclosure than the product plane's row counts. Do not add
+one.
+
+**Two counters that did not exist anywhere in this codebase before.**
+`payments_duplicate` / `rows_skipped_duplicate` count the `ON CONFLICT DO NOTHING` path at
+both grains. This is what finally makes 013's documented duplicate-remit detector usable —
+013 states "a re-pull of an already-ingested date MUST report `payments_inserted = 0`", and
+until now there was no record of yesterday's run to compare against. With a 5-day trailing
+window four of every five pulled dates are re-pulls, so the **healthy steady state is a HIGH
+`payments_duplicate`** against a `payments_inserted` equal to genuinely new remits only.
+`payments_inserted` staying high against a stable `payments_mapped` means the remit
+fingerprint has destabilised and BPR02 is being double-counted.
+
+**`status` vocabulary — `empty` and zero-attempts are the non-obvious ones.**
+`failed` (handler threw) · `partial` (`pulls_failed + pulls_zero_files +
+pulls_skipped_budget > 0`) · `empty` (`pulls_attempted = 0`, OR `pulls_empty =
+pulls_attempted`) · `ok` otherwise. `empty` is a distinct state because
+`pulls_empty == pulls_attempted` is BOTH a quiet day AND the exact signature of the CMD
+credential having lost its Payment role — today that case returns `200 {ok:true}` and is
+indistinguishable from a quiet day, which is how this ingest could sit dead in production
+unnoticed. **Two consecutive `empty` runs across a 5-day window is page-worthy.**
+Zero attempts is also `empty`, not `ok`: a run that attempted nothing has proven nothing
+about the feed's health, and calling it `ok` is the same false reassurance.
+
+**Failed runs carry REAL counters, not zeros.** `runEra835Ingest` now accepts an optional
+caller-owned `stats` object and mutates it (still returning it, so existing callers are
+untouched). Without this, a mid-run throw discarded every counter while the completed
+pulls' inserts were already committed — a run that processed 10 of 15 customers and died
+would record `failed, payments_inserted 0`. That poisons the duplicate detector above: the
+partial run's contribution vanishes, the next 5-day re-pull dedupes those same rows, and
+the whole sequence reads healthy. Given **finding 1** (the 2026-07-31 30%/42% pull-failure
+episodes, root cause UNKNOWN and the throttle theory FALSIFIED), failed runs are the case
+we most need honest numbers for. Note the consequence: `failed` no longer implies "nothing
+happened".
+
+**Write path.** `recordEra835IngestRun` (`src/ingest/era_ingest.ts`), called from
+`handleEra835IngestCron` on BOTH the success and the error path, each wrapped fail-soft —
+a summary-write failure must never fail an ingest that already succeeded (0053's posture),
+and the most likely cause of landing there is 022 not being applied yet. `writer_user` is
+`current_user` read inside the `withTenant` transaction: **RECORDED, NOT ASSERTED** — there
+is no identity guard on this path (unlike the billing-audit writer) and 022 does not invent
+one. On the error path every tenant in the seeded roster gets a `failed` row, because
+per-tenant attribution is not available there.
+
+**Verified live at apply time:** `era_835_payment` = **18** columns and
+`era_835_adjustment` = **42** columns, UNCHANGED — 022 touches neither table. Those two
+counts are the assertions in 022 §7 whose job is proving exactly that.
+
+Artifacts: `SQL Schemas/022_era_835_ingest_run.sql` + `022_era_835_ingest_run_rollback.sql`.
+
+### Product-plane migration number is NOT trustworthy right now (2026-08-02)
+
+`CLAUDE.md` and `.claude/rules/sql-migrations.md` both say the next **product** number is
+`0072`, but `supabase/migrations/0072_teen_mh_tx_facility.sql` (+ rollback) already exists
+**untracked** in the main checkout, and `0071_cmd_charge_census_aging_index.sql` is untracked
+too. Both docs were deliberately left at `0072` in the 022 change: bumping them to `0073`
+would assert state that is not in version control, and if those files are renamed or deleted
+the docs become wrong in the other direction. **Resolve by committing or deleting the
+untracked `0071`/`0072` files, then set the product number to match.** Until that happens,
+check the filesystem, not the doc, before claiming a product-plane number. (The Veris number
+in both docs IS current: 023.)
