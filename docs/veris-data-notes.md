@@ -3206,3 +3206,52 @@ current. Compare Monday's first runs against these four figures. **If Monday sti
 charge rows, it becomes a real investigation** — per the standing signal-misread rule, note that
 `cmd_explorer_rows` measures ROWS WRITTEN, not run success, so a zero there is not by itself a
 failed run.
+
+---
+
+## 0072 — APPLIED LIVE (2026-08-02 09:27 UTC). The 186 rows moved, as predicted.
+
+Ledger row `20260802092718 0072_teen_mh_tx_facility`. Applied via `apply_migration` (single txn,
+plain DDL/DML, no `set role` — `collections.facilities` and `cmd_facility_aliases` are
+postgres-owned). Post-apply verification, all green:
+
+| check | result |
+|---|---|
+| facilities row | `TEEN_MH_TX \| TEEN MENTAL HEALTH TEXAS \| acct 10035166 \| care_setting OP \| acronym 'TEEN MH TX'` |
+| alias repointed | `'TEEN MENTAL HEALTH TEXAS LLC'` → `TEEN_MH_TX` |
+| TREAT_TX's own alias | `'TREAT MENTAL HEALTH TEXAS LLC'` → `TREAT_TX`, untouched |
+| rows resolving to TEEN_MH_TX | **186** — exactly the pre-apply prediction |
+| rows resolving to TREAT_TX | 16,718 |
+
+**This was a data correction, and it landed as one.** The 186 `cmd_explorer_rows`
+($581,698.32 of `charge_amount`, one-time load 2026-06-29) previously resolved to TREAT_TX
+through both live read paths (`cmdExplorerQuery.ts:233`, `qualifyQuery.ts:139`) and now resolve
+to TEEN_MH_TX. **TREAT_TX's Collections and Qualify figures drop by that amount and a new
+TEEN_MH_TX facility appears carrying it — expect the numbers to move.** Correct per the
+2026-07-28 owner ruling (separate legal entity, distinct NPI 1124973086). Rollback on file
+(`0072_teen_mh_tx_facility_rollback.sql`) restores the alias to TREAT_TX; it deliberately leaves
+the facilities row, because removing it can violate the alias FK.
+
+Note `/qualify` is behind its maintenance gate for everyone except `alec@treathealth.ai`, but
+**Collections is NOT gated** — the attribution change is visible to real users now.
+
+### Reservation table: 0071 and 0072 are discharged
+
+Both files are committed and on `origin/main` (`f538648`), so under the table's own
+remove-when-on-main rule the 0071/0072 rows at ~:1331–1332 are stale. Rows left in place rather
+than deleted, per this file's append-only discipline — treat this entry as their disposition.
+**0072 is APPLIED. 0071 is committed but NOT applied** (index-only; must be built with
+`CREATE INDEX CONCURRENTLY` outside `apply_migration` — see its header).
+
+### Product-plane migration number — RESOLVED to 0075
+
+The 2026-08-02 entry above ("Product-plane migration number is NOT trustworthy right now") set
+the condition: "resolve by committing or deleting the untracked 0071/0072 files, then set the
+product number to match." Both are now committed, so the condition is met. **Next free product
+number is 0075** (0071–0074 all exist on `origin/main`; 0073/0074/0072 applied, 0071 not).
+
+`.claude/rules/sql-migrations.md` is updated to 0075 in the same commit as this entry.
+**`CLAUDE.md` still says 0072 and needs the same one-line fix** — deliberately NOT made here: a
+parallel session is actively rewriting that file this morning (it added the "Canonical Context
+Set" section), and editing it concurrently already caused one cross-session index collision
+today. Whoever owns that file next should change the one number.
