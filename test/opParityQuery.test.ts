@@ -111,3 +111,46 @@ test('assessOpParity: a consolidated-only class is surfaced, not treated as a sh
   assert.equal(a.verdicts[0]!.delta, -42, 'negative delta records the surplus');
   assert.deepEqual(a.droppedClasses, []);
 });
+
+test('buildOpParityQuery: FAILS CLOSED on an empty entity scope', () => {
+  // `= any('{}'::uuid[])` is always false, so an empty scope would return zero rows and grade
+  // the night CLEAN having measured nothing — a fail-open on the gate. Must throw instead.
+  const { add } = collector();
+  assert.throws(
+    () => buildOpParityQuery('2026-08-02', [], add),
+    /entityIds required/,
+    'an empty scope must throw, not silently match nothing',
+  );
+});
+
+test('buildOpParityQuery: rejects a malformed entity id', () => {
+  const { add } = collector();
+  assert.throws(
+    () => buildOpParityQuery('2026-08-02', ['not-a-uuid'], add),
+    /canonical business_entity_id UUIDs/,
+  );
+});
+
+test('buildOpParityQuery: accepts a multi-tenant scope', () => {
+  const INDIGO = '141d459c-f371-4229-9a92-ace198e940bb';
+  const { values, add } = collector();
+  buildOpParityQuery('2026-08-02', [BXR, INDIGO], add);
+  assert.deepEqual(values[1], [BXR, INDIGO], 'both tenants bound as one array param');
+});
+
+test('assessOpParity: an UNMEASURED night is never a pass', () => {
+  const empty = assessOpParity([]);
+  assert.equal(empty.measured, false);
+  assert.equal(empty.parityHolds, false, 'no rows proves nothing — must not grade clean');
+
+  // Rows present but both sides zero is equally vacuous.
+  const zeroed = assessOpParity([{ status_category: 'PAID', legacy_rows: '0', consolidated_rows: '0' }]);
+  assert.equal(zeroed.measured, false);
+  assert.equal(zeroed.parityHolds, false);
+});
+
+test('assessOpParity: a genuinely clean night is measured AND holds', () => {
+  const a = assessOpParity([{ status_category: 'AT_PAYER', legacy_rows: '3870', consolidated_rows: '3870' }]);
+  assert.equal(a.measured, true);
+  assert.equal(a.parityHolds, true);
+});

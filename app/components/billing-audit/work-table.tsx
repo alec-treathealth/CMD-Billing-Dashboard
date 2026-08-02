@@ -10,33 +10,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Pager, SortHeaderCell } from '@/components/data-grid';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { loadAuditRows, revealAuditRows, type AuditCursor, type AuditFilter, type AuditGridRow, type AuditSort } from '@/lib/actions';
+import { freshnessDisplayDate, isPageStale, newestIngestOnPage } from '@/lib/billing-audit/freshness';
 import type { AuditScope } from '../../../src/billingAudit/auditConfig';
 import type { DashboardView } from '@/lib/views';
-
-/** Days after which the page's newest ingest is called out as stale. The consolidated feed
- *  refreshes nightly, so anything past two days has missed at least one full cycle. */
-const STALE_AFTER_DAYS = 2;
-
-/**
- * Newest `ingested_at` on the CURRENT PAGE — deliberately page-local, NOT a table-wide max().
- *
- * A table-wide figure is dominated by whichever status class is still refreshing, so it would
- * HIDE a per-class freeze — which is the exact failure mode this indicator exists to expose.
- * `audit_row` is a worklist whose rows are updated in place, never deleted: if a feed change
- * stops refreshing one class (e.g. PAID, or balance-due-patient beyond the filter window),
- * those rows stay on the page looking current forever. Page-local means that when you are
- * looking at frozen rows, the stamp you see is THEIR real age, not the healthy classes'.
- *
- * Returns null when no row on the page carries a timestamp (nullable column).
- */
-function newestIngestOnPage(rows: readonly AuditGridRow[]): string | null {
-  let newest: string | null = null;
-  for (const r of rows) {
-    // ingested_at is projected as a fixed-width ISO-8601 Z string, so lexical > is chronological.
-    if (r.ingested_at && (newest === null || r.ingested_at > newest)) newest = r.ingested_at;
-  }
-  return newest;
-}
 
 // Status category → chip label + semantic color (distinct from the teal brand accent).
 const STATUS: Record<string, { label: string; fg: string; bg: string }> = {
@@ -113,18 +89,14 @@ export function AuditWorkTable({ scope, view, canRevealPhi, filter, initialPage,
   const seeded = useRef(initialPage != null);
   const filterKey = JSON.stringify(filter);
 
-  // Freshness stamp. `nowMs` is set AFTER mount and stays null on the server: the seeded IP page
-  // renders server-side, and comparing against a server clock there would produce a different
-  // string than the client's first paint (hydration mismatch). The date itself is rendered from
-  // the row value, so it is deterministic — only the stale HIGHLIGHT waits for the client.
+  // Freshness stamp (decision logic in @/lib/billing-audit/freshness — pure + unit-tested).
+  // `nowMs` is set AFTER mount and stays null on the server: the seeded IP page renders
+  // server-side, and a server clock would hydrate differently. The DATE is derived from the row
+  // value so it is deterministic; only the stale HIGHLIGHT waits for the client.
   const [nowMs, setNowMs] = useState<number | null>(null);
   useEffect(() => { setNowMs(Date.now()); }, [rows]);
-  const newestIngest = newestIngestOnPage(rows);
-  const newestIngestMs = newestIngest ? Date.parse(newestIngest) : NaN;
-  const isStale =
-    nowMs !== null &&
-    !Number.isNaN(newestIngestMs) &&
-    nowMs - newestIngestMs > STALE_AFTER_DAYS * 86_400_000;
+  const freshness = newestIngestOnPage(rows);
+  const isStale = isPageStale(freshness, nowMs);
 
   // While "Reveal all" is on, reveal the CURRENT page's not-yet-revealed rows (one gated + audited
   // bulk call). `revealed` is intentionally omitted from deps — the missing-id check reads it at
@@ -193,12 +165,12 @@ export function AuditWorkTable({ scope, view, canRevealPhi, filter, initialPage,
           </button>
         )}
         <span className={`${canRevealPhi ? 'ml-3' : 'ml-auto'} text-xs text-ink400`}>{loading ? 'Loading…' : `${rows.length} row${rows.length === 1 ? '' : 's'} · page ${page + 1}`}</span>
-        {!loading && newestIngest ? (
+        {!loading && freshness ? (
           <span
             className={`ml-3 text-xs ${isStale ? 'text-[color:var(--status-warn,#B0741F)]' : 'text-ink400'}`}
-            title={`Newest ingest on this page: ${newestIngest}. Page-local by design — a table-wide figure would hide a class that has stopped refreshing.`}
+            title={`Newest ingest on this page: ${freshness.iso}. Page-local by design — a table-wide figure would hide a class that has stopped refreshing.`}
           >
-            {isStale ? '⚠ ' : ''}Updated {newestIngest.slice(0, 10)}
+            {isStale ? '⚠ ' : ''}Updated {freshnessDisplayDate(freshness)}
           </span>
         ) : null}
       </div>

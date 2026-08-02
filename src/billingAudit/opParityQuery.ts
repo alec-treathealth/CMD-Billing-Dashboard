@@ -39,6 +39,8 @@
  * `source_filter_id` column is NULL on the legacy feed too.
  */
 
+import { assertEntityScope } from '../collections/entityScope.js';
+
 export type ParamAdder = (v: unknown) => string;
 
 /** One `status_category` compared across the two feeds for a single ingest day. */
@@ -61,6 +63,14 @@ export interface OpParityRow {
  * FULL OUTER JOIN, not a left join: a class that appears ONLY on the consolidated side is
  * also worth seeing (it would mean the new feed is finding rows the legacy one never did),
  * and a left join would silently drop it.
+ *
+ * FAILS CLOSED ON AN EMPTY SCOPE. `entityIds` goes through the standing `assertEntityScope`
+ * guard, which throws on an empty or malformed list. That matters more here than on a normal
+ * reader: `= any('{}'::uuid[])` is always false, so an empty scope would return zero rows,
+ * `assessOpParity` would see nothing to compare, and the night would grade CLEAN having
+ * measured nothing — a fail-OPEN on the very gate that is supposed to block the cutover. Same
+ * reasoning as 022's status vocabulary, where zero attempts is `empty` rather than `ok`: a run
+ * that proved nothing must never read as a pass.
  */
 export function buildOpParityQuery(
   asOfDate: string,
@@ -68,7 +78,7 @@ export function buildOpParityQuery(
   addParam: ParamAdder,
 ): string {
   const day = addParam(asOfDate);
-  const ents = addParam([...entityIds]);
+  const ents = addParam(assertEntityScope(entityIds, 'buildOpParityQuery'));
   return (
     'with legacy as (' +
     '  select status_category, count(*) as n' +
@@ -111,7 +121,17 @@ export interface OpParityAssessment {
   droppedClasses: readonly string[];
   totalLegacy: number;
   totalConsolidated: number;
-  /** False when ANY class shows a shortfall — i.e. the night is NOT clean for cutover purposes. */
+  /**
+   * Did this night actually compare anything? False when the query returned no rows at all —
+   * the cron did not run, the day is wrong, or the scope matched nothing. Kept separate from
+   * `parityHolds` so "nothing to compare" can never be mistaken for "compared and agreed".
+   */
+  measured: boolean;
+  /**
+   * True only when the night was MEASURED and no class shows a shortfall. An unmeasured night
+   * is never a pass — it has proven nothing about coverage, and calling it clean is the same
+   * false reassurance 022 rejected when it made zero-attempt runs `empty` rather than `ok`.
+   */
   parityHolds: boolean;
 }
 
@@ -137,11 +157,17 @@ export function assessOpParity(
     const shortfall = legacyRows > 0 && (consolidatedRows === 0 || delta > allowed);
     return { statusCategory: r.status_category, legacyRows, consolidatedRows, delta, shortfall };
   });
+  const totalLegacy = verdicts.reduce((a, v) => a + v.legacyRows, 0);
+  const totalConsolidated = verdicts.reduce((a, v) => a + v.consolidatedRows, 0);
+  // "Measured" means the two feeds actually produced something to compare. A day with rows on
+  // neither side proves nothing — see the `measured` doc comment.
+  const measured = verdicts.length > 0 && (totalLegacy > 0 || totalConsolidated > 0);
   return {
     verdicts,
     droppedClasses: verdicts.filter((v) => v.legacyRows > 0 && v.consolidatedRows === 0).map((v) => v.statusCategory),
-    totalLegacy: verdicts.reduce((a, v) => a + v.legacyRows, 0),
-    totalConsolidated: verdicts.reduce((a, v) => a + v.consolidatedRows, 0),
-    parityHolds: !verdicts.some((v) => v.shortfall),
+    totalLegacy,
+    totalConsolidated,
+    measured,
+    parityHolds: measured && !verdicts.some((v) => v.shortfall),
   };
 }
