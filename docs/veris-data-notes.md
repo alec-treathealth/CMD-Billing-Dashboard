@@ -3255,3 +3255,58 @@ number is 0075** (0071–0074 all exist on `origin/main`; 0073/0074/0072 applied
 parallel session is actively rewriting that file this morning (it added the "Canonical Context
 Set" section), and editing it concurrently already caused one cross-session index collision
 today. Whoever owns that file next should change the one number.
+
+---
+
+## 0071 index BUILT — and the AR read could not use it until arAging was fixed (2026-08-02)
+
+`cmd_charge_census_ent_charge_date (business_entity_id, charge_date, charge_id)` built with
+`CREATE INDEX CONCURRENTLY` via `execute_sql` (autocommit — it cannot run inside
+`apply_migration`'s txn), then `vacuum (analyze)`. Built in the clean gap after the `:35` census
+run finished at 09:35:58 (verified `still_running = 0` first). **`indisvalid = true`,
+`indisready = true`, 2,392 kB** — a failed CONCURRENTLY build leaves an INVALID index that is
+silently never used, so check this, not just that the name exists.
+
+**0071 has NO ledger row and never will** — `execute_sql` does not write
+`supabase_migrations.schema_migrations`. Same as 0068/0069/0070. **The ledger is not authoritative
+for applied state on this plane; verify the object.**
+
+### ⚠ THE INDEX WAS INERT FOR ITS ONLY CONSUMER — measured immediately after building
+
+The first EXPLAIN, using the entity form the app actually emits, did **not** touch the new index:
+
+| predicate | plan | buffers | exec |
+|---|---|---|---|
+| `= any(array[…]::uuid[])` | Bitmap Heap Scan on `…_entity_last_seen` + **top-N heapsort** | 2,286 | **14.95 ms** |
+| `= '…'::uuid` (scalar) | **Index Scan using `…_ent_charge_date`** | 65 | **0.36 ms** |
+
+~42× time, ~35× buffers, BXR slice = 15,026 rows, `limit 100`.
+
+**Cause:** `= ANY(array)` is a `ScalarArrayOpExpr`. To emit `charge_date asc` from it the planner
+would have to merge one index range per array element, so it declines and sorts the whole entity
+slice instead — precisely the sort 0071 was authored to remove. `arAging.ts:101` emitted exactly
+that form, while `arAging.ts:89` claimed the read was "Backed by 0071's … index". **The comment
+was aspirational; the plan disagreed.**
+
+**Fix:** `buildArAgingWorklistQuery` now emits `business_entity_id = $1::uuid` when `entityIds`
+has exactly one element, and keeps `= any($1::uuid[])` otherwise. The **binding moves with the
+predicate** — `= $1::uuid` against a bound array fails the cast outright, so `values[0]` becomes
+the scalar in that branch. Cross-tenant reads keep the array form and keep paying the sort,
+exactly as before 0071. AR is single-tenant (BXR) today, so the fast path is the live path.
+Re-verified against prod on the real projection (all 11 columns incl. the three ciphertext PHI
+columns): **Index Scan, 65 buffers, 0.358 ms.**
+
+**Carry this pattern.** Any ordered, keyset-paginated read whose ORDER BY leads with a column
+*after* `business_entity_id` in a composite index needs SCALAR entity equality to get the ordered
+scan. The app-side `= any(...)` scoping idiom (R1, 2026-07-06) and index-ordered pagination are in
+tension; single-tenant callers must special-case or the index silently does nothing. `distribution`
+is unaffected — it is a `group by` aggregate with no ORDER BY the index could serve.
+
+### arAging had ZERO tests before this
+
+`src/collections/arAging.ts` shipped in `f538648` untested. `test/arAging.test.ts` adds 7 hermetic
+tests, the load-bearing ones pinning the predicate/binding pair above (scalar form + scalar
+binding for one entity; array form + array binding for many) so the fast path cannot silently
+regress to the inert version. Also covers keyset shape (dated cursor must still admit the
+null-date tail, else those rows are unreachable), facility parameterisation, and that the PHI
+columns are projected as raw ciphertext with no in-query decryption.

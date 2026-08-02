@@ -97,8 +97,26 @@ export interface ArAgingWorklistOpts {
  */
 export function buildArAgingWorklistQuery(opts: ArAgingWorklistOpts): ParamQuery {
   const { entityIds, asOf, facility, after, limit } = opts;
-  const values: unknown[] = [entityIds, asOf];
-  const conds: string[] = ['business_entity_id = any($1::uuid[])'];
+  // SINGLE-TENANT FAST PATH — measured, not cosmetic. `= any($1::uuid[])` is a ScalarArrayOpExpr,
+  // which cannot drive an ORDERED index scan: Postgres would have to merge one range per array
+  // element to produce `charge_date asc`, so it gives up and bitmap-scans the whole entity slice
+  // then top-N sorts it — defeating 0071 entirely. Measured on prod 2026-08-02 right after 0071's
+  // index was built (BXR, 15,026 rows in slice, limit 100):
+  //     = any(array[…])  → Bitmap Heap Scan on cmd_charge_census_entity_last_seen + top-N heapsort,
+  //                        2,286 buffers, 14.95 ms   ← does NOT touch 0071's index
+  //     = $1::uuid       → Index Scan using cmd_charge_census_ent_charge_date,
+  //                        65 buffers, 0.36 ms       ← ~42x faster, ~35x fewer buffers
+  // A plain equality on exactly one id is the ONLY form that gets the ordered scan, and AR is
+  // single-tenant today (BXR). The array form is kept verbatim for the multi-tenant case so
+  // cross-tenant reads stay correct — they just pay the sort, as they did before 0071.
+  //
+  // $1 is bound to the SCALAR in the single-tenant branch: `= $1::uuid` against a bound array
+  // would fail the cast outright, so the predicate and the binding have to move together.
+  const singleTenant = entityIds.length === 1;
+  const values: unknown[] = [singleTenant ? entityIds[0] : entityIds, asOf];
+  const conds: string[] = [
+    singleTenant ? 'business_entity_id = $1::uuid' : 'business_entity_id = any($1::uuid[])',
+  ];
 
   if (facility !== undefined) {
     values.push(facility);
