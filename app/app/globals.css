@@ -53,6 +53,20 @@
     --brand-ink: #135e5a; /* strong accent: KPI numbers, active text */
     --brand-accent: #1c8b82; /* highlight: KPI top border, active underline, fills */
     --brand-soft: #eaf4f2; /* soft tint: tracks / subtle backgrounds */
+
+    /* ---- Material-3 navigation-rail tokens ----------------------------------
+       STRUCTURE from Material 3, COLOR from the brand vars above. Declared here
+       (on :root === <html>) so they substitute against whatever --brand-* the
+       active [data-view] rule has already set on the same element — which is how
+       the rail inherits per-tenant branding without a second palette. The rail is
+       the only consumer; nothing else should read --m3-*. */
+    --m3-rail-surface: var(--brand-bar);
+    --m3-rail-on: rgba(255, 255, 255, 0.76); /* inactive icon + label */
+    --m3-rail-on-active: #ffffff; /* active icon + label */
+    --m3-rail-indicator: color-mix(in srgb, var(--brand-accent) 46%, transparent);
+    --m3-rail-state: rgba(255, 255, 255, 0.1); /* M3 state layer: hover/press overlay */
+    --m3-ease-emphasized: cubic-bezier(0.2, 0, 0, 1); /* M3 "emphasized" easing */
+    --m3-dur-expand: 300ms; /* M3 long2 — the rail expand/collapse */
   }
 
   /* Consolidated = the default TreatHealthOS teal (combined identity). */

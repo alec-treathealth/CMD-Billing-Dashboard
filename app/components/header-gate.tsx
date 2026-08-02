@@ -2,18 +2,20 @@
 
 /**
  * Hides the global brand/nav header on routes that render their own full-page
- * chrome (the Continuity-styled auth screens). Client-side because the pathname
- * is the only input; the header itself stays a server-rendered child.
+ * chrome (the Continuity-styled auth screens, and the /qualify/m PWA). Client-side
+ * because the pathname is the only input; the header itself stays a server-rendered
+ * child.
+ *
+ * The route list lives in `lib/shell.ts` so the header, the navigation rail, and the
+ * content inset all gate on ONE predicate — three copies would drift the first time
+ * a full-page route is added.
  */
 import { usePathname } from 'next/navigation';
 
-const FULL_PAGE_ROUTES = new Set(['/login', '/forgot-password', '/set-password']);
+import { isFullPageRoute } from '@/lib/shell';
 
 export function HeaderGate({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  if (pathname === null) return <>{children}</>;
-  // The Qualify mobile PWA (/qualify/m) is a full-screen, self-chrome surface — hide the global brand
-  // header there. Uses startsWith so it never matches the desktop /qualify (which keeps the header).
-  if (FULL_PAGE_ROUTES.has(pathname) || pathname.startsWith('/qualify/m')) return null;
+  if (isFullPageRoute(pathname)) return null;
   return <>{children}</>;
 }

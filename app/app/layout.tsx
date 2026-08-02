@@ -7,8 +7,11 @@ import { TenantLogo } from '@/components/tenant-logo';
 import { UserMenu } from '@/components/user-menu';
 import { BrandTheme } from '@/components/brand-theme';
 import { HeaderGate } from '@/components/header-gate';
+import { NavRail } from '@/components/shell/nav-rail';
+import { ContentInset } from '@/components/shell/content-inset';
 import { dashboardAccess } from '@/lib/access';
 import { isAlecOwnerEmail } from '@/lib/alec-only';
+import { resolveShellModeEnv } from '@/lib/shell';
 import './globals.css';
 
 // Co-locate every page's server function with the database. The Supabase project is in
@@ -61,6 +64,10 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   // switcher-side <SwitcherTenantLogo>; here it resolves to null (no entity), so no avatar-side logo.
   const role = access.ok ? access.access.role : undefined;
   const singleTenantSlug = role && role !== 'super_admin' ? (access.ok ? access.access.entity : null) : null;
+  // Which chrome to render. Server-read env, default 'bar' — production is unchanged until
+  // SHELL_MODE=rail is set (and, as with the maintenance switches, redeployed).
+  const shellMode = resolveShellModeEnv(process.env.SHELL_MODE);
+  const railMode = shellMode === 'rail';
   return (
     <html lang="en">
       <body className="min-h-screen bg-ground">
@@ -68,30 +75,51 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         <Suspense fallback={null}>
           <BrandTheme />
         </Suspense>
+        {/* The M3 navigation rail (SHELL_MODE=rail only). Fixed to the left edge, outside the
+            HeaderGate because it self-gates on the same isFullPageRoute predicate. It reads
+            ?view= to forward the tenant scope, so it needs the same Suspense boundary as the
+            nav and switcher below. */}
+        <Suspense fallback={null}>
+          <NavRail mode={shellMode} role={role} />
+        </Suspense>
+        <ContentInset mode={shellMode}>
         {/* Brand anchor bar — background follows the active view (--brand-bar; teal by
-            default off-dashboard). 3-col grid keeps the nav centered, logo left, and the
-            right column holds the view switcher + user avatar. Hidden on /login, which
-            renders its own full-page split-panel chrome. */}
+            default off-dashboard). In 'bar' mode a 3-col grid keeps the nav centered, logo
+            left, and the right column holds the view switcher + user avatar. In 'rail' mode
+            the rail owns the brand and the nav, so the bar slims to the right-hand controls.
+            Hidden on /login, which renders its own full-page split-panel chrome.
+            NOTE: exactly ONE display class — emitting both `flex` and `grid` would leave the
+            layout to Tailwind's stylesheet order rather than to this ternary. */}
         <HeaderGate>
-        <header className="grid h-14 grid-cols-[auto_1fr_auto] items-center gap-3 bg-[var(--brand-bar)] px-4 transition-colors duration-300 sm:px-6">
-          {/* col 1: logo + title */}
-          <div className="flex items-center gap-3">
-            <Logo size={26} />
-            <div className="leading-none">
-              <div className="ths-h text-sm font-semibold tracking-tight text-white">
-                TreatHealth<span className="text-[#5FBFA8]">OS</span>
-              </div>
-              <div className="mt-0.5 hidden text-[9px] font-semibold uppercase tracking-widest text-white/70 sm:block">
-                Billing · RCM
+        <header
+          className={[
+            'h-14 items-center gap-3 bg-[var(--brand-bar)] px-4 transition-colors duration-300 sm:px-6',
+            railMode ? 'flex justify-end' : 'grid grid-cols-[auto_1fr_auto]',
+          ].join(' ')}
+        >
+          {/* col 1: logo + title — omitted in rail mode, where the rail carries the mark. */}
+          {railMode ? null : (
+            <div className="flex items-center gap-3">
+              <Logo size={26} />
+              <div className="leading-none">
+                <div className="ths-h text-sm font-semibold tracking-tight text-white">
+                  TreatHealth<span className="text-[#5FBFA8]">OS</span>
+                </div>
+                <div className="mt-0.5 hidden text-[9px] font-semibold uppercase tracking-widest text-white/70 sm:block">
+                  Billing · RCM
+                </div>
               </div>
             </div>
-          </div>
+          )}
           {/* col 2: nav — centered. NavLinks reads ?view= (to forward it onto the Dashboard
               link) via useSearchParams, so it must be wrapped in Suspense for the static routes
-              (/, /code-reference) this shared layout also renders — same as the switcher below. */}
-          <Suspense fallback={null}>
-            <NavLinks role={role} />
-          </Suspense>
+              (/, /code-reference) this shared layout also renders — same as the switcher below.
+              In rail mode the rail is the nav, so this is omitted rather than duplicated. */}
+          {railMode ? null : (
+            <Suspense fallback={null}>
+              <NavLinks role={role} />
+            </Suspense>
+          )}
           {/* col 3: view switcher (dashboard routes only) + user avatar.
               The ViewSwitcher is NON-PHI UI (it just rewrites ?view=) and renders regardless
               of auth — production gates the app via Vercel Deployment Protection, where there
@@ -115,6 +143,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         </header>
         </HeaderGate>
         {children}
+        </ContentInset>
       </body>
     </html>
   );
