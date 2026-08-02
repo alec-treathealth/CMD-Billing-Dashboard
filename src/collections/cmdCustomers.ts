@@ -37,7 +37,7 @@
  *   INVALID CRITERIA — and TEEN TX / WELLNESS RECOVERY accept it but return no rows. If any of
  *   these becomes active, add its collections.facilities row + the saved filter before listing it.)
  *
- * Indigo (business_entity_id 141d459c…, CMD account 474623): 32 active facility accounts,
+ * Indigo (business_entity_id 141d459c…, CMD account 474623): 30 active facility accounts,
  * confirmed by the business owner. Indigo has no short-code/acronym scheme yet, so facilityCode
  * = the CMD facility ID itself (staging.era_835_adjustment.facility_code is free text). Names
  * below are authoritative — preserve exact spelling/casing; the two CROWN VIEW entries are
@@ -46,6 +46,20 @@
  *   EXCLUDED on purpose (mirrors BXR's billing-account exclusion): 10025030 BILLING SERVICE
  *   ACCOUNT — empty CMD-side and not saved under filter 10147669 (returns INVALID CRITERIA). If it
  *   ever carries data, save the filter under it + add a collections.facilities row before listing.
+ *   EXCLUDED on purpose 2026-08-02 — the explorer/census saved filter is NOT valid under these
+ *   customers: every invoke returns `CMD report.run returned no identifier (status: INVALID
+ *   CRITERIA)`, a HARD FETCH FAILURE, not a valid-but-empty report. 10036020 MADISON RECOVERY
+ *   CENTER, 10036030 MISSOURI BEHAVIORAL HEALTH. Evidence at exclusion: 270 consecutive
+ *   `status='error' / error_label='fetch_failed'` runs each in collections.cmd_census_run since
+ *   2026-07-22, ZERO successes ever (`last_ok IS NULL`), and zero rows ever landed in
+ *   cmd_explorer_rows or cmd_charge_census (30 of the then-32 Indigo facilities carry rows; these
+ *   two are exactly the gap). They were added 2026-07-08 on the belief they were saved under
+ *   filter 10147669 — that belief is CONTRADICTED by the failure record and the claim is retracted
+ *   here. Root cause is CMD-side and UNCONFIRMED (pending Jess/CMD-side confirmation); do NOT
+ *   record them as "0-rows expected" — that is a different class (see WRC on the audit plane).
+ *   Two permanently-failing customers also mask every new failure in the hourly cron log, which is
+ *   why they come out before alerting is opened. Re-add only after a rows-bearing probe confirms
+ *   the filter is saved under the account, per the pattern above.
  *   REMOVED 2026-07-09 (shut down / no longer exist, verified 0 rows): 10034063 MAPSONG PC,
  *   10035913 NORTHERN CALIFORNIA MENTAL HEALTH, 10032612 POSTPARTUM MENTAL HEALTH,
  *   10029219 THRIVE MEDICAL SPECIALISTS, 10034039 TREADSTONE SERVICES PC.
@@ -81,7 +95,7 @@ export const BXR_CUSTOMERS: readonly CmdCustomer[] = [
   { customerId: '10031212', facilityCode: 'TREAT_WA', businessEntityId: BXR_ENTITY_ID }, //      TREAT MENTAL HEALTH WASHINGTON (OP)
 ];
 
-/** Indigo's 32 active facility customer accounts (CMD account 474623). facilityCode = CMD id. */
+/** Indigo's 30 active facility customer accounts (CMD account 474623). facilityCode = CMD id. */
 export const INDIGO_CUSTOMERS: readonly CmdCustomer[] = [
   { customerId: '10026460', facilityCode: '10026460', businessEntityId: INDIGO_ENTITY_ID }, // 405 RECOVERY
   { customerId: '10029373', facilityCode: '10029373', businessEntityId: INDIGO_ENTITY_ID }, // ADDICTION FREE RECOVERY SERVICES
@@ -96,11 +110,9 @@ export const INDIGO_CUSTOMERS: readonly CmdCustomer[] = [
   { customerId: '10033859', facilityCode: '10033859', businessEntityId: INDIGO_ENTITY_ID }, // INTO THE LIGHT
   { customerId: '10032291', facilityCode: '10032291', businessEntityId: INDIGO_ENTITY_ID }, // KIN WELLNESS
   { customerId: '10030095', facilityCode: '10030095', businessEntityId: INDIGO_ENTITY_ID }, // KNOX RECOVERY
-  { customerId: '10036020', facilityCode: '10036020', businessEntityId: INDIGO_ENTITY_ID }, // MADISON RECOVERY CENTER (added 2026-07-08, in filter 10147669)
   { customerId: '10024431', facilityCode: '10024431', businessEntityId: INDIGO_ENTITY_ID }, // MENTAL HEALTH CENTER OF SAN DIEGO
   { customerId: '10030319', facilityCode: '10030319', businessEntityId: INDIGO_ENTITY_ID }, // MENTAL HEALTH MODESTO
   { customerId: '10034979', facilityCode: '10034979', businessEntityId: INDIGO_ENTITY_ID }, // MENTAL HEALTH TREATMENT AND STABILIZATION CENTER OF SACRAMENTO
-  { customerId: '10036030', facilityCode: '10036030', businessEntityId: INDIGO_ENTITY_ID }, // MISSOURI BEHAVIORAL HEALTH (added 2026-07-08, in filter 10147669)
   { customerId: '10034230', facilityCode: '10034230', businessEntityId: INDIGO_ENTITY_ID }, // MY TEEN MENTAL HEALTH
   { customerId: '10026125', facilityCode: '10026125', businessEntityId: INDIGO_ENTITY_ID }, // MY TIME RECOVERY, LLC
   { customerId: '10033867', facilityCode: '10033867', businessEntityId: INDIGO_ENTITY_ID }, // NEW ORIGINS
