@@ -1,0 +1,61 @@
+-- 0071 — AR-aging support index on collections.cmd_charge_census.
+--
+-- WHY: the CMD AR Automation build (docs/ CMD AR Automation build doc; Phase 0 findings in
+-- docs/veris-data-notes.md, 2026-07-28) makes the census the AR-aging source. Phase 0's live probe
+-- of report 10091971 / census filter 10148130 established that the pre-bucketed `Charge Fromdate Age`
+-- column is NOT on the census feed, but `Charge From Date` IS — and the census already ingests it as
+-- `charge_date`. So charge age is derived at READ time as (as_of::date - charge_date); no new data
+-- column is needed and no CMD-side filter change is required. (This is why the build doc's original
+-- plan to add age_bucket_raw / age_days_min/max / charge_balance was dropped — see the ledger note.)
+--
+-- The book-wide AR read is "every open charge across all BXR facilities, oldest first" — an
+-- entity-scoped scan ordered by charge_date ASC (oldest = highest age), with charge_id as the keyset
+-- tiebreaker (§3.8: keyset pagination, never OFFSET). Today the table's only btree beyond the
+-- (business_entity_id, charge_id) UNIQUE is (business_entity_id, last_seen_at) (0058) — neither serves
+-- an age-ordered read, forcing a sort of the full entity slice (~40k rows and growing once the filter
+-- widens). This index makes the age-ordered, entity-scoped read a range scan in charge_date order.
+--
+-- NULLS: charge_date is nullable (the census mapper is lenient — a blank/unparseable date → NULL,
+-- never a dropped row). Unknown-age charges sort LAST under ASC (btree default NULLS LAST), which is
+-- the desired worklist behavior (a charge with no service date is not "the oldest").
+--
+-- LIVE APPLY (mirror 0068): create the LIVE index with CREATE INDEX CONCURRENTLY (no ACCESS EXCLUSIVE
+-- lock on the census, which the :15/:35 census crons write) followed by
+--   vacuum (analyze) collections.cmd_charge_census;
+-- CONCURRENTLY and VACUUM cannot run inside apply_migration's single txn — run them manually off-tick.
+-- This FILE uses a plain, transaction-safe `create index if not exists` so it is a no-op where the
+-- index already exists and still provisions a fresh (branch/CI) environment; on prod, prefer the
+-- CONCURRENTLY form so a build never blocks a census write.
+--
+-- PHI DISCIPLINE (docs/CLAUDE.md §2): index keys are business_entity_id (uuid) + charge_date (date) +
+-- charge_id (opaque CMD id). No PHI in the index — patient_name / member_id / group_number are the only
+-- PHI columns and are NOT referenced here. No plaintext identifier is indexed.
+--
+-- OWNERSHIP: collections.cmd_charge_census is postgres-owned (0058) → plain DDL, no `set role`. No
+-- grant or RLS change: the index inherits the table's existing grants (0058: select/insert/update to
+-- cmd_rollup_writer, select to claims_reader) and RLS policies unchanged.
+--
+-- IDEMPOTENT: `create index if not exists` — safe to re-run; a no-op where present.
+-- DEPENDENCY: 0058 (creates collections.cmd_charge_census). No dependency on the unapplied 0067.
+-- Rollback: 0071_cmd_charge_census_aging_index_rollback.sql (drops the index only).
+
+-- ---------------------------------------------------------------------------
+-- 1. AR-aging read index: entity-scoped, charge_date-ordered, charge_id keyset tiebreaker.
+-- ---------------------------------------------------------------------------
+create index if not exists cmd_charge_census_ent_charge_date
+  on collections.cmd_charge_census (business_entity_id, charge_date, charge_id);
+
+-- ---------------------------------------------------------------------------
+-- N. Verification (run manually after apply)
+-- ---------------------------------------------------------------------------
+-- Index exists and leads with business_entity_id:
+--   select indexdef from pg_indexes
+--    where schemaname='collections' and indexname='cmd_charge_census_ent_charge_date';
+--
+-- Age-ordered entity read uses it (expect an Index/Index-Only Scan, not a Sort of the entity slice):
+--   explain (analyze, buffers)
+--   select charge_id, charge_date, facility, primary_payer, charge_amount, claim_status_category
+--     from collections.cmd_charge_census
+--    where business_entity_id = any(array['af504ab6-3dcd-4aa4-a93c-27bc58de4088']::uuid[])
+--    order by charge_date asc nulls last, charge_id asc
+--    limit 100;
