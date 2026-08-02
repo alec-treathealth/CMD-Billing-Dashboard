@@ -169,6 +169,7 @@ import { decryptPhi, encryptPhi } from '../../src/collections/phiCrypto.js';
 import { cmdEra835ConfigFor, expandDateRange, runEra835Ingest } from '../../src/ingest/era_ingest.js';
 import { CmdEra835Error, cmdDownload835, read835Files } from '../../src/collections/cmd835.js';
 import {
+  businessTodayIso,
   eraUpcomingPayments,
   mergeEraUpcoming,
   type EraUpcomingSummary,
@@ -895,17 +896,22 @@ function verisReaderPool(): Db {
  * writes (/api/cron/era-835, `50 8 * * *`), the read is two indexed aggregates over a small
  * table, and no cron revalidates a tag for this surface — an unstable_cache entry here would
  * serve stale money for an unbounded time after an ingest lands.
+ *
+ * "Upcoming" is anchored to the ops calendar day in America/Los_Angeles, not UTC — see
+ * era835Upcoming's header. The cutoff is computed ONCE here and shared across tenants, so a
+ * Consolidated read straddling midnight PT cannot scope its two tenants to different days.
  */
 export async function getEraUpcomingPayments(entityIds: string[]): Promise<EraUpcomingSummary> {
   if (entityIds.length === 0) {
     // Mirrors assertEntityScope's posture: an empty scope must read NOTHING, loudly.
     throw new Error('getEraUpcomingPayments: empty entity scope');
   }
+  const cutoffIso = businessTodayIso();
   const parts: EraUpcomingSummary[] = [];
   for (const id of entityIds) {
     // Sequential on purpose: at most 2 entities, and each read is its own short
     // transaction on the small shared pool — parallelism buys nothing here.
-    parts.push(await eraUpcomingPayments(verisReaderPool(), id));
+    parts.push(await eraUpcomingPayments(verisReaderPool(), id, cutoffIso));
   }
   return mergeEraUpcoming(parts);
 }
