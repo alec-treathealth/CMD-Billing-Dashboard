@@ -12,10 +12,26 @@
 -- The 0042 crosswalk currently folds 'TEEN MENTAL HEALTH TEXAS LLC' → TREAT_TX (0042:67, "owner-confirmed
 -- typo"). That was the earlier (2026-07-10) understanding; it is now superseded. Any read-time join
 -- through cmd_facility_aliases (Collections care_setting grouping; the forthcoming AR aging view) would
--- otherwise attribute Teen MH TX's charges to TREAT_TX. Nothing is mis-attributed TODAY (the census loop
--- excludes account 10035166 and stores facility as raw text, not via the alias — Phase 0), so this is a
--- prerequisite hardening BEFORE Teen MH TX is ever ingested by the collections/census crons, not a
--- correction of live data.
+-- otherwise attribute Teen MH TX's charges to TREAT_TX.
+--
+-- ⚠ CORRECTED 2026-08-02 — THIS IS A LIVE READ-PATH DATA CORRECTION, NOT INERT HARDENING.
+-- An earlier draft of this header claimed "nothing is mis-attributed TODAY". That was WRONG: it reasoned
+-- from the CENSUS (where it holds — cmd_charge_census has 0 rows for this facility text) and silently
+-- generalised to the EXPLORER, which is a different table fed by a different cron. Measured live
+-- 2026-08-02 before apply: collections.cmd_explorer_rows carries 186 rows with
+-- facility = 'TEEN MENTAL HEALTH TEXAS LLC', $581,698.32 of charge_amount, all ingested in a single
+-- one-time load on 2026-06-29 (charge dates 2026-03-19..2026-06-18, BXR). Nothing has landed since, so
+-- the population is historical and closed — but it is NOT empty, and BOTH live read paths join this
+-- alias (src/collections/cmdExplorerQuery.ts:233, src/collections/qualifyQuery.ts:139).
+-- CONSEQUENCE ON APPLY: those 186 rows stop resolving to TREAT_TX and start resolving to TEEN_MH_TX.
+-- TREAT_TX's Collections/Qualify totals drop by that amount and a new TEEN_MH_TX facility appears with
+-- it. That is the CORRECT attribution per the 2026-07-28 owner ruling (separate legal entity, distinct
+-- NPI) — but it is a visible change to production reporting, not a no-op. Do not describe it as one.
+-- The two code facts the old claim rested on DO still hold and are still worth knowing: account
+-- 10035166 has zero entries in BXR_CUSTOMERS (src/collections/cmdCustomers.ts — it appears only in the
+-- EXCLUDED header comment), and the census writes facility as raw text
+-- (src/collections/cmdCensus.ts:141, `facility: blankToNull(full.facility)`) with no alias join at
+-- ingest anywhere. They just do not imply the explorer table is empty of this text.
 --
 -- care_setting = 'OP': TEEN_MH_TX sits in the billing-audit OP roster (auditConfig.ts AUDIT_OP_CUSTOMERS,
 -- alongside its sibling TREAT_TX which is OP in 0016), and the facility's profile lists IOP/OP rate lines.
