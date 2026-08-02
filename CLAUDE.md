@@ -8,6 +8,63 @@ plane, and the `staging`/`ref`/`core` Veris ML plane.
 **Every row is PHI.** The compliance layer (SOC 2 / HIPAA / OWASP) is ON for
 this whole repo. The invariants below are not preferences.
 
+## Canonical Context Set
+
+This table is the only authoritative source of doc paths in this repo. If a
+prompt hands you a path, treat it as a hint and defer to this table.
+
+Enforced by `scripts/check-context-map.ts`, which runs inside root `npm test`
+(`test/contextMap.test.ts`). Every path in the table must resolve on disk; every
+path in the NOT-IN-REPO list must not. A `git mv` fails the gate instead of
+silently rotting this section. The guard reads the working tree, not `HEAD`, so
+only committed docs belong in the table — untracked ones go under
+[Uncommitted — not guarded](#uncommitted--not-guarded).
+
+| Role | Path | Read-order |
+|---|---|---|
+| Standing rules, verification gate, this map | `CLAUDE.md` | 1 |
+| Live tribal-knowledge ledger — **wins on conflict with this file** | `docs/veris-data-notes.md` | 2 |
+| Build guide — the 13 gated Veris/Indigo sessions + order deviations | `docs/Fable Build Doc E2E/00-GUIDE.md` | 3 |
+| PR compliance rules — the real Qodo content (`.qodo/` is empty) | `pr_compliance_checklist.yaml` | 4 |
+| Visual system — TreatHealthOS tokens and palette | `docs/design-system.md` | 5 |
+| Qodo required-status-check contract + rename hazard | `docs/qodo-compliance-gate.md` | 6 |
+| Product orientation — what this app actually is | `README.md` | 7 |
+
+Read-order is a cold-start sequence, not a priority ranking. Path-scoped rules in
+`.claude/rules/` load automatically and are not listed here — see
+[Where the detail lives](#where-the-detail-lives).
+
+### NOT IN REPO — project-knowledge only
+
+These live only in Alec's Claude.ai project knowledge. **Do not search for them,
+do not infer their contents.** If a prompt references one, stop and ask Alec to
+paste it.
+
+- `Veris-Plan-Reconciliation-and-Next-Steps.md`
+
+### Superseded in repo — do not treat as current
+
+A file *does* exist at each path below, but it is a frozen snapshot. The live
+version is project knowledge, not the repo copy — ask Alec to paste it rather
+than reading these as current. They are guarded (they must keep resolving) so a
+`git mv` surfaces here instead of rotting.
+
+- `docs/qualify-build-series.md` — the 5-prompt Qualify build series as authored; the shipped build diverged.
+- `docs/archive/fable-build-doc-e2e/01-session-ground-truth.md` — first of the 01–13 session prompts; the whole directory is the same vintage.
+- `docs/archive/CLAUDE-2026-07-06.md` — previous 914-line context file. Stale in ≥6 places; superseded by this file plus `.claude/rules/`.
+
+### Uncommitted — not guarded
+
+These exist locally but are **untracked**, so the guard cannot assert them
+without going red on a fresh clone. `git add` each and promote it.
+
+- `CMD AR Automation — Build Doc v2.md` (repo root) — the current AR build plan.
+  Promote into the table above once tracked.
+- `scripts/check-context-map.ts` and `test/contextMap.test.ts` — **the guard
+  itself is untracked.** The enforcement claim at the top of this section is
+  therefore true on Alec's machine and false on a fresh clone. Commit both
+  before relying on the gate in CI or in a PR review.
+
 ## Standing rules — do not regress
 
 - **PHI never** reaches logs, LLM prompts/transcripts, `summary_stats`, a URL or
@@ -39,13 +96,13 @@ this whole repo. The invariants below are not preferences.
 
 ## Verification gate
 
-Run all four before any commit. This is the bar for "verified" — not typecheck
+Run all five before any commit. This is the bar for "verified" — not typecheck
 alone, and especially not when a shared helper changed.
 
 ```bash
-npm test                          # root hermetic suite — 697 pass / 0 fail
+npm test                          # root hermetic suite — 858 pass / 0 fail
 npm run typecheck                 # root tsc (strict: noUncheckedIndexedAccess)
-cd app && npm test                # app suite — 127 pass / 0 fail
+cd app && npm test                # app suite — 176 pass / 0 fail
 cd app && npm run typecheck        # app tsc
 cd app && npm run build            # catches bundler-only failures tsc cannot
 ```
@@ -53,6 +110,15 @@ cd app && npm run build            # catches bundler-only failures tsc cannot
 Root `tsc` is stricter than app `tsc` — a test can be green in `app/` while root
 `tsc` is red. Run both. `next build` is the only thing that catches webpack
 failures (see `.claude/rules/nextjs-app.md`).
+
+Those counts are a tripwire, not a target: if a suite reports fewer than the
+number above, tests were lost — find out why before committing.
+
+## Git workflow
+
+Open PRs against `staging`, never `main` — use `gh pr create --base staging`
+explicitly. `main` is production; it only receives a PR from `staging` after
+Vercel and Qodo checks pass.
 
 ## Repo layout
 
@@ -64,7 +130,7 @@ Two **separate** migration planes — never mix the directories:
 
 | Plane | Directory | Next number |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0072** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0075** |
 | Veris ML (`staging`, `ref`, `core`) | `SQL Schemas/0NN_*.sql` | **023** |
 
 Merging a migration in a PR does **not** apply it to prod. Code that depends on
@@ -72,8 +138,15 @@ it 500s until `apply_migration` runs.
 
 ## Live surfaces
 
-Top nav: Overview · Collections · Claims Audit (Beta) · Qualify (Beta) · Code
-Reference · Ask.
+Top nav is built from `app/lib/nav-model.ts` — `nav-links.tsx` (bar) and
+`shell/nav-rail.tsx` (rail) both read it, so the two shells cannot disagree.
+The link set is role-dependent:
+
+- `admin` / `user` / unknown — Overview · Collections · Claims Audit (Beta) · Code Reference
+- `super_admin` — the above plus Qualify (Beta), between Overview and Collections
+- `admissions_seat` — Qualify only (single-surface persona)
+
+Surfaces:
 
 - `/dashboard` (Overview) and `/dashboard/collections` — the primary product.
 - `/billing-audit` (labelled "Claims Audit") and `/qualify` + `/qualify/m` — both
@@ -83,10 +156,48 @@ Reference · Ask.
 - `/claims` and `/claims/[claimId]` — **taken down 2026-07-15**, now a
   `redirect('/')` stub. The implementation is in git history, not deleted. The
   name "Claims" is reserved for Veris S10.
-- 10 Vercel crons in `app/vercel.json` (collections explorer + census per tenant,
-  rollup refresh, VOB sync, CMS HCPCS sync, billing-audit IP/OP, code
-  decisions). VOB sync is scheduled by Vercel but *runs* as a GitHub Action
-  (`.github/workflows/vob-sync.yml`) — it won't show output in the Vercel cron UI.
+- `/ask` — **removed from the nav 2026-07-15** (unfinished), also a
+  `redirect('/')` stub. `<SearchConsole />` and the `/api/agent` path stay in git
+  history; restoring means remounting the page *and* re-adding the nav entry.
+
+`app/vercel.json` declares **14 cron entries across 13 distinct routes**
+(`billing-audit-consolidated` runs on three schedules):
+
+| Route | Cadence |
+|---|---|
+| `cmd-explorer` · `indigo-explorer` | hourly, :00 / :30 |
+| `cmd-census` · `indigo-census` | hourly, :15 / :35 |
+| `refresh-charge-rollup` | hourly, :45 |
+| `cmd-explorer-catchup` | daily 07:52 |
+| `era-835` | daily 08:50 |
+| `vob-sync` | daily 09:17 |
+| `cms-hcpcs-sync` | quarterly, 06:00 on the 2nd of Jan/Apr/Jul/Oct |
+| `billing-audit-op` · `billing-code-decisions` | daily 02:20 / 02:40 |
+| `billing-audit-consolidated` | daily 02:40, 03:10, 03:40 |
+
+VOB sync is scheduled by Vercel but *runs* as a GitHub Action
+(`.github/workflows/vob-sync.yml`) — it won't show output in the Vercel cron UI.
+
+## Agent tooling — plugins and skills
+
+Three layers load, in increasing specificity. Don't confuse them:
+
+1. **`superpowers` plugin** — user-scope, on Alec's machine only. Version
+   **6.2.0**, installed from a local directory marketplace at
+   `~/.claude/local-marketplaces/superpowers` (marketplace id `superpowers-dev`).
+   Ships 14 general workflow skills (TDD, systematic-debugging, writing-plans,
+   verification-before-completion, …) plus its own SessionStart hook, which
+   coexists with this repo's `.claude/hooks/session-start.sh`.
+2. **`.claude/rules/*.md`** — repo-scoped, path-triggered, checked in. These are
+   binding for this codebase and **outrank any generic plugin skill** wherever
+   the two disagree — most of all on the PHI and least-privilege rules above.
+3. **This file** — the standing rules, the gate, and the context map.
+
+The repo deliberately does **not** vendor or pin `superpowers`: it is absent from
+`.claude/settings.json`, `package.json`, and `.claude/plugins/`. A fresh clone
+gets the rules and the hook, not the plugin. Do not add an `enabledPlugins` entry
+for it — pinning a version in a tracked settings file forces that version on
+every clone, and a stale pin silently shadows a newer local install.
 
 ## Where the detail lives
 
@@ -103,13 +214,16 @@ matching files. Read the one for the area you're changing:
 | `app/lib/qualify/`, `app/components/qualify/` | `qualify.md` |
 | `src/billingAudit/`, `app/lib/billing-audit/` | `billing-audit.md` |
 
-Longer-form references (not auto-loaded — read on demand):
+Longer-form references (not auto-loaded — read on demand). Paths for these live
+in [Canonical Context Set](#canonical-context-set); that table wins:
 
 - `docs/veris-data-notes.md` — the live tribal-knowledge ledger, updated
   per-apply. **When it conflicts with anything here, it wins.** Surface the
   conflict in your output; never silently pick a side.
 - `docs/design-system.md` — the TreatHealthOS visual system.
-- `docs/CMD AR Automation — Build Doc v2.md` — the current AR build plan.
+- `CMD AR Automation — Build Doc v2.md` (repo root, **untracked**) — the current
+  AR build plan. Previously mis-cited here as `docs/CMD AR Automation — Build
+  Doc v2.md`, which has never existed.
 - `docs/archive/CLAUDE-2026-07-06.md` — the previous 914-line context file,
   frozen. Historical only; it is stale in ≥6 places and superseded by this file
   plus the rules above.
@@ -118,19 +232,27 @@ Longer-form references (not auto-loaded — read on demand):
 
 These are wrong in the code today. Fix opportunistically; never copy them.
 
-- `app/lib/server.ts` and `app/app/api/cron/indigo-explorer/route.ts` say 36–37
-  Indigo customers. The roster is **32** (`src/collections/cmdCustomers.ts`).
-- `src/collections/cmdExplorer.ts` references CMD filter `10147499`. The live
-  cron default is **`10147530`** (`app/lib/server.ts`). `10147499` survives only
-  in the manual `cmdDailyBackfill.ts` CLI.
+- `app/lib/server.ts` (~L1688) says 36 Indigo customers and
+  `app/app/api/cron/indigo-explorer/route.ts` says 37. The roster is **30**
+  (`src/collections/cmdCustomers.ts`) — 10036020 MADISON RECOVERY CENTER and
+  10036030 MISSOURI BEHAVIORAL HEALTH were dropped 2026-08-02 for hard INVALID
+  CRITERIA. BXR is **15**.
+- CMD report/filter pairings turn over fast; trust `app/lib/server.ts`, never
+  prose. Live today: BXR explorer **10093959 / 10148478**, Indigo explorer
+  **10092391 / 10147669**. Both **10091971 / 10147530** (lost in CMD 2026-07-31)
+  and the older **10147499** are DEAD — every pairing returns INVALID CRITERIA.
+  `10147499` survives only in the manual `cmdDailyBackfill.ts` CLI, which already
+  documents it as dead.
 - `src/collections/cmdExplorer.ts` says the row fingerprint hashes 14 fields — it
-  hashes 18.
+  hashes **18** (15 non-PHI + 3 PHI, see `mapReportRows`).
 - `supabase/migrations/0067_*` looks applicable but is **stale**: as authored it
   drops 0068's covering index and 0069's MAINTAIN grant. Leave it alone.
-- The agent still defaults to model `claude-opus-4-8` (`src/agent/agent.ts`).
-  Flag before relying on it for new AI work.
-## Git workflow
-Open PRs against `staging`, never `main` — use `gh pr create --base staging` explicitly.
-`main` is production; it only receives a PR from `staging` after Vercel and Qodo checks pass.
-<!-- Ground truth re-verified against HEAD 0b69ce0 on 2026-07-28: test counts,
-     cron list, roster sizes, migration numbers, and route status all run live. -->
+- The agent still defaults to model `claude-opus-4-8` (`DEFAULT_MODEL`,
+  `src/agent/agent.ts`). Flag before relying on it for new AI work.
+
+<!-- Ground truth re-verified against HEAD d0f8635 (branch staging) on 2026-08-02:
+     test counts run live (root 858, app 176; both typechecks clean), cron table
+     read from app/vercel.json, nav from app/lib/nav-model.ts, roster sizes from
+     src/collections/cmdCustomers.ts, report/filter ids from app/lib/server.ts,
+     migration numbers from both migration directories, route status from the
+     page stubs, and every Canonical Context Set path re-resolved. -->
