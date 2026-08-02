@@ -54,6 +54,7 @@ import { CmdEra835Error, cmdDownload835, read835Files, type CmdEra835Config, typ
 import { encryptPhi, fingerprintRow } from '../collections/phiCrypto.js';
 import { blindIndexesForRowSafe } from '../collections/blindIndex.js';
 import { makeClient, type Db } from '../collections/db.js';
+import { withTenant } from '../veris/withTenant.js';
 import { parseEra835, type Era835Claim, type Era835Transaction } from './era835Parser.js';
 
 const ALLOWED_GROUP_CODES = new Set(['CO', 'PR', 'OA', 'PI', 'CR']);
@@ -533,10 +534,22 @@ async function buildInsertParams(
   ];
 }
 
-/** What one pull's insert actually wrote. */
+/** What one pull's insert actually wrote — AND what it silently didn't. */
 export interface Era835InsertCounts {
   payments: number;
   adjustments: number;
+  /**
+   * Remits that hit ON CONFLICT (row_fingerprint) DO NOTHING — already ingested, so nothing
+   * was written. Counted because the conflict path used to be SILENT: the 2026-08-02
+   * production run mapped 112 remits and inserted 39, and the other 73 were recorded
+   * nowhere at all. payments + payments_duplicate = the remits offered to the DB.
+   *
+   * This is also what makes 013's documented duplicate-remit detector usable — see the
+   * payments_duplicate column comment in SQL Schemas/022.
+   */
+  payments_duplicate: number;
+  /** The same, at triplet grain: each batch contributes batch.length - rowCount. */
+  adjustments_duplicate: number;
 }
 
 /**
@@ -563,7 +576,12 @@ export async function insertEra835Transactions(
   mapped: Era835MappedTransaction[],
   ingestedBy: string,
 ): Promise<Era835InsertCounts> {
-  const counts: Era835InsertCounts = { payments: 0, adjustments: 0 };
+  const counts: Era835InsertCounts = {
+    payments: 0,
+    adjustments: 0,
+    payments_duplicate: 0,
+    adjustments_duplicate: 0,
+  };
   if (mapped.length === 0) return counts;
   const client = await db.connect();
   try {
@@ -601,6 +619,10 @@ export async function insertEra835Transactions(
               'and the writer SELECT policy)',
           );
         }
+        // Reached ONLY when the re-read succeeded, i.e. a genuine idempotent re-pull. A row
+        // that is neither inserted nor findable is a grant/RLS defect and throws above —
+        // it must never be miscounted as a duplicate.
+        counts.payments_duplicate += 1;
       } else {
         counts.payments += 1;
       }
@@ -621,7 +643,12 @@ export async function insertEra835Transactions(
           `insert into staging.era_835_adjustment (${INSERT_COLS.join(', ')}) ` +
           `values ${tuples.join(', ')} on conflict (row_fingerprint) do nothing`;
         const res = await client.query(sql, params);
-        counts.adjustments += res.rowCount ?? 0;
+        // DO NOTHING makes rowCount the rows actually written; the shortfall is the
+        // already-present triplets. Both halves are recorded so the run row can state
+        // rows_inserted + rows_skipped_duplicate = the triplets offered.
+        const wrote = res.rowCount ?? 0;
+        counts.adjustments += wrote;
+        counts.adjustments_duplicate += batch.length - wrote;
       }
     }
 
@@ -668,6 +695,61 @@ export interface Era835IngestDeps {
    * survive. Default: absent — per-pull isolation, the pre-existing behavior.
    */
   fatal?: (err: unknown) => boolean;
+  /**
+   * A CALLER-OWNED stats object to accumulate into, instead of a fresh internal one.
+   * Returned as before, so omitting it changes nothing.
+   *
+   * WHY IT EXISTS: this function RETURNS its stats, so a mid-run throw (a fatal 401/403,
+   * a DB failure) discards every counter — while the inserts from already-completed pulls
+   * are committed to disk. A run that processed 10 of 15 customers and then died would
+   * record "failed, payments_inserted 0" having actually inserted. That poisons the very
+   * detector migration 022 exists to build: the partial run's contribution vanishes, the
+   * next 5-day re-pull dedupes those same rows, and the whole sequence reads healthy.
+   * Given finding 1 (the 2026-07-31 30%/42% failure episodes, root cause UNKNOWN and the
+   * throttle theory FALSIFIED), failed runs are the case we most need honest numbers for.
+   */
+  stats?: Era835IngestStats;
+}
+
+/**
+ * The per-tenant slice of one run. Every field is accumulated inside the EXISTING
+ * date × customer loop, where `customer.businessEntityId` is already in scope — including
+ * the budget-skip branch — so attribution is exact rather than inferred. Mirrors the
+ * staging.era_835_ingest_run columns 1:1 (migration 022).
+ */
+export interface Era835TenantCounts {
+  customers_total: number;
+  pulls_attempted: number;
+  pulls_failed: number;
+  pulls_failed_by_code: Record<string, number>;
+  pulls_empty: number;
+  pulls_zero_files: number;
+  pulls_skipped_budget: number;
+  files_parsed: number;
+  payments_mapped: number;
+  payments_inserted: number;
+  payments_duplicate: number;
+  rows_inserted: number;
+  rows_skipped_duplicate: number;
+}
+
+/** A zeroed per-tenant slice. */
+export function blankEra835TenantCounts(): Era835TenantCounts {
+  return {
+    customers_total: 0,
+    pulls_attempted: 0,
+    pulls_failed: 0,
+    pulls_failed_by_code: {},
+    pulls_empty: 0,
+    pulls_zero_files: 0,
+    pulls_skipped_budget: 0,
+    files_parsed: 0,
+    payments_mapped: 0,
+    payments_inserted: 0,
+    payments_duplicate: 0,
+    rows_inserted: 0,
+    rows_skipped_duplicate: 0,
+  };
 }
 
 /** Non-PHI run summary — safe to log and return to the (authed) caller. */
@@ -729,21 +811,35 @@ export interface Era835IngestStats {
   in_set_duplicate_payments: number;
   payments_inserted: number;
   rows_inserted: number;
+  /**
+   * Remits that hit ON CONFLICT DO NOTHING, run-wide. 65% of the 2026-08-02 production
+   * run's parsed remits took this path and were recorded nowhere. See Era835InsertCounts.
+   */
+  payments_duplicate: number;
+  /** Triplets that hit ON CONFLICT DO NOTHING, run-wide. */
+  rows_skipped_duplicate: number;
+  /**
+   * The SAME run, sliced by tenant (key = business_entity_id). The run-wide counters above
+   * are unchanged and still feed the single log line; this is purely additive.
+   *
+   * WHY PER-TENANT, rather than skipping the run row when the roster spans tenants:
+   * skipping is a silent observability hole, and the first time Indigo joins the 835
+   * roster ERA observability would stop with no signal at all. One row per tenant instead.
+   * Today's roster is BXR-only, so this holds exactly one key — the multi-tenant path is
+   * built now precisely so nothing has to be remembered later.
+   */
+  by_entity: Record<string, Era835TenantCounts>;
 }
 
 /**
- * Core ingest — transport-agnostic. Loops date × customer, downloads + parses the
- * 835s, maps CAS triplets to rows, de-dups by fingerprint within each pull, and (when
- * writeDb is set) idempotently inserts per pull with per-pull isolation. Returns
- * non-PHI counts only. Per-pull failures are logged (label only) and skipped; a hard
- * DB failure still throws.
+ * A zeroed run summary. Exported so a CALLER can own the object it passes to
+ * runEra835Ingest and still read real counters after a mid-run throw — see the `stats`
+ * dep below.
  */
-export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835IngestStats> {
-  const now = deps.now ?? Date.now;
-  const started = now();
-  const stats: Era835IngestStats = {
-    dates: deps.dates.length,
-    customers: deps.customers.length,
+export function newEra835IngestStats(): Era835IngestStats {
+  return {
+    dates: 0,
+    customers: 0,
     pulls_attempted: 0,
     pulls_failed: 0,
     pulls_failed_by_code: {},
@@ -762,23 +858,76 @@ export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835Ing
     in_set_duplicate_payments: 0,
     payments_inserted: 0,
     rows_inserted: 0,
+    payments_duplicate: 0,
+    rows_skipped_duplicate: 0,
+    by_entity: {},
   };
+}
+
+/**
+ * Seed by_entity with every tenant in the roster and its customer count, BEFORE any pull
+ * runs. Two jobs: a tenant whose every pull budget-skips still gets a row showing how many
+ * customers it should have covered, and the error path always has the full roster to write
+ * 'failed' rows for even when the throw predates the loop.
+ *
+ * ASSIGNS customers_total rather than incrementing it, so calling this twice on the same
+ * stats object with the same roster is a no-op — the cron handler seeds up front and
+ * runEra835Ingest seeds again on entry, and both must agree.
+ */
+export function seedEra835TenantRoster(
+  stats: Era835IngestStats,
+  customers: ReadonlyArray<CmdCustomer>,
+): void {
+  const totals = new Map<string, number>();
+  for (const c of customers) {
+    totals.set(c.businessEntityId, (totals.get(c.businessEntityId) ?? 0) + 1);
+  }
+  for (const [entityId, n] of totals) {
+    (stats.by_entity[entityId] ??= blankEra835TenantCounts()).customers_total = n;
+  }
+}
+
+/**
+ * Core ingest — transport-agnostic. Loops date × customer, downloads + parses the
+ * 835s, maps CAS triplets to rows, de-dups by fingerprint within each pull, and (when
+ * writeDb is set) idempotently inserts per pull with per-pull isolation. Returns
+ * non-PHI counts only. Per-pull failures are logged (label only) and skipped; a hard
+ * DB failure still throws.
+ */
+export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835IngestStats> {
+  const now = deps.now ?? Date.now;
+  const started = now();
+  // Caller-owned when supplied, so a mid-run throw does not discard committed work.
+  const stats: Era835IngestStats = deps.stats ?? newEra835IngestStats();
+  stats.dates = deps.dates.length;
+  stats.customers = deps.customers.length;
+  seedEra835TenantRoster(stats, deps.customers);
+  /** This customer's tenant slice. Present for every roster member after the seed above. */
+  const ent = (c: CmdCustomer): Era835TenantCounts =>
+    (stats.by_entity[c.businessEntityId] ??= blankEra835TenantCounts());
 
   for (const date of deps.dates) {
     for (const customer of deps.customers) {
       if (deps.budgetMs !== undefined && now() - started > deps.budgetMs) {
         stats.pulls_skipped_budget += 1;
+        ent(customer).pulls_skipped_budget += 1;
         continue;
       }
       stats.pulls_attempted += 1;
+      ent(customer).pulls_attempted += 1;
       try {
         const result = await deps.download(customer.customerId, date);
         // Two different zero-row outcomes, counted apart. 'empty' is CMD saying there
         // were no ERAs (normal). A real ZIP that yields no ISA files is a SIGNAL that
         // should be ~never — neither is a failure, and neither may be silently merged.
         const files = result.kind === 'empty' ? [] : result.files;
-        if (result.kind === 'empty') stats.pulls_empty += 1;
-        else if (files.length === 0) stats.pulls_zero_files += 1;
+        if (result.kind === 'empty') {
+          stats.pulls_empty += 1;
+          ent(customer).pulls_empty += 1;
+        } else if (files.length === 0) {
+          stats.pulls_zero_files += 1;
+          ent(customer).pulls_zero_files += 1;
+        }
         // Dedup within the pull at BOTH grains: remits by payment fingerprint, and each
         // remit's triplets by triplet fingerprint. Keyed this way, the same remit
         // delivered twice in one zip collapses to one payment row and its triplets merge
@@ -790,6 +939,7 @@ export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835Ing
         for (const file of files) {
           const parsed = parseEra835(file.edi);
           stats.files_parsed += 1;
+          ent(customer).files_parsed += 1;
           stats.claims += parsed.claimCount;
           stats.remark_codes_seen += parsed.remarkCount;
           const mapped = mapTransactions(
@@ -799,6 +949,7 @@ export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835Ing
           );
           for (const { payment, adjustments } of mapped) {
             stats.payments_mapped += 1;
+            ent(customer).payments_mapped += 1;
             if (payment.payment_amount === null) stats.payments_amount_out_of_range += 1;
             if (adjustments.length === 0) stats.payments_without_adjustments += 1;
             stats.adjustments_mapped += adjustments.length;
@@ -831,6 +982,13 @@ export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835Ing
           );
           stats.payments_inserted += written.payments;
           stats.rows_inserted += written.adjustments;
+          stats.payments_duplicate += written.payments_duplicate;
+          stats.rows_skipped_duplicate += written.adjustments_duplicate;
+          const e = ent(customer);
+          e.payments_inserted += written.payments;
+          e.rows_inserted += written.adjustments;
+          e.payments_duplicate += written.payments_duplicate;
+          e.rows_skipped_duplicate += written.adjustments_duplicate;
         }
       } catch (err) {
         // Fatal (e.g. 401/403 credential rejection): every remaining pull would fail the
@@ -846,6 +1004,9 @@ export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835Ing
         stats.pulls_failed += 1;
         const code = err instanceof CmdEra835Error ? err.code : 'other';
         stats.pulls_failed_by_code[code] = (stats.pulls_failed_by_code[code] ?? 0) + 1;
+        const e = ent(customer);
+        e.pulls_failed += 1;
+        e.pulls_failed_by_code[code] = (e.pulls_failed_by_code[code] ?? 0) + 1;
         // Per-pull isolation: customer + date + message (non-PHI) only.
         console.error(
           `era-835 ingest: customer ${customer.customerId} (${customer.facilityCode}) date ${date} failed: ` +
@@ -863,10 +1024,129 @@ export async function runEra835Ingest(deps: Era835IngestDeps): Promise<Era835Ing
       `(no-adjustment ${stats.payments_without_adjustments}, unquantified BPR02 ${stats.payments_amount_out_of_range}), ` +
       `adjustments ${stats.adjustments_mapped}, remarks ${stats.remark_codes_seen}; ` +
       `in-set dups ${stats.in_set_duplicates} triplet / ${stats.in_set_duplicate_payments} remit; ` +
-      `inserted ${stats.payments_inserted} payments + ${stats.rows_inserted} adjustments` +
+      `inserted ${stats.payments_inserted} payments + ${stats.rows_inserted} adjustments ` +
+      // The ON CONFLICT DO NOTHING path, previously invisible here. With a 5-day trailing
+      // window four of every five dates are re-pulls, so a HIGH duplicate count is the
+      // healthy steady state — see the payments_duplicate column comment in 022.
+      `(already-present: ${stats.payments_duplicate} payments + ${stats.rows_skipped_duplicate} adjustments)` +
       (stats.pulls_failed > 0 ? `; failed by code ${JSON.stringify(stats.pulls_failed_by_code)}` : ''),
   );
   return stats;
+}
+
+// --- Run-level observability (staging.era_835_ingest_run, migration 022) -------
+
+/** Column order for the run-row insert — matches buildEra835RunParams below EXACTLY. */
+const ERA835_RUN_COLS = [
+  'business_entity_id', 'writer_user', 'status', 'started_at', 'window_start', 'window_end',
+  'customers_total', 'pulls_attempted', 'pulls_failed', 'pulls_empty', 'pulls_zero_files',
+  'pulls_skipped_budget', 'files_parsed', 'payments_mapped', 'payments_inserted',
+  'payments_duplicate', 'rows_inserted', 'rows_skipped_duplicate', 'pulls_failed_by_code',
+  'error_detail',
+] as const;
+
+/**
+ * Placeholders for one row, with the ::jsonb cast attached BY COLUMN NAME rather than by a
+ * hardcoded position. Reordering ERA835_RUN_COLS therefore cannot silently cast the wrong
+ * parameter — which matters in code whose entire purpose is durability.
+ */
+const ERA835_RUN_PLACEHOLDERS = ERA835_RUN_COLS.map((col, i) =>
+  col === 'pulls_failed_by_code' ? `$${i + 1}::jsonb` : `$${i + 1}`,
+).join(', ');
+
+export type Era835RunStatus = 'ok' | 'partial' | 'empty' | 'failed';
+
+/**
+ * One tenant's run outcome. 'failed' is decided by the CALLER (the handler threw); this
+ * classifies everything else. Mirrored in the status column comment of SQL Schemas/022.
+ *
+ * 'empty' IS NOT 'ok', and that is the whole point of the state existing. pulls_empty is
+ * CMD's documented "no 835 ERAs on that date" response — a normal quiet day, AND the exact
+ * signature of the credential having lost its Payment role: every pull succeeds and every
+ * pull returns nothing. Today that case returns 200 {ok:true} and is indistinguishable
+ * from a quiet day, which is how this ingest could sit dead in production unnoticed. Two
+ * CONSECUTIVE 'empty' runs over a 5-day trailing window is not a quiet week; it is
+ * page-worthy.
+ *
+ * ZERO ATTEMPTS IS ALSO 'empty'. A run that reaches the summary having attempted nothing —
+ * an empty roster, a roster whose every entry belongs to another tenant, a budget guard
+ * that fired before the first pull — has proven nothing about the feed's health. Calling
+ * that 'ok' would be the same false reassurance as collapsing 'empty' into 'ok': a
+ * healthy-looking row nobody attempted to earn.
+ */
+export function era835RunStatus(c: Era835TenantCounts): Era835RunStatus {
+  if (c.pulls_failed + c.pulls_zero_files + c.pulls_skipped_budget > 0) return 'partial';
+  if (c.pulls_attempted === 0) return 'empty';
+  if (c.pulls_empty === c.pulls_attempted) return 'empty';
+  return 'ok';
+}
+
+export interface Era835RunMeta {
+  /** ISO timestamp captured at handler entry. */
+  startedAt: string;
+  /** First/last ISO date of the pulled window; null when the run died before it existed. */
+  windowStart: string | null;
+  windowEnd: string | null;
+}
+
+/** Positional params for ONE tenant's run row, in ERA835_RUN_COLS order. */
+function buildEra835RunParams(
+  entityId: string,
+  writerUser: string,
+  c: Era835TenantCounts,
+  meta: Era835RunMeta,
+  failure?: { error: string },
+): unknown[] {
+  return [
+    entityId, writerUser,
+    failure ? 'failed' : era835RunStatus(c),
+    meta.startedAt, meta.windowStart, meta.windowEnd,
+    c.customers_total, c.pulls_attempted, c.pulls_failed, c.pulls_empty, c.pulls_zero_files,
+    c.pulls_skipped_budget, c.files_parsed, c.payments_mapped, c.payments_inserted,
+    c.payments_duplicate, c.rows_inserted, c.rows_skipped_duplicate,
+    JSON.stringify(c.pulls_failed_by_code),
+    // MESSAGE ONLY, bounded to the column's CHECK. Never EDI, never a patient identifier,
+    // never a cell value — the same discipline the per-pull error log already holds to.
+    failure ? failure.error.slice(0, 500) : null,
+  ];
+}
+
+/**
+ * Persist ONE run row PER TENANT (staging.era_835_ingest_run, migration 022) — the durable
+ * record that ends the silent-no-op gap. Called on BOTH the success and the error path, so
+ * a run that inserted nothing is still visible AS a run.
+ *
+ * NON-PHI: counts, ISO dates, the writer role name, failure codes, and (on failure) an
+ * error MESSAGE truncated to 500 chars. There is deliberately no per-customer array — on
+ * this feed that would be a per-facility remittance-activity breakdown, a materially
+ * richer disclosure than claims.audit_ingest_run's row counts.
+ *
+ * writer_user is `current_user` read INSIDE the withTenant transaction, i.e. what the
+ * connection actually authenticated as. RECORDED, NOT ASSERTED: there is no identity guard
+ * on this path (unlike the billing-audit writer) and this does not invent one.
+ *
+ * THE CALLER MUST WRAP THIS FAIL-SOFT. A summary-write failure must NEVER fail an ingest
+ * that already succeeded (0053's stated posture).
+ */
+export async function recordEra835IngestRun(
+  db: Db,
+  meta: Era835RunMeta,
+  byEntity: Record<string, Era835TenantCounts>,
+  failure?: { error: string },
+): Promise<void> {
+  for (const [entityId, counts] of Object.entries(byEntity)) {
+    // One tenant per transaction — the staging RLS WITH CHECK reads the transaction-local
+    // GUC, so a shared transaction could not satisfy two tenants.
+    await withTenant(db, entityId, async (client) => {
+      const who = await client.query<{ u: string }>('select current_user as u');
+      const vals = buildEra835RunParams(entityId, who.rows[0]?.u ?? 'unknown', counts, meta, failure);
+      await client.query(
+        `insert into staging.era_835_ingest_run (${ERA835_RUN_COLS.join(', ')}) ` +
+          `values (${ERA835_RUN_PLACEHOLDERS})`,
+        vals,
+      );
+    });
+  }
 }
 
 // --- CLI ---------------------------------------------------------------------

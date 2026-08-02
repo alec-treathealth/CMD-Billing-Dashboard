@@ -514,7 +514,12 @@ test('insertEra835Transactions: payment row is written first and its id lands on
   const mapped = mapTransactions(r.transactions, { customer: CUSTOMER, sourceFile: 'f.835' }, NO_SKIPS());
 
   return insertEra835Transactions(fakeDb, BE, mapped, 'test').then((counts) => {
-    assert.deepEqual(counts, { payments: 1, adjustments: 5 });
+    assert.deepEqual(counts, {
+      payments: 1,
+      adjustments: 5,
+      payments_duplicate: 0,
+      adjustments_duplicate: 0,
+    });
 
     // Write order: tenant GUC, then the payment row, then the adjustments.
     const payIdx = sql.findIndex((s) => s.startsWith('insert into staging.era_835_payment'));
@@ -565,7 +570,16 @@ test('insertEra835Transactions: a re-pull re-reads the existing payment id inste
   const mapped = mapTransactions(r.transactions, { customer: CUSTOMER, sourceFile: 'f.835' }, NO_SKIPS());
 
   return insertEra835Transactions(fakeDb, BE, mapped, 'test').then((counts) => {
-    assert.deepEqual(counts, { payments: 0, adjustments: 0 }, 're-pull inserts nothing');
+    // THE SILENT PATH, NOW COUNTED. This whole-remit re-pull writes nothing, and before
+    // migration 022 it reported nothing either — the 2026-08-02 production run swallowed
+    // 73 of 112 parsed remits exactly here. inserted=0 alongside duplicate>0 is what makes
+    // 013's duplicate-remit detector ("a re-pull MUST report payments_inserted = 0")
+    // checkable after the fact instead of only in a live console.
+    assert.deepEqual(
+      counts,
+      { payments: 0, adjustments: 0, payments_duplicate: 1, adjustments_duplicate: 5 },
+      're-pull inserts nothing AND says so',
+    );
     assert.ok(sql.some((s) => s.startsWith('select id from staging.era_835_payment')));
     assert.ok(sql.some((s) => s.includes('commit')));
   });
