@@ -49,8 +49,13 @@ import {
   type CollectionsYoy,
   type FacilityDimensionRow,
 } from '@/lib/actions';
-import { BXR_ENTITY_ID, INDIGO_ENTITY_ID, type DashboardView } from '@/lib/views';
-import { EraUpcomingBody, type ForecastEditIntent } from './era-upcoming';
+import { BXR_ENTITY_ID, INDIGO_ENTITY_ID, viewToEntityIds, type DashboardView } from '@/lib/views';
+import {
+  EraUpcomingBody,
+  type ForecastEditIntent,
+  type ForecastFacilityOption,
+} from './era-upcoming';
+import { facilityCodesForEntity } from '../../../src/collections/cmdCustomers';
 import type { EraUpcomingSummary } from '../../../src/veris/era835Upcoming.js';
 import type { UpcomingOverrideSummary } from '../../../src/veris/upcomingOverride.js';
 import type { ManualForecastRow } from '../../../src/veris/upcomingForecast';
@@ -343,6 +348,25 @@ export function OverviewKpis({
 
   const kpis = kpisState.data;
 
+  // Facilities a manual forecast row may name. The ROSTER decides tenancy (collections.facilities
+  // is tenant-agnostic reference data and cannot), so the dimension is narrowed by
+  // facilityCodesForEntity — which is also exactly what the Server Action re-checks. Consolidated
+  // resolves to two tenants, so it yields NOTHING and the form is replaced by an explanation
+  // rather than offering choices the server would reject.
+  const forecastFacilityOptions: ForecastFacilityOption[] =
+    view === 'consolidated'
+      ? []
+      : facilityCodesForEntity(viewToEntityIds(view)[0] ?? '')
+          .map((code) => {
+            const dim = dimByCode.get(code);
+            // Label with everything a human needs to pick confidently; fall back to the bare
+            // code rather than hiding a roster facility the dimension has not seeded.
+            const name = dim?.facility_name;
+            const acr = dim?.display_acronym;
+            return { code, label: acr && name ? `${acr} — ${name}` : (name ?? acr ?? code) };
+          })
+          .sort((a, b) => a.label.localeCompare(b.label));
+
   // --- card metrics ---------------------------------------------------------------
   const mtdGross = kpis.mtd.gross;
   const ytdGross = kpis.ytd.gross;
@@ -426,6 +450,7 @@ export function OverviewKpis({
         onClose={() => setEraOpen(false)}
         view={view}
         canEdit={canEditForecast}
+        facilityOptions={forecastFacilityOptions}
       />
     </div>
   );
@@ -451,6 +476,7 @@ function EraUpcomingPanel({
   onClose,
   view,
   canEdit,
+  facilityOptions,
 }: {
   open: boolean;
   /** See AllFacilitiesTable.onClose — the toggle button owns this state. */
@@ -458,6 +484,9 @@ function EraUpcomingPanel({
   view: DashboardView;
   /** super_admin only. Convenience for hiding controls; the Server Actions are the real gate. */
   canEdit: boolean;
+  /** The active tenant's facilities — the only valid targets for a manual add. Empty on
+   *  Consolidated, where a write has no single tenant to name. */
+  facilityOptions: ForecastFacilityOption[];
 }) {
   const [status, setStatus] = useState<'idle' | 'loading' | 'error' | 'ready'>('idle');
   const [data, setData] = useState<EraUpcomingSummary | null>(null);
@@ -507,6 +536,18 @@ function EraUpcomingPanel({
     try {
       if (intent.op === 'delete-edit') {
         await deleteUpcomingManual(intent.id, view);
+      } else if (intent.op === 'add') {
+        await saveUpcomingManual(
+          {
+            kind: 'add',
+            facilityCode: intent.facilityCode,
+            payerLabel: intent.payerLabel,
+            expectedDate: intent.expectedDate,
+            methodLabel: intent.methodLabel,
+            amount: intent.amount,
+          },
+          view,
+        );
       } else if (intent.op === 'suppress') {
         await saveUpcomingManual(
           {
@@ -561,6 +602,7 @@ function EraUpcomingPanel({
           manual={manual}
           canEdit={canEdit}
           busy={busy}
+          facilityOptions={facilityOptions}
           onEdit={(intent) => void applyEdit(intent)}
         />
       ) : (

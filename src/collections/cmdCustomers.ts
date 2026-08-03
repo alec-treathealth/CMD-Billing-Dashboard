@@ -138,3 +138,27 @@ export const CMD_EXPLORER_CUSTOMERS: readonly CmdCustomer[] = BXR_CUSTOMERS;
 
 /** BXR + Indigo — the full customer roster for tenant-aware ingest loops (era_ingest). */
 export const ALL_CMD_CUSTOMERS: readonly CmdCustomer[] = [...BXR_CUSTOMERS, ...INDIGO_CUSTOMERS];
+
+/**
+ * Every facilityCode the given tenant owns. THE ROSTER IS THE SOURCE OF TRUTH for "which book
+ * does this facility belong to" — `collections.facilities` is tenant-agnostic reference data
+ * and cannot answer it.
+ *
+ * Exists for the forecast-edit write path (migration 024): a super admin picks a facility for a
+ * hand-added expected payment, and without this check a facility from the OTHER book could be
+ * attributed to the tenant being written — money filed under the wrong company, visible nowhere
+ * except as an odd row on a tile. Pure and data-only, so it is safe to import from a client
+ * component as well as from the server.
+ */
+export function facilityCodesForEntity(businessEntityId: string): string[] {
+  return ALL_CMD_CUSTOMERS.filter((c) => c.businessEntityId === businessEntityId).map(
+    (c) => c.facilityCode,
+  );
+}
+
+/** True when `facilityCode` is on the given tenant's roster. Case-sensitive: codes are canonical. */
+export function facilityBelongsToEntity(facilityCode: string, businessEntityId: string): boolean {
+  return ALL_CMD_CUSTOMERS.some(
+    (c) => c.businessEntityId === businessEntityId && c.facilityCode === facilityCode,
+  );
+}

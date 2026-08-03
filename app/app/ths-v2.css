@@ -778,6 +778,35 @@
   border-bottom: 0;
 }
 
+/* The add-a-payment disclosure. Its summary is not part of the parent grid — it is one
+   label, not a data row — so it opts out of the shared grid template. */
+[data-ths='v2'] .ths-add-summary {
+  display: flex;
+  gap: var(--space-3);
+  color: var(--color-accent);
+}
+/* Fields wrap and each keeps its label attached, so a narrow viewport reflows into
+   rows instead of scrolling. `align-items: end` lines the submit button up with the
+   inputs rather than with their labels. */
+[data-ths='v2'] .ths-add-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--space-3);
+  padding: var(--space-3) 0 var(--space-2) 26px;
+}
+[data-ths='v2'] .ths-add-form .ths-field {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+[data-ths='v2'] .ths-add-form .ths-input {
+  max-width: 220px;
+}
+[data-ths='v2'] .ths-add-note {
+  padding: 0 0 var(--space-3) 26px;
+}
+
 @media (max-width: 640px) {
   /* Narrow screens drop the payer-count column's fixed share and let the grid
      reflow rather than forcing the page to scroll sideways. */
