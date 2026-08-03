@@ -278,6 +278,27 @@ function deriveSourceTier(url: string, allowed: string[]): 'primary' | 'secondar
   return matchesAny(url, allowed) ? 'primary' : 'secondary';
 }
 
+/** PRIOR STATE for the monthly diff. Reads the previous artifact for this key and
+ *  returns the identity tuples already reported, so the model can suppress them.
+ *  Mirrors the finding_hash key (payer_plan|change_type|date_effective|source_url)
+ *  so what the prompt suppresses and what the DB dedups on cannot drift apart. */
+function priorStateBlock(dir: string, key: string, currentStamp: string): string {
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => f.startsWith(`${key}-`) && f.endsWith('.json') && !f.includes(currentStamp));
+  } catch { return '(none — first run)'; }
+  if (!files.length) return '(none — first run)';
+  const latest = files.sort().at(-1)!;
+  let prior: { findings?: Array<Record<string, string>> };
+  try { prior = JSON.parse(readFileSync(`${dir}/${latest}`, 'utf8')); } catch { return '(none — first run)'; }
+  const priorFindings = prior.findings ?? [];
+  if (!priorFindings.length) return `(prior run ${latest} reported no findings)`;
+  return [`(from ${latest} — ${priorFindings.length} already reported, do NOT re-report these)`]
+    .concat(priorFindings.map((f, i) =>
+      `${i + 1}. ${f.change_type} | eff=${f.date_effective} | ${f.source_url}\n   ${f.payer_plan}\n   ${f.summary}`))
+    .join('\n');
+}
+
 // ------------------------------------------------------------------- the run
 
 async function main() {
