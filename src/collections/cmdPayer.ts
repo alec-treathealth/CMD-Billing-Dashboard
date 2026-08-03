@@ -433,10 +433,20 @@ export function describeReportZip(
 // The grain is per CHARGE LINE (so claim_count is charge-line count). Patient
 // Full Name / Member ID / Group Number are PHI and are never read here. One alias
 // kept per field for resilience to minor report-label edits.
-// 'Charge Current Payer Name' is report 10093971's label (the 2026-08-02 rebuild that replaced the
-// lost 10091828/10147241 pair). Appended LAST so any report still emitting the 'Primary' forms keeps
-// its existing mapping — pick() returns the first candidate present.
-const PAYER_KEYS = ['Charge Primary Payer Name', 'Primary Payer Name', 'Charge Current Payer Name'];
+// Report 10093971 (the 2026-08-02 rebuild that replaced the lost 10091828/10147241 pair) has now
+// emitted two different payer labels: 'Charge Current Payer Name' in its first cut, and plain
+// 'Payer Name' after the 2026-08-03 fix. 'Charge Current Payer Name' turned out to be the
+// CURRENTLY-RESPONSIBLE payer — it collapsed a 15-account book to 15 distinct names against the
+// 60-80/month the rollup table carries — so it is kept only so an un-rebuilt report still maps to
+// something rather than to the blank sentinel. Both are appended AFTER the 'Primary' forms, which
+// stay first: pick() returns the first candidate present, so any report emitting a Primary label
+// keeps its existing mapping and no shipped pull changes value.
+const PAYER_KEYS = [
+  'Charge Primary Payer Name',
+  'Primary Payer Name',
+  'Payer Name',
+  'Charge Current Payer Name',
+];
 // 'Facility Name/ID' is a REQUIRED fallback here — do NOT remove. The shipped payer
 // rollup pulls a DIFFERENT CMD report (report 10091729 / filter 10147241) that emits
 // the older 'Facility Name/ID' header; dropping the fallback silently nulls facility

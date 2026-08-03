@@ -495,11 +495,32 @@ function PayerBreakdownTable({
     [rows],
   );
 
-  if (rows.length === 0) return null;
+  // Dismissal is LOCAL and resets whenever the month changes. Unlike the two Overview reveal
+  // panels, this table is the primary content of the By-Payer view rather than something the user
+  // opened, so a sticky dismissal would leave that view looking empty with no obvious way back.
+  // Re-selecting a month brings it straight back.
+  const [dismissed, setDismissed] = useState(false);
+  useEffect(() => {
+    setDismissed(false);
+  }, [monthLabel]);
+
+  if (rows.length === 0 || dismissed) return null;
 
   return (
     <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
-      <h3 className="text-sm font-semibold text-ink900">Payer breakdown — {monthLabel}</h3>
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-ink900">Payer breakdown — {monthLabel}</h3>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => setDismissed(true)}
+          aria-label="Close payer breakdown"
+          className="text-ink600"
+        >
+          <X className="h-4 w-4" />
+        </Button>
+      </div>
       <p className="mb-3 mt-0.5 text-xs text-muted-foreground">
         Charged / Allowed / Paid / Collection gap per payer. Click a payer for its per-facility breakdown.
       </p>

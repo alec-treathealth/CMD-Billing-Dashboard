@@ -153,3 +153,34 @@ test('collectRowsAcrossCustomers: an account with zero rows is not an error', as
   );
   assert.equal(rows.length, 1);
 });
+
+// --- PAYER_KEYS aliases ------------------------------------------------------
+//
+// Report 10093971 has emitted THREE different payer labels across its rebuilds. Each is mapped,
+// and the 'Primary' forms stay ahead of the others so no previously-shipped pull changes value.
+// 'Charge Current Payer Name' is the CURRENTLY-RESPONSIBLE payer and is a poor substitute — it
+// collapsed one facility's book to 2 distinct payers where 'Payer Name' yields 30 — but it is
+// kept mapped so an un-rebuilt report degrades to a wrong-ish payer rather than to the blank
+// sentinel, which would silently merge every payer into one rollup row.
+
+test('extractLineFields: maps the plain "Payer Name" label (report 10093971, 2026-08-03 rebuild)', () => {
+  const f = extractLineFields({
+    'Charge From Date': '03/14/2026',
+    'Payer Name': 'AETNA',
+    'Facility Name': 'CAMH',
+  });
+  assert.equal(f?.payer, 'AETNA');
+});
+
+test('extractLineFields: a Primary payer label still wins over the newer aliases', () => {
+  // Order matters: pick() takes the FIRST candidate present. A report emitting both must keep
+  // resolving to the Primary column so existing rollup values are unchanged.
+  const f = extractLineFields({
+    'Charge From Date': '03/14/2026',
+    'Charge Primary Payer Name': 'PRIMARY WINS',
+    'Payer Name': 'SHOULD NOT WIN',
+    'Charge Current Payer Name': 'SHOULD NOT WIN EITHER',
+    'Facility Name': 'CAMH',
+  });
+  assert.equal(f?.payer, 'PRIMARY WINS');
+});
