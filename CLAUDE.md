@@ -60,10 +60,10 @@ without going red on a fresh clone. `git add` each and promote it.
 
 - `CMD AR Automation — Build Doc v2.md` (repo root) — the current AR build plan.
   Promote into the table above once tracked.
-- `scripts/check-context-map.ts` and `test/contextMap.test.ts` — **the guard
-  itself is untracked.** The enforcement claim at the top of this section is
-  therefore true on Alec's machine and false on a fresh clone. Commit both
-  before relying on the gate in CI or in a PR review.
+
+`scripts/check-context-map.ts` and `test/contextMap.test.ts` were tracked on
+2026-08-03, so the enforcement claim at the top of this section is now true on a
+fresh clone and in CI, not only on Alec's machine.
 
 ## Standing rules — do not regress
 
@@ -100,7 +100,7 @@ Run all five before any commit. This is the bar for "verified" — not typecheck
 alone, and especially not when a shared helper changed.
 
 ```bash
-npm test                          # root hermetic suite — 858 pass / 0 fail
+npm test                          # root hermetic suite — 869 pass / 0 fail
 npm run typecheck                 # root tsc (strict: noUncheckedIndexedAccess)
 cd app && npm test                # app suite — 176 pass / 0 fail
 cd app && npm run typecheck        # app tsc
@@ -160,7 +160,7 @@ Surfaces:
   `redirect('/')` stub. `<SearchConsole />` and the `/api/agent` path stay in git
   history; restoring means remounting the page *and* re-adding the nav entry.
 
-`app/vercel.json` declares **14 cron entries across 13 distinct routes**
+`app/vercel.json` declares **15 cron entries across 13 distinct routes**
 (`billing-audit-consolidated` runs on three schedules):
 
 | Route | Cadence |
@@ -171,6 +171,7 @@ Surfaces:
 | `cmd-explorer-catchup` | daily 07:52 |
 | `era-835` | daily 08:50 |
 | `vob-sync` | daily 09:17 |
+| `refresh-cmd-payer` | daily 10:50 |
 | `cms-hcpcs-sync` | quarterly, 06:00 on the 2nd of Jan/Apr/Jul/Oct |
 | `billing-audit-op` · `billing-code-decisions` | daily 02:20 / 02:40 |
 | `billing-audit-consolidated` | daily 02:40, 03:10, 03:40 |
@@ -238,11 +239,35 @@ These are wrong in the code today. Fix opportunistically; never copy them.
   10036030 MISSOURI BEHAVIORAL HEALTH were dropped 2026-08-02 for hard INVALID
   CRITERIA. BXR is **15**.
 - CMD report/filter pairings turn over fast; trust `app/lib/server.ts`, never
-  prose. Live today: BXR explorer **10093959 / 10148478**, Indigo explorer
-  **10092391 / 10147669**. Both **10091971 / 10147530** (lost in CMD 2026-07-31)
-  and the older **10147499** are DEAD — every pairing returns INVALID CRITERIA.
-  `10147499` survives only in the manual `cmdDailyBackfill.ts` CLI, which already
-  documents it as dead.
+  prose. Live as of 2026-08-03: BXR explorer **10093959 / 10148478**, Indigo
+  explorer **10092391 / 10148487**, payer rollup **10093971 / 10148488**.
+  DEAD — every pairing returns INVALID CRITERIA: **10091971 / 10147530** (lost
+  2026-07-31), the older **10147499**, and **10091828 / 10147241** (the payer
+  pair, confirmed dead 2026-08-02 by `scripts/dryrun-cmd-payer-refresh.ts`).
+  Retired but not dead: Indigo's **10147669** (a trailing 4-week window, replaced
+  2026-08-02) and **10147602**. `10147499` survives only in a comment in the
+  manual `cmdDailyBackfill.ts` CLI — that CLI's default is now `10148478`.
+- `collections.cmd_payer_facility_monthly` now holds **two different
+  populations**, and the seam is at 2026-06. Rows for 2026-05 and earlier came
+  from the 2026-06-25 manual CSV ingest of the Derek History Report. Rows from
+  2026-06 forward are written by `/api/cron/refresh-cmd-payer` (scheduled
+  2026-08-03, daily 10:50) from report 10093971, whose filter windows on
+  **payment date**, not service date. Measured live-vs-CSV coverage by service
+  month decays monotonically — 2026-06 1202%, 2026-05 155%, 2026-04 123%,
+  2026-03 60%, 2026-01 18%, 2025-12 3.6%, 2025-05 0.7% — which is the signature
+  of a payment-date window, not a defect. The cron's 3-month trailing window
+  never reaches 2026-05 or earlier, so the CSV history is never overwritten;
+  expect a definitional step at the boundary in the "By Payer" chart.
+- 10:50 was chosen for that cron so it cannot contend with the hourly CMD crons
+  (:00/:15/:30/:35) for CMD's one-report-at-a-time partner slot. Probing during
+  a :15 census on 2026-08-02 cost 13 BXR census fetches — they self-healed the
+  next hour, but do not schedule CMD work near those minutes.
+- `dropFuturePaymentRows` is a bounded horizon now, but ships at
+  `FUTURE_PAYMENT_HORIZON_DAYS = 0` — identical to the old strict today-cutoff.
+  Do **not** flip it to 14 without also bounding the Collections reads at today:
+  Overview and Collections read the same rows through
+  `collections.daily_collections_resolved`, so the horizon alone would put
+  near-future money on the Collections tab.
 - `src/collections/cmdExplorer.ts` says the row fingerprint hashes 14 fields — it
   hashes **18** (15 non-PHI + 3 PHI, see `mapReportRows`).
 - `supabase/migrations/0067_*` looks applicable but is **stale**: as authored it
