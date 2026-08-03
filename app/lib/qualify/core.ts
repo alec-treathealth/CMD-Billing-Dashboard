@@ -534,10 +534,12 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
 
   const now = deps.now();
   // Feed staleness (Phase 0): the GLOBAL high-water mark going stale means every policy read is
-  // suspect — the exact "confidently wrong" failure mode. Day-grain source, hour-grain threshold.
+  // suspect — the exact "confidently wrong" failure mode. The loader returns a FULL UTC ISO
+  // timestamp (PR #73 review fix), so the threshold applies exactly — the old day-grain source
+  // needed a 24h slack that could delay the stale flag a day past the configured bar. A legacy
+  // bare-date string still parses (as midnight UTC) and errs toward flagging EARLY, never late.
   const staleFloorMs = QUALIFY_VOB_STALE_HOURS * 3_600_000;
-  const vobStale =
-    globalFresh !== null && now.getTime() - Date.parse(`${globalFresh}T00:00:00Z`) > staleFloorMs + 86_400_000 - 1;
+  const vobStale = globalFresh !== null && now.getTime() - Date.parse(globalFresh) > staleFloorMs;
   const policy: QualifyPolicyCard | null =
     policyRow === null
       ? null

@@ -46,6 +46,9 @@ test('freshness query: one global high-water mark, zero params', () => {
   assert.equal(params.length, 0);
   assert.match(sql, new RegExp(`from ${VOB_MEMBER_BENEFITS_LATEST.replace('.', '\\.')}`));
   assert.match(sql, /max\(vob_created_at\)/);
+  // PR #73 review pin: FULL UTC timestamp — a day-grain regression would reintroduce the 24h slack.
+  assert.match(sql, /at time zone 'UTC'/);
+  assert.match(sql, /HH24:MI:SS/);
 });
 
 test('window rungs: ONE scan, five FILTER counts, token+tenant scoped, widest rung bounds the scan', () => {

@@ -78,7 +78,7 @@ function v2deps(principal: () => ReturnType<typeof SUPER>, over: Partial<Qualify
     revealRows: async () => [],
     now: () => NOW,
     loadPolicy: async () => POLICY,
-    loadVobFreshness: async () => '2026-08-02', // fresh (yesterday, inside 48h+day-grain slack)
+    loadVobFreshness: async () => '2026-08-02T06:00:00Z', // fresh — 30h old, inside the 48h bar
     loadWindowRungs: async () => RUNGS_THIN,
     loadCodingDecisions: async () => ({ seeded: false, rows: [] }),
     loadCensusAuth: async () => [],
@@ -163,7 +163,7 @@ test('policy card: on-file fields attach; network is NULL today (Phase D extract
 });
 
 test('Phase 0 staleness: a stale GLOBAL feed flags the card even when the policy has its own dates', async () => {
-  const deps = v2deps(SUPER, { loadVobFreshness: async () => '2026-07-25' }); // 9 days stale
+  const deps = v2deps(SUPER, { loadVobFreshness: async () => '2026-07-25T00:00:00Z' }); // 9 days stale
   const snap = await getQualifySnapshotCore(deps, AUTO_IN);
   assert.equal(snap.policy!.vobStale, true);
 });
@@ -281,4 +281,15 @@ test('comparable read: the coding factor is EXCLUDED (payer unknown), never a un
   assert.match(coding.detail, /payer-scoped/);
   // Renormalized over claims + confidence (+ ttp from the fixture's median): coding's 30 is absent.
   assert.ok(snap.facilities[0]!.availableWeight <= 60);
+});
+
+test('vobStale boundary: the 48h bar applies EXACTLY — a 49h-old feed flags, a 47h-old one does not', async () => {
+  // PR #73 review pin. Under the old day-grain + 24h-slack math a 49h-old timestamp read as fresh
+  // (bare date → midnight → 60h, still under the 72h effective bar). Timestamp precision fixes it.
+  const stale = v2deps(SUPER, { loadVobFreshness: async () => '2026-08-01T11:00:00Z' }); // NOW − 49h
+  const fresh = v2deps(SUPER, { loadVobFreshness: async () => '2026-08-01T13:00:00Z' }); // NOW − 47h
+  const s1 = await getQualifySnapshotCore(stale, AUTO_IN);
+  const s2 = await getQualifySnapshotCore(fresh, AUTO_IN);
+  assert.equal(s1.policy!.vobStale, true);
+  assert.equal(s2.policy!.vobStale, false);
 });

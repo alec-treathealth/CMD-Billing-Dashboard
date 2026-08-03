@@ -57,7 +57,8 @@ export async function loadQualifyPolicy(
   );
 }
 
-/** Global VOB feed high-water mark (Phase 0 staleness disclosure). Null on an empty matview. */
+/** Global VOB feed high-water mark as a FULL UTC ISO timestamp (exact staleness math in core).
+ *  Null on an empty matview. */
 export async function loadQualifyVobFreshness(): Promise<string | null> {
   const q = buildQualifyVobFreshnessQuery();
   const res = await qualifyV2Reader().query<{ fresh_as_of: string | null }>(q.sql, q.params);

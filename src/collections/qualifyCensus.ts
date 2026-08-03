@@ -17,6 +17,13 @@
  *   residential (13): 'Admit Status' + 'Days in RTC' (+ 'Lost Auth Days', 'IQ')
  *   outpatient  (14): 'Status' + 'Days in OP' (no IQ)
  * 'Total Auth Days' / 'Next UR Date' / 'VOB Status' are universal across all 27.
+ *
+ * TENANCY (deliberate exception, PR #73 review): qualify_facility_census carries NO
+ * business_entity_id — it is facility-grain, non-PHI ops data keyed by
+ * collections.facilities.facility_code, and the facilities table itself is entity-less (verified
+ * live 2026-08-03: the per-row tenant key exists on exactly the six DATA tables). Census values
+ * only ever SURFACE joined to entity-scoped ranking rows in core.ts, and the Qualify surface is
+ * deliberately cross-tenant (QUALIFY_TENANT_SCOPE). Migration 0079 restates this on the SQL side.
  */
 
 export type CensusBoardFamily = 'residential' | 'outpatient';

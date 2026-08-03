@@ -104,6 +104,9 @@ export interface CensusSyncStats {
   boards_failed: number;
   conformance: CensusConformance[];
   capacity_mapped: number;
+  /** Facility Info item names with NO roster mapping (PR #73 review): a rename or a new facility
+   *  must show up in the report like a missing column does — never silently lose its capacity. */
+  capacity_unmapped: string[];
 }
 
 /**
@@ -125,14 +128,22 @@ export async function runQualifyCensusSync(
     boards_failed: 0,
     conformance: [],
     capacity_mapped: 0,
+    capacity_unmapped: [],
   };
 
   // Bed capacity: Facility Info items are FACILITIES (names are facility names — non-PHI). The name
   // is matched against collections facility display names by the operator-curated map below.
   let capacity: Map<string, number> = new Map();
   try {
-    capacity = await fetchBedCapacity();
+    const cap = await fetchBedCapacity();
+    capacity = cap.byCode;
     stats.capacity_mapped = capacity.size;
+    stats.capacity_unmapped = cap.unmapped;
+    if (cap.unmapped.length > 0) {
+      // Facility Info item names are FACILITY names (non-PHI) — loggable, and worth logging: an
+      // unmapped name is capacity silently lost until an operator extends the name→code map.
+      console.warn(`qualify-census: ${cap.unmapped.length} facility-info name(s) with no roster mapping: ${cap.unmapped.join(', ')}`);
+    }
   } catch (err) {
     console.error(`qualify-census: facility-info fetch failed (${err instanceof Error ? err.message : 'error'})`);
   }
@@ -187,10 +198,10 @@ const FACILITY_INFO_NAME_TO_CODE: Readonly<Record<string, string>> = {
   'LONESTAR MH': 'LSMH',
 };
 
-async function fetchBedCapacity(): Promise<Map<string, number>> {
+async function fetchBedCapacity(): Promise<{ byCode: Map<string, number>; unmapped: string[] }> {
   const columns = await fetchBoardColumns(MONDAY_FACILITY_INFO_BOARD);
   const bedsCol = columns.find((c) => c.title.trim().toLowerCase() === '# of beds')?.id;
-  if (!bedsCol) return new Map();
+  if (!bedsCol) return { byCode: new Map(), unmapped: [] };
   const data = await mondayQuery<{
     boards: Array<{ items_page: { items: Array<{ name: string; column_values: Array<{ id: string; text: string | null }> }> } }>;
   }>(
@@ -199,12 +210,17 @@ async function fetchBedCapacity(): Promise<Map<string, number>> {
     { ids: [MONDAY_FACILITY_INFO_BOARD], cols: [bedsCol] },
   );
   const out = new Map<string, number>();
+  const unmapped: string[] = [];
   for (const item of data.boards[0]?.items_page.items ?? []) {
     const code = FACILITY_INFO_NAME_TO_CODE[item.name.trim().toUpperCase()];
     const beds = num(item.column_values.find((cv) => cv.id === bedsCol)?.text ?? null);
-    if (code && beds !== null && beds > 0) out.set(code, Math.trunc(beds));
+    if (!code) {
+      unmapped.push(item.name.trim()); // facility name — non-PHI by board construction
+      continue;
+    }
+    if (beds !== null && beds > 0) out.set(code, Math.trunc(beds));
   }
-  return out;
+  return { byCode: out, unmapped };
 }
 
 /** --discover: list the workspace's boards (id + name) so an operator can extend the census map.

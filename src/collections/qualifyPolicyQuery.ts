@@ -99,7 +99,9 @@ export function buildQualifyPolicyQuery(
  *  be legitimately old, but the FEED's high-water mark going stale is an ops alarm surfaced on-card. */
 export function buildQualifyVobFreshnessQuery(): { sql: string; params: unknown[] } {
   return {
-    sql: `select to_char(max(vob_created_at), 'YYYY-MM-DD') as fresh_as_of from ${VOB_MEMBER_BENEFITS_LATEST}`,
+    // Full UTC ISO timestamp, not day-grain (PR #73 review): the staleness compare in core.ts
+    // applies QUALIFY_VOB_STALE_HOURS exactly, so truncating here would smuggle up to 24h of slack.
+    sql: `select to_char(max(vob_created_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as fresh_as_of from ${VOB_MEMBER_BENEFITS_LATEST}`,
     params: [],
   };
 }
