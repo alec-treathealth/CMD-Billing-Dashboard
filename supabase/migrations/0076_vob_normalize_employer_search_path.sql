@@ -1,0 +1,43 @@
+-- 0076 — pin search_path on vob.normalize_employer (Supabase linter 0011).
+--
+-- WHY: the only security advisor firing on this project is
+--   function_search_path_mutable — vob.normalize_employer has a role mutable search_path
+-- (https://supabase.com/docs/guides/database/database-linter?lint=0011_function_search_path_mutable).
+-- A function without a pinned search_path resolves unqualified names against the CALLER's
+-- search_path, so anyone able to create an object in an earlier-resolving schema can shadow a
+-- function the body calls. This one is IMMUTABLE and is evaluated inside the definition of the
+-- vob.member_benefits_latest matview (0064), i.e. on the Qualify/Collections read path — so a
+-- shadowed call would silently change employer normalization for every member lookup.
+--
+-- SAFETY OF THE EMPTY PATH: checked the body against the live definition before writing this. It
+-- calls coalesce / nullif / btrim / regexp_replace / upper only — all pg_catalog, which is ALWAYS
+-- implicitly searched and cannot be shadowed. There is no unqualified reference to a vob/public
+-- object, so `search_path = ''` needs NO body change. Verified there are no dependent indexes or
+-- generated columns whose stored values could be affected (the matview recomputes on refresh).
+--
+-- SIGNATURE: normalize_employer(raw text) — one argument. `ALTER FUNCTION vob.normalize_employer()`
+-- (no args, as it is easy to write from the advisor's object name) fails with 42883.
+--
+-- PHI DISCIPLINE: none touched. This is a function-attribute change; it reads and writes no rows,
+-- and the function's input is an employer name, which is not PHI.
+-- OWNERSHIP: unchanged — ALTER FUNCTION does not transfer ownership. Apply as `postgres`, which
+-- owns schema vob; do NOT wrap in SET ROLE claims_admin (it has no privileges on vob — see 0075's
+-- header). ALTER FUNCTION additionally requires ownership of the function itself.
+-- IDEMPOTENT: ALTER FUNCTION ... SET is last-write-wins; re-running sets the same value.
+-- DEPENDENCY: 0064 (creates the function). No behaviour change, so no reindex/refresh is required.
+-- Rollback: 0076_vob_normalize_employer_search_path_rollback.sql
+
+alter function vob.normalize_employer(text) set search_path = '';
+
+-- 2. Verification (run manually after apply)
+--
+-- -- the setting is attached (expect: {search_path=""})
+-- select proname, proconfig from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+--  where n.nspname = 'vob' and p.proname = 'normalize_employer';
+--
+-- -- behaviour is unchanged on the cases 0064 was validated against
+-- select vob.normalize_employer('Google, LLC.')        = 'GOOGLE'  as google_llc,
+--        vob.normalize_employer('GOOGLE GHIP CHDP HSA') = 'GOOGLE'  as google_plan_noise,
+--        vob.normalize_employer('INSURANCE CO')         is not null as never_empty;
+--
+-- -- the advisor should now report zero security lints
