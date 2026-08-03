@@ -8,6 +8,8 @@ import {
   aggregateDailyDeposits,
   dropFuturePaymentRows,
   FUTURE_PAYMENT_HORIZON_DAYS,
+  mapReportRows,
+  splitFacilityLabel,
 } from '../src/collections/cmdExplorer.js';
 import { CMD_EXPLORER_CUSTOMERS } from '../src/collections/cmdCustomers.js';
 import { FACILITY_CODES } from '../src/collections/config.js';
@@ -130,4 +132,53 @@ test('CMD_EXPLORER_CUSTOMERS: 15 unique customers → real, unique facility code
     assert.ok(FACILITY_CODES.has(c.facilityCode), `${c.facilityCode} is a seeded facility code`);
     assert.ok(/^\d+$/.test(c.customerId), `${c.customerId} is a numeric customer id`);
   }
+});
+
+// --- splitFacilityLabel (bank/deposit report's 'Facility Name/ID') ------------
+
+test('splitFacilityLabel: strips the trailing id so only the name is stored/displayed', () => {
+  assert.deepEqual(splitFacilityLabel('CALIFORNIA MENTAL HEALTH LLC (10272858)'), {
+    name: 'CALIFORNIA MENTAL HEALTH LLC',
+    id: '10272858',
+  });
+});
+
+test('splitFacilityLabel: same-named facilities are distinguishable by id', () => {
+  // The reason the id is parsed at all: CMD returns this name under two different ids.
+  const a = splitFacilityLabel('CALIFORNIA MENTAL HEALTH LLC (10272858)');
+  const b = splitFacilityLabel('CALIFORNIA MENTAL HEALTH LLC (10272308)');
+  assert.equal(a.name, b.name);
+  assert.notEqual(a.id, b.id);
+});
+
+test('splitFacilityLabel: a bare name is untouched (existing reports unaffected)', () => {
+  assert.deepEqual(splitFacilityLabel('CAMH'), { name: 'CAMH', id: null });
+});
+
+test('splitFacilityLabel: only a trailing all-digit group counts as an id', () => {
+  // A facility whose real name contains parentheses must keep them.
+  assert.deepEqual(splitFacilityLabel('TREAT MENTAL HEALTH (WEST)'), {
+    name: 'TREAT MENTAL HEALTH (WEST)',
+    id: null,
+  });
+});
+
+test('mapReportRows: a Facility Name/ID cell maps to the NAME only', () => {
+  const [mapped] = mapReportRows([
+    {
+      'Charge From Date': '07/01/2026',
+      'Facility Name/ID': 'CALIFORNIA MENTAL HEALTH LLC (10272858)',
+      'Charge/Debit Amount': '$100.00',
+    },
+  ]);
+  assert.equal(mapped?.facility, 'CALIFORNIA MENTAL HEALTH LLC', 'the id must never reach the UI');
+});
+
+test('splitFacilityLabel: a null from pick() is passed through, not crashed on', () => {
+  // REGRESSION. pick() in cmdExplorer returns `string | null`, not `string | undefined`. An
+  // earlier cut guarded only on undefined, so a facility-less row hit null.trim(), threw inside
+  // mapReportRows, and cmdExplorerCron counted the entire customer failed — five cron tests went
+  // red at once with no mention of facilities anywhere in the failure.
+  assert.deepEqual(splitFacilityLabel(null), { name: null, id: null });
+  assert.doesNotThrow(() => mapReportRows([{ 'Charge From Date': '07/01/2026' }]));
 });

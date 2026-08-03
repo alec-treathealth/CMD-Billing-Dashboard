@@ -28,7 +28,11 @@ export const HEADERS = {
   payment_received: ['Payment Received'],
   cpt_code: ['Charge CPT Code', 'CPT Code'],
   revenue_code: ['Revenue Code'],
-  facility: ['Facility Name'],
+  // 'Facility Name/ID' is the bank/deposit report's label. Its cells carry BOTH parts —
+  // 'CALIFORNIA MENTAL HEALTH LLC (10272858)' — and splitFacilityLabel strips the id so only the
+  // name is ever stored or displayed. Listed second so a report emitting the bare 'Facility Name'
+  // is unaffected (pick() returns the first candidate present).
+  facility: ['Facility Name', 'Facility Name/ID'],
   patient_name: ['Patient Full Name'], //               PHI
   member_id_raw: ['Claim Primary Member ID'], //         PHI
   group_number: ['Primary Group Number', 'Primary Group #'], // PHI
@@ -227,6 +231,40 @@ function pick(row: CmdReportRow, candidates: readonly string[]): string | null {
 }
 
 /** Map parsed CSV rows to the explorer shape (non-PHI + PHI + content rowId). */
+/**
+ * Split a CMD facility label into its display name and its trailing parenthesised id.
+ *
+ *   'CALIFORNIA MENTAL HEALTH LLC (10272858)' -> { name: 'CALIFORNIA MENTAL HEALTH LLC',
+ *                                                  id: '10272858' }
+ *   'CAMH'                                    -> { name: 'CAMH', id: null }
+ *
+ * WHY: the bank/deposit report projects 'Facility Name/ID' rather than a bare name, and the id is
+ * what tells two same-named facilities apart — CMD returns 'CALIFORNIA MENTAL HEALTH LLC' under
+ * BOTH 10272858 and 10272308. The UI must show the name only, so the id is stripped here at the
+ * mapping boundary rather than in every renderer.
+ *
+ * ⚠ THAT ID IS NOT A CMD CUSTOMER ID. Verified 2026-08-03: neither 10272858 nor 10272308 exists in
+ * collections.facilities, and both sit under a single customer, whereas roster customer ids are of
+ * the 10027973 form. So it CANNOT be compared against the loop's customerId to validate that a
+ * pull returned the right account — that check would reject every row. It is a CMD-internal
+ * facility/location id: useful for disambiguating same-named facilities, and nothing more, until
+ * someone establishes a mapping from it to facility_code.
+ *
+ * Only a trailing all-digit '(...)' group is treated as an id, so a facility whose NAME contains
+ * parentheses keeps them.
+ */
+export function splitFacilityLabel(raw: string | null): { name: string | null; id: string | null } {
+  // `string | null`, NOT `string | undefined` — pick() in this module returns null for an absent
+  // column. An earlier cut guarded only on undefined, so a facility-less row hit null.trim(), threw
+  // inside mapReportRows, and cmdExplorerCron counted the whole customer failed; five cron tests
+  // went red with no mention of facilities in any of them. Absent stays null so mapRow can still
+  // report 'facility: missing'.
+  if (raw === null) return { name: null, id: null };
+  const m = raw.trim().match(/^(.*?)\s*\((\d+)\)$/);
+  if (m === null) return { name: raw, id: null };
+  return { name: m[1]!.trim(), id: m[2]! };
+}
+
 export function mapReportRows(rows: CmdReportRow[]): CmdExplorerFullRow[] {
   return rows.map((row) => {
     const nonPhi = {
@@ -234,7 +272,7 @@ export function mapReportRows(rows: CmdReportRow[]): CmdExplorerFullRow[] {
       payment_received: pick(row, HEADERS.payment_received),
       cpt_code: pick(row, HEADERS.cpt_code),
       revenue_code: pick(row, HEADERS.revenue_code),
-      facility: pick(row, HEADERS.facility),
+      facility: splitFacilityLabel(pick(row, HEADERS.facility)).name,
       charge_amount: pick(row, HEADERS.charge_amount),
       allowed_amount: pick(row, HEADERS.allowed_amount),
       insurance_payments: pick(row, HEADERS.insurance_payments),
