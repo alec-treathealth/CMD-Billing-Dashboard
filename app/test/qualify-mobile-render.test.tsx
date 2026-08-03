@@ -466,3 +466,35 @@ test('mobile heating-up chips — facility-shaped with rating, Δpts, and the DE
   assert.ok(html.includes('disabled'), 'a chip with no dominant payer is not tappable (never a dead resolve)');
   assert.equal(renderToStaticMarkup(<HeatingUp trends={[]} window={trailingWindow(30)} onOpen={() => {}} />), '', 'empty render with no trends');
 });
+
+// ── v2 (Phase I): IQ-band card + the compact policy line ────────────────────────────────────────
+test('SwipeRow v2: an IQ-banded facility renders the v2 numeral + verdict label, not the v1 bucket', async () => {
+  const { mobileIqStyle } = await import('../components/qualify/m/colors');
+  const rated: QualifyFacility = { ...FAC, ratingV2: 72, iqBand: '65', distinctPatients: 14 };
+  const html = renderToStaticMarkup(<SwipeRow facility={rated} onWhy={noop} onOpen={noop} />);
+  assert.ok(html.includes('>72<'), 'v2 numeral renders (never the rounded v1 rating)');
+  assert.ok(html.includes('Strong 65%+'), 'IQ verdict + band label');
+  assert.ok(html.includes('#2E8B6F'), 'band-65 green drives the card accents');
+  // Fallback: no v2 rating → the v1 bucket presentation survives untouched.
+  const legacy = renderToStaticMarkup(<SwipeRow facility={{ ...FAC, distinctPatients: 14 }} onWhy={noop} onOpen={noop} />);
+  assert.ok(legacy.includes(String(Math.round(FAC.rating as number))), 'v1 numeral fallback');
+  // mobileIqStyle: every band mapped; null → the neutral style (no fabricated color).
+  assert.equal(mobileIqStyle('0').color, '#C0453B');
+  assert.equal(mobileIqStyle(null).label, mobileBucketStyle(null).label);
+});
+
+test('MobilePolicyLine: VOB chips + network + stale banner; estimated banner on comparable; silent when neither', async () => {
+  const { MobilePolicyLine } = await import('../components/qualify/m/policy-line');
+  const policy = {
+    found: true as const, memberCount: 3, carrier: 'AETNA', employerName: 'ACME CO', funding: 'SELF',
+    policyType: 'PPO', planType: 'EPO', groupOnFile: true, network: 'OON' as const,
+    vobFreshAsOf: '2026-08-01', vobStale: true, deductible: null, deductibleMet: null, oopMax: null, oopMet: null,
+  };
+  const html = renderToStaticMarkup(<MobilePolicyLine policy={policy} provenance="comparable_employer" />);
+  assert.ok(html.includes('AETNA') && html.includes('Self-funded') && html.includes('EPO'), 'compact chips');
+  assert.ok(html.includes('OON'), 'network chip');
+  assert.ok(html.includes('VOB data is stale'), 'stale banner');
+  assert.ok(html.includes('Estimated') && html.includes('same employer plan'), 'estimated provenance banner');
+  assert.ok(!html.includes('ACME CO'), 'employer name NEVER on the phone line');
+  assert.equal(renderToStaticMarkup(<MobilePolicyLine policy={null} provenance="direct" />), '', 'silent with no policy on the direct path');
+});
