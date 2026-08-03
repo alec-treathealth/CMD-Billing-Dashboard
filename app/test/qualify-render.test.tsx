@@ -785,3 +785,19 @@ test('scorecard v2 — IQ numeral + band pill + weight bar + expandable factor l
   assert.ok(html.includes('Scored on 90 of 100 weighting'), 'renormalization disclosed, never hidden');
   assert.ok(html.includes('no data yet'), 'an unavailable factor says so instead of pretending');
 });
+
+// ── v2 compose: the single-identifier classifier (the "two fields" contract) ───────────────────────
+test('classifyQualifyIdentifier: ≤3 letters is the prefix narrow, anything else the member-id narrow', async () => {
+  const { classifyQualifyIdentifier } = await import('../lib/qualify/contract');
+  assert.deepEqual(classifyQualifyIdentifier('XQH'), { memberId: '', alphaPrefix: 'XQH' });
+  assert.deepEqual(classifyQualifyIdentifier(' ab '), { memberId: '', alphaPrefix: 'ab' });
+  assert.deepEqual(classifyQualifyIdentifier('W2740123'), { memberId: 'W2740123', alphaPrefix: '' });
+  assert.deepEqual(classifyQualifyIdentifier('AB1'), { memberId: 'AB1', alphaPrefix: '' }); // digit ⇒ not a prefix
+  assert.deepEqual(classifyQualifyIdentifier('ABCD'), { memberId: 'ABCD', alphaPrefix: '' }); // 4 letters ⇒ member id
+  assert.deepEqual(classifyQualifyIdentifier('   '), { memberId: '', alphaPrefix: '' });
+  // exactly one narrow is ever active — the both-identifiers dead-end is unrepresentable
+  for (const raw of ['XQH', 'W2740123', 'AB1', '']) {
+    const c = classifyQualifyIdentifier(raw);
+    assert.ok(!(c.memberId !== '' && c.alphaPrefix !== ''));
+  }
+});

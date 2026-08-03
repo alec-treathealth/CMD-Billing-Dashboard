@@ -698,3 +698,16 @@ export function qualifyWindowBounds(
   const priorFrom = shift(from, -windowDays);
   return { from: iso(from), to: iso(to), priorFrom: iso(priorFrom), priorTo: iso(priorTo) };
 }
+
+/**
+ * v2 single-identifier field: classify one typed term into the two blind-index narrows.
+ * ≤3 letters ⇒ alpha prefix (member_id_prefix_bidx STARTS-WITH); anything else ⇒ exact member id
+ * (member_id_bidx). Exactly one of the two is ever non-empty — the old both-identifiers dead-end
+ * is unrepresentable through this function.
+ */
+export function classifyQualifyIdentifier(raw: string): { memberId: string; alphaPrefix: string } {
+  const v = raw.trim();
+  if (v === '') return { memberId: '', alphaPrefix: '' };
+  if (/^[A-Za-z]{1,3}$/.test(v)) return { memberId: '', alphaPrefix: v };
+  return { memberId: v, alphaPrefix: '' };
+}
