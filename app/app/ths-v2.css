@@ -1,0 +1,628 @@
+/* ============================================================================
+   TREAT DESIGN SYSTEM v2 — "Bright Teal", LIGHT GROUND ONLY
+   Ported from ~/Desktop/TreatHealthOS/design-system/{tokens,components}.css.
+
+   SCOPE: everything here lives under [data-ths='v2']. Nothing leaks. Only the
+   Overview page (/dashboard) opts in today — Collections, the Explorer grid,
+   Qualify and Claims Audit keep the v1 look until each is ported deliberately.
+   That is why this is a separate file rather than edits to globals.css.
+
+   THREE DELIBERATE DEVIATIONS from the shipped design-system files:
+
+   1. NO @theme BLOCK. tokens.css ships a Tailwind-v4 CSS-first @theme block;
+      this app is Tailwind 3.4.19, where @theme is not a directive. The file
+      itself says to drop it off v4 — the :root layer is what the app reads.
+
+   2. LIGHT IS THE BASE, NOT AN OVERRIDE. tokens.css defines the dark ground on
+      :root and inverts under [data-ground='light']. Here the light values ARE
+      the base, so a dark value can never leak in through a selector we forgot.
+
+   3. THE TEXT-BEARING NEUTRAL STEPS ARE RESTATED FOR LIGHT. tokens.css inverts
+      accent/danger/ok/warn/info for the light ground but leaves the neutral ramp
+      at its dark-ground values, where step 500 ("the floor for live content")
+      computes to 4.09:1 on this ground — below AA for body text. Each step keeps
+      its documented ROLE and gets a light-legal value; measured ratios are in the
+      comments. Step 600 stays sub-AA and is therefore disabled/non-text only,
+      exactly as upstream intends.
+
+   Class names carry a `ths-` prefix (upstream uses bare `.card` / `.table` /
+   `.input` / `.btn` / `.bar`). Those bare names would collide with an existing
+   Tailwind + shadcn app the moment anything else adopts them. A future
+   whole-app port can drop the prefix in one pass.
+   ========================================================================== */
+
+[data-ths='v2'] {
+  /* ---- Ground ----------------------------------------------------------- */
+  --color-bg: #fbf8f4;
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-text: #1b2b2a; /* 14.0:1 on bg */
+
+  /* ---- Primary accent — brand teal, stepped down for the light ground.
+          The bright #41E0C6 is 1.6:1 here (invisible), so the accent is the
+          700 — same hue, 7.1:1. The deep brand hexes are unchanged. -------- */
+  --color-accent: #135e5a;
+  --color-accent-100: #e8fcf7;
+  --color-accent-200: #c2f6eb;
+  --color-accent-300: #8cecdb;
+  --color-accent-400: #41e0c6;
+  --color-accent-500: #2dbda9;
+  --color-accent-600: #1c8b82; /* legacy brand teal — unchanged            */
+  --color-accent-700: #135e5a; /* legacy brand deep — unchanged, == accent */
+  --color-accent-800: #0e3a3a; /* legacy brand section — unchanged         */
+  --color-accent-900: #0a2625;
+
+  /* ---- Secondary accent — coral. DECORATION ONLY, carries no severity. --- */
+  --color-accent-2: #bf533a; /* 4.9:1 */
+  --color-accent-2-100: #fff4f1;
+  --color-accent-2-200: #ffe2db;
+  --color-accent-2-300: #fec9bc;
+  --color-accent-2-400: #feac98;
+  --color-accent-2-500: #f18065;
+  --color-accent-2-600: #bf533a;
+  --color-accent-2-700: #873421;
+  --color-accent-2-800: #571e10;
+  --color-accent-2-900: #3b1208;
+
+  /* ---- Danger — errors and destructive actions ONLY. -------------------- */
+  --color-danger: #d23a33; /* 4.7:1 */
+  --color-danger-100: #fff4f2;
+  --color-danger-200: #ffe2de;
+  --color-danger-300: #fec9c1;
+  --color-danger-400: #feaba1;
+  --color-danger-500: #ff6b5e;
+  --color-danger-600: #d23a33;
+  --color-danger-700: #971a18;
+  --color-danger-800: #620a0a;
+  --color-danger-900: #420606;
+
+  /* ---- Neutrals. See deviation 3 above — roles preserved, values relit.
+          100/200 are fills, 300–500 carry text, 600 is disabled-only. ----- */
+  --color-neutral-100: #f2f5f4; /* subtle fill just above surface          */
+  --color-neutral-200: #e4e9e6; /* hairlines, table rules                  */
+  --color-neutral-300: #3a4544; /* body copy · 9.4:1                       */
+  --color-neutral-400: #4d5454; /* secondary copy · 7.3:1                  */
+  --color-neutral-500: #5c6664; /* labels, captions · 5.6:1 — content floor */
+  --color-neutral-600: #737b7b; /* disabled text · 4.1:1 — NEVER live copy  */
+  --color-neutral-700: #4d5454; /* strong borders                          */
+  --color-neutral-800: #e4e9e6; /* ring for elev-sm on light               */
+  --color-neutral-900: #d7ded9;
+
+  /* ---- Status ----------------------------------------------------------- */
+  --color-ok: #027c57; /* 4.9:1 */
+  --color-warn: #9a6a00; /* 4.5:1 */
+  --color-info: #007397; /* 5.1:1 */
+  --color-muted: var(--color-neutral-500);
+
+  /* ---- Structure -------------------------------------------------------- */
+  --color-divider: color-mix(in srgb, var(--color-text) 16%, transparent);
+
+  /* ---- Chart series. Every fill below clears 3:1 on --color-surface, which
+          is the WCAG 1.4.11 bar for a graphical object. First four stay
+          distinguishable under deuteranopia (info before warn). ----------- */
+  --chart-1: var(--color-accent-600); /* #1C8B82 · 4.0:1 */
+  --chart-2: var(--color-accent-2-600); /* #BF533A · 4.9:1 */
+  --chart-3: #007397; /* 5.1:1 */
+  --chart-4: #9a6a00; /* 4.5:1 */
+  --chart-5: var(--color-accent-700); /* #135E5A · 7.6:1 */
+  --chart-6: var(--color-accent-2-700); /* #873421 · 8.3:1 */
+  --chart-grid: color-mix(in srgb, var(--color-text) 9%, transparent);
+  --chart-axis: var(--color-neutral-500);
+
+  /* ---- Type ------------------------------------------------------------- */
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
+
+  /* ---- Space — compact by default (0.70x). ------------------------------ */
+  --space-1: 2.8px;
+  --space-2: 5.6px;
+  --space-3: 8.4px;
+  --space-4: 11.2px;
+  --space-6: 16.8px;
+  --space-8: 22.4px;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+
+  /* ---- Elevation — a ring, then a shadow. ------------------------------- */
+  --shadow-sm: 0 0 0 1px var(--color-neutral-200);
+  --shadow-md: 0 0 0 1px var(--color-neutral-200), 0 6px 18px rgba(14, 58, 58, 0.1);
+  --shadow-lg: 0 0 0 1px var(--color-neutral-900), 0 16px 40px rgba(14, 58, 58, 0.16);
+  --shadow-accent: 0 0 0 1px color-mix(in srgb, var(--color-accent) 45%, transparent),
+    0 8px 20px -8px color-mix(in srgb, var(--color-accent) 35%, transparent);
+
+  /* ---- Rules — freestanding rules fade out 48px from each end. ---------- */
+  --rule-h: linear-gradient(
+    to right,
+    transparent,
+    var(--color-divider) 48px,
+    var(--color-divider) calc(100% - 48px),
+    transparent
+  );
+
+  --table-cell-pad: 8px;
+
+  /* ---- Motion ----------------------------------------------------------- */
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-1: 0.12s;
+  --dur-2: 0.22s;
+  --dur-3: 0.36s;
+}
+
+/* Comfortable density multiplies the compact scale by 1.45. Opt-in per subtree. */
+[data-ths='v2'][data-density='comfortable'],
+[data-ths='v2'] [data-density='comfortable'] {
+  --space-1: 4.06px;
+  --space-2: 8.12px;
+  --space-3: 12.18px;
+  --space-4: 16.24px;
+  --space-6: 24.36px;
+  --space-8: 32.48px;
+  --table-cell-pad: 11px;
+}
+
+/* High contrast — opt-in, for long shifts on bad monitors. */
+[data-ths='v2'][data-contrast='high'] {
+  --color-divider: color-mix(in srgb, var(--color-text) 32%, transparent);
+  --color-neutral-500: var(--color-neutral-400);
+  --color-neutral-600: var(--color-neutral-500);
+}
+
+/* ============================================================================
+   COMPONENTS
+   ========================================================================== */
+
+/* ---- Surfaces -------------------------------------------------------------- */
+[data-ths='v2'] .ths-card {
+  background: var(--color-surface);
+  border-radius: var(--radius-lg);
+  padding: var(--space-6);
+  color: var(--color-text);
+}
+/* A card whose child owns the padding (scrolling tables reach the card edge).
+   Declared as its own class rather than a `p-0` utility: every rule in this file
+   carries the [data-ths='v2'] ancestor, so a single-class Tailwind utility can
+   never win the specificity contest against one of them. Skin comes from these
+   classes; layout (flex/grid/gap/margin) still comes from utilities, which these
+   classes deliberately do not set. */
+[data-ths='v2'] .ths-card-flush {
+  padding: 0;
+  overflow: hidden;
+}
+[data-ths='v2'] .ths-elev-sm {
+  box-shadow: var(--shadow-sm);
+}
+[data-ths='v2'] .ths-elev-md {
+  box-shadow: var(--shadow-md);
+}
+[data-ths='v2'] .ths-elev-lg {
+  box-shadow: var(--shadow-lg);
+}
+/* One accent-lit card per screen, maximum. */
+[data-ths='v2'] .ths-card-lit {
+  box-shadow: var(--shadow-accent);
+}
+
+[data-ths='v2'] .ths-card-kicker {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-accent);
+}
+[data-ths='v2'] .ths-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+/* Body copy inside a card — descriptions, captions that are read, not scanned.
+   Distinct from .ths-card-meta, which is the smaller label/timestamp role. */
+[data-ths='v2'] .ths-card-body {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--color-neutral-400); /* 7.3:1 */
+}
+[data-ths='v2'] .ths-card-meta {
+  font-size: 11.5px;
+  color: var(--color-neutral-500); /* 5.6:1 */
+}
+
+/* ---- Tenant identity ------------------------------------------------------
+   v2 has ONE accent (teal), and it stays the accent everywhere on this page.
+   These are the narrow exception: a per-tenant identity color used ONLY as a
+   decorative mark next to a card's own tenant label, so the two stacked charts
+   on the Consolidated view are distinguishable at a glance. Values are the
+   tenants' existing --brand-ink hexes from globals.css, both legal on this
+   ground (navy 14:1, violet 8.7:1). Never used for text, state or severity, and
+   the tenant name is always spelled out beside the mark — so the color is never
+   the sole carrier of meaning (WCAG 1.4.1).
+--------------------------------------------------------------------------- */
+[data-ths='v2'] [data-tenant] {
+  --tenant: var(--color-accent);
+}
+[data-ths='v2'] [data-tenant='bxr'] {
+  --tenant: #1a1a2e;
+}
+[data-ths='v2'] [data-tenant='indigo'] {
+  --tenant: #5b2a9e;
+}
+
+/* ---- KPI tile ------------------------------------------------------------- */
+[data-ths='v2'] .ths-kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+[data-ths='v2'] .ths-kpi-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-neutral-500);
+}
+[data-ths='v2'] .ths-kpi-value {
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+[data-ths='v2'] .ths-kpi-delta {
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+[data-ths='v2'] .ths-kpi-sub {
+  font-size: 11px;
+  color: var(--color-neutral-500);
+}
+
+/* ---- Tags — a label, never a button. ------------------------------------- */
+[data-ths='v2'] .ths-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1.5px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+[data-ths='v2'] .ths-tag-accent {
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+[data-ths='v2'] .ths-tag-accent-2 {
+  color: var(--color-accent-2);
+  background: color-mix(in srgb, var(--color-accent-2) 12%, transparent);
+}
+[data-ths='v2'] .ths-tag-ok {
+  color: var(--color-ok);
+  background: color-mix(in srgb, var(--color-ok) 12%, transparent);
+}
+[data-ths='v2'] .ths-tag-warn {
+  color: var(--color-warn);
+  background: color-mix(in srgb, var(--color-warn) 14%, transparent);
+}
+[data-ths='v2'] .ths-tag-danger {
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+}
+[data-ths='v2'] .ths-tag-info {
+  color: var(--color-info);
+  background: color-mix(in srgb, var(--color-info) 12%, transparent);
+}
+[data-ths='v2'] .ths-tag-neutral {
+  color: var(--color-neutral-400);
+  background: color-mix(in srgb, var(--color-text) 7%, transparent);
+}
+[data-ths='v2'] .ths-tag-outline {
+  color: var(--color-neutral-400);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--color-divider);
+}
+
+/* ---- Buttons — the accent is a line, never a flood. ---------------------- */
+[data-ths='v2'] .ths-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 30px;
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--color-text);
+  cursor: pointer;
+  transition:
+    background var(--dur-1) var(--ease),
+    border-color var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease);
+}
+[data-ths='v2'] .ths-btn:disabled {
+  color: var(--color-neutral-600);
+  border-color: var(--color-neutral-200);
+  cursor: not-allowed;
+}
+[data-ths='v2'] .ths-btn-primary {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+[data-ths='v2'] .ths-btn-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+[data-ths='v2'] .ths-btn-secondary {
+  border-color: var(--color-divider);
+  color: var(--color-text);
+}
+[data-ths='v2'] .ths-btn-secondary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-text) 5%, transparent);
+}
+[data-ths='v2'] .ths-btn-ghost {
+  color: var(--color-neutral-500);
+}
+[data-ths='v2'] .ths-btn-ghost:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-text) 5%, transparent);
+  color: var(--color-text);
+}
+[data-ths='v2'] .ths-btn-sm {
+  min-height: 26px;
+  font-size: 11.5px;
+  padding: var(--space-1) var(--space-3);
+}
+[data-ths='v2'] .ths-btn-icon {
+  width: 30px;
+  min-width: 30px;
+  padding: 0;
+}
+/* Both modifiers together must still be square — .ths-btn-sm only lowers the
+   min-height, which would otherwise leave a 30x26 icon button. */
+[data-ths='v2'] .ths-btn-icon.ths-btn-sm {
+  width: 26px;
+  min-width: 26px;
+}
+
+/* An expanded/pressed reveal-toggle reads as selected, not as a second primary
+   action. Both attributes are covered: aria-expanded is the correct semantic for a
+   disclosure button, aria-pressed for a stateful toggle. */
+[data-ths='v2'] .ths-btn[aria-pressed='true'],
+[data-ths='v2'] .ths-btn[aria-expanded='true'] {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+}
+
+/* ---- Fields -------------------------------------------------------------- */
+[data-ths='v2'] .ths-field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 11.5px;
+  color: var(--color-neutral-500);
+}
+[data-ths='v2'] .ths-input {
+  min-height: 30px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: 12.5px;
+}
+[data-ths='v2'] .ths-input:hover {
+  border-color: color-mix(in srgb, var(--color-text) 26%, transparent);
+}
+
+/* ---- Segmented control — a radio group that looks like a switch. --------- */
+[data-ths='v2'] .ths-seg {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-text) 5%, transparent);
+}
+[data-ths='v2'] .ths-seg-opt {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-radius: calc(var(--radius-md) - 2px);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--color-neutral-500);
+  cursor: pointer;
+  transition:
+    background var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease);
+}
+[data-ths='v2'] .ths-seg-opt input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  margin: 0;
+  cursor: pointer;
+}
+[data-ths='v2'] .ths-seg-opt:hover {
+  color: var(--color-text);
+}
+[data-ths='v2'] .ths-seg-opt:has(input:checked) {
+  background: var(--color-surface);
+  color: var(--color-accent);
+  box-shadow: var(--shadow-sm);
+}
+
+/* ---- Focus — one visible ring for every interactive element. ------------- */
+[data-ths='v2'] :is(button, select, input, a, [tabindex]):focus-visible,
+[data-ths='v2'] .ths-seg-opt:has(input:focus-visible) {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* ---- Table — numeric columns right-align and go tabular. ----------------- */
+[data-ths='v2'] .ths-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+[data-ths='v2'] .ths-table thead th {
+  padding: var(--space-2) 10px;
+  text-align: left;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-neutral-500);
+  border-bottom: 1px solid var(--color-divider);
+  white-space: nowrap;
+}
+[data-ths='v2'] .ths-table tbody td {
+  padding: var(--table-cell-pad) 10px;
+  color: var(--color-neutral-300);
+  border-bottom: 1px solid var(--color-neutral-200);
+}
+[data-ths='v2'] .ths-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+[data-ths='v2'] .ths-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--color-text) 4%, transparent);
+}
+/* Left-aligned but still tabular — dates and codes, where right-aligning would
+   read as a quantity. */
+[data-ths='v2'] .ths-table .mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+[data-ths='v2'] .ths-table .num,
+[data-ths='v2'] .ths-table th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+[data-ths='v2'] .ths-table thead th.num {
+  font-family: inherit;
+}
+/* A row that is itself a control (opens a drill-down). Cursor + wash only; the
+   selected row keeps a persistent wash so the open panel's subject is obvious. */
+[data-ths='v2'] .ths-row-click {
+  cursor: pointer;
+}
+[data-ths='v2'] .ths-row-active td,
+[data-ths='v2'] .ths-row-click:hover td {
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+[data-ths='v2'] .ths-table-total td {
+  border-top: 2px solid var(--color-divider);
+  font-weight: 600;
+  color: var(--color-text);
+}
+/* Sticky head for the scrolling drill-down tables. */
+[data-ths='v2'] .ths-table-sticky thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--color-surface);
+}
+/* Wide content scrolls inside its own box; the page never scrolls sideways. */
+[data-ths='v2'] .ths-scroll-x {
+  overflow-x: auto;
+}
+
+/* ---- Chart tooltip — a raised card at tooltip scale, so it never inherits
+        .ths-card's 16.8px padding. ---------------------------------------- */
+[data-ths='v2'] .ths-tooltip {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-md);
+  font-size: 11.5px;
+  color: var(--color-neutral-300);
+}
+[data-ths='v2'] .ths-tooltip dd {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--color-text);
+}
+/* The bar's own total — the one figure the reader is checking. */
+[data-ths='v2'] .ths-tooltip dd.total {
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+/* ---- Text roles — so a component never hard-codes a status color. --------- */
+[data-ths='v2'] .ths-text-accent {
+  color: var(--color-accent);
+}
+[data-ths='v2'] .ths-text-muted {
+  color: var(--color-neutral-500);
+}
+[data-ths='v2'] .ths-text-ok {
+  color: var(--color-ok);
+}
+[data-ths='v2'] .ths-text-warn {
+  color: var(--color-warn);
+}
+[data-ths='v2'] .ths-text-danger {
+  color: var(--color-danger);
+}
+
+/* ---- Notice / alert strips ------------------------------------------------ */
+/* Informational, accent-led. The left rule carries the emphasis so the strip does
+   not shout — it appears on a normal first-of-month, not on a failure. */
+[data-ths='v2'] .ths-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  border-left: 2px solid var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 7%, transparent);
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--color-neutral-400);
+}
+/* Something is actually wrong. Danger, never decoration. */
+[data-ths='v2'] .ths-alert {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  border-left: 2px solid var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+  font-size: 12.5px;
+  color: var(--color-danger);
+}
+
+/* ---- Empty / pending state ------------------------------------------------ */
+[data-ths='v2'] .ths-empty-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+}
+
+/* ---- Rules, dots, misc --------------------------------------------------- */
+[data-ths='v2'] .ths-hr {
+  height: 1px;
+  border: 0;
+  margin: var(--space-6) 0;
+  background: var(--rule-h);
+}
+[data-ths='v2'] .ths-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}

@@ -9,11 +9,13 @@
  *  • Month — "June (MTD)" (the current 2026 month) plus every prior 2026 month
  *            with data (May…January), reverse-chron. 2026 only.
  *
- * The chart rendering itself reuses the exact recharts bodies, tooltips, legends,
- * and color tokens from the originals (FacilityKpiBars / PayerGapBars), so there
- * is no visual regression. Data scoping per selection:
+ * Rendered in the Treat Design System v2 light-mode layer (app/app/ths-v2.css),
+ * which the Overview page opts into with data-ths='v2'. Data scoping per selection:
  *
- *  • Facility · MTD  → cached loadCollectionsKpis() (stacked MTD + YTD bars).
+ *  • Facility · MTD  → cached loadCollectionsKpis(), reshaped by mtdGrossRows() into
+ *                      the same Checks+EFT bars every other month renders.
+ *  • Facility · YTD  → the same cached aggregate, as a separate horizontal ranking
+ *                      chart below the month chart (FacilityYtdBars).
  *  • Facility · past → loadCollectionsDailyRange({year,month}) aggregated to a
  *                      single gross bar per facility (tooltip: Gross/Checks/EFT).
  *  • Payer · any month → month-scoped for EVERY month incl. the current one:
@@ -39,8 +41,6 @@ import {
 
 import { CalendarClock, Download, Filter, X } from 'lucide-react';
 
-import { Button } from '@/components/ui/button';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ControlSelect } from '@/components/data-grid';
 import { PayerGapBars, payerChartRows } from '@/components/payer-chart';
 import { money, moneyAxis } from '@/lib/format';
@@ -58,9 +58,30 @@ import {
 } from '@/lib/actions';
 import { facilityLabel } from '../../../src/collections/summaryTypes';
 import type { CmdPayerFacilityRow } from '../../../src/collections/cmdPayerRollup';
-import { CHART_COLORS, FacilityKpiBars, kpiChartRows, LegendSwatch } from './collections';
-import { MiniBar, useWidget, WidgetCard } from './widgets';
-import { type DashboardView } from '@/lib/views';
+import { MiniBar, useWidget } from './widgets';
+import { viewTitle, type DashboardView } from '@/lib/views';
+
+/**
+ * Chart palette — Treat Design System v2 tokens, resolved at paint time from the
+ * [data-ths='v2'] scope this page renders inside (see app/app/ths-v2.css). Every
+ * fill clears 3:1 on the card surface, the WCAG 1.4.11 bar for a graphical object.
+ *
+ * EFT takes the primary teal because it is the dominant payment type in every
+ * month of this data; Checks takes coral, which in v2 is explicitly DECORATION and
+ * carries no severity — a coral segment must never read as "something is wrong".
+ * The YTD ranking chart takes the deep teal so the two facility charts on this page
+ * can never be confused at a glance.
+ */
+const CHART = {
+  eft: 'var(--chart-1)',
+  checks: 'var(--chart-2)',
+  ytd: 'var(--chart-5)',
+  grid: 'var(--chart-grid)',
+  axis: 'var(--chart-axis)',
+} as const;
+
+/** Bar hover wash — the accent at 6%, matching the v2 table row-hover weight. */
+const BAR_CURSOR_FILL = 'rgba(28,139,130,0.06)';
 
 /** The chart card title per view (so an Indigo/Consolidated view isn't mislabeled "BXR"). */
 function chartTitleFor(view: DashboardView): string {
@@ -125,6 +146,34 @@ function aggregateGrossByFacility(rows: CollectionsDailyResult['rows']): Facilit
   return [...byFacility.values()].sort((a, b) => b.gross - a.gross);
 }
 
+/**
+ * The CURRENT month's rows in the same shape as a past month's, so every month
+ * renders through one chart. The KPI aggregate is already loaded and already
+ * month-to-date, so this is a reshape — no fetch, no re-aggregation.
+ */
+function mtdGrossRows(data: CollectionsKpis): FacilityGrossRow[] {
+  return data.by_facility
+    .map((r) => ({
+      facility: facilityLabel(r),
+      facility_code: r.facility_code,
+      blank: r.facility_name === null,
+      gross: r.mtd_gross,
+      checks: r.mtd_checks,
+      eft: r.mtd_eft,
+    }))
+    .sort((a, b) => b.gross - a.gross);
+}
+
+/** One legend entry: a color dot + its label. Replaces the v1 square swatch. */
+function LegendDot({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className="ths-dot" style={{ color }} />
+      {label}
+    </span>
+  );
+}
+
 function FacilityGrossTooltip({
   active,
   payload,
@@ -141,25 +190,34 @@ function FacilityGrossTooltip({
   // gross = checks + eft (verified). The bar splits gross into Checks + EFT; Gross
   // is shown last as the summary total (the bar length), not a stacked segment.
   return (
-    <div className="rounded-md border border-line bg-surface px-3 py-2 text-xs shadow-ths">
-      <div className="mb-1 font-semibold text-ink900">{r.facility}</div>
-      <dl className="grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5 tabular-nums">
-        <dt className="text-muted-foreground">{prefix}Checks</dt>
-        <dd className="text-right text-ink900">{money(r.checks)}</dd>
-        <dt className="text-muted-foreground">{prefix}EFT</dt>
-        <dd className="text-right text-ink900">{money(r.eft)}</dd>
-        <dt className="text-muted-foreground">{prefix}Gross</dt>
-        <dd className="text-right text-[var(--brand-ink)]">{money(r.gross)}</dd>
+    <div className="ths-tooltip">
+      <div className="ths-card-title mb-1">{r.facility}</div>
+      <dl className="grid grid-cols-[auto_auto] gap-x-4 gap-y-0.5">
+        <dt>{prefix}Checks</dt>
+        <dd>{money(r.checks)}</dd>
+        <dt>{prefix}EFT</dt>
+        <dd>{money(r.eft)}</dd>
+        <dt>{prefix}Gross</dt>
+        <dd className="total">{money(r.gross)}</dd>
       </dl>
     </div>
   );
 }
 
 /**
- * Per-facility payment-type bars (past-month facility view). Month gross splits
- * into its two payment types — Checks + EFT (verified identity: gross = checks +
- * eft) — as two non-overlapping segments summing to month gross (the bar length).
- * Reuses the same axes and money formatters as the MTD chart.
+ * Per-facility payment-type bars — the facility view for EVERY month, current
+ * included. Month gross splits into its two payment types (verified identity:
+ * gross = checks + eft) as two non-overlapping segments summing to month gross,
+ * the bar height.
+ *
+ * WHY THIS IS NOW THE ONLY FACILITY-BY-MONTH CHART: the current month used to get
+ * a different, three-series chart that stacked this month's Checks + EFT under
+ * `ytd_remaining` (= YTD gross − MTD gross) and set bar height to YTD gross. That
+ * mixed two time bases in one stack, so the amber residual was 80–95% of every bar
+ * and dwarfed the segments the reader came for — and because `ytd_remaining` is a
+ * derived residual that exists nowhere else in the product, the tooltip never named
+ * it. Year-to-date now has its own chart (FacilityYtdBars) where the comparison is
+ * the point, instead of riding along on top of a month.
  */
 function FacilityGrossBars({
   rows,
@@ -190,7 +248,7 @@ function FacilityGrossBars({
               if (onBarClick && typeof code === 'string') onBarClick(code);
             }}
           >
-            <CartesianGrid vertical={false} stroke="#E4E9E6" />
+            <CartesianGrid vertical={false} stroke={CHART.grid} />
             <XAxis
               type="category"
               dataKey="facility"
@@ -198,28 +256,126 @@ function FacilityGrossBars({
               angle={-35}
               textAnchor="end"
               height={64}
-              tick={{ fontSize: 10, fill: '#4A5C5A' }}
-              stroke="#E4E9E6"
+              tick={{ fontSize: 10, fill: CHART.axis }}
+              stroke={CHART.grid}
             />
             <YAxis
               type="number"
               tickFormatter={moneyAxis}
               width={64}
-              tick={{ fontSize: 11, fill: '#63756E' }}
-              stroke="#E4E9E6"
+              tick={{ fontSize: 11, fill: CHART.axis }}
+              stroke={CHART.grid}
             />
-            <Tooltip content={<FacilityGrossTooltip monthLabel={monthLabel} />} cursor={{ fill: 'rgba(28,139,130,0.06)' }} />
+            <Tooltip content={<FacilityGrossTooltip monthLabel={monthLabel} />} cursor={{ fill: BAR_CURSOR_FILL }} />
             {/* Stacked bottom→top: Checks → EFT = month gross (bar height). */}
-            <Bar dataKey="checks" stackId="gross" name={`${monthLabel} Checks`} fill={CHART_COLORS.checks} radius={[0, 0, 0, 0]} />
-            <Bar dataKey="eft" stackId="gross" name={`${monthLabel} EFT`} fill={CHART_COLORS.eft} radius={[2, 2, 0, 0]} />
+            <Bar dataKey="checks" stackId="gross" name={`${monthLabel} Checks`} fill={CHART.checks} radius={[0, 0, 0, 0]} />
+            <Bar dataKey="eft" stackId="gross" name={`${monthLabel} EFT`} fill={CHART.eft} radius={[3, 3, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </div>
 
-      <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
-        <LegendSwatch color={CHART_COLORS.checks} label={`${monthLabel} Checks`} />
-        <LegendSwatch color={CHART_COLORS.eft} label={`${monthLabel} EFT`} />
-        <span className="ml-auto">Bar height = month gross.</span>
+      <div className="ths-card-meta flex flex-wrap items-center gap-4">
+        <LegendDot color={CHART.checks} label={`${monthLabel} Checks`} />
+        <LegendDot color={CHART.eft} label={`${monthLabel} EFT`} />
+        <span className="ml-auto">Bar height = {monthLabel || 'month'} gross.</span>
+      </div>
+    </>
+  );
+}
+
+/**
+ * Axis-label guard for the YTD chart. Facilities without a display acronym fall back
+ * to their full CMD name ("CROWN VIEW CO-OCCURRING INSTITUTE - 612335"), and recharts
+ * has no ellipsis of its own — an over-long tick just overlaps its neighbours. The
+ * tooltip always shows the untruncated name, so nothing is lost.
+ */
+function truncateLabel(value: string): string {
+  return value.length > 26 ? `${value.slice(0, 25)}…` : value;
+}
+
+/** A facility's year-to-date gross (the YTD ranking chart's row shape). */
+interface FacilityYtdRow {
+  facility: string;
+  facility_code: string | null;
+  ytd_gross: number;
+}
+
+/**
+ * Map the KPI aggregate to YTD rows, richest first. Same source as the month
+ * chart (kpis.by_facility), so the two charts can never disagree.
+ */
+function ytdRows(data: CollectionsKpis): FacilityYtdRow[] {
+  return data.by_facility
+    .map((r) => ({
+      facility: facilityLabel(r),
+      facility_code: r.facility_code,
+      ytd_gross: r.ytd_gross,
+    }))
+    .sort((a, b) => b.ytd_gross - a.ytd_gross);
+}
+
+function FacilityYtdTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: { payload: FacilityYtdRow }[];
+}) {
+  if (!active || !payload || payload.length === 0) return null;
+  const r = payload[0]!.payload;
+  return (
+    <div className="ths-tooltip">
+      <div className="ths-card-title mb-1">{r.facility}</div>
+      <dl className="grid grid-cols-[auto_auto] gap-x-4 gap-y-0.5">
+        <dt>YTD gross</dt>
+        <dd className="total">{money(r.ytd_gross)}</dd>
+      </dl>
+    </div>
+  );
+}
+
+/**
+ * "YTD gross by facility" — a single-series HORIZONTAL ranking chart.
+ *
+ * Horizontal on purpose, and it is the accessibility win in this pass: the vertical
+ * month chart has to rotate its category labels -35° and still truncates them, which
+ * is unreadable for Indigo's 30 facilities with names like "CROWN VIEW CO-OCCURRING
+ * INSTITUTE - 612335". Here every label is horizontal, left-aligned and read at a
+ * normal angle. The differing form is also what keeps this chart from being confused
+ * with the month chart above it.
+ *
+ * Deliberately NOT clickable: the drill-down panel shows one MONTH's daily rows, so a
+ * click here would open a month panel from a year-to-date bar. One chart, one claim.
+ */
+function FacilityYtdBars({ rows, year }: { rows: FacilityYtdRow[]; year: number }) {
+  // 22px per row keeps 30 facilities legible without a scroll; the floor stops a
+  // one-facility filter from rendering a single absurdly fat bar.
+  const height = Math.max(140, rows.length * 22 + 32);
+  return (
+    <>
+      <div role="img" aria-label={`Year-to-date ${year} gross collections by facility`} style={{ width: '100%', height }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={rows} layout="vertical" margin={{ top: 4, right: 64, bottom: 4, left: 8 }} barCategoryGap="22%">
+            <CartesianGrid horizontal={false} stroke={CHART.grid} />
+            <XAxis type="number" tickFormatter={moneyAxis} tick={{ fontSize: 11, fill: CHART.axis }} stroke={CHART.grid} />
+            <YAxis
+              type="category"
+              dataKey="facility"
+              width={168}
+              interval={0}
+              tickFormatter={truncateLabel}
+              tick={{ fontSize: 10, fill: CHART.axis }}
+              stroke={CHART.grid}
+            />
+            <Tooltip content={<FacilityYtdTooltip />} cursor={{ fill: BAR_CURSOR_FILL }} />
+            <Bar dataKey="ytd_gross" name={`YTD ${year} gross`} fill={CHART.ytd} radius={[0, 3, 3, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div className="ths-card-meta flex flex-wrap items-center gap-4">
+        <LegendDot color={CHART.ytd} label={`YTD ${year} gross`} />
+        <span className="ml-auto">Bar length = year-to-date gross.</span>
       </div>
     </>
   );
@@ -305,54 +461,54 @@ function FacilityDailyPanel({
   );
 
   return (
-    <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
+    <div className="ths-card ths-elev-md">
       <div className="mb-3 flex items-center justify-between gap-2">
-        <h3 className="text-sm font-semibold text-ink900">
+        <h3 className="ths-card-title">
           {facilityName} — {monthLabel}
         </h3>
-        <Button
+        <button
           type="button"
-          variant="ghost"
-          size="sm"
           onClick={onClose}
           aria-label="Close daily distribution"
-          className="text-ink600"
+          className="ths-btn ths-btn-ghost ths-btn-icon ths-btn-sm"
         >
-          <X className="h-4 w-4" />
-        </Button>
+          <X className="h-4 w-4" aria-hidden />
+        </button>
       </div>
 
       {facilityRows.length === 0 ? (
-        <div className="py-6 text-center text-sm text-muted-foreground">
+        <div className="ths-card-meta py-6 text-center">
           No data for this facility in {monthLabel}.
         </div>
       ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Date</TableHead>
-              <TableHead className="text-right">Checks</TableHead>
-              <TableHead className="text-right">EFT</TableHead>
-              <TableHead className="text-right">Gross</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {facilityRows.map((r) => (
-              <TableRow key={r.payment_date}>
-                <TableCell className="tabular-nums">{formatMmDdYyyy(r.payment_date)}</TableCell>
-                <TableCell className="text-right tabular-nums">{money(r.checks_amount)}</TableCell>
-                <TableCell className="text-right tabular-nums">{money(r.eft_amount)}</TableCell>
-                <TableCell className="text-right tabular-nums">{money(r.gross_amount)}</TableCell>
-              </TableRow>
-            ))}
-            <TableRow className="border-t-2 font-semibold">
-              <TableCell>TOTALS</TableCell>
-              <TableCell className="text-right tabular-nums">{money(totals.checks)}</TableCell>
-              <TableCell className="text-right tabular-nums">{money(totals.eft)}</TableCell>
-              <TableCell className="text-right tabular-nums">{money(totals.gross)}</TableCell>
-            </TableRow>
-          </TableBody>
-        </Table>
+        <div className="ths-scroll-x">
+          <table className="ths-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th className="num">Checks</th>
+                <th className="num">EFT</th>
+                <th className="num">Gross</th>
+              </tr>
+            </thead>
+            <tbody>
+              {facilityRows.map((r) => (
+                <tr key={r.payment_date}>
+                  <td className="mono">{formatMmDdYyyy(r.payment_date)}</td>
+                  <td className="num">{money(r.checks_amount)}</td>
+                  <td className="num">{money(r.eft_amount)}</td>
+                  <td className="num">{money(r.gross_amount)}</td>
+                </tr>
+              ))}
+              <tr className="ths-table-total">
+                <td>TOTALS</td>
+                <td className="num">{money(totals.checks)}</td>
+                <td className="num">{money(totals.eft)}</td>
+                <td className="num">{money(totals.gross)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
@@ -402,57 +558,57 @@ function PayerFacilityPanel({
   );
 
   return (
-    <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
+    <div className="ths-card ths-elev-md">
       <div className="mb-3 flex items-center justify-between gap-2">
-        <h3 className="text-sm font-semibold text-ink900">
+        <h3 className="ths-card-title">
           {payer} — {monthLabel}
         </h3>
-        <Button
+        <button
           type="button"
-          variant="ghost"
-          size="sm"
           onClick={onClose}
           aria-label="Close facility breakdown"
-          className="text-ink600"
+          className="ths-btn ths-btn-ghost ths-btn-icon ths-btn-sm"
         >
-          <X className="h-4 w-4" />
-        </Button>
+          <X className="h-4 w-4" aria-hidden />
+        </button>
       </div>
 
       {payerRows.length === 0 ? (
-        <div className="py-6 text-center text-sm text-muted-foreground">
+        <div className="ths-card-meta py-6 text-center">
           No facility breakdown for this payer in {monthLabel}.
         </div>
       ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Facility</TableHead>
-              <TableHead className="text-right">Charged</TableHead>
-              <TableHead className="text-right">Allowed</TableHead>
-              <TableHead className="text-right">Paid</TableHead>
-              <TableHead className="text-right">Gap</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {payerRows.map((r) => (
-              <TableRow key={r.facility_name ?? '(unassigned)'}>
-                <TableCell>{r.facility_name ?? '(unassigned)'}</TableCell>
-                <TableCell className="text-right tabular-nums">{money(r.total_charge)}</TableCell>
-                <TableCell className="text-right tabular-nums">{money(r.total_allowed)}</TableCell>
-                <TableCell className="text-right tabular-nums">{money(r.total_paid)}</TableCell>
-                <TableCell className="text-right tabular-nums">{money(r.total_collection_gap)}</TableCell>
-              </TableRow>
-            ))}
-            <TableRow className="border-t-2 font-semibold">
-              <TableCell>TOTALS</TableCell>
-              <TableCell className="text-right tabular-nums">{money(totals.charge)}</TableCell>
-              <TableCell className="text-right tabular-nums">{money(totals.allowed)}</TableCell>
-              <TableCell className="text-right tabular-nums">{money(totals.paid)}</TableCell>
-              <TableCell className="text-right tabular-nums">{money(totals.gap)}</TableCell>
-            </TableRow>
-          </TableBody>
-        </Table>
+        <div className="ths-scroll-x">
+          <table className="ths-table">
+            <thead>
+              <tr>
+                <th>Facility</th>
+                <th className="num">Charged</th>
+                <th className="num">Allowed</th>
+                <th className="num">Paid</th>
+                <th className="num">Gap</th>
+              </tr>
+            </thead>
+            <tbody>
+              {payerRows.map((r) => (
+                <tr key={r.facility_name ?? '(unassigned)'}>
+                  <td>{r.facility_name ?? '(unassigned)'}</td>
+                  <td className="num">{money(r.total_charge)}</td>
+                  <td className="num">{money(r.total_allowed)}</td>
+                  <td className="num">{money(r.total_paid)}</td>
+                  <td className="num">{money(r.total_collection_gap)}</td>
+                </tr>
+              ))}
+              <tr className="ths-table-total">
+                <td>TOTALS</td>
+                <td className="num">{money(totals.charge)}</td>
+                <td className="num">{money(totals.allowed)}</td>
+                <td className="num">{money(totals.paid)}</td>
+                <td className="num">{money(totals.gap)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
@@ -507,76 +663,76 @@ function PayerBreakdownTable({
   if (rows.length === 0 || dismissed) return null;
 
   return (
-    <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
+    <div className="ths-card ths-elev-md">
       <div className="flex items-center justify-between gap-3">
-        <h3 className="text-sm font-semibold text-ink900">Payer breakdown — {monthLabel}</h3>
-        <Button
+        <h3 className="ths-card-title">Payer breakdown — {monthLabel}</h3>
+        <button
           type="button"
-          variant="ghost"
-          size="sm"
           onClick={() => setDismissed(true)}
           aria-label="Close payer breakdown"
-          className="text-ink600"
+          className="ths-btn ths-btn-ghost ths-btn-icon ths-btn-sm"
         >
-          <X className="h-4 w-4" />
-        </Button>
+          <X className="h-4 w-4" aria-hidden />
+        </button>
       </div>
-      <p className="mb-3 mt-0.5 text-xs text-muted-foreground">
+      <p className="ths-card-meta mb-3 mt-0.5">
         Charged / Allowed / Paid / Collection gap per payer. Click a payer for its per-facility breakdown.
       </p>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Payer</TableHead>
-            <TableHead className="text-right">Charged</TableHead>
-            <TableHead className="text-right">Allowed</TableHead>
-            <TableHead className="text-right">Paid</TableHead>
-            <TableHead className="text-right">Collection Gap</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((r, i) => {
-            const label = r.payer_name ?? '(blank)';
-            const gapPct = r.total_charge > 0 ? (r.total_collection_gap / r.total_charge) * 100 : 0;
-            const active = selectedPayer === label;
-            return (
-              <TableRow
-                key={`${label}-${i}`}
-                onClick={() => onPayerClick(label)}
-                className={`cursor-pointer ${active ? 'bg-[var(--brand-soft)]' : 'hover:bg-[var(--brand-soft)]'}`}
-              >
-                <TableCell>
-                  {r.payer_name ?? <span className="text-muted-foreground">(blank)</span>}
-                </TableCell>
-                <TableCell className="text-right tabular-nums">{money(r.total_charge)}</TableCell>
-                <TableCell className="text-right tabular-nums">{money(r.total_allowed)}</TableCell>
-                <TableCell className="text-right tabular-nums">{money(r.total_paid)}</TableCell>
-                <TableCell className="text-right">
-                  <div className="flex items-center justify-end gap-2">
-                    <span className="tabular-nums">{money(r.total_collection_gap)}</span>
-                    <span className="w-14 shrink-0">
-                      <MiniBar pct={gapPct} />
-                    </span>
-                  </div>
-                </TableCell>
-              </TableRow>
-            );
-          })}
-          <TableRow className="border-t-2 font-semibold">
-            <TableCell>TOTALS</TableCell>
-            <TableCell className="text-right tabular-nums">{money(totals.charge)}</TableCell>
-            <TableCell className="text-right tabular-nums">{money(totals.allowed)}</TableCell>
-            <TableCell className="text-right tabular-nums">{money(totals.paid)}</TableCell>
-            <TableCell className="text-right tabular-nums">{money(totals.gap)}</TableCell>
-          </TableRow>
-        </TableBody>
-      </Table>
+      <div className="ths-scroll-x">
+        <table className="ths-table">
+          <thead>
+            <tr>
+              <th>Payer</th>
+              <th className="num">Charged</th>
+              <th className="num">Allowed</th>
+              <th className="num">Paid</th>
+              <th className="num">Collection Gap</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => {
+              const label = r.payer_name ?? '(blank)';
+              const gapPct = r.total_charge > 0 ? (r.total_collection_gap / r.total_charge) * 100 : 0;
+              const active = selectedPayer === label;
+              return (
+                <tr
+                  key={`${label}-${i}`}
+                  onClick={() => onPayerClick(label)}
+                  className={`ths-row-click${active ? ' ths-row-active' : ''}`}
+                >
+                  <td>
+                    {r.payer_name ?? <span className="ths-card-meta">(blank)</span>}
+                  </td>
+                  <td className="num">{money(r.total_charge)}</td>
+                  <td className="num">{money(r.total_allowed)}</td>
+                  <td className="num">{money(r.total_paid)}</td>
+                  <td className="num">
+                    <div className="flex items-center justify-end gap-2">
+                      <span className="mono">{money(r.total_collection_gap)}</span>
+                      <span className="w-14 shrink-0">
+                        <MiniBar pct={gapPct} />
+                      </span>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+            <tr className="ths-table-total">
+              <td>TOTALS</td>
+              <td className="num">{money(totals.charge)}</td>
+              <td className="num">{money(totals.allowed)}</td>
+              <td className="num">{money(totals.paid)}</td>
+              <td className="num">{money(totals.gap)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
 function ChartLoading() {
-  return <div className="py-12 text-center text-sm text-muted-foreground">Loading…</div>;
+  return <div className="ths-card-meta py-12 text-center">Loading…</div>;
 }
 
 function ChartError() {
@@ -606,15 +762,15 @@ function ChartEmpty({
   const Icon = variant === 'filtered' ? Filter : CalendarClock;
   return (
     <div className="flex flex-col items-center justify-center gap-2 py-14 text-center">
-      <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--brand-soft)] text-[var(--brand-ink)]">
+      <span className="ths-empty-icon">
         <Icon className="h-5 w-5" aria-hidden />
       </span>
-      <div className="text-sm font-semibold text-ink900">{title}</div>
-      {subtitle && <p className="max-w-xs text-xs text-muted-foreground">{subtitle}</p>}
+      <div className="ths-card-title">{title}</div>
+      {subtitle && <p className="ths-card-meta max-w-xs">{subtitle}</p>}
       {action && (
-        <Button type="button" variant="outline" size="sm" className="mt-1" onClick={action.onClick}>
+        <button type="button" className="ths-btn ths-btn-primary ths-btn-sm mt-1" onClick={action.onClick}>
           {action.label}
-        </Button>
+        </button>
       )}
     </div>
   );
@@ -848,11 +1004,11 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
   const monthLabel = month ? `${monthName} ${anchorYear}` : '';
   const clickHint = ' Click a facility for its daily breakdown.';
   const payerClickHint = ' Click a payer for its facility breakdown.';
+  // One sentence for every month now that the current month renders through the same
+  // chart as the rest; only the "month to date" qualifier differs.
   const description =
     view === 'facility'
-      ? isMtd
-        ? `MTD vs. YTD gross by facility, sorted by YTD gross.${clickHint}`
-        : `${monthLabel} gross by facility, sorted by gross.${clickHint}`
+      ? `${monthLabel} gross by facility${isMtd ? ' (month to date)' : ''}, sorted by gross.${clickHint}`
       : `Top ${PAYER_TOP_N} payers by total charged (${monthLabel}) — paid vs. collection gap.${payerClickHint}`;
 
   // Daily rows for the selected month (drill-down): cached latest-month rows for
@@ -877,7 +1033,9 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
     let table: string[][];
     if (isMtd) {
       if (kpisState.status !== 'ready') return;
-      const facilities = [...kpisState.data.by_facility].sort((a, b) => b.ytd_gross - a.ytd_gross);
+      // Sorted by the month's gross so the CSV row order matches the chart the user
+      // is looking at. The YTD column rides along as context (it backs the YTD chart).
+      const facilities = [...kpisState.data.by_facility].sort((a, b) => b.mtd_gross - a.mtd_gross);
       table = [
         ['Facility', 'Checks', 'EFT', 'Gross', 'YTD Gross'],
         ...facilities.map((r) => [
@@ -898,6 +1056,13 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
     downloadCsv(filename, table);
   }
 
+  // YTD ranking rows — same KPI aggregate as the month chart, narrowed by the same
+  // Setting/Facility filters so the two charts always describe the same set of
+  // facilities. Independent of the Month picker on purpose: year-to-date is anchored
+  // to as_of, not to the month being inspected above, and the heading says so.
+  const ytdChartRows =
+    kpisState.status === 'ready' ? filterFacilityRows(ytdRows(kpisState.data)) : [];
+
   const facilityFiltersActive = careFilter !== 'ALL' || facilityFilter !== '';
   const resetFacilityFilters = () => {
     setCareFilter('ALL');
@@ -915,7 +1080,7 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
       if (isMtd) {
         if (kpisState.status === 'loading') return <ChartLoading />;
         if (kpisState.status === 'error') return <ChartError />;
-        const rows = filterFacilityRows(kpiChartRows(kpisState.data));
+        const rows = filterFacilityRows(mtdGrossRows(kpisState.data));
         if (rows.length === 0) {
           return facilityFiltersActive ? (
             <ChartEmpty
@@ -931,7 +1096,7 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
             />
           );
         }
-        return <FacilityKpiBars rows={rows} monthLabel="MTD" onBarClick={setSelectedFacility} />;
+        return <FacilityGrossBars rows={rows} monthLabel={monthName} onBarClick={setSelectedFacility} />;
       }
       if (past.kind === 'facility') {
         const rows = filterFacilityRows(past.rows);
@@ -984,10 +1149,23 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
   }
 
   return (
-    <WidgetCard title={chartTitleFor(scope)} state={{ status: 'ready' }}>
+    <section className="ths-card ths-elev-sm" data-tenant={scope}>
+      <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="ths-card-title text-base">{chartTitleFor(scope)}</h2>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Tenant mark + name. The name is what carries the meaning; the colored
+              dot only makes the two Consolidated cards scannable. */}
+          <span className="ths-tag ths-tag-outline">
+            <span className="ths-dot" style={{ color: 'var(--tenant)' }} />
+            {viewTitle(scope)}
+          </span>
+          {asOf && <span className="ths-card-meta">as of {asOf}</span>}
+        </div>
+      </header>
       <div className="space-y-4">
         <div className="flex flex-wrap items-center gap-3">
           <ControlSelect
+            className="ths-input"
             label="View"
             value={view}
             ariaLabel="Chart view"
@@ -1003,6 +1181,7 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
             <option value="payer">By Payer</option>
           </ControlSelect>
           <ControlSelect
+            className="ths-input"
             label="Month"
             value={month ?? ''}
             ariaLabel="Month"
@@ -1017,6 +1196,7 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
           {view === 'facility' && (
             <>
               <ControlSelect
+                className="ths-input"
                 label="Setting"
                 value={careFilter}
                 ariaLabel="Inpatient / Outpatient filter"
@@ -1030,6 +1210,7 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
                 <option value="OP">OP only</option>
               </ControlSelect>
               <ControlSelect
+                className="ths-input"
                 label="Facility"
                 value={facilityFilter}
                 ariaLabel="Facility filter"
@@ -1046,6 +1227,7 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
           )}
           {view === 'payer' && (
             <ControlSelect
+              className="ths-input"
               label="Payer"
               value={payerFilter}
               ariaLabel="Payer filter"
@@ -1060,21 +1242,19 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
             </ControlSelect>
           )}
           {view === 'facility' && (
-            <Button
+            <button
               type="button"
-              variant="outline"
-              size="sm"
               onClick={handleExport}
               disabled={!canExport}
-              className="ml-auto"
+              className="ths-btn ths-btn-secondary ths-btn-sm ml-auto"
             >
-              <Download className="h-4 w-4" />
+              <Download className="h-4 w-4" aria-hidden />
               Export CSV
-            </Button>
+            </button>
           )}
         </div>
 
-        <div className="text-sm text-muted-foreground">{description}</div>
+        <p className="ths-card-body">{description}</p>
 
         {chartArea()}
 
@@ -1098,23 +1278,21 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
                 onClose={() => setSelectedFacility(null)}
               />
             ) : (
-              <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
+              <div className="ths-card ths-elev-md">
                 <div className="mb-2 flex items-center justify-between gap-2">
-                  <h3 className="text-sm font-semibold text-ink900">
+                  <h3 className="ths-card-title">
                     {selectedFacilityName} — {monthLabel}
                   </h3>
-                  <Button
+                  <button
                     type="button"
-                    variant="ghost"
-                    size="sm"
                     onClick={() => setSelectedFacility(null)}
                     aria-label="Close daily distribution"
-                    className="text-ink600"
+                    className="ths-btn ths-btn-ghost ths-btn-icon ths-btn-sm"
                   >
-                    <X className="h-4 w-4" />
-                  </Button>
+                    <X className="h-4 w-4" aria-hidden />
+                  </button>
                 </div>
-                <div className="py-6 text-center text-sm text-muted-foreground">
+                <div className="ths-card-meta py-6 text-center">
                   {dailyError ? 'Unable to load the daily distribution.' : 'Loading daily distribution…'}
                 </div>
               </div>
@@ -1133,6 +1311,41 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
           </div>
         )}
       </div>
-    </WidgetCard>
+
+      {/* ── Second chart: year-to-date. Its own heading, its own form (horizontal),
+             its own single series — so it reads as a separate claim about the data
+             rather than a segment sitting on top of the month above it. ────────── */}
+      {view === 'facility' && kpisState.status === 'ready' && (
+        <>
+          <hr className="ths-hr" />
+          <section>
+            <header className="mb-1 flex flex-wrap items-center justify-between gap-2">
+              <h3 className="ths-card-title">YTD gross by facility</h3>
+              <span className="ths-card-meta">
+                {anchorYear} year to date{asOf ? ` · as of ${asOf}` : ''}
+              </span>
+            </header>
+            <p className="ths-card-body mb-3">
+              Every facility&apos;s {anchorYear} collections to date, richest first. Not clickable —
+              the daily breakdown above belongs to the selected month.
+            </p>
+            {ytdChartRows.length === 0 ? (
+              <ChartEmpty
+                variant={facilityFiltersActive ? 'filtered' : undefined}
+                title={facilityFiltersActive ? 'No facilities match' : 'No collections yet'}
+                subtitle={
+                  facilityFiltersActive
+                    ? 'Adjust the IP/OP setting or facility filter to see year-to-date gross.'
+                    : `No ${anchorYear} collections have posted yet.`
+                }
+                action={facilityFiltersActive ? { label: 'Reset filters', onClick: resetFacilityFilters } : undefined}
+              />
+            ) : (
+              <FacilityYtdBars rows={ytdChartRows} year={anchorYear} />
+            )}
+          </section>
+        </>
+      )}
+    </section>
   );
 }

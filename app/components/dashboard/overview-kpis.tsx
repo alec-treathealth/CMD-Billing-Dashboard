@@ -30,10 +30,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { CalendarClock, Filter, Table2, X } from 'lucide-react';
 
-import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ControlSelect } from '@/components/data-grid';
 import { money } from '@/lib/format';
 import {
@@ -47,10 +44,10 @@ import {
   type CollectionsYoy,
   type FacilityDimensionRow,
 } from '@/lib/actions';
-import { type DashboardView } from '@/lib/views';
+import { BXR_ENTITY_ID, INDIGO_ENTITY_ID, type DashboardView } from '@/lib/views';
 import { EraUpcomingBody } from './era-upcoming';
 import type { EraUpcomingSummary } from '../../../src/veris/era835Upcoming.js';
-import { Kpi, useWidget } from './widgets';
+import { useWidget } from './widgets';
 
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -59,6 +56,22 @@ const MONTH_NAMES = [
 
 /** All Facilities care-setting filter. */
 type FacilitySetting = 'ALL' | 'IP' | 'OP';
+
+/**
+ * All Facilities book (tenant) filter. Consolidated sums BXR + Indigo into one roster, so this
+ * narrows it back to a single book. Meaningless on the bxr/indigo views — the book is already
+ * fixed there — so the control is rendered ONLY for 'consolidated'.
+ */
+type FacilityBook = 'ALL' | 'BXR' | 'INDIGO';
+
+/** Which book a row belongs to, from its (non-PHI) business_entity_id; null = neither/unknown. */
+function bookOf(entityId: string | null): Exclude<FacilityBook, 'ALL'> | null {
+  if (entityId === BXR_ENTITY_ID) return 'BXR';
+  if (entityId === INDIGO_ENTITY_ID) return 'INDIGO';
+  return null;
+}
+
+const BOOK_LABEL: Record<Exclude<FacilityBook, 'ALL'>, string> = { BXR: 'BXR', INDIGO: 'Indigo' };
 
 // --- pure date/number helpers (anchored to the live as_of, not wall-clock) --------
 
@@ -88,11 +101,11 @@ function pctChange(cur: number, prior: number): number | null {
 /** A small colored trend line: ▲ green / ▼ red / – neutral, with a label. */
 function Trend({ pct, label }: { pct: number | null; label: string }) {
   if (pct === null) {
-    return <span className="text-status-neutral">— {label}</span>;
+    return <span className="ths-text-muted">— {label}</span>;
   }
   const up = pct > 0.05;
   const down = pct < -0.05;
-  const cls = up ? 'text-status-ok' : down ? 'text-status-danger' : 'text-status-neutral';
+  const cls = up ? 'ths-text-ok' : down ? 'ths-text-danger' : 'ths-text-muted';
   const arrow = up ? '▲' : down ? '▼' : '–';
   return (
     <span className={cls}>
@@ -131,21 +144,49 @@ function FreshnessRibbon({ asOf }: { asOf: string }) {
   return (
     <div
       role="status"
-      className="flex items-start gap-2.5 rounded-lg border border-line border-l-2 border-l-[var(--brand-accent)] bg-[var(--brand-soft)] px-3.5 py-2.5"
+      className="ths-notice"
     >
-      <span className="relative mt-[3px] flex h-2 w-2 shrink-0" aria-hidden>
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--brand-accent)] opacity-60" />
-        <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--brand-accent)]" />
+      <span className="ths-text-accent relative mt-[3px] flex h-2 w-2 shrink-0" aria-hidden>
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-current opacity-50" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-current" />
       </span>
-      <p className="text-sm leading-snug">
-        <span className="font-semibold text-[var(--brand-ink)]">
+      <p>
+        <span className="ths-text-accent font-semibold">
           Showing {shownMonth} {y}
         </span>
-        <span className="text-muted-foreground">
+        <span>
           {' '}— latest complete data, as of {asOf}. {nextMonth} collections post throughout the
           month; this view updates daily (~6&nbsp;AM).
         </span>
       </p>
+    </div>
+  );
+}
+
+/**
+ * KPI tile, v2. Deliberately page-local rather than a new mode on the shared `Kpi`
+ * in widgets.tsx: that component still dresses the Collections surface, which this
+ * pass does not reskin, and a `variant` prop there would tie the two surfaces'
+ * redesigns to each other. When Collections is ported, the two converge and this
+ * one goes away.
+ */
+function V2Kpi({
+  label,
+  value,
+  detail,
+  sub,
+}: {
+  label: string;
+  value: string;
+  detail?: ReactNode;
+  sub?: ReactNode;
+}) {
+  return (
+    <div className="ths-card ths-elev-sm ths-kpi">
+      <div className="ths-kpi-label">{label}</div>
+      <div className="ths-kpi-value ths-num">{value}</div>
+      {detail && <div className="ths-kpi-delta ths-num">{detail}</div>}
+      {sub && <div className="ths-kpi-sub">{sub}</div>}
     </div>
   );
 }
@@ -155,13 +196,11 @@ function KpiSkeletonRow() {
   return (
     <div className="grid gap-3 sm:grid-cols-3">
       {[0, 1, 2].map((i) => (
-        <Card key={i} className="border-t-2 border-t-[var(--brand-accent)]">
-          <CardContent className="space-y-2 pb-4 pt-4">
-            <Skeleton className="h-3 w-20" />
-            <Skeleton className="h-6 w-28" />
-            <Skeleton className="h-3 w-24" />
-          </CardContent>
-        </Card>
+        <div key={i} className="ths-card ths-elev-sm space-y-2">
+          <Skeleton className="h-3 w-20" />
+          <Skeleton className="h-7 w-28" />
+          <Skeleton className="h-3 w-24" />
+        </div>
       ))}
     </div>
   );
@@ -183,18 +222,14 @@ function PanelToggleButton({
   children: ReactNode;
 }) {
   return (
-    <Button
+    <button
       type="button"
-      variant="outline"
-      size="sm"
       onClick={onToggle}
       aria-expanded={open}
-      className={`border-[var(--brand-ink)] bg-[var(--brand-ink)] text-white hover:bg-[var(--brand-ink)] hover:text-white hover:opacity-90 ${
-        open ? 'ring-2 ring-[var(--brand-accent)] ring-offset-1' : ''
-      }`}
+      className="ths-btn ths-btn-secondary ths-btn-sm"
     >
       {children}
-    </Button>
+    </button>
   );
 }
 
@@ -266,9 +301,7 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
   if (kpisState.status === 'loading') return <KpiSkeletonRow />;
   if (kpisState.status === 'error') {
     return (
-      <div className="rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-sm text-status-danger">
-        Unable to load the headline metrics.
-      </div>
+      <div className="ths-alert">Unable to load the headline metrics.</div>
     );
   }
 
@@ -304,13 +337,13 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
     <div className="space-y-3">
       {asOf && <FreshnessRibbon asOf={asOf} />}
       <div className="grid gap-3 sm:grid-cols-3">
-        <Kpi
+        <V2Kpi
           label={monthName ? `MTD Gross · ${monthName}` : 'MTD Gross'}
           value={money(mtdGross)}
           detail={<Trend pct={momPct} label={priorMonthName ? `vs ${priorMonthName}` : 'vs last month'} />}
           sub={asOf ? `as of ${asOf}` : undefined}
         />
-        <Kpi
+        <V2Kpi
           label="YTD Gross"
           value={money(ytdGross)}
           detail={
@@ -320,7 +353,7 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
           }
           sub={<Trend pct={yoyPct} label={yoy ? `YoY collected vs ${yoy.prior_year}` : 'YoY'} />}
         />
-        <Kpi
+        <V2Kpi
           label="Year Forecast"
           value={forecast === null ? '—' : money(forecast)}
           detail={
@@ -335,11 +368,11 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
 
       <div className="flex flex-wrap items-center gap-2">
         <PanelToggleButton open={facilitiesOpen} onToggle={() => setFacilitiesOpen((s) => !s)}>
-          <Table2 className="h-4 w-4" />
+          <Table2 className="h-4 w-4" aria-hidden />
           All Facilities Table
         </PanelToggleButton>
         <PanelToggleButton open={eraOpen} onToggle={() => setEraOpen((s) => !s)}>
-          <CalendarClock className="h-4 w-4" />
+          <CalendarClock className="h-4 w-4" aria-hidden />
           ERA-Confirmed Upcoming Payments
         </PanelToggleButton>
       </div>
@@ -401,28 +434,24 @@ function EraUpcomingPanel({
 
   if (!open) return null;
   return (
-    <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
+    <div className="ths-card ths-elev-sm">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <h3 className="text-sm font-semibold text-ink900">ERA-Confirmed Upcoming Payments</h3>
-        <Button
+        <h3 className="ths-card-title">ERA-Confirmed Upcoming Payments</h3>
+        <button
           type="button"
-          variant="ghost"
-          size="sm"
           onClick={onClose}
           aria-label="Close ERA-confirmed upcoming payments"
-          className="text-ink600"
+          className="ths-btn ths-btn-ghost ths-btn-icon ths-btn-sm"
         >
-          <X className="h-4 w-4" />
-        </Button>
+          <X className="h-4 w-4" aria-hidden />
+        </button>
       </div>
       {status === 'error' ? (
-        <div className="rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-sm text-status-danger">
-          Unable to load ERA-confirmed payments.
-        </div>
+        <div className="ths-alert">Unable to load ERA-confirmed payments.</div>
       ) : status === 'ready' && data ? (
         <EraUpcomingBody data={data} />
       ) : (
-        <div className="py-6 text-center text-sm text-muted-foreground">Loading…</div>
+        <div className="ths-card-meta py-6 text-center">Loading…</div>
       )}
     </div>
   );
@@ -433,6 +462,8 @@ interface FacilityTableRow {
   label: string;
   // CareSetting | null — includes 'BOTH' (a facility serving inpatient AND outpatient).
   careSetting: FacilityDimensionRow['care_setting'];
+  /** Owning book (BXR / Indigo); null when the entity id is neither. Shown on Consolidated only. */
+  book: Exclude<FacilityBook, 'ALL'> | null;
   checks: number;
   eft: number;
   gross: number;
@@ -442,6 +473,8 @@ interface FacilityTableRow {
 interface FacilityMonthTotals {
   facility_code: string | null;
   facility_name: string | null;
+  /** Owning tenant — carried by BOTH sources (kpis.by_facility and the daily rows). Non-PHI. */
+  business_entity_id: string | null;
   checks: number;
   eft: number;
   gross: number;
@@ -449,11 +482,17 @@ interface FacilityMonthTotals {
 
 /**
  * "All Facilities Table" — the full (un-paginated) per-facility table summed for a
- * selected month, with an IP/OP setting filter. `open` is owned by OverviewKpis (the
+ * selected month, with an IP/OP setting filter and — on the Consolidated view only — a
+ * BXR/Indigo book filter. `open` is owned by OverviewKpis (the
  * toggle button lives in its button row). Aggregate, non-PHI:
  * the current month reads the already-loaded MTD KPI rows; a past month fetches that
  * month's daily rows (loadCollectionsDailyRange) and sums them per facility. Joined to
  * the facility dimension for acronym labels + the IP/OP (care_setting) filter.
+ *
+ * The book filter needs no new query: business_entity_id already rides along on both
+ * sources (CollectionsFacilityKpi and CollectionsDailyRow), so it filters client-side over
+ * rows the panel has already loaded. Both filters are display-only narrowing — the TOTALS
+ * row sums the VISIBLE rows, so it always ties to what's on screen.
  */
 function AllFacilitiesTable({
   open,
@@ -473,6 +512,12 @@ function AllFacilitiesTable({
   view: DashboardView;
 }) {
   const [setting, setSetting] = useState<FacilitySetting>('ALL');
+  // The book filter only exists on Consolidated. Deriving the effective value (rather than
+  // resetting state on view change) means switching away and back can never leave the table
+  // silently narrowed by a control that isn't rendered.
+  const [book, setBook] = useState<FacilityBook>('ALL');
+  const showBook = view === 'consolidated';
+  const effectiveBook: FacilityBook = showBook ? book : 'ALL';
 
   const currentYear = asOf ? Number(asOf.slice(0, 4)) : null;
   const currentMonth = asOf ? Number(asOf.slice(5, 7)) : null;
@@ -506,9 +551,15 @@ function AllFacilitiesTable({
           setPastStatus('error');
           return;
         }
+        // Grouped by facility AND owning book, matching the KPI reader's own grain (it groups
+        // by facility_code, facility_name, business_entity_id). That keeps the book filter
+        // exact: a code that somehow appeared under both tenants — and the '(unassigned)'
+        // bucket, which legitimately can — stays attributable instead of being merged.
         const byFacility = new Map<string, FacilityMonthTotals>();
         for (const row of r.data.rows) {
-          const key = row.facility_code ?? '__unassigned__';
+          // Entity id first: it is a fixed-length uuid, so the join cannot be ambiguous
+          // whatever characters a facility code contains.
+          const key = `${row.business_entity_id}:${row.facility_code ?? '__unassigned__'}`;
           const e = byFacility.get(key);
           if (e) {
             e.checks += row.checks_amount;
@@ -518,6 +569,7 @@ function AllFacilitiesTable({
             byFacility.set(key, {
               facility_code: row.facility_code,
               facility_name: row.facility_name,
+              business_entity_id: row.business_entity_id,
               checks: row.checks_amount,
               eft: row.eft_amount,
               gross: row.gross_amount,
@@ -536,12 +588,13 @@ function AllFacilitiesTable({
   }, [open, isCurrent, month, currentYear, view]);
 
   // Rows for display: current month → MTD KPI rows; past month → fetched + aggregated.
-  // Joined to the dimension for the acronym label + IP/OP, then filtered by setting.
+  // Joined to the dimension for the acronym label + IP/OP, then filtered by setting + book.
   const rows = useMemo<FacilityTableRow[]>(() => {
     const source: FacilityMonthTotals[] = isCurrent
       ? kpis.by_facility.map((f) => ({
           facility_code: f.facility_code,
           facility_name: f.facility_name,
+          business_entity_id: f.business_entity_id,
           checks: f.mtd_checks,
           eft: f.mtd_eft,
           gross: f.mtd_gross,
@@ -553,6 +606,7 @@ function AllFacilitiesTable({
         return {
           label: dim?.display_acronym ?? f.facility_name ?? '(unassigned)',
           careSetting: dim?.care_setting ?? null,
+          book: bookOf(f.business_entity_id),
           checks: f.checks,
           eft: f.eft,
           gross: f.gross,
@@ -560,8 +614,11 @@ function AllFacilitiesTable({
       })
       // A 'BOTH' facility (serves inpatient AND outpatient) is a member of both filters.
       .filter((r) => setting === 'ALL' || r.careSetting === setting || r.careSetting === 'BOTH')
+      // Book filter: an unattributable row (book === null) is excluded by a specific book rather
+      // than silently counted under it — the TOTALS row must equal the book actually selected.
+      .filter((r) => effectiveBook === 'ALL' || r.book === effectiveBook)
       .sort((a, b) => b.gross - a.gross);
-  }, [isCurrent, kpis, pastRows, dimByCode, setting]);
+  }, [isCurrent, kpis, pastRows, dimByCode, setting, effectiveBook]);
 
   const totals = useMemo(
     () =>
@@ -584,14 +641,18 @@ function AllFacilitiesTable({
 
   if (!open) return null;
   return (
-    <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
+    <div className="ths-card ths-elev-sm">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <h3 className="text-sm font-semibold text-ink900">
-          All facilities{monthName && currentYear ? ` — ${monthName} ${currentYear}` : ''}
+        <h3 className="ths-card-title">
+          {/* The heading names the active book so a narrowed table is never mistaken for the
+              whole consolidated roster. */}
+          {effectiveBook === 'ALL' ? 'All facilities' : `${BOOK_LABEL[effectiveBook]} facilities`}
+          {monthName && currentYear ? ` — ${monthName} ${currentYear}` : ''}
           {isCurrent ? (isComplete ? ' (final)' : ' (MTD)') : ''}
         </h3>
         <div className="flex flex-wrap items-center gap-3">
           <ControlSelect
+            className="ths-input"
             label="Month"
             value={month ?? ''}
             ariaLabel="Month"
@@ -605,7 +666,22 @@ function AllFacilitiesTable({
               </option>
             ))}
           </ControlSelect>
+          {/* Consolidated only — the bxr/indigo views are already a single book. */}
+          {showBook && (
+            <ControlSelect
+              className="ths-input"
+              label="Book"
+              value={book}
+              ariaLabel="BXR / Indigo book filter"
+              onChange={(v) => setBook(v as FacilityBook)}
+            >
+              <option value="ALL">BXR &amp; Indigo</option>
+              <option value="BXR">BXR only</option>
+              <option value="INDIGO">Indigo only</option>
+            </ControlSelect>
+          )}
           <ControlSelect
+            className="ths-input"
             label="Setting"
             value={setting}
             ariaLabel="Inpatient / Outpatient filter"
@@ -615,73 +691,90 @@ function AllFacilitiesTable({
             <option value="IP">IP only</option>
             <option value="OP">OP only</option>
           </ControlSelect>
-          <Button
+          <button
             type="button"
-            variant="ghost"
-            size="sm"
             onClick={onClose}
             aria-label="Close all facilities table"
-            className="text-ink600"
+            className="ths-btn ths-btn-ghost ths-btn-icon ths-btn-sm"
           >
-            <X className="h-4 w-4" />
-          </Button>
+            <X className="h-4 w-4" aria-hidden />
+          </button>
         </div>
       </div>
 
       {loadingPast ? (
-        <div className="py-6 text-center text-sm text-muted-foreground">Loading…</div>
+        <div className="ths-card-meta py-6 text-center">Loading…</div>
       ) : errorPast ? (
-        <div className="rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-sm text-status-danger">
-          Could not load that month.
-        </div>
+        <div className="ths-alert">Could not load that month.</div>
       ) : rows.length === 0 ? (
-        setting !== 'ALL' ? (
+        // "Filtered to nothing" is a different story from "no data" — say which filters did it and
+        // offer a one-click way back, rather than implying the month is empty.
+        setting !== 'ALL' || effectiveBook !== 'ALL' ? (
           <div className="flex flex-col items-center gap-1.5 py-8 text-center">
-            <Filter className="h-5 w-5 text-muted-foreground" aria-hidden />
-            <div className="text-sm font-medium text-ink900">No {setting} facilities this month</div>
+            <span className="ths-empty-icon mb-1">
+              <Filter className="h-5 w-5" aria-hidden />
+            </span>
+            <div className="ths-card-title">
+              No{' '}
+              {[effectiveBook === 'ALL' ? null : BOOK_LABEL[effectiveBook], setting === 'ALL' ? null : setting]
+                .filter(Boolean)
+                .join(' ')}{' '}
+              facilities this month
+            </div>
             <button
               type="button"
-              onClick={() => setSetting('ALL')}
-              className="text-xs font-medium text-[var(--brand-ink)] underline underline-offset-2"
+              onClick={() => {
+                setSetting('ALL');
+                setBook('ALL');
+              }}
+              className="ths-btn ths-btn-primary ths-btn-sm mt-1"
             >
-              Show IP &amp; OP
+              {setting !== 'ALL' && effectiveBook === 'ALL' ? <>Show IP &amp; OP</> : 'Clear filters'}
             </button>
           </div>
         ) : (
-          <div className="py-8 text-center text-sm text-muted-foreground">
+          <div className="ths-card-meta py-8 text-center">
             No collections recorded{monthName ? ` for ${monthName}` : ''} yet.
           </div>
         )
       ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Facility</TableHead>
-              <TableHead>Setting</TableHead>
-              <TableHead className="text-right">Checks</TableHead>
-              <TableHead className="text-right">EFT</TableHead>
-              <TableHead className="text-right">Gross</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((r, i) => (
-              <TableRow key={`${r.label}-${i}`}>
-                <TableCell>{r.label}</TableCell>
-                <TableCell className="text-muted-foreground">{r.careSetting ?? '—'}</TableCell>
-                <TableCell className="text-right tabular-nums">{money(r.checks)}</TableCell>
-                <TableCell className="text-right tabular-nums">{money(r.eft)}</TableCell>
-                <TableCell className="text-right tabular-nums">{money(r.gross)}</TableCell>
-              </TableRow>
-            ))}
-            <TableRow className="border-t-2 font-semibold">
-              <TableCell>TOTALS</TableCell>
-              <TableCell />
-              <TableCell className="text-right tabular-nums">{money(totals.checks)}</TableCell>
-              <TableCell className="text-right tabular-nums">{money(totals.eft)}</TableCell>
-              <TableCell className="text-right tabular-nums">{money(totals.gross)}</TableCell>
-            </TableRow>
-          </TableBody>
-        </Table>
+        <div className="ths-scroll-x">
+          <table className="ths-table">
+            <thead>
+              <tr>
+                <th>Facility</th>
+                {/* Only on Consolidated: on a single-book view every row would read the same. */}
+                {showBook && <th>Book</th>}
+                <th>Setting</th>
+                <th className="num">Checks</th>
+                <th className="num">EFT</th>
+                <th className="num">Gross</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={`${r.label}-${i}`}>
+                  <td>{r.label}</td>
+                  {showBook && (
+                    <td className="ths-text-muted">{r.book ? BOOK_LABEL[r.book] : '—'}</td>
+                  )}
+                  <td className="ths-text-muted">{r.careSetting ?? '—'}</td>
+                  <td className="num">{money(r.checks)}</td>
+                  <td className="num">{money(r.eft)}</td>
+                  <td className="num">{money(r.gross)}</td>
+                </tr>
+              ))}
+              <tr className="ths-table-total">
+                <td>TOTALS</td>
+                {showBook && <td />}
+                <td />
+                <td className="num">{money(totals.checks)}</td>
+                <td className="num">{money(totals.eft)}</td>
+                <td className="num">{money(totals.gross)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
