@@ -391,14 +391,29 @@ test('malformed tenant id is rejected before any pool use (withTenant fail-fast)
 
 // --- read path ---------------------------------------------------------------
 
-/** Fake pool for the read: returns the given totals row and rows. */
-function readPool(total: string, rows: unknown[]): OverrideDb {
+/**
+ * Fake pool for the PARTITIONED read: the totals statement is recognized by its
+ * `upcoming_total` alias; the two row queries are told apart by their boundary operator
+ * (`>=` upcoming vs `<` overdue) — the same distinction the live SQL carries.
+ */
+function readPool(
+  upcomingTotal: string,
+  upcomingRows: unknown[],
+  overdueTotal: string = '0',
+  overdueRows: unknown[] = [],
+): OverrideDb {
   const client = {
     async query(sql: string, params?: unknown[]) {
       if (/set_config/i.test(sql)) return { rowCount: 1, rows: [{ set_config: params?.[0] }] };
       if (/current_setting/i.test(sql)) return { rowCount: 1, rows: [{ v: params?.[0] ?? TENANT }] };
-      if (/rows_total/i.test(sql)) return { rowCount: 1, rows: [{ rows_total: rows.length, total }] };
-      if (/facility_code/i.test(sql)) return { rowCount: rows.length, rows };
+      if (/upcoming_total/i.test(sql)) {
+        return {
+          rowCount: 1,
+          rows: [{ upcoming_total: upcomingTotal, overdue_total: overdueTotal }],
+        };
+      }
+      if (/expected_date >= \$2/i.test(sql)) return { rowCount: upcomingRows.length, rows: upcomingRows };
+      if (/expected_date < \$2/i.test(sql)) return { rowCount: overdueRows.length, rows: overdueRows };
       return { rowCount: 0, rows: [] };
     },
     release() {},
@@ -420,47 +435,75 @@ function readPool(total: string, rows: unknown[]): OverrideDb {
   return { connect: async () => tracking } as unknown as OverrideDb;
 }
 
-test('read normalizes Postgres numeric text to fixed-2 and passes the cutoff through', async () => {
-  const rows = [
-    {
-      expected_date: '2026-08-03',
-      facility_code: 'TREAT_WA',
-      payer_label: 'Regence',
-      method_label: 'EFT',
-      amount: '35000.00',
-      is_patient_specific: true,
-    },
-  ];
-  const out = await upcomingOverrides(readPool('35000', rows), TENANT, '2026-08-03');
-  assert.equal(out.total, '35000.00'); // '35000' → '35000.00'
-  assert.equal(out.rows.length, 1);
-  assert.equal(out.rows_truncated, false);
+test('read partitions at the cutoff, normalizes numeric text, and carries the clock value', async () => {
+  const upRow = {
+    expected_date: '2026-08-03',
+    facility_code: 'TREAT_WA',
+    payer_label: 'Regence',
+    method_label: 'EFT',
+    amount: '35000.00',
+    is_patient_specific: true,
+  };
+  const overRow = {
+    expected_date: '2026-05-26',
+    facility_code: 'KWC',
+    payer_label: 'BCBS AR',
+    method_label: 'Check',
+    amount: '72000.00',
+    is_patient_specific: true,
+  };
+  const out = await upcomingOverrides(
+    readPool('35000', [upRow], '72000', [overRow]),
+    TENANT,
+    '2026-08-03',
+  );
+  assert.equal(out.cutoff, '2026-08-03', 'the ONE clock value rides in the payload');
+  assert.equal(out.upcoming.total, '35000.00'); // '35000' → '35000.00'
+  assert.equal(out.upcoming.rows.length, 1);
+  assert.equal(out.upcoming.rows_truncated, false);
+  // THE PROOF CASE: the past-dated $72,000 row lands in overdue, nowhere else.
+  assert.equal(out.overdue.total, '72000.00');
+  assert.deepEqual(
+    out.overdue.rows.map((r) => r.expected_date),
+    ['2026-05-26'],
+  );
+  assert.equal(out.overdue.rows_truncated, false);
 });
 
-test('read returns 0.00 rather than null when there is no forecast', async () => {
+test('read returns 0.00 partitions rather than null when there is no forecast', async () => {
   const out = await upcomingOverrides(readPool('0', []), TENANT, '2026-08-03');
-  assert.equal(out.total, '0.00');
-  assert.deepEqual(out.rows, []);
+  assert.equal(out.upcoming.total, '0.00');
+  assert.deepEqual(out.upcoming.rows, []);
+  assert.equal(out.overdue.total, '0.00');
+  assert.deepEqual(out.overdue.rows, []);
 });
 
 // --- merge (Consolidated) ----------------------------------------------------
 
-const part = (total: string, rows: UpcomingOverrideSummary['rows']): UpcomingOverrideSummary => ({
-  total,
-  rows,
-  rows_truncated: false,
+type PartRows = UpcomingOverrideSummary['upcoming']['rows'];
+const part = (
+  total: string,
+  rows: PartRows,
+  overdueTotal = '0.00',
+  overdueRows: PartRows = [],
+): UpcomingOverrideSummary => ({
+  cutoff: '2026-08-03',
+  upcoming: { total, rows, rows_truncated: false },
+  overdue: { total: overdueTotal, rows: overdueRows, rows_truncated: false },
 });
 
-test('merge adds money in exact integer cents', () => {
+test('merge adds money in exact integer cents, per partition', () => {
   const merged = mergeUpcomingOverrides([
-    part('0.10', []),
-    part('0.20', []),
+    part('0.10', [], '0.70', []),
+    part('0.20', [], '0.10', []),
   ]);
   // Float addition would give 0.30000000000000004 here.
-  assert.equal(merged.total, '0.30');
+  assert.equal(merged.upcoming.total, '0.30');
+  assert.equal(merged.overdue.total, '0.80');
+  assert.equal(merged.cutoff, '2026-08-03');
 });
 
-test('merge concatenates rows and orders them deterministically', () => {
+test('merge concatenates rows per partition and orders them deterministically', () => {
   const a = part('44000.00', [
     {
       expected_date: '2026-08-04',
@@ -471,25 +514,45 @@ test('merge concatenates rows and orders them deterministically', () => {
       is_patient_specific: false,
     },
   ]);
-  const b = part('35000.00', [
-    {
-      expected_date: '2026-08-03',
-      facility_code: 'TREAT_WA',
-      payer_label: 'Regence',
-      method_label: 'EFT',
-      amount: '35000.00',
-      is_patient_specific: true,
-    },
-  ]);
+  const b = part(
+    '35000.00',
+    [
+      {
+        expected_date: '2026-08-03',
+        facility_code: 'TREAT_WA',
+        payer_label: 'Regence',
+        method_label: 'EFT',
+        amount: '35000.00',
+        is_patient_specific: true,
+      },
+    ],
+    '72000.00',
+    [
+      {
+        expected_date: '2026-05-26',
+        facility_code: 'KWC',
+        payer_label: 'BCBS AR',
+        method_label: 'Check',
+        amount: '72000.00',
+        is_patient_specific: true,
+      },
+    ],
+  );
   const merged = mergeUpcomingOverrides([a, b]);
-  assert.equal(merged.total, '79000.00');
+  assert.equal(merged.upcoming.total, '79000.00');
   assert.deepEqual(
-    merged.rows.map((r) => r.expected_date),
+    merged.upcoming.rows.map((r) => r.expected_date),
     ['2026-08-03', '2026-08-04'],
     'ascending by date regardless of input order',
   );
+  // The overdue partition merges independently — no cross-partition bleed.
+  assert.equal(merged.overdue.total, '72000.00');
+  assert.deepEqual(
+    merged.overdue.rows.map((r) => r.facility_code),
+    ['KWC'],
+  );
   // Reversing the input must not change the output.
-  assert.deepEqual(mergeUpcomingOverrides([b, a]).rows, merged.rows);
+  assert.deepEqual(mergeUpcomingOverrides([b, a]).upcoming.rows, merged.upcoming.rows);
 });
 
 test('merge of a single part returns it untouched', () => {
@@ -497,11 +560,11 @@ test('merge of a single part returns it untouched', () => {
   assert.equal(mergeUpcomingOverrides([only]), only);
 });
 
-test('merge propagates truncation from any part', () => {
-  const merged = mergeUpcomingOverrides([
-    { ...part('1.00', []), rows_truncated: true },
-    part('2.00', []),
-  ]);
-  assert.equal(merged.rows_truncated, true);
-  assert.equal(merged.total, '3.00');
+test('merge propagates truncation from any part, per partition', () => {
+  const t = part('1.00', []);
+  t.upcoming.rows_truncated = true;
+  const merged = mergeUpcomingOverrides([t, part('2.00', [])]);
+  assert.equal(merged.upcoming.rows_truncated, true);
+  assert.equal(merged.overdue.rows_truncated, false, 'truncation never bleeds across partitions');
+  assert.equal(merged.upcoming.total, '3.00');
 });

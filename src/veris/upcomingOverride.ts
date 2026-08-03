@@ -229,14 +229,42 @@ export interface UpcomingOverrideRow {
   is_patient_specific: boolean;
 }
 
-/** The forecast payload for one scope. */
-export interface UpcomingOverrideSummary {
-  /** Sum of `rows` in fixed-2 text. '0.00' when empty. */
+/**
+ * One partition of the forecast (Upcoming or Overdue).
+ *
+ * ⚠️ TOTALS PROVENANCE (Alec's constraint, 2026-08-03): `total` here is the SQL UNCAPPED
+ * aggregate for the partition — PRE-024-resolution. It exists for merge arithmetic and
+ * diagnostics. The tile's RENDERED subtotals are recomputed client-side from the RESOLVED
+ * rows (post correct/suppress), for BOTH partitions — never read off this field.
+ */
+export interface UpcomingOverridePartition {
+  /** SQL uncapped aggregate in fixed-2 text — pre-resolution; see provenance note above. */
   total: string;
-  /** Forecast rows from the cutoff date forward, ascending. */
+  /** Rows ascending by expected_date (oldest first — for Overdue, truncation therefore
+   *  drops the NEWEST overdue, never the most delinquent). */
   rows: UpcomingOverrideRow[];
-  /** True when more rows exist than the display cap — `total` is NOT affected. */
+  /** True when more rows exist than this partition's cap — `total` is NOT affected. */
   rows_truncated: boolean;
+}
+
+/**
+ * The forecast payload for one scope, PARTITIONED at the cutoff (Alec's ruling 2026-08-03:
+ * LANDED, not DATE-PASSED — an overdue forecast is not landed; it is the highest-value row
+ * on the tile, but it must never inflate the upcoming subtotal or any headline).
+ */
+export interface UpcomingOverrideSummary {
+  /**
+   * THE ONE CLOCK VALUE — the businessTodayIso() string the SQL partition used. The client
+   * re-partitions RESOLVED rows against this same string (resolve-first-then-partition: a
+   * 024 'correct' cannot move expected_date — the date is the match key — but a manual
+   * 'add' is born with its own date and enters post-SQL, so bucketing must happen on the
+   * resolved rows). A date-valued prop, never a second clock call.
+   */
+  cutoff: string;
+  /** expected_date >= cutoff. */
+  upcoming: UpcomingOverridePartition;
+  /** expected_date < cutoff — overdue expected payments, oldest first. */
+  overdue: UpcomingOverridePartition;
 }
 
 /**
@@ -246,18 +274,18 @@ export interface UpcomingOverrideSummary {
 const ROW_CAP = 100;
 
 // Explicit allowlisted columns, fixed literals; only values are bound params. No SELECT *.
-// The cutoff mirrors era835Upcoming's: `>= $2::date` where $2 is the CIVIL date in the
-// business zone, NOT Postgres current_date (Vercel and the DB both run TZ=UTC, so from
-// 17:00 PT onward current_date is already tomorrow Pacific and today's forecast would
-// silently vanish for the people reading it).
+// $2 is the CIVIL date in the business zone (businessTodayIso), NOT Postgres current_date
+// (Vercel and the DB both run TZ=UTC, so from 17:00 PT onward current_date is already
+// tomorrow Pacific and today's forecast would silently vanish for the people reading it).
+// ONE statement carries both partitions' uncapped aggregates so they cannot come from
+// different snapshots. These totals are PRE-resolution — see UpcomingOverridePartition.
 const OVERRIDE_TOTALS_SQL = `
-  select count(*)::int                          as rows_total,
-         coalesce(sum(amount), 0)::text         as total
+  select coalesce(sum(amount) filter (where expected_date >= $2::date), 0)::text as upcoming_total,
+         coalesce(sum(amount) filter (where expected_date <  $2::date), 0)::text as overdue_total
     from staging.expected_payment_override
-   where business_entity_id = $1::uuid
-     and expected_date >= $2::date`;
+   where business_entity_id = $1::uuid`;
 
-const OVERRIDE_ROWS_SQL = `
+const OVERRIDE_UPCOMING_ROWS_SQL = `
   select expected_date::text as expected_date,
          facility_code,
          payer_label,
@@ -270,6 +298,23 @@ const OVERRIDE_ROWS_SQL = `
    order by expected_date asc, facility_code asc, payer_label asc
    limit ${ROW_CAP + 1}`;
 
+// Overdue: oldest first — the most delinquent row is the escalation priority, and the ASC
+// LIMIT means a capped list drops the NEWEST overdue, never the most delinquent (Alec's
+// ordering ruling). Per-partition cap: overdue accumulates when nobody deletes sheet rows,
+// and a SHARED cap would let it starve the upcoming list out of existence.
+const OVERRIDE_OVERDUE_ROWS_SQL = `
+  select expected_date::text as expected_date,
+         facility_code,
+         payer_label,
+         method_label,
+         amount::text        as amount,
+         is_patient_specific
+    from staging.expected_payment_override
+   where business_entity_id = $1::uuid
+     and expected_date < $2::date
+   order by expected_date asc, facility_code asc, payer_label asc
+   limit ${ROW_CAP + 1}`;
+
 /**
  * One tenant's upcoming forecast rows. Two queries, ONE withTenant transaction, one client.
  *
@@ -277,7 +322,13 @@ const OVERRIDE_ROWS_SQL = `
  * pass the same value to every tenant, or a Consolidated read straddling midnight PT would
  * scope its tenants to different days. Making it required means a caller cannot forget.
  * Pass era835Upcoming.businessTodayIso() — the SAME value the ERA half of the tile uses, so
- * the two halves can never disagree about what "upcoming" means.
+ * the two halves can never disagree about what day "today" is.
+ *
+ * ⚠️ THE BOUNDARY OPERATORS DIFFER ON PURPOSE — do not "harmonize" them. ERA uses
+ * `payment_date > cutoff` (a BPR16-today remit has LANDED); this feed's upcoming partition
+ * uses `expected_date >= cutoff` (a forecast expected today has NOT landed — it is still
+ * money someone is waiting on). LANDED, not DATE-PASSED, is the governing rule (Alec,
+ * 2026-08-03).
  */
 export async function upcomingOverrides(
   pool: OverrideDb,
@@ -285,20 +336,30 @@ export async function upcomingOverrides(
   cutoffIso: string,
 ): Promise<UpcomingOverrideSummary> {
   return withTenant(pool, businessEntityId, async (client) => {
-    const totals = await client.query<{ rows_total: number; total: string }>(
+    const totals = await client.query<{ upcoming_total: string; overdue_total: string }>(
       OVERRIDE_TOTALS_SQL,
       [businessEntityId, cutoffIso],
     );
-    const res = await client.query<UpcomingOverrideRow>(OVERRIDE_ROWS_SQL, [
+    const up = await client.query<UpcomingOverrideRow>(OVERRIDE_UPCOMING_ROWS_SQL, [
       businessEntityId,
       cutoffIso,
     ]);
-    const rows = res.rows;
-    const truncated = rows.length > ROW_CAP;
+    const over = await client.query<UpcomingOverrideRow>(OVERRIDE_OVERDUE_ROWS_SQL, [
+      businessEntityId,
+      cutoffIso,
+    ]);
+    const partition = (rows: UpcomingOverrideRow[], total: string): UpcomingOverridePartition => {
+      const truncated = rows.length > ROW_CAP;
+      return {
+        total: fixed2FromNumericText(total),
+        rows: truncated ? rows.slice(0, ROW_CAP) : rows,
+        rows_truncated: truncated,
+      };
+    };
     return {
-      total: fixed2FromNumericText(totals.rows[0]?.total ?? '0'),
-      rows: truncated ? rows.slice(0, ROW_CAP) : rows,
-      rows_truncated: truncated,
+      cutoff: cutoffIso,
+      upcoming: partition(up.rows, totals.rows[0]?.upcoming_total ?? '0'),
+      overdue: partition(over.rows, totals.rows[0]?.overdue_total ?? '0'),
     };
   });
 }
@@ -314,25 +375,35 @@ export function mergeUpcomingOverrides(
   parts: UpcomingOverrideSummary[],
 ): UpcomingOverrideSummary {
   if (parts.length === 1) return parts[0]!; // single-tenant view, untouched
-  let cents = 0;
-  let truncated = false;
-  const rows: UpcomingOverrideRow[] = [];
-  for (const p of parts) {
-    cents += centsFromNumericText(p.total) ?? 0;
-    truncated = truncated || p.rows_truncated;
-    rows.push(...p.rows);
-  }
-  rows.sort(
-    (a, b) =>
-      a.expected_date.localeCompare(b.expected_date) ||
-      a.facility_code.localeCompare(b.facility_code) ||
-      a.payer_label.localeCompare(b.payer_label),
-  );
-  const overflow = rows.length > ROW_CAP;
+  const mergePartition = (pick: (s: UpcomingOverrideSummary) => UpcomingOverridePartition) => {
+    let cents = 0;
+    let truncated = false;
+    const rows: UpcomingOverrideRow[] = [];
+    for (const s of parts) {
+      const p = pick(s);
+      cents += centsFromNumericText(p.total) ?? 0;
+      truncated = truncated || p.rows_truncated;
+      rows.push(...p.rows);
+    }
+    rows.sort(
+      (a, b) =>
+        a.expected_date.localeCompare(b.expected_date) ||
+        a.facility_code.localeCompare(b.facility_code) ||
+        a.payer_label.localeCompare(b.payer_label),
+    );
+    const overflow = rows.length > ROW_CAP;
+    return {
+      total: fixed2FromCents(cents),
+      rows: overflow ? rows.slice(0, ROW_CAP) : rows,
+      rows_truncated: truncated || overflow,
+    };
+  };
+  // Every part carries the SAME cutoff by construction — the caller computes
+  // businessTodayIso() once and passes it to every tenant (upcomingOverrides requires it).
   return {
-    total: fixed2FromCents(cents),
-    rows: overflow ? rows.slice(0, ROW_CAP) : rows,
-    rows_truncated: truncated || overflow,
+    cutoff: parts[0]!.cutoff,
+    upcoming: mergePartition((s) => s.upcoming),
+    overdue: mergePartition((s) => s.overdue),
   };
 }
 
