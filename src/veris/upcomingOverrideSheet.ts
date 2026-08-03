@@ -38,21 +38,29 @@ export interface OverrideGrid {
 }
 
 /**
- * THE CANONICAL TAB. A DEDICATED tab, not the existing multi-section "Upcoming Payments"
- * sheet — that one stacks an abandoned `Auth or Claim Issue` header, a section title, the
- * real header, a 2-row gap, an orphan row, and a `Total` row whose label sits in column 5.
- * Parsing that shape in place would bake permanent brittleness into this module for no
- * benefit. One flat tab, header on row 1, data below. Alec reshapes once.
+ * THE CANONICAL TAB — the workbook's existing "Current Updates" tab (gid 6894062), read
+ * IN PLACE. The original plan (a dedicated flat tab, header on row 1) is VOID per Alec,
+ * 2026-08-03: the workbook belongs to BXR ops (catherine@bxrconsulting.com), we have no
+ * write access, and there is no "Upcoming Payments Overrides" tab anywhere in it. The
+ * Upcoming Payments block lives on this tab, and the parser handles its shape
+ * STRUCTURALLY (header located by scan, non-data rows classified by content), never by
+ * hardcoded row numbers. Observed shape 2026-08-03:
+ *
+ *   row 1    junk ("leav")
+ *   row 3    ABANDONED header — also six columns (…, Date/Range, Auth or Claim Issue,
+ *            Last Update), which is why findOverrideHeader must match EXACTLY
+ *   row 7    "Upcoming Payments" section-title row
+ *   row 8    the REAL header (Facility, Insurance, Client, Date, Check or EFT, Amount)
+ *   rows 9+  data, containing INTERIOR BLANK GAP ROWS with real data below them
+ *   last     a Total footer whose label sits in column 5 and whose Facility is blank
  */
-export const OVERRIDE_TAB = 'Upcoming Payments Overrides';
+export const OVERRIDE_TAB = 'Current Updates';
 
 /**
- * THE CANONICAL HEADER — exact spelling, exact order, row 1.
- *
- * Deliberately identical to the existing sheet's own header row (`Facility`, `Insurance`,
- * `Client`, `Date`, `Check or EFT`, `Amount`) so reshaping is a copy-paste into a new tab
- * rather than a rename exercise. `Client` stays in the contract because the operator needs
- * it to do their job — it is dropped at THIS boundary, not removed from the sheet.
+ * THE CANONICAL HEADER — exact spelling, exact order, located by SCAN (findOverrideHeader),
+ * never by row number. This IS the sheet's own header row (row 8 as observed 2026-08-03).
+ * `Client` stays in the contract because the operator needs it to do their job — it is
+ * dropped at THIS boundary, not removed from the sheet.
  */
 export const OVERRIDE_HEADERS = [
   'Facility',
@@ -261,10 +269,15 @@ export interface ParsedOverrideRow {
   sourceRowNum: number;
 }
 
-/** Why a row was rejected. CODES ONLY — no cell content, so these are safe to log. */
+/**
+ * Why a row was rejected. CODES ONLY — no cell content, so these are safe to log.
+ *
+ * There is deliberately NO 'missing_facility' (removed 2026-08-03, Alec's ruling): a blank
+ * Facility marks a NON-DATA row — the Total footer, section spacers — and is skipped
+ * silently, not rejected. See the blank-Facility note in parseOverrideSheet.
+ */
 export type OverrideRejectReason =
   | 'unmapped_facility'
-  | 'missing_facility'
   | 'missing_payer'
   | 'bad_date'
   | 'bad_method'
@@ -309,54 +322,63 @@ export interface ParsedOverrideSheet {
   unmappedFacilities: string[];
 }
 
+/** How many leading sheet rows to scan for the header before failing loud. The real
+ *  header sits at row 8 today; 50 leaves generous room for ops adding notes above it. */
+const HEADER_SCAN_LIMIT = 50;
+
 /**
- * Validate the header row against OVERRIDE_HEADERS. Throws LOUD on any drift.
+ * Locate the header row: the FIRST row whose six leading cells EXACTLY match
+ * OVERRIDE_HEADERS (trimmed, case-insensitive; extra trailing columns tolerated).
+ * Returns its 1-based sheet rowNum. Throws LOUD, with the scanned-row count, when
+ * no row matches within HEADER_SCAN_LIMIT.
  *
- * Positional AND exact (case-insensitive on the header text only), mirroring
- * src/sheets.ts.buildColumnOrder: mis-mapping columns on a sheet whose column 3 is PHI and
- * whose column 6 is money is not a recoverable error. A reordered header must fail the
- * sync, not quietly swap `Amount` for `Date`.
- *
- * Extra trailing columns are TOLERATED (an operator adding a scratch note column to the
- * right must not break the feed); the first six must be exactly right.
+ * EXACT-MATCH IS LOAD-BEARING: the live sheet's abandoned row-3 header is ALSO six
+ * columns (…, `Date/Range`, `Auth or Claim Issue`, `Last Update`). A loose "first
+ * six-column row" finder would latch onto it and map `Amount` onto `Last Update` —
+ * mis-mapping columns on a sheet whose column 3 is PHI and whose column 6 is money is
+ * not a recoverable error (mirrors src/sheets.ts.buildColumnOrder's posture). Its
+ * `Date/Range` cell is what disqualifies it here.
  */
-export function assertOverrideHeader(header: string[]): void {
-  if (header.length < OVERRIDE_HEADERS.length) {
-    throw new Error(
-      `Override tab header has ${header.length} columns, expected at least ` +
-        `${OVERRIDE_HEADERS.length} (${OVERRIDE_HEADERS.join(', ')}). ` +
-        `Sheet shape has drifted — refusing to map columns by guess.`,
+export function findOverrideHeader(grid: OverrideGrid): number {
+  let scanned = 0;
+  for (const { rowNum, cells } of grid.rows) {
+    if (rowNum > HEADER_SCAN_LIMIT) break;
+    scanned += 1;
+    if (cells.length < OVERRIDE_HEADERS.length) continue;
+    const match = OVERRIDE_HEADERS.every(
+      (expected, i) => (cells[i] ?? '').trim().toLowerCase() === expected.toLowerCase(),
     );
+    if (match) return rowNum;
   }
-  OVERRIDE_HEADERS.forEach((expected, i) => {
-    const actual = (header[i] ?? '').trim();
-    if (actual.toLowerCase() !== expected.toLowerCase()) {
-      throw new Error(
-        `Override tab column ${i} header mismatch: got ${JSON.stringify(actual)}, ` +
-          `expected ${JSON.stringify(expected)}. Refusing to map by guess.`,
-      );
-    }
-  });
+  throw new Error(
+    `Override header (${OVERRIDE_HEADERS.join(', ')}) not found in the ${scanned} row(s) ` +
+      `scanned (limit ${HEADER_SCAN_LIMIT}). Sheet shape has drifted — refusing to map ` +
+      `columns by guess.`,
+  );
 }
 
 /**
- * Parse the override tab. Row 1 is the header (validated, throws on drift); every row below
- * is a candidate forecast.
+ * Parse the override tab. The header is LOCATED BY SCAN (findOverrideHeader) — every row
+ * at or above it (the junk row, the abandoned header, the section title) is never data;
+ * every row below it is a candidate forecast.
  *
- * Fully-blank rows are SKIPPED SILENTLY, not rejected — a hand-maintained sheet always has
- * trailing empties and spacer rows, and reporting them as failures would bury the real
- * rejections in noise. A row with SOME content but a bad field IS rejected and reported.
+ * ⚠️ BLANK ROWS ARE SKIPPED, NEVER A TERMINATOR — the single most important behaviour in
+ * this loop. The live sheet has an interior blank gap row with a real forecast row BELOW
+ * it; terminating on the first blank would silently drop every forecast after the gap.
+ * Fully-blank rows are skipped SILENTLY (not rejected): a hand-maintained sheet always has
+ * spacers, and reporting them as failures would bury the real rejections in noise. A row
+ * with SOME content but a bad field IS rejected and reported — except a blank Facility,
+ * which marks a non-data row (footer/spacer) and is skipped, see below.
  */
 export function parseOverrideSheet(grid: OverrideGrid): ParsedOverrideSheet {
-  const headerRow = grid.rows.find((r) => r.rowNum === 1) ?? grid.rows[0];
-  assertOverrideHeader(headerRow?.cells ?? []);
+  const headerRowNum = findOverrideHeader(grid);
 
   const rows: ParsedOverrideRow[] = [];
   const rejects: OverrideReject[] = [];
   const unmapped = new Set<string>();
 
   for (const { rowNum, cells } of grid.rows) {
-    if (rowNum <= 1) continue; // the header
+    if (rowNum <= headerRowNum) continue; // pre-header junk rows AND the header itself
     const cell = (i: number): string => (cells[i] ?? '').trim();
 
     const facilityLabel = cell(COL.facility);
@@ -380,7 +402,13 @@ export function parseOverrideSheet(grid: OverrideGrid): ParsedOverrideSheet {
     }
 
     if (facilityLabel === '') {
-      rejects.push({ rowNum, reason: 'missing_facility' });
+      // A blank Facility marks a NON-DATA row, not a defect: the sheet's Total footer
+      // (label in column 5, amount in column 6) and section spacers all leave Facility
+      // blank, and the footer's label text is fragile ("Total " with a trailing space
+      // today) where its missing facility is structural. Skipped SILENTLY — the old
+      // 'missing_facility' reason left the reject union DELIBERATELY (Alec, 2026-08-03),
+      // accepting that a half-keyed data row missing only its facility drops without a
+      // reject rather than the footer rejecting on every sync.
       continue;
     }
     const facilityCode = resolveFacilityCode(facilityLabel);
@@ -409,8 +437,8 @@ export function parseOverrideSheet(grid: OverrideGrid): ParsedOverrideSheet {
     }
     const amountCents = centsFromCurrency(amountRaw);
     if (amountCents === null || amountCents <= 0) {
-      // Catches blanks, the `$ -` sentinel, negatives, and the `Total` footer row if one
-      // is ever pasted in (its label sits in a different column, so it fails here).
+      // Catches blanks, the `$ -` sentinel, and negatives. (The Total footer never gets
+      // here — its blank Facility classifies it as non-data above.)
       rejects.push({ rowNum, reason: 'bad_amount' });
       continue;
     }

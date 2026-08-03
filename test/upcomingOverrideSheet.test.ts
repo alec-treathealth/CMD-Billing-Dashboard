@@ -14,8 +14,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   OVERRIDE_HEADERS,
-  assertOverrideHeader,
   centsFromCurrency,
+  findOverrideHeader,
   fixed2FromCents,
   isoFromSheetDate,
   knownFacilityCodes,
@@ -42,33 +42,67 @@ function grid(...dataRows: string[][]): OverrideGrid {
 
 // --- header contract ---------------------------------------------------------
 
-test('assertOverrideHeader accepts the canonical header', () => {
-  assert.doesNotThrow(() => assertOverrideHeader(HEADER));
+/** The live sheet's ABANDONED row-3 header — also six columns. Must never match. */
+const ABANDONED_HEADER = [
+  'Facility',
+  'Insurance',
+  'Client',
+  'Date/Range',
+  'Auth or Claim Issue',
+  'Last Update',
+];
+
+function gridOfRows(rows: string[][]): OverrideGrid {
+  return { rows: rows.map((cells, i) => ({ rowNum: i + 1, cells })) };
+}
+
+test('findOverrideHeader finds the canonical header wherever it sits', () => {
+  assert.equal(findOverrideHeader(gridOfRows([HEADER])), 1);
+  assert.equal(findOverrideHeader(gridOfRows([['junk'], [], ['note', 'x'], HEADER])), 4);
 });
 
-test('assertOverrideHeader is case-insensitive and trims', () => {
-  assert.doesNotThrow(() =>
-    assertOverrideHeader(['  facility ', 'INSURANCE', 'Client', 'date', 'Check or EFT', ' amount']),
+test('findOverrideHeader is case-insensitive and trims', () => {
+  assert.equal(
+    findOverrideHeader(
+      gridOfRows([['  facility ', 'INSURANCE', 'Client', 'date', 'Check or EFT', ' amount']]),
+    ),
+    1,
   );
 });
 
-test('assertOverrideHeader tolerates EXTRA trailing columns (operator scratch notes)', () => {
-  assert.doesNotThrow(() => assertOverrideHeader([...HEADER, 'Notes', 'Follow-up']));
+test('findOverrideHeader tolerates EXTRA trailing columns (operator scratch notes)', () => {
+  assert.equal(findOverrideHeader(gridOfRows([[...HEADER, 'Notes', 'Follow-up']])), 1);
 });
 
-test('assertOverrideHeader fails loud on a reordered header', () => {
+test('EXACT MATCH IS LOAD-BEARING: the abandoned 6-column header must NEVER match', () => {
+  // A loose "first six-column row" finder would latch onto ABANDONED_HEADER and map
+  // Amount onto "Last Update". Its Date/Range cell must disqualify it.
+  assert.equal(findOverrideHeader(gridOfRows([ABANDONED_HEADER, HEADER])), 2);
+  assert.throws(() => findOverrideHeader(gridOfRows([ABANDONED_HEADER])), /not found/i);
+});
+
+test('findOverrideHeader does not match a reordered header', () => {
   // Amount and Date swapped — the exact drift that would land a date in a money column.
   const drifted = [...HEADER];
   drifted[3] = 'Amount';
   drifted[5] = 'Date';
-  assert.throws(() => assertOverrideHeader(drifted), /header mismatch/i);
+  assert.throws(() => findOverrideHeader(gridOfRows([drifted])), /not found/i);
 });
 
-test('assertOverrideHeader fails loud when columns are missing', () => {
-  assert.throws(() => assertOverrideHeader(['Facility', 'Insurance']), /drifted/i);
+test('findOverrideHeader fails loud with the scanned-row count when no header exists', () => {
+  assert.throws(
+    () => findOverrideHeader(gridOfRows([['Facility', 'Insurance'], ['junk']])),
+    /not found in the 2 row/i,
+  );
 });
 
-test('parseOverrideSheet propagates header drift as a throw (fail-soft happens upstream)', () => {
+test('findOverrideHeader gives up past the scan limit rather than scanning forever', () => {
+  const rows: string[][] = Array.from({ length: 60 }, () => ['x']);
+  rows[55] = [...HEADER]; // rowNum 56 — beyond the limit of 50
+  assert.throws(() => findOverrideHeader(gridOfRows(rows)), /not found/i);
+});
+
+test('parseOverrideSheet propagates a missing header as a throw (fail-soft happens upstream)', () => {
   const bad: OverrideGrid = { rows: [{ rowNum: 1, cells: ['Nope', 'Wrong'] }] };
   assert.throws(() => parseOverrideSheet(bad), /drifted/i);
 });
@@ -317,7 +351,6 @@ test('partially-filled rows ARE rejected with a reason code and no cell content'
     ['PCMH', '', 'Multiple', '08/04/2026', 'EFT', '$44,000.00'],
     ['LAMH', 'Aetna', 'Multiple', '08/04/2026', 'Carrier Pigeon', '$1,000.00'],
     ['LSMH', 'Aetna', 'Multiple', '08/04/2026', 'EFT', '$ -'],
-    ['', 'Aetna', 'Multiple', '08/04/2026', 'EFT', '$1,000.00'],
   );
   const out = parseOverrideSheet(g);
   assert.equal(out.rows.length, 0);
@@ -328,11 +361,23 @@ test('partially-filled rows ARE rejected with a reason code and no cell content'
       [3, 'missing_payer'],
       [4, 'bad_method'],
       [5, 'bad_amount'],
-      [6, 'missing_facility'],
     ],
   );
   // Only unmapped_facility may carry a label; nothing else echoes a cell.
   for (const r of out.rejects) assert.equal(r.facilityLabel, undefined);
+});
+
+test('a blank-Facility row is a NON-DATA row — skipped silently, never rejected', () => {
+  // The Total footer and section spacers leave Facility blank; 'missing_facility' left the
+  // reject union DELIBERATELY (Alec, 2026-08-03). This includes a half-keyed row that has
+  // other content — the accepted trade for a footer that would otherwise reject every sync.
+  const g = grid(
+    ['', 'Aetna', 'Multiple', '08/04/2026', 'EFT', '$1,000.00'],
+    ['', '', '', '', 'Total ', '$481,000.00'], // the live footer, trailing space and all
+  );
+  const out = parseOverrideSheet(g);
+  assert.deepEqual(out.rows, []);
+  assert.deepEqual(out.rejects, [], 'blank-Facility rows must never surface as rejects');
 });
 
 test('unmapped facilities are collected DISTINCT and sorted for the needs-a-ruling list', () => {
@@ -348,12 +393,14 @@ test('unmapped facilities are collected DISTINCT and sorted for the needs-a-ruli
   assert.equal(out.rejects.length, 3);
 });
 
-test('a pasted Total footer row is rejected, never counted as a forecast', () => {
-  // The real sheet's Total row puts its label in column 5 and the amount in column 6.
-  const g = grid(['', '', '', '', 'Total', '$291,000.00']);
-  const out = parseOverrideSheet(g);
-  assert.equal(out.rows.length, 0);
-  assert.equal(out.rejects[0]!.reason, 'missing_facility');
+test('the Total footer row is skipped structurally, never counted and never a reject', () => {
+  // The real sheet's Total row puts its label in column 5 and the amount in column 6,
+  // leaving Facility blank — the structural signal, robust to the label's exact text.
+  for (const label of ['Total', 'Total ', 'TOTAL', 'Grand Total']) {
+    const out = parseOverrideSheet(grid(['', '', '', '', label, '$291,000.00']));
+    assert.equal(out.rows.length, 0, label);
+    assert.deepEqual(out.rejects, [], label);
+  }
 });
 
 test('an empty data region parses to nothing without throwing', () => {
@@ -361,4 +408,75 @@ test('an empty data region parses to nothing without throwing', () => {
   assert.deepEqual(out.rows, []);
   assert.deepEqual(out.rejects, []);
   assert.deepEqual(out.unmappedFacilities, []);
+});
+
+// --- THE LIVE "Current Updates" SHAPE ----------------------------------------
+
+test('THE LIVE SHEET SHAPE: junk row, abandoned header, section title, interior gap, Total footer', () => {
+  // The exact 26-row shape of the "Current Updates" tab as dictated from the CSV export
+  // (Alec, 2026-08-03). Client cells use the invented PHI_NAME placeholder — fixtures are
+  // committed, so the sheet's real names must never appear here.
+  const g: OverrideGrid = {
+    rows: [
+      { rowNum: 1, cells: ['leav', '', '', '', '', ''] },
+      { rowNum: 2, cells: [] },
+      { rowNum: 3, cells: [...ABANDONED_HEADER] },
+      { rowNum: 4, cells: [] },
+      { rowNum: 5, cells: [] },
+      { rowNum: 6, cells: [] },
+      { rowNum: 7, cells: ['Upcoming Payments', '', '', '', '', ''] },
+      { rowNum: 8, cells: [...HEADER] },
+      { rowNum: 9, cells: ['PCMH', 'BCBS', 'Multiple', '08/05/2026', 'EFT', '$35,000.00'] },
+      { rowNum: 10, cells: ['CAMH', 'UHC', PHI_NAME, '08/06/2026', 'EFT', '$44,000.00'] },
+      { rowNum: 11, cells: ['LAMH', 'Aetna', 'Multiple', '08/07/2026', 'Check', '$28,000.00'] },
+      { rowNum: 12, cells: ['TMHCA', 'BCBS', 'Multiple', '08/10/2026', 'EFT', '$21,000.00'] },
+      { rowNum: 13, cells: ['TMHWA', 'Regence', 'Multiple', '08/11/2026', 'EFT', '$19,000.00'] },
+      { rowNum: 14, cells: ['LSMH', 'BCBS TX', 'Multiple', '08/12/2026', 'Check', '$33,000.00'] },
+      { rowNum: 15, cells: ['NASH', 'BCBS TN', 'Multiple', '08/13/2026', 'EFT', '$25,000.00'] },
+      { rowNum: 16, cells: ['TBH', 'Cigna', 'Multiple', '08/14/2026', 'EFT', '$18,000.00'] },
+      { rowNum: 17, cells: ['PCMH', 'Anthem', PHI_NAME, '08/18/2026', 'Check', '$27,000.00'] },
+      { rowNum: 18, cells: ['CAMH', 'BCBS', 'Multiple', '08/19/2026', 'EFT', '$22,000.00'] },
+      { rowNum: 19, cells: ['KWC', 'Anthem KY', 'Multiple', '08/20/2026', 'EFT', '$31,000.00'] },
+      { rowNum: 20, cells: ['LAMH', 'UHC', 'Multiple', '08/21/2026', 'Check', '$26,000.00'] },
+      { rowNum: 21, cells: ['LSMH', 'Aetna', 'Multiple', '08/25/2026', 'EFT', '$20,000.00'] },
+      { rowNum: 22, cells: [] }, // ← THE GAP. Real data resumes BELOW it.
+      { rowNum: 23, cells: ['KWC', 'BCBS AR', PHI_NAME, '05/26/2026', 'Check', '$72,000.00'] },
+      { rowNum: 24, cells: [] },
+      { rowNum: 25, cells: [] },
+      { rowNum: 26, cells: ['', '', '', '', 'Total ', '$481,000.00'] },
+    ],
+  };
+  const out = parseOverrideSheet(g);
+
+  // THE SINGLE MOST IMPORTANT ASSERTION: the row BELOW the interior gap survives.
+  // Terminating on the first blank row would silently drop this $72,000 forecast.
+  const postGapRow = out.rows.find((r) => r.sourceRowNum === 23);
+  assert.ok(postGapRow, 'the post-gap row was dropped — blanks must be skipped, not terminate');
+  assert.equal(postGapRow.facilityCode, 'KWC');
+  assert.equal(postGapRow.payerLabel, 'BCBS AR');
+  assert.equal(postGapRow.methodLabel, 'Check');
+  assert.equal(postGapRow.amount, '72000.00');
+  // A PAST expected date is KEPT — it is a legitimate outstanding expected payment.
+  // "Upcoming" windowing belongs to the read path (a known, separate follow-up).
+  assert.equal(postGapRow.expectedDate, '2026-05-26');
+  assert.equal(postGapRow.isPatientSpecific, true);
+
+  // 13 data rows (9–21) + the post-gap row 23. Nothing above the header parsed; the junk
+  // row, abandoned header, and section title produced NO rows and NO reject noise; the
+  // Total footer was skipped structurally.
+  assert.equal(out.rows.length, 14);
+  assert.deepEqual(out.rejects, []);
+  assert.deepEqual(out.unmappedFacilities, []);
+
+  // Had the abandoned row-3 header matched, Amount would have mapped onto "Last Update"
+  // and every amount would have failed. The exact total proves full column mapping:
+  const total = out.rows.reduce((s, r) => s + r.amountCents, 0);
+  assert.equal(fixed2FromCents(total), '421000.00');
+
+  // Alias resolution applied where the sheet spelling disagrees with the roster.
+  assert.equal(out.rows.find((r) => r.sourceRowNum === 12)!.facilityCode, 'TREAT_CA');
+  assert.equal(out.rows.find((r) => r.sourceRowNum === 13)!.facilityCode, 'TREAT_WA');
+
+  // And the PHI drop holds across the whole live shape.
+  assert.equal(JSON.stringify(out).includes(PHI_NAME), false, 'patient name leaked');
 });
