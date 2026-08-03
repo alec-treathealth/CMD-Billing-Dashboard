@@ -131,7 +131,7 @@ Two **separate** migration planes — never mix the directories:
 | Plane | Directory | Next number |
 |---|---|---|
 | Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0077** |
-| Veris ML (`staging`, `ref`, `core`) | `SQL Schemas/0NN_*.sql` | **024** |
+| Veris ML (`staging`, `ref`, `core`) | `SQL Schemas/0NN_*.sql` | **025** |
 
 Merging a migration in a PR does **not** apply it to prod. Code that depends on
 it 500s until `apply_migration` runs.

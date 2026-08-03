@@ -57,6 +57,14 @@
 import { count, money } from '../../lib/format';
 import type { EraUpcomingSummary } from '../../../src/veris/era835Upcoming.js';
 import type { UpcomingOverrideSummary } from '../../../src/veris/upcomingOverride.js';
+import {
+  resolveForecast,
+  suggestLandedMatches,
+  type LandedSuggestion,
+  type ManualForecastRow,
+  type ResolvedForecastRow,
+  type StaleManualRow,
+} from '../../../src/veris/upcomingForecast';
 
 /** Amber "data caveat" treatment — same family as the explorer's cohort caveats. */
 const FLOOR_BANNER_CLASS =
@@ -148,6 +156,12 @@ export interface UpcomingItem {
   unquantified?: number;
   /** Forecast rows only: the sheet named one patient rather than a batch. NAME NOT STORED. */
   isPatientSpecific?: boolean;
+  /** Forecast rows only: 'sheet' fed it, or a super admin authored it (024). */
+  origin?: 'sheet' | 'manual';
+  /** Forecast rows only: a super-admin 'correct' changed this row's amount or method. */
+  corrected?: boolean;
+  /** Forecast rows only: the 024 row id behind a manual add or the applied correction. */
+  manualId?: number;
 }
 
 /** A (date × facility) parent: what lands at one facility on one day. */
@@ -222,12 +236,19 @@ export function buildUpcomingGroups(
   for (const or of overrides?.rows ?? []) {
     const g = get(or.expected_date, or.facility_code);
     g.forecastCents += centsFromText(or.amount) ?? 0;
+    // `origin`/`corrected`/`manualId` are present when the caller passed RESOLVED rows (the
+    // live path) and absent when it passed raw sheet rows (the pre-024 shape the render suite
+    // still exercises). Optional rather than required so both callers stay valid.
+    const r = or as Partial<ResolvedForecastRow> & typeof or;
     g.items.push({
       kind: 'forecast',
       payer: or.payer_label,
       methodLabel: or.method_label,
       amount: or.amount,
       isPatientSpecific: or.is_patient_specific,
+      origin: r.origin ?? 'sheet',
+      corrected: r.corrected ?? false,
+      manualId: r.manualId,
     });
   }
 
@@ -244,6 +265,17 @@ export function buildUpcomingGroups(
   return groups;
 }
 
+/**
+ * What the tile asks the host to do. The leaf EMITS intents and never calls a Server Action
+ * itself — that keeps it a pure function of its props (so the render suite can drive every
+ * control) and keeps the super-admin gate on the server side of one boundary instead of two.
+ */
+export type ForecastEditIntent =
+  | { op: 'suppress'; facilityCode: string; payerLabel: string; expectedDate: string;
+      reason: 'landed' | 'incorrect' | 'cancelled'; matchedEraKey?: string }
+  | { op: 'correct'; facilityCode: string; payerLabel: string; expectedDate: string; amount: string }
+  | { op: 'delete-edit'; id: number };
+
 /** Small pill marking a leaf's epistemic class. Text-labelled, never color-only. */
 function KindTag({ kind }: { kind: UpcomingItem['kind'] }) {
   return kind === 'forecast' ? (
@@ -257,6 +289,10 @@ function KindTag({ kind }: { kind: UpcomingItem['kind'] }) {
 export function EraUpcomingBody({
   data,
   overrides = null,
+  manual = [],
+  canEdit = false,
+  onEdit,
+  busy = false,
 }: {
   data: EraUpcomingSummary;
   /**
@@ -267,9 +303,35 @@ export function EraUpcomingBody({
    * working exactly as designed.
    */
   overrides?: UpcomingOverrideSummary | null;
+  /** Super-admin edits (024). Folded over the sheet feed before anything renders. */
+  manual?: ManualForecastRow[];
+  /** True only for super_admin. Controls are not rendered at all otherwise — and the server
+   *  re-checks the role on every write, so hiding them is convenience, not the gate. */
+  canEdit?: boolean;
+  onEdit?: (intent: ForecastEditIntent) => void;
+  /** A write is in flight; controls disable so a double-click cannot fire twice. */
+  busy?: boolean;
 }) {
-  const forecastCents = centsFromText(overrides?.total ?? null) ?? 0;
-  const forecastRows = overrides?.rows.length ?? 0;
+  // RESOLUTION FIRST. Everything below renders the forecast AFTER super-admin corrections and
+  // suppressions are applied, so a corrected amount and a hidden landed row are the truth the
+  // whole tile agrees on — headline line, parent subtotals and subitems alike.
+  const resolved = resolveForecast(overrides?.rows ?? [], manual);
+  const forecastCents = resolved.totalCents;
+  const forecastRows = resolved.rows.length;
+  // The forecast total is recomputed from the resolved rows rather than reusing 023's uncapped
+  // aggregate: that number predates the corrections. It is therefore capped-accurate — fine at
+  // the ~9 rows the sheet carries, and the cap notice below fires if that ever stops holding.
+  const forecastForGroups: UpcomingOverrideSummary | null =
+    overrides || manual.length > 0
+      ? {
+          total: fixed2FromCents(forecastCents),
+          rows: resolved.rows,
+          rows_truncated: overrides?.rows_truncated ?? false,
+        }
+      : null;
+  // Suggestions run against the SAME ERA groups the tile already has — no extra read. Nothing
+  // is hidden by them; each is a question a super admin answers.
+  const suggestions = canEdit ? suggestLandedMatches(resolved.rows, data.groups) : [];
 
   if (data.remits === 0 && forecastRows === 0) {
     // Calm empty state — the table is expected to be empty until the ERA ingest cron
@@ -286,7 +348,7 @@ export function EraUpcomingBody({
     );
   }
 
-  const groups = buildUpcomingGroups(data, overrides);
+  const groups = buildUpcomingGroups(data, forecastForGroups);
   // From the ERA groups, NOT from `groups`: the headline line it sits on is labelled
   // "ERA-confirmed", and `groups` now also contains forecast-only parents. Taking the first
   // merged parent would print a forecast date under a confirmed heading whenever a forecast
@@ -333,6 +395,14 @@ export function EraUpcomingBody({
         </p>
       )}
 
+      {suggestions.length > 0 && (
+        <SuggestionStrip suggestions={suggestions} busy={busy} onEdit={onEdit} />
+      )}
+
+      {resolved.stale.length > 0 && (
+        <StaleEditStrip stale={resolved.stale} busy={busy} onEdit={onEdit} />
+      )}
+
       {/* Column headings for the parent rows. aria-hidden: this is a visual key for the
           grid below, and every <summary> already names its own values in its accessible
           text, so exposing it to a screen reader would just read a stray row of nouns. */}
@@ -346,7 +416,7 @@ export function EraUpcomingBody({
 
       <div className="ths-item-list">
         {groups.map((g) => (
-          <UpcomingGroupRow key={g.key} group={g} />
+          <UpcomingGroupRow key={g.key} group={g} canEdit={canEdit} busy={busy} onEdit={onEdit} />
         ))}
       </div>
 
@@ -355,13 +425,129 @@ export function EraUpcomingBody({
           wrong feed. The ERA cap is stated as its literal 50 (as it always was); the forecast
           cap is stated without a number because importing the server's ROW_CAP here would
           pull pg + withTenant into this pure leaf and break the render suite. */}
-      {(data.groups_truncated || overrides?.rows_truncated) && (
+      {(data.groups_truncated || forecastForGroups?.rows_truncated) && (
         <p className="ths-card-meta">
           {data.groups_truncated && 'ERA breakdown capped at the first 50 date/payer groups. '}
-          {overrides?.rows_truncated && 'Forecast list capped — more rows exist in the sheet. '}
+          {forecastForGroups?.rows_truncated &&
+            'Forecast list capped — more rows exist in the sheet. '}
           The headline total and remit count include everything.
         </p>
       )}
+    </div>
+  );
+}
+
+/**
+ * "Looks landed — confirm?" Suggested matches between a forecast row and an 835 that has since
+ * arrived. NOTHING IS HIDDEN BY THIS STRIP. Confirming writes a 'landed' suppression stamped
+ * with the 835 key the human agreed to; declining is simply not clicking, because a decline
+ * would need its own stored state and the suggestion is cheap to re-read next time.
+ *
+ * Confidence is stated in words, not implied by color: 'high' means the amount matched to the
+ * cent AND the payer names corresponded; 'medium' means one of the two. The payer heuristic
+ * genuinely cannot see some same-payer pairs ('BCBS' vs 'BLUE CROSS OF CALIFORNIA (CA)'),
+ * which is exactly why a human confirms.
+ */
+function SuggestionStrip({
+  suggestions,
+  busy,
+  onEdit,
+}: {
+  suggestions: LandedSuggestion[];
+  busy: boolean;
+  onEdit?: (intent: ForecastEditIntent) => void;
+}) {
+  return (
+    <div className="ths-notice flex-col items-stretch">
+      <div className="ths-card-title mb-1">
+        {count(suggestions.length)} forecast {suggestions.length === 1 ? 'row' : 'rows'} may have
+        already landed
+      </div>
+      <ul className="flex flex-col gap-1.5">
+        {suggestions.map((sg) => (
+          <li
+            key={`${sg.forecast.expected_date}-${sg.forecast.facility_code}-${sg.forecast.payer_label}`}
+            className="flex flex-wrap items-center gap-2"
+          >
+            <span className="ths-tag ths-tag-accent-2">Forecast</span>
+            <span className="ths-num tabular-nums">{money(sg.forecast.amount)}</span>
+            <span>
+              {sg.forecast.facility_code} · {sg.forecast.payer_label} · {sg.forecast.expected_date}
+            </span>
+            <span aria-hidden>→</span>
+            <span className="ths-tag ths-tag-accent">835 {sg.era.payment_date}</span>
+            <span>
+              {sg.era.payer_name ?? '(unnamed payer)'} · {money(sg.era.amount)} ·{' '}
+              {sg.confidence === 'high' ? 'amount and payer match' : 'partial match'}
+              {sg.dayGap !== 0 ? ` · ${Math.abs(sg.dayGap)}d ${sg.dayGap > 0 ? 'later' : 'earlier'}` : ''}
+            </span>
+            <button
+              type="button"
+              className="ths-btn ths-btn-primary ths-btn-sm"
+              disabled={busy}
+              onClick={() =>
+                onEdit?.({
+                  op: 'suppress',
+                  facilityCode: sg.forecast.facility_code,
+                  payerLabel: sg.forecast.payer_label,
+                  expectedDate: sg.forecast.expected_date,
+                  reason: 'landed',
+                  matchedEraKey: sg.eraKey,
+                })
+              }
+            >
+              Confirm landed
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * Super-admin edits that no longer match any forecast row — almost always because the operator
+ * edited that row in the sheet, which is allowed. Surfaced rather than silently ignored: an
+ * orphaned correction contributes NO money and would otherwise sit there looking applied.
+ */
+function StaleEditStrip({
+  stale,
+  busy,
+  onEdit,
+}: {
+  stale: StaleManualRow[];
+  busy: boolean;
+  onEdit?: (intent: ForecastEditIntent) => void;
+}) {
+  return (
+    <div className="ths-notice flex-col items-stretch">
+      <div className="ths-card-title mb-1">
+        {count(stale.length)} manual {stale.length === 1 ? 'edit' : 'edits'} no longer match a
+        forecast row
+      </div>
+      <p className="ths-card-meta mb-1">
+        The sheet row each one targeted has changed or gone. They are having no effect — re-make
+        them against the current row, or remove them.
+      </p>
+      <ul className="flex flex-col gap-1.5">
+        {stale.map((st) => (
+          <li key={st.manual.id} className="flex flex-wrap items-center gap-2">
+            <span className="ths-tag ths-tag-neutral">{st.manual.kind}</span>
+            <span>
+              {st.manual.facility_code} · {st.manual.payer_label} · {st.manual.expected_date}
+              {st.manual.amount ? ` · ${money(st.manual.amount)}` : ''}
+            </span>
+            <button
+              type="button"
+              className="ths-btn ths-btn-secondary ths-btn-sm"
+              disabled={busy}
+              onClick={() => onEdit?.({ op: 'delete-edit', id: st.manual.id })}
+            >
+              Remove edit
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -373,7 +559,17 @@ export function EraUpcomingBody({
  * count, amount) because that is what a screen reader announces when it lands on the
  * disclosure — so a user who never expands it still hears the complete parent fact.
  */
-function UpcomingGroupRow({ group: g }: { group: UpcomingGroup }) {
+function UpcomingGroupRow({
+  group: g,
+  canEdit = false,
+  busy = false,
+  onEdit,
+}: {
+  group: UpcomingGroup;
+  canEdit?: boolean;
+  busy?: boolean;
+  onEdit?: (intent: ForecastEditIntent) => void;
+}) {
   const payers = g.items.length;
   const hasForecast = g.forecastCents > 0;
   return (
@@ -414,6 +610,9 @@ function UpcomingGroupRow({ group: g }: { group: UpcomingGroup }) {
               <th>Method</th>
               <th className="num">Remits</th>
               <th className="num">Amount</th>
+              {/* The controls column exists only for a super admin. The server re-checks the
+                  role on every write, so this is decluttering, not the authorization. */}
+              {canEdit && <th>Actions</th>}
             </tr>
           </thead>
           <tbody>
@@ -421,6 +620,12 @@ function UpcomingGroupRow({ group: g }: { group: UpcomingGroup }) {
               <tr key={`${it.kind}-${it.payer ?? ''}-${it.methodLabel}-${i}`}>
                 <td>
                   {it.payer ?? <span className="ths-text-muted">(unnamed payer)</span>}
+                  {it.corrected && (
+                    <span className="ths-tag ths-tag-neutral ml-1.5">corrected</span>
+                  )}
+                  {it.origin === 'manual' && (
+                    <span className="ths-tag ths-tag-neutral ml-1.5">added by admin</span>
+                  )}
                   {/* The forecast half stores NO patient name (023's PHI boundary) — only
                       that the sheet row was for one patient rather than a batch. */}
                   {it.isPatientSpecific && (
@@ -443,11 +648,114 @@ function UpcomingGroupRow({ group: g }: { group: UpcomingGroup }) {
                     </span>
                   )}
                 </td>
+                {canEdit && (
+                  <td>
+                    {it.kind === 'forecast' ? (
+                      <ForecastRowControls
+                        date={g.date}
+                        facilityCode={g.facilityCode}
+                        item={it}
+                        busy={busy}
+                        onEdit={onEdit}
+                      />
+                    ) : (
+                      // A confirmed 835 remit is not editable here. It is what a payer sent;
+                      // correcting it would mean rewriting the remittance advice.
+                      <span className="ths-card-meta">—</span>
+                    )}
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
         </table>
       </div>
     </details>
+  );
+}
+
+/**
+ * Super-admin controls on ONE forecast row.
+ *
+ * Stateless on purpose: the amount form is uncontrolled and read on submit, so this component
+ * — and the whole tile — stays a pure function of its props and the render suite can drive
+ * every control without a DOM harness. The host owns the in-flight flag and the refetch.
+ *
+ * "Not coming" is 'incorrect' rather than 'cancelled' because that is the case an operator
+ * actually hits: the sheet row was wrong. 'cancelled' exists in 024 for a payer withdrawing a
+ * scheduled payment and has no button yet — adding one is a label, not a schema change.
+ */
+function ForecastRowControls({
+  date,
+  facilityCode,
+  item,
+  busy,
+  onEdit,
+}: {
+  date: string;
+  facilityCode: string;
+  item: UpcomingItem;
+  busy: boolean;
+  onEdit?: (intent: ForecastEditIntent) => void;
+}) {
+  const target = { facilityCode, payerLabel: item.payer ?? '', expectedDate: date };
+  const label = `${facilityCode} ${item.payer ?? ''} ${date}`.trim();
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <button
+        type="button"
+        className="ths-btn ths-btn-secondary ths-btn-sm"
+        disabled={busy}
+        aria-label={`Mark landed: ${label}`}
+        onClick={() => onEdit?.({ op: 'suppress', ...target, reason: 'landed' })}
+      >
+        Mark landed
+      </button>
+      <button
+        type="button"
+        className="ths-btn ths-btn-secondary ths-btn-sm"
+        disabled={busy}
+        aria-label={`Mark not coming: ${label}`}
+        onClick={() => onEdit?.({ op: 'suppress', ...target, reason: 'incorrect' })}
+      >
+        Not coming
+      </button>
+      <form
+        className="flex items-center gap-1"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const input = e.currentTarget.elements.namedItem('amount');
+          const raw = input instanceof HTMLInputElement ? input.value.trim() : '';
+          // Shape-check here too: the Server Action validates independently, but a bad value
+          // should not cost a round trip.
+          if (!/^\d{1,10}(\.\d{1,2})?$/.test(raw)) return;
+          onEdit?.({ op: 'correct', ...target, amount: raw });
+        }}
+      >
+        <input
+          type="text"
+          inputMode="decimal"
+          name="amount"
+          defaultValue={item.amount ?? ''}
+          size={9}
+          className="ths-input ths-num"
+          aria-label={`Correct amount: ${label}`}
+        />
+        <button type="submit" className="ths-btn ths-btn-primary ths-btn-sm" disabled={busy}>
+          Save
+        </button>
+      </form>
+      {item.manualId !== undefined && (
+        <button
+          type="button"
+          className="ths-btn ths-btn-ghost ths-btn-sm"
+          disabled={busy}
+          aria-label={`Remove admin edit: ${label}`}
+          onClick={() => onEdit?.({ op: 'delete-edit', id: item.manualId! })}
+        >
+          {item.origin === 'manual' ? 'Remove row' : 'Undo correction'}
+        </button>
+      )}
+    </div>
   );
 }

@@ -40,16 +40,20 @@ import {
   loadCollectionsYoy,
   loadEraUpcoming,
   loadFacilityDimension,
+  loadUpcomingManual,
   loadUpcomingOverrides,
+  saveUpcomingManual,
+  deleteUpcomingManual,
   type CollectionsDailyResult,
   type CollectionsKpis,
   type CollectionsYoy,
   type FacilityDimensionRow,
 } from '@/lib/actions';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID, type DashboardView } from '@/lib/views';
-import { EraUpcomingBody } from './era-upcoming';
+import { EraUpcomingBody, type ForecastEditIntent } from './era-upcoming';
 import type { EraUpcomingSummary } from '../../../src/veris/era835Upcoming.js';
 import type { UpcomingOverrideSummary } from '../../../src/veris/upcomingOverride.js';
+import type { ManualForecastRow } from '../../../src/veris/upcomingForecast';
 import { useWidget } from './widgets';
 
 const MONTH_NAMES = [
@@ -233,7 +237,14 @@ function PanelToggleButton({
   );
 }
 
-export function OverviewKpis({ view }: { view: DashboardView }) {
+export function OverviewKpis({
+  view,
+  canEditForecast = false,
+}: {
+  view: DashboardView;
+  /** super_admin only — surfaces the Upcoming Payments edit controls. */
+  canEditForecast?: boolean;
+}) {
   const [facilitiesOpen, setFacilitiesOpen] = useState(false);
   const [eraOpen, setEraOpen] = useState(false);
   // `view` is the active tenant scope. It is passed to every collections load* action (which
@@ -385,7 +396,12 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
         asOf={asOf}
         view={view}
       />
-      <EraUpcomingPanel open={eraOpen} onClose={() => setEraOpen(false)} view={view} />
+      <EraUpcomingPanel
+        open={eraOpen}
+        onClose={() => setEraOpen(false)}
+        view={view}
+        canEdit={canEditForecast}
+      />
     </div>
   );
 }
@@ -409,26 +425,37 @@ function EraUpcomingPanel({
   open,
   onClose,
   view,
+  canEdit,
 }: {
   open: boolean;
   /** See AllFacilitiesTable.onClose — the toggle button owns this state. */
   onClose: () => void;
   view: DashboardView;
+  /** super_admin only. Convenience for hiding controls; the Server Actions are the real gate. */
+  canEdit: boolean;
 }) {
   const [status, setStatus] = useState<'idle' | 'loading' | 'error' | 'ready'>('idle');
   const [data, setData] = useState<EraUpcomingSummary | null>(null);
   const [overrides, setOverrides] = useState<UpcomingOverrideSummary | null>(null);
+  const [manual, setManual] = useState<ManualForecastRow[]>([]);
+  const [busy, setBusy] = useState(false);
+  // Bumped after a successful write to re-run the loader — the tile must show the resolved
+  // truth (correction applied, landed row gone) rather than optimistically patched state,
+  // because the resolver's output depends on rows this component does not own.
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     if (!open) return;
     let live = true;
     setStatus('loading');
     setData(null);
     setOverrides(null);
-    Promise.all([loadEraUpcoming(view), loadUpcomingOverrides(view)])
-      .then(([era, ovr]) => {
+    setManual([]);
+    Promise.all([loadEraUpcoming(view), loadUpcomingOverrides(view), loadUpcomingManual(view)])
+      .then(([era, ovr, man]) => {
         if (!live) return;
-        // The forecast half never gates the panel — see the fail-soft note above.
+        // Neither the forecast feed nor the edit table gates the panel — see the note above.
         setOverrides(ovr.ok ? ovr.data : null);
+        setManual(man.ok ? man.data.rows : []);
         if (era.ok) {
           setData(era.data);
           setStatus('ready');
@@ -442,7 +469,49 @@ function EraUpcomingPanel({
     return () => {
       live = false;
     };
-  }, [open, view]);
+  }, [open, view, reloadKey]);
+
+  /**
+   * Apply one edit intent from the tile. The Server Action re-checks super_admin and writes the
+   * audit row — this handler only marshals and refetches, so nothing here is a security
+   * boundary. Failures are left to the reload: the tile re-renders whatever the server actually
+   * holds, which is the honest outcome whether the write landed or not.
+   */
+  async function applyEdit(intent: ForecastEditIntent) {
+    setBusy(true);
+    try {
+      if (intent.op === 'delete-edit') {
+        await deleteUpcomingManual(intent.id, view);
+      } else if (intent.op === 'suppress') {
+        await saveUpcomingManual(
+          {
+            kind: 'suppress',
+            facilityCode: intent.facilityCode,
+            payerLabel: intent.payerLabel,
+            expectedDate: intent.expectedDate,
+            amount: null,
+            suppressReason: intent.reason,
+            matchedEraKey: intent.matchedEraKey ?? null,
+          },
+          view,
+        );
+      } else {
+        await saveUpcomingManual(
+          {
+            kind: 'correct',
+            facilityCode: intent.facilityCode,
+            payerLabel: intent.payerLabel,
+            expectedDate: intent.expectedDate,
+            amount: intent.amount,
+          },
+          view,
+        );
+      }
+    } finally {
+      setBusy(false);
+      setReloadKey((k) => k + 1);
+    }
+  }
 
   if (!open) return null;
   return (
@@ -461,7 +530,14 @@ function EraUpcomingPanel({
       {status === 'error' ? (
         <div className="ths-alert">Unable to load upcoming payments.</div>
       ) : status === 'ready' && data ? (
-        <EraUpcomingBody data={data} overrides={overrides} />
+        <EraUpcomingBody
+          data={data}
+          overrides={overrides}
+          manual={manual}
+          canEdit={canEdit}
+          busy={busy}
+          onEdit={(intent) => void applyEdit(intent)}
+        />
       ) : (
         <div className="ths-card-meta py-6 text-center">Loading…</div>
       )}

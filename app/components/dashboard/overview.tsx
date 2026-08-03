@@ -113,7 +113,19 @@ export function ClaimsDistributions() {
  * identical UI; the scope flows through the viewToEntityIds seam (app/lib/views.ts).
  * Until Indigo data is ingested, every view resolves to BXR-or-stub data.
  */
-export function Dashboard({ view }: { view: DashboardView }) {
+export function Dashboard({
+  view,
+  canEditForecast = false,
+}: {
+  view: DashboardView;
+  /**
+   * super_admin only. Threaded from the page's server-side dashboardAccess() rather than
+   * re-derived in the client: the role must be decided once, on the server, closest to the
+   * session. The Server Actions behind every edit re-check it independently, so this prop only
+   * decides whether controls are rendered.
+   */
+  canEditForecast?: boolean;
+}) {
   // "ERA-Confirmed Upcoming Payments" moved from a standalone top card into the
   // OverviewKpis toggle-button row (next to "All Facilities Table") — same data,
   // now revealed on demand.
@@ -123,7 +135,7 @@ export function Dashboard({ view }: { view: DashboardView }) {
     // rule in that file is scoped to this attribute, so Collections, the Explorer
     // grid, Qualify and Claims Audit are untouched until each is ported.
     <section data-ths="v2" className="space-y-6">
-      <OverviewKpis view={view} />
+      <OverviewKpis view={view} canEditForecast={canEditForecast} />
       <OverviewBarChart scope={view} />
     </section>
   );

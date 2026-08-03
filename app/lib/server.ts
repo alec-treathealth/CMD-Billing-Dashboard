@@ -188,6 +188,7 @@ import {
   upcomingOverrideSync,
   type UpcomingOverrideSummary,
 } from '../../src/veris/upcomingOverride.js';
+import type { ManualForecastRow } from '../../src/veris/upcomingForecast.js';
 import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
 import { refreshCmdPayerRollup } from '../../src/collections/cmdPayerRefresh.js';
 import { CMD_EXPLORER_CUSTOMERS, INDIGO_CUSTOMERS, BXR_CUSTOMERS, type CmdCustomer } from '../../src/collections/cmdCustomers.js';
@@ -1035,6 +1036,103 @@ export type {
   UpcomingOverrideSummary,
   UpcomingOverrideRow,
 } from '../../src/veris/upcomingOverride.js';
+
+// --- Super-admin forecast EDITS (staging.expected_payment_manual, migration 024) -------
+
+/**
+ * One tenant's super-admin edits to the forecast. Read-only here; the resolver that folds
+ * these over the sheet feed is pure and runs at the UI edge (src/veris/upcomingForecast.ts).
+ *
+ * A SEPARATE TABLE FROM THE SHEET FEED, and that is the point: 023 is replace-per-sync, so a
+ * hand-authored row there would be destroyed by the next hourly cron. 024 grants the cron
+ * NOTHING on this table, which is a structural guarantee rather than a careful predicate.
+ *
+ * Explicit allowlisted columns, RLS-scoped by the GUC through withTenant, reader pool. Rows
+ * are unbounded in principle but bounded in practice by the unique index (one decision per
+ * kind + match key) and by there being ~9 sheet rows to decide about.
+ */
+export async function getUpcomingManual(entityIds: string[]): Promise<ManualForecastRow[]> {
+  if (entityIds.length === 0) {
+    // Mirrors assertEntityScope: an empty scope reads NOTHING, loudly.
+    throw new Error('getUpcomingManual: empty entity scope');
+  }
+  const out: ManualForecastRow[] = [];
+  for (const id of entityIds) {
+    const rows = await withTenant(verisReaderPool(), id, async (client) => {
+      const res = await client.query<ManualForecastRow>(
+        `select id, kind, facility_code, payer_label, expected_date::text as expected_date,
+                method_label, amount::text as amount, suppress_reason, matched_era_key
+           from staging.expected_payment_manual
+          where business_entity_id = $1::uuid
+          order by expected_date asc, facility_code asc, payer_label asc, id asc`,
+        [id],
+      );
+      return res.rows;
+    });
+    out.push(...rows);
+  }
+  return out;
+}
+export type {
+  ManualForecastRow,
+  ResolvedForecastRow,
+  LandedSuggestion,
+} from '../../src/veris/upcomingForecast.js';
+
+/**
+ * Create or re-decide ONE super-admin forecast edit. Authorization is NOT decided here —
+ * app/lib/actions.ts gates on role === 'super_admin' and writes the audit row. This is the
+ * narrow mechanism: a claims_admin-owned SECURITY DEFINER function called on the SAME
+ * least-privilege claims_reader pool used everywhere else, exactly like claims.upsert_app_user.
+ *
+ * The function runs as its owner and therefore BYPASSES RLS, so `businessEntityId` — derived
+ * server-side from the RBAC-clamped view, never from the client — is what scopes the write.
+ * The function re-validates it against core.business_entity before inserting.
+ */
+export async function saveUpcomingManualRow(input: {
+  businessEntityId: string;
+  kind: 'add' | 'correct' | 'suppress';
+  facilityCode: string;
+  payerLabel: string;
+  expectedDate: string;
+  methodLabel: string | null;
+  amount: string | null;
+  suppressReason: 'landed' | 'incorrect' | 'cancelled' | null;
+  matchedEraKey: string | null;
+  actorUserId: string;
+}): Promise<string> {
+  const { rows } = await readerExecutor().query<{ id: string }>(
+    'select staging.upsert_expected_payment_manual(' +
+      '$1::uuid, $2, $3, $4, $5::date, $6, $7::numeric, $8, $9, $10::uuid) as id',
+    [
+      input.businessEntityId,
+      input.kind,
+      input.facilityCode,
+      input.payerLabel,
+      input.expectedDate,
+      input.methodLabel,
+      input.amount,
+      input.suppressReason,
+      input.matchedEraKey,
+      input.actorUserId,
+    ],
+  );
+  const id = rows[0]?.id;
+  if (!id) throw new Error('saveUpcomingManualRow: upsert returned no id');
+  return id;
+}
+
+/** Remove one edit. Returns false when the id did not exist for this tenant (idempotent). */
+export async function removeUpcomingManualRow(
+  businessEntityId: string,
+  id: number,
+): Promise<boolean> {
+  const { rows } = await readerExecutor().query<{ deleted: boolean }>(
+    'select staging.delete_expected_payment_manual($1::uuid, $2::bigint) as deleted',
+    [businessEntityId, id],
+  );
+  return rows[0]?.deleted === true;
+}
 
 /**
  * GET /api/cron/upcoming-overrides — "Upcoming Payments" sheet → staging.

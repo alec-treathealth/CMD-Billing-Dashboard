@@ -57,7 +57,7 @@ export default async function DashboardPage({
         </p>
         <DataFreshness view={view} />
       </header>
-      <Dashboard view={view} />
+      <Dashboard view={view} canEditForecast={access.access.role === 'super_admin'} />
       <footer className="mt-10 border-t pt-4 text-xs text-muted-foreground">
         Internal tool — handles PHI. Access requires per-user sign-in and is scoped by your assigned
         role. Do not share patient data outside the authorized billing audience.

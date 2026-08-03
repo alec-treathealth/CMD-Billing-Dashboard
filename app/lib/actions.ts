@@ -89,6 +89,10 @@ import {
   type EraUpcomingSummary,
   getUpcomingOverrides,
   type UpcomingOverrideSummary,
+  getUpcomingManual,
+  saveUpcomingManualRow,
+  removeUpcomingManualRow,
+  type ManualForecastRow,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
 import { dashboardAccess } from '@/lib/access';
@@ -524,6 +528,172 @@ export async function loadUpcomingOverrides(
     return { ok: true, data: await getUpcomingOverrides(entityIds) };
   } catch {
     return { ok: false };
+  }
+}
+
+/**
+ * Super-admin edits to the upcoming-payment forecast (staging.expected_payment_manual,
+ * migration 024). READ path — open to any entitled viewer, because these rows are non-PHI
+ * billing configuration and the tile must show a corrected amount to everyone who can see the
+ * tile at all. Only WRITING them is super-admin-gated (see saveUpcomingManual below).
+ *
+ * Tenant scope is clamped SERVER-SIDE via viewEntityScope; fail-closed on an empty scope.
+ */
+export async function loadUpcomingManual(
+  view?: DashboardView,
+): Promise<DashboardResult<{ rows: ManualForecastRow[] }>> {
+  try {
+    const entityIds = await viewEntityScope(view);
+    if (!entityIds || entityIds.length === 0) return { ok: false };
+    return { ok: true, data: { rows: await getUpcomingManual(entityIds) } };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Resolve the ONE tenant a forecast edit belongs to, or null.
+ *
+ * A write must name exactly one tenant. The Consolidated view resolves to TWO entity ids, so
+ * a write issued from it is ambiguous — and guessing (first id, or "both") would either
+ * mis-attribute money or duplicate a human decision across two books. Reject it and make the
+ * caller pick a tenant view. This is also the fail-closed path for an unprovisioned session.
+ */
+async function singleWriteEntity(view?: DashboardView): Promise<string | null> {
+  const entityIds = await viewEntityScope(view);
+  if (!entityIds || entityIds.length !== 1) return null;
+  return entityIds[0] ?? null;
+}
+
+/** What the UI submits for one edit. Validated here before it reaches the DB function. */
+export interface UpcomingManualInput {
+  kind: 'add' | 'correct' | 'suppress';
+  facilityCode: string;
+  payerLabel: string;
+  /** ISO 'YYYY-MM-DD'. */
+  expectedDate: string;
+  methodLabel?: 'EFT' | 'Check' | null;
+  /** Fixed-point decimal STRING, never a float. Required for add/correct, null for suppress. */
+  amount?: string | null;
+  suppressReason?: 'landed' | 'incorrect' | 'cancelled' | null;
+  /** Provenance stamp for a confirmed 'landed' match: 'date|facility|payer'. */
+  matchedEraKey?: string | null;
+}
+
+/** Bounded, closed-set validation at the trust boundary. Returns null when the input is fine. */
+function validateManualInput(i: UpcomingManualInput): string | null {
+  if (!['add', 'correct', 'suppress'].includes(i.kind)) return 'bad_kind';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(i.expectedDate)) return 'bad_date';
+  // Every externally-supplied string gets a length bound; these mirror 024's CHECKs so a
+  // rejection surfaces here as a clean message rather than as a DB constraint violation.
+  if (i.facilityCode.length < 1 || i.facilityCode.length > 64) return 'bad_facility';
+  if (i.payerLabel.trim().length < 1 || i.payerLabel.length > 200) return 'bad_payer';
+  if (i.methodLabel != null && i.methodLabel !== 'EFT' && i.methodLabel !== 'Check') {
+    return 'bad_method';
+  }
+  if (i.amount != null && !/^\d{1,10}(\.\d{1,2})?$/.test(i.amount)) return 'bad_amount';
+  if (i.kind === 'add' && (i.amount == null || i.methodLabel == null)) return 'add_needs_amount';
+  if (i.kind === 'correct' && i.amount == null) return 'correct_needs_amount';
+  if (i.kind === 'suppress') {
+    if (i.amount != null) return 'suppress_has_amount';
+    if (i.suppressReason == null) return 'suppress_needs_reason';
+  }
+  if (
+    i.suppressReason != null &&
+    !['landed', 'incorrect', 'cancelled'].includes(i.suppressReason)
+  ) {
+    return 'bad_reason';
+  }
+  return null;
+}
+
+/**
+ * Create or re-decide one forecast edit. SUPER-ADMIN ONLY.
+ *
+ * Three layers, in this order, none of them redundant:
+ *   1. role === 'super_admin' here — the policy decision, closest to the caller.
+ *   2. a claims.access_audit row naming the real actor, written BEFORE the mutation so an
+ *      attempt is recorded even if the write then fails. This is the only durable record of
+ *      who changed a money figure.
+ *   3. 024's per-kind CHECK constraint — the DB guarantees a malformed statement about the
+ *      forecast cannot land whatever this code does.
+ *
+ * Returns a generic error string on failure: details go to the server log, never to the client.
+ */
+export async function saveUpcomingManual(
+  input: UpcomingManualInput,
+  view?: DashboardView,
+): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
+  const gate = await dashboardAccess();
+  // `user` is typed optional on Access, so narrow it here rather than asserting: no verified
+  // actor means no audit row is possible, and an unaudited money edit must not happen.
+  if (!gate.ok || gate.access.role !== 'super_admin' || !gate.access.user) {
+    return { ok: false, error: 'forbidden' };
+  }
+  const actor = gate.access.user;
+  const invalid = validateManualInput(input);
+  if (invalid) return { ok: false, error: invalid };
+  const entityId = await singleWriteEntity(view);
+  if (!entityId) return { ok: false, error: 'pick_a_tenant_view' };
+  try {
+    await recordAccess({
+      actorEmail: actor.email,
+      actorUserId: actor.id,
+      action: 'edit_upcoming_forecast',
+      // NON-PHI only: what was decided, about which facility/payer/date, for how much.
+      detail: {
+        kind: input.kind,
+        facility_code: input.facilityCode,
+        payer_label: input.payerLabel,
+        expected_date: input.expectedDate,
+        amount: input.amount ?? null,
+        suppress_reason: input.suppressReason ?? null,
+        entity: entityId,
+      },
+    });
+    const id = await saveUpcomingManualRow({
+      businessEntityId: entityId,
+      kind: input.kind,
+      facilityCode: input.facilityCode,
+      payerLabel: input.payerLabel.trim(),
+      expectedDate: input.expectedDate,
+      methodLabel: input.methodLabel ?? null,
+      amount: input.amount ?? null,
+      suppressReason: input.suppressReason ?? null,
+      matchedEraKey: input.matchedEraKey ?? null,
+      actorUserId: actor.id,
+    });
+    return { ok: true, id };
+  } catch (err) {
+    console.error('saveUpcomingManual failed:', err instanceof Error ? err.message : String(err));
+    return { ok: false, error: 'write_failed' };
+  }
+}
+
+/** Remove one forecast edit (reverting to whatever the sheet says). SUPER-ADMIN ONLY. */
+export async function deleteUpcomingManual(
+  id: number,
+  view?: DashboardView,
+): Promise<{ ok: true; deleted: boolean } | { ok: false; error: string }> {
+  const gate = await dashboardAccess();
+  if (!gate.ok || gate.access.role !== 'super_admin' || !gate.access.user) {
+    return { ok: false, error: 'forbidden' };
+  }
+  const actor = gate.access.user;
+  if (!Number.isSafeInteger(id) || id <= 0) return { ok: false, error: 'bad_id' };
+  const entityId = await singleWriteEntity(view);
+  if (!entityId) return { ok: false, error: 'pick_a_tenant_view' };
+  try {
+    await recordAccess({
+      actorEmail: actor.email,
+      actorUserId: actor.id,
+      action: 'delete_upcoming_forecast_edit',
+      detail: { manual_id: id, entity: entityId },
+    });
+    return { ok: true, deleted: await removeUpcomingManualRow(entityId, id) };
+  } catch (err) {
+    console.error('deleteUpcomingManual failed:', err instanceof Error ? err.message : String(err));
+    return { ok: false, error: 'write_failed' };
   }
 }
 
