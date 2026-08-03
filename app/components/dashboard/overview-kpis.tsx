@@ -28,7 +28,7 @@
  * that needs to change scope once the real data layer lands.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { CalendarClock, Filter, Table2 } from 'lucide-react';
+import { CalendarClock, Filter, Table2, X } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -344,8 +344,15 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
         </PanelToggleButton>
       </div>
 
-      <AllFacilitiesTable open={facilitiesOpen} kpis={kpis} dimByCode={dimByCode} asOf={asOf} view={view} />
-      <EraUpcomingPanel open={eraOpen} view={view} />
+      <AllFacilitiesTable
+        open={facilitiesOpen}
+        onClose={() => setFacilitiesOpen(false)}
+        kpis={kpis}
+        dimByCode={dimByCode}
+        asOf={asOf}
+        view={view}
+      />
+      <EraUpcomingPanel open={eraOpen} onClose={() => setEraOpen(false)} view={view} />
     </div>
   );
 }
@@ -357,7 +364,16 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
  * reveal. The body is the unchanged EraUpcomingBody leaf, so the 013 read-path
  * contract (floor banner, no fabricated zeros) renders identically here.
  */
-function EraUpcomingPanel({ open, view }: { open: boolean; view: DashboardView }) {
+function EraUpcomingPanel({
+  open,
+  onClose,
+  view,
+}: {
+  open: boolean;
+  /** See AllFacilitiesTable.onClose — the toggle button owns this state. */
+  onClose: () => void;
+  view: DashboardView;
+}) {
   const [status, setStatus] = useState<'idle' | 'loading' | 'error' | 'ready'>('idle');
   const [data, setData] = useState<EraUpcomingSummary | null>(null);
   useEffect(() => {
@@ -386,7 +402,19 @@ function EraUpcomingPanel({ open, view }: { open: boolean; view: DashboardView }
   if (!open) return null;
   return (
     <div className="rounded-lg border border-line bg-card p-4 shadow-ths">
-      <h3 className="mb-3 text-sm font-semibold text-ink900">ERA-Confirmed Upcoming Payments</h3>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-ink900">ERA-Confirmed Upcoming Payments</h3>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={onClose}
+          aria-label="Close ERA-confirmed upcoming payments"
+          className="text-ink600"
+        >
+          <X className="h-4 w-4" />
+        </Button>
+      </div>
       {status === 'error' ? (
         <div className="rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-sm text-status-danger">
           Unable to load ERA-confirmed payments.
@@ -429,12 +457,16 @@ interface FacilityMonthTotals {
  */
 function AllFacilitiesTable({
   open,
+  onClose,
   kpis,
   dimByCode,
   asOf,
   view,
 }: {
   open: boolean;
+  /** Dismiss control for the panel's own X — same state the toggle button owns, so the
+   *  button un-presses when the panel closes itself. */
+  onClose: () => void;
   kpis: CollectionsKpis;
   dimByCode: Map<string, FacilityDimensionRow>;
   asOf: string | null;
@@ -583,6 +615,16 @@ function AllFacilitiesTable({
             <option value="IP">IP only</option>
             <option value="OP">OP only</option>
           </ControlSelect>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={onClose}
+            aria-label="Close all facilities table"
+            className="text-ink600"
+          >
+            <X className="h-4 w-4" />
+          </Button>
         </div>
       </div>
 
