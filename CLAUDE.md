@@ -130,8 +130,8 @@ Two **separate** migration planes — never mix the directories:
 
 | Plane | Directory | Next number |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0075** |
-| Veris ML (`staging`, `ref`, `core`) | `SQL Schemas/0NN_*.sql` | **023** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0077** |
+| Veris ML (`staging`, `ref`, `core`) | `SQL Schemas/0NN_*.sql` | **024** |
 
 Merging a migration in a PR does **not** apply it to prod. Code that depends on
 it 500s until `apply_migration` runs.
@@ -160,7 +160,7 @@ Surfaces:
   `redirect('/')` stub. `<SearchConsole />` and the `/api/agent` path stay in git
   history; restoring means remounting the page *and* re-adding the nav entry.
 
-`app/vercel.json` declares **16 cron entries across 14 distinct routes**
+`app/vercel.json` declares **17 cron entries across 15 distinct routes**
 (`billing-audit-consolidated` runs on three schedules):
 
 | Route | Cadence |
@@ -168,6 +168,7 @@ Surfaces:
 | `cmd-explorer` · `indigo-explorer` | hourly, :00 / :30 |
 | `cmd-census` · `indigo-census` | hourly, :15 / :35 |
 | `refresh-charge-rollup` | hourly, :45 |
+| `upcoming-overrides` | hourly, :55 |
 | `cmd-explorer-catchup` | daily 07:52 |
 | `era-835` | daily 08:50 |
 | `vob-sync` | daily 09:17 |

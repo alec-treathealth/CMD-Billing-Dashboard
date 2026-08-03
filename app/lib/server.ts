@@ -182,6 +182,12 @@ import {
   mergeEraUpcoming,
   type EraUpcomingSummary,
 } from '../../src/veris/era835Upcoming.js';
+import {
+  mergeUpcomingOverrides,
+  upcomingOverrides,
+  upcomingOverrideSync,
+  type UpcomingOverrideSummary,
+} from '../../src/veris/upcomingOverride.js';
 import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
 import { refreshCmdPayerRollup } from '../../src/collections/cmdPayerRefresh.js';
 import { CMD_EXPLORER_CUSTOMERS, INDIGO_CUSTOMERS, BXR_CUSTOMERS, type CmdCustomer } from '../../src/collections/cmdCustomers.js';
@@ -986,6 +992,126 @@ export async function getEraUpcomingPayments(entityIds: string[]): Promise<EraUp
   return mergeEraUpcoming(parts);
 }
 export type { EraUpcomingSummary, EraUpcomingGroup } from '../../src/veris/era835Upcoming.js';
+
+// --- Upcoming-payment FORECAST overrides (Overview tile, staging.expected_payment_override) --
+
+/**
+ * Hand-keyed forecast rows for an ALREADY-CLAMPED entity scope, synced FROM the "Upcoming
+ * Payments" Google Sheet (migration 023). The FORECAST half of the "ERA-Confirmed Upcoming
+ * Payers" tile; getEraUpcomingPayments above is the CONFIRMED half.
+ *
+ * ADDITIVE-ONLY (Alec, 2026-08-03): these rows are shown ALONGSIDE the ERA rows and never
+ * suppress one. Do NOT add this total to EraUpcomingSummary.total in a single headline —
+ * the two are different epistemic classes (835-confirmed vs. operator-asserted), and a
+ * forecast row whose 835 has since landed is double-counted until the operator deletes it
+ * from the sheet. Label them separately in the UI. ERA reconciliation is later work.
+ *
+ * Same shape as the ERA read on purpose: one withTenant read per entity (staging RLS is
+ * GUC-scoped, one tenant per transaction), Consolidated = the per-tenant results merged in
+ * exact integer cents, fails closed on an empty scope, and the cutoff is computed ONCE here
+ * and shared across tenants — businessTodayIso(), the SAME anchor the ERA half uses, so the
+ * two halves cannot disagree about what "upcoming" means across midnight PT.
+ *
+ * LIVE read, deliberately uncached, matching the ERA half: the table changes when the
+ * hourly override cron writes, and no cron revalidates a tag for this surface, so an
+ * unstable_cache entry would serve a stale forecast for an unbounded time.
+ */
+export async function getUpcomingOverrides(
+  entityIds: string[],
+): Promise<UpcomingOverrideSummary> {
+  if (entityIds.length === 0) {
+    // Mirrors assertEntityScope / getEraUpcomingPayments: an empty scope reads NOTHING, loudly.
+    throw new Error('getUpcomingOverrides: empty entity scope');
+  }
+  const cutoffIso = businessTodayIso();
+  const parts: UpcomingOverrideSummary[] = [];
+  for (const id of entityIds) {
+    // Sequential: at most 2 entities, each its own short transaction on the shared pool.
+    parts.push(await upcomingOverrides(verisReaderPool(), id, cutoffIso));
+  }
+  return mergeUpcomingOverrides(parts);
+}
+export type {
+  UpcomingOverrideSummary,
+  UpcomingOverrideRow,
+} from '../../src/veris/upcomingOverride.js';
+
+/**
+ * GET /api/cron/upcoming-overrides — "Upcoming Payments" sheet → staging.
+ * expected_payment_override. Auth: Bearer <CRON_SECRET>. GET only.
+ *
+ * THE GOOGLE SHEETS CONNECTOR, composed here. Reuses the EXACT env-only OAuth
+ * refresh-token pattern already proven by handleBillingCodeDecisionsCron below —
+ * GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET / GOOGLE_SHEETS_REFRESH_TOKEN are
+ * shared with that cron (one Google client, one grant, scope spreadsheets.readonly), so the
+ * only NEW env var is UPCOMING_PAYMENTS_SHEET_ID. Names never values; fail-fast when unset.
+ * `googleapis` is imported lazily so it stays out of the cold-start path of every other
+ * route in this module.
+ *
+ * Writes as the least-privilege cmd_rollup_writer (023 grants it SELECT/INSERT/DELETE on
+ * this one table, GUC-scoped by RLS) — never claims_admin, never the service-role key.
+ *
+ * BXR-ONLY TODAY, deliberately explicit. Every one of the sheet's live rows is a BXR
+ * facility, and the parser's alias table contains only BXR codes, so the tenant is passed
+ * as a literal rather than inferred. An Indigo forecast tab would be a SECOND call with
+ * INDIGO_TENANT_ID and its own tab + alias entries — not a widening of this one.
+ *
+ * FAIL-SOFT on the sheet: a fetch failure or header drift returns status 'parse_failed'
+ * with zero writes, mapped to ok:false in the body — last good forecast stays on the tile.
+ * Schedule lives in app/vercel.json (single source of truth) — do not restate it here.
+ */
+export async function handleUpcomingOverridesCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
+    return { status: 405, body: { error: 'method_not_allowed' } };
+  }
+  const secret = process.env.CRON_SECRET;
+  if (!secret || !isAuthorized(req.authorization, secret)) {
+    return { status: 401, body: { error: 'unauthorized' } };
+  }
+  try {
+    const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID?.trim();
+    const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET?.trim();
+    const refreshToken = process.env.GOOGLE_SHEETS_REFRESH_TOKEN?.trim();
+    const sheetId = process.env.UPCOMING_PAYMENTS_SHEET_ID?.trim();
+    if (!clientId || !clientSecret || !refreshToken || !sheetId) {
+      throw new Error(
+        'Upcoming-overrides sync env not configured: set GOOGLE_OAUTH_CLIENT_ID, ' +
+          'GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_SHEETS_REFRESH_TOKEN, UPCOMING_PAYMENTS_SHEET_ID',
+      );
+    }
+    const [{ google }, { readSheet }] = await Promise.all([
+      import('googleapis'),
+      import('../../src/sheets.js'),
+    ]);
+    const oauth = new google.auth.OAuth2(clientId, clientSecret);
+    oauth.setCredentials({ refresh_token: refreshToken });
+    const stats = await upcomingOverrideSync({
+      // readSheet splits row 1 off as `header`; the override parser wants EVERY row with
+      // true 1-based rowNums so it can validate the header itself and report real sheet
+      // row numbers in rejects — reassemble. Same shim as the billing-code cron.
+      fetchTab: async (tab) => {
+        const res = await readSheet(sheetId, tab, oauth);
+        return { rows: [{ rowNum: 1, cells: res.header }, ...res.rows] };
+      },
+      writeDb: rollupWriterDb(),
+      businessEntityId: BXR_TENANT_ID,
+    });
+    // NO revalidateTag HERE, on purpose. getUpcomingOverrides is a LIVE uncached read (same
+    // posture as getEraUpcomingPayments — see its comment above), so there is no cache entry
+    // for this surface to bust and a revalidate call would be dead code implying otherwise.
+    // If this read is ever wrapped in unstable_cache, add the tag in BOTH places at once.
+    return { status: 200, body: { ok: stats.status !== 'parse_failed', ...stats } };
+  } catch (err) {
+    console.error(
+      'upcoming-overrides cron failed:',
+      err instanceof Error ? err.message : String(err),
+    );
+    return { status: 500, body: { error: 'cron_failed' } };
+  }
+}
 
 // --- 835 ERA ingest cron (staging.era_835_payment + era_835_adjustment) --------------
 

@@ -87,6 +87,8 @@ import {
   type AuditRevealedRow,
   getEraUpcomingPayments,
   type EraUpcomingSummary,
+  getUpcomingOverrides,
+  type UpcomingOverrideSummary,
 } from '@/lib/server';
 import { requireExecutive } from '@/lib/executive';
 import { dashboardAccess } from '@/lib/access';
@@ -492,6 +494,34 @@ export async function loadEraUpcoming(
     const entityIds = await viewEntityScope(view);
     if (!entityIds || entityIds.length === 0) return { ok: false };
     return { ok: true, data: await getEraUpcomingPayments(entityIds) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Hand-keyed upcoming-payment FORECAST overrides (Overview tile) — staging.
+ * expected_payment_override only, synced read-only from the "Upcoming Payments" sheet
+ * (migration 023). The companion to loadEraUpcoming: that one is 835-CONFIRMED money, this
+ * one is operator-ASSERTED money with no 835 yet.
+ *
+ * ADDITIVE-ONLY (Alec, 2026-08-03): render these alongside the ERA rows, visually distinct,
+ * and do NOT sum the two totals into one headline — a forecast row whose 835 has landed is
+ * double-counted until the operator removes it from the sheet. ERA reconciliation is
+ * separate, later work.
+ *
+ * `view` is a display hint; tenant scope is clamped SERVER-SIDE to the session's entitlement
+ * via viewEntityScope (fail-closed: no principal / empty entitlement → { ok: false }, never
+ * a wide default). Non-PHI payload: facility, payer label, date, method, amount, and the
+ * is_patient_specific boolean — never a patient name (the sync's parser drops it).
+ */
+export async function loadUpcomingOverrides(
+  view?: DashboardView,
+): Promise<DashboardResult<UpcomingOverrideSummary>> {
+  try {
+    const entityIds = await viewEntityScope(view);
+    if (!entityIds || entityIds.length === 0) return { ok: false };
+    return { ok: true, data: await getUpcomingOverrides(entityIds) };
   } catch {
     return { ok: false };
   }
