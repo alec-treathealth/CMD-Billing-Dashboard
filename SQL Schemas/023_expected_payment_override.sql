@@ -171,9 +171,9 @@ $t$Hand-keyed UPCOMING-PAYMENT FORECAST rows synced read-only FROM the "Upcoming
 
 ADDITIVE-ONLY (Alec, 2026-08-03): these rows display ALONGSIDE ERA rows and never suppress or replace one. There is no supersedes column and no join to era_835_payment by design — ERA reconciliation is separate, later work. Consequence: a forecast row left in the sheet after its 835 lands IS double-counted. The UI must present these as FORECAST, never fold them into the ERA-confirmed total.
 
-NON-PHI BY CONSTRUCTION. The source sheet''s `Client` column holds patient names; this table HAS NO PATIENT COLUMN. The parser derives is_patient_specific and discards the string — never stored, never logged, never sent to an LLM. Do not add a patient/member/claim column here; that would be a new PHI-classified table (see 021''s enc + blind-index pattern).
+NON-PHI BY CONSTRUCTION. The source sheet's `Client` column holds patient names; this table HAS NO PATIENT COLUMN. The parser derives is_patient_specific and discards the string — never stored, never logged, never sent to an LLM. Do not add a patient/member/claim column here; that would be a new PHI-classified table (see 021's enc + blind-index pattern).
 
-REPLACE-PER-SYNC: each run DELETEs the tenant''s rows and INSERTs the current parse in one withTenant transaction. The sheet has no stable row identity, so structural replacement is the idempotency mechanism — not a natural key. This table is therefore NOT append-only, unlike staging.era_835_ingest_run.
+REPLACE-PER-SYNC: each run DELETEs the tenant's rows and INSERTs the current parse in one withTenant transaction. The sheet has no stable row identity, so structural replacement is the idempotency mechanism — not a natural key. This table is therefore NOT append-only, unlike staging.era_835_ingest_run.
 
 The sheet stays the ONLY editing surface. The app never writes back (the OAuth grant is spreadsheets.readonly).$t$;
 
