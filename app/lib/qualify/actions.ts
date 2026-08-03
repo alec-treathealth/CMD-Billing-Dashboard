@@ -32,6 +32,12 @@ import {
 import type { CmdFacilityOption } from '../../../src/collections/cmdExplorerQuery';
 import { memberIdBlindIndex, alphaPrefixBlindIndex, groupNumberBlindIndex, patientNameBlindIndex } from '../../../src/collections/blindIndex';
 import {
+  loadQualifyPolicy,
+  loadQualifyVobFreshness,
+  loadQualifyWindowRungs,
+  loadCurrentCodingDecisions,
+} from '@/lib/qualify/loaders';
+import {
   getQualifySnapshotCore,
   getQualifySnapshotByPayerCore,
   getQualifySnapshotByNameCore,
@@ -72,13 +78,22 @@ import type {
   RevealQualifyRowsResult,
 } from '@/lib/qualify/contract';
 
+/**
+ * loadQualifyFacilities' published type still says `payer: string` (app/lib/server.ts is under
+ * concurrent development and is deliberately untouched by the v2 branch), but the SQL builder
+ * underneath (buildFacilityRankingQuery) accepts `payer: string | null` — null is the v2
+ * comparable-cohort ranking, and the core guarantees a market narrow rides with it. This shim is
+ * the ONE place that widening is asserted; delete it when server.ts's own signature widens.
+ */
+const loadFacilitiesV2 = loadQualifyFacilities as unknown as QualifyDeps['loadFacilities'];
+
 const realDeps: QualifyDeps = {
   requirePrincipal: requireQualifyPrincipal,
   mintToken: (query, kind) => (kind === 'prefix' ? alphaPrefixBlindIndex(query) : memberIdBlindIndex(query)),
   mintGroupToken: (raw) => groupNumberBlindIndex(raw),
   mintNameToken: (raw) => patientNameBlindIndex(raw),
   resolvePayer: resolveQualifyPayer,
-  loadFacilities: loadQualifyFacilities,
+  loadFacilities: loadFacilitiesV2,
   loadIdentifierLandingFacility: loadQualifyIdentifierLandingFacility,
   loadFacilityCases: loadQualifyFacilityCases,
   loadMatchSummary: loadQualifyMatchSummary,
@@ -92,6 +107,11 @@ const realDeps: QualifyDeps = {
   revealRow: (id, actor, entityIds, action) => revealCmdExplorerRow(id, actor, entityIds, action),
   revealRows: (ids, actor, entityIds, action) => revealCmdExplorerRows(ids, actor, entityIds, action),
   now: () => new Date(),
+  // ── v2 seams (Phases 0/A/B/E) — loaders.ts owns the second reader pool; census binds in Phase G.
+  loadPolicy: (token, kind) => loadQualifyPolicy(token, kind),
+  loadVobFreshness: () => loadQualifyVobFreshness(),
+  loadWindowRungs: (token, kind, entityIds, froms, to) => loadQualifyWindowRungs(token, kind, entityIds, froms, to),
+  loadCodingDecisions: () => loadCurrentCodingDecisions(),
 };
 
 /** Max employers accepted in one market narrow (bounded input — the vocabulary is ~11.6k). */

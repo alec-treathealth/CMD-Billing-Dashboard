@@ -7,8 +7,16 @@
  * can load it hermetically. All PHI/DB/crypto reach it only through the injected QualifyDeps.
  */
 import { qualifyRating, QUALIFY_MIN_LINES } from './rating';
+import { computeRatingV2, type QualifyProvenance } from './ratingV2';
+import { QUALIFY_RATING_CONFIDENT_PATIENTS } from './sampleGate';
 import { confidenceOf } from './confidence';
 import { facilityLocation } from './facilityLocations';
+import {
+  lookupCodingDecision,
+  codingCodesLabel,
+  type CodingDecisionRow,
+} from '../../../src/collections/codingRegistryQuery';
+import type { QualifyPolicyRow, QualifyWindowRungsRow } from '../../../src/collections/qualifyPolicyQuery';
 import {
   isQualifyWindow,
   sniffQualifyKind,
@@ -43,6 +51,11 @@ import {
   type QualifyOverview,
   type QualifyComposeInput,
   type QualifyMatchSummary,
+  type QualifyPolicyCard,
+  type QualifyWindowLadder,
+  type QualifyWindowRung,
+  type QualifyTrailingDays,
+  QUALIFY_VOB_STALE_HOURS,
 } from './contract';
 import type { QualifyPrincipal } from './principal';
 import {
@@ -92,7 +105,9 @@ export interface QualifyDeps {
   mintNameToken: (raw: string) => string | null;
   resolvePayer: (token: string, kind: QualifyTokenKind, entityIds: string[]) => Promise<string | null>;
   loadFacilities: (
-    payer: string,
+    /** The resolved payer, or NULL for the v2 comparable-cohort ranking (Phase B) — the builder
+     *  omits the payer clause; the market semi-join MUST carry the scope (core enforces it). */
+    payer: string | null,
     from: string,
     to: string,
     entityIds: string[],
@@ -172,6 +187,37 @@ export interface QualifyDeps {
     action: string,
   ) => Promise<QualifyRevealedRow[]>;
   now: () => Date;
+
+  // ── v2 seams (Phases 0/A/B/E/G) — ALL OPTIONAL, all fail-soft ─────────────────────────────────
+  // Optional so (a) the pre-v2 fake-deps test corpus keeps compiling untouched and (b) every core
+  // degrades honestly when a seam is absent: no policy card, coding factor "unseeded", census
+  // factors unavailable — never a throw, never a fabricated value.
+  /** Phase B: the policy on file behind a member/prefix token (vob.member_benefits_latest aggregate). */
+  loadPolicy?: (token: string, kind: QualifyMatchKind) => Promise<QualifyPolicyRow>;
+  /** Phase 0: the GLOBAL VOB feed high-water mark (max vob_created_at) — the staleness alarm input. */
+  loadVobFreshness?: () => Promise<string | null>;
+  /** Phase E: the five-rung distinct-patient ladder in ONE scan. */
+  loadWindowRungs?: (
+    token: string,
+    kind: QualifyMatchKind,
+    entityIds: string[],
+    froms: { d30: string; d60: string; d90: string; d180: string; d365: string },
+    to: string,
+  ) => Promise<QualifyWindowRungsRow>;
+  /** Phase A: all CURRENT coding decisions (seeded:false while 0077 is unapplied/empty). */
+  loadCodingDecisions?: () => Promise<{ seeded: boolean; rows: CodingDecisionRow[] }>;
+  /** Phase G: per-facility census aggregates (auth days, LOS, next UR, open beds). Empty = none. */
+  loadCensusAuth?: () => Promise<QualifyCensusAggRow[]>;
+}
+
+/** Per-facility monday-census AGGREGATE row (Phase G) — facility-level only, deliberately no
+ *  patient-level census data crosses this seam (no new PHI at rest for the auth-fit factor). */
+export interface QualifyCensusAggRow {
+  facility_code: string;
+  avg_auth_days: number | null;
+  avg_los_days: number | null;
+  next_ur_date: string | null; // soonest upcoming UR date on the board, ISO
+  open_beds: number | null;
 }
 
 /** Raw, un-stripped lifetime cohort context the server loader returns (dollar sums intact — the
@@ -187,11 +233,17 @@ export interface QualifyPatientCohortRaw {
 
 // ── pure assembly helpers ────────────────────────────────────────────────────
 
-/** The ONE amounts choke point (R-AMOUNTS): null every dollar field. Runs LAST, in one place. */
+/** The ONE amounts choke point (R-AMOUNTS): null every dollar field. Runs LAST, in one place.
+ *  v2 extends it to the policy card's raw benefit strings (deductible/OOP text is dollar-bearing);
+ *  factors + ratingV2 are dollar-free BY CONSTRUCTION (ratingV2.ts has no dollar input) and pass
+ *  through untouched — that is the blind-parity invariant. */
 function stripSnapshotAmounts(snap: QualifySnapshot): QualifySnapshot {
   return {
     ...snap,
     facilities: snap.facilities.map((f) => ({ ...f, billedAmount: null, allowedAmount: null })),
+    policy: snap.policy
+      ? { ...snap.policy, deductible: null, deductibleMet: null, oopMax: null, oopMet: null }
+      : null,
   };
 }
 
@@ -201,7 +253,67 @@ function stripClaimsAmounts(claims: QualifyClaim[]): QualifyClaim[] {
 }
 
 function emptySnapshot(hasAmounts: boolean): QualifySnapshot {
-  return { resolved: null, facilities: [], identifierLandingFacility: null, viewerHasAmountsCapability: hasAmounts, tenantScope: QUALIFY_TENANT_SCOPE };
+  return {
+    resolved: null,
+    facilities: [],
+    identifierLandingFacility: null,
+    viewerHasAmountsCapability: hasAmounts,
+    tenantScope: QUALIFY_TENANT_SCOPE,
+    policy: null,
+    ladder: null,
+    provenance: 'none',
+  };
+}
+
+// ── v2 factor context — everything assembleFacilities needs beyond the rows ─────────────────────
+
+interface QualifyFactorContext {
+  windowDays: number;
+  provenance: QualifyProvenance;
+  coding: { seeded: boolean; rows: CodingDecisionRow[] };
+  census: Map<string, QualifyCensusAggRow>;
+  /** The resolved payer LABEL the coding lookup keys on. Null on the comparable path (no payer —
+   *  registry decisions are payer-scoped, so the factor honestly reads "no decision on file"). */
+  payer: string | null;
+  now: Date;
+}
+
+const NO_CODING = { seeded: false, rows: [] as CodingDecisionRow[] };
+
+/** Days spanned by [from, to) — the data-confidence age input for ANY window shape. */
+function windowDaysOf(from: string, to: string): number {
+  const ms = Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`);
+  return Number.isFinite(ms) && ms > 0 ? Math.round(ms / 86_400_000) : 0;
+}
+
+/** Assemble the shared factor context for one snapshot: load coding + census ONCE (both optional
+ *  seams, both fail-soft), never per facility. */
+async function factorContext(
+  deps: QualifyDeps,
+  payer: string | null,
+  from: string,
+  to: string,
+  provenance: QualifyProvenance,
+): Promise<QualifyFactorContext> {
+  const [coding, censusRows] = await Promise.all([
+    deps.loadCodingDecisions ? deps.loadCodingDecisions().catch(() => NO_CODING) : Promise.resolve(NO_CODING),
+    deps.loadCensusAuth ? deps.loadCensusAuth().catch(() => [] as QualifyCensusAggRow[]) : Promise.resolve([] as QualifyCensusAggRow[]),
+  ]);
+  const census = new Map<string, QualifyCensusAggRow>();
+  for (const r of censusRows) if (r.facility_code) census.set(r.facility_code, r);
+  return { windowDays: windowDaysOf(from, to), provenance, coding, census, payer, now: deps.now() };
+}
+
+/** The context used when a call path deliberately skips factor inputs (compose/cases-only paths). */
+function defaultFactorContext(deps: QualifyDeps, from: string, to: string): QualifyFactorContext {
+  return {
+    windowDays: windowDaysOf(from, to),
+    provenance: 'direct',
+    coding: NO_CODING,
+    census: new Map(),
+    payer: null,
+    now: deps.now(),
+  };
 }
 
 /** Non-PHI alpha-prefix echo (≤3 chars) — never the raw member id. */
@@ -226,41 +338,87 @@ function entityLabel(entityIds: string[] | null | undefined): 'BXR' | 'Indigo' |
 }
 
 /**
- * Shape + rate + sort the facility rows. VALUE-FIRST (ruling 2026-07-19b): rank by rating = allowed%
- * desc (nulls last), tiebreak name. FLOOR: drop facilities under QUALIFY_MIN_LINES charge lines first, so
- * a degenerate "100% on 1 line" fluke never surfaces — but a genuinely small facility (>= the floor)
- * ranks on its merit, never demoted for being small.
+ * Shape + rate + sort the facility rows. v2 (qualify-v2-build-plan §5): every card carries the
+ * five-factor reading (computed HERE, server-side, from NON-DOLLAR inputs only — the wire ships the
+ * work, the client never re-derives it), and the RANK is by ratingV2 desc — the factor model is the
+ * sort key. Fallbacks keep it total: ratingV2 null (suppressed) sorts after rated cards, then the
+ * value-first v1 pct, then name — deterministic under every data shape. FLOOR unchanged: drop
+ * < QUALIFY_MIN_LINES flukes on payer-wide paths only.
  */
-function assembleFacilities(rows: QualifyFacilityRow[], applyFloor = true): QualifyFacility[] {
+function assembleFacilities(
+  rows: QualifyFacilityRow[],
+  ctx: QualifyFactorContext,
+  applyFloor = true,
+): QualifyFacility[] {
   return rows
     // FLOOR (payer-wide only): drop < QUALIFY_MIN_LINES flukes. An IDENTIFIER-scoped ranking passes
     // applyFloor=false — every facility the searched id billed is relevant (even a single claim), and the
     // "thin sample" flag (lineCount) communicates the small n instead of hiding the facility.
     .filter((r) => !applyFloor || r.line_count >= QUALIFY_MIN_LINES)
-    .map((r) => ({
-      rank: 0,
-      name: r.facility_name ?? r.facility,
-      facilityKey: r.facility, // raw rollup text — the join key for the facility-scoped cases drill
-      city: facilityLocation(r.facility_code)?.city ?? null,
-      state: facilityLocation(r.facility_code)?.state ?? null,
-      pctAllowedOfBilled: r.pct_allowed,
-      rating: qualifyRating(r.pct_allowed),
-      streakSignal: null, // Q-E: always null in v1
-      billedAmount: r.billed,
-      allowedAmount: r.allowed,
-      lineCount: r.line_count,
-      distinctPatients: r.distinct_patients, // rating sample-gate unit (sampleGate.ts) — non-dollar, non-PHI count
-      // 0059 trust signal (non-dollar — survives the amounts strip for admissions_seat).
-      confirmedClaims: r.confirmed_claims,
-      estimateClaims: r.estimate_claims,
-      unknownClaims: r.unknown_claims,
-      careSetting: r.care_setting,
-      entity: entityLabel(r.entity_ids),
-    }))
+    .map((r) => {
+      const facilityCode = r.facility_code ?? null;
+      const census = facilityCode ? ctx.census.get(facilityCode) ?? null : null;
+      // Coding lookup: payer-scoped (registry decisions are per payer family). The comparable path
+      // carries payer=null → no row → the factor reads "no decision on file", which is the truth.
+      const decision = ctx.coding.seeded
+        ? lookupCodingDecision(ctx.coding.rows, ctx.payer, facilityCode, r.care_setting)
+        : null;
+      const v2 = computeRatingV2({
+        pctAllowed: r.pct_allowed,
+        lineCount: r.line_count,
+        confirmedClaims: r.confirmed_claims,
+        distinctPatients: r.distinct_patients,
+        windowDays: ctx.windowDays,
+        provenance: ctx.provenance,
+        registrySeeded: ctx.coding.seeded,
+        codingLifecycle: decision ? (decision.lifecycle as import('./ratingV2').CodingLifecycle) : null,
+        codingDecidedOn: decision?.decided_on ?? null,
+        codingCodesLabel: decision ? codingCodesLabel(decision) : null,
+        medianDaysToPayment: r.median_days_to_payment ?? null,
+        avgAuthDays: census?.avg_auth_days ?? null,
+        avgLosDays: census?.avg_los_days ?? null,
+        now: ctx.now,
+      });
+      return {
+        rank: 0,
+        name: r.facility_name ?? r.facility,
+        facilityKey: r.facility, // raw rollup text — the join key for the facility-scoped cases drill
+        city: facilityLocation(r.facility_code)?.city ?? null,
+        state: facilityLocation(r.facility_code)?.state ?? null,
+        pctAllowedOfBilled: r.pct_allowed,
+        rating: qualifyRating(r.pct_allowed),
+        streakSignal: null, // Q-E: always null in v1
+        billedAmount: r.billed,
+        allowedAmount: r.allowed,
+        lineCount: r.line_count,
+        distinctPatients: r.distinct_patients, // rating sample-gate unit (sampleGate.ts) — non-dollar, non-PHI count
+        // 0059 trust signal (non-dollar — survives the amounts strip for admissions_seat).
+        confirmedClaims: r.confirmed_claims,
+        estimateClaims: r.estimate_claims,
+        unknownClaims: r.unknown_claims,
+        careSetting: r.care_setting,
+        entity: entityLabel(r.entity_ids),
+        // v2 — all non-dollar; survive the amounts strip unchanged.
+        medianDaysToPayment: r.median_days_to_payment ?? null,
+        avgAuthDays: census?.avg_auth_days ?? null,
+        avgLosDays: census?.avg_los_days ?? null,
+        nextUrDate: census?.next_ur_date ?? null,
+        openBeds: census?.open_beds ?? null,
+        ratingV2: v2.rating,
+        iqBand: v2.band,
+        factors: v2.factors,
+        availableWeight: v2.availableWeight,
+      };
+    })
     .sort((a, b) => {
-      if (a.rating === null && b.rating !== null) return 1;
-      if (b.rating === null && a.rating !== null) return -1;
-      if (a.rating !== null && b.rating !== null && b.rating !== a.rating) return b.rating - a.rating;
+      // v2 rank: factor rating desc, nulls (suppressed) last …
+      if (a.ratingV2 === null && b.ratingV2 !== null) return 1;
+      if (b.ratingV2 === null && a.ratingV2 !== null) return -1;
+      if (a.ratingV2 !== null && b.ratingV2 !== null && b.ratingV2 !== a.ratingV2) return b.ratingV2 - a.ratingV2;
+      // … then the value-first v1 rating, then pct, then name — deterministic everywhere.
+      const br = b.rating ?? -1;
+      const ar = a.rating ?? -1;
+      if (br !== ar) return br - ar;
       const bp = b.pctAllowedOfBilled ?? -1;
       const ap = a.pctAllowedOfBilled ?? -1;
       if (bp !== ap) return bp - ap;
@@ -329,44 +487,158 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
     detail: { field: kind, window: serializeQualifyWindow(window) },
   });
 
-  const payerName = await deps.resolvePayer(token, kind, gate.entityIds);
-  if (!payerName) return emptySnapshot(gate.hasAmounts); // known-nothing → VOB (resolved stays null)
+  // ── Phase E: the AUTO-WINDOW sufficiency ladder (one bucketed query, never five probes). Runs
+  // BEFORE the payer resolve so the chosen window scopes everything downstream. Manual windows
+  // (input.auto falsy) skip it entirely — the Range menu stays the biller's override.
+  let window2: QualifyWindow = window;
+  let ladder: QualifyWindowLadder | null = null;
+  if (input.auto === true && deps.loadWindowRungs) {
+    const rungDays: QualifyTrailingDays[] = [30, 60, 90, 180, 365];
+    const now = deps.now();
+    const boundsOf = (d: QualifyTrailingDays) => qualifyWindowBounds({ kind: 'trailing', days: d }, now);
+    const to = boundsOf(30).to; // all trailing windows share the exclusive upper bound
+    const froms = {
+      d30: boundsOf(30).from,
+      d60: boundsOf(60).from,
+      d90: boundsOf(90).from,
+      d180: boundsOf(180).from,
+      d365: boundsOf(365).from,
+    };
+    try {
+      const counts = await deps.loadWindowRungs(token, kind, gate.entityIds, froms, to);
+      const byDay: Record<QualifyTrailingDays, number> = {
+        30: counts.p30,
+        60: counts.p60,
+        90: counts.p90,
+        180: counts.p180,
+        270: counts.p180, // 270 is not a ladder rung; mapped for type-totality only (never rendered)
+        365: counts.p365,
+      };
+      const rungs: QualifyWindowRung[] = rungDays.map((d) => ({
+        days: d,
+        distinctPatients: byDay[d],
+        sufficient: byDay[d] >= QUALIFY_RATING_CONFIDENT_PATIENTS,
+      }));
+      const chosen = rungs.find((r) => r.sufficient) ?? rungs[rungs.length - 1]!;
+      ladder = { rungs, chosenDays: chosen.days, sufficient: chosen.sufficient };
+      window2 = { kind: 'trailing', days: chosen.days };
+    } catch {
+      ladder = null; // ladder failure degrades to the caller's window — never blocks the search
+    }
+  }
 
-  const { from, to } = qualifyWindowBounds(window, deps.now());
-  // Fix A: alongside the payer-wide ranking, look up WHERE the searched identifier's most-recent in-window
-  // claim is (token already minted above). The claim ordering is byte-identical to the drill's.
-  // Identifier-scoped ranking: the ranking is narrowed to the SEARCHED token's footprint (only facilities
-  // that billed it in-window; counts/ratings over its matched rows), so the left panel + band counts +
-  // Recent Claims all describe the same identifier — not the whole payer book (ruling: the payer is step 1
-  // of the drilldown, the facilities the user sees must be the ones that billed what they searched).
-  const [facRows, landingRaw] = await Promise.all([
-    deps.loadFacilities(payerName, from, to, gate.entityIds, input.market, token, kind),
-    deps.loadIdentifierLandingFacility(token, kind, payerName, from, to, gate.entityIds),
+  // ── Phase B/0: the policy on file behind the token + the global VOB feed freshness — parallel
+  // with the payer resolve. All three fail-soft; a VOB hiccup must not take down the claims read.
+  const [payerName, policyRow, globalFresh] = await Promise.all([
+    deps.resolvePayer(token, kind, gate.entityIds),
+    deps.loadPolicy ? deps.loadPolicy(token, kind).catch(() => null) : Promise.resolve(null),
+    deps.loadVobFreshness ? deps.loadVobFreshness().catch(() => null) : Promise.resolve(null),
   ]);
 
-  const facilities = assembleFacilities(facRows, false); // no floor — every facility the id billed is relevant
-  // The landing facility is guaranteed present in the identifier-scoped set when it billed in-window; keep
-  // it only if so (a never-in-window identifier collapses to null → the honest "widen the window" state).
-  const identifierLandingFacility =
-    landingRaw !== null && facilities.some((f) => f.facilityKey === landingRaw) ? landingRaw : null;
-  const resolved: QualifyResolved = {
-    payerName,
-    matchedOn: kind,
-    matchedValue: alphaEcho(raw),
-    totalCharges: facilities.reduce((s, f) => s + f.lineCount, 0),
-    facilityCount: facilities.length,
-    windowStart: from,
-    windowEnd: to,
-    identifierScoped: true,
-  };
-  const snap: QualifySnapshot = {
-    resolved,
-    facilities,
-    identifierLandingFacility,
-    viewerHasAmountsCapability: gate.hasAmounts,
-    tenantScope: QUALIFY_TENANT_SCOPE,
-  };
-  return gate.hasAmounts ? snap : stripSnapshotAmounts(snap); // stripAmounts LAST
+  const now = deps.now();
+  // Feed staleness (Phase 0): the GLOBAL high-water mark going stale means every policy read is
+  // suspect — the exact "confidently wrong" failure mode. Day-grain source, hour-grain threshold.
+  const staleFloorMs = QUALIFY_VOB_STALE_HOURS * 3_600_000;
+  const vobStale =
+    globalFresh !== null && now.getTime() - Date.parse(`${globalFresh}T00:00:00Z`) > staleFloorMs + 86_400_000 - 1;
+  const policy: QualifyPolicyCard | null =
+    policyRow === null
+      ? null
+      : {
+          found: policyRow.member_count > 0,
+          memberCount: policyRow.member_count,
+          carrier: policyRow.carrier,
+          employerName: policyRow.employer_name,
+          funding: policyRow.funding,
+          policyType: policyRow.policy_type,
+          planType: policyRow.plan_type,
+          groupOnFile: policyRow.group_on_file,
+          network: null, // Phase D: not extracted from the VOB yet (three parser generations, none carries it)
+          vobFreshAsOf: policyRow.vob_fresh_as_of,
+          vobStale,
+          deductible: policyRow.deductible,
+          deductibleMet: policyRow.deductible_met,
+          oopMax: policyRow.oop_max,
+          oopMet: policyRow.oop_met,
+        };
+
+  const { from, to } = qualifyWindowBounds(window2, now);
+
+  if (payerName) {
+    // ── DIRECT provenance: this identifier has its own claims history. Identifier-scoped ranking:
+    // the panel + counts + Recent Claims all describe the SEARCHED token's footprint (ruling: the
+    // facilities the user sees must be the ones that billed what they searched).
+    const ctx = await factorContext(deps, payerName, from, to, 'direct');
+    const [facRows, landingRaw] = await Promise.all([
+      deps.loadFacilities(payerName, from, to, gate.entityIds, input.market, token, kind),
+      deps.loadIdentifierLandingFacility(token, kind, payerName, from, to, gate.entityIds),
+    ]);
+    const facilities = assembleFacilities(facRows, ctx, false); // no floor — every billed facility is relevant
+    const identifierLandingFacility =
+      landingRaw !== null && facilities.some((f) => f.facilityKey === landingRaw) ? landingRaw : null;
+    const resolved: QualifyResolved = {
+      payerName,
+      matchedOn: kind,
+      matchedValue: alphaEcho(raw),
+      totalCharges: facilities.reduce((s, f) => s + f.lineCount, 0),
+      facilityCount: facilities.length,
+      windowStart: from,
+      windowEnd: to,
+      identifierScoped: true,
+    };
+    const snap: QualifySnapshot = {
+      resolved,
+      facilities,
+      identifierLandingFacility,
+      viewerHasAmountsCapability: gate.hasAmounts,
+      tenantScope: QUALIFY_TENANT_SCOPE,
+      policy,
+      ladder,
+      provenance: 'direct',
+    };
+    return gate.hasAmounts ? snap : stripSnapshotAmounts(snap); // stripAmounts LAST
+  }
+
+  // ── COMPARABLE provenance (Phase B): no claims for THIS identifier, but the VOB tells us its
+  // plan. Rank facilities over the policy's behavioral peer group — same employer plan first
+  // (member_benefits employer_norm semi-join), else the funding market — clearly labeled ESTIMATED,
+  // never dressed as direct evidence. resolved stays null (the honest "no own history" signal);
+  // the policy card + provenance carry the story. No cohort at all → the plain VOB path.
+  if (policy?.found && deps.loadFacilities) {
+    const employerNorm = policyRow?.employer_norm ?? null;
+    const funding = policyRow?.funding ?? null;
+    const comparable: { market: VobMarketFilter; provenance: QualifyProvenance } | null = employerNorm
+      ? { market: { employers: [employerNorm] }, provenance: 'comparable_employer' }
+      : funding
+        ? { market: { funding: [funding] }, provenance: 'comparable_funding' }
+        : null;
+    if (comparable) {
+      try {
+        const ctx = await factorContext(deps, null, from, to, comparable.provenance);
+        // payer=null + a NON-EMPTY market: the builder ranks the cohort across all payers. The
+        // payer-wide floor applies (this is a book-shaped ranking, not an identifier footprint).
+        const facRows = await deps.loadFacilities(null, from, to, gate.entityIds, comparable.market);
+        const facilities = assembleFacilities(facRows, ctx, true);
+        const snap: QualifySnapshot = {
+          resolved: null,
+          facilities,
+          identifierLandingFacility: null,
+          viewerHasAmountsCapability: gate.hasAmounts,
+          tenantScope: QUALIFY_TENANT_SCOPE,
+          policy,
+          ladder,
+          provenance: facilities.length > 0 ? comparable.provenance : 'none',
+        };
+        return gate.hasAmounts ? snap : stripSnapshotAmounts(snap);
+      } catch {
+        // comparable ranking failure degrades to the plain VOB path below
+      }
+    }
+  }
+
+  const empty = emptySnapshot(gate.hasAmounts);
+  const snap: QualifySnapshot = { ...empty, policy, ladder };
+  return gate.hasAmounts ? snap : stripSnapshotAmounts(snap);
 }
 
 /**
@@ -399,9 +671,10 @@ export async function getQualifySnapshotByPayerCore(
   });
 
   const { from, to } = qualifyWindowBounds(window, deps.now());
+  const ctx = await factorContext(deps, payer, from, to, 'direct');
   const facRows = await deps.loadFacilities(payer, from, to, gate.entityIds, input.market);
 
-  const facilities = assembleFacilities(facRows);
+  const facilities = assembleFacilities(facRows, ctx);
   const resolved: QualifyResolved = {
     payerName: payer,
     matchedOn: 'payer',
@@ -418,6 +691,9 @@ export async function getQualifySnapshotByPayerCore(
     identifierLandingFacility: null, // resolve-by-payer carries NO identifier → payer-wide (ruling 3)
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
+    policy: null, // a payer label carries no member identity → nothing to resolve a policy from
+    ladder: null,
+    provenance: 'direct',
   };
   return gate.hasAmounts ? snap : stripSnapshotAmounts(snap); // stripAmounts LAST
 }
@@ -466,13 +742,14 @@ export async function getQualifySnapshotByNameCore(
   if (!payerName) return emptySnapshot(gate.hasAmounts); // never-seen name → VOB (resolved stays null)
 
   const { from, to } = qualifyWindowBounds(window, deps.now());
+  const ctx = await factorContext(deps, payerName, from, to, 'direct');
   // Identifier-scoped ranking (same as the member/prefix path) — narrowed to the searched name's footprint.
   const [facRows, landingRaw] = await Promise.all([
     deps.loadFacilities(payerName, from, to, gate.entityIds, input.market, token, 'client_name'),
     deps.loadIdentifierLandingFacility(token, 'client_name', payerName, from, to, gate.entityIds),
   ]);
 
-  const facilities = assembleFacilities(facRows, false); // no floor — every facility the name billed is relevant
+  const facilities = assembleFacilities(facRows, ctx, false); // no floor — every facility the name billed is relevant
   const identifierLandingFacility =
     landingRaw !== null && facilities.some((f) => f.facilityKey === landingRaw) ? landingRaw : null;
   const resolved: QualifyResolved = {
@@ -491,6 +768,9 @@ export async function getQualifySnapshotByNameCore(
     identifierLandingFacility,
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
+    policy: null, // name resolution carries no prefix → no policy lookup (a name is not a plan)
+    ladder: null,
+    provenance: 'direct',
   };
   return gate.hasAmounts ? snap : stripSnapshotAmounts(snap); // stripAmounts LAST
 }

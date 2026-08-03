@@ -16,8 +16,10 @@ import { AreaChips, deriveAreaChips, facilitiesInArea, AREA_ALL, AREA_OTHER } fr
 import { qualifyRating } from '../lib/qualify/rating';
 import { mobileBucketStyle } from '../components/qualify/m/colors';
 import type { QualifyFacility, QualifyClaim, QualifyPhi } from '../lib/qualify/contract';
+import { QUALIFY_FACILITY_V2_NULLS } from './helpers/qualifyV2Fixture';
 
 const FAC: QualifyFacility = {
+  ...QUALIFY_FACILITY_V2_NULLS,
   rank: 1,
   name: 'MENTAL HEALTH CENTER OF SAN DIEGO',
   facilityKey: 'mental health center of san diego',

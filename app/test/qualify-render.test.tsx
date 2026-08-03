@@ -28,12 +28,14 @@ import type {
   QualifyFacilityTrend,
   QualifyPhi,
 } from '../lib/qualify/contract';
+import { QUALIFY_FACILITY_V2_NULLS } from './helpers/qualifyV2Fixture';
 
 const solidRating = qualifyRating(55)!; // 55 → ok
 const thinHighRating = qualifyRating(90)!; // 90 → ok (value-first: a small high-% facility reads GREEN)
 const lowRating = qualifyRating(24)!; // 24 → danger (a genuinely weak reimbursement)
 
 const SOLID: QualifyFacility = {
+  ...QUALIFY_FACILITY_V2_NULLS,
   rank: 1, name: 'SOLID', facilityKey: 'solid', city: 'Boulder', state: 'CO',
   pctAllowedOfBilled: 55, rating: solidRating, streakSignal: null,
   billedAmount: 308900, allowedAmount: 166800, lineCount: 400, distinctPatients: 40,
@@ -42,6 +44,7 @@ const SOLID: QualifyFacility = {
 // THIN_HIGH: 90% on ONE patient — the sample gate (hotfix 2026-07-27) suppresses its color to
 // neutral ("insufficient data"), even though the value-first rating itself is 90 (→ ratingBucket ok).
 const THIN_HIGH: QualifyFacility = {
+  ...QUALIFY_FACILITY_V2_NULLS,
   rank: 2, name: 'THIN HIGH', facilityKey: 'thin high', city: 'Reno', state: 'NV',
   pctAllowedOfBilled: 90, rating: thinHighRating, streakSignal: null,
   billedAmount: 412300, allowedAmount: 251500, lineCount: 1, distinctPatients: 1,
@@ -58,6 +61,7 @@ const CASE_AT_THIN: QualifyClaim = {
 // A weak-reimbursement facility (24% → danger) with a HIGH-pct case, to prove the % ALLOWED cell
 // follows the case's OWN pct (95% → green), NOT the parent facility's danger bucket.
 const LOW: QualifyFacility = {
+  ...QUALIFY_FACILITY_V2_NULLS,
   rank: 3, name: 'LOW YIELD', facilityKey: 'low yield', city: 'Fresno', state: 'CA',
   pctAllowedOfBilled: 24, rating: lowRating, streakSignal: null,
   billedAmount: 500000, allowedAmount: 120000, lineCount: 300, distinctPatients: 30,

@@ -1,0 +1,4 @@
+facility_code	payer_label	decided_on	codes_utilizing	billing_rules	lifecycle	notes
+NMH	Anthem BCBS (ALL OTHERS)	5/21/2026	H0017/0158	Single DOS	CONFIRMED CODES	example row — replace everything below the header with the reconciled matrix
+KWC	CIGNA	04/07/2026	NO HCPCS / 1001	2-3 DOS per claim; 863	OPEN TEST	NO HCPCS means suppress the HCPCS line and bill the rev code alone
+	UHC/UMR	6/10/2026	H2036/0912	TOB 133; 3 units per code (PER HOUR)	CONTINUE TESTS	blank facility_code = payer-wide default (matches any facility)

@@ -38,6 +38,21 @@ export type QualifyPrincipal =
   | { ok: false; error: string };
 
 /**
+ * Registry (coding decision) EDIT policy — STRICTER than the Qualify read policy: super_admin ONLY.
+ * The registry is the repo's first editable write surface; widening it to the billing team's entity
+ * roles is a deliberate future policy change made HERE (one line, reviewed), never at a call site.
+ * Pure for the same testability reason as the Qualify principal.
+ */
+export function requireRegistryEditorFromAccess(result: QualifyAccessInput): QualifyPrincipal {
+  const base = requireQualifyPrincipalFromAccess(result);
+  if (!base.ok) return base;
+  if (!result.ok || result.access.role !== 'super_admin') {
+    return { ok: false, error: 'Editing the code decision registry requires a super admin.' };
+  }
+  return base;
+}
+
+/**
  * Apply the Qualify authorization + pinned scope to an already-resolved dashboard AccessResult.
  * Default-deny; fail-closed on no session / unprovisioned / no-auth fallback / any role outside
  * { super_admin, admissions_seat }.

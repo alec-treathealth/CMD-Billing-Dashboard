@@ -76,6 +76,11 @@ export interface QualifyFacilityRow {
   billed: number | null; // sum(charge_amount), ALL lines — stripped in the action for admissions_seat
   allowed: number | null; // sum(allowed_reliable) EXCLUDING tier e2 (0059 evidence sum; null when zero reliable evidence) — stripped for admissions_seat
   pct_allowed: number | null; // dollar-weighted reliable-allowed/billed, 0-100 (guarded); null → neutral rating
+  /** v2 TTP factor input: median (payment_received − charge_date) in days over the in-window rows.
+   *  NON-DOLLAR (a day count). Paid-lines-only by construction — the window is payment-dated, so
+   *  unresolved claims are structurally absent from this axis (the factor detail discloses it).
+   *  OPTIONAL so pre-v2 fixtures/loaders remain valid; consumers coalesce to null. */
+  median_days_to_payment?: number | null;
   entity_ids: string[]; // distinct tenant uuid(s) backing this facility — core maps to a BXR/Indigo/Mixed label
 }
 export interface QualifyClaimRow {
@@ -209,7 +214,12 @@ const RANKING_RELIABLE_SELECT =
  * 5,412 e1 charges' facilities vs the pre-0059 panel. That is the fix, not a regression.
  */
 export function buildFacilityRankingQuery(
-  payer: string,
+  /** The resolved payer, OR NULL for the v2 COMPARABLE-COHORT ranking (Phase B): a no-claims policy
+   *  ranks facilities over its employer/funding cohort (the `market` semi-join) across ALL payers —
+   *  the cohort IS the policy's behavioral peer group, so no payer clause is emitted. Callers must
+   *  pass a market narrow whenever payer is null (an unscoped null would rank the whole book); the
+   *  cores enforce that. */
+  payer: string | null,
   from: string,
   to: string,
   entityIds: string[],
@@ -220,7 +230,7 @@ export function buildFacilityRankingQuery(
   const ent = assertEntityScope(entityIds, 'buildFacilityRankingQuery');
   const { params, add } = paramList();
   const e = add(ent);
-  const p = add(payer);
+  const payerCond = payer !== null ? `and primary_payer = ${add(payer)} ` : '';
   const f = add(from);
   const t = add(to);
   // Optional IDENTIFIER narrow: a prefix/member/client-name search scopes the ranking to that
@@ -249,13 +259,18 @@ export function buildFacilityRankingQuery(
     "count(*) filter (where allowed_tier = 'e2')::int as estimate_claims, " +
     "count(*) filter (where allowed_tier in ('b','none'))::int as unknown_claims, " +
     'sum(charge_amount)::float8 as billed, ' +
+    // v2 TTP factor: median service→payment days over the in-window (paid) rows. A day count, not a
+    // dollar — survives the amounts strip. charge_date can be null on degenerate rows → FILTERed out.
+    'percentile_cont(0.5) within group (order by (payment_received - charge_date)::float8) ' +
+    'filter (where charge_date is not null and payment_received is not null)::float8 as median_days_to_payment, ' +
     // entity_ids: the distinct tenant(s) whose rows back this facility card. The core maps it to a
     // small non-PHI 'BXR' / 'Indigo' / 'Mixed' LABEL — never used to GROUP or SPLIT (cross-tenant
     // interleave stays; grouping-by-entity is banned). A facility text under both tenants → 'Mixed'.
     'array_agg(distinct business_entity_id::text) as entity_ids, ' +
     RANKING_RELIABLE_SELECT + ' ' +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
-    `where business_entity_id = any(${e}::uuid[]) and primary_payer = ${p} ` +
+    `where business_entity_id = any(${e}::uuid[]) ` +
+    payerCond +
     `and payment_received >= ${f}::date and payment_received < ${t}::date ` +
     "and facility is not null and btrim(facility) <> '' " +
     idNarrow +
@@ -263,14 +278,14 @@ export function buildFacilityRankingQuery(
     'group by facility';
   const sql =
     'select agg.facility, agg.line_count, agg.distinct_patients, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
-    'agg.billed, agg.allowed, agg.pct_allowed, agg.entity_ids, ' +
+    'agg.billed, agg.allowed, agg.pct_allowed, agg.median_days_to_payment, agg.entity_ids, ' +
     'max(f.facility_name) as facility_name, ' +
     'max(f.care_setting) as care_setting, ' +
     'max(coalesce(fe.facility_code, a.facility_code)) as facility_code ' +
     `from (${inner}) agg ` +
     FACILITY_DIM_JOINS +
     'group by agg.facility, agg.line_count, agg.distinct_patients, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
-    'agg.billed, agg.allowed, agg.pct_allowed, agg.entity_ids ' +
+    'agg.billed, agg.allowed, agg.pct_allowed, agg.median_days_to_payment, agg.entity_ids ' +
     'order by agg.pct_allowed desc nulls last, agg.facility';
   return { sql, params };
 }
