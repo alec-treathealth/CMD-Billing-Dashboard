@@ -3414,3 +3414,63 @@ in-flight files by construction.
 Related: one `next build` in the same window failed with a bare "Build error occurred" and passed
 on an immediate re-run. That was webpack reading a file the other session saved mid-build, not a
 defect. In a shared tree, a single build failure is not evidence until it reproduces.
+
+## 023 — `staging.expected_payment_override` APPLIED LIVE (2026-08-03), after 024
+
+The concurrent-revision hold that made 024 go first is over: at apply time the
+worktree copy of 023 was **byte-identical to `origin/main`** (sha256
+`acce664…dffb` on both sides after the quoting fix below). Applied from the
+committed bytes of `ab56a93` (branch `veris/023-expected-payment-override`),
+not an editor buffer — `git show HEAD:"SQL Schemas/023_…"` diffed empty against
+the working file first.
+
+**Apply order is now: 024 → 023. 025 (payer-policy-intel) remains authored,
+NOT applied**, owned by its in-flight session. Next free Veris number is still
+**026**. This supersedes the "023 is STILL NOT APPLIED" line in 024's record
+above.
+
+### Verified after apply (the file's own §7 block, run live)
+
+| Check | Result |
+|---|---|
+| owner / RLS / FORCE | `claims_admin` · on · off ✓ |
+| row count fresh | 0 ✓ |
+| PHI column scan (`patient\|client\|member\|subscriber\|claim_number\|dob\|ssn\|name`, excluding the boolean) | **0 rows** ✓ |
+| `is_patient_specific` type | `boolean` — not a string smuggling a name ✓ |
+| tenancy FK | one FK → `core.business_entity`, validated ✓ |
+| policies | exactly 4: reader SELECT (USING), writer SELECT (USING), writer INSERT (WITH CHECK), writer DELETE (USING) ✓ |
+| grants | `claims_admin` (owner) + `claims_reader`/SELECT + `cmd_rollup_writer`/{SELECT,INSERT,DELETE}; **no UPDATE to any non-owner role** ✓ |
+| `method_label` CHECK | `= ANY (ARRAY['EFT','Check'])` — the sheet's vocabulary, not BPR04 ✓ |
+| index | `(business_entity_id, expected_date)` — leads with the tenant column (018 rule) ✓ |
+| ERA tables unchanged | `era_835_payment` 18 cols · `era_835_adjustment` 42 cols (022 §7 parity) ✓ |
+| security advisors | `{"lints":[]}` ✓ |
+
+### The `amount > 0` CHECK was EXERCISED, not just inspected
+
+A `DO $probe$` block inserted a `0.00` row against a real
+`core.business_entity` id, asserted `check_violation` raised (it did), and
+asserted `rows_left_behind = 0` (it was — re-confirmed by a follow-up
+`count(*)`). The block RAISEs loudly on either failure, so a silent pass was
+not possible.
+
+### Same defect class as 024, caught by the same review step
+
+3 instances of `''` inside the `$t$…$t$` table comment (`sheet''s`, `021''s`,
+`tenant''s`) — inside dollar-quoting that is two literal apostrophes, not an
+escape. Fixed pre-apply (`ab56a93`, that one file only); the ordinary-quoted
+`COMMENT ON COLUMN` strings, where `''` IS correct, were left alone. The live
+comment was read back via `obj_description`/`col_description` after apply:
+apostrophes landed clean in both quoting forms.
+
+### Cron re-diagnosis recorded with the apply (matters for ordering)
+
+`/api/cron/upcoming-overrides` was **never 500ing**: the sync fail-softs on
+fetch/parse (`status:'parse_failed'`, route returns 200 `ok:false`, "keeping
+last good data"). Live production logs confirmed 200s and the Sheets error
+`Unable to parse range: Upcoming Payments Overrides` — which also confirms the
+override tab **does not exist yet**. The DB write path, by contrast, throws
+loud by design. **Consequence: 023 had to apply BEFORE the tab is created** —
+tab-first would have flipped the cron from silent-soft-fail to real hourly
+500s the moment parse started succeeding. With 023 now applied, creating the
+tab is safe: first successful sync lands rows in one replace-per-sync
+transaction, and `loadUpcomingOverrides` goes `ok:true`.
