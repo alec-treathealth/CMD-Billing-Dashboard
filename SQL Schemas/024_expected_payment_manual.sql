@@ -148,13 +148,13 @@ CREATE INDEX IF NOT EXISTS expected_payment_manual_upcoming_idx
   ON staging.expected_payment_manual (business_entity_id, expected_date);
 
 COMMENT ON TABLE staging.expected_payment_manual IS
-$t$SUPER-ADMIN edits to the upcoming-payment forecast: add a payment neither feed knows about, correct a sheet row''s amount, or suppress a sheet row that landed or was wrong.
+$t$SUPER-ADMIN edits to the upcoming-payment forecast: add a payment neither feed knows about, correct a sheet row's amount, or suppress a sheet row that landed or was wrong.
 
-A SEPARATE TABLE FROM 023 ON PURPOSE. 023 is replace-per-sync — the hourly cron DELETEs the tenant''s rows and re-inserts the sheet parse — so a hand-authored row there would be destroyed within the hour. The cron has NO privilege on this table at all, which is the structural guarantee rather than a careful predicate.
+A SEPARATE TABLE FROM 023 ON PURPOSE. 023 is replace-per-sync — the hourly cron DELETEs the tenant's rows and re-inserts the sheet parse — so a hand-authored row there would be destroyed within the hour. The cron has NO privilege on this table at all, which is the structural guarantee rather than a careful predicate.
 
-MATCH KEY IS CONTENT, NOT IDENTITY. (facility_code, payer_label, expected_date) identifies the targeted sheet row. Editing that sheet row''s date breaks the link; the resolver marks the orphan STALE and the UI shows it. A stale ''correct'' is NOT promoted to an ''add'' — a correction is a statement about a sheet row and asserts nothing without it.
+MATCH KEY IS CONTENT, NOT IDENTITY. (facility_code, payer_label, expected_date) identifies the targeted sheet row. Editing that sheet row's date breaks the link; the resolver marks the orphan STALE and the UI shows it. A stale 'correct' is NOT promoted to an 'add' — a correction is a statement about a sheet row and asserts nothing without it.
 
-NOT AUTOMATIC RECONCILIATION. ''suppress'' with reason ''landed'' is a HUMAN confirming the money arrived. payer_label and era_835_payment.payer_name do not join reliably, so the app suggests and a super admin confirms. 023''s additive-only ruling holds: nothing is hidden without a named actor.
+NOT AUTOMATIC RECONCILIATION. 'suppress' with reason 'landed' is a HUMAN confirming the money arrived. payer_label and era_835_payment.payer_name do not join reliably, so the app suggests and a super admin confirms. 023's additive-only ruling holds: nothing is hidden without a named actor.
 
 NON-PHI BY CONSTRUCTION: no patient column and NO FREE-TEXT NOTE column — a note field here would collect patient names and silently promote this tile into PHI scope. Structured suppress_reason only.$t$;
 

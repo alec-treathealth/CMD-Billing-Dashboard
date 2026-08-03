@@ -294,8 +294,36 @@ test('a FETCHED url counts as retrieved, so a fetch-sourced finding is not quara
       },
     },
   ]);
-  assert.deepEqual(harvested.urls, [OPTUM_PDF]);
-  assert.equal(resolveStatus(rawFinding({ source_url: OPTUM_PDF }), new Set(harvested.urls)), 'confirmed');
+  assert.deepEqual(harvested.urls, [{ url: OPTUM_PDF, via: 'fetch' }]);
+  const urlSet = new Set(harvested.urls.map((u) => u.url));
+  assert.equal(resolveStatus(rawFinding({ source_url: OPTUM_PDF }), urlSet), 'confirmed');
+});
+
+test('retrievedVia records which tool surfaced each URL — needed to diagnose a gate D failure', async () => {
+  // The 2026-08-03 aetna run returned arxiv/medrxiv/uspto/nih URLs against an
+  // allow-list of aetna.com + meritain.com. Gate D caught them, but aggregate
+  // counts could not say whether search or fetch admitted them.
+  const { transport } = scriptedTransport([
+    {
+      stop_reason: 'tool_use', model: MODEL, container: { id: 'c' }, usage: usage(),
+      content: [
+        searchResultBlock([OPTUM_URL]),
+        {
+          type: 'web_fetch_tool_result', tool_use_id: 'srvtoolu_f',
+          content: { type: 'web_fetch_result', url: OPTUM_PDF, content: { type: 'document', title: 'P' } },
+        },
+        emitBlock({ findings: [], checked_no_change: [], unreachable: [] }),
+      ],
+    },
+    { stop_reason: 'end_turn', model: MODEL, usage: usage({ server_tool_use: {} }), content: [] },
+  ]);
+  const res = await researchPayer({ payerKey: 'optum', ...WINDOW, focus: FOCUS, transport }, SYSTEM);
+  assert.deepEqual(res.retrievedVia, [
+    { url: OPTUM_URL, via: 'search' },
+    { url: OPTUM_PDF, via: 'fetch' },
+  ]);
+  // retrievedUrls stays the flat provenance set, in the same order.
+  assert.deepEqual(res.retrievedUrls, [OPTUM_URL, OPTUM_PDF]);
 });
 
 // --- (b) pause_turn continuation ------------------------------------------

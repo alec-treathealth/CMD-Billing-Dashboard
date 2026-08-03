@@ -104,11 +104,28 @@ export interface TokenUsage {
 
 export type RunStatus = 'ok' | 'failed';
 
+export type RetrievalVia = 'search' | 'fetch';
+
+export interface RetrievedUrl {
+  url: string;
+  via: RetrievalVia;
+}
+
 export interface ResearchResult {
   payload: EmitFindingsPayload | null;
   /** Every URL the API actually returned this run, from search AND fetch. This is
    *  the provenance set: a source_url absent from it is quarantined. */
   retrievedUrls: string[];
+  /**
+   * Same URLs, carrying which tool surfaced each one.
+   *
+   * Kept because `allowed_domains` proved not to be strictly honored: the
+   * 2026-08-03 aetna run returned arxiv.org, medrxiv.org, uspto.gov and
+   * nih.gov URLs against an allow-list of aetna.com + meritain.com. Gate D caught
+   * them, but the aggregate counts alone could not say whether search or fetch let
+   * them in — which is the first question any Gate D failure raises.
+   */
+  retrievedVia: RetrievedUrl[];
   toolErrors: string[];
   searchRequests: number;
   fetchRequests: number;

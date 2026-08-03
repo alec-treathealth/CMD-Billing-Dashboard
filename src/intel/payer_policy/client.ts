@@ -28,7 +28,7 @@
  */
 
 import { matchesAnyDomain, rosterEntry, type RosterEntry } from './roster.js';
-import type { EmitFindingsPayload, ResearchResult, TokenUsage } from './types.js';
+import type { EmitFindingsPayload, ResearchResult, RetrievedUrl, TokenUsage } from './types.js';
 import { CHANGE_TYPES, CONFIDENCES, ORIGINATORS, SCOPES, UNREACHABLE_REASON_CODES } from './types.js';
 
 export const MODEL = 'claude-opus-5';
@@ -154,7 +154,7 @@ function unionPayloads(calls: EmitFindingsPayload[]): EmitFindingsPayload {
 }
 
 interface Harvested {
-  urls: string[];
+  urls: RetrievedUrl[];
   toolErrors: string[];
   emitCalls: EmitFindingsPayload[];
 }
@@ -173,7 +173,7 @@ export function harvestBlocks(blocks: unknown[]): Harvested {
         // LIST => results. Single OBJECT => error.
         if (Array.isArray(block.content)) {
           for (const result of block.content) {
-            if (result?.url) out.urls.push(String(result.url));
+            if (result?.url) out.urls.push({ url: String(result.url), via: 'search' });
           }
         } else if (block.content) {
           out.toolErrors.push(`web_search:${block.content.error_code ?? 'unknown_error'}`);
@@ -183,7 +183,7 @@ export function harvestBlocks(blocks: unknown[]): Harvested {
       if (block.type === 'web_fetch_tool_result') {
         const content = block.content;
         if (content?.type === 'web_fetch_result' && content.url) {
-          out.urls.push(String(content.url));
+          out.urls.push({ url: String(content.url), via: 'fetch' });
         } else if (content?.type === 'web_fetch_tool_result_error') {
           out.toolErrors.push(`web_fetch:${content.error_code ?? 'unknown_error'}`);
         }
@@ -244,7 +244,7 @@ export async function researchPayer(
     { role: 'user', content: buildUserMessage(opts, entry) },
   ];
 
-  const urls: string[] = [];
+  const urls: RetrievedUrl[] = [];
   const toolErrors: string[] = [];
   const emitCalls: EmitFindingsPayload[] = [];
   const usages: TokenUsage[] = [];
@@ -324,7 +324,11 @@ export async function researchPayer(
     anomalies.push(`emit_findings called ${emitCalls.length} times — unioned`);
   }
 
-  const dedupedUrls = [...new Set(urls)];
+  // Dedupe by URL, keeping the first tool that surfaced it.
+  const seen = new Map<string, RetrievedUrl>();
+  for (const item of urls) if (!seen.has(item.url)) seen.set(item.url, item);
+  const retrievedVia = [...seen.values()];
+  const dedupedUrls = retrievedVia.map((item) => item.url);
   const failures: string[] = [];
   if (transportFailure) failures.push(`TRANSPORT — ${transportFailure}`);
   if (turnBudgetExceeded) failures.push(`TURN BUDGET (${TURN_BUDGET}) EXCEEDED`);
@@ -357,6 +361,7 @@ export async function researchPayer(
   return {
     payload,
     retrievedUrls: dedupedUrls,
+    retrievedVia,
     toolErrors,
     searchRequests,
     fetchRequests,
