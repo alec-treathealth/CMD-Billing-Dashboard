@@ -7,7 +7,7 @@
  * user is already looking at — aggregates only; the server re-validates through the zod firewall
  * (zero dollar fields for every role) and re-derives the blind flag from the principal.
  */
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import { generateQualifyAiExplanation } from '@/lib/qualify/ai-actions';
 import { parseAiSections } from '../../../src/collections/aiAnalysis';
 import type { QualifyAiInput } from '../../../src/collections/qualifyAi';
@@ -70,6 +70,9 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const genRef = useRef(0);
+  const readerRef = useRef<ReadableStreamDefaultReader<string> | null>(null);
+  // Unmount mid-stream must cancel the server stream (bounded waste otherwise, but still waste).
+  useEffect(() => () => { void readerRef.current?.cancel(); }, []);
 
   const chips = useMemo<ChipId[]>(() => {
     const out: ChipId[] = ['explain'];
@@ -100,14 +103,19 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
           return;
         }
         const reader = res.stream.getReader();
+        readerRef.current = reader;
         let acc = '';
         for (;;) {
           const { done, value } = await reader.read();
-          if (genRef.current !== gen) return;
+          if (genRef.current !== gen) {
+            void reader.cancel(); // superseded question — stop the server stream, don't just abandon it
+            return;
+          }
           if (done) break;
           acc += value;
           setText(acc);
         }
+        readerRef.current = null;
         setStreaming(false);
       } catch {
         if (genRef.current !== gen) return;

@@ -116,7 +116,9 @@ export async function runQualifyCensusSync(
   opts: { boards?: readonly CensusBoardConfig[]; today?: string } = {},
 ): Promise<CensusSyncStats> {
   const boards = opts.boards ?? MONDAY_CENSUS_BOARDS;
-  const today = opts.today ?? new Date().toISOString().slice(0, 10);
+  // "Today" in US Central, not UTC: both live boards are US facilities, and a UTC date rolls
+  // forward at ~6-7pm CT — which would drop a UR review due TODAY from the chip all evening.
+  const today = opts.today ?? new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago' }).format(new Date());
   const stats: CensusSyncStats = {
     boards_total: boards.length,
     boards_synced: 0,
@@ -172,7 +174,7 @@ export async function runQualifyCensusSync(
       stats.boards_synced++;
     } catch (err) {
       stats.boards_failed++;
-      // board id + error CLASS only — never response bodies (they can echo query text)
+      // board id + monday's error MESSAGE (non-PHI: census selections never include names) — never response bodies
       console.error(`qualify-census: board ${board.boardId} failed (${err instanceof Error ? err.message : 'error'})`);
     }
   }

@@ -513,7 +513,7 @@ export function QualifyMobileApp({
     }
     if (snapshot && snapshot.resolved === null) {
       const estimated = snapshot.provenance === 'comparable_employer' || snapshot.provenance === 'comparable_funding';
-      if (!estimated || filteredList.length === 0) {
+      if (!estimated || snapshot.facilities.length === 0) {
         if (snapshot.policy?.found) {
           return (
             <EmptyState>

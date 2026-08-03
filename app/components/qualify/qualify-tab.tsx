@@ -475,11 +475,17 @@ export function QualifyTab({
     }
     const lgen = ++leadGenRef.current;
     const auto = lastAutoIdentifierRef.current !== singleIdentifier;
+    // Consume the auto flag SYNCHRONOUSLY: a window change mid-flight must re-enter as auto=false
+    // (never override the user's pick), and a rejected auto fetch must not re-auto on the next
+    // manual window change.
+    lastAutoIdentifierRef.current = singleIdentifier;
     getQualifySnapshot({ query: singleIdentifier, window: windowSel, auto })
       .then((snap) => {
         if (leadGenRef.current !== lgen) return;
-        lastAutoIdentifierRef.current = singleIdentifier;
-        setLeadSnapshot(snap);
+        // The manual-window echo refetch (auto=false) carries ladder:null by design — PRESERVE the
+        // ladder from the auto fetch so the disclosure card doesn't flash and vanish exactly when
+        // it re-windowed (same identifier, so the rung counts still describe this search).
+        setLeadSnapshot((prev) => (!auto && snap.ladder === null && prev !== null ? { ...snap, ladder: prev.ladder } : snap));
         // Follow the ladder's decision ONCE per search: the whole surface (panel, cases, KPIs)
         // re-windows to the chosen span so every number on screen describes ONE window.
         if (auto && snap.ladder && (windowSel.kind !== 'trailing' || windowSel.days !== snap.ladder.chosenDays)) {

@@ -118,3 +118,18 @@ test('board registry: verified boards map to real 8-digit facility codes', () =>
     assert.match(b.boardId, /^\d+$/);
   }
 });
+
+test('PHI tripwire: census GraphQL never selects item `name` — names on census boards are patients', async () => {
+  // The invariant is a QUERY-STRING property, so pin the query strings themselves: a future edit
+  // adding `name` to the census items selection (the obvious edit for per-patient data) must fail
+  // the hermetic suite, not just a comment.
+  const { readFile } = await import('node:fs/promises');
+  const src = await readFile(new URL('../src/collections/qualifyCensusSync.ts', import.meta.url), 'utf8');
+  const queries = src.match(/'query \([^']+'/g) ?? [];
+  assert.ok(queries.length >= 4, `expected the four GraphQL query strings, found ${queries.length}`);
+  const censusItems = queries.filter((q) => q.includes('$cursor'));
+  assert.equal(censusItems.length, 1, 'exactly one paginated census-items query');
+  assert.ok(!/\bname\b/.test(censusItems[0] ?? ''), 'the census items query must NEVER select name');
+  const nameItemQueries = queries.filter((q) => /items \{ name/.test(q));
+  assert.equal(nameItemQueries.length, 1, 'item name is selected in exactly ONE query — Facility Info (items are facilities)');
+});

@@ -90,7 +90,7 @@ export const QUALIFY_AI_INSUFFICIENT_COPY =
 /** Section markers the model MUST emit — same client-splitting contract as the collections panel. */
 export const QUALIFY_AI_SECTIONS = ['TL;DR', 'Signals', 'Risks'] as const;
 
-export const QUALIFY_AI_MAX_TOKENS = 1024;
+export const QUALIFY_AI_MAX_TOKENS = 4096; // opus-5 thinks by default and thinking SHARES this cap — 1024 truncated answers mid-section
 
 const SYSTEM_PROMPT = [
   'You are a revenue-cycle analyst for OUT-OF-NETWORK behavioral-health billing, explaining a',

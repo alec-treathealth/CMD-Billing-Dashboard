@@ -47,7 +47,9 @@ export async function generateQualifyAiExplanation(input: unknown): Promise<Qual
 
   if (!isQualifyAiSufficient(safeInput)) return { ok: false, reason: 'insufficient' };
 
-  const model = process.env.ANTHROPIC_MODEL || 'claude-opus-5';
+  // QUALIFY_AI_MODEL first: ANTHROPIC_MODEL is a shared knob (agent + collections panel default it
+  // to claude-opus-4-8) — pinning those surfaces must not silently repoint this one.
+  const model = process.env.QUALIFY_AI_MODEL || process.env.ANTHROPIC_MODEL || 'claude-opus-5';
   const sdk = new Anthropic(); // ANTHROPIC_API_KEY from env; never logged
 
   // 3. Durable audit BEFORE streaming (best-effort; non-PHI detail — question id + shape only).
@@ -71,21 +73,23 @@ export async function generateQualifyAiExplanation(input: unknown): Promise<Qual
 
   const { system, user } = buildQualifyAiMessages(safeInput);
 
+  let ms: { abort(): void } | null = null;
   const stream = new ReadableStream<string>({
     async start(controller) {
       try {
-        const ms = sdk.messages.stream({
+        const live = sdk.messages.stream({
           model,
           max_tokens: QUALIFY_AI_MAX_TOKENS,
           system,
           messages: [{ role: 'user', content: user }],
         });
-        for await (const event of ms) {
+        ms = live;
+        for await (const event of live) {
           if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
             controller.enqueue(event.delta.text);
           }
         }
-        const final = await ms.finalMessage();
+        const final = await live.finalMessage();
         // One PHI-free cost line (the collections-panel discipline): counts only, never content.
         console.log(
           JSON.stringify({
@@ -94,14 +98,23 @@ export async function generateQualifyAiExplanation(input: unknown): Promise<Qual
             question: safeInput.question,
             input_tokens: final.usage.input_tokens,
             output_tokens: final.usage.output_tokens,
+            stop_reason: final.stop_reason, // truncation ('max_tokens') and refusals must be visible in ops, not silent
           }),
         );
+        if ((final.stop_reason as string | null) === 'refusal') {
+          // An opus-5 safety refusal arrives as HTTP 200 — never render it as a finished answer.
+          controller.error(new Error('qualify_ai_failed'));
+          return;
+        }
         controller.close();
       } catch (err) {
         console.error('qualify_ai_explain failed'); // generic; the SDK error may echo prompt content
         controller.error(new Error('qualify_ai_failed'));
         void err;
       }
+    },
+    cancel() {
+      ms?.abort(); // client abandoned the panel — stop paying for tokens
     },
   });
 

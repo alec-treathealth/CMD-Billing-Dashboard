@@ -64,6 +64,10 @@ export function RegistryClient({ initial }: { initial: CodingRegistryList }) {
   const [pending, startTransition] = useTransition();
   const [form, setForm] = useState(EMPTY_FORM);
   const [supersedes, setSupersedes] = useState<number | null>(null);
+  // The full row being superseded: the form edits its headline fields, but the columns the form
+  // does NOT surface (plan_alpha, employer_norm, DRG, condition codes, modifiers, units, span)
+  // must carry into the superseding insert — versioning must never silently strip attributes.
+  const [carry, setCarry] = useState<CodingRegistryList['rows'][number] | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedId, setSavedId] = useState<number | null>(null);
@@ -86,7 +90,20 @@ export function RegistryClient({ initial }: { initial: CodingRegistryList }) {
   const submit = () => {
     setError(null);
     const batch = form.dos_batch.trim().match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+    const carried: Partial<CodingDecisionInput> =
+      supersedes !== null && carry
+        ? {
+            plan_alpha: carry.plan_alpha,
+            employer_norm: carry.employer_norm,
+            drg_code: carry.drg_code,
+            condition_codes: carry.condition_codes,
+            modifiers_removed: carry.modifiers_removed,
+            units_per_dos: carry.units_per_dos,
+            billing_span: carry.billing_span === 'admit_dc' || carry.billing_span === 'interim' ? carry.billing_span : null,
+          }
+        : {};
     const input: CodingDecisionInput = {
+      ...carried,
       payer_family: form.payer_family,
       payer_variant_label: form.payer_variant_label || null,
       facility_code: form.facility_code || null,
@@ -110,7 +127,7 @@ export function RegistryClient({ initial }: { initial: CodingRegistryList }) {
       }
       setSavedId(res.id);
       setForm(EMPTY_FORM);
-      setSupersedes(null);
+      setSupersedes(null); setCarry(null);
       setFormOpen(false);
       router.refresh();
     });
@@ -118,6 +135,7 @@ export function RegistryClient({ initial }: { initial: CodingRegistryList }) {
 
   const beginSupersede = (r: CodingRegistryList['rows'][number]) => {
     setSupersedes(r.id);
+    setCarry(r);
     setForm({
       payer_family: r.payer_family,
       payer_variant_label: r.payer_variant_label ?? '',
@@ -151,7 +169,7 @@ export function RegistryClient({ initial }: { initial: CodingRegistryList }) {
             type="button"
             onClick={() => {
               setFormOpen((v) => !v);
-              setSupersedes(null);
+              setSupersedes(null); setCarry(null);
               setError(null);
             }}
             className="rounded-lg bg-teal700 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-teal900"
@@ -241,7 +259,7 @@ export function RegistryClient({ initial }: { initial: CodingRegistryList }) {
             >
               {pending ? 'Saving…' : supersedes !== null ? 'Save & supersede' : 'Save decision'}
             </button>
-            <button type="button" onClick={() => { setFormOpen(false); setSupersedes(null); }} className="rounded-lg border border-line px-4 py-2 text-sm font-semibold text-ink600">
+            <button type="button" onClick={() => { setFormOpen(false); setSupersedes(null); setCarry(null); }} className="rounded-lg border border-line px-4 py-2 text-sm font-semibold text-ink600">
               Cancel
             </button>
           </div>
