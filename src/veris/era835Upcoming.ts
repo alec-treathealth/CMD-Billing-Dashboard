@@ -19,13 +19,19 @@
  * belt (index-leading filter per the 018 rule) and suspenders (RLS), and it makes the
  * intended scope visible in the SQL itself.
  *
- * THE UPCOMING WINDOW is `payment_date >= $2::date`, where $2 is the CIVIL DATE IN THE
- * BUSINESS ZONE (businessTodayIso). NOT Postgres `current_date`: Vercel runs TZ=UTC and so
- * does the database, so from 17:00 PT to midnight PT `current_date` is already TOMORROW
- * Pacific and the tile silently drops remits dated TODAY for the people reading it. Bound
- * param rather than SQL-side `(now() at time zone …)` on purpose — a literal date keeps the
- * scan sargable on 013's (business_entity_id, payment_date) index, and it makes the DST
- * math unit-testable instead of only substring-assertable.
+ * THE UPCOMING WINDOW is `payment_date > $2::date` — STRICTLY AFTER today — where $2 is the
+ * CIVIL DATE IN THE BUSINESS ZONE (businessTodayIso). Strict `>` per Alec's ruling
+ * 2026-08-03: a remit whose BPR16 is today has LANDED (fund movement is today) and its money
+ * is in the paid bar chart (measured: CMD posting is same-day-or-earlier for ~94% of
+ * matchable remits) — keeping it here clogs the view with non-future money. The residual
+ * posting-lag tail is a STRUCTURAL two-clock gap (tile keys on BPR16, chart keys on CMD
+ * receipt date) that exists under `>=` as well — see docs/veris-data-notes.md § "two-clock
+ * gap". NOT Postgres `current_date`: Vercel runs TZ=UTC and so does the database, so from
+ * 17:00 PT to midnight PT `current_date` is already TOMORROW Pacific and the tile silently
+ * drops remits dated tomorrow for the people reading it. Bound param rather than SQL-side
+ * `(now() at time zone …)` on purpose — a literal date keeps the scan sargable on 013's
+ * (business_entity_id, payment_date) index, and it makes the DST math unit-testable instead
+ * of only substring-assertable.
  *
  * NULL payment_date rows are EXCLUDED by that same comparison (SQL null comparison).
  * Correct for THIS tile — a remit with no BPR16 cannot be placed on a timeline, so it is
@@ -153,7 +159,7 @@ const TOTALS_SQL = `
          (count(*) filter (where payment_method = 'NON'))::int as zero_dollar_remits
     from staging.era_835_payment
    where business_entity_id = $1::uuid
-     and payment_date >= $2::date`;
+     and payment_date > $2::date`;
 
 const GROUPS_SQL = `
   select payment_date::text                                    as payment_date,
@@ -165,7 +171,7 @@ const GROUPS_SQL = `
          (count(*) filter (where payment_amount is null))::int as unquantified_remits
     from staging.era_835_payment
    where business_entity_id = $1::uuid
-     and payment_date >= $2::date
+     and payment_date > $2::date
    group by payment_date, facility_code, payer_name, payment_method
    order by payment_date asc,
             facility_code asc,
