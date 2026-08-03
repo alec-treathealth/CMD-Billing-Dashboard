@@ -159,6 +159,22 @@ test('bare domain matches subdomains; path-scoped entry requires the path', () =
   assert.ok(!matchesDomainEntry('not a url', 'cms.gov'));
 });
 
+test('a trailing-dot FQDN is the same host — regression, this failed a live run', () => {
+  // Observed 2026-08-03: web_search returned `https://www.uhcprovider.com./` once in
+  // 106 URLs. `new URL().hostname` keeps the trailing root-label dot, so the host
+  // compared unequal to `uhcprovider.com` and Gate D marked a healthy run FAILED.
+  const entry = rosterEntry('optum')!;
+  assert.ok(matchesAnyDomain('https://www.uhcprovider.com./', entry.domains));
+  assert.ok(matchesDomainEntry('https://www.uhcprovider.com./', 'uhcprovider.com'));
+  assert.ok(matchesDomainEntry('https://uhcprovider.com./x', 'uhcprovider.com'));
+  // Grouping was also affected — it bucketed this URL under "com.".
+  assert.equal(registrableDomain('www.uhcprovider.com.'), 'uhcprovider.com');
+  // Normalization must not open the allow-list: a foreign host with a trailing dot
+  // is still foreign.
+  assert.ok(!matchesAnyDomain('https://www.cigna.com./', entry.domains));
+  assert.ok(!matchesDomainEntry('https://evil-uhcprovider.com./', 'uhcprovider.com'));
+});
+
 test('registrableDomain collapses subdomains and handles multipart suffixes', () => {
   assert.equal(registrableDomain('public.providerexpress.com'), 'providerexpress.com');
   assert.equal(registrableDomain('www.cms.gov'), 'cms.gov');

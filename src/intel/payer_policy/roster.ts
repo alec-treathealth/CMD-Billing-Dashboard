@@ -99,10 +99,26 @@ const MULTIPART_SUFFIXES = new Set([
   'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'com.au', 'co.nz', 'co.jp', 'com.br', 'co.za',
 ]);
 
+/**
+ * Normalizes a hostname for comparison: lowercase, and strip the DNS root label.
+ *
+ * `new URL().hostname` PRESERVES a trailing dot, so `www.uhcprovider.com.` and
+ * `www.uhcprovider.com` are the same host but compare unequal. Observed live: the
+ * search tool returned `https://www.uhcprovider.com./` once in 106 URLs, which
+ * failed the domain gate and marked an otherwise-healthy run FAILED.
+ *
+ * Against an allow-list this gap fails CLOSED (rejects valid, never admits
+ * invalid). The same gap against a block-list would be a filter-bypass vector, so
+ * normalization lives in one place both callers share rather than being inlined.
+ */
+function normalizeHost(hostname: string): string {
+  return hostname.toLowerCase().replace(/\.+$/, '');
+}
+
 /** eTLD+1 approximation. Adequate for this roster (.com/.gov/.org); the multipart
  *  set keeps a stray foreign URL grouping sanely rather than collapsing to a TLD. */
 export function registrableDomain(hostname: string): string {
-  const parts = hostname.toLowerCase().replace(/^www\./, '').split('.');
+  const parts = normalizeHost(hostname).replace(/^www\./, '').split('.');
   if (parts.length <= 2) return parts.join('.');
   const lastTwo = parts.slice(-2).join('.');
   return MULTIPART_SUFFIXES.has(lastTwo) ? parts.slice(-3).join('.') : lastTwo;
@@ -115,7 +131,7 @@ export function registrableDomain(hostname: string): string {
  */
 export function matchesDomainEntry(url: string, entry: string): boolean {
   const slash = entry.indexOf('/');
-  const entryHost = (slash === -1 ? entry : entry.slice(0, slash)).toLowerCase();
+  const entryHost = normalizeHost(slash === -1 ? entry : entry.slice(0, slash));
   const entryPath = slash === -1 ? '' : entry.slice(slash);
   let parsed: URL;
   try {
@@ -124,7 +140,7 @@ export function matchesDomainEntry(url: string, entry: string): boolean {
     return false;
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-  const host = parsed.hostname.toLowerCase();
+  const host = normalizeHost(parsed.hostname);
   if (host !== entryHost && !host.endsWith(`.${entryHost}`)) return false;
   return entryPath === '' || parsed.pathname.startsWith(entryPath);
 }
