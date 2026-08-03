@@ -209,11 +209,14 @@ export async function collectionsKpis(
 ): Promise<CollectionsKpis> {
   const asOfArg = validateDateBound('as_of' as 'from', args.as_of);
   const entityIds = assertEntityScope(ctx.entityIds, 'collectionsKpis');
+  const bound = futurePaymentBound(args.include_future_payments, ctx);
+  // An explicit future anchor must not bypass the Collections future-payment bound.
+  const effectiveAsOf = asOfArg && bound && asOfArg > bound ? bound : asOfArg;
 
   const { rows } = await ctx.executor.query<RawKpiRow>(collectionsKpisSql(), [
-    asOfArg ?? null,
+    effectiveAsOf ?? null,
     entityIds,
-    futurePaymentBound(args.include_future_payments, ctx),
+    bound,
   ]);
 
   const by_facility: CollectionsFacilityKpi[] = rows.map((r) => ({
@@ -242,7 +245,7 @@ export async function collectionsKpis(
   };
 
   const result: CollectionsKpis = {
-    as_of: rows[0]?.as_of ?? asOfArg ?? null,
+    as_of: rows[0]?.as_of ?? effectiveAsOf ?? null,
     mtd,
     ytd,
     by_facility,
