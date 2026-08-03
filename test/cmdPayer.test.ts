@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cmdRunReportToZip, extractLineFields } from '../src/collections/cmdPayer.js';
+import { cmdRunReportToZip, collectRowsAcrossCustomers, extractLineFields } from '../src/collections/cmdPayer.js';
 import type { CmdApiConfig, CmdReportRow } from '../src/collections/cmdPayer.js';
 
 /**
@@ -82,4 +82,74 @@ test('cmdRunReportToZip: a RUNNING poll resets the empty streak so a busy report
     fakeCmd([SUCCESS_EMPTY, SUCCESS_EMPTY, RUNNING, SUCCESS_EMPTY, SUCCESS_EMPTY, WITH_DATA], { emptyGraceAttempts: 3 }),
   );
   assert.ok(Buffer.isBuffer(zip));
+});
+
+// --- collectRowsAcrossCustomers (whole-book pull) ----------------------------
+//
+// GUARDS THE ALL-OR-NOTHING INVARIANT. writeRollup DELETEs per (month × tenant) across every
+// facility and re-INSERTs from the tuples handed to it, so a partial book silently destroys the
+// accounts that did not answer. These tests fail first if someone "improves" the loop into a
+// resilient per-customer skip the way cmdExplorerCron does it — correct there, destructive here.
+
+/** A row tagged with its source account, so concatenation order is observable. */
+const taggedRow = (customerId: string): CmdReportRow => ({
+  'Charge From Date': '03/14/2026',
+  'Charge Primary Payer Name': 'Beacon Carelon',
+  'Facility Name': customerId,
+});
+
+test('collectRowsAcrossCustomers: concatenates every account in roster order', async () => {
+  const seen: string[] = [];
+  const rows = await collectRowsAcrossCustomers(['10027973', '10029105', '10030471'], async (id) => {
+    seen.push(id);
+    return [taggedRow(id), taggedRow(id)];
+  });
+  assert.deepEqual(seen, ['10027973', '10029105', '10030471'], 'must pull sequentially, in roster order');
+  assert.equal(rows.length, 6);
+  assert.deepEqual(
+    rows.map((r) => r['Facility Name']),
+    ['10027973', '10027973', '10029105', '10029105', '10030471', '10030471'],
+  );
+});
+
+test('collectRowsAcrossCustomers: one failing account aborts the whole pull (no partial book)', async () => {
+  const attempted: string[] = [];
+  await assert.rejects(
+    () =>
+      collectRowsAcrossCustomers(['10027973', '10029105', '10030471'], async (id) => {
+        attempted.push(id);
+        if (id === '10029105') throw new Error('INVALID CRITERIA');
+        return [taggedRow(id)];
+      }),
+    /customer 10029105 failed/,
+  );
+  // Stopped AT the failure — never went on to pull the rest and hand back a partial book.
+  assert.deepEqual(attempted, ['10027973', '10029105']);
+});
+
+test('collectRowsAcrossCustomers: preserves the underlying error as `cause`', async () => {
+  const original = new Error('CMD report.run returned no identifier (status: INVALID CRITERIA)');
+  await assert.rejects(
+    () => collectRowsAcrossCustomers(['10027973'], async () => { throw original; }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal(err.cause, original, 'the CMD failure must stay diagnosable');
+      return true;
+    },
+  );
+});
+
+test('collectRowsAcrossCustomers: an empty roster fails closed rather than reporting a clean no-op', async () => {
+  await assert.rejects(
+    () => collectRowsAcrossCustomers([], async () => [taggedRow('nope')]),
+    /empty customer roster/,
+  );
+});
+
+test('collectRowsAcrossCustomers: an account with zero rows is not an error', async () => {
+  // A facility with no activity in the window is normal — only a THROW aborts the book.
+  const rows = await collectRowsAcrossCustomers(['10027973', '10029105'], async (id) =>
+    id === '10027973' ? [] : [taggedRow(id)],
+  );
+  assert.equal(rows.length, 1);
 });
