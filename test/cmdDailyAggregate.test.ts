@@ -85,12 +85,18 @@ test('dropFuturePaymentRows: horizon crosses a month boundary by real calendar d
   assert.equal(dropFuturePaymentRows(rows, '2026-07-08', 14).dropped, 1, '+28 days is outside');
 });
 
-test('dropFuturePaymentRows: the SHIPPED default is 0 — strict today-cutoff, no behaviour change', () => {
-  // Locks the dark-ship. If someone flips FUTURE_PAYMENT_HORIZON_DAYS to 14 without also
-  // bounding the Collections reads at today, this fails and says why.
+test('dropFuturePaymentRows: the SHIPPED default is the 14-day horizon', () => {
+  // The paired read-split (futurePaymentBound in daily.ts) is what makes ingesting these rows
+  // safe: Collections bounds at today, Overview does not. Setting this back to 0 is the kill
+  // switch if forward-dated deposits prove unreliable.
   const rows = [row({ 'Payment Received': '2026-07-09', 'Check Payment': '$1.00' })];
-  assert.equal(FUTURE_PAYMENT_HORIZON_DAYS, 0, 'flip to 14 only WITH the Overview/Collections read-split');
-  assert.equal(dropFuturePaymentRows(rows, '2026-07-08').dropped, 1, 'default must drop tomorrow');
+  assert.equal(FUTURE_PAYMENT_HORIZON_DAYS, 14);
+  assert.equal(dropFuturePaymentRows(rows, '2026-07-08').dropped, 0, 'tomorrow is real money, keep it');
+  assert.equal(
+    dropFuturePaymentRows([row({ 'Payment Received': '12/30/2026', 'Check Payment': '$1.00' })], '2026-07-08').dropped,
+    1,
+    'the typo class is still dropped',
+  );
 });
 
 test('dropFuturePaymentRows: horizon 0 restores the original strict today-cutoff', () => {

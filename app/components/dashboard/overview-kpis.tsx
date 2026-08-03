@@ -205,7 +205,7 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
   // re-derives the entitled business_entity_id(s) SERVER-SIDE — the client value is only a hint)
   // and used as the useWidget/effect dependency, so switching the view re-fetches for the new
   // tenant. The facility dimension is tenant-agnostic reference data, so it is not view-scoped.
-  const kpisState = useWidget<CollectionsKpis>(() => loadCollectionsKpis(view), [view]);
+  const kpisState = useWidget<CollectionsKpis>(() => loadCollectionsKpis(view, 'overview'), [view]);
   const dimState = useWidget<FacilityDimensionRow[]>(loadFacilityDimension);
 
   const asOf = kpisState.status === 'ready' ? kpisState.data.as_of : null;
@@ -224,7 +224,7 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
         if (live && r.ok) setYoy(r.data);
       })
       .catch(() => {});
-    loadCollectionsDailyRange({ year, month }, view)
+    loadCollectionsDailyRange({ year, month }, view, 'overview')
       .then((r) => {
         if (live && r.ok) setPriorMonth(r.data);
       })
@@ -499,7 +499,7 @@ function AllFacilitiesTable({
     }
     let live = true;
     setPastStatus('loading');
-    loadCollectionsDailyRange({ year: currentYear, month }, view)
+    loadCollectionsDailyRange({ year: currentYear, month }, view, 'overview')
       .then((r) => {
         if (!live) return;
         if (!r.ok) {

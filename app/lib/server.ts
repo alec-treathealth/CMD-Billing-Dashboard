@@ -1494,7 +1494,8 @@ export const dashboardCollectionsSummary = unstable_cache(
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
 );
 
-/** MTD/YTD collections KPIs by facility (non-PHI; anchored to latest payment_date). Per-tenant cache. */
+/** MTD/YTD collections KPIs by facility (non-PHI; anchored to latest payment_date). Per-tenant cache.
+ *  Collections-tab variant: bounded at today, so CMD's forward-dated deposits are excluded. */
 export const dashboardCollectionsKpis = unstable_cache(
   async (entityIds: string[]): Promise<CollectionsKpis> =>
     collectionsKpis(
@@ -1502,6 +1503,25 @@ export const dashboardCollectionsKpis = unstable_cache(
       { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds },
     ),
   ['dashboard-collections-kpis'],
+  { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
+);
+
+/**
+ * Overview variant of dashboardCollectionsKpis — INCLUDES forward-dated deposits.
+ *
+ * A SEPARATE unstable_cache with its own key part, deliberately, rather than a boolean argument
+ * on the one above. Both surfaces call with the same entityIds, so sharing a cache entry would
+ * let whichever surface rendered first decide what the other sees — the Collections tab could
+ * serve Overview's future-inclusive figures, silently defeating the split. Distinct keys make
+ * that impossible rather than merely unlikely.
+ */
+export const dashboardCollectionsKpisOverview = unstable_cache(
+  async (entityIds: string[]): Promise<CollectionsKpis> =>
+    collectionsKpis(
+      { include_future_payments: true },
+      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds },
+    ),
+  ['dashboard-collections-kpis-overview'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
 );
 
@@ -1522,7 +1542,8 @@ export const dashboardCollectionsYoy = unstable_cache(
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
 );
 
-/** Latest-month daily collections rows (non-PHI; date × facility × checks/eft/gross). Per-tenant cache. */
+/** Latest-month daily collections rows (non-PHI; date × facility × checks/eft/gross). Per-tenant cache.
+ *  Collections-tab variant: bounded at today. */
 export const dashboardCollectionsDaily = unstable_cache(
   async (entityIds: string[]): Promise<CollectionsDailyResult> =>
     collectionsDaily(
@@ -1530,6 +1551,18 @@ export const dashboardCollectionsDaily = unstable_cache(
       { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds },
     ),
   ['dashboard-collections-daily'],
+  { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
+);
+
+/** Overview variant of dashboardCollectionsDaily — INCLUDES forward-dated deposits. Separate
+ *  cache key for the reason given on dashboardCollectionsKpisOverview. */
+export const dashboardCollectionsDailyOverview = unstable_cache(
+  async (entityIds: string[]): Promise<CollectionsDailyResult> =>
+    collectionsDaily(
+      { include_future_payments: true },
+      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds },
+    ),
+  ['dashboard-collections-daily-overview'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
 );
 
@@ -1559,6 +1592,9 @@ export async function collectionsDailyForMonth(
   year: number,
   month: number,
   entityIds: string[],
+  /** Overview passes true so a forward-dated deposit inside the selected month is counted.
+   *  Not cached, so unlike the two wrappers above this can safely be a plain argument. */
+  includeFuturePayments = false,
 ): Promise<CollectionsDailyResult> {
   if (!Number.isInteger(year) || year < 2000 || year > 2100) {
     throw new Error('year must be an integer in [2000, 2100]');
@@ -1572,7 +1608,7 @@ export async function collectionsDailyForMonth(
   const from = `${year}-${pad(month)}-01`;
   const to = `${nextYear}-${pad(nextMonth)}-01`; // exclusive upper bound
   return collectionsDaily(
-    { from, to },
+    { from, to, include_future_payments: includeFuturePayments },
     { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds },
   );
 }
