@@ -18,6 +18,7 @@
     { "path": "/api/cron/billing-audit-consolidated", "schedule": "40 2 * * *" },
     { "path": "/api/cron/billing-audit-consolidated", "schedule": "10 3 * * *" },
     { "path": "/api/cron/billing-audit-consolidated", "schedule": "40 3 * * *" },
-    { "path": "/api/cron/billing-code-decisions", "schedule": "40 2 * * *" }
+    { "path": "/api/cron/billing-code-decisions", "schedule": "40 2 * * *" },
+    { "path": "/api/cron/payer-intel", "schedule": "20 7 2 * *" }
   ]
 }
