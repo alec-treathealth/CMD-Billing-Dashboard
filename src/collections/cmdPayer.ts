@@ -351,6 +351,61 @@ export async function cmdReportRows(cfg: CmdApiConfig): Promise<CmdReportRow[]> 
 }
 
 /**
+ * Pull ONE report across MANY CMD customer accounts and concatenate the rows.
+ *
+ * WHY THIS EXISTS: CMD scopes every report by customer, and one customer == one facility.
+ * A single `cmdReportRows` call therefore returns ONE facility's slice. The payer rollup
+ * (collections.cmd_payer_facility_monthly) and the By Payer chart are WHOLE-BOOK figures, so
+ * both must loop the roster. Pulling one account against a whole-book table understates the
+ * month by roughly an order of magnitude (measured 2026-08-02: one BXR account returned
+ * $1.4M for 2026-05 against the book's $11.4M).
+ *
+ * ALL-OR-NOTHING — the reason this is a helper and not an inline loop. `writeRollup` DELETEs
+ * per (month × tenant) across ALL facilities and re-INSERTs from the tuples it is handed, so a
+ * partially-fetched book would delete a complete month and write back only the accounts that
+ * answered. That is silent data loss with a 200 response. Any account that throws aborts the
+ * whole pull, so the caller writes nothing. A hard platform timeout mid-loop is safe for the
+ * same reason: the write only runs after every account has answered.
+ *
+ * SEQUENTIAL by contract: CMD permits one running report at a time per partner, matching
+ * cmdExplorerCron / cmdCensusCron. Deliberately NO budget guard — the other two crons are
+ * per-facility idempotent so partial progress is fine and resumes next run, but a truncated
+ * pull here is destructive. Failing the run is the correct outcome; the next scheduled run
+ * retries the whole book.
+ *
+ * `fetchOne` is injected rather than calling cmdReportRows directly so the ordering and the
+ * all-or-nothing guarantee stay hermetically testable (no network in `npm test`).
+ * customerIds are CMD account numbers — not PHI, safe in an error message.
+ */
+export async function collectRowsAcrossCustomers(
+  customerIds: readonly string[],
+  fetchOne: (customerId: string) => Promise<CmdReportRow[]>,
+): Promise<CmdReportRow[]> {
+  if (customerIds.length === 0) {
+    // Fail closed. An empty roster would yield zero tuples, and zero tuples means writeRollup
+    // deletes nothing — but it would also report a successful no-op run forever. A roster that
+    // came back empty is a config fault, not a quiet success.
+    throw new Error('collectRowsAcrossCustomers: empty customer roster — refusing to pull an empty book');
+  }
+  const out: CmdReportRow[] = [];
+  for (const customerId of customerIds) {
+    let rows: CmdReportRow[];
+    try {
+      rows = await fetchOne(customerId);
+    } catch (err) {
+      throw new Error(
+        `collectRowsAcrossCustomers: customer ${customerId} failed — refusing to write a partial book`,
+        { cause: err },
+      );
+    }
+    // Push in a loop rather than spreading: a whole-book pull is tens of thousands of rows and
+    // `out.push(...rows)` passes every row as an argument, which blows the call-stack arg limit.
+    for (const row of rows) out.push(row);
+  }
+  return out;
+}
+
+/**
  * PHI-safe structural description of a report zip: per-entry filename, parsed
  * column names, and row count. Returns NO cell values — used by the probe to
  * reveal the report shape without emitting any patient-level data.
@@ -378,7 +433,10 @@ export function describeReportZip(
 // The grain is per CHARGE LINE (so claim_count is charge-line count). Patient
 // Full Name / Member ID / Group Number are PHI and are never read here. One alias
 // kept per field for resilience to minor report-label edits.
-const PAYER_KEYS = ['Charge Primary Payer Name', 'Primary Payer Name'];
+// 'Charge Current Payer Name' is report 10093971's label (the 2026-08-02 rebuild that replaced the
+// lost 10091828/10147241 pair). Appended LAST so any report still emitting the 'Primary' forms keeps
+// its existing mapping — pick() returns the first candidate present.
+const PAYER_KEYS = ['Charge Primary Payer Name', 'Primary Payer Name', 'Charge Current Payer Name'];
 // 'Facility Name/ID' is a REQUIRED fallback here — do NOT remove. The shipped payer
 // rollup pulls a DIFFERENT CMD report (report 10091729 / filter 10147241) that emits
 // the older 'Facility Name/ID' header; dropping the fallback silently nulls facility
@@ -389,7 +447,10 @@ const PAYER_KEYS = ['Charge Primary Payer Name', 'Primary Payer Name'];
 const FACILITY_KEYS = ['Facility Name', 'Facility Name/ID'];
 const CHARGE_KEYS = ['Charge/Debit Amount', 'Charge Amount'];
 const ALLOWED_KEYS = ['Payment Allowed Amount', 'Allowed Amount'];
-const PAID_KEYS = ['Charge Insurance Payments', 'Insurance Payment Amount'];
+// 'Payment Total Paid' is report 10093971's label for insurance paid. Appended LAST, so a report
+// emitting BOTH the charge-grain 'Charge Insurance Payments' and this one still resolves to the
+// charge-grain column and no existing pull changes value.
+const PAID_KEYS = ['Charge Insurance Payments', 'Insurance Payment Amount', 'Payment Total Paid'];
 const DATE_KEYS = ['Charge From Date', 'Date Of Service'];
 
 /** Case-insensitive field read across a small set of candidate header names. */
@@ -536,6 +597,7 @@ export async function cmdPayerGapForMonth(
   year: number,
   month: number,
   cfg: CmdApiConfig,
+  customerIds?: readonly string[],
 ): Promise<PayerGapSummary> {
   if (!Number.isInteger(year) || year < 2000 || year > 2100) {
     throw new Error('year must be an integer in [2000, 2100]');
@@ -543,6 +605,15 @@ export async function cmdPayerGapForMonth(
   if (!Number.isInteger(month) || month < 1 || month > 12) {
     throw new Error('month must be an integer in [1, 12]');
   }
-  const rows = await cmdReportRows(cfg);
+  // `customerIds` omitted == cfg.customerId's single account (the original one-facility behavior,
+  // still what the probe/CLI paths want). Supplied == WHOLE BOOK: this is a by-payer total, so a
+  // one-account answer is not a smaller correct answer, it is a wrong one. See
+  // collectRowsAcrossCustomers for why a partial pull throws instead of returning what it has.
+  const rows =
+    customerIds === undefined
+      ? await cmdReportRows(cfg)
+      : await collectRowsAcrossCustomers(customerIds, (customerId) =>
+          cmdReportRows({ ...cfg, customerId }),
+        );
   return mapCmdReportToPayerGap(rows, { year, month });
 }

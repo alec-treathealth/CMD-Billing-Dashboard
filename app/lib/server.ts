@@ -162,7 +162,7 @@ import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collecti
 import { collectionsYoy } from '../../src/collections/collectionsYoy.js';
 import type { CollectionsYoy } from '../../src/collections/collectionsYoy.js';
 import { facilityDimension, type FacilityDimensionRow } from '../../src/collections/facilities.js';
-import { cmdPayerGapForMonth, cmdReportRows, type CmdApiConfig, type CmdReportRow } from '../../src/collections/cmdPayer.js';
+import { cmdPayerGapForMonth, cmdReportRows, collectRowsAcrossCustomers, type CmdApiConfig, type CmdReportRow } from '../../src/collections/cmdPayer.js';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdExplorer.js';
 import { aliasIndigoFacilityColumn, BXR_REPORT_COLUMNS } from '../../src/collections/cmdExplorer.js';
 import { decryptPhi, encryptPhi } from '../../src/collections/phiCrypto.js';
@@ -624,7 +624,16 @@ export function handleCmdPayerRefresh(req: CmdPayerRefreshHttpRequest) {
     secret: process.env.CRON_SECRET,
     refresh: () =>
       refreshCmdPayerRollup({
-        fetchRows: () => cmdReportRows(cmdApiConfig()),
+        // WHOLE BOOK, all-or-nothing. writeRollup DELETEs per (month × tenant) across every
+        // facility, so a single-account pull here would delete a complete month and write back
+        // one facility's slice. collectRowsAcrossCustomers throws if ANY account fails, which
+        // leaves writeRollup unreached and the month untouched.
+        fetchRows: () => {
+          const cfg = cmdApiConfig();
+          return collectRowsAcrossCustomers(bxrPayerCustomerIds(), (customerId) =>
+            cmdReportRows({ ...cfg, customerId }),
+          );
+        },
         writeDb: rollupWriterDb(),
         businessEntityId: BXR_TENANT_ID, // BXR-only report config (cmdApiConfig)
       }),
@@ -1597,8 +1606,15 @@ function cmdApiConfig(): CmdApiConfig {
   return {
     baseUrl: process.env.CMD_API_BASE_URL?.trim() || 'https://webapi.collaboratemd.com',
     customerId: process.env.CMD_CUSTOMER_ID?.trim() || '10027973',
-    reportId: process.env.CMD_REPORT_ID?.trim() || '10091828',
-    filterId: process.env.CMD_FILTER_ID?.trim() || '10147241',
+    // 2026-08-02: 10091828 / 10147241 went INVALID CRITERIA (the pair had been unexercised since
+    // the 2026-06-25 manual CSV ingest; a dry run against it returned no identifier at all). These
+    // are the rebuilt replacements, probed the same day: 1,063 rows, 8 columns, spanning
+    // 2023-08 .. 2026-07 — so unlike the explorer filters this one is all-history, not a rolling
+    // window. Two of its labels differ from the old report ('Charge Current Payer Name',
+    // 'Payment Total Paid') and are registered as aliases in cmdPayer.ts PAYER_KEYS / PAID_KEYS.
+    // The old ids are DEAD — do not restore them as fallbacks.
+    reportId: process.env.CMD_REPORT_ID?.trim() || '10093971',
+    filterId: process.env.CMD_FILTER_ID?.trim() || '10148488',
     auth,
     // CMD batch reporting is async (run → poll a base64 zip). Bound the poll so a
     // slow/contended report (one-at-a-time per partner, 20-min server cap) fails
@@ -1609,8 +1625,20 @@ function cmdApiConfig(): CmdApiConfig {
   };
 }
 
+/** The BXR customer accounts a WHOLE-BOOK payer pull must cover. CMD scopes by customer and one
+ *  customer == one facility, so both payer surfaces (this live gap read and the rollup cron) loop
+ *  the roster; cmdApiConfig()'s single `customerId` covers exactly one facility. */
+function bxrPayerCustomerIds(): string[] {
+  return BXR_CUSTOMERS.map((c) => c.customerId);
+}
+
 export async function payerGapCmdForMonth(year: number, month: number): Promise<PayerGapSummary> {
-  return cmdPayerGapForMonth(year, month, cmdApiConfig());
+  // WHOLE BOOK. Before 2026-08-02 this pulled cmdApiConfig()'s single account and, with the old
+  // pair dead, always threw — so loadPayerGapCmd fell through to its matview fallback and the
+  // one-facility scope never showed. Now that the pair resolves, a single-account pull would
+  // return a plausible-looking ~1/10th of the book instead of falling back. Measured on the new
+  // report: one account = $1.4M for 2026-05 against the book's $11.4M.
+  return cmdPayerGapForMonth(year, month, cmdApiConfig(), bxrPayerCustomerIds());
 }
 
 /**
@@ -1680,12 +1708,11 @@ function cmdExplorerConfigFor(customerId: string): CmdApiConfig {
 }
 
 /**
- * Live-fetch config for ONE Indigo CMD customer account (report 10092391 / filter 10147669 —
- * replaced 10147602 after 2 facilities were added to the account; 10147602 was Indigo's own but is
- * being retired). Indigo's equivalent of BXR's 10093959/10148478, on the SAME CMD_API_* partner
- * creds. Overridable
+ * Live-fetch config for ONE Indigo CMD customer account (report 10092391 / filter 10148487 —
+ * see the dated note on filterId below; predecessors 10147669 and 10147602 are retired).
+ * Indigo's equivalent of BXR's 10093959/10148478, on the SAME CMD_API_* partner creds. Overridable
  * via CMD_INDIGO_REPORT_ID / CMD_INDIGO_FILTER_ID without a deploy; poll tuning is shared with the
- * BXR explorer cron (identical CMD batch behavior). customerId varies per call to cover all 36
+ * BXR explorer cron (identical CMD batch behavior). customerId varies per call to cover all 30
  * Indigo facilities. The "Customer Name" → "Facility Name" alias is applied by the cron wrapper
  * (transformRows: aliasIndigoFacilityColumn), NOT here — this only selects the report/filter.
  */
@@ -1694,7 +1721,19 @@ function cmdIndigoConfigFor(customerId: string): CmdApiConfig {
     ...cmdApiConfig(),
     customerId,
     reportId: process.env.CMD_INDIGO_REPORT_ID?.trim() || '10092391',
-    filterId: process.env.CMD_INDIGO_FILTER_ID?.trim() || '10147669',
+    // 2026-08-02: switched from 10147669 (a TRAILING ~4-week window: probed 2026-07-06 .. 2026-08-05,
+    // 2,393 rows over 3 sampled accounts) to 10148487, Indigo's OWN current-period filter (probed
+    // 2026-08-03 .. 2026-08-05, 211 rows over the same 3 accounts, 0 erroring, identical 22-column
+    // projection). Indigo no longer rides a BXR-shaped trailing window.
+    // TWO CONSEQUENCES, both verified, neither a blocker for the switch itself:
+    //   1. This does NOT by itself surface the 08/03-08/05 payments. Both filters already return
+    //      them; dropFuturePaymentRows (cmdExplorerCron.ts) drops every payment_received > today,
+    //      so they land only once the calendar reaches each date.
+    //   2. The trailing window was Indigo's ONLY self-heal for late-arriving prior-month
+    //      adjustments — cmd-explorer-catchup is BXR-only (cmdExplorerCatchupConfigFor spreads
+    //      cmdExplorerConfigFor). Until an Indigo catch-up exists, a July adjustment posted in
+    //      August is never re-pulled.
+    filterId: process.env.CMD_INDIGO_FILTER_ID?.trim() || '10148487',
     pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 3_000,
     maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 8,
     emptyGraceAttempts: Number(process.env.CMD_EXPLORER_EMPTY_GRACE) || 4,

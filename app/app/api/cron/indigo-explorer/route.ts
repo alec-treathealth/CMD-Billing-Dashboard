@@ -4,7 +4,7 @@
  * GET only — any other verb is 405.
  *
  * Indigo's sibling of /api/cron/cmd-explorer: pulls the live CMD report (report 10092391 /
- * filter 10147669) once PER CUSTOMER (37 Indigo facility accounts), aliases the "Customer Name"
+ * filter 10148487) once PER CUSTOMER (30 Indigo facility accounts), aliases the "Customer Name"
  * facility column, encrypts the 3 PHI identifiers, idempotently upserts charge lines into
  * collections.cmd_explorer_rows AND re-sources per-facility Check+EFT deposits into
  * collections.daily_collections (source_tag='cmd') as the least-privilege cmd_rollup_writer role,
@@ -13,7 +13,7 @@
  * route name in logs + the Vercel Cron tab; scheduled at :30 to stay off the shared CMD partner
  * session that BXR uses at :00.
  *
- * Node runtime (pg + libsodium); never statically cached. maxDuration covers 37 SEQUENTIAL CMD
+ * Node runtime (pg + libsodium); never statically cached. maxDuration covers 30 SEQUENTIAL CMD
  * batch polls plus the DB writes; the cron's wall-clock guard stops launching new customers near
  * the deadline and the rest are picked up next run (idempotent).
  */
