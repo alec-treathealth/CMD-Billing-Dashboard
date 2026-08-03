@@ -118,7 +118,11 @@ export function Dashboard({ view }: { view: DashboardView }) {
   // OverviewKpis toggle-button row (next to "All Facilities Table") — same data,
   // now revealed on demand.
   return (
-    <section className="space-y-4">
+    // data-ths='v2' opts this page — and only this page — into the Treat Design
+    // System v2 light-ground tokens and class layer (app/app/ths-v2.css). Every
+    // rule in that file is scoped to this attribute, so Collections, the Explorer
+    // grid, Qualify and Claims Audit are untouched until each is ported.
+    <section data-ths="v2" className="space-y-6">
       <OverviewKpis view={view} />
       <OverviewBarChart scope={view} />
     </section>

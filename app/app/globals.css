@@ -1,5 +1,11 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Fraunces:opsz,wght@9..144,400..700&display=swap');
 
+/* Treat Design System v2 (light ground), scoped to [data-ths='v2'] — currently
+   the Overview page only. Imported here so one stylesheet ships; the scope, the
+   deviations from the upstream design-system files, and the specificity contract
+   are documented in ths-v2.css itself. */
+@import './ths-v2.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

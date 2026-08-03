@@ -104,6 +104,10 @@ export function PayerGapBars({
       <div
         role="img"
         aria-label="Payers — paid vs. collection gap"
+        // ths-chart-clickable is what actually lands the pointer cursor inside the v2
+        // design-system scope: recharts sets cursor:default inline on its own wrapper,
+        // which beats inheritance from this div. Inert outside that scope.
+        className={onBarClick ? 'ths-chart-clickable' : undefined}
         style={{ width: '100%', height: 380, cursor: onBarClick ? 'pointer' : undefined }}
       >
         <ResponsiveContainer width="100%" height="100%">
