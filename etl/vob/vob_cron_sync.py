@@ -1,4 +1,5 @@
-"""DRAFT — NOT DEPLOYED / NOT RUN. Incremental Monday -> vob.indigo_vob sync.
+"""LIVE — incremental Monday -> vob.indigo_vob sync (scheduled by the Vercel cron
+/api/cron/vob-sync, which workflow_dispatches .github/workflows/vob-sync.yml).
 
 Runs headless (GitHub Actions, daily). Keeps vob.indigo_vob current as VOBs are added,
 re-VOB'd, admitted, or de-admitted on Monday board 1606316049.
@@ -36,6 +37,8 @@ SOURCE = "indigo_monday_1606316049"
 LOADER_ENV = os.environ.get("VOB_LOADER_ENV", "/Users/aleclowi/vob-data/loader.env")
 DELETE_SAFETY_FRAC = 0.10                            # never delete >10% of the table in one run
 MONDAY_URL = "https://api.monday.com/v2"
+ITEM_CHUNK = 50                                      # ids per items() call — ALWAYS passed as an
+                                                     # explicit `limit` too (see asset_urls)
 
 # table columns written (0060 + 0061 employer + 0062 monday_updated_at)
 COLS = ["monday_item_id", "facility", "vob_created_at", "monday_updated_at",
@@ -123,15 +126,38 @@ def scan_board():
     return out
 
 def asset_urls(item_ids):
-    """{item_id: public_url} for the latest file in files4. Signed URLs expire ~1h -> use promptly."""
+    """({item_id: public_url}, seen_ids) for the latest file in files4.
+
+    `seen_ids` is every id the API actually returned. The caller needs it to tell a
+    genuinely-unattached item apart from one the API silently dropped — see below.
+
+    items(ids:) CARRIES A DEFAULT limit OF 25 (measured 2026-08-03: request 26 -> 25 back,
+    request 50 -> 25 back, request 60 -> 25 back; with an explicit limit all are returned).
+    Chunks of 50 therefore lost their last 25 ids on EVERY run, and because those items were
+    never inserted they stayed "new" and were re-requested — and re-dropped — next run. That
+    is the whole of the standing `no_pdf` backlog: 2026-08-01 ran 182 new/changed -> 4 chunks
+    -> 100 returned, 2 of them genuinely unattached -> 98 upserted / 84 "no_pdf"; 2026-08-02
+    ran 36 -> 25 returned, same 2 unattached -> 23 upserted / 13 "no_pdf". Both reconcile
+    exactly. It drained slowly rather than sticking (a smaller backlog eventually fits under
+    25), so the symptom read as a high error RATE instead of a truncation.
+
+    Fix: pass the limit explicitly, bound to the chunk size, and return `seen` so a future
+    silent truncation is COUNTED (api_missing) instead of being folded into `no_pdf` again.
+    assets(ids:) was measured NOT to truncate (60/60 returned), so only items() is capped.
+
+    Signed URLs expire ~1h -> use promptly.
+    """
     out = {}
-    qf = 'query($ids:[ID!]) { items(ids:$ids) { id column_values(ids:["files4"]) { value } } }'
+    seen = set()
+    qf = ('query($ids:[ID!], $lim:Int!) { items(ids:$ids, limit:$lim) '
+          '{ id column_values(ids:["files4"]) { value } } }')
     qa = 'query($ids:[ID!]!) { assets(ids:$ids) { id public_url } }'   # assets(ids:) requires non-null [ID!]!
-    for i in range(0, len(item_ids), 50):
-        chunk = item_ids[i:i+50]
-        d = monday(qf, {"ids": chunk})
+    for i in range(0, len(item_ids), ITEM_CHUNK):
+        chunk = item_ids[i:i+ITEM_CHUNK]
+        d = monday(qf, {"ids": chunk, "lim": ITEM_CHUNK})
         asset_of = {}
         for it in d["items"]:
+            seen.add(it["id"])
             cv = it.get("column_values") or [{}]
             val = cv[0].get("value")
             if not val:
@@ -147,7 +173,7 @@ def asset_urls(item_ids):
             u = url_by_asset.get(aid)
             if u:
                 out[iid] = u
-    return out
+    return out, seen
 
 # ---------- extract -> table row (excludes raw PHI + notes + relationship_client) ----------
 def build_row(raw, iid, facility, vob_created_at, monday_updated_at):
@@ -208,7 +234,7 @@ def main():
     print(f"board items: {len(board)} | admitted: {len(admitted)}")
 
     ci, u = conninfo(getenv("CMD_ROLLUP_WRITER_DATABASE_URL"), getenv("SUPABASE_CA_PATH"))
-    upserted = deactivated = reactivated = errors = no_pdf = download_fail = 0
+    upserted = deactivated = reactivated = errors = no_pdf = download_fail = api_missing = 0
     note_parts = []
 
     with psycopg.connect(ci, connect_timeout=30, prepare_threshold=None) as conn:
@@ -235,7 +261,7 @@ def main():
 
             # download + extract + upsert new/changed
             if to_process:
-                urls = asset_urls([iid for iid, _, _ in to_process])
+                urls, seen = asset_urls([iid for iid, _, _ in to_process])
                 ph = "(" + ",".join(["%s"] * len(COLS)) + ")"
                 setexpr = ", ".join(f"{c}=excluded.{c}" for c in COLS if c != "monday_item_id")
                 sql = (f"insert into vob.indigo_vob ({', '.join(COLS)}) values {ph} "
@@ -244,7 +270,16 @@ def main():
                 for iid, fac, upd in to_process:
                     url = urls.get(iid)
                     if not url:
-                        no_pdf += 1; continue                    # no files4 attachment yet — retried next run
+                        # Split the two causes. seen == the API returned the item, so a missing
+                        # URL is a real "no files4 attachment yet" (retried next run, harmless).
+                        # NOT seen == the API silently dropped the id; that is the truncation
+                        # class that produced the 2026-07/08 backlog and must never hide inside
+                        # no_pdf again. Both still retry — only the accounting differs.
+                        if iid in seen:
+                            no_pdf += 1
+                        else:
+                            api_missing += 1
+                        continue
                     try:
                         raw = download_and_extract(url)          # extract_pdf never raises (a bad PDF returns a
                         row = build_row(raw, iid, fac, board[iid][2], upd)   # row w/ extraction_flag), so this
@@ -255,9 +290,15 @@ def main():
                         cur.executemany(sql, batch); upserted += len(batch); batch = []
                 if batch:
                     cur.executemany(sql, batch); upserted += len(batch)
-            errors = no_pdf + download_fail
+            errors = no_pdf + download_fail + api_missing
             if errors:
-                note_parts.append(f"errors={no_pdf} no_pdf/{download_fail} download_fail")
+                note_parts.append(
+                    f"errors={no_pdf} no_pdf/{download_fail} download_fail/{api_missing} api_missing")
+            if api_missing:
+                # Loud: this should be 0 now that items() carries an explicit limit. Non-zero means
+                # the API dropped ids again (a new cap, or a cap on some other field) and VOBs are
+                # being deferred indefinitely — exactly the failure this run-log exists to surface.
+                note_parts.append("WARN api_missing>0: items() dropped ids — check the page limit")
 
             # SOFT-delete de-admitted / off-board (guarded). Mark deactivated_at instead of DELETE so
             # the benefit row is retained (it still enriches the member's historical collections
@@ -291,6 +332,18 @@ def main():
                 "admitted=excluded.admitted, upserted=excluded.upserted, deactivated=excluded.deactivated, "
                 "reactivated=excluded.reactivated, errors=excluded.errors, note=excluded.note",
                 (SOURCE, len(board), len(admitted), upserted, deactivated, reactivated, errors, note))
+
+            # Append-only run history (0075). sync_state is one row per source, so it can only ever
+            # answer "how was the LAST run" — which is exactly why the items() truncation sat
+            # unnoticed: a stable errors=84 reads like a steady state, not a defect. This row makes
+            # the error split trendable (see the migration's verification block).
+            cur.execute(
+                "insert into vob.sync_run "
+                "(source,board_items,admitted,to_process,upserted,deactivated,reactivated,"
+                " no_pdf,download_fail,api_missing,note) "
+                "values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (SOURCE, len(board), len(admitted), len(to_process), upserted, deactivated,
+                 reactivated, no_pdf, download_fail, api_missing, note))
         conn.commit()
         # Refresh the materialized latest-per-member set (migration 0063). Strictly, only `upserted`
         # (new/changed benefit data) alters matview CONTENT today — a soft-delete/reactivate touches
@@ -305,7 +358,8 @@ def main():
 
     print(f"upserted={upserted} watermark_backfill={len(to_touch)} "
           f"deactivated={deactivated} reactivated={reactivated} "
-          f"errors={errors} (no_pdf={no_pdf} download_fail={download_fail}) note={note or '-'}")
+          f"errors={errors} (no_pdf={no_pdf} download_fail={download_fail} "
+          f"api_missing={api_missing}) note={note or '-'}")
 
 if __name__ == "__main__":
     main()
