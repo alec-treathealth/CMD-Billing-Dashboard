@@ -208,6 +208,11 @@ import {
   handleRevalidateRequest,
   type RevalidateHttpRequest,
 } from '../../src/routes/revalidateHandler.js';
+import { reconcileDeposits } from '../../src/collections/reconcileDeposits.js';
+import {
+  handleReconcileDepositsRequest,
+  type ReconcileDepositsHttpRequest,
+} from '../../src/routes/reconcileDepositsHandler.js';
 import {
   handleCmdPayerRefreshRequest,
   type CmdPayerRefreshHttpRequest,
@@ -619,6 +624,54 @@ export function handleRevalidate(req: RevalidateHttpRequest) {
  * the trailing window of months as the least-privilege cmd_rollup_writer role. No
  * PHI crosses this boundary; only non-PHI stats are returned.
  */
+/**
+ * Deposit reconciliation cron (Vercel Cron, daily). Gated on CRON_SECRET. Pulls CMD's
+ * "what reflects in the bank" report per BXR customer, aggregates it through the SAME
+ * aggregateDailyDeposits the explorer cron uses, and diffs facility-day totals against
+ * collections.daily_collections.
+ *
+ * READ-ONLY: the reader pool only — no writer is opened and nothing is persisted, so this cron
+ * cannot damage the feed it is checking. Findings surface as a log line (see
+ * RECONCILE_ALERT_PREFIX); persisting history would need a new table, i.e. a migration, which is
+ * deliberately out of scope.
+ */
+export function handleReconcileDeposits(req: ReconcileDepositsHttpRequest) {
+  return handleReconcileDepositsRequest(req, {
+    secret: process.env.CRON_SECRET,
+    reconcile: () =>
+      reconcileDeposits({
+        customers: BXR_CUSTOMERS.map((c) => ({ customerId: c.customerId, facilityCode: c.facilityCode })),
+        fetchRows: (customerId) => cmdReportRows(cmdReconcileConfigFor(customerId)),
+        readStoredGross: async (from, to) => {
+          // Explicit column list, fixed table name, values bound as $n (CLAUDE.md). Tenant-scoped
+          // to BXR because the reconcile report is BXR's; source_tag='cmd' so a legacy workbook
+          // row can never be mistaken for what the live cron wrote.
+          const { rows } = await readerExecutor().query<{
+            facility_code: string;
+            payment_date: string;
+            gross: string;
+          }>(
+            'select facility_code, to_char(payment_date, \'YYYY-MM-DD\') as payment_date, ' +
+              'sum(gross_amount)::text as gross ' +
+              'from collections.daily_collections ' +
+              'where business_entity_id = $1 and source_tag = $2 ' +
+              'and payment_date >= $3::date and payment_date <= $4::date ' +
+              'and facility_code is not null ' +
+              'group by facility_code, payment_date',
+            [BXR_TENANT_ID, 'cmd', from, to],
+          );
+          return rows.map((r) => ({
+            facility_code: r.facility_code,
+            payment_date: r.payment_date,
+            gross: Number(r.gross),
+          }));
+        },
+        materialUsd: Number(process.env.RECONCILE_MATERIAL_USD) || undefined,
+        totalUsd: Number(process.env.RECONCILE_TOTAL_USD) || undefined,
+      }),
+  });
+}
+
 export function handleCmdPayerRefresh(req: CmdPayerRefreshHttpRequest) {
   return handleCmdPayerRefreshRequest(req, {
     secret: process.env.CRON_SECRET,
@@ -1773,6 +1826,28 @@ function cmdIndigoConfigFor(customerId: string): CmdApiConfig {
     pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 3_000,
     maxPollAttempts: Number(process.env.CMD_EXPLORER_POLL_ATTEMPTS) || 8,
     emptyGraceAttempts: Number(process.env.CMD_EXPLORER_EMPTY_GRACE) || 4,
+  };
+}
+
+/**
+ * Live-fetch config for ONE BXR customer against CMD's "what reflects in the bank" report
+ * (10050915). Filters saved under it: 10148489 "this month" (the daily default) and 10148490
+ * "last month". Overridable via CMD_RECONCILE_REPORT_ID / CMD_RECONCILE_FILTER_ID.
+ *
+ * A default filter is safe here where the catch-up cron demands env — this path is READ-ONLY, so
+ * the worst case of a wrong window is a useless comparison, not a bad write.
+ *
+ * Poll budget is its own: a clean single-customer pull measured 11-42s on 2026-08-03. The
+ * >14-minute timeouts seen on 08-02 were contention from concurrent manual probes against CMD's
+ * one-report-at-a-time partner slot, not this report being slow.
+ */
+function cmdReconcileConfigFor(customerId: string): CmdApiConfig {
+  return {
+    ...cmdExplorerConfigFor(customerId),
+    reportId: process.env.CMD_RECONCILE_REPORT_ID?.trim() || '10050915',
+    filterId: process.env.CMD_RECONCILE_FILTER_ID?.trim() || '10148489',
+    pollIntervalMs: Number(process.env.CMD_RECONCILE_POLL_INTERVAL_MS) || 5_000,
+    maxPollAttempts: Number(process.env.CMD_RECONCILE_POLL_ATTEMPTS) || 12,
   };
 }
 

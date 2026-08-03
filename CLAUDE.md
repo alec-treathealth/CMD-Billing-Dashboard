@@ -100,7 +100,7 @@ Run all five before any commit. This is the bar for "verified" — not typecheck
 alone, and especially not when a shared helper changed.
 
 ```bash
-npm test                          # root hermetic suite — 869 pass / 0 fail
+npm test                          # root hermetic suite — 889 pass / 0 fail
 npm run typecheck                 # root tsc (strict: noUncheckedIndexedAccess)
 cd app && npm test                # app suite — 176 pass / 0 fail
 cd app && npm run typecheck        # app tsc
@@ -160,7 +160,7 @@ Surfaces:
   `redirect('/')` stub. `<SearchConsole />` and the `/api/agent` path stay in git
   history; restoring means remounting the page *and* re-adding the nav entry.
 
-`app/vercel.json` declares **15 cron entries across 13 distinct routes**
+`app/vercel.json` declares **16 cron entries across 14 distinct routes**
 (`billing-audit-consolidated` runs on three schedules):
 
 | Route | Cadence |
@@ -172,6 +172,7 @@ Surfaces:
 | `era-835` | daily 08:50 |
 | `vob-sync` | daily 09:17 |
 | `refresh-cmd-payer` | daily 10:50 |
+| `reconcile-deposits` | daily 11:50 |
 | `cms-hcpcs-sync` | quarterly, 06:00 on the 2nd of Jan/Apr/Jul/Oct |
 | `billing-audit-op` · `billing-code-decisions` | daily 02:20 / 02:40 |
 | `billing-audit-consolidated` | daily 02:40, 03:10, 03:40 |
