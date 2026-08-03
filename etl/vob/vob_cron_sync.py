@@ -293,7 +293,7 @@ def main():
             errors = no_pdf + download_fail + api_missing
             if errors:
                 note_parts.append(
-                    f"errors={no_pdf} no_pdf/{download_fail} download_fail/{api_missing} api_missing")
+                    f"errors={errors} no_pdf/{download_fail} download_fail/{api_missing} api_missing")
             if api_missing:
                 # Loud: this should be 0 now that items() carries an explicit limit. Non-zero means
                 # the API dropped ids again (a new cap, or a cap on some other field) and VOBs are
