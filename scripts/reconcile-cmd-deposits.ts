@@ -50,9 +50,11 @@ function cfgFor(customerId: string, filterId: string): CmdApiConfig {
     reportId: REPORT_ID,
     filterId,
     auth: auth(),
-    // This report is SLOW — four probe attempts on 2026-08-02/03 exhausted budgets up to 14
-    // minutes. A manual script can afford to wait where a 300s Vercel cron cannot; that runtime
-    // is precisely why this is a script and not a cron.
+    // A clean single-customer pull is 11-42s. Four probes on 2026-08-02/03 appeared to take >14
+    // minutes, but that was contention from concurrent manual runs queued against CMD's
+    // one-report-at-a-time partner slot — not this report. The generous budget below is kept
+    // anyway because a script can afford to wait; the scheduled sibling
+    // (/api/cron/reconcile-deposits) uses a tighter one to fit inside maxDuration.
     pollIntervalMs: Number(process.env.RECONCILE_POLL_INTERVAL_MS) || 10_000,
     maxPollAttempts: Number(process.env.RECONCILE_POLL_ATTEMPTS) || 90,
     emptyGraceAttempts: 4,
@@ -91,6 +93,8 @@ async function main(): Promise<void> {
   console.log('');
 
   const live: ByFacilityDate = new Map();
+  /** Facilities this run actually pulled — the only ones eligible for comparison. */
+  const reachedFacilities = new Set<string>();
   const facilityLabels = new Map<string, string>();
   let rowsFetched = 0;
   const failures: string[] = [];
@@ -107,6 +111,7 @@ async function main(): Promise<void> {
       continue;
     }
     rowsFetched += rows.length;
+    reachedFacilities.add(c.facilityCode);
     // Record the report's own facility label (name only — the id is stripped) for the header.
     for (const r of rows) {
       const label = splitFacilityLabel(r['Facility Name/ID'] ?? r['Facility Name'] ?? null).name;
@@ -146,8 +151,24 @@ async function main(): Promise<void> {
         'group by facility_code, payment_date',
       [BXR_ENTITY_ID, 'cmd', from, to],
     );
+    // ONLY facilities actually pulled may be compared. A facility that failed, or that simply was
+    // not in this run's roster, contributes $0.00 on the report side — so including it would
+    // report its entire stored total as a shortfall that does not exist. Running this script for a
+    // single customer made every OTHER facility look like a total loss until this filter existed.
     const stored: ByFacilityDate = new Map();
-    for (const r of res.rows) addGross(stored, r.facility_code, r.payment_date, Number(r.gross));
+    let excludedFacilities = 0;
+    for (const r of res.rows) {
+      if (!reachedFacilities.has(r.facility_code)) {
+        excludedFacilities += 1;
+        continue;
+      }
+      addGross(stored, r.facility_code, r.payment_date, Number(r.gross));
+    }
+    if (excludedFacilities > 0) {
+      console.log(
+        `(excluded ${excludedFacilities} stored facility-day rows for facilities this run did not pull)`,
+      );
+    }
 
     const facilities = [...new Set([...live.keys(), ...stored.keys()])].sort();
     console.log('');
