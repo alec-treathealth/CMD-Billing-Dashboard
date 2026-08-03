@@ -14,6 +14,7 @@
 
 import https from 'node:https';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { matchesAnyDomain, registrableDomain as registrableDomainOf } from '../src/intel/payer_policy/roster.js';
 
 /** A research turn can exceed undici's 300s headers timeout (UND_ERR_HEADERS_TIMEOUT),
  *  and `undici` isn't resolvable here to override the dispatcher. node:https has no
@@ -258,60 +259,23 @@ const EMIT_FINDINGS = {
 
 // eTLD+1 approximation. Adequate for this map (.com/.gov/.org); the multi-part
 // list covers the common ccTLD shapes so a stray foreign URL still groups sanely.
-const MULTIPART = new Set(['co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'com.au', 'co.nz', 'co.jp', 'com.br', 'co.za']);
-
+// Domain matching + eTLD+1 now come from src/intel/payer_policy/roster.ts rather
+// than a private copy. The copies had already diverged once: this script's version
+// rejected `https://www.uhcprovider.com./` (a trailing-dot FQDN, the same host) and
+// marked a healthy optum run FAILED on GATE D. One implementation, one fix.
 function registrableDomain(host: string): string {
-  const parts = host.replace(/^www\./, '').split('.');
-  if (parts.length <= 2) return parts.join('.');
-  const lastTwo = parts.slice(-2).join('.');
-  return MULTIPART.has(lastTwo) ? parts.slice(-3).join('.') : lastTwo;
+  return registrableDomainOf(host);
 }
 
 function hostOf(url: string): string | null {
   try { return new URL(url).hostname.toLowerCase(); } catch { return null; }
 }
 
-/** allowed_domains semantics: bare domain matches the domain and all subdomains;
- *  an entry with a path additionally requires the path prefix. */
-function matchesEntry(url: string, entry: string): boolean {
-  const slash = entry.indexOf('/');
-  const eHost = (slash === -1 ? entry : entry.slice(0, slash)).toLowerCase();
-  const ePath = slash === -1 ? '' : entry.slice(slash);
-  let u: URL;
-  try { u = new URL(url); } catch { return false; }
-  const h = u.hostname.toLowerCase();
-  if (h !== eHost && !h.endsWith('.' + eHost)) return false;
-  return ePath === '' || u.pathname.startsWith(ePath);
-}
+const matchesAny = (url: string, entries: string[]) => matchesAnyDomain(url, entries);
 
-const matchesAny = (url: string, entries: string[]) => entries.some((e) => matchesEntry(url, e));
-
-/** source_tier is derived, not model-emitted: every domain in the map is a primary
- *  source by construction. Kept as a function so widening the map later is the only
- *  edit needed. */
+/** source_tier is derived, not model-emitted: every domain in the map is primary. */
 function deriveSourceTier(url: string, allowed: string[]): 'primary' | 'secondary' {
   return matchesAny(url, allowed) ? 'primary' : 'secondary';
-}
-
-/** PRIOR STATE for the monthly diff. Reads the previous artifact for this key and
- *  returns the identity tuples already reported, so the model can suppress them.
- *  Mirrors the finding_hash key (payer_plan|change_type|date_effective|source_url)
- *  so what the prompt suppresses and what the DB dedups on cannot drift apart. */
-function priorStateBlock(dir: string, key: string, currentStamp: string): string {
-  let files: string[];
-  try {
-    files = readdirSync(dir).filter((f) => f.startsWith(`${key}-`) && f.endsWith('.json') && !f.includes(currentStamp));
-  } catch { return '(none — first run)'; }
-  if (!files.length) return '(none — first run)';
-  const latest = files.sort().at(-1)!;
-  let prior: { findings?: Array<Record<string, string>> };
-  try { prior = JSON.parse(readFileSync(`${dir}/${latest}`, 'utf8')); } catch { return '(none — first run)'; }
-  const fs_ = prior.findings ?? [];
-  if (!fs_.length) return `(prior run ${latest} reported no findings)`;
-  return [`(from ${latest} — ${fs_.length} already reported, do NOT re-report these)`]
-    .concat(fs_.map((f, i) =>
-      `${i + 1}. ${f.change_type} | eff=${f.date_effective} | ${f.source_url}\n   ${f.payer_plan}\n   ${f.summary}`))
-    .join('\n');
 }
 
 // ------------------------------------------------------------------- the run
