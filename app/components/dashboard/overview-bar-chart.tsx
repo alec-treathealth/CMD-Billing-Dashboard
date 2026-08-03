@@ -59,6 +59,7 @@ import {
 import { facilityLabel } from '../../../src/collections/summaryTypes';
 import type { CmdPayerFacilityRow } from '../../../src/collections/cmdPayerRollup';
 import { MiniBar, useWidget } from './widgets';
+import { tenantBrand } from '@/lib/tenant-branding';
 import { viewTitle, type DashboardView } from '@/lib/views';
 
 /**
@@ -82,6 +83,33 @@ const CHART = {
 
 /** Bar hover wash — the accent at 6%, matching the v2 table row-hover weight. */
 const BAR_CURSOR_FILL = 'rgba(28,139,130,0.06)';
+
+/**
+ * The company chip on a chart card: real logo + spelled-out name, in the tenant's own
+ * color. On the Consolidated view this is what tells you which book each stacked card
+ * is reporting, so it is deliberately larger and higher-contrast than a plain tag.
+ *
+ * The logo comes from tenantBrand() — the single declared tenant→asset map — but is
+ * rendered here rather than through <TenantLogo>, whose treatment (white circle,
+ * white/30 ring, white initials) is tuned for the dark top bar and would disappear on
+ * a light card. A tenant with no asset, and the defensive 'consolidated' case, fall
+ * back to the colored dot; the name renders either way, so nothing depends on the
+ * image loading.
+ */
+function TenantChip({ scope }: { scope: DashboardView }) {
+  const brand = tenantBrand(scope);
+  return (
+    <span className="ths-tenant">
+      {brand?.kind === 'image' ? (
+        // eslint-disable-next-line @next/next/no-img-element -- tiny fixed static asset, same call as <TenantLogo>
+        <img src={brand.src} alt="" aria-hidden className="ths-tenant-logo" />
+      ) : (
+        <span className="ths-dot" />
+      )}
+      {viewTitle(scope)}
+    </span>
+  );
+}
 
 /** The chart card title per view (so an Indigo/Consolidated view isn't mislabeled "BXR"). */
 function chartTitleFor(view: DashboardView): string {
@@ -236,7 +264,10 @@ function FacilityGrossBars({
       <div
         role="img"
         aria-label="Collections gross by facility"
-        style={{ width: '100%', height: 380, cursor: onBarClick ? 'pointer' : undefined }}
+        // ths-chart-clickable is what actually lands the pointer cursor — recharts sets
+        // cursor:default inline on its own wrapper, which beats inheritance from here.
+        className={onBarClick ? 'ths-chart-clickable' : undefined}
+        style={{ width: '100%', height: 380 }}
       >
         <ResponsiveContainer width="100%" height="100%">
           <BarChart
@@ -1153,12 +1184,7 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
       <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <h2 className="ths-card-title text-base">{chartTitleFor(scope)}</h2>
         <div className="flex flex-wrap items-center gap-2">
-          {/* Tenant mark + name. The name is what carries the meaning; the colored
-              dot only makes the two Consolidated cards scannable. */}
-          <span className="ths-tag ths-tag-outline">
-            <span className="ths-dot" style={{ color: 'var(--tenant)' }} />
-            {viewTitle(scope)}
-          </span>
+          <TenantChip scope={scope} />
           {asOf && <span className="ths-card-meta">as of {asOf}</span>}
         </div>
       </header>

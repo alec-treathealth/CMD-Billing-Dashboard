@@ -28,7 +28,7 @@
  * that needs to change scope once the real data layer lands.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { CalendarClock, Filter, Table2, X } from 'lucide-react';
+import { CalendarClock, ChevronDown, Filter, Table2, X } from 'lucide-react';
 
 import { Skeleton } from '@/components/ui/skeleton';
 import { ControlSelect } from '@/components/data-grid';
@@ -207,10 +207,11 @@ function KpiSkeletonRow() {
 }
 
 /**
- * The shared reveal-toggle button (All Facilities / ERA). Filled with the active view's
- * brand color for discoverability. --brand-ink is dark in all three views (teal/navy/purple),
- * so white text stays legible everywhere (unlike --brand-accent, which is gold for BXR).
- * A brand-accent ring marks the expanded state.
+ * The shared reveal-toggle (All Facilities / ERA). These two are the only way into their
+ * panels, so they are sized and colored to be found: accent-outlined and tinted when
+ * shut, filled accent when open (7.1:1 white-on-accent). The chevron flips with the
+ * state — a conventional disclosure affordance — and aria-expanded carries the same fact
+ * to assistive tech, so the state is never conveyed by color alone.
  */
 function PanelToggleButton({
   open,
@@ -222,13 +223,9 @@ function PanelToggleButton({
   children: ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      aria-expanded={open}
-      className="ths-btn ths-btn-secondary ths-btn-sm"
-    >
+    <button type="button" onClick={onToggle} aria-expanded={open} className="ths-toggle">
       {children}
+      <ChevronDown className="ths-toggle-chevron h-4 w-4" aria-hidden />
     </button>
   );
 }

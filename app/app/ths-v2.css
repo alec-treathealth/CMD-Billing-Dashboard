@@ -398,6 +398,82 @@
   background: color-mix(in srgb, var(--color-accent) 10%, transparent);
 }
 
+/* ---- Reveal toggle — a disclosure, sized to be found -----------------------
+   Bigger and accent-led when closed, filled when open. The design system reserves
+   the filled accent for one primary action per screen; this is a SELECTED STATE
+   rather than a call to action, which is why it is allowed to fill — and why the
+   closed state stays an outline so a shut panel never competes with real actions.
+   White on the light-ground accent is 7.1:1 (AA). aria-expanded does the talking
+   for assistive tech; the chevron and the fill are its visual echo.
+--------------------------------------------------------------------------- */
+[data-ths='v2'] .ths-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 36px;
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 38%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-accent) 6%, transparent);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-accent);
+  cursor: pointer;
+  transition:
+    background var(--dur-1) var(--ease),
+    border-color var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease);
+}
+[data-ths='v2'] .ths-toggle:hover {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  border-color: var(--color-accent);
+}
+[data-ths='v2'] .ths-toggle[aria-expanded='true'] {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: #ffffff;
+}
+/* The chevron points down when the panel is shut, up when it is open. */
+[data-ths='v2'] .ths-toggle-chevron {
+  transition: transform var(--dur-2) var(--ease);
+}
+[data-ths='v2'] .ths-toggle[aria-expanded='true'] .ths-toggle-chevron {
+  transform: rotate(180deg);
+}
+
+/* ---- Tenant chip — the company mark on a chart card -----------------------
+   Bigger than a .ths-tag and carrying the real logo, because on the Consolidated
+   view this is the thing that tells you which book you are reading. Text is the
+   tenant color (navy 14:1 / violet 8.7:1 on this ground), and the company name is
+   always spelled out beside the mark, so neither color nor image is the sole
+   carrier of meaning.
+--------------------------------------------------------------------------- */
+[data-ths='v2'] .ths-tenant {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px 12px 4px 7px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--tenant);
+  background: color-mix(in srgb, var(--tenant) 8%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tenant) 24%, transparent);
+}
+/* Height-constrained, width-auto: bxr.png is a square monogram and indigo.webp is
+   a wide wordmark, so a fixed square box would squash one of them. */
+[data-ths='v2'] .ths-tenant-logo {
+  display: block;
+  height: 18px;
+  width: auto;
+  max-width: 80px;
+  object-fit: contain;
+  flex: none;
+}
+
 /* ---- Fields -------------------------------------------------------------- */
 [data-ths='v2'] .ths-field {
   display: inline-flex;
@@ -534,6 +610,21 @@
 /* Wide content scrolls inside its own box; the page never scrolls sideways. */
 [data-ths='v2'] .ths-scroll-x {
   overflow-x: auto;
+}
+
+/* ---- Clickable chart -------------------------------------------------------
+   recharts writes `cursor: 'default'` into .recharts-wrapper's INLINE style
+   (generateCategoricalChart), and an inline style on the child beats `pointer`
+   inherited from our wrapper — so the hand never appeared over the bars. An
+   external rule can only outrank an inline style with !important; this is that
+   case, not a specificity shortcut.
+
+   Applied ONLY to charts that actually open a drill-down, so the hand always
+   promises something real: the YTD ranking chart is not clickable and keeps the
+   default arrow, which is half of how a reader learns the difference.
+--------------------------------------------------------------------------- */
+[data-ths='v2'] .ths-chart-clickable .recharts-wrapper {
+  cursor: pointer !important;
 }
 
 /* ---- Chart tooltip — a raised card at tooltip scale, so it never inherits
