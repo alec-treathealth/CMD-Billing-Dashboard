@@ -338,7 +338,7 @@ export function EraUpcomingBody({
     // runs. This is "nothing scheduled", not an error and not a zero-dollar datum.
     return (
       <div className="py-2">
-        <p className="text-sm text-foreground">No upcoming payments scheduled.</p>
+        <p className="text-sm text-foreground">No future payments scheduled.</p>
         <p className="ths-card-meta mt-1">
           Shows finalized 835 remittances with an effective payment date of today or later,
           plus any forecast rows keyed into the Upcoming Payments sheet. Entries appear once

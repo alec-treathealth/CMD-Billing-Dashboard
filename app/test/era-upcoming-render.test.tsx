@@ -64,7 +64,7 @@ const S = (over: Partial<EraUpcomingSummary>): EraUpcomingSummary => {
 
 test('empty state: calm "nothing scheduled" — no dollars, no error styling', () => {
   const html = renderToStaticMarkup(<EraUpcomingBody data={S({})} />);
-  assert.ok(html.includes('No upcoming payments scheduled'), 'the calm empty read');
+  assert.ok(html.includes('No future payments scheduled'), 'the calm empty read');
   assert.ok(!html.includes('$'), 'no zero presented as data');
   assert.ok(!html.includes('Unable to load'), 'not an error state');
   assert.ok(!html.includes('floor'), 'no floor banner when there is nothing to understate');
@@ -267,7 +267,7 @@ test('forecast-only: the tile renders even with zero ERA remits, headline stays 
   const html = renderToStaticMarkup(
     <EraUpcomingBody data={S({})} overrides={OS([OR({ amount: '5000.00' })])} />,
   );
-  assert.ok(!html.includes('No upcoming payments scheduled'), 'not the empty state');
+  assert.ok(!html.includes('No future payments scheduled'), 'not the empty state');
   assert.ok(html.includes('$5,000.00'), 'the forecast is visible on its own');
   // The ERA headline is CONFIRMED money. With no confirmed remits it is unknown, not $0.00 —
   // and above all not the forecast figure promoted into the confirmed slot.

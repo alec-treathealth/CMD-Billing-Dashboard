@@ -6,8 +6,8 @@
  *   • YTD Gross   — year-to-date gross split IP / OP / IP+OP, with a YoY trend.
  *   • Year Forecast — a live linear-YTD run-rate projection, with a YoY-vs-prior-year trend.
  * Plus a toggle-button row: "All Facilities Table" (per-facility table for a selected
- * month) and "Upcoming Payments" (835-confirmed remits plus the operator-keyed forecast,
- * fetched only when opened). Each button reveals its panel below the row,
+ * month) and "Future <tenant> Payments" (835-confirmed remits plus the operator-keyed
+ * forecast, fetched only when opened). Each button reveals its panel below the row,
  * All-Facilities-style.
  *
  * Data sources (all NON-PHI, reader-only; no row fetch, no LLM):
@@ -60,6 +60,31 @@ const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December',
 ];
+
+/**
+ * The Future-Payments panel title, per view.
+ *
+ * NAMES THE TENANT rather than hardcoding "BXR", for the same reason chartTitleFor does in
+ * overview-bar-chart.tsx: the 835-confirmed half of this panel is view-scoped, so on the
+ * Indigo view a "Future BXR Payments" heading would sit directly above Indigo's remits, and on
+ * Consolidated it would name one of the two books on screen. Consolidated stays unqualified
+ * because it is both books and is not a tenant.
+ *
+ * NOTE the FORECAST half is BXR-only today regardless of this label — the sheet cron passes
+ * BXR_TENANT_ID literally and the parser's alias table holds only BXR codes (023). So an Indigo
+ * view shows Indigo's confirmed remits and no forecast rows. When an Indigo override tab exists
+ * this label needs no change; the feed does.
+ */
+function futurePaymentsTitle(view: DashboardView): string {
+  switch (view) {
+    case 'bxr':
+      return 'Future BXR Payments';
+    case 'indigo':
+      return 'Future Indigo Payments';
+    case 'consolidated':
+      return 'Future Payments';
+  }
+}
 
 /** All Facilities care-setting filter. */
 type FacilitySetting = 'ALL' | 'IP' | 'OP';
@@ -242,7 +267,7 @@ export function OverviewKpis({
   canEditForecast = false,
 }: {
   view: DashboardView;
-  /** super_admin only — surfaces the Upcoming Payments edit controls. */
+  /** super_admin only — surfaces the Future Payments edit controls. */
   canEditForecast?: boolean;
 }) {
   const [facilitiesOpen, setFacilitiesOpen] = useState(false);
@@ -384,7 +409,7 @@ export function OverviewKpis({
         </PanelToggleButton>
         <PanelToggleButton open={eraOpen} onToggle={() => setEraOpen((s) => !s)}>
           <CalendarClock className="h-4 w-4" aria-hidden />
-          Upcoming Payments
+          {futurePaymentsTitle(view)}
         </PanelToggleButton>
       </div>
 
@@ -517,18 +542,18 @@ function EraUpcomingPanel({
   return (
     <div className="ths-card ths-elev-sm">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <h3 className="ths-card-title">Upcoming Payments</h3>
+        <h3 className="ths-card-title">{futurePaymentsTitle(view)}</h3>
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close upcoming payments"
+          aria-label={`Close ${futurePaymentsTitle(view).toLowerCase()}`}
           className="ths-btn ths-btn-ghost ths-btn-icon ths-btn-sm"
         >
           <X className="h-4 w-4" aria-hidden />
         </button>
       </div>
       {status === 'error' ? (
-        <div className="ths-alert">Unable to load upcoming payments.</div>
+        <div className="ths-alert">Unable to load future payments.</div>
       ) : status === 'ready' && data ? (
         <EraUpcomingBody
           data={data}
