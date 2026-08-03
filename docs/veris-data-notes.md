@@ -3386,3 +3386,31 @@ Close it by creating the sheet tab, or by making the missing-config path a quiet
 
 Reasoned from the code, not observed: the Vercel MCP was disconnected during this session, so
 the actual runtime output was not read.
+
+### Correction to `fc2c8f6`'s commit message — and a concurrency hazard worth knowing
+
+`fc2c8f6` ends with "Root typecheck is RED on `src/intel/payer_policy/{client,types}.ts` … Not
+touched, not fixed, not committed here." **Both halves of that are wrong**, and the reason is
+worth recording because it will happen again.
+
+What actually happened: two agent sessions were working in the SAME working tree, which means
+they also share ONE git index. I staged four files and verified it with
+`git diff --cached --name-only` — accurate at that instant. Between that check and
+`git commit`, the other session ran its own `git add`, staging three of its files into the
+shared index. `git commit` commits **the index**, not the list you passed to your own `git add`,
+so those three came along: `src/intel/payer_policy/client.ts`, `types.ts`, and
+`test/payerPolicyIntel.test.ts`.
+
+Outcome was benign — they had finished the edit, so `fc2c8f6` typechecks clean (root tsc exit 0,
+root 1001/1001) and nothing is dangling. But their work is published under a commit message
+about migration 024, which misattributes it.
+
+**The fix, for any session sharing a tree:** `git commit -o <paths>` (or
+`git commit -- <paths>`) commits ONLY those paths and ignores whatever else is in the index.
+`git add <paths>` followed by a bare `git commit` is NOT equivalent and is unsafe here. Also
+treat `git add -A <dir>` as forbidden in a shared tree — it sweeps up another session's
+in-flight files by construction.
+
+Related: one `next build` in the same window failed with a bare "Build error occurred" and passed
+on an immediate re-run. That was webpack reading a file the other session saved mid-build, not a
+defect. In a shared tree, a single build failure is not evidence until it reproduces.
