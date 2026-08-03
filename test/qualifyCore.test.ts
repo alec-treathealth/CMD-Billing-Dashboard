@@ -62,7 +62,7 @@ const REVEAL_PHI = { patient_name: 'DOE, JANE', member_id_raw: 'AETMEMBER123', g
 interface Cap {
   audits: Array<{ action: string; detail: Record<string, unknown> }>;
   facilityEntityIds: string[][];
-  facilitiesArgs: Array<{ payer: string; token: string | null; kind: string | null; entityIds: string[] }>;
+  facilitiesArgs: Array<{ payer: string | null; token: string | null; kind: string | null; entityIds: string[] }>;
   landingArgs: Array<{ kind: string; payer: string; entityIds: string[] }>;
   revealActions: string[];
   facilityCasesArgs: Array<{
@@ -148,14 +148,25 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
 
 const IN = { query: 'AETMEMBER123', window: W30 }; // long → member_id kind
 
-// ── #1 RANK ORDER (silent-bug guard): value-first — higher allowed% ranks first, volume never demotes ─
-test('snapshot: a small high-% facility RANKS ABOVE a large mid-% one (value-first, ruling 2026-07-19b)', async () => {
+// ── #1 RANK ORDER (silent-bug guard): v2 CONFIDENCE-WEIGHTED — the factor rating is the sort key.
+// SUPERSESSION NOTE (qualify-v2-build-plan §5/§6, 2026-08-03): ruling 2026-07-19b ("volume never
+// bends the score") still governs the v1 `rating` FIELD (it remains exactly the allowed%), but the
+// SORT now follows ratingV2, where data confidence (sample × age × provenance) carries 20 points —
+// deliberately, so a 3-patient 60% cannot outrank a 40-patient 55% and "a rep can't manufacture a
+// flattering rating from two claims". Both orderings are pinned here so neither drifts silently.
+test('snapshot: rank is ratingV2 — a confident mid-% book outranks a thin high-% slice; v1 rating stays the raw pct', async () => {
   const snap = await getQualifySnapshotCore(makeDeps(SUPER, cap()), IN);
-  assert.equal(snap.facilities[0]!.name, 'CA MENTAL HEALTH'); // 60% (3 lines, ≥ floor) → rank 1 on merit
-  assert.equal(snap.facilities[1]!.name, '405 RECOVERY'); // 55% (400 lines) → rank 2
-  // The higher allowed% ranks FIRST despite far less volume — rating = allowed%, no volume drag.
-  assert.ok((snap.facilities[0]!.pctAllowedOfBilled ?? 0) > (snap.facilities[1]!.pctAllowedOfBilled ?? 0));
-  assert.equal(snap.facilities[0]!.rating, 60); // rating IS the allowed%
+  assert.equal(snap.facilities[0]!.name, '405 RECOVERY'); // 55% on 40 patients → conf 1.0 → v2 75
+  assert.equal(snap.facilities[1]!.name, 'CA MENTAL HEALTH'); // 60% on 3 patients → thin ×0.6 → v2 60
+  assert.equal(snap.facilities[0]!.ratingV2, 75); // (25·0.55 + 20·1.0) / 45
+  assert.equal(snap.facilities[1]!.ratingV2, 60); // (25·0.60 + 20·0.6) / 45
+  assert.equal(snap.facilities[0]!.iqBand, '65');
+  assert.equal(snap.facilities[1]!.iqBand, '50');
+  // The v1 field is untouched by v2: rating IS still the allowed% (ruling 2026-07-19b preserved).
+  assert.equal(snap.facilities[1]!.rating, 60);
+  assert.equal(snap.facilities[0]!.rating, 55);
+  // Registry unseeded + no TTP/census in these fixtures → renormalized over claims+confidence = 45.
+  assert.equal(snap.facilities[0]!.availableWeight, 45);
   assert.equal(snap.facilities[0]!.rank, 1);
   assert.equal(snap.facilities[1]!.rank, 2);
 });
@@ -542,8 +553,8 @@ test('by-payer: resolves facilities in rating order WITHOUT the PHI resolve (min
   assert.equal(snap.resolved?.payerName, 'AETNA');
   assert.equal(snap.resolved?.matchedOn, 'payer');
   assert.equal(snap.resolved?.matchedValue, ''); // no PHI prefix echo on this path
-  assert.equal(snap.facilities[0]!.name, 'CA MENTAL HEALTH'); // value-first order preserved (same as PHI path)
-  assert.equal(snap.facilities[1]!.name, '405 RECOVERY');
+  assert.equal(snap.facilities[0]!.name, '405 RECOVERY'); // v2 confidence-weighted order (same as PHI path)
+  assert.equal(snap.facilities[1]!.name, 'CA MENTAL HEALTH');
 });
 
 test('by-payer: writes the distinct search_qualify_payer audit (payer label) — never search_qualify_phi', async () => {

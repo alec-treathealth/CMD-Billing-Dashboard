@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { groupClaimsByPatient, filterFacilitiesByLoc } from '../app/lib/qualify/groupClaims.js';
 import type { QualifyClaim, QualifyFacility } from '../app/lib/qualify/contract.js';
+import { QUALIFY_FACILITY_V2_NULLS } from './helpers/qualifyV2Fixture.js';
 
 const claim = (over: Partial<QualifyClaim> & { id: number; patientKey: number }): QualifyClaim => ({
   memberIdMasked: '••••••',
@@ -67,6 +68,7 @@ test('groupClaimsByPatient: all-unknown → unknown; otherwise confirmed; empty 
 });
 
 const fac = (key: string, careSetting: QualifyFacility['careSetting']): QualifyFacility => ({
+  ...QUALIFY_FACILITY_V2_NULLS,
   rank: 1, name: key.toUpperCase(), facilityKey: key, city: null, state: null,
   pctAllowedOfBilled: 50, rating: 50, streakSignal: null, billedAmount: null, allowedAmount: null,
   lineCount: 10, distinctPatients: 10, confirmedClaims: 10, estimateClaims: 0, unknownClaims: 0, careSetting, entity: null,

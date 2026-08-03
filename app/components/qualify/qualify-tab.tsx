@@ -39,10 +39,11 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Briefcase, Building2, Eye, EyeOff, Landmark, Lock, ShieldCheck } from 'lucide-react';
+import { Briefcase, Building2, ChevronRight, Eye, EyeOff, Landmark, Lock, Search, ShieldCheck } from 'lucide-react';
 import {
   getQualifyMatchSummary,
   getQualifyComposedCases,
+  getQualifySnapshot,
   getQualifySnapshotByPayer,
   getQualifyPayerEverBilled,
   getQualifyResolvePayer,
@@ -56,6 +57,7 @@ import {
   revealQualifyRows,
 } from '@/lib/qualify/actions';
 import {
+  classifyQualifyIdentifier,
   QUALIFY_CLIENT_NAME_ENABLED,
   QUALIFY_REVEAL_BATCH_CAP,
   qualifyWindowLabel,
@@ -78,6 +80,9 @@ import type { RatingBucket } from '@/lib/qualify/rating';
 import { CasesTable } from '@/components/qualify/cases-table';
 import { CohortSheet } from '@/components/qualify/cohort-sheet';
 import { FacilityPanel } from '@/components/qualify/facility-panel';
+import { PolicyStrip } from '@/components/qualify/policy-strip';
+import { WindowLadder } from '@/components/qualify/window-ladder';
+import { QualifyAiPanel } from '@/components/qualify/qualify-ai-panel';
 import { BookKpiTiles, EvidenceGauge, HeatingUpCards, HeatingUpSkeleton } from '@/components/qualify/overview';
 import { WindowControl } from '@/components/qualify/window-control';
 import { VobModal } from '@/components/qualify/vob-modal';
@@ -151,6 +156,14 @@ export function QualifyTab({
   // resolve its dominant payer server-side and rank against THAT — so an identifier search doesn't force a
   // manual payer pick. `derivedPayer` null = not applicable OR the identifier was never seen.
   const [derivedPayer, setDerivedPayer] = useState<string | null>(null);
+  // ── v2 LEAD snapshot (Phases 0/B/D/E): the identifier-driven policy card + auto-window ladder +
+  //    comparable ranking, from the PHI snapshot core. Fetched alongside the derived-payer resolve;
+  //    gen-guarded like every other stream. `auto` fires once per NEW identifier (the ladder decides
+  //    the window); later manual window changes refetch with the user's explicit choice respected.
+  const [leadSnapshot, setLeadSnapshot] = useState<QualifySnapshot | null>(null);
+  const leadGenRef = useRef(0);
+  const lastAutoIdentifierRef = useRef<string | null>(null);
+  const [expandedFacilities, setExpandedFacilities] = useState<ReadonlySet<string>>(new Set());
   const [derivedLoading, setDerivedLoading] = useState(false);
   const resolveGenRef = useRef(0);
 
@@ -199,6 +212,24 @@ export function QualifyTab({
   //    payer/facility scope leaves the initial fetch to the dedicated (scoped) effects, exactly as before.
   const userDrivenRef = useRef(false);
   const combinedOwnedInitialRef = useRef(false);
+
+  // ── v2 IDENTIFIED-FIRST COMPOSE (the Qualify v2 prototype's hierarchy): one smart identifier
+  //    field + facility is the whole primary search; the aggregate pickers fold behind "Browse
+  //    filters". The single input CLASSIFIES instead of splitting into two boxes — ≤3 letters is the
+  //    alpha-prefix STARTS-WITH narrow (member_id_prefix_bidx), anything else the exact member-id
+  //    narrow (member_id_bidx). It writes the SAME two states the old separate inputs wrote, so every
+  //    downstream contract (compose filter, ladder, lead snapshot, audits) is unchanged — and the old
+  //    both-identifiers dead-end is unrepresentable from the UI.
+  const identifierValue = memberId || alphaPrefix;
+  const onIdentifierChange = useCallback((raw: string) => {
+    const c = classifyQualifyIdentifier(raw);
+    setMemberId(c.memberId);
+    setAlphaPrefix(c.alphaPrefix);
+  }, []);
+  const [browseOpen, setBrowseOpen] = useState(false);
+  const scrollToResults = useCallback(() => {
+    document.getElementById('qualify-results')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
 
   const resetReveal = useCallback(() => {
     setRevealed(new Map());
@@ -451,6 +482,52 @@ export function QualifyTab({
         setDerivedLoading(false);
       });
   }, [singleIdentifier]);
+
+  // ── v2 LEAD snapshot fetch: policy strip + ladder + (comparable) ranking for the searched
+  //    identifier. AUTO only when the identifier CHANGED — a manual window change after a search
+  //    refetches under the user's window (respect the override; the Range menu stays the biller path).
+  useEffect(() => {
+    if (!singleIdentifier) {
+      setLeadSnapshot(null);
+      lastAutoIdentifierRef.current = null;
+      return;
+    }
+    const lgen = ++leadGenRef.current;
+    const auto = lastAutoIdentifierRef.current !== singleIdentifier;
+    // Consume the auto flag SYNCHRONOUSLY: a window change mid-flight must re-enter as auto=false
+    // (never override the user's pick), and a rejected auto fetch must not re-auto on the next
+    // manual window change.
+    lastAutoIdentifierRef.current = singleIdentifier;
+    getQualifySnapshot({ query: singleIdentifier, window: windowSel, auto })
+      .then((snap) => {
+        if (leadGenRef.current !== lgen) return;
+        // The manual-window echo refetch (auto=false) carries ladder:null by design — PRESERVE the
+        // ladder from the auto fetch so the disclosure card doesn't flash and vanish exactly when
+        // it re-windowed (same identifier, so the rung counts still describe this search).
+        setLeadSnapshot((prev) => (!auto && snap.ladder === null && prev !== null ? { ...snap, ladder: prev.ladder } : snap));
+        // Follow the ladder's decision ONCE per search: the whole surface (panel, cases, KPIs)
+        // re-windows to the chosen span so every number on screen describes ONE window.
+        if (auto && snap.ladder && (windowSel.kind !== 'trailing' || windowSel.days !== snap.ladder.chosenDays)) {
+          setWindowSel({ kind: 'trailing', days: snap.ladder.chosenDays });
+        }
+      })
+      .catch(() => {
+        if (leadGenRef.current !== lgen) return;
+        setLeadSnapshot(null);
+      });
+    // windowSel is deliberately IN deps: a post-search window change refetches the lead under the
+    // manual window (auto=false), keeping the policy/estimate read on the same span as the panel.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [singleIdentifier, windowSel]);
+
+  const toggleFacilityExpansion = useCallback((key: string) => {
+    setExpandedFacilities((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   // ── FACILITY PANEL fetch: the payer-wide ranking for the panel's payer — either the ONE selected payer
   //    OR the payer derived from a single-identifier search. 0/2+ payers with no resolvable identifier ⇒
@@ -830,112 +907,29 @@ export function QualifyTab({
         <HeatingUpSkeleton />
       ) : null}
 
-      {/* ── COMPOSE CONSOLE (Design B, made VISIBLE): a two-zone split — Payer + Facility SCORE the book
-          (tinted zone, teal controls); Employer + Funding narrow the LIST only (plain zone) — over the
-          hatched PHI row and the dark readout bar. The seam states the rule, so the layout itself now
-          says what the old "employer/funding don't move the tiles" hint line used to spell out (removed).
-          Interaction model unchanged: AND-composed filter, drill-not-filter, tickerPinned distinct from
-          selection, canRevealPhi gating, amounts choke-point — visual only. ── */}
+      {/* ── COMPOSE CONSOLE (v2 prototype hierarchy): the IDENTIFIED search leads — one smart
+          identifier field + facility + Search over the hatched PHI treatment — with the aggregate
+          pickers folded behind "Browse filters" and the dark readout bar anchoring the card. Design
+          B's rule survives as the hint line (payer/facility score; employer/funding/group # narrow).
+          Interaction model unchanged: AND-composed filter, drill-not-filter, tickerPinned distinct
+          from selection, canRevealPhi gating, amounts choke-point — visual only. ── */}
       <div className="overflow-hidden rounded-2xl border border-line bg-surface shadow-ths-sm">
         {/* teal cap — the finder-card chrome, kept */}
         <div aria-hidden className="h-[3px] bg-gradient-to-r from-teal700 via-teal500 to-teal200" />
 
-        <div className="grid grid-cols-1 min-[900px]:grid-cols-[1fr_auto_1fr]">
-          {/* ZONE 1 — SCORES READ THIS: payer + facility (they move ratings / tiles / ticker). */}
-          <div className="bg-gradient-to-b from-teal50/60 to-teal50/20 px-4 py-4 sm:px-5">
-            <div className="mb-3 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-              <span className="font-head text-[10.5px] font-bold uppercase tracking-[0.1em] text-teal700">
-                Scores read this
-              </span>
-              <span className="text-[11.5px] text-ink600">Ratings, tiles and the ticker follow these two.</span>
-            </div>
-            <div className="grid grid-cols-1 gap-3 min-[560px]:grid-cols-2">
-              <MultiSelectTagPicker
-                label="Payer"
-                placeholder="Filter by payer…"
-                icon={<ShieldCheck className="h-3.5 w-3.5" aria-hidden />}
-                options={payerOptions}
-                selected={payerSelection}
-                onToggle={togglePayer}
-                onClear={clearPayers}
-                tone="score"
-                derivedValues={derivedValues}
-              />
-              <MultiSelectTagPicker
-                label="Facility"
-                placeholder="Filter by facility…"
-                icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
-                options={facilityOptions}
-                selected={facilitySelection}
-                onToggle={toggleFacility}
-                onClear={clearFacilities}
-                tone="score"
-                derivedValues={derivedValues}
-              />
-            </div>
-          </div>
-
-          {/* SEAM — carries the rule. Vertical divider on desktop; a horizontal one when the zones stack
-              (<900px). The label background masks the line behind it. */}
-          <div className="relative flex items-center justify-center min-[900px]:items-stretch">
-            <div className="h-px w-full bg-line min-[900px]:my-3.5 min-[900px]:h-auto min-[900px]:w-px" />
-            <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap bg-surface px-2.5 py-[3px] font-mono text-[9.5px] uppercase tracking-[0.14em] text-ink400 min-[900px]:rotate-180 min-[900px]:px-[3px] min-[900px]:py-2.5 min-[900px]:[writing-mode:vertical-rl]">
-              narrows the list only →
-            </span>
-          </div>
-
-          {/* ZONE 2 — LIST ONLY: employer + funding (they filter the matching claims, never the ratings). */}
-          <div className="px-4 py-4 sm:px-5">
-            <div className="mb-3 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-              <span className="font-head text-[10.5px] font-bold uppercase tracking-[0.1em] text-ink400">List only</span>
-              <span className="text-[11.5px] text-ink400">Too thin to score — these filter claims, not ratings.</span>
-            </div>
-            <div className="grid grid-cols-1 gap-3 min-[560px]:grid-cols-2">
-              <MultiSelectTagPicker
-                label="Employer"
-                placeholder="Type to find employers…"
-                icon={<Briefcase className="h-3.5 w-3.5" aria-hidden />}
-                options={employerPickerOptions}
-                selected={employerSelection}
-                onToggle={toggleEmployer}
-                onClear={clearEmployers}
-                onQueryChange={setEmployerQuery}
-                loading={employerLoading}
-                minChars={EMPLOYER_MIN_CHARS}
-                displayOverride={employerDisplay}
-                tone="list"
-              />
-              {/* Funding stays a PICKER (Collections parity) — the earlier two-toggle-pill plan is dropped. */}
-              <MultiSelectTagPicker
-                label="Funding"
-                placeholder="Self-funded / Fully insured…"
-                icon={<Landmark className="h-3.5 w-3.5" aria-hidden />}
-                options={fundingPickerOptions}
-                selected={fundingSelection}
-                onToggle={toggleFunding}
-                onClear={clearFunding}
-                tone="list"
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* PHI ROW — hatched + dashed-teal top border + "Identified" lock badge so an IDENTIFIED (person-
-            level) search always looks materially different from the aggregate zones. canRevealPhi-gated.
-            Qualify carries a FOURTH input (Client Name) Collections deliberately does NOT — the
-            admissions-first person lookup (Change C); do NOT "fix" to Collections parity. Client Name is
-            additionally behind QUALIFY_CLIENT_NAME_ENABLED (dormant until migration 0067 + the owner-run
-            name backfill — Part 2, deferred), so it and its divergence note render only when the flag is
-            on. Raw terms are state-only (never URL/log). */}
+        {/* ── IDENTIFIED SEARCH (v2 primary — the prototype's hierarchy: the prefix IS the policy, so
+            the person-level search leads the card). Two fields is the whole search: the single smart
+            identifier input (auto-classifies prefix vs member ID) + the facility picker. canRevealPhi-
+            gated exactly like the old PHI row; raw terms remain state-only (never URL/log). ── */}
         {canRevealPhi ? (
-          <div className="q-phi-hatch border-t border-dashed border-teal200 px-4 py-4 sm:px-5">
+          <div className="q-phi-hatch px-4 py-4 sm:px-5">
             <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1.5">
               <span className="inline-flex items-center gap-1.5 rounded-full bg-teal900 px-2.5 py-1 text-[10.5px] font-semibold tracking-wide text-white">
                 <Lock className="h-2.5 w-2.5" aria-hidden />
                 Identified
               </span>
               <span className="font-head text-[10.5px] font-bold uppercase tracking-[0.1em] text-teal900">
-                Find one client
+                Two fields is the whole search
               </span>
               <span className="text-[11.5px] text-ink600 min-[560px]:ml-auto">Audited on use. Never written to the URL.</span>
               {canGlobalReveal ? (
@@ -958,26 +952,140 @@ export function QualifyTab({
                 </button>
               ) : null}
             </div>
-            <div className="grid grid-cols-2 gap-3 min-[720px]:grid-cols-4">
-              <PhiInput label="Member ID" value={memberId} onChange={setMemberId} placeholder="e.g. W2740…" />
-              <PhiInput label="Alpha prefix" value={alphaPrefix} onChange={setAlphaPrefix} placeholder="3 letters" />
-              <PhiInput label="Group #" value={groupNumber} onChange={setGroupNumber} placeholder="Group" />
-              {/* FOURTH field (Client name) is INTENTIONALLY ABSENT here — this three-field state is not
-                  an oversight. It is DATA-GATED behind QUALIFY_CLIENT_NAME_ENABLED (Part 2, deferred):
-                  as of 2026-07-27 the cmd_explorer_charge_rollup matview has NO patient_name_bidx column
-                  and coverage is ~0.07%, so wiring name search today would 500 / silently miss ~99.9% of
-                  patients. Do NOT "complete" this by enabling the flag against the current matview — that
-                  needs the (recommended build-alongside-and-swap) rebuild + the owner-run backfill FIRST.
-                  See docs/veris-data-notes.md → "0067 ops analysis" and contract.ts QUALIFY_CLIENT_NAME_ENABLED. */}
-              {QUALIFY_CLIENT_NAME_ENABLED ? (
-                <PhiInput label="Client name" value={clientName} onChange={setClientName} placeholder="Last, First" />
-              ) : null}
+            <div className="grid grid-cols-1 items-end gap-3 min-[720px]:grid-cols-[minmax(200px,250px)_minmax(220px,1fr)_auto]">
+              <label className="flex flex-col gap-1">
+                <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-teal900">
+                  <ShieldCheck className="h-3.5 w-3.5 text-teal700" aria-hidden />
+                  Member ID or prefix
+                </span>
+                <input
+                  value={identifierValue}
+                  onChange={(e) => onIdentifierChange(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') scrollToResults();
+                  }}
+                  spellCheck={false}
+                  autoComplete="off"
+                  placeholder="XQH · or a full member ID"
+                  aria-label="Member ID or alpha prefix"
+                  className="h-10 rounded-lg border border-teal200 bg-surface px-3 font-mono text-[15px] font-medium uppercase tracking-[0.08em] text-ink900 outline-none transition-colors placeholder:normal-case placeholder:tracking-normal placeholder:text-ink400 focus:border-teal500 focus:ring-2 focus:ring-teal500/25"
+                />
+              </label>
+              <MultiSelectTagPicker
+                label="Facility"
+                placeholder="Search and select a facility…"
+                icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
+                options={facilityOptions}
+                selected={facilitySelection}
+                onToggle={toggleFacility}
+                onClear={clearFacilities}
+                tone="score"
+                derivedValues={derivedValues}
+              />
+              <button
+                type="button"
+                onClick={scrollToResults}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-teal700 px-5 text-sm font-semibold text-white transition-colors hover:bg-teal900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40"
+              >
+                <Search className="h-4 w-4" aria-hidden />
+                Search
+              </button>
             </div>
-            {QUALIFY_CLIENT_NAME_ENABLED ? (
-              <p className="mt-2 text-[10.5px] text-ink400">Qualify only — Collections has no name lookup.</p>
-            ) : null}
           </div>
         ) : null}
+
+        {/* ── BROWSE FILTERS (Design B, folded behind the identified search): payer still SCORES the
+            book; employer/funding/group # narrow the LIST only — the seam rule survives as the hint
+            line. Collapsed by default; FORCED open while any browse filter is active (active filters
+            are never hidden) and always open for viewers without the identified search. Interaction
+            model unchanged: AND-composed, drill-not-filter, tickerPinned distinct from selection. ── */}
+        {(() => {
+          const browseActive =
+            payerSelection.length > 0 ||
+            employerSelection.length > 0 ||
+            fundingSelection.length > 0 ||
+            groupNumber.trim() !== '' ||
+            (QUALIFY_CLIENT_NAME_ENABLED && clientName.trim() !== '');
+          const browseExpanded = browseOpen || browseActive || !canRevealPhi;
+          return (
+            <div className={canRevealPhi ? 'border-t border-dashed border-teal200' : ''}>
+              {canRevealPhi ? (
+                <button
+                  type="button"
+                  aria-expanded={browseExpanded}
+                  onClick={() => setBrowseOpen((o) => !o)}
+                  disabled={browseActive}
+                  className="flex w-full items-center gap-2 px-4 py-2.5 text-left transition-colors enabled:hover:bg-teal50/40 sm:px-5"
+                >
+                  <ChevronRight
+                    aria-hidden
+                    className={['h-3.5 w-3.5 text-ink400 transition-transform', browseExpanded ? 'rotate-90' : ''].join(' ')}
+                  />
+                  <span className="font-head text-[10.5px] font-bold uppercase tracking-[0.1em] text-ink600">Browse filters</span>
+                  <span className="text-[11px] text-ink400">payer · employer · funding · group #</span>
+                  {browseActive ? (
+                    <span className="ml-auto rounded-full bg-teal50 px-2 py-0.5 text-[10px] font-bold text-teal700">active</span>
+                  ) : null}
+                </button>
+              ) : null}
+              {browseExpanded ? (
+                <div className={['px-4 pb-4 sm:px-5', canRevealPhi ? '' : 'pt-4'].join(' ')}>
+                  <p className="mb-3 text-[11.5px] text-ink600">
+                    <b className="font-semibold text-teal700">Payer and facility move the scores.</b> Employer, funding and
+                    group # only narrow the matching claims.
+                  </p>
+                  <div className="grid grid-cols-1 gap-3 min-[560px]:grid-cols-2 min-[1100px]:grid-cols-4">
+                    <MultiSelectTagPicker
+                      label="Payer"
+                      placeholder="Filter by payer…"
+                      icon={<ShieldCheck className="h-3.5 w-3.5" aria-hidden />}
+                      options={payerOptions}
+                      selected={payerSelection}
+                      onToggle={togglePayer}
+                      onClear={clearPayers}
+                      tone="score"
+                      derivedValues={derivedValues}
+                    />
+                    <MultiSelectTagPicker
+                      label="Employer"
+                      placeholder="Type to find employers…"
+                      icon={<Briefcase className="h-3.5 w-3.5" aria-hidden />}
+                      options={employerPickerOptions}
+                      selected={employerSelection}
+                      onToggle={toggleEmployer}
+                      onClear={clearEmployers}
+                      onQueryChange={setEmployerQuery}
+                      loading={employerLoading}
+                      minChars={EMPLOYER_MIN_CHARS}
+                      displayOverride={employerDisplay}
+                      tone="list"
+                    />
+                    {/* Funding stays a PICKER (Collections parity) — the earlier two-toggle-pill plan is dropped. */}
+                    <MultiSelectTagPicker
+                      label="Funding"
+                      placeholder="Self-funded / Fully insured…"
+                      icon={<Landmark className="h-3.5 w-3.5" aria-hidden />}
+                      options={fundingPickerOptions}
+                      selected={fundingSelection}
+                      onToggle={toggleFunding}
+                      onClear={clearFunding}
+                      tone="list"
+                    />
+                    {canRevealPhi ? <PhiInput label="Group #" value={groupNumber} onChange={setGroupNumber} placeholder="Group" /> : null}
+                    {/* Client name stays DATA-GATED behind QUALIFY_CLIENT_NAME_ENABLED (needs the 0067
+                        matview rebuild + owner-run backfill first — see contract.ts). Not an oversight. */}
+                    {canRevealPhi && QUALIFY_CLIENT_NAME_ENABLED ? (
+                      <PhiInput label="Client name" value={clientName} onChange={setClientName} placeholder="Last, First" />
+                    ) : null}
+                  </div>
+                  {canRevealPhi && QUALIFY_CLIENT_NAME_ENABLED ? (
+                    <p className="mt-2 text-[10.5px] text-ink400">Qualify only — Collections has no name lookup.</p>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          );
+        })()}
 
         {/* READOUT BAR — anchors the console on the dark teal bar: the live match count, then [evidence
             gauge — wired in Part 1b], then the window + LOC segmented controls + Clear all. */}
@@ -1034,8 +1142,22 @@ export function QualifyTab({
       {/* ── CONTEXT LINE + LIVE MATCH COUNT + FACILITY RANKING + COMPOSED CASES ── */}
       {hasAnyFilter ? (
         <>
+          {/* ── v2 POLICY STRIP + AUTO-WINDOW LADDER (Phases 0/B/D/E): identifier searches only —
+              the prefix IS the policy; the ladder shows the window decision instead of hiding it. */}
+          {singleIdentifier && leadSnapshot?.policy ? (
+            <PolicyStrip
+              policy={leadSnapshot.policy}
+              provenance={leadSnapshot.provenance}
+              hasAmounts={hasAmounts}
+              prefixEcho={leadSnapshot.resolved?.matchedValue ?? ''}
+            />
+          ) : null}
+          {singleIdentifier && leadSnapshot?.ladder ? <WindowLadder ladder={leadSnapshot.ladder} /> : null}
           {/* Lighter context line (the old resolved-payer hero band is gone). Non-dollar for admissions_seat. */}
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-2xl border border-line bg-surface px-4 py-2.5 text-[12px] text-ink600">
+          <div
+            id="qualify-results"
+            className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-2xl border border-line bg-surface px-4 py-2.5 text-[12px] text-ink600"
+          >
             <span className="font-semibold text-ink900">{qualifyWindowLabel(windowSel)}</span>
             <span aria-hidden className="text-ink300">·</span>
             <span>{payerSummary}</span>
@@ -1093,15 +1215,33 @@ export function QualifyTab({
                     selectedKeys={activeFacilityKeys}
                     onToggle={toggleFacility}
                     payerLabel={panelPayer}
+                    expandedKeys={expandedFacilities}
+                    onExpandToggle={toggleFacilityExpansion}
                   />
                 ) : derivedLoading || (panelPayer && !panelSnapshot) ? (
                   <div className="rounded-2xl border bg-card p-6 text-center text-sm text-muted-foreground shadow-ths-sm">
                     {derivedLoading ? 'Resolving payer…' : 'Loading facility ranking…'}
                   </div>
+                ) : leadSnapshot && !leadSnapshot.resolved && leadSnapshot.facilities.length > 0 ? (
+                  // ESTIMATED (Phase B): no claims of its own, but the VOB names its cohort — rank the
+                  // policy's behavioral peer group, clearly labeled, never dressed as direct evidence.
+                  <FacilityPanel
+                    facilities={leadSnapshot.facilities}
+                    hasAmounts={hasAmounts}
+                    heatOn
+                    selectedKeys={activeFacilityKeys}
+                    onToggle={toggleFacility}
+                    payerLabel={leadSnapshot.policy?.employerName ?? leadSnapshot.policy?.carrier ?? null}
+                    expandedKeys={expandedFacilities}
+                    onExpandToggle={toggleFacilityExpansion}
+                    provenance={leadSnapshot.provenance}
+                  />
                 ) : (
                   // An identifier was searched but resolved to no payer (never seen / misspelled).
                   <div className="rounded-2xl border border-dashed bg-card p-6 text-center text-[13px] text-muted-foreground">
-                    No payer on file for that identifier — it may be new or misspelled.
+                    {leadSnapshot?.policy?.found
+                      ? 'This plan has no claims history anywhere yet — the policy card above is everything on file. Ask a biller before quoting.'
+                      : 'No payer on file for that identifier — it may be new or misspelled.'}
                   </div>
                 )
               ) : (
@@ -1146,6 +1286,15 @@ export function QualifyTab({
               )}
             </div>
           </div>
+
+          {/* ── Phase H: the AI explainer — chips + streamed TL;DR/Signals/Risks, grounded in the
+              snapshot on screen. Lead (identifier) snapshot preferred; by-payer panel otherwise. */}
+          {(() => {
+            const aiSnap = leadSnapshot && (leadSnapshot.resolved || leadSnapshot.facilities.length > 0 || leadSnapshot.policy?.found)
+              ? leadSnapshot
+              : panelSnapshot;
+            return aiSnap ? <QualifyAiPanel snapshot={aiSnap} blind={!hasAmounts} /> : null;
+          })()}
 
           <CohortSheet
             data={cohortSheet?.data ?? null}

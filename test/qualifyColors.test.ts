@@ -3,10 +3,12 @@ import { test } from 'node:test';
 import { buildFacilityBucketMap, caseBucket, bucketClass } from '../app/components/qualify/colors.js';
 import { qualifyRating, ratingBucket } from '../app/lib/qualify/rating.js';
 import type { QualifyFacility } from '../app/lib/qualify/contract.js';
+import { QUALIFY_FACILITY_V2_NULLS } from './helpers/qualifyV2Fixture.js';
 
 /** Minimal QualifyFacility with rating computed from (pct, lineCount) exactly as the action does. */
 function fac(name: string, pct: number | null, lineCount: number, rank = 1): QualifyFacility {
   return {
+    ...QUALIFY_FACILITY_V2_NULLS,
     rank,
     name,
     facilityKey: name.toLowerCase(),

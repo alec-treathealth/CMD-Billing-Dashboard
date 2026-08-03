@@ -46,6 +46,25 @@ export const RATING_WASH: Record<RatingBucket, string> = {
   neutral: 'transparent',
 };
 
+/** IQ verdict band (rating v2 — the billing team's own 65/50/30/15/0 census scale) → solid hex +
+ *  wash. Five bands, five visual tiers: the top two are both green-family (deep green vs brand
+ *  teal) so an 82 never reads identical to a 52; 15 wears the coral warm accent; 0 is the true
+ *  danger red. Mirrors `.q-band*` in globals.css — mobile styles inline from these. */
+export const IQ_BAND_HEX: Record<'65' | '50' | '30' | '15' | '0', string> = {
+  '65': '#2E8B6F',
+  '50': '#1C8B82',
+  '30': '#C9881E',
+  '15': '#E2674F',
+  '0': '#C0453B',
+};
+export const IQ_BAND_WASH: Record<'65' | '50' | '30' | '15' | '0', string> = {
+  '65': '#E6F2EC',
+  '50': '#EAF4F2',
+  '30': '#FBF1DE',
+  '15': '#FCEDE8',
+  '0': '#FBE7E4',
+};
+
 /**
  * Staged-reveal per-item animation delay (ms), CAPPED so the total stagger stays bounded no matter how
  * many siblings render — the design-system's `min(i, 3) * 60ms` rule in one place. Pair with the

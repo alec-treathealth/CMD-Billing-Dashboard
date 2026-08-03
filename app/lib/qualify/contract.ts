@@ -6,6 +6,11 @@
  * window math. Semantics are frozen (Prompt 2); adjust field names only with sign-off.
  */
 import type { QualifyConfidence } from './confidence';
+import type { QualifyProvenance, QualifyIqBand, QualifyFactorReading } from './ratingV2';
+
+// Rating-v2 vocabulary re-exported so client surfaces keep ONE import seam (contract.ts) — the
+// engine itself (ratingV2.ts) is a pure leaf both may import directly for helpers.
+export type { QualifyProvenance, QualifyIqBand, QualifyFactorReading } from './ratingV2';
 
 /** Trailing-window day counts. 30/60/90 are the quick PILLS; 180/270/365 (6/9/12 months) are the
  *  longer ROLLING spans in the Range ▾ menu — capped at 12 months so the widest scan stays ~1 year.
@@ -118,6 +123,11 @@ export interface QualifyInput {
   window: QualifyWindow;
   /** Optional VOB employer/funding narrow applied to the facility ranking (see QualifyMarket). */
   market?: QualifyMarket;
+  /** v2 AUTO-WINDOW: when true the server runs the sufficiency ladder (one bucketed query — 30→365,
+   *  stop at the first rung with QUALIFY_RATING_CONFIDENT_PATIENTS distinct patients) and `window` is
+   *  treated as a fallback only. The resolved ladder rides back on the snapshot so the UI can show the
+   *  decision instead of hiding it. Omitted/false = the manual window (the Range menu, biller path). */
+  auto?: boolean;
 }
 
 /**
@@ -369,6 +379,29 @@ export interface QualifyFacility {
    *  facility text carries rows from both tenants (cross-tenant interleave is intended; this is a
    *  label only, never a grouping/split). null when the rows carried no resolvable entity. */
   entity: 'BXR' | 'Indigo' | 'Mixed' | null;
+  // ── Rating v2 (five-factor model; §5). All NON-DOLLAR — survive the amounts strip unchanged. ──
+  /** Median days from service (charge_date) to payment (payment_received) over the in-window PAID
+   *  lines — the TTP factor's input. Paid-lines-only by construction (the window is payment-dated);
+   *  the factor detail discloses that rather than pretending unpaid claims are visible. */
+  medianDaysToPayment: number | null;
+  /** monday census aggregates (Phase G; fail-soft null until the census snapshot table is live). */
+  avgAuthDays: number | null;
+  avgLosDays: number | null;
+  /** Next UR (utilization review) date on this facility's census, ISO — the §5 UR banner ("auth may
+   *  change soon"), a banner not a factor. Null when no census data / nothing scheduled. */
+  nextUrDate: string | null;
+  /** Open-bed count from the census (items named "Open Bed…"). Display context only. */
+  openBeds: number | null;
+  /** The five-factor rating (0-100 over available weights) — the v2 SORT KEY and numeral. Null =
+   *  suppressed (sample floor / no money evidence) → the honest-restraint card. */
+  ratingV2: number | null;
+  /** IQ verdict band ('65'|'50'|'30'|'15'|'0') — the billing team's own scale. Null when unrated. */
+  iqBand: QualifyIqBand | null;
+  /** The factor readings behind ratingV2 (weights, scores, directions, plain-language details) — the
+   *  card's "Why this score" expansion ships its work, it never re-derives it client-side. */
+  factors: QualifyFactorReading[];
+  /** Sum of available factor weights (renormalization denominator) — "scored on N of 100 weighting". */
+  availableWeight: number;
 }
 
 /** ONE claim (charge) line — claim grain (Direction B, ruling 1): one row per charge from the 0050 rollup,
@@ -408,6 +441,64 @@ export interface QualifyClaim {
 export const QUALIFY_TENANT_SCOPE = 'cross-tenant-bxr-indigo' as const;
 export const QUALIFY_MEMBER_ID_MASK = '••••••';
 
+// ── Rating v2 additions (qualify-v2-build-plan §§2,5,6,7 — policy card, ladder, freshness) ────────
+
+/** VOB data older than this (vs the max vob_created_at behind the searched prefix) renders a staleness
+ *  disclosure on the policy card — the Phase 0 defence against the confidently-wrong failure mode
+ *  (a silent VOB stall must be visible where the decision is made, not only in ops). In hours. */
+export const QUALIFY_VOB_STALE_HOURS = 48;
+
+/**
+ * The RESOLVED POLICY strip (Phase B): what is already on file behind the searched alpha prefix, from
+ * vob.member_benefits_latest — matched on the prefix BLIND INDEX (member_id_prefix_bidx; there is no
+ * readable prefix column, verified 2026-08-03). Modal values across the prefix's members; the rep
+ * types five characters and the plan identifies itself.
+ *
+ * PHI shape: carrier/employer/funding/plan levels are plan-level facts (the registry-adjacent, non-PHI
+ * tier); `groupOnFile` is a PRESENCE flag only — the group number exists solely as a blind index and
+ * can never be displayed. The four benefit strings are raw VOB text and dollar-bearing → nulled for
+ * admissions_seat at the core's strip choke point (display-only, NEVER scored — ruled in §5).
+ */
+export interface QualifyPolicyCard {
+  found: boolean; // any VOB rows behind this prefix
+  memberCount: number; // distinct members under the prefix in the VOB set
+  carrier: string | null; // modal insurance_co
+  employerName: string | null; // modal employer_name (display; matching uses employer_norm server-side)
+  funding: string | null; // 'Self-Funded' | 'Fully Insured' (raw VOB value)
+  policyType: string | null; // modal policy_type (PPO/EPO/…)
+  planType: string | null; // modal plan_type
+  groupOnFile: boolean; // group_number_bidx present — presence only, the raw group is unrecoverable
+  /** Phase D INN/OON gate. ALWAYS null today: network is not extracted from the VOB (three live parser
+   *  generations, none carries it — the extractor change is cross-repo work in etl/vob). The three-way
+   *  flow ships now so the moment the field lands the gate lights up: INN → contracted-expectation
+   *  short-circuit; OON → full model; null → full model + "network not captured on this VOB" banner. */
+  network: 'INN' | 'OON' | null;
+  vobFreshAsOf: string | null; // max vob_created_at (ISO date) behind this prefix
+  vobStale: boolean; // vobFreshAsOf older than QUALIFY_VOB_STALE_HOURS vs "now" (Phase 0 disclosure)
+  // Display-only benefit strings (raw VOB text; unparsed). Dollar-bearing → stripped (null) for
+  // admissions_seat; never an input to any rating factor.
+  deductible: string | null;
+  deductibleMet: string | null;
+  oopMax: string | null;
+  oopMet: string | null;
+}
+
+/** One rung of the auto-window sufficiency ladder (Phase E). */
+export interface QualifyWindowRung {
+  days: QualifyTrailingDays;
+  distinctPatients: number;
+  sufficient: boolean; // distinctPatients >= the confident floor (sampleGate)
+}
+
+/** The resolved ladder: every rung's count (ONE bucketed query — never five round-trips) plus the
+ *  window the server chose. `sufficient:false` means even 365d never reached the confident floor —
+ *  the UI says so instead of silently showing a thin number. */
+export interface QualifyWindowLadder {
+  rungs: QualifyWindowRung[];
+  chosenDays: QualifyTrailingDays;
+  sufficient: boolean;
+}
+
 /** Hard PHI-audit cap for ONE audited reveal batch (revealQualifyRows). The per-patient reveal slices a
  *  patient's claim ids to this before the call, so a rare high-frequency patient (>50 in-window claims)
  *  reveals its most-recent 50 with an honest note rather than failing the batch. The SERVER enforces the
@@ -415,8 +506,12 @@ export const QUALIFY_MEMBER_ID_MASK = '••••••';
 export const QUALIFY_REVEAL_BATCH_CAP = 50;
 
 export interface QualifySnapshot {
-  /** null ⇒ never-seen-this-identifier (VOB path). A non-null resolved with facilities:[] is the
-   *  distinct "payer has no facilities in this window" state — frontends key VOB off resolved===null. */
+  /** null ⇒ this identifier resolved to NO claims history. Pre-v2 that always meant "VOB path"; with
+   *  the policy card a null resolved now splits three ways the frontends must distinguish:
+   *    resolved=null + policy?.found + facilities.length>0 → the ESTIMATED (comparable-provenance) read
+   *    resolved=null + policy?.found + facilities:[]       → policy known, no evidence anywhere → VOB/biller
+   *    resolved=null + (!policy || !policy.found)           → never seen at all → VOB path
+   *  A non-null resolved with facilities:[] stays the distinct "payer has no facilities in this window". */
   resolved: QualifyResolved | null;
   facilities: QualifyFacility[];
   /** Fix A: raw facility text (== QualifyFacility.facilityKey) of the searched identifier's MOST-RECENT
@@ -427,6 +522,17 @@ export interface QualifySnapshot {
   identifierLandingFacility: string | null;
   viewerHasAmountsCapability: boolean; // === (role !== 'admissions_seat')
   tenantScope: typeof QUALIFY_TENANT_SCOPE; // always the literal — impossible to forget
+  // ── v2 additions (all optional-shaped via null so pre-v2 fixtures/paths stay valid) ──
+  /** The resolved policy strip (Phase B). Null on non-identifier paths (resolve-by-payer/name) and
+   *  when the VOB lookup is unavailable. */
+  policy: QualifyPolicyCard | null;
+  /** The auto-window ladder actually run for THIS snapshot (Phase E). Null when the caller passed an
+   *  explicit window (manual Range) or the path carries no identifier. */
+  ladder: QualifyWindowLadder | null;
+  /** What the ranking's evidence is built ON (§6). 'direct' on the identifier/payer paths with own
+   *  claims; 'comparable_*' when the ranking fell back to an employer/funding cohort; 'none' when
+   *  there is nothing to rank on. Factor math consumes the same value — one source of truth. */
+  provenance: QualifyProvenance;
 }
 
 export interface QualifyMover {
@@ -591,4 +697,17 @@ export function qualifyWindowBounds(
   const priorTo = from; // adjacent, non-overlapping
   const priorFrom = shift(from, -windowDays);
   return { from: iso(from), to: iso(to), priorFrom: iso(priorFrom), priorTo: iso(priorTo) };
+}
+
+/**
+ * v2 single-identifier field: classify one typed term into the two blind-index narrows.
+ * ≤3 letters ⇒ alpha prefix (member_id_prefix_bidx STARTS-WITH); anything else ⇒ exact member id
+ * (member_id_bidx). Exactly one of the two is ever non-empty — the old both-identifiers dead-end
+ * is unrepresentable through this function.
+ */
+export function classifyQualifyIdentifier(raw: string): { memberId: string; alphaPrefix: string } {
+  const v = raw.trim();
+  if (v === '') return { memberId: '', alphaPrefix: '' };
+  if (/^[A-Za-z]{1,3}$/.test(v)) return { memberId: '', alphaPrefix: v };
+  return { memberId: v, alphaPrefix: '' };
 }

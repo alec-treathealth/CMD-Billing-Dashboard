@@ -180,6 +180,30 @@
   --q-wash: transparent;
 }
 
+/* Rating v2 IQ verdict bands (the billing team's own 65/50/30/15/0 census scale — ratingV2.ts).
+   Five visual tiers: deep green / brand teal / amber / coral / red. Hexes mirror tokens.ts
+   IQ_BAND_HEX / IQ_BAND_WASH (mobile styles inline from those). */
+.q-band65 {
+  --q-c: #2e8b6f;
+  --q-wash: #e6f2ec;
+}
+.q-band50 {
+  --q-c: #1c8b82;
+  --q-wash: #eaf4f2;
+}
+.q-band30 {
+  --q-c: #c9881e;
+  --q-wash: #fbf1de;
+}
+.q-band15 {
+  --q-c: #e2674f;
+  --q-wash: #fcede8;
+}
+.q-band0 {
+  --q-c: #c0453b;
+  --q-wash: #fbe7e4;
+}
+
 .q-fac {
   border-left: 4px solid var(--q-c, transparent);
 }
@@ -448,4 +472,19 @@
   .q-marquee [data-dup='true'] {
     display: none;
   }
+}
+
+/* Qualify AI explainer caret (Phase H) — blinks while the answer streams. */
+@keyframes q-ai-caret {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+.q-ai-caret {
+  animation: q-ai-caret 1s step-end infinite;
 }

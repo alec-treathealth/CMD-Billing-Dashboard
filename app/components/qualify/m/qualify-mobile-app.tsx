@@ -38,6 +38,7 @@ import { resolveLandingWins, drillLandingWins, isPayerChange, scopeFacilitiesFor
 import { filterFacilitiesByLoc, filterClaimsByLoc, type QualifyLocFilter } from '@/lib/qualify/groupClaims';
 import { nextPage, prevPage } from '@/lib/qualify/pagination';
 import { MobileFacilityList } from '@/components/qualify/m/facility-list';
+import { MobilePolicyLine } from '@/components/qualify/m/policy-line';
 import { TrendSheet } from '@/components/qualify/m/trend-sheet';
 import { DetailSheet } from '@/components/qualify/m/detail-sheet';
 import { ClaimDetailSheet } from '@/components/qualify/m/claim-detail-sheet';
@@ -240,7 +241,9 @@ export function QualifyMobileApp({
         setAreaFilter(AREA_ALL);
         if (snap.resolved === null) {
           setEcho(t);
-          setList([]);
+          // v2: the COMPARABLE path rides resolved:null with a ranked peer cohort — keep it.
+          // A true no-match ships facilities: [] anyway, so this stays the empty state there.
+          setList(snap.facilities);
           setPage(0);
           setLocFilter(null);
         } else {
@@ -509,11 +512,23 @@ export function QualifyMobileApp({
       return <EmptyState>Search a member ID or 3-letter prefix — or tap a heating-up facility.</EmptyState>;
     }
     if (snapshot && snapshot.resolved === null) {
-      return (
-        <EmptyState>
-          No match for <span className="ths-num" style={{ color: INK900, fontWeight: 600 }}>{echo}</span>
-        </EmptyState>
-      );
+      const estimated = snapshot.provenance === 'comparable_employer' || snapshot.provenance === 'comparable_funding';
+      if (!estimated || snapshot.facilities.length === 0) {
+        if (snapshot.policy?.found) {
+          return (
+            <EmptyState>
+              VOB on file{snapshot.policy.carrier ? ` (${snapshot.policy.carrier})` : ''} — no paid history yet for this
+              plan or its peer group.
+            </EmptyState>
+          );
+        }
+        return (
+          <EmptyState>
+            No match for <span className="ths-num" style={{ color: INK900, fontWeight: 600 }}>{echo}</span>
+          </EmptyState>
+        );
+      }
+      // estimated cohort → fall through to the ranked list; MobilePolicyLine above carries the banner
     }
     if (snapshot && snapshot.facilities.length === 0) {
       return <EmptyState>No facilities for this payer in this window.</EmptyState>;
@@ -843,6 +858,8 @@ export function QualifyMobileApp({
           })}
         </div>
       ) : null}
+
+      {searched && snapshot ? <MobilePolicyLine policy={snapshot.policy} provenance={snapshot.provenance} /> : null}
 
       {renderBody()}
 

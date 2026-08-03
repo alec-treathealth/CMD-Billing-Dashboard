@@ -28,12 +28,17 @@ import type {
   QualifyFacilityTrend,
   QualifyPhi,
 } from '../lib/qualify/contract';
+import { QUALIFY_FACILITY_V2_NULLS } from './helpers/qualifyV2Fixture';
+import { PolicyStrip } from '../components/qualify/policy-strip';
+import { WindowLadder } from '../components/qualify/window-ladder';
+import type { QualifyPolicyCard, QualifyWindowLadder, QualifyFactorReading } from '../lib/qualify/contract';
 
 const solidRating = qualifyRating(55)!; // 55 → ok
 const thinHighRating = qualifyRating(90)!; // 90 → ok (value-first: a small high-% facility reads GREEN)
 const lowRating = qualifyRating(24)!; // 24 → danger (a genuinely weak reimbursement)
 
 const SOLID: QualifyFacility = {
+  ...QUALIFY_FACILITY_V2_NULLS,
   rank: 1, name: 'SOLID', facilityKey: 'solid', city: 'Boulder', state: 'CO',
   pctAllowedOfBilled: 55, rating: solidRating, streakSignal: null,
   billedAmount: 308900, allowedAmount: 166800, lineCount: 400, distinctPatients: 40,
@@ -42,6 +47,7 @@ const SOLID: QualifyFacility = {
 // THIN_HIGH: 90% on ONE patient — the sample gate (hotfix 2026-07-27) suppresses its color to
 // neutral ("insufficient data"), even though the value-first rating itself is 90 (→ ratingBucket ok).
 const THIN_HIGH: QualifyFacility = {
+  ...QUALIFY_FACILITY_V2_NULLS,
   rank: 2, name: 'THIN HIGH', facilityKey: 'thin high', city: 'Reno', state: 'NV',
   pctAllowedOfBilled: 90, rating: thinHighRating, streakSignal: null,
   billedAmount: 412300, allowedAmount: 251500, lineCount: 1, distinctPatients: 1,
@@ -58,6 +64,7 @@ const CASE_AT_THIN: QualifyClaim = {
 // A weak-reimbursement facility (24% → danger) with a HIGH-pct case, to prove the % ALLOWED cell
 // follows the case's OWN pct (95% → green), NOT the parent facility's danger bucket.
 const LOW: QualifyFacility = {
+  ...QUALIFY_FACILITY_V2_NULLS,
   rank: 3, name: 'LOW YIELD', facilityKey: 'low yield', city: 'Fresno', state: 'CA',
   pctAllowedOfBilled: 24, rating: lowRating, streakSignal: null,
   billedAmount: 500000, allowedAmount: 120000, lineCount: 300, distinctPatients: 30,
@@ -131,19 +138,22 @@ test('SAMPLE GATE — a 90% facility on ONE patient is SUPPRESSED (neutral + "in
   assert.ok(/1 patient\b/.test(html), 'the patient count the judgment rests on is visible');
 });
 
-test('SAMPLE GATE — value-first color is INTACT once the sample is adequate (90% on ≥10 patients reads GREEN)', () => {
-  const ample = { ...THIN_HIGH, distinctPatients: 12 };
+test('SAMPLE GATE — color is INTACT once the sample is adequate (v2: a well-sampled 90% wears its IQ band)', () => {
+  // v2 paint: the row's color comes from the IQ band (ratingV2), not the legacy bucket. A 90%
+  // ample-sample row computes to the 65%+ band server-side; the fixture carries those values.
+  const ample = { ...THIN_HIGH, distinctPatients: 12, ratingV2: 94, iqBand: '65' as const };
   const html = renderToStaticMarkup(<FacilityPanel facilities={[ample]} hasAmounts heatOn />);
-  assert.ok(html.includes('q-fac q-ok'), 'a well-sampled 90% row is green — the gate suppresses only thin slices, not the rating');
+  assert.ok(html.includes('q-fac q-band65'), 'a well-sampled 90% row wears the 65%+ band — the gate suppresses only thin slices');
   assert.ok(html.includes('90%'), 'the confident % renders');
   // NB: RATING_LEGEND.description mentions "thin sample" prose — assert on the PILL element, not the substring.
   assert.ok(!html.includes('>thin sample<') && !html.includes('>insufficient data<'), 'no thin/insufficient PILL at ≥10 patients');
 });
 
 test('SAMPLE GATE — a 3-9 patient facility shows the rating but is flagged a THIN SAMPLE', () => {
-  const thin = { ...THIN_HIGH, distinctPatients: 5 };
+  // v2: the thin multiplier lowers the score but the band still colors (suppression is <3 only).
+  const thin = { ...THIN_HIGH, distinctPatients: 5, ratingV2: 77, iqBand: '65' as const };
   const html = renderToStaticMarkup(<FacilityPanel facilities={[thin]} hasAmounts heatOn />);
-  assert.ok(html.includes('q-fac q-ok'), 'the rating still colors at 3-9 patients (not suppressed)');
+  assert.ok(html.includes('q-fac q-band65'), 'the band still colors at 3-9 patients (not suppressed)');
   assert.ok(html.includes('90%'), 'the % renders');
   assert.ok(html.includes('>thin sample<'), 'but the thin-sample PILL is present');
   assert.ok(/5 patients/.test(html), 'patient count visible');
@@ -663,4 +673,131 @@ test('heating-up cards — a null-dominant-payer card is DISABLED (inert), not a
   const orphanHtml = renderToStaticMarkup(<HeatingUpCards trends={noPayer} window={W30} onOpen={() => {}} />);
   assert.ok(orphanHtml.includes('disabled'), 'a card with no dominant payer is disabled (never a dead click)');
   assert.ok(!html.includes('role="listitem"'), 'cards are native buttons (no role=listitem clobbering aria-pressed)');
+});
+
+
+// ── Rating v2 surfaces (Phases 0/B/D/E): policy strip, window ladder, scorecard factors ─────────
+
+const POLICY: QualifyPolicyCard = {
+  found: true,
+  memberCount: 14,
+  carrier: 'AETNA',
+  employerName: 'Vanderbilt Univ. Medical Center',
+  funding: 'Self-Funded',
+  policyType: 'PPO',
+  planType: 'OPEN ACCESS',
+  groupOnFile: true,
+  network: null,
+  vobFreshAsOf: '2026-08-02',
+  vobStale: false,
+  deductible: '$1,500',
+  deductibleMet: null,
+  oopMax: '$6,000',
+  oopMet: null,
+};
+
+test('PolicyStrip — the plan identifies itself: chips, self-funded banner, null-network line (Phase D today)', () => {
+  const html = renderToStaticMarkup(<PolicyStrip policy={POLICY} provenance="direct" hasAmounts prefixEcho="W29" />);
+  assert.ok(html.includes('AETNA'), 'carrier chip');
+  assert.ok(html.includes('Vanderbilt'), 'employer chip');
+  assert.ok(html.includes('Self-Funded'), 'funding chip');
+  assert.ok(html.includes('network not captured on this VOB'), 'the Phase D null path is explicit, never blank');
+  assert.ok(html.includes('Self-funded plan'), 'the §5 modifier banner (who decides the claim)');
+  assert.ok(html.includes('$1,500'), 'benefit strings render for an amounts-capable viewer');
+  assert.ok(html.includes('display only'), 'and are labeled display-only — never scored');
+  assert.ok(!html.includes('Estimated read'), 'no estimate banner on direct provenance');
+});
+
+test('PolicyStrip — admissions_seat sees NO dollar strings; stale feed banner fires on vobStale', () => {
+  const stripped = { ...POLICY, deductible: null, deductibleMet: null, oopMax: null, oopMet: null, vobStale: true };
+  const html = renderToStaticMarkup(<PolicyStrip policy={stripped} provenance="comparable_employer" hasAmounts={false} prefixEcho="W29" />);
+  assert.ok(!html.includes('$'), 'zero dollar signs for the blind view');
+  assert.ok(html.includes('VOB feed is stale'), 'Phase 0: the confidently-wrong defence is loud');
+  assert.ok(html.includes('Estimated read'), 'comparable provenance is labeled');
+  assert.ok(html.includes('same employer plan'), 'and says what the estimate rests on');
+});
+
+test('PolicyStrip — not-found renders the honest VOB prompt, never an empty card', () => {
+  const html = renderToStaticMarkup(
+    <PolicyStrip policy={{ ...POLICY, found: false, memberCount: 0 }} provenance="none" hasAmounts prefixEcho="ZZZ" />,
+  );
+  assert.ok(html.includes('No VOB on file'));
+  assert.ok(html.includes('ZZZ'));
+});
+
+const LADDER: QualifyWindowLadder = {
+  rungs: [
+    { days: 30, distinctPatients: 2, sufficient: false },
+    { days: 60, distinctPatients: 4, sufficient: false },
+    { days: 90, distinctPatients: 11, sufficient: true },
+    { days: 180, distinctPatients: 15, sufficient: true },
+    { days: 365, distinctPatients: 22, sufficient: true },
+  ],
+  chosenDays: 90,
+  sufficient: true,
+};
+
+test('WindowLadder — shows every rung it weighed and states the outcome in plain language', () => {
+  const html = renderToStaticMarkup(<WindowLadder ladder={LADDER} />);
+  assert.ok(html.includes('Finding a window with enough patients to trust'));
+  assert.ok(html.includes('2 patients — too few'), 'the 30d rung shows why it was ruled out');
+  assert.ok(html.includes('11 patients — enough'), 'the chosen rung shows why it cleared');
+  assert.ok(/Showing trailing[^]*?90[^]*?days/.test(html), 'the disclosure names the chosen window');
+});
+
+test('WindowLadder — the insufficient outcome is disclosed, never silent', () => {
+  const insufficient: QualifyWindowLadder = {
+    rungs: LADDER.rungs.map((r) => ({ ...r, distinctPatients: 2, sufficient: false })),
+    chosenDays: 365,
+    sufficient: false,
+  };
+  const html = renderToStaticMarkup(<WindowLadder ladder={insufficient} />);
+  assert.ok(html.includes('directional, not confirmed'), 'the honest-restraint copy');
+});
+
+const FACTORS: QualifyFactorReading[] = [
+  { key: 'coding', label: 'Coding decision confidence', weight: 30, score: 1, available: true, direction: 'pos', detail: 'CONFIRMED CODES (H0017 / 0158) — decided 30d ago.' },
+  { key: 'claims', label: 'Claims reliability', weight: 25, score: 0.62, available: true, direction: 'neu', detail: '62% of billed allowed across 120 lines (110 confirmed-tier).' },
+  { key: 'dataConfidence', label: 'Data confidence', weight: 20, score: 1, available: true, direction: 'pos', detail: '22 distinct patients · window reached 90d · this policy’s own claims.' },
+  { key: 'ttp', label: 'Time to payment', weight: 15, score: 0.83, available: true, direction: 'pos', detail: 'Median 38 days from service to payment — paid lines only; claims still unresolved are not visible on this axis.' },
+  { key: 'authFit', label: 'Auth / LOS fit', weight: 10, score: null, available: false, direction: 'neu', detail: 'No authorization / length-of-stay data for this facility.' },
+];
+
+test('scorecard v2 — IQ numeral + band pill + weight bar + expandable factor list with renormalization note', () => {
+  const scored = {
+    ...QUALIFY_FACILITY_V2_NULLS,
+    ...SOLID,
+    ratingV2: 84,
+    iqBand: '65' as const,
+    factors: FACTORS,
+    availableWeight: 90,
+    medianDaysToPayment: 38,
+  };
+  const expanded = new Set([scored.facilityKey]);
+  const html = renderToStaticMarkup(
+    <FacilityPanel facilities={[scored]} hasAmounts heatOn expandedKeys={expanded} />,
+  );
+  assert.ok(html.includes('q-fac q-band65'), 'the card paints from the IQ band');
+  assert.ok(html.includes('>84<'), 'the big v2 numeral');
+  assert.ok(html.includes('Strong · 65%+'), 'the team’s own band vocabulary on the pill');
+  assert.ok(html.includes('Why this score') || html.includes('Hide the reasoning'), 'the expansion affordance');
+  assert.ok(html.includes('CONFIRMED CODES (H0017 / 0158)'), 'factor detail ships the registry decision');
+  assert.ok(html.includes('Scored on 90 of 100 weighting'), 'renormalization disclosed, never hidden');
+  assert.ok(html.includes('no data yet'), 'an unavailable factor says so instead of pretending');
+});
+
+// ── v2 compose: the single-identifier classifier (the "two fields" contract) ───────────────────────
+test('classifyQualifyIdentifier: ≤3 letters is the prefix narrow, anything else the member-id narrow', async () => {
+  const { classifyQualifyIdentifier } = await import('../lib/qualify/contract');
+  assert.deepEqual(classifyQualifyIdentifier('XQH'), { memberId: '', alphaPrefix: 'XQH' });
+  assert.deepEqual(classifyQualifyIdentifier(' ab '), { memberId: '', alphaPrefix: 'ab' });
+  assert.deepEqual(classifyQualifyIdentifier('W2740123'), { memberId: 'W2740123', alphaPrefix: '' });
+  assert.deepEqual(classifyQualifyIdentifier('AB1'), { memberId: 'AB1', alphaPrefix: '' }); // digit ⇒ not a prefix
+  assert.deepEqual(classifyQualifyIdentifier('ABCD'), { memberId: 'ABCD', alphaPrefix: '' }); // 4 letters ⇒ member id
+  assert.deepEqual(classifyQualifyIdentifier('   '), { memberId: '', alphaPrefix: '' });
+  // exactly one narrow is ever active — the both-identifiers dead-end is unrepresentable
+  for (const raw of ['XQH', 'W2740123', 'AB1', '']) {
+    const c = classifyQualifyIdentifier(raw);
+    assert.ok(!(c.memberId !== '' && c.alphaPrefix !== ''));
+  }
 });

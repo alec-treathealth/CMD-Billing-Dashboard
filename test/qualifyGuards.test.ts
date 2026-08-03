@@ -21,6 +21,7 @@ import {
 } from '../app/lib/qualify/qualifyGuards.js';
 import { cohortKey, cohortReducer, INITIAL_COHORT } from '../app/lib/qualify/qualifyCohort.js';
 import type { QualifyFacility, QualifyResolved } from '../app/lib/qualify/contract.js';
+import { QUALIFY_FACILITY_V2_NULLS } from './helpers/qualifyV2Fixture.js';
 
 // ── Resolution stream (resolveSeq recency) ──────────────────────────────────────────────────────────
 
@@ -112,6 +113,7 @@ test('identifierEmptyTerm: the ≤3 echo for a prefix search; generic "this memb
 });
 
 const fac = (key: string, rank: number): QualifyFacility => ({
+  ...QUALIFY_FACILITY_V2_NULLS,
   rank, name: key.toUpperCase(), facilityKey: key, city: null, state: null,
   pctAllowedOfBilled: 50, rating: 50, streakSignal: null, billedAmount: null, allowedAmount: null, lineCount: 10, distinctPatients: 10,
   confirmedClaims: 10, estimateClaims: 0, unknownClaims: 0, careSetting: null, entity: null,

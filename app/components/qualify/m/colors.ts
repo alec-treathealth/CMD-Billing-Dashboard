@@ -33,3 +33,22 @@ const STYLES: Record<RatingBucket, MobileBucketStyle> = {
 export function mobileBucketStyle(rating: number | null): MobileBucketStyle {
   return STYLES[ratingBucket(rating)];
 }
+
+// ── Rating v2 (IQ bands) ─────────────────────────────────────────────────────────────────────────
+// The billing team's own 65/50/30/15/0 census scale (ratingV2.ts). Hexes mirror tokens.ts
+// IQ_BAND_HEX/WASH; the label is the verdict + the band the team already speaks.
+import { IQ_BAND_LABELS, IQ_BAND_VERDICTS, type QualifyIqBand } from '../../../lib/qualify/ratingV2';
+
+const IQ_STYLES: Record<QualifyIqBand, MobileBucketStyle> = {
+  '65': { color: '#2E8B6F', tint: '#EAF3EE', label: `${IQ_BAND_VERDICTS['65']} ${IQ_BAND_LABELS['65']}` },
+  '50': { color: '#1C8B82', tint: '#EAF4F2', label: `${IQ_BAND_VERDICTS['50']} ${IQ_BAND_LABELS['50']}` },
+  '30': { color: '#C9881E', tint: '#FBF1E0', label: `${IQ_BAND_VERDICTS['30']} ${IQ_BAND_LABELS['30']}` },
+  '15': { color: '#E2674F', tint: '#FCEDE8', label: `${IQ_BAND_VERDICTS['15']} ${IQ_BAND_LABELS['15']}` },
+  '0': { color: '#C0453B', tint: '#FBEAEA', label: `${IQ_BAND_VERDICTS['0']} ${IQ_BAND_LABELS['0']}` },
+};
+
+/** v2 style: IQ band when rated; the neutral v1 style when not. Mobile renders ONE scale — the
+ *  band — with the v1 bucket style kept only as the unrated fallback. */
+export function mobileIqStyle(band: QualifyIqBand | null): MobileBucketStyle {
+  return band === null ? STYLES.neutral : IQ_STYLES[band];
+}

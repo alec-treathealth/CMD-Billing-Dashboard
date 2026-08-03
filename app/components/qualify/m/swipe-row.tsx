@@ -13,7 +13,7 @@
  * fields by construction (amounts gate satisfied structurally).
  */
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { mobileBucketStyle } from './colors';
+import { mobileBucketStyle, mobileIqStyle } from './colors';
 import { ratingSampleTier } from '../../../lib/qualify/sampleGate';
 import { BuildingIcon, TrendIcon } from './icons';
 import type { QualifyFacility } from '../../../lib/qualify/contract';
@@ -48,8 +48,20 @@ export function SwipeRow({
   // SAMPLE GATE: < 3 distinct patients → neutral (no confident color / number); 3-9 → thin flag.
   const tier = sampleGated ? ratingSampleTier(facility.distinctPatients) : 'full';
   const insufficient = tier === 'insufficient';
-  const b = insufficient ? mobileBucketStyle(null) : mobileBucketStyle(facility.rating);
-  const ratingText = insufficient || facility.rating === null ? '—' : String(Math.round(facility.rating));
+  // v2: the IQ band is the ONE scale (parity with desktop); v1 bucket style is the unrated fallback.
+  const v2 = facility.ratingV2 !== null && facility.iqBand !== null;
+  const b = insufficient
+    ? mobileBucketStyle(null)
+    : v2
+      ? mobileIqStyle(facility.iqBand)
+      : mobileBucketStyle(facility.rating);
+  const ratingText = insufficient
+    ? '—'
+    : v2
+      ? String(facility.ratingV2)
+      : facility.rating === null
+        ? '—'
+        : String(Math.round(facility.rating));
   const label = insufficient ? 'Insufficient' : b.label;
   const patients = `${facility.distinctPatients} patient${facility.distinctPatients === 1 ? '' : 's'}`;
   // "City, ST" only when BOTH are present — partial (city-only / state-only) omits cleanly, never "City, " or ", ST".
