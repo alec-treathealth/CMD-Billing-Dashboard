@@ -7,6 +7,7 @@
     { "path": "/api/cron/cmd-census", "schedule": "15 * * * *" },
     { "path": "/api/cron/indigo-census", "schedule": "35 * * * *" },
     { "path": "/api/cron/refresh-charge-rollup", "schedule": "45 * * * *" },
+    { "path": "/api/cron/upcoming-overrides", "schedule": "55 * * * *" },
     { "path": "/api/cron/cmd-explorer-catchup", "schedule": "52 7 * * *" },
     { "path": "/api/cron/era-835", "schedule": "50 8 * * *" },
     { "path": "/api/cron/vob-sync", "schedule": "17 9 * * *" },

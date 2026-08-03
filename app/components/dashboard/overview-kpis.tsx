@@ -6,8 +6,9 @@
  *   • YTD Gross   — year-to-date gross split IP / OP / IP+OP, with a YoY trend.
  *   • Year Forecast — a live linear-YTD run-rate projection, with a YoY-vs-prior-year trend.
  * Plus a toggle-button row: "All Facilities Table" (per-facility table for a selected
- * month) and "ERA-Confirmed Upcoming Payments" (the 835 upcoming-remit table, fetched
- * only when opened). Each button reveals its panel below the row, All-Facilities-style.
+ * month) and "Future <tenant> Payments" (835-confirmed remits plus the operator-keyed
+ * forecast, fetched only when opened). Each button reveals its panel below the row,
+ * All-Facilities-style.
  *
  * Data sources (all NON-PHI, reader-only; no row fetch, no LLM):
  *   • MTD/YTD gross, per-facility rows, the anchor date  → loadCollectionsKpis (live
@@ -39,20 +40,51 @@ import {
   loadCollectionsYoy,
   loadEraUpcoming,
   loadFacilityDimension,
+  loadUpcomingManual,
+  loadUpcomingOverrides,
+  saveUpcomingManual,
+  deleteUpcomingManual,
   type CollectionsDailyResult,
   type CollectionsKpis,
   type CollectionsYoy,
   type FacilityDimensionRow,
 } from '@/lib/actions';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID, type DashboardView } from '@/lib/views';
-import { EraUpcomingBody } from './era-upcoming';
+import { EraUpcomingBody, type ForecastEditIntent } from './era-upcoming';
 import type { EraUpcomingSummary } from '../../../src/veris/era835Upcoming.js';
+import type { UpcomingOverrideSummary } from '../../../src/veris/upcomingOverride.js';
+import type { ManualForecastRow } from '../../../src/veris/upcomingForecast';
 import { useWidget } from './widgets';
 
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December',
 ];
+
+/**
+ * The Future-Payments panel title, per view.
+ *
+ * NAMES THE TENANT rather than hardcoding "BXR", for the same reason chartTitleFor does in
+ * overview-bar-chart.tsx: the 835-confirmed half of this panel is view-scoped, so on the
+ * Indigo view a "Future BXR Payments" heading would sit directly above Indigo's remits, and on
+ * Consolidated it would name one of the two books on screen. Consolidated stays unqualified
+ * because it is both books and is not a tenant.
+ *
+ * NOTE the FORECAST half is BXR-only today regardless of this label — the sheet cron passes
+ * BXR_TENANT_ID literally and the parser's alias table holds only BXR codes (023). So an Indigo
+ * view shows Indigo's confirmed remits and no forecast rows. When an Indigo override tab exists
+ * this label needs no change; the feed does.
+ */
+function futurePaymentsTitle(view: DashboardView): string {
+  switch (view) {
+    case 'bxr':
+      return 'Future BXR Payments';
+    case 'indigo':
+      return 'Future Indigo Payments';
+    case 'consolidated':
+      return 'Future Payments';
+  }
+}
 
 /** All Facilities care-setting filter. */
 type FacilitySetting = 'ALL' | 'IP' | 'OP';
@@ -230,7 +262,14 @@ function PanelToggleButton({
   );
 }
 
-export function OverviewKpis({ view }: { view: DashboardView }) {
+export function OverviewKpis({
+  view,
+  canEditForecast = false,
+}: {
+  view: DashboardView;
+  /** super_admin only — surfaces the Future Payments edit controls. */
+  canEditForecast?: boolean;
+}) {
   const [facilitiesOpen, setFacilitiesOpen] = useState(false);
   const [eraOpen, setEraOpen] = useState(false);
   // `view` is the active tenant scope. It is passed to every collections load* action (which
@@ -370,7 +409,7 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
         </PanelToggleButton>
         <PanelToggleButton open={eraOpen} onToggle={() => setEraOpen((s) => !s)}>
           <CalendarClock className="h-4 w-4" aria-hidden />
-          ERA-Confirmed Upcoming Payments
+          {futurePaymentsTitle(view)}
         </PanelToggleButton>
       </div>
 
@@ -382,40 +421,68 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
         asOf={asOf}
         view={view}
       />
-      <EraUpcomingPanel open={eraOpen} onClose={() => setEraOpen(false)} view={view} />
+      <EraUpcomingPanel
+        open={eraOpen}
+        onClose={() => setEraOpen(false)}
+        view={view}
+        canEdit={canEditForecast}
+      />
     </div>
   );
 }
 
 /**
- * "ERA-Confirmed Upcoming Payments" as a reveal panel — same interaction as the All
- * Facilities table. Fetches only while open (nothing is loaded for users who never
- * click), re-fetching on each open / view change so the figures are never stale-on-
- * reveal. The body is the unchanged EraUpcomingBody leaf, so the 013 read-path
- * contract (floor banner, no fabricated zeros) renders identically here.
+ * "Upcoming Payments" as a reveal panel — same interaction as the All Facilities table.
+ * Fetches only while open (nothing is loaded for users who never click), re-fetching on each
+ * open / view change so the figures are never stale-on-reveal.
+ *
+ * TWO READS, ONE PANEL, INDEPENDENTLY FAIL-SOFT. loadEraUpcoming is the 835-CONFIRMED half
+ * and gates the panel: if it fails, the panel shows an error. loadUpcomingOverrides is the
+ * operator-keyed FORECAST half (migration 023) and is strictly additive — an ok:false there
+ * degrades to `overrides = null` and the confirmed half renders alone, with no error shown.
+ * That is deliberate and load-bearing: 023 is not applied in every environment, and until it
+ * is, that read fails on EVERY call. Coupling the panel's health to it would take a working
+ * ERA tile down over a feed that is behaving exactly as designed.
+ *
+ * The two are requested concurrently, so the forecast never adds latency to the tile.
  */
 function EraUpcomingPanel({
   open,
   onClose,
   view,
+  canEdit,
 }: {
   open: boolean;
   /** See AllFacilitiesTable.onClose — the toggle button owns this state. */
   onClose: () => void;
   view: DashboardView;
+  /** super_admin only. Convenience for hiding controls; the Server Actions are the real gate. */
+  canEdit: boolean;
 }) {
   const [status, setStatus] = useState<'idle' | 'loading' | 'error' | 'ready'>('idle');
   const [data, setData] = useState<EraUpcomingSummary | null>(null);
+  const [overrides, setOverrides] = useState<UpcomingOverrideSummary | null>(null);
+  const [manual, setManual] = useState<ManualForecastRow[]>([]);
+  const [busy, setBusy] = useState(false);
+  // Bumped after a successful write to re-run the loader — the tile must show the resolved
+  // truth (correction applied, landed row gone) rather than optimistically patched state,
+  // because the resolver's output depends on rows this component does not own.
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     if (!open) return;
     let live = true;
     setStatus('loading');
     setData(null);
-    loadEraUpcoming(view)
-      .then((r) => {
+    setOverrides(null);
+    setManual([]);
+    Promise.all([loadEraUpcoming(view), loadUpcomingOverrides(view), loadUpcomingManual(view)])
+      .then(([era, ovr, man]) => {
         if (!live) return;
-        if (r.ok) {
-          setData(r.data);
+        // Neither the forecast feed nor the edit table gates the panel — see the note above.
+        setOverrides(ovr.ok ? ovr.data : null);
+        setManual(man.ok ? man.data.rows : []);
+        if (era.ok) {
+          setData(era.data);
           setStatus('ready');
         } else {
           setStatus('error');
@@ -427,26 +494,75 @@ function EraUpcomingPanel({
     return () => {
       live = false;
     };
-  }, [open, view]);
+  }, [open, view, reloadKey]);
+
+  /**
+   * Apply one edit intent from the tile. The Server Action re-checks super_admin and writes the
+   * audit row — this handler only marshals and refetches, so nothing here is a security
+   * boundary. Failures are left to the reload: the tile re-renders whatever the server actually
+   * holds, which is the honest outcome whether the write landed or not.
+   */
+  async function applyEdit(intent: ForecastEditIntent) {
+    setBusy(true);
+    try {
+      if (intent.op === 'delete-edit') {
+        await deleteUpcomingManual(intent.id, view);
+      } else if (intent.op === 'suppress') {
+        await saveUpcomingManual(
+          {
+            kind: 'suppress',
+            facilityCode: intent.facilityCode,
+            payerLabel: intent.payerLabel,
+            expectedDate: intent.expectedDate,
+            amount: null,
+            suppressReason: intent.reason,
+            matchedEraKey: intent.matchedEraKey ?? null,
+          },
+          view,
+        );
+      } else {
+        await saveUpcomingManual(
+          {
+            kind: 'correct',
+            facilityCode: intent.facilityCode,
+            payerLabel: intent.payerLabel,
+            expectedDate: intent.expectedDate,
+            amount: intent.amount,
+          },
+          view,
+        );
+      }
+    } finally {
+      setBusy(false);
+      setReloadKey((k) => k + 1);
+    }
+  }
 
   if (!open) return null;
   return (
     <div className="ths-card ths-elev-sm">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <h3 className="ths-card-title">ERA-Confirmed Upcoming Payments</h3>
+        <h3 className="ths-card-title">{futurePaymentsTitle(view)}</h3>
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close ERA-confirmed upcoming payments"
+          aria-label={`Close ${futurePaymentsTitle(view).toLowerCase()}`}
           className="ths-btn ths-btn-ghost ths-btn-icon ths-btn-sm"
         >
           <X className="h-4 w-4" aria-hidden />
         </button>
       </div>
       {status === 'error' ? (
-        <div className="ths-alert">Unable to load ERA-confirmed payments.</div>
+        <div className="ths-alert">Unable to load future payments.</div>
       ) : status === 'ready' && data ? (
-        <EraUpcomingBody data={data} />
+        <EraUpcomingBody
+          data={data}
+          overrides={overrides}
+          manual={manual}
+          canEdit={canEdit}
+          busy={busy}
+          onEdit={(intent) => void applyEdit(intent)}
+        />
       ) : (
         <div className="ths-card-meta py-6 text-center">Loading…</div>
       )}

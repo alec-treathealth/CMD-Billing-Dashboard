@@ -703,6 +703,94 @@
   background: color-mix(in srgb, var(--color-accent) 10%, transparent);
 }
 
+/* ---- Item hierarchy (parent → subitems) ------------------------------------
+   A Monday/Asana-style disclosure list built on native <details>/<summary>, so
+   keyboard operation and the announced expanded state come from the platform
+   rather than from a hand-rolled widget. One shared grid template on both the
+   heading strip and every summary keeps the columns aligned down the list.
+--------------------------------------------------------------------------- */
+[data-ths='v2'] .ths-item-head,
+[data-ths='v2'] .ths-item-summary {
+  display: grid;
+  grid-template-columns: 14px 96px minmax(88px, 1fr) minmax(140px, 1.6fr) minmax(96px, auto);
+  align-items: center;
+  gap: var(--space-3);
+}
+[data-ths='v2'] .ths-item-head {
+  padding: 0 10px var(--space-2);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-neutral-500);
+  border-bottom: 1px solid var(--color-divider);
+}
+[data-ths='v2'] .ths-item-list {
+  display: flex;
+  flex-direction: column;
+}
+[data-ths='v2'] .ths-item {
+  border-bottom: 1px solid var(--color-neutral-200);
+}
+[data-ths='v2'] .ths-item:last-child {
+  border-bottom: 0;
+}
+[data-ths='v2'] .ths-item-summary {
+  padding: var(--space-3) 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  color: var(--color-neutral-300);
+  cursor: pointer;
+  list-style: none; /* Firefox */
+}
+/* The platform triangle is replaced by our own rotating chevron. */
+[data-ths='v2'] .ths-item-summary::-webkit-details-marker {
+  display: none;
+}
+[data-ths='v2'] .ths-item-summary::marker {
+  content: '';
+}
+[data-ths='v2'] .ths-item-summary:hover {
+  background: color-mix(in srgb, var(--color-text) 4%, transparent);
+}
+[data-ths='v2'] .ths-item-chevron {
+  color: var(--color-neutral-500);
+  transition: transform var(--dur-1) var(--ease);
+  transform-origin: 50% 50%;
+  display: inline-block;
+}
+[data-ths='v2'] .ths-item[open] > .ths-item-summary {
+  background: color-mix(in srgb, var(--color-accent) 6%, transparent);
+}
+[data-ths='v2'] .ths-item[open] > .ths-item-summary .ths-item-chevron {
+  transform: rotate(90deg);
+}
+/* The subitem table is indented under its parent and loses the outer hairlines —
+   it reads as contained by the parent row, not as a sibling table. */
+[data-ths='v2'] .ths-item-table {
+  margin: 0 0 var(--space-3) 26px;
+  width: calc(100% - 26px);
+}
+[data-ths='v2'] .ths-item-table thead th {
+  border-bottom-color: var(--color-neutral-200);
+}
+[data-ths='v2'] .ths-item-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+@media (max-width: 640px) {
+  /* Narrow screens drop the payer-count column's fixed share and let the grid
+     reflow rather than forcing the page to scroll sideways. */
+  [data-ths='v2'] .ths-item-head,
+  [data-ths='v2'] .ths-item-summary {
+    grid-template-columns: 14px 88px 1fr auto;
+  }
+  [data-ths='v2'] .ths-item-head span:nth-child(4),
+  [data-ths='v2'] .ths-item-summary > span:nth-child(4) {
+    display: none;
+  }
+}
+
 /* ---- Rules, dots, misc --------------------------------------------------- */
 [data-ths='v2'] .ths-hr {
   height: 1px;

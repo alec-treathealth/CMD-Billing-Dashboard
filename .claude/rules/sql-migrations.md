@@ -10,8 +10,8 @@ Two separate planes. Never put a file in the wrong directory.
 
 | Plane | Directory | Next number |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0075** |
-| Veris ML (`staging`, `ref`, `core`) | `SQL Schemas/0NN_*.sql` | **023** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0077** |
+| Veris ML (`staging`, `ref`, `core`) | `SQL Schemas/0NN_*.sql` | **025** |
 
 **Merging a migration in a PR does not apply it to prod.** Same-PR code 500s
 until `apply_migration` runs. This has already caused one incident (0056 broke
