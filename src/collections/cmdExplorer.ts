@@ -353,10 +353,45 @@ export function aggregateDailyDeposits(rows: CmdReportRow[], facilityCode: strin
 }
 
 /**
- * Drop charge-line rows whose Payment Received date is in the FUTURE relative to `todayIso`
- * (both ISO 'YYYY-MM-DD'; ISO dates compare lexically == chronologically). A payment cannot be
- * received on a future date — such rows are upstream data-entry errors (e.g. a 12/30/2026 typo)
- * that shove max(payment_date) months ahead and break every date-window/chart in the app.
+ * The number of days past `todayIso` a Payment Received date may sit and still be ingested.
+ *
+ * WHY A HORIZON AND NOT ZERO (changed 2026-08-02). The original guard dropped EVERY future-dated
+ * row. That was written for the 12/30/2026 typo class, but it also silently discarded real money:
+ * CMD carries forward-dated deposit/check dates a few business days out, and on 2026-08-02 the
+ * live Indigo report held 08/03, 08/04 and 08/05 rows worth $105,171 / $23,058 / $30,598 across
+ * just 3 sampled accounts. Those are genuine and the Overview page is meant to show them.
+ *
+ * 14 days separates the two populations cleanly: a forward-dated deposit lands within a business
+ * week or two, while the typo class (a mis-keyed year or month) overshoots by months. Anything
+ * past the horizon is still dropped, so max(payment_date) can move at most two weeks ahead
+ * instead of into next year.
+ *
+ * SHIPPED AT 0 ON PURPOSE — 0 reproduces the original strict "nothing after today" behaviour
+ * exactly, so this commit changes no numbers on any surface. The horizon is inert until the
+ * Overview/Collections read-split exists, because Overview and Collections read the SAME rows
+ * (both go through collections.daily_collections_resolved). Ingesting near-future rows today
+ * would put them on the Collections tab too, which is explicitly not wanted. Flip this to 14 in
+ * the same change that teaches Collections to bound its reads at today; the horizon logic and
+ * its tests are already proven for both values.
+ */
+export const FUTURE_PAYMENT_HORIZON_DAYS = 0;
+
+/** `isoDate` + `days`, as ISO 'YYYY-MM-DD'. UTC arithmetic so it cannot drift with server locale. */
+function addDaysIso(isoDate: string, days: number): string {
+  const t = Date.parse(`${isoDate}T00:00:00Z`);
+  if (Number.isNaN(t)) return isoDate; // unparseable anchor ⇒ horizon collapses to the anchor
+  return new Date(t + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * Drop charge-line rows whose Payment Received date is IMPLAUSIBLY far in the future — more than
+ * `horizonDays` past `todayIso` (both ISO 'YYYY-MM-DD'; ISO dates compare lexically ==
+ * chronologically). Rows dated today, in the past, or inside the horizon are KEPT.
+ *
+ * READ-SIDE, NOT INGEST-SIDE, is where "should the Overview show tomorrow's deposit?" is now
+ * decided. Ingest keeps near-future rows; the Collections surface filters to `<= today` when it
+ * reads, and Overview does not. Doing it this way needs no schema change and keeps one row set
+ * feeding both surfaces — see collections.daily_collections_resolved, which both read.
  *
  * Rows with a blank/unparseable payment date are KEPT: an unpaid charge line is still a valid
  * cmd_explorer_rows entry (payment_received is nullable), and aggregateDailyDeposits already
@@ -366,12 +401,16 @@ export function aggregateDailyDeposits(rows: CmdReportRow[], facilityCode: strin
 export function dropFuturePaymentRows(
   rows: CmdReportRow[],
   todayIso: string,
+  horizonDays: number = FUTURE_PAYMENT_HORIZON_DAYS,
 ): { kept: CmdReportRow[]; dropped: number } {
+  // A negative horizon would silently widen the drop past "today"; clamp so the guard can only
+  // ever be as strict as the original behaviour, never stricter.
+  const cutoff = addDaysIso(todayIso, Math.max(0, horizonDays));
   const kept: CmdReportRow[] = [];
   let dropped = 0;
   for (const row of rows) {
     const d = paymentDateIso(pick(row, PAYMENT_DATE_KEYS));
-    if (d !== null && d > todayIso) {
+    if (d !== null && d > cutoff) {
       dropped += 1;
       continue;
     }

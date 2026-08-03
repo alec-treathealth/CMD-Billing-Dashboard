@@ -4,7 +4,11 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { aggregateDailyDeposits, dropFuturePaymentRows } from '../src/collections/cmdExplorer.js';
+import {
+  aggregateDailyDeposits,
+  dropFuturePaymentRows,
+  FUTURE_PAYMENT_HORIZON_DAYS,
+} from '../src/collections/cmdExplorer.js';
 import { CMD_EXPLORER_CUSTOMERS } from '../src/collections/cmdCustomers.js';
 import { FACILITY_CODES } from '../src/collections/config.js';
 
@@ -42,22 +46,61 @@ test('aggregateDailyDeposits: empty input → no rows', () => {
   assert.deepEqual(aggregateDailyDeposits([], 'TBH'), []);
 });
 
-test('dropFuturePaymentRows: drops future Payment Received dates; keeps today, past, and blank', () => {
-  const today = '2026-07-08';
+// CONTRACT CHANGED 2026-08-02: the guard was "drop anything after today", which also discarded
+// CMD's real forward-dated deposits (live Indigo held 08/03-08/05 rows worth six figures on
+// 08/02). It is now a HORIZON: near-future rows are ingested, and whether a surface SHOWS them is
+// a read-side decision. The typo class this guard exists for still gets dropped.
+test('dropFuturePaymentRows: keeps near-future rows inside the horizon; still drops the typo class', () => {
+  const today = '2026-07-08'; // horizon 14 ⇒ cutoff 2026-07-22
   const rows = [
     row({ 'Payment Received': '2026-07-08', 'Check Payment': '$1.00' }), //  today → keep
     row({ 'Payment Received': '01/02/2026', 'Check Payment': '$1.00' }), //  past  → keep
     row({ 'Payment Received': '', 'Check Payment': '$1.00' }), //            blank → keep (unpaid line)
-    row({ 'Payment Received': '2026-07-09', 'Check Payment': '$1.00' }), //  tomorrow → drop
+    row({ 'Payment Received': '2026-07-09', 'Check Payment': '$1.00' }), //  tomorrow → KEEP (real deposit)
     row({ 'Payment Received': '12/30/2026', 'Check Payment': '$1.00' }), //  far future → drop (the bug)
   ];
-  const { kept, dropped } = dropFuturePaymentRows(rows, today);
-  assert.equal(dropped, 2);
-  assert.equal(kept.length, 3);
+  const { kept, dropped } = dropFuturePaymentRows(rows, today, 14);
+  assert.equal(dropped, 1, 'only the far-future typo is dropped');
   assert.deepEqual(
     kept.map((r) => r['Payment Received']),
-    ['2026-07-08', '01/02/2026', ''],
+    ['2026-07-08', '01/02/2026', '', '2026-07-09'],
   );
+});
+
+test('dropFuturePaymentRows: the horizon boundary is inclusive, the day past it is not', () => {
+  const today = '2026-07-08';
+  const rows = [
+    row({ 'Payment Received': '2026-07-22', 'Check Payment': '$1.00' }), // exactly +14 → keep
+    row({ 'Payment Received': '2026-07-23', 'Check Payment': '$1.00' }), // +15        → drop
+  ];
+  const { kept, dropped } = dropFuturePaymentRows(rows, today, 14);
+  assert.equal(dropped, 1);
+  assert.deepEqual(kept.map((r) => r['Payment Received']), ['2026-07-22']);
+});
+
+test('dropFuturePaymentRows: horizon crosses a month boundary by real calendar days', () => {
+  // Guards against a naive "same month" or string-slice implementation.
+  const rows = [row({ 'Payment Received': '2026-08-05', 'Check Payment': '$1.00' })];
+  assert.equal(dropFuturePaymentRows(rows, '2026-07-31', 14).dropped, 0, '+5 days across the month end is inside');
+  assert.equal(dropFuturePaymentRows(rows, '2026-07-08', 14).dropped, 1, '+28 days is outside');
+});
+
+test('dropFuturePaymentRows: the SHIPPED default is 0 — strict today-cutoff, no behaviour change', () => {
+  // Locks the dark-ship. If someone flips FUTURE_PAYMENT_HORIZON_DAYS to 14 without also
+  // bounding the Collections reads at today, this fails and says why.
+  const rows = [row({ 'Payment Received': '2026-07-09', 'Check Payment': '$1.00' })];
+  assert.equal(FUTURE_PAYMENT_HORIZON_DAYS, 0, 'flip to 14 only WITH the Overview/Collections read-split');
+  assert.equal(dropFuturePaymentRows(rows, '2026-07-08').dropped, 1, 'default must drop tomorrow');
+});
+
+test('dropFuturePaymentRows: horizon 0 restores the original strict today-cutoff', () => {
+  const rows = [
+    row({ 'Payment Received': '2026-07-08', 'Check Payment': '$1.00' }),
+    row({ 'Payment Received': '2026-07-09', 'Check Payment': '$1.00' }),
+  ];
+  const { kept, dropped } = dropFuturePaymentRows(rows, '2026-07-08', 0);
+  assert.equal(dropped, 1);
+  assert.deepEqual(kept.map((r) => r['Payment Received']), ['2026-07-08']);
 });
 
 test('dropFuturePaymentRows: guarded rows never reach daily aggregation (future gross excluded)', () => {
