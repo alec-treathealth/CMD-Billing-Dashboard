@@ -1,5 +1,5 @@
 /**
- * "ERA-Confirmed Upcoming Payments" — RENDERED-HTML tests on the pure body leaf.
+ * "Upcoming Payments" — RENDERED-HTML tests on the pure body leaf.
  *
  * What these lock, against real markup:
  *   1) the READ-PATH CONTRACT reaches the USER: whenever unquantified_remits > 0 the
@@ -10,7 +10,12 @@
  *   3) money renders formatted, null group amounts render as an em dash (never $0.00),
  *      and the truncation footnote appears only when the breakdown was capped,
  *   4) the headline never blends incoming remits with BPR04=NON non-payments, and the
- *      zero-dollar clause vanishes at zero rather than rendering "· 0 zero-dollar".
+ *      zero-dollar clause vanishes at zero rather than rendering "· 0 zero-dollar",
+ *   5) THE ADDITIVE-ONLY CONTRACT: operator-keyed forecast money is never summed into the
+ *      ERA-confirmed headline, is labelled as forecast wherever it appears, and an absent
+ *      forecast payload degrades to the confirmed half alone rather than to an error,
+ *   6) the (date × facility) hierarchy is a native disclosure — one <details> per parent,
+ *      with the per-payer split inside it — and the forecast half never renders a name.
  *
  * EraUpcomingBody is a presentational leaf with relative/type-only imports, so this
  * renders it directly (same harness as qualify-render.test.tsx). No DB, no network.
@@ -18,8 +23,17 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { EraUpcomingBody, paymentMethodLabel } from '../components/dashboard/era-upcoming';
+import {
+  buildUpcomingGroups,
+  centsFromText,
+  EraUpcomingBody,
+  paymentMethodLabel,
+} from '../components/dashboard/era-upcoming';
 import type { EraUpcomingGroup, EraUpcomingSummary } from '../../src/veris/era835Upcoming.js';
+import type {
+  UpcomingOverrideRow,
+  UpcomingOverrideSummary,
+} from '../../src/veris/upcomingOverride.js';
 
 const G = (over: Partial<EraUpcomingGroup>): EraUpcomingGroup => ({
   payment_date: '2026-08-03',
@@ -50,7 +64,7 @@ const S = (over: Partial<EraUpcomingSummary>): EraUpcomingSummary => {
 
 test('empty state: calm "nothing scheduled" — no dollars, no error styling', () => {
   const html = renderToStaticMarkup(<EraUpcomingBody data={S({})} />);
-  assert.ok(html.includes('No ERA-confirmed payments scheduled'), 'the calm empty read');
+  assert.ok(html.includes('No upcoming payments scheduled'), 'the calm empty read');
   assert.ok(!html.includes('$'), 'no zero presented as data');
   assert.ok(!html.includes('Unable to load'), 'not an error state');
   assert.ok(!html.includes('floor'), 'no floor banner when there is nothing to understate');
@@ -198,4 +212,133 @@ test('truncation footnote appears when the breakdown was capped', () => {
   );
   assert.ok(html.includes('capped at the first 50'), 'silent truncation is not allowed');
   assert.ok(html.includes('include everything'), 'and the headline is stated to be uncapped');
+});
+
+// ---------------------------------------------------------------------------
+// The FORECAST half (migration 023) and the hierarchy.
+// ---------------------------------------------------------------------------
+
+const OR = (over: Partial<UpcomingOverrideRow>): UpcomingOverrideRow => ({
+  expected_date: '2026-08-03',
+  facility_code: 'CAMH',
+  payer_label: 'BCBS',
+  method_label: 'EFT',
+  amount: '5000.00',
+  is_patient_specific: false,
+  ...over,
+});
+
+const OS = (rows: UpcomingOverrideRow[], over: Partial<UpcomingOverrideSummary> = {}): UpcomingOverrideSummary => ({
+  total: rows
+    .reduce((c, r) => c + (centsFromText(r.amount) ?? 0), 0)
+    .toString()
+    .replace(/(\d\d)$/, '.$1'),
+  rows,
+  rows_truncated: false,
+  ...over,
+});
+
+test('THE ADDITIVE-ONLY CONTRACT: forecast money never enters the ERA headline', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([OR({ amount: '5000.00' })])}
+    />,
+  );
+  assert.ok(html.includes('$100.00'), 'the confirmed total still shows');
+  assert.ok(html.includes('$5,000.00'), 'the forecast total shows too');
+  // The blended figure is the whole hazard: a forecast row left in the sheet after its 835
+  // lands would double-count, so $5,100.00 must never appear anywhere on this tile.
+  assert.ok(!html.includes('$5,100.00'), 'the two are NEVER summed into one number');
+  assert.ok(html.includes('not included in the total above'), 'and the split is stated in words');
+  assert.ok(html.includes('Forecast'), 'forecast money is labelled as such');
+});
+
+test('a missing forecast payload degrades to the confirmed half, not to an error', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody data={S({ total: '100.00', remits: 1, groups: [G({})] })} overrides={null} />,
+  );
+  assert.ok(html.includes('$100.00'), 'the confirmed half renders');
+  assert.ok(!html.includes('Forecast'), 'no forecast furniture with no forecast data');
+  assert.ok(!html.includes('Unable to load'), 'an unapplied migration 023 is NOT an error here');
+});
+
+test('forecast-only: the tile renders even with zero ERA remits, headline stays unknown', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody data={S({})} overrides={OS([OR({ amount: '5000.00' })])} />,
+  );
+  assert.ok(!html.includes('No upcoming payments scheduled'), 'not the empty state');
+  assert.ok(html.includes('$5,000.00'), 'the forecast is visible on its own');
+  // The ERA headline is CONFIRMED money. With no confirmed remits it is unknown, not $0.00 —
+  // and above all not the forecast figure promoted into the confirmed slot.
+  assert.ok(html.includes('—'), 'confirmed headline is unknown, not a fabricated zero');
+});
+
+test('the hierarchy is one native <details> disclosure per (date x facility)', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({
+        total: '300.00',
+        remits: 3,
+        groups: [
+          G({ payer_name: 'ACME HEALTH PLAN', amount: '100.00' }),
+          G({ payer_name: 'BETA PLAN', amount: '150.00' }),
+          G({ facility_code: 'KWC', payer_name: 'ACME HEALTH PLAN', amount: '50.00' }),
+        ],
+      })}
+    />,
+  );
+  // Two facilities on one date => two parents, not three payer rows at the top level.
+  assert.equal(html.split('<details').length - 1, 2, 'one disclosure per date x facility');
+  assert.ok(html.includes('2 payers') && html.includes('1 payer'), 'parents state their child count');
+  assert.ok(html.includes('$250.00'), 'the CAMH parent shows the summed subtotal');
+  assert.ok(html.includes('ACME HEALTH PLAN') && html.includes('BETA PLAN'), 'subitems are present');
+});
+
+test('a forecast leaf never renders a patient name — only the unnamed marker', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({})}
+      overrides={OS([OR({ is_patient_specific: true, payer_label: 'UHC' })])}
+    />,
+  );
+  assert.ok(html.includes('1 patient'), 'patient-specific rows are marked');
+  assert.ok(html.includes('UHC'), 'the payer label is shown');
+  // 023's PHI boundary: the parser drops the sheet's Client cell, so there is no name to
+  // render here and this type cannot carry one.
+  assert.ok(!/patient['\s]*name/i.test(html), 'and no name field is rendered');
+});
+
+test('buildUpcomingGroups: confirmed subtotal stays null when every leaf is unquantified', () => {
+  const groups = buildUpcomingGroups(
+    S({ remits: 2, unquantified_remits: 2, groups: [G({ amount: null, unquantified_remits: 2, remits: 2 })] }),
+    null,
+  );
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0]!.confirmedCents, null, 'null, never 0 — unreadable is not zero');
+  assert.equal(groups[0]!.unquantified, 2);
+});
+
+test('buildUpcomingGroups: confirmed leaves sort ahead of forecast leaves in a parent', () => {
+  const groups = buildUpcomingGroups(
+    S({ total: '10.00', remits: 1, groups: [G({ amount: '10.00' })] }),
+    OS([OR({ amount: '9999.00' })]),
+  );
+  assert.equal(groups.length, 1, 'same date + facility folds into ONE parent');
+  assert.deepEqual(
+    groups[0]!.items.map((i) => i.kind),
+    ['confirmed', 'forecast'],
+    'certain money is read before asserted money, regardless of size',
+  );
+  assert.equal(groups[0]!.confirmedCents, 1000);
+  assert.equal(groups[0]!.forecastCents, 999900);
+});
+
+test('centsFromText is exact and rejects junk', () => {
+  assert.equal(centsFromText('19832.60'), 1983260);
+  assert.equal(centsFromText('291000'), 29100000);
+  assert.equal(centsFromText('0.1'), 10);
+  assert.equal(centsFromText(null), null);
+  assert.equal(centsFromText('$100'), null, 'formatting is the UI edge, not this parser');
+  assert.equal(centsFromText('1.234'), null, 'more than cents precision is not a money value');
 });

@@ -6,8 +6,9 @@
  *   • YTD Gross   — year-to-date gross split IP / OP / IP+OP, with a YoY trend.
  *   • Year Forecast — a live linear-YTD run-rate projection, with a YoY-vs-prior-year trend.
  * Plus a toggle-button row: "All Facilities Table" (per-facility table for a selected
- * month) and "ERA-Confirmed Upcoming Payments" (the 835 upcoming-remit table, fetched
- * only when opened). Each button reveals its panel below the row, All-Facilities-style.
+ * month) and "Upcoming Payments" (835-confirmed remits plus the operator-keyed forecast,
+ * fetched only when opened). Each button reveals its panel below the row,
+ * All-Facilities-style.
  *
  * Data sources (all NON-PHI, reader-only; no row fetch, no LLM):
  *   • MTD/YTD gross, per-facility rows, the anchor date  → loadCollectionsKpis (live
@@ -39,6 +40,7 @@ import {
   loadCollectionsYoy,
   loadEraUpcoming,
   loadFacilityDimension,
+  loadUpcomingOverrides,
   type CollectionsDailyResult,
   type CollectionsKpis,
   type CollectionsYoy,
@@ -47,6 +49,7 @@ import {
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID, type DashboardView } from '@/lib/views';
 import { EraUpcomingBody } from './era-upcoming';
 import type { EraUpcomingSummary } from '../../../src/veris/era835Upcoming.js';
+import type { UpcomingOverrideSummary } from '../../../src/veris/upcomingOverride.js';
 import { useWidget } from './widgets';
 
 const MONTH_NAMES = [
@@ -370,7 +373,7 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
         </PanelToggleButton>
         <PanelToggleButton open={eraOpen} onToggle={() => setEraOpen((s) => !s)}>
           <CalendarClock className="h-4 w-4" aria-hidden />
-          ERA-Confirmed Upcoming Payments
+          Upcoming Payments
         </PanelToggleButton>
       </div>
 
@@ -388,11 +391,19 @@ export function OverviewKpis({ view }: { view: DashboardView }) {
 }
 
 /**
- * "ERA-Confirmed Upcoming Payments" as a reveal panel — same interaction as the All
- * Facilities table. Fetches only while open (nothing is loaded for users who never
- * click), re-fetching on each open / view change so the figures are never stale-on-
- * reveal. The body is the unchanged EraUpcomingBody leaf, so the 013 read-path
- * contract (floor banner, no fabricated zeros) renders identically here.
+ * "Upcoming Payments" as a reveal panel — same interaction as the All Facilities table.
+ * Fetches only while open (nothing is loaded for users who never click), re-fetching on each
+ * open / view change so the figures are never stale-on-reveal.
+ *
+ * TWO READS, ONE PANEL, INDEPENDENTLY FAIL-SOFT. loadEraUpcoming is the 835-CONFIRMED half
+ * and gates the panel: if it fails, the panel shows an error. loadUpcomingOverrides is the
+ * operator-keyed FORECAST half (migration 023) and is strictly additive — an ok:false there
+ * degrades to `overrides = null` and the confirmed half renders alone, with no error shown.
+ * That is deliberate and load-bearing: 023 is not applied in every environment, and until it
+ * is, that read fails on EVERY call. Coupling the panel's health to it would take a working
+ * ERA tile down over a feed that is behaving exactly as designed.
+ *
+ * The two are requested concurrently, so the forecast never adds latency to the tile.
  */
 function EraUpcomingPanel({
   open,
@@ -406,16 +417,20 @@ function EraUpcomingPanel({
 }) {
   const [status, setStatus] = useState<'idle' | 'loading' | 'error' | 'ready'>('idle');
   const [data, setData] = useState<EraUpcomingSummary | null>(null);
+  const [overrides, setOverrides] = useState<UpcomingOverrideSummary | null>(null);
   useEffect(() => {
     if (!open) return;
     let live = true;
     setStatus('loading');
     setData(null);
-    loadEraUpcoming(view)
-      .then((r) => {
+    setOverrides(null);
+    Promise.all([loadEraUpcoming(view), loadUpcomingOverrides(view)])
+      .then(([era, ovr]) => {
         if (!live) return;
-        if (r.ok) {
-          setData(r.data);
+        // The forecast half never gates the panel — see the fail-soft note above.
+        setOverrides(ovr.ok ? ovr.data : null);
+        if (era.ok) {
+          setData(era.data);
           setStatus('ready');
         } else {
           setStatus('error');
@@ -433,20 +448,20 @@ function EraUpcomingPanel({
   return (
     <div className="ths-card ths-elev-sm">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <h3 className="ths-card-title">ERA-Confirmed Upcoming Payments</h3>
+        <h3 className="ths-card-title">Upcoming Payments</h3>
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close ERA-confirmed upcoming payments"
+          aria-label="Close upcoming payments"
           className="ths-btn ths-btn-ghost ths-btn-icon ths-btn-sm"
         >
           <X className="h-4 w-4" aria-hidden />
         </button>
       </div>
       {status === 'error' ? (
-        <div className="ths-alert">Unable to load ERA-confirmed payments.</div>
+        <div className="ths-alert">Unable to load upcoming payments.</div>
       ) : status === 'ready' && data ? (
-        <EraUpcomingBody data={data} />
+        <EraUpcomingBody data={data} overrides={overrides} />
       ) : (
         <div className="ths-card-meta py-6 text-center">Loading…</div>
       )}
