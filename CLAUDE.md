@@ -142,10 +142,11 @@ an in-flight session. Before authoring, re-derive the next number per
 worktrees and the live applied state).
 
 Veris apply state as of 2026-08-03, which is NOT the same as the file order:
-**024 APPLIED LIVE · 023 authored but NOT applied · 025 authored but NOT applied.** 024 went
-first because 023 was under concurrent revision and 024 has no executable dependency on it —
-no FK, no view, no trigger (the resolver is in `src/veris/upcomingForecast.ts`). Do not read the
-numbering as an apply order. See `docs/veris-data-notes.md` § "024 … APPLIED LIVE".
+**024 APPLIED LIVE · 023 APPLIED LIVE (2026-08-03, after 024) · 025 authored but NOT
+applied.** 024 went first because 023 was under concurrent revision and 024 has no executable
+dependency on it — no FK, no view, no trigger (the resolver is in
+`src/veris/upcomingForecast.ts`); 023 followed once that revision settled. Do not read the
+numbering as an apply order. See `docs/veris-data-notes.md` §§ "023 …" / "024 …".
 
 Merging a migration in a PR does **not** apply it to prod. Code that depends on
 it 500s until `apply_migration` runs.
