@@ -112,11 +112,15 @@ test('builders: fixed identifiers, bound params, ::date cast on the UR date', ()
   assert.doesNotMatch(read.sql, /select \*/i);
 });
 
-test('board registry: verified boards map to real 8-digit facility codes', () => {
+test('board registry: verified boards map to roster facility_code tokens (mnemonic or 8-digit)', () => {
+  // collections.facilities mixes mnemonic codes (NASH, LSMH, TREAT_*) with 8-digit CMD ids —
+  // roster-verified 2026-08-03. The old /^\d{8}$/ pin was the exact bug: it blessed codes the
+  // roster doesn't carry, so the factor could never match its facility.
   for (const b of MONDAY_CENSUS_BOARDS) {
-    assert.match(b.facilityCode, /^\d{8}$/);
+    assert.match(b.facilityCode, /^[A-Z0-9_]{2,40}$/);
     assert.match(b.boardId, /^\d+$/);
   }
+  assert.deepEqual(MONDAY_CENSUS_BOARDS.map((b) => b.facilityCode), ['NASH', 'LSMH']);
 });
 
 test('PHI tripwire: census GraphQL never selects item `name` — names on census boards are patients', async () => {

@@ -183,8 +183,8 @@ export async function runQualifyCensusSync(
 
 /** Facility Info '# of Beds' by facility_code, via the operator-curated name → code map. */
 const FACILITY_INFO_NAME_TO_CODE: Readonly<Record<string, string>> = {
-  'NASHVILLE MH': '10030911',
-  'LONESTAR MH': '10031977',
+  'NASHVILLE MH': 'NASH', // roster-verified 2026-08-03 — collections.facilities keys these by mnemonic
+  'LONESTAR MH': 'LSMH',
 };
 
 async function fetchBedCapacity(): Promise<Map<string, number>> {

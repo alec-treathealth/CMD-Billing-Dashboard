@@ -28,12 +28,27 @@ import {
 import { makeClient } from '../src/collections/db.js';
 
 /** Sheet long-form → collections.facilities.facility_code. Extend as the defect report names forms. */
+// Verified against collections.facilities on 2026-08-03: the roster keys THESE facilities by
+// mnemonic (KWC/LSMH/DMH/TBH/CAMH/PCMH/TREAT_*), and Nashville is 'NASH' — NOT the sheet's 'NMH'.
+// An unmapped mnemonic that happens to match /^[A-Z0-9_]{2,40}$/ would silently seed a code the
+// rating lookup can never match, so every block token is mapped EXPLICITLY.
 const FACILITY_ALIASES: Record<string, string> = {
-  'KY Wellness': 'KWC',
-  'Nashville MH': 'NMH',
-  'Trat TX': 'TREAT_TX', // the sheet's own typo, mapped on purpose so the row seeds facility-scoped
-  'Treat TX': 'TREAT_TX',
-  'Treat NV': 'TREAT_NV',
+  KWC: 'KWC',
+  LSMH: 'LSMH',
+  DMH: 'DMH',
+  NMH: 'NASH', // the one true rename — sheet says NMH, roster says NASH
+  TBH: 'TBH',
+  CAMH: 'CAMH',
+  PCMH: 'PCMH',
+  'TREAT CA': 'TREAT_CA',
+  'TREAT TX': 'TREAT_TX',
+  'TREAT TN': 'TREAT_TN',
+  'TREAT NV': 'TREAT_NV',
+  'TREAT WA': 'TREAT_WA',
+  'TELEHEALTH TX': 'TELEHEALTH_MH',
+  'KY WELLNESS': 'KWC',
+  'NASHVILLE MH': 'NASH',
+  'TRAT TX': 'TREAT_TX', // the sheet's own typo, mapped on purpose so the row seeds facility-scoped
 };
 
 async function main(): Promise<void> {

@@ -23,7 +23,7 @@ export type CensusBoardFamily = 'residential' | 'outpatient';
 
 export interface CensusBoardConfig {
   boardId: string;
-  facilityCode: string; // collections.facilities.facility_code (8-digit CMD customer)
+  facilityCode: string; // collections.facilities.facility_code VERBATIM (mnemonic or 8-digit — the roster mixes both)
   family: CensusBoardFamily;
 }
 
@@ -31,8 +31,11 @@ export interface CensusBoardConfig {
  *  (which lists the workspace's census boards so an operator can map the remaining ~25). Adding a
  *  row here is the entire onboarding for a facility's auth-fit factor. */
 export const MONDAY_CENSUS_BOARDS: readonly CensusBoardConfig[] = [
-  { boardId: '7422342993', facilityCode: '10030911', family: 'residential' }, // Nashville MH Admissions Census
-  { boardId: '8401390206', facilityCode: '10031977', family: 'residential' }, // Lonestar MH Admissions Census
+  // facilityCode = collections.facilities.facility_code VERBATIM (roster-verified 2026-08-03).
+  // These facilities are mnemonic-keyed in the roster — 'NASH'/'LSMH' — NOT 8-digit CMD ids; a code
+  // the roster doesn't carry would make the auth-fit factor silently never match its facility.
+  { boardId: '7422342993', facilityCode: 'NASH', family: 'residential' }, // Nashville MH Admissions Census
+  { boardId: '8401390206', facilityCode: 'LSMH', family: 'residential' }, // Lonestar MH Admissions Census
 ];
 
 /** The Facility Info board (facility-grain — item names are FACILITY names, not patients). */

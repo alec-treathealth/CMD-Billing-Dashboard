@@ -1,0 +1,48 @@
+facility_code	payer_label	decided_on	codes_utilizing	billing_rules	lifecycle	notes	plan_alpha	level_of_care
+KWC	BCBS AR - Walmart plan	5/21/2026	NO HCPCS / 1001	10-11 DOS Per Claim	CONFIRMED CODES			
+KWC	BCBS - Blues	2/23/2026	H0018/1001	Single DOS	CONFIRMED CODES			
+KWC	GEHA	3/25/2026	HCPCS/REV	5 DOS BULK 863 TOB	CONFIRMED CODES	sheet carries no actual codes for GEHA — header noise; billing team to supply		
+KWC	BCBS - Anthems	2/23/2026	NO HCPCS / 1001	Single DOS	CONFIRMED CODES			
+LSMH	BCBS MA	4/27/2026	H0018/1001	Regular billing - Single DOS	CONFIRMED CODES			
+LSMH	BCBS OK	2/18/2026	NO HCPCS /0124	Single DOS	CONFIRMED CODES			
+LSMH	All other BCBS (Including Anthem)	6/27/2025	H0019/0100	2-3 DOS per claim, add DRG 951	CONFIRMED CODES			
+LSMH	Cigna	5/12/2026	H0017/0158	Single DOS, looks like it works for MRC-2 but not for MRC-1? - TEST FOR TWO MONTHS	OPEN TEST	lifecycle derived from rules prose (EH tab has no Test Status column)		
+DMH	BCBS MA	4/27/2026	H0018/1001	Regular billing - Single DOS	CONFIRMED CODES			
+DMH	BCBS OK	2/18/2026	NO HCPCS /0124	Single DOS	CONFIRMED CODES			
+DMH	All other BCBS (Including Anthem)	6/27/2025	H0019/0100	2 DOS per claim, add DRG 951	CONFIRMED CODES			
+DMH	Cigna	6/30/2026	H0017/0158	Single DOS, looks like it works for MRC-2 but not for MRC-1? TEST FOR 2 MONTHS	OPEN TEST	lifecycle derived from rules prose (EH tab has no Test Status column)		
+NMH	Highmark BCBS	6/14/2026	NO HCPCS /0128	Bulk 5 DOS	CONFIRMED CODES			
+NMH	BCBS TX - MH (ZGP ALPHA)	7/7/2026	H0017 / 0158	3 DOS per claim	CONFIRMED CODES		ZGP	
+NMH	BCBS TX - MH (NON ZGP ALPHA)	7/7/2026	H0017 / 0128	2 DOS per claim	CONFIRMED CODES		NON-ZGP	
+TBH	Highmark BCBS	6/14/2026	NO HCPCS /0128	Bulk 5 DOS	CONFIRMED CODES			
+TBH	BCBS TX - SUD (DTX)	7/7/2026	H0017 / 0156	2-3 DOS per claim	CONFIRMED CODES			DTX
+TBH	BCBS TX - SUD (RTC)	7/7/2026	H0017 / 0128	2-3 DOS per claim	CONFIRMED CODES			RTC
+TBH	BCBS TX - MH (ZGP ALPHA)	7/7/2026	H0017 / 0158	3 DOS per claim	CONTINUE TESTS	Might be discontinued · lifecycle derived from rules prose (EH tab has no Test Status column)	ZGP	
+TBH	BCBS TX - MH (NON ZGP ALPHA)	7/7/2026	H0017 / 0128	2 DOS per claim	CONTINUE TESTS	Might be discontinued · lifecycle derived from rules prose (EH tab has no Test Status column)	NON-ZGP	
+CAMH	Blue Cards	4/21/2026	H0018/0124	86X TOB - Single DOS	CONFIRMED CODES			
+CAMH	Anthem BCBS	5/18/2026	H0017/0158	86X TOB - Single DOS	CONFIRMED CODES			
+CAMH	GEHA	03/25/2026	HCPCS/REV	5 DOS BULK 863 TOB	CONFIRMED CODES	sheet carries no actual codes for GEHA — header noise; billing team to supply		
+CAMH	Anthem BCBS CALIFORNIA	6/22/2026	H0018/0158	Single DOS	CONFIRMED CODES			
+CAMH	Anthem BCBS (ALL OTHERS)	06/22/2026	H0019/0158	Single DOS	CONFIRMED CODES			
+CAMH	BCBS IL (Blue Card)	6/22/2026	H0017/0158	Single DOS	CONFIRMED CODES			
+CAMH	BCBS TX (Blue Card)	06/22/2026	H0017/0158	Single DOS	CONFIRMED CODES			
+PCMH	Blue Cards	4/21/2026	H0018/0124	86X TOB - Single DOS	CONFIRMED CODES			
+PCMH	Anthem BCBS	5/18/2026	H0017/0158	86X TOB - Single DOS	CONFIRMED CODES			
+PCMH	GEHA	03/25/2026	HCPCS/REV	5 DOS BULK 863 TOB	CONFIRMED CODES	sheet carries no actual codes for GEHA — header noise; billing team to supply		
+PCMH	Anthem BCBS CALIFORNIA	6/22/2026	H0018/0158	Single DOS	CONFIRMED CODES			
+PCMH	Anthem BCBS (ALL OTHER)	06/22/2026	H0019/0158	Single DOS	CONFIRMED CODES			
+PCMH	BCBS IL (Blue Card)	6/22/2026	H0017/0158	Single DOS	CONFIRMED CODES			
+PCMH	BCBS TX (Blue Card)	06/22/2026	H0017/0158	Single DOS	CONFIRMED CODES			
+Treat CA	Optum/UHC/UMR	5/20/2026	H2020/0905	ALL IOP OPTUM/UHC	CONFIRMED CODES			IOP
+Treat CA	Anthem BCBS	06/01/2026	H2013/0905	Still doing a few testing, but all billing besides those moving forward will be this.	CONTINUE TESTS	lifecycle derived from rules prose (EH tab has no Test Status column)		
+Treat CA	Blue Cards	06/01/2026	H2013/0905	Still doing a few testing, but all billing besides those moving forward will be this.	CONTINUE TESTS	lifecycle derived from rules prose (EH tab has no Test Status column)		
+Treat CA	Anthem of CALIFORNIA	06/30/2026	H2020/0905	Allowing $2924	CONFIRMED CODES			
+Treat TX	UMR	6/12/2026	H2020/0905	removing GT mod on claims	CONFIRMED CODES			
+Treat TX	Anthem & BCBS	06/01/2026	H2012/0905	3 units per code (PER HOUR)	CONFIRMED CODES			
+Treat TX	BCBS TX	07/14/2026	S9480/0912	Add Condition code 92	CONFIRMED CODES			
+Treat TX	Optum/UHC/UMR	05/20/2026	H2020/0905	ALL IOP OPTUM/UHC	CONFIRMED CODES			IOP
+Treat TN	UMR	06/12/2026	H2020/0905	removing GT mod on claims	CONFIRMED CODES			
+Treat NV	UMR	06/12/2026	H2020/0905		CONFIRMED CODES			
+Treat NV	Cigna	0714/2026	H2013/0905		CONFIRMED CODES	sheet date is corrupt (0714/2026) — kept so the report names it		
+Treat WA	UMR	06/12/2026	H2020/0905		CONFIRMED CODES			
+Treat WA	BCBS		H2018/0905	Thinking we might start testing this instead of H2018	UPCOMING TEST	no decision date on the sheet — kept so the report names it · lifecycle derived from rules prose (EH tab has no Test Status column)		
