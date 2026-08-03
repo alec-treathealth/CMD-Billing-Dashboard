@@ -27,6 +27,12 @@ export function bucketClass(bucket: RatingBucket): `q-${RatingBucket}` {
   return `q-${bucket}`;
 }
 
+/** Rating-v2 IQ band → its paint class (`.q-band65` … `.q-band0` set --q-c / --q-wash in
+ *  globals.css). null (unrated) → the neutral class — restraint, never a fabricated color. */
+export function iqBandClass(band: '65' | '50' | '30' | '15' | '0' | null): string {
+  return band === null ? 'q-neutral' : `q-band${band}`;
+}
+
 /**
  * Confidence → the q-class its UI wears (coverage-bar segments, legend dots, the estimate %-cell):
  * confirmed → q-ok · estimate → q-warn (amber — NEVER green, regardless of the number) ·

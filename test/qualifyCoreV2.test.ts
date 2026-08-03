@@ -106,9 +106,9 @@ test('auto-window: the ladder stops at the FIRST sufficient rung (90d) and the s
       [30, 2, false],
       [60, 4, false],
       [90, 11, true],
-      [180, 15, false],
-      [365, 22, false],
-    ].map(([d, p]) => [d, p, p >= 10]),
+      [180, 15, true],
+      [365, 22, true],
+    ],
   );
   // The RESOLVED window spans exactly the chosen 90 days.
   const spanDays = (Date.parse(snap.resolved!.windowEnd) - Date.parse(snap.resolved!.windowStart)) / 86_400_000;

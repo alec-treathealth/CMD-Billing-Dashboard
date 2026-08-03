@@ -43,6 +43,7 @@ import { Briefcase, Building2, Eye, EyeOff, Landmark, Lock, ShieldCheck } from '
 import {
   getQualifyMatchSummary,
   getQualifyComposedCases,
+  getQualifySnapshot,
   getQualifySnapshotByPayer,
   getQualifyPayerEverBilled,
   getQualifyResolvePayer,
@@ -78,6 +79,8 @@ import type { RatingBucket } from '@/lib/qualify/rating';
 import { CasesTable } from '@/components/qualify/cases-table';
 import { CohortSheet } from '@/components/qualify/cohort-sheet';
 import { FacilityPanel } from '@/components/qualify/facility-panel';
+import { PolicyStrip } from '@/components/qualify/policy-strip';
+import { WindowLadder } from '@/components/qualify/window-ladder';
 import { BookKpiTiles, EvidenceGauge, HeatingUpCards, HeatingUpSkeleton } from '@/components/qualify/overview';
 import { WindowControl } from '@/components/qualify/window-control';
 import { VobModal } from '@/components/qualify/vob-modal';
@@ -151,6 +154,14 @@ export function QualifyTab({
   // resolve its dominant payer server-side and rank against THAT — so an identifier search doesn't force a
   // manual payer pick. `derivedPayer` null = not applicable OR the identifier was never seen.
   const [derivedPayer, setDerivedPayer] = useState<string | null>(null);
+  // ── v2 LEAD snapshot (Phases 0/B/D/E): the identifier-driven policy card + auto-window ladder +
+  //    comparable ranking, from the PHI snapshot core. Fetched alongside the derived-payer resolve;
+  //    gen-guarded like every other stream. `auto` fires once per NEW identifier (the ladder decides
+  //    the window); later manual window changes refetch with the user's explicit choice respected.
+  const [leadSnapshot, setLeadSnapshot] = useState<QualifySnapshot | null>(null);
+  const leadGenRef = useRef(0);
+  const lastAutoIdentifierRef = useRef<string | null>(null);
+  const [expandedFacilities, setExpandedFacilities] = useState<ReadonlySet<string>>(new Set());
   const [derivedLoading, setDerivedLoading] = useState(false);
   const resolveGenRef = useRef(0);
 
@@ -451,6 +462,46 @@ export function QualifyTab({
         setDerivedLoading(false);
       });
   }, [singleIdentifier]);
+
+  // ── v2 LEAD snapshot fetch: policy strip + ladder + (comparable) ranking for the searched
+  //    identifier. AUTO only when the identifier CHANGED — a manual window change after a search
+  //    refetches under the user's window (respect the override; the Range menu stays the biller path).
+  useEffect(() => {
+    if (!singleIdentifier) {
+      setLeadSnapshot(null);
+      lastAutoIdentifierRef.current = null;
+      return;
+    }
+    const lgen = ++leadGenRef.current;
+    const auto = lastAutoIdentifierRef.current !== singleIdentifier;
+    getQualifySnapshot({ query: singleIdentifier, window: windowSel, auto })
+      .then((snap) => {
+        if (leadGenRef.current !== lgen) return;
+        lastAutoIdentifierRef.current = singleIdentifier;
+        setLeadSnapshot(snap);
+        // Follow the ladder's decision ONCE per search: the whole surface (panel, cases, KPIs)
+        // re-windows to the chosen span so every number on screen describes ONE window.
+        if (auto && snap.ladder && (windowSel.kind !== 'trailing' || windowSel.days !== snap.ladder.chosenDays)) {
+          setWindowSel({ kind: 'trailing', days: snap.ladder.chosenDays });
+        }
+      })
+      .catch(() => {
+        if (leadGenRef.current !== lgen) return;
+        setLeadSnapshot(null);
+      });
+    // windowSel is deliberately IN deps: a post-search window change refetches the lead under the
+    // manual window (auto=false), keeping the policy/estimate read on the same span as the panel.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [singleIdentifier, windowSel]);
+
+  const toggleFacilityExpansion = useCallback((key: string) => {
+    setExpandedFacilities((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   // ── FACILITY PANEL fetch: the payer-wide ranking for the panel's payer — either the ONE selected payer
   //    OR the payer derived from a single-identifier search. 0/2+ payers with no resolvable identifier ⇒
@@ -1034,6 +1085,17 @@ export function QualifyTab({
       {/* ── CONTEXT LINE + LIVE MATCH COUNT + FACILITY RANKING + COMPOSED CASES ── */}
       {hasAnyFilter ? (
         <>
+          {/* ── v2 POLICY STRIP + AUTO-WINDOW LADDER (Phases 0/B/D/E): identifier searches only —
+              the prefix IS the policy; the ladder shows the window decision instead of hiding it. */}
+          {singleIdentifier && leadSnapshot?.policy ? (
+            <PolicyStrip
+              policy={leadSnapshot.policy}
+              provenance={leadSnapshot.provenance}
+              hasAmounts={hasAmounts}
+              prefixEcho={leadSnapshot.resolved?.matchedValue ?? ''}
+            />
+          ) : null}
+          {singleIdentifier && leadSnapshot?.ladder ? <WindowLadder ladder={leadSnapshot.ladder} /> : null}
           {/* Lighter context line (the old resolved-payer hero band is gone). Non-dollar for admissions_seat. */}
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-2xl border border-line bg-surface px-4 py-2.5 text-[12px] text-ink600">
             <span className="font-semibold text-ink900">{qualifyWindowLabel(windowSel)}</span>
@@ -1093,15 +1155,33 @@ export function QualifyTab({
                     selectedKeys={activeFacilityKeys}
                     onToggle={toggleFacility}
                     payerLabel={panelPayer}
+                    expandedKeys={expandedFacilities}
+                    onExpandToggle={toggleFacilityExpansion}
                   />
                 ) : derivedLoading || (panelPayer && !panelSnapshot) ? (
                   <div className="rounded-2xl border bg-card p-6 text-center text-sm text-muted-foreground shadow-ths-sm">
                     {derivedLoading ? 'Resolving payer…' : 'Loading facility ranking…'}
                   </div>
+                ) : leadSnapshot && !leadSnapshot.resolved && leadSnapshot.facilities.length > 0 ? (
+                  // ESTIMATED (Phase B): no claims of its own, but the VOB names its cohort — rank the
+                  // policy's behavioral peer group, clearly labeled, never dressed as direct evidence.
+                  <FacilityPanel
+                    facilities={leadSnapshot.facilities}
+                    hasAmounts={hasAmounts}
+                    heatOn
+                    selectedKeys={activeFacilityKeys}
+                    onToggle={toggleFacility}
+                    payerLabel={leadSnapshot.policy?.employerName ?? leadSnapshot.policy?.carrier ?? null}
+                    expandedKeys={expandedFacilities}
+                    onExpandToggle={toggleFacilityExpansion}
+                    provenance={leadSnapshot.provenance}
+                  />
                 ) : (
                   // An identifier was searched but resolved to no payer (never seen / misspelled).
                   <div className="rounded-2xl border border-dashed bg-card p-6 text-center text-[13px] text-muted-foreground">
-                    No payer on file for that identifier — it may be new or misspelled.
+                    {leadSnapshot?.policy?.found
+                      ? 'This plan has no claims history anywhere yet — the policy card above is everything on file. Ask a biller before quoting.'
+                      : 'No payer on file for that identifier — it may be new or misspelled.'}
                   </div>
                 )
               ) : (
