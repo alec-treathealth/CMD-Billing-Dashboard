@@ -8,10 +8,25 @@ paths:
 
 Two separate planes. Never put a file in the wrong directory.
 
-| Plane | Directory | Next number |
+| Plane | Directory | Next number (as of 2026-08-03) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0077** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0080** |
 | Veris ML (`staging`, `ref`, `core`) | `SQL Schemas/0NN_*.sql` | **026** |
+
+0077/0078/0079 are **Qualify-owned and applied live** — never author a new
+0077. Never edit 023, 024, or 025 in place.
+
+These numbers are a **floor, not the answer**. Before claiming a number,
+cross-check (a) untracked and unpushed migration files in every worktree, and
+(b) the live applied state via the Supabase MCP.
+
+**Fail loud.** If the next-number here contradicts the live applied state or
+an untracked file in another worktree, this doc is stale — stop and
+re-derive, don't proceed.
+
+TODO — replace hardcoded numbers with a ref-derived command; naive prefix
+matching is poisoned by `2026-06-22_claim_line_nullcredit_dedup.sql` and by
+`.ts` files in `SQL Schemas/`.
 
 Veris apply state as of 2026-08-03, which is NOT the same as the file order:
 **024 APPLIED LIVE · 023 authored but NOT applied · 025 authored but NOT applied.** 024 went

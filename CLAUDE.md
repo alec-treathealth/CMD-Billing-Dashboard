@@ -100,9 +100,9 @@ Run all five before any commit. This is the bar for "verified" — not typecheck
 alone, and especially not when a shared helper changed.
 
 ```bash
-npm test                          # root hermetic suite — 889 pass / 0 fail
+npm test                          # root hermetic suite — 1066 pass / 0 fail (clean origin/main @6d62ca6, measured 2026-08-03)
 npm run typecheck                 # root tsc (strict: noUncheckedIndexedAccess)
-cd app && npm test                # app suite — 176 pass / 0 fail
+cd app && npm test                # app suite — 198 pass / 0 fail (clean origin/main @6d62ca6, measured 2026-08-03)
 cd app && npm run typecheck        # app tsc
 cd app && npm run build            # catches bundler-only failures tsc cannot
 ```
@@ -112,7 +112,9 @@ Root `tsc` is stricter than app `tsc` — a test can be green in `app/` while ro
 failures (see `.claude/rules/nextjs-app.md`).
 
 Those counts are a tripwire, not a target: if a suite reports fewer than the
-number above, tests were lost — find out why before committing.
+number above, tests were lost — find out why before committing. Only counts
+measured on a clean detached checkout of `origin/main` are trustworthy — a
+shared working tree with other sessions' edits is not evidence.
 
 ## Git workflow
 
@@ -128,10 +130,16 @@ library from `../src` and is the Vercel app root.
 
 Two **separate** migration planes — never mix the directories:
 
-| Plane | Directory | Next number |
+| Plane | Directory | Next number (as of 2026-08-03) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0077** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0080** |
 | Veris ML (`staging`, `ref`, `core`) | `SQL Schemas/0NN_*.sql` | **026** |
+
+0077/0078/0079 are **Qualify-owned and applied live** — never author a new
+0077. Never edit 023, 024, or 025 in place — 024 is applied and 025 belongs to
+an in-flight session. Before authoring, re-derive the next number per
+`.claude/rules/sql-migrations.md` (ref-derived max is a floor; cross-check
+worktrees and the live applied state).
 
 Veris apply state as of 2026-08-03, which is NOT the same as the file order:
 **024 APPLIED LIVE · 023 authored but NOT applied · 025 authored but NOT applied.** 024 went
@@ -166,7 +174,7 @@ Surfaces:
   `redirect('/')` stub. `<SearchConsole />` and the `/api/agent` path stay in git
   history; restoring means remounting the page *and* re-adding the nav entry.
 
-`app/vercel.json` declares **17 cron entries across 15 distinct routes**
+`app/vercel.json` declares **18 cron entries across 16 distinct routes**
 (`billing-audit-consolidated` runs on three schedules):
 
 | Route | Cadence |
@@ -181,8 +189,13 @@ Surfaces:
 | `refresh-cmd-payer` | daily 10:50 |
 | `reconcile-deposits` | daily 11:50 |
 | `cms-hcpcs-sync` | quarterly, 06:00 on the 2nd of Jan/Apr/Jul/Oct |
+| `payer-intel` | monthly, 07:20 on the 2nd |
 | `billing-audit-op` · `billing-code-decisions` | daily 02:20 / 02:40 |
 | `billing-audit-consolidated` | daily 02:40, 03:10, 03:40 |
+
+`/api/cron/qualify-census` exists as a route but is **deliberately absent**
+from `vercel.json` — scheduling it is reserved for an explicitly-scoped
+session (see `docs/qualify-v2-morning-runbook.md`).
 
 VOB sync is scheduled by Vercel but *runs* as a GitHub Action
 (`.github/workflows/vob-sync.yml`) — it won't show output in the Vercel cron UI.
