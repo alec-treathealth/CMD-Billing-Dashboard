@@ -21,6 +21,7 @@ import {
   buildCodingDecisionHistoryQuery,
   type CodingDecisionRow,
 } from '../../../src/collections/codingRegistryQuery';
+import { buildQualifyCensusReadQuery } from '../../../src/collections/qualifyCensus';
 import type { QualifyTokenKind } from '../../../src/collections/qualifyQuery';
 
 let executor: PgExecutor | null = null;
@@ -116,6 +117,33 @@ export async function loadCodingDecisionHistory(limit = 500): Promise<{ availabl
     return { available: true, rows: res.rows };
   } catch (err) {
     if (registryAbsent(err)) return { available: false, rows: [] };
+    throw err;
+  }
+}
+
+
+/** Per-facility monday-census aggregates (Phase G) — FAIL-SOFT while 0078 is unapplied: the
+ *  auth-fit factor reads unavailable and the UR/beds chips stay absent, never a 500. Aggregate
+ *  facility-grain rows only (no PHI exists on this path). */
+export async function loadQualifyCensusAuth(): Promise<
+  Array<{ facility_code: string; avg_auth_days: number | null; avg_los_days: number | null; next_ur_date: string | null; open_beds: number | null }>
+> {
+  const q = buildQualifyCensusReadQuery();
+  try {
+    const res = await qualifyV2Reader().query<{
+      facility_code: string;
+      avg_auth_days: number | null;
+      avg_los_days: number | null;
+      next_ur_date: string | null;
+      open_beds: number | null;
+    }>(q.sql, q.params);
+    return res.rows;
+  } catch (err) {
+    const code = typeof err === 'object' && err !== null ? String((err as { code?: unknown }).code) : '';
+    if (code === '42P01') {
+      console.error('qualify census table absent (0078 unapplied) — auth-fit factor unavailable');
+      return [];
+    }
     throw err;
   }
 }
