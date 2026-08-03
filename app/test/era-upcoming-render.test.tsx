@@ -229,14 +229,35 @@ const OR = (over: Partial<UpcomingOverrideRow>): UpcomingOverrideRow => ({
   ...over,
 });
 
-const OS = (rows: UpcomingOverrideRow[], over: Partial<UpcomingOverrideSummary> = {}): UpcomingOverrideSummary => ({
-  total: rows
+/** Fixture cutoff: at-or-before every OR default date, so plain OS(rows) rows are UPCOMING. */
+const CUTOFF = '2026-08-03';
+
+const sumFixed2 = (rows: UpcomingOverrideRow[]): string =>
+  rows
     .reduce((c, r) => c + (centsFromText(r.amount) ?? 0), 0)
     .toString()
-    .replace(/(\d\d)$/, '.$1'),
-  rows,
-  rows_truncated: false,
-  ...over,
+    .replace(/(\d\d)$/, '.$1');
+
+const OS = (
+  rows: UpcomingOverrideRow[],
+  over: {
+    cutoff?: string;
+    overdueRows?: UpcomingOverrideRow[];
+    upcomingTruncated?: boolean;
+    overdueTruncated?: boolean;
+  } = {},
+): UpcomingOverrideSummary => ({
+  cutoff: over.cutoff ?? CUTOFF,
+  upcoming: {
+    total: sumFixed2(rows),
+    rows,
+    rows_truncated: over.upcomingTruncated ?? false,
+  },
+  overdue: {
+    total: sumFixed2(over.overdueRows ?? []),
+    rows: over.overdueRows ?? [],
+    rows_truncated: over.overdueTruncated ?? false,
+  },
 });
 
 test('THE ADDITIVE-ONLY CONTRACT: forecast money never enters the ERA headline', () => {
@@ -323,7 +344,7 @@ test('buildUpcomingGroups: confirmed subtotal stays null when every leaf is unqu
 test('buildUpcomingGroups: confirmed leaves sort ahead of forecast leaves in a parent', () => {
   const groups = buildUpcomingGroups(
     S({ total: '10.00', remits: 1, groups: [G({ amount: '10.00' })] }),
-    OS([OR({ amount: '9999.00' })]),
+    OS([OR({ amount: '9999.00' })]).upcoming,
   );
   assert.equal(groups.length, 1, 'same date + facility folds into ONE parent');
   assert.deepEqual(
@@ -333,6 +354,185 @@ test('buildUpcomingGroups: confirmed leaves sort ahead of forecast leaves in a p
   );
   assert.equal(groups[0]!.confirmedCents, 1000);
   assert.equal(groups[0]!.forecastCents, 999900);
+});
+
+// ---------------------------------------------------------------------------
+// The OVERDUE partition (LANDED, not DATE-PASSED — Alec's ruling 2026-08-03).
+// ---------------------------------------------------------------------------
+
+/** THE PROOF CASE from the live sheet: $72,000 KWC / BCBS AR, expected 2026-05-26. */
+const PROOF_OVERDUE = OR({
+  expected_date: '2026-05-26',
+  facility_code: 'KWC',
+  payer_label: 'BCBS AR',
+  method_label: 'Check',
+  amount: '72000.00',
+  is_patient_specific: true,
+});
+
+test('THE PROOF CASE: the past-dated $72,000 row renders in Overdue and NOWHERE else', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([OR({ amount: '5000.00' })], { overdueRows: [PROOF_OVERDUE] })}
+    />,
+  );
+  assert.ok(html.includes('Overdue'), 'the Overdue section renders');
+  assert.ok(html.includes('$72,000.00'), 'the overdue money is visible');
+  assert.ok(html.includes('69 days overdue'), '2026-05-26 → 2026-08-03 is 69 days');
+  // Exclusions — the partition is only right if the money is in exactly one place:
+  assert.ok(html.includes('$100.00'), 'ERA headline is untouched');
+  assert.ok(html.includes('$5,000.00'), 'the upcoming forecast subtotal is untouched');
+  assert.ok(!html.includes('$77,000.00'), 'overdue never folds into the forecast subtotal');
+  assert.ok(!html.includes('$72,100.00'), 'overdue never folds into the ERA headline');
+});
+
+test('RESOLVE THEN PARTITION: a past-dated manual add buckets into Overdue', () => {
+  // kind='add' is the door a server-side partition would miss: the add enters at the
+  // client resolver with its own date, after any SQL bucketing of sheet rows.
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([])}
+      manual={[
+        {
+          id: 7,
+          kind: 'add',
+          facility_code: 'KWC',
+          payer_label: 'TRICARE',
+          expected_date: '2026-07-01',
+          method_label: 'Check',
+          amount: '1234.00',
+          suppress_reason: null,
+          matched_era_key: null,
+        },
+      ]}
+    />,
+  );
+  assert.ok(html.includes('Overdue'), 'the section appears for the add alone');
+  assert.ok(html.includes('$1,234.00'), 'the overdue add renders');
+  assert.ok(html.includes('manual add'), 'and is marked as a manual add');
+  assert.ok(!html.includes('not included in the total above'), 'no upcoming Forecast line — nothing upcoming');
+});
+
+test('TOTALS PROVENANCE: the overdue subtotal is the RESOLVED recomputation, not the SQL aggregate', () => {
+  // A 'correct' halves the overdue row. The payload's SQL aggregate still says 72000 —
+  // rendering it would show pre-correction money. The rendered subtotal must be 36000.
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([], { overdueRows: [PROOF_OVERDUE] })}
+      manual={[
+        {
+          id: 9,
+          kind: 'correct',
+          facility_code: 'KWC',
+          payer_label: 'BCBS AR',
+          expected_date: '2026-05-26',
+          method_label: null,
+          amount: '36000.00',
+          suppress_reason: null,
+          matched_era_key: null,
+        },
+      ]}
+    />,
+  );
+  assert.ok(html.includes('$36,000.00'), 'the corrected amount renders');
+  assert.ok(!html.includes('$72,000.00'), 'the pre-correction SQL aggregate is NOT rendered');
+  assert.ok(html.includes('corrected'), 'the correction is marked');
+});
+
+test('a suppress removes an overdue row entirely — landed money never shows as overdue', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([], { overdueRows: [PROOF_OVERDUE] })}
+      manual={[
+        {
+          id: 11,
+          kind: 'suppress',
+          facility_code: 'KWC',
+          payer_label: 'BCBS AR',
+          expected_date: '2026-05-26',
+          method_label: null,
+          amount: null,
+          suppress_reason: 'landed',
+          matched_era_key: null,
+        },
+      ]}
+    />,
+  );
+  assert.ok(!html.includes('Overdue'), 'no Overdue section when its only row is suppressed');
+  assert.ok(!html.includes('$72,000.00'), 'the suppressed money is gone');
+});
+
+test('EMPTY STATE, THIRD POPULATION: all-overdue never claims "nothing scheduled" alone', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody data={S({})} overrides={OS([], { overdueRows: [PROOF_OVERDUE] })} />,
+  );
+  // The approved wording, verbatim shape: statement + count + pointer.
+  assert.ok(
+    html.includes('No future payments scheduled — 1 overdue expected payment below.'),
+    'the approved third-population wording',
+  );
+  assert.ok(html.includes('$72,000.00'), 'and the overdue section actually renders below it');
+});
+
+test('an unparseable overdue amount is a COUNTED FLOOR, never a silent zero', () => {
+  // sumCents' contract: the bad row still renders, the subtotal excludes it, and the
+  // exclusion is stated — the ERA half's floor idiom, not a crash and not a quiet 0.
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([], {
+        overdueRows: [PROOF_OVERDUE, OR({ expected_date: '2026-06-01', amount: 'garbage' })],
+      })}
+    />,
+  );
+  assert.ok(html.includes('$72,000.00'), 'the readable subtotal is exactly the good row');
+  assert.ok(
+    html.includes('1 overdue row carries an unreadable amount'),
+    'the exclusion is stated, not silent',
+  );
+  assert.ok(html.includes('is a floor'), 'and the subtotal is named a floor');
+});
+
+test('an all-overdue book still surfaces stale 024 edits', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({})}
+      overrides={OS([], { overdueRows: [PROOF_OVERDUE] })}
+      manual={[
+        {
+          id: 13,
+          kind: 'correct',
+          facility_code: 'CAMH',
+          payer_label: 'GONE FROM SHEET',
+          expected_date: '2026-08-05',
+          method_label: null,
+          amount: '500.00',
+          suppress_reason: null,
+          matched_era_key: null,
+        },
+      ]}
+    />,
+  );
+  assert.ok(html.includes('No future payments scheduled — 1 overdue'), 'third population');
+  assert.ok(
+    html.includes('no longer match a forecast row'),
+    'the stale edit is visible exactly when the operator is reconciling by hand',
+  );
+});
+
+test('overdue truncation is announced per partition and names the drop direction', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([], { overdueRows: [PROOF_OVERDUE], overdueTruncated: true })}
+    />,
+  );
+  assert.ok(html.includes('Overdue list capped'), 'truncation is stated');
+  assert.ok(html.includes('newest overdue were dropped'), 'oldest-first retention is stated');
 });
 
 test('centsFromText is exact and rejects junk', () => {
@@ -394,7 +594,7 @@ test('the amount field constrains itself to a money shape in the markup', () => 
 });
 
 test('payerSuggestions dedupes across both feeds, forecast vocabulary first', () => {
-  const forecast = buildUpcomingGroups(S({}), OS([OR({ payer_label: 'BCBS' })]))
+  const forecast = buildUpcomingGroups(S({}), OS([OR({ payer_label: 'BCBS' })]).upcoming)
     .flatMap((g) => g.items)
     .map((i) => ({
       expected_date: '2026-08-03',

@@ -102,7 +102,10 @@ test('eraUpcomingPayments: runs under withTenant with the explicit tenant predic
     assert.ok(s.sql.includes('business_entity_id = $1::uuid'), 'explicit tenant predicate');
     // The cutoff is a BOUND PARAM, never SQL-side current_date/now(): sargable on 013's
     // (business_entity_id, payment_date) index, and the DST math stays unit-testable.
-    assert.ok(s.sql.includes('payment_date >= $2::date'), 'upcoming window is a bound date');
+    // STRICTLY `>` (Alec, 2026-08-03): a BPR16-today remit has LANDED — it belongs to the
+    // paid chart, not the upcoming tile. LANDED, not DATE-PASSED.
+    assert.ok(s.sql.includes('payment_date > $2::date'), 'upcoming window is a bound date');
+    assert.ok(!s.sql.includes('payment_date >= $2::date'), 'today is landed, never upcoming');
     assert.ok(!s.sql.includes('current_date'), 'never the UTC server day');
     assert.ok(!s.sql.includes('select *'), 'explicit allowlisted columns only');
     assert.deepEqual(s.params, [BE, '2026-08-01'], 'tenant + cutoff are the bound values');
