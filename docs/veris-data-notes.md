@@ -3503,3 +3503,42 @@ tab-first would have flipped the cron from silent-soft-fail to real hourly
 500s the moment parse started succeeding. With 023 now applied, creating the
 tab is safe: first successful sync lands rows in one replace-per-sync
 transaction, and `loadUpcomingOverrides` goes `ok:true`.
+
+## 025 — `intel` schema APPLIED LIVE (2026-08-03), after two 42501 posture corrections
+
+Applied via `apply_migration` (project `dbpabchpvipipkzkogta`) with explicit
+authorization, same session that built the worker preflight. **The file as
+originally authored could not apply**, and the corrected version is what both
+the repo and prod now carry. Two live-verified privilege walls, in order:
+
+1. `SET ROLE claims_admin; CREATE SCHEMA intel` → **42501 permission denied for
+   database postgres.** `claims_admin` holds neither CREATE on the database nor
+   CREATEROLE (`has_database_privilege` / `pg_roles.rolcreaterole` both false),
+   which also matches `staging`/`ref`/`collections` being postgres-owned. Fix:
+   sections 1–2 run as `postgres` itself, with
+   `CREATE SCHEMA IF NOT EXISTS intel AUTHORIZATION claims_admin` keeping the
+   schema born owned by `claims_admin`.
+2. Table DDL as `claims_admin` → **42501 permission denied for schema
+   extensions** on `extensions.halfvec(1024)`. `claims_admin` has NO standing
+   USAGE on `extensions`, yet owns the existing halfvec tables
+   (`staging.claim_signatures`, `ref.carc_embeddings`) — type/opclass ACLs are
+   checked at DDL time only. Fix: the migration brackets its DDL with
+   `GRANT USAGE ON SCHEMA extensions TO claims_admin` … `REVOKE`, ending at the
+   verified pre-apply posture exactly (`has_schema_privilege` false after).
+
+### Verified after apply (the file's own §8 block, run live)
+
+- 3 tables in `intel`, all `rls_on`, all owned by `claims_admin`.
+- `embedding` = `halfvec` atttypmod 1024; `embed_tsv` = stored generated tsvector.
+- 12 indexes total incl. `idx_ppf_embedding_hnsw` + both GINs.
+- 8 policies, zero `cmd = 'DELETE'`; `intel_writer` = INSERT+UPDATE on
+  run/finding, INSERT-only on run_check, **no DELETE anywhere**
+  (`has_table_privilege(... 'DELETE')` false on both).
+- Zero grants to anon/authenticated/PUBLIC.
+- The worker's `PREFLIGHT_SQL` (src/intel/payer_policy/preflight.ts) returns
+  all-true independently.
+
+**Still NOT green for the Sept 2 cron:** GH repo secrets `ANTHROPIC_API_KEY` /
+`INTEL_WRITER_DATABASE_URL` are believed unset, and `intel_writer` is NOLOGIN
+until credentials are provisioned out of band. 025 closes the schema gap only.
+Next Veris number remains **026**.

@@ -13,6 +13,7 @@ import {
   resolveStatus, shouldUpdateFinding, upsertRunResults, type Queryable,
 } from '../src/intel/payer_policy/upsert.js';
 import { estimateCostUsd, failureGateOf, runOnePayer } from '../src/intel/payer_policy/run.js';
+import { PREFLIGHT_SQL, assertIntelPreflight, preflightGaps } from '../src/intel/payer_policy/preflight.js';
 import type { EmitFindingsPayload, RawFinding } from '../src/intel/payer_policy/types.js';
 
 /**
@@ -607,4 +608,107 @@ test('emit_findings called twice is unioned and flagged, not an error', async ()
   assert.equal(res.payload?.findings.length, 2);
   assert.deepEqual(res.failures, []);
   assert.ok(res.anomalies[0]?.includes('called 2 times'));
+});
+
+// --- DB preflight (P1) ------------------------------------------------------
+
+test('preflight passes on a fully-provisioned intel schema', async () => {
+  const db: Queryable = {
+    query: async () => ({
+      rowCount: 1,
+      rows: [{
+        schema_ok: true, role_ok: true,
+        run_table_ok: true, finding_table_ok: true, check_table_ok: true,
+        run_write_ok: true, finding_write_ok: true, check_insert_ok: true,
+      }],
+    }),
+  };
+  await assert.doesNotReject(() => assertIntelPreflight(db));
+});
+
+test('preflight names EVERY gap in one error when 025 is unapplied', async () => {
+  // The exact state of prod today: no schema, no role, nothing else either.
+  const db: Queryable = {
+    query: async () => ({
+      rowCount: 1,
+      rows: [{
+        schema_ok: false, role_ok: false,
+        run_table_ok: false, finding_table_ok: false, check_table_ok: false,
+        run_write_ok: false, finding_write_ok: false, check_insert_ok: false,
+      }],
+    }),
+  };
+  await assert.rejects(() => assertIntelPreflight(db), (err: Error) => {
+    assert.match(err.message, /schema intel/);
+    assert.match(err.message, /role intel_writer/);
+    assert.match(err.message, /table intel\.payer_policy_run\b/);
+    assert.match(err.message, /table intel\.payer_policy_finding/);
+    assert.match(err.message, /table intel\.payer_policy_run_check/);
+    assert.match(err.message, /025_payer_policy_intel\.sql/);
+    // Grant gaps are implied by the missing tables/role — not repeated as noise.
+    assert.ok(!err.message.includes('grant'), 'no grant noise when tables are missing');
+    // One line: the operator sees the whole gap set in a single log entry.
+    assert.ok(!err.message.includes('\n'), 'single-line error');
+    return true;
+  });
+});
+
+test('preflight reports a grant gap only when role and table both exist', () => {
+  const base = {
+    schema_ok: true, role_ok: true,
+    run_table_ok: true, finding_table_ok: true, check_table_ok: true,
+    run_write_ok: true, finding_write_ok: true, check_insert_ok: true,
+  };
+  assert.deepEqual(preflightGaps(base), []);
+  assert.deepEqual(
+    preflightGaps({ ...base, finding_write_ok: false }),
+    ['grant INSERT,UPDATE on intel.payer_policy_finding to intel_writer'],
+  );
+  assert.deepEqual(
+    preflightGaps({ ...base, check_insert_ok: false }),
+    ['grant INSERT on intel.payer_policy_run_check to intel_writer'],
+  );
+  // Missing role: grant flags are all false but must not be reported.
+  assert.deepEqual(
+    preflightGaps({
+      ...base, role_ok: false, run_write_ok: false, finding_write_ok: false, check_insert_ok: false,
+    }),
+    ['role intel_writer'],
+  );
+});
+
+test('preflight rejects an empty probe result rather than passing vacuously', async () => {
+  const db: Queryable = { query: async () => ({ rowCount: 0, rows: [] }) };
+  await assert.rejects(() => assertIntelPreflight(db), /returned no row/);
+});
+
+test('preflight SQL is a fixed literal probing catalogs only, guarded per CASE', () => {
+  // No parameters, no interpolation targets, and every has_table_privilege call
+  // sits under the role+table CASE guard so a partial apply reports gaps
+  // instead of erroring the probe.
+  assert.ok(!PREFLIGHT_SQL.includes('$'), 'no bind params or template holes');
+  const privilegeCalls = PREFLIGHT_SQL.match(/has_table_privilege/g) ?? [];
+  const guards = PREFLIGHT_SQL.match(/CASE WHEN role_ok AND \w+_table_ok/g) ?? [];
+  assert.equal(privilegeCalls.length, 5);
+  assert.equal(guards.length, 3);
+});
+
+// --- search/fetch budgets (P2, raised 2026-08-03) ---------------------------
+
+test('roster budgets match the 2026-08-03 raise — a deliberate, measured change', () => {
+  // budget_exhausted was 28/40 unreachable rows at the old caps (federal 20,
+  // payers 10, fetch 6). Changing these numbers is a cost decision (~$55-65/run
+  // estimated) — re-measure with DRY_RUN=1 before trusting a new figure.
+  const budgets = Object.fromEntries(ROSTER.map((r) => [r.key, [r.searchUses, r.fetchUses]]));
+  assert.deepEqual(budgets, {
+    federal: [28, 8],
+    codesets: [8, 10],
+    optum: [14, 10],
+    anthem: [14, 10],
+    cigna: [14, 10],
+    aetna: [14, 10],
+    umr: [14, 10],
+    bsca: [14, 10],
+    bcbstx: [14, 10],
+  });
 });

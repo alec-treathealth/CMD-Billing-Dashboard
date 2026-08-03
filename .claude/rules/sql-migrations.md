@@ -11,7 +11,7 @@ Two separate planes. Never put a file in the wrong directory.
 | Plane | Directory | Next number (as of 2026-08-03) |
 |---|---|---|
 | Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0080** |
-| Veris ML (`staging`, `ref`, `core`) | `SQL Schemas/0NN_*.sql` | **026** |
+| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **026** |
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
 0077. Never edit 023, 024, or 025 in place.
@@ -29,11 +29,12 @@ matching is poisoned by `2026-06-22_claim_line_nullcredit_dedup.sql` and by
 `.ts` files in `SQL Schemas/`.
 
 Veris apply state as of 2026-08-03, which is NOT the same as the file order:
-**024 APPLIED LIVE · 023 APPLIED LIVE (2026-08-03, after 024) · 025 authored but NOT
-applied.** 024 went first because 023 was under concurrent revision and 024 has no executable
-dependency on it — no FK, no view, no trigger (the resolver is in
-`src/veris/upcomingForecast.ts`); 023 followed once that revision settled. Do not read the
-numbering as an apply order. See `docs/veris-data-notes.md` §§ "023 …" / "024 …".
+**024 APPLIED LIVE · 023 APPLIED LIVE (2026-08-03, after 024) · 025 APPLIED LIVE
+(2026-08-03, after two 42501 posture corrections — see the file header).** 024 went first
+because 023 was under concurrent revision and 024 has no executable dependency on it — no FK,
+no view, no trigger (the resolver is in `src/veris/upcomingForecast.ts`); 023 followed once
+that revision settled. Do not read the numbering as an apply order. See
+`docs/veris-data-notes.md` §§ "023 …" / "024 …" / "025 …".
 
 **Merging a migration in a PR does not apply it to prod.** Same-PR code 500s
 until `apply_migration` runs. This has already caused one incident (0056 broke

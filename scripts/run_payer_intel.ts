@@ -11,12 +11,16 @@
  * one key never aborts the rest. Reads ANTHROPIC_API_KEY and, unless DRY_RUN,
  * INTEL_WRITER_DATABASE_URL from the environment. Neither is ever logged.
  *
- * PRECONDITION: `SQL Schemas/025_payer_policy_intel.sql` must be applied. Without
- * it every write fails against a missing intel schema.
+ * PRECONDITION: `SQL Schemas/025_payer_policy_intel.sql` must be applied. A DB
+ * preflight (src/intel/payer_policy/preflight.ts) asserts the intel schema and
+ * intel_writer grants before the first API call, so an unapplied migration
+ * costs one fast red run instead of the full research spend. DRY_RUN skips it —
+ * dry runs never touch the DB.
  */
 
 import https from 'node:https';
 import { Pool } from 'pg';
+import { assertIntelPreflight } from '../src/intel/payer_policy/preflight.js';
 import { ROSTER, rosterEntry, rosterKeys } from '../src/intel/payer_policy/roster.js';
 import { runOnePayer } from '../src/intel/payer_policy/run.js';
 import { PAYER_POLICY_SYSTEM_PROMPT, DEFAULT_FOCUS } from '../src/intel/payer_policy/systemPrompt.js';
@@ -94,6 +98,16 @@ async function main(): Promise<void> {
     // only pool.query(sql, params) is used — never a named prepare.
     pool = new Pool({ connectionString: url, max: 2 });
     db = { query: (sql, params) => pool!.query(sql, params) };
+    // Fail BEFORE the first API call: with 025 unapplied the roster researches
+    // ~$40 / ~50 min and then fails every write. Also forces the lazy pool to
+    // connect, so a bad credential surfaces here instead of after the spend.
+    try {
+      await assertIntelPreflight(db);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      await pool.end();
+      process.exit(1);
+    }
   }
 
   const { windowStart, windowEnd } = researchWindow(new Date());
