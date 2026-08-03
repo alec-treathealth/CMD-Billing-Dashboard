@@ -81,6 +81,7 @@ import { CohortSheet } from '@/components/qualify/cohort-sheet';
 import { FacilityPanel } from '@/components/qualify/facility-panel';
 import { PolicyStrip } from '@/components/qualify/policy-strip';
 import { WindowLadder } from '@/components/qualify/window-ladder';
+import { QualifyAiPanel } from '@/components/qualify/qualify-ai-panel';
 import { BookKpiTiles, EvidenceGauge, HeatingUpCards, HeatingUpSkeleton } from '@/components/qualify/overview';
 import { WindowControl } from '@/components/qualify/window-control';
 import { VobModal } from '@/components/qualify/vob-modal';
@@ -1226,6 +1227,15 @@ export function QualifyTab({
               )}
             </div>
           </div>
+
+          {/* ── Phase H: the AI explainer — chips + streamed TL;DR/Signals/Risks, grounded in the
+              snapshot on screen. Lead (identifier) snapshot preferred; by-payer panel otherwise. */}
+          {(() => {
+            const aiSnap = leadSnapshot && (leadSnapshot.resolved || leadSnapshot.facilities.length > 0 || leadSnapshot.policy?.found)
+              ? leadSnapshot
+              : panelSnapshot;
+            return aiSnap ? <QualifyAiPanel snapshot={aiSnap} blind={!hasAmounts} /> : null;
+          })()}
 
           <CohortSheet
             data={cohortSheet?.data ?? null}
