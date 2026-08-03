@@ -81,6 +81,7 @@ async function fetchCensusItems(boardId: string, columnIds: string[]): Promise<A
     cursor = pageData?.cursor ?? null;
     if (!cursor) break;
   }
+  if (cursor) throw new Error(`monday census pagination truncated after 10 pages (board ${boardId})`);
   return out;
 }
 
@@ -116,7 +117,7 @@ export interface CensusSyncStats {
  */
 export async function runQualifyCensusSync(
   client: pg.PoolClient,
-  opts: { boards?: readonly CensusBoardConfig[]; today?: string } = {},
+  opts: { boards?: readonly CensusBoardConfig[]; today?: string; businessEntityId?: string } = {},
 ): Promise<CensusSyncStats> {
   const boards = opts.boards ?? MONDAY_CENSUS_BOARDS;
   // "Today" in US Central, not UTC: both live boards are US facilities, and a UTC date rolls
@@ -169,7 +170,10 @@ export async function runQualifyCensusSync(
         urDate: resolved.urId ? isoDate(r[resolved.urId]) : null,
       }));
       const agg = aggregateCensusItems(items, today);
+      const businessEntityId = opts.businessEntityId ?? process.env.BUSINESS_ENTITY_ID;
+      if (!businessEntityId) throw new Error('Missing businessEntityId for census sync');
       const upsert = buildUpsertCensusRowQuery({
+        business_entity_id: businessEntityId,
         facility_code: board.facilityCode,
         board_id: board.boardId,
         board_family: board.family,

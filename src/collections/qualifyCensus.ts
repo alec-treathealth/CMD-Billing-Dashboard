@@ -157,18 +157,20 @@ export function buildUpsertCensusRowQuery(row: {
   avg_los_days: number | null;
   auth_sample: number;
   next_ur_date: string | null;
+  business_entity_id: string;
 }): { sql: string; params: unknown[] } {
   return {
     sql:
       'insert into collections.qualify_facility_census ' +
-      '(facility_code, board_id, board_family, admitted_count, open_beds, bed_capacity, avg_auth_days, avg_los_days, auth_sample, next_ur_date, synced_at) ' +
-      'values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date, now()) ' +
-      'on conflict (facility_code) do update set ' +
+      '(business_entity_id, facility_code, board_id, board_family, admitted_count, open_beds, bed_capacity, avg_auth_days, avg_los_days, auth_sample, next_ur_date, synced_at) ' +
+      'values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::date, now()) ' +
+      'on conflict (business_entity_id, facility_code) do update set ' +
       'board_id = excluded.board_id, board_family = excluded.board_family, admitted_count = excluded.admitted_count, ' +
       'open_beds = excluded.open_beds, bed_capacity = excluded.bed_capacity, avg_auth_days = excluded.avg_auth_days, ' +
       'avg_los_days = excluded.avg_los_days, auth_sample = excluded.auth_sample, next_ur_date = excluded.next_ur_date, ' +
       'synced_at = now()',
     params: [
+      row.business_entity_id,
       row.facility_code,
       row.board_id,
       row.board_family,
@@ -184,12 +186,12 @@ export function buildUpsertCensusRowQuery(row: {
 }
 
 /** Read every facility's census aggregates (the rating factor's seam — tiny table, whole read). */
-export function buildQualifyCensusReadQuery(): { sql: string; params: unknown[] } {
+export function buildQualifyCensusReadQuery(businessEntityId: string): { sql: string; params: unknown[] } {
   return {
     sql:
       'select facility_code, avg_auth_days::float8 as avg_auth_days, avg_los_days::float8 as avg_los_days, ' +
       "to_char(next_ur_date, 'YYYY-MM-DD') as next_ur_date, open_beds " +
-      'from collections.qualify_facility_census',
-    params: [],
+      'from collections.qualify_facility_census where business_entity_id = $1::uuid',
+    params: [businessEntityId],
   };
 }
