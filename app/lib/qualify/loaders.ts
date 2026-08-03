@@ -76,11 +76,19 @@ export async function loadQualifyWindowRungs(
   return res.rows[0] ?? { p30: 0, p60: 0, p90: 0, p180: 0, p365: 0 };
 }
 
-/** Postgres error codes that mean "the registry isn't there yet", not "the database is down". */
-const REGISTRY_ABSENT_CODES = new Set(['42P01' /* undefined_table */, '3F000' /* invalid_schema_name */, '42501' /* insufficient_privilege (grants not applied) */]);
+/** Postgres error codes that mean "the registry isn't there yet", not "the database is down".
+ *  0077 creates schema + tables + grants in ONE apply, so there is no legitimate partially-granted
+ *  steady state — 42501 (insufficient_privilege) is deliberately NOT here: after apply, a
+ *  permission error is a real outage and must surface, never masquerade as "unseeded"
+ *  (review finding #3 — the confidently-wrong axis). */
+const REGISTRY_ABSENT_CODES = new Set(['42P01' /* undefined_table */, '3F000' /* invalid_schema_name */]);
 
 function registryAbsent(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && REGISTRY_ABSENT_CODES.has(String((err as { code?: unknown }).code));
+  const code = typeof err === 'object' && err !== null ? String((err as { code?: unknown }).code) : '';
+  const absent = REGISTRY_ABSENT_CODES.has(code);
+  // SQLSTATE is non-PHI; the swallow must stay discoverable in server logs.
+  if (absent) console.error(`coding registry unavailable (sqlstate ${code}) — treating as unseeded`);
+  return absent;
 }
 
 /**

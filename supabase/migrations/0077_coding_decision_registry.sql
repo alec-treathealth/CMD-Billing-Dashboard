@@ -131,14 +131,17 @@ create policy coding_audit_editor_insert on coding.code_decision_audit
 
 -- 4. Grants --------------------------------------------------------------------------------------
 -- Reader: SELECT both (the rating factor + registry UI list run as claims_reader).
--- Editor: INSERT + UPDATE on code_decision (UPDATE only for the supersede close — the app writes
--- decision changes as INSERT-new + close-old), INSERT-only on the audit, SELECT to read back its
--- own writes inside the transaction. Sequences: identity columns need USAGE.
+-- Editor: INSERT on code_decision plus a COLUMN-LEVEL UPDATE on exactly the two supersede columns —
+-- decision fields are immutable BY PRIVILEGE, not convention (the §4 argument: the sheet died by
+-- destructive overwrite; the registry must be structurally unable to repeat it). The audit table is
+-- INSERT-only for the editor — no SELECT: RETURNING needs no read grant, and audit reads belong to
+-- claims_reader. Sequences: identity columns need USAGE.
 
 grant usage on schema coding to claims_reader, consolidated_reader, coding_editor;
 grant select on coding.code_decision, coding.code_decision_audit to claims_reader, consolidated_reader;
-grant select, insert, update on coding.code_decision to coding_editor;
-grant select, insert on coding.code_decision_audit to coding_editor;
+grant select, insert on coding.code_decision to coding_editor;
+grant update (effective_to, superseded_by) on coding.code_decision to coding_editor;
+grant insert on coding.code_decision_audit to coding_editor;
 grant usage, select on all sequences in schema coding to coding_editor;
 
 -- 5. Verification (run manually after apply)
@@ -148,7 +151,8 @@ grant usage, select on all sequences in schema coding to coding_editor;
 --   from pg_class c join pg_namespace n on n.oid = c.relnamespace
 --  where n.nspname = 'coding' and c.relkind = 'r';
 --
--- -- editor is append/update-narrow: INSERT+UPDATE on code_decision, INSERT on audit, NO DELETE anywhere
+-- -- editor is append-narrow: INSERT + column-UPDATE(effective_to, superseded_by) on code_decision,
+-- -- INSERT-only on audit, NO DELETE anywhere (column grants appear in information_schema.column_privileges)
 -- select grantee, table_name, privilege_type from information_schema.role_table_grants
 --  where table_schema = 'coding' order by grantee, table_name, privilege_type;
 --

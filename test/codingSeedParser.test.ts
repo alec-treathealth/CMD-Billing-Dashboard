@@ -135,3 +135,13 @@ test('blank lines and unknown extra columns are tolerated', () => {
   assert.equal(out.decisions.length, 1);
   assert.equal(out.decisions[0]!.payer_family, 'AETNA');
 });
+
+
+test('blank facility_code: row seeds payer-wide AND the dry run names it (non-skipping warning, finding #7)', () => {
+  const out = parseCodingSeedTsv(tsv('\tGEHA\t05/01/2026\tH0017/0158\t\tOPEN TEST\t'));
+  assert.equal(out.decisions.length, 1);
+  assert.equal(out.decisions[0]!.facility_code, null);
+  assert.equal(out.skipped, 0);
+  assert.equal(out.defects.length, 1);
+  assert.match(out.defects[0]!.reason, /PAYER-WIDE default/);
+});

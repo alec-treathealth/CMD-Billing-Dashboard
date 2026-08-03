@@ -85,6 +85,17 @@ test('lookupCodingDecision: facility+LOC exact beats facility beats payer-wide; 
   assert.equal(lookupCodingDecision(rows, 'TOTALLY UNKNOWN', 'NMH', 'IP'), null); // unmapped label
 });
 
+test('lookupCodingDecision EXCLUDES a payer-wide row whose LOC contradicts the facility (finding #2)', () => {
+  // An OP facility must never be rated on an RTC-only payer-wide default — exclusion, not score-0 match.
+  const rows = [row({ id: 9, facility_code: null, level_of_care: 'RTC' })];
+  assert.equal(lookupCodingDecision(rows, 'BCBS', 'NMH', 'OP'), null);
+  // …but the SAME row matches the IP side, and a facility-EXACT row wins even on LOC mismatch
+  // (the facility-specific decision beats our crosswalk-guessed care setting).
+  assert.equal(lookupCodingDecision(rows, 'BCBS', 'NMH', 'IP')?.id, 9);
+  const exact = [row({ id: 10, facility_code: 'NMH', level_of_care: 'RTC' })];
+  assert.equal(lookupCodingDecision(exact, 'BCBS', 'NMH', 'OP')?.id, 10);
+});
+
 test('lookupCodingDecision ignores superseded rows', () => {
   const rows = [row({ id: 5, effective_to: '2026-07-15' })];
   assert.equal(lookupCodingDecision(rows, 'BCBS', null, null), null);

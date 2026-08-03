@@ -228,6 +228,11 @@ export function buildFacilityRankingQuery(
   kind: QualifyTokenKind | null = null,
 ): { sql: string; params: unknown[] } {
   const ent = assertEntityScope(entityIds, 'buildFacilityRankingQuery');
+  // Fail-closed at the CHOKEPOINT (the assertEntityScope pattern): a null payer with no market
+  // narrow would silently rank the whole book through the comparable path (review finding #5).
+  if (payer === null && !(market.employers?.length || market.funding?.length)) {
+    throw new Error('buildFacilityRankingQuery: payer=null (cohort mode) requires a non-empty market narrow');
+  }
   const { params, add } = paramList();
   const e = add(ent);
   const payerCond = payer !== null ? `and primary_payer = ${add(payer)} ` : '';

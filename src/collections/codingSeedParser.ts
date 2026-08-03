@@ -298,6 +298,9 @@ export function parseCodingSeedTsv(tsv: string, facilityAliases: Record<string, 
     }
 
     // Facility: exact facility_code OR alias long-form; unmatched text → defect, row kept payer-wide.
+    // A BLANK facility is also named in the report (non-skipping): blank means payer-wide-default
+    // here, but in the sheet blank usually means "forward-fill from the block header" — the operator
+    // must confirm each one is intentional, never a silent guess (review finding #7).
     const rawFac = col(row, 'facility_code');
     let facility: string | null = null;
     if (rawFac !== '') {
@@ -307,6 +310,8 @@ export function parseCodingSeedTsv(tsv: string, facilityAliases: Record<string, 
       else {
         defects.push({ line: lineNo, field: 'facility_code', value: rawFac, reason: 'unrecognized facility text — add it to the alias map (row seeded payer-wide until fixed)' });
       }
+    } else {
+      defects.push({ line: lineNo, field: 'facility_code', value: '', reason: 'blank facility — row seeds as a PAYER-WIDE default (matches every facility); confirm this is intentional, not a missed block-header forward-fill' });
     }
 
     const locRaw = col(row, 'level_of_care').toUpperCase();

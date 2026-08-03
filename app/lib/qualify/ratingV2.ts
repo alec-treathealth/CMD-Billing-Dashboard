@@ -215,6 +215,10 @@ export interface QualifyRatingV2Input {
   provenance: QualifyProvenance;
   // coding (Phase A)
   registrySeeded: boolean;
+  /** False on the comparable-cohort path: no payer was resolved, and code decisions are
+   *  payer-scoped — the factor is excluded (renormalized away) rather than scored 0 against a
+   *  lookup that could never succeed. Default true. */
+  payerKnown?: boolean;
   codingLifecycle: CodingLifecycle | null;
   codingDecidedOn: string | null; // ISO date
   codingCodesLabel: string | null; // e.g. 'H0017 / 0158' — display only
@@ -281,6 +285,18 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
       available: false,
       direction: 'neu',
       detail: 'Code decision registry not yet seeded — this factor joins the score once the billing team’s matrix is loaded.',
+    });
+  } else if (input.payerKnown === false) {
+    // Comparable-cohort (estimated) reads carry no resolved payer; a payer-scoped lookup can never
+    // succeed, so exclude rather than uniformly dragging every estimate to 0/30 (review finding #13).
+    factors.push({
+      key: 'coding',
+      label: QUALIFY_FACTOR_LABELS.coding,
+      weight: QUALIFY_FACTOR_WEIGHTS.coding,
+      score: null,
+      available: false,
+      direction: 'neu',
+      detail: 'No payer resolved for this estimated read — code decisions are payer-scoped, so this factor is excluded rather than guessed.',
     });
   } else if (input.codingLifecycle === null) {
     factors.push({

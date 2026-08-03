@@ -83,7 +83,7 @@ export function buildQualifyPolicyQuery(
     'mode() within group (order by funding) as funding, ' +
     'mode() within group (order by policy_type) as policy_type, ' +
     'mode() within group (order by plan_type) as plan_type, ' +
-    'bool_or(group_number_bidx is not null) as group_on_file, ' +
+    'coalesce(bool_or(group_number_bidx is not null), false) as group_on_file, ' +
     "to_char(max(vob_created_at), 'YYYY-MM-DD') as vob_fresh_as_of, " +
     'mode() within group (order by ind_deductible) as deductible, ' +
     'mode() within group (order by ind_deductible_met) as deductible_met, ' +

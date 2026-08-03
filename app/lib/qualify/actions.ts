@@ -82,10 +82,12 @@ import type {
  * loadQualifyFacilities' published type still says `payer: string` (app/lib/server.ts is under
  * concurrent development and is deliberately untouched by the v2 branch), but the SQL builder
  * underneath (buildFacilityRankingQuery) accepts `payer: string | null` — null is the v2
- * comparable-cohort ranking, and the core guarantees a market narrow rides with it. This shim is
- * the ONE place that widening is asserted; delete it when server.ts's own signature widens.
+ * comparable-cohort ranking, guarded at the builder chokepoint (a null payer without a market
+ * narrow throws). The wrapper widens ONLY the payer parameter — every other argument stays
+ * type-checked (review finding #12). Delete when server.ts's own signature widens.
  */
-const loadFacilitiesV2 = loadQualifyFacilities as unknown as QualifyDeps['loadFacilities'];
+const loadFacilitiesV2: QualifyDeps['loadFacilities'] = (payer, from, to, entityIds, market, token, kind) =>
+  loadQualifyFacilities(payer as string, from, to, entityIds, market, token ?? undefined, kind ?? undefined);
 
 const realDeps: QualifyDeps = {
   requirePrincipal: requireQualifyPrincipal,

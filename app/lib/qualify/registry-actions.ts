@@ -172,7 +172,8 @@ export async function saveCodingDecision(
     if (err instanceof Error && err.message === 'supersede_target_not_current') {
       return { ok: false, error: 'That decision was already superseded — reload and try again.' };
     }
-    console.error('saveCodingDecision failed'); // generic; never echo SQL/driver detail to the client
+    const code = typeof err === 'object' && err !== null ? String((err as { code?: unknown }).code ?? '') : '';
+    console.error(`saveCodingDecision failed (sqlstate ${code || 'none'})`); // code only; never SQL/driver detail, never to the client
     return { ok: false, error: 'The decision could not be saved.' };
   }
 }

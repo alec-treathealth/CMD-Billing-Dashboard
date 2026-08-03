@@ -280,6 +280,13 @@ interface QualifyFactorContext {
 
 const NO_CODING = { seeded: false, rows: [] as CodingDecisionRow[] };
 
+/** Comparable-cohort rankings are POPULATION estimates — recency beats reach. Unclamped, the
+ *  funding-cohort shape at 365d measured 17.3s on prod (EXPLAIN ANALYZE 2026-08-03: 152k-row scan +
+ *  12.8MB external sort); at 90d the same shape measures ~0.32s (44k rows, 3.5MB sort). The clamp is
+ *  DISCLOSED, not hidden: windowAgeMultiplier(90)=0.9 prices it into data confidence, and every
+ *  factor detail names the 90d reach (review finding #6). */
+const QUALIFY_COMPARABLE_WINDOW_DAYS = 90 as const;
+
 /** Days spanned by [from, to) — the data-confidence age input for ANY window shape. */
 function windowDaysOf(from: string, to: string): number {
   const ms = Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`);
@@ -304,17 +311,6 @@ async function factorContext(
   return { windowDays: windowDaysOf(from, to), provenance, coding, census, payer, now: deps.now() };
 }
 
-/** The context used when a call path deliberately skips factor inputs (compose/cases-only paths). */
-function defaultFactorContext(deps: QualifyDeps, from: string, to: string): QualifyFactorContext {
-  return {
-    windowDays: windowDaysOf(from, to),
-    provenance: 'direct',
-    coding: NO_CODING,
-    census: new Map(),
-    payer: null,
-    now: deps.now(),
-  };
-}
 
 /** Non-PHI alpha-prefix echo (≤3 chars) — never the raw member id. */
 function alphaEcho(raw: string): string {
@@ -371,6 +367,7 @@ function assembleFacilities(
         windowDays: ctx.windowDays,
         provenance: ctx.provenance,
         registrySeeded: ctx.coding.seeded,
+        payerKnown: ctx.payer !== null,
         codingLifecycle: decision ? (decision.lifecycle as import('./ratingV2').CodingLifecycle) : null,
         codingDecidedOn: decision?.decided_on ?? null,
         codingCodesLabel: decision ? codingCodesLabel(decision) : null,
@@ -492,7 +489,7 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
   // (input.auto falsy) skip it entirely — the Range menu stays the biller's override.
   let window2: QualifyWindow = window;
   let ladder: QualifyWindowLadder | null = null;
-  if (input.auto === true && deps.loadWindowRungs) {
+  if (input.auto === true && kind === 'prefix' && deps.loadWindowRungs) {
     const rungDays: QualifyTrailingDays[] = [30, 60, 90, 180, 365];
     const now = deps.now();
     const boundsOf = (d: QualifyTrailingDays) => qualifyWindowBounds({ kind: 'trailing', days: d }, now);
@@ -568,8 +565,10 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
     // ── DIRECT provenance: this identifier has its own claims history. Identifier-scoped ranking:
     // the panel + counts + Recent Claims all describe the SEARCHED token's footprint (ruling: the
     // facilities the user sees must be the ones that billed what they searched).
-    const ctx = await factorContext(deps, payerName, from, to, 'direct');
-    const [facRows, landingRaw] = await Promise.all([
+    // Factor context (coding + census) is independent of the row loads — run all three together
+    // (review finding #11: two avoidable serial round-trips on a latency-sensitive surface).
+    const [ctx, facRows, landingRaw] = await Promise.all([
+      factorContext(deps, payerName, from, to, 'direct'),
       deps.loadFacilities(payerName, from, to, gate.entityIds, input.market, token, kind),
       deps.loadIdentifierLandingFacility(token, kind, payerName, from, to, gate.entityIds),
     ]);
@@ -614,10 +613,15 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
         : null;
     if (comparable) {
       try {
-        const ctx = await factorContext(deps, null, from, to, comparable.provenance);
         // payer=null + a NON-EMPTY market: the builder ranks the cohort across all payers. The
         // payer-wide floor applies (this is a book-shaped ranking, not an identifier footprint).
-        const facRows = await deps.loadFacilities(null, from, to, gate.entityIds, comparable.market);
+        // Window is CLAMPED to the comparable span (see the constant above) — never the ladder's
+        // 365d worst case, which this path would otherwise always hit (zero own-claims ⇒ widest rung).
+        const cb = qualifyWindowBounds({ kind: 'trailing', days: QUALIFY_COMPARABLE_WINDOW_DAYS }, now);
+        const [ctx, facRows] = await Promise.all([
+          factorContext(deps, null, cb.from, cb.to, comparable.provenance),
+          deps.loadFacilities(null, cb.from, cb.to, gate.entityIds, comparable.market),
+        ]);
         const facilities = assembleFacilities(facRows, ctx, true);
         const snap: QualifySnapshot = {
           resolved: null,
@@ -671,8 +675,10 @@ export async function getQualifySnapshotByPayerCore(
   });
 
   const { from, to } = qualifyWindowBounds(window, deps.now());
-  const ctx = await factorContext(deps, payer, from, to, 'direct');
-  const facRows = await deps.loadFacilities(payer, from, to, gate.entityIds, input.market);
+  const [ctx, facRows] = await Promise.all([
+    factorContext(deps, payer, from, to, 'direct'),
+    deps.loadFacilities(payer, from, to, gate.entityIds, input.market),
+  ]);
 
   const facilities = assembleFacilities(facRows, ctx);
   const resolved: QualifyResolved = {
@@ -742,9 +748,10 @@ export async function getQualifySnapshotByNameCore(
   if (!payerName) return emptySnapshot(gate.hasAmounts); // never-seen name → VOB (resolved stays null)
 
   const { from, to } = qualifyWindowBounds(window, deps.now());
-  const ctx = await factorContext(deps, payerName, from, to, 'direct');
-  // Identifier-scoped ranking (same as the member/prefix path) — narrowed to the searched name's footprint.
-  const [facRows, landingRaw] = await Promise.all([
+  // Identifier-scoped ranking (same as the member/prefix path) — narrowed to the searched name's
+  // footprint. Factor context rides the same Promise.all (review finding #11).
+  const [ctx, facRows, landingRaw] = await Promise.all([
+    factorContext(deps, payerName, from, to, 'direct'),
     deps.loadFacilities(payerName, from, to, gate.entityIds, input.market, token, 'client_name'),
     deps.loadIdentifierLandingFacility(token, 'client_name', payerName, from, to, gate.entityIds),
   ]);

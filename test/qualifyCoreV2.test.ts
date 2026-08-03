@@ -184,11 +184,11 @@ test('admissions_seat: policy benefit strings are STRIPPED; factors/ratings iden
 });
 
 test('comparable_employer: no own claims → cohort ranking (payer NULL + employer market), resolved stays null', async () => {
-  const facCalls: Array<{ payer: string | null; market: unknown }> = [];
+  const facCalls: Array<{ payer: string | null; market: unknown; from: string; to: string }> = [];
   const deps = v2deps(SUPER, {
     resolvePayer: async () => null,
-    loadFacilities: async (payer, _f, _t, _e, market) => {
-      facCalls.push({ payer, market });
+    loadFacilities: async (payer, from, to, _e, market) => {
+      facCalls.push({ payer, market, from, to });
       return FAC;
     },
   });
@@ -200,6 +200,12 @@ test('comparable_employer: no own claims → cohort ranking (payer NULL + employ
   assert.equal(facCalls.length, 1);
   assert.equal(facCalls[0]!.payer, null);
   assert.deepEqual(facCalls[0]!.market, { employers: ['VANDERBILT'] });
+  // Finding #6: the cohort ranking is CLAMPED to 90 days (never the ladder's 365d worst case —
+  // measured 17.3s unclamped vs ~0.32s clamped on prod), and the clamp is disclosed in the factors.
+  const span = (Date.parse(facCalls[0]!.to) - Date.parse(facCalls[0]!.from)) / 86_400_000;
+  assert.equal(span, 90);
+  const conf = snap.facilities[0]!.factors.find((f) => f.key === 'dataConfidence')!;
+  assert.match(conf.detail, /window reached 90d/);
   // Cross-check the scope arrays still ride: both tenants pinned.
   assert.ok([BXR_ENTITY_ID, INDIGO_ENTITY_ID].every(Boolean));
 });
@@ -246,4 +252,33 @@ test('TTP factor rides the ranking row: median 41d lands in the facility factors
   const ttp = snap.facilities[0]!.factors.find((f) => f.key === 'ttp');
   assert.ok(ttp && ttp.available);
   assert.match(ttp!.detail, /Median 41 days/);
+});
+
+
+test('auto-window: an exact MEMBER-ID search skips the ladder (N-of-1 — a 10-patient floor is meaningless)', async () => {
+  let rungCalls = 0;
+  const deps = v2deps(SUPER, {
+    loadWindowRungs: async () => {
+      rungCalls++;
+      return RUNGS_THIN;
+    },
+  });
+  const snap = await getQualifySnapshotCore(deps, { query: 'AETMEMBER123', window: { kind: 'trailing', days: 30 }, auto: true });
+  assert.equal(rungCalls, 0);
+  assert.equal(snap.ladder, null);
+  assert.ok(snap.resolved);
+});
+
+test('comparable read: the coding factor is EXCLUDED (payer unknown), never a uniform 0/30 drag (finding #13)', async () => {
+  const deps = v2deps(SUPER, {
+    resolvePayer: async () => null,
+    loadCodingDecisions: async () => ({ seeded: true, rows: [] }),
+  });
+  const snap = await getQualifySnapshotCore(deps, AUTO_IN);
+  assert.equal(snap.provenance, 'comparable_employer');
+  const coding = snap.facilities[0]!.factors.find((f) => f.key === 'coding')!;
+  assert.equal(coding.available, false);
+  assert.match(coding.detail, /payer-scoped/);
+  // Renormalized over claims + confidence (+ ttp from the fixture's median): coding's 30 is absent.
+  assert.ok(snap.facilities[0]!.availableWeight <= 60);
 });

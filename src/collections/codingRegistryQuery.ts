@@ -268,9 +268,14 @@ export function lookupCodingDecision(
       const facWild = r.facility_code === null;
       if (!facExact && !facWild) return null;
       const loc = locMatches(r.level_of_care);
-      // exact facility + LOC = 3 · exact facility = 2 · payer-wide + LOC = 1 · payer-wide = 0
+      // Preference: exact facility + LOC = 3 · exact facility (LOC mismatch tolerated — the
+      // facility-specific decision wins even when its LOC tag disagrees with our care_setting
+      // resolution, which is itself a crosswalk guess) = 2 · payer-wide + LOC-compatible = 1.
+      // A payer-wide row whose level_of_care CONTRADICTS the facility's care setting is NOT a
+      // match — an OP facility must never be rated on an RTC/DTX-only default (review finding #2;
+      // the §8.3 LOC-inference question stays open, but exclusion is the safe side of it).
+      if (!facExact && !loc) return null;
       const score = (facExact ? 2 : 0) + (loc ? 1 : 0);
-      if (facExact || loc) return { r, score };
       return { r, score };
     })
     .filter((x): x is { r: CodingDecisionRow; score: number } => x !== null)

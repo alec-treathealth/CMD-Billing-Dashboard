@@ -29,11 +29,11 @@ test('policy query: aggregates only — no member-level projection, group number
   const { sql } = buildQualifyPolicyQuery('t', 'member_id');
   assert.match(sql, /where member_id_bidx = \$1/);
   assert.match(sql, /count\(distinct member_id_bidx\)::int as member_count/);
-  assert.match(sql, /bool_or\(group_number_bidx is not null\) as group_on_file/);
+  assert.match(sql, /coalesce\(bool_or\(group_number_bidx is not null\), false\) as group_on_file/);
   // The blind indexes are counted / presence-tested / equality-matched — never projected as values.
   const legitimate = sql
     .replace('count(distinct member_id_bidx)::int as member_count', '')
-    .replace('bool_or(group_number_bidx is not null) as group_on_file', '')
+    .replace('coalesce(bool_or(group_number_bidx is not null), false) as group_on_file', '')
     .replace('where member_id_bidx = $1', '');
   assert.ok(!legitimate.includes('member_id_bidx'), 'member_id_bidx only in count/where');
   assert.ok(!legitimate.includes('group_number_bidx'), 'group_number_bidx only in the presence test');
@@ -80,4 +80,10 @@ test('ranking (payer path) still binds payer and now returns the median TTP day 
   assert.match(sql, /percentile_cont\(0\.5\) within group \(order by \(payment_received - charge_date\)::float8\)/);
   assert.match(sql, /as median_days_to_payment/);
   assert.match(sql, /agg\.median_days_to_payment/);
+});
+
+
+test('ranking with payer=null and NO market narrow throws at the builder chokepoint (finding #5)', () => {
+  assert.throws(() => buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, {}), /market narrow/);
+  assert.throws(() => buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, { employers: [] }), /market narrow/);
 });
