@@ -13,7 +13,7 @@
  */
 
 import https from 'node:https';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 
 /** A research turn can exceed undici's 300s headers timeout (UND_ERR_HEADERS_TIMEOUT),
  *  and `undici` isn't resolvable here to override the dispatcher. node:https has no
@@ -65,19 +65,31 @@ const OUT_DIR = 'scratch/payer-intel';
 // originator: CMS. Researching them once per payer would pay for the same work
 // seven times, and it let federal hits mask a payer whose own sources returned
 // nothing. Payer keys now carry payer-own domains only.
-const PAYERS: Record<string, { display: string; domains: string[]; maxUses: number }> = {
+// `federal` was split in two after the 2026-08-03 batch: with cms.gov +
+// federalregister.gov + ama-assn.org + nubc.org on one 15-search budget, OPPS
+// and PFS consumed it all — ama-assn.org returned 1 URL of 150 and nubc.org
+// returned 0, and the run logged NUBC and NSA/IDR as never queried. Code-set
+// governance now has its own budget it cannot be starved out of.
+const PAYERS: Record<string, { display: string; domains: string[]; maxUses: number; fetchUses: number }> = {
   federal: {
-    display: 'Federal / standards bodies (CMS, AMA, NUBC) — industry-wide changes only, no single payer.',
-    domains: ['cms.gov', 'federalregister.gov', 'ama-assn.org', 'nubc.org'],
-    maxUses: 15,
+    display: 'Federal rules and rates — CMS and the Federal Register. Industry-wide changes only, no single payer.',
+    domains: ['cms.gov', 'federalregister.gov'],
+    maxUses: 20,
+    fetchUses: 8,
   },
-  anthem: { display: 'Anthem', domains: ['providernews.anthem.com', 'providers.anthem.com'], maxUses: 10 },
-  optum: { display: 'Optum / UnitedHealthcare Behavioral Health (Provider Express)', domains: ['public.providerexpress.com', 'uhcprovider.com'], maxUses: 10 },
-  cigna: { display: 'Cigna / Evernorth', domains: ['providernewsroom.com/evernorth', 'cigna.com', 'evernorth.com'], maxUses: 10 },
-  aetna: { display: 'Aetna', domains: ['aetna.com', 'meritain.com'], maxUses: 10 },
-  umr: { display: 'UMR', domains: ['umr.com'], maxUses: 10 },
-  bsca: { display: 'Blue Shield of California', domains: ['blueshieldca.com'], maxUses: 10 },
-  bcbstx: { display: 'Blue Cross Blue Shield of Texas', domains: ['bcbstx.com'], maxUses: 10 },
+  codesets: {
+    display: 'Code-set governance bodies — AMA (CPT) and NUBC (UB-04 revenue codes). Industry-wide code-set changes only, no single payer.',
+    domains: ['ama-assn.org', 'nubc.org'],
+    maxUses: 8,
+    fetchUses: 6,
+  },
+  anthem: { display: 'Anthem', domains: ['providernews.anthem.com', 'providers.anthem.com'], maxUses: 10, fetchUses: 6 },
+  optum: { display: 'Optum / UnitedHealthcare Behavioral Health (Provider Express)', domains: ['public.providerexpress.com', 'uhcprovider.com'], maxUses: 10, fetchUses: 6 },
+  cigna: { display: 'Cigna / Evernorth', domains: ['providernewsroom.com/evernorth', 'cigna.com', 'evernorth.com'], maxUses: 10, fetchUses: 6 },
+  aetna: { display: 'Aetna', domains: ['aetna.com', 'meritain.com'], maxUses: 10, fetchUses: 6 },
+  umr: { display: 'UMR', domains: ['umr.com'], maxUses: 10, fetchUses: 6 },
+  bsca: { display: 'Blue Shield of California', domains: ['blueshieldca.com'], maxUses: 10, fetchUses: 6 },
+  bcbstx: { display: 'Blue Cross Blue Shield of Texas', domains: ['bcbstx.com'], maxUses: 10, fetchUses: 6 },
 };
 
 // ------------------------------------------------------------- system prompt
@@ -89,7 +101,11 @@ You produce dated, citation-backed findings. You never fabricate a code, effecti
 
 1. Establish the window. The user gives you a LAST_DATE and today's date. Research only what changed in that window. Do not re-report items the user's PRIOR STATE block already contains.
 
+   WINDOW RULE — apply this exactly. An item is in-window if its PUBLICATION date (the date the payer, CMS, or standards body posted, announced, or bulletined it) falls in [LAST_DATE, RUN DATE]. Publication date is the filter. Approval date and effective date are recorded for their own sake and do NOT decide window membership — an item published in-window with an effective date months later IS in-window, and an item approved or effective in-window but published before LAST_DATE is NOT. Record the publication date in date_published on every finding. If you cannot establish a publication date, set date_published to "unknown" and set confidence to needs_verification; do not guess it from the effective date.
+
 2. Search the payer named in the user message and no other. Check its provider-bulletin, reimbursement-policy, and coverage-policy pages for items dated after LAST_DATE. Issue several distinct queries rather than one broad one.
+
+2a. Use web_fetch to read what search only surfaced. Search returns titles and snippets; the code-level detail — per-diem logic, unit caps, modifier rules, prior-auth code lists — almost always sits inside the linked bulletin, policy PDF, or article body. When a search result looks like it carries the substance, FETCH IT rather than reporting that its content could not be retrieved. This applies especially to reimbursement-policy PDFs and prior-authorization lists. You can only fetch URLs that already appeared in a search result, so search first, then fetch. Budget your fetches: prefer a few high-value documents over many index pages.
 
 3. Look for:
    - CPT/HCPCS and facility revenue code activity (adds, deletes, revisions, reclassifications, new modifier or unit rules)
@@ -151,7 +167,8 @@ If the run date falls in a new plan year or after July, also check for the curre
 - Distinguish payer-issued from industry-wide. Set originator to the body that actually originated the change.
 - Distinguish "approved" from "effective." Provider Express and similar list internal approval dates; the operative claims date may differ. Populate both date_approved and date_effective when visible.
 - Set scope explicitly wherever a change treats in-network and out-of-network differently — e.g. a prior-auth removal that applies only to contracted providers.
-- Log gaps honestly. Much payer content sits behind provider-portal logins (CignaforHCP, Availity, payer SSO). Absence of a published change is not proof none exists. Put those in unreachable[] with the reason.
+- Log gaps honestly. Much payer content sits behind provider-portal logins (CignaforHCP, Availity, payer SSO). Absence of a published change is not proof none exists. Put those in unreachable[] with the reason — but only AFTER you have tried web_fetch on the URL. "Content not retrieved" is not an acceptable reason for a URL you never fetched.
+- Classify every unreachable entry with a reason_code, because these are operationally different and get handled differently: login_gated (provider portal / SSO / no public equivalent — permanent, do not retry), pdf_not_parsed (document located but its content was not read), content_not_retrieved (page fetched or attempted but the substance was not obtained), budget_exhausted (search or fetch budget ran out before this source was reached — a tuning problem, not a source problem), not_published (the payer genuinely does not publish this layer publicly), other. Use budget_exhausted only when you actually ran out; do not use it as a catch-all.
 - If the payer was checked and genuinely had no change in the window, put it in checked_no_change[] — do not invent a finding to fill space.
 - Never fill an unknown from memory. If a figure or date is uncertain, set confidence to needs_verification.
 - If sources conflict, take the primary source. Primary beats secondary, always.
@@ -182,8 +199,8 @@ const EMIT_FINDINGS = {
           additionalProperties: false,
           required: [
             'payer_plan', 'change_type', 'originator', 'summary', 'codes_affected',
-            'scope', 'self_funded_relevant', 'date_approved', 'date_effective',
-            'source_url', 'source_domain', 'source_tier', 'confidence', 'embed_text',
+            'scope', 'self_funded_relevant', 'date_published', 'date_approved', 'date_effective',
+            'source_url', 'source_domain', 'confidence', 'embed_text',
           ],
           properties: {
             payer_plan: STR('Payer and, where applicable, the specific plan or product line.'),
@@ -193,11 +210,15 @@ const EMIT_FINDINGS = {
             codes_affected: { type: 'array', items: { type: 'string' }, description: 'CPT/HCPCS/revenue codes affected. Empty array if none.' },
             scope: { type: 'string', enum: ['in_network', 'out_of_network', 'both', 'unclear'] },
             self_funded_relevant: { type: 'boolean', description: 'True if this bears on self-funded / ERISA employer plan administration.' },
+            date_published: STR('Date the item was posted/announced/bulletined, YYYY-MM-DD. THIS is the window filter. Use "unknown" if not establishable — never infer it from the effective date.'),
             date_approved: STR('Internal approval date as published, YYYY-MM-DD. Use "unknown" if not visible.'),
             date_effective: STR('Operative claims date, YYYY-MM-DD. Use "unknown" if not visible.'),
-            source_url: STR('A URL you actually retrieved this session. Never reconstructed from memory.'),
+            source_url: STR('A URL you actually retrieved or fetched this session. Never reconstructed from memory.'),
             source_domain: STR('Registrable domain of source_url, e.g. providerexpress.com.'),
-            source_tier: { type: 'string', enum: ['primary', 'secondary'] },
+            // source_tier is deliberately NOT here. allowed_domains contains only
+            // primary sources, so a model-emitted tier is a tautology — the
+            // 2026-08-03 batch returned primary 10/10. It is derived at ingest
+            // from the domain map instead, where it is a lookup, not a judgement.
             confidence: { type: 'string', enum: ['confirmed', 'needs_verification'] },
             embed_text: STR('Self-contained paragraph naming payer, change, codes, and both dates. No pronouns referring to other findings.'),
           },
@@ -210,12 +231,23 @@ const EMIT_FINDINGS = {
       },
       unreachable: {
         type: 'array',
-        description: 'Sources that could not be reached or read.',
+        description: 'Sources that could not be reached or read. Only after web_fetch was attempted.',
         items: {
           type: 'object',
           additionalProperties: false,
-          required: ['payer', 'reason', 'url'],
-          properties: { payer: STR('Payer name.'), reason: STR('Why unreachable.'), url: STR('URL attempted.') },
+          required: ['payer', 'reason_code', 'reason', 'url'],
+          properties: {
+            payer: STR('Payer name.'),
+            // Typed because these are operationally different: budget_exhausted is a
+            // knob to turn, login_gated is a wall to route around permanently. The
+            // 2026-08-03 batch had 38 free-text reasons and could not distinguish them.
+            reason_code: {
+              type: 'string',
+              enum: ['login_gated', 'pdf_not_parsed', 'content_not_retrieved', 'budget_exhausted', 'not_published', 'other'],
+            },
+            reason: STR('Specific detail behind the reason_code.'),
+            url: STR('URL attempted. Use "none" if no URL was located at all.'),
+          },
         },
       },
     },
@@ -254,6 +286,34 @@ function matchesEntry(url: string, entry: string): boolean {
 
 const matchesAny = (url: string, entries: string[]) => entries.some((e) => matchesEntry(url, e));
 
+/** source_tier is derived, not model-emitted: every domain in the map is a primary
+ *  source by construction. Kept as a function so widening the map later is the only
+ *  edit needed. */
+function deriveSourceTier(url: string, allowed: string[]): 'primary' | 'secondary' {
+  return matchesAny(url, allowed) ? 'primary' : 'secondary';
+}
+
+/** PRIOR STATE for the monthly diff. Reads the previous artifact for this key and
+ *  returns the identity tuples already reported, so the model can suppress them.
+ *  Mirrors the finding_hash key (payer_plan|change_type|date_effective|source_url)
+ *  so what the prompt suppresses and what the DB dedups on cannot drift apart. */
+function priorStateBlock(dir: string, key: string, currentStamp: string): string {
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => f.startsWith(`${key}-`) && f.endsWith('.json') && !f.includes(currentStamp));
+  } catch { return '(none — first run)'; }
+  if (!files.length) return '(none — first run)';
+  const latest = files.sort().at(-1)!;
+  let prior: { findings?: Array<Record<string, string>> };
+  try { prior = JSON.parse(readFileSync(`${dir}/${latest}`, 'utf8')); } catch { return '(none — first run)'; }
+  const fs_ = prior.findings ?? [];
+  if (!fs_.length) return `(prior run ${latest} reported no findings)`;
+  return [`(from ${latest} — ${fs_.length} already reported, do NOT re-report these)`]
+    .concat(fs_.map((f, i) =>
+      `${i + 1}. ${f.change_type} | eff=${f.date_effective} | ${f.source_url}\n   ${f.payer_plan}\n   ${f.summary}`))
+    .join('\n');
+}
+
 // ------------------------------------------------------------------- the run
 
 async function main() {
@@ -269,16 +329,19 @@ async function main() {
 
   const allowedDomains = payer.domains;
   const maxUses = payer.maxUses;
+  const stamp = RUN_DATE.replace(/-/g, '');
+  const priorState = priorStateBlock(OUT_DIR, payerKey, stamp);
 
   const userMessage = `RUN DATE: ${RUN_DATE}
 LAST_DATE: ${LAST_DATE}
 RESEARCH WINDOW: ${LAST_DATE} → ${RUN_DATE}
+WINDOW FILTER: publication date (see the WINDOW RULE in your instructions)
 
 PAYER IN SCOPE (this run covers this payer and no other):
 ${payer.display}
 
 PRIOR STATE (do not re-report these as new):
-(none — first run)
+${priorState}
 
 FOCUS THIS RUN:
 Anything changing the OON allowed-amount basis or prior-auth posture for
@@ -290,16 +353,30 @@ Research and emit findings.`;
 
   const tools = [
     { type: 'web_search_20260318', name: 'web_search', max_uses: maxUses, response_inclusion: 'full', allowed_domains: allowedDomains },
+    // web_fetch reaches the layer search cannot: policy PDFs and article bodies,
+    // which is where the codes live. The 2026-08-03 batch made 0 fetches and left
+    // codes_affected empty on 70% of findings. Same domain map — a fetch must not
+    // escape the payer's scope any more than a search may. max_content_tokens
+    // bounds text but NOT PDFs (documented), so fetchUses is the real cost bound.
+    {
+      type: 'web_fetch_20260318',
+      name: 'web_fetch',
+      max_uses: payer.fetchUses,
+      response_inclusion: 'full',
+      allowed_domains: allowedDomains,
+      max_content_tokens: 30000,
+    },
     EMIT_FINDINGS,
   ];
 
   const messages: Array<{ role: string; content: unknown }> = [{ role: 'user', content: userMessage }];
 
-  const retrieved: Array<{ url: string; title: string }> = [];
+  const retrieved: Array<{ url: string; title: string; via: 'search' | 'fetch' }> = [];
   const searchErrors: string[] = [];
   const emitCalls: any[] = [];
   const usages: any[] = [];
   let webSearchRequests = 0;
+  let webFetchRequests = 0;
   let turnCount = 0;
   let turnBudgetExceeded = false;
   let lastStop = '';
@@ -336,6 +413,7 @@ Research and emit findings.`;
     console.error(`[turn ${turnCount}] ${msg.stop_reason} in ${Date.now() - tTurn}ms — searches so far ${(webSearchRequests + (msg.usage?.server_tool_use?.web_search_requests ?? 0))}`);
     usages.push(msg.usage);
     webSearchRequests += msg.usage?.server_tool_use?.web_search_requests ?? 0;
+    webFetchRequests += msg.usage?.server_tool_use?.web_fetch_requests ?? 0;
     lastStop = msg.stop_reason;
     if (msg.container?.id) containerId = msg.container.id;
 
@@ -346,9 +424,20 @@ Research and emit findings.`;
       for (const b of blocks ?? []) {
         if (b?.type === 'web_search_tool_result') {
           if (Array.isArray(b.content)) {
-            for (const r of b.content) if (r?.url) retrieved.push({ url: r.url, title: r.title ?? '' });
+            for (const r of b.content) if (r?.url) retrieved.push({ url: r.url, title: r.title ?? '', via: 'search' });
           } else if (b.content) {
-            searchErrors.push(String(b.content.error_code ?? 'unknown_error'));
+            searchErrors.push(`web_search:${b.content.error_code ?? 'unknown_error'}`);
+          }
+        }
+        // A fetched URL is a retrieved URL: it must land in the provenance set so a
+        // finding sourced from a fetch passes the source_url check, and it must face
+        // Gate D so a fetch cannot escape the payer's domain scope.
+        if (b?.type === 'web_fetch_tool_result') {
+          const c = b.content;
+          if (c?.type === 'web_fetch_result' && c.url) {
+            retrieved.push({ url: c.url, title: c.content?.title ?? '', via: 'fetch' });
+          } else if (c?.type === 'web_fetch_tool_result_error') {
+            searchErrors.push(`web_fetch:${c.error_code ?? 'unknown_error'}`);
           }
         }
         if (b?.type === 'code_execution_tool_result' && Array.isArray(b.content)) harvest(b.content);
@@ -457,9 +546,9 @@ Research and emit findings.`;
 
   // 4
   console.log(`\n${line}\n4. SEARCH BUDGET\n${line}`);
-  console.log(`web_search_requests : ${webSearchRequests}`);
-  console.log(`max_uses cap        : ${maxUses}`);
-  console.log(`cap respected       : ${webSearchRequests <= maxUses ? 'YES' : `NO — OVER BY ${webSearchRequests - maxUses}`}`);
+  console.log(`web_search_requests : ${webSearchRequests} / cap ${maxUses}${webSearchRequests > maxUses ? ` — OVER BY ${webSearchRequests - maxUses}` : ''}`);
+  console.log(`web_fetch_requests  : ${webFetchRequests} / cap ${payer.fetchUses}${webFetchRequests > payer.fetchUses ? ` — OVER BY ${webFetchRequests - payer.fetchUses}` : ''}`);
+  console.log(`retrieved via       : search ${retrieved.filter((r) => r.via === 'search').length} | fetch ${retrieved.filter((r) => r.via === 'fetch').length}`);
 
   // 5
   console.log(`\n${line}\n5. RAW emit_findings PAYLOAD\n${line}`);
@@ -480,7 +569,8 @@ Research and emit findings.`;
     payload.findings.forEach((f: any, i: number) => {
       const ok = urlSet.has(f.source_url);
       console.log(`  [${i + 1}] ${ok ? 'PASS      ' : 'QUARANTINE'}  ${f.source_url}`);
-      console.log(`       ${f.change_type} / ${f.originator} / ${f.scope} / ${f.confidence} — ${f.summary}`);
+      console.log(`       ${f.change_type} / ${f.originator} / ${f.scope} / ${f.confidence} / tier=${deriveSourceTier(f.source_url, allowedDomains)}`);
+      console.log(`       pub=${f.date_published} appr=${f.date_approved} eff=${f.date_effective} — ${f.summary}`);
     });
     const q = payload.findings.filter((f: any) => !urlSet.has(f.source_url)).length;
     console.log(`\n  ${payload.findings.length - q} PASS, ${q} QUARANTINE`);
@@ -495,7 +585,6 @@ Research and emit findings.`;
   // --- persist ---------------------------------------------------------------
   // Written unconditionally, including on failure, so one bad key never costs
   // the batch its other results.
-  const stamp = RUN_DATE.replace(/-/g, '');
   mkdirSync(OUT_DIR, { recursive: true });
   const outPath = `${OUT_DIR}/${payerKey}-${stamp}.json`;
   writeFileSync(outPath, JSON.stringify({
@@ -505,16 +594,23 @@ Research and emit findings.`;
     failures,
     allowed_domains: allowedDomains,
     max_uses: maxUses,
+    max_fetch_uses: payer.fetchUses,
+    window: { last_date: LAST_DATE, run_date: RUN_DATE, filter: 'date_published' },
+    prior_state_supplied: !priorState.startsWith('(none'),
     stop_reason: lastStop,
     retrieved_urls: retrievedUrls,
+    retrieved_via: { search: retrieved.filter((r) => r.via === 'search').length, fetch: retrieved.filter((r) => r.via === 'fetch').length },
     retrieved_by_domain: Object.fromEntries(sorted.map(([d, u]) => [d, u.length])),
-    findings: payload.findings,
+    // source_tier derived here, not model-emitted — see deriveSourceTier.
+    findings: payload.findings.map((f: any) => ({ ...f, source_tier: deriveSourceTier(f.source_url, allowedDomains) })),
     checked_no_change: payload.checked_no_change,
     unreachable: payload.unreachable,
+    quarantined: payload.findings.filter((f: any) => !urlSet.has(f.source_url)).map((f: any) => f.source_url),
     anomalies,
-    search_errors: searchErrors,
+    tool_errors: searchErrors,
     usage: usages,
     web_search_requests: webSearchRequests,
+    web_fetch_requests: webFetchRequests,
     turn_count: turnCount,
     wall_ms: wallMs,
   }, null, 2));
