@@ -12,8 +12,27 @@
  */
 
 import { rosterEntry, rosterKeys, type RosterEntry } from './roster.js';
-import { researchPayer, type MessagesTransport } from './client.js';
+import { researchPayer, MODEL, type MessagesTransport } from './client.js';
 import { upsertRunResults, type Queryable, type UpsertCounts } from './upsert.js';
+
+const INSERT_RUN_SQL = `
+  INSERT INTO intel.payer_policy_run
+    (payer_key, window_start, window_end, model, status, failure_gate,
+     findings_count, search_requests_used, fetch_requests_used, input_tokens,
+     output_tokens, thinking_tokens, service_tier, inference_geo, cost_usd,
+     turn_count, wall_ms, finished_at)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
+  RETURNING run_id
+`;
+
+const UPDATE_RUN_SQL = `
+  UPDATE intel.payer_policy_run
+  SET findings_count = $2, search_requests_used = $3, fetch_requests_used = $4,
+      input_tokens = $5, output_tokens = $6, thinking_tokens = $7,
+      service_tier = $8, inference_geo = $9, cost_usd = $10,
+      turn_count = $11, wall_ms = $12
+  WHERE run_id = $1
+`;
 import type { ResearchResult, RunStatus } from './types.js';
 
 /** Opus 5 input/output rates, $ per token. Only used for the cost_usd metric. */
@@ -91,15 +110,36 @@ export async function runOnePayer(opts: RunOneOptions): Promise<RunOneResult> {
 
   let counts: UpsertCounts | null = null;
   let persisted = false;
-  if (opts.db && status === 'ok' && research.payload) {
-    counts = await upsertRunResults(opts.db, {
-      runId: null,
-      payerKey: opts.payerKey,
-      allowedDomains: entry.domains,
-      retrievedUrls: research.retrievedUrls,
-      payload: research.payload,
-    });
-    persisted = true;
+  if (opts.db) {
+    const inputTokens = research.usages.reduce((sum, u) => sum + (u.input_tokens ?? 0), 0);
+    const outputTokens = research.usages.reduce((sum, u) => sum + (u.output_tokens ?? 0), 0);
+    const thinkingTokens = research.usages.reduce(
+      (sum, u) => sum + (u.output_tokens_details?.thinking_tokens ?? 0), 0);
+    const usage = research.usages[research.usages.length - 1];
+    const run = await opts.db.query(INSERT_RUN_SQL, [
+      opts.payerKey, opts.windowStart, opts.windowEnd, MODEL, status, failureGate,
+      research.payload?.findings.length ?? 0, research.searchRequests, research.fetchRequests,
+      inputTokens, outputTokens, thinkingTokens, usage?.service_tier ?? null,
+      usage?.inference_geo ?? null, estimateCostUsd(research), research.turnCount, research.wallMs,
+    ]);
+    const runId = (run.rows[0] as { run_id: string }).run_id;
+
+    if (status === 'ok' && research.payload) {
+      counts = await upsertRunResults(opts.db, {
+        runId,
+        payerKey: opts.payerKey,
+        allowedDomains: entry.domains,
+        retrievedUrls: research.retrievedUrls,
+        payload: research.payload,
+      });
+      persisted = true;
+    }
+    await opts.db.query(UPDATE_RUN_SQL, [
+      runId, research.payload?.findings.length ?? 0, research.searchRequests,
+      research.fetchRequests, inputTokens, outputTokens, thinkingTokens,
+      usage?.service_tier ?? null, usage?.inference_geo ?? null, estimateCostUsd(research),
+      research.turnCount, research.wallMs,
+    ]);
   }
 
   return {
