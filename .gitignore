@@ -56,3 +56,6 @@ supabase/.temp/
 
 # Vercel CLI local project link (README.txt + project.json — link metadata only, no secrets)
 .vercel/
+
+# Local probe/research output (scripts/payer_intel_probe.ts writes here)
+scratch/
