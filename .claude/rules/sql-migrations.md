@@ -11,7 +11,13 @@ Two separate planes. Never put a file in the wrong directory.
 | Plane | Directory | Next number |
 |---|---|---|
 | Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0077** |
-| Veris ML (`staging`, `ref`, `core`) | `SQL Schemas/0NN_*.sql` | **025** |
+| Veris ML (`staging`, `ref`, `core`) | `SQL Schemas/0NN_*.sql` | **026** |
+
+Veris apply state as of 2026-08-03, which is NOT the same as the file order:
+**024 APPLIED LIVE · 023 authored but NOT applied · 025 authored but NOT applied.** 024 went
+first because 023 was under concurrent revision and 024 has no executable dependency on it —
+no FK, no view, no trigger (the resolver is in `src/veris/upcomingForecast.ts`). Do not read the
+numbering as an apply order. See `docs/veris-data-notes.md` § "024 … APPLIED LIVE".
 
 **Merging a migration in a PR does not apply it to prod.** Same-PR code 500s
 until `apply_migration` runs. This has already caused one incident (0056 broke

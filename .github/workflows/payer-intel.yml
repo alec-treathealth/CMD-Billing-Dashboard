@@ -1,0 +1,62 @@
+# NOT ARMED — monthly payer policy research. This is the WORKER; the SCHEDULER is Vercel Cron
+# (/api/cron/payer-intel in app/vercel.json), so the job appears and is runnable alongside the other
+# crons in one control plane. There is intentionally NO `schedule:` trigger — that would double-fire
+# against the Vercel cron, exactly as vob-sync.yml documents.
+#
+# WHY GitHub Actions and not a Vercel function: measured on the 2026-08-03 batch, one payer key takes
+# ~2.5-8 minutes (multi-turn, web_search + web_fetch, ~50s per turn) and the full nine-key roster
+# ~25-70 minutes. That is past the serverless execution ceiling, and a timeout mid-roster would leave
+# a half-written run with no error row — the silent failure this pipeline exists to refuse.
+#
+# BEFORE THIS CAN RUN (all three, in this order):
+#   1. Apply `SQL Schemas/025_payer_policy_intel.sql`. Merging a migration does NOT apply it; without
+#      the intel schema every write fails (the 0056 incident pattern).
+#   2. Provision the intel_writer role password out of band and set repo secrets
+#      INTEL_WRITER_DATABASE_URL and ANTHROPIC_API_KEY.
+#   3. Set GITHUB_DISPATCH_TOKEN in the Vercel environment (the same fine-grained token vob-sync
+#      uses) and add the cron entry to app/vercel.json.
+# Until then, leaving this file present and undispatched is inert: workflow_dispatch only fires when
+# something POSTs it.
+#
+# COST: ~$14 and ~25-70 min per full-roster run at Opus 5 rates, dominated by input tokens from
+# response_inclusion "full". Monthly cadence makes that immaterial; do not raise the frequency
+# without re-checking it.
+#
+# SECURITY: only secrets.* are referenced, and only inside env: — never interpolated into a run:
+# command. No github.event.* value is read anywhere in this file, so there is no workflow-injection
+# surface. No PHI is involved at any point: the pipeline reads public payer bulletins, CMS fact
+# sheets, and Federal Register documents only.
+
+name: payer-intel
+
+on:
+  workflow_dispatch: {}          # triggered by the Vercel cron (/api/cron/payer-intel); also runnable by hand
+
+concurrency:
+  group: payer-intel
+  cancel-in-progress: false      # never overlap runs — concurrent runs would double-write findings
+
+permissions:
+  contents: read
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    # Full roster measured at ~25-70 min; 120 leaves headroom without hanging a runner all day.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: npm ci
+      # Guards the gate suite and the provenance/idempotency invariants BEFORE spending API budget.
+      # Hermetic — no network, no DB, no LLM.
+      - name: Unit tests (gates, provenance, idempotency)
+        run: npx tsx --test test/payerPolicyIntel.test.ts
+      - name: Run payer policy research
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          INTEL_WRITER_DATABASE_URL: ${{ secrets.INTEL_WRITER_DATABASE_URL }}
+        run: npx tsx scripts/run_payer_intel.ts

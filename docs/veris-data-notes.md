@@ -3310,3 +3310,107 @@ binding for one entity; array form + array binding for many) so the fast path ca
 regress to the inert version. Also covers keyset shape (dated cursor must still admit the
 null-date tail, else those rows are unreachable), facility parameterisation, and that the PHI
 columns are projected as raw ciphertext with no in-query decryption.
+
+---
+
+## 024 — `staging.expected_payment_manual` APPLIED LIVE (2026-08-03), AHEAD of 023
+
+**Applied out of order on purpose.** 023 (`expected_payment_override`, the Google-Sheet
+forecast feed) was under concurrent revision in another session, so 024 went first. This is
+safe and was verified, not assumed: 024's only two mentions of `expected_payment_override` are
+a numbering note and a commented-out verification query — **no FK, no view, no trigger**. The
+resolver that merges the two feeds lives in `src/veris/upcomingForecast.ts`, in the app.
+
+That is the payoff of the two-tables decision, and it is worth remembering next time: keeping
+the machine-replaced feed and the hand-authored edits in separate tables made them
+independently appliable.
+
+**State at apply:** neither table existed. 023 is STILL NOT APPLIED.
+
+**The file numbering is no longer the apply order.** As of 2026-08-03 the Veris plane reads
+023 (authored, NOT applied) · 024 (**APPLIED**) · 025 payer-policy-intel (authored in a
+parallel session, NOT applied). Next free number is **026**. Anyone reasoning about this
+plane from filenames alone will get the wrong answer — check the live DB.
+
+### Verified after apply (the file's own §7 block, run live)
+
+| Check | Result |
+|---|---|
+| owner / RLS / FORCE | `claims_admin` · on · off ✓ |
+| PHI column scan (`patient\|client\|member\|name\|note\|comment`) | **0 rows** ✓ |
+| grants | `claims_admin` (owner) + `claims_reader`/SELECT **only** ✓ |
+| `cmd_rollup_writer` grants | **none** — the structural guarantee holds ✓ |
+| policies | exactly 1: reader SELECT with USING ✓ |
+| functions | both `SECURITY DEFINER`, `proconfig = search_path=""` ✓ |
+| indexes | pkey + `decision_uidx` + `upcoming_idx` (leads with `business_entity_id`) ✓ |
+| security advisors | **0 lints** — no 0011 finding ✓ |
+
+### The constraints were EXERCISED, not just inspected
+
+A live probe ran 8 expectations and left 0 rows behind. All held: `add` without an amount,
+`suppress` carrying money, `suppress` with no reason, and an unknown tenant uuid are all
+REJECTED; a well-formed `add` succeeds; re-deciding the same (kind, match key) UPDATEs in place
+rather than creating a second row; a cross-tenant delete returns **false without raising**; and
+a same-tenant delete is idempotent on the second call.
+
+The unknown-tenant case matters more than it looks: these functions are `SECURITY DEFINER` and
+run as the owner, so **RLS does not protect them**. The explicit
+`EXISTS (SELECT 1 FROM core.business_entity …)` guard is the only thing between a typo'd uuid
+and a row no reader could ever see or clean up.
+
+### Defect found and fixed DURING the apply review
+
+The `COMMENT ON TABLE` body is dollar-quoted (`$t$…$t$`), where `''` is **two literal
+apostrophes, not an escape**. 12 of them would have landed in the live comment as
+`sheet row''s amount`. Fixed before applying. The `COMMENT ON COLUMN` statements use ordinary
+`'…'` quoting where `''` IS correct, and were deliberately left alone — an assertion in the fix
+script checked that.
+
+### What works now, and what still waits on 023
+
+- **`kind='add'` is fully live** — it needs no sheet row.
+- Marking a manual add landed/removed, and the suggest-then-confirm flow, work.
+- `correct` / `suppress` aimed at SHEET rows resolve as **stale** (there are no sheet rows yet)
+  and the UI says so. They light up when 023 applies.
+- `loadUpcomingOverrides` returns `ok:false` until 023 applies; the tile degrades to the
+  835-confirmed half, which is a tested path.
+
+### ⚠️ The sheet cron is LIVE in production and erroring hourly
+
+`e2bc1f0` merged `{"path": "/api/cron/upcoming-overrides", "schedule": "55 * * * *"}` to main,
+so it has been firing at :55 since. It is NOT dangerous — the fail-soft boundary catches the
+missing `Upcoming Payments Overrides` tab before any DB write is attempted, returning
+`200 {ok:false, status:'parse_failed'}`. But it logs an error every hour, and this repo already
+learned that **a red light that is always red is not a signal** (the dormant-customer cluster).
+Close it by creating the sheet tab, or by making the missing-config path a quiet no-op.
+
+Reasoned from the code, not observed: the Vercel MCP was disconnected during this session, so
+the actual runtime output was not read.
+
+### Correction to `fc2c8f6`'s commit message — and a concurrency hazard worth knowing
+
+`fc2c8f6` ends with "Root typecheck is RED on `src/intel/payer_policy/{client,types}.ts` … Not
+touched, not fixed, not committed here." **Both halves of that are wrong**, and the reason is
+worth recording because it will happen again.
+
+What actually happened: two agent sessions were working in the SAME working tree, which means
+they also share ONE git index. I staged four files and verified it with
+`git diff --cached --name-only` — accurate at that instant. Between that check and
+`git commit`, the other session ran its own `git add`, staging three of its files into the
+shared index. `git commit` commits **the index**, not the list you passed to your own `git add`,
+so those three came along: `src/intel/payer_policy/client.ts`, `types.ts`, and
+`test/payerPolicyIntel.test.ts`.
+
+Outcome was benign — they had finished the edit, so `fc2c8f6` typechecks clean (root tsc exit 0,
+root 1001/1001) and nothing is dangling. But their work is published under a commit message
+about migration 024, which misattributes it.
+
+**The fix, for any session sharing a tree:** `git commit -o <paths>` (or
+`git commit -- <paths>`) commits ONLY those paths and ignores whatever else is in the index.
+`git add <paths>` followed by a bare `git commit` is NOT equivalent and is unsafe here. Also
+treat `git add -A <dir>` as forbidden in a shared tree — it sweeps up another session's
+in-flight files by construction.
+
+Related: one `next build` in the same window failed with a bare "Build error occurred" and passed
+on an immediate re-run. That was webpack reading a file the other session saved mid-build, not a
+defect. In a shared tree, a single build failure is not evidence until it reproduces.
