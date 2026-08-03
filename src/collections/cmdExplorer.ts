@@ -366,15 +366,14 @@ export function aggregateDailyDeposits(rows: CmdReportRow[], facilityCode: strin
  * past the horizon is still dropped, so max(payment_date) can move at most two weeks ahead
  * instead of into next year.
  *
- * SHIPPED AT 0 ON PURPOSE — 0 reproduces the original strict "nothing after today" behaviour
- * exactly, so this commit changes no numbers on any surface. The horizon is inert until the
- * Overview/Collections read-split exists, because Overview and Collections read the SAME rows
- * (both go through collections.daily_collections_resolved). Ingesting near-future rows today
- * would put them on the Collections tab too, which is explicitly not wanted. Flip this to 14 in
- * the same change that teaches Collections to bound its reads at today; the horizon logic and
- * its tests are already proven for both values.
+ * ACTIVE AT 14 since 2026-08-03. It shipped at 0 (inert) one commit earlier, because Overview and
+ * Collections read the SAME rows through collections.daily_collections_resolved and a horizon
+ * alone would have put near-future money on the Collections tab. The read-time split now exists
+ * — see futurePaymentBound in daily.ts — so Collections bounds at today while Overview does not,
+ * and ingesting these rows is safe. Setting this back to 0 is the correct kill switch if
+ * forward-dated deposits ever turn out to be unreliable; nothing else needs reverting.
  */
-export const FUTURE_PAYMENT_HORIZON_DAYS = 0;
+export const FUTURE_PAYMENT_HORIZON_DAYS = 14;
 
 /** `isoDate` + `days`, as ISO 'YYYY-MM-DD'. UTC arithmetic so it cannot drift with server locale. */
 function addDaysIso(isoDate: string, days: number): string {

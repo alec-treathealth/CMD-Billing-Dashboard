@@ -45,6 +45,31 @@ export interface CollectionsQueryContext {
   audit?: (line: string) => void;
 }
 
+/**
+ * Resolve the "no payment later than this" bound both readers apply.
+ *
+ * THE OVERVIEW/COLLECTIONS SPLIT LIVES HERE. CMD carries forward-dated deposit dates, and
+ * `dropFuturePaymentRows` now ingests them up to a horizon instead of discarding them. Overview is
+ * meant to show that money the day CMD reports it; the Collections tab is not. Both surfaces read
+ * the SAME rows through `collections.daily_collections_resolved`, so the distinction cannot live in
+ * the ingest — it has to be made at read time, here.
+ *
+ * DEFAULT IS EXCLUDE (bound at today). Every existing caller — the Collections tab, the Bearer
+ * /api routes, anything that simply omits the flag — keeps today's behaviour with no change.
+ * Only the Overview readers opt in by passing `include_future_payments: true`.
+ *
+ * Returns an ISO 'YYYY-MM-DD' bound, or null for "no bound" (include everything). The date is
+ * resolved from `ctx.now` rather than SQL `current_date` so the boundary is deterministic in
+ * tests and cannot drift with the database session's TimeZone.
+ */
+function futurePaymentBound(
+  includeFuture: boolean | undefined,
+  ctx: CollectionsQueryContext,
+): string | null {
+  if (includeFuture === true) return null;
+  return (ctx.now ?? (() => new Date()))().toISOString().slice(0, 10);
+}
+
 // --- collectionsDaily -------------------------------------------------------
 
 /**
@@ -56,7 +81,7 @@ export interface CollectionsQueryContext {
  */
 export function collectionsDailySql(): string {
   return (
-    `with anchor as (select max(payment_date) as max_d from collections.daily_collections_resolved where business_entity_id = any($4::uuid[])) ` +
+    `with anchor as (select max(payment_date) as max_d from collections.daily_collections_resolved where business_entity_id = any($4::uuid[]) and ($5::date is null or payment_date <= $5::date)) ` +
     `select ` +
     `to_char(dc.payment_date, 'YYYY-MM-DD') as payment_date, ` +
     `dc.facility_code as facility_code, ` +
@@ -75,6 +100,7 @@ export function collectionsDailySql(): string {
     `else (($1::date is null or dc.payment_date >= $1::date) ` +
     `and ($2::date is null or dc.payment_date < $2::date)) end) ` +
     `and ($3::text is null or dc.facility_code = $3::text) ` +
+    `and ($5::date is null or dc.payment_date <= $5::date) ` +
     `order by dc.payment_date desc, f.facility_name nulls last, dc.facility_code`
   );
 }
@@ -99,12 +125,14 @@ export async function collectionsDaily(
     ? args.facility_code.trim()
     : undefined;
   const entityIds = assertEntityScope(ctx.entityIds, 'collectionsDaily');
+  const maxPaymentDate = futurePaymentBound(args.include_future_payments, ctx);
 
   const { rows } = await ctx.executor.query<RawDailyRow>(collectionsDailySql(), [
     from ?? null,
     to ?? null,
     facility ?? null,
     entityIds,
+    maxPaymentDate,
   ]);
 
   const out: CollectionsDailyRow[] = rows.map((r) => ({
@@ -141,7 +169,7 @@ export function collectionsKpisSql(): string {
   const mtd = `dc.payment_date >= date_trunc('month', a.d)::date and dc.payment_date <= a.d`;
   const ytd = `dc.payment_date >= date_trunc('year', a.d)::date and dc.payment_date <= a.d`;
   return (
-    `with anchor as (select coalesce($1::date, max(payment_date)) as d from collections.daily_collections_resolved where business_entity_id = any($2::uuid[])) ` +
+    `with anchor as (select coalesce($1::date, max(payment_date)) as d from collections.daily_collections_resolved where business_entity_id = any($2::uuid[]) and ($3::date is null or payment_date <= $3::date)) ` +
     `select ` +
     `to_char(a.d, 'YYYY-MM-DD') as as_of, ` +
     `dc.facility_code as facility_code, ` +
@@ -182,7 +210,11 @@ export async function collectionsKpis(
   const asOfArg = validateDateBound('as_of' as 'from', args.as_of);
   const entityIds = assertEntityScope(ctx.entityIds, 'collectionsKpis');
 
-  const { rows } = await ctx.executor.query<RawKpiRow>(collectionsKpisSql(), [asOfArg ?? null, entityIds]);
+  const { rows } = await ctx.executor.query<RawKpiRow>(collectionsKpisSql(), [
+    asOfArg ?? null,
+    entityIds,
+    futurePaymentBound(args.include_future_payments, ctx),
+  ]);
 
   const by_facility: CollectionsFacilityKpi[] = rows.map((r) => ({
     facility_code: r.facility_code,

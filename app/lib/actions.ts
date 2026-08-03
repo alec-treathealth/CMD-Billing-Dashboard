@@ -25,7 +25,9 @@ import {
   browseClaims,
   collectionsDailyForMonth,
   dashboardCollectionsDaily,
+  dashboardCollectionsDailyOverview,
   dashboardCollectionsKpis,
+  dashboardCollectionsKpisOverview,
   dashboardCollectionsSummary,
   dashboardCollectionsYoy,
   dashboardDistribution,
@@ -536,11 +538,24 @@ export async function loadCollectionsSummary(
 }
 
 /** MTD/YTD collections KPIs by facility (Phase 7.1; non-PHI, reader-only). Tenant-scoped by the clamped view. */
-export async function loadCollectionsKpis(view?: DashboardView): Promise<DashboardResult<CollectionsKpis>> {
+/**
+ * `surface` selects the future-payment policy, and defaults to the stricter one. 'overview'
+ * includes CMD's forward-dated deposits; 'collections' (the default) bounds at today. It is a
+ * display choice over non-PHI aggregates, not an authorization boundary — tenant scope is still
+ * derived server-side from the RBAC-clamped view — so a client passing either value is harmless.
+ */
+export async function loadCollectionsKpis(
+  view?: DashboardView,
+  surface: 'collections' | 'overview' = 'collections',
+): Promise<DashboardResult<CollectionsKpis>> {
   const entityIds = await viewEntityScope(view);
   if (!entityIds) return { ok: false };
   try {
-    return { ok: true, data: await dashboardCollectionsKpis(entityIds) };
+    const data =
+      surface === 'overview'
+        ? await dashboardCollectionsKpisOverview(entityIds)
+        : await dashboardCollectionsKpis(entityIds);
+    return { ok: true, data };
   } catch {
     return { ok: false };
   }
@@ -575,11 +590,17 @@ export async function loadCollectionsYoy(
 /** Latest-month daily collections rows (Phase 7.1; non-PHI, reader-only). Tenant-scoped by the clamped view. */
 export async function loadCollectionsDaily(
   view?: DashboardView,
+  /** See loadCollectionsKpis — defaults to the stricter (today-bounded) policy. */
+  surface: 'collections' | 'overview' = 'collections',
 ): Promise<DashboardResult<CollectionsDailyResult>> {
   const entityIds = await viewEntityScope(view);
   if (!entityIds) return { ok: false };
   try {
-    return { ok: true, data: await dashboardCollectionsDaily(entityIds) };
+    const data =
+      surface === 'overview'
+        ? await dashboardCollectionsDailyOverview(entityIds)
+        : await dashboardCollectionsDaily(entityIds);
+    return { ok: true, data };
   } catch {
     return { ok: false };
   }
@@ -609,11 +630,21 @@ export async function loadCollectionsDailyRange(
     month: number;
   },
   view?: DashboardView,
+  /** See loadCollectionsKpis — defaults to the stricter (today-bounded) policy. */
+  surface: 'collections' | 'overview' = 'collections',
 ): Promise<DashboardResult<CollectionsDailyResult>> {
   const entityIds = await viewEntityScope(view);
   if (!entityIds) return { ok: false };
   try {
-    return { ok: true, data: await collectionsDailyForMonth(params.year, params.month, entityIds) };
+    return {
+      ok: true,
+      data: await collectionsDailyForMonth(
+        params.year,
+        params.month,
+        entityIds,
+        surface === 'overview',
+      ),
+    };
   } catch {
     return { ok: false };
   }

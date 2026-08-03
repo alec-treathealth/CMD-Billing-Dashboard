@@ -23,6 +23,13 @@ export interface CollectionsDailyArgs {
   from?: string;
   /** Exclusive upper bound on payment_date, 'YYYY-MM-DD'. */
   to?: string;
+  /**
+   * Include deposits dated LATER than today. Default false — see futurePaymentBound in daily.ts.
+   * Overview opts in (CMD's forward-dated deposits are real money and belong on the money tiles);
+   * the Collections tab does not. Both read the same rows, so this is the only thing separating
+   * them.
+   */
+  include_future_payments?: boolean;
 }
 
 export interface CollectionsDailyRow {
@@ -54,6 +61,12 @@ export interface CollectionsDailyResult {
 export interface CollectionsKpisArgs {
   /** Anchor date 'YYYY-MM-DD'; defaults to max(payment_date) in the data. */
   as_of?: string;
+  /**
+   * Include deposits dated LATER than today when resolving the anchor. Default false. Because
+   * MTD/YTD are bounded by `<= anchor`, bounding the anchor is what excludes future rows — see
+   * futurePaymentBound in daily.ts.
+   */
+  include_future_payments?: boolean;
 }
 
 export interface CollectionsAmounts {

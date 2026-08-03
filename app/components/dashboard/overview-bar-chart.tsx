@@ -647,9 +647,9 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
   // (`scope`, not `view`: this file's own `view` state is the By Facility/By Payer toggle.)
 
   // MTD data is the already-cached aggregate read for the active tenant.
-  const kpisState = useWidget<CollectionsKpis>(() => loadCollectionsKpis(scope), [scope]);
+  const kpisState = useWidget<CollectionsKpis>(() => loadCollectionsKpis(scope, 'overview'), [scope]);
   // Latest-month daily rows (cached) — backs the MTD facility drill-down panel.
-  const dailyMtdState = useWidget<CollectionsDailyResult>(() => loadCollectionsDaily(scope), [scope]);
+  const dailyMtdState = useWidget<CollectionsDailyResult>(() => loadCollectionsDaily(scope, 'overview'), [scope]);
   // Canonical facility dimension (code -> care_setting/acronym) for the IP/OP split,
   // Facility filters, and acronym bar labels. Cached reference (migration 0016).
   const dimState = useWidget<FacilityDimensionRow[]>(loadFacilityDimension);
@@ -725,7 +725,7 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
     let live = true;
     setPast({ kind: 'loading' });
     if (view === 'facility') {
-      loadCollectionsDailyRange({ year: anchorYear, month }, scope)
+      loadCollectionsDailyRange({ year: anchorYear, month }, scope, 'overview')
         .then((r) => {
           if (!live) return;
           setPast(

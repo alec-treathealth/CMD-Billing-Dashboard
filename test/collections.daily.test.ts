@@ -14,7 +14,7 @@ import type { ExecResult, QueryExecutor } from '../src/queries/types.js';
 const SCOPE = [BXR_ENTITY_ID];
 
 const DAILY_SQL =
-  `with anchor as (select max(payment_date) as max_d from collections.daily_collections_resolved where business_entity_id = any($4::uuid[])) ` +
+  `with anchor as (select max(payment_date) as max_d from collections.daily_collections_resolved where business_entity_id = any($4::uuid[]) and ($5::date is null or payment_date <= $5::date)) ` +
   `select ` +
   `to_char(dc.payment_date, 'YYYY-MM-DD') as payment_date, ` +
   `dc.facility_code as facility_code, ` +
@@ -33,10 +33,11 @@ const DAILY_SQL =
   `else (($1::date is null or dc.payment_date >= $1::date) ` +
   `and ($2::date is null or dc.payment_date < $2::date)) end) ` +
   `and ($3::text is null or dc.facility_code = $3::text) ` +
+  `and ($5::date is null or dc.payment_date <= $5::date) ` +
   `order by dc.payment_date desc, f.facility_name nulls last, dc.facility_code`;
 
 const KPIS_SQL =
-  `with anchor as (select coalesce($1::date, max(payment_date)) as d from collections.daily_collections_resolved where business_entity_id = any($2::uuid[])) ` +
+  `with anchor as (select coalesce($1::date, max(payment_date)) as d from collections.daily_collections_resolved where business_entity_id = any($2::uuid[]) and ($3::date is null or payment_date <= $3::date)) ` +
   `select ` +
   `to_char(a.d, 'YYYY-MM-DD') as as_of, ` +
   `dc.facility_code as facility_code, ` +
@@ -82,7 +83,7 @@ test('collectionsDailySql: exact + reads only daily_collections/facilities', () 
   assert.ok(!sql.includes('collections_raw'));
   assert.ok(!sql.includes('payment_lines'));
   assert.ok(!sql.includes('source_group_code'));
-  assert.ok(sql.includes('$1::date') && sql.includes('$2::date') && sql.includes('$3::text'));
+  assert.ok(sql.includes('$1::date') && sql.includes('$2::date') && sql.includes('$3::text') && sql.includes('$5::date'));
 });
 
 test('collectionsKpisSql: exact + reads only daily_collections/facilities', () => {
@@ -91,7 +92,7 @@ test('collectionsKpisSql: exact + reads only daily_collections/facilities', () =
   assert.ok(!sql.includes('collections_raw'));
   assert.ok(!sql.includes('payment_lines'));
   assert.ok(!sql.includes('source_group_code'));
-  assert.ok(sql.includes('$1::date'));
+  assert.ok(sql.includes('$1::date') && sql.includes('$3::date'));
 });
 
 // --- collectionsDaily params --------------------------------------------------
@@ -100,13 +101,13 @@ test('daily: no args → [null, null, null, scope] (SQL CASE applies latest-mont
   const cap: Capture = {};
   await collectionsDaily({}, ctx(fakeExecutor([], cap)));
   assert.equal(cap.sql, DAILY_SQL);
-  assert.deepEqual(cap.params, [null, null, null, SCOPE]);
+  assert.deepEqual(cap.params, [null, null, null, SCOPE, '2026-06-14']);
 });
 
 test('daily: explicit window + facility are passed/trimmed as $1/$2/$3; scope as $4', async () => {
   const cap: Capture = {};
   await collectionsDaily({ facility_code: ' CAMH ', from: '2026-06-01', to: '2026-07-01' }, ctx(fakeExecutor([], cap)));
-  assert.deepEqual(cap.params, ['2026-06-01', '2026-07-01', 'CAMH', SCOPE]);
+  assert.deepEqual(cap.params, ['2026-06-01', '2026-07-01', 'CAMH', SCOPE, '2026-06-14']);
 });
 
 test('daily/kpis: fail-closed — empty entityIds rejected before any query', async () => {
@@ -154,7 +155,7 @@ test('kpis: as_of param passthrough; overall = sum of by_facility; checks/eft sp
       mtd_checks: '2', mtd_eft: '3', mtd_gross: '5', ytd_checks: '20', ytd_eft: '30', ytd_gross: '50' },
   ];
   const k = await collectionsKpis({ as_of: '2026-06-30' }, ctx(fakeExecutor(rows, cap)));
-  assert.deepEqual(cap.params, ['2026-06-30', SCOPE]);
+  assert.deepEqual(cap.params, ['2026-06-30', SCOPE, '2026-06-14']);
   assert.equal(k.as_of, '2026-06-30');
   // MTD overall
   assert.strictEqual(k.mtd.checks, 12);
@@ -239,4 +240,52 @@ test('kpis + daily each emit exactly one non-PHI audit line', async () => {
   await collectionsKpis({}, ctx(fakeExecutor([], {}), (l) => kl.push(l)));
   assert.equal(kl.length, 1);
   assert.equal(JSON.parse(kl[0]!).event, 'collections_kpis');
+});
+
+// --- Overview/Collections future-payment split -------------------------------
+//
+// Overview and the Collections tab read the SAME rows through
+// daily_collections_resolved, so this read-time bound is the ONLY thing separating them.
+// CMD carries forward-dated deposit dates and dropFuturePaymentRows now ingests them up
+// to a horizon; Overview shows that money, Collections does not. If these fail, the two
+// surfaces have silently converged.
+
+test('collectionsDaily: defaults to EXCLUDING future payments (bound = today)', async () => {
+  const cap: Capture = {};
+  await collectionsDaily({}, ctx(fakeExecutor([], cap)));
+  assert.equal(cap.params?.[4], '2026-06-14', 'omitting the flag must bound at the injected today');
+});
+
+test('collectionsDaily: include_future_payments passes a null bound (no upper limit)', async () => {
+  const cap: Capture = {};
+  await collectionsDaily({ include_future_payments: true }, ctx(fakeExecutor([], cap)));
+  assert.equal(cap.params?.[4], null);
+});
+
+test('collectionsKpis: defaults to EXCLUDING future payments (anchor bounded at today)', async () => {
+  const cap: Capture = {};
+  await collectionsKpis({}, ctx(fakeExecutor([], cap)));
+  assert.equal(cap.params?.[2], '2026-06-14');
+});
+
+test('collectionsKpis: include_future_payments lets the anchor reach the true max', async () => {
+  const cap: Capture = {};
+  await collectionsKpis({ include_future_payments: true }, ctx(fakeExecutor([], cap)));
+  assert.equal(cap.params?.[2], null);
+});
+
+test('the future bound is derived from ctx.now, never the database clock', async () => {
+  // Guards against a "fix" that swaps the param for SQL current_date, which would make the
+  // boundary depend on the database session TimeZone and be untestable.
+  const cap: Capture = {};
+  const executor = fakeExecutor([], cap);
+  await collectionsDaily({}, {
+    executor,
+    createdBy: 'test',
+    entityIds: SCOPE,
+    now: () => new Date('2027-01-31T23:00:00Z'),
+    audit: () => {},
+  });
+  assert.equal(cap.params?.[4], '2027-01-31');
+  assert.ok(!cap.sql?.includes('current_date'), 'must not reach for the DB clock');
 });
