@@ -10,6 +10,7 @@
     { "path": "/api/cron/cmd-explorer-catchup", "schedule": "52 7 * * *" },
     { "path": "/api/cron/era-835", "schedule": "50 8 * * *" },
     { "path": "/api/cron/vob-sync", "schedule": "17 9 * * *" },
+    { "path": "/api/cron/refresh-cmd-payer", "schedule": "50 10 * * *" },
     { "path": "/api/cron/cms-hcpcs-sync", "schedule": "0 6 2 1,4,7,10 *" },
     { "path": "/api/cron/billing-audit-op", "schedule": "20 2 * * *" },
     { "path": "/api/cron/billing-audit-consolidated", "schedule": "40 2 * * *" },

@@ -160,10 +160,8 @@ Surfaces:
   `redirect('/')` stub. `<SearchConsole />` and the `/api/agent` path stay in git
   history; restoring means remounting the page *and* re-adding the nav entry.
 
-`app/vercel.json` declares **14 cron entries across 12 distinct routes**
-(`billing-audit-consolidated` runs on three schedules). `refresh-cmd-payer` is a
-13th cron *route* that is deliberately scheduled nowhere — see the report-grain
-note under [Known stale comments](#known-stale-comments--do-not-propagate):
+`app/vercel.json` declares **15 cron entries across 13 distinct routes**
+(`billing-audit-consolidated` runs on three schedules):
 
 | Route | Cadence |
 |---|---|
@@ -173,6 +171,7 @@ note under [Known stale comments](#known-stale-comments--do-not-propagate):
 | `cmd-explorer-catchup` | daily 07:52 |
 | `era-835` | daily 08:50 |
 | `vob-sync` | daily 09:17 |
+| `refresh-cmd-payer` | daily 10:50 |
 | `cms-hcpcs-sync` | quarterly, 06:00 on the 2nd of Jan/Apr/Jul/Oct |
 | `billing-audit-op` · `billing-code-decisions` | daily 02:20 / 02:40 |
 | `billing-audit-consolidated` | daily 02:40, 03:10, 03:40 |
@@ -248,13 +247,21 @@ These are wrong in the code today. Fix opportunistically; never copy them.
   Retired but not dead: Indigo's **10147669** (a trailing 4-week window, replaced
   2026-08-02) and **10147602**. `10147499` survives only in a comment in the
   manual `cmdDailyBackfill.ts` CLI — that CLI's default is now `10148478`.
-- Report **10093971 is one row per PAYMENT POSTING, not per charge line**
-  (measured 2026-08-03: 1,049 rows over 822 distinct `Payment Charge ID`).
-  `aggregateRollup` sums `Charge Amount` per row, so it over-states charges by
-  **+26.7%**. This is why `/api/cron/refresh-cmd-payer` is deliberately
-  **unscheduled** — the route is correct, the report is not. Fixing it means
-  projecting charge-level `Charge Insurance Payments` instead of posting-level
-  `Payment Total Paid`, and dropping `Payment Charge ID`.
+- `collections.cmd_payer_facility_monthly` now holds **two different
+  populations**, and the seam is at 2026-06. Rows for 2026-05 and earlier came
+  from the 2026-06-25 manual CSV ingest of the Derek History Report. Rows from
+  2026-06 forward are written by `/api/cron/refresh-cmd-payer` (scheduled
+  2026-08-03, daily 10:50) from report 10093971, whose filter windows on
+  **payment date**, not service date. Measured live-vs-CSV coverage by service
+  month decays monotonically — 2026-06 1202%, 2026-05 155%, 2026-04 123%,
+  2026-03 60%, 2026-01 18%, 2025-12 3.6%, 2025-05 0.7% — which is the signature
+  of a payment-date window, not a defect. The cron's 3-month trailing window
+  never reaches 2026-05 or earlier, so the CSV history is never overwritten;
+  expect a definitional step at the boundary in the "By Payer" chart.
+- 10:50 was chosen for that cron so it cannot contend with the hourly CMD crons
+  (:00/:15/:30/:35) for CMD's one-report-at-a-time partner slot. Probing during
+  a :15 census on 2026-08-02 cost 13 BXR census fetches — they self-healed the
+  next hour, but do not schedule CMD work near those minutes.
 - `dropFuturePaymentRows` is a bounded horizon now, but ships at
   `FUTURE_PAYMENT_HORIZON_DAYS = 0` — identical to the old strict today-cutoff.
   Do **not** flip it to 14 without also bounding the Collections reads at today:

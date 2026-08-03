@@ -306,7 +306,13 @@ export async function cmdExplorerCron(deps: CmdExplorerCronDeps): Promise<CmdExp
   console.log(
     `cmd-explorer cron: customers ${stats.customers_processed}/${stats.customers_total} ` +
       `(failed ${stats.customers_failed}, budget-skipped ${stats.customers_skipped_budget}); ` +
-      `fetched ${stats.rows_fetched}, charge valid ${stats.charge_mapped_valid}, ` +
+      // future-dropped is SURFACED here on purpose. It was tracked but never printed, and on
+      // 2026-08-02 that silence cost a full investigation: the Indigo report was returning real
+      // 08/03-08/05 deposits, the guard was discarding every one, and the log showed only a
+      // fetched-vs-valid gap with no hint why. A non-zero value here means money the report
+      // returned did not reach either write.
+      `fetched ${stats.rows_fetched}, future-dropped ${stats.rows_future_skipped}, ` +
+      `charge valid ${stats.charge_mapped_valid}, ` +
       `charge skipped ${stats.charge_skipped}, charge inserted ${stats.charge_inserted}; ` +
       `daily inserted ${stats.daily_rows_inserted}, daily replaced ${stats.daily_rows_deleted}`,
   );
