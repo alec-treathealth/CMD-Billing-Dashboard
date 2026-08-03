@@ -15,6 +15,7 @@
  * factor reads slightly-stale aggregates rather than nothing). The cron cadence self-heals.
  */
 import type pg from 'pg';
+import { BXR_ENTITY_ID } from '../tenants';
 import {
   MONDAY_CENSUS_BOARDS,
   MONDAY_FACILITY_INFO_BOARD,
@@ -113,7 +114,7 @@ export interface CensusSyncStats {
  */
 export async function runQualifyCensusSync(
   client: pg.PoolClient,
-  opts: { boards?: readonly CensusBoardConfig[]; today?: string } = {},
+  opts: { boards?: readonly CensusBoardConfig[]; today?: string; businessEntityId?: string } = {},
 ): Promise<CensusSyncStats> {
   const boards = opts.boards ?? MONDAY_CENSUS_BOARDS;
   // "Today" in US Central, not UTC: both live boards are US facilities, and a UTC date rolls
@@ -159,6 +160,7 @@ export async function runQualifyCensusSync(
       }));
       const agg = aggregateCensusItems(items, today);
       const upsert = buildUpsertCensusRowQuery({
+        business_entity_id: opts.businessEntityId ?? BXR_ENTITY_ID,
         facility_code: board.facilityCode,
         board_id: board.boardId,
         board_family: board.family,

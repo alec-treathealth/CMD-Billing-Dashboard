@@ -125,10 +125,10 @@ export async function loadCodingDecisionHistory(limit = 500): Promise<{ availabl
 /** Per-facility monday-census aggregates (Phase G) — FAIL-SOFT while 0078 is unapplied: the
  *  auth-fit factor reads unavailable and the UR/beds chips stay absent, never a 500. Aggregate
  *  facility-grain rows only (no PHI exists on this path). */
-export async function loadQualifyCensusAuth(): Promise<
+export async function loadQualifyCensusAuth(businessEntityIds: string[]): Promise<
   Array<{ facility_code: string; avg_auth_days: number | null; avg_los_days: number | null; next_ur_date: string | null; open_beds: number | null }>
 > {
-  const q = buildQualifyCensusReadQuery();
+  const q = buildQualifyCensusReadQuery(businessEntityIds);
   try {
     const res = await qualifyV2Reader().query<{
       facility_code: string;

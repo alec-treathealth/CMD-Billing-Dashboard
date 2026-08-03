@@ -207,7 +207,7 @@ export interface QualifyDeps {
   /** Phase A: all CURRENT coding decisions (seeded:false while 0077 is unapplied/empty). */
   loadCodingDecisions?: () => Promise<{ seeded: boolean; rows: CodingDecisionRow[] }>;
   /** Phase G: per-facility census aggregates (auth days, LOS, next UR, open beds). Empty = none. */
-  loadCensusAuth?: () => Promise<QualifyCensusAggRow[]>;
+  loadCensusAuth?: (businessEntityIds: string[]) => Promise<QualifyCensusAggRow[]>;
 }
 
 /** Per-facility monday-census AGGREGATE row (Phase G) — facility-level only, deliberately no
@@ -301,10 +301,11 @@ async function factorContext(
   from: string,
   to: string,
   provenance: QualifyProvenance,
+  businessEntityIds: string[],
 ): Promise<QualifyFactorContext> {
   const [coding, censusRows] = await Promise.all([
     deps.loadCodingDecisions ? deps.loadCodingDecisions().catch(() => NO_CODING) : Promise.resolve(NO_CODING),
-    deps.loadCensusAuth ? deps.loadCensusAuth().catch(() => [] as QualifyCensusAggRow[]) : Promise.resolve([] as QualifyCensusAggRow[]),
+    deps.loadCensusAuth ? deps.loadCensusAuth(businessEntityIds).catch(() => [] as QualifyCensusAggRow[]) : Promise.resolve([] as QualifyCensusAggRow[]),
   ]);
   const census = new Map<string, QualifyCensusAggRow>();
   for (const r of censusRows) if (r.facility_code) census.set(r.facility_code, r);
@@ -568,7 +569,7 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
     // Factor context (coding + census) is independent of the row loads — run all three together
     // (review finding #11: two avoidable serial round-trips on a latency-sensitive surface).
     const [ctx, facRows, landingRaw] = await Promise.all([
-      factorContext(deps, payerName, from, to, 'direct'),
+      factorContext(deps, payerName, from, to, 'direct', gate.entityIds),
       deps.loadFacilities(payerName, from, to, gate.entityIds, input.market, token, kind),
       deps.loadIdentifierLandingFacility(token, kind, payerName, from, to, gate.entityIds),
     ]);
@@ -619,7 +620,7 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
         // 365d worst case, which this path would otherwise always hit (zero own-claims ⇒ widest rung).
         const cb = qualifyWindowBounds({ kind: 'trailing', days: QUALIFY_COMPARABLE_WINDOW_DAYS }, now);
         const [ctx, facRows] = await Promise.all([
-          factorContext(deps, null, cb.from, cb.to, comparable.provenance),
+          factorContext(deps, null, cb.from, cb.to, comparable.provenance, gate.entityIds),
           deps.loadFacilities(null, cb.from, cb.to, gate.entityIds, comparable.market),
         ]);
         const facilities = assembleFacilities(facRows, ctx, true);
@@ -676,7 +677,7 @@ export async function getQualifySnapshotByPayerCore(
 
   const { from, to } = qualifyWindowBounds(window, deps.now());
   const [ctx, facRows] = await Promise.all([
-    factorContext(deps, payer, from, to, 'direct'),
+    factorContext(deps, payer, from, to, 'direct', gate.entityIds),
     deps.loadFacilities(payer, from, to, gate.entityIds, input.market),
   ]);
 
@@ -751,7 +752,7 @@ export async function getQualifySnapshotByNameCore(
   // Identifier-scoped ranking (same as the member/prefix path) — narrowed to the searched name's
   // footprint. Factor context rides the same Promise.all (review finding #11).
   const [ctx, facRows, landingRaw] = await Promise.all([
-    factorContext(deps, payerName, from, to, 'direct'),
+    factorContext(deps, payerName, from, to, 'direct', gate.entityIds),
     deps.loadFacilities(payerName, from, to, gate.entityIds, input.market, token, 'client_name'),
     deps.loadIdentifierLandingFacility(token, 'client_name', payerName, from, to, gate.entityIds),
   ]);

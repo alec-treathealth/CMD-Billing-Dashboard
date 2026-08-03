@@ -115,7 +115,7 @@ const realDeps: QualifyDeps = {
   loadVobFreshness: () => loadQualifyVobFreshness(),
   loadWindowRungs: (token, kind, entityIds, froms, to) => loadQualifyWindowRungs(token, kind, entityIds, froms, to),
   loadCodingDecisions: () => loadCurrentCodingDecisions(),
-  loadCensusAuth: () => loadQualifyCensusAuth(),
+  loadCensusAuth: (businessEntityIds) => loadQualifyCensusAuth(businessEntityIds),
 };
 
 /** Max employers accepted in one market narrow (bounded input — the vocabulary is ~11.6k). */

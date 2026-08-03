@@ -22,7 +22,8 @@
 set role claims_admin;
 
 create table if not exists collections.qualify_facility_census (
-  facility_code   text        primary key,          -- collections.facilities.facility_code (8-digit CMD customer)
+  business_entity_id uuid        not null,             -- explicit tenant scope
+  facility_code   text        not null,          -- collections.facilities.facility_code (8-digit CMD customer)
   board_id        text        not null,             -- monday board id (non-PHI ops identifier)
   board_family    text        not null check (board_family in ('residential', 'outpatient')),
   admitted_count  integer     not null default 0,
@@ -32,7 +33,8 @@ create table if not exists collections.qualify_facility_census (
   avg_los_days    numeric(6,2),                     -- avg Days in RTC / Days in OP over admitted rows
   auth_sample     integer     not null default 0,   -- admitted rows contributing to avg_auth_days
   next_ur_date    date,                             -- soonest upcoming UR date on the board
-  synced_at       timestamptz not null default now()
+  synced_at       timestamptz not null default now(),
+  primary key (business_entity_id, facility_code)
 );
 
 reset role;
@@ -54,7 +56,7 @@ create policy qualify_census_rw on collections.qualify_facility_census
 -- Grants — the established collections-cron writer; readers for the factor + any ops query.
 
 grant select on collections.qualify_facility_census to claims_reader, consolidated_reader;
-grant select, insert, update, delete on collections.qualify_facility_census to cmd_rollup_writer;
+grant select, insert, update on collections.qualify_facility_census to cmd_rollup_writer;
 
 -- Verification (run manually after apply)
 --
