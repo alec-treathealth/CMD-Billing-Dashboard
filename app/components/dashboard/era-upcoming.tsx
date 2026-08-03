@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * "Upcoming Payments" — the Overview module over staging.era_835_payment (payment grain,
+ * "Future <tenant> Payments" — the Overview module over staging.era_835_payment (payment grain,
  * migration 013) PLUS the hand-keyed forecast in staging.expected_payment_override
  * (migration 023). Rendered inside the OverviewKpis toggle panel, next to "All Facilities
  * Table".
@@ -271,10 +271,21 @@ export function buildUpcomingGroups(
  * control) and keeps the super-admin gate on the server side of one boundary instead of two.
  */
 export type ForecastEditIntent =
+  | { op: 'add'; facilityCode: string; payerLabel: string; expectedDate: string;
+      methodLabel: 'EFT' | 'Check'; amount: string }
   | { op: 'suppress'; facilityCode: string; payerLabel: string; expectedDate: string;
       reason: 'landed' | 'incorrect' | 'cancelled'; matchedEraKey?: string }
   | { op: 'correct'; facilityCode: string; payerLabel: string; expectedDate: string; amount: string }
   | { op: 'delete-edit'; id: number };
+
+/** One selectable facility for the add form: canonical code + something a human recognises. */
+export interface ForecastFacilityOption {
+  code: string;
+  label: string;
+}
+
+/** The amount shape 024 accepts: up to 10 digits, at most 2 decimals, positive. */
+const AMOUNT_RE = /^\d{1,10}(\.\d{1,2})?$/;
 
 /** Small pill marking a leaf's epistemic class. Text-labelled, never color-only. */
 function KindTag({ kind }: { kind: UpcomingItem['kind'] }) {
@@ -293,6 +304,7 @@ export function EraUpcomingBody({
   canEdit = false,
   onEdit,
   busy = false,
+  facilityOptions = [],
 }: {
   data: EraUpcomingSummary;
   /**
@@ -311,6 +323,12 @@ export function EraUpcomingBody({
   onEdit?: (intent: ForecastEditIntent) => void;
   /** A write is in flight; controls disable so a double-click cannot fire twice. */
   busy?: boolean;
+  /**
+   * Facilities the ACTIVE TENANT owns — the only valid targets for a manual add. Empty means
+   * "no single tenant in scope" (the Consolidated view), and the form is replaced by an
+   * explanation rather than shown and then rejected server-side.
+   */
+  facilityOptions?: ForecastFacilityOption[];
 }) {
   // RESOLUTION FIRST. Everything below renders the forecast AFTER super-admin corrections and
   // suppressions are applied, so a corrected amount and a hidden landed row are the truth the
@@ -344,6 +362,18 @@ export function EraUpcomingBody({
           plus any forecast rows keyed into the Upcoming Payments sheet. Entries appear once
           ERA ingest is running and payers adjudicate upcoming deposits.
         </p>
+        {/* The form belongs here too: an empty tile is exactly when a super admin needs to key
+            the first expected payment, and hiding it would send them to the sheet instead. */}
+        {canEdit && (
+          <div className="mt-3">
+            <AddForecastForm
+              facilityOptions={facilityOptions}
+              payerSuggestions={[]}
+              busy={busy}
+              onEdit={onEdit}
+            />
+          </div>
+        )}
       </div>
     );
   }
@@ -419,6 +449,15 @@ export function EraUpcomingBody({
           <UpcomingGroupRow key={g.key} group={g} canEdit={canEdit} busy={busy} onEdit={onEdit} />
         ))}
       </div>
+
+      {canEdit && (
+        <AddForecastForm
+          facilityOptions={facilityOptions}
+          payerSuggestions={payerSuggestions(resolved.rows, data.groups)}
+          busy={busy}
+          onEdit={onEdit}
+        />
+      )}
 
       {/* Truncation is named PER SOURCE. The two halves cap independently and at different
           numbers, so one blended "breakdown capped" sentence would attribute the cut to the
@@ -757,5 +796,176 @@ function ForecastRowControls({
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * Payer labels already in play, for the add form's datalist. Suggestions only — the field stays
+ * free text because 023 deliberately keeps payer labels VERBATIM and unresolved: forcing an
+ * operator's shorthand through alias resolution would drop any label with no alias row.
+ *
+ * Forecast labels come first (they are the vocabulary this feed actually uses), then 835 payer
+ * names, deduplicated case-insensitively.
+ */
+export function payerSuggestions(
+  forecast: ResolvedForecastRow[],
+  eraGroups: EraUpcomingSummary['groups'],
+): string[] {
+  const seen = new Map<string, string>();
+  for (const r of forecast) {
+    const k = r.payer_label.trim().toUpperCase();
+    if (k && !seen.has(k)) seen.set(k, r.payer_label.trim());
+  }
+  for (const g of eraGroups) {
+    const name = g.payer_name?.trim();
+    if (!name) continue;
+    const k = name.toUpperCase();
+    if (!seen.has(k)) seen.set(k, name);
+  }
+  return [...seen.values()].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Add a payment neither feed knows about (024 kind='add').
+ *
+ * WHY A DISCLOSURE, NOT AN ALWAYS-OPEN FORM: this is the rarest action on the tile — the sheet
+ * is the normal way a forecast arrives, and this exists for the payment that never made it
+ * there. Collapsed by default keeps the tile a report rather than a data-entry screen, and
+ * <details> gives the same free keyboard + announced-state behaviour as the parent rows above.
+ *
+ * UNCONTROLLED, so the whole tile stays a pure function of its props: values are read off the
+ * form on submit, validated, and handed up as an intent. No client state, nothing to get out of
+ * sync, and the render suite can drive it.
+ *
+ * FACILITY IS A SELECT, NOT TEXT. 024 stores a canonical facility_code and has no FK to
+ * validate one, so free text would let a typo land a payment under a facility that does not
+ * exist — invisible until someone noticed the tile was short. The options are the ACTIVE
+ * TENANT's roster only; the Server Action re-checks membership, so this is convenience over a
+ * real guard rather than the guard itself.
+ *
+ * VALIDATION IS DUPLICATED ON PURPOSE. Client-side keeps a bad value from costing a round trip
+ * and lets the message land next to the field; the Server Action validates independently
+ * because a client check is not a control. 024's CHECK constraints are the third layer.
+ */
+function AddForecastForm({
+  facilityOptions,
+  payerSuggestions: payers,
+  busy,
+  onEdit,
+}: {
+  facilityOptions: ForecastFacilityOption[];
+  payerSuggestions: string[];
+  busy: boolean;
+  onEdit?: (intent: ForecastEditIntent) => void;
+}) {
+  // No single tenant in scope (Consolidated). Say why rather than rendering a form whose every
+  // submission the server would reject with 'pick_a_tenant_view'.
+  if (facilityOptions.length === 0) {
+    return (
+      <p className="ths-card-meta">
+        Switch to the BXR or Indigo view to add an expected payment — a manual entry has to name
+        one company&apos;s book.
+      </p>
+    );
+  }
+  return (
+    <details className="ths-item">
+      <summary className="ths-item-summary ths-add-summary">
+        <span className="ths-item-chevron" aria-hidden>
+          ▸
+        </span>
+        <span className="font-medium">Add an expected payment</span>
+      </summary>
+      <form
+        className="ths-add-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const f = e.currentTarget;
+          const read = (name: string): string => {
+            const el = f.elements.namedItem(name);
+            return el instanceof HTMLInputElement || el instanceof HTMLSelectElement
+              ? el.value.trim()
+              : '';
+          };
+          const facilityCode = read('facilityCode');
+          const payerLabel = read('payerLabel');
+          const expectedDate = read('expectedDate');
+          const methodLabel = read('methodLabel');
+          const amount = read('amount');
+          // Mirrors the Server Action's validator and 024's per-kind CHECK. A silent no-op is
+          // better than a submitted-and-rejected round trip; the required/pattern attributes
+          // mean the browser has already blocked the common cases before we get here.
+          if (!facilityCode || !payerLabel || !AMOUNT_RE.test(amount)) return;
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(expectedDate)) return;
+          if (methodLabel !== 'EFT' && methodLabel !== 'Check') return;
+          onEdit?.({ op: 'add', facilityCode, payerLabel, expectedDate, methodLabel, amount });
+          f.reset();
+        }}
+      >
+        <label className="ths-field">
+          <span>Facility</span>
+          <select name="facilityCode" className="ths-input" required defaultValue="">
+            <option value="" disabled>
+              Select…
+            </option>
+            {facilityOptions.map((f) => (
+              <option key={f.code} value={f.code}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="ths-field">
+          <span>Payer</span>
+          <input
+            name="payerLabel"
+            className="ths-input"
+            list="ths-payer-suggestions"
+            maxLength={200}
+            required
+            placeholder="e.g. BCBS"
+          />
+          <datalist id="ths-payer-suggestions">
+            {payers.map((p) => (
+              <option key={p} value={p} />
+            ))}
+          </datalist>
+        </label>
+        <label className="ths-field">
+          <span>Expected</span>
+          {/* Native date input: gives an ISO value directly, and brings its own keyboard and
+              locale handling instead of us parsing a typed MM/DD/YYYY. */}
+          <input type="date" name="expectedDate" className="ths-input ths-num" required />
+        </label>
+        <label className="ths-field">
+          <span>Method</span>
+          <select name="methodLabel" className="ths-input" defaultValue="EFT">
+            <option value="EFT">EFT</option>
+            <option value="Check">Check</option>
+          </select>
+        </label>
+        <label className="ths-field">
+          <span>Amount</span>
+          <input
+            name="amount"
+            className="ths-input ths-num"
+            inputMode="decimal"
+            // pattern mirrors AMOUNT_RE so the browser blocks a bad value before submit and
+            // announces it on the field, which is the accessible place for the message.
+            pattern="\d{1,10}(\.\d{1,2})?"
+            title="Dollars, up to two decimals — e.g. 4200 or 4200.50"
+            required
+            placeholder="4200.00"
+          />
+        </label>
+        <button type="submit" className="ths-btn ths-btn-primary ths-btn-sm" disabled={busy}>
+          Add payment
+        </button>
+      </form>
+      <p className="ths-card-meta ths-add-note">
+        Added here, not in the sheet — the hourly sheet sync never touches it, and it shows as
+        &ldquo;added by admin&rdquo; on the tile.
+      </p>
+    </details>
   );
 }

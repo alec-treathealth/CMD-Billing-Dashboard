@@ -94,6 +94,7 @@ import {
   removeUpcomingManualRow,
   type ManualForecastRow,
 } from '@/lib/server';
+import { facilityBelongsToEntity } from '../../src/collections/cmdCustomers.js';
 import { requireExecutive } from '@/lib/executive';
 import { dashboardAccess } from '@/lib/access';
 import { BXR_ENTITY_ID, clampView, viewToEntityIds, type DashboardView } from '@/lib/views';
@@ -635,6 +636,14 @@ export async function saveUpcomingManual(
   if (invalid) return { ok: false, error: invalid };
   const entityId = await singleWriteEntity(view);
   if (!entityId) return { ok: false, error: 'pick_a_tenant_view' };
+  // CROSS-TENANT GUARD. 024 does not FK facility_code (the two payment feeds are deliberately
+  // unjoined), and collections.facilities is tenant-agnostic reference data, so nothing else in
+  // the stack can tell that CAMH is BXR's and 10034230 is Indigo's. Without this, a super admin
+  // on the BXR view could file an Indigo facility's payment under BXR — money in the wrong book,
+  // visible only as an odd row on a tile. The roster in cmdCustomers.ts is the source of truth.
+  if (!facilityBelongsToEntity(input.facilityCode, entityId)) {
+    return { ok: false, error: 'facility_not_in_tenant' };
+  }
   try {
     await recordAccess({
       actorEmail: actor.email,

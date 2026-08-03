@@ -5,7 +5,7 @@
  * `1auO2SDezdYS7tbqqDnk9OU_R7G-Erab8omvOZW0ANRQ`, a hand-keyed forward forecast of
  * payments ops knows are coming that have NO 835 yet and therefore cannot appear in
  * staging.era_835_payment. Lands in staging.expected_payment_override (migration 023) and
- * displays ALONGSIDE the ERA rows on the Overview "ERA-Confirmed Upcoming Payers" tile.
+ * displays ALONGSIDE the ERA rows on the Overview "Future <tenant> Payments" tile.
  *
  * ADDITIVE-ONLY (Alec, 2026-08-03). Nothing here suppresses, replaces, or reconciles
  * against an ERA row. No supersedes key, no join to era_835_payment. ERA reconciliation is
@@ -95,13 +95,18 @@ export type MethodLabel = 'EFT' | 'Check';
  * underscores, hyphens and dots removed, so `TMH WA`, `TMHWA`, `tmh_wa` and `TMH-WA` all
  * resolve to the same entry and a stray space in the sheet cannot break the sync.
  *
- * ⚠️ DELIBERATELY ABSENT: `Teen Mental Health`, which appears in the workbook's July OP grid
- * and resolves to NOTHING here. It needs a business ruling before it can be mapped — the
- * closest roster match is Indigo's MY TEEN MENTAL HEALTH (CMD customer 10034230), which
- * belongs to a DIFFERENT TENANT. Mapping it to a BXR code would cross-attribute another
- * tenant's money, and mapping it to the Indigo code would land an Indigo row under
- * whichever tenant the sync happens to run for. So it stays unmapped and gets REPORTED as
- * unmapped every run until Alec rules. Do not "fix" this by guessing.
+ * ⚠️ DELIBERATELY ABSENT, AND NOW RULED ON: `Teen Mental Health`, which appears in the
+ * workbook's July OP grid and resolves to NOTHING here. The closest roster match is Indigo's
+ * MY TEEN MENTAL HEALTH (CMD customer 10034230) — a DIFFERENT TENANT. Alec CONFIRMED that
+ * reading on 2026-08-03, so this entry stays absent permanently rather than pending: mapping it
+ * to a BXR code would cross-attribute another tenant's money, and mapping it to the Indigo code
+ * would land an Indigo row under whichever tenant the sync runs for (BXR today). It is reported
+ * as unmapped every run, which is the correct outcome, not a backlog item.
+ *
+ * The route to actually ingesting it is an INDIGO override tab with its own alias entries and a
+ * second sync call under INDIGO_TENANT_ID — a widening of the feed, not of this table.
+ * `test/upcomingForecast.test.ts` asserts every value below is on the BXR roster, so an entry
+ * added here that crosses tenants fails the suite rather than shipping.
  *
  * Every value below is a real BXR facilityCode from cmdCustomers.ts. The sheet is BXR-only
  * today (all 9 live rows are BXR facilities); an Indigo override tab would need its own

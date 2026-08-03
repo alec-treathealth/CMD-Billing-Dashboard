@@ -25,6 +25,7 @@ import { test } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   buildUpcomingGroups,
+  payerSuggestions,
   centsFromText,
   EraUpcomingBody,
   paymentMethodLabel,
@@ -341,4 +342,74 @@ test('centsFromText is exact and rejects junk', () => {
   assert.equal(centsFromText(null), null);
   assert.equal(centsFromText('$100'), null, 'formatting is the UI edge, not this parser');
   assert.equal(centsFromText('1.234'), null, 'more than cents precision is not a money value');
+});
+
+// ---------------------------------------------------------------------------
+// The add-a-payment form (024 kind='add').
+// ---------------------------------------------------------------------------
+
+const FACILITIES = [
+  { code: 'CAMH', label: 'CAMH — CA MENTAL HEALTH' },
+  { code: 'KWC', label: 'KWC — KENTUCKY WELLNESS CENTER' },
+];
+
+test('the add form renders only for a super admin', () => {
+  const withEdit = renderToStaticMarkup(
+    <EraUpcomingBody data={S({})} canEdit facilityOptions={FACILITIES} />,
+  );
+  assert.ok(withEdit.includes('Add an expected payment'), 'super admin gets the form');
+  assert.ok(withEdit.includes('CA MENTAL HEALTH'), 'facilities are selectable, not free text');
+
+  const withoutEdit = renderToStaticMarkup(
+    <EraUpcomingBody data={S({})} facilityOptions={FACILITIES} />,
+  );
+  assert.ok(!withoutEdit.includes('Add an expected payment'), 'nobody else sees it');
+});
+
+test('the form appears on an EMPTY tile too — that is when it is most needed', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody data={S({})} canEdit facilityOptions={FACILITIES} />,
+  );
+  assert.ok(html.includes('No future payments scheduled'), 'still the calm empty read');
+  assert.ok(html.includes('Add an expected payment'), 'and the form is reachable from it');
+});
+
+test('Consolidated explains instead of offering a form the server would reject', () => {
+  // A write must name one tenant; Consolidated resolves to two entity ids, so the action
+  // returns 'pick_a_tenant_view'. Offering the form there would be a guaranteed dead end.
+  const html = renderToStaticMarkup(<EraUpcomingBody data={S({})} canEdit facilityOptions={[]} />);
+  assert.ok(!html.includes('Add an expected payment'), 'no form without a single tenant');
+  assert.ok(html.includes('Switch to the BXR or Indigo view'), 'it says what to do instead');
+});
+
+test('the amount field constrains itself to a money shape in the markup', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody data={S({})} canEdit facilityOptions={FACILITIES} />,
+  );
+  // The browser blocks a bad value and announces it on the field — the accessible place for
+  // the message — before the client check or the Server Action ever see it.
+  assert.ok(html.includes('pattern="\\d{1,10}(\\.\\d{1,2})?"'), 'money pattern is on the input');
+  assert.ok(html.includes('type="date"'), 'native date input, not a parsed text field');
+  assert.ok(html.includes('required'), 'the required fields are marked for the browser');
+});
+
+test('payerSuggestions dedupes across both feeds, forecast vocabulary first', () => {
+  const forecast = buildUpcomingGroups(S({}), OS([OR({ payer_label: 'BCBS' })]))
+    .flatMap((g) => g.items)
+    .map((i) => ({
+      expected_date: '2026-08-03',
+      facility_code: 'CAMH',
+      payer_label: i.payer ?? '',
+      method_label: i.methodLabel,
+      amount: i.amount ?? '0.00',
+      is_patient_specific: false,
+      origin: 'sheet' as const,
+      corrected: false,
+    }));
+  const out = payerSuggestions(forecast, [
+    G({ payer_name: 'AETNA' }),
+    G({ payer_name: 'bcbs' }),
+    G({ payer_name: null }),
+  ]);
+  assert.deepEqual(out, ['AETNA', 'BCBS'], 'case-insensitive dedupe, unnamed payer dropped');
 });

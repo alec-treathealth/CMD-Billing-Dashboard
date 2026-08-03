@@ -126,7 +126,7 @@ export function Dashboard({
    */
   canEditForecast?: boolean;
 }) {
-  // "ERA-Confirmed Upcoming Payments" moved from a standalone top card into the
+  // "Future <tenant> Payments" moved from a standalone top card into the
   // OverviewKpis toggle-button row (next to "All Facilities Table") — same data,
   // now revealed on demand.
   return (

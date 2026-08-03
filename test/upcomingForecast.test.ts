@@ -16,6 +16,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  BXR_CUSTOMERS,
+  INDIGO_CUSTOMERS,
+  facilityBelongsToEntity,
+  facilityCodesForEntity,
+} from '../src/collections/cmdCustomers.js';
+import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../src/tenants.js';
+import {
   amountFromCents,
   centsFromAmount,
   matchKey,
@@ -271,4 +278,43 @@ test('suggestions are deterministic regardless of input order', () => {
   );
   assert.deepEqual(a, ['CAMH', 'KWC']);
   assert.deepEqual(a, b);
+});
+
+// --- the cross-tenant facility guard --------------------------------------------------
+// This is what stops a super admin on the BXR view filing an Indigo facility's expected
+// payment under BXR. 024 has no FK on facility_code and collections.facilities is
+// tenant-agnostic, so the roster is the only thing that can answer "whose facility is this".
+
+test('facilityCodesForEntity returns exactly one tenant roster', () => {
+  const bxr = facilityCodesForEntity(BXR_ENTITY_ID);
+  const indigo = facilityCodesForEntity(INDIGO_ENTITY_ID);
+  assert.equal(bxr.length, BXR_CUSTOMERS.length);
+  assert.equal(indigo.length, INDIGO_CUSTOMERS.length);
+  assert.ok(bxr.includes('CAMH'), 'a known BXR short code');
+  // THE POINT OF THE GUARD: no facility may appear on both rosters, or "whose is it" has no
+  // answer and the guard would wave a cross-tenant write through.
+  const overlap = bxr.filter((c) => indigo.includes(c));
+  assert.deepEqual(overlap, [], 'the two books share no facility code');
+});
+
+test('facilityBelongsToEntity is exact and rejects the other tenant', () => {
+  assert.ok(facilityBelongsToEntity('CAMH', BXR_ENTITY_ID));
+  assert.ok(!facilityBelongsToEntity('CAMH', INDIGO_ENTITY_ID), 'a BXR facility is not Indigo');
+  const anIndigoCode = INDIGO_CUSTOMERS[0]!.facilityCode;
+  assert.ok(facilityBelongsToEntity(anIndigoCode, INDIGO_ENTITY_ID));
+  assert.ok(!facilityBelongsToEntity(anIndigoCode, BXR_ENTITY_ID), 'and not the reverse');
+  assert.ok(!facilityBelongsToEntity('camh', BXR_ENTITY_ID), 'codes are canonical, not case-folded');
+  assert.ok(!facilityBelongsToEntity('NOT_A_FACILITY', BXR_ENTITY_ID));
+  assert.ok(!facilityBelongsToEntity('CAMH', '00000000-0000-0000-0000-000000000000'));
+});
+
+test('every alias the sheet parser can produce is a real BXR facility', async () => {
+  // 023's alias table resolves sheet labels to canonical codes, and the sheet cron writes as
+  // BXR. If those two ever disagree the guard would start rejecting legitimate sheet-derived
+  // corrections — so lock them together here rather than discovering it in production.
+  const { knownFacilityCodes } = await import('../src/veris/upcomingOverrideSheet.js');
+  const bxr = facilityCodesForEntity(BXR_ENTITY_ID);
+  for (const code of knownFacilityCodes()) {
+    assert.ok(bxr.includes(code), `alias target ${code} must be on the BXR roster`);
+  }
 });
