@@ -3415,6 +3415,35 @@ Related: one `next build` in the same window failed with a bare "Build error occ
 on an immediate re-run. That was webpack reading a file the other session saved mid-build, not a
 defect. In a shared tree, a single build failure is not evidence until it reproduces.
 
+## Upcoming Payments — OVERRIDE_TAB is "Current Updates"; the dedicated-tab plan is VOID (2026-08-03)
+
+The plan to have ops create a flat `Upcoming Payments Overrides` tab is **void** (Alec,
+2026-08-03): the workbook belongs to BXR ops (catherine@bxrconsulting.com), we have no
+write access, and no such tab exists anywhere in it. Full tab list: **Current Updates**
+(gid 6894062, where the Upcoming Payments block lives, starting ~row 7) plus IP/OP month
+tabs January–August. The `GOOGLE_SHEETS_REFRESH_TOKEN` identity already reads the workbook
+fine — the cron's `Unable to parse range` error was tab-not-found, never permissions.
+
+The parser now reads the block IN PLACE, structurally rather than by row number:
+
+- Header located by **exact-match scan** (`findOverrideHeader`, limit 50 rows; row 8
+  today). Exact match is load-bearing — the abandoned row-3 header is ALSO six columns
+  (`…, Date/Range, Auth or Claim Issue, Last Update`) and a loose finder would map
+  `Amount` onto `Last Update`. Rows at/above the header are never data.
+- **Interior blank rows are SKIPPED, never a terminator** — the live sheet has a gap row
+  with a real $72,000 forecast BELOW it. Pinned by the live-shape fixture test.
+- The **Total footer** (label in column 5, blank Facility) is classified non-data by its
+  blank Facility and skipped silently. `missing_facility` left the reject union
+  deliberately: the accepted trade is that a half-keyed data row missing only its
+  facility drops without a reject, instead of the footer rejecting on every sync.
+
+**KNOWN FOLLOW-UP (ruled 2026-08-03, deliberately NOT in this change):** the read path's
+`expected_date >= today` cutoff (`OVERRIDE_TOTALS_SQL` / `OVERRIDE_ROWS_SQL` in
+`src/veris/upcomingOverride.ts`) hides past-dated rows from the tile and its total even
+though they land in the table. Past-dated sheet rows are legitimate outstanding expected
+payments, so the parser keeps them; widening the read is a separate change. Until it
+ships, the 05/26 $72,000 row is in `staging.expected_payment_override` but not on the
+Overview tile — a correct, known intermediate state.
 ## 023 — `staging.expected_payment_override` APPLIED LIVE (2026-08-03), after 024
 
 The concurrent-revision hold that made 024 go first is over: at apply time the
