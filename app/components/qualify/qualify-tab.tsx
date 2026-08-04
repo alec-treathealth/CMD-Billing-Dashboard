@@ -90,6 +90,7 @@ import { MultiSelectTagPicker, type PickerOption } from '@/components/ui/multi-s
 import { buildQualifySearchParams, parseQualifySearchParams } from '@/lib/qualify/urlState';
 import { deriveTileFlanks, NO_TILE_FLANKS } from '@/lib/qualify/tileFlanks';
 import { deriveOnFileTags } from '@/lib/qualify/onFileTags';
+import { settledNoMatches } from '@/lib/qualify/matchState';
 import { derivePolicyRating } from '@/lib/qualify/policyRating';
 
 /** Band → the ON-DARK hue for the policy numeral (the light-surface RATING_HEX is unreadable on
@@ -817,11 +818,20 @@ export function QualifyTab({
       ? leadSnapshot
       : panelSnapshot;
 
-  /** The composed filter matches NOTHING — a settled, successful count of zero, not a pending state
-   *  (`summary === null` while loading) and not a failure (`summaryError`). Worth saying out loud even
-   *  without a grid: it is the difference between "this ranking is not your client's history" and "this
-   *  ranking is built on it", and the ranking itself looks identical either way. */
-  const noMatches = !summaryError && summary !== null && summary.count === 0;
+  /** The composed filter matches NOTHING — a SETTLED, successful count of zero. Worth saying out loud
+   *  even without a grid: it is the difference between "this ranking is not your client's history" and
+   *  "this ranking is built on it", and the ranking itself looks identical either way.
+   *
+   *  `!summaryLoading` is load-bearing, not defensive (Qodo review of PR #100). The compose effect does
+   *  NOT clear `summary` on a filter or window change — it keeps the previous result and marks the
+   *  readout "updating…", so during the debounce plus fetch `summary` still holds the PRIOR search's
+   *  count. Without this gate a search that previously returned zero kept asserting "no charge lines
+   *  match this search" over a new search that had not been answered yet, and because the copy prints
+   *  `qualifyWindowLabel(windowSel)` — which updates synchronously — a window change rendered the OLD
+   *  window's zero labelled with the NEW window's name. That is this series' own defect: a claim about a
+   *  population the screen is not describing. The count itself may show stale with an "updating…" chip
+   *  beside it; a categorical sentence gets no such marker, so it waits for the answer. */
+  const noMatches = settledNoMatches({ loading: summaryLoading, error: summaryError, count: summary?.count ?? null });
 
   // SR-only announcement (the compose count updates silently otherwise).
   const liveMessage = !hasAnyFilter
