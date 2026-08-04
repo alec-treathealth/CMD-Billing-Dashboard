@@ -3622,3 +3622,19 @@ version.
 `INTEL_WRITER_DATABASE_URL` are believed unset, and `intel_writer` is NOLOGIN
 until credentials are provisioned out of band. 025 closes the schema gap only.
 Next Veris number remains **026**.
+
+## fc2c8f6's three intel files — attributed to the intel workstream; no code split needed (2026-08-04)
+
+Closing the open "split fc2c8f6?" decision, per Alec's ruling. The three intel
+files inside `fc2c8f6` ("024 APPLIED LIVE") — `src/intel/payer_policy/client.ts`,
+`src/intel/payer_policy/types.ts`, `test/payerPolicyIntel.test.ts` — belong to
+the **payer-intel workstream**, not to migration 024: they are one coherent,
+complete edit (the `RetrievedUrl` via-tagging that records whether search or
+fetch surfaced each URL, the first question any Gate D failure raises) swept in
+by the shared-index hazard `4430e47` documents (two sessions, one index; a bare
+`git commit` commits the index, not your own `git add` list). Confirmed by
+inspection 2026-08-04: `client.ts` and `types.ts` have not changed since
+`fc2c8f6` itself, the edit is self-contained with **no overloaded logic to
+separate and zero behavior change available**, and `fc2c8f6` is an ancestor of
+production `main` under merge commits — so the "split" resolves as this
+attribution note, not a history rewrite and not a code restructure.
