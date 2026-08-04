@@ -228,6 +228,124 @@ test('suggested table: scoped+rated(no conflict)→placement; scoped+unrated→r
   assert.equal(qualifyAiChips(unrated).suggestedId, 'ranks');
 });
 
+// ── Scenario 6: nothing-strong + confident sample — the ONLY state that PRODUCES takeit ──────────
+//
+// Without this fixture the takeit and improve candidate lines could both be deleted with a green
+// suite (every other fixture either caps at five before reaching improve, or has something >= 50).
+
+const NOTHING_STRONG = snap({
+  facilities: [
+    fac({ rank: 1, name: 'ALPHA', ratingV2: 40, iqBand: '30', distinctPatients: 12, medianDaysToPayment: 60, factors: [NEG_FACTOR] }),
+    fac({ rank: 2, name: 'BETA', ratingV2: 22, iqBand: '15', distinctPatients: 8, medianDaysToPayment: 70, factors: [NEG_FACTOR] }),
+  ],
+  ladder: { ...CONFIDENT_LADDER, rungs: [{ days: 90 as const, distinctPatients: 20, sufficient: true }] },
+});
+
+test('nothing-strong + confident: takeit AND improve are both produced; placement is suppressed', () => {
+  const { chips, suggestedId } = qualifyAiChips(NOTHING_STRONG);
+  assert.deepEqual(
+    chips.map((c) => c.id),
+    ['ranks', 'takeit', 'speed', 'improve'],
+  );
+  assert.equal(chips[1]?.label, 'Should we be taking this policy at all?');
+  assert.equal(chips[3]?.label, 'What would move this rating?');
+  // placement is deliberately withheld when nothing reads strong — yet the ruled suggested table's
+  // else-branch still returns ranks, which IS shown here.
+  assert.ok(!chips.some((c) => c.id === 'placement'));
+  assert.equal(suggestedId, 'ranks');
+});
+
+test('takeit is mutually exclusive with thin — a thin sample asks about history, not appetite', () => {
+  // Weak (nothing >= 50) AND thin (4 < 10): the mockup gates takeit on `!thin`, because "should we
+  // take this policy" is unanswerable on evidence too thin to read.
+  const thinAndWeak = snap({
+    facilities: [fac({ rank: 1, name: 'ALPHA', ratingV2: 40, iqBand: '30', distinctPatients: 4, factors: [NEG_FACTOR] })],
+  });
+  const ids = qualifyAiChips(thinAndWeak).chips.map((c) => c.id);
+  assert.ok(ids.includes('thin'));
+  assert.ok(!ids.includes('takeit'));
+});
+
+// ── The ladder is load-bearing: it OVERRIDES the facility sum for the thin decision ──────────────
+
+test('thin reads the chosen ladder rung, not the facility sum — both directions', () => {
+  const base = NOTHING_STRONG.facilities;
+  // Facility sum is 20 (confident) but the chosen rung says 4 — the RUNG wins, so thin fires.
+  const rungThin = snap({
+    facilities: base,
+    ladder: { rungs: [{ days: 90 as const, distinctPatients: 4, sufficient: false }], chosenDays: 90, sufficient: false },
+  });
+  assert.ok(qualifyAiChips(rungThin).chips.some((c) => c.id === 'thin'), 'rung 4 → thin');
+  // Converse: a tiny facility sum (2) with a confident rung (14) must NOT read as thin.
+  const rungConfident = snap({
+    facilities: [fac({ rank: 1, name: 'ALPHA', ratingV2: 60, iqBand: '50', distinctPatients: 2 })],
+    ladder: CONFIDENT_LADDER,
+  });
+  assert.ok(!qualifyAiChips(rungConfident).chips.some((c) => c.id === 'thin'), 'rung 14 → not thin');
+  // No ladder at all → fall back to the facility sum (2 → thin).
+  const noLadder = snap({ facilities: rungConfident.facilities });
+  assert.ok(qualifyAiChips(noLadder).chips.some((c) => c.id === 'thin'), 'no ladder → facility sum');
+});
+
+test('thin boundary is exactly the confident floor: 9 thin, 10 not', () => {
+  const at = (n: number) =>
+    qualifyAiChips(
+      snap({
+        facilities: [fac({ rank: 1, name: 'ALPHA', ratingV2: 60, iqBand: '50', distinctPatients: n })],
+      }),
+    ).chips.some((c) => c.id === 'thin');
+  assert.equal(at(9), true);
+  assert.equal(at(10), false);
+});
+
+// ── Guards that would otherwise be deletable with a green suite ──────────────────────────────────
+
+test('a policy card with found:false contributes NO policy chips — an unmatched VOB is not a fact', () => {
+  const notFound = snap({
+    facilities: [fac({ rank: 1, name: 'ALPHA', ratingV2: 60, iqBand: '50', distinctPatients: 14 })],
+    // Every policy-derived chip would fire on these values if `found` were ignored.
+    policy: policyCard({ found: false, policyType: 'EPO', funding: 'Self-Funded', network: 'OON' }),
+  });
+  const ids = qualifyAiChips(notFound).chips.map((c) => c.id);
+  for (const leaked of ['plantype', 'funding', 'network']) {
+    assert.ok(!ids.includes(leaked as never), `${leaked} must not fire on an unmatched policy`);
+  }
+  // And the suggested table must not claim OON either — this facility is scoped+rated with no
+  // conflict, so the ruled table lands on placement; 'network' would mean an unmatched VOB had
+  // asserted a posture.
+  assert.equal(qualifyAiChips(notFound).suggestedId, 'placement');
+});
+
+test('an UNAVAILABLE factor is not a signal — no improve lever, no conflict', () => {
+  const unavailableNeg: QualifyFactorReading = { ...NEG_FACTOR, available: false, score: null };
+  const s = snap({
+    facilities: [fac({ rank: 1, name: 'ALPHA', ratingV2: 60, iqBand: '50', distinctPatients: 14, factors: [POS_FACTOR, unavailableNeg] })],
+  });
+  const { chips, suggestedId } = qualifyAiChips(s);
+  assert.ok(!chips.some((c) => c.id === 'improve'), 'unavailable factors need data, not effort');
+  // Not a conflict either (pos + unavailable-neg) → scoped+rated falls through to placement.
+  assert.equal(suggestedId, 'placement');
+});
+
+test('policy-only with ZERO facilities is a supported state and still offers chips', () => {
+  const policyOnly = snap({ policy: policyCard({ policyType: 'EPO', funding: 'Self-Funded' }) });
+  const { chips, suggestedId } = qualifyAiChips(policyOnly);
+  assert.deepEqual(
+    chips.map((c) => c.id),
+    ['explain', 'thin', 'plantype', 'funding'],
+  );
+  assert.equal(chips[0]?.label, 'What do we actually know about this policy?');
+  assert.equal(suggestedId, 'ranks'); // nothing to rank — panel highlights nothing, by design
+});
+
+test('the neutral speed label appears when any facility pays inside the slow threshold', () => {
+  const fast = snap({
+    facilities: [fac({ rank: 1, name: 'ALPHA', ratingV2: 60, iqBand: '50', distinctPatients: 14, medianDaysToPayment: 35 })],
+  });
+  const speed = qualifyAiChips(fast).chips.find((c) => c.id === 'speed');
+  assert.equal(speed?.label, 'How long until we see the money?');
+});
+
 // ── Cap, ordering under pressure, determinism ────────────────────────────────────────────────────
 
 test('at most five chips even when eight candidates qualify — most specific win', () => {

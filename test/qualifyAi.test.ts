@@ -12,6 +12,7 @@ import {
   createBlindLineScrubber,
   runQualifyAiExplanation,
   QUALIFY_AI_QUESTIONS,
+  QUALIFY_AI_ACTION,
   type QualifyAiInput,
   type QualifyAiRunDeps,
 } from '../src/collections/qualifyAi';
@@ -188,7 +189,12 @@ function makeDeps(
 ) {
   const events: string[] = [];
   const logs: Array<Record<string, unknown>> = [];
-  const audits: Array<Record<string, unknown>> = [];
+  const audits: Array<{
+    actorEmail: string;
+    actorUserId: string;
+    action: string;
+    detail: Record<string, unknown>;
+  }> = [];
   const deps: QualifyAiRunDeps = {
     gate: async () =>
       opts.gateOk === false
@@ -196,7 +202,7 @@ function makeDeps(
         : { ok: true, actor: { email: 'rep@example.test', userId: 'u-1' }, hasAmounts: opts.hasAmounts ?? true },
     recordAccess: async (entry) => {
       events.push('audit');
-      audits.push(entry.detail);
+      audits.push(entry);
       if (opts.auditThrows) throw new Error('audit unavailable');
     },
     transport: () => {
@@ -233,8 +239,8 @@ test('core: the audit row lands BEFORE the model transport is touched — for EV
     assert.deepEqual(events, ['audit'], `${question}: audit precedes the stream`);
     await collect(run);
     assert.deepEqual(events, ['audit', 'transport'], `${question}: transport only on consumption`);
-    assert.equal(audits[0]?.question, question);
-    assert.equal(audits[0]?.model, 'test-model');
+    assert.equal(audits[0]?.detail.question, question);
+    assert.equal(audits[0]?.detail.model, 'test-model');
     const cost = logs.find((l) => l.evt === 'qualify_ai_explain_cost');
     assert.ok(cost, `${question}: cost line logged`);
     assert.equal(cost?.stop_reason, 'end_turn');
@@ -297,6 +303,37 @@ test('core: gate denial → unavailable; firewall reject → invalid; empty read
     await runQualifyAiExplanation({ ...VALID, facilities: [], policy: null }, makeDeps([]).deps),
     { ok: false, reason: 'insufficient' },
   );
+});
+
+test('core: the audit ROW itself is right — action key, actor, and the whole detail shape', async () => {
+  const { deps, audits } = makeDeps(['## TL;DR\nok\n']);
+  const run = await runQualifyAiExplanation({ ...VALID, question: 'takeit', windowDays: 180 }, deps);
+  await collect(run);
+  const row = audits[0];
+  // The action string is the claims.access_audit QUERY KEY — renaming it silently orphans the audit
+  // trail, so it is pinned to a literal here, not to the constant it comes from.
+  assert.equal(row?.action, 'qualify_ai_explain');
+  assert.equal(QUALIFY_AI_ACTION, 'qualify_ai_explain');
+  // Attribution is the entire point of the row: it must be the SERVER principal, never a client value.
+  assert.equal(row?.actorEmail, 'rep@example.test');
+  assert.equal(row?.actorUserId, 'u-1');
+  // Full shape — a dropped field is a silent loss of audit context, and no field may be PHI/dollars.
+  assert.deepEqual(row?.detail, {
+    question: 'takeit',
+    provenance: 'direct',
+    facilities: 1,
+    window_days: 180,
+    model: 'test-model',
+  });
+});
+
+test('core: an early-breaking consumer aborts the upstream call (no tokens paid after abandon)', async () => {
+  const { deps, events } = makeDeps(['## TL;DR\nfirst\n', '## Signals\nsecond\n']);
+  const run = await runQualifyAiExplanation(VALID, deps);
+  assert.ok(run.ok);
+  if (!run.ok) return;
+  for await (const _chunk of run.deltas) break; // client navigated away after the first delta
+  assert.ok(events.includes('abort'), 'the transport was aborted, not merely abandoned');
 });
 
 test('core: an audit hiccup never blocks the non-PHI read (best-effort, preserved)', async () => {

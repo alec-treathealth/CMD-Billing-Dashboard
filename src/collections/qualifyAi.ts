@@ -364,9 +364,17 @@ export async function runQualifyAiExplanation(input: unknown, deps: QualifyAiRun
           }),
         )
       : null;
-    for await (const delta of live.deltas) {
-      const out = scrub ? scrub.push(delta) : delta;
-      if (out) yield out;
+    // A consumer that stops pulling (client navigated away mid-answer) must not leave the upstream
+    // model call running — `finally` fires on early break/return, where nothing else would.
+    let drained = false;
+    try {
+      for await (const delta of live.deltas) {
+        const out = scrub ? scrub.push(delta) : delta;
+        if (out) yield out;
+      }
+      drained = true;
+    } finally {
+      if (!drained) live.abort();
     }
     const tail = scrub ? scrub.flush() : '';
     if (tail) yield tail;
