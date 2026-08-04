@@ -870,7 +870,8 @@ export function QualifyTab({
   //    renders, so the tiles bracket what they average and the notice describes what is on screen.
   //    `panelFacilities` is the LOC-lensed ranking; the identifier flag is what makes the ranking's
   //    population (payer-wide) and the grid's population (this client) diverge. ──────────────────────
-  const rankedForScope = panelPayer && panelSnapshot ? panelFacilities : leadSnapshot?.facilities ?? [];
+  const rankedForScopeLoading = Boolean(panelPayer && !panelSnapshot);
+  const rankedForScope = rankedForScopeLoading ? [] : panelPayer ? panelFacilities : leadSnapshot?.facilities ?? [];
   const facilitySpread = useMemo(() => deriveFacilitySpread(rankedForScope), [rankedForScope]);
   const scopeNotice = useMemo(
     () =>
@@ -1314,7 +1315,7 @@ export function QualifyTab({
           {/* ── SCOPE HONESTY (2026-08-04): the ranking is payer-WIDE while the grid is fully composed,
               so when those two populations disagree the screen says so — ABOVE the ranking, where it
               is read, not below a 27-card list. Pure decision in lib/qualify/scopeNotice.ts. ── */}
-          <ScopeNotice notice={scopeNotice} />
+          {!rankedForScopeLoading ? <ScopeNotice notice={scopeNotice} /> : null}
 
           {/* ── AI EXPLAINER — moved ABOVE the ranking (2026-08-04). It used to render after the
               two-column grid, which on a 27-facility payer put it a full screen below the fold: the
