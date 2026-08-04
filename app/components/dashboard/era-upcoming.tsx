@@ -56,7 +56,10 @@
  */
 import { count, money } from '../../lib/format';
 import type { EraUpcomingSummary } from '../../../src/veris/era835Upcoming.js';
-import type { UpcomingOverrideSummary } from '../../../src/veris/upcomingOverride.js';
+import type {
+  UpcomingOverrideRow,
+  UpcomingOverrideSummary,
+} from '../../../src/veris/upcomingOverride.js';
 import {
   resolveForecast,
   suggestLandedMatches,
@@ -194,7 +197,9 @@ export interface UpcomingGroup {
  */
 export function buildUpcomingGroups(
   era: EraUpcomingSummary,
-  overrides: UpcomingOverrideSummary | null,
+  // Structurally minimal on purpose: callers pass the UPCOMING resolved rows only — the
+  // Overdue partition renders in its own section and must never interleave here.
+  overrides: { rows: UpcomingOverrideRow[] } | null,
 ): UpcomingGroup[] {
   const byKey = new Map<string, UpcomingGroup>();
   const get = (date: string, facilityCode: string): UpcomingGroup => {
@@ -330,35 +335,77 @@ export function EraUpcomingBody({
    */
   facilityOptions?: ForecastFacilityOption[];
 }) {
-  // RESOLUTION FIRST. Everything below renders the forecast AFTER super-admin corrections and
-  // suppressions are applied, so a corrected amount and a hidden landed row are the truth the
-  // whole tile agrees on — headline line, parent subtotals and subitems alike.
-  const resolved = resolveForecast(overrides?.rows ?? [], manual);
-  const forecastCents = resolved.totalCents;
-  const forecastRows = resolved.rows.length;
-  // The forecast total is recomputed from the resolved rows rather than reusing 023's uncapped
-  // aggregate: that number predates the corrections. It is therefore capped-accurate — fine at
-  // the ~9 rows the sheet carries, and the cap notice below fires if that ever stops holding.
-  const forecastForGroups: UpcomingOverrideSummary | null =
+  // RESOLUTION FIRST, THEN PARTITION (Alec, 2026-08-03). Everything below renders the
+  // forecast AFTER super-admin corrections and suppressions are applied, so a corrected
+  // amount and a hidden landed row are the truth the whole tile agrees on. Resolution runs
+  // over the UNION of both partitions — a suppress/correct must hit its row wherever it
+  // sits — and only THEN are rows bucketed. Why post-resolution bucketing: a 024 'correct'
+  // cannot move expected_date (the date is the match key), but a manual 'add' is born with
+  // its own date and enters HERE, after the SQL partition — a past-dated add must land in
+  // Overdue, not wherever the SQL happened to put sheet rows.
+  const resolved = resolveForecast(
+    [...(overrides?.upcoming.rows ?? []), ...(overrides?.overdue.rows ?? [])],
+    manual,
+  );
+  // THE ONE CLOCK VALUE — the same businessTodayIso() string the SQL partition used, carried
+  // in the payload. A date-valued prop; this component never calls for "today" (a browser
+  // clock would be a second clock in the wrong timezone). Null only when the whole override
+  // payload is absent (023 dark / sync failed soft), where every resolved row is a manual
+  // add with no boundary to bucket against — treated as upcoming, the pre-partition shape.
+  const cutoff = overrides?.cutoff ?? null;
+  const upcomingResolved = cutoff
+    ? resolved.rows.filter((r) => r.expected_date >= cutoff)
+    : resolved.rows;
+  const overdueResolved = cutoff ? resolved.rows.filter((r) => r.expected_date < cutoff) : [];
+  // ⚠️ TOTALS PROVENANCE (Alec's constraint): BOTH rendered subtotals are recomputed from
+  // the RESOLVED rows of their partition. The SQL aggregates riding in the payload
+  // (overrides.upcoming.total / overrides.overdue.total) are pre-resolution and are NOT
+  // rendered — the overdue subtotal is not the SQL number just because it is in the payload.
+  //
+  // An unparseable amount is NEITHER a crash NOR a silent zero: it is COUNTED, and any
+  // count > 0 marks that subtotal as a floor in the UI — the ERA half's proven idiom for
+  // "a sum shown without its unreadable count is a floor presented as a total". 023's
+  // CHECK makes this near-impossible for sheet rows, which is exactly why a silent zero
+  // would never be noticed if it ever happened.
+  const sumCents = (rows: { amount: string }[]): { cents: number; unparseable: number } => {
+    let cents = 0;
+    let unparseable = 0;
+    for (const r of rows) {
+      const c = centsFromText(r.amount);
+      if (c === null) unparseable += 1;
+      else cents += c;
+    }
+    return { cents, unparseable };
+  };
+  const upcomingSum = sumCents(upcomingResolved);
+  const overdueSum = sumCents(overdueResolved);
+  const forecastCents = upcomingSum.cents;
+  const overdueCents = overdueSum.cents;
+  const forecastRows = upcomingResolved.length;
+  // The upcoming forecast feed for the merged group list — UPCOMING partition only; the
+  // Overdue section renders separately and never interleaves with future money.
+  const forecastForGroups =
     overrides || manual.length > 0
       ? {
-          total: fixed2FromCents(forecastCents),
-          rows: resolved.rows,
-          rows_truncated: overrides?.rows_truncated ?? false,
+          rows: upcomingResolved,
+          rows_truncated: overrides?.upcoming.rows_truncated ?? false,
         }
       : null;
-  // Suggestions run against the SAME ERA groups the tile already has — no extra read. Nothing
-  // is hidden by them; each is a question a super admin answers.
+  // Suggestions run against the SAME ERA groups the tile already has — no extra read. The
+  // input is the resolved UNION, so a recently-overdue row whose 835 lands inside the
+  // 7-day window can now receive a landed-suggestion too. (The deep suggester gap — the
+  // candidate pool is bounded by the display window — is filed in veris-data-notes, not
+  // fixed here.)
   const suggestions = canEdit ? suggestLandedMatches(resolved.rows, data.groups) : [];
 
-  if (data.remits === 0 && forecastRows === 0) {
+  if (data.remits === 0 && forecastRows === 0 && overdueResolved.length === 0) {
     // Calm empty state — the table is expected to be empty until the ERA ingest cron
     // runs. This is "nothing scheduled", not an error and not a zero-dollar datum.
     return (
       <div className="py-2">
         <p className="text-sm text-foreground">No future payments scheduled.</p>
         <p className="ths-card-meta mt-1">
-          Shows finalized 835 remittances with an effective payment date of today or later,
+          Shows finalized 835 remittances with an effective payment date after today,
           plus any forecast rows keyed into the Upcoming Payments sheet. Entries appear once
           ERA ingest is running and payers adjudicate upcoming deposits.
         </p>
@@ -373,6 +420,43 @@ export function EraUpcomingBody({
               onEdit={onEdit}
             />
           </div>
+        )}
+      </div>
+    );
+  }
+
+  // THE THIRD POPULATION (approved wording, Alec 2026-08-03): nothing upcoming on either
+  // half, but overdue money exists. "No future payments scheduled" alone would be a lie of
+  // omission — an all-overdue book is the state that most needs attention.
+  if (data.remits === 0 && forecastRows === 0 && overdueResolved.length > 0 && cutoff) {
+    return (
+      <div className="space-y-3">
+        <p className="text-sm text-foreground">
+          No future payments scheduled — {count(overdueResolved.length)} overdue expected{' '}
+          {overdueResolved.length === 1 ? 'payment' : 'payments'} below.
+        </p>
+        <OverdueStrip
+          rows={overdueResolved}
+          totalCents={overdueCents}
+          cutoff={cutoff}
+          truncated={overrides?.overdue.rows_truncated ?? false}
+          unparseable={overdueSum.unparseable}
+        />
+        {/* Stale 024 edits render here too (Alec, 2026-08-03): an all-overdue book is
+            precisely when an operator is reconciling by hand and needs to see an edit
+            that is silently doing nothing. (The all-empty state above stays without it:
+            its no-dollars calm contract is test-pinned, and with zero rows anywhere the
+            edits resurface the moment any population returns.) */}
+        {resolved.stale.length > 0 && (
+          <StaleEditStrip stale={resolved.stale} busy={busy} onEdit={onEdit} />
+        )}
+        {canEdit && (
+          <AddForecastForm
+            facilityOptions={facilityOptions}
+            payerSuggestions={[]}
+            busy={busy}
+            onEdit={onEdit}
+          />
         )}
       </div>
     );
@@ -411,6 +495,9 @@ export function EraUpcomingBody({
             <span>
               across {count(forecastRows)} operator-keyed {forecastRows === 1 ? 'row' : 'rows'} — not
               included in the total above
+              {upcomingSum.unparseable > 0
+                ? ` · ${count(upcomingSum.unparseable)} unreadable, subtotal is a floor`
+                : ''}
             </span>
           </div>
         )}
@@ -449,6 +536,18 @@ export function EraUpcomingBody({
           <UpcomingGroupRow key={g.key} group={g} canEdit={canEdit} busy={busy} onEdit={onEdit} />
         ))}
       </div>
+
+      {/* OVERDUE — its own section, after the upcoming list. Never interleaved above, never
+          in the Forecast line, never in the ERA headline. */}
+      {overdueResolved.length > 0 && cutoff && (
+        <OverdueStrip
+          rows={overdueResolved}
+          totalCents={overdueCents}
+          cutoff={cutoff}
+          truncated={overrides?.overdue.rows_truncated ?? false}
+          unparseable={overdueSum.unparseable}
+        />
+      )}
 
       {canEdit && (
         <AddForecastForm
@@ -540,6 +639,85 @@ function SuggestionStrip({
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/** Whole days between two ISO civil dates (b − a). Pure string/UTC arithmetic — no clock. */
+function wholeDaysBetween(aIso: string, bIso: string): number {
+  const parse = (iso: string) => {
+    const [y, m, d] = iso.split('-').map(Number);
+    return Date.UTC(y ?? 0, (m ?? 1) - 1, d ?? 1);
+  };
+  return Math.round((parse(bIso) - parse(aIso)) / 86_400_000);
+}
+
+/**
+ * OVERDUE — forecast rows whose expected_date has passed without the money landing. These are
+ * NOT noise and NOT landed: an overdue expected payment from a payer that doesn't do ERA is
+ * the highest-value row on the tile (Alec's ruling, 2026-08-03). Rendered as its OWN section
+ * with its OWN subtotal — excluded from the ERA headline, the Forecast line, and the merged
+ * group list above. Oldest first: the most delinquent row is the escalation priority.
+ *
+ * The subtotal here is the client-side RESOLVED recomputation for this partition — never the
+ * SQL aggregate that rides in the payload (that number predates 024 corrections).
+ */
+function OverdueStrip({
+  rows,
+  totalCents,
+  cutoff,
+  truncated,
+  unparseable = 0,
+}: {
+  rows: ResolvedForecastRow[];
+  totalCents: number;
+  cutoff: string;
+  truncated: boolean;
+  /** Rows whose amount failed to parse — counted, never silently zeroed. See sumCents. */
+  unparseable?: number;
+}) {
+  return (
+    <div className="ths-notice flex-col items-stretch">
+      <div className="ths-card-title mb-1 flex flex-wrap items-center gap-1.5">
+        <span className="ths-tag ths-tag-warn">Overdue</span>
+        <span className="ths-num tabular-nums">{money(fixed2FromCents(totalCents))}</span>
+        <span className="font-normal">
+          across {count(rows.length)} expected {rows.length === 1 ? 'payment' : 'payments'} past{' '}
+          {rows.length === 1 ? 'its' : 'their'} date without landing — not in any total above
+        </span>
+      </div>
+      <ul className="flex flex-col gap-1.5">
+        {rows.map((r) => (
+          <li
+            key={`${r.expected_date}-${r.facility_code}-${r.payer_label}`}
+            className="flex flex-wrap items-center gap-2"
+          >
+            <span className="ths-num tabular-nums">{money(r.amount)}</span>
+            <span>
+              {r.facility_code} · {r.payer_label} · {r.method_label}
+            </span>
+            <span className="ths-card-meta">
+              expected {r.expected_date} · {count(wholeDaysBetween(r.expected_date, cutoff))} days
+              overdue
+              {r.corrected ? ' · corrected' : ''}
+              {r.origin === 'manual' ? ' · manual add' : ''}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {unparseable > 0 && (
+        <p className="ths-card-meta mt-1">
+          {count(unparseable)} overdue {unparseable === 1 ? 'row carries' : 'rows carry'} an
+          unreadable amount and {unparseable === 1 ? 'is' : 'are'} not included — the subtotal
+          shown is a floor, not the full sum.
+        </p>
+      )}
+      {truncated && (
+        <p className="ths-card-meta mt-1">
+          Overdue list capped — more overdue rows exist in the sheet. The oldest are shown; the
+          newest overdue were dropped.
+        </p>
+      )}
     </div>
   );
 }

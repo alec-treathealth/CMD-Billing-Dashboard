@@ -3504,6 +3504,68 @@ tab-first would have flipped the cron from silent-soft-fail to real hourly
 tab is safe: first successful sync lands rows in one replace-per-sync
 transaction, and `loadUpcomingOverrides` goes `ok:true`.
 
+## The two-clock gap — tile (BPR16) vs paid chart (CMD receipt) — STRUCTURAL, measured (2026-08-03)
+
+The Overview tile keys on **BPR16** (fund-movement date, `staging.era_835_payment.payment_date`,
+mapped at `src/ingest/era835Parser.ts` §BPR); the paid bar chart keys on **CMD's Payment
+Received** (posting date, `collections.daily_collections.payment_date`, born in
+`aggregateDailyDeposits`). Two clocks by construction. Consequences, ruled on by Alec
+2026-08-03 with the ERA `>=` → `>` change:
+
+- **The invisibility gap is NOT created by the `>` edit.** A BPR16=08/03 remit leaves the
+  tile at midnight PT on 08/04 under `>=` as well; if CMD posts 08/05 there is an invisible
+  day either way. `>` widens a pre-existing gap by exactly one day; it doesn't open one. No
+  predicate choice closes it.
+- **Measured distribution** (last 35 days, BXR): 103 remits, **17 matchable** by exact
+  amount against per-(payer, posting-day) sums of `cmd_explorer_rows.insurance_payments` —
+  there is **no CMD-side join key on the ERA trace number**, so the 86 unmatched are
+  *unmeasurable*, not clean. Of the 17: median lag **0**, p90 **0**, 16/17 posted
+  same-day-or-earlier, one **+8-day** straggler, one **−3** (CMD posted BEFORE fund
+  movement — the inverse case: that money is on the tile and in the paid chart at the same
+  time; same root cause, opposite direction, equally unfixable by a date boundary).
+- A "settling" state that ages out by timer rather than by fact would be a fiction — buying
+  back one day of a structural gap. Rejected.
+- **The real fix is a per-remit join** between `staging.era_835_payment`
+  (`check_eft_trace_number`) and the CMD side, which would let the tile detect ACTUAL
+  posting instead of guessing. **Filed, not built.**
+
+## Overview tile: LANDED, not DATE-PASSED — ERA `>` + overdue partition (2026-08-03)
+
+Alec's governing rule: the tile's boundary is whether money has LANDED, not whether its
+date has passed. The two halves needed opposite corrections:
+
+- **ERA half:** `payment_date >= today` → **`> today`** (both statements in
+  `src/veris/era835Upcoming.ts`). A BPR16-today remit has landed and is in the paid chart.
+- **Override half:** cutoff REMOVED from the read; rows are **partitioned** —
+  `expected_date >= today` = Upcoming (counts toward the forecast subtotal),
+  `< today` = **Overdue** (own section, own subtotal, oldest first, excluded from every
+  headline). An overdue forecast is NOT landed — it is the highest-value row on the tile.
+  ⚠️ The boundary operators differ on purpose (`>` vs `>=`) — do not "harmonize" them.
+- **RESOLVE FIRST, THEN PARTITION.** A 024 `correct` cannot move `expected_date` (the date
+  is the match key — schema-proven), but a 024 **`add` is born with its own date** and
+  enters at the client resolver, after any SQL bucketing — so partition happens client-side
+  on the RESOLVED rows, against the SQL's own cutoff value carried in the payload
+  (`UpcomingOverrideSummary.cutoff`). One clock, held as one value; the component never
+  calls for "today".
+- **Totals provenance:** BOTH partitions' rendered subtotals are the client-side RESOLVED
+  recomputation. The SQL aggregates in the payload are pre-resolution merge/diagnostic
+  fields and are never rendered.
+- **Caps are per-partition** (overdue accumulates when nobody deletes sheet rows; a shared
+  cap would let it starve upcoming). Overdue truncation drops the NEWEST overdue, never the
+  most delinquent.
+- **THE PROOF CASE:** as of 2026-08-03 the Overdue section renders exactly one row —
+  **$72,000 KWC / BCBS AR, expected 2026-05-26, 69 days overdue**. If that row renders
+  anywhere but Overdue, the partition is wrong. Pinned by the render suite.
+- **Known gap, deferred (Alec's ruling):** the 024 landed-suggester cannot retire overdue
+  rows — its candidate pool is the ERA display window (now `> today`) and
+  `DEFAULT_DAY_WINDOW = 7` vs a 69-day overdue gap. Acceptable BECAUSE of the partition: a
+  stale overdue row can no longer inflate any headline; it is a visible row ops can see and
+  delete — §3.3's ratified mitigation, now with the row visible instead of silently hidden.
+  Do not build the lookback candidate query without re-opening the call.
+- **Zero-dollar `NON` remits stay** (already partitioned out of `incoming_remits`; a denial
+  is real signal). Whether they belong on a tile titled "Upcoming Payments" is a **product
+  call for Ravie/Derek** — flagged, not a code change.
+
 ## 025 — `intel` schema APPLIED LIVE (2026-08-03), after two 42501 posture corrections
 
 Applied via `apply_migration` (project `dbpabchpvipipkzkogta`) with explicit
