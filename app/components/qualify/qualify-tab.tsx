@@ -870,7 +870,16 @@ export function QualifyTab({
   //    renders, so the tiles bracket what they average and the notice describes what is on screen.
   //    `panelFacilities` is the LOC-lensed ranking; the identifier flag is what makes the ranking's
   //    population (payer-wide) and the grid's population (this client) diverge. ──────────────────────
-  const rankedForScope = panelPayer && panelSnapshot ? panelFacilities : leadSnapshot?.facilities ?? [];
+  //    LOADING IS ITS OWN STATE, not an empty set (Qodo review, 2026-08-04). While the panel ranking
+  //    is in flight the left column renders "Loading facility ranking…" — no cards — so falling
+  //    through to leadSnapshot's facilities made the bar, the flanks and the notice describe a
+  //    population that was NOT on screen. That is the same defect as the original report, one layer
+  //    down. Empty during the fetch suppresses all three (deriveFacilitySpread → null,
+  //    deriveScopeNotice → null at rankedCount 0), and the flag keeps the policy block from claiming
+  //    "no facility clears the sample floor" — which is what derivePolicyRating([]) says, and which
+  //    would be a false statement about a network fetch rather than about the data.
+  const rankingLoading = Boolean(panelPayer && !panelSnapshot);
+  const rankedForScope = rankingLoading ? [] : panelPayer ? panelFacilities : leadSnapshot?.facilities ?? [];
   const facilitySpread = useMemo(() => deriveFacilitySpread(rankedForScope), [rankedForScope]);
   const scopeNotice = useMemo(
     () =>
@@ -1188,7 +1197,7 @@ export function QualifyTab({
               us". RECONCILED BY CONSTRUCTION — it is the patient-weighted mean of exactly the ratings
               on the cards below, so the bar and the ranking can never disagree. Null (no facility
               clears the floor) renders "—" + "Not rated", never a 0. ── */}
-          {policyRating.ratedCount > 0 || rankedForScope.length > 0 ? (
+          {!rankingLoading && (policyRating.ratedCount > 0 || rankedForScope.length > 0) ? (
             <div className="flex items-center gap-3 border-l border-white/15 pl-4 min-[560px]:order-2">
               <div className="text-right">
                 <div className="text-[10px] font-extrabold uppercase tracking-[0.11em] text-white/55">Policy rating</div>

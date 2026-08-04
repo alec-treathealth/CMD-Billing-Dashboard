@@ -18,6 +18,7 @@ import {
 } from '../lib/qualify/scopeNotice';
 import { ScopeNotice } from '../components/qualify/scope-notice';
 import { BookKpiTiles } from '../components/qualify/overview';
+import { derivePolicyRating } from '../lib/qualify/policyRating';
 import { QUALIFY_FACILITY_V2_NULLS } from './helpers/qualifyV2Fixture';
 import { QUALIFY_TENANT_SCOPE } from '../lib/qualify/contract';
 import type { QualifyBookKpis, QualifyFacility } from '../lib/qualify/contract';
@@ -122,6 +123,26 @@ test('the notice renders as an ALERT when warning, a note when informational, an
   assert.match(info, /data-tone="info"/);
   assert.ok(!/role="alert"/.test(info), 'an FYI must not shout like a failure');
   assert.equal(renderToStaticMarkup(<ScopeNotice notice={null} />), '');
+});
+
+// ── While the ranking is loading, every derived read must go quiet ──────────────────────────────
+//
+// Qodo review 2026-08-04: with a payer resolved but its snapshot still in flight, the left column
+// shows "Loading facility ranking…" and NO cards. The container therefore passes an empty set during
+// that window, and all three derived reads have to suppress themselves off it — otherwise the bar,
+// the flanks and the notice describe a population that is not on screen, which is the original bug
+// one layer down.
+
+test('loading (empty ranked set) suppresses the notice, the flanks, and any policy claim', () => {
+  assert.equal(deriveScopeNotice({ ...BASE, rankedCount: 0 }), null, 'no notice about an absent ranking');
+  assert.equal(deriveFacilitySpread([]), null, 'no flanks');
+  // And the policy rating must not be renderable: ratedCount 0 is what the container gates on.
+  const pr = derivePolicyRating([]);
+  assert.equal(pr.ratedCount, 0);
+  assert.equal(pr.rating, null);
+  // Its basis is a claim about DATA ("no facility clears the sample floor") and would be false about
+  // a network fetch — which is why the container gates on an explicit loading flag and not on this.
+  assert.match(pr.basis, /sample floor/);
 });
 
 // ── KPI flanks ──────────────────────────────────────────────────────────────────────────────────
