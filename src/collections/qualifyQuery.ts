@@ -76,6 +76,13 @@ export interface QualifyFacilityRow {
   billed: number | null; // sum(charge_amount), ALL lines — stripped in the action for admissions_seat
   allowed: number | null; // sum(allowed_reliable) EXCLUDING tier e2 (0059 evidence sum; null when zero reliable evidence) — stripped for admissions_seat
   pct_allowed: number | null; // dollar-weighted reliable-allowed/billed, 0-100 (guarded); null → neutral rating
+  /** The other two KPI-tile metrics, per facility — the worst/best FLANKS the tiles bracket their
+   *  headline with (2026-08-04). Computed by the SAME expressions buildBookKpisQuery uses, so a flank
+   *  and the headline above it are the same measurement. PERCENTAGES ONLY (never the payment sum), so
+   *  they survive the amounts strip and blind/sighted roles derive identical flanks. OPTIONAL so
+   *  pre-existing fixtures/loaders stay valid; consumers coalesce to null. */
+  pct_paid_of_allowed?: number | null;
+  pct_paid_of_billed?: number | null;
   /** v2 TTP factor input: median (payment_received − charge_date) in days over the in-window rows.
    *  NON-DOLLAR (a day count). Paid-lines-only by construction — the window is payment-dated, so
    *  unresolved claims are structurally absent from this axis (the factor detail discloses it).
@@ -190,14 +197,30 @@ export function buildResolvePayerQuery(
  *
  * Deliberately NOT PCT_RATIO_SELECT: that shared select still sums the netted `allowed_amount` and
  * carries the pct_paid 2%/$100 floor — both stay with the combo/cohort consumers until their own
- * repoint diff (the floor re-ruling is DEFERRED until real allowed_reliable numbers exist). The
- * ranking never consumed pct_paid, so none is computed here.
+ * repoint diff (the floor re-ruling is DEFERRED until real allowed_reliable numbers exist).
+ *
+ * PAID RATIOS (2026-08-04, Alec's ask: the KPI tiles show worst/best FACILITY flanks on all three
+ * metrics, so each facility must carry all three). The two `pct_paid_*` expressions are BYTE-FOR-BYTE
+ * the ones `buildBookKpisQuery` computes — same numerator (`sum(insurance_payments)`), same reliable
+ * denominator, same guard, same rounding. That is the point: a flank must be the same measurement as
+ * the headline it brackets, or the tile's parts contradict its whole. A parity test asserts the two
+ * builders keep emitting identical expressions.
+ *
+ * NON-DOLLAR: only the PERCENTAGES are projected, never `sum(insurance_payments)` itself — so these
+ * survive the amounts strip and an admissions_seat derives identical flanks to a super_admin. Cost is
+ * one more aggregate over rows the query already scans (no new join, no new predicate).
  */
 const RANKING_RELIABLE_SELECT =
   "(sum(allowed_reliable) filter (where allowed_tier <> 'e2'))::float8 as allowed, " +
   'case when sum(charge_amount) > 0 then ' +
   "round((sum(allowed_reliable) filter (where allowed_tier <> 'e2')) / sum(charge_amount) * 100, 2)::float8 " +
-  'end as pct_allowed';
+  'end as pct_allowed, ' +
+  "case when (sum(allowed_reliable) filter (where allowed_tier <> 'e2')) > 0 then " +
+  "round(sum(insurance_payments) / (sum(allowed_reliable) filter (where allowed_tier <> 'e2')) * 100, 2)::float8 " +
+  'end as pct_paid_of_allowed, ' +
+  'case when sum(charge_amount) > 0 then ' +
+  'round(sum(insurance_payments) / sum(charge_amount) * 100, 2)::float8 ' +
+  'end as pct_paid_of_billed';
 
 /**
  * Per-facility dollar-weighted RELIABLE allowed/billed for the resolved payer, windowed on
@@ -283,14 +306,16 @@ export function buildFacilityRankingQuery(
     'group by facility';
   const sql =
     'select agg.facility, agg.line_count, agg.distinct_patients, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
-    'agg.billed, agg.allowed, agg.pct_allowed, agg.median_days_to_payment, agg.entity_ids, ' +
+    'agg.billed, agg.allowed, agg.pct_allowed, agg.pct_paid_of_allowed, agg.pct_paid_of_billed, ' +
+    'agg.median_days_to_payment, agg.entity_ids, ' +
     'max(f.facility_name) as facility_name, ' +
     'max(f.care_setting) as care_setting, ' +
     'max(coalesce(fe.facility_code, a.facility_code)) as facility_code ' +
     `from (${inner}) agg ` +
     FACILITY_DIM_JOINS +
     'group by agg.facility, agg.line_count, agg.distinct_patients, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
-    'agg.billed, agg.allowed, agg.pct_allowed, agg.median_days_to_payment, agg.entity_ids ' +
+    'agg.billed, agg.allowed, agg.pct_allowed, agg.pct_paid_of_allowed, agg.pct_paid_of_billed, ' +
+    'agg.median_days_to_payment, agg.entity_ids ' +
     'order by agg.pct_allowed desc nulls last, agg.facility';
   return { sql, params };
 }
