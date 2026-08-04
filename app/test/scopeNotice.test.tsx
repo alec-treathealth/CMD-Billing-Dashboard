@@ -14,6 +14,7 @@ import {
   deriveScopeNotice,
   deriveFacilitySpread,
   deriveOnFileTags,
+  flanksAreComparable,
   type DeriveScopeNoticeInput,
 } from '../lib/qualify/scopeNotice';
 import { ScopeNotice } from '../components/qualify/scope-notice';
@@ -188,6 +189,33 @@ test('loading (empty ranked set) suppresses the notice, the flanks, and any poli
   // Its basis is a claim about DATA ("no facility clears the sample floor") and would be false about
   // a network fetch — which is why the container gates on an explicit loading flag and not on this.
   assert.match(pr.basis, /sample floor/);
+});
+
+// ── Review remediation, 2026-08-04 ──────────────────────────────────────────────────────────────
+
+test('FLANKS OBEY THE SAMPLE GATE — a sub-floor facility cannot set the range', () => {
+  // The card for a sub-floor facility renders '—' with NO percentage. Before the gate, that facility
+  // could still set "Worst", so the tile named a facility carrying a number visible nowhere beneath
+  // it. 61% of facility×payer rows sit under the floor, so the Worst flank was the expected victim.
+  const thinButExtreme = { ...fac('THIN', 4), distinctPatients: 2 };
+  const s = deriveFacilitySpread([fac('ALPHA', 62), fac('BETA', 41), thinButExtreme]);
+  assert.equal(s?.worst.who, 'BETA', 'the sub-floor 4% must not become the Worst flank');
+  assert.equal(s?.best.who, 'ALPHA');
+  // Two rated facilities plus any number of sub-floor ones still works; fewer than two does not.
+  assert.equal(deriveFacilitySpread([fac('ALPHA', 62), thinButExtreme]), null);
+});
+
+test('FLANK COMPARABILITY — flanks render only when the tiles and the ranking share a scope', () => {
+  // Exactly one payer CHIP and no LOC lens is the only state where the two queries coincide.
+  assert.equal(flanksAreComparable({ payerChipCount: 1, locActive: false }), true);
+  // A payer DERIVED from an identifier does not count — the tiles were fetched with no payer at all,
+  // so they are book-wide while the ranking is not. This was the flagship-path hole.
+  assert.equal(flanksAreComparable({ payerChipCount: 0, locActive: false }), false);
+  // Multiple payers: the ranking is single-payer by construction, the tiles are not.
+  assert.equal(flanksAreComparable({ payerChipCount: 2, locActive: false }), false);
+  // The LOC lens filters the ranking client-side but the KPI query takes no LOC argument — the tiles
+  // even caption themselves "not LOC-scoped", so the headline could sit outside its own bracket.
+  assert.equal(flanksAreComparable({ payerChipCount: 1, locActive: true }), false);
 });
 
 // ── KPI flanks ──────────────────────────────────────────────────────────────────────────────────

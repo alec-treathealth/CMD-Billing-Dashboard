@@ -14,6 +14,7 @@
  * admissions_seat session derives the identical notice.
  */
 import type { QualifyFacility } from './contract';
+import { ratingSampleTier } from './sampleGate';
 
 export type QualifyScopeTone = 'info' | 'warn';
 
@@ -125,6 +126,31 @@ export function deriveScopeNotice(input: DeriveScopeNoticeInput): QualifyScopeNo
 }
 
 /**
+ * ARE THE FLANKS EVEN COMPARABLE TO THE HEADLINE? (review, 2026-08-04)
+ *
+ * The KPI tiles and the facility ranking are fetched by different queries with different scopes, so
+ * the flanks may only render when those two scopes provably coincide. The previous container logic
+ * tried to narrow its way there and left three reachable states where it neither matched nor
+ * suppressed — a book-wide headline flanked by a peer-cohort estimate, a payer-narrowed slice under
+ * an all-payers headline, and an LOC-lensed set under a headline the tiles themselves caption "not
+ * LOC-scoped". Rather than enumerate narrowings, this states the one condition under which the two
+ * populations are the same and refuses otherwise. Suppressing a true-but-unverifiable flank costs a
+ * decoration; showing a headline outside its own bracket costs the rep's trust in the number.
+ */
+export interface FlankComparabilityInput {
+  /** Payer CHIPS selected. Exactly one is the only state where tiles and ranking share a payer. A
+   *  payer *derived* from an identifier does not count: the tiles were fetched with no payer at all. */
+  payerChipCount: number;
+  /** LOC lens active. The ranking is LOC-filtered client-side; the KPI query takes no LOC argument
+   *  and the tiles say so in their own caption. Different populations by construction. */
+  locActive: boolean;
+}
+
+export function flanksAreComparable({ payerChipCount, locActive }: FlankComparabilityInput): boolean {
+  return payerChipCount === 1 && !locActive;
+}
+
+/**
  * "ON FILE" TAGS — the prototype's policy tag row. What the plan behind the searched prefix actually
  * IS, so the rep reasons about coverage instead of guessing: carrier · funding · policy type · plan
  * type · network.
@@ -195,7 +221,16 @@ export interface QualifyFacilitySpread {
 
 export function deriveFacilitySpread(facilities: readonly QualifyFacility[]): QualifyFacilitySpread | null {
   const scored = facilities.filter(
-    (f): f is QualifyFacility & { pctAllowedOfBilled: number } => f.pctAllowedOfBilled !== null,
+    (f): f is QualifyFacility & { pctAllowedOfBilled: number } =>
+      f.pctAllowedOfBilled !== null &&
+      // SAMPLE GATE — the flanks quote a percentage, so they are bound by the same floor as the card
+      // that would have to corroborate it. Without this a sub-floor facility (whose own card renders
+      // '—' with NO percentage) could set the "Worst" flank, and the tile would name a facility with
+      // a number that appears nowhere beneath it. Not hypothetical: 61% of facility×payer rows sit
+      // under 3 patients (41eee3a), and extremes are exactly where that noise lives, so the Worst
+      // flank was the EXPECTED victim rather than an edge case. Same gate derivePolicyRating and
+      // deriveTopRanks already apply — this is the one place it was missing.
+      ratingSampleTier(f.distinctPatients) !== 'insufficient',
   );
   if (scored.length < 2) return null;
   let lo = scored[0]!;
