@@ -343,25 +343,35 @@ test('cases table — a patient GROUP row shows the payment date of its most-rec
   assert.ok(html.includes('2026-07-22'), 'the group row shows the first (most-recently-paid) claim’s payment date');
 });
 
-test('facility panel — rows are interactive buttons; ONE selected key marks exactly one row pressed', () => {
+// ── Alec's ruling 2026-08-04: CLICKING A CARD READS IT, it does not edit the search. A card click used
+//    to push that facility into the compose filter, so browsing the ranking silently rewrote the query
+//    that produced it and the rep's only way back was Clear all. The card is now the "Why this score"
+//    disclosure; facility filtering lives only in the Facility picker.
+test('facility panel — a card is a DISCLOSURE control (aria-expanded), never a filter toggle', () => {
   const html = renderToStaticMarkup(
     <FacilityPanel facilities={FACILITIES} hasAmounts={false} heatOn selectedKeys={new Set(['solid'])} payerLabel="AETNA" />,
   );
-  assert.ok(html.includes('<button'), 'facility rows are interactive buttons (add-to-filter)');
-  assert.ok(html.includes('aria-pressed="true"'), 'the selected facility is marked pressed');
-  assert.ok(html.includes('ring-teal500'), 'the selected facility carries the selection ring');
-  assert.equal(html.split('aria-pressed="true"').length - 1, 1, 'one selected key → one pressed row');
-  assert.ok(html.includes('payer-wide across the'), 'the header states the ranking is payer-wide across the book');
-  assert.ok(html.includes('AETNA'), 'the payer label names the ranking subject');
-  // Highlighting NEVER filters — both facilities still render even though only one is selected.
-  assert.ok(html.includes('SOLID') && html.includes('THIN HIGH'), 'selection highlights, it does not filter the ranking');
+  assert.ok(html.includes('<button'), 'facility rows are interactive buttons');
+  assert.ok(html.includes('aria-expanded="false"'), 'the card body advertises the disclosure state');
+  assert.ok(!html.includes('aria-pressed'), 'nothing on a card is a selection toggle any more');
+  assert.ok(!/add it to your filter/.test(html), 'the add-to-filter instruction is gone with the behaviour');
+  assert.ok(/reasoning behind its score/.test(html), 'the caption says what a click actually does');
 });
 
-test('facility panel — MULTI-highlight: several selected keys mark several rows pressed at once', () => {
-  const html = renderToStaticMarkup(
+test('facility panel — a filtered facility is still HIGHLIGHTED, and highlighting never filters the list', () => {
+  // selectedKeys reflects the compose bar's Facility picker, so the ranking and the bar visibly agree.
+  const one = renderToStaticMarkup(
+    <FacilityPanel facilities={FACILITIES} hasAmounts={false} heatOn selectedKeys={new Set(['solid'])} payerLabel="AETNA" />,
+  );
+  const SELECTED = 'bg-teal50 ring-2 ring-teal500'; // the selection-only pair (focus rings also say ring-teal500)
+  assert.equal(one.split(SELECTED).length - 1, 1, 'one selected key → exactly one highlighted row');
+  assert.ok(one.includes('SOLID') && one.includes('THIN HIGH'), 'selection highlights, it does not filter the ranking');
+  assert.ok(one.includes('AETNA'), 'the payer label names the ranking subject');
+  assert.ok(one.includes('across the whole book'), 'the caption states the ranking is book-wide, not this search');
+  const both = renderToStaticMarkup(
     <FacilityPanel facilities={FACILITIES} hasAmounts={false} heatOn selectedKeys={new Set(['solid', 'thin high'])} payerLabel="AETNA" />,
   );
-  assert.equal(html.split('aria-pressed="true"').length - 1, 2, 'two selected keys → two pressed rows (the compose bar can select several facilities)');
+  assert.equal(both.split(SELECTED).length - 1, 2, 'the compose bar can hold several facilities at once');
 });
 
 test('cases table — a facility-scoped set still omits dollars for a no-amounts viewer (DOM omission)', () => {

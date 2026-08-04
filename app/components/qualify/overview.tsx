@@ -25,7 +25,7 @@ import { ratingBucket } from '../../lib/qualify/rating';
 import { ratingSampleTier, ratingEvidencePips } from '../../lib/qualify/sampleGate';
 import { qualifyWindowLabel, serializeQualifyWindow } from '../../lib/qualify/contract';
 import type { QualifyBookKpis, QualifyFacilityTrend, QualifyWindow } from '../../lib/qualify/contract';
-import type { QualifyFacilitySpread } from '../../lib/qualify/scopeNotice';
+import { NO_TILE_FLANKS, type QualifyTileFlanks, type QualifyTileMetric } from '../../lib/qualify/tileFlanks';
 import { RATING_HEX, staggerDelayMs } from './tokens';
 import { Spark } from './spark';
 import { useMarquee } from './useMarquee';
@@ -40,16 +40,22 @@ export function BookKpiTiles({
   kpis,
   locActive,
   scopeLabel = null,
-  spread = null,
+  flanks = NO_TILE_FLANKS,
+  flankSource = null,
 }: {
   kpis: QualifyBookKpis | null;
   locActive: boolean;
   /** When set (a resolved payer), the tiles are scoped to that subject — the caption names it instead
    *  of "book-wide". Null = the fresh, unresolved landing (book-wide). */
   scopeLabel?: string | null;
-  /** Worst/best facilities on the allowed metric, from the SAME set the ranking shows
-   *  (deriveFacilitySpread). Null = fewer than two scored facilities, or a flat set. */
-  spread?: QualifyFacilitySpread | null;
+  /** Worst/best facility PER TILE, each on that tile's own metric (deriveTileFlanks). A null entry =
+   *  fewer than two facilities carry that metric above the sample floor, or the set is flat. */
+  flanks?: QualifyTileFlanks;
+  /** What population the flanks are drawn FROM — printed under them. The ranking that produces the
+   *  flanks and the KPI query that produces the headline can be different populations, so the set is
+   *  named rather than implied. Null suppresses the flanks entirely: an unlabelled range would be the
+   *  parts-vs-whole defect this caption exists to close. */
+  flankSource?: string | null;
 }) {
   // The tiles either read book-wide (landing) or are scoped to the composed payer + facility set.
   const scope = scopeLabel ?? 'book-wide';
@@ -65,7 +71,7 @@ export function BookKpiTiles({
       : tier === 'thin'
         ? ` · thin sample (${patients} patient${patients === 1 ? '' : 's'})`
         : '';
-  const tiles: { key: string; tone: 'g' | 'a'; label: string; value: number | null; caption: string }[] = [
+  const tiles: { key: QualifyTileMetric; tone: 'g' | 'a'; label: string; value: number | null; caption: string }[] = [
     {
       key: 'allowed',
       tone: 'g',
@@ -74,20 +80,23 @@ export function BookKpiTiles({
       caption: `${scope} · reliable allowed ÷ billed`,
     },
     {
-      key: 'paid-of-allowed',
+      key: 'paidOfAllowed',
       tone: 'a',
       label: '% paid of allowed',
       value: kpis?.pctPaidOfAllowed ?? null,
       caption: `${scope} · payer paid ÷ allowed`,
     },
     {
-      key: 'paid-of-billed',
+      key: 'paidOfBilled',
       tone: 'a',
       label: '% paid of billed',
       value: kpis?.pctPaidOfBilled ?? null,
       caption: `${scope} · net realization`,
     },
   ];
+  // ONE gate for every tile's flanks: a source must be named, and the headline sample must be good
+  // enough to bracket. Per-tile the spread can still be null (thin coverage on that metric alone).
+  const flanksOn = flankSource !== null && !insufficient;
   return (
     <div className="grid grid-cols-1 gap-4 min-[900px]:grid-cols-3">
       {tiles.map((t, i) => (
@@ -110,31 +119,37 @@ export function BookKpiTiles({
             {insufficient ? '—' : pctText(t.value)}
             {!insufficient && t.value !== null ? <span className="ml-0.5 text-lg">%</span> : null}
           </div>
-          {/* THE FLANKS (prototype `spreadFor`): the facilities that SET the range on this metric.
-              Only on the allowed tile, which is the one the ranking is built from — a tile that
-              averages a set it cannot also bracket is the parts contradicting the whole. */}
-          {t.key === 'allowed' && spread && !insufficient ? (
-            <div className="mt-2.5 flex items-stretch gap-2">
-              {[spread.worst, spread.best].map((end) => (
-                <div
-                  key={end.label}
-                  className="min-w-0 flex-1 border-l-2 pl-2"
-                  style={{ borderColor: end.label === 'Best' ? '#2E8B6F' : '#C0453B' }}
-                >
-                  <div className="flex items-baseline gap-1">
-                    <span className="text-[8.5px] font-extrabold uppercase tracking-[0.08em] text-ink400">{end.label}</span>
-                    <span
-                      className="font-mono text-[12.5px] font-semibold tabular-nums"
-                      style={{ color: end.label === 'Best' ? '#2E8B6F' : '#C0453B' }}
-                    >
-                      {end.value}%
-                    </span>
+          {/* THE FLANKS (prototype `spreadFor`): the facilities that SET the range ON THIS TILE'S OWN
+              METRIC. All three tiles carry them now — each read from that facility's own
+              pctAllowedOfBilled / pctPaidOfAllowed / pctPaidOfBilled, computed server-side by the same
+              expressions as the headline. `flankSource` names the set they come from, because the
+              ranking and the KPI query are not always the same population and an unlabelled range
+              would be the parts contradicting the whole. */}
+          {flanksOn && flanks[t.key] ? (
+            <div className="mt-2.5">
+              <div className="flex items-stretch gap-2">
+                {[flanks[t.key]!.worst, flanks[t.key]!.best].map((end) => (
+                  <div
+                    key={end.label}
+                    className="min-w-0 flex-1 border-l-2 pl-2"
+                    style={{ borderColor: end.label === 'Best' ? '#2E8B6F' : '#C0453B' }}
+                  >
+                    <div className="flex items-baseline gap-1">
+                      <span className="text-[8.5px] font-extrabold uppercase tracking-[0.08em] text-ink400">{end.label}</span>
+                      <span
+                        className="font-mono text-[12.5px] font-semibold tabular-nums"
+                        style={{ color: end.label === 'Best' ? '#2E8B6F' : '#C0453B' }}
+                      >
+                        {end.value}%
+                      </span>
+                    </div>
+                    <div className="truncate text-[9.5px] leading-tight text-ink400" title={end.who}>
+                      {end.who}
+                    </div>
                   </div>
-                  <div className="truncate text-[9.5px] leading-tight text-ink400" title={end.who}>
-                    {end.who}
-                  </div>
-                </div>
-              ))}
+                ))}
+              </div>
+              <div className="mt-1 text-[9.5px] leading-tight text-ink400">range {flankSource}</div>
             </div>
           ) : null}
           <div className="mt-2 text-[11px] text-ink400">
