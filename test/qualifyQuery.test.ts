@@ -167,7 +167,14 @@ test('buildFacilityRankingQuery: rates on allowed_reliable with tier e2 excluded
     'exclusion is BY TIER, never a non-null check — e2 IS non-null and would clamp to a false green',
   );
   assert.match(sql, /as pct_allowed/, 'dollar-weighted reliable-allowed / billed');
-  assert.ok(!sql.includes('pct_paid'), 'no pct_paid here — PCT_RATIO_SELECT + its floor stay with combo/cohort (re-rule deferred)');
+  // PAID RATIOS (2026-08-04): the ranking now also carries the other two KPI-tile metrics per facility,
+  // because the tiles render worst/best FACILITY flanks on all three. What must NOT leak in is
+  // PCT_RATIO_SELECT's 2%/$100 denominator FLOOR — that stays with the combo/cohort consumers (its
+  // re-rule is deferred), and a floored ratio here would disagree with the unfloored headline above it.
+  assert.match(sql, /as pct_paid_of_allowed/, 'per-facility paid ÷ reliable allowed');
+  assert.match(sql, /as pct_paid_of_billed/, 'per-facility paid ÷ billed');
+  assert.ok(!/greatest\(sum\(charge_amount\) \* 0\.02, 100\)/.test(sql), 'PCT_RATIO_SELECT floor must not leak in');
+  assert.ok(!/ as pct_paid,| as pct_paid$/.test(sql), 'the floored PCT_RATIO_SELECT pct_paid stays out');
   assert.match(sql, /primary_payer = \$2/);
   assert.match(sql, /payment_received >= \$3::date and payment_received < \$4::date/, 'half-open window');
   assert.ok(sql.includes('collections.facilities'), 'facility_name/care_setting crosswalk');
@@ -443,6 +450,45 @@ test('book KPIs: three guarded ratios + distinct-patient count, e2 excluded, NO 
   assert.ok(!/as .*(billed_amount|charge_total|insurance_payments) /.test(sql), 'no raw dollar column leaves SQL');
   // member_id_bidx is COUNTED, never projected as a column (no PHI leaves).
   assert.ok(!sql.replace(/count\(distinct member_id_bidx\)/g, '').includes('member_id_bidx'), 'bidx counted, never projected');
+});
+
+// ── FLANK PARITY (2026-08-04) ────────────────────────────────────────────────────────────────────
+//
+// The KPI tiles print a headline from buildBookKpisQuery and, beneath it, the worst/best FACILITY on the
+// same metric from buildFacilityRankingQuery. If those two builders ever compute a metric differently,
+// the tile's parts contradict its whole — a facility could be bracketed outside a range it belongs to,
+// or "Best" could exceed a headline it helped produce. SQL cannot share a constant across the two
+// builders' shapes (one is a flat aggregate, the other a grouped subselect), so this test is the lock.
+test('FLANK PARITY: the ranking computes the paid ratios with the SAME expressions as the book KPIs', () => {
+  const kpis = buildBookKpisQuery({ from: '2026-06-17', to: '2026-07-17' }, BOTH).sql;
+  const rank = buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH).sql;
+  const reliable = "sum(allowed_reliable) filter (where allowed_tier <> 'e2')";
+  const EXPRESSIONS = [
+    // paid ÷ reliable allowed, guarded on a positive denominator
+    `case when (${reliable}) > 0 then round(sum(insurance_payments) / (${reliable}) * 100, 2)::float8 end as pct_paid_of_allowed`,
+    // paid ÷ billed
+    'case when sum(charge_amount) > 0 then round(sum(insurance_payments) / sum(charge_amount) * 100, 2)::float8 end as pct_paid_of_billed',
+  ];
+  for (const expr of EXPRESSIONS) {
+    assert.ok(kpis.includes(expr), `book KPIs no longer emit: ${expr}`);
+    assert.ok(rank.includes(expr), `the ranking no longer emits: ${expr}`);
+  }
+  // And the allowed metric, which both have always shared.
+  assert.ok(kpis.includes(reliable) && rank.includes(reliable), 'both read the same reliable-allowed sum');
+});
+
+test('FLANK PARITY: the ranking projects the paid PERCENTAGES only — never the payment sum itself', () => {
+  // A percentage survives the amounts strip, so an admissions_seat derives identical flanks to a
+  // super_admin. Projecting sum(insurance_payments) would put a dollar figure on the wire for a role
+  // that must never receive one, and stripSnapshotAmounts does not know about a new field.
+  const { sql } = buildFacilityRankingQuery('AETNA', '2026-06-17', '2026-07-17', BOTH);
+  assert.ok(!/as (paid|payments|insurance_payments)\b/.test(sql), 'no raw payment column is projected');
+  // The OUTER select list only (the inner subselect follows it, inside `from (…) agg`): every column
+  // that reaches the caller is listed there, so a payment sum could only escape through it.
+  const start = sql.indexOf('select agg.facility');
+  const outerList = sql.slice(start, sql.indexOf(' from (', start));
+  assert.ok(!outerList.includes('insurance_payments'), 'a payment sum reaches the caller');
+  assert.match(outerList, /agg\.pct_paid_of_allowed, agg\.pct_paid_of_billed/, 'the two percentages do');
 });
 
 // DESIGN B ASYMMETRY (Phase 2): payer + facility scope the tiles; employer/funding NEVER do. This is

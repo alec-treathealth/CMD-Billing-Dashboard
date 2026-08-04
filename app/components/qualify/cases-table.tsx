@@ -1,6 +1,14 @@
 'use client';
 
 /**
+ * ⚠ NOT MOUNTED ANYWHERE as of 2026-08-04. Alec ruled the claim-line grid off the desktop /qualify page
+ * entirely — that surface answers "which facility", and per-claim rows answered a different question
+ * while crowding the ranking and being the only reason PHI rows were fetched there. This component and
+ * its tests are RETAINED, not deleted: the masking/reveal behaviour below is carefully specified and
+ * tested, and re-mounting it (here or on a future audit surface) should not mean rewriting it. It has no
+ * caller today — /qualify/m renders its own claim views. Decide keep-vs-delete deliberately, not by
+ * assuming this is live.
+ *
  * Qualify — recent CLAIMS table (claim grain). The most-recent claims for the resolved payer at the
  * selected facility, grouped by patient. SORT/COLUMNS: the panel windows AND sorts on PAYMENT date
  * (payment_received) — both the Payment date and DOS (service date) columns render so the order reads

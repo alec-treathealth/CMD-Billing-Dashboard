@@ -3,11 +3,11 @@
 /**
  * Qualify — facility panel. Ranked cross-tenant facility list for the resolved payer.
  *
- * COLOR = RATING (rulings Q-G / R-RATING): the left border, %-number tint, and bar fill all derive
- * from `ratingBucket(f.rating)` — the value-first allowed% (rating.ts) — NOT the raw pct. The
- * displayed number and bar width ARE the raw pctAllowedOfBilled (the human-meaningful "% allowed of
- * billed"); the row title surfaces the rating so the rank order is explainable. Legend copy comes
- * from RATING_LEGEND.
+ * COLOR = RATING. The hero numeral, the left border and the verdict pill all paint from the v2 IQ band
+ * (`iqBandClass(f.iqBand)`, ratingV2.ts — the five-factor model), which is also the sort key; the
+ * secondary "% allowed" line under it is the raw `pctAllowedOfBilled`. (The v1 `ratingBucket(f.rating)`
+ * paint this header used to describe was superseded by v2; only the LEGEND still speaks v1's
+ * Strong/Watch/Weak vocabulary, from RATING_LEGEND.)
  *
  * SAMPLE GATE (hotfix 2026-07-27, sampleGate.ts): the rating carries NO volume term, but under a
  * payer slice the median facility rests on ~2 distinct patients — a confident color on 1-2 patients
@@ -21,17 +21,22 @@
  * both values are non-null — the elements are OMITTED from the DOM otherwise (the server has already
  * nulled them; this is belt-and-suspenders, never CSS-hiding a shipped value).
  *
- * SELECTION (compose bar): each facility row toggles that facility in the COMPOSE FILTER. Selecting a
- * row HIGHLIGHTS it (adds it to the filter set at right); it NEVER filters/intersects this ranking. The
- * ranking stays PAYER-WIDE ACROSS THE BOOK on purpose — restricting it to facilities the user already
- * picked could only show them what they already chose. `selectedKeys` (matched against `facilityKey`,
- * the raw rollup join text) marks EVERY selected row pressed (several can be pressed at once);
- * `onToggle(facilityKey)` adds/removes it. Both optional so the render test can mount hermetically.
+ * CLICKING A CARD READS IT — IT DOES NOT EDIT THE SEARCH (Alec's ruling, 2026-08-04). A card click
+ * used to push that facility into the compose filter, so browsing the ranking silently rewrote the
+ * facility picker and the rep had no way back except Clear all: the act of LOOKING at a result changed
+ * the query that produced it. Now the whole card is the "Why this score" disclosure — reading is free,
+ * and the search changes only when the user edits the search. Filtering by facility is still available,
+ * deliberately in one place: the Facility picker in the compose bar.
+ *
+ * `selectedKeys` (matched against `facilityKey`, the raw rollup join text) still HIGHLIGHTS the
+ * facilities that are in the compose filter, so the ranking and the bar visibly agree. Highlighting
+ * never filters this list — the ranking stays PAYER-WIDE ACROSS THE BOOK on purpose, since restricting
+ * it to facilities the user already picked could only show them what they already chose.
  *
  * Pure/presentational (no hooks) so it renders hermetically under renderToStaticMarkup. Imports are
  * relative + type-only where possible so the render test runs under tsx without `@/` resolution.
  */
-import { ratingBucket, RATING_LEGEND, type RatingBucket } from '../../lib/qualify/rating';
+import { RATING_LEGEND, type RatingBucket } from '../../lib/qualify/rating';
 import { ratingSampleTier, ratingEvidencePips, QUALIFY_RATING_MIN_PATIENTS } from '../../lib/qualify/sampleGate';
 import { IQ_BAND_LABELS, IQ_BAND_VERDICTS, PROVENANCE_LABELS, facilityFactorsDisagree } from '../../lib/qualify/ratingV2';
 import { CONFIDENCE_LEGEND, type QualifyConfidence } from '../../lib/qualify/confidence';
@@ -145,7 +150,6 @@ export function FacilityPanel({
   hasAmounts,
   heatOn,
   selectedKeys = EMPTY_KEYS,
-  onToggle,
   payerLabel = null,
   expandedKeys = EMPTY_KEYS,
   onExpandToggle,
@@ -154,11 +158,10 @@ export function FacilityPanel({
   facilities: readonly QualifyFacility[];
   hasAmounts: boolean;
   heatOn: boolean;
-  /** facilityKeys currently in the compose filter — EVERY matching row reads pressed (several at once).
-   *  Selecting HIGHLIGHTS; it never filters this ranking (which stays payer-wide across the book). */
+  /** facilityKeys currently in the compose filter — every matching row is HIGHLIGHTED so the ranking
+   *  and the compose bar visibly agree. Highlighting never filters this ranking, and clicking a card
+   *  never adds to this set (the Facility picker is the only way in — see the header). */
   selectedKeys?: ReadonlySet<string>;
-  /** Toggle this facility in the compose filter (add/remove its raw rollup facilityKey). Optional for tests. */
-  onToggle?: (facilityKey: string) => void;
   /** The single resolved payer this ranking is for — named in the header next to "payer-wide across the
    *  book" so the ranking is never mistaken for the filtered match count above it. */
   payerLabel?: string | null;
@@ -191,16 +194,17 @@ export function FacilityPanel({
           Estimated — {PROVENANCE_LABELS[provenance]}. Directional, not confirmed; this plan has no claims of its own yet.
         </p>
       ) : null}
-      {/* This ranking is PAYER-WIDE across the whole book — NOT the filtered match count above. Tapping a
-          row adds that facility to the filter (highlight), it never narrows this list. */}
-      {/* The caption must match the PROVENANCE. On the comparable paths this panel is handed an
-          EMPLOYER name, not a payer, and printing "<employer> · payer-wide across the book" put a
-          flat contradiction directly under a scope notice that (correctly) calls the same ranking an
-          estimate from similar plans. Two statements about one list, on one screen. */}
+      {/* SCOPE, stated once, HERE (2026-08-04). This caption is now the only place the ranking's
+          population is declared: the separate red scope banner that used to sit above the panel is gone
+          (Alec's ruling — it read as an error, and repeated in three sentences what this line says in
+          one). The fact it carries is load-bearing, so it must stay accurate and it must match the
+          PROVENANCE: on the comparable paths this panel is handed an EMPLOYER name, not a payer, and
+          printing "<employer> · payer-wide across the book" would be a flat contradiction.
+          The old "tap to add it to your filter" instruction is gone with the behaviour it described. */}
       <p className="px-4 pb-1 text-[11px] text-muted-foreground">
         {payerLabel ? <b className="font-semibold text-ink600">{payerLabel}</b> : estimated ? 'This cohort' : 'This payer'}
-        {estimated ? ' · peer-cohort estimate, not this plan’s own claims' : ' · payer-wide across the book'} · tap a
-        facility to add it to your filter
+        {estimated ? ' · peer-cohort estimate, not this plan’s own claims' : ' · across the whole book, not only this search'}{' '}
+        · click a facility for the reasoning behind its score
       </p>
 
       {/* ALL facilities render (server returns the full set, no LIMIT); the cap is gone. */}
@@ -214,7 +218,6 @@ export function FacilityPanel({
             // SAMPLE GATE (hotfix 2026-07-27): tier by distinct patients, then suppress the color at
             // 'insufficient'. The score (f.rating) is untouched — only the DISPLAY bucket + pct are gated.
             const tier = ratingSampleTier(f.distinctPatients);
-            const bucket = tier === 'insufficient' ? 'neutral' : ratingBucket(f.rating);
             const showPct = tier !== 'insufficient';
             const pct = f.pctAllowedOfBilled;
             const loc = [f.city, f.state].filter(Boolean).join(', ');
@@ -227,7 +230,6 @@ export function FacilityPanel({
             // v2 paint: the left border + verdict block color from the IQ band; the legacy bucket
             // still grades the secondary confirmed-% line via a nested span class.
             const paint = unrated || tier === 'insufficient' ? 'q-neutral' : iqBandClass(f.iqBand);
-            void bucket; // legacy bucket retained for the pct tint below
             return (
               <div
                 key={f.rank}
@@ -238,17 +240,20 @@ export function FacilityPanel({
                   selected ? 'bg-teal50 ring-2 ring-teal500' : '',
                 ].join(' ')}
               >
+                {/* The card body is the DISCLOSURE control, not a filter control: it opens the same
+                    "Why this score" panel the labelled button below opens. aria-expanded, not
+                    aria-pressed — nothing is being selected. */}
                 <button
                   type="button"
-                  onClick={() => onToggle?.(f.facilityKey)}
-                  aria-pressed={selected}
+                  onClick={() => onExpandToggle?.(f.facilityKey)}
+                  aria-expanded={expanded}
                   className="block w-full rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40"
                   title={
                     tier === 'insufficient'
                       ? `Insufficient data — only ${f.distinctPatients} patient${f.distinctPatients === 1 ? '' : 's'} in this slice`
                       : unrated
                         ? 'No rating — insufficient evidence'
-                        : `Rating ${f.ratingV2} (${IQ_BAND_LABELS[f.iqBand!]}) · rank ${f.rank}`
+                        : `Rating ${f.ratingV2} (${IQ_BAND_LABELS[f.iqBand!]}) · rank ${f.rank} · click for the reasoning`
                   }
                 >
                   <div className="flex items-start justify-between gap-2.5">
@@ -344,9 +349,11 @@ export function FacilityPanel({
                       </span>
                     ) : null}
                   </div>
-                  {/* ONE bar per card (Alec's surgical ruling, 2026-07-22): the 0059 COVERAGE bar —
-                      confirmed / estimate / unknown segments, captioned below. The rating already
-                      EXCLUDES the estimate segment (ruling Q2a) — this shows that honestly. */}
+                  {/* The 0059 COVERAGE bar — confirmed / estimate / unknown segments, captioned below.
+                      The rating already EXCLUDES the estimate segment (ruling Q2a) — this shows that
+                      honestly. (The "ONE bar per card" ruling of 2026-07-22 was superseded when v2
+                      re-added the WeightBar below; two bars ship deliberately, measuring different
+                      things — coverage here, factor composition there.) */}
                   <div className="mt-[7px] flex h-[5px] overflow-hidden rounded-full bg-line" aria-hidden>
                     <CoverageSegment conf="confirmed" count={f.confirmedClaims} total={f.lineCount} />
                     <CoverageSegment conf="estimate" count={f.estimateClaims} total={f.lineCount} />

@@ -351,6 +351,13 @@ export interface QualifyFacility {
    *  excluded — see qualifyQuery.ts RANKING_RELIABLE_SELECT). null when the guarded denominator
    *  collapses OR the facility has ZERO reliable evidence in-window → neutral badge, never 0%. */
   pctAllowedOfBilled: number | null;
+  /** The other two KPI-tile metrics for THIS facility — insurance payments ÷ reliable allowed, and ÷
+   *  billed (0-100, guarded; null when the denominator collapses — never a fabricated 0%). Computed
+   *  server-side by the SAME expressions the book-wide tiles use, so the worst/best flanks the tiles
+   *  render are the same measurement as the headline above them. NON-DOLLAR (percentages only), so
+   *  they survive the amounts strip untouched and an admissions_seat derives identical flanks. */
+  pctPaidOfAllowed: number | null;
+  pctPaidOfBilled: number | null;
   /** Value-first rating (rating.ts, ruling 2026-07-19b) = clamp0to100(pctAllowedOfBilled) — the SORT
    *  key AND badge-color source. null → neutral badge. */
   rating: number | null;

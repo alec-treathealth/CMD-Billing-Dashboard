@@ -383,6 +383,10 @@ function assembleFacilities(
         city: facilityLocation(r.facility_code)?.city ?? null,
         state: facilityLocation(r.facility_code)?.state ?? null,
         pctAllowedOfBilled: r.pct_allowed,
+        // The other two tile metrics, per facility — the flanks the KPI tiles bracket their headline
+        // with. Percentages, so they are NOT in stripSnapshotAmounts' remit and blind/sighted match.
+        pctPaidOfAllowed: r.pct_paid_of_allowed ?? null,
+        pctPaidOfBilled: r.pct_paid_of_billed ?? null,
         rating: qualifyRating(r.pct_allowed),
         streakSignal: null, // Q-E: always null in v1
         billedAmount: r.billed,
