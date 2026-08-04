@@ -3538,6 +3538,24 @@ the repo and prod now carry. Two live-verified privilege walls, in order:
 - The worker's `PREFLIGHT_SQL` (src/intel/payer_policy/preflight.ts) returns
   all-true independently.
 
+### The two failed attempts left NOTHING behind (checked directly, not inferred)
+
+The authored file contains no `CREATE INDEX CONCURRENTLY`, so both failed
+attempts ran wholly inside `apply_migration`'s transaction wrapper and rolled
+back — attempt 1 died on its first statement, attempt 2 at the finding-table
+DDL. Verified after the successful apply: a full `pg_class` sweep of `intel`
+returns exactly **17 relations** — the 3 tables, the 12 §8 indexes, and the 2
+bigserial PK sequences (`payer_policy_finding_finding_id_seq`,
+`payer_policy_run_check_check_id_seq`), every one owned by `claims_admin` —
+plus **0** functions, **0** standalone types, **0** user triggers, **0**
+views/matviews, exactly **8** policies, and **0** grants to any role outside
+{`claims_admin`, `claims_reader`, `intel_writer`, `postgres`}.
+`supabase_migrations.schema_migrations` carries exactly **one** row for this
+migration (`20260803234940`, the successful third attempt) — failed applies
+record nothing. The two failures' individual timestamps were not captured
+(tool results carry no clock); both fell in the minutes before the recorded
+version.
+
 **Still NOT green for the Sept 2 cron:** GH repo secrets `ANTHROPIC_API_KEY` /
 `INTEL_WRITER_DATABASE_URL` are believed unset, and `intel_writer` is NOLOGIN
 until credentials are provisioned out of band. 025 closes the schema gap only.
