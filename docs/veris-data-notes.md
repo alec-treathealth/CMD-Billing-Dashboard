@@ -3565,3 +3565,60 @@ date has passed. The two halves needed opposite corrections:
 - **Zero-dollar `NON` remits stay** (already partitioned out of `incoming_remits`; a denial
   is real signal). Whether they belong on a tile titled "Upcoming Payments" is a **product
   call for Ravie/Derek** — flagged, not a code change.
+
+## 025 — `intel` schema APPLIED LIVE (2026-08-03), after two 42501 posture corrections
+
+Applied via `apply_migration` (project `dbpabchpvipipkzkogta`) with explicit
+authorization, same session that built the worker preflight. **The file as
+originally authored could not apply**, and the corrected version is what both
+the repo and prod now carry. Two live-verified privilege walls, in order:
+
+1. `SET ROLE claims_admin; CREATE SCHEMA intel` → **42501 permission denied for
+   database postgres.** `claims_admin` holds neither CREATE on the database nor
+   CREATEROLE (`has_database_privilege` / `pg_roles.rolcreaterole` both false),
+   which also matches `staging`/`ref`/`collections` being postgres-owned. Fix:
+   sections 1–2 run as `postgres` itself, with
+   `CREATE SCHEMA IF NOT EXISTS intel AUTHORIZATION claims_admin` keeping the
+   schema born owned by `claims_admin`.
+2. Table DDL as `claims_admin` → **42501 permission denied for schema
+   extensions** on `extensions.halfvec(1024)`. `claims_admin` has NO standing
+   USAGE on `extensions`, yet owns the existing halfvec tables
+   (`staging.claim_signatures`, `ref.carc_embeddings`) — type/opclass ACLs are
+   checked at DDL time only. Fix: the migration brackets its DDL with
+   `GRANT USAGE ON SCHEMA extensions TO claims_admin` … `REVOKE`, ending at the
+   verified pre-apply posture exactly (`has_schema_privilege` false after).
+
+### Verified after apply (the file's own §8 block, run live)
+
+- 3 tables in `intel`, all `rls_on`, all owned by `claims_admin`.
+- `embedding` = `halfvec` atttypmod 1024; `embed_tsv` = stored generated tsvector.
+- 12 indexes total incl. `idx_ppf_embedding_hnsw` + both GINs.
+- 8 policies, zero `cmd = 'DELETE'`; `intel_writer` = INSERT+UPDATE on
+  run/finding, INSERT-only on run_check, **no DELETE anywhere**
+  (`has_table_privilege(... 'DELETE')` false on both).
+- Zero grants to anon/authenticated/PUBLIC.
+- The worker's `PREFLIGHT_SQL` (src/intel/payer_policy/preflight.ts) returns
+  all-true independently.
+
+### The two failed attempts left NOTHING behind (checked directly, not inferred)
+
+The authored file contains no `CREATE INDEX CONCURRENTLY`, so both failed
+attempts ran wholly inside `apply_migration`'s transaction wrapper and rolled
+back — attempt 1 died on its first statement, attempt 2 at the finding-table
+DDL. Verified after the successful apply: a full `pg_class` sweep of `intel`
+returns exactly **17 relations** — the 3 tables, the 12 §8 indexes, and the 2
+bigserial PK sequences (`payer_policy_finding_finding_id_seq`,
+`payer_policy_run_check_check_id_seq`), every one owned by `claims_admin` —
+plus **0** functions, **0** standalone types, **0** user triggers, **0**
+views/matviews, exactly **8** policies, and **0** grants to any role outside
+{`claims_admin`, `claims_reader`, `intel_writer`, `postgres`}.
+`supabase_migrations.schema_migrations` carries exactly **one** row for this
+migration (`20260803234940`, the successful third attempt) — failed applies
+record nothing. The two failures' individual timestamps were not captured
+(tool results carry no clock); both fell in the minutes before the recorded
+version.
+
+**Still NOT green for the Sept 2 cron:** GH repo secrets `ANTHROPIC_API_KEY` /
+`INTEL_WRITER_DATABASE_URL` are believed unset, and `intel_writer` is NOLOGIN
+until credentials are provisioned out of band. 025 closes the schema gap only.
+Next Veris number remains **026**.

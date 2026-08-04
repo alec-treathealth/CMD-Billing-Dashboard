@@ -13,7 +13,14 @@
 --   PHI table. Deliberately NOT placed in `staging` (PHI/tenant RLS regime) nor
 --   in `ref` (whose 13 tables share a verified owner-only/no-writer invariant set
 --   in 015 that a writer role would permanently erode).
--- OWNERSHIP: schema and all three tables born owned by claims_admin via SET ROLE.
+-- OWNERSHIP: schema born owned by claims_admin via CREATE SCHEMA ... AUTHORIZATION;
+--   all three tables born owned by claims_admin via SET ROLE. Schema and role
+--   creation run as postgres itself — claims_admin holds neither CREATE on the
+--   database nor CREATEROLE (verified live 2026-08-03; first apply attempt as
+--   claims_admin failed 42501, matching staging/ref/collections being
+--   postgres-created). A scoped GRANT/REVOKE of USAGE on schema `extensions`
+--   brackets the DDL: claims_admin needs halfvec only at creation time, and the
+--   end state matches 011/012 (owner without a standing extensions grant).
 --   Reads: claims_reader (SELECT). Writes: intel_writer (INSERT, UPDATE only —
 --   never DELETE, at both the grant and the policy layer).
 -- IDEMPOTENT: CREATE ... IF NOT EXISTS throughout; DROP POLICY IF EXISTS before
@@ -24,24 +31,21 @@
 --   halfvec_cosine_ops shape). No other migration required.
 -- Rollback: 025_payer_policy_intel_rollback.sql
 
--- Objects are born owned by claims_admin. apply_migration runs as `postgres`,
--- a non-superuser holding `GRANT claims_admin TO postgres WITH SET TRUE`.
-SET ROLE claims_admin;
+-- apply_migration runs as `postgres`, a non-superuser holding
+-- `GRANT claims_admin TO postgres WITH SET TRUE`. Sections 1-2 MUST run as
+-- postgres itself: CREATE SCHEMA needs CREATE on the database and CREATE ROLE
+-- needs CREATEROLE, and claims_admin deliberately holds neither (42501 on the
+-- first apply attempt, 2026-08-03). AUTHORIZATION keeps the schema born owned
+-- by claims_admin; everything from section 3 on runs under SET ROLE.
 
 -- ---------------------------------------------------------------------------
--- 1. Schema
+-- 1. Schema (as postgres; born owned by claims_admin via AUTHORIZATION)
 -- ---------------------------------------------------------------------------
 
-CREATE SCHEMA IF NOT EXISTS intel;
-COMMENT ON SCHEMA intel IS
-  'Non-PHI, tenant-agnostic industry reference intelligence. Payer and federal '
-  'policy findings for Qualify RAG. No PHI, no business_entity_id, no joins to '
-  'patient/member/claim data.';
-
-REVOKE ALL ON SCHEMA intel FROM PUBLIC;
+CREATE SCHEMA IF NOT EXISTS intel AUTHORIZATION claims_admin;
 
 -- ---------------------------------------------------------------------------
--- 2. Writer role
+-- 2. Writer role (as postgres: CREATE ROLE requires CREATEROLE)
 -- ---------------------------------------------------------------------------
 -- CREATE-if-absent. NEVER DROP ROLE — the rollback revokes and leaves the role.
 -- No password here; credentials stay out of band in .env.
@@ -58,6 +62,23 @@ COMMENT ON ROLE intel_writer IS
   'Ingest role for intel.*. INSERT + UPDATE only. Deliberately has no DELETE at '
   'either the grant or the RLS-policy layer: policy findings are append-and-correct, '
   'never erased, so a compromised or buggy ingest cannot destroy history.';
+
+-- claims_admin holds no USAGE on schema `extensions` (verified live 2026-08-03:
+-- second apply attempt failed 42501 on extensions.halfvec), yet it owns the
+-- existing halfvec tables (staging.claim_signatures, ref.carc_embeddings) —
+-- type/opclass ACLs are checked at DDL time only. Grant for the duration of
+-- this migration and revoke at the end, restoring the verified posture exactly.
+GRANT USAGE ON SCHEMA extensions TO claims_admin;
+
+-- Everything below is born owned by claims_admin.
+SET ROLE claims_admin;
+
+COMMENT ON SCHEMA intel IS
+  'Non-PHI, tenant-agnostic industry reference intelligence. Payer and federal '
+  'policy findings for Qualify RAG. No PHI, no business_entity_id, no joins to '
+  'patient/member/claim data.';
+
+REVOKE ALL ON SCHEMA intel FROM PUBLIC;
 
 -- ---------------------------------------------------------------------------
 -- 3. payer_policy_run — one row per (payer key, research invocation)
@@ -304,6 +325,10 @@ REVOKE ALL ON intel.payer_policy_finding   FROM PUBLIC;
 REVOKE ALL ON intel.payer_policy_run_check FROM PUBLIC;
 
 RESET ROLE;
+
+-- Restore the standing posture: claims_admin keeps ownership of the halfvec
+-- table but no standing USAGE on `extensions`, matching 011/012's end state.
+REVOKE USAGE ON SCHEMA extensions FROM claims_admin;
 
 -- ---------------------------------------------------------------------------
 -- 8. Verification (run manually after apply)

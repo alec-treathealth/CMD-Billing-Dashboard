@@ -3,9 +3,10 @@
 Internal, PHI-aware web app over out-of-network behavioral-health billing data
 (BXR Consulting + Indigo Consulting, sourced from CollaborateMD "CMD"). Two
 Postgres planes in one Supabase cluster: the `claims`/`collections` product
-plane, and the `staging`/`ref`/`core` Veris ML plane.
+plane, and the `staging`/`ref`/`core`/`intel` Veris ML plane.
 
-**Every row is PHI.** The compliance layer (SOC 2 / HIPAA / OWASP) is ON for
+**Every row is PHI** — except `intel.*`, which is deliberately non-PHI
+(public payer/federal policy findings; see `SQL Schemas/025_*.sql`). The compliance layer (SOC 2 / HIPAA / OWASP) is ON for
 this whole repo. The invariants below are not preferences.
 
 ## Canonical Context Set
@@ -100,9 +101,9 @@ Run all five before any commit. This is the bar for "verified" — not typecheck
 alone, and especially not when a shared helper changed.
 
 ```bash
-npm test                          # root hermetic suite — 1066 pass / 0 fail (clean origin/main @6d62ca6, measured 2026-08-03)
+npm test                          # root hermetic suite — 1076 pass / 0 fail (1070 measured on clean origin/main @9f9d01d 2026-08-03, +6 intel preflight/budget tests in this branch)
 npm run typecheck                 # root tsc (strict: noUncheckedIndexedAccess)
-cd app && npm test                # app suite — 198 pass / 0 fail (clean origin/main @6d62ca6, measured 2026-08-03)
+cd app && npm test                # app suite — 198 pass / 0 fail (measured on clean origin/main @9f9d01d, 2026-08-03)
 cd app && npm run typecheck        # app tsc
 cd app && npm run build            # catches bundler-only failures tsc cannot
 ```
@@ -133,20 +134,20 @@ Two **separate** migration planes — never mix the directories:
 | Plane | Directory | Next number (as of 2026-08-03) |
 |---|---|---|
 | Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0080** |
-| Veris ML (`staging`, `ref`, `core`) | `SQL Schemas/0NN_*.sql` | **026** |
+| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **026** |
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
-0077. Never edit 023, 024, or 025 in place — 024 is applied and 025 belongs to
-an in-flight session. Before authoring, re-derive the next number per
+0077. Never edit 023, 024, or 025 in place — all three are applied live. Before authoring, re-derive the next number per
 `.claude/rules/sql-migrations.md` (ref-derived max is a floor; cross-check
 worktrees and the live applied state).
 
 Veris apply state as of 2026-08-03, which is NOT the same as the file order:
-**024 APPLIED LIVE · 023 APPLIED LIVE (2026-08-03, after 024) · 025 authored but NOT
-applied.** 024 went first because 023 was under concurrent revision and 024 has no executable
-dependency on it — no FK, no view, no trigger (the resolver is in
-`src/veris/upcomingForecast.ts`); 023 followed once that revision settled. Do not read the
-numbering as an apply order. See `docs/veris-data-notes.md` §§ "023 …" / "024 …".
+**024 APPLIED LIVE · 023 APPLIED LIVE (2026-08-03, after 024) · 025 APPLIED LIVE
+(2026-08-03, after two 42501 posture corrections — see the file header).** 024 went first
+because 023 was under concurrent revision and 024 has no executable dependency on it — no FK,
+no view, no trigger (the resolver is in `src/veris/upcomingForecast.ts`); 023 followed once
+that revision settled. Do not read the numbering as an apply order. See
+`docs/veris-data-notes.md` §§ "023 …" / "024 …" / "025 …".
 
 Merging a migration in a PR does **not** apply it to prod. Code that depends on
 it 500s until `apply_migration` runs.
