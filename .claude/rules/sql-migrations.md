@@ -8,13 +8,17 @@ paths:
 
 Two separate planes. Never put a file in the wrong directory.
 
-| Plane | Directory | Next number (as of 2026-08-03) |
+| Plane | Directory | Next number (as of 2026-08-04) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0080** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0083** |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **026** |
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
-0077. Never edit 023, 024, or 025 in place.
+0077. 0080/0081/0082 (explorer perf: filter-options matview, rollup trigram
+GIN, base-table hygiene) are **applied live 2026-08-04**; 0081 was applied
+statement-by-statement via autocommit `execute_sql` (CREATE INDEX
+CONCURRENTLY), NOT `apply_migration` — see its file header before imitating.
+Never edit 023, 024, or 025 in place.
 
 These numbers are a **floor, not the answer**. Before claiming a number,
 cross-check (a) untracked and unpushed migration files in every worktree, and
