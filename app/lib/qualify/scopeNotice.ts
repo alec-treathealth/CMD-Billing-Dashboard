@@ -33,8 +33,13 @@ export interface DeriveScopeNoticeInput {
   /** True when the compose bar carried a PHI identifier (alpha prefix / member id / client name),
    *  which is the case where the ranking's population and the grid's population diverge hardest. */
   identifierSearched: boolean;
-  /** The payer the ranking is scoped to, for naming it. */
+  /** The payer the ranking is scoped to, for naming it (legacy fallback). */
   rankingPayerLabel: string | null;
+  /** The actual population represented by the ranking. */
+  rankingScope?:
+    | { kind: 'payer'; label: string }
+    | { kind: 'all_payers' }
+    | { kind: 'cohort'; label: string };
   /** Human window label ("30d", "Jul 2026") — quoted back so the rep can act on it. */
   windowLabel: string;
 }
@@ -45,10 +50,11 @@ export interface DeriveScopeNoticeInput {
  * every keystroke teaches the rep to ignore scope warnings.
  */
 export function deriveScopeNotice(input: DeriveScopeNoticeInput): QualifyScopeNotice | null {
-  const { rankedCount, composedCount, identifierSearched, rankingPayerLabel, windowLabel } = input;
+  const { rankedCount, composedCount, identifierSearched, rankingPayerLabel, rankingScope, windowLabel } = input;
   if (composedCount === null) return null; // still loading — never speak before the data does
   if (rankedCount === 0) return null; // no ranking on screen, nothing to misread
-  const payer = rankingPayerLabel ?? 'this payer';
+  const scope = rankingScope ?? { kind: 'payer' as const, label: rankingPayerLabel ?? 'this payer' };
+  const scopeLabel = scope.kind === 'payer' ? `${scope.label}-wide` : scope.kind === 'all_payers' ? 'across all payers' : `${scope.label} cohort`;
   const facilityWord = rankedCount === 1 ? 'facility' : 'facilities';
 
   if (composedCount === 0) {
@@ -56,16 +62,16 @@ export function deriveScopeNotice(input: DeriveScopeNoticeInput): QualifyScopeNo
     return identifierSearched
       ? {
           tone: 'warn',
-          headline: `These ${rankedCount} ${facilityWord} are ${payer}-wide — not this client's history.`,
+          headline: `These ${rankedCount} ${facilityWord} are ${scopeLabel} — not this client's history.`,
           detail:
             `This client has no charge lines in the ${windowLabel} window, so nothing below is evidence about ` +
-            `their policy: it is how ${payer} pays us generally. Widen the window, or ask a biller before you quote anything.`,
+            `their policy: it is ${scope.kind === 'payer' ? `how ${scope.label} pays us generally` : `a comparison of ${scope.kind === 'all_payers' ? 'all payers' : `${scope.label} facilities`}`}. Widen the window, or ask a biller before you quote anything.`,
         }
       : {
           tone: 'warn',
           headline: `${rankedCount} ${facilityWord} ranked, but no charge lines match your filters.`,
           detail:
-            `The ranking is ${payer}-wide for the ${windowLabel} window; your other filters — facility, employer, ` +
+            `The ranking is ${scopeLabel} for the ${windowLabel} window; your other filters — facility, employer, ` +
             `funding, setting — narrow only the rows. Remove one to see the claims behind these ratings.`,
         };
   }
@@ -74,7 +80,7 @@ export function deriveScopeNotice(input: DeriveScopeNoticeInput): QualifyScopeNo
     // Both populations have data, but they are still not the same population. State it once, quietly.
     return {
       tone: 'info',
-      headline: `Ranking is ${payer}-wide; the rows below are this client's own claims.`,
+      headline: `Ranking is ${scopeLabel}; the rows below are this client's own claims.`,
       detail: `Two different populations, both for the ${windowLabel} window — the ratings are payer behaviour, not this policy's track record.`,
     };
   }

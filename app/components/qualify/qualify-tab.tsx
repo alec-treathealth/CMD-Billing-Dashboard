@@ -76,18 +76,7 @@ import type { CmdEmployerOption } from '@/lib/actions';
 import { MultiSelectTagPicker, type PickerOption } from '@/components/ui/multi-select-tag-picker';
 import { buildQualifySearchParams, parseQualifySearchParams } from '@/lib/qualify/urlState';
 import { deriveScopeNotice, deriveFacilitySpread, deriveOnFileTags } from '@/lib/qualify/scopeNotice';
-import { derivePolicyRating } from '@/lib/qualify/policyRating';
 import { ScopeNotice } from '@/components/qualify/scope-notice';
-
-/** Band → the ON-DARK hue for the policy numeral (the light-surface RATING_HEX is unreadable on
- *  teal900). Brighter, higher-contrast variants of the same five bands. */
-const POLICY_BAND_HEX: Record<'65' | '50' | '30' | '15' | '0', string> = {
-  '65': '#5FC9BE',
-  '50': '#5FC9BE',
-  '30': '#E9B44C',
-  '15': '#F0917C',
-  '0': '#F0917C',
-};
 import { filterFacilitiesByLoc, filterClaimsByLoc, type QualifyLocFilter } from '@/lib/qualify/groupClaims';
 import type { RatingBucket } from '@/lib/qualify/rating';
 import { CasesTable } from '@/components/qualify/cases-table';
@@ -871,7 +860,22 @@ export function QualifyTab({
   //    `panelFacilities` is the LOC-lensed ranking; the identifier flag is what makes the ranking's
   //    population (payer-wide) and the grid's population (this client) diverge. ──────────────────────
   const rankedForScope = panelPayer && panelSnapshot ? panelFacilities : leadSnapshot?.facilities ?? [];
-  const facilitySpread = useMemo(() => deriveFacilitySpread(rankedForScope), [rankedForScope]);
+  // Flanks must describe the same facility population as the KPI query, not merely the ranking.
+  const facilitiesForSpread = useMemo(() => {
+    if (facilitySelection.length > 0) {
+      const selected = new Set(facilitySelection);
+      return rankedForScope.filter((f) => selected.has(f.facilityKey));
+    }
+    // Empty selections are book-wide; an identifier-derived/comparable ranking is not.
+    if (payerSelection.length === 0 && panelPayer) return [];
+    return rankedForScope;
+  }, [rankedForScope, facilitySelection, payerSelection.length, panelPayer]);
+  const facilitySpread = useMemo(() => (kpis ? deriveFacilitySpread(facilitiesForSpread) : null), [facilitiesForSpread, kpis]);
+  const rankingScope = panelPayer
+    ? { kind: 'payer' as const, label: panelPayer }
+    : leadSnapshot?.provenance?.startsWith('comparable_')
+      ? { kind: 'all_payers' as const }
+      : { kind: 'payer' as const, label: leadSnapshot?.policy?.carrier ?? 'this payer' };
   const scopeNotice = useMemo(
     () =>
       deriveScopeNotice({
@@ -880,14 +884,11 @@ export function QualifyTab({
         // singleIdentifier is the TERM (string | null) — never render it, only its presence.
         identifierSearched: singleIdentifier !== null,
         rankingPayerLabel: panelPayer ?? leadSnapshot?.policy?.carrier ?? null,
+        rankingScope,
         windowLabel: qualifyWindowLabel(windowSel),
       }),
-    [rankedForScope.length, summaryLoading, summary?.count, singleIdentifier, panelPayer, leadSnapshot?.policy?.carrier, windowSel],
+    [rankedForScope.length, summaryLoading, summary?.count, singleIdentifier, panelPayer, leadSnapshot?.policy?.carrier, leadSnapshot?.provenance, rankingScope, windowSel],
   );
-
-  // The policy-level rating shown on the dark bar — the patient-weighted mean of the SAME cards the
-  // ranking renders, so the two can never contradict each other.
-  const policyRating = useMemo(() => derivePolicyRating(rankedForScope), [rankedForScope]);
 
   // "On file" tags for the readout bar — only once the VOB actually matched the prefix. An unmatched
   // policy contributes nothing rather than a row of five "not on file" chips.
@@ -1183,34 +1184,6 @@ export function QualifyTab({
               </button>
             ) : null}
           </div>
-
-          {/* ── POLICY RATING (prototype's showPolicyScore): the one number for "does this payer pay
-              us". RECONCILED BY CONSTRUCTION — it is the patient-weighted mean of exactly the ratings
-              on the cards below, so the bar and the ranking can never disagree. Null (no facility
-              clears the floor) renders "—" + "Not rated", never a 0. ── */}
-          {policyRating.ratedCount > 0 || rankedForScope.length > 0 ? (
-            <div className="flex items-center gap-3 border-l border-white/15 pl-4 min-[560px]:order-2">
-              <div className="text-right">
-                <div className="text-[10px] font-extrabold uppercase tracking-[0.11em] text-white/55">Policy rating</div>
-                <div className="mt-px text-[11px] text-white/60">{policyRating.basis}</div>
-              </div>
-              <div
-                className="font-display text-[36px] font-semibold leading-[0.85] tracking-tight tabular-nums"
-                style={{ color: policyRating.band ? POLICY_BAND_HEX[policyRating.band] : 'rgba(255,255,255,.72)' }}
-              >
-                {policyRating.rating ?? '—'}
-              </div>
-              <span
-                className="rounded-full px-2.5 py-[3px] text-[11.5px] font-bold"
-                style={{
-                  background: policyRating.band ? `${POLICY_BAND_HEX[policyRating.band]}29` : 'rgba(255,255,255,.1)',
-                  color: policyRating.band ? POLICY_BAND_HEX[policyRating.band] : 'rgba(255,255,255,.72)',
-                }}
-              >
-                {policyRating.verdict}
-              </span>
-            </div>
-          ) : null}
 
           {/* ── "ON FILE" (prototype's policy tag row): what the plan behind this prefix ACTUALLY is —
               carrier · funding · policy type · plan · network. The rep never types any of it, and a
