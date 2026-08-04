@@ -23,9 +23,10 @@
 --   `claims.gin_trgm_ops` — a bare `gin_trgm_ops` fails with "operator class does not exist".
 --
 -- ⚠ APPLY PATH — NOT apply_migration. CREATE INDEX CONCURRENTLY cannot run inside a
---   transaction block, and apply_migration wraps the whole file in one. Apply this file by
---   running EACH statement below as its own single-statement query via the Supabase MCP
---   execute_sql (single statements execute in autocommit — verified 2026-08-03 with a VACUUM
+--   transaction block, and apply_migration wraps the whole file in one. Apply the
+--   corresponding `.manual.sql` file by running EACH statement as its own single-statement
+--   query via the Supabase MCP execute_sql (single statements execute in autocommit — verified
+--   2026-08-03 with a VACUUM
 --   probe, which carries the same restriction). Run them in order; avoid the :45–:48 window
 --   (the hourly rollup refresh holds SHARE UPDATE EXCLUSIVE, which CIC queues behind).
 --   If a build fails midway it leaves an INVALID index: STOP per the live-DB failure rule —
@@ -45,19 +46,10 @@
 -- DEPENDENCY: 0050/0059 (the matview), pg_trgm in schema claims. Independent of 0080.
 -- Rollback: 0081_cmd_charge_rollup_search_trgm_rollback.sql
 
-create index concurrently if not exists cmd_charge_rollup_facility_trgm
-  on collections.cmd_explorer_charge_rollup using gin (facility claims.gin_trgm_ops);
-
-create index concurrently if not exists cmd_charge_rollup_payer_trgm
-  on collections.cmd_explorer_charge_rollup using gin (primary_payer claims.gin_trgm_ops);
-
-create index concurrently if not exists cmd_charge_rollup_cpt_trgm
-  on collections.cmd_explorer_charge_rollup using gin (cpt_code claims.gin_trgm_ops);
-
-create index concurrently if not exists cmd_charge_rollup_revenue_trgm
-  on collections.cmd_explorer_charge_rollup using gin (revenue_code claims.gin_trgm_ops);
-
-analyze collections.cmd_explorer_charge_rollup;
+-- The executable statements live in 0081_cmd_charge_rollup_search_trgm.manual.sql.
+-- This numbered file is intentionally comment-only so transactional migration runners
+-- cannot accidentally execute CREATE INDEX CONCURRENTLY in a transaction.
+-- Apply the .manual.sql file one statement at a time in autocommit mode, then ANALYZE.
 
 -- Verification (run manually after apply) --------------------------------------
 -- select indexrelname, pg_size_pretty(pg_relation_size(indexrelid))

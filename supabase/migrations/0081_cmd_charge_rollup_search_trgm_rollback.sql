@@ -8,10 +8,6 @@
 -- Search behavior after rollback: `ilike` degrades gracefully to the pre-0081 seq scan —
 -- slower, not broken. No code revert is required (the ::text-cast removal is index-agnostic).
 
-drop index concurrently if exists collections.cmd_charge_rollup_facility_trgm;
-
-drop index concurrently if exists collections.cmd_charge_rollup_payer_trgm;
-
-drop index concurrently if exists collections.cmd_charge_rollup_cpt_trgm;
-
-drop index concurrently if exists collections.cmd_charge_rollup_revenue_trgm;
+-- The executable rollback statements live in
+-- 0081_cmd_charge_rollup_search_trgm_rollback.manual.sql.
+-- This numbered file is intentionally comment-only for transactional runners.

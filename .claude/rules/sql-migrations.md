@@ -17,8 +17,11 @@ Two separate planes. Never put a file in the wrong directory.
 0077. 0080/0081/0082 (explorer perf: filter-options matview, rollup trigram
 GIN, base-table hygiene) are **applied live 2026-08-04**; 0081 was applied
 statement-by-statement via autocommit `execute_sql` (CREATE INDEX
-CONCURRENTLY), NOT `apply_migration` — see its file header before imitating.
-Never edit 023, 024, or 025 in place.
+CONCURRENTLY), NOT `apply_migration`. The numbered 0081 files are intentionally
+comment-only; executable forward/rollback SQL is in the corresponding
+`*.manual.sql` files. Files ending in `.manual.sql` are excluded from the
+transactional migration set and must be run one statement at a time in
+autocommit mode. Never edit 023, 024, or 025 in place.
 
 These numbers are a **floor, not the answer**. Before claiming a number,
 cross-check (a) untracked and unpushed migration files in every worktree, and
