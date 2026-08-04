@@ -181,7 +181,12 @@ export function cmdExplorerBaseConds(
   // scans were the bulk of the wasted work, and this is the authoritative floor both builders share.
   if (term.length >= CMD_SEARCH_TERM_MIN && cols.length > 0) {
     const p = add(likeContains(term)); // one bound pattern, reused across the OR
-    const ors = cols.map((c) => `${CMD_EXPLORER_SEARCH_COLUMNS[c]}::text ilike ${p}`);
+    // NO cast: all four allowlisted search columns ARE text (verified against the live rollup
+    // 2026-08-03), so `::text` was a parse-time no-op the planner already stripped. It is
+    // dropped so the predicate matches the 0081 trigram GIN indexes BY INSPECTION — and because
+    // a cast on a hypothetical future non-text column would silently make these indexes
+    // unreachable (such a column would need its own expression index, not a cast here).
+    const ors = cols.map((c) => `${CMD_EXPLORER_SEARCH_COLUMNS[c]} ilike ${p}`);
     conds.push(`(${ors.join(' or ')})`);
   }
   // Searchable-PHI blind-index equality (opaque keyed-HMAC tokens; raw PHI never gets here).
@@ -210,9 +215,15 @@ export interface CmdFacilityOption {
 
 /**
  * Build the tenant-scoped facility-options query for the dropdown. The DISTINCT facility list is
- * taken STRICTLY from cmd_explorer_rows scoped to the caller's entitled entityIds (a BXR user never
- * sees an Indigo-only facility string), then resolved to the non-PHI facility dimension purely to
- * enrich name + care_setting. Resolution is two-path: an EXACT name match, else the explicit
+ * read from collections.cmd_explorer_filter_options (migration 0080) — the tiny precomputed
+ * (business_entity_id, kind, value) dimension matview, refreshed by the same hourly function as
+ * the charge rollup — scoped to the caller's entitled entityIds (a BXR user never sees an
+ * Indigo-only facility string). BEFORE 0080 this ran a DISTINCT over the whole 503MB/642k-row
+ * tenant slice of cmd_explorer_rows per cache miss (measured 1.9s warm / 33.9s cold); the
+ * matview is <100KB. Vocabulary semantics are preserved: the matview derives from the 0050/0059
+ * charge rollup, which is exactly what the grid/summary `facility = any(...)` filter executes
+ * against. Each value is then resolved to the non-PHI facility dimension purely to enrich
+ * name + care_setting. Resolution is two-path: an EXACT name match, else the explicit
  * cmd_facility_aliases crosswalk (migration 0039) — which reconciles the CMD export text with the
  * curated dimension name (trailing " LLC", abbreviations, multi-text facilities, a confirmed typo).
  * care_setting is always read from the resolved dimension row (single source of truth), never the
@@ -221,14 +232,14 @@ export interface CmdFacilityOption {
  * facility leaks into the list; the joins only attach the IP/OP label. A text that resolves to
  * neither (e.g. the "No Facility" placeholder) yields a null care_setting → "Other" in the UI.
  * `max()` collapses any join multiplicity. Non-PHI; every value bound ($1 = entityIds), every
- * identifier a fixed literal.
+ * identifier a fixed literal. Null/blank filtering is baked into the matview definition.
  */
 export function buildCmdFacilityOptionsQuery(entityIds: string[]): { sql: string; params: unknown[] } {
   const params: unknown[] = [entityIds];
   const sql =
     'select r.facility, max(f.facility_name) as facility_name, max(f.care_setting) as care_setting ' +
-    'from (select distinct facility from collections.cmd_explorer_rows ' +
-    "where business_entity_id = any($1::uuid[]) and facility is not null and btrim(facility) <> '') r " +
+    'from (select distinct value as facility from collections.cmd_explorer_filter_options ' +
+    "where business_entity_id = any($1::uuid[]) and kind = 'facility') r " +
     'left join collections.facilities fe on upper(fe.facility_name) = upper(r.facility) ' +
     'left join collections.cmd_facility_aliases a on upper(a.facility_text) = upper(r.facility) ' +
     'left join collections.facilities f on f.facility_code = coalesce(fe.facility_code, a.facility_code) ' +
@@ -238,17 +249,21 @@ export function buildCmdFacilityOptionsQuery(entityIds: string[]): { sql: string
 
 /**
  * Distinct payer names for the guided PAYER search's type-ahead, tenant-scoped to the caller's
- * entitled entityIds. Non-PHI (`primary_payer` is a payer name, not an identifier). Blank/null
- * payers are excluded; results are ordered for a stable client list. Every value is bound
- * ($1 = entityIds); every identifier is a fixed literal. ~260 distinct payers per tenant, so the
- * client loads the full list ONCE and filters it as the user types — no per-keystroke round-trip
- * and no server-side pagination needed at this cardinality.
+ * entitled entityIds. Reads collections.cmd_explorer_filter_options (migration 0080, kind =
+ * 'payer') — the precomputed dimension matview — instead of a DISTINCT over the 503MB
+ * cmd_explorer_rows slice (measured 1.9s warm / 33.9s cold before 0080). DISTINCT is still
+ * required: a multi-entity scope (Consolidated) can hold the same payer name under both
+ * entities. Non-PHI (`primary_payer` is a payer name, not an identifier). Blank/null payers are
+ * excluded in the matview definition; results are ordered for a stable client list. Every value
+ * is bound ($1 = entityIds); every identifier is a fixed literal. ~260 distinct payers per
+ * tenant, so the client loads the full list ONCE and filters it as the user types — no
+ * per-keystroke round-trip and no server-side pagination needed at this cardinality.
  */
 export function buildCmdPayerOptionsQuery(entityIds: string[]): { sql: string; params: unknown[] } {
   const params: unknown[] = [entityIds];
   const sql =
-    'select distinct primary_payer from collections.cmd_explorer_rows ' +
-    "where business_entity_id = any($1::uuid[]) and primary_payer is not null and btrim(primary_payer) <> '' " +
+    'select distinct value as primary_payer from collections.cmd_explorer_filter_options ' +
+    "where business_entity_id = any($1::uuid[]) and kind = 'payer' " +
     'order by primary_payer';
   return { sql, params };
 }
