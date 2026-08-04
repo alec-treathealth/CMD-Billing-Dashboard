@@ -821,7 +821,7 @@ export function QualifyTab({
    *  (`summary === null` while loading) and not a failure (`summaryError`). Worth saying out loud even
    *  without a grid: it is the difference between "this ranking is not your client's history" and "this
    *  ranking is built on it", and the ranking itself looks identical either way. */
-  const noMatches = !summaryError && summary !== null && summary.count === 0;
+  const noMatches = !summaryLoading && !summaryError && summary !== null && summary.count === 0;
 
   // SR-only announcement (the compose count updates silently otherwise).
   const liveMessage = !hasAnyFilter
