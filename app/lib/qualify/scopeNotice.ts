@@ -155,13 +155,21 @@ export function flanksAreComparable({ payerChipCount, locActive }: FlankComparab
  * IS, so the rep reasons about coverage instead of guessing: carrier · funding · policy type · plan
  * type · network.
  *
- * PHI BOUNDARY, deliberate and narrow: these five are plan-level facts (the registry-adjacent
- * non-PHI tier). `employerName` is NOT included even though the policy card carries it — an employer
- * plus a facility plus a date range narrows to a person, and the query-library allowlist has never
- * let employer_name reach a model or a log. `groupOnFile` is a presence flag by contract (the raw
- * group number exists only as a blind index and can never be displayed), so it is not rendered here
- * either. No benefit dollars: deductible/oopMax are dollar-bearing and already stripped for
- * admissions_seat, so putting them on a shared bar would make the bar role-dependent.
+ * PHI BOUNDARY, deliberate and narrow.
+ *
+ * `employerName` IS included — Alec's ruling, 2026-08-04: the employer is a factor of the search and
+ * belongs on screen when a prefix resolves. It was already rendered by the policy strip, so
+ * withholding it here made the two summaries of one policy disagree for no benefit. The scope of that
+ * ruling is DISPLAY to an authenticated Qualify principal, which is what this surface exists for. It
+ * does NOT license the other two paths: employer must still never reach a model prompt (the
+ * QualifyAiInput schema has no field for it, structurally) or a log line, and `employer_norm` being
+ * written to the URL query string — where it reaches browser history, Referer and edge logs — is a
+ * separate open question, because a URL escapes the authenticated surface and a rendered chip does not.
+ *
+ * Still excluded, for reasons the ruling does not touch: `groupOnFile` is a presence flag by contract
+ * (the raw group number exists only as a blind index and can never be displayed), and the four benefit
+ * strings are dollar-bearing and already stripped for admissions_seat, so putting them on a shared bar
+ * would make the bar role-dependent.
  *
  * A missing value renders "not on file" rather than being dropped, because on this surface "we did
  * not capture the network" and "in network" are different answers and must not look alike.
@@ -178,6 +186,7 @@ export interface QualifyOnFileTag {
 
 export interface DeriveOnFileTagsInput {
   carrier: string | null;
+  employerName: string | null;
   funding: string | null;
   policyType: string | null;
   planType: string | null;
@@ -192,6 +201,9 @@ export function deriveOnFileTags(policy: DeriveOnFileTagsInput | null): QualifyO
   };
   return [
     tag('Payer', policy.carrier),
+    // Second, not last: after the payer this is the fact the rep most needs, and on a self-funded
+    // plan it names who actually decides an exception.
+    tag('Employer', policy.employerName),
     tag('Funding', policy.funding),
     tag('Policy', policy.policyType),
     tag('Plan', policy.planType),
