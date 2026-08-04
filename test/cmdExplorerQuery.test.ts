@@ -67,13 +67,15 @@ test('substring search: OR across ONLY allowlisted columns, one shared pattern p
     searchColumns: ['facility', 'primary_payer', 'patient_name' as never, 'bogus' as never],
   };
   const { sql, params } = buildCmdExplorerQuery(null, filter, SORT, 51, ENTITY);
-  // both allowlisted columns present, PHI / unknown absent
-  assert.match(sql, /facility::text ilike \$2/);
-  assert.match(sql, /primary_payer::text ilike \$2/);
+  // both allowlisted columns present, PHI / unknown absent. NO ::text cast (0081): the four
+  // search columns ARE text, and the bare column is what the trigram GIN indexes match.
+  assert.match(sql, /facility ilike \$2/);
+  assert.match(sql, /primary_payer ilike \$2/);
+  assert.doesNotMatch(sql, /::text ilike/, 'the cast must not creep back (0081 index reachability)');
   assert.doesNotMatch(sql, /patient_name/);
   assert.doesNotMatch(sql, /bogus/);
   // ONE bound pattern reused across the OR
-  assert.match(sql, /\(facility::text ilike \$2 or primary_payer::text ilike \$2\)/);
+  assert.match(sql, /\(facility ilike \$2 or primary_payer ilike \$2\)/);
   assert.equal(params[1], '%BCBS%');
   assertAllBound(sql, params);
 });
@@ -98,11 +100,11 @@ test('search allowlist is the 4 TEXT columns only — money/date keys are droppe
     ],
   };
   const { sql } = buildCmdExplorerQuery(null, filter, SORT, 51, ENTITY);
-  assert.match(sql, /cpt_code::text ilike \$2/);
-  assert.doesNotMatch(sql, /charge_amount::text ilike/);
-  assert.doesNotMatch(sql, /payment_received::text ilike/);
-  assert.doesNotMatch(sql, /charge_date::text ilike/);
-  assert.doesNotMatch(sql, /allowed_amount::text ilike/);
+  assert.match(sql, /cpt_code ilike \$2/);
+  assert.doesNotMatch(sql, /charge_amount ilike/);
+  assert.doesNotMatch(sql, /payment_received ilike/);
+  assert.doesNotMatch(sql, /charge_date ilike/);
+  assert.doesNotMatch(sql, /allowed_amount ilike/);
 });
 
 test('substring search: a sub-minimum term emits NO ILIKE clause (browse), the floor is 3', () => {
@@ -112,7 +114,7 @@ test('substring search: a sub-minimum term emits NO ILIKE clause (browse), the f
   assert.doesNotMatch(short.sql, /ilike/);
   // Exactly 3 chars → the substring clause is emitted.
   const ok = buildCmdExplorerQuery(null, { q: '908', searchColumns: ['cpt_code'] }, SORT, 51, ENTITY);
-  assert.match(ok.sql, /cpt_code::text ilike \$2/);
+  assert.match(ok.sql, /cpt_code ilike \$2/);
   // The floor also guards the summary aggregates.
   const { totals } = buildCmdSearchSummaryQueries({ q: 'ab', searchColumns: ['facility'] }, ENTITY);
   assert.doesNotMatch(totals.sql, /ilike/);
@@ -220,18 +222,19 @@ test('allowed_amount / pct_allowed / pct_paid are SORTABLE AGAIN (0059 ③) — 
 
 test('facility options query is tenant-scoped and its only bound value is entityIds', () => {
   const { sql, params } = buildCmdFacilityOptionsQuery(ENTITY);
-  // tenant scope on cmd_explorer_rows is the sole bound param ($1 = entityIds)
+  // tenant scope on the 0080 dimension matview is the sole bound param ($1 = entityIds)
   assert.match(sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
   assert.deepEqual(params, [ENTITY]);
   assert.equal(params.length, 1);
-  // distinct facilities from the ROWS (tenant-scoped), enriched by resolving to the dimension
-  assert.match(sql, /select distinct facility from collections\.cmd_explorer_rows/);
+  // distinct facilities from the 0080 filter-options matview (tenant-scoped, kind literal),
+  // enriched by resolving to the dimension. The 503MB cmd_explorer_rows DISTINCT scan is gone.
+  assert.match(sql, /select distinct value as facility from collections\.cmd_explorer_filter_options/);
+  assert.match(sql, /kind = 'facility'/);
+  assert.doesNotMatch(sql, /from collections\.cmd_explorer_rows/);
   // two-path resolution: exact name match OR the explicit alias crosswalk, then dimension by code
   assert.match(sql, /left join collections\.facilities fe on upper\(fe\.facility_name\) = upper\(r\.facility\)/);
   assert.match(sql, /left join collections\.cmd_facility_aliases a on upper\(a\.facility_text\) = upper\(r\.facility\)/);
   assert.match(sql, /f\.facility_code = coalesce\(fe\.facility_code, a\.facility_code\)/);
-  // blank facilities excluded; no interpolation
-  assert.match(sql, /btrim\(facility\) <> ''/);
   assertAllBound(sql, params);
 });
 
@@ -268,8 +271,12 @@ test('payer options query is tenant-scoped and its only bound value is entityIds
   assert.match(sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
   assert.deepEqual(params, [ENTITY]);
   assert.equal(params.length, 1);
-  assert.match(sql, /select distinct primary_payer from collections\.cmd_explorer_rows/);
-  assert.match(sql, /btrim\(primary_payer\) <> ''/);
+  // reads the 0080 filter-options matview (kind literal), NOT the 503MB base-table DISTINCT.
+  // DISTINCT survives: a multi-entity (Consolidated) scope can hold one payer under both entities.
+  assert.match(sql, /select distinct value as primary_payer from collections\.cmd_explorer_filter_options/);
+  assert.match(sql, /kind = 'payer'/);
+  assert.doesNotMatch(sql, /from collections\.cmd_explorer_rows/);
+  assert.match(sql, /order by primary_payer/);
   assertAllBound(sql, params);
 });
 

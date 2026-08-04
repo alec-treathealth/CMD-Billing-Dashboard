@@ -92,8 +92,13 @@ export async function refreshChargeRollup(deps: RefreshChargeRollupDeps): Promis
     //     refresh) and ANALYZE refreshes the stats. Its OWN autocommit statement (VACUUM cannot run
     //     inside a transaction), as cmd_rollup_writer (GRANT MAINTAIN, mig 0069). NON-FATAL: a vacuum
     //     failure must NOT fail an otherwise-successful refresh — it is logged, the run still closes ok.
+    //     0080 addendum: the SECURITY DEFINER function now ALSO refreshes the tiny
+    //     cmd_explorer_filter_options dimension matview, so the same best-effort VACUUM covers
+    //     both (one statement, multi-table form; MAINTAIN granted on both to this writer).
     try {
-      await deps.db.query('vacuum (analyze) collections.cmd_explorer_charge_rollup');
+      await deps.db.query(
+        'vacuum (analyze) collections.cmd_explorer_charge_rollup, collections.cmd_explorer_filter_options',
+      );
     } catch (vacErr) {
       console.error(
         'refresh-charge-rollup: post-refresh VACUUM (ANALYZE) failed (refresh still succeeded):',
