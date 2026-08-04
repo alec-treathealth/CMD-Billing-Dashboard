@@ -75,7 +75,7 @@ import {
 import type { CmdEmployerOption } from '@/lib/actions';
 import { MultiSelectTagPicker, type PickerOption } from '@/components/ui/multi-select-tag-picker';
 import { buildQualifySearchParams, parseQualifySearchParams } from '@/lib/qualify/urlState';
-import { deriveScopeNotice, deriveFacilitySpread, deriveOnFileTags } from '@/lib/qualify/scopeNotice';
+import { deriveScopeNotice, deriveFacilitySpread, deriveOnFileTags, type QualifyRankingScope } from '@/lib/qualify/scopeNotice';
 import { derivePolicyRating } from '@/lib/qualify/policyRating';
 import { ScopeNotice } from '@/components/qualify/scope-notice';
 
@@ -880,7 +880,37 @@ export function QualifyTab({
   //    would be a false statement about a network fetch rather than about the data.
   const rankingLoading = Boolean(panelPayer && !panelSnapshot);
   const rankedForScope = rankingLoading ? [] : panelPayer ? panelFacilities : leadSnapshot?.facilities ?? [];
-  const facilitySpread = useMemo(() => deriveFacilitySpread(rankedForScope), [rankedForScope]);
+  // FLANKS MUST MATCH THE TILE'S OWN POPULATION, not merely the ranking (Qodo review, 2026-08-04).
+  // The tiles are scoped to payer + facility selection; the ranking is payer-wide. So with facilities
+  // selected, unfiltered flanks would name facilities OUTSIDE the set the headline averages; and with
+  // an identifier search and no payer chip the tiles read book-wide (kpiScopeLabel null) while the
+  // ranking is payer-derived. Both are the same parts-vs-whole defect this module exists to prevent,
+  // so the flanks either describe the tile's set or they do not render.
+  const facilitiesForSpread = useMemo(() => {
+    if (facilitySelection.length > 0) {
+      const selected = new Set(facilitySelection); // facilitySelection holds facilityKey values
+      return rankedForScope.filter((f) => selected.has(f.facilityKey));
+    }
+    if (payerSelection.length === 0 && panelPayer) return []; // book-wide tiles vs a derived ranking
+    return rankedForScope;
+  }, [rankedForScope, facilitySelection, payerSelection.length, panelPayer]);
+  // Gated on kpis: flanks bracket a headline, so they must not appear before one exists.
+  const facilitySpread = useMemo(
+    () => (kpis ? deriveFacilitySpread(facilitiesForSpread) : null),
+    [facilitiesForSpread, kpis],
+  );
+
+  // WHAT the ranking is a ranking OF. On the comparable_* provenances it is a peer-cohort ESTIMATE,
+  // not the payer's own claims, and the notice must not call that "AETNA-wide". Memoized because it
+  // feeds a useMemo dep list — an inline object literal would change identity every render and
+  // silently defeat that memo.
+  const rankingScope = useMemo<QualifyRankingScope>(() => {
+    if (panelPayer) return { kind: 'payer', label: panelPayer };
+    if (leadSnapshot?.provenance === 'comparable_employer') return { kind: 'employer_cohort' };
+    if (leadSnapshot?.provenance === 'comparable_funding') return { kind: 'funding_cohort' };
+    return { kind: 'payer', label: leadSnapshot?.policy?.carrier ?? null };
+  }, [panelPayer, leadSnapshot?.provenance, leadSnapshot?.policy?.carrier]);
+
   const scopeNotice = useMemo(
     () =>
       deriveScopeNotice({
@@ -888,10 +918,10 @@ export function QualifyTab({
         composedCount: summaryLoading ? null : summary?.count ?? null,
         // singleIdentifier is the TERM (string | null) — never render it, only its presence.
         identifierSearched: singleIdentifier !== null,
-        rankingPayerLabel: panelPayer ?? leadSnapshot?.policy?.carrier ?? null,
+        rankingScope,
         windowLabel: qualifyWindowLabel(windowSel),
       }),
-    [rankedForScope.length, summaryLoading, summary?.count, singleIdentifier, panelPayer, leadSnapshot?.policy?.carrier, windowSel],
+    [rankedForScope.length, summaryLoading, summary?.count, singleIdentifier, rankingScope, windowSel],
   );
 
   // The policy-level rating shown on the dark bar — the patient-weighted mean of the SAME cards the
