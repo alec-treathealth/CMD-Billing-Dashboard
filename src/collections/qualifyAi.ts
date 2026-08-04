@@ -46,10 +46,28 @@ const facilitySchema = z
   })
   .strict();
 
+/** Every preset chip id, in one place — the zod enum, the framing table, and the tests all derive
+ *  from this list so a chip cannot exist without a framing line (TS enforces the Record below).
+ *  The 2026-08-04 additions (thin/takeit/plantype/funding/network) are the mockup's conditional
+ *  chips ported onto real snapshot fields; 'slide' (steepest-decline) was RULED OUT — same root
+ *  cause as the deferred streak badge (no faithful monthly trend behind the 0050 rollup). */
+export const QUALIFY_AI_QUESTIONS = [
+  'explain',
+  'placement',
+  'speed',
+  'improve',
+  'ranks',
+  'thin',
+  'takeit',
+  'plantype',
+  'funding',
+  'network',
+] as const;
+
 export const QualifyAiInputSchema = z
   .object({
     /** Which preset chip fired — the question shapes the read. */
-    question: z.enum(['explain', 'placement', 'speed', 'improve', 'ranks']),
+    question: z.enum(QUALIFY_AI_QUESTIONS),
     /** The resolved payer LABEL (non-PHI rollup dimension) — null on comparable/none paths. */
     payerName: short(120).nullable(),
     /** Policy facts on file (plan-level, non-PHI; NO employer, NO identifiers, NO benefit dollars). */
@@ -131,6 +149,11 @@ const QUESTION_FRAMING: Record<QualifyAiInput['question'], string> = {
   speed: 'Question: HOW FAST does this policy pay? Read days-to-payment and what drags it.',
   improve: 'Question: WHAT WOULD MOVE this rating? Only factors reading negative are levers; unavailable factors need data, not effort.',
   ranks: 'Question: WHICH facility does this policy pay best, and how real is the gap between them?',
+  thin: 'Question: IS THERE ENOUGH HISTORY here to trust these numbers? Distinct patients — not lines — are the unit of evidence; read the sample honestly and say what "directional" means for this rep.',
+  takeit: 'Question: SHOULD WE BE TAKING this policy at all? Nothing in the set reads strong — weigh the best available evidence against declining, and be direct about which way it leans.',
+  plantype: 'Question: NARROW PLAN (EPO/HMO) — is there a realistic path to payment? Read what the plan type means for access and authorization, using only the policy facts provided.',
+  funding: "Question: WHO actually DECIDES this claim? Self-funded means the employer's administrator sets exceptions, not a payer rate sheet; fully insured means the carrier does. Read what that does to flexibility.",
+  network: 'Question: WHAT does the NETWORK POSTURE mean for us here? Read INN/OON from the policy facts and what it implies for billing strength and denial risk — never guess a posture that is not provided.',
 };
 
 /** Build the {system, user} messages for one explainer call. The user turn is the JSON aggregate. */
@@ -144,4 +167,196 @@ export function buildQualifyAiMessages(input: QualifyAiInput): { system: string;
     'Write the TL;DR / Signals / Risks sections now.',
   ].join('\n');
   return { system: SYSTEM_PROMPT, user };
+}
+
+// ── Blind-role defensive scrub (2026-08-04) ──────────────────────────────────────────────────────
+//
+// The INPUT path is already dollar-free by construction (the schema above cannot express a dollar),
+// so on an amounts-blind session any dollar-shaped output is a model violation, never data. This is
+// the BACKSTOP for that case: scan the streamed text server-side, drop the offending line, keep the
+// rest of the answer. A dropped line beats a leaked figure; a leaked figure beats nothing only for
+// viewers entitled to amounts, who never pass through this path.
+
+/** Dollar-shaped content that must never reach an amounts-blind viewer. Deliberately broad — ANY
+ *  '$', 'dollar(s)', or 'USD' trips it. False positives cost one blanked line on the blind path;
+ *  a miss costs a leak, so the trade is not close. */
+export const BLIND_DOLLAR_PATTERN = /\$|\b(?:dollars?|usd)\b/i;
+
+export interface BlindLineScrubber {
+  /** Feed one stream delta; returns the text safe to forward now (complete, scanned lines only). */
+  push(delta: string): string;
+  /** End of stream: scan and release whatever partial line is still buffered. */
+  flush(): string;
+}
+
+/** Line-buffered scrub for the blind streaming path. Emission becomes line-granular — a line is
+ *  held until its newline arrives — so a dollar split across two deltas ("$" + "4,200") can never
+ *  slip through the seam. A matching line is BLANKED (its newline kept) so the markdown section
+ *  structure the client splits on survives; `onScrub` fires once per blanked line. */
+export function createBlindLineScrubber(onScrub: () => void): BlindLineScrubber {
+  let pending = '';
+  const scan = (line: string): string => {
+    if (!BLIND_DOLLAR_PATTERN.test(line)) return line;
+    onScrub();
+    return '';
+  };
+  return {
+    push(delta: string): string {
+      pending += delta;
+      const cut = pending.lastIndexOf('\n');
+      if (cut === -1) return '';
+      const complete = pending.slice(0, cut + 1);
+      pending = pending.slice(cut + 1);
+      // complete ends with '\n', so the final split element is '' and passes through untouched.
+      return complete
+        .split('\n')
+        .map((line, i, all) => (i === all.length - 1 ? line : scan(line)))
+        .join('\n');
+    },
+    flush(): string {
+      const out = scan(pending);
+      pending = '';
+      return out;
+    },
+  };
+}
+
+// ── Orchestration core (2026-08-04) ─────────────────────────────────────────────────────────────
+//
+// The full explainer pipeline — firewall → gate → audit-before-stream → model stream → blind scrub
+// → cost line → refusal check — with every side effect injected, so the root hermetic suite can
+// prove the ORDER (audit strictly precedes the model call) and the blind scrub end-to-end with a
+// fake transport. app/lib/qualify/ai-actions.ts is the thin 'use server' binder that supplies the
+// real gate, audit writer, and Anthropic transport. This module is NOT a server action — it is not
+// remotely callable, and its deps come only from the binder.
+
+export const QUALIFY_AI_ACTION = 'qualify_ai_explain';
+
+export interface QualifyAiActor {
+  email: string;
+  userId: string;
+}
+
+export type QualifyAiGateResult =
+  | { ok: true; actor: QualifyAiActor; hasAmounts: boolean }
+  | { ok: false };
+
+export interface QualifyAiUsage {
+  inputTokens: number;
+  outputTokens: number;
+  stopReason: string | null;
+}
+
+export interface QualifyAiTransportSession {
+  /** Text deltas only — the transport adapter filters its provider's event stream down to text. */
+  deltas: AsyncIterable<string>;
+  /** Resolves after `deltas` is exhausted with the run's usage + stop reason. */
+  final(): Promise<QualifyAiUsage>;
+  abort(): void;
+}
+
+export type QualifyAiTransport = (req: {
+  model: string;
+  system: string;
+  user: string;
+  maxTokens: number;
+}) => QualifyAiTransportSession;
+
+export interface QualifyAiRunDeps {
+  gate(): Promise<QualifyAiGateResult>;
+  recordAccess(entry: {
+    actorEmail: string;
+    actorUserId: string;
+    action: string;
+    detail: Record<string, unknown>;
+  }): Promise<unknown>;
+  transport: QualifyAiTransport;
+  model: string;
+  /** PHI-free structured ops lines (the cost line + blind-scrub alerts). Counts and ids only —
+   *  never streamed text, never matched text. */
+  log(line: Record<string, unknown>): void;
+}
+
+export type QualifyAiRun =
+  | { ok: true; deltas: AsyncIterable<string>; abort(): void }
+  | { ok: false; reason: 'insufficient' | 'invalid' | 'unavailable' };
+
+export async function runQualifyAiExplanation(input: unknown, deps: QualifyAiRunDeps): Promise<QualifyAiRun> {
+  // 1. PHI firewall BEFORE anything else — unknown keys (and therefore any identifier or dollar
+  //    field a compromised client might attach) are rejected structurally, never forwarded.
+  const parsed = QualifyAiInputSchema.safeParse(input);
+  if (!parsed.success) return { ok: false, reason: 'invalid' };
+  const ai = parsed.data;
+
+  // 2. Gate — same principal policy as every Qualify surface (fail-closed).
+  const gate = await deps.gate();
+  if (!gate.ok) return { ok: false, reason: 'unavailable' };
+
+  // The prompt is dollar-free for EVERY role by schema construction; amountsBlind only tunes copy.
+  // Trust the server-side principal over the client's claim — the flag can tighten, never loosen.
+  const blind = !gate.hasAmounts;
+  const safeInput: QualifyAiInput = { ...ai, amountsBlind: blind || ai.amountsBlind };
+
+  if (!isQualifyAiSufficient(safeInput)) return { ok: false, reason: 'insufficient' };
+
+  // 3. Durable audit BEFORE the model call (best-effort; non-PHI detail — question id + shape only).
+  //    The transport is only constructed inside the generator below, which cannot run until this
+  //    function has returned — so the audit row strictly precedes the first model byte.
+  try {
+    await deps.recordAccess({
+      actorEmail: gate.actor.email,
+      actorUserId: gate.actor.userId,
+      action: QUALIFY_AI_ACTION,
+      detail: {
+        question: safeInput.question,
+        provenance: safeInput.provenance,
+        facilities: safeInput.facilities.length,
+        window_days: safeInput.windowDays,
+        model: deps.model,
+      },
+    });
+  } catch {
+    // an audit hiccup must not block a non-PHI aggregate read; the action name is still attributable
+    // via the model-cost log line below
+  }
+
+  const { system, user } = buildQualifyAiMessages(safeInput);
+
+  let session: QualifyAiTransportSession | null = null;
+  const deltas = (async function* () {
+    const live = deps.transport({ model: deps.model, system, user, maxTokens: QUALIFY_AI_MAX_TOKENS });
+    session = live;
+    // Defensive scrub on the SERVER-derived blind flag only — a sighted viewer's stream is untouched.
+    const scrub = blind
+      ? createBlindLineScrubber(() =>
+          deps.log({
+            evt: 'qualify_ai_blind_scrub',
+            question: safeInput.question,
+            facilities: safeInput.facilities.length,
+          }),
+        )
+      : null;
+    for await (const delta of live.deltas) {
+      const out = scrub ? scrub.push(delta) : delta;
+      if (out) yield out;
+    }
+    const tail = scrub ? scrub.flush() : '';
+    if (tail) yield tail;
+    const final = await live.final();
+    // One PHI-free cost line (the collections-panel discipline): counts only, never content.
+    deps.log({
+      evt: 'qualify_ai_explain_cost',
+      model: deps.model,
+      question: safeInput.question,
+      input_tokens: final.inputTokens,
+      output_tokens: final.outputTokens,
+      stop_reason: final.stopReason, // truncation ('max_tokens') and refusals must be visible in ops, not silent
+    });
+    if (final.stopReason === 'refusal') {
+      // An opus-5 safety refusal arrives as HTTP 200 — never render it as a finished answer.
+      throw new Error('qualify_ai_refusal');
+    }
+  })();
+
+  return { ok: true, deltas, abort: () => session?.abort() };
 }

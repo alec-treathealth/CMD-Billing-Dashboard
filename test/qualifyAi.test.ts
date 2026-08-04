@@ -9,7 +9,11 @@ import {
   QualifyAiInputSchema,
   buildQualifyAiMessages,
   isQualifyAiSufficient,
+  createBlindLineScrubber,
+  runQualifyAiExplanation,
+  QUALIFY_AI_QUESTIONS,
   type QualifyAiInput,
+  type QualifyAiRunDeps,
 } from '../src/collections/qualifyAi';
 
 const VALID: QualifyAiInput = {
@@ -98,4 +102,174 @@ test('the built prompt carries no dollar sign and no identifier-shaped content',
 test('insufficient: no facilities AND no policy → the panel never calls the model', () => {
   assert.equal(isQualifyAiSufficient({ ...VALID, facilities: [], policy: null }), false);
   assert.equal(isQualifyAiSufficient({ ...VALID, facilities: [] }), true); // policy alone is explainable
+});
+
+// ── Chip enum + framing (2026-08-04 mockup-port additions) ──────────────────────────────────────
+
+test('every chip id round-trips the firewall and carries its own dollar-free framing line', () => {
+  const framings = new Set<string>();
+  for (const question of QUALIFY_AI_QUESTIONS) {
+    const parsed = QualifyAiInputSchema.safeParse({ ...VALID, question });
+    assert.ok(parsed.success, `${question} parses`);
+    const { user } = buildQualifyAiMessages({ ...VALID, question });
+    assert.match(user, /^Question: /, `${question} is framed`);
+    assert.ok(!user.includes('$'), `${question} user turn is dollar-free`);
+    framings.add(user.split('\n')[0] ?? '');
+  }
+  // Ten distinct framings for ten chips — no chip silently reuses another's question.
+  assert.equal(framings.size, QUALIFY_AI_QUESTIONS.length);
+});
+
+// ── Blind-role defensive scrubber ────────────────────────────────────────────────────────────────
+
+test('blind scrubber: clean text passes byte-identical across arbitrary chunk seams', () => {
+  let scrubs = 0;
+  const s = createBlindLineScrubber(() => {
+    scrubs += 1;
+  });
+  const parts = ['## TL;', 'DR\nAll clean here.\n## Sig', 'nals\n- 62% of billed allowed\n- 41 median days'];
+  const out = parts.map((p) => s.push(p)).join('') + s.flush();
+  assert.equal(out, parts.join(''));
+  assert.equal(scrubs, 0);
+});
+
+test('blind scrubber: a dollar split across two deltas is caught at the line seam', () => {
+  let scrubs = 0;
+  const s = createBlindLineScrubber(() => {
+    scrubs += 1;
+  });
+  const out = s.push('- roughly $') + s.push('4,200 per stay\n- clean line\n') + s.flush();
+  assert.equal(out, '\n- clean line\n'); // poisoned line blanked, its newline kept, clean line intact
+  assert.equal(scrubs, 1);
+});
+
+test('blind scrubber: word forms (dollars / USD) trip it; the unterminated final line is scanned on flush', () => {
+  let scrubs = 0;
+  const s = createBlindLineScrubber(() => {
+    scrubs += 1;
+  });
+  assert.equal(s.push('about five thousand dollars total\n'), '\n');
+  assert.equal(s.push('USD 900 outstanding'), ''); // held — no newline yet
+  assert.equal(s.flush(), ''); // scanned and blanked at flush
+  assert.equal(scrubs, 2);
+});
+
+// ── Orchestration core (fake deps — hermetic; no live gate/DB/Anthropic) ─────────────────────────
+
+function makeDeps(
+  chunks: string[],
+  opts: { hasAmounts?: boolean; stopReason?: string | null; gateOk?: boolean; auditThrows?: boolean } = {},
+) {
+  const events: string[] = [];
+  const logs: Array<Record<string, unknown>> = [];
+  const audits: Array<Record<string, unknown>> = [];
+  const deps: QualifyAiRunDeps = {
+    gate: async () =>
+      opts.gateOk === false
+        ? { ok: false }
+        : { ok: true, actor: { email: 'rep@example.test', userId: 'u-1' }, hasAmounts: opts.hasAmounts ?? true },
+    recordAccess: async (entry) => {
+      events.push('audit');
+      audits.push(entry.detail);
+      if (opts.auditThrows) throw new Error('audit unavailable');
+    },
+    transport: () => {
+      events.push('transport');
+      return {
+        deltas: (async function* () {
+          for (const chunk of chunks) yield chunk;
+        })(),
+        final: async () => ({ inputTokens: 10, outputTokens: 20, stopReason: opts.stopReason ?? 'end_turn' }),
+        abort: () => {
+          events.push('abort');
+        },
+      };
+    },
+    model: 'test-model',
+    log: (line) => logs.push(line),
+  };
+  return { deps, events, logs, audits };
+}
+
+async function collect(run: Awaited<ReturnType<typeof runQualifyAiExplanation>>): Promise<string> {
+  if (!run.ok) throw new Error(`expected ok run, got ${JSON.stringify(run)}`);
+  let out = '';
+  for await (const chunk of run.deltas) out += chunk;
+  return out;
+}
+
+test('core: the audit row lands BEFORE the model transport is touched — for EVERY chip id', async () => {
+  for (const question of QUALIFY_AI_QUESTIONS) {
+    const { deps, events, audits, logs } = makeDeps(['## TL;DR\nok\n']);
+    const run = await runQualifyAiExplanation({ ...VALID, question }, deps);
+    assert.ok(run.ok, `${question} runs`);
+    // The action has returned; the transport has NOT been constructed yet — audit strictly first.
+    assert.deepEqual(events, ['audit'], `${question}: audit precedes the stream`);
+    await collect(run);
+    assert.deepEqual(events, ['audit', 'transport'], `${question}: transport only on consumption`);
+    assert.equal(audits[0]?.question, question);
+    assert.equal(audits[0]?.model, 'test-model');
+    const cost = logs.find((l) => l.evt === 'qualify_ai_explain_cost');
+    assert.ok(cost, `${question}: cost line logged`);
+    assert.equal(cost?.stop_reason, 'end_turn');
+  }
+});
+
+const POISONED = [
+  '## TL;DR\nStrong read at the top facility.\n',
+  '## Signals\n- roughly $12,',
+  '000 per admission historically\n- 62% of billed allowed on 40 patients\n',
+  '## Risks\n- thin sample under 10 patients',
+];
+
+test('core: blind path — poisoned dollars scrubbed, alert line PHI-free, clean text still delivered', async () => {
+  const { deps, logs } = makeDeps(POISONED, { hasAmounts: false });
+  // amountsBlind:false from the client — the SERVER principal must force the blind path anyway.
+  const run = await runQualifyAiExplanation({ ...VALID, amountsBlind: false }, deps);
+  const out = await collect(run);
+  assert.ok(!out.includes('$'), 'no dollar sign reaches the client');
+  assert.ok(!/12,?000/.test(out), 'no dollar figure reaches the client');
+  assert.ok(out.includes('- 62% of billed allowed on 40 patients'), 'clean sibling line survives');
+  assert.ok(out.includes('## Risks'), 'section structure survives');
+  assert.ok(out.includes('thin sample under 10 patients'), 'flush releases the unterminated final line');
+  const alerts = logs.filter((l) => l.evt === 'qualify_ai_blind_scrub');
+  assert.equal(alerts.length, 1, 'one alert per blanked line');
+  assert.deepEqual(Object.keys(alerts[0] ?? {}).sort(), ['evt', 'facilities', 'question']);
+  assert.equal(alerts[0]?.facilities, 1);
+  assert.ok(!JSON.stringify(alerts[0]).includes('$'), 'the alert never echoes matched text');
+});
+
+test('core: sighted path is byte-identical passthrough — the scrub never runs', async () => {
+  const { deps, logs } = makeDeps(POISONED, { hasAmounts: true });
+  const run = await runQualifyAiExplanation(VALID, deps);
+  assert.equal(await collect(run), POISONED.join(''));
+  assert.equal(logs.filter((l) => l.evt === 'qualify_ai_blind_scrub').length, 0);
+});
+
+test('core: an opus refusal (HTTP 200) rejects the stream instead of finishing it', async () => {
+  const { deps } = makeDeps(['## TL;DR\nok\n'], { stopReason: 'refusal' });
+  const run = await runQualifyAiExplanation(VALID, deps);
+  await assert.rejects(() => collect(run), /qualify_ai_refusal/);
+});
+
+test('core: gate denial → unavailable; firewall reject → invalid; empty read → insufficient', async () => {
+  assert.deepEqual(await runQualifyAiExplanation(VALID, makeDeps([], { gateOk: false }).deps), {
+    ok: false,
+    reason: 'unavailable',
+  });
+  assert.deepEqual(await runQualifyAiExplanation({ ...VALID, memberId: 'AET123' }, makeDeps([]).deps), {
+    ok: false,
+    reason: 'invalid',
+  });
+  assert.deepEqual(
+    await runQualifyAiExplanation({ ...VALID, facilities: [], policy: null }, makeDeps([]).deps),
+    { ok: false, reason: 'insufficient' },
+  );
+});
+
+test('core: an audit hiccup never blocks the non-PHI read (best-effort, preserved)', async () => {
+  const { deps, events } = makeDeps(['## TL;DR\nok\n'], { auditThrows: true });
+  const run = await runQualifyAiExplanation(VALID, deps);
+  assert.equal(await collect(run), '## TL;DR\nok\n');
+  assert.deepEqual(events, ['audit', 'transport']);
 });

@@ -6,22 +6,21 @@
  * Risks), a blinking caret while streaming. The input is assembled HERE from the snapshot the
  * user is already looking at — aggregates only; the server re-validates through the zod firewall
  * (zero dollar fields for every role) and re-derives the blind flag from the principal.
+ *
+ * Chips are DERIVED, not fixed (2026-08-04, the v2 mockup's chipsFor port): aiChips.ts conditions
+ * every candidate on what this search actually returned and flags the one most worth asking
+ * ("suggested" — teal ✦ + soft border until a question is running). While an answer streams, a
+ * sentinel keeps the panel's bottom edge in view (scrollIntoView 'nearest' — instant, so the
+ * global prefers-reduced-motion reset needs no per-component opt-out).
  */
 import { useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import { generateQualifyAiExplanation } from '@/lib/qualify/ai-actions';
 import { parseAiSections } from '../../../src/collections/aiAnalysis';
 import type { QualifyAiInput } from '../../../src/collections/qualifyAi';
 import type { QualifySnapshot } from '../../lib/qualify/contract';
+import { qualifyAiChips, type QualifyAiChipId } from '../../lib/qualify/aiChips';
 
-type ChipId = QualifyAiInput['question'];
-
-const CHIP_LABELS: Record<ChipId, string> = {
-  explain: 'Why does this facility score what it does?',
-  ranks: 'Which of our facilities does this policy pay best?',
-  placement: 'Should I place this client here?',
-  speed: 'How long until we see the money?',
-  improve: 'What would move this rating?',
-};
+type ChipId = QualifyAiChipId;
 
 function buildInput(question: ChipId, snap: QualifySnapshot, blind: boolean): QualifyAiInput {
   return {
@@ -71,17 +70,18 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
   const [error, setError] = useState<string | null>(null);
   const genRef = useRef(0);
   const readerRef = useRef<ReadableStreamDefaultReader<string> | null>(null);
+  const followRef = useRef<HTMLDivElement | null>(null);
   // Unmount mid-stream must cancel the server stream (bounded waste otherwise, but still waste).
   useEffect(() => () => { void readerRef.current?.cancel(); }, []);
+  // Auto-scroll-follow: as the streamed answer grows, keep its bottom edge in view. scrollIntoView
+  // 'nearest' nudges the nearest scrollable ancestor minimally (no jump when already visible) and
+  // is instant, not smooth — so prefers-reduced-motion needs nothing beyond the global reset.
+  // Gated on `streaming`: once the answer is done, the panel stops steering the scroll position.
+  useEffect(() => {
+    if (streaming && text) followRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [streaming, text]);
 
-  const chips = useMemo<ChipId[]>(() => {
-    const out: ChipId[] = ['explain'];
-    if (snapshot.facilities.length > 1) out.push('ranks');
-    if (snapshot.facilities.length > 0) out.push('placement');
-    if (snapshot.facilities.some((f) => f.medianDaysToPayment !== null)) out.push('speed');
-    if (snapshot.facilities.some((f) => f.factors.some((x) => x.available && x.direction === 'neg'))) out.push('improve');
-    return out;
-  }, [snapshot]);
+  const { chips, suggestedId } = useMemo(() => qualifyAiChips(snapshot), [snapshot]);
 
   const run = useCallback(
     async (id: ChipId) => {
@@ -141,20 +141,33 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
       </div>
 
       <div className="grid grid-cols-1 gap-2 p-3.5 sm:grid-cols-2 lg:grid-cols-3">
-        {chips.map((id) => (
-          <button
-            key={id}
-            type="button"
-            onClick={() => run(id)}
-            aria-pressed={active === id}
-            className={[
-              'rounded-xl border px-3 py-2 text-left text-[12.5px] font-semibold leading-snug transition-colors',
-              active === id ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200 hover:text-teal700',
-            ].join(' ')}
-          >
-            {CHIP_LABELS[id]}
-          </button>
-        ))}
+        {chips.map((chip) => {
+          // The suggestion is a resting-state nudge only — it clears the moment any chip runs.
+          const suggested = chip.id === suggestedId && active === null;
+          return (
+            <button
+              key={chip.id}
+              type="button"
+              onClick={() => run(chip.id)}
+              aria-pressed={active === chip.id}
+              className={[
+                'rounded-xl border px-3 py-2 text-left text-[12.5px] font-semibold leading-snug transition-colors',
+                active === chip.id
+                  ? 'border-teal500 bg-teal50 text-teal700'
+                  : suggested
+                    ? 'border-teal200 bg-teal50 text-ink600 hover:text-teal700'
+                    : 'border-line bg-surface text-ink600 hover:border-teal200 hover:text-teal700',
+              ].join(' ')}
+            >
+              {suggested ? (
+                <span aria-hidden className="mr-1.5 text-teal500">
+                  ✦
+                </span>
+              ) : null}
+              {chip.label}
+            </button>
+          );
+        })}
       </div>
 
       {active === null ? (
@@ -197,6 +210,7 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
                   case before quoting anything.
                 </p>
               ) : null}
+              <div ref={followRef} aria-hidden className="h-px scroll-mb-4" />
             </div>
           )}
         </div>
