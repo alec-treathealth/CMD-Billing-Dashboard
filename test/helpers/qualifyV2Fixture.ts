@@ -9,6 +9,10 @@ import type { QualifyFacility } from '../../app/lib/qualify/contract';
 
 export const QUALIFY_FACILITY_V2_NULLS: Pick<
   QualifyFacility,
+  // The two non-allowed KPI-tile metrics (2026-08-04) — null here so a fixture that cares about the
+  // tile flanks must state its own values, and one that doesn't gets the honest "we cannot say".
+  | 'pctPaidOfAllowed'
+  | 'pctPaidOfBilled'
   | 'medianDaysToPayment'
   | 'avgAuthDays'
   | 'avgLosDays'
@@ -19,6 +23,8 @@ export const QUALIFY_FACILITY_V2_NULLS: Pick<
   | 'factors'
   | 'availableWeight'
 > = {
+  pctPaidOfAllowed: null,
+  pctPaidOfBilled: null,
   medianDaysToPayment: null,
   avgAuthDays: null,
   avgLosDays: null,

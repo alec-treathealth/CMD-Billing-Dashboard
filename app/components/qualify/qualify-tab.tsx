@@ -1,26 +1,35 @@
 'use client';
 
 /**
- * Qualify tab — the COMPOSE-BAR container (Phase 1 of the compose-bar rework). Replaces the old
- * tab-based single-mode resolver with a Collections-style AND-composed multi-filter bar, while KEEPING
- * Qualify's own outputs (the Heating-Up ticker, the live match count, the recent-claims panel). The
- * browser's sole data path is the Qualify Server Actions (this component is the only caller).
+ * Qualify tab — the COMPOSE-BAR container. A Collections-style AND-composed multi-filter bar over
+ * Qualify's own outputs (the Heating-Up ticker, the live match count, the KPI tiles, the facility
+ * ranking). The browser's sole data path is the Qualify Server Actions (this component is the only caller).
  *
- * INPUT MODEL (the swap): four MultiSelectTagPickers — Facility · Payer · Employer · Funding — plus a
- * PHI row (Member ID · Alpha prefix · Group # · Client Name) all AND-compose into ONE CmdExplorer-shaped
- * filter (the Qualify-side QualifyComposeInput). An empty field = NO restriction (never match-nothing).
- * The derived filter drives TWO reads: getQualifyMatchSummary (the live "N charge lines match" count +
- * non-dollar percentages) and getQualifyComposedCases (the claim rows for the panel). Both run through
- * Qualify's amounts choke point server-side, so an admissions_seat sees the count + percentages with
- * ZERO dollars. Debounced + recency-guarded (genRef) so a slow earlier response can't overwrite a newer.
+ * NO CLAIM-LINE GRID (Alec's ruling, 2026-08-04). This surface answers "should we take this client, and
+ * where do we send them" — a decision about FACILITIES. The per-claim table that used to occupy the right
+ * half of the page answered a different question (which is Collections' and the audit surface's job),
+ * crowded the ranking into a half-width column, and was the only reason PHI rows were fetched here at
+ * all. Charge-line COUNTS and DOLLAR AGGREGATES stay — they are what the count, the tiles and the
+ * facility cards are made of. The individual rows are gone, and with them the per-patient reveal, the
+ * global reveal toggle and the patient-cohort sheet, since each of those existed to operate on that grid.
+ * The `revealQualifyRows` action itself stays: /qualify/m still uses it on the mobile drill.
+ *
+ * INPUT MODEL: four MultiSelectTagPickers — Facility · Payer · Employer · Funding — plus the PHI inputs
+ * (Member ID / alpha prefix, Group #, Client Name) all AND-compose into ONE CmdExplorer-shaped filter
+ * (the Qualify-side QualifyComposeInput). An empty field = NO restriction (never match-nothing). The
+ * derived filter drives ONE read: getQualifyMatchSummary (the live "N charge lines match" count + the
+ * non-dollar percentages), which runs through Qualify's amounts choke point server-side, so an
+ * admissions_seat sees the count + percentages with ZERO dollars. Debounced + recency-guarded (genRef)
+ * so a slow earlier response can't overwrite a newer.
  *
  * PHI ROW (Change C divergence — do NOT "fix" to Collections parity): Qualify is the admissions-facing
- * surface where person-first lookup is the natural entry, so it carries a FOURTH PHI input — Client Name —
- * that Collections deliberately has no equivalent for. All four PHI inputs are canRevealPhi-gated; Client
- * Name is ADDITIONALLY behind QUALIFY_CLIENT_NAME_ENABLED (contract.ts) and stays hidden until migration
- * 0067 + the owner-run name backfill land. The raw PHI terms live in component state only — never a URL,
- * never a log; the server mints the blind indexes from them. See docs/veris-data-notes.md ("Qualify
- * Client-Name (Change C) activation") — flipping the flag ALSO requires making the live count name-aware.
+ * surface where person-first lookup is the natural entry, so it carries a Client Name input that
+ * Collections deliberately has no equivalent for. Every PHI input is canRevealPhi-gated; Client Name is
+ * ADDITIONALLY behind QUALIFY_CLIENT_NAME_ENABLED (contract.ts) and stays hidden until migration 0067 +
+ * the owner-run name backfill land. The raw PHI terms live in component state only — never a URL, never a
+ * log; the server mints the blind indexes from them. See docs/veris-data-notes.md ("Qualify Client-Name
+ * (Change C) activation") — flipping the flag ALSO requires making the live count name-aware. Because the
+ * grid is gone, a PHI term now only ever NARROWS AN AGGREGATE: no identified row is ever transmitted.
  *
  * TICKER (Facilities Heating Up): stays BOOK-WIDE in Phase 1 — only the window control refetches it (the
  * compose pickers do NOT re-scope the ticker or the KPI tiles; employer/funding are pure filter
@@ -36,48 +45,53 @@
  * OUT OF SCOPE (Phase 2, frozen): the FacilityPanel single-payer ranking + the lighter context line +
  * the VOB single-payer probe land in the NEXT commit. The book KPI tiles + ticker keep their current
  * book-wide behavior — buildBookKpisQuery / buildFacilityTrendQuery are untouched.
+ *
+ * ── UI RULINGS, 2026-08-04 (Alec, from a live pass on production). Four behaviours here exist because
+ * they were asked for by name; do not "restore" what they replaced:
+ *   1. READING NEVER EDITS THE SEARCH. A facility card click opens "Why this score" — it does NOT push
+ *      that facility into the compose filter. Browsing results used to rewrite the query that produced
+ *      them. Facility filtering lives in exactly one place: the Facility picker.
+ *   2. THE IDENTIFIER FIELD HAS ITS OWN ×. Clearing the primary search no longer means clearing every
+ *      filter with it.
+ *   3. NO CLAIM-LINE GRID AT ALL (see above) — the ranking is the full page width, always.
+ *   4. THE STANDALONE SCOPE BANNER IS GONE. Its fact — this ranking is the payer across the whole
+ *      book, not this search — ships once, on the panel caption and the KPI flank captions.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Briefcase, Building2, ChevronRight, Eye, EyeOff, Landmark, Lock, Search, ShieldCheck } from 'lucide-react';
+import { Briefcase, Building2, ChevronRight, Landmark, Lock, Search, ShieldCheck, X } from 'lucide-react';
 import {
   getQualifyMatchSummary,
-  getQualifyComposedCases,
   getQualifySnapshot,
   getQualifySnapshotByPayer,
   getQualifyPayerEverBilled,
   getQualifyResolvePayer,
-  getQualifyPatientCohort,
   getQualifyBookKpis,
   getQualifyFacilityTrends,
   getQualifyOverview,
   loadQualifyFacilityOptions,
   loadQualifyPayerOptions,
   loadQualifyEmployers,
-  revealQualifyRows,
 } from '@/lib/qualify/actions';
 import {
   classifyQualifyIdentifier,
   QUALIFY_CLIENT_NAME_ENABLED,
-  QUALIFY_REVEAL_BATCH_CAP,
   qualifyWindowLabel,
   trailingWindow,
   type QualifyBookKpis,
-  type QualifyClaim,
   type QualifyComposeInput,
   type QualifyFacilityTrend,
   type QualifyMatchSummary,
-  type QualifyPhi,
-  type QualifyPatientCohort,
   type QualifySnapshot,
   type QualifyWindow,
 } from '@/lib/qualify/contract';
 import type { CmdEmployerOption } from '@/lib/actions';
 import { MultiSelectTagPicker, type PickerOption } from '@/components/ui/multi-select-tag-picker';
 import { buildQualifySearchParams, parseQualifySearchParams } from '@/lib/qualify/urlState';
-import { deriveScopeNotice, deriveFacilitySpread, deriveOnFileTags } from '@/lib/qualify/scopeNotice';
+import { deriveTileFlanks, NO_TILE_FLANKS } from '@/lib/qualify/tileFlanks';
+import { deriveOnFileTags } from '@/lib/qualify/onFileTags';
+import { settledNoMatches } from '@/lib/qualify/matchState';
 import { derivePolicyRating } from '@/lib/qualify/policyRating';
-import { ScopeNotice } from '@/components/qualify/scope-notice';
 
 /** Band → the ON-DARK hue for the policy numeral (the light-surface RATING_HEX is unreadable on
  *  teal900). Brighter, higher-contrast variants of the same five bands. */
@@ -88,10 +102,7 @@ const POLICY_BAND_HEX: Record<'65' | '50' | '30' | '15' | '0', string> = {
   '15': '#F0917C',
   '0': '#F0917C',
 };
-import { filterFacilitiesByLoc, filterClaimsByLoc, type QualifyLocFilter } from '@/lib/qualify/groupClaims';
-import type { RatingBucket } from '@/lib/qualify/rating';
-import { CasesTable } from '@/components/qualify/cases-table';
-import { CohortSheet } from '@/components/qualify/cohort-sheet';
+import { filterFacilitiesByLoc, type QualifyLocFilter } from '@/lib/qualify/groupClaims';
 import { FacilityPanel } from '@/components/qualify/facility-panel';
 import { PolicyStrip } from '@/components/qualify/policy-strip';
 import { WindowLadder } from '@/components/qualify/window-ladder';
@@ -105,9 +116,6 @@ import { QualifyLandingHero } from '@/components/qualify/landing-hero';
 const COMPOSE_DEBOUNCE_MS = 350;
 /** Employer type-ahead: min chars + debounce (server-driven, mirrors Collections). */
 const EMPLOYER_MIN_CHARS = 3;
-
-/** An empty facility-bucket map — CasesTable retains the prop but no longer colors from it. */
-const NO_FACILITY_BUCKETS: Map<string, RatingBucket> = new Map();
 
 export function QualifyTab({
   viewerHasAmountsCapability,
@@ -138,13 +146,12 @@ export function QualifyTab({
   const [overviewError, setOverviewError] = useState(false);
   const [initializing, setInitializing] = useState(true);
 
-  // ── COMPOSED READS (live count + claim rows) ───────────────────────────────────────────────────
+  // ── COMPOSED READ (the live count + its non-dollar percentages — an aggregate, no rows) ────────
   const [summary, setSummary] = useState<QualifyMatchSummary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
-  const [composedCases, setComposedCases] = useState<QualifyClaim[]>([]);
-  const [capped, setCapped] = useState(false);
-  const [casesLoading, setCasesLoading] = useState(false);
-  const [casesError, setCasesError] = useState(false);
+  /** The match-count fetch FAILED. Distinct from a zero count: "we could not count" and "nothing
+   *  matches" send the rep in opposite directions. */
+  const [summaryError, setSummaryError] = useState(false);
 
   // ── TICKER PIN — a DISTINCT flag, set ONLY by a card click, cleared ONLY by the clear actions. NEVER
   //    derived from the facility selection (deriving it would freeze the marquee whenever someone picks a
@@ -164,6 +171,17 @@ export function QualifyTab({
   //    ranking's own distinct-patient sample gate, sampleGate.ts, is the guard). Highlights the selected
   //    facilities; never intersects. ────────────────────────────────────────────────────────────────
   const [panelSnapshot, setPanelSnapshot] = useState<QualifySnapshot | null>(null);
+  /** Explicit fetch-in-flight flag for the ranking. Deriving it from `!panelSnapshot` could not tell
+   *  a refetch from a first load, nor a failure from a pending request — see the fetch effect. */
+  const [panelLoading, setPanelLoading] = useState(false);
+  /** The ranking fetch FAILED (review: unaddressed feedback from PR #34, which this series widened).
+   *  A failure used to set panelSnapshot = null, which is the same value as "not loaded yet" — so a
+   *  dropped connection showed an eternal "Loading facility ranking…" with no error and no retry,
+   *  and once the notice/flanks/policy-bar keyed off that state they all went dark forever with it. A
+   *  network failure spoken as a network pending is the same category of lie this series exists to
+   *  remove, so it gets its own state and a retry. */
+  const [panelError, setPanelError] = useState(false);
+  const [panelReloadKey, setPanelReloadKey] = useState(0);
   const panelGenRef = useRef(0);
   // When the user searches a single PHI identifier (alpha prefix / member id) with NO payer chip, we
   // resolve its dominant payer server-side and rank against THAT — so an identifier search doesn't force a
@@ -194,22 +212,14 @@ export function QualifyTab({
   const [employerQuery, setEmployerQuery] = useState('');
   const [employerDisplay, setEmployerDisplay] = useState<Map<string, string>>(() => new Map());
 
-  // ── PHI reveal (per-patient, audited) + the Change-B global toggle. In-memory ONLY (never localStorage). ─
-  const [revealed, setRevealed] = useState<Map<number, QualifyPhi>>(() => new Map());
-  const revealedRef = useRef(revealed);
-  revealedRef.current = revealed;
-  const [revealingKeys, setRevealingKeys] = useState<ReadonlySet<number>>(() => new Set());
-  const [revealError, setRevealError] = useState<string | null>(null);
-  const [globalReveal, setGlobalReveal] = useState(false);
-  // Change B eligibility: canRevealPhi && amounts ⇔ super_admin/admin exactly (admissions_seat lacks amounts).
-  const canGlobalReveal = canRevealPhi && viewerHasAmountsCapability;
+  // ── NO PHI REVEAL ON THIS SURFACE. The per-patient reveal, the Change-B global toggle and the
+  //    patient-cohort slide-over all existed to operate on the claim-line grid, which is gone
+  //    (Alec's ruling, 2026-08-04 — see the header). Nothing here fetches an identified row, so there
+  //    is nothing to unmask: `canRevealPhi` now gates only the SEARCH INPUTS, which mint blind indexes
+  //    server-side and never receive PHI back. The audited reveal path itself is intact and still used
+  //    by /qualify/m. Do not re-add a reveal control here without a grid to reveal into.
 
-  // Phase 3 patient-cohort slide-over (masked label + fetched context). Null = closed.
-  const [cohortSheet, setCohortSheet] = useState<{ label: string; data: QualifyPatientCohort | null; loading: boolean } | null>(
-    null,
-  );
-
-  // Recency guards — one for the compose fetch (count + cases + reveal), one for the overview ticker,
+  // Recency guards — one for the compose fetch (the live count), one for the overview ticker,
   // one for the payer+facility-scoped KPI tiles (Phase 2).
   const composeGenRef = useRef(0);
   const overviewGenRef = useRef(0);
@@ -242,12 +252,6 @@ export function QualifyTab({
   const [browseOpen, setBrowseOpen] = useState(false);
   const scrollToResults = useCallback(() => {
     document.getElementById('qualify-results')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, []);
-
-  const resetReveal = useCallback(() => {
-    setRevealed(new Map());
-    setRevealingKeys(new Set());
-    setRevealError(null);
   }, []);
 
   // ── DERIVED: the compose filter + whether any restriction is active (client mirror of composeHasAny) ─
@@ -287,7 +291,6 @@ export function QualifyTab({
   const identifierTerm = alphaPrefix.trim() || memberId.trim();
   const bothIdentifiers = alphaPrefix.trim() !== '' && memberId.trim() !== '';
   const singleIdentifier = payerSelection.length === 0 && identifierTerm !== '' && !bothIdentifiers ? identifierTerm : null;
-
   // ── OVERVIEW TICKER: Heating-Up trends. Phase 2 (Design B): BOOK-WIDE-WITHIN-PAYER — payer-scoped when
   //    EXACTLY ONE payer is selected, book-wide at 0 or 2+. Facility/employer/funding NEVER scope it
   //    (only payer + window are inputs). Owns TRENDS only; the KPI tiles are owned by their own effect.
@@ -406,20 +409,19 @@ export function QualifyTab({
     return () => clearTimeout(t);
   }, [payerSelection, windowSel, refreshOverview]);
 
-  // ── COMPOSE FETCH: the live match count + the composed claim rows, debounced + recency-guarded. No
-  //    filter ⇒ clear + no fetch (the landing hero shows). ──────────────────────────────────────────────
+  // ── COMPOSE FETCH: the live match count (an AGGREGATE — count + non-dollar percentages + distinct
+  //    clients), debounced + recency-guarded. No filter ⇒ clear + no fetch (the landing hero shows).
+  //    This used to ALSO fetch the composed claim rows for the right-hand grid; that grid is gone
+  //    (Alec's ruling, 2026-08-04), so the second read is gone with it and this surface no longer pulls
+  //    a single identified row across the wire. ─────────────────────────────────────────────────────
   useEffect(() => {
     if (!hasAnyFilter) {
       setSummary(null);
-      setComposedCases([]);
-      setCapped(false);
-      setCasesError(false);
       setSummaryLoading(false);
-      setCasesLoading(false);
       return;
     }
     setSummaryLoading(true);
-    setCasesLoading(true);
+    setSummaryError(false);
     const gen = ++composeGenRef.current;
     const t = setTimeout(() => {
       getQualifyMatchSummary(composeInput)
@@ -450,28 +452,15 @@ export function QualifyTab({
           setSummary(null);
           setSummaryLoading(false);
           setVobPayer(null);
-        });
-      getQualifyComposedCases(composeInput)
-        .then((r) => {
-          if (composeGenRef.current !== gen) return;
-          resetReveal(); // new result set → drop the prior scope's reveal cache (globalReveal re-reveals below)
-          setComposedCases(r.claims);
-          setCapped(r.capped);
-          setCasesError(false);
-          setCasesLoading(false);
-        })
-        .catch(() => {
-          if (composeGenRef.current !== gen) return;
-          setComposedCases([]);
-          setCapped(false);
-          setCasesError(true);
-          setCasesLoading(false);
+          // A FAILED count must not render as a confident "0 charge lines match" (review: unaddressed
+          // from PR #34) — the readout bar was asserting zero off the same failure.
+          setSummaryError(true);
         });
     }, COMPOSE_DEBOUNCE_MS);
     return () => clearTimeout(t);
     // composeInput is recomposed each render; depend on its inputs (stable state identities) instead.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [facilitySelection, payerSelection, employerSelection, fundingSelection, memberId, alphaPrefix, groupNumber, clientName, windowSel, hasAnyFilter, resetReveal]);
+  }, [facilitySelection, payerSelection, employerSelection, fundingSelection, memberId, alphaPrefix, groupNumber, clientName, windowSel, hasAnyFilter]);
 
   // ── IDENTIFIER → PAYER resolve: when the user searched a single PHI identifier with no payer chip,
   //    resolve its dominant payer so the ranking can render without forcing a manual payer pick. ────────
@@ -551,19 +540,35 @@ export function QualifyTab({
   useEffect(() => {
     if (!panelPayer) {
       setPanelSnapshot(null);
+      setPanelLoading(false);
+      setPanelError(false);
       return;
     }
+    // CLEAR BEFORE REFETCH (review, 2026-08-04). This used to keep the previous payer's snapshot
+    // while the new one was in flight — the long-accepted "desktop stale-flash". That was tolerable
+    // while it was purely cosmetic, but the scope notice, the policy rating and the flanks now make
+    // explicit CLAIMS about the ranking, and those claims are keyed on the NEW payer and window. So
+    // on a payer or window switch the screen asserted "these 27 facilities are BCBS-wide" over
+    // Aetna's set. Clearing turns that into an honest loading state and retires the deferred flash.
+    setPanelSnapshot(null);
+    setPanelLoading(true);
+    setPanelError(false);
     const pgen = ++panelGenRef.current;
     getQualifySnapshotByPayer({ payer: panelPayer, window: windowSel })
       .then((snap) => {
         if (panelGenRef.current !== pgen) return;
         setPanelSnapshot(snap);
+        setPanelLoading(false);
       })
       .catch(() => {
         if (panelGenRef.current !== pgen) return;
         setPanelSnapshot(null);
+        // Settle BOTH flags on failure: deriving "loading" from a null snapshot pinned a failed fetch
+        // in the loading state forever, hiding the policy block with no way out and no error shown.
+        setPanelLoading(false);
+        setPanelError(true);
       });
-  }, [panelPayer, windowSel]);
+  }, [panelPayer, windowSel, panelReloadKey]);
 
   // ── URL STATE: persist the NON-PHI selection arrays + window + LOC (replace, never push). PHI is
   //    excluded by construction — buildQualifySearchParams has no field for it. ─────────────────────────
@@ -626,117 +631,6 @@ export function QualifyTab({
       clearTimeout(t);
     };
   }, [employerQuery]);
-
-  // ── PER-PATIENT reveal (audited; unchanged for every role). ───────────────────────────────────────
-  const revealPatient = useCallback(
-    (patientKey: number, claimIds: number[]) => {
-      if (!canRevealPhi || claimIds.length === 0) return;
-      const ids = claimIds.slice(0, QUALIFY_REVEAL_BATCH_CAP);
-      if (ids.every((id) => revealedRef.current.has(id))) return;
-      const gen = composeGenRef.current; // capture (don't bump) — a newer compose fetch discards this
-      setRevealingKeys((s) => new Set(s).add(patientKey));
-      setRevealError(null);
-      const clearKey = () =>
-        setRevealingKeys((s) => {
-          const n = new Set(s);
-          n.delete(patientKey);
-          return n;
-        });
-      void (async () => {
-        try {
-          const res = await revealQualifyRows(ids);
-          if (composeGenRef.current !== gen) return;
-          clearKey();
-          if (res.ok) {
-            setRevealed((m) => {
-              const n = new Map(m);
-              for (const row of res.rows) {
-                const { id, ...phi } = row;
-                n.set(id, phi);
-              }
-              return n;
-            });
-          } else {
-            setRevealError(res.error);
-          }
-        } catch {
-          if (composeGenRef.current !== gen) return;
-          clearKey();
-          setRevealError('Reveal is unavailable right now.');
-        }
-      })();
-    },
-    [canRevealPhi],
-  );
-
-  // ── CHANGE B: the GLOBAL persistent reveal. When ON, each new result set's rows re-reveal through the
-  //    SAME audited path, chunked to the 50 batch cap (gen-guarded). ──────────────────────────────────
-  useEffect(() => {
-    if (!globalReveal || !canGlobalReveal || composedCases.length === 0) return;
-    const ids = composedCases.map((c) => c.id).filter((id) => !revealedRef.current.has(id));
-    if (ids.length === 0) return;
-    const gen = composeGenRef.current; // capture — a newer result set discards these landings
-    let alive = true;
-    void (async () => {
-      for (let i = 0; i < ids.length; i += QUALIFY_REVEAL_BATCH_CAP) {
-        const chunk = ids.slice(i, i + QUALIFY_REVEAL_BATCH_CAP);
-        try {
-          const res = await revealQualifyRows(chunk);
-          if (!alive || composeGenRef.current !== gen) return;
-          if (res.ok) {
-            setRevealed((m) => {
-              const n = new Map(m);
-              for (const row of res.rows) {
-                const { id, ...phi } = row;
-                n.set(id, phi);
-              }
-              return n;
-            });
-          } else {
-            setRevealError(res.error);
-            return;
-          }
-        } catch {
-          if (!alive || composeGenRef.current !== gen) return;
-          setRevealError('Reveal is unavailable right now.');
-          return;
-        }
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [globalReveal, canGlobalReveal, composedCases]);
-
-  const toggleGlobalReveal = useCallback(() => {
-    setGlobalReveal((on) => {
-      if (on) resetReveal(); // OFF re-masks the whole surface
-      return !on;
-    });
-  }, [resetReveal]);
-
-  // ── Phase 3 cohort slide-over — derive the payer/facility AUDIT CONTEXT from the clicked claim (the
-  //    cohort itself is re-derived server-side from claimId; payer/facility are context only). ───────────
-  const viewCohort = useCallback(
-    (claimId: number, label: string) => {
-      const claim = composedCases.find((c) => c.id === claimId);
-      setCohortSheet({ label, data: null, loading: true });
-      void (async () => {
-        try {
-          const res = await getQualifyPatientCohort({
-            payer: claim?.payerName ?? '',
-            facility: claim?.facilityName ?? '',
-            window: windowSel,
-            claimId,
-          });
-          setCohortSheet((cur) => (cur && cur.label === label ? { ...cur, data: res, loading: false } : cur));
-        } catch {
-          setCohortSheet(null);
-        }
-      })();
-    },
-    [composedCases, windowSel],
-  );
 
   // ── Window change: just set the window — the KPI-tiles, ticker, and compose effects all key on
   //    windowSel and refetch themselves (no imperative strip refresh needed). ─────────────────────────
@@ -810,19 +704,15 @@ export function QualifyTab({
     setTickerPinned(false);
     setDerivedValues(new Set());
     setSummary(null);
-    setComposedCases([]);
-    setCapped(false);
-    setCasesError(false);
+    setSummaryError(false);
     setPanelSnapshot(null);
     setVobPayer(null);
     vobDismissedRef.current = null;
-    resetReveal();
-  }, [resetReveal]);
+  }, []);
 
-  // ── Change D: the ONE LOC lens (client-side view filter) — scopes the ticker, the facility ranking,
-  //    and the case rows. ─────────────────────────────────────────────────────────────────────────────
+  // ── Change D: the ONE LOC lens (client-side view filter) — scopes the ticker and the facility
+  //    ranking. (It used to also filter the case rows; there are none now.) ─────────────────────────
   const visibleTrends = useMemo(() => filterFacilitiesByLoc(trends, locFilter), [trends, locFilter]);
-  const visibleCases = useMemo(() => filterClaimsByLoc(composedCases, locFilter), [composedCases, locFilter]);
   const panelFacilities = useMemo(
     () => filterFacilitiesByLoc(panelSnapshot?.facilities ?? [], locFilter),
     [panelSnapshot, locFilter],
@@ -866,24 +756,49 @@ export function QualifyTab({
       ? summary.totalCharge.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })
       : null;
 
-  // ── SCOPE HONESTY + KPI FLANKS (2026-08-04) — both derived from the SAME facility set the ranking
-  //    renders, so the tiles bracket what they average and the notice describes what is on screen.
-  //    `panelFacilities` is the LOC-lensed ranking; the identifier flag is what makes the ranking's
-  //    population (payer-wide) and the grid's population (this client) diverge. ──────────────────────
-  const rankedForScope = panelPayer && panelSnapshot ? panelFacilities : leadSnapshot?.facilities ?? [];
-  const facilitySpread = useMemo(() => deriveFacilitySpread(rankedForScope), [rankedForScope]);
-  const scopeNotice = useMemo(
-    () =>
-      deriveScopeNotice({
-        rankedCount: rankedForScope.length,
-        composedCount: summaryLoading ? null : summary?.count ?? null,
-        // singleIdentifier is the TERM (string | null) — never render it, only its presence.
-        identifierSearched: singleIdentifier !== null,
-        rankingPayerLabel: panelPayer ?? leadSnapshot?.policy?.carrier ?? null,
-        windowLabel: qualifyWindowLabel(windowSel),
-      }),
-    [rankedForScope.length, summaryLoading, summary?.count, singleIdentifier, panelPayer, leadSnapshot?.policy?.carrier, windowSel],
+  // ── THE RANKED SET every derived read hangs off — the SAME facilities the panel renders, so the
+  //    tiles' flanks and the policy rating can never describe a population the screen does not show.
+  //    LOADING IS ITS OWN STATE, not an empty set (review, 2026-08-04). While the panel ranking is in
+  //    flight the left column renders "Loading facility ranking…" — no cards — so falling through to
+  //    leadSnapshot's facilities made the bar and the flanks describe a population that was NOT on
+  //    screen. Empty during the fetch suppresses both, and the flag keeps the policy block from
+  //    claiming "no facility clears the sample floor" — which is what derivePolicyRating([]) says, and
+  //    which would be a false statement about a network fetch rather than about the data.
+  //    Both legs of the placeholder the left column actually renders — `derivedLoading || (panelPayer
+  //    && !panelSnapshot)`. The earlier flag covered only the second, so while "Resolving payer…"
+  //    showed with no cards, the bar still spoke off the PREVIOUS search's facilities.
+  const rankingLoading = panelLoading || derivedLoading || Boolean(panelPayer && !panelSnapshot);
+  const rankedForScope = rankingLoading ? [] : panelPayer ? panelFacilities : leadSnapshot?.facilities ?? [];
+
+  // ── KPI FLANKS (2026-08-04, Alec's ask: bring the worst/best facility percentages back — on ALL
+  //    THREE tiles, not just the allowed one). Each tile's flanks read that tile's OWN metric off the
+  //    ranked facilities (contract.ts now carries pctPaidOfAllowed / pctPaidOfBilled per facility,
+  //    computed by the same SQL expressions as the headline).
+  //
+  //    The tiles and the ranking are fetched by different queries and are not always the same
+  //    population (a payer DERIVED from an identifier, a peer cohort, an LOC-lensed subset). The
+  //    previous pass answered that by SUPPRESSING the flanks unless the two provably coincided, which
+  //    hid them on the flagship identifier-search path — exactly where a rep wants the range. So they
+  //    render, and `flankSource` NAMES the set they are drawn from: a labelled range over a named set
+  //    is honest, an unlabelled one is the parts-contradicting-the-whole defect. Null source ⇒ none.
+  const tileFlanks = useMemo(
+    // Gated on kpis: flanks bracket a headline, so they must not appear before one exists.
+    () => (kpis && rankedForScope.length > 0 ? deriveTileFlanks(rankedForScope) : NO_TILE_FLANKS),
+    [rankedForScope, kpis],
   );
+  // What the flanks are OF, in the tile's own words. Names the population and the lens, so it can be
+  // checked against the panel caption below rather than taken on faith.
+  const flankSource = useMemo(() => {
+    if (!kpis || rankedForScope.length === 0) return null;
+    const n = rankedForScope.length;
+    const who = panelPayer
+      ? panelPayer
+      : leadSnapshot?.provenance === 'comparable_employer' || leadSnapshot?.provenance === 'comparable_funding'
+        ? 'the peer cohort'
+        : leadSnapshot?.policy?.carrier ?? 'this payer';
+    return `across ${n} ranked ${n === 1 ? 'facility' : 'facilities'} · ${who}${locFilter ? ` · ${locFilter === 'BOTH' ? 'Both' : locFilter} only` : ''}`;
+  }, [kpis, rankedForScope.length, panelPayer, leadSnapshot?.provenance, leadSnapshot?.policy?.carrier, locFilter]);
+
 
   // The policy-level rating shown on the dark bar — the patient-weighted mean of the SAME cards the
   // ranking renders, so the two can never contradict each other.
@@ -902,6 +817,21 @@ export function QualifyTab({
     leadSnapshot && (leadSnapshot.resolved || leadSnapshot.facilities.length > 0 || leadSnapshot.policy?.found)
       ? leadSnapshot
       : panelSnapshot;
+
+  /** The composed filter matches NOTHING — a SETTLED, successful count of zero. Worth saying out loud
+   *  even without a grid: it is the difference between "this ranking is not your client's history" and
+   *  "this ranking is built on it", and the ranking itself looks identical either way.
+   *
+   *  `!summaryLoading` is load-bearing, not defensive (Qodo review of PR #100). The compose effect does
+   *  NOT clear `summary` on a filter or window change — it keeps the previous result and marks the
+   *  readout "updating…", so during the debounce plus fetch `summary` still holds the PRIOR search's
+   *  count. Without this gate a search that previously returned zero kept asserting "no charge lines
+   *  match this search" over a new search that had not been answered yet, and because the copy prints
+   *  `qualifyWindowLabel(windowSel)` — which updates synchronously — a window change rendered the OLD
+   *  window's zero labelled with the NEW window's name. That is this series' own defect: a claim about a
+   *  population the screen is not describing. The count itself may show stale with an "updating…" chip
+   *  beside it; a categorical sentence gets no such marker, so it waits for the answer. */
+  const noMatches = settledNoMatches({ loading: summaryLoading, error: summaryError, count: summary?.count ?? null });
 
   // SR-only announcement (the compose count updates silently otherwise).
   const liveMessage = !hasAnyFilter
@@ -981,26 +911,13 @@ export function QualifyTab({
               <span className="font-head text-[10.5px] font-bold uppercase tracking-[0.1em] text-teal900">
                 Two fields is the whole search
               </span>
-              <span className="text-[11.5px] text-ink600 min-[560px]:ml-auto">Audited on use. Never written to the URL.</span>
-              {canGlobalReveal ? (
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={globalReveal}
-                  onClick={toggleGlobalReveal}
-                  title="Reveal PHI identifiers across the results — every reveal is audited"
-                  className={[
-                    'inline-flex h-8 items-center gap-2 rounded-lg border px-3 text-[12px] font-semibold transition-colors',
-                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40',
-                    globalReveal
-                      ? 'border-coral400 bg-coral50 text-coral600'
-                      : 'border-line bg-surface text-ink600 hover:text-ink900',
-                  ].join(' ')}
-                >
-                  {globalReveal ? <Eye aria-hidden className="h-3.5 w-3.5" /> : <EyeOff aria-hidden className="h-3.5 w-3.5" />}
-                  Reveal PHI identifiers
-                </button>
-              ) : null}
+              {/* NO UNMASK CONTROL HERE: with the claim-line grid gone there is nothing on this page to
+                  unmask, and a toggle that reveals nothing is worse than no toggle. The terms typed here
+                  go one way — the server HMACs them into blind indexes and returns only aggregates. The
+                  audited per-patient reveal path is intact and still used by /qualify/m. */}
+              <span className="text-[11.5px] text-ink600 min-[560px]:ml-auto">
+                Audited on use. Never written to the URL, and no identified row is returned.
+              </span>
             </div>
             <div className="grid grid-cols-1 items-end gap-3 min-[720px]:grid-cols-[minmax(200px,250px)_minmax(220px,1fr)_auto]">
               <label className="flex flex-col gap-1">
@@ -1008,18 +925,36 @@ export function QualifyTab({
                   <ShieldCheck className="h-3.5 w-3.5 text-teal700" aria-hidden />
                   Member ID or prefix
                 </span>
-                <input
-                  value={identifierValue}
-                  onChange={(e) => onIdentifierChange(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') scrollToResults();
-                  }}
-                  spellCheck={false}
-                  autoComplete="off"
-                  placeholder="XQH · or a full member ID"
-                  aria-label="Member ID or alpha prefix"
-                  className="h-10 rounded-lg border border-teal200 bg-surface px-3 font-mono text-[15px] font-medium uppercase tracking-[0.08em] text-ink900 outline-none transition-colors placeholder:normal-case placeholder:tracking-normal placeholder:text-ink400 focus:border-teal500 focus:ring-2 focus:ring-teal500/25"
-                />
+                {/* CLEARING THE SEARCH IS ONE CLICK (Alec's ruling, 2026-08-04). The identifier is the
+                    primary search on this surface, and until now the only way to empty it was to select
+                    the text by hand or hit "Clear all" on the dark bar — which also drops every other
+                    filter. An in-field × clears exactly this field and nothing else. */}
+                <span className="relative flex">
+                  <input
+                    value={identifierValue}
+                    onChange={(e) => onIdentifierChange(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') scrollToResults();
+                      if (e.key === 'Escape' && identifierValue !== '') onIdentifierChange('');
+                    }}
+                    spellCheck={false}
+                    autoComplete="off"
+                    placeholder="XQH · or a full member ID"
+                    aria-label="Member ID or alpha prefix"
+                    className="h-10 w-full rounded-lg border border-teal200 bg-surface pl-3 pr-9 font-mono text-[15px] font-medium uppercase tracking-[0.08em] text-ink900 outline-none transition-colors placeholder:normal-case placeholder:tracking-normal placeholder:text-ink400 focus:border-teal500 focus:ring-2 focus:ring-teal500/25"
+                  />
+                  {identifierValue !== '' ? (
+                    <button
+                      type="button"
+                      onClick={() => onIdentifierChange('')}
+                      aria-label="Clear the member ID or prefix"
+                      title="Clear this search (Esc)"
+                      className="absolute right-1 top-1 inline-flex h-8 w-8 items-center justify-center rounded-md text-ink400 transition-colors hover:bg-teal50 hover:text-ink900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40"
+                    >
+                      <X aria-hidden className="h-4 w-4" />
+                    </button>
+                  ) : null}
+                </span>
               </label>
               <MultiSelectTagPicker
                 label="Facility"
@@ -1142,9 +1077,9 @@ export function QualifyTab({
         <div className="flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-line bg-teal900 px-4 py-3 sm:px-5">
           <div className="flex items-baseline gap-2">
             <span className="font-mono text-[26px] font-semibold leading-none tracking-tight text-white tabular-nums">
-              {!hasAnyFilter ? '—' : summaryLoading && !summary ? '…' : (summary?.count ?? 0).toLocaleString('en-US')}
+              {!hasAnyFilter ? '—' : summaryLoading && !summary ? '…' : summaryError ? '—' : (summary?.count ?? 0).toLocaleString('en-US')}
             </span>
-            <span className="text-[12px] text-white/70">charge lines match</span>
+            <span className="text-[12px] text-white/70">{summaryError ? 'count unavailable' : 'charge lines match'}</span>
             {hasAnyFilter && summaryLoading ? (
               <span className="text-[10.5px] uppercase tracking-wide text-teal200">updating…</span>
             ) : null}
@@ -1188,7 +1123,7 @@ export function QualifyTab({
               us". RECONCILED BY CONSTRUCTION — it is the patient-weighted mean of exactly the ratings
               on the cards below, so the bar and the ranking can never disagree. Null (no facility
               clears the floor) renders "—" + "Not rated", never a 0. ── */}
-          {policyRating.ratedCount > 0 || rankedForScope.length > 0 ? (
+          {!rankingLoading && (policyRating.ratedCount > 0 || rankedForScope.length > 0) ? (
             <div className="flex items-center gap-3 border-l border-white/15 pl-4 min-[560px]:order-2">
               <div className="text-right">
                 <div className="text-[10px] font-extrabold uppercase tracking-[0.11em] text-white/55">Policy rating</div>
@@ -1246,8 +1181,15 @@ export function QualifyTab({
         </div>
       </div>
 
-      {/* ── KPI TILES (Phase 2: scoped to payer + facility; sample-gated) ── */}
-      <BookKpiTiles kpis={kpis} locActive={locFilter !== null} scopeLabel={kpiScopeLabel} spread={facilitySpread} />
+      {/* ── KPI TILES (Phase 2: scoped to payer + facility; sample-gated). Each carries the worst/best
+          FACILITY on its own metric, captioned with the set they come from. ── */}
+      <BookKpiTiles
+        kpis={kpis}
+        locActive={locFilter !== null}
+        scopeLabel={kpiScopeLabel}
+        flanks={tileFlanks}
+        flankSource={flankSource}
+      />
 
       {/* ── CONTEXT LINE + LIVE MATCH COUNT + FACILITY RANKING + COMPOSED CASES ── */}
       {hasAnyFilter ? (
@@ -1311,111 +1253,100 @@ export function QualifyTab({
             <span className="text-[#7fae9f]">BXR + Indigo</span>
           </div>
 
-          {/* ── SCOPE HONESTY (2026-08-04): the ranking is payer-WIDE while the grid is fully composed,
-              so when those two populations disagree the screen says so — ABOVE the ranking, where it
-              is read, not below a 27-card list. Pure decision in lib/qualify/scopeNotice.ts. ── */}
-          <ScopeNotice notice={scopeNotice} />
+          {/* ── The standalone SCOPE BANNER is deliberately gone (Alec's ruling, 2026-08-04). It fired
+              a red three-sentence alert whenever a client had no lines in the window — the single most
+              common state on this surface — to restate, at length, what the ranking's own caption says
+              in one line: this list is the payer across the whole book, not this search. An alert that
+              appears on the normal path stops being read, and the copy ("nothing below is evidence
+              about their policy") read as a failure rather than as context. The FACT is load-bearing
+              and still shipped, once, where the claim is made: the Facilities caption below, plus the
+              flankSource line on each KPI tile. Do not re-add a second copy of it here. ── */}
 
-          {/* ── AI EXPLAINER — moved ABOVE the ranking (2026-08-04). It used to render after the
-              two-column grid, which on a 27-facility payer put it a full screen below the fold: the
-              answer to "does this payer pay us" was the least visible thing on the page. Lead
-              (identifier) snapshot preferred; by-payer panel otherwise. ── */}
+          {/* ── AI EXPLAINER — ABOVE the ranking (2026-08-04). It used to render after the two-column
+              grid, which on a 27-facility payer put it a full screen below the fold: the answer to "does
+              this payer pay us" was the least visible thing on the page. Lead (identifier) snapshot
+              preferred; by-payer panel otherwise. ── */}
           {aiSnapshot ? <QualifyAiPanel snapshot={aiSnapshot} blind={!hasAmounts} /> : null}
 
-          <div className="grid grid-cols-1 items-start gap-4 min-[1280px]:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
-            {/* LEFT: the payer-wide facility ranking — for the ONE selected payer, or the payer DERIVED
-                from a single-identifier search (so an alpha/member search never forces a payer pick).
-                0/2+ payers with no resolvable identifier → a one-line note. Widened from a fixed 380px
-                column (2026-08-04): the scorecard carries a hero numeral, a verdict pill, evidence pips,
-                a weight bar and a 6-factor expansion, and none of that is legible at 380px. */}
-            <div>
-              {payerSelection.length === 1 || singleIdentifier ? (
-                panelPayer && panelSnapshot ? (
-                  <FacilityPanel
-                    facilities={panelFacilities}
-                    hasAmounts={hasAmounts}
-                    heatOn
-                    selectedKeys={activeFacilityKeys}
-                    onToggle={toggleFacility}
-                    payerLabel={panelPayer}
-                    expandedKeys={expandedFacilities}
-                    onExpandToggle={toggleFacilityExpansion}
-                  />
-                ) : derivedLoading || (panelPayer && !panelSnapshot) ? (
-                  <div className="rounded-2xl border bg-card p-6 text-center text-sm text-muted-foreground shadow-ths-sm">
-                    {derivedLoading ? 'Resolving payer…' : 'Loading facility ranking…'}
-                  </div>
-                ) : leadSnapshot && !leadSnapshot.resolved && leadSnapshot.facilities.length > 0 ? (
-                  // ESTIMATED (Phase B): no claims of its own, but the VOB names its cohort — rank the
-                  // policy's behavioral peer group, clearly labeled, never dressed as direct evidence.
-                  <FacilityPanel
-                    facilities={leadSnapshot.facilities}
-                    hasAmounts={hasAmounts}
-                    heatOn
-                    selectedKeys={activeFacilityKeys}
-                    onToggle={toggleFacility}
-                    payerLabel={leadSnapshot.policy?.employerName ?? leadSnapshot.policy?.carrier ?? null}
-                    expandedKeys={expandedFacilities}
-                    onExpandToggle={toggleFacilityExpansion}
-                    provenance={leadSnapshot.provenance}
-                  />
-                ) : (
-                  // An identifier was searched but resolved to no payer (never seen / misspelled).
-                  <div className="rounded-2xl border border-dashed bg-card p-6 text-center text-[13px] text-muted-foreground">
-                    {leadSnapshot?.policy?.found
-                      ? 'This plan has no claims history anywhere yet — the policy card above is everything on file. Ask a biller before quoting.'
-                      : 'No payer on file for that identifier — it may be new or misspelled.'}
-                  </div>
-                )
+          {/* ZERO MATCHES is a fact about the SEARCH, and it changes what the ranking below means: with
+              no lines of this client's own, the list is purely how the payer pays us generally. One
+              line, stated calmly, on the one path where it matters. */}
+          {noMatches ? (
+            <div className="rounded-2xl border border-dashed border-line bg-card px-4 py-3 text-[13px] text-muted-foreground">
+              <b className="font-semibold text-ink900">No charge lines match this search</b> in the{' '}
+              {qualifyWindowLabel(windowSel)} window. Try a longer window or fewer filters — the ranking below is the
+              payer across the whole book either way.
+            </div>
+          ) : null}
+
+          {/* ── THE FACILITY RANKING, FULL WIDTH (Alec's ruling, 2026-08-04). No second column: the
+              claim-line grid that used to take 51% of the page is gone entirely — see the header. The
+              scorecard carries a hero numeral, a verdict pill, evidence pips, two bars and a 6-factor
+              expansion, and it now gets the room those were designed for.
+              For the ONE selected payer, or the payer DERIVED from a single-identifier search (so an
+              alpha/member search never forces a payer pick). 0/2+ payers with no resolvable identifier
+              → a one-line note. ── */}
+          <div>
+            {payerSelection.length === 1 || singleIdentifier ? (
+              panelPayer && panelSnapshot ? (
+                <FacilityPanel
+                  facilities={panelFacilities}
+                  hasAmounts={hasAmounts}
+                  heatOn
+                  selectedKeys={activeFacilityKeys}
+                  payerLabel={panelPayer}
+                  expandedKeys={expandedFacilities}
+                  onExpandToggle={toggleFacilityExpansion}
+                />
+              ) : panelError ? (
+                // A FAILED ranking is not a loading one, and not an empty one either. Say so, and
+                // give a way out — this used to render the loading placeholder forever.
+                <div className="rounded-2xl border border-dashed border-line bg-card p-6 text-center shadow-ths-sm">
+                  <p className="text-sm text-status-danger">Couldn’t load the facility ranking.</p>
+                  <p className="mt-1 text-[12.5px] text-ink400">
+                    Nothing below is missing on purpose — the fetch failed. Your filters and the rows still work.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setPanelReloadKey((k) => k + 1)}
+                    className="mt-3 rounded-lg border border-line px-3 py-1.5 text-[13px] font-semibold text-ink900 transition-colors hover:bg-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40"
+                  >
+                    Retry
+                  </button>
+                </div>
+              ) : rankingLoading ? (
+                // ONE source of truth for this state (review: the predicate used to be spelled out
+                // here AND derived above, so the two could drift — and they did).
+                <div className="rounded-2xl border bg-card p-6 text-center text-sm text-muted-foreground shadow-ths-sm">
+                  {derivedLoading ? 'Resolving payer…' : 'Loading facility ranking…'}
+                </div>
+              ) : leadSnapshot && !leadSnapshot.resolved && leadSnapshot.facilities.length > 0 ? (
+                // ESTIMATED (Phase B): no claims of its own, but the VOB names its cohort — rank the
+                // policy's behavioral peer group, clearly labeled, never dressed as direct evidence.
+                <FacilityPanel
+                  facilities={leadSnapshot.facilities}
+                  hasAmounts={hasAmounts}
+                  heatOn
+                  selectedKeys={activeFacilityKeys}
+                  payerLabel={leadSnapshot.policy?.employerName ?? leadSnapshot.policy?.carrier ?? null}
+                  expandedKeys={expandedFacilities}
+                  onExpandToggle={toggleFacilityExpansion}
+                  provenance={leadSnapshot.provenance}
+                />
               ) : (
+                // An identifier was searched but resolved to no payer (never seen / misspelled).
                 <div className="rounded-2xl border border-dashed bg-card p-6 text-center text-[13px] text-muted-foreground">
-                  Select a single payer — or search a member ID / alpha prefix — to see the facility ranking.
+                  {leadSnapshot?.policy?.found
+                    ? 'This plan has no claims history anywhere yet — the policy card above is everything on file. Ask a biller before quoting.'
+                    : 'No payer on file for that identifier — it may be new or misspelled.'}
                 </div>
-              )}
-            </div>
-
-            {/* RIGHT: the composed claim rows (or the plain empty state). */}
-            <div>
-              {casesError ? (
-                <div className="rounded-2xl border border-dashed bg-card p-10 text-center text-sm text-status-danger">
-                  Qualify is unavailable right now. Please try again.
-                </div>
-              ) : summary && summary.count === 0 && !casesLoading ? (
-                // Plain empty state. When the single-payer "never billed" probe confirms, the VobModal
-                // overlays this; otherwise this widen-your-filters nudge (window-widen hinted) stands.
-                <div className="rounded-2xl border border-dashed bg-card p-10 text-center text-sm text-muted-foreground">
-                  No charge lines match these filters.
-                  <div className="mt-1 text-[13px] text-ink400">Try removing a filter, or choose a longer window.</div>
-                </div>
-              ) : (
-                <div aria-busy={casesLoading} className={['transition-opacity', casesLoading ? 'opacity-60' : ''].join(' ')}>
-                  <CasesTable
-                    claims={visibleCases}
-                    hasAmounts={hasAmounts}
-                    heatOn
-                    facilityBuckets={NO_FACILITY_BUCKETS}
-                    facilityLabel={null}
-                    canReveal={canRevealPhi}
-                    revealed={revealed}
-                    revealingKeys={revealingKeys}
-                    revealError={revealError}
-                    onRevealPatient={revealPatient}
-                    onHideIdentifiers={resetReveal}
-                    onViewCohort={viewCohort}
-                    capped={capped}
-                    globalRevealOn={globalReveal && canGlobalReveal}
-                  />
-                </div>
-              )}
-            </div>
+              )
+            ) : (
+              <div className="rounded-2xl border border-dashed bg-card p-6 text-center text-[13px] text-muted-foreground">
+                Select a single payer — or search a member ID / alpha prefix — to see the facility ranking.
+              </div>
+            )}
           </div>
-
-          <CohortSheet
-            data={cohortSheet?.data ?? null}
-            loading={cohortSheet?.loading ?? false}
-            patientLabel={cohortSheet?.label ?? null}
-            onClose={() => setCohortSheet(null)}
-          />
         </>
       ) : (
         // No filter yet: the animated brand hero fills the space until a filter (or a Heating-Up tap)

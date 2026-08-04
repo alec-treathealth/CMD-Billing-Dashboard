@@ -20,8 +20,7 @@ import type { QualifyAiInput } from '../../../src/collections/qualifyAi';
 import type { QualifySnapshot } from '../../lib/qualify/contract';
 import { qualifyAiChips, type QualifyAiChipId } from '../../lib/qualify/aiChips';
 import { deriveTopRanks } from '../../lib/qualify/policyRating';
-import { ratingBucket } from '../../lib/qualify/rating';
-import { RATING_HEX } from './tokens';
+import { IQ_BAND_HEX } from './tokens';
 
 type ChipId = QualifyAiChipId;
 
@@ -89,6 +88,20 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
     const { top } = el.getBoundingClientRect();
     if (top <= window.innerHeight + 200) el.scrollIntoView({ block: 'nearest' });
   }, [streaming, text]);
+
+  // A NEW SEARCH INVALIDATES THE OLD ANSWER (review). `ranks` re-derives off the new snapshot while
+  // `text`/`active` were only reset inside run(), so the previous payer's prose sat above a freshly
+  // re-derived table — an authoritative-looking numeric table under reasoning about a different
+  // policy. Supersede the in-flight generation too, so a landing stream cannot repopulate it.
+  useEffect(() => {
+    genRef.current += 1;
+    void readerRef.current?.cancel();
+    readerRef.current = null;
+    setActive(null);
+    setText('');
+    setError(null);
+    setStreaming(false);
+  }, [snapshot]);
 
   const { chips, suggestedId } = useMemo(() => qualifyAiChips(snapshot), [snapshot]);
   const ranks = useMemo(() => deriveTopRanks(snapshot.facilities), [snapshot.facilities]);
@@ -226,12 +239,12 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
               {!streaming && text && active === 'ranks' && ranks.length > 1 ? (
                 <div className="mt-3 border-t border-line pt-2.5">
                   <div className="font-mono text-[9.5px] font-semibold uppercase tracking-[0.16em] text-teal700">
-                    Top {ranks.length} facilities on this policy
+                    Top {ranks.length} facilities · {snapshot.resolved?.payerName ?? snapshot.policy?.carrier ?? 'this search'}
                   </div>
                   <div className="mt-2 flex flex-col">
                     {ranks.map((r) => (
                       <div
-                        key={r.name}
+                        key={r.facilityKey}
                         className="grid grid-cols-[20px_minmax(0,1fr)_auto_auto] items-center gap-3 rounded-lg px-2 py-1.5 odd:bg-surface"
                       >
                         <span className="font-mono text-[11px] font-semibold text-ink400">{r.rank}</span>
@@ -241,7 +254,7 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
                         <span className="whitespace-nowrap text-[11px] text-ink400">{r.evidence}</span>
                         <span
                           className="min-w-[34px] text-right font-mono text-[14px] font-semibold tabular-nums"
-                          style={{ color: RATING_HEX[ratingBucket(r.rating)] }}
+                          style={{ color: IQ_BAND_HEX[r.band] }}
                         >
                           {r.rating}
                         </span>

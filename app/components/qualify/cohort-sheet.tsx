@@ -1,6 +1,11 @@
 'use client';
 
 /**
+ * ⚠ NOT MOUNTED ANYWHERE as of 2026-08-04. Its only entry point was the "View cohort" action on the
+ * desktop claim-line grid, which Alec ruled off the /qualify page (see cases-table.tsx). Retained with
+ * its tests rather than deleted — the suppression floor below is a real PHI safeguard worth keeping
+ * intact — but it has no caller today.
+ *
  * Qualify Phase 3 — the patient-group "View cohort" right slide-over: the member's LIFETIME
  * alpha-prefix cohort context (payer-behavior peer group) — patients count, end-to-end yield pcts,
  * payer mix, CPT mix. Suppression-first: `data.suppressed` renders the honest "not enough data"
