@@ -233,6 +233,9 @@ test('(a) clean run: findings resolved, provenance passes, run is ok', async () 
   assert.equal(res.research.retrievedUrls.length, 1);
   assert.equal(res.research.fetchRequests, 1);
   assert.ok(res.costUsd > 0);
+  // A clean run is untouched by the Gate D(2) exclusion machinery.
+  assert.deepEqual(res.research.domainEscapes, []);
+  assert.deepEqual(res.research.anomalies, []);
 });
 
 test('(a) resolveFinding derives source_tier and normalizes "unknown" dates to null', () => {
@@ -418,18 +421,11 @@ test('end_turn WITHOUT emit_findings is FAILED, not "no findings"', async () => 
   assert.equal(res.payload, null);
 });
 
-test('GATE D fails a run whose retrieval escaped the key domains, or returned nothing', async () => {
-  const foreign = 'https://www.cigna.com/reimbursement';
-  const { transport } = scriptedTransport([
-    {
-      stop_reason: 'tool_use', model: MODEL, container: { id: 'c' }, usage: usage(),
-      content: [searchResultBlock([foreign]), emitBlock({ findings: [], checked_no_change: [], unreachable: [] })],
-    },
-    { stop_reason: 'end_turn', model: MODEL, usage: usage({ server_tool_use: {} }), content: [] },
-  ]);
-  const res = await researchPayer({ payerKey: 'optum', ...WINDOW, focus: FOCUS, transport }, SYSTEM);
-  assert.ok(res.failures.some((f) => f.startsWith('GATE D')), 'cross-payer URL must fail gate D');
+// The pre-2026-08-04 assertion "cross-payer URL must fail gate D" is deliberately
+// GONE: Alec's ruling made D(2) domain escapes a per-URL exclusion + quarantine,
+// never a run failure. See the Gate D(2) section below. D(1) is unchanged:
 
+test('GATE D(1) unchanged: zero retrieved URLs is still a full-run failure', async () => {
   const empty = scriptedTransport([
     {
       stop_reason: 'tool_use', model: MODEL, container: { id: 'c' }, usage: usage(),
@@ -437,8 +433,23 @@ test('GATE D fails a run whose retrieval escaped the key domains, or returned no
     },
     { stop_reason: 'end_turn', model: MODEL, usage: usage({ server_tool_use: {} }), content: [] },
   ]);
-  const res2 = await researchPayer({ payerKey: 'optum', ...WINDOW, focus: FOCUS, transport: empty.transport }, SYSTEM);
-  assert.ok(res2.failures.some((f) => f.includes('zero retrieved URLs')));
+  const res = await researchPayer({ payerKey: 'optum', ...WINDOW, focus: FOCUS, transport: empty.transport }, SYSTEM);
+  assert.ok(res.failures.some((f) => f.includes('zero retrieved URLs')));
+});
+
+test('GATE C unchanged: findings asserting sources against an empty retrieved set still fail', async () => {
+  // Searches happened (usage() reports 2) but no URL blocks ever surfaced, and the
+  // model still emitted a finding claiming a source. C and D(1) both fire.
+  const { transport } = scriptedTransport([
+    {
+      stop_reason: 'tool_use', model: MODEL, container: { id: 'c' }, usage: usage(),
+      content: [emitBlock({ findings: [rawFinding()], checked_no_change: [], unreachable: [] })],
+    },
+    { stop_reason: 'end_turn', model: MODEL, usage: usage({ server_tool_use: {} }), content: [] },
+  ]);
+  const res = await researchPayer({ payerKey: 'optum', ...WINDOW, focus: FOCUS, transport }, SYSTEM);
+  assert.ok(res.failures.some((f) => f.startsWith('GATE C')));
+  assert.ok(res.failures.some((f) => f.includes('zero retrieved URLs')));
 });
 
 test('GATE E fails a max_tokens run — a truncated strict-tool input is not a payload', async () => {
@@ -711,4 +722,108 @@ test('roster budgets match the 2026-08-03 raise — a deliberate, measured chang
     bsca: [14, 10],
     bcbstx: [14, 10],
   });
+});
+
+// --- Gate D(2): per-URL exclusion + quarantine (Alec's ruling, 2026-08-04) ---
+
+test('GATE D(2): a domain escape no longer fails the run — excluded, logged, quarantined', async () => {
+  const foreign = 'https://arxiv.org/abs/2408.01234';
+  const legit = rawFinding();
+  const tainted = rawFinding({
+    change_type: 'coverage',
+    source_url: foreign,
+    source_domain: 'arxiv.org',
+    summary: 'Preprint misattributed as payer policy.',
+    embed_text: 'A preprint that must never be indexed as Optum policy.',
+  });
+  const { transport } = scriptedTransport([
+    {
+      stop_reason: 'tool_use', model: MODEL, container: { id: 'c' }, usage: usage(),
+      content: [
+        searchResultBlock([OPTUM_URL, foreign]),
+        emitBlock({ findings: [legit, tainted], checked_no_change: [], unreachable: [] }),
+      ],
+    },
+    { stop_reason: 'end_turn', model: MODEL, usage: usage({ server_tool_use: {} }), content: [] },
+  ]);
+  const fake = recordingDb();
+  const res = await runOnePayer({
+    payerKey: 'optum', ...WINDOW, focus: FOCUS, systemPrompt: SYSTEM, transport, db: fake.db,
+  });
+
+  // The run PASSES on its legitimate retrievals — no gate fires.
+  assert.equal(res.status, 'ok');
+  assert.equal(res.failureGate, null);
+  assert.equal(res.persisted, true);
+  // The escaped URL is excluded from the provenance set and recorded with the
+  // tool that admitted it (the via-tagging from fc2c8f6's swept-in edit).
+  assert.deepEqual(res.research.retrievedUrls, [OPTUM_URL]);
+  assert.deepEqual(res.research.domainEscapes, [{ url: foreign, via: 'search' }]);
+  // The violation line is EXACTLY url + admitting tool + the allow-list it
+  // escaped — no payload fields, no summaries, nothing else can leak into logs.
+  assert.deepEqual(res.research.anomalies, [
+    `GATE D VIOLATION — ${foreign} (via search) outside allowed_domains ` +
+    '[public.providerexpress.com, uhcprovider.com] — excluded from retrieved set',
+  ]);
+  // Both rows stored; the tainted one QUARANTINES via the EXISTING
+  // resolveStatus path — same status enum, no schema change.
+  assert.equal(res.counts?.inserted, 2);
+  assert.equal(res.counts?.quarantined, 1);
+  const findingWrites = fake.calls.filter((c) => c.sql.includes('payer_policy_finding'));
+  const statusByUrl = new Map(findingWrites.map((c) => [c.params[13], c.params[17]]));
+  assert.equal(statusByUrl.get(foreign), 'quarantined');
+  assert.equal(statusByUrl.get(OPTUM_URL), 'confirmed');
+});
+
+test('GATE D(2): the measured fetch-escape vector is excluded and attributed to fetch', async () => {
+  const foreign = 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1234567/';
+  const { transport } = scriptedTransport([
+    {
+      stop_reason: 'tool_use', model: MODEL, container: { id: 'c' }, usage: usage(),
+      content: [
+        searchResultBlock([OPTUM_URL]),
+        {
+          type: 'web_fetch_tool_result', tool_use_id: 'srvtoolu_f',
+          content: { type: 'web_fetch_result', url: foreign, content: { type: 'document', title: 'X' } },
+        },
+        emitBlock({ findings: [], checked_no_change: [], unreachable: [] }),
+      ],
+    },
+    { stop_reason: 'end_turn', model: MODEL, usage: usage({ server_tool_use: {} }), content: [] },
+  ]);
+  const res = await researchPayer({ payerKey: 'optum', ...WINDOW, focus: FOCUS, transport }, SYSTEM);
+  assert.deepEqual(res.failures, []);
+  assert.deepEqual(res.retrievedUrls, [OPTUM_URL]);
+  assert.deepEqual(res.domainEscapes, [{ url: foreign, via: 'fetch' }]);
+  assert.ok(res.anomalies[0]?.includes('(via fetch)'));
+});
+
+test('GATE D(2)->D(1) fail-closed: when EVERY retrieval escaped, the run still fails, zero writes', async () => {
+  const foreign = 'https://www.cigna.com/reimbursement';
+  const { transport } = scriptedTransport([
+    {
+      stop_reason: 'tool_use', model: MODEL, container: { id: 'c' }, usage: usage(),
+      content: [
+        searchResultBlock([foreign]),
+        emitBlock({
+          findings: [rawFinding({ source_url: foreign, source_domain: 'cigna.com' })],
+          checked_no_change: [], unreachable: [],
+        }),
+      ],
+    },
+    { stop_reason: 'end_turn', model: MODEL, usage: usage({ server_tool_use: {} }), content: [] },
+  ]);
+  const fake = recordingDb();
+  const res = await runOnePayer({
+    payerKey: 'optum', ...WINDOW, focus: FOCUS, systemPrompt: SYSTEM, transport, db: fake.db,
+  });
+  assert.equal(res.status, 'failed');
+  // Exclusion emptied the legitimate set, so D(1) fires — and C, because the
+  // finding asserts a source. Fail-closed is preserved without D(2) run-failure.
+  assert.ok(res.research.failures.some((f) => f.includes('zero retrieved URLs')));
+  assert.ok(res.research.failures.some((f) => f.startsWith('GATE C')));
+  assert.equal(res.persisted, false);
+  assert.equal(fake.calls.length, 0, 'a failed run writes nothing');
+  // The escape is still visible for diagnostics.
+  assert.deepEqual(res.research.domainEscapes, [{ url: foreign, via: 'search' }]);
 });

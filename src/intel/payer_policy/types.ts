@@ -126,6 +126,15 @@ export interface ResearchResult {
    * them in — which is the first question any Gate D failure raises.
    */
   retrievedVia: RetrievedUrl[];
+  /**
+   * URLs the API returned but which escaped this key's `allowed_domains`
+   * (the web_fetch escape measured 2026-08-03 — ~11% of key-runs, a recurring
+   * arXiv/medRxiv/NCBI set). EXCLUDED from retrievedUrls/retrievedVia before
+   * any gate evaluates, so they can never legitimize a finding's provenance:
+   * a finding citing one quarantines via the ordinary resolveStatus path.
+   * Per-URL disposition, not a run failure — Alec's Gate D ruling, 2026-08-04.
+   */
+  domainEscapes: RetrievedUrl[];
   toolErrors: string[];
   searchRequests: number;
   fetchRequests: number;

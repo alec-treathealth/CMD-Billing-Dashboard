@@ -3638,3 +3638,14 @@ inspection 2026-08-04: `client.ts` and `types.ts` have not changed since
 separate and zero behavior change available**, and `fc2c8f6` is an ancestor of
 production `main` under merge commits — so the "split" resolves as this
 attribution note, not a history rewrite and not a code restructure.
+
+## payer_policy_run rows are not yet written — run_id NULL gap (backlog, 2026-08-04)
+
+No code writes `intel.payer_policy_run`: the worker passes `runId: null`,
+findings land with `run_id NULL`, `run_check` rows are skipped entirely
+(guarded on `runId`), and a FAILED run persists nothing — the run-row
+observability described alongside the gates (status, failure_gate, cost,
+`domain_escape` visibility) is designed but unbuilt. Flagged during the Gate
+D(2) ruling implementation; explicitly out of scope that night. Building it is
+backlog: an INSERT at run start + UPDATE at finish as `intel_writer`, which
+also makes the run_check path live.
