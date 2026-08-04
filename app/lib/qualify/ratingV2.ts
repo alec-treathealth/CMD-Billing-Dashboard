@@ -269,6 +269,30 @@ const round1 = (v: number) => Math.round(v * 10) / 10;
  * Compute the five-factor rating. Deterministic, dollar-free, and total: every input combination
  * yields a well-formed result (nulls where honesty demands them, never NaN on the wire).
  */
+/**
+ * FACTORS DISAGREE — at least one live factor reads positive AND at least one reads negative.
+ *
+ * This is the case the scorecard earns its keep on, and the one a single blended numeral hides: a
+ * facility with a strong allowed rate and a terrible claim-status mix rates mid-band, and "mid" is
+ * exactly the wrong summary of it. The card badges it so the rep opens the reasoning instead of
+ * reading the number and moving on.
+ *
+ * `available` matters: an unavailable factor is missing data, not a negative signal, so it can
+ * neither create nor resolve a disagreement. Pure, non-dollar, shared by the card and the AI chip
+ * logic so the two cannot drift on what "conflict" means.
+ */
+export function facilityFactorsDisagree(factors: readonly QualifyFactorReading[]): boolean {
+  let pos = false;
+  let neg = false;
+  for (const f of factors) {
+    if (!f.available) continue;
+    if (f.direction === 'pos') pos = true;
+    else if (f.direction === 'neg') neg = true;
+    if (pos && neg) return true;
+  }
+  return false;
+}
+
 export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
   const now = input.now ?? new Date();
   const patients = Number.isFinite(input.distinctPatients) && input.distinctPatients > 0 ? Math.trunc(input.distinctPatients) : 0;

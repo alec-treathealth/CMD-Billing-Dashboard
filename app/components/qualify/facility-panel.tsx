@@ -33,7 +33,7 @@
  */
 import { ratingBucket, RATING_LEGEND, type RatingBucket } from '../../lib/qualify/rating';
 import { ratingSampleTier, ratingEvidencePips, QUALIFY_RATING_MIN_PATIENTS } from '../../lib/qualify/sampleGate';
-import { IQ_BAND_LABELS, IQ_BAND_VERDICTS, PROVENANCE_LABELS } from '../../lib/qualify/ratingV2';
+import { IQ_BAND_LABELS, IQ_BAND_VERDICTS, PROVENANCE_LABELS, facilityFactorsDisagree } from '../../lib/qualify/ratingV2';
 import { CONFIDENCE_LEGEND, type QualifyConfidence } from '../../lib/qualify/confidence';
 import { bucketClass, confidenceClass, iqBandClass } from './colors';
 import type { QualifyFacility, QualifyFactorReading, QualifyProvenance } from '../../lib/qualify/contract';
@@ -216,6 +216,9 @@ export function FacilityPanel({
             const selected = selectedKeys.has(f.facilityKey);
             const expanded = expandedKeys.has(f.facilityKey);
             const unrated = f.ratingV2 === null;
+            // Only meaningful on a card that shows a number: an unrated/suppressed card has no
+            // blended figure for a disagreement to be hiding behind.
+            const factorsDisagree = !unrated && tier !== 'insufficient' && facilityFactorsDisagree(f.factors);
             // v2 paint: the left border + verdict block color from the IQ band; the legacy bucket
             // still grades the secondary confirmed-% line via a nested span class.
             const paint = unrated || tier === 'insufficient' ? 'q-neutral' : iqBandClass(f.iqBand);
@@ -267,6 +270,18 @@ export function FacilityPanel({
                           title={`Only ${f.distinctPatients} patients back this rating — treat as an early signal`}
                         >
                           thin sample
+                        </span>
+                      ) : null}
+                      {/* FACTORS DISAGREE — the case a single blended numeral hides (strong allowed
+                          rate, terrible aging). Badged so the rep opens the reasoning rather than
+                          reading a mid-band number and moving on. Coral, because it is the one thing
+                          on this card that says "the number alone is not the answer". */}
+                      {factorsDisagree ? (
+                        <span
+                          className="inline-flex shrink-0 items-center rounded-full border border-[#F0917C] bg-[#FCEDE8] px-1.5 py-px text-[10px] font-semibold text-status-danger"
+                          title="At least one factor reads positive and another reads negative — the blended rating hides that. Open “Why this score”."
+                        >
+                          factors disagree
                         </span>
                       ) : null}
                       {f.nextUrDate ? (
