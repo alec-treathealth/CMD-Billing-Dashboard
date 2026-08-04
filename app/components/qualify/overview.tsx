@@ -25,6 +25,7 @@ import { ratingBucket } from '../../lib/qualify/rating';
 import { ratingSampleTier, ratingEvidencePips } from '../../lib/qualify/sampleGate';
 import { qualifyWindowLabel, serializeQualifyWindow } from '../../lib/qualify/contract';
 import type { QualifyBookKpis, QualifyFacilityTrend, QualifyWindow } from '../../lib/qualify/contract';
+import type { QualifyFacilitySpread } from '../../lib/qualify/scopeNotice';
 import { RATING_HEX, staggerDelayMs } from './tokens';
 import { Spark } from './spark';
 import { useMarquee } from './useMarquee';
@@ -39,12 +40,16 @@ export function BookKpiTiles({
   kpis,
   locActive,
   scopeLabel = null,
+  spread = null,
 }: {
   kpis: QualifyBookKpis | null;
   locActive: boolean;
   /** When set (a resolved payer), the tiles are scoped to that subject — the caption names it instead
    *  of "book-wide". Null = the fresh, unresolved landing (book-wide). */
   scopeLabel?: string | null;
+  /** Worst/best facilities on the allowed metric, from the SAME set the ranking shows
+   *  (deriveFacilitySpread). Null = fewer than two scored facilities, or a flat set. */
+  spread?: QualifyFacilitySpread | null;
 }) {
   // The tiles either read book-wide (landing) or are scoped to the composed payer + facility set.
   const scope = scopeLabel ?? 'book-wide';
@@ -105,6 +110,33 @@ export function BookKpiTiles({
             {insufficient ? '—' : pctText(t.value)}
             {!insufficient && t.value !== null ? <span className="ml-0.5 text-lg">%</span> : null}
           </div>
+          {/* THE FLANKS (prototype `spreadFor`): the facilities that SET the range on this metric.
+              Only on the allowed tile, which is the one the ranking is built from — a tile that
+              averages a set it cannot also bracket is the parts contradicting the whole. */}
+          {t.key === 'allowed' && spread && !insufficient ? (
+            <div className="mt-2.5 flex items-stretch gap-2">
+              {[spread.worst, spread.best].map((end) => (
+                <div
+                  key={end.label}
+                  className="min-w-0 flex-1 border-l-2 pl-2"
+                  style={{ borderColor: end.label === 'Best' ? '#2E8B6F' : '#C0453B' }}
+                >
+                  <div className="flex items-baseline gap-1">
+                    <span className="text-[8.5px] font-extrabold uppercase tracking-[0.08em] text-ink400">{end.label}</span>
+                    <span
+                      className="font-mono text-[12.5px] font-semibold tabular-nums"
+                      style={{ color: end.label === 'Best' ? '#2E8B6F' : '#C0453B' }}
+                    >
+                      {end.value}%
+                    </span>
+                  </div>
+                  <div className="truncate text-[9.5px] leading-tight text-ink400" title={end.who}>
+                    {end.who}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
           <div className="mt-2 text-[11px] text-ink400">
             {t.caption}
             {tierNote}

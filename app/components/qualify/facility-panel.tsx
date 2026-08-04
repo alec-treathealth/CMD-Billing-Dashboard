@@ -285,25 +285,29 @@ export function FacilityPanel({
                     </span>
                     {/* v2 VERDICT block: the one big display numeral + the IQ band pill (the billing
                         team's own 65/50/30/15/0 scale); the confirmed-% is the secondary metric. */}
+                    {/* THE VERDICT DOMINATES (2026-08-04). Was a 26px numeral sized for the old fixed
+                        380px column, where it read as just another number in a dense row; the whole
+                        point of this card is that the rep sees one figure from across the desk. The
+                        supporting metrics recede beneath it. */}
                     <span className="shrink-0 text-right">
-                      <span className="q-pct block font-display text-[26px] font-semibold leading-none tabular-nums">
+                      <span className="q-pct block font-display text-[38px] font-semibold leading-[0.9] tabular-nums min-[720px]:text-[52px]">
                         {unrated || tier === 'insufficient' ? '—' : f.ratingV2}
                       </span>
-                      <span className="mt-0.5 inline-flex items-center gap-1">
+                      <span className="mt-1 inline-flex items-center gap-1">
                         {!unrated && tier !== 'insufficient' && f.iqBand ? (
                           <span
-                            className="inline-flex items-center rounded-full px-1.5 py-px text-[9.5px] font-bold"
+                            className="inline-flex items-center rounded-full px-2 py-[2px] text-[10.5px] font-bold"
                             style={{ background: 'var(--q-wash)', color: 'var(--q-c)' }}
                           >
                             {IQ_BAND_VERDICTS[f.iqBand]} · {IQ_BAND_LABELS[f.iqBand]}
                           </span>
                         ) : (
-                          <span className="inline-flex items-center rounded-full border border-line px-1.5 py-px text-[9.5px] font-bold text-ink400">
+                          <span className="inline-flex items-center rounded-full border border-line px-2 py-[2px] text-[10.5px] font-bold text-ink400">
                             Not rated
                           </span>
                         )}
                       </span>
-                      <span className="mt-0.5 block text-[11px] tabular-nums text-ink400">
+                      <span className="mt-1 block text-[11px] tabular-nums text-ink400">
                         {showPct && pct !== null ? `${Math.round(pct)}% allowed` : ''}
                       </span>
                     </span>
