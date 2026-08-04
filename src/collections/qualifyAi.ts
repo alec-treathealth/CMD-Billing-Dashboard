@@ -211,18 +211,26 @@ export interface BlindLineScrubber {
   flush(): string;
 }
 
+/** What replaces a withheld line. NOT the empty string, and that is load-bearing: parseAiSections
+ *  matches `##\s*Signals\s*\n`, whose trailing \s* swallows a blank line, so emptying a section's
+ *  ONLY body line makes the next '## Signals' header get captured as TL;DR PROSE — the panel then
+ *  renders the literal text "## Signals" and duplicates the body. Reproduced, not theorised. A
+ *  single space does not help (\s* eats that too); a visible token both fixes the parse and is more
+ *  honest than a silent gap — the reader learns something was withheld. */
+export const BLIND_WITHHELD_LINE = '[withheld]';
+
 /** Line-buffered scrub for the blind streaming path. Emission becomes line-granular — a line is
  *  held until its newline arrives — so a dollar split across two deltas ("$" + "4,200") can never
- *  slip through the seam. A matching line is BLANKED (its newline kept) so the markdown section
- *  structure the client splits on survives; `onScrub` fires once per blanked line, carrying only
- *  WHICH shape tripped (a two-value enum — never the matched text). */
+ *  slip through the seam. A matching line is replaced by BLIND_WITHHELD_LINE (its newline kept) so
+ *  the markdown section structure the client splits on survives; `onScrub` fires once per withheld
+ *  line, carrying only WHICH shape tripped (a two-value enum — never the matched text). */
 export function createBlindLineScrubber(onScrub: (shape: BlindDollarShape) => void): BlindLineScrubber {
   let pending = '';
   const scan = (line: string): string => {
     const shape = blindDollarShape(line);
     if (!shape) return line;
     onScrub(shape);
-    return '';
+    return BLIND_WITHHELD_LINE;
   };
   return {
     push(delta: string): string {

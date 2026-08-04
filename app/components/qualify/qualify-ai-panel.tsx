@@ -77,8 +77,14 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
   // 'nearest' nudges the nearest scrollable ancestor minimally (no jump when already visible) and
   // is instant, not smooth — so prefers-reduced-motion needs nothing beyond the global reset.
   // Gated on `streaming`: once the answer is done, the panel stops steering the scroll position.
+  // ALSO gated on the reader still being near the tail: following unconditionally scroll-LOCKS a
+  // reader who scrolled up to re-read an earlier bullet, because the next delta yanks them back.
   useEffect(() => {
-    if (streaming && text) followRef.current?.scrollIntoView({ block: 'nearest' });
+    if (!streaming || !text) return;
+    const el = followRef.current;
+    if (!el) return;
+    const { top } = el.getBoundingClientRect();
+    if (top <= window.innerHeight + 200) el.scrollIntoView({ block: 'nearest' });
   }, [streaming, text]);
 
   const { chips, suggestedId } = useMemo(() => qualifyAiChips(snapshot), [snapshot]);
@@ -92,7 +98,13 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
       setStreaming(true);
       try {
         const res = await generateQualifyAiExplanation(buildInput(id, snapshot, blind));
-        if (genRef.current !== gen) return;
+        if (genRef.current !== gen) {
+          // Superseded while the action was still resolving (gate + audit + first token is 1-3s).
+          // Cancel rather than drop it: an unread stream keeps the model call — and the billing —
+          // running to completion, and the in-loop supersede path below already cancels.
+          if (res.ok) void res.stream.cancel();
+          return;
+        }
         if (!res.ok) {
           setStreaming(false);
           setError(

@@ -5,6 +5,7 @@
  */
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
+import { parseAiSections } from '../src/collections/aiAnalysis';
 import {
   QualifyAiInputSchema,
   buildQualifyAiMessages,
@@ -13,6 +14,7 @@ import {
   runQualifyAiExplanation,
   QUALIFY_AI_QUESTIONS,
   QUALIFY_AI_ACTION,
+  BLIND_WITHHELD_LINE,
   type QualifyAiInput,
   type QualifyAiRunDeps,
 } from '../src/collections/qualifyAi';
@@ -140,7 +142,9 @@ test('blind scrubber: a dollar split across two deltas is caught at the line sea
     scrubs += 1;
   });
   const out = s.push('- roughly $') + s.push('4,200 per stay\n- clean line\n') + s.flush();
-  assert.equal(out, '\n- clean line\n'); // poisoned line blanked, its newline kept, clean line intact
+  // Withheld line replaced by a VISIBLE token (never emptied — see BLIND_WITHHELD_LINE), newline
+  // kept, clean sibling intact.
+  assert.equal(out, `${BLIND_WITHHELD_LINE}\n- clean line\n`);
   assert.equal(scrubs, 1);
 });
 
@@ -149,10 +153,10 @@ test('blind scrubber: FIGURE-ADJACENT word forms trip it; the unterminated final
   const s = createBlindLineScrubber((shape) => {
     shapes.push(shape);
   });
-  assert.equal(s.push('about 5,000 dollars total\n'), '\n'); // digit + dollars
-  assert.equal(s.push('900 usd outstanding\n'), '\n'); // digit + usd
+  assert.equal(s.push('about 5,000 dollars total\n'), `${BLIND_WITHHELD_LINE}\n`); // digit + dollars
+  assert.equal(s.push('900 usd outstanding\n'), `${BLIND_WITHHELD_LINE}\n`); // digit + usd
   assert.equal(s.push('USD 900 outstanding'), ''); // held — no newline yet
-  assert.equal(s.flush(), ''); // scanned and blanked at flush
+  assert.equal(s.flush(), BLIND_WITHHELD_LINE); // scanned and withheld at flush
   assert.deepEqual(shapes, ['word', 'word', 'word']);
 });
 
@@ -179,6 +183,24 @@ test('blind scrubber: the sigil shape is reported distinctly from the word shape
   s.push('- about $4,200 per stay\n- and 5,000 dollars more\n');
   s.flush();
   assert.deepEqual(shapes, ['sigil', 'word']);
+});
+
+// Regression: withholding a section's ONLY body line must not corrupt the client's section split.
+// Emptying it made parseAiSections' `##\s*Signals\s*\n` swallow the blank line and capture the NEXT
+// header as TL;DR prose — the panel rendered the literal text "## Signals". Reproduced before the fix.
+test('blind scrubber: a section whose only body line is withheld still parses into its own section', () => {
+  const s = createBlindLineScrubber(() => {});
+  const raw =
+    '## TL;DR\nNASH is the strongest fit at 72; no $ amounts are visible to your role.\n' +
+    '## Signals\n- NASH 72 (IQ 50+), 14 distinct patients.\n' +
+    '## Risks\n- Thin sample.\n';
+  const out = s.push(raw) + s.flush();
+  const sections = parseAiSections(out);
+  assert.ok(!sections['TL;DR'].includes('## Signals'), 'the next header is NOT captured as TL;DR prose');
+  assert.equal(sections['TL;DR'], BLIND_WITHHELD_LINE);
+  assert.equal(sections.Signals, '- NASH 72 (IQ 50+), 14 distinct patients.');
+  assert.equal(sections.Risks, '- Thin sample.');
+  assert.ok(!out.includes('$'));
 });
 
 // ── Orchestration core (fake deps — hermetic; no live gate/DB/Anthropic) ─────────────────────────
