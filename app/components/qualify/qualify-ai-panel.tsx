@@ -19,6 +19,9 @@ import { parseAiSections } from '../../../src/collections/aiAnalysis';
 import type { QualifyAiInput } from '../../../src/collections/qualifyAi';
 import type { QualifySnapshot } from '../../lib/qualify/contract';
 import { qualifyAiChips, type QualifyAiChipId } from '../../lib/qualify/aiChips';
+import { deriveTopRanks } from '../../lib/qualify/policyRating';
+import { ratingBucket } from '../../lib/qualify/rating';
+import { RATING_HEX } from './tokens';
 
 type ChipId = QualifyAiChipId;
 
@@ -88,6 +91,7 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
   }, [streaming, text]);
 
   const { chips, suggestedId } = useMemo(() => qualifyAiChips(snapshot), [snapshot]);
+  const ranks = useMemo(() => deriveTopRanks(snapshot.facilities), [snapshot.facilities]);
 
   const run = useCallback(
     async (id: ChipId) => {
@@ -213,6 +217,36 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
                   <div className="prose-sm mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-ink900">
                     {sections.Risks}
                     {caret}
+                  </div>
+                </div>
+              ) : null}
+              {/* RANKS TABLE — shown when the answer IS a ranking, once the stream finishes. Derived
+                  from the snapshot rather than parsed from the prose: the model writes the reasoning,
+                  the numbers stay ours, so this can never disagree with the cards or the bar. */}
+              {!streaming && text && active === 'ranks' && ranks.length > 1 ? (
+                <div className="mt-3 border-t border-line pt-2.5">
+                  <div className="font-mono text-[9.5px] font-semibold uppercase tracking-[0.16em] text-teal700">
+                    Top {ranks.length} facilities on this policy
+                  </div>
+                  <div className="mt-2 flex flex-col">
+                    {ranks.map((r) => (
+                      <div
+                        key={r.name}
+                        className="grid grid-cols-[20px_minmax(0,1fr)_auto_auto] items-center gap-3 rounded-lg px-2 py-1.5 odd:bg-surface"
+                      >
+                        <span className="font-mono text-[11px] font-semibold text-ink400">{r.rank}</span>
+                        <span className="truncate text-[13px] font-semibold text-ink900" title={r.name}>
+                          {r.name}
+                        </span>
+                        <span className="whitespace-nowrap text-[11px] text-ink400">{r.evidence}</span>
+                        <span
+                          className="min-w-[34px] text-right font-mono text-[14px] font-semibold tabular-nums"
+                          style={{ color: RATING_HEX[ratingBucket(r.rating)] }}
+                        >
+                          {r.rating}
+                        </span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               ) : null}
