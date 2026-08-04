@@ -25,6 +25,41 @@ export interface QualifyScopeNotice {
   detail: string;
 }
 
+/**
+ * The population a ranking represents. `payer` is the direct path (the payer's own claims);
+ * the two cohort kinds are the `comparable_*` provenances, where the ranking is an ESTIMATE built
+ * from similar plans rather than this policy's history — and the copy has to say so, because the
+ * whole honesty rule on this surface is that an estimate is never dressed as direct evidence.
+ */
+export type QualifyRankingScope =
+  | { kind: 'payer'; label: string | null }
+  | { kind: 'employer_cohort' }
+  | { kind: 'funding_cohort' };
+
+/** How each scope reads mid-sentence ("These 27 facilities are …"). */
+function scopePhrase(scope: QualifyRankingScope): string {
+  switch (scope.kind) {
+    case 'payer':
+      return `${scope.label ?? 'this payer'}-wide`;
+    case 'employer_cohort':
+      return 'an ESTIMATE from employers like this one';
+    case 'funding_cohort':
+      return 'an ESTIMATE from plans funded like this one';
+  }
+}
+
+/** What the ranking actually describes, for the explanatory second sentence. */
+function scopeSource(scope: QualifyRankingScope): string {
+  switch (scope.kind) {
+    case 'payer':
+      return `how ${scope.label ?? 'this payer'} pays us generally`;
+    case 'employer_cohort':
+      return 'how peer employers behave — a cohort estimate, not this policy';
+    case 'funding_cohort':
+      return 'how similarly-funded plans behave — a cohort estimate, not this policy';
+  }
+}
+
 export interface DeriveScopeNoticeInput {
   /** Facilities in the ranking on screen. */
   rankedCount: number;
@@ -33,8 +68,11 @@ export interface DeriveScopeNoticeInput {
   /** True when the compose bar carried a PHI identifier (alpha prefix / member id / client name),
    *  which is the case where the ranking's population and the grid's population diverge hardest. */
   identifierSearched: boolean;
-  /** The payer the ranking is scoped to, for naming it. */
-  rankingPayerLabel: string | null;
+  /** WHAT the ranking is actually a ranking OF. Not just a label: on the comparable-provenance paths
+   *  the ranking is a peer COHORT, not the payer's own claims, and calling that "AETNA-wide" is
+   *  factually wrong — it is an estimate assembled from similar plans. The three kinds read
+   *  differently on purpose (Qodo review, 2026-08-04). */
+  rankingScope: QualifyRankingScope;
   /** Human window label ("30d", "Jul 2026") — quoted back so the rep can act on it. */
   windowLabel: string;
 }
@@ -45,10 +83,11 @@ export interface DeriveScopeNoticeInput {
  * every keystroke teaches the rep to ignore scope warnings.
  */
 export function deriveScopeNotice(input: DeriveScopeNoticeInput): QualifyScopeNotice | null {
-  const { rankedCount, composedCount, identifierSearched, rankingPayerLabel, windowLabel } = input;
+  const { rankedCount, composedCount, identifierSearched, rankingScope, windowLabel } = input;
   if (composedCount === null) return null; // still loading — never speak before the data does
   if (rankedCount === 0) return null; // no ranking on screen, nothing to misread
-  const payer = rankingPayerLabel ?? 'this payer';
+  const phrase = scopePhrase(rankingScope);
+  const source = scopeSource(rankingScope);
   const facilityWord = rankedCount === 1 ? 'facility' : 'facilities';
 
   if (composedCount === 0) {
@@ -56,16 +95,16 @@ export function deriveScopeNotice(input: DeriveScopeNoticeInput): QualifyScopeNo
     return identifierSearched
       ? {
           tone: 'warn',
-          headline: `These ${rankedCount} ${facilityWord} are ${payer}-wide — not this client's history.`,
+          headline: `These ${rankedCount} ${facilityWord} are ${phrase} — not this client's history.`,
           detail:
             `This client has no charge lines in the ${windowLabel} window, so nothing below is evidence about ` +
-            `their policy: it is how ${payer} pays us generally. Widen the window, or ask a biller before you quote anything.`,
+            `their policy: it is ${source}. Widen the window, or ask a biller before you quote anything.`,
         }
       : {
           tone: 'warn',
           headline: `${rankedCount} ${facilityWord} ranked, but no charge lines match your filters.`,
           detail:
-            `The ranking is ${payer}-wide for the ${windowLabel} window; your other filters — facility, employer, ` +
+            `The ranking is ${phrase} for the ${windowLabel} window; your other filters — facility, employer, ` +
             `funding, setting — narrow only the rows. Remove one to see the claims behind these ratings.`,
         };
   }
@@ -74,8 +113,11 @@ export function deriveScopeNotice(input: DeriveScopeNoticeInput): QualifyScopeNo
     // Both populations have data, but they are still not the same population. State it once, quietly.
     return {
       tone: 'info',
-      headline: `Ranking is ${payer}-wide; the rows below are this client's own claims.`,
-      detail: `Two different populations, both for the ${windowLabel} window — the ratings are payer behaviour, not this policy's track record.`,
+      headline: `Ranking is ${phrase}; the rows below are this client's own claims.`,
+      detail:
+        `Two different populations, both for the ${windowLabel} window — the ratings are ${
+          rankingScope.kind === 'payer' ? 'payer behaviour' : 'a cohort estimate'
+        }, not this policy's track record.`,
     };
   }
 

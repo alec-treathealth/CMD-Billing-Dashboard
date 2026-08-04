@@ -18,6 +18,7 @@ import {
 } from '../lib/qualify/scopeNotice';
 import { ScopeNotice } from '../components/qualify/scope-notice';
 import { BookKpiTiles } from '../components/qualify/overview';
+import { derivePolicyRating } from '../lib/qualify/policyRating';
 import { QUALIFY_FACILITY_V2_NULLS } from './helpers/qualifyV2Fixture';
 import { QUALIFY_TENANT_SCOPE } from '../lib/qualify/contract';
 import type { QualifyBookKpis, QualifyFacility } from '../lib/qualify/contract';
@@ -26,7 +27,7 @@ const BASE: DeriveScopeNoticeInput = {
   rankedCount: 27,
   composedCount: 0,
   identifierSearched: true,
-  rankingPayerLabel: 'AETNA',
+  rankingScope: { kind: 'payer', label: 'AETNA' },
   windowLabel: '30d',
 };
 
@@ -83,10 +84,55 @@ test('singular grammar at one facility', () => {
 });
 
 test('a payer we cannot name degrades to "this payer", never to "null"', () => {
-  const n = deriveScopeNotice({ ...BASE, rankingPayerLabel: null });
+  const n = deriveScopeNotice({ ...BASE, rankingScope: { kind: 'payer', label: null } });
   assert.ok(n);
   assert.ok(!/null|undefined/.test(n.headline + n.detail));
   assert.match(n.headline, /this payer-wide/);
+});
+
+// ── A COMPARABLE ranking is an estimate, and must never be called "payer-wide" ──────────────────
+//
+// Qodo review 2026-08-04 caught this: on comparable_employer / comparable_funding provenance the
+// ranking is a peer COHORT assembled from similar plans, not the payer's own claims. Labelling that
+// "AETNA-wide" asserts direct evidence we do not have — the one thing the honesty rules on this
+// surface forbid outright.
+
+test('an employer cohort is called an ESTIMATE, never payer-wide', () => {
+  const n = deriveScopeNotice({ ...BASE, rankingScope: { kind: 'employer_cohort' } });
+  assert.ok(n);
+  assert.match(n.headline, /ESTIMATE from employers like this one/);
+  assert.ok(!/-wide/.test(n.headline), 'must not claim payer-wide evidence');
+  assert.match(n.detail, /cohort estimate, not this policy/);
+});
+
+test('a funding cohort says so distinctly — the two comparable paths are different claims', () => {
+  const emp = deriveScopeNotice({ ...BASE, rankingScope: { kind: 'employer_cohort' } });
+  const fund = deriveScopeNotice({ ...BASE, rankingScope: { kind: 'funding_cohort' } });
+  assert.match(fund?.headline ?? '', /ESTIMATE from plans funded like this one/);
+  assert.notEqual(emp?.headline, fund?.headline, 'employer and funding cohorts must not share copy');
+});
+
+test('the quiet INFO line also drops "payer behaviour" for a cohort — it is an estimate there', () => {
+  const n = deriveScopeNotice({ ...BASE, composedCount: 412, rankingScope: { kind: 'funding_cohort' } });
+  assert.ok(n);
+  assert.equal(n.tone, 'info');
+  assert.match(n.detail, /a cohort estimate, not this policy's track record/);
+  assert.ok(!/payer behaviour/.test(n.detail));
+});
+
+test('no scope ever emits "null", "undefined" or an empty label', () => {
+  for (const rankingScope of [
+    { kind: 'payer' as const, label: null },
+    { kind: 'payer' as const, label: 'AETNA' },
+    { kind: 'employer_cohort' as const },
+    { kind: 'funding_cohort' as const },
+  ]) {
+    for (const composedCount of [0, 412]) {
+      const n = deriveScopeNotice({ ...BASE, rankingScope, composedCount });
+      if (!n) continue;
+      assert.ok(!/null|undefined/.test(n.headline + n.detail), `${rankingScope.kind} leaked a placeholder`);
+    }
+  }
 });
 
 // ── Silence is also a requirement ───────────────────────────────────────────────────────────────
@@ -124,6 +170,26 @@ test('the notice renders as an ALERT when warning, a note when informational, an
   assert.equal(renderToStaticMarkup(<ScopeNotice notice={null} />), '');
 });
 
+// ── While the ranking is loading, every derived read must go quiet ──────────────────────────────
+//
+// Qodo review 2026-08-04: with a payer resolved but its snapshot still in flight, the left column
+// shows "Loading facility ranking…" and NO cards. The container therefore passes an empty set during
+// that window, and all three derived reads have to suppress themselves off it — otherwise the bar,
+// the flanks and the notice describe a population that is not on screen, which is the original bug
+// one layer down.
+
+test('loading (empty ranked set) suppresses the notice, the flanks, and any policy claim', () => {
+  assert.equal(deriveScopeNotice({ ...BASE, rankedCount: 0 }), null, 'no notice about an absent ranking');
+  assert.equal(deriveFacilitySpread([]), null, 'no flanks');
+  // And the policy rating must not be renderable: ratedCount 0 is what the container gates on.
+  const pr = derivePolicyRating([]);
+  assert.equal(pr.ratedCount, 0);
+  assert.equal(pr.rating, null);
+  // Its basis is a claim about DATA ("no facility clears the sample floor") and would be false about
+  // a network fetch — which is why the container gates on an explicit loading flag and not on this.
+  assert.match(pr.basis, /sample floor/);
+});
+
 // ── KPI flanks ──────────────────────────────────────────────────────────────────────────────────
 
 test('flanks name the facilities that SET the range, rounded, worst and best', () => {
@@ -139,6 +205,25 @@ test('flanks refuse a fake range: unrated facilities excluded, <2 scored, or a f
   assert.equal(deriveFacilitySpread([fac('ALPHA', 62)]), null);
   assert.equal(deriveFacilitySpread([fac('ALPHA', 62), fac('BETA', null)]), null, 'null pct is not a 0%');
   assert.equal(deriveFacilitySpread([fac('ALPHA', 55), fac('BETA', 55)]), null, 'flat is not a spread');
+});
+
+// The container narrows the flank population before calling this (Qodo review 2026-08-04): the tiles
+// scope to payer + facility, the ranking is payer-wide, so unnarrowed flanks would name facilities
+// outside the set the headline averages. These pin the two narrowing outcomes the container produces.
+test('flanks over a FACILITY-NARROWED set describe only the selected facilities', () => {
+  const ranked = [fac('ALPHA', 62), fac('BETA', 30), fac('GAMMA', 44)];
+  const selected = new Set(['alpha', 'gamma']); // facilityKey values, as facilitySelection holds
+  const narrowed = ranked.filter((f) => selected.has(f.facilityKey));
+  const s = deriveFacilitySpread(narrowed);
+  assert.equal(s?.best.who, 'ALPHA');
+  assert.equal(s?.worst.who, 'GAMMA', 'BETA is outside the selection and cannot set the range');
+  // Narrowing to ONE facility is not a range — the tile shows a headline with no flanks.
+  assert.equal(deriveFacilitySpread(ranked.filter((f) => f.facilityKey === 'alpha')), null);
+});
+
+test('flanks are suppressed entirely when the tiles are book-wide but the ranking is not', () => {
+  // The container passes [] for that case; the pure function must then produce nothing.
+  assert.equal(deriveFacilitySpread([]), null);
 });
 
 test('the KPI allowed tile RENDERS the flanks — and only that tile, and never on a thin sample', () => {
