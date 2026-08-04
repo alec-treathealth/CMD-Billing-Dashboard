@@ -45,10 +45,19 @@ export interface QualifyPolicyRating {
  * Derived from the snapshot, NOT parsed out of the model's prose — the same reason the policy rating
  * is: a table the model authored could disagree with the cards, and then the rep is adjudicating
  * between two AI-shaped numbers. The model writes the reasoning; the numbers stay ours. Same rated
- * set and same sample gate as `derivePolicyRating`, so all three (bar, table, cards) move together.
+ * set and same sample gate as `derivePolicyRating`.
+ *
+ * SCOPE CAVEAT, because the earlier claim here that "all three (bar, table, cards) move together" was
+ * NOT true: the bar and the cards read the LOC-lensed by-payer ranking, whereas this table reads the
+ * AI panel's snapshot, which prefers the identifier lead when one resolved. Those can be different
+ * populations, so the table is captioned with the population it actually describes rather than being
+ * presented as the same list as the cards.
  */
 export interface QualifyRankRow {
   rank: number;
+  /** Stable identity. Facility NAMES are not unique (contract.ts) — two same-named facilities keyed
+   *  by name give React duplicate keys and can swap rows. Review: unaddressed from PR #94. */
+  facilityKey: string;
   name: string;
   rating: number;
   band: QualifyIqBand;
@@ -67,6 +76,7 @@ export function deriveTopRanks(facilities: readonly QualifyFacility[], limit = 5
     .slice(0, Math.max(0, limit))
     .map((f, i) => ({
       rank: i + 1,
+      facilityKey: f.facilityKey,
       name: f.name,
       rating: f.ratingV2,
       // Every row here is rated, so iqBandOf cannot return null — assert it rather than widen the type.

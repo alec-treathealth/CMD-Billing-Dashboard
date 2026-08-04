@@ -75,7 +75,7 @@ import {
 import type { CmdEmployerOption } from '@/lib/actions';
 import { MultiSelectTagPicker, type PickerOption } from '@/components/ui/multi-select-tag-picker';
 import { buildQualifySearchParams, parseQualifySearchParams } from '@/lib/qualify/urlState';
-import { deriveScopeNotice, deriveFacilitySpread, deriveOnFileTags, type QualifyRankingScope } from '@/lib/qualify/scopeNotice';
+import { deriveScopeNotice, deriveFacilitySpread, deriveOnFileTags, flanksAreComparable, type QualifyRankingScope } from '@/lib/qualify/scopeNotice';
 import { derivePolicyRating } from '@/lib/qualify/policyRating';
 import { ScopeNotice } from '@/components/qualify/scope-notice';
 
@@ -141,6 +141,9 @@ export function QualifyTab({
   // ── COMPOSED READS (live count + claim rows) ───────────────────────────────────────────────────
   const [summary, setSummary] = useState<QualifyMatchSummary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
+  /** The match-count fetch FAILED. Distinct from a zero count: "we could not count" and "nothing
+   *  matches" send the rep in opposite directions. */
+  const [summaryError, setSummaryError] = useState(false);
   const [composedCases, setComposedCases] = useState<QualifyClaim[]>([]);
   const [capped, setCapped] = useState(false);
   const [casesLoading, setCasesLoading] = useState(false);
@@ -164,6 +167,17 @@ export function QualifyTab({
   //    ranking's own distinct-patient sample gate, sampleGate.ts, is the guard). Highlights the selected
   //    facilities; never intersects. ────────────────────────────────────────────────────────────────
   const [panelSnapshot, setPanelSnapshot] = useState<QualifySnapshot | null>(null);
+  /** Explicit fetch-in-flight flag for the ranking. Deriving it from `!panelSnapshot` could not tell
+   *  a refetch from a first load, nor a failure from a pending request — see the fetch effect. */
+  const [panelLoading, setPanelLoading] = useState(false);
+  /** The ranking fetch FAILED (review: unaddressed feedback from PR #34, which this series widened).
+   *  A failure used to set panelSnapshot = null, which is the same value as "not loaded yet" — so a
+   *  dropped connection showed an eternal "Loading facility ranking…" with no error and no retry,
+   *  and once the notice/flanks/policy-bar keyed off that state they all went dark forever with it. A
+   *  network failure spoken as a network pending is the same category of lie this series exists to
+   *  remove, so it gets its own state and a retry. */
+  const [panelError, setPanelError] = useState(false);
+  const [panelReloadKey, setPanelReloadKey] = useState(0);
   const panelGenRef = useRef(0);
   // When the user searches a single PHI identifier (alpha prefix / member id) with NO payer chip, we
   // resolve its dominant payer server-side and rank against THAT — so an identifier search doesn't force a
@@ -287,6 +301,12 @@ export function QualifyTab({
   const identifierTerm = alphaPrefix.trim() || memberId.trim();
   const bothIdentifiers = alphaPrefix.trim() !== '' && memberId.trim() !== '';
   const singleIdentifier = payerSelection.length === 0 && identifierTerm !== '' && !bothIdentifiers ? identifierTerm : null;
+  /** ANY PHI narrow is active on the grid — the condition under which the grid's population is one
+   *  client while the ranking stays payer-wide. Distinct from `singleIdentifier`, which is the
+   *  narrower "an identifier that DERIVED a payer" and must not be used for scope warnings. Presence
+   *  only; these raw terms are state-only and never reach a URL, a log or a prompt. */
+  const phiNarrowActive =
+    memberId.trim() !== '' || alphaPrefix.trim() !== '' || groupNumber.trim() !== '' || clientName.trim() !== '';
 
   // ── OVERVIEW TICKER: Heating-Up trends. Phase 2 (Design B): BOOK-WIDE-WITHIN-PAYER — payer-scoped when
   //    EXACTLY ONE payer is selected, book-wide at 0 or 2+. Facility/employer/funding NEVER scope it
@@ -419,6 +439,7 @@ export function QualifyTab({
       return;
     }
     setSummaryLoading(true);
+    setSummaryError(false);
     setCasesLoading(true);
     const gen = ++composeGenRef.current;
     const t = setTimeout(() => {
@@ -450,6 +471,10 @@ export function QualifyTab({
           setSummary(null);
           setSummaryLoading(false);
           setVobPayer(null);
+          // A FAILED count must not render as a confident "0 charge lines match" (review: unaddressed
+          // from PR #34). The scope notice already treats this as null/unknown and stays silent; the
+          // readout bar was asserting zero off the same failure.
+          setSummaryError(true);
         });
       getQualifyComposedCases(composeInput)
         .then((r) => {
@@ -551,19 +576,35 @@ export function QualifyTab({
   useEffect(() => {
     if (!panelPayer) {
       setPanelSnapshot(null);
+      setPanelLoading(false);
+      setPanelError(false);
       return;
     }
+    // CLEAR BEFORE REFETCH (review, 2026-08-04). This used to keep the previous payer's snapshot
+    // while the new one was in flight — the long-accepted "desktop stale-flash". That was tolerable
+    // while it was purely cosmetic, but the scope notice, the policy rating and the flanks now make
+    // explicit CLAIMS about the ranking, and those claims are keyed on the NEW payer and window. So
+    // on a payer or window switch the screen asserted "these 27 facilities are BCBS-wide" over
+    // Aetna's set. Clearing turns that into an honest loading state and retires the deferred flash.
+    setPanelSnapshot(null);
+    setPanelLoading(true);
+    setPanelError(false);
     const pgen = ++panelGenRef.current;
     getQualifySnapshotByPayer({ payer: panelPayer, window: windowSel })
       .then((snap) => {
         if (panelGenRef.current !== pgen) return;
         setPanelSnapshot(snap);
+        setPanelLoading(false);
       })
       .catch(() => {
         if (panelGenRef.current !== pgen) return;
         setPanelSnapshot(null);
+        // Settle BOTH flags on failure: deriving "loading" from a null snapshot pinned a failed fetch
+        // in the loading state forever, hiding the policy block with no way out and no error shown.
+        setPanelLoading(false);
+        setPanelError(true);
       });
-  }, [panelPayer, windowSel]);
+  }, [panelPayer, windowSel, panelReloadKey]);
 
   // ── URL STATE: persist the NON-PHI selection arrays + window + LOC (replace, never push). PHI is
   //    excluded by construction — buildQualifySearchParams has no field for it. ─────────────────────────
@@ -878,7 +919,10 @@ export function QualifyTab({
   //    deriveScopeNotice → null at rankedCount 0), and the flag keeps the policy block from claiming
   //    "no facility clears the sample floor" — which is what derivePolicyRating([]) says, and which
   //    would be a false statement about a network fetch rather than about the data.
-  const rankingLoading = Boolean(panelPayer && !panelSnapshot);
+  // Both legs of the placeholder the left column actually renders — `derivedLoading || (panelPayer &&
+  // !panelSnapshot)`. The earlier flag covered only the second, so while "Resolving payer…" showed
+  // with no cards, the bar and the notice still spoke off the PREVIOUS search's facilities.
+  const rankingLoading = panelLoading || derivedLoading || Boolean(panelPayer && !panelSnapshot);
   const rankedForScope = rankingLoading ? [] : panelPayer ? panelFacilities : leadSnapshot?.facilities ?? [];
   // FLANKS MUST MATCH THE TILE'S OWN POPULATION, not merely the ranking (Qodo review, 2026-08-04).
   // The tiles are scoped to payer + facility selection; the ranking is payer-wide. So with facilities
@@ -887,13 +931,20 @@ export function QualifyTab({
   // ranking is payer-derived. Both are the same parts-vs-whole defect this module exists to prevent,
   // so the flanks either describe the tile's set or they do not render.
   const facilitiesForSpread = useMemo(() => {
+    // ONE condition, checked first: unless the tiles and the ranking provably share a scope, no
+    // flanks. The earlier narrow-your-way-there version left three reachable states where it neither
+    // matched nor suppressed (comparable-cohort under a book-wide headline; a payer-narrowed slice
+    // under an all-payers headline because the facility branch returned first; an LOC-lensed set
+    // under a headline the tiles caption "not LOC-scoped").
+    if (!flanksAreComparable({ payerChipCount: payerSelection.length, locActive: locFilter !== null })) {
+      return [];
+    }
     if (facilitySelection.length > 0) {
       const selected = new Set(facilitySelection); // facilitySelection holds facilityKey values
       return rankedForScope.filter((f) => selected.has(f.facilityKey));
     }
-    if (payerSelection.length === 0 && panelPayer) return []; // book-wide tiles vs a derived ranking
     return rankedForScope;
-  }, [rankedForScope, facilitySelection, payerSelection.length, panelPayer]);
+  }, [rankedForScope, facilitySelection, payerSelection.length, locFilter]);
   // Gated on kpis: flanks bracket a headline, so they must not appear before one exists.
   const facilitySpread = useMemo(
     () => (kpis ? deriveFacilitySpread(facilitiesForSpread) : null),
@@ -916,12 +967,17 @@ export function QualifyTab({
       deriveScopeNotice({
         rankedCount: rankedForScope.length,
         composedCount: summaryLoading ? null : summary?.count ?? null,
-        // singleIdentifier is the TERM (string | null) — never render it, only its presence.
-        identifierSearched: singleIdentifier !== null,
+        // ANY PHI narrow, not just the one that DERIVED a payer. `singleIdentifier` additionally
+        // requires zero payer chips, but the grid filters on memberId/alphaPrefix/group/clientName
+        // regardless of the payer selection — so picking a payer chip and THEN pasting a member id
+        // left the original reported bug completely unwarned (payer-wide ranking beside one client's
+        // rows, no notice at all), or fired the filters-variant copy that enumerates non-PHI filters
+        // when the narrow was a member id. Presence only — the term itself is never rendered.
+        identifierSearched: phiNarrowActive,
         rankingScope,
         windowLabel: qualifyWindowLabel(windowSel),
       }),
-    [rankedForScope.length, summaryLoading, summary?.count, singleIdentifier, rankingScope, windowSel],
+    [rankedForScope.length, summaryLoading, summary?.count, phiNarrowActive, rankingScope, windowSel],
   );
 
   // The policy-level rating shown on the dark bar — the patient-weighted mean of the SAME cards the
@@ -1181,9 +1237,9 @@ export function QualifyTab({
         <div className="flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-line bg-teal900 px-4 py-3 sm:px-5">
           <div className="flex items-baseline gap-2">
             <span className="font-mono text-[26px] font-semibold leading-none tracking-tight text-white tabular-nums">
-              {!hasAnyFilter ? '—' : summaryLoading && !summary ? '…' : (summary?.count ?? 0).toLocaleString('en-US')}
+              {!hasAnyFilter ? '—' : summaryLoading && !summary ? '…' : summaryError ? '—' : (summary?.count ?? 0).toLocaleString('en-US')}
             </span>
-            <span className="text-[12px] text-white/70">charge lines match</span>
+            <span className="text-[12px] text-white/70">{summaryError ? 'count unavailable' : 'charge lines match'}</span>
             {hasAnyFilter && summaryLoading ? (
               <span className="text-[10.5px] uppercase tracking-wide text-teal200">updating…</span>
             ) : null}
@@ -1380,7 +1436,25 @@ export function QualifyTab({
                     expandedKeys={expandedFacilities}
                     onExpandToggle={toggleFacilityExpansion}
                   />
-                ) : derivedLoading || (panelPayer && !panelSnapshot) ? (
+                ) : panelError ? (
+                  // A FAILED ranking is not a loading one, and not an empty one either. Say so, and
+                  // give a way out — this used to render the loading placeholder forever.
+                  <div className="rounded-2xl border border-dashed border-line bg-card p-6 text-center shadow-ths-sm">
+                    <p className="text-sm text-status-danger">Couldn’t load the facility ranking.</p>
+                    <p className="mt-1 text-[12.5px] text-ink400">
+                      Nothing below is missing on purpose — the fetch failed. Your filters and the rows still work.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setPanelReloadKey((k) => k + 1)}
+                      className="mt-3 rounded-lg border border-line px-3 py-1.5 text-[13px] font-semibold text-ink900 transition-colors hover:bg-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : rankingLoading ? (
+                  // ONE source of truth for this state (review: the predicate used to be spelled out
+                  // here AND derived above, so the two could drift — and they did).
                   <div className="rounded-2xl border bg-card p-6 text-center text-sm text-muted-foreground shadow-ths-sm">
                     {derivedLoading ? 'Resolving payer…' : 'Loading facility ranking…'}
                   </div>

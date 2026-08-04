@@ -14,6 +14,7 @@
  * admissions_seat session derives the identical notice.
  */
 import type { QualifyFacility } from './contract';
+import { ratingSampleTier } from './sampleGate';
 
 export type QualifyScopeTone = 'info' | 'warn';
 
@@ -125,17 +126,50 @@ export function deriveScopeNotice(input: DeriveScopeNoticeInput): QualifyScopeNo
 }
 
 /**
+ * ARE THE FLANKS EVEN COMPARABLE TO THE HEADLINE? (review, 2026-08-04)
+ *
+ * The KPI tiles and the facility ranking are fetched by different queries with different scopes, so
+ * the flanks may only render when those two scopes provably coincide. The previous container logic
+ * tried to narrow its way there and left three reachable states where it neither matched nor
+ * suppressed — a book-wide headline flanked by a peer-cohort estimate, a payer-narrowed slice under
+ * an all-payers headline, and an LOC-lensed set under a headline the tiles themselves caption "not
+ * LOC-scoped". Rather than enumerate narrowings, this states the one condition under which the two
+ * populations are the same and refuses otherwise. Suppressing a true-but-unverifiable flank costs a
+ * decoration; showing a headline outside its own bracket costs the rep's trust in the number.
+ */
+export interface FlankComparabilityInput {
+  /** Payer CHIPS selected. Exactly one is the only state where tiles and ranking share a payer. A
+   *  payer *derived* from an identifier does not count: the tiles were fetched with no payer at all. */
+  payerChipCount: number;
+  /** LOC lens active. The ranking is LOC-filtered client-side; the KPI query takes no LOC argument
+   *  and the tiles say so in their own caption. Different populations by construction. */
+  locActive: boolean;
+}
+
+export function flanksAreComparable({ payerChipCount, locActive }: FlankComparabilityInput): boolean {
+  return payerChipCount === 1 && !locActive;
+}
+
+/**
  * "ON FILE" TAGS — the prototype's policy tag row. What the plan behind the searched prefix actually
  * IS, so the rep reasons about coverage instead of guessing: carrier · funding · policy type · plan
  * type · network.
  *
- * PHI BOUNDARY, deliberate and narrow: these five are plan-level facts (the registry-adjacent
- * non-PHI tier). `employerName` is NOT included even though the policy card carries it — an employer
- * plus a facility plus a date range narrows to a person, and the query-library allowlist has never
- * let employer_name reach a model or a log. `groupOnFile` is a presence flag by contract (the raw
- * group number exists only as a blind index and can never be displayed), so it is not rendered here
- * either. No benefit dollars: deductible/oopMax are dollar-bearing and already stripped for
- * admissions_seat, so putting them on a shared bar would make the bar role-dependent.
+ * PHI BOUNDARY, deliberate and narrow.
+ *
+ * `employerName` IS included — Alec's ruling, 2026-08-04: the employer is a factor of the search and
+ * belongs on screen when a prefix resolves. It was already rendered by the policy strip, so
+ * withholding it here made the two summaries of one policy disagree for no benefit. The scope of that
+ * ruling is DISPLAY to an authenticated Qualify principal, which is what this surface exists for. It
+ * does NOT license the other two paths: employer must still never reach a model prompt (the
+ * QualifyAiInput schema has no field for it, structurally) or a log line, and `employer_norm` being
+ * written to the URL query string — where it reaches browser history, Referer and edge logs — is a
+ * separate open question, because a URL escapes the authenticated surface and a rendered chip does not.
+ *
+ * Still excluded, for reasons the ruling does not touch: `groupOnFile` is a presence flag by contract
+ * (the raw group number exists only as a blind index and can never be displayed), and the four benefit
+ * strings are dollar-bearing and already stripped for admissions_seat, so putting them on a shared bar
+ * would make the bar role-dependent.
  *
  * A missing value renders "not on file" rather than being dropped, because on this surface "we did
  * not capture the network" and "in network" are different answers and must not look alike.
@@ -152,6 +186,7 @@ export interface QualifyOnFileTag {
 
 export interface DeriveOnFileTagsInput {
   carrier: string | null;
+  employerName: string | null;
   funding: string | null;
   policyType: string | null;
   planType: string | null;
@@ -166,6 +201,9 @@ export function deriveOnFileTags(policy: DeriveOnFileTagsInput | null): QualifyO
   };
   return [
     tag('Payer', policy.carrier),
+    // Second, not last: after the payer this is the fact the rep most needs, and on a self-funded
+    // plan it names who actually decides an exception.
+    tag('Employer', policy.employerName),
     tag('Funding', policy.funding),
     tag('Policy', policy.policyType),
     tag('Plan', policy.planType),
@@ -195,7 +233,16 @@ export interface QualifyFacilitySpread {
 
 export function deriveFacilitySpread(facilities: readonly QualifyFacility[]): QualifyFacilitySpread | null {
   const scored = facilities.filter(
-    (f): f is QualifyFacility & { pctAllowedOfBilled: number } => f.pctAllowedOfBilled !== null,
+    (f): f is QualifyFacility & { pctAllowedOfBilled: number } =>
+      f.pctAllowedOfBilled !== null &&
+      // SAMPLE GATE — the flanks quote a percentage, so they are bound by the same floor as the card
+      // that would have to corroborate it. Without this a sub-floor facility (whose own card renders
+      // '—' with NO percentage) could set the "Worst" flank, and the tile would name a facility with
+      // a number that appears nowhere beneath it. Not hypothetical: 61% of facility×payer rows sit
+      // under 3 patients (41eee3a), and extremes are exactly where that noise lives, so the Worst
+      // flank was the EXPECTED victim rather than an edge case. Same gate derivePolicyRating and
+      // deriveTopRanks already apply — this is the one place it was missing.
+      ratingSampleTier(f.distinctPatients) !== 'insufficient',
   );
   if (scored.length < 2) return null;
   let lo = scored[0]!;

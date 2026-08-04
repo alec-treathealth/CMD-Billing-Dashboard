@@ -14,6 +14,7 @@ import {
   deriveScopeNotice,
   deriveFacilitySpread,
   deriveOnFileTags,
+  flanksAreComparable,
   type DeriveScopeNoticeInput,
 } from '../lib/qualify/scopeNotice';
 import { ScopeNotice } from '../components/qualify/scope-notice';
@@ -190,6 +191,33 @@ test('loading (empty ranked set) suppresses the notice, the flanks, and any poli
   assert.match(pr.basis, /sample floor/);
 });
 
+// ── Review remediation, 2026-08-04 ──────────────────────────────────────────────────────────────
+
+test('FLANKS OBEY THE SAMPLE GATE — a sub-floor facility cannot set the range', () => {
+  // The card for a sub-floor facility renders '—' with NO percentage. Before the gate, that facility
+  // could still set "Worst", so the tile named a facility carrying a number visible nowhere beneath
+  // it. 61% of facility×payer rows sit under the floor, so the Worst flank was the expected victim.
+  const thinButExtreme = { ...fac('THIN', 4), distinctPatients: 2 };
+  const s = deriveFacilitySpread([fac('ALPHA', 62), fac('BETA', 41), thinButExtreme]);
+  assert.equal(s?.worst.who, 'BETA', 'the sub-floor 4% must not become the Worst flank');
+  assert.equal(s?.best.who, 'ALPHA');
+  // Two rated facilities plus any number of sub-floor ones still works; fewer than two does not.
+  assert.equal(deriveFacilitySpread([fac('ALPHA', 62), thinButExtreme]), null);
+});
+
+test('FLANK COMPARABILITY — flanks render only when the tiles and the ranking share a scope', () => {
+  // Exactly one payer CHIP and no LOC lens is the only state where the two queries coincide.
+  assert.equal(flanksAreComparable({ payerChipCount: 1, locActive: false }), true);
+  // A payer DERIVED from an identifier does not count — the tiles were fetched with no payer at all,
+  // so they are book-wide while the ranking is not. This was the flagship-path hole.
+  assert.equal(flanksAreComparable({ payerChipCount: 0, locActive: false }), false);
+  // Multiple payers: the ranking is single-payer by construction, the tiles are not.
+  assert.equal(flanksAreComparable({ payerChipCount: 2, locActive: false }), false);
+  // The LOC lens filters the ranking client-side but the KPI query takes no LOC argument — the tiles
+  // even caption themselves "not LOC-scoped", so the headline could sit outside its own bracket.
+  assert.equal(flanksAreComparable({ payerChipCount: 1, locActive: true }), false);
+});
+
 // ── KPI flanks ──────────────────────────────────────────────────────────────────────────────────
 
 test('flanks name the facilities that SET the range, rounded, worst and best', () => {
@@ -257,17 +285,30 @@ test('the KPI allowed tile RENDERS the flanks — and only that tile, and never 
 
 const POLICY = {
   carrier: 'AETNA',
+  employerName: 'VANDERBILT UNIV. MEDICAL CENTER',
   funding: 'Self-Funded',
   policyType: 'PPO',
   planType: 'OPEN ACCESS',
   network: null,
 };
 
-test('on-file tags carry the five plan-level facts, in order, network in the mono face', () => {
+test('on-file tags carry the six plan-level facts, in order, network in the mono face', () => {
   const tags = deriveOnFileTags(POLICY);
-  assert.deepEqual(tags.map((t) => t.label), ['Payer', 'Funding', 'Policy', 'Plan', 'Network']);
+  assert.deepEqual(tags.map((t) => t.label), ['Payer', 'Employer', 'Funding', 'Policy', 'Plan', 'Network']);
   assert.equal(tags[0]?.value, 'AETNA');
-  assert.equal(tags[4]?.mono, true);
+  assert.equal(tags[5]?.mono, true);
+});
+
+// Alec's ruling 2026-08-04: the employer is a factor of the search and belongs on screen when a prefix
+// resolves — it was already rendered by the policy strip, so withholding it here made two summaries of
+// one policy disagree. The ruling covers DISPLAY to an authenticated principal only.
+test('the EMPLOYER surfaces on a resolved prefix (ruled), second after the payer', () => {
+  const tags = deriveOnFileTags(POLICY);
+  assert.equal(tags[1]?.label, 'Employer');
+  assert.equal(tags[1]?.value, 'VANDERBILT UNIV. MEDICAL CENTER');
+  assert.equal(tags[1]?.missing, false);
+  // An unnamed employer still reads honestly rather than vanishing.
+  assert.equal(deriveOnFileTags({ ...POLICY, employerName: null })[1]?.value, 'not on file');
 });
 
 test('a null field says "not on file" — because "network unknown" and "in network" are different answers', () => {
@@ -279,11 +320,13 @@ test('a null field says "not on file" — because "network unknown" and "in netw
   assert.equal(deriveOnFileTags({ ...POLICY, funding: '   ' }).find((t) => t.label === 'Funding')?.missing, true);
 });
 
-test('PHI BOUNDARY: no employer, no group number, no dollar figure can appear in the tag row', () => {
-  // The input type has no field for any of them; this pins the rendered output too, so a future
-  // widening of the input cannot leak into the bar unnoticed.
+test('PHI BOUNDARY: no group number and no dollar figure can appear in the tag row', () => {
+  // Employer is now deliberately present (ruled). The group number never can be — it exists only as a
+  // blind index — and the four benefit strings are dollar-bearing and stripped for admissions_seat, so
+  // putting them here would make a shared bar role-dependent. The input type has no field for any of
+  // them; this pins the rendered output too, so a future widening cannot leak in unnoticed.
   const json = JSON.stringify(deriveOnFileTags(POLICY));
-  for (const forbidden of ['employer', 'group', '$', 'deductible', 'oop']) {
+  for (const forbidden of ['group', '$', 'deductible', 'oop']) {
     assert.ok(!json.toLowerCase().includes(forbidden), `${forbidden} must never reach the on-file row`);
   }
 });

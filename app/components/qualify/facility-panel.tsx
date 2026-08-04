@@ -193,9 +193,14 @@ export function FacilityPanel({
       ) : null}
       {/* This ranking is PAYER-WIDE across the whole book — NOT the filtered match count above. Tapping a
           row adds that facility to the filter (highlight), it never narrows this list. */}
+      {/* The caption must match the PROVENANCE. On the comparable paths this panel is handed an
+          EMPLOYER name, not a payer, and printing "<employer> · payer-wide across the book" put a
+          flat contradiction directly under a scope notice that (correctly) calls the same ranking an
+          estimate from similar plans. Two statements about one list, on one screen. */}
       <p className="px-4 pb-1 text-[11px] text-muted-foreground">
-        {payerLabel ? <b className="font-semibold text-ink600">{payerLabel}</b> : 'This payer'} · payer-wide across the
-        book · tap a facility to add it to your filter
+        {payerLabel ? <b className="font-semibold text-ink600">{payerLabel}</b> : estimated ? 'This cohort' : 'This payer'}
+        {estimated ? ' · peer-cohort estimate, not this plan’s own claims' : ' · payer-wide across the book'} · tap a
+        facility to add it to your filter
       </p>
 
       {/* ALL facilities render (server returns the full set, no LIMIT); the cap is gone. */}
