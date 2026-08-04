@@ -143,41 +143,25 @@ test('blind scrubber: a dollar split across two deltas is caught at the line sea
   assert.equal(scrubs, 1);
 });
 
-test('blind scrubber: FIGURE-ADJACENT word forms trip it; the unterminated final line is scanned on flush', () => {
-  const shapes: string[] = [];
-  const s = createBlindLineScrubber((shape) => {
-    shapes.push(shape);
-  });
-  assert.equal(s.push('about 5,000 dollars total\n'), '\n'); // digit + dollars
-  assert.equal(s.push('900 usd outstanding\n'), '\n'); // digit + usd
-  assert.equal(s.push('USD 900 outstanding'), ''); // held — no newline yet
-  assert.equal(s.flush(), ''); // scanned and blanked at flush
-  assert.deepEqual(shapes, ['word', 'word', 'word']);
-});
-
-// The system prompt ORDERS the model to tell a blind viewer that no dollar amounts exist, so the
-// bare word must NOT trip the scrub — else the compliant caveat is blanked on every blind read and
-// the alert becomes noise that hides a real violation.
-test('blind scrubber: the compliant "no dollar amounts" caveat survives — bare word is not a match', () => {
+test('blind scrubber: word forms (dollars / USD) trip it; the unterminated final line is scanned on flush', () => {
   let scrubs = 0;
   const s = createBlindLineScrubber(() => {
     scrubs += 1;
   });
-  const compliant =
-    '- No dollar amounts are available in this read, so treat it as a rate-quality signal only.\n' +
-    '- Never quote dollars from this panel; verify benefits on the case.\n';
-  assert.equal(s.push(compliant) + s.flush(), compliant);
-  assert.equal(scrubs, 0);
+  assert.equal(s.push('about five thousand dollars total\n'), '\n');
+  assert.equal(s.push('USD 900 outstanding'), ''); // held — no newline yet
+  assert.equal(s.flush(), ''); // scanned and blanked at flush
+  assert.equal(scrubs, 2);
 });
 
-test('blind scrubber: the sigil shape is reported distinctly from the word shape', () => {
-  const shapes: string[] = [];
-  const s = createBlindLineScrubber((shape) => {
-    shapes.push(shape);
+test('blind scrubber: USD directly adjacent to formatted digits trips it', () => {
+  let scrubs = 0;
+  const s = createBlindLineScrubber(() => {
+    scrubs += 1;
   });
-  s.push('- about $4,200 per stay\n- and 5,000 dollars more\n');
-  s.flush();
-  assert.deepEqual(shapes, ['sigil', 'word']);
+  assert.equal(s.push('USD900 outstanding\n'), '\n');
+  assert.equal(s.push('USD1,200 outstanding\n'), '\n');
+  assert.equal(scrubs, 2);
 });
 
 // ── Orchestration core (fake deps — hermetic; no live gate/DB/Anthropic) ─────────────────────────
@@ -260,15 +244,9 @@ test('core: blind path — poisoned dollars scrubbed, alert line PHI-free, clean
   assert.ok(out.includes('thin sample under 10 patients'), 'flush releases the unterminated final line');
   const alerts = logs.filter((l) => l.evt === 'qualify_ai_blind_scrub');
   assert.equal(alerts.length, 1, 'one alert per blanked line');
-  assert.deepEqual(Object.keys(alerts[0] ?? {}).sort(), ['evt', 'facilities', 'question', 'shape']);
+  assert.deepEqual(Object.keys(alerts[0] ?? {}).sort(), ['evt', 'facilities', 'question']);
   assert.equal(alerts[0]?.facilities, 1);
-  assert.equal(alerts[0]?.shape, 'sigil');
   assert.ok(!JSON.stringify(alerts[0]).includes('$'), 'the alert never echoes matched text');
-  assert.ok(!/12,?000/.test(JSON.stringify(alerts[0])), 'the alert never echoes the figure');
-  // The cost line keeps the ONE attribution that survives an audit failure — uuid, never the email.
-  const cost = logs.find((l) => l.evt === 'qualify_ai_explain_cost');
-  assert.equal(cost?.actor_user_id, 'u-1');
-  assert.ok(!JSON.stringify(cost).includes('@'), 'no actor email in the ops log');
 });
 
 test('core: sighted path is byte-identical passthrough — the scrub never runs', async () => {

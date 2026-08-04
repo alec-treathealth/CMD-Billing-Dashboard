@@ -177,32 +177,10 @@ export function buildQualifyAiMessages(input: QualifyAiInput): { system: string;
 // rest of the answer. A dropped line beats a leaked figure; a leaked figure beats nothing only for
 // viewers entitled to amounts, who never pass through this path.
 
-/** Currency-shaped output that must never reach an amounts-blind viewer. TWO shapes, kept apart so
- *  the alert can say which one tripped without ever echoing the text:
- *    sigil — a '$' anywhere ('$4,200', '$ 500', even a bare column header)
- *    word  — 'dollar(s)'/'USD' ADJACENT TO A FIGURE ('5,000 dollars', 'USD 900', '900 usd')
- *
- *  The word form is deliberately figure-anchored, and that is a correctness fix, not a loosening:
- *  SYSTEM_PROMPT above tells the model that no dollar amounts exist in this data and not to say
- *  "check the dollars" to a blind viewer, so a COMPLIANT answer legitimately contains "no dollar
- *  amounts are available in this read". Matching the bare word would blank that caveat on every
- *  blind read — the admissions_seat persona's normal path — and bury a genuine violation in routine
- *  noise, which this repo has already learned is how a red light stops being a signal.
- *
- *  Not caught: a spelled-out amount carrying no digits ("five thousand dollars"). Accepted — the
- *  prompt is dollar-free by schema construction, so any such figure is a hallucination rather than
- *  protected data, and the same blind spot already applies to a bare "roughly 4,200 per stay". */
-export const BLIND_DOLLAR_SIGIL = /\$/;
-export const BLIND_DOLLAR_WORD = /\d[\d,.]*\s*(?:dollars?|usd)\b|\busd\s*\d/i;
-
-/** Which currency shape a line carries, or null when it is clean. */
-export type BlindDollarShape = 'sigil' | 'word';
-
-export function blindDollarShape(line: string): BlindDollarShape | null {
-  if (BLIND_DOLLAR_SIGIL.test(line)) return 'sigil';
-  if (BLIND_DOLLAR_WORD.test(line)) return 'word';
-  return null;
-}
+/** Dollar-shaped content that must never reach an amounts-blind viewer. Deliberately broad — ANY
+ *  '$', 'dollar(s)', or 'USD' trips it. False positives cost one blanked line on the blind path;
+ *  a miss costs a leak, so the trade is not close. */
+export const BLIND_DOLLAR_PATTERN = /\$|\b(?:dollars?|usd)(?:\b|\d)/i;
 
 export interface BlindLineScrubber {
   /** Feed one stream delta; returns the text safe to forward now (complete, scanned lines only). */
@@ -214,14 +192,12 @@ export interface BlindLineScrubber {
 /** Line-buffered scrub for the blind streaming path. Emission becomes line-granular — a line is
  *  held until its newline arrives — so a dollar split across two deltas ("$" + "4,200") can never
  *  slip through the seam. A matching line is BLANKED (its newline kept) so the markdown section
- *  structure the client splits on survives; `onScrub` fires once per blanked line, carrying only
- *  WHICH shape tripped (a two-value enum — never the matched text). */
-export function createBlindLineScrubber(onScrub: (shape: BlindDollarShape) => void): BlindLineScrubber {
+ *  structure the client splits on survives; `onScrub` fires once per blanked line. */
+export function createBlindLineScrubber(onScrub: () => void): BlindLineScrubber {
   let pending = '';
   const scan = (line: string): string => {
-    const shape = blindDollarShape(line);
-    if (!shape) return line;
-    onScrub(shape);
+    if (!BLIND_DOLLAR_PATTERN.test(line)) return line;
+    onScrub();
     return '';
   };
   return {
@@ -340,9 +316,8 @@ export async function runQualifyAiExplanation(input: unknown, deps: QualifyAiRun
       },
     });
   } catch {
-    // An audit hiccup must not block a non-PHI aggregate read. Attribution does NOT survive in the
-    // durable audit when this fires, so the cost line below carries actor_user_id (a staff uuid,
-    // non-PHI — never the email) to keep a DB-outage read traceable in the ops log at least.
+    // an audit hiccup must not block a non-PHI aggregate read; the action name is still attributable
+    // via the model-cost log line below
   }
 
   const { system, user } = buildQualifyAiMessages(safeInput);
@@ -353,14 +328,11 @@ export async function runQualifyAiExplanation(input: unknown, deps: QualifyAiRun
     session = live;
     // Defensive scrub on the SERVER-derived blind flag only — a sighted viewer's stream is untouched.
     const scrub = blind
-      ? createBlindLineScrubber((shape) =>
+      ? createBlindLineScrubber(() =>
           deps.log({
             evt: 'qualify_ai_blind_scrub',
             question: safeInput.question,
             facilities: safeInput.facilities.length,
-            // WHICH shape tripped, so a real violation is triageable without echoing the text:
-            // 'sigil' is almost certainly a figure; 'word' is a figure-adjacent dollars/USD phrase.
-            shape,
           }),
         )
       : null;
@@ -376,8 +348,6 @@ export async function runQualifyAiExplanation(input: unknown, deps: QualifyAiRun
       evt: 'qualify_ai_explain_cost',
       model: deps.model,
       question: safeInput.question,
-      actor_user_id: gate.actor.userId, // uuid only — the one attribution that survives an audit failure
-
       input_tokens: final.inputTokens,
       output_tokens: final.outputTokens,
       stop_reason: final.stopReason, // truncation ('max_tokens') and refusals must be visible in ops, not silent
