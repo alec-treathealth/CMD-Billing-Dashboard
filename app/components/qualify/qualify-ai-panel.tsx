@@ -6,22 +6,24 @@
  * Risks), a blinking caret while streaming. The input is assembled HERE from the snapshot the
  * user is already looking at — aggregates only; the server re-validates through the zod firewall
  * (zero dollar fields for every role) and re-derives the blind flag from the principal.
+ *
+ * Chips are DERIVED, not fixed (2026-08-04, the v2 mockup's chipsFor port): aiChips.ts conditions
+ * every candidate on what this search actually returned and flags the one most worth asking
+ * ("suggested" — teal ✦ + soft border until a question is running). While an answer streams, a
+ * sentinel keeps the panel's bottom edge in view (scrollIntoView 'nearest' — instant, so the
+ * global prefers-reduced-motion reset needs no per-component opt-out).
  */
 import { useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import { generateQualifyAiExplanation } from '@/lib/qualify/ai-actions';
 import { parseAiSections } from '../../../src/collections/aiAnalysis';
 import type { QualifyAiInput } from '../../../src/collections/qualifyAi';
 import type { QualifySnapshot } from '../../lib/qualify/contract';
+import { qualifyAiChips, type QualifyAiChipId } from '../../lib/qualify/aiChips';
+import { deriveTopRanks } from '../../lib/qualify/policyRating';
+import { ratingBucket } from '../../lib/qualify/rating';
+import { RATING_HEX } from './tokens';
 
-type ChipId = QualifyAiInput['question'];
-
-const CHIP_LABELS: Record<ChipId, string> = {
-  explain: 'Why does this facility score what it does?',
-  ranks: 'Which of our facilities does this policy pay best?',
-  placement: 'Should I place this client here?',
-  speed: 'How long until we see the money?',
-  improve: 'What would move this rating?',
-};
+type ChipId = QualifyAiChipId;
 
 function buildInput(question: ChipId, snap: QualifySnapshot, blind: boolean): QualifyAiInput {
   return {
@@ -71,17 +73,25 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
   const [error, setError] = useState<string | null>(null);
   const genRef = useRef(0);
   const readerRef = useRef<ReadableStreamDefaultReader<string> | null>(null);
+  const followRef = useRef<HTMLDivElement | null>(null);
   // Unmount mid-stream must cancel the server stream (bounded waste otherwise, but still waste).
   useEffect(() => () => { void readerRef.current?.cancel(); }, []);
+  // Auto-scroll-follow: as the streamed answer grows, keep its bottom edge in view. scrollIntoView
+  // 'nearest' nudges the nearest scrollable ancestor minimally (no jump when already visible) and
+  // is instant, not smooth — so prefers-reduced-motion needs nothing beyond the global reset.
+  // Gated on `streaming`: once the answer is done, the panel stops steering the scroll position.
+  // ALSO gated on the reader still being near the tail: following unconditionally scroll-LOCKS a
+  // reader who scrolled up to re-read an earlier bullet, because the next delta yanks them back.
+  useEffect(() => {
+    if (!streaming || !text) return;
+    const el = followRef.current;
+    if (!el) return;
+    const { top } = el.getBoundingClientRect();
+    if (top <= window.innerHeight + 200) el.scrollIntoView({ block: 'nearest' });
+  }, [streaming, text]);
 
-  const chips = useMemo<ChipId[]>(() => {
-    const out: ChipId[] = ['explain'];
-    if (snapshot.facilities.length > 1) out.push('ranks');
-    if (snapshot.facilities.length > 0) out.push('placement');
-    if (snapshot.facilities.some((f) => f.medianDaysToPayment !== null)) out.push('speed');
-    if (snapshot.facilities.some((f) => f.factors.some((x) => x.available && x.direction === 'neg'))) out.push('improve');
-    return out;
-  }, [snapshot]);
+  const { chips, suggestedId } = useMemo(() => qualifyAiChips(snapshot), [snapshot]);
+  const ranks = useMemo(() => deriveTopRanks(snapshot.facilities), [snapshot.facilities]);
 
   const run = useCallback(
     async (id: ChipId) => {
@@ -92,7 +102,13 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
       setStreaming(true);
       try {
         const res = await generateQualifyAiExplanation(buildInput(id, snapshot, blind));
-        if (genRef.current !== gen) return;
+        if (genRef.current !== gen) {
+          // Superseded while the action was still resolving (gate + audit + first token is 1-3s).
+          // Cancel rather than drop it: an unread stream keeps the model call — and the billing —
+          // running to completion, and the in-loop supersede path below already cancels.
+          if (res.ok) void res.stream.cancel();
+          return;
+        }
         if (!res.ok) {
           setStreaming(false);
           setError(
@@ -141,20 +157,33 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
       </div>
 
       <div className="grid grid-cols-1 gap-2 p-3.5 sm:grid-cols-2 lg:grid-cols-3">
-        {chips.map((id) => (
-          <button
-            key={id}
-            type="button"
-            onClick={() => run(id)}
-            aria-pressed={active === id}
-            className={[
-              'rounded-xl border px-3 py-2 text-left text-[12.5px] font-semibold leading-snug transition-colors',
-              active === id ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200 hover:text-teal700',
-            ].join(' ')}
-          >
-            {CHIP_LABELS[id]}
-          </button>
-        ))}
+        {chips.map((chip) => {
+          // The suggestion is a resting-state nudge only — it clears the moment any chip runs.
+          const suggested = chip.id === suggestedId && active === null;
+          return (
+            <button
+              key={chip.id}
+              type="button"
+              onClick={() => run(chip.id)}
+              aria-pressed={active === chip.id}
+              className={[
+                'rounded-xl border px-3 py-2 text-left text-[12.5px] font-semibold leading-snug transition-colors',
+                active === chip.id
+                  ? 'border-teal500 bg-teal50 text-teal700'
+                  : suggested
+                    ? 'border-teal200 bg-teal50 text-ink600 hover:text-teal700'
+                    : 'border-line bg-surface text-ink600 hover:border-teal200 hover:text-teal700',
+              ].join(' ')}
+            >
+              {suggested ? (
+                <span aria-hidden className="mr-1.5 text-teal500">
+                  ✦
+                </span>
+              ) : null}
+              {chip.label}
+            </button>
+          );
+        })}
       </div>
 
       {active === null ? (
@@ -191,12 +220,43 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
                   </div>
                 </div>
               ) : null}
+              {/* RANKS TABLE — shown when the answer IS a ranking, once the stream finishes. Derived
+                  from the snapshot rather than parsed from the prose: the model writes the reasoning,
+                  the numbers stay ours, so this can never disagree with the cards or the bar. */}
+              {!streaming && text && active === 'ranks' && ranks.length > 1 ? (
+                <div className="mt-3 border-t border-line pt-2.5">
+                  <div className="font-mono text-[9.5px] font-semibold uppercase tracking-[0.16em] text-teal700">
+                    Top {ranks.length} facilities on this policy
+                  </div>
+                  <div className="mt-2 flex flex-col">
+                    {ranks.map((r) => (
+                      <div
+                        key={r.name}
+                        className="grid grid-cols-[20px_minmax(0,1fr)_auto_auto] items-center gap-3 rounded-lg px-2 py-1.5 odd:bg-surface"
+                      >
+                        <span className="font-mono text-[11px] font-semibold text-ink400">{r.rank}</span>
+                        <span className="truncate text-[13px] font-semibold text-ink900" title={r.name}>
+                          {r.name}
+                        </span>
+                        <span className="whitespace-nowrap text-[11px] text-ink400">{r.evidence}</span>
+                        <span
+                          className="min-w-[34px] text-right font-mono text-[14px] font-semibold tabular-nums"
+                          style={{ color: RATING_HEX[ratingBucket(r.rating)] }}
+                        >
+                          {r.rating}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               {!streaming && text ? (
                 <p className="mt-3 border-t border-dashed border-line pt-2 text-[10.5px] text-ink400">
                   Grounded in the factors above · window {snapshot.ladder?.chosenDays ?? '—'}d · verify benefits on the
                   case before quoting anything.
                 </p>
               ) : null}
+              <div ref={followRef} aria-hidden className="h-px scroll-mb-4" />
             </div>
           )}
         </div>

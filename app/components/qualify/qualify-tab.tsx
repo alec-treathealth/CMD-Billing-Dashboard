@@ -75,6 +75,19 @@ import {
 import type { CmdEmployerOption } from '@/lib/actions';
 import { MultiSelectTagPicker, type PickerOption } from '@/components/ui/multi-select-tag-picker';
 import { buildQualifySearchParams, parseQualifySearchParams } from '@/lib/qualify/urlState';
+import { deriveScopeNotice, deriveFacilitySpread, deriveOnFileTags } from '@/lib/qualify/scopeNotice';
+import { derivePolicyRating } from '@/lib/qualify/policyRating';
+import { ScopeNotice } from '@/components/qualify/scope-notice';
+
+/** Band → the ON-DARK hue for the policy numeral (the light-surface RATING_HEX is unreadable on
+ *  teal900). Brighter, higher-contrast variants of the same five bands. */
+const POLICY_BAND_HEX: Record<'65' | '50' | '30' | '15' | '0', string> = {
+  '65': '#5FC9BE',
+  '50': '#5FC9BE',
+  '30': '#E9B44C',
+  '15': '#F0917C',
+  '0': '#F0917C',
+};
 import { filterFacilitiesByLoc, filterClaimsByLoc, type QualifyLocFilter } from '@/lib/qualify/groupClaims';
 import type { RatingBucket } from '@/lib/qualify/rating';
 import { CasesTable } from '@/components/qualify/cases-table';
@@ -853,6 +866,43 @@ export function QualifyTab({
       ? summary.totalCharge.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })
       : null;
 
+  // ── SCOPE HONESTY + KPI FLANKS (2026-08-04) — both derived from the SAME facility set the ranking
+  //    renders, so the tiles bracket what they average and the notice describes what is on screen.
+  //    `panelFacilities` is the LOC-lensed ranking; the identifier flag is what makes the ranking's
+  //    population (payer-wide) and the grid's population (this client) diverge. ──────────────────────
+  const rankedForScope = panelPayer && panelSnapshot ? panelFacilities : leadSnapshot?.facilities ?? [];
+  const facilitySpread = useMemo(() => deriveFacilitySpread(rankedForScope), [rankedForScope]);
+  const scopeNotice = useMemo(
+    () =>
+      deriveScopeNotice({
+        rankedCount: rankedForScope.length,
+        composedCount: summaryLoading ? null : summary?.count ?? null,
+        // singleIdentifier is the TERM (string | null) — never render it, only its presence.
+        identifierSearched: singleIdentifier !== null,
+        rankingPayerLabel: panelPayer ?? leadSnapshot?.policy?.carrier ?? null,
+        windowLabel: qualifyWindowLabel(windowSel),
+      }),
+    [rankedForScope.length, summaryLoading, summary?.count, singleIdentifier, panelPayer, leadSnapshot?.policy?.carrier, windowSel],
+  );
+
+  // The policy-level rating shown on the dark bar — the patient-weighted mean of the SAME cards the
+  // ranking renders, so the two can never contradict each other.
+  const policyRating = useMemo(() => derivePolicyRating(rankedForScope), [rankedForScope]);
+
+  // "On file" tags for the readout bar — only once the VOB actually matched the prefix. An unmatched
+  // policy contributes nothing rather than a row of five "not on file" chips.
+  const onFileTags = useMemo(
+    () => deriveOnFileTags(leadSnapshot?.policy?.found ? leadSnapshot.policy : null),
+    [leadSnapshot?.policy],
+  );
+
+  // The snapshot the AI explainer reads: the identifier lead when it resolved to anything, else the
+  // by-payer panel. Hoisted out of the JSX so the panel can move above the ranking.
+  const aiSnapshot =
+    leadSnapshot && (leadSnapshot.resolved || leadSnapshot.facilities.length > 0 || leadSnapshot.policy?.found)
+      ? leadSnapshot
+      : panelSnapshot;
+
   // SR-only announcement (the compose count updates silently otherwise).
   const liveMessage = !hasAnyFilter
     ? ''
@@ -1133,11 +1183,71 @@ export function QualifyTab({
               </button>
             ) : null}
           </div>
+
+          {/* ── POLICY RATING (prototype's showPolicyScore): the one number for "does this payer pay
+              us". RECONCILED BY CONSTRUCTION — it is the patient-weighted mean of exactly the ratings
+              on the cards below, so the bar and the ranking can never disagree. Null (no facility
+              clears the floor) renders "—" + "Not rated", never a 0. ── */}
+          {policyRating.ratedCount > 0 || rankedForScope.length > 0 ? (
+            <div className="flex items-center gap-3 border-l border-white/15 pl-4 min-[560px]:order-2">
+              <div className="text-right">
+                <div className="text-[10px] font-extrabold uppercase tracking-[0.11em] text-white/55">Policy rating</div>
+                <div className="mt-px text-[11px] text-white/60">{policyRating.basis}</div>
+              </div>
+              <div
+                className="font-display text-[36px] font-semibold leading-[0.85] tracking-tight tabular-nums"
+                style={{ color: policyRating.band ? POLICY_BAND_HEX[policyRating.band] : 'rgba(255,255,255,.72)' }}
+              >
+                {policyRating.rating ?? '—'}
+              </div>
+              <span
+                className="rounded-full px-2.5 py-[3px] text-[11.5px] font-bold"
+                style={{
+                  background: policyRating.band ? `${POLICY_BAND_HEX[policyRating.band]}29` : 'rgba(255,255,255,.1)',
+                  color: policyRating.band ? POLICY_BAND_HEX[policyRating.band] : 'rgba(255,255,255,.72)',
+                }}
+              >
+                {policyRating.verdict}
+              </span>
+            </div>
+          ) : null}
+
+          {/* ── "ON FILE" (prototype's policy tag row): what the plan behind this prefix ACTUALLY is —
+              carrier · funding · policy type · plan · network. The rep never types any of it, and a
+              missing field says "not on file" rather than being silently dropped, because "we don't
+              know the network" and "in network" are different answers. Plan-level, non-PHI: no
+              employer, no group number (presence-only by contract), no benefit dollars. ── */}
+          {onFileTags.length > 0 ? (
+            <div className="flex basis-full flex-wrap items-center gap-1.5 border-t border-white/15 pt-2.5">
+              <span className="mr-1 text-[10px] font-extrabold uppercase tracking-[0.11em] text-white/50">On file</span>
+              {onFileTags.map((t) => (
+                <span
+                  key={t.label}
+                  title={`${t.label} · ${t.value}`}
+                  className={[
+                    'inline-flex max-w-full items-baseline gap-1.5 rounded-full border border-dashed px-2.5 py-[3px]',
+                    t.missing ? 'border-white/20' : 'border-teal200/45 bg-white/[0.06]',
+                  ].join(' ')}
+                >
+                  <span className="shrink-0 text-[8.5px] font-bold uppercase tracking-[0.07em] text-white/50">{t.label}</span>
+                  <span
+                    className={[
+                      'min-w-0 truncate text-[11.5px] font-semibold leading-snug',
+                      t.mono ? 'font-mono tabular-nums' : '',
+                      t.missing ? 'text-white/50' : 'text-white',
+                    ].join(' ')}
+                  >
+                    {t.value}
+                  </span>
+                </span>
+              ))}
+            </div>
+          ) : null}
         </div>
       </div>
 
       {/* ── KPI TILES (Phase 2: scoped to payer + facility; sample-gated) ── */}
-      <BookKpiTiles kpis={kpis} locActive={locFilter !== null} scopeLabel={kpiScopeLabel} />
+      <BookKpiTiles kpis={kpis} locActive={locFilter !== null} scopeLabel={kpiScopeLabel} spread={facilitySpread} />
 
       {/* ── CONTEXT LINE + LIVE MATCH COUNT + FACILITY RANKING + COMPOSED CASES ── */}
       {hasAnyFilter ? (
@@ -1201,10 +1311,23 @@ export function QualifyTab({
             <span className="text-[#7fae9f]">BXR + Indigo</span>
           </div>
 
-          <div className="grid grid-cols-1 items-start gap-4 min-[960px]:grid-cols-[380px_1fr]">
+          {/* ── SCOPE HONESTY (2026-08-04): the ranking is payer-WIDE while the grid is fully composed,
+              so when those two populations disagree the screen says so — ABOVE the ranking, where it
+              is read, not below a 27-card list. Pure decision in lib/qualify/scopeNotice.ts. ── */}
+          <ScopeNotice notice={scopeNotice} />
+
+          {/* ── AI EXPLAINER — moved ABOVE the ranking (2026-08-04). It used to render after the
+              two-column grid, which on a 27-facility payer put it a full screen below the fold: the
+              answer to "does this payer pay us" was the least visible thing on the page. Lead
+              (identifier) snapshot preferred; by-payer panel otherwise. ── */}
+          {aiSnapshot ? <QualifyAiPanel snapshot={aiSnapshot} blind={!hasAmounts} /> : null}
+
+          <div className="grid grid-cols-1 items-start gap-4 min-[1280px]:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
             {/* LEFT: the payer-wide facility ranking — for the ONE selected payer, or the payer DERIVED
                 from a single-identifier search (so an alpha/member search never forces a payer pick).
-                0/2+ payers with no resolvable identifier → a one-line note. */}
+                0/2+ payers with no resolvable identifier → a one-line note. Widened from a fixed 380px
+                column (2026-08-04): the scorecard carries a hero numeral, a verdict pill, evidence pips,
+                a weight bar and a 6-factor expansion, and none of that is legible at 380px. */}
             <div>
               {payerSelection.length === 1 || singleIdentifier ? (
                 panelPayer && panelSnapshot ? (
@@ -1286,15 +1409,6 @@ export function QualifyTab({
               )}
             </div>
           </div>
-
-          {/* ── Phase H: the AI explainer — chips + streamed TL;DR/Signals/Risks, grounded in the
-              snapshot on screen. Lead (identifier) snapshot preferred; by-payer panel otherwise. */}
-          {(() => {
-            const aiSnap = leadSnapshot && (leadSnapshot.resolved || leadSnapshot.facilities.length > 0 || leadSnapshot.policy?.found)
-              ? leadSnapshot
-              : panelSnapshot;
-            return aiSnap ? <QualifyAiPanel snapshot={aiSnap} blind={!hasAmounts} /> : null;
-          })()}
 
           <CohortSheet
             data={cohortSheet?.data ?? null}
