@@ -101,9 +101,9 @@ Run all five before any commit. This is the bar for "verified" — not typecheck
 alone, and especially not when a shared helper changed.
 
 ```bash
-npm test                          # root hermetic suite — 1076 pass / 0 fail (1070 measured on clean origin/main @9f9d01d 2026-08-03, +6 intel preflight/budget tests in this branch)
+npm test                          # root hermetic suite — 1076 pass / 0 fail (measured 2026-08-04 on the tree of main @53b49d6)
 npm run typecheck                 # root tsc (strict: noUncheckedIndexedAccess)
-cd app && npm test                # app suite — 198 pass / 0 fail (measured on clean origin/main @9f9d01d, 2026-08-03)
+cd app && npm test                # app suite — 206 pass / 0 fail (measured 2026-08-04 on the tree of main @53b49d6; #83 added 8)
 cd app && npm run typecheck        # app tsc
 cd app && npm run build            # catches bundler-only failures tsc cannot
 ```
