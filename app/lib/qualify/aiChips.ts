@@ -29,6 +29,7 @@
  */
 import type { QualifyFacility, QualifySnapshot } from './contract';
 import { QUALIFY_RATING_CONFIDENT_PATIENTS } from './sampleGate';
+import { facilityFactorsDisagree } from './ratingV2';
 import type { QualifyAiInput } from '../../../src/collections/qualifyAi';
 
 export type QualifyAiChipId = QualifyAiInput['question'];
@@ -60,10 +61,10 @@ function hasDirection(f: QualifyFacility, direction: 'pos' | 'neg'): boolean {
   return f.factors.some((x) => x.available && x.direction === direction);
 }
 
-/** Factor readings that disagree — a live positive AND a live negative on the same facility. */
-function inConflict(f: QualifyFacility): boolean {
-  return hasDirection(f, 'pos') && hasDirection(f, 'neg');
-}
+/** Factor readings that disagree — a live positive AND a live negative on the same facility. Shared
+ *  with the scorecard's "factors disagree" badge (ratingV2.ts) so the chip logic and the card cannot
+ *  drift on what a conflict is. */
+const inConflict = (f: QualifyFacility): boolean => facilityFactorsDisagree(f.factors);
 
 /** Policy-level distinct patients: the chosen ladder rung when the ladder ran, else the facility
  *  sum (a patient seen at two facilities counts twice there — acceptable for a >=10 threshold). */

@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { getQualifySnapshotCore, type QualifyDeps } from '../app/lib/qualify/core.js';
 import { requireQualifyPrincipalFromAccess } from '../app/lib/qualify/principal.js';
+import { facilityFactorsDisagree } from '../app/lib/qualify/ratingV2.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../src/tenants.js';
 import type { QualifyFacilityRow } from '../src/collections/qualifyQuery.js';
 import type { QualifyPolicyRow, QualifyWindowRungsRow } from '../src/collections/qualifyPolicyQuery.js';
@@ -292,4 +293,20 @@ test('vobStale boundary: the 48h bar applies EXACTLY — a 49h-old feed flags, a
   const s2 = await getQualifySnapshotCore(fresh, AUTO_IN);
   assert.equal(s1.policy!.vobStale, true);
   assert.equal(s2.policy!.vobStale, false);
+});
+
+// ── "Factors disagree" (2026-08-04): the case a single blended numeral hides ─────────────────────
+
+test('facilityFactorsDisagree: a live positive AND a live negative is a conflict', () => {
+  const F = (direction: 'pos' | 'neg' | 'neu', available = true) =>
+    ({ key: 'claims', label: 'x', weight: 25, score: 0.5, available, direction, detail: 'd' }) as const;
+  assert.equal(facilityFactorsDisagree([F('pos'), F('neg')]), true);
+  assert.equal(facilityFactorsDisagree([F('neg'), F('pos')]), true, 'order-independent');
+  assert.equal(facilityFactorsDisagree([F('pos'), F('pos')]), false);
+  assert.equal(facilityFactorsDisagree([F('neg'), F('neg')]), false);
+  assert.equal(facilityFactorsDisagree([F('pos'), F('neu'), F('neu')]), false, 'neutral is not negative');
+  assert.equal(facilityFactorsDisagree([]), false);
+  // UNAVAILABLE is missing data, not a signal: it can neither create nor resolve a disagreement.
+  assert.equal(facilityFactorsDisagree([F('pos'), F('neg', false)]), false);
+  assert.equal(facilityFactorsDisagree([F('pos', false), F('neg')]), false);
 });

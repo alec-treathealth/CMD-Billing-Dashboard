@@ -33,7 +33,7 @@
  */
 import { ratingBucket, RATING_LEGEND, type RatingBucket } from '../../lib/qualify/rating';
 import { ratingSampleTier, ratingEvidencePips, QUALIFY_RATING_MIN_PATIENTS } from '../../lib/qualify/sampleGate';
-import { IQ_BAND_LABELS, IQ_BAND_VERDICTS, PROVENANCE_LABELS } from '../../lib/qualify/ratingV2';
+import { IQ_BAND_LABELS, IQ_BAND_VERDICTS, PROVENANCE_LABELS, facilityFactorsDisagree } from '../../lib/qualify/ratingV2';
 import { CONFIDENCE_LEGEND, type QualifyConfidence } from '../../lib/qualify/confidence';
 import { bucketClass, confidenceClass, iqBandClass } from './colors';
 import type { QualifyFacility, QualifyFactorReading, QualifyProvenance } from '../../lib/qualify/contract';
@@ -216,6 +216,9 @@ export function FacilityPanel({
             const selected = selectedKeys.has(f.facilityKey);
             const expanded = expandedKeys.has(f.facilityKey);
             const unrated = f.ratingV2 === null;
+            // Only meaningful on a card that shows a number: an unrated/suppressed card has no
+            // blended figure for a disagreement to be hiding behind.
+            const factorsDisagree = !unrated && tier !== 'insufficient' && facilityFactorsDisagree(f.factors);
             // v2 paint: the left border + verdict block color from the IQ band; the legacy bucket
             // still grades the secondary confirmed-% line via a nested span class.
             const paint = unrated || tier === 'insufficient' ? 'q-neutral' : iqBandClass(f.iqBand);
@@ -269,6 +272,18 @@ export function FacilityPanel({
                           thin sample
                         </span>
                       ) : null}
+                      {/* FACTORS DISAGREE — the case a single blended numeral hides (strong allowed
+                          rate, terrible aging). Badged so the rep opens the reasoning rather than
+                          reading a mid-band number and moving on. Coral, because it is the one thing
+                          on this card that says "the number alone is not the answer". */}
+                      {factorsDisagree ? (
+                        <span
+                          className="inline-flex shrink-0 items-center rounded-full border border-[#F0917C] bg-[#FCEDE8] px-1.5 py-px text-[10px] font-semibold text-status-danger"
+                          title="At least one factor reads positive and another reads negative — the blended rating hides that. Open “Why this score”."
+                        >
+                          factors disagree
+                        </span>
+                      ) : null}
                       {f.nextUrDate ? (
                         <span
                           className="inline-flex shrink-0 items-center rounded-full border border-[#F0917C] bg-[#FCEDE8] px-1.5 py-px text-[10px] font-semibold text-status-danger"
@@ -285,25 +300,29 @@ export function FacilityPanel({
                     </span>
                     {/* v2 VERDICT block: the one big display numeral + the IQ band pill (the billing
                         team's own 65/50/30/15/0 scale); the confirmed-% is the secondary metric. */}
+                    {/* THE VERDICT DOMINATES (2026-08-04). Was a 26px numeral sized for the old fixed
+                        380px column, where it read as just another number in a dense row; the whole
+                        point of this card is that the rep sees one figure from across the desk. The
+                        supporting metrics recede beneath it. */}
                     <span className="shrink-0 text-right">
-                      <span className="q-pct block font-display text-[26px] font-semibold leading-none tabular-nums">
+                      <span className="q-pct block font-display text-[38px] font-semibold leading-[0.9] tabular-nums min-[720px]:text-[52px]">
                         {unrated || tier === 'insufficient' ? '—' : f.ratingV2}
                       </span>
-                      <span className="mt-0.5 inline-flex items-center gap-1">
+                      <span className="mt-1 inline-flex items-center gap-1">
                         {!unrated && tier !== 'insufficient' && f.iqBand ? (
                           <span
-                            className="inline-flex items-center rounded-full px-1.5 py-px text-[9.5px] font-bold"
+                            className="inline-flex items-center rounded-full px-2 py-[2px] text-[10.5px] font-bold"
                             style={{ background: 'var(--q-wash)', color: 'var(--q-c)' }}
                           >
                             {IQ_BAND_VERDICTS[f.iqBand]} · {IQ_BAND_LABELS[f.iqBand]}
                           </span>
                         ) : (
-                          <span className="inline-flex items-center rounded-full border border-line px-1.5 py-px text-[9.5px] font-bold text-ink400">
+                          <span className="inline-flex items-center rounded-full border border-line px-2 py-[2px] text-[10.5px] font-bold text-ink400">
                             Not rated
                           </span>
                         )}
                       </span>
-                      <span className="mt-0.5 block text-[11px] tabular-nums text-ink400">
+                      <span className="mt-1 block text-[11px] tabular-nums text-ink400">
                         {showPct && pct !== null ? `${Math.round(pct)}% allowed` : ''}
                       </span>
                     </span>
