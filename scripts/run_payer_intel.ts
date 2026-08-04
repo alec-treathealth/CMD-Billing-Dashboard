@@ -141,6 +141,7 @@ async function main(): Promise<void> {
         inserted: result.counts?.inserted ?? 0,
         unchanged: result.counts?.unchanged ?? 0,
         quarantined: result.counts?.quarantined ?? 0,
+        domain_escapes: result.research.domainEscapes.length,
         cost_usd: result.costUsd,
         wall_s: Math.round(result.research.wallMs / 1000),
       });
@@ -148,6 +149,9 @@ async function main(): Promise<void> {
         `${result.research.payload?.findings.length ?? 0} findings, ` +
         `${result.research.retrievedUrls.length} urls, $${result.costUsd.toFixed(4)}`);
       for (const failure of result.research.failures) console.log(`      FAILED -> ${failure}`);
+      // GATE D VIOLATION lines land here — stderr so the Actions log shows them
+      // loud even on a passing run. Public URLs and domain names only, never PHI.
+      for (const anomaly of result.research.anomalies) console.error(`      ${anomaly}`);
     } catch (err) {
       // One key's crash must not take the roster down.
       const message = err instanceof Error ? err.message : String(err);

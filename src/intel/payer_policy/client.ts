@@ -327,7 +327,20 @@ export async function researchPayer(
   // Dedupe by URL, keeping the first tool that surfaced it.
   const seen = new Map<string, RetrievedUrl>();
   for (const item of urls) if (!seen.has(item.url)) seen.set(item.url, item);
-  const retrievedVia = [...seen.values()];
+  // GATE D(2) — PER-URL EXCLUSION, not a run failure (Alec's ruling 2026-08-04,
+  // supersedes fail-closed). `allowed_domains` is not strictly honored upstream:
+  // web_fetch escaped it in ~11% of measured key-runs (a fixed arXiv/medRxiv/NCBI
+  // set), and failing the whole run discarded ~97 good URLs' research each time.
+  // Excluding the escaped URL BEFORE the provenance set is built means a finding
+  // citing it fails resolveStatus and QUARANTINES via the ordinary path — it can
+  // never be legitimized — while the run passes on its legitimate retrievals.
+  // Exclusion runs before gates C and D(1), so a run whose EVERY retrieval
+  // escaped ends with an empty legitimate set and still fails closed via D(1).
+  const retrievedVia: RetrievedUrl[] = [];
+  const domainEscapes: RetrievedUrl[] = [];
+  for (const item of seen.values()) {
+    (matchesAnyDomain(item.url, entry.domains) ? retrievedVia : domainEscapes).push(item);
+  }
   const dedupedUrls = retrievedVia.map((item) => item.url);
   const failures: string[] = [];
   if (transportFailure) failures.push(`TRANSPORT — ${transportFailure}`);
@@ -342,14 +355,10 @@ export async function researchPayer(
   if (dedupedUrls.length === 0 && (payload?.findings ?? []).some((f) => f?.source_url)) {
     failures.push('GATE C — retrieved-URL set empty while findings assert source_urls');
   }
-  // GATE D: nothing may mask a key whose own sources returned nothing, and no
-  // retrieval may escape the key's domain scope.
+  // GATE D(1): nothing may mask a key whose own sources returned nothing. Still a
+  // full-run failure — per-URL exclusion applies only to D(2) domain escapes.
   if (dedupedUrls.length === 0) {
     failures.push("GATE D — zero retrieved URLs (this key's own sources returned nothing)");
-  }
-  const offending = dedupedUrls.filter((url) => !matchesAnyDomain(url, entry.domains));
-  if (offending.length) {
-    failures.push(`GATE D — ${offending.length}/${dedupedUrls.length} retrieved URLs outside allowed_domains`);
   }
   // GATE E: max_tokens mid-emit_findings yields a truncated strict-tool input that
   // parses as valid JSON but is not the whole payload. A healthy turn 1 ends on
@@ -358,10 +367,20 @@ export async function researchPayer(
     failures.push('GATE E — stop_reason max_tokens (truncated strict-tool input)');
   }
 
+  // Loud, one line per escaped URL: url + admitting tool + the allow-list it
+  // escaped. These are public bulletin/preprint URLs — non-PHI by construction.
+  for (const escaped of domainEscapes) {
+    anomalies.push(
+      `GATE D VIOLATION — ${escaped.url} (via ${escaped.via}) outside allowed_domains ` +
+      `[${entry.domains.join(', ')}] — excluded from retrieved set`,
+    );
+  }
+
   return {
     payload,
     retrievedUrls: dedupedUrls,
     retrievedVia,
+    domainEscapes,
     toolErrors,
     searchRequests,
     fetchRequests,
