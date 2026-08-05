@@ -62,6 +62,7 @@ import {
   buildCmdExplorerQuery,
   buildCmdSearchSummaryQueries,
   buildCmdFacilityOptionsQuery,
+  buildQualifyFacilityOptionsQuery,
   buildCmdPayerOptionsQuery,
   buildCmdEmployerOptionsQuery,
   buildCohortCurveQueries,
@@ -82,6 +83,7 @@ import {
   type CmdSearchGroup,
   type CmdComboGroup,
   type CmdFacilityOption,
+  type QualifyFacilityOption,
   type CmdEmployerOption,
   type VobMarketFilter,
   type CohortCurvePoint,
@@ -149,6 +151,7 @@ export type {
   CmdComboGroup,
   CmdSearchSummary,
   CmdFacilityOption,
+  QualifyFacilityOption,
   CmdEmployerOption,
   CohortCurvePoint,
   CohortCurve,
@@ -2755,6 +2758,41 @@ export const cmdExplorerFacilities = unstable_cache(
   // every pass, so any visitor right after a cron run ate the full cost. A dedicated tag + a longer
   // timer means the dropdown is a warm cache hit ~always; a brand-new facility surfaces within the
   // hour (its rows are already in the grid regardless — this only gates the filter dropdown's list).
+  { revalidate: 3600, tags: ['cmd-facilities'] },
+);
+
+/**
+ * Qualify's facility options — ONE ROW PER FACILITY, with every raw CMD spelling in `variants`.
+ *
+ * Separate from cmdExplorerFacilities on purpose: the Collections explorer keeps the raw-text-grain
+ * option list (it is production and out of scope), while Qualify's picker needs the de-duplicated
+ * shape so `LONESTAR MENTAL HEALTH` and `LONESTAR MENTAL HEALTH LLC` stop rendering as two
+ * indistinguishable rows. Same vocabulary, same crosswalk, different GROUP BY — see
+ * buildQualifyFacilityOptionsQuery.
+ *
+ * Own cache key, same 'cmd-facilities' tag and 1-hour timer as the explorer list: the vocabulary is
+ * the same near-static set, so both should warm and expire together.
+ */
+export const qualifyFacilityOptions = unstable_cache(
+  async (entityIds: string[]): Promise<QualifyFacilityOption[]> => {
+    const { sql, params } = buildQualifyFacilityOptionsQuery(entityIds);
+    const { rows } = await readerExecutor().query<{
+      display: string | null;
+      value: string;
+      variants: string[] | null;
+      care_setting: string | null;
+    }>(sql, params);
+    return rows.map((r) => ({
+      value: r.value,
+      // array_agg always contains at least the grouped row, but a null would silently drop the
+      // facility from the filter rather than the list — fall back to the canonical value.
+      variants: Array.isArray(r.variants) && r.variants.length > 0 ? r.variants : [r.value],
+      display: r.display ?? r.value,
+      care_setting:
+        r.care_setting === 'IP' || r.care_setting === 'OP' || r.care_setting === 'BOTH' ? r.care_setting : null,
+    }));
+  },
+  ['qualify-facility-options'],
   { revalidate: 3600, tags: ['cmd-facilities'] },
 );
 

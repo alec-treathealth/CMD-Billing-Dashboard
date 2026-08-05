@@ -21,7 +21,7 @@ import {
   loadQualifyClaimPrefixToken,
   loadQualifyPatientCohort,
   cmdExplorerEmployers,
-  cmdExplorerFacilities,
+  qualifyFacilityOptions,
   cmdExplorerPayers,
   CMD_FUNDING_MARKETS,
   recordAccess,
@@ -29,7 +29,7 @@ import {
   revealCmdExplorerRows,
   type CmdEmployerOption,
 } from '@/lib/server';
-import type { CmdFacilityOption } from '../../../src/collections/cmdExplorerQuery';
+import type { QualifyFacilityOption } from '../../../src/collections/cmdExplorerQuery';
 import { memberIdBlindIndex, alphaPrefixBlindIndex, groupNumberBlindIndex, patientNameBlindIndex } from '../../../src/collections/blindIndex';
 import {
   loadQualifyPolicy,
@@ -324,7 +324,7 @@ export async function loadQualifyEmployers(term: string): Promise<QualifyEmploye
   }
 }
 
-export type QualifyFacilityOptionsResult = { ok: true; facilities: CmdFacilityOption[] } | { ok: false };
+export type QualifyFacilityOptionsResult = { ok: true; facilities: QualifyFacilityOption[] } | { ok: false };
 export type QualifyPayerOptionsResult = { ok: true; payers: string[] } | { ok: false };
 
 /**
@@ -333,12 +333,17 @@ export type QualifyPayerOptionsResult = { ok: true; payers: string[] } | { ok: f
  * principal's PINNED cross-tenant [BXR, Indigo] entityIds — Qualify is deliberately cross-tenant, so the
  * option sets span both books. Reuse the SAME collections option loaders (same rollup, same dimension
  * crosswalk) with Qualify's entity array where collections passes one tenant. Never PHI.
+ *
+ * FACILITIES ARE DE-DUPLICATED HERE and NOT in Collections: `qualifyFacilityOptions` collapses the
+ * raw-text grain to one row per resolved facility_code and returns every spelling in `variants`, so
+ * the picker stops showing two identical `LONESTAR MENTAL HEALTH LLC` rows that scope to 4,156 and
+ * 81 lines respectively. The Collections explorer deliberately keeps the raw-text list.
  */
 export async function loadQualifyFacilityOptions(): Promise<QualifyFacilityOptionsResult> {
   const gate = await requireQualifyPrincipal();
   if (!gate.ok) return { ok: false };
   try {
-    return { ok: true, facilities: await cmdExplorerFacilities(gate.entityIds) };
+    return { ok: true, facilities: await qualifyFacilityOptions(gate.entityIds) };
   } catch {
     return { ok: false };
   }

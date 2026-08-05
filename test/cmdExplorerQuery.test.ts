@@ -5,6 +5,7 @@ import {
   buildCmdExplorerQuery,
   buildCmdSearchSummaryQueries,
   buildCmdFacilityOptionsQuery,
+  buildQualifyFacilityOptionsQuery,
   buildCmdPayerOptionsQuery,
   buildCmdEmployerOptionsQuery,
   CMD_FUNDING_MARKETS,
@@ -235,6 +236,42 @@ test('facility options query is tenant-scoped and its only bound value is entity
   assert.match(sql, /left join collections\.facilities fe on upper\(fe\.facility_name\) = upper\(r\.facility\)/);
   assert.match(sql, /left join collections\.cmd_facility_aliases a on upper\(a\.facility_text\) = upper\(r\.facility\)/);
   assert.match(sql, /f\.facility_code = coalesce\(fe\.facility_code, a\.facility_code\)/);
+  assertAllBound(sql, params);
+});
+
+test('the COLLECTIONS facility options stay raw-text grain — that surface is out of scope', () => {
+  // Guard against "fixing" the duplicate-option problem here too. Collections is production; only
+  // Qualify's picker was de-duplicated, and it uses its own builder.
+  const { sql } = buildCmdFacilityOptionsQuery(ENTITY);
+  assert.match(sql, /group by r\.facility/, 'Collections groups by the RAW text, one row per spelling');
+  assert.doesNotMatch(sql, /array_agg/);
+  assert.doesNotMatch(sql, /display_acronym/);
+});
+
+test('QUALIFY facility options collapse to ONE ROW PER FACILITY and carry every raw spelling', () => {
+  const { sql, params } = buildQualifyFacilityOptionsQuery(ENTITY);
+  // Same vocabulary + same two-path crosswalk as the Collections list, so the option set stays
+  // exactly the set of facility texts the grid/summary predicate can match.
+  assert.match(sql, /select distinct value as facility from collections\.cmd_explorer_filter_options/);
+  assert.match(sql, /kind = 'facility'/);
+  assert.match(sql, /left join collections\.facilities fe on upper\(fe\.facility_name\) = upper\(r\.facility\)/);
+  assert.match(sql, /left join collections\.cmd_facility_aliases a on upper\(a\.facility_text\) = upper\(r\.facility\)/);
+  assert.doesNotMatch(sql, /from collections\.cmd_explorer_rows/);
+
+  // THE DE-DUPLICATION: group by the RESOLVED code, so `LONESTAR MENTAL HEALTH` and
+  // `LONESTAR MENTAL HEALTH LLC` (both LSMH) become one option instead of two identical-looking rows.
+  assert.match(sql, /group by coalesce\(f\.facility_code, upper\(r\.facility\)\)/);
+  // ...and keep EVERY spelling, because the filter must cover all 4,237 charge lines, not 4,156 or 81.
+  assert.match(sql, /array_agg\(r\.facility order by r\.facility\) as variants/);
+  // An unresolved text (the `No Facility` placeholder) groups by itself and keeps its own row.
+  assert.match(sql, /min\(r\.facility\) as value/);
+
+  // Label from display_acronym FIRST: it is the curated short label, populated for all 16 mnemonic
+  // facilities and NULL for every 8-digit Indigo one — hence the mandatory facility_name fallback.
+  assert.match(sql, /coalesce\(f\.display_acronym, f\.facility_name, min\(r\.facility\)\) as display/);
+
+  assert.deepEqual(params, [ENTITY]);
+  assert.equal(params.length, 1);
   assertAllBound(sql, params);
 });
 

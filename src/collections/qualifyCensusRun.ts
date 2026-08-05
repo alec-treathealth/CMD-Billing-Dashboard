@@ -35,7 +35,7 @@
 import type pg from 'pg';
 import { runQualifyCensusSync } from './qualifyCensusSync.js';
 import type { CensusSyncStats } from './qualifyCensusSync.js';
-import type { CensusBoardConfig } from './qualifyCensus.js';
+import { conformanceHasGap, type CensusFacilityConfig } from './qualifyCensus.js';
 
 /** Matches the 0087 CHECK constraint. */
 export type QualifyCensusRunStatus = 'ok' | 'partial' | 'failed';
@@ -53,16 +53,21 @@ export interface QualifyCensusRunResult extends CensusSyncStats {
 }
 
 /**
- * Boards that synced but whose expected monday column titles did not all resolve.
+ * FACILITIES whose conformance line records something an operator must act on.
  *
  * This is the sync's quietest failure: when `resolveCensusColumns` finds none of the titles, the
  * item fetch is skipped entirely, `aggregateCensusItems([])` returns zeros, and the upsert
- * overwrites a good facility row with those zeros plus a fresh `synced_at` — all while
- * `boards_synced` is incremented. Left unrecorded, the run reads a clean 'ok' over silently
- * zeroed data, which is the same indistinguishable-states failure this module exists to end.
+ * overwrites a good facility row with those zeros plus a fresh `synced_at` — all while the board
+ * counts as synced. Left unrecorded, the run reads a clean 'ok' over silently zeroed data, which is
+ * the same indistinguishable-states failure this module exists to end.
+ *
+ * The predicate now spans four causes, not one (see conformanceHasGap): a missing title, a title
+ * that RESOLVED BUT CARRIED NO VALUES, a board whose columns contradict its declared family, and a
+ * family <-> care_setting violation. The second is why this needed widening at all: title presence
+ * alone reported `conformance_gap_boards: 0` for months against an API-empty LOS formula column.
  */
 export function countConformanceGaps(stats: Pick<CensusSyncStats, 'conformance'>): number {
-  return stats.conformance.filter((c) => c.missing.length > 0).length;
+  return stats.conformance.filter(conformanceHasGap).length;
 }
 
 export interface QualifyCensusRunDeps {
@@ -73,9 +78,12 @@ export interface QualifyCensusRunDeps {
   /** Monotonic clock (ms) for the duration measurement; injectable for tests. Default Date.now. */
   now?: () => number;
   /** The sync itself — injected so tests exercise this module without monday I/O. */
-  sync?: (client: pg.PoolClient, opts?: { boards?: readonly CensusBoardConfig[]; today?: string }) => Promise<CensusSyncStats>;
+  sync?: (
+    client: pg.PoolClient,
+    opts?: { facilities?: readonly CensusFacilityConfig[]; today?: string },
+  ) => Promise<CensusSyncStats>;
   /** Passed straight through to the sync. */
-  opts?: { boards?: readonly CensusBoardConfig[]; today?: string };
+  opts?: { facilities?: readonly CensusFacilityConfig[]; today?: string };
 }
 
 /**
@@ -93,11 +101,17 @@ export interface QualifyCensusRunDeps {
  * a healthy run over zeroed data — see countConformanceGaps.
  */
 export function deriveCensusRunStatus(
-  stats: Pick<CensusSyncStats, 'boards_total' | 'boards_synced' | 'boards_failed' | 'conformance'>,
+  stats: Pick<
+    CensusSyncStats,
+    'boards_total' | 'boards_synced' | 'boards_failed' | 'facilities_failed' | 'conformance'
+  >,
 ): QualifyCensusRunStatus {
   if (stats.boards_total === 0) return 'ok';
   if (stats.boards_synced === 0) return 'failed';
   if (stats.boards_failed > 0) return 'partial';
+  // A facility can fail with every board healthy: its upsert threw, or one board of an N:1 set
+  // failed so the whole facility was skipped rather than upserted from a partial item set.
+  if (stats.facilities_failed > 0) return 'partial';
   if (countConformanceGaps(stats) > 0) return 'partial';
   return 'ok';
 }
@@ -186,8 +200,11 @@ export async function runQualifyCensusSyncLogged(deps: QualifyCensusRunDeps): Pr
               stats.boards_failed > 0
                 ? `${stats.boards_failed} of ${stats.boards_total} board(s) failed; see cron logs for per-board messages`
                 : null,
+              stats.facilities_failed > 0
+                ? `${stats.facilities_failed} of ${stats.facilities_total} facilit(ies) not upserted`
+                : null,
               gaps > 0
-                ? `${gaps} of ${stats.boards_total} board(s) synced with missing monday columns — aggregates zeroed`
+                ? `${gaps} of ${stats.facilities_total} facilit(ies) synced with a conformance gap (missing or value-empty monday columns, family or care_setting mismatch)`
                 : null,
             ]
               .filter((s): s is string => s !== null)
@@ -201,12 +218,16 @@ export async function runQualifyCensusSyncLogged(deps: QualifyCensusRunDeps): Pr
     const durationMs = now() - startedMs;
     const message = err instanceof Error ? err.message : String(err);
     const empty: CensusSyncStats = {
+      facilities_total: 0,
+      facilities_synced: 0,
+      facilities_failed: 0,
       boards_total: 0,
       boards_synced: 0,
       boards_failed: 0,
       conformance: [],
       capacity_mapped: 0,
       capacity_unmapped: [],
+      blocked_boards: [],
     };
     await closeRow('failed', empty, truncateErrorLabel(message), durationMs);
     throw err;
