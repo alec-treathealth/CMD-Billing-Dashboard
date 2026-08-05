@@ -121,7 +121,8 @@ export function buildClaimsOnlyCandidatesQuery(handleToken: string, kind: Qualif
      and not m.needs_review
     left join ref.payer_identity pi
       on pi.canonical_payer_id = m.canonical_payer_id
-    where r.${col} = $1
+    where r.business_entity_id = any(array['af504ab6-3dcd-4aa4-a93c-27bc58de4088', '141d459c-f371-4229-9a92-ace198e940bb']::uuid[])
+      and r.${col} = $1
       and nullif(btrim(r.primary_payer), '') is not null
       and not exists (
         select 1 from vob.member_benefits_latest v
@@ -170,7 +171,8 @@ export function buildGroupClaimEvidenceQuery(
       count(distinct r.member_id_bidx)::int as distinct_patients,
       bool_or(r.allowed_tier is not null and r.allowed_tier <> 'e2') as has_reliable_allowed
     from collections.cmd_explorer_charge_rollup r
-    where r.${col} = $1
+    where r.business_entity_id = any(array['af504ab6-3dcd-4aa4-a93c-27bc58de4088', '141d459c-f371-4229-9a92-ace198e940bb']::uuid[])
+      and r.${col} = $1
       and r.charge_date >= $3::date
       and r.charge_date <  $4::date
       and upper(btrim(r.primary_payer)) in (
@@ -220,7 +222,8 @@ export function buildCandidateEvidenceBatchQuery(
         on m.vocabulary = 'claims_primary_payer'
        and m.alias_norm = upper(btrim(r.primary_payer))
        and not m.needs_review
-     where r.${col} = $1
+     where r.business_entity_id = any(array['af504ab6-3dcd-4aa4-a93c-27bc58de4088', '141d459c-f371-4229-9a92-ace198e940bb']::uuid[])
+      and r.${col} = $1
        and m.canonical_payer_id = any($2::text[])
        and r.charge_date >= $3::date
        and r.charge_date <  $4::date
@@ -282,7 +285,8 @@ export function buildGroupLadderQuery(
     with scoped as (
       select r.member_id_bidx, r.charge_date
         from collections.cmd_explorer_charge_rollup r
-       where r.${col} = $1
+       where r.business_entity_id = any(array['af504ab6-3dcd-4aa4-a93c-27bc58de4088', '141d459c-f371-4229-9a92-ace198e940bb']::uuid[])
+      and r.${col} = $1
          and r.charge_date >= ($2::date - ${widest})
          and r.charge_date <  $2::date
          and upper(btrim(r.primary_payer)) in (
