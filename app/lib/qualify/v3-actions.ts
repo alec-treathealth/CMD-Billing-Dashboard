@@ -29,24 +29,22 @@
  * that could be forgotten.
  */
 import { requireQualifyPrincipal } from '@/lib/qualify/gate';
-import { resolveCoverage, trailingWindowFor, type UnresolvableReason } from '@/lib/qualify/resolutionService';
-import type { QualifyResolution } from '@/lib/qualify/resolution';
+import { resolveCoverage, trailingWindowFor } from '@/lib/qualify/resolutionService';
 
-export interface V3FlowState {
-  resolution: QualifyResolution | null;
-  reason: UnresolvableReason | null;
-  /** Prefix-safe echo to repopulate the input. NEVER a full member id. */
-  echo: string;
-  /** Set only on a gate denial, so the screen can say why rather than showing an empty result. */
-  denied: string | null;
-}
-
-export const V3_INITIAL_STATE: V3FlowState = {
-  resolution: null,
-  reason: 'empty',
-  echo: '',
-  denied: null,
-};
+/**
+ * ⚠ THE STATE SHAPE AND `V3_INITIAL_STATE` LIVE IN `v3FlowState.ts`, NOT HERE, AND MUST STAY THERE.
+ *
+ * This file is `'use server'`, so it may export ONLY async functions. `V3_INITIAL_STATE` is a plain
+ * object; when it was exported from here, `next build` PASSED and the failure landed at runtime —
+ * the flight loader registered the object as a Server Action and the generated per-page action entry
+ * threw `A "use server" file can only export async functions, found object.` on first require. That
+ * entry hosts every action reachable from `app/qualify/page`, so one bad export 500'd all 19 Qualify
+ * actions while the page GET still rendered: the book overview, Heating-Up ticker and KPI tiles all
+ * failed with no server log naming the cause. See `v3FlowState.ts` for the full write-up.
+ *
+ * A TYPE-only import is safe (types are erased). Never re-export a value from this module.
+ */
+import type { V3FlowState } from '@/lib/qualify/v3FlowState';
 
 /** Bounded window widths. An out-of-range value falls back rather than reaching SQL. */
 const DEFAULT_WINDOW_DAYS = 30;
