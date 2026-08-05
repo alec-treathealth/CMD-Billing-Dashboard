@@ -8,9 +8,6 @@
 -- ⚠ CODE ORDER: revert the Phase-2 ingest code BEFORE running this, or the hourly cron 500s on
 --   the missing column.
 
-set role claims_admin;
-
+-- No SET ROLE: postgres owns this table (measured 2026-08-05; see 0084 OWNERSHIP).
 alter table collections.cmd_explorer_rows
   drop column if exists pull_facility_code;
-
-reset role;

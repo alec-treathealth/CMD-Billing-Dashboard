@@ -47,8 +47,12 @@
 --   already SELECT-visible to claims_reader on the rollup; no new exposure. No ciphertext, no
 --   plaintext identifiers. `note` is operator free text: the UI labels it "no PHI", bounds it to
 --   500 chars, and it is NEVER logged or echoed into error messages.
--- OWNERSHIP: table + trigger + function born owned by claims_admin via SET ROLE (the standing
---   posture for TABLES; the postgres-owned form is for the 0080/0083 matview family only).
+-- OWNERSHIP: postgres. ⚠ MEASURED 2026-08-05, not assumed — every live collections relation is
+--   `relowner = postgres` (cmd_explorer_rows, facilities, cmd_facility_aliases, the rollup,
+--   cmd_charge_int_facility), matching 0083's header. An earlier cut of this file wrapped it in
+--   `SET ROLE claims_admin` per the generic rule in .claude/rules/sql-migrations.md; that rule
+--   describes the `claims` schema, and in THIS plane it downgrades postgres to a non-owner and
+--   fails 42501. The definer function is postgres-owned for the same reason — see section 4.
 -- IDEMPOTENT: IF NOT EXISTS on table/indexes, CREATE OR REPLACE on functions, DROP TRIGGER IF
 --   EXISTS before CREATE TRIGGER, DROP POLICY IF EXISTS before CREATE POLICY, grants reapplied
 --   unconditionally. Re-running converges.
@@ -56,7 +60,8 @@
 --   (existence check inside the write function). Independent of 0084. 0086 depends on THIS.
 -- Rollback: 0085_facility_assignments_rollback.sql
 
-set role claims_admin;
+-- No SET ROLE anywhere in this file: apply_migration runs as postgres, which owns this plane
+-- (see OWNERSHIP above). SET ROLE claims_admin here would downgrade to a non-owner and fail 42501.
 
 -- 1. Table ---------------------------------------------------------------------
 create table if not exists collections.facility_assignments (
@@ -300,14 +305,14 @@ begin
 end;
 $$;
 
-alter function collections.save_facility_assignments(uuid, text, text, text, jsonb)
-  owner to claims_admin;
+-- Owner is postgres (the creating role) — deliberately NOT claims_admin. A SECURITY DEFINER
+-- function executes as its OWNER: owning it as claims_admin would leave it unable to write
+-- facility_assignments or read cmd_explorer_charge_rollup, both postgres-owned. Postgres owns
+-- all three, so the write path works and the owner bypasses RLS as intended.
 revoke execute on function collections.save_facility_assignments(uuid, text, text, text, jsonb)
   from public, anon, authenticated, service_role;
 grant execute on function collections.save_facility_assignments(uuid, text, text, text, jsonb)
   to claims_reader;
-
-reset role;
 
 -- 5. Verification (run manually after apply) ------------------------------------
 -- Table + partial unique index + trigger exist:

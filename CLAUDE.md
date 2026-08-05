@@ -134,18 +134,31 @@ Two **separate** migration planes — never mix the directories:
 | Plane | Directory | Next number (as of 2026-08-05) |
 |---|---|---|
 | Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0087** |
-| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **027** |
+| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **029** |
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
 0077. 0080/0081/0082 (explorer perf) are **applied live 2026-08-04** — 0081
 via autocommit `execute_sql` statements, not `apply_migration` (see its
 header). **0083 is applied live** (2026-08-05 04:19:16 UTC, ledger
-20260805041916). **0084/0085/0086 (Facility Resolution) are AUTHORED AND NOT
-APPLIED** — apply order is 0084 → 0085 → 0086, and the ingest code that stamps
-`pull_facility_code` must deploy AFTER 0084. Never edit 023, 024, or 025 in
-place — all three are applied live. Before authoring, re-derive the next number
+20260805041916). **0084/0085/0086 (Facility Resolution) are APPLIED LIVE
+2026-08-05** — ledger 20260805074605 / 074855 / 074944, in that order. Veris
+**027 and 028 are applied live** (ledger 20260805065025 / 20260805060000, another
+session), which is why the next Veris number is 029. Never edit 023, 024, or 025
+in place — all three are applied live. Before authoring, re-derive the next number
 per `.claude/rules/sql-migrations.md` (ref-derived max is a floor; cross-check
 worktrees and the live applied state).
+
+⚠ **OWNERSHIP IN THE `collections` PLANE IS `postgres`, NOT `claims_admin`.**
+Measured 2026-08-05: `cmd_explorer_rows`, `facilities`, `cmd_facility_aliases`,
+`cmd_explorer_charge_rollup` and `cmd_charge_int_facility` are all
+`relowner = postgres`. `.claude/rules/sql-migrations.md` says migrations create
+objects "born owned via `SET ROLE claims_admin`" — that describes the `claims`
+schema. In `collections` a `SET ROLE claims_admin` **downgrades** the applying
+role from owner to non-owner and fails with `42501: must be owner of table …`.
+0084 and 0085 both hit this on first apply. Do not add `SET ROLE` to a
+`collections` migration, and own SECURITY DEFINER functions there as `postgres`
+(a definer runs as its OWNER — a claims_admin-owned definer cannot write a
+postgres-owned table).
 
 Veris apply state as of 2026-08-03, which is NOT the same as the file order:
 **024 APPLIED LIVE · 023 APPLIED LIVE (2026-08-03, after 024) · 025 APPLIED LIVE
