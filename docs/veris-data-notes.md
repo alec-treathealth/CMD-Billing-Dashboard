@@ -3649,3 +3649,156 @@ observability described alongside the gates (status, failure_gate, cost,
 D(2) ruling implementation; explicitly out of scope that night. Building it is
 backlog: an INSERT at run start + UPDATE at finish as `intel_writer`, which
 also makes the run_check path live.
+
+---
+
+## 0084 / 0085 / 0086 — Facility Resolution: the 'No Facility' attribution engine (2026-08-05)
+
+**Status: AUTHORED, NOT APPLIED.** All three ship in one PR against `staging`. Prod apply is a
+separate, explicit call. Apply order is **0084 → 0085 → 0086**, and the Phase-2 ingest code must
+deploy *after* 0084 (the cron INSERT names the new column).
+
+### The grain correction — read this before quoting any 'No Facility' number
+
+The bucket has been quoted at two different magnitudes because it has two grains, and only one of
+them is the right one to aggregate:
+
+| Grain | Object | Charges/rows | Charge $ | Insurance-paid $ |
+|---|---|---|---|---|
+| **charge (correct)** | `collections.cmd_explorer_charge_rollup` | **11,414** | **$29,081,575.38** | $8,209,249.45 |
+| line (do not sum) | `collections.cmd_explorer_rows` | 25,751 | $68,245,789.40 | $20,749,497.68 |
+
+Line grain is payment-posting grain — one charge appears once per posting, so summing it
+double-counts by ~2.3×. **Aggregates read the rollup.** Indigo has **zero** sentinel rows across
+497,378 charges; this is a BXR-only defect. Sentinel literal is exactly `'No Facility'` — a sweep
+for `%no%facil%`, `%unassigned%`, `%unknown%`, `%none%`, `''` finds no second spelling.
+
+### Phase-0 lever measurements — what we tried against the $20.95M residual
+
+The residual is the part member-inference cannot reach: **265 members / 8,167 charges /
+$20,953,468.22** who have zero named-facility rows anywhere in the rollup. Each lever below was
+measured live and then independently re-derived by a second implementation with differently
+structured SQL. **A measured zero is a finding and is recorded as one.**
+
+| Lever | Exact join key | Members reached | Charges | Charge $ | Verdict |
+|---|---|---|---|---|---|
+| `collections.cmd_charge_census` | `member_id_bidx` | 0 | 0 | **$0** | dead |
+| `cmd_facility_aliases` / `facilities` | **none exists** | 0 | 0 | **$0** | not a lever |
+| `staging.era_835_adjustment` | `member_id_bidx` | 0 | 0 | **$0** | dead |
+| `vob.indigo_vob` | `member_id_bidx` | 47 (strict) | 1,704 | **$2,999,620.00** | **SHIPS** |
+
+- **Census.** `charge_id` equality is *structurally impossible* — the rollup has no `charge_id`
+  column at all. On `member_id_bidx` the keyspaces do align (462 of 543 census members appear in
+  the rollup), but 461 of those are already facility-named. Exactly **1** of the 265 residual
+  members has any census row, and that row is itself `'No Facility'`. The census is a recent
+  Qualify feed over current admissions; the residual is legacy history that predates it.
+- **Aliases/facilities.** Pure label→code maps: no member or charge identifier exists on either
+  table, so there is no row-level key. Kept in 0086 for *canonicalization* only. Three labels
+  that member-inference resolves to are missing an alias row (NASHVILLE MENTAL HEALTH LLC,
+  PACIFIC COAST MENTAL HEALTH LLC, FIRST RESPONDERS OF CALIFORNIA LLC) — all three match
+  `facilities.facility_name` exactly, so 0086's two-stage `label_map` covers them today.
+- **ERA-835.** 2,418 BXR rows, `member_id_bidx` on 51.28%, `facility_code` never null. 82 of its
+  111 members match the rollup — and every one of the 82 is already facility-named. Revisit only
+  if ERA history is backfilled over the legacy period.
+- **VOB.** The cross-tenant expectation was **falsified**: 217 of 265 residual BXR members (82%)
+  hit `vob.indigo_vob` on exact bidx equality. But the headline is deliberately the *strict*
+  subset, not that ceiling — see below.
+
+### Why the VOB method ships at $3.0M and not $17.0M
+
+A "ceiling variant" that accepts `vob.member_benefits_current`'s latest-wins tie-break would cover
+6,863 charges / $17,011,938.22. **We do not ship it.** That view's zero-tie property is an artifact
+of `DISTINCT ON`, not data agreement — it manufactures a single answer where the underlying rows
+disagree. The shipped `vob` method requires all four links, each an exact equality:
+
+1. `member_id_bidx` equality into `vob.indigo_vob`;
+2. **all** of that member's non-empty VOB facility labels agree (`count(distinct) = 1`);
+3. the agreed label maps to a `facility_code` by exact case-insensitive equality against
+   `cmd_facility_aliases.facility_text` or `facilities.facility_name` — **no fuzzy matching**;
+4. the mapped code is on the **BXR roster** (the 15 mnemonics in `cmdCustomers.ts`).
+
+Link 4 is the **cross-book guard** and it is load-bearing: residual BXR members carry VOBs at
+*Indigo* facilities (e.g. `Opus Health` → 10021573). A BXR charge can never belong to an Indigo
+office, so those members are excluded rather than attributed. 145 members pass link 2; 71 survive
+link 3; **47 survive link 4** — all currently resolving to CAMH.
+
+VOB labels are Monday-board strings, not CMD facility strings. Unmapped ones stay unresolved with
+reason `vob_unmapped`: `Tennessee BH`, `SVR`, `MHC`, `Shine MH`, `Nashville MH`, `LoneStar MH`,
+`Saddleback`, … **`Treat MH` can never auto-map** — five `TREAT_*` facilities exist and picking one
+would be a guess. Adding a ratified `cmd_facility_aliases` row grows the method on the next
+refresh **with no migration** — the mapping is data, not code.
+
+### The method taxonomy (0086), in precedence order
+
+`manual` > `named` > `member_inference` > `vob` > `tie_break` > `unresolved`. Exactly one method
+per charge; `facility_alias` is NULL **iff** `unresolved`.
+
+- `manual` — a current (non-superseded) row in `collections.facility_assignments`.
+- `named` — 0084 pull provenance: every line in the charge's group carries the same non-null
+  `pull_facility_code`. Zero today; grows only from cron rows written after the Phase-2 deploy.
+- `member_inference` — the member's non-sentinel rollup rows name exactly one facility (0083's
+  resolver, generalized).
+- `vob` — the strict four-link chain above.
+- `tie_break` — 2+ named facilities; the most recent named row wins, ordered
+  `(charge_date DESC, payment_received DESC NULLS LAST, id DESC)`. Deterministic given the data;
+  the trailing `id` breaks exact date ties.
+- `unresolved` — reason ∈ `provenance_conflict` | `vob_tied` | `vob_unmapped` | `no_evidence`.
+
+**Dry-run verified 2026-08-05** — the 0086 definition run as a plain query against live data, with
+`manual`/`named` stubbed empty (equivalent to apply-time state):
+
+| method | charges | charge $ | paid $ |
+|---|---|---|---|
+| member_inference | 3,102 | $7,472,871.90 | $2,279,882.24 |
+| vob | 1,704 | $2,999,620.00 | $1,014,423.39 |
+| tie_break | 145 | $655,235.26 | $299,366.02 |
+| unresolved | 6,463 | $17,953,848.22 | $4,615,577.80 |
+| **total** | **11,414** | **$29,081,575.38** | — |
+
+Conserved to the cent. Invariants all green: no duplicate `id`, no sentinel charge missing, no
+unresolved row carrying an alias, no resolved row missing one, no `facility_alias = 'No Facility'`.
+**35.3% of the bucket's dollars are now attributed** (was 25.70% with member-inference alone; the
+VOB method added $3.0M). None of the 9 explorer-tied members passed the strict VOB chain.
+
+### The forward fix (0084 + Phase-2 code)
+
+`cmd_explorer_rows.pull_facility_code` — nullable text, stamped by the cron with the roster
+`facilityCode` the pull was issued against. The cron *already held* this value and used it for the
+`daily_collections` write while discarding it on the explorer write; that discard is the reason the
+legacy residual is unattributable at all. **NOT in the 14-field `row_fingerprint`** (same ruling as
+`business_entity_id`, 0028) — a re-pull is the same content regardless of which account returned
+it. `ON CONFLICT DO NOTHING` means provenance is **first-seen**, like `ingested_at`.
+
+Permanently NULL on all seed-era rows: `source_file` is `'Derek Automation.csv'` for 18,529 of the
+18,530 residual rows — one combined export with no per-customer provenance. Nothing can backfill it
+honestly, and the migration does not pretend otherwise. This closes the trickle class (1 cron-era
+sentinel charge, $1,200, 2026-07) for *future* rows only; legacy stays the engine's job.
+
+### Refresh IS wired at birth — the 0083 lesson applied
+
+0083 shipped a matview wired to no refresh path, which made "wire refresh" a hard precondition of
+any consumer. 0086 does not repeat that: `collections.refresh_facility_resolution()` exists at
+landing and is called from **two** places — the app write path immediately after every
+`save_facility_assignments()` commit, and the hourly `:45` route *after* the rollup refresh.
+
+It is deliberately **NOT** a statement inside `collections.refresh_cmd_explorer_charge_rollup()`.
+That function's statements share one transaction, so a failure there would roll back the
+**production** rollup refresh (the transaction-coupling entry above). In `refreshChargeRollup`'s
+caller it is best-effort and non-fatal: the rollup run has already closed `ok=true`, and the write
+path refreshes anyway. It also tolerates 0086 being unapplied — the function simply does not exist
+yet and the failure is logged, not raised.
+
+### The assignment store (0085)
+
+Append-only with real supersession, enforced by a trigger, not by convention. Because the
+one-current-per-charge partial unique index is checked per statement, supersession is stamped in
+**two** steps inside one transaction: `superseded_at` first (freeing the index), INSERT the
+successors, then `superseded_by`. The trigger permits exactly those two transitions and refuses
+every other UPDATE and all DELETEs.
+
+Assignment identity is the **0059 rollup group key** — `(business_entity_id, member_id_bidx,
+charge_date, cpt_key, revenue_key, facility_label, charge_amount)` — **not** the rollup's `id`.
+`id` is the latest snapshot's line id and shifts when new snapshots arrive; the composite does not.
+A `facility_label = 'No Facility'` CHECK keeps the workflow from ever forking a real facility's
+attribution. Writes go through a SECURITY DEFINER function with EXECUTE granted to `claims_reader`
+only (the 0047 `save_grid_view` precedent); no app role holds table DML.

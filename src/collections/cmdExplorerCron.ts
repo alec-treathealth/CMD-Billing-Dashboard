@@ -259,7 +259,11 @@ export async function cmdExplorerCron(deps: CmdExplorerCronDeps): Promise<CmdExp
         }
         stats.charge_mapped_valid += 1;
         if (!byFingerprint.has(result.row.row_fingerprint)) {
-          byFingerprint.set(result.row.row_fingerprint, result.row);
+          // Stamp pull provenance (0084): the roster facilityCode this per-customer pull was
+          // issued against. Only the cron knows it — mapRow deliberately doesn't (it maps report
+          // CELLS; this is provenance). First writer wins downstream (ON CONFLICT DO NOTHING),
+          // matching ingested_at's first-seen semantics.
+          byFingerprint.set(result.row.row_fingerprint, { ...result.row, pull_facility_code: facilityCode });
         }
       }
       stats.charge_inserted += await insertRows(deps.writeDb, [...byFingerprint.values()], entityId);
