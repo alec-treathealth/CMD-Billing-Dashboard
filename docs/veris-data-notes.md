@@ -3838,3 +3838,38 @@ that names `pull_facility_code` into production before 0084 existed. Had it run,
 freezing `cmd_explorer_rows` AND `daily_collections` silently, because the throw at `insertRows`
 also skips the `replaceCmdDailyForFacility` write below it. Resolved forward by applying 0084
 rather than reverting. The rule stands: **migrations first, merge second.**
+
+### The 3.8% payer-alias wrong-rate is 027's dedup, NOT Guard C (2026-08-05)
+
+Recorded here because the number is quoted in a reviewer-facing header and the obvious reading of
+it is wrong. Source: `scripts/score-payer-aliases.ts:353-368`, which measures it and says so
+explicitly.
+
+```
+pre-027, no Guard C:  A=27 B=19 E=3 F=12  · testable 210 · F = 12/210 = 5.7%
+post-027, Guard C on: A=11 B=19 C=6 E=3 F=8 · testable 212 · F =  8/212 = 3.8%
+```
+
+**Guard C caught ZERO of the 47 changed confirmed-tier cases** — its bucket is empty in this
+holdout. The mechanism is bucket A: 027 merged 11 duplicate payer identities, so 16 cases where the
+scorer looked like it "picked the wrong id" were picking a DIFFERENT ROW FOR THE SAME PAYER, and
+after the merge they resolve correctly. Four of those had been sitting in bucket F. The `+2` on
+`testable` is second-order — two formerly-vacuous cases became testable once the surface pool
+changed.
+
+Guard C earns its place on the PROPOSAL streams instead: it annotated 66 rows and removed 74 names
+from the VOB survivor set. It does not move this metric.
+
+**Why this matters beyond bookkeeping.** In `SQL Schemas/028_payer_alias_idf_population.sql`, Guard
+C is introduced at `:27` as "NEW, this migration's addition" roughly ten lines above the
+EXPECTED WRONG-RATE paragraph at `:34`. That header never actually attributes the 5.7%→3.8% move —
+it is not stale, and it was deliberately NOT edited (028 is applied live, ledger
+`20260805060000`; applied migrations are not edited in place). But the adjacency invites exactly
+the misattribution the scorer warns against: *"Attributing the holdout improvement to it would
+credit the wrong mechanism and invite someone to 'tune Guard C' to move a number it does not
+touch."* If someone later tries to improve the wrong-rate by tuning Guard C, they will be tuning a
+guard with no effect on it. Tune the dedup, or the candidate surface — not Guard C.
+
+The scorer guards the number against rot itself: `WRONG_RATE_F = 8` / `WRONG_RATE_TESTABLE = 212`
+are hardcoded so the header can print above the table that computes them, and the sanity section
+asserts the computed value still matches, failing loudly with the new figure if the corpus shifts.
