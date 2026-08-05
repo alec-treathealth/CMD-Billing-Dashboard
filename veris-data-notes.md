@@ -3904,3 +3904,142 @@ names, but **the alias repoint is not reversible**: after the UPDATE, an alias p
 `pi_anthem_california` is indistinguishable from one that always did. The log records how MANY
 rows moved per absorbed id, never WHICH. The rollback file carries the `\copy` export recipe and
 drops the tables LAST, because the log is the only record of what to restore.
+
+## 028 — VOB-side alias population from the IDF scorer, APPLIED LIVE (2026-08-05)
+
+Closes the implementation gap 026 named against itself: §8d proposed claims→canonical only, with no
+symmetric VOB→canonical stage, which is why the crosswalk was 25 points weaker on the side **D2
+actually enters from**. 695 proposals landed (49 claims-side recoveries + 646 VOB-side), **every one
+`needs_review = true`**.
+
+### THE HEADLINE IS NOT A COVERAGE IMPROVEMENT — read the table carefully
+
+| Side | Tier | names | volume | share |
+|---|---|---|---|---|
+| CLAIMS (lines) | CONFIRMED | 316 | 417,844 | **85.1%** |
+| | PROPOSED (idf_cosine, new) | 49 | 4,980 | 1.0% |
+| | PROPOSED (trigram, 026) | 35 | 36,817 | 7.5% |
+| | PROGRAM (per-member by design) | 4 | 26,279 | 5.4% |
+| | UNMAPPED, held for review | 61 | 5,172 | 1.1% |
+| VOB (members) | CONFIRMED | 201 | 13,818 | **60.0%** |
+| | PROPOSED (idf_cosine, new) | 646 | 8,017 | 34.8% |
+| | UNMAPPED, no alias row | 273 | 1,200 | 5.2% |
+
+**CONFIRMED is UNCHANGED at 85.1% / 60.0%, and that is correct, not a disappointment.** What moved
+is the VOB "no alias row at all" gap: **40.0% (9,217 members) → 5.2% (1,200)**. 028 converted an
+invisible gap into a *reviewable queue*. Coverage moves when a human reviews, not when a machine
+proposes — and any report that adds the PROPOSED tier into a coverage headline is making exactly the
+92.6%-vs-85.1% error 026's table was built to prevent.
+
+### Guard C — the class Guard B structurally cannot see
+
+Guard B asks "does this match rest only on modifier tokens?". Guard C asks a different question:
+**both names resolve a US state and the states DIFFER.** The match then rests on a real shared
+identity token and the STATE is what disagrees, so Guard B is silent by construction. Measured
+catches, all of which would previously have shipped unannotated:
+
+```
+BLUE CROSS AND BLUE SHIELD OF HAWAII -> pi_bcbs_texas          @0.711
+VIRGINIA BLUE CROSS BLUE SHIELD      -> pi_bcbs_tennessee      @0.673
+ANTHEM BCBS COLORADO                 -> pi_anthem_nevada       @0.736
+BCBS OF NORTH DAKOTA                 -> pi_bcbs_north_carolina @0.502
+```
+
+**Token comparison is not enough, and North Dakota is why.** Tokenized, the query is
+{BCBS, OF, NORTH, DAKOTA} and the candidate {BCBS, NORTH, CAROLINA} — NORTH matches, so a naive
+"share a state token?" test says yes. States must be resolved as UNITS (longest-match-first over the
+token sequence) before comparison. A bare `CAROLINA`/`DAKOTA`/`HAMPSHIRE` resolves to NOTHING on
+purpose: without its direction word the state is unknown, and guessing would make the guard fire on
+a coin flip. An unresolved state disables Guard C for that name — silence when it does not know.
+
+**Guard C FLAGS, it does not BLOCK** (unlike A, and unlike B's treatment in 028). The identity
+support is real and a reviewer resolves a state mismatch at a glance, so 66 rows ship with
+`review_note = 'GUARD-C state mismatch: verify the state before accepting.'` Dropping them would
+discard signal; shipping them silently would be the 026 defect again.
+
+⚠ **Known Guard C limitation, with its example.** Only a TRAILING two-letter code is resolved, so
+`BCBS CT - TX -> pi_bcbs_texas` is NOT flagged: CT sits mid-name and is skipped, leaving {TX} on both
+sides. Accepting mid-position codes was rejected because it costs ~100 false flags on correct names
+(see the marginal-band measurement). Also excluded from state resolution entirely: `CO OR IN ME OK HI
+DE` — ordinary English/business words that would resolve a state out of noise ('DELTA DENTAL CO' is
+not Colorado). **Like the MODIFIER list, this curation IS the guard's discriminating power, so its
+errors are the guard's errors.** Extend it with measurement, never intuition.
+
+### Stream numbers, post-027, final modifier set, all three sums balanced
+
+| Stream | survives | Guard A blocked | Guard B/C flagged | no viable candidate | total |
+|---|---|---|---|---|---|
+| 026 trigram proposals | 28 | 5 | 1 (not also A) | 1 | **35** ✓ |
+| claims `no_candidate` | 47 | 40 | 2 | 19 | **108** ✓ |
+| unmapped VOB names | 582 | 182 | 90 | 65 | **919** ✓ |
+
+The 35-stream sum previously read 34 and said MISMATCH without naming the lost row. **The sum check
+itself was wrong**: Guard A and Guard B/C overlap, so `blockedA + flaggedB` double-counts and the
+partition needs `flaggedOnly` (flagged but not blocked). Fixed; all three now balance.
+
+Payload is 695, not 582+47=629, because **Guard-C-flagged rows are included with a note** while
+Guard-A/B rows are excluded.
+
+### ⚠ TWO SANITY CHECKS WERE FAILING BEFORE THIS SESSION AND ONE STILL IS — correcting the record
+
+The prior session's summary implied the scorer's checks were clean. **They were not**: the pre-027
+output file reads `OVERALL: SANITY CHECKS FAILED`. Both failures pre-date 027 and Guard C. 027
+*improved* both.
+
+1. **"OXFORD HEALTH PLANS no longer top-scores pi_health_plans_inc" — was MIS-SPECIFIED, now fixed
+   and passing.** No canonical identity contains the token OXFORD at all (Oxford is a UHC brand with
+   no row), so nothing OXFORD-bearing can outrank the wrong answer *no matter how the weighting is
+   tuned*. The check demanded an outcome the data cannot produce. The invariant that actually protects
+   the book is that the wrong proposal never SHIPS — Guard A blocks it — so the check now asserts
+   "rank 1 is correct OR the guards refuse", and prints which held. Satisfying the old form would
+   have required inventing a `pi_oxford` row, which is a data decision for a human.
+2. **"CONFIRMED pairs still resolve to the same canonical ≥80%" — STILL FAILING at 77.8%
+   (165/212), deliberately left red.** Improved from 71.0% by 027. The 80% floor was never
+   calibrated, but **it was not lowered**, because the metric it fails on is the only thing measuring
+   the remaining dedup backlog: `held` counts every change as a failure, and most changes are not
+   errors. When the scorer moves `ANTHEM BCBS CT` from `pi_anthem_connecticut` to
+   `pi_anthem_bcbs_of_ct` at 0.957 it has found a **duplicate identity 027's queue does not cover**.
+   No reweighting can fix that; a 029 dedup pass can.
+
+   A second, properly-specified check was ADDED alongside rather than replacing it: **bucket F — the
+   rate at which the scorer picks a genuinely different payer that NEITHER guard objects to — is
+   8/212 = 3.8%** (was 12/210 = 5.7% pre-027). That is the number the reviewer header quotes, and a
+   third check now asserts the header's hardcoded figure still equals the measured one, so the header
+   cannot quietly become a lie.
+
+Changed-case classification (47 total): **A=11** duplicate identity · **B=19** abbreviation form
+(query uses a state code, canonical spells it out) · **C=6** modifier-driven · **E=3** unreachable ·
+**F=8** genuinely different, uncaught. Bucket A collapsing 27→11 is 027 working as designed.
+
+### 029 CANDIDATES discovered as a by-product — bucket A's 11 remaining duplicates
+Not merged, no ruling, recorded so the finding is not lost. The clearest is
+`pi_anthem_connecticut` ↔ `pi_anthem_bcbs_of_ct` (displaySim 0.957). These are additional to the 5
+parked pairs in 027's entry.
+
+### Apply mechanics — NOT via `apply_migration`, and why
+The file is 79KB because its payload is 695 generated rows. Passing that through the MCP tool means
+an agent **retyping generated content**, reintroducing the transcription risk that generating it
+removed — one mis-copied canonical id is a wrong merge with a plausible review note attached. Applied
+instead from the **committed file bytes** in ONE transaction as `claims_admin` (the role the
+migration's own `set role` targets, and the owner of `payer_alias_map`), verify-full TLS via
+`src/collections/db.ts`.
+
+**First attempt rolled back whole on `42501 permission denied for schema supabase_migrations`** —
+`claims_admin` cannot write the migration ledger. That failure is worth keeping: it *proved* the
+transaction wrapper, since both assertion NOTICEs had already fired and nothing persisted. The ledger
+row was then inserted separately through the MCP path, which runs as `postgres`. **Consequence to
+know:** the DDL and its `schema_migrations` row are in two transactions, so a failure between them
+would leave an applied-but-unrecorded migration. Detectable and correctable, and verified here
+(`20260805060000`).
+
+### Verified after apply
+695 idf_cosine rows, **0 of them confirmed**; 42 human rows byte-identical to a pre-captured snapshot
+(asserted in-migration, not just claimed); 0 pairing-invariant violations table-wide; 0 aliases
+pointing at a 027-absorbed id; 67 rows carry a review_note; provenance CHECK admits `idf_cosine` plus
+all six original values; `no_candidate` 108 → 59; totals 1,685 alias rows / 188 identities.
+**Next Veris number is 029.**
+
+### ⚠ STILL OPEN FOR A HUMAN — resolution quality is capped at the CONFIRMED tier by design
+D2 reads `needs_review = false` only, so all 695 proposals are **invisible to resolution** until
+reviewed. Until that review happens, Qualify's identified-search path resolves 60.0% of VOB members
+and no more. That is a deliberate cap, not a defect — but it must not be reported as 94.8%.
