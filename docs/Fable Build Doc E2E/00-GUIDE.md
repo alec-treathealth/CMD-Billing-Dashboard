@@ -45,7 +45,7 @@ PG-A → S1 → S2 → S3 → S4 ─────────────┐
 > isolation without waiting on the ML runtime. **S4 (Python ML runtime / brain training)
 > is deliberately DEFERRED; brains 1/2/3 stay OFF.** The Indigo RENDER surface was carved
 > out for a separate later decision (Option 3) — NOT the CMD dashboard (that would reopen
-> the S1 ADR). Full reasoning + rulings: `docs/veris-data-notes.md` →
+> the S1 ADR). Full reasoning + rulings: `veris-data-notes.md` →
 > "S5/S6 (compressed, resequenced)" (2026-07-06). This annotates the map; it does not
 > rewrite the table.
 
@@ -70,7 +70,7 @@ These run in **chat / Claude Desktop**, not Claude Code. They exist because the 
 3. **Answer the FIRST OUTPUT questions** before letting any code get written. Every session opens with verification questions; they are the cheap insurance against the "assumed uuid, silent RLS no-op" class of bug (§8.5.2).  
 4. **Work artifact-by-artifact through the HOLDs.** Diff shown → you say go → it lands. `npm test` \+ both typechecks before any commit is proposed — the session prompts encode this, but it's your job to actually read the diffs.  
 5. **End every session with the handoff.** Each prompt's final instruction invokes your prompt-handoff pattern (Who you are / Where we are / Open threads / Pick up here). Save it; it's the top of the next session's paste.  
-6. **Update `docs/veris-data-notes.md`** with anything learned the hard way — join keys, field quirks, timings. This is the §8.5.3 tribal-knowledge rule; S1 creates the file, every session feeds it.
+6. **Update `veris-data-notes.md`** with anything learned the hard way — join keys, field quirks, timings. This is the §8.5.3 tribal-knowledge rule; S1 creates the file, every session feeds it.
 
 **When a session goes sideways:** if it passes \~25–30 turns with work remaining, cut a handoff and resume fresh — don't push a degrading context through a migration. If Claude observes something in the live schema or CLAUDE.md that conflicts with the prompt, the prompts instruct it to stop and surface; when that fires, resolve it yourself in writing before continuing. If scope creep appears ("while we're in here…"), the answer is: new session, new prompt — the SCOPE block in each file is the contract.
 

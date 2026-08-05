@@ -18,7 +18,7 @@ test('canonical table lists the docs a cold-start engineer cannot work without',
   for (const required of [
     'CLAUDE.md',
     'docs/Fable Build Doc E2E/00-GUIDE.md',
-    'docs/veris-data-notes.md',
+    'veris-data-notes.md',
     'pr_compliance_checklist.yaml',
     'docs/design-system.md',
   ]) {

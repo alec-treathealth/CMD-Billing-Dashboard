@@ -24,7 +24,7 @@ rows). Deployed to Vercel.
 > rules, the verification gate, and an index of where everything lives. Deeper
 > per-area detail lives in [`.claude/rules/`](.claude/rules/) and loads
 > automatically when you touch the matching files. The live tribal-knowledge
-> ledger is [`docs/veris-data-notes.md`](docs/veris-data-notes.md) (it wins on
+> ledger is [`veris-data-notes.md`](veris-data-notes.md) (it wins on
 > conflicts); the visual system is
 > [`docs/design-system.md`](docs/design-system.md).
 
@@ -59,8 +59,9 @@ This is a monorepo-style two-package repo:
   Through `020`. Never mix the two directories.
 - **`certs/supabase-ca.crt`** — public Supabase Root CA for verify-full TLS.
 - **`.claude/rules/`** — path-scoped engineering rules Claude Code loads on demand.
-- **`docs/`** — `veris-data-notes.md` (live ledger), `design-system.md`, build
-  docs, and `archive/` (frozen historical context).
+- **`veris-data-notes.md`** (repo root) — the live tribal-knowledge ledger.
+- **`docs/`** — `design-system.md`, build docs, and `archive/` (frozen
+  historical context).
 
 ## Tech stack
 

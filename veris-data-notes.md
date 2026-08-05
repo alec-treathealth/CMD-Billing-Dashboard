@@ -3649,3 +3649,145 @@ observability described alongside the gates (status, failure_gate, cost,
 D(2) ruling implementation; explicitly out of scope that night. Building it is
 backlog: an INSERT at run start + UPDATE at finish as `intel_writer`, which
 also makes the run_check path live.
+
+## RATIFIED — Qualify v3 KPI tiles stay BOOK-WIDE and say so (2026-08-04)
+
+D5 of `qualify-v3-search-rearchitecture-PROMPT.md` offered two options for the
+Qualify KPI tiles: scope them to the resolved population, or label them
+explicitly as book-wide context. **Ruled by Alec: option 2.** The tiles remain
+book-wide, are explicitly labelled as such, and carry a provenance line derived
+from `QualifyResolution` that reads **"book-wide, not this client."**
+
+**Why option 1 is forbidden, not merely unchosen.** A v3 `CoverageGroup` carries
+`employerKey`. Scoping the tiles to the whole group would therefore scope them by
+employer — and the Phase-2 Design B asymmetry already measured that facility ×
+payer × employer approaches **~1 distinct patient** (1,606 slices, thinner than
+the already-thin facility × payer median of 2). See "Qualify Phase 2 —
+filter-aware orientation layer, Design B ASYMMETRY (2026-07-27)" above, which
+records the measurement and the enforcement: `buildBookKpisQuery` takes a
+`QualifyOrientationScope` type that **cannot express** employer or funding, and a
+regression test in `qualifyQuery.test.ts` fails loudly if `employer_norm` /
+`member_benefits_latest` / `funding =` ever appears in the tiles predicate.
+Option 1 would delete that guard and reintroduce the ~1-patient rating Design B
+exists to prevent.
+
+§5c's "every number on screen traces to one `QualifyResolution`" is satisfied in
+the honest sense: the tile's **provenance string** comes from the resolution and
+states that the tile is *not* about this client. Traceability is the requirement;
+identical scoping is not.
+
+**D2 must not re-litigate this.** A future session proposing resolution-scoped
+KPI tiles is reopening a ratified decision and must stop for Alec — and must
+first re-run the Design B slice-thinness measurement, not argue from design
+taste.
+
+Scope note: this entry is a DECISION record only. `QualifyResolution` does not
+exist yet; no interface, UI, or D2 code was written when this was ratified.
+
+## 026 — `ref.payer_identity` + `ref.payer_alias_map` APPLIED LIVE (2026-08-04)
+
+Qualify v3 workstream D1 (the payer crosswalk). Applied via `apply_migration`
+with explicit authorization, on the **third** attempt; the two failures were both
+SQLSTATE **42803** and both are fixed in the repo file, so repo and prod match:
+
+1. §7a derived `slug` from `lower(btrim(canonical_name))` while grouping on
+   `upper(btrim(canonical_name))`. Different expressions ⇒ the planner cannot
+   prove functional dependency on the group key. Fix: normalize in an inner
+   subquery, group on that, derive `slug` from the group key itself.
+2. §8d put a correlated subquery in `HAVING` referencing the grouped column
+   (`r.primary_payer`) — rejected even though the reference is to the grouping
+   expression. Fix: aggregate into `claims_names`, then anti-join in a plain
+   `WHERE` on the already-grouped alias.
+
+Both failures rolled back whole (verified: 0 objects, 0 `schema_migrations`
+rows between attempts). Next Veris number is now **027**.
+
+### Posture verified after apply
+2 tables owned by `claims_admin`, RLS on / FORCE off; 2 policies, both SELECT;
+`claims_reader` SELECT on both; **0** grants to anon/authenticated/service_role/
+PUBLIC; 7 indexes (5 + 2 PKs); `schema_migrations` carries exactly one row.
+Guard 9b holds: **0** alias rows point `canonical_payer_id` at a `program`-kind
+identity — the deliberate asymmetry (a routing program is never a resolution
+target) is enforced, not merely documented.
+
+### Seeded: 199 identities / 1,039 aliases
+Identities: 71 insurer · 114 unclassified · 9 carve_out · 2 tpa · 2 non_payer ·
+1 program. Aliases: 690 same_payer · 309 unmapped · 36 carve_out · 4
+program_label; 344 carry `needs_review`.
+
+### P0 COVERAGE REPORT — claim volume by TRUST TIER (not by "mapped")
+
+| Tier | names | lines | % of volume |
+|---|---|---|---|
+| CONFIRMED mapping | 316 | 417,844 | **85.1%** |
+| PROPOSED (needs review) | 35 | 36,817 | 7.5% |
+| PROGRAM (per-member by design) | 4 | 26,279 | 5.4% |
+| UNMAPPED, no candidate | 108 | 10,140 | 2.1% |
+| UNMAPPED, held for review | 2 | 12 | 0.0% |
+
+**Report 85.1%, never 92.6%.** The naive "has a canonical" figure is 92.6%, but
+7.5 points of that are unconfirmed machine proposals — see the wrong-merge
+finding below for why counting them would be exactly the error this table exists
+to prevent.
+
+### ⚠ THE TRIGRAM STAGE PRODUCED A WRONG MERGE ON THE LARGEST SINGLE GAP
+`needs_review` earned its existence on day one. Of the top 10 proposals by
+volume, **at least 3 are wrong**, including the biggest:
+
+- **`CIGNA HEALTH PLANS` (31,878 lines = 6.5% of ALL claim volume) → proposed
+  `pi_health_plans_inc` at similarity 0.565. WRONG.** That is Cigna; Health Plans
+  Inc is an unrelated TPA. Trigram matched the generic substring "HEALTH PLANS".
+- `OXFORD HEALTH PLANS` (667) → `pi_health_plans_inc`. WRONG — Oxford is UHC.
+- `CIGNA BEHAVIORIAL HEALTH` (398) → `pi_carelon_behavioral_health`. WRONG —
+  matched on "BEHAVIORAL HEALTH"; Cigna's BH arm is not Carelon.
+
+Correct proposals in the same batch: `HEALTHSCOPE BENEFITS INC.` (0.840),
+`SUREST - BIND`, `UMR FKA UMR`, `UHC GOLDEN RULE INSURANCE`, `MERITAIN HEALTH
+MINNEAPOLIS`, `AETNA TEXAS`.
+
+**Raising the threshold does not fix this** — the wrong ones sit at 0.500-0.565
+and correct ones sit at 0.500-0.593, so no cut separates them. The real defect is
+that trigram similarity over payer names collides on generic tokens (HEALTH,
+PLANS, BEHAVIORAL, BLUE CROSS) while the *distinctive* token (CIGNA, OXFORD) is
+what carries the identity. A future proposer should down-weight generic tokens
+(TF-IDF-ish) or require the distinctive token to match. **Do not auto-accept
+these. Do not "tune the threshold" and call it solved.**
+
+### ⚠ THE CROSSWALK IS ASYMMETRIC — and the weak side is the one D2 enters from
+
+| Side | Confirmed |
+|---|---|
+| Claims volume (`primary_payer`) | **85.1%** of 491,092 lines |
+| VOB members (`insurance_co`) | **60.0%** of 23,035 members |
+
+**919 of 1,120 VOB carrier names have no alias row at all**, covering **9,217
+members (40.0%)**. Concentrated and therefore tractable: the top 20 missing names
+carry 5,261 of those 9,217 (57%), and 518 of the 919 are singletons.
+
+This matters more than the headline: **D2's resolution enters from the member's
+VOB row**, so the VOB side is the binding constraint on the identified-search
+path, not claims coverage. Sobering specific: **`ANTHEM BCBS OF CALIFORNIA` —
+1,576 members, the single largest VOB name — is still unmapped**, and that is
+precisely the string from the §3c screenshot ("Anthem BCBS of California" on the
+policy card vs "ANTHEM BLUE CROSS CALIFORNIA" in the ranking header) that
+motivated this entire workstream. **D1 as applied does not yet fix the motivating
+example.** `UHC` (724 members) is the acronym class trigram cannot reach.
+
+**Implementation gap, owned:** §8d proposes only claims→canonical. The migration
+has **no symmetric VOB→canonical proposal stage**, which is *why* the VOB side
+lags 25 points behind. Closing it is 027 (or a re-runnable script) — and given the
+wrong-merge finding above, it should NOT simply be the same trigram pass pointed
+the other way.
+
+### The payer_id spine
+359 ids recorded; **160 unanimous** (every VOB name under the id resolves to one
+canonical ⇒ canonical set, no guess); **199 need a human** (0 or ≥2 canonicals).
+Hint only, as designed — never an identity.
+
+### Operational note: the ladder is iterative
+Trigram proposals are drawn from `vob_insurance_co` aliases that ALREADY resolve
+(201 rows), not from all 1,120 VOB names. So each round of VOB-side review grows
+the candidate pool and a re-run produces new proposals. This is also why the
+pre-apply estimate (48 no-candidate names / 47,656 lines) differs from the actual
+(108 names / 10,140 lines): the estimate matched against all 1,120 VOB names,
+while the migration matches against the resolving subset. Fewer lines, more names.

@@ -292,7 +292,7 @@ export interface QualifyFacilityCases {
  *
  * ⚠ Do NOT apply migration 0067 as-authored — it is STALE (drops 0068's covering index + 0069's MAINTAIN
  * grant). The full ops analysis + the RECOMMENDED build-alongside-and-swap approach (sub-second lock, no
- * outage — supersedes the old "~90s rebuild/outage" plan) live in docs/veris-data-notes.md → "0067 ops
+ * outage — supersedes the old "~90s rebuild/outage" plan) live in veris-data-notes.md → "0067 ops
  * analysis". Until Part 2 lands, the Client Name field + its divergence note are HIDDEN in the compose
  * console (3 PHI fields, not 4).
  *
@@ -300,7 +300,7 @@ export interface QualifyFacilityCases {
  * and now the readout EVIDENCE count too: BOTH QualifyMatchSummary.count (Collections' shared summary
  * builder) AND QualifyMatchSummary.distinctPatients (buildQualifyMatchClientCountQuery) run the
  * cmdExplorerBaseConds predicate, which cannot express patient_name_bidx, so both must gain the name AND
- * in lockstep or the count + gauge would over-count a name-narrowed search. See docs/veris-data-notes.md
+ * in lockstep or the count + gauge would over-count a name-narrowed search. See veris-data-notes.md
  * → "Qualify Client-Name (Change C) activation".
  */
 export const QUALIFY_CLIENT_NAME_ENABLED = false;

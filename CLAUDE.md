@@ -24,7 +24,7 @@ only committed docs belong in the table — untracked ones go under
 | Role | Path | Read-order |
 |---|---|---|
 | Standing rules, verification gate, this map | `CLAUDE.md` | 1 |
-| Live tribal-knowledge ledger — **wins on conflict with this file** | `docs/veris-data-notes.md` | 2 |
+| Live tribal-knowledge ledger — **wins on conflict with this file** | `veris-data-notes.md` | 2 |
 | Build guide — the 13 gated Veris/Indigo sessions + order deviations | `docs/Fable Build Doc E2E/00-GUIDE.md` | 3 |
 | PR compliance rules — the real Qodo content (`.qodo/` is empty) | `pr_compliance_checklist.yaml` | 4 |
 | Visual system — TreatHealthOS tokens and palette | `docs/design-system.md` | 5 |
@@ -101,9 +101,9 @@ Run all five before any commit. This is the bar for "verified" — not typecheck
 alone, and especially not when a shared helper changed.
 
 ```bash
-npm test                          # root hermetic suite — 1076 pass / 0 fail (measured 2026-08-04 on the tree of main @53b49d6)
+npm test                          # root hermetic suite — >=1110 pass / 0 fail
 npm run typecheck                 # root tsc (strict: noUncheckedIndexedAccess)
-cd app && npm test                # app suite — 206 pass / 0 fail (measured 2026-08-04 on the tree of main @53b49d6; #83 added 8)
+cd app && npm test                # app suite — >=259 pass / 0 fail
 cd app && npm run typecheck        # app tsc
 cd app && npm run build            # catches bundler-only failures tsc cannot
 ```
@@ -113,9 +113,19 @@ Root `tsc` is stricter than app `tsc` — a test can be green in `app/` while ro
 failures (see `.claude/rules/nextjs-app.md`).
 
 Those counts are a tripwire, not a target: if a suite reports fewer than the
-number above, tests were lost — find out why before committing. Only counts
-measured on a clean detached checkout of `origin/main` are trustworthy — a
-shared working tree with other sessions' edits is not evidence.
+number above, tests were lost — find out why before committing. They are written
+as `>=` floors deliberately, because the suites grow and a hardcoded exact number
+rots into a false tripwire within days.
+
+**Provenance of the current floors (read before trusting them).** 1110 / 259 were
+measured 2026-08-04 on the **shared working tree** of branch
+`fix/qualify-no-matches-stale`, not on a clean checkout — they superseded 1076 /
+206, which were measured on the tree of `main` @`53b49d6`. By the rule in the next
+sentence that makes them *floors that are known to be reachable*, not ratified
+counts. Only counts measured on a clean detached checkout of `origin/main` are
+trustworthy — a shared working tree with other sessions' edits is not evidence.
+Re-measure on a clean checkout when you next have one, and promote the number
+then.
 
 ## Git workflow
 
@@ -149,7 +159,7 @@ Veris apply state as of 2026-08-03, which is NOT the same as the file order:
 because 023 was under concurrent revision and 024 has no executable dependency on it — no FK,
 no view, no trigger (the resolver is in `src/veris/upcomingForecast.ts`); 023 followed once
 that revision settled. Do not read the numbering as an apply order. See
-`docs/veris-data-notes.md` §§ "023 …" / "024 …" / "025 …".
+`veris-data-notes.md` §§ "023 …" / "024 …" / "025 …".
 
 Merging a migration in a PR does **not** apply it to prod. Code that depends on
 it 500s until `apply_migration` runs.
@@ -243,7 +253,7 @@ matching files. Read the one for the area you're changing:
 Longer-form references (not auto-loaded — read on demand). Paths for these live
 in [Canonical Context Set](#canonical-context-set); that table wins:
 
-- `docs/veris-data-notes.md` — the live tribal-knowledge ledger, updated
+- `veris-data-notes.md` — the live tribal-knowledge ledger, updated
   per-apply. **When it conflicts with anything here, it wins.** Surface the
   conflict in your output; never silently pick a side.
 - `docs/design-system.md` — the TreatHealthOS visual system.

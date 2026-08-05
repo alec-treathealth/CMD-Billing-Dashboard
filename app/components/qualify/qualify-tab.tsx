@@ -27,7 +27,7 @@
  * Collections deliberately has no equivalent for. Every PHI input is canRevealPhi-gated; Client Name is
  * ADDITIONALLY behind QUALIFY_CLIENT_NAME_ENABLED (contract.ts) and stays hidden until migration 0067 +
  * the owner-run name backfill land. The raw PHI terms live in component state only — never a URL, never a
- * log; the server mints the blind indexes from them. See docs/veris-data-notes.md ("Qualify Client-Name
+ * log; the server mints the blind indexes from them. See veris-data-notes.md ("Qualify Client-Name
  * (Change C) activation") — flipping the flag ALSO requires making the live count name-aware. Because the
  * grid is gone, a PHI term now only ever NARROWS AN AGGREGATE: no identified row is ever transmitted.
  *
