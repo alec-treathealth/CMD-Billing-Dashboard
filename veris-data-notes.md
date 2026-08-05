@@ -4234,6 +4234,61 @@ rather than reverting. The rule stands: **migrations first, merge second.**
 
 ### The 3.8% payer-alias wrong-rate is 027's dedup, NOT Guard C (2026-08-05)
 
+> ### ⚠ CORRECTION 2026-08-05 — THIS ENTRY'S CENTRAL CLAIM IS FALSE. READ THIS FIRST.
+>
+> **"Guard C caught ZERO of the 47 changed confirmed-tier cases" is wrong. Guard C caught SIX**, and
+> its confirmed-tier false-positive rate is **0 of 6** — every flag is correct. The entry below is
+> left intact per this file's own rule ("never rewrite history — correct earlier entries with a dated
+> correction line"), but do not act on it.
+>
+> **The heading is also wrong as written.** The 5.7% → 3.8% move is **BOTH** mechanisms: 027's dedup
+> (bucket A 27 → 11, the larger effect) **and** Guard C (the 6 below). Read the heading as
+> "is *mostly* 027's dedup, *and also* Guard C".
+>
+> **How the error happened, because the mechanism will bite again.** The scorer's printed `COUNTS:`
+> line renders each bucket by its key's **FIRST CHARACTER**, and two keys collide there:
+> `C. MODIFIER-DRIVEN` (Guard **B**) and `C2. STATE MISMATCH` (Guard **C**) both render as `C`.
+> Seeing a single `C=6` invites the conclusion that it is the Guard-B bucket and that Guard C's is
+> empty. **It is the exact inverse — `C2` holds the 6 and the Guard-B bucket is the empty one.**
+> Read the bucket HEADINGS in the `--analyze` output, never the `COUNTS:` abbreviation; it is lossy.
+> (This is a real trap: the same misreading was made independently by two sessions on one day.)
+>
+> The six Guard-C catches, verbatim (`want` = the CONFIRMED mapping, `got` = the scorer's top-1):
+>
+> ```
+> BLUE CARD PROGRAM TX              want=pi_bcbs_texas          got=pi_bcbs_illinois      @0.679
+> BLUE CROSS AND BLUE SHIELD OF T…  want=pi_bcbs_texas          got=pi_anthem_nevada      @0.700
+> BLUECARD PROGRAM OF MD            want=pi_carefirst_maryland  got=pi_bcbs_pennsylvania  @0.650
+> BLUECARD PROGRAM OF SC           want=pi_bcbs_south_carolina  got=pi_bcbs_pennsylvania  @0.650
+> BLUECARD PROGRAM OF TX            want=pi_bcbs_texas          got=pi_bcbs_pennsylvania  @0.668
+> TENNESSEE BLUE CROSS BLUE SHIELD  want=pi_bcbs_tennessee      got=pi_bcbs_texas         @0.588
+> ```
+>
+> Every one names a state and resolved to a DIFFERENT state, so every flag is correct. Five of six
+> are BlueCard/state-BCBS names — precisely the class Guard C was built for.
+>
+> **What survives from the entry below, unchanged and still true:** the bucket table's numbers; that
+> 027's dedup is the larger contributor; that Guard C also does bulk work on the PROPOSAL streams
+> (66 rows annotated, 74 names removed from the VOB survivor set); and that `028`'s applied header
+> was correctly left un-edited.
+>
+> **What is now wrong in the entry below:** "caught ZERO", "its bucket is empty in this holdout",
+> "It does not move this metric", and the closing advice "not Guard C" — Guard C *does* move this
+> metric, by 6 cases.
+>
+> **NOT MEASURED, and do not infer it:** whether all six would have landed in bucket F with Guard C
+> disabled. The classifier tests `flagC` BEFORE `blockA`, so some may also be Guard-A blocks.
+> Isolating that needs a Guard-C-disabled re-run, which no flag currently exposes.
+>
+> Provenance: the source this entry cites (`scripts/score-payer-aliases.ts:353-368`) was itself
+> carrying the same false claim and was corrected in `16bd64b` on branch
+> `qualify/v3-crosswalk-through-p3`; the line range no longer matches. The corrected attribution now
+> lives beside `WRONG_RATE_F` / `WRONG_RATE_TESTABLE` in that file.
+>
+> ⚠ **Path note:** this entry was appended to `docs/veris-data-notes.md`, which **stopped being the
+> canonical ledger path at `dd77d54`** (relocated to the repo root, ratified 2026-08-04). It was
+> carried here by a merge. Append to the ROOT file.
+
 Recorded here because the number is quoted in a reviewer-facing header and the obvious reading of
 it is wrong. Source: `scripts/score-payer-aliases.ts:353-368`, which measures it and says so
 explicitly.
