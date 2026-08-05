@@ -13,7 +13,10 @@
  * Action. This file holds no business rule, so there is nothing here for the flow's tests to miss.
  */
 import { useActionState } from 'react';
-import { resolveCoverageAction, V3_INITIAL_STATE } from '../../../lib/qualify/v3-actions';
+import { resolveCoverageAction } from '../../../lib/qualify/v3-actions';
+// V3_INITIAL_STATE comes from a PLAIN module, never from the 'use server' one: a non-function export
+// there is registered as a Server Action and throws at runtime for the whole page's action entry.
+import { V3_INITIAL_STATE } from '../../../lib/qualify/v3FlowState';
 import { ResolutionFlow } from './resolution-flow';
 
 export function ResolutionFlowClient(): React.ReactElement {
