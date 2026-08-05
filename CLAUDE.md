@@ -141,16 +141,20 @@ library from `../src` and is the Vercel app root.
 
 Two **separate** migration planes — never mix the directories:
 
-| Plane | Directory | Next number (as of 2026-08-04) |
+| Plane | Directory | Next number (as of 2026-08-05) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0083** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0087** |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **029** |
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
 0077. 0080/0081/0082 (explorer perf) are **applied live 2026-08-04** — 0081
 via autocommit `execute_sql` statements, not `apply_migration` (see its
-header). Never edit 023, 024, or 025 in place — all three are applied live. Before authoring, re-derive the next number per
-`.claude/rules/sql-migrations.md` (ref-derived max is a floor; cross-check
+header). **0083 is applied live** (2026-08-05 04:19:16 UTC, ledger
+20260805041916). **0084/0085/0086 (Facility Resolution) are AUTHORED AND NOT
+APPLIED** — apply order is 0084 → 0085 → 0086, and the ingest code that stamps
+`pull_facility_code` must deploy AFTER 0084. Never edit 023, 024, or 025 in
+place — all three are applied live. Before authoring, re-derive the next number
+per `.claude/rules/sql-migrations.md` (ref-derived max is a floor; cross-check
 worktrees and the live applied state).
 
 Veris apply state as of 2026-08-03, which is NOT the same as the file order:
