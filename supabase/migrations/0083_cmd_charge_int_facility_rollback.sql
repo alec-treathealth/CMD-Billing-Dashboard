@@ -1,0 +1,44 @@
+-- ROLLBACK for 0083 — drops collections.cmd_charge_int_facility. That is the whole rollback.
+--
+-- SYMMETRY IS THE POINT: the forward migration creates exactly one object (the matview, plus its
+-- own unique index and its own grants, both of which die with it). It creates no function, replaces
+-- no function, alters no table, and touches no other object's ACL. So this file drops one object and
+-- stops.
+--
+-- ⚠ DO NOT ADD A `create or replace function collections.refresh_cmd_explorer_charge_rollup()`
+-- HERE. An earlier draft of this rollback did, to "restore" the 0080 two-statement body. That would
+-- be WRONG and actively dangerous under the shipped Option C scope: the forward migration never
+-- modified that function, so re-asserting it in the rollback would (a) rewrite a live production
+-- SECURITY DEFINER function that this migration never owned, and (b) silently revert any LATER
+-- migration that had legitimately extended it in the meantime. A rollback must undo what its
+-- forward file did — no more. The forward file did not touch the function; neither does this.
+--
+-- ⚠ ORDERING: 0083 changes no behavior at its landing — nothing reads the matview (D1, Alec
+-- 2026-08-05: no consumer repoints this session), and nothing refreshes it. But once any consumer
+-- has LEFT JOINed cmd_charge_int_facility, ROLL THE APP BACK FIRST (or together), else those
+-- readers 42P01 on the missing matview.
+--
+-- collections.cmd_explorer_charge_rollup is NOT touched by the forward migration and is NOT touched
+-- here — its 11 indexes and its ACL are unaffected in both directions.
+--
+-- IDEMPOTENT: IF EXISTS on the drop. Safe to re-run.
+
+-- 1. Drop the matview (its unique index and its grants go with it) --------------
+drop materialized view if exists collections.cmd_charge_int_facility;
+
+-- 2. Verification (run manually after rollback) --------------------------------
+-- The matview is gone:
+--   select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace
+--    where n.nspname = 'collections' and c.relname = 'cmd_charge_int_facility';      -- expect 0
+--
+-- The refresh function was never touched, in either direction — still the 0080 two-statement body:
+--   select prosrc from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+--    where n.nspname = 'collections' and p.proname = 'refresh_cmd_explorer_charge_rollup';
+--   -- expect EXACTLY two refresh statements: cmd_explorer_charge_rollup, cmd_explorer_filter_options
+--
+-- The hourly refresh still works end to end:
+--   select collections.refresh_cmd_explorer_charge_rollup();   -- as cmd_rollup_writer: must succeed
+--
+-- The rollup is intact (compare to the same baseline the forward migration used):
+--   select business_entity_id, count(*), round(sum(charge_amount),2), round(sum(insurance_payments),2)
+--     from collections.cmd_explorer_charge_rollup group by 1 order by 1;
