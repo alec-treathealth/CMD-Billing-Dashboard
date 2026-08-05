@@ -37,8 +37,10 @@
 --   "Current" everywhere means superseded_at IS NULL.
 --
 -- WRITE PATH: collections.save_facility_assignments() below — SECURITY DEFINER owned by
---   claims_admin, EXECUTE granted to claims_reader ONLY (the 0047 claims.save_grid_view
---   precedent). The app-side Server Action performs the role gate (admin/super_admin) BEFORE
+--   POSTGRES (see OWNERSHIP; a definer runs as its owner, and only postgres owns the objects it
+--   touches), EXECUTE granted to claims_reader ONLY (the 0047 claims.save_grid_view grant
+--   precedent — that function is claims_admin-owned because the `claims` schema is; this one is
+--   not). The app-side Server Action performs the role gate (admin/super_admin) BEFORE
 --   calling; the function enforces shape, bounds, vocabulary (facility_code must exist in
 --   collections.facilities) and that every charge key matches a real rollup charge. Direct
 --   INSERT/UPDATE/DELETE on the table are granted to NO app role.
@@ -47,8 +49,12 @@
 --   already SELECT-visible to claims_reader on the rollup; no new exposure. No ciphertext, no
 --   plaintext identifiers. `note` is operator free text: the UI labels it "no PHI", bounds it to
 --   500 chars, and it is NEVER logged or echoed into error messages.
--- OWNERSHIP: table + trigger + function born owned by claims_admin via SET ROLE (the standing
---   posture for TABLES; the postgres-owned form is for the 0080/0083 matview family only).
+-- OWNERSHIP: postgres. ⚠ MEASURED 2026-08-05, not assumed — every live collections relation is
+--   `relowner = postgres` (cmd_explorer_rows, facilities, cmd_facility_aliases, the rollup,
+--   cmd_charge_int_facility), matching 0083's header. An earlier cut of this file wrapped it in
+--   `SET ROLE claims_admin` per the generic rule in .claude/rules/sql-migrations.md; that rule
+--   describes the `claims` schema, and in THIS plane it downgrades postgres to a non-owner and
+--   fails 42501. The definer function is postgres-owned for the same reason — see section 4.
 -- IDEMPOTENT: IF NOT EXISTS on table/indexes, CREATE OR REPLACE on functions, DROP TRIGGER IF
 --   EXISTS before CREATE TRIGGER, DROP POLICY IF EXISTS before CREATE POLICY, grants reapplied
 --   unconditionally. Re-running converges.
@@ -56,7 +62,8 @@
 --   (existence check inside the write function). Independent of 0084. 0086 depends on THIS.
 -- Rollback: 0085_facility_assignments_rollback.sql
 
-set role claims_admin;
+-- No SET ROLE anywhere in this file: apply_migration runs as postgres, which owns this plane
+-- (see OWNERSHIP above). SET ROLE claims_admin here would downgrade to a non-owner and fail 42501.
 
 -- 1. Table ---------------------------------------------------------------------
 create table if not exists collections.facility_assignments (
@@ -164,7 +171,7 @@ create trigger facility_assignments_guard
 -- Reads are app-scoped (the cmd_explorer_rows posture: permissive SELECT for claims_reader; the
 -- app filters business_entity_id explicitly through entityScope). Writes have NO policy and NO
 -- grant for any app role — the only write path is the definer function below, which runs as the
--- table owner (claims_admin), and table owners are not subject to their own RLS absent FORCE.
+-- table owner (postgres), and table owners are not subject to their own RLS absent FORCE.
 alter table collections.facility_assignments enable row level security;
 
 drop policy if exists facility_assignments_reader_select on collections.facility_assignments;
@@ -300,14 +307,14 @@ begin
 end;
 $$;
 
-alter function collections.save_facility_assignments(uuid, text, text, text, jsonb)
-  owner to claims_admin;
+-- Owner is postgres (the creating role) — deliberately NOT claims_admin. A SECURITY DEFINER
+-- function executes as its OWNER: owning it as claims_admin would leave it unable to write
+-- facility_assignments or read cmd_explorer_charge_rollup, both postgres-owned. Postgres owns
+-- all three, so the write path works and the owner bypasses RLS as intended.
 revoke execute on function collections.save_facility_assignments(uuid, text, text, text, jsonb)
   from public, anon, authenticated, service_role;
 grant execute on function collections.save_facility_assignments(uuid, text, text, text, jsonb)
   to claims_reader;
-
-reset role;
 
 -- 5. Verification (run manually after apply) ------------------------------------
 -- Table + partial unique index + trigger exist:

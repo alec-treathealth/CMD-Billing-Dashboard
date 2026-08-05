@@ -7,11 +7,9 @@
 --     select * from collections.facility_assignments order by id;  -- (contains member_id_bidx
 --     tokens and operator notes — treat the export itself as sensitive.)
 
-set role claims_admin;
+-- No SET ROLE: postgres owns these objects (measured 2026-08-05; see 0085 OWNERSHIP).
 
 drop function if exists collections.save_facility_assignments(uuid, text, text, text, jsonb);
 drop trigger  if exists facility_assignments_guard on collections.facility_assignments;
 drop function if exists collections.facility_assignments_guard();
 drop table    if exists collections.facility_assignments;
-
-reset role;
