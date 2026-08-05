@@ -188,7 +188,7 @@ Surfaces:
   `redirect('/')` stub. `<SearchConsole />` and the `/api/agent` path stay in git
   history; restoring means remounting the page *and* re-adding the nav entry.
 
-`app/vercel.json` declares **18 cron entries across 16 distinct routes**
+`app/vercel.json` declares **19 cron entries across 17 distinct routes**
 (`billing-audit-consolidated` runs on three schedules):
 
 | Route | Cadence |
@@ -196,6 +196,7 @@ Surfaces:
 | `cmd-explorer` · `indigo-explorer` | hourly, :00 / :30 |
 | `cmd-census` · `indigo-census` | hourly, :15 / :35 |
 | `refresh-charge-rollup` | hourly, :45 |
+| `qualify-census` | hourly, :47 |
 | `upcoming-overrides` | hourly, :55 |
 | `cmd-explorer-catchup` | daily 07:52 |
 | `era-835` | daily 08:50 |
@@ -207,9 +208,12 @@ Surfaces:
 | `billing-audit-op` · `billing-code-decisions` | daily 02:20 / 02:40 |
 | `billing-audit-consolidated` | daily 02:40, 03:10, 03:40 |
 
-`/api/cron/qualify-census` exists as a route but is **deliberately absent**
-from `vercel.json` — scheduling it is reserved for an explicitly-scoped
-session (see `docs/qualify-v2-morning-runbook.md`).
+`/api/cron/qualify-census` was scheduled 2026-08-04 (hourly :47) in the
+explicitly-scoped Auth/LOS session the morning runbook reserved it for, after
+`MONDAY_SECRET_API_KEY` landed in Vercel. It feeds the Qualify auth-fit factor
+from Monday census boards; only NASH and LSMH boards are curated
+(`src/collections/qualifyCensus.ts`) — other facilities honestly show
+"no data yet" until an operator maps their boards.
 
 VOB sync is scheduled by Vercel but *runs* as a GitHub Action
 (`.github/workflows/vob-sync.yml`) — it won't show output in the Vercel cron UI.
