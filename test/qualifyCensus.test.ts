@@ -381,6 +381,20 @@ test('representativeBoardId: the LOWEST id, deterministically, regardless of con
   assert.equal(representativeBoardId([]), '');
 });
 
+test('representativeBoardId: NUMERIC ordering across mixed-width ids, not lexicographic', () => {
+  // The registry holds both 10- and 11-digit ids. A bare .sort() is UTF-16 order, so it would return
+  // '18394268978' here because '1' < '7' — lexicographically smallest, numerically the LARGER id.
+  assert.equal(representativeBoardId(['18394268978', '7046603503']), '7046603503');
+  assert.equal(representativeBoardId(['7046603503', '18394268978']), '7046603503');
+  // Same-width ids: numeric and lexicographic agree, which is why today's only rollup hid this.
+  assert.equal(representativeBoardId(['9977268128', '6974268840']), '6974268840');
+  // Three ids, two widths.
+  assert.equal(representativeBoardId(['18424928550', '9933183210', '7047312296']), '7047312296');
+  // Deterministic, never a throw, on an unexpected non-numeric id.
+  assert.equal(representativeBoardId(['abc', '7046603503']), '7046603503');
+  assert.equal(representativeBoardId(['zz', 'aa']), 'aa');
+});
+
 // --- builders -----------------------------------------------------------------
 
 test('builders: fixed identifiers, bound params, ::date cast on the UR date', () => {

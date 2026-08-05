@@ -506,9 +506,31 @@ export function buildUpsertCensusRowQuery(row: {
   };
 }
 
-/** The lowest board id in a facility's set — the deterministic representative stored in board_id. */
+/**
+ * Order two monday board ids NUMERICALLY, not lexicographically.
+ *
+ * `Array.sort()` with no comparator sorts by UTF-16 code unit, which is NOT numeric order for
+ * mixed-length digit strings: '18394268978' sorts BEFORE '7046603503' because '1' < '7'. The
+ * registry holds both 10- and 11-digit ids, so a lexicographic "lowest" would be wrong the moment a
+ * facility mixed widths — today's only multi-board facility happens to have two 11-digit ids, which
+ * is exactly the kind of accident that hides a broken contract until it doesn't.
+ *
+ * Length-then-lexicographic IS numeric order for non-negative integers without leading zeros, which
+ * is what monday ids are. Chosen over BigInt because it cannot throw on an unexpected non-numeric id
+ * — such an id falls through to a plain lexicographic compare, so the result stays deterministic
+ * rather than crashing the sync.
+ */
+function compareBoardIds(a: string, b: string): number {
+  const bothNumeric = /^\d+$/.test(a) && /^\d+$/.test(b);
+  if (bothNumeric && a.length !== b.length) return a.length - b.length;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** The NUMERICALLY lowest board id in a facility's set — the deterministic representative stored in
+ *  board_id. Deterministic is the load-bearing property (the column can only hold one of the set);
+ *  "lowest" is just how that one is chosen, and compareBoardIds makes the claim true. */
 export function representativeBoardId(boardIds: readonly string[]): string {
-  return [...boardIds].sort()[0] ?? '';
+  return [...boardIds].sort(compareBoardIds)[0] ?? '';
 }
 
 /** Read every facility's census aggregates (the rating factor's seam — tiny table, whole read). */

@@ -295,10 +295,26 @@ export function buildCmdFacilityOptionsQuery(entityIds: string[]): { sql: string
  *
  * Non-PHI throughout (facility names and CMD export text). $1 = entityIds is the only bound value;
  * every identifier is a fixed literal.
+ *
+ * ── DELIBERATE CROSS-TENANT READ — justification (compliance checklist) ───────────────────────────
+ * `business_entity_id = any($1::uuid[])` spans MORE THAN ONE tenant on purpose. Qualify is a
+ * cross-tenant surface by product decision: an admissions lead is qualified against the whole book
+ * (BXR + Indigo), because the question "who reimburses this policy best" has no per-tenant answer.
+ * The scope is NOT client-supplied — `requireQualifyPrincipal` returns a PINNED
+ * [BXR_ENTITY_ID, INDIGO_ENTITY_ID] array (app/lib/qualify/principal.ts, QUALIFY_ENTITY_IDS) that no
+ * request parameter can widen or redirect, and `assertEntityScope` throws on an empty or malformed
+ * scope rather than reading every tenant's rows. The identical array is what the ranking, KPI and
+ * compose queries already run under (QUALIFY_TENANT_SCOPE = 'cross-tenant-bxr-indigo').
+ * What this returns is non-PHI in both directions: facility names and CMD export text, never a
+ * patient identifier or a dollar figure. The `collections.facilities` /
+ * `collections.cmd_facility_aliases` joins are NOT tenant-filtered (the dimension is entity-less),
+ * but they only enrich labels for facility texts that ALREADY passed the tenant scope in the inner
+ * select, so no other tenant's facility can enter the list through them.
  */
 export function buildQualifyFacilityOptionsQuery(entityIds: string[]): { sql: string; params: unknown[] } {
   const params: unknown[] = [entityIds];
   const sql =
+    // Cross-tenant by design; scope is the caller's PINNED principal array, never request input.
     'select coalesce(f.display_acronym, f.facility_name, min(r.facility)) as display, ' +
     'min(r.facility) as value, ' +
     'array_agg(r.facility order by r.facility) as variants, ' +

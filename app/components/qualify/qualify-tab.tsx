@@ -87,6 +87,12 @@ import {
 } from '@/lib/qualify/contract';
 import type { CmdEmployerOption } from '@/lib/actions';
 import { MultiSelectTagPicker, type PickerOption } from '@/components/ui/multi-select-tag-picker';
+import {
+  canonicalFacilityValue,
+  expandFacilitySelection,
+  indexFacilityCanonical,
+  indexFacilityVariants,
+} from '@/lib/qualify/facilityVariants';
 import { buildQualifySearchParams, parseQualifySearchParams } from '@/lib/qualify/urlState';
 import { deriveTileFlanks, NO_TILE_FLANKS } from '@/lib/qualify/tileFlanks';
 import { deriveOnFileTags } from '@/lib/qualify/onFileTags';
@@ -205,9 +211,20 @@ export function QualifyTab({
 
   // ── PICKER OPTION VOCABULARIES ────────────────────────────────────────────────────────────────────
   const [facilityOptions, setFacilityOptions] = useState<PickerOption[]>([]);
-  /** canonical picker value → EVERY raw CMD facility text it covers. One facility can carry several
-   *  spellings in the CMD export; the picker shows one row and the filter gets all of them. */
+  /** ANY raw CMD facility text → EVERY spelling of that same facility (including itself).
+   *
+   *  Keyed by every variant, not only the canonical one, on purpose: the value stored in
+   *  `facilitySelection` does not always come from the picker. A ticker-card click stores the trend
+   *  row's RAW `facilityKey`, and a URL restored from before this change can carry any spelling. A
+   *  canonical-only map would miss those and silently fall back to the single spelling — scoping the
+   *  search to 81 charge lines where the facility has 4,237. */
   const [facilityVariants, setFacilityVariants] = useState<Record<string, string[]>>({});
+  /** ANY raw CMD facility text → the CANONICAL picker value for that facility.
+   *
+   *  A REF, not state, because `openTrendCard` must keep a stable identity: the Heating-Up marquee is
+   *  memoized on its props and remounting it mid-scroll restarts the animation (a Phase 2 invariant).
+   *  Reading the map through a ref keeps that callback's dep array empty. */
+  const facilityCanonicalRef = useRef<Record<string, string>>({});
   const [payerOptions, setPayerOptions] = useState<PickerOption[]>([]);
   // Employer is a SERVER type-ahead (the ~11.6k vocabulary is too large to load whole).
   const [employerOptions, setEmployerOptions] = useState<CmdEmployerOption[]>([]);
@@ -279,7 +296,7 @@ export function QualifyTab({
    *  NOTE the name: `expandedFacilities` was already taken by the ranking's accordion state, which is
    *  an unrelated ReadonlySet of open cards. */
   const facilityFilterValues = useMemo(
-    () => facilitySelection.flatMap((v) => facilityVariants[v] ?? [v]),
+    () => expandFacilitySelection(facilitySelection, facilityVariants),
     [facilitySelection, facilityVariants],
   );
 
@@ -363,7 +380,11 @@ export function QualifyTab({
       // labelled from display_acronym (falling back to facility_name, then the raw text), so the
       // two `LONESTAR MENTAL HEALTH…` spellings arrive as a single option here.
       setFacilityOptions(r.facilities.map((f) => ({ value: f.value, display: f.display, badge: f.care_setting })));
-      setFacilityVariants(Object.fromEntries(r.facilities.map((f) => [f.value, f.variants])));
+      // Both maps are keyed by EVERY spelling, so a selection that did not come from the picker (a
+      // ticker-card click, an older URL) still expands and still canonicalizes. The indexes are pure
+      // and unit-tested (lib/qualify/facilityVariants.ts) — every failure mode here is silent.
+      setFacilityVariants(indexFacilityVariants(r.facilities));
+      facilityCanonicalRef.current = indexFacilityCanonical(r.facilities);
     });
     void loadQualifyPayerOptions().then((r) => {
       if (!alive || !r.ok) return;
@@ -684,11 +705,18 @@ export function QualifyTab({
     if (!t.dominantPayer) return;
     userDrivenRef.current = true; // Step 2: a ticker-card click is a user interaction
     setTickerPinned(true);
-    setFacilitySelection([t.facilityKey]);
+    // CANONICALIZE. `t.facilityKey` is the RAW rollup facility text, which is not necessarily the
+    // canonical picker value for that facility. Storing the raw spelling would break two things at
+    // once: the chip would carry a value no picker option matches (so its dashed "derived" styling
+    // and its remove affordance would not line up), and the filter would scope to that one spelling
+    // instead of the facility. Canonicalizing keeps the selection in the picker's own vocabulary.
+    const canonical = canonicalFacilityValue(t.facilityKey, facilityCanonicalRef.current);
+    setFacilitySelection([canonical]);
     setPayerSelection([t.dominantPayer]);
     // Mark exactly these two as ticker-DERIVED so their chips read dashed + ↳ (a hand-picked chip stays
     // solid). Namespaces don't collide, so one set feeds both the facility and payer pickers.
-    setDerivedValues(new Set([t.facilityKey, t.dominantPayer]));
+    // Keyed on the CANONICAL value, matching what facilitySelection now holds.
+    setDerivedValues(new Set([canonical, t.dominantPayer]));
     setEmployerSelection([]);
     setFundingSelection([]);
     setMemberId('');
