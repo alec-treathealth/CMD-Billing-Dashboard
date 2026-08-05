@@ -350,21 +350,45 @@ const GUARD_B_MIN_SHARE = flag('guard-b-share', 0.1);
 // section asserts the computed value still matches. If the corpus shifts and it does not, the check
 // FAILS and names the new figure — the header cannot quietly become a lie.
 //
-// ── WHAT MOVED THE RATE FROM 5.7% TO 3.8% — measured, and NOT what you would guess ──────────────
+// ── WHAT MOVED THE RATE FROM 5.7% TO 3.8% — measured ────────────────────────────────────────────
 //
-//   pre-027, no Guard C:  A=27 B=19 E=3 F=12  · testable 210 · F = 12/210 = 5.7%
-//   post-027, Guard C on: A=11 B=19 C=6 E=3 F=8 · testable 212 · F =  8/212 = 3.8%
+//   pre-027, no Guard C:  A=27 B=19       E=3 F=12 · testable 210 · F = 12/210 = 5.7%
+//   post-027, Guard C on: A=11 B=19 C2=6  E=3 F=8  · testable 212 · F =  8/212 = 3.8%
 //
-// **The improvement is 027's dedup, not Guard C.** Guard C caught ZERO of the 47 changed
-// confirmed-tier cases — the classifier's Guard-C bucket is empty in this holdout. The mechanism is
-// bucket A: 027 merged 11 duplicate identities, so 16 cases where the scorer "picked the wrong id"
-// were picking a DIFFERENT ROW FOR THE SAME PAYER, and after the merge they simply resolve
-// correctly. Four of those had been sitting in F. The +2 in `testable` is a second-order effect of
-// the surface pool changing (2 formerly-vacuous cases became testable).
+// BOTH mechanisms contributed, and the split is:
 //
-// Guard C earns its place on the PROPOSAL streams, not on this metric: it annotated 66 rows and
-// removed 74 names from the VOB survivor set. Attributing the holdout improvement to it would credit
-// the wrong mechanism and invite someone to "tune Guard C" to move a number it does not touch.
+//   * 027's DEDUP collapsed bucket A from 27 to 11. Those cases were the scorer "picking the wrong
+//     id" when it was really picking a DIFFERENT ROW FOR THE SAME PAYER; once merged they resolve
+//     correctly. This is the larger effect.
+//   * GUARD C caught SIX genuine confirmed-tier errors (bucket C2, below). All six are real
+//     wrong-state matches, not false flags — Guard C's false-positive rate on this holdout is
+//     0 of 6.
+//
+// ⚠ CORRECTION, 2026-08-05. An earlier version of this comment claimed "Guard C caught ZERO … the
+// Guard-C bucket is empty in this holdout." That was WRONG, and the way it was wrong is worth
+// keeping: the printed `COUNTS:` line renders each bucket by its key's FIRST CHARACTER, and the keys
+// 'C. MODIFIER-DRIVEN' (Guard B) and 'C2. STATE MISMATCH' (Guard C) both render as `C`. Seeing a
+// single `C=6` I concluded it was the Guard-B bucket and that Guard C's was empty. It is the exact
+// opposite — C2 holds the 6 and the Guard-B bucket is the empty one. Read the bucket HEADINGS, not
+// the COUNTS line; the abbreviation is lossy.
+//
+// The six Guard-C catches, verbatim (want = the CONFIRMED mapping, got = the scorer's top-1):
+//   BLUE CARD PROGRAM TX              want=pi_bcbs_texas            got=pi_bcbs_illinois      @0.679
+//   BLUE CROSS AND BLUE SHIELD OF T…  want=pi_bcbs_texas            got=pi_anthem_nevada      @0.700
+//   BLUECARD PROGRAM OF MD            want=pi_carefirst_maryland    got=pi_bcbs_pennsylvania  @0.650
+//   BLUECARD PROGRAM OF SC            want=pi_bcbs_south_carolina   got=pi_bcbs_pennsylvania  @0.650
+//   BLUECARD PROGRAM OF TX            want=pi_bcbs_texas            got=pi_bcbs_pennsylvania  @0.668
+//   TENNESSEE BLUE CROSS BLUE SHIELD  want=pi_bcbs_tennessee        got=pi_bcbs_texas         @0.588
+//
+// Every one names a state and got a DIFFERENT state, so every flag is correct. Note the shape: five
+// of six are BlueCard/state-BCBS names, which is the class Guard C was built for.
+//
+// NOT MEASURED, and do not assume it: whether all six would have landed in F with Guard C disabled.
+// The classifier tests `flagC` BEFORE `blockA`, so some may also be Guard-A blocks. Isolating that
+// needs a Guard-C-disabled re-run, which no flag currently exposes.
+//
+// Guard C also does the bulk of its work on the PROPOSAL streams rather than here: 66 rows annotated
+// and 74 names removed from the VOB survivor set.
 const WRONG_RATE_F = 8;
 const WRONG_RATE_TESTABLE = 212;
 const WRONG_RATE_PCT = ((100 * WRONG_RATE_F) / WRONG_RATE_TESTABLE).toFixed(1);

@@ -223,6 +223,26 @@ Surfaces:
 | `billing-audit-op` · `billing-code-decisions` | daily 02:20 / 02:40 |
 | `billing-audit-consolidated` | daily 02:40, 03:10, 03:40 |
 
+> **The `:41–:59` reserved window is CMD-API-scoped, as practiced** (evidenced 2026-08-05 — do not
+> re-fight this). The band is held for live CMD probe work, and the constraint that matters is
+> *contention for CMD's one-report-at-a-time partner slot*, not the clock alone. Two crons sit inside
+> it and legitimately stay:
+>
+> - `refresh-charge-rollup` (:45) is **DB-only**. `app/app/api/cron/refresh-charge-rollup/route.ts:32`
+>   → `handleRefreshChargeRollup` (`app/lib/server.ts:745`) →
+>   `handleRefreshChargeRollupRequest` (`src/routes/refreshChargeRollupHandler.ts:41`), whose sole
+>   injected dependency is `refresh()` (`:33`). That runs
+>   `select collections.refresh_cmd_explorer_charge_rollup()`
+>   (`src/collections/refreshChargeRollup.ts:86`). Zero `fetch`, zero HTTP client, no CMD call.
+> - `upcoming-overrides` (:55) makes an **external call, but to Google Sheets, not CMD** —
+>   `app/lib/server.ts:1237-1249` imports `googleapis` and calls `readSheet(sheetId, tab, oauth)`.
+>
+> So neither contends for the CMD slot. A cron that *does* call the CMD API belongs outside
+> :41–:59 — that is why `qualify-census` moved off :47 even though it talks to Monday: the rule was
+> applied conservatively rather than argued down. If the band is ever redefined as wall-clock-absolute
+> rather than CMD-scoped, these two need their own explicitly-scoped change; they are
+> production-critical and must not be moved as a drive-by.
+
 `/api/cron/qualify-census` was scheduled 2026-08-04 (hourly **:22**) in the
 explicitly-scoped Auth/LOS session the morning runbook reserved it for, after
 `MONDAY_SECRET_API_KEY` landed in Vercel. It feeds the Qualify auth-fit factor
