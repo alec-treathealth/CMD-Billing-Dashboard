@@ -205,6 +205,8 @@ export interface ResolutionFlowProps {
   reason: 'empty' | 'prefix_too_short' | 'no_match' | null;
   /** The term currently in the box. Prefix-safe: callers pass `handle.echo`, never a full member id. */
   echo: string;
+  /** The original term, retained only in action state and submitted via POST for later steps. */
+  term?: string;
   /**
    * The Server Action every step submits to. Required — there is no URL fallback ON PURPOSE, because a
    * fallback would be a GET and would put the term back in the query string.
@@ -214,7 +216,7 @@ export interface ResolutionFlowProps {
   denied?: string | null;
 }
 
-export function ResolutionFlow({ resolution, reason, echo, action, denied }: ResolutionFlowProps): React.ReactElement {
+export function ResolutionFlow({ resolution, reason, echo, term = echo, action, denied }: ResolutionFlowProps): React.ReactElement {
   const step1Complete = resolution !== null;
   const step2Complete = resolution !== null && !resolution.candidates.wasAmbiguous;
   const step3Complete = resolution?.window.frozen ?? false;
@@ -304,7 +306,7 @@ export function ResolutionFlow({ resolution, reason, echo, action, denied }: Res
               </p>
             )}
             <form action={action}>
-              <input type="hidden" name="term" value={echo} />
+              <input type="hidden" name="term" value={term} />
               <ul className="flex list-none flex-col gap-2 p-0">
                 {orderedCandidates(resolution).map((c) => (
                   <CandidateRow
@@ -363,7 +365,7 @@ export function ResolutionFlow({ resolution, reason, echo, action, denied }: Res
               <>
                 <p className="mb-3 text-sm text-ink900">{resolution.window.ladder.rationale}</p>
                 <form action={action}>
-                  <input type="hidden" name="term" value={echo} />
+                  <input type="hidden" name="term" value={term} />
                   <fieldset className="border-0 p-0">
                     <legend className="mb-2 text-sm font-medium text-ink900">Window</legend>
                     <ul className="flex list-none flex-col gap-2 p-0">

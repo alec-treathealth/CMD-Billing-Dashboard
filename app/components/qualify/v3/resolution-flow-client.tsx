@@ -23,6 +23,7 @@ export function ResolutionFlowClient(): React.ReactElement {
       resolution={state.resolution}
       reason={state.reason}
       echo={state.echo}
+      term={state.term}
       denied={state.denied}
       action={formAction}
     />

@@ -37,6 +37,8 @@ export interface V3FlowState {
   reason: UnresolvableReason | null;
   /** Prefix-safe echo to repopulate the input. NEVER a full member id. */
   echo: string;
+  /** The POST-only continuation term, retained in client action state for subsequent steps. */
+  term: string;
   /** Set only on a gate denial, so the screen can say why rather than showing an empty result. */
   denied: string | null;
 }
@@ -45,6 +47,7 @@ export const V3_INITIAL_STATE: V3FlowState = {
   resolution: null,
   reason: 'empty',
   echo: '',
+  term: '',
   denied: null,
 };
 
@@ -67,7 +70,7 @@ function intField(form: FormData, name: string): number | null {
 export async function resolveCoverageAction(_prev: V3FlowState, form: FormData): Promise<V3FlowState> {
   const principal = await requireQualifyPrincipal();
   if (!principal.ok) {
-    return { resolution: null, reason: null, echo: '', denied: principal.error };
+    return { resolution: null, reason: null, echo: '', term: '', denied: principal.error };
   }
 
   const rawTerm = form.get('term');
@@ -89,5 +92,5 @@ export async function resolveCoverageAction(_prev: V3FlowState, form: FormData):
 
   // The echo is what repopulates the input. It is deliberately NOT `term`: for a full member id the
   // classifier returns '', so the id is not round-tripped through the DOM either.
-  return { resolution, reason, echo: resolution?.handle.echo ?? '', denied: null };
+  return { resolution, reason, echo: resolution?.handle.echo ?? '', term, denied: null };
 }
