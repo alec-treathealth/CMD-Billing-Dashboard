@@ -200,7 +200,12 @@ export function buildCandidateEvidenceBatchQuery(
 ): BuiltQuery {
   const col = HANDLE_COLUMN[kind].rollup;
   if (canonicalIds.length === 0) {
-    return { sql: 'select null::text as canonical_payer_id, 0::bigint as lines where false', params: [] };
+    // Zero rows, but the FULL row shape: the caller's row type declares `members`, and a query that
+    // omits a column the type promises is a lie that happens to be unobservable. Found in review.
+    return {
+      sql: 'select null::text as canonical_payer_id, 0::bigint as lines, 0::int as members where false',
+      params: [],
+    };
   }
   const sql = `
     select m.canonical_payer_id                as canonical_payer_id,
@@ -238,21 +243,27 @@ export function buildGroupLadderQuery(
   rungDays: readonly number[],
 ): BuiltQuery {
   const col = HANDLE_COLUMN[kind].rollup;
-  const widest = Math.max(...rungDays);
-  if (canonicalPayerId === null) {
-    return {
-      sql: rungDays
-        .map((d, i) => `select ${d}::int as days, 0::int as members, 0::bigint as lines${i === 0 ? '' : ''}`)
-        .join(' union all '),
-      params: [],
-    };
-  }
-  // Rung day-counts are numeric LITERALS derived from a caller-supplied number[] that is validated
-  // below — never from a string. A non-finite or negative rung is rejected rather than interpolated.
+
+  // VALIDATE FIRST, BEFORE ANY BRANCH. Rung day-counts are the one thing in this file interpolated as
+  // SQL literals rather than bound as params (a FILTER clause per rung cannot take a placeholder for
+  // its own arithmetic), so validation is the only thing standing between them and injection.
+  //
+  // ⚠ THIS USED TO SIT BELOW THE unmapped EARLY-RETURN, which meant the unmapped branch interpolated
+  // rungDays with NO validation at all. Not reachable today — the sole caller passes the hardcoded
+  // LADDER_RUNGS constant — but "unreachable" is a property of today's callers, not of this function,
+  // and the whole point of validating here is to not depend on that. Found in review.
   for (const d of rungDays) {
     if (!Number.isInteger(d) || d <= 0 || d > 3650) {
       throw new Error(`invalid ladder rung: ${String(d)} (must be a positive integer <= 3650)`);
     }
+  }
+  const widest = Math.max(...rungDays);
+
+  if (canonicalPayerId === null) {
+    return {
+      sql: rungDays.map((d) => `select ${d}::int as days, 0::int as members, 0::bigint as lines`).join(' union all '),
+      params: [],
+    };
   }
   const buckets = rungDays
     .map(

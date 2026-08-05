@@ -13,6 +13,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'node:path';
 import {
+  buildCandidateEvidenceBatchQuery,
   buildCoverageCandidatesQuery,
   buildClaimsOnlyCandidatesQuery,
   buildGroupClaimEvidenceQuery,
@@ -208,13 +209,28 @@ test('the ladder counts THE CHOSEN GROUP, not everyone sharing the prefix', () =
 });
 
 test('ladder rungs are validated, never interpolated from unchecked input', () => {
-  for (const bad of [0, -30, 1.5, 4000, Number.NaN]) {
-    assert.throws(
-      () => buildGroupLadderQuery(TOKEN, 'prefix', 'pi_cigna', '2026-02-01', [bad]),
-      /invalid ladder rung/,
-      `rung ${String(bad)} must be rejected`,
-    );
+  // Both branches. The unmapped (null canonical) branch used to sit ABOVE the validation loop and
+  // therefore interpolated rung widths unchecked — unreachable via today's only caller, but
+  // "unreachable" is a property of the callers, not of this function. Found in review.
+  for (const canonical of ['pi_cigna', null] as const) {
+    for (const bad of [0, -30, 1.5, 4000, Number.NaN]) {
+      assert.throws(
+        () => buildGroupLadderQuery(TOKEN, 'prefix', canonical, '2026-02-01', [bad]),
+        /invalid ladder rung/,
+        `rung ${String(bad)} must be rejected for canonical=${String(canonical)}`,
+      );
+    }
   }
+});
+
+test('the empty-batch evidence query returns the FULL row shape, not a subset', () => {
+  // A zero-row query that omits a column the caller's row type declares is a lie that happens to be
+  // unobservable. Found in review.
+  const { sql } = buildCandidateEvidenceBatchQuery(TOKEN, 'prefix', [], '2026-01-01', '2026-02-01');
+  for (const col of ['canonical_payer_id', 'lines', 'members']) {
+    assert.ok(sql.includes(`as ${col}`), `the empty shape must still declare ${col}`);
+  }
+  assert.match(sql, /where false/, 'and return no rows');
 });
 
 // ── predicateId ──────────────────────────────────────────────────────────────────────────────────

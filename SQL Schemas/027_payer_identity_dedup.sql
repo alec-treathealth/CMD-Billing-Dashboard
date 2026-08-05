@@ -44,10 +44,23 @@
 --   veris-data-notes.md "Apply-path privilege model"). `apply_migration` runs as `postgres`, a
 --   non-superuser with SET-capable membership in `claims_admin`.
 --
--- IDEMPOTENT: `IF NOT EXISTS` on both tables/indexes, `DROP POLICY IF EXISTS` before CREATE, and
---   every data step is a set operation keyed on the plan table. A second run finds zero absorbed
---   ids live, so sections 6-10 move zero rows and section 4's seed is `ON CONFLICT DO NOTHING`.
---   Re-running after success is a no-op, NOT a second merge.
+-- IDEMPOTENT — WITH ONE IMPORTANT QUALIFICATION, corrected 2026-08-05 after review found the claim
+--   that used to sit here was FALSE. The DDL is idempotent (`IF NOT EXISTS` on both tables/indexes,
+--   `DROP POLICY IF EXISTS` before CREATE, `ON CONFLICT DO NOTHING` on the section-4 seed) and no
+--   re-run can produce a SECOND merge or corrupt anything.
+--
+--   But a re-run is NOT a silent no-op, which is what this header used to promise. Section 5 guard (b)
+--   asserts every id in `_027_plan` still exists live; after a successful first run the 11 absorbed
+--   ids have been DELETED by section 9, so a second application ABORTS with
+--   `027 section 5: plan references identities that do not exist live: ...`. That is a loud,
+--   whole-transaction rollback with zero side effects — safe, but an operator re-running after an
+--   ambiguous "did this commit?" moment sees an alarming error rather than a clean pass.
+--
+--   Deliberately NOT changed to short-circuit: this file is APPLIED LIVE, and altering its executable
+--   behaviour would put the repo out of step with production for no safety gain. Corrected as a
+--   comment-only amendment, the same precedent 013 and 023 used post-apply (zero DDL effect; the repo
+--   file stays canonical). IF YOU SEE THAT ERROR, THE MIGRATION ALREADY SUCCEEDED — verify with
+--   section 11's queries instead of trying to force it through.
 --
 -- ⚠ FAIL-LOUD, WHOLE-MIGRATION: `apply_migration` wraps this in ONE transaction, so the
 --   "one transaction per component" requirement is satisfied more strongly than asked — either all
