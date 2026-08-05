@@ -74,7 +74,7 @@ import {
   loadQualifyEmployers,
 } from '@/lib/qualify/actions';
 import {
-  classifyQualifyIdentifier,
+  qualifyIdentifierNarrows,
   QUALIFY_CLIENT_NAME_ENABLED,
   qualifyWindowLabel,
   trailingWindow,
@@ -238,14 +238,20 @@ export function QualifyTab({
 
   // ── v2 IDENTIFIED-FIRST COMPOSE (the Qualify v2 prototype's hierarchy): one smart identifier
   //    field + facility is the whole primary search; the aggregate pickers fold behind "Browse
-  //    filters". The single input CLASSIFIES instead of splitting into two boxes — ≤3 letters is the
-  //    alpha-prefix STARTS-WITH narrow (member_id_prefix_bidx), anything else the exact member-id
+  //    filters". The single input CLASSIFIES instead of splitting into two boxes — <=3 chars is the
+  //    alpha-prefix STARTS-WITH narrow (member_id_prefix_bidx), anything longer the exact member-id
   //    narrow (member_id_bidx). It writes the SAME two states the old separate inputs wrote, so every
   //    downstream contract (compose filter, ladder, lead snapshot, audits) is unchanged — and the old
   //    both-identifiers dead-end is unrepresentable from the UI.
+  //
+  //    D3 (2026-08-05): the rule is now the SERVER's, via the one authority. It used to be
+  //    "<=3 LETTERS", which demoted "W26" to an exact member id here while the server read it as a
+  //    prefix — the client then minted a token matching nothing and the page showed "0 charge lines
+  //    match" beside a fully populated policy card. Real prefixes are mostly alphanumeric, so that
+  //    broke the common case and spared only letters-only handles like XDP.
   const identifierValue = memberId || alphaPrefix;
   const onIdentifierChange = useCallback((raw: string) => {
-    const c = classifyQualifyIdentifier(raw);
+    const c = qualifyIdentifierNarrows(raw);
     setMemberId(c.memberId);
     setAlphaPrefix(c.alphaPrefix);
   }, []);
