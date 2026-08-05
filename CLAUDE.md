@@ -25,15 +25,26 @@ only committed docs belong in the table — untracked ones go under
 |---|---|---|
 | Standing rules, verification gate, this map | `CLAUDE.md` | 1 |
 | Live tribal-knowledge ledger — **wins on conflict with this file** | `veris-data-notes.md` | 2 |
-| Build guide — the 13 gated Veris/Indigo sessions + order deviations | `docs/Fable Build Doc E2E/00-GUIDE.md` | 3 |
+| Build guide — the 13 gated Veris/Indigo sessions + order deviations | `docs/archive/00-GUIDE.md` | 3 |
 | PR compliance rules — the real Qodo content (`.qodo/` is empty) | `pr_compliance_checklist.yaml` | 4 |
-| Visual system — TreatHealthOS tokens and palette | `docs/design-system.md` | 5 |
+| Visual system — TreatHealthOS tokens and palette | `docs/archive/design-system.md` | 5 |
 | Qodo required-status-check contract + rename hazard | `docs/qodo-compliance-gate.md` | 6 |
 | Product orientation — what this app actually is | `README.md` | 7 |
 
 Read-order is a cold-start sequence, not a priority ranking. Path-scoped rules in
 `.claude/rules/` load automatically and are not listed here — see
 [Where the detail lives](#where-the-detail-lives).
+
+> **`docs/archive/` now holds two LIVE documents, which is a naming lie worth knowing about**
+> (recorded 2026-08-05). A bulk relocation moved `docs/Fable Build Doc E2E/00-GUIDE.md` →
+> `docs/archive/00-GUIDE.md` and `docs/design-system.md` → `docs/archive/design-system.md`. Both are
+> still CURRENT — the design system is what `.claude/rules/nextjs-app.md` tells you to follow, and
+> `00-GUIDE.md` is read-order 3. The paths above are the real ones; do not infer staleness from the
+> `archive/` segment the way the [Superseded](#superseded-in-repo--do-not-treat-as-current) list
+> below invites you to. `veris-data-notes.md` was swept into `archive/` by the same move and was
+> **restored to the repo root**, because it is the append-target ledger this file designates as
+> authoritative and the "root wins" relocation was ratified 2026-08-04 — a live ledger filed under
+> `archive/` would read as frozen to every future session.
 
 ### NOT IN REPO — project-knowledge only
 
@@ -264,7 +275,7 @@ in [Canonical Context Set](#canonical-context-set); that table wins:
 - `veris-data-notes.md` — the live tribal-knowledge ledger, updated
   per-apply. **When it conflicts with anything here, it wins.** Surface the
   conflict in your output; never silently pick a side.
-- `docs/design-system.md` — the TreatHealthOS visual system.
+- `docs/archive/design-system.md` — the TreatHealthOS visual system.
 - `CMD AR Automation — Build Doc v2.md` (repo root, **untracked**) — the current
   AR build plan. Previously mis-cited here as `docs/CMD AR Automation — Build
   Doc v2.md`, which has never existed.

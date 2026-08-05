@@ -54,6 +54,11 @@ export interface BuiltQuery {
  *
  * `group_on_file` is a PRESENCE boolean. The group number itself is PHI behind a blind index and is
  * never projected.
+ *
+ * NOTE WHAT THIS DOES NOT USE: `vob.payer_id`. Identity here is resolved by joining `insurance_co`
+ * against the NAME vocabulary only. The `payer_id` spine is a real resolution path — 160 CONFIRMED
+ * `vob_payer_id` aliases exist — but it is NOT WIRED IN, so no caller may claim a payer_id-backed
+ * basis. A `has_payer_id` column used to be projected here and was mistaken for exactly that.
  */
 export function buildCoverageCandidatesQuery(handleToken: string, kind: QualifyHandleKind): BuiltQuery {
   const col = HANDLE_COLUMN[kind].vob;
@@ -70,8 +75,7 @@ export function buildCoverageCandidatesQuery(handleToken: string, kind: QualifyH
       v.policy_type                                           as policy_type,
       count(distinct v.member_id_bidx)::int                   as member_count,
       max(v.vob_created_at)::text                             as vob_fresh_as_of,
-      bool_or(v.group_number_bidx is not null)                as group_on_file,
-      bool_or(v.payer_id is not null and btrim(v.payer_id) <> '') as has_payer_id
+      bool_or(v.group_number_bidx is not null)                as group_on_file
     from vob.member_benefits_latest v
     left join ref.payer_alias_map m
       on m.vocabulary = 'vob_insurance_co'

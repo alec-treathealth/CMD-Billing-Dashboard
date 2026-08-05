@@ -340,3 +340,30 @@ test('the flow renders no URL carrying employer identity', () => {
   }
   assert.ok(!/[?&]employer/.test(html), 'and no query string mentions an employer');
 });
+
+test('S1 keeps RANK order after a pick — the list must not reshuffle when the user acts', () => {
+  // The chosen row used to render FIRST, so picking the third candidate jumped it to the top and the
+  // list stopped expressing size while still captioned "we have pre-selected the largest". A list that
+  // moves when you act on it is the "searching randomness" complaint in miniature.
+  const html = render(
+    fixture({
+      candidates: {
+        total: 3,
+        chosenIndex: 2, // the LAST candidate is selected
+        wasAmbiguous: true,
+        chosenBy: 'user',
+        rejected: [
+          { canonicalPayerId: 'pi_a', payerDisplayName: 'AAA First', employerLabel: null, funding: null, planType: null, memberCount: 90, hasClaimEvidence: true },
+          { canonicalPayerId: 'pi_b', payerDisplayName: 'BBB Second', employerLabel: null, funding: null, planType: null, memberCount: 50, hasClaimEvidence: true },
+        ],
+      },
+    }),
+  );
+  const s1 = html.slice(html.indexOf('qualify-s1'), html.indexOf('qualify-s2'));
+  const order = [...s1.matchAll(/id="cand-(\d+)"/g)].map((m) => Number(m[1]));
+  assert.deepEqual(order, [0, 1, 2], `candidate rows must render in rank order, got ${order.join(',')}`);
+  // And the chosen one is still the one marked selected, at its own position.
+  const idxOfSelected = s1.indexOf('>Selected<');
+  const idxOfCand2 = s1.indexOf('id="cand-2"');
+  assert.ok(idxOfCand2 > 0 && idxOfSelected > idxOfCand2, 'the Selected marker belongs to cand-2');
+});

@@ -145,6 +145,60 @@ function CandidateRow(props: {
   );
 }
 
+/**
+ * The candidate list in RANK order, with each row carrying its original index.
+ *
+ * ⚠ WHY THIS EXISTS. The chosen row used to be rendered FIRST and the rejected rows after it, which
+ * meant the list was ranked only until the user picked something: choose the third candidate and it
+ * jumped to the top, so "we have pre-selected the largest" sat above a list whose order no longer
+ * expressed size. Re-ordering under a pick also makes the list move when the user acts, which is
+ * exactly the "searching randomness" complaint. The rejected summaries arrive in rank order with the
+ * chosen one filtered out, so reinserting it at its own index restores the original ranking.
+ */
+interface OrderedCandidate {
+  index: number;
+  chosen: boolean;
+  canonicalPayerId: string | null;
+  payerDisplayName: string;
+  employerLabel: string | null;
+  funding: 'Self-Funded' | 'Fully Insured' | null;
+  planType: string | null;
+  memberCount: number;
+  hasClaimEvidence: boolean;
+  evidenceNote: string;
+}
+
+function orderedCandidates(r: QualifyResolution): OrderedCandidate[] {
+  const chosenIdx = r.candidates.chosenIndex;
+  const out: OrderedCandidate[] = r.candidates.rejected.map((s: CoverageGroupSummary, i: number) => ({
+    // The inverse of `groups.filter((_, i) => i !== chosenIndex)`: every rejected row at or past the
+    // chosen position shifts up by one in the filtered array, so add it back.
+    index: i + (i >= chosenIdx ? 1 : 0),
+    chosen: false,
+    canonicalPayerId: s.canonicalPayerId,
+    payerDisplayName: s.payerDisplayName,
+    employerLabel: s.employerLabel,
+    funding: s.funding,
+    planType: s.planType,
+    memberCount: s.memberCount,
+    hasClaimEvidence: s.hasClaimEvidence,
+    evidenceNote: 'has claim history',
+  }));
+  out.push({
+    index: chosenIdx,
+    chosen: true,
+    canonicalPayerId: r.group.canonicalPayerId,
+    payerDisplayName: r.group.payerDisplayName,
+    employerLabel: r.group.employerLabel,
+    funding: r.group.funding,
+    planType: r.group.planType,
+    memberCount: r.group.memberCount,
+    hasClaimEvidence: r.group.claimEvidence.lines > 0,
+    evidenceNote: evidenceNoteFor(r),
+  });
+  return out.sort((a, b) => a.index - b.index);
+}
+
 export interface ResolutionFlowProps {
   resolution: QualifyResolution | null;
   /** Set when `resolution` is null — the three states stay distinct (I5). */
@@ -252,29 +306,18 @@ export function ResolutionFlow({ resolution, reason, echo, action, denied }: Res
             <form action={action}>
               <input type="hidden" name="term" value={echo} />
               <ul className="flex list-none flex-col gap-2 p-0">
-                <CandidateRow
-                  index={resolution.candidates.chosenIndex}
-                  chosen
-                  payerDisplayName={resolution.group.payerDisplayName}
-                  employerLabel={resolution.group.employerLabel}
-                  funding={resolution.group.funding}
-                  planType={resolution.group.planType}
-                  memberCount={resolution.group.memberCount}
-                  hasClaimEvidence={resolution.group.claimEvidence.lines > 0}
-                  evidenceNote={evidenceNoteFor(resolution)}
-                />
-                {resolution.candidates.rejected.map((r: CoverageGroupSummary, i: number) => (
+                {orderedCandidates(resolution).map((c) => (
                   <CandidateRow
-                    key={`${r.canonicalPayerId ?? 'unmapped'}-${i}`}
-                    index={i + (i >= resolution.candidates.chosenIndex ? 1 : 0)}
-                    chosen={false}
-                    payerDisplayName={r.payerDisplayName}
-                    employerLabel={r.employerLabel}
-                    funding={r.funding}
-                    planType={r.planType}
-                    memberCount={r.memberCount}
-                    hasClaimEvidence={r.hasClaimEvidence}
-                    evidenceNote="has claim history"
+                    key={`${c.canonicalPayerId ?? 'unmapped'}-${c.index}`}
+                    index={c.index}
+                    chosen={c.chosen}
+                    payerDisplayName={c.payerDisplayName}
+                    employerLabel={c.employerLabel}
+                    funding={c.funding}
+                    planType={c.planType}
+                    memberCount={c.memberCount}
+                    hasClaimEvidence={c.hasClaimEvidence}
+                    evidenceNote={c.evidenceNote}
                   />
                 ))}
               </ul>

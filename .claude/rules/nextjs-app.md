@@ -88,7 +88,7 @@ set to `0`/`false`/`off` — changing it on Vercel requires a redeploy.
 
 ## Design
 
-Follow `docs/design-system.md` (TreatHealthOS). Per-view branding is driven by
+Follow `docs/archive/design-system.md` (TreatHealthOS). Per-view branding is driven by
 `brand-theme.tsx` setting `<html data-view=…>` and `--brand-*` CSS variables in
 `globals.css`: Consolidated = teal, BXR = navy/brass, Indigo = indigo/violet.
 Off-dashboard chrome stays teal; charts keep functional multi-series colors.

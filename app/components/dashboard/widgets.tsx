@@ -82,7 +82,7 @@ export function WidgetCard({
 }
 
 /**
- * A big-number KPI tile (the TreatHealthOS "KPI tile" — see docs/design-system.md).
+ * A big-number KPI tile (the TreatHealthOS "KPI tile" — see docs/archive/design-system.md).
  * `detail` renders a second, smaller value line; `sub` a muted footnote. Both accept
  * a ReactNode so callers can pass a colored trend/breakdown, not just a string.
  * Shared by the Collections MTD/YTD widget and the overview KPI row.

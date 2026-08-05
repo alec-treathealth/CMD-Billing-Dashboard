@@ -7,6 +7,7 @@
  */
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
+import { normalizeFunding, trailingWindowFor } from '../lib/qualify/resolutionService';
 import {
   deriveNotices,
   employerKeyFor,
@@ -43,7 +44,7 @@ function group(over: Partial<CoverageGroup> = {}): CoverageGroup {
     payerRelationship: 'same_payer',
     administratorId: null,
     administratorName: null,
-    resolutionBasis: 'vob_payer_id',
+    resolutionBasis: 'vob_name', // nothing produces 'vob_payer_id' yet — the spine is unwired
     employerKey: 'emp_1',
     employerLabel: 'SOUTHWEST AIRLINES CO',
     funding: 'Self-Funded',
@@ -351,4 +352,45 @@ test('network null is stated as "not captured", not silently omitted', () => {
   // …but not for a claims-only group, where there is no VOB to have captured it.
   const claimsOnly = deriveNotices(group({ resolutionBasis: 'claims_only' }), candidates(), '2026-08-05');
   assert.ok(!claimsOnly.some((x) => x.kind === 'network_not_captured'));
+});
+
+// ── Post-ship self-review fixes (2026-08-05) ─────────────────────────────────────────────────────
+
+test('the trailing window ENDS TODAY inclusive, matching v2 — today is not dropped', () => {
+  // MEASURED OFF-BY-ONE. The first version returned { from: anchor - days, to: anchor }, and because
+  // every rollup read is `charge_date >= from and < to`, that excluded today entirely and shifted the
+  // window back a day — so a v3 "30 days" covered different rows than a v2 "30 days". v2's convention
+  // (contract.ts) is `to = anchor + 1` exclusive, `from = anchor - (days - 1)`.
+  const w = trailingWindowFor('2026-08-05', 30);
+  assert.equal(w.to, '2026-08-06', 'exclusive upper is TOMORROW, so all of today is in-window');
+  assert.equal(w.from, '2026-07-07', 'inclusive lower gives exactly 30 days');
+  // Exactly `days` days wide, for every rung the ladder offers.
+  for (const days of [30, 60, 90, 180, 365]) {
+    const x = trailingWindowFor('2026-08-05', days);
+    const span = (Date.parse(`${x.to}T00:00:00Z`) - Date.parse(`${x.from}T00:00:00Z`)) / 86_400_000;
+    assert.equal(span, days, `${days}-day window must span exactly ${days} days, got ${span}`);
+  }
+});
+
+test('a single-day window is representable and does not invert', () => {
+  const w = trailingWindowFor('2026-08-05', 1);
+  assert.equal(w.from, '2026-08-05');
+  assert.equal(w.to, '2026-08-06');
+});
+
+test('funding: a VOB that captured BOTH fundings resolves to NULL, not a coin flip', () => {
+  // MEASURED live: 'Self-Funded;Fully Insured' exists on 12 members. A startsWith('self') test
+  // resolved it to a definitive "Self-Funded" — a confident wrong answer, which is the failure class
+  // this whole surface exists to remove. Unknown must read as unknown.
+  assert.equal(normalizeFunding('Self-Funded;Fully Insured'), null);
+  assert.equal(normalizeFunding('Fully Insured, Self-Funded'), null);
+  // The two real single values still resolve, case- and separator-tolerant.
+  assert.equal(normalizeFunding('Self-Funded'), 'Self-Funded');
+  assert.equal(normalizeFunding('self funded'), 'Self-Funded');
+  assert.equal(normalizeFunding('Fully Insured'), 'Fully Insured');
+  assert.equal(normalizeFunding('fully-insured'), 'Fully Insured');
+  // Absent / blank / unrecognized are all null rather than a nearest guess.
+  for (const v of [null, '', '   ', 'Level Funded', 'unknown']) {
+    assert.equal(normalizeFunding(v), null, `${JSON.stringify(v)} must be null`);
+  }
 });

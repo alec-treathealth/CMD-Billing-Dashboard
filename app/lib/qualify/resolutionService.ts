@@ -84,7 +84,6 @@ interface VobCandidateRow {
   member_count: number;
   vob_fresh_as_of: string | null;
   group_on_file: boolean;
-  has_payer_id: boolean;
 }
 
 interface ClaimsOnlyRow {
@@ -107,12 +106,22 @@ export interface ResolveCoverageInput {
   chosenIndex?: number;
 }
 
-/** Normalize the VOB `funding` string onto the contract's two-value union. Unknown ⇒ null, never a guess. */
-function normalizeFunding(raw: string | null): CoverageGroup['funding'] {
+/**
+ * Normalize the VOB `funding` string onto the contract's two-value union. Unknown ⇒ null, never a guess.
+ *
+ * MEASURED (live, 2026-08-05): the column holds `Self-Funded` (15,437), `Fully Insured` (7,078), NULL
+ * (499), `''` (9) — and **`'Self-Funded;Fully Insured'` (12)**. That last value is a VOB that captured
+ * BOTH, and a `startsWith('self')` test silently resolved it to a definitive "Self-Funded". Reporting
+ * a coin-flip as a fact is the exact failure this re-architecture exists to delete, so a multi-valued
+ * funding string resolves to NULL — the UI then renders "Funding not captured", which is true, instead
+ * of a confident wrong answer on 12 members' plans.
+ */
+export function normalizeFunding(raw: string | null): CoverageGroup['funding'] {
   if (!raw) return null;
   const v = raw.trim().toLowerCase();
-  if (v.startsWith('self')) return 'Self-Funded';
-  if (v.startsWith('fully')) return 'Fully Insured';
+  if (v.includes(';') || v.includes(',')) return null; // captured more than one — genuinely unknown
+  if (v === 'self-funded' || v === 'self funded') return 'Self-Funded';
+  if (v === 'fully insured' || v === 'fully-insured') return 'Fully Insured';
   return null;
 }
 
@@ -131,13 +140,22 @@ function normalizeRelationship(raw: string): CoverageGroup['payerRelationship'] 
 }
 
 /**
- * How this group's identity was established. Ordered strongest-first, and the order is the point: a
- * `payer_id`-backed resolution involved no name guessing, while a name match did.
+ * How this group's identity was actually established.
+ *
+ * ⚠ CORRECTED 2026-08-05. This used to return `'vob_payer_id'` whenever the VOB row merely HAD a
+ * `payer_id`, which overstated the provenance in the one field whose entire job is to say how strongly
+ * we know. `buildCoverageCandidatesQuery` resolves identity by joining `insurance_co` against the NAME
+ * vocabulary — `payer_id` is not part of that join at all — so the presence of a `payer_id` says
+ * nothing about how the payer was identified. Claiming the stronger basis is the same class of error
+ * as the dominant-payer heuristic: a confident label over a weaker fact.
+ *
+ * `'vob_payer_id'` stays in the union because the spine IS a real resolution path — `payer_alias_map`
+ * carries 160 CONFIRMED `vob_payer_id` aliases — but it is NOT BUILT YET. When a payer_id-first
+ * resolution stage lands, it returns that value; until then nothing may.
  */
 function basisFor(row: VobCandidateRow): ResolutionBasis {
   if (normalizeRelationship(row.payer_relationship) === 'program_label') return 'program_label_per_member';
-  if (row.canonical_payer_id === null) return 'vob_name'; // matched a VOB name that has no confirmed alias
-  return row.has_payer_id ? 'vob_payer_id' : 'vob_name';
+  return 'vob_name';
 }
 
 const ZERO_EVIDENCE: ClaimEvidence = {
@@ -430,7 +448,20 @@ async function buildLadder(
   return { rungs, proposedDays: proposed.days, rationale };
 }
 
-/** Trailing window from a `to` date, in the shape `resolveCoverage` expects. */
-export function trailingWindowFor(to: string, days: number): { from: string; to: string } {
-  return { from: shiftIsoDays(to, -days), to };
+/**
+ * Trailing window of exactly `days` days ENDING ON `anchor` INCLUSIVE, expressed as a half-open
+ * `[from, to)` range.
+ *
+ * ⚠ MEASURED OFF-BY-ONE, fixed 2026-08-05. The first version returned `{ from: anchor - days, to:
+ * anchor }`. Because every rollup read here is `charge_date >= from and < to`, that EXCLUDED today
+ * entirely and shifted the whole window back a day — so a v3 "30 days" covered a different 30 days
+ * than a v2 "30 days", and today's charges were invisible on the v3 surface until tomorrow.
+ *
+ * v2's `trailingWindowFromDays` in contract.ts is the convention to match, and it is explicit about
+ * why: `to = anchor + 1` ("exclusive upper = tomorrow, so all of today is in-window") and
+ * `from = anchor - (days - 1)` ("inclusive lower → exactly windowDays days"). This now computes the
+ * identical pair. Do not "simplify" it back to `anchor - days`.
+ */
+export function trailingWindowFor(anchor: string, days: number): { from: string; to: string } {
+  return { from: shiftIsoDays(anchor, -(days - 1)), to: shiftIsoDays(anchor, 1) };
 }

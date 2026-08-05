@@ -2,7 +2,7 @@
 
 Created by **S1 (Ground truth & ADR ratification, 2026-07-02)**. Every session
 appends what it learned the hard way — join keys, field quirks, timings, live-DB
-facts, ratified decisions (the §8.5.3 tribal-knowledge rule in `docs/Fable Build Doc E2E/00-GUIDE.md`).
+facts, ratified decisions (the §8.5.3 tribal-knowledge rule in `docs/archive/00-GUIDE.md`).
 Append under a dated session heading; never rewrite history — correct earlier
 entries with a dated correction line, the way CLAUDE.md §17 corrected CO-45.
 

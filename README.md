@@ -26,7 +26,7 @@ rows). Deployed to Vercel.
 > automatically when you touch the matching files. The live tribal-knowledge
 > ledger is [`veris-data-notes.md`](veris-data-notes.md) (it wins on
 > conflicts); the visual system is
-> [`docs/design-system.md`](docs/design-system.md).
+> [`docs/archive/design-system.md`](docs/archive/design-system.md).
 
 ## Architecture at a glance
 

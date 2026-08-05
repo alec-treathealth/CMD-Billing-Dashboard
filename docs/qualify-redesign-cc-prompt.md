@@ -10,9 +10,9 @@ before every commit. Never add a `Co-Authored-By: Claude` trailer.
 
 You are a senior engineer embedded with Alec on CMD-Billing-Dashboard (main, production).
 Read IN FULL before touching anything: the root `CLAUDE.md` (+ `.claude/rules/qualify.md`),
-`docs/design-system.md`,
+`docs/archive/design-system.md`,
 `docs/qualify-build-series.md`, and the RULINGS section of this file.
-`docs/Fable Build Doc E2E/00-GUIDE.md` and `veris-data-notes.md` are the standing
+`docs/archive/00-GUIDE.md` and `veris-data-notes.md` are the standing
 operator / reconciliation guides — skim for conventions; they do NOT govern this Qualify
 redesign (see RULINGS · Doc paths). Surface — never silently resolve — any conflict between
 those docs and what you observe.
