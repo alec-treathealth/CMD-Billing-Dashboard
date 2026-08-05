@@ -116,6 +116,8 @@
 -- rollup. Measured end-to-end: 2.02s.
 drop materialized view if exists collections.cmd_charge_int_facility;
 
+-- DELIBERATE CROSS-TENANT EXCEPTION: this shared matview is built across all business entities;
+-- tenant isolation is preserved by carrying business_entity_id and scoping all patient lookups to it.
 create materialized view collections.cmd_charge_int_facility as
 with int_rows as (
   select id, business_entity_id, member_id_bidx, payment_received
