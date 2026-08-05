@@ -114,6 +114,7 @@ function CandidateRow(props: {
             adding a second focusable element for the same action. */}
         <input
           id={id}
+          form={props.formId}
           type="radio"
           name="candidate"
           value={String(props.index)}
@@ -248,7 +249,7 @@ export function ResolutionFlow({ resolution, reason, echo, action, denied }: Res
 
       {/* ── S0 ─────────────────────────────────────────────────────────────────────────────────── */}
       <Step id="qualify-s0" n={1} title="Who are we looking at?" complete={step1Complete}>
-        <form action={action} className="flex flex-col gap-2">
+        <form id="qualify-s0" action={action} className="flex flex-col gap-2">
           <label htmlFor="qualify-term" className="text-sm font-medium text-ink900">
             Member ID prefix, full member ID, or facility name
           </label>
@@ -304,11 +305,11 @@ export function ResolutionFlow({ resolution, reason, echo, action, denied }: Res
               </p>
             )}
             <form action={action}>
-              <input type="hidden" name="term" value={echo} />
               <ul className="flex list-none flex-col gap-2 p-0">
                 {orderedCandidates(resolution).map((c) => (
                   <CandidateRow
                     key={`${c.canonicalPayerId ?? 'unmapped'}-${c.index}`}
+                    formId="qualify-s0"
                     index={c.index}
                     chosen={c.chosen}
                     payerDisplayName={c.payerDisplayName}
@@ -322,7 +323,7 @@ export function ResolutionFlow({ resolution, reason, echo, action, denied }: Res
                 ))}
               </ul>
               {resolution.candidates.total > 1 ? (
-                <button type="submit" className="mt-3 w-fit rounded-md bg-teal700 px-4 py-2 text-sm font-semibold text-white">
+                <button form="qualify-s0" type="submit" className="mt-3 w-fit rounded-md bg-teal700 px-4 py-2 text-sm font-semibold text-white">
                   Use this plan
                 </button>
               ) : null}
@@ -363,7 +364,6 @@ export function ResolutionFlow({ resolution, reason, echo, action, denied }: Res
               <>
                 <p className="mb-3 text-sm text-ink900">{resolution.window.ladder.rationale}</p>
                 <form action={action}>
-                  <input type="hidden" name="term" value={echo} />
                   <fieldset className="border-0 p-0">
                     <legend className="mb-2 text-sm font-medium text-ink900">Window</legend>
                     <ul className="flex list-none flex-col gap-2 p-0">
@@ -375,6 +375,7 @@ export function ResolutionFlow({ resolution, reason, echo, action, denied }: Res
                             <label htmlFor={id} className="flex cursor-pointer items-center gap-3 rounded-md border border-line p-3">
                               <input
                                 id={id}
+                                form="qualify-s0"
                                 type="radio"
                                 name="windowDays"
                                 value={String(rung.days)}
@@ -400,7 +401,7 @@ export function ResolutionFlow({ resolution, reason, echo, action, denied }: Res
                       })}
                     </ul>
                   </fieldset>
-                  <button type="submit" className="mt-3 w-fit rounded-md bg-teal700 px-4 py-2 text-sm font-semibold text-white">
+                  <button form="qualify-s0" type="submit" className="mt-3 w-fit rounded-md bg-teal700 px-4 py-2 text-sm font-semibold text-white">
                     Confirm window
                   </button>
                 </form>
@@ -480,4 +481,5 @@ function evidenceNoteFor(r: QualifyResolution): string {
   }
   if (e.sampleTier === 'thin') return `${e.distinctPatients} patients of history — thin`;
   return `${e.distinctPatients} patients across ${e.distinctFacilities} facilities`;
+}
 }
