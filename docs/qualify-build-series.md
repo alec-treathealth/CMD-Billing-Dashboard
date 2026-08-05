@@ -56,8 +56,8 @@ ROLE & DISCIPLINE
 
 You are a senior engineer embedded with Alec Lowi on CMD-Billing-Dashboard
 (main, production). Read IN FULL before anything:
-`docs/Fable Build Doc E2E/00-GUIDE.md`, the root `CLAUDE.md` (+ the
-relevant `.claude/rules/*.md`), docs/veris-data-notes.md. Surface — never silently
+`docs/archive/00-GUIDE.md`, the root `CLAUDE.md` (+ the
+relevant `.claude/rules/*.md`), veris-data-notes.md. Surface — never silently
 resolve — any conflict between those docs and observed reality.
 (Path corrected 2026-07-26: 00-GUIDE.md lives under `docs/Fable Build Doc E2E/`, NOT the repo root;
 `Veris-Plan-Reconciliation-and-Next-Steps.md` does not exist anywhere in the repo — dropped.)
@@ -325,7 +325,7 @@ Overview and Collections, the teal-900/coral-600/Fraunces (display) + Space
 Grotesk (headings) + Inter (body) + IBM Plex Mono (numeric) TreatHealthOS
 design-system tokens [corrected 2026-07-27: the app loads NO Hanken Grotesk
 — globals.css @imports Inter/Space Grotesk/IBM Plex Mono/Fraunces; body font
-is Inter, headings Space Grotesk, matching docs/design-system.md], the filter bar
+is Inter, headings Space Grotesk, matching docs/archive/design-system.md], the filter bar
 (search + Resolve payer button + 7/14/30/Month segmented control — note:
 confirm with Alec whether Qualify's window control should be
 7/14/30/60/90 to match the mobile build, since the proposal shows

@@ -26,7 +26,7 @@ const config: Config = {
         mono: ['IBM Plex Mono', 'ui-monospace', 'monospace'],
       },
       boxShadow: {
-        // TreatHealthOS 3-tier elevation scale (see docs/design-system.md §Elevation):
+        // TreatHealthOS 3-tier elevation scale (see docs/archive/design-system.md §Elevation):
         //   ths-sm = card AT REST (barely lifted) · ths = RAISED (hover / active panel) ·
         //   ths-lg = FLOATING (sheets, modals, the mobile phone frame).
         'ths-sm': '0 1px 2px rgba(27,43,42,.05), 0 1px 1px rgba(27,43,42,.04)',
@@ -106,7 +106,7 @@ const config: Config = {
           to: { height: '0' },
         },
         // TreatHealthOS motion tokens (Session E). Enter = fade + small rise; exit = the reverse.
-        // One shared easing (ease-out) + the "panel" duration (see docs/design-system.md §Motion).
+        // One shared easing (ease-out) + the "panel" duration (see docs/archive/design-system.md §Motion).
         'ths-reveal': {
           from: { opacity: '0', transform: 'translateY(4px)' },
           to: { opacity: '1', transform: 'translateY(0)' },

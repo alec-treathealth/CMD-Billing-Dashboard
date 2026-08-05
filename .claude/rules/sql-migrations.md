@@ -11,7 +11,7 @@ Two separate planes. Never put a file in the wrong directory.
 | Plane | Directory | Next number (as of 2026-08-04) |
 |---|---|---|
 | Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0083** |
-| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **026** |
+| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **029** |
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
 0077. 0080/0081/0082 (explorer perf: filter-options matview, rollup trigram
@@ -38,7 +38,7 @@ Veris apply state as of 2026-08-03, which is NOT the same as the file order:
 because 023 was under concurrent revision and 024 has no executable dependency on it — no FK,
 no view, no trigger (the resolver is in `src/veris/upcomingForecast.ts`); 023 followed once
 that revision settled. Do not read the numbering as an apply order. See
-`docs/veris-data-notes.md` §§ "023 …" / "024 …" / "025 …".
+`veris-data-notes.md` §§ "023 …" / "024 …" / "025 …".
 
 **Merging a migration in a PR does not apply it to prod.** Same-PR code 500s
 until `apply_migration` runs. This has already caused one incident (0056 broke
@@ -93,4 +93,4 @@ ROLE`. Revoking that grant re-breaks the apply path with SQLSTATE 42501. Do not
 drops 0068's covering index and 0069's MAINTAIN grant. It was rewritten to
 swap-form with a raise-on-loss gate but has **not** been applied, and it is
 gated on a name backfill. Do not apply it without re-reading
-`app/lib/qualify/contract.ts` and `docs/veris-data-notes.md`.
+`app/lib/qualify/contract.ts` and `veris-data-notes.md`.

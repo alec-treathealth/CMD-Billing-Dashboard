@@ -3,7 +3,7 @@
  * → claims.audit_row). Transport-agnostic like auditIngest.ts: the composition root
  * injects the roster, the per-(customer, filter) zip fetch, the least-privilege writer
  * pool (claims_audit_writer), and the tenant. Recon ground truth + Alec's rulings:
- * docs/veris-data-notes.md "Consolidated audit report recon — measured (2026-07-29)".
+ * veris-data-notes.md "Consolidated audit report recon — measured (2026-07-29)".
  *
  * IDENTITY (Alec's ruling 2026-07-29): upsert on (business_entity_id, charge_debit_id)
  * — the feed's true unique row key (0073's partial unique index is the arbiter) — with

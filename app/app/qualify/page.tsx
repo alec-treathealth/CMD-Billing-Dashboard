@@ -14,7 +14,9 @@ import { dashboardAccess } from '@/lib/access';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { QualifyMaintenanceNotice } from '@/components/qualify/qualify-maintenance-notice';
 import { qualifyMaintenanceBlocks } from '@/lib/qualify/maintenance';
+import { qualifyV3FlowEnabled } from '@/lib/qualify/v3Flags';
 import { QualifyTab } from '@/components/qualify/qualify-tab';
+import { ResolutionFlowClient } from '@/components/qualify/v3/resolution-flow-client';
 
 export const metadata: Metadata = { title: 'Qualify | CMD Billing' };
 
@@ -42,6 +44,21 @@ export default async function QualifyPage() {
   // admissions_seat never even renders the $ column headers; every snapshot re-confirms it, and the
   // server strips the dollar VALUES regardless (single choke point in the action core).
   const viewerHasAmountsCapability = role !== 'admissions_seat';
+
+  // ── v3 (P3): ADDITIVE, dark by default ────────────────────────────────────────────────────────
+  // Mounted only when QUALIFY_V3_FLOW is on, and it REPLACES nothing when off — v2 below is
+  // untouched, including its urlState behaviour, which is grandfathered on prod and out of scope.
+  //
+  // NOTE WHAT IS *NOT* HERE: no searchParams. The v3 flow submits through a Server Action, so the
+  // typed identifier travels in a POST body and never enters the query string. An earlier version of
+  // this page read `searchParams.term`, which would have put a full member ID in browser history, the
+  // Referer header and edge logs — PHI in a URL. Do not reintroduce a searchParams read here.
+  // Authorization is re-checked inside the action by requireQualifyPrincipal; this page gate is the
+  // routing mirror, not the control.
+  if (qualifyV3FlowEnabled()) {
+    return <ResolutionFlowClient />;
+  }
+
   return (
     <QualifyTab viewerHasAmountsCapability={viewerHasAmountsCapability} canRevealPhi={access.access.canRevealPhi} />
   );

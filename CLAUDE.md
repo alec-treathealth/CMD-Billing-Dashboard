@@ -24,16 +24,27 @@ only committed docs belong in the table — untracked ones go under
 | Role | Path | Read-order |
 |---|---|---|
 | Standing rules, verification gate, this map | `CLAUDE.md` | 1 |
-| Live tribal-knowledge ledger — **wins on conflict with this file** | `docs/veris-data-notes.md` | 2 |
-| Build guide — the 13 gated Veris/Indigo sessions + order deviations | `docs/Fable Build Doc E2E/00-GUIDE.md` | 3 |
+| Live tribal-knowledge ledger — **wins on conflict with this file** | `veris-data-notes.md` | 2 |
+| Build guide — the 13 gated Veris/Indigo sessions + order deviations | `docs/archive/00-GUIDE.md` | 3 |
 | PR compliance rules — the real Qodo content (`.qodo/` is empty) | `pr_compliance_checklist.yaml` | 4 |
-| Visual system — TreatHealthOS tokens and palette | `docs/design-system.md` | 5 |
+| Visual system — TreatHealthOS tokens and palette | `docs/archive/design-system.md` | 5 |
 | Qodo required-status-check contract + rename hazard | `docs/qodo-compliance-gate.md` | 6 |
 | Product orientation — what this app actually is | `README.md` | 7 |
 
 Read-order is a cold-start sequence, not a priority ranking. Path-scoped rules in
 `.claude/rules/` load automatically and are not listed here — see
 [Where the detail lives](#where-the-detail-lives).
+
+> **`docs/archive/` now holds two LIVE documents, which is a naming lie worth knowing about**
+> (recorded 2026-08-05). A bulk relocation moved `docs/Fable Build Doc E2E/00-GUIDE.md` →
+> `docs/archive/00-GUIDE.md` and `docs/design-system.md` → `docs/archive/design-system.md`. Both are
+> still CURRENT — the design system is what `.claude/rules/nextjs-app.md` tells you to follow, and
+> `00-GUIDE.md` is read-order 3. The paths above are the real ones; do not infer staleness from the
+> `archive/` segment the way the [Superseded](#superseded-in-repo--do-not-treat-as-current) list
+> below invites you to. `veris-data-notes.md` was swept into `archive/` by the same move and was
+> **restored to the repo root**, because it is the append-target ledger this file designates as
+> authoritative and the "root wins" relocation was ratified 2026-08-04 — a live ledger filed under
+> `archive/` would read as frozen to every future session.
 
 ### NOT IN REPO — project-knowledge only
 
@@ -101,9 +112,9 @@ Run all five before any commit. This is the bar for "verified" — not typecheck
 alone, and especially not when a shared helper changed.
 
 ```bash
-npm test                          # root hermetic suite — 1076 pass / 0 fail (measured 2026-08-04 on the tree of main @53b49d6)
+npm test                          # root hermetic suite — >=1110 pass / 0 fail
 npm run typecheck                 # root tsc (strict: noUncheckedIndexedAccess)
-cd app && npm test                # app suite — 206 pass / 0 fail (measured 2026-08-04 on the tree of main @53b49d6; #83 added 8)
+cd app && npm test                # app suite — >=259 pass / 0 fail
 cd app && npm run typecheck        # app tsc
 cd app && npm run build            # catches bundler-only failures tsc cannot
 ```
@@ -113,9 +124,19 @@ Root `tsc` is stricter than app `tsc` — a test can be green in `app/` while ro
 failures (see `.claude/rules/nextjs-app.md`).
 
 Those counts are a tripwire, not a target: if a suite reports fewer than the
-number above, tests were lost — find out why before committing. Only counts
-measured on a clean detached checkout of `origin/main` are trustworthy — a
-shared working tree with other sessions' edits is not evidence.
+number above, tests were lost — find out why before committing. They are written
+as `>=` floors deliberately, because the suites grow and a hardcoded exact number
+rots into a false tripwire within days.
+
+**Provenance of the current floors (read before trusting them).** 1110 / 259 were
+measured 2026-08-04 on the **shared working tree** of branch
+`fix/qualify-no-matches-stale`, not on a clean checkout — they superseded 1076 /
+206, which were measured on the tree of `main` @`53b49d6`. By the rule in the next
+sentence that makes them *floors that are known to be reachable*, not ratified
+counts. Only counts measured on a clean detached checkout of `origin/main` are
+trustworthy — a shared working tree with other sessions' edits is not evidence.
+Re-measure on a clean checkout when you next have one, and promote the number
+then.
 
 ## Git workflow
 
@@ -166,7 +187,7 @@ Veris apply state as of 2026-08-03, which is NOT the same as the file order:
 because 023 was under concurrent revision and 024 has no executable dependency on it — no FK,
 no view, no trigger (the resolver is in `src/veris/upcomingForecast.ts`); 023 followed once
 that revision settled. Do not read the numbering as an apply order. See
-`docs/veris-data-notes.md` §§ "023 …" / "024 …" / "025 …".
+`veris-data-notes.md` §§ "023 …" / "024 …" / "025 …".
 
 Merging a migration in a PR does **not** apply it to prod. Code that depends on
 it 500s until `apply_migration` runs.
@@ -195,7 +216,7 @@ Surfaces:
   `redirect('/')` stub. `<SearchConsole />` and the `/api/agent` path stay in git
   history; restoring means remounting the page *and* re-adding the nav entry.
 
-`app/vercel.json` declares **18 cron entries across 16 distinct routes**
+`app/vercel.json` declares **19 cron entries across 17 distinct routes**
 (`billing-audit-consolidated` runs on three schedules):
 
 | Route | Cadence |
@@ -203,6 +224,7 @@ Surfaces:
 | `cmd-explorer` · `indigo-explorer` | hourly, :00 / :30 |
 | `cmd-census` · `indigo-census` | hourly, :15 / :35 |
 | `refresh-charge-rollup` | hourly, :45 |
+| `qualify-census` | hourly, :22 |
 | `upcoming-overrides` | hourly, :55 |
 | `cmd-explorer-catchup` | daily 07:52 |
 | `era-835` | daily 08:50 |
@@ -214,9 +236,32 @@ Surfaces:
 | `billing-audit-op` · `billing-code-decisions` | daily 02:20 / 02:40 |
 | `billing-audit-consolidated` | daily 02:40, 03:10, 03:40 |
 
-`/api/cron/qualify-census` exists as a route but is **deliberately absent**
-from `vercel.json` — scheduling it is reserved for an explicitly-scoped
-session (see `docs/qualify-v2-morning-runbook.md`).
+> **The `:41–:59` reserved window is CMD-API-scoped, as practiced** (evidenced 2026-08-05 — do not
+> re-fight this). The band is held for live CMD probe work, and the constraint that matters is
+> *contention for CMD's one-report-at-a-time partner slot*, not the clock alone. Two crons sit inside
+> it and legitimately stay:
+>
+> - `refresh-charge-rollup` (:45) is **DB-only**. `app/app/api/cron/refresh-charge-rollup/route.ts:32`
+>   → `handleRefreshChargeRollup` (`app/lib/server.ts:745`) →
+>   `handleRefreshChargeRollupRequest` (`src/routes/refreshChargeRollupHandler.ts:41`), whose sole
+>   injected dependency is `refresh()` (`:33`). That runs
+>   `select collections.refresh_cmd_explorer_charge_rollup()`
+>   (`src/collections/refreshChargeRollup.ts:86`). Zero `fetch`, zero HTTP client, no CMD call.
+> - `upcoming-overrides` (:55) makes an **external call, but to Google Sheets, not CMD** —
+>   `app/lib/server.ts:1237-1249` imports `googleapis` and calls `readSheet(sheetId, tab, oauth)`.
+>
+> So neither contends for the CMD slot. A cron that *does* call the CMD API belongs outside
+> :41–:59 — that is why `qualify-census` moved off :47 even though it talks to Monday: the rule was
+> applied conservatively rather than argued down. If the band is ever redefined as wall-clock-absolute
+> rather than CMD-scoped, these two need their own explicitly-scoped change; they are
+> production-critical and must not be moved as a drive-by.
+
+`/api/cron/qualify-census` was scheduled 2026-08-04 (hourly **:22**) in the
+explicitly-scoped Auth/LOS session the morning runbook reserved it for, after
+`MONDAY_SECRET_API_KEY` landed in Vercel. It feeds the Qualify auth-fit factor
+from Monday census boards; only NASH and LSMH boards are curated
+(`src/collections/qualifyCensus.ts`) — other facilities honestly show
+"no data yet" until an operator maps their boards.
 
 VOB sync is scheduled by Vercel but *runs* as a GitHub Action
 (`.github/workflows/vob-sync.yml`) — it won't show output in the Vercel cron UI.
@@ -260,10 +305,10 @@ matching files. Read the one for the area you're changing:
 Longer-form references (not auto-loaded — read on demand). Paths for these live
 in [Canonical Context Set](#canonical-context-set); that table wins:
 
-- `docs/veris-data-notes.md` — the live tribal-knowledge ledger, updated
+- `veris-data-notes.md` — the live tribal-knowledge ledger, updated
   per-apply. **When it conflicts with anything here, it wins.** Surface the
   conflict in your output; never silently pick a side.
-- `docs/design-system.md` — the TreatHealthOS visual system.
+- `docs/archive/design-system.md` — the TreatHealthOS visual system.
 - `CMD AR Automation — Build Doc v2.md` (repo root, **untracked**) — the current
   AR build plan. Previously mis-cited here as `docs/CMD AR Automation — Build
   Doc v2.md`, which has never existed.

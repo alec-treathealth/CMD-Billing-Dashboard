@@ -2,7 +2,7 @@
 
 Session artifacts, 2026-07-29 build session (consolidated audit ingest on report
 `10064394`, filters `10148376` B + `10148377` C). Grounded in the recon record
-persisted the same day in `docs/veris-data-notes.md` ("Consolidated audit report
+persisted the same day in `veris-data-notes.md` ("Consolidated audit report
 recon — measured (2026-07-29)") — the measured ground truth these reports cite.
 
 **Naming note (surfaced, not silently resolved):** the original build prompt refers

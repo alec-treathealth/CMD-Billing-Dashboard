@@ -18,7 +18,7 @@
  *
  * TWO CONTRACT CAVEATS WITH OPERATIONAL CONSEQUENCES — the receipt-date axis (and the
  * cron lookback it forces) and the full-day-snapshot / deleted-835 reconciliation
- * trap — are written up in `docs/veris-data-notes.md`, "CMD 835 download — contract
+ * trap — are written up in `veris-data-notes.md`, "CMD 835 download — contract
  * caveats". That ledger is the winning authority per CLAUDE.md; read it before
  * scheduling this or reconciling its output. Deliberately NOT duplicated here.
  *
