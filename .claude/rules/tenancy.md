@@ -78,5 +78,5 @@ abandoned**: brains stay off, its claims-facing UI is down. `staging.*`/`ref.*`/
 Before onboarding a third tenant, revisit any cross-tenant matview: a matview
 cannot carry RLS, so a `claims_reader` SELECT grant exposes every tenant's rows.
 
-`docs/veris-data-notes.md` is the live ledger for this plane and **wins** over
+`veris-data-notes.md` is the live ledger for this plane and **wins** over
 any other doc when they conflict.

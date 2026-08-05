@@ -5,7 +5,7 @@
  * query — no pool, no env, no secrets, no PHI decrypt. The composition root (app/lib/server.ts) runs
  * them against the reader pool with the caller's entity array and decrypts any PHI per app/lib/phi.ts.
  *
- * AGE is derived at read time (Phase 0, docs/veris-data-notes.md 2026-07-28): the census carries no
+ * AGE is derived at read time (Phase 0, veris-data-notes.md 2026-07-28): the census carries no
  * `Charge Fromdate Age` column, but charge_date (a real DATE, from "Charge From Date") is ingested, so
  * age-in-days = ($asOf::date - charge_date) and the bucket CASE below mirrors src/collections/ageBucket.ts
  * EXACTLY (same 8 CMD-verbatim labels, same day boundaries — day 30 → 'a', etc.). Keep the two in sync.

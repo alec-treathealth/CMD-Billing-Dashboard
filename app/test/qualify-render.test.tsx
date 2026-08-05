@@ -796,18 +796,28 @@ test('scorecard v2 — IQ numeral + band pill + weight bar + expandable factor l
   assert.ok(html.includes('no data yet'), 'an unavailable factor says so instead of pretending');
 });
 
-// ── v2 compose: the single-identifier classifier (the "two fields" contract) ───────────────────────
-test('classifyQualifyIdentifier: ≤3 letters is the prefix narrow, anything else the member-id narrow', async () => {
-  const { classifyQualifyIdentifier } = await import('../lib/qualify/contract');
-  assert.deepEqual(classifyQualifyIdentifier('XQH'), { memberId: '', alphaPrefix: 'XQH' });
-  assert.deepEqual(classifyQualifyIdentifier(' ab '), { memberId: '', alphaPrefix: 'ab' });
-  assert.deepEqual(classifyQualifyIdentifier('W2740123'), { memberId: 'W2740123', alphaPrefix: '' });
-  assert.deepEqual(classifyQualifyIdentifier('AB1'), { memberId: 'AB1', alphaPrefix: '' }); // digit ⇒ not a prefix
-  assert.deepEqual(classifyQualifyIdentifier('ABCD'), { memberId: 'ABCD', alphaPrefix: '' }); // 4 letters ⇒ member id
-  assert.deepEqual(classifyQualifyIdentifier('   '), { memberId: '', alphaPrefix: '' });
+// ── compose: the single-identifier narrows (the "two fields" contract) ────────────────────────────
+//
+// REWRITTEN 2026-08-05 (D3). This test previously PINNED THE DEFECT: its `AB1` case asserted
+// `{ memberId: 'AB1' }` with the comment "digit ⇒ not a prefix", which is precisely the client-side
+// rule that disagreed with the server and produced "0 charge lines match" beside a populated policy
+// card. A test that locks in a bug is worse than no test, because it makes the fix look like the
+// regression. The function is now a projection of `classifyQualifyHandle` (the one authority) and was
+// renamed to `qualifyIdentifierNarrows` so no caller can reach the old rule by muscle memory.
+// Exhaustive handle-shape coverage lives in `qualifyHandle.test.tsx` (I2).
+test('qualifyIdentifierNarrows: <=3 chars is the prefix narrow, anything longer the member-id narrow', async () => {
+  const { qualifyIdentifierNarrows } = await import('../lib/qualify/contract');
+  assert.deepEqual(qualifyIdentifierNarrows('XQH'), { memberId: '', alphaPrefix: 'XQH' });
+  assert.deepEqual(qualifyIdentifierNarrows(' ab '), { memberId: '', alphaPrefix: 'ab' });
+  assert.deepEqual(qualifyIdentifierNarrows('W2740123'), { memberId: 'W2740123', alphaPrefix: '' });
+  // THE CORRECTED CASE — an alphanumeric 3-char handle is a PREFIX. This is the whole D3 fix.
+  assert.deepEqual(qualifyIdentifierNarrows('AB1'), { memberId: '', alphaPrefix: 'AB1' });
+  assert.deepEqual(qualifyIdentifierNarrows('W26'), { memberId: '', alphaPrefix: 'W26' });
+  assert.deepEqual(qualifyIdentifierNarrows('ABCD'), { memberId: 'ABCD', alphaPrefix: '' }); // 4 chars ⇒ member id
+  assert.deepEqual(qualifyIdentifierNarrows('   '), { memberId: '', alphaPrefix: '' });
   // exactly one narrow is ever active — the both-identifiers dead-end is unrepresentable
-  for (const raw of ['XQH', 'W2740123', 'AB1', '']) {
-    const c = classifyQualifyIdentifier(raw);
+  for (const raw of ['XQH', 'W2740123', 'AB1', 'W26', '']) {
+    const c = qualifyIdentifierNarrows(raw);
     assert.ok(!(c.memberId !== '' && c.alphaPrefix !== ''));
   }
 });

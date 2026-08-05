@@ -25,7 +25,7 @@
  * is in the paid bar chart (measured: CMD posting is same-day-or-earlier for ~94% of
  * matchable remits) — keeping it here clogs the view with non-future money. The residual
  * posting-lag tail is a STRUCTURAL two-clock gap (tile keys on BPR16, chart keys on CMD
- * receipt date) that exists under `>=` as well — see docs/veris-data-notes.md § "two-clock
+ * receipt date) that exists under `>=` as well — see veris-data-notes.md § "two-clock
  * gap". NOT Postgres `current_date`: Vercel runs TZ=UTC and so does the database, so from
  * 17:00 PT to midnight PT `current_date` is already TOMORROW Pacific and the tile silently
  * drops remits dated tomorrow for the people reading it. Bound param rather than SQL-side

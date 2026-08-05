@@ -292,7 +292,7 @@ export interface QualifyFacilityCases {
  *
  * ⚠ Do NOT apply migration 0067 as-authored — it is STALE (drops 0068's covering index + 0069's MAINTAIN
  * grant). The full ops analysis + the RECOMMENDED build-alongside-and-swap approach (sub-second lock, no
- * outage — supersedes the old "~90s rebuild/outage" plan) live in docs/veris-data-notes.md → "0067 ops
+ * outage — supersedes the old "~90s rebuild/outage" plan) live in veris-data-notes.md → "0067 ops
  * analysis". Until Part 2 lands, the Client Name field + its divergence note are HIDDEN in the compose
  * console (3 PHI fields, not 4).
  *
@@ -300,7 +300,7 @@ export interface QualifyFacilityCases {
  * and now the readout EVIDENCE count too: BOTH QualifyMatchSummary.count (Collections' shared summary
  * builder) AND QualifyMatchSummary.distinctPatients (buildQualifyMatchClientCountQuery) run the
  * cmdExplorerBaseConds predicate, which cannot express patient_name_bidx, so both must gain the name AND
- * in lockstep or the count + gauge would over-count a name-narrowed search. See docs/veris-data-notes.md
+ * in lockstep or the count + gauge would over-count a name-narrowed search. See veris-data-notes.md
  * → "Qualify Client-Name (Change C) activation".
  */
 export const QUALIFY_CLIENT_NAME_ENABLED = false;
@@ -312,9 +312,84 @@ export type QualifyMatchKind = 'member_id' | 'prefix';
  *  exact-name blind-index path (Change C; the name itself is NEVER echoed back), OR 'payer' — the
  *  resolve-by-primary-payer label path (no PHI token; the movers/Heating-up tap). matchedOn uses this. */
 export type QualifyResolvedKind = QualifyMatchKind | 'payer' | 'client_name';
-/** <=3 chars ⇒ alpha-prefix, else exact member-id (the searchAuditPatients precedent). Pure. */
+/**
+ * How the ONE authority read a typed handle. `kind` is the decision; `readAs` is that decision in
+ * plain language, for the screen; `echo` is the only part of the input that may be rendered back.
+ *
+ * `echo` is PREFIX-SAFE BY CONSTRUCTION: it carries the value for a prefix (<=3 chars, non-PHI under
+ * the existing contract) and is EMPTY for a member id. A full member id is PHI, so the classifier
+ * refuses to hand it back — otherwise the "how we read your input" line becomes a disclosure surface
+ * the moment someone renders it. `readAs` likewise never embeds the value.
+ */
+export interface QualifyHandleReading {
+  kind: QualifyMatchKind | 'empty';
+  /** Plain-language statement of the reading. Non-PHI, non-dollar — safe in a provenance string. */
+  readAs: string;
+  /** Prefix-safe echo: the prefix itself, or '' for a member id / empty input. */
+  echo: string;
+  /** The trimmed input, for blind-index minting. NOT for rendering — this can be PHI. */
+  value: string;
+}
+
+/**
+ * THE identifier authority (Qualify v3 / D3). Every path — client and server — resolves a typed
+ * handle through this function and nothing else.
+ *
+ * WHY IT EXISTS. Two functions used to make this decision with different rules, and they disagreed on
+ * the commonest real shape. The client's `classifyQualifyIdentifier` required /^[A-Za-z]{1,3}$/, so
+ * "W26" was an exact member id and minted a `member_id_bidx` token matching NOTHING; the server's
+ * `sniffQualifyKind` called it a prefix and resolved a policy, a ladder, a payer and a 28-facility
+ * ranking. Result on screen: a populated policy card and a rating of 34 beside "0 charge lines match".
+ * Real alpha-prefixes are overwhelmingly ALPHANUMERIC, so the letters-only rule failed on most actual
+ * insurance cards while XDP and XQH happened to work — which is why it read as intermittent.
+ *
+ * The surviving rule is the SERVER's: trimmed length <= 3 ⇒ prefix. A digit does not demote a prefix.
+ *
+ * A 3-character full member id therefore reads as a prefix, deliberately: a 3-char prefix search is a
+ * SUPERSET of the exact search (the 3-char prefix of a 3-char id is the id), so the member is still
+ * found. Prefix-as-superset can never lose a row, whereas the old rule minted an exact token against
+ * a prefix index and lost every alphanumeric case.
+ *
+ * Pure — no I/O, no PHI escape. `QUALIFY_PREFIX_MAX_CHARS` is the single width literal.
+ */
+export const QUALIFY_PREFIX_MAX_CHARS = 3;
+
+export function classifyQualifyHandle(raw: string): QualifyHandleReading {
+  const value = raw.trim();
+  if (value === '') {
+    return { kind: 'empty', readAs: 'no identifier entered', echo: '', value: '' };
+  }
+  if (value.length <= QUALIFY_PREFIX_MAX_CHARS) {
+    return {
+      kind: 'prefix',
+      readAs: `read as a ${value.length}-character member-ID prefix`,
+      echo: value,
+      value,
+    };
+  }
+  return {
+    kind: 'member_id',
+    // Deliberately states the LENGTH, never the value — see QualifyHandleReading.
+    readAs: `read as a complete member ID (${value.length} characters)`,
+    echo: '',
+    value,
+  };
+}
+
+/**
+ * <=3 chars ⇒ alpha-prefix, else exact member-id (the searchAuditPatients precedent). Pure.
+ *
+ * NOT a second authority — a PROJECTION of `classifyQualifyHandle` onto the two-kind union the
+ * server's mint/resolve path already speaks. It is kept because three call sites consume exactly this
+ * shape and renaming them buys nothing; `qualifyHandle.test.tsx` asserts the two can never disagree.
+ *
+ * Empty input maps to 'prefix' to preserve the pre-v3 behaviour of this function exactly. Every caller
+ * guards on an empty term before calling, so the value is unobservable — but changing it silently
+ * would be a behaviour change smuggled inside a refactor.
+ */
 export function sniffQualifyKind(query: string): QualifyMatchKind {
-  return query.trim().length <= 3 ? 'prefix' : 'member_id';
+  const k = classifyQualifyHandle(query).kind;
+  return k === 'member_id' ? 'member_id' : 'prefix';
 }
 
 export interface QualifyResolved {
@@ -707,14 +782,18 @@ export function qualifyWindowBounds(
 }
 
 /**
- * v2 single-identifier field: classify one typed term into the two blind-index narrows.
- * ≤3 letters ⇒ alpha prefix (member_id_prefix_bidx STARTS-WITH); anything else ⇒ exact member id
- * (member_id_bidx). Exactly one of the two is ever non-empty — the old both-identifiers dead-end
- * is unrepresentable through this function.
+ * Single-identifier field → the two blind-index narrows. Exactly one is ever non-empty, so the old
+ * both-identifiers dead-end stays unrepresentable.
+ *
+ * D3 (2026-08-05): this used to carry its OWN classification rule (/^[A-Za-z]{1,3}$/) and was the
+ * losing half of the two-authority divergence — it is now a pure projection of
+ * `classifyQualifyHandle`. The behaviour change is intended and is the fix: "W26" now yields
+ * `alphaPrefix: 'W26'` (a prefix narrow that matches real rows) instead of `memberId: 'W26'`
+ * (an exact token that matched nothing).
  */
-export function classifyQualifyIdentifier(raw: string): { memberId: string; alphaPrefix: string } {
-  const v = raw.trim();
-  if (v === '') return { memberId: '', alphaPrefix: '' };
-  if (/^[A-Za-z]{1,3}$/.test(v)) return { memberId: '', alphaPrefix: v };
-  return { memberId: v, alphaPrefix: '' };
+export function qualifyIdentifierNarrows(raw: string): { memberId: string; alphaPrefix: string } {
+  const h = classifyQualifyHandle(raw);
+  if (h.kind === 'prefix') return { memberId: '', alphaPrefix: h.echo };
+  if (h.kind === 'member_id') return { memberId: h.value, alphaPrefix: '' };
+  return { memberId: '', alphaPrefix: '' };
 }

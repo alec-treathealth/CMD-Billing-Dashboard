@@ -1,7 +1,7 @@
 /**
  * AR age buckets — derived from a charge's service date, NOT parsed from a CMD column.
  *
- * Phase 0 (docs/veris-data-notes.md, 2026-07-28) established that the census feed does NOT carry the
+ * Phase 0 (veris-data-notes.md, 2026-07-28) established that the census feed does NOT carry the
  * pre-bucketed `Charge Fromdate Age` column, but DOES carry `Charge From Date` (ingested as
  * cmd_charge_census.charge_date). So we compute age in whole days as (asOf - charge_date) and bucket it
  * ourselves. This is exact/sortable, needs no CMD-side filter change, and drifts live with the calendar

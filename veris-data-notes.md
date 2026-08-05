@@ -2,7 +2,7 @@
 
 Created by **S1 (Ground truth & ADR ratification, 2026-07-02)**. Every session
 appends what it learned the hard way — join keys, field quirks, timings, live-DB
-facts, ratified decisions (the §8.5.3 tribal-knowledge rule in `docs/Fable Build Doc E2E/00-GUIDE.md`).
+facts, ratified decisions (the §8.5.3 tribal-knowledge rule in `docs/archive/00-GUIDE.md`).
 Append under a dated session heading; never rewrite history — correct earlier
 entries with a dated correction line, the way CLAUDE.md §17 corrected CO-45.
 
@@ -3650,6 +3650,399 @@ D(2) ruling implementation; explicitly out of scope that night. Building it is
 backlog: an INSERT at run start + UPDATE at finish as `intel_writer`, which
 also makes the run_check path live.
 
+## RATIFIED — Qualify v3 KPI tiles stay BOOK-WIDE and say so (2026-08-04)
+
+D5 of `qualify-v3-search-rearchitecture-PROMPT.md` offered two options for the
+Qualify KPI tiles: scope them to the resolved population, or label them
+explicitly as book-wide context. **Ruled by Alec: option 2.** The tiles remain
+book-wide, are explicitly labelled as such, and carry a provenance line derived
+from `QualifyResolution` that reads **"book-wide, not this client."**
+
+**Why option 1 is forbidden, not merely unchosen.** A v3 `CoverageGroup` carries
+`employerKey`. Scoping the tiles to the whole group would therefore scope them by
+employer — and the Phase-2 Design B asymmetry already measured that facility ×
+payer × employer approaches **~1 distinct patient** (1,606 slices, thinner than
+the already-thin facility × payer median of 2). See "Qualify Phase 2 —
+filter-aware orientation layer, Design B ASYMMETRY (2026-07-27)" above, which
+records the measurement and the enforcement: `buildBookKpisQuery` takes a
+`QualifyOrientationScope` type that **cannot express** employer or funding, and a
+regression test in `qualifyQuery.test.ts` fails loudly if `employer_norm` /
+`member_benefits_latest` / `funding =` ever appears in the tiles predicate.
+Option 1 would delete that guard and reintroduce the ~1-patient rating Design B
+exists to prevent.
+
+§5c's "every number on screen traces to one `QualifyResolution`" is satisfied in
+the honest sense: the tile's **provenance string** comes from the resolution and
+states that the tile is *not* about this client. Traceability is the requirement;
+identical scoping is not.
+
+**D2 must not re-litigate this.** A future session proposing resolution-scoped
+KPI tiles is reopening a ratified decision and must stop for Alec — and must
+first re-run the Design B slice-thinness measurement, not argue from design
+taste.
+
+Scope note: this entry is a DECISION record only. `QualifyResolution` does not
+exist yet; no interface, UI, or D2 code was written when this was ratified.
+
+## 026 — `ref.payer_identity` + `ref.payer_alias_map` APPLIED LIVE (2026-08-04)
+
+Qualify v3 workstream D1 (the payer crosswalk). Applied via `apply_migration`
+with explicit authorization, on the **third** attempt; the two failures were both
+SQLSTATE **42803** and both are fixed in the repo file, so repo and prod match:
+
+1. §7a derived `slug` from `lower(btrim(canonical_name))` while grouping on
+   `upper(btrim(canonical_name))`. Different expressions ⇒ the planner cannot
+   prove functional dependency on the group key. Fix: normalize in an inner
+   subquery, group on that, derive `slug` from the group key itself.
+2. §8d put a correlated subquery in `HAVING` referencing the grouped column
+   (`r.primary_payer`) — rejected even though the reference is to the grouping
+   expression. Fix: aggregate into `claims_names`, then anti-join in a plain
+   `WHERE` on the already-grouped alias.
+
+Both failures rolled back whole (verified: 0 objects, 0 `schema_migrations`
+rows between attempts). Next Veris number is now **027**.
+
+### Posture verified after apply
+2 tables owned by `claims_admin`, RLS on / FORCE off; 2 policies, both SELECT;
+`claims_reader` SELECT on both; **0** grants to anon/authenticated/service_role/
+PUBLIC; 7 indexes (5 + 2 PKs); `schema_migrations` carries exactly one row.
+Guard 9b holds: **0** alias rows point `canonical_payer_id` at a `program`-kind
+identity — the deliberate asymmetry (a routing program is never a resolution
+target) is enforced, not merely documented.
+
+### Seeded: 199 identities / 1,039 aliases
+Identities: 71 insurer · 114 unclassified · 9 carve_out · 2 tpa · 2 non_payer ·
+1 program. Aliases: 690 same_payer · 309 unmapped · 36 carve_out · 4
+program_label; 344 carry `needs_review`.
+
+### P0 COVERAGE REPORT — claim volume by TRUST TIER (not by "mapped")
+
+| Tier | names | lines | % of volume |
+|---|---|---|---|
+| CONFIRMED mapping | 316 | 417,844 | **85.1%** |
+| PROPOSED (needs review) | 35 | 36,817 | 7.5% |
+| PROGRAM (per-member by design) | 4 | 26,279 | 5.4% |
+| UNMAPPED, no candidate | 108 | 10,140 | 2.1% |
+| UNMAPPED, held for review | 2 | 12 | 0.0% |
+
+**Report 85.1%, never 92.6%.** The naive "has a canonical" figure is 92.6%, but
+7.5 points of that are unconfirmed machine proposals — see the wrong-merge
+finding below for why counting them would be exactly the error this table exists
+to prevent.
+
+### ⚠ THE TRIGRAM STAGE PRODUCED A WRONG MERGE ON THE LARGEST SINGLE GAP
+`needs_review` earned its existence on day one. Of the top 10 proposals by
+volume, **at least 3 are wrong**, including the biggest:
+
+- **`CIGNA HEALTH PLANS` (31,878 lines = 6.5% of ALL claim volume) → proposed
+  `pi_health_plans_inc` at similarity 0.565. WRONG.** That is Cigna; Health Plans
+  Inc is an unrelated TPA. Trigram matched the generic substring "HEALTH PLANS".
+- `OXFORD HEALTH PLANS` (667) → `pi_health_plans_inc`. WRONG — Oxford is UHC.
+- `CIGNA BEHAVIORIAL HEALTH` (398) → `pi_carelon_behavioral_health`. WRONG —
+  matched on "BEHAVIORAL HEALTH"; Cigna's BH arm is not Carelon.
+
+Correct proposals in the same batch: `HEALTHSCOPE BENEFITS INC.` (0.840),
+`SUREST - BIND`, `UMR FKA UMR`, `UHC GOLDEN RULE INSURANCE`, `MERITAIN HEALTH
+MINNEAPOLIS`, `AETNA TEXAS`.
+
+**Raising the threshold does not fix this** — the wrong ones sit at 0.500-0.565
+and correct ones sit at 0.500-0.593, so no cut separates them. The real defect is
+that trigram similarity over payer names collides on generic tokens (HEALTH,
+PLANS, BEHAVIORAL, BLUE CROSS) while the *distinctive* token (CIGNA, OXFORD) is
+what carries the identity. A future proposer should down-weight generic tokens
+(TF-IDF-ish) or require the distinctive token to match. **Do not auto-accept
+these. Do not "tune the threshold" and call it solved.**
+
+### ⚠ THE CROSSWALK IS ASYMMETRIC — and the weak side is the one D2 enters from
+
+| Side | Confirmed |
+|---|---|
+| Claims volume (`primary_payer`) | **85.1%** of 491,092 lines |
+| VOB members (`insurance_co`) | **60.0%** of 23,035 members |
+
+**919 of 1,120 VOB carrier names have no alias row at all**, covering **9,217
+members (40.0%)**. Concentrated and therefore tractable: the top 20 missing names
+carry 5,261 of those 9,217 (57%), and 518 of the 919 are singletons.
+
+This matters more than the headline: **D2's resolution enters from the member's
+VOB row**, so the VOB side is the binding constraint on the identified-search
+path, not claims coverage. Sobering specific: **`ANTHEM BCBS OF CALIFORNIA` —
+1,576 members, the single largest VOB name — is still unmapped**, and that is
+precisely the string from the §3c screenshot ("Anthem BCBS of California" on the
+policy card vs "ANTHEM BLUE CROSS CALIFORNIA" in the ranking header) that
+motivated this entire workstream. **D1 as applied does not yet fix the motivating
+example.** `UHC` (724 members) is the acronym class trigram cannot reach.
+
+**Implementation gap, owned:** §8d proposes only claims→canonical. The migration
+has **no symmetric VOB→canonical proposal stage**, which is *why* the VOB side
+lags 25 points behind. Closing it is 027 (or a re-runnable script) — and given the
+wrong-merge finding above, it should NOT simply be the same trigram pass pointed
+the other way.
+
+### The payer_id spine
+359 ids recorded; **160 unanimous** (every VOB name under the id resolves to one
+canonical ⇒ canonical set, no guess); **199 need a human** (0 or ≥2 canonicals).
+Hint only, as designed — never an identity.
+
+### Operational note: the ladder is iterative
+Trigram proposals are drawn from `vob_insurance_co` aliases that ALREADY resolve
+(201 rows), not from all 1,120 VOB names. So each round of VOB-side review grows
+the candidate pool and a re-run produces new proposals. This is also why the
+pre-apply estimate (48 no-candidate names / 47,656 lines) differs from the actual
+(108 names / 10,140 lines): the estimate matched against all 1,120 VOB names,
+while the migration matches against the resolving subset. Fewer lines, more names.
+
+## 027 — canonical payer dedup APPLIED LIVE (2026-08-04), first attempt
+
+Qualify v3 P0 follow-on. 026's generic slug ladder minted **several identities for one real
+payer**, which would have surfaced in D2 as multiple "candidates" that are the same company —
+the user asked to choose between two spellings of one answer, which is the ambiguity v3 exists
+to remove, wearing a new hat.
+
+### The 15 proposals were a GRAPH, not 15 pairs
+
+15 machine-proposed merge **cases** → **12 distinct id pairs** → **11 connected components** over
+23 nodes. Three pairs had been double-counted: two alias cases pointing at ONE id pair, for New
+Hampshire (`ANTHEM BCBS NH` + `BCBS NH`), Nevada, and Maryland (`BCBS MD` + `CAREFIRST BCBS MD`).
+`{pi_bcbs_california, pi_anthem_california, pi_anthem_blue_cross_of_california}` is a single
+**three-node** component. Merging that as two independent pairs in arbitrary order can leave a
+dangling reference to a node the other pair already deleted, so 027 resolves components in one
+plan table before a row moves. **Carry this**: any future dedup proposal list is a graph until
+proven otherwise.
+
+**10 components executed** (Health Net parked, below), absorbing **11 nodes**: 199 → **188 live
+identities**. 32 alias rows repointed; `payer_alias_map` total unchanged at **1,039** — the merge
+moved pointers, it did not drop aliases.
+
+### Survivor rule (ratified): volume picks the ID, a human picks the NAME
+
+(1) greatest aggregate claim-line volume across the node's aliases — fewest rows move; (2) most
+name aliases; (3) lexicographically smallest id, for determinism. **`display_name` is a separate
+decision**, and New Hampshire is why: volume picks `pi_bcbs_new_hampshire` (86 lines vs 47) while
+the actual NH licensee brands as Anthem. Id and name come from different authorities on purpose.
+
+| Survivor | display_name set | Absorbed |
+|---|---|---|
+| `pi_anthem_california` | Anthem Blue Cross of California | `pi_anthem_blue_cross_of_california` (5 aliases), `pi_bcbs_california` (7) |
+| `pi_bcbs_new_hampshire` | Anthem Blue Cross and Blue Shield of New Hampshire | `pi_anthem_new_hampshire` (1) |
+| `pi_anthem_nevada` | Anthem Blue Cross and Blue Shield of Nevada | `pi_bcbs_nevada` (2) |
+| `pi_anthem_georgia` | Anthem Blue Cross and Blue Shield of Georgia | `pi_bcbs_georgia` (3) |
+| `pi_anthem_indiana` | Anthem Blue Cross and Blue Shield of Indiana | `pi_bcbs_indiana` (2) |
+| `pi_anthem_kentucky` | Anthem Blue Cross and Blue Shield of Kentucky | `pi_bcbs_kentucky` (2) |
+| `pi_anthem_ohio` | Anthem Blue Cross and Blue Shield of Ohio | `pi_bcbs_ohio` (2) |
+| `pi_carefirst_maryland` | CareFirst BlueCross BlueShield | `pi_bcbs_maryland` (3) |
+| `pi_premera_washington` | Premera Blue Cross | `pi_premera_bcbs` (2) |
+| `pi_bcbs_federal` | Blue Cross Blue Shield Federal Employee Program | `pi_bcbs_fep` (3) |
+
+⚠ **Convention divergence, recorded not hidden.** 026 seeded every `display_name` in UPPER CASE
+(it dropped `initcap()` because it mangled acronyms — BCBS → Bcbs). These 10 land in mixed case
+as ratified, so `display_name` is now mixed-convention across 188 rows. Display-layer
+inconsistency, not a data defect; completing the pass is a follow-up.
+
+### `ref.payer_identity_never_merge` — the ruling is now a constraint, not a memory
+
+Eight review cases said "textually similar, DIFFERENT payers" → **6 distinct rulings** (two were
+adjudicated twice). Three of them named a node **this migration deletes**. A ruling that stops
+applying because its target got merged away is the silent-heuristic failure mode relocated — same
+class as the dominant-payer heuristic, just later and quieter.
+
+So the rulings live in a table whose FKs are **`ON DELETE RESTRICT` on both sides**. After 027, a
+future merge **cannot** delete a constrained node without repointing the ruling first; the
+database refuses. Two rulings were repointed by 027 itself:
+
+- `pi_blue_shield_california` ↮ ~~`pi_bcbs_california`~~ → **`pi_anthem_california`**
+- `pi_health_plan_of_nevada` ↮ ~~`pi_bcbs_nevada`~~ → **`pi_anthem_nevada`**
+
+The other four (NC/SC, Capital-BC/BCBS-PA, Independence TPA/plan, Medicare/UHC-MA) named no
+absorbed node and are unchanged. Pairs are unordered but stored **once**, normalized
+`id_low < id_high` — without that CHECK the same ruling could exist twice in opposite orders and a
+one-direction lookup would silently miss it.
+
+**The RESTRICT semantics were EXERCISED, not inspected.** Section 10g creates a throwaway
+identity, pairs it with a real ruling, attempts the delete, and reads the refusing constraint name
+out of the error via `GET STACKED DIAGNOSTICS`. The throwaway matters: every *real* never-merge
+node also has alias rows, so deleting one raises `foreign_key_violation` from **either**
+constraint — a probe that could not tell which one fired would pass even if `never_merge` were
+protecting nothing. Probe left 0 rows behind (verified directly, not inferred).
+
+### `ref.payer_identity_merge_log` — and why there is no `merged_into` column
+
+Absorbed rows are **DELETED**, so `payer_identity` keeps its grain: one row per LIVE payer. A
+tombstone column would be a footgun — every future query would have to remember to filter it, and
+the one that forgets resurrects a duplicate candidate in the UI. History lives in the log, where
+nothing resolving a payer will read it by accident. The log deliberately carries **no FKs**
+(`absorbed_id` names a deleted row).
+
+### Posture verified after apply
+2 tables owned by `claims_admin`, RLS on / FORCE off; 2 policies, both SELECT; `claims_reader`
+SELECT on both; **0** grants to anon/authenticated/service_role/PUBLIC; 11 merge_log rows; 6
+never_merge rows; 0 absorbed-id references anywhere; 0 PHI-denylist columns; `confdeltype='r'` on
+**2** FKs (read from the catalog, not the DDL text); security advisors `{"lints":[]}`;
+`schema_migrations` carries exactly 1 row. **Next Veris number is 028.**
+
+### ⚠ OPEN FOR ALEC — 6 parked merge pairs, NOT merged and given NO never_merge row
+
+These are domain questions, and the honest state is "undecided", which is neither a merge nor a
+ruling. Recording them as never-merge would fabricate a decision nobody made:
+
+1. `pi_healthnet` ↔ `pi_health_net_california` — Health Net California may be a distinct
+   subsidiary rather than a spelling variant. (R2 parked this explicitly.)
+2. `pi_ambetter_florida` ↔ `pi_ambetter_health` — state plan vs parent brand; merging loses state
+   granularity.
+3. `pi_anthem_bcbs` ↔ `pi_anthem_california` — a generic catch-all vs a state-specific id. The
+   catch-all may need **splitting**, not merging.
+4. `pi_bcbs_pennsylvania` ↔ `pi_highmark_pennsylvania` — Highmark licenses western PA only.
+5. `pi_bcbs_washington` ↔ `pi_regence_washington` — both Regence and Premera license WA.
+
+(Five distinct pairs; the sixth review case was the second `anthem_bcbs`/`anthem_california`
+hit.) Until these are ruled, D2 may legitimately surface two candidates that are arguably one
+payer — a visible ambiguity, which is the designed-honest state, not a defect.
+
+### Rollback is PARTIALLY reversible — know this before running it
+`027_payer_identity_dedup_rollback.sql` restores the 11 identity shells and the pre-027 display
+names, but **the alias repoint is not reversible**: after the UPDATE, an alias pointing at
+`pi_anthem_california` is indistinguishable from one that always did. The log records how MANY
+rows moved per absorbed id, never WHICH. The rollback file carries the `\copy` export recipe and
+drops the tables LAST, because the log is the only record of what to restore.
+
+## 028 — VOB-side alias population from the IDF scorer, APPLIED LIVE (2026-08-05)
+
+Closes the implementation gap 026 named against itself: §8d proposed claims→canonical only, with no
+symmetric VOB→canonical stage, which is why the crosswalk was 25 points weaker on the side **D2
+actually enters from**. 695 proposals landed (49 claims-side recoveries + 646 VOB-side), **every one
+`needs_review = true`**.
+
+### THE HEADLINE IS NOT A COVERAGE IMPROVEMENT — read the table carefully
+
+| Side | Tier | names | volume | share |
+|---|---|---|---|---|
+| CLAIMS (lines) | CONFIRMED | 316 | 417,844 | **85.1%** |
+| | PROPOSED (idf_cosine, new) | 49 | 4,980 | 1.0% |
+| | PROPOSED (trigram, 026) | 35 | 36,817 | 7.5% |
+| | PROGRAM (per-member by design) | 4 | 26,279 | 5.4% |
+| | UNMAPPED, held for review | 61 | 5,172 | 1.1% |
+| VOB (members) | CONFIRMED | 201 | 13,818 | **60.0%** |
+| | PROPOSED (idf_cosine, new) | 646 | 8,017 | 34.8% |
+| | UNMAPPED, no alias row | 273 | 1,200 | 5.2% |
+
+**CONFIRMED is UNCHANGED at 85.1% / 60.0%, and that is correct, not a disappointment.** What moved
+is the VOB "no alias row at all" gap: **40.0% (9,217 members) → 5.2% (1,200)**. 028 converted an
+invisible gap into a *reviewable queue*. Coverage moves when a human reviews, not when a machine
+proposes — and any report that adds the PROPOSED tier into a coverage headline is making exactly the
+92.6%-vs-85.1% error 026's table was built to prevent.
+
+### Guard C — the class Guard B structurally cannot see
+
+Guard B asks "does this match rest only on modifier tokens?". Guard C asks a different question:
+**both names resolve a US state and the states DIFFER.** The match then rests on a real shared
+identity token and the STATE is what disagrees, so Guard B is silent by construction. Measured
+catches, all of which would previously have shipped unannotated:
+
+```
+BLUE CROSS AND BLUE SHIELD OF HAWAII -> pi_bcbs_texas          @0.711
+VIRGINIA BLUE CROSS BLUE SHIELD      -> pi_bcbs_tennessee      @0.673
+ANTHEM BCBS COLORADO                 -> pi_anthem_nevada       @0.736
+BCBS OF NORTH DAKOTA                 -> pi_bcbs_north_carolina @0.502
+```
+
+**Token comparison is not enough, and North Dakota is why.** Tokenized, the query is
+{BCBS, OF, NORTH, DAKOTA} and the candidate {BCBS, NORTH, CAROLINA} — NORTH matches, so a naive
+"share a state token?" test says yes. States must be resolved as UNITS (longest-match-first over the
+token sequence) before comparison. A bare `CAROLINA`/`DAKOTA`/`HAMPSHIRE` resolves to NOTHING on
+purpose: without its direction word the state is unknown, and guessing would make the guard fire on
+a coin flip. An unresolved state disables Guard C for that name — silence when it does not know.
+
+**Guard C FLAGS, it does not BLOCK** (unlike A, and unlike B's treatment in 028). The identity
+support is real and a reviewer resolves a state mismatch at a glance, so 66 rows ship with
+`review_note = 'GUARD-C state mismatch: verify the state before accepting.'` Dropping them would
+discard signal; shipping them silently would be the 026 defect again.
+
+⚠ **Known Guard C limitation, with its example.** Only a TRAILING two-letter code is resolved, so
+`BCBS CT - TX -> pi_bcbs_texas` is NOT flagged: CT sits mid-name and is skipped, leaving {TX} on both
+sides. Accepting mid-position codes was rejected because it costs ~100 false flags on correct names
+(see the marginal-band measurement). Also excluded from state resolution entirely: `CO OR IN ME OK HI
+DE` — ordinary English/business words that would resolve a state out of noise ('DELTA DENTAL CO' is
+not Colorado). **Like the MODIFIER list, this curation IS the guard's discriminating power, so its
+errors are the guard's errors.** Extend it with measurement, never intuition.
+
+### Stream numbers, post-027, final modifier set, all three sums balanced
+
+| Stream | survives | Guard A blocked | Guard B/C flagged | no viable candidate | total |
+|---|---|---|---|---|---|
+| 026 trigram proposals | 28 | 5 | 1 (not also A) | 1 | **35** ✓ |
+| claims `no_candidate` | 47 | 40 | 2 | 19 | **108** ✓ |
+| unmapped VOB names | 582 | 182 | 90 | 65 | **919** ✓ |
+
+The 35-stream sum previously read 34 and said MISMATCH without naming the lost row. **The sum check
+itself was wrong**: Guard A and Guard B/C overlap, so `blockedA + flaggedB` double-counts and the
+partition needs `flaggedOnly` (flagged but not blocked). Fixed; all three now balance.
+
+Payload is 695, not 582+47=629, because **Guard-C-flagged rows are included with a note** while
+Guard-A/B rows are excluded.
+
+### ⚠ TWO SANITY CHECKS WERE FAILING BEFORE THIS SESSION AND ONE STILL IS — correcting the record
+
+The prior session's summary implied the scorer's checks were clean. **They were not**: the pre-027
+output file reads `OVERALL: SANITY CHECKS FAILED`. Both failures pre-date 027 and Guard C. 027
+*improved* both.
+
+1. **"OXFORD HEALTH PLANS no longer top-scores pi_health_plans_inc" — was MIS-SPECIFIED, now fixed
+   and passing.** No canonical identity contains the token OXFORD at all (Oxford is a UHC brand with
+   no row), so nothing OXFORD-bearing can outrank the wrong answer *no matter how the weighting is
+   tuned*. The check demanded an outcome the data cannot produce. The invariant that actually protects
+   the book is that the wrong proposal never SHIPS — Guard A blocks it — so the check now asserts
+   "rank 1 is correct OR the guards refuse", and prints which held. Satisfying the old form would
+   have required inventing a `pi_oxford` row, which is a data decision for a human.
+2. **"CONFIRMED pairs still resolve to the same canonical ≥80%" — STILL FAILING at 77.8%
+   (165/212), deliberately left red.** Improved from 71.0% by 027. The 80% floor was never
+   calibrated, but **it was not lowered**, because the metric it fails on is the only thing measuring
+   the remaining dedup backlog: `held` counts every change as a failure, and most changes are not
+   errors. When the scorer moves `ANTHEM BCBS CT` from `pi_anthem_connecticut` to
+   `pi_anthem_bcbs_of_ct` at 0.957 it has found a **duplicate identity 027's queue does not cover**.
+   No reweighting can fix that; a 029 dedup pass can.
+
+   A second, properly-specified check was ADDED alongside rather than replacing it: **bucket F — the
+   rate at which the scorer picks a genuinely different payer that NEITHER guard objects to — is
+   8/212 = 3.8%** (was 12/210 = 5.7% pre-027). That is the number the reviewer header quotes, and a
+   third check now asserts the header's hardcoded figure still equals the measured one, so the header
+   cannot quietly become a lie.
+
+Changed-case classification (47 total): **A=11** duplicate identity · **B=19** abbreviation form
+(query uses a state code, canonical spells it out) · **C=6** modifier-driven · **E=3** unreachable ·
+**F=8** genuinely different, uncaught. Bucket A collapsing 27→11 is 027 working as designed.
+
+### 029 CANDIDATES discovered as a by-product — bucket A's 11 remaining duplicates
+Not merged, no ruling, recorded so the finding is not lost. The clearest is
+`pi_anthem_connecticut` ↔ `pi_anthem_bcbs_of_ct` (displaySim 0.957). These are additional to the 5
+parked pairs in 027's entry.
+
+### Apply mechanics — NOT via `apply_migration`, and why
+The file is 79KB because its payload is 695 generated rows. Passing that through the MCP tool means
+an agent **retyping generated content**, reintroducing the transcription risk that generating it
+removed — one mis-copied canonical id is a wrong merge with a plausible review note attached. Applied
+instead from the **committed file bytes** in ONE transaction as `claims_admin` (the role the
+migration's own `set role` targets, and the owner of `payer_alias_map`), verify-full TLS via
+`src/collections/db.ts`.
+
+**First attempt rolled back whole on `42501 permission denied for schema supabase_migrations`** —
+`claims_admin` cannot write the migration ledger. That failure is worth keeping: it *proved* the
+transaction wrapper, since both assertion NOTICEs had already fired and nothing persisted. The ledger
+row was then inserted separately through the MCP path, which runs as `postgres`. **Consequence to
+know:** the DDL and its `schema_migrations` row are in two transactions, so a failure between them
+would leave an applied-but-unrecorded migration. Detectable and correctable, and verified here
+(`20260805060000`).
+
+### Verified after apply
+695 idf_cosine rows, **0 of them confirmed**; 42 human rows byte-identical to a pre-captured snapshot
+(asserted in-migration, not just claimed); 0 pairing-invariant violations table-wide; 0 aliases
+pointing at a 027-absorbed id; 67 rows carry a review_note; provenance CHECK admits `idf_cosine` plus
+all six original values; `no_candidate` 108 → 59; totals 1,685 alias rows / 188 identities.
+**Next Veris number is 029.**
+
+### ⚠ STILL OPEN FOR A HUMAN — resolution quality is capped at the CONFIRMED tier by design
+D2 reads `needs_review = false` only, so all 695 proposals are **invisible to resolution** until
+reviewed. Until that review happens, Qualify's identified-search path resolves 60.0% of VOB members
+and no more. That is a deliberate cap, not a defect — but it must not be reported as 94.8%.
 ---
 
 ## 0084 / 0085 / 0086 — Facility Resolution: the 'No Facility' attribution engine (2026-08-05)
@@ -3840,6 +4233,61 @@ also skips the `replaceCmdDailyForFacility` write below it. Resolved forward by 
 rather than reverting. The rule stands: **migrations first, merge second.**
 
 ### The 3.8% payer-alias wrong-rate is 027's dedup, NOT Guard C (2026-08-05)
+
+> ### ⚠ CORRECTION 2026-08-05 — THIS ENTRY'S CENTRAL CLAIM IS FALSE. READ THIS FIRST.
+>
+> **"Guard C caught ZERO of the 47 changed confirmed-tier cases" is wrong. Guard C caught SIX**, and
+> its confirmed-tier false-positive rate is **0 of 6** — every flag is correct. The entry below is
+> left intact per this file's own rule ("never rewrite history — correct earlier entries with a dated
+> correction line"), but do not act on it.
+>
+> **The heading is also wrong as written.** The 5.7% → 3.8% move is **BOTH** mechanisms: 027's dedup
+> (bucket A 27 → 11, the larger effect) **and** Guard C (the 6 below). Read the heading as
+> "is *mostly* 027's dedup, *and also* Guard C".
+>
+> **How the error happened, because the mechanism will bite again.** The scorer's printed `COUNTS:`
+> line renders each bucket by its key's **FIRST CHARACTER**, and two keys collide there:
+> `C. MODIFIER-DRIVEN` (Guard **B**) and `C2. STATE MISMATCH` (Guard **C**) both render as `C`.
+> Seeing a single `C=6` invites the conclusion that it is the Guard-B bucket and that Guard C's is
+> empty. **It is the exact inverse — `C2` holds the 6 and the Guard-B bucket is the empty one.**
+> Read the bucket HEADINGS in the `--analyze` output, never the `COUNTS:` abbreviation; it is lossy.
+> (This is a real trap: the same misreading was made independently by two sessions on one day.)
+>
+> The six Guard-C catches, verbatim (`want` = the CONFIRMED mapping, `got` = the scorer's top-1):
+>
+> ```
+> BLUE CARD PROGRAM TX              want=pi_bcbs_texas          got=pi_bcbs_illinois      @0.679
+> BLUE CROSS AND BLUE SHIELD OF T…  want=pi_bcbs_texas          got=pi_anthem_nevada      @0.700
+> BLUECARD PROGRAM OF MD            want=pi_carefirst_maryland  got=pi_bcbs_pennsylvania  @0.650
+> BLUECARD PROGRAM OF SC           want=pi_bcbs_south_carolina  got=pi_bcbs_pennsylvania  @0.650
+> BLUECARD PROGRAM OF TX            want=pi_bcbs_texas          got=pi_bcbs_pennsylvania  @0.668
+> TENNESSEE BLUE CROSS BLUE SHIELD  want=pi_bcbs_tennessee      got=pi_bcbs_texas         @0.588
+> ```
+>
+> Every one names a state and resolved to a DIFFERENT state, so every flag is correct. Five of six
+> are BlueCard/state-BCBS names — precisely the class Guard C was built for.
+>
+> **What survives from the entry below, unchanged and still true:** the bucket table's numbers; that
+> 027's dedup is the larger contributor; that Guard C also does bulk work on the PROPOSAL streams
+> (66 rows annotated, 74 names removed from the VOB survivor set); and that `028`'s applied header
+> was correctly left un-edited.
+>
+> **What is now wrong in the entry below:** "caught ZERO", "its bucket is empty in this holdout",
+> "It does not move this metric", and the closing advice "not Guard C" — Guard C *does* move this
+> metric, by 6 cases.
+>
+> **NOT MEASURED, and do not infer it:** whether all six would have landed in bucket F with Guard C
+> disabled. The classifier tests `flagC` BEFORE `blockA`, so some may also be Guard-A blocks.
+> Isolating that needs a Guard-C-disabled re-run, which no flag currently exposes.
+>
+> Provenance: the source this entry cites (`scripts/score-payer-aliases.ts:353-368`) was itself
+> carrying the same false claim and was corrected in `16bd64b` on branch
+> `qualify/v3-crosswalk-through-p3`; the line range no longer matches. The corrected attribution now
+> lives beside `WRONG_RATE_F` / `WRONG_RATE_TESTABLE` in that file.
+>
+> ⚠ **Path note:** this entry was appended to `docs/veris-data-notes.md`, which **stopped being the
+> canonical ledger path at `dd77d54`** (relocated to the repo root, ratified 2026-08-04). It was
+> carried here by a merge. Append to the ROOT file.
 
 Recorded here because the number is quoted in a reviewer-facing header and the obvious reading of
 it is wrong. Source: `scripts/score-payer-aliases.ts:353-368`, which measures it and says so

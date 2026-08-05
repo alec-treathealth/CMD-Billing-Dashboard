@@ -43,23 +43,47 @@ different window shapes. Trailing options are 30/60/90 (quick pills) and
 180/270/365 (the Range menu, capped at 12 months). Calendar prior-window for any
 delta is the **previous equivalent calendar period**, never prior-year-same-month.
 
-## Rating — value-first, and it stays that way
+## Rating — v2 is the five-factor model (shipped); v1 is value-first
 
-The rating **is** the facility's dollar-weighted allowed ÷ billed. Full stop. It
-is both the list sort key and the badge-color source, and it equals the displayed
-`pctAllowedOfBilled`. Volume never bends the score: in RCM the allowed% reflects
-the payer's contracted rate, which is stable at low volume, so a small facility
-genuinely at 90% is a strong lead.
+**Shipped `main` sorts and renders `ratingV2`** (`app/lib/qualify/ratingV2.ts`),
+not v1. `QualifyFacility.ratingV2` is the sort key and the hero numeral, paired
+with `iqBand`, `factors[]` and `availableWeight`. Five factors, weights summing
+to 100 and **renormalized over the available set**:
 
-`rating.ts` computes from `pctAllowed` only — never dollar amounts — so an
-`admissions_seat` session derives the identical badge. Keep it that way.
+| Factor | Weight | Note |
+|---|---|---|
+| `coding` | 30 | registry lifecycle × decision age; UNAVAILABLE until the registry is seeded |
+| `claims` | 25 | the v1 value-first signal — reliable allowed ÷ billed, tier e2 excluded |
+| `dataConfidence` | 20 | sample × window-age × provenance; an auto-widened window costs confidence, visibly |
+| `ttp` | 15 | median service→payment days over PAID lines only, and the detail says so |
+| `authFit` | 10 | avg LOS vs avg authorized days; overrun-only penalty |
 
-Volume is surfaced as **context, never a penalty**, two ways: a hard floor
+`pctAllowed` null ⇒ the **whole** rating is null. Below
+`QUALIFY_RATING_MIN_PATIENTS` distinct patients the rating is null regardless of
+factor scores (`sampleGate.ts` is the single source of that floor); factors are
+still returned so the card can show what evidence does exist.
+
+The verdict scale is the billing team's own **IQ bands** (65/50/30/15/0, adopted
+from the monday census IQ column), not a second Strong/Watch/Weak vocabulary.
+
+**v1 `rating.ts` still exists and is still exported** — `qualifyRating(pctAllowed)
+= clamp0to100(pctAllowed)`, buckets 50/30 — for surfaces not yet migrated. Every
+v2 surface renders the IQ band. Do not treat v1 as dead, and do not treat it as
+current.
+
+**The invariant that survived both models:** every rating input is a percentage,
+count, day-count, enum or date string — **never a dollar amount** — so an
+`admissions_seat` session derives an identical rating, band and factor list.
+`test/qualifyCoreV2.test.ts` proves it at the wire level. Keep it that way.
+
+Volume is surfaced as **context, never a penalty**: a hard floor
 (`QUALIFY_MIN_LINES`, applied in `core.ts`) that drops degenerate "100% on one
-claim" flukes, and a soft "limited data" flag.
+claim" flukes, plus a soft "limited data" flag.
 
-Folding a second signal (denial rate, recency, streak) into the rating is an
-explicit v2 decision, not a tweak.
+Folding a second signal into the rating **was** the explicit v2 decision, and it
+has been made — v2 folds in coding, data confidence, TTP and auth fit. Adding a
+*sixth* factor, or changing a weight, is the same class of decision and needs the
+same sign-off; it is not a tweak.
 
 ## Sample gate
 

@@ -7,9 +7,9 @@
  *    (a patient name) is NEVER in any census query string. Grep this file: `name` appears solely
  *    in the Facility Info query, whose items are facilities.
  *  - The token (MONDAY_SECRET_API_KEY) is read from env at call time, never logged, never thrown.
- *  - LEAST-PRIVILEGE GAP (recon 2026-08-03, carried, not fixed here): the deployed token is a
- *    personal admin-scoped key. Provision a dedicated read-only monday identity before this sync
- *    is scheduled — tracked in the morning runbook.
+ *    Provisioned in Vercel (Preview + Production) 2026-08-04; the sync is scheduled hourly at :47.
+ *  - LEAST-PRIVILEGE (carried): whether the deployed token is a dedicated read-only monday
+ *    identity or a personal key is operator-owned — verify before widening this sync's scope.
  *
  * No retry loop: a failed board is reported and skipped (the table keeps its previous row; the
  * factor reads slightly-stale aggregates rather than nothing). The cron cadence self-heals.

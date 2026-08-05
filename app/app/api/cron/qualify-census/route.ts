@@ -2,12 +2,17 @@
  * GET /api/cron/qualify-census — monday census → collections.qualify_facility_census aggregates
  * (Qualify Phase G: the auth-fit factor, UR banner, and open-bed context).
  *
- * ⚠ DELIBERATELY NOT IN app/vercel.json YET. Scheduling this is a morning decision, not an
- * overnight one: (1) the standing rule keeps the cron surface untouched outside explicitly scoped
- * sessions; (2) the monday token in env is a personal admin-scoped key — the least-privilege
- * service identity should land first; (3) monday quiet-window placement (:41–:59, per the CMD
- * cron contention notes) deserves a human look. Until then: run manually via
- * scripts/run-qualify-census.ts, or hit this route with the Bearer secret.
+ * SCHEDULED hourly at :22 (app/vercel.json) — ratified 2026-08-04 in the explicitly-scoped
+ * Auth/LOS session after MONDAY_SECRET_API_KEY landed in Vercel (Preview + Production).
+ *
+ * ⚠ :22, NOT :41–:59. This was first scheduled at :47 on a misreading of the morning runbook, which
+ * called :41–:59 a good slot. It is the opposite: **:41–:59 UTC is the CMD quiet window reserved for
+ * live probe work, and no production cron may be scheduled inside it — not even a non-CMD one**
+ * (corrected by Alec 2026-08-05). :22 is clear of every existing hourly cron (:00 :15 :30 :35 :45 :55)
+ * and outside the reserved band. Do not move this back into the :41–:59 range.
+ * A missing/invalid key degrades honestly: runQualifyCensusSync catches per board, the route
+ * returns 200 with failure counts, and the auth-fit factor stays "no data yet" — pinned by
+ * test/qualifyCensusSync.test.ts. Manual run: scripts/run-qualify-census.ts.
  *
  * Auth: Authorization: Bearer <CRON_SECRET> (the standard Vercel cron contract). GET only.
  * PHI: none end to end — the sync fetches monday column values only (never census item names)

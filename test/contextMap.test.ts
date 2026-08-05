@@ -15,12 +15,16 @@ const map = loadContextMap();
 
 test('canonical table lists the docs a cold-start engineer cannot work without', () => {
   const paths = map.canonical.map((e) => e.path);
+  // Paths updated 2026-08-05 after a bulk relocation moved the build guide and the design system
+  // into docs/archive/. Both are still LIVE documents despite the directory name — the assertion is
+  // "the map lists them", and it keeps naming them explicitly so a future move fails here loudly
+  // instead of the row being quietly dropped from CLAUDE.md.
   for (const required of [
     'CLAUDE.md',
-    'docs/Fable Build Doc E2E/00-GUIDE.md',
-    'docs/veris-data-notes.md',
+    'docs/archive/00-GUIDE.md',
+    'veris-data-notes.md',
     'pr_compliance_checklist.yaml',
-    'docs/design-system.md',
+    'docs/archive/design-system.md',
   ]) {
     assert.ok(paths.includes(required), `canonical table is missing ${required}`);
   }

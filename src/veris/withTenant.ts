@@ -1,6 +1,6 @@
 /**
  * withTenant — the ONE way to run tenant-scoped queries against the Veris
- * core.* / staging.* tables (S2 gate ruling; see docs/veris-data-notes.md, S2
+ * core.* / staging.* tables (S2 gate ruling; see veris-data-notes.md, S2
  * "withTenant implementation constraints").
  *
  * Single-client transaction discipline on the Supavisor transaction pooler

@@ -110,7 +110,7 @@ The loader must reproduce the app's **exact** `member_id` normalization + HMAC (
 
 **Feasibility GUC caveat.** The 30.8% overlap probe used a raw connection with **no `withTenant`/GUC set**, so it cannot be attributed to both tenants; it is indicative only. Post-load match-rate QA (run with proper tenant context) is authoritative.
 
-**0a — next migration = `0060`.** Evidence: local `supabase/migrations` max `0059`; `origin/main` (HEAD `83af99a`) max `0059`; `git log --all` max `0059`; all 3 other worktrees ≤ `0059` with no ≥0060 files (committed or uncommitted); `docs/veris-data-notes.md` ledger max `0059`.
+**0a — next migration = `0060`.** Evidence: local `supabase/migrations` max `0059`; `origin/main` (HEAD `83af99a`) max `0059`; `git log --all` max `0059`; all 3 other worktrees ≤ `0059` with no ≥0060 files (committed or uncommitted); `veris-data-notes.md` ledger max `0059`.
 
 **0d — CSV = 29 columns (confirmed).** Table carries **28 columns**: match keys + benefit text + provenance. **Excluded from the table by the loader:** `additional_notes` (free-text PHI), raw `patient_name` / `patient_dob` / `member_id` / `group_number` (only their blind indexes are stored), and `relationship_client` / `employer_name` (kept out to preserve a pseudonymous, benefit-only table).
 
