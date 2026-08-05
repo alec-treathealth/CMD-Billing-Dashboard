@@ -410,6 +410,19 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
   const auth = input.avgAuthDays;
   const los = input.avgLosDays;
   if (auth === null || los === null || !Number.isFinite(auth) || !Number.isFinite(los) || auth <= 0) {
+    // NAME THE INPUT THAT IS ACTUALLY ABSENT. The old copy said "No authorization / length-of-stay
+    // data" for every unavailable case, which was actively misleading for months: monday's API
+    // returns "" for the LOS formula column, so avg_auth_days was populated (21.11 / 25.17 days on
+    // the two instrumented facilities) while avg_los_days was NULL — auth data was fine and only
+    // LOS was missing. A factor that misstates which half it lacks sends the operator to the wrong
+    // board column.
+    const authKnown = auth !== null && Number.isFinite(auth) && auth > 0;
+    const losKnown = los !== null && Number.isFinite(los);
+    const detail = authKnown
+      ? 'Authorized days are on file, but no length-of-stay data for this facility yet.'
+      : losKnown
+        ? 'Length of stay is on file, but no authorized-days data for this facility yet.'
+        : 'No authorization or length-of-stay data for this facility yet.';
     factors.push({
       key: 'authFit',
       label: QUALIFY_FACTOR_LABELS.authFit,
@@ -417,7 +430,7 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
       score: null,
       available: false,
       direction: 'neu',
-      detail: 'No authorization / length-of-stay data for this facility.',
+      detail,
     });
   } else {
     const fit = los <= auth ? 1 : clamp01(1 - (los - auth) / auth);

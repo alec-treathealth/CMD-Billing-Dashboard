@@ -16,11 +16,19 @@ import { test } from 'node:test';
 import type pg from 'pg';
 import { runQualifyCensusSync } from '../src/collections/qualifyCensusSync';
 
-function stubClient(onQuery: () => void): pg.PoolClient {
+/**
+ * Every query throws, which pins two things at once: no WRITE reaches the table on the
+ * no-credential path, and the one READ the sync now issues first (care_setting, for the
+ * family <-> care_setting assertion) is FAIL-SOFT — a refused select must not take the feed down.
+ * `onWrite` counts only mutating statements, so the read cannot mask a regression in the write path.
+ */
+function stubClient(onWrite: () => void, onRead: () => void = () => {}): pg.PoolClient {
   return {
-    query: async () => {
-      onQuery();
-      throw new Error('DB write attempted on the no-credential path');
+    query: async (sql?: unknown) => {
+      const text = typeof sql === 'string' ? sql.toLowerCase() : '';
+      if (/^\s*(insert|update|delete)\b/.test(text)) onWrite();
+      else onRead();
+      throw new Error('DB statement attempted on the no-credential path');
     },
   } as unknown as pg.PoolClient;
 }
@@ -35,16 +43,21 @@ for (const [label, value] of [
     if (value === undefined) delete process.env.MONDAY_SECRET_API_KEY;
     else process.env.MONDAY_SECRET_API_KEY = value;
     let writes = 0;
+    let reads = 0;
     const errors: string[] = [];
     console.error = (msg?: unknown) => {
       errors.push(String(msg));
     };
     try {
-      const stats = await runQualifyCensusSync(stubClient(() => writes++));
+      const stats = await runQualifyCensusSync(stubClient(() => writes++, () => reads++));
       assert.equal(stats.boards_synced, 0, 'no board can sync without a credential');
       assert.equal(stats.boards_failed, stats.boards_total, 'every configured board reports failed');
       assert.ok(stats.boards_total > 0, 'the default board registry is non-empty');
-      assert.equal(writes, 0, 'the writer connection is never touched');
+      assert.equal(writes, 0, 'NOTHING is written — the table keeps its previous rows');
+      // The care_setting read is attempted and refused; the sync must survive that.
+      assert.ok(reads > 0, 'the care_setting read is attempted before any monday I/O');
+      assert.equal(stats.facilities_synced, 0, 'no facility is upserted without a credential');
+      assert.equal(stats.facilities_failed, stats.facilities_total, 'every facility reports failed');
       assert.equal(stats.capacity_mapped, 0, 'bed capacity cannot resolve without a credential');
       assert.ok(errors.length > 0, 'the failure is reported, never swallowed');
       for (const e of errors) {

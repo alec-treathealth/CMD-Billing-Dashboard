@@ -214,6 +214,36 @@ export interface CmdFacilityOption {
 }
 
 /**
+ * ONE OPTION PER FACILITY for Qualify's facility picker — the de-duplicated shape.
+ *
+ * WHY THIS EXISTS SEPARATELY FROM CmdFacilityOption. That one is DISTINCT on the raw CMD facility
+ * text, so a facility whose CMD export carries more than one spelling appears more than once. Live
+ * example: `LONESTAR MENTAL HEALTH` (4,156 charge lines) and `LONESTAR MENTAL HEALTH LLC` (81 lines)
+ * both resolve to `LSMH` and both label from the same dimension row, so the dropdown rendered TWO
+ * rows with byte-identical text and the same IP badge. Picking one silently scoped the search to
+ * 4,156 lines and picking the other to 81, with nothing on screen to tell them apart.
+ *
+ * Collapsing by resolved `facility_code` fixes both halves: one row per facility, and `variants`
+ * carries EVERY raw text so selecting it covers all 4,237 lines. `CmdExplorerFilter.facility` is
+ * already `string[]`, so the variants expand into the existing predicate with no schema change.
+ *
+ * A text that resolves to no facility (the `No Facility` placeholder, 11,414 lines) groups by itself
+ * and keeps its own row — it is a real bucket in the data, not a duplicate.
+ *
+ * The Collections explorer deliberately keeps using CmdFacilityOption: it is production and out of
+ * scope here.
+ */
+export interface QualifyFacilityOption {
+  /** The canonical raw CMD text for this facility — what the UI stores as the selected value. */
+  value: string;
+  /** EVERY raw CMD text this option covers, including `value`. Expanded into the filter. */
+  variants: string[];
+  /** display_acronym, else facility_name, else the canonical raw text. */
+  display: string;
+  care_setting: 'IP' | 'OP' | 'BOTH' | null;
+}
+
+/**
  * Build the tenant-scoped facility-options query for the dropdown. The DISTINCT facility list is
  * read from collections.cmd_explorer_filter_options (migration 0080) — the tiny precomputed
  * (business_entity_id, kind, value) dimension matview, refreshed by the same hourly function as
@@ -244,6 +274,44 @@ export function buildCmdFacilityOptionsQuery(entityIds: string[]): { sql: string
     'left join collections.cmd_facility_aliases a on upper(a.facility_text) = upper(r.facility) ' +
     'left join collections.facilities f on f.facility_code = coalesce(fe.facility_code, a.facility_code) ' +
     'group by r.facility order by r.facility';
+  return { sql, params };
+}
+
+/**
+ * Qualify's facility options, ONE ROW PER FACILITY (see QualifyFacilityOption for why).
+ *
+ * Same vocabulary source and same two-path crosswalk as buildCmdFacilityOptionsQuery — the 0080
+ * filter-options matview, then an exact name match else the cmd_facility_aliases crosswalk — so the
+ * option set stays exactly the set of facility texts the grid/summary predicate can match. The only
+ * difference is the GROUP BY: `coalesce(f.facility_code, upper(r.facility))` collapses every raw
+ * spelling of one facility into a single row and `array_agg` keeps all of them.
+ *
+ * The label prefers `display_acronym`, which is populated for all 16 mnemonic (BXR) facilities and
+ * NULL for every 8-digit (Indigo) one — hence the mandatory `facility_name` fallback, and then the
+ * raw text for an unresolved bucket. That ordering also settles a naming inconsistency the raw
+ * dimension name could not: `CALIFORNIA MENTAL HEALTH LLC` resolves to a dimension row named
+ * `CA MENTAL HEALTH`, so labelling from facility_name alone showed a different name in the picker
+ * than everywhere else. `display_acronym` is the curated short label and is the same in both places.
+ *
+ * Non-PHI throughout (facility names and CMD export text). $1 = entityIds is the only bound value;
+ * every identifier is a fixed literal.
+ */
+export function buildQualifyFacilityOptionsQuery(entityIds: string[]): { sql: string; params: unknown[] } {
+  const params: unknown[] = [entityIds];
+  const sql =
+    'select coalesce(f.display_acronym, f.facility_name, min(r.facility)) as display, ' +
+    'min(r.facility) as value, ' +
+    'array_agg(r.facility order by r.facility) as variants, ' +
+    'max(f.care_setting) as care_setting ' +
+    'from (select distinct value as facility from collections.cmd_explorer_filter_options ' +
+    "where business_entity_id = any($1::uuid[]) and kind = 'facility') r " +
+    'left join collections.facilities fe on upper(fe.facility_name) = upper(r.facility) ' +
+    'left join collections.cmd_facility_aliases a on upper(a.facility_text) = upper(r.facility) ' +
+    'left join collections.facilities f on f.facility_code = coalesce(fe.facility_code, a.facility_code) ' +
+    // Unresolved texts group by themselves (upper() so two casings of one unresolved text still
+    // collapse); resolved ones group by their facility_code.
+    'group by coalesce(f.facility_code, upper(r.facility)), f.display_acronym, f.facility_name ' +
+    'order by 1';
   return { sql, params };
 }
 
