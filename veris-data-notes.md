@@ -3791,3 +3791,116 @@ the candidate pool and a re-run produces new proposals. This is also why the
 pre-apply estimate (48 no-candidate names / 47,656 lines) differs from the actual
 (108 names / 10,140 lines): the estimate matched against all 1,120 VOB names,
 while the migration matches against the resolving subset. Fewer lines, more names.
+
+## 027 — canonical payer dedup APPLIED LIVE (2026-08-04), first attempt
+
+Qualify v3 P0 follow-on. 026's generic slug ladder minted **several identities for one real
+payer**, which would have surfaced in D2 as multiple "candidates" that are the same company —
+the user asked to choose between two spellings of one answer, which is the ambiguity v3 exists
+to remove, wearing a new hat.
+
+### The 15 proposals were a GRAPH, not 15 pairs
+
+15 machine-proposed merge **cases** → **12 distinct id pairs** → **11 connected components** over
+23 nodes. Three pairs had been double-counted: two alias cases pointing at ONE id pair, for New
+Hampshire (`ANTHEM BCBS NH` + `BCBS NH`), Nevada, and Maryland (`BCBS MD` + `CAREFIRST BCBS MD`).
+`{pi_bcbs_california, pi_anthem_california, pi_anthem_blue_cross_of_california}` is a single
+**three-node** component. Merging that as two independent pairs in arbitrary order can leave a
+dangling reference to a node the other pair already deleted, so 027 resolves components in one
+plan table before a row moves. **Carry this**: any future dedup proposal list is a graph until
+proven otherwise.
+
+**10 components executed** (Health Net parked, below), absorbing **11 nodes**: 199 → **188 live
+identities**. 32 alias rows repointed; `payer_alias_map` total unchanged at **1,039** — the merge
+moved pointers, it did not drop aliases.
+
+### Survivor rule (ratified): volume picks the ID, a human picks the NAME
+
+(1) greatest aggregate claim-line volume across the node's aliases — fewest rows move; (2) most
+name aliases; (3) lexicographically smallest id, for determinism. **`display_name` is a separate
+decision**, and New Hampshire is why: volume picks `pi_bcbs_new_hampshire` (86 lines vs 47) while
+the actual NH licensee brands as Anthem. Id and name come from different authorities on purpose.
+
+| Survivor | display_name set | Absorbed |
+|---|---|---|
+| `pi_anthem_california` | Anthem Blue Cross of California | `pi_anthem_blue_cross_of_california` (5 aliases), `pi_bcbs_california` (7) |
+| `pi_bcbs_new_hampshire` | Anthem Blue Cross and Blue Shield of New Hampshire | `pi_anthem_new_hampshire` (1) |
+| `pi_anthem_nevada` | Anthem Blue Cross and Blue Shield of Nevada | `pi_bcbs_nevada` (2) |
+| `pi_anthem_georgia` | Anthem Blue Cross and Blue Shield of Georgia | `pi_bcbs_georgia` (3) |
+| `pi_anthem_indiana` | Anthem Blue Cross and Blue Shield of Indiana | `pi_bcbs_indiana` (2) |
+| `pi_anthem_kentucky` | Anthem Blue Cross and Blue Shield of Kentucky | `pi_bcbs_kentucky` (2) |
+| `pi_anthem_ohio` | Anthem Blue Cross and Blue Shield of Ohio | `pi_bcbs_ohio` (2) |
+| `pi_carefirst_maryland` | CareFirst BlueCross BlueShield | `pi_bcbs_maryland` (3) |
+| `pi_premera_washington` | Premera Blue Cross | `pi_premera_bcbs` (2) |
+| `pi_bcbs_federal` | Blue Cross Blue Shield Federal Employee Program | `pi_bcbs_fep` (3) |
+
+⚠ **Convention divergence, recorded not hidden.** 026 seeded every `display_name` in UPPER CASE
+(it dropped `initcap()` because it mangled acronyms — BCBS → Bcbs). These 10 land in mixed case
+as ratified, so `display_name` is now mixed-convention across 188 rows. Display-layer
+inconsistency, not a data defect; completing the pass is a follow-up.
+
+### `ref.payer_identity_never_merge` — the ruling is now a constraint, not a memory
+
+Eight review cases said "textually similar, DIFFERENT payers" → **6 distinct rulings** (two were
+adjudicated twice). Three of them named a node **this migration deletes**. A ruling that stops
+applying because its target got merged away is the silent-heuristic failure mode relocated — same
+class as the dominant-payer heuristic, just later and quieter.
+
+So the rulings live in a table whose FKs are **`ON DELETE RESTRICT` on both sides**. After 027, a
+future merge **cannot** delete a constrained node without repointing the ruling first; the
+database refuses. Two rulings were repointed by 027 itself:
+
+- `pi_blue_shield_california` ↮ ~~`pi_bcbs_california`~~ → **`pi_anthem_california`**
+- `pi_health_plan_of_nevada` ↮ ~~`pi_bcbs_nevada`~~ → **`pi_anthem_nevada`**
+
+The other four (NC/SC, Capital-BC/BCBS-PA, Independence TPA/plan, Medicare/UHC-MA) named no
+absorbed node and are unchanged. Pairs are unordered but stored **once**, normalized
+`id_low < id_high` — without that CHECK the same ruling could exist twice in opposite orders and a
+one-direction lookup would silently miss it.
+
+**The RESTRICT semantics were EXERCISED, not inspected.** Section 10g creates a throwaway
+identity, pairs it with a real ruling, attempts the delete, and reads the refusing constraint name
+out of the error via `GET STACKED DIAGNOSTICS`. The throwaway matters: every *real* never-merge
+node also has alias rows, so deleting one raises `foreign_key_violation` from **either**
+constraint — a probe that could not tell which one fired would pass even if `never_merge` were
+protecting nothing. Probe left 0 rows behind (verified directly, not inferred).
+
+### `ref.payer_identity_merge_log` — and why there is no `merged_into` column
+
+Absorbed rows are **DELETED**, so `payer_identity` keeps its grain: one row per LIVE payer. A
+tombstone column would be a footgun — every future query would have to remember to filter it, and
+the one that forgets resurrects a duplicate candidate in the UI. History lives in the log, where
+nothing resolving a payer will read it by accident. The log deliberately carries **no FKs**
+(`absorbed_id` names a deleted row).
+
+### Posture verified after apply
+2 tables owned by `claims_admin`, RLS on / FORCE off; 2 policies, both SELECT; `claims_reader`
+SELECT on both; **0** grants to anon/authenticated/service_role/PUBLIC; 11 merge_log rows; 6
+never_merge rows; 0 absorbed-id references anywhere; 0 PHI-denylist columns; `confdeltype='r'` on
+**2** FKs (read from the catalog, not the DDL text); security advisors `{"lints":[]}`;
+`schema_migrations` carries exactly 1 row. **Next Veris number is 028.**
+
+### ⚠ OPEN FOR ALEC — 6 parked merge pairs, NOT merged and given NO never_merge row
+
+These are domain questions, and the honest state is "undecided", which is neither a merge nor a
+ruling. Recording them as never-merge would fabricate a decision nobody made:
+
+1. `pi_healthnet` ↔ `pi_health_net_california` — Health Net California may be a distinct
+   subsidiary rather than a spelling variant. (R2 parked this explicitly.)
+2. `pi_ambetter_florida` ↔ `pi_ambetter_health` — state plan vs parent brand; merging loses state
+   granularity.
+3. `pi_anthem_bcbs` ↔ `pi_anthem_california` — a generic catch-all vs a state-specific id. The
+   catch-all may need **splitting**, not merging.
+4. `pi_bcbs_pennsylvania` ↔ `pi_highmark_pennsylvania` — Highmark licenses western PA only.
+5. `pi_bcbs_washington` ↔ `pi_regence_washington` — both Regence and Premera license WA.
+
+(Five distinct pairs; the sixth review case was the second `anthem_bcbs`/`anthem_california`
+hit.) Until these are ruled, D2 may legitimately surface two candidates that are arguably one
+payer — a visible ambiguity, which is the designed-honest state, not a defect.
+
+### Rollback is PARTIALLY reversible — know this before running it
+`027_payer_identity_dedup_rollback.sql` restores the 11 identity shells and the pre-027 display
+names, but **the alias repoint is not reversible**: after the UPDATE, an alias pointing at
+`pi_anthem_california` is indistinguishable from one that always did. The log records how MANY
+rows moved per absorbed id, never WHICH. The rollback file carries the `\copy` export recipe and
+drops the tables LAST, because the log is the only record of what to restore.
