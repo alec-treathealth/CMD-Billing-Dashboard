@@ -2,10 +2,14 @@
  * GET /api/cron/qualify-census — monday census → collections.qualify_facility_census aggregates
  * (Qualify Phase G: the auth-fit factor, UR banner, and open-bed context).
  *
- * SCHEDULED hourly at :47 (app/vercel.json) — ratified 2026-08-04 in the explicitly-scoped
- * Auth/LOS session after MONDAY_SECRET_API_KEY landed in Vercel (Preview + Production). :47 sits
- * in the :41–:59 quiet window the morning runbook asked for; this route talks to monday, not CMD,
- * so the partner-slot constraint is soft — the slot just keeps clear of :45/:55 neighbors.
+ * SCHEDULED hourly at :22 (app/vercel.json) — ratified 2026-08-04 in the explicitly-scoped
+ * Auth/LOS session after MONDAY_SECRET_API_KEY landed in Vercel (Preview + Production).
+ *
+ * ⚠ :22, NOT :41–:59. This was first scheduled at :47 on a misreading of the morning runbook, which
+ * called :41–:59 a good slot. It is the opposite: **:41–:59 UTC is the CMD quiet window reserved for
+ * live probe work, and no production cron may be scheduled inside it — not even a non-CMD one**
+ * (corrected by Alec 2026-08-05). :22 is clear of every existing hourly cron (:00 :15 :30 :35 :45 :55)
+ * and outside the reserved band. Do not move this back into the :41–:59 range.
  * A missing/invalid key degrades honestly: runQualifyCensusSync catches per board, the route
  * returns 200 with failure counts, and the auth-fit factor stays "no data yet" — pinned by
  * test/qualifyCensusSync.test.ts. Manual run: scripts/run-qualify-census.ts.

@@ -349,6 +349,22 @@ const GUARD_B_MIN_SHARE = flag('guard-b-share', 0.1);
 // A hardcoded number in a header is exactly the kind of claim that rots silently, so the sanity
 // section asserts the computed value still matches. If the corpus shifts and it does not, the check
 // FAILS and names the new figure — the header cannot quietly become a lie.
+//
+// ── WHAT MOVED THE RATE FROM 5.7% TO 3.8% — measured, and NOT what you would guess ──────────────
+//
+//   pre-027, no Guard C:  A=27 B=19 E=3 F=12  · testable 210 · F = 12/210 = 5.7%
+//   post-027, Guard C on: A=11 B=19 C=6 E=3 F=8 · testable 212 · F =  8/212 = 3.8%
+//
+// **The improvement is 027's dedup, not Guard C.** Guard C caught ZERO of the 47 changed
+// confirmed-tier cases — the classifier's Guard-C bucket is empty in this holdout. The mechanism is
+// bucket A: 027 merged 11 duplicate identities, so 16 cases where the scorer "picked the wrong id"
+// were picking a DIFFERENT ROW FOR THE SAME PAYER, and after the merge they simply resolve
+// correctly. Four of those had been sitting in F. The +2 in `testable` is a second-order effect of
+// the surface pool changing (2 formerly-vacuous cases became testable).
+//
+// Guard C earns its place on the PROPOSAL streams, not on this metric: it annotated 66 rows and
+// removed 74 names from the VOB survivor set. Attributing the holdout improvement to it would credit
+// the wrong mechanism and invite someone to "tune Guard C" to move a number it does not touch.
 const WRONG_RATE_F = 8;
 const WRONG_RATE_TESTABLE = 212;
 const WRONG_RATE_PCT = ((100 * WRONG_RATE_F) / WRONG_RATE_TESTABLE).toFixed(1);

@@ -211,7 +211,7 @@ Surfaces:
 | `cmd-explorer` · `indigo-explorer` | hourly, :00 / :30 |
 | `cmd-census` · `indigo-census` | hourly, :15 / :35 |
 | `refresh-charge-rollup` | hourly, :45 |
-| `qualify-census` | hourly, :47 |
+| `qualify-census` | hourly, :22 |
 | `upcoming-overrides` | hourly, :55 |
 | `cmd-explorer-catchup` | daily 07:52 |
 | `era-835` | daily 08:50 |
@@ -223,7 +223,7 @@ Surfaces:
 | `billing-audit-op` · `billing-code-decisions` | daily 02:20 / 02:40 |
 | `billing-audit-consolidated` | daily 02:40, 03:10, 03:40 |
 
-`/api/cron/qualify-census` was scheduled 2026-08-04 (hourly :47) in the
+`/api/cron/qualify-census` was scheduled 2026-08-04 (hourly **:22**) in the
 explicitly-scoped Auth/LOS session the morning runbook reserved it for, after
 `MONDAY_SECRET_API_KEY` landed in Vercel. It feeds the Qualify auth-fit factor
 from Monday census boards; only NASH and LSMH boards are curated
