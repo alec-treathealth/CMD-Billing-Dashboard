@@ -192,9 +192,24 @@ export async function runQualifyCensusSync(
   return stats;
 }
 
-/** Facility Info '# of Beds' by facility_code, via the operator-curated name → code map. */
+/** Facility Info '# of Beds' by facility_code, via the operator-curated name → code map.
+ *
+ *  ⚠ Keys are matched against `item.name.trim().toUpperCase()`, so they must be the FACILITY INFO
+ *  board's item names — NOT the census board names, which use a different convention for the same
+ *  facility ("Nashville MH Admissions Census" vs the item "Nashville Mental Health").
+ *
+ *  MEASURED 2026-08-05: only the two 'MH' keys existed and NEITHER matched, so fetchBedCapacity
+ *  returned an empty map on every run, capacity_mapped was 0, and `capacity.get(code) ?? null`
+ *  wrote bed_capacity = NULL for every facility — the open-bed context had never once populated.
+ *  A live --discover run listed all 23 Facility Info names; the two mapped below are verbatim from
+ *  it. The 'MH' spellings are retained as aliases because both conventions are live in the same
+ *  workspace and a rename in either direction would silently re-break capacity. */
 const FACILITY_INFO_NAME_TO_CODE: Readonly<Record<string, string>> = {
-  'NASHVILLE MH': 'NASH', // roster-verified 2026-08-03 — collections.facilities keys these by mnemonic
+  // Verbatim Facility Info item names — the spellings that actually match (measured 2026-08-05).
+  'NASHVILLE MENTAL HEALTH': 'NASH', // roster-verified — collections.facilities keys these by mnemonic
+  'LONESTAR MENTAL HEALTH': 'LSMH',
+  // Aliases: the census-board convention, kept so a rename toward it does not re-break capacity.
+  'NASHVILLE MH': 'NASH',
   'LONESTAR MH': 'LSMH',
 };
 

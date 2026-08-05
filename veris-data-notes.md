@@ -4321,3 +4321,72 @@ guard with no effect on it. Tune the dedup, or the candidate surface — not Gua
 The scorer guards the number against rot itself: `WRONG_RATE_F = 8` / `WRONG_RATE_TESTABLE = 212`
 are hardcoded so the header can print above the table that computes them, and the sanity section
 asserts the computed value still matches, failing loudly with the new figure if the corpus shifts.
+
+---
+
+## 0087 — a durable run-log for `/api/cron/qualify-census` (APPLIED LIVE 2026-08-05)
+
+**The defect, stated precisely.** The cron cannot fail visibly. `runQualifyCensusSync` catches PER
+BOARD and the route returns HTTP **200** with counts regardless, so a dead `MONDAY_SECRET_API_KEY`
+yields `200 { boards_total: 2, boards_synced: 0, boards_failed: 2 }` — a success status, an
+empty-but-present aggregate table, and a Qualify auth-fit factor reading "no data yet" for every
+facility. From outside that is byte-identical to a facility whose monday board was never curated.
+The only signal was a `console.error`, and Vercel logs are 403-scoped away from this project.
+
+**Why it stopped being hypothetical.** On 2026-08-05 the cron was scheduled (:22, live on main via
+PR #109) and `collections.qualify_facility_census` was still **0 rows** after three consecutive
+ticks with a valid token present in Vercel Production — while a hand-run of the *identical* sync
+(`scripts/run-qualify-census.ts`, 09:57 UTC) wrote both facilities on the first attempt. The
+deployed cron and the same code by hand disagreed, and the database could not say why, because
+nothing recorded that the cron had ever run. That is the whole argument for the table.
+
+`collections.qualify_census_run` — one row per attempt, INSERTed **before any monday I/O** as its
+own autocommit statement, so a platform kill leaves `finished_at IS NULL`. That row is evidence a
+`try/catch` cannot produce: a hard kill runs no catch block. Same shape as
+`refreshChargeRollup.ts`.
+
+**`conformance_gap_boards` — the quietest failure, and the one the first draft missed.** If monday
+renames a column title, `resolveCensusColumns` returns every id null, the item fetch is **skipped
+entirely** (`ids = []`), `aggregateCensusItems([])` yields zeros, and the upsert overwrites a good
+facility row with those zeros **plus a fresh `synced_at`** — while `boards_synced` is still
+incremented. The run would otherwise read a clean `'ok'` over silently zeroed data with a freshness
+stamp that lies. `stats.conformance` was the only evidence and it was in-memory only. A non-zero
+count now forces `'partial'` and carries a label distinct from a board failure, because the two
+want different operator responses: a failed board never wrote; a gapped board wrote garbage.
+
+**Fail-soft, deliberately.** An unapplied 0087 or a refused INSERT logs and the sync still runs
+(`run_id` null). An observability layer that can take the feed down is worse than none. A
+*throwing* sync still closes the row `'failed'` and rethrows.
+
+**Ownership.** No `SET ROLE`. Verified as `cmd_rollup_writer` end-to-end, not merely as `postgres`
+— the write path is fail-soft, so a privilege bug would have been swallowed to a console line and
+left the table permanently empty, which the health-check legend would then have misread. The MCP
+role cannot `set role cmd_rollup_writer`, so the verification was a real run through the writer
+connection: run row id 1, `status='ok'`, 4004 ms, 2/2 boards, 0 gaps.
+
+### `bed_capacity` had NEVER populated — a name-map mismatch (fixed, same day)
+
+`FACILITY_INFO_NAME_TO_CODE` is matched against `item.name.trim().toUpperCase()` on the **Facility
+Info** board, but carried only the **census-board** spellings `'NASHVILLE MH'` / `'LONESTAR MH'`.
+The Facility Info items are actually `Nashville Mental Health` and `Lonestar Mental Health`, so
+neither key ever matched: `fetchBedCapacity` returned an empty map, `capacity_mapped` was 0, and
+`capacity.get(code) ?? null` wrote `bed_capacity = NULL` for every facility on every run. The
+open-bed context had never once worked.
+
+Two conventions for the same facility are live in the same workspace, which is how this survived.
+Both spellings are now mapped. Measured after the fix: `capacity_mapped` 0 → **2**, unmapped
+23 → 21, `bed_capacity` NASH **8** / LSMH **12**.
+
+⚠ Open data question, not a code defect: NASH reports `admitted_count 17` against `bed_capacity 8`.
+LSMH is coherent (9 admitted, 12 beds, 3 open). Nashville's Facility Info "# of Beds" is either
+stale or scoped to a single unit. `open_beds` is computed from board status independently of
+capacity, so the two can disagree without either being wrong.
+
+### Observed while verifying, NOT part of this work — the census crons are degrading
+
+`collections.cmd_census_run` write coverage, distinct hours per day: 07-29 through 08-01 all **24**;
+08-02 **12**; 08-03 and 08-04 **5**; 08-05 **2**, and only **15** distinct customers — the BXR
+roster alone, with Indigo's 30 entirely absent. Last row before 10:00 UTC on 08-05 was 03:16. The
+47 → 45 customer drop on 08-02 is the documented INVALID CRITERIA removal and is expected; the
+24 → 2 collapse in distinct hours is not. Untouched here — CLAUDE.md scopes those crons to an
+explicitly-scoped session. Flagged for one.
