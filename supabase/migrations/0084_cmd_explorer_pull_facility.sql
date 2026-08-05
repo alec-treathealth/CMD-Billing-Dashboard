@@ -35,8 +35,12 @@
 --
 -- PHI DISCIPLINE: the value is a facility/office code from our own roster — non-PHI. No
 --   ciphertext, no blind index, no patient data.
--- OWNERSHIP: column on an existing claims_admin-owned table; ALTER runs via SET ROLE claims_admin
---   so ownership is unchanged.
+-- OWNERSHIP: postgres. ⚠ MEASURED 2026-08-05, not assumed — every live collections relation
+--   (cmd_explorer_rows, facilities, cmd_facility_aliases, the rollup, cmd_charge_int_facility) is
+--   `relowner = postgres`, matching 0083's header. An earlier cut of this file wrapped the ALTER in
+--   `SET ROLE claims_admin` per the generic rule in .claude/rules/sql-migrations.md; that rule
+--   describes the `claims` schema, and here it DOWNGRADES postgres to a non-owner and fails with
+--   42501 "must be owner of table cmd_explorer_rows". No SET ROLE in this plane.
 -- IDEMPOTENT: ADD COLUMN IF NOT EXISTS; COMMENT is CREATE OR REPLACE semantics by nature.
 -- DEPENDENCY: 0019 (the table). Nothing depends on this until 0086 (matview) and the Phase-2 code
 --   deploy that starts stamping it. Applying this column BEFORE the code deploys is safe (inserts
@@ -45,8 +49,7 @@
 -- Rollback: 0084_cmd_explorer_pull_facility_rollback.sql
 
 -- 1. Column ------------------------------------------------------------------
-set role claims_admin;
-
+-- No SET ROLE: apply_migration runs as postgres, which OWNS this table (see OWNERSHIP above).
 alter table collections.cmd_explorer_rows
   add column if not exists pull_facility_code text;
 
@@ -55,8 +58,6 @@ comment on column collections.cmd_explorer_rows.pull_facility_code is
   'Provenance, not report content: never in row_fingerprint, never restamped on re-pull. NULL on '
   'all seed-era rows and all cron rows written before the 0084-era code deploy. Read by the '
   '0086 cmd_facility_resolution ''named'' method.';
-
-reset role;
 
 -- 2. Verification (run manually after apply) ----------------------------------
 -- Column exists, is nullable text, and is all-NULL until the code deploy:

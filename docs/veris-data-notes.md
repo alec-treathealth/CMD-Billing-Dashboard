@@ -3802,3 +3802,39 @@ charge_date, cpt_key, revenue_key, facility_label, charge_amount)` — **not** t
 A `facility_label = 'No Facility'` CHECK keeps the workflow from ever forking a real facility's
 attribution. Writes go through a SECURITY DEFINER function with EXECUTE granted to `claims_reader`
 only (the 0047 `save_grid_view` precedent); no app role holds table DML.
+
+### 0084/0085/0086 APPLIED LIVE 2026-08-05 — and the ownership trap they hit
+
+Ledger `20260805074605` (0084) → `20260805074855` (0085) → `20260805074944` (0086), applied in
+that order via `apply_migration`. Post-apply invariants against the REAL matview, identical to the
+dry-run: I1 conservation 11,414 = 11,414, delta `0.00`, total `$29,081,575.38`; I2 duplicates 0,
+missing 0; I3 all four zero-checks 0; I4 member_inference 3,102 / `$7,472,871.90` · vob 1,704 /
+`$2,999,620.00` · tie_break 145 / `$655,235.26` · unresolved 6,463 / `$17,953,848.22`.
+`collections.refresh_facility_resolution()` executes cleanly.
+
+**⚠ THE TRAP, worth its own entry.** 0084 and 0085 were authored with
+`set role claims_admin; … reset role;`, following the generic instruction in
+`.claude/rules/sql-migrations.md` that migrations create objects "born owned" that way. **0084
+failed on first apply with `42501: must be owner of table cmd_explorer_rows`.**
+
+Measured cause: **every live relation in `collections` is `relowner = postgres`** —
+`cmd_explorer_rows`, `facilities`, `cmd_facility_aliases`, `cmd_explorer_charge_rollup`,
+`cmd_charge_int_facility`. `apply_migration` already runs as `postgres`, so `SET ROLE
+claims_admin` **downgrades** it from owner to non-owner. The rule's advice describes the `claims`
+schema; it is actively wrong for this plane. 0083's header had already recorded postgres ownership
+for the matview family — the mistake was not carrying that across to the table migrations.
+
+Two consequences, both now baked into the files:
+1. **No `SET ROLE` in a `collections` migration.** Both files and both rollbacks were corrected.
+2. **SECURITY DEFINER functions here must be postgres-owned.** A definer executes as its OWNER, so
+   `alter function … owner to claims_admin` would have left `save_facility_assignments` unable to
+   write the postgres-owned `facility_assignments` or read the postgres-owned rollup. Verified
+   live post-apply: `save_facility_assignments` owner `postgres`, `prosecdef = true`.
+
+**Deploy-order incident.** PR #107 merged to `main` instead of `staging`, putting the ingest code
+that names `pull_facility_code` into production before 0084 existed. Had it run, every hourly
+`cmd-explorer` / `indigo-explorer` pull would have thrown `42703` inside the per-customer catch
+(`cmdExplorerCron.ts:285`) — a **200 response** with `customers_failed = N` and zero inserts,
+freezing `cmd_explorer_rows` AND `daily_collections` silently, because the throw at `insertRows`
+also skips the `replaceCmdDailyForFacility` write below it. Resolved forward by applying 0084
+rather than reverting. The rule stands: **migrations first, merge second.**
