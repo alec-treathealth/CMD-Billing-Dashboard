@@ -11,7 +11,8 @@
  * PHI: none — see qualifyCensusSync.ts (column values only; census item names never fetched).
  */
 import { makeClient } from '../src/collections/db.js';
-import { runQualifyCensusSync, discoverWorkspaceBoards } from '../src/collections/qualifyCensusSync.js';
+import { discoverWorkspaceBoards } from '../src/collections/qualifyCensusSync.js';
+import { runQualifyCensusSyncLogged } from '../src/collections/qualifyCensusRun.js';
 import { MONDAY_CENSUS_BOARDS } from '../src/collections/qualifyCensus.js';
 
 const ADMISSIONS_WORKSPACE = '2613676'; // 'A. Admissions (Main)' — verified 2026-08-03
@@ -33,7 +34,9 @@ async function main(): Promise<void> {
   const pool = makeClient(url);
   const client = await pool.connect();
   try {
-    const stats = await runQualifyCensusSync(client);
+    // Logged like the cron (0087), tagged 'manual' so an operator's ad-hoc run is distinguishable
+    // from a scheduled one in collections.qualify_census_run.
+    const stats = await runQualifyCensusSyncLogged({ client, triggeredBy: 'manual' });
     console.log(JSON.stringify(stats, null, 2));
     if (stats.conformance.some((c) => c.missing.length > 0)) {
       console.log('\nconformance gaps (board lacks expected columns):');
