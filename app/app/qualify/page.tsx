@@ -16,8 +16,7 @@ import { QualifyMaintenanceNotice } from '@/components/qualify/qualify-maintenan
 import { qualifyMaintenanceBlocks } from '@/lib/qualify/maintenance';
 import { qualifyV3FlowEnabled } from '@/lib/qualify/v3Flags';
 import { QualifyTab } from '@/components/qualify/qualify-tab';
-import { ResolutionFlow } from '@/components/qualify/v3/resolution-flow';
-import { resolveCoverage, trailingWindowFor } from '@/lib/qualify/resolutionService';
+import { ResolutionFlowClient } from '@/components/qualify/v3/resolution-flow-client';
 
 export const metadata: Metadata = { title: 'Qualify | CMD Billing' };
 
@@ -27,13 +26,7 @@ export const metadata: Metadata = { title: 'Qualify | CMD Billing' };
 // /code-reference's rationale.)
 export const dynamic = 'force-dynamic';
 
-export default async function QualifyPage({
-  searchParams,
-}: {
-  // Next 15: searchParams is a PROMISE. Awaited below, inside the v3 branch only, so the v2 path
-  // does nothing new and cannot be slowed or changed by this addition.
-  searchParams?: Promise<Record<string, string | string[] | undefined>>;
-}) {
+export default async function QualifyPage() {
   const access = await dashboardAccess();
   if (!access.ok) {
     if (access.reason === 'unauthenticated') redirect('/login');
@@ -56,29 +49,14 @@ export default async function QualifyPage({
   // Mounted only when QUALIFY_V3_FLOW is on, and it REPLACES nothing when off — v2 below is
   // untouched, including its urlState behaviour, which is grandfathered on prod and out of scope.
   //
-  // The term is read from searchParams because S0 submits a plain GET form, so the whole S0->S2 path
-  // works with JavaScript disabled and the keyboard path is the DOM order. It is a member-ID PREFIX
-  // or a full member ID — PHI — so it is used to resolve and then dropped: `handle.echo` (prefix-safe,
-  // '' for a full id) is the only thing rendered back, and nothing here writes it anywhere else.
-  // canRevealPhi gates the lookup exactly as v2 does; without it the flow renders its empty state.
+  // NOTE WHAT IS *NOT* HERE: no searchParams. The v3 flow submits through a Server Action, so the
+  // typed identifier travels in a POST body and never enters the query string. An earlier version of
+  // this page read `searchParams.term`, which would have put a full member ID in browser history, the
+  // Referer header and edge logs — PHI in a URL. Do not reintroduce a searchParams read here.
+  // Authorization is re-checked inside the action by requireQualifyPrincipal; this page gate is the
+  // routing mirror, not the control.
   if (qualifyV3FlowEnabled()) {
-    const sp = (await searchParams) ?? {};
-    const raw = typeof sp.term === 'string' ? sp.term : '';
-    const term = access.access.canRevealPhi ? raw : '';
-    const today = new Date().toISOString().slice(0, 10);
-    const days = Number(typeof sp.windowDays === 'string' ? sp.windowDays : '30');
-    const window = trailingWindowFor(today, Number.isInteger(days) && days > 0 && days <= 3650 ? days : 30);
-    const chosenRaw = typeof sp.candidate === 'string' ? Number(sp.candidate) : Number.NaN;
-    const { resolution, reason } = await resolveCoverage({
-      term,
-      from: window.from,
-      to: window.to,
-      today,
-      ...(Number.isInteger(chosenRaw) && chosenRaw >= 0 ? { chosenIndex: chosenRaw } : {}),
-    });
-    return (
-      <ResolutionFlow resolution={resolution} reason={reason} echo={resolution?.handle.echo ?? ''} />
-    );
+    return <ResolutionFlowClient />;
   }
 
   return (

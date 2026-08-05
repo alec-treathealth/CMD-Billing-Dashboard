@@ -107,8 +107,18 @@ function fixture(over: Partial<QualifyResolution> = {}): QualifyResolution {
   return { ...base, notices: over.notices ?? deriveNotices(base.group, base.candidates, '2026-08-05') };
 }
 
-const render = (r: QualifyResolution | null, reason: 'empty' | 'prefix_too_short' | 'no_match' | null = null) =>
-  renderToStaticMarkup(<ResolutionFlow resolution={r} reason={reason} echo={r?.handle.echo ?? ''} />);
+/** A no-op stand-in for the Server Action. The flow must never depend on WHERE it submits, only that
+ *  it submits via an action rather than a URL. */
+const noopAction = (_form: FormData): void => {};
+
+const render = (
+  r: QualifyResolution | null,
+  reason: 'empty' | 'prefix_too_short' | 'no_match' | null = null,
+  denied: string | null = null,
+) =>
+  renderToStaticMarkup(
+    <ResolutionFlow resolution={r} reason={reason} echo={r?.handle.echo ?? ''} action={noopAction} denied={denied} />,
+  );
 
 // ── Landmark + heading structure ─────────────────────────────────────────────────────────────────
 
@@ -216,7 +226,7 @@ test('I9: one control per target — a candidate row has exactly one focusable e
 
 // ── Keyboard path = DOM order, and works without JS ─────────────────────────────────────────────
 
-test('I9: the S0→S2 path is plain forms and inputs — no JS required, tab order is visual order', () => {
+test('I9: the S0→S2 path is native forms and controls — tab order is visual order', () => {
   const html = render(fixture());
   // Every step's control is a native form element, so the keyboard path is the DOM order by default
   // rather than something a tabindex has to reconstruct.
@@ -224,6 +234,30 @@ test('I9: the S0→S2 path is plain forms and inputs — no JS required, tab ord
   assert.equal((html.match(/<form/g) ?? []).length, 3, 'S0, S1 and S2 each submit natively');
   assert.match(html, /<input id="qualify-term"/, 'S0 is a real text input');
   assert.match(html, /<label htmlFor|<label for="qualify-term"/, 'and it is labelled');
+});
+
+test('PHI: no form GETs — the typed identifier must never reach a query string', () => {
+  // THE REGRESSION THIS PINS. The first version of the flow submitted
+  // `<form method="GET" action="/qualify">` with `name="term"`, which puts the typed identifier in the
+  // URL: browser history, the Referer header, edge logs. For a full member ID that is PHI in a URL —
+  // a standing-rule violation and exactly what §S0 forbids. Caught by this run's own Phase-F grep,
+  // not by review, which is why it gets a test.
+  const html = render(fixture());
+  assert.ok(!/method="get"/i.test(html), 'no GET form may exist in this flow');
+  assert.ok(!/<form[^>]*action="\/qualify"/.test(html), 'no form may target a URL — they submit via the action');
+  // And no form declares a URL action at all: React renders a Server Action as method="POST".
+  const formTags = html.match(/<form[^>]*>/g) ?? [];
+  assert.equal(formTags.length, 3);
+  for (const tag of formTags) {
+    assert.ok(!/action="[^"]*\?/.test(tag), `a form action carries a query string: ${tag}`);
+  }
+});
+
+test('a gate denial is its own state, not an empty result', () => {
+  const html = render(null, null, 'Your role does not have access to Qualify.');
+  assert.match(html, /Your role does not have access to Qualify\./);
+  // It must NOT also read as "nothing found", which is a claim about the data rather than about access.
+  assert.ok(!html.includes(UNRESOLVABLE_COPY.no_match), 'a denial is not a no-match');
 });
 
 test('I9: the S0 input is labelled and described, not placeholder-only', () => {

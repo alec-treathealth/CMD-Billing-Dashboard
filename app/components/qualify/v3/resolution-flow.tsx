@@ -22,13 +22,21 @@
  *     disclosure, giving one action two tab stops.
  *
  * ── RENDERING MODEL ─────────────────────────────────────────────────────────────────────────────
- * A SERVER component, deliberately. It receives a `QualifyResolution` and renders it; it holds no
- * state, fetches nothing, and imports no query builder (I1). Step advancement is expressed as plain
- * links/forms so the whole S0→S2 path works without JavaScript and the keyboard path is the DOM order.
+ * PRESENTATIONAL and server-renderable: it receives a `QualifyResolution` plus a form `action`, holds
+ * no state, fetches nothing, and imports no query builder (I1). Every step is a native <form> with
+ * native controls, so the keyboard path is the DOM order rather than something a tabindex has to
+ * reconstruct.
  *
- * PHI: the only user-derived string rendered is `resolution.handle.echo`, which is prefix-only by
- * construction (a full member id echoes as ''). Nothing here reaches a URL — `employerLabel` is
- * display-only and `employerKey` is opaque and positional.
+ * ⚠ THE FORMS POST, THEY DO NOT GET — and that is a correctness requirement, not a style choice. An
+ * earlier version of this file used `method="GET" action="/qualify"` with `name="term"`, which puts
+ * the typed identifier in the QUERY STRING: browser history, the `Referer` header, edge logs. For a
+ * full member ID that is PHI in a URL, violating the standing rule and §S0's explicit requirement
+ * that the term never reach the URL. The Server Action posts it in the body instead. Do not "simplify"
+ * these back to GET.
+ *
+ * PHI: the only user-derived string rendered is `resolution.handle.echo`, prefix-only by construction
+ * (a full member id echoes as ''), so not even the DOM round-trips an id. `employerLabel` is
+ * display-only; `employerKey` is opaque and positional.
  */
 import type { CoverageGroupSummary, PanelId, QualifyResolution } from '../../../lib/qualify/resolution';
 
@@ -143,9 +151,16 @@ export interface ResolutionFlowProps {
   reason: 'empty' | 'prefix_too_short' | 'no_match' | null;
   /** The term currently in the box. Prefix-safe: callers pass `handle.echo`, never a full member id. */
   echo: string;
+  /**
+   * The Server Action every step submits to. Required — there is no URL fallback ON PURPOSE, because a
+   * fallback would be a GET and would put the term back in the query string.
+   */
+  action: (formData: FormData) => void | Promise<void>;
+  /** A gate denial, stated rather than rendered as an empty result. */
+  denied?: string | null;
 }
 
-export function ResolutionFlow({ resolution, reason, echo }: ResolutionFlowProps): React.ReactElement {
+export function ResolutionFlow({ resolution, reason, echo, action, denied }: ResolutionFlowProps): React.ReactElement {
   const step1Complete = resolution !== null;
   const step2Complete = resolution !== null && !resolution.candidates.wasAmbiguous;
   const step3Complete = resolution?.window.frozen ?? false;
@@ -179,7 +194,7 @@ export function ResolutionFlow({ resolution, reason, echo }: ResolutionFlowProps
 
       {/* ── S0 ─────────────────────────────────────────────────────────────────────────────────── */}
       <Step id="qualify-s0" n={1} title="Who are we looking at?" complete={step1Complete}>
-        <form method="GET" action="/qualify" className="flex flex-col gap-2">
+        <form action={action} className="flex flex-col gap-2">
           <label htmlFor="qualify-term" className="text-sm font-medium text-ink900">
             Member ID prefix, full member ID, or facility name
           </label>
@@ -202,6 +217,13 @@ export function ResolutionFlow({ resolution, reason, echo }: ResolutionFlowProps
           </button>
         </form>
       </Step>
+
+      {/* A gate denial is its own state — never an empty result, which would read as "nothing found". */}
+      {denied ? (
+        <p role="status" className="rounded-md border border-line bg-teal50 p-4 text-sm text-ink900">
+          {denied}
+        </p>
+      ) : null}
 
       {/* ── The three distinct not-resolved states ─────────────────────────────────────────────── */}
       {!resolution && reason ? (
@@ -227,7 +249,7 @@ export function ResolutionFlow({ resolution, reason, echo }: ResolutionFlowProps
                 Only one plan matched what you typed, so it was selected for you.
               </p>
             )}
-            <form method="GET" action="/qualify">
+            <form action={action}>
               <input type="hidden" name="term" value={echo} />
               <ul className="flex list-none flex-col gap-2 p-0">
                 <CandidateRow
@@ -297,7 +319,7 @@ export function ResolutionFlow({ resolution, reason, echo }: ResolutionFlowProps
             {resolution.window.ladder ? (
               <>
                 <p className="mb-3 text-sm text-ink900">{resolution.window.ladder.rationale}</p>
-                <form method="GET" action="/qualify">
+                <form action={action}>
                   <input type="hidden" name="term" value={echo} />
                   <fieldset className="border-0 p-0">
                     <legend className="mb-2 text-sm font-medium text-ink900">Window</legend>
