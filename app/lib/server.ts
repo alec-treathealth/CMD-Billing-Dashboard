@@ -104,6 +104,40 @@ export {
   resolveCmdExplorerCursor,
   buildCmdSearchSummaryQueries,
 } from '../../src/collections/cmdExplorerQuery.js';
+import {
+  buildResolutionOverviewQuery,
+  buildResolutionQueueQuery,
+  buildMemberUnresolvedKeysQuery,
+  buildResolutionFacilityOptionsQuery,
+  parseResolutionSearch,
+  resolveResolutionSort,
+  resolveResolutionCursor,
+  memberDisplayToken,
+  RESOLUTION_PAGE_SIZE,
+  RESOLUTION_METHODS,
+  type ResolutionRow,
+  type ResolutionOverviewRow,
+  type ResolutionChargeKey,
+  type ResolutionChip,
+  type ResolutionSort,
+  type ResolutionCursor,
+} from '../../src/collections/facilityResolutionQuery.js';
+export {
+  parseResolutionSearch,
+  resolveResolutionSort,
+  resolveResolutionCursor,
+  memberDisplayToken,
+  RESOLUTION_PAGE_SIZE,
+  RESOLUTION_METHODS,
+};
+export type {
+  ResolutionRow,
+  ResolutionOverviewRow,
+  ResolutionChargeKey,
+  ResolutionChip,
+  ResolutionSort,
+  ResolutionCursor,
+};
 export type {
   CmdExplorerFilter,
   CmdExplorerSearchColumn,
@@ -711,7 +745,27 @@ export function handleCmdPayerRefresh(req: CmdPayerRefreshHttpRequest) {
 export function handleRefreshChargeRollup(req: RefreshChargeRollupHttpRequest) {
   return handleRefreshChargeRollupRequest(req, {
     secret: process.env.CRON_SECRET,
-    refresh: () => refreshChargeRollup({ db: rollupWriterDb(), triggeredBy: 'cron' }),
+    refresh: async () => {
+      const stats = await refreshChargeRollup({ db: rollupWriterDb(), triggeredBy: 'cron' });
+      // 0086: the facility-resolution matview joins the hourly cadence HERE — after the rollup it
+      // derives from, as its OWN statements, and deliberately NOT inside
+      // collections.refresh_cmd_explorer_charge_rollup() (that function's statements share one
+      // transaction, so a failure there would roll back the production rollup refresh — the
+      // transaction-coupling entry in veris-data-notes.md). BEST-EFFORT: a resolution-refresh
+      // failure must not fail the rollup run (the write path also refreshes after every
+      // assignment, and the run row above already closed ok=true). Non-fatal + loudly logged;
+      // also tolerated before 0086 is applied (the function simply doesn't exist yet).
+      try {
+        await rollupWriterDb().query('select collections.refresh_facility_resolution()');
+        await rollupWriterDb().query('vacuum (analyze) collections.cmd_facility_resolution');
+      } catch (err) {
+        console.error(
+          'refresh-charge-rollup: facility-resolution refresh failed (rollup refresh unaffected):',
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      return stats;
+    },
   });
 }
 
@@ -3091,4 +3145,134 @@ export async function loadQualifyPatientCohort(
     byPayer: payer.rows.map((g) => ({ label: g.label, count: g.count, charge: g.charge })),
     byCpt: cpt.rows.map((g) => ({ label: g.label, count: g.count, charge: g.charge })),
   };
+}
+
+// --- Facility Resolution (0084-0086) -----------------------------------------------
+// The attribution engine's UI surface: overview + queue read the 0086 matview as claims_reader;
+// manual assignments write through the 0085 SECURITY-DEFINER function (the 0047 grid-view
+// precedent — claims_reader holds EXECUTE, never table DML); every write is followed by the 0086
+// refresh function so the page the operator lands back on already reflects the assignment.
+// TENANCY: the matview carries no RLS — every query here binds entityIds derived server-side.
+// PHI: member_id_bidx only (HMAC token); no identifier, no name, ever. Notes are never logged.
+
+/** Cache tag for the overview rollup; busted after every assignment write. */
+const FACILITY_RESOLUTION_TAG = 'facility-resolution';
+
+/** Per-method overview (charge grain), cached 15 min per entity scope. */
+export const loadFacilityResolutionOverview = unstable_cache(
+  async (entityIds: string[]): Promise<ResolutionOverviewRow[]> => {
+    const { sql, params } = buildResolutionOverviewQuery(entityIds);
+    const { rows } = await readerExecutor().query<ResolutionOverviewRow>(sql, params);
+    return rows;
+  },
+  ['facility-resolution-overview'],
+  { revalidate: 900, tags: [FACILITY_RESOLUTION_TAG] },
+);
+
+/** One queue page (keyset). Deliberately UNCACHED: the queue must reflect an assignment the
+ *  moment the operator returns to it, and the (chips, sort, cursor) key space is unbounded. */
+export interface ResolutionQueuePage {
+  rows: ResolutionRow[];
+  nextCursor: ResolutionCursor | null;
+}
+
+/** pg returns int8 as text; narrow id/assignment_id to numbers for the wire shape. */
+interface ResolutionDbRecord extends Omit<ResolutionRow, 'id' | 'assignment_id'> {
+  id: string;
+  assignment_id: string | null;
+}
+
+export async function loadFacilityResolutionQueue(
+  applied: readonly ResolutionChip[],
+  sort: ResolutionSort | undefined,
+  cursor: ResolutionCursor | null,
+  entityIds: string[],
+): Promise<ResolutionQueuePage> {
+  const { sql, params } = buildResolutionQueueQuery(applied, sort, cursor, entityIds);
+  const { rows } = await readerExecutor().query<ResolutionDbRecord>(sql, params);
+  const hasMore = rows.length > RESOLUTION_PAGE_SIZE;
+  const page = (hasMore ? rows.slice(0, RESOLUTION_PAGE_SIZE) : rows).map((r) => ({
+    ...r,
+    id: Number(r.id),
+    assignment_id: r.assignment_id === null ? null : Number(r.assignment_id),
+  }));
+  const s = resolveResolutionSort(sort);
+  const last = page[page.length - 1];
+  const nextCursor: ResolutionCursor | null =
+    hasMore && last ? { id: last.id, value: last[s.column] } : null;
+  return { rows: page, nextCursor };
+}
+
+/** The assignment picker's canonical facility list: the ENTITY'S OWN roster only (the 0086
+ *  cross-book guard, applied to humans too — a BXR charge must never be assigned to an Indigo
+ *  office). Codes come from the checked-in roster (cmdCustomers.ts), names from
+ *  collections.facilities. Cached 15 min per scope. */
+export const loadResolutionFacilityOptions = unstable_cache(
+  async (entityIds: string[]): Promise<Array<{ facility_code: string; facility_name: string }>> => {
+    const roster = [...CMD_EXPLORER_CUSTOMERS, ...INDIGO_CUSTOMERS]
+      .filter((c) => c.businessEntityId !== undefined && entityIds.includes(c.businessEntityId))
+      .map((c) => c.facilityCode);
+    const codes = [...new Set(roster)];
+    if (codes.length === 0) return [];
+    const { sql, params } = buildResolutionFacilityOptionsQuery(codes);
+    const { rows } = await readerExecutor().query<{ facility_code: string; facility_name: string }>(
+      sql,
+      params,
+    );
+    return rows;
+  },
+  ['facility-resolution-facility-options'],
+  { revalidate: 900, tags: [FACILITY_RESOLUTION_TAG] },
+);
+
+/** Bulk-by-member expansion: every UNRESOLVED charge key for the given members. Fails loud past
+ *  the 0085 save bound (500 keys) rather than truncating a member's charges. */
+export async function expandMemberUnresolvedKeys(
+  entityIds: string[],
+  memberBidxes: string[],
+): Promise<ResolutionChargeKey[]> {
+  const { sql, params } = buildMemberUnresolvedKeysQuery(entityIds, memberBidxes);
+  const { rows } = await readerExecutor().query<ResolutionChargeKey>(sql, params);
+  if (rows.length > 500) {
+    throw new Error('expandMemberUnresolvedKeys: selection exceeds the 500-charge assignment bound');
+  }
+  return rows;
+}
+
+/** Write manual assignments (0085 definer function) and refresh the resolution matview (0086)
+ *  so the caller's next read is already consistent. Returns the number written. The refresh is
+ *  its own statement (REFRESH CONCURRENTLY cannot share a transaction) and its failure is
+ *  surfaced — an assignment the queue doesn't reflect would look like a lost write. */
+export async function saveFacilityAssignmentsAndRefresh(input: {
+  userId: string;
+  email: string;
+  facilityCode: string;
+  note: string;
+  charges: ResolutionChargeKey[];
+}): Promise<number> {
+  const exec = readerExecutor();
+  const res = await exec.query<{ save_facility_assignments: number }>(
+    'select collections.save_facility_assignments($1, $2, $3, $4, $5::jsonb) as save_facility_assignments',
+    [
+      input.userId,
+      input.email,
+      input.facilityCode,
+      input.note,
+      JSON.stringify(
+        input.charges.map((c) => ({
+          business_entity_id: c.business_entity_id,
+          member_id_bidx: c.member_id_bidx,
+          charge_date: c.charge_date,
+          cpt_key: c.cpt_key,
+          revenue_key: c.revenue_key,
+          facility_label: 'No Facility',
+          charge_amount: c.charge_amount,
+        })),
+      ),
+    ],
+  );
+  const written = Number(res.rows[0]?.save_facility_assignments ?? 0);
+  await exec.query('select collections.refresh_facility_resolution()', []);
+  revalidateTag(FACILITY_RESOLUTION_TAG);
+  return written;
 }
