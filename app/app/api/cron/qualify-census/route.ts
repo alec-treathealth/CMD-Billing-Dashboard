@@ -19,7 +19,7 @@
  * and writes facility-grain counts/averages/dates. Response is non-PHI stats.
  */
 import { makeClient } from '../../../../../src/collections/db';
-import { runQualifyCensusSync } from '../../../../../src/collections/qualifyCensusSync';
+import { runQualifyCensusSyncLogged } from '../../../../../src/collections/qualifyCensusRun';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -43,7 +43,10 @@ export async function GET(req: Request): Promise<Response> {
   }
   const client = await writerPool().connect();
   try {
-    const stats = await runQualifyCensusSync(client);
+    // Wrapped for the 0087 run-log: this route returns 200 even when every board fails, so a
+    // durable row is the only way to tell "the cron failed" from "the board was never curated"
+    // after the fact. Fail-soft — an unapplied 0087 logs to the console and the sync still runs.
+    const stats = await runQualifyCensusSyncLogged({ client, triggeredBy: 'cron' });
     return Response.json({ ok: true, ...stats }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (err) {
     console.error(`qualify-census cron failed (${err instanceof Error ? err.message : 'error'})`);
