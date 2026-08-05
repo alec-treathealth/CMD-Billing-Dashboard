@@ -111,6 +111,9 @@ const INSERT_COLS = [
   // Feed-1 dimension columns (②a, migration 0057) — non-PHI, appended LAST. buildInsertParams
   // pushes their values in this exact order. NOT encrypted, NOT in the fingerprint.
   'charge_id', 'charge_entered_date', 'charge_to_date', 'claim_status_raw', 'claim_status_category',
+  // Pull provenance (0084) — non-PHI roster facilityCode, appended after ②a. NOT in the
+  // fingerprint (see PlainRow.pull_facility_code); NULL from the seed/adapter paths.
+  'pull_facility_code',
 ] as const;
 
 const BATCH = 500;
@@ -141,6 +144,14 @@ export interface PlainRow {
   claim_status_category: string | null; // derived: normalizeStatus(claim_status_raw).category
   source_file: string;
   row_fingerprint: string;
+  /** Roster facilityCode of the CMD customer pull this row came from (0084) — PROVENANCE, not
+   *  report content. Optional: only the live cron knows it (cmdExplorerCron stamps it after
+   *  mapRow); the seed CLI and the Indigo one-time adapter leave it unset (their sources carry no
+   *  per-customer provenance — 'Derek Automation.csv' was one combined export). NOT part of the
+   *  LOCKED row_fingerprint, same ruling as business_entity_id (0028): the dedup key must not
+   *  change because a different account returned identical content. ON CONFLICT DO NOTHING means
+   *  the FIRST writer's provenance sticks — first-seen semantics, like ingested_at. */
+  pull_facility_code?: string | null;
 }
 
 type MapResult = { ok: true; row: PlainRow } | { ok: false; label: string };
@@ -381,6 +392,8 @@ async function buildInsertParams(row: PlainRow, businessEntityId: string): Promi
     bidx.member_id_bidx, bidx.member_id_prefix_bidx, bidx.group_number_bidx, nameBidx,
     // Feed-1 dimension columns (②a) — non-PHI plaintext, positional order matches INSERT_COLS.
     row.charge_id, row.charge_entered_date, row.charge_to_date, row.claim_status_raw, row.claim_status_category,
+    // Pull provenance (0084) — null when the source carries none (seed CSV, Indigo adapter).
+    row.pull_facility_code ?? null,
   ];
 }
 
