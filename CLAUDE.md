@@ -154,7 +154,7 @@ Two **separate** migration planes — never mix the directories:
 
 | Plane | Directory | Next number (as of 2026-08-05) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0087** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0088** |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **029** |
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
@@ -162,7 +162,9 @@ Two **separate** migration planes — never mix the directories:
 via autocommit `execute_sql` statements, not `apply_migration` (see its
 header). **0083 is applied live** (2026-08-05 04:19:16 UTC, ledger
 20260805041916). **0084/0085/0086 (Facility Resolution) are APPLIED LIVE
-2026-08-05** — ledger 20260805074605 / 074855 / 074944, in that order. Veris
+2026-08-05** — ledger 20260805074605 / 074855 / 074944, in that order. **0087
+(qualify-census run-log) is APPLIED LIVE 2026-08-05** — verified as the writer
+role, not just as `postgres`. Veris
 **027 and 028 are applied live** (ledger 20260805065025 / 20260805060000, another
 session), which is why the next Veris number is 029. Never edit 023, 024, or 025
 in place — all three are applied live. Before authoring, re-derive the next number
