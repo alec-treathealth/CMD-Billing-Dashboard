@@ -278,9 +278,21 @@ export function QualifyTab({
    *
    *  NOTE the name: `expandedFacilities` was already taken by the ranking's accordion state, which is
    *  an unrelated ReadonlySet of open cards. */
+  const facilityCanonicalByVariant = useMemo(() => {
+    const reverse = new Map<string, string>();
+    for (const [canonical, variants] of Object.entries(facilityVariants)) {
+      for (const variant of variants) reverse.set(variant, canonical);
+    }
+    return reverse;
+  }, [facilityVariants]);
   const facilityFilterValues = useMemo(
     () => facilitySelection.flatMap((v) => facilityVariants[v] ?? [v]),
     [facilitySelection, facilityVariants],
+  );
+
+  const canonicalFacilityValue = useCallback(
+    (value: string) => facilityCanonicalByVariant.get(value) ?? value,
+    [facilityCanonicalByVariant],
   );
 
   // ── DERIVED: the compose filter + whether any restriction is active (client mirror of composeHasAny) ─
@@ -684,18 +696,19 @@ export function QualifyTab({
     if (!t.dominantPayer) return;
     userDrivenRef.current = true; // Step 2: a ticker-card click is a user interaction
     setTickerPinned(true);
-    setFacilitySelection([t.facilityKey]);
+    const canonicalFacility = canonicalFacilityValue(t.facilityKey);
+    setFacilitySelection([canonicalFacility]);
     setPayerSelection([t.dominantPayer]);
     // Mark exactly these two as ticker-DERIVED so their chips read dashed + ↳ (a hand-picked chip stays
     // solid). Namespaces don't collide, so one set feeds both the facility and payer pickers.
-    setDerivedValues(new Set([t.facilityKey, t.dominantPayer]));
+    setDerivedValues(new Set([canonicalFacility, t.dominantPayer]));
     setEmployerSelection([]);
     setFundingSelection([]);
     setMemberId('');
     setAlphaPrefix('');
     setGroupNumber('');
     setClientName('');
-  }, []);
+  }, [canonicalFacilityValue]);
 
   // ── Picker plumbing ───────────────────────────────────────────────────────────────────────────────
   const toggleIn = (setter: React.Dispatch<React.SetStateAction<string[]>>) => (value: string) => {
