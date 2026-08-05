@@ -37,8 +37,10 @@
 --   "Current" everywhere means superseded_at IS NULL.
 --
 -- WRITE PATH: collections.save_facility_assignments() below — SECURITY DEFINER owned by
---   claims_admin, EXECUTE granted to claims_reader ONLY (the 0047 claims.save_grid_view
---   precedent). The app-side Server Action performs the role gate (admin/super_admin) BEFORE
+--   POSTGRES (see OWNERSHIP; a definer runs as its owner, and only postgres owns the objects it
+--   touches), EXECUTE granted to claims_reader ONLY (the 0047 claims.save_grid_view grant
+--   precedent — that function is claims_admin-owned because the `claims` schema is; this one is
+--   not). The app-side Server Action performs the role gate (admin/super_admin) BEFORE
 --   calling; the function enforces shape, bounds, vocabulary (facility_code must exist in
 --   collections.facilities) and that every charge key matches a real rollup charge. Direct
 --   INSERT/UPDATE/DELETE on the table are granted to NO app role.
@@ -169,7 +171,7 @@ create trigger facility_assignments_guard
 -- Reads are app-scoped (the cmd_explorer_rows posture: permissive SELECT for claims_reader; the
 -- app filters business_entity_id explicitly through entityScope). Writes have NO policy and NO
 -- grant for any app role — the only write path is the definer function below, which runs as the
--- table owner (claims_admin), and table owners are not subject to their own RLS absent FORCE.
+-- table owner (postgres), and table owners are not subject to their own RLS absent FORCE.
 alter table collections.facility_assignments enable row level security;
 
 drop policy if exists facility_assignments_reader_select on collections.facility_assignments;
