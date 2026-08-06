@@ -492,6 +492,11 @@ export interface QualifyFacility {
   nextUrDate: string | null;
   /** Open-bed count from the census (items named "Open Bed…"). Display context only. */
   openBeds: number | null;
+  /** Licensed bed count — the DENOMINATOR for openBeds, so the card can show occupancy instead of a
+   *  context-free free-bed count. Null for outpatient facilities (no beds, correctly absent) and for
+   *  residential facilities not yet in the curated map. A count, never a dollar: identical for an
+   *  admissions_seat session. */
+  bedCapacity: number | null;
   /** The five-factor rating (0-100 over available weights) — the v2 SORT KEY and numeral. Null =
    *  suppressed (sample floor / no money evidence) → the honest-restraint card. */
   ratingV2: number | null;

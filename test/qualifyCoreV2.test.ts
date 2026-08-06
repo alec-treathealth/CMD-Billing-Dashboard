@@ -495,3 +495,97 @@ test('override cannot survive a spread outage — no evidence means no authoriza
   assert.equal(snap.resolved?.payerName, 'AETNA');
   assert.equal(snap.payerOverridden, false);
 });
+
+// ── COMPLETED-STAY auth/LOS (0091). The census snapshot measures clients still admitted, so its LOS
+// is today-minus-admit and the overrun penalty could never fire: measured 2026-08-06 all twelve
+// residential facilities read 0.69-0.96. On completed stays four are at or over 1.0. These pin that
+// the better measurement wins, that it is DISCLOSED, and that losing it degrades rather than breaks.
+
+const OUTCOME = {
+  facility_code: '10026460',
+  stays_sample: 142,
+  auth_sample: 102,
+  avg_los_days: 40.1,
+  avg_auth_days: 36.35,
+  window_days: 365,
+};
+
+function authFitOf(snap: Awaited<ReturnType<typeof getQualifySnapshotCore>>) {
+  return snap.facilities[0]!.factors.find((f) => f.key === 'authFit')!;
+}
+
+test('completed stays OUTRANK the in-progress snapshot, and the overrun now actually scores', async () => {
+  const deps = v2deps(SUPER, {
+    // The snapshot would say 20d vs 30d authorized — comfortably within, score 1, no penalty.
+    loadCensusAuth: async () => [
+      { facility_code: '10026460', board_family: 'residential', avg_auth_days: 30, avg_los_days: 20,
+        auth_sample: 9, los_sample: 9, next_ur_date: null, open_beds: null, bed_capacity: null },
+    ],
+    loadFacilityOutcomes: async () => [OUTCOME],
+  });
+  const f = authFitOf(await getQualifySnapshotCore(deps, AUTO_IN));
+  assert.equal(f.available, true);
+  assert.ok(f.detail.includes('40.1d') && f.detail.includes('36.4d'), 'the COMPLETED averages are shown');
+  assert.ok(!f.detail.includes('20d'), 'the in-progress numbers are not');
+  assert.ok(f.score !== null && f.score < 1, 'and an overrun finally costs something');
+  // Two facilities scored on different measurements are not comparable — say which one this is.
+  assert.ok(f.detail.includes('Completed stays'), 'the basis is disclosed');
+  assert.ok(f.detail.includes('365'), 'along with the window it was measured over');
+});
+
+test('with NO outcomes row the snapshot is used, and the card admits stays are still running', async () => {
+  const deps = v2deps(SUPER, {
+    loadCensusAuth: async () => [
+      { facility_code: '10026460', board_family: 'residential', avg_auth_days: 30, avg_los_days: 20,
+        auth_sample: 9, los_sample: 9, next_ur_date: null, open_beds: null, bed_capacity: null },
+    ],
+    loadFacilityOutcomes: async () => [],
+  });
+  const f = authFitOf(await getQualifySnapshotCore(deps, AUTO_IN));
+  assert.equal(f.available, true);
+  assert.ok(f.detail.includes('20d') && f.detail.includes('30d'), 'the snapshot numbers');
+  assert.ok(f.detail.includes('currently admitted'), 'and the caveat that they read low');
+});
+
+test('a THIN outcomes row does not displace the snapshot — better measurement, not fewer clients', async () => {
+  const deps = v2deps(SUPER, {
+    loadCensusAuth: async () => [
+      { facility_code: '10026460', board_family: 'residential', avg_auth_days: 30, avg_los_days: 20,
+        auth_sample: 9, los_sample: 9, next_ur_date: null, open_beds: null, bed_capacity: null },
+    ],
+    // 2 completed stays: below QUALIFY_AUTH_FIT_MIN_SAMPLE. Swapping a 9-client snapshot for a
+    // 2-stay average would trade one bias for a worse one.
+    loadFacilityOutcomes: async () => [{ ...OUTCOME, stays_sample: 2, auth_sample: 2 }],
+  });
+  const f = authFitOf(await getQualifySnapshotCore(deps, AUTO_IN));
+  assert.ok(f.detail.includes('20d'), 'the snapshot still scores it');
+  assert.ok(!f.detail.includes('Completed stays'));
+});
+
+test('an outcomes outage degrades to the snapshot — never a dead ranking', async () => {
+  const deps = v2deps(SUPER, {
+    loadCensusAuth: async () => [
+      { facility_code: '10026460', board_family: 'residential', avg_auth_days: 30, avg_los_days: 20,
+        auth_sample: 9, los_sample: 9, next_ur_date: null, open_beds: null, bed_capacity: null },
+    ],
+    loadFacilityOutcomes: async () => {
+      throw new Error('boom');
+    },
+  });
+  const snap = await getQualifySnapshotCore(deps, AUTO_IN);
+  assert.equal(snap.facilities.length, 1, 'the ranking survives');
+  assert.equal(authFitOf(snap).available, true, 'and auth-fit falls back rather than vanishing');
+});
+
+test('outpatient suppression still wins over an outcomes row — the ruling is not bypassed', async () => {
+  const deps = v2deps(SUPER, {
+    loadCensusAuth: async () => [
+      { facility_code: '10026460', board_family: 'outpatient', avg_auth_days: 30, avg_los_days: 20,
+        auth_sample: 9, los_sample: 9, next_ur_date: null, open_beds: null, bed_capacity: null },
+    ],
+    loadFacilityOutcomes: async () => [OUTCOME],
+  });
+  const f = authFitOf(await getQualifySnapshotCore(deps, AUTO_IN));
+  assert.equal(f.available, false, 'outpatient is not scored on auth/LOS regardless of source');
+  assert.ok(f.detail.includes('Not scored for outpatient'));
+});

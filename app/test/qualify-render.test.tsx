@@ -938,3 +938,47 @@ test('PayerRail — carries NO dollars, so a blind seat and a sighted session se
   );
   assert.ok(!html.includes('$'), 'zero dollar signs — this renders identically for admissions_seat');
 });
+
+// ── BED OCCUPANCY (2026-08-06). bed_capacity was WRITTEN hourly from the curated licensed-bed map
+// and read by nothing — the chip could say "8 open beds" but not "8 of 12". Those are different
+// facts: 8 free at a 20-bed house and 8 free at a 12-bed house are opposite signals about whether
+// the facility will take this patient.
+
+test('facility panel — open beds render as OCCUPANCY when the licensed count is on file', () => {
+  const withCapacity = [{ ...FACILITIES[0]!, openBeds: 8, bedCapacity: 20 }];
+  const html = renderToStaticMarkup(<FacilityPanel facilities={withCapacity} hasAmounts heatOn />);
+  assert.ok(html.includes('8 of 20 beds'), 'the denominator is shown, not just the free count');
+  assert.ok(html.includes('40% free'), 'and the percentage is spelled out in the tooltip');
+});
+
+test('facility panel — NO licensed count falls back to the bare count, never an invented denominator', () => {
+  // Outpatient (no beds) and not-yet-curated residential both land here. Showing a made-up capacity
+  // would be worse than showing less.
+  const noCapacity = [{ ...FACILITIES[0]!, openBeds: 8, bedCapacity: null }];
+  const html = renderToStaticMarkup(<FacilityPanel facilities={noCapacity} hasAmounts heatOn />);
+  assert.ok(html.includes('8 open beds'), 'the pre-existing wording is preserved exactly');
+  // Scoped to the occupancy shape: a bare `' of '` also matches unrelated copy elsewhere on the card.
+  assert.ok(!/\d+ of \d+ beds/.test(html), 'no denominator is implied');
+  assert.ok(html.includes('occupancy is unknown'), 'and the tooltip says WHY it is missing');
+});
+
+test('facility panel — a nearly-full house is flagged, a roomy one is not', () => {
+  const tight = renderToStaticMarkup(
+    <FacilityPanel facilities={[{ ...FACILITIES[0]!, openBeds: 1, bedCapacity: 12 }]} hasAmounts heatOn />,
+  );
+  assert.ok(tight.includes('text-status-warn'), '1 of 12 (8% free) reads as tight');
+  const roomy = renderToStaticMarkup(
+    <FacilityPanel facilities={[{ ...FACILITIES[0]!, openBeds: 6, bedCapacity: 12 }]} hasAmounts heatOn />,
+  );
+  assert.ok(!roomy.includes('text-status-warn'), '6 of 12 (50% free) does not');
+  // Occupancy is a FACT on the card, never folded into the score — the rating is unchanged by it.
+  assert.ok(tight.includes('of 12 beds') && roomy.includes('of 12 beds'));
+});
+
+test('facility panel — bed occupancy carries no dollars, so a blind seat sees the same chip', () => {
+  const html = renderToStaticMarkup(
+    <FacilityPanel facilities={[{ ...FACILITIES[0]!, openBeds: 8, bedCapacity: 20 }]} hasAmounts={false} heatOn />,
+  );
+  assert.ok(html.includes('8 of 20 beds'), 'occupancy is visible to admissions_seat');
+  assert.ok(!html.includes('$'), 'and still no dollars anywhere');
+});
