@@ -556,7 +556,7 @@ function facility(over: Partial<QualifyFacility>): QualifyFacility {
     city: 'Nashville',
     state: 'TN',
     ratingV2: 62,
-    iqBand: 'Solid',
+    iqBand: '50', // the real QualifyIqBand vocabulary — renders as "Solid · 50%+"
     distinctPatients: 14,
     lineCount: 210,
     careSetting: 'IP',

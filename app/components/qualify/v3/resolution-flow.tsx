@@ -31,6 +31,7 @@
  * prompt. Everything rendered here is counts, enums, names and dates — no dollar field exists in
  * `QualifyResolution` by construction, so blind and sighted roles receive identical bytes.
  */
+import { ChevronRight } from 'lucide-react';
 import type {
   CoverageGroupSummary,
   QualifyResolution,
@@ -41,6 +42,9 @@ import type {
   QualifyTrailingDays,
 } from '../../../lib/qualify/contract';
 import { derivePolicyRating } from '../../../lib/qualify/policyRating';
+import { IQ_BAND_LABELS, IQ_BAND_VERDICTS } from '../../../lib/qualify/ratingV2';
+import { clusterCarriers, type CarrierCluster } from '../../../lib/qualify/carrierCluster';
+import { IQ_BAND_HEX } from '../tokens';
 
 // ── Pure derivations (exported for the shell and the tests) ─────────────────────────────────────
 
@@ -104,9 +108,15 @@ export function orderedCandidates(r: QualifyResolution): OrderedCandidate[] {
   return out.sort((a, b) => a.index - b.index);
 }
 
-/** One carrier tile: every candidate sharing a payer display name, members summed. */
+/** One carrier tile: a CLUSTER of spellings that are the same payer (carrierCluster.ts), with the
+ *  exact display names folded in — the plan stage filters candidates by membership in `names`. */
 export interface PayerGroup {
   payer: string;
+  /** Every raw payerDisplayName folded into this tile. Membership test for the plan stage. */
+  names: ReadonlySet<string>;
+  /** Spellings other than the label — VOBs are hand-typed by different people, so one payer
+   *  arrives spelled a dozen ways; the tile says how many it absorbed. */
+  otherSpellings: string[];
   unmapped: boolean;
   memberCount: number;
   planCount: number;
@@ -114,22 +124,48 @@ export interface PayerGroup {
 }
 
 export function payerGroupsOf(r: QualifyResolution): PayerGroup[] {
-  const byPayer = new Map<string, PayerGroup>();
+  // First fold identical display names (a payer can appear as several plan candidates)…
+  interface NameGroup {
+    payer: string;
+    canonicalPayerId: string | null;
+    members: number;
+    planCount: number;
+    hasClaimEvidence: boolean;
+    allUnmapped: boolean;
+  }
+  const byName = new Map<string, NameGroup>();
   for (const c of orderedCandidates(r)) {
-    const g = byPayer.get(c.payerDisplayName) ?? {
+    const g = byName.get(c.payerDisplayName) ?? {
       payer: c.payerDisplayName,
-      unmapped: true, // AND-folded below: the tile says Unmapped only when EVERY candidate is
-      memberCount: 0,
+      canonicalPayerId: null,
+      members: 0,
       planCount: 0,
       hasClaimEvidence: false,
+      allUnmapped: true,
     };
-    g.unmapped = g.unmapped && c.canonicalPayerId === null;
-    g.memberCount += c.memberCount;
+    g.canonicalPayerId = g.canonicalPayerId ?? c.canonicalPayerId;
+    g.members += c.memberCount;
     g.planCount += 1;
     g.hasClaimEvidence = g.hasClaimEvidence || c.hasClaimEvidence;
-    byPayer.set(c.payerDisplayName, g);
+    g.allUnmapped = g.allUnmapped && c.canonicalPayerId === null;
+    byName.set(c.payerDisplayName, g);
   }
-  return [...byPayer.values()].sort((a, b) => b.memberCount - a.memberCount);
+  // …then cluster the names themselves: VOBs are manually entered by different people, so the same
+  // carrier arrives spelled a dozen ways ("ANTHEM BCBS OF CA", "Anthem Blue Cross of California",
+  // two typos of CALIFORNIA, …). The crosswalk's ruling outranks text similarity inside
+  // clusterCarriers — two confirmed-but-different payers never merge.
+  const clusters: CarrierCluster<NameGroup & { name: string }>[] = clusterCarriers(
+    [...byName.values()].map((g) => ({ ...g, name: g.payer })),
+  );
+  return clusters.map((cl) => ({
+    payer: cl.label,
+    names: new Set(cl.members.map((m) => m.payer)),
+    otherSpellings: cl.otherSpellings,
+    unmapped: cl.members.every((m) => m.allUnmapped),
+    memberCount: cl.members.reduce((s, m) => s + m.members, 0),
+    planCount: cl.members.reduce((s, m) => s + m.planCount, 0),
+    hasClaimEvidence: cl.members.some((m) => m.hasClaimEvidence),
+  }));
 }
 
 /**
@@ -187,17 +223,32 @@ export function liveSentenceFor(
 /** Stage shell: a <section> whose <h2> IS the question. One question per screen. The heading takes
  *  tabIndex={-1} so the shell can move focus to it on a stage swap — clicking a tile unmounts the
  *  focused element, and without a landing target a keyboard user re-tabs from the document top. */
-function Stage(props: { id: string; question: string; children: React.ReactNode }): React.ReactElement {
+function Stage(props: {
+  id: string;
+  question: string;
+  /** Optional step ordinal chip ("Step 2 of 4") — orientation without a progress bar's weight. */
+  step?: string;
+  children: React.ReactNode;
+}): React.ReactElement {
   const headingId = `${props.id}-heading`;
   return (
     <section id={props.id} aria-labelledby={headingId} className="flex flex-col gap-4">
-      <h2
-        id={headingId}
-        tabIndex={-1}
-        className="ths-h font-display text-xl font-semibold tracking-tight text-ink900 outline-none"
-      >
-        {props.question}
-      </h2>
+      <div className="flex items-baseline gap-3">
+        {/* Space Grotesk for headings (font-head) — Fraunces (font-display) is reserved for the one
+            hero numeral, per the design system. */}
+        <h2
+          id={headingId}
+          tabIndex={-1}
+          className="ths-h font-head text-xl font-semibold tracking-tight text-ink900 outline-none"
+        >
+          {props.question}
+        </h2>
+        {props.step ? (
+          <span className="rounded-full border border-teal200 bg-teal50/70 px-2.5 py-0.5 text-xs font-bold uppercase tracking-widest text-teal700">
+            {props.step}
+          </span>
+        ) : null}
+      </div>
       {props.children}
     </section>
   );
@@ -274,35 +325,56 @@ export function StageIdentify(props: {
   pending: boolean;
 }): React.ReactElement {
   return (
-    <Stage id="qualify-s-identify" question="Who are we looking at?">
-      <form action={props.action} className="flex w-full max-w-xl flex-col gap-2">
-        <label htmlFor="qualify-term" className="text-sm font-medium text-ink900">
-          Member ID prefix or full member ID
-        </label>
-        <div className="flex gap-2">
-          <input
-            id="qualify-term"
-            name="term"
-            type="text"
-            defaultValue={props.echo}
-            autoComplete="off"
-            aria-describedby="qualify-term-help"
-            className="w-full rounded-lg border border-line bg-surface px-4 py-3 text-base text-ink900 shadow-ths-sm"
-          />
-          <button
-            type="submit"
-            disabled={props.pending}
-            className="shrink-0 rounded-lg bg-teal700 px-5 py-3 text-sm font-semibold text-white disabled:opacity-60"
-          >
-            {props.pending ? 'Looking up…' : 'Find coverage'}
-          </button>
+    <Stage id="qualify-s-identify" question="Who are we looking at?" step="Step 1 of 4">
+      {/* The v2 landing hero's panel language (q-hero-* in globals.css: drifting glows, the comet on
+          the frame) with the SEARCH LIVING INSIDE IT — the previous design's centerpiece, carrying
+          the flow's first question instead of sitting beside a separate finder. All motion is
+          CSS-only and collapses under prefers-reduced-motion. */}
+      <section
+        aria-label="Search to qualify a lead"
+        className="q-hero q-hero-border animate-ths-reveal relative flex min-h-[300px] items-center justify-center overflow-hidden rounded-2xl border border-line px-6 py-12 sm:py-16"
+        style={{ background: 'linear-gradient(180deg, #FDFBF8 0%, #FBF8F4 100%)' }}
+      >
+        <div aria-hidden className="pointer-events-none absolute inset-0">
+          <span className="q-hero-glow q-hero-glow--a" />
+          <span className="q-hero-glow q-hero-glow--b" />
         </div>
-        <p id="qualify-term-help" className="text-xs text-ink600">
-          {props.readAs
-            ? `We ${props.readAs}.`
-            : 'Three characters is read as a prefix; anything longer as a complete member ID.'}
-        </p>
-      </form>
+        <form action={props.action} className="relative z-[2] flex w-full max-w-xl flex-col items-center gap-3 text-center">
+          <label htmlFor="qualify-term" className="font-head text-lg font-semibold tracking-tight text-ink900">
+            Member ID prefix or full member ID
+          </label>
+          <div className="flex w-full gap-2">
+            <input
+              id="qualify-term"
+              name="term"
+              type="text"
+              defaultValue={props.echo}
+              autoComplete="off"
+              aria-describedby="qualify-term-help"
+              className="h-12 w-full rounded-xl border border-line bg-surface px-4 font-mono text-base tracking-wide text-ink900 shadow-ths-sm outline-none transition-colors focus:border-teal500 focus:ring-2 focus:ring-teal500/25"
+            />
+            <button
+              type="submit"
+              disabled={props.pending}
+              className="h-12 shrink-0 rounded-xl bg-teal700 px-6 text-sm font-semibold text-white transition-colors hover:bg-teal900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40 disabled:opacity-60"
+            >
+              {props.pending ? 'Looking up…' : 'Find coverage'}
+            </button>
+          </div>
+          <p id="qualify-term-help" className="text-xs text-ink600">
+            {props.readAs
+              ? `We ${props.readAs}.`
+              : 'Three characters is read as a prefix; anything longer as a complete member ID.'}
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-2 text-xs font-semibold">
+            {['Member ID', 'Alpha prefix'].map((t) => (
+              <span key={t} className="rounded-full border border-teal200 bg-teal50/70 px-2.5 py-1 text-teal700">
+                {t}
+              </span>
+            ))}
+          </div>
+        </form>
+      </section>
     </Stage>
   );
 }
@@ -314,33 +386,65 @@ export function StagePayer(props: {
   onPick: (payer: string) => void;
 }): React.ReactElement {
   const groups = payerGroupsOf(props.resolution);
+  const spellingsFolded = groups.reduce((s, g) => s + g.otherSpellings.length, 0);
   return (
-    <Stage id="qualify-s-payer" question="Which carrier is on the card?">
+    <Stage id="qualify-s-payer" question="Which carrier is on the card?" step="Step 2 of 4">
       <p className="text-sm text-ink600">
-        <strong className="font-semibold text-ink900">{groups.length} carriers</strong> sit behind what you
-        typed. Pick the one on the card in front of you.
+        <strong className="font-semibold text-ink900">
+          {groups.length === 1 ? 'One carrier' : `${groups.length} carriers`}
+        </strong>{' '}
+        sit behind what you typed. Pick the one on the card in front of you.
+        {spellingsFolded > 0 ? (
+          <span>
+            {' '}
+            VOBs are hand-typed, so{' '}
+            <span className="ths-num" aria-label={`${spellingsFolded} alternate spellings folded in`}>
+              {spellingsFolded}
+            </span>{' '}
+            alternate spelling{spellingsFolded === 1 ? ' was' : 's were'} folded into these cards — each card
+            lists what it absorbed.
+          </span>
+        ) : null}
       </p>
       <ul className="grid list-none grid-cols-1 gap-3 p-0 sm:grid-cols-2 lg:grid-cols-3">
-        {groups.map((g) => (
+        {groups.map((g, i) => (
           <li key={g.payer}>
             <button
               type="button"
               data-v3-tile
               onClick={() => props.onPick(g.payer)}
-              className="flex w-full flex-col items-start gap-1 rounded-xl border border-line bg-surface p-4 text-left shadow-ths-sm transition-colors hover:border-teal500 hover:bg-teal50"
+              className="group flex h-full w-full flex-col items-start gap-1.5 rounded-xl border border-line bg-card p-4 text-left shadow-ths-sm transition-[box-shadow,transform,border-color] duration-150 ease-out hover:-translate-y-0.5 hover:border-teal500 hover:shadow-ths focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40"
             >
-              <span className="text-base font-semibold text-ink900">{g.payer}</span>
-              {g.unmapped ? <span className="text-xs font-semibold text-ink600">Unmapped payer</span> : null}
-              <span className="text-xs text-ink600">
-                <span className="ths-num" aria-label={`${g.memberCount} verified members under this carrier`}>
+              <span className="flex w-full items-start gap-2">
+                <span className="font-mono text-xs font-bold text-ink400">#{i + 1}</span>
+                <span className="font-head text-base font-semibold leading-tight tracking-tight text-ink900">
+                  {g.payer}
+                </span>
+                <ChevronRight
+                  aria-hidden
+                  className="ml-auto mt-0.5 h-4 w-4 shrink-0 text-teal500 transition-transform group-hover:translate-x-0.5"
+                  strokeWidth={2.5}
+                />
+              </span>
+              {g.unmapped ? (
+                <span className="rounded-full bg-ground px-2 py-0.5 text-xs font-semibold text-ink600">
+                  Unmapped payer
+                </span>
+              ) : null}
+              <span className="font-mono text-xs tabular-nums text-ink600">
+                <span aria-label={`${g.memberCount} verified members under this carrier`}>
                   {g.memberCount.toLocaleString()}
                 </span>{' '}
                 members ·{' '}
-                <span className="ths-num" aria-label={`${g.planCount} plans under this carrier`}>
-                  {g.planCount.toLocaleString()}
-                </span>{' '}
+                <span aria-label={`${g.planCount} plans under this carrier`}>{g.planCount.toLocaleString()}</span>{' '}
                 {g.planCount === 1 ? 'plan' : 'plans'}
               </span>
+              {g.otherSpellings.length > 0 ? (
+                <span className="line-clamp-2 text-xs text-ink400">
+                  Also filed as {g.otherSpellings.slice(0, 3).join(' · ')}
+                  {g.otherSpellings.length > 3 ? ` · +${g.otherSpellings.length - 3} more` : ''}
+                </span>
+              ) : null}
               {evidenceWord(g.hasClaimEvidence)}
             </button>
           </li>
@@ -366,8 +470,17 @@ export function StagePlan(props: {
 }): React.ReactElement {
   const all = orderedCandidates(props.resolution);
   const payers = payerGroupsOf(props.resolution);
-  const payer = props.payerPick ?? payers[0]?.payer ?? props.resolution.group.payerDisplayName;
-  const underPayer = all.filter((c) => c.payerDisplayName === payer);
+  // The pick is a CLUSTER label; membership is by the cluster's folded spelling set, so plans filed
+  // under "ANTHEM BCBS OF CA" surface when the tile said "Anthem Blue Cross of California". A stale
+  // pick (label no longer among the clusters after a re-resolve) yields the EMPTY state below — it
+  // must not silently fall back to the largest cluster, which would show another carrier's plans
+  // under the picked name.
+  const cluster =
+    props.payerPick !== null
+      ? (payers.find((p) => p.payer === props.payerPick) ?? null)
+      : (payers[0] ?? null);
+  const payer = props.payerPick ?? cluster?.payer ?? props.resolution.group.payerDisplayName;
+  const underPayer = cluster === null ? [] : all.filter((c) => cluster.names.has(c.payerDisplayName));
   // A stale carrier pick after a re-resolve can leave zero plans under it — say that plainly
   // instead of rendering "0 plans" over an empty grid with filter copy that presumes a filter.
   if (underPayer.length === 0) {
@@ -386,7 +499,7 @@ export function StagePlan(props: {
       ? underPayer
       : underPayer.filter((c) => (c.employerLabel ?? 'no plan sponsor on file').toLowerCase().includes(needle));
   return (
-    <Stage id="qualify-s-plan" question="Which plan is it?">
+    <Stage id="qualify-s-plan" question="Which plan is it?" step="Step 3 of 4">
       <p className="text-sm text-ink600">
         <strong className="font-semibold text-ink900">
           {underPayer.length === 1 ? 'One plan' : `${underPayer.length} plans`}
@@ -418,19 +531,18 @@ export function StagePlan(props: {
             <form
               action={props.planAction}
               data-v3-tile
-              className="flex h-full flex-col gap-1 rounded-xl border border-line bg-surface p-4 shadow-ths-sm"
+              className="flex h-full flex-col gap-1.5 rounded-xl border border-line bg-card p-4 shadow-ths-sm transition-[box-shadow,transform] duration-150 ease-out hover:-translate-y-0.5 hover:shadow-ths"
             >
               <input type="hidden" name="candidate" value={String(c.index)} />
-              <span className="text-base font-semibold text-ink900">
+              <span className="font-head text-base font-semibold leading-tight tracking-tight text-ink900">
                 {c.employerLabel ?? 'No plan sponsor on file'}
               </span>
-              <span className="text-xs text-ink600">
-                {[c.funding ?? 'Funding not captured', c.planType ?? 'Plan type not captured'].join(' · ')}
+              <span className="flex flex-wrap gap-1.5 text-xs font-semibold">
+                <span className="rounded-full bg-teal50 px-2 py-0.5 text-teal700">{c.funding ?? 'Funding not captured'}</span>
+                <span className="rounded-full bg-ground px-2 py-0.5 text-ink600">{c.planType ?? 'Plan type not captured'}</span>
               </span>
-              <span className="text-xs text-ink600">
-                <span className="ths-num" aria-label={`${c.memberCount} members on this plan`}>
-                  {c.memberCount.toLocaleString()}
-                </span>{' '}
+              <span className="font-mono text-xs tabular-nums text-ink600">
+                <span aria-label={`${c.memberCount} members on this plan`}>{c.memberCount.toLocaleString()}</span>{' '}
                 members
               </span>
               {evidenceWord(c.hasClaimEvidence)}
@@ -541,12 +653,17 @@ function ScoreCard({ f }: { f: QualifyFacility }): React.ReactElement {
           {f.ratingV2 !== null ? (
             <>
               <span
-                className="font-display text-3xl font-semibold tracking-tight text-ink900"
+                className="font-display text-3xl font-semibold tracking-tight"
+                style={{ color: f.iqBand ? IQ_BAND_HEX[f.iqBand] : undefined }}
                 aria-label={`rating ${f.ratingV2} out of 100`}
               >
                 {f.ratingV2}
               </span>
-              <span className="text-xs font-semibold text-ink600">{f.iqBand ?? ''}</span>
+              {/* The verdict as a WORD beside the colour — hue never carries it alone. The scale is
+                  the billing team's own IQ bands ("Watch · 30%+"), not a second vocabulary. */}
+              <span className="text-xs font-semibold text-ink600">
+                {f.iqBand ? `${IQ_BAND_VERDICTS[f.iqBand]} · ${IQ_BAND_LABELS[f.iqBand]}` : ''}
+              </span>
             </>
           ) : (
             <span className="max-w-[130px] text-right text-xs font-medium text-ink600">
@@ -602,7 +719,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   ].join(' · ');
   const rating = snap ? derivePolicyRating(snap.facilities) : null;
   return (
-    <Stage id="qualify-s-answer" question="Does this payer pay us — and where?">
+    <Stage id="qualify-s-answer" question="Does this payer pay us — and where?" step="Step 4 of 4">
       {/* The policy identity the user resolved, restated in one line — never re-derived. */}
       <p className="text-sm text-ink900">
         <span className="font-semibold">{g.payerDisplayName}</span>
@@ -830,7 +947,7 @@ export interface ResolutionStagesProps {
 export function ResolutionStages(props: ResolutionStagesProps): React.ReactElement {
   return (
     <div role="region" aria-labelledby="qualify-v3-flow-heading" className="flex flex-col gap-5">
-      <h1 id="qualify-v3-flow-heading" className="font-display text-2xl font-semibold tracking-tight text-ink900">
+      <h1 id="qualify-v3-flow-heading" className="font-head text-2xl font-semibold tracking-tight text-ink900">
         Qualify a client
       </h1>
 
