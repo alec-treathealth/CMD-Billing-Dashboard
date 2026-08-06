@@ -56,8 +56,8 @@ if (typeof window !== 'undefined') {
   gsap.registerPlugin(ScrollTrigger);
 }
 
-/** The ticker's own window — see the fetch effect for why 90 days rather than 30. */
-const TICKER_WINDOW = { kind: 'trailing', days: 90 } as const;
+/** The ticker's own window — see the fetch effect for why a trailing window rather than 30 days. */
+const TICKER_WINDOW = { kind: 'trailing', days: 60 } as const;
 
 export function ResolutionFlowClient({
   viewerHasAmountsCapability,
@@ -280,9 +280,11 @@ export function ResolutionFlowClient({
   }, [stage, predicateId, isPending, scopeKey]);
 
   // ── The landing ticker: fetched ONCE on mount, book-wide, independent of the search ───────────
-  // Trailing 90 days rather than 30: the strip ranks by rating DELTA against the prior equivalent
-  // period, and at 30 days a single claim can swing a facility's delta by double digits. Fail-soft to
-  // an empty strip — the trend query is orientation, and it must never block the search box.
+  // Trailing 60 days (Alec, 2026-08-06 — narrowed from 90 so the strip reads as current). The strip
+  // ranks by rating DELTA against the prior equivalent period, so the window has a floor: at 30 days a
+  // single claim can swing a facility's delta by double digits. 60 keeps that noise bounded while
+  // halving the lag; do not take it lower without re-checking the delta distribution. Fail-soft to an
+  // empty strip — the trend query is orientation, and it must never block the search box.
   useEffect(() => {
     let alive = true;
     getQualifyFacilityTrends(TICKER_WINDOW)
