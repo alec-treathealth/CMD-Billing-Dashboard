@@ -151,6 +151,7 @@ function props(stage: FlowStage, r: QualifyResolution | null, over: Partial<Reso
           onPayerOverride: noop,
           windowDays: null,
           onWindowDays: noop,
+          refetching: false,
         }
       : null,
     ...over,
@@ -169,6 +170,7 @@ function answerProps(over: Partial<NonNullable<ResolutionStagesProps['answer']>>
     onPayerOverride: noop,
     windowDays: null,
     onWindowDays: noop,
+    refetching: false,
     ...over,
   };
 }
@@ -218,6 +220,23 @@ test('the trend ticker rides the IDENTIFY stage only — it must not compete wit
     const html = render(props(stage, r, { ...over, ticker }));
     assert.ok(!html.includes('ticker-slot'), `the ticker must not render on the ${stage} stage`);
   }
+});
+
+test('the step rail names every step, and a SKIPPED step says so — it never reads as done', () => {
+  // A sole candidate skips both questions; the rail must not imply the user answered them.
+  const sole = render(props('answer', soleCandidate()));
+  assert.match(sole, /Identify/);
+  assert.match(sole, /Carrier/);
+  assert.match(sole, /Plan/);
+  assert.match(sole, /Answer/);
+  assert.equal((sole.match(/— skipped/g) ?? []).length, 2, 'Carrier AND Plan read as skipped');
+  // A real multi-plan pick reaches the answer with both questions ANSWERED — nothing skipped.
+  const picked = render(props('answer', fixture()));
+  assert.equal((picked.match(/— skipped/g) ?? []).length, 0, 'answered questions are done, not skipped');
+  assert.ok((picked.match(/— done/g) ?? []).length >= 3, 'the walked stages read as done');
+  // The rail is decorative navigation: no buttons, and no second live region.
+  const railChunk = sole.slice(sole.indexOf('data-v3-rail'), sole.indexOf('aria-live'));
+  assert.ok(!/<button/.test(railChunk), 'rail segments are not controls — the receipt is the revisit affordance');
 });
 
 test('exactly one stage section renders at a time', () => {
@@ -635,6 +654,34 @@ test('a plan with no claims history says the ranking is not evidence about it', 
   const html = render(props('answer', noClaims, { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'dominant' }) }));
   assert.match(html, /This plan has no claims history of its own/);
   assert.match(html, /not evidence about Aetna/);
+});
+
+test('RULE 2654416: during a re-scope, categorical sentences wait — only dimmed numbers may speak', () => {
+  // The window chip's state updates synchronously, so mid-fetch the disclosure reads the NEW window
+  // while every derived read is still the OLD set. A stale NUMBER beside a visible marker (the dim +
+  // beam) is honest — the marker says so. A categorical SENTENCE gets no such marker, so it waits.
+  const html = render(
+    props('answer', fixture(), {
+      answer: answerProps({
+        snapshot: snapshotFixture(), // the 90-day set, still on screen
+        refetching: true,
+        windowDays: 365, // the user's own action — a fact, allowed to speak immediately
+        scopeSource: 'dominant',
+      }),
+    }),
+  );
+  // The user's action and the dimmed evidence stay:
+  assert.match(html, /Showing trailing 365 days — your selection\./);
+  assert.match(html, /NASHVILLE MENTAL HEALTH/, 'the scorecard grid stays rendered');
+  assert.match(html, /opacity-60/, 'behind the dim marker');
+  assert.match(html, /q-refetch-beam/, 'and the progress beam');
+  // The sentence-bearing claims about data that has not answered yet are ABSENT:
+  assert.ok(!/policy rating \d+ out of 100/.test(html), 'the hero numeral + verdict wait');
+  assert.ok(!html.includes('patient-weighted across'), 'rating.basis is a DATA claim — false during a fetch (e7e8a0e)');
+  assert.ok(!html.includes('Largest by volume — pick another to re-scope.'), 'the scope caption asserts one of four claims — it waits');
+  assert.ok(!html.includes('could not be scoped to'), 'the dominant-scope warning waits');
+  // And this is a refetch, not a first load — the skeleton must NOT appear:
+  assert.ok(!html.includes('Ranking facilities for this plan…'), 'no skeleton on a refetch');
 });
 
 test('the window default is stated honestly when automatic sizing was unavailable', () => {

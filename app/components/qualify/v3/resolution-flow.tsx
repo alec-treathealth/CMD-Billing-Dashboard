@@ -44,7 +44,7 @@ import type {
 import { derivePolicyRating } from '../../../lib/qualify/policyRating';
 import { IQ_BAND_LABELS, IQ_BAND_VERDICTS } from '../../../lib/qualify/ratingV2';
 import { clusterCarriers, type CarrierCluster } from '../../../lib/qualify/carrierCluster';
-import { IQ_BAND_HEX } from '../tokens';
+import { IQ_BAND_HEX, IQ_BAND_WASH } from '../tokens';
 
 // ── Pure derivations (exported for the shell and the tests) ─────────────────────────────────────
 
@@ -226,31 +226,138 @@ export function liveSentenceFor(
 function Stage(props: {
   id: string;
   question: string;
-  /** Optional step ordinal chip ("Step 2 of 4") — orientation without a progress bar's weight. */
-  step?: string;
+  /**
+   * Content that PINS with the heading (CSS sticky — the plan stage's count sentence + employer
+   * filter). When set, the heading row and this block share one sticky wrapper so the question stays
+   * on screen while a long tile grid scrolls beneath it. The shell's ScrollTrigger only ADDS the
+   * elevation (`q-stuck`) once the grid is under it — sticky itself is pure CSS, so a reduced-motion
+   * user keeps the pin and simply never sees the shadow transition.
+   */
+  pinned?: React.ReactNode;
   children: React.ReactNode;
 }): React.ReactElement {
   const headingId = `${props.id}-heading`;
+  const header = (
+    <>
+      {/* Space Grotesk for headings (font-head) — Fraunces (font-display) is reserved for the one
+          hero numeral, per the design system. */}
+      <h2
+        id={headingId}
+        tabIndex={-1}
+        className="ths-h font-head text-xl font-semibold tracking-tight text-ink900 outline-none"
+      >
+        {props.question}
+      </h2>
+      {props.pinned}
+    </>
+  );
   return (
     <section id={props.id} aria-labelledby={headingId} className="flex flex-col gap-4">
-      <div className="flex items-baseline gap-3">
-        {/* Space Grotesk for headings (font-head) — Fraunces (font-display) is reserved for the one
-            hero numeral, per the design system. */}
-        <h2
-          id={headingId}
-          tabIndex={-1}
-          className="ths-h font-head text-xl font-semibold tracking-tight text-ink900 outline-none"
+      {props.pinned !== undefined ? (
+        <div
+          data-v3-sticky
+          className="sticky top-0 z-20 -mx-2 flex flex-col gap-3 rounded-b-xl bg-ground px-2 pb-3 pt-1 transition-shadow duration-150 ease-out"
         >
-          {props.question}
-        </h2>
-        {props.step ? (
-          <span className="rounded-full border border-teal200 bg-teal50/70 px-2.5 py-0.5 text-xs font-bold uppercase tracking-widest text-teal700">
-            {props.step}
-          </span>
-        ) : null}
-      </div>
+          {header}
+        </div>
+      ) : (
+        header
+      )}
       {props.children}
     </section>
+  );
+}
+
+// ── The step rail ────────────────────────────────────────────────────────────────────────────────
+
+export type RailState = 'pending' | 'current' | 'done' | 'skipped';
+
+const RAIL_SEGMENTS: readonly { stage: FlowStage; label: string }[] = [
+  { stage: 'identify', label: 'Identify' },
+  { stage: 'payer', label: 'Carrier' },
+  { stage: 'plan', label: 'Plan' },
+  { stage: 'answer', label: 'Answer' },
+];
+
+/**
+ * Per-segment rail state. PURE — same inputs as `deriveStage`, so the rail can never disagree with
+ * the stage machine about what was skipped: a sole carrier skips the payer question, a sole
+ * candidate skips both questions. A skipped segment must never render as "done" — done implies the
+ * user answered a question they were never asked.
+ */
+export function railStates(stage: FlowStage, resolution: QualifyResolution | null, groups?: PayerGroup[]): RailState[] {
+  const idx = RAIL_SEGMENTS.findIndex((s) => s.stage === stage);
+  const soleCandidate = resolution !== null && resolution.candidates.total <= 1;
+  const soleCarrier = resolution !== null && (groups ?? payerGroupsOf(resolution)).length <= 1;
+  return RAIL_SEGMENTS.map((seg, i) => {
+    if (i === idx) return 'current';
+    if (i > idx) return 'pending';
+    if (seg.stage === 'payer' && (soleCandidate || soleCarrier)) return 'skipped';
+    if (seg.stage === 'plan' && soleCandidate) return 'skipped';
+    return 'done';
+  });
+}
+
+/** Colour scale per the design brief: teal50 pending → teal200 skipped → teal500 current → teal700
+ *  done. Colour never carries the state alone — the dot shape differs (skipped is dashed-ring,
+ *  current is solid-ring) and every segment carries its state as visually-hidden TEXT. */
+const RAIL_DOT: Record<RailState, string> = {
+  pending: 'bg-teal50 border border-line',
+  skipped: 'bg-teal200 border border-dashed border-teal500',
+  current: 'bg-teal500 ring-2 ring-teal500/30 animate-pulse',
+  done: 'bg-teal700',
+};
+
+const RAIL_FILL: Record<RailState, string> = {
+  pending: 'w-0',
+  skipped: 'w-full bg-teal200',
+  current: 'w-1/2 bg-teal500',
+  done: 'w-full bg-teal700',
+};
+
+/**
+ * Decorative progression, NOT a control — the receipt strip is the revisit affordance and stays.
+ * Plain list semantics (role list/listitem, no buttons, no aria-live: the single live region already
+ * announces the stage). The fill advances left-to-right on the panel duration via CSS transition,
+ * which runs equally in reverse when the user goes back — and collapses entirely under the global
+ * prefers-reduced-motion reset.
+ */
+export function StepRail(props: {
+  stage: FlowStage;
+  resolution: QualifyResolution | null;
+  payerGroups?: PayerGroup[];
+}): React.ReactElement {
+  const states = railStates(props.stage, props.resolution, props.payerGroups);
+  return (
+    <ol role="list" className="flex list-none items-start gap-2 p-0" data-v3-rail>
+      {RAIL_SEGMENTS.map((seg, i) => {
+        const state = states[i] ?? 'pending';
+        return (
+          <li key={seg.stage} role="listitem" className="flex min-w-0 flex-1 flex-col gap-1.5">
+            <span className="flex items-center gap-2">
+              <span aria-hidden className={`h-2.5 w-2.5 shrink-0 rounded-full ${RAIL_DOT[state]}`} />
+              <span className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-teal50">
+                <span
+                  aria-hidden
+                  className={`block h-full rounded-full transition-[width] duration-200 ease-out ${RAIL_FILL[state]}`}
+                />
+              </span>
+            </span>
+            <span
+              className={`truncate text-xs font-semibold ${
+                state === 'current' ? 'text-teal700' : state === 'done' ? 'text-ink900' : 'text-ink400'
+              }`}
+            >
+              {seg.label}
+              {/* The state as TEXT — "skipped" must be readable, not inferable from a hue. */}
+              <span className="sr-only">
+                {state === 'current' ? ' — current step' : state === 'done' ? ' — done' : state === 'skipped' ? ' — skipped' : ' — not yet'}
+              </span>
+            </span>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 
@@ -269,17 +376,19 @@ export interface ReceiptProps {
   stage: FlowStage;
   payerPick: string | null;
   onChange: (backTo: 'identify' | 'payer' | 'plan') => void;
+  /** Optional pre-computed clusters (the shell memoizes one call per resolution). */
+  payerGroups?: PayerGroup[];
 }
 
 /**
  * What has been decided so far, each entry revisitable. Completion is carried by the WORDS on each
  * entry — never by a checkmark hue alone.
  */
-export function FlowReceipt({ resolution, stage, payerPick, onChange }: ReceiptProps): React.ReactElement {
+export function FlowReceipt({ resolution, stage, payerPick, onChange, payerGroups }: ReceiptProps): React.ReactElement {
   // For a full member id the echo is '' by construction — the receipt shows the READING instead,
   // so the id never reaches the markup and the entry still says what was searched.
   const idLabel = resolution.handle.echo !== '' ? resolution.handle.echo : resolution.handle.readAs;
-  const payers = payerGroupsOf(resolution);
+  const payers = payerGroups ?? payerGroupsOf(resolution);
   const payerLabel = stage === 'answer' ? resolution.group.payerDisplayName : payerPick;
   const planLabel =
     stage === 'answer' ? (resolution.group.employerLabel ?? 'No plan sponsor on file') : null;
@@ -325,7 +434,7 @@ export function StageIdentify(props: {
   pending: boolean;
 }): React.ReactElement {
   return (
-    <Stage id="qualify-s-identify" question="Who are we looking at?" step="Step 1 of 4">
+    <Stage id="qualify-s-identify" question="Who are we looking at?">
       {/* The v2 landing hero's panel language (q-hero-* in globals.css: drifting glows, the comet on
           the frame) with the SEARCH LIVING INSIDE IT — the previous design's centerpiece, carrying
           the flow's first question instead of sitting beside a separate finder. All motion is
@@ -356,7 +465,12 @@ export function StageIdentify(props: {
             <button
               type="submit"
               disabled={props.pending}
-              className="h-12 shrink-0 rounded-xl bg-teal700 px-6 text-sm font-semibold text-white transition-colors hover:bg-teal900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40 disabled:opacity-60"
+              // q-btn-progress (globals.css): a determinate-feeling sweep across the button while the
+              // lookup runs — motion says "working", not just a dimmed disable. Collapses under the
+              // reduced-motion reset; the "Looking up…" text still carries the state.
+              className={`relative h-12 shrink-0 overflow-hidden rounded-xl bg-teal700 px-6 text-sm font-semibold text-white transition-colors hover:bg-teal900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40 disabled:opacity-80 ${
+                props.pending ? 'q-btn-progress' : ''
+              }`}
             >
               {props.pending ? 'Looking up…' : 'Find coverage'}
             </button>
@@ -381,14 +495,23 @@ export function StageIdentify(props: {
 
 // ── Stage 2 · Payer ──────────────────────────────────────────────────────────────────────────────
 
+/** Left accent rail per evidence state (Phase 5). Colour ACCOMPANIES a word that is already on the
+ *  tile — `evidenceWord()` / the Unmapped pill — never replaces one. */
+function payerAccent(g: PayerGroup): string {
+  if (g.unmapped) return 'border-l-coral400';
+  return g.hasClaimEvidence ? 'border-l-teal500' : 'border-l-ink400';
+}
+
 export function StagePayer(props: {
   resolution: QualifyResolution;
   onPick: (payer: string) => void;
+  /** Optional pre-computed clusters (the shell memoizes one call per resolution). */
+  payerGroups?: PayerGroup[];
 }): React.ReactElement {
-  const groups = payerGroupsOf(props.resolution);
+  const groups = props.payerGroups ?? payerGroupsOf(props.resolution);
   const spellingsFolded = groups.reduce((s, g) => s + g.otherSpellings.length, 0);
   return (
-    <Stage id="qualify-s-payer" question="Which carrier is on the card?" step="Step 2 of 4">
+    <Stage id="qualify-s-payer" question="Which carrier is on the card?">
       <p className="text-sm text-ink600">
         <strong className="font-semibold text-ink900">
           {groups.length === 1 ? 'One carrier' : `${groups.length} carriers`}
@@ -406,18 +529,19 @@ export function StagePayer(props: {
           </span>
         ) : null}
       </p>
-      <ul className="grid list-none grid-cols-1 gap-3 p-0 sm:grid-cols-2 lg:grid-cols-3">
+      <ul data-v3-grid className="grid list-none grid-cols-1 gap-2.5 p-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {groups.map((g, i) => (
           <li key={g.payer}>
             <button
               type="button"
               data-v3-tile
               onClick={() => props.onPick(g.payer)}
-              className="group flex h-full w-full flex-col items-start gap-1.5 rounded-xl border border-line bg-card p-4 text-left shadow-ths-sm transition-[box-shadow,transform,border-color] duration-150 ease-out hover:-translate-y-0.5 hover:border-teal500 hover:shadow-ths focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40"
+              className={`group flex h-full w-full flex-col items-start gap-1 rounded-xl border border-l-[3px] border-line bg-card p-3 text-left shadow-ths-sm transition-[box-shadow,transform,border-color] duration-150 ease-out hover:-translate-y-0.5 hover:shadow-ths focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40 ${payerAccent(g)}`}
             >
               <span className="flex w-full items-start gap-2">
                 <span className="font-mono text-xs font-bold text-ink400">#{i + 1}</span>
-                <span className="font-head text-base font-semibold leading-tight tracking-tight text-ink900">
+                {/* The ONE dominant line in the tile. */}
+                <span className="line-clamp-2 font-head text-[15px] font-semibold leading-tight tracking-tight text-ink900">
                   {g.payer}
                 </span>
                 <ChevronRight
@@ -426,12 +550,7 @@ export function StagePayer(props: {
                   strokeWidth={2.5}
                 />
               </span>
-              {g.unmapped ? (
-                <span className="rounded-full bg-ground px-2 py-0.5 text-xs font-semibold text-ink600">
-                  Unmapped payer
-                </span>
-              ) : null}
-              <span className="font-mono text-xs tabular-nums text-ink600">
+              <span className="font-mono text-xs tabular-nums text-ink400">
                 <span aria-label={`${g.memberCount} verified members under this carrier`}>
                   {g.memberCount.toLocaleString()}
                 </span>{' '}
@@ -439,10 +558,30 @@ export function StagePayer(props: {
                 <span aria-label={`${g.planCount} plans under this carrier`}>{g.planCount.toLocaleString()}</span>{' '}
                 {g.planCount === 1 ? 'plan' : 'plans'}
               </span>
+              <span className="flex flex-wrap items-center gap-1 text-xs font-semibold">
+                {g.unmapped ? (
+                  <span className="rounded-full bg-coral50 px-2 py-0.5 text-coral600">Unmapped payer</span>
+                ) : null}
+                {/* Spellings DEMOTED to a count chip (they cost two clamped lines before): the full
+                    list stays available — title for pointer users, an sr-only sentence for AT, and
+                    an inline expansion on tile hover/focus. */}
+                {g.otherSpellings.length > 0 ? (
+                  <span
+                    className="rounded-full bg-ground px-2 py-0.5 text-ink600"
+                    title={`Also filed as ${g.otherSpellings.join(' · ')}`}
+                  >
+                    +{g.otherSpellings.length} spelling{g.otherSpellings.length === 1 ? '' : 's'}
+                    <span className="sr-only">. Also filed as {g.otherSpellings.join(', ')}.</span>
+                  </span>
+                ) : null}
+              </span>
               {g.otherSpellings.length > 0 ? (
-                <span className="line-clamp-2 text-xs text-ink400">
-                  Also filed as {g.otherSpellings.slice(0, 3).join(' · ')}
-                  {g.otherSpellings.length > 3 ? ` · +${g.otherSpellings.length - 3} more` : ''}
+                <span
+                  aria-hidden
+                  className="hidden text-xs text-ink400 group-hover:line-clamp-2 group-focus-visible:line-clamp-2"
+                >
+                  Also filed as {g.otherSpellings.slice(0, 4).join(' · ')}
+                  {g.otherSpellings.length > 4 ? ` · +${g.otherSpellings.length - 4} more` : ''}
                 </span>
               ) : null}
               {evidenceWord(g.hasClaimEvidence)}
@@ -467,9 +606,11 @@ export function StagePlan(props: {
   planAction: (fd: FormData) => void;
   onAskAi: () => void;
   pending: boolean;
+  /** Optional pre-computed clusters (the shell memoizes one call per resolution). */
+  payerGroups?: PayerGroup[];
 }): React.ReactElement {
   const all = orderedCandidates(props.resolution);
-  const payers = payerGroupsOf(props.resolution);
+  const payers = props.payerGroups ?? payerGroupsOf(props.resolution);
   // The pick is a CLUSTER label; membership is by the cluster's folded spelling set, so plans filed
   // under "ANTHEM BCBS OF CA" surface when the tile said "Anthem Blue Cross of California". A stale
   // pick (label no longer among the clusters after a re-resolve) yields the EMPTY state below — it
@@ -499,58 +640,78 @@ export function StagePlan(props: {
       ? underPayer
       : underPayer.filter((c) => (c.employerLabel ?? 'no plan sponsor on file').toLowerCase().includes(needle));
   return (
-    <Stage id="qualify-s-plan" question="Which plan is it?" step="Step 3 of 4">
-      <p className="text-sm text-ink600">
-        <strong className="font-semibold text-ink900">
-          {underPayer.length === 1 ? 'One plan' : `${underPayer.length} plans`}
-        </strong>{' '}
-        under {payer}. These are every possibility we have on file — pick the one on the card, or ask the AI
-        about one. The largest is a guess, not an answer.
-      </p>
-      {underPayer.length > PLAN_FILTER_THRESHOLD ? (
-        <div className="flex max-w-md flex-col gap-1">
-          <label htmlFor="qualify-plan-filter" className="text-sm font-medium text-ink900">
-            Narrow by employer
-          </label>
-          <input
-            id="qualify-plan-filter"
-            type="text"
-            value={props.planFilter}
-            onChange={(e) => props.onPlanFilter(e.target.value)}
-            autoComplete="off"
-            className="rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink900"
-          />
-          <p className="text-xs text-ink600">
-            Showing {visible.length} of {underPayer.length} plans.
+    <Stage
+      id="qualify-s-plan"
+      question="Which plan is it?"
+      // The question, the count sentence, and the filter PIN (CSS sticky) while the grid scrolls
+      // beneath — on a 30-plan carrier the user should never lose what they are answering. Keyboard
+      // order is unchanged: this is the same DOM order, in a sticky wrapper.
+      pinned={
+        <>
+          <p className="text-sm text-ink600">
+            <strong className="font-semibold text-ink900">
+              {underPayer.length === 1 ? 'One plan' : `${underPayer.length} plans`}
+            </strong>{' '}
+            under {payer}. These are every possibility we have on file — pick the one on the card, or ask the AI
+            about one. The largest is a guess, not an answer.
           </p>
-        </div>
-      ) : null}
-      <ul className="grid list-none grid-cols-1 gap-3 p-0 sm:grid-cols-2">
+          {underPayer.length > PLAN_FILTER_THRESHOLD ? (
+            <div className="flex max-w-md flex-col gap-1">
+              <label htmlFor="qualify-plan-filter" className="text-sm font-medium text-ink900">
+                Narrow by employer
+              </label>
+              <input
+                id="qualify-plan-filter"
+                type="text"
+                value={props.planFilter}
+                onChange={(e) => props.onPlanFilter(e.target.value)}
+                autoComplete="off"
+                className="rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink900 outline-none transition-colors focus:border-teal500 focus:ring-2 focus:ring-teal500/25"
+              />
+              <p className="text-xs text-ink600">
+                Showing {visible.length} of {underPayer.length} plans.
+              </p>
+            </div>
+          ) : null}
+        </>
+      }
+    >
+      {/* Density is the design fix here: 1→2→3→4 columns and a p-3 tile. A plan tile is a SCAN
+          TARGET — one dominant line (the employer), one muted metric line, pills for the attributes.
+          At 2 columns on a wide desktop each tile was ~800px of mostly whitespace; two tiles filled
+          the fold. */}
+      <ul data-v3-grid className="grid list-none grid-cols-1 gap-2.5 p-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {visible.map((c) => (
           <li key={`${c.canonicalPayerId ?? 'unmapped'}-${c.index}`}>
             <form
               action={props.planAction}
               data-v3-tile
-              className="flex h-full flex-col gap-1.5 rounded-xl border border-line bg-card p-4 shadow-ths-sm transition-[box-shadow,transform] duration-150 ease-out hover:-translate-y-0.5 hover:shadow-ths"
+              className="flex h-full flex-col gap-1 rounded-xl border border-line bg-card p-3 shadow-ths-sm transition-[box-shadow,transform] duration-150 ease-out hover:-translate-y-0.5 hover:shadow-ths"
             >
               <input type="hidden" name="candidate" value={String(c.index)} />
-              <span className="font-head text-base font-semibold leading-tight tracking-tight text-ink900">
+              {/* The ONE dominant line — nothing else in the tile carries this weight. */}
+              <span className="line-clamp-2 font-head text-[15px] font-semibold leading-tight tracking-tight text-ink900">
                 {c.employerLabel ?? 'No plan sponsor on file'}
               </span>
-              <span className="flex flex-wrap gap-1.5 text-xs font-semibold">
-                <span className="rounded-full bg-teal50 px-2 py-0.5 text-teal700">{c.funding ?? 'Funding not captured'}</span>
-                <span className="rounded-full bg-ground px-2 py-0.5 text-ink600">{c.planType ?? 'Plan type not captured'}</span>
-              </span>
-              <span className="font-mono text-xs tabular-nums text-ink600">
+              <span className="font-mono text-xs tabular-nums text-ink400">
                 <span aria-label={`${c.memberCount} members on this plan`}>{c.memberCount.toLocaleString()}</span>{' '}
                 members
               </span>
+              {/* Attributes as pills: categories, not judgements — two distinguishable muted fills
+                  (funding wears the brand teal, plan shape the info blue). Never below 12px. */}
+              <span className="flex flex-wrap gap-1 text-xs font-semibold">
+                <span className="rounded-full bg-teal50 px-2 py-0.5 text-teal700">{c.funding ?? 'Funding not captured'}</span>
+                <span className="rounded-full bg-status-info/10 px-2 py-0.5 text-status-info">
+                  {c.planType ?? 'Plan type not captured'}
+                </span>
+              </span>
               {evidenceWord(c.hasClaimEvidence)}
-              <span className="mt-2 flex gap-2">
+              {/* Both actions, one compact row — the pair is pinned by the invariant suite. */}
+              <span className="mt-auto flex gap-1.5 pt-1.5">
                 <button
                   type="submit"
                   disabled={props.pending}
-                  className="rounded-lg bg-teal700 px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-60"
+                  className="rounded-lg bg-teal700 px-2.5 py-1 text-xs font-semibold text-white transition-colors hover:bg-teal900 disabled:opacity-60"
                 >
                   Use this plan
                 </button>
@@ -558,7 +719,7 @@ export function StagePlan(props: {
                   type="submit"
                   disabled={props.pending}
                   onClick={props.onAskAi}
-                  className="rounded-lg border border-teal200 bg-teal50 px-3 py-1.5 text-sm font-semibold text-teal700 disabled:opacity-60"
+                  className="rounded-lg border border-teal200 bg-teal50 px-2.5 py-1 text-xs font-semibold text-teal700 transition-colors hover:bg-teal200/60 disabled:opacity-60"
                 >
                   <span aria-hidden>✦ </span>Ask AI about this plan
                 </button>
@@ -624,7 +785,14 @@ function FactorRows({ facility }: { facility: QualifyFacility }): React.ReactEle
 function ScoreCard({ f }: { f: QualifyFacility }): React.ReactElement {
   const location = [f.city, f.state].filter(Boolean).join(', ');
   return (
-    <li data-v3-tile className="rounded-xl border border-line bg-surface p-4 shadow-ths-sm">
+    <li
+      data-v3-tile
+      className="rounded-xl border border-line bg-surface p-4 shadow-ths-sm"
+      // IQ_BAND_WASH at card level (Phase 5): the wash EXTENDS the numeral's hue, which already sits
+      // beside its verdict word — colour accompanies the word, never replaces it. Unrated cards keep
+      // the plain surface: honest restraint stays visually colourless.
+      style={f.iqBand && f.ratingV2 !== null ? { backgroundColor: IQ_BAND_WASH[f.iqBand] } : undefined}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 flex-col">
           <span className="flex items-baseline gap-2">
@@ -706,6 +874,28 @@ export interface StageAnswerProps {
   onPayerOverride: (label: string | null) => void;
   windowDays: QualifyTrailingDays | null;
   onWindowDays: (days: QualifyTrailingDays | null) => void;
+  /**
+   * A RE-SCOPE of content already on screen (window chip, billed-under chip) — per the design
+   * system, that keeps the current content rendered at reduced opacity with a thin progress bar,
+   * instead of blanking to a skeleton. Skeletons are for genuine first loads only.
+   */
+  refetching: boolean;
+}
+
+/** First-load ghost sized to the real footprint (window line + hero + two scorecard rows), so the
+ *  swap to content does not shift layout. aria-hidden — the visible status line above it announces. */
+function AnswerSkeleton(): React.ReactElement {
+  return (
+    <div aria-hidden className="flex flex-col gap-4">
+      <div className="h-[74px] animate-pulse rounded-lg border border-line bg-surface" />
+      <div className="h-[104px] animate-pulse rounded-xl border border-line bg-surface" />
+      <ul className="grid list-none grid-cols-1 gap-3 p-0 lg:grid-cols-2">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <li key={i} className="h-[108px] animate-pulse rounded-xl border border-line bg-surface" />
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 export function StageAnswer(props: StageAnswerProps): React.ReactElement {
@@ -719,28 +909,41 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   ].join(' · ');
   const rating = snap ? derivePolicyRating(snap.facilities) : null;
   return (
-    <Stage id="qualify-s-answer" question="Does this payer pay us — and where?" step="Step 4 of 4">
+    <Stage id="qualify-s-answer" question="Does this payer pay us — and where?">
       {/* The policy identity the user resolved, restated in one line — never re-derived. */}
       <p className="text-sm text-ink900">
         <span className="font-semibold">{g.payerDisplayName}</span>
         <span className="text-ink600"> · {policyBits}</span>
       </p>
 
-      {props.pending || (!snap && !props.snapshotError) ? (
-        <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
-          Ranking facilities for this plan…
-        </p>
+      {(props.pending || (!snap && !props.snapshotError)) && !(snap && props.refetching) ? (
+        <>
+          <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
+            Ranking facilities for this plan…
+          </p>
+          <AnswerSkeleton />
+        </>
       ) : props.snapshotError ? (
         <p role="status" className="rounded-lg border border-line bg-coral50 p-4 text-sm text-ink900">
           The facility ranking could not be loaded. The plan resolution above still stands — try again, or
           change the window.
         </p>
       ) : snap ? (
-        <>
+        // The refetch treatment: current content stays RENDERED and readable at reduced opacity with
+        // a thin indeterminate bar — a re-scope is not a first load, and blanking to a skeleton
+        // makes every chip click feel like a page rebuild.
+        <div className={`relative flex flex-col gap-4 ${props.refetching ? 'opacity-60 transition-opacity duration-150' : ''}`}>
+          {props.refetching ? (
+            <span aria-hidden className="q-refetch-bar absolute inset-x-0 -top-2 h-0.5 overflow-hidden rounded-full">
+              <span className="q-refetch-beam block h-full w-1/3 rounded-full bg-teal500" />
+            </span>
+          ) : null}
           {/* SCOPE HONESTY (review Critical 1). When the pick couldn't be bridged to a claims label
               — no claims history for this plan, or an unmapped payer — the ranking below is the
-              identifier's DOMINANT payer, and that must be said in words, not implied by chips. */}
-          {props.scopeSource === 'dominant' && snap.resolved && r.candidates.total > 1 ? (
+              identifier's DOMINANT payer, and that must be said in words, not implied by chips.
+              SUPPRESSED IN FLIGHT (rule 2654416): this is a categorical sentence about the data; it
+              waits for its answer rather than describing the set being replaced. */}
+          {!props.refetching && props.scopeSource === 'dominant' && snap.resolved && r.candidates.total > 1 ? (
             <p role="status" className="rounded-lg border border-line bg-coral50 p-4 text-sm text-ink900">
               {g.claimEvidence.lines === 0
                 ? `This plan has no claims history of its own — the ranking below is this identifier's history under ${snap.resolved.payerName}, not evidence about ${g.payerDisplayName}.`
@@ -806,48 +1009,69 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                   </button>
                 );
               })}
-              <span className="text-xs text-ink600">
-                {/* "You picked this" / "your plan pick implies this" / "we defaulted" are three
-                    different claims — and a REJECTED override must never render as honoured. */}
-                {snap.payerOverridden
-                  ? props.scopeSource === 'user'
-                    ? 'Your selection.'
-                    : 'Scoped to the plan you picked.'
-                  : props.scopeSource !== 'dominant'
-                    ? 'Could not scope to the picked plan — showing the largest by volume.'
-                    : 'Largest by volume — pick another to re-scope.'}
-              </span>
+              {/* "You picked this" / "your plan pick implies this" / "we defaulted" are three
+                  different claims — and a REJECTED override must never render as honoured. The
+                  caption is SUPPRESSED IN FLIGHT (rule 2654416): it asserts one of four scope
+                  claims about a set that has not answered yet. The chips themselves stay — they
+                  are the user's controls, not claims. */}
+              {props.refetching ? null : (
+                <span className="text-xs text-ink600">
+                  {snap.payerOverridden
+                    ? props.scopeSource === 'user'
+                      ? 'Your selection.'
+                      : 'Scoped to the plan you picked.'
+                    : props.scopeSource !== 'dominant'
+                      ? 'Could not scope to the picked plan — showing the largest by volume.'
+                      : 'Largest by volume — pick another to re-scope.'}
+                </span>
+              )}
             </div>
           ) : null}
 
-          {/* The hero: ONE number, patient-weighted, with its basis stated. */}
-          <div className="flex items-center gap-5 rounded-xl border border-line bg-surface p-5 shadow-ths-sm">
-            {rating && rating.rating !== null ? (
-              <span
-                className="font-display text-6xl font-semibold tracking-tight text-ink900"
-                aria-label={`policy rating ${rating.rating} out of 100`}
-              >
-                {rating.rating}
-              </span>
+          {/* The hero: ONE number, patient-weighted, with its basis stated. The band wash sits
+              behind it (Phase 5); the verdict WORD beside the numeral still carries the meaning.
+              SUPPRESSED IN FLIGHT (rules e7e8a0e + 2654416): the numeral, the verdict word and the
+              basis are claims about the data — at zero rated facilities the basis literally reads
+              "no facility clears the sample floor", which is FALSE during a fetch. The dim treatment
+              is a marker calibrated for the grid's numbers; these sentences wait instead. */}
+          <div
+            className="flex items-center gap-5 rounded-xl border border-line bg-surface p-5 shadow-ths-sm"
+            style={!props.refetching && rating?.band ? { backgroundColor: IQ_BAND_WASH[rating.band] } : undefined}
+          >
+            {props.refetching ? (
+              // No numeral, no verdict, no basis — a wordless pulse holds the footprint.
+              <span aria-hidden className="h-14 w-full max-w-sm animate-pulse rounded-lg bg-ground" />
             ) : (
-              <span className="text-2xl font-semibold text-ink600">Not rated</span>
+              <>
+                {rating && rating.rating !== null ? (
+                  <span
+                    className="font-display text-6xl font-semibold tracking-tight"
+                    style={{ color: rating.band ? IQ_BAND_HEX[rating.band] : undefined }}
+                    aria-label={`policy rating ${rating.rating} out of 100`}
+                  >
+                    {rating.rating}
+                  </span>
+                ) : (
+                  <span className="text-2xl font-semibold text-ink600">Not rated</span>
+                )}
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-sm font-semibold text-ink900">{rating?.verdict ?? 'Not rated'}</span>
+                  <span className="text-xs text-ink600">{rating?.basis ?? 'no facility clears the sample floor'}</span>
+                  {rating && rating.rating !== null ? (
+                    <span className="text-xs text-ink600">
+                      <span className="ths-num" aria-label={`${rating.patients} patients behind this rating`}>
+                        {rating.patients.toLocaleString()}
+                      </span>{' '}
+                      patients ·{' '}
+                      <span className="ths-num" aria-label={`${rating.ratedCount} rated facilities`}>
+                        {rating.ratedCount}
+                      </span>{' '}
+                      rated facilities
+                    </span>
+                  ) : null}
+                </div>
+              </>
             )}
-            <div className="flex flex-col gap-0.5">
-              <span className="text-sm font-semibold text-ink900">{rating?.verdict ?? 'Not rated'}</span>
-              <span className="text-xs text-ink600">{rating?.basis ?? 'no facility clears the sample floor'}</span>
-              {rating && rating.rating !== null ? (
-                <span className="text-xs text-ink600">
-                  <span className="ths-num" aria-label={`${rating.patients} patients behind this rating`}>
-                    {rating.patients.toLocaleString()}
-                  </span>{' '}
-                  patients ·{' '}
-                  <span className="ths-num" aria-label={`${rating.ratedCount} rated facilities`}>
-                    {rating.ratedCount}
-                  </span>{' '}
-                  rated facilities
-                </span>
-              ) : null}
-            </div>
           </div>
 
           {/* The AI layer — preset chips, streamed answers, grounded in THIS snapshot. */}
@@ -869,7 +1093,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               </p>
             ) : null}
           </section>
-        </>
+        </div>
       ) : null}
 
       {/* Everything v2 shouted, behind one calm disclosure — present, honest, not competing. */}
@@ -878,7 +1102,14 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
         <div className="mt-3 flex flex-col gap-3">
           <ul className="flex list-none flex-col gap-2 p-0">
             {r.notices.map((n) => (
-              <li key={n.kind} className="text-sm text-ink900">
+              // Severity hue BEHIND the severity word (Phase 5) — the word stays; the wash makes a
+              // caution findable in a scan without reading every line.
+              <li
+                key={n.kind}
+                className={`rounded-lg px-2.5 py-1.5 text-sm text-ink900 ${
+                  n.severity === 'caution' ? 'bg-coral50' : 'bg-teal50'
+                }`}
+              >
                 <span className="mr-2 text-xs font-semibold uppercase text-ink600">
                   {n.severity === 'caution' ? 'Caution' : 'Note'}
                 </span>
@@ -936,13 +1167,23 @@ export interface ResolutionStagesProps {
    * with the question being asked, which is the whole point of one-question-per-screen.
    */
   ticker: React.ReactNode;
+  /** Optional pre-computed clusters — the shell memoizes ONE `payerGroupsOf` call per resolution and
+   *  threads it to the rail, receipt, and both tile stages, which otherwise each re-derive it
+   *  (clusterCarriers is O(n²), and scroll-driven work makes that visible as filter-input lag). */
+  payerGroups?: PayerGroup[];
   answer: Omit<StageAnswerProps, 'resolution'> | null;
 }
 
 /**
- * The presentational root: receipt + ONE live region + the active stage. Holds no state and fetches
- * nothing — the shell (`resolution-flow-client.tsx`) owns both, so this renders statically for the
- * I9 assertions.
+ * The presentational root: rail + receipt + ONE live region + the active stage. Holds no state and
+ * fetches nothing — the shell (`resolution-flow-client.tsx`) owns both, so this renders statically
+ * for the I9 assertions.
+ *
+ * MOTION CONTRACT WITH THE SHELL: everything above `[data-v3-stage]` is CHROME — the h1, the rail,
+ * the live region, the receipt, and the ticker. The shell's GSAP targets ONLY the `[data-v3-stage]`
+ * subtree, so the chrome never blinks on a stage swap; the receipt reads as a persistent trail
+ * precisely because it does not move. The ticker sits OUTSIDE the animated subtree for the same
+ * reason, even though it renders only on the identify stage.
  */
 export function ResolutionStages(props: ResolutionStagesProps): React.ReactElement {
   return (
@@ -950,6 +1191,8 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
       <h1 id="qualify-v3-flow-heading" className="font-head text-2xl font-semibold tracking-tight text-ink900">
         Qualify a client
       </h1>
+
+      <StepRail stage={props.stage} resolution={props.resolution} payerGroups={props.payerGroups} />
 
       {/* THE single live region — one, not one per panel; the important sentence must not queue. */}
       <p aria-live="polite" className="sr-only">
@@ -968,45 +1211,50 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
           stage={props.stage}
           payerPick={props.payerPick}
           onChange={props.onChange}
+          payerGroups={props.payerGroups}
         />
       ) : null}
 
-      {props.stage === 'identify' ? (
-        <>
-          {props.ticker}
-          <StageIdentify
-            echo={props.echo}
-            readAs={props.resolution ? props.resolution.handle.readAs : null}
-            action={props.identifyAction}
+      {props.stage === 'identify' ? props.ticker : null}
+
+      <div data-v3-stage>
+        {props.stage === 'identify' ? (
+          <>
+            <StageIdentify
+              echo={props.echo}
+              readAs={props.resolution ? props.resolution.handle.readAs : null}
+              action={props.identifyAction}
+              pending={props.pending}
+            />
+            {!props.resolution && props.reason ? (
+              <p role="status" className="mt-4 max-w-xl rounded-md border border-line bg-teal50 p-4 text-sm text-ink600">
+                {UNRESOLVABLE_COPY[props.reason]}
+              </p>
+            ) : null}
+          </>
+        ) : null}
+
+        {props.stage === 'payer' && props.resolution ? (
+          <StagePayer resolution={props.resolution} onPick={props.onPickPayer} payerGroups={props.payerGroups} />
+        ) : null}
+
+        {props.stage === 'plan' && props.resolution ? (
+          <StagePlan
+            resolution={props.resolution}
+            payerPick={props.payerPick}
+            planFilter={props.planFilter}
+            onPlanFilter={props.onPlanFilter}
+            planAction={props.planAction}
+            onAskAi={props.onAskAi}
             pending={props.pending}
+            payerGroups={props.payerGroups}
           />
-          {!props.resolution && props.reason ? (
-            <p role="status" className="max-w-xl rounded-md border border-line bg-teal50 p-4 text-sm text-ink600">
-              {UNRESOLVABLE_COPY[props.reason]}
-            </p>
-          ) : null}
-        </>
-      ) : null}
+        ) : null}
 
-      {props.stage === 'payer' && props.resolution ? (
-        <StagePayer resolution={props.resolution} onPick={props.onPickPayer} />
-      ) : null}
-
-      {props.stage === 'plan' && props.resolution ? (
-        <StagePlan
-          resolution={props.resolution}
-          payerPick={props.payerPick}
-          planFilter={props.planFilter}
-          onPlanFilter={props.onPlanFilter}
-          planAction={props.planAction}
-          onAskAi={props.onAskAi}
-          pending={props.pending}
-        />
-      ) : null}
-
-      {props.stage === 'answer' && props.resolution && props.answer ? (
-        <StageAnswer resolution={props.resolution} {...props.answer} />
-      ) : null}
+        {props.stage === 'answer' && props.resolution && props.answer ? (
+          <StageAnswer resolution={props.resolution} {...props.answer} />
+        ) : null}
+      </div>
     </div>
   );
 }
