@@ -40,10 +40,12 @@ import {
   deriveStage,
   employerNarrowFor,
   filterCandidates,
+  isRefetching,
   NO_ANSWER_FILTERS,
   orderedCandidates,
   payerGroupsOf,
   ResolutionStages,
+  scopeKeyOf,
   type AnswerFilters,
   type FlowStage,
 } from './resolution-flow';
@@ -81,10 +83,10 @@ export function ResolutionFlowClient({
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [payerOverride, setPayerOverride] = useState<string | null>(null);
   const [windowDays, setWindowDays] = useState<QualifyTrailingDays | null>(null);
-  // True while a RE-SCOPE of the answer (window chip / billed-under chip) is in flight. The design
-  // system's refetch rule: content already on screen stays rendered, dimmed, with a progress bar —
-  // it never blanks to a skeleton. Skeletons are reserved for the genuine first load (snapshot null).
-  const [refetching, setRefetching] = useState(false);
+  // What scope the RENDERED snapshot describes. A re-scope keeps content on screen, dimmed, with a
+  // progress bar — never blanked; skeletons are for the genuine first load (snapshot null). `refetching` is derived from this against the
+  // requested scope key — never an independently-set flag (see scopeKeyOf for the stuck-flag bug).
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
   // The landing ticker. `null` = still loading (renders the skeleton, which reserves the strip's
   // height so a 2.5-5s trend query cannot shove the search box down the page); [] = loaded empty.
   const [trends, setTrends] = useState<QualifyFacilityTrend[] | null>(null);
@@ -114,7 +116,6 @@ export function ResolutionFlowClient({
       setSnapshotError(null);
       setPayerOverride(null);
       setWindowDays(null);
-      setRefetching(false);
       formAction(fd);
     },
     [formAction],
@@ -133,11 +134,9 @@ export function ResolutionFlowClient({
     setPayerOverride(null);
     setSnapshot(null);
     setSnapshotError(null);
-    setRefetching(false);
   }, []);
 
   const onToggleFilter = useCallback((facet: 'planType' | 'funding' | 'employer', value: string) => {
-    setRefetching(true); // a filter change re-scopes content already on screen
     setFilters((f) => {
       const key = facet === 'planType' ? 'planTypes' : facet === 'funding' ? 'funding' : 'employers';
       const cur = f[key];
@@ -146,7 +145,6 @@ export function ResolutionFlowClient({
   }, []);
 
   const onClearFilters = useCallback(() => {
-    setRefetching(true);
     setFilters(NO_ANSWER_FILTERS);
     setEmployerQuery('');
   }, []);
@@ -164,7 +162,6 @@ export function ResolutionFlowClient({
       setBackTo(null);
       setSnapshot(null);
       setSnapshotError(null);
-      setRefetching(false);
       formAction(fd);
     },
     [formAction],
@@ -178,7 +175,6 @@ export function ResolutionFlowClient({
     setAutoAsk(false);
     setPayerOverride(null);
     setWindowDays(null);
-    setRefetching(false);
     setPicked(false);
     setSkipped(false); // stepping back into the funnel un-skips it
     setFilters(NO_ANSWER_FILTERS);
@@ -230,7 +226,15 @@ export function ResolutionFlowClient({
   }, [answerCandidates, filters]);
 
   // A stable dependency key — arrays get a new identity every render and would refetch forever.
-  const marketKey = `${filters.funding.slice().sort().join('|')}#${(narrow.employers ?? []).slice().sort().join('|')}`;
+  // ONE key for the whole request identity, used both as the effect's dependency and as the
+  // yardstick for `refetching`, so the two can never disagree about what is in flight.
+  const scopeKey = scopeKeyOf({
+    payerLabel: sentOverride,
+    windowDays,
+    funding: filters.funding,
+    employers: narrow.employers,
+  });
+  const refetching = isRefetching(snapshot !== null, loadedKey, scopeKey);
 
   // ── Snapshot for the answer stage — the hardened v2 data path under the new UI ────────────────
   const predicateId = state.resolution?.predicateId ?? null;
@@ -257,23 +261,23 @@ export function ResolutionFlowClient({
       .then((s) => {
         if (alive) {
           setSnapshot(s);
-          setRefetching(false);
+          setLoadedKey(scopeKey); // stamp WHAT this snapshot describes
         }
       })
       .catch(() => {
         if (alive) {
           setSnapshot(null);
           setSnapshotError('failed');
-          setRefetching(false);
         }
       });
     return () => {
       alive = false;
     };
-    // marketKey is the stable serialization of `filters.funding` + `narrow.employers`; the arrays
-    // themselves would be new identities every render and refetch forever.
+    // scopeKey is the stable serialization of every request input (payer label, window, funding,
+    // employers); the arrays themselves would be new identities every render and refetch forever.
+    // Depending on it alone is sound BECAUSE it is derived from exactly those values.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stage, predicateId, isPending, sentOverride, windowDays, marketKey]);
+  }, [stage, predicateId, isPending, scopeKey]);
 
   // ── The landing ticker: fetched ONCE on mount, book-wide, independent of the search ───────────
   // Trailing 90 days rather than 30: the strip ranks by rating DELTA against the prior equivalent
@@ -452,12 +456,10 @@ export function ResolutionFlowClient({
                 // Re-scopes are REFETCHES of content already on screen: the snapshot stays rendered
                 // (dimmed, with the progress bar) rather than blanking — the design system's rule.
                 onPayerOverride: (label) => {
-                  setRefetching(true);
                   setPayerOverride(label);
                 },
                 windowDays,
                 onWindowDays: (d) => {
-                  setRefetching(true);
                   setWindowDays(d);
                 },
               }

@@ -267,6 +267,48 @@ export function facetsOf(all: readonly OrderedCandidate[]): {
  */
 export const ANSWER_EMPLOYER_SEND_MAX = 200;
 
+/**
+ * The identity of the scope a ranking request describes — payer label × window × market narrow.
+ *
+ * ⚠ WHY THIS EXISTS RATHER THAN A `refetching` BOOLEAN (Qodo, PR #126). The flag was set to true by
+ * four separate handlers and cleared in ONE place: the fetch effect's resolve. So any click that did
+ * not move an effect dependency left it stuck true forever — and because the stale-sentence rule
+ * suppresses the hero numeral, the verdict, `rating.basis` and the scope captions while refetching,
+ * the answer stage lost its headline PERMANENTLY. Every one of these was reachable:
+ *   · clicking the already-selected window chip (`onWindowDays(30)` when it is already 30);
+ *   · clicking "Automatic" in its DEFAULT state — the very first thing on screen;
+ *   · clicking the active billed-under chip, which sends `onPayerOverride(null)` when the override
+ *     is already null;
+ *   · toggling a plan type whose employer set is not a proper subset, or exceeds the 200 bound —
+ *     both leave `market.employers` null and the market key unchanged.
+ * React bails out of a no-op setState, so the deps never changed and the effect never ran.
+ *
+ * Deriving the flag from "what is requested vs what is rendered" makes the stuck state
+ * unrepresentable: a no-op click cannot change the key, so it cannot flip the flag. Fixing the two
+ * reported handlers would have left the two filter paths broken.
+ */
+export function scopeKeyOf(parts: {
+  payerLabel: string | null;
+  windowDays: number | null;
+  funding: readonly string[];
+  employers: readonly string[] | null;
+}): string {
+  return [
+    parts.payerLabel ?? '',
+    parts.windowDays === null ? 'auto' : String(parts.windowDays),
+    parts.funding.slice().sort().join('|'),
+    parts.employers === null ? '' : parts.employers.slice().sort().join('|'),
+  ].join('#');
+}
+
+/**
+ * True only when content is on screen AND it describes a scope the user has since moved off.
+ * `hasSnapshot` false is a FIRST LOAD (skeleton), never a refetch — the two treatments differ.
+ */
+export function isRefetching(hasSnapshot: boolean, loadedKey: string | null, scopeKey: string): boolean {
+  return hasSnapshot && loadedKey !== null && loadedKey !== scopeKey;
+}
+
 export function employerNarrowFor(
   universe: readonly OrderedCandidate[],
   filtered: readonly OrderedCandidate[],
