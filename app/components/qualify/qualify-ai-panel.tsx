@@ -65,7 +65,19 @@ function buildInput(question: ChipId, snap: QualifySnapshot, blind: boolean): Qu
   };
 }
 
-export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot; blind: boolean }) {
+export function QualifyAiPanel({
+  snapshot,
+  blind,
+  autoAsk = false,
+}: {
+  snapshot: QualifySnapshot;
+  blind: boolean;
+  /** v3 plan-tile drill-down: run the SUGGESTED chip once, unprompted, when the panel arrives. The
+   *  suggestion derives from this snapshot (aiChips), so the auto-question is grounded in what the
+   *  search actually returned — a self-funded plan opens with the plan-administrator question, etc.
+   *  Same run() path as a click: gate, audit and PHI firewall are identical. */
+  autoAsk?: boolean;
+}) {
   const [active, setActive] = useState<ChipId | null>(null);
   const [text, setText] = useState('');
   const [streaming, setStreaming] = useState(false);
@@ -154,6 +166,15 @@ export function QualifyAiPanel({ snapshot, blind }: { snapshot: QualifySnapshot;
     },
     [snapshot, blind],
   );
+
+  // The auto-ask fires ONCE per mount, after the reset effect above (declaration order), and only
+  // while nothing has run yet — a user who already clicked a chip is never interrupted.
+  const autoAskedRef = useRef(false);
+  useEffect(() => {
+    if (!autoAsk || autoAskedRef.current || active !== null) return;
+    autoAskedRef.current = true;
+    void run(suggestedId);
+  }, [autoAsk, active, run, suggestedId]);
 
   const sections = parseAiSections(text);
   const caret = streaming ? <span aria-hidden className="q-ai-caret ml-0.5 inline-block h-[13px] w-[7px] bg-teal500 align-[-2px]" /> : null;

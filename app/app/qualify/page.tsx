@@ -45,9 +45,9 @@ export default async function QualifyPage() {
   // server strips the dollar VALUES regardless (single choke point in the action core).
   const viewerHasAmountsCapability = role !== 'admissions_seat';
 
-  // ── v3 (P3): ADDITIVE, dark by default ────────────────────────────────────────────────────────
-  // Mounted only when QUALIFY_V3_FLOW is on, and it REPLACES nothing when off — v2 below is
-  // untouched, including its urlState behaviour, which is grandfathered on prod and out of scope.
+  // ── v3: THE RENDERED UI (default ON since 2026-08-06 — Alec's staged-flow directive). v2 below
+  // stays reachable via the QUALIFY_V3_FLOW=off kill switch; its render path is otherwise untouched,
+  // including its urlState behaviour, which is grandfathered on prod and out of scope.
   //
   // NOTE WHAT IS *NOT* HERE: no searchParams. The v3 flow submits through a Server Action, so the
   // typed identifier travels in a POST body and never enters the query string. An earlier version of
@@ -56,7 +56,7 @@ export default async function QualifyPage() {
   // Authorization is re-checked inside the action by requireQualifyPrincipal; this page gate is the
   // routing mirror, not the control.
   if (qualifyV3FlowEnabled()) {
-    return <ResolutionFlowClient />;
+    return <ResolutionFlowClient viewerHasAmountsCapability={viewerHasAmountsCapability} />;
   }
 
   return (
