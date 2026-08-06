@@ -10,7 +10,7 @@ Two separate planes. Never put a file in the wrong directory.
 
 | Plane | Directory | Next number (as of 2026-08-06) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0090** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0092** |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **029** |
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
@@ -99,9 +99,37 @@ every run for weeks over data that was completely fine.
 select has_table_privilege('cmd_rollup_writer', 'collections.<table>', 'SELECT');
 ```
 
-And in the code: **never let a fail-soft catch absorb a 42501.** A permission
-error can never succeed on retry, so absorbing it converts an outage into
-permanently wrong output. Degrade on transient codes; rethrow on 42501.
+⚠ **A GRANT IS ONLY HALF THE GATE, AND `has_table_privilege` ONLY ANSWERS THAT
+HALF.** 0089 granted the SELECT and the alarm still read 23 of 23, because
+`collections.facilities` also has **RLS enabled** and `cmd_rollup_writer` matched
+no policy. Under RLS a role with no applicable policy sees an **empty table — not
+an error**. So the grant satisfied the privilege check and RLS silently filtered
+every row away. 0090 added the policy. Check BOTH:
+
+```sql
+-- gate 1: the GRANT
+select has_table_privilege('cmd_rollup_writer','collections.<table>','SELECT');
+-- gate 2: RLS — is it on, and is there a policy for this role?
+select relrowsecurity from pg_class c join pg_namespace n on n.oid=c.relnamespace
+ where n.nspname='collections' and c.relname='<table>';
+select policyname, roles, cmd from pg_policies
+ where schemaname='collections' and tablename='<table>';
+```
+
+⚠⚠ **YOU CANNOT VERIFY THIS AS `postgres`.** `postgres` has `rolbypassrls = true`
+(measured), so it sees every row regardless of policy — checking a per-role
+visibility problem from a role that bypasses RLS cannot detect it, by
+construction. The Supabase MCP connects as `postgres`, so every MCP query is
+blind to this class. Verify by running the actual job with the actual role's
+credential, or read `pg_policies` directly.
+
+And in the code: **never let a fail-soft catch absorb a 42501**, and **treat
+"zero rows for a non-empty ask" as a misconfiguration, not a data state.** A
+permission error cannot succeed on retry, so absorbing it converts an outage into
+permanently wrong output — and an RLS-filtered read raises nothing at all, so the
+row count is the only signal it leaves. Degrade on transient codes; rethrow on
+42501; rethrow on an all-rows-missing result (see `CensusVisibilityError` in
+`src/collections/qualifyCensusSync.ts`).
 
 ## Conventions
 
