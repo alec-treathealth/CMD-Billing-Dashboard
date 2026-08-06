@@ -95,6 +95,7 @@ function snap(over: Partial<QualifySnapshot>): QualifySnapshot {
     ladder: null,
     provenance: 'direct',
     payerOptions: [],
+    payerOverridden: false,
     ...over,
   };
 }

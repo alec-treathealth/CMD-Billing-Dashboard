@@ -430,3 +430,68 @@ test('comparable path falls back to the modal employer when the spread is unavai
   assert.equal(snap.provenance, 'comparable_employer');
   assert.deepEqual(facCalls[0]!.market, { employers: ['VANDERBILT'] });
 });
+
+// ── The payer drill-down (2026-08-06). Measured: 80.6% of member-weighted searches land on a
+// multi-payer prefix and the top payer is a MINORITY in 15.7%, so the default resolve — right ~84%
+// of the time — needs an escape hatch that does NOT abandon the identifier narrow.
+
+const SPREAD = async () => [
+  { primary_payer: 'AETNA', lines: 120, patients: 9, last_payment: '2026-07-30' },
+  { primary_payer: 'CIGNA', lines: 44, patients: 4, last_payment: '2026-06-02' },
+];
+
+test('payer override scopes to the chosen payer while KEEPING the identifier narrow', async () => {
+  const calls: Array<{ payer: string | null; token: string | null | undefined }> = [];
+  const deps = v2deps(SUPER, {
+    loadPayerSpread: SPREAD,
+    loadFacilities: async (payer, _f, _t, _e, _m, token) => {
+      calls.push({ payer, token });
+      return FAC;
+    },
+  });
+  const snap = await getQualifySnapshotCore(deps, { ...AUTO_IN, payerOverride: 'CIGNA' });
+  assert.equal(snap.resolved?.payerName, 'CIGNA', 'the drill-down payer is the resolved one');
+  assert.equal(snap.payerOverridden, true, 'and the snapshot says the USER chose it');
+  assert.equal(calls[0]!.payer, 'CIGNA');
+  // The distinction from the resolve-by-payer path: the token still scopes the ranking, so this is
+  // "this patient under CIGNA", not "CIGNA's whole book".
+  assert.equal(calls[0]!.token, 'HMAC_TOKEN');
+  assert.equal(snap.resolved?.identifierScoped, true);
+});
+
+test('an override naming a payer the identifier NEVER billed is REJECTED, not honoured', async () => {
+  const deps = v2deps(SUPER, { loadPayerSpread: SPREAD });
+  const snap = await getQualifySnapshotCore(deps, { ...AUTO_IN, payerOverride: 'UNITED HEALTHCARE' });
+  // Falls back to the dominant payer rather than producing a confidently-empty result labelled as
+  // resolved evidence. A hand-edited value must not be able to manufacture that claim.
+  assert.equal(snap.resolved?.payerName, 'AETNA');
+  assert.equal(snap.payerOverridden, false, 'a REJECTED override must never render as honoured');
+});
+
+test('override is exact-match and whitespace-trimmed; empty/blank falls through to the resolve', async () => {
+  const deps = v2deps(SUPER, { loadPayerSpread: SPREAD });
+  const trimmed = await getQualifySnapshotCore(deps, { ...AUTO_IN, payerOverride: '  CIGNA  ' });
+  assert.equal(trimmed.resolved?.payerName, 'CIGNA', 'surrounding whitespace does not defeat the match');
+  for (const v of ['', '   ', null, undefined]) {
+    const snap = await getQualifySnapshotCore(deps, { ...AUTO_IN, payerOverride: v });
+    assert.equal(snap.resolved?.payerName, 'AETNA', `blank override (${JSON.stringify(v)}) uses the resolve`);
+    assert.equal(snap.payerOverridden, false);
+  }
+  // Case differences are NOT coerced — primary_payer is matched exactly everywhere else in core.
+  const wrongCase = await getQualifySnapshotCore(deps, { ...AUTO_IN, payerOverride: 'cigna' });
+  assert.equal(wrongCase.resolved?.payerName, 'AETNA');
+  assert.equal(wrongCase.payerOverridden, false);
+});
+
+test('override cannot survive a spread outage — no evidence means no authorization', async () => {
+  const deps = v2deps(SUPER, {
+    loadPayerSpread: async () => {
+      throw new Error('boom');
+    },
+  });
+  const snap = await getQualifySnapshotCore(deps, { ...AUTO_IN, payerOverride: 'CIGNA' });
+  // The spread IS the authorization set. Losing it must fail CLOSED to the dominant payer, never
+  // fall open to "trust the client".
+  assert.equal(snap.resolved?.payerName, 'AETNA');
+  assert.equal(snap.payerOverridden, false);
+});

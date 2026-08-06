@@ -180,6 +180,27 @@ async function fetchCareSettings(
 }
 
 /**
+ * SQLSTATE 42501 — insufficient_privilege. A permission error is an OUTAGE, not a data state, and
+ * must never be absorbed into a fail-soft default.
+ *
+ * This exists because absorbing it cost months of useless alarm. cmd_rollup_writer had no SELECT on
+ * collections.facilities, so fetchCareSettings raised 42501 on every run; the catch below swallowed
+ * it into an empty map; checkCareSetting then reported "no care_setting on the roster row" for all
+ * 23 facilities; and the run log read `conformance_gap_boards: 23 of 23, status: partial` forever.
+ * A saturated alarm cannot distinguish a real regression from itself — the 6 genuine gaps were
+ * invisible underneath it. Migration 0089 grants the missing SELECT; this stops the next such
+ * omission from hiding for months.
+ *
+ * The rule is already written down elsewhere in this repo, and this module simply failed to apply
+ * it: app/lib/qualify/loaders.ts keeps 42501 OUT of its "registry absent" fail-soft set with the
+ * note "after apply, a permission error is a real outage and must surface, never masquerade as
+ * unseeded". Same lesson, same shape, different module.
+ */
+function isPermissionError(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === '42501';
+}
+
+/**
  * Run one full sync: every configured FACILITY -> one aggregate row (items concatenated across all
  * of its boards), plus bed capacity from the Facility Info board where a name mapping exists.
  * `client` is a cmd_rollup_writer connection; each facility upserts independently.
@@ -234,12 +255,24 @@ export async function runQualifyCensusSync(
     );
   }
 
-  // care_setting for the structural assertion. Fail-soft: if this read fails the sync still runs and
-  // every settingMismatch reads as "unknown" rather than taking the feed down.
+  // care_setting for the structural assertion. Fail-soft on a TRANSIENT failure — a dropped
+  // connection must not take the feed down, and every settingMismatch then reads "unknown".
+  //
+  // But NOT on 42501. A permission error means this read can never succeed, so absorbing it turns
+  // the assertion into a permanent false positive on every facility — which is exactly what happened
+  // before 0089 (see isPermissionError). Rethrowing makes the run 'failed' with the real SQLSTATE in
+  // error_label, which is loud, accurate, and fixable; a silent 'partial' was none of those.
   let careSettings: Map<string, string | null> = new Map();
   try {
     careSettings = await fetchCareSettings(client, facilities.map((f) => f.facilityCode));
   } catch (err) {
+    if (isPermissionError(err)) {
+      throw new Error(
+        'qualify-census: care_setting read denied (SQLSTATE 42501) — cmd_rollup_writer needs ' +
+          'SELECT on collections.facilities (migration 0089). Refusing to run with the ' +
+          'family<->care_setting assertion permanently unasserted.',
+      );
+    }
     console.error(
       `qualify-census: care_setting read failed, family<->care_setting unasserted (${err instanceof Error ? err.message : 'error'})`,
     );

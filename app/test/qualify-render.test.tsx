@@ -871,3 +871,70 @@ test('qualifyIdentifierNarrows: <=3 chars is the prefix narrow, anything longer 
     assert.ok(!(c.memberId !== '' && c.alphaPrefix !== ''));
   }
 });
+
+// ── PAYER RAIL (2026-08-06): the non-blocking drill-down. Measured — 80.6% of member-weighted
+// searches land on a multi-payer prefix, but the dominant payer is right ~84% of the time, so this
+// must NEVER become a gate. These pin both halves: it appears when there is a real choice, and it is
+// completely absent when there is not.
+
+const PAYER_OPTS = [
+  { payer: 'AETNA', lines: 120, patients: 9, lastPayment: '2026-07-30' },
+  { payer: 'CIGNA', lines: 44, patients: 4, lastPayment: '2026-06-02' },
+  { payer: 'BCBS', lines: 36, patients: 3, lastPayment: null },
+];
+
+test('PayerRail — renders every payer with its line count, and marks the active one', async () => {
+  const { PayerRail } = await import('../components/qualify/payer-rail');
+  const html = renderToStaticMarkup(
+    <PayerRail options={PAYER_OPTS} activePayer="AETNA" overridden={false} onSelect={() => {}} />,
+  );
+  for (const p of ['AETNA', 'CIGNA', 'BCBS']) assert.ok(html.includes(p), `${p} is offered`);
+  assert.ok(html.includes('3 payers'), 'the count is stated');
+  assert.ok(html.includes('120 lines') && html.includes('44 lines'), 'evidence rides each chip');
+  assert.ok(html.includes('aria-pressed="true"'), 'the active payer is marked for assistive tech');
+  assert.ok(html.includes('leads'), 'and is explained as the volume winner, not an arbitrary pick');
+});
+
+test('PayerRail — SELF-HIDES at one option or none: no rail, no implied choice', async () => {
+  const { PayerRail } = await import('../components/qualify/payer-rail');
+  const one = renderToStaticMarkup(
+    <PayerRail options={[PAYER_OPTS[0]!]} activePayer="AETNA" overridden={false} onSelect={() => {}} />,
+  );
+  assert.equal(one, '', 'a single payer is not a choice — 17.8% of searches must be untouched');
+  // Empty means "spread not loaded", NOT "one payer". Rendering anything would assert alternatives
+  // were checked and none existed — a claim the component cannot make here.
+  const none = renderToStaticMarkup(
+    <PayerRail options={[]} activePayer="AETNA" overridden={false} onSelect={() => {}} />,
+  );
+  assert.equal(none, '', 'an unloaded spread renders nothing rather than a false all-clear');
+});
+
+test('PayerRail — flags a MINORITY dominant payer instead of presenting it silently', async () => {
+  const { PayerRail } = await import('../components/qualify/payer-rail');
+  // 120 of 380 = 31.6%, under the half-the-lines bar — the 15.7% case.
+  const minority = [...PAYER_OPTS, { payer: 'UMR', lines: 180, patients: 12, lastPayment: '2026-07-01' }];
+  const html = renderToStaticMarkup(
+    <PayerRail options={minority} activePayer="AETNA" overridden={false} onSelect={() => {}} />,
+  );
+  assert.ok(html.includes('is only 120 of 380 claim lines'), 'the thinness is quantified, not hinted');
+  assert.ok(html.includes('check the others'));
+  assert.ok(!html.includes('leads'), 'and it must NOT simultaneously claim the payer leads');
+});
+
+test('PayerRail — a user drill-down is labelled as THEIR choice, not as our resolve', async () => {
+  const { PayerRail } = await import('../components/qualify/payer-rail');
+  const html = renderToStaticMarkup(
+    <PayerRail options={PAYER_OPTS} activePayer="CIGNA" overridden onSelect={() => {}} />,
+  );
+  assert.ok(html.includes('showing your selection'), '"you picked this" and "we picked this" differ');
+  assert.ok(!html.includes('ranked by volume'), 'the resolve wording must not also appear');
+  assert.ok(html.includes('never widens'), 'and the scope promise is stated on the surface');
+});
+
+test('PayerRail — carries NO dollars, so a blind seat and a sighted session see the same rail', async () => {
+  const { PayerRail } = await import('../components/qualify/payer-rail');
+  const html = renderToStaticMarkup(
+    <PayerRail options={PAYER_OPTS} activePayer="AETNA" overridden={false} onSelect={() => {}} />,
+  );
+  assert.ok(!html.includes('$'), 'zero dollar signs — this renders identically for admissions_seat');
+});
