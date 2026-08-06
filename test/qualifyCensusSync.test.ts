@@ -15,6 +15,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type pg from 'pg';
 import { runQualifyCensusSync } from '../src/collections/qualifyCensusSync';
+import { FACILITY_BED_CAPACITY, MONDAY_CENSUS_FACILITIES } from '../src/collections/qualifyCensus';
 
 /**
  * Every query throws, which pins two things at once: no WRITE reaches the table on the
@@ -58,7 +59,11 @@ for (const [label, value] of [
       assert.ok(reads > 0, 'the care_setting read is attempted before any monday I/O');
       assert.equal(stats.facilities_synced, 0, 'no facility is upserted without a credential');
       assert.equal(stats.facilities_failed, stats.facilities_total, 'every facility reports failed');
-      assert.equal(stats.capacity_mapped, 0, 'bed capacity cannot resolve without a credential');
+      // Bed capacity SURVIVES a dead credential now that it is curated in code — that is the point
+      // of curating it. It used to be 0 here because the only source was the monday Facility Info
+      // board. Every residential facility still reports a capacity; no outpatient one does.
+      const residential = MONDAY_CENSUS_FACILITIES.filter((f) => f.family === 'residential').length;
+      assert.equal(stats.capacity_mapped, residential, 'curated capacity does not depend on monday');
       assert.ok(errors.length > 0, 'the failure is reported, never swallowed');
       for (const e of errors) {
         assert.ok(!/Bearer|eyJ/.test(e), 'error output never carries token material');
@@ -70,3 +75,186 @@ for (const [label, value] of [
     }
   });
 }
+
+/**
+ * The two behaviours that ship in the SYNC layer had no coverage at all: the wall-clock budget that
+ * stops a 24-board run from being killed mid-flight, and the curated bed capacity that beats the
+ * (stale) monday board. Both are exercised here without touching the network — the budget test never
+ * reaches monday, and the upsert test stubs `fetch` with canned board payloads.
+ */
+
+/** A client that records every statement so the upsert's bound params can be asserted. */
+function capturingClient(): { client: pg.PoolClient; calls: Array<{ sql: string; params: readonly unknown[] }> } {
+  const calls: Array<{ sql: string; params: readonly unknown[] }> = [];
+  const client = {
+    query: async (sql?: unknown, params?: unknown) => {
+      calls.push({ sql: String(sql), params: (params as unknown[]) ?? [] });
+      // The care_setting read is the only SELECT the sync issues; give it a residential answer.
+      if (/from collections\.facilities/i.test(String(sql))) {
+        return { rows: [{ facility_code: 'NASH', care_setting: 'IP' }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  } as unknown as pg.PoolClient;
+  return { client, calls };
+}
+
+test('wall-clock budget: an exhausted budget SKIPS facilities instead of being killed mid-run', async () => {
+  // budgetMs 0 with a monotonic clock means the guard trips before the first facility, so this needs
+  // no credential and makes no monday call — the guard is checked BEFORE any I/O by design.
+  const { client, calls } = capturingClient();
+  const stats = await runQualifyCensusSync(client, {
+    facilities: [
+      { facilityCode: 'NASH', family: 'residential', boardIds: ['1'] },
+      { facilityCode: 'LSMH', family: 'residential', boardIds: ['2'] },
+    ],
+    today: '2026-08-11',
+    budgetMs: 0,
+    now: (() => {
+      let t = 0;
+      return () => (t += 1000); // every read advances a second: started=1000, first check=2000 > 0
+    })(),
+  });
+  assert.equal(stats.facilities_skipped_budget, 2, 'both facilities skipped, none attempted');
+  assert.equal(stats.facilities_synced, 0);
+  assert.equal(stats.facilities_failed, 0, 'skipped is NOT failed — nothing went wrong, there was no time');
+  assert.equal(stats.boards_synced, 0);
+  assert.ok(
+    !calls.some((c) => /insert into collections\.qualify_facility_census/i.test(c.sql)),
+    'a skipped facility keeps its previous row — stale beats half-written',
+  );
+});
+
+test('upsert: curated bed capacity wins over the board, and los_sample is written (0088)', async () => {
+  const savedKey = process.env.MONDAY_SECRET_API_KEY;
+  const savedFetch = globalThis.fetch;
+  const savedInfo = console.info;
+  const savedWarn = console.warn;
+  process.env.MONDAY_SECRET_API_KEY = 'test-token-not-a-real-key';
+  console.info = () => {};
+  console.warn = () => {};
+
+  // Canned monday responses. The Facility Info board deliberately reports a DIFFERENT bed count
+  // (8) than the curated map holds for NASH (20) — the exact live staleness this precedence fixes.
+  globalThis.fetch = (async (_url: unknown, init: unknown) => {
+    const body = JSON.parse(String((init as { body?: unknown }).body ?? '{}')) as { query: string };
+    const q = body.query;
+    let data: unknown = {};
+    if (/columns \{ id title \}/.test(q)) {
+      data = {
+        boards: [
+          {
+            columns: [
+              { id: 'st', title: 'Admit Status' },
+              { id: 'adm', title: 'ADM Date' },
+              { id: 'dc', title: 'DC Date' },
+              { id: 'auth', title: 'Total Auth Days' },
+              { id: 'ur', title: 'Next UR Date' },
+              { id: 'beds', title: '# of Beds' },
+            ],
+          },
+        ],
+      };
+    } else if (/items \{ name/.test(q)) {
+      data = { boards: [{ items_page: { items: [{ name: 'Nashville Mental Health', column_values: [{ id: 'beds', text: '8' }] }] } }] };
+    } else {
+      // Four admitted clients with computable stays -> clears the 3-sample floor.
+      const mk = (adm: string) => ({
+        column_values: [
+          { id: 'st', text: 'Admitted' },
+          { id: 'adm', text: adm },
+          { id: 'dc', text: '' },
+          { id: 'auth', text: '30' },
+          { id: 'ur', text: '' },
+        ],
+      });
+      data = {
+        boards: [
+          { items_page: { cursor: null, items: [mk('2026-08-01'), mk('2026-08-02'), mk('2026-08-03'), mk('2026-08-04')] } },
+        ],
+      };
+    }
+    return { ok: true, json: async () => ({ data }) } as unknown as Response;
+  }) as unknown as typeof fetch;
+
+  try {
+    const { client, calls } = capturingClient();
+    const stats = await runQualifyCensusSync(client, {
+      facilities: [{ facilityCode: 'NASH', family: 'residential', boardIds: ['7422342993'] }],
+      today: '2026-08-11',
+    });
+    assert.equal(stats.facilities_synced, 1);
+
+    const upsert = calls.find((c) => /insert into collections\.qualify_facility_census/i.test(c.sql));
+    assert.ok(upsert, 'the facility was upserted');
+    // Param order from buildUpsertCensusRowQuery: facility_code, board_id, board_family,
+    // admitted_count, open_beds, bed_capacity, avg_auth_days, avg_los_days, auth_sample,
+    // los_sample, next_ur_date.
+    assert.equal(upsert.params[0], 'NASH');
+    assert.equal(upsert.params[5], FACILITY_BED_CAPACITY['NASH'], 'curated 20 wins over the board’s 8');
+    assert.equal(upsert.params[5], 20);
+    assert.equal(upsert.params[8], 4, 'auth_sample');
+    assert.equal(upsert.params[9], 4, 'los_sample is written (0088)');
+    // The floor no longer lives here: the average is stored honestly and ratingV2 decides.
+    assert.ok(typeof upsert.params[7] === 'number' && (upsert.params[7] as number) > 0, 'avg_los_days stored, not nulled');
+  } finally {
+    globalThis.fetch = savedFetch;
+    console.info = savedInfo;
+    console.warn = savedWarn;
+    if (savedKey === undefined) delete process.env.MONDAY_SECRET_API_KEY;
+    else process.env.MONDAY_SECRET_API_KEY = savedKey;
+  }
+});
+
+test('upsert: a sample BELOW the floor is still stored honestly — suppression is the rating layer’s job', async () => {
+  const savedKey = process.env.MONDAY_SECRET_API_KEY;
+  const savedFetch = globalThis.fetch;
+  const savedInfo = console.info;
+  const savedWarn = console.warn;
+  process.env.MONDAY_SECRET_API_KEY = 'test-token-not-a-real-key';
+  console.info = () => {};
+  console.warn = () => {};
+
+  globalThis.fetch = (async (_url: unknown, init: unknown) => {
+    const body = JSON.parse(String((init as { body?: unknown }).body ?? '{}')) as { query: string };
+    const q = body.query;
+    let data: unknown = {};
+    if (/columns \{ id title \}/.test(q)) {
+      data = { boards: [{ columns: [
+        { id: 'st', title: 'Admit Status' }, { id: 'adm', title: 'ADM Date' },
+        { id: 'dc', title: 'DC Date' }, { id: 'auth', title: 'Total Auth Days' },
+        { id: 'ur', title: 'Next UR Date' },
+      ] }] };
+    } else if (/items \{ name/.test(q)) {
+      data = { boards: [{ items_page: { items: [] } }] };
+    } else {
+      data = { boards: [{ items_page: { cursor: null, items: [
+        { column_values: [
+          { id: 'st', text: 'Admitted' }, { id: 'adm', text: '2026-08-01' },
+          { id: 'dc', text: '' }, { id: 'auth', text: '30' }, { id: 'ur', text: '' },
+        ] },
+      ] } }] };
+    }
+    return { ok: true, json: async () => ({ data }) } as unknown as Response;
+  }) as unknown as typeof fetch;
+
+  try {
+    const { client, calls } = capturingClient();
+    await runQualifyCensusSync(client, {
+      facilities: [{ facilityCode: 'NASH', family: 'residential', boardIds: ['7422342993'] }],
+      today: '2026-08-11',
+    });
+    const upsert = calls.find((c) => /insert into collections\.qualify_facility_census/i.test(c.sql));
+    assert.ok(upsert);
+    assert.equal(upsert.params[9], 1, 'los_sample = 1, below the floor of 3');
+    // THE REGRESSION THIS PINS: the floor used to null this here, which made the rating say "no
+    // length-of-stay data" about a facility that had some. The table now stores what it measured.
+    assert.equal(upsert.params[7], 10, 'avg_los_days stored honestly (2026-08-01 -> 2026-08-11)');
+  } finally {
+    globalThis.fetch = savedFetch;
+    console.info = savedInfo;
+    console.warn = savedWarn;
+    if (savedKey === undefined) delete process.env.MONDAY_SECRET_API_KEY;
+    else process.env.MONDAY_SECRET_API_KEY = savedKey;
+  }
+});

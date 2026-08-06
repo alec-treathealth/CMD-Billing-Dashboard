@@ -28,7 +28,9 @@ import {
   CENSUS_EXCLUDED_BOARD_IDS,
   CENSUS_TITLES,
   CENSUS_WORKSPACE_IDS,
+  FACILITY_BED_CAPACITY,
   MONDAY_CENSUS_FACILITIES,
+  QUALIFY_LOS_MIN_SAMPLE,
   MONDAY_FACILITY_INFO_BOARD,
   aggregateCensusItems,
   buildFacilityCareSettingQuery,
@@ -115,6 +117,35 @@ function isoDate(text: string | null | undefined): string | null {
   return /^\d{4}-\d{2}-\d{2}$/.test(t) ? t : null;
 }
 
+/**
+ * Wall-clock budget before the loop stops STARTING new facilities. The route declares
+ * `maxDuration = 120`, and every monday call here is sequential: ~24 column queries plus ~30 item
+ * pages plus Facility Info. 95s leaves room for the in-flight facility to finish and the run-log
+ * UPDATE to land, so a slow run degrades into "some facilities skipped, recorded as such" rather
+ * than a platform kill that leaves `finished_at IS NULL` and no counts at all.
+ *
+ * This mirrors cmdExplorerCron's DEFAULT_BUDGET_MS guard; .claude/rules/collections-crons.md
+ * requires every roster-looping cron to carry one, and this sync was the exception.
+ */
+export const CENSUS_BUDGET_MS = 95_000;
+
+/** Rotate a list so element `offset` comes first. Pure; total order is otherwise preserved. */
+export function rotateFacilities<T>(items: readonly T[], offset: number): T[] {
+  if (items.length === 0) return [];
+  const k = ((Math.trunc(offset) % items.length) + items.length) % items.length;
+  return [...items.slice(k), ...items.slice(0, k)];
+}
+
+/**
+ * Which facility goes first this run. Derived from the hour so it advances once per scheduled tick
+ * (the cron is hourly) and is deterministic for a given clock — no persisted cursor, no extra
+ * column, and a manual re-run inside the same hour reproduces the same order.
+ */
+export function rotationOffset(nowMs: number, count: number): number {
+  if (count <= 0) return 0;
+  return Math.floor(nowMs / 3_600_000) % count;
+}
+
 export interface CensusSyncStats {
   /** Facilities configured / upserted / skipped because a board of theirs failed. */
   facilities_total: number;
@@ -124,6 +155,10 @@ export interface CensusSyncStats {
   boards_total: number;
   boards_synced: number;
   boards_failed: number;
+  /** Facilities not ATTEMPTED because the wall-clock budget ran out. Distinct from
+   *  facilities_failed: nothing went wrong, there was no time. Rotation means a different set is
+   *  skipped next run, so a persistent value here means the budget is genuinely too tight. */
+  facilities_skipped_budget: number;
   conformance: CensusConformance[];
   capacity_mapped: number;
   /** Facility Info item names with NO roster mapping (PR #73 review): a rename or a new facility
@@ -151,9 +186,27 @@ async function fetchCareSettings(
  */
 export async function runQualifyCensusSync(
   client: pg.PoolClient,
-  opts: { facilities?: readonly CensusFacilityConfig[]; today?: string } = {},
+  opts: {
+    facilities?: readonly CensusFacilityConfig[];
+    today?: string;
+    /** Wall-clock budget before the loop stops starting NEW facilities. Default CENSUS_BUDGET_MS. */
+    budgetMs?: number;
+    /** Monotonic clock for the guard (injectable for tests). Default Date.now. */
+    now?: () => number;
+    /** Index to start the rotation at. Default derives from the hour — see rotateFacilities. */
+    startIndex?: number;
+  } = {},
 ): Promise<CensusSyncStats> {
-  const facilities = opts.facilities ?? MONDAY_CENSUS_FACILITIES;
+  const configured = opts.facilities ?? MONDAY_CENSUS_FACILITIES;
+  const now = opts.now ?? Date.now;
+  const started = now();
+  const budgetMs = opts.budgetMs ?? CENSUS_BUDGET_MS;
+  // ROTATE. The loop is sequential and this sync went from 2 boards to 24, so a run CAN exhaust the
+  // function's 120s. With a fixed iteration order the same tail facilities are starved EVERY run —
+  // TELEHEALTH_MH is last in the registry and would simply never sync, forever, while the run status
+  // still read 'ok' for the facilities that did fit. Rotating the start point makes starvation
+  // transient instead of permanent: over successive hours every facility gets to go first.
+  const facilities = rotateFacilities(configured, opts.startIndex ?? rotationOffset(started, configured.length));
   // "Today" in US Central, not UTC: the boards are US facilities, and a UTC date rolls forward at
   // ~6-7pm CT — which would drop a UR review due TODAY from the chip all evening, and would add a
   // spurious day to every in-house LOS for those hours.
@@ -162,6 +215,7 @@ export async function runQualifyCensusSync(
     facilities_total: facilities.length,
     facilities_synced: 0,
     facilities_failed: 0,
+    facilities_skipped_budget: 0,
     boards_total: facilities.reduce((n, f) => n + f.boardIds.length, 0),
     boards_synced: 0,
     boards_failed: 0,
@@ -191,23 +245,58 @@ export async function runQualifyCensusSync(
     );
   }
 
-  // Bed capacity: Facility Info items are FACILITIES (names are facility names — non-PHI).
+  // Bed capacity: Facility Info items are FACILITIES (names are facility names — non-PHI). Since the
+  // curated FACILITY_BED_CAPACITY became the source of truth, this read exists for exactly two
+  // reasons: to cover a facility the curated map does not carry yet, and to DETECT DIVERGENCE when
+  // the board is updated. Without the divergence check the constant would win forever and a real
+  // bed-count change would be invisible — the inverse of the staleness it was introduced to fix.
   let capacity: Map<string, number> = new Map();
   try {
     const cap = await fetchBedCapacity();
     capacity = cap.byCode;
-    stats.capacity_mapped = capacity.size;
     stats.capacity_unmapped = cap.unmapped;
-    if (cap.unmapped.length > 0) {
-      console.warn(
-        `qualify-census: ${cap.unmapped.length} facility-info name(s) with no roster mapping: ${cap.unmapped.join(', ')}`,
+
+    // A facility-info name with no code mapping only matters when the curated map ALSO lacks that
+    // facility — otherwise its capacity is already known and the name is noise. Reporting all ~21
+    // every hour is how an operator learns to ignore this log, which then hides a real warning.
+    const curatedCodes = new Set(Object.keys(FACILITY_BED_CAPACITY));
+    const unmappedAndUncovered = cap.unmapped.filter((n) => !curatedCodes.has(n));
+    if (unmappedAndUncovered.length > 0) {
+      console.info(
+        `qualify-census: ${unmappedAndUncovered.length} facility-info name(s) with no roster mapping (capacity comes from the curated map, so this is informational): ${unmappedAndUncovered.join(', ')}`,
       );
+    }
+
+    // DIVERGENCE: the board disagreeing with the curated constant is the signal that a facility
+    // opened or closed a house. Warn loudly — this is the one thing the board read is for.
+    for (const [code, curated] of Object.entries(FACILITY_BED_CAPACITY)) {
+      const fromBoard = capacity.get(code);
+      if (fromBoard !== undefined && fromBoard !== curated) {
+        console.warn(
+          `qualify-census: bed-count divergence for ${code} — curated ${curated}, Facility Info board ${fromBoard}. ` +
+            'The curated value is being used. Confirm which is right and update FACILITY_BED_CAPACITY.',
+        );
+      }
     }
   } catch (err) {
     console.error(`qualify-census: facility-info fetch failed (${err instanceof Error ? err.message : 'error'})`);
   }
 
+  // EFFECTIVE capacity coverage, not the board map's size. This is persisted to
+  // collections.qualify_census_run (0087), so reporting `capacity.size` (2, the board matches) while
+  // 13 facilities actually receive a bed count would make the durable metric read as "capacity is
+  // broken" forever — in the very table built to end indistinguishable states.
+  stats.capacity_mapped = facilities.filter(
+    (f) => FACILITY_BED_CAPACITY[f.facilityCode] !== undefined || capacity.has(f.facilityCode),
+  ).length;
+
   for (const facility of facilities) {
+    // Stop STARTING new facilities near the deadline. Checked before any monday I/O so a skipped
+    // facility costs nothing and keeps its previous row — stale beats half-written.
+    if (now() - started > budgetMs) {
+      stats.facilities_skipped_budget++;
+      continue;
+    }
     const t = CENSUS_TITLES[facility.family];
     const items: CensusItem[] = [];
     const missingTitles = new Set<string>();
@@ -268,17 +357,40 @@ export async function runQualifyCensusSync(
     const emptyTitles =
       items.length > 0 ? allTitles.filter((x) => !missingTitles.has(x) && !sawValue.has(x)) : [];
 
+    // Aggregate ONCE, here, so the conformance line can carry the LOS partition. (A facility whose
+    // boards did not all read is still reported below, but is NOT upserted — its partition describes
+    // a partial item set, which is why facilities_failed marks it.)
+    const agg = aggregateCensusItems(items, today, facility.family);
+
     const conformance: CensusConformance = {
       facilityCode: facility.facilityCode,
       family: facility.family,
       boardIds: [...facility.boardIds],
       itemCount: items.length,
+      admittedCount: agg.admittedCount,
+      losSample: agg.losSample,
+      losUnbilledExcluded: agg.losUnbilledExcluded,
+      losUncomputable: agg.losUncomputable,
       missingTitles: [...missingTitles],
       emptyTitles,
       familyMismatch,
       settingMismatch: checkCareSetting(facility.family, careSettings.get(facility.facilityCode)),
     };
     stats.conformance.push(conformance);
+
+    // The LOS partition, reported whenever ANY admitted client is missing from the average. Fires
+    // for BOTH families deliberately: the old line was gated on the unbilled count, which is always
+    // zero for residential — the one family that still scores auth-fit — so the uncomputable case
+    // was invisible exactly where it mattered. The two causes name different owners: 'not billed' is
+    // outpatient data maintenance, 'no usable dates' is ADM/DC hygiene on any board.
+    if (agg.losUnbilledExcluded > 0 || agg.losUncomputable > 0) {
+      console.info(
+        `qualify-census: ${facility.facilityCode} LOS computed for ${agg.losSample} of ${agg.admittedCount} admitted — ` +
+          `${agg.losUnbilledExcluded} not billed (no Total Auth Days, no Next UR Date), ` +
+          `${agg.losUncomputable} billed but no usable ADM/DC dates`,
+      );
+    }
+
     if (conformanceHasGap(conformance)) {
       console.warn(
         `qualify-census: ${facility.facilityCode} [boards ${facility.boardIds.join(',')}] conformance — ` +
@@ -301,17 +413,27 @@ export async function runQualifyCensusSync(
     }
 
     try {
-      const agg = aggregateCensusItems(items, today, facility.family);
+      // NO SAMPLE FLOOR HERE — deliberately. It used to write avg_los_days = NULL below the floor,
+      // which collapsed "withheld as too thin" into "absent" one layer too early: the rating could
+      // no longer tell them apart and its own copy asserted "no length-of-stay data" about a
+      // facility that HAD data, and the measured average was destroyed with nothing to audit it
+      // against. The floor is a SCORING decision and now lives in ratingV2 beside the outpatient
+      // suppression, fed by the `los_sample` / `auth_sample` columns. This table stores what it
+      // measured, honestly.
       const upsert = buildUpsertCensusRowQuery({
         facility_code: facility.facilityCode,
         board_id: representativeBoardId(facility.boardIds),
         board_family: facility.family,
         admitted_count: agg.admittedCount,
         open_beds: agg.openBeds,
-        bed_capacity: capacity.get(facility.facilityCode) ?? null,
+        // CURATED capacity wins over the Facility Info board, which is stale on three facilities
+        // (Nashville 8 vs 20, Opus 18 vs 12, Hillside 18 vs 17 — measured 2026-08-05). The board is
+        // the fallback for a facility the curated map does not carry yet.
+        bed_capacity: FACILITY_BED_CAPACITY[facility.facilityCode] ?? capacity.get(facility.facilityCode) ?? null,
         avg_auth_days: agg.avgAuthDays,
         avg_los_days: agg.avgLosDays,
         auth_sample: agg.authSample,
+        los_sample: agg.losSample,
         next_ur_date: agg.nextUrDate,
       });
       await client.query(upsert.sql, upsert.params);
@@ -322,6 +444,13 @@ export async function runQualifyCensusSync(
         `qualify-census: upsert for ${facility.facilityCode} failed (${err instanceof Error ? err.message : 'error'})`,
       );
     }
+  }
+  if (stats.facilities_skipped_budget > 0) {
+    console.warn(
+      `qualify-census: wall-clock budget (${budgetMs}ms) exhausted — ${stats.facilities_skipped_budget} of ` +
+        `${stats.facilities_total} facilit(ies) not attempted. Rotation means a different set runs first next ` +
+        'hour, so no facility is starved permanently; a persistent value here means the budget is too tight.',
+    );
   }
   return stats;
 }

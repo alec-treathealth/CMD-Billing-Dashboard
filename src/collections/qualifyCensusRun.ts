@@ -221,6 +221,7 @@ export async function runQualifyCensusSyncLogged(deps: QualifyCensusRunDeps): Pr
       facilities_total: 0,
       facilities_synced: 0,
       facilities_failed: 0,
+      facilities_skipped_budget: 0,
       boards_total: 0,
       boards_synced: 0,
       boards_failed: 0,

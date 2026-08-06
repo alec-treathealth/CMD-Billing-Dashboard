@@ -186,6 +186,54 @@ export const CENSUS_WORKSPACE_IDS: readonly string[] = [
 export const MONDAY_FACILITY_INFO_BOARD = '7475219124';
 
 /**
+ * LICENSED BED COUNT per facility — the CURATED source of truth, operator-supplied 2026-08-05.
+ *
+ * WHY CURATED RATHER THAN READ FROM THE BOARD. Capacity was being name-matched against the
+ * `Facility Info` board, and that had failed three different ways at once: the map held only two
+ * keys so 21 facilities wrote `bed_capacity = NULL`, and where it DID match the board was stale.
+ * Measured against the operator's list on 2026-08-05, the board disagrees on three facilities:
+ *
+ *   Nashville   board  8  ->  20   (corroborated by the NASH board's OWN group titles,
+ *                                   'Broad St (8 Beds COED)' + 'Rutland Rd (12 Beds COED)' = 20 —
+ *                                   the board item was only ever counting one house)
+ *   Opus        board 18  ->  12
+ *   Hillside    board 18  ->  17
+ *
+ * Board total 174 vs the operator's 179; those three deltas (-6 +12 -1 = +5) account for the gap
+ * exactly, which is what makes this a correction rather than two guesses.
+ *
+ * Bed count is licensure, not telemetry — it changes when a facility opens or closes a house, which
+ * is a deliberate business event, not a daily drift. An explicit reviewable constant is the right
+ * shape for that; a silent name-match against an unmaintained board is not. The board is still read
+ * as a FALLBACK for a facility absent from this map, and its unmapped names are still reported.
+ *
+ * OUTPATIENT FACILITIES ARE DELIBERATELY ABSENT: they have no beds. `bed_capacity` stays NULL for
+ * them, which is correct, not missing.
+ */
+// `number | undefined` deliberately: app tsc lacks noUncheckedIndexedAccess, so a plain
+// Record<string, number> would type a miss as `number` and make the `?? board` fallback read as dead
+// code in the app package while only root tsc told the truth.
+export const FACILITY_BED_CAPACITY: Readonly<Record<string, number | undefined>> = {
+  // residential, mapped and synced
+  CAMH: 12,
+  DMH: 12,
+  KWC: 16,
+  LAMH: 6,
+  LSMH: 12,
+  NASH: 20,
+  PCMH: 6,
+  TBH: 8,
+  '10021573': 12, // Opus Health
+  '10025950': 16, // Silicon Valley Recovery
+  '10026624': 17, // Hillside Horizon for Teens
+  '10028595': 12, // Revival Mental Health
+  // residential, NOT synced — recorded so the number is not lost when they are onboarded.
+  '10024431': 24, // MHC of San Diego — DEFERRED (care_setting BOTH; needs the census re-grain)
+  // Wellness Recovery Center (6 beds) has no collections.facilities row at all, so it has no
+  // facility_code to key on here. It stays in CENSUS_BLOCKED_BOARDS until it is seeded.
+};
+
+/**
  * Logical column titles per family. The resolver matches case-insensitively on trimmed titles.
  *
  * THERE IS DELIBERATELY NO `los` ENTRY. Nothing reads the LOS formula column any more
@@ -290,7 +338,50 @@ export interface CensusAggregates {
   avgLosDays: number | null;
   authSample: number;
   losSample: number;
+  /** Admitted OUTPATIENT items dropped from the LOS population as not-billed (see isBilledForAuthFit).
+   *  Observability only — nothing scores off it, but a facility that suddenly excludes everyone is a
+   *  board-hygiene problem worth seeing rather than a facility with no length of stay. */
+  losUnbilledExcluded: number;
+  /** Admitted items that PASSED the billed gate but produced no usable LOS — no ADM date, discharged
+   *  with no DC date, or an unparseable/negative span (see computeLosDays).
+   *
+   *  This category exists because reporting only `losSample` and `losUnbilledExcluded` invites the
+   *  reader to conclude they sum to `admittedCount`, and they do not. With all three named the
+   *  partition is EXHAUSTIVE and the identity below holds, which is what a test can pin:
+   *
+   *      admittedCount === losSample + losUnbilledExcluded + losUncomputable
+   *
+   *  It also points at a different owner than the other two: unbilled is an outpatient
+   *  data-maintenance question, uncomputable is ADM/DC hygiene on any board. */
+  losUncomputable: number;
   nextUrDate: string | null;
+}
+
+/**
+ * Does this admitted item belong in the AUTH/LOS metric at all?
+ *
+ * RESIDENTIAL: always. A bed night is billed; there is no meaningful unbilled resident.
+ *
+ * OUTPATIENT: only when the item carries a `Total Auth Days` value OR a `Next UR Date`. Those two
+ * columns are the board's own "this patient is being billed / is under utilization review" signal
+ * (ruling 2026-08-05). Outpatient enrollment is NOT the same quantity as an authorized episode —
+ * a cash-pay or self-pay client can stay enrolled indefinitely with no payer involvement at all —
+ * so averaging their length of stay against authorized days compares two unrelated things.
+ *
+ * The measured consequence of not doing this: FRCA showed avg LOS 223.9 days against 86 authorized,
+ * TREAT_CA 109.1 vs 43, TREAT_TX 81.4 vs 30. `authFit` penalises overrun, so all three scored 0 —
+ * a full 10-weight-point penalty manufactured out of clients the payer was never billed for.
+ *
+ * SCOPE, deliberately narrow: this gate applies to the auth/LOS FACTOR ONLY. An excluded client is
+ * still in admittedCount and open-bed context, and is untouched in every claims-derived factor
+ * (claims reliability, time-to-payment, data confidence, coding) — those read charge lines, not the
+ * census, so a client with no auth but real billed claims still scores on all of them.
+ */
+export function isBilledForAuthFit(family: CensusBoardFamily, item: CensusItem): boolean {
+  if (family === 'residential') return true;
+  const hasAuth = item.authDays !== null && Number.isFinite(item.authDays) && item.authDays > 0;
+  const hasUr = typeof item.urDate === 'string' && item.urDate.trim() !== '';
+  return hasAuth || hasUr;
 }
 
 const round2 = (v: number) => Math.round(v * 100) / 100;
@@ -351,8 +442,9 @@ export function computeLosDays(
  *  - admitted = status label exactly 'Admitted'.
  *  - open beds = status label starting 'Open Bed' (never item names).
  *  - avg auth = over ADMITTED items with a real auth value.
- *  - avg LOS = over ADMITTED items whose LOS is computable (see computeLosDays). Negative values
- *    are dropped: a DC date before the ADM date is a data-entry error on the board, not a stay.
+ *  - avg LOS = over ADMITTED, BILLED items whose LOS is computable (see isBilledForAuthFit and
+ *    computeLosDays). Negative values are dropped: a DC date before the ADM date is a data-entry
+ *    error on the board, not a stay.
  *  - next UR = the SOONEST date on or after `today` across ALL items (a UR on a pending admit still
  *    matters); past dates never surface as "upcoming".
  *
@@ -368,7 +460,11 @@ export function aggregateCensusItems(
   const withAuth = admitted.filter(
     (i) => i.authDays !== null && Number.isFinite(i.authDays) && (i.authDays as number) > 0,
   );
-  const losValues = admitted
+  // The LOS population is the BILLED admitted set, which for residential is all of them and for
+  // outpatient is those carrying an auth or a UR date. Comparing a cash-pay client's open-ended
+  // enrolment against authorized days is not an overrun, it is a category error.
+  const billed = admitted.filter((i) => isBilledForAuthFit(family, i));
+  const losValues = billed
     .map((i) => computeLosDays(family, i.status, i.admDate, i.dcDate, today))
     .filter((v): v is number => v !== null && Number.isFinite(v) && v >= 0);
   const upcoming = items
@@ -383,6 +479,8 @@ export function aggregateCensusItems(
     avgLosDays: losValues.length > 0 ? round2(losValues.reduce((s, v) => s + v, 0) / losValues.length) : null,
     authSample: withAuth.length,
     losSample: losValues.length,
+    losUnbilledExcluded: admitted.length - billed.length,
+    losUncomputable: billed.length - losValues.length,
     nextUrDate: upcoming[0] ?? null,
   };
 }
@@ -426,6 +524,16 @@ export interface CensusConformance {
   /** EVERY board that fed this facility's row — the run report must name them all. */
   boardIds: string[];
   itemCount: number;
+  /** The LOS population, partitioned EXHAUSTIVELY so nobody has to subtract:
+   *  `admittedCount === losSample + losUnbilledExcluded + losUncomputable`.
+   *
+   *  Reported, NOT a gap: an admitted client with no ADM date yet is ordinary, and demoting every
+   *  run to 'partial' for it would make the status meaningless. These carry the board-hygiene signal
+   *  ("avg LOS over 3 of 54") that decides whether a facility's auth-fit number is worth reading. */
+  admittedCount: number;
+  losSample: number;
+  losUnbilledExcluded: number;
+  losUncomputable: number;
   /** Expected titles that did not resolve on at least one board. */
   missingTitles: string[];
   /** Titles that resolved but carried zero values across every item. */
@@ -479,18 +587,20 @@ export function buildUpsertCensusRowQuery(row: {
   avg_auth_days: number | null;
   avg_los_days: number | null;
   auth_sample: number;
+  /** 0088. Pairs with auth_sample so the rating can gate on min(auth, los) rather than one side. */
+  los_sample: number;
   next_ur_date: string | null;
 }): { sql: string; params: unknown[] } {
   return {
     sql:
       'insert into collections.qualify_facility_census ' +
-      '(facility_code, board_id, board_family, admitted_count, open_beds, bed_capacity, avg_auth_days, avg_los_days, auth_sample, next_ur_date, synced_at) ' +
-      'values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date, now()) ' +
+      '(facility_code, board_id, board_family, admitted_count, open_beds, bed_capacity, avg_auth_days, avg_los_days, auth_sample, los_sample, next_ur_date, synced_at) ' +
+      'values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::date, now()) ' +
       'on conflict (facility_code) do update set ' +
       'board_id = excluded.board_id, board_family = excluded.board_family, admitted_count = excluded.admitted_count, ' +
       'open_beds = excluded.open_beds, bed_capacity = excluded.bed_capacity, avg_auth_days = excluded.avg_auth_days, ' +
-      'avg_los_days = excluded.avg_los_days, auth_sample = excluded.auth_sample, next_ur_date = excluded.next_ur_date, ' +
-      'synced_at = now()',
+      'avg_los_days = excluded.avg_los_days, auth_sample = excluded.auth_sample, los_sample = excluded.los_sample, ' +
+      'next_ur_date = excluded.next_ur_date, synced_at = now()',
     params: [
       row.facility_code,
       row.board_id,
@@ -501,6 +611,7 @@ export function buildUpsertCensusRowQuery(row: {
       row.avg_auth_days,
       row.avg_los_days,
       row.auth_sample,
+      row.los_sample,
       row.next_ur_date,
     ],
   };
@@ -533,11 +644,24 @@ export function representativeBoardId(boardIds: readonly string[]): string {
   return [...boardIds].sort(compareBoardIds)[0] ?? '';
 }
 
-/** Read every facility's census aggregates (the rating factor's seam — tiny table, whole read). */
+/**
+ * Minimum number of computable LOS values before an average is worth scoring.
+ *
+ * A mean over one or two stays is noise, and the auth/LOS factor carries 10 of 100 weight points —
+ * enough for a two-row sample to move a facility's band. Set to 3 to match the lower tier of the
+ * repo's existing patient-count idiom (`sampleGate.ts`, tiers 3 / 10) rather than inventing a third
+ * threshold. Below the floor the average is written NULL, which renders the factor unavailable and
+ * renormalizes its weight away — no score, rather than a confident wrong one.
+ */
+export const QUALIFY_LOS_MIN_SAMPLE = 3;
+
+/** Read every facility's census aggregates (the rating factor's seam — tiny table, whole read).
+ *  `board_family` rides along because the rating suppresses auth/LOS for outpatient outright. */
 export function buildQualifyCensusReadQuery(): { sql: string; params: unknown[] } {
   return {
     sql:
-      'select facility_code, avg_auth_days::float8 as avg_auth_days, avg_los_days::float8 as avg_los_days, ' +
+      'select facility_code, board_family, avg_auth_days::float8 as avg_auth_days, avg_los_days::float8 as avg_los_days, ' +
+      'auth_sample, los_sample, ' +
       "to_char(next_ur_date, 'YYYY-MM-DD') as next_ur_date, open_beds " +
       'from collections.qualify_facility_census',
     params: [],

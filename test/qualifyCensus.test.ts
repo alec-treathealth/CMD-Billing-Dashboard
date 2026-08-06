@@ -23,11 +23,15 @@ import {
   conformanceHasGap,
   daysBetweenUtc,
   emptyResolvedColumns,
+  FACILITY_BED_CAPACITY,
+  isBilledForAuthFit,
+  QUALIFY_LOS_MIN_SAMPLE,
   representativeBoardId,
   resolveCensusColumns,
   type CensusConformance,
   type CensusItem,
 } from '../src/collections/qualifyCensus';
+import { rotateFacilities, rotationOffset } from '../src/collections/qualifyCensusSync';
 
 // --- column resolution ---------------------------------------------------------
 
@@ -219,8 +223,13 @@ test('aggregation: the SAME items yield a different avg LOS per family, by exact
   ];
   // Both are DISCHARGED, so both take the branch where the formulas differ. Aggregation must not be
   // family-agnostic: 'Admitted' filtering is on the status label, and 'Discharged' items are
-  // excluded from the average — so use admitted items to see the delta.
-  const inHouse: CensusItem[] = [item({ admDate: '2026-08-01' }), item({ admDate: '2026-08-03' })];
+  // excluded from the average — so use admitted items to see the delta. They carry an auth value so
+  // the outpatient billed-gate keeps them (see isBilledForAuthFit); without one the OP average would
+  // be null and this would be testing the gate instead of the formula.
+  const inHouse: CensusItem[] = [
+    item({ admDate: '2026-08-01', authDays: 30 }),
+    item({ admDate: '2026-08-03', authDays: 30 }),
+  ];
   const res = aggregateCensusItems(inHouse, '2026-08-11', 'residential');
   const op = aggregateCensusItems(inHouse, '2026-08-11', 'outpatient');
   assert.equal(res.avgLosDays, 9); // (10+8)/2 — in-house branch, no +1 in either family
@@ -228,6 +237,122 @@ test('aggregation: the SAME items yield a different avg LOS per family, by exact
   // And a discharged-only board contributes nothing to the average either way (not 'Admitted').
   assert.equal(aggregateCensusItems(items, '2026-08-11', 'residential').avgLosDays, null);
   assert.equal(aggregateCensusItems(items, '2026-08-11', 'residential').losSample, 0);
+});
+
+test('isBilledForAuthFit: residential always; outpatient needs an auth OR a UR date', () => {
+  const mk = (over: Partial<CensusItem>): CensusItem => item(over);
+  // Residential: a bed night is billed, so every admitted resident counts.
+  assert.equal(isBilledForAuthFit('residential', mk({ authDays: null, urDate: null })), true);
+  // Outpatient: either signal is enough...
+  assert.equal(isBilledForAuthFit('outpatient', mk({ authDays: 30, urDate: null })), true);
+  assert.equal(isBilledForAuthFit('outpatient', mk({ authDays: null, urDate: '2026-09-01' })), true);
+  assert.equal(isBilledForAuthFit('outpatient', mk({ authDays: 30, urDate: '2026-09-01' })), true);
+  // ...and neither means the client is not being billed — cash-pay, self-pay, unbilled.
+  assert.equal(isBilledForAuthFit('outpatient', mk({ authDays: null, urDate: null })), false);
+  assert.equal(isBilledForAuthFit('outpatient', mk({ authDays: 0, urDate: null })), false, 'a zero auth is not an auth');
+  assert.equal(isBilledForAuthFit('outpatient', mk({ authDays: null, urDate: '  ' })), false, 'blank is not a date');
+});
+
+test('aggregation: OUTPATIENT LOS counts only BILLED clients — the cash-pay distortion', () => {
+  // Measured motivation: including unbilled clients gave FRCA 223.9 avg LOS days against 86
+  // authorized, scoring authFit 0 on clients the payer was never billed for.
+  const items: CensusItem[] = [
+    item({ authDays: 30, admDate: '2026-08-01' }), // billed by auth -> 10 days
+    item({ authDays: null, urDate: '2026-09-01', admDate: '2026-08-05' }), // billed by UR -> 6 days
+    item({ authDays: null, urDate: null, admDate: '2025-01-01' }), // CASH PAY, 587 days — excluded
+    item({ authDays: null, urDate: null, admDate: '2025-02-01' }), // CASH PAY, 556 days — excluded
+  ];
+  const op = aggregateCensusItems(items, '2026-08-11', 'outpatient');
+  assert.equal(op.avgLosDays, 8, '(10+6)/2 — the two open-ended cash-pay stays are not in the average');
+  assert.equal(op.losSample, 2);
+  assert.equal(op.losUnbilledExcluded, 2);
+  assert.equal(op.admittedCount, 4, 'census context still counts every admitted client');
+
+  // The SAME items on a residential board keep everyone: a bed night is billed.
+  const res = aggregateCensusItems(items, '2026-08-11', 'residential');
+  assert.equal(res.losSample, 4);
+  assert.equal(res.losUnbilledExcluded, 0);
+  assert.ok((res.avgLosDays ?? 0) > 250, 'residential averages all four, including the long stays');
+});
+
+test('aggregation: an OP facility with NO billed clients yields a null LOS, not a fabricated one', () => {
+  // Correct downstream: ratingV2 marks authFit unavailable and now says LOS is the missing half.
+  const op = aggregateCensusItems(
+    [item({ authDays: null, urDate: null, admDate: '2026-01-01' })],
+    '2026-08-11',
+    'outpatient',
+  );
+  assert.equal(op.avgLosDays, null);
+  assert.equal(op.losSample, 0);
+  assert.equal(op.losUnbilledExcluded, 1);
+});
+
+test('the billed gate touches LOS ONLY — auth, open beds and next UR are unchanged', () => {
+  const items: CensusItem[] = [
+    item({ authDays: 40, admDate: '2026-08-01' }),
+    item({ authDays: null, urDate: null, admDate: '2026-08-01' }), // unbilled: out of LOS, in everything else
+    item({ status: 'Open Bed (Male)' }),
+    item({ status: 'Pending Admit', urDate: '2026-08-20' }),
+  ];
+  const op = aggregateCensusItems(items, '2026-08-11', 'outpatient');
+  assert.equal(op.avgAuthDays, 40, 'the auth average is unaffected by the LOS gate');
+  assert.equal(op.authSample, 1);
+  assert.equal(op.openBeds, 1, 'open-bed context is unaffected');
+  assert.equal(op.nextUrDate, '2026-08-20', 'the UR banner is unaffected');
+  assert.equal(op.admittedCount, 2);
+  assert.equal(op.losSample, 1);
+});
+
+test('the LOS partition is EXHAUSTIVE: admitted = sample + unbilled + uncomputable', () => {
+  // The identity is the point. Reporting only two of the three categories invites the reader to
+  // subtract and get the wrong answer, which is exactly what the old log line did. A test on the
+  // identity survives a future change to ANY of the three filters, where a reworded string would not.
+  const cases: Array<{ items: CensusItem[]; family: 'residential' | 'outpatient' }> = [
+    {
+      family: 'outpatient',
+      items: [
+        item({ authDays: 30, admDate: '2026-08-01' }), // billed + computable
+        item({ authDays: 30, admDate: null }), // billed, NO adm -> uncomputable
+        item({ authDays: null, urDate: null, admDate: '2026-08-01' }), // not billed
+        item({ status: 'Discharged', admDate: '2026-01-01', dcDate: '2026-01-05' }), // not admitted
+        item({ status: 'Open Bed (Male)' }), // not admitted
+      ],
+    },
+    {
+      family: 'residential',
+      items: [
+        item({ admDate: '2026-08-01' }),
+        item({ admDate: null }), // uncomputable
+        item({ status: 'Admitted', admDate: '2026-08-01', dcDate: null }),
+      ],
+    },
+    { family: 'residential', items: [] },
+  ];
+  for (const { items, family } of cases) {
+    const agg = aggregateCensusItems(items, '2026-08-11', family);
+    assert.equal(
+      agg.admittedCount,
+      agg.losSample + agg.losUnbilledExcluded + agg.losUncomputable,
+      `partition must be exhaustive for ${family} (${JSON.stringify(agg)})`,
+    );
+  }
+});
+
+test('losUncomputable isolates BILLED-but-undateable from NOT-BILLED — different owners', () => {
+  const agg = aggregateCensusItems(
+    [
+      item({ authDays: 30, admDate: '2026-08-01' }), // counted
+      item({ authDays: 30, admDate: null }), // billed, no ADM date -> board hygiene
+      item({ authDays: 30, status: 'Discharged', admDate: '2026-08-01', dcDate: null }), // not admitted
+      item({ authDays: null, urDate: null, admDate: '2026-08-01' }), // not billed -> OP data maintenance
+    ],
+    '2026-08-11',
+    'outpatient',
+  );
+  assert.equal(agg.losSample, 1);
+  assert.equal(agg.losUnbilledExcluded, 1, 'no auth and no UR');
+  assert.equal(agg.losUncomputable, 1, 'billed but no ADM date');
+  assert.equal(agg.admittedCount, 3);
 });
 
 test('aggregation: a DC date before the ADM date is dropped, not averaged as a negative', () => {
@@ -303,6 +428,10 @@ test('conformanceHasGap: all four causes count, and a clean line does not', () =
     family: 'residential',
     boardIds: ['7422342993'],
     itemCount: 233,
+    admittedCount: 15,
+    losSample: 15,
+    losUnbilledExcluded: 0,
+    losUncomputable: 0,
     missingTitles: [],
     emptyTitles: [],
     familyMismatch: null,
@@ -374,6 +503,65 @@ test('registry: the four blocked boards are exactly the known-unrostered ones, e
   }
 });
 
+test('bed capacity: every RESIDENTIAL facility is curated; outpatient facilities have none', () => {
+  // The operator's list is the source of truth (2026-08-05); the Facility Info board is stale on
+  // three facilities and left 21 at NULL. Beds are licensure, so every residential facility we sync
+  // must carry a number — a NULL here is the old silent failure coming back.
+  for (const f of MONDAY_CENSUS_FACILITIES) {
+    const beds = FACILITY_BED_CAPACITY[f.facilityCode];
+    if (f.family === 'residential') {
+      assert.equal(typeof beds, 'number', `${f.facilityCode} (residential) has no curated bed count`);
+      assert.ok((beds as number) > 0, `${f.facilityCode} bed count must be positive`);
+    } else {
+      assert.equal(beds, undefined, `${f.facilityCode} is outpatient and must NOT have beds`);
+    }
+  }
+  // The three corrections against the Facility Info board, pinned so a later "sync from the board"
+  // cannot silently reintroduce them.
+  assert.equal(FACILITY_BED_CAPACITY['NASH'], 20, 'board said 8 — it counted one of two houses');
+  assert.equal(FACILITY_BED_CAPACITY['10021573'], 12, 'board said 18');
+  assert.equal(FACILITY_BED_CAPACITY['10026624'], 17, 'board said 18');
+  // MHC is deferred, not synced, but its number is recorded so onboarding does not have to re-ask.
+  assert.equal(FACILITY_BED_CAPACITY['10024431'], 24);
+  // The 12 synced residential facilities plus deferred MHC.
+  assert.equal(Object.keys(FACILITY_BED_CAPACITY).length, 13);
+});
+
+test('QUALIFY_LOS_MIN_SAMPLE matches the repo sample-gate idiom rather than inventing a threshold', () => {
+  // app/lib/qualify/sampleGate.ts tiers on distinct patients at QUALIFY_RATING_MIN_PATIENTS = 3 and
+  // QUALIFY_RATING_CONFIDENT_PATIENTS = 10. The LOS floor reuses the LOWER tier so the codebase has
+  // one vocabulary for "too few to score", not three. Not imported here: that constant lives in the
+  // app package and this is the root suite — the pin is the number plus this note.
+  assert.equal(QUALIFY_LOS_MIN_SAMPLE, 3);
+});
+
+test('rotateFacilities: total order preserved, offset wraps, and it is safe on empty/negative', () => {
+  // Rotation is what stops a wall-clock timeout from starving the SAME tail facilities forever.
+  const xs = ['a', 'b', 'c', 'd'];
+  assert.deepEqual(rotateFacilities(xs, 0), ['a', 'b', 'c', 'd']);
+  assert.deepEqual(rotateFacilities(xs, 1), ['b', 'c', 'd', 'a']);
+  assert.deepEqual(rotateFacilities(xs, 3), ['d', 'a', 'b', 'c']);
+  assert.deepEqual(rotateFacilities(xs, 4), ['a', 'b', 'c', 'd'], 'wraps');
+  assert.deepEqual(rotateFacilities(xs, 9), ['b', 'c', 'd', 'a']);
+  assert.deepEqual(rotateFacilities(xs, -1), ['d', 'a', 'b', 'c'], 'negative wraps forward');
+  assert.deepEqual(rotateFacilities([], 3), []);
+  // Every element survives exactly once — a rotation that dropped one would silently stop syncing it.
+  for (let k = 0; k < 8; k++) assert.deepEqual([...rotateFacilities(xs, k)].sort(), ['a', 'b', 'c', 'd']);
+});
+
+test('rotationOffset advances once per hour and covers every position over a day', () => {
+  const HOUR = 3_600_000;
+  const n = MONDAY_CENSUS_FACILITIES.length;
+  const base = 1_800_000_000_000; // fixed epoch ms; Date.now() is not used in tests
+  assert.equal(rotationOffset(base, n), rotationOffset(base + HOUR - 1, n), 'stable within an hour');
+  assert.notEqual(rotationOffset(base, n), rotationOffset(base + HOUR, n), 'advances on the next hour');
+  // Over `n` consecutive hours every facility gets to go first — the starvation guarantee.
+  const seen = new Set<number>();
+  for (let h = 0; h < n; h++) seen.add(rotationOffset(base + h * HOUR, n));
+  assert.equal(seen.size, n, 'every start position is reached within one full cycle');
+  assert.equal(rotationOffset(base, 0), 0, 'empty registry is safe');
+});
+
 test('representativeBoardId: the LOWEST id, deterministically, regardless of config order', () => {
   assert.equal(representativeBoardId(['18405687473', '18394268978']), '18394268978');
   assert.equal(representativeBoardId(['18394268978', '18405687473']), '18394268978');
@@ -408,16 +596,20 @@ test('builders: fixed identifiers, bound params, ::date cast on the UR date', ()
     avg_auth_days: 18.5,
     avg_los_days: 16.33,
     auth_sample: 14,
+    los_sample: 12,
     next_ur_date: '2026-08-05',
   });
   assert.match(up.sql, /insert into collections\.qualify_facility_census/);
   assert.match(up.sql, /on conflict \(facility_code\) do update/);
-  assert.equal(up.params.length, 10);
+  assert.match(up.sql, /\blos_sample\b/, '0088: the LOS sample rides with auth_sample');
+  assert.equal(up.params.length, 11);
   assert.ok(!up.sql.includes('10030911'), 'values bound, never inlined');
 
   const read = buildQualifyCensusReadQuery();
   assert.match(read.sql, /from collections\.qualify_facility_census/);
   assert.doesNotMatch(read.sql, /select \*/i);
+  // board_family rides along so the rating can suppress auth/LOS for outpatient outright.
+  assert.match(read.sql, /\bboard_family\b/);
 
   const care = buildFacilityCareSettingQuery(['NASH', '10021573']);
   assert.match(care.sql, /from collections\.facilities/);
