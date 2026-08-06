@@ -129,7 +129,8 @@ function findingsMapOf(snap: QualifySnapshot | null): ReadonlyMap<string, Qualif
 }
 import { WindowLadder } from '@/components/qualify/window-ladder';
 import { QualifyAiPanel } from '@/components/qualify/qualify-ai-panel';
-import { BookKpiTiles, EvidenceGauge, HeatingUpCards, HeatingUpSkeleton } from '@/components/qualify/overview';
+import { BookKpiTiles, EvidenceGauge } from '@/components/qualify/overview';
+import { HeatingUpCards, HeatingUpSkeleton } from '@/components/qualify/shared/heating-ticker';
 import { WindowControl } from '@/components/qualify/window-control';
 import { VobModal } from '@/components/qualify/vob-modal';
 import { QualifyLandingHero } from '@/components/qualify/landing-hero';

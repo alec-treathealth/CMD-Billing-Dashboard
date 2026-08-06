@@ -1,33 +1,281 @@
 'use client';
 
 /**
- * Client shell for the v3 flow. It exists for exactly one reason: to hold the action state so the
- * typed term travels in a POST body instead of a query string.
+ * Client shell for the staged v3 flow — owns the state, the motion, and the PHI discipline.
  *
- * The term lives in this component's `useActionState` result and in the uncontrolled input's DOM
- * value — never lifted, never persisted, never in the URL. That is the same discipline `IdentityForm`
- * already applies to patient inputs on the v2 surface.
+ * ── WHERE THE TYPED IDENTIFIER LIVES ────────────────────────────────────────────────────────────
+ * In `termRef` — JS memory only (the IdentityForm discipline). It is captured from the identify
+ * form's FormData at dispatch and INJECTED into every later submission the same way, so it is never
+ * rendered into the DOM as a hidden field, never in a URL, never persisted. What renders is
+ * `handle.echo`, prefix-safe by construction ('' for a full member id). This is also what lets a
+ * full-member-id search survive the plan-pick round trip: the earlier S1/S2 forms round-tripped the
+ * EMPTY echo as the term, which re-resolved a full-id search as 'empty' — carrying the term in the
+ * ref instead of the DOM fixes that without ever writing the id anywhere readable.
  *
- * Everything else is delegated: `ResolutionFlow` is a pure presentational component (server-renderable
- * and therefore assertable with `renderToStaticMarkup`), and all resolution logic is in the Server
- * Action. This file holds no business rule, so there is nothing here for the flow's tests to miss.
+ * ── STAGE MACHINE ───────────────────────────────────────────────────────────────────────────────
+ * `deriveStage` is pure (resolution × payerPick × picked). The shell adds one escape hatch —
+ * `backTo`, set by the receipt's Change buttons — and clears client choices when the user goes
+ * back, so a stale carrier pick can never scope a new plan pick (the payer-override stale-read
+ * class of bug, PR #124's lesson, applied here by construction).
+ *
+ * ── MOTION ──────────────────────────────────────────────────────────────────────────────────────
+ * GSAP, the requested idiom: the incoming stage slides up 14px/220ms ease-out; tiles stagger
+ * min(index,3)×60ms (capped — a 186-plan list must not cascade forever). One easing. Disabled
+ * entirely under prefers-reduced-motion. Motion narrates progression; it never gates input.
  */
-import { useActionState } from 'react';
+import { useActionState, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import gsap from 'gsap';
 import { resolveCoverageAction } from '../../../lib/qualify/v3-actions';
-// V3_INITIAL_STATE comes from a PLAIN module, never from the 'use server' one: a non-function export
-// there is registered as a Server Action and throws at runtime for the whole page's action entry.
+// V3_INITIAL_STATE comes from a PLAIN module, never the 'use server' one: a non-function export
+// there is registered as a Server Action and 500s every action on the page (see v3FlowState.ts).
 import { V3_INITIAL_STATE } from '../../../lib/qualify/v3FlowState';
-import { ResolutionFlow } from './resolution-flow';
+import { getQualifyFacilityTrends, getQualifySnapshot } from '../../../lib/qualify/actions';
+import type { QualifyFacilityTrend, QualifySnapshot, QualifyTrailingDays } from '../../../lib/qualify/contract';
+import { QualifyAiPanel } from '../qualify-ai-panel';
+import { HeatingUpCards, HeatingUpSkeleton } from '../shared/heating-ticker';
+import { deriveStage, ResolutionStages, type FlowStage } from './resolution-flow';
 
-export function ResolutionFlowClient(): React.ReactElement {
-  const [state, formAction] = useActionState(resolveCoverageAction, V3_INITIAL_STATE);
+/** The ticker's own window — see the fetch effect for why 90 days rather than 30. */
+const TICKER_WINDOW = { kind: 'trailing', days: 90 } as const;
+
+export function ResolutionFlowClient({
+  viewerHasAmountsCapability,
+}: {
+  viewerHasAmountsCapability: boolean;
+}): React.ReactElement {
+  const [state, formAction, isPending] = useActionState(resolveCoverageAction, V3_INITIAL_STATE);
+
+  // The raw term — JS memory only. See the header block before moving this anywhere.
+  const termRef = useRef<string>('');
+
+  const [payerPick, setPayerPick] = useState<string | null>(null);
+  const [picked, setPicked] = useState(false);
+  const [planFilter, setPlanFilter] = useState('');
+  const [autoAsk, setAutoAsk] = useState(false);
+  const [backTo, setBackTo] = useState<FlowStage | null>(null);
+  const [snapshot, setSnapshot] = useState<QualifySnapshot | null>(null);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
+  const [payerOverride, setPayerOverride] = useState<string | null>(null);
+  const [windowDays, setWindowDays] = useState<QualifyTrailingDays | null>(null);
+  // The landing ticker. `null` = still loading (renders the skeleton, which reserves the strip's
+  // height so a 2.5-5s trend query cannot shove the search box down the page); [] = loaded empty.
+  const [trends, setTrends] = useState<QualifyFacilityTrend[] | null>(null);
+
+  /** A new identify submit invalidates every downstream choice — clear them BEFORE dispatching. */
+  const identifyAction = useCallback(
+    (fd: FormData) => {
+      const term = fd.get('term');
+      termRef.current = typeof term === 'string' ? term : '';
+      setPayerPick(null);
+      setPicked(false);
+      setPlanFilter('');
+      setAutoAsk(false);
+      setBackTo(null);
+      setSnapshot(null);
+      setSnapshotError(null);
+      setPayerOverride(null);
+      setWindowDays(null);
+      formAction(fd);
+    },
+    [formAction],
+  );
+
+  /** A plan pick: inject the held term (never from the DOM), mark picked, dispatch. */
+  const planAction = useCallback(
+    (fd: FormData) => {
+      fd.set('term', termRef.current);
+      setPicked(true);
+      setBackTo(null);
+      setSnapshot(null);
+      setSnapshotError(null);
+      formAction(fd);
+    },
+    [formAction],
+  );
+
+  const onChange = useCallback((target: 'identify' | 'payer' | 'plan') => {
+    // Going back CLEARS what was decided at and after that stage — a kept-but-hidden choice is how
+    // one client's ranking ends up scoped to another's payer.
+    setSnapshot(null);
+    setSnapshotError(null);
+    setAutoAsk(false);
+    setPayerOverride(null);
+    setWindowDays(null);
+    setPicked(false);
+    if (target !== 'plan') setPayerPick(null);
+    setPlanFilter('');
+    setBackTo(target);
+  }, []);
+
+  const derived = deriveStage({ resolution: state.resolution, payerPick, picked });
+  // The receipt's Change can only step BACKWARD from what is derivable; any submit clears it.
+  const stage: FlowStage = backTo ?? derived;
+
+  // ── The pick→ranking bridge (review Critical 1) ────────────────────────────────────────────────
+  // The pick is in VOB vocabulary; the snapshot's payerOverride is in claims vocabulary. The chosen
+  // group carries its own confirmed claims labels (claimsPayerLabels, resolutionService §5b), so the
+  // ranking is scoped to the payer the user actually picked. A user chip click outranks the bridge;
+  // the core validates whatever is sent against the token's own spread, so this can only align
+  // scope, never widen it. When the bridge is empty (unmapped / no claims), nothing is sent and the
+  // answer stage SAYS the ranking is dominant-payer scoped instead of implying it is the pick's.
+  const pickLabel = state.resolution?.group.claimsPayerLabels[0] ?? null;
+  const sentOverride = payerOverride ?? pickLabel;
+  const scopeSource: 'user' | 'pick' | 'dominant' =
+    payerOverride !== null ? 'user' : pickLabel !== null ? 'pick' : 'dominant';
+
+  // ── Snapshot for the answer stage — the hardened v2 data path under the new UI ────────────────
+  const predicateId = state.resolution?.predicateId ?? null;
+  useEffect(() => {
+    if (stage !== 'answer' || predicateId === null || isPending) return;
+    const term = termRef.current;
+    if (term === '') return; // nothing held (e.g. hot-reload mid-flow); the answer stage keeps its loading state
+    let alive = true;
+    setSnapshotError(null);
+    getQualifySnapshot({
+      query: term,
+      window: { kind: 'trailing', days: windowDays ?? 90 },
+      auto: windowDays === null,
+      ...(sentOverride !== null ? { payerOverride: sentOverride } : {}),
+    })
+      .then((s) => {
+        if (alive) setSnapshot(s);
+      })
+      .catch(() => {
+        if (alive) {
+          setSnapshot(null);
+          setSnapshotError('failed');
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [stage, predicateId, isPending, sentOverride, windowDays]);
+
+  // ── The landing ticker: fetched ONCE on mount, book-wide, independent of the search ───────────
+  // Trailing 90 days rather than 30: the strip ranks by rating DELTA against the prior equivalent
+  // period, and at 30 days a single claim can swing a facility's delta by double digits. Fail-soft to
+  // an empty strip — the trend query is orientation, and it must never block the search box.
+  useEffect(() => {
+    let alive = true;
+    getQualifyFacilityTrends(TICKER_WINDOW)
+      .then((t) => {
+        if (alive) setTrends(t);
+      })
+      .catch(() => {
+        if (alive) setTrends([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // ── Focus follows the question (review: stage swaps unmount the focused element) ──────────────
+  // Without this, clicking a tile drops focus to <body> and a keyboard user re-tabs from the top at
+  // every stage. The stage's own <h2> takes focus (tabIndex={-1} in the Stage chrome), which also
+  // makes a screen reader read the new question. Skipped on first render — stealing focus from the
+  // search input on page load would be worse than nothing.
+  const prevStageRef = useRef<FlowStage | null>(null);
+  useEffect(() => {
+    const prev = prevStageRef.current;
+    prevStageRef.current = stage;
+    if (prev === null || prev === stage) return;
+    document.getElementById(`qualify-s-${stage}-heading`)?.focus();
+  }, [stage]);
+
+  // ── Motion ─────────────────────────────────────────────────────────────────────────────────────
+  // Keyed on the stage AND on the snapshot's arrival, so the answer stage's scorecards get their
+  // entrance too (they land after the stage does). The re-fetch already blanks to a skeleton, so the
+  // fade-in on a re-scope reads as the refresh it is.
+  const hasSnapshot = snapshot !== null;
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    const el = stageRef.current;
+    if (!el || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const ctx = gsap.context(() => {
+      gsap.fromTo(el, { autoAlpha: 0, y: 14 }, { autoAlpha: 1, y: 0, duration: 0.22, ease: 'power2.out' });
+      const tiles = el.querySelectorAll('[data-v3-tile]');
+      if (tiles.length > 0) {
+        gsap.fromTo(
+          tiles,
+          { autoAlpha: 0, y: 10 },
+          {
+            autoAlpha: 1,
+            y: 0,
+            duration: 0.15,
+            ease: 'power2.out',
+            delay: 0.08,
+            stagger: (i: number) => Math.min(i, 3) * 0.06,
+          },
+        );
+      }
+    }, el);
+    return () => ctx.revert();
+  }, [stage, hasSnapshot]);
+
   return (
-    <ResolutionFlow
-      resolution={state.resolution}
-      reason={state.reason}
-      echo={state.echo}
-      denied={state.denied}
-      action={formAction}
-    />
+    // THE PAGE CHROME. Matching the v2 tab's <main> exactly, because the route layout supplies none:
+    // the first staged build returned a bare <div> and rendered the h1 flush against the viewport's
+    // top-left corner with zero padding. max-w-[1680px] is the design system's wide-desktop bound.
+    <main ref={stageRef} className="mx-auto max-w-[1680px] p-6 sm:p-8">
+      <ResolutionStages
+        ticker={
+          trends === null ? (
+            <HeatingUpSkeleton />
+          ) : (
+            // readOnly: v3 resolves a MEMBER, not a facility, so there is no facility-first drill to
+            // click into. Inert cards beat buttons that no-op.
+            <HeatingUpCards trends={trends} window={TICKER_WINDOW} readOnly />
+          )
+        }
+        stage={stage}
+        resolution={state.resolution}
+        reason={state.reason}
+        echo={state.echo}
+        denied={state.denied}
+        pending={isPending}
+        payerPick={payerPick}
+        planFilter={planFilter}
+        identifyAction={identifyAction}
+        planAction={planAction}
+        onPickPayer={(p) => {
+          setPayerPick(p);
+          setBackTo(null);
+        }}
+        onPlanFilter={setPlanFilter}
+        onAskAi={() => setAutoAsk(true)}
+        onChange={onChange}
+        answer={
+          state.resolution
+            ? {
+                snapshot,
+                snapshotError,
+                aiPanel: snapshot ? (
+                  <QualifyAiPanel
+                    snapshot={snapshot}
+                    blind={!viewerHasAmountsCapability}
+                    autoAsk={autoAsk}
+                    // ONE-SHOT (review Critical 2): without the disarm, every re-scope (window,
+                    // billed-under chip) nulls the snapshot, unmounts the panel, and the remount
+                    // re-fires an unrequested, audited, billed LLM call over whatever was on screen.
+                    onAutoAsked={() => setAutoAsk(false)}
+                  />
+                ) : null,
+                pending: isPending,
+                scopeSource,
+                payerOverride,
+                onPayerOverride: (label) => {
+                  setSnapshot(null);
+                  setPayerOverride(label);
+                },
+                windowDays,
+                onWindowDays: (d) => {
+                  setSnapshot(null);
+                  setWindowDays(d);
+                },
+              }
+            : null
+        }
+      />
+    </main>
   );
 }
