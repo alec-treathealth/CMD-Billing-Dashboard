@@ -8,9 +8,9 @@ paths:
 
 Two separate planes. Never put a file in the wrong directory.
 
-| Plane | Directory | Next number (as of 2026-08-04) |
+| Plane | Directory | Next number (as of 2026-08-06) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0083** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0090** |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **029** |
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
@@ -76,6 +76,32 @@ Use numbered section banners in the body and end with a commented
 migrations create objects **born owned** via `SET ROLE claims_admin` … `RESET
 ROLE`. Revoking that grant re-breaks the apply path with SQLSTATE 42501. Do not
 "clean it up".
+
+⚠ **That paragraph describes the `claims` schema ONLY. It is wrong for
+`collections`.** Measured 2026-08-05: every live `collections` relation is
+`relowner = postgres`, so a `SET ROLE claims_admin` there *downgrades* the
+applying role from owner to non-owner and fails `42501: must be owner of table …`.
+It cost two failed applies on 0084/0085. In the `collections` plane write the
+plain statement with **no `SET ROLE`**, and own SECURITY DEFINER functions as
+`postgres` (a definer runs as its OWNER, so a `claims_admin`-owned definer cannot
+write a postgres-owned table).
+
+## Grants for cron writers — check before you read
+
+A cron that adds a read of a NEW `collections.*` table must also check that its
+writer role can read it. `cmd_rollup_writer`'s grants are per-table and were
+**not** blanket-granted across the schema. 0089 exists because the census sync
+started reading `collections.facilities` without one: the read raised 42501, a
+fail-soft `catch` absorbed it, and the conformance alarm reported `23 of 23` on
+every run for weeks over data that was completely fine.
+
+```sql
+select has_table_privilege('cmd_rollup_writer', 'collections.<table>', 'SELECT');
+```
+
+And in the code: **never let a fail-soft catch absorb a 42501.** A permission
+error can never succeed on retry, so absorbing it converts an outage into
+permanently wrong output. Degrade on transient codes; rethrow on 42501.
 
 ## Conventions
 

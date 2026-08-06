@@ -247,6 +247,7 @@ export interface QualifyCensusAggRow {
   los_sample?: number | null;
   next_ur_date: string | null; // soonest upcoming UR date on the board, ISO
   open_beds: number | null;
+  bed_capacity: number | null;
 }
 
 /** Raw, un-stripped lifetime cohort context the server loader returns (dollar sums intact — the
@@ -445,6 +446,9 @@ function assembleFacilities(
         // edit put it on both objects; on this one it was undeclared payload that nothing read.
         nextUrDate: census?.next_ur_date ?? null,
         openBeds: census?.open_beds ?? null,
+        // Licensed beds (curated FACILITY_BED_CAPACITY). Null for outpatient — they have no beds,
+        // which is correct rather than missing — and for any residential facility not yet curated.
+        bedCapacity: census?.bed_capacity ?? null,
         ratingV2: v2.rating,
         iqBand: v2.band,
         factors: v2.factors,

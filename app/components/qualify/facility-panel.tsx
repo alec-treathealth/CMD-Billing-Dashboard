@@ -302,9 +302,29 @@ export function FacilityPanel({
                           UR {f.nextUrDate}
                         </span>
                       ) : null}
+                      {/* OCCUPANCY, not a bare free-bed count. 8 free at a 20-bed house and 8 free at
+                          a 12-bed house are opposite signals about whether they will take this
+                          patient, and the count alone cannot tell them apart. The denominator is the
+                          curated licensed-bed figure; when it is absent (outpatient — no beds — or a
+                          facility not yet curated) this falls back to the old count rather than
+                          inventing one. Tightness is a FACT shown, never folded into the rating. */}
                       {f.openBeds !== null && f.openBeds > 0 ? (
-                        <span className="inline-flex shrink-0 items-center rounded-full border border-line bg-surface px-1.5 py-px text-[10px] font-semibold text-ink600">
-                          {f.openBeds} open bed{f.openBeds === 1 ? '' : 's'}
+                        <span
+                          className={[
+                            'inline-flex shrink-0 items-center rounded-full border px-1.5 py-px text-[10px] font-semibold',
+                            f.bedCapacity !== null && f.bedCapacity > 0 && f.openBeds / f.bedCapacity <= 0.15
+                              ? 'border-status-warn/30 bg-status-warn/10 text-status-warn'
+                              : 'border-line bg-surface text-ink600',
+                          ].join(' ')}
+                          title={
+                            f.bedCapacity !== null && f.bedCapacity > 0
+                              ? `${f.openBeds} of ${f.bedCapacity} licensed beds open (${Math.round((f.openBeds / f.bedCapacity) * 100)}% free) on the latest census sync`
+                              : `${f.openBeds} open bed${f.openBeds === 1 ? '' : 's'} on the latest census sync — licensed bed count not on file, so occupancy is unknown`
+                          }
+                        >
+                          {f.bedCapacity !== null && f.bedCapacity > 0
+                            ? `${f.openBeds} of ${f.bedCapacity} beds`
+                            : `${f.openBeds} open bed${f.openBeds === 1 ? '' : 's'}`}
                         </span>
                       ) : null}
                     </span>

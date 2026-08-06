@@ -662,7 +662,11 @@ export function buildQualifyCensusReadQuery(): { sql: string; params: unknown[] 
     sql:
       'select facility_code, board_family, avg_auth_days::float8 as avg_auth_days, avg_los_days::float8 as avg_los_days, ' +
       'auth_sample, los_sample, ' +
-      "to_char(next_ur_date, 'YYYY-MM-DD') as next_ur_date, open_beds " +
+      // bed_capacity rides so the UI can say "8 of 12 open" rather than a bare "8 open". Until now
+      // this column was WRITTEN hourly (curated FACILITY_BED_CAPACITY) and never read by anything —
+      // an open-bed count with no denominator is not a decision: 8 free at a 20-bed house and 8 free
+      // at a 12-bed house are opposite signals about whether they will take this patient.
+      "to_char(next_ur_date, 'YYYY-MM-DD') as next_ur_date, open_beds, bed_capacity " +
       'from collections.qualify_facility_census',
     params: [],
   };
