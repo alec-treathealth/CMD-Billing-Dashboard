@@ -10,6 +10,7 @@
 import { requireQualifyPrincipal } from '@/lib/qualify/gate';
 import {
   resolveQualifyPayer,
+  loadQualifyPayerSpread,
   loadQualifyFacilities,
   loadQualifyIdentifierLandingFacility,
   loadQualifyFacilityCases,
@@ -33,6 +34,7 @@ import type { QualifyFacilityOption } from '../../../src/collections/cmdExplorer
 import { memberIdBlindIndex, alphaPrefixBlindIndex, groupNumberBlindIndex, patientNameBlindIndex } from '../../../src/collections/blindIndex';
 import {
   loadQualifyPolicy,
+  loadQualifyPolicySpread,
   loadQualifyVobFreshness,
   loadQualifyWindowRungs,
   loadCurrentCodingDecisions,
@@ -96,6 +98,7 @@ const realDeps: QualifyDeps = {
   mintGroupToken: (raw) => groupNumberBlindIndex(raw),
   mintNameToken: (raw) => patientNameBlindIndex(raw),
   resolvePayer: resolveQualifyPayer,
+  loadPayerSpread: loadQualifyPayerSpread,
   loadFacilities: loadFacilitiesV2,
   loadIdentifierLandingFacility: loadQualifyIdentifierLandingFacility,
   loadFacilityCases: loadQualifyFacilityCases,
@@ -112,6 +115,7 @@ const realDeps: QualifyDeps = {
   now: () => new Date(),
   // ── v2 seams (Phases 0/A/B/E) — loaders.ts owns the second reader pool; census binds in Phase G.
   loadPolicy: (token, kind) => loadQualifyPolicy(token, kind),
+  loadPolicySpread: (token, kind) => loadQualifyPolicySpread(token, kind),
   loadVobFreshness: () => loadQualifyVobFreshness(),
   loadWindowRungs: (token, kind, entityIds, froms, to) => loadQualifyWindowRungs(token, kind, entityIds, froms, to),
   loadCodingDecisions: () => loadCurrentCodingDecisions(),

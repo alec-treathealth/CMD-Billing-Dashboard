@@ -541,6 +541,24 @@ export const QUALIFY_VOB_STALE_HOURS = 48;
  * can never be displayed. The four benefit strings are raw VOB text and dollar-bearing → nulled for
  * admissions_seat at the core's strip choke point (display-only, NEVER scored — ruled in §5).
  */
+/** One value in a wire-safe spread: the value and how many members carry it. Used for CARRIERS only
+ *  on the policy card — see the PHI note on QualifyPolicyCard.carriers for why employers have no
+ *  equivalent. Non-PHI and dollar-free, so it is byte-identical for an admissions_seat session. */
+export interface QualifyPolicySpreadEntry {
+  value: string;
+  members: number;
+}
+
+/** One payer behind the searched identifier, with the evidence supporting it. Plaintext
+ *  primary_payer is non-PHI (same class as QualifyMover.label). Counts and a date only — never an
+ *  amount — so this is identical for an admissions_seat session and safe as a rating/AI input. */
+export interface QualifyPayerOption {
+  payer: string;
+  lines: number;
+  patients: number;
+  lastPayment: string | null; // ISO date of the most recent payment_received
+}
+
 export interface QualifyPolicyCard {
   found: boolean; // any VOB rows behind this prefix
   memberCount: number; // distinct members under the prefix in the VOB set
@@ -550,6 +568,25 @@ export interface QualifyPolicyCard {
   policyType: string | null; // modal policy_type (PPO/EPO/…)
   planType: string | null; // modal plan_type
   groupOnFile: boolean; // group_number_bidx present — presence only, the raw group is unrecoverable
+  /** How many DISTINCT employers / carriers sit behind this prefix — the honesty denominators for the
+   *  two modal chips above. `carrier` is "1 of carrierCount"; >1 means the chip is a SLICE, not the
+   *  answer. MEASURED 2026-08-06: weighted by member (how a card-in-hand search actually samples),
+   *  80.5% of searches land on a multi-employer prefix and 86.8% on a multi-carrier one, and in 57%
+   *  the displayed employer is a MINORITY of the prefix. Mean member-weighted dominance is 49.1% —
+   *  so a bare mode with no denominator is wrong more often than right. 1 = genuinely unambiguous.
+   *  0 only when the column is null for every member. */
+  employerCount: number;
+  carrierCount: number;
+  /** The carriers behind this prefix, ranked by member count — the drill-down set for the carrier
+   *  chip. Capped at QUALIFY_SPREAD_LIMIT server-side, so `carriers.length` can be < carrierCount;
+   *  always render the count, never the array length, as the denominator. Empty when the spread query
+   *  was unavailable (fail-soft) — an empty array means "not loaded", NOT "only one carrier".
+   *
+   *  ⚠ There is deliberately NO `employers` counterpart. employer_name is a PHI column
+   *  (app/lib/phi.ts) and the AI payload has never carried it (src/collections/qualifyAi.ts); the
+   *  employer spread is consumed SERVER-SIDE ONLY, as the comparable-cohort key. Only the COUNT
+   *  crosses the wire. Do not add one. */
+  carriers: QualifyPolicySpreadEntry[];
   /** Phase D INN/OON gate. ALWAYS null today: network is not extracted from the VOB (three live parser
    *  generations, none carries it — the extractor change is cross-repo work in etl/vob). The three-way
    *  flow ships now so the moment the field lands the gate lights up: INN → contracted-expectation
@@ -615,6 +652,17 @@ export interface QualifySnapshot {
    *  claims; 'comparable_*' when the ranking fell back to an employer/funding cohort; 'none' when
    *  there is nothing to rank on. Factor math consumes the same value — one source of truth. */
   provenance: QualifyProvenance;
+  /** EVERY payer the searched identifier bills under, ranked — `resolved.payer` is element [0], not a
+   *  different answer. MEASURED 2026-08-06: weighted by member, 80.6% of searches land on a prefix
+   *  billing under more than one payer (max 17), so the pre-existing single-payer resolve discarded
+   *  real history for four searches in five. length>1 is the signal a disambiguation step is
+   *  warranted; length<=1 means the resolve was genuinely unambiguous and the UI should say so rather
+   *  than prompt.
+   *
+   *  EMPTY ARRAY MEANS "NOT LOADED", never "one payer" — it is empty on the non-identifier paths
+   *  (resolve-by-payer/name), when the identifier has no claims at all, and when the spread query
+   *  fails soft. Read `resolved` for whether a payer was resolved at all. */
+  payerOptions: QualifyPayerOption[];
 }
 
 export interface QualifyMover {

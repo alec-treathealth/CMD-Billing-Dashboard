@@ -693,6 +693,11 @@ const POLICY: QualifyPolicyCard = {
   memberCount: 14,
   carrier: 'AETNA',
   employerName: 'Vanderbilt Univ. Medical Center',
+  // Unambiguous by default so the pre-existing assertions below keep testing the CONFIDENT rendering;
+  // the ambiguous path gets its own tests rather than silently changing every existing expectation.
+  employerCount: 1,
+  carrierCount: 1,
+  carriers: [],
   funding: 'Self-Funded',
   policyType: 'PPO',
   planType: 'OPEN ACCESS',
@@ -725,6 +730,51 @@ test('PolicyStrip — admissions_seat sees NO dollar strings; stale feed banner 
   assert.ok(html.includes('VOB feed is stale'), 'Phase 0: the confidently-wrong defence is loud');
   assert.ok(html.includes('Estimated read'), 'comparable provenance is labeled');
   assert.ok(html.includes('same employer plan'), 'and says what the estimate rests on');
+});
+
+// ── The SPREAD disclosure (2026-08-06). Measured: member-weighted, 86.8% of searches land on a
+// multi-carrier prefix and 57% on one where the displayed employer is a MINORITY. A bare modal chip
+// was confidently wrong more often than right; these pin that it now says so — and, just as
+// important, that an UNAMBIGUOUS prefix is not cluttered with a warning it doesn't warrant.
+
+test('PolicyStrip — an unambiguous prefix renders NO spread disclosure and NO "1 of" suffix', () => {
+  const html = renderToStaticMarkup(<PolicyStrip policy={POLICY} provenance="direct" hasAmounts prefixEcho="W29" />);
+  assert.ok(!html.includes('1 of '), 'no dominance suffix when every field has exactly one value');
+  assert.ok(!html.includes('is not one plan'), 'no spread sentence — it would be wallpaper');
+  assert.ok(html.includes('Vanderbilt'), 'and the self-funded banner still names the single employer');
+});
+
+test('PolicyStrip — a multi-carrier/multi-employer prefix says so on the chips AND in a sentence', () => {
+  const spread = { ...POLICY, memberCount: 46, carrierCount: 3, employerCount: 7 };
+  const html = renderToStaticMarkup(<PolicyStrip policy={spread} provenance="direct" hasAmounts prefixEcho="W20" />);
+  assert.ok(html.includes('1 of 3'), 'carrier chip carries its denominator');
+  assert.ok(html.includes('1 of 7'), 'employer chip carries its denominator');
+  assert.ok(html.includes('This prefix is not one plan'), 'the disclosure sentence fires');
+  assert.ok(html.includes('3 carriers') && html.includes('7 employers'), 'and states both counts');
+  assert.ok(html.includes('46'), 'against the member count they are drawn from');
+  // The self-funded line must stop naming ONE employer once several are on file — otherwise it
+  // re-asserts exactly the specificity the sentence above just withdrew.
+  assert.ok(!html.includes('Vanderbilt Univ. Medical Center carries the risk'));
+  assert.ok(html.includes('the employer carries the risk'));
+});
+
+test('PolicyStrip — one ambiguous field alone is enough to disclose, and only that field is marked', () => {
+  const html = renderToStaticMarkup(
+    <PolicyStrip policy={{ ...POLICY, carrierCount: 4 }} provenance="direct" hasAmounts prefixEcho="W20" />,
+  );
+  assert.ok(html.includes('1 of 4') && html.includes('4 carriers'), 'the carrier side discloses');
+  assert.ok(!html.includes('employers'), 'the unambiguous employer side stays silent');
+  assert.ok(html.includes('Vanderbilt'), 'and still names the sole employer on the self-funded line');
+});
+
+test('MobilePolicyLine and PolicyStrip agree on carrier ambiguity — the two shells cannot diverge', async () => {
+  const { MobilePolicyLine } = await import('../components/qualify/m/policy-line');
+  const spread = { ...POLICY, carrierCount: 3 };
+  const mobile = renderToStaticMarkup(<MobilePolicyLine policy={spread} provenance="direct" />);
+  const desktop = renderToStaticMarkup(<PolicyStrip policy={spread} provenance="direct" hasAmounts prefixEcho="W20" />);
+  assert.ok(mobile.includes('1 of 3') && desktop.includes('1 of 3'), 'both disclose the same denominator');
+  // The phone line's standing rule: plan shape only, never an employer identifier.
+  assert.ok(!mobile.includes('Vanderbilt'), 'employer name still never reaches the phone line');
 });
 
 test('PolicyStrip — not-found renders the honest VOB prompt, never an empty card', () => {
