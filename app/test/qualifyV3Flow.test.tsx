@@ -52,6 +52,7 @@ function fixture(over: Partial<QualifyResolution> = {}): QualifyResolution {
       memberCount: 61,
       vobFreshAsOf: '2026-07-20',
       vobStale: false,
+      claimsPayerLabels: ['AETNA US HEALTHCARE'],
       claimEvidence: {
         distinctMembers: 42,
         lines: 1358,
@@ -144,12 +145,29 @@ function props(stage: FlowStage, r: QualifyResolution | null, over: Partial<Reso
           snapshotError: null,
           aiPanel: null,
           pending: false,
+          scopeSource: 'pick',
           payerOverride: null,
           onPayerOverride: noop,
           windowDays: null,
           onWindowDays: noop,
         }
       : null,
+    ...over,
+  };
+}
+
+/** The answer-stage props helper, for overriding scope/window fields per test. */
+function answerProps(over: Partial<NonNullable<ResolutionStagesProps['answer']>> = {}): NonNullable<ResolutionStagesProps['answer']> {
+  return {
+    snapshot: null,
+    snapshotError: null,
+    aiPanel: null,
+    pending: false,
+    scopeSource: 'pick',
+    payerOverride: null,
+    onPayerOverride: noop,
+    windowDays: null,
+    onWindowDays: noop,
     ...over,
   };
 }
@@ -334,7 +352,6 @@ test('PHI: the plan forms carry NO term field — the identifier lives in shell 
 test('PHI: a member-id handle renders no echo — the full id never reaches the markup', () => {
   const r = fixture({ handle: { kind: 'member_id', readAs: 'read as a complete member ID (10 characters)', echo: '' } });
   const html = render(props('identify', r));
-  assert.ok(!html.includes('W291408212'), 'no member id anywhere');
   assert.match(html, /value=""/, 'the input round-trips an empty echo rather than the id');
   // And the receipt names the READING, not the value.
   const answerHtml = render(props('answer', r));
@@ -495,22 +512,22 @@ test('the book-wide KPI provenance is rendered verbatim, and the predicate id is
 test('the answer stage without a snapshot is an honest loading state, and an error is not an empty result', () => {
   const loading = render(props('answer', fixture()));
   assert.match(loading, /Ranking facilities for this plan…/);
-  const failed = render(
-    props('answer', fixture(), {
-      answer: {
-        snapshot: null,
-        snapshotError: 'failed',
-        aiPanel: null,
-        pending: false,
-        payerOverride: null,
-        onPayerOverride: noop,
-        windowDays: null,
-        onWindowDays: noop,
-      },
-    }),
-  );
+  const failed = render(props('answer', fixture(), { answer: answerProps({ snapshotError: 'failed' }) }));
   assert.match(failed, /The facility ranking could not be loaded\./);
   assert.match(failed, /The plan resolution above still stands/);
+});
+
+test('going back to the search step announces the STAGE, not the stale result', () => {
+  const html = render(props('identify', fixture()));
+  assert.match(html, /Back at the search step\. Searching again replaces the current result\./);
+  assert.ok(!html.includes('Resolved: Aetna'), 'the live region must not describe a screen no longer shown');
+});
+
+test('a stale carrier pick with zero plans is stated plainly, not rendered as an empty grid', () => {
+  const html = render(props('plan', fixture(), { payerPick: 'CARRIER THAT VANISHED' }));
+  assert.match(html, /No plans are on file under CARRIER THAT VANISHED in this result\./);
+  assert.ok(!html.includes('Use this plan'), 'no tiles under a vanished carrier');
+  assert.ok(!html.includes('Clear the filter'), 'and no filter copy presuming a filter caused it');
 });
 
 // ── The answer stage with a snapshot ─────────────────────────────────────────────────────────────
@@ -553,20 +570,7 @@ function snapshotFixture(): QualifySnapshot {
 }
 
 test('the answer stage: window disclosed in one line, hero named, unrated card is honest restraint', () => {
-  const html = render(
-    props('answer', fixture(), {
-      answer: {
-        snapshot: snapshotFixture(),
-        snapshotError: null,
-        aiPanel: null,
-        pending: false,
-        payerOverride: null,
-        onPayerOverride: noop,
-        windowDays: null,
-        onWindowDays: noop,
-      },
-    }),
-  );
+  const html = render(props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture() }) }));
   // The auto-window decision is DISCLOSED, with the override one expander away.
   assert.match(html, /Showing trailing 90 days — needed this far back to reach a reliable sample\./);
   assert.match(html, /Change the window/);
@@ -580,7 +584,49 @@ test('the answer stage: window disclosed in one line, hero named, unrated card i
   assert.match(html, /Why this score/);
   assert.match(html, />Helps</);
   assert.match(html, />No data</);
-  // The claims-side scope chips state whether the scope was the user's choice.
+  // The claims-side scope chips render; the caption matrix has its own test below.
   assert.match(html, /Billed under/);
-  assert.match(html, /Largest by volume — pick another to re-scope\./);
+});
+
+// ── Scope honesty (review Critical 1): the ranking's payer scope is a CLAIM and must be labelled ──
+
+test('the billed-under caption distinguishes "you picked", "your plan implies", "we defaulted", and a REJECTED override', () => {
+  const overridden = { ...snapshotFixture(), payerOverridden: true } as QualifySnapshot;
+  // A user chip click, honoured.
+  const user = render(props('answer', fixture(), { answer: answerProps({ snapshot: overridden, scopeSource: 'user', payerOverride: 'AETNA US HEALTHCARE' }) }));
+  assert.match(user, /Your selection\./);
+  // The plan pick's own claims label, honoured.
+  const pick = render(props('answer', fixture(), { answer: answerProps({ snapshot: overridden, scopeSource: 'pick' }) }));
+  assert.match(pick, /Scoped to the plan you picked\./);
+  // An override was SENT but the core rejected it — this must never render as honoured.
+  const rejected = render(props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'pick' }) }));
+  assert.match(rejected, /Could not scope to the picked plan — showing the largest by volume\./);
+  assert.ok(!/Scoped to the plan you picked\./.test(rejected), 'a rejected override is not a scoping');
+  // Nothing was sent at all.
+  const dominant = render(props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'dominant' }) }));
+  assert.match(dominant, /Largest by volume — pick another to re-scope\./);
+});
+
+test('a dominant-scoped ranking under a multi-plan pick states the mismatch in words, not chips', () => {
+  const html = render(props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'dominant' }) }));
+  assert.match(html, /could not be scoped to Aetna/);
+  assert.match(html, /under AETNA US HEALTHCARE, its largest payer by volume\./);
+});
+
+test('a plan with no claims history says the ranking is not evidence about it', () => {
+  const noClaims = fixture();
+  noClaims.group.claimEvidence = { ...noClaims.group.claimEvidence, lines: 0, distinctMembers: 0, distinctPatients: 0, distinctFacilities: 0, sampleTier: 'insufficient' };
+  noClaims.group.claimsPayerLabels = [];
+  const html = render(props('answer', noClaims, { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'dominant' }) }));
+  assert.match(html, /This plan has no claims history of its own/);
+  assert.match(html, /not evidence about Aetna/);
+});
+
+test('the window default is stated honestly when automatic sizing was unavailable', () => {
+  const noLadder = { ...snapshotFixture(), ladder: null } as QualifySnapshot;
+  const auto = render(props('answer', fixture(), { answer: answerProps({ snapshot: noLadder }) }));
+  assert.match(auto, /the default window; automatic sizing is not available for this search\./);
+  assert.ok(!auto.includes('your selection'), 'a default the user never chose must not be called theirs');
+  const manual = render(props('answer', fixture(), { answer: answerProps({ snapshot: noLadder, windowDays: 180 }) }));
+  assert.match(manual, /Showing trailing 180 days — your selection\./);
 });

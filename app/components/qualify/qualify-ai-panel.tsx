@@ -69,6 +69,7 @@ export function QualifyAiPanel({
   snapshot,
   blind,
   autoAsk = false,
+  onAutoAsked,
 }: {
   snapshot: QualifySnapshot;
   blind: boolean;
@@ -77,6 +78,10 @@ export function QualifyAiPanel({
    *  search actually returned — a self-funded plan opens with the plan-administrator question, etc.
    *  Same run() path as a click: gate, audit and PHI firewall are identical. */
   autoAsk?: boolean;
+  /** Called the moment autoAsk is consumed, so the OWNER disarms it. Without this, a re-scope that
+   *  unmounts and remounts the panel (v3 nulls the snapshot on every window/payer change) resets the
+   *  per-mount guard and re-fires an unrequested, audited, billed model call. One ask per arm. */
+  onAutoAsked?: () => void;
 }) {
   const [active, setActive] = useState<ChipId | null>(null);
   const [text, setText] = useState('');
@@ -167,14 +172,17 @@ export function QualifyAiPanel({
     [snapshot, blind],
   );
 
-  // The auto-ask fires ONCE per mount, after the reset effect above (declaration order), and only
-  // while nothing has run yet — a user who already clicked a chip is never interrupted.
+  // The auto-ask fires ONCE per ARM, after the reset effect above (declaration order), and only
+  // while nothing has run yet — a user who already clicked a chip is never interrupted. The ref
+  // guards this mount; onAutoAsked disarms the owner so a REMOUNT cannot fire again (Critical 2:
+  // v3 unmounts this panel on every re-scope, and a per-mount guard alone re-fires on arrival).
   const autoAskedRef = useRef(false);
   useEffect(() => {
     if (!autoAsk || autoAskedRef.current || active !== null) return;
     autoAskedRef.current = true;
+    onAutoAsked?.();
     void run(suggestedId);
-  }, [autoAsk, active, run, suggestedId]);
+  }, [autoAsk, active, run, suggestedId, onAutoAsked]);
 
   const sections = parseAiSections(text);
   const caret = streaming ? <span aria-hidden className="q-ai-caret ml-0.5 inline-block h-[13px] w-[7px] bg-teal500 align-[-2px]" /> : null;
@@ -230,7 +238,14 @@ export function QualifyAiPanel({
           {error ? (
             <p className="rounded-xl border border-dashed border-line bg-ground px-3 py-2.5 text-[12.5px] text-status-danger">{error}</p>
           ) : (
-            <div aria-live="polite" className="rounded-xl border border-line bg-ground px-4 py-3">
+            /* NOT a live region (review): aria-live on the streaming container re-announced the
+               growing answer token-by-token and competed with the flow's single stage announcer —
+               "the important sentence must not queue". The sr-only status below announces ONCE, on
+               completion, which is the event a non-sighted user can act on. */
+            <div className="rounded-xl border border-line bg-ground px-4 py-3">
+              <p role="status" className="sr-only">
+                {!streaming && text ? 'Answer ready.' : ''}
+              </p>
               <div className="font-mono text-[9.5px] font-semibold uppercase tracking-[0.16em] text-teal700">TL;DR</div>
               <p className="mt-1 text-[13.5px] leading-relaxed text-ink900">
                 {sections['TL;DR'] || (streaming && !text ? 'Reading the numbers…' : sections['TL;DR'])}

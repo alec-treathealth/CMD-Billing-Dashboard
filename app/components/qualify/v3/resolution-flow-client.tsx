@@ -104,19 +104,31 @@ export function ResolutionFlowClient({
   // The receipt's Change can only step BACKWARD from what is derivable; any submit clears it.
   const stage: FlowStage = backTo ?? derived;
 
+  // ── The pick→ranking bridge (review Critical 1) ────────────────────────────────────────────────
+  // The pick is in VOB vocabulary; the snapshot's payerOverride is in claims vocabulary. The chosen
+  // group carries its own confirmed claims labels (claimsPayerLabels, resolutionService §5b), so the
+  // ranking is scoped to the payer the user actually picked. A user chip click outranks the bridge;
+  // the core validates whatever is sent against the token's own spread, so this can only align
+  // scope, never widen it. When the bridge is empty (unmapped / no claims), nothing is sent and the
+  // answer stage SAYS the ranking is dominant-payer scoped instead of implying it is the pick's.
+  const pickLabel = state.resolution?.group.claimsPayerLabels[0] ?? null;
+  const sentOverride = payerOverride ?? pickLabel;
+  const scopeSource: 'user' | 'pick' | 'dominant' =
+    payerOverride !== null ? 'user' : pickLabel !== null ? 'pick' : 'dominant';
+
   // ── Snapshot for the answer stage — the hardened v2 data path under the new UI ────────────────
   const predicateId = state.resolution?.predicateId ?? null;
   useEffect(() => {
     if (stage !== 'answer' || predicateId === null || isPending) return;
     const term = termRef.current;
-    if (term === '') return; // nothing held (e.g. hot-reload mid-flow) — the stage shows its own empty state
+    if (term === '') return; // nothing held (e.g. hot-reload mid-flow); the answer stage keeps its loading state
     let alive = true;
     setSnapshotError(null);
     getQualifySnapshot({
       query: term,
       window: { kind: 'trailing', days: windowDays ?? 90 },
       auto: windowDays === null,
-      ...(payerOverride !== null ? { payerOverride } : {}),
+      ...(sentOverride !== null ? { payerOverride: sentOverride } : {}),
     })
       .then((s) => {
         if (alive) setSnapshot(s);
@@ -130,9 +142,26 @@ export function ResolutionFlowClient({
     return () => {
       alive = false;
     };
-  }, [stage, predicateId, isPending, payerOverride, windowDays]);
+  }, [stage, predicateId, isPending, sentOverride, windowDays]);
+
+  // ── Focus follows the question (review: stage swaps unmount the focused element) ──────────────
+  // Without this, clicking a tile drops focus to <body> and a keyboard user re-tabs from the top at
+  // every stage. The stage's own <h2> takes focus (tabIndex={-1} in the Stage chrome), which also
+  // makes a screen reader read the new question. Skipped on first render — stealing focus from the
+  // search input on page load would be worse than nothing.
+  const prevStageRef = useRef<FlowStage | null>(null);
+  useEffect(() => {
+    const prev = prevStageRef.current;
+    prevStageRef.current = stage;
+    if (prev === null || prev === stage) return;
+    document.getElementById(`qualify-s-${stage}-heading`)?.focus();
+  }, [stage]);
 
   // ── Motion ─────────────────────────────────────────────────────────────────────────────────────
+  // Keyed on the stage AND on the snapshot's arrival, so the answer stage's scorecards get their
+  // entrance too (they land after the stage does). The re-fetch already blanks to a skeleton, so the
+  // fade-in on a re-scope reads as the refresh it is.
+  const hasSnapshot = snapshot !== null;
   const stageRef = useRef<HTMLDivElement | null>(null);
   useLayoutEffect(() => {
     const el = stageRef.current;
@@ -156,7 +185,7 @@ export function ResolutionFlowClient({
       }
     }, el);
     return () => ctx.revert();
-  }, [stage]);
+  }, [stage, hasSnapshot]);
 
   return (
     <div ref={stageRef}>
@@ -184,9 +213,18 @@ export function ResolutionFlowClient({
                 snapshot,
                 snapshotError,
                 aiPanel: snapshot ? (
-                  <QualifyAiPanel snapshot={snapshot} blind={!viewerHasAmountsCapability} autoAsk={autoAsk} />
+                  <QualifyAiPanel
+                    snapshot={snapshot}
+                    blind={!viewerHasAmountsCapability}
+                    autoAsk={autoAsk}
+                    // ONE-SHOT (review Critical 2): without the disarm, every re-scope (window,
+                    // billed-under chip) nulls the snapshot, unmounts the panel, and the remount
+                    // re-fires an unrequested, audited, billed LLM call over whatever was on screen.
+                    onAutoAsked={() => setAutoAsk(false)}
+                  />
                 ) : null,
                 pending: isPending,
+                scopeSource,
                 payerOverride,
                 onPayerOverride: (label) => {
                   setSnapshot(null);

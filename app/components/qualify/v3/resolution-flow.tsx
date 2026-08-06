@@ -48,7 +48,10 @@ export type FlowStage = 'identify' | 'payer' | 'plan' | 'answer';
 
 /** Non-PHI copy for the three states a search can fail in, kept distinct on purpose (I5). */
 export const UNRESOLVABLE_COPY: Readonly<Record<'empty' | 'prefix_too_short' | 'no_match', string>> = {
-  empty: 'Enter a member ID prefix, a full member ID, or a facility name to begin.',
+  // Deliberately NOT offering a facility-name search: classifyQualifyHandle reads only
+  // prefix/member-id, so promising one (as an earlier version did) sent "NASHVILLE" down the
+  // member-id blind index and reported a confusing no-match (review, Important 5).
+  empty: 'Enter a member ID prefix or a full member ID to begin.',
   prefix_too_short:
     'A prefix needs at least 3 characters to look up. Two characters cannot be matched — this is not the same as finding nothing.',
   no_match: 'That identifier does not match any plan we have coverage or claims for.',
@@ -115,11 +118,12 @@ export function payerGroupsOf(r: QualifyResolution): PayerGroup[] {
   for (const c of orderedCandidates(r)) {
     const g = byPayer.get(c.payerDisplayName) ?? {
       payer: c.payerDisplayName,
-      unmapped: c.canonicalPayerId === null,
+      unmapped: true, // AND-folded below: the tile says Unmapped only when EVERY candidate is
       memberCount: 0,
       planCount: 0,
       hasClaimEvidence: false,
     };
+    g.unmapped = g.unmapped && c.canonicalPayerId === null;
     g.memberCount += c.memberCount;
     g.planCount += 1;
     g.hasClaimEvidence = g.hasClaimEvidence || c.hasClaimEvidence;
@@ -154,6 +158,12 @@ export function liveSentenceFor(
   reason: 'empty' | 'prefix_too_short' | 'no_match' | null,
 ): string {
   if (!resolution) return reason ? UNRESOLVABLE_COPY[reason] : '';
+  if (stage === 'identify') {
+    // Back at the search step with a result still held — announce the STAGE, not the stale result
+    // (an unchanged "Resolved: …" sentence would mean no announcement at all, and it would describe
+    // a screen no longer shown).
+    return 'Back at the search step. Searching again replaces the current result.';
+  }
   if (stage === 'payer') {
     return `${payerGroupsOf(resolution).length} carriers match what you typed. Pick the one on the card.`;
   }
@@ -174,12 +184,18 @@ export function liveSentenceFor(
 
 // ── Shared chrome ────────────────────────────────────────────────────────────────────────────────
 
-/** Stage shell: a <section> whose <h2> IS the question. One question per screen. */
+/** Stage shell: a <section> whose <h2> IS the question. One question per screen. The heading takes
+ *  tabIndex={-1} so the shell can move focus to it on a stage swap — clicking a tile unmounts the
+ *  focused element, and without a landing target a keyboard user re-tabs from the document top. */
 function Stage(props: { id: string; question: string; children: React.ReactNode }): React.ReactElement {
   const headingId = `${props.id}-heading`;
   return (
     <section id={props.id} aria-labelledby={headingId} className="flex flex-col gap-4">
-      <h2 id={headingId} className="ths-h font-display text-xl font-semibold tracking-tight text-ink900">
+      <h2
+        id={headingId}
+        tabIndex={-1}
+        className="ths-h font-display text-xl font-semibold tracking-tight text-ink900 outline-none"
+      >
         {props.question}
       </h2>
       {props.children}
@@ -209,7 +225,9 @@ export interface ReceiptProps {
  * entry — never by a checkmark hue alone.
  */
 export function FlowReceipt({ resolution, stage, payerPick, onChange }: ReceiptProps): React.ReactElement {
-  const idLabel = resolution.handle.echo !== '' ? resolution.handle.echo : `(${resolution.handle.readAs})`;
+  // For a full member id the echo is '' by construction — the receipt shows the READING instead,
+  // so the id never reaches the markup and the entry still says what was searched.
+  const idLabel = resolution.handle.echo !== '' ? resolution.handle.echo : resolution.handle.readAs;
   const payers = payerGroupsOf(resolution);
   const payerLabel = stage === 'answer' ? resolution.group.payerDisplayName : payerPick;
   const planLabel =
@@ -259,7 +277,7 @@ export function StageIdentify(props: {
     <Stage id="qualify-s-identify" question="Who are we looking at?">
       <form action={props.action} className="flex w-full max-w-xl flex-col gap-2">
         <label htmlFor="qualify-term" className="text-sm font-medium text-ink900">
-          Member ID prefix, full member ID, or facility name
+          Member ID prefix or full member ID
         </label>
         <div className="flex gap-2">
           <input
@@ -350,6 +368,18 @@ export function StagePlan(props: {
   const payers = payerGroupsOf(props.resolution);
   const payer = props.payerPick ?? payers[0]?.payer ?? props.resolution.group.payerDisplayName;
   const underPayer = all.filter((c) => c.payerDisplayName === payer);
+  // A stale carrier pick after a re-resolve can leave zero plans under it — say that plainly
+  // instead of rendering "0 plans" over an empty grid with filter copy that presumes a filter.
+  if (underPayer.length === 0) {
+    return (
+      <Stage id="qualify-s-plan" question="Which plan is it?">
+        <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
+          No plans are on file under {payer} in this result. Use the receipt above to change the
+          carrier or search again.
+        </p>
+      </Stage>
+    );
+  }
   const needle = props.planFilter.trim().toLowerCase();
   const visible =
     needle === ''
@@ -425,7 +455,7 @@ export function StagePlan(props: {
           </li>
         ))}
       </ul>
-      {visible.length === 0 ? (
+      {visible.length === 0 && needle !== '' ? (
         <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
           No plan sponsor matches that text. Clear the filter to see all {underPayer.length} plans.
         </p>
@@ -436,11 +466,17 @@ export function StagePlan(props: {
 
 // ── Stage 4 · Answer ─────────────────────────────────────────────────────────────────────────────
 
-const WINDOW_CHOICES: readonly QualifyTrailingDays[] = [30, 60, 90, 180, 365];
+const WINDOW_CHOICES: readonly QualifyTrailingDays[] = [30, 60, 90, 180, 270, 365];
 
-function windowSentence(snapshot: QualifySnapshot): string {
+/** windowDays is the shell's MANUAL selection (null = automatic requested). A null ladder on the
+ *  automatic path is NOT "set manually" — the core only auto-sizes prefix searches, so a full
+ *  member-id search arrives ladder-less on a default the user never chose. Say which it was. */
+function windowSentence(snapshot: QualifySnapshot, windowDays: QualifyTrailingDays | null): string {
+  if (windowDays !== null) return `Showing trailing ${windowDays} days — your selection.`;
   const ladder = snapshot.ladder;
-  if (!ladder) return 'Window set manually.';
+  if (!ladder) {
+    return 'Showing trailing 90 days — the default window; automatic sizing is not available for this search.';
+  }
   if (!ladder.sufficient) {
     return `Showing trailing ${ladder.chosenDays} days — even the widest window holds a thin sample; read with care.`;
   }
@@ -541,6 +577,14 @@ export interface StageAnswerProps {
    */
   aiPanel: React.ReactNode;
   pending: boolean;
+  /**
+   * How the snapshot's payer scope was chosen — the shell's pick→ranking bridge (review Critical 1):
+   * 'user' = a billed-under chip; 'pick' = the chosen plan's own claims label (claimsPayerLabels[0]);
+   * 'dominant' = nothing to send, the core resolved the identifier's largest payer. The captions
+   * below MUST distinguish these — "you picked this" and "we defaulted to this" are different claims
+   * about the same number.
+   */
+  scopeSource: 'user' | 'pick' | 'dominant';
   payerOverride: string | null;
   onPayerOverride: (label: string | null) => void;
   windowDays: QualifyTrailingDays | null;
@@ -576,9 +620,20 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
         </p>
       ) : snap ? (
         <>
+          {/* SCOPE HONESTY (review Critical 1). When the pick couldn't be bridged to a claims label
+              — no claims history for this plan, or an unmapped payer — the ranking below is the
+              identifier's DOMINANT payer, and that must be said in words, not implied by chips. */}
+          {props.scopeSource === 'dominant' && snap.resolved && r.candidates.total > 1 ? (
+            <p role="status" className="rounded-lg border border-line bg-coral50 p-4 text-sm text-ink900">
+              {g.claimEvidence.lines === 0
+                ? `This plan has no claims history of its own — the ranking below is this identifier's history under ${snap.resolved.payerName}, not evidence about ${g.payerDisplayName}.`
+                : `The ranking below could not be scoped to ${g.payerDisplayName} — it shows this identifier's history under ${snap.resolved.payerName}, its largest payer by volume.`}
+            </p>
+          ) : null}
+
           {/* The window decision, DISCLOSED in one line with the override one expander away. */}
           <div className="flex flex-col gap-1 rounded-lg border border-line bg-surface px-4 py-3">
-            <p className="text-sm text-ink900">{props.windowDays === null ? windowSentence(snap) : `Showing trailing ${props.windowDays} days — your selection.`}</p>
+            <p className="text-sm text-ink900">{windowSentence(snap, props.windowDays)}</p>
             <details>
               <summary className="cursor-pointer text-xs font-semibold text-teal700">Change the window</summary>
               <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -635,7 +690,15 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 );
               })}
               <span className="text-xs text-ink600">
-                {snap.payerOverridden ? 'Your selection.' : 'Largest by volume — pick another to re-scope.'}
+                {/* "You picked this" / "your plan pick implies this" / "we defaulted" are three
+                    different claims — and a REJECTED override must never render as honoured. */}
+                {snap.payerOverridden
+                  ? props.scopeSource === 'user'
+                    ? 'Your selection.'
+                    : 'Scoped to the plan you picked.'
+                  : props.scopeSource !== 'dominant'
+                    ? 'Could not scope to the picked plan — showing the largest by volume.'
+                    : 'Largest by volume — pick another to re-scope.'}
               </span>
             </div>
           ) : null}

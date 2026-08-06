@@ -17,6 +17,7 @@ import {
   buildCoverageCandidatesQuery,
   buildClaimsOnlyCandidatesQuery,
   buildGroupClaimEvidenceQuery,
+  buildGroupClaimsLabelsQuery,
   buildGroupLadderQuery,
   predicateIdFor,
 } from '../src/collections/qualifyResolutionQuery.js';
@@ -85,6 +86,7 @@ test('every builder binds VALUES only — no interpolated identifier, no SELECT 
     buildCoverageCandidatesQuery(TOKEN, 'member_id'),
     buildClaimsOnlyCandidatesQuery(TOKEN, 'prefix'),
     buildGroupClaimEvidenceQuery(TOKEN, 'prefix', 'pi_cigna', '2026-01-01', '2026-02-01'),
+    buildGroupClaimsLabelsQuery(TOKEN, 'prefix', 'pi_cigna', '2026-01-01', '2026-02-01'),
     buildGroupLadderQuery(TOKEN, 'prefix', 'pi_cigna', '2026-02-01', [30, 60, 90]),
   ];
   for (const b of builds) {
@@ -270,6 +272,35 @@ test('predicateId never embeds the blind-index token', () => {
 });
 
 // ── Claims-only groups (§3d) ─────────────────────────────────────────────────────────────────────
+
+test('the claims-labels bridge is crosswalk-scoped, bounded, and totally ordered', () => {
+  // Review Critical 1: the answer stage passes labels[0] as the snapshot payerOverride, so a label
+  // outside the chosen group's CONFIRMED alias set would silently re-scope the ranking to another
+  // payer — the exact defect the bridge exists to prevent.
+  const b = buildGroupClaimsLabelsQuery(TOKEN, 'prefix', 'pi_cigna', '2026-01-01', '2026-02-01');
+  assert.ok(/vocabulary = 'claims_primary_payer'/.test(b.sql), 'labels come from the claims vocabulary');
+  assert.ok(/m\.canonical_payer_id = \$2/.test(b.sql), 'scoped to the chosen canonical payer, bound');
+  assert.ok(/limit 3\b/.test(b.sql), 'bounded — one to send, a couple to show');
+  assert.ok(/order by count\(\*\) desc, r\.primary_payer asc/.test(b.sql), 'total order — ties cannot reshuffle');
+  assert.deepEqual(b.params, [TOKEN, 'pi_cigna', '2026-01-01', '2026-02-01']);
+});
+
+test('candidate ordering is TOTAL — equal member counts cannot reshuffle between requests', () => {
+  // The plan tiles post a positional candidate index back to the server, which re-resolves against a
+  // freshly built list. Without a total order, two 1-member plans under one carrier could swap
+  // between the render and the pick, and the server would honour an index pointing at a different
+  // plan than the tile the user clicked (review, Important 3).
+  const vob = buildCoverageCandidatesQuery(TOKEN, 'prefix').sql;
+  for (const tieBreak of ['v.employer_norm asc nulls last', 'v.plan_type asc nulls last', 'v.funding asc nulls last', 'v.policy_type asc nulls last']) {
+    assert.ok(vob.includes(tieBreak), `VOB candidates missing tie-breaker: ${tieBreak}`);
+  }
+  const claims = buildClaimsOnlyCandidatesQuery(TOKEN, 'prefix').sql;
+  const orderBy = claims.slice(claims.indexOf('order by'));
+  assert.ok(
+    /coalesce\(pi\.display_name, upper\(btrim\(r\.primary_payer\)\)\) asc/.test(orderBy),
+    'claims-only candidates need the display-name tie-breaker',
+  );
+});
 
 test('the claims-only path anti-joins VOB so a member with a policy is never double-counted', () => {
   const { sql } = buildClaimsOnlyCandidatesQuery(TOKEN, 'prefix');
