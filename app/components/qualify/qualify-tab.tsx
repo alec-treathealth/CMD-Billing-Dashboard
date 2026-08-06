@@ -112,6 +112,7 @@ import { filterFacilitiesByLoc, type QualifyLocFilter } from '@/lib/qualify/grou
 import { FacilityPanel } from '@/components/qualify/facility-panel';
 import { PolicyStrip } from '@/components/qualify/policy-strip';
 import { PayerRail } from '@/components/qualify/payer-rail';
+import { effectivePayerOverride, type QualifyPayerOverride } from '@/lib/qualify/payerOverride';
 import { WindowLadder } from '@/components/qualify/window-ladder';
 import { QualifyAiPanel } from '@/components/qualify/qualify-ai-panel';
 import { BookKpiTiles, EvidenceGauge, HeatingUpCards, HeatingUpSkeleton } from '@/components/qualify/overview';
@@ -199,10 +200,12 @@ export function QualifyTab({
   //    gen-guarded like every other stream. `auto` fires once per NEW identifier (the ladder decides
   //    the window); later manual window changes refetch with the user's explicit choice respected.
   const [leadSnapshot, setLeadSnapshot] = useState<QualifySnapshot | null>(null);
-  /** Payer drill-down (the rail). null = use the volume-dominant resolve. Scoped to ONE search —
-   *  cleared whenever singleIdentifier changes, so a new patient never inherits the previous
-   *  patient's payer scope. The SERVER re-validates it against the identifier's own spread. */
-  const [payerOverride, setPayerOverride] = useState<string | null>(null);
+  /** Payer drill-down (the rail), PAIRED WITH THE IDENTIFIER IT WAS CHOSEN FOR. Storing the payer
+   *  alone and clearing it in an effect does NOT work: effects run after the commit, so the
+   *  snapshot fetch in the same commit still sends the previous patient's payer. See
+   *  effectivePayerOverride for the full failure list. The SERVER re-validates the value against
+   *  the identifier's own spread regardless — this pairing is a lifetime rule, not authorization. */
+  const [payerOverride, setPayerOverride] = useState<QualifyPayerOverride | null>(null);
   const leadGenRef = useRef(0);
   const lastAutoIdentifierRef = useRef<string | null>(null);
   const [expandedFacilities, setExpandedFacilities] = useState<ReadonlySet<string>>(new Set());
@@ -549,12 +552,11 @@ export function QualifyTab({
       });
   }, [singleIdentifier]);
 
-  // The payer drill-down is scoped to ONE search. Clearing it on identifier change is not hygiene —
-  // carrying it over would silently scope a NEW patient to the previous patient's payer and label
-  // the result as their resolved history.
-  useEffect(() => {
-    setPayerOverride(null);
-  }, [singleIdentifier]);
+  /* Derived DURING RENDER, not in an effect. On the render where singleIdentifier changes this is
+   * already null, so the very first fetch for a new patient cannot inherit the previous patient's
+   * payer scope — which an effect-based reset could not guarantee, because effects run after the
+   * commit that already fired the fetch. */
+  const activePayerOverride = effectivePayerOverride(payerOverride, singleIdentifier);
 
   // ── v2 LEAD snapshot fetch: policy strip + ladder + (comparable) ranking for the searched
   //    identifier. AUTO only when the identifier CHANGED — a manual window change after a search
@@ -573,7 +575,7 @@ export function QualifyTab({
     // (never override the user's pick), and a rejected auto fetch must not re-auto on the next
     // manual window change.
     lastAutoIdentifierRef.current = singleIdentifier;
-    getQualifySnapshot({ query: singleIdentifier, window: windowSel, auto, payerOverride })
+    getQualifySnapshot({ query: singleIdentifier, window: windowSel, auto, payerOverride: activePayerOverride })
       .then((snap) => {
         if (leadGenRef.current !== lgen) return;
         // The manual-window echo refetch (auto=false) carries ladder:null by design — PRESERVE the
@@ -592,9 +594,12 @@ export function QualifyTab({
       });
     // windowSel is deliberately IN deps: a post-search window change refetches the lead under the
     // manual window (auto=false), keeping the policy/estimate read on the same span as the panel.
-    // payerOverride likewise: selecting a payer in the rail IS the refetch trigger.
+    // activePayerOverride likewise: selecting a payer in the rail IS the refetch trigger. It is the
+    // DERIVED value, not the raw state — the raw one changes on a search transition (to a stale
+    // pairing that no longer applies) and would fire a second, redundant fetch that also duplicates
+    // the server-side PHI audit row and discards the auto-window ladder.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [singleIdentifier, windowSel, payerOverride]);
+  }, [singleIdentifier, windowSel, activePayerOverride]);
 
   const toggleFacilityExpansion = useCallback((key: string) => {
     setExpandedFacilities((prev) => {
@@ -1294,7 +1299,7 @@ export function QualifyTab({
               options={leadSnapshot.payerOptions}
               activePayer={leadSnapshot.resolved?.payerName ?? null}
               overridden={leadSnapshot.payerOverridden}
-              onSelect={setPayerOverride}
+              onSelect={(payer) => setPayerOverride({ identifier: singleIdentifier, payer })}
             />
           ) : null}
           {/* Lighter context line (the old resolved-payer hero band is gone). Non-dollar for admissions_seat. */}
