@@ -46,8 +46,16 @@ import { resolveCoverage, trailingWindowFor } from '@/lib/qualify/resolutionServ
  */
 import type { V3FlowState } from '@/lib/qualify/v3FlowState';
 
-/** Bounded window widths. An out-of-range value falls back rather than reaching SQL. */
-const DEFAULT_WINDOW_DAYS = 30;
+/**
+ * Bounded window widths. An out-of-range value falls back rather than reaching SQL.
+ *
+ * The default is WIDE (365) on purpose — the resolution stages answer "does this plan have history
+ * AT ALL", which is a wide question: at the old 30-day default, a plan whose last claim paid 60 days
+ * ago showed "No claim history" on its tile, which is false in the sense the rep reads it. Recency
+ * honesty belongs to the ANSWER stage, whose snapshot runs its own auto-window ladder and disclosed
+ * rationale (docs/qualify-v3-search-pattern.md §Window policy).
+ */
+const DEFAULT_WINDOW_DAYS = 365;
 const MAX_WINDOW_DAYS = 3650;
 
 function intField(form: FormData, name: string): number | null {

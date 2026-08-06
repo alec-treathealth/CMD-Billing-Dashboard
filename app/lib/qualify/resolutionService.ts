@@ -30,6 +30,7 @@ import {
   buildClaimsOnlyCandidatesQuery,
   buildCoverageCandidatesQuery,
   buildGroupClaimEvidenceQuery,
+  buildGroupClaimsLabelsQuery,
   buildGroupLadderQuery,
   predicateIdFor,
   type QualifyHandleKind,
@@ -262,6 +263,7 @@ export async function resolveCoverage(input: ResolveCoverageInput): Promise<Reso
       memberCount: row.member_count,
       vobFreshAsOf: row.vob_fresh_as_of,
       vobStale: isVobStale(row.vob_fresh_as_of, input.today),
+      claimsPayerLabels: [], // filled in step 5, for the CHOSEN group only
       // Placeholder counts until the chosen group gets its full evidence query in step 5. `lines` and
       // `distinctMembers` are real here (from the batch); facilities and reliability need the detail
       // query, so they stay at the honest zero rather than a guess.
@@ -291,6 +293,7 @@ export async function resolveCoverage(input: ResolveCoverageInput): Promise<Reso
       memberCount: row.member_count,
       vobFreshAsOf: null,
       vobStale: false,
+      claimsPayerLabels: [], // filled in step 5, for the CHOSEN group only
       claimEvidence: ev
         ? { ...ZERO_EVIDENCE, distinctMembers: ev.members, lines: ev.lines, distinctPatients: ev.members,
             sampleTier: sampleTierFor(ev.members) }
@@ -331,6 +334,17 @@ export async function resolveCoverage(input: ResolveCoverageInput): Promise<Reso
         hasReliableAllowed: r.has_reliable_allowed,
       };
     }
+  }
+
+  // ── 5b. Claims labels for the CHOSEN group — the vocabulary bridge the answer stage rides. The
+  // pick is in VOB canonical names; the snapshot's payerOverride is in claims primary_payer labels.
+  // Without this, the facility ranking silently reverts to the identifier's DOMINANT payer under a
+  // header naming the picked one (the PR #92 scope-honesty defect class). Unmapped or claims-empty
+  // groups honestly stay [] — the UI states the mismatch instead of guessing.
+  if (chosen.canonicalPayerId !== null && chosen.claimEvidence.lines > 0) {
+    const labelsQ = buildGroupClaimsLabelsQuery(token, kind, chosen.canonicalPayerId, input.from, input.to);
+    const labelsRes = await db.query<{ label: string; lines: string }>(labelsQ.sql, labelsQ.params);
+    chosen.claimsPayerLabels = labelsRes.rows.map((r) => r.label);
   }
 
   // ── 6. The ladder — a PROPOSAL scoped to the chosen group, never an applied change (§5d) ───────

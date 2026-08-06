@@ -7,11 +7,18 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import {
   buildQualifyPolicyQuery,
+  buildQualifyPolicySpreadQuery,
   buildQualifyVobFreshnessQuery,
   buildQualifyWindowRungsQuery,
+  QUALIFY_SPREAD_LIMIT,
   VOB_MEMBER_BENEFITS_LATEST,
 } from '../src/collections/qualifyPolicyQuery';
-import { buildFacilityRankingQuery } from '../src/collections/qualifyQuery';
+import {
+  buildFacilityRankingQuery,
+  buildResolvePayerQuery,
+  buildResolvePayerSpreadQuery,
+  QUALIFY_PAYER_SPREAD_LIMIT,
+} from '../src/collections/qualifyQuery';
 
 const ENT = ['af504ab6-3dcd-4aa4-a93c-27bc58de4088', '141d459c-f371-4229-9a92-ace198e940bb'];
 
@@ -89,4 +96,86 @@ test('ranking (payer path) still binds payer and now returns the median TTP day 
 test('ranking with payer=null and NO market narrow throws at the builder chokepoint (finding #5)', () => {
   assert.throws(() => buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, {}), /market narrow/);
   assert.throws(() => buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, { employers: [] }), /market narrow/);
+});
+
+// ── The SPREAD builders (2026-08-06): the widening that stops a single mode() standing in for a
+// population. See the builders' headers for the measurements that motivated them.
+
+test('policy spread: both dims, token AND limit bound once each, reused across both branches', () => {
+  const { sql, params } = buildQualifyPolicySpreadQuery('tok-abc', 'prefix');
+  assert.deepEqual(params, ['tok-abc', QUALIFY_SPREAD_LIMIT]);
+  // ONE bound param each, referenced twice — not two copies, and not interpolated.
+  assert.equal((sql.match(/\$1/g) || []).length, 2);
+  assert.equal((sql.match(/\$2/g) || []).length, 2);
+  assert.match(sql, /'employer'::text as dim/);
+  assert.match(sql, /'carrier'::text as dim/);
+  assert.match(sql, /union all/);
+  assert.match(sql, /member_id_prefix_bidx = \$1/);
+  // Each branch carries its own LIMIT — an uncapped branch is the 300-employer failure mode.
+  assert.equal((sql.match(/limit \$2/g) || []).length, 2);
+});
+
+test('policy spread: the LIMIT is a BOUND param, never interpolated into the SQL text', () => {
+  const { sql, params } = buildQualifyPolicySpreadQuery('tok-abc', 'prefix', 7);
+  // The literal must not appear in the text — safety comes from binding, not from the clamp.
+  assert.doesNotMatch(sql, /limit 7/);
+  assert.match(sql, /limit \$2/);
+  assert.equal(params[1], 7);
+});
+
+test('policy spread groups employer_norm — NEVER employer_name, which is a PHI column', () => {
+  const { sql } = buildQualifyPolicySpreadQuery('tok-abc', 'prefix');
+  assert.match(sql, /employer_norm as value/);
+  // The whole PHI posture of this builder in one assertion: the display name must not appear at all.
+  assert.doesNotMatch(sql, /employer_name/);
+});
+
+test('policy spread: member_id kind swaps the match column; token still never projected', () => {
+  const { sql } = buildQualifyPolicySpreadQuery('tok-m', 'member_id');
+  assert.match(sql, /member_id_bidx = \$1/);
+  assert.doesNotMatch(sql, /select[^;]*member_id_prefix_bidx as value/);
+});
+
+test('policy spread: limit is integer-clamped in the BOUND VALUE, bounding the scan not the syntax', () => {
+  // The clamp is a resource bound and now lands in params[1], not in the SQL text.
+  assert.equal(buildQualifyPolicySpreadQuery('t', 'prefix', 0).params[1], 1);
+  assert.equal(buildQualifyPolicySpreadQuery('t', 'prefix', -5).params[1], 1);
+  assert.equal(buildQualifyPolicySpreadQuery('t', 'prefix', 9999).params[1], 200);
+  assert.equal(buildQualifyPolicySpreadQuery('t', 'prefix', 7.9).params[1], 7);
+});
+
+test('policy query counts IGNORE blanks, so dirty data cannot manufacture a fake "1 of 2"', () => {
+  const { sql } = buildQualifyPolicyQuery('tok-abc', 'prefix');
+  // count(distinct col) treats '' as a real value; the spread builder filters it with btrim(…) <> ''
+  // and the UI treats blank as missing. All three must agree or the chip overclaims ambiguity.
+  assert.match(sql, /count\(distinct nullif\(btrim\(employer_norm\), ''\)\)::int as employer_count/);
+  assert.match(sql, /count\(distinct nullif\(btrim\(insurance_co\), ''\)\)::int as carrier_count/);
+  assert.doesNotMatch(sql, /count\(distinct employer_norm\)/);
+  assert.doesNotMatch(sql, /count\(distinct insurance_co\)/);
+});
+
+test('payer spread: same ordering as the narrow resolve, so row [0] agrees by construction', () => {
+  const ORDER = 'order by count(*) desc, max(payment_received) desc nulls last, primary_payer';
+  assert.ok(buildResolvePayerQuery('tok', 'prefix', ENT).sql.includes(ORDER));
+  assert.ok(buildResolvePayerSpreadQuery('tok', 'prefix', ENT).sql.includes(ORDER));
+});
+
+test('payer spread returns evidence counts and a date — never an amount (admissions_seat parity)', () => {
+  const { sql, params } = buildResolvePayerSpreadQuery('tok', 'prefix', ENT);
+  assert.match(sql, /count\(\*\)::int as lines/);
+  assert.match(sql, /count\(distinct member_id_bidx\)::int as patients/);
+  assert.match(sql, /to_char\(max\(payment_received\), 'YYYY-MM-DD'\) as last_payment/);
+  // A dollar column here would silently diverge blind and sighted sessions.
+  assert.doesNotMatch(sql, /allowed|charge_amount|insurance_payments|billed/);
+  // BOUND limit — the value rides params, never the SQL text.
+  assert.match(sql, /limit \$3$/);
+  assert.doesNotMatch(sql, new RegExp(`limit ${QUALIFY_PAYER_SPREAD_LIMIT}`));
+  assert.equal(params[1], 'tok');
+  assert.equal(params[2], QUALIFY_PAYER_SPREAD_LIMIT);
+});
+
+test('payer spread stays tenant-scoped and refuses an empty scope (fail-closed, not fail-open)', () => {
+  const { sql } = buildResolvePayerSpreadQuery('tok', 'prefix', ENT);
+  assert.match(sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
+  assert.throws(() => buildResolvePayerSpreadQuery('tok', 'prefix', []));
 });

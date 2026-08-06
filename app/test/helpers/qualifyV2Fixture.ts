@@ -16,6 +16,7 @@ export const QUALIFY_FACILITY_V2_NULLS: Pick<
   | 'avgLosDays'
   | 'nextUrDate'
   | 'openBeds'
+  | 'bedCapacity'
   | 'ratingV2'
   | 'iqBand'
   | 'factors'
@@ -28,6 +29,7 @@ export const QUALIFY_FACILITY_V2_NULLS: Pick<
   avgLosDays: null,
   nextUrDate: null,
   openBeds: null,
+  bedCapacity: null,
   ratingV2: null,
   iqBand: null,
   factors: [],

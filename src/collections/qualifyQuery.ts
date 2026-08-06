@@ -180,6 +180,66 @@ export function buildResolvePayerQuery(
   return { sql, params };
 }
 
+/** One payer behind a token, with the evidence supporting it. Plaintext primary_payer is non-PHI
+ *  (same class as QualifyMover.label), so unlike the VOB employer spread this IS wire-safe. */
+export interface QualifyPayerSpreadRow {
+  primary_payer: string;
+  lines: number;
+  patients: number;
+  last_payment: string | null; // ISO date of the most recent payment_received, or null
+}
+
+/** Hard cap on payers returned. MEASURED 2026-08-06: the busiest prefix bills under 17 distinct
+ *  payers, so 25 clears the live maximum with headroom and still bounds a pathological future row. */
+export const QUALIFY_PAYER_SPREAD_LIMIT = 25;
+
+/**
+ * EVERY payer behind a token, ranked — the widened form of buildResolvePayerQuery.
+ *
+ * WHY: buildResolvePayerQuery computes exactly this ranking and then throws all but the top row away
+ * with `limit 1`. MEASURED live 2026-08-06 over the whole rollup (2,665 prefixes carrying claims,
+ * 491,905 lines): 44.9% of those prefixes bill under MORE THAN ONE payer, and weighted by member —
+ * how a real card-in-hand search samples — that is **80.6% of searches**, against 82.1% of all
+ * charge lines. Max 17 payers on a single prefix. So for four searches in five, `limit 1` silently
+ * discards real billing history the user came to find, and the surface reports a single payer as
+ * though it were the answer.
+ *
+ * Identical semantics to buildResolvePayerQuery otherwise — same UNWINDOWED posture (identity is
+ * recognized if the token appears at ANY time), same tenancy scope, same dominance ordering — so row
+ * [0] of this result is byte-identical to what that builder returns. It is a widening, not a
+ * redefinition, and the two must not drift: test/qualifyPolicyQuery.test.ts pins that agreement.
+ *
+ * `last_payment` rides along so a disambiguation UI can rank recency against volume without a second
+ * query; it is a date, never an amount, so it is identical for an admissions_seat session.
+ */
+export function buildResolvePayerSpreadQuery(
+  token: string,
+  kind: QualifyTokenKind,
+  entityIds: string[],
+  limit: number = QUALIFY_PAYER_SPREAD_LIMIT,
+): { sql: string; params: unknown[] } {
+  const ent = assertEntityScope(entityIds, 'buildResolvePayerSpreadQuery');
+  const { params, add } = paramList();
+  const e = add(ent);
+  const tok = add(token);
+  const col = TOKEN_COLUMN[kind];
+  // BOUND, not interpolated — the LIMIT is a value. The clamp is a resource bound (stop a caller bug
+  // asking for 10^9 rows), not the safety mechanism; binding is. See buildQualifyPolicySpreadQuery.
+  const lim = add(Math.max(1, Math.min(200, Math.trunc(limit))));
+  const sql =
+    'select primary_payer, count(*)::int as lines, ' +
+    'count(distinct member_id_bidx)::int as patients, ' +
+    "to_char(max(payment_received), 'YYYY-MM-DD') as last_payment " +
+    `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
+    `where business_entity_id = any(${e}::uuid[]) and ${col} = ${tok} ` +
+    "and primary_payer is not null and btrim(primary_payer) <> '' " +
+    'group by primary_payer ' +
+    // The SAME ordering as buildResolvePayerQuery, so row [0] agrees with the narrow resolve exactly.
+    'order by count(*) desc, max(payment_received) desc nulls last, primary_payer ' +
+    `limit ${lim}`;
+  return { sql, params };
+}
+
 /**
  * The RANKING's reliable-evidence ratio (0059 repoint, ruling Q2a 2026-07-22) — the rating fix.
  *
@@ -502,25 +562,50 @@ export function buildMoversQuery(
   // VOB employer/funding market narrow — scopes the whole two-window population before the payer
   // rollup (semi-join; no-VOB members excluded when active).
   const mj = buildVobMarketSemiJoin(opts.market ?? {}, add);
-  // Scan ONCE across the union [priorFrom, thisTo); FILTER splits the two windows. The outer WHERE
-  // uses CTE column names (aliases can't appear in HAVING, so the floor lives in the outer query).
-  const sql =
-    'with w as (' +
-    'select primary_payer, ' +
-    `count(distinct member_id_bidx) filter (where payment_received >= ${tf}::date and payment_received < ${tt}::date)::int as this_patients, ` +
-    `count(distinct member_id_bidx) filter (where payment_received >= ${pf}::date and payment_received < ${pt}::date)::int as prior_patients, ` +
-    `count(*) filter (where payment_received >= ${tf}::date and payment_received < ${tt}::date)::int as this_charges ` +
-    `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
+  /*
+   * THREE HASHED PASSES, NOT ONE SORTED SCAN — mount-path latency fix (MEASURED 2026-08-06 on prod,
+   * 12-month window plus its prior window):
+   *
+   *   one scan, count(distinct) FILTER per window .. 13045 ms  Sort, external merge, 26576kB to DISK
+   *   split per window, count(distinct) per CTE ....  1126 ms  two sorts, 14MB + 11MB to disk
+   *   distinct-first, grouped (this shape) .........   681 ms  all HashAggregate, Batches: 1, NO spill
+   *
+   * `count(distinct x)` under a GROUP BY forces a sort by (group key, x) over the whole scan, and the
+   * old single-pass form did it across the UNION of both windows — 272,245 rows, 26 MB spilled to
+   * disk. Collapsing to DISTINCT pairs first lets the planner hash both stages, and each pass then
+   * scans only the window it needs. 19x, on a query that runs on EVERY mount of the tab.
+   *
+   * SEMANTICS UNCHANGED, and worth re-checking if you edit this: `t` is the CURRENT window, so a
+   * payer appearing only in the prior window is absent — which the old form also dropped, because
+   * `this_patients >= minPatients` (>= 1) filtered it out. A payer with no prior rows gets
+   * prior_patients = 0 via coalesce, exactly as count() over an empty FILTER did.
+   *
+   * Re-check the plan if you touch this. The win is the ABSENCE of Sort/external-merge in
+   * EXPLAIN (ANALYZE, BUFFERS); a regression is the ~13s class and no test can see it.
+   */
+  const scope =
     `where business_entity_id = any(${e}::uuid[]) ` +
     "and primary_payer is not null and btrim(primary_payer) <> '' " +
-    `and payment_received >= ${pf}::date and payment_received < ${tt}::date ` +
-    (mj ? `and ${mj} ` : '') +
-    'group by primary_payer' +
-    ') ' +
-    'select primary_payer, this_patients, prior_patients, (this_patients - prior_patients) as delta_patients ' +
-    'from w ' +
-    `where this_patients >= ${minp} and this_charges >= ${minc} ` +
-    `order by delta_patients desc, this_patients desc, primary_payer limit ${lim}`;
+    (mj ? `and ${mj} ` : '');
+  /** DISTINCT (payer, patient) pairs in ONE window, then counted per payer — both stages hashable. */
+  const patientsIn = (from: string, to: string) =>
+    'select primary_payer, count(*)::int as patients from (' +
+    `select distinct primary_payer, member_id_bidx from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
+    `${scope}and payment_received >= ${from}::date and payment_received < ${to}::date) z ` +
+    'group by primary_payer';
+  const sql =
+    `with t as (${patientsIn(tf, tt)}), ` +
+    'c as (' +
+    `select primary_payer, count(*)::int as this_charges from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
+    `${scope}and payment_received >= ${tf}::date and payment_received < ${tt}::date ` +
+    'group by primary_payer), ' +
+    `p as (${patientsIn(pf, pt)}) ` +
+    'select t.primary_payer, t.patients as this_patients, coalesce(p.patients, 0) as prior_patients, ' +
+    '(t.patients - coalesce(p.patients, 0)) as delta_patients ' +
+    'from t join c on c.primary_payer = t.primary_payer ' +
+    'left join p on p.primary_payer = t.primary_payer ' +
+    `where t.patients >= ${minp} and c.this_charges >= ${minc} ` +
+    `order by delta_patients desc, this_patients desc, t.primary_payer limit ${lim}`;
   return { sql, params };
 }
 
@@ -573,16 +658,38 @@ export function buildBookKpisQuery(
   // semi-join is emitted — the Design B asymmetry is structural. Do NOT swap this for a full filter.
   const where = cmdExplorerBaseConds(scope, ent, add).join(' and ');
   const reliable = "sum(allowed_reliable) filter (where allowed_tier <> 'e2')";
+  /*
+   * TWO SCANS, DELIBERATELY — mount-path latency fix (MEASURED 2026-08-06 on prod, over the 12-month
+   * book-wide window this tile runs on at mount):
+   *
+   *   money sums alone ............    55 ms   parallel index-only scan
+   *   count(distinct) alone .......    81 ms   HashAggregate, 1041kB, Batches: 1
+   *   BOTH IN ONE AGGREGATE .......  1819 ms   Sort, external merge, 14232kB TO DISK
+   *   both, split as below ........   152 ms
+   *
+   * Postgres cannot combine `count(distinct x)` with sibling aggregates without SORTING the whole
+   * scan by x, and the covering index carries an 82-byte payload — so 153,543 rows became a 14 MB
+   * external merge that spilled to disk. Isolated, the same count hashes 4,320 distinct values in
+   * about a megabyte. One extra index-only scan (~40 ms) buys the sort away: 12x on EVERY mount.
+   *
+   * The predicate is built ONCE and its $n placeholders are referenced by both branches (verified
+   * live: a parameter may be referenced any number of times). Do NOT call cmdExplorerBaseConds again
+   * for the second branch — it would push duplicate params and renumber the placeholders.
+   *
+   * `.claude/rules/qualify.md` requires this tile to stay an index-only scan; both halves still are.
+   * Re-check the plan if you touch it — a regression here is the ~1.8s class and no test can see it.
+   */
   const sql =
-    'select ' +
+    'select m.pct_allowed_of_billed, m.pct_paid_of_allowed, m.pct_paid_of_billed, d.distinct_patients ' +
+    'from (select ' +
     `case when sum(charge_amount) > 0 then round((${reliable}) / sum(charge_amount) * 100, 2)::float8 end as pct_allowed_of_billed, ` +
     `case when (${reliable}) > 0 then round(sum(insurance_payments) / (${reliable}) * 100, 2)::float8 end as pct_paid_of_allowed, ` +
-    'case when sum(charge_amount) > 0 then round(sum(insurance_payments) / sum(charge_amount) * 100, 2)::float8 end as pct_paid_of_billed, ' +
-    // Tile sample gate (Phase 2): distinct patients in the slice. member_id_bidx is COUNTED, never
-    // projected (no PHI leaves) — mirrors the ranking + movers discipline.
-    'count(distinct member_id_bidx)::int as distinct_patients ' +
-    `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
-    `where ${where}`;
+    'case when sum(charge_amount) > 0 then round(sum(insurance_payments) / sum(charge_amount) * 100, 2)::float8 end as pct_paid_of_billed ' +
+    `from ${CMD_EXPLORER_CHARGE_ROLLUP} where ${where}) m ` +
+    // Tile sample gate (Phase 2): distinct patients in the slice. member_id_bidx is GROUPED inside
+    // the subquery and COUNTED outside it — never projected (no PHI leaves).
+    'cross join (select count(*)::int as distinct_patients from (' +
+    `select distinct member_id_bidx from ${CMD_EXPLORER_CHARGE_ROLLUP} where ${where}) x) d`;
   return { sql, params };
 }
 

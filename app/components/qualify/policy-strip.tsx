@@ -24,26 +24,56 @@
 import type { QualifyPolicyCard, QualifyProvenance } from '../../lib/qualify/contract';
 import { PROVENANCE_LABELS } from '../../lib/qualify/ratingV2';
 
-function Chip({ label, value, mono = false }: { label: string; value: string | null; mono?: boolean }) {
+/**
+ * `of` is the count of DISTINCT values behind the prefix for this field. >1 means the value shown is
+ * the most common one, NOT the only one, and the chip says so instead of asserting a bare mode.
+ *
+ * Why this matters more than it looks: measured 2026-08-06, weighted by member (how a real
+ * card-in-hand search samples), 86.8% of searches land on a multi-carrier prefix and 57% on one where
+ * the displayed employer is a MINORITY of the population. A bare chip was confidently wrong more often
+ * than right. `of` is null for fields with no spread concept (funding, plan, group) — those render
+ * exactly as before.
+ */
+function Chip({
+  label,
+  value,
+  mono = false,
+  of = null,
+}: {
+  label: string;
+  value: string | null;
+  mono?: boolean;
+  of?: number | null;
+}) {
   const missing = value === null || value.trim() === '';
+  const ambiguous = !missing && of !== null && of > 1;
   return (
     <span
       className={[
         'inline-flex max-w-full items-baseline gap-1.5 rounded-full border px-2.5 py-0.5',
-        missing ? 'border-line bg-surface' : 'border-teal200 bg-teal50',
+        missing ? 'border-line bg-surface' : ambiguous ? 'border-status-warn/30 bg-status-warn/10' : 'border-teal200 bg-teal50',
       ].join(' ')}
-      title={`${label} · ${missing ? 'not on file' : value} · autofilled from the VOB on file`}
+      title={
+        missing
+          ? `${label} · not on file`
+          : ambiguous
+            ? `${label} · ${value} · the most common of ${of} on this prefix — not the only one`
+            : `${label} · ${value} · the only one on this prefix · autofilled from the VOB on file`
+      }
     >
       <span className="shrink-0 text-[9.5px] font-bold uppercase tracking-[0.07em] text-ink400">{label}</span>
       <span
         className={[
           'min-w-0 truncate text-[12px] font-semibold leading-5',
-          missing ? 'text-ink400' : 'text-teal700',
+          missing ? 'text-ink400' : ambiguous ? 'text-status-warn' : 'text-teal700',
           mono ? 'font-mono tabular-nums' : '',
         ].join(' ')}
       >
         {missing ? 'not on file' : value}
       </span>
+      {ambiguous ? (
+        <span className="shrink-0 text-[9.5px] font-bold tabular-nums text-status-warn/80">1 of {of}</span>
+      ) : null}
     </span>
   );
 }
@@ -110,8 +140,8 @@ export function PolicyStrip({
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5 px-4 pb-3 pt-1.5">
-        <Chip label="Carrier" value={policy.carrier} />
-        <Chip label="Employer" value={policy.employerName} />
+        <Chip label="Carrier" value={policy.carrier} of={policy.carrierCount} />
+        <Chip label="Employer" value={policy.employerName} of={policy.employerCount} />
         <Chip label="Funding" value={policy.funding} />
         <Chip label="Policy" value={policy.policyType} />
         <Chip label="Plan" value={policy.planType} />
@@ -127,10 +157,31 @@ export function PolicyStrip({
         )}
       </div>
 
-      {/* Self-funded is a MODIFIER + banner, never a factor (§5): who actually decides the claim. */}
+      {/* THE SPREAD DISCLOSURE. Renders only when the prefix actually is ambiguous, so an unambiguous
+          policy reads exactly as it did before and this line never becomes wallpaper. It states what
+          the chips above are — a modal read over a population — which the chips alone cannot. */}
+      {policy.carrierCount > 1 || policy.employerCount > 1 ? (
+        <p className="border-t border-line px-4 py-2 text-[11.5px] text-ink600">
+          <b className="font-semibold text-status-warn">This prefix is not one plan.</b> Its{' '}
+          {policy.memberCount.toLocaleString('en-US')} verified members span{' '}
+          {policy.carrierCount > 1 ? (
+            <b className="font-semibold tabular-nums">{policy.carrierCount} carriers</b>
+          ) : null}
+          {policy.carrierCount > 1 && policy.employerCount > 1 ? ' and ' : null}
+          {policy.employerCount > 1 ? (
+            <b className="font-semibold tabular-nums">{policy.employerCount} employers</b>
+          ) : null}
+          . The chips above show the most common of each — read them as the likeliest match, not the answer.
+        </p>
+      ) : null}
+
+      {/* Self-funded is a MODIFIER + banner, never a factor (§5): who actually decides the claim.
+          Attributing the risk to a NAMED employer is only honest when the prefix carries one; with
+          several, naming the modal one asserts the very specificity the line above just disclaimed. */}
       {policy.funding && /self/i.test(policy.funding) ? (
         <p className="border-t border-line px-4 py-2 text-[11.5px] text-ink600">
-          <b className="font-semibold">Self-funded plan</b> — {policy.employerName ?? 'the employer'} carries the risk;
+          <b className="font-semibold">Self-funded plan</b> —{' '}
+          {policy.employerCount > 1 ? 'the employer' : (policy.employerName ?? 'the employer')} carries the risk;
           exceptions and single-case agreements are decided by a plan administrator, not a payer rate sheet.
         </p>
       ) : null}

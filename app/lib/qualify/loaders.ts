@@ -11,9 +11,11 @@
 import { PgExecutor, makeReaderPool, readerConnectionStringFromEnv } from '../../../src/queries/executor';
 import {
   buildQualifyPolicyQuery,
+  buildQualifyPolicySpreadQuery,
   buildQualifyVobFreshnessQuery,
   buildQualifyWindowRungsQuery,
   type QualifyPolicyRow,
+  type QualifyPolicySpreadRow,
   type QualifyWindowRungsRow,
 } from '../../../src/collections/qualifyPolicyQuery';
 import {
@@ -21,7 +23,7 @@ import {
   buildCodingDecisionHistoryQuery,
   type CodingDecisionRow,
 } from '../../../src/collections/codingRegistryQuery';
-import { buildQualifyCensusReadQuery } from '../../../src/collections/qualifyCensus';
+import { buildQualifyCensusReadQuery, buildQualifyOutcomesReadQuery } from '../../../src/collections/qualifyCensus';
 import type { QualifyTokenKind } from '../../../src/collections/qualifyQuery';
 
 let executor: PgExecutor | null = null;
@@ -44,6 +46,8 @@ export async function loadQualifyPolicy(
       carrier: null,
       employer_name: null,
       employer_norm: null,
+      employer_count: 0,
+      carrier_count: 0,
       funding: null,
       policy_type: null,
       plan_type: null,
@@ -55,6 +59,20 @@ export async function loadQualifyPolicy(
       oop_met: null,
     }
   );
+}
+
+/** The employer + carrier spread behind a token, ranked and capped (QUALIFY_SPREAD_LIMIT).
+ *
+ *  ⚠ The returned employer rows carry employer_norm and are SERVER-SIDE ONLY — getQualifySnapshotCore
+ *  splits them off at its PHI forwarding boundary and never puts them on the wire. Returning them
+ *  from this loader is intentional: the comparable-cohort join key needs them. */
+export async function loadQualifyPolicySpread(
+  token: string,
+  kind: Exclude<QualifyTokenKind, 'client_name'>,
+): Promise<QualifyPolicySpreadRow[]> {
+  const q = buildQualifyPolicySpreadQuery(token, kind);
+  const res = await qualifyV2Reader().query<QualifyPolicySpreadRow>(q.sql, q.params);
+  return res.rows;
 }
 
 /** Global VOB feed high-water mark as a FULL UTC ISO timestamp (exact staleness math in core).
@@ -127,22 +145,54 @@ export async function loadCodingDecisionHistory(limit = 500): Promise<{ availabl
  *  auth-fit factor reads unavailable and the UR/beds chips stay absent, never a 500. Aggregate
  *  facility-grain rows only (no PHI exists on this path). */
 export async function loadQualifyCensusAuth(): Promise<
-  Array<{ facility_code: string; avg_auth_days: number | null; avg_los_days: number | null; next_ur_date: string | null; open_beds: number | null }>
+  Array<{ facility_code: string; board_family: string | null; avg_auth_days: number | null; avg_los_days: number | null; auth_sample: number | null; los_sample: number | null; next_ur_date: string | null; open_beds: number | null; bed_capacity: number | null }>
 > {
   const q = buildQualifyCensusReadQuery();
   try {
     const res = await qualifyV2Reader().query<{
       facility_code: string;
+      board_family: string | null;
       avg_auth_days: number | null;
       avg_los_days: number | null;
+      auth_sample: number | null;
+      los_sample: number | null;
       next_ur_date: string | null;
       open_beds: number | null;
+      bed_capacity: number | null;
     }>(q.sql, q.params);
     return res.rows;
   } catch (err) {
     const code = typeof err === 'object' && err !== null ? String((err as { code?: unknown }).code) : '';
     if (code === '42P01') {
       console.error('qualify census table absent (0078 unapplied) — auth-fit factor unavailable');
+      return [];
+    }
+    throw err;
+  }
+}
+
+/** Completed-stay LOS/auth per facility (0091) — FAIL-SOFT on 42P01 while the table is unapplied,
+ *  exactly like the census reader above: the auth-fit factor then falls back to the in-progress
+ *  census snapshot rather than 500ing. Any OTHER error rethrows — a real outage must not read as
+ *  "no outcomes on file". Aggregate facility-grain rows; no PHI on this path. */
+export async function loadQualifyFacilityOutcomes(): Promise<
+  Array<{ facility_code: string; stays_sample: number; auth_sample: number; avg_los_days: number | null; avg_auth_days: number | null; window_days: number }>
+> {
+  const q = buildQualifyOutcomesReadQuery();
+  try {
+    const res = await qualifyV2Reader().query<{
+      facility_code: string;
+      stays_sample: number;
+      auth_sample: number;
+      avg_los_days: number | null;
+      avg_auth_days: number | null;
+      window_days: number;
+    }>(q.sql, q.params);
+    return res.rows;
+  } catch (err) {
+    const code = typeof err === 'object' && err !== null ? String((err as { code?: unknown }).code) : '';
+    if (code === '42P01') {
+      console.error('qualify facility outcomes table absent (0091 unapplied) — auth-fit falls back to the census snapshot');
       return [];
     }
     throw err;

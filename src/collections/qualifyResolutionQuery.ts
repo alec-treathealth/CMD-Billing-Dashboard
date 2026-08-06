@@ -90,7 +90,11 @@ export function buildCoverageCandidatesQuery(handleToken: string, kind: QualifyH
              coalesce(m.relationship, 'unmapped'), pi.administers_for, adm.display_name,
              v.employer_norm, v.funding, v.plan_type, v.policy_type
     order by count(distinct v.member_id_bidx) desc,
-             coalesce(pi.display_name, upper(btrim(v.insurance_co))) asc`;
+             coalesce(pi.display_name, upper(btrim(v.insurance_co))) asc,
+             v.employer_norm asc nulls last,
+             v.plan_type asc nulls last,
+             v.funding asc nulls last,
+             v.policy_type asc nulls last`;
   return { sql, params: [handleToken] };
 }
 
@@ -129,7 +133,8 @@ export function buildClaimsOnlyCandidatesQuery(handleToken: string, kind: Qualif
       )
     group by m.canonical_payer_id, coalesce(pi.display_name, upper(btrim(r.primary_payer))),
              coalesce(m.relationship, 'unmapped')
-    order by count(distinct r.member_id_bidx) desc`;
+    order by count(distinct r.member_id_bidx) desc,
+             coalesce(pi.display_name, upper(btrim(r.primary_payer))) asc`;
   return { sql, params: [handleToken] };
 }
 
@@ -180,6 +185,49 @@ export function buildGroupClaimEvidenceQuery(
            and m.canonical_payer_id = $2
            and not m.needs_review
       )`;
+  return { sql, params: [handleToken, canonicalPayerId, from, to] };
+}
+
+/**
+ * CLAIMS-SIDE LABELS for one chosen group — the crosswalk bridge the ANSWER stage rides.
+ *
+ * The staged flow resolves a pick in VOB vocabulary (canonical payer display names) but the facility
+ * ranking is scoped in CLAIMS vocabulary (`primary_payer` labels, the `payerOverride` the snapshot
+ * core validates). Without this bridge the answer stage silently ranks the identifier's DOMINANT
+ * payer while its header names the picked one — the PR #92 scope-honesty defect class. This returns
+ * the top `primary_payer` labels CONFIRMED (via the alias map) to belong to the chosen group's
+ * canonical payer, within this identifier's own rows, ranked by line count. The caller passes [0] as
+ * `payerOverride`; the core still validates it against the token's spread, so this can never widen
+ * scope — only align it.
+ *
+ * Payer labels are non-PHI (they are companies, not people). Bounded LIMIT 3: the caller needs one,
+ * plus enough to show alternatives; an unbounded list is waste on the critical path.
+ */
+export function buildGroupClaimsLabelsQuery(
+  handleToken: string,
+  kind: QualifyHandleKind,
+  canonicalPayerId: string,
+  from: string,
+  to: string,
+): BuiltQuery {
+  const col = HANDLE_COLUMN[kind].rollup;
+  const sql = `
+    select r.primary_payer as label,
+           count(*)::bigint as lines
+      from collections.cmd_explorer_charge_rollup r
+     where r.${col} = $1
+       and r.charge_date >= $3::date
+       and r.charge_date <  $4::date
+       and upper(btrim(r.primary_payer)) in (
+         select m.alias_norm
+           from ref.payer_alias_map m
+          where m.vocabulary = 'claims_primary_payer'
+            and m.canonical_payer_id = $2
+            and not m.needs_review
+       )
+     group by r.primary_payer
+     order by count(*) desc, r.primary_payer asc
+     limit 3`;
   return { sql, params: [handleToken, canonicalPayerId, from, to] };
 }
 

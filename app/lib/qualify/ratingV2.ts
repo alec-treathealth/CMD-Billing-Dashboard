@@ -144,6 +144,29 @@ function codingAgeMultiplier(ageDays: number): number {
 
 // ── Factor machinery ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Minimum clients behind EACH auth-fit average before the factor is worth scoring. Mirrors
+ * QUALIFY_LOS_MIN_SAMPLE in src/collections/qualifyCensus.ts and, through it, the lower tier of
+ * sampleGate.ts (QUALIFY_RATING_MIN_PATIENTS = 3) — one vocabulary for "too few to score", not
+ * three. Declared here rather than imported because ratingV2 is pure app-side contract code and
+ * must not reach into the ingest package; the pairing is pinned by a test.
+ */
+export const QUALIFY_AUTH_FIT_MIN_SAMPLE = 3;
+
+/**
+ * True when either side of the auth-fit ratio is built on too few clients. `undefined` means the
+ * sample was never measured (a pre-0088 row, or a caller that does not supply it) — that must NOT
+ * suppress, or every facility would lose the factor the moment the column was added and before the
+ * first sync repopulated it.
+ */
+export function censusSampleBelowFloor(authSample?: number | null, losSample?: number | null): boolean {
+  const known = (n?: number | null): n is number => typeof n === 'number' && Number.isFinite(n);
+  if (!known(authSample) && !known(losSample)) return false;
+  const auth = known(authSample) ? authSample : Number.POSITIVE_INFINITY;
+  const los = known(losSample) ? losSample : Number.POSITIVE_INFINITY;
+  return Math.min(auth, los) < QUALIFY_AUTH_FIT_MIN_SAMPLE;
+}
+
 export type QualifyFactorKey = 'coding' | 'claims' | 'dataConfidence' | 'ttp' | 'authFit';
 
 /** Nominal weights (sum 100). Renormalized over the available set at compute time. */
@@ -227,6 +250,24 @@ export interface QualifyRatingV2Input {
   // auth / LOS fit (monday census aggregates, Phase G)
   avgAuthDays: number | null;
   avgLosDays: number | null;
+  /** Which monday census family fed the aggregates above, or null when the facility has no census
+   *  row. OUTPATIENT SUPPRESSES THE AUTH/LOS FACTOR ENTIRELY — see the factor body for why. */
+  censusFamily?: 'residential' | 'outpatient' | null;
+  /** How many admitted clients each census average was computed over (0078 / 0088). The factor is a
+   *  RATIO of the two, so BOTH need a floor — gating only the LOS side lets the same noise back in
+   *  through the denominator. Measured: TREAT_TX carried ONE Total Auth Days value across 47
+   *  admits. Absent (undefined) means "not measured", which does not suppress — a facility with no
+   *  census row is handled by the null-input branch below. */
+  authSample?: number | null;
+  losSample?: number | null;
+  /** WHICH measurement avgLosDays is. 'completed' = finished admissions with a real discharge date
+   *  (collections.qualify_facility_outcomes); 'in_progress' = the monday census snapshot of
+   *  currently-admitted clients, where LOS is today-minus-admit and therefore reads systematically
+   *  low. Null/absent = unstated, and the detail simply omits the note rather than guessing. */
+  losBasis?: 'completed' | 'in_progress' | null;
+  /** Trailing window (days) the completed-stay averages were measured over — shown so the number is
+   *  self-describing. Ignored unless losBasis is 'completed'. */
+  losWindowDays?: number | null;
   /** Injectable clock for the coding-age decay (tests pin it). */
   now?: Date;
 }
@@ -409,7 +450,20 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
   // — auth / LOS fit (10) ————————————————————————————————————————————————————
   const auth = input.avgAuthDays;
   const los = input.avgLosDays;
-  if (auth === null || los === null || !Number.isFinite(auth) || !Number.isFinite(los) || auth <= 0) {
+  if (input.censusFamily === 'outpatient') {
+    /* OUTPATIENT IS NOT SCORED ON AUTH/LOS. Ruling 2026-08-05, on measured evidence rather than
+     * preference: on the outpatient census boards, `Total Auth Days` / `Next UR Date` are maintained
+     * on 0-29% of CURRENTLY-admitted clients (median ~5%) (TREAT_CA 3 of 54, FRCA 2 of 7, TREAT_TX 2 of 47,
+     * TELEHEALTH_MH 0 of 13), the few that carry one are stale rows whose ADM dates sit 8 months
+     * behind the admitted median, and ZERO admitted clients on any of those boards carry a DC date —
+     * so every outpatient LOS is an open-ended today-minus-admit that grows without bound.
+     * Scoring that produced a full 10-point penalty (authFit 0) at FRCA, TREAT_CA and TREAT_TX off
+     * two or three abandoned rows.
+     * Outpatient enrolment is also not the same quantity as an authorized episode — a self-pay
+     * client can stay enrolled with no payer involvement — so even with perfect data the comparison
+     * needs its own definition. Until the boards maintain authorization and discharge dates, the
+     * honest reading is "we do not measure this here", not a zero. The weight renormalizes over the
+     * remaining factors, so an outpatient facility is not penalised for the suppression. */
     factors.push({
       key: 'authFit',
       label: QUALIFY_FACTOR_LABELS.authFit,
@@ -417,10 +471,76 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
       score: null,
       available: false,
       direction: 'neu',
-      detail: 'No authorization / length-of-stay data for this facility.',
+      detail:
+        'Not scored for outpatient — authorization and discharge dates are not maintained on the outpatient census boards, so length of stay there is not a measure of authorized care.',
+    });
+  } else if (
+    auth !== null &&
+    los !== null &&
+    Number.isFinite(auth) &&
+    Number.isFinite(los) &&
+    auth > 0 &&
+    censusSampleBelowFloor(input.authSample, input.losSample)
+  ) {
+    /* TOO THIN TO SCORE. Both averages exist, but at least one is built on fewer than
+     * QUALIFY_AUTH_FIT_MIN_SAMPLE clients. This branch is deliberately SEPARATE from the
+     * missing-input branch below, and it is deliberately HERE rather than at write time: the sync
+     * used to enforce the floor by storing avg_los_days = NULL, which collapsed "withheld as thin"
+     * into "absent" and made the copy below assert there was no length-of-stay data about a
+     * facility that had some. A scoring threshold belongs in the scoring layer, where the reason can
+     * be stated. The table stores what it measured. */
+    const n = Math.min(input.authSample ?? 0, input.losSample ?? 0);
+    factors.push({
+      key: 'authFit',
+      label: QUALIFY_FACTOR_LABELS.authFit,
+      weight: QUALIFY_FACTOR_WEIGHTS.authFit,
+      score: null,
+      available: false,
+      direction: 'neu',
+      detail: `Only ${n} client${n === 1 ? '' : 's'} on file for authorized days or length of stay — too few to score.`,
+    });
+  } else if (auth === null || los === null || !Number.isFinite(auth) || !Number.isFinite(los) || auth <= 0) {
+    // NAME THE INPUT THAT IS ACTUALLY ABSENT. The old copy said "No authorization / length-of-stay
+    // data" for every unavailable case, which was actively misleading for months: monday's API
+    // returns "" for the LOS formula column, so avg_auth_days was populated (21.11 / 25.17 days on
+    // the two instrumented facilities) while avg_los_days was NULL — auth data was fine and only
+    // LOS was missing. A factor that misstates which half it lacks sends the operator to the wrong
+    // board column.
+    const authKnown = auth !== null && Number.isFinite(auth) && auth > 0;
+    const losKnown = los !== null && Number.isFinite(los);
+    const detail = authKnown
+      ? 'Authorized days are on file, but no length-of-stay data for this facility yet.'
+      : losKnown
+        ? 'Length of stay is on file, but no authorized-days data for this facility yet.'
+        : 'No authorization or length-of-stay data for this facility yet.';
+    factors.push({
+      key: 'authFit',
+      label: QUALIFY_FACTOR_LABELS.authFit,
+      weight: QUALIFY_FACTOR_WEIGHTS.authFit,
+      score: null,
+      available: false,
+      direction: 'neu',
+      detail,
     });
   } else {
     const fit = los <= auth ? 1 : clamp01(1 - (los - auth) / auth);
+    /* THE BASIS IS PART OF THE READING, so it is stated rather than assumed.
+     *
+     * 'completed' means finished admissions with a real discharge date; 'in_progress' means a
+     * snapshot of currently-admitted clients, where LOS is today-minus-admit and every stay is
+     * unfinished. They are different quantities and they disagree materially — measured 2026-08-06
+     * across the twelve residential facilities, the in-progress read put EVERY one below its
+     * authorization (0.69-0.96), so the overrun penalty could never fire; on completed stays four
+     * are at or over it (10026624 1.10, 10025950 1.05, PCMH 1.03, LSMH 1.00).
+     *
+     * An operator comparing two facilities has to know which measurement they are looking at, and a
+     * facility scored on completed stays is not comparable to one scored on stays in progress. */
+    const basisNote =
+      input.losBasis === 'completed'
+        ? ` Completed stays${input.losWindowDays ? `, trailing ${input.losWindowDays}d` : ''}.`
+        : input.losBasis === 'in_progress'
+          ? ' Based on clients currently admitted, so stays are still running and this reads low.'
+          : '';
     factors.push({
       key: 'authFit',
       label: QUALIFY_FACTOR_LABELS.authFit,
@@ -428,7 +548,7 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
       score: fit,
       available: true,
       direction: directionOf(fit),
-      detail: `Avg length of stay ${round1(los)}d vs ${round1(auth)}d authorized.`,
+      detail: `Avg length of stay ${round1(los)}d vs ${round1(auth)}d authorized.${basisNote}`,
     });
   }
 
