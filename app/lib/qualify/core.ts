@@ -218,6 +218,10 @@ export interface QualifyCensusAggRow {
   board_family?: string | null;
   avg_auth_days: number | null;
   avg_los_days: number | null;
+  /** Clients behind each average (0078 / 0088). The rating gates on the SMALLER of the two, because
+   *  auth-fit is their ratio. Optional so a pre-0088 read still typechecks and does not suppress. */
+  auth_sample?: number | null;
+  los_sample?: number | null;
   next_ur_date: string | null; // soonest upcoming UR date on the board, ISO
   open_beds: number | null;
 }
@@ -377,6 +381,8 @@ function assembleFacilities(
         avgAuthDays: census?.avg_auth_days ?? null,
         avgLosDays: census?.avg_los_days ?? null,
         censusFamily: census?.board_family === 'outpatient' || census?.board_family === 'residential' ? census.board_family : null,
+        authSample: census?.auth_sample ?? null,
+        losSample: census?.los_sample ?? null,
         now: ctx.now,
       });
       return {
@@ -406,7 +412,10 @@ function assembleFacilities(
         medianDaysToPayment: r.median_days_to_payment ?? null,
         avgAuthDays: census?.avg_auth_days ?? null,
         avgLosDays: census?.avg_los_days ?? null,
-        censusFamily: census?.board_family === 'outpatient' || census?.board_family === 'residential' ? census.board_family : null,
+        // NO censusFamily HERE. It is a rating INPUT (see the computeRatingV2 call above), not part
+        // of the client contract — `QualifyFacility` in contract.ts declares no such field, and
+        // contract.ts is the frozen single source of truth for what crosses the wire. A mechanical
+        // edit put it on both objects; on this one it was undeclared payload that nothing read.
         nextUrDate: census?.next_ur_date ?? null,
         openBeds: census?.open_beds ?? null,
         ratingV2: v2.rating,

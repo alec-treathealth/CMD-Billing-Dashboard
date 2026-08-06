@@ -210,7 +210,10 @@ export const MONDAY_FACILITY_INFO_BOARD = '7475219124';
  * OUTPATIENT FACILITIES ARE DELIBERATELY ABSENT: they have no beds. `bed_capacity` stays NULL for
  * them, which is correct, not missing.
  */
-export const FACILITY_BED_CAPACITY: Readonly<Record<string, number>> = {
+// `number | undefined` deliberately: app tsc lacks noUncheckedIndexedAccess, so a plain
+// Record<string, number> would type a miss as `number` and make the `?? board` fallback read as dead
+// code in the app package while only root tsc told the truth.
+export const FACILITY_BED_CAPACITY: Readonly<Record<string, number | undefined>> = {
   // residential, mapped and synced
   CAMH: 12,
   DMH: 12,
@@ -339,6 +342,18 @@ export interface CensusAggregates {
    *  Observability only — nothing scores off it, but a facility that suddenly excludes everyone is a
    *  board-hygiene problem worth seeing rather than a facility with no length of stay. */
   losUnbilledExcluded: number;
+  /** Admitted items that PASSED the billed gate but produced no usable LOS — no ADM date, discharged
+   *  with no DC date, or an unparseable/negative span (see computeLosDays).
+   *
+   *  This category exists because reporting only `losSample` and `losUnbilledExcluded` invites the
+   *  reader to conclude they sum to `admittedCount`, and they do not. With all three named the
+   *  partition is EXHAUSTIVE and the identity below holds, which is what a test can pin:
+   *
+   *      admittedCount === losSample + losUnbilledExcluded + losUncomputable
+   *
+   *  It also points at a different owner than the other two: unbilled is an outpatient
+   *  data-maintenance question, uncomputable is ADM/DC hygiene on any board. */
+  losUncomputable: number;
   nextUrDate: string | null;
 }
 
@@ -465,6 +480,7 @@ export function aggregateCensusItems(
     authSample: withAuth.length,
     losSample: losValues.length,
     losUnbilledExcluded: admitted.length - billed.length,
+    losUncomputable: billed.length - losValues.length,
     nextUrDate: upcoming[0] ?? null,
   };
 }
@@ -508,6 +524,16 @@ export interface CensusConformance {
   /** EVERY board that fed this facility's row — the run report must name them all. */
   boardIds: string[];
   itemCount: number;
+  /** The LOS population, partitioned EXHAUSTIVELY so nobody has to subtract:
+   *  `admittedCount === losSample + losUnbilledExcluded + losUncomputable`.
+   *
+   *  Reported, NOT a gap: an admitted client with no ADM date yet is ordinary, and demoting every
+   *  run to 'partial' for it would make the status meaningless. These carry the board-hygiene signal
+   *  ("avg LOS over 3 of 54") that decides whether a facility's auth-fit number is worth reading. */
+  admittedCount: number;
+  losSample: number;
+  losUnbilledExcluded: number;
+  losUncomputable: number;
   /** Expected titles that did not resolve on at least one board. */
   missingTitles: string[];
   /** Titles that resolved but carried zero values across every item. */
@@ -561,18 +587,20 @@ export function buildUpsertCensusRowQuery(row: {
   avg_auth_days: number | null;
   avg_los_days: number | null;
   auth_sample: number;
+  /** 0088. Pairs with auth_sample so the rating can gate on min(auth, los) rather than one side. */
+  los_sample: number;
   next_ur_date: string | null;
 }): { sql: string; params: unknown[] } {
   return {
     sql:
       'insert into collections.qualify_facility_census ' +
-      '(facility_code, board_id, board_family, admitted_count, open_beds, bed_capacity, avg_auth_days, avg_los_days, auth_sample, next_ur_date, synced_at) ' +
-      'values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date, now()) ' +
+      '(facility_code, board_id, board_family, admitted_count, open_beds, bed_capacity, avg_auth_days, avg_los_days, auth_sample, los_sample, next_ur_date, synced_at) ' +
+      'values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::date, now()) ' +
       'on conflict (facility_code) do update set ' +
       'board_id = excluded.board_id, board_family = excluded.board_family, admitted_count = excluded.admitted_count, ' +
       'open_beds = excluded.open_beds, bed_capacity = excluded.bed_capacity, avg_auth_days = excluded.avg_auth_days, ' +
-      'avg_los_days = excluded.avg_los_days, auth_sample = excluded.auth_sample, next_ur_date = excluded.next_ur_date, ' +
-      'synced_at = now()',
+      'avg_los_days = excluded.avg_los_days, auth_sample = excluded.auth_sample, los_sample = excluded.los_sample, ' +
+      'next_ur_date = excluded.next_ur_date, synced_at = now()',
     params: [
       row.facility_code,
       row.board_id,
@@ -583,6 +611,7 @@ export function buildUpsertCensusRowQuery(row: {
       row.avg_auth_days,
       row.avg_los_days,
       row.auth_sample,
+      row.los_sample,
       row.next_ur_date,
     ],
   };
@@ -632,6 +661,7 @@ export function buildQualifyCensusReadQuery(): { sql: string; params: unknown[] 
   return {
     sql:
       'select facility_code, board_family, avg_auth_days::float8 as avg_auth_days, avg_los_days::float8 as avg_los_days, ' +
+      'auth_sample, los_sample, ' +
       "to_char(next_ur_date, 'YYYY-MM-DD') as next_ur_date, open_beds " +
       'from collections.qualify_facility_census',
     params: [],

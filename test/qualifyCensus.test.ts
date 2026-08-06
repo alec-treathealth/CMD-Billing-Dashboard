@@ -31,6 +31,7 @@ import {
   type CensusConformance,
   type CensusItem,
 } from '../src/collections/qualifyCensus';
+import { rotateFacilities, rotationOffset } from '../src/collections/qualifyCensusSync';
 
 // --- column resolution ---------------------------------------------------------
 
@@ -302,6 +303,58 @@ test('the billed gate touches LOS ONLY — auth, open beds and next UR are uncha
   assert.equal(op.losSample, 1);
 });
 
+test('the LOS partition is EXHAUSTIVE: admitted = sample + unbilled + uncomputable', () => {
+  // The identity is the point. Reporting only two of the three categories invites the reader to
+  // subtract and get the wrong answer, which is exactly what the old log line did. A test on the
+  // identity survives a future change to ANY of the three filters, where a reworded string would not.
+  const cases: Array<{ items: CensusItem[]; family: 'residential' | 'outpatient' }> = [
+    {
+      family: 'outpatient',
+      items: [
+        item({ authDays: 30, admDate: '2026-08-01' }), // billed + computable
+        item({ authDays: 30, admDate: null }), // billed, NO adm -> uncomputable
+        item({ authDays: null, urDate: null, admDate: '2026-08-01' }), // not billed
+        item({ status: 'Discharged', admDate: '2026-01-01', dcDate: '2026-01-05' }), // not admitted
+        item({ status: 'Open Bed (Male)' }), // not admitted
+      ],
+    },
+    {
+      family: 'residential',
+      items: [
+        item({ admDate: '2026-08-01' }),
+        item({ admDate: null }), // uncomputable
+        item({ status: 'Admitted', admDate: '2026-08-01', dcDate: null }),
+      ],
+    },
+    { family: 'residential', items: [] },
+  ];
+  for (const { items, family } of cases) {
+    const agg = aggregateCensusItems(items, '2026-08-11', family);
+    assert.equal(
+      agg.admittedCount,
+      agg.losSample + agg.losUnbilledExcluded + agg.losUncomputable,
+      `partition must be exhaustive for ${family} (${JSON.stringify(agg)})`,
+    );
+  }
+});
+
+test('losUncomputable isolates BILLED-but-undateable from NOT-BILLED — different owners', () => {
+  const agg = aggregateCensusItems(
+    [
+      item({ authDays: 30, admDate: '2026-08-01' }), // counted
+      item({ authDays: 30, admDate: null }), // billed, no ADM date -> board hygiene
+      item({ authDays: 30, status: 'Discharged', admDate: '2026-08-01', dcDate: null }), // not admitted
+      item({ authDays: null, urDate: null, admDate: '2026-08-01' }), // not billed -> OP data maintenance
+    ],
+    '2026-08-11',
+    'outpatient',
+  );
+  assert.equal(agg.losSample, 1);
+  assert.equal(agg.losUnbilledExcluded, 1, 'no auth and no UR');
+  assert.equal(agg.losUncomputable, 1, 'billed but no ADM date');
+  assert.equal(agg.admittedCount, 3);
+});
+
 test('aggregation: a DC date before the ADM date is dropped, not averaged as a negative', () => {
   const items: CensusItem[] = [
     item({ admDate: '2026-08-04' }), // in-house, 6 days
@@ -375,6 +428,10 @@ test('conformanceHasGap: all four causes count, and a clean line does not', () =
     family: 'residential',
     boardIds: ['7422342993'],
     itemCount: 233,
+    admittedCount: 15,
+    losSample: 15,
+    losUnbilledExcluded: 0,
+    losUncomputable: 0,
     missingTitles: [],
     emptyTitles: [],
     familyMismatch: null,
@@ -478,6 +535,33 @@ test('QUALIFY_LOS_MIN_SAMPLE matches the repo sample-gate idiom rather than inve
   assert.equal(QUALIFY_LOS_MIN_SAMPLE, 3);
 });
 
+test('rotateFacilities: total order preserved, offset wraps, and it is safe on empty/negative', () => {
+  // Rotation is what stops a wall-clock timeout from starving the SAME tail facilities forever.
+  const xs = ['a', 'b', 'c', 'd'];
+  assert.deepEqual(rotateFacilities(xs, 0), ['a', 'b', 'c', 'd']);
+  assert.deepEqual(rotateFacilities(xs, 1), ['b', 'c', 'd', 'a']);
+  assert.deepEqual(rotateFacilities(xs, 3), ['d', 'a', 'b', 'c']);
+  assert.deepEqual(rotateFacilities(xs, 4), ['a', 'b', 'c', 'd'], 'wraps');
+  assert.deepEqual(rotateFacilities(xs, 9), ['b', 'c', 'd', 'a']);
+  assert.deepEqual(rotateFacilities(xs, -1), ['d', 'a', 'b', 'c'], 'negative wraps forward');
+  assert.deepEqual(rotateFacilities([], 3), []);
+  // Every element survives exactly once — a rotation that dropped one would silently stop syncing it.
+  for (let k = 0; k < 8; k++) assert.deepEqual([...rotateFacilities(xs, k)].sort(), ['a', 'b', 'c', 'd']);
+});
+
+test('rotationOffset advances once per hour and covers every position over a day', () => {
+  const HOUR = 3_600_000;
+  const n = MONDAY_CENSUS_FACILITIES.length;
+  const base = 1_800_000_000_000; // fixed epoch ms; Date.now() is not used in tests
+  assert.equal(rotationOffset(base, n), rotationOffset(base + HOUR - 1, n), 'stable within an hour');
+  assert.notEqual(rotationOffset(base, n), rotationOffset(base + HOUR, n), 'advances on the next hour');
+  // Over `n` consecutive hours every facility gets to go first — the starvation guarantee.
+  const seen = new Set<number>();
+  for (let h = 0; h < n; h++) seen.add(rotationOffset(base + h * HOUR, n));
+  assert.equal(seen.size, n, 'every start position is reached within one full cycle');
+  assert.equal(rotationOffset(base, 0), 0, 'empty registry is safe');
+});
+
 test('representativeBoardId: the LOWEST id, deterministically, regardless of config order', () => {
   assert.equal(representativeBoardId(['18405687473', '18394268978']), '18394268978');
   assert.equal(representativeBoardId(['18394268978', '18405687473']), '18394268978');
@@ -512,11 +596,13 @@ test('builders: fixed identifiers, bound params, ::date cast on the UR date', ()
     avg_auth_days: 18.5,
     avg_los_days: 16.33,
     auth_sample: 14,
+    los_sample: 12,
     next_ur_date: '2026-08-05',
   });
   assert.match(up.sql, /insert into collections\.qualify_facility_census/);
   assert.match(up.sql, /on conflict \(facility_code\) do update/);
-  assert.equal(up.params.length, 10);
+  assert.match(up.sql, /\blos_sample\b/, '0088: the LOS sample rides with auth_sample');
+  assert.equal(up.params.length, 11);
   assert.ok(!up.sql.includes('10030911'), 'values bound, never inlined');
 
   const read = buildQualifyCensusReadQuery();

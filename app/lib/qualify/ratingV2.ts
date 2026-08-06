@@ -144,6 +144,29 @@ function codingAgeMultiplier(ageDays: number): number {
 
 // ── Factor machinery ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Minimum clients behind EACH auth-fit average before the factor is worth scoring. Mirrors
+ * QUALIFY_LOS_MIN_SAMPLE in src/collections/qualifyCensus.ts and, through it, the lower tier of
+ * sampleGate.ts (QUALIFY_RATING_MIN_PATIENTS = 3) — one vocabulary for "too few to score", not
+ * three. Declared here rather than imported because ratingV2 is pure app-side contract code and
+ * must not reach into the ingest package; the pairing is pinned by a test.
+ */
+export const QUALIFY_AUTH_FIT_MIN_SAMPLE = 3;
+
+/**
+ * True when either side of the auth-fit ratio is built on too few clients. `undefined` means the
+ * sample was never measured (a pre-0088 row, or a caller that does not supply it) — that must NOT
+ * suppress, or every facility would lose the factor the moment the column was added and before the
+ * first sync repopulated it.
+ */
+export function censusSampleBelowFloor(authSample?: number | null, losSample?: number | null): boolean {
+  const known = (n?: number | null): n is number => typeof n === 'number' && Number.isFinite(n);
+  if (!known(authSample) && !known(losSample)) return false;
+  const auth = known(authSample) ? authSample : Number.POSITIVE_INFINITY;
+  const los = known(losSample) ? losSample : Number.POSITIVE_INFINITY;
+  return Math.min(auth, los) < QUALIFY_AUTH_FIT_MIN_SAMPLE;
+}
+
 export type QualifyFactorKey = 'coding' | 'claims' | 'dataConfidence' | 'ttp' | 'authFit';
 
 /** Nominal weights (sum 100). Renormalized over the available set at compute time. */
@@ -230,6 +253,13 @@ export interface QualifyRatingV2Input {
   /** Which monday census family fed the aggregates above, or null when the facility has no census
    *  row. OUTPATIENT SUPPRESSES THE AUTH/LOS FACTOR ENTIRELY — see the factor body for why. */
   censusFamily?: 'residential' | 'outpatient' | null;
+  /** How many admitted clients each census average was computed over (0078 / 0088). The factor is a
+   *  RATIO of the two, so BOTH need a floor — gating only the LOS side lets the same noise back in
+   *  through the denominator. Measured: TREAT_TX carried ONE Total Auth Days value across 47
+   *  admits. Absent (undefined) means "not measured", which does not suppress — a facility with no
+   *  census row is handled by the null-input branch below. */
+  authSample?: number | null;
+  losSample?: number | null;
   /** Injectable clock for the coding-age decay (tests pin it). */
   now?: Date;
 }
@@ -415,7 +445,7 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
   if (input.censusFamily === 'outpatient') {
     /* OUTPATIENT IS NOT SCORED ON AUTH/LOS. Ruling 2026-08-05, on measured evidence rather than
      * preference: on the outpatient census boards, `Total Auth Days` / `Next UR Date` are maintained
-     * on only 4-6% of CURRENTLY-admitted clients (TREAT_CA 3 of 54, FRCA 2 of 7, TREAT_TX 2 of 47,
+     * on 0-29% of CURRENTLY-admitted clients (median ~5%) (TREAT_CA 3 of 54, FRCA 2 of 7, TREAT_TX 2 of 47,
      * TELEHEALTH_MH 0 of 13), the few that carry one are stale rows whose ADM dates sit 8 months
      * behind the admitted median, and ZERO admitted clients on any of those boards carry a DC date —
      * so every outpatient LOS is an open-ended today-minus-admit that grows without bound.
@@ -435,6 +465,31 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
       direction: 'neu',
       detail:
         'Not scored for outpatient — authorization and discharge dates are not maintained on the outpatient census boards, so length of stay there is not a measure of authorized care.',
+    });
+  } else if (
+    auth !== null &&
+    los !== null &&
+    Number.isFinite(auth) &&
+    Number.isFinite(los) &&
+    auth > 0 &&
+    censusSampleBelowFloor(input.authSample, input.losSample)
+  ) {
+    /* TOO THIN TO SCORE. Both averages exist, but at least one is built on fewer than
+     * QUALIFY_AUTH_FIT_MIN_SAMPLE clients. This branch is deliberately SEPARATE from the
+     * missing-input branch below, and it is deliberately HERE rather than at write time: the sync
+     * used to enforce the floor by storing avg_los_days = NULL, which collapsed "withheld as thin"
+     * into "absent" and made the copy below assert there was no length-of-stay data about a
+     * facility that had some. A scoring threshold belongs in the scoring layer, where the reason can
+     * be stated. The table stores what it measured. */
+    const n = Math.min(input.authSample ?? 0, input.losSample ?? 0);
+    factors.push({
+      key: 'authFit',
+      label: QUALIFY_FACTOR_LABELS.authFit,
+      weight: QUALIFY_FACTOR_WEIGHTS.authFit,
+      score: null,
+      available: false,
+      direction: 'neu',
+      detail: `Only ${n} client${n === 1 ? '' : 's'} on file for authorized days or length of stay — too few to score.`,
     });
   } else if (auth === null || los === null || !Number.isFinite(auth) || !Number.isFinite(los) || auth <= 0) {
     // NAME THE INPUT THAT IS ACTUALLY ABSENT. The old copy said "No authorization / length-of-stay
