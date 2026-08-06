@@ -173,18 +173,104 @@ export function payerGroupsOf(r: QualifyResolution): PayerGroup[] {
  * `picked` (the user submitted a plan). A sole candidate skips straight to the answer; a single
  * carrier skips the payer stage. Skipped stages are STATED on the answer stage's disclosure, never
  * silent (deriveNotices already emits `sole_candidate`).
+ *
+ * `skipped` is the user's OWN escape hatch (the Skip button on either narrowing stage): jump to the
+ * answer without choosing a carrier or a plan, and browse the identifier's whole footprint with the
+ * answer stage's filter lines instead. It is deliberately a separate input from `picked` — "I chose
+ * this plan" and "I declined to choose" must never render as the same claim.
  */
 export function deriveStage(args: {
   resolution: QualifyResolution | null;
   payerPick: string | null;
   picked: boolean;
+  skipped?: boolean;
 }): FlowStage {
   const r = args.resolution;
   if (!r) return 'identify';
+  if (args.skipped) return 'answer';
   if (r.candidates.total <= 1) return 'answer';
   if (args.picked) return 'answer';
   if (payerGroupsOf(r).length > 1 && args.payerPick === null) return 'payer';
   return 'plan';
+}
+
+// ── Answer-stage filters (the general-search escape hatch) ───────────────────────────────────────
+
+/** Multiselect narrows on the answer stage. Empty array = no restriction on that facet. */
+export interface AnswerFilters {
+  planTypes: string[];
+  funding: string[];
+  employers: string[];
+}
+
+export const NO_ANSWER_FILTERS: AnswerFilters = { planTypes: [], funding: [], employers: [] };
+
+export function answerFiltersActive(f: AnswerFilters): boolean {
+  return f.planTypes.length > 0 || f.funding.length > 0 || f.employers.length > 0;
+}
+
+/** AND across facets, OR within one — the standard multiselect reading. */
+export function filterCandidates(all: readonly OrderedCandidate[], f: AnswerFilters): OrderedCandidate[] {
+  return all.filter((c) => {
+    if (f.planTypes.length > 0 && !(c.planType !== null && f.planTypes.includes(c.planType))) return false;
+    if (f.funding.length > 0 && !(c.funding !== null && f.funding.includes(c.funding))) return false;
+    if (f.employers.length > 0 && !(c.employerLabel !== null && f.employers.includes(c.employerLabel))) return false;
+    return true;
+  });
+}
+
+export interface Facet {
+  value: string;
+  members: number;
+}
+
+/** Distinct values per facet, member-weighted and ranked — the biggest option first, so the list
+ *  reads as "what this identifier actually has" rather than an alphabet. */
+export function facetsOf(all: readonly OrderedCandidate[]): {
+  planTypes: Facet[];
+  funding: Facet[];
+  employers: Facet[];
+} {
+  const tally = (pick: (c: OrderedCandidate) => string | null): Facet[] => {
+    const m = new Map<string, number>();
+    for (const c of all) {
+      const v = pick(c);
+      if (v === null || v === '') continue;
+      m.set(v, (m.get(v) ?? 0) + c.memberCount);
+    }
+    return [...m.entries()]
+      .map(([value, members]) => ({ value, members }))
+      .sort((a, b) => b.members - a.members || a.value.localeCompare(b.value));
+  };
+  return {
+    planTypes: tally((c) => c.planType),
+    funding: tally((c) => c.funding),
+    employers: tally((c) => c.employerLabel),
+  };
+}
+
+/**
+ * The `market.employers` value to send with the ranking query, or null when the narrow cannot be
+ * expressed faithfully.
+ *
+ * ⚠ THE BOUND IS LOAD-BEARING. `sanitizeMarket` SLICES the employer array at
+ * QUALIFY_EMPLOYER_SET_MAX (200) at the action boundary. Sending 311 employers would silently rank
+ * over 200 of them while this screen said it searched all 311 — a narrowing the user never asked for
+ * and cannot see. So: send the set only when it is a PROPER SUBSET (otherwise it is not a narrow at
+ * all) and within the bound; otherwise send nothing and let the caption say the ranking is not
+ * employer-narrowed.
+ */
+export const ANSWER_EMPLOYER_SEND_MAX = 200;
+
+export function employerNarrowFor(
+  universe: readonly OrderedCandidate[],
+  filtered: readonly OrderedCandidate[],
+): { employers: string[] } | { tooMany: number } | null {
+  const allEmployers = new Set(universe.map((c) => c.employerLabel).filter((e): e is string => e !== null && e !== ''));
+  const picked = [...new Set(filtered.map((c) => c.employerLabel).filter((e): e is string => e !== null && e !== ''))];
+  if (picked.length === 0 || picked.length >= allEmployers.size) return null; // not a narrow
+  if (picked.length > ANSWER_EMPLOYER_SEND_MAX) return { tooMany: picked.length };
+  return { employers: picked };
 }
 
 /** The live-region sentence for the current state — announced once, as a full sentence. */
@@ -361,6 +447,24 @@ export function StepRail(props: {
   );
 }
 
+/**
+ * The escape hatch, offered on every narrowing stage: stop answering questions and go straight to
+ * the answer over the identifier's WHOLE footprint, then narrow (or not) with the answer stage's
+ * filter lines. Declining to choose is a real answer, and the answer stage says which one it got.
+ */
+function SkipStep(props: { onSkip: () => void; what: string }): React.ReactElement {
+  return (
+    <button
+      type="button"
+      onClick={props.onSkip}
+      aria-label={`Skip ${props.what} and search across all plans for this member`}
+      className="w-fit rounded-lg border border-line bg-surface px-3 py-1.5 text-sm font-semibold text-ink600 transition-colors hover:border-teal500 hover:text-teal700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40"
+    >
+      Skip <span className="font-normal text-ink400">— search all plans</span>
+    </button>
+  );
+}
+
 function evidenceWord(has: boolean): React.ReactElement {
   return has ? (
     <span className="text-xs text-ink600">Claims history on file</span>
@@ -505,6 +609,7 @@ function payerAccent(g: PayerGroup): string {
 export function StagePayer(props: {
   resolution: QualifyResolution;
   onPick: (payer: string) => void;
+  onSkip: () => void;
   /** Optional pre-computed clusters (the shell memoizes one call per resolution). */
   payerGroups?: PayerGroup[];
 }): React.ReactElement {
@@ -529,6 +634,7 @@ export function StagePayer(props: {
           </span>
         ) : null}
       </p>
+      <SkipStep onSkip={props.onSkip} what="the carrier step" />
       <ul data-v3-grid className="grid list-none grid-cols-1 gap-2.5 p-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {groups.map((g, i) => (
           <li key={g.payer}>
@@ -605,6 +711,7 @@ export function StagePlan(props: {
   onPlanFilter: (v: string) => void;
   planAction: (fd: FormData) => void;
   onAskAi: () => void;
+  onSkip: () => void;
   pending: boolean;
   /** Optional pre-computed clusters (the shell memoizes one call per resolution). */
   payerGroups?: PayerGroup[];
@@ -631,6 +738,7 @@ export function StagePlan(props: {
           No plans are on file under {payer} in this result. Use the receipt above to change the
           carrier or search again.
         </p>
+        <SkipStep onSkip={props.onSkip} what="the plan step" />
       </Stage>
     );
   }
@@ -655,6 +763,7 @@ export function StagePlan(props: {
             under {payer}. These are every possibility we have on file — pick the one on the card, or ask the AI
             about one. The largest is a guess, not an answer.
           </p>
+          <SkipStep onSkip={props.onSkip} what="the plan step" />
           {underPayer.length > PLAN_FILTER_THRESHOLD ? (
             <div className="flex max-w-md flex-col gap-1">
               <label htmlFor="qualify-plan-filter" className="text-sm font-medium text-ink900">
@@ -869,7 +978,18 @@ export interface StageAnswerProps {
    * below MUST distinguish these — "you picked this" and "we defaulted to this" are different claims
    * about the same number.
    */
-  scopeSource: 'user' | 'pick' | 'dominant';
+  scopeSource: 'user' | 'pick' | 'dominant' | 'skipped';
+  /** The candidate UNIVERSE the filter lines describe: every plan under the picked carrier, or —
+   *  after a Skip — every plan behind the identifier. Supplied by the shell so this stays pure. */
+  candidates: readonly OrderedCandidate[];
+  filters: AnswerFilters;
+  onToggleFilter: (facet: 'planType' | 'funding' | 'employer', value: string) => void;
+  onClearFilters: () => void;
+  employerQuery: string;
+  onEmployerQuery: (v: string) => void;
+  /** Set when the employer narrow could not be sent because it exceeded the action's 200 bound —
+   *  the caption says the ranking is NOT employer-narrowed rather than implying it is. */
+  employerNarrowTooMany: number | null;
   payerOverride: string | null;
   onPayerOverride: (label: string | null) => void;
   windowDays: QualifyTrailingDays | null;
@@ -880,6 +1000,43 @@ export interface StageAnswerProps {
    * instead of blanking to a skeleton. Skeletons are for genuine first loads only.
    */
   refetching: boolean;
+}
+
+/** One filter row, styled as the "BILLED UNDER" line: a label, then toggle chips. Multiselect —
+ *  `aria-pressed` carries the state and the chip appends " · on" so it is never hue-only. */
+function FilterLine(props: {
+  label: string;
+  options: readonly Facet[];
+  selected: readonly string[];
+  onToggle: (v: string) => void;
+  /** Trailing note — what the current selection means for the ranking. */
+  note?: string;
+}): React.ReactElement | null {
+  if (props.options.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="text-xs font-medium uppercase tracking-wide text-ink400">{props.label}</span>
+      {props.options.map((o) => {
+        const on = props.selected.includes(o.value);
+        return (
+          <button
+            key={o.value}
+            type="button"
+            aria-pressed={on}
+            onClick={() => props.onToggle(o.value)}
+            className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
+              on ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
+            }`}
+          >
+            {o.value}
+            <span className="font-mono tabular-nums text-ink400"> · {o.members.toLocaleString()}</span>
+            {on ? ' · on' : ''}
+          </button>
+        );
+      })}
+      {props.note ? <span className="text-xs text-ink600">{props.note}</span> : null}
+    </div>
+  );
 }
 
 /** First-load ghost sized to the real footprint (window line + hero + two scorecard rows), so the
@@ -908,6 +1065,20 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
     g.network ?? 'Network not captured on this VOB',
   ].join(' · ');
   const rating = snap ? derivePolicyRating(snap.facilities) : null;
+  const facets = facetsOf(props.candidates);
+  const filteredCandidates = filterCandidates(props.candidates, props.filters);
+  const filtersActive = answerFiltersActive(props.filters);
+  // Employer options: filtered by the tag-search text, then capped for render — a 311-employer chip
+  // wall is not a control. Selected employers are always shown so a narrow is never invisible.
+  const employerNeedle = props.employerQuery.trim().toLowerCase();
+  const employerMatches = facets.employers.filter(
+    (o) => employerNeedle === '' || o.value.toLowerCase().includes(employerNeedle),
+  );
+  const EMPLOYER_CHIP_CAP = 40;
+  const employerOptions = [
+    ...facets.employers.filter((o) => props.filters.employers.includes(o.value)),
+    ...employerMatches.filter((o) => !props.filters.employers.includes(o.value)).slice(0, EMPLOYER_CHIP_CAP),
+  ];
   return (
     <Stage id="qualify-s-answer" question="Does this payer pay us — and where?">
       {/* The policy identity the user resolved, restated in one line — never re-derived. */}
@@ -951,37 +1122,135 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
             </p>
           ) : null}
 
-          {/* The window decision, DISCLOSED in one line with the override one expander away. */}
-          <div className="flex flex-col gap-1 rounded-lg border border-line bg-surface px-4 py-3">
+          {/* A SKIP is its own scope claim: no plan was chosen, so the ranking is the identifier's
+              whole footprint under its largest payer. "You declined to narrow" and "we could not
+              narrow" are different statements and must not share copy. */}
+          {!props.refetching && props.scopeSource === 'skipped' && snap.resolved ? (
+            <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink900">
+              You skipped the plan questions, so this is a general search: every facility this member
+              has history at under {snap.resolved.payerName}. Use the lines below to narrow it, or the
+              receipt above to pick a plan.
+            </p>
+          ) : null}
+
+          {/* ── The control lines. All visible, none behind a dropdown (the employer tag-search is
+              the one exception — 311 employers cannot be chips). Each is the "BILLED UNDER" idiom:
+              a label, then toggles. Window is SINGLE-select (a window is one value); the three
+              facets are multiselect. ── */}
+          <div className="flex flex-col gap-2.5 rounded-lg border border-line bg-surface px-4 py-3">
             <p className="text-sm text-ink900">{windowSentence(snap, props.windowDays)}</p>
-            <details>
-              <summary className="cursor-pointer text-xs font-semibold text-teal700">Change the window</summary>
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                {WINDOW_CHOICES.map((d) => {
-                  const active = props.windowDays === d;
-                  return (
-                    <button
-                      key={d}
-                      type="button"
-                      aria-pressed={active}
-                      onClick={() => props.onWindowDays(d)}
-                      className={`rounded-full border px-3 py-1 text-xs font-semibold ${
-                        active ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600'
-                      }`}
-                    >
-                      {d} days{active ? ' · selected' : ''}
-                    </button>
-                  );
-                })}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium uppercase tracking-wide text-ink400">Window</span>
+              {WINDOW_CHOICES.map((d) => {
+                const active = props.windowDays === d;
+                return (
+                  <button
+                    key={d}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => props.onWindowDays(d)}
+                    className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
+                      active ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
+                    }`}
+                  >
+                    {d} days{active ? ' · selected' : ''}
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                aria-pressed={props.windowDays === null}
+                onClick={() => props.onWindowDays(null)}
+                className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
+                  props.windowDays === null ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
+                }`}
+              >
+                Automatic{props.windowDays === null ? ' · selected' : ''}
+              </button>
+            </div>
+
+            <FilterLine
+              label="Plan type"
+              options={facets.planTypes}
+              selected={props.filters.planTypes}
+              onToggle={(v) => props.onToggleFilter('planType', v)}
+            />
+            <FilterLine
+              label="Funding"
+              options={facets.funding}
+              selected={props.filters.funding}
+              onToggle={(v) => props.onToggleFilter('funding', v)}
+            />
+
+            {/* The employer tag-search: a visible dropdown whose SUMMARY states the current reach,
+                so the count is readable without opening it. */}
+            {facets.employers.length > 0 ? (
+              <details className="text-xs">
+                <summary className="cursor-pointer font-semibold text-teal700">
+                  {props.filters.employers.length > 0
+                    ? `Narrowed to ${props.filters.employers.length} of ${facets.employers.length} employers`
+                    : `Searched over ${facets.employers.length} employer${facets.employers.length === 1 ? '' : 's'}`}
+                </summary>
+                <div className="mt-2 flex flex-col gap-2">
+                  <label htmlFor="qualify-answer-employers" className="text-xs font-medium text-ink900">
+                    Find an employer
+                  </label>
+                  <input
+                    id="qualify-answer-employers"
+                    type="text"
+                    value={props.employerQuery}
+                    onChange={(e) => props.onEmployerQuery(e.target.value)}
+                    autoComplete="off"
+                    className="max-w-sm rounded-lg border border-line bg-surface px-3 py-1.5 text-sm text-ink900 outline-none transition-colors focus:border-teal500 focus:ring-2 focus:ring-teal500/25"
+                  />
+                  <div className="flex max-h-56 flex-wrap gap-1.5 overflow-y-auto">
+                    {employerOptions.map((o) => {
+                      const on = props.filters.employers.includes(o.value);
+                      return (
+                        <button
+                          key={o.value}
+                          type="button"
+                          aria-pressed={on}
+                          onClick={() => props.onToggleFilter('employer', o.value)}
+                          className={`rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors ${
+                            on ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
+                          }`}
+                        >
+                          {o.value}
+                          <span className="font-mono tabular-nums text-ink400"> · {o.members.toLocaleString()}</span>
+                          {on ? ' · on' : ''}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {employerOptions.length < employerMatches.length ? (
+                    <p className="text-ink600">
+                      Showing the {employerOptions.length} largest of {employerMatches.length} matches — type to narrow.
+                    </p>
+                  ) : null}
+                </div>
+              </details>
+            ) : null}
+
+            {/* What the filters DID to the ranking — stated, never inferred. */}
+            {filtersActive ? (
+              <p className="flex flex-wrap items-center gap-2 text-xs text-ink600">
+                <span>
+                  Ranking over {filteredCandidates.length} of {props.candidates.length} plans
+                  {props.employerNarrowTooMany !== null
+                    ? ` — too many employers (${props.employerNarrowTooMany}) to narrow the ranking by employer, so it is not`
+                    : ''}
+                  .
+                </span>
                 <button
                   type="button"
-                  onClick={() => props.onWindowDays(null)}
-                  className="rounded-full border border-line bg-surface px-3 py-1 text-xs font-semibold text-ink600"
+                  onClick={props.onClearFilters}
+                  className="rounded-full border border-line px-2.5 py-0.5 font-semibold text-teal700 hover:bg-teal50"
                 >
-                  Automatic{props.windowDays === null ? ' · selected' : ''}
+                  Clear filters
                 </button>
-              </div>
-            </details>
+              </p>
+            ) : null}
           </div>
 
           {/* Claims-side scope: which billed-under label the ranking is scoped to. */}
@@ -1159,6 +1428,8 @@ export interface ResolutionStagesProps {
   onPlanFilter: (v: string) => void;
   onAskAi: () => void;
   onChange: (backTo: 'identify' | 'payer' | 'plan') => void;
+  /** The Skip escape hatch, offered on both narrowing stages. */
+  onSkip: () => void;
   /**
    * The "Facilities Heating Up" trend strip, passed as a SLOT (the shell owns its fetch and its
    * marquee hook, so this module stays statically renderable). Rendered on the IDENTIFY stage only:
@@ -1235,7 +1506,12 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
         ) : null}
 
         {props.stage === 'payer' && props.resolution ? (
-          <StagePayer resolution={props.resolution} onPick={props.onPickPayer} payerGroups={props.payerGroups} />
+          <StagePayer
+            resolution={props.resolution}
+            onPick={props.onPickPayer}
+            onSkip={props.onSkip}
+            payerGroups={props.payerGroups}
+          />
         ) : null}
 
         {props.stage === 'plan' && props.resolution ? (
@@ -1246,6 +1522,7 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
             onPlanFilter={props.onPlanFilter}
             planAction={props.planAction}
             onAskAi={props.onAskAi}
+            onSkip={props.onSkip}
             pending={props.pending}
             payerGroups={props.payerGroups}
           />

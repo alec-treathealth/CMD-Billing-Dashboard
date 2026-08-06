@@ -35,7 +35,18 @@ import type { QualifyFacilityTrend, QualifySnapshot, QualifyTrailingDays } from 
 import { QualifyAiPanel } from '../qualify-ai-panel';
 import { HeatingUpCards, HeatingUpSkeleton } from '../shared/heating-ticker';
 import { staggerDelayMs } from '../tokens';
-import { deriveStage, payerGroupsOf, ResolutionStages, type FlowStage } from './resolution-flow';
+import {
+  answerFiltersActive,
+  deriveStage,
+  employerNarrowFor,
+  filterCandidates,
+  NO_ANSWER_FILTERS,
+  orderedCandidates,
+  payerGroupsOf,
+  ResolutionStages,
+  type AnswerFilters,
+  type FlowStage,
+} from './resolution-flow';
 
 // ScrollTrigger ships inside the gsap package — no new dependency. Client components also render on
 // the server once, so guard the registration behind a window check.
@@ -58,6 +69,11 @@ export function ResolutionFlowClient({
 
   const [payerPick, setPayerPick] = useState<string | null>(null);
   const [picked, setPicked] = useState(false);
+  // The user's own escape hatch: jump to the answer over the WHOLE footprint. Distinct from
+  // `picked` — declining to choose is a different claim from choosing, and the answer says which.
+  const [skipped, setSkipped] = useState(false);
+  const [filters, setFilters] = useState<AnswerFilters>(NO_ANSWER_FILTERS);
+  const [employerQuery, setEmployerQuery] = useState('');
   const [planFilter, setPlanFilter] = useState('');
   const [autoAsk, setAutoAsk] = useState(false);
   const [backTo, setBackTo] = useState<FlowStage | null>(null);
@@ -88,6 +104,9 @@ export function ResolutionFlowClient({
       termRef.current = typeof term === 'string' ? term : '';
       setPayerPick(null);
       setPicked(false);
+      setSkipped(false);
+      setFilters(NO_ANSWER_FILTERS);
+      setEmployerQuery('');
       setPlanFilter('');
       setAutoAsk(false);
       setBackTo(null);
@@ -101,6 +120,37 @@ export function ResolutionFlowClient({
     [formAction],
   );
 
+  /** Skip the remaining questions: straight to the answer over the whole footprint. Clears any
+   *  half-made narrowing so the general search is genuinely general. */
+  const onSkip = useCallback(() => {
+    setSkipped(true);
+    setPicked(false);
+    setPayerPick(null);
+    setPlanFilter('');
+    setBackTo(null);
+    setFilters(NO_ANSWER_FILTERS);
+    setEmployerQuery('');
+    setPayerOverride(null);
+    setSnapshot(null);
+    setSnapshotError(null);
+    setRefetching(false);
+  }, []);
+
+  const onToggleFilter = useCallback((facet: 'planType' | 'funding' | 'employer', value: string) => {
+    setRefetching(true); // a filter change re-scopes content already on screen
+    setFilters((f) => {
+      const key = facet === 'planType' ? 'planTypes' : facet === 'funding' ? 'funding' : 'employers';
+      const cur = f[key];
+      return { ...f, [key]: cur.includes(value) ? cur.filter((v) => v !== value) : [...cur, value] };
+    });
+  }, []);
+
+  const onClearFilters = useCallback(() => {
+    setRefetching(true);
+    setFilters(NO_ANSWER_FILTERS);
+    setEmployerQuery('');
+  }, []);
+
   /** A plan pick: inject the held term (never from the DOM), mark picked, dispatch. A NEW plan is a
    *  new population — a genuine first load, so the snapshot blanks to the skeleton (unlike a
    *  re-scope, which keeps stale content dimmed). */
@@ -108,6 +158,9 @@ export function ResolutionFlowClient({
     (fd: FormData) => {
       fd.set('term', termRef.current);
       setPicked(true);
+      setSkipped(false); // choosing a plan supersedes a prior skip
+      setFilters(NO_ANSWER_FILTERS);
+      setEmployerQuery('');
       setBackTo(null);
       setSnapshot(null);
       setSnapshotError(null);
@@ -127,12 +180,15 @@ export function ResolutionFlowClient({
     setWindowDays(null);
     setRefetching(false);
     setPicked(false);
+    setSkipped(false); // stepping back into the funnel un-skips it
+    setFilters(NO_ANSWER_FILTERS);
+    setEmployerQuery('');
     if (target !== 'plan') setPayerPick(null);
     setPlanFilter('');
     setBackTo(target);
   }, []);
 
-  const derived = deriveStage({ resolution: state.resolution, payerPick, picked });
+  const derived = deriveStage({ resolution: state.resolution, payerPick, picked, skipped });
   // The receipt's Change can only step BACKWARD from what is derivable; any submit clears it.
   const stage: FlowStage = backTo ?? derived;
 
@@ -143,10 +199,38 @@ export function ResolutionFlowClient({
   // the core validates whatever is sent against the token's own spread, so this can only align
   // scope, never widen it. When the bridge is empty (unmapped / no claims), nothing is sent and the
   // answer stage SAYS the ranking is dominant-payer scoped instead of implying it is the pick's.
-  const pickLabel = state.resolution?.group.claimsPayerLabels[0] ?? null;
+  // A SKIP suppresses the bridge deliberately: the resolution still carries a pre-selected group
+  // (the largest candidate), and riding its claims label would scope the "general search" to a plan
+  // the user explicitly declined to choose.
+  const pickLabel = skipped ? null : (state.resolution?.group.claimsPayerLabels[0] ?? null);
   const sentOverride = payerOverride ?? pickLabel;
-  const scopeSource: 'user' | 'pick' | 'dominant' =
-    payerOverride !== null ? 'user' : pickLabel !== null ? 'pick' : 'dominant';
+  const scopeSource: 'user' | 'pick' | 'dominant' | 'skipped' =
+    payerOverride !== null ? 'user' : pickLabel !== null ? 'pick' : skipped ? 'skipped' : 'dominant';
+
+  // ── The answer-stage filter universe and the market narrow ────────────────────────────────────
+  // Universe: after a Skip, every candidate behind the identifier; otherwise the picked carrier's
+  // cluster, so the filter lines describe the set the user is actually looking at.
+  const answerCandidates = useMemo(() => {
+    if (state.resolution === null) return [];
+    const all = orderedCandidates(state.resolution);
+    if (skipped || payerPick === null) return all;
+    const cluster = payerGroups.find((p) => p.payer === payerPick);
+    return cluster ? all.filter((c) => cluster.names.has(c.payerDisplayName)) : all;
+  }, [state.resolution, skipped, payerPick, payerGroups]);
+
+  // funding goes to the market directly (a closed vocabulary the action intersects); plan type has
+  // no market field, so it narrows by way of the employer set the filtered candidates resolve to.
+  const narrow = useMemo(() => {
+    if (!answerFiltersActive(filters)) return { employers: null as string[] | null, tooMany: null as number | null };
+    const filtered = filterCandidates(answerCandidates, filters);
+    const res = employerNarrowFor(answerCandidates, filtered);
+    if (res === null) return { employers: null, tooMany: null };
+    if ('tooMany' in res) return { employers: null, tooMany: res.tooMany };
+    return { employers: res.employers, tooMany: null };
+  }, [answerCandidates, filters]);
+
+  // A stable dependency key — arrays get a new identity every render and would refetch forever.
+  const marketKey = `${filters.funding.slice().sort().join('|')}#${(narrow.employers ?? []).slice().sort().join('|')}`;
 
   // ── Snapshot for the answer stage — the hardened v2 data path under the new UI ────────────────
   const predicateId = state.resolution?.predicateId ?? null;
@@ -156,11 +240,19 @@ export function ResolutionFlowClient({
     if (term === '') return; // nothing held (e.g. hot-reload mid-flow); the answer stage keeps its loading state
     let alive = true;
     setSnapshotError(null);
+    const market =
+      filters.funding.length > 0 || narrow.employers !== null
+        ? {
+            ...(filters.funding.length > 0 ? { funding: filters.funding } : {}),
+            ...(narrow.employers !== null ? { employers: narrow.employers } : {}),
+          }
+        : undefined;
     getQualifySnapshot({
       query: term,
       window: { kind: 'trailing', days: windowDays ?? 90 },
       auto: windowDays === null,
       ...(sentOverride !== null ? { payerOverride: sentOverride } : {}),
+      ...(market ? { market } : {}),
     })
       .then((s) => {
         if (alive) {
@@ -178,7 +270,10 @@ export function ResolutionFlowClient({
     return () => {
       alive = false;
     };
-  }, [stage, predicateId, isPending, sentOverride, windowDays]);
+    // marketKey is the stable serialization of `filters.funding` + `narrow.employers`; the arrays
+    // themselves would be new identities every render and refetch forever.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, predicateId, isPending, sentOverride, windowDays, marketKey]);
 
   // ── The landing ticker: fetched ONCE on mount, book-wide, independent of the search ───────────
   // Trailing 90 days rather than 30: the strip ranks by rating DELTA against the prior equivalent
@@ -326,6 +421,7 @@ export function ResolutionFlowClient({
         onPlanFilter={setPlanFilter}
         onAskAi={() => setAutoAsk(true)}
         onChange={onChange}
+        onSkip={onSkip}
         answer={
           state.resolution
             ? {
@@ -345,6 +441,13 @@ export function ResolutionFlowClient({
                 pending: isPending,
                 scopeSource,
                 refetching,
+                candidates: answerCandidates,
+                filters,
+                onToggleFilter,
+                onClearFilters,
+                employerQuery,
+                onEmployerQuery: setEmployerQuery,
+                employerNarrowTooMany: narrow.tooMany,
                 payerOverride,
                 // Re-scopes are REFETCHES of content already on screen: the snapshot stays rendered
                 // (dimmed, with the progress bar) rather than blanking — the design system's rule.
