@@ -23,8 +23,9 @@
  * min(index,3)×60ms (capped — a 186-plan list must not cascade forever). One easing. Disabled
  * entirely under prefers-reduced-motion. Motion narrates progression; it never gates input.
  */
-import { useActionState, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useActionState, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import gsap from 'gsap';
+import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { resolveCoverageAction } from '../../../lib/qualify/v3-actions';
 // V3_INITIAL_STATE comes from a PLAIN module, never the 'use server' one: a non-function export
 // there is registered as a Server Action and 500s every action on the page (see v3FlowState.ts).
@@ -33,7 +34,25 @@ import { getQualifyFacilityTrends, getQualifySnapshot } from '../../../lib/quali
 import type { QualifyFacilityTrend, QualifySnapshot, QualifyTrailingDays } from '../../../lib/qualify/contract';
 import { QualifyAiPanel } from '../qualify-ai-panel';
 import { HeatingUpCards, HeatingUpSkeleton } from '../shared/heating-ticker';
-import { deriveStage, ResolutionStages, type FlowStage } from './resolution-flow';
+import { staggerDelayMs } from '../tokens';
+import {
+  answerFiltersActive,
+  deriveStage,
+  employerNarrowFor,
+  filterCandidates,
+  NO_ANSWER_FILTERS,
+  orderedCandidates,
+  payerGroupsOf,
+  ResolutionStages,
+  type AnswerFilters,
+  type FlowStage,
+} from './resolution-flow';
+
+// ScrollTrigger ships inside the gsap package — no new dependency. Client components also render on
+// the server once, so guard the registration behind a window check.
+if (typeof window !== 'undefined') {
+  gsap.registerPlugin(ScrollTrigger);
+}
 
 /** The ticker's own window — see the fetch effect for why 90 days rather than 30. */
 const TICKER_WINDOW = { kind: 'trailing', days: 90 } as const;
@@ -50,6 +69,11 @@ export function ResolutionFlowClient({
 
   const [payerPick, setPayerPick] = useState<string | null>(null);
   const [picked, setPicked] = useState(false);
+  // The user's own escape hatch: jump to the answer over the WHOLE footprint. Distinct from
+  // `picked` — declining to choose is a different claim from choosing, and the answer says which.
+  const [skipped, setSkipped] = useState(false);
+  const [filters, setFilters] = useState<AnswerFilters>(NO_ANSWER_FILTERS);
+  const [employerQuery, setEmployerQuery] = useState('');
   const [planFilter, setPlanFilter] = useState('');
   const [autoAsk, setAutoAsk] = useState(false);
   const [backTo, setBackTo] = useState<FlowStage | null>(null);
@@ -57,9 +81,21 @@ export function ResolutionFlowClient({
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [payerOverride, setPayerOverride] = useState<string | null>(null);
   const [windowDays, setWindowDays] = useState<QualifyTrailingDays | null>(null);
+  // True while a RE-SCOPE of the answer (window chip / billed-under chip) is in flight. The design
+  // system's refetch rule: content already on screen stays rendered, dimmed, with a progress bar —
+  // it never blanks to a skeleton. Skeletons are reserved for the genuine first load (snapshot null).
+  const [refetching, setRefetching] = useState(false);
   // The landing ticker. `null` = still loading (renders the skeleton, which reserves the strip's
   // height so a 2.5-5s trend query cannot shove the search box down the page); [] = loaded empty.
   const [trends, setTrends] = useState<QualifyFacilityTrend[] | null>(null);
+
+  // ONE clustering pass per resolution (clusterCarriers is O(n²)); the rail, receipt and both tile
+  // stages read this instead of each re-deriving it — scroll-driven work on top of 4-5 re-derives
+  // per render was going to surface as employer-filter input lag.
+  const payerGroups = useMemo(
+    () => (state.resolution !== null ? payerGroupsOf(state.resolution) : []),
+    [state.resolution],
+  );
 
   /** A new identify submit invalidates every downstream choice — clear them BEFORE dispatching. */
   const identifyAction = useCallback(
@@ -68,6 +104,9 @@ export function ResolutionFlowClient({
       termRef.current = typeof term === 'string' ? term : '';
       setPayerPick(null);
       setPicked(false);
+      setSkipped(false);
+      setFilters(NO_ANSWER_FILTERS);
+      setEmployerQuery('');
       setPlanFilter('');
       setAutoAsk(false);
       setBackTo(null);
@@ -75,19 +114,57 @@ export function ResolutionFlowClient({
       setSnapshotError(null);
       setPayerOverride(null);
       setWindowDays(null);
+      setRefetching(false);
       formAction(fd);
     },
     [formAction],
   );
 
-  /** A plan pick: inject the held term (never from the DOM), mark picked, dispatch. */
+  /** Skip the remaining questions: straight to the answer over the whole footprint. Clears any
+   *  half-made narrowing so the general search is genuinely general. */
+  const onSkip = useCallback(() => {
+    setSkipped(true);
+    setPicked(false);
+    setPayerPick(null);
+    setPlanFilter('');
+    setBackTo(null);
+    setFilters(NO_ANSWER_FILTERS);
+    setEmployerQuery('');
+    setPayerOverride(null);
+    setSnapshot(null);
+    setSnapshotError(null);
+    setRefetching(false);
+  }, []);
+
+  const onToggleFilter = useCallback((facet: 'planType' | 'funding' | 'employer', value: string) => {
+    setRefetching(true); // a filter change re-scopes content already on screen
+    setFilters((f) => {
+      const key = facet === 'planType' ? 'planTypes' : facet === 'funding' ? 'funding' : 'employers';
+      const cur = f[key];
+      return { ...f, [key]: cur.includes(value) ? cur.filter((v) => v !== value) : [...cur, value] };
+    });
+  }, []);
+
+  const onClearFilters = useCallback(() => {
+    setRefetching(true);
+    setFilters(NO_ANSWER_FILTERS);
+    setEmployerQuery('');
+  }, []);
+
+  /** A plan pick: inject the held term (never from the DOM), mark picked, dispatch. A NEW plan is a
+   *  new population — a genuine first load, so the snapshot blanks to the skeleton (unlike a
+   *  re-scope, which keeps stale content dimmed). */
   const planAction = useCallback(
     (fd: FormData) => {
       fd.set('term', termRef.current);
       setPicked(true);
+      setSkipped(false); // choosing a plan supersedes a prior skip
+      setFilters(NO_ANSWER_FILTERS);
+      setEmployerQuery('');
       setBackTo(null);
       setSnapshot(null);
       setSnapshotError(null);
+      setRefetching(false);
       formAction(fd);
     },
     [formAction],
@@ -101,13 +178,17 @@ export function ResolutionFlowClient({
     setAutoAsk(false);
     setPayerOverride(null);
     setWindowDays(null);
+    setRefetching(false);
     setPicked(false);
+    setSkipped(false); // stepping back into the funnel un-skips it
+    setFilters(NO_ANSWER_FILTERS);
+    setEmployerQuery('');
     if (target !== 'plan') setPayerPick(null);
     setPlanFilter('');
     setBackTo(target);
   }, []);
 
-  const derived = deriveStage({ resolution: state.resolution, payerPick, picked });
+  const derived = deriveStage({ resolution: state.resolution, payerPick, picked, skipped });
   // The receipt's Change can only step BACKWARD from what is derivable; any submit clears it.
   const stage: FlowStage = backTo ?? derived;
 
@@ -118,10 +199,38 @@ export function ResolutionFlowClient({
   // the core validates whatever is sent against the token's own spread, so this can only align
   // scope, never widen it. When the bridge is empty (unmapped / no claims), nothing is sent and the
   // answer stage SAYS the ranking is dominant-payer scoped instead of implying it is the pick's.
-  const pickLabel = state.resolution?.group.claimsPayerLabels[0] ?? null;
+  // A SKIP suppresses the bridge deliberately: the resolution still carries a pre-selected group
+  // (the largest candidate), and riding its claims label would scope the "general search" to a plan
+  // the user explicitly declined to choose.
+  const pickLabel = skipped ? null : (state.resolution?.group.claimsPayerLabels[0] ?? null);
   const sentOverride = payerOverride ?? pickLabel;
-  const scopeSource: 'user' | 'pick' | 'dominant' =
-    payerOverride !== null ? 'user' : pickLabel !== null ? 'pick' : 'dominant';
+  const scopeSource: 'user' | 'pick' | 'dominant' | 'skipped' =
+    payerOverride !== null ? 'user' : pickLabel !== null ? 'pick' : skipped ? 'skipped' : 'dominant';
+
+  // ── The answer-stage filter universe and the market narrow ────────────────────────────────────
+  // Universe: after a Skip, every candidate behind the identifier; otherwise the picked carrier's
+  // cluster, so the filter lines describe the set the user is actually looking at.
+  const answerCandidates = useMemo(() => {
+    if (state.resolution === null) return [];
+    const all = orderedCandidates(state.resolution);
+    if (skipped || payerPick === null) return all;
+    const cluster = payerGroups.find((p) => p.payer === payerPick);
+    return cluster ? all.filter((c) => cluster.names.has(c.payerDisplayName)) : all;
+  }, [state.resolution, skipped, payerPick, payerGroups]);
+
+  // funding goes to the market directly (a closed vocabulary the action intersects); plan type has
+  // no market field, so it narrows by way of the employer set the filtered candidates resolve to.
+  const narrow = useMemo(() => {
+    if (!answerFiltersActive(filters)) return { employers: null as string[] | null, tooMany: null as number | null };
+    const filtered = filterCandidates(answerCandidates, filters);
+    const res = employerNarrowFor(answerCandidates, filtered);
+    if (res === null) return { employers: null, tooMany: null };
+    if ('tooMany' in res) return { employers: null, tooMany: res.tooMany };
+    return { employers: res.employers, tooMany: null };
+  }, [answerCandidates, filters]);
+
+  // A stable dependency key — arrays get a new identity every render and would refetch forever.
+  const marketKey = `${filters.funding.slice().sort().join('|')}#${(narrow.employers ?? []).slice().sort().join('|')}`;
 
   // ── Snapshot for the answer stage — the hardened v2 data path under the new UI ────────────────
   const predicateId = state.resolution?.predicateId ?? null;
@@ -131,25 +240,40 @@ export function ResolutionFlowClient({
     if (term === '') return; // nothing held (e.g. hot-reload mid-flow); the answer stage keeps its loading state
     let alive = true;
     setSnapshotError(null);
+    const market =
+      filters.funding.length > 0 || narrow.employers !== null
+        ? {
+            ...(filters.funding.length > 0 ? { funding: filters.funding } : {}),
+            ...(narrow.employers !== null ? { employers: narrow.employers } : {}),
+          }
+        : undefined;
     getQualifySnapshot({
       query: term,
       window: { kind: 'trailing', days: windowDays ?? 90 },
       auto: windowDays === null,
       ...(sentOverride !== null ? { payerOverride: sentOverride } : {}),
+      ...(market ? { market } : {}),
     })
       .then((s) => {
-        if (alive) setSnapshot(s);
+        if (alive) {
+          setSnapshot(s);
+          setRefetching(false);
+        }
       })
       .catch(() => {
         if (alive) {
           setSnapshot(null);
           setSnapshotError('failed');
+          setRefetching(false);
         }
       });
     return () => {
       alive = false;
     };
-  }, [stage, predicateId, isPending, sentOverride, windowDays]);
+    // marketKey is the stable serialization of `filters.funding` + `narrow.employers`; the arrays
+    // themselves would be new identities every render and refetch forever.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, predicateId, isPending, sentOverride, windowDays, marketKey]);
 
   // ── The landing ticker: fetched ONCE on mount, book-wide, independent of the search ───────────
   // Trailing 90 days rather than 30: the strip ranks by rating DELTA against the prior equivalent
@@ -169,48 +293,100 @@ export function ResolutionFlowClient({
     };
   }, []);
 
-  // ── Focus follows the question (review: stage swaps unmount the focused element) ──────────────
-  // Without this, clicking a tile drops focus to <body> and a keyboard user re-tabs from the top at
-  // every stage. The stage's own <h2> takes focus (tabIndex={-1} in the Stage chrome), which also
-  // makes a screen reader read the new question. Skipped on first render — stealing focus from the
-  // search input on page load would be worse than nothing.
+  // ── Motion + focus ─────────────────────────────────────────────────────────────────────────────
+  // ⚠ THE TWEEN TARGETS `[data-v3-stage]` — THE STAGE SUBTREE — NEVER THE <main>. An earlier version
+  // animated `autoAlpha` on the <main> wrapper, which sets `visibility: hidden` on the h1, the rail,
+  // the receipt, the live region and the ticker on every stage change: the whole page blinked, and
+  // the focus call (then a separate passive effect) ran while its target was inside a hidden subtree,
+  // which is a no-op in every browser — so keyboard focus fell to <body>, the exact regression the
+  // effect existed to prevent. Focus now moves inside the timeline's onStart, when the target is
+  // visible; under prefers-reduced-motion — where every tween and trigger is skipped and content
+  // renders fully revealed, immediately — the focus call still runs on its own.
+  //
+  // Keyed on the stage AND on the snapshot's arrival, so the answer's scorecards get their entrance
+  // (they land after the stage does). A RE-SCOPE no longer nulls the snapshot, so `hasSnapshot` is
+  // stable across it — the dim-and-progress-bar treatment plays instead of a re-entrance.
+  const hasSnapshot = snapshot !== null;
+  const stageRef = useRef<HTMLElement | null>(null);
   const prevStageRef = useRef<FlowStage | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const root = stageRef.current;
     const prev = prevStageRef.current;
     prevStageRef.current = stage;
-    if (prev === null || prev === stage) return;
-    document.getElementById(`qualify-s-${stage}-heading`)?.focus();
-  }, [stage]);
-
-  // ── Motion ─────────────────────────────────────────────────────────────────────────────────────
-  // Keyed on the stage AND on the snapshot's arrival, so the answer stage's scorecards get their
-  // entrance too (they land after the stage does). The re-fetch already blanks to a skeleton, so the
-  // fade-in on a re-scope reads as the refresh it is.
-  const hasSnapshot = snapshot !== null;
-  const stageRef = useRef<HTMLDivElement | null>(null);
-  useLayoutEffect(() => {
-    const el = stageRef.current;
-    if (!el || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const stageChanged = prev !== null && prev !== stage;
+    // Focus follows the question: the stage's own <h2> (tabIndex={-1} in the Stage chrome), so a
+    // keyboard user is never dropped to <body> when a tile click unmounts the focused element.
+    // Skipped on first render — stealing focus from the search input on page load is worse.
+    const focusHeading = () => document.getElementById(`qualify-s-${stage}-heading`)?.focus();
+    const stageEl = root?.querySelector<HTMLElement>('[data-v3-stage]') ?? null;
+    if (!root || !stageEl || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      if (stageChanged) focusHeading();
+      return;
+    }
     const ctx = gsap.context(() => {
-      gsap.fromTo(el, { autoAlpha: 0, y: 14 }, { autoAlpha: 1, y: 0, duration: 0.22, ease: 'power2.out' });
-      const tiles = el.querySelectorAll('[data-v3-tile]');
-      if (tiles.length > 0) {
-        gsap.fromTo(
-          tiles,
-          { autoAlpha: 0, y: 10 },
-          {
-            autoAlpha: 1,
-            y: 0,
-            duration: 0.15,
-            ease: 'power2.out',
-            delay: 0.08,
-            stagger: (i: number) => Math.min(i, 3) * 0.06,
+      gsap.fromTo(
+        stageEl,
+        { autoAlpha: 0, y: 14 },
+        {
+          autoAlpha: 1,
+          y: 0,
+          duration: 0.22,
+          ease: 'power2.out',
+          onStart: () => {
+            if (stageChanged) focusHeading();
           },
-        );
+        },
+      );
+
+      // Batched scroll reveal (one batcher, never one trigger per tile — a 186-plan list with 186
+      // triggers janks). Tiles start hidden ONLY inside this guarded block, so a reduced-motion user
+      // — for whom none of this runs — gets the fully-revealed list immediately. `once: true`: a
+      // list the user is scanning must not re-animate on scroll-back. Stage 3 gets full amplitude,
+      // stage 2 the same vocabulary at lower amplitude, so the two screens read as one system.
+      const tiles = gsap.utils.toArray<HTMLElement>('[data-v3-tile]', stageEl);
+      if (tiles.length > 0) {
+        const rise = stage === 'plan' ? 10 : 6;
+        gsap.set(tiles, { autoAlpha: 0, y: rise });
+        ScrollTrigger.batch(tiles, {
+          start: 'top 88%',
+          once: true,
+          interval: 0.1,
+          onEnter: (batch) =>
+            gsap.to(batch, {
+              autoAlpha: 1,
+              y: 0,
+              duration: 0.22,
+              ease: 'power2.out',
+              stagger: (i: number) => staggerDelayMs(i) / 1000,
+            }),
+        });
       }
-    }, el);
+
+      // The plan stage's sticky header: CSS `position: sticky` does the pinning; ScrollTrigger only
+      // ADDS the elevation (`q-stuck` in globals.css) once the grid has scrolled beneath it — no
+      // `pin: true`, whose spacer elements fight the grid layout.
+      const sticky = root.querySelector<HTMLElement>('[data-v3-sticky]');
+      const grid = root.querySelector<HTMLElement>('[data-v3-grid]');
+      if (sticky && grid) {
+        ScrollTrigger.create({
+          trigger: grid,
+          start: 'top 128px',
+          end: 'max',
+          onToggle: (self) => sticky.classList.toggle('q-stuck', self.isActive),
+        });
+      }
+    }, root);
     return () => ctx.revert();
   }, [stage, hasSnapshot]);
+
+  // The employer filter changes the tile list's length on every keystroke, which invalidates every
+  // ScrollTrigger's measured position — refresh, debounced, or 186 keystroke-refreshes thrash.
+  useEffect(() => {
+    if (stage !== 'plan') return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const t = window.setTimeout(() => ScrollTrigger.refresh(), 150);
+    return () => window.clearTimeout(t);
+  }, [planFilter, stage]);
 
   return (
     // THE PAGE CHROME. Matching the v2 tab's <main> exactly, because the route layout supplies none:
@@ -227,6 +403,7 @@ export function ResolutionFlowClient({
             <HeatingUpCards trends={trends} window={TICKER_WINDOW} readOnly />
           )
         }
+        payerGroups={payerGroups}
         stage={stage}
         resolution={state.resolution}
         reason={state.reason}
@@ -244,6 +421,7 @@ export function ResolutionFlowClient({
         onPlanFilter={setPlanFilter}
         onAskAi={() => setAutoAsk(true)}
         onChange={onChange}
+        onSkip={onSkip}
         answer={
           state.resolution
             ? {
@@ -262,14 +440,24 @@ export function ResolutionFlowClient({
                 ) : null,
                 pending: isPending,
                 scopeSource,
+                refetching,
+                candidates: answerCandidates,
+                filters,
+                onToggleFilter,
+                onClearFilters,
+                employerQuery,
+                onEmployerQuery: setEmployerQuery,
+                employerNarrowTooMany: narrow.tooMany,
                 payerOverride,
+                // Re-scopes are REFETCHES of content already on screen: the snapshot stays rendered
+                // (dimmed, with the progress bar) rather than blanking — the design system's rule.
                 onPayerOverride: (label) => {
-                  setSnapshot(null);
+                  setRefetching(true);
                   setPayerOverride(label);
                 },
                 windowDays,
                 onWindowDays: (d) => {
-                  setSnapshot(null);
+                  setRefetching(true);
                   setWindowDays(d);
                 },
               }

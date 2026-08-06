@@ -11,6 +11,8 @@ import { test } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   ResolutionStages,
+  NO_ANSWER_FILTERS,
+  SKIP_CARRIER_MAX,
   UNRESOLVABLE_COPY,
   deriveStage,
   orderedCandidates,
@@ -139,6 +141,7 @@ function props(stage: FlowStage, r: QualifyResolution | null, over: Partial<Reso
     onPlanFilter: noop,
     onAskAi: noop,
     onChange: noop,
+    onSkip: noop,
     ticker: null,
     answer: r
       ? {
@@ -151,6 +154,14 @@ function props(stage: FlowStage, r: QualifyResolution | null, over: Partial<Reso
           onPayerOverride: noop,
           windowDays: null,
           onWindowDays: noop,
+          refetching: false,
+          candidates: r ? orderedCandidates(r) : [],
+          filters: NO_ANSWER_FILTERS,
+          onToggleFilter: noop,
+          onClearFilters: noop,
+          employerQuery: '',
+          onEmployerQuery: noop,
+          employerNarrowTooMany: null,
         }
       : null,
     ...over,
@@ -169,6 +180,14 @@ function answerProps(over: Partial<NonNullable<ResolutionStagesProps['answer']>>
     onPayerOverride: noop,
     windowDays: null,
     onWindowDays: noop,
+    refetching: false,
+    candidates: [],
+    filters: NO_ANSWER_FILTERS,
+    onToggleFilter: noop,
+    onClearFilters: noop,
+    employerQuery: '',
+    onEmployerQuery: noop,
+    employerNarrowTooMany: null,
     ...over,
   };
 }
@@ -218,6 +237,149 @@ test('the trend ticker rides the IDENTIFY stage only — it must not compete wit
     const html = render(props(stage, r, { ...over, ticker }));
     assert.ok(!html.includes('ticker-slot'), `the ticker must not render on the ${stage} stage`);
   }
+});
+
+// ── The Skip escape hatch + the answer-stage filter lines (general search) ──────────────────────
+
+test('Skip is offered on BOTH narrowing stages and jumps straight to the answer', () => {
+  for (const [stage, over] of [
+    ['payer', {}],
+    ['plan', { payerPick: 'Aetna' }],
+  ] as Array<[FlowStage, Partial<ResolutionStagesProps>]>) {
+    const html = render(props(stage, fixture(), over));
+    assert.match(html, /Skip/, `${stage} offers Skip`);
+    assert.match(
+      html,
+      /aria-label="Skip the (carrier|plan) step and search across all plans for this member"/,
+      `${stage}'s Skip says what it does`,
+    );
+  }
+  // The stage machine honours it, and it is NOT the same input as a plan pick.
+  assert.equal(deriveStage({ resolution: fixture(), payerPick: null, picked: false, skipped: true }), 'answer');
+  assert.equal(deriveStage({ resolution: fixture(), payerPick: null, picked: false, skipped: false }), 'payer');
+});
+
+test('Skip is withheld on the carrier stage when the carrier choice is NOT obvious', () => {
+  // With a dozen carriers behind a prefix, skipping resolves the ranking to whichever payer happens
+  // to dominate the claims — arbitrary, not general, and indistinguishable from the answer screen.
+  const many = fixture({
+    candidates: {
+      total: 6,
+      chosenIndex: 0,
+      wasAmbiguous: true,
+      chosenBy: 'user',
+      rejected: ['Cigna', 'UMR', 'GEHA', 'Magellan', 'Optum'].map((payerDisplayName, i) => ({
+        canonicalPayerId: `pi_${i}`,
+        payerDisplayName,
+        employerLabel: null,
+        funding: null,
+        planType: null,
+        memberCount: 5 - i,
+        hasClaimEvidence: true,
+      })),
+    },
+  });
+  assert.ok(payerGroupsOf(many).length >= SKIP_CARRIER_MAX, 'fixture has a non-obvious carrier set');
+  const crowded = render(props('payer', many));
+  assert.ok(!crowded.includes('search all plans'), 'no Skip offered when the carrier is a real question');
+  // Two carriers is the obvious case — Skip returns.
+  const obvious = render(props('payer', fixture()));
+  assert.equal(payerGroupsOf(fixture()).length, 2);
+  assert.match(obvious, /search all plans/, 'Skip is offered when the choice is nearly obvious');
+  // The PLAN stage always offers it — by then the population is one carrier's plans.
+  assert.match(render(props('plan', many, { payerPick: 'Aetna' })), /search all plans/);
+});
+
+test('a skipped search decides nothing past the identifier — the receipt must not claim a plan', () => {
+  // r.group is still the PRE-SELECTED candidate (the largest employer). Rendering its employer as a
+  // "PLAN" entry claimed a decision the user explicitly declined to make, while the ranking beneath
+  // was payer-wide.
+  const html = render(
+    props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'skipped' }) }),
+  );
+  // Scoped to the RECEIPT nav — the step rail also carries a "Plan" label, correctly marked skipped.
+  const receipt = html.slice(html.indexOf('aria-label="Your search so far"'), html.indexOf('</nav>'));
+  assert.ok(!receipt.includes('>Plan<'), 'no PLAN receipt entry after a skip');
+  assert.match(receipt, />Scope</, 'the receipt states the SCOPE instead');
+  assert.match(html, /All plans · AETNA US HEALTHCARE/, 'named by the payer the ranking actually used');
+  assert.match(html, /Pick a plan/, 'and offers the way back into the funnel');
+  // The identity line names the payer, not an unchosen employer's policy.
+  assert.match(html, /all plans — no plan chosen/);
+  assert.ok(!html.includes('SOUTHWEST AIRLINES CO'), 'the pre-selected employer is never presented as resolved');
+  // And the notice that reads "you are seeing the one you selected" is suppressed.
+  assert.ok(!html.includes('You are seeing the one you selected'), 'no selection claim after a skip');
+});
+
+test('a skipped search says it was skipped — never "we could not narrow"', () => {
+  const skipped = render(
+    props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'skipped' }) }),
+  );
+  assert.match(skipped, /You skipped the plan questions, so this is a general search/);
+  assert.ok(!skipped.includes('could not be scoped to'), 'declining to narrow is not a failure to narrow');
+  // And the two claims stay distinct: a genuine bridge failure keeps its own wording.
+  const dominant = render(
+    props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'dominant' }) }),
+  );
+  assert.match(dominant, /could not be scoped to/);
+  assert.ok(!dominant.includes('You skipped the plan questions'), 'a failure to narrow is not a skip');
+});
+
+test('the filter lines are visible controls, multiselect, and state what they did to the ranking', () => {
+  const r = fixture();
+  const html = render(
+    props('answer', r, {
+      answer: answerProps({
+        snapshot: snapshotFixture(),
+        candidates: orderedCandidates(r),
+        filters: { planTypes: ['PPO'], funding: [], employers: [] },
+      }),
+    }),
+  );
+  // Facets derived from the candidate universe, each an aria-pressed toggle (not a dropdown).
+  assert.match(html, />Plan type</);
+  assert.match(html, />Funding</);
+  assert.match(html, /aria-pressed="true"[^>]*>PPO/, 'the active facet reads pressed');
+  assert.match(html, / · on/, 'and carries a WORD, not just a hue');
+  // The employer control is a real dropdown pill, stating its reach in its own summary.
+  assert.match(html, />Employers</);
+  assert.match(html, /Searched over 2|Narrowed to \d+ of 2/);
+  // What the filter did to the ranking is STATED, with a way out.
+  assert.match(html, /Ranking over \d+ of \d+ plans/);
+  assert.match(html, /Clear filters/);
+});
+
+test('an employer narrow too large to send says the ranking is NOT employer-narrowed', () => {
+  // sanitizeMarket SLICES employers at 200; sending more would rank over a subset while the screen
+  // implied the whole set. The caption has to admit it instead.
+  const r = fixture();
+  const html = render(
+    props('answer', r, {
+      answer: answerProps({
+        snapshot: snapshotFixture(),
+        candidates: orderedCandidates(r),
+        filters: { planTypes: ['PPO'], funding: [], employers: [] },
+        employerNarrowTooMany: 311,
+      }),
+    }),
+  );
+  assert.match(html, /too many employers \(311\) to narrow the ranking by employer, so it is not/);
+});
+
+test('the step rail names every step, and a SKIPPED step says so — it never reads as done', () => {
+  // A sole candidate skips both questions; the rail must not imply the user answered them.
+  const sole = render(props('answer', soleCandidate()));
+  assert.match(sole, /Identify/);
+  assert.match(sole, /Carrier/);
+  assert.match(sole, /Plan/);
+  assert.match(sole, /Answer/);
+  assert.equal((sole.match(/— skipped/g) ?? []).length, 2, 'Carrier AND Plan read as skipped');
+  // A real multi-plan pick reaches the answer with both questions ANSWERED — nothing skipped.
+  const picked = render(props('answer', fixture()));
+  assert.equal((picked.match(/— skipped/g) ?? []).length, 0, 'answered questions are done, not skipped');
+  assert.ok((picked.match(/— done/g) ?? []).length >= 3, 'the walked stages read as done');
+  // The rail is decorative navigation: no buttons, and no second live region.
+  const railChunk = sole.slice(sole.indexOf('data-v3-rail'), sole.indexOf('aria-live'));
+  assert.ok(!/<button/.test(railChunk), 'rail segments are not controls — the receipt is the revisit affordance');
 });
 
 test('exactly one stage section renders at a time', () => {
@@ -586,9 +748,12 @@ function snapshotFixture(): QualifySnapshot {
 
 test('the answer stage: window disclosed in one line, hero named, unrated card is honest restraint', () => {
   const html = render(props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture() }) }));
-  // The auto-window decision is DISCLOSED, with the override one expander away.
+  // The auto-window decision is DISCLOSED, and the override is now a VISIBLE line rather than a
+  // dropdown (2026-08-06: the window buttons sit on screen beside the other control lines).
   assert.match(html, /Showing trailing 90 days — needed this far back to reach a reliable sample\./);
-  assert.match(html, /Change the window/);
+  assert.ok(!html.includes('Change the window'), 'the window override is no longer behind a disclosure');
+  assert.match(html, />Window</, 'it is a labelled control line');
+  assert.match(html, /Automatic · selected/, 'with the current choice stated as a word');
   // The hero numeral carries an accessible name.
   assert.match(html, /aria-label="policy rating \d+ out of 100"/);
   // Ranked cards: the rated one shows its number + band word; the thin one shows restraint, no colour.
@@ -635,6 +800,34 @@ test('a plan with no claims history says the ranking is not evidence about it', 
   const html = render(props('answer', noClaims, { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'dominant' }) }));
   assert.match(html, /This plan has no claims history of its own/);
   assert.match(html, /not evidence about Aetna/);
+});
+
+test('RULE 2654416: during a re-scope, categorical sentences wait — only dimmed numbers may speak', () => {
+  // The window chip's state updates synchronously, so mid-fetch the disclosure reads the NEW window
+  // while every derived read is still the OLD set. A stale NUMBER beside a visible marker (the dim +
+  // beam) is honest — the marker says so. A categorical SENTENCE gets no such marker, so it waits.
+  const html = render(
+    props('answer', fixture(), {
+      answer: answerProps({
+        snapshot: snapshotFixture(), // the 90-day set, still on screen
+        refetching: true,
+        windowDays: 365, // the user's own action — a fact, allowed to speak immediately
+        scopeSource: 'dominant',
+      }),
+    }),
+  );
+  // The user's action and the dimmed evidence stay:
+  assert.match(html, /Showing trailing 365 days — your selection\./);
+  assert.match(html, /NASHVILLE MENTAL HEALTH/, 'the scorecard grid stays rendered');
+  assert.match(html, /opacity-60/, 'behind the dim marker');
+  assert.match(html, /q-refetch-beam/, 'and the progress beam');
+  // The sentence-bearing claims about data that has not answered yet are ABSENT:
+  assert.ok(!/policy rating \d+ out of 100/.test(html), 'the hero numeral + verdict wait');
+  assert.ok(!html.includes('patient-weighted across'), 'rating.basis is a DATA claim — false during a fetch (e7e8a0e)');
+  assert.ok(!html.includes('Largest by volume — pick another to re-scope.'), 'the scope caption asserts one of four claims — it waits');
+  assert.ok(!html.includes('could not be scoped to'), 'the dominant-scope warning waits');
+  // And this is a refetch, not a first load — the skeleton must NOT appear:
+  assert.ok(!html.includes('Ranking facilities for this plan…'), 'no skeleton on a refetch');
 });
 
 test('the window default is stated honestly when automatic sizing was unavailable', () => {
