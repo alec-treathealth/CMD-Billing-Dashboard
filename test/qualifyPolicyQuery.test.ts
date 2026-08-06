@@ -7,11 +7,18 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import {
   buildQualifyPolicyQuery,
+  buildQualifyPolicySpreadQuery,
   buildQualifyVobFreshnessQuery,
   buildQualifyWindowRungsQuery,
+  QUALIFY_SPREAD_LIMIT,
   VOB_MEMBER_BENEFITS_LATEST,
 } from '../src/collections/qualifyPolicyQuery';
-import { buildFacilityRankingQuery } from '../src/collections/qualifyQuery';
+import {
+  buildFacilityRankingQuery,
+  buildResolvePayerQuery,
+  buildResolvePayerSpreadQuery,
+  QUALIFY_PAYER_SPREAD_LIMIT,
+} from '../src/collections/qualifyQuery';
 
 const ENT = ['af504ab6-3dcd-4aa4-a93c-27bc58de4088', '141d459c-f371-4229-9a92-ace198e940bb'];
 
@@ -89,4 +96,70 @@ test('ranking (payer path) still binds payer and now returns the median TTP day 
 test('ranking with payer=null and NO market narrow throws at the builder chokepoint (finding #5)', () => {
   assert.throws(() => buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, {}), /market narrow/);
   assert.throws(() => buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, { employers: [] }), /market narrow/);
+});
+
+// ── The SPREAD builders (2026-08-06): the widening that stops a single mode() standing in for a
+// population. See the builders' headers for the measurements that motivated them.
+
+test('policy spread: both dims, token bound once and reused, capped per branch', () => {
+  const { sql, params } = buildQualifyPolicySpreadQuery('tok-abc', 'prefix');
+  assert.equal(params.length, 1);
+  assert.equal(params[0], 'tok-abc');
+  // ONE bound param serving both UNION branches — not two copies of the token.
+  assert.equal((sql.match(/\$1/g) || []).length, 2);
+  assert.match(sql, /'employer'::text as dim/);
+  assert.match(sql, /'carrier'::text as dim/);
+  assert.match(sql, /union all/);
+  assert.match(sql, /member_id_prefix_bidx = \$1/);
+  // Each branch carries its own LIMIT — an uncapped branch is the 300-employer failure mode.
+  assert.equal((sql.match(new RegExp(`limit ${QUALIFY_SPREAD_LIMIT}`, 'g')) || []).length, 2);
+});
+
+test('policy spread groups employer_norm — NEVER employer_name, which is a PHI column', () => {
+  const { sql } = buildQualifyPolicySpreadQuery('tok-abc', 'prefix');
+  assert.match(sql, /employer_norm as value/);
+  // The whole PHI posture of this builder in one assertion: the display name must not appear at all.
+  assert.doesNotMatch(sql, /employer_name/);
+});
+
+test('policy spread: member_id kind swaps the match column; token still never projected', () => {
+  const { sql } = buildQualifyPolicySpreadQuery('tok-m', 'member_id');
+  assert.match(sql, /member_id_bidx = \$1/);
+  assert.doesNotMatch(sql, /select[^;]*member_id_prefix_bidx as value/);
+});
+
+test('policy spread: limit is integer-clamped, so a caller bug cannot unbound or negate the scan', () => {
+  assert.match(buildQualifyPolicySpreadQuery('t', 'prefix', 0).sql, /limit 1\)/);
+  assert.match(buildQualifyPolicySpreadQuery('t', 'prefix', -5).sql, /limit 1\)/);
+  assert.match(buildQualifyPolicySpreadQuery('t', 'prefix', 9999).sql, /limit 200\)/);
+  assert.match(buildQualifyPolicySpreadQuery('t', 'prefix', 7.9).sql, /limit 7\)/);
+});
+
+test('policy query projects the TRUE distinct counts — the honesty denominators for the modal chips', () => {
+  const { sql } = buildQualifyPolicyQuery('tok-abc', 'prefix');
+  assert.match(sql, /count\(distinct employer_norm\)::int as employer_count/);
+  assert.match(sql, /count\(distinct insurance_co\)::int as carrier_count/);
+});
+
+test('payer spread: same ordering as the narrow resolve, so row [0] agrees by construction', () => {
+  const ORDER = 'order by count(*) desc, max(payment_received) desc nulls last, primary_payer';
+  assert.ok(buildResolvePayerQuery('tok', 'prefix', ENT).sql.includes(ORDER));
+  assert.ok(buildResolvePayerSpreadQuery('tok', 'prefix', ENT).sql.includes(ORDER));
+});
+
+test('payer spread returns evidence counts and a date — never an amount (admissions_seat parity)', () => {
+  const { sql, params } = buildResolvePayerSpreadQuery('tok', 'prefix', ENT);
+  assert.match(sql, /count\(\*\)::int as lines/);
+  assert.match(sql, /count\(distinct member_id_bidx\)::int as patients/);
+  assert.match(sql, /to_char\(max\(payment_received\), 'YYYY-MM-DD'\) as last_payment/);
+  // A dollar column here would silently diverge blind and sighted sessions.
+  assert.doesNotMatch(sql, /allowed|charge_amount|insurance_payments|billed/);
+  assert.match(sql, new RegExp(`limit ${QUALIFY_PAYER_SPREAD_LIMIT}$`));
+  assert.equal(params[1], 'tok');
+});
+
+test('payer spread stays tenant-scoped and refuses an empty scope (fail-closed, not fail-open)', () => {
+  const { sql } = buildResolvePayerSpreadQuery('tok', 'prefix', ENT);
+  assert.match(sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
+  assert.throws(() => buildResolvePayerSpreadQuery('tok', 'prefix', []));
 });

@@ -180,6 +180,65 @@ export function buildResolvePayerQuery(
   return { sql, params };
 }
 
+/** One payer behind a token, with the evidence supporting it. Plaintext primary_payer is non-PHI
+ *  (same class as QualifyMover.label), so unlike the VOB employer spread this IS wire-safe. */
+export interface QualifyPayerSpreadRow {
+  primary_payer: string;
+  lines: number;
+  patients: number;
+  last_payment: string | null; // ISO date of the most recent payment_received, or null
+}
+
+/** Hard cap on payers returned. MEASURED 2026-08-06: the busiest prefix bills under 17 distinct
+ *  payers, so 25 clears the live maximum with headroom and still bounds a pathological future row. */
+export const QUALIFY_PAYER_SPREAD_LIMIT = 25;
+
+/**
+ * EVERY payer behind a token, ranked — the widened form of buildResolvePayerQuery.
+ *
+ * WHY: buildResolvePayerQuery computes exactly this ranking and then throws all but the top row away
+ * with `limit 1`. MEASURED live 2026-08-06 over the whole rollup (2,665 prefixes carrying claims,
+ * 491,905 lines): 44.9% of those prefixes bill under MORE THAN ONE payer, and weighted by member —
+ * how a real card-in-hand search samples — that is **80.6% of searches**, against 82.1% of all
+ * charge lines. Max 17 payers on a single prefix. So for four searches in five, `limit 1` silently
+ * discards real billing history the user came to find, and the surface reports a single payer as
+ * though it were the answer.
+ *
+ * Identical semantics to buildResolvePayerQuery otherwise — same UNWINDOWED posture (identity is
+ * recognized if the token appears at ANY time), same tenancy scope, same dominance ordering — so row
+ * [0] of this result is byte-identical to what that builder returns. It is a widening, not a
+ * redefinition, and the two must not drift: test/qualifyPolicyQuery.test.ts pins that agreement.
+ *
+ * `last_payment` rides along so a disambiguation UI can rank recency against volume without a second
+ * query; it is a date, never an amount, so it is identical for an admissions_seat session.
+ */
+export function buildResolvePayerSpreadQuery(
+  token: string,
+  kind: QualifyTokenKind,
+  entityIds: string[],
+  limit: number = QUALIFY_PAYER_SPREAD_LIMIT,
+): { sql: string; params: unknown[] } {
+  const ent = assertEntityScope(entityIds, 'buildResolvePayerSpreadQuery');
+  const { params, add } = paramList();
+  const e = add(ent);
+  const tok = add(token);
+  const col = TOKEN_COLUMN[kind];
+  // Integer-clamped and interpolated, never a bound param — see QUALIFY_SPREAD_LIMIT's note.
+  const lim = Math.max(1, Math.min(200, Math.trunc(limit)));
+  const sql =
+    'select primary_payer, count(*)::int as lines, ' +
+    'count(distinct member_id_bidx)::int as patients, ' +
+    "to_char(max(payment_received), 'YYYY-MM-DD') as last_payment " +
+    `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
+    `where business_entity_id = any(${e}::uuid[]) and ${col} = ${tok} ` +
+    "and primary_payer is not null and btrim(primary_payer) <> '' " +
+    'group by primary_payer ' +
+    // The SAME ordering as buildResolvePayerQuery, so row [0] agrees with the narrow resolve exactly.
+    'order by count(*) desc, max(payment_received) desc nulls last, primary_payer ' +
+    `limit ${lim}`;
+  return { sql, params };
+}
+
 /**
  * The RANKING's reliable-evidence ratio (0059 repoint, ruling Q2a 2026-07-22) — the rating fix.
  *

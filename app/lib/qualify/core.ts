@@ -16,7 +16,12 @@ import {
   codingCodesLabel,
   type CodingDecisionRow,
 } from '../../../src/collections/codingRegistryQuery';
-import type { QualifyPolicyRow, QualifyWindowRungsRow } from '../../../src/collections/qualifyPolicyQuery';
+import type {
+  QualifyPolicyRow,
+  QualifyPolicySpreadRow,
+  QualifyWindowRungsRow,
+} from '../../../src/collections/qualifyPolicyQuery';
+import type { QualifyPayerSpreadRow } from '../../../src/collections/qualifyQuery';
 import {
   isQualifyWindow,
   sniffQualifyKind,
@@ -52,6 +57,7 @@ import {
   type QualifyComposeInput,
   type QualifyMatchSummary,
   type QualifyPolicyCard,
+  type QualifyPayerOption,
   type QualifyWindowLadder,
   type QualifyWindowRung,
   type QualifyTrailingDays,
@@ -104,6 +110,23 @@ export interface QualifyDeps {
    *  term normalizes to nothing. The raw name never leaves this call's argument. */
   mintNameToken: (raw: string) => string | null;
   resolvePayer: (token: string, kind: QualifyTokenKind, entityIds: string[]) => Promise<string | null>;
+  /** EVERY payer behind the token, ranked — the widened resolvePayer (buildResolvePayerSpreadQuery).
+   *  Row [0] agrees with resolvePayer exactly by construction; this exists so the surface can offer
+   *  the other 80.6% of searches their real alternatives instead of discarding them. Optional so
+   *  pre-existing dep fixtures stay valid, and fail-soft at the call site: losing the spread must
+   *  degrade to today's single-payer behaviour, never take the search down. */
+  loadPayerSpread?: (
+    token: string,
+    kind: QualifyTokenKind,
+    entityIds: string[],
+  ) => Promise<QualifyPayerSpreadRow[]>;
+  /** The employer + carrier spread behind the token (buildQualifyPolicySpreadQuery). ⚠ The employer
+   *  rows are SERVER-SIDE ONLY — see the forwarding boundary in getQualifySnapshotCore. Optional and
+   *  fail-soft for the same reason as loadPayerSpread. */
+  loadPolicySpread?: (
+    token: string,
+    kind: Exclude<QualifyTokenKind, 'client_name'>,
+  ) => Promise<QualifyPolicySpreadRow[]>;
   loadFacilities: (
     /** The resolved payer, or NULL for the v2 comparable-cohort ranking (Phase B) — the builder
      *  omits the payer clause; the market semi-join MUST carry the scope (core enforces it). */
@@ -268,6 +291,9 @@ function emptySnapshot(hasAmounts: boolean): QualifySnapshot {
     policy: null,
     ladder: null,
     provenance: 'none',
+    // Empty = "not loaded", which is exactly right here: an empty snapshot resolved no identifier,
+    // so there is no payer set to disambiguate. Never conflate with "exactly one payer".
+    payerOptions: [],
   };
 }
 
@@ -543,11 +569,39 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
 
   // ── Phase B/0: the policy on file behind the token + the global VOB feed freshness — parallel
   // with the payer resolve. All three fail-soft; a VOB hiccup must not take down the claims read.
-  const [payerName, policyRow, globalFresh] = await Promise.all([
+  const [payerName, policyRow, globalFresh, payerSpread, policySpread] = await Promise.all([
     deps.resolvePayer(token, kind, gate.entityIds),
     deps.loadPolicy ? deps.loadPolicy(token, kind).catch(() => null) : Promise.resolve(null),
     deps.loadVobFreshness ? deps.loadVobFreshness().catch(() => null) : Promise.resolve(null),
+    // Both spreads fail SOFT to []: losing a widening must degrade to the pre-existing single-value
+    // behaviour, never take the search down. [] reads as "not loaded" everywhere downstream.
+    deps.loadPayerSpread
+      ? deps.loadPayerSpread(token, kind, gate.entityIds).catch(() => [])
+      : Promise.resolve([] as QualifyPayerSpreadRow[]),
+    deps.loadPolicySpread ? deps.loadPolicySpread(token, kind).catch(() => []) : Promise.resolve([]),
   ]);
+
+  // ── THE PHI FORWARDING BOUNDARY for the VOB spread. Split ONCE, here, and never re-joined.
+  //
+  // `employer` rows carry employer_norm, whose display twin employer_name is a PHI column
+  // (app/lib/phi.ts PHI_BASE_COLUMNS) that the AI payload has never carried (qualifyAi.ts). They stay
+  // SERVER-SIDE — used below as the comparable-cohort join key, exactly like the pre-existing
+  // policyRow.employer_norm, which this file already documents as "never forwarded on the wire".
+  // Only the COUNT of them crosses, via policyRow.employer_count.
+  //
+  // `carrier` rows carry insurance_co, which is NOT a PHI column and already ships singular as
+  // policy.carrier. Those ARE wire-safe and become the carrier drill-down set.
+  const employerSpread = policySpread.filter((r) => r.dim === 'employer');
+  const carrierSpread = policySpread.filter((r) => r.dim === 'carrier');
+
+  // Counts and a date only — no amount — so payerOptions is byte-identical for an admissions_seat
+  // session and needs no entry in stripSnapshotAmounts. Keep it that way.
+  const payerOptions: QualifyPayerOption[] = payerSpread.map((r) => ({
+    payer: r.primary_payer,
+    lines: r.lines,
+    patients: r.patients,
+    lastPayment: r.last_payment,
+  }));
 
   const now = deps.now();
   // Feed staleness (Phase 0): the GLOBAL high-water mark going stale means every policy read is
@@ -569,6 +623,11 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
           policyType: policyRow.policy_type,
           planType: policyRow.plan_type,
           groupOnFile: policyRow.group_on_file,
+          // The TRUE distinct counts from the one-row aggregate — never carrierSpread.length, which
+          // is capped at QUALIFY_SPREAD_LIMIT and would under-report a 50-carrier prefix as 25.
+          employerCount: policyRow.employer_count,
+          carrierCount: policyRow.carrier_count,
+          carriers: carrierSpread.map((r) => ({ value: r.value, members: r.members })),
           network: null, // Phase D: not extracted from the VOB yet (three parser generations, none carries it)
           vobFreshAsOf: policyRow.vob_fresh_as_of,
           vobStale,
@@ -613,6 +672,9 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
       policy,
       ladder,
       provenance: 'direct',
+      // The DIRECT path is the only one where alternatives exist to offer: the identifier has its own
+      // claims, and payerOptions[0] is the payerName resolved just above.
+      payerOptions,
     };
     return gate.hasAmounts ? snap : stripSnapshotAmounts(snap); // stripAmounts LAST
   }
@@ -625,11 +687,22 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
   if (policy?.found && deps.loadFacilities) {
     const employerNorm = policyRow?.employer_norm ?? null;
     const funding = policyRow?.funding ?? null;
-    const comparable: { market: VobMarketFilter; provenance: QualifyProvenance } | null = employerNorm
-      ? { market: { employers: [employerNorm] }, provenance: 'comparable_employer' }
-      : funding
-        ? { market: { funding: [funding] }, provenance: 'comparable_funding' }
-        : null;
+    // EVERY employer behind the prefix, not just the modal one. `VobMarketFilter.employers` has
+    // always been a string[]; passing a single element was the narrowing. MEASURED 2026-08-06: in 57%
+    // of member-weighted searches the modal employer is a MINORITY of the prefix, so the old
+    // one-element cohort excluded most of the peer group it claimed to rank over — and did so most
+    // aggressively on the big prefixes real searches land on. The spread is ranked and capped at
+    // QUALIFY_SPREAD_LIMIT, so this stays bounded (the pathological prefix carries 300 employers).
+    //
+    // employerNorm remains the FALLBACK: if the spread failed soft or is empty, this path must still
+    // behave exactly as it did before rather than losing comparable provenance entirely.
+    const employers = employerSpread.length > 0 ? employerSpread.map((r) => r.value) : employerNorm ? [employerNorm] : [];
+    const comparable: { market: VobMarketFilter; provenance: QualifyProvenance } | null =
+      employers.length > 0
+        ? { market: { employers }, provenance: 'comparable_employer' }
+        : funding
+          ? { market: { funding: [funding] }, provenance: 'comparable_funding' }
+          : null;
     if (comparable) {
       try {
         // payer=null + a NON-EMPTY market: the builder ranks the cohort across all payers. The
@@ -651,6 +724,10 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
           policy,
           ladder,
           provenance: facilities.length > 0 ? comparable.provenance : 'none',
+          // COMPARABLE provenance means this identifier has NO claims of its own, so payerSpread is
+          // empty by construction — there is nothing to disambiguate. Stated explicitly rather than
+          // spread in, so the empty is a decision and not an oversight.
+          payerOptions: [],
         };
         return gate.hasAmounts ? snap : stripSnapshotAmounts(snap);
       } catch {
@@ -716,6 +793,9 @@ export async function getQualifySnapshotByPayerCore(
     identifierLandingFacility: null, // resolve-by-payer carries NO identifier → payer-wide (ruling 3)
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
+    // The user NAMED the payer — that IS the disambiguation, already made. Offering alternatives
+    // here would invite them to undo the choice they just expressed. Empty is correct, not missing.
+    payerOptions: [],
     policy: null, // a payer label carries no member identity → nothing to resolve a policy from
     ladder: null,
     provenance: 'direct',
@@ -794,6 +874,12 @@ export async function getQualifySnapshotByNameCore(
     identifierLandingFacility,
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
+    // DELIBERATELY EMPTY, and a known gap rather than a decision on the merits. A client-name resolve
+    // is identifier-shaped and can be multi-payer exactly like a prefix, so this path deserves the
+    // same widening. It does not get it here because the Client Name surface is still gated off
+    // (.claude/rules/qualify.md), which means the change would ship unverifiable against real use.
+    // Wire loadPayerSpread(token, 'client_name', …) here when that surface turns on.
+    payerOptions: [],
     policy: null, // name resolution carries no prefix → no policy lookup (a name is not a plan)
     ladder: null,
     provenance: 'direct',

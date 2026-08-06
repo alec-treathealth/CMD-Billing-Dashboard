@@ -11,9 +11,11 @@
 import { PgExecutor, makeReaderPool, readerConnectionStringFromEnv } from '../../../src/queries/executor';
 import {
   buildQualifyPolicyQuery,
+  buildQualifyPolicySpreadQuery,
   buildQualifyVobFreshnessQuery,
   buildQualifyWindowRungsQuery,
   type QualifyPolicyRow,
+  type QualifyPolicySpreadRow,
   type QualifyWindowRungsRow,
 } from '../../../src/collections/qualifyPolicyQuery';
 import {
@@ -44,6 +46,8 @@ export async function loadQualifyPolicy(
       carrier: null,
       employer_name: null,
       employer_norm: null,
+      employer_count: 0,
+      carrier_count: 0,
       funding: null,
       policy_type: null,
       plan_type: null,
@@ -55,6 +59,20 @@ export async function loadQualifyPolicy(
       oop_met: null,
     }
   );
+}
+
+/** The employer + carrier spread behind a token, ranked and capped (QUALIFY_SPREAD_LIMIT).
+ *
+ *  ⚠ The returned employer rows carry employer_norm and are SERVER-SIDE ONLY — getQualifySnapshotCore
+ *  splits them off at its PHI forwarding boundary and never puts them on the wire. Returning them
+ *  from this loader is intentional: the comparable-cohort join key needs them. */
+export async function loadQualifyPolicySpread(
+  token: string,
+  kind: Exclude<QualifyTokenKind, 'client_name'>,
+): Promise<QualifyPolicySpreadRow[]> {
+  const q = buildQualifyPolicySpreadQuery(token, kind);
+  const res = await qualifyV2Reader().query<QualifyPolicySpreadRow>(q.sql, q.params);
+  return res.rows;
 }
 
 /** Global VOB feed high-water mark as a FULL UTC ISO timestamp (exact staleness math in core).

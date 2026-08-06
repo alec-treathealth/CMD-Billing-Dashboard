@@ -44,6 +44,10 @@ const POLICY: QualifyPolicyRow = {
   carrier: 'AETNA',
   employer_name: 'Vanderbilt Univ. Medical Center',
   employer_norm: 'VANDERBILT',
+  // >1 on both: this fixture's 14 members span several employers and carriers, which is the LIVE
+  // shape (member-weighted, 80.5% of searches are multi-employer) rather than the convenient one.
+  employer_count: 3,
+  carrier_count: 2,
   funding: 'Self-Funded',
   policy_type: 'PPO',
   plan_type: 'OPEN ACCESS',
@@ -309,4 +313,120 @@ test('facilityFactorsDisagree: a live positive AND a live negative is a conflict
   // UNAVAILABLE is missing data, not a signal: it can neither create nor resolve a disagreement.
   assert.equal(facilityFactorsDisagree([F('pos'), F('neg', false)]), false);
   assert.equal(facilityFactorsDisagree([F('pos', false), F('neg')]), false);
+});
+
+// ── The SPREAD widening (2026-08-06). buildQualifyPolicySpreadQuery / buildResolvePayerSpreadQuery
+// exist because a single mode() was standing in for a population: member-weighted, 80.5% of searches
+// land on a multi-employer prefix, 80.6% on a multi-payer one. These pin what the CORE does with
+// that — most of all the PHI boundary, which is the one thing here that must never regress.
+
+test('comparable cohort ranks over EVERY employer on the prefix, not just the modal one', async () => {
+  const facCalls: Array<{ market: unknown }> = [];
+  const deps = v2deps(SUPER, {
+    resolvePayer: async () => null,
+    loadPolicySpread: async () => [
+      { dim: 'employer' as const, value: 'VANDERBILT', members: 20 },
+      { dim: 'employer' as const, value: 'HCA', members: 18 },
+      { dim: 'employer' as const, value: 'KROGER', members: 8 },
+      { dim: 'carrier' as const, value: 'AETNA', members: 30 },
+    ],
+    loadFacilities: async (_p, _f, _t, _e, market) => {
+      facCalls.push({ market });
+      return FAC;
+    },
+  });
+  const snap = await getQualifySnapshotCore(deps, AUTO_IN);
+  assert.equal(snap.provenance, 'comparable_employer');
+  // The narrowing this replaces was `{ employers: ['VANDERBILT'] }` — the modal one alone, which
+  // excluded 26 of this prefix's 46 members from the cohort it claimed to rank over.
+  assert.deepEqual(facCalls[0]!.market, { employers: ['VANDERBILT', 'HCA', 'KROGER'] });
+});
+
+test('PHI BOUNDARY: employer values from the spread NEVER reach the snapshot — only their count', async () => {
+  const deps = v2deps(SUPER, {
+    loadPolicySpread: async () => [
+      { dim: 'employer' as const, value: 'VANDERBILT', members: 20 },
+      { dim: 'employer' as const, value: 'SECRET_EMPLOYER_CO', members: 18 },
+      { dim: 'carrier' as const, value: 'AETNA', members: 30 },
+      { dim: 'carrier' as const, value: 'CIGNA', members: 16 },
+    ],
+  });
+  const snap = await getQualifySnapshotCore(deps, AUTO_IN);
+  // employer_name is a PHI column (app/lib/phi.ts); the spread's employer values are its join key and
+  // must stay server-side. Serialize the WHOLE snapshot so this catches a leak anywhere in it, not
+  // just on the field we happened to think of.
+  const wire = JSON.stringify(snap);
+  assert.ok(!wire.includes('SECRET_EMPLOYER_CO'), 'no employer value from the spread crosses the wire');
+  assert.ok(!wire.includes('VANDERBILT'), 'not even the modal one — employer_norm was never wire-side');
+  // Carriers are NOT PHI and already shipped singular, so those DO cross as the drill-down set.
+  assert.deepEqual(snap.policy?.carriers, [
+    { value: 'AETNA', members: 30 },
+    { value: 'CIGNA', members: 16 },
+  ]);
+  // The counts come from the one-row aggregate, never from the capped spread's length.
+  assert.equal(snap.policy?.employerCount, 3);
+  assert.equal(snap.policy?.carrierCount, 2);
+});
+
+test('payerOptions[0] IS the resolved payer — the widening never contradicts the narrow resolve', async () => {
+  const deps = v2deps(SUPER, {
+    resolvePayer: async () => 'AETNA',
+    loadPayerSpread: async () => [
+      { primary_payer: 'AETNA', lines: 120, patients: 9, last_payment: '2026-07-30' },
+      { primary_payer: 'CIGNA', lines: 44, patients: 4, last_payment: '2026-06-02' },
+    ],
+  });
+  const snap = await getQualifySnapshotCore(deps, AUTO_IN);
+  assert.equal(snap.resolved?.payerName, 'AETNA');
+  assert.equal(snap.payerOptions[0]!.payer, 'AETNA');
+  assert.equal(snap.payerOptions.length, 2);
+  assert.equal(snap.payerOptions[1]!.payer, 'CIGNA');
+  assert.equal(snap.payerOptions[1]!.patients, 4);
+});
+
+test('payerOptions carries no dollars — a blind seat and a sighted one see the SAME options', async () => {
+  const spread = async () => [
+    { primary_payer: 'AETNA', lines: 120, patients: 9, last_payment: '2026-07-30' },
+    { primary_payer: 'CIGNA', lines: 44, patients: 4, last_payment: '2026-06-02' },
+  ];
+  const seat = await getQualifySnapshotCore(v2deps(SEAT, { loadPayerSpread: spread }), AUTO_IN);
+  const sup = await getQualifySnapshotCore(v2deps(SUPER, { loadPayerSpread: spread }), AUTO_IN);
+  assert.deepEqual(seat.payerOptions, sup.payerOptions);
+  assert.equal(seat.viewerHasAmountsCapability, false);
+});
+
+test('both spreads fail SOFT — a widening outage degrades to the old behaviour, never a dead search', async () => {
+  const deps = v2deps(SUPER, {
+    loadPayerSpread: async () => {
+      throw new Error('boom');
+    },
+    loadPolicySpread: async () => {
+      throw new Error('boom');
+    },
+  });
+  const snap = await getQualifySnapshotCore(deps, AUTO_IN);
+  assert.ok(snap.resolved, 'the search still resolves');
+  assert.deepEqual(snap.payerOptions, []);
+  assert.deepEqual(snap.policy?.carriers, []);
+  // The COUNTS survive: they ride the one-row policy aggregate, which is a different query.
+  assert.equal(snap.policy?.employerCount, 3);
+});
+
+test('comparable path falls back to the modal employer when the spread is unavailable', async () => {
+  const facCalls: Array<{ market: unknown }> = [];
+  const deps = v2deps(SUPER, {
+    resolvePayer: async () => null,
+    loadPolicySpread: async () => {
+      throw new Error('boom');
+    },
+    loadFacilities: async (_p, _f, _t, _e, market) => {
+      facCalls.push({ market });
+      return FAC;
+    },
+  });
+  const snap = await getQualifySnapshotCore(deps, AUTO_IN);
+  // Losing the spread must not lose comparable provenance entirely — that would be a worse
+  // regression than the narrowing it replaced.
+  assert.equal(snap.provenance, 'comparable_employer');
+  assert.deepEqual(facCalls[0]!.market, { employers: ['VANDERBILT'] });
 });

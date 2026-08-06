@@ -162,6 +162,7 @@ export type {
 } from '../../src/collections/cmdExplorerQuery.js';
 import {
   buildResolvePayerQuery,
+  buildResolvePayerSpreadQuery,
   buildFacilityRankingQuery,
   buildIdentifierLandingFacilityQuery,
   buildFacilityCasesQuery,
@@ -174,6 +175,7 @@ import type { QualifyPatientCohortRaw } from './qualify/core';
 import type {
   QualifyTokenKind,
   QualifyResolvePayerRow,
+  QualifyPayerSpreadRow,
   QualifyFacilityRow,
   QualifyClaimRow,
   QualifyMoverRow,
@@ -3015,6 +3017,19 @@ export async function resolveQualifyPayer(
   const q = buildResolvePayerQuery(token, kind, entityIds);
   const { rows } = await readerExecutor().query<QualifyResolvePayerRow>(q.sql, q.params);
   return rows[0]?.primary_payer ?? null;
+}
+
+/** EVERY payer behind the token, ranked (row [0] === resolveQualifyPayer by construction). The
+ *  widening: 80.6% of member-weighted searches land on a prefix billing under more than one payer,
+ *  and the narrow resolve above discarded all but the top one. Reader-scoped; token stays opaque. */
+export async function loadQualifyPayerSpread(
+  token: string,
+  kind: QualifyTokenKind,
+  entityIds: string[],
+): Promise<QualifyPayerSpreadRow[]> {
+  const q = buildResolvePayerSpreadQuery(token, kind, entityIds);
+  const { rows } = await readerExecutor().query<QualifyPayerSpreadRow>(q.sql, q.params);
+  return rows;
 }
 
 /** Per-facility dollar-weighted ranking rows for a resolved payer, in-window, cross-tenant. */

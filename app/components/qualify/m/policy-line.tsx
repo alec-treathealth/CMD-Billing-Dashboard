@@ -28,7 +28,10 @@ export function MobilePolicyLine({
 
   const chips: string[] = [];
   if (policy?.found) {
-    if (policy.carrier) chips.push(policy.carrier);
+    // Desktop parity (2026-08-06): a bare carrier chip asserts the prefix has ONE carrier, and
+    // member-weighted that is false for 86.8% of searches. The suffix is the whole disclosure at
+    // phone width — no room for desktop's spread sentence, but silence here would be the same lie.
+    if (policy.carrier) chips.push(policy.carrierCount > 1 ? `${policy.carrier} · 1 of ${policy.carrierCount}` : policy.carrier);
     if (policy.funding) chips.push(policy.funding === 'SELF' ? 'Self-funded' : policy.funding === 'FULLY' ? 'Fully insured' : policy.funding);
     if (policy.planType) chips.push(policy.planType);
   }
