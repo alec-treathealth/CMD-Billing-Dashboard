@@ -311,11 +311,14 @@ test('buildFacilityCasesQuery: no cursor param exists — no keyset WHERE, singl
 // ── buildMoversQuery: distinct-patient delta + both suppression floors + clamp. ──────────────────
 test('buildMoversQuery: distinct-patient delta across adjacent windows, floors clamped, signed-desc', () => {
   const { sql, params } = buildMoversQuery('2026-06-17', '2026-07-17', '2026-05-18', '2026-06-17', BOTH);
-  assert.match(sql, /count\(distinct member_id_bidx\) filter \(where payment_received >= \$2::date and payment_received < \$3::date\)/, 'this-window distinct patients');
-  assert.match(sql, /count\(distinct member_id_bidx\) filter \(where payment_received >= \$4::date and payment_received < \$5::date\)/, 'prior-window distinct patients');
-  assert.match(sql, /\(this_patients - prior_patients\) as delta_patients/, 'signed delta');
-  assert.match(sql, /where this_patients >= \$6 and this_charges >= \$7/, 'patient suppression + charge floor');
-  assert.match(sql, /order by delta_patients desc, this_patients desc, primary_payer/, 'gainers first, deterministic');
+  // Distinct patients per window, each as its own DISTINCT-then-count pass (see the perf guard below).
+  assert.match(sql, /select distinct primary_payer, member_id_bidx from collections\.cmd_explorer_charge_rollup .*payment_received >= \$2::date and payment_received < \$3::date/, 'this-window distinct patients');
+  assert.match(sql, /select distinct primary_payer, member_id_bidx from collections\.cmd_explorer_charge_rollup .*payment_received >= \$4::date and payment_received < \$5::date/, 'prior-window distinct patients');
+  assert.match(sql, /\(t\.patients - coalesce\(p\.patients, 0\)\) as delta_patients/, 'signed delta');
+  assert.match(sql, /where t\.patients >= \$6 and c\.this_charges >= \$7/, 'patient suppression + charge floor');
+  assert.match(sql, /order by delta_patients desc, this_patients desc, t\.primary_payer/, 'gainers first, deterministic');
+  // A payer with NO prior-window rows must read 0, not null — the old count() over an empty FILTER did.
+  assert.match(sql, /coalesce\(p\.patients, 0\) as prior_patients/, 'absent prior window is 0, never null');
   assert.match(sql, /primary_payer/, 'labeled by plaintext payer (non-PHI)');
   assert.equal(params[5], QUALIFY_MOVERS_MIN_PATIENTS);
   assert.equal(params[6], QUALIFY_MOVERS_MIN_CHARGES);
@@ -406,11 +409,23 @@ test('buildMoversQuery: a market funding filter scopes the two-window population
   const { sql, params } = buildMoversQuery('2026-06-17', '2026-07-17', '2026-05-18', '2026-06-17', BOTH, {
     market: { funding: ['Fully Insured'] },
   });
-  assert.match(
-    sql,
-    /member_id_bidx in \(select member_id_bidx from vob\.member_benefits_latest where funding = any\(\$9::text\[\]\)\) group by primary_payer/,
-  );
+  // The semi-join scopes the population BEFORE the payer rollup. It now appears in every pass (both
+  // patient windows and the charge count) rather than once — the same narrow, applied consistently.
+  const mjRe = /member_id_bidx in \(select member_id_bidx from vob\.member_benefits_latest where funding = any\(\$9::text\[\]\)\)/g;
+  assert.equal((sql.match(mjRe) ?? []).length, 3, 'market narrow applied to all three passes');
   assert.deepEqual(params[8], ['Fully Insured']);
+});
+
+test('buildMoversQuery: distinct-first per window — the 13s mount regression guard', () => {
+  const { sql } = buildMoversQuery('2026-06-17', '2026-07-17', '2026-05-18', '2026-06-17', BOTH);
+  /* MEASURED on prod 2026-08-06 over the 12-month window this runs on at mount:
+   *   one scan, count(distinct) FILTER per window .. 13045 ms (Sort, external merge, 26576kB to DISK)
+   *   distinct-first, grouped (current) ............   681 ms (all HashAggregate, no spill)
+   * count(distinct x) under GROUP BY forces a sort by (group key, x) across the whole scan. Folding
+   * these back together is a ~19x latency regression on EVERY mount, invisible to every other test. */
+  assert.doesNotMatch(sql, /count\(distinct/, 'no count(distinct) — it forces a sort under GROUP BY');
+  assert.doesNotMatch(sql, /filter \(where payment_received/, 'windows are separate passes, not FILTERs over a union scan');
+  assert.equal((sql.match(/select distinct primary_payer, member_id_bidx/g) ?? []).length, 2, 'one DISTINCT pass per window');
 });
 
 test('qualify builders: NO market filter emits NO VOB clause (unchanged behavior)', () => {
@@ -441,15 +456,32 @@ test('book KPIs: three guarded ratios + distinct-patient count, e2 excluded, NO 
   assert.ok(sql.includes('as pct_allowed_of_billed'), 'allowed/billed ratio');
   assert.ok(sql.includes('as pct_paid_of_allowed'), 'paid/allowed ratio (collection yield)');
   assert.ok(sql.includes('as pct_paid_of_billed'), 'paid/billed ratio (net realization)');
-  assert.match(sql, /count\(distinct member_id_bidx\)::int as distinct_patients/, 'tile sample gate: distinct-patient count');
+  assert.match(sql, /count\(\*\)::int as distinct_patients/, 'tile sample gate: distinct-patient count');
   assert.ok(sql.includes("allowed_tier <> 'e2'"), 'reliable-allowed excludes tier e2 (ruling Q2a — parity with the rating)');
   assert.ok(sql.includes('case when'), 'every ratio is denominator-guarded (null, never a coerced 0%)');
-  // Only the three ratios + the count are PROJECTED (dollars are summed as denominators, never returned).
+  // Four output columns on the OUTER select (3 ratios + the count), dollars summed as denominators.
   const selectList = sql.slice(sql.indexOf('select ') + 7, sql.indexOf(' from '));
-  assert.equal((selectList.match(/ as /g) ?? []).length, 4, 'exactly four output columns (3 ratios + patient count)');
+  assert.equal(selectList.split(',').length, 4, 'exactly four output columns (3 ratios + patient count)');
   assert.ok(!/as .*(billed_amount|charge_total|insurance_payments) /.test(sql), 'no raw dollar column leaves SQL');
-  // member_id_bidx is COUNTED, never projected as a column (no PHI leaves).
-  assert.ok(!sql.replace(/count\(distinct member_id_bidx\)/g, '').includes('member_id_bidx'), 'bidx counted, never projected');
+  // member_id_bidx is COUNTED/GROUPED inside the subquery, never projected out (no PHI leaves).
+  assert.ok(!sql.replace(/select distinct member_id_bidx/g, '').includes('member_id_bidx'), 'bidx grouped, never projected');
+});
+
+test('book KPIs: the distinct count is a SEPARATE scan — the 1.8s mount regression guard', () => {
+  const { sql, params } = buildBookKpisQuery({ from: '2026-06-17', to: '2026-07-17' }, BOTH);
+  /* MEASURED on prod, 2026-08-06, over the 12-month book-wide window this runs on at mount:
+   *   both aggregates in ONE select ... 1819 ms (Sort, external merge, 14232kB spilled to DISK)
+   *   split as it is now .............   152 ms (index-only scan + HashAggregate, 1041kB, no spill)
+   * Postgres cannot combine count(distinct x) with sibling aggregates without sorting the whole
+   * scan by x. Folding these back together is a ~12x latency regression on EVERY mount of the tab,
+   * and nothing else in the suite would catch it. */
+  assert.doesNotMatch(sql, /count\(distinct member_id_bidx\)/, 'must NOT be folded back into one aggregate');
+  assert.match(sql, /cross join/, 'the two aggregates stay separate scans');
+  assert.equal((sql.match(/from collections\.cmd_explorer_charge_rollup/g) ?? []).length, 2, 'two scans');
+  // The predicate is emitted twice but BOUND once — a second cmdExplorerBaseConds call would push
+  // duplicate params and silently renumber the placeholders.
+  assert.equal(params.length, 3, 'entity array + from + to, bound once');
+  assert.equal((sql.match(/\$1::uuid\[\]/g) ?? []).length, 2, 'one placeholder, referenced by both branches');
 });
 
 // ── FLANK PARITY (2026-08-04) ────────────────────────────────────────────────────────────────────
