@@ -260,6 +260,14 @@ export interface QualifyRatingV2Input {
    *  census row is handled by the null-input branch below. */
   authSample?: number | null;
   losSample?: number | null;
+  /** WHICH measurement avgLosDays is. 'completed' = finished admissions with a real discharge date
+   *  (collections.qualify_facility_outcomes); 'in_progress' = the monday census snapshot of
+   *  currently-admitted clients, where LOS is today-minus-admit and therefore reads systematically
+   *  low. Null/absent = unstated, and the detail simply omits the note rather than guessing. */
+  losBasis?: 'completed' | 'in_progress' | null;
+  /** Trailing window (days) the completed-stay averages were measured over — shown so the number is
+   *  self-describing. Ignored unless losBasis is 'completed'. */
+  losWindowDays?: number | null;
   /** Injectable clock for the coding-age decay (tests pin it). */
   now?: Date;
 }
@@ -516,6 +524,23 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
     });
   } else {
     const fit = los <= auth ? 1 : clamp01(1 - (los - auth) / auth);
+    /* THE BASIS IS PART OF THE READING, so it is stated rather than assumed.
+     *
+     * 'completed' means finished admissions with a real discharge date; 'in_progress' means a
+     * snapshot of currently-admitted clients, where LOS is today-minus-admit and every stay is
+     * unfinished. They are different quantities and they disagree materially — measured 2026-08-06
+     * across the twelve residential facilities, the in-progress read put EVERY one below its
+     * authorization (0.69-0.96), so the overrun penalty could never fire; on completed stays four
+     * are at or over it (10026624 1.10, 10025950 1.05, PCMH 1.03, LSMH 1.00).
+     *
+     * An operator comparing two facilities has to know which measurement they are looking at, and a
+     * facility scored on completed stays is not comparable to one scored on stays in progress. */
+    const basisNote =
+      input.losBasis === 'completed'
+        ? ` Completed stays${input.losWindowDays ? `, trailing ${input.losWindowDays}d` : ''}.`
+        : input.losBasis === 'in_progress'
+          ? ' Based on clients currently admitted, so stays are still running and this reads low.'
+          : '';
     factors.push({
       key: 'authFit',
       label: QUALIFY_FACTOR_LABELS.authFit,
@@ -523,7 +548,7 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
       score: fit,
       available: true,
       direction: directionOf(fit),
-      detail: `Avg length of stay ${round1(los)}d vs ${round1(auth)}d authorized.`,
+      detail: `Avg length of stay ${round1(los)}d vs ${round1(auth)}d authorized.${basisNote}`,
     });
   }
 

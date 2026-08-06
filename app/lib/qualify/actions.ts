@@ -39,6 +39,7 @@ import {
   loadQualifyWindowRungs,
   loadCurrentCodingDecisions,
   loadQualifyCensusAuth,
+  loadQualifyFacilityOutcomes,
 } from '@/lib/qualify/loaders';
 import {
   getQualifySnapshotCore,
@@ -119,6 +120,7 @@ const realDeps: QualifyDeps = {
   loadVobFreshness: () => loadQualifyVobFreshness(),
   loadWindowRungs: (token, kind, entityIds, froms, to) => loadQualifyWindowRungs(token, kind, entityIds, froms, to),
   loadCodingDecisions: () => loadCurrentCodingDecisions(),
+  loadFacilityOutcomes: () => loadQualifyFacilityOutcomes(),
   loadCensusAuth: () => loadQualifyCensusAuth(),
 };
 

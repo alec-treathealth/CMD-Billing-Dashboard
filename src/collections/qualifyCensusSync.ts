@@ -169,6 +169,22 @@ export interface CensusSyncStats {
   blocked_boards: Array<{ boardId: string; boardName: string; blocker: string }>;
 }
 
+/**
+ * The read succeeded but the caller cannot SEE the rows — a privilege/RLS/wrong-database problem
+ * wearing the costume of an empty table.
+ *
+ * A TYPED error, not a string match (the repo rule: never match on error strings). The call site's
+ * fail-soft catch would otherwise absorb this exactly like a transient blip, which is the whole
+ * failure being fixed — an RLS-filtered read raises nothing, so "zero rows" is the only signal there
+ * is, and it must survive the catch that exists for genuine outages.
+ */
+export class CensusVisibilityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CensusVisibilityError';
+  }
+}
+
 /** Fetch care_setting for the configured codes so family <-> care_setting can be asserted. */
 async function fetchCareSettings(
   client: pg.PoolClient,
@@ -176,6 +192,28 @@ async function fetchCareSettings(
 ): Promise<Map<string, string | null>> {
   const q = buildFacilityCareSettingQuery(facilityCodes);
   const { rows } = await client.query<{ facility_code: string; care_setting: string | null }>(q.sql, q.params);
+  // ZERO ROWS FOR A NON-EMPTY ASK IS A MISCONFIGURATION, NOT A DATA STATE.
+  //
+  // This guard exists because the 42501 guard below CANNOT catch the failure that actually happened.
+  // collections.facilities has RLS enabled, and a role with no applicable policy sees an EMPTY TABLE
+  // rather than an error (measured 2026-08-06: cmd_rollup_writer had the 0089 GRANT and still read
+  // nothing, because it matched no policy and rolbypassrls is false). A GRANT and an RLS policy are
+  // two independent gates and only the first one fails loudly.
+  //
+  // The predicate is deliberately EXACTLY zero, not "fewer than we asked for". A partial result is a
+  // legitimate roster gap — a configured facility that genuinely has no row yet — and must stay
+  // fail-soft. But every configured code resolving to nothing, when we asked for at least one, can
+  // only mean a privilege, policy, or wrong-database problem. That is unrecoverable by retry and
+  // must not be absorbed into "no care_setting on file", which is how it read for weeks.
+  if (facilityCodes.length > 0 && rows.length === 0) {
+    throw new CensusVisibilityError(
+      `qualify-census: care_setting read returned 0 rows for ${facilityCodes.length} configured ` +
+        'facilities. The roster is not empty, so this is a visibility problem, not a data state — ' +
+        'check the cmd_rollup_writer GRANT (migration 0089) AND its RLS policy on ' +
+        'collections.facilities (migration 0090). NOTE: verifying as `postgres` will not reproduce ' +
+        'this — postgres has rolbypassrls.',
+    );
+  }
   return new Map(rows.map((r) => [r.facility_code, r.care_setting]));
 }
 
@@ -266,6 +304,9 @@ export async function runQualifyCensusSync(
   try {
     careSettings = await fetchCareSettings(client, facilities.map((f) => f.facilityCode));
   } catch (err) {
+    // Two unrecoverable classes, both rethrown: a refused read (42501) and an INVISIBLE one (RLS).
+    // Only the first announces itself; the second is why CensusVisibilityError exists.
+    if (err instanceof CensusVisibilityError) throw err;
     if (isPermissionError(err)) {
       throw new Error(
         'qualify-census: care_setting read denied (SQLSTATE 42501) — cmd_rollup_writer needs ' +

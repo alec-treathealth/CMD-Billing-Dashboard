@@ -325,3 +325,59 @@ test('a NON-permission care_setting failure still fail-softs — a blip must not
     if (savedKey !== undefined) process.env.MONDAY_SECRET_API_KEY = savedKey;
   }
 });
+
+test('care_setting read returning ZERO rows for a non-empty ask THROWS — RLS-empty is silent', async () => {
+  // The failure 0090 fixed: collections.facilities has RLS and cmd_rollup_writer matched no policy,
+  // so the read SUCCEEDED and returned nothing. No error means the 42501 guard cannot see it; the
+  // only signal is "we asked for 23 codes and got 0 back".
+  const client = {
+    query: async (sql?: unknown) => {
+      const text = typeof sql === 'string' ? sql.toLowerCase() : '';
+      if (text.includes('from collections.facilities')) return { rows: [], rowCount: 0 };
+      return { rows: [], rowCount: 0 };
+    },
+  } as unknown as pg.PoolClient;
+  const saved = process.env.MONDAY_SECRET_API_KEY;
+  process.env.MONDAY_SECRET_API_KEY = 'unused-the-throw-precedes-any-fetch';
+  try {
+    await assert.rejects(
+      () => runQualifyCensusSync(client, {}),
+      (e: unknown) => {
+        const m = e instanceof Error ? e.message : '';
+        assert.match(m, /0 rows/);
+        assert.match(m, /0089/);   // the GRANT
+        assert.match(m, /0090/);   // the RLS policy — both gates named
+        assert.match(m, /rolbypassrls/); // and the reason verifying as postgres misses it
+        return true;
+      },
+    );
+  } finally {
+    if (saved === undefined) delete process.env.MONDAY_SECRET_API_KEY;
+    else process.env.MONDAY_SECRET_API_KEY = saved;
+  }
+});
+
+test('a PARTIAL care_setting result stays fail-soft — a roster gap is not a visibility failure', async () => {
+  // Exactly-zero is the predicate, deliberately. One configured facility with no roster row yet is a
+  // legitimate data state and must not take the whole sync down.
+  const client = {
+    query: async (sql?: unknown) => {
+      const text = typeof sql === 'string' ? sql.toLowerCase() : '';
+      if (text.includes('from collections.facilities')) {
+        return { rows: [{ facility_code: 'NASH', care_setting: 'IP' }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  } as unknown as pg.PoolClient;
+  const savedKey = process.env.MONDAY_SECRET_API_KEY;
+  const savedError = console.error;
+  delete process.env.MONDAY_SECRET_API_KEY; // boards fail fast, zero network I/O
+  console.error = () => {};
+  try {
+    const stats = await runQualifyCensusSync(client, {});
+    assert.ok(stats.boards_total > 0, 'one row back is enough to proceed');
+  } finally {
+    console.error = savedError;
+    if (savedKey !== undefined) process.env.MONDAY_SECRET_API_KEY = savedKey;
+  }
+});

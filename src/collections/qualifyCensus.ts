@@ -679,3 +679,21 @@ export function buildFacilityCareSettingQuery(facilityCodes: readonly string[]):
     params: [[...facilityCodes]],
   };
 }
+
+/**
+ * Completed-stay LOS/auth per facility (0091). Fixed literals; no params.
+ *
+ * Read SEPARATELY from the census aggregates rather than joined in SQL: the two tables have
+ * different grains and lifecycles (an hourly live snapshot vs a slow trailing-window aggregate), and
+ * a join would silently drop facilities present in one and not the other. The core merges them
+ * explicitly so "which source won" is a visible decision rather than a join artifact.
+ */
+export function buildQualifyOutcomesReadQuery(): { sql: string; params: unknown[] } {
+  return {
+    sql:
+      'select facility_code, stays_sample, auth_sample, ' +
+      'avg_los_days::float8 as avg_los_days, avg_auth_days::float8 as avg_auth_days, ' +
+      'window_days from collections.qualify_facility_outcomes',
+    params: [],
+  };
+}

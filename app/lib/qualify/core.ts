@@ -7,7 +7,7 @@
  * can load it hermetically. All PHI/DB/crypto reach it only through the injected QualifyDeps.
  */
 import { qualifyRating, QUALIFY_MIN_LINES } from './rating';
-import { computeRatingV2, type QualifyProvenance } from './ratingV2';
+import { computeRatingV2, QUALIFY_AUTH_FIT_MIN_SAMPLE, type QualifyProvenance } from './ratingV2';
 import { QUALIFY_RATING_CONFIDENT_PATIENTS } from './sampleGate';
 import { confidenceOf } from './confidence';
 import { facilityLocation } from './facilityLocations';
@@ -230,6 +230,9 @@ export interface QualifyDeps {
   /** Phase A: all CURRENT coding decisions (seeded:false while 0077 is unapplied/empty). */
   loadCodingDecisions?: () => Promise<{ seeded: boolean; rows: CodingDecisionRow[] }>;
   /** Phase G: per-facility census aggregates (auth days, LOS, next UR, open beds). Empty = none. */
+  /** Completed-stay aggregates (0091). Optional + fail-soft: absent means the auth-fit factor keeps
+   *  using the in-progress census snapshot, which is the pre-0091 behaviour. */
+  loadFacilityOutcomes?: () => Promise<QualifyOutcomesRow[]>;
   loadCensusAuth?: () => Promise<QualifyCensusAggRow[]>;
 }
 
@@ -248,6 +251,18 @@ export interface QualifyCensusAggRow {
   next_ur_date: string | null; // soonest upcoming UR date on the board, ISO
   open_beds: number | null;
   bed_capacity: number | null;
+}
+
+/** One facility's COMPLETED-stay aggregate (0091) — finished admissions with a real discharge date,
+ *  over a trailing window. Distinct from QualifyCensusAggRow, which is a live snapshot of clients
+ *  still admitted; see the basis decision in assembleFacilities. */
+export interface QualifyOutcomesRow {
+  facility_code: string;
+  stays_sample: number;
+  auth_sample: number;
+  avg_los_days: number | null;
+  avg_auth_days: number | null;
+  window_days: number;
 }
 
 /** Raw, un-stripped lifetime cohort context the server loader returns (dollar sums intact — the
@@ -306,6 +321,7 @@ interface QualifyFactorContext {
   provenance: QualifyProvenance;
   coding: { seeded: boolean; rows: CodingDecisionRow[] };
   census: Map<string, QualifyCensusAggRow>;
+  outcomes: Map<string, QualifyOutcomesRow>;
   /** The resolved payer LABEL the coding lookup keys on. Null on the comparable path (no payer —
    *  registry decisions are payer-scoped, so the factor honestly reads "no decision on file"). */
   payer: string | null;
@@ -336,13 +352,18 @@ async function factorContext(
   to: string,
   provenance: QualifyProvenance,
 ): Promise<QualifyFactorContext> {
-  const [coding, censusRows] = await Promise.all([
+  const [coding, censusRows, outcomeRows] = await Promise.all([
     deps.loadCodingDecisions ? deps.loadCodingDecisions().catch(() => NO_CODING) : Promise.resolve(NO_CODING),
     deps.loadCensusAuth ? deps.loadCensusAuth().catch(() => [] as QualifyCensusAggRow[]) : Promise.resolve([] as QualifyCensusAggRow[]),
+    // Fail-soft to []: losing the completed-stay aggregates degrades auth-fit to the in-progress
+    // snapshot (the pre-0091 behaviour), never takes the ranking down.
+    deps.loadFacilityOutcomes ? deps.loadFacilityOutcomes().catch(() => [] as QualifyOutcomesRow[]) : Promise.resolve([] as QualifyOutcomesRow[]),
   ]);
   const census = new Map<string, QualifyCensusAggRow>();
+  const outcomes = new Map<string, QualifyOutcomesRow>();
   for (const r of censusRows) if (r.facility_code) census.set(r.facility_code, r);
-  return { windowDays: windowDaysOf(from, to), provenance, coding, census, payer, now: deps.now() };
+  for (const r of outcomeRows) if (r.facility_code) outcomes.set(r.facility_code, r);
+  return { windowDays: windowDaysOf(from, to), provenance, coding, census, outcomes, payer, now: deps.now() };
 }
 
 
@@ -388,6 +409,27 @@ function assembleFacilities(
     .map((r) => {
       const facilityCode = r.facility_code ?? null;
       const census = facilityCode ? ctx.census.get(facilityCode) ?? null : null;
+      /* WHICH LENGTH-OF-STAY MEASUREMENT SCORES THIS FACILITY — decided here, explicitly, once.
+       *
+       * The census snapshot measures clients CURRENTLY ADMITTED, so its LOS is today-minus-admit: a
+       * stay still running. Completed stays (0091) measure finished admissions with a real discharge
+       * date. They disagree materially — measured 2026-08-06, the in-progress read put ALL twelve
+       * residential facilities below their authorization (0.69-0.96), so the overrun penalty could
+       * never fire for anyone; on completed stays four are at or over it. It also carries 47-165
+       * authorized-day values per facility against the snapshot's 4-15.
+       *
+       * Completed stays WIN when present with a usable sample, because they are the quantity the
+       * factor claims to compare. Otherwise fall back to the snapshot unchanged — outpatient
+       * facilities have no outcomes row at all, and the factor suppresses there for its own reasons.
+       * The chosen basis rides into the rating so the card can SAY which one it used; two facilities
+       * scored on different measurements are not comparable and the operator must be told. */
+      const outcome = facilityCode ? ctx.outcomes.get(facilityCode) ?? null : null;
+      const useOutcomes =
+        outcome !== null &&
+        outcome.avg_los_days !== null &&
+        outcome.avg_auth_days !== null &&
+        outcome.auth_sample >= QUALIFY_AUTH_FIT_MIN_SAMPLE &&
+        outcome.stays_sample >= QUALIFY_AUTH_FIT_MIN_SAMPLE;
       // Coding lookup: payer-scoped (registry decisions are per payer family). The comparable path
       // carries payer=null → no row → the factor reads "no decision on file", which is the truth.
       const decision = ctx.coding.seeded
@@ -406,11 +448,13 @@ function assembleFacilities(
         codingDecidedOn: decision?.decided_on ?? null,
         codingCodesLabel: decision ? codingCodesLabel(decision) : null,
         medianDaysToPayment: r.median_days_to_payment ?? null,
-        avgAuthDays: census?.avg_auth_days ?? null,
-        avgLosDays: census?.avg_los_days ?? null,
+        avgAuthDays: useOutcomes ? outcome!.avg_auth_days : (census?.avg_auth_days ?? null),
+        avgLosDays: useOutcomes ? outcome!.avg_los_days : (census?.avg_los_days ?? null),
         censusFamily: census?.board_family === 'outpatient' || census?.board_family === 'residential' ? census.board_family : null,
-        authSample: census?.auth_sample ?? null,
-        losSample: census?.los_sample ?? null,
+        authSample: useOutcomes ? outcome!.auth_sample : (census?.auth_sample ?? null),
+        losSample: useOutcomes ? outcome!.stays_sample : (census?.los_sample ?? null),
+        losBasis: useOutcomes ? 'completed' : census?.avg_los_days != null ? 'in_progress' : null,
+        losWindowDays: useOutcomes ? outcome!.window_days : null,
         now: ctx.now,
       });
       return {
