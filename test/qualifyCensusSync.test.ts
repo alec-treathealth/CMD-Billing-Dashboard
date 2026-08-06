@@ -258,3 +258,70 @@ test('upsert: a sample BELOW the floor is still stored honestly — suppression 
     else process.env.MONDAY_SECRET_API_KEY = savedKey;
   }
 });
+
+// ── The saturated-alarm regression (diagnosed 2026-08-06) ───────────────────────────────────────
+//
+// cmd_rollup_writer had no SELECT on collections.facilities, so the care_setting read raised 42501
+// every run. The fail-soft catch absorbed it, checkCareSetting saw `undefined` for every facility,
+// and the run log reported `conformance_gap_boards: 23 of 23, status: partial` indefinitely — an
+// alarm that could not distinguish a real regression from itself, hiding 6 genuine gaps underneath.
+// Migration 0089 grants the SELECT; these pin the code half so the next such omission cannot hide.
+
+/** A pg-shaped error: the driver sets `.code` to the SQLSTATE, which is what the guard reads. */
+function pgError(code: string, message = 'permission denied'): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
+}
+
+function clientThatFailsCareSettingRead(err: Error): pg.PoolClient {
+  return {
+    query: async (sql?: unknown) => {
+      const text = typeof sql === 'string' ? sql.toLowerCase() : '';
+      if (text.includes('from collections.facilities')) throw err;
+      return { rows: [], rowCount: 0 };
+    },
+  } as unknown as pg.PoolClient;
+}
+
+test('care_setting read denied (42501) THROWS — a permission error is an outage, not a data state', async () => {
+  const saved = process.env.MONDAY_SECRET_API_KEY;
+  process.env.MONDAY_SECRET_API_KEY = 'test-token-not-used-the-throw-precedes-any-fetch';
+  try {
+    await assert.rejects(
+      () => runQualifyCensusSync(clientThatFailsCareSettingRead(pgError('42501')), {}),
+      // Names the SQLSTATE, the role, the table and the migration — an operator can act on it.
+      (e: unknown) => {
+        const m = e instanceof Error ? e.message : '';
+        assert.match(m, /42501/);
+        assert.match(m, /cmd_rollup_writer/);
+        assert.match(m, /collections\.facilities/);
+        assert.match(m, /0089/);
+        return true;
+      },
+    );
+  } finally {
+    if (saved === undefined) delete process.env.MONDAY_SECRET_API_KEY;
+    else process.env.MONDAY_SECRET_API_KEY = saved;
+  }
+});
+
+test('a NON-permission care_setting failure still fail-softs — a blip must not take the feed down', async () => {
+  const savedKey = process.env.MONDAY_SECRET_API_KEY;
+  const savedError = console.error;
+  delete process.env.MONDAY_SECRET_API_KEY; // every board then fails fast, with zero network I/O
+  const errors: string[] = [];
+  console.error = (msg?: unknown) => {
+    errors.push(String(msg));
+  };
+  try {
+    // 08006 = connection_failure: transient, and the distinction that matters. It degrades.
+    const stats = await runQualifyCensusSync(clientThatFailsCareSettingRead(pgError('08006', 'conn lost')), {});
+    assert.ok(stats.boards_total > 0, 'the sync still ran rather than throwing');
+    assert.ok(
+      errors.some((e) => e.includes('care_setting read failed')),
+      'and the degrade stayed discoverable in the logs',
+    );
+  } finally {
+    console.error = savedError;
+    if (savedKey !== undefined) process.env.MONDAY_SECRET_API_KEY = savedKey;
+  }
+});

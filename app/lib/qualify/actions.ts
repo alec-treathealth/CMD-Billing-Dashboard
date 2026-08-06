@@ -152,8 +152,19 @@ function sanitizeMarket(market?: QualifyMarket): QualifyMarket | undefined {
   return out.employers || out.funding ? out : undefined;
 }
 
+/** Max length of a payer drill-down label. primary_payer values are short; this only bounds abuse —
+ *  the core still validates membership in the identifier's own spread, which is the real check. */
+const QUALIFY_PAYER_OVERRIDE_MAX = 200;
+
 export async function getQualifySnapshot(input: QualifyInput): Promise<QualifySnapshot> {
-  return getQualifySnapshotCore(realDeps, { ...input, market: sanitizeMarket(input.market) });
+  // Bound the drill-down label at the trust boundary (this IS the 'use server' edge), matching how
+  // sanitizeMarket bounds employer strings. Length only: the VALUE is authorized in the core against
+  // the identifier's own payer spread, because only there is the evidence to authorize it against.
+  const payerOverride =
+    typeof input.payerOverride === 'string' && input.payerOverride.length <= QUALIFY_PAYER_OVERRIDE_MAX
+      ? input.payerOverride
+      : null;
+  return getQualifySnapshotCore(realDeps, { ...input, payerOverride, market: sanitizeMarket(input.market) });
 }
 
 /** Resolve-by-payer: load a payer's facilities/cases directly from its label (the Heating-up path). */

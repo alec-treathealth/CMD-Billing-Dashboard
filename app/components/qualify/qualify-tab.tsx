@@ -111,6 +111,7 @@ const POLICY_BAND_HEX: Record<'65' | '50' | '30' | '15' | '0', string> = {
 import { filterFacilitiesByLoc, type QualifyLocFilter } from '@/lib/qualify/groupClaims';
 import { FacilityPanel } from '@/components/qualify/facility-panel';
 import { PolicyStrip } from '@/components/qualify/policy-strip';
+import { PayerRail } from '@/components/qualify/payer-rail';
 import { WindowLadder } from '@/components/qualify/window-ladder';
 import { QualifyAiPanel } from '@/components/qualify/qualify-ai-panel';
 import { BookKpiTiles, EvidenceGauge, HeatingUpCards, HeatingUpSkeleton } from '@/components/qualify/overview';
@@ -198,6 +199,10 @@ export function QualifyTab({
   //    gen-guarded like every other stream. `auto` fires once per NEW identifier (the ladder decides
   //    the window); later manual window changes refetch with the user's explicit choice respected.
   const [leadSnapshot, setLeadSnapshot] = useState<QualifySnapshot | null>(null);
+  /** Payer drill-down (the rail). null = use the volume-dominant resolve. Scoped to ONE search —
+   *  cleared whenever singleIdentifier changes, so a new patient never inherits the previous
+   *  patient's payer scope. The SERVER re-validates it against the identifier's own spread. */
+  const [payerOverride, setPayerOverride] = useState<string | null>(null);
   const leadGenRef = useRef(0);
   const lastAutoIdentifierRef = useRef<string | null>(null);
   const [expandedFacilities, setExpandedFacilities] = useState<ReadonlySet<string>>(new Set());
@@ -544,6 +549,13 @@ export function QualifyTab({
       });
   }, [singleIdentifier]);
 
+  // The payer drill-down is scoped to ONE search. Clearing it on identifier change is not hygiene —
+  // carrying it over would silently scope a NEW patient to the previous patient's payer and label
+  // the result as their resolved history.
+  useEffect(() => {
+    setPayerOverride(null);
+  }, [singleIdentifier]);
+
   // ── v2 LEAD snapshot fetch: policy strip + ladder + (comparable) ranking for the searched
   //    identifier. AUTO only when the identifier CHANGED — a manual window change after a search
   //    refetches under the user's window (respect the override; the Range menu stays the biller path).
@@ -555,11 +567,13 @@ export function QualifyTab({
     }
     const lgen = ++leadGenRef.current;
     const auto = lastAutoIdentifierRef.current !== singleIdentifier;
+    // A payer drill-down is the SAME identifier, so `auto` is already false here and the ladder is
+    // not re-run — the drill-down re-scopes the payer, it must not silently re-window the surface.
     // Consume the auto flag SYNCHRONOUSLY: a window change mid-flight must re-enter as auto=false
     // (never override the user's pick), and a rejected auto fetch must not re-auto on the next
     // manual window change.
     lastAutoIdentifierRef.current = singleIdentifier;
-    getQualifySnapshot({ query: singleIdentifier, window: windowSel, auto })
+    getQualifySnapshot({ query: singleIdentifier, window: windowSel, auto, payerOverride })
       .then((snap) => {
         if (leadGenRef.current !== lgen) return;
         // The manual-window echo refetch (auto=false) carries ladder:null by design — PRESERVE the
@@ -578,8 +592,9 @@ export function QualifyTab({
       });
     // windowSel is deliberately IN deps: a post-search window change refetches the lead under the
     // manual window (auto=false), keeping the policy/estimate read on the same span as the panel.
+    // payerOverride likewise: selecting a payer in the rail IS the refetch trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [singleIdentifier, windowSel]);
+  }, [singleIdentifier, windowSel, payerOverride]);
 
   const toggleFacilityExpansion = useCallback((key: string) => {
     setExpandedFacilities((prev) => {
@@ -1271,6 +1286,17 @@ export function QualifyTab({
             />
           ) : null}
           {singleIdentifier && leadSnapshot?.ladder ? <WindowLadder ladder={leadSnapshot.ladder} /> : null}
+          {/* ── PAYER RAIL: the drill-down for the ~80% of searches whose identifier bills under more
+              than one payer. Self-hiding at <=1 option, so an unambiguous search is untouched. Sits
+              directly under the policy strip because both answer "what am I actually looking at?" */}
+          {singleIdentifier && leadSnapshot ? (
+            <PayerRail
+              options={leadSnapshot.payerOptions}
+              activePayer={leadSnapshot.resolved?.payerName ?? null}
+              overridden={leadSnapshot.payerOverridden}
+              onSelect={setPayerOverride}
+            />
+          ) : null}
           {/* Lighter context line (the old resolved-payer hero band is gone). Non-dollar for admissions_seat. */}
           <div
             id="qualify-results"

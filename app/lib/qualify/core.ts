@@ -294,6 +294,7 @@ function emptySnapshot(hasAmounts: boolean): QualifySnapshot {
     // Empty = "not loaded", which is exactly right here: an empty snapshot resolved no identifier,
     // so there is no payer set to disambiguate. Never conflate with "exactly one payer".
     payerOptions: [],
+    payerOverridden: false,
   };
 }
 
@@ -569,7 +570,7 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
 
   // ── Phase B/0: the policy on file behind the token + the global VOB feed freshness — parallel
   // with the payer resolve. All three fail-soft; a VOB hiccup must not take down the claims read.
-  const [payerName, policyRow, globalFresh, payerSpread, policySpread] = await Promise.all([
+  const [dominantPayer, policyRow, globalFresh, payerSpread, policySpread] = await Promise.all([
     deps.resolvePayer(token, kind, gate.entityIds),
     deps.loadPolicy ? deps.loadPolicy(token, kind).catch(() => null) : Promise.resolve(null),
     deps.loadVobFreshness ? deps.loadVobFreshness().catch(() => null) : Promise.resolve(null),
@@ -602,6 +603,24 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
     patients: r.patients,
     lastPayment: r.last_payment,
   }));
+
+  // ── The payer drill-down, VALIDATED against this identifier's own evidence.
+  //
+  // An override is honoured ONLY if the token actually bills under it. That is the whole security
+  // and honesty argument in one line: `resolved` asserts "this identifier's footprint under this
+  // payer", so accepting an arbitrary client string would let a hand-edited value produce a
+  // confidently-empty result labelled as resolved evidence. Membership in payerSpread is the exact
+  // predicate that makes the assertion true, and it costs nothing — the spread is already loaded.
+  //
+  // Falls back to the dominant payer (payerName) on a miss rather than erroring: the user's intent
+  // was still "search this identifier", and a silent narrowing is worse than the default answer.
+  // Comparison is exact — primary_payer values are matched exactly everywhere else in this file.
+  const overrideRequested = typeof input.payerOverride === 'string' ? input.payerOverride.trim() : '';
+  const overrideHonoured =
+    overrideRequested !== '' && payerOptions.some((o) => o.payer === overrideRequested)
+      ? overrideRequested
+      : null;
+  const payerName = overrideHonoured ?? dominantPayer;
 
   const now = deps.now();
   // Feed staleness (Phase 0): the GLOBAL high-water mark going stale means every policy read is
@@ -675,6 +694,7 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
       // The DIRECT path is the only one where alternatives exist to offer: the identifier has its own
       // claims, and payerOptions[0] is the payerName resolved just above.
       payerOptions,
+      payerOverridden: overrideHonoured !== null,
     };
     return gate.hasAmounts ? snap : stripSnapshotAmounts(snap); // stripAmounts LAST
   }
@@ -728,6 +748,7 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
           // empty by construction — there is nothing to disambiguate. Stated explicitly rather than
           // spread in, so the empty is a decision and not an oversight.
           payerOptions: [],
+          payerOverridden: false,
         };
         return gate.hasAmounts ? snap : stripSnapshotAmounts(snap);
       } catch {
@@ -796,6 +817,8 @@ export async function getQualifySnapshotByPayerCore(
     // The user NAMED the payer — that IS the disambiguation, already made. Offering alternatives
     // here would invite them to undo the choice they just expressed. Empty is correct, not missing.
     payerOptions: [],
+    // Not an override of a resolve: there was no resolve to override on this path.
+    payerOverridden: false,
     policy: null, // a payer label carries no member identity → nothing to resolve a policy from
     ladder: null,
     provenance: 'direct',
@@ -880,6 +903,7 @@ export async function getQualifySnapshotByNameCore(
     // (.claude/rules/qualify.md), which means the change would ship unverifiable against real use.
     // Wire loadPayerSpread(token, 'client_name', …) here when that surface turns on.
     payerOptions: [],
+    payerOverridden: false,
     policy: null, // name resolution carries no prefix → no policy lookup (a name is not a plan)
     ladder: null,
     provenance: 'direct',

@@ -51,7 +51,7 @@ function Chip({
     <span
       className={[
         'inline-flex max-w-full items-baseline gap-1.5 rounded-full border px-2.5 py-0.5',
-        missing ? 'border-line bg-surface' : ambiguous ? 'border-[#E8D5A8] bg-[#FBF1DE]' : 'border-teal200 bg-teal50',
+        missing ? 'border-line bg-surface' : ambiguous ? 'border-status-warn/30 bg-status-warn/10' : 'border-teal200 bg-teal50',
       ].join(' ')}
       title={
         missing

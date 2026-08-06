@@ -128,6 +128,24 @@ export interface QualifyInput {
    *  treated as a fallback only. The resolved ladder rides back on the snapshot so the UI can show the
    *  decision instead of hiding it. Omitted/false = the manual window (the Range menu, biller path). */
   auto?: boolean;
+  /**
+   * PAYER DRILL-DOWN: scope this identifier's footprint to a payer OTHER than the dominant one.
+   *
+   * The default resolve picks the top payer by volume, which is right ~84% of searches — but
+   * measured 2026-08-06, 80.6% of member-weighted searches land on a prefix billing under more than
+   * one payer (max 17), and in 15.7% the top payer is a MINORITY of the lines. This is how the user
+   * reaches the rest without abandoning the identifier narrow.
+   *
+   * Distinct from QualifyPayerInput: that path drops the identifier entirely and ranks the payer's
+   * whole book. This one KEEPS the token, so the answer stays "this patient's history, under that
+   * payer" rather than silently widening to everyone's.
+   *
+   * VALIDATED SERVER-SIDE against the identifier's own payer spread — an override naming a payer the
+   * token never billed is IGNORED and the dominant payer is used, so a hand-edited value can never
+   * manufacture a `resolved` claim the evidence does not support. Ignored entirely on the non-prefix
+   * paths and when the token resolves to nothing.
+   */
+  payerOverride?: string | null;
 }
 
 /**
@@ -663,6 +681,11 @@ export interface QualifySnapshot {
    *  (resolve-by-payer/name), when the identifier has no claims at all, and when the spread query
    *  fails soft. Read `resolved` for whether a payer was resolved at all. */
   payerOptions: QualifyPayerOption[];
+  /** True when `resolved.payer` came from a user drill-down rather than the volume-dominant resolve.
+   *  The UI says so, because "we picked this" and "you picked this" are different claims about the
+   *  same number. False when no override was sent OR when one was sent and REJECTED for naming a
+   *  payer this identifier never billed — a rejected override must never render as honoured. */
+  payerOverridden: boolean;
 }
 
 export interface QualifyMover {

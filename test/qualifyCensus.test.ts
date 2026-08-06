@@ -636,3 +636,44 @@ test('PHI tripwire: census GraphQL never selects item `name` — names on census
     'item name is selected in exactly ONE query — Facility Info (items are facilities)',
   );
 });
+
+/**
+ * THE SATURATION MECHANISM, pinned (diagnosed 2026-08-06).
+ *
+ * An EMPTY careSettings map — which is what a swallowed 42501 produces — makes every facility
+ * report a settingMismatch, so conformanceHasGap() is true for all of them and the run log reads
+ * `conformance_gap_boards: N of N, status: partial` forever. That is indistinguishable from a real
+ * catastrophe and drowns the genuine gaps. This test exists so the causal chain is documented
+ * where the next reader will look, rather than only in migration 0089's header.
+ */
+test('an EMPTY care_setting map saturates conformance — every facility gaps on a lookup miss alone', () => {
+  const careSettings = new Map<string, string | null>(); // exactly what a swallowed 42501 leaves
+  const clean = {
+    facilityCode: 'NASH',
+    family: 'residential' as const,
+    boardIds: ['1'],
+    itemCount: 231,
+    admittedCount: 17,
+    losSample: 17,
+    losUnbilledExcluded: 0,
+    losUncomputable: 0,
+    missingTitles: [],
+    emptyTitles: [],
+    familyMismatch: null,
+  };
+
+  // Otherwise-perfect facility + empty map => a gap, caused by nothing but the missing lookup.
+  const starved = { ...clean, settingMismatch: checkCareSetting('residential', careSettings.get('NASH')) };
+  assert.match(String(starved.settingMismatch), /no care_setting on the roster row/);
+  assert.equal(conformanceHasGap(starved), true, 'the alarm fires on a facility with zero real defects');
+
+  // The SAME facility with the roster value present (post-0089) is clean — proving the 23/23 was an
+  // artifact of the failed read, not of the data. Verified live: all 23 carry a correct care_setting.
+  const fed = { ...clean, settingMismatch: checkCareSetting('residential', 'IP') };
+  assert.equal(fed.settingMismatch, null);
+  assert.equal(conformanceHasGap(fed), false, 'and goes quiet once the read succeeds');
+
+  // A REAL gap still fires with the map populated — the fix must not blunt the assertion.
+  const realGap = { ...fed, emptyTitles: ['Total Auth Days'] };
+  assert.equal(conformanceHasGap(realGap), true, 'genuine value-empty columns still report');
+});
