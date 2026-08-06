@@ -14,10 +14,9 @@
  * ruled acceptable 2026-08-04, and R6 keeps it out of every URL. Nothing here projects a member id,
  * a patient name, a group number value, or any dollar amount that reaches a blind role.
  *
- * CROSS-TENANT BY RATIFIED DESIGN. There is no `business_entity_id` predicate in this file and that is
- * deliberate, not an omission: Qualify counts across BXR and Indigo together. `vob.member_benefits_latest`
- * carries no tenancy column at all. If a future change adds a single-entity WHERE here, that is a
- * deviation from ratified design — stop and say so.
+ * CROSS-TENANT BY RATIFIED DESIGN. Most queries in this file count across BXR and Indigo together;
+ * `vob.member_benefits_latest` carries no tenancy column at all. Queries that read tenant-keyed rollup
+ * data must still apply an explicit `business_entity_id` scope where the caller has one.
  *
  * CONFIRMED ALIASES ONLY (R8). Every crosswalk join carries `and not m.needs_review`. 028 loaded 695
  * machine proposals into `ref.payer_alias_map`; a proposal may NEVER resolve a payer. This single
@@ -209,6 +208,7 @@ export function buildGroupClaimsLabelsQuery(
   canonicalPayerId: string,
   from: string,
   to: string,
+  businessEntityId: string,
 ): BuiltQuery {
   const col = HANDLE_COLUMN[kind].rollup;
   const sql = `
@@ -216,6 +216,7 @@ export function buildGroupClaimsLabelsQuery(
            count(*)::bigint as lines
       from collections.cmd_explorer_charge_rollup r
      where r.${col} = $1
+       and r.business_entity_id = $5::uuid
        and r.charge_date >= $3::date
        and r.charge_date <  $4::date
        and upper(btrim(r.primary_payer)) in (
@@ -228,7 +229,7 @@ export function buildGroupClaimsLabelsQuery(
      group by r.primary_payer
      order by count(*) desc, r.primary_payer asc
      limit 3`;
-  return { sql, params: [handleToken, canonicalPayerId, from, to] };
+  return { sql, params: [handleToken, canonicalPayerId, from, to, businessEntityId] };
 }
 
 /**
