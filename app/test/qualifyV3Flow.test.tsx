@@ -12,6 +12,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   ResolutionStages,
   NO_ANSWER_FILTERS,
+  SKIP_CARRIER_MAX,
   UNRESOLVABLE_COPY,
   deriveStage,
   orderedCandidates,
@@ -258,6 +259,57 @@ test('Skip is offered on BOTH narrowing stages and jumps straight to the answer'
   assert.equal(deriveStage({ resolution: fixture(), payerPick: null, picked: false, skipped: false }), 'payer');
 });
 
+test('Skip is withheld on the carrier stage when the carrier choice is NOT obvious', () => {
+  // With a dozen carriers behind a prefix, skipping resolves the ranking to whichever payer happens
+  // to dominate the claims — arbitrary, not general, and indistinguishable from the answer screen.
+  const many = fixture({
+    candidates: {
+      total: 6,
+      chosenIndex: 0,
+      wasAmbiguous: true,
+      chosenBy: 'user',
+      rejected: ['Cigna', 'UMR', 'GEHA', 'Magellan', 'Optum'].map((payerDisplayName, i) => ({
+        canonicalPayerId: `pi_${i}`,
+        payerDisplayName,
+        employerLabel: null,
+        funding: null,
+        planType: null,
+        memberCount: 5 - i,
+        hasClaimEvidence: true,
+      })),
+    },
+  });
+  assert.ok(payerGroupsOf(many).length >= SKIP_CARRIER_MAX, 'fixture has a non-obvious carrier set');
+  const crowded = render(props('payer', many));
+  assert.ok(!crowded.includes('search all plans'), 'no Skip offered when the carrier is a real question');
+  // Two carriers is the obvious case — Skip returns.
+  const obvious = render(props('payer', fixture()));
+  assert.equal(payerGroupsOf(fixture()).length, 2);
+  assert.match(obvious, /search all plans/, 'Skip is offered when the choice is nearly obvious');
+  // The PLAN stage always offers it — by then the population is one carrier's plans.
+  assert.match(render(props('plan', many, { payerPick: 'Aetna' })), /search all plans/);
+});
+
+test('a skipped search decides nothing past the identifier — the receipt must not claim a plan', () => {
+  // r.group is still the PRE-SELECTED candidate (the largest employer). Rendering its employer as a
+  // "PLAN" entry claimed a decision the user explicitly declined to make, while the ranking beneath
+  // was payer-wide.
+  const html = render(
+    props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'skipped' }) }),
+  );
+  // Scoped to the RECEIPT nav — the step rail also carries a "Plan" label, correctly marked skipped.
+  const receipt = html.slice(html.indexOf('aria-label="Your search so far"'), html.indexOf('</nav>'));
+  assert.ok(!receipt.includes('>Plan<'), 'no PLAN receipt entry after a skip');
+  assert.match(receipt, />Scope</, 'the receipt states the SCOPE instead');
+  assert.match(html, /All plans · AETNA US HEALTHCARE/, 'named by the payer the ranking actually used');
+  assert.match(html, /Pick a plan/, 'and offers the way back into the funnel');
+  // The identity line names the payer, not an unchosen employer's policy.
+  assert.match(html, /all plans — no plan chosen/);
+  assert.ok(!html.includes('SOUTHWEST AIRLINES CO'), 'the pre-selected employer is never presented as resolved');
+  // And the notice that reads "you are seeing the one you selected" is suppressed.
+  assert.ok(!html.includes('You are seeing the one you selected'), 'no selection claim after a skip');
+});
+
 test('a skipped search says it was skipped — never "we could not narrow"', () => {
   const skipped = render(
     props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'skipped' }) }),
@@ -288,8 +340,9 @@ test('the filter lines are visible controls, multiselect, and state what they di
   assert.match(html, />Funding</);
   assert.match(html, /aria-pressed="true"[^>]*>PPO/, 'the active facet reads pressed');
   assert.match(html, / · on/, 'and carries a WORD, not just a hue');
-  // The employer control states its reach in its own summary.
-  assert.match(html, /Searched over 2 employers|Narrowed to \d+ of 2 employers/);
+  // The employer control is a real dropdown pill, stating its reach in its own summary.
+  assert.match(html, />Employers</);
+  assert.match(html, /Searched over 2|Narrowed to \d+ of 2/);
   // What the filter did to the ranking is STATED, with a way out.
   assert.match(html, /Ranking over \d+ of \d+ plans/);
   assert.match(html, /Clear filters/);

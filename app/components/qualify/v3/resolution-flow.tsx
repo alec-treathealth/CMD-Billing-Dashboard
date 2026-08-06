@@ -31,6 +31,11 @@
  * prompt. Everything rendered here is counts, enums, names and dates — no dollar field exists in
  * `QualifyResolution` by construction, so blind and sighted roles receive identical bytes.
  */
+// useMemo only — no useEffect/useLayoutEffect and no browser API, so this module stays renderable
+// by renderToStaticMarkup in the hermetic suite. The memos matter: facetsOf + filterCandidates walk
+// the whole candidate universe (311 plans on a real prefix) and would otherwise re-run on every
+// keystroke in the employer tag-search.
+import { useMemo } from 'react';
 import { ChevronRight } from 'lucide-react';
 import type {
   CoverageGroupSummary,
@@ -278,8 +283,19 @@ export function liveSentenceFor(
   stage: FlowStage,
   resolution: QualifyResolution | null,
   reason: 'empty' | 'prefix_too_short' | 'no_match' | null,
+  opts: { skipped?: boolean; scopePayer?: string | null } = {},
 ): string {
   if (!resolution) return reason ? UNRESOLVABLE_COPY[reason] : '';
+  // A skipped search resolved NOTHING past the identifier: announcing the pre-selected candidate's
+  // employer as "Resolved: …" told a screen-reader user a plan had been chosen when none was — the
+  // same claim the receipt and the identity line had to stop making.
+  if (opts.skipped) {
+    return (
+      'You skipped the plan questions. Showing a general search across all plans' +
+      (opts.scopePayer ? ` under ${opts.scopePayer}` : '') +
+      '.'
+    );
+  }
   if (stage === 'identify') {
     // Back at the search step with a result still held — announce the STAGE, not the stale result
     // (an unchanged "Resolved: …" sentence would mean no announcement at all, and it would describe
@@ -448,9 +464,20 @@ export function StepRail(props: {
 }
 
 /**
- * The escape hatch, offered on every narrowing stage: stop answering questions and go straight to
- * the answer over the identifier's WHOLE footprint, then narrow (or not) with the answer stage's
- * filter lines. Declining to choose is a real answer, and the answer stage says which one it got.
+ * Skip is only offered on the CARRIER stage when the carrier choice is nearly obvious — fewer than
+ * this many clusters. Ruled 2026-08-06: with a dozen carriers behind a prefix, "skip" resolves the
+ * ranking to whichever payer happens to dominate the identifier's claims, which is ARBITRARY rather
+ * than general, and the user cannot tell the difference from the answer screen. Below the threshold
+ * the carrier is effectively already known, so declining to pick costs nothing. The PLAN stage always
+ * offers it: by then the population is one carrier's plans, and "I don't know which plan" is the
+ * common real case.
+ */
+export const SKIP_CARRIER_MAX = 3;
+
+/**
+ * The escape hatch: stop answering questions and go straight to the answer over the identifier's
+ * WHOLE footprint, then narrow (or not) with the answer stage's filter lines. Declining to choose is
+ * a real answer, and the answer stage says which one it got.
  */
 function SkipStep(props: { onSkip: () => void; what: string }): React.ReactElement {
   return (
@@ -482,22 +509,59 @@ export interface ReceiptProps {
   onChange: (backTo: 'identify' | 'payer' | 'plan') => void;
   /** Optional pre-computed clusters (the shell memoizes one call per resolution). */
   payerGroups?: PayerGroup[];
+  /** A skipped search decided nothing past the identifier — see the guard in the body. */
+  skipped?: boolean;
+  /** The payer the RANKING actually used, for the skipped scope entry. */
+  scopePayer?: string | null;
 }
 
 /**
  * What has been decided so far, each entry revisitable. Completion is carried by the WORDS on each
  * entry — never by a checkmark hue alone.
  */
-export function FlowReceipt({ resolution, stage, payerPick, onChange, payerGroups }: ReceiptProps): React.ReactElement {
+export function FlowReceipt({
+  resolution,
+  stage,
+  payerPick,
+  onChange,
+  payerGroups,
+  skipped = false,
+  scopePayer = null,
+}: ReceiptProps): React.ReactElement {
   // For a full member id the echo is '' by construction — the receipt shows the READING instead,
   // so the id never reaches the markup and the entry still says what was searched.
   const idLabel = resolution.handle.echo !== '' ? resolution.handle.echo : resolution.handle.readAs;
   const payers = payerGroups ?? payerGroupsOf(resolution);
+  const entry = 'flex items-center gap-2 rounded-full border border-line bg-surface py-1 pl-3 pr-1';
+  const change = 'rounded-full px-2 py-0.5 text-xs font-semibold text-teal700 hover:bg-teal50';
+
+  // ⚠ A SKIPPED SEARCH DECIDED NOTHING BEYOND THE IDENTIFIER. Rendering the pre-selected candidate's
+  // employer as a "PLAN" entry claimed a decision the user explicitly declined to make. The receipt
+  // is a record of DECISIONS; after a skip there is one, plus the scope the ranking actually used.
+  if (skipped) {
+    return (
+      <nav aria-label="Your search so far" className="flex flex-wrap items-center gap-2">
+        <span className={entry}>
+          <span className="text-xs font-medium uppercase tracking-wide text-ink400">Search</span>
+          <span className="ths-num text-sm text-ink900">{idLabel}</span>
+          <button type="button" className={change} onClick={() => onChange('identify')}>
+            Change
+          </button>
+        </span>
+        <span className={entry}>
+          <span className="text-xs font-medium uppercase tracking-wide text-ink400">Scope</span>
+          <span className="text-sm text-ink900">All plans{scopePayer ? ` · ${scopePayer}` : ''}</span>
+          <button type="button" className={change} onClick={() => onChange('payer')}>
+            Pick a plan
+          </button>
+        </span>
+      </nav>
+    );
+  }
+
   const payerLabel = stage === 'answer' ? resolution.group.payerDisplayName : payerPick;
   const planLabel =
     stage === 'answer' ? (resolution.group.employerLabel ?? 'No plan sponsor on file') : null;
-  const entry = 'flex items-center gap-2 rounded-full border border-line bg-surface py-1 pl-3 pr-1';
-  const change = 'rounded-full px-2 py-0.5 text-xs font-semibold text-teal700 hover:bg-teal50';
   return (
     <nav aria-label="Your search so far" className="flex flex-wrap items-center gap-2">
       <span className={entry}>
@@ -634,7 +698,7 @@ export function StagePayer(props: {
           </span>
         ) : null}
       </p>
-      <SkipStep onSkip={props.onSkip} what="the carrier step" />
+      {groups.length < SKIP_CARRIER_MAX ? <SkipStep onSkip={props.onSkip} what="the carrier step" /> : null}
       <ul data-v3-grid className="grid list-none grid-cols-1 gap-2.5 p-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {groups.map((g, i) => (
           <li key={g.payer}>
@@ -703,6 +767,10 @@ export function StagePayer(props: {
 
 /** Above this many plans, a type-to-narrow filter appears (a prefix can span 186 employers). */
 export const PLAN_FILTER_THRESHOLD = 8;
+
+/** Employer chips rendered at once in the answer-stage tag-search. Selected chips are always shown
+ *  on top of this, so a narrow is never hidden by the cap. */
+const EMPLOYER_CHIP_CAP = 40;
 
 export function StagePlan(props: {
   resolution: QualifyResolution;
@@ -1058,6 +1126,13 @@ function AnswerSkeleton(): React.ReactElement {
 export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   const { resolution: r, snapshot: snap } = props;
   const g = r.group;
+  // ⚠ A SKIPPED SEARCH HAS NO CHOSEN PLAN. `r.group` is still the PRE-SELECTED candidate (the
+  // largest employer), and rendering its employer/funding/plan-type as "the resolved policy" claims
+  // the user picked a plan they explicitly declined to pick — while the ranking underneath is
+  // payer-wide (no payerOverride, no market: verified at the fetch). The identity line names the
+  // payer the ranking actually used instead.
+  const skipped = props.scopeSource === 'skipped';
+  const scopePayer = snap?.resolved?.payerName ?? g.payerDisplayName;
   const policyBits = [
     g.employerLabel ?? 'No plan sponsor on file',
     g.funding ?? 'Funding not captured',
@@ -1065,26 +1140,32 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
     g.network ?? 'Network not captured on this VOB',
   ].join(' · ');
   const rating = snap ? derivePolicyRating(snap.facilities) : null;
-  const facets = facetsOf(props.candidates);
-  const filteredCandidates = filterCandidates(props.candidates, props.filters);
+  const facets = useMemo(() => facetsOf(props.candidates), [props.candidates]);
+  const filteredCandidates = useMemo(
+    () => filterCandidates(props.candidates, props.filters),
+    [props.candidates, props.filters],
+  );
   const filtersActive = answerFiltersActive(props.filters);
   // Employer options: filtered by the tag-search text, then capped for render — a 311-employer chip
   // wall is not a control. Selected employers are always shown so a narrow is never invisible.
   const employerNeedle = props.employerQuery.trim().toLowerCase();
-  const employerMatches = facets.employers.filter(
-    (o) => employerNeedle === '' || o.value.toLowerCase().includes(employerNeedle),
+  const employerMatches = useMemo(
+    () => facets.employers.filter((o) => employerNeedle === '' || o.value.toLowerCase().includes(employerNeedle)),
+    [facets.employers, employerNeedle],
   );
-  const EMPLOYER_CHIP_CAP = 40;
-  const employerOptions = [
-    ...facets.employers.filter((o) => props.filters.employers.includes(o.value)),
-    ...employerMatches.filter((o) => !props.filters.employers.includes(o.value)).slice(0, EMPLOYER_CHIP_CAP),
-  ];
+  const employerOptions = useMemo(
+    () => [
+      ...facets.employers.filter((o) => props.filters.employers.includes(o.value)),
+      ...employerMatches.filter((o) => !props.filters.employers.includes(o.value)).slice(0, EMPLOYER_CHIP_CAP),
+    ],
+    [facets.employers, employerMatches, props.filters.employers],
+  );
   return (
     <Stage id="qualify-s-answer" question="Does this payer pay us — and where?">
-      {/* The policy identity the user resolved, restated in one line — never re-derived. */}
+      {/* The identity of what is on screen, restated in one line — never re-derived. */}
       <p className="text-sm text-ink900">
-        <span className="font-semibold">{g.payerDisplayName}</span>
-        <span className="text-ink600"> · {policyBits}</span>
+        <span className="font-semibold">{skipped ? scopePayer : g.payerDisplayName}</span>
+        <span className="text-ink600"> · {skipped ? 'all plans — no plan chosen' : policyBits}</span>
       </p>
 
       {(props.pending || (!snap && !props.snapshotError)) && !(snap && props.refetching) ? (
@@ -1185,13 +1266,20 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
             {/* The employer tag-search: a visible dropdown whose SUMMARY states the current reach,
                 so the count is readable without opening it. */}
             {facets.employers.length > 0 ? (
-              <details className="text-xs">
-                <summary className="cursor-pointer font-semibold text-teal700">
+              <details className="group/emp text-xs">
+                {/* A REAL dropdown control, not a text link: same pill geometry as every other chip
+                    on these lines, with its own caret. `list-none` + the webkit rule kill the
+                    native marker so the caret is ours and points the right way when open. */}
+                <summary className="flex w-fit cursor-pointer list-none items-center gap-2 rounded-full border border-line bg-surface px-3 py-1 text-xs font-semibold text-ink900 transition-colors hover:border-teal500 hover:text-teal700 [&::-webkit-details-marker]:hidden">
+                  <span className="text-xs font-medium uppercase tracking-wide text-ink400">Employers</span>
                   {props.filters.employers.length > 0
-                    ? `Narrowed to ${props.filters.employers.length} of ${facets.employers.length} employers`
-                    : `Searched over ${facets.employers.length} employer${facets.employers.length === 1 ? '' : 's'}`}
+                    ? `Narrowed to ${props.filters.employers.length} of ${facets.employers.length}`
+                    : `Searched over ${facets.employers.length}`}
+                  <span aria-hidden className="text-ink400 transition-transform group-open/emp:rotate-180">
+                    ▾
+                  </span>
                 </summary>
-                <div className="mt-2 flex flex-col gap-2">
+                <div className="mt-2 flex flex-col gap-2 rounded-xl border border-line bg-ground p-3">
                   <label htmlFor="qualify-answer-employers" className="text-xs font-medium text-ink900">
                     Find an employer
                   </label>
@@ -1370,21 +1458,25 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
         <summary className="cursor-pointer text-sm font-semibold text-ink900">How this was resolved</summary>
         <div className="mt-3 flex flex-col gap-3">
           <ul className="flex list-none flex-col gap-2 p-0">
-            {r.notices.map((n) => (
+            {r.notices
+              // 'ambiguous_candidates' reads "You are seeing the one you selected" — false after a
+              // Skip, where the user selected nothing. The skip banner above says what happened.
+              .filter((n) => !(skipped && n.kind === 'ambiguous_candidates'))
+              .map((n) => (
               // Severity hue BEHIND the severity word (Phase 5) — the word stays; the wash makes a
               // caution findable in a scan without reading every line.
-              <li
-                key={n.kind}
-                className={`rounded-lg px-2.5 py-1.5 text-sm text-ink900 ${
-                  n.severity === 'caution' ? 'bg-coral50' : 'bg-teal50'
-                }`}
-              >
-                <span className="mr-2 text-xs font-semibold uppercase text-ink600">
-                  {n.severity === 'caution' ? 'Caution' : 'Note'}
-                </span>
-                {n.text}
-              </li>
-            ))}
+                <li
+                  key={n.kind}
+                  className={`rounded-lg px-2.5 py-1.5 text-sm text-ink900 ${
+                    n.severity === 'caution' ? 'bg-coral50' : 'bg-teal50'
+                  }`}
+                >
+                  <span className="mr-2 text-xs font-semibold uppercase text-ink600">
+                    {n.severity === 'caution' ? 'Caution' : 'Note'}
+                  </span>
+                  {n.text}
+                </li>
+              ))}
           </ul>
           <dl className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {(['ranking', 'policy', 'ai'] as const).map((panel) => (
@@ -1457,6 +1549,8 @@ export interface ResolutionStagesProps {
  * reason, even though it renders only on the identify stage.
  */
 export function ResolutionStages(props: ResolutionStagesProps): React.ReactElement {
+  const skipped = props.answer?.scopeSource === 'skipped';
+  const scopePayer = props.answer?.snapshot?.resolved?.payerName ?? null;
   return (
     <div role="region" aria-labelledby="qualify-v3-flow-heading" className="flex flex-col gap-5">
       <h1 id="qualify-v3-flow-heading" className="font-head text-2xl font-semibold tracking-tight text-ink900">
@@ -1467,7 +1561,7 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
 
       {/* THE single live region — one, not one per panel; the important sentence must not queue. */}
       <p aria-live="polite" className="sr-only">
-        {liveSentenceFor(props.stage, props.resolution, props.reason)}
+        {liveSentenceFor(props.stage, props.resolution, props.reason, { skipped, scopePayer })}
       </p>
 
       {props.denied ? (
@@ -1483,6 +1577,8 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
           payerPick={props.payerPick}
           onChange={props.onChange}
           payerGroups={props.payerGroups}
+          skipped={skipped}
+          scopePayer={scopePayer}
         />
       ) : null}
 
