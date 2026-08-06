@@ -290,7 +290,38 @@ export interface CensusAggregates {
   avgLosDays: number | null;
   authSample: number;
   losSample: number;
+  /** Admitted OUTPATIENT items dropped from the LOS population as not-billed (see isBilledForAuthFit).
+   *  Observability only — nothing scores off it, but a facility that suddenly excludes everyone is a
+   *  board-hygiene problem worth seeing rather than a facility with no length of stay. */
+  losUnbilledExcluded: number;
   nextUrDate: string | null;
+}
+
+/**
+ * Does this admitted item belong in the AUTH/LOS metric at all?
+ *
+ * RESIDENTIAL: always. A bed night is billed; there is no meaningful unbilled resident.
+ *
+ * OUTPATIENT: only when the item carries a `Total Auth Days` value OR a `Next UR Date`. Those two
+ * columns are the board's own "this patient is being billed / is under utilization review" signal
+ * (ruling 2026-08-05). Outpatient enrollment is NOT the same quantity as an authorized episode —
+ * a cash-pay or self-pay client can stay enrolled indefinitely with no payer involvement at all —
+ * so averaging their length of stay against authorized days compares two unrelated things.
+ *
+ * The measured consequence of not doing this: FRCA showed avg LOS 223.9 days against 86 authorized,
+ * TREAT_CA 109.1 vs 43, TREAT_TX 81.4 vs 30. `authFit` penalises overrun, so all three scored 0 —
+ * a full 10-weight-point penalty manufactured out of clients the payer was never billed for.
+ *
+ * SCOPE, deliberately narrow: this gate applies to the auth/LOS FACTOR ONLY. An excluded client is
+ * still in admittedCount and open-bed context, and is untouched in every claims-derived factor
+ * (claims reliability, time-to-payment, data confidence, coding) — those read charge lines, not the
+ * census, so a client with no auth but real billed claims still scores on all of them.
+ */
+export function isBilledForAuthFit(family: CensusBoardFamily, item: CensusItem): boolean {
+  if (family === 'residential') return true;
+  const hasAuth = item.authDays !== null && Number.isFinite(item.authDays) && item.authDays > 0;
+  const hasUr = typeof item.urDate === 'string' && item.urDate.trim() !== '';
+  return hasAuth || hasUr;
 }
 
 const round2 = (v: number) => Math.round(v * 100) / 100;
@@ -351,8 +382,9 @@ export function computeLosDays(
  *  - admitted = status label exactly 'Admitted'.
  *  - open beds = status label starting 'Open Bed' (never item names).
  *  - avg auth = over ADMITTED items with a real auth value.
- *  - avg LOS = over ADMITTED items whose LOS is computable (see computeLosDays). Negative values
- *    are dropped: a DC date before the ADM date is a data-entry error on the board, not a stay.
+ *  - avg LOS = over ADMITTED, BILLED items whose LOS is computable (see isBilledForAuthFit and
+ *    computeLosDays). Negative values are dropped: a DC date before the ADM date is a data-entry
+ *    error on the board, not a stay.
  *  - next UR = the SOONEST date on or after `today` across ALL items (a UR on a pending admit still
  *    matters); past dates never surface as "upcoming".
  *
@@ -368,7 +400,11 @@ export function aggregateCensusItems(
   const withAuth = admitted.filter(
     (i) => i.authDays !== null && Number.isFinite(i.authDays) && (i.authDays as number) > 0,
   );
-  const losValues = admitted
+  // The LOS population is the BILLED admitted set, which for residential is all of them and for
+  // outpatient is those carrying an auth or a UR date. Comparing a cash-pay client's open-ended
+  // enrolment against authorized days is not an overrun, it is a category error.
+  const billed = admitted.filter((i) => isBilledForAuthFit(family, i));
+  const losValues = billed
     .map((i) => computeLosDays(family, i.status, i.admDate, i.dcDate, today))
     .filter((v): v is number => v !== null && Number.isFinite(v) && v >= 0);
   const upcoming = items
@@ -383,6 +419,7 @@ export function aggregateCensusItems(
     avgLosDays: losValues.length > 0 ? round2(losValues.reduce((s, v) => s + v, 0) / losValues.length) : null,
     authSample: withAuth.length,
     losSample: losValues.length,
+    losUnbilledExcluded: admitted.length - billed.length,
     nextUrDate: upcoming[0] ?? null,
   };
 }

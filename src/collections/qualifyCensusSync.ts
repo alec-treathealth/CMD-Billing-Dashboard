@@ -302,6 +302,16 @@ export async function runQualifyCensusSync(
 
     try {
       const agg = aggregateCensusItems(items, today, facility.family);
+      // Outpatient only: clients with neither a Total Auth Days nor a Next UR Date are not billed,
+      // so they are out of the auth/LOS metric (and ONLY that metric). Logged because "avg LOS over
+      // 3 of 41 admits" and "avg LOS over 41 of 41" are very different confidence, and because a
+      // facility that abruptly excludes everyone is a board-hygiene problem, not a clinical one.
+      if (agg.losUnbilledExcluded > 0) {
+        console.info(
+          `qualify-census: ${facility.facilityCode} LOS over ${agg.losSample} billed admit(s); ` +
+            `${agg.losUnbilledExcluded} admitted client(s) excluded as not-billed (no Total Auth Days, no Next UR Date)`,
+        );
+      }
       const upsert = buildUpsertCensusRowQuery({
         facility_code: facility.facilityCode,
         board_id: representativeBoardId(facility.boardIds),

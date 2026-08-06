@@ -23,6 +23,7 @@ import {
   conformanceHasGap,
   daysBetweenUtc,
   emptyResolvedColumns,
+  isBilledForAuthFit,
   representativeBoardId,
   resolveCensusColumns,
   type CensusConformance,
@@ -219,8 +220,13 @@ test('aggregation: the SAME items yield a different avg LOS per family, by exact
   ];
   // Both are DISCHARGED, so both take the branch where the formulas differ. Aggregation must not be
   // family-agnostic: 'Admitted' filtering is on the status label, and 'Discharged' items are
-  // excluded from the average — so use admitted items to see the delta.
-  const inHouse: CensusItem[] = [item({ admDate: '2026-08-01' }), item({ admDate: '2026-08-03' })];
+  // excluded from the average — so use admitted items to see the delta. They carry an auth value so
+  // the outpatient billed-gate keeps them (see isBilledForAuthFit); without one the OP average would
+  // be null and this would be testing the gate instead of the formula.
+  const inHouse: CensusItem[] = [
+    item({ admDate: '2026-08-01', authDays: 30 }),
+    item({ admDate: '2026-08-03', authDays: 30 }),
+  ];
   const res = aggregateCensusItems(inHouse, '2026-08-11', 'residential');
   const op = aggregateCensusItems(inHouse, '2026-08-11', 'outpatient');
   assert.equal(res.avgLosDays, 9); // (10+8)/2 — in-house branch, no +1 in either family
@@ -228,6 +234,70 @@ test('aggregation: the SAME items yield a different avg LOS per family, by exact
   // And a discharged-only board contributes nothing to the average either way (not 'Admitted').
   assert.equal(aggregateCensusItems(items, '2026-08-11', 'residential').avgLosDays, null);
   assert.equal(aggregateCensusItems(items, '2026-08-11', 'residential').losSample, 0);
+});
+
+test('isBilledForAuthFit: residential always; outpatient needs an auth OR a UR date', () => {
+  const mk = (over: Partial<CensusItem>): CensusItem => item(over);
+  // Residential: a bed night is billed, so every admitted resident counts.
+  assert.equal(isBilledForAuthFit('residential', mk({ authDays: null, urDate: null })), true);
+  // Outpatient: either signal is enough...
+  assert.equal(isBilledForAuthFit('outpatient', mk({ authDays: 30, urDate: null })), true);
+  assert.equal(isBilledForAuthFit('outpatient', mk({ authDays: null, urDate: '2026-09-01' })), true);
+  assert.equal(isBilledForAuthFit('outpatient', mk({ authDays: 30, urDate: '2026-09-01' })), true);
+  // ...and neither means the client is not being billed — cash-pay, self-pay, unbilled.
+  assert.equal(isBilledForAuthFit('outpatient', mk({ authDays: null, urDate: null })), false);
+  assert.equal(isBilledForAuthFit('outpatient', mk({ authDays: 0, urDate: null })), false, 'a zero auth is not an auth');
+  assert.equal(isBilledForAuthFit('outpatient', mk({ authDays: null, urDate: '  ' })), false, 'blank is not a date');
+});
+
+test('aggregation: OUTPATIENT LOS counts only BILLED clients — the cash-pay distortion', () => {
+  // Measured motivation: including unbilled clients gave FRCA 223.9 avg LOS days against 86
+  // authorized, scoring authFit 0 on clients the payer was never billed for.
+  const items: CensusItem[] = [
+    item({ authDays: 30, admDate: '2026-08-01' }), // billed by auth -> 10 days
+    item({ authDays: null, urDate: '2026-09-01', admDate: '2026-08-05' }), // billed by UR -> 6 days
+    item({ authDays: null, urDate: null, admDate: '2025-01-01' }), // CASH PAY, 587 days — excluded
+    item({ authDays: null, urDate: null, admDate: '2025-02-01' }), // CASH PAY, 556 days — excluded
+  ];
+  const op = aggregateCensusItems(items, '2026-08-11', 'outpatient');
+  assert.equal(op.avgLosDays, 8, '(10+6)/2 — the two open-ended cash-pay stays are not in the average');
+  assert.equal(op.losSample, 2);
+  assert.equal(op.losUnbilledExcluded, 2);
+  assert.equal(op.admittedCount, 4, 'census context still counts every admitted client');
+
+  // The SAME items on a residential board keep everyone: a bed night is billed.
+  const res = aggregateCensusItems(items, '2026-08-11', 'residential');
+  assert.equal(res.losSample, 4);
+  assert.equal(res.losUnbilledExcluded, 0);
+  assert.ok((res.avgLosDays ?? 0) > 250, 'residential averages all four, including the long stays');
+});
+
+test('aggregation: an OP facility with NO billed clients yields a null LOS, not a fabricated one', () => {
+  // Correct downstream: ratingV2 marks authFit unavailable and now says LOS is the missing half.
+  const op = aggregateCensusItems(
+    [item({ authDays: null, urDate: null, admDate: '2026-01-01' })],
+    '2026-08-11',
+    'outpatient',
+  );
+  assert.equal(op.avgLosDays, null);
+  assert.equal(op.losSample, 0);
+  assert.equal(op.losUnbilledExcluded, 1);
+});
+
+test('the billed gate touches LOS ONLY — auth, open beds and next UR are unchanged', () => {
+  const items: CensusItem[] = [
+    item({ authDays: 40, admDate: '2026-08-01' }),
+    item({ authDays: null, urDate: null, admDate: '2026-08-01' }), // unbilled: out of LOS, in everything else
+    item({ status: 'Open Bed (Male)' }),
+    item({ status: 'Pending Admit', urDate: '2026-08-20' }),
+  ];
+  const op = aggregateCensusItems(items, '2026-08-11', 'outpatient');
+  assert.equal(op.avgAuthDays, 40, 'the auth average is unaffected by the LOS gate');
+  assert.equal(op.authSample, 1);
+  assert.equal(op.openBeds, 1, 'open-bed context is unaffected');
+  assert.equal(op.nextUrDate, '2026-08-20', 'the UR banner is unaffected');
+  assert.equal(op.admittedCount, 2);
+  assert.equal(op.losSample, 1);
 });
 
 test('aggregation: a DC date before the ADM date is dropped, not averaged as a negative', () => {
