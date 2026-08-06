@@ -811,6 +811,14 @@ export interface ResolutionStagesProps {
   onPlanFilter: (v: string) => void;
   onAskAi: () => void;
   onChange: (backTo: 'identify' | 'payer' | 'plan') => void;
+  /**
+   * The "Facilities Heating Up" trend strip, passed as a SLOT (the shell owns its fetch and its
+   * marquee hook, so this module stays statically renderable). Rendered on the IDENTIFY stage only:
+   * that is the screen the search has not filled yet, and it is what keeps the landing alive instead
+   * of the near-empty page the staged rebuild first shipped. On the later stages it would compete
+   * with the question being asked, which is the whole point of one-question-per-screen.
+   */
+  ticker: React.ReactNode;
   answer: Omit<StageAnswerProps, 'resolution'> | null;
 }
 
@@ -848,6 +856,7 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
 
       {props.stage === 'identify' ? (
         <>
+          {props.ticker}
           <StageIdentify
             echo={props.echo}
             readAs={props.resolution ? props.resolution.handle.readAs : null}

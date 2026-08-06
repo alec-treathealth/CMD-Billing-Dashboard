@@ -29,10 +29,14 @@ import { resolveCoverageAction } from '../../../lib/qualify/v3-actions';
 // V3_INITIAL_STATE comes from a PLAIN module, never the 'use server' one: a non-function export
 // there is registered as a Server Action and 500s every action on the page (see v3FlowState.ts).
 import { V3_INITIAL_STATE } from '../../../lib/qualify/v3FlowState';
-import { getQualifySnapshot } from '../../../lib/qualify/actions';
-import type { QualifySnapshot, QualifyTrailingDays } from '../../../lib/qualify/contract';
+import { getQualifyFacilityTrends, getQualifySnapshot } from '../../../lib/qualify/actions';
+import type { QualifyFacilityTrend, QualifySnapshot, QualifyTrailingDays } from '../../../lib/qualify/contract';
 import { QualifyAiPanel } from '../qualify-ai-panel';
+import { HeatingUpCards, HeatingUpSkeleton } from '../shared/heating-ticker';
 import { deriveStage, ResolutionStages, type FlowStage } from './resolution-flow';
+
+/** The ticker's own window — see the fetch effect for why 90 days rather than 30. */
+const TICKER_WINDOW = { kind: 'trailing', days: 90 } as const;
 
 export function ResolutionFlowClient({
   viewerHasAmountsCapability,
@@ -53,6 +57,9 @@ export function ResolutionFlowClient({
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [payerOverride, setPayerOverride] = useState<string | null>(null);
   const [windowDays, setWindowDays] = useState<QualifyTrailingDays | null>(null);
+  // The landing ticker. `null` = still loading (renders the skeleton, which reserves the strip's
+  // height so a 2.5-5s trend query cannot shove the search box down the page); [] = loaded empty.
+  const [trends, setTrends] = useState<QualifyFacilityTrend[] | null>(null);
 
   /** A new identify submit invalidates every downstream choice — clear them BEFORE dispatching. */
   const identifyAction = useCallback(
@@ -144,6 +151,24 @@ export function ResolutionFlowClient({
     };
   }, [stage, predicateId, isPending, sentOverride, windowDays]);
 
+  // ── The landing ticker: fetched ONCE on mount, book-wide, independent of the search ───────────
+  // Trailing 90 days rather than 30: the strip ranks by rating DELTA against the prior equivalent
+  // period, and at 30 days a single claim can swing a facility's delta by double digits. Fail-soft to
+  // an empty strip — the trend query is orientation, and it must never block the search box.
+  useEffect(() => {
+    let alive = true;
+    getQualifyFacilityTrends(TICKER_WINDOW)
+      .then((t) => {
+        if (alive) setTrends(t);
+      })
+      .catch(() => {
+        if (alive) setTrends([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   // ── Focus follows the question (review: stage swaps unmount the focused element) ──────────────
   // Without this, clicking a tile drops focus to <body> and a keyboard user re-tabs from the top at
   // every stage. The stage's own <h2> takes focus (tabIndex={-1} in the Stage chrome), which also
@@ -188,8 +213,20 @@ export function ResolutionFlowClient({
   }, [stage, hasSnapshot]);
 
   return (
-    <div ref={stageRef}>
+    // THE PAGE CHROME. Matching the v2 tab's <main> exactly, because the route layout supplies none:
+    // the first staged build returned a bare <div> and rendered the h1 flush against the viewport's
+    // top-left corner with zero padding. max-w-[1680px] is the design system's wide-desktop bound.
+    <main ref={stageRef} className="mx-auto max-w-[1680px] p-6 sm:p-8">
       <ResolutionStages
+        ticker={
+          trends === null ? (
+            <HeatingUpSkeleton />
+          ) : (
+            // readOnly: v3 resolves a MEMBER, not a facility, so there is no facility-first drill to
+            // click into. Inert cards beat buttons that no-op.
+            <HeatingUpCards trends={trends} window={TICKER_WINDOW} readOnly />
+          )
+        }
         stage={stage}
         resolution={state.resolution}
         reason={state.reason}
@@ -239,6 +276,6 @@ export function ResolutionFlowClient({
             : null
         }
       />
-    </div>
+    </main>
   );
 }

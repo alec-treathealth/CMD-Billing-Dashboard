@@ -139,6 +139,7 @@ function props(stage: FlowStage, r: QualifyResolution | null, over: Partial<Reso
     onPlanFilter: noop,
     onAskAi: noop,
     onChange: noop,
+    ticker: null,
     answer: r
       ? {
           snapshot: null,
@@ -203,6 +204,20 @@ test('deriveStage: a single carrier with many plans skips the payer stage, not t
   });
   assert.equal(payerGroupsOf(r).length, 1, 'one carrier');
   assert.equal(deriveStage({ resolution: r, payerPick: null, picked: false }), 'plan');
+});
+
+test('the trend ticker rides the IDENTIFY stage only — it must not compete with the question', () => {
+  const ticker = <div data-testid="ticker-slot">Facilities Heating Up</div>;
+  const on = render(props('identify', null, { ticker }));
+  assert.match(on, /data-testid="ticker-slot"/, 'the landing is not left empty');
+  for (const [stage, r, over] of [
+    ['payer', fixture(), {}],
+    ['plan', fixture(), { payerPick: 'Aetna' }],
+    ['answer', fixture(), {}],
+  ] as Array<[FlowStage, QualifyResolution | null, Partial<ResolutionStagesProps>]>) {
+    const html = render(props(stage, r, { ...over, ticker }));
+    assert.ok(!html.includes('ticker-slot'), `the ticker must not render on the ${stage} stage`);
+  }
 });
 
 test('exactly one stage section renders at a time', () => {
