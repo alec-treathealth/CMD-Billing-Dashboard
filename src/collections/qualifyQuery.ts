@@ -689,7 +689,7 @@ export function buildBookKpisQuery(
     // Tile sample gate (Phase 2): distinct patients in the slice. member_id_bidx is GROUPED inside
     // the subquery and COUNTED outside it — never projected (no PHI leaves).
     'cross join (select count(*)::int as distinct_patients from (' +
-    `select distinct member_id_bidx from ${CMD_EXPLORER_CHARGE_ROLLUP} where ${where}) x) d`;
+    `select distinct member_id_bidx from ${CMD_EXPLORER_CHARGE_ROLLUP} where ${where} and member_id_bidx is not null) x) d`;
   return { sql, params };
 }
 
