@@ -55,6 +55,7 @@ function group(over: Partial<CoverageGroup> = {}): CoverageGroup {
     memberCount: 61,
     vobFreshAsOf: '2026-07-20',
     vobStale: false,
+    claimsPayerLabels: [],
     claimEvidence: EVIDENCE_OK,
     ...over,
   };

@@ -7,7 +7,7 @@
  * can load it hermetically. All PHI/DB/crypto reach it only through the injected QualifyDeps.
  */
 import { qualifyRating, QUALIFY_MIN_LINES } from './rating';
-import { computeRatingV2, type QualifyProvenance } from './ratingV2';
+import { computeRatingV2, QUALIFY_AUTH_FIT_MIN_SAMPLE, type QualifyProvenance } from './ratingV2';
 import { QUALIFY_RATING_CONFIDENT_PATIENTS } from './sampleGate';
 import { confidenceOf } from './confidence';
 import { facilityLocation } from './facilityLocations';
@@ -16,7 +16,12 @@ import {
   codingCodesLabel,
   type CodingDecisionRow,
 } from '../../../src/collections/codingRegistryQuery';
-import type { QualifyPolicyRow, QualifyWindowRungsRow } from '../../../src/collections/qualifyPolicyQuery';
+import type {
+  QualifyPolicyRow,
+  QualifyPolicySpreadRow,
+  QualifyWindowRungsRow,
+} from '../../../src/collections/qualifyPolicyQuery';
+import type { QualifyPayerSpreadRow } from '../../../src/collections/qualifyQuery';
 import {
   isQualifyWindow,
   sniffQualifyKind,
@@ -52,6 +57,7 @@ import {
   type QualifyComposeInput,
   type QualifyMatchSummary,
   type QualifyPolicyCard,
+  type QualifyPayerOption,
   type QualifyWindowLadder,
   type QualifyWindowRung,
   type QualifyTrailingDays,
@@ -104,6 +110,23 @@ export interface QualifyDeps {
    *  term normalizes to nothing. The raw name never leaves this call's argument. */
   mintNameToken: (raw: string) => string | null;
   resolvePayer: (token: string, kind: QualifyTokenKind, entityIds: string[]) => Promise<string | null>;
+  /** EVERY payer behind the token, ranked — the widened resolvePayer (buildResolvePayerSpreadQuery).
+   *  Row [0] agrees with resolvePayer exactly by construction; this exists so the surface can offer
+   *  the other 80.6% of searches their real alternatives instead of discarding them. Optional so
+   *  pre-existing dep fixtures stay valid, and fail-soft at the call site: losing the spread must
+   *  degrade to today's single-payer behaviour, never take the search down. */
+  loadPayerSpread?: (
+    token: string,
+    kind: QualifyTokenKind,
+    entityIds: string[],
+  ) => Promise<QualifyPayerSpreadRow[]>;
+  /** The employer + carrier spread behind the token (buildQualifyPolicySpreadQuery). ⚠ The employer
+   *  rows are SERVER-SIDE ONLY — see the forwarding boundary in getQualifySnapshotCore. Optional and
+   *  fail-soft for the same reason as loadPayerSpread. */
+  loadPolicySpread?: (
+    token: string,
+    kind: Exclude<QualifyTokenKind, 'client_name'>,
+  ) => Promise<QualifyPolicySpreadRow[]>;
   loadFacilities: (
     /** The resolved payer, or NULL for the v2 comparable-cohort ranking (Phase B) — the builder
      *  omits the payer clause; the market semi-join MUST carry the scope (core enforces it). */
@@ -207,6 +230,9 @@ export interface QualifyDeps {
   /** Phase A: all CURRENT coding decisions (seeded:false while 0077 is unapplied/empty). */
   loadCodingDecisions?: () => Promise<{ seeded: boolean; rows: CodingDecisionRow[] }>;
   /** Phase G: per-facility census aggregates (auth days, LOS, next UR, open beds). Empty = none. */
+  /** Completed-stay aggregates (0091). Optional + fail-soft: absent means the auth-fit factor keeps
+   *  using the in-progress census snapshot, which is the pre-0091 behaviour. */
+  loadFacilityOutcomes?: () => Promise<QualifyOutcomesRow[]>;
   loadCensusAuth?: () => Promise<QualifyCensusAggRow[]>;
 }
 
@@ -214,10 +240,29 @@ export interface QualifyDeps {
  *  patient-level census data crosses this seam (no new PHI at rest for the auth-fit factor). */
 export interface QualifyCensusAggRow {
   facility_code: string;
+  /** 'residential' | 'outpatient' — the rating suppresses auth/LOS outright for outpatient. */
+  board_family?: string | null;
   avg_auth_days: number | null;
   avg_los_days: number | null;
+  /** Clients behind each average (0078 / 0088). The rating gates on the SMALLER of the two, because
+   *  auth-fit is their ratio. Optional so a pre-0088 read still typechecks and does not suppress. */
+  auth_sample?: number | null;
+  los_sample?: number | null;
   next_ur_date: string | null; // soonest upcoming UR date on the board, ISO
   open_beds: number | null;
+  bed_capacity: number | null;
+}
+
+/** One facility's COMPLETED-stay aggregate (0091) — finished admissions with a real discharge date,
+ *  over a trailing window. Distinct from QualifyCensusAggRow, which is a live snapshot of clients
+ *  still admitted; see the basis decision in assembleFacilities. */
+export interface QualifyOutcomesRow {
+  facility_code: string;
+  stays_sample: number;
+  auth_sample: number;
+  avg_los_days: number | null;
+  avg_auth_days: number | null;
+  window_days: number;
 }
 
 /** Raw, un-stripped lifetime cohort context the server loader returns (dollar sums intact — the
@@ -262,6 +307,10 @@ function emptySnapshot(hasAmounts: boolean): QualifySnapshot {
     policy: null,
     ladder: null,
     provenance: 'none',
+    // Empty = "not loaded", which is exactly right here: an empty snapshot resolved no identifier,
+    // so there is no payer set to disambiguate. Never conflate with "exactly one payer".
+    payerOptions: [],
+    payerOverridden: false,
   };
 }
 
@@ -272,6 +321,7 @@ interface QualifyFactorContext {
   provenance: QualifyProvenance;
   coding: { seeded: boolean; rows: CodingDecisionRow[] };
   census: Map<string, QualifyCensusAggRow>;
+  outcomes: Map<string, QualifyOutcomesRow>;
   /** The resolved payer LABEL the coding lookup keys on. Null on the comparable path (no payer —
    *  registry decisions are payer-scoped, so the factor honestly reads "no decision on file"). */
   payer: string | null;
@@ -302,13 +352,18 @@ async function factorContext(
   to: string,
   provenance: QualifyProvenance,
 ): Promise<QualifyFactorContext> {
-  const [coding, censusRows] = await Promise.all([
+  const [coding, censusRows, outcomeRows] = await Promise.all([
     deps.loadCodingDecisions ? deps.loadCodingDecisions().catch(() => NO_CODING) : Promise.resolve(NO_CODING),
     deps.loadCensusAuth ? deps.loadCensusAuth().catch(() => [] as QualifyCensusAggRow[]) : Promise.resolve([] as QualifyCensusAggRow[]),
+    // Fail-soft to []: losing the completed-stay aggregates degrades auth-fit to the in-progress
+    // snapshot (the pre-0091 behaviour), never takes the ranking down.
+    deps.loadFacilityOutcomes ? deps.loadFacilityOutcomes().catch(() => [] as QualifyOutcomesRow[]) : Promise.resolve([] as QualifyOutcomesRow[]),
   ]);
   const census = new Map<string, QualifyCensusAggRow>();
+  const outcomes = new Map<string, QualifyOutcomesRow>();
   for (const r of censusRows) if (r.facility_code) census.set(r.facility_code, r);
-  return { windowDays: windowDaysOf(from, to), provenance, coding, census, payer, now: deps.now() };
+  for (const r of outcomeRows) if (r.facility_code) outcomes.set(r.facility_code, r);
+  return { windowDays: windowDaysOf(from, to), provenance, coding, census, outcomes, payer, now: deps.now() };
 }
 
 
@@ -354,6 +409,27 @@ function assembleFacilities(
     .map((r) => {
       const facilityCode = r.facility_code ?? null;
       const census = facilityCode ? ctx.census.get(facilityCode) ?? null : null;
+      /* WHICH LENGTH-OF-STAY MEASUREMENT SCORES THIS FACILITY — decided here, explicitly, once.
+       *
+       * The census snapshot measures clients CURRENTLY ADMITTED, so its LOS is today-minus-admit: a
+       * stay still running. Completed stays (0091) measure finished admissions with a real discharge
+       * date. They disagree materially — measured 2026-08-06, the in-progress read put ALL twelve
+       * residential facilities below their authorization (0.69-0.96), so the overrun penalty could
+       * never fire for anyone; on completed stays four are at or over it. It also carries 47-165
+       * authorized-day values per facility against the snapshot's 4-15.
+       *
+       * Completed stays WIN when present with a usable sample, because they are the quantity the
+       * factor claims to compare. Otherwise fall back to the snapshot unchanged — outpatient
+       * facilities have no outcomes row at all, and the factor suppresses there for its own reasons.
+       * The chosen basis rides into the rating so the card can SAY which one it used; two facilities
+       * scored on different measurements are not comparable and the operator must be told. */
+      const outcome = facilityCode ? ctx.outcomes.get(facilityCode) ?? null : null;
+      const useOutcomes =
+        outcome !== null &&
+        outcome.avg_los_days !== null &&
+        outcome.avg_auth_days !== null &&
+        outcome.auth_sample >= QUALIFY_AUTH_FIT_MIN_SAMPLE &&
+        outcome.stays_sample >= QUALIFY_AUTH_FIT_MIN_SAMPLE;
       // Coding lookup: payer-scoped (registry decisions are per payer family). The comparable path
       // carries payer=null → no row → the factor reads "no decision on file", which is the truth.
       const decision = ctx.coding.seeded
@@ -372,8 +448,13 @@ function assembleFacilities(
         codingDecidedOn: decision?.decided_on ?? null,
         codingCodesLabel: decision ? codingCodesLabel(decision) : null,
         medianDaysToPayment: r.median_days_to_payment ?? null,
-        avgAuthDays: census?.avg_auth_days ?? null,
-        avgLosDays: census?.avg_los_days ?? null,
+        avgAuthDays: useOutcomes ? outcome!.avg_auth_days : (census?.avg_auth_days ?? null),
+        avgLosDays: useOutcomes ? outcome!.avg_los_days : (census?.avg_los_days ?? null),
+        censusFamily: census?.board_family === 'outpatient' || census?.board_family === 'residential' ? census.board_family : null,
+        authSample: useOutcomes ? outcome!.auth_sample : (census?.auth_sample ?? null),
+        losSample: useOutcomes ? outcome!.stays_sample : (census?.los_sample ?? null),
+        losBasis: useOutcomes ? 'completed' : census?.avg_los_days != null ? 'in_progress' : null,
+        losWindowDays: useOutcomes ? outcome!.window_days : null,
         now: ctx.now,
       });
       return {
@@ -403,8 +484,15 @@ function assembleFacilities(
         medianDaysToPayment: r.median_days_to_payment ?? null,
         avgAuthDays: census?.avg_auth_days ?? null,
         avgLosDays: census?.avg_los_days ?? null,
+        // NO censusFamily HERE. It is a rating INPUT (see the computeRatingV2 call above), not part
+        // of the client contract — `QualifyFacility` in contract.ts declares no such field, and
+        // contract.ts is the frozen single source of truth for what crosses the wire. A mechanical
+        // edit put it on both objects; on this one it was undeclared payload that nothing read.
         nextUrDate: census?.next_ur_date ?? null,
         openBeds: census?.open_beds ?? null,
+        // Licensed beds (curated FACILITY_BED_CAPACITY). Null for outpatient — they have no beds,
+        // which is correct rather than missing — and for any residential facility not yet curated.
+        bedCapacity: census?.bed_capacity ?? null,
         ratingV2: v2.rating,
         iqBand: v2.band,
         factors: v2.factors,
@@ -530,11 +618,57 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
 
   // ── Phase B/0: the policy on file behind the token + the global VOB feed freshness — parallel
   // with the payer resolve. All three fail-soft; a VOB hiccup must not take down the claims read.
-  const [payerName, policyRow, globalFresh] = await Promise.all([
+  const [dominantPayer, policyRow, globalFresh, payerSpread, policySpread] = await Promise.all([
     deps.resolvePayer(token, kind, gate.entityIds),
     deps.loadPolicy ? deps.loadPolicy(token, kind).catch(() => null) : Promise.resolve(null),
     deps.loadVobFreshness ? deps.loadVobFreshness().catch(() => null) : Promise.resolve(null),
+    // Both spreads fail SOFT to []: losing a widening must degrade to the pre-existing single-value
+    // behaviour, never take the search down. [] reads as "not loaded" everywhere downstream.
+    deps.loadPayerSpread
+      ? deps.loadPayerSpread(token, kind, gate.entityIds).catch(() => [])
+      : Promise.resolve([] as QualifyPayerSpreadRow[]),
+    deps.loadPolicySpread ? deps.loadPolicySpread(token, kind).catch(() => []) : Promise.resolve([]),
   ]);
+
+  // ── THE PHI FORWARDING BOUNDARY for the VOB spread. Split ONCE, here, and never re-joined.
+  //
+  // `employer` rows carry employer_norm, whose display twin employer_name is a PHI column
+  // (app/lib/phi.ts PHI_BASE_COLUMNS) that the AI payload has never carried (qualifyAi.ts). They stay
+  // SERVER-SIDE — used below as the comparable-cohort join key, exactly like the pre-existing
+  // policyRow.employer_norm, which this file already documents as "never forwarded on the wire".
+  // Only the COUNT of them crosses, via policyRow.employer_count.
+  //
+  // `carrier` rows carry insurance_co, which is NOT a PHI column and already ships singular as
+  // policy.carrier. Those ARE wire-safe and become the carrier drill-down set.
+  const employerSpread = policySpread.filter((r) => r.dim === 'employer');
+  const carrierSpread = policySpread.filter((r) => r.dim === 'carrier');
+
+  // Counts and a date only — no amount — so payerOptions is byte-identical for an admissions_seat
+  // session and needs no entry in stripSnapshotAmounts. Keep it that way.
+  const payerOptions: QualifyPayerOption[] = payerSpread.map((r) => ({
+    payer: r.primary_payer,
+    lines: r.lines,
+    patients: r.patients,
+    lastPayment: r.last_payment,
+  }));
+
+  // ── The payer drill-down, VALIDATED against this identifier's own evidence.
+  //
+  // An override is honoured ONLY if the token actually bills under it. That is the whole security
+  // and honesty argument in one line: `resolved` asserts "this identifier's footprint under this
+  // payer", so accepting an arbitrary client string would let a hand-edited value produce a
+  // confidently-empty result labelled as resolved evidence. Membership in payerSpread is the exact
+  // predicate that makes the assertion true, and it costs nothing — the spread is already loaded.
+  //
+  // Falls back to the dominant payer (payerName) on a miss rather than erroring: the user's intent
+  // was still "search this identifier", and a silent narrowing is worse than the default answer.
+  // Comparison is exact — primary_payer values are matched exactly everywhere else in this file.
+  const overrideRequested = typeof input.payerOverride === 'string' ? input.payerOverride.trim() : '';
+  const overrideHonoured =
+    overrideRequested !== '' && payerOptions.some((o) => o.payer === overrideRequested)
+      ? overrideRequested
+      : null;
+  const payerName = overrideHonoured ?? dominantPayer;
 
   const now = deps.now();
   // Feed staleness (Phase 0): the GLOBAL high-water mark going stale means every policy read is
@@ -556,6 +690,11 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
           policyType: policyRow.policy_type,
           planType: policyRow.plan_type,
           groupOnFile: policyRow.group_on_file,
+          // The TRUE distinct counts from the one-row aggregate — never carrierSpread.length, which
+          // is capped at QUALIFY_SPREAD_LIMIT and would under-report a 50-carrier prefix as 25.
+          employerCount: policyRow.employer_count,
+          carrierCount: policyRow.carrier_count,
+          carriers: carrierSpread.map((r) => ({ value: r.value, members: r.members })),
           network: null, // Phase D: not extracted from the VOB yet (three parser generations, none carries it)
           vobFreshAsOf: policyRow.vob_fresh_as_of,
           vobStale,
@@ -600,6 +739,10 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
       policy,
       ladder,
       provenance: 'direct',
+      // The DIRECT path is the only one where alternatives exist to offer: the identifier has its own
+      // claims, and payerOptions[0] is the payerName resolved just above.
+      payerOptions,
+      payerOverridden: overrideHonoured !== null,
     };
     return gate.hasAmounts ? snap : stripSnapshotAmounts(snap); // stripAmounts LAST
   }
@@ -612,11 +755,22 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
   if (policy?.found && deps.loadFacilities) {
     const employerNorm = policyRow?.employer_norm ?? null;
     const funding = policyRow?.funding ?? null;
-    const comparable: { market: VobMarketFilter; provenance: QualifyProvenance } | null = employerNorm
-      ? { market: { employers: [employerNorm] }, provenance: 'comparable_employer' }
-      : funding
-        ? { market: { funding: [funding] }, provenance: 'comparable_funding' }
-        : null;
+    // EVERY employer behind the prefix, not just the modal one. `VobMarketFilter.employers` has
+    // always been a string[]; passing a single element was the narrowing. MEASURED 2026-08-06: in 57%
+    // of member-weighted searches the modal employer is a MINORITY of the prefix, so the old
+    // one-element cohort excluded most of the peer group it claimed to rank over — and did so most
+    // aggressively on the big prefixes real searches land on. The spread is ranked and capped at
+    // QUALIFY_SPREAD_LIMIT, so this stays bounded (the pathological prefix carries 300 employers).
+    //
+    // employerNorm remains the FALLBACK: if the spread failed soft or is empty, this path must still
+    // behave exactly as it did before rather than losing comparable provenance entirely.
+    const employers = employerSpread.length > 0 ? employerSpread.map((r) => r.value) : employerNorm ? [employerNorm] : [];
+    const comparable: { market: VobMarketFilter; provenance: QualifyProvenance } | null =
+      employers.length > 0
+        ? { market: { employers }, provenance: 'comparable_employer' }
+        : funding
+          ? { market: { funding: [funding] }, provenance: 'comparable_funding' }
+          : null;
     if (comparable) {
       try {
         // payer=null + a NON-EMPTY market: the builder ranks the cohort across all payers. The
@@ -638,6 +792,11 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
           policy,
           ladder,
           provenance: facilities.length > 0 ? comparable.provenance : 'none',
+          // COMPARABLE provenance means this identifier has NO claims of its own, so payerSpread is
+          // empty by construction — there is nothing to disambiguate. Stated explicitly rather than
+          // spread in, so the empty is a decision and not an oversight.
+          payerOptions: [],
+          payerOverridden: false,
         };
         return gate.hasAmounts ? snap : stripSnapshotAmounts(snap);
       } catch {
@@ -703,6 +862,11 @@ export async function getQualifySnapshotByPayerCore(
     identifierLandingFacility: null, // resolve-by-payer carries NO identifier → payer-wide (ruling 3)
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
+    // The user NAMED the payer — that IS the disambiguation, already made. Offering alternatives
+    // here would invite them to undo the choice they just expressed. Empty is correct, not missing.
+    payerOptions: [],
+    // Not an override of a resolve: there was no resolve to override on this path.
+    payerOverridden: false,
     policy: null, // a payer label carries no member identity → nothing to resolve a policy from
     ladder: null,
     provenance: 'direct',
@@ -781,6 +945,13 @@ export async function getQualifySnapshotByNameCore(
     identifierLandingFacility,
     viewerHasAmountsCapability: gate.hasAmounts,
     tenantScope: QUALIFY_TENANT_SCOPE,
+    // DELIBERATELY EMPTY, and a known gap rather than a decision on the merits. A client-name resolve
+    // is identifier-shaped and can be multi-payer exactly like a prefix, so this path deserves the
+    // same widening. It does not get it here because the Client Name surface is still gated off
+    // (.claude/rules/qualify.md), which means the change would ship unverifiable against real use.
+    // Wire loadPayerSpread(token, 'client_name', …) here when that surface turns on.
+    payerOptions: [],
+    payerOverridden: false,
     policy: null, // name resolution carries no prefix → no policy lookup (a name is not a plan)
     ladder: null,
     provenance: 'direct',

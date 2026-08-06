@@ -10,6 +10,7 @@
     { "path": "/api/cron/upcoming-overrides", "schedule": "55 * * * *" },
     { "path": "/api/cron/qualify-census", "schedule": "22 * * * *" },
     { "path": "/api/cron/cmd-explorer-catchup", "schedule": "52 7 * * *" },
+    { "path": "/api/cron/facility-outcomes", "schedule": "10 4 * * *" },
     { "path": "/api/cron/era-835", "schedule": "50 8 * * *" },
     { "path": "/api/cron/vob-sync", "schedule": "17 9 * * *" },
     { "path": "/api/cron/refresh-cmd-payer", "schedule": "50 10 * * *" },

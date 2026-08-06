@@ -66,6 +66,9 @@ function policyCard(over: Partial<QualifyPolicyCard>): QualifyPolicyCard {
     memberCount: 12,
     carrier: 'AETNA',
     employerName: null,
+    employerCount: 1,
+    carrierCount: 1,
+    carriers: [],
     funding: null,
     policyType: 'PPO',
     planType: null,
@@ -91,6 +94,8 @@ function snap(over: Partial<QualifySnapshot>): QualifySnapshot {
     policy: null,
     ladder: null,
     provenance: 'direct',
+    payerOptions: [],
+    payerOverridden: false,
     ...over,
   };
 }

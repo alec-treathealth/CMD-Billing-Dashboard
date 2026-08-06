@@ -134,6 +134,39 @@ test('auth fit: under-auth is 1.0; overrun penalizes proportionally', () => {
   assert.equal(factor(computeRatingV2(baseInput({ avgAuthDays: 0, avgLosDays: 10 })), 'authFit').available, false);
 });
 
+test('auth fit: OUTPATIENT is never scored, even with both inputs present', () => {
+  // Ruling 2026-08-05. The outpatient boards maintain auth/UR on 4-6% of current clients and never
+  // set a DC date, so LOS there is an open-ended today-minus-admit — measured 370 days at FRCA
+  // against 86 authorized, which scored a full 10-point penalty off two abandoned rows.
+  const op = computeRatingV2(baseInput({ avgAuthDays: 86, avgLosDays: 370, censusFamily: 'outpatient' }));
+  const f = factor(op, 'authFit');
+  assert.equal(f.available, false, 'outpatient is suppressed regardless of the numbers');
+  assert.equal(f.score, null);
+  assert.match(f.detail, /not scored for outpatient/i);
+  // Suppression must not PENALISE: the weight renormalizes away rather than scoring zero.
+  assert.ok(!op.factors.some((x) => x.key === 'authFit' && x.score === 0));
+
+  // The identical numbers on a RESIDENTIAL facility still score (and still penalise the overrun).
+  const res = computeRatingV2(baseInput({ avgAuthDays: 86, avgLosDays: 370, censusFamily: 'residential' }));
+  assert.equal(factor(res, 'authFit').available, true);
+  assert.equal(factor(res, 'authFit').score, 0, 'a 4x overrun on a bed is still a real overrun');
+
+  // No census row at all → the ordinary unavailable path, not the outpatient copy.
+  const none = computeRatingV2(baseInput({ avgAuthDays: 20, avgLosDays: 18, censusFamily: null }));
+  assert.equal(factor(none, 'authFit').available, true, 'a null family is residential-or-unknown, not suppressed');
+});
+
+test('auth fit: the unavailable copy names WHICH input is missing', () => {
+  // It said "No authorization / length-of-stay data" for every case, which was wrong for months:
+  // auth was populated and only LOS was missing.
+  const noLos = factor(computeRatingV2(baseInput({ avgAuthDays: 21, avgLosDays: null })), 'authFit');
+  assert.match(noLos.detail, /authorized days are on file/i);
+  const noAuth = factor(computeRatingV2(baseInput({ avgAuthDays: null, avgLosDays: 17 })), 'authFit');
+  assert.match(noAuth.detail, /length of stay is on file/i);
+  const neither = factor(computeRatingV2(baseInput({ avgAuthDays: null, avgLosDays: null })), 'authFit');
+  assert.match(neither.detail, /no authorization or length-of-stay data/i);
+});
+
 test('coding decay: 420d-old CONFIRMED decays to 0.4; fresh DID-NOT-WORK scores 0.05; undated → stale floor', () => {
   const stale = computeRatingV2(
     baseInput({ registrySeeded: true, codingLifecycle: 'CONFIRMED CODES', codingDecidedOn: '2025-06-09' }), // 420d

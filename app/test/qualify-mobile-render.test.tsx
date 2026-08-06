@@ -487,6 +487,7 @@ test('MobilePolicyLine: VOB chips + network + stale banner; estimated banner on 
   const { MobilePolicyLine } = await import('../components/qualify/m/policy-line');
   const policy = {
     found: true as const, memberCount: 3, carrier: 'AETNA', employerName: 'ACME CO', funding: 'SELF',
+    employerCount: 1, carrierCount: 1, carriers: [],
     policyType: 'PPO', planType: 'EPO', groupOnFile: true, network: 'OON' as const,
     vobFreshAsOf: '2026-08-01', vobStale: true, deductible: null, deductibleMet: null, oopMax: null, oopMet: null,
   };

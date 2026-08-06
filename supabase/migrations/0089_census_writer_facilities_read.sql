@@ -1,0 +1,79 @@
+-- 0089 — grant cmd_rollup_writer SELECT on collections.facilities: un-saturate the census alarm.
+--
+-- WHY: the qualify-census run log has reported `status: partial` with
+--   `conformance_gap_boards: 23 of 23` on EVERY run since the 23-facility onboarding. Measured
+--   2026-08-06, that is not 23 data problems. It is one missing GRANT.
+--
+--   The chain, verified end to end:
+--     1. The census cron connects as cmd_rollup_writer (the least-privilege writer, 0078/0079).
+--     2. runQualifyCensusSync calls fetchCareSettings ->
+--        `select facility_code, care_setting from collections.facilities where facility_code = any($1)`
+--        (buildFacilityCareSettingQuery, src/collections/qualifyCensus.ts).
+--     3. cmd_rollup_writer has NO SELECT on collections.facilities. Measured:
+--          has_table_privilege('cmd_rollup_writer','collections.facilities','SELECT') = FALSE
+--        while claims_reader, claims_admin and postgres are all TRUE. So the read raises 42501.
+--     4. The call site catches it fail-soft and leaves `careSettings` an EMPTY MAP.
+--     5. checkCareSetting(family, undefined) then returns
+--        "no care_setting on the roster row" for EVERY facility, settingMismatch goes non-null,
+--        conformanceHasGap() is true 23/23, and deriveCensusRunStatus demotes the run to 'partial'.
+--
+--   The roster data was never the problem. Verified live: all 23 facilities carry a correct
+--   care_setting (IP for every residential board, OP for every outpatient board, zero exceptions).
+--
+-- WHAT IT COSTS TODAY: the alarm is saturated, so it cannot do its job. A genuinely new conformance
+--   failure — a renamed monday column, a board remapped to the wrong family — would move the count
+--   from 23 to 23 and change nothing an operator could see. The REAL gaps are currently 6 facilities
+--   (Total Auth Days value-empty on 6 outpatient boards, Next UR Date on 4 of those), and they have
+--   been invisible under the noise since onboarding.
+--
+-- WHY THE GRANT RATHER THAN DROPPING THE CHECK: the family <-> care_setting assertion is the check
+--   that catches a board mapped to the wrong facility, and the two families' LOS expressions differ
+--   by one day (residential counts the discharge day). A silently misdeclared family is a one-day
+--   error in avg_los_days, not a crash — exactly the class of bug worth an assertion. The assertion
+--   is right; it just could not read its input.
+--
+-- LEAST PRIVILEGE: SELECT only, on one table the writer already needs to interpret. No INSERT /
+--   UPDATE / DELETE — the writer must never mutate the facility roster, which is an admin-path
+--   concern. This is the narrowest grant that makes the existing assertion functional. It should
+--   have been part of 0079 (census writer privileges); it was missed because the care_setting
+--   assertion landed later, and the fail-soft catch hid the omission instead of surfacing it.
+--
+-- PHI: none. collections.facilities is facility-grain reference data (code, name, acronym,
+--   care_setting) and is entity-less by design — see the tenancy note in 0079. No patient data.
+--
+-- OWNERSHIP: postgres. NO `SET ROLE claims_admin` — in the collections plane that DOWNGRADES the
+--   applying role from owner to non-owner and fails 42501 (measured on 0084/0085, 2026-08-05).
+--   A GRANT must be issued by the object owner or a superuser; postgres owns collections.facilities
+--   (relowner = postgres, measured), so the plain statement below is correct.
+--
+-- DEPENDENCY: none. collections.facilities and cmd_rollup_writer both predate this
+--   (facilities_care_setting_acronym, 20260625; cmd_rollup_writer_role, 20260625).
+--
+-- IDEMPOTENT: GRANT is repeatable — re-running is a no-op, it does not stack or error.
+--
+-- Rollback: 0089_census_writer_facilities_read_rollback.sql
+
+grant select on collections.facilities to cmd_rollup_writer;
+
+-- ── Verification (run manually after apply; all three must hold) ────────────────────────────────
+--
+-- 1. the writer can now read the roster, and gained nothing else
+-- select has_table_privilege('cmd_rollup_writer','collections.facilities','SELECT') as can_read,
+--        has_table_privilege('cmd_rollup_writer','collections.facilities','INSERT') as can_insert,
+--        has_table_privilege('cmd_rollup_writer','collections.facilities','UPDATE') as can_update,
+--        has_table_privilege('cmd_rollup_writer','collections.facilities','DELETE') as can_delete;
+--   -- expect true, false, false, false
+--
+-- 2. the grant is SELECT and nothing more
+-- select grantee, privilege_type from information_schema.role_table_grants
+--  where table_schema='collections' and table_name='facilities' and grantee='cmd_rollup_writer'
+--  order by privilege_type;
+--   -- expect exactly one row: SELECT
+--
+-- 3. AFTER the next :22 cron run, the alarm de-saturates and reports the REAL gaps
+-- select id, status, boards_total, boards_synced, conformance_gap_boards, error_label
+--   from collections.qualify_census_run order by id desc limit 1;
+--   -- expect conformance_gap_boards to fall from 23 to ~6 (the value-empty Total Auth Days /
+--   -- Next UR Date outpatient boards). Status stays 'partial' — correctly this time, naming a real
+--   -- and actionable OP data-coverage gap instead of a self-inflicted one. A drop to 23 -> 23 means
+--   -- the grant did not take; a drop to 0 means the assertion stopped asserting and is a REGRESSION.
