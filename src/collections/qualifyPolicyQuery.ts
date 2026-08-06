@@ -87,8 +87,17 @@ export function buildQualifyPolicyQuery(
     'mode() within group (order by employer_name) as employer_name, ' +
     'mode() within group (order by employer_norm) as employer_norm, ' +
     // The honesty denominators for the modal chips above. Same scan, same WHERE — no extra cost.
-    'count(distinct employer_norm)::int as employer_count, ' +
-    'count(distinct insurance_co)::int as carrier_count, ' +
+    //
+    // nullif(btrim(…), '') is NOT decoration: count(distinct) treats '' and '   ' as real distinct
+    // values, while buildQualifyPolicySpreadQuery filters them out with `btrim(col) <> ''` and the UI
+    // treats a blank as missing. Without this the three disagree, and the disagreement points the
+    // wrong way — a prefix with one real employer plus one blank row would report employer_count = 2
+    // and render "1 of 2", manufacturing ambiguity out of dirty data on the exact chip that exists to
+    // stop the surface overclaiming. MEASURED 2026-08-06: zero blank rows live in either column
+    // across all 23,067, so this is latent rather than active — but the VOB parser is upstream ETL
+    // (three generations so far), and "no blanks today" is not a property this query can rely on.
+    "count(distinct nullif(btrim(employer_norm), ''))::int as employer_count, " +
+    "count(distinct nullif(btrim(insurance_co), ''))::int as carrier_count, " +
     'mode() within group (order by funding) as funding, ' +
     'mode() within group (order by policy_type) as policy_type, ' +
     'mode() within group (order by plan_type) as plan_type, ' +
@@ -152,10 +161,14 @@ export function buildQualifyPolicySpreadQuery(
   const { params, add } = paramList();
   const tok = add(token);
   const col = VOB_TOKEN_COLUMN[kind];
-  // `limit` is a NUMBER interpolated after an integer clamp, never a bound param: it sits inside a
-  // per-branch LIMIT of a UNION ALL, where a $n would have to be bound twice. Clamped to [1, 200] so
-  // a caller bug cannot turn this into an unbounded scan or a negative-LIMIT syntax error.
-  const lim = Math.max(1, Math.min(200, Math.trunc(limit)));
+  // The LIMIT is a VALUE, so it is BOUND, not interpolated — the repo rule is that only table/column
+  // names are fixed literals. An earlier revision interpolated it on the belief that a $n could not
+  // be reused across both UNION ALL branches; that was simply wrong (verified against the live
+  // database 2026-08-06: one placeholder referenced in both branches, including as LIMIT, binds
+  // once and applies to both). The clamp stays, but as a RESOURCE bound, not a safety mechanism:
+  // binding makes the query injection-proof by construction, while the clamp is what stops a caller
+  // bug asking for 10^9 rows. Two different jobs; neither substitutes for the other.
+  const lim = add(Math.max(1, Math.min(200, Math.trunc(limit))));
   const branch = (dim: 'employer' | 'carrier', valueCol: string) =>
     `(select '${dim}'::text as dim, ${valueCol} as value, ` +
     'count(distinct member_id_bidx)::int as members ' +

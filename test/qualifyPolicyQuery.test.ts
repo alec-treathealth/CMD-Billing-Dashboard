@@ -101,18 +101,26 @@ test('ranking with payer=null and NO market narrow throws at the builder chokepo
 // ── The SPREAD builders (2026-08-06): the widening that stops a single mode() standing in for a
 // population. See the builders' headers for the measurements that motivated them.
 
-test('policy spread: both dims, token bound once and reused, capped per branch', () => {
+test('policy spread: both dims, token AND limit bound once each, reused across both branches', () => {
   const { sql, params } = buildQualifyPolicySpreadQuery('tok-abc', 'prefix');
-  assert.equal(params.length, 1);
-  assert.equal(params[0], 'tok-abc');
-  // ONE bound param serving both UNION branches — not two copies of the token.
+  assert.deepEqual(params, ['tok-abc', QUALIFY_SPREAD_LIMIT]);
+  // ONE bound param each, referenced twice — not two copies, and not interpolated.
   assert.equal((sql.match(/\$1/g) || []).length, 2);
+  assert.equal((sql.match(/\$2/g) || []).length, 2);
   assert.match(sql, /'employer'::text as dim/);
   assert.match(sql, /'carrier'::text as dim/);
   assert.match(sql, /union all/);
   assert.match(sql, /member_id_prefix_bidx = \$1/);
   // Each branch carries its own LIMIT — an uncapped branch is the 300-employer failure mode.
-  assert.equal((sql.match(new RegExp(`limit ${QUALIFY_SPREAD_LIMIT}`, 'g')) || []).length, 2);
+  assert.equal((sql.match(/limit \$2/g) || []).length, 2);
+});
+
+test('policy spread: the LIMIT is a BOUND param, never interpolated into the SQL text', () => {
+  const { sql, params } = buildQualifyPolicySpreadQuery('tok-abc', 'prefix', 7);
+  // The literal must not appear in the text — safety comes from binding, not from the clamp.
+  assert.doesNotMatch(sql, /limit 7/);
+  assert.match(sql, /limit \$2/);
+  assert.equal(params[1], 7);
 });
 
 test('policy spread groups employer_norm — NEVER employer_name, which is a PHI column', () => {
@@ -128,17 +136,22 @@ test('policy spread: member_id kind swaps the match column; token still never pr
   assert.doesNotMatch(sql, /select[^;]*member_id_prefix_bidx as value/);
 });
 
-test('policy spread: limit is integer-clamped, so a caller bug cannot unbound or negate the scan', () => {
-  assert.match(buildQualifyPolicySpreadQuery('t', 'prefix', 0).sql, /limit 1\)/);
-  assert.match(buildQualifyPolicySpreadQuery('t', 'prefix', -5).sql, /limit 1\)/);
-  assert.match(buildQualifyPolicySpreadQuery('t', 'prefix', 9999).sql, /limit 200\)/);
-  assert.match(buildQualifyPolicySpreadQuery('t', 'prefix', 7.9).sql, /limit 7\)/);
+test('policy spread: limit is integer-clamped in the BOUND VALUE, bounding the scan not the syntax', () => {
+  // The clamp is a resource bound and now lands in params[1], not in the SQL text.
+  assert.equal(buildQualifyPolicySpreadQuery('t', 'prefix', 0).params[1], 1);
+  assert.equal(buildQualifyPolicySpreadQuery('t', 'prefix', -5).params[1], 1);
+  assert.equal(buildQualifyPolicySpreadQuery('t', 'prefix', 9999).params[1], 200);
+  assert.equal(buildQualifyPolicySpreadQuery('t', 'prefix', 7.9).params[1], 7);
 });
 
-test('policy query projects the TRUE distinct counts — the honesty denominators for the modal chips', () => {
+test('policy query counts IGNORE blanks, so dirty data cannot manufacture a fake "1 of 2"', () => {
   const { sql } = buildQualifyPolicyQuery('tok-abc', 'prefix');
-  assert.match(sql, /count\(distinct employer_norm\)::int as employer_count/);
-  assert.match(sql, /count\(distinct insurance_co\)::int as carrier_count/);
+  // count(distinct col) treats '' as a real value; the spread builder filters it with btrim(…) <> ''
+  // and the UI treats blank as missing. All three must agree or the chip overclaims ambiguity.
+  assert.match(sql, /count\(distinct nullif\(btrim\(employer_norm\), ''\)\)::int as employer_count/);
+  assert.match(sql, /count\(distinct nullif\(btrim\(insurance_co\), ''\)\)::int as carrier_count/);
+  assert.doesNotMatch(sql, /count\(distinct employer_norm\)/);
+  assert.doesNotMatch(sql, /count\(distinct insurance_co\)/);
 });
 
 test('payer spread: same ordering as the narrow resolve, so row [0] agrees by construction', () => {
@@ -154,8 +167,11 @@ test('payer spread returns evidence counts and a date — never an amount (admis
   assert.match(sql, /to_char\(max\(payment_received\), 'YYYY-MM-DD'\) as last_payment/);
   // A dollar column here would silently diverge blind and sighted sessions.
   assert.doesNotMatch(sql, /allowed|charge_amount|insurance_payments|billed/);
-  assert.match(sql, new RegExp(`limit ${QUALIFY_PAYER_SPREAD_LIMIT}$`));
+  // BOUND limit — the value rides params, never the SQL text.
+  assert.match(sql, /limit \$3$/);
+  assert.doesNotMatch(sql, new RegExp(`limit ${QUALIFY_PAYER_SPREAD_LIMIT}`));
   assert.equal(params[1], 'tok');
+  assert.equal(params[2], QUALIFY_PAYER_SPREAD_LIMIT);
 });
 
 test('payer spread stays tenant-scoped and refuses an empty scope (fail-closed, not fail-open)', () => {

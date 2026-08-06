@@ -223,8 +223,9 @@ export function buildResolvePayerSpreadQuery(
   const e = add(ent);
   const tok = add(token);
   const col = TOKEN_COLUMN[kind];
-  // Integer-clamped and interpolated, never a bound param — see QUALIFY_SPREAD_LIMIT's note.
-  const lim = Math.max(1, Math.min(200, Math.trunc(limit)));
+  // BOUND, not interpolated — the LIMIT is a value. The clamp is a resource bound (stop a caller bug
+  // asking for 10^9 rows), not the safety mechanism; binding is. See buildQualifyPolicySpreadQuery.
+  const lim = add(Math.max(1, Math.min(200, Math.trunc(limit))));
   const sql =
     'select primary_payer, count(*)::int as lines, ' +
     'count(distinct member_id_bidx)::int as patients, ' +
