@@ -23,7 +23,9 @@ import {
   conformanceHasGap,
   daysBetweenUtc,
   emptyResolvedColumns,
+  FACILITY_BED_CAPACITY,
   isBilledForAuthFit,
+  QUALIFY_LOS_MIN_SAMPLE,
   representativeBoardId,
   resolveCensusColumns,
   type CensusConformance,
@@ -444,6 +446,38 @@ test('registry: the four blocked boards are exactly the known-unrostered ones, e
   }
 });
 
+test('bed capacity: every RESIDENTIAL facility is curated; outpatient facilities have none', () => {
+  // The operator's list is the source of truth (2026-08-05); the Facility Info board is stale on
+  // three facilities and left 21 at NULL. Beds are licensure, so every residential facility we sync
+  // must carry a number — a NULL here is the old silent failure coming back.
+  for (const f of MONDAY_CENSUS_FACILITIES) {
+    const beds = FACILITY_BED_CAPACITY[f.facilityCode];
+    if (f.family === 'residential') {
+      assert.equal(typeof beds, 'number', `${f.facilityCode} (residential) has no curated bed count`);
+      assert.ok((beds as number) > 0, `${f.facilityCode} bed count must be positive`);
+    } else {
+      assert.equal(beds, undefined, `${f.facilityCode} is outpatient and must NOT have beds`);
+    }
+  }
+  // The three corrections against the Facility Info board, pinned so a later "sync from the board"
+  // cannot silently reintroduce them.
+  assert.equal(FACILITY_BED_CAPACITY['NASH'], 20, 'board said 8 — it counted one of two houses');
+  assert.equal(FACILITY_BED_CAPACITY['10021573'], 12, 'board said 18');
+  assert.equal(FACILITY_BED_CAPACITY['10026624'], 17, 'board said 18');
+  // MHC is deferred, not synced, but its number is recorded so onboarding does not have to re-ask.
+  assert.equal(FACILITY_BED_CAPACITY['10024431'], 24);
+  // The 12 synced residential facilities plus deferred MHC.
+  assert.equal(Object.keys(FACILITY_BED_CAPACITY).length, 13);
+});
+
+test('QUALIFY_LOS_MIN_SAMPLE matches the repo sample-gate idiom rather than inventing a threshold', () => {
+  // app/lib/qualify/sampleGate.ts tiers on distinct patients at QUALIFY_RATING_MIN_PATIENTS = 3 and
+  // QUALIFY_RATING_CONFIDENT_PATIENTS = 10. The LOS floor reuses the LOWER tier so the codebase has
+  // one vocabulary for "too few to score", not three. Not imported here: that constant lives in the
+  // app package and this is the root suite — the pin is the number plus this note.
+  assert.equal(QUALIFY_LOS_MIN_SAMPLE, 3);
+});
+
 test('representativeBoardId: the LOWEST id, deterministically, regardless of config order', () => {
   assert.equal(representativeBoardId(['18405687473', '18394268978']), '18394268978');
   assert.equal(representativeBoardId(['18394268978', '18405687473']), '18394268978');
@@ -488,6 +522,8 @@ test('builders: fixed identifiers, bound params, ::date cast on the UR date', ()
   const read = buildQualifyCensusReadQuery();
   assert.match(read.sql, /from collections\.qualify_facility_census/);
   assert.doesNotMatch(read.sql, /select \*/i);
+  // board_family rides along so the rating can suppress auth/LOS for outpatient outright.
+  assert.match(read.sql, /\bboard_family\b/);
 
   const care = buildFacilityCareSettingQuery(['NASH', '10021573']);
   assert.match(care.sql, /from collections\.facilities/);

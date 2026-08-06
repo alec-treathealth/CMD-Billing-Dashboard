@@ -186,6 +186,51 @@ export const CENSUS_WORKSPACE_IDS: readonly string[] = [
 export const MONDAY_FACILITY_INFO_BOARD = '7475219124';
 
 /**
+ * LICENSED BED COUNT per facility — the CURATED source of truth, operator-supplied 2026-08-05.
+ *
+ * WHY CURATED RATHER THAN READ FROM THE BOARD. Capacity was being name-matched against the
+ * `Facility Info` board, and that had failed three different ways at once: the map held only two
+ * keys so 21 facilities wrote `bed_capacity = NULL`, and where it DID match the board was stale.
+ * Measured against the operator's list on 2026-08-05, the board disagrees on three facilities:
+ *
+ *   Nashville   board  8  ->  20   (corroborated by the NASH board's OWN group titles,
+ *                                   'Broad St (8 Beds COED)' + 'Rutland Rd (12 Beds COED)' = 20 —
+ *                                   the board item was only ever counting one house)
+ *   Opus        board 18  ->  12
+ *   Hillside    board 18  ->  17
+ *
+ * Board total 174 vs the operator's 179; those three deltas (-6 +12 -1 = +5) account for the gap
+ * exactly, which is what makes this a correction rather than two guesses.
+ *
+ * Bed count is licensure, not telemetry — it changes when a facility opens or closes a house, which
+ * is a deliberate business event, not a daily drift. An explicit reviewable constant is the right
+ * shape for that; a silent name-match against an unmaintained board is not. The board is still read
+ * as a FALLBACK for a facility absent from this map, and its unmapped names are still reported.
+ *
+ * OUTPATIENT FACILITIES ARE DELIBERATELY ABSENT: they have no beds. `bed_capacity` stays NULL for
+ * them, which is correct, not missing.
+ */
+export const FACILITY_BED_CAPACITY: Readonly<Record<string, number>> = {
+  // residential, mapped and synced
+  CAMH: 12,
+  DMH: 12,
+  KWC: 16,
+  LAMH: 6,
+  LSMH: 12,
+  NASH: 20,
+  PCMH: 6,
+  TBH: 8,
+  '10021573': 12, // Opus Health
+  '10025950': 16, // Silicon Valley Recovery
+  '10026624': 17, // Hillside Horizon for Teens
+  '10028595': 12, // Revival Mental Health
+  // residential, NOT synced — recorded so the number is not lost when they are onboarded.
+  '10024431': 24, // MHC of San Diego — DEFERRED (care_setting BOTH; needs the census re-grain)
+  // Wellness Recovery Center (6 beds) has no collections.facilities row at all, so it has no
+  // facility_code to key on here. It stays in CENSUS_BLOCKED_BOARDS until it is seeded.
+};
+
+/**
  * Logical column titles per family. The resolver matches case-insensitively on trimmed titles.
  *
  * THERE IS DELIBERATELY NO `los` ENTRY. Nothing reads the LOS formula column any more
@@ -570,11 +615,23 @@ export function representativeBoardId(boardIds: readonly string[]): string {
   return [...boardIds].sort(compareBoardIds)[0] ?? '';
 }
 
-/** Read every facility's census aggregates (the rating factor's seam — tiny table, whole read). */
+/**
+ * Minimum number of computable LOS values before an average is worth scoring.
+ *
+ * A mean over one or two stays is noise, and the auth/LOS factor carries 10 of 100 weight points —
+ * enough for a two-row sample to move a facility's band. Set to 3 to match the lower tier of the
+ * repo's existing patient-count idiom (`sampleGate.ts`, tiers 3 / 10) rather than inventing a third
+ * threshold. Below the floor the average is written NULL, which renders the factor unavailable and
+ * renormalizes its weight away — no score, rather than a confident wrong one.
+ */
+export const QUALIFY_LOS_MIN_SAMPLE = 3;
+
+/** Read every facility's census aggregates (the rating factor's seam — tiny table, whole read).
+ *  `board_family` rides along because the rating suppresses auth/LOS for outpatient outright. */
 export function buildQualifyCensusReadQuery(): { sql: string; params: unknown[] } {
   return {
     sql:
-      'select facility_code, avg_auth_days::float8 as avg_auth_days, avg_los_days::float8 as avg_los_days, ' +
+      'select facility_code, board_family, avg_auth_days::float8 as avg_auth_days, avg_los_days::float8 as avg_los_days, ' +
       "to_char(next_ur_date, 'YYYY-MM-DD') as next_ur_date, open_beds " +
       'from collections.qualify_facility_census',
     params: [],

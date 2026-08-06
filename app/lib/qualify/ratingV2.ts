@@ -227,6 +227,9 @@ export interface QualifyRatingV2Input {
   // auth / LOS fit (monday census aggregates, Phase G)
   avgAuthDays: number | null;
   avgLosDays: number | null;
+  /** Which monday census family fed the aggregates above, or null when the facility has no census
+   *  row. OUTPATIENT SUPPRESSES THE AUTH/LOS FACTOR ENTIRELY — see the factor body for why. */
+  censusFamily?: 'residential' | 'outpatient' | null;
   /** Injectable clock for the coding-age decay (tests pin it). */
   now?: Date;
 }
@@ -409,7 +412,31 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
   // — auth / LOS fit (10) ————————————————————————————————————————————————————
   const auth = input.avgAuthDays;
   const los = input.avgLosDays;
-  if (auth === null || los === null || !Number.isFinite(auth) || !Number.isFinite(los) || auth <= 0) {
+  if (input.censusFamily === 'outpatient') {
+    /* OUTPATIENT IS NOT SCORED ON AUTH/LOS. Ruling 2026-08-05, on measured evidence rather than
+     * preference: on the outpatient census boards, `Total Auth Days` / `Next UR Date` are maintained
+     * on only 4-6% of CURRENTLY-admitted clients (TREAT_CA 3 of 54, FRCA 2 of 7, TREAT_TX 2 of 47,
+     * TELEHEALTH_MH 0 of 13), the few that carry one are stale rows whose ADM dates sit 8 months
+     * behind the admitted median, and ZERO admitted clients on any of those boards carry a DC date —
+     * so every outpatient LOS is an open-ended today-minus-admit that grows without bound.
+     * Scoring that produced a full 10-point penalty (authFit 0) at FRCA, TREAT_CA and TREAT_TX off
+     * two or three abandoned rows.
+     * Outpatient enrolment is also not the same quantity as an authorized episode — a self-pay
+     * client can stay enrolled with no payer involvement — so even with perfect data the comparison
+     * needs its own definition. Until the boards maintain authorization and discharge dates, the
+     * honest reading is "we do not measure this here", not a zero. The weight renormalizes over the
+     * remaining factors, so an outpatient facility is not penalised for the suppression. */
+    factors.push({
+      key: 'authFit',
+      label: QUALIFY_FACTOR_LABELS.authFit,
+      weight: QUALIFY_FACTOR_WEIGHTS.authFit,
+      score: null,
+      available: false,
+      direction: 'neu',
+      detail:
+        'Not scored for outpatient — authorization and discharge dates are not maintained on the outpatient census boards, so length of stay there is not a measure of authorized care.',
+    });
+  } else if (auth === null || los === null || !Number.isFinite(auth) || !Number.isFinite(los) || auth <= 0) {
     // NAME THE INPUT THAT IS ACTUALLY ABSENT. The old copy said "No authorization / length-of-stay
     // data" for every unavailable case, which was actively misleading for months: monday's API
     // returns "" for the LOS formula column, so avg_auth_days was populated (21.11 / 25.17 days on

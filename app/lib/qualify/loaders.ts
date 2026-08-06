@@ -127,12 +127,13 @@ export async function loadCodingDecisionHistory(limit = 500): Promise<{ availabl
  *  auth-fit factor reads unavailable and the UR/beds chips stay absent, never a 500. Aggregate
  *  facility-grain rows only (no PHI exists on this path). */
 export async function loadQualifyCensusAuth(): Promise<
-  Array<{ facility_code: string; avg_auth_days: number | null; avg_los_days: number | null; next_ur_date: string | null; open_beds: number | null }>
+  Array<{ facility_code: string; board_family: string | null; avg_auth_days: number | null; avg_los_days: number | null; next_ur_date: string | null; open_beds: number | null }>
 > {
   const q = buildQualifyCensusReadQuery();
   try {
     const res = await qualifyV2Reader().query<{
       facility_code: string;
+      board_family: string | null;
       avg_auth_days: number | null;
       avg_los_days: number | null;
       next_ur_date: string | null;

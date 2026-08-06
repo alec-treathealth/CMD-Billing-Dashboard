@@ -28,7 +28,9 @@ import {
   CENSUS_EXCLUDED_BOARD_IDS,
   CENSUS_TITLES,
   CENSUS_WORKSPACE_IDS,
+  FACILITY_BED_CAPACITY,
   MONDAY_CENSUS_FACILITIES,
+  QUALIFY_LOS_MIN_SAMPLE,
   MONDAY_FACILITY_INFO_BOARD,
   aggregateCensusItems,
   buildFacilityCareSettingQuery,
@@ -312,15 +314,28 @@ export async function runQualifyCensusSync(
             `${agg.losUnbilledExcluded} admitted client(s) excluded as not-billed (no Total Auth Days, no Next UR Date)`,
         );
       }
+      // SAMPLE FLOOR. A mean over one or two stays is noise, and auth/LOS carries 10 of 100 weight
+      // points — enough for a two-row sample to move a facility's band. Below the floor the average
+      // is written NULL so the factor renders unavailable and its weight renormalizes away: no
+      // score, rather than a confident wrong one. The raw sample size stays in the run log.
+      const losBelowFloor = agg.losSample > 0 && agg.losSample < QUALIFY_LOS_MIN_SAMPLE;
+      if (losBelowFloor) {
+        console.info(
+          `qualify-census: ${facility.facilityCode} avg LOS suppressed — sample ${agg.losSample} < ${QUALIFY_LOS_MIN_SAMPLE}`,
+        );
+      }
       const upsert = buildUpsertCensusRowQuery({
         facility_code: facility.facilityCode,
         board_id: representativeBoardId(facility.boardIds),
         board_family: facility.family,
         admitted_count: agg.admittedCount,
         open_beds: agg.openBeds,
-        bed_capacity: capacity.get(facility.facilityCode) ?? null,
+        // CURATED capacity wins over the Facility Info board, which is stale on three facilities
+        // (Nashville 8 vs 20, Opus 18 vs 12, Hillside 18 vs 17 — measured 2026-08-05). The board is
+        // the fallback for a facility the curated map does not carry yet.
+        bed_capacity: FACILITY_BED_CAPACITY[facility.facilityCode] ?? capacity.get(facility.facilityCode) ?? null,
         avg_auth_days: agg.avgAuthDays,
-        avg_los_days: agg.avgLosDays,
+        avg_los_days: losBelowFloor ? null : agg.avgLosDays,
         auth_sample: agg.authSample,
         next_ur_date: agg.nextUrDate,
       });

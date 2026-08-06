@@ -214,6 +214,8 @@ export interface QualifyDeps {
  *  patient-level census data crosses this seam (no new PHI at rest for the auth-fit factor). */
 export interface QualifyCensusAggRow {
   facility_code: string;
+  /** 'residential' | 'outpatient' — the rating suppresses auth/LOS outright for outpatient. */
+  board_family?: string | null;
   avg_auth_days: number | null;
   avg_los_days: number | null;
   next_ur_date: string | null; // soonest upcoming UR date on the board, ISO
@@ -374,6 +376,7 @@ function assembleFacilities(
         medianDaysToPayment: r.median_days_to_payment ?? null,
         avgAuthDays: census?.avg_auth_days ?? null,
         avgLosDays: census?.avg_los_days ?? null,
+        censusFamily: census?.board_family === 'outpatient' || census?.board_family === 'residential' ? census.board_family : null,
         now: ctx.now,
       });
       return {
@@ -403,6 +406,7 @@ function assembleFacilities(
         medianDaysToPayment: r.median_days_to_payment ?? null,
         avgAuthDays: census?.avg_auth_days ?? null,
         avgLosDays: census?.avg_los_days ?? null,
+        censusFamily: census?.board_family === 'outpatient' || census?.board_family === 'residential' ? census.board_family : null,
         nextUrDate: census?.next_ur_date ?? null,
         openBeds: census?.open_beds ?? null,
         ratingV2: v2.rating,
