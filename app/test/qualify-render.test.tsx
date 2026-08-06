@@ -982,3 +982,74 @@ test('facility panel — bed occupancy carries no dollars, so a blind seat sees 
   assert.ok(html.includes('8 of 20 beds'), 'occupancy is visible to admissions_seat');
   assert.ok(!html.includes('$'), 'and still no dollars anywhere');
 });
+
+// ── ANCHORED FINDINGS + SEARCH TRACE (CCR-Agent port, 2026-08-06) ───────────────────────────────
+
+test('FacilityFindings — renders the claim, the verbatim rationale, and labelled evidence', async () => {
+  const { FacilityFindings } = await import('../components/qualify/facility-findings');
+  const html = renderToStaticMarkup(
+    <FacilityFindings
+      findings={[{
+        factorKey: 'ttp', severity: 'watch',
+        title: 'Time to payment is pulling this score down',
+        rationale: 'Median 130 days on paid lines.',
+        evidence: [{ label: 'Sample', value: '14 distinct patients' }, { label: 'Window', value: '90d' }],
+      }]}
+    />,
+  );
+  assert.ok(html.includes('Watch'), 'severity chip');
+  assert.ok(html.includes('pulling this score down'), 'the claim');
+  assert.ok(html.includes('Median 130 days'), 'the server sentence, verbatim');
+  assert.ok(html.includes('Evidence') && html.includes('14 distinct patients'), 'cited support');
+});
+
+test('FacilityFindings — a gap reads as neutral, NOT as an alarm', async () => {
+  const { FacilityFindings } = await import('../components/qualify/facility-findings');
+  const html = renderToStaticMarkup(
+    <FacilityFindings
+      findings={[{ factorKey: 'coding', severity: 'gap', title: 'Coding decision confidence could not be measured',
+        rationale: 'Registry not seeded yet.', evidence: [{ label: 'Effect on the score', value: '30 points renormalized away' }] }]}
+    />,
+  );
+  assert.ok(html.includes('No data'));
+  // An honest absence coloured like a defect trains the reader to ignore both.
+  assert.ok(!html.includes('status-warn'), 'a gap must not borrow the warning tone');
+  assert.ok(html.includes('renormalized away'), 'but it still says what the absence costs');
+});
+
+test('FacilityFindings — renders NOTHING when there is nothing to report', async () => {
+  const { FacilityFindings } = await import('../components/qualify/facility-findings');
+  assert.equal(renderToStaticMarkup(<FacilityFindings findings={[]} />), '', 'no reassuring placeholder');
+});
+
+test('SearchTrace — lists the decisions and labels itself a record, not a live feed', async () => {
+  const { SearchTrace } = await import('../components/qualify/search-trace');
+  const html = renderToStaticMarkup(
+    <SearchTrace lines={[
+      { tone: 'ok', text: '46 verified members on file behind this prefix' },
+      { tone: 'flag', text: 'Not one plan — 3 carriers and 7 employers behind it' },
+      { tone: 'note', text: 'Widened to 90d to reach 11 patients' },
+    ]} />,
+  );
+  assert.ok(html.includes('How this was resolved'));
+  assert.ok(html.includes('46 verified members') && html.includes('Widened to 90d'));
+  // The honesty line: getQualifySnapshot is one round trip, so this cannot be a live feed and the
+  // UI must not imply otherwise.
+  assert.ok(html.includes('a record of the decisions, not a live feed'));
+});
+
+test('SearchTrace — renders NOTHING for an empty trace', async () => {
+  const { SearchTrace } = await import('../components/qualify/search-trace');
+  assert.equal(renderToStaticMarkup(<SearchTrace lines={[]} />), '');
+});
+
+test('neither new component emits a dollar — admissions_seat parity holds', async () => {
+  const { SearchTrace } = await import('../components/qualify/search-trace');
+  const { FacilityFindings } = await import('../components/qualify/facility-findings');
+  const a = renderToStaticMarkup(<SearchTrace lines={[{ tone: 'ok', text: '12 facilities ranked' }]} />);
+  const b = renderToStaticMarkup(
+    <FacilityFindings findings={[{ factorKey: 'claims', severity: 'watch', title: 't', rationale: 'r',
+      evidence: [{ label: 'Sample', value: '14 distinct patients' }] }]} />,
+  );
+  assert.ok(!a.includes('$') && !b.includes('$'));
+});

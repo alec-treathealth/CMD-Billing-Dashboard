@@ -113,6 +113,20 @@ import { FacilityPanel } from '@/components/qualify/facility-panel';
 import { PolicyStrip } from '@/components/qualify/policy-strip';
 import { PayerRail } from '@/components/qualify/payer-rail';
 import { effectivePayerOverride, type QualifyPayerOverride } from '@/lib/qualify/payerOverride';
+import { SearchTrace } from '@/components/qualify/search-trace';
+import { deriveSearchTrace } from '@/lib/qualify/searchTrace';
+import { deriveFacilityFindings, type QualifyFinding } from '@/lib/qualify/findings';
+
+/** facilityKey -> its anchored findings, for ONE snapshot. Module-scope and pure: a finding cites
+ *  the window, provenance and ladder of the snapshot it came from, so the two panels each derive
+ *  from their own rather than sharing a map. Empty map for a null snapshot — the panel then renders
+ *  exactly as it did before findings existed. */
+function findingsMapOf(snap: QualifySnapshot | null): ReadonlyMap<string, QualifyFinding[]> {
+  const m = new Map<string, QualifyFinding[]>();
+  if (snap === null) return m;
+  for (const f of snap.facilities) m.set(f.facilityKey, deriveFacilityFindings(f, snap));
+  return m;
+}
 import { WindowLadder } from '@/components/qualify/window-ladder';
 import { QualifyAiPanel } from '@/components/qualify/qualify-ai-panel';
 import { BookKpiTiles, EvidenceGauge, HeatingUpCards, HeatingUpSkeleton } from '@/components/qualify/overview';
@@ -557,6 +571,16 @@ export function QualifyTab({
    * payer scope — which an effect-based reset could not guarantee, because effects run after the
    * commit that already fired the fetch. */
   const activePayerOverride = effectivePayerOverride(payerOverride, singleIdentifier);
+
+  /* Both derivations are PURE functions of the snapshot — no fetch, no new server data. Memoized on
+   * the snapshot identity so scrolling or toggling a card does not recompute them. */
+  const searchTrace = useMemo(() => (leadSnapshot ? deriveSearchTrace(leadSnapshot) : []), [leadSnapshot]);
+  const leadFindings = useMemo(() => findingsMapOf(leadSnapshot), [leadSnapshot]);
+  /* The primary panel ranks from a DIFFERENT snapshot (panelSnapshot), and a finding cites its own
+   * snapshot's window, provenance and ladder — so it must be derived from the snapshot whose
+   * facilities it annotates. Reusing the lead map here would attach the identifier search's evidence
+   * to payer-wide rows. */
+  const panelFindings = useMemo(() => findingsMapOf(panelSnapshot), [panelSnapshot]);
 
   // ── v2 LEAD snapshot fetch: policy strip + ladder + (comparable) ranking for the searched
   //    identifier. AUTO only when the identifier CHANGED — a manual window change after a search
@@ -1291,6 +1315,9 @@ export function QualifyTab({
             />
           ) : null}
           {singleIdentifier && leadSnapshot?.ladder ? <WindowLadder ladder={leadSnapshot.ladder} /> : null}
+          {/* The decisions the ranked list cannot explain by itself: why this window, why this
+              payer, why an estimate. Retrospective by construction — see search-trace.tsx. */}
+          {singleIdentifier && leadSnapshot ? <SearchTrace lines={searchTrace} /> : null}
           {/* ── PAYER RAIL: the drill-down for the ~80% of searches whose identifier bills under more
               than one payer. Self-hiding at <=1 option, so an unambiguous search is untouched. Sits
               directly under the policy strip because both answer "what am I actually looking at?" */}
@@ -1394,6 +1421,7 @@ export function QualifyTab({
                   payerLabel={panelPayer}
                   expandedKeys={expandedFacilities}
                   onExpandToggle={toggleFacilityExpansion}
+                  findingsByFacility={panelFindings}
                 />
               ) : panelError ? (
                 // A FAILED ranking is not a loading one, and not an empty one either. Say so, and
@@ -1429,6 +1457,7 @@ export function QualifyTab({
                   expandedKeys={expandedFacilities}
                   onExpandToggle={toggleFacilityExpansion}
                   provenance={leadSnapshot.provenance}
+                  findingsByFacility={leadFindings}
                 />
               ) : (
                 // An identifier was searched but resolved to no payer (never seen / misspelled).
