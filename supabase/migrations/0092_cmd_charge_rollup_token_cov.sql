@@ -1,0 +1,87 @@
+-- 0092 — Covering indexes for the token-scoped Qualify v2 reads (Phase E ladder + Phase B/0 resolvePayer).
+--
+-- WHY: F1 perf session (2026-08-06). getQualifySnapshotCore's Phase E auto-window ladder
+-- (loadWindowRungs) and Phase B/0's resolvePayer both filter
+-- collections.cmd_explorer_charge_rollup on member_id_prefix_bidx / member_id_bidx alone — the
+-- bare btree indexes `cmd_charge_rollup_prefix` / `cmd_charge_rollup_member` carry NO INCLUDE
+-- payload, so every matched row forces a heap fetch to read business_entity_id / payment_received
+-- / primary_payer / member_id_bidx. Because the rollup is populated in CMD ingestion order — unrelated
+-- to member identity — a token's matched rows are scattered almost 1:1 across distinct 8 KB heap
+-- blocks rather than clustered, so even an all-cache-hit bitmap heap scan costs hundreds of ms in
+-- buffer-manager/recheck overhead. This is the SAME class of regression 0068/0070 fixed for the
+-- book-wide KPI query ("a column that is neither a key nor in the INCLUDE payload silently drops
+-- the query to a heap read" — .claude/rules/qualify.md Performance section) — it was just never
+-- extended to the identifier-narrow (prefix/member) query family the v2 ladder/resolve added later.
+--
+-- MEASURED (live, claims_reader, 2026-08-06, the busiest real prefix token in the rollup — 9,253
+-- matched rows out of 492,287 total rows in the table):
+--   • loadWindowRungs (ladder):  Bitmap Heap Scan, 1,455 shared-buffer hits, ~353 ms total
+--   • resolvePayer:              Bitmap Heap Scan, 3,558 shared-buffer hits, ~676 ms total
+--   Both are 100% shared-buffer HITS (no disk read) — the cost is heap-block-visit/recheck volume,
+--   not I/O latency, which is exactly what an INCLUDE payload eliminates (index-only scan, no heap
+--   visit at all once the visibility map is warm).
+-- By contrast the SAME session's ranking-batch queries (buildFacilityRankingQuery,
+-- buildIdentifierLandingFacilityQuery), which hit the existing covering-shaped
+-- `cmd_charge_rollup_entity_payer_payment` composite index after a payer+window filter narrows
+-- 9,253 rows to 459, ran in 18–80 ms. This migration gives the ladder/resolvePayer family an
+-- equivalently-shaped path.
+--
+-- SCOPE: additive only. Builds two NEW covering indexes alongside the existing bare
+-- `cmd_charge_rollup_prefix` / `cmd_charge_rollup_member`; does NOT drop them. The bare indexes
+-- become redundant once these are live and warm, but dropping them is a separate, later decision
+-- (they cost ~4 MB each today — see file footer) — not bundled here to keep this migration a pure
+-- addition with zero regression risk.
+--
+-- PHI DISCIPLINE: member_id_bidx and member_id_prefix_bidx are keyed-HMAC blind-index tokens, not
+-- PHI (the raw member id is). primary_payer is plaintext but non-PHI (same class as QualifyMover.label
+-- — see qualifyQuery.ts). business_entity_id and payment_received are non-PHI. Nothing new is exposed;
+-- this only changes which index answers an existing, already-authorized query shape.
+-- OWNERSHIP: collections.cmd_explorer_charge_rollup is postgres-owned (measured 2026-08-05, see
+-- CLAUDE.md's "OWNERSHIP IN THE collections PLANE" note) — apply_migration runs as postgres, which
+-- already owns this table, so NO `SET ROLE claims_admin` here (that would downgrade to non-owner
+-- and fail 42501, exactly the 0084/0085 landmine).
+-- IDEMPOTENT: every statement is IF NOT EXISTS; a clean re-run is a no-op. CAVEAT (same as 0070): if
+-- a CONCURRENTLY build is interrupted it can leave an INVALID index IF NOT EXISTS will not repair —
+-- check `select indexrelid::regclass, indisvalid from pg_index where indrelid =
+-- 'collections.cmd_explorer_charge_rollup'::regclass and not indisvalid;` and drop+retry any hit.
+-- DEPENDENCY: none. Independent of 0088-0091.
+-- Rollback: 0092_cmd_charge_rollup_token_cov_rollback.sql
+--
+-- ── APPLY DISCIPLINE (READ BEFORE RUNNING) — same as 0070 ──────────────────────────────────────────
+-- CREATE INDEX CONCURRENTLY and VACUUM cannot run inside a transaction block. This file has NO
+-- begin/commit and NO do $$ … $$ wrapper; apply statement-by-statement OUTSIDE a transaction
+-- (autocommit execute_sql, not apply_migration — see 0081's header for the precedent). Alec applies
+-- this; it is not auto-applied.
+
+-- 1) Covering index for PREFIX-scoped reads (the auto-window ladder's dominant use, and prefix
+--    resolvePayer/loadPayerSpread). member_id_bidx rides in the payload ONLY so ladder's
+--    count(distinct member_id_bidx) can be answered index-only — never projected to any caller.
+create index concurrently if not exists cmd_charge_rollup_prefix_cov
+  on collections.cmd_explorer_charge_rollup (member_id_prefix_bidx)
+  include (business_entity_id, payment_received, primary_payer, member_id_bidx);
+
+-- 2) Covering index for EXACT-member-scoped reads (member_id resolvePayer/loadWindowRungs). No need
+--    to re-include member_id_bidx — it is already the index's leading key.
+create index concurrently if not exists cmd_charge_rollup_member_cov
+  on collections.cmd_explorer_charge_rollup (member_id_bidx)
+  include (business_entity_id, payment_received, primary_payer);
+
+-- 3) Warm the visibility map so index-only scans actually elide heap fetches (Heap Fetches: 0) —
+--    the hourly refresh already VACUUMs post-refresh (0069 MAINTAIN grant); this is the one-time
+--    bootstrap for these two freshly-built indexes.
+vacuum (analyze) collections.cmd_explorer_charge_rollup;
+
+-- ── Verification (run manually after apply) ─────────────────────────────────────────────────────
+-- Expect Index Only Scan on cmd_charge_rollup_prefix_cov, Heap Fetches: 0 (once the visibility map
+-- is warm — re-run once if the first pass still shows fetches):
+--
+--   explain (analyze, buffers)
+--   select count(distinct member_id_bidx) filter (where payment_received >= current_date - 29)
+--     from collections.cmd_explorer_charge_rollup
+--    where business_entity_id = any(array['af504ab6-3dcd-4aa4-a93c-27bc58de4088','141d459c-f371-4229-9a92-ace198e940bb']::uuid[])
+--      and member_id_prefix_bidx = '<any real prefix token from the table>'
+--      and payment_received >= current_date - 364 and payment_received < current_date + 1;
+--
+-- Confirm the size delta against the estimate in the rollback file's header before deciding whether
+-- to drop the two now-redundant bare indexes (cmd_charge_rollup_prefix, cmd_charge_rollup_member) in
+-- a follow-up migration.
