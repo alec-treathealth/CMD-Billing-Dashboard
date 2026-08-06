@@ -13,6 +13,8 @@ import {
   ResolutionStages,
   NO_ANSWER_FILTERS,
   SKIP_CARRIER_MAX,
+  isRefetching,
+  scopeKeyOf,
   UNRESOLVABLE_COPY,
   deriveStage,
   orderedCandidates,
@@ -257,6 +259,53 @@ test('Skip is offered on BOTH narrowing stages and jumps straight to the answer'
   // The stage machine honours it, and it is NOT the same input as a plan pick.
   assert.equal(deriveStage({ resolution: fixture(), payerPick: null, picked: false, skipped: true }), 'answer');
   assert.equal(deriveStage({ resolution: fixture(), payerPick: null, picked: false, skipped: false }), 'payer');
+});
+
+// ── The refetch flag cannot get stuck (Qodo, PR #126) ───────────────────────────────────────────
+
+test('a NO-OP scope click cannot flip the refetch flag — the stuck-headline bug', () => {
+  // The flag was set true by four handlers and cleared in ONE place: the fetch effect's resolve. Any
+  // click that did not move an effect dependency left it stuck true forever, and because the
+  // stale-sentence rule suppresses the hero numeral, verdict, basis and scope captions while
+  // refetching, the answer stage lost its headline permanently. Deriving the flag from
+  // requested-vs-rendered makes that unrepresentable: a no-op click cannot change the key.
+  const base = { payerLabel: 'AETNA', windowDays: 90, funding: [] as string[], employers: null };
+  const key = scopeKeyOf(base);
+  assert.equal(scopeKeyOf(base), key, 'the key is stable for identical inputs');
+  assert.equal(isRefetching(true, key, key), false, 'rendered scope == requested scope ⇒ not refetching');
+
+  // Each of the four reachable no-op clicks leaves the key untouched.
+  assert.equal(scopeKeyOf({ ...base, windowDays: 90 }), key, 'clicking the already-selected window');
+  assert.equal(scopeKeyOf({ ...base, funding: [] }), key, 'clearing already-empty filters');
+  assert.equal(scopeKeyOf({ ...base, employers: null }), key, 'a filter that yields no employer narrow');
+  assert.equal(
+    scopeKeyOf({ payerLabel: 'AETNA', windowDays: 90, funding: [], employers: null }),
+    key,
+    'clicking the active billed-under chip when the override is already null',
+  );
+
+  // A REAL change moves the key, so the dim + beam engage.
+  for (const changed of [
+    { ...base, windowDays: 365 },
+    { ...base, payerLabel: 'AETNA US HEALTHCARE' },
+    { ...base, payerLabel: null },
+    { ...base, funding: ['Self-Funded'] },
+    { ...base, employers: ['TESLA'] },
+  ]) {
+    assert.notEqual(scopeKeyOf(changed), key, `a real change must move the key: ${JSON.stringify(changed)}`);
+    assert.equal(isRefetching(true, key, scopeKeyOf(changed)), true, 'and that IS a refetch');
+  }
+
+  // Order within a facet is not a change — the key sorts, so chip order cannot cause a phantom fetch.
+  assert.equal(
+    scopeKeyOf({ ...base, funding: ['Fully Insured', 'Self-Funded'] }),
+    scopeKeyOf({ ...base, funding: ['Self-Funded', 'Fully Insured'] }),
+  );
+
+  // A FIRST load is never a refetch: no snapshot on screen ⇒ skeleton, not the dim treatment.
+  assert.equal(isRefetching(false, null, key), false, 'first load');
+  assert.equal(isRefetching(false, 'stale', key), false, 'a failed fetch cleared the snapshot');
+  assert.equal(isRefetching(true, null, key), false, 'content present but nothing stamped yet');
 });
 
 test('Skip is withheld on the carrier stage when the carrier choice is NOT obvious', () => {
