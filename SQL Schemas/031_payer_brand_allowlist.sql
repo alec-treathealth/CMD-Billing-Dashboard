@@ -89,6 +89,19 @@
 
 set role claims_admin;
 
+-- CHECK constraints cannot contain subqueries, so keep the array scan in an immutable helper.
+create or replace function ref.is_state_code_array(states text[])
+returns boolean
+language sql
+immutable
+as $$
+  select states is null
+    or coalesce(
+      (select bool_and(s is not null and s ~ '^[A-Z]{2}$') from unnest(states) as s),
+      true
+    )
+$$;
+
 -- ───────────────────────────────────────────────────────────────────────────────────────────────────
 -- 1. The parent: one row per brand token
 -- ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -112,10 +125,7 @@ create table if not exists ref.payer_brand (
     entity_resolution in ('single_entity', 'split_by_product', 'unreviewed')),
   constraint payer_brand_dates check (effective_to is null or effective_to > effective_from),
   -- Every state code is exactly two upper-case letters. Stops 'California' entering a code array.
-  constraint payer_brand_states_are_codes check (
-    licensed_states is null
-    or licensed_states = array[]::text[]
-    or (select bool_and(s ~ '^[A-Z]{2}$') from unnest(licensed_states) as s))
+  constraint payer_brand_states_are_codes check (ref.is_state_code_array(licensed_states))
 );
 
 -- ───────────────────────────────────────────────────────────────────────────────────────────────────
