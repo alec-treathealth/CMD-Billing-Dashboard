@@ -184,7 +184,10 @@ export function ResolutionFlowClient({
     setBackTo(target);
   }, []);
 
-  const derived = deriveStage({ resolution: state.resolution, payerPick, picked, skipped });
+  // `payerGroups` is the SAME memoized set the rail, receipt and tiles read (see the useMemo above).
+  // Passing it here is what makes "which stage are we on" and "how many carriers does the rail show"
+  // one derivation instead of two that happen to agree.
+  const derived = deriveStage({ resolution: state.resolution, payerPick, picked, skipped, payerGroups });
   // The receipt's Change can only step BACKWARD from what is derivable; any submit clears it.
   const stage: FlowStage = backTo ?? derived;
 

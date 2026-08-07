@@ -17,6 +17,7 @@ import {
   scopeKeyOf,
   UNRESOLVABLE_COPY,
   deriveStage,
+  liveSentenceFor,
   orderedCandidates,
   payerGroupsOf,
   type FlowStage,
@@ -225,6 +226,59 @@ test('deriveStage: a single carrier with many plans skips the payer stage, not t
   });
   assert.equal(payerGroupsOf(r).length, 1, 'one carrier');
   assert.equal(deriveStage({ resolution: r, payerPick: null, picked: false }), 'plan');
+});
+
+// F3a. deriveStage and liveSentenceFor used to ALWAYS self-derive payerGroupsOf, so the stage the
+// flow picked and the carriers the rail counted were two independent derivations that merely
+// happened to agree. The shell now threads its ONE memoized set into both. This pins the property
+// that makes that safe: supplying the memo can never change the answer — and, just as important,
+// that the supplied value is actually REACHED rather than discarded by the ?? fallback.
+test('F3a: threading the memoized payerGroups cannot change what deriveStage or liveSentenceFor say', () => {
+  const multi = fixture(); // two carriers → the payer question
+  const sole = fixture({
+    candidates: {
+      total: 3,
+      chosenIndex: 0,
+      wasAmbiguous: true,
+      chosenBy: 'user',
+      rejected: [
+        { canonicalPayerId: 'pi_aetna', payerDisplayName: 'Aetna', employerLabel: 'ACME CO', funding: null, planType: null, memberCount: 9, hasClaimEvidence: true },
+        { canonicalPayerId: 'pi_aetna', payerDisplayName: 'Aetna', employerLabel: 'GLOBEX', funding: null, planType: null, memberCount: 3, hasClaimEvidence: false },
+      ],
+    },
+  });
+
+  for (const [label, r] of [['two carriers', multi], ['one carrier', sole]] as const) {
+    for (const payerPick of [null, 'Aetna']) {
+      for (const picked of [false, true]) {
+        const base = { resolution: r, payerPick, picked };
+        assert.equal(
+          deriveStage({ ...base, payerGroups: payerGroupsOf(r) }),
+          deriveStage(base),
+          `deriveStage disagreed with itself (${label}, payerPick=${payerPick}, picked=${picked})`,
+        );
+      }
+    }
+    assert.equal(
+      liveSentenceFor('payer', r, null, { payerGroups: payerGroupsOf(r) }),
+      liveSentenceFor('payer', r, null),
+      `liveSentenceFor disagreed with itself (${label})`,
+    );
+  }
+
+  // NEGATIVE CONTROL — without this, every assertion above would still pass if the ?? fallback
+  // always won and the supplied set were ignored. A deliberately wrong set MUST move the answer.
+  assert.equal(deriveStage({ resolution: multi, payerPick: null, picked: false }), 'payer');
+  assert.equal(
+    deriveStage({ resolution: multi, payerPick: null, picked: false, payerGroups: payerGroupsOf(sole) }),
+    'plan',
+    'a supplied one-carrier set must be USED, not discarded in favour of a self-derive',
+  );
+  assert.match(
+    liveSentenceFor('payer', sole, null, { payerGroups: payerGroupsOf(multi) }),
+    /^2 carriers match/,
+    'liveSentenceFor must count the SUPPLIED set, not re-derive from the resolution',
+  );
 });
 
 test('the trend ticker rides the IDENTIFY stage only — it must not compete with the question', () => {
