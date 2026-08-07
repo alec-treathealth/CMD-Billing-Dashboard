@@ -196,8 +196,13 @@ query went 353ms / 1,455 buffers to **17.5ms with `Heap Fetches: 0`** — but it
 roughly **12x over**, because the INCLUDE payload carries `primary_payer` *text* and
 the estimate priced only the HMAC token. Indexes on `cmd_explorer_charge_rollup` are
 now 306 MB against a 164 MB heap. Dropping the superseded bare
-`cmd_charge_rollup_prefix` / `_member` recovers only ~8 MB and does not offset this;
-the real lever is whether `primary_payer` belongs in the prefix payload at all.
+`cmd_charge_rollup_prefix` / `_member` recovers only ~8 MB and does not offset this.
+**Settled 2026-08-07: KEEP `primary_payer` in both payloads** — it is not only the
+ladder's; `buildResolvePayerQuery`/`buildResolvePayerSpreadQuery` (every token
+search, ~80.6% multi-payer prefixes) and v3's `buildClaimsOnlyCandidatesQuery` also
+read it index-only off these same indexes, and live EXPLAIN shows dropping it
+reproduces the pre-0092 3,561-buffer bitmap-heap path (the 676ms class) — see
+veris-data-notes.md's 0092 section, "Resolution (2026-08-07)", for the full recon.
 **Price an INCLUDE payload by its widest text column, not its keys.** Veris
 **027 and 028 are applied live** (ledger 20260805065025 / 20260805060000, another
 session). **029 (`ref.payer_alias_map` confirmation-attribution gate) is APPLIED LIVE
