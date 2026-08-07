@@ -210,11 +210,11 @@ back-fill those 695 with a synthetic reviewer** — see `veris-data-notes.md` §
 **030 (dedup round 2) is AUTHORED BUT NOT APPLIED.** It drops and re-adds the 029 gate
 inside its own transaction; that is sanctioned *only* because its final section proves
 confirmation state was byte-identical throughout. Copy the proof if you copy the pattern.
-⚠ **031 IS RESERVED, NOT FREE.** A payer-brand-allowlist migration numbered 031 exists on
-an open branch (`feat/payer-brand-allowlist`) and is deliberately held back until it has a
-caller. The next number safe to author against is therefore **032** — taking 031 collides
-with that branch. This is exactly the "cross-check worktrees" case the sentence below warns
-about; a `SQL Schemas/` listing on `staging` alone will wrongly say 031 is free.
+**031 (payer brand allowlist) is AUTHORED BUT NOT APPLIED, and is deliberately held
+until it has a caller** — it creates `ref.payer_brand` + `ref.payer_brand_entity` and
+nothing reads them yet. 026 and 027 both refuse to mint a surface with no owner; 031's
+only justification is being the FK target a later wiring change needs. **If that wiring
+is not coming, close this rather than applying it.** The next free Veris number is **032**.
 Never edit 023, 024, or 025
 in place — all three are applied live. Before authoring, re-derive the next number
 per `.claude/rules/sql-migrations.md` (ref-derived max is a floor; cross-check
