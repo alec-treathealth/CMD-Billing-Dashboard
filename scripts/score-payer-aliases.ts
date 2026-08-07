@@ -121,6 +121,56 @@ CAROLINA DAKOTA OHIO OKLAHOMA OREGON PENNSYLVANIA RHODE ISLAND TENNESSEE TEXAS U
 VIRGINIA WASHINGTON WISCONSIN WYOMING`.split(/\s+/);
 const STATE_CODES = `AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT
 NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC`.split(/\s+/);
+
+/**
+ * Code → the token(s) its spelled-out form contributes, for the ABBREVIATION-FORM classifier only.
+ *
+ * ⚠ THIS REPLACES A POSITIONAL ZIP THAT WAS SILENTLY WRONG FOR 13 OF 51 CODES. The previous form was
+ *
+ *     for (const [i, code] of STATE_CODES.entries()) stateOf.set(code, US_STATES[i] ?? '');
+ *
+ * which assumed the two lists were index-aligned. They are not, and cannot be: US_STATES is a
+ * MODIFIER-token vocabulary, so it holds 48 TOKENS, not 51 states. It splits RHODE ISLAND into two
+ * entries, collapses NC/SC to one CAROLINA and ND/SD to one DAKOTA, and omits DC entirely. The zip
+ * therefore desynchronised at RHODE ISLAND and every code from SC onward mapped to the wrong state:
+ *
+ *     SC -> ISLAND     SD -> TENNESSEE   TN -> TEXAS      TX -> UTAH       UT -> VERMONT
+ *     VT -> VIRGINIA   VA -> WASHINGTON  WA -> WISCONSIN  WV -> WYOMING    WI/WY/DC -> ''
+ *
+ * BLAST RADIUS WAS REPORTING-ONLY, AND PESSIMISTIC. `stateOf` feeds exactly one thing: the `abbrev`
+ * test that sorts a changed case into bucket B ("query used a state code, wanted canonical spells it
+ * out"). A wrong lookup makes that test return false, so the case fell through to C/C2/D/F instead —
+ * i.e. the bug could only ever move cases INTO the wrong-rate bucket, never out of it. It never
+ * touched a guard verdict, a score, or a proposal. That is why the published rate was safe to quote
+ * while this was latent, and why correcting it can only hold the rate flat or improve it.
+ *
+ * DELIBERATELY A SEPARATE TABLE, NOT A FIX TO US_STATES. `MODIFIER_RAW` (Guard B) and
+ * `STATE_CODE_SET` (Guard C) are both built from those two lists. Adding NORTH/SOUTH/COLUMBIA to
+ * US_STATES to make a zip work would change the modifier vocabulary and therefore change guard
+ * verdicts — the one thing this fix must not do. Keeping the mapping in its own table leaves both
+ * guards bit-for-bit identical.
+ *
+ * MULTI-TOKEN ON PURPOSE. Requiring every token to appear is what keeps "BCBS SC" from reading as an
+ * abbreviation of "BCBS NORTH CAROLINA". The bare CAROLINA/DAKOTA forms in US_STATES cannot express
+ * that distinction; this table can. (Same reasoning as the directional-state fix in
+ * app/lib/qualify/carrierCluster.ts — a direction word carries identity.)
+ *
+ * NEW is intentionally absent from the NH/NJ/NM/NY forms: it is not in the US_STATES vocabulary, and
+ * the distinctive token alone is what a display name is matched on.
+ */
+const STATE_CODE_TO_NAME: Readonly<Record<string, readonly string[]>> = {
+  AL: ['ALABAMA'], AK: ['ALASKA'], AZ: ['ARIZONA'], AR: ['ARKANSAS'], CA: ['CALIFORNIA'],
+  CO: ['COLORADO'], CT: ['CONNECTICUT'], DE: ['DELAWARE'], FL: ['FLORIDA'], GA: ['GEORGIA'],
+  HI: ['HAWAII'], ID: ['IDAHO'], IL: ['ILLINOIS'], IN: ['INDIANA'], IA: ['IOWA'], KS: ['KANSAS'],
+  KY: ['KENTUCKY'], LA: ['LOUISIANA'], ME: ['MAINE'], MD: ['MARYLAND'], MA: ['MASSACHUSETTS'],
+  MI: ['MICHIGAN'], MN: ['MINNESOTA'], MS: ['MISSISSIPPI'], MO: ['MISSOURI'], MT: ['MONTANA'],
+  NE: ['NEBRASKA'], NV: ['NEVADA'], NH: ['HAMPSHIRE'], NJ: ['JERSEY'], NM: ['MEXICO'],
+  NY: ['YORK'], NC: ['NORTH', 'CAROLINA'], ND: ['NORTH', 'DAKOTA'], OH: ['OHIO'],
+  OK: ['OKLAHOMA'], OR: ['OREGON'], PA: ['PENNSYLVANIA'], RI: ['RHODE', 'ISLAND'],
+  SC: ['SOUTH', 'CAROLINA'], SD: ['SOUTH', 'DAKOTA'], TN: ['TENNESSEE'], TX: ['TEXAS'],
+  UT: ['UTAH'], VT: ['VERMONT'], VA: ['VIRGINIA'], WA: ['WASHINGTON'],
+  WV: ['WEST', 'VIRGINIA'], WI: ['WISCONSIN'], WY: ['WYOMING'], DC: ['COLUMBIA'],
+};
 // NOTE ON CURATION. This list is the guard's whole discriminating power, so its errors are the
 // guard's errors. Two corrections already forced by measurement:
 //   + COMMERCIAL / PROGRAM / CARD — omitting COMMERCIAL let "UPMC HEALTH PLAN COMMERCIAL" match
@@ -350,6 +400,20 @@ const GUARD_B_MIN_SHARE = flag('guard-b-share', 0.1);
 // section asserts the computed value still matches. If the corpus shifts and it does not, the check
 // FAILS and names the new figure — the header cannot quietly become a lie.
 //
+// ⚠ THIS NUMBER NOW DIVERGES FROM SQL Schemas/028's HEADER, DELIBERATELY. 028 states "8 of 212
+// (~3.8%, 1 in 27)". That figure was inflated by a defect in this file, not by the scorer: `stateOf`
+// was built by positionally zipping STATE_CODES against US_STATES, two lists that are not and cannot
+// be index-aligned (see STATE_CODE_TO_NAME). Thirteen of 51 codes resolved to the wrong state, which
+// made the ABBREVIATION-FORM test return false and pushed genuine abbreviations down the if-chain
+// into later buckets. Corrected 2026-08-07, the same holdout measures 7 of 212 (~3.3%, 1 in 30) —
+// one BLUECARD case left bucket F for bucket B, where it always belonged. The scorer's accuracy did
+// not change; only the classification of an already-correct result did.
+//
+// 028 IS APPLIED LIVE AND IS NOT EDITED. Its header remains an accurate record of what was believed
+// and printed at apply time. The correction is recorded in veris-data-notes.md, which CLAUDE.md
+// designates as the live ledger that wins on conflict with any other document in this repo. If you
+// are reconciling the two figures, the ledger is the current one.
+//
 // ── WHAT MOVED THE RATE FROM 5.7% TO 3.8% — measured ────────────────────────────────────────────
 //
 //   pre-027, no Guard C:  A=27 B=19       E=3 F=12 · testable 210 · F = 12/210 = 5.7%
@@ -389,7 +453,7 @@ const GUARD_B_MIN_SHARE = flag('guard-b-share', 0.1);
 //
 // Guard C also does the bulk of its work on the PROPOSAL streams rather than here: 66 rows annotated
 // and 74 names removed from the VOB survivor set.
-const WRONG_RATE_F = 8;
+const WRONG_RATE_F = 7; // was 8 pre-2026-08-07; the stateOf zip defect inflated it by one. See above.
 const WRONG_RATE_TESTABLE = 212;
 const WRONG_RATE_PCT = ((100 * WRONG_RATE_F) / WRONG_RATE_TESTABLE).toFixed(1);
 const WRONG_RATE_DENOM = Math.round(WRONG_RATE_TESTABLE / WRONG_RATE_F);
@@ -796,8 +860,8 @@ async function main(): Promise<void> {
     // the dedup backlog it is currently the only thing measuring.
     const displayByCanon = new Map<string, string>();
     for (const s of surfRes.rows) displayByCanon.set(s.canonical, s.display);
-    const stateOf = new Map<string, string>();
-    for (const [i, code] of STATE_CODES.entries()) stateOf.set(code, US_STATES[i] ?? '');
+    // See STATE_CODE_TO_NAME: this used to be a positional zip of two lists that are not, and cannot
+    // be, index-aligned. Reporting-only blast radius, but wrong for 13 of 51 codes.
 
     const buckets = new Map<string, string[]>();
     const addTo = (k: string, line: string) => buckets.set(k, [...(buckets.get(k) ?? []), line]);
@@ -819,9 +883,13 @@ async function main(): Promise<void> {
       }
       const dsim = cosine(vectorize(wantDisp, idf, maxIdf), vectorize(gotDisp, idf, maxIdf));
       const qToks = tokenize(r.alias_norm);
+      // Every token of the spelled-out form must appear, so "BCBS SC" is not read as an
+      // abbreviation of "BCBS NORTH CAROLINA". foldPlural is applied per token to stay symmetric
+      // with tokenize(), which folds each token as it splits.
+      const wantToks = tokenize(wantDisp);
       const abbrev = qToks.some((t) => {
-        const full = stateOf.get(t);
-        return !!full && tokenize(wantDisp).includes(foldPlural(full));
+        const full = STATE_CODE_TO_NAME[t];
+        return full !== undefined && full.every((part) => wantToks.includes(foldPlural(part)));
       });
       const g = applyGuards(
         r.alias_norm,
