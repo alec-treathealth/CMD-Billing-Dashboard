@@ -216,6 +216,15 @@ back-fill those 695 with a synthetic reviewer** — see `veris-data-notes.md` §
 so the next Veris number is **032**. 030 drops and re-adds the 029 gate inside its own
 transaction; that is sanctioned *only* because its final section proves confirmation
 state was byte-identical throughout. Copy the proof if you copy the pattern.
+⚠ **031 IS HELD ON PURPOSE — DO NOT APPLY IT TO CLEAR THE BACKLOG.** It creates
+`ref.payer_brand` + `ref.payer_brand_entity` and **nothing reads either table**. 026 and
+027 both refuse to mint a surface with no owner, and 031 is the same shape: its only
+justification is being the FK target a later wiring change needs. Being merged into the
+repo is not a decision to apply it. If that wiring is not coming, **delete 031 rather
+than applying it** — an applied table with no caller is schema debt that later readers
+will assume is load-bearing. The file's own header says the same thing; this note exists
+because a `SQL Schemas/` listing shows 031 sitting next to genuinely-pending migrations
+and gives no hint that it is deliberately parked.
 Never edit 023, 024, or 025
 in place — all three are applied live. Before authoring, re-derive the next number
 per `.claude/rules/sql-migrations.md` (ref-derived max is a floor; cross-check
