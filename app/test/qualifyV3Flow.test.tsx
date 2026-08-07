@@ -26,6 +26,9 @@ import {
 import { deriveNotices } from '../lib/qualify/resolution';
 import type { PanelEvidence, PanelId, QualifyResolution } from '../lib/qualify/resolution';
 import type { QualifyFacility, QualifySnapshot } from '../lib/qualify/contract';
+import { trailingWindow } from '../lib/qualify/contract';
+import { HeatingUpCards, HeatingUpSkeleton } from '../components/qualify/shared/heating-ticker';
+import { TRENDS } from './helpers/qualifyTrends';
 
 const PANELS: readonly PanelId[] = ['kpis', 'ranking', 'policy', 'ladder', 'trend', 'ai'];
 
@@ -549,16 +552,43 @@ test('I9: the live region states the reason when nothing resolved', () => {
 
 // ── Text size floor ─────────────────────────────────────────────────────────────────────────────
 
+// F4 (2026-08-06). This test was passing over markup it never rendered. `props()` defaults
+// `ticker: null` and no case overrode it, so the Heating-Up strip — real content on a real rep's
+// screen — was outside the sweep, and shipped FIVE sub-12px classes (one at 9px). The answer stage
+// was scanned only in its skeleton state for the same reason: with `snapshot: null` the whole
+// snapshot-bearing subtree (scorecard grid, filter lines, receipt) never rendered.
+//
+// Two structural fixes, both of which matter more than the size assertions themselves:
+//   1. The case list now renders the REAL <HeatingUpCards> and <HeatingUpSkeleton> the shell ships
+//      (resolution-flow-client.tsx:403-411), and an answer stage WITH a snapshot.
+//   2. Each case asserts a POSITIVE CONTROL first. Without one, a refactor that stops rendering
+//      `props.ticker` would make this test vacuously green again — which is exactly the failure
+//      being fixed here, and a green vacuous test is worse than no test.
 test('I9: no meaning-bearing text below 12px anywhere in the flow', () => {
-  for (const [stage, r, over] of [
-    ['identify', null, {}],
-    ['payer', fixture(), {}],
-    ['plan', fixture(), { payerPick: 'Aetna' }],
-    ['answer', fixture(), {}],
-  ] as Array<[FlowStage, QualifyResolution | null, Partial<ResolutionStagesProps>]>) {
+  const ticker = <HeatingUpCards trends={TRENDS} window={trailingWindow(60)} readOnly />;
+  const cases: Array<[string, FlowStage, QualifyResolution | null, Partial<ResolutionStagesProps>, RegExp]> = [
+    ['identify', 'identify', null, {}, /Search/],
+    ['payer', 'payer', fixture(), {}, /Aetna/],
+    ['plan', 'plan', fixture(), { payerPick: 'Aetna' }, /Aetna/],
+    ['answer (skeleton)', 'answer', fixture(), {}, /Ranking facilities for this plan/],
+    // The two branches the shell actually mounts on the landing. `readOnly` and the 60-day window
+    // mirror production exactly (TICKER_WINDOW, resolution-flow-client.tsx:60).
+    ['identify + real ticker', 'identify', null, { ticker }, /Facilities Heating Up/],
+    ['identify + ticker skeleton', 'identify', null, { ticker: <HeatingUpSkeleton /> }, /Loading trends/],
+    // The answer stage with data — the branch the skeleton case above never reaches. Added
+    // 2026-08-06 and green on arrival; it found nothing at the time, it is coverage, not a fix.
+    ['answer + snapshot', 'answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture() }) }, /NASHVILLE MENTAL HEALTH/],
+  ];
+
+  for (const [label, stage, r, over, mustRender] of cases) {
     const html = render(props(stage, r, over));
-    for (const tooSmall of ['text-[8.5px]', 'text-[9px]', 'text-[9.5px]', 'text-[10px]', 'text-[10.5px]', 'text-[11px]', 'text-[11.5px]']) {
-      assert.ok(!html.includes(tooSmall), `sub-12px class on ${stage}: ${tooSmall}`);
+    // POSITIVE CONTROL — prove this case rendered the markup it claims to be sweeping.
+    assert.match(html, mustRender, `${label}: rendered nothing to scan — the floor check would be vacuous`);
+    // A regex sweep, not a literal blocklist: the old list enumerated seven exact strings, so
+    // text-[8px] or text-[11.75px] would have passed silently. px-only, deliberately — no rem/em
+    // arbitrary text sizes exist anywhere in app/components/qualify today.
+    for (const m of html.matchAll(/text-\[(\d+(?:\.\d+)?)px\]/g)) {
+      assert.ok(Number(m[1]) >= 12, `sub-12px class on ${label}: text-[${m[1]}px]`);
     }
   }
 });
