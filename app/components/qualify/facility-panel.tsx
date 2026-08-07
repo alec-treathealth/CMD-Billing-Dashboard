@@ -123,27 +123,27 @@ function FactorList({ f, findings = [] }: { f: QualifyFacility; findings?: Quali
     <div className="mt-1 rounded-xl border border-line bg-ground px-3 py-1">
       {f.factors.map((x) => (
         <div key={x.key} className="border-b border-line py-2 last:border-b-0">
-        <div className="flex items-start gap-2.5">
-          <span className={['mt-px w-4 shrink-0 text-center text-[11px] font-bold', x.available ? DIR_META[x.direction].cls : 'text-ink400'].join(' ')} aria-hidden>
-            {x.available ? DIR_META[x.direction].arrow : '·'}
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="flex flex-wrap items-center gap-x-2">
-              <b className="text-[12.5px] font-semibold text-ink900">{x.label}</b>
-              <span className={['text-[10.5px] font-bold', x.available ? DIR_META[x.direction].cls : 'text-ink400'].join(' ')}>
-                {x.available ? DIR_META[x.direction].label : 'no data yet'}
-              </span>
+          <div className="flex items-start gap-2.5">
+            <span className={['mt-px w-4 shrink-0 text-center text-xs font-bold', x.available ? DIR_META[x.direction].cls : 'text-ink400'].join(' ')} aria-hidden>
+              {x.available ? DIR_META[x.direction].arrow : '·'}
             </span>
-            <span className="block text-[11.5px] leading-snug text-ink600">{x.detail}</span>
-          </span>
-          <span className="shrink-0 font-mono text-[11.5px] tabular-nums text-ink400">{x.weight}%</span>
-        </div>
-        {/* ANCHORED beneath the factor it is about (the CCR FlagCard rule) — not collected into a
-            panel the reader has to map back onto rows themselves. */}
-        <FacilityFindings findings={findings.filter((fi) => fi.factorKey === x.key)} />
+            <span className="min-w-0 flex-1">
+              <span className="flex flex-wrap items-center gap-x-2">
+                <b className="text-[12.5px] font-semibold text-ink900">{x.label}</b>
+                <span className={['text-xs font-semibold', x.available ? DIR_META[x.direction].cls : 'text-ink400'].join(' ')}>
+                  {x.available ? DIR_META[x.direction].label : 'no data yet'}
+                </span>
+              </span>
+              <span className="block text-xs leading-snug text-ink600">{x.detail}</span>
+            </span>
+            <span className="shrink-0 font-mono text-xs tabular-nums text-ink400">{x.weight}%</span>
+          </div>
+          {/* ANCHORED beneath the factor it is about (the CCR FlagCard rule) — not collected into a
+              panel the reader has to map back onto rows themselves. */}
+          <FacilityFindings findings={findings.filter((fi) => fi.factorKey === x.key)} />
         </div>
       ))}
-      <p className="py-1.5 text-[10.5px] text-ink400">
+      <p className="py-1.5 text-xs text-ink400">
         Scored on {f.availableWeight} of 100 weighting — factors without data are excluded, never guessed.
       </p>
     </div>
@@ -201,7 +201,7 @@ export function FacilityPanel({
         </span>
       </div>
       {estimated ? (
-        <p className="mx-4 mb-1 rounded-lg border border-dashed border-teal200 bg-teal50/50 px-2.5 py-1.5 text-[11.5px] font-semibold text-teal700">
+        <p className="mx-4 mb-1 rounded-lg border border-dashed border-teal200 bg-teal50/50 px-2.5 py-1.5 text-xs font-semibold text-teal700">
           Estimated — {PROVENANCE_LABELS[provenance]}. Directional, not confirmed; this plan has no claims of its own yet.
         </p>
       ) : null}
@@ -212,7 +212,7 @@ export function FacilityPanel({
           PROVENANCE: on the comparable paths this panel is handed an EMPLOYER name, not a payer, and
           printing "<employer> · payer-wide across the book" would be a flat contradiction.
           The old "tap to add it to your filter" instruction is gone with the behaviour it described. */}
-      <p className="px-4 pb-1 text-[11px] text-muted-foreground">
+      <p className="px-4 pb-1 text-xs text-muted-foreground">
         {payerLabel ? <b className="font-semibold text-ink600">{payerLabel}</b> : estimated ? 'This cohort' : 'This payer'}
         {estimated ? ' · peer-cohort estimate, not this plan’s own claims' : ' · across the whole book, not only this search'}{' '}
         · click a facility for the reasoning behind its score
@@ -269,25 +269,25 @@ export function FacilityPanel({
                 >
                   <div className="flex items-start justify-between gap-2.5">
                     <span className="flex min-w-0 flex-wrap items-center gap-2 text-[13.5px] font-semibold text-ink900">
-                      <span className="inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[5px] bg-teal50 text-[11px] font-bold text-teal700">
+                      <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-[5px] bg-teal50 text-xs font-bold text-teal700">
                         {f.rank}
                       </span>
                       {f.name}
                       {f.careSetting ? (
-                        <span className="inline-flex shrink-0 items-center rounded-full bg-[#e4f0f5] px-1.5 py-px text-[10px] font-bold uppercase tracking-wide text-status-info">
+                        <span className="inline-flex shrink-0 items-center rounded-full bg-status-info/10 px-2 py-0.5 text-xs font-semibold text-status-info">
                           {LOC_LABEL[f.careSetting]}
                         </span>
                       ) : null}
                       {tier === 'insufficient' ? (
                         <span
-                          className="inline-flex shrink-0 items-center rounded-full border border-line bg-surface px-1.5 py-px text-[10px] font-semibold text-ink400"
+                          className="inline-flex shrink-0 items-center rounded-full border border-line bg-surface px-2 py-0.5 text-xs font-semibold text-ink400"
                           title={`Only ${f.distinctPatients} patient${f.distinctPatients === 1 ? '' : 's'} back this rating — not enough to score this slice`}
                         >
                           insufficient data
                         </span>
                       ) : tier === 'thin' ? (
                         <span
-                          className="inline-flex shrink-0 items-center rounded-full border border-line bg-surface px-1.5 py-px text-[10px] font-semibold text-ink400"
+                          className="inline-flex shrink-0 items-center rounded-full border border-line bg-surface px-2 py-0.5 text-xs font-semibold text-ink400"
                           title={`Only ${f.distinctPatients} patients back this rating — treat as an early signal`}
                         >
                           thin sample
@@ -299,7 +299,7 @@ export function FacilityPanel({
                           on this card that says "the number alone is not the answer". */}
                       {factorsDisagree ? (
                         <span
-                          className="inline-flex shrink-0 items-center rounded-full border border-[#F0917C] bg-[#FCEDE8] px-1.5 py-px text-[10px] font-semibold text-status-danger"
+                          className="inline-flex shrink-0 items-center rounded-full border border-[#F0917C] bg-[#FCEDE8] px-2 py-0.5 text-xs font-semibold text-status-danger"
                           title="At least one factor reads positive and another reads negative — the blended rating hides that. Open “Why this score”."
                         >
                           factors disagree
@@ -307,7 +307,7 @@ export function FacilityPanel({
                       ) : null}
                       {f.nextUrDate ? (
                         <span
-                          className="inline-flex shrink-0 items-center rounded-full border border-[#F0917C] bg-[#FCEDE8] px-1.5 py-px text-[10px] font-semibold text-status-danger"
+                          className="inline-flex shrink-0 items-center rounded-full border border-[#F0917C] bg-[#FCEDE8] px-2 py-0.5 text-xs font-semibold text-status-danger"
                           title="A utilization review is scheduled on this facility's census — authorization may change"
                         >
                           UR {f.nextUrDate}
@@ -322,7 +322,7 @@ export function FacilityPanel({
                       {f.openBeds !== null && f.openBeds > 0 ? (
                         <span
                           className={[
-                            'inline-flex shrink-0 items-center rounded-full border px-1.5 py-px text-[10px] font-semibold',
+                            'inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-xs font-semibold',
                             f.bedCapacity !== null && f.bedCapacity > 0 && f.openBeds / f.bedCapacity <= 0.15
                               ? 'border-status-warn/30 bg-status-warn/10 text-status-warn'
                               : 'border-line bg-surface text-ink600',
@@ -352,27 +352,27 @@ export function FacilityPanel({
                       <span className="mt-1 inline-flex items-center gap-1">
                         {!unrated && tier !== 'insufficient' && f.iqBand ? (
                           <span
-                            className="inline-flex items-center rounded-full px-2 py-[2px] text-[10.5px] font-bold"
+                            className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-bold"
                             style={{ background: 'var(--q-wash)', color: 'var(--q-c)' }}
                           >
                             {IQ_BAND_VERDICTS[f.iqBand]} · {IQ_BAND_LABELS[f.iqBand]}
                           </span>
                         ) : (
-                          <span className="inline-flex items-center rounded-full border border-line px-2 py-[2px] text-[10.5px] font-bold text-ink400">
+                          <span className="inline-flex items-center rounded-full border border-line px-2 py-0.5 text-xs font-bold text-ink400">
                             Not rated
                           </span>
                         )}
                       </span>
-                      <span className="mt-1 block text-[11px] tabular-nums text-ink400">
+                      <span className="mt-1 block text-xs tabular-nums text-ink400">
                         {showPct && pct !== null ? `${Math.round(pct)}% allowed` : ''}
                       </span>
                     </span>
                   </div>
-                  <div className="mt-1.5 flex items-center justify-between text-[11.5px]">
+                  <div className="mt-1.5 flex items-center justify-between text-xs">
                     <span className="flex items-center gap-1.5 text-ink400">
                       <EvidencePips patients={f.distinctPatients} />
                       {loc || ' '}
-                      {f.entity ? <span className="text-[10px] font-semibold">· {f.entity}</span> : null}
+                      {f.entity ? <span className="text-xs font-semibold">· {f.entity}</span> : null}
                     </span>
                     {hasAmounts && f.allowedAmount !== null && f.billedAmount !== null ? (
                       <span className="tabular-nums text-muted-foreground">
@@ -390,7 +390,7 @@ export function FacilityPanel({
                     <CoverageSegment conf="estimate" count={f.estimateClaims} total={f.lineCount} />
                     <CoverageSegment conf="unknown" count={f.unknownClaims} total={f.lineCount} />
                   </div>
-                  <p className="mt-1 text-[10.5px] text-ink400">
+                  <p className="mt-1 text-xs text-ink400">
                     Rated on {f.confirmedClaims} of {f.lineCount} claims · {f.distinctPatients} patient{f.distinctPatients === 1 ? '' : 's'}
                   </p>
                 </button>
@@ -406,7 +406,7 @@ export function FacilityPanel({
                       type="button"
                       onClick={() => onExpandToggle?.(f.facilityKey)}
                       aria-expanded={expanded}
-                      className="mt-1 flex w-full items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left text-[11px] font-semibold text-teal700 transition-colors hover:bg-teal50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40"
+                      className="mt-1 flex w-full items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left text-xs font-semibold text-teal700 transition-colors hover:bg-teal50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40"
                     >
                       <span aria-hidden className="inline-block transition-transform" style={{ transform: expanded ? 'rotate(90deg)' : 'none' }}>
                         ›
@@ -420,7 +420,7 @@ export function FacilityPanel({
                       tier === 'insufficient' ? (
                         <div className="mt-1 rounded-xl border border-dashed border-line bg-[#F4F2EF] px-3 py-2.5">
                           <p className="text-[12.5px] font-semibold text-ink600">Not enough data to rate</p>
-                          <p className="mt-0.5 text-[11.5px] leading-snug text-ink400">
+                          <p className="mt-0.5 text-xs leading-snug text-ink400">
                             {f.distinctPatients} patient{f.distinctPatients === 1 ? '' : 's'} in this window — the floor is{' '}
                             {QUALIFY_RATING_MIN_PATIENTS} to show a number at all. A number built on that would be noise
                             wearing a color. Ask a biller.
@@ -439,7 +439,7 @@ export function FacilityPanel({
         )}
       </div>
 
-      <div className="flex flex-wrap gap-3.5 border-t px-4 py-3 text-[11.5px] text-muted-foreground">
+      <div className="flex flex-wrap gap-3.5 border-t px-4 py-3 text-xs text-muted-foreground">
         {LEGEND_BUCKETS.map((b) => (
           <span key={b} className="inline-flex items-center gap-1.5">
             <span className={['q-dot', bucketClass(b), 'inline-block h-2.5 w-2.5 rounded-full'].join(' ')} />
@@ -447,9 +447,9 @@ export function FacilityPanel({
           </span>
         ))}
       </div>
-      <p className="px-4 pb-2 text-[11px] text-muted-foreground">{RATING_LEGEND.description}</p>
+      <p className="px-4 pb-2 text-xs text-muted-foreground">{RATING_LEGEND.description}</p>
       {/* Confidence legend (0059): the coverage-bar vocabulary, shared verbatim with mobile. */}
-      <div className="flex flex-wrap gap-3.5 px-4 pb-1 text-[11.5px] text-muted-foreground">
+      <div className="flex flex-wrap gap-3.5 px-4 pb-1 text-xs text-muted-foreground">
         {LEGEND_CONFIDENCE.map((k) => (
           <span key={k} className="inline-flex items-center gap-1.5">
             <span className={['q-dot', confidenceClass(k), 'inline-block h-2.5 w-2.5 rounded-full'].join(' ')} />
@@ -457,7 +457,7 @@ export function FacilityPanel({
           </span>
         ))}
       </div>
-      <p className="px-4 pb-3 text-[11px] text-muted-foreground">{CONFIDENCE_LEGEND.description}</p>
+      <p className="px-4 pb-3 text-xs text-muted-foreground">{CONFIDENCE_LEGEND.description}</p>
       </div>
     </section>
   );

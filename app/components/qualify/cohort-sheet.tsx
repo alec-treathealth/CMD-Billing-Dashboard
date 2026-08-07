@@ -36,7 +36,7 @@ function MixList({
   if (rows.length === 0) return null;
   return (
     <div className="px-4 pt-3">
-      <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
+      <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{title}</h3>
       <ul className="mt-1.5 space-y-1">
         {rows.map((r, i) => (
           <li key={`${r.label ?? '—'}-${i}`} className="flex items-baseline justify-between gap-2 text-[12.5px]">
@@ -58,7 +58,7 @@ function Pct({ label, value }: { label: string; value: number | null }) {
       <div className="tabular-nums text-[15px] font-semibold text-ink900">
         {value === null ? '—' : `${Math.round(value)}%`}
       </div>
-      <div className="text-[10px] font-semibold uppercase tracking-wide text-ink400">{label}</div>
+      <div className="text-xs font-medium uppercase text-ink400">{label}</div>
     </div>
   );
 }
@@ -123,7 +123,7 @@ export function CohortSheet({
           </div>
           <MixList title="Payer mix" rows={data!.byPayer} showDollars={showDollars} />
           <MixList title="CPT mix" rows={data!.byCpt} showDollars={showDollars} />
-          <p className="px-4 pt-4 text-[10.5px] leading-snug text-ink400">
+          <p className="px-4 pt-4 text-xs leading-snug text-ink400">
             Cohort = members sharing this patient’s ID prefix (their payer-behavior peer group). Aggregates only;
             individual claims stay in the table behind the audited reveal.
           </p>

@@ -192,7 +192,7 @@ export function QualifyAiPanel({
       <div className="flex flex-wrap items-center gap-2 border-b border-line bg-gradient-to-b from-teal50 to-surface px-4 py-2.5">
         <span aria-hidden className="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-teal700 text-[13px] text-white">✦</span>
         <h2 className="font-head text-[15px] font-semibold tracking-tight">Ask about this policy</h2>
-        <span className="text-[11.5px] text-muted-foreground">
+        <span className="text-xs text-muted-foreground">
           {snapshot.resolved?.payerName ?? snapshot.policy?.carrier ?? 'This search'} · aggregates only
           {blind ? ' · amounts withheld for this role' : ''}
         </span>
@@ -246,14 +246,14 @@ export function QualifyAiPanel({
               <p role="status" className="sr-only">
                 {!streaming && text ? 'Answer ready.' : ''}
               </p>
-              <div className="font-mono text-[9.5px] font-semibold uppercase tracking-[0.16em] text-teal700">TL;DR</div>
+              <div className="font-mono text-xs font-semibold uppercase tracking-wide text-teal700">TL;DR</div>
               <p className="mt-1 text-[13.5px] leading-relaxed text-ink900">
                 {sections['TL;DR'] || (streaming && !text ? 'Reading the numbers…' : sections['TL;DR'])}
                 {sections.Signals === '' && sections.Risks === '' ? caret : null}
               </p>
               {sections.Signals ? (
                 <div className="mt-3 border-t border-line pt-2.5">
-                  <div className="font-mono text-[9.5px] font-semibold uppercase tracking-[0.16em] text-status-ok">Signals</div>
+                  <div className="font-mono text-xs font-semibold uppercase tracking-wide text-status-ok">Signals</div>
                   <div className="prose-sm mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-ink900">
                     {sections.Signals}
                     {sections.Risks === '' ? caret : null}
@@ -262,7 +262,7 @@ export function QualifyAiPanel({
               ) : null}
               {sections.Risks ? (
                 <div className="mt-3 border-t border-line pt-2.5">
-                  <div className="font-mono text-[9.5px] font-semibold uppercase tracking-[0.16em] text-status-danger">Risks</div>
+                  <div className="font-mono text-xs font-semibold uppercase tracking-wide text-status-danger">Risks</div>
                   <div className="prose-sm mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-ink900">
                     {sections.Risks}
                     {caret}
@@ -274,7 +274,7 @@ export function QualifyAiPanel({
                   the numbers stay ours, so this can never disagree with the cards or the bar. */}
               {!streaming && text && active === 'ranks' && ranks.length > 1 ? (
                 <div className="mt-3 border-t border-line pt-2.5">
-                  <div className="font-mono text-[9.5px] font-semibold uppercase tracking-[0.16em] text-teal700">
+                  <div className="font-mono text-xs font-semibold uppercase tracking-wide text-teal700">
                     Top {ranks.length} facilities · {snapshot.resolved?.payerName ?? snapshot.policy?.carrier ?? 'this search'}
                   </div>
                   <div className="mt-2 flex flex-col">
@@ -283,11 +283,11 @@ export function QualifyAiPanel({
                         key={r.facilityKey}
                         className="grid grid-cols-[20px_minmax(0,1fr)_auto_auto] items-center gap-3 rounded-lg px-2 py-1.5 odd:bg-surface"
                       >
-                        <span className="font-mono text-[11px] font-semibold text-ink400">{r.rank}</span>
+                        <span className="font-mono text-xs font-semibold text-ink400">{r.rank}</span>
                         <span className="truncate text-[13px] font-semibold text-ink900" title={r.name}>
                           {r.name}
                         </span>
-                        <span className="whitespace-nowrap text-[11px] text-ink400">{r.evidence}</span>
+                        <span className="whitespace-nowrap text-xs text-ink400">{r.evidence}</span>
                         <span
                           className="min-w-[34px] text-right font-mono text-[14px] font-semibold tabular-nums"
                           style={{ color: IQ_BAND_HEX[r.band] }}
@@ -300,7 +300,7 @@ export function QualifyAiPanel({
                 </div>
               ) : null}
               {!streaming && text ? (
-                <p className="mt-3 border-t border-dashed border-line pt-2 text-[10.5px] text-ink400">
+                <p className="mt-3 border-t border-dashed border-line pt-2 text-xs text-ink400">
                   Grounded in the factors above · window {snapshot.ladder?.chosenDays ?? '—'}d · verify benefits on the
                   case before quoting anything.
                 </p>

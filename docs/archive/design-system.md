@@ -38,6 +38,22 @@ TreatHealthOS visual system applied to an internal PHI-aware billing dashboard.
 Page `<h1>` always uses `text-2xl font-semibold tracking-tight` (Qualify uses `font-display`).
 Card titles use `text-base font-semibold` (via `CardTitle`).
 
+**12px is the floor for meaning-bearing text** — no `text-[…px]` below it, anywhere. `text-xs` is
+**13px** in this config (`app/tailwind.config.ts` `fontSize.xs`), not the browser default 12px, and is
+the smallest house size — reach for it, never a smaller arbitrary value. Origin: I9
+(`app/components/qualify/v3/resolution-flow.tsx`), which found Qualify eyebrows and pills running as
+small as 8.5px. The two blessed small treatments below that: the eyebrow
+(`text-xs font-medium uppercase tracking-wide text-ink400`, palette-swapped on dark surfaces) and the
+category pill (`rounded-full bg-status-info/10 px-2 py-0.5 text-xs font-semibold text-status-info`).
+When the bump threatens a fixed-width container, ship truncation with it (`min-w-0 truncate` on the
+growing value, or grow the box) in the same change — never shrink the type back down to make it fit.
+A **skeleton must match its real content's size**, not just its slot — the same CLS rule as
+Components → Skeleton below: if the content that lands is 13px, the pulse block standing in for it
+must already be sized as if it were, or the swap-in shifts layout. Enforced by the I9 regex sweeps
+(`text-\[(\d+(?:\.\d+)?)px\]` asserted `>= 12`) in `qualifyV3Flow.test.tsx`, `qualify-render.test.tsx`
+and `qualify-mobile-render.test.tsx` — the floor lives in those three suites; extend the sweep to a new
+component, don't re-derive the rule inline.
+
 ---
 
 ## Elevation

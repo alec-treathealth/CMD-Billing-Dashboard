@@ -41,18 +41,18 @@ export function FacilityFindings({ findings }: { findings: QualifyFinding[] }) {
         return (
           <div key={`${fi.factorKey}-${fi.severity}`} className={['rounded-xl border-l-2 bg-ground px-3 py-2.5', meta.rule].join(' ')}>
             <div className="flex flex-wrap items-center gap-2">
-              <span className={['inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-bold', meta.chip].join(' ')}>
+              <span className={['inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold', meta.chip].join(' ')}>
                 {meta.label}
               </span>
               <b className="text-[12.5px] font-semibold leading-snug text-ink900">{fi.title}</b>
             </div>
             {/* The server-computed sentence, verbatim — never paraphrased on the client. */}
-            <p className="mt-1 text-[11.5px] leading-relaxed text-ink600">{fi.rationale}</p>
+            <p className="mt-1 text-xs leading-relaxed text-ink600">{fi.rationale}</p>
             {fi.evidence.length > 0 ? (
               <dl className="mt-2 space-y-1 rounded-lg bg-surface px-2.5 py-2">
-                <dt className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink400">Evidence</dt>
+                <dt className="text-xs font-medium uppercase tracking-wide text-ink400">Evidence</dt>
                 {fi.evidence.map((e) => (
-                  <dd key={e.label} className="text-[11px] leading-snug text-ink600">
+                  <dd key={e.label} className="text-xs leading-snug text-ink600">
                     <span className="font-semibold text-ink900">{e.label}</span>
                     <span aria-hidden> · </span>
                     <span className="tabular-nums">{e.value}</span>
