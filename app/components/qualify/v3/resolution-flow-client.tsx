@@ -18,12 +18,28 @@
  * back, so a stale carrier pick can never scope a new plan pick (the payer-override stale-read
  * class of bug, PR #124's lesson, applied here by construction).
  *
+ * ── WHERE THE STATE RULES LIVE ──────────────────────────────────────────────────────────────────
+ * In `./flow-state.ts` — `shellReducer`, fourteen fields, seventeen actions, with the full
+ * per-action field-write table and the lettered invariants (a–l) in its header. READ THAT FIRST
+ * before changing any handler here. What is left in this file is deliberately only the three things
+ * a reducer cannot hold: the PHI ref, the effects, and the values derived per render (`stage`,
+ * `scopeKey`, `stale`/`refetching`/`staleAfterError` — never stored, see the stuck-flag note below).
+ *
  * ── MOTION ──────────────────────────────────────────────────────────────────────────────────────
  * GSAP, the requested idiom: the incoming stage slides up 14px/220ms ease-out; tiles stagger
  * min(index,3)×60ms (capped — a 186-plan list must not cascade forever). One easing. Disabled
  * entirely under prefers-reduced-motion. Motion narrates progression; it never gates input.
  */
-import { useActionState, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  useActionState,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from 'react';
 import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { resolveCoverageAction } from '../../../lib/qualify/v3-actions';
@@ -31,7 +47,7 @@ import { resolveCoverageAction } from '../../../lib/qualify/v3-actions';
 // there is registered as a Server Action and 500s every action on the page (see v3FlowState.ts).
 import { V3_INITIAL_STATE } from '../../../lib/qualify/v3FlowState';
 import { getQualifyFacilityTrends, getQualifySnapshot } from '../../../lib/qualify/actions';
-import type { QualifyFacilityTrend, QualifySnapshot, QualifyTrailingDays } from '../../../lib/qualify/contract';
+import type { QualifyFacilityTrend } from '../../../lib/qualify/contract';
 import { QualifyAiPanel } from '../qualify-ai-panel';
 import { HeatingUpCards, HeatingUpSkeleton } from '../shared/heating-ticker';
 import { staggerDelayMs } from '../tokens';
@@ -41,14 +57,15 @@ import {
   employerNarrowFor,
   filterCandidates,
   isRefetching,
-  NO_ANSWER_FILTERS,
   orderedCandidates,
   payerGroupsOf,
   ResolutionStages,
   scopeKeyOf,
-  type AnswerFilters,
   type FlowStage,
 } from './resolution-flow';
+// The flow's fourteen fields and the rules that move them. Its header is the spec; this file is the
+// transport (PHI ref, effects, derivations) wired to it.
+import { INITIAL_SHELL_STATE, shellReducer } from './flow-state';
 
 // ScrollTrigger ships inside the gsap package — no new dependency. Client components also render on
 // the server once, so guard the registration behind a window check.
@@ -69,31 +86,37 @@ export function ResolutionFlowClient({
   // The raw term — JS memory only. See the header block before moving this anywhere.
   const termRef = useRef<string>('');
 
-  const [payerPick, setPayerPick] = useState<string | null>(null);
-  const [picked, setPicked] = useState(false);
-  // The user's own escape hatch: jump to the answer over the WHOLE footprint. Distinct from
-  // `picked` — declining to choose is a different claim from choosing, and the answer says which.
-  const [skipped, setSkipped] = useState(false);
-  const [filters, setFilters] = useState<AnswerFilters>(NO_ANSWER_FILTERS);
-  const [employerQuery, setEmployerQuery] = useState('');
-  const [planFilter, setPlanFilter] = useState('');
-  const [autoAsk, setAutoAsk] = useState(false);
-  const [backTo, setBackTo] = useState<FlowStage | null>(null);
-  const [snapshot, setSnapshot] = useState<QualifySnapshot | null>(null);
-  const [snapshotError, setSnapshotError] = useState<string | null>(null);
-  // A monotonic retry counter, and the ONLY way to re-fire a request whose inputs did not change.
-  // The snapshot effect keys on `scopeKey`, which is by construction identical on a retry — so
-  // without this, "try again" is a no-op and a failed answer stage stays dead until the user picks a
-  // different scope or re-searches. Never reset it: the four submit paths already clear the snapshot
-  // and error, and zeroing it could make a later retry collide with a stale value and do nothing.
-  const [retryNonce, setRetryNonce] = useState(0);
-  const [payerOverride, setPayerOverride] = useState<string | null>(null);
-  const [windowDays, setWindowDays] = useState<QualifyTrailingDays | null>(null);
-  // What scope the RENDERED snapshot describes. A re-scope keeps content on screen, dimmed, with a
-  // progress bar — never blanked; skeletons are for the genuine first load (snapshot null). `refetching` is derived from this against the
-  // requested scope key — never an independently-set flag (see scopeKeyOf for the stuck-flag bug).
-  const [loadedKey, setLoadedKey] = useState<string | null>(null);
-  // The landing ticker. `null` = still loading (renders the skeleton, which reserves the strip's
+  // ONE state machine, not fourteen useState hooks. Destructured so every read site below is the
+  // same identifier it always was. Notable fields, restated here because they are easy to misuse:
+  //   · retryNonce — monotonic, NEVER reset. It is the only way to re-fire a request whose inputs
+  //     did not change: the snapshot effect keys on `scopeKey`, which is by construction identical
+  //     on a retry, so without it "try again" is a no-op and a failed answer stage stays dead.
+  //   · loadedKey — what scope the RENDERED snapshot describes; stamped only on success. A re-scope
+  //     keeps content on screen, dimmed, with a progress bar — never blanked; skeletons are for the
+  //     genuine first load (snapshot null). `refetching` is DERIVED from this against the requested
+  //     scope key — never an independently-set flag (see scopeKeyOf for the stuck-flag bug).
+  //   · skipped — the user's own escape hatch: jump to the answer over the WHOLE footprint.
+  //     Distinct from `picked`; declining to choose is a different claim from choosing.
+  const [flow, dispatch] = useReducer(shellReducer, INITIAL_SHELL_STATE);
+  const {
+    payerPick,
+    picked,
+    skipped,
+    filters,
+    employerQuery,
+    planFilter,
+    autoAsk,
+    backTo,
+    snapshot,
+    snapshotError,
+    retryNonce,
+    payerOverride,
+    windowDays,
+    loadedKey,
+  } = flow;
+
+  // NOT in the reducer, deliberately: the ticker is a mount-once fetch that no flow field and no
+  // handler touches. `null` = still loading (renders the skeleton, which reserves the strip's
   // height so a 2.5-5s trend query cannot shove the search box down the page); [] = loaded empty.
   const [trends, setTrends] = useState<QualifyFacilityTrend[] | null>(null);
 
@@ -105,23 +128,14 @@ export function ResolutionFlowClient({
     [state.resolution],
   );
 
-  /** A new identify submit invalidates every downstream choice — clear them BEFORE dispatching. */
+  /** A new identify submit invalidates every downstream choice — clear them BEFORE dispatching to
+   *  the server action. Capturing the term into the ref is the ONLY thing that happens outside the
+   *  reducer here, and it happens outside because the term is PHI (see the header). */
   const identifyAction = useCallback(
     (fd: FormData) => {
       const term = fd.get('term');
       termRef.current = typeof term === 'string' ? term : '';
-      setPayerPick(null);
-      setPicked(false);
-      setSkipped(false);
-      setFilters(NO_ANSWER_FILTERS);
-      setEmployerQuery('');
-      setPlanFilter('');
-      setAutoAsk(false);
-      setBackTo(null);
-      setSnapshot(null);
-      setSnapshotError(null);
-      setPayerOverride(null);
-      setWindowDays(null);
+      dispatch({ type: 'search_submitted' });
       formAction(fd);
     },
     [formAction],
@@ -130,40 +144,26 @@ export function ResolutionFlowClient({
   /** Skip the remaining questions: straight to the answer over the whole footprint. Clears any
    *  half-made narrowing so the general search is genuinely general. */
   const onSkip = useCallback(() => {
-    setSkipped(true);
-    setPicked(false);
-    setPayerPick(null);
-    setPlanFilter('');
-    setBackTo(null);
-    setFilters(NO_ANSWER_FILTERS);
-    setEmployerQuery('');
-    setPayerOverride(null);
-    setSnapshot(null);
-    setSnapshotError(null);
+    dispatch({ type: 'skipped' });
   }, []);
 
   const onToggleFilter = useCallback((facet: 'planType' | 'funding' | 'employer', value: string) => {
-    setFilters((f) => {
-      const key = facet === 'planType' ? 'planTypes' : facet === 'funding' ? 'funding' : 'employers';
-      const cur = f[key];
-      return { ...f, [key]: cur.includes(value) ? cur.filter((v) => v !== value) : [...cur, value] };
-    });
+    dispatch({ type: 'filter_toggled', facet, value });
   }, []);
 
   const onClearFilters = useCallback(() => {
-    setFilters(NO_ANSWER_FILTERS);
-    setEmployerQuery('');
+    dispatch({ type: 'filters_cleared' });
   }, []);
 
   /** Re-issue the SAME snapshot request after a failure. Bumping the nonce is what moves the
    *  effect's dependency array; nothing about the request itself changes (the term is still in
    *  `termRef`, the scope still in state), so nothing is stashed anywhere to support this. The
    *  empty-term guard mirrors the effect's own early return at the top — without it, clearing the
-   *  error here would leave a banner-free stage with no fetch behind it. */
+   *  error here would leave a banner-free stage with no fetch behind it. It stays in this wrapper
+   *  rather than in the reducer because the reducer must never read the PHI ref. */
   const onRetrySnapshot = useCallback(() => {
     if (termRef.current === '') return;
-    setSnapshotError(null);
-    setRetryNonce((n) => n + 1);
+    dispatch({ type: 'retry_requested' });
   }, []);
 
   /** A plan pick: inject the held term (never from the DOM), mark picked, dispatch. A NEW plan is a
@@ -172,33 +172,16 @@ export function ResolutionFlowClient({
   const planAction = useCallback(
     (fd: FormData) => {
       fd.set('term', termRef.current);
-      setPicked(true);
-      setSkipped(false); // choosing a plan supersedes a prior skip
-      setFilters(NO_ANSWER_FILTERS);
-      setEmployerQuery('');
-      setBackTo(null);
-      setSnapshot(null);
-      setSnapshotError(null);
+      dispatch({ type: 'plan_submitted' });
       formAction(fd);
     },
     [formAction],
   );
 
+  /** Going back CLEARS what was decided at and after that stage — a kept-but-hidden choice is how
+   *  one client's ranking ends up scoped to another's payer. */
   const onChange = useCallback((target: 'identify' | 'payer' | 'plan') => {
-    // Going back CLEARS what was decided at and after that stage — a kept-but-hidden choice is how
-    // one client's ranking ends up scoped to another's payer.
-    setSnapshot(null);
-    setSnapshotError(null);
-    setAutoAsk(false);
-    setPayerOverride(null);
-    setWindowDays(null);
-    setPicked(false);
-    setSkipped(false); // stepping back into the funnel un-skips it
-    setFilters(NO_ANSWER_FILTERS);
-    setEmployerQuery('');
-    if (target !== 'plan') setPayerPick(null);
-    setPlanFilter('');
-    setBackTo(target);
+    dispatch({ type: 'went_back', target });
   }, []);
 
   // `payerGroups` is the SAME memoized set the rail, receipt and tiles read (see the useMemo above).
@@ -277,7 +260,7 @@ export function ResolutionFlowClient({
     const term = termRef.current;
     if (term === '') return; // nothing held (e.g. hot-reload mid-flow); the answer stage keeps its loading state
     let alive = true;
-    setSnapshotError(null);
+    dispatch({ type: 'snapshot_requested' });
     const market =
       filters.funding.length > 0 || narrow.employers !== null
         ? {
@@ -293,10 +276,10 @@ export function ResolutionFlowClient({
       ...(market ? { market } : {}),
     })
       .then((s) => {
-        if (alive) {
-          setSnapshot(s);
-          setLoadedKey(scopeKey); // stamp WHAT this snapshot describes
-        }
+        // `scopeKey` rides in the PAYLOAD: it is computed in render scope, and the reducer cannot
+        // see render scope. This closure already holds the right one — the key for the request that
+        // just came back — so it stamps WHAT this snapshot describes.
+        if (alive) dispatch({ type: 'snapshot_resolved', snapshot: s, scopeKey });
       })
       .catch(() => {
         if (alive) {
@@ -305,7 +288,7 @@ export function ResolutionFlowClient({
           // request. `loadedKey` is deliberately NOT stamped here — it must keep pointing at the
           // scope the RENDERED snapshot actually describes, which is what lets the stage below tell
           // "stale content" apart from "content that matches what was asked".
-          setSnapshotError('failed');
+          dispatch({ type: 'snapshot_failed' });
         }
       });
     return () => {
@@ -460,12 +443,9 @@ export function ResolutionFlowClient({
         planFilter={planFilter}
         identifyAction={identifyAction}
         planAction={planAction}
-        onPickPayer={(p) => {
-          setPayerPick(p);
-          setBackTo(null);
-        }}
-        onPlanFilter={setPlanFilter}
-        onAskAi={() => setAutoAsk(true)}
+        onPickPayer={(p) => dispatch({ type: 'payer_picked', payer: p })}
+        onPlanFilter={(v) => dispatch({ type: 'plan_filter_changed', value: v })}
+        onAskAi={() => dispatch({ type: 'ai_armed' })}
         onChange={onChange}
         onSkip={onSkip}
         answer={
@@ -481,7 +461,7 @@ export function ResolutionFlowClient({
                     // ONE-SHOT (review Critical 2): without the disarm, every re-scope (window,
                     // billed-under chip) nulls the snapshot, unmounts the panel, and the remount
                     // re-fires an unrequested, audited, billed LLM call over whatever was on screen.
-                    onAutoAsked={() => setAutoAsk(false)}
+                    onAutoAsked={() => dispatch({ type: 'ai_disarmed' })}
                   />
                 ) : null,
                 pending: isPending,
@@ -494,18 +474,15 @@ export function ResolutionFlowClient({
                 onToggleFilter,
                 onClearFilters,
                 employerQuery,
-                onEmployerQuery: setEmployerQuery,
+                onEmployerQuery: (v) => dispatch({ type: 'employer_query_changed', value: v }),
                 employerNarrowTooMany: narrow.tooMany,
                 payerOverride,
                 // Re-scopes are REFETCHES of content already on screen: the snapshot stays rendered
                 // (dimmed, with the progress bar) rather than blanking — the design system's rule.
-                onPayerOverride: (label) => {
-                  setPayerOverride(label);
-                },
+                // Which is why these two actions write ONE field each and never touch `snapshot`.
+                onPayerOverride: (label) => dispatch({ type: 'payer_override_changed', label }),
                 windowDays,
-                onWindowDays: (d) => {
-                  setWindowDays(d);
-                },
+                onWindowDays: (d) => dispatch({ type: 'window_days_changed', days: d }),
               }
             : null
         }
