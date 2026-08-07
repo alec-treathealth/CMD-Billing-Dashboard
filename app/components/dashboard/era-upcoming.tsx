@@ -46,6 +46,14 @@
  * state at all — so the whole tile stays a pure function of its props and the render suite
  * can assert on real subitem markup.
  *
+ * EVERY EDIT CONTROL REPORTS ITS OUTCOME (2026-08-07). The leaf still only EMITS intents and
+ * still holds no client state; what changed is that the host no longer discards what the Server
+ * Action returned. `ForecastEditBanner` below is the pure surface for that outcome, and the
+ * English lives in app/lib/forecast/edit-feedback.ts. This is not polish: failure and success
+ * used to be pixel-identical (a busy flag, a refetch, an unchanged tile), which is how a
+ * guaranteed no-op — a bigint id reaching the delete guard as the string "15" — sat unnoticed
+ * across every "Remove edit", "Remove row" and "Undo correction" button on this tile.
+ *
  * Non-PHI throughout (facility code / payer / date / method / amounts / remit counts) —
  * facility_code is a BXR short code or Indigo CMD customer id, never a patient attribute,
  * so there is no reveal gate here. The forecast half never carries a patient name either:
@@ -55,6 +63,10 @@
  * render suite can assert on real markup without pulling server-only modules.
  */
 import { count, money } from '../../lib/format';
+import type {
+  ForecastEditIntent,
+  ForecastEditOutcome,
+} from '../../lib/forecast/edit-feedback';
 import type { EraUpcomingSummary } from '../../../src/veris/era835Upcoming.js';
 import type {
   UpcomingOverrideRow,
@@ -63,6 +75,7 @@ import type {
 import {
   resolveForecast,
   suggestLandedMatches,
+  type HiddenForecastRow,
   type LandedSuggestion,
   type ManualForecastRow,
   type ResolvedForecastRow,
@@ -274,14 +287,48 @@ export function buildUpcomingGroups(
  * What the tile asks the host to do. The leaf EMITS intents and never calls a Server Action
  * itself — that keeps it a pure function of its props (so the render suite can drive every
  * control) and keeps the super-admin gate on the server side of one boundary instead of two.
+ *
+ * The type itself now lives in app/lib/forecast/edit-feedback.ts, beside the outcome policy that
+ * turns each intent into the English an operator reads when it fails. Re-exported here so every
+ * existing import site is unchanged. Type-only, so this leaf stays free of runtime lib imports.
  */
-export type ForecastEditIntent =
-  | { op: 'add'; facilityCode: string; payerLabel: string; expectedDate: string;
-      methodLabel: 'EFT' | 'Check'; amount: string }
-  | { op: 'suppress'; facilityCode: string; payerLabel: string; expectedDate: string;
-      reason: 'landed' | 'incorrect' | 'cancelled'; matchedEraKey?: string }
-  | { op: 'correct'; facilityCode: string; payerLabel: string; expectedDate: string; amount: string }
-  | { op: 'delete-edit'; id: number };
+export type { ForecastEditIntent };
+
+/**
+ * The edit-feedback surface. PURE — the host owns the async state and passes the outcome down,
+ * so the render suite can assert every tone without a DOM harness or a server module.
+ *
+ * TWO ALWAYS-MOUNTED REGIONS, never one region with a swapped role. A live region announces
+ * reliably only when it is already in the DOM before its text changes; mounting it with content
+ * already inside is silent on most screen readers. Failures are assertive (money did not move);
+ * success and in-flight are polite. Meaning is carried by the text tag, never by the colour.
+ */
+export function ForecastEditBanner({ outcome }: { outcome: ForecastEditOutcome | null }) {
+  const err = outcome?.tone === 'error' ? outcome : null;
+  const soft = outcome && outcome.tone !== 'error' ? outcome : null;
+  return (
+    <>
+      <div role="alert" aria-live="assertive" aria-atomic="true">
+        {err && (
+          <p className="ths-alert mb-2 flex flex-wrap items-center gap-2">
+            <span className="ths-tag ths-tag-danger">Not saved</span>
+            <span>{err.text}</span>
+          </p>
+        )}
+      </div>
+      <div role="status" aria-live="polite" aria-atomic="true">
+        {soft && (
+          <p className="ths-card-meta mb-2 flex flex-wrap items-center gap-2">
+            <span className={soft.tone === 'ok' ? 'ths-tag ths-tag-ok' : 'ths-tag ths-tag-neutral'}>
+              {soft.tone === 'ok' ? 'Saved' : soft.tone === 'info' ? 'No change' : 'Saving…'}
+            </span>
+            <span>{soft.text}</span>
+          </p>
+        )}
+      </div>
+    </>
+  );
+}
 
 /** One selectable facility for the add form: canonical code + something a human recognises. */
 export interface ForecastFacilityOption {
@@ -409,6 +456,16 @@ export function EraUpcomingBody({
           plus any forecast rows keyed into the Upcoming Payments sheet. Entries appear once
           ERA ingest is running and payers adjudicate upcoming deposits.
         </p>
+        {/* ⚠️ THE STATE THAT MOST NEEDS AN UNDO. Hiding the last row lands the tile HERE, on
+            the calm "nothing scheduled" copy. Without this strip the operator has just made
+            money disappear and the screen offers nothing to click — which is precisely the
+            one-way door HiddenStrip exists to close. The no-dollars calm contract survives:
+            it is a collapsed disclosure with no total. */}
+        {canEdit && resolved.hidden.length > 0 && (
+          <div className="mt-3">
+            <HiddenStrip hidden={resolved.hidden} busy={busy} onEdit={onEdit} />
+          </div>
+        )}
         {/* The form belongs here too: an empty tile is exactly when a super admin needs to key
             the first expected payment, and hiding it would send them to the sheet instead. */}
         {canEdit && (
@@ -435,12 +492,19 @@ export function EraUpcomingBody({
           No future payments scheduled — {count(overdueResolved.length)} overdue expected{' '}
           {overdueResolved.length === 1 ? 'payment' : 'payments'} below.
         </p>
+        {/* ⚠️ THE CALL SITE THAT GETS MISSED. This branch fires only when data.remits === 0 AND
+            forecastRows === 0, i.e. when the ENTIRE tile is overdue — precisely the state the
+            controls exist for, and a state no populated-tile fixture can ever reach. Any prop
+            added to OverdueStrip must be threaded here as well as at the main-return call site. */}
         <OverdueStrip
           rows={overdueResolved}
           totalCents={overdueCents}
           cutoff={cutoff}
           truncated={overrides?.overdue.rows_truncated ?? false}
           unparseable={overdueSum.unparseable}
+          canEdit={canEdit}
+          busy={busy}
+          onEdit={onEdit}
         />
         {/* Stale 024 edits render here too (Alec, 2026-08-03): an all-overdue book is
             precisely when an operator is reconciling by hand and needs to see an edit
@@ -448,7 +512,10 @@ export function EraUpcomingBody({
             its no-dollars calm contract is test-pinned, and with zero rows anywhere the
             edits resurface the moment any population returns.) */}
         {resolved.stale.length > 0 && (
-          <StaleEditStrip stale={resolved.stale} busy={busy} onEdit={onEdit} />
+          <StaleEditStrip stale={resolved.stale} canEdit={canEdit} busy={busy} onEdit={onEdit} />
+        )}
+        {canEdit && resolved.hidden.length > 0 && (
+          <HiddenStrip hidden={resolved.hidden} busy={busy} onEdit={onEdit} />
         )}
         {canEdit && (
           <AddForecastForm
@@ -517,7 +584,7 @@ export function EraUpcomingBody({
       )}
 
       {resolved.stale.length > 0 && (
-        <StaleEditStrip stale={resolved.stale} busy={busy} onEdit={onEdit} />
+        <StaleEditStrip stale={resolved.stale} canEdit={canEdit} busy={busy} onEdit={onEdit} />
       )}
 
       {/* Column headings for the parent rows. aria-hidden: this is a visual key for the
@@ -546,7 +613,16 @@ export function EraUpcomingBody({
           cutoff={cutoff}
           truncated={overrides?.overdue.rows_truncated ?? false}
           unparseable={overdueSum.unparseable}
+          canEdit={canEdit}
+          busy={busy}
+          onEdit={onEdit}
         />
+      )}
+
+      {/* After the overdue section, before the add form: the reading order is what IS coming,
+          what is LATE, then what you took off — and only then the form to add more. */}
+      {canEdit && resolved.hidden.length > 0 && (
+        <HiddenStrip hidden={resolved.hidden} busy={busy} onEdit={onEdit} />
       )}
 
       {canEdit && (
@@ -602,11 +678,10 @@ function SuggestionStrip({
         already landed
       </div>
       <ul className="flex flex-col gap-1.5">
-        {suggestions.map((sg) => (
-          <li
-            key={`${sg.forecast.expected_date}-${sg.forecast.facility_code}-${sg.forecast.payer_label}`}
-            className="flex flex-wrap items-center gap-2"
-          >
+        {/* One suggestion per forecast row, and two forecast rows can share the (date, facility,
+            payer) tuple — same latent collision the overdue list had. Keyed the same way. */}
+        {suggestions.map((sg, i) => (
+          <li key={forecastRowKey(sg.forecast, i)} className="flex flex-wrap items-center gap-2">
             <span className="ths-tag ths-tag-accent-2">Forecast</span>
             <span className="ths-num tabular-nums">{money(sg.forecast.amount)}</span>
             <span>
@@ -643,6 +718,47 @@ function SuggestionStrip({
   );
 }
 
+/**
+ * A stable React list key for a resolved forecast row.
+ *
+ * (date, facility, payer) is NOT unique — 023 has no unique index and its header is explicit
+ * that two identical forecasts are legal — so the tuple alone collided on real data long before
+ * the duplicate-add defect existed, and will keep colliding after it is fixed. `manualId` is no
+ * fix either: one 'correct' applies to every sheet row sharing its key, so two rendered rows can
+ * carry the same manualId. Amount, method and the 024 id join the tuple, with the index as the
+ * last resort for rows that are genuinely indistinguishable.
+ *
+ * INDEX LAST, AND CONTENT IN THE KEY, on purpose: these rows now carry an UNCONTROLLED amount
+ * input (defaultValue is read once at mount), so a key that survives an amount change would keep
+ * a stale dollar figure in the box, and a key that collides would let React carry one row's typed
+ * value onto another row's money. Remounting is the safe failure here.
+ */
+export function forecastRowKey(r: ResolvedForecastRow, i: number): string {
+  return `${r.expected_date}|${r.facility_code}|${r.payer_label}|${r.method_label}|${r.amount}|${r.manualId ?? ''}|${i}`;
+}
+
+/**
+ * ResolvedForecastRow → the UpcomingItem shape ForecastRowControls consumes.
+ *
+ * Exists so the OVERDUE strip can reuse the group table's controls verbatim instead of growing a
+ * second copy of the same four buttons and the same aria-label formula. `buildUpcomingGroups`
+ * does the equivalent mapping inline (see its forecast loop) from a slightly different input —
+ * an UpcomingOverrideRow widened with Partial<ResolvedForecastRow> — so the two stay separate
+ * rather than being forced into one over-general helper.
+ */
+function forecastItemFromResolved(r: ResolvedForecastRow): UpcomingItem {
+  return {
+    kind: 'forecast',
+    payer: r.payer_label,
+    methodLabel: r.method_label,
+    amount: r.amount,
+    isPatientSpecific: r.is_patient_specific,
+    origin: r.origin,
+    corrected: r.corrected,
+    manualId: r.manualId,
+  };
+}
+
 /** Whole days between two ISO civil dates (b − a). Pure string/UTC arithmetic — no clock. */
 function wholeDaysBetween(aIso: string, bIso: string): number {
   const parse = (iso: string) => {
@@ -661,6 +777,13 @@ function wholeDaysBetween(aIso: string, bIso: string): number {
  *
  * The subtotal here is the client-side RESOLVED recomputation for this partition — never the
  * SQL aggregate that rides in the payload (that number predates 024 corrections).
+ *
+ * CONTROLS LIVE HERE TOO (2026-08-07). Overdue used to be the ONE row class with no buttons at
+ * all — amounts and prose and nothing to press — which meant the highest-value row on the tile
+ * was the only one that could not be marked landed or not-coming. With every forecast row in
+ * the live book currently overdue, that made the whole forecast half unactionable. The controls
+ * are the SAME component the group table renders, emitting the SAME 024 intents; the server
+ * re-checks super_admin on every write, so `canEdit` is decluttering, not the gate.
  */
 function OverdueStrip({
   rows,
@@ -668,6 +791,9 @@ function OverdueStrip({
   cutoff,
   truncated,
   unparseable = 0,
+  canEdit = false,
+  busy = false,
+  onEdit,
 }: {
   rows: ResolvedForecastRow[];
   totalCents: number;
@@ -675,6 +801,10 @@ function OverdueStrip({
   truncated: boolean;
   /** Rows whose amount failed to parse — counted, never silently zeroed. See sumCents. */
   unparseable?: number;
+  /** super_admin only. Defaulted so the strip stays safe to render bare. */
+  canEdit?: boolean;
+  busy?: boolean;
+  onEdit?: (intent: ForecastEditIntent) => void;
 }) {
   return (
     <div className="ths-notice flex-col items-stretch">
@@ -686,12 +816,18 @@ function OverdueStrip({
           {rows.length === 1 ? 'its' : 'their'} date without landing — not in any total above
         </span>
       </div>
-      <ul className="flex flex-col gap-1.5">
-        {rows.map((r) => (
-          <li
-            key={`${r.expected_date}-${r.facility_code}-${r.payer_label}`}
-            className="flex flex-wrap items-center gap-2"
-          >
+      {/* The honest limit of the correct form, stated once for the section rather than per row:
+          expected_date IS the match key, so a 024 'correct' can change the money but can never
+          re-date a row. A payer that reschedules needs Not coming + a fresh add. */}
+      {canEdit && (
+        <p className="ths-card-meta mb-1">
+          A rescheduled payment cannot be re-dated here — the date is part of the match key. Mark
+          it Not coming and add it again on the new date.
+        </p>
+      )}
+      <ul className={canEdit ? 'flex flex-col gap-2' : 'flex flex-col gap-1.5'}>
+        {rows.map((r, i) => (
+          <li key={forecastRowKey(r, i)} className="flex flex-wrap items-center gap-2">
             <span className="ths-num tabular-nums">{money(r.amount)}</span>
             <span>
               {r.facility_code} · {r.payer_label} · {r.method_label}
@@ -702,6 +838,21 @@ function OverdueStrip({
               {r.corrected ? ' · corrected' : ''}
               {r.origin === 'manual' ? ' · manual add' : ''}
             </span>
+            {/* `context="overdue"` reaches every aria-label below. A screen-reader user tabbing
+                a flat list is a long way from the section heading, and "Mark landed: KWC BCBS AR
+                2026-05-26" is otherwise indistinguishable from the same row in the group table. */}
+            {canEdit && (
+              <div className="w-full sm:ml-auto sm:w-auto">
+                <ForecastRowControls
+                  date={r.expected_date}
+                  facilityCode={r.facility_code}
+                  item={forecastItemFromResolved(r)}
+                  busy={busy}
+                  onEdit={onEdit}
+                  context="overdue"
+                />
+              </div>
+            )}
           </li>
         ))}
       </ul>
@@ -723,49 +874,199 @@ function OverdueStrip({
 }
 
 /**
- * Super-admin edits that no longer match any forecast row — almost always because the operator
- * edited that row in the sheet, which is allowed. Surfaced rather than silently ignored: an
- * orphaned correction contributes NO money and would otherwise sit there looking applied.
+ * Why ONE stale edit is doing nothing. Exhaustive on purpose — the union grew once already
+ * (2026-08-07, 'duplicate_of_sheet_row'), and the strip-level copy used to assert the orphan
+ * reason for every row, which the new variant would have silently falsified.
+ */
+function staleReasonText(st: StaleManualRow): string {
+  switch (st.reason) {
+    case 'no_matching_sheet_row':
+      return 'No forecast row at this date, facility and payer — the sheet row it targeted has changed or gone. Re-make it against the current row, or remove it.';
+    case 'duplicate_of_sheet_row': {
+      const amounts = (st.sheetAmounts ?? []).map((a) => money(a)).join(' + ');
+      const named = amounts ? ` (${amounts})` : '';
+      return `The sheet already carries this facility, payer and date${named}. That row is counted; this add is not added on top of it. To key a second payment here, put it in the sheet or use a different date.`;
+    }
+    default: {
+      // A new reason variant is a compile error here rather than inheriting orphan wording.
+      const unreachable: never = st.reason;
+      return unreachable;
+    }
+  }
+}
+
+/**
+ * Super-admin edits that are STORED but changing no number on this tile. Two causes today: the
+ * sheet row a correct/suppress targeted has changed or gone (almost always the operator editing
+ * the sheet, which is allowed), or an add duplicates a key the sheet already occupies. Surfaced
+ * rather than silently ignored — either way the edit contributes NO money and would otherwise
+ * sit there looking applied.
+ *
+ * The heading is REASON-NEUTRAL and each line says why. It used to assert "no longer match a
+ * forecast row" for every row, which is false for a duplicate: that add matches a forecast row
+ * exactly, which is the entire problem with it.
  */
 function StaleEditStrip({
   stale,
+  canEdit,
   busy,
   onEdit,
 }: {
   stale: StaleManualRow[];
+  /**
+   * Gates the BUTTON, not the strip. loadUpcomingManual is deliberately open to any entitled
+   * viewer (it is non-PHI billing configuration, and the tile must show a corrected amount to
+   * everyone who can see the tile at all), so an entity admin legitimately reads these rows —
+   * but only a super admin can delete one. This was the single edit control on the tile that
+   * was never gated, which went unnoticed for as long as it failed silently.
+   */
+  canEdit: boolean;
   busy: boolean;
   onEdit?: (intent: ForecastEditIntent) => void;
 }) {
   return (
     <div className="ths-notice flex-col items-stretch">
       <div className="ths-card-title mb-1">
-        {count(stale.length)} manual {stale.length === 1 ? 'edit' : 'edits'} no longer match a
-        forecast row
+        {count(stale.length)} manual {stale.length === 1 ? 'edit' : 'edits'} not in effect
       </div>
       <p className="ths-card-meta mb-1">
-        The sheet row each one targeted has changed or gone. They are having no effect — re-make
-        them against the current row, or remove them.
+        Stored, but changing no number on this tile. Each line says why.
       </p>
       <ul className="flex flex-col gap-1.5">
         {stale.map((st) => (
-          <li key={st.manual.id} className="flex flex-wrap items-center gap-2">
-            <span className="ths-tag ths-tag-neutral">{st.manual.kind}</span>
-            <span>
-              {st.manual.facility_code} · {st.manual.payer_label} · {st.manual.expected_date}
-              {st.manual.amount ? ` · ${money(st.manual.amount)}` : ''}
-            </span>
-            <button
-              type="button"
-              className="ths-btn ths-btn-secondary ths-btn-sm"
-              disabled={busy}
-              onClick={() => onEdit?.({ op: 'delete-edit', id: st.manual.id })}
-            >
-              Remove edit
-            </button>
+          <li key={st.manual.id} className="flex flex-col gap-0.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="ths-tag ths-tag-neutral">{st.manual.kind}</span>
+              <span>
+                {st.manual.facility_code} · {st.manual.payer_label} · {st.manual.expected_date}
+                {st.manual.amount ? ` · ${money(st.manual.amount)}` : ''}
+              </span>
+              {canEdit && (
+                <button
+                  type="button"
+                  className="ths-btn ths-btn-secondary ths-btn-sm"
+                  disabled={busy}
+                  aria-label={`Remove edit: ${st.manual.facility_code} ${st.manual.payer_label} ${st.manual.expected_date}`}
+                  onClick={() =>
+                    onEdit?.({
+                      op: 'delete-edit',
+                      id: st.manual.id,
+                      // Display-only, so the panel-level failure message can NAME the row. A
+                      // delete-edit intent otherwise carries nothing but an opaque id. Never
+                      // marshalled into the Server Action call. Non-PHI, like every other value
+                      // on this tile.
+                      label: `${st.manual.facility_code} · ${st.manual.payer_label} · ${st.manual.expected_date}`,
+                    })
+                  }
+                >
+                  Remove edit
+                </button>
+              )}
+            </div>
+            <span className="ths-card-meta">{staleReasonText(st)}</span>
           </li>
         ))}
       </ul>
     </div>
+  );
+}
+
+/** Why one suppression was written, in the operator's words. Exhaustive over 024's vocabulary. */
+function suppressReasonText(reason: ManualForecastRow['suppress_reason']): string {
+  switch (reason) {
+    case 'landed':
+      return 'marked landed';
+    case 'incorrect':
+      return 'marked not coming';
+    case 'cancelled':
+      return 'marked cancelled';
+    default:
+      // 024 allows NULL only on non-suppress kinds, which cannot reach this strip. Rendered
+      // rather than thrown: a tile must not blank out over a row it merely cannot label.
+      return 'hidden';
+  }
+}
+
+/**
+ * HIDDEN BY YOU — suppressions that are IN EFFECT, each with an Undo.
+ *
+ * THE ONE-WAY DOOR THIS CLOSES (2026-08-07). "Mark landed" and "Not coming" write a suppress
+ * row, the resolver applies it, and the money leaves the tile. Before this strip there was no
+ * id on screen to delete: an applied suppress is not stale (it is working), so it rendered
+ * nowhere, and any manual add at the same key was swallowed by the same branch — invisible AND
+ * undeletable, because re-keying it through the add form is eaten by the suppress still
+ * standing. Recovery meant SQL. Deleting the suppress restores the sheet row and the add
+ * together, which is why one Undo per suppression is the whole mechanism.
+ *
+ * COLLAPSED BY DEFAULT, and super-admin only. This is a record of money that is NOT coming;
+ * an operator reading the tile for what to expect should not have to scroll past it, and only
+ * a super admin can act on it anyway. <details> gives keyboard operation and an announced
+ * expanded state for free, exactly as the parent rows and the add form already do.
+ *
+ * ⚠️ NOT A TOTAL. These amounts are deliberately never summed into a headline figure. The
+ * money here is money a human said is not coming; a "hidden: $X" subtotal beside the real ones
+ * would put it straight back on the tile as a number. Per-row amounts only.
+ */
+function HiddenStrip({
+  hidden,
+  busy,
+  onEdit,
+}: {
+  hidden: HiddenForecastRow[];
+  busy: boolean;
+  onEdit?: (intent: ForecastEditIntent) => void;
+}) {
+  return (
+    <details className="ths-item">
+      <summary className="ths-item-summary ths-add-summary">
+        <span className="ths-item-chevron" aria-hidden>
+          ▸
+        </span>
+        <span className="font-medium">
+          Hidden by you ({count(hidden.length)})
+        </span>
+        <span className="ths-card-meta">
+          {hidden.length === 1 ? 'a payment you removed' : 'payments you removed'} from this tile
+          — expand to undo
+        </span>
+      </summary>
+      <ul className="flex flex-col gap-1.5 px-3 pb-3 pt-1">
+        {hidden.map((h) => {
+          const label = `${h.manual.facility_code} · ${h.manual.payer_label} · ${h.manual.expected_date}`;
+          return (
+            <li key={h.manual.id} className="flex flex-col gap-0.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="ths-tag ths-tag-neutral">
+                  {suppressReasonText(h.manual.suppress_reason)}
+                </span>
+                {/* Each hidden amount named separately, never added up — one suppress can hide
+                    several rows at one key, and a sum here would read as a balance. */}
+                {h.hiddenAmounts.map((a, i) => (
+                  <span key={`${h.manual.id}-${i}`} className="ths-num tabular-nums">
+                    {money(a)}
+                  </span>
+                ))}
+                <span>{label}</span>
+                <button
+                  type="button"
+                  className="ths-btn ths-btn-secondary ths-btn-sm"
+                  disabled={busy}
+                  aria-label={`Undo hiding: ${h.manual.facility_code} ${h.manual.payer_label} ${h.manual.expected_date}`}
+                  onClick={() => onEdit?.({ op: 'delete-edit', id: h.manual.id, label })}
+                >
+                  Undo
+                </button>
+              </div>
+              <span className="ths-card-meta">
+                {h.hidAdd
+                  ? 'Undo puts this back on the tile, including the row you added at this date.'
+                  : 'Undo puts this back on the tile.'}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </details>
   );
 }
 
@@ -901,6 +1202,11 @@ function UpcomingGroupRow({
  * "Not coming" is 'incorrect' rather than 'cancelled' because that is the case an operator
  * actually hits: the sheet row was wrong. 'cancelled' exists in 024 for a payer withdrawing a
  * scheduled payment and has no button yet — adding one is a label, not a schema change.
+ *
+ * Shared verbatim by the group table and the OVERDUE strip. The root is a plain <div>, valid
+ * inside both a <td> and an <li>, so the two surfaces cannot drift apart on wording, aria
+ * labelling or which intents exist. `context` disambiguates the aria-labels when the same row
+ * can appear in two places.
  */
 function ForecastRowControls({
   date,
@@ -908,15 +1214,20 @@ function ForecastRowControls({
   item,
   busy,
   onEdit,
+  context,
 }: {
   date: string;
   facilityCode: string;
   item: UpcomingItem;
   busy: boolean;
   onEdit?: (intent: ForecastEditIntent) => void;
+  /** Appended to every aria-label, e.g. "overdue". Omitted in the group table, whose labels
+   *  therefore stay byte-identical to what they were before the strip reused this. */
+  context?: string;
 }) {
   const target = { facilityCode, payerLabel: item.payer ?? '', expectedDate: date };
-  const label = `${facilityCode} ${item.payer ?? ''} ${date}`.trim();
+  const label =
+    `${facilityCode} ${item.payer ?? ''} ${date}`.trim() + (context ? ` (${context})` : '');
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <button
@@ -937,38 +1248,64 @@ function ForecastRowControls({
       >
         Not coming
       </button>
-      <form
-        className="flex items-center gap-1"
-        onSubmit={(e) => {
-          e.preventDefault();
-          const input = e.currentTarget.elements.namedItem('amount');
-          const raw = input instanceof HTMLInputElement ? input.value.trim() : '';
-          // Shape-check here too: the Server Action validates independently, but a bad value
-          // should not cost a round trip.
-          if (!/^\d{1,10}(\.\d{1,2})?$/.test(raw)) return;
-          onEdit?.({ op: 'correct', ...target, amount: raw });
-        }}
-      >
-        <input
-          type="text"
-          inputMode="decimal"
-          name="amount"
-          defaultValue={item.amount ?? ''}
-          size={9}
-          className="ths-input ths-num"
-          aria-label={`Correct amount: ${label}`}
-        />
-        <button type="submit" className="ths-btn ths-btn-primary ths-btn-sm" disabled={busy}>
-          Save
-        </button>
-      </form>
+      {/* NO AMOUNT FORM ON A MANUAL-ORIGIN ROW. resolveForecast's adds loop never consults the
+          correct map (a 'correct' is a statement about a SHEET row; 024's header is explicit
+          that it is not promoted to an add), so a correction keyed to a manual add applies
+          nothing and is unconditionally reported stale. Rendering the box here would invite an
+          operator to type a dollar figure that lands in the not-in-effect strip instead of on
+          the tile. To change a manual add's amount: remove the row and add it again. This
+          suppresses the form in the GROUP TABLE too — the trap was already live there. */}
+      {item.origin !== 'manual' && (
+        <form
+          className="flex items-center gap-1"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const input = e.currentTarget.elements.namedItem('amount');
+            const raw = input instanceof HTMLInputElement ? input.value.trim() : '';
+            // SECOND LAYER, not the user-facing one. `required` + `pattern` below mean the
+            // browser blocks a malformed amount before submit and announces it ON THE FIELD,
+            // which is the accessible place for it and the idiom AddForecastForm already uses.
+            // This guard used to be the ONLY check, and a bare `return` here was a silent
+            // no-op — the exact class of dead control this whole change exists to remove.
+            // It survives as defence for a programmatic submit, where there is no operator to
+            // tell. The Server Action validates independently; 024's CHECK is the third layer.
+            if (!AMOUNT_RE.test(raw)) return;
+            onEdit?.({ op: 'correct', ...target, amount: raw });
+          }}
+        >
+          <input
+            type="text"
+            inputMode="decimal"
+            name="amount"
+            defaultValue={item.amount ?? ''}
+            size={9}
+            required
+            // Mirrors AMOUNT_RE. Kept as a literal because the `pattern` attribute takes a
+            // string, not a RegExp — if you change one, change both.
+            pattern="\d{1,10}(\.\d{1,2})?"
+            title="Dollars, up to two decimals — e.g. 4200 or 4200.50"
+            className="ths-input ths-num"
+            aria-label={`Correct amount: ${label}`}
+          />
+          <button type="submit" className="ths-btn ths-btn-primary ths-btn-sm" disabled={busy}>
+            Save
+          </button>
+        </form>
+      )}
       {item.manualId !== undefined && (
         <button
           type="button"
           className="ths-btn ths-btn-ghost ths-btn-sm"
           disabled={busy}
           aria-label={`Remove admin edit: ${label}`}
-          onClick={() => onEdit?.({ op: 'delete-edit', id: item.manualId! })}
+          onClick={() =>
+            onEdit?.({
+              op: 'delete-edit',
+              id: item.manualId!,
+              // Display-only; see the note on the same call in StaleEditStrip.
+              label: `${facilityCode} · ${item.payer ?? ''} · ${date}`,
+            })
+          }
         >
           {item.origin === 'manual' ? 'Remove row' : 'Undo correction'}
         </button>

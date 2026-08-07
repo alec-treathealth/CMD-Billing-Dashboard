@@ -52,9 +52,11 @@ import {
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID, viewToEntityIds, type DashboardView } from '@/lib/views';
 import {
   EraUpcomingBody,
+  ForecastEditBanner,
   type ForecastEditIntent,
   type ForecastFacilityOption,
 } from './era-upcoming';
+import { runForecastEdit, type ForecastEditOutcome } from '@/lib/forecast/edit-feedback';
 import { facilityCodesForEntity } from '../../../src/collections/cmdCustomers';
 import type { EraUpcomingSummary } from '../../../src/veris/era835Upcoming.js';
 import type { UpcomingOverrideSummary } from '../../../src/veris/upcomingOverride.js';
@@ -475,7 +477,7 @@ function EraUpcomingPanel({
   open,
   onClose,
   view,
-  canEdit,
+  canEdit: hasEditRole,
   facilityOptions,
 }: {
   open: boolean;
@@ -488,6 +490,22 @@ function EraUpcomingPanel({
    *  Consolidated, where a write has no single tenant to name. */
   facilityOptions: ForecastFacilityOption[];
 }) {
+  /**
+   * EDITABLE = THE ROLE **AND** A SINGLE TENANT IN SCOPE.
+   *
+   * The role alone is not enough, and shipping row controls on the overdue rows is what made
+   * that bite. Every write resolves its tenant through singleWriteEntity, which returns null
+   * whenever the view maps to more than one entity — so on Consolidated a super admin gets a
+   * full set of live-looking controls whose every invocation is rejected with
+   * 'pick_a_tenant_view'. That is the same class of lie as the dead buttons this change exists
+   * to remove: a control that cannot succeed must not render.
+   *
+   * facilityOptions is the signal because it is the SAME one the server re-checks — the caller
+   * derives it from facilityCodesForEntity, empty exactly on Consolidated, and AddForecastForm
+   * has been using it for this purpose since 024. Reusing it keeps one definition of "a write
+   * has somewhere to land" instead of two that can drift.
+   */
+  const canEdit = hasEditRole && facilityOptions.length > 0;
   const [status, setStatus] = useState<'idle' | 'loading' | 'error' | 'ready'>('idle');
   const [data, setData] = useState<EraUpcomingSummary | null>(null);
   const [overrides, setOverrides] = useState<UpcomingOverrideSummary | null>(null);
@@ -497,6 +515,14 @@ function EraUpcomingPanel({
   // truth (correction applied, landed row gone) rather than optimistically patched state,
   // because the resolver's output depends on rows this component does not own.
   const [reloadKey, setReloadKey] = useState(0);
+  // The last edit's outcome, held HERE and not in the body, for three reasons: the body is a
+  // pure leaf by contract, the body UNMOUNTS on the refetch that follows a write (the loader
+  // sets status='loading' and data=null), and a live region only announces reliably when it was
+  // already in the DOM before its text changed. All three say the same thing — the message must
+  // outlive the thing it is about.
+  const [editOutcome, setEditOutcome] = useState<ForecastEditOutcome | null>(null);
+  // "Could not read the edits" is NOT "there are no edits" — see the banner below.
+  const [manualFailed, setManualFailed] = useState(false);
   useEffect(() => {
     if (!open) return;
     let live = true;
@@ -504,12 +530,14 @@ function EraUpcomingPanel({
     setData(null);
     setOverrides(null);
     setManual([]);
+    setManualFailed(false);
     Promise.all([loadEraUpcoming(view), loadUpcomingOverrides(view), loadUpcomingManual(view)])
       .then(([era, ovr, man]) => {
         if (!live) return;
         // Neither the forecast feed nor the edit table gates the panel — see the note above.
         setOverrides(ovr.ok ? ovr.data : null);
         setManual(man.ok ? man.data.rows : []);
+        setManualFailed(!man.ok);
         if (era.ok) {
           setData(era.data);
           setStatus('ready');
@@ -525,58 +553,43 @@ function EraUpcomingPanel({
     };
   }, [open, view, reloadKey]);
 
+  // Clear the feedback on panel close and on a view change — deliberately NOT on reloadKey.
+  // reloadKey is bumped by the very write whose outcome we are showing, so folding this into the
+  // loader effect above would erase the message the instant it appeared. EraUpcomingPanel stays
+  // MOUNTED while closed (`if (!open) return null` is a render guard, not an unmount), so
+  // without this a failure from a previous open reappears on reopen.
+  useEffect(() => {
+    setEditOutcome(null);
+  }, [open, view]);
+
   /**
    * Apply one edit intent from the tile. The Server Action re-checks super_admin and writes the
-   * audit row — this handler only marshals and refetches, so nothing here is a security
-   * boundary. Failures are left to the reload: the tile re-renders whatever the server actually
-   * holds, which is the honest outcome whether the write landed or not.
+   * audit row — this handler only marshals, surfaces the result, and decides whether to refetch;
+   * nothing here is a security boundary.
+   *
+   * THE RESULT IS NOT DISCARDED. It used to be, on the reasoning that "the tile re-renders
+   * whatever the server actually holds, which is the honest outcome whether the write landed or
+   * not". That is false when nothing was attempted: an unchanged tile after a rejection is
+   * indistinguishable from an unchanged tile after a no-op, which is exactly how a guaranteed
+   * no-op (a bigint id arriving as a string) survived unnoticed. Every rejection now reaches the
+   * operator through the panel's live region.
+   *
+   * REFETCH ONLY WHEN THE SERVER MAY HAVE CHANGED STATE — see shouldRefetch in
+   * app/lib/forecast/edit-feedback.ts.
    */
   async function applyEdit(intent: ForecastEditIntent) {
     setBusy(true);
-    try {
-      if (intent.op === 'delete-edit') {
-        await deleteUpcomingManual(intent.id, view);
-      } else if (intent.op === 'add') {
-        await saveUpcomingManual(
-          {
-            kind: 'add',
-            facilityCode: intent.facilityCode,
-            payerLabel: intent.payerLabel,
-            expectedDate: intent.expectedDate,
-            methodLabel: intent.methodLabel,
-            amount: intent.amount,
-          },
-          view,
-        );
-      } else if (intent.op === 'suppress') {
-        await saveUpcomingManual(
-          {
-            kind: 'suppress',
-            facilityCode: intent.facilityCode,
-            payerLabel: intent.payerLabel,
-            expectedDate: intent.expectedDate,
-            amount: null,
-            suppressReason: intent.reason,
-            matchedEraKey: intent.matchedEraKey ?? null,
-          },
-          view,
-        );
-      } else {
-        await saveUpcomingManual(
-          {
-            kind: 'correct',
-            facilityCode: intent.facilityCode,
-            payerLabel: intent.payerLabel,
-            expectedDate: intent.expectedDate,
-            amount: intent.amount,
-          },
-          view,
-        );
-      }
-    } finally {
-      setBusy(false);
-      setReloadKey((k) => k + 1);
-    }
+    // Also empties the alert region, which is load-bearing rather than cosmetic: two identical
+    // consecutive failures produce identical text, and a live region with no empty transition in
+    // between does not re-announce.
+    setEditOutcome({ tone: 'busy', text: 'Saving…' });
+    const { outcome, refetch } = await runForecastEdit(intent, view, {
+      save: saveUpcomingManual,
+      remove: deleteUpcomingManual,
+    });
+    setEditOutcome(outcome);
+    setBusy(false);
+    if (refetch) setReloadKey((k) => k + 1);
   }
 
   if (!open) return null;
@@ -593,6 +606,37 @@ function EraUpcomingPanel({
           <X className="h-4 w-4" aria-hidden />
         </button>
       </div>
+      {/* ABOVE the branch switch on purpose: the post-write refetch drops the tile into
+          'loading' and unmounts the body, so a message rendered inside it would flash and
+          vanish — and its live region would be torn down mid-announcement. */}
+      <ForecastEditBanner outcome={editOutcome} />
+      {/* ⚠️ "COULD NOT READ THE EDITS" IS NOT "THERE ARE NO EDITS", and the two fail-soft reads
+          on this panel are NOT symmetric — do not collapse them into one policy.
+          A failed OVERRIDES read (023) REMOVES forecast rows. Subtractive, safe, and the
+          documented reason it degrades in silence: 023 is not applied in every environment.
+          A failed MANUAL read (024) ADDS MONEY BACK. `manual: []` is indistinguishable from
+          "no edits exist", so every suppression un-applies and every correction reverts —
+          a payment the operator marked landed reappears as live forecast, on a tile that looks
+          authoritative. That has to be said out loud, not degraded through.
+          Rendered beside the body rather than instead of it: the ERA-confirmed half is still
+          true, and blanking a working tile over the edit feed would be its own lie. */}
+      {status === 'ready' && manualFailed && (
+        <p className="ths-alert mb-3" role="status">
+          Your saved edits could not be read, so this tile is showing the sheet feed unresolved —
+          anything marked landed or corrected is not applied here. Reopen the panel to retry.
+        </p>
+      )}
+      {/* Said ONCE, up front, instead of on every rejected click. A super admin on Consolidated
+          has the role but no single tenant for a write to land in, so no row control renders —
+          this replaces them with the reason. AddForecastForm carries the same sentence for the
+          case where it is the only control on screen; the wording is deliberately identical so
+          the two never read as different rules. */}
+      {hasEditRole && !canEdit && status === 'ready' && (
+        <p className="ths-card-meta mb-3">
+          Switch to the BXR or Indigo view to change future payments — an edit has to name one
+          company&apos;s book.
+        </p>
+      )}
       {status === 'error' ? (
         <div className="ths-alert">Unable to load future payments.</div>
       ) : status === 'ready' && data ? (

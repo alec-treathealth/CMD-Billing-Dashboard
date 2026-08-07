@@ -9,7 +9,14 @@
  *   3) money is exact to the cent through a correction,
  *   4) a suggestion is never emitted on facility+date alone, at most one per forecast row,
  *      and high confidence requires BOTH amount and payer to agree,
- *   5) the payer heuristic's real cases: the sheet's shorthand against the 835's legal name.
+ *   5) the payer heuristic's real cases: the sheet's shorthand against the 835's legal name,
+ *   6) THE WIRE SHAPE. 024's `id` is bigint and node-pg hands int8 back as TEXT, so the runtime
+ *      row is `{ id: "15" }` while the type says `number`. manualRowFromDb is the narrowing, and
+ *      these tests drive STRING ids through it and then through the predicate the delete Server
+ *      Action actually guards with — the coverage whose absence let every delete button be a
+ *      guaranteed no-op while the suite stayed green on numeric literals,
+ *   7) THE SHEET WINS a match-key collision: an add duplicating a sheet row is surfaced, not
+ *      emitted, so the money is counted once.
  *
  * Pure module: no DB, no network, no clock.
  */
@@ -25,11 +32,13 @@ import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../src/tenants.js';
 import {
   amountFromCents,
   centsFromAmount,
+  manualRowFromDb,
   matchKey,
   payersCorrespond,
   resolveForecast,
   suggestLandedMatches,
   type EraCandidate,
+  type ManualForecastDbRow,
   type ManualForecastRow,
   type SheetForecastRow,
 } from '../src/veris/upcomingForecast.js';
@@ -57,6 +66,17 @@ const manual = (over: Partial<ManualForecastRow> = {}): ManualForecastRow => ({
   matched_era_key: null,
   ...over,
 });
+
+/**
+ * The SAME row as `manual()`, but shaped the way the driver really hands it back: `id` is a
+ * STRING, because staging.expected_payment_manual.id is bigint and node-pg's default int8 parser
+ * returns text. Every fixture in the render suite uses numeric literals, which is precisely why
+ * nothing caught the delete path being dead.
+ */
+const dbRow = (over: Partial<ManualForecastDbRow> = {}): ManualForecastDbRow => {
+  const m = manual();
+  return { ...m, id: String(m.id), ...over };
+};
 
 const era = (over: Partial<EraCandidate> = {}): EraCandidate => ({
   payment_date: '2026-08-04',
@@ -165,12 +185,311 @@ test("an 'add' appears with manual origin, and can itself be suppressed", () => 
   assert.equal(suppressed.stale.length, 0);
 });
 
+// --- THE WIRE SHAPE: bigint id → JS number ----------------------------------
+// staging.expected_payment_manual.id is bigint (oid 20). node-pg's DEFAULT parser returns int8
+// as a STRING and this repo registers no type parser, so an unmapped read puts "15" in a field
+// declared `number`. Everything below drives the REAL shape.
+
+test('manualRowFromDb narrows the driver\'s bigint text and leaves every other field alone', () => {
+  const r = manualRowFromDb(dbRow({ id: '15' }));
+  assert.equal(r.id, 15);
+  assert.equal(typeof r.id, 'number', 'a React key coerces either way — the DELETE GUARD does not');
+  // Idempotent, so the mapper is safe to apply to an already-narrowed row and every existing
+  // numeric-literal fixture stays valid.
+  assert.equal(manualRowFromDb({ ...dbRow(), id: 15 }).id, 15);
+  const raw = dbRow({ id: '15' });
+  assert.deepEqual(manualRowFromDb(raw), { ...raw, id: 15 }, 'nothing else is touched');
+});
+
+test('manualRowFromDb THROWS rather than truncating — a wrong id deletes the wrong decision', () => {
+  // 2^53 + 1 cannot round-trip through a JS number. Unreachable on an identity sequence from 1,
+  // which is the point: this is a tripwire, not a recovery strategy. Silently truncating would
+  // aim a delete at somebody else's money decision.
+  for (const bad of ['9007199254740993', '0', '-1', '1.5', 'abc', '', '  ']) {
+    assert.throws(
+      () => manualRowFromDb(dbRow({ id: bad })),
+      /not a safe positive integer/,
+      `id ${JSON.stringify(bad)} must be refused`,
+    );
+  }
+});
+
+test('THE REGRESSION: every id the tile can act on passes deleteUpcomingManual\'s guard', () => {
+  // The live 2026-08-06 book, as the driver returns it: 11 manual rows with STRING ids, plus the
+  // one sheet row. Before the read boundary was fixed these ids reached
+  // `Number.isSafeInteger(id) && id > 0` (app/lib/actions.ts) as strings, so EVERY "Remove edit",
+  // "Remove row" and "Undo correction" button returned bad_id without touching the database.
+  const K = (over: Partial<ManualForecastDbRow>) =>
+    dbRow({ method_label: null, amount: null, ...over });
+  const live: ManualForecastDbRow[] = [
+    K({ id: '6', kind: 'correct', facility_code: 'KWC', payer_label: 'BCBS TN', expected_date: '2026-08-05', amount: '32000.00' }),
+    K({ id: '7', kind: 'suppress', facility_code: 'KWC', payer_label: 'BCBS TN', expected_date: '2026-08-05', suppress_reason: 'landed' }),
+    K({ id: '8', kind: 'add', facility_code: 'KWC', payer_label: 'BCBS TN', expected_date: '2026-08-05', method_label: 'EFT', amount: '32000.00' }),
+    K({ id: '9', kind: 'suppress', facility_code: 'LSMH', payer_label: 'Aetna', expected_date: '2026-08-05', suppress_reason: 'incorrect' }),
+    K({ id: '10', kind: 'suppress', facility_code: 'NASH', payer_label: 'BCBS', expected_date: '2026-08-05', suppress_reason: 'incorrect' }),
+    K({ id: '11', kind: 'suppress', facility_code: 'TBH', payer_label: 'BCBS', expected_date: '2026-08-05', suppress_reason: 'incorrect' }),
+    K({ id: '12', kind: 'suppress', facility_code: 'TREAT_WA', payer_label: 'Regence', expected_date: '2026-08-05', suppress_reason: 'incorrect' }),
+    K({ id: '13', kind: 'suppress', facility_code: 'TBH', payer_label: 'Aetna', expected_date: '2026-08-06', suppress_reason: 'incorrect' }),
+    K({ id: '14', kind: 'suppress', facility_code: 'TREAT_WA', payer_label: 'Aetna', expected_date: '2026-08-06', suppress_reason: 'incorrect' }),
+    K({ id: '15', kind: 'add', facility_code: 'KWC', payer_label: 'BCBS AR', expected_date: '2026-05-26', method_label: 'Check', amount: '72000.00' }),
+    K({ id: '16', kind: 'suppress', facility_code: 'KWC', payer_label: 'Anthem', expected_date: '2026-08-06', suppress_reason: 'landed' }),
+  ];
+  const liveSheet: SheetForecastRow[] = [
+    sheet({ facility_code: 'KWC', payer_label: 'BCBS AR', expected_date: '2026-05-26',
+            method_label: 'Check', amount: '72000.00', is_patient_specific: true }),
+  ];
+
+  const r = resolveForecast(liveSheet, live.map(manualRowFromDb));
+
+  // Copied VERBATIM from app/lib/actions.ts deleteUpcomingManual — if that guard changes, this
+  // assertion is the thing that should notice.
+  const passesDeleteGuard = (id: number) => Number.isSafeInteger(id) && id > 0;
+  for (const row of r.rows) {
+    if (row.manualId !== undefined) {
+      assert.ok(passesDeleteGuard(row.manualId), `rendered row id ${row.manualId} must be deletable`);
+    }
+  }
+  assert.ok(r.stale.length > 0, 'the live book really does carry stale edits');
+  for (const st of r.stale) {
+    assert.ok(passesDeleteGuard(st.manual.id), `stale edit id ${st.manual.id} must be deletable`);
+  }
+
+  // And the sort at the end of resolveForecast is numeric BY TYPE now, not numeric by the
+  // accident of JS coercing "10" - "2". A localeCompare "simplification" would order 10 before 2.
+  const ids = r.stale.map((s) => s.manual.id);
+  assert.deepEqual(ids, [...ids].sort((a, b) => a - b), 'stale is ascending by id');
+  assert.ok(ids.includes(15), 'the duplicate add is among them (see the duplicate tests below)');
+});
+
 test('the match key is case- and whitespace-insensitive on the payer label only', () => {
   assert.equal(matchKey('CAMH', ' umr ', '2026-08-04'), matchKey('CAMH', 'UMR', '2026-08-04'));
   assert.notEqual(matchKey('CAMH', 'UMR', '2026-08-04'), matchKey('camh', 'UMR', '2026-08-04'));
   // A correction keyed with sloppy spacing still lands on its row.
   const r = resolveForecast([sheet()], [manual({ payer_label: '  umr  ', amount: '1.00' })]);
   assert.equal(r.rows[0]!.amount, '1.00');
+});
+
+// --- THE SHEET WINS A KEY COLLISION -----------------------------------------
+
+test('a manual add duplicating a sheet row is SKIPPED and surfaced — the money is counted once', () => {
+  // The live 2026-08-06 state: add id 15 duplicates the sheet's KWC / BCBS AR / 2026-05-26
+  // $72,000 row exactly, and the tile rendered both for a $144,000 overdue subtotal.
+  const r = resolveForecast([sheet()], [manual({ kind: 'add', method_label: 'EFT', amount: '16117.31' })]);
+  assert.equal(r.rows.length, 1, 'one payment, one row');
+  assert.equal(r.rows[0]!.origin, 'sheet', 'the feed of record wins');
+  assert.equal(r.totalCents, 1611731, 'NOT 3223462 — the double count is the whole defect');
+  assert.equal(r.stale.length, 1, 'and the add is surfaced, never silently dropped');
+  assert.equal(r.stale[0]!.reason, 'duplicate_of_sheet_row');
+  assert.equal(r.stale[0]!.manual.kind, 'add');
+  assert.deepEqual(r.stale[0]!.sheetAmounts, ['16117.31'], 'the money that IS counted is named');
+});
+
+test('the duplicate check is on the MATCH KEY, not on the amount', () => {
+  // Loosening this to key+amount would let a mistyped add render beside its sheet twin at a key
+  // that 024's vocabulary cannot address separately: suppress(key) kills both, correct(key) hits
+  // only the sheet row. Same ambiguous state, differently spelled.
+  const r = resolveForecast([sheet()], [manual({ kind: 'add', method_label: 'EFT', amount: '999.00' })]);
+  assert.equal(r.rows.length, 1);
+  assert.equal(r.rows[0]!.amount, '16117.31', "the sheet's amount, not the add's");
+  assert.equal(r.stale.length, 1);
+  assert.equal(r.stale[0]!.reason, 'duplicate_of_sheet_row');
+});
+
+test('a suppress on a duplicated key consumes the sheet row AND the add, and nothing is stale', () => {
+  // Locks the suppress-before-duplicate ordering, and proves the double-mark of usedSuppress is
+  // harmless (it is a Set).
+  const r = resolveForecast(
+    [sheet()],
+    [
+      manual({ kind: 'add', method_label: 'EFT', amount: '16117.31' }),
+      manual({ kind: 'suppress', amount: null, suppress_reason: 'landed' }),
+    ],
+  );
+  assert.equal(r.rows.length, 0);
+  assert.equal(r.totalCents, 0);
+  assert.equal(r.stale.length, 0, 'no duplicate complaint about a row the human already hid');
+});
+
+test("THE DELIBERATE ASYMMETRY: a 'correct' on a key held only by an ADD is stale", () => {
+  // This is the live ids 6/7/8 shape, and it is NOT the sub-defect it looks like. The adds loop
+  // never consults the correct map — a correction is a statement about a SHEET row and 024 does
+  // not promote it to an add — so this correct is changing nothing whether or not the add is
+  // suppressed. Marking it "used" for symmetry with the sheet loop would HIDE a dead edit, which
+  // is the one thing the stale strip exists to prevent. Pinned so nobody "fixes" the asymmetry.
+  const at = { facility_code: 'KWC', payer_label: 'BCBS TN', expected_date: '2026-08-05' };
+  const r = resolveForecast(
+    [],
+    [
+      manual({ id: 6, kind: 'correct', ...at, amount: '32000.00' }),
+      manual({ id: 7, kind: 'suppress', ...at, amount: null, suppress_reason: 'landed' }),
+      manual({ id: 8, kind: 'add', ...at, method_label: 'EFT', amount: '32000.00' }),
+    ],
+  );
+  assert.equal(r.rows.length, 0, 'the add is suppressed');
+  assert.equal(r.stale.length, 1);
+  assert.equal(r.stale[0]!.manual.id, 6);
+  assert.equal(r.stale[0]!.manual.kind, 'correct');
+  assert.equal(r.stale[0]!.reason, 'no_matching_sheet_row', 'orphaned, not duplicate');
+});
+
+test('two identical sheet forecasts BOTH survive — this module never dedupes the feed of record', () => {
+  // 023 has no unique index and its header is explicit that two identical forecasts are legal.
+  const two = resolveForecast([sheet({ amount: '100.00' }), sheet({ amount: '900.00' })], []);
+  assert.equal(two.rows.length, 2, 'the dedupe applies to ADDS, never to the sheet');
+  assert.equal(two.totalCents, 100000);
+
+  const withAdd = resolveForecast(
+    [sheet({ amount: '100.00' }), sheet({ amount: '900.00' })],
+    [manual({ kind: 'add', method_label: 'EFT', amount: '1.00' })],
+  );
+  assert.equal(withAdd.rows.length, 2, 'still both sheet rows');
+  assert.equal(withAdd.stale.length, 1);
+  assert.deepEqual(withAdd.stale[0]!.sheetAmounts, ['100.00', '900.00'], 'both colliding amounts');
+});
+
+test('the resolved order is a TOTAL order over a duplicated match key', () => {
+  // (date, facility, payer) is not unique and OVERRIDE_*_ROWS_SQL orders by those same three
+  // columns, so without the amount/method tiebreak the render order of a duplicated key is
+  // planner order — stable-sorted into place and free to flip between page loads.
+  const amounts = (rows: SheetForecastRow[]) =>
+    resolveForecast(rows, []).rows.map((r) => r.amount);
+  const forward = amounts([sheet({ amount: '100.00' }), sheet({ amount: '900.00' })]);
+  const reverse = amounts([sheet({ amount: '900.00' }), sheet({ amount: '100.00' })]);
+  assert.deepEqual(forward, ['900.00', '100.00'], 'larger first, matching the group-list idiom');
+  assert.deepEqual(forward, reverse, 'and input order cannot change it');
+});
+
+// --- hidden: an applied suppression must stay reversible -------------------
+//
+// Suppression used to be a ONE-WAY DOOR. An applied suppress is consumed into `usedSuppress`,
+// so it is not stale (it is working exactly as asked) and rendered nowhere — there was no id on
+// screen to delete and the hidden row could never come back from the UI. These pin the way out.
+
+test('an applied suppression is HIDDEN, not stale, and names the money it removed', () => {
+  const r = resolveForecast(
+    [sheet({ amount: '16117.31' })],
+    [manual({ kind: 'suppress', amount: null, suppress_reason: 'landed' })],
+  );
+  assert.equal(r.rows.length, 0, 'the row is off the tile — that is what suppress means');
+  assert.equal(r.stale.length, 0, 'and it is NOT stale: a working edit is not an orphaned one');
+  assert.equal(r.hidden.length, 1, 'it is hidden, so the UI can offer an Undo');
+  assert.equal(r.hidden[0]!.manual.kind, 'suppress');
+  assert.deepEqual(r.hidden[0]!.hiddenAmounts, ['16117.31'], 'the operator sees what left');
+  assert.equal(r.hidden[0]!.hidAdd, false);
+});
+
+test('hidden reports the CORRECTED amount — that is what an Undo brings back', () => {
+  const key = { facility_code: 'CAMH', payer_label: 'UMR', expected_date: '2026-08-04' };
+  const r = resolveForecast(
+    [sheet({ ...key, amount: '16117.31' })],
+    [
+      manual({ ...key, kind: 'correct', amount: '20000.00' }),
+      manual({ ...key, kind: 'suppress', amount: null, suppress_reason: 'landed' }),
+    ],
+  );
+  assert.equal(r.hidden.length, 1);
+  assert.deepEqual(
+    r.hidden[0]!.hiddenAmounts,
+    ['20000.00'],
+    'naming the pre-correction 16117.31 would understate the money coming back',
+  );
+});
+
+test('a suppressed manual ADD is hidden with hidAdd — the invisible-and-undeletable case', () => {
+  // The regression that made this a blocker: the adds loop consumed the add into the same
+  // branch, so it rendered nowhere, was not stale, and re-keying it through the add form was
+  // swallowed by the suppress still standing. Recovery meant SQL.
+  const key = { facility_code: 'KWC', payer_label: 'BCBS TN', expected_date: '2026-08-05' };
+  const r = resolveForecast(
+    [],
+    [
+      manual({ ...key, kind: 'add', method_label: 'EFT', amount: '32000.00' }),
+      manual({ ...key, kind: 'suppress', amount: null, suppress_reason: 'landed' }),
+    ],
+  );
+  assert.equal(r.rows.length, 0);
+  assert.equal(r.hidden.length, 1);
+  assert.equal(r.hidden[0]!.hidAdd, true, 'so the copy can say the add comes back too');
+  assert.deepEqual(r.hidden[0]!.hiddenAmounts, ['32000.00']);
+  assert.equal(
+    r.hidden[0]!.manual.kind,
+    'suppress',
+    'Undo deletes the SUPPRESS, which is what restores the add',
+  );
+});
+
+test('one suppress hiding a duplicated sheet key reports BOTH amounts under ONE undo', () => {
+  const r = resolveForecast(
+    [sheet({ amount: '100.00' }), sheet({ amount: '900.00' })],
+    [manual({ kind: 'suppress', amount: null, suppress_reason: 'incorrect' })],
+  );
+  assert.equal(r.hidden.length, 1, 'one edit, one Undo — not one per row it happens to cover');
+  assert.deepEqual(r.hidden[0]!.hiddenAmounts, ['100.00', '900.00']);
+});
+
+test('a suppress that hides NOTHING stays stale — hidden means in effect', () => {
+  const r = resolveForecast([], [manual({ kind: 'suppress', amount: null, suppress_reason: 'landed' })]);
+  assert.equal(r.hidden.length, 0);
+  assert.equal(r.stale.length, 1);
+  assert.equal(r.stale[0]!.reason, 'no_matching_sheet_row');
+});
+
+test('hidden money is NEVER in totalCents — undoing is how it comes back, not summing', () => {
+  const r = resolveForecast(
+    [sheet({ amount: '16117.31' }), sheet({ facility_code: 'KWC', amount: '500.00' })],
+    [manual({ kind: 'suppress', amount: null, suppress_reason: 'landed' })],
+  );
+  assert.equal(r.totalCents, 50000, 'only the surviving KWC row');
+  assert.ok(r.hidden.length > 0, 'and the suppressed 16117.31 is recorded, not counted');
+});
+
+test('THE LIVE BOOK: every one of the 11 manual rows is reachable from the UI', () => {
+  // The 2026-08-06 production state that produced this work. Before the fix the operator could
+  // clear NONE of them (the delete guard rejected the bigint-as-string id); after the dedupe
+  // alone, ids 7 and 8 were still unreachable. This asserts the whole book is addressable.
+  const k = (facility_code: string, payer_label: string, expected_date: string) => ({
+    facility_code,
+    payer_label,
+    expected_date,
+  });
+  const rows: ManualForecastDbRow[] = [
+    dbRow({ id: '6', kind: 'correct', ...k('KWC', 'BCBS TN', '2026-08-05'), amount: '32000.00' }),
+    dbRow({ id: '7', kind: 'suppress', ...k('KWC', 'BCBS TN', '2026-08-05'), amount: null, suppress_reason: 'landed' }),
+    dbRow({ id: '8', kind: 'add', ...k('KWC', 'BCBS TN', '2026-08-05'), method_label: 'EFT', amount: '32000.00' }),
+    dbRow({ id: '9', kind: 'suppress', ...k('LSMH', 'Aetna', '2026-08-05'), amount: null, suppress_reason: 'incorrect' }),
+    dbRow({ id: '10', kind: 'suppress', ...k('NASH', 'BCBS', '2026-08-05'), amount: null, suppress_reason: 'incorrect' }),
+    dbRow({ id: '11', kind: 'suppress', ...k('TBH', 'BCBS', '2026-08-05'), amount: null, suppress_reason: 'incorrect' }),
+    dbRow({ id: '12', kind: 'suppress', ...k('TREAT_WA', 'Regence', '2026-08-05'), amount: null, suppress_reason: 'incorrect' }),
+    dbRow({ id: '13', kind: 'suppress', ...k('TBH', 'Aetna', '2026-08-06'), amount: null, suppress_reason: 'incorrect' }),
+    dbRow({ id: '14', kind: 'suppress', ...k('TREAT_WA', 'Aetna', '2026-08-06'), amount: null, suppress_reason: 'incorrect' }),
+    dbRow({ id: '15', kind: 'add', ...k('KWC', 'BCBS AR', '2026-05-26'), method_label: 'Check', amount: '72000.00' }),
+    dbRow({ id: '16', kind: 'suppress', ...k('KWC', 'Anthem', '2026-08-06'), amount: null, suppress_reason: 'landed' }),
+  ];
+  const liveSheet = [
+    sheet({ ...k('KWC', 'BCBS AR', '2026-05-26'), method_label: 'Check', amount: '72000.00', is_patient_specific: true }),
+  ];
+  const r = resolveForecast(liveSheet, rows.map(manualRowFromDb));
+
+  assert.equal(r.rows.length, 1, 'one real forecast row, not the two that made it $144,000');
+  assert.equal(r.totalCents, 7200000);
+
+  const staleIds = r.stale.map((s) => s.manual.id);
+  const hiddenIds = r.hidden.map((h) => h.manual.id);
+  assert.deepEqual(staleIds, [6, 9, 10, 11, 12, 13, 14, 15, 16]);
+  assert.deepEqual(hiddenIds, [7]);
+  // 8 is not listed anywhere BY ITSELF, and must not be: it is restored by undoing 7. Asserting
+  // that explicitly is the point — an add reachable only through its suppress is the design.
+  assert.equal(r.hidden[0]!.hidAdd, true, 'undoing 7 brings add 8 back');
+
+  const addressable = new Set([...staleIds, ...hiddenIds]);
+  for (const id of [6, 7, 9, 10, 11, 12, 13, 14, 15, 16]) {
+    assert.ok(addressable.has(id), `edit ${id} must have a control on screen`);
+  }
+  // And every id the UI puts on a delete-edit intent must survive the Server Action's guard —
+  // copied verbatim from deleteUpcomingManual, because that is the check that was rejecting.
+  for (const id of addressable) {
+    assert.ok(Number.isSafeInteger(id) && id > 0, `id ${String(id)} must pass the delete guard`);
+  }
 });
 
 test('cents helpers are exact and reject junk', () => {
