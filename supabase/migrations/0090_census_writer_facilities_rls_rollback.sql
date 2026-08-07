@@ -1,4 +1,4 @@
--- ROLLBACK for 0090 — drop the writer's RLS SELECT policy on collections.facilities.
+-- ROLLBACK for 0094 — drop the writer's RLS SELECT policy on collections.facilities.
 --
 -- ⚠ THIS RESTORES THE BUG, not a neutral prior state. Without the policy, cmd_rollup_writer's read
 --   of collections.facilities succeeds and returns ZERO ROWS (RLS with no applicable policy is
@@ -13,7 +13,7 @@
 -- which case also remove the care_setting assertion from the sync, rather than leaving an assertion
 -- that cannot read its input.
 --
--- OWNERSHIP: postgres — no SET ROLE (see the 0090 header).
+-- OWNERSHIP: postgres — no SET ROLE (see the 0094 header).
 
 drop policy if exists collections_writer_select_facilities on collections.facilities;
 

@@ -1,4 +1,4 @@
--- 0091 — collections.qualify_facility_outcomes: completed-stay LOS/auth, so auth-fit compares evenly.
+-- 0095 — collections.qualify_facility_outcomes: completed-stay LOS/auth, so auth-fit compares evenly.
 --
 -- WHY: the auth-fit factor divides average length of stay by average authorized days. Both inputs
 --   come from collections.qualify_facility_census, which is a snapshot of CURRENTLY ADMITTED clients
@@ -68,7 +68,7 @@
 -- IDEMPOTENT: CREATE TABLE IF NOT EXISTS; DROP POLICY IF EXISTS before CREATE POLICY (42710);
 --   the seed is ON CONFLICT DO UPDATE.
 --
--- Rollback: 0091_qualify_facility_outcomes_rollback.sql
+-- Rollback: 0095_qualify_facility_outcomes_rollback.sql
 
 -- 1. Table -------------------------------------------------------------------------------------
 create table if not exists collections.qualify_facility_outcomes (

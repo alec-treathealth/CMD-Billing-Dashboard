@@ -1,4 +1,4 @@
--- 0088 — collections.qualify_facility_census.los_sample: the LOS side of the auth-fit sample gate.
+-- 0092 — collections.qualify_facility_census.los_sample: the LOS side of the auth-fit sample gate.
 --
 -- WHY: the auth/LOS rating factor is a ratio of two averages, and until now only ONE of them could
 --   be sample-gated. `auth_sample` has existed since 0078 (the count of admitted rows contributing
@@ -48,7 +48,7 @@
 -- IDEMPOTENT: ADD COLUMN IF NOT EXISTS. Re-running is a no-op, including on a database where the
 --   column already exists with rows populated (the default is not re-applied to existing rows).
 --
--- ROLLBACK: 0088_qualify_census_los_sample_rollback.sql. Dropping the column is safe ONLY once the
+-- ROLLBACK: 0092_qualify_census_los_sample_rollback.sql. Dropping the column is safe ONLY once the
 --   reading code is also rolled back — buildQualifyCensusReadQuery projects it, so a
 --   code-forward/schema-back state 500s the Qualify book overview. Roll code back first.
 
@@ -58,7 +58,7 @@ alter table collections.qualify_facility_census
 comment on column collections.qualify_facility_census.los_sample is
   'Admitted rows contributing to avg_los_days: billed (see isBilledForAuthFit) AND with a computable '
   'length of stay. Pairs with auth_sample; ratingV2 gates the auth-fit factor on '
-  'min(auth_sample, los_sample) >= QUALIFY_LOS_MIN_SAMPLE. 0 = not yet resynced since 0088.';
+  'min(auth_sample, los_sample) >= QUALIFY_LOS_MIN_SAMPLE. 0 = not yet resynced since 0092.';
 
 -- ── verification (run after applying; all three must hold) ─────────────────────────────────────
 --

@@ -1,4 +1,4 @@
--- 0090 — RLS SELECT policy on collections.facilities for cmd_rollup_writer.
+-- 0094 — RLS SELECT policy on collections.facilities for cmd_rollup_writer.
 --
 -- WHY: 0089 granted the writer SELECT on this table and the census conformance alarm STILL reported
 --   23 of 23. Proved by running the sync manually against prod after 0089 was applied: the gap
@@ -45,7 +45,7 @@
 -- IDEMPOTENT: DROP POLICY IF EXISTS before CREATE — otherwise a re-run raises 42710 (see
 --   .claude/rules/sql-migrations.md).
 --
--- Rollback: 0090_census_writer_facilities_rls_rollback.sql
+-- Rollback: 0094_census_writer_facilities_rls_rollback.sql
 
 drop policy if exists collections_writer_select_facilities on collections.facilities;
 

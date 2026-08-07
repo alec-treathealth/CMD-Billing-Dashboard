@@ -1,4 +1,4 @@
--- 0089 — grant cmd_rollup_writer SELECT on collections.facilities: un-saturate the census alarm.
+-- 0093 — grant cmd_rollup_writer SELECT on collections.facilities: un-saturate the census alarm.
 --
 -- WHY: the qualify-census run log has reported `status: partial` with
 --   `conformance_gap_boards: 23 of 23` on EVERY run since the 23-facility onboarding. Measured
@@ -51,7 +51,7 @@
 --
 -- IDEMPOTENT: GRANT is repeatable — re-running is a no-op, it does not stack or error.
 --
--- Rollback: 0089_census_writer_facilities_read_rollback.sql
+-- Rollback: 0093_census_writer_facilities_read_rollback.sql
 
 grant select on collections.facilities to cmd_rollup_writer;
 

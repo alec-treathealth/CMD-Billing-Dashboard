@@ -1,4 +1,4 @@
--- ROLLBACK for 0089 — revoke cmd_rollup_writer's SELECT on collections.facilities.
+-- ROLLBACK for 0093 — revoke cmd_rollup_writer's SELECT on collections.facilities.
 --
 -- ⚠ WHAT THIS RESTORES IS THE BUG, not a neutral prior state. Revoking sends the census sync back to
 --   a 42501 on every run's care_setting read, an empty careSettings map, and a saturated
@@ -15,7 +15,7 @@
 --   error is an outage, not a data state. So rolling this back WILL start failing census runs
 --   loudly. That is the intended behaviour, and it is the reason to prefer fixing forward.
 --
--- OWNERSHIP: postgres — no SET ROLE (see the 0089 header).
+-- OWNERSHIP: postgres — no SET ROLE (see the 0093 header).
 
 revoke select on collections.facilities from cmd_rollup_writer;
 

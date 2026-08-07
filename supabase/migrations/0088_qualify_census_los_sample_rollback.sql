@@ -1,4 +1,4 @@
--- ROLLBACK for 0088 — drop collections.qualify_facility_census.los_sample.
+-- ROLLBACK for 0092 — drop collections.qualify_facility_census.los_sample.
 --
 -- ⚠ ROLL THE CODE BACK FIRST. buildQualifyCensusReadQuery (src/collections/qualifyCensus.ts)
 --   PROJECTS los_sample, and loadQualifyCensusAuth types it. Dropping the column while the deployed
@@ -8,9 +8,9 @@
 --
 -- Dropping los_sample loses only the stored sample COUNT. No average is lost (avg_los_days is a
 -- separate column) and the next hourly :22 sync recomputes everything from monday regardless, so
--- this is recoverable in one cron tick once 0088 is re-applied.
+-- this is recoverable in one cron tick once 0092 is re-applied.
 --
--- OWNERSHIP: postgres — no SET ROLE (see the 0088 header).
+-- OWNERSHIP: postgres — no SET ROLE (see the 0092 header).
 
 alter table collections.qualify_facility_census
   drop column if exists los_sample;
