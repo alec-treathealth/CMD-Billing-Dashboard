@@ -1220,26 +1220,6 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // (snapshot still loading, or a first load that failed). Name NOBODY rather than name the payer of
   // a plan the user declined.
   const skipUnder = snap?.resolved?.payerName ? ` under ${snap.resolved.payerName}` : '';
-  /**
-   * ⚠ THE DISCLOSURE'S CAPTIONS ARE FROZEN AT RESOLVE TIME AND A SKIP NEVER RE-RESOLVES.
-   * `r.provenance` is minted SERVER-side inside `resolveCoverage` (resolutionService.ts:383-408) from
-   * the chosen candidate, via `panelProvenance` (resolution.ts:303-317) which interpolates
-   * `group.employerLabel`. A Skip is pure client state (resolution-flow-client.tsx:132-143) — no
-   * server round trip — so after one, these strings still read
-   * "AETNA · FRESNO UNIFIED SCHOOL DISTRICT · 57 members · 1,994 charge lines" about a plan the user
-   * explicitly declined, while the panels underneath are identifier-wide: the fetch sends no
-   * payerOverride and no market (client :221, :281-294), and the AI payload is built entirely from
-   * that same snapshot (qualify-ai-panel.tsx:27-66). DISPLAY-ONLY BUG — the data was already honest.
-   *
-   * Extending 7c86709's pattern: state what IS true rather than blank the row. Keyed on `skipped`
-   * ALONE — never on chosenBy/chosenIndex, because a Skip taken AFTER a plan pick leaves `r.group`
-   * describing the previously-picked candidate rather than index 0.
-   */
-  const skipProvenance: Record<'ranking' | 'policy' | 'ai', string> = {
-    ranking: `all plans — no plan chosen · this identifier's whole footprint${skipUnder}`,
-    policy: 'no plan chosen — no single policy backs this screen',
-    ai: `grounded in the ranking on screen — all plans, no plan chosen${skipUnder}`,
-  };
   const policyBits = [
     g.employerLabel ?? 'No plan sponsor on file',
     g.funding ?? 'Funding not captured',
@@ -1253,6 +1233,81 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
     [props.candidates, props.filters],
   );
   const filtersActive = answerFiltersActive(props.filters);
+  /**
+   * ⚠ A SKIP IS NOT A PROMISE THAT THE FETCH STAYED WIDE, and v1 of this fix assumed it was.
+   * `scopeSource` never moves off 'skipped' when the answer-stage filter chips are used — it is
+   * derived from payerOverride / pickLabel / skipped alone (resolution-flow-client.tsx:222-224) and
+   * knows nothing about filters — but the fetch effect DOES fold active filters into a real `market`
+   * payload (client :278-294): funding goes straight through, and plan type / employer narrow by way
+   * of the employer set `employerNarrowFor` resolves them to. So "Skip, then one Funding chip" was
+   * rendering "this identifier's whole footprint" over a funding-narrowed snapshot, flatly
+   * contradicting the "Ranking over N of M plans" line a few rows above it.
+   *
+   * Recomputed here with the SAME pure function on the SAME inputs the shell used — `props.candidates`
+   * IS the shell's `answerCandidates` and `props.filters` IS its `filters` (client :492, :493) — not a
+   * second derivation that can drift from the request. That precision earns its keep in two states
+   * where "filters are active" and "the ranking is narrowed" come apart: a narrow `employerNarrowFor`
+   * refused as not-a-narrow (:325), and one that exceeded the send bound (`tooMany`, :326). Neither
+   * reached the request, the plan-count line already discloses the second, and neither may be claimed
+   * here — so those fall back to the whole-footprint wording, which is what the snapshot really is.
+   */
+  const employerNarrow = filtersActive ? employerNarrowFor(props.candidates, filteredCandidates) : null;
+  const rankingNarrowed =
+    props.filters.funding.length > 0 || (employerNarrow !== null && 'employers' in employerNarrow);
+  /**
+   * ⚠ THE DISCLOSURE'S CAPTIONS ARE FROZEN AT RESOLVE TIME AND A SKIP NEVER RE-RESOLVES.
+   * `r.provenance` is minted SERVER-side inside `resolveCoverage` (resolutionService.ts:383-408) from
+   * the chosen candidate, via `panelProvenance` (resolution.ts:303-317) which interpolates
+   * `group.employerLabel`. A Skip is pure client state (resolution-flow-client.tsx:132-143) — no
+   * server round trip — so after one, these strings still read
+   * "AETNA · FRESNO UNIFIED SCHOOL DISTRICT · 57 members · 1,994 charge lines" about a plan the user
+   * explicitly declined, while the panels underneath are identifier-wide: the fetch sends no
+   * payerOverride (client :221) and, absent filters, no market. DISPLAY-ONLY BUG — the data was
+   * already honest.
+   *
+   * Extending 7c86709's pattern: state what IS true rather than blank the row. Keyed on `skipped`
+   * ALONE — never on chosenBy/chosenIndex, because a Skip taken AFTER a plan pick leaves `r.group`
+   * describing the previously-picked candidate rather than index 0.
+   */
+  const skipProvenance: Record<'ranking' | 'policy' | 'ai', string> = {
+    ranking: rankingNarrowed
+      ? `all plans — no plan chosen, then narrowed by your filter selections${skipUnder}`
+      : `all plans — no plan chosen · this identifier's whole footprint${skipUnder}`,
+    // Filters narrow rows; they never elect a policy. True either way.
+    policy: 'no plan chosen — no single policy backs this screen',
+    ai: rankingNarrowed
+      ? `grounded in the ranking on screen — all plans, no plan chosen, narrowed by your filter selections${skipUnder}`
+      : `grounded in the ranking on screen — all plans, no plan chosen${skipUnder}`,
+  };
+  /**
+   * ⚠ "EVERY deriveNotices KIND IS GROUP-SCOPED" — v1 of this fix asserted that and was wrong about
+   * exactly one kind, so here is the per-kind reality (resolution.ts:324-385):
+   *   · `unmapped_payer`, `thin_evidence`, `stale_vob`, `network_not_captured` — read off the CHOSEN
+   *     candidate's payer identity, claim evidence, VOB freshness and network capture. After a skip
+   *     the panels are a wider row set, so all four describe the plan the user declined.
+   *     'network_not_captured' ("In-network status is not captured on this VOB") is the line Alec
+   *     hit; 'unmapped_payer' is worse still, because it denies facility comparisons the ranking is
+   *     visibly making.
+   *   · `ambiguous_candidates`, `sole_candidate` — both claim a selection that did not happen.
+   *     7c86709 filtered the first; the second makes the same claim and goes with it.
+   *   · `no_policy_on_file` — MEMBER-level, not plan-level, and TRUE after a skip on the path that
+   *     produced this bug. resolutionService §3 pushes every VOB row before any claims-only row
+   *     (:243-302, and nothing sorts `groups` afterwards), so a `claims_only` basis at chosenIndex 0
+   *     PROVES the identifier has no VOB row at all — "No verification of benefits on file for this
+   *     member" is then a statement about the identifier, and v1 suppressed it, making the screen
+   *     claim more confidence than it had.
+   * The chosenIndex-0 gate is what the VOB-first ordering actually proves. A pick-then-skip (receipt
+   * Change → plan → Skip, which does not clear `state.resolution`) can leave a claims-only group
+   * chosen out of a VOB-BEARING set, where the member-level claim would be false — unprovable, so
+   * unstated. Note this asks a DIFFERENT question than the `skipped`-alone keying above: that one is
+   * "was a plan chosen", this one is "is this basis identifier-wide".
+   */
+  const skipSurvivingNotices = r.notices.filter(
+    (n) => n.kind === 'no_policy_on_file' && r.candidates.chosenIndex === 0,
+  );
+  // ⟺ the identifier has no VOB row anywhere (see above). Picking a plan therefore cannot surface
+  // benefits notes, so the explanation below must not offer that as a way to see them.
+  const identifierHasNoVob = skipSurvivingNotices.length > 0;
   // Employer options: filtered by the tag-search text, then capped for render — a 311-employer chip
   // wall is not a control. Selected employers are always shown so a narrow is never invisible.
   const employerNeedle = props.employerQuery.trim().toLowerCase();
@@ -1610,42 +1665,37 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
       <details className="rounded-lg border border-line bg-surface px-4 py-3">
         <summary className="cursor-pointer text-sm font-semibold text-ink900">How this was resolved</summary>
         <div className="mt-3 flex flex-col gap-3">
-          {/* ⚠ EVERY kind `deriveNotices` mints is GROUP-scoped (resolution.ts:324-385): each one reads
-              off the chosen candidate's payer identity, VOB freshness, network capture, resolution
-              basis or claim evidence. After a Skip the panels are about a different, wider row set, so
-              all of them describe the declined plan — 'network_not_captured' ("In-network status is
-              not captured on this VOB") was the line Alec hit, and 'unmapped_payer' is worse still,
-              since it denies facility comparisons the ranking is visibly making. This SUPERSEDES
-              7c86709's single-kind filter on 'ambiguous_candidates' (keeping that filter under a
-              branch that only runs when !skipped would be dead code). Suppression alone is the
-              failure mode 7c86709 warns about, so the list is REPLACED by the true statement rather
-              than silently emptied. */}
-          {skipped ? (
-            <p className="rounded-lg bg-teal50 px-2.5 py-1.5 text-sm text-ink900">
-              <span className="mr-2 text-xs font-semibold uppercase text-ink600">Note</span>
-              No plan was chosen, so the notes about one plan — its benefits, its evidence, its network —
-              are not shown: every one of them describes the plan you skipped past, not the rows above.
-              Pick a plan from the receipt to see them.
-            </p>
-          ) : (
-            <ul className="flex list-none flex-col gap-2 p-0">
-              {r.notices.map((n) => (
-                // Severity hue BEHIND the severity word (Phase 5) — the word stays; the wash makes a
-                // caution findable in a scan without reading every line.
-                <li
-                  key={n.kind}
-                  className={`rounded-lg px-2.5 py-1.5 text-sm text-ink900 ${
-                    n.severity === 'caution' ? 'bg-coral50' : 'bg-teal50'
-                  }`}
-                >
-                  <span className="mr-2 text-xs font-semibold uppercase text-ink600">
-                    {n.severity === 'caution' ? 'Caution' : 'Note'}
-                  </span>
-                  {n.text}
-                </li>
-              ))}
-            </ul>
-          )}
+          {/* Which notices survive a skip is decided at `skipSurvivingNotices` above — per KIND, with
+              the reasoning. This SUPERSEDES 7c86709's single-kind filter on 'ambiguous_candidates'.
+              Suppression alone is the failure mode 7c86709 warns about, so the suppressed set is
+              REPLACED by a line saying why it is absent rather than silently emptied. */}
+          <ul className="flex list-none flex-col gap-2 p-0">
+            {(skipped ? skipSurvivingNotices : r.notices).map((n) => (
+              // Severity hue BEHIND the severity word (Phase 5) — the word stays; the wash makes a
+              // caution findable in a scan without reading every line.
+              <li
+                key={n.kind}
+                className={`rounded-lg px-2.5 py-1.5 text-sm text-ink900 ${
+                  n.severity === 'caution' ? 'bg-coral50' : 'bg-teal50'
+                }`}
+              >
+                <span className="mr-2 text-xs font-semibold uppercase text-ink600">
+                  {n.severity === 'caution' ? 'Caution' : 'Note'}
+                </span>
+                {n.text}
+              </li>
+            ))}
+            {skipped ? (
+              <li className="rounded-lg bg-teal50 px-2.5 py-1.5 text-sm text-ink900">
+                <span className="mr-2 text-xs font-semibold uppercase text-ink600">Note</span>
+                No plan was chosen, so the notes about one plan — its benefits, its evidence, its network —
+                are not shown: every one of them describes the plan you skipped past, not the rows above.
+                {/* Only offered when a plan COULD carry them. With no VOB row anywhere behind this
+                    identifier, "pick a plan to see them" sends the user after notes that do not exist. */}
+                {identifierHasNoVob ? '' : ' Pick a plan from the receipt to see them.'}
+              </li>
+            ) : null}
+          </ul>
           <dl className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {(['ranking', 'policy', 'ai'] as const).map((panel) => (
               <div key={panel} className="flex flex-col">
