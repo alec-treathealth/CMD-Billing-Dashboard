@@ -150,6 +150,62 @@ function FactorList({ f, findings = [] }: { f: QualifyFacility; findings?: Quali
   );
 }
 
+/**
+ * The bed-context chip, as three genuinely different states rather than one truthiness check.
+ *
+ * WHY THIS IS A FUNCTION. It used to be an inline `openBeds > 0 ?` guard, which silently collapsed
+ * two opposite meanings into "render nothing": a house with ZERO free beds, and a facility that has
+ * no beds at all. Measured live 2026-08-07, that hid the status of five of twenty-three facilities
+ * — every residential house that was FULL. "Full" is the single most actionable thing this card can
+ * say to a rep deciding where to route a patient, and it was the one value the card stayed silent
+ * on. Silence read as "no census data", which is the opposite of the truth.
+ *
+ * The denominator is what separates the two zeroes, and it is already on the row:
+ *   · capacity known + 0 open  -> FULL. A fact, and a strong one.
+ *   · capacity absent + 0 open -> not a bed facility (outpatient). Correctly silent.
+ *   · openBeds null            -> no census row at all. Genuinely unknown, correctly silent.
+ *
+ * Tightness stays a FACT SHOWN, never folded into the rating — same rule as before.
+ */
+export function bedChip(
+  openBeds: number | null,
+  bedCapacity: number | null,
+): { label: string; title: string; tone: 'roomy' | 'tight' } | null {
+  if (openBeds === null) return null; // no census row — do not imply a count we do not have
+  const hasCapacity = bedCapacity !== null && bedCapacity > 0;
+
+  if (openBeds === 0) {
+    // Without a denominator a zero cannot be read as "full": outpatient boards report no beds at
+    // all, and every one of them would otherwise claim to be at capacity.
+    if (!hasCapacity) return null;
+    return {
+      label: `Full · 0 of ${bedCapacity}`,
+      title: `No open beds — all ${bedCapacity} licensed beds occupied on the latest census sync`,
+      tone: 'tight',
+    };
+  }
+
+  if (!hasCapacity) {
+    return {
+      label: `${openBeds} open bed${openBeds === 1 ? '' : 's'}`,
+      title:
+        `${openBeds} open bed${openBeds === 1 ? '' : 's'} on the latest census sync — ` +
+        'licensed bed count not on file, so occupancy is unknown',
+      tone: 'roomy',
+    };
+  }
+
+  const capacity = bedCapacity as number;
+  return {
+    label: `${openBeds} of ${capacity} beds`,
+    title:
+      `${openBeds} of ${capacity} licensed beds open ` +
+      `(${Math.round((openBeds / capacity) * 100)}% free) on the latest census sync`,
+    // Same 15% floor as before; a full house is tight by definition and is handled above.
+    tone: openBeds / capacity <= 0.15 ? 'tight' : 'roomy',
+  };
+}
+
 const EMPTY_KEYS: ReadonlySet<string> = new Set();
 
 export function FacilityPanel({
@@ -313,31 +369,25 @@ export function FacilityPanel({
                           UR {f.nextUrDate}
                         </span>
                       ) : null}
-                      {/* OCCUPANCY, not a bare free-bed count. 8 free at a 20-bed house and 8 free at
-                          a 12-bed house are opposite signals about whether they will take this
-                          patient, and the count alone cannot tell them apart. The denominator is the
-                          curated licensed-bed figure; when it is absent (outpatient — no beds — or a
-                          facility not yet curated) this falls back to the old count rather than
-                          inventing one. Tightness is a FACT shown, never folded into the rating. */}
-                      {f.openBeds !== null && f.openBeds > 0 ? (
-                        <span
-                          className={[
-                            'inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-xs font-semibold',
-                            f.bedCapacity !== null && f.bedCapacity > 0 && f.openBeds / f.bedCapacity <= 0.15
-                              ? 'border-status-warn/30 bg-status-warn/10 text-status-warn'
-                              : 'border-line bg-surface text-ink600',
-                          ].join(' ')}
-                          title={
-                            f.bedCapacity !== null && f.bedCapacity > 0
-                              ? `${f.openBeds} of ${f.bedCapacity} licensed beds open (${Math.round((f.openBeds / f.bedCapacity) * 100)}% free) on the latest census sync`
-                              : `${f.openBeds} open bed${f.openBeds === 1 ? '' : 's'} on the latest census sync — licensed bed count not on file, so occupancy is unknown`
-                          }
-                        >
-                          {f.bedCapacity !== null && f.bedCapacity > 0
-                            ? `${f.openBeds} of ${f.bedCapacity} beds`
-                            : `${f.openBeds} open bed${f.openBeds === 1 ? '' : 's'}`}
-                        </span>
-                      ) : null}
+                      {/* OCCUPANCY, not a bare free-bed count — and FULL is a state, not an absence.
+                          8 free at a 20-bed house and 8 free at a 12-bed house are opposite signals
+                          about whether they will take this patient, and the count alone cannot tell
+                          them apart. `bedChip` above owns the three states; the JSX only picks a
+                          tone. Tightness is a FACT shown, never folded into the rating. */}
+                      {((bed) =>
+                        bed === null ? null : (
+                          <span
+                            className={[
+                              'inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-xs font-semibold',
+                              bed.tone === 'tight'
+                                ? 'border-status-warn/30 bg-status-warn/10 text-status-warn'
+                                : 'border-line bg-surface text-ink600',
+                            ].join(' ')}
+                            title={bed.title}
+                          >
+                            {bed.label}
+                          </span>
+                        ))(bedChip(f.openBeds, f.bedCapacity))}
                     </span>
                     {/* v2 VERDICT block: the one big display numeral + the IQ band pill (the billing
                         team's own 65/50/30/15/0 scale); the confirmed-% is the secondary metric. */}
