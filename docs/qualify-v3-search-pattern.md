@@ -72,11 +72,20 @@ so this doc no longer has a silent gap for the next cutover to repeat:
   buckets derived from the facilities the ranking already returned — reusing the mobile PWA's
   `deriveAreaChips` / `facilitiesInArea` (an unmapped facility buckets under "Other" and is
   never dropped, never a typed term reaching the blind index).
-- **The answer-armed ticker.** Heating Up's cards are clickable again on IDENTIFY *and* stage
-  4, but a click now seeds the area facet rather than v2's {facility + dominant payer} pivot —
-  v3 resolves a member, and re-pivoting the whole surface on a click would throw the member
-  away. The strip stays inert (`readOnly`) on PAYER and PLAN, where a click would compete with
-  the question those stages are asking.
+- **The answer-armed ticker.** Heating Up's cards are clickable again — a click seeds the area
+  facet rather than v2's {facility + dominant payer} pivot, because v3 resolves a member and
+  re-pivoting the whole surface on a click would throw the member away. That armed/inert split
+  is unchanged, but where the strip RENDERS is not: **updated 2026-08-07** (Alec, product
+  directive: *"I don't like the tickers on the post-click search page. Need them on all the
+  pages."*) — the strip now persists across **all four stages**, as a single mount that survives
+  every stage transition (so a click never resets the marquee's scroll position). This overturns
+  the sentence that shipped a few hours earlier in this same doc update, which had the strip
+  excluding PAYER and PLAN under the "must not compete with the question" rule below. Alec is the
+  ratifier of that rule and has overturned it *for the ticker specifically* — the rule itself
+  still governs everything else stages 2–3 exclude (see "The principle" and the bullets above).
+  Only stage 4, with a snapshot on screen, arms it as a control; IDENTIFY/PAYER/PLAN render it
+  `readOnly` — orientation, not a control, because a click on those three still has no honest
+  target (v3 has no facility-first resolve path).
 
 ## Motion
 

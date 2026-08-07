@@ -317,33 +317,68 @@ test('F3a: threading the memoized payerGroups cannot change what deriveStage or 
   );
 });
 
-// AMENDED 2026-08-07 (location restore). This test used to read "the IDENTIFY stage only". The RULE
-// it was written to protect — "it must not compete with the question being asked" — is unchanged and
-// is exactly why payer and plan still exclude it: those two screens ASK. The answer stage does not
-// ask, it answers, and there the strip stops being decoration: its cards seed the AREA facet, which
-// is the restored half of v2's clickable ticker. Narrowing the assertion, not relaxing it.
-test('the trend ticker rides IDENTIFY and ANSWER — never the two stages that ask a question', () => {
+// OVERTURNED 2026-08-07 (Alec, product directive: "I don't like the tickers on the post-click
+// search page. Need them on all the pages."). This test previously read "the IDENTIFY stage only",
+// then (same day, location restore) "IDENTIFY and ANSWER — never the two stages that ask a
+// question", under the 2026-08-06 rule "it must not compete with the question being asked". Alec is
+// the ratifier of that rule and has now overturned it FOR THE TICKER SPECIFICALLY: PAYER and PLAN no
+// longer exclude it. The competition argument is not being relitigated here — his directive
+// supersedes it outright, and if it needs correcting that is a product call for him, not a technical
+// one. REWRITTEN, not deleted, so the reversal stays on record instead of vanishing from history.
+test('the trend ticker persists across ALL FOUR stages (2026-08-07 directive overturns IDENTIFY+ANSWER-only)', () => {
   const ticker = <div data-testid="ticker-slot">Facilities Heating Up</div>;
-  const on = render(props('identify', null, { ticker }));
-  assert.match(on, /data-testid="ticker-slot"/, 'the landing is not left empty');
-  const answer = render(props('answer', fixture(), { ticker }));
-  assert.match(answer, /data-testid="ticker-slot"/, 'the answer stage carries it as the area seeder');
+  const cases: Array<[FlowStage, QualifyResolution | null, Partial<ResolutionStagesProps>]> = [
+    ['identify', null, {}],
+    ['payer', fixture(), {}],
+    ['plan', fixture(), { payerPick: 'Aetna' }],
+    ['answer', fixture(), {}],
+  ];
+  const byStage: Record<string, string> = {};
+  for (const [stage, r, over] of cases) {
+    const html = render(props(stage, r, { ...over, ticker }));
+    assert.match(html, /data-testid="ticker-slot"/, `the ${stage} stage must not lose the ticker`);
+    byStage[stage] = html;
+    // OUTSIDE the animated stage subtree on every one of the four — the shell's GSAP targets
+    // `[data-v3-stage]` only. This is also what makes ONE PERSISTENT MOUNT possible rather than a
+    // per-stage remount: `ResolutionStages` renders `props.ticker` from a single unconditional call
+    // site (resolution-flow.tsx), so a stage swap cannot unmount it — a remount would reset the
+    // marquee's scroll position on every stage change, which defeats the whole point of "on all the
+    // pages".
+    assert.ok(
+      html.indexOf('ticker-slot') < html.indexOf('data-v3-stage'),
+      `${stage}: the ticker must precede the animated subtree, so the tween never touches it`,
+    );
+  }
+
+  // ── Armed vs. inert, end to end, per stage — spec item 2: this rule is UNCHANGED by the reversal
+  // above. `tickerIsLive` still says live only on ANSWER with a snapshot on screen; PAYER and PLAN
+  // now show the strip, but as ORIENTATION, not a control — a click there still has no honest
+  // target. Rendered through the REAL `<HeatingUpCards>`, with `readOnly` computed exactly the way
+  // the shell wires it (resolution-flow-client.tsx `readOnly={!tickerLive}`), so this proves the
+  // wiring end to end rather than only the pure predicate (which has its own dedicated test below).
+  const rungThrough = (stage: FlowStage, r: QualifyResolution | null, hasSnapshot: boolean, over: Partial<ResolutionStagesProps> = {}) => {
+    const live = tickerIsLive(stage, hasSnapshot);
+    const real = <HeatingUpCards trends={TRENDS} window={trailingWindow(60)} readOnly={!live} openAs="area" onOpen={noop} />;
+    return render(props(stage, r, { ...over, ticker: real }));
+  };
+
   for (const [stage, r, over] of [
+    ['identify', null, {}],
     ['payer', fixture(), {}],
     ['plan', fixture(), { payerPick: 'Aetna' }],
   ] as Array<[FlowStage, QualifyResolution | null, Partial<ResolutionStagesProps>]>) {
-    const html = render(props(stage, r, { ...over, ticker }));
-    assert.ok(!html.includes('ticker-slot'), `the ticker must not render on the ${stage} stage`);
+    const html = rungThrough(stage, r, false, over);
+    assert.match(html, /Facilities Heating Up/, `${stage}: the ticker rendered — otherwise the inert check below is vacuous`);
+    assert.ok(!html.includes('Narrow the ranked list'), `${stage}: an inert ticker must not promise a narrow`);
+    assert.match(html, /trend for orientation/, `${stage}: an inert card says what it is instead of promising a filter`);
   }
-  // And it stays OUTSIDE the animated stage subtree on both — the shell's GSAP targets
-  // `[data-v3-stage]`, and a control that re-enters from autoAlpha 0 on every click of itself
-  // flickers under the cursor.
-  for (const html of [on, answer]) {
-    assert.ok(
-      html.indexOf('ticker-slot') < html.indexOf('data-v3-stage'),
-      'the ticker precedes the animated subtree, so the tween never touches it',
-    );
-  }
+
+  const answerLoading = rungThrough('answer', fixture(), false, {});
+  assert.match(answerLoading, /trend for orientation/, 'answer stage still loading: nothing to narrow yet, so still inert');
+
+  const answerArmed = rungThrough('answer', fixture(), true, { answer: answerProps({ snapshot: snapshotFixture() }) });
+  assert.ok(!answerArmed.includes('trend for orientation'), 'answer + snapshot: a real control, not orientation');
+  assert.match(answerArmed, /title="Narrow the ranked list to/, 'answer + snapshot: a card names its narrow');
 });
 
 // ── The Skip escape hatch + the answer-stage filter lines (general search) ──────────────────────
@@ -780,6 +815,11 @@ test('I9: no meaning-bearing text below 12px anywhere in the flow', () => {
     // mirror production exactly (TICKER_WINDOW, resolution-flow-client.tsx:60).
     ['identify + real ticker', 'identify', null, { ticker }, /Facilities Heating Up/],
     ['identify + ticker skeleton', 'identify', null, { ticker: <HeatingUpSkeleton /> }, /Loading trends/],
+    // The 2026-08-07 directive put the (inert) strip on PAYER and PLAN too — markup this sweep never
+    // saw before, because every case above it either predates the reversal or is the landing. Same
+    // readOnly ticker as the identify case; different surrounding stage markup underneath it.
+    ['payer + inert ticker', 'payer', fixture(), { ticker }, /Facilities Heating Up/],
+    ['plan + inert ticker', 'plan', fixture(), { payerPick: 'Aetna', ticker }, /Facilities Heating Up/],
     // The answer stage with data — the branch the skeleton case above never reaches. Added
     // 2026-08-06 and green on arrival; it found nothing at the time, it is coverage, not a fix.
     ['answer + snapshot', 'answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture() }) }, /NASHVILLE MENTAL HEALTH/],

@@ -1978,15 +1978,20 @@ export interface ResolutionStagesProps {
    * The "Facilities Heating Up" trend strip, passed as a SLOT (the shell owns its fetch and its
    * marquee hook, so this module stays statically renderable).
    *
-   * RENDERED ON IDENTIFY AND ON ANSWER — NEVER ON THE TWO QUESTION STAGES. It used to ride identify
-   * alone, under the rule "it must not compete with the question being asked". That rule is intact
-   * and is exactly why payer and plan still exclude it: those two screens ASK. The answer stage does
-   * not ask, it answers, and there the strip stops being decoration and becomes the control that
-   * seeds the AREA facet — the restored half of v2's clickable ticker (a v2 card pivoted the whole
-   * surface to {facility + dominant payer}; a v3 card narrows the ranked grid to that facility's
-   * area, because v3 resolves a MEMBER and re-pivoting to a facility would throw the member away).
-   * On identify the shell keeps it `readOnly`: there is no ranking to narrow, so an inert card is
-   * the honest one.
+   * ⚠ RENDERED ON ALL FOUR STAGES — OVERTURNED 2026-08-07 (Alec, product directive: "I don't like
+   * the tickers on the post-click search page. Need them on all the pages."). It used to exclude
+   * PAYER and PLAN under the 2026-08-06 rule "it must not compete with the question being asked" —
+   * that rule is not being re-argued here; Alec is the ratifier and has overturned it FOR THE
+   * TICKER SPECIFICALLY. If this reversal needs correcting, that is a product call for him, not a
+   * technical one. `app/test/qualifyV3Flow.test.tsx`'s coverage was REWRITTEN, not deleted, to keep
+   * the overturned rule on record rather than letting it silently vanish from history.
+   *
+   * The armed/inert rule underneath is UNCHANGED — see `tickerIsLive`. On IDENTIFY/PAYER/PLAN the
+   * shell still passes it `readOnly`: there is no ranking to narrow on those three, so an inert card
+   * is the honest one. Only on ANSWER, with a snapshot on screen, does a click seed the AREA
+   * facet — the restored half of v2's clickable ticker (a v2 card pivoted the whole surface to
+   * {facility + dominant payer}; a v3 card narrows the ranked grid to that facility's area, because
+   * v3 resolves a MEMBER and re-pivoting to a facility would throw the member away).
    */
   ticker: React.ReactNode;
   /** Optional pre-computed clusters — the shell memoizes ONE `payerGroupsOf` call per resolution and
@@ -2008,10 +2013,13 @@ export interface ResolutionStagesProps {
  * MOTION CONTRACT WITH THE SHELL: everything above `[data-v3-stage]` is CHROME — the h1, the rail,
  * the live region, the receipt, and the ticker. The shell's GSAP targets ONLY the `[data-v3-stage]`
  * subtree, so the chrome never blinks on a stage swap; the receipt reads as a persistent trail
- * precisely because it does not move. The ticker sits OUTSIDE the animated subtree for the same
- * reason, on both stages that render it — and it must STAY outside: on the answer stage its cards
- * seed the area facet, and a control that re-enters from `autoAlpha: 0` on every click of itself is
- * a control that flickers under the user's cursor.
+ * precisely because it does not move. The ticker sits OUTSIDE the animated subtree for the SAME
+ * reason, and — since 2026-08-07 — on EVERY stage that renders (now all four; see `ticker`'s own
+ * doc for the reversal). It must STAY outside and stay a SINGLE mount: this is `props.ticker`,
+ * rendered from ONE unconditional call site below rather than once per stage branch, precisely so a
+ * stage swap cannot unmount and remount it — a remount would reset the marquee's scroll position on
+ * every click, and on the answer stage a control that re-enters from `autoAlpha: 0` on every click
+ * of itself is a control that flickers under the user's cursor.
  */
 export function ResolutionStages(props: ResolutionStagesProps): React.ReactElement {
   const skipped = props.answer?.scopeSource === 'skipped';
@@ -2047,7 +2055,8 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
         />
       ) : null}
 
-      {props.stage === 'identify' || props.stage === 'answer' ? props.ticker : null}
+      {/* ALL FOUR STAGES, one persistent mount (2026-08-07 directive — see `ticker`'s doc above). */}
+      {props.ticker}
 
       <div data-v3-stage>
         {props.stage === 'identify' ? (
