@@ -27,6 +27,18 @@ export interface AreaChip {
 }
 
 /**
+ * The bucket a `state` value belongs to — the ONE place the "unmapped ⇒ Other, never dropped" rule
+ * is written. Both functions below read it, and so does the desktop v3 flow, which needs the same
+ * mapping for a DIFFERENT input shape: a ticker card's `QualifyFacilityTrend.state`, not a
+ * `QualifyFacility`. Extracted (2026-08-07) rather than re-tested inline in a second file, because
+ * two copies of `state === null || state === ''` is exactly how an empty string starts getting
+ * dropped on one surface and bucketed on the other.
+ */
+export function areaKeyFor(state: string | null): string {
+  return state === null || state === '' ? AREA_OTHER : state;
+}
+
+/**
  * The chip list for a resolved deck: All (leftmost) + each distinct non-null state present (sorted) +
  * Other (only when at least one facility has no location). PURE — derived entirely from the facilities
  * already on the client. The parent shows the row only when this returns >2 chips (i.e. >=2 real buckets).
@@ -35,7 +47,7 @@ export function deriveAreaChips(facilities: readonly QualifyFacility[]): AreaChi
   const states = Array.from(
     new Set(facilities.map((f) => f.state).filter((s): s is string => s !== null && s !== '')),
   ).sort();
-  const hasOther = facilities.some((f) => f.state === null || f.state === '');
+  const hasOther = facilities.some((f) => areaKeyFor(f.state) === AREA_OTHER);
   return [
     { key: AREA_ALL, label: 'All' },
     ...states.map((s) => ({ key: s, label: s })),
@@ -49,8 +61,7 @@ export function facilitiesInArea(
   key: string,
 ): QualifyFacility[] {
   if (key === AREA_ALL) return [...facilities];
-  if (key === AREA_OTHER) return facilities.filter((f) => f.state === null || f.state === '');
-  return facilities.filter((f) => f.state === key);
+  return facilities.filter((f) => areaKeyFor(f.state) === key);
 }
 
 export function AreaChips({
