@@ -209,6 +209,22 @@ test('buildIdentifierLandingFacilityQuery: prefix→prefix column, member→exac
   assert.ok(!exact.sql.includes('member_id_prefix_bidx'), 'exact mode does NOT touch the prefix column');
 });
 
+// ── IDENTIFIER-WIDE landing (2026-08-07): payer null drops ONLY the payer clause. ─────────────────
+// This query can never be called without a token, so dropping the payer clause cannot widen it to the
+// book — unlike the ranking builder, which needs a chokepoint guard for exactly that reason.
+test('buildIdentifierLandingFacilityQuery: payer=null drops the payer clause and NOTHING else', () => {
+  const wide = buildIdentifierLandingFacilityQuery(TOKEN, 'prefix', null, '2026-06-17', '2026-07-17', BOTH);
+  assert.ok(!/primary_payer = \$/.test(wide.sql), 'no payer equality in identifier-wide mode');
+  assert.match(wide.sql, /member_id_prefix_bidx = \$4/, 'the identifier narrow is still there (one param earlier)');
+  assert.match(wide.sql, /payment_received >= \$2::date and payment_received < \$3::date/, 'window intact');
+  assert.match(wide.sql, /business_entity_id = any\(\$1::uuid\[\]\)/, 'tenant scope intact');
+  assert.deepEqual(wide.params, [BOTH, '2026-06-17', '2026-07-17', TOKEN], 'the payer param is gone, not blank');
+  // ⚠ THE ORDERING IS THE CONTRACT (see the parity test below). Widening the scope must not touch it.
+  const scoped = buildIdentifierLandingFacilityQuery(TOKEN, 'prefix', 'AETNA', '2026-06-17', '2026-07-17', BOTH);
+  const orderOf = (s: string) => s.slice(s.indexOf('order by'));
+  assert.equal(orderOf(wide.sql), orderOf(scoped.sql), 'ORDER BY is byte-identical with and without a payer');
+});
+
 // ── ORDER-BY PARITY (the land-on-the-wrong-facility guard): the landing lookup's "most recent" ordering
 //    MUST match the drill's claim ordering — NOW on the PAYMENT-date axis (payment_received desc nulls last,
 //    id desc). payment_received is a DATE (0019), so the drill's to_char('YYYY-MM-DD') alias is lexical ==

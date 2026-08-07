@@ -63,7 +63,7 @@ interface Cap {
   audits: Array<{ action: string; detail: Record<string, unknown> }>;
   facilityEntityIds: string[][];
   facilitiesArgs: Array<{ payer: string | null; token: string | null; kind: string | null; entityIds: string[] }>;
-  landingArgs: Array<{ kind: string; payer: string; entityIds: string[] }>;
+  landingArgs: Array<{ kind: string; payer: string | null; entityIds: string[] }>;
   revealActions: string[];
   facilityCasesArgs: Array<{
     payer: string;

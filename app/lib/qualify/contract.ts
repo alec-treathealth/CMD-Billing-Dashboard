@@ -146,6 +146,31 @@ export interface QualifyInput {
    * paths and when the token resolves to nothing.
    */
   payerOverride?: string | null;
+  /**
+   * IDENTIFIER-WIDE RANKING — the v3 "Skip — search all plans" scope (Alec, 2026-08-07).
+   *
+   * `'all'` ranks the searched identifier's WHOLE claims footprint: every facility it billed at, under
+   * EVERY billed-under label it carries, not just the dominant one. Omitted (the default) keeps the
+   * pre-existing single-label behaviour exactly.
+   *
+   * WHY THIS EXISTS AND WHAT IT REVERSES. Until today the DIRECT path was payer-scoped BY
+   * CONSTRUCTION — `resolvePayer` picked the highest-line-count `primary_payer` and the ranking query
+   * emitted a single-label equality — so a Skip that promised "the whole footprint" silently returned
+   * one label. Measured on a live prefix: AETNA 5,308 lines ranked, AETNA US HEALTHCARE 1,038 and
+   * AETNA - FIRST HEALTH NETWORK 7 excluded, and the two extra facilities that billed the member ONLY
+   * under those labels never appeared. Alec's ruling reverses the "rankings are payer-scoped" core
+   * ruling for this path and models it on the Collections guided search: whole radius by default,
+   * facets OFF until the user turns them on, empty selection = NO restriction.
+   *
+   * ⚠ THE PRICE, STATED. Cross-label `pct_allowed` is a BLEND, not a payer contract rate. Every card
+   * carries `payerCount` so it can say "across N payers", and the BILLED UNDER chips are the one-click
+   * un-blend. See `QualifyFacility.payerCount`.
+   *
+   * IGNORED (never silently honoured) when an override IS honoured: an explicit chip is a narrower,
+   * later choice than the skip that preceded it, and honouring both would mean claiming an all-payers
+   * scope over a single-label ranking. The core resolves that precedence in one place.
+   */
+  payerScope?: 'all';
 }
 
 /**
@@ -411,7 +436,33 @@ export function sniffQualifyKind(query: string): QualifyMatchKind {
 }
 
 export interface QualifyResolved {
-  payerName: string;
+  /**
+   * The ONE billed-under label the ranking is scoped to — or NULL when the ranking spans EVERY label
+   * the searched identifier bills under (`payerScope === 'all'`, the v3 Skip).
+   *
+   * ⚠ THIS WENT NULLABLE ON PURPOSE, AND THE TYPECHECK RIPPLE IS THE POINT (2026-08-07). This field
+   * is a SCOPE CLAIM, not a decoration: nine surfaces interpolate it into a sentence that asserts what
+   * the numbers beside it describe ("ranked under AETNA", "every facility this member has history at
+   * under AETNA", the AI panel's frame, the mobile KPI tiles' scope). Keeping it non-null as "the
+   * largest label, informationally" while the ranking spanned all of them would have left every one of
+   * those sentences compiling, rendering, and lying — the exact scope-lie class PRs #92 / #148 / #157
+   * were spent fixing. Making it null forces each consumer to answer "what do I say when there is no
+   * one payer" at COMPILE time.
+   *
+   * DO NOT `?? 'This search'` IT. A bare `??` fallback re-hides the claim; branch on `payerScope`.
+   */
+  payerName: string | null;
+  /**
+   * WHAT THE RANKING IS SCOPED TO, named rather than inferred. `'payer'` = the single `payerName`
+   * label; `'all'` = every label behind the identifier.
+   *
+   * INVARIANT (asserted in test/qualifyCore.test.ts): `payerScope === 'all'` ⟺ `payerName === null`.
+   * The discriminator is deliberately redundant with the null. A reader who meets `payerName: string
+   * | null` alone reads null as "we could not resolve one", which is a DIFFERENT claim from "there
+   * are several and we used them all" — and the natural response to the first is a `??` fallback,
+   * which is precisely the silent overclaim. Naming the scope makes the fallback look wrong.
+   */
+  payerScope: 'payer' | 'all';
   matchedOn: QualifyResolvedKind;
   /** Non-PHI alpha-prefix echo (<=3 chars). NEVER the raw member id — the client echoes its own input. */
   matchedValue: string;
@@ -426,6 +477,20 @@ export interface QualifyResolved {
    *  False on the resolve-by-payer path (Heating-Up card / on-load / URL restore), which stays payer-wide.
    *  Lets the UI caption the scope without re-deriving it from matchedOn. */
   identifierScoped: boolean;
+}
+
+/**
+ * THE ONE billed-under label a snapshot is scoped to — or null when there isn't one (all-payers, or
+ * nothing resolved at all).
+ *
+ * Exists so that a consumer which genuinely needs a single label has to SAY what it does when there
+ * is none, at the call site, instead of reaching for `resolved?.payerName ?? something`. Every such
+ * `??` in this codebase's history has been a scope claim quietly rewritten as a display default.
+ * Pure; no I/O; safe on the client.
+ */
+export function scopedPayerOf(resolved: QualifyResolved | null | undefined): string | null {
+  if (!resolved) return null;
+  return resolved.payerScope === 'payer' ? resolved.payerName : null;
 }
 
 export interface QualifyFacility {
@@ -465,6 +530,34 @@ export interface QualifyFacility {
    *  slice the median facility has ~2 patients, so the UI suppresses the bucket color below 3 and
    *  flags 3-9 as a thin sample; charge lines overstate the sample ~23×, hence the patient unit. */
   distinctPatients: number;
+  /**
+   * THE BLEND DISCLOSURE — distinct billed-under labels behind THIS card's rows (Alec, 2026-08-07).
+   *
+   * THREE states. 1 in payer-scoped mode by construction (the ranking query pins a single label).
+   * ZERO is legal and means the rows carry no billed-under label at all — `count(distinct
+   * primary_payer)` over an all-NULL group, reachable only in identifier-wide mode, where no payer
+   * predicate is emitted. Do NOT write `payerCount > 1 ? … : 'one label'`: that binary reads zero as
+   * one, which is a fabricated count on the surface this field exists to protect. >1 is where it is
+   * load-bearing: `pctAllowedOfBilled` and therefore `ratingV2`
+   * are a DOLLAR-WEIGHTED BLEND across those labels, which is an honest answer to "what did this
+   * member's claims actually allow here" and NOT an answer to "what does payer X pay at facility Y".
+   * Two facilities can rank differently purely on payer mix — Simpson's paradox, on the surface
+   * admissions acts on. The card says "across N payers"; the BILLED UNDER chips are the un-blend.
+   *
+   * NON-DOLLAR (a count) → survives the amounts strip; an admissions_seat sees the same disclosure.
+   */
+  payerCount: number;
+  /**
+   * The single billed-under label behind this card — ONLY when there is exactly one (`payerCount ===
+   * 1`); null above that, where naming one of several would be a scope lie at card level.
+   *
+   * The SQL side is `max(primary_payer)`, which is exactly right at one distinct value and arbitrary
+   * above it, so the CORE nulls it rather than trusting every render site to remember the condition.
+   * Exists because under an all-payers ranking a card that spans one label is more usefully labelled
+   * "1 payer · AETNA" than "across 1 payer" — the count answers "is this blended", the label answers
+   * "blended with what", and at one the second answer is free.
+   */
+  solePayer: string | null;
   /** Coverage triple (0059 trust signal): per-facility in-window claim counts by confidence bucket
    *  (confidence.ts — confirmed = a/cd/e1, estimate = e2, unknown = b/none). Sums to lineCount.
    *  NON-DOLLAR: renders for admissions_seat; never stripped. Backs the coverage bar + the

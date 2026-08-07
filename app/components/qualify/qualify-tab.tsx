@@ -77,6 +77,7 @@ import {
   qualifyIdentifierNarrows,
   QUALIFY_CLIENT_NAME_ENABLED,
   qualifyWindowLabel,
+  scopedPayerOf,
   trailingWindow,
   type QualifyBookKpis,
   type QualifyComposeInput,
@@ -1325,7 +1326,10 @@ export function QualifyTab({
           {singleIdentifier && leadSnapshot ? (
             <PayerRail
               options={leadSnapshot.payerOptions}
-              activePayer={leadSnapshot.resolved?.payerName ?? null}
+              // `scopedPayerOf`: an all-payers ranking has NO active chip, which is the desired
+              // reading (Collections model — nothing selected means no restriction). A `?? null`
+              // happens to agree here, but only by accident; this states the intent.
+              activePayer={scopedPayerOf(leadSnapshot.resolved)}
               overridden={leadSnapshot.payerOverridden}
               onSelect={(payer) => setPayerOverride({ identifier: singleIdentifier, payer })}
             />

@@ -62,6 +62,7 @@ import {
   type QualifyWindowRung,
   type QualifyTrailingDays,
   QUALIFY_VOB_STALE_HOURS,
+  scopedPayerOf,
 } from './contract';
 import type { QualifyPrincipal } from './principal';
 import {
@@ -140,11 +141,12 @@ export interface QualifyDeps {
     token?: string | null,
     kind?: QualifyTokenKind | null,
   ) => Promise<QualifyFacilityRow[]>;
-  /** Fix A: raw facility of the searched identifier's most-recent in-window claim under the payer (or null). */
+  /** Fix A: raw facility of the searched identifier's most-recent in-window claim under the payer (or
+   *  null). `payer` NULL = identifier-wide (the v3 Skip): the most-recent claim under ANY label. */
   loadIdentifierLandingFacility: (
     token: string,
     kind: QualifyTokenKind,
-    payer: string,
+    payer: string | null,
     from: string,
     to: string,
     entityIds: string[],
@@ -323,8 +325,20 @@ interface QualifyFactorContext {
   census: Map<string, QualifyCensusAggRow>;
   outcomes: Map<string, QualifyOutcomesRow>;
   /** The resolved payer LABEL the coding lookup keys on. Null on the comparable path (no payer —
-   *  registry decisions are payer-scoped, so the factor honestly reads "no decision on file"). */
+   *  registry decisions are payer-scoped, so the factor honestly reads "no decision on file") AND in
+   *  identifier-wide mode (several payers — see `allPayers`, which tells the two aparts). */
   payer: string | null;
+  /**
+   * ⚠ WHY `payer === null` IS NOT ENOUGH. Two different situations reach the coding factor with no
+   * payer key, and they need different words: the COMPARABLE path has no payer at all ("no payer
+   * resolved for this estimated read"), while IDENTIFIER-WIDE mode has several and deliberately used
+   * them all. The distinction is not cosmetic — dropping the payer key drops the coding factor
+   * entirely, which SHIFTS ratingV2 against a payer-scoped ranking of the very same facilities. Two
+   * searches over one identifier will disagree, and the factor detail is the only place that can
+   * explain why. Silence there is how "the same facility scored differently ten minutes ago" becomes
+   * a trust problem instead of a documented consequence.
+   */
+  allPayers: boolean;
   now: Date;
 }
 
@@ -351,6 +365,9 @@ async function factorContext(
   from: string,
   to: string,
   provenance: QualifyProvenance,
+  /** IDENTIFIER-WIDE mode: payer is null because there are SEVERAL, not because there are none.
+   *  Defaults false so every pre-existing call site keeps its exact meaning. */
+  allPayers = false,
 ): Promise<QualifyFactorContext> {
   const [coding, censusRows, outcomeRows] = await Promise.all([
     deps.loadCodingDecisions ? deps.loadCodingDecisions().catch(() => NO_CODING) : Promise.resolve(NO_CODING),
@@ -363,7 +380,7 @@ async function factorContext(
   const outcomes = new Map<string, QualifyOutcomesRow>();
   for (const r of censusRows) if (r.facility_code) census.set(r.facility_code, r);
   for (const r of outcomeRows) if (r.facility_code) outcomes.set(r.facility_code, r);
-  return { windowDays: windowDaysOf(from, to), provenance, coding, census, outcomes, payer, now: deps.now() };
+  return { windowDays: windowDaysOf(from, to), provenance, coding, census, outcomes, payer, allPayers, now: deps.now() };
 }
 
 
@@ -409,6 +426,34 @@ function assembleFacilities(
     .map((r) => {
       const facilityCode = r.facility_code ?? null;
       const census = facilityCode ? ctx.census.get(facilityCode) ?? null : null;
+      /* HOW MANY BILLED-UNDER LABELS BACK THIS CARD — resolved ONCE, because three consumers read it
+       * (the card's disclosure, the claims factor's detail, the AI payload) and three parallel
+       * expressions is how they drift apart. Three states, not two:
+       *
+       *   undefined / null — the COLUMN WAS NOT SELECTED. Only a loader or fixture predating
+       *                      `payer_count` produces this, and those describe payer-scoped-shaped
+       *                      reads where exactly one label backs the card. 1 is correct.
+       *   0               — the column WAS selected and the answer is genuinely NONE.
+       *                      `count(distinct primary_payer)` over a group whose values are all NULL
+       *                      is 0, and identifier-wide mode emits no payer predicate
+       *                      (buildFacilityRankingQuery's `payerCond`), so the group is reachable.
+       *   >= 1            — the real count.
+       *
+       * ⚠ `?? 1` CONFLATED THE FIRST TWO AND THE COMMENT HERE USED TO CLAIM OTHERWISE. `??` catches
+       * only null/undefined, so a literal 0 sailed through into consumers all written as binaries
+       * around "> 1": the card rendered "1 payer" for a facility with NO known label, the claims
+       * factor reassured the operator that "nothing is blended here", and the strict-zod AI firewall
+       * (min(1)) hard-REJECTED the request, killing Ask AI for the whole snapshot. Clamping 0 to 1
+       * would have made the old comment true by fabricating a count on the exact surface the blend
+       * disclosure exists to protect — so the coalesce distinguishes the two cases and every consumer
+       * handles zero honestly instead.
+       *
+       * LATENT today: an adversarial probe of the live rollup (2026-08-07) found ZERO null-or-blank
+       * primary_payer rows across 492,890 rows of full ingest history. Nothing FORBIDS the state
+       * though — `primary_payer` is a bare `text` (0019), the 0059 matview body does not filter it,
+       * and cmdExplorer's norm() maps a blank cell to NULL — and a guarantee asserted in a comment
+       * rather than in code is the same defect class as the guard C1 fixed. */
+      const payerCount = r.payer_count == null ? 1 : Math.max(0, Math.trunc(r.payer_count));
       /* WHICH LENGTH-OF-STAY MEASUREMENT SCORES THIS FACILITY — decided here, explicitly, once.
        *
        * The census snapshot measures clients CURRENTLY ADMITTED, so its LOS is today-minus-admit: a
@@ -444,6 +489,10 @@ function assembleFacilities(
         provenance: ctx.provenance,
         registrySeeded: ctx.coding.seeded,
         payerKnown: ctx.payer !== null,
+        // Same exclusion, different sentence — see QualifyFactorContext.allPayers. The COUNT rides
+        // with it because the claims factor's detail names the blend's size, not just its existence.
+        payerScopeAll: ctx.allPayers,
+        payerCount,
         codingLifecycle: decision ? (decision.lifecycle as import('./ratingV2').CodingLifecycle) : null,
         codingDecidedOn: decision?.decided_on ?? null,
         codingCodesLabel: decision ? codingCodesLabel(decision) : null,
@@ -474,6 +523,14 @@ function assembleFacilities(
         allowedAmount: r.allowed,
         lineCount: r.line_count,
         distinctPatients: r.distinct_patients, // rating sample-gate unit (sampleGate.ts) — non-dollar, non-PHI count
+        // THE BLEND DISCLOSURE (contract.ts QualifyFacility.payerCount) — see the three-state note
+        // where `payerCount` is derived above.
+        payerCount,
+        // NAMED ONLY AT EXACTLY ONE. The SQL is max(primary_payer): exact at one distinct value,
+        // arbitrary above it, and NULL at zero. Deciding that here — once — beats asking every render
+        // site to remember the condition, and a card naming one of several labels would be a scope
+        // lie at exactly the grain the blend disclosure exists to protect.
+        solePayer: payerCount === 1 ? (r.sole_payer ?? null) : null,
         // 0059 trust signal (non-dollar — survives the amounts strip for admissions_seat).
         confirmedClaims: r.confirmed_claims,
         estimateClaims: r.estimate_claims,
@@ -727,18 +784,34 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
     // ── DIRECT provenance: this identifier has its own claims history. Identifier-scoped ranking:
     // the panel + counts + Recent Claims all describe the SEARCHED token's footprint (ruling: the
     // facilities the user sees must be the ones that billed what they searched).
+    //
+    // ── IDENTIFIER-WIDE (the v3 Skip, Alec 2026-08-07) ────────────────────────────────────────────
+    // `payerScope: 'all'` widens the ranking from ONE billed-under label to EVERY label the token
+    // carries. This REVERSES the standing "the DIRECT path's rankings are payer-scoped" ruling for
+    // this one input; see contract.ts QualifyInput.payerScope and docs/qualify-v3-search-pattern.md.
+    //
+    // PRECEDENCE, decided in ONE place: an HONOURED override wins. A billed-under chip is a later,
+    // narrower, explicit choice than the skip that preceded it, and the surface renders that chip as
+    // "showing" — ranking all-payers underneath it would be a scope lie in the other direction. A
+    // REJECTED override (not in this token's spread) does not win, because nothing was applied.
+    const allPayers = input.payerScope === 'all' && overrideHonoured === null;
+    // The scope claim, computed ONCE and used for the loads, the rating context AND `resolved` — so
+    // "what we ranked" and "what we say we ranked" cannot drift apart.
+    const rankPayer = allPayers ? null : payerName;
     // Factor context (coding + census) is independent of the row loads — run all three together
     // (review finding #11: two avoidable serial round-trips on a latency-sensitive surface).
     const [ctx, facRows, landingRaw] = await Promise.all([
-      factorContext(deps, payerName, from, to, 'direct'),
-      deps.loadFacilities(payerName, from, to, gate.entityIds, input.market, token, kind),
-      deps.loadIdentifierLandingFacility(token, kind, payerName, from, to, gate.entityIds),
+      factorContext(deps, rankPayer, from, to, 'direct', allPayers),
+      deps.loadFacilities(rankPayer, from, to, gate.entityIds, input.market, token, kind),
+      deps.loadIdentifierLandingFacility(token, kind, rankPayer, from, to, gate.entityIds),
     ]);
     const facilities = assembleFacilities(facRows, ctx, false); // no floor — every billed facility is relevant
     const identifierLandingFacility =
       landingRaw !== null && facilities.some((f) => f.facilityKey === landingRaw) ? landingRaw : null;
     const resolved: QualifyResolved = {
-      payerName,
+      // NULL is the scope claim in all-payers mode, not an absence — see QualifyResolved.payerName.
+      payerName: rankPayer,
+      payerScope: allPayers ? 'all' : 'payer',
       matchedOn: kind,
       matchedValue: alphaEcho(raw),
       totalCharges: facilities.reduce((s, f) => s + f.lineCount, 0),
@@ -865,6 +938,7 @@ export async function getQualifySnapshotByPayerCore(
   const facilities = assembleFacilities(facRows, ctx);
   const resolved: QualifyResolved = {
     payerName: payer,
+    payerScope: 'payer', // the payer IS the entry point here — this path cannot be all-payers
     matchedOn: 'payer',
     matchedValue: '', // no PHI prefix echo on the resolve-by-payer path
     totalCharges: facilities.reduce((s, f) => s + f.lineCount, 0),
@@ -948,6 +1022,8 @@ export async function getQualifySnapshotByNameCore(
     landingRaw !== null && facilities.some((f) => f.facilityKey === landingRaw) ? landingRaw : null;
   const resolved: QualifyResolved = {
     payerName,
+    // The name path has no Skip control and sends no payerScope — dominant-label scoped, as shipped.
+    payerScope: 'payer',
     matchedOn: 'client_name',
     matchedValue: '', // NEVER echo a name (PHI) — unlike the ≤3-char alpha prefix
     totalCharges: facilities.reduce((s, f) => s + f.lineCount, 0),
@@ -1055,6 +1131,13 @@ export async function getQualifyFacilityCasesCore(
   // allPayers (mobile) only drops the single-payer filter. The identifier narrow (when the session arrived via
   // a search) still applies (ruling 5). The builder over-fetches by one (limit+1) so `capped` is a length
   // check, not a count.
+  //
+  // ⚠ DRILL PARITY WITH AN IDENTIFIER-WIDE RANKING (2026-08-07). If the CARDS were ranked all-payers
+  // (`resolved.payerScope === 'all'`) and a drill opened here payer-scoped, the card's line count and
+  // the drill's row count would disagree with nothing on screen to explain the gap. Today that cannot
+  // happen: the v3 answer stage has no cases drill at all, and the ONLY caller — the mobile detail
+  // sheet — already passes `allPayers: true` unconditionally (qualify-mobile-app.tsx). Any NEW drill
+  // on a surface that can reach the Skip must pass it too.
   const allPayers = input.allPayers === true;
   const { from, to } = qualifyWindowBounds(window, deps.now());
   // Build the shared-predicate filter (one-element facility/payer arrays — the single-facility drill is
@@ -1429,10 +1512,14 @@ export async function getQualifyInitialCore(
 
   const snapshot = await getQualifySnapshotByPayerCore(deps, { payer: top, window, market });
   const rank1 = snapshot.resolved ? snapshot.facilities[0]?.facilityKey ?? null : null;
-  if (!snapshot.resolved || !rank1) return { ...empty, snapshot };
+  // The by-payer path always resolves exactly ONE label, so this is non-null in practice; reading it
+  // through `scopedPayerOf` states that rather than assuming it, and bails instead of inventing a
+  // scope if that ever stops being true. (See QualifyResolved.payerName for why it is nullable now.)
+  const drillPayer = scopedPayerOf(snapshot.resolved);
+  if (!snapshot.resolved || !rank1 || drillPayer === null) return { ...empty, snapshot };
 
   const cases = await getQualifyFacilityCasesCore(deps, {
-    payer: snapshot.resolved.payerName,
+    payer: drillPayer,
     facility: rank1,
     window,
     market,
@@ -1573,10 +1660,12 @@ export async function getQualifyOverviewCore(
   const focus = snapshot.facilities.some((f) => f.facilityKey === top.facilityKey)
     ? top.facilityKey
     : snapshot.facilities[0]?.facilityKey ?? null;
-  if (!focus) return { ...empty, topPayer: top.dominantPayer, topFacility: top.facilityKey, snapshot };
+  // Same narrowing as getQualifyInitialCore — the by-payer path is single-label by construction.
+  const drillPayer = scopedPayerOf(snapshot.resolved);
+  if (!focus || drillPayer === null) return { ...empty, topPayer: top.dominantPayer, topFacility: top.facilityKey, snapshot };
 
   const cases = await getQualifyFacilityCasesCore(deps, {
-    payer: snapshot.resolved.payerName,
+    payer: drillPayer,
     facility: focus,
     window,
     market,

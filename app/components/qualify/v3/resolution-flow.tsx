@@ -47,6 +47,8 @@ import type {
   QualifyTrailingDays,
 } from '../../../lib/qualify/contract';
 import { derivePolicyRating } from '../../../lib/qualify/policyRating';
+// The scope claim's ONE home — shared with the AI panel so the two cannot phrase it differently.
+import { ALL_PAYERS_LABEL } from '../../../lib/qualify/scopeLabel';
 import { IQ_BAND_LABELS, IQ_BAND_VERDICTS } from '../../../lib/qualify/ratingV2';
 import { clusterCarriers, type CarrierCluster } from '../../../lib/qualify/carrierCluster';
 // ⚠ A DESKTOP MODULE IMPORTING FROM `m/`, ON PURPOSE. `deriveAreaChips` / `facilitiesInArea` /
@@ -395,12 +397,21 @@ export function scopeKeyOf(parts: {
   windowDays: number | null;
   funding: readonly string[];
   employers: readonly string[] | null;
+  /**
+   * IDENTIFIER-WIDE mode (2026-08-07) — a real dimension of the request, so a real dimension of its
+   * identity. Without it, un-skipping into a plan pick that resolves to the SAME dominant label
+   * produces an identical key: the effect never re-runs, and a payer-scoped answer keeps rendering
+   * under an all-payers caption (or the reverse). `allPayers` is the LAST segment so every existing
+   * key is a strict prefix of its payer-scoped equivalent — pinned keys stay readable in a diff.
+   */
+  allPayers?: boolean;
 }): string {
   return [
     parts.payerLabel ?? '',
     parts.windowDays === null ? 'auto' : String(parts.windowDays),
     parts.funding.slice().sort().join('|'),
     parts.employers === null ? '' : parts.employers.slice().sort().join('|'),
+    parts.allPayers ? 'all' : '',
   ].join('#');
 }
 
@@ -431,16 +442,27 @@ export function liveSentenceFor(
   stage: FlowStage,
   resolution: QualifyResolution | null,
   reason: 'empty' | 'prefix_too_short' | 'no_match' | null,
-  opts: { skipped?: boolean; scopePayer?: string | null; payerGroups?: PayerGroup[] } = {},
+  opts: {
+    skipped?: boolean;
+    scopePayer?: string | null;
+    /** The ranking spans every billed-under label. Distinct from `scopePayer === null`, which is also
+     *  true while the snapshot is still in flight — announce the wider scope only once it is real. */
+    scopeAllPayers?: boolean;
+    payerGroups?: PayerGroup[];
+  } = {},
 ): string {
   if (!resolution) return reason ? UNRESOLVABLE_COPY[reason] : '';
   // A skipped search resolved NOTHING past the identifier: announcing the pre-selected candidate's
   // employer as "Resolved: …" told a screen-reader user a plan had been chosen when none was — the
   // same claim the receipt and the identity line had to stop making.
   if (opts.skipped) {
+    // The screen-reader sentence carries the SAME scope claim as the visible banner, so it takes the
+    // same three-way branch. "across all plans under AETNA" said aloud over an all-payers ranking is
+    // the identical lie, just less visible — and the sr-only line is exactly where an unfixed claim
+    // survives a browser pass.
     return (
       'You skipped the plan questions. Showing a general search across all plans' +
-      (opts.scopePayer ? ` under ${opts.scopePayer}` : '') +
+      (opts.scopeAllPayers ? ' and all payers on file' : opts.scopePayer ? ` under ${opts.scopePayer}` : '') +
       '.'
     );
   }
@@ -663,8 +685,12 @@ export interface ReceiptProps {
    * deriving this from the payer-scope enum is exactly the masquerade `ScopeSource` documents.
    */
   skipped?: boolean;
-  /** The payer the RANKING actually used, for the skipped scope entry. */
+  /** The payer the RANKING actually used, for the skipped scope entry. Null when there is none. */
   scopePayer?: string | null;
+  /** The ranking spans EVERY billed-under label (identifier-wide). Distinct from `scopePayer ===
+   *  null`, which is also true while a first load is still in flight — a receipt must not assert the
+   *  wider scope before the core has confirmed it ranked that way. */
+  scopeAllPayers?: boolean;
   /**
    * `scopePayer` is the operator's OWN re-scope (a billed-under chip that the core honoured), not a
    * default. Naming that is the honesty pattern of 7c86709 applied to the state this fix uncovered:
@@ -686,6 +712,7 @@ export function FlowReceipt({
   payerGroups,
   skipped = false,
   scopePayer = null,
+  scopeAllPayers = false,
   scopeByUser = false,
 }: ReceiptProps): React.ReactElement {
   // For a full member id the echo is '' by construction — the receipt shows the READING instead,
@@ -711,7 +738,7 @@ export function FlowReceipt({
         <span className={entry}>
           <span className="text-xs font-medium uppercase tracking-wide text-ink400">Scope</span>
           <span className="text-sm text-ink900">
-            All plans{scopePayer ? ` · ${scopePayer}` : ''}
+            All plans{scopeAllPayers ? ' · all payers' : scopePayer ? ` · ${scopePayer}` : ''}
             {scopeByUser ? ' — your re-scope' : ''}
           </span>
           <button type="button" className={change} onClick={() => onChange('payer')}>
@@ -1126,7 +1153,12 @@ function FactorRows({ facility }: { facility: QualifyFacility }): React.ReactEle
   );
 }
 
-function ScoreCard({ f }: { f: QualifyFacility }): React.ReactElement {
+/**
+ * `allPayers` is the RANKING's scope, passed down rather than inferred from `f.payerCount`: a
+ * single-label card under an all-payers ranking and the same card under a payer-scoped one carry
+ * identical counts and are different claims. See the blend disclosure in the body.
+ */
+function ScoreCard({ f, allPayers }: { f: QualifyFacility; allPayers: boolean }): React.ReactElement {
   const location = [f.city, f.state].filter(Boolean).join(', ');
   return (
     <li
@@ -1159,6 +1191,53 @@ function ScoreCard({ f }: { f: QualifyFacility }): React.ReactElement {
               {f.lineCount.toLocaleString()}
             </span>{' '}
             lines
+            {/* ── THE BLEND DISCLOSURE (Alec, 2026-08-07) ─────────────────────────────────────────
+                Under an all-payers ranking this card's percentage and rating are dollar-weighted over
+                EVERY billed-under label behind these rows. That honestly answers "what did this
+                member's claims actually allow here" and does NOT answer "what does payer X pay here"
+                — a facility can read green on an AETNA-heavy mix while the member's other label pays
+                badly at the same place. Simpson's paradox, on the screen admissions acts on.
+
+                ⚠ GATED ON THE SCOPE, NOT ON THE COUNT, and the difference is not academic. `payerCount
+                > 1` measured live renders on 0 of 14 cards at 30d and 1 of 28 at 365d — so Alec's
+                ruling ("each card says across N payers") would have fired almost never, and an
+                all-payers card would have been indistinguishable from a payer-scoped one at exactly
+                the grain the operator reads. The count is what varies; the SCOPE is what the sentence
+                is about. Absent entirely on a payer-scoped ranking, where it would be noise on every
+                card of the ~84% of searches that never skip.
+
+                At one label the COUNT alone ("across 1 payer") is a worse sentence than the LABEL, so
+                the card names it — `solePayer`, which the core nulls above one precisely so it can
+                never name one of several here. */}
+            {allPayers ? (
+              <>
+                {' · '}
+                {/* ⚠ THREE STATES, NOT A BINARY. `payerCount > 1 ? … : '1 payer'` read ZERO as one —
+                    a fabricated count on the exact surface this disclosure exists to protect. Zero is
+                    reachable: count(distinct primary_payer) over an all-NULL group, and
+                    identifier-wide mode emits no payer predicate. See core.ts assembleFacilities. */}
+                <span className="font-semibold text-ink900">
+                  {f.payerCount > 1 ? (
+                    <>
+                      blended across{' '}
+                      <span className="ths-num" aria-label={`${f.payerCount} billed-under labels`}>
+                        {f.payerCount}
+                      </span>{' '}
+                      payers
+                    </>
+                  ) : f.payerCount === 1 ? (
+                    <>
+                      <span className="ths-num" aria-label="1 billed-under label">
+                        1
+                      </span>{' '}
+                      payer{f.solePayer ? ` · ${f.solePayer}` : ''}
+                    </>
+                  ) : (
+                    'no billed-under label on these rows'
+                  )}
+                </span>
+              </>
+            ) : null}
           </span>
         </div>
         <div className="flex shrink-0 flex-col items-end">
@@ -1269,8 +1348,37 @@ export interface StageAnswerProps {
   onRetry: () => void;
 }
 
+/**
+ * THE ON/OFF INVENTORY BADGE (Alec, 2026-08-07).
+ *
+ * Every facet on this screen states, in words, whether it is restricting the ranking — because after
+ * a Skip the honest answer is "none of them are", and a row of un-highlighted chips does not SAY
+ * that. It shows what could be chosen; it never says nothing was. That is the Collections model's
+ * fourth behaviour ("the scope is always captioned, INCLUDING the empty state") applied per facet
+ * instead of once per screen, which is what a screen with six independent facets needs.
+ *
+ * `Off · all N` is deliberately not `0 selected`: "off" names the STATE, "all N" names the
+ * CONSEQUENCE, and the consequence is the part an operator acts on. An empty selection means NO
+ * restriction here exactly as it does in `cmdExplorerQuery.ts` — never `= any(ARRAY[])`, which would
+ * match nothing.
+ */
+function FacetState(props: { on: boolean; text: string }): React.ReactElement {
+  return (
+    <span
+      className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+        props.on ? 'bg-teal50 text-teal700' : 'bg-ground text-ink600'
+      }`}
+    >
+      {props.on ? 'On' : 'Off'} · {props.text}
+    </span>
+  );
+}
+
 /** One filter row, styled as the "BILLED UNDER" line: a label, then toggle chips. Multiselect —
- *  `aria-pressed` carries the state and the chip appends " · on" so it is never hue-only. */
+ *  `aria-pressed` carries the state and the chip appends " · on" so it is never hue-only.
+ *
+ *  `data-v3-facet` is the STAGGER HOOK for the skip reveal (see the shell's layout effect). It marks
+ *  a row as one beat of the inventory; it carries no styling and nothing reads it at runtime. */
 function FilterLine(props: {
   label: string;
   options: readonly Facet[];
@@ -1281,8 +1389,16 @@ function FilterLine(props: {
 }): React.ReactElement | null {
   if (props.options.length === 0) return null;
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div data-v3-facet className="flex flex-wrap items-center gap-2">
       <span className="text-xs font-medium uppercase tracking-wide text-ink400">{props.label}</span>
+      <FacetState
+        on={props.selected.length > 0}
+        text={
+          props.selected.length > 0
+            ? `${props.selected.length} of ${props.options.length}`
+            : `all ${props.options.length}`
+        }
+      />
       {props.options.map((o) => {
         const on = props.selected.includes(o.value);
         return (
@@ -1312,6 +1428,12 @@ function FilterLine(props: {
  * four of these eight rows shipped wrong — three of them saying a PICK had failed when none was
  * made, the fourth ("Your selection.") saying only half of what was true:
  *
+ * A NINTH ROW SITS ABOVE THE TABLE (2026-08-07): when `allPayers` is true the ranking is scoped to no
+ * label at all, no chip is active, and every row below — which all describe a single-label ranking —
+ * is false. It is checked FIRST rather than woven into the table because it is a different KIND of
+ * fact: the other three inputs are about how a label was CHOSEN, and this one is about whether one
+ * was used.
+ *
  *   skipped │ honoured │ source   │ caption
  *   ────────┼──────────┼──────────┼──────────────────────────────────────────────────────────────
  *    true   │  true    │ user     │ no plan chosen, and the label is the operator's own re-scope
@@ -1333,7 +1455,19 @@ function FilterLine(props: {
  * single-label equality in the ranking query. Widening it to the identifier's whole footprint is a
  * separate change, and copy must never pre-announce behaviour that is not shipped.
  */
-function billedUnderCaption(args: { skipped: boolean; payerOverridden: boolean; scopeSource: ScopeSource }): string {
+export function billedUnderCaption(args: {
+  skipped: boolean;
+  payerOverridden: boolean;
+  scopeSource: ScopeSource;
+  /** The RESULT, from `resolved.payerScope` — not the request. See the all-payers row below. */
+  allPayers?: boolean;
+}): string {
+  // ── ALL-PAYERS OUTRANKS EVERY ROW BELOW, and it has to (2026-08-07). Under an identifier-wide
+  // ranking NO chip is active, and every string below describes a ranking scoped to ONE label —
+  // including the plain-skip row, which used to be the honest answer here and is now the description
+  // of a state the skip no longer produces. This is the un-blend affordance's own caption, so it
+  // says what the chips DO rather than what was chosen.
+  if (args.allPayers) return 'No label selected — ranking across all of them. Pick one to un-blend.';
   if (args.skipped) {
     // NO PLAN WAS CHOSEN leads, because it stays true however the payer label was arrived at.
     if (args.payerOverridden) return 'No plan chosen — this label is your own re-scope.';
@@ -1356,15 +1490,33 @@ function billedUnderCaption(args: { skipped: boolean; payerOverridden: boolean; 
  * honesty argument made in layout: everything on the control card re-issues the ranking request,
  * and this does not. Selection carries the word "showing", never hue alone (I9).
  */
-function AreaLine(props: {
+export function AreaLine(props: {
   chips: readonly AreaChip[];
   active: string;
   counts: ReadonlyMap<string, number>;
   onSelect: (key: string) => void;
 }): React.ReactElement {
+  // AREA IS A FACET OF THE INVENTORY EVEN THOUGH IT DOES NOT LIVE ON THE CONTROL CARD (2026-08-07).
+  // Its placement beside the grid is deliberate and unchanged — everything on the control card
+  // re-issues the ranking request and this does not — but "where the control sits" and "is this
+  // facet restricting what I am looking at" are different questions, and the inventory answers the
+  // second. Without the badge and the `anyFacetOn` term, the headline sentence reads "nothing is
+  // restricting this search" beside a LIT Area chip: the exact contradiction `payerFacetOn` was added
+  // to prevent, on the one facet Alec named by name. `data-v3-facet` enrols it in the skip reveal's
+  // stagger, which selects on the attribute across the stage rather than inside the control card.
+  const on = props.active !== AREA_ALL;
+  // ⚠ COUNT THE AREA CHIPS, DO NOT SUBTRACT ONE FROM THE LIST. This read `props.chips.length - 1`,
+  // i.e. "everything except the All chip" — an assumption about a list whose composition belongs to
+  // the area module, not to this file. If `areaChipsWithActive` ever stops emitting the literal All
+  // chip, or grows a second non-area entry, subtraction prints a wrong denominator, and the
+  // `Math.max(1, …)` that guarded it made that failure SILENT rather than loud. Filtering on the key
+  // asks the list what it contains instead of assuming, and needs no floor: an empty area set cannot
+  // reach here (the render gate upstream requires >2 chips or an active narrow).
+  const areaOptions = props.chips.filter((c) => c.key !== AREA_ALL).length;
   return (
-    <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filter the ranked list by area">
+    <div data-v3-facet className="flex flex-wrap items-center gap-2" role="group" aria-label="Filter the ranked list by area">
       <span className="text-xs font-medium uppercase tracking-wide text-ink400">Area</span>
+      <FacetState on={on} text={on ? `1 of ${areaOptions}` : `all ${areaOptions}`} />
       {props.chips.map((c) => {
         const on = c.key === props.active;
         const n = props.counts.get(c.key) ?? 0;
@@ -1441,14 +1593,26 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // `pending && !refetching` arm was unreachable because all four submit paths null the snapshot
   // before dispatching.
   const showSkeleton = snap === null && (props.pending || props.snapshotError === null);
-  const scopePayer = snap?.resolved?.payerName ?? g.payerDisplayName;
+  /**
+   * IS THE RANKING SPANNING EVERY BILLED-UNDER LABEL? Read off `resolved.payerScope`, which the CORE
+   * sets from what it actually ranked — never off `skipped`, which is a client intention. A Skip plus
+   * a billed-under chip is a payer-scoped ranking with `skipped` still true, and the whole point of
+   * this file's #157/#165 lineage is that intentions and results get separate variables.
+   */
+  const allPayers = snap?.resolved?.payerScope === 'all';
   // ⚠ THE ONLY HONEST PAYER NAME AFTER A SKIP is the one the SNAPSHOT actually resolved. `scopePayer`
-  // above falls back to `g.payerDisplayName` — the DECLINED candidate's carrier — which is tolerable
-  // for the identity line's shipped wording (7c86709) but would smuggle that carrier straight back
-  // into the disclosure captions this fix exists to clean, in the exact window where we know least
+  // falls back to `g.payerDisplayName` — the DECLINED candidate's carrier — which is tolerable for
+  // the identity line's shipped wording (7c86709) but would smuggle that carrier straight back into
+  // the disclosure captions this fix exists to clean, in the exact window where we know least
   // (snapshot still loading, or a first load that failed). Name NOBODY rather than name the payer of
-  // a plan the user declined.
-  const skipUnder = snap?.resolved?.payerName ? ` under ${snap.resolved.payerName}` : '';
+  // a plan the user declined — and under an all-payers ranking name nobody FULL STOP, because there
+  // is no single payer to name and the carrier of the declined plan is the worst available guess.
+  const scopePayer = allPayers ? null : (snap?.resolved?.payerName ?? g.payerDisplayName);
+  const skipUnder = allPayers
+    ? ' across every payer on file'
+    : snap?.resolved?.payerName
+      ? ` under ${snap.resolved.payerName}`
+      : '';
   const policyBits = [
     g.employerLabel ?? 'No plan sponsor on file',
     g.funding ?? 'Funding not captured',
@@ -1462,6 +1626,17 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
     [props.candidates, props.filters],
   );
   const filtersActive = answerFiltersActive(props.filters);
+  // ⚠ NOT just `filtersActive`. That helper answers "is a CANDIDATE filter narrowing the plan list",
+  // which covers three of the six facets. The inventory's headline sentence makes a claim about ALL
+  // of them, so it counts the billed-under scope too. (Window is excluded deliberately — it is never
+  // off; see its FacetState.) Reusing filtersActive here would print "every switch is off" beside a
+  // lit BILLED UNDER chip.
+  //
+  // The `> 1` guard is not defensive padding: with ONE label on file, that label IS the whole
+  // footprint, the chip row does not render at all, and calling the scope a switch-that-is-on would
+  // point the operator at a control they cannot see, to widen a search that is already as wide as it
+  // can be.
+  const payerFacetOn = snap !== null && snap.payerOptions.length > 1 && !allPayers;
   /**
    * ⚠ A SKIP IS NOT A PROMISE THAT THE FETCH STAYED WIDE, and v1 of this fix assumed it was.
    * NEITHER of the two values that reach this component knows anything about the answer-stage filter
@@ -1491,6 +1666,11 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // `rankedFacilities`, `areaChips`, `shownFacilities` — stays where it was, next to the grid it
   // narrows. This is the ONLY declaration of `areaActive`; do not re-declare it below.
   const areaActive = props.area !== AREA_ALL;
+  // AREA COUNTS AS A FACET (2026-08-07), which is why this sits BELOW `areaActive` rather than beside
+  // `payerFacetOn` above. Area is the one facet whose control lives outside the control card — see
+  // AreaLine for why that placement is right and why it does not exempt it from the inventory —
+  // and omitting it let one click produce "nothing is restricting this search" beside a lit Area chip.
+  const anyFacetOn = filtersActive || payerFacetOn || areaActive;
   /**
    * ⚠ THE DISCLOSURE'S CAPTIONS ARE FROZEN AT RESOLVE TIME AND A SKIP NEVER RE-RESOLVES.
    * `r.provenance` is minted SERVER-side inside `resolveCoverage` (resolutionService.ts:383-408) from
@@ -1603,7 +1783,11 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
     <Stage id="qualify-s-answer" question="Does this payer pay us — and where?">
       {/* The identity of what is on screen, restated in one line — never re-derived. */}
       <p className="text-sm text-ink900">
-        <span className="font-semibold">{skipped ? scopePayer : g.payerDisplayName}</span>
+        {/* `scopePayer` is null exactly when the ranking spans every label — an empty <span> would
+            silently drop the subject of this sentence, so the all-payers case is named. */}
+        <span className="font-semibold">
+          {skipped ? (allPayers ? ALL_PAYERS_LABEL : scopePayer) : g.payerDisplayName}
+        </span>
         <span className="text-ink600"> · {skipped ? 'all plans — no plan chosen' : policyBits}</span>
       </p>
 
@@ -1675,21 +1859,65 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
           ) : null}
 
           {/* A SKIP is its own scope claim: no plan was chosen, so the ranking is the identifier's
-              whole footprint under its largest payer. "You declined to narrow" and "we could not
-              narrow" are different statements and must not share copy. */}
+              whole footprint. "You declined to narrow" and "we could not narrow" are different
+              statements and must not share copy.
+              The all-payers arm is the one this promise was WRITTEN for and could not keep until
+              2026-08-07: the sentence used to end "under {payerName}", which was true of the label but
+              not of the promise ("search all plans"). Now it can say what it always meant, and the
+              payer-scoped arm survives for the case where a chip re-scoped it. */}
           {!stale && skipped && snap.resolved ? (
             <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink900">
-              You skipped the plan questions, so this is a general search: every facility this member
-              has history at under {snap.resolved.payerName}. Use the lines below to narrow it, or the
-              receipt above to pick a plan.
+              {allPayers ? (
+                <>
+                  You skipped the plan questions, so this is a general search: every facility this member
+                  has history at,{' '}
+                  {/* The COUNT comes from payerOptions, which fails SOFT to [] when the spread query is
+                      lost — and the ranking is still all-payers in that state. "across all 1 payer"
+                      would then be a fabricated number under a true claim, so the count is dropped
+                      rather than defaulted. */}
+                  {snap.payerOptions.length > 1
+                    ? `across all ${snap.payerOptions.length} payers they bill under`
+                    : 'across every payer they bill under'}
+                  . Use the switches below to narrow it, or the receipt above to pick a plan.
+                </>
+              ) : (
+                <>
+                  You skipped the plan questions, but the ranking is scoped to {snap.resolved.payerName}: every
+                  facility this member has history at under that one label. Turn the BILLED UNDER switch off to
+                  search all of them again.
+                </>
+              )}
             </p>
           ) : null}
 
           {/* ── The control lines. All visible, none behind a dropdown (the employer tag-search is
               the one exception — 311 employers cannot be chips). Each is the "BILLED UNDER" idiom:
-              a label, then toggles. Window is SINGLE-select (a window is one value); the three
-              facets are multiselect. ── */}
-          <div className="flex flex-col gap-2.5 rounded-lg border border-line bg-surface px-4 py-3">
+              a label, then an ON/OFF state badge, then toggles. Window is SINGLE-select (a window is
+              one value); the three facets are multiselect.
+
+              ── THE SKIP LANDS HERE (Alec, 2026-08-07) ────────────────────────────────────────────
+              After a Skip this block IS the answer to "what did the search just do": every facet, its
+              state in words, and its toggles — one surface, not a summary beside the controls it
+              describes. `data-v3-inventory` marks it for the shell's reveal timeline; each row is
+              tagged `data-v3-facet`. The motion is the flow's existing vocabulary (14px / 220ms
+              power2.out, stagger min(i,3)×60ms) and animates OPACITY, never `autoAlpha` — see the
+              shell for why that distinction is what keeps the toggles live throughout. ── */}
+          <div data-v3-inventory className="flex flex-col gap-2.5 rounded-lg border border-line bg-surface px-4 py-3">
+            {/* The inventory's own sentence, shown only after a Skip — the state where "nothing is
+                filtered" is a fact worth asserting rather than left to be read off six unlit rows. */}
+            {skipped && !stale ? (
+              <p data-v3-facet className="text-xs font-semibold text-ink600">
+                {/* ⚠ "EVERY SWITCH IS OFF" WAS FALSE ONE CLICK IN. Skip, then press "90 days": no
+                    filter is active, no label is scoped, so the old sentence claimed nothing was
+                    restricting the search — directly above a Window row reading "On · 90 days". Both
+                    halves were wrong at once. The window is a real narrowing that can never be turned
+                    off (see its FacetState), so the sentence names it as the standing exception
+                    instead of pretending the screen has none. */}
+                {anyFacetOn
+                  ? 'Some switches are on — everything marked Off is unrestricted.'
+                  : 'No filters are on — apart from the window, nothing is narrowing this search. Turn any switch on to narrow it.'}
+              </p>
+            ) : null}
             {/* GRANULAR suppression, honouring the RULE 2654416 ruling rather than blanketing it.
                 The MANUAL variant ("— your selection") states the user's own action — a fact,
                 allowed to speak immediately under the dim+beam marker (the standing ruling in the
@@ -1703,8 +1931,14 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
             {props.staleAfterError || (props.refetching && props.windowDays === null) ? null : (
               <p className="text-sm text-ink900">{windowSentence(snap, props.windowDays)}</p>
             )}
-            <div className="flex flex-wrap items-center gap-2">
+            <div data-v3-facet className="flex flex-wrap items-center gap-2">
               <span className="text-xs font-medium uppercase tracking-wide text-ink400">Window</span>
+              {/* THE ONE FACET THAT IS NEVER OFF, and the inventory says so rather than pretending
+                  otherwise. A ranking always has a window; "Automatic" is a CHOICE OF window, not the
+                  absence of one — so this reads "On · automatic" or "On · 90 days", never "Off". The
+                  Collections model carries the same caveat (its 90-day recency chip is a real default
+                  narrowing, captioned as "· Last 90 days" rather than hidden). */}
+              <FacetState on text={props.windowDays === null ? 'automatic' : `${props.windowDays} days`} />
               {WINDOW_CHOICES.map((d) => {
                 const active = props.windowDays === d;
                 return (
@@ -1749,15 +1983,22 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
             {/* The employer tag-search: a visible dropdown whose SUMMARY states the current reach,
                 so the count is readable without opening it. */}
             {facets.employers.length > 0 ? (
-              <details className="group/emp text-xs">
+              <details data-v3-facet className="group/emp text-xs">
                 {/* A REAL dropdown control, not a text link: same pill geometry as every other chip
                     on these lines, with its own caret. `list-none` + the webkit rule kill the
-                    native marker so the caret is ours and points the right way when open. */}
+                    native marker so the caret is ours and points the right way when open.
+                    The state badge sits INSIDE the summary because this facet's controls are behind
+                    the disclosure — the inventory has to be readable without opening it. */}
                 <summary className="flex w-fit cursor-pointer list-none items-center gap-2 rounded-full border border-line bg-surface px-3 py-1 text-xs font-semibold text-ink900 transition-colors hover:border-teal500 hover:text-teal700 [&::-webkit-details-marker]:hidden">
                   <span className="text-xs font-medium uppercase tracking-wide text-ink400">Employers</span>
-                  {props.filters.employers.length > 0
-                    ? `Narrowed to ${props.filters.employers.length} of ${facets.employers.length}`
-                    : `Searched over ${facets.employers.length}`}
+                  <FacetState
+                    on={props.filters.employers.length > 0}
+                    text={
+                      props.filters.employers.length > 0
+                        ? `${props.filters.employers.length} of ${facets.employers.length}`
+                        : `all ${facets.employers.length}`
+                    }
+                  />
                   <span aria-hidden className="text-ink400 transition-transform group-open/emp:rotate-180">
                     ▾
                   </span>
@@ -1822,49 +2063,64 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 </button>
               </p>
             ) : null}
-          </div>
 
-          {/* Claims-side scope: which billed-under label the ranking is scoped to. */}
-          {snap.payerOptions.length > 1 ? (
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-medium uppercase tracking-wide text-ink400">Billed under</span>
-              {snap.payerOptions.map((p) => {
-                const active = snap.resolved?.payerName === p.payer;
-                return (
-                  <button
-                    key={p.payer}
-                    type="button"
-                    aria-pressed={active}
-                    onClick={() => props.onPayerOverride(active ? null : p.payer)}
-                    className={`rounded-full border px-3 py-1 text-xs font-semibold ${
-                      active ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600'
-                    }`}
-                  >
-                    {p.payer}
-                    <span className="ths-num" aria-label={`${p.lines} charge lines under this label`}>
-                      {' '}
-                      · {p.lines.toLocaleString()}
-                    </span>
-                    {active ? ' · showing' : ''}
-                  </button>
-                );
-              })}
-              {/* "You picked this" / "your plan pick implies this" / "we defaulted" are three
-                  different claims — and a REJECTED override must never render as honoured. The
-                  caption is SUPPRESSED IN FLIGHT (rule 2654416): it asserts one of four scope
-                  claims about a set that has not answered yet. The chips themselves stay — they
-                  are the user's controls, not claims. */}
-              {stale ? null : (
-                <span className="text-xs text-ink600">
-                  {billedUnderCaption({
-                    skipped,
-                    payerOverridden: snap.payerOverridden,
-                    scopeSource: props.scopeSource,
-                  })}
-                </span>
-              )}
-            </div>
-          ) : null}
+            {/* Claims-side scope: which billed-under label the ranking is scoped to. MOVED INSIDE the
+                inventory block 2026-08-07 — it was the one facet living outside the panel that claims
+                to list every facet, and after a Skip it is the facet that matters most (it is the
+                un-blend). Its state badge reads "Off · all N labels" when nothing is selected, which
+                is now a REACHABLE state rather than a hypothetical: before the identifier-wide skip,
+                the core always resolved a dominant label and one chip was always lit. */}
+            {snap.payerOptions.length > 1 ? (
+              <div data-v3-facet className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-medium uppercase tracking-wide text-ink400">Billed under</span>
+                <FacetState
+                  on={!allPayers}
+                  text={allPayers ? `all ${snap.payerOptions.length} labels` : (scopePayer ?? '1 label')}
+                />
+                {snap.payerOptions.map((p) => {
+                  // ⚠ COMPARE AGAINST THE SCOPE, NOT THE NAME. `resolved.payerName` is null under an
+                  // all-payers ranking, so `=== p.payer` is false for every chip and none lights —
+                  // which is the correct reading and the Collections model exactly (nothing selected
+                  // means no restriction). Going through `scopePayer` states that rather than relying
+                  // on a null comparison to happen to do the right thing.
+                  const active = !allPayers && scopePayer === p.payer;
+                  return (
+                    <button
+                      key={p.payer}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => props.onPayerOverride(active ? null : p.payer)}
+                      className={`rounded-full border px-3 py-1 text-xs font-semibold ${
+                        active ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600'
+                      }`}
+                    >
+                      {p.payer}
+                      <span className="ths-num" aria-label={`${p.lines} charge lines under this label`}>
+                        {' '}
+                        · {p.lines.toLocaleString()}
+                      </span>
+                      {active ? ' · showing' : ''}
+                    </button>
+                  );
+                })}
+                {/* "You picked this" / "your plan pick implies this" / "we defaulted" are three
+                    different claims — and a REJECTED override must never render as honoured. The
+                    caption is SUPPRESSED IN FLIGHT (rule 2654416): it asserts one of four scope
+                    claims about a set that has not answered yet. The chips themselves stay — they
+                    are the user's controls, not claims. */}
+                {stale ? null : (
+                  <span className="text-xs text-ink600">
+                    {billedUnderCaption({
+                      skipped,
+                      payerOverridden: snap.payerOverridden,
+                      scopeSource: props.scopeSource,
+                      allPayers,
+                    })}
+                  </span>
+                )}
+              </div>
+            ) : null}
+          </div>
 
           {/* The hero: ONE number, patient-weighted, with its basis stated. The band wash sits
               behind it (Phase 5); the verdict WORD beside the numeral still carries the meaning.
@@ -1958,7 +2214,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
             ) : null}
             <ul className="grid list-none grid-cols-1 gap-3 p-0 lg:grid-cols-2">
               {shownFacilities.map((f) => (
-                <ScoreCard key={f.facilityKey} f={f} />
+                <ScoreCard key={f.facilityKey} f={f} allPayers={allPayers} />
               ))}
             </ul>
             {/* Two different emptinesses, two different sentences. "Nothing ranked at all" is a
@@ -2130,6 +2386,11 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
   // the surface where that lie was loudest: it re-grew a "PLAN <declined employer>" entry.
   const skipped = props.answer?.skipped ?? false;
   const scopePayer = props.answer?.snapshot?.resolved?.payerName ?? null;
+  // The receipt's Scope entry used to be able to say only "All plans" plus, when there was one, a
+  // label. Under an identifier-wide ranking there is no label AND the payer axis is genuinely wide —
+  // "All plans" alone would read as an omission where it is actually the stronger claim, so the
+  // receipt names it.
+  const scopeAllPayers = props.answer?.snapshot?.resolved?.payerScope === 'all';
   // Only when the core HONOURED the chip: `scopeSource === 'user'` means one was sent, not that it
   // was applied, and `scopePayer` is the label actually used. Calling a rejected chip "your re-scope"
   // would be the same class of overclaim this fix removes.
@@ -2144,7 +2405,12 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
 
       {/* THE single live region — one, not one per panel; the important sentence must not queue. */}
       <p aria-live="polite" className="sr-only">
-        {liveSentenceFor(props.stage, props.resolution, props.reason, { skipped, scopePayer, payerGroups: props.payerGroups })}
+        {liveSentenceFor(props.stage, props.resolution, props.reason, {
+          skipped,
+          scopePayer,
+          scopeAllPayers,
+          payerGroups: props.payerGroups,
+        })}
       </p>
 
       {props.denied ? (
@@ -2162,6 +2428,7 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
           payerGroups={props.payerGroups}
           skipped={skipped}
           scopePayer={scopePayer}
+          scopeAllPayers={scopeAllPayers}
           scopeByUser={scopeByUser}
         />
       ) : null}
