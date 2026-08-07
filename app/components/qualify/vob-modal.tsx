@@ -55,7 +55,7 @@ export function VobModal({
 
         <div className="px-6 pb-1 pl-[78px] text-[13.5px] text-muted-foreground">
           <div className="my-2.5 rounded-lg border bg-background px-3 py-2.5 font-mono text-[13px] text-ink900">
-            <span className="mb-0.5 block font-sans text-[10px] font-semibold uppercase tracking-wider text-ink400">
+            <span className="mb-0.5 block font-sans text-xs font-medium uppercase tracking-wide text-ink400">
               Payer
             </span>
             {query}
@@ -76,7 +76,7 @@ export function VobModal({
           >
             Close
           </button>
-          <span className="ml-auto text-[11px] font-semibold text-status-warn">CTA inert · TODO</span>
+          <span className="ml-auto text-xs font-semibold text-status-warn">CTA inert · TODO</span>
         </div>
       </div>
     </div>

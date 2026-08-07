@@ -33,19 +33,19 @@ export function SearchTrace({ lines }: { lines: QualifyTraceLine[] }) {
   return (
     <section className="overflow-hidden rounded-2xl border bg-card shadow-ths-sm" data-testid="search-trace">
       <div className="flex flex-wrap items-baseline gap-x-2 border-b border-line bg-surface px-4 py-2">
-        <span className="text-[9.5px] font-bold uppercase tracking-[0.07em] text-ink400">How this was resolved</span>
+        <span className="text-xs font-medium uppercase tracking-wide text-ink400">How this was resolved</span>
         {/* Says plainly that this is a record, not a live feed — see the module header. */}
-        <span className="ml-auto text-[10.5px] italic text-ink400">a record of the decisions, not a live feed</span>
+        <span className="ml-auto text-xs italic text-ink400">a record of the decisions, not a live feed</span>
       </div>
       <ol className="space-y-1.5 px-4 py-2.5">
         {lines.map((l, i) => {
           const meta = TONE_META[l.tone];
           return (
             <li key={`${l.tone}-${i}`} className="flex items-start gap-2">
-              <span aria-hidden className={['mt-px w-3 shrink-0 text-center text-[11px] font-bold', meta.cls].join(' ')}>
+              <span aria-hidden className={['mt-px w-4 shrink-0 text-center text-xs font-bold', meta.cls].join(' ')}>
                 {meta.mark}
               </span>
-              <span className="min-w-0 flex-1 text-[11.5px] leading-relaxed text-ink600">{l.text}</span>
+              <span className="min-w-0 flex-1 text-xs leading-relaxed text-ink600">{l.text}</span>
             </li>
           );
         })}

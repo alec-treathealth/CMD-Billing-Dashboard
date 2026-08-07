@@ -61,7 +61,7 @@ function Chip({
             : `${label} · ${value} · the only one on this prefix · autofilled from the VOB on file`
       }
     >
-      <span className="shrink-0 text-[9.5px] font-bold uppercase tracking-[0.07em] text-ink400">{label}</span>
+      <span className="shrink-0 text-xs font-medium uppercase tracking-wide text-ink400">{label}</span>
       <span
         className={[
           'min-w-0 truncate text-[12px] font-semibold leading-5',
@@ -72,7 +72,7 @@ function Chip({
         {missing ? 'not on file' : value}
       </span>
       {ambiguous ? (
-        <span className="shrink-0 text-[9.5px] font-bold tabular-nums text-status-warn/80">1 of {of}</span>
+        <span className="shrink-0 text-xs font-semibold tabular-nums text-status-warn/80">1 of {of}</span>
       ) : null}
     </span>
   );
@@ -127,13 +127,13 @@ export function PolicyStrip({
       ) : null}
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-4 pb-1 pt-3">
-        <span className="inline-flex items-center gap-1.5 rounded-full bg-teal900 px-2.5 py-0.5 text-[10.5px] font-semibold text-white">
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-teal900 px-2.5 py-0.5 text-xs font-semibold text-white">
           Policy on file
         </span>
         <span className="font-head text-[13px] font-semibold tracking-tight text-ink900">
           {prefixEcho ? <span className="font-mono">{prefixEcho}</span> : 'This plan'} identifies itself — nothing to re-type
         </span>
-        <span className="ml-auto text-[11px] text-muted-foreground">
+        <span className="ml-auto text-xs text-muted-foreground">
           {policy.memberCount.toLocaleString('en-US')} verified member{policy.memberCount === 1 ? '' : 's'} · VOB as of{' '}
           <b className="font-semibold text-ink600">{policy.vobFreshAsOf ?? '—'}</b>
         </span>
@@ -147,7 +147,7 @@ export function PolicyStrip({
         <Chip label="Plan" value={policy.planType} />
         <Chip label="Group #" value={policy.groupOnFile ? 'on file' : null} mono />
         {policy.network === null ? (
-          <span className="ml-1 text-[11px] italic text-ink400" title="The VOB parser does not extract network status yet — the gate lights up the day it does.">
+          <span className="ml-1 text-xs italic text-ink400" title="The VOB parser does not extract network status yet — the gate lights up the day it does.">
             network not captured on this VOB
           </span>
         ) : policy.network === 'OON' ? (
@@ -161,7 +161,7 @@ export function PolicyStrip({
           policy reads exactly as it did before and this line never becomes wallpaper. It states what
           the chips above are — a modal read over a population — which the chips alone cannot. */}
       {policy.carrierCount > 1 || policy.employerCount > 1 ? (
-        <p className="border-t border-line px-4 py-2 text-[11.5px] text-ink600">
+        <p className="border-t border-line px-4 py-2 text-xs text-ink600">
           <b className="font-semibold text-status-warn">This prefix is not one plan.</b> Its{' '}
           {policy.memberCount.toLocaleString('en-US')} verified members span{' '}
           {policy.carrierCount > 1 ? (
@@ -179,7 +179,7 @@ export function PolicyStrip({
           Attributing the risk to a NAMED employer is only honest when the prefix carries one; with
           several, naming the modal one asserts the very specificity the line above just disclaimed. */}
       {policy.funding && /self/i.test(policy.funding) ? (
-        <p className="border-t border-line px-4 py-2 text-[11.5px] text-ink600">
+        <p className="border-t border-line px-4 py-2 text-xs text-ink600">
           <b className="font-semibold">Self-funded plan</b> —{' '}
           {policy.employerCount > 1 ? 'the employer' : (policy.employerName ?? 'the employer')} carries the risk;
           exceptions and single-case agreements are decided by a plan administrator, not a payer rate sheet.
@@ -187,14 +187,14 @@ export function PolicyStrip({
       ) : null}
 
       {benefits.length > 0 ? (
-        <p className="border-t border-line px-4 py-2 text-[11.5px] tabular-nums text-ink600">
+        <p className="border-t border-line px-4 py-2 text-xs tabular-nums text-ink600">
           {benefits.join(' · ')}
-          <span className="ml-1.5 text-[10.5px] italic text-ink400">display only — never part of the score</span>
+          <span className="ml-1.5 text-xs italic text-ink400">display only — never part of the score</span>
         </p>
       ) : null}
 
       {provenance !== 'direct' && provenance !== 'none' ? (
-        <p className="border-t border-dashed border-teal200 bg-teal50/50 px-4 py-2 text-[11.5px] font-semibold text-teal700">
+        <p className="border-t border-dashed border-teal200 bg-teal50/50 px-4 py-2 text-xs font-semibold text-teal700">
           Estimated read: {PROVENANCE_LABELS[provenance]} — directional, not confirmed. This plan has no claims of its
           own yet.
         </p>

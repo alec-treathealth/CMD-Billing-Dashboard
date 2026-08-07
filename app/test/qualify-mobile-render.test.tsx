@@ -499,3 +499,123 @@ test('MobilePolicyLine: VOB chips + network + stale banner; estimated banner on 
   assert.ok(!html.includes('ACME CO'), 'employer name NEVER on the phone line');
   assert.equal(renderToStaticMarkup(<MobilePolicyLine policy={null} provenance="direct" />), '', 'silent with no policy on the direct path');
 });
+
+// ── Text-size floor sweep (12px-floor sweep, Task 1) ────────────────────────────────────────────────
+//
+// The F4 idiom, ported from app/test/qualifyV3Flow.test.tsx (I9) to the mobile components THIS file
+// renders. A regex sweep, not a literal blocklist. Every case asserts a POSITIVE CONTROL first — a
+// vacuous sweep over markup that never rendered would stay green through a future regression (the
+// exact failure mode F4's own header comment documents in qualify-render.test.tsx). m/swipe-row.tsx
+// carried this file's only pre-existing sub-12px offenders (a 9px careSetting chip + a 9px band
+// verdict label, both now text-xs); the rest of m/ was already clean per the recon sweep — this test
+// is regression coverage for both.
+test('floor sweep: no meaning-bearing text below 12px in any mobile Qualify component this file renders', () => {
+  const cases: Array<[string, string, RegExp]> = [
+    [
+      'SwipeRow (v1 fallback — BOTH chip, thin-sample meta line)',
+      renderToStaticMarkup(<SwipeRow facility={FAC} onWhy={noop} onOpen={noop} />),
+      />Both</,
+    ],
+    [
+      'SwipeRow (v2 IQ-rated — Strong band verdict)',
+      renderToStaticMarkup(
+        <SwipeRow facility={{ ...FAC, ratingV2: 72, iqBand: '65', distinctPatients: 14 }} onWhy={noop} onOpen={noop} />,
+      ),
+      /Strong 65%\+/,
+    ],
+    [
+      'SwipeRow (sample-gated — Insufficient band label)',
+      renderToStaticMarkup(<SwipeRow facility={{ ...FAC, distinctPatients: 1 }} onWhy={noop} onOpen={noop} />),
+      /Insufficient/,
+    ],
+    [
+      'MobileFacilityList (paged browse — swipe hint + page indicator)',
+      renderToStaticMarkup(
+        <MobileFacilityList
+          facilities={facN(7)}
+          page={0}
+          scoped={false}
+          onPageNext={noop}
+          onPagePrev={noop}
+          onWhy={noop}
+          onOpen={noop}
+        />,
+      ),
+      /Swipe left or right to page/,
+    ],
+    [
+      'MobileFacilityList (identifier-scoped — single card, no pager)',
+      renderToStaticMarkup(
+        <MobileFacilityList
+          facilities={[{ ...FAC, rank: 4, name: 'LANDING FAC', facilityKey: 'landing' }]}
+          page={0}
+          scoped
+          onPageNext={noop}
+          onPagePrev={noop}
+          onWhy={noop}
+          onOpen={noop}
+        />,
+      ),
+      /LANDING FAC/,
+    ],
+    [
+      'TrendSheet (coverage breakdown + City, ST)',
+      renderToStaticMarkup(<TrendSheet facility={FAC} onClose={noop} />),
+      /Confirmed claims/,
+    ],
+    [
+      'DetailSheet (reveal-capable, masked — "Tap a claim to reveal" + chip strip)',
+      renderToStaticMarkup(
+        <DetailSheet facility={FAC} claims={MIXED_CASES} loading={false} hasAmounts onOpenClaim={noop} onClose={noop} {...noReveal} canReveal />,
+      ),
+      /Tap a claim to reveal/,
+    ],
+    [
+      'DetailSheet (cached-PHI revealed — "Hide IDs")',
+      renderToStaticMarkup(
+        <DetailSheet facility={FAC} claims={CASES} loading={false} hasAmounts={false} onOpenClaim={noop} onClose={noop} {...noReveal} canReveal revealed={REVEALED} />,
+      ),
+      /Hide IDs/,
+    ],
+    [
+      'DetailSheet (capped + search-context banner)',
+      renderToStaticMarkup(
+        <DetailSheet
+          facility={FAC}
+          claims={MIXED_CASES}
+          loading={false}
+          hasAmounts
+          onOpenClaim={noop}
+          onClose={noop}
+          {...noReveal}
+          capped
+          searchContext={{ term: 'EAZ', payer: 'ANTHEM BLUE CROSS CA' }}
+        />,
+      ),
+      /Show all/,
+    ],
+    [
+      'ClaimDetailSheet (reveal-capable, no phi yet — "Reveal identifiers")',
+      renderToStaticMarkup(<ClaimDetailSheet claim={CASES[0]!} hasAmounts={false} phi={null} canReveal onReveal={noop} onClose={noop} />),
+      /Reveal identifiers/,
+    ],
+    [
+      'ClaimDetailSheet (revealed phi + amounts)',
+      renderToStaticMarkup(<ClaimDetailSheet claim={CASES[0]!} hasAmounts phi={PHI} onClose={noop} />),
+      /GRP42/,
+    ],
+    [
+      'AreaChips (active + inactive chips)',
+      renderToStaticMarkup(<AreaChips chips={deriveAreaChips(MIXED)} active="CA" onSelect={noop} />),
+      /aria-pressed="true"[^>]*>CA<\/button>/,
+    ],
+  ];
+
+  for (const [label, html, mustRender] of cases) {
+    // POSITIVE CONTROL — prove this case rendered the markup it claims to be sweeping.
+    assert.match(html, mustRender, `${label}: rendered nothing to scan — the floor check would be vacuous`);
+    for (const m of html.matchAll(/text-\[(\d+(?:\.\d+)?)px\]/g)) {
+      assert.ok(Number(m[1]) >= 12, `sub-12px class on ${label}: text-[${m[1]}px]`);
+    }
+  }
+});

@@ -26,7 +26,7 @@ export function WindowLadder({ ladder }: { ladder: QualifyWindowLadder }) {
         <h3 className="font-head text-[13px] font-semibold tracking-tight text-ink900">
           Finding a window with enough patients to trust
         </h3>
-        <span className="text-[11px] text-muted-foreground">
+        <span className="text-xs text-muted-foreground">
           needs {floor}+ distinct patients · stops at the first that clears
         </span>
       </div>
@@ -55,11 +55,11 @@ export function WindowLadder({ ladder }: { ladder: QualifyWindowLadder }) {
             >
               <div className="flex items-baseline gap-1 font-mono text-[17px] font-semibold tabular-nums leading-none text-ink900">
                 {r.days}
-                <span className="text-[10px] font-normal text-ink400">days</span>
+                <span className="text-xs font-normal text-ink400">days</span>
               </div>
               <div
                 className={[
-                  'mt-1.5 text-[10.5px] font-semibold tabular-nums',
+                  'mt-1.5 text-xs font-semibold tabular-nums',
                   r.sufficient ? 'text-teal700' : tried ? 'text-ink600' : 'text-ink400',
                 ].join(' ')}
               >
