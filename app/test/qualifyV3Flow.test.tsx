@@ -501,9 +501,102 @@ test('the resolution disclosure describes the rows on screen after a skip, and i
   // The predicate: RE-CAPTIONED, not deleted. It names a resolution the panels are not about.
   assert.match(skipped, /p_deadbeef<\/span> identifies the plan that was resolved\s+before you skipped/);
   assert.ok(!/panels showing the same value are about/.test(skipped), 'the same-rows claim is false after a skip');
-  // Every deriveNotices kind is group-scoped, so all of them describe the declined plan.
+  // The PLAN-level notices go; the member-level one is a separate case, pinned in its own test below.
   assert.ok(!skipped.includes('In-network status is not captured on this VOB'), 'the declined VOB note is gone');
   assert.match(skipped, /No plan was chosen, so the notes about one plan/, 'and their absence is explained');
+});
+
+// FINDING 1 (r2). `scopeSource` is derived from payerOverride/pickLabel/skipped and knows nothing
+// about the answer-stage filter chips (resolution-flow-client.tsx:222-224), but the fetch effect
+// folds active filters into a real `market` payload (client :278-294). So Skip → one Funding chip
+// left v1's caption asserting "this identifier's whole footprint" over a funding-narrowed snapshot,
+// contradicting the "Ranking over N of M plans" line a few rows up.
+test('a skipped search that is then FILTERED says so — "whole footprint" is a claim about the fetch', () => {
+  const r = fixture();
+  const disclosure = (over: Partial<NonNullable<ResolutionStagesProps['answer']>>) =>
+    disclosureOf(
+      render(
+        props('answer', r, {
+          answer: answerProps({
+            snapshot: snapshotFixture(),
+            scopeSource: 'skipped',
+            candidates: orderedCandidates(r),
+            ...over,
+          }),
+        }),
+      ),
+    );
+
+  // No filters: the r1 strings, unchanged.
+  const wide = disclosure({});
+  assert.match(wide, /whole footprint under AETNA US HEALTHCARE/, 'unfiltered, the skip caption is untouched');
+  assert.ok(!wide.includes('narrowed by your filter selections'), 'and claims no narrow');
+
+  // A funding chip goes straight into the market — the ranking is NOT the whole footprint.
+  const narrowed = disclosure({ filters: { planTypes: [], funding: ['Self-Funded'], employers: [] } });
+  assert.ok(!narrowed.includes('whole footprint'), 'a narrowed fetch may not be captioned as the whole footprint');
+  assert.match(narrowed, /all plans — no plan chosen, then narrowed by your filter selections under AETNA US HEALTHCARE/);
+  assert.match(narrowed, /grounded in the ranking on screen — all plans, no plan chosen, narrowed by your filter selections/);
+
+  // ...and the precision that a bare `filtersActive` check would get wrong: selecting EVERY employer
+  // in the universe is not a narrow (employerNarrowFor :325 returns null), nothing extra reaches the
+  // request, so the whole-footprint wording is the true one even though filters are active.
+  const notANarrow = disclosure({
+    filters: { planTypes: [], funding: [], employers: ['SOUTHWEST AIRLINES CO', 'ACME CO'] },
+  });
+  assert.match(notANarrow, /whole footprint under AETNA US HEALTHCARE/, 'a filter that narrows nothing narrows nothing');
+  assert.ok(!notANarrow.includes('narrowed by your filter selections'), 'claiming otherwise would be the same defect inverted');
+});
+
+// FINDING 2 (r2). v1 asserted every deriveNotices kind was group-scoped and suppressed all of them.
+// `no_policy_on_file` is MEMBER-level ("No verification of benefits on file for this member") and
+// survives a skip on the path this bug came from.
+test('a skipped search keeps the MEMBER-level no-VOB notice and suppresses the plan-level ones', () => {
+  const r = fixture();
+  const skipRender = (res: QualifyResolution) =>
+    disclosureOf(
+      render(props('answer', res, { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'skipped' }) })),
+    );
+
+  // VOB-backed: every notice on this resolution really is about the plan that was declined.
+  const vobBacked = skipRender(r);
+  assert.ok(!vobBacked.includes('In-network status is not captured on this VOB'), 'the plan-level VOB note goes');
+  assert.ok(!vobBacked.includes('You are seeing the one you selected'), 'so does the selection claim');
+  assert.match(vobBacked, /Pick a plan from the receipt to see them/, 'a VOB-bearing identifier is shown the way back to them');
+
+  // claims_only at chosenIndex 0. resolutionService §3 pushes every VOB row before any claims-only
+  // row (:243-302, nothing sorts afterwards), so this PROVES the identifier has no VOB row at all —
+  // the notice is then a statement about the member, not about a plan.
+  const noVobGroup = {
+    ...r.group,
+    resolutionBasis: 'claims_only' as const,
+    employerLabel: null,
+    funding: null,
+    planType: null,
+    vobFreshAsOf: null,
+  };
+  const noVob = skipRender(fixture({ group: noVobGroup }));
+  assert.match(noVob, /No verification of benefits on file for this member/, 'the member-level truth survives the skip');
+  assert.ok(!noVob.includes('Pick a plan from the receipt to see them'),
+    'and the copy stops promising notes that no plan behind this identifier can carry');
+
+  // The chosenIndex-0 gate is exactly what the VOB-first ordering proves. A pick-then-skip (receipt
+  // Change → plan → Skip, which never clears state.resolution) can leave a claims-only group chosen
+  // out of a VOB-BEARING set, where the member-level claim would be false. Unprovable, so unstated.
+  const unprovable = skipRender(fixture({ group: noVobGroup, candidates: { ...r.candidates, chosenIndex: 1 } }));
+  assert.ok(!unprovable.includes('No verification of benefits on file'), 'an unprovable member-level claim is not made');
+});
+
+// FINDING 3 (r2). The key safety decision — skipUnder reads snap.resolved.payerName and NEVER
+// scopePayer's g.payerDisplayName fallback — had no coverage, because every other assertion renders
+// with a snapshot in hand. This is the window where the fallback would fire.
+test('before the snapshot lands, a skipped caption names NO payer rather than the declined one', () => {
+  const loading = disclosureOf(
+    render(props('answer', fixture(), { answer: answerProps({ snapshot: null, scopeSource: 'skipped' }) })),
+  );
+  assert.ok(!loading.includes('Aetna'), 'the declined candidate\'s carrier never reaches the caption');
+  assert.match(loading, /whole footprint/, 'the caption degrades to the scope-less form');
+  assert.ok(!loading.includes(' under '), 'naming nobody beats naming a payer we cannot stand behind');
 });
 
 test('a skipped search says it was skipped — never "we could not narrow"', () => {
