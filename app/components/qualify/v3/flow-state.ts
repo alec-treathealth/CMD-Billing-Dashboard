@@ -2,8 +2,10 @@
  * Qualify v3 — THE SHELL'S STATE MACHINE. Fourteen fields, seventeen actions, one place each field
  * is written.
  *
- * Extracted from `resolution-flow-client.tsx` (F3b). The shell was carrying fourteen `useState`
- * hooks whose ~58 setter call sites encoded the rules below only by repetition: "a new search clears
+ * Extracted from `resolution-flow-client.tsx` (F3b). The shell was carrying FIFTEEN `useState` hooks
+ * — the fourteen fields below, plus `trends`, which stays behind (see WHAT IS DELIBERATELY NOT IN
+ * HERE) — bound at 58 setter sites: 56 direct calls, of which 2 are `setTrends`, plus 2 raw setters
+ * passed as props. They encoded the rules below only by repetition: "a new search clears
  * everything downstream" was twelve adjacent `setX(...)` lines, and the fact that Skip deliberately
  * does NOT clear `windowDays` was legible only by diffing two of those blocks by eye. Every rule in
  * this file was already true; none of it was stated anywhere, and none of it was testable without
@@ -86,6 +88,14 @@
  * 16 · payer_override_changed {label} — WRITES payerOverride=label.
  * 17 · window_days_changed {days}     — WRITES windowDays=days.
  *
+ * EIGHTEEN SWITCH ARMS, SEVENTEEN ACTIONS. The eighteenth is `default: return state` — an arm the
+ * `ShellAction` union makes unreachable through the type system, kept because the type system is not
+ * the only caller: a hot-reloaded action queued against a newer reducer, or a hand-written dispatch
+ * in a future test, would otherwise fall off the end and return `undefined` as the whole state. It
+ * returns the SAME object, so a stray dispatch cannot even cost a render. Pinned by a test that
+ * dispatches a bogus type through a cast. It matches the `windowReducer` precedent
+ * (app/lib/qualify/resolution.ts:417).
+ *
  * ── INVARIANTS (each one is pinned by a test in app/test/qualifyV3FlowState.test.tsx) ────────────
  * a · A NEW SEARCH CLEARS EVERYTHING DOWNSTREAM. `search_submitted` from ANY prior state lands on
  *     the same twelve values above — a kept-but-hidden choice is how one client's ranking ends up
@@ -122,13 +132,31 @@
  * The asymmetries in (f), (g) and (h) are OBSERVED BEHAVIOR carried over verbatim, not oversights to
  * normalize. Changing one is a product decision, not a refactor.
  *
- * ── REFERENTIAL BAIL-OUT ────────────────────────────────────────────────────────────────────────
- * `useState` skips a re-render when a setter is handed an `Object.is`-identical value; a naive
- * reducer returns `{...state}` every time and loses that. `bailIfUnchanged` restores it exactly:
- * when every field of the next state is `Object.is` to the previous one, the PREVIOUS OBJECT is
- * returned and `useReducer` bails out the same way `useState` did. This is why `filters` is reset to
- * the shared `NO_ANSWER_FILTERS` constant rather than a fresh literal — identity is load-bearing for
- * the `narrow` memo downstream.
+ * ── REFERENTIAL BAIL-OUT — AND THE ONE RESPECT IN WHICH IT IS *NOT* WHAT useState DID ───────────
+ * A naive reducer returns `{...state}` on every dispatch, so every dispatch re-renders. Where the
+ * old shell had a genuine no-op — the fetch effect's request-start clear when `snapshotError` was
+ * already null, a chip click that re-sends the value already set — that would now cost a full
+ * subtree render. `bailIfUnchanged` prevents it: when every field of the next state is `Object.is`
+ * to the previous one it returns the PREVIOUS OBJECT, and React's render-phase check bails out of
+ * reconciling children and of re-running effects.
+ *
+ * ⚠ BUT IT IS NOT THE SAME BAIL. `useState` has an EAGER path: with an empty update queue and an
+ * `Object.is`-identical next value, React never schedules the update at all and the component body
+ * does not re-run. `useReducer` has no such path — `dispatchReducerAction` always schedules, the
+ * body re-runs ONCE, and only then does the returned-same-object check stop the work. So a no-op
+ * dispatch costs one extra body invocation that the pre-F3b shell did not pay. That is
+ * consequence-free HERE (the body is pure, every memo hits on unchanged deps, no effect re-fires)
+ * and it is the honest residual of the extraction — do not describe this guard as reproducing
+ * `useState` exactly, because it does not.
+ *
+ * ONE ACTION BYPASSES THE GUARD ENTIRELY: `retry_requested`, which returns a fresh object
+ * unconditionally. The nonce always moves by construction, so the comparison could only ever cost
+ * time — and a retry that bailed would be the exact dead-stage bug the nonce exists to prevent.
+ *
+ * This is also why `filters` is reset to the shared `NO_ANSWER_FILTERS` constant rather than a fresh
+ * literal — identity is load-bearing for the `narrow` memo downstream, and a fresh-but-equal object
+ * would invalidate it on every navigation. Pinned per nav action in the test file, by reference and
+ * not by `deepEqual` (which is reference-blind, and left that rule silently unpinned until MUT-F).
  */
 import type { QualifySnapshot, QualifyTrailingDays } from '../../../lib/qualify/contract';
 import { NO_ANSWER_FILTERS, type AnswerFilters, type FlowStage } from './resolution-flow';
