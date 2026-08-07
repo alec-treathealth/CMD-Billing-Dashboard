@@ -20,9 +20,15 @@ import {
   liveSentenceFor,
   orderedCandidates,
   payerGroupsOf,
+  scopeSourceOf,
   type FlowStage,
   type ResolutionStagesProps,
 } from '../components/qualify/v3/resolution-flow';
+import {
+  INITIAL_SHELL_STATE,
+  shellReducer,
+  type ShellAction,
+} from '../components/qualify/v3/flow-state';
 import { deriveNotices, panelProvenance } from '../lib/qualify/resolution';
 import type { PanelEvidence, PanelId, QualifyResolution } from '../lib/qualify/resolution';
 import type { QualifyFacility, QualifySnapshot } from '../lib/qualify/contract';
@@ -31,6 +37,11 @@ import { HeatingUpCards, HeatingUpSkeleton } from '../components/qualify/shared/
 import { TRENDS } from './helpers/qualifyTrends';
 
 const PANELS: readonly PanelId[] = ['kpis', 'ranking', 'policy', 'ladder', 'trend', 'ai'];
+
+/** React escapes `'` to `&#x27;` in a text node, so copy carrying one must be asserted as it renders
+ *  rather than as it is authored. The alternative — a typographic apostrophe — is used nowhere in
+ *  this surface's copy, and inventing one here to dodge an escape would be a style fork. */
+const esc = (s: string): string => s.replace(/'/g, '&#x27;');
 
 function fixture(over: Partial<QualifyResolution> = {}): QualifyResolution {
   const evidence = Object.fromEntries(
@@ -178,6 +189,7 @@ function props(stage: FlowStage, r: QualifyResolution | null, over: Partial<Reso
           aiPanel: null,
           pending: false,
           scopeSource: 'pick',
+          skipped: false,
           payerOverride: null,
           onPayerOverride: noop,
           windowDays: null,
@@ -206,6 +218,7 @@ function answerProps(over: Partial<NonNullable<ResolutionStagesProps['answer']>>
     aiPanel: null,
     pending: false,
     scopeSource: 'pick',
+    skipped: false,
     payerOverride: null,
     onPayerOverride: noop,
     windowDays: null,
@@ -430,7 +443,7 @@ test('a skipped search decides nothing past the identifier — the receipt must 
   // "PLAN" entry claimed a decision the user explicitly declined to make, while the ranking beneath
   // was payer-wide.
   const html = render(
-    props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'skipped' }) }),
+    props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), skipped: true, scopeSource: 'dominant' }) }),
   );
   // Scoped to the RECEIPT nav — the step rail also carries a "Plan" label, correctly marked skipped.
   const receipt = html.slice(html.indexOf('aria-label="Your search so far"'), html.indexOf('</nav>'));
@@ -443,6 +456,71 @@ test('a skipped search decides nothing past the identifier — the receipt must 
   assert.ok(!html.includes('SOUTHWEST AIRLINES CO'), 'the pre-selected employer is never presented as resolved');
   // And the notice that reads "you are seeing the one you selected" is suppressed.
   assert.ok(!html.includes('You are seeing the one you selected'), 'no selection claim after a skip');
+});
+
+// Alec, live in a browser, 2026-08-07. "Skip — search all plans", then ONE press on a BILLED UNDER
+// chip, and the whole surface re-presented the plan he had just declined as though he had picked it:
+// a "CARRIER … · PLAN <sponsor>" receipt, the identity line with that plan's full policy bits, and
+// the resolve-time notices about it. (The live sponsor name is not repeated here — an employer label
+// tied to a member lookup is PHI-adjacent. The fixture's stand-in is what gets asserted.)
+//
+// The cause is a COLLAPSE, not an ordering mistake. `scopeSource` answered two independent questions
+// with one enum — "who chose the payer label" (user / the pick's claims label / the dominant default)
+// and "was a plan chosen at all" — and every skip guard in the presentation read the second off the
+// first. A chip press legitimately makes the first answer 'user'; nothing about it touches the
+// second. Re-ordering the ternary would only move the lie onto whichever claim lost the tie, so the
+// two claims are two values now: `skipped` rides as its own prop, straight from the reducer field
+// that pins the answer stage.
+test('a billed-under re-scope AFTER a skip is still a skip — it must not re-present the declined plan', () => {
+  const r = fixture();
+  // The exact sequence, through the real reducer: Skip, then one chip.
+  const flow = ([{ type: 'skipped' }, { type: 'payer_override_changed', label: 'AETNA' }] as ShellAction[]).reduce(
+    shellReducer,
+    INITIAL_SHELL_STATE,
+  );
+  assert.equal(flow.skipped, true, 'the reducer knows a chip press is not a plan pick (invariants g/h)');
+  assert.equal(flow.payerOverride, 'AETNA', 'and the chip really did land');
+
+  // The shell's payer-scope provenance, from that state (resolution-flow-client.tsx). 'user' is
+  // CORRECT and stays correct — the label on the ranking IS the one the operator chose. What must
+  // not follow from it is any claim about a plan.
+  const scopeSource = scopeSourceOf({ payerOverride: flow.payerOverride, pickLabel: null });
+  assert.equal(scopeSource, 'user');
+
+  const snap = { ...snapshotFixture(), resolved: { payerName: 'AETNA' }, payerOverridden: true } as QualifySnapshot;
+  const html = render(
+    props('answer', r, {
+      answer: answerProps({ snapshot: snap, skipped: flow.skipped, scopeSource, payerOverride: flow.payerOverride }),
+    }),
+  );
+
+  const receipt = html.slice(html.indexOf('aria-label="Your search so far"'), html.indexOf('</nav>'));
+  assert.match(receipt, />Scope</, 'the receipt still records a SCOPE — the only thing that was decided');
+  assert.ok(!receipt.includes('>Plan<'), 'and no PLAN entry, because no plan was chosen');
+  assert.ok(!receipt.includes('>Carrier<'), 'nor a CARRIER entry — the carrier question was skipped too');
+  // Honesty is stating what IS true (7c86709), and "no plan chosen, re-scoped to a label you picked"
+  // is a real, nameable state. Name it rather than merely dropping the false half.
+  assert.match(html, /All plans · AETNA — your re-scope/, 'the Scope entry names the re-scope as the operator\'s own');
+  assert.match(html, /all plans — no plan chosen/, 'the identity line still says no plan was chosen');
+  assert.ok(!html.includes('SOUTHWEST AIRLINES CO'), 'the declined plan sponsor appears NOWHERE in the markup');
+  assert.ok(!html.includes('Self-Funded · PPO'), 'nor the declined plan\'s policy bits');
+  assert.ok(!html.includes('In-network status is not captured on this VOB'), 'nor its resolve-time notices');
+  assert.match(html, /No plan was chosen, so the notes about one plan/, 'their absence is explained, not silent');
+  assert.match(html, /identifies the plan that was resolved\s+before you skipped/, 'the predicate keeps its skip caption');
+  // The skip banner is the sentence that vanished on the first chip press.
+  assert.match(html, /You skipped the plan questions, so this is a general search/);
+  assert.ok(!html.includes('could not be scoped to'), 'declining to narrow is still not a failure to narrow');
+
+  // THE DEFECT WAS INDISTINGUISHABILITY: a genuine pick plus one chip rendered byte-identically to
+  // this. Pin that they now differ, and that the picked path still presents its plan — otherwise the
+  // assertions above would pass against a screen that never shows a plan at all.
+  const picked = render(
+    props('answer', r, {
+      answer: answerProps({ snapshot: snap, skipped: false, scopeSource: 'user', payerOverride: 'AETNA' }),
+    }),
+  );
+  assert.ok(picked.includes('SOUTHWEST AIRLINES CO'), 'a genuine pick DOES present its plan');
+  assert.notEqual(html, picked, 'skip-then-re-scope and pick-then-re-scope are different states and render differently');
 });
 
 /** The "How this was resolved" disclosure, sliced. Deliberately scoped: the employer label and the
@@ -486,7 +564,7 @@ test('the resolution disclosure describes the rows on screen after a skip, and i
 
   // ── The fix. A SKIPPED answer captions the same three panels with the identifier-wide truth.
   const skipped = disclosureOf(
-    render(props('answer', r, { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'skipped' }) })),
+    render(props('answer', r, { answer: answerProps({ snapshot: snapshotFixture(), skipped: true, scopeSource: 'dominant' }) })),
   );
   assert.ok(!skipped.includes(employer!), 'the declined plan\'s employer never captions a panel');
   assert.ok(!skipped.includes('42 members'), 'nor its member count');
@@ -519,7 +597,8 @@ test('a skipped search that is then FILTERED says so — "whole footprint" is a 
         props('answer', r, {
           answer: answerProps({
             snapshot: snapshotFixture(),
-            scopeSource: 'skipped',
+            skipped: true,
+            scopeSource: 'dominant',
             candidates: orderedCandidates(r),
             ...over,
           }),
@@ -555,7 +634,7 @@ test('a skipped search keeps the MEMBER-level no-VOB notice and suppresses the p
   const r = fixture();
   const skipRender = (res: QualifyResolution) =>
     disclosureOf(
-      render(props('answer', res, { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'skipped' }) })),
+      render(props('answer', res, { answer: answerProps({ snapshot: snapshotFixture(), skipped: true, scopeSource: 'dominant' }) })),
     );
 
   // VOB-backed: every notice on this resolution really is about the plan that was declined.
@@ -592,7 +671,7 @@ test('a skipped search keeps the MEMBER-level no-VOB notice and suppresses the p
 // with a snapshot in hand. This is the window where the fallback would fire.
 test('before the snapshot lands, a skipped caption names NO payer rather than the declined one', () => {
   const loading = disclosureOf(
-    render(props('answer', fixture(), { answer: answerProps({ snapshot: null, scopeSource: 'skipped' }) })),
+    render(props('answer', fixture(), { answer: answerProps({ snapshot: null, skipped: true, scopeSource: 'dominant' }) })),
   );
   assert.ok(!loading.includes('Aetna'), 'the declined candidate\'s carrier never reaches the caption');
   assert.match(loading, /whole footprint/, 'the caption degrades to the scope-less form');
@@ -601,7 +680,7 @@ test('before the snapshot lands, a skipped caption names NO payer rather than th
 
 test('a skipped search says it was skipped — never "we could not narrow"', () => {
   const skipped = render(
-    props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'skipped' }) }),
+    props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), skipped: true, scopeSource: 'dominant' }) }),
   );
   assert.match(skipped, /You skipped the plan questions, so this is a general search/);
   assert.ok(!skipped.includes('could not be scoped to'), 'declining to narrow is not a failure to narrow');
@@ -1216,6 +1295,39 @@ test('the billed-under caption distinguishes "you picked", "your plan implies", 
   // Nothing was sent at all.
   const dominant = render(props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'dominant' }) }));
   assert.match(dominant, /Largest by volume — pick another to re-scope\./);
+  // A chip WAS sent and the core rejected it. The old discriminator (`scopeSource !== 'dominant'`)
+  // swept this into the picked-plan wording; nothing was picked, a label was.
+  const rejectedChip = render(props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'user', payerOverride: 'NOT A REAL LABEL' }) }));
+  assert.match(rejectedChip, /That label could not be applied — showing the largest by volume\./);
+  assert.ok(!rejectedChip.includes('the picked plan'), 'a rejected chip is not a rejected plan pick');
+});
+
+// The caption's discriminator was `payerOverridden ? … : scopeSource !== 'dominant' ? …`, so a SKIP
+// — which sends nothing and picks nothing — fell into the arm written for a REJECTED PLAN PICK:
+// "Could not scope to the picked plan". No plan was ever picked. The two missing arms, added here.
+// Copy describes the ranking AS IT BEHAVES TODAY: a single dominant billed-under label. Widening
+// that to the identifier's whole footprint is a separate change and must not be pre-announced.
+test('the billed-under caption has its own arms for a SKIP — nothing was picked, so nothing was rejected', () => {
+  const skipNoOverride = render(
+    props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), skipped: true, scopeSource: 'dominant' }) }),
+  );
+  assert.ok(
+    skipNoOverride.includes(esc("No plan chosen — showing this identifier's largest label by volume; pick another to re-scope.")),
+    'the skip gets its own arm, worded for the ranking as it behaves today: one dominant label',
+  );
+  assert.ok(!skipNoOverride.includes('Could not scope to the picked plan'), 'the user picked nothing to fail to scope to');
+  assert.ok(!skipNoOverride.includes('Largest by volume — pick another to re-scope.'), 'and the dominant arm omits that no plan was chosen');
+
+  // Skip, then a billed-under chip that WAS honoured — Alec's live state. Two true facts, one line.
+  const overridden = { ...snapshotFixture(), payerOverridden: true } as QualifySnapshot;
+  const skipThenChip = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: overridden, skipped: true, scopeSource: 'user', payerOverride: 'AETNA US HEALTHCARE' }),
+    }),
+  );
+  assert.match(skipThenChip, /No plan chosen — this label is your own re-scope\./);
+  assert.ok(!skipThenChip.includes('Scoped to the plan you picked.'), 'no plan was picked');
+  assert.ok(!/>Your selection\./.test(skipThenChip), 'and "Your selection." alone would imply one was');
 });
 
 test('a dominant-scoped ranking under a multi-plan pick states the mismatch in words, not chips', () => {

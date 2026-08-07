@@ -61,6 +61,7 @@ import {
   payerGroupsOf,
   ResolutionStages,
   scopeKeyOf,
+  scopeSourceOf,
   type FlowStage,
 } from './resolution-flow';
 // The flow's fourteen fields and the rules that move them. Its header is the spec; this file is the
@@ -203,8 +204,12 @@ export function ResolutionFlowClient({
   // the user explicitly declined to choose.
   const pickLabel = skipped ? null : (state.resolution?.group.claimsPayerLabels[0] ?? null);
   const sentOverride = payerOverride ?? pickLabel;
-  const scopeSource: 'user' | 'pick' | 'dominant' | 'skipped' =
-    payerOverride !== null ? 'user' : pickLabel !== null ? 'pick' : skipped ? 'skipped' : 'dominant';
+  // TWO CLAIMS, TWO VALUES. `scopeSource` answers "who chose the payer label" and nothing else; the
+  // reducer's `skipped` answers "was a plan chosen" and is threaded to the presentation as its own
+  // prop below. They used to be one enum, and because a billed-under chip legitimately outranks a
+  // skip for the FIRST question, one chip press after a Skip turned every skip guard off at once and
+  // re-presented the declined plan as a picked one. See `ScopeSource` in ./resolution-flow.
+  const scopeSource = scopeSourceOf({ payerOverride, pickLabel });
 
   // ── The answer-stage filter universe and the market narrow ────────────────────────────────────
   // Universe: after a Skip, every candidate behind the identifier; otherwise the picked carrier's
@@ -466,6 +471,10 @@ export function ResolutionFlowClient({
                 ) : null,
                 pending: isPending,
                 scopeSource,
+                // The reducer field itself. Everything that must not claim a plan was chosen —
+                // the receipt, the identity line, the skip banner, the suppressed notices and
+                // provenance — reads THIS, so a re-scope cannot un-skip the presentation.
+                skipped,
                 refetching,
                 staleAfterError,
                 onRetry: onRetrySnapshot,

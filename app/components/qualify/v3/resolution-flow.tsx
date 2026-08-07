@@ -206,6 +206,36 @@ export function deriveStage(args: {
   return 'plan';
 }
 
+/**
+ * WHO CHOSE THE PAYER LABEL THE RANKING IS SCOPED TO. Three values, one question — and deliberately
+ * NOT a fourth value for "the user skipped the plan questions".
+ *
+ * ⚠ THIS ENUM ONCE CARRIED A 'skipped' MEMBER, AND THAT COLLAPSE WAS A LIVE SCOPE-LIE.
+ * "Who chose the payer label" and "was a plan chosen at all" are INDEPENDENT claims, and folding
+ * them into one enum forces a precedence between them that no ranking can be honest about. It
+ * ranked 'user' above 'skipped', so one press on a BILLED UNDER chip after a Skip — a legitimate
+ * re-scope, which really does make the label the user's own — flipped the value to 'user' and, with
+ * it, every presentation guard that read skip-ness off this enum: the receipt reverted to
+ * "CARRIER … · PLAN …", the identity line printed the declined plan's policy bits, and the
+ * resolve-time notices about that plan came back. A genuine plan pick plus one chip press rendered
+ * BYTE-IDENTICALLY, so the surface could not distinguish "picked, then re-scoped" from "declined to
+ * pick, then re-scoped". Re-ordering the ternary would only move the lie onto whichever claim lost
+ * the tie. `skipped` therefore travels as its OWN prop, sourced from the reducer field that pins the
+ * answer stage (`flow-state.ts`, invariants g/h: only a plan pick or a step back un-skips).
+ */
+export type ScopeSource = 'user' | 'pick' | 'dominant';
+
+/**
+ * PURE, and exported for the same reason `deriveStage` is: the shell's derivation and the tests'
+ * must be one expression, not two that happen to agree. `pickLabel` is the pick→ranking bridge the
+ * shell computes (the chosen group's own claims label, suppressed after a Skip — see the shell).
+ */
+export function scopeSourceOf(args: { payerOverride: string | null; pickLabel: string | null }): ScopeSource {
+  if (args.payerOverride !== null) return 'user';
+  if (args.pickLabel !== null) return 'pick';
+  return 'dominant';
+}
+
 // ── Answer-stage filters (the general-search escape hatch) ───────────────────────────────────────
 
 /** Multiselect narrows on the answer stage. Empty array = no restriction on that facet. */
@@ -561,10 +591,21 @@ export interface ReceiptProps {
   onChange: (backTo: 'identify' | 'payer' | 'plan') => void;
   /** Optional pre-computed clusters (the shell memoizes one call per resolution). */
   payerGroups?: PayerGroup[];
-  /** A skipped search decided nothing past the identifier — see the guard in the body. */
+  /**
+   * A skipped search decided nothing past the identifier — see the guard in the body. Sourced from
+   * the REDUCER field, never from `scopeSource`: a billed-under re-scope is not a plan pick, and
+   * deriving this from the payer-scope enum is exactly the masquerade `ScopeSource` documents.
+   */
   skipped?: boolean;
   /** The payer the RANKING actually used, for the skipped scope entry. */
   scopePayer?: string | null;
+  /**
+   * `scopePayer` is the operator's OWN re-scope (a billed-under chip that the core honoured), not a
+   * default. Naming that is the honesty pattern of 7c86709 applied to the state this fix uncovered:
+   * "no plan chosen, re-scoped to a label you picked" is a real state, so the receipt says so rather
+   * than falling silent about half of it.
+   */
+  scopeByUser?: boolean;
 }
 
 /**
@@ -579,6 +620,7 @@ export function FlowReceipt({
   payerGroups,
   skipped = false,
   scopePayer = null,
+  scopeByUser = false,
 }: ReceiptProps): React.ReactElement {
   // For a full member id the echo is '' by construction — the receipt shows the READING instead,
   // so the id never reaches the markup and the entry still says what was searched.
@@ -602,7 +644,10 @@ export function FlowReceipt({
         </span>
         <span className={entry}>
           <span className="text-xs font-medium uppercase tracking-wide text-ink400">Scope</span>
-          <span className="text-sm text-ink900">All plans{scopePayer ? ` · ${scopePayer}` : ''}</span>
+          <span className="text-sm text-ink900">
+            All plans{scopePayer ? ` · ${scopePayer}` : ''}
+            {scopeByUser ? ' — your re-scope' : ''}
+          </span>
           <button type="button" className={change} onClick={() => onChange('payer')}>
             Pick a plan
           </button>
@@ -1097,8 +1142,18 @@ export interface StageAnswerProps {
    * 'dominant' = nothing to send, the core resolved the identifier's largest payer. The captions
    * below MUST distinguish these — "you picked this" and "we defaulted to this" are different claims
    * about the same number.
+   *
+   * It answers ONE question and says nothing about whether a plan was chosen — see `skipped` below
+   * and the `ScopeSource` header for the live defect that separation exists to prevent.
    */
-  scopeSource: 'user' | 'pick' | 'dominant' | 'skipped';
+  scopeSource: ScopeSource;
+  /**
+   * WAS A PLAN CHOSEN AT ALL. The reducer's own field (`flow-state.ts`), threaded rather than
+   * inferred: only submitting a plan or stepping back through the receipt un-skips (invariants g/h),
+   * and in particular a billed-under re-scope does not. Every guard on this screen that suppresses
+   * the declined candidate's employer, policy bits, notices and provenance reads THIS.
+   */
+  skipped: boolean;
   /** The candidate UNIVERSE the filter lines describe: every plan under the picked carrier, or —
    *  after a Skip — every plan behind the identifier. Supplied by the shell so this stays pure. */
   candidates: readonly OrderedCandidate[];
@@ -1174,6 +1229,46 @@ function FilterLine(props: {
   );
 }
 
+/**
+ * The BILLED UNDER caption — the sentence that says what the chips above it MEAN. Three independent
+ * inputs, spelled out as a table because the old nested ternary discriminated on the wrong one and
+ * four of these eight rows shipped wrong — three of them saying a PICK had failed when none was
+ * made, the fourth ("Your selection.") saying only half of what was true:
+ *
+ *   skipped │ honoured │ source   │ caption
+ *   ────────┼──────────┼──────────┼──────────────────────────────────────────────────────────────
+ *    true   │  true    │ user     │ no plan chosen, and the label is the operator's own re-scope
+ *    true   │  false   │ user     │ no plan chosen, and the chip they sent was rejected
+ *    true   │  false   │ dominant │ no plan chosen — the plain skip
+ *    false  │  true    │ user     │ a chip, honoured
+ *    false  │  true    │ pick     │ the plan pick's own claims label, honoured
+ *    false  │  false   │ pick     │ the pick's label was REJECTED — the largest by volume instead
+ *    false  │  false   │ user     │ the chip was REJECTED — the largest by volume instead
+ *    false  │  false   │ dominant │ nothing was sent at all
+ *
+ * ⚠ THE SKIPPED ROWS ARE WHY THIS IS A TABLE. The old expression read
+ * `payerOverridden ? … : scopeSource !== 'dominant' ? 'Could not scope to the picked plan …' : …`,
+ * so a Skip — which sends nothing and picks nothing — landed in the arm written for a rejected PLAN
+ * PICK and told the operator a pick had failed when they had declined to make one. `!== 'dominant'`
+ * also swallowed a rejected CHIP into the same "picked plan" wording; that row is now its own too.
+ *
+ * The skipped copy describes the ranking AS IT BEHAVES TODAY — one dominant billed-under label, the
+ * single-label equality in the ranking query. Widening it to the identifier's whole footprint is a
+ * separate change, and copy must never pre-announce behaviour that is not shipped.
+ */
+function billedUnderCaption(args: { skipped: boolean; payerOverridden: boolean; scopeSource: ScopeSource }): string {
+  if (args.skipped) {
+    // NO PLAN WAS CHOSEN leads, because it stays true however the payer label was arrived at.
+    if (args.payerOverridden) return 'No plan chosen — this label is your own re-scope.';
+    if (args.scopeSource === 'user') return 'No plan chosen — that label could not be applied; showing the largest by volume.';
+    return "No plan chosen — showing this identifier's largest label by volume; pick another to re-scope.";
+  }
+  if (args.payerOverridden) return args.scopeSource === 'user' ? 'Your selection.' : 'Scoped to the plan you picked.';
+  if (args.scopeSource === 'pick') return 'Could not scope to the picked plan — showing the largest by volume.';
+  if (args.scopeSource === 'user') return 'That label could not be applied — showing the largest by volume.';
+  return 'Largest by volume — pick another to re-scope.';
+}
+
 /** First-load ghost sized to the real footprint (window line + hero + two scorecard rows), so the
  *  swap to content does not shift layout. aria-hidden — the visible status line above it announces. */
 function AnswerSkeleton(): React.ReactElement {
@@ -1198,7 +1293,11 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // the user picked a plan they explicitly declined to pick — while the ranking underneath is
   // payer-wide (no payerOverride, no market: verified at the fetch). The identity line names the
   // payer the ranking actually used instead.
-  const skipped = props.scopeSource === 'skipped';
+  //
+  // ⚠ THIS READS THE REDUCER FIELD, NOT `scopeSource`. It used to be `props.scopeSource === 'skipped'`,
+  // and one billed-under chip press after a Skip flipped that enum to 'user' and turned every guard
+  // below off at once — re-presenting the declined plan as a picked one. See the `ScopeSource` header.
+  const skipped = props.skipped;
   // The four render states, named once. A FAILED REFETCH is not a first load and must not be
   // rendered as one: `refreshFailed` keeps the last-known-good answer on screen and APPENDS the
   // banner, where `firstLoadFailed` has nothing to preserve and shows the bare error.
@@ -1385,7 +1484,11 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               identifier's DOMINANT payer, and that must be said in words, not implied by chips.
               SUPPRESSED IN FLIGHT (rule 2654416): this is a categorical sentence about the data; it
               waits for its answer rather than describing the set being replaced. */}
-          {!stale && props.scopeSource === 'dominant' && snap.resolved && r.candidates.total > 1 ? (
+          {/* `!skipped` is load-bearing now that the two claims are separate values: a plain skip
+              sends nothing, so its scopeSource IS 'dominant' — and this banner says a pick could not
+              be scoped. Without the guard, decoupling would have swapped one wrong sentence for
+              another on the very screen it exists to fix. */}
+          {!stale && !skipped && props.scopeSource === 'dominant' && snap.resolved && r.candidates.total > 1 ? (
             <p role="status" className="rounded-lg border border-line bg-coral50 p-4 text-sm text-ink900">
               {g.claimEvidence.lines === 0
                 ? `This plan has no claims history of its own — the ranking below is this identifier's history under ${snap.resolved.payerName}, not evidence about ${g.payerDisplayName}.`
@@ -1396,7 +1499,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
           {/* A SKIP is its own scope claim: no plan was chosen, so the ranking is the identifier's
               whole footprint under its largest payer. "You declined to narrow" and "we could not
               narrow" are different statements and must not share copy. */}
-          {!stale && props.scopeSource === 'skipped' && snap.resolved ? (
+          {!stale && skipped && snap.resolved ? (
             <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink900">
               You skipped the plan questions, so this is a general search: every facility this member
               has history at under {snap.resolved.payerName}. Use the lines below to narrow it, or the
@@ -1575,13 +1678,11 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                   are the user's controls, not claims. */}
               {stale ? null : (
                 <span className="text-xs text-ink600">
-                  {snap.payerOverridden
-                    ? props.scopeSource === 'user'
-                      ? 'Your selection.'
-                      : 'Scoped to the plan you picked.'
-                    : props.scopeSource !== 'dominant'
-                      ? 'Could not scope to the picked plan — showing the largest by volume.'
-                      : 'Largest by volume — pick another to re-scope.'}
+                  {billedUnderCaption({
+                    skipped,
+                    payerOverridden: snap.payerOverridden,
+                    scopeSource: props.scopeSource,
+                  })}
                 </span>
               )}
             </div>
@@ -1791,8 +1892,15 @@ export interface ResolutionStagesProps {
  * reason, even though it renders only on the identify stage.
  */
 export function ResolutionStages(props: ResolutionStagesProps): React.ReactElement {
-  const skipped = props.answer?.scopeSource === 'skipped';
+  // The reducer's own field, arriving through the answer bag — NOT `scopeSource === 'skipped'`, which
+  // a single billed-under chip press used to falsify (see the `ScopeSource` header). The receipt is
+  // the surface where that lie was loudest: it re-grew a "PLAN <declined employer>" entry.
+  const skipped = props.answer?.skipped ?? false;
   const scopePayer = props.answer?.snapshot?.resolved?.payerName ?? null;
+  // Only when the core HONOURED the chip: `scopeSource === 'user'` means one was sent, not that it
+  // was applied, and `scopePayer` is the label actually used. Calling a rejected chip "your re-scope"
+  // would be the same class of overclaim this fix removes.
+  const scopeByUser = props.answer?.scopeSource === 'user' && (props.answer?.snapshot?.payerOverridden ?? false);
   return (
     <div role="region" aria-labelledby="qualify-v3-flow-heading" className="flex flex-col gap-5">
       <h1 id="qualify-v3-flow-heading" className="font-head text-2xl font-semibold tracking-tight text-ink900">
@@ -1821,6 +1929,7 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
           payerGroups={props.payerGroups}
           skipped={skipped}
           scopePayer={scopePayer}
+          scopeByUser={scopeByUser}
         />
       ) : null}
 
