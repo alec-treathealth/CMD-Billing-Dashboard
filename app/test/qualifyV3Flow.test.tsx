@@ -161,6 +161,8 @@ function props(stage: FlowStage, r: QualifyResolution | null, over: Partial<Reso
           windowDays: null,
           onWindowDays: noop,
           refetching: false,
+          staleAfterError: false,
+          onRetry: noop,
           candidates: r ? orderedCandidates(r) : [],
           filters: NO_ANSWER_FILTERS,
           onToggleFilter: noop,
@@ -187,6 +189,8 @@ function answerProps(over: Partial<NonNullable<ResolutionStagesProps['answer']>>
     windowDays: null,
     onWindowDays: noop,
     refetching: false,
+    staleAfterError: false,
+    onRetry: noop,
     candidates: [],
     filters: NO_ANSWER_FILTERS,
     onToggleFilter: noop,
@@ -361,7 +365,10 @@ test('a NO-OP scope click cannot flip the refetch flag — the stuck-headline bu
 
   // A FIRST load is never a refetch: no snapshot on screen ⇒ skeleton, not the dim treatment.
   assert.equal(isRefetching(false, null, key), false, 'first load');
-  assert.equal(isRefetching(false, 'stale', key), false, 'a failed fetch cleared the snapshot');
+  // Nothing on screen is never a refetch — it is a first load, whatever the stamp says. (This used
+  // to be justified as "a failed fetch cleared the snapshot"; since F2 a failed fetch KEEPS its
+  // snapshot, so that rationale is gone even though the pure-function truth is unchanged.)
+  assert.equal(isRefetching(false, 'stale', key), false, 'no content on screen is never a refetch');
   assert.equal(isRefetching(true, null, key), false, 'content present but nothing stamped yet');
 });
 
@@ -825,6 +832,85 @@ test('the answer stage without a snapshot is an honest loading state, and an err
   const failed = render(props('answer', fixture(), { answer: answerProps({ snapshotError: 'failed' }) }));
   assert.match(failed, /The facility ranking could not be loaded\./);
   assert.match(failed, /The plan resolution above still stands/);
+  // A FIRST-load failure has nothing to preserve, so it stays the plain error state: no grid to
+  // keep, nothing to dim, and no Retry control (the refresh banner owns that affordance).
+  assert.ok(!failed.includes('Try again'), 'a first-load failure has nothing to retry into');
+  assert.ok(!failed.includes('opacity-60'), 'nothing on screen to dim');
+  assert.ok(!failed.includes('NASHVILLE MENTAL HEALTH'), 'no grid without a snapshot');
+});
+
+/** The answer hero's wordless placeholder (the `h-14` ghost that replaces the numeral/verdict while
+ *  the content on screen is stale), or null. Scoped deliberately: the step rail's current-stage dot
+ *  also carries `animate-pulse`, so a bare html.includes('animate-pulse') answers a different
+ *  question than the one these tests are asking. */
+function heroGhostOf(html: string): string | null {
+  return html.match(/class="h-14[^"]*"/)?.[0] ?? null;
+}
+
+// F2. A failed RE-SCOPE used to null the snapshot, so one failed chip click threw away a perfectly
+// good answer and replaced the whole stage with a paragraph. Worse, it was unrecoverable: the fetch
+// effect keys on scopeKey, which a same-chip re-click does not move, so "try again" — which the copy
+// literally said — could not be done. The answer stage stayed dead until the user re-searched.
+test('F2: a failed refetch KEEPS the last answer on screen, dimmed, with the error appended', () => {
+  const html = render(
+    props('answer', fixture(), {
+      answer: answerProps({
+        snapshot: snapshotFixture(),
+        snapshotError: 'failed',
+        staleAfterError: true,
+        refetching: false,
+      }),
+    }),
+  );
+  // The answer survives — this is the whole point.
+  assert.match(html, /NASHVILLE MENTAL HEALTH/, 'the scorecard must survive a failed refetch');
+  assert.match(html, /could not be refreshed/, 'and the failure must still be stated');
+  assert.match(html, /Nothing was lost/);
+  assert.match(html, /opacity-60/, 'stale content is dimmed, exactly like an in-flight re-scope');
+  // …but WITHOUT claiming progress. A stopped fetch that animates a progress marker is the
+  // stuck-flag lie 7a40728/bef4c57 fixed, re-introduced through a different door.
+  assert.ok(!html.includes('q-refetch-beam'), 'a stopped fetch must not animate a progress beam');
+  // Scoped to the HERO placeholder specifically — the step rail's current-stage dot also pulses,
+  // legitimately, and says nothing about the fetch.
+  assert.ok(heroGhostOf(html) !== null, 'the hero placeholder should still hold the footprint');
+  assert.ok(
+    !(heroGhostOf(html) ?? '').includes('animate-pulse'),
+    'nor a pulsing hero placeholder — motion is a progress claim',
+  );
+  assert.ok(
+    !html.includes('Ranking facilities for this plan…'),
+    'a failed refetch is not a first load and must not render the skeleton',
+  );
+});
+
+test('F2: the failed refetch offers a REAL retry control, not just the words "try again"', () => {
+  const html = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: snapshotFixture(), snapshotError: 'failed', staleAfterError: true }),
+    }),
+  );
+  const banner = html.slice(html.indexOf('could not be refreshed'));
+  assert.match(
+    banner,
+    /<button type="button"[^>]*>Try again<\/button>/,
+    'retry must be a native <button type="button"> — not a link, not a span with a handler',
+  );
+});
+
+test('F2: an in-flight refetch still claims progress; only a FAILED one goes quiet', () => {
+  const inFlight = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: snapshotFixture(), refetching: true, staleAfterError: false }),
+    }),
+  );
+  // The pre-existing treatment is untouched: dim + beam + pulse while genuinely fetching.
+  assert.match(inFlight, /opacity-60/);
+  assert.match(inFlight, /q-refetch-beam/, 'a running fetch DOES animate its progress beam');
+  assert.ok(
+    (heroGhostOf(inFlight) ?? '').includes('animate-pulse'),
+    'and its hero placeholder DOES pulse — this is the treatment F2 must not have broken',
+  );
+  assert.ok(!inFlight.includes('could not be refreshed'), 'and says nothing about failure');
 });
 
 test('going back to the search step announces the STAGE, not the stale result', () => {
