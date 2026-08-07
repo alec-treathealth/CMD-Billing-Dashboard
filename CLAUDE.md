@@ -154,7 +154,7 @@ Two **separate** migration planes — never mix the directories:
 
 | Plane | Directory | Next number (as of 2026-08-06) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0092** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0093** |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **029** |
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
@@ -173,7 +173,21 @@ writer could not read the roster and the 42501 was being swallowed into an empty
 map. If you add a `collections.*` read to a cron, **check the writer's grant
 first** — `has_table_privilege('cmd_rollup_writer', …)` — because a fail-soft
 catch will otherwise turn a permission error into permanently wrong data rather
-than a visible failure. Veris
+than a visible failure. **0090 (writer SELECT policy on `collections.facilities`)
+and 0091 (`collections.qualify_facility_outcomes` + both its policies) are APPLIED
+LIVE** — verified 2026-08-06 by object presence, not by a ledger entry. **0092
+(Qualify token-scoped covering indexes) is APPLIED LIVE 2026-08-06** via autocommit
+`execute_sql`, **not** `apply_migration`: it runs `CREATE INDEX CONCURRENTLY` twice
+plus `VACUUM (ANALYZE)`, none of which can run inside a transaction block (same
+discipline as 0070 and 0081). It delivered what it promised — the ladder's prefix
+query went 353ms / 1,455 buffers to **17.5ms with `Heap Fetches: 0`** — but it cost
+**169 MB** (102 + 67) against its rollback header's estimate of "10-15 MB combined",
+roughly **12x over**, because the INCLUDE payload carries `primary_payer` *text* and
+the estimate priced only the HMAC token. Indexes on `cmd_explorer_charge_rollup` are
+now 306 MB against a 164 MB heap. Dropping the superseded bare
+`cmd_charge_rollup_prefix` / `_member` recovers only ~8 MB and does not offset this;
+the real lever is whether `primary_payer` belongs in the prefix payload at all.
+**Price an INCLUDE payload by its widest text column, not its keys.** Veris
 **027 and 028 are applied live** (ledger 20260805065025 / 20260805060000, another
 session), which is why the next Veris number is 029. Never edit 023, 024, or 025
 in place — all three are applied live. Before authoring, re-derive the next number
