@@ -227,7 +227,11 @@ import {
   upcomingOverrideSync,
   type UpcomingOverrideSummary,
 } from '../../src/veris/upcomingOverride.js';
-import type { ManualForecastRow } from '../../src/veris/upcomingForecast.js';
+import type {
+  ManualForecastRow,
+  ManualForecastDbRow,
+} from '../../src/veris/upcomingForecast.js';
+import { manualRowFromDb } from '../../src/veris/upcomingForecast.js';
 import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
 import { refreshCmdPayerRollup } from '../../src/collections/cmdPayerRefresh.js';
 import { CMD_EXPLORER_CUSTOMERS, INDIGO_CUSTOMERS, BXR_CUSTOMERS, type CmdCustomer } from '../../src/collections/cmdCustomers.js';
@@ -1118,7 +1122,14 @@ export async function getUpcomingManual(entityIds: string[]): Promise<ManualFore
   const out: ManualForecastRow[] = [];
   for (const id of entityIds) {
     const rows = await withTenant(verisReaderPool(), id, async (client) => {
-      const res = await client.query<ManualForecastRow>(
+      // `id` is BIGINT and the driver hands int8 back as TEXT — narrow it HERE, at the read
+      // boundary, the same way toExplorerRow / toAuditGridRow / the facility-resolution queue
+      // do, and the same way saveUpcomingManualRow already types its own bigint return forty
+      // lines below. Skipping this makes every "Remove edit" / "Remove row" / "Undo
+      // correction" button on the tile a silent no-op: deleteUpcomingManual guards with
+      // Number.isSafeInteger, and Number.isSafeInteger("15") is false. The generic is the
+      // *Db* row on purpose, so returning res.rows unmapped is a tsc error, not a review miss.
+      const res = await client.query<ManualForecastDbRow>(
         `select id, kind, facility_code, payer_label, expected_date::text as expected_date,
                 method_label, amount::text as amount, suppress_reason, matched_era_key
            from staging.expected_payment_manual
@@ -1126,7 +1137,7 @@ export async function getUpcomingManual(entityIds: string[]): Promise<ManualFore
           order by expected_date asc, facility_code asc, payer_label asc, id asc`,
         [id],
       );
-      return res.rows;
+      return res.rows.map(manualRowFromDb);
     });
     out.push(...rows);
   }

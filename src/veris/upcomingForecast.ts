@@ -15,6 +15,19 @@
  * been ORPHANED by a sheet edit. Resolution here returns the orphans as first-class output
  * instead of silently dropping them, and stays unit-testable without a database.
  *
+ * THE SHEET WINS A KEY COLLISION (2026-08-07). A manual 'add' whose match key the sheet feed
+ * already occupies is NOT emitted — it comes back as stale with reason 'duplicate_of_sheet_row',
+ * carrying the sheet amounts it collided with. Emitting both double-counted the money on the
+ * live tile (one $72,000 KWC / BCBS AR payment rendered twice for a $144,000 overdue subtotal),
+ * and a rendered add sharing a key with a sheet row is UNADDRESSABLE by 024's own vocabulary:
+ * 024's decision unique index is (entity, kind, facility_code, payer_label, expected_date), so
+ * a suppress on that key kills both rows at once and a correct on it applies only to the sheet
+ * row. The check is on the KEY, not the amount, for exactly that reason — an add with a
+ * mistyped amount beside its sheet twin is the same unaddressable state, not a distinct row.
+ * The cost is real and accepted: a genuine SECOND same-key payment can no longer be hand-keyed.
+ * It is surfaced with both amounts rather than dropped, and the remedy is the sheet (the feed
+ * of record) or a different date.
+ *
  * NOTHING HERE HIDES MONEY ON ITS OWN. `suggestLandedMatches` returns candidates and a
  * confidence; only a human writing a 'suppress' row removes anything (024's header, Alec's
  * ruling 2026-08-03). That is the whole reason payer matching is allowed to be fuzzy: a false
@@ -41,6 +54,15 @@ export interface SheetForecastRow {
 
 /** A super-admin edit, as the 024 read path returns it. */
 export interface ManualForecastRow {
+  /**
+   * 024's `bigint generated always as identity`.
+   *
+   * ⚠️ node-pg's DEFAULT parser hands int8 back as a **string**, and this repo registers no
+   * type parser (verified 2026-08-07: no `setTypeParser` outside node_modules; every pool is
+   * built with no `types` option). A raw `res.rows` read therefore puts the STRING "15" in a
+   * field declared `number` — a type lie the compiler cannot see. Always come through
+   * `manualRowFromDb`; never hand the driver's rows straight to this type.
+   */
   id: number;
   kind: 'add' | 'correct' | 'suppress';
   facility_code: string;
@@ -50,6 +72,46 @@ export interface ManualForecastRow {
   amount: string | null;
   suppress_reason: 'landed' | 'incorrect' | 'cancelled' | null;
   matched_era_key: string | null;
+}
+
+/**
+ * The 024 read shape AS THE DRIVER RETURNS IT.
+ *
+ * Typing a `client.query<...>` generic as THIS rather than as ManualForecastRow is the whole
+ * structural point: it makes `return res.rows` a tsc error, so the coercion cannot be omitted
+ * again. It was omitted once — `getUpcomingManual` (app/lib/server.ts) selected the raw `id`
+ * while `saveUpcomingManualRow`, forty lines below in the same file, already typed its own
+ * bigint return as `{ id: string }`. The cost was silent and total: every "Remove edit",
+ * "Remove row" and "Undo correction" button on the Future Payments tile was a guaranteed
+ * no-op, because `deleteUpcomingManual` guards with `Number.isSafeInteger` and
+ * `Number.isSafeInteger("15") === false`.
+ *
+ * `string | number` rather than `string` so the mapper is idempotent and every numeric-literal
+ * fixture in the test suites stays valid.
+ */
+export interface ManualForecastDbRow extends Omit<ManualForecastRow, 'id'> {
+  id: string | number;
+}
+
+/**
+ * Narrow one raw 024 row to the declared shape.
+ *
+ * THROWS rather than truncating. A bigint past 2^53 cannot round-trip through a JS number, and
+ * a silently-wrong id is exactly the failure this function exists to end: the delete path
+ * addresses a row BY id, so a truncated id would delete someone else's money decision. In
+ * practice unreachable — an identity sequence from 1 over one row per human decision about one
+ * forecast row — so this is a tripwire, not a recovery strategy.
+ *
+ * NON-PHI: the id is a synthetic row number, safe to name in the message.
+ */
+export function manualRowFromDb(r: ManualForecastDbRow): ManualForecastRow {
+  const id = typeof r.id === 'number' ? r.id : Number(r.id);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new Error(
+      `upcomingForecast: expected_payment_manual.id is not a safe positive integer (${String(r.id)})`,
+    );
+  }
+  return { ...r, id };
 }
 
 /** One row of the resolved forecast the tile renders. */
@@ -76,13 +138,65 @@ export interface ResolvedForecastRow {
  */
 export interface StaleManualRow {
   manual: ManualForecastRow;
-  reason: 'no_matching_sheet_row';
+  /**
+   * 'no_matching_sheet_row'  — a correct/suppress whose target sheet row changed or vanished.
+   * 'duplicate_of_sheet_row' — an ADD whose match key the sheet feed already occupies. THE
+   *   SHEET WINS and the add is not emitted; see the ruling in this file's header.
+   */
+  reason: 'no_matching_sheet_row' | 'duplicate_of_sheet_row';
+  /**
+   * 'duplicate_of_sheet_row' only: the fixed-2 amounts of the sheet rows holding that key, in
+   * sheet order, so the strip can name the money that IS being counted instead of just saying
+   * the add was dropped. More than one is possible — 023 has no unique index and two identical
+   * forecasts are legal.
+   */
+  sheetAmounts?: string[];
+}
+
+/**
+ * A suppression that IS in effect — the record of money a super admin took off the tile.
+ *
+ * WHY THIS EXISTS (2026-08-07). Suppression was a ONE-WAY DOOR. The fold consumes an applied
+ * suppress into `usedSuppress` and moves on, so it is not stale (it is working exactly as
+ * asked), it renders nowhere, and there is no id on screen to delete — the hidden row could
+ * never come back from the UI. Worse, a manual 'add' at the same key was consumed by the same
+ * branch, leaving it invisible AND undeletable: re-keying it through the add form is silently
+ * eaten by the suppress that is still standing, so recovery meant SQL. That was survivable
+ * while the only Mark-landed buttons sat in the group table; it stopped being survivable when
+ * the overdue rows got controls, because overdue is where the entire live forecast sits.
+ *
+ * Deleting the suppress restores the sheet row AND any add it was killing, so ONE mechanism
+ * closes both halves. That is why this is a first-class output rather than an extra `stale`
+ * reason: `stale` means "this edit is changing no number", and an applied suppression is
+ * changing a number — it is the one edit on the tile that is definitely working.
+ *
+ * ⚠️ HIDDEN MONEY IS NOT ON THE TILE. These amounts are a record of what was REMOVED. They
+ * must never be added into the ERA headline, the Forecast line, the overdue subtotal, or any
+ * other total — that would resurrect as a number the money a human just said is not coming.
+ */
+export interface HiddenForecastRow {
+  /** The 'suppress' edit doing the hiding. Its id is what an Undo deletes. */
+  manual: ManualForecastRow;
+  /**
+   * Fixed-2 amounts this suppression is keeping off the tile, sheet rows first then a manual
+   * add. More than one is possible: 023 has no unique index, and a suppress kills every row at
+   * its key at once. A hidden sheet row that also carried a 'correct' reports the CORRECTED
+   * amount — that is the figure that would be on screen if the suppression were undone.
+   */
+  hiddenAmounts: string[];
+  /** True when a manual 'add' is among what is hidden, so the copy can say the add comes back. */
+  hidAdd: boolean;
 }
 
 export interface ResolvedForecast {
   rows: ResolvedForecastRow[];
   stale: StaleManualRow[];
-  /** Sum of `rows` in exact integer cents. */
+  /**
+   * Applied suppressions, ascending by edit id. Invariant: one entry per key in `usedSuppress`
+   * — a suppress that hid nothing is `stale`, never `hidden`.
+   */
+  hidden: HiddenForecastRow[];
+  /** Sum of `rows` in exact integer cents. NEVER includes `hidden` — see the warning above. */
   totalCents: number;
 }
 
@@ -124,6 +238,16 @@ export function matchKey(facilityCode: string, payerLabel: string, expectedDate:
  * A stale 'correct' is NOT promoted to an 'add'. A correction is a statement ABOUT a sheet
  * row; with the row gone it asserts nothing, and resurrecting it would put money on the tile
  * that neither the sheet nor a deliberate 'add' claims exists.
+ *
+ * And an 'add' that collides with a sheet row on the match key is SKIPPED, not emitted beside
+ * it — see THE SHEET WINS A KEY COLLISION in this file's header. Within the adds loop the
+ * order is likewise load-bearing: suppress, then the duplicate check, then emit.
+ *
+ * THREE OUTPUTS, and the distinction between the last two is the whole point:
+ *   rows   — what is on the tile.
+ *   stale  — edits changing NO number, so they can be re-pointed or cleared.
+ *   hidden — suppressions changing a number RIGHT NOW, so they can be undone. Without this a
+ *            suppression was a one-way door; see HiddenForecastRow.
  */
 export function resolveForecast(
   sheet: SheetForecastRow[],
@@ -139,17 +263,48 @@ export function resolveForecast(
     else adds.push(m);
   }
 
+  // The sheet indexed by match key. A BUCKET, not a single row: 023 has no unique index on
+  // (facility, payer, date) and its header is explicit that two identical forecasts are legal.
+  const sheetByKey = new Map<string, SheetForecastRow[]>();
+  for (const s of sheet) {
+    const key = matchKey(s.facility_code, s.payer_label, s.expected_date);
+    const bucket = sheetByKey.get(key);
+    if (bucket) bucket.push(s);
+    else sheetByKey.set(key, [s]);
+  }
+
   const rows: ResolvedForecastRow[] = [];
   const usedSuppress = new Set<string>();
   const usedCorrect = new Set<string>();
 
+  // Applied suppressions, accumulated as they fire. Keyed because ONE suppress can hide
+  // several rows at once (a duplicated sheet key, or a sheet row plus an add), and the Undo
+  // that restores them is a single delete of that one edit.
+  const hiddenByKey = new Map<string, HiddenForecastRow>();
+  const hide = (key: string, m: ManualForecastRow, amount: string, fromAdd: boolean): void => {
+    let h = hiddenByKey.get(key);
+    if (!h) {
+      h = { manual: m, hiddenAmounts: [], hidAdd: false };
+      hiddenByKey.set(key, h);
+    }
+    h.hiddenAmounts.push(amount);
+    if (fromAdd) h.hidAdd = true;
+  };
+
+  // Iterates ROWS, not keys, deliberately: two sheet rows at one key must BOTH render.
   for (const s of sheet) {
     const key = matchKey(s.facility_code, s.payer_label, s.expected_date);
-    if (suppress.has(key)) {
+    const sup = suppress.get(key);
+    if (sup) {
       usedSuppress.add(key);
       // Mark the correction used too, if any: the row is gone either way, and reporting the
       // correction as orphaned would send the operator chasing a row a human deliberately hid.
-      if (correct.has(key)) usedCorrect.add(key);
+      const applied = correct.get(key);
+      if (applied) usedCorrect.add(key);
+      // Report the CORRECTED figure where one applied — that is what would be on screen if the
+      // suppression were undone, and naming the pre-correction amount would understate the
+      // money an Undo brings back.
+      hide(key, sup, applied?.amount ?? s.amount, false);
       continue;
     }
     const c = correct.get(key);
@@ -180,14 +335,43 @@ export function resolveForecast(
     });
   }
 
+  const staleAdds: StaleManualRow[] = [];
   for (const a of adds) {
-    // A manual add is also subject to suppression: confirming "this landed" must work on a
-    // row a super admin typed, not only on a sheet row.
     const key = matchKey(a.facility_code, a.payer_label, a.expected_date);
-    if (suppress.has(key)) {
+    // SUPPRESS FIRST, and it wins over the duplicate check. A manual add is also subject to
+    // suppression: confirming "this landed" must work on a row a super admin typed, not only
+    // on a sheet row. And once a human has said "nothing at this key is coming", telling them
+    // their add duplicates a row they just hid is noise — the add contributes no money either
+    // way. `usedSuppress` is a Set, so the sheet loop having already marked this key is not a
+    // double-mark.
+    const sup = suppress.get(key);
+    if (sup) {
       usedSuppress.add(key);
+      // The add is HIDDEN, not stale. Recording it here is what makes it deletable again:
+      // before this, the add vanished with no id on screen and the suppress standing over its
+      // key swallowed any attempt to re-key it, so recovery meant SQL.
+      hide(key, sup, a.amount ?? '0.00', true);
       continue;
     }
+    // THE SHEET WINS. Not silently — the add is reported with the colliding sheet amounts so
+    // the operator can see the money they typed and clear the now-redundant edit. See the
+    // ruling in this file's header for why this is key-only and why the sheet is preferred.
+    const collides = sheetByKey.get(key);
+    if (collides !== undefined) {
+      staleAdds.push({
+        manual: a,
+        reason: 'duplicate_of_sheet_row',
+        sheetAmounts: collides.map((s) => s.amount),
+      });
+      continue;
+    }
+    // DELIBERATELY NOT marking usedCorrect here, unlike the sheet loop above — this asymmetry
+    // is the decision, not an oversight. A 'correct' is a statement ABOUT A SHEET ROW (024's
+    // header: it is never promoted to an add), and this loop never applies one to an add, so a
+    // correct at a key held only by an add has no target and is changing nothing. That is
+    // genuinely ORPHANED, and hiding it would hide a dead edit — which is the one thing the
+    // stale strip exists to prevent. The sheet loop's case is different: there the correction
+    // HAD a live target that a human then deliberately hid.
     rows.push({
       expected_date: a.expected_date,
       facility_code: a.facility_code,
@@ -203,25 +387,42 @@ export function resolveForecast(
     });
   }
 
-  const stale: StaleManualRow[] = [];
+  const stale: StaleManualRow[] = [...staleAdds];
   for (const [key, m] of suppress) {
     if (!usedSuppress.has(key)) stale.push({ manual: m, reason: 'no_matching_sheet_row' });
   }
   for (const [key, m] of correct) {
     if (!usedCorrect.has(key)) stale.push({ manual: m, reason: 'no_matching_sheet_row' });
   }
+  // Numeric subtraction is sound because `manualRowFromDb` guarantees a real number here. It
+  // WAS NOT before: the read boundary handed this a bigint-as-string, and this line worked only
+  // by JS coercing "10" - "2". Do not "simplify" it to localeCompare — that would order 10
+  // before 2 — and do not drop the mapper, which is what makes the arithmetic honest.
   stale.sort((a, b) => a.manual.id - b.manual.id);
 
   rows.sort(
     (a, b) =>
       a.expected_date.localeCompare(b.expected_date) ||
       a.facility_code.localeCompare(b.facility_code) ||
-      a.payer_label.localeCompare(b.payer_label),
+      a.payer_label.localeCompare(b.payer_label) ||
+      // THE MATCH KEY IS NOT UNIQUE, so the three columns above are not a total order. 023 has
+      // no unique index, two identical forecasts are legal, and OVERRIDE_*_ROWS_SQL orders by
+      // these same three columns — without a tiebreak a duplicated key renders in whatever
+      // order the planner happened to return, which can flip between page loads. Larger amount
+      // first, matching the group list's descending-amount idiom.
+      (centsFromAmount(b.amount) ?? 0) - (centsFromAmount(a.amount) ?? 0) ||
+      a.method_label.localeCompare(b.method_label),
   );
+
+  // Ascending by edit id, matching `stale` — both strips read as "oldest decision first".
+  const hidden = [...hiddenByKey.values()].sort((a, b) => a.manual.id - b.manual.id);
 
   return {
     rows,
     stale,
+    hidden,
+    // `rows` ONLY. Never `hidden` — see the warning on HiddenForecastRow. Summing what a human
+    // deliberately removed would put it straight back on the tile as a number.
     totalCents: rows.reduce((sum, r) => sum + (centsFromAmount(r.amount) ?? 0), 0),
   };
 }
