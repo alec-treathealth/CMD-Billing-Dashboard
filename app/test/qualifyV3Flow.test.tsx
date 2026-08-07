@@ -23,7 +23,7 @@ import {
   type FlowStage,
   type ResolutionStagesProps,
 } from '../components/qualify/v3/resolution-flow';
-import { deriveNotices } from '../lib/qualify/resolution';
+import { deriveNotices, panelProvenance } from '../lib/qualify/resolution';
 import type { PanelEvidence, PanelId, QualifyResolution } from '../lib/qualify/resolution';
 import type { QualifyFacility, QualifySnapshot } from '../lib/qualify/contract';
 import { trailingWindow } from '../lib/qualify/contract';
@@ -36,9 +36,12 @@ function fixture(over: Partial<QualifyResolution> = {}): QualifyResolution {
   const evidence = Object.fromEntries(
     PANELS.map((p) => [
       p,
+      // `subset` is left EMPTY here on purpose, mirroring resolutionService §7 (:386-404) which mints
+      // it from `panelProvenance` a few lines later. A hand-written subset is how the disclosure bug
+      // shipped — see the mint below.
       p === 'kpis'
-        ? { scope: 'book_wide', members: null, lines: null, belowFloor: false, subset: 'book-wide, not this client' }
-        : { scope: 'resolution', members: 42, lines: 1358, belowFloor: false, subset: 'Aetna · 42 members' },
+        ? { scope: 'book_wide', members: null, lines: null, belowFloor: false, subset: '' }
+        : { scope: 'resolution', members: 42, lines: 1358, belowFloor: false, subset: '' },
     ]),
   ) as Record<PanelId, PanelEvidence>;
   const base: QualifyResolution = {
@@ -113,15 +116,34 @@ function fixture(over: Partial<QualifyResolution> = {}): QualifyResolution {
     },
     predicateId: 'p_deadbeef',
     evidence,
-    provenance: Object.fromEntries(PANELS.map((p) => [p, evidence[p].subset])) as Record<PanelId, string>,
+    // Placeholder only — the real mint happens below, after `over` is merged, so an overridden group
+    // gets the provenance IT would really produce.
+    provenance: Object.fromEntries(PANELS.map((p) => [p, ''])) as Record<PanelId, string>,
     unmapped: false,
     policyOnFile: true,
     notices: [],
     ...over,
   };
+  // Provenance is MINTED from the real `panelProvenance`, never hand-written. This fixture used to
+  // carry `subset: 'Aetna · 42 members'` — no employer — while production interpolates
+  // `group.employerLabel` (resolution.ts:310), so the disclosure's provenance <dl> rendered
+  // "AETNA · FRESNO UNIFIED SCHOOL DISTRICT · 57 members · 1,994 charge lines" live while the skip
+  // test's `!html.includes('SOUTHWEST AIRLINES CO')` assertion sailed through against a string that
+  // could not contain it. The fixture gap, not the assertion, is what let the bug ship: a fixture
+  // that diverges from its mint function tests nothing about the mint. Mirrors resolutionService §7
+  // (:383-408) exactly, including writing the same line back into `evidence[p].subset`.
+  const mintedEvidence = Object.fromEntries(
+    PANELS.map((p) => [p, { ...base.evidence[p], subset: panelProvenance(p, base.evidence[p], base.group) }]),
+  ) as Record<PanelId, PanelEvidence>;
+  const minted = Object.fromEntries(PANELS.map((p) => [p, mintedEvidence[p].subset])) as Record<PanelId, string>;
   // Notices are DERIVED, never hand-written — a hand-written set can contradict the candidates in a
   // way the real service cannot, failing tests for fixture reasons rather than flow defects.
-  return { ...base, notices: over.notices ?? deriveNotices(base.group, base.candidates, '2026-08-05') };
+  return {
+    ...base,
+    evidence: over.evidence ?? mintedEvidence,
+    provenance: over.provenance ?? minted,
+    notices: over.notices ?? deriveNotices(base.group, base.candidates, '2026-08-05'),
+  };
 }
 
 /** A sole-candidate resolution — skips straight to the answer stage. */
@@ -421,6 +443,67 @@ test('a skipped search decides nothing past the identifier — the receipt must 
   assert.ok(!html.includes('SOUTHWEST AIRLINES CO'), 'the pre-selected employer is never presented as resolved');
   // And the notice that reads "you are seeing the one you selected" is suppressed.
   assert.ok(!html.includes('You are seeing the one you selected'), 'no selection claim after a skip');
+});
+
+/** The "How this was resolved" disclosure, sliced. Deliberately scoped: the employer label and the
+ *  member counts also reach the filter chips and the identity line, so a whole-document `includes`
+ *  answers a different question than the one these assertions are asking. No <details> nests inside
+ *  it, so the first closing tag after the summary is its own. */
+function disclosureOf(html: string): string {
+  const start = html.indexOf('How this was resolved');
+  assert.ok(start >= 0, 'the disclosure is on screen');
+  const end = html.indexOf('</details>', start);
+  assert.ok(end > start, 'the disclosure closes');
+  return html.slice(start, end);
+}
+
+// Alec, live, 2026-08-07: after "Skip — search all plans" the disclosure still captioned the panels
+// "AETNA · FRESNO UNIFIED SCHOOL DISTRICT · 57 members · 1,994 charge lines" — the DECLINED
+// candidate's employer cohort. `r.provenance` is minted at resolve time and a Skip never re-resolves
+// (resolutionService.ts:383-408 vs resolution-flow-client.tsx:132-143). The data was already
+// identifier-wide; only these captions lied. Extends 7c86709, which fixed the receipt, the identity
+// line and the live sentence but reached the disclosure only for one notice kind.
+test('the resolution disclosure describes the rows on screen after a skip, and is untouched without one', () => {
+  const r = fixture();
+  const employer = r.group.employerLabel;
+  assert.equal(employer, 'SOUTHWEST AIRLINES CO', 'the fixture still carries an employer to leak');
+
+  // ── The regression pin. A NON-skipped answer keeps every resolve-time caption BYTE-IDENTICAL,
+  // straight from the server mint — this fix may not move the resolved path by one character.
+  const resolved = disclosureOf(
+    render(props('answer', r, { answer: answerProps({ snapshot: snapshotFixture() }) })),
+  );
+  for (const panel of ['ranking', 'policy', 'ai', 'kpis'] as const) {
+    assert.ok(
+      resolved.includes(`<dd class="text-sm text-ink900">${r.provenance[panel]}</dd>`),
+      `the ${panel} caption is the server mint verbatim: ${r.provenance[panel]}`,
+    );
+  }
+  assert.ok(resolved.includes(`${r.group.payerDisplayName} · ${employer} · 42 members · 1,358 charge lines`),
+    'and that mint really does carry the employer and counts — otherwise this test proves nothing');
+  assert.match(resolved, /panels showing the same value are about the same rows/, 'the same-rows contract stands');
+  assert.match(resolved, /In-network status is not captured on this VOB/, 'group-scoped notices stand');
+
+  // ── The fix. A SKIPPED answer captions the same three panels with the identifier-wide truth.
+  const skipped = disclosureOf(
+    render(props('answer', r, { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'skipped' }) })),
+  );
+  assert.ok(!skipped.includes(employer!), 'the declined plan\'s employer never captions a panel');
+  assert.ok(!skipped.includes('42 members'), 'nor its member count');
+  assert.ok(!skipped.includes('1,358 charge lines'), 'nor its charge-line count');
+  // Honesty is what IS true, not the absence of what is false (7c86709): each row still says something.
+  assert.match(skipped, /whole footprint under AETNA US HEALTHCARE/, 'the ranking names the scope it used');
+  assert.match(skipped, /no single policy backs this screen/, 'the policy row states there is no policy');
+  assert.match(skipped, /grounded in the ranking on screen/, 'the AI row states what it was fed');
+  // The KPI caption is scope 'book_wide' by construction and makes no plan claim — verbatim, always.
+  assert.ok(skipped.includes('<dd class="text-sm text-ink900">book-wide, not this client</dd>'),
+    'the ratified KPI wording survives a skip byte-for-byte');
+  // The predicate: RE-CAPTIONED, not deleted. It names a resolution the panels are not about.
+  assert.match(skipped, /p_deadbeef<\/span> identifies the plan that was resolved\s+before you skipped/);
+  assert.ok(!/panels showing the same value are about/.test(skipped), 'the same-rows claim is false after a skip');
+  // Every deriveNotices kind is group-scoped, so all of them describe the declined plan.
+  assert.ok(!skipped.includes('In-network status is not captured on this VOB'), 'the declined VOB note is gone');
+  assert.match(skipped, /No plan was chosen, so the notes about one plan/, 'and their absence is explained');
 });
 
 test('a skipped search says it was skipped — never "we could not narrow"', () => {

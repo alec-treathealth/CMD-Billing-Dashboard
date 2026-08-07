@@ -1213,6 +1213,33 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // before dispatching.
   const showSkeleton = snap === null && (props.pending || props.snapshotError === null);
   const scopePayer = snap?.resolved?.payerName ?? g.payerDisplayName;
+  // ⚠ THE ONLY HONEST PAYER NAME AFTER A SKIP is the one the SNAPSHOT actually resolved. `scopePayer`
+  // above falls back to `g.payerDisplayName` — the DECLINED candidate's carrier — which is tolerable
+  // for the identity line's shipped wording (7c86709) but would smuggle that carrier straight back
+  // into the disclosure captions this fix exists to clean, in the exact window where we know least
+  // (snapshot still loading, or a first load that failed). Name NOBODY rather than name the payer of
+  // a plan the user declined.
+  const skipUnder = snap?.resolved?.payerName ? ` under ${snap.resolved.payerName}` : '';
+  /**
+   * ⚠ THE DISCLOSURE'S CAPTIONS ARE FROZEN AT RESOLVE TIME AND A SKIP NEVER RE-RESOLVES.
+   * `r.provenance` is minted SERVER-side inside `resolveCoverage` (resolutionService.ts:383-408) from
+   * the chosen candidate, via `panelProvenance` (resolution.ts:303-317) which interpolates
+   * `group.employerLabel`. A Skip is pure client state (resolution-flow-client.tsx:132-143) — no
+   * server round trip — so after one, these strings still read
+   * "AETNA · FRESNO UNIFIED SCHOOL DISTRICT · 57 members · 1,994 charge lines" about a plan the user
+   * explicitly declined, while the panels underneath are identifier-wide: the fetch sends no
+   * payerOverride and no market (client :221, :281-294), and the AI payload is built entirely from
+   * that same snapshot (qualify-ai-panel.tsx:27-66). DISPLAY-ONLY BUG — the data was already honest.
+   *
+   * Extending 7c86709's pattern: state what IS true rather than blank the row. Keyed on `skipped`
+   * ALONE — never on chosenBy/chosenIndex, because a Skip taken AFTER a plan pick leaves `r.group`
+   * describing the previously-picked candidate rather than index 0.
+   */
+  const skipProvenance: Record<'ranking' | 'policy' | 'ai', string> = {
+    ranking: `all plans — no plan chosen · this identifier's whole footprint${skipUnder}`,
+    policy: 'no plan chosen — no single policy backs this screen',
+    ai: `grounded in the ranking on screen — all plans, no plan chosen${skipUnder}`,
+  };
   const policyBits = [
     g.employerLabel ?? 'No plan sponsor on file',
     g.funding ?? 'Funding not captured',
@@ -1571,14 +1598,28 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
       <details className="rounded-lg border border-line bg-surface px-4 py-3">
         <summary className="cursor-pointer text-sm font-semibold text-ink900">How this was resolved</summary>
         <div className="mt-3 flex flex-col gap-3">
-          <ul className="flex list-none flex-col gap-2 p-0">
-            {r.notices
-              // 'ambiguous_candidates' reads "You are seeing the one you selected" — false after a
-              // Skip, where the user selected nothing. The skip banner above says what happened.
-              .filter((n) => !(skipped && n.kind === 'ambiguous_candidates'))
-              .map((n) => (
-              // Severity hue BEHIND the severity word (Phase 5) — the word stays; the wash makes a
-              // caution findable in a scan without reading every line.
+          {/* ⚠ EVERY kind `deriveNotices` mints is GROUP-scoped (resolution.ts:324-385): each one reads
+              off the chosen candidate's payer identity, VOB freshness, network capture, resolution
+              basis or claim evidence. After a Skip the panels are about a different, wider row set, so
+              all of them describe the declined plan — 'network_not_captured' ("In-network status is
+              not captured on this VOB") was the line Alec hit, and 'unmapped_payer' is worse still,
+              since it denies facility comparisons the ranking is visibly making. This SUPERSEDES
+              7c86709's single-kind filter on 'ambiguous_candidates' (keeping that filter under a
+              branch that only runs when !skipped would be dead code). Suppression alone is the
+              failure mode 7c86709 warns about, so the list is REPLACED by the true statement rather
+              than silently emptied. */}
+          {skipped ? (
+            <p className="rounded-lg bg-teal50 px-2.5 py-1.5 text-sm text-ink900">
+              <span className="mr-2 text-xs font-semibold uppercase text-ink600">Note</span>
+              No plan was chosen, so the notes about one plan — its benefits, its evidence, its network —
+              are not shown: every one of them describes the plan you skipped past, not the rows above.
+              Pick a plan from the receipt to see them.
+            </p>
+          ) : (
+            <ul className="flex list-none flex-col gap-2 p-0">
+              {r.notices.map((n) => (
+                // Severity hue BEHIND the severity word (Phase 5) — the word stays; the wash makes a
+                // caution findable in a scan without reading every line.
                 <li
                   key={n.kind}
                   className={`rounded-lg px-2.5 py-1.5 text-sm text-ink900 ${
@@ -1591,26 +1632,47 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                   {n.text}
                 </li>
               ))}
-          </ul>
+            </ul>
+          )}
           <dl className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {(['ranking', 'policy', 'ai'] as const).map((panel) => (
               <div key={panel} className="flex flex-col">
                 <dt className="text-xs font-medium uppercase tracking-wide text-ink400">
                   {panel === 'ranking' ? 'Facility ranking' : panel === 'policy' ? 'Policy card' : 'AI explainer'}
                 </dt>
-                <dd className="text-sm text-ink900">{r.provenance[panel]}</dd>
+                {/* See skipProvenance: r.provenance is resolve-time and names the DECLINED plan's
+                    employer and member/line counts. The panels are identifier-wide after a skip. */}
+                <dd className="text-sm text-ink900">{skipped ? skipProvenance[panel] : r.provenance[panel]}</dd>
               </div>
             ))}
             <div className="flex flex-col">
               <dt className="text-xs font-medium uppercase tracking-wide text-ink400">KPI tiles</dt>
-              {/* The ratified wording, verbatim — the book-wide tiles are deliberately NOT about this client. */}
+              {/* The ratified wording, verbatim — the book-wide tiles are deliberately NOT about this client.
+                  CORRECT after a skip too: `panelProvenance`'s book_wide arm (resolution.ts:304-308) is
+                  minted unconditionally and makes no claim about any plan or employer. Left untouched. */}
               <dd className="text-sm text-ink900">{r.provenance.kpis}</dd>
             </div>
           </dl>
-          <p className="text-xs text-ink600">
-            Predicate <span className="ths-num">{r.predicateId}</span> — panels showing the same value are about
-            the same rows.
-          </p>
+          {/* ⚠ THE PREDICATE IS RE-CAPTIONED WHEN SKIPPED, NOT SUPPRESSED. `predicateIdFor` hashes the
+              chosen candidate's employerLabel/funding/planType (resolutionService.ts:415-423), so after
+              a skip it is the identity of a row set NO panel above is about — the "same rows" contract
+              is simply false there, and no other surface on the skip screen carries this id to compare
+              against. Deleting the line was the tempting move and is the wrong one under 7c86709: the
+              id is the only durable handle on what the identify step actually produced, the receipt's
+              "Pick a plan" leads straight back to that resolution, and a silent gap exactly where a
+              reader looks for the row-identity contract teaches nothing. So it keeps the id and states
+              its real relationship to the screen. The non-skipped sentence is byte-identical. */}
+          {skipped ? (
+            <p className="text-xs text-ink600">
+              Predicate <span className="ths-num">{r.predicateId}</span> identifies the plan that was resolved
+              before you skipped — not the rows above. A general search has no single row predicate.
+            </p>
+          ) : (
+            <p className="text-xs text-ink600">
+              Predicate <span className="ths-num">{r.predicateId}</span> — panels showing the same value are about
+              the same rows.
+            </p>
+          )}
         </div>
       </details>
     </Stage>
