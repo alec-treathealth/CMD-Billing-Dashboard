@@ -20,6 +20,7 @@ export const QUALIFY_FACILITY_V2_NULLS: Pick<
   // The blend disclosure (2026-08-07). 1 = a payer-scoped card, which is what a fixture that says
   // nothing about payer scope means. Only an identifier-wide ranking produces >1.
   | 'payerCount'
+  | 'solePayer'
   | 'ratingV2'
   | 'iqBand'
   | 'factors'
@@ -34,6 +35,7 @@ export const QUALIFY_FACILITY_V2_NULLS: Pick<
   openBeds: null,
   bedCapacity: null,
   payerCount: 1,
+  solePayer: null,
   ratingV2: null,
   iqBand: null,
   factors: [],

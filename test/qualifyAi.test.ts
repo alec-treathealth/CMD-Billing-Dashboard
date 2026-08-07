@@ -101,7 +101,10 @@ test('the built prompt carries no dollar sign and no identifier-shaped content',
   assert.match(user, /WHY does the top facility score/);
   // The framing changes with the question — each chip asks its own thing.
   const ranks = buildQualifyAiMessages({ ...VALID, question: 'ranks' });
-  assert.match(ranks.user, /WHICH facility does this policy pay best/);
+  // "this policy" became "this read" 2026-08-07: under payerScope 'all' there is no ONE policy, and
+  // the old framing fought the scope rule in SYSTEM_PROMPT instead of reinforcing it.
+  assert.match(ranks.user, /WHICH facility does this read pay best at/);
+  assert.match(ranks.user, /the comparison is between BLENDS/);
 });
 
 test('insufficient: no facilities AND no policy → the panel never calls the model', () => {

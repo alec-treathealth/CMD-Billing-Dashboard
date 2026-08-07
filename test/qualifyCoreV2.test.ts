@@ -585,6 +585,38 @@ test('payerScope:all discloses the SCOPE in the coding factor, not "no payer res
   assert.ok(!/no payer resolved/i.test(coding.detail), 'the comparable-path wording must not leak here');
 });
 
+test('the CLAIMS factor — the one that carries the blended number — discloses the blend and its size', async () => {
+  const deps = v2deps(SUPER, {
+    loadPayerSpread: SPREAD,
+    loadFacilities: async () => FAC.map((r) => ({ ...r, payer_count: 3 })),
+  });
+  const snap = await getQualifySnapshotCore(deps, { ...AUTO_IN, payerScope: 'all' });
+  const claims = snap.facilities[0]?.factors.find((f) => f.key === 'claims');
+  assert.ok(claims, 'the claims factor is present');
+  // ⚠ THIS SENTENCE LIVES INSIDE "Why this score" — the place an operator goes to interrogate a
+  // percentage they do not trust. "62% of billed allowed" unqualified there presents a cross-label
+  // blend as one payer's payment behaviour: the exact claim the ruling forbids, in the place it does
+  // the most damage. The COUNT rides along because a blend of two is not a blend of nine.
+  assert.match(claims.detail, /Blended across 3 billed-under labels/);
+  assert.match(claims.detail, /NOT one payer's rate/);
+  assert.match(claims.detail, /scope to one label to un-blend/);
+
+  // ONE label under an all-payers ranking is not a blend, and saying it is would be its own overclaim.
+  const single = await getQualifySnapshotCore(
+    v2deps(SUPER, { loadPayerSpread: SPREAD, loadFacilities: async () => FAC.map((r) => ({ ...r, payer_count: 1 })) }),
+    { ...AUTO_IN, payerScope: 'all' },
+  );
+  const one = single.facilities[0]?.factors.find((f) => f.key === 'claims');
+  assert.match(one!.detail, /billed the member under one label only, so nothing is blended here/);
+
+  // A PAYER-SCOPED read gets no scope note at all — it would be noise on every card of the ~84% of
+  // searches that never skip, and there is nothing there to disclose.
+  const scoped = await getQualifySnapshotCore(v2deps(SUPER, { loadPayerSpread: SPREAD }), AUTO_IN);
+  const plain = scoped.facilities[0]?.factors.find((f) => f.key === 'claims');
+  assert.ok(!/[Bb]lended/.test(plain!.detail), 'no blend note on a single-label ranking');
+  assert.ok(!/Ranked across all payers/.test(plain!.detail));
+});
+
 test('the blend disclosure rides the rows: payer_count reaches QualifyFacility.payerCount', async () => {
   const deps = v2deps(SUPER, {
     loadPayerSpread: SPREAD,
@@ -597,6 +629,30 @@ test('the blend disclosure rides the rows: payer_count reaches QualifyFacility.p
   // 0 would render "across 0 payers", which is never true of a row that exists.
   const legacy = await getQualifySnapshotCore(v2deps(SUPER, { loadPayerSpread: SPREAD }), AUTO_IN);
   assert.ok(legacy.facilities.every((f) => f.payerCount === 1), 'absent payer_count coalesces to 1, never 0');
+});
+
+test('solePayer names the label at ONE, and is NULLED above one where max() would be arbitrary', async () => {
+  // The SQL is max(primary_payer): exact when there is one distinct value, an arbitrary pick above
+  // it. The core decides that ONCE rather than trusting every render site to remember the condition —
+  // a card naming one of several labels would be a scope lie at exactly the grain the blend
+  // disclosure exists to protect.
+  const one = await getQualifySnapshotCore(
+    v2deps(SUPER, {
+      loadPayerSpread: SPREAD,
+      loadFacilities: async () => FAC.map((r) => ({ ...r, payer_count: 1, sole_payer: 'AETNA' })),
+    }),
+    { ...AUTO_IN, payerScope: 'all' },
+  );
+  assert.ok(one.facilities.every((f) => f.solePayer === 'AETNA'));
+
+  const many = await getQualifySnapshotCore(
+    v2deps(SUPER, {
+      loadPayerSpread: SPREAD,
+      loadFacilities: async () => FAC.map((r) => ({ ...r, payer_count: 3, sole_payer: 'AETNA' })),
+    }),
+    { ...AUTO_IN, payerScope: 'all' },
+  );
+  assert.ok(many.facilities.every((f) => f.solePayer === null), 'above one label the name is arbitrary and must not survive');
 });
 
 test('override cannot survive a spread outage — no evidence means no authorization', async () => {

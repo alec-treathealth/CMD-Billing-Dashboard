@@ -543,6 +543,17 @@ export interface QualifyFacility {
    * NON-DOLLAR (a count) → survives the amounts strip; an admissions_seat sees the same disclosure.
    */
   payerCount: number;
+  /**
+   * The single billed-under label behind this card — ONLY when there is exactly one (`payerCount ===
+   * 1`); null above that, where naming one of several would be a scope lie at card level.
+   *
+   * The SQL side is `max(primary_payer)`, which is exactly right at one distinct value and arbitrary
+   * above it, so the CORE nulls it rather than trusting every render site to remember the condition.
+   * Exists because under an all-payers ranking a card that spans one label is more usefully labelled
+   * "1 payer · AETNA" than "across 1 payer" — the count answers "is this blended", the label answers
+   * "blended with what", and at one the second answer is free.
+   */
+  solePayer: string | null;
   /** Coverage triple (0059 trust signal): per-facility in-window claim counts by confidence bucket
    *  (confidence.ts — confirmed = a/cd/e1, estimate = e2, unknown = b/none). Sums to lineCount.
    *  NON-DOLLAR: renders for admissions_seat; never stripped. Backs the coverage bar + the

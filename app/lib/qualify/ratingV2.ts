@@ -252,6 +252,9 @@ export interface QualifyRatingV2Input {
    * they have an explanation. Default false.
    */
   payerScopeAll?: boolean;
+  /** Distinct billed-under labels behind THIS facility's rows — the blend's size. 1 under a
+   *  payer-scoped read by construction. Only read when `payerScopeAll` is true; default 1. */
+  payerCount?: number;
   codingLifecycle: CodingLifecycle | null;
   codingDecidedOn: string | null; // ISO date
   codingCodesLabel: string | null; // e.g. 'H0017 / 0158' — display only
@@ -407,8 +410,22 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
   }
 
   // — claims reliability (25) ————————————————————————————————————————————————
+  //
+  // ⚠ THIS IS THE FACTOR THAT CARRIES THE BLENDED NUMBER, so it is the factor that must disclose the
+  // blend (2026-08-07). `pctAllowed` under an identifier-wide ranking is dollar-weighted across EVERY
+  // billed-under label behind the facility's rows — and this sentence lives inside "Why this score",
+  // which is exactly where an operator goes to interrogate a percentage they do not trust. Saying
+  // "62% of billed allowed" there, unqualified, presents a cross-label blend as one payer's payment
+  // behaviour: the precise claim Alec's ruling forbids, in the precise place it does the most damage.
+  // The COUNT rides in the sentence because a blend of two is a different thing from a blend of nine.
   const pct = input.pctAllowed;
   const claimsScore = pct === null || Number.isNaN(pct) ? null : clamp01(pct / 100);
+  const blendLabels = Math.max(1, Math.trunc(input.payerCount ?? 1));
+  const blendNote = !input.payerScopeAll
+    ? ''
+    : blendLabels > 1
+      ? ` Blended across ${blendLabels} billed-under labels — this is what the member's claims allowed here, NOT one payer's rate; scope to one label to un-blend.`
+      : ' Ranked across all payers; this facility billed the member under one label only, so nothing is blended here.';
   factors.push({
     key: 'claims',
     label: QUALIFY_FACTOR_LABELS.claims,
@@ -418,8 +435,9 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
     direction: claimsScore === null ? 'neu' : directionOf(claimsScore),
     detail:
       claimsScore === null
-        ? 'No reliable allowed evidence in this window — nothing to rate the payer’s payment behavior on.'
-        : `${round1(pct as number)}% of billed allowed across ${input.lineCount} line${input.lineCount === 1 ? '' : 's'} (${input.confirmedClaims} confirmed-tier).`,
+        ? // "the payer's" presumes a single payer, which an all-payers read does not have.
+          `No reliable allowed evidence in this window — nothing to rate ${input.payerScopeAll ? 'payment behaviour' : 'the payer’s payment behavior'} on.`
+        : `${round1(pct as number)}% of billed allowed across ${input.lineCount} line${input.lineCount === 1 ? '' : 's'} (${input.confirmedClaims} confirmed-tier).${blendNote}`,
   });
 
   // — data confidence (20) ———————————————————————————————————————————————————

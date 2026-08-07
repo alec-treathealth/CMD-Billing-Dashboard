@@ -168,9 +168,11 @@ const SYSTEM_PROMPT = [
 const QUESTION_FRAMING: Record<QualifyAiInput['question'], string> = {
   explain: 'Question: WHY does the top facility score what it scores? Walk the factors that carry and drag it.',
   placement: 'Question: SHOULD the rep place this client here? A placement read — direct about risk, never a guarantee.',
-  speed: 'Question: HOW FAST does this policy pay? Read days-to-payment and what drags it.',
+  // "this policy" presumes ONE payer, which payerScope 'all' does not have — the framing would then
+  // fight the scope rule in SYSTEM_PROMPT rather than reinforce it (2026-08-07).
+  speed: 'Question: HOW FAST does this read pay? Read days-to-payment and what drags it. Under payerScope "all" that is the member\'s claims across every label, not one policy.',
   improve: 'Question: WHAT WOULD MOVE this rating? Only factors reading negative are levers; unavailable factors need data, not effort.',
-  ranks: 'Question: WHICH facility does this policy pay best, and how real is the gap between them?',
+  ranks: 'Question: WHICH facility does this read pay best at, and how real is the gap between them? Under payerScope "all" the comparison is between BLENDS — name payerCount where it differs, because a gap can be payer mix rather than facility performance.',
   thin: 'Question: IS THERE ENOUGH HISTORY here to trust these numbers? Distinct patients — not lines — are the unit of evidence; read the sample honestly and say what "directional" means for this rep.',
   takeit: 'Question: SHOULD WE BE TAKING this policy at all? Nothing in the set reads strong — weigh the best available evidence against declining, and be direct about which way it leans.',
   plantype: 'Question: NARROW PLAN (EPO/HMO) — is there a realistic path to payment? Read what the plan type means for access and authorization, using only the policy facts provided.',

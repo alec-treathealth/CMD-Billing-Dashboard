@@ -108,6 +108,33 @@ test('ranking with payer=null and NO scope at all still throws at the builder ch
     () => buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, {}, null, 'prefix'),
     /requires a scope/,
   );
+  // ⚠ AN EMPTY-STRING TOKEN IS NOT A SCOPE, AND THE GUARD ONCE THOUGHT IT WAS. `idNarrow` emits on
+  // TRUTHINESS (`token && kind`), so '' produces no identifier clause; a guard written `token !== null`
+  // accepted this pair and the builder emitted neither a payer clause nor an identifier one — an
+  // unscoped WHOLE-BOOK ranking, the maximum-magnitude version of the exact failure this chokepoint
+  // exists to prevent. Unreachable from the cores today, but the builder's header claims enforcement
+  // happens HERE, so the claim has to be true independently of its callers.
+  assert.throws(
+    () => buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, {}, '', 'prefix'),
+    /requires a scope/,
+  );
+});
+
+test('the guard and the identifier narrow agree on what counts as a token — one predicate, two sites', () => {
+  // The pairing is the invariant: whatever the guard ACCEPTS as an identifier scope, the SQL must
+  // actually narrow by. Asserted as a property rather than by re-reading the source, so the two
+  // cannot drift apart silently the way they did.
+  for (const token of ['HMAC_PFX', '', null] as const) {
+    let sql: string | null = null;
+    try {
+      sql = buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, {}, token, 'prefix').sql;
+    } catch {
+      sql = null; // the guard refused — which is a valid outcome, just not a silently-unscoped one
+    }
+    if (sql !== null) {
+      assert.match(sql, /member_id_prefix_bidx = \$\d+/, `an accepted token (${JSON.stringify(token)}) must actually narrow`);
+    }
+  }
 });
 
 // ── IDENTIFIER-WIDE MODE (the v3 Skip, 2026-08-07) ───────────────────────────────────────────────

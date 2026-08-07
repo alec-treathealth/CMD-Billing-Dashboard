@@ -461,8 +461,10 @@ function assembleFacilities(
         provenance: ctx.provenance,
         registrySeeded: ctx.coding.seeded,
         payerKnown: ctx.payer !== null,
-        // Same exclusion, different sentence — see QualifyFactorContext.allPayers.
+        // Same exclusion, different sentence — see QualifyFactorContext.allPayers. The COUNT rides
+        // with it because the claims factor's detail names the blend's size, not just its existence.
         payerScopeAll: ctx.allPayers,
+        payerCount: r.payer_count ?? 1,
         codingLifecycle: decision ? (decision.lifecycle as import('./ratingV2').CodingLifecycle) : null,
         codingDecidedOn: decision?.decided_on ?? null,
         codingCodesLabel: decision ? codingCodesLabel(decision) : null,
@@ -498,6 +500,11 @@ function assembleFacilities(
         // one label backs the card. 0 would render "across 0 payers", which is never true of a row
         // that exists.
         payerCount: r.payer_count ?? 1,
+        // NULLED above one label: the SQL is max(primary_payer), exact at one distinct value and
+        // arbitrary above it. Deciding that here — once — beats asking every render site to
+        // remember the condition, and a card naming one of several labels would be a scope lie at
+        // exactly the grain the blend disclosure exists to protect.
+        solePayer: (r.payer_count ?? 1) === 1 ? (r.sole_payer ?? null) : null,
         // 0059 trust signal (non-dollar — survives the amounts strip for admissions_seat).
         confirmedClaims: r.confirmed_claims,
         estimateClaims: r.estimate_claims,

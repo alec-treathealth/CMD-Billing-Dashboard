@@ -51,6 +51,22 @@ import { derivePolicyRating } from '../../../lib/qualify/policyRating';
 import { ALL_PAYERS_LABEL } from '../../../lib/qualify/scopeLabel';
 import { IQ_BAND_LABELS, IQ_BAND_VERDICTS } from '../../../lib/qualify/ratingV2';
 import { clusterCarriers, type CarrierCluster } from '../../../lib/qualify/carrierCluster';
+// ⚠ A DESKTOP MODULE IMPORTING FROM `m/`, ON PURPOSE. `deriveAreaChips` / `facilitiesInArea` /
+// `areaKeyFor` are the only geographic filter Qualify has ever shipped (mobile, d4776af) and they
+// already encode the rule that matters here: an unmapped facility buckets under 'Other' and is NEVER
+// dropped. Copying them into `v3/` would give the two surfaces two chances to disagree about what a
+// null state means — and the mobile file is pure, `'use client'`-safe, and imports only a type from
+// `contract.ts`, so there is nothing to pay for taking it. Only the PURE helpers cross over; the
+// mobile `<AreaChips>` component does not — it carries the PWA's inline-style vocabulary, and these
+// chips are rendered in the desktop control idiom below.
+import {
+  AREA_ALL,
+  AREA_OTHER,
+  areaKeyFor,
+  deriveAreaChips,
+  facilitiesInArea,
+  type AreaChip,
+} from '../m/area-chips';
 import { IQ_BAND_HEX, IQ_BAND_WASH } from '../tokens';
 
 // ── Pure derivations (exported for the shell and the tests) ─────────────────────────────────────
@@ -261,6 +277,56 @@ export function filterCandidates(all: readonly OrderedCandidate[], f: AnswerFilt
     if (f.employers.length > 0 && !(c.employerLabel !== null && f.employers.includes(c.employerLabel))) return false;
     return true;
   });
+}
+
+// ── The AREA facet (the restored location narrow) ────────────────────────────────────────────────
+//
+// WHAT WAS LOST AND WHY THIS IS THE SHAPE OF THE ANSWER. v2's tab carried a Facility type-ahead in
+// its primary search row and a Heating Up ticker whose cards pivoted the whole view to {facility +
+// dominant payer}. The 2026-08-06 v3 cutover dropped both, and — unlike the browse-filter row, the
+// KPI tiles and the always-open trace — the drop is absent from the ratified pattern doc's
+// deliberate-drops list, so it was a casualty rather than a ruling. The first dark-launch v3 build
+// even PROMISED "…or a facility name" in the search box; typing "NASHVILLE" was HMAC'd down the
+// member-id blind index and reported a confusing no-match, and the review fix deleted the promise
+// instead of building the capability.
+//
+// This restores the capability WITHOUT re-opening that defect: nothing here touches
+// `classifyQualifyHandle`, so no free-text term can ever reach the blind index again by this route.
+// The facet is a post-hoc narrow over facilities the ranking ALREADY returned — state buckets, using
+// the mobile deck's own helpers, single-select exactly as the mobile chips are.
+//
+// ⚠ IT NARROWS THE GRID, NOT THE FETCH. See flow-state.ts invariant (m): `area` is a sibling of
+// `filters`, never a member, precisely so that no request-shaping code can read it.
+
+/**
+ * The chips for the ranked set, with the ACTIVE key guaranteed present.
+ *
+ * `deriveAreaChips` builds its list from the facilities in hand, which is right for the mobile deck
+ * where the only way to pick an area is to click one of those chips. The desktop flow has a second
+ * seeder: a Heating Up card, whose trends are BOOK-WIDE and can name a state this member has no
+ * history in. Left alone, that click would narrow the grid to nothing with no chip on screen to
+ * un-press — an active filter the user cannot see is an unclearable one. So an active key the ranked
+ * set does not contain is appended rather than swallowed, and the empty grid gets a sentence saying
+ * which area it is empty for.
+ */
+export function areaChipsWithActive(facilities: readonly QualifyFacility[], active: string): AreaChip[] {
+  const chips = deriveAreaChips(facilities);
+  if (chips.some((c) => c.key === active)) return chips;
+  // Same label vocabulary as the derived chips — 'Other' is a word, not the sentinel string.
+  return [...chips, { key: active, label: active === AREA_OTHER ? 'Other' : active }];
+}
+
+/**
+ * Is the Heating Up ticker a LIVE control, or orientation-only?
+ *
+ * Live exactly when an answer is on screen to narrow. On the landing there is nothing to filter —
+ * v3 resolves a MEMBER, not a facility, so a landing click has no honest target, and the strip keeps
+ * the `readOnly` treatment that renders every card as a disabled non-button rather than a button
+ * that no-ops. Pure and exported so the shell's `readOnly` prop and its `onOpen` guard are ONE
+ * decision: two of them would eventually disagree and hand back a clickable card with a dead handler.
+ */
+export function tickerIsLive(stage: FlowStage, hasSnapshot: boolean): boolean {
+  return stage === 'answer' && hasSnapshot;
 }
 
 export interface Facet {
@@ -1042,6 +1108,10 @@ export function StagePlan(props: {
 
 const WINDOW_CHOICES: readonly QualifyTrailingDays[] = [30, 60, 90, 180, 270, 365];
 
+/** A stable empty reference for the pre-snapshot render — a fresh `[]` would re-run every area memo
+ *  on every keystroke in the employer search while the answer is still loading. */
+const EMPTY_FACILITIES: readonly QualifyFacility[] = [];
+
 /** windowDays is the shell's MANUAL selection (null = automatic requested). A null ladder on the
  *  automatic path is NOT "set manually" — the core only auto-sizes prefix searches, so a full
  *  member-id search arrives ladder-less on a default the user never chose. Say which it was. */
@@ -1083,7 +1153,12 @@ function FactorRows({ facility }: { facility: QualifyFacility }): React.ReactEle
   );
 }
 
-function ScoreCard({ f }: { f: QualifyFacility }): React.ReactElement {
+/**
+ * `allPayers` is the RANKING's scope, passed down rather than inferred from `f.payerCount`: a
+ * single-label card under an all-payers ranking and the same card under a payer-scoped one carry
+ * identical counts and are different claims. See the blend disclosure in the body.
+ */
+function ScoreCard({ f, allPayers }: { f: QualifyFacility; allPayers: boolean }): React.ReactElement {
   const location = [f.city, f.state].filter(Boolean).join(', ');
   return (
     <li
@@ -1117,23 +1192,43 @@ function ScoreCard({ f }: { f: QualifyFacility }): React.ReactElement {
             </span>{' '}
             lines
             {/* ── THE BLEND DISCLOSURE (Alec, 2026-08-07) ─────────────────────────────────────────
-                This card's percentage and rating are dollar-weighted over EVERY billed-under label
-                behind these rows. That is an honest answer to "what did this member's claims actually
-                allow here" and NOT an answer to "what does payer X pay here" — a facility can read
-                green on an AETNA-heavy mix while the member's other label pays badly at the same
-                place. Simpson's paradox, on the screen admissions acts on.
-                Rendered only above 1, because at 1 it is a payer-scoped card and the phrase would be
-                noise on every card of every ordinary search. The un-blend is one click away: the
-                BILLED UNDER switch above. */}
-            {f.payerCount > 1 ? (
+                Under an all-payers ranking this card's percentage and rating are dollar-weighted over
+                EVERY billed-under label behind these rows. That honestly answers "what did this
+                member's claims actually allow here" and does NOT answer "what does payer X pay here"
+                — a facility can read green on an AETNA-heavy mix while the member's other label pays
+                badly at the same place. Simpson's paradox, on the screen admissions acts on.
+
+                ⚠ GATED ON THE SCOPE, NOT ON THE COUNT, and the difference is not academic. `payerCount
+                > 1` measured live renders on 0 of 14 cards at 30d and 1 of 28 at 365d — so Alec's
+                ruling ("each card says across N payers") would have fired almost never, and an
+                all-payers card would have been indistinguishable from a payer-scoped one at exactly
+                the grain the operator reads. The count is what varies; the SCOPE is what the sentence
+                is about. Absent entirely on a payer-scoped ranking, where it would be noise on every
+                card of the ~84% of searches that never skip.
+
+                At one label the COUNT alone ("across 1 payer") is a worse sentence than the LABEL, so
+                the card names it — `solePayer`, which the core nulls above one precisely so it can
+                never name one of several here. */}
+            {allPayers ? (
               <>
                 {' · '}
                 <span className="font-semibold text-ink900">
-                  blended across{' '}
-                  <span className="ths-num" aria-label={`${f.payerCount} billed-under labels`}>
-                    {f.payerCount}
-                  </span>{' '}
-                  payers
+                  {f.payerCount > 1 ? (
+                    <>
+                      blended across{' '}
+                      <span className="ths-num" aria-label={`${f.payerCount} billed-under labels`}>
+                        {f.payerCount}
+                      </span>{' '}
+                      payers
+                    </>
+                  ) : (
+                    <>
+                      <span className="ths-num" aria-label="1 billed-under label">
+                        1
+                      </span>{' '}
+                      payer{f.solePayer ? ` · ${f.solePayer}` : ''}
+                    </>
+                  )}
                 </span>
               </>
             ) : null}
@@ -1213,6 +1308,13 @@ export interface StageAnswerProps {
   /** Set when the employer narrow could not be sent because it exceeded the action's 200 bound —
    *  the caption says the ranking is NOT employer-narrowed rather than implying it is. */
   employerNarrowTooMany: number | null;
+  /**
+   * The AREA facet: AREA_ALL | a 2-letter state | AREA_OTHER. Narrows the RENDERED scorecard grid
+   * only — it is deliberately not part of `filters`, reaches no request, and must never enter
+   * `rankingNarrowed` or any caption that describes what was fetched (flow-state.ts invariant m).
+   */
+  area: string;
+  onSelectArea: (key: string) => void;
   payerOverride: string | null;
   onPayerOverride: (label: string | null) => void;
   windowDays: QualifyTrailingDays | null;
@@ -1372,6 +1474,72 @@ export function billedUnderCaption(args: {
   return 'Largest by volume — pick another to re-scope.';
 }
 
+/**
+ * The AREA chip row — the restored location narrow, rendered in the desktop `FilterLine` idiom
+ * (label + toggle chips) rather than the mobile `<AreaChips>` component, whose inline styles belong
+ * to the PWA. SINGLE-select, because `facilitiesInArea` takes one key and because "All" is a chip
+ * rather than an absence: an explicit way back is what stops a narrow becoming a trap.
+ *
+ * It lives INSIDE the scorecard section, not on the control card above it, and that placement is the
+ * honesty argument made in layout: everything on the control card re-issues the ranking request,
+ * and this does not. Selection carries the word "showing", never hue alone (I9).
+ */
+function AreaLine(props: {
+  chips: readonly AreaChip[];
+  active: string;
+  counts: ReadonlyMap<string, number>;
+  onSelect: (key: string) => void;
+}): React.ReactElement {
+  // AREA IS A FACET OF THE INVENTORY EVEN THOUGH IT DOES NOT LIVE ON THE CONTROL CARD (2026-08-07).
+  // Its placement beside the grid is deliberate and unchanged — everything on the control card
+  // re-issues the ranking request and this does not — but "where the control sits" and "is this
+  // facet restricting what I am looking at" are different questions, and the inventory answers the
+  // second. Without the badge and the `anyFacetOn` term, the headline sentence reads "nothing is
+  // restricting this search" beside a LIT Area chip: the exact contradiction `payerFacetOn` was added
+  // to prevent, on the one facet Alec named by name. `data-v3-facet` enrols it in the skip reveal's
+  // stagger, which selects on the attribute across the stage rather than inside the control card.
+  const on = props.active !== AREA_ALL;
+  return (
+    <div data-v3-facet className="flex flex-wrap items-center gap-2" role="group" aria-label="Filter the ranked list by area">
+      <span className="text-xs font-medium uppercase tracking-wide text-ink400">Area</span>
+      <FacetState
+        on={on}
+        text={on ? `1 of ${Math.max(1, props.chips.length - 1)}` : `all ${Math.max(1, props.chips.length - 1)}`}
+      />
+      {props.chips.map((c) => {
+        const on = c.key === props.active;
+        const n = props.counts.get(c.key) ?? 0;
+        return (
+          <button
+            key={c.key}
+            type="button"
+            aria-pressed={on}
+            onClick={() => props.onSelect(c.key)}
+            className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
+              on ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
+            }`}
+          >
+            {c.label}
+            {/* Proper pluralization (review Finding 3) — the same `${n === 1 ? '' : 's'}` idiom
+                `panelProvenance` already uses for "member"/"charge line" (resolution.ts). Every
+                non-'All' chip in a real ranking routinely carries n=1 (three facilities across three
+                distinct states means every per-state chip's count IS 1), so "1 ranked facilities" was
+                not an edge case — it was the common case. */}
+            <span
+              className="font-mono tabular-nums text-ink400"
+              aria-label={`${n} ranked facilit${n === 1 ? 'y' : 'ies'}`}
+            >
+              {' '}
+              · {n}
+            </span>
+            {on ? ' · showing' : ''}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 /** First-load ghost sized to the real footprint (window line + hero + two scorecard rows), so the
  *  swap to content does not shift layout. aria-hidden — the visible status line above it announces. */
 function AnswerSkeleton(): React.ReactElement {
@@ -1458,7 +1626,6 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // point the operator at a control they cannot see, to widen a search that is already as wide as it
   // can be.
   const payerFacetOn = snap !== null && snap.payerOptions.length > 1 && !allPayers;
-  const anyFacetOn = filtersActive || payerFacetOn;
   /**
    * ⚠ A SKIP IS NOT A PROMISE THAT THE FETCH STAYED WIDE, and v1 of this fix assumed it was.
    * `scopeSource` never moves off 'skipped' when the answer-stage filter chips are used — it is
@@ -1480,6 +1647,17 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   const employerNarrow = filtersActive ? employerNarrowFor(props.candidates, filteredCandidates) : null;
   const rankingNarrowed =
     props.filters.funding.length > 0 || (employerNarrow !== null && 'employers' in employerNarrow);
+  // Hoisted ahead of `skipProvenance` (below) on purpose — the AI caption needs it too, and a
+  // `const` must precede every place that reads it. Trivial and `snap`-independent (props.area alone
+  // decides it), so hoisting costs nothing; the fuller AREA-facet block that DOES depend on `snap` —
+  // `rankedFacilities`, `areaChips`, `shownFacilities` — stays where it was, next to the grid it
+  // narrows. This is the ONLY declaration of `areaActive`; do not re-declare it below.
+  const areaActive = props.area !== AREA_ALL;
+  // AREA COUNTS AS A FACET (2026-08-07), which is why this sits BELOW `areaActive` rather than beside
+  // `payerFacetOn` above. Area is the one facet whose control lives outside the control card — see
+  // AreaLine for why that placement is right and why it does not exempt it from the inventory —
+  // and omitting it let one click produce "nothing is restricting this search" beside a lit Area chip.
+  const anyFacetOn = filtersActive || payerFacetOn || areaActive;
   /**
    * ⚠ THE DISCLOSURE'S CAPTIONS ARE FROZEN AT RESOLVE TIME AND A SKIP NEVER RE-RESOLVES.
    * `r.provenance` is minted SERVER-side inside `resolveCoverage` (resolutionService.ts:383-408) from
@@ -1501,9 +1679,24 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
       : `all plans — no plan chosen · this identifier's whole footprint${skipUnder}`,
     // Filters narrow rows; they never elect a policy. True either way.
     policy: 'no plan chosen — no single policy backs this screen',
-    ai: rankingNarrowed
-      ? `grounded in the ranking on screen — all plans, no plan chosen, narrowed by your filter selections${skipUnder}`
-      : `grounded in the ranking on screen — all plans, no plan chosen${skipUnder}`,
+    /**
+     * ⚠ "ON SCREEN" STOPS BEING TRUE THE MOMENT AN AREA CHIP IS PRESSED, for the same reason the hero
+     * rating comment a few dozen lines down explains for the numeral: `<QualifyAiPanel
+     * snapshot={snapshot}>` (resolution-flow-client.tsx) is handed the FULL, un-narrowed snapshot —
+     * never `shownFacilities` — because the area facet is a grid-only narrow (invariant (m), see the
+     * AREA-facet block below) with no code path to the AI panel's props. So while `areaActive`, the
+     * scorecard the user sees is a strict subset of what the AI actually read, and "grounded in the
+     * ranking on screen" would describe a ranking narrower than the one really behind the answer.
+     * Applying the SAME standard as the hero: say what IS true (the AI covers the full ranking, not
+     * the narrowed grid) instead of letting a grid-only control quietly relabel what backs the answer.
+     */
+    ai: areaActive
+      ? rankingNarrowed
+        ? `grounded in the full ranking behind this answer, not the narrowed grid — all plans, no plan chosen, narrowed by your filter selections${skipUnder}`
+        : `grounded in the full ranking behind this answer, not the narrowed grid — all plans, no plan chosen${skipUnder}`
+      : rankingNarrowed
+        ? `grounded in the ranking on screen — all plans, no plan chosen, narrowed by your filter selections${skipUnder}`
+        : `grounded in the ranking on screen — all plans, no plan chosen${skipUnder}`,
   };
   /**
    * ⚠ "EVERY deriveNotices KIND IS GROUP-SCOPED" — v1 of this fix asserted that and was wrong about
@@ -1548,6 +1741,31 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
     ],
     [facets.employers, employerMatches, props.filters.employers],
   );
+  // ── The AREA facet, applied ────────────────────────────────────────────────────────────────────
+  // Everything below is derived from `snap.facilities` — the rows the ranking ALREADY returned. No
+  // memo here feeds `scopeKey`, the fetch effect, or `rankingNarrowed`; grep this block for
+  // `props.filters` and there is nothing to find, which is the structural half of invariant (m).
+  const rankedFacilities: readonly QualifyFacility[] = snap?.facilities ?? EMPTY_FACILITIES;
+  const areaChips = useMemo(
+    () => areaChipsWithActive(rankedFacilities, props.area),
+    [rankedFacilities, props.area],
+  );
+  const areaCounts = useMemo(() => {
+    const m = new Map<string, number>([[AREA_ALL, rankedFacilities.length]]);
+    for (const f of rankedFacilities) {
+      const k = areaKeyFor(f.state);
+      m.set(k, (m.get(k) ?? 0) + 1);
+    }
+    return m;
+  }, [rankedFacilities]);
+  const shownFacilities = useMemo(
+    () => facilitiesInArea(rankedFacilities, props.area),
+    [rankedFacilities, props.area],
+  );
+  // `areaActive` is declared once, above `skipProvenance` — see the comment there.
+  // Two real buckets, or an active narrow that must stay clearable. One bucket is not a choice, and
+  // a row of one chip reading "All · 12" is noise — the same rule the mobile deck applies.
+  const showAreaLine = areaChips.length > 2 || areaActive;
   return (
     <Stage id="qualify-s-answer" question="Does this payer pay us — and where?">
       {/* The identity of what is on screen, restated in one line — never re-derived. */}
@@ -1676,9 +1894,15 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 filtered" is a fact worth asserting rather than left to be read off six unlit rows. */}
             {skipped && !stale ? (
               <p data-v3-facet className="text-xs font-semibold text-ink600">
+                {/* ⚠ "EVERY SWITCH IS OFF" WAS FALSE ONE CLICK IN. Skip, then press "90 days": no
+                    filter is active, no label is scoped, so the old sentence claimed nothing was
+                    restricting the search — directly above a Window row reading "On · 90 days". Both
+                    halves were wrong at once. The window is a real narrowing that can never be turned
+                    off (see its FacetState), so the sentence names it as the standing exception
+                    instead of pretending the screen has none. */}
                 {anyFacetOn
-                  ? 'Some switches are on — everything marked Off below is unrestricted.'
-                  : 'Every switch is off — nothing below is restricting this search. Turn any of them on to narrow it.'}
+                  ? 'Some switches are on — everything marked Off is unrestricted.'
+                  : 'No filters are on — apart from the window, nothing is narrowing this search. Turn any switch on to narrow it.'}
               </p>
             ) : null}
             {/* GRANULAR suppression, honouring the RULE 2654416 ruling rather than blanketing it.
@@ -1940,19 +2164,57 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
           {/* The AI layer — preset chips, streamed answers, grounded in THIS snapshot. */}
           {props.aiPanel}
 
-          {/* The scorecard. Ranked; each card explains itself behind ONE disclosure. */}
+          {/* The scorecard. Ranked; each card explains itself behind ONE disclosure. The AREA row
+              sits here rather than on the control card above BECAUSE it does not re-scope anything:
+              it hides rows the ranking already returned. Layout carries that distinction. */}
           <section aria-labelledby="qualify-scorecard-heading" className="flex flex-col gap-2">
             <h3 id="qualify-scorecard-heading" className="ths-h text-base font-semibold text-ink900">
               Facilities, ranked
             </h3>
+            {showAreaLine ? (
+              <AreaLine chips={areaChips} active={props.area} counts={areaCounts} onSelect={props.onSelectArea} />
+            ) : null}
+            {/* ⚠ THE HERO IS NOT RE-DERIVED FOR THE AREA, and this sentence is why that is honest
+                rather than a bug. `derivePolicyRating` runs over `snap.facilities` — the whole
+                ranked scope — and recomputing it per area would let a grid-only control silently
+                move the headline number and its "N rated facilities" basis. So the number keeps its
+                meaning and the narrow states its own reach instead.
+                GATED ON `shownFacilities.length > 0` TOO (review Finding 2), not `areaActive` alone:
+                an area with nothing in it already gets its OWN sentence below ("No ranked facility is
+                in this area…"), and rendering both together put two overlapping `role="status"`
+                sentences on screen for the same click — "Showing 0 of 3…" right next to "No ranked
+                facility is in this area." The zero-count case has nothing left for this sentence to
+                say that the other one doesn't already say better. */}
+            {areaActive && shownFacilities.length > 0 ? (
+              <p role="status" className="text-xs text-ink600">
+                Showing{' '}
+                <span className="ths-num" aria-label={`${shownFacilities.length} facilities shown`}>
+                  {shownFacilities.length}
+                </span>{' '}
+                of{' '}
+                <span className="ths-num" aria-label={`${rankedFacilities.length} ranked facilities in total`}>
+                  {rankedFacilities.length}
+                </span>{' '}
+                ranked facilities in this area. The ranking itself was not re-run — the rating above
+                still covers all {rankedFacilities.length}.
+              </p>
+            ) : null}
             <ul className="grid list-none grid-cols-1 gap-3 p-0 lg:grid-cols-2">
-              {snap.facilities.map((f) => (
-                <ScoreCard key={f.facilityKey} f={f} />
+              {shownFacilities.map((f) => (
+                <ScoreCard key={f.facilityKey} f={f} allPayers={allPayers} />
               ))}
             </ul>
-            {snap.facilities.length === 0 ? (
+            {/* Two different emptinesses, two different sentences. "Nothing ranked at all" is a
+                statement about the payer and the window; "nothing in TN" is a statement about the
+                chip the user just pressed, and the fix for it is one click away. */}
+            {rankedFacilities.length === 0 ? (
               <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
                 No facility has claims history under this scope in the window shown.
+              </p>
+            ) : shownFacilities.length === 0 ? (
+              <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
+                No ranked facility is in this area. The {rankedFacilities.length} facilities behind this
+                answer are still there — choose All above to see them.
               </p>
             ) : null}
           </section>
@@ -2060,10 +2322,22 @@ export interface ResolutionStagesProps {
   onSkip: () => void;
   /**
    * The "Facilities Heating Up" trend strip, passed as a SLOT (the shell owns its fetch and its
-   * marquee hook, so this module stays statically renderable). Rendered on the IDENTIFY stage only:
-   * that is the screen the search has not filled yet, and it is what keeps the landing alive instead
-   * of the near-empty page the staged rebuild first shipped. On the later stages it would compete
-   * with the question being asked, which is the whole point of one-question-per-screen.
+   * marquee hook, so this module stays statically renderable).
+   *
+   * ⚠ RENDERED ON ALL FOUR STAGES — OVERTURNED 2026-08-07 (Alec, product directive: "I don't like
+   * the tickers on the post-click search page. Need them on all the pages."). It used to exclude
+   * PAYER and PLAN under the 2026-08-06 rule "it must not compete with the question being asked" —
+   * that rule is not being re-argued here; Alec is the ratifier and has overturned it FOR THE
+   * TICKER SPECIFICALLY. If this reversal needs correcting, that is a product call for him, not a
+   * technical one. `app/test/qualifyV3Flow.test.tsx`'s coverage was REWRITTEN, not deleted, to keep
+   * the overturned rule on record rather than letting it silently vanish from history.
+   *
+   * The armed/inert rule underneath is UNCHANGED — see `tickerIsLive`. On IDENTIFY/PAYER/PLAN the
+   * shell still passes it `readOnly`: there is no ranking to narrow on those three, so an inert card
+   * is the honest one. Only on ANSWER, with a snapshot on screen, does a click seed the AREA
+   * facet — the restored half of v2's clickable ticker (a v2 card pivoted the whole surface to
+   * {facility + dominant payer}; a v3 card narrows the ranked grid to that facility's area, because
+   * v3 resolves a MEMBER and re-pivoting to a facility would throw the member away).
    */
   ticker: React.ReactNode;
   /** Optional pre-computed clusters — the shell memoizes ONE `payerGroupsOf` call per resolution and
@@ -2085,8 +2359,13 @@ export interface ResolutionStagesProps {
  * MOTION CONTRACT WITH THE SHELL: everything above `[data-v3-stage]` is CHROME — the h1, the rail,
  * the live region, the receipt, and the ticker. The shell's GSAP targets ONLY the `[data-v3-stage]`
  * subtree, so the chrome never blinks on a stage swap; the receipt reads as a persistent trail
- * precisely because it does not move. The ticker sits OUTSIDE the animated subtree for the same
- * reason, even though it renders only on the identify stage.
+ * precisely because it does not move. The ticker sits OUTSIDE the animated subtree for the SAME
+ * reason, and — since 2026-08-07 — on EVERY stage that renders (now all four; see `ticker`'s own
+ * doc for the reversal). It must STAY outside and stay a SINGLE mount: this is `props.ticker`,
+ * rendered from ONE unconditional call site below rather than once per stage branch, precisely so a
+ * stage swap cannot unmount and remount it — a remount would reset the marquee's scroll position on
+ * every click, and on the answer stage a control that re-enters from `autoAlpha: 0` on every click
+ * of itself is a control that flickers under the user's cursor.
  */
 export function ResolutionStages(props: ResolutionStagesProps): React.ReactElement {
   // The reducer's own field, arriving through the answer bag — NOT `scopeSource === 'skipped'`, which
@@ -2141,7 +2420,8 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
         />
       ) : null}
 
-      {props.stage === 'identify' ? props.ticker : null}
+      {/* ALL FOUR STAGES, one persistent mount (2026-08-07 directive — see `ticker`'s doc above). */}
+      {props.ticker}
 
       <div data-v3-stage>
         {props.stage === 'identify' ? (

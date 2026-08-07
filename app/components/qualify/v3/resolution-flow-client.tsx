@@ -19,8 +19,8 @@
  * class of bug, PR #124's lesson, applied here by construction).
  *
  * ── WHERE THE STATE RULES LIVE ──────────────────────────────────────────────────────────────────
- * In `./flow-state.ts` — `shellReducer`, fourteen fields, seventeen actions, with the full
- * per-action field-write table and the lettered invariants (a–l) in its header. READ THAT FIRST
+ * In `./flow-state.ts` — `shellReducer`, fifteen fields, eighteen actions, with the full
+ * per-action field-write table and the lettered invariants (a–m) in its header. READ THAT FIRST
  * before changing any handler here. What is left in this file is deliberately only the three things
  * a reducer cannot hold: the PHI ref, the effects, and the values derived per render (`stage`,
  * `scopeKey`, `stale`/`refetching`/`staleAfterError` — never stored, see the stuck-flag note below).
@@ -57,6 +57,7 @@ import type { QualifyFacilityTrend } from '../../../lib/qualify/contract';
 import { QualifyAiPanel } from '../qualify-ai-panel';
 import { HeatingUpCards, HeatingUpSkeleton } from '../shared/heating-ticker';
 import { staggerDelayMs } from '../tokens';
+import { AREA_ALL, areaKeyFor } from '../m/area-chips';
 import {
   answerFiltersActive,
   deriveStage,
@@ -68,9 +69,10 @@ import {
   ResolutionStages,
   scopeKeyOf,
   scopeSourceOf,
+  tickerIsLive,
   type FlowStage,
 } from './resolution-flow';
-// The flow's fourteen fields and the rules that move them. Its header is the spec; this file is the
+// The flow's fifteen fields and the rules that move them. Its header is the spec; this file is the
 // transport (PHI ref, effects, derivations) wired to it.
 import { INITIAL_SHELL_STATE, shellReducer } from './flow-state';
 
@@ -83,6 +85,9 @@ if (typeof window !== 'undefined') {
 /** The ticker's own window — see the fetch effect for why a trailing window rather than 30 days. */
 const TICKER_WINDOW = { kind: 'trailing', days: 60 } as const;
 
+/** Stable empty reference for "no ticker card is pressed" — a fresh Set would defeat the strip's memo. */
+const NO_TICKER_KEYS: ReadonlySet<string> = new Set();
+
 export function ResolutionFlowClient({
   viewerHasAmountsCapability,
 }: {
@@ -93,7 +98,7 @@ export function ResolutionFlowClient({
   // The raw term — JS memory only. See the header block before moving this anywhere.
   const termRef = useRef<string>('');
 
-  // ONE state machine, not fourteen useState hooks. Destructured so every read site below is the
+  // ONE state machine, not fifteen useState hooks. Destructured so every read site below is the
   // same identifier it always was. Notable fields, restated here because they are easy to misuse:
   //   · retryNonce — monotonic, NEVER reset. It is the only way to re-fire a request whose inputs
   //     did not change: the snapshot effect keys on `scopeKey`, which is by construction identical
@@ -120,6 +125,7 @@ export function ResolutionFlowClient({
     payerOverride,
     windowDays,
     loadedKey,
+    area,
   } = flow;
 
   // NOT in the reducer, deliberately: the ticker is a mount-once fetch that no flow field and no
@@ -160,6 +166,13 @@ export function ResolutionFlowClient({
 
   const onClearFilters = useCallback(() => {
     dispatch({ type: 'filters_cleared' });
+  }, []);
+
+  /** The AREA facet — the restored location narrow. Grid-only by construction: it writes one reducer
+   *  field that `scopeKeyOf` does not read, so the fetch effect below cannot observe it and no
+   *  snapshot request is issued (flow-state.ts invariant m). */
+  const onSelectArea = useCallback((key: string) => {
+    dispatch({ type: 'area_selected', key });
   }, []);
 
   /** Re-issue the SAME snapshot request after a failure. Bumping the nonce is what moves the
@@ -418,9 +431,15 @@ export function ResolutionFlowClient({
 
       // ── THE SKIP REVEAL (Alec, 2026-08-07) ──────────────────────────────────────────────────────
       // The Skip lands on an inventory of every facet and its ON/OFF state, and the motion carries
-      // the eye from the stage's own entrance down through that inventory as one continuous beat —
-      // the same 220ms / power2.out / min(i,3)×60ms vocabulary the stage and the tiles already speak,
-      // at the tiles' lower amplitude. No second easing, no second timing curve, no new idiom.
+      // the eye down through that inventory — the same 220ms / power2.out / min(i,3)×60ms vocabulary
+      // the stage and the tiles already speak, at the tiles' lower amplitude. No second easing, no
+      // second timing curve, no new idiom.
+      //
+      // CONCURRENT WITH THE STAGE ENTRANCE, not sequenced after it. Both tweens are created in the
+      // same `gsap.context` on the same tick and start together; what separates them visually is the
+      // STAGGER (0 / 60 / 120 / 180ms, capped) against the stage's single 14px rise, so the rows
+      // resolve just behind it. Stating that plainly, because "the stage lands first and the rows
+      // follow" would describe a timeline this code does not build and send a reader hunting a delay.
       //
       // ⚠ OPACITY, NOT `autoAlpha`, AND THAT IS THE WHOLE CONSTRAINT. `autoAlpha` sets
       // `visibility: hidden`, which makes an element genuinely unclickable and drops it out of the
@@ -432,7 +451,12 @@ export function ResolutionFlowClient({
       //
       // Runs off the same layout effect (and therefore the same reduced-motion guard) as everything
       // else here: under `prefers-reduced-motion` the inventory renders complete and immediately.
-      const facetRows = gsap.utils.toArray<HTMLElement>('[data-v3-inventory] [data-v3-facet]', stageEl);
+      // Selected across the STAGE, not inside `[data-v3-inventory]`, because one facet's control does
+      // not live on the control card: the AREA row sits beside the grid it narrows (see AreaLine —
+      // everything on the control card re-issues the ranking request and area does not). It is still
+      // a facet of the inventory, so it is still a beat of the reveal, and DOM order puts it last,
+      // which is where it belongs — the last thing between the operator and the list.
+      const facetRows = gsap.utils.toArray<HTMLElement>('[data-v3-facet]', stageEl);
       if (facetRows.length > 0) {
         gsap.fromTo(
           facetRows,
@@ -476,6 +500,34 @@ export function ResolutionFlowClient({
     return () => window.clearTimeout(t);
   }, [planFilter, stage]);
 
+  // ── The Heating Up ticker as a CONTROL (the restored half of v2's clickable strip) ─────────────
+  // v2's cards pivoted the whole surface to {facility + dominant payer}. v3 cannot do that and stay
+  // itself — it resolves a MEMBER, and re-pivoting to a facility throws the member away — so a card
+  // click here seeds the answer stage's AREA facet from the card's own state instead. That is only
+  // meaningful once there is a ranked list to narrow, which is exactly what `tickerIsLive` says.
+  //
+  // ONE predicate drives BOTH the `readOnly` treatment and the handler's guard. Two would eventually
+  // disagree, and the disagreement that matters is the one that ships a card looking clickable with
+  // a handler that returns early — the dead-target failure `openable` already refuses.
+  const tickerLive = tickerIsLive(stage, hasSnapshot);
+  const onTickerOpen = useCallback(
+    (t: QualifyFacilityTrend) => {
+      if (!tickerLive) return;
+      dispatch({ type: 'area_selected', key: areaKeyFor(t.state) });
+    },
+    [tickerLive],
+  );
+  // Cards whose area IS the active narrow read pressed, so a click has visible consequence inside
+  // the strip and not only in the grid below it. Book-wide trends, member-scoped ranking: a pressed
+  // card is a claim about the FACET, not about the member's history at that facility.
+  const tickerActiveKeys = useMemo(
+    () =>
+      area === AREA_ALL || trends === null
+        ? NO_TICKER_KEYS
+        : new Set(trends.filter((t) => areaKeyFor(t.state) === area).map((t) => t.facilityKey)),
+    [trends, area],
+  );
+
   return (
     // THE PAGE CHROME. Matching the v2 tab's <main> exactly, because the route layout supplies none:
     // the first staged build returned a bare <div> and rendered the h1 flush against the viewport's
@@ -486,9 +538,19 @@ export function ResolutionFlowClient({
           trends === null ? (
             <HeatingUpSkeleton />
           ) : (
-            // readOnly: v3 resolves a MEMBER, not a facility, so there is no facility-first drill to
-            // click into. Inert cards beat buttons that no-op.
-            <HeatingUpCards trends={trends} window={TICKER_WINDOW} readOnly />
+            // readOnly OFF only on the answer stage: there a click seeds the AREA facet. On the
+            // landing there is no ranking to narrow, so the cards stay inert — v3 resolves a MEMBER,
+            // and inert cards beat buttons that no-op. `scopePayer` stays null on BOTH stages: these
+            // trends were fetched book-wide, and labelling the strip with the resolved payer would
+            // claim a scope the query never had.
+            <HeatingUpCards
+              trends={trends}
+              window={TICKER_WINDOW}
+              readOnly={!tickerLive}
+              openAs="area"
+              activeFacilityKeys={tickerActiveKeys}
+              onOpen={onTickerOpen}
+            />
           )
         }
         payerGroups={payerGroups}
@@ -539,6 +601,8 @@ export function ResolutionFlowClient({
                 employerQuery,
                 onEmployerQuery: (v) => dispatch({ type: 'employer_query_changed', value: v }),
                 employerNarrowTooMany: narrow.tooMany,
+                area,
+                onSelectArea,
                 payerOverride,
                 // Re-scopes are REFETCHES of content already on screen: the snapshot stays rendered
                 // (dimmed, with the progress bar) rather than blanking — the design system's rule.

@@ -75,6 +75,10 @@ export interface QualifyFacilityRow {
    *  pct_allowed is a cross-label blend and the card must say so. OPTIONAL so pre-existing fixtures
    *  and loaders stay valid; consumers coalesce to 1 (the payer-scoped truth). */
   payer_count?: number | null;
+  /** `max(primary_payer)` over the same slice. MEANINGFUL ONLY WHEN payer_count = 1, where max is the
+   *  single label exactly; above one it is an arbitrary pick and the core nulls it. OPTIONAL for the
+   *  same fixture-compatibility reason as payer_count. */
+  sole_payer?: string | null;
   confirmed_claims: number; // count of tiers a/cd/e1 (SQL mirror of confidence.ts — parity-tested)
   estimate_claims: number; // count of tier e2
   unknown_claims: number; // count of tiers b/none — the three sum to line_count
@@ -332,7 +336,19 @@ export function buildFacilityRankingQuery(
   // 3.2ms / 264 buffers at 30d, 19.4ms / 1,471 buffers at the 365d ladder worst case, 100% shared-
   // buffer hits, no new index. What must STILL throw is (null payer, no market, no token) — the
   // genuinely unscoped read.
-  const idScoped = token !== null && kind !== null;
+  //
+  // ⚠ THIS PREDICATE MUST STAY BYTE-EQUIVALENT TO `idNarrow`'s BELOW, and `Boolean(token)` rather
+  // than `token !== null` is the whole reason it is written this way. `idNarrow` emits on
+  // `token && kind` — TRUTHINESS — so an EMPTY-STRING token emits no narrow at all. A guard testing
+  // `token !== null` accepted `('', 'prefix')` as a scope, and the builder then emitted neither a
+  // payer clause NOR an identifier clause: an unscoped WHOLE-BOOK facility ranking, which is exactly
+  // the failure this chokepoint exists to prevent, at its maximum magnitude. Unreachable from the
+  // cores today (getQualifySnapshotCore returns before the ranking when the mint yields a falsy
+  // token) — but this function's own header claims enforcement happens HERE rather than in the
+  // cores, and a chokepoint whose guarantee depends on its callers is not a chokepoint. Two
+  // predicates answering one question is how they drift; if `idNarrow` ever changes, change this
+  // line in the same edit.
+  const idScoped = Boolean(token) && kind !== null;
   if (payer === null && !idScoped && !(market.employers?.length || market.funding?.length)) {
     throw new Error(
       'buildFacilityRankingQuery: payer=null requires a scope — a non-empty market narrow (cohort mode) or an identifier token+kind (identifier-wide mode)',
@@ -373,6 +389,12 @@ export function buildFacilityRankingQuery(
     // that produced the blend — free, and impossible to forget to compute. Degenerate but correct in
     // payer-scoped mode: the payer equality above pins it to 1.
     'count(distinct primary_payer)::int as payer_count, ' +
+    // The label ITSELF, for the payer_count = 1 case. `max()` rather than `mode()` on purpose: with
+    // exactly one distinct value max IS that value, exactly and cheaply (no sort, no ordered-set
+    // aggregate) — and above one it is an arbitrary pick, which is why the CORE nulls it out at
+    // payer_count > 1 rather than trusting a caller not to render it. Same scan as payer_count, and
+    // strictly cheaper than the count(distinct) beside it.
+    'max(primary_payer) as sole_payer, ' +
     "count(*) filter (where allowed_tier in ('a','cd','e1'))::int as confirmed_claims, " +
     "count(*) filter (where allowed_tier = 'e2')::int as estimate_claims, " +
     "count(*) filter (where allowed_tier in ('b','none'))::int as unknown_claims, " +
@@ -395,7 +417,7 @@ export function buildFacilityRankingQuery(
     (mj ? `and ${mj} ` : '') +
     'group by facility';
   const sql =
-    'select agg.facility, agg.line_count, agg.distinct_patients, agg.payer_count, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
+    'select agg.facility, agg.line_count, agg.distinct_patients, agg.payer_count, agg.sole_payer, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
     'agg.billed, agg.allowed, agg.pct_allowed, agg.pct_paid_of_allowed, agg.pct_paid_of_billed, ' +
     'agg.median_days_to_payment, agg.entity_ids, ' +
     'max(f.facility_name) as facility_name, ' +
@@ -403,7 +425,7 @@ export function buildFacilityRankingQuery(
     'max(coalesce(fe.facility_code, a.facility_code)) as facility_code ' +
     `from (${inner}) agg ` +
     FACILITY_DIM_JOINS +
-    'group by agg.facility, agg.line_count, agg.distinct_patients, agg.payer_count, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
+    'group by agg.facility, agg.line_count, agg.distinct_patients, agg.payer_count, agg.sole_payer, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
     'agg.billed, agg.allowed, agg.pct_allowed, agg.pct_paid_of_allowed, agg.pct_paid_of_billed, ' +
     'agg.median_days_to_payment, agg.entity_ids ' +
     'order by agg.pct_allowed desc nulls last, agg.facility';
@@ -411,9 +433,12 @@ export function buildFacilityRankingQuery(
 }
 
 /**
- * Fix A landing lookup: the RAW facility text of the searched identifier's MOST-RECENT in-window claim under
- * the resolved payer, cross-tenant. Returns 0 or 1 row. Scoped by `primary_payer = $payer` so the returned
- * facility is guaranteed non-empty under the single-payer desktop drill. The blind-index column matches the
+ * Fix A landing lookup: the RAW facility text of the searched identifier's MOST-RECENT in-window claim,
+ * cross-tenant. Returns 0 or 1 row. Scoped by `primary_payer = $payer` WHEN A PAYER IS GIVEN — which is what
+ * guarantees the returned facility is non-empty under the single-payer desktop drill. Since 2026-08-07 `payer`
+ * may be NULL (the v3 identifier-wide Skip): the clause is dropped, the claim is the most recent under ANY
+ * label, and the guarantee changes shape rather than disappearing — the landing facility then belongs to an
+ * all-payers ranking, which is the set the caller is drilling. The blind-index column matches the
  * sniffed kind (exact → member_id_bidx; prefix → member_id_prefix_bidx) — the SAME columns the drill/resolve
  * use; no new mint. NO floor here — the CORE drops the candidate if it isn't a ranked (floor-clearing) facility
  * (approach ii), so this stays a single indexed lookup and the floor logic lives in ONE place (assembleFacilities).

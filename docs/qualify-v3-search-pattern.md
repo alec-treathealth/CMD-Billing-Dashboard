@@ -57,6 +57,36 @@ the answer stage's ladder.
 - The always-open trace, notices, ladder tiles, and policy-fact rows — all become collapsed
   disclosures on stage 4. Present, honest, not shouting.
 
+**Not a ruling — a casualty, corrected 2026-08-07.** The 2026-08-06 cutover also dropped two
+facility-level affordances — v2's Facility type-ahead in the primary search row, and the
+Heating Up ticker's clickable cards — and unlike the three drops above, *neither ever appeared
+in this list*: nothing here named them, so nothing tracked the loss, and it took a live gap
+report to notice. (The first dark-launch build made the search-box drop worse by promising
+"…or a facility name" without building it — typing a city name was HMAC'd down the member-id
+blind index and came back a confusing no-match; the fix that shipped deleted the promise
+rather than the capability.) Both are now RESTORED, in a v3-native shape rather than a v2 port,
+so this doc no longer has a silent gap for the next cutover to repeat:
+
+- **The area facet** (stage 4 only — `AreaLine` in `resolution-flow.tsx`) is what the Facility
+  type-ahead became. It narrows the RENDERED scorecard grid alone, never the fetch, over state
+  buckets derived from the facilities the ranking already returned — reusing the mobile PWA's
+  `deriveAreaChips` / `facilitiesInArea` (an unmapped facility buckets under "Other" and is
+  never dropped, never a typed term reaching the blind index).
+- **The answer-armed ticker.** Heating Up's cards are clickable again — a click seeds the area
+  facet rather than v2's {facility + dominant payer} pivot, because v3 resolves a member and
+  re-pivoting the whole surface on a click would throw the member away. That armed/inert split
+  is unchanged, but where the strip RENDERS is not: **updated 2026-08-07** (Alec, product
+  directive: *"I don't like the tickers on the post-click search page. Need them on all the
+  pages."*) — the strip now persists across **all four stages**, as a single mount that survives
+  every stage transition (so a click never resets the marquee's scroll position). This overturns
+  the sentence that shipped a few hours earlier in this same doc update, which had the strip
+  excluding PAYER and PLAN under the "must not compete with the question" rule below. Alec is the
+  ratifier of that rule and has overturned it *for the ticker specifically* — the rule itself
+  still governs everything else stages 2–3 exclude (see "The principle" and the bullets above).
+  Only stage 4, with a snapshot on screen, arms it as a control; IDENTIFY/PAYER/PLAN render it
+  `readOnly` — orientation, not a control, because a click on those three still has no honest
+  target (v3 has no facility-first resolve path).
+
 ## Motion
 
 GSAP stage transitions: outgoing stage clears, incoming slides up 14px/220ms ease-out, tiles
@@ -107,7 +137,17 @@ least as tightly as the employer semi-join the guard already accepted.
    surface admissions staff act on, so every card carries `payerCount` and says "blended across
    N payers" above 1, and the BILLED UNDER chips are the one-click un-blend.
 
-3. **The scope is a typed claim, not a display default.** `QualifyResolved.payerName` is
+3. **The blend disclosure is gated on the SCOPE, not on the count.** Measured live, `payerCount > 1`
+   holds on 0 of 14 cards at 30d and 1 of 28 at 365d — so a count gate would have made the ruling
+   fire almost never, and left an all-payers card indistinguishable from a payer-scoped one at the
+   grain the operator actually reads. Every card under an all-payers ranking states its label count;
+   at one label it names the label instead (`max(primary_payer)`, exact at one distinct value, nulled
+   by the core above one where it would be arbitrary). Nothing renders on a payer-scoped ranking.
+   The disclosure also lives in the **claims-reliability factor's** detail inside "Why this score" —
+   that factor carries the blended number, and that expander is where an operator interrogates a
+   percentage they do not trust.
+
+4. **The scope is a typed claim, not a display default.** `QualifyResolved.payerName` is
    nullable now, beside an explicit `payerScope: 'payer' | 'all'` discriminator (invariant:
    `'all'` ⟺ `payerName === null`). Nullable *forces* every consumer to confront the case at
    compile time; the discriminator *names* it, so the tempting `?? 'This search'` reads as
@@ -143,7 +183,17 @@ inventory animates plain `opacity`, never `autoAlpha`. `autoAlpha` sets `visibil
 which would make live controls genuinely unclickable and drop them out of the accessibility
 tree for the length of the stagger. Motion narrates progression; it does not gate input.
 
-> **Not in this repo yet: the `area` facet.** Alec's inventory list names it, and PR #164
-> (`feat/qualify-v3-location-facet`) adds it — unmerged as of this date. When it lands it needs
-> its own `data-v3-facet` row and `FacetState` badge, or the inventory's claim to list *every*
-> facet quietly stops being true.
+**The `area` facet is in the inventory, and it is the interesting one.** PR #164 merged while this
+was being built and deliberately placed the area chips **beside the ranked grid**, not on the control
+card — because everything on the control card re-issues the ranking request and area does not. That
+placement is right and is unchanged. But *"where the control sits"* and *"is this facet restricting
+what I am looking at"* are different questions, and the inventory answers the second: area carries a
+`FacetState` badge, a `data-v3-facet` hook (the reveal selects across the stage, not inside the
+card), and a term in `anyFacetOn`. Without that last part, one click — Skip, then an area chip —
+printed *"nothing is narrowing this search"* directly above a lit Area chip.
+
+The same class of bug is why the empty-state sentence names the window explicitly. *"Every switch is
+off"* was false one click in: Skip, then "90 days", and the headline denied any narrowing while the
+Window row beneath read `On · 90 days`. The window is a real narrowing that can never be turned off,
+so the sentence says so — *"No filters are on — apart from the window, nothing is narrowing this
+search"* — rather than pretending the screen has no exceptions.
