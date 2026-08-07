@@ -166,7 +166,7 @@ Two **separate** migration planes — never mix the directories:
 | Plane | Directory | Next number (as of 2026-08-06) |
 |---|---|---|
 | Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0093** |
-| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **029** |
+| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **032** |
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
 0077. 0080/0081/0082 (explorer perf) are **applied live 2026-08-04** — 0081
@@ -200,7 +200,18 @@ now 306 MB against a 164 MB heap. Dropping the superseded bare
 the real lever is whether `primary_payer` belongs in the prefix payload at all.
 **Price an INCLUDE payload by its widest text column, not its keys.** Veris
 **027 and 028 are applied live** (ledger 20260805065025 / 20260805060000, another
-session), which is why the next Veris number is 029. Never edit 023, 024, or 025
+session). **029 (`ref.payer_alias_map` confirmation-attribution gate) is APPLIED LIVE
+2026-08-07** — it flips `needs_review`'s default from `false` to `true` and adds a
+`NOT VALID` CHECK requiring `reviewed_by` + `reviewed_at` on any confirmed row.
+The `NOT VALID` is **permanent and deliberate**: the 695 pre-029 confirmed rows are
+exempt forever, so `confirmed + reviewed_by IS NULL` is a reliable "predates the
+boundary" marker, not a defect. **Never `VALIDATE` that constraint and never
+back-fill those 695 with a synthetic reviewer** — see `veris-data-notes.md` § 029.
+**030 (dedup round 2) and 031 (payer brand allowlist) are AUTHORED BUT NOT APPLIED**,
+so the next Veris number is **032**. 030 drops and re-adds the 029 gate inside its own
+transaction; that is sanctioned *only* because its final section proves confirmation
+state was byte-identical throughout. Copy the proof if you copy the pattern.
+Never edit 023, 024, or 025
 in place — all three are applied live. Before authoring, re-derive the next number
 per `.claude/rules/sql-migrations.md` (ref-derived max is a floor; cross-check
 worktrees and the live applied state).

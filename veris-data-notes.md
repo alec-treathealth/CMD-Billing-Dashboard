@@ -4450,3 +4450,104 @@ its own decision.
 present. `0091` — table `collections.qualify_facility_outcomes` plus policies
 `qfo_reader_select` and `qfo_writer_select`: all present. Both therefore APPLIED
 LIVE; CLAUDE.md's migration section now records them alongside 0092.
+
+## 029 — a forward-only attribution boundary on `ref.payer_alias_map` (APPLIED LIVE 2026-08-07)
+
+Applied 2026-08-07 via `apply_migration` (plain transactional DDL — no
+`CREATE INDEX CONCURRENTLY`, no `VACUUM`, so none of the 0070/0081/0092 autocommit
+discipline applies). Ratified by Alec in-session before apply.
+
+**What it changes.** Two defects on the table, both measured live 2026-08-06:
+
+1. `needs_review` was `NOT NULL DEFAULT false`. An INSERT that merely *omitted* the
+   column landed CONFIRMED — that is, silently became payer identity, with the
+   `and not m.needs_review` predicate on all six crosswalk joins in
+   `src/collections/qualifyResolutionQuery.ts` waving it straight through. Default
+   is now `true`. Every seed to date passed the value explicitly, so this never
+   bit; it was a trap waiting for the first author who did not know to.
+2. All **695** confirmed rows had `reviewed_by` and `reviewed_at` NULL — confirmed
+   by nobody, at no time, since 026 created the columns. New CHECK
+   `payer_alias_map_confirmation_attributed` requires both to be non-null whenever
+   `needs_review` is false.
+
+**The constraint is `NOT VALID`, and that is the design, not a compromise.** It is
+enforced on every INSERT *and* UPDATE from now on, but the 695 legacy rows are not
+scanned and are **not** back-attributed.
+
+> **FORWARD-ONLY ASSURANCE BOUNDARY — ratified, permanent, do not "clean up".**
+> `confirmed + reviewed_by IS NULL` is **not** a data-quality defect. It is a
+> reliable marker that a row predates 2026-08-07 and its provenance is genuinely
+> unknown. `confirmed + reviewed_by IS NOT NULL` means a named human ruled on it at
+> a known time. A future migration that back-fills the 695 with a synthetic
+> reviewer would destroy that distinction and manufacture an audit trail that never
+> existed. The only honest route to making those rows trustworthy is a human
+> re-confirming them for real. **Do not run `VALIDATE CONSTRAINT` on this expecting
+> a no-op** — it fails on the 695 by design.
+
+**Verified after apply.** Default `true`; constraint present with
+`convalidated = f`; counts unchanged at 695 confirmed / 990 proposals / 1,685 total;
+all 695 still unattributed; RLS still on with 1 policy. Both negative probes error
+`23514` as required — an INSERT with `needs_review = false` and no reviewer, *and*
+an UPDATE flipping `UHC` to confirmed. That second one matters: a legacy-shaped
+confirmation cannot be laundered through an edit. No probe row left behind.
+
+**UHC and nine siblings carry a review note, not a schema surface.** Ten
+structurally-underspecified proposals (`UHC`, `ANTHEM`, `BLUE CROSS BLUE SHIELD`,
+`BCBS FED`, `TRICARE`, `REGENCE BCBS`, `BCBS REGENCE`, `EMPIRE BCBS`,
+`INDEPENDENCE BCBS`, `PREMERA BC`) now carry a `STRUCTURALLY AMBIGUOUS —` note.
+Bare `UHC` is 944 VOBs proposed at 0.510 to a *Medicare Advantage* identity on no
+product evidence at all; the VOB's own `plan_type` column is populated on ~96% of
+rows and is the co-signal such a resolution would need. No `manual_only` column was
+added — 026 and 027 both refuse to mint surfaces with no caller, and nothing
+auto-confirms today.
+
+**Five ambiguous strings are ALREADY confirmed and were deliberately left alone:**
+`KAISER` (via `exact_match`, against four Kaiser identities), plus `ANTHEM BCBS`,
+`HIGHMARK BCBS`, `CAREFIRST BCBS`, `WELLMARK BCBS` (via `payer_alias_seed`). Those
+are rulings; 029 has no standing to revisit them. They are a finding for the
+reviewer, not something this migration fixes.
+
+## 028's stated wrong-rate was inflated by a reporting defect — the live figure is 7/212 (2026-08-07)
+
+**`SQL Schemas/028` states `~3.8% (8 of 212, roughly 1 in 27)`. The correct figure
+is `~3.3% (7 of 212, roughly 1 in 30)`.** 028 is applied live and is **not** edited;
+its header stays an accurate record of what was believed and printed at apply time.
+This ledger entry is the current figure, per CLAUDE.md's rule that these notes win
+on conflict.
+
+**Root cause was in the scorer's *reporting*, never in its scoring.**
+`scripts/score-payer-aliases.ts` built its code→state lookup by positionally zipping
+`STATE_CODES` (51 entries) against `US_STATES` (48). Those lists are not, and cannot
+be, index-aligned: `US_STATES` is a MODIFIER-token vocabulary, so it splits
+`RHODE ISLAND` into two entries, collapses NC/SC to one `CAROLINA` and ND/SD to one
+`DAKOTA`, and omits DC. The zip desynchronised at `RHODE ISLAND`; **13 of 51 codes
+were wrong** from `SC` onward — `SC→ISLAND`, `TN→TEXAS`, `TX→UTAH`, `VA→WASHINGTON`,
+`WV→WYOMING`, `WI`/`WY`/`DC`→`''`.
+
+That map feeds exactly one thing: the ABBREVIATION-FORM test that sorts a changed
+case into bucket B. A wrong lookup made the test return false, pushing genuine
+abbreviations down the if-chain into later buckets — so the defect could only ever
+move cases **into** the wrong-rate bucket, never out. It never touched a guard
+verdict, a score, or a proposal, which is why the published rate was safe to quote
+while this was latent, and why correcting it could only hold the rate flat or
+improve it.
+
+**Fixed 2026-08-07** with an explicit `STATE_CODE_TO_NAME` table, deliberately kept
+**separate from** `US_STATES`/`STATE_CODES` so that `MODIFIER_RAW` (Guard B) and
+`STATE_CODE_SET` (Guard C) stay bit-for-bit identical and no guard verdict can move.
+The forms are multi-token (`SC → [SOUTH, CAROLINA]`) so `BCBS SC` cannot read as an
+abbreviation of `BCBS NORTH CAROLINA` — the same reasoning as the directional-state
+fix in `app/lib/qualify/carrierCluster.ts`.
+
+**Measured effect:** four `BLUECARD PROGRAM OF {SC,TX,WA}`-class cases moved into
+bucket B where they always belonged — three from guard-caught buckets, one from
+bucket F. Hence 8 → 7. The uncalibrated dedup-backlog tripwire is **byte-identical
+before and after** (`165/212 held (77.8%), 47 changed, 92 vacuous`), which is the
+proof that scoring did not move. `WRONG_RATE_F` updated 8 → 7; the scorer's own
+self-policing check passes again and its printed header now reads `1 IN 30 (~3.3%)`.
+
+**That tripwire still FAILs, and still should.** `CONFIRMED pairs still resolve to
+the same canonical` has been red since 027 and is red for a real reason — it counts
+the crosswalk's remaining duplicate-identity backlog, not scorer error. Re-baselining
+it to green would hide the only measurement of that backlog. `OVERALL: SANITY CHECKS
+FAILED` on this script is therefore expected, pre-existing, and not a regression.

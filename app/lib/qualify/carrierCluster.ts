@@ -82,28 +82,54 @@ const EXPANSIONS: Readonly<Record<string, readonly string[]>> = {
   MH: ['MENTAL', 'HEALTH'],
 };
 
-/** US state/territory codes → the state name, so "ANTHEM CA" and "Anthem … California" agree. */
-const STATES: Readonly<Record<string, string>> = {
-  AL: 'ALABAMA', AK: 'ALASKA', AZ: 'ARIZONA', AR: 'ARKANSAS', CA: 'CALIFORNIA', CO: 'COLORADO',
-  CT: 'CONNECTICUT', DE: 'DELAWARE', DC: 'COLUMBIA', FL: 'FLORIDA', GA: 'GEORGIA', HI: 'HAWAII',
-  ID: 'IDAHO', IL: 'ILLINOIS', IN: 'INDIANA', IA: 'IOWA', KS: 'KANSAS', KY: 'KENTUCKY',
-  LA: 'LOUISIANA', ME: 'MAINE', MD: 'MARYLAND', MA: 'MASSACHUSETTS', MI: 'MICHIGAN',
-  MN: 'MINNESOTA', MS: 'MISSISSIPPI', MO: 'MISSOURI', MT: 'MONTANA', NE: 'NEBRASKA',
-  NV: 'NEVADA', NH: 'HAMPSHIRE', NJ: 'JERSEY', NM: 'MEXICO', NY: 'YORK', NC: 'CAROLINA',
-  ND: 'DAKOTA', OH: 'OHIO', OK: 'OKLAHOMA', OR: 'OREGON', PA: 'PENNSYLVANIA', RI: 'ISLAND',
-  SC: 'CAROLINA', SD: 'DAKOTA', TN: 'TENNESSEE', TX: 'TEXAS', UT: 'UTAH', VT: 'VERMONT',
-  VA: 'VIRGINIA', WA: 'WASHINGTON', WV: 'VIRGINIA', WI: 'WISCONSIN', WY: 'WYOMING',
+/**
+ * US state/territory codes → the state's DISTINGUISHING TOKENS, so "ANTHEM CA" and
+ * "Anthem … California" agree. Multi-token on purpose for the directional states — see below.
+ */
+const STATES: Readonly<Record<string, readonly string[]>> = {
+  AL: ['ALABAMA'], AK: ['ALASKA'], AZ: ['ARIZONA'], AR: ['ARKANSAS'], CA: ['CALIFORNIA'],
+  CO: ['COLORADO'], CT: ['CONNECTICUT'], DE: ['DELAWARE'], DC: ['COLUMBIA'], FL: ['FLORIDA'],
+  GA: ['GEORGIA'], HI: ['HAWAII'], ID: ['IDAHO'], IL: ['ILLINOIS'], IN: ['INDIANA'], IA: ['IOWA'],
+  KS: ['KANSAS'], KY: ['KENTUCKY'], LA: ['LOUISIANA'], ME: ['MAINE'], MD: ['MARYLAND'],
+  MA: ['MASSACHUSETTS'], MI: ['MICHIGAN'], MN: ['MINNESOTA'], MS: ['MISSISSIPPI'],
+  MO: ['MISSOURI'], MT: ['MONTANA'], NE: ['NEBRASKA'], NV: ['NEVADA'], NH: ['HAMPSHIRE'],
+  NJ: ['JERSEY'], NM: ['MEXICO'], NY: ['YORK'], NC: ['NORTH', 'CAROLINA'],
+  ND: ['NORTH', 'DAKOTA'], OH: ['OHIO'], OK: ['OKLAHOMA'], OR: ['OREGON'], PA: ['PENNSYLVANIA'],
+  RI: ['ISLAND'], SC: ['SOUTH', 'CAROLINA'], SD: ['SOUTH', 'DAKOTA'], TN: ['TENNESSEE'],
+  TX: ['TEXAS'], UT: ['UTAH'], VT: ['VERMONT'], VA: ['VIRGINIA'], WA: ['WASHINGTON'],
+  WV: ['WEST', 'VIRGINIA'], WI: ['WISCONSIN'], WY: ['WYOMING'],
 };
 
 /**
- * ⚠ NOTE THE COLLISIONS ABOVE, they are deliberate and bounded: NC/SC both expand to CAROLINA and
- * ND/SD to DAKOTA, because "NORTH"/"SOUTH" is a separate token in the spelled-out form. That means
- * "BCBS NC" and "BCBS SC" both reduce to {BLUE,CROSS,SHIELD,CAROLINA} and WOULD merge. Neither
- * appears in this book (the roster is CA/TN/TX/KY/NV/WA/MO), so it is not reachable today — but if a
- * Carolinas or Dakotas payer is ever onboarded, these four codes must carry their direction word.
- * Recorded rather than silently fixed, because a speculative fix here is untestable against real data.
+ * ⚠ THE DIRECTION WORD IS LOAD-BEARING — it is the only thing separating four pairs of real,
+ * different payers. NC/SC both used to expand to bare CAROLINA and ND/SD to bare DAKOTA, so
+ * "BCBS NC" and "BCBS SC" both reduced to {BLUE,CROSS,SHIELD,CAROLINA} and merged into one tile.
+ * WV/VA had the same collision via bare VIRGINIA.
+ *
+ * A previous version of this comment claimed the collision was "not reachable today (the roster is
+ * CA/TN/TX/KY/NV/WA/MO)". That was WRONG, and it was wrong because it reasoned from the FACILITY
+ * roster — where our facilities are — rather than from the PAYER book, which is national. Measured
+ * live 2026-08-06 against 32,372 VOBs, the collision was firing on three tiles:
+ *
+ *   BCBS NC(51) + BCBS OF NC(28) + BCBS SC(27) + BCBS OF SC(15)  → one tile, two payers, 121 VOBs
+ *   BCBS OF ND(7) + BCBS ND(6) + BCBS SD(1)                       → one tile, two payers,  14 VOBs
+ *   ANTHEM BCBS OF NC(2) + ANTHEM BC OF SC(1)                     → one tile, two payers,   3 VOBs
+ *
+ * Carrying the direction word fixes a SECOND, quieter defect at the same time: state tokens are part
+ * of the core (see `sameCarrier`), and the core is compared by cardinality first, so the abbreviated
+ * form never merged with its own spelled-out form — {ANTHEM,CAROLINA} (2 tokens) could not equal
+ * {ANTHEM,NORTH,CAROLINA} (3). "BCBS NC" and "BCBS OF NORTH CAROLINA" were two tiles. Now both
+ * produce three tokens and correctly become one.
+ *
+ * Deriving the tokens rather than listing exceptions is what keeps this true: any future
+ * direction-prefixed state is correct by construction. NORTH/SOUTH/WEST are already in STATE_NAMES,
+ * so `anchorsOf` still reads them as geography and no company anchor changes.
+ *
+ * These are the codes whose expansion carries more than one token — i.e. the ones that would
+ * collide if flattened back to a single word. Kept exported as executable documentation of the
+ * hazard; `test/carrierCluster.test.tsx` asserts each pair stays apart.
  */
-export const AMBIGUOUS_STATE_CODES: readonly string[] = ['NC', 'SC', 'ND', 'SD', 'WV', 'VA'];
+export const DIRECTIONAL_STATE_CODES: readonly string[] = ['NC', 'ND', 'SC', 'SD', 'WV'];
 
 /** Minimum token length for typo-tolerant matching. Below this, one edit is a different word. */
 export const FUZZY_MIN_LEN = 6;
@@ -151,7 +177,9 @@ export function carrierTokens(raw: string): string[] {
     .filter((w) => w !== '');
   const out: string[] = [];
   for (const w of words) {
-    const expanded = EXPANSIONS[w] ?? (STATES[w] !== undefined && words.length > 1 ? [STATES[w] as string] : [w]);
+    // EXPANSIONS wins outright; STATES applies only inside a multi-word name, so a bare "CA" or
+    // "IN" stays literal rather than becoming a state nobody named.
+    const expanded = EXPANSIONS[w] ?? (words.length > 1 ? STATES[w] : undefined) ?? [w];
     for (const t of expanded) if (!NOISE.has(t)) out.push(t);
   }
   return out;

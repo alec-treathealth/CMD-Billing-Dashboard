@@ -13,6 +13,7 @@ import {
   editDistance,
   sameCarrier,
   buildTokenCanonicalizer,
+  DIRECTIONAL_STATE_CODES,
   type ClusterableCarrier,
 } from '../lib/qualify/carrierCluster';
 
@@ -87,6 +88,73 @@ test('a stateless name never merges into a state-specific one', () => {
 test('same anchor, different state — never merged', () => {
   const [a, b] = sets('ANTHEM BLUE CROSS OF CALIFORNIA', 'ANTHEM BLUE CROSS OF NEVADA');
   assert.equal(sameCarrier(a, b), false);
+});
+
+// ── Directional state codes: the collision measured live on 2026-08-06 ───────────────────────────
+// Bare CAROLINA / DAKOTA / VIRGINIA used to merge two different licensees into one tile. The
+// direction word is the ONLY signal separating each pair, so each one gets an assertion.
+
+test('the Carolinas, the Dakotas and the Virginias are different payers — never merged', () => {
+  const pairs: Array<[string, string]> = [
+    ['BCBS NC', 'BCBS SC'], // measured: 121 VOBs in one tile before the fix
+    ['BCBS OF NC', 'BCBS OF SC'],
+    ['BCBS ND', 'BCBS SD'], // measured: 14 VOBs
+    ['ANTHEM BCBS OF NC', 'ANTHEM BC OF SC'], // measured: 3 VOBs
+    ['BCBS WV', 'BCBS VA'], // WV collided into VA via bare VIRGINIA
+    ['BCBS OF NORTH CAROLINA', 'BCBS OF SOUTH CAROLINA'],
+    ['HIGHMARK BCBS OF WEST VIRGINIA', 'CAREFIRST BCBS OF VIRGINIA'],
+  ];
+  for (const [x, y] of pairs) {
+    const [a, b] = sets(x, y);
+    assert.equal(sameCarrier(a, b), false, `${x} must NOT merge with ${y}`);
+  }
+});
+
+test('an abbreviated directional state merges with its own spelled-out form', () => {
+  // The quieter half of the same defect: the core is compared by cardinality first, so a 2-token
+  // {ANTHEM,CAROLINA} could never equal a 3-token {ANTHEM,NORTH,CAROLINA}. Both are 3 now.
+  const pairs: Array<[string, string]> = [
+    ['BCBS NC', 'BCBS OF NORTH CAROLINA'],
+    ['BCBS SC', 'BCBS SOUTH CAROLINA'],
+    ['BCBS ND', 'BCBS OF NORTH DAKOTA'],
+    ['BCBS WV', 'BCBS OF WEST VIRGINIA'],
+  ];
+  for (const [x, y] of pairs) {
+    const [a, b] = sets(x, y);
+    assert.equal(sameCarrier(a, b), true, `${x} should merge with ${y}`);
+  }
+});
+
+test('the live Carolina cluster splits into exactly two tiles, one per licensee', () => {
+  // Verbatim spellings and counts from the 2026-08-06 measurement.
+  const clusters = clusterCarriers([
+    c('BCBS NC', 51),
+    c('BCBS OF NC', 28),
+    c('BCBS SC', 27),
+    c('BCBS OF SC', 15),
+    c('BCBS OF NORTH CAROLINA', 148),
+    c('BCBS OF SOUTH CAROLINA', 167),
+  ]);
+  assert.equal(clusters.length, 2, `expected 2 tiles, got: ${clusters.map((x) => x.label).join(' | ')}`);
+  const byLabel = new Map(clusters.map((x) => [x.label, x]));
+  const south = byLabel.get('BCBS OF SOUTH CAROLINA');
+  const north = byLabel.get('BCBS OF NORTH CAROLINA');
+  assert.ok(south && north, 'both licensees survive as their own tile');
+  assert.deepEqual(south.members.map((m) => m.name).sort(), ['BCBS OF SC', 'BCBS OF SOUTH CAROLINA', 'BCBS SC']);
+  assert.deepEqual(north.members.map((m) => m.name).sort(), ['BCBS NC', 'BCBS OF NC', 'BCBS OF NORTH CAROLINA']);
+});
+
+test('DIRECTIONAL_STATE_CODES lists exactly the codes whose expansion is multi-token', () => {
+  // Executable documentation: if someone flattens one of these back to a single word, the pair it
+  // guards silently re-merges. This asserts the constant cannot drift from the map it describes.
+  for (const code of DIRECTIONAL_STATE_CODES) {
+    assert.ok(
+      carrierTokens(`BCBS ${code}`).length > carrierTokens('BCBS CA').length,
+      `${code} must expand to more tokens than a single-word state`,
+    );
+  }
+  // VA is NOT directional — WV carrying WEST is what resolves the pair, so VA needs no prefix.
+  assert.equal(DIRECTIONAL_STATE_CODES.includes('VA'), false);
 });
 
 test('THE CROSSWALK OUTRANKS TEXT: two confirmed-but-different payers never merge however alike', () => {
