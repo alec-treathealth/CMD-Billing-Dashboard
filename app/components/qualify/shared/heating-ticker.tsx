@@ -57,6 +57,7 @@ export const HeatingUpCards = memo(function HeatingUpCards({
   activeFacilityKeys = EMPTY_KEYS,
   pinned = false,
   readOnly = false,
+  openAs = 'facility_payer',
   onOpen,
 }: {
   trends: readonly QualifyFacilityTrend[];
@@ -80,8 +81,23 @@ export const HeatingUpCards = memo(function HeatingUpCards({
    * exactly the dead-target failure the `openable` branch below already refuses to ship.
    */
   readOnly?: boolean;
-  /** Ticker-card click — the container REPLACES the whole filter set with {this facility, its dominant
-   *  payer}. Optional for tests. */
+  /**
+   * WHAT A CLICK MEANS — the two surfaces read the same card differently, and the card must say
+   * which, because a title that promises the wrong narrow is worse than an inert card.
+   *
+   * · 'facility_payer' (default, v2's tab) — the container replaces the whole filter set with
+   *   {this facility, its dominant payer}. A card with NO dominant payer cannot express that, so it
+   *   renders inert.
+   * · 'area' (v3's answer stage) — the click seeds the answer-stage AREA facet from the card's
+   *   `state`. `dominantPayer` is irrelevant to that, and an unmapped card is not a dead card
+   *   either: it seeds the 'Other' bucket, which the ranked grid honours. So EVERY card is openable
+   *   in this mode.
+   *
+   * A string union rather than a callback, deliberately: this component is `memo`'d, and a function
+   * prop would have to be `useCallback`'d at every mount to keep that memo from being decorative.
+   */
+  openAs?: 'facility_payer' | 'area';
+  /** Ticker-card click. `openAs` says what the container does with it. Optional for tests. */
   onOpen?: (trend: QualifyFacilityTrend) => void;
 }) {
   // Hook BEFORE the early return (rules of hooks — the call must run on every render).
@@ -98,10 +114,12 @@ export const HeatingUpCards = memo(function HeatingUpCards({
     const hex = RATING_HEX[bucket];
     const active = activeFacilityKeys.has(t.facilityKey);
     const loc = [t.city, t.state].filter(Boolean).join(', ');
-    // A card with no resolvable dominant payer — or the whole strip in readOnly mode — can't drive
-    // anything, so render it inert (no hover-lift, default cursor, disabled) rather than a button
-    // whose click silently no-ops.
-    const openable = !!t.dominantPayer && !readOnly;
+    // A card that can't drive anything renders inert (no hover-lift, default cursor, disabled)
+    // rather than as a button whose click silently no-ops. readOnly kills the whole strip; past
+    // that, what makes a card drivable depends on what the click MEANS — see `openAs`. In 'area'
+    // mode an unmapped card is still drivable (it seeds 'Other'), which is why this is not simply
+    // `!!t.dominantPayer` any more.
+    const openable = !readOnly && (openAs === 'area' || !!t.dominantPayer);
     return (
       <button
         key={dup ? `dup-${t.facilityKey}` : t.facilityKey}
@@ -118,9 +136,15 @@ export const HeatingUpCards = memo(function HeatingUpCards({
         title={
           readOnly
             ? `${t.name} — trend for orientation`
-            : openable
-              ? `Filter to ${t.name} + ${t.dominantPayer}`
-              : `${t.name} — no dominant payer to filter on this window`
+            : openAs === 'area'
+              ? // `t.state`, NOT `loc`: a card with a city but no state is an UNMAPPED-area card,
+                // and `loc` would be truthy for it and print "…to null".
+                t.state
+                ? `Narrow the ranked list to ${t.state}`
+                : 'Narrow the ranked list to facilities with no mapped area'
+              : openable
+                ? `Filter to ${t.name} + ${t.dominantPayer}`
+                : `${t.name} — no dominant payer to filter on this window`
         }
         className={[
           'w-[216px] flex-none rounded-xl border bg-card px-3.5 py-3 text-left',

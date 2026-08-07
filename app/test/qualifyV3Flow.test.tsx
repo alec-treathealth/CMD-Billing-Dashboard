@@ -15,6 +15,8 @@ import {
   SKIP_CARRIER_MAX,
   isRefetching,
   scopeKeyOf,
+  tickerIsLive,
+  areaChipsWithActive,
   UNRESOLVABLE_COPY,
   deriveStage,
   liveSentenceFor,
@@ -28,6 +30,7 @@ import type { PanelEvidence, PanelId, QualifyResolution } from '../lib/qualify/r
 import type { QualifyFacility, QualifySnapshot } from '../lib/qualify/contract';
 import { trailingWindow } from '../lib/qualify/contract';
 import { HeatingUpCards, HeatingUpSkeleton } from '../components/qualify/shared/heating-ticker';
+import { AREA_ALL, AREA_OTHER, areaKeyFor, facilitiesInArea } from '../components/qualify/m/area-chips';
 import { TRENDS } from './helpers/qualifyTrends';
 
 const PANELS: readonly PanelId[] = ['kpis', 'ranking', 'policy', 'ladder', 'trend', 'ai'];
@@ -192,6 +195,8 @@ function props(stage: FlowStage, r: QualifyResolution | null, over: Partial<Reso
           employerQuery: '',
           onEmployerQuery: noop,
           employerNarrowTooMany: null,
+          area: AREA_ALL,
+          onSelectArea: noop,
         }
       : null,
     ...over,
@@ -220,6 +225,8 @@ function answerProps(over: Partial<NonNullable<ResolutionStagesProps['answer']>>
     employerQuery: '',
     onEmployerQuery: noop,
     employerNarrowTooMany: null,
+    area: AREA_ALL,
+    onSelectArea: noop,
     ...over,
   };
 }
@@ -310,17 +317,32 @@ test('F3a: threading the memoized payerGroups cannot change what deriveStage or 
   );
 });
 
-test('the trend ticker rides the IDENTIFY stage only — it must not compete with the question', () => {
+// AMENDED 2026-08-07 (location restore). This test used to read "the IDENTIFY stage only". The RULE
+// it was written to protect — "it must not compete with the question being asked" — is unchanged and
+// is exactly why payer and plan still exclude it: those two screens ASK. The answer stage does not
+// ask, it answers, and there the strip stops being decoration: its cards seed the AREA facet, which
+// is the restored half of v2's clickable ticker. Narrowing the assertion, not relaxing it.
+test('the trend ticker rides IDENTIFY and ANSWER — never the two stages that ask a question', () => {
   const ticker = <div data-testid="ticker-slot">Facilities Heating Up</div>;
   const on = render(props('identify', null, { ticker }));
   assert.match(on, /data-testid="ticker-slot"/, 'the landing is not left empty');
+  const answer = render(props('answer', fixture(), { ticker }));
+  assert.match(answer, /data-testid="ticker-slot"/, 'the answer stage carries it as the area seeder');
   for (const [stage, r, over] of [
     ['payer', fixture(), {}],
     ['plan', fixture(), { payerPick: 'Aetna' }],
-    ['answer', fixture(), {}],
   ] as Array<[FlowStage, QualifyResolution | null, Partial<ResolutionStagesProps>]>) {
     const html = render(props(stage, r, { ...over, ticker }));
     assert.ok(!html.includes('ticker-slot'), `the ticker must not render on the ${stage} stage`);
+  }
+  // And it stays OUTSIDE the animated stage subtree on both — the shell's GSAP targets
+  // `[data-v3-stage]`, and a control that re-enters from autoAlpha 0 on every click of itself
+  // flickers under the cursor.
+  for (const html of [on, answer]) {
+    assert.ok(
+      html.indexOf('ticker-slot') < html.indexOf('data-v3-stage'),
+      'the ticker precedes the animated subtree, so the tween never touches it',
+    );
   }
 });
 
@@ -761,6 +783,28 @@ test('I9: no meaning-bearing text below 12px anywhere in the flow', () => {
     // The answer stage with data — the branch the skeleton case above never reaches. Added
     // 2026-08-06 and green on arrival; it found nothing at the time, it is coverage, not a fix.
     ['answer + snapshot', 'answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture() }) }, /NASHVILLE MENTAL HEALTH/],
+    // The AREA facet's own markup (2026-08-07): the chip row, its counts, and the narrowing
+    // sentence. `area: 'TN'` is what puts the last two on screen at all — the unfiltered case above
+    // renders neither, so without this row the floor sweep would never scan them.
+    [
+      'answer + area facet active',
+      'answer',
+      fixture(),
+      { answer: answerProps({ snapshot: snapshotFixture(), area: 'TN' }) },
+      /ranked facilities in this area/,
+    ],
+    // ...and the ANSWER-stage ticker, which is a live control there rather than the landing's inert
+    // strip. Different markup (chevrons, enabled buttons), so it needs its own sweep.
+    [
+      'answer + live area ticker',
+      'answer',
+      fixture(),
+      {
+        answer: answerProps({ snapshot: snapshotFixture() }),
+        ticker: <HeatingUpCards trends={TRENDS} window={trailingWindow(60)} openAs="area" onOpen={noop} />,
+      },
+      /Facilities Heating Up/,
+    ],
   ];
 
   for (const [label, stage, r, over, mustRender] of cases) {
@@ -1268,4 +1312,199 @@ test('the window default is stated honestly when automatic sizing was unavailabl
   assert.ok(!auto.includes('your selection'), 'a default the user never chose must not be called theirs');
   const manual = render(props('answer', fixture(), { answer: answerProps({ snapshot: noLadder, windowDays: 180 }) }));
   assert.match(manual, /Showing trailing 180 days — your selection\./);
+});
+
+// ── The AREA facet — the restored location narrow (2026-08-07) ───────────────────────────────────
+//
+// WHAT THESE PIN. v2's desktop tab had a Facility type-ahead in its primary search row and a
+// clickable Heating Up ticker; the v3 cutover dropped both, and the ratified pattern doc's
+// deliberate-drops list does not mention either — a casualty, not a ruling. The restoration is a
+// GRID narrow over facilities the ranking already returned. The most important assertions below are
+// therefore the negative ones: that the facet reaches nothing describing what was FETCHED.
+
+/** A facility set spanning two states plus an unmapped one, so 'Other' is always exercised. */
+function threeStateSnapshot(): QualifySnapshot {
+  return {
+    ...snapshotFixture(),
+    facilities: [
+      facility({ rank: 1, name: 'NASHVILLE MENTAL HEALTH', facilityKey: 'NASH', city: 'Nashville', state: 'TN' }),
+      facility({ rank: 2, name: 'PHOENIX RENEWAL', facilityKey: 'PHX', city: 'Phoenix', state: 'AZ' }),
+      facility({ rank: 3, name: 'UNLISTED BH', facilityKey: 'UNL', city: null, state: null }),
+    ],
+  } as unknown as QualifySnapshot;
+}
+
+test('areaChipsWithActive: All + sorted states + Other, and an unmapped facility is NEVER dropped', () => {
+  const chips = areaChipsWithActive(threeStateSnapshot().facilities, AREA_ALL);
+  assert.deepEqual(chips.map((c) => c.key), [AREA_ALL, 'AZ', 'TN', AREA_OTHER], 'states alpha-sorted, Other last');
+  assert.deepEqual(chips.map((c) => c.label), ['All', 'AZ', 'TN', 'Other']);
+
+  // Every facility lands in exactly one bucket, and the buckets add up to the whole set — the
+  // "never dropped" claim stated as arithmetic rather than as a comment.
+  const facilities = threeStateSnapshot().facilities;
+  const bucketed = chips.filter((c) => c.key !== AREA_ALL).flatMap((c) => facilitiesInArea(facilities, c.key));
+  assert.equal(bucketed.length, facilities.length, 'the buckets partition the set — nothing falls out');
+  assert.deepEqual(facilitiesInArea(facilities, AREA_OTHER).map((f) => f.facilityKey), ['UNL']);
+
+  // A BOOK-WIDE ticker card can seed a state this member has no history in. The chip is appended so
+  // the narrow stays visible and clearable; swallowing it would leave an unclearable empty grid.
+  const seeded = areaChipsWithActive(facilities, 'OR');
+  assert.deepEqual(seeded.map((c) => c.key), [AREA_ALL, 'AZ', 'TN', AREA_OTHER, 'OR']);
+  const seededOther = areaChipsWithActive([facility({ state: 'TN' })], AREA_OTHER);
+  assert.deepEqual(seededOther.map((c) => c.label), ['All', 'TN', 'Other'], "the appended bucket says 'Other', not the sentinel");
+});
+
+test('the area chips render on the answer stage, counted, with selection as a WORD', () => {
+  const html = render(props('answer', fixture(), { answer: answerProps({ snapshot: threeStateSnapshot() }) }));
+  // POSITIVE CONTROL — the grid really rendered, so the assertions below are about a real screen.
+  assert.match(html, /NASHVILLE MENTAL HEALTH/, 'the scorecard rendered — otherwise this test is vacuous');
+  assert.match(html, /aria-label="Filter the ranked list by area"/, 'the row is a named group');
+  assert.match(html, /aria-label="3 ranked facilities"/, 'All is counted');
+  assert.match(html, />Other<span/, 'the unmapped bucket is offered, not hidden');
+  // I9: selection carries a word, never hue alone.
+  const active = render(props('answer', fixture(), { answer: answerProps({ snapshot: threeStateSnapshot(), area: 'TN' }) }));
+  assert.match(active, /TN<span[^>]*>[^<]*· 1<\/span> · showing/, 'the active chip says "showing"');
+  assert.match(active, /aria-pressed="true"/);
+
+  // ONE bucket is not a choice: a single-state ranking shows no row at all.
+  const oneState = { ...snapshotFixture(), facilities: [facility({ state: 'TN' })] } as unknown as QualifySnapshot;
+  const single = render(props('answer', fixture(), { answer: answerProps({ snapshot: oneState }) }));
+  assert.ok(!single.includes('Filter the ranked list by area'), 'a one-chip row is noise, not a control');
+});
+
+test('an active area narrows the GRID and says so — the hero keeps covering the whole ranking', () => {
+  const wide = render(props('answer', fixture(), { answer: answerProps({ snapshot: threeStateSnapshot() }) }));
+  for (const name of ['NASHVILLE MENTAL HEALTH', 'PHOENIX RENEWAL', 'UNLISTED BH']) {
+    assert.ok(wide.includes(name), `${name} is on screen unfiltered`);
+  }
+  assert.ok(!wide.includes('ranked facilities in this area'), 'no narrow, no narrowing sentence');
+
+  const tn = render(props('answer', fixture(), { answer: answerProps({ snapshot: threeStateSnapshot(), area: 'TN' }) }));
+  assert.match(tn, /NASHVILLE MENTAL HEALTH/, 'the TN facility stays');
+  assert.ok(!tn.includes('PHOENIX RENEWAL'), 'the AZ facility is hidden');
+  assert.ok(!tn.includes('UNLISTED BH'), 'and so is the unmapped one');
+  assert.match(tn, /ranked facilities in this area\. The ranking itself was not re-run/, 'the narrow states its own reach');
+  assert.match(tn, /the rating above still covers all 3/, 'and refuses to claim the hero moved with it');
+  // The hero is derived from the WHOLE set, so it must be byte-identical across the narrow.
+  const heroOf = (h: string) => /aria-label="policy rating (\d+) out of 100"/.exec(h)?.[1] ?? null;
+  assert.ok(heroOf(wide) !== null, 'the unfiltered hero rendered a number');
+  assert.equal(heroOf(tn), heroOf(wide), 'a GRID narrow may not move the headline number');
+
+  // The Other bucket is selectable and holds exactly the unmapped facility.
+  const other = render(props('answer', fixture(), { answer: answerProps({ snapshot: threeStateSnapshot(), area: AREA_OTHER }) }));
+  assert.match(other, /UNLISTED BH/);
+  assert.ok(!other.includes('NASHVILLE MENTAL HEALTH'));
+});
+
+test('an area with no ranked facility is an honest empty state, not the no-history one', () => {
+  // Reachable from a Heating Up card: the ticker is BOOK-WIDE and this member may have no history
+  // in that state. The two emptinesses are different claims and must not share copy.
+  const empty = render(props('answer', fixture(), { answer: answerProps({ snapshot: threeStateSnapshot(), area: 'OR' }) }));
+  assert.match(empty, /No ranked facility is in this area\./, 'it says which emptiness this is');
+  assert.match(empty, /The 3 facilities behind this\s+answer are still there — choose All above to see them\./);
+  assert.ok(
+    !empty.includes('No facility has claims history under this scope'),
+    'that sentence is about the payer and the window, and it would be false here',
+  );
+  assert.match(empty, /OR<span/, 'the chip for the empty area is still on screen, so the narrow is clearable');
+
+  // And the genuinely-empty ranking keeps its own, different sentence.
+  const noRows = { ...snapshotFixture(), facilities: [] } as unknown as QualifySnapshot;
+  const none = render(props('answer', fixture(), { answer: answerProps({ snapshot: noRows }) }));
+  assert.match(none, /No facility has claims history under this scope in the window shown\./);
+  assert.ok(!none.includes('No ranked facility is in this area'), 'nothing was narrowed — do not blame a chip');
+});
+
+test('HONESTY GUARD: an active area does NOT flip any caption that describes the FETCH', () => {
+  // flow-state.ts invariant (m). `rankingNarrowed` keys on filters.funding and the employer narrow;
+  // the area facet is a sibling of `filters`, never a member, so it cannot enter. This test is what
+  // makes that structural claim a checked one: fold `area` into AnswerFilters (or add
+  // `|| props.area !== AREA_ALL` to rankingNarrowed) and it goes red on the first assertion.
+  const r = fixture();
+  const skipped = (over: Partial<NonNullable<ResolutionStagesProps['answer']>>) =>
+    render(
+      props('answer', r, {
+        answer: answerProps({
+          snapshot: threeStateSnapshot(),
+          scopeSource: 'skipped',
+          candidates: orderedCandidates(r),
+          ...over,
+        }),
+      }),
+    );
+
+  const withArea = skipped({ area: 'TN' });
+  const disclosure = disclosureOf(withArea);
+  assert.match(disclosure, /whole footprint under AETNA US HEALTHCARE/, 'the fetch WAS the whole footprint — say so');
+  assert.ok(
+    !disclosure.includes('narrowed by your filter selections'),
+    'a grid narrow is not a fetch narrow; claiming otherwise misdescribes the request',
+  );
+  // Nor may it summon the plans line, which counts CANDIDATES and would read "N of N".
+  assert.ok(!withArea.includes('Ranking over'), 'the plan-count line belongs to the request-shaping filters');
+  assert.ok(!withArea.includes('Clear filters'), 'and so does its Clear button — the All chip is the area\'s clear');
+  // Positive control on the same fixture: a FUNDING chip DOES flip it, so the assertions above are
+  // testing suppression rather than an unreachable branch.
+  const funded = disclosureOf(skipped({ filters: { planTypes: [], funding: ['Self-Funded'], employers: [] } }));
+  assert.match(funded, /narrowed by your filter selections/, 'a real fetch narrow still says so');
+});
+
+// ── The re-armed ticker (v2's clickable strip, restored with a v3 meaning) ───────────────────────
+
+test('tickerIsLive: a card is a control only when there is a ranking to narrow', () => {
+  assert.equal(tickerIsLive('answer', true), true, 'answer + snapshot — the only live case');
+  assert.equal(tickerIsLive('answer', false), false, 'the answer is still loading: nothing to narrow yet');
+  for (const stage of ['identify', 'payer', 'plan'] as const) {
+    assert.equal(tickerIsLive(stage, true), false, `${stage} has no ranked grid, so the strip is orientation`);
+    assert.equal(tickerIsLive(stage, false), false);
+  }
+});
+
+test('the landing ticker is INERT and the answer ticker is a real area control', () => {
+  // Landing: `readOnly` renders every card as a disabled non-button. An inert card must not look
+  // clickable — that is the dead-target failure the strip already refuses to ship.
+  const landing = renderToStaticMarkup(<HeatingUpCards trends={TRENDS} window={trailingWindow(60)} readOnly openAs="area" />);
+  assert.equal((landing.match(/<button/g) ?? []).length, (landing.match(/disabled=""/g) ?? []).length,
+    'every card on the landing is disabled');
+  assert.match(landing, /trend for orientation/, 'and says what it is instead of promising a filter');
+  assert.ok(!landing.includes('Narrow the ranked list'), 'the landing promises no narrow');
+
+  // Answer stage: live.
+  const live = renderToStaticMarkup(<HeatingUpCards trends={TRENDS} window={trailingWindow(60)} openAs="area" onOpen={noop} />);
+  assert.ok(!live.includes('disabled=""'), 'every card is drivable in area mode');
+  assert.match(live, /title="Narrow the ranked list to AZ"/, 'a mapped card names its state');
+  assert.match(live, /title="Narrow the ranked list to facilities with no mapped area"/, 'an unmapped one is honest, not dead');
+  assert.ok(!live.includes('Filter to '), "v2's facility+payer promise must not survive into area mode");
+
+  // ⚠ THE CASE THAT MAKES `openAs` EARN ITS EXISTENCE, and the one every card in TRENDS misses:
+  // dominantPayer NULL. Under v2's reading that card is inert, because {facility + dominant payer}
+  // is unexpressible without a payer. Under the AREA reading it is perfectly drivable — the click
+  // seeds a state bucket and never looks at the payer. Without this pair the openability rule could
+  // silently revert to `!!t.dominantPayer` and the whole suite would stay green (it did, on the
+  // first mutation sweep of this change).
+  const orphan = [{ ...TRENDS[0]!, facilityKey: 'orphan', name: 'ORPHAN FAC', dominantPayer: null }];
+  const orphanArea = renderToStaticMarkup(<HeatingUpCards trends={orphan} window={trailingWindow(60)} openAs="area" onOpen={noop} />);
+  assert.ok(!orphanArea.includes('disabled=""'), 'no dominant payer is no obstacle to picking an AREA');
+  assert.match(orphanArea, /title="Narrow the ranked list to AZ"/, 'and it says which area');
+  const orphanV2 = renderToStaticMarkup(<HeatingUpCards trends={orphan} window={trailingWindow(60)} onOpen={noop} />);
+  assert.match(orphanV2, /disabled=""/, "v2's reading still refuses the dead click");
+  assert.match(orphanV2, /no dominant payer to filter on this window/);
+
+  // The v2 default is otherwise untouched.
+  const v2 = renderToStaticMarkup(<HeatingUpCards trends={TRENDS} window={trailingWindow(60)} onOpen={noop} />);
+  assert.match(v2, /title="Filter to SUMMIT RIDGE RECOVERY \+ AETNA"/, 'the default reading is unchanged');
+});
+
+test('a ticker click seeds the area the SAME way the grid buckets it', () => {
+  // The shell maps a card to a facet key with `areaKeyFor(t.state)` — the identical function
+  // `facilitiesInArea` buckets by. Two mappings would eventually disagree, and the disagreement
+  // shows up as a chip that selects an area containing none of the facilities it named.
+  assert.equal(areaKeyFor('TN'), 'TN');
+  assert.equal(areaKeyFor(null), AREA_OTHER, 'an unmapped card seeds Other, it does not seed nothing');
+  assert.equal(areaKeyFor(''), AREA_OTHER, 'and neither does a blank string');
+  for (const t of TRENDS) {
+    const key = areaKeyFor(t.state);
+    const chips = areaChipsWithActive(threeStateSnapshot().facilities, key);
+    assert.ok(chips.some((c) => c.key === key), `a click on ${t.name} always lands on a chip that exists`);
+  }
 });

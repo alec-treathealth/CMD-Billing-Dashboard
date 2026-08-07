@@ -8,9 +8,9 @@
  * TWO LAYERS:
  *   1 · A FIELD-WRITE TABLE. Every action is dispatched against one maximally-dirty fixture and the
  *       result is compared to `{...before, ...declaredWrites}` — which pins the writes AND the
- *       non-writes in one assertion. If an action ever starts touching a fourteenth field, the row
+ *       non-writes in one assertion. If an action ever starts touching a sixteenth field, the row
  *       for it fails.
- *   2 · The named INVARIANTS from the module header (a–l), asserted directly, because "search
+ *   2 · The named INVARIANTS from the module header (a–m), asserted directly, because "search
  *       clears everything downstream" and "retryNonce is never reset" are the claims a future
  *       refactor will be tempted to break.
  *
@@ -20,6 +20,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { QualifySnapshot } from '../lib/qualify/contract';
+import { AREA_ALL, AREA_OTHER } from '../components/qualify/m/area-chips';
 import { NO_ANSWER_FILTERS } from '../components/qualify/v3/resolution-flow';
 import {
   INITIAL_SHELL_STATE,
@@ -55,6 +56,7 @@ function dirty(over: Partial<ShellState> = {}): ShellState {
     payerOverride: 'ALPHA MUTUAL OF THE MIDWEST',
     windowDays: 180,
     loadedKey: 'p:ALPHA|w:180|f:|e:',
+    area: 'TN',
     ...over,
   };
 }
@@ -80,13 +82,14 @@ const EVERY_ACTION: ShellAction[] = [
   { type: 'ai_disarmed' },
   { type: 'payer_override_changed', label: 'BETA MUTUAL INC' },
   { type: 'window_days_changed', days: 30 },
+  { type: 'area_selected', key: 'CA' },
 ];
 
 // ── 1 · The field-write table ────────────────────────────────────────────────────────────────────
 
 const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[] = [
   {
-    name: 'search_submitted writes twelve and keeps retryNonce + loadedKey',
+    name: 'search_submitted writes thirteen and keeps retryNonce + loadedKey',
     action: { type: 'search_submitted' },
     writes: {
       payerPick: null,
@@ -101,10 +104,11 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       snapshotError: null,
       payerOverride: null,
       windowDays: null,
+      area: AREA_ALL,
     },
   },
   {
-    name: 'skipped writes ten — and NOT windowDays or autoAsk',
+    name: 'skipped writes eleven — and NOT windowDays or autoAsk',
     action: { type: 'skipped' },
     writes: {
       skipped: true,
@@ -117,10 +121,11 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       payerOverride: null,
       snapshot: null,
       snapshotError: null,
+      area: AREA_ALL,
     },
   },
   {
-    name: 'plan_submitted writes seven — and NOT payerPick/planFilter/payerOverride/windowDays/autoAsk',
+    name: 'plan_submitted writes eight — and NOT payerPick/planFilter/payerOverride/windowDays/autoAsk',
     action: { type: 'plan_submitted' },
     writes: {
       picked: true,
@@ -130,10 +135,11 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       backTo: null,
       snapshot: null,
       snapshotError: null,
+      area: AREA_ALL,
     },
   },
   {
-    name: "went_back('identify') writes twelve, payerPick among them",
+    name: "went_back('identify') writes thirteen, payerPick among them",
     action: { type: 'went_back', target: 'identify' },
     writes: {
       snapshot: null,
@@ -148,10 +154,11 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       payerPick: null,
       planFilter: '',
       backTo: 'identify',
+      area: AREA_ALL,
     },
   },
   {
-    name: "went_back('payer') writes twelve, payerPick among them",
+    name: "went_back('payer') writes thirteen, payerPick among them",
     action: { type: 'went_back', target: 'payer' },
     writes: {
       snapshot: null,
@@ -166,10 +173,11 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       payerPick: null,
       planFilter: '',
       backTo: 'payer',
+      area: AREA_ALL,
     },
   },
   {
-    name: "went_back('plan') writes eleven — the carrier pick SURVIVES",
+    name: "went_back('plan') writes twelve — the carrier pick SURVIVES",
     action: { type: 'went_back', target: 'plan' },
     writes: {
       snapshot: null,
@@ -183,6 +191,7 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       employerQuery: '',
       planFilter: '',
       backTo: 'plan',
+      area: AREA_ALL,
     },
   },
   {
@@ -201,9 +210,9 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     writes: { employerQuery: 'south' },
   },
   {
-    name: 'filters_cleared writes filters + employerQuery only',
+    name: 'filters_cleared writes filters + employerQuery + area only',
     action: { type: 'filters_cleared' },
-    writes: { filters: NO_ANSWER_FILTERS, employerQuery: '' },
+    writes: { filters: NO_ANSWER_FILTERS, employerQuery: '', area: AREA_ALL },
   },
   {
     name: 'retry_requested writes snapshotError + retryNonce ONLY',
@@ -237,6 +246,14 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     action: { type: 'window_days_changed', days: 30 },
     writes: { windowDays: 30 },
   },
+  {
+    // THE WHOLE POINT OF THIS ROW IS THE NON-WRITES. `area` is a GRID narrow: if this action ever
+    // starts touching `filters`, `snapshot` or `loadedKey`, the facet has become a fetch narrow and
+    // the disclosure captions downstream start lying about what was requested (invariant m).
+    name: 'area_selected writes area ONLY — never filters, never the snapshot (invariant m)',
+    action: { type: 'area_selected', key: 'CA' },
+    writes: { area: 'CA' },
+  },
 ];
 
 for (const row of TABLE) {
@@ -248,7 +265,7 @@ for (const row of TABLE) {
   });
 }
 
-test('F3b: the initial state is the fourteen shell defaults, filters by shared reference', () => {
+test('F3b: the initial state is the fifteen shell defaults, filters by shared reference', () => {
   assert.deepEqual(INITIAL_SHELL_STATE, {
     payerPick: null,
     picked: false,
@@ -264,12 +281,14 @@ test('F3b: the initial state is the fourteen shell defaults, filters by shared r
     payerOverride: null,
     windowDays: null,
     loadedKey: null,
+    area: AREA_ALL,
   });
-  assert.equal(Object.keys(INITIAL_SHELL_STATE).length, 14, 'fourteen fields, no more');
+  assert.equal(Object.keys(INITIAL_SHELL_STATE).length, 15, 'fifteen fields, no more');
   assert.equal(INITIAL_SHELL_STATE.filters, NO_ANSWER_FILTERS, 'the SHARED constant, not a copy');
+  assert.equal(INITIAL_SHELL_STATE.area, AREA_ALL, 'the area facet starts unnarrowed');
 });
 
-test('F3b: every filters reset is the SHARED constant BY REFERENCE, not a fresh equal literal', () => {
+test('F3b: every filters reset is the SHARED constant BY REFERENCE — and clears the area with it', () => {
   // BY REFERENCE, deliberately. The field-write table above compares with deepEqual, which is
   // reference-blind: swapping all five of these resets to `{ planTypes: [], funding: [], employers: [] }`
   // left the whole suite green (review MUT-F), even though `narrow`'s useMemo depends on `filters`
@@ -286,11 +305,16 @@ test('F3b: every filters reset is the SHARED constant BY REFERENCE, not a fresh 
   ];
   for (const action of resets) {
     const target = action.type === 'went_back' ? `${action.type}('${action.target}')` : action.type;
+    const after = shellReducer(dirty(), action);
     assert.equal(
-      shellReducer(dirty(), action).filters,
+      after.filters,
       NO_ANSWER_FILTERS,
       `${target} must reset filters to the shared constant, not to an equal copy`,
     );
+    // The AREA facet resets at exactly these sites and nowhere else — ONE list, so the two narrows
+    // on the answer stage can never drift into clearing at different moments. It is a string, so
+    // there is no reference to preserve; what is pinned is the SET of reset sites.
+    assert.equal(after.area, AREA_ALL, `${target} must clear the area facet alongside the filters`);
   }
 });
 
@@ -483,6 +507,47 @@ for (const { facet, key } of FACETS) {
   });
 }
 
+// ── 3b · The AREA facet: invariant (m) ───────────────────────────────────────────────────────────
+
+test('INV m: area_selected reaches NOTHING the fetch reads — no filters, no snapshot, no loadedKey', () => {
+  // The structural claim behind the whole facet. `scopeKeyOf` is built from payerLabel x windowDays
+  // x filters.funding x the employer narrow; if `area_selected` cannot move any of those, the fetch
+  // effect (which depends on scopeKey and retryNonce alone) cannot see an area change at all.
+  const before = dirty();
+  const after = shellReducer(before, { type: 'area_selected', key: 'CA' });
+  assert.equal(after.area, 'CA');
+  assert.equal(after.filters, before.filters, 'the filter bag is not even re-created');
+  assert.equal(after.snapshot, before.snapshot, 'the answer on screen is untouched');
+  assert.equal(after.loadedKey, before.loadedKey, 'so nothing reads as stale and no refetch is implied');
+  assert.equal(after.snapshotError, before.snapshotError);
+  assert.equal(after.windowDays, before.windowDays);
+  assert.equal(after.payerOverride, before.payerOverride);
+});
+
+test('INV m: a re-scope KEEPS the area — it narrows the grid, and the grid is still there', () => {
+  // Deliberate asymmetry: only the four navigations and Clear reset it. A window change is the same
+  // question over a wider set, not a new question — exactly how `filters` already behaves.
+  for (const action of [
+    { type: 'payer_override_changed', label: 'BETA MUTUAL INC' } as const,
+    { type: 'window_days_changed', days: 30 } as const,
+    { type: 'snapshot_requested' } as const,
+    { type: 'snapshot_resolved', snapshot: SNAP_B, scopeKey: 'k9' } as const,
+    { type: 'snapshot_failed' } as const,
+    { type: 'retry_requested' } as const,
+  ]) {
+    assert.equal(shellReducer(dirty(), action).area, 'TN', `${action.type} must not clear the area`);
+  }
+});
+
+test('area_selected: All, a state and the Other bucket are all just keys — and All is a real value', () => {
+  let s = shellReducer(INITIAL_SHELL_STATE, { type: 'area_selected', key: 'TN' });
+  assert.equal(s.area, 'TN');
+  s = shellReducer(s, { type: 'area_selected', key: AREA_OTHER });
+  assert.equal(s.area, AREA_OTHER, 'the unmapped bucket is selectable, not a null hole');
+  s = shellReducer(s, { type: 'area_selected', key: AREA_ALL });
+  assert.equal(s.area, AREA_ALL, 'pressing All is how a narrow is undone from the chip row');
+});
+
 // ── 4 · The useState bail-out, preserved ─────────────────────────────────────────────────────────
 
 test('F3b: an action that changes nothing returns the IDENTICAL object, as useState did', () => {
@@ -505,6 +570,9 @@ test('F3b: an action that changes nothing returns the IDENTICAL object, as useSt
 
   const scoped = dirty({ windowDays: 180 });
   assert.equal(shellReducer(scoped, { type: 'window_days_changed', days: 180 }), scoped, 'same window');
+
+  const inArea = dirty({ area: 'TN' });
+  assert.equal(shellReducer(inArea, { type: 'area_selected', key: 'TN' }), inArea, 'same area chip');
 
   const stamped = dirty();
   assert.equal(

@@ -1,10 +1,10 @@
 /**
- * Qualify v3 — THE SHELL'S STATE MACHINE. Fourteen fields, seventeen actions, one place each field
+ * Qualify v3 — THE SHELL'S STATE MACHINE. Fifteen fields, eighteen actions, one place each field
  * is written.
  *
  * Extracted from `resolution-flow-client.tsx` (F3b). The shell was carrying FIFTEEN `useState` hooks
- * — the fourteen fields below, plus `trends`, which stays behind (see WHAT IS DELIBERATELY NOT IN
- * HERE) — bound at 58 setter sites: 56 direct calls, of which 2 are `setTrends`, plus 2 raw setters
+ * — the fourteen fields it then had, plus `trends`, which stays behind (see WHAT IS DELIBERATELY NOT
+ * IN HERE) — bound at 58 setter sites: 56 direct calls, of which 2 are `setTrends`, plus 2 raw setters
  * passed as props. They encoded the rules below only by repetition: "a new search clears
  * everything downstream" was twelve adjacent `setX(...)` lines, and the fact that Skip deliberately
  * does NOT clear `windowDays` was legible only by diffing two of those blocks by eye. Every rule in
@@ -43,28 +43,31 @@
  * absent from every list but `retry_requested` and `snapshot_resolved` respectively — that is the
  * point, not an omission.
  *
- *  1 · search_submitted        — a new identify submit. WRITES TWELVE:
+ *  1 · search_submitted        — a new identify submit. WRITES THIRTEEN:
  *                                payerPick=null, picked=false, skipped=false,
  *                                filters=NO_ANSWER_FILTERS, employerQuery='', planFilter='',
  *                                autoAsk=false, backTo=null, snapshot=null, snapshotError=null,
- *                                payerOverride=null, windowDays=null.
+ *                                payerOverride=null, windowDays=null, area=AREA_ALL.
  *                                KEEPS retryNonce, loadedKey.
- *  2 · skipped                 — "skip the questions, answer over the whole footprint". WRITES TEN:
+ *  2 · skipped                 — "skip the questions, answer over the whole footprint". WRITES ELEVEN:
  *                                skipped=true, picked=false, payerPick=null, planFilter='',
  *                                backTo=null, filters=NO_ANSWER_FILTERS, employerQuery='',
- *                                payerOverride=null, snapshot=null, snapshotError=null.
+ *                                payerOverride=null, snapshot=null, snapshotError=null,
+ *                                area=AREA_ALL.
  *                                KEEPS windowDays, autoAsk, retryNonce, loadedKey (see invariant f).
- *  3 · plan_submitted          — a plan pick. WRITES SEVEN:
+ *  3 · plan_submitted          — a plan pick. WRITES EIGHT:
  *                                picked=true, skipped=false, filters=NO_ANSWER_FILTERS,
- *                                employerQuery='', backTo=null, snapshot=null, snapshotError=null.
+ *                                employerQuery='', backTo=null, snapshot=null, snapshotError=null,
+ *                                area=AREA_ALL.
  *                                KEEPS payerPick, planFilter, payerOverride, windowDays, autoAsk,
  *                                retryNonce, loadedKey (see invariant g).
- *  4 · went_back {target}      — a receipt "Change". WRITES TWELVE:
+ *  4 · went_back {target}      — a receipt "Change". WRITES THIRTEEN:
  *                                snapshot=null, snapshotError=null, autoAsk=false,
  *                                payerOverride=null, windowDays=null, picked=false, skipped=false,
  *                                filters=NO_ANSWER_FILTERS, employerQuery='', planFilter='',
- *                                backTo=target, and payerPick=null ONLY when target !== 'plan'
- *                                (the machine's one conditional write — invariant h).
+ *                                area=AREA_ALL, backTo=target, and payerPick=null ONLY when
+ *                                target !== 'plan' (the machine's one conditional write —
+ *                                invariant h).
  *                                KEEPS retryNonce, loadedKey.
  *  5 · payer_picked {payer}    — WRITES payerPick=payer, backTo=null.
  *  6 · plan_filter_changed {value}     — WRITES planFilter=value.
@@ -72,7 +75,10 @@
  *  8 · filter_toggled {facet,value}    — WRITES filters (add/remove `value` in the facet's array;
  *                                        facet 'planType'→planTypes, 'funding'→funding,
  *                                        'employer'→employers).
- *  9 · filters_cleared         — WRITES filters=NO_ANSWER_FILTERS, employerQuery=''.
+ *  9 · filters_cleared         — WRITES filters=NO_ANSWER_FILTERS, employerQuery='', area=AREA_ALL.
+ *                                The area rides along because "Clear filters" is one button and the
+ *                                answer stage has one control surface: a narrow that survived it
+ *                                would be a narrow the user believes they just cleared.
  * 10 · retry_requested         — WRITES snapshotError=null, retryNonce=prev+1. NOTHING ELSE, ever.
  * 11 · snapshot_requested      — WRITES snapshotError=null. Dispatched at the top of the fetch
  *                                effect so `refetching` can only claim progress while a request is
@@ -87,8 +93,12 @@
  * 15 · ai_disarmed             — WRITES autoAsk=false.
  * 16 · payer_override_changed {label} — WRITES payerOverride=label.
  * 17 · window_days_changed {days}     — WRITES windowDays=days.
+ * 18 · area_selected {key}            — WRITES area=key. AND NOTHING ELSE — most of all not
+ *                                       `snapshot`, `loadedKey` or anything `scopeKeyOf` reads
+ *                                       (invariant m). Single-select, the mobile chip model:
+ *                                       AREA_ALL | a 2-letter state | AREA_OTHER.
  *
- * EIGHTEEN SWITCH ARMS, SEVENTEEN ACTIONS. The eighteenth is `default: return state` — an arm the
+ * NINETEEN SWITCH ARMS, EIGHTEEN ACTIONS. The nineteenth is `default: return state` — an arm the
  * `ShellAction` union makes unreachable through the type system, kept because the type system is not
  * the only caller: a hot-reloaded action queued against a newer reducer, or a hand-written dispatch
  * in a future test, would otherwise fall off the end and return `undefined` as the whole state. It
@@ -128,6 +138,18 @@
  * l · `autoAsk` IS ONE-SHOT: armed by `ai_armed`, disarmed by `ai_disarmed` / `search_submitted` /
  *     `went_back`. Without the disarm, a re-scope remount re-fires an unrequested, audited, BILLED
  *     LLM call (review Critical 2).
+ * m · `area` IS A GRID NARROW, NOT A FETCH NARROW — and it is a SEPARATE FIELD from `filters` for
+ *     exactly that reason. Every consumer of `AnswerFilters` is request-facing: `answerFiltersActive`
+ *     gates the shell's `narrow` memo, `filterCandidates`/`employerNarrowFor` resolve the employer
+ *     set that goes into `market`, `scopeKeyOf` reads `filters.funding`, and `rankingNarrowed`
+ *     (resolution-flow.tsx) turns those into the disclosure's "narrowed by your filter selections"
+ *     caption. `area` narrows the RENDERED FACILITY LIST — a different object entirely
+ *     (`QualifyFacility`, not `OrderedCandidate`) — and must reach none of them. Folding it into
+ *     `AnswerFilters` would have flipped `answerFiltersActive` true on an area-only selection, which
+ *     prints "Ranking over 311 of 311 plans" over an untouched request. Keeping it beside `filters`
+ *     makes the honesty guarantee STRUCTURAL: there is no code path from this field to a request.
+ *     It resets wherever `filters` resets (the four navigations + `filters_cleared`) and nowhere
+ *     else — notably NOT on the two re-scopes, which keep their content on screen.
  *
  * The asymmetries in (f), (g) and (h) are OBSERVED BEHAVIOR carried over verbatim, not oversights to
  * normalize. Changing one is a product decision, not a refactor.
@@ -159,9 +181,13 @@
  * not by `deepEqual` (which is reference-blind, and left that rule silently unpinned until MUT-F).
  */
 import type { QualifySnapshot, QualifyTrailingDays } from '../../../lib/qualify/contract';
+// ONE 'all' sentinel across both Qualify surfaces, imported rather than redeclared: the desktop
+// answer stage and the mobile deck now speak the same area vocabulary (AREA_ALL | state | 'other'),
+// and two constants that merely happen to both be 'all' is how they stop being the same vocabulary.
+import { AREA_ALL } from '../m/area-chips';
 import { NO_ANSWER_FILTERS, type AnswerFilters, type FlowStage } from './resolution-flow';
 
-/** The fourteen fields the staged flow moves between screens. No PHI: the term lives in a ref. */
+/** The fifteen fields the staged flow moves between screens. No PHI: the term lives in a ref. */
 export interface ShellState {
   /** The carrier the user picked on stage 2, in VOB vocabulary. */
   payerPick: string | null;
@@ -186,6 +212,13 @@ export interface ShellState {
   windowDays: QualifyTrailingDays | null;
   /** What scope the RENDERED snapshot describes — see invariant (d). */
   loadedKey: string | null;
+  /**
+   * The answer stage's AREA facet: AREA_ALL | a 2-letter state | AREA_OTHER (unmapped facilities,
+   * never dropped). Restores the facility/location narrow the v3 cutover lost. Deliberately NOT a
+   * member of `filters` — see invariant (m); it narrows the rendered grid and reaches no request.
+   * Non-PHI (facility city/state only) and never persisted to the URL.
+   */
+  area: string;
 }
 
 export type ShellAction =
@@ -205,7 +238,8 @@ export type ShellAction =
   | { type: 'ai_armed' }
   | { type: 'ai_disarmed' }
   | { type: 'payer_override_changed'; label: string | null }
-  | { type: 'window_days_changed'; days: QualifyTrailingDays | null };
+  | { type: 'window_days_changed'; days: QualifyTrailingDays | null }
+  | { type: 'area_selected'; key: string };
 
 export const INITIAL_SHELL_STATE: ShellState = {
   payerPick: null,
@@ -222,11 +256,12 @@ export const INITIAL_SHELL_STATE: ShellState = {
   payerOverride: null,
   windowDays: null,
   loadedKey: null,
+  area: AREA_ALL,
 };
 
 /**
  * Restore `useState`'s bail-out. Keyed off `Object.keys(next)` rather than a hand-listed field set,
- * so adding a fifteenth field cannot silently make two different states compare equal.
+ * so adding a sixteenth field cannot silently make two different states compare equal.
  */
 function bailIfUnchanged(prev: ShellState, next: ShellState): ShellState {
   for (const k of Object.keys(next) as (keyof ShellState)[]) {
@@ -253,6 +288,7 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         snapshotError: null,
         payerOverride: null,
         windowDays: null,
+        area: AREA_ALL,
       });
 
     // Straight to the answer over the whole footprint. Clears any half-made narrowing so the general
@@ -270,6 +306,7 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         payerOverride: null,
         snapshot: null,
         snapshotError: null,
+        area: AREA_ALL,
       });
 
     // A NEW plan is a new population — a genuine first load, so the snapshot blanks to the skeleton
@@ -284,6 +321,7 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         backTo: null,
         snapshot: null,
         snapshotError: null,
+        area: AREA_ALL,
       });
 
     // Going back CLEARS what was decided at and after that stage — a kept-but-hidden choice is how
@@ -303,6 +341,7 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         payerPick: action.target !== 'plan' ? null : state.payerPick,
         planFilter: '',
         backTo: action.target,
+        area: AREA_ALL,
       });
 
     case 'payer_picked':
@@ -324,8 +363,16 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
       return bailIfUnchanged(state, { ...state, filters: { ...state.filters, [key]: next } });
     }
 
+    // "Clear filters" is one button over one control surface, so it clears the area too — a narrow
+    // that outlived the button that claims to clear it is the kept-but-hidden choice this machine
+    // exists to prevent.
     case 'filters_cleared':
-      return bailIfUnchanged(state, { ...state, filters: NO_ANSWER_FILTERS, employerQuery: '' });
+      return bailIfUnchanged(state, {
+        ...state,
+        filters: NO_ANSWER_FILTERS,
+        employerQuery: '',
+        area: AREA_ALL,
+      });
 
     // The ONLY write to retryNonce in the whole machine, and it only ever goes up (invariant c).
     case 'retry_requested':
@@ -355,6 +402,11 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
 
     case 'window_days_changed':
       return bailIfUnchanged(state, { ...state, windowDays: action.days });
+
+    // A GRID narrow, not a re-scope: it writes one field that nothing in `scopeKeyOf` reads, so the
+    // fetch effect cannot see it and no request is issued (invariant m).
+    case 'area_selected':
+      return bailIfUnchanged(state, { ...state, area: action.key });
 
     default:
       return state;
