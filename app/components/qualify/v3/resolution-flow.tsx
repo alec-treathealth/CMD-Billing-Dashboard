@@ -183,19 +183,26 @@ export function payerGroupsOf(r: QualifyResolution): PayerGroup[] {
  * answer without choosing a carrier or a plan, and browse the identifier's whole footprint with the
  * answer stage's filter lines instead. It is deliberately a separate input from `picked` — "I chose
  * this plan" and "I declined to choose" must never render as the same claim.
+ *
+ * `payerGroups` is the shell's memoized cluster set (ONE `payerGroupsOf` call per resolution, shared
+ * with the rail, the receipt, both tile stages and the live sentence). Omitting it self-derives, so
+ * this stays callable from a test with a resolution alone — but when the shell supplies it, the
+ * stage machine and the rail are provably reading ONE value rather than two that happen to agree.
  */
 export function deriveStage(args: {
   resolution: QualifyResolution | null;
   payerPick: string | null;
   picked: boolean;
   skipped?: boolean;
+  /** Optional pre-computed clusters (the shell memoizes one call per resolution). */
+  payerGroups?: PayerGroup[];
 }): FlowStage {
   const r = args.resolution;
   if (!r) return 'identify';
   if (args.skipped) return 'answer';
   if (r.candidates.total <= 1) return 'answer';
   if (args.picked) return 'answer';
-  if (payerGroupsOf(r).length > 1 && args.payerPick === null) return 'payer';
+  if ((args.payerGroups ?? payerGroupsOf(r)).length > 1 && args.payerPick === null) return 'payer';
   return 'plan';
 }
 
@@ -320,12 +327,15 @@ export function employerNarrowFor(
   return { employers: picked };
 }
 
-/** The live-region sentence for the current state — announced once, as a full sentence. */
+/** The live-region sentence for the current state — announced once, as a full sentence.
+ *
+ *  `opts.payerGroups` is the shell's memoized cluster set. It rides in the EXISTING opts bag rather
+ *  than as a fifth positional so every current call compiles untouched; omitting it self-derives. */
 export function liveSentenceFor(
   stage: FlowStage,
   resolution: QualifyResolution | null,
   reason: 'empty' | 'prefix_too_short' | 'no_match' | null,
-  opts: { skipped?: boolean; scopePayer?: string | null } = {},
+  opts: { skipped?: boolean; scopePayer?: string | null; payerGroups?: PayerGroup[] } = {},
 ): string {
   if (!resolution) return reason ? UNRESOLVABLE_COPY[reason] : '';
   // A skipped search resolved NOTHING past the identifier: announcing the pre-selected candidate's
@@ -345,7 +355,7 @@ export function liveSentenceFor(
     return 'Back at the search step. Searching again replaces the current result.';
   }
   if (stage === 'payer') {
-    return `${payerGroupsOf(resolution).length} carriers match what you typed. Pick the one on the card.`;
+    return `${(opts.payerGroups ?? payerGroupsOf(resolution)).length} carriers match what you typed. Pick the one on the card.`;
   }
   if (stage === 'plan') {
     return `${resolution.candidates.total} plans match. Pick one, or ask the AI about one.`;
@@ -1573,8 +1583,12 @@ export interface ResolutionStagesProps {
    */
   ticker: React.ReactNode;
   /** Optional pre-computed clusters — the shell memoizes ONE `payerGroupsOf` call per resolution and
-   *  threads it to the rail, receipt, and both tile stages, which otherwise each re-derive it
-   *  (clusterCarriers is O(n²), and scroll-driven work makes that visible as filter-input lag). */
+   *  threads it to the rail, receipt, both tile stages, the STAGE MACHINE (`deriveStage`) and the
+   *  LIVE SENTENCE, which otherwise each re-derive it. The point is single-source-of-truth, not
+   *  speed: `payerGroupsOf` folds candidates by display name BEFORE clustering, so `clusterCarriers`
+   *  is O(n²) in the count of DISTINCT carrier names (~13 on a real prefix), not in the candidate
+   *  count — measured ~0.05 ms/call at 311 candidates. Threading it means the stage the flow picks
+   *  and the carriers the rail counts can never be two derivations that merely happen to agree. */
   payerGroups?: PayerGroup[];
   answer: Omit<StageAnswerProps, 'resolution'> | null;
 }
@@ -1603,7 +1617,7 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
 
       {/* THE single live region — one, not one per panel; the important sentence must not queue. */}
       <p aria-live="polite" className="sr-only">
-        {liveSentenceFor(props.stage, props.resolution, props.reason, { skipped, scopePayer })}
+        {liveSentenceFor(props.stage, props.resolution, props.reason, { skipped, scopePayer, payerGroups: props.payerGroups })}
       </p>
 
       {props.denied ? (
