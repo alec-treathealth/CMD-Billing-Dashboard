@@ -318,6 +318,31 @@ test('F3b: every filters reset is the SHARED constant BY REFERENCE — and clear
   }
 });
 
+test('F3b: every filters reset is the SHARED constant BY REFERENCE, not a fresh equal literal', () => {
+  // BY REFERENCE, deliberately. The field-write table above compares with deepEqual, which is
+  // reference-blind: swapping all five of these resets to `{ planTypes: [], funding: [], employers: [] }`
+  // left the whole suite green (review MUT-F), even though `narrow`'s useMemo depends on `filters`
+  // by identity and a fresh-but-equal object invalidates it on every single navigation. The header
+  // calls this rule load-bearing; until now only INITIAL_SHELL_STATE pinned it.
+  const resets: ShellAction[] = [
+    { type: 'search_submitted' },
+    { type: 'skipped' },
+    { type: 'plan_submitted' },
+    { type: 'went_back', target: 'identify' },
+    { type: 'went_back', target: 'payer' },
+    { type: 'went_back', target: 'plan' },
+    { type: 'filters_cleared' },
+  ];
+  for (const action of resets) {
+    const target = action.type === 'went_back' ? `${action.type}('${action.target}')` : action.type;
+    assert.equal(
+      shellReducer(dirty(), action).filters,
+      NO_ANSWER_FILTERS,
+      `${target} must reset filters to the shared constant, not to an equal copy`,
+    );
+  }
+});
+
 // ── 2 · The named invariants ─────────────────────────────────────────────────────────────────────
 
 test('INV a: a new search clears EVERYTHING downstream, from any prior state', () => {

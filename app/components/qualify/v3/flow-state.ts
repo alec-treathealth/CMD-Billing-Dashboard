@@ -5,6 +5,8 @@
  * Extracted from `resolution-flow-client.tsx` (F3b). The shell was carrying FIFTEEN `useState` hooks
  * — the fourteen fields it then had, plus `trends`, which stays behind (see WHAT IS DELIBERATELY NOT
  * IN HERE) — bound at 58 setter sites: 56 direct calls, of which 2 are `setTrends`, plus 2 raw setters
+ * — the fourteen fields below, plus `trends`, which stays behind (see WHAT IS DELIBERATELY NOT IN
+ * HERE) — bound at 58 setter sites: 56 direct calls, of which 2 are `setTrends`, plus 2 raw setters
  * passed as props. They encoded the rules below only by repetition: "a new search clears
  * everything downstream" was twelve adjacent `setX(...)` lines, and the fact that Skip deliberately
  * does NOT clear `windowDays` was legible only by diffing two of those blocks by eye. Every rule in
@@ -99,6 +101,14 @@
  *                                       AREA_ALL | a 2-letter state | AREA_OTHER.
  *
  * NINETEEN SWITCH ARMS, EIGHTEEN ACTIONS. The nineteenth is `default: return state` — an arm the
+ * `ShellAction` union makes unreachable through the type system, kept because the type system is not
+ * the only caller: a hot-reloaded action queued against a newer reducer, or a hand-written dispatch
+ * in a future test, would otherwise fall off the end and return `undefined` as the whole state. It
+ * returns the SAME object, so a stray dispatch cannot even cost a render. Pinned by a test that
+ * dispatches a bogus type through a cast. It matches the `windowReducer` precedent
+ * (app/lib/qualify/resolution.ts:417).
+ *
+ * EIGHTEEN SWITCH ARMS, SEVENTEEN ACTIONS. The eighteenth is `default: return state` — an arm the
  * `ShellAction` union makes unreachable through the type system, kept because the type system is not
  * the only caller: a hot-reloaded action queued against a newer reducer, or a hand-written dispatch
  * in a future test, would otherwise fall off the end and return `undefined` as the whole state. It
