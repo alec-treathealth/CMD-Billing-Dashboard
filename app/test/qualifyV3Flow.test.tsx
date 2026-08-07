@@ -590,6 +590,14 @@ test('a billed-under re-scope AFTER a skip is still a skip — it must not re-pr
   // all-payers wording would be the mirror-image overclaim.
   assert.match(html, /You skipped the plan questions, but the ranking is scoped to AETNA/);
   assert.ok(!html.includes('could not be scoped to'), 'declining to narrow is still not a failure to narrow');
+  // ...and the A11Y half of the same masquerade, which is not visible in a screenshot: the single
+  // aria-live region runs through `liveSentenceFor`, whose skip arm was gated on the same collapsed
+  // enum. A screen-reader user was told "Resolved: <carrier> · <sponsor> · <funding>" about a plan
+  // they had declined — the one surface where the lie could not be spotted by looking.
+  const liveFrom = html.indexOf('aria-live="polite"');
+  const live = html.slice(liveFrom, html.indexOf('</p>', liveFrom));
+  assert.match(live, /You skipped the plan questions\. Showing a general search across all plans under AETNA\./);
+  assert.ok(!live.includes('Resolved:'), 'nothing was resolved past the identifier, so nothing is announced as resolved');
 
   // THE DEFECT WAS INDISTINGUISHABILITY: a genuine pick plus one chip rendered byte-identically to
   // this. Pin that they now differ, and that the picked path still presents its plan — otherwise the
@@ -1842,11 +1850,15 @@ test('HONESTY GUARD: an active area does NOT flip any caption that describes the
       props('answer', r, {
         answer: answerProps({
           snapshot: threeStateSnapshot(),
-          // MERGE INTEGRATION (#164 × #165): this used to read `scopeSource: 'skipped'`. #165 split
-          // "who chose the payer label" from "was a plan chosen" into two values precisely because
-          // one billed-under chip press falsified the second, so the skip presentation now reads the
-          // reducer field. Same state, stated the way the component actually asks for it.
+          // MERGE INTEGRATION (#164 × #165). This read `scopeSource: 'skipped'` when #164 wrote it.
+          // #165 split that one enum in two — `scopeSource` now answers only "who chose the payer
+          // label", and the skip itself is its own prop, precisely because one billed-under chip
+          // press falsified the second. So the skip state is the PAIR below. `'dominant'` rather
+          // than the fixture default `'pick'`: a skip forces `pickLabel` to null
+          // (resolution-flow-client.tsx), so `scopeSourceOf` cannot return 'pick' beside a skip —
+          // the default would put this fixture in a state the app is unable to produce.
           skipped: true,
+          scopeSource: 'dominant',
           candidates: orderedCandidates(r),
           ...over,
         }),
@@ -1884,7 +1896,9 @@ test('the AI provenance caption stops claiming "on screen" grounding once an are
         props('answer', r, {
           answer: answerProps({
             snapshot: threeStateSnapshot(),
-            skipped: true, // see the merge-integration note on the guard test above
+            // Same #164 × #165 split as the guard above — see the note there.
+            skipped: true,
+            scopeSource: 'dominant',
             candidates: orderedCandidates(r),
             ...over,
           }),

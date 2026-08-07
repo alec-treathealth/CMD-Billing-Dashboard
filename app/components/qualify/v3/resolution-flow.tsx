@@ -1628,16 +1628,18 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   const payerFacetOn = snap !== null && snap.payerOptions.length > 1 && !allPayers;
   /**
    * ⚠ A SKIP IS NOT A PROMISE THAT THE FETCH STAYED WIDE, and v1 of this fix assumed it was.
-   * `scopeSource` never moves off 'skipped' when the answer-stage filter chips are used — it is
-   * derived from payerOverride / pickLabel / skipped alone (resolution-flow-client.tsx:222-224) and
-   * knows nothing about filters — but the fetch effect DOES fold active filters into a real `market`
-   * payload (client :278-294): funding goes straight through, and plan type / employer narrow by way
-   * of the employer set `employerNarrowFor` resolves them to. So "Skip, then one Funding chip" was
-   * rendering "this identifier's whole footprint" over a funding-narrowed snapshot, flatly
-   * contradicting the "Ranking over N of M plans" line a few rows above it.
+   * NEITHER of the two values that reach this component knows anything about the answer-stage filter
+   * chips: `props.skipped` is the reducer field, written only by Skip / a plan pick / a step back
+   * (flow-state.ts, invariants g/h), and `props.scopeSource` is `scopeSourceOf(payerOverride,
+   * pickLabel)` (resolution-flow-client.tsx:212), which reads the two payer-label inputs and nothing
+   * else. But the fetch effect DOES fold active filters into a real `market` payload
+   * (client :269-282): funding goes straight through, and plan type / employer narrow by way of the
+   * employer set `employerNarrowFor` resolves them to. So "Skip, then one Funding chip" was rendering
+   * "this identifier's whole footprint" over a funding-narrowed snapshot, flatly contradicting the
+   * "Ranking over N of M plans" line a few rows above it.
    *
    * Recomputed here with the SAME pure function on the SAME inputs the shell used — `props.candidates`
-   * IS the shell's `answerCandidates` and `props.filters` IS its `filters` (client :492, :493) — not a
+   * IS the shell's `answerCandidates` and `props.filters` IS its `filters` (client :481, :482) — not a
    * second derivation that can drift from the request. That precision earns its keep in two states
    * where "filters are active" and "the ranking is narrowed" come apart: a narrow `employerNarrowFor`
    * refused as not-a-narrow (:325), and one that exceeded the send bound (`tooMany`, :326). Neither
@@ -1662,12 +1664,12 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
    * ⚠ THE DISCLOSURE'S CAPTIONS ARE FROZEN AT RESOLVE TIME AND A SKIP NEVER RE-RESOLVES.
    * `r.provenance` is minted SERVER-side inside `resolveCoverage` (resolutionService.ts:383-408) from
    * the chosen candidate, via `panelProvenance` (resolution.ts:303-317) which interpolates
-   * `group.employerLabel`. A Skip is pure client state (resolution-flow-client.tsx:132-143) — no
+   * `group.employerLabel`. A Skip is pure client state (resolution-flow-client.tsx:147-149) — no
    * server round trip — so after one, these strings still read
    * "AETNA · FRESNO UNIFIED SCHOOL DISTRICT · 57 members · 1,994 charge lines" about a plan the user
-   * explicitly declined, while the panels underneath are identifier-wide: the fetch sends no
-   * payerOverride (client :221) and, absent filters, no market. DISPLAY-ONLY BUG — the data was
-   * already honest.
+   * explicitly declined, while the panels underneath are identifier-wide: the pick bridge is
+   * suppressed (client :205) so, absent a chip press, the fetch sends no payerOverride (client :280)
+   * and, absent filters, no market. DISPLAY-ONLY BUG — the data was already honest.
    *
    * Extending 7c86709's pattern: state what IS true rather than blank the row. Keyed on `skipped`
    * ALONE — never on chosenBy/chosenIndex, because a Skip taken AFTER a plan pick leaves `r.group`
