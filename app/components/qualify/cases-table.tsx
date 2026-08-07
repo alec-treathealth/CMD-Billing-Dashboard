@@ -50,7 +50,7 @@ function usd0(n: number): string {
   return `$${Math.round(n).toLocaleString('en-US')}`;
 }
 
-const TH = 'border-b bg-teal50 px-3.5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground whitespace-nowrap';
+const TH = 'border-b bg-teal50 px-3.5 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground whitespace-nowrap';
 const TH_NUM = `${TH} text-right`;
 const TD = 'border-b px-3.5 py-2.5 text-[13px] align-middle';
 
@@ -143,7 +143,7 @@ export function CasesTable({
           onViewCohort(claimId, `Patient ${patientKey}`);
         }}
         title="View this patient's cohort context (lifetime peer group; aggregates only)"
-        className="ml-1 rounded-full border border-teal200 bg-teal50 px-1.5 py-px text-[10px] font-semibold text-teal700 hover:bg-teal200"
+        className="ml-1 rounded-full border border-teal200 bg-teal50 px-2 py-0.5 text-xs font-semibold text-teal700 hover:bg-teal200"
       >
         cohort
       </button>
@@ -177,7 +177,7 @@ export function CasesTable({
               onClick={(e) => { e.stopPropagation(); onRevealPatient(c.patientKey, [c.id]); }}
               disabled={revealingKeys.has(c.patientKey)}
               title="Reveal this patient's identifiers (audited)"
-              className="ml-1 rounded-full border border-teal200 bg-teal50 px-1.5 py-px text-[10px] font-semibold text-teal700 hover:bg-teal200 disabled:opacity-60"
+              className="ml-1 rounded-full border border-teal200 bg-teal50 px-2 py-0.5 text-xs font-semibold text-teal700 hover:bg-teal200 disabled:opacity-60"
             >
               {revealingKeys.has(c.patientKey) ? 'Revealing…' : 'Reveal'}
             </button>
@@ -196,7 +196,7 @@ export function CasesTable({
         <td className={`${TD} min-w-[200px]`}>{c.facilityName ?? '—'}</td>
         <td className={TD}>
           {c.program ? (
-            <span className="inline-flex items-center rounded-full bg-[#e4f0f5] px-2 py-0.5 text-[10.5px] font-bold uppercase tracking-wide text-status-info">
+            <span className="inline-flex items-center rounded-full bg-status-info/10 px-2 py-0.5 text-xs font-semibold text-status-info">
               {c.program}
             </span>
           ) : (
@@ -220,10 +220,10 @@ export function CasesTable({
             {pct === null ? '—' : c.confidence === 'estimate' ? `~${Math.round(pct)}%` : `${Math.round(pct)}%`}
           </span>
           {c.confidence === 'estimate' ? (
-            <span className="block text-[10px] leading-tight text-ink400">estimate · reversals</span>
+            <span className="block text-xs leading-tight text-ink400">estimate · reversals</span>
           ) : null}
           {c.confidence === 'unknown' ? (
-            <span className="block text-[10px] leading-tight text-ink400">no allowed on file</span>
+            <span className="block text-xs leading-tight text-ink400">no allowed on file</span>
           ) : null}
         </td>
         {hasAmounts ? (
@@ -269,20 +269,20 @@ export function CasesTable({
               className="inline-flex items-center gap-1.5 font-semibold text-ink900"
               title={open ? 'Collapse this patient’s claims' : canReveal ? 'Expand to reveal + see day-by-day claims (audited)' : 'Expand to day-by-day claims'}
             >
-              <span aria-hidden className="text-[10px] text-ink400">{open ? '▾' : '▸'}</span>
+              <span aria-hidden className="text-xs text-ink400">{open ? '▾' : '▸'}</span>
               <span className={isShown ? 'text-ink900' : 'text-ink400'}>
                 {isShown ? (phi?.patient_name ?? '—') : `Patient ${g.patientKey}`}
               </span>
-              <span className="rounded-full bg-teal50 px-1.5 py-px text-[10px] font-bold text-teal700">
+              <span className="rounded-full bg-teal50 px-2 py-0.5 text-xs font-bold text-teal700">
                 {g.claimCount} claims
               </span>
-              {revealingThis ? <span className="text-[10px] font-medium text-ink400">Revealing…</span> : null}
+              {revealingThis ? <span className="text-xs font-medium text-ink400">Revealing…</span> : null}
             </button>
             {cohortChip(first.id, g.patientKey)}
             {/* Rare high-frequency patient: a single audited batch caps at REVEAL_BATCH_CAP, so IDs beyond
                 the 50 most recent stay masked — say so honestly. */}
             {isShown && g.claimCount > QUALIFY_REVEAL_BATCH_CAP ? (
-              <span className="ml-1 text-[10px] text-ink400">IDs shown for the 50 most recent</span>
+              <span className="ml-1 text-xs text-ink400">IDs shown for the 50 most recent</span>
             ) : null}
           </td>
           <td className={TD}>
@@ -298,7 +298,7 @@ export function CasesTable({
           <td className={`${TD} min-w-[200px]`}>{first.facilityName ?? '—'}</td>
           <td className={TD}>
             {programs ? (
-              <span className="inline-flex items-center rounded-full bg-[#e4f0f5] px-2 py-0.5 text-[10.5px] font-bold uppercase tracking-wide text-status-info">
+              <span className="inline-flex items-center rounded-full bg-status-info/10 px-2 py-0.5 text-xs font-semibold text-status-info">
                 {programs}
               </span>
             ) : (
@@ -320,10 +320,10 @@ export function CasesTable({
               {g.avgPct === null ? '—' : g.confidence === 'estimate' ? `~${g.avgPct}% avg` : `${g.avgPct}% avg`}
             </span>
             {g.confidence === 'estimate' ? (
-              <span className="block text-[10px] leading-tight text-ink400">estimate · reversals</span>
+              <span className="block text-xs leading-tight text-ink400">estimate · reversals</span>
             ) : null}
             {g.confidence === 'unknown' ? (
-              <span className="block text-[10px] leading-tight text-ink400">no allowed on file</span>
+              <span className="block text-xs leading-tight text-ink400">no allowed on file</span>
             ) : null}
           </td>
           {hasAmounts ? (
@@ -349,18 +349,18 @@ export function CasesTable({
               control is "Hide identifiers" — shown once something IS revealed — plus a discovery hint.
               Under the Change-B GLOBAL toggle the hint states the standing reveal instead. */}
           {globalRevealOn ? (
-            <span className="whitespace-nowrap text-[11px] font-medium text-teal700">identifiers revealed (audited)</span>
+            <span className="whitespace-nowrap text-xs font-medium text-teal700">identifiers revealed (audited)</span>
           ) : canReveal && revealed.size > 0 ? (
             <button
               type="button"
               onClick={onHideIdentifiers}
               title="Re-mask every revealed patient (this session)"
-              className="rounded-md border border-teal500 bg-teal50 px-2.5 py-1 text-[11px] font-semibold text-teal700 transition-colors hover:bg-teal200"
+              className="rounded-md border border-teal500 bg-teal50 px-2.5 py-1 text-xs font-semibold text-teal700 transition-colors hover:bg-teal200"
             >
               Hide identifiers
             </button>
           ) : canReveal ? (
-            <span className="whitespace-nowrap text-[11px] text-muted-foreground">Reveal IDs per patient (audited)</span>
+            <span className="whitespace-nowrap text-xs text-muted-foreground">Reveal IDs per patient (audited)</span>
           ) : null}
           <span className="whitespace-nowrap text-xs font-semibold text-muted-foreground">
             {claims.length} recent claims{canReveal ? '' : ' · masked'}
@@ -368,12 +368,12 @@ export function CasesTable({
         </div>
       </div>
       {filterCaption ? (
-        <p className="px-4 pb-1.5 text-[11.5px] font-medium text-teal700">
+        <p className="px-4 pb-1.5 text-xs font-medium text-teal700">
           Showing claims matching {filterCaption}
         </p>
       ) : null}
       {canReveal && revealError ? (
-        <p className="px-4 pb-1 text-[11px] font-medium text-status-danger">{revealError}</p>
+        <p className="px-4 pb-1 text-xs font-medium text-status-danger">{revealError}</p>
       ) : null}
       <div className="overflow-x-auto">
         <table className={['w-full border-collapse', heatOn ? 'q-heat' : ''].join(' ')}>

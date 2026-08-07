@@ -76,7 +76,7 @@ export function SwipeRow({
       onKeyDown={onKeyDown}
       className="relative flex items-center gap-3 px-4"
       style={{
-        height: 96,
+        height: 108,
         borderRadius: 16,
         background: SURFACE,
         border: `0.5px solid ${LINE}`,
@@ -96,14 +96,14 @@ export function SwipeRow({
           </div>
           {facility.careSetting ? (
             <span
-              className="flex-shrink-0 rounded-full px-1.5 py-px text-[9px] font-bold uppercase tracking-wide"
+              className="flex-shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold uppercase"
               style={{ background: '#e4f0f5', color: '#2C6E8A' }}
             >
               {facility.careSetting === 'BOTH' ? 'Both' : facility.careSetting}
             </span>
           ) : null}
         </div>
-        <div className="mt-0.5 truncate text-[11px]" style={{ color: INK400 }}>
+        <div className="mt-0.5 truncate text-xs" style={{ color: INK400 }}>
           {loc ? `${loc} · ` : ''}{patients} · {facility.lineCount} lines{tier === 'thin' ? ' · thin sample' : ''}
         </div>
         {/* 0059 coverage micro-bar: confirmed / estimate / unknown (estimate amber, never green). */}
@@ -120,7 +120,7 @@ export function SwipeRow({
         <div className="ths-num text-[20px] font-bold leading-none" style={{ color: b.color }}>
           {ratingText}
         </div>
-        <div className="mt-0.5 text-[9px] font-bold uppercase tracking-wide" style={{ color: b.color }}>
+        <div className="mt-0.5 text-xs font-semibold uppercase" style={{ color: b.color }}>
           {label}
         </div>
       </div>

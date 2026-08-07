@@ -33,6 +33,7 @@ import { TRENDS } from './helpers/qualifyTrends';
 import { PolicyStrip } from '../components/qualify/policy-strip';
 import { WindowLadder } from '../components/qualify/window-ladder';
 import type { QualifyPolicyCard, QualifyWindowLadder, QualifyFactorReading } from '../lib/qualify/contract';
+import type { QualifyTileFlanks } from '../lib/qualify/tileFlanks';
 
 const solidRating = qualifyRating(55)!; // 55 → ok
 const thinHighRating = qualifyRating(90)!; // 90 → ok (value-first: a small high-% facility reads GREEN)
@@ -1039,4 +1040,234 @@ test('neither new component emits a dollar — admissions_seat parity holds', as
       evidence: [{ label: 'Sample', value: '14 distinct patients' }] }]} />,
   );
   assert.ok(!a.includes('$') && !b.includes('$'));
+});
+
+// ── Text-size floor sweep (12px-floor sweep, Task 1) ────────────────────────────────────────────────
+//
+// The F4 idiom, ported from app/test/qualifyV3Flow.test.tsx (I9) to the components THIS file renders.
+// A regex sweep, not a literal blocklist — text-[8px] or text-[11.75px] would slip past a blocklist
+// but not this. Each case asserts a POSITIVE CONTROL first: a vacuous sweep over markup that never
+// actually rendered (the exact failure mode F4's own header comment documents — see above) is worse
+// than no test, because a refactor that stops rendering the branch would leave this green for the
+// wrong reason. Cases are built to walk the branchy states (expanded scorecards, revealed/masked PHI,
+// capped/global-reveal headers, spread/self-funded/stale/estimated policy banners, minority payer
+// flags, watch/gap findings) rather than just the each component's simplest render, since that is
+// where a future sub-12px regression is most likely to hide.
+test('floor sweep: no meaning-bearing text below 12px in any Qualify component this file renders', async () => {
+  const { PayerRail } = await import('../components/qualify/payer-rail');
+  const { FacilityFindings } = await import('../components/qualify/facility-findings');
+  const { SearchTrace } = await import('../components/qualify/search-trace');
+
+  const sweepFacility = {
+    ...QUALIFY_FACILITY_V2_NULLS,
+    ...SOLID,
+    ratingV2: 84,
+    iqBand: '65' as const,
+    factors: FACTORS,
+    availableWeight: 90,
+    medianDaysToPayment: 38,
+    openBeds: 1,
+    bedCapacity: 12,
+    nextUrDate: '2026-09-01',
+  };
+  const SWEEP_FLANKS: QualifyTileFlanks = {
+    allowed: { worst: { label: 'Worst', value: 24, who: 'LOW YIELD' }, best: { label: 'Best', value: 90, who: 'THIN HIGH' } },
+    paidOfAllowed: { worst: { label: 'Worst', value: 60, who: 'LOW YIELD' }, best: { label: 'Best', value: 95, who: 'SOLID' } },
+    paidOfBilled: { worst: { label: 'Worst', value: 20, who: 'LOW YIELD' }, best: { label: 'Best', value: 70, who: 'SOLID' } },
+  };
+
+  const cases: Array<[string, string, RegExp]> = [
+    [
+      'FacilityPanel (expanded scorecard + bed occupancy + UR + legend)',
+      renderToStaticMarkup(
+        <FacilityPanel
+          facilities={[sweepFacility, THIN_HIGH]}
+          hasAmounts
+          heatOn
+          expandedKeys={new Set([sweepFacility.facilityKey])}
+          payerLabel="AETNA"
+        />,
+      ),
+      /Scored on 90 of 100 weighting/,
+    ],
+    [
+      'CasesTable (unrevealed, cohort chip + per-patient reveal)',
+      renderToStaticMarkup(
+        <CasesTable
+          claims={[
+            { ...CASE_AT_THIN, id: 9101, patientKey: 9101 },
+            { ...CASE_AT_LOW, id: 9102, patientKey: 9102 },
+          ]}
+          hasAmounts
+          heatOn
+          facilityBuckets={buildFacilityBucketMap(FACILITIES)}
+          {...noReveal}
+          canReveal
+          onViewCohort={() => {}}
+        />,
+      ),
+      /Reveal IDs per patient/,
+    ],
+    [
+      'CasesTable (group revealing + estimate/unknown confidence captions)',
+      renderToStaticMarkup(
+        <CasesTable
+          claims={[
+            { ...CASE_AT_THIN, id: 9103, patientKey: 9200 },
+            { ...CASE_AT_THIN, id: 9104, patientKey: 9200, dos: '2026-07-14' },
+            ESTIMATE_CLAIM,
+            UNKNOWN_CLAIM,
+          ]}
+          hasAmounts
+          heatOn
+          facilityBuckets={buildFacilityBucketMap([])}
+          canReveal
+          revealed={new Map<number, QualifyPhi>()}
+          revealingKeys={new Set([9200])}
+          revealError={null}
+          onRevealPatient={noop}
+          onHideIdentifiers={noop}
+        />,
+      ),
+      /Revealing…/,
+    ],
+    [
+      'CasesTable (global reveal on, capped, filter caption, reveal error)',
+      renderToStaticMarkup(
+        <CasesTable
+          claims={[{ ...CASE_AT_THIN, id: 9105, patientKey: 9300 }]}
+          hasAmounts
+          heatOn
+          facilityBuckets={buildFacilityBucketMap([])}
+          canReveal
+          revealed={new Map<number, QualifyPhi>([[9105, PHI]])}
+          revealingKeys={new Set<number>()}
+          revealError="Reveal failed — try again"
+          onRevealPatient={noop}
+          onHideIdentifiers={noop}
+          capped
+          filterCaption="alpha prefix W29"
+          globalRevealOn
+        />,
+      ),
+      /identifiers revealed \(audited\)/,
+    ],
+    [
+      'CohortSheet (populated — pcts + mixes)',
+      renderToStaticMarkup(
+        <CohortSheet
+          data={{
+            suppressed: false, floor: 5, patients: 12, pctCollected: 30, pctAllowed: 40, pctPaid: 75,
+            byPayer: [{ label: 'AETNA', count: 30, charge: null }],
+            byCpt: [{ label: 'H0015', count: 18, charge: null }],
+            viewerHasAmountsCapability: false, tenantScope: 'cross-tenant-bxr-indigo' as const,
+          }}
+          loading={false}
+          patientLabel="Patient 3"
+          onClose={noop}
+        />,
+      ),
+      /Payer mix/,
+    ],
+    [
+      'BookKpiTiles (flanks + LOC lens)',
+      renderToStaticMarkup(<BookKpiTiles kpis={KPIS} locActive flanks={SWEEP_FLANKS} flankSource="the ranked facilities" />),
+      /range the ranked facilities/,
+    ],
+    [
+      'EvidenceGauge (ink variant, full sample)',
+      renderToStaticMarkup(<EvidenceGauge distinctPatients={41} variant="ink" />),
+      /41 clients/,
+    ],
+    [
+      'EvidenceGauge (dark variant, thin sample)',
+      renderToStaticMarkup(<EvidenceGauge distinctPatients={3} />),
+      /directional only/,
+    ],
+    [
+      'PolicyStrip (spread + self-funded + benefits + stale + estimated)',
+      renderToStaticMarkup(
+        <PolicyStrip
+          policy={{ ...POLICY, carrierCount: 3, employerCount: 7, vobStale: true, network: null }}
+          provenance="comparable_employer"
+          hasAmounts
+          prefixEcho="W29"
+        />,
+      ),
+      /Policy on file/,
+    ],
+    [
+      'WindowLadder (rungs + outcome sentence)',
+      renderToStaticMarkup(<WindowLadder ladder={LADDER} />),
+      /Finding a window with enough patients to trust/,
+    ],
+    [
+      'PayerRail (dominant leads)',
+      renderToStaticMarkup(<PayerRail options={PAYER_OPTS} activePayer="AETNA" overridden={false} onSelect={() => {}} />),
+      /Billed under/,
+    ],
+    [
+      'PayerRail (minority flag)',
+      renderToStaticMarkup(
+        <PayerRail
+          options={[...PAYER_OPTS, { payer: 'UMR', lines: 180, patients: 12, lastPayment: '2026-07-01' }]}
+          activePayer="AETNA"
+          overridden={false}
+          onSelect={() => {}}
+        />,
+      ),
+      /check the others/,
+    ],
+    [
+      'SearchTrace (mixed tone lines)',
+      renderToStaticMarkup(
+        <SearchTrace
+          lines={[
+            { tone: 'ok', text: '46 verified members on file behind this prefix' },
+            { tone: 'flag', text: 'Not one plan — 3 carriers and 7 employers behind it' },
+            { tone: 'note', text: 'Widened to 90d to reach 11 patients' },
+          ]}
+        />,
+      ),
+      /How this was resolved/,
+    ],
+    [
+      'FacilityFindings (watch + gap severities)',
+      renderToStaticMarkup(
+        <FacilityFindings
+          findings={[
+            {
+              factorKey: 'ttp', severity: 'watch', title: 'Time to payment is pulling this score down',
+              rationale: 'Median 130 days on paid lines.',
+              evidence: [{ label: 'Sample', value: '14 distinct patients' }, { label: 'Window', value: '90d' }],
+            },
+            {
+              factorKey: 'coding', severity: 'gap', title: 'Coding decision confidence could not be measured',
+              rationale: 'Registry not seeded yet.',
+              evidence: [{ label: 'Effect on the score', value: '30 points renormalized away' }],
+            },
+          ]}
+        />,
+      ),
+      /Evidence/,
+    ],
+    [
+      'HeatingUpCards (real trends)',
+      renderToStaticMarkup(<HeatingUpCards trends={TRENDS} window={W30} onOpen={noop} />),
+      /Facilities Heating Up/,
+    ],
+    [
+      'Spark (2-point draw-in)',
+      renderToStaticMarkup(<Spark points={[40, 60]} hex="#2E8B6F" />),
+      /q-spark/,
+    ],
+  ];
+
+  for (const [label, html, mustRender] of cases) {
+    // POSITIVE CONTROL — prove this case rendered the markup it claims to be sweeping.
+    assert.match(html, mustRender, `${label}: rendered nothing to scan — the floor check would be vacuous`);
+    for (const m of html.matchAll(/text-\[(\d+(?:\.\d+)?)px\]/g)) {
+      assert.ok(Number(m[1]) >= 12, `sub-12px class on ${label}: text-[${m[1]}px]`);
+    }
+  }
 });

@@ -127,7 +127,7 @@ export function BookKpiTiles({
                     style={{ borderColor: end.label === 'Best' ? '#2E8B6F' : '#C0453B' }}
                   >
                     <div className="flex items-baseline gap-1">
-                      <span className="text-[8.5px] font-extrabold uppercase tracking-[0.08em] text-ink400">{end.label}</span>
+                      <span className="text-xs font-medium uppercase tracking-wide text-ink400">{end.label}</span>
                       <span
                         className="font-mono text-[12.5px] font-semibold tabular-nums"
                         style={{ color: end.label === 'Best' ? '#2E8B6F' : '#C0453B' }}
@@ -135,16 +135,16 @@ export function BookKpiTiles({
                         {end.value}%
                       </span>
                     </div>
-                    <div className="truncate text-[9.5px] leading-tight text-ink400" title={end.who}>
+                    <div className="truncate text-xs leading-tight text-ink400" title={end.who}>
                       {end.who}
                     </div>
                   </div>
                 ))}
               </div>
-              <div className="mt-1 text-[9.5px] leading-tight text-ink400">range {flankSource}</div>
+              <div className="mt-1 text-xs leading-tight text-ink400">range {flankSource}</div>
             </div>
           ) : null}
-          <div className="mt-2 text-[11px] text-ink400">
+          <div className="mt-2 text-xs text-ink400">
             {t.caption}
             {tierNote}
             {locActive ? ' · not LOC-scoped' : ''}
@@ -204,7 +204,7 @@ export function EvidenceGauge({
           );
         })}
       </div>
-      <span className={['text-[11.5px] leading-tight', ink ? 'text-ink400' : 'text-white/70'].join(' ')}>
+      <span className={['text-xs leading-tight', ink ? 'text-ink400' : 'text-white/70'].join(' ')}>
         <b className={['block text-[12px] font-semibold', ink ? 'text-ink900' : 'text-white'].join(' ')}>
           {n.toLocaleString('en-US')} client{n === 1 ? '' : 's'}
         </b>

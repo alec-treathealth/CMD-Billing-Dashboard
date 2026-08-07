@@ -186,24 +186,24 @@ export function RegistryClient({ initial }: { initial: CodingRegistryList }) {
             {supersedes !== null ? `Supersede decision #${supersedes}` : 'New decision'}
           </h2>
           {supersedes !== null ? (
-            <p className="mt-0.5 text-[11.5px] text-muted-foreground">
+            <p className="mt-0.5 text-xs text-muted-foreground">
               The old row is closed (effective_to = the new decision date) and linked — never overwritten.
             </p>
           ) : null}
           <div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-4">
-            <label className="text-[11px] font-semibold text-ink600">
+            <label className="text-xs font-semibold text-ink600">
               Payer family*
               <input value={form.payer_family} onChange={set('payer_family')} placeholder="BCBS" className="mt-1 w-full rounded-lg border border-teal200 px-2 py-1.5 text-[13px]" />
             </label>
-            <label className="text-[11px] font-semibold text-ink600">
+            <label className="text-xs font-semibold text-ink600">
               Variant label
               <input value={form.payer_variant_label} onChange={set('payer_variant_label')} placeholder="Anthem BCBS (ALL OTHERS)" className="mt-1 w-full rounded-lg border border-line px-2 py-1.5 text-[13px]" />
             </label>
-            <label className="text-[11px] font-semibold text-ink600">
+            <label className="text-xs font-semibold text-ink600">
               Facility code
               <input value={form.facility_code} onChange={set('facility_code')} placeholder="NMH (blank = payer-wide)" className="mt-1 w-full rounded-lg border border-line px-2 py-1.5 text-[13px]" />
             </label>
-            <label className="text-[11px] font-semibold text-ink600">
+            <label className="text-xs font-semibold text-ink600">
               Level of care
               <select value={form.level_of_care} onChange={set('level_of_care')} className="mt-1 w-full rounded-lg border border-line bg-surface px-2 py-1.5 text-[13px]">
                 <option value="">—</option>
@@ -212,27 +212,27 @@ export function RegistryClient({ initial }: { initial: CodingRegistryList }) {
                 ))}
               </select>
             </label>
-            <label className="text-[11px] font-semibold text-ink600">
+            <label className="text-xs font-semibold text-ink600">
               HCPCS
               <input value={form.hcpcs_code} onChange={set('hcpcs_code')} disabled={form.hcpcs_suppressed} placeholder="H0017" className="mt-1 w-full rounded-lg border border-line px-2 py-1.5 font-mono text-[13px] disabled:bg-ground disabled:text-ink400" />
             </label>
-            <label className="text-[11px] font-semibold text-ink600">
+            <label className="text-xs font-semibold text-ink600">
               Revenue code*
               <input value={form.revenue_code} onChange={set('revenue_code')} placeholder="0158" className="mt-1 w-full rounded-lg border border-teal200 px-2 py-1.5 font-mono text-[13px]" />
             </label>
-            <label className="flex items-end gap-2 pb-1 text-[11px] font-semibold text-ink600">
+            <label className="flex items-end gap-2 pb-1 text-xs font-semibold text-ink600">
               <input type="checkbox" checked={form.hcpcs_suppressed} onChange={set('hcpcs_suppressed')} className="h-4 w-4 accent-teal700" />
               NO HCPCS (rev only — a billing method, not a gap)
             </label>
-            <label className="text-[11px] font-semibold text-ink600">
+            <label className="text-xs font-semibold text-ink600">
               DOS per claim
               <input value={form.dos_batch} onChange={set('dos_batch')} placeholder="1 or 2-3" className="mt-1 w-full rounded-lg border border-line px-2 py-1.5 font-mono text-[13px]" />
             </label>
-            <label className="text-[11px] font-semibold text-ink600">
+            <label className="text-xs font-semibold text-ink600">
               Type of bill
               <input value={form.type_of_bill} onChange={set('type_of_bill')} placeholder="863 / 86X" className="mt-1 w-full rounded-lg border border-line px-2 py-1.5 font-mono text-[13px]" />
             </label>
-            <label className="text-[11px] font-semibold text-ink600">
+            <label className="text-xs font-semibold text-ink600">
               Lifecycle*
               <select value={form.lifecycle} onChange={set('lifecycle')} className="mt-1 w-full rounded-lg border border-teal200 bg-surface px-2 py-1.5 text-[13px]">
                 {LIFECYCLES.map((l) => (
@@ -240,11 +240,11 @@ export function RegistryClient({ initial }: { initial: CodingRegistryList }) {
                 ))}
               </select>
             </label>
-            <label className="text-[11px] font-semibold text-ink600">
+            <label className="text-xs font-semibold text-ink600">
               Decided on*
               <input type="date" value={form.decided_on} onChange={set('decided_on')} className="mt-1 w-full rounded-lg border border-teal200 px-2 py-1.5 text-[13px]" />
             </label>
-            <label className="col-span-2 text-[11px] font-semibold text-ink600 md:col-span-4">
+            <label className="col-span-2 text-xs font-semibold text-ink600 md:col-span-4">
               Notes
               <textarea value={form.notes} onChange={set('notes')} rows={2} className="mt-1 w-full rounded-lg border border-line px-2 py-1.5 text-[13px]" />
             </label>
@@ -269,7 +269,7 @@ export function RegistryClient({ initial }: { initial: CodingRegistryList }) {
       <section className="overflow-hidden rounded-2xl border bg-card shadow-ths-sm">
         <div className="flex items-center gap-2 px-4 pb-2 pt-3.5">
           <h2 className="font-head text-sm font-semibold tracking-tight">Current decisions</h2>
-          <span className="text-[11.5px] text-muted-foreground">{current.length} live</span>
+          <span className="text-xs text-muted-foreground">{current.length} live</span>
         </div>
         {current.length === 0 ? (
           <p className="px-4 pb-5 text-[13px] text-muted-foreground">
@@ -280,7 +280,7 @@ export function RegistryClient({ initial }: { initial: CodingRegistryList }) {
           <div className="overflow-x-auto">
             <table className="w-full text-[12.5px]">
               <thead>
-                <tr className="border-t border-line bg-ground text-left text-[10.5px] font-bold uppercase tracking-wide text-ink400">
+                <tr className="border-t border-line bg-ground text-left text-xs font-semibold uppercase tracking-wide text-ink400">
                   <th className="px-4 py-2">Payer</th>
                   <th className="px-2 py-2">Facility</th>
                   <th className="px-2 py-2">LOC</th>
@@ -297,7 +297,7 @@ export function RegistryClient({ initial }: { initial: CodingRegistryList }) {
                   <tr key={r.id} className="border-t border-line align-top">
                     <td className="px-4 py-2">
                       <b className="font-semibold text-ink900">{r.payer_family}</b>
-                      {r.payer_variant_label ? <span className="block text-[11px] text-ink400">{r.payer_variant_label}</span> : null}
+                      {r.payer_variant_label ? <span className="block text-xs text-ink400">{r.payer_variant_label}</span> : null}
                     </td>
                     <td className="px-2 py-2 font-mono text-[12px]">{r.facility_code ?? <span className="text-ink400">payer-wide</span>}</td>
                     <td className="px-2 py-2">{r.level_of_care ?? '—'}</td>
@@ -307,14 +307,14 @@ export function RegistryClient({ initial }: { initial: CodingRegistryList }) {
                     </td>
                     <td className="px-2 py-2 font-mono text-[12px]">{r.type_of_bill ?? '—'}</td>
                     <td className="px-2 py-2">
-                      <span className={['inline-flex rounded-full px-2 py-px text-[10.5px] font-bold', lifecycleClass(r.lifecycle)].join(' ')}>
+                      <span className={['inline-flex rounded-full px-2 py-0.5 text-xs font-bold', lifecycleClass(r.lifecycle)].join(' ')}>
                         {r.lifecycle}
                       </span>
                     </td>
                     <td className="px-2 py-2 font-mono text-[12px] tabular-nums">{r.decided_on}</td>
                     <td className="px-2 py-2 text-right">
                       {initial.editable ? (
-                        <button type="button" onClick={() => beginSupersede(r)} className="rounded-md border border-line px-2 py-1 text-[11px] font-semibold text-teal700 hover:border-teal200 hover:bg-teal50">
+                        <button type="button" onClick={() => beginSupersede(r)} className="rounded-md border border-line px-2 py-1 text-xs font-semibold text-teal700 hover:border-teal200 hover:bg-teal50">
                           Supersede
                         </button>
                       ) : null}
@@ -331,7 +331,7 @@ export function RegistryClient({ initial }: { initial: CodingRegistryList }) {
         <section className="overflow-hidden rounded-2xl border bg-card shadow-ths-sm">
           <div className="flex items-center gap-2 px-4 pb-2 pt-3.5">
             <h2 className="font-head text-sm font-semibold tracking-tight">History</h2>
-            <span className="text-[11.5px] text-muted-foreground">{history.length} superseded — the drift the sheet could never show</span>
+            <span className="text-xs text-muted-foreground">{history.length} superseded — the drift the sheet could never show</span>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-[12.5px]">
@@ -342,7 +342,7 @@ export function RegistryClient({ initial }: { initial: CodingRegistryList }) {
                     <td className="px-2 py-1.5 font-mono text-[12px]">{r.facility_code ?? 'payer-wide'}</td>
                     <td className="px-2 py-1.5 font-mono text-[12px]">{codesLabel(r)}</td>
                     <td className="px-2 py-1.5">{r.lifecycle}</td>
-                    <td className="px-2 py-1.5 font-mono text-[11.5px] tabular-nums">
+                    <td className="px-2 py-1.5 font-mono text-xs tabular-nums">
                       {r.effective_from} → {r.effective_to}
                       {r.superseded_by !== null ? ` · superseded by #${r.superseded_by}` : ''}
                     </td>

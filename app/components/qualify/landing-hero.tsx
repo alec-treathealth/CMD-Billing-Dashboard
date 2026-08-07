@@ -60,7 +60,7 @@ export function QualifyLandingHero() {
           — or tap a <span className="font-semibold text-teal700">Facility Heating Up</span> above to resolve its
           payer.
         </p>
-        <div className="mt-5 flex flex-wrap items-center justify-center gap-2 text-[11px] font-semibold">
+        <div className="mt-5 flex flex-wrap items-center justify-center gap-2 text-xs font-semibold">
           {(QUALIFY_CLIENT_NAME_ENABLED
             ? ['Member ID', 'Alpha prefix', 'Client name']
             : ['Member ID', 'Alpha prefix']

@@ -130,7 +130,7 @@ export function WindowControl({
           aria-label="Longer date range"
           className="animate-ths-reveal absolute left-0 top-full z-30 mt-2 w-64 rounded-xl border bg-card p-2 shadow-ths-lg"
         >
-          <div className="px-2 pb-1 pt-1 text-[10px] font-bold uppercase tracking-widest text-ink400">Rolling (from today)</div>
+          <div className="px-2 pb-1 pt-1 text-xs font-medium uppercase tracking-wide text-ink400">Rolling (from today)</div>
           {QUALIFY_ROLLING_OPTIONS.map((d) => {
             const active = win.kind === 'trailing' && win.days === d;
             return (
@@ -154,7 +154,7 @@ export function WindowControl({
             );
           })}
 
-          <div className="mt-1 border-t px-2 pb-1 pt-2 text-[10px] font-bold uppercase tracking-widest text-ink400">
+          <div className="mt-1 border-t px-2 pb-1 pt-2 text-xs font-medium uppercase tracking-wide text-ink400">
             Specific period
           </div>
           <div className="flex items-center gap-2 px-2 py-1">
@@ -190,7 +190,7 @@ export function WindowControl({
               ))}
             </select>
           </div>
-          {calendar ? <div className="px-2 pb-1 pt-0.5 text-[11px] text-ink400">Showing {qualifyWindowLabel(win)}</div> : null}
+          {calendar ? <div className="px-2 pb-1 pt-0.5 text-xs text-ink400">Showing {qualifyWindowLabel(win)}</div> : null}
         </div>
       ) : null}
     </div>

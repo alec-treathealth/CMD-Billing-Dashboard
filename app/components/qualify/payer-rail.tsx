@@ -73,23 +73,23 @@ export function PayerRail({
       aria-label="Payers this identifier bills under"
     >
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-        <span className="text-[9.5px] font-bold uppercase tracking-[0.07em] text-ink400">Billed under</span>
+        <span className="text-xs font-medium uppercase tracking-wide text-ink400">Billed under</span>
         <span className="font-head text-[13px] font-semibold tracking-tight text-ink900">
           {options.length} payers
         </span>
         {/* The honesty line. Two DIFFERENT claims, never conflated: the user chose this scope, or we
             did and it is thin. Both are more informative than showing a payer with no provenance. */}
         {overridden ? (
-          <span className="text-[11px] text-muted-foreground">
+          <span className="text-xs text-muted-foreground">
             showing your selection — <b className="font-semibold text-ink600">{activePayer}</b>
           </span>
         ) : activeIsMinority ? (
-          <span className="text-[11px] font-semibold text-status-warn">
+          <span className="text-xs font-semibold text-status-warn">
             {activePayer} is only {active!.lines.toLocaleString('en-US')} of{' '}
             {totalLines.toLocaleString('en-US')} claim lines — check the others
           </span>
         ) : (
-          <span className="text-[11px] text-muted-foreground">
+          <span className="text-xs text-muted-foreground">
             ranked by volume; <b className="font-semibold text-ink600">{activePayer}</b> leads
           </span>
         )}
@@ -126,7 +126,7 @@ export function PayerRail({
               <span className="min-w-0 truncate text-[12px] font-semibold leading-5">{o.payer}</span>
               <span
                 className={[
-                  'shrink-0 text-[9.5px] font-bold tabular-nums',
+                  'shrink-0 text-xs font-semibold tabular-nums',
                   isActive ? 'text-white/70' : 'text-ink400',
                 ].join(' ')}
               >
@@ -137,7 +137,7 @@ export function PayerRail({
         })}
       </div>
 
-      <p className="mt-2 text-[10.5px] italic text-ink400">
+      <p className="mt-2 text-xs italic text-ink400">
         Each of these is still this client’s own history — picking one narrows the scope, it never widens it
         to the payer’s whole book.
       </p>

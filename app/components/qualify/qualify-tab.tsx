@@ -1015,24 +1015,24 @@ export function QualifyTab({
         {canRevealPhi ? (
           <div className="q-phi-hatch px-4 py-4 sm:px-5">
             <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-teal900 px-2.5 py-1 text-[10.5px] font-semibold tracking-wide text-white">
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-teal900 px-2.5 py-1 text-xs font-semibold tracking-wide text-white">
                 <Lock className="h-2.5 w-2.5" aria-hidden />
                 Identified
               </span>
-              <span className="font-head text-[10.5px] font-bold uppercase tracking-[0.1em] text-teal900">
+              <span className="font-head text-xs font-bold uppercase tracking-wide text-teal900">
                 Two fields is the whole search
               </span>
               {/* NO UNMASK CONTROL HERE: with the claim-line grid gone there is nothing on this page to
                   unmask, and a toggle that reveals nothing is worse than no toggle. The terms typed here
                   go one way — the server HMACs them into blind indexes and returns only aggregates. The
                   audited per-patient reveal path is intact and still used by /qualify/m. */}
-              <span className="text-[11.5px] text-ink600 min-[560px]:ml-auto">
+              <span className="text-xs text-ink600 min-[560px]:ml-auto">
                 Audited on use. Never written to the URL, and no identified row is returned.
               </span>
             </div>
             <div className="grid grid-cols-1 items-end gap-3 min-[720px]:grid-cols-[minmax(200px,250px)_minmax(220px,1fr)_auto]">
               <label className="flex flex-col gap-1">
-                <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-teal900">
+                <span className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-teal900">
                   <ShieldCheck className="h-3.5 w-3.5 text-teal700" aria-hidden />
                   Member ID or prefix
                 </span>
@@ -1117,16 +1117,16 @@ export function QualifyTab({
                     aria-hidden
                     className={['h-3.5 w-3.5 text-ink400 transition-transform', browseExpanded ? 'rotate-90' : ''].join(' ')}
                   />
-                  <span className="font-head text-[10.5px] font-bold uppercase tracking-[0.1em] text-ink600">Browse filters</span>
-                  <span className="text-[11px] text-ink400">payer · employer · funding · group #</span>
+                  <span className="font-head text-xs font-bold uppercase tracking-wide text-ink600">Browse filters</span>
+                  <span className="text-xs text-ink400">payer · employer · funding · group #</span>
                   {browseActive ? (
-                    <span className="ml-auto rounded-full bg-teal50 px-2 py-0.5 text-[10px] font-bold text-teal700">active</span>
+                    <span className="ml-auto rounded-full bg-teal50 px-2 py-0.5 text-xs font-bold text-teal700">active</span>
                   ) : null}
                 </button>
               ) : null}
               {browseExpanded ? (
                 <div className={['px-4 pb-4 sm:px-5', canRevealPhi ? '' : 'pt-4'].join(' ')}>
-                  <p className="mb-3 text-[11.5px] text-ink600">
+                  <p className="mb-3 text-xs text-ink600">
                     <b className="font-semibold text-teal700">Payer and facility move the scores.</b> Employer, funding and
                     group # only narrow the matching claims.
                   </p>
@@ -1175,7 +1175,7 @@ export function QualifyTab({
                     ) : null}
                   </div>
                   {canRevealPhi && QUALIFY_CLIENT_NAME_ENABLED ? (
-                    <p className="mt-2 text-[10.5px] text-ink400">Qualify only — Collections has no name lookup.</p>
+                    <p className="mt-2 text-xs text-ink400">Qualify only — Collections has no name lookup.</p>
                   ) : null}
                 </div>
               ) : null}
@@ -1192,7 +1192,7 @@ export function QualifyTab({
             </span>
             <span className="text-[12px] text-white/70">{summaryError ? 'count unavailable' : 'charge lines match'}</span>
             {hasAnyFilter && summaryLoading ? (
-              <span className="text-[10.5px] uppercase tracking-wide text-teal200">updating…</span>
+              <span className="text-xs uppercase tracking-wide text-teal200">updating…</span>
             ) : null}
           </div>
 
@@ -1237,8 +1237,8 @@ export function QualifyTab({
           {!rankingLoading && (policyRating.ratedCount > 0 || rankedForScope.length > 0) ? (
             <div className="flex items-center gap-3 border-l border-white/15 pl-4 min-[560px]:order-2">
               <div className="text-right">
-                <div className="text-[10px] font-extrabold uppercase tracking-[0.11em] text-white/55">Policy rating</div>
-                <div className="mt-px text-[11px] text-white/60">{policyRating.basis}</div>
+                <div className="text-xs font-medium uppercase tracking-wide text-white/55">Policy rating</div>
+                <div className="mt-px text-xs text-white/60">{policyRating.basis}</div>
               </div>
               <div
                 className="font-display text-[36px] font-semibold leading-[0.85] tracking-tight tabular-nums"
@@ -1247,7 +1247,7 @@ export function QualifyTab({
                 {policyRating.rating ?? '—'}
               </div>
               <span
-                className="rounded-full px-2.5 py-[3px] text-[11.5px] font-bold"
+                className="rounded-full px-2.5 py-[3px] text-xs font-bold"
                 style={{
                   background: policyRating.band ? `${POLICY_BAND_HEX[policyRating.band]}29` : 'rgba(255,255,255,.1)',
                   color: policyRating.band ? POLICY_BAND_HEX[policyRating.band] : 'rgba(255,255,255,.72)',
@@ -1265,7 +1265,7 @@ export function QualifyTab({
               employer, no group number (presence-only by contract), no benefit dollars. ── */}
           {onFileTags.length > 0 ? (
             <div className="flex basis-full flex-wrap items-center gap-1.5 border-t border-white/15 pt-2.5">
-              <span className="mr-1 text-[10px] font-extrabold uppercase tracking-[0.11em] text-white/50">On file</span>
+              <span className="mr-1 text-xs font-medium uppercase tracking-wide text-white/50">On file</span>
               {onFileTags.map((t) => (
                 <span
                   key={t.label}
@@ -1275,10 +1275,10 @@ export function QualifyTab({
                     t.missing ? 'border-white/20' : 'border-teal200/45 bg-white/[0.06]',
                   ].join(' ')}
                 >
-                  <span className="shrink-0 text-[8.5px] font-bold uppercase tracking-[0.07em] text-white/50">{t.label}</span>
+                  <span className="shrink-0 text-xs font-medium uppercase tracking-wide text-white/50">{t.label}</span>
                   <span
                     className={[
-                      'min-w-0 truncate text-[11.5px] font-semibold leading-snug',
+                      'min-w-0 truncate text-xs font-semibold leading-snug',
                       t.mono ? 'font-mono tabular-nums' : '',
                       t.missing ? 'text-white/50' : 'text-white',
                     ].join(' ')}
@@ -1508,7 +1508,7 @@ function PhiInput({
 }) {
   return (
     <label className="flex min-w-[9rem] flex-1 flex-col gap-1">
-      <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</span>
+      <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</span>
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
