@@ -4444,6 +4444,50 @@ meaningful offset. If disk on this cluster matters, the lever is whether
 verification query never reads it. Not changed here — that is a new migration and
 its own decision.
 
+### Resolution (2026-08-07) — KEEP `primary_payer`; drop assessed, not authored
+
+The "lever" framing above turned out half-true. A read-only recon probe (Task 3 of
+the qualify-remaining SDD, 2026-08-07) confirmed the ladder (`loadWindowRungs` /
+`buildQualifyWindowRungsQuery`) genuinely never reads `primary_payer` — that's the
+one true half. But the payload has two more consumers that do, on every token
+search: `buildResolvePayerQuery` and `buildResolvePayerSpreadQuery`
+(`src/collections/qualifyQuery.ts`) filter (`IS NOT NULL` / `btrim<>''`),
+`GROUP BY`, and project `primary_payer` — these are the resolve+spread legs that
+run on every token search, and the file's own comment notes 80.6% of
+member-weighted searches are multi-payer. A third consumer the original 0092
+debate never listed: v3's `buildClaimsOnlyCandidatesQuery`
+(`src/collections/qualifyResolutionQuery.ts:120`) also reads `primary_payer` +
+`member_id_bidx` under a token filter, index-only-eligible only while
+`primary_payer` rides in the payload.
+
+Live EXPLAIN (claims_reader) on both cov indexes, across all three query shapes:
+`cmd_charge_rollup_prefix_cov` 235 buffers, 6.9-23.4 ms, Heap Fetches effectively 0
+(13 — post-vacuum visibility-map churn, not a regression); `cmd_charge_rollup_member_cov`
+20 buffers, 0.8-1.3 ms, Heap Fetches 0. Stripping `primary_payer` from the payload
+was probed by reproducing the pre-0092 path directly: it returns as a 3,561-buffer
+bitmap-heap scan over 3,549 scattered heap blocks for the same busiest prefix
+token — the pre-0092 676 ms class this migration exists to kill.
+
+**Verdict: KEEP `primary_payer` in BOTH `cmd_charge_rollup_prefix_cov` and
+`cmd_charge_rollup_member_cov`.** CLAUDE.md's 0092 note is corrected the same date
+so it stops implying the ladder is the payload's only reader.
+
+Also assessed, NOT authored: dropping the two now-superseded bare indexes
+(`cmd_charge_rollup_prefix`, `cmd_charge_rollup_member`) is SAFE — `REFRESH
+MATERIALIZED VIEW CONCURRENTLY` anchors on the UNIQUE `cmd_charge_rollup_id` index,
+not on either bare token index, so neither is structurally required by the
+hourly refresh. But it recovers only ~8.2 MB and mildly raises bitmap-source cost
+on the heap-reading token queries that still pick the bare indexes today (cohort
+curve, v3 evidence shapes) — the busiest prefix's index-buffer cost goes from 12
+to ~230 against 3,549 heap blocks that dominate the cost anyway, a few-percent
+bump, not a regression class. This is Alec's call, explicitly deferred — not
+authored as a migration here.
+
+If the 169 MB combined size ever needs to come down, the honest lever is
+normalizing `primary_payer` to a narrow payer-id column in the matview (a schema
+change + payload swap), not stripping the payload — flagged as future work, not
+bundled with this docs pass.
+
 ### Also verified live this session (object presence, not ledger entries)
 
 `0090` — policy `collections_writer_select_facilities` on `collections.facilities`:
