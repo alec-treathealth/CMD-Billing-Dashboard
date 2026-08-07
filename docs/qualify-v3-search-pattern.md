@@ -57,6 +57,27 @@ the answer stage's ladder.
 - The always-open trace, notices, ladder tiles, and policy-fact rows — all become collapsed
   disclosures on stage 4. Present, honest, not shouting.
 
+**Not a ruling — a casualty, corrected 2026-08-07.** The 2026-08-06 cutover also dropped two
+facility-level affordances — v2's Facility type-ahead in the primary search row, and the
+Heating Up ticker's clickable cards — and unlike the three drops above, *neither ever appeared
+in this list*: nothing here named them, so nothing tracked the loss, and it took a live gap
+report to notice. (The first dark-launch build made the search-box drop worse by promising
+"…or a facility name" without building it — typing a city name was HMAC'd down the member-id
+blind index and came back a confusing no-match; the fix that shipped deleted the promise
+rather than the capability.) Both are now RESTORED, in a v3-native shape rather than a v2 port,
+so this doc no longer has a silent gap for the next cutover to repeat:
+
+- **The area facet** (stage 4 only — `AreaLine` in `resolution-flow.tsx`) is what the Facility
+  type-ahead became. It narrows the RENDERED scorecard grid alone, never the fetch, over state
+  buckets derived from the facilities the ranking already returned — reusing the mobile PWA's
+  `deriveAreaChips` / `facilitiesInArea` (an unmapped facility buckets under "Other" and is
+  never dropped, never a typed term reaching the blind index).
+- **The answer-armed ticker.** Heating Up's cards are clickable again on IDENTIFY *and* stage
+  4, but a click now seeds the area facet rather than v2's {facility + dominant payer} pivot —
+  v3 resolves a member, and re-pivoting the whole surface on a click would throw the member
+  away. The strip stays inert (`readOnly`) on PAYER and PLAN, where a click would compete with
+  the question those stages are asking.
+
 ## Motion
 
 GSAP stage transitions: outgoing stage clears, incoming slides up 14px/220ms ease-out, tiles
