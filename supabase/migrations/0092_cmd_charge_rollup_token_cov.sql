@@ -111,3 +111,14 @@ vacuum (analyze) collections.cmd_explorer_charge_rollup;
 --   i.e. ~5% of what these two added. It is no longer a meaningful offset. If the disk matters, the
 --   lever to examine is whether `primary_payer` needs to ride in the PREFIX payload at all — the
 --   ladder's own verification query never reads it.
+--
+-- ── RESOLVED 2026-08-07 — KEEP primary_payer in both payloads ──────────────────────────────────────
+-- Answered: primary_payer stays in both cmd_charge_rollup_prefix_cov and cmd_charge_rollup_member_cov.
+-- The ladder is not the payload's only reader — buildResolvePayerQuery / buildResolvePayerSpreadQuery
+-- (every token search) and v3's buildClaimsOnlyCandidatesQuery all read primary_payer index-only off
+-- these same indexes; live EXPLAIN confirms dropping it reproduces the pre-0092 3,561-buffer
+-- bitmap-heap path. Separately: dropping the bare cmd_charge_rollup_prefix / _member indexes was
+-- assessed SAFE (REFRESH MATERIALIZED VIEW CONCURRENTLY anchors on the unique cmd_charge_rollup_id
+-- index, not either bare token index) but NOT authored here — Alec's call. Full recon:
+-- veris-data-notes.md's 0092 section, "Resolution (2026-08-07) — KEEP primary_payer; drop assessed,
+-- not authored".
