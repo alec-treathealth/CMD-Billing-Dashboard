@@ -510,6 +510,14 @@ test('a billed-under re-scope AFTER a skip is still a skip — it must not re-pr
   // The skip banner is the sentence that vanished on the first chip press.
   assert.match(html, /You skipped the plan questions, so this is a general search/);
   assert.ok(!html.includes('could not be scoped to'), 'declining to narrow is still not a failure to narrow');
+  // ...and the A11Y half of the same masquerade, which is not visible in a screenshot: the single
+  // aria-live region runs through `liveSentenceFor`, whose skip arm was gated on the same collapsed
+  // enum. A screen-reader user was told "Resolved: <carrier> · <sponsor> · <funding>" about a plan
+  // they had declined — the one surface where the lie could not be spotted by looking.
+  const liveFrom = html.indexOf('aria-live="polite"');
+  const live = html.slice(liveFrom, html.indexOf('</p>', liveFrom));
+  assert.match(live, /You skipped the plan questions\. Showing a general search across all plans under AETNA\./);
+  assert.ok(!live.includes('Resolved:'), 'nothing was resolved past the identifier, so nothing is announced as resolved');
 
   // THE DEFECT WAS INDISTINGUISHABILITY: a genuine pick plus one chip rendered byte-identically to
   // this. Pin that they now differ, and that the picked path still presents its plan — otherwise the
