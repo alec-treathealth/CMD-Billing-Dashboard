@@ -70,6 +70,11 @@ export interface QualifyFacilityRow {
   care_setting: 'IP' | 'OP' | 'BOTH' | null; // resolved dimension level-of-care; null when unresolved
   line_count: number; // ALL in-window logical charge lines (volume context: floor + "limited data") — NOT tier-filtered
   distinct_patients: number; // count(distinct member_id_bidx) in-window — the sample-gate unit (rating suppression, hotfix 2026-07-27); the token is COUNTED, never projected
+  /** Distinct billed-under labels (count(distinct primary_payer)) behind THIS facility's slice — the
+   *  BLEND DISCLOSURE. 1 by construction in payer-scoped mode; >1 only in identifier-wide mode, where
+   *  pct_allowed is a cross-label blend and the card must say so. OPTIONAL so pre-existing fixtures
+   *  and loaders stay valid; consumers coalesce to 1 (the payer-scoped truth). */
+  payer_count?: number | null;
   confirmed_claims: number; // count of tiers a/cd/e1 (SQL mirror of confidence.ts — parity-tested)
   estimate_claims: number; // count of tier e2
   unknown_claims: number; // count of tiers b/none — the three sum to line_count
@@ -297,11 +302,16 @@ const RANKING_RELIABLE_SELECT =
  * 5,412 e1 charges' facilities vs the pre-0059 panel. That is the fix, not a regression.
  */
 export function buildFacilityRankingQuery(
-  /** The resolved payer, OR NULL for the v2 COMPARABLE-COHORT ranking (Phase B): a no-claims policy
-   *  ranks facilities over its employer/funding cohort (the `market` semi-join) across ALL payers —
-   *  the cohort IS the policy's behavioral peer group, so no payer clause is emitted. Callers must
-   *  pass a market narrow whenever payer is null (an unscoped null would rank the whole book); the
-   *  cores enforce that. */
+  /** The resolved payer, OR NULL for one of the two payerless modes:
+   *
+   *  · COMPARABLE-COHORT (Phase B, v2): a no-claims policy ranks facilities over its employer/funding
+   *    cohort (the `market` semi-join) across ALL payers — the cohort IS the policy's behavioral peer
+   *    group, so no payer clause is emitted.
+   *  · IDENTIFIER-WIDE (the v3 Skip, 2026-08-07): the searched identifier's WHOLE footprint, every
+   *    billed-under label it carries. The `token`+`kind` narrow IS the scope here.
+   *
+   *  Callers must pass a market narrow OR a token+kind whenever payer is null — an unscoped null
+   *  would rank the whole book. Enforced at the chokepoint below, not by the cores. */
   payer: string | null,
   from: string,
   to: string,
@@ -311,10 +321,22 @@ export function buildFacilityRankingQuery(
   kind: QualifyTokenKind | null = null,
 ): { sql: string; params: unknown[] } {
   const ent = assertEntityScope(entityIds, 'buildFacilityRankingQuery');
-  // Fail-closed at the CHOKEPOINT (the assertEntityScope pattern): a null payer with no market
-  // narrow would silently rank the whole book through the comparable path (review finding #5).
-  if (payer === null && !(market.employers?.length || market.funding?.length)) {
-    throw new Error('buildFacilityRankingQuery: payer=null (cohort mode) requires a non-empty market narrow');
+  // Fail-closed at the CHOKEPOINT (the assertEntityScope pattern): a null payer with NEITHER narrow
+  // would silently rank the whole book (review finding #5).
+  //
+  // ⚠ THE TOKEN IS A SCOPE, and this guard used to refuse to see that. It read "payer=null requires a
+  // non-empty MARKET narrow", which was the only payerless mode that existed (comparable-cohort). The
+  // v3 Skip promises the identifier's whole footprint, and a blind-index equality on
+  // member_id_bidx / member_id_prefix_bidx / patient_name_bidx bounds the scan at least as tightly as
+  // an employer semi-join does — measured live 2026-08-07 on the busiest prefix (9,268 rollup rows):
+  // 3.2ms / 264 buffers at 30d, 19.4ms / 1,471 buffers at the 365d ladder worst case, 100% shared-
+  // buffer hits, no new index. What must STILL throw is (null payer, no market, no token) — the
+  // genuinely unscoped read.
+  const idScoped = token !== null && kind !== null;
+  if (payer === null && !idScoped && !(market.employers?.length || market.funding?.length)) {
+    throw new Error(
+      'buildFacilityRankingQuery: payer=null requires a scope — a non-empty market narrow (cohort mode) or an identifier token+kind (identifier-wide mode)',
+    );
   }
   const { params, add } = paramList();
   const e = add(ent);
@@ -343,6 +365,14 @@ export function buildFacilityRankingQuery(
     // 2026-07-27). member_id_bidx is an opaque keyed-HMAC token: COUNTED here, NEVER projected (no
     // PHI leaves), exactly like the movers query's distinct-patient floor.
     'count(distinct member_id_bidx)::int as distinct_patients, ' +
+    // ⚠ THE BLEND DISCLOSURE (Alec, 2026-08-07). In identifier-wide mode `pct_allowed` below is a
+    // dollar-weighted blend ACROSS EVERY LABEL the identifier bills under at this facility, and a
+    // blend is not a payer contract rate: a facility can read green on an AETNA-heavy mix while the
+    // member's other label pays badly there (Simpson's paradox, on the exact surface admissions acts
+    // on). The card must be able to SAY "across N payers", so the number rides out of the same scan
+    // that produced the blend — free, and impossible to forget to compute. Degenerate but correct in
+    // payer-scoped mode: the payer equality above pins it to 1.
+    'count(distinct primary_payer)::int as payer_count, ' +
     "count(*) filter (where allowed_tier in ('a','cd','e1'))::int as confirmed_claims, " +
     "count(*) filter (where allowed_tier = 'e2')::int as estimate_claims, " +
     "count(*) filter (where allowed_tier in ('b','none'))::int as unknown_claims, " +
@@ -365,7 +395,7 @@ export function buildFacilityRankingQuery(
     (mj ? `and ${mj} ` : '') +
     'group by facility';
   const sql =
-    'select agg.facility, agg.line_count, agg.distinct_patients, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
+    'select agg.facility, agg.line_count, agg.distinct_patients, agg.payer_count, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
     'agg.billed, agg.allowed, agg.pct_allowed, agg.pct_paid_of_allowed, agg.pct_paid_of_billed, ' +
     'agg.median_days_to_payment, agg.entity_ids, ' +
     'max(f.facility_name) as facility_name, ' +
@@ -373,7 +403,7 @@ export function buildFacilityRankingQuery(
     'max(coalesce(fe.facility_code, a.facility_code)) as facility_code ' +
     `from (${inner}) agg ` +
     FACILITY_DIM_JOINS +
-    'group by agg.facility, agg.line_count, agg.distinct_patients, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
+    'group by agg.facility, agg.line_count, agg.distinct_patients, agg.payer_count, agg.confirmed_claims, agg.estimate_claims, agg.unknown_claims, ' +
     'agg.billed, agg.allowed, agg.pct_allowed, agg.pct_paid_of_allowed, agg.pct_paid_of_billed, ' +
     'agg.median_days_to_payment, agg.entity_ids ' +
     'order by agg.pct_allowed desc nulls last, agg.facility';
@@ -399,7 +429,11 @@ export function buildFacilityRankingQuery(
 export function buildIdentifierLandingFacilityQuery(
   token: string,
   kind: QualifyTokenKind,
-  payer: string,
+  /** The resolved payer, OR NULL for IDENTIFIER-WIDE mode (the v3 Skip): the payer clause is dropped
+   *  and the landing claim is the identifier's most-recent in-window claim under ANY label. Safe
+   *  unscoped because the token equality below is always present here — unlike the ranking builder,
+   *  this query CANNOT be called without an identifier. */
+  payer: string | null,
   from: string,
   to: string,
   entityIds: string[],
@@ -407,7 +441,10 @@ export function buildIdentifierLandingFacilityQuery(
   const ent = assertEntityScope(entityIds, 'buildIdentifierLandingFacilityQuery');
   const { params, add } = paramList();
   const e = add(ent);
-  const p = add(payer);
+  // ⚠ ONLY the payer clause is optional. The ORDER BY below is byte-locked to buildFacilityCasesQuery
+  // (see the header) — widening the scope must never touch the ordering, or the landed facility and
+  // the drill's top claim can disagree.
+  const payerCond = payer !== null ? `and primary_payer = ${add(payer)} ` : '';
   const f = add(from);
   const t = add(to);
   const col = TOKEN_COLUMN[kind];
@@ -415,7 +452,8 @@ export function buildIdentifierLandingFacilityQuery(
   const sql =
     'select facility ' +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
-    `where business_entity_id = any(${e}::uuid[]) and primary_payer = ${p} ` +
+    `where business_entity_id = any(${e}::uuid[]) ` +
+    payerCond +
     `and payment_received >= ${f}::date and payment_received < ${t}::date ` +
     `and ${col} = ${tok} ` +
     "and facility is not null and btrim(facility) <> '' " +

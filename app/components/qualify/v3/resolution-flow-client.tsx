@@ -29,6 +29,12 @@
  * GSAP, the requested idiom: the incoming stage slides up 14px/220ms ease-out; tiles stagger
  * min(index,3)×60ms (capped — a 186-plan list must not cascade forever). One easing. Disabled
  * entirely under prefers-reduced-motion. Motion narrates progression; it never gates input.
+ *
+ * THREE SURFACES SPEAK IT, and only three: the stage subtree (14px), the scorecard/plan tiles
+ * (6-10px, scroll-batched), and — added 2026-08-07 for the Skip — the answer stage's FACET INVENTORY
+ * (6px, staggered on arrival). Same duration, same ease, same stagger function. The inventory is the
+ * one that animates plain OPACITY instead of `autoAlpha`, because its rows are live controls and
+ * `visibility: hidden` would make them unclickable for the length of the stagger — see the effect.
  */
 import {
   useActionState,
@@ -210,6 +216,17 @@ export function ResolutionFlowClient({
   // skip for the FIRST question, one chip press after a Skip turned every skip guard off at once and
   // re-presented the declined plan as a picked one. See `ScopeSource` in ./resolution-flow.
   const scopeSource = scopeSourceOf({ payerOverride, pickLabel });
+  // ── IDENTIFIER-WIDE: what "Skip — search all plans" now actually asks for ──────────────────────
+  // Until 2026-08-07 a Skip sent NOTHING and the core resolved the dominant billed-under label, so
+  // the "general search" covered one label out of up to seventeen — measured on a live prefix, AETNA
+  // 5,308 lines ranked while AETNA US HEALTHCARE (1,038) and AETNA - FIRST HEALTH NETWORK (7) were
+  // silently excluded, along with the two facilities the member billed ONLY under those. Alec's
+  // ruling: rank the whole footprint. `payerScope: 'all'` is that request.
+  //
+  // A BILLED UNDER chip still wins. `payerOverride !== null` means the operator explicitly re-scoped
+  // to one label AFTER skipping, the chip renders as "showing", and the core would refuse to honour
+  // both anyway — so this client asks for exactly one of them, and the two never race.
+  const allPayers = skipped && payerOverride === null;
 
   // ── The answer-stage filter universe and the market narrow ────────────────────────────────────
   // Universe: after a Skip, every candidate behind the identifier; otherwise the picked carrier's
@@ -241,6 +258,7 @@ export function ResolutionFlowClient({
     windowDays,
     funding: filters.funding,
     employers: narrow.employers,
+    allPayers,
   });
   // THREE states, not one boolean — because a failed refetch now KEEPS its snapshot, and
   // `isRefetching` cannot tell "a request is running" from "a request stopped, badly".
@@ -278,6 +296,8 @@ export function ResolutionFlowClient({
       window: { kind: 'trailing', days: windowDays ?? 90 },
       auto: windowDays === null,
       ...(sentOverride !== null ? { payerOverride: sentOverride } : {}),
+      // Mutually exclusive with payerOverride by construction (see `allPayers` above).
+      ...(allPayers ? { payerScope: 'all' as const } : {}),
       ...(market ? { market } : {}),
     })
       .then((s) => {
@@ -394,6 +414,40 @@ export function ResolutionFlowClient({
               stagger: (i: number) => staggerDelayMs(i) / 1000,
             }),
         });
+      }
+
+      // ── THE SKIP REVEAL (Alec, 2026-08-07) ──────────────────────────────────────────────────────
+      // The Skip lands on an inventory of every facet and its ON/OFF state, and the motion carries
+      // the eye from the stage's own entrance down through that inventory as one continuous beat —
+      // the same 220ms / power2.out / min(i,3)×60ms vocabulary the stage and the tiles already speak,
+      // at the tiles' lower amplitude. No second easing, no second timing curve, no new idiom.
+      //
+      // ⚠ OPACITY, NOT `autoAlpha`, AND THAT IS THE WHOLE CONSTRAINT. `autoAlpha` sets
+      // `visibility: hidden`, which makes an element genuinely unclickable and drops it out of the
+      // accessibility tree — so the tile treatment above, correct for a scroll-revealed LIST, would
+      // here make the last row's toggles dead for ~400ms after a Skip. These rows are CONTROLS, and
+      // the ruling is that motion narrates progression and never gates input. With plain opacity the
+      // switches are clickable, focusable and announced from the first frame; the animation is
+      // decoration over a live surface, which is the only honest way to animate a control.
+      //
+      // Runs off the same layout effect (and therefore the same reduced-motion guard) as everything
+      // else here: under `prefers-reduced-motion` the inventory renders complete and immediately.
+      const facetRows = gsap.utils.toArray<HTMLElement>('[data-v3-inventory] [data-v3-facet]', stageEl);
+      if (facetRows.length > 0) {
+        gsap.fromTo(
+          facetRows,
+          { opacity: 0, y: 6 },
+          {
+            opacity: 1,
+            y: 0,
+            duration: 0.22,
+            ease: 'power2.out',
+            stagger: (i: number) => staggerDelayMs(i) / 1000,
+            // Belt and braces: if a tween is ever interrupted mid-flight (a re-scope unmounting the
+            // block), the row must not be left at a fractional opacity.
+            onInterrupt: () => gsap.set(facetRows, { opacity: 1, y: 0 }),
+          },
+        );
       }
 
       // The plan stage's sticky header: CSS `position: sticky` does the pinning; ScrollTrigger only

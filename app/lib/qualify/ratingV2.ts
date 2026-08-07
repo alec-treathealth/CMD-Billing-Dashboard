@@ -242,6 +242,16 @@ export interface QualifyRatingV2Input {
    *  payer-scoped — the factor is excluded (renormalized away) rather than scored 0 against a
    *  lookup that could never succeed. Default true. */
   payerKnown?: boolean;
+  /**
+   * IDENTIFIER-WIDE mode (the v3 Skip, 2026-08-07): `payerKnown` is false because the ranking spans
+   * EVERY label the identifier bills under, not because none resolved. Only the WORDS differ — the
+   * factor is excluded either way — but the words are the whole point. Excluding a 30-weight factor
+   * renormalizes the other four, so the SAME facility scores differently under an all-payers ranking
+   * than under a payer-scoped one. An operator who runs both and is told "no payer resolved" on a
+   * screen that is visibly ranking several payers has been handed a contradiction; told the truth,
+   * they have an explanation. Default false.
+   */
+  payerScopeAll?: boolean;
   codingLifecycle: CodingLifecycle | null;
   codingDecidedOn: string | null; // ISO date
   codingCodesLabel: string | null; // e.g. 'H0017 / 0158' — display only
@@ -354,6 +364,10 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
   } else if (input.payerKnown === false) {
     // Comparable-cohort (estimated) reads carry no resolved payer; a payer-scoped lookup can never
     // succeed, so exclude rather than uniformly dragging every estimate to 0/30 (review finding #13).
+    //
+    // IDENTIFIER-WIDE reads reach the same exclusion for the OPPOSITE reason — several payers, not
+    // none — and say so, because excluding a 30-weight factor renormalizes the rest and this is the
+    // only place that can explain why the same facility scores differently across the two scopes.
     factors.push({
       key: 'coding',
       label: QUALIFY_FACTOR_LABELS.coding,
@@ -361,7 +375,9 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
       score: null,
       available: false,
       direction: 'neu',
-      detail: 'No payer resolved for this estimated read — code decisions are payer-scoped, so this factor is excluded rather than guessed.',
+      detail: input.payerScopeAll
+        ? 'Ranked across every payer this member bills under — code decisions are payer-scoped, so this factor is excluded rather than blended. Scoping to one label with the BILLED UNDER chips brings it back, and can move the score.'
+        : 'No payer resolved for this estimated read — code decisions are payer-scoped, so this factor is excluded rather than guessed.',
     });
   } else if (input.codingLifecycle === null) {
     factors.push({

@@ -21,7 +21,7 @@
  * contract change. Counts, day counts, enums and labels only — never a dollar — so the trace is
  * byte-identical for an admissions_seat session.
  */
-import type { QualifySnapshot } from './contract';
+import { scopedPayerOf, type QualifySnapshot } from './contract';
 import { PROVENANCE_LABELS } from './ratingV2';
 
 /** 'ok' reads as settled, 'note' as a decision worth knowing, 'flag' as something to check. */
@@ -86,14 +86,27 @@ export function deriveSearchTrace(snap: QualifySnapshot): QualifyTraceLine[] {
   // ── the payer ──────────────────────────────────────────────────────────────────────────────
   if (snap.payerOptions.length > 1) {
     const total = snap.payerOptions.reduce((s, o) => s + o.lines, 0);
-    const active = snap.payerOptions.find((o) => o.payer === snap.resolved?.payerName) ?? null;
-    const share = active && total > 0 ? Math.round((active.lines / total) * 100) : null;
-    lines.push({
-      tone: snap.payerOverridden ? 'note' : share !== null && share < 50 ? 'flag' : 'ok',
-      text: snap.payerOverridden
-        ? `Scoped to ${snap.resolved?.payerName} — your selection, out of ${snap.payerOptions.length} payers on file`
-        : `${snap.payerOptions.length} payers on file; ranked under ${snap.resolved?.payerName}${share !== null ? ` (${share}% of claim lines)` : ''}`,
-    });
+    // ALL-PAYERS gets its own line, not a variant of the payer-scoped one. "Ranked under X (62% of
+    // claim lines)" is a scope CLAIM, and after the identifier-wide Skip it is false in both halves:
+    // there is no single X, and the ranking covers 100% of the lines, not the dominant label's share.
+    // `scopedPayerOf` is what makes that unmissable — this file cannot interpolate a label it has not
+    // first established exists.
+    const scoped = scopedPayerOf(snap.resolved);
+    if (scoped === null && snap.resolved !== null) {
+      lines.push({
+        tone: 'note',
+        text: `Ranked across all ${snap.payerOptions.length} payers on file — the chips can scope it to one`,
+      });
+    } else if (scoped !== null) {
+      const active = snap.payerOptions.find((o) => o.payer === scoped) ?? null;
+      const share = active && total > 0 ? Math.round((active.lines / total) * 100) : null;
+      lines.push({
+        tone: snap.payerOverridden ? 'note' : share !== null && share < 50 ? 'flag' : 'ok',
+        text: snap.payerOverridden
+          ? `Scoped to ${scoped} — your selection, out of ${snap.payerOptions.length} payers on file`
+          : `${snap.payerOptions.length} payers on file; ranked under ${scoped}${share !== null ? ` (${share}% of claim lines)` : ''}`,
+      });
+    }
   }
 
   // ── what got ranked ────────────────────────────────────────────────────────────────────────

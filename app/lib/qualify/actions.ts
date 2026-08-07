@@ -166,7 +166,18 @@ export async function getQualifySnapshot(input: QualifyInput): Promise<QualifySn
     typeof input.payerOverride === 'string' && input.payerOverride.length <= QUALIFY_PAYER_OVERRIDE_MAX
       ? input.payerOverride
       : null;
-  return getQualifySnapshotCore(realDeps, { ...input, payerOverride, market: sanitizeMarket(input.market) });
+  // Identifier-wide scope: a CLOSED vocabulary of exactly one value, so the boundary re-derives it
+  // rather than forwarding whatever arrived. Anything else — including the string 'ALL', a boolean,
+  // an object — becomes undefined and the request is payer-scoped, which is the pre-existing
+  // behaviour. Fail-closed toward the NARROWER claim: a widened scope is a widened assertion about
+  // what the numbers describe, and it must be asked for exactly.
+  const payerScope = input.payerScope === 'all' ? ('all' as const) : undefined;
+  return getQualifySnapshotCore(realDeps, {
+    ...input,
+    payerOverride,
+    ...(payerScope ? { payerScope } : { payerScope: undefined }),
+    market: sanitizeMarket(input.market),
+  });
 }
 
 /** Resolve-by-payer: load a payer's facilities/cases directly from its label (the Heating-up path). */

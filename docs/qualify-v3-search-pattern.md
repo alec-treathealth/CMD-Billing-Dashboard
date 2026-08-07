@@ -63,3 +63,87 @@ GSAP stage transitions: outgoing stage clears, incoming slides up 14px/220ms eas
 stagger `min(index,3) * 60ms` (capped — long lists must not cascade forever). One easing.
 `prefers-reduced-motion` disables all of it. Motion communicates progression through the
 stages; it never blocks input.
+
+## RULING REVERSED — 2026-08-07: the Skip ranks the whole radius, not one label
+
+Alec's direction, this date, modelled explicitly on the Collections guided search: *"rank
+ALL-PAYERS by default on skip — the identifier's whole footprint, every billed-under label"*,
+with the filters becoming *"user-controlled facets"*, and *"when the user chooses Skip, use
+streaming motion to cover the entire search, and at the end show which filters are ON and
+which are OFF so they can toggle them."*
+
+**What this reverses.** The core ruling that a DIRECT-path ranking is payer-scoped. That was
+not an incidental implementation choice — it was load-bearing in three places: `resolvePayer`
+picked the single highest-line-count `primary_payer`, `buildFacilityRankingQuery` emitted a
+single-label equality, and the builder's fail-closed guard *refused* a null payer without a
+market narrow. It is recorded here rather than quietly changed because a reader of the
+sections above would otherwise reasonably conclude the old rule still holds.
+
+**Why.** The Skip's own control says "search all plans" and its banner promised "every
+facility this member has history at". Measured on a live prefix, it delivered one label of
+three: AETNA 5,308 lines ranked, AETNA US HEALTHCARE 1,038 and AETNA - FIRST HEALTH NETWORK 7
+excluded — along with the two facilities the member billed at **only** under those labels. The
+promise was structurally unkeepable, so PR #165 narrowed the copy to match the behaviour; this
+change fixes the behaviour instead.
+
+**Feasibility, measured live 2026-08-07** (as `claims_reader`, busiest prefix = 9,268 rollup
+rows, warm): payer+token 30d = 2.05ms / 208 buffers; identifier-wide 30d = 3.2ms / 264
+buffers; identifier-wide 365d (the ladder's worst case, and the common skip shape) = 19.4ms /
+1,471 buffers. All shared-buffer hits, **no new index**. The token narrow bounds the scan at
+least as tightly as the employer semi-join the guard already accepted.
+
+### The three rules this ruling carries
+
+1. **Empty means no restriction, never "match nothing."** Straight from the Collections model
+   (`cmdExplorerQuery.ts`): a facet with nothing selected omits its condition entirely. A
+   builder that emitted `= any(ARRAY[])` would turn "facets off = whole radius" into zero rows.
+   The billed-under scope is the same shape: no chip active *is* the wide state.
+
+2. **A blended percentage is never a payer contract rate.** Under an all-payers ranking a
+   facility's `pctAllowedOfBilled` — and therefore its `ratingV2` — is dollar-weighted across
+   every label behind its rows. That is an honest answer to *"what did this member's claims
+   actually allow here"* and **not** an answer to *"what does payer X pay at facility Y."* Two
+   facilities can rank differently purely on payer mix. This is Simpson's paradox on the exact
+   surface admissions staff act on, so every card carries `payerCount` and says "blended across
+   N payers" above 1, and the BILLED UNDER chips are the one-click un-blend.
+
+3. **The scope is a typed claim, not a display default.** `QualifyResolved.payerName` is
+   nullable now, beside an explicit `payerScope: 'payer' | 'all'` discriminator (invariant:
+   `'all'` ⟺ `payerName === null`). Nullable *forces* every consumer to confront the case at
+   compile time; the discriminator *names* it, so the tempting `?? 'This search'` reads as
+   wrong rather than natural. Consumers needing exactly one label go through `scopedPayerOf`,
+   which returns null rather than inventing one.
+
+### Two consequences worth stating rather than discovering
+
+- **Ratings shift between the two scopes, and the factor detail says so.** Code decisions are
+  payer-keyed, so an all-payers read cannot look one up; the coding factor (weight 30) is
+  excluded, which renormalizes the other four. The same facility therefore scores differently
+  all-payers than payer-scoped. Its detail reads *"Ranked across every payer this member bills
+  under — code decisions are payer-scoped, so this factor is excluded rather than blended.
+  Scoping to one label with the BILLED UNDER chips brings it back, and can move the score."*
+
+- **Mobile KPI tiles are hidden, not re-captioned.** `QualifyOrientationScope` has payer,
+  facility and window axes and no identifier axis, so "book KPIs for this member's whole
+  footprint" does not exist. Falling through to the book-wide numbers would put three
+  percentages about the entire book directly above a ranking of one member's facilities. The
+  tiles are withheld with the reason stated.
+
+### The Skip reveal
+
+Streaming motion in the flow's **existing** vocabulary — 220ms, `power2.out`, stagger
+`min(index,3) × 60ms`, disabled entirely under `prefers-reduced-motion`. It carries the eye
+from the stage entrance down through a facet inventory that states, in words, whether each
+facet is ON or OFF: window (never off — it says which window instead), plan type, funding,
+employers, billed under. Every row is toggleable **in place**: the inventory is the controls,
+not a summary beside them.
+
+One deviation from the tile treatment, and it is the constraint rather than a detail: the
+inventory animates plain `opacity`, never `autoAlpha`. `autoAlpha` sets `visibility: hidden`,
+which would make live controls genuinely unclickable and drop them out of the accessibility
+tree for the length of the stagger. Motion narrates progression; it does not gate input.
+
+> **Not in this repo yet: the `area` facet.** Alec's inventory list names it, and PR #164
+> (`feat/qualify-v3-location-facet`) adds it — unmerged as of this date. When it lands it needs
+> its own `data-v3-facet` row and `FacetState` badge, or the inventory's claim to list *every*
+> facet quietly stops being true.

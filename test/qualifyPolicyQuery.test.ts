@@ -93,9 +93,46 @@ test('ranking (payer path) still binds payer and now returns the median TTP day 
 });
 
 
-test('ranking with payer=null and NO market narrow throws at the builder chokepoint (finding #5)', () => {
-  assert.throws(() => buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, {}), /market narrow/);
-  assert.throws(() => buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, { employers: [] }), /market narrow/);
+test('ranking with payer=null and NO scope at all still throws at the builder chokepoint (finding #5)', () => {
+  // The guard's REASON is unchanged — an unscoped null ranks the whole book — but it now recognises
+  // TWO scopes. These four calls carry neither, so they must still throw.
+  assert.throws(() => buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, {}), /requires a scope/);
+  assert.throws(() => buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, { employers: [] }), /requires a scope/);
+  // A token with NO kind is not a scope: the builder cannot pick a blind-index column without one, so
+  // the narrow would silently vanish and the read would go book-wide. Same for a kind with no token.
+  assert.throws(
+    () => buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, {}, 'HMAC', null),
+    /requires a scope/,
+  );
+  assert.throws(
+    () => buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, {}, null, 'prefix'),
+    /requires a scope/,
+  );
+});
+
+// ── IDENTIFIER-WIDE MODE (the v3 Skip, 2026-08-07) ───────────────────────────────────────────────
+// Reverses "the DIRECT path's rankings are payer-scoped" for this one input. The TOKEN is the scope:
+// a blind-index equality bounds the scan at least as tightly as an employer semi-join (measured live
+// — 3.2ms/264 buffers at 30d on the busiest prefix, 19.4ms/1,471 at the 365d ladder worst case).
+test('ranking with payer=null and a token+kind is ALLOWED — the identifier narrow IS the scope', () => {
+  const { sql, params } = buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, {}, 'HMAC_PFX', 'prefix');
+  assert.ok(!/primary_payer = \$/.test(sql), 'no payer equality — the ranking spans every label');
+  assert.match(sql, /and member_id_prefix_bidx = \$\d+/, 'the identifier narrow IS present');
+  assert.ok(params.includes('HMAC_PFX'), 'the token is a bound param, never inlined');
+  // Fail-closed shape that must survive the widening.
+  assert.match(sql, /business_entity_id = any\(\$1::uuid\[\]\)/, 'tenant scope intact');
+  assert.match(sql, /payment_received >= \$\d+::date and payment_received < \$\d+::date/, 'window intact');
+});
+
+test('ranking: payer_count rides the SAME scan so a card can disclose the blend', () => {
+  // Present in BOTH modes — degenerate (always 1) under a payer equality, load-bearing without one.
+  for (const q of [
+    buildFacilityRankingQuery('AETNA', '2026-05-01', '2026-08-01', ENT),
+    buildFacilityRankingQuery(null, '2026-05-01', '2026-08-01', ENT, {}, 'HMAC_PFX', 'prefix'),
+  ]) {
+    assert.match(q.sql, /count\(distinct primary_payer\)::int as payer_count/, 'counted in the inner aggregate');
+    assert.match(q.sql, /agg\.payer_count/, 'projected through the outer select');
+  }
 });
 
 // ── The SPREAD builders (2026-08-06): the widening that stops a single mode() standing in for a

@@ -387,10 +387,24 @@ test('a NO-OP scope click cannot flip the refetch flag — the stuck-headline bu
     { ...base, payerLabel: null },
     { ...base, funding: ['Self-Funded'] },
     { ...base, employers: ['TESLA'] },
+    // ⚠ THE SCOPE IS A REQUEST INPUT, so it is a request IDENTITY input (2026-08-07). Without it, a
+    // plain skip (payerLabel null, all-payers) and an un-skip whose plan resolves to no bridge label
+    // (payerLabel null, payer-scoped) share a key: the effect never re-runs, and a payer-scoped
+    // answer keeps rendering under an all-payers caption — or the reverse.
+    { ...base, payerLabel: null, allPayers: true },
   ]) {
     assert.notEqual(scopeKeyOf(changed), key, `a real change must move the key: ${JSON.stringify(changed)}`);
     assert.equal(isRefetching(true, key, scopeKeyOf(changed)), true, 'and that IS a refetch');
   }
+
+  // Same payer label, different SCOPE — the pair the new dimension exists to separate.
+  assert.notEqual(
+    scopeKeyOf({ ...base, payerLabel: null, allPayers: true }),
+    scopeKeyOf({ ...base, payerLabel: null }),
+    'all-payers and "no bridge label" are different requests and must not share a key',
+  );
+  // Omitting it is identical to false, so every pre-existing key is unchanged.
+  assert.equal(scopeKeyOf({ ...base, allPayers: false }), key, 'the added dimension is inert when off');
 
   // Order within a facet is not a change — the key sorts, so chip order cannot cause a phantom fetch.
   assert.equal(
@@ -487,7 +501,14 @@ test('a billed-under re-scope AFTER a skip is still a skip — it must not re-pr
   const scopeSource = scopeSourceOf({ payerOverride: flow.payerOverride, pickLabel: null });
   assert.equal(scopeSource, 'user');
 
-  const snap = { ...snapshotFixture(), resolved: { payerName: 'AETNA' }, payerOverridden: true } as QualifySnapshot;
+  // payerScope 'payer': an HONOURED chip beats the skip's all-payers request in the core (one scope
+  // claim, decided in one place), so this snapshot really is single-label — which is why the banner
+  // below takes the re-scoped arm rather than the all-payers one.
+  const snap = {
+    ...snapshotFixture(),
+    resolved: { payerName: 'AETNA', payerScope: 'payer' },
+    payerOverridden: true,
+  } as QualifySnapshot;
   const html = render(
     props('answer', r, {
       answer: answerProps({ snapshot: snap, skipped: flow.skipped, scopeSource, payerOverride: flow.payerOverride }),
@@ -507,8 +528,10 @@ test('a billed-under re-scope AFTER a skip is still a skip — it must not re-pr
   assert.ok(!html.includes('In-network status is not captured on this VOB'), 'nor its resolve-time notices');
   assert.match(html, /No plan was chosen, so the notes about one plan/, 'their absence is explained, not silent');
   assert.match(html, /identifies the plan that was resolved\s+before you skipped/, 'the predicate keeps its skip caption');
-  // The skip banner is the sentence that vanished on the first chip press.
-  assert.match(html, /You skipped the plan questions, so this is a general search/);
+  // The skip banner is the sentence that vanished on the first chip press. Since 2026-08-07 it takes
+  // the RE-SCOPED arm here, because the chip really did narrow the ranking to one label — the
+  // all-payers wording would be the mirror-image overclaim.
+  assert.match(html, /You skipped the plan questions, but the ranking is scoped to AETNA/);
   assert.ok(!html.includes('could not be scoped to'), 'declining to narrow is still not a failure to narrow');
 
   // THE DEFECT WAS INDISTINGUISHABILITY: a genuine pick plus one chip rendered byte-identically to
@@ -679,10 +702,18 @@ test('before the snapshot lands, a skipped caption names NO payer rather than th
 });
 
 test('a skipped search says it was skipped — never "we could not narrow"', () => {
+  // A PLAIN skip is identifier-wide since 2026-08-07 (payerScope 'all'), so the banner promises the
+  // whole footprint and can now keep that promise. The snapshot fixture is payer-scoped by default,
+  // so this states the scope it means rather than inheriting one.
+  const allSnap = {
+    ...snapshotFixture(),
+    resolved: { ...snapshotFixture().resolved, payerName: null, payerScope: 'all' },
+  } as QualifySnapshot;
   const skipped = render(
-    props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), skipped: true, scopeSource: 'dominant' }) }),
+    props('answer', fixture(), { answer: answerProps({ snapshot: allSnap, skipped: true, scopeSource: 'dominant' }) }),
   );
   assert.match(skipped, /You skipped the plan questions, so this is a general search/);
+  assert.match(skipped, /across all \d+ payers they bill under/, 'and the promise names the whole footprint');
   assert.ok(!skipped.includes('could not be scoped to'), 'declining to narrow is not a failure to narrow');
   // And the two claims stay distinct: a genuine bridge failure keeps its own wording.
   const dominant = render(
@@ -710,7 +741,9 @@ test('the filter lines are visible controls, multiselect, and state what they di
   assert.match(html, / · on/, 'and carries a WORD, not just a hue');
   // The employer control is a real dropdown pill, stating its reach in its own summary.
   assert.match(html, />Employers</);
-  assert.match(html, /Searched over 2|Narrowed to \d+ of 2/);
+  // The reach now rides the shared ON/OFF badge (2026-08-07) instead of bespoke summary copy, so the
+  // employer facet reads in the same vocabulary as every other row of the inventory.
+  assert.match(html, /Off · all 2|On · \d+ of 2/);
   // What the filter did to the ranking is STATED, with a way out.
   assert.match(html, /Ranking over \d+ of \d+ plans/);
   assert.match(html, /Clear filters/);
@@ -1328,6 +1361,148 @@ test('the billed-under caption has its own arms for a SKIP — nothing was picke
   assert.match(skipThenChip, /No plan chosen — this label is your own re-scope\./);
   assert.ok(!skipThenChip.includes('Scoped to the plan you picked.'), 'no plan was picked');
   assert.ok(!/>Your selection\./.test(skipThenChip), 'and "Your selection." alone would imply one was');
+});
+
+// ── IDENTIFIER-WIDE SKIP (Alec, 2026-08-07): the whole footprint, the blend disclosure, and the
+// ON/OFF inventory the Skip now lands on. ────────────────────────────────────────────────────────
+
+/** The snapshot a plain Skip produces since the reversal: no single label, every label ranked. */
+function allPayersSnapshot(over: Partial<QualifySnapshot> = {}): QualifySnapshot {
+  const base = snapshotFixture();
+  return {
+    ...base,
+    resolved: { ...base.resolved, payerName: null, payerScope: 'all' },
+    ...over,
+  } as unknown as QualifySnapshot;
+}
+
+test('all-payers: NO billed-under chip is active, and the caption says the ranking is un-narrowed', () => {
+  const html = render(
+    props('answer', fixture(), { answer: answerProps({ snapshot: allPayersSnapshot(), skipped: true, scopeSource: 'dominant' }) }),
+  );
+  // The Collections model: empty selection means NO restriction, and no chip pretends otherwise.
+  assert.ok(!html.includes(' · showing'), 'no chip claims to be the scope');
+  assert.ok(!/aria-pressed="true"[^>]*>AETNA/.test(html), 'and none reads pressed');
+  assert.match(html, /No label selected — ranking across all of them\. Pick one to un-blend\./);
+  // The single-label captions are all FALSE here and must not appear.
+  assert.ok(!html.includes('largest label by volume'), 'nothing was defaulted to');
+  assert.ok(!html.includes('Could not scope'), 'nothing failed');
+  // And the facet badge names the un-narrowed state in the same vocabulary as every other row.
+  assert.match(html, /Off · all 2 labels/);
+});
+
+test('all-payers: the skip banner keeps the promise the copy always made', () => {
+  const html = render(
+    props('answer', fixture(), { answer: answerProps({ snapshot: allPayersSnapshot(), skipped: true, scopeSource: 'dominant' }) }),
+  );
+  assert.match(html, /every facility this member\s+has history at,\s*across all 2 payers they bill under/);
+  // The count comes from payerOptions, which fails soft to []. A fabricated "all 1 payer" under a
+  // true all-payers claim is worse than no count, so the count is dropped in that state.
+  const noSpread = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: allPayersSnapshot({ payerOptions: [] }), skipped: true, scopeSource: 'dominant' }),
+    }),
+  );
+  assert.match(noSpread, /across every payer they bill under/);
+  assert.ok(!/across all 1 payer/.test(noSpread), 'a lost spread must not manufacture a count');
+  // The pre-2026-08-07 sentence named one label. Under an all-payers ranking that is the scope lie
+  // this whole change exists to remove, so no label may be interpolated anywhere near it.
+  assert.ok(!/history at under AETNA/.test(html), 'no single label is claimed as the scope');
+  // The screen-reader line carries the SAME claim — that is where an unfixed one survives a browser pass.
+  assert.match(html, /Showing a general search across all plans and all payers on file\./);
+  // The identity line names the scope instead of rendering an empty subject from a null payerName.
+  assert.match(html, /All payers on file/);
+  assert.ok(!/<span class="font-semibold"><\/span>/.test(html), 'the identity line never renders an empty subject');
+});
+
+test('all-payers: the receipt records the wider scope rather than falling silent about it', () => {
+  const html = render(
+    props('answer', fixture(), { answer: answerProps({ snapshot: allPayersSnapshot(), skipped: true, scopeSource: 'dominant' }) }),
+  );
+  const receipt = html.slice(html.indexOf('aria-label="Your search so far"'), html.indexOf('</nav>'));
+  assert.match(receipt, /All plans · all payers/);
+  assert.ok(!receipt.includes('your re-scope'), 'nothing was re-scoped — the default IS wide now');
+});
+
+test('THE BLEND DISCLOSURE: a card whose rows span several labels says so; a single-label card does not', () => {
+  const blended = allPayersSnapshot({
+    facilities: [
+      facility({ payerCount: 3 }),
+      facility({ rank: 2, name: 'KENTUCKY WELLNESS CENTER', facilityKey: 'KWC', payerCount: 1 }),
+    ],
+  } as Partial<QualifySnapshot>);
+  const html = render(props('answer', fixture(), { answer: answerProps({ snapshot: blended, skipped: true, scopeSource: 'dominant' }) }));
+  // ⚠ Simpson's paradox on the surface admissions acts on: a facility can read green on an
+  // AETNA-heavy mix while the member's OTHER label pays badly at the same place. The percentage and
+  // the rating on this card are a cross-label blend and the card must never let that pass silently.
+  assert.match(html, /blended across\s*<span class="ths-num" aria-label="3 billed-under labels">\s*3\s*<\/span>\s*payers/);
+  assert.equal((html.match(/blended across/g) ?? []).length, 1, 'only the blended card discloses — 1 label is not a blend');
+});
+
+test('the blend disclosure is ABSENT from an ordinary payer-scoped search', () => {
+  // payerCount is 1 on every card of a payer-scoped ranking by construction (the query pins one
+  // label), so this phrase must never appear on the ~84% of searches that never skip.
+  const html = render(props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture() }) }));
+  assert.ok(!html.includes('blended across'), 'no blend caption on a single-label ranking');
+});
+
+test('THE SKIP INVENTORY: every facet states ON or OFF, and the toggles are live in the same markup', () => {
+  const html = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: allPayersSnapshot(), skipped: true, scopeSource: 'dominant', candidates: orderedCandidates(fixture()) }),
+    }),
+  );
+  const inv = html.slice(html.indexOf('data-v3-inventory'));
+  // The headline claim, then one legible state per facet.
+  assert.match(inv, /Every switch is off — nothing below is restricting this search\./);
+  assert.match(inv, />Window<\/span><span class="[^"]*">On · automatic</, 'window is never off, and says which it is');
+  assert.match(inv, />Plan type<\/span><span class="[^"]*">Off · all \d+</);
+  assert.match(inv, />Funding<\/span><span class="[^"]*">Off · all \d+</);
+  assert.match(inv, />Employers<\/span><span class="[^"]*">Off · all \d+</);
+  assert.match(inv, />Billed under<\/span><span class="[^"]*">Off · all 2 labels</);
+  // ⚠ TOGGLEABLE IN PLACE. The inventory is the CONTROLS, not a summary beside them — every row it
+  // lists carries its own buttons in the same markup, which is what "flip any of them" requires.
+  assert.match(inv, /aria-pressed="false"[^>]*>PPO/, 'the plan-type toggles are here');
+  assert.match(inv, /aria-pressed="false"[^>]*>AETNA/, 'so are the billed-under toggles');
+  // Marked for the stagger. Six beats: the headline, window, plan type, funding, employers, billed under.
+  assert.ok((inv.match(/data-v3-facet/g) ?? []).length >= 5, 'the rows carry the reveal hook');
+});
+
+test('the inventory headline flips once ANY facet is on — including the billed-under scope alone', () => {
+  // ⚠ `answerFiltersActive` covers three of the six facets. Reusing it here would print "every switch
+  // is off" beside a lit BILLED UNDER chip, which is the claim this sentence exists to make true.
+  const scoped = render(
+    props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), skipped: true, scopeSource: 'dominant' }) }),
+  );
+  assert.match(scoped, /Some switches are on — everything marked Off below is unrestricted\./);
+  assert.ok(!scoped.includes('Every switch is off'), 'a payer-scoped ranking is a switch that is on');
+});
+
+test('with ONE label on file the billed-under scope is not counted as a switch that is on', () => {
+  // The chip row does not render below 2 options, so calling the scope "on" would point the operator
+  // at a control they cannot see, to widen a search that is already as wide as it can be — with one
+  // label, that label IS the whole footprint.
+  const one = {
+    ...snapshotFixture(),
+    payerOptions: [{ payer: 'AETNA', lines: 3690, patients: 122, lastPayment: '2026-08-02' }],
+  } as QualifySnapshot;
+  const html = render(props('answer', fixture(), { answer: answerProps({ snapshot: one, skipped: true, scopeSource: 'dominant' }) }));
+  assert.ok(!html.includes('Billed under'), 'the chip row self-hides at one option');
+  assert.match(html, /Every switch is off/);
+  assert.ok(!html.includes('Some switches are on'));
+});
+
+test('the inventory sentence is a SKIP affordance — it does not intrude on a resolved plan pick', () => {
+  const picked = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'pick', candidates: orderedCandidates(fixture()) }),
+    }),
+  );
+  assert.ok(!picked.includes('Every switch is off'), 'no inventory headline outside a skip');
+  assert.ok(!picked.includes('Some switches are on'));
+  // The per-facet badges DO stay — they are honest on every path, and a second vocabulary for the
+  // picked path would be exactly the kind of drift this file keeps out.
+  assert.match(picked, /Off · all \d+/);
 });
 
 test('a dominant-scoped ranking under a multi-plan pick states the mismatch in words, not chips', () => {

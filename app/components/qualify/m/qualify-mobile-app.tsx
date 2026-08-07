@@ -31,7 +31,7 @@
  */
 import { useCallback, useEffect, useReducer, useRef, useState, useTransition, type ReactNode } from 'react';
 import { getQualifySnapshot, getQualifySnapshotByPayer, getQualifyFacilityCases, getQualifyOverview, getQualifyBookKpis, revealQualifyRows } from '@/lib/qualify/actions';
-import { QUALIFY_WINDOW_OPTIONS, QUALIFY_ROLLING_OPTIONS, QUALIFY_CAL_YEAR_MIN, QUALIFY_REVEAL_BATCH_CAP, qualifyRollingLabel, qualifyWindowLabel, sniffQualifyKind, trailingWindow } from '@/lib/qualify/contract';
+import { QUALIFY_WINDOW_OPTIONS, QUALIFY_ROLLING_OPTIONS, QUALIFY_CAL_YEAR_MIN, QUALIFY_REVEAL_BATCH_CAP, qualifyRollingLabel, qualifyWindowLabel, scopedPayerOf, sniffQualifyKind, trailingWindow } from '@/lib/qualify/contract';
 import type { QualifySnapshot, QualifyFacility, QualifyFacilityTrend, QualifyBookKpis, QualifyClaim, QualifyWindow, QualifyPhi, QualifyMarket } from '@/lib/qualify/contract';
 import { cohortReducer, cohortKey, INITIAL_COHORT, type QualifyCohort } from '@/lib/qualify/qualifyCohort';
 import { resolveLandingWins, drillLandingWins, isPayerChange, scopeFacilitiesForList, isIdentifierResolution, isIdentifierEmpty, identifierEmptyTerm } from '@/lib/qualify/qualifyGuards';
@@ -252,8 +252,11 @@ export function QualifyMobileApp({
           setPage(0);
           setLocFilter(null);
         }
-        refreshScopedKpis(snap.resolved?.payerName ?? null, w); // scope the KPI tiles to the resolved payer
-        syncCohortForResolution(snap.resolved?.payerName ?? null, w);
+        // `scopedPayerOf`, not `?? null`: an all-payers resolution has no single label to scope
+        // these to, and passing null here means "clear the scope", which the render guard above
+        // then refuses to caption as book-wide. See kpiAllPayers.
+        refreshScopedKpis(scopedPayerOf(snap.resolved), w); // scope the KPI tiles to the resolved payer
+        syncCohortForResolution(scopedPayerOf(snap.resolved), w);
       } catch {
         if (!resolveLandingWins(seq, resolveSeq.current)) return;
         setHint('Qualify is unavailable right now. Please try again.');
@@ -280,13 +283,13 @@ export function QualifyMobileApp({
         setList(snap.facilities);
         setPage(0);
         setLocFilter(null);
-        refreshScopedKpis(snap.resolved?.payerName ?? null, w); // scope the KPI tiles to the resolved payer
+        refreshScopedKpis(scopedPayerOf(snap.resolved), w); // scope the KPI tiles to the resolved payer
         // HYBRID (Change E): when the tapped chip's facility ranks under its payer, open it directly.
         const focus = focusKey ? snap.facilities.find((f) => f.facilityKey === focusKey) : undefined;
         // Skip syncCohort's own drill when a focus open follows — openFacility issues the single
         // authoritative (audited) drill; without this the same-payer path double-fetches the OLD
         // facility's cases for a sheet we're about to replace (review finding).
-        syncCohortForResolution(snap.resolved?.payerName ?? null, w, !!focus);
+        syncCohortForResolution(scopedPayerOf(snap.resolved), w, !!focus);
         if (focus) openFacility(focus);
       } catch {
         if (!resolveLandingWins(seq, resolveSeq.current)) return;
@@ -492,7 +495,22 @@ export function QualifyMobileApp({
   // builder returns a distinct-patient count, and the tile display is SAMPLE-GATED below (a <3-patient
   // slice renders no confident %, matching the ranking + desktop). Employer/funding still never scope
   // these tiles (that's why refreshScopedKpis passes { payers } only, no market).
-  const kpiScopePayer = snapshot?.resolved?.payerName ?? null;
+  //
+  // ⚠ ALL-PAYERS IS NOT BOOK-WIDE, AND FALLING THROUGH TO THE BOOK IS THE WORST OPTION HERE.
+  // `QualifyOrientationScope` (the KPI builder's scope type) has payer + facility + window axes and
+  // NO identifier axis — there is no such thing as "the book KPIs for this member's whole footprint",
+  // and there cannot be without a new query. So when the ranking is identifier-wide the honest set is
+  // EMPTY and the tiles are HIDDEN, with the reason stated in their place. The tempting alternative —
+  // let `kpiScopePayer` go null and let `tilesScoped` fall through to the book-wide numbers already
+  // in hand — is exactly the failure this repo keeps re-learning: a plausible number under a caption
+  // that does not describe it. Three percentages about ~30 facilities' entire book would sit directly
+  // above a ranking of the handful of facilities one member billed at, and nothing would say so.
+  //
+  // Mobile has no Skip control today, so this branch is not reachable from the mobile UI — it is here
+  // because the SHAPE became reachable in the contract, and an unreachable honest branch costs
+  // nothing where a reachable silent fallback costs trust.
+  const kpiAllPayers = snapshot?.resolved?.payerScope === 'all';
+  const kpiScopePayer = scopedPayerOf(snapshot?.resolved ?? null);
   const tilesScoped = searched && kpiScopePayer !== null && scopedKpis !== null;
   const shownKpis = tilesScoped ? scopedKpis : kpis;
   // SAMPLE GATE (Design B parity with desktop): tier the tiles by the slice's distinct-patient count.
@@ -565,9 +583,14 @@ export function QualifyMobileApp({
   }
 
   const resolvedForSheet = snapshot?.resolved ?? null;
+  // `searchContext.payer` SEEDS the detail sheet's payer chip — it pre-selects a filter. Under an
+  // all-payers ranking there is no label to seed, and seeding one would silently narrow the drill
+  // below the ranking that opened it. No context ⇒ no chip pre-selected ⇒ every payer's claims, which
+  // is the Collections model ("empty selection means no restriction") and matches the cards above.
+  const sheetPayer = scopedPayerOf(resolvedForSheet);
   const searchContext =
-    resolvedForSheet && resolvedForSheet.matchedOn === 'prefix' && resolvedForSheet.matchedValue
-      ? { term: resolvedForSheet.matchedValue, payer: resolvedForSheet.payerName }
+    resolvedForSheet && resolvedForSheet.matchedOn === 'prefix' && resolvedForSheet.matchedValue && sheetPayer !== null
+      ? { term: resolvedForSheet.matchedValue, payer: sheetPayer }
       : null;
 
   const areaChips = snapshot?.resolved ? deriveAreaChips(snapshot.facilities) : [];
@@ -582,7 +605,9 @@ export function QualifyMobileApp({
   const selMonth = win.kind === 'month' ? win.month : 0;
 
   // CHANGE G — the breadcrumb levels currently live (payer › facility › claim).
-  const crumbPayer = snapshot?.resolved?.payerName ?? null;
+  // The breadcrumb names ONE payer; an all-payers resolution has none to name, so the crumb starts
+  // at the facility instead of labelling the trail with a payer the ranking is not scoped to.
+  const crumbPayer = scopedPayerOf(snapshot?.resolved ?? null);
   const crumbs: { key: string; label: string; onTap: (() => void) | null }[] = [];
   if (crumbPayer) {
     crumbs.push({ key: 'payer', label: crumbPayer, onTap: detail || claim ? () => { setClaim(null); closeFacility(); } : null });
@@ -800,27 +825,38 @@ export function QualifyMobileApp({
           subject resolves (mirrors desktop). SAMPLE-GATED (Design B): a <3-patient slice renders no
           confident % ("insufficient data"); 3-9 shows the % with a thin-sample caption. The LOC lens
           never re-scopes these. */}
-      <div style={{ display: 'flex', gap: 8, padding: '12px 16px 2px' }}>
-        {(
-          [
-            { key: 'allowed', label: 'allowed / billed', v: shownKpis?.pctAllowedOfBilled ?? null, color: RATING_HEX.ok, bg: '#E6F2EC' },
-            { key: 'paidAllowed', label: 'paid / allowed', v: shownKpis?.pctPaidOfAllowed ?? null, color: RATING_HEX.warn, bg: '#FBF1DE' },
-            { key: 'paidBilled', label: 'paid / billed', v: shownKpis?.pctPaidOfBilled ?? null, color: RATING_HEX.warn, bg: '#FBF1DE' },
-          ] as const
-        ).map((t) => (
-          <div key={t.key} style={{ flex: 1, borderRadius: 12, border: `1px solid ${QUALIFY_PALETTE.line}`, padding: '9px 11px', background: tileInsufficient ? '#F1F3F2' : t.bg }}>
-            <div className="ths-num" style={{ fontSize: 20, fontWeight: 600, color: tileInsufficient ? INK400 : t.color }}>
-              {tileInsufficient || t.v === null ? '—' : `${Math.round(t.v)}%`}
-            </div>
-            <div style={{ fontSize: 9.5, color: QUALIFY_PALETTE.ink600, fontWeight: 600, marginTop: 2 }}>{t.label}</div>
+      {/* ALL-PAYERS: no tiles, and a sentence where they were. See kpiAllPayers above for why the
+          book-wide fallback is refused rather than captioned. */}
+      {kpiAllPayers ? (
+        <div style={{ padding: '12px 16px 2px', fontSize: 11, fontWeight: 600, color: INK400 }}>
+          No book-wide tiles for an all-payers search — these three percentages can only be scoped to one
+          payer, and this ranking spans every payer this member bills under.
+        </div>
+      ) : (
+        <>
+          <div style={{ display: 'flex', gap: 8, padding: '12px 16px 2px' }}>
+            {(
+              [
+                { key: 'allowed', label: 'allowed / billed', v: shownKpis?.pctAllowedOfBilled ?? null, color: RATING_HEX.ok, bg: '#E6F2EC' },
+                { key: 'paidAllowed', label: 'paid / allowed', v: shownKpis?.pctPaidOfAllowed ?? null, color: RATING_HEX.warn, bg: '#FBF1DE' },
+                { key: 'paidBilled', label: 'paid / billed', v: shownKpis?.pctPaidOfBilled ?? null, color: RATING_HEX.warn, bg: '#FBF1DE' },
+              ] as const
+            ).map((t) => (
+              <div key={t.key} style={{ flex: 1, borderRadius: 12, border: `1px solid ${QUALIFY_PALETTE.line}`, padding: '9px 11px', background: tileInsufficient ? '#F1F3F2' : t.bg }}>
+                <div className="ths-num" style={{ fontSize: 20, fontWeight: 600, color: tileInsufficient ? INK400 : t.color }}>
+                  {tileInsufficient || t.v === null ? '—' : `${Math.round(t.v)}%`}
+                </div>
+                <div style={{ fontSize: 9.5, color: QUALIFY_PALETTE.ink600, fontWeight: 600, marginTop: 2 }}>{t.label}</div>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
-      <div style={{ padding: '4px 16px 0', fontSize: 10, fontWeight: 600, color: INK400, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-        {tilesScoped ? kpiScopePayer : 'book-wide'}
-        {tileTierNote}
-        {locFilter !== null ? ' · not LOC-scoped' : ''}
-      </div>
+          <div style={{ padding: '4px 16px 0', fontSize: 10, fontWeight: 600, color: INK400, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {tilesScoped ? kpiScopePayer : 'book-wide'}
+            {tileTierNote}
+            {locFilter !== null ? ' · not LOC-scoped' : ''}
+          </div>
+        </>
+      )}
 
       <HeatingUp trends={trends} window={win} onOpen={(t) => { if (t.dominantPayer) resolveByPayer(t.dominantPayer, winRef.current, t.facilityKey); }} />
       <SwRegister />

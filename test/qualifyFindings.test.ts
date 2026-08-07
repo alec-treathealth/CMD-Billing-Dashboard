@@ -98,7 +98,7 @@ test('NEITHER derivation ever emits a dollar — blind and sighted sessions see 
       vobFreshAsOf: '2026-08-01', vobStale: true, deductible: '$1,500', deductibleMet: null, oopMax: '$6,000', oopMet: null },
     payerOptions: [{ payer: 'AETNA', lines: 100, patients: 9, lastPayment: '2026-07-30' },
                    { payer: 'CIGNA', lines: 300, patients: 12, lastPayment: '2026-06-01' }],
-    resolved: { payerName: 'AETNA', matchedOn: 'prefix', matchedValue: 'W20', totalCharges: 120,
+    resolved: { payerName: 'AETNA', payerScope: 'payer', matchedOn: 'prefix', matchedValue: 'W20', totalCharges: 120,
                 facilityCount: 1, windowStart: '2026-05-01', windowEnd: '2026-08-01', identifierScoped: true },
   });
   const text = JSON.stringify([deriveFacilityFindings(f, s), deriveSearchTrace(s)]);
@@ -119,7 +119,7 @@ test('trace narrates the DECISIONS: spread, widened window, minority payer, esti
       vobFreshAsOf: '2026-08-01', vobStale: false, deductible: null, deductibleMet: null, oopMax: null, oopMet: null },
     payerOptions: [{ payer: 'AETNA', lines: 100, patients: 9, lastPayment: null },
                    { payer: 'CIGNA', lines: 300, patients: 12, lastPayment: null }],
-    resolved: { payerName: 'AETNA', matchedOn: 'prefix', matchedValue: 'W20', totalCharges: 120,
+    resolved: { payerName: 'AETNA', payerScope: 'payer', matchedOn: 'prefix', matchedValue: 'W20', totalCharges: 120,
                 facilityCount: 1, windowStart: '2026-05-01', windowEnd: '2026-08-01', identifierScoped: true },
   }));
   const all = lines.map((l) => l.text).join(' | ');
@@ -157,10 +157,28 @@ test('a user drill-down is narrated as THEIR choice, not as the resolve', () => 
     payerOverridden: true,
     payerOptions: [{ payer: 'AETNA', lines: 100, patients: 9, lastPayment: null },
                    { payer: 'CIGNA', lines: 300, patients: 12, lastPayment: null }],
-    resolved: { payerName: 'CIGNA', matchedOn: 'prefix', matchedValue: 'W20', totalCharges: 1,
+    resolved: { payerName: 'CIGNA', payerScope: 'payer', matchedOn: 'prefix', matchedValue: 'W20', totalCharges: 1,
                 facilityCount: 0, windowStart: '2026-05-01', windowEnd: '2026-08-01', identifierScoped: true },
   }));
   assert.match(lines.map((l) => l.text).join(' '), /your selection/);
+});
+
+// An IDENTIFIER-WIDE ranking (the v3 Skip, 2026-08-07) gets its own line rather than a variant of the
+// payer-scoped one. "Ranked under X (25% of claim lines)" is a scope CLAIM, and after the skip both
+// halves are false: there is no single X, and the ranking covers 100% of the lines, not one label's
+// share. The old expression would have printed "ranked under undefined" from a null payerName.
+test('trace: an all-payers ranking says so, and never names a label or a share', () => {
+  const lines = deriveSearchTrace(snap({
+    payerOptions: [{ payer: 'AETNA', lines: 100, patients: 9, lastPayment: null },
+                   { payer: 'CIGNA', lines: 300, patients: 12, lastPayment: null }],
+    resolved: { payerName: null, payerScope: 'all', matchedOn: 'prefix', matchedValue: 'W20', totalCharges: 400,
+                facilityCount: 4, windowStart: '2026-05-01', windowEnd: '2026-08-01', identifierScoped: true },
+  }));
+  const all = lines.map((l) => l.text).join(' | ');
+  assert.match(all, /Ranked across all 2 payers on file/);
+  assert.ok(!/ranked under/i.test(all), 'no single label is named');
+  assert.ok(!/% of claim lines/.test(all), 'a dominant-share figure is meaningless here');
+  assert.ok(!/undefined|null/.test(all), 'a null payerName must never reach the copy');
 });
 
 test('an empty snapshot narrates NOTHING rather than announcing it found nothing', () => {

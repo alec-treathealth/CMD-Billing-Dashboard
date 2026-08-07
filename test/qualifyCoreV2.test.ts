@@ -483,6 +483,122 @@ test('override is exact-match and whitespace-trimmed; empty/blank falls through 
   assert.equal(wrongCase.payerOverridden, false);
 });
 
+// ── IDENTIFIER-WIDE RANKING (the v3 Skip, Alec 2026-08-07) ───────────────────────────────────────
+// REVERSES the standing "the DIRECT path's rankings are payer-scoped" ruling for this one input.
+// Before it, a Skip that promised "search all plans" sent nothing, the core resolved the dominant
+// label, and the ranking silently covered one of up to seventeen — excluding both the other labels'
+// lines AND the facilities the member billed ONLY under them.
+
+test('payerScope:all ranks with payer=null while KEEPING the identifier narrow', async () => {
+  const calls: Array<{ payer: string | null; token: string | null | undefined }> = [];
+  const landing: Array<string | null> = [];
+  const deps = v2deps(SUPER, {
+    loadPayerSpread: SPREAD,
+    loadFacilities: async (payer, _f, _t, _e, _m, token) => {
+      calls.push({ payer, token });
+      return FAC;
+    },
+    loadIdentifierLandingFacility: async (_tok, _k, payer) => {
+      landing.push(payer);
+      return '405 recovery';
+    },
+  });
+  const snap = await getQualifySnapshotCore(deps, { ...AUTO_IN, payerScope: 'all' });
+  assert.equal(calls[0]!.payer, null, 'the ranking query gets no payer — every billed-under label');
+  // THE WHOLE POINT: null payer WITHOUT losing the identifier. This is "this member everywhere",
+  // not "the whole book" — the token is what keeps the second from happening.
+  assert.equal(calls[0]!.token, 'HMAC_TOKEN', 'the identifier narrow still scopes the ranking');
+  assert.equal(landing[0], null, 'the landing lookup widens in lockstep, or it lands outside the ranking');
+  assert.equal(snap.resolved?.identifierScoped, true);
+});
+
+test('payerScope:all resolves payerName NULL and payerScope "all" — the scope claim, not a decoration', async () => {
+  const deps = v2deps(SUPER, { loadPayerSpread: SPREAD });
+  const snap = await getQualifySnapshotCore(deps, { ...AUTO_IN, payerScope: 'all' });
+  assert.equal(snap.resolved?.payerScope, 'all');
+  // Nullable BY DESIGN: nine surfaces interpolate payerName into a sentence asserting what the
+  // numbers describe. Leaving it as "the dominant label, informationally" would leave all nine
+  // compiling and lying — the scope-lie class PRs #92/#148/#157 were spent removing.
+  assert.equal(snap.resolved?.payerName, null);
+  assert.equal(snap.payerOverridden, false, 'nothing was overridden — a scope is not an override');
+  // payerOptions is UNCHANGED: it is now the UN-SELECTED facet (the Collections model).
+  assert.equal(snap.payerOptions.length, 2);
+});
+
+test('INVARIANT: payerScope "all" ⟺ payerName null, on every core path', async () => {
+  const deps = v2deps(SUPER, { loadPayerSpread: SPREAD });
+  for (const input of [AUTO_IN, { ...AUTO_IN, payerScope: 'all' as const }, { ...AUTO_IN, payerOverride: 'CIGNA' }]) {
+    const r = (await getQualifySnapshotCore(deps, input)).resolved;
+    assert.ok(r, 'resolved present');
+    assert.equal(r.payerScope === 'all', r.payerName === null, `invariant holds for ${JSON.stringify(input)}`);
+  }
+});
+
+test('an HONOURED billed-under chip BEATS payerScope:all — one scope claim, decided in one place', async () => {
+  const calls: Array<string | null> = [];
+  const deps = v2deps(SUPER, {
+    loadPayerSpread: SPREAD,
+    loadFacilities: async (payer) => {
+      calls.push(payer);
+      return FAC;
+    },
+  });
+  const snap = await getQualifySnapshotCore(deps, { ...AUTO_IN, payerScope: 'all', payerOverride: 'CIGNA' });
+  // The chip is the later, narrower, explicit choice AND the surface renders it as "showing".
+  // Ranking all-payers underneath a lit chip would be a scope lie in the other direction.
+  assert.equal(calls[0], 'CIGNA');
+  assert.equal(snap.resolved?.payerName, 'CIGNA');
+  assert.equal(snap.resolved?.payerScope, 'payer');
+  assert.equal(snap.payerOverridden, true);
+});
+
+test('a REJECTED chip does NOT beat payerScope:all — nothing was applied, so nothing narrows', async () => {
+  const deps = v2deps(SUPER, { loadPayerSpread: SPREAD });
+  const snap = await getQualifySnapshotCore(deps, {
+    ...AUTO_IN,
+    payerScope: 'all',
+    payerOverride: 'UNITED HEALTHCARE', // not in this identifier's spread
+  });
+  // Without this branch the reject would fall back to the DOMINANT label and quietly re-narrow a
+  // search the user asked to widen — the fallback being right for a plain override is exactly why
+  // it is wrong here.
+  assert.equal(snap.resolved?.payerScope, 'all');
+  assert.equal(snap.resolved?.payerName, null);
+  assert.equal(snap.payerOverridden, false);
+});
+
+test('payerScope:all discloses the SCOPE in the coding factor, not "no payer resolved"', async () => {
+  const deps = v2deps(SUPER, {
+    loadPayerSpread: SPREAD,
+    loadCodingDecisions: async () => ({ seeded: true, rows: [] }),
+  });
+  const snap = await getQualifySnapshotCore(deps, { ...AUTO_IN, payerScope: 'all' });
+  const coding = snap.facilities[0]?.factors.find((f) => f.key === 'coding');
+  assert.ok(coding, 'the coding factor is present');
+  assert.equal(coding.available, false, 'payer-scoped decisions cannot be looked up without a payer');
+  // ⚠ THE SENTENCE IS THE DELIVERABLE. Excluding a 30-weight factor renormalizes the other four, so
+  // the SAME facility scores differently under all-payers than under a payer-scoped ranking. An
+  // operator who runs both and reads "no payer resolved" on a screen that is visibly ranking several
+  // payers has been handed a contradiction; this is the sentence that makes it an explanation.
+  assert.match(coding.detail, /across every payer this member bills under/i);
+  assert.match(coding.detail, /BILLED UNDER/);
+  assert.ok(!/no payer resolved/i.test(coding.detail), 'the comparable-path wording must not leak here');
+});
+
+test('the blend disclosure rides the rows: payer_count reaches QualifyFacility.payerCount', async () => {
+  const deps = v2deps(SUPER, {
+    loadPayerSpread: SPREAD,
+    loadFacilities: async () => FAC.map((r) => ({ ...r, payer_count: 3 })),
+  });
+  const snap = await getQualifySnapshotCore(deps, { ...AUTO_IN, payerScope: 'all' });
+  assert.ok(snap.facilities.length > 0);
+  assert.ok(snap.facilities.every((f) => f.payerCount === 3), 'a blended card carries its label count');
+  // A loader/fixture predating the column describes a payer-scoped ranking — one label per card.
+  // 0 would render "across 0 payers", which is never true of a row that exists.
+  const legacy = await getQualifySnapshotCore(v2deps(SUPER, { loadPayerSpread: SPREAD }), AUTO_IN);
+  assert.ok(legacy.facilities.every((f) => f.payerCount === 1), 'absent payer_count coalesces to 1, never 0');
+});
+
 test('override cannot survive a spread outage — no evidence means no authorization', async () => {
   const deps = v2deps(SUPER, {
     loadPayerSpread: async () => {

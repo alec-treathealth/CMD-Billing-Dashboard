@@ -22,6 +22,7 @@ import {
 const VALID: QualifyAiInput = {
   question: 'explain',
   payerName: 'AETNA',
+  payerScope: 'payer',
   policy: {
     carrier: 'AETNA',
     funding: 'Self-Funded',
@@ -43,6 +44,7 @@ const VALID: QualifyAiInput = {
       pctAllowedOfBilled: 62,
       distinctPatients: 22,
       lineCount: 120,
+      payerCount: 1,
       medianDaysToPayment: 41,
       factors: [
         {
@@ -363,4 +365,51 @@ test('core: an audit hiccup never blocks the non-PHI read (best-effort, preserve
   const run = await runQualifyAiExplanation(VALID, deps);
   assert.equal(await collect(run), '## TL;DR\nok\n');
   assert.deepEqual(events, ['audit', 'transport']);
+});
+
+// ── IDENTIFIER-WIDE SCOPE reaches the model (2026-08-07) ─────────────────────────────────────────
+// The explainer's whole posture is that it never narrates more confidence than the data carries. A
+// null `payerName` used to mean exactly one thing ("no payer on this estimated read") and now means
+// two, so the scope is stated as its own REQUIRED field rather than inferred from the null.
+
+test('the AI payload REQUIRES an explicit payer scope — a null payerName no longer says which case it is', () => {
+  const { payerScope: _drop, ...without } = VALID;
+  assert.equal(QualifyAiInputSchema.safeParse(without).success, false, 'omitting the scope is rejected at the firewall');
+  for (const scope of ['payer', 'all', 'none'] as const) {
+    assert.equal(QualifyAiInputSchema.safeParse({ ...VALID, payerScope: scope }).success, true, scope);
+  }
+  assert.equal(QualifyAiInputSchema.safeParse({ ...VALID, payerScope: 'whatever' }).success, false, 'closed vocabulary');
+  // The all-payers shape as the panel actually sends it: no single label, a per-card blend count.
+  const allPayers = {
+    ...VALID,
+    payerName: null,
+    payerScope: 'all' as const,
+    facilities: VALID.facilities.map((f) => ({ ...f, payerCount: 4 })),
+  };
+  assert.equal(QualifyAiInputSchema.safeParse(allPayers).success, true);
+  // payerCount is a COUNT of labels behind a card — never 0, because a card that exists has rows.
+  assert.equal(
+    QualifyAiInputSchema.safeParse({ ...VALID, facilities: VALID.facilities.map((f) => ({ ...f, payerCount: 0 })) }).success,
+    false,
+  );
+});
+
+test('the system prompt forbids narrating a blended percentage as one payer’s rate', () => {
+  // ⚠ Simpson's paradox is the risk this instruction exists for: with payerScope "all" a facility's
+  // allowed-of-billed is dollar-weighted across payerCount labels, so it can read strong overall and
+  // weak under the one label that matters to the client on the phone. The model is told to say so,
+  // and told where the un-blend control is.
+  const { system, user } = buildQualifyAiMessages({
+    ...VALID,
+    payerName: null,
+    payerScope: 'all',
+    facilities: VALID.facilities.map((f) => ({ ...f, payerCount: 4 })),
+  });
+  assert.match(system, /payerScope "all"/);
+  assert.match(system, /BLEND across payerCount labels/);
+  assert.match(system, /never call a blended percentage a payer's rate/);
+  assert.match(system, /BILLED UNDER chips/);
+  // And the scope really rides in the JSON the model reads, not only in the instructions.
+  assert.match(user, /"payerScope":"all"/);
+  assert.match(user, /"payerCount":4/);
 });

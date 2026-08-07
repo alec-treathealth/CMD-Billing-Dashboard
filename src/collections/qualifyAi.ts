@@ -42,6 +42,10 @@ const facilitySchema = z
     distinctPatients: z.number().int().min(0),
     lineCount: z.number().int().min(0),
     medianDaysToPayment: z.number().min(0).max(3650).nullable(),
+    /** Distinct billed-under labels behind THIS facility's rows. 1 under a payer-scoped read; >1
+     *  means pctAllowedOfBilled above is a blend across that many labels and must not be narrated as
+     *  one payer's contract rate. A count, never a dollar. */
+    payerCount: z.number().int().min(1).max(1000),
     factors: z.array(factorSchema).max(6),
   })
   .strict();
@@ -68,8 +72,20 @@ export const QualifyAiInputSchema = z
   .object({
     /** Which preset chip fired — the question shapes the read. */
     question: z.enum(QUALIFY_AI_QUESTIONS),
-    /** The resolved payer LABEL (non-PHI rollup dimension) — null on comparable/none paths. */
+    /** The resolved payer LABEL (non-PHI rollup dimension) — null on comparable/none paths AND in
+     *  identifier-wide mode. `payerScope` is what tells those apart; never infer from the null. */
     payerName: short(120).nullable(),
+    /**
+     * WHAT THE RANKING IS SCOPED TO (2026-08-07). REQUIRED, deliberately — a null `payerName` used to
+     * mean exactly one thing ("no payer on this estimated read") and now means two, so an explainer
+     * reading only the null would narrate an all-payers ranking as an unscoped estimate.
+     *
+     *   'payer' — one billed-under label, named in payerName.
+     *   'all'   — EVERY label the searched identifier bills under. Each facility's
+     *             pctAllowedOfBilled is then a cross-label BLEND (payerCount says across how many).
+     *   'none'  — nothing resolved (comparable-cohort / VOB-only reads).
+     */
+    payerScope: z.enum(['payer', 'all', 'none']),
     /** Policy facts on file (plan-level, non-PHI; NO employer, NO identifiers, NO benefit dollars). */
     policy: z
       .object({
@@ -126,6 +142,12 @@ const SYSTEM_PROMPT = [
   '  number is directional; say "directional, not confirmed".',
   '- A facility below 10 distinct patients is a thin sample; below 3 it is unrated — never invent a',
   '  number for it, and never average away a thin sample\'s uncertainty.',
+  '- payerScope "all" means the ranking spans EVERY billed-under label this member carries, not one',
+  '  payer. Each facility\'s allowed-of-billed is then a BLEND across payerCount labels — say so, and',
+  '  never call a blended percentage a payer\'s rate. Where payerCount > 1 the number can be carried',
+  '  by one label\'s mix, so a facility can read strong overall and weak under the label that matters.',
+  '  Tell the rep the BILLED UNDER chips scope it to one label. payerScope "payer" means payerName is',
+  '  the only label in the read.',
   '- policy.vobStale true: the VOB feed is stale — tell the rep to verify benefits before quoting.',
   '- Self-funded plans: the employer\'s administrator decides exceptions, not a payer rate sheet.',
   '- Median days-to-payment covers PAID lines only — unresolved claims are invisible on that axis.',
