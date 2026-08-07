@@ -338,7 +338,12 @@ export function buildQualifyFacilityOptionsQuery(entityIds: string[]): { sql: st
  * cmd_explorer_rows slice (measured 1.9s warm / 33.9s cold before 0080). DISTINCT is still
  * required: a multi-entity scope (Consolidated) can hold the same payer name under both
  * entities. Non-PHI (`primary_payer` is a payer name, not an identifier). Blank/null payers are
- * excluded in the matview definition; results are ordered for a stable client list. Every value
+ * excluded by `cmd_explorer_filter_options`'s OWN definition (0080) — ⚠ that is a statement about
+ * THIS matview and nothing else. It is NOT true of `cmd_explorer_charge_rollup` (0059), whose body
+ * does not filter the column, nor of `cmd_explorer_rows` (0019), where `primary_payer` is a bare
+ * `text` and cmdExplorer's norm() maps a blank cell to NULL. Anything aggregating over those must
+ * handle a null payer itself; see the payer_count derivation in app/lib/qualify/core.ts, which does.
+ * Results are ordered for a stable client list. Every value
  * is bound ($1 = entityIds); every identifier is a fixed literal. ~260 distinct payers per
  * tenant, so the client loads the full list ONCE and filters it as the user types — no
  * per-keystroke round-trip and no server-side pagination needed at this cardinality.

@@ -390,9 +390,23 @@ test('the AI payload REQUIRES an explicit payer scope — a null payerName no lo
     facilities: VALID.facilities.map((f) => ({ ...f, payerCount: 4 })),
   };
   assert.equal(QualifyAiInputSchema.safeParse(allPayers).success, true);
-  // payerCount is a COUNT of labels behind a card — never 0, because a card that exists has rows.
+  // ⚠ ZERO IS A LEGAL COUNT, and min(1) made it a HARD REJECT of the whole request. `count(distinct
+  // primary_payer)` over a group whose values are all NULL is 0, and identifier-wide mode emits no
+  // payer predicate — so a facility with no billed-under label at all would have failed the strict
+  // firewall and killed Ask AI for the entire snapshot, not just that card. A firewall exists to stop
+  // PHI and dollars, not to reject an honest count.
   assert.equal(
     QualifyAiInputSchema.safeParse({ ...VALID, facilities: VALID.facilities.map((f) => ({ ...f, payerCount: 0 })) }).success,
+    true,
+    'a facility with no billed-under label must not take the whole AI request down',
+  );
+  // Still fails closed on the shapes that are genuinely impossible.
+  assert.equal(
+    QualifyAiInputSchema.safeParse({ ...VALID, facilities: VALID.facilities.map((f) => ({ ...f, payerCount: -1 })) }).success,
+    false,
+  );
+  assert.equal(
+    QualifyAiInputSchema.safeParse({ ...VALID, facilities: VALID.facilities.map((f) => ({ ...f, payerCount: 1.5 })) }).success,
     false,
   );
 });

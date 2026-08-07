@@ -10,6 +10,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
+  AreaLine,
   ResolutionStages,
   NO_ANSWER_FILTERS,
   SKIP_CARRIER_MAX,
@@ -1541,6 +1542,21 @@ test('THE BLEND DISCLOSURE: EVERY card under an all-payers ranking states its la
   assert.match(html, /<span class="ths-num" aria-label="1 billed-under label">\s*1\s*<\/span>\s*payer · AETNA/);
 });
 
+test('the blend disclosure says ZERO labels rather than claiming one', () => {
+  // ⚠ THE ELSE-BRANCH USED TO SWALLOW THIS. `payerCount > 1 ? 'blended across N' : '1 payer'` is a
+  // binary over a value with three real states, so a facility whose rows carry NO billed-under label
+  // rendered as "1 payer" — a fabricated count on the exact surface the blend disclosure exists to
+  // protect. Zero is reachable: count(distinct primary_payer) over an all-NULL group is 0, and
+  // identifier-wide mode emits no payer predicate.
+  const none = allPayersSnapshot({
+    facilities: [facility({ payerCount: 0, solePayer: null })],
+  } as Partial<QualifySnapshot>);
+  const html = render(props('answer', fixture(), { answer: answerProps({ snapshot: none, skipped: true, scopeSource: 'dominant' }) }));
+  assert.match(html, /no billed-under label on these rows/);
+  assert.ok(!/1 payer/.test(html), 'zero labels is not one label');
+  assert.ok(!/blended across/.test(html), 'and it is not a blend either — there is nothing to blend');
+});
+
 test('the blend disclosure NAMES no label when max() would have been arbitrary', () => {
   // solePayer is null above one label by construction in the core; the card must degrade to the bare
   // count rather than inventing one, and must never print "payer · null".
@@ -1627,6 +1643,48 @@ test('THE SKIP INVENTORY covers AREA too, even though its control lives beside t
   assert.match(narrowed.slice(narrowed.indexOf('aria-label="Filter the ranked list by area"')), /On · 1 of \d+/);
 });
 
+// ── The AREA badge's denominator ─────────────────────────────────────────────────────────────────
+// It used to read `chips.length - 1` — "everything except the All chip" — an assumption about a list
+// whose composition belongs to the area module. Rendered directly here rather than through the stage
+// because ONLY a synthetic chip list can discriminate the two implementations: through a real
+// snapshot, `areaChipsWithActive` always emits exactly one All chip, so subtraction and filtering
+// agree and a test built on it would pass against either. This is the reason the component is
+// exported.
+test('the AREA badge counts area chips, and does not assume the list shape', () => {
+  const renderArea = (chips: readonly { key: string; label: string }[], active: string) =>
+    renderToStaticMarkup(
+      <AreaLine chips={chips as never} active={active} counts={new Map()} onSelect={() => {}} />,
+    );
+
+  // A list with NO All chip: subtraction under-counts by one, filtering is right. If this ever goes
+  // green against `chips.length - 1` again, the assumption is back.
+  assert.match(renderArea([{ key: 'TN', label: 'TN' }, { key: 'AZ', label: 'AZ' }], AREA_ALL), /Off · all 2/);
+  // The ordinary shape, where the two implementations agree — kept so the fix cannot regress the
+  // common case while satisfying the synthetic one.
+  assert.match(
+    renderArea([{ key: AREA_ALL, label: 'All' }, { key: 'TN', label: 'TN' }, { key: 'AZ', label: 'AZ' }], AREA_ALL),
+    /Off · all 2/,
+  );
+  // The gate at the call site admits `chips.length === 2` through its `|| areaActive` arm, so
+  // "On · 1 of 1" is reachable. It is odd-looking but TRUE — there is one area and you are on it —
+  // and the old `Math.max(1, …)` floor would have printed the same thing while hiding a real zero.
+  assert.match(renderArea([{ key: AREA_ALL, label: 'All' }, { key: 'TN', label: 'TN' }], 'TN'), /On · 1 of 1/);
+});
+
+test('the AREA badge agrees with the real chip builder end-to-end', () => {
+  // Integration half: the denominator the stage renders is the number of non-All chips
+  // `areaChipsWithActive` actually produced for that facility set.
+  const facilities = threeStateSnapshot().facilities;
+  const expected = areaChipsWithActive(facilities, AREA_ALL).filter((c) => c.key !== AREA_ALL).length;
+  assert.equal(expected, 3, 'AZ + TN + Other for this fixture');
+  const html = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: threeStateSnapshot(), skipped: true, scopeSource: 'dominant' }),
+    }),
+  );
+  assert.ok(html.includes(`Off · all ${expected}`), 'the badge states the real option count');
+});
+
 test('the inventory headline flips once ANY facet is on — including the billed-under scope alone', () => {
   // ⚠ `answerFiltersActive` covers three of the six facets. Reusing it here would print "every switch
   // is off" beside a lit BILLED UNDER chip, which is the claim this sentence exists to make true.
@@ -1634,7 +1692,11 @@ test('the inventory headline flips once ANY facet is on — including the billed
     props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), skipped: true, scopeSource: 'dominant' }) }),
   );
   assert.match(scoped, /Some switches are on — everything marked Off is unrestricted\./);
-  assert.ok(!scoped.includes('Every switch is off'), 'a payer-scoped ranking is a switch that is on');
+  // ⚠ THIS NEGATIVE USED TO NAME 'Every switch is off', WHICH THE I4 FIX DELETED FROM THE SOURCE —
+  // so it passed no matter what the component did. A guard that cannot fail is worse than no guard,
+  // because it reads as coverage. Re-pointed at the string the component would ACTUALLY emit if
+  // `anyFacetOn` regressed, which is the other arm of the same ternary.
+  assert.ok(!scoped.includes('No filters are on'), 'a payer-scoped ranking is a switch that is on');
 });
 
 test('with ONE label on file the billed-under scope is not counted as a switch that is on', () => {

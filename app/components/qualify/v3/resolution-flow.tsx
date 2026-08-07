@@ -1212,6 +1212,10 @@ function ScoreCard({ f, allPayers }: { f: QualifyFacility; allPayers: boolean })
             {allPayers ? (
               <>
                 {' · '}
+                {/* ⚠ THREE STATES, NOT A BINARY. `payerCount > 1 ? … : '1 payer'` read ZERO as one —
+                    a fabricated count on the exact surface this disclosure exists to protect. Zero is
+                    reachable: count(distinct primary_payer) over an all-NULL group, and
+                    identifier-wide mode emits no payer predicate. See core.ts assembleFacilities. */}
                 <span className="font-semibold text-ink900">
                   {f.payerCount > 1 ? (
                     <>
@@ -1221,13 +1225,15 @@ function ScoreCard({ f, allPayers }: { f: QualifyFacility; allPayers: boolean })
                       </span>{' '}
                       payers
                     </>
-                  ) : (
+                  ) : f.payerCount === 1 ? (
                     <>
                       <span className="ths-num" aria-label="1 billed-under label">
                         1
                       </span>{' '}
                       payer{f.solePayer ? ` · ${f.solePayer}` : ''}
                     </>
+                  ) : (
+                    'no billed-under label on these rows'
                   )}
                 </span>
               </>
@@ -1484,7 +1490,7 @@ export function billedUnderCaption(args: {
  * honesty argument made in layout: everything on the control card re-issues the ranking request,
  * and this does not. Selection carries the word "showing", never hue alone (I9).
  */
-function AreaLine(props: {
+export function AreaLine(props: {
   chips: readonly AreaChip[];
   active: string;
   counts: ReadonlyMap<string, number>;
@@ -1499,13 +1505,18 @@ function AreaLine(props: {
   // to prevent, on the one facet Alec named by name. `data-v3-facet` enrols it in the skip reveal's
   // stagger, which selects on the attribute across the stage rather than inside the control card.
   const on = props.active !== AREA_ALL;
+  // ⚠ COUNT THE AREA CHIPS, DO NOT SUBTRACT ONE FROM THE LIST. This read `props.chips.length - 1`,
+  // i.e. "everything except the All chip" — an assumption about a list whose composition belongs to
+  // the area module, not to this file. If `areaChipsWithActive` ever stops emitting the literal All
+  // chip, or grows a second non-area entry, subtraction prints a wrong denominator, and the
+  // `Math.max(1, …)` that guarded it made that failure SILENT rather than loud. Filtering on the key
+  // asks the list what it contains instead of assuming, and needs no floor: an empty area set cannot
+  // reach here (the render gate upstream requires >2 chips or an active narrow).
+  const areaOptions = props.chips.filter((c) => c.key !== AREA_ALL).length;
   return (
     <div data-v3-facet className="flex flex-wrap items-center gap-2" role="group" aria-label="Filter the ranked list by area">
       <span className="text-xs font-medium uppercase tracking-wide text-ink400">Area</span>
-      <FacetState
-        on={on}
-        text={on ? `1 of ${Math.max(1, props.chips.length - 1)}` : `all ${Math.max(1, props.chips.length - 1)}`}
-      />
+      <FacetState on={on} text={on ? `1 of ${areaOptions}` : `all ${areaOptions}`} />
       {props.chips.map((c) => {
         const on = c.key === props.active;
         const n = props.counts.get(c.key) ?? 0;

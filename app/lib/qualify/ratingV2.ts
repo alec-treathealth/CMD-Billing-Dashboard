@@ -420,12 +420,17 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
   // The COUNT rides in the sentence because a blend of two is a different thing from a blend of nine.
   const pct = input.pctAllowed;
   const claimsScore = pct === null || Number.isNaN(pct) ? null : clamp01(pct / 100);
-  const blendLabels = Math.max(1, Math.trunc(input.payerCount ?? 1));
+  // THREE states, not two — see the derivation note in core.ts assembleFacilities. Zero is not "one";
+  // reassuring the operator that "nothing is blended here" when the rows carry no label at all is a
+  // claim about attribution that nothing supports.
+  const blendLabels = Math.max(0, Math.trunc(input.payerCount ?? 1));
   const blendNote = !input.payerScopeAll
     ? ''
     : blendLabels > 1
       ? ` Blended across ${blendLabels} billed-under labels — this is what the member's claims allowed here, NOT one payer's rate; scope to one label to un-blend.`
-      : ' Ranked across all payers; this facility billed the member under one label only, so nothing is blended here.';
+      : blendLabels === 1
+        ? ' Ranked across all payers; this facility billed the member under one label only, so nothing is blended here.'
+        : ' Ranked across all payers, but these rows carry no billed-under label at all — there is nothing to attribute this percentage to.';
   factors.push({
     key: 'claims',
     label: QUALIFY_FACTOR_LABELS.claims,

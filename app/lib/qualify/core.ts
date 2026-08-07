@@ -426,6 +426,34 @@ function assembleFacilities(
     .map((r) => {
       const facilityCode = r.facility_code ?? null;
       const census = facilityCode ? ctx.census.get(facilityCode) ?? null : null;
+      /* HOW MANY BILLED-UNDER LABELS BACK THIS CARD — resolved ONCE, because three consumers read it
+       * (the card's disclosure, the claims factor's detail, the AI payload) and three parallel
+       * expressions is how they drift apart. Three states, not two:
+       *
+       *   undefined / null — the COLUMN WAS NOT SELECTED. Only a loader or fixture predating
+       *                      `payer_count` produces this, and those describe payer-scoped-shaped
+       *                      reads where exactly one label backs the card. 1 is correct.
+       *   0               — the column WAS selected and the answer is genuinely NONE.
+       *                      `count(distinct primary_payer)` over a group whose values are all NULL
+       *                      is 0, and identifier-wide mode emits no payer predicate
+       *                      (buildFacilityRankingQuery's `payerCond`), so the group is reachable.
+       *   >= 1            — the real count.
+       *
+       * ⚠ `?? 1` CONFLATED THE FIRST TWO AND THE COMMENT HERE USED TO CLAIM OTHERWISE. `??` catches
+       * only null/undefined, so a literal 0 sailed through into consumers all written as binaries
+       * around "> 1": the card rendered "1 payer" for a facility with NO known label, the claims
+       * factor reassured the operator that "nothing is blended here", and the strict-zod AI firewall
+       * (min(1)) hard-REJECTED the request, killing Ask AI for the whole snapshot. Clamping 0 to 1
+       * would have made the old comment true by fabricating a count on the exact surface the blend
+       * disclosure exists to protect — so the coalesce distinguishes the two cases and every consumer
+       * handles zero honestly instead.
+       *
+       * LATENT today: an adversarial probe of the live rollup (2026-08-07) found ZERO null-or-blank
+       * primary_payer rows across 492,890 rows of full ingest history. Nothing FORBIDS the state
+       * though — `primary_payer` is a bare `text` (0019), the 0059 matview body does not filter it,
+       * and cmdExplorer's norm() maps a blank cell to NULL — and a guarantee asserted in a comment
+       * rather than in code is the same defect class as the guard C1 fixed. */
+      const payerCount = r.payer_count == null ? 1 : Math.max(0, Math.trunc(r.payer_count));
       /* WHICH LENGTH-OF-STAY MEASUREMENT SCORES THIS FACILITY — decided here, explicitly, once.
        *
        * The census snapshot measures clients CURRENTLY ADMITTED, so its LOS is today-minus-admit: a
@@ -464,7 +492,7 @@ function assembleFacilities(
         // Same exclusion, different sentence — see QualifyFactorContext.allPayers. The COUNT rides
         // with it because the claims factor's detail names the blend's size, not just its existence.
         payerScopeAll: ctx.allPayers,
-        payerCount: r.payer_count ?? 1,
+        payerCount,
         codingLifecycle: decision ? (decision.lifecycle as import('./ratingV2').CodingLifecycle) : null,
         codingDecidedOn: decision?.decided_on ?? null,
         codingCodesLabel: decision ? codingCodesLabel(decision) : null,
@@ -495,16 +523,14 @@ function assembleFacilities(
         allowedAmount: r.allowed,
         lineCount: r.line_count,
         distinctPatients: r.distinct_patients, // rating sample-gate unit (sampleGate.ts) — non-dollar, non-PHI count
-        // THE BLEND DISCLOSURE (contract.ts QualifyFacility.payerCount). Coalesced to 1, not 0: a
-        // loader or fixture that predates the column describes a payer-scoped ranking, where exactly
-        // one label backs the card. 0 would render "across 0 payers", which is never true of a row
-        // that exists.
-        payerCount: r.payer_count ?? 1,
-        // NULLED above one label: the SQL is max(primary_payer), exact at one distinct value and
-        // arbitrary above it. Deciding that here — once — beats asking every render site to
-        // remember the condition, and a card naming one of several labels would be a scope lie at
-        // exactly the grain the blend disclosure exists to protect.
-        solePayer: (r.payer_count ?? 1) === 1 ? (r.sole_payer ?? null) : null,
+        // THE BLEND DISCLOSURE (contract.ts QualifyFacility.payerCount) — see the three-state note
+        // where `payerCount` is derived above.
+        payerCount,
+        // NAMED ONLY AT EXACTLY ONE. The SQL is max(primary_payer): exact at one distinct value,
+        // arbitrary above it, and NULL at zero. Deciding that here — once — beats asking every render
+        // site to remember the condition, and a card naming one of several labels would be a scope
+        // lie at exactly the grain the blend disclosure exists to protect.
+        solePayer: payerCount === 1 ? (r.sole_payer ?? null) : null,
         // 0059 trust signal (non-dollar — survives the amounts strip for admissions_seat).
         confirmedClaims: r.confirmed_claims,
         estimateClaims: r.estimate_claims,

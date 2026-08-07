@@ -631,6 +631,40 @@ test('the blend disclosure rides the rows: payer_count reaches QualifyFacility.p
   assert.ok(legacy.facilities.every((f) => f.payerCount === 1), 'absent payer_count coalesces to 1, never 0');
 });
 
+// ── payer_count = 0 IS A REACHABLE ANSWER, AND `?? 1` NEVER SAW IT ───────────────────────────────
+// `count(distinct primary_payer)` over a group whose values are ALL NULL is 0, not 1 — and
+// identifier-wide mode emits no payer predicate, so such a group can reach the core. `??` only
+// catches null/undefined, so a literal 0 sailed through and was rendered as ONE label: the card said
+// "1 payer", the claims factor said "billed under one label only, so nothing is blended here", and
+// the strict-zod AI firewall (payerCount min) hard-rejected the whole request, killing Ask AI on that
+// facility. LATENT today — an adversarial probe found zero null/blank primary_payer rows across the
+// full ingest history (492,890 rollup rows) — but nothing FORBIDS the state: the column is a bare
+// `text` (0019), the 0059 matview body does not filter it, and cmdExplorer's norm() maps a blank cell
+// to NULL. The comment beside the coalesce claimed a guarantee the code did not provide, which is the
+// same shape of defect as C1.
+test('payer_count 0 (a group with no billed-under label at all) is NOT silently rendered as one', async () => {
+  const deps = v2deps(SUPER, {
+    loadPayerSpread: SPREAD,
+    loadFacilities: async () => FAC.map((r) => ({ ...r, payer_count: 0, sole_payer: null })),
+  });
+  const snap = await getQualifySnapshotCore(deps, { ...AUTO_IN, payerScope: 'all' });
+  assert.ok(snap.facilities.length > 0);
+  assert.ok(snap.facilities.every((f) => f.payerCount === 0), 'zero known labels stays zero — it is the true answer');
+  assert.ok(snap.facilities.every((f) => f.solePayer === null), 'and there is no sole label to name');
+  // The claims factor must not assert the single-label reassurance, which is flatly false here.
+  const claims = snap.facilities[0]?.factors.find((f) => f.key === 'claims');
+  assert.ok(!/one label only/.test(claims!.detail), 'zero labels is not "one label only"');
+  assert.match(claims!.detail, /no billed-under label at all/);
+});
+
+test('an ABSENT payer_count still means 1 — the legacy loader is a different case from a real zero', async () => {
+  // The two cases were conflated by `?? 1`. undefined/null = "the column was not selected", which
+  // only happens on a payer-scoped-shaped read where exactly one label backs the card. A numeric 0 =
+  // "the column WAS selected and the answer is none". Same coalesce, opposite truths.
+  const legacy = await getQualifySnapshotCore(v2deps(SUPER, { loadPayerSpread: SPREAD }), AUTO_IN);
+  assert.ok(legacy.facilities.every((f) => f.payerCount === 1), 'absent stays 1');
+});
+
 test('solePayer names the label at ONE, and is NULLED above one where max() would be arbitrary', async () => {
   // The SQL is max(primary_payer): exact when there is one distinct value, an arbitrary pick above
   // it. The core decides that ONCE rather than trusting every render site to remember the condition —

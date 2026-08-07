@@ -533,8 +533,12 @@ export interface QualifyFacility {
   /**
    * THE BLEND DISCLOSURE — distinct billed-under labels behind THIS card's rows (Alec, 2026-08-07).
    *
-   * 1 in payer-scoped mode by construction (the ranking query pins a single label). >1 only in
-   * identifier-wide mode, and there it is load-bearing: `pctAllowedOfBilled` and therefore `ratingV2`
+   * THREE states. 1 in payer-scoped mode by construction (the ranking query pins a single label).
+   * ZERO is legal and means the rows carry no billed-under label at all — `count(distinct
+   * primary_payer)` over an all-NULL group, reachable only in identifier-wide mode, where no payer
+   * predicate is emitted. Do NOT write `payerCount > 1 ? … : 'one label'`: that binary reads zero as
+   * one, which is a fabricated count on the surface this field exists to protect. >1 is where it is
+   * load-bearing: `pctAllowedOfBilled` and therefore `ratingV2`
    * are a DOLLAR-WEIGHTED BLEND across those labels, which is an honest answer to "what did this
    * member's claims actually allow here" and NOT an answer to "what does payer X pay at facility Y".
    * Two facilities can rank differently purely on payer mix — Simpson's paradox, on the surface

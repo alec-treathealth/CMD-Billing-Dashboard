@@ -42,10 +42,17 @@ const facilitySchema = z
     distinctPatients: z.number().int().min(0),
     lineCount: z.number().int().min(0),
     medianDaysToPayment: z.number().min(0).max(3650).nullable(),
-    /** Distinct billed-under labels behind THIS facility's rows. 1 under a payer-scoped read; >1
-     *  means pctAllowedOfBilled above is a blend across that many labels and must not be narrated as
-     *  one payer's contract rate. A count, never a dollar. */
-    payerCount: z.number().int().min(1).max(1000),
+    /**
+     * Distinct billed-under labels behind THIS facility's rows. 1 under a payer-scoped read; >1 means
+     * pctAllowedOfBilled above is a blend across that many labels and must not be narrated as one
+     * payer's contract rate. A count, never a dollar.
+     *
+     * ⚠ min(0), NOT min(1). Zero is a legal answer — `count(distinct primary_payer)` over a group
+     * whose values are all NULL — and this schema is a STRICT firewall, so min(1) did not degrade
+     * that one facility, it hard-REJECTED the request and killed Ask AI for the whole snapshot. The
+     * firewall exists to stop PHI and dollars crossing, not to refuse an honest count.
+     */
+    payerCount: z.number().int().min(0).max(1000),
     factors: z.array(factorSchema).max(6),
   })
   .strict();
@@ -142,6 +149,8 @@ const SYSTEM_PROMPT = [
   '  number is directional; say "directional, not confirmed".',
   '- A facility below 10 distinct patients is a thin sample; below 3 it is unrated — never invent a',
   '  number for it, and never average away a thin sample\'s uncertainty.',
+  '- payerCount 0 on a facility means its rows carry NO billed-under label at all — say the label is',
+  '  unknown there; never call it one payer, and never treat its percentage as attributable.',
   '- payerScope "all" means the ranking spans EVERY billed-under label this member carries, not one',
   '  payer. Each facility\'s allowed-of-billed is then a BLEND across payerCount labels — say so, and',
   '  never call a blended percentage a payer\'s rate. Where payerCount > 1 the number can be carried',
