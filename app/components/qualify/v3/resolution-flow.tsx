@@ -1327,7 +1327,19 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               a label, then toggles. Window is SINGLE-select (a window is one value); the three
               facets are multiselect. ── */}
           <div className="flex flex-col gap-2.5 rounded-lg border border-line bg-surface px-4 py-3">
-            <p className="text-sm text-ink900">{windowSentence(snap, props.windowDays)}</p>
+            {/* GRANULAR suppression, honouring the RULE 2654416 ruling rather than blanketing it.
+                The MANUAL variant ("— your selection") states the user's own action — a fact,
+                allowed to speak immediately under the dim+beam marker (the standing ruling in the
+                RULE 2654416 test). But the AUTO variants read the RENDERED snapshot's LADDER — a
+                data claim about the set being replaced — so they wait like every other categorical
+                sentence. And after a FAILED refetch (staleAfterError) the WHOLE sentence waits:
+                there is no beam, the duration is unbounded post-F2, and the failure banner just
+                said the content shows the previous scope — "Showing trailing 365 days" printed
+                beside that banner would be a direct contradiction. The Window CHIPS below stay —
+                they are the user's controls (and, after a failure, the escape route). */}
+            {props.staleAfterError || (props.refetching && props.windowDays === null) ? null : (
+              <p className="text-sm text-ink900">{windowSentence(snap, props.windowDays)}</p>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs font-medium uppercase tracking-wide text-ink400">Window</span>
               {WINDOW_CHOICES.map((d) => {

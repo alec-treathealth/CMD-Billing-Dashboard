@@ -913,6 +913,42 @@ test('F2: an in-flight refetch still claims progress; only a FAILED one goes qui
   assert.ok(!inFlight.includes('could not be refreshed'), 'and says nothing about failure');
 });
 
+// The window sentence has two populations with different honesty properties, and the fix is
+// GRANULAR to match. The manual variant ("— your selection") states the user's own action — a fact,
+// allowed to speak immediately during an in-flight refetch (the standing RULE 2654416 ruling, pinned
+// below in its own test). The AUTO variants read the RENDERED snapshot's LADDER — a data claim
+// about the set being replaced — so they wait like every other categorical sentence. And after a
+// FAILED refetch the whole sentence waits regardless of variant: there is no beam, the duration is
+// unbounded post-F2, and the failure banner ("it still shows the scope you were on before") would be
+// directly contradicted by "Showing trailing 365 days" printed beside it.
+test('the window sentence: ladder variants wait while stale; nothing speaks over the failure banner', () => {
+  // Non-stale, both variants render:
+  const manual = render(props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), windowDays: 365 }) }));
+  assert.match(manual, /Showing trailing 365 days — your selection\./);
+  const auto = render(props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture() }) }));
+  assert.match(auto, /needed this far back to reach a reliable sample\./);
+
+  // In-flight + AUTO: the sentence reads the stale snapshot's ladder — it waits.
+  const autoInFlight = render(
+    props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), refetching: true }) }),
+  );
+  assert.ok(!autoInFlight.includes('Showing trailing'), 'the ladder sentence is a data claim — it waits in flight');
+
+  // Failed refetch: BOTH variants wait — the failure banner owns the description of what is shown.
+  for (const windowDays of [365, null] as const) {
+    const failed = render(
+      props('answer', fixture(), {
+        answer: answerProps({ snapshot: snapshotFixture(), windowDays, snapshotError: 'failed', staleAfterError: true }),
+      }),
+    );
+    assert.ok(
+      !failed.includes('Showing trailing'),
+      `after a failed refetch the sentence must not contradict the banner (windowDays=${windowDays})`,
+    );
+    assert.match(failed, />Window</, 'the Window control line stays — it is the escape route');
+  }
+});
+
 test('going back to the search step announces the STAGE, not the stale result', () => {
   const html = render(props('identify', fixture()));
   assert.match(html, /Back at the search step\. Searching again replaces the current result\./);
