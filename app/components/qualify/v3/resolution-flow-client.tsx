@@ -63,6 +63,7 @@ import {
   ResolutionStages,
   scopeKeyOf,
   scopeSourceOf,
+  tickerIsLive,
   type FlowStage,
 } from './resolution-flow';
 // The flow's fifteen fields and the rules that move them. Its header is the spec; this file is the

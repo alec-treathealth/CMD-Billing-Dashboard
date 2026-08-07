@@ -1608,7 +1608,13 @@ test('HONESTY GUARD: an active area does NOT flip any caption that describes the
       props('answer', r, {
         answer: answerProps({
           snapshot: threeStateSnapshot(),
-          scopeSource: 'skipped',
+          // MERGE INTEGRATION (#164 × #165). This read `scopeSource: 'skipped'` when #164 wrote it.
+          // #165 split that one enum in two — `scopeSource` now answers only "who chose the payer
+          // label", and the skip itself is its own prop — so the skip state is expressed as the pair
+          // below. `'dominant'` rather than the fixture default: a skip forces `pickLabel` to null
+          // (resolution-flow-client.tsx), so `scopeSourceOf` cannot return 'pick' alongside a skip.
+          skipped: true,
+          scopeSource: 'dominant',
           candidates: orderedCandidates(r),
           ...over,
         }),
@@ -1646,7 +1652,9 @@ test('the AI provenance caption stops claiming "on screen" grounding once an are
         props('answer', r, {
           answer: answerProps({
             snapshot: threeStateSnapshot(),
-            scopeSource: 'skipped',
+            // Same #164 × #165 split as the guard above — see the note there.
+            skipped: true,
+            scopeSource: 'dominant',
             candidates: orderedCandidates(r),
             ...over,
           }),

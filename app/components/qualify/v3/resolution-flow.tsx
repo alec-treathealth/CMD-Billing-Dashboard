@@ -1346,6 +1346,59 @@ function billedUnderCaption(args: { skipped: boolean; payerOverridden: boolean; 
   return 'Largest by volume — pick another to re-scope.';
 }
 
+/**
+ * The AREA chip row — the restored location narrow, rendered in the desktop `FilterLine` idiom
+ * (label + toggle chips) rather than the mobile `<AreaChips>` component, whose inline styles belong
+ * to the PWA. SINGLE-select, because `facilitiesInArea` takes one key and because "All" is a chip
+ * rather than an absence: an explicit way back is what stops a narrow becoming a trap.
+ *
+ * It lives INSIDE the scorecard section, not on the control card above it, and that placement is the
+ * honesty argument made in layout: everything on the control card re-issues the ranking request,
+ * and this does not. Selection carries the word "showing", never hue alone (I9).
+ */
+function AreaLine(props: {
+  chips: readonly AreaChip[];
+  active: string;
+  counts: ReadonlyMap<string, number>;
+  onSelect: (key: string) => void;
+}): React.ReactElement {
+  return (
+    <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filter the ranked list by area">
+      <span className="text-xs font-medium uppercase tracking-wide text-ink400">Area</span>
+      {props.chips.map((c) => {
+        const on = c.key === props.active;
+        const n = props.counts.get(c.key) ?? 0;
+        return (
+          <button
+            key={c.key}
+            type="button"
+            aria-pressed={on}
+            onClick={() => props.onSelect(c.key)}
+            className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
+              on ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
+            }`}
+          >
+            {c.label}
+            {/* Proper pluralization (review Finding 3) — the same `${n === 1 ? '' : 's'}` idiom
+                `panelProvenance` already uses for "member"/"charge line" (resolution.ts). Every
+                non-'All' chip in a real ranking routinely carries n=1 (three facilities across three
+                distinct states means every per-state chip's count IS 1), so "1 ranked facilities" was
+                not an edge case — it was the common case. */}
+            <span
+              className="font-mono tabular-nums text-ink400"
+              aria-label={`${n} ranked facilit${n === 1 ? 'y' : 'ies'}`}
+            >
+              {' '}
+              · {n}
+            </span>
+            {on ? ' · showing' : ''}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 /** First-load ghost sized to the real footprint (window line + hero + two scorecard rows), so the
  *  swap to content does not shift layout. aria-hidden — the visible status line above it announces. */
 function AnswerSkeleton(): React.ReactElement {
