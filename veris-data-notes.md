@@ -4390,3 +4390,63 @@ roster alone, with Indigo's 30 entirely absent. Last row before 10:00 UTC on 08-
 47 → 45 customer drop on 08-02 is the documented INVALID CRITERIA removal and is expected; the
 24 → 2 collapse in distinct hours is not. Untouched here — CLAUDE.md scopes those crons to an
 explicitly-scoped session. Flagged for one.
+
+---
+
+## 0092 — Qualify token-scoped covering indexes, APPLIED LIVE (2026-08-06)
+
+Applied by this session at Alec's instruction, immediately after PR #134 merged
+`staging` → `main`. Three statements, each an autocommit `execute_sql` — **never
+`apply_migration`**, because `CREATE INDEX CONCURRENTLY` and `VACUUM` cannot run
+inside a transaction block. Same discipline as 0070 and 0081; the file's own
+"APPLY DISCIPLINE" header says so and says "Alec applies this; it is not
+auto-applied."
+
+1. `create index concurrently … cmd_charge_rollup_prefix_cov`
+2. `create index concurrently … cmd_charge_rollup_member_cov`
+3. `vacuum (analyze) collections.cmd_explorer_charge_rollup`
+
+Pre-flight: zero `not indisvalid` indexes on the matview, so no interrupted-build
+cleanup was needed. Post-apply both indexes are `indisvalid = indisready = true`.
+
+### It worked — index-only scans, Heap Fetches: 0
+
+Verified with the query the migration's own footer specifies, on the same busiest
+prefix token it benchmarked (9,256 rows now vs 9,253 then):
+
+| path | before (per 0092's header) | after |
+|---|---|---|
+| prefix / ladder | Bitmap Heap Scan, 1,455 buffers, ~353 ms | Index Only Scan, 233 buffers, **17.5 ms** |
+| exact member | Bitmap Heap Scan, 3,558 buffers, ~676 ms | Index Only Scan, 20 buffers, **0.57 ms** |
+
+`Heap Fetches: 0` on both, so the step-3 VACUUM did warm the visibility map. The
+prefix run still showed `read=229` — the freshly-built index was cold, not a defect.
+
+### ⚠ The size estimate was ~12x low — carry this lesson
+
+The rollback header predicted **"a delta on the order of 10-15 MB combined"**.
+Actual: **`cmd_charge_rollup_prefix_cov` 102 MB + `cmd_charge_rollup_member_cov`
+67 MB = 169 MB.** `collections.cmd_explorer_charge_rollup` is now **164 MB heap /
+306 MB indexes / 470 MB total** — indexes ~1.9x the table.
+
+The estimate priced the added `member_id_bidx` HMAC (~65 B/entry) and overlooked
+that BOTH payloads also carry **`primary_payer`, a plaintext payer-name string**.
+Payer names in this book are long and highly various — 1,237 distinct normalized
+spellings measured the same day (see the VOB payer-variant work). **Price an
+INCLUDE payload by its widest TEXT column, not by its keys.** This generalizes to
+0068/0070 and any future covering index on this matview.
+
+Consequence for the open decision 0092 deliberately left to a follow-up: dropping
+the superseded bare `cmd_charge_rollup_prefix` (3,928 kB) + `cmd_charge_rollup_member`
+(4,360 kB) recovers only ~8 MB — about 5% of what was just added, no longer a
+meaningful offset. If disk on this cluster matters, the lever is whether
+`primary_payer` needs to ride in the PREFIX payload at all; the ladder's own
+verification query never reads it. Not changed here — that is a new migration and
+its own decision.
+
+### Also verified live this session (object presence, not ledger entries)
+
+`0090` — policy `collections_writer_select_facilities` on `collections.facilities`:
+present. `0091` — table `collections.qualify_facility_outcomes` plus policies
+`qfo_reader_select` and `qfo_writer_select`: all present. Both therefore APPLIED
+LIVE; CLAUDE.md's migration section now records them alongside 0092.

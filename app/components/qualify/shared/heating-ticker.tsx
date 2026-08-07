@@ -138,10 +138,14 @@ export const HeatingUpCards = memo(function HeatingUpCards({
             secondary confirmation). Inert cards get no glyph. The name moves to its own row below so a
             2-line clamp never fights the pill. */}
         <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-ink900">
-          <span className="text-[10px] font-bold text-ink400">#{i + 1}</span>
+          <span className="text-xs font-bold text-ink400">#{i + 1}</span>
           <span aria-hidden className="q-dot inline-block h-1.5 w-1.5 rounded-full" style={{ background: hex }} />
           {t.careSetting ? (
-            <span className="ml-auto inline-flex shrink-0 items-center rounded-full bg-[#eef4f6] px-2 py-px text-[9px] font-extrabold uppercase tracking-wide text-status-info">
+            // The v3 flow's house category pill (resolution-flow.tsx:921-924) rather than a bespoke
+            // one: same fill token, same padding, same weight. `uppercase`/`extrabold`/`tracking-wide`
+            // were 9px legibility compensation and are not needed at 13px — the precedent pill
+            // carries none of them.
+            <span className="ml-auto inline-flex shrink-0 items-center rounded-full bg-status-info/10 px-2 py-0.5 text-xs font-semibold text-status-info">
               {LOC_LABEL[t.careSetting]}
             </span>
           ) : null}
@@ -166,12 +170,16 @@ export const HeatingUpCards = memo(function HeatingUpCards({
         <div className="my-1.5">
           <Spark points={t.points} hex={hex} width={184} height={26} />
         </div>
-        <div className="flex items-center justify-between gap-2 text-[10px] text-ink400">
+        {/* 10px → 13px on a 188px content row: the left span previously had no truncation
+            discipline, so at the larger size it would win the flex fight and starve the City, ST
+            span on the right to nothing — the location would silently VANISH rather than shrink.
+            `min-w-0 truncate` on both is what makes the size change safe; it is not tidying. */}
+        <div className="flex items-center justify-between gap-2 text-xs text-ink400">
           {/* Change A: "n" is DEFINED — claim lines backing the rating, never a bare n=. */}
-          <span>
+          <span className="min-w-0 truncate">
             {t.lineCount.toLocaleString('en-US')} claim lines · {range}
           </span>
-          <span className="truncate text-right">{loc}</span>
+          <span className="min-w-0 truncate text-right">{loc}</span>
         </div>
       </button>
     );
@@ -181,7 +189,10 @@ export const HeatingUpCards = memo(function HeatingUpCards({
     <section>
       <div className="mb-2.5 flex items-center gap-2 px-0.5">
         <h2 className="font-head text-[15px] font-semibold tracking-tight">Facilities Heating Up</h2>
-        <span className="inline-flex items-center gap-1.5 text-[10px] font-extrabold uppercase tracking-widest text-ink400">
+        {/* The v3 flow's house eyebrow (resolution-flow.tsx:587, :1128 and 9 more): text-xs /
+            font-medium / tracking-wide. `extrabold` + `tracking-widest` existed only to make 10px
+            readable. Must stay in lockstep with the skeleton's eyebrow below — see the CLS note. */}
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-ink400">
           <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-status-ok" />
           Trending · {range} · {scopePayer ?? 'across the book'}
         </span>
@@ -211,7 +222,10 @@ export function HeatingUpSkeleton() {
     <section aria-hidden>
       <div className="mb-2.5 flex items-center gap-2 px-0.5">
         <h2 className="font-head text-[15px] font-semibold tracking-tight text-ink400">Facilities Heating Up</h2>
-        <span className="text-[10px] font-extrabold uppercase tracking-widest text-ink400">Loading trends…</span>
+        {/* IDENTICAL to the real header's eyebrow above, and not merely for tidiness: the shell
+            swaps this exact node for that one when trends resolve (resolution-flow-client.tsx:403-411),
+            so a size mismatch here is a layout shift on every load. Move the two together. */}
+        <span className="text-xs font-medium uppercase tracking-wide text-ink400">Loading trends…</span>
       </div>
       <div className="flex gap-2.5 overflow-hidden pb-2 pl-0.5 pr-0.5 pt-0.5">
         {Array.from({ length: 6 }).map((_, i) => (

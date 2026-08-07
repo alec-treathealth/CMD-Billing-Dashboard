@@ -183,19 +183,26 @@ export function payerGroupsOf(r: QualifyResolution): PayerGroup[] {
  * answer without choosing a carrier or a plan, and browse the identifier's whole footprint with the
  * answer stage's filter lines instead. It is deliberately a separate input from `picked` — "I chose
  * this plan" and "I declined to choose" must never render as the same claim.
+ *
+ * `payerGroups` is the shell's memoized cluster set (ONE `payerGroupsOf` call per resolution, shared
+ * with the rail, the receipt, both tile stages and the live sentence). Omitting it self-derives, so
+ * this stays callable from a test with a resolution alone — but when the shell supplies it, the
+ * stage machine and the rail are provably reading ONE value rather than two that happen to agree.
  */
 export function deriveStage(args: {
   resolution: QualifyResolution | null;
   payerPick: string | null;
   picked: boolean;
   skipped?: boolean;
+  /** Optional pre-computed clusters (the shell memoizes one call per resolution). */
+  payerGroups?: PayerGroup[];
 }): FlowStage {
   const r = args.resolution;
   if (!r) return 'identify';
   if (args.skipped) return 'answer';
   if (r.candidates.total <= 1) return 'answer';
   if (args.picked) return 'answer';
-  if (payerGroupsOf(r).length > 1 && args.payerPick === null) return 'payer';
+  if ((args.payerGroups ?? payerGroupsOf(r)).length > 1 && args.payerPick === null) return 'payer';
   return 'plan';
 }
 
@@ -320,12 +327,15 @@ export function employerNarrowFor(
   return { employers: picked };
 }
 
-/** The live-region sentence for the current state — announced once, as a full sentence. */
+/** The live-region sentence for the current state — announced once, as a full sentence.
+ *
+ *  `opts.payerGroups` is the shell's memoized cluster set. It rides in the EXISTING opts bag rather
+ *  than as a fifth positional so every current call compiles untouched; omitting it self-derives. */
 export function liveSentenceFor(
   stage: FlowStage,
   resolution: QualifyResolution | null,
   reason: 'empty' | 'prefix_too_short' | 'no_match' | null,
-  opts: { skipped?: boolean; scopePayer?: string | null } = {},
+  opts: { skipped?: boolean; scopePayer?: string | null; payerGroups?: PayerGroup[] } = {},
 ): string {
   if (!resolution) return reason ? UNRESOLVABLE_COPY[reason] : '';
   // A skipped search resolved NOTHING past the identifier: announcing the pre-selected candidate's
@@ -345,7 +355,7 @@ export function liveSentenceFor(
     return 'Back at the search step. Searching again replaces the current result.';
   }
   if (stage === 'payer') {
-    return `${payerGroupsOf(resolution).length} carriers match what you typed. Pick the one on the card.`;
+    return `${(opts.payerGroups ?? payerGroupsOf(resolution)).length} carriers match what you typed. Pick the one on the card.`;
   }
   if (stage === 'plan') {
     return `${resolution.candidates.total} plans match. Pick one, or ask the AI about one.`;
@@ -1108,8 +1118,23 @@ export interface StageAnswerProps {
    * A RE-SCOPE of content already on screen (window chip, billed-under chip) — per the design
    * system, that keeps the current content rendered at reduced opacity with a thin progress bar,
    * instead of blanking to a skeleton. Skeletons are for genuine first loads only.
+   *
+   * STRICTLY "a request is in flight". It drives the animated progress beam, so it must never be
+   * true for a fetch that has stopped — see `staleAfterError`.
    */
   refetching: boolean;
+  /**
+   * Content on screen describes a scope the user has moved off, AND the fetch for the new scope
+   * FAILED. Dim it exactly like a re-scope — it is equally provisional — but claim no progress: a
+   * stopped fetch must not animate a progress marker. Mutually exclusive with `refetching`.
+   */
+  staleAfterError: boolean;
+  /**
+   * Re-issue the identical snapshot request after a failure. The shell carries a nonce to make this
+   * possible: a retry's scope key is unchanged by construction and the fetch effect keys on it, so
+   * without an explicit trigger, clicking the same chip again is a no-op.
+   */
+  onRetry: () => void;
 }
 
 /** One filter row, styled as the "BILLED UNDER" line: a label, then toggle chips. Multiselect —
@@ -1174,6 +1199,19 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // payer-wide (no payerOverride, no market: verified at the fetch). The identity line names the
   // payer the ranking actually used instead.
   const skipped = props.scopeSource === 'skipped';
+  // The four render states, named once. A FAILED REFETCH is not a first load and must not be
+  // rendered as one: `refreshFailed` keeps the last-known-good answer on screen and APPENDS the
+  // banner, where `firstLoadFailed` has nothing to preserve and shows the bare error.
+  const firstLoadFailed = props.snapshotError !== null && snap === null;
+  const refreshFailed = props.snapshotError !== null && snap !== null;
+  // Dim for either reason — both mean "this describes a scope you moved off". The BEAM stays tied
+  // to props.refetching alone (see below): dimming says provisional, the beam claims progress.
+  const stale = props.refetching || props.staleAfterError;
+  // Equivalent to the previous inline expression for every reachable state: with snap === null it
+  // reduces to the same `pending || !error`, and with a snapshot present it is false — the old
+  // `pending && !refetching` arm was unreachable because all four submit paths null the snapshot
+  // before dispatching.
+  const showSkeleton = snap === null && (props.pending || props.snapshotError === null);
   const scopePayer = snap?.resolved?.payerName ?? g.payerDisplayName;
   const policyBits = [
     g.employerLabel ?? 'No plan sponsor on file',
@@ -1210,23 +1248,51 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
         <span className="text-ink600"> · {skipped ? 'all plans — no plan chosen' : policyBits}</span>
       </p>
 
-      {(props.pending || (!snap && !props.snapshotError)) && !(snap && props.refetching) ? (
+      {/* THREE INDEPENDENT SIBLINGS, not an exclusive ternary chain. The chain put the error arm
+          ABOVE the `snap` arm, so any error dropped the whole scorecard even when a perfectly good
+          one was in hand — the banner REPLACED the answer instead of annotating it. */}
+      {showSkeleton ? (
         <>
           <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
             Ranking facilities for this plan…
           </p>
           <AnswerSkeleton />
         </>
-      ) : props.snapshotError ? (
+      ) : null}
+
+      {/* A genuine FIRST load failed: there is nothing to preserve and nothing to dim. Copy is
+          unchanged, and deliberately carries no Retry — see the refresh banner below for why. */}
+      {firstLoadFailed ? (
         <p role="status" className="rounded-lg border border-line bg-coral50 p-4 text-sm text-ink900">
           The facility ranking could not be loaded. The plan resolution above still stands — try again, or
           change the window.
         </p>
-      ) : snap ? (
+      ) : null}
+
+      {/* A REFRESH failed with a good answer still in hand. Say what is on screen and offer a real
+          control — the old copy said "try again" while providing nothing to click, and re-clicking
+          the same chip was a genuine no-op (unchanged scope key ⇒ the fetch effect never re-ran). */}
+      {refreshFailed ? (
+        <p role="status" className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-coral50 p-4 text-sm text-ink900">
+          <span>
+            The ranking below could not be refreshed
+            {props.staleAfterError ? ' — it still shows the scope you were on before' : ''}. Nothing was lost.
+          </span>
+          <button
+            type="button"
+            onClick={props.onRetry}
+            className="w-fit shrink-0 rounded-full border border-line bg-surface px-3 py-1 text-xs font-semibold text-teal700 transition-colors hover:border-teal500 hover:bg-teal50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40"
+          >
+            Try again
+          </button>
+        </p>
+      ) : null}
+
+      {snap ? (
         // The refetch treatment: current content stays RENDERED and readable at reduced opacity with
         // a thin indeterminate bar — a re-scope is not a first load, and blanking to a skeleton
         // makes every chip click feel like a page rebuild.
-        <div className={`relative flex flex-col gap-4 ${props.refetching ? 'opacity-60 transition-opacity duration-150' : ''}`}>
+        <div className={`relative flex flex-col gap-4 ${stale ? 'opacity-60 transition-opacity duration-150' : ''}`}>
           {props.refetching ? (
             <span aria-hidden className="q-refetch-bar absolute inset-x-0 -top-2 h-0.5 overflow-hidden rounded-full">
               <span className="q-refetch-beam block h-full w-1/3 rounded-full bg-teal500" />
@@ -1237,7 +1303,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               identifier's DOMINANT payer, and that must be said in words, not implied by chips.
               SUPPRESSED IN FLIGHT (rule 2654416): this is a categorical sentence about the data; it
               waits for its answer rather than describing the set being replaced. */}
-          {!props.refetching && props.scopeSource === 'dominant' && snap.resolved && r.candidates.total > 1 ? (
+          {!stale && props.scopeSource === 'dominant' && snap.resolved && r.candidates.total > 1 ? (
             <p role="status" className="rounded-lg border border-line bg-coral50 p-4 text-sm text-ink900">
               {g.claimEvidence.lines === 0
                 ? `This plan has no claims history of its own — the ranking below is this identifier's history under ${snap.resolved.payerName}, not evidence about ${g.payerDisplayName}.`
@@ -1248,7 +1314,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
           {/* A SKIP is its own scope claim: no plan was chosen, so the ranking is the identifier's
               whole footprint under its largest payer. "You declined to narrow" and "we could not
               narrow" are different statements and must not share copy. */}
-          {!props.refetching && props.scopeSource === 'skipped' && snap.resolved ? (
+          {!stale && props.scopeSource === 'skipped' && snap.resolved ? (
             <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink900">
               You skipped the plan questions, so this is a general search: every facility this member
               has history at under {snap.resolved.payerName}. Use the lines below to narrow it, or the
@@ -1413,7 +1479,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                   caption is SUPPRESSED IN FLIGHT (rule 2654416): it asserts one of four scope
                   claims about a set that has not answered yet. The chips themselves stay — they
                   are the user's controls, not claims. */}
-              {props.refetching ? null : (
+              {stale ? null : (
                 <span className="text-xs text-ink600">
                   {snap.payerOverridden
                     ? props.scopeSource === 'user'
@@ -1435,11 +1501,17 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               is a marker calibrated for the grid's numbers; these sentences wait instead. */}
           <div
             className="flex items-center gap-5 rounded-xl border border-line bg-surface p-5 shadow-ths-sm"
-            style={!props.refetching && rating?.band ? { backgroundColor: IQ_BAND_WASH[rating.band] } : undefined}
+            style={!stale && rating?.band ? { backgroundColor: IQ_BAND_WASH[rating.band] } : undefined}
           >
-            {props.refetching ? (
-              // No numeral, no verdict, no basis — a wordless pulse holds the footprint.
-              <span aria-hidden className="h-14 w-full max-w-sm animate-pulse rounded-lg bg-ground" />
+            {stale ? (
+              // No numeral, no verdict, no basis — a wordless placeholder holds the footprint. It
+              // PULSES only while a fetch is genuinely running; after a failure it is static, for
+              // the same reason the progress beam is withheld — motion is a progress claim, and
+              // there is no progress to claim once the request has stopped.
+              <span
+                aria-hidden
+                className={`h-14 w-full max-w-sm rounded-lg bg-ground ${props.refetching ? 'animate-pulse' : ''}`}
+              />
             ) : (
               <>
                 {rating && rating.rating !== null ? (
@@ -1573,8 +1645,12 @@ export interface ResolutionStagesProps {
    */
   ticker: React.ReactNode;
   /** Optional pre-computed clusters — the shell memoizes ONE `payerGroupsOf` call per resolution and
-   *  threads it to the rail, receipt, and both tile stages, which otherwise each re-derive it
-   *  (clusterCarriers is O(n²), and scroll-driven work makes that visible as filter-input lag). */
+   *  threads it to the rail, receipt, both tile stages, the STAGE MACHINE (`deriveStage`) and the
+   *  LIVE SENTENCE, which otherwise each re-derive it. The point is single-source-of-truth, not
+   *  speed: `payerGroupsOf` folds candidates by display name BEFORE clustering, so `clusterCarriers`
+   *  is O(n²) in the count of DISTINCT carrier names (~13 on a real prefix), not in the candidate
+   *  count — measured ~0.05 ms/call at 311 candidates. Threading it means the stage the flow picks
+   *  and the carriers the rail counts can never be two derivations that merely happen to agree. */
   payerGroups?: PayerGroup[];
   answer: Omit<StageAnswerProps, 'resolution'> | null;
 }
@@ -1603,7 +1679,7 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
 
       {/* THE single live region — one, not one per panel; the important sentence must not queue. */}
       <p aria-live="polite" className="sr-only">
-        {liveSentenceFor(props.stage, props.resolution, props.reason, { skipped, scopePayer })}
+        {liveSentenceFor(props.stage, props.resolution, props.reason, { skipped, scopePayer, payerGroups: props.payerGroups })}
       </p>
 
       {props.denied ? (

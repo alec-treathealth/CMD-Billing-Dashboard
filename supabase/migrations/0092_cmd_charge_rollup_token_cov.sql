@@ -85,3 +85,29 @@ vacuum (analyze) collections.cmd_explorer_charge_rollup;
 -- Confirm the size delta against the estimate in the rollback file's header before deciding whether
 -- to drop the two now-redundant bare indexes (cmd_charge_rollup_prefix, cmd_charge_rollup_member) in
 -- a follow-up migration.
+--
+-- ── APPLIED LIVE 2026-08-06 — MEASURED, and the size estimate was WRONG ────────────────────────────
+-- Applied as three autocommit `execute_sql` statements (both CONCURRENTLY builds + the VACUUM), never
+-- apply_migration. No invalid indexes before or after; both landed indisvalid = indisready = true.
+--
+-- PERF — the migration delivered, verified with the query above on the same busiest prefix token this
+-- header benchmarked (9,256 matched rows, up from 9,253):
+--   • prefix/ladder path:  Bitmap Heap Scan 1,455 buffers ~353 ms  ->  Index Only Scan 233 buffers,
+--                          17.5 ms, Heap Fetches: 0
+--   • exact-member path:   Bitmap Heap Scan 3,558 buffers ~676 ms  ->  Index Only Scan  20 buffers,
+--                          0.57 ms, Heap Fetches: 0
+--   (the prefix run still showed read=229 — the freshly-built index was cold; it warms.)
+--
+-- SIZE — the rollback header's "10-15 MB combined" estimate was off by ~12x. ACTUAL:
+--   cmd_charge_rollup_prefix_cov  102 MB      cmd_charge_rollup_member_cov  67 MB   (169 MB combined)
+--   cmd_explorer_charge_rollup is now 164 MB heap / 306 MB indexes / 470 MB total — indexes ~1.9x the
+--   table. WHY THE ESTIMATE MISSED: it priced the added member_id_bidx HMAC (~65 B) and ignored that
+--   BOTH payloads also carry `primary_payer`, a plaintext payer-name string. Payer names in this book
+--   run long and are highly various (1,237 distinct spellings measured the same day). The lesson is
+--   general: price an INCLUDE payload by its widest TEXT column, not by its keys.
+--
+--   This changes the drop decision the SCOPE note above left open: retiring the bare
+--   cmd_charge_rollup_prefix (3,928 kB) + cmd_charge_rollup_member (4,360 kB) recovers only ~8 MB,
+--   i.e. ~5% of what these two added. It is no longer a meaningful offset. If the disk matters, the
+--   lever to examine is whether `primary_payer` needs to ride in the PREFIX payload at all — the
+--   ladder's own verification query never reads it.

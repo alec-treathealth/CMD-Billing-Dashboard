@@ -26,10 +26,10 @@ import type {
   QualifyFacility,
   QualifyClaim,
   QualifyBookKpis,
-  QualifyFacilityTrend,
   QualifyPhi,
 } from '../lib/qualify/contract';
 import { QUALIFY_FACILITY_V2_NULLS } from './helpers/qualifyV2Fixture';
+import { TRENDS } from './helpers/qualifyTrends';
 import { PolicyStrip } from '../components/qualify/policy-strip';
 import { WindowLadder } from '../components/qualify/window-ladder';
 import type { QualifyPolicyCard, QualifyWindowLadder, QualifyFactorReading } from '../lib/qualify/contract';
@@ -390,23 +390,9 @@ const KPIS: QualifyBookKpis = {
   pctAllowedOfBilled: 44.4, pctPaidOfAllowed: 82.1, pctPaidOfBilled: 36.2, distinctPatients: 120,
   windowStart: '2026-06-18', windowEnd: '2026-07-18', tenantScope: 'cross-tenant-bxr-indigo',
 };
-const TRENDS: QualifyFacilityTrend[] = [
-  {
-    facilityKey: 'summit ridge', name: 'SUMMIT RIDGE RECOVERY', city: 'Scottsdale', state: 'AZ',
-    careSetting: 'IP', entity: 'BXR', dominantPayer: 'AETNA', lineCount: 210,
-    currentRating: 68, priorRating: 62.9, deltaPts: 5.1, points: [61, 62, 64, 63, 66, 67, 68, 68],
-  },
-  {
-    facilityKey: 'valley springs', name: 'VALLEY SPRINGS', city: 'Boise', state: 'ID',
-    careSetting: 'OP', entity: 'Indigo', dominantPayer: 'CIGNA', lineCount: 96,
-    currentRating: 22, priorRating: 26.5, deltaPts: -4.5, points: [27, 26, 25, 24, 23, 22],
-  },
-  {
-    facilityKey: 'fresh face', name: 'FRESH FACE BH', city: null, state: null,
-    careSetting: null, entity: null, dominantPayer: 'AETNA', lineCount: 12,
-    currentRating: 55, priorRating: null, deltaPts: null, points: [55],
-  },
-];
+// TRENDS moved verbatim to ./helpers/qualifyTrends (2026-08-06, F4) so the v3 flow's text-size floor
+// test can render a REAL <HeatingUpCards> off the SAME three rows. Every assertion below is
+// unchanged and still reads exactly those rows — see the import at the top of this file.
 
 test('KPI tiles — three percentage tiles, ZERO dollars, null renders "—" (never a coerced 0%)', () => {
   const html = renderToStaticMarkup(<BookKpiTiles kpis={KPIS} locActive={false} />);

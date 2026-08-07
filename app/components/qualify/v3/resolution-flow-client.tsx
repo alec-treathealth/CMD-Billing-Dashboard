@@ -81,6 +81,12 @@ export function ResolutionFlowClient({
   const [backTo, setBackTo] = useState<FlowStage | null>(null);
   const [snapshot, setSnapshot] = useState<QualifySnapshot | null>(null);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
+  // A monotonic retry counter, and the ONLY way to re-fire a request whose inputs did not change.
+  // The snapshot effect keys on `scopeKey`, which is by construction identical on a retry — so
+  // without this, "try again" is a no-op and a failed answer stage stays dead until the user picks a
+  // different scope or re-searches. Never reset it: the four submit paths already clear the snapshot
+  // and error, and zeroing it could make a later retry collide with a stale value and do nothing.
+  const [retryNonce, setRetryNonce] = useState(0);
   const [payerOverride, setPayerOverride] = useState<string | null>(null);
   const [windowDays, setWindowDays] = useState<QualifyTrailingDays | null>(null);
   // What scope the RENDERED snapshot describes. A re-scope keeps content on screen, dimmed, with a
@@ -149,6 +155,17 @@ export function ResolutionFlowClient({
     setEmployerQuery('');
   }, []);
 
+  /** Re-issue the SAME snapshot request after a failure. Bumping the nonce is what moves the
+   *  effect's dependency array; nothing about the request itself changes (the term is still in
+   *  `termRef`, the scope still in state), so nothing is stashed anywhere to support this. The
+   *  empty-term guard mirrors the effect's own early return at the top — without it, clearing the
+   *  error here would leave a banner-free stage with no fetch behind it. */
+  const onRetrySnapshot = useCallback(() => {
+    if (termRef.current === '') return;
+    setSnapshotError(null);
+    setRetryNonce((n) => n + 1);
+  }, []);
+
   /** A plan pick: inject the held term (never from the DOM), mark picked, dispatch. A NEW plan is a
    *  new population — a genuine first load, so the snapshot blanks to the skeleton (unlike a
    *  re-scope, which keeps stale content dimmed). */
@@ -184,7 +201,10 @@ export function ResolutionFlowClient({
     setBackTo(target);
   }, []);
 
-  const derived = deriveStage({ resolution: state.resolution, payerPick, picked, skipped });
+  // `payerGroups` is the SAME memoized set the rail, receipt and tiles read (see the useMemo above).
+  // Passing it here is what makes "which stage are we on" and "how many carriers does the rail show"
+  // one derivation instead of two that happen to agree.
+  const derived = deriveStage({ resolution: state.resolution, payerPick, picked, skipped, payerGroups });
   // The receipt's Change can only step BACKWARD from what is derivable; any submit clears it.
   const stage: FlowStage = backTo ?? derived;
 
@@ -234,7 +254,21 @@ export function ResolutionFlowClient({
     funding: filters.funding,
     employers: narrow.employers,
   });
-  const refetching = isRefetching(snapshot !== null, loadedKey, scopeKey);
+  // THREE states, not one boolean — because a failed refetch now KEEPS its snapshot, and
+  // `isRefetching` cannot tell "a request is running" from "a request stopped, badly".
+  //
+  //   stale           — what is on screen no longer describes what the user asked for. Dim it.
+  //   refetching      — stale AND a request is genuinely in flight. Drives the progress beam ONLY.
+  //   staleAfterError — stale AND the request failed. Dim, but claim no progress.
+  //
+  // Collapsing these would animate a progress beam over a dead fetch and suppress the hero numeral
+  // forever — the exact stuck-flag class of bug 7a40728/bef4c57 fixed. Note the deliberate
+  // asymmetry: a failure at the SAME scope (loadedKey === scopeKey) leaves `stale` false, so the
+  // content stays full-opacity with its headline intact and only the banner is appended — nothing
+  // on screen is wrong in that case, so nothing should look provisional.
+  const stale = isRefetching(snapshot !== null, loadedKey, scopeKey);
+  const refetching = stale && snapshotError === null;
+  const staleAfterError = stale && snapshotError !== null;
 
   // ── Snapshot for the answer stage — the hardened v2 data path under the new UI ────────────────
   const predicateId = state.resolution?.predicateId ?? null;
@@ -266,7 +300,11 @@ export function ResolutionFlowClient({
       })
       .catch(() => {
         if (alive) {
-          setSnapshot(null);
+          // KEEP the last-known-good snapshot. It was valid a moment ago and is no less valid
+          // because a re-scope failed; blanking it threw away a correct answer to report a failed
+          // request. `loadedKey` is deliberately NOT stamped here — it must keep pointing at the
+          // scope the RENDERED snapshot actually describes, which is what lets the stage below tell
+          // "stale content" apart from "content that matches what was asked".
           setSnapshotError('failed');
         }
       });
@@ -276,8 +314,10 @@ export function ResolutionFlowClient({
     // scopeKey is the stable serialization of every request input (payer label, window, funding,
     // employers); the arrays themselves would be new identities every render and refetch forever.
     // Depending on it alone is sound BECAUSE it is derived from exactly those values.
+    // `retryNonce` is the manual re-trigger: a retry re-issues an IDENTICAL request, so scopeKey
+    // cannot move and the effect would otherwise never re-run.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stage, predicateId, isPending, scopeKey]);
+  }, [stage, predicateId, isPending, scopeKey, retryNonce]);
 
   // ── The landing ticker: fetched ONCE on mount, book-wide, independent of the search ───────────
   // Trailing 60 days (Alec, 2026-08-06 — narrowed from 90 so the strip reads as current). The strip
@@ -447,6 +487,8 @@ export function ResolutionFlowClient({
                 pending: isPending,
                 scopeSource,
                 refetching,
+                staleAfterError,
+                onRetry: onRetrySnapshot,
                 candidates: answerCandidates,
                 filters,
                 onToggleFilter,

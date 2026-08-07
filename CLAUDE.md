@@ -112,9 +112,9 @@ Run all five before any commit. This is the bar for "verified" — not typecheck
 alone, and especially not when a shared helper changed.
 
 ```bash
-npm test                          # root hermetic suite — >=1110 pass / 0 fail
+npm test                          # root hermetic suite — >=1284 pass / 0 fail
 npm run typecheck                 # root tsc (strict: noUncheckedIndexedAccess)
-cd app && npm test                # app suite — >=259 pass / 0 fail
+cd app && npm test                # app suite — >=386 pass / 0 fail
 cd app && npm run typecheck        # app tsc
 cd app && npm run build            # catches bundler-only failures tsc cannot
 ```
@@ -128,15 +128,26 @@ number above, tests were lost — find out why before committing. They are writt
 as `>=` floors deliberately, because the suites grow and a hardcoded exact number
 rots into a false tripwire within days.
 
-**Provenance of the current floors (read before trusting them).** 1110 / 259 were
-measured 2026-08-04 on the **shared working tree** of branch
-`fix/qualify-no-matches-stale`, not on a clean checkout — they superseded 1076 /
-206, which were measured on the tree of `main` @`53b49d6`. By the rule in the next
-sentence that makes them *floors that are known to be reachable*, not ratified
-counts. Only counts measured on a clean detached checkout of `origin/main` are
-trustworthy — a shared working tree with other sessions' edits is not evidence.
-Re-measure on a clean checkout when you next have one, and promote the number
-then.
+**Provenance of the current floors (read before trusting them).** 1284 / 386 are
+**RATIFIED counts**, not merely floors known to be reachable: measured 2026-08-06
+on a **clean detached worktree** of `origin/main` @`ea3dadb` (`git worktree add
+--detach origin/main`, `git status --porcelain` empty before any command ran,
+`npm ci` clean at both root and `app/`, all five gate commands exit 0). That is
+the exact condition the paragraph below demands, so these may be trusted as
+measured rather than as a lower bound someone once hit.
+
+They supersede 1110 / 259, which were measured 2026-08-04 on the **shared working
+tree** of branch `fix/qualify-no-matches-stale` and were explicitly flagged as
+not-evidence; those in turn superseded 1076 / 206 (tree of `main` @`53b49d6`).
+The 1110 / 259 pair had drifted **174 root and 127 app tests low**, which had
+quietly disabled the tripwire: a suite could have silently lost ~170 tests and
+still "passed" the floor. If you find yourself more than a few dozen tests above
+the number here, that is the same rot — re-measure and promote.
+
+**The rule that produced these numbers, unchanged:** only counts measured on a
+clean detached checkout of `origin/main` are trustworthy — a shared working tree
+with other sessions' edits is not evidence. Re-measure on a clean checkout when
+you next have one, and promote the number then.
 
 ## Git workflow
 
@@ -154,7 +165,7 @@ Two **separate** migration planes — never mix the directories:
 
 | Plane | Directory | Next number (as of 2026-08-06) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0092** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0093** |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **029** |
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
@@ -173,7 +184,21 @@ writer could not read the roster and the 42501 was being swallowed into an empty
 map. If you add a `collections.*` read to a cron, **check the writer's grant
 first** — `has_table_privilege('cmd_rollup_writer', …)` — because a fail-soft
 catch will otherwise turn a permission error into permanently wrong data rather
-than a visible failure. Veris
+than a visible failure. **0090 (writer SELECT policy on `collections.facilities`)
+and 0091 (`collections.qualify_facility_outcomes` + both its policies) are APPLIED
+LIVE** — verified 2026-08-06 by object presence, not by a ledger entry. **0092
+(Qualify token-scoped covering indexes) is APPLIED LIVE 2026-08-06** via autocommit
+`execute_sql`, **not** `apply_migration`: it runs `CREATE INDEX CONCURRENTLY` twice
+plus `VACUUM (ANALYZE)`, none of which can run inside a transaction block (same
+discipline as 0070 and 0081). It delivered what it promised — the ladder's prefix
+query went 353ms / 1,455 buffers to **17.5ms with `Heap Fetches: 0`** — but it cost
+**169 MB** (102 + 67) against its rollback header's estimate of "10-15 MB combined",
+roughly **12x over**, because the INCLUDE payload carries `primary_payer` *text* and
+the estimate priced only the HMAC token. Indexes on `cmd_explorer_charge_rollup` are
+now 306 MB against a 164 MB heap. Dropping the superseded bare
+`cmd_charge_rollup_prefix` / `_member` recovers only ~8 MB and does not offset this;
+the real lever is whether `primary_payer` belongs in the prefix payload at all.
+**Price an INCLUDE payload by its widest text column, not its keys.** Veris
 **027 and 028 are applied live** (ledger 20260805065025 / 20260805060000, another
 session), which is why the next Veris number is 029. Never edit 023, 024, or 025
 in place — all three are applied live. Before authoring, re-derive the next number

@@ -17,6 +17,7 @@ import {
   scopeKeyOf,
   UNRESOLVABLE_COPY,
   deriveStage,
+  liveSentenceFor,
   orderedCandidates,
   payerGroupsOf,
   type FlowStage,
@@ -25,6 +26,9 @@ import {
 import { deriveNotices } from '../lib/qualify/resolution';
 import type { PanelEvidence, PanelId, QualifyResolution } from '../lib/qualify/resolution';
 import type { QualifyFacility, QualifySnapshot } from '../lib/qualify/contract';
+import { trailingWindow } from '../lib/qualify/contract';
+import { HeatingUpCards, HeatingUpSkeleton } from '../components/qualify/shared/heating-ticker';
+import { TRENDS } from './helpers/qualifyTrends';
 
 const PANELS: readonly PanelId[] = ['kpis', 'ranking', 'policy', 'ladder', 'trend', 'ai'];
 
@@ -157,6 +161,8 @@ function props(stage: FlowStage, r: QualifyResolution | null, over: Partial<Reso
           windowDays: null,
           onWindowDays: noop,
           refetching: false,
+          staleAfterError: false,
+          onRetry: noop,
           candidates: r ? orderedCandidates(r) : [],
           filters: NO_ANSWER_FILTERS,
           onToggleFilter: noop,
@@ -183,6 +189,8 @@ function answerProps(over: Partial<NonNullable<ResolutionStagesProps['answer']>>
     windowDays: null,
     onWindowDays: noop,
     refetching: false,
+    staleAfterError: false,
+    onRetry: noop,
     candidates: [],
     filters: NO_ANSWER_FILTERS,
     onToggleFilter: noop,
@@ -225,6 +233,59 @@ test('deriveStage: a single carrier with many plans skips the payer stage, not t
   });
   assert.equal(payerGroupsOf(r).length, 1, 'one carrier');
   assert.equal(deriveStage({ resolution: r, payerPick: null, picked: false }), 'plan');
+});
+
+// F3a. deriveStage and liveSentenceFor used to ALWAYS self-derive payerGroupsOf, so the stage the
+// flow picked and the carriers the rail counted were two independent derivations that merely
+// happened to agree. The shell now threads its ONE memoized set into both. This pins the property
+// that makes that safe: supplying the memo can never change the answer — and, just as important,
+// that the supplied value is actually REACHED rather than discarded by the ?? fallback.
+test('F3a: threading the memoized payerGroups cannot change what deriveStage or liveSentenceFor say', () => {
+  const multi = fixture(); // two carriers → the payer question
+  const sole = fixture({
+    candidates: {
+      total: 3,
+      chosenIndex: 0,
+      wasAmbiguous: true,
+      chosenBy: 'user',
+      rejected: [
+        { canonicalPayerId: 'pi_aetna', payerDisplayName: 'Aetna', employerLabel: 'ACME CO', funding: null, planType: null, memberCount: 9, hasClaimEvidence: true },
+        { canonicalPayerId: 'pi_aetna', payerDisplayName: 'Aetna', employerLabel: 'GLOBEX', funding: null, planType: null, memberCount: 3, hasClaimEvidence: false },
+      ],
+    },
+  });
+
+  for (const [label, r] of [['two carriers', multi], ['one carrier', sole]] as const) {
+    for (const payerPick of [null, 'Aetna']) {
+      for (const picked of [false, true]) {
+        const base = { resolution: r, payerPick, picked };
+        assert.equal(
+          deriveStage({ ...base, payerGroups: payerGroupsOf(r) }),
+          deriveStage(base),
+          `deriveStage disagreed with itself (${label}, payerPick=${payerPick}, picked=${picked})`,
+        );
+      }
+    }
+    assert.equal(
+      liveSentenceFor('payer', r, null, { payerGroups: payerGroupsOf(r) }),
+      liveSentenceFor('payer', r, null),
+      `liveSentenceFor disagreed with itself (${label})`,
+    );
+  }
+
+  // NEGATIVE CONTROL — without this, every assertion above would still pass if the ?? fallback
+  // always won and the supplied set were ignored. A deliberately wrong set MUST move the answer.
+  assert.equal(deriveStage({ resolution: multi, payerPick: null, picked: false }), 'payer');
+  assert.equal(
+    deriveStage({ resolution: multi, payerPick: null, picked: false, payerGroups: payerGroupsOf(sole) }),
+    'plan',
+    'a supplied one-carrier set must be USED, not discarded in favour of a self-derive',
+  );
+  assert.match(
+    liveSentenceFor('payer', sole, null, { payerGroups: payerGroupsOf(multi) }),
+    /^2 carriers match/,
+    'liveSentenceFor must count the SUPPLIED set, not re-derive from the resolution',
+  );
 });
 
 test('the trend ticker rides the IDENTIFY stage only — it must not compete with the question', () => {
@@ -304,7 +365,10 @@ test('a NO-OP scope click cannot flip the refetch flag — the stuck-headline bu
 
   // A FIRST load is never a refetch: no snapshot on screen ⇒ skeleton, not the dim treatment.
   assert.equal(isRefetching(false, null, key), false, 'first load');
-  assert.equal(isRefetching(false, 'stale', key), false, 'a failed fetch cleared the snapshot');
+  // Nothing on screen is never a refetch — it is a first load, whatever the stamp says. (This used
+  // to be justified as "a failed fetch cleared the snapshot"; since F2 a failed fetch KEEPS its
+  // snapshot, so that rationale is gone even though the pure-function truth is unchanged.)
+  assert.equal(isRefetching(false, 'stale', key), false, 'no content on screen is never a refetch');
   assert.equal(isRefetching(true, null, key), false, 'content present but nothing stamped yet');
 });
 
@@ -495,16 +559,43 @@ test('I9: the live region states the reason when nothing resolved', () => {
 
 // ── Text size floor ─────────────────────────────────────────────────────────────────────────────
 
+// F4 (2026-08-06). This test was passing over markup it never rendered. `props()` defaults
+// `ticker: null` and no case overrode it, so the Heating-Up strip — real content on a real rep's
+// screen — was outside the sweep, and shipped FIVE sub-12px classes (one at 9px). The answer stage
+// was scanned only in its skeleton state for the same reason: with `snapshot: null` the whole
+// snapshot-bearing subtree (scorecard grid, filter lines, receipt) never rendered.
+//
+// Two structural fixes, both of which matter more than the size assertions themselves:
+//   1. The case list now renders the REAL <HeatingUpCards> and <HeatingUpSkeleton> the shell ships
+//      (resolution-flow-client.tsx:403-411), and an answer stage WITH a snapshot.
+//   2. Each case asserts a POSITIVE CONTROL first. Without one, a refactor that stops rendering
+//      `props.ticker` would make this test vacuously green again — which is exactly the failure
+//      being fixed here, and a green vacuous test is worse than no test.
 test('I9: no meaning-bearing text below 12px anywhere in the flow', () => {
-  for (const [stage, r, over] of [
-    ['identify', null, {}],
-    ['payer', fixture(), {}],
-    ['plan', fixture(), { payerPick: 'Aetna' }],
-    ['answer', fixture(), {}],
-  ] as Array<[FlowStage, QualifyResolution | null, Partial<ResolutionStagesProps>]>) {
+  const ticker = <HeatingUpCards trends={TRENDS} window={trailingWindow(60)} readOnly />;
+  const cases: Array<[string, FlowStage, QualifyResolution | null, Partial<ResolutionStagesProps>, RegExp]> = [
+    ['identify', 'identify', null, {}, /Search/],
+    ['payer', 'payer', fixture(), {}, /Aetna/],
+    ['plan', 'plan', fixture(), { payerPick: 'Aetna' }, /Aetna/],
+    ['answer (skeleton)', 'answer', fixture(), {}, /Ranking facilities for this plan/],
+    // The two branches the shell actually mounts on the landing. `readOnly` and the 60-day window
+    // mirror production exactly (TICKER_WINDOW, resolution-flow-client.tsx:60).
+    ['identify + real ticker', 'identify', null, { ticker }, /Facilities Heating Up/],
+    ['identify + ticker skeleton', 'identify', null, { ticker: <HeatingUpSkeleton /> }, /Loading trends/],
+    // The answer stage with data — the branch the skeleton case above never reaches. Added
+    // 2026-08-06 and green on arrival; it found nothing at the time, it is coverage, not a fix.
+    ['answer + snapshot', 'answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture() }) }, /NASHVILLE MENTAL HEALTH/],
+  ];
+
+  for (const [label, stage, r, over, mustRender] of cases) {
     const html = render(props(stage, r, over));
-    for (const tooSmall of ['text-[8.5px]', 'text-[9px]', 'text-[9.5px]', 'text-[10px]', 'text-[10.5px]', 'text-[11px]', 'text-[11.5px]']) {
-      assert.ok(!html.includes(tooSmall), `sub-12px class on ${stage}: ${tooSmall}`);
+    // POSITIVE CONTROL — prove this case rendered the markup it claims to be sweeping.
+    assert.match(html, mustRender, `${label}: rendered nothing to scan — the floor check would be vacuous`);
+    // A regex sweep, not a literal blocklist: the old list enumerated seven exact strings, so
+    // text-[8px] or text-[11.75px] would have passed silently. px-only, deliberately — no rem/em
+    // arbitrary text sizes exist anywhere in app/components/qualify today.
+    for (const m of html.matchAll(/text-\[(\d+(?:\.\d+)?)px\]/g)) {
+      assert.ok(Number(m[1]) >= 12, `sub-12px class on ${label}: text-[${m[1]}px]`);
     }
   }
 });
@@ -741,6 +832,85 @@ test('the answer stage without a snapshot is an honest loading state, and an err
   const failed = render(props('answer', fixture(), { answer: answerProps({ snapshotError: 'failed' }) }));
   assert.match(failed, /The facility ranking could not be loaded\./);
   assert.match(failed, /The plan resolution above still stands/);
+  // A FIRST-load failure has nothing to preserve, so it stays the plain error state: no grid to
+  // keep, nothing to dim, and no Retry control (the refresh banner owns that affordance).
+  assert.ok(!failed.includes('Try again'), 'a first-load failure has nothing to retry into');
+  assert.ok(!failed.includes('opacity-60'), 'nothing on screen to dim');
+  assert.ok(!failed.includes('NASHVILLE MENTAL HEALTH'), 'no grid without a snapshot');
+});
+
+/** The answer hero's wordless placeholder (the `h-14` ghost that replaces the numeral/verdict while
+ *  the content on screen is stale), or null. Scoped deliberately: the step rail's current-stage dot
+ *  also carries `animate-pulse`, so a bare html.includes('animate-pulse') answers a different
+ *  question than the one these tests are asking. */
+function heroGhostOf(html: string): string | null {
+  return html.match(/class="h-14[^"]*"/)?.[0] ?? null;
+}
+
+// F2. A failed RE-SCOPE used to null the snapshot, so one failed chip click threw away a perfectly
+// good answer and replaced the whole stage with a paragraph. Worse, it was unrecoverable: the fetch
+// effect keys on scopeKey, which a same-chip re-click does not move, so "try again" — which the copy
+// literally said — could not be done. The answer stage stayed dead until the user re-searched.
+test('F2: a failed refetch KEEPS the last answer on screen, dimmed, with the error appended', () => {
+  const html = render(
+    props('answer', fixture(), {
+      answer: answerProps({
+        snapshot: snapshotFixture(),
+        snapshotError: 'failed',
+        staleAfterError: true,
+        refetching: false,
+      }),
+    }),
+  );
+  // The answer survives — this is the whole point.
+  assert.match(html, /NASHVILLE MENTAL HEALTH/, 'the scorecard must survive a failed refetch');
+  assert.match(html, /could not be refreshed/, 'and the failure must still be stated');
+  assert.match(html, /Nothing was lost/);
+  assert.match(html, /opacity-60/, 'stale content is dimmed, exactly like an in-flight re-scope');
+  // …but WITHOUT claiming progress. A stopped fetch that animates a progress marker is the
+  // stuck-flag lie 7a40728/bef4c57 fixed, re-introduced through a different door.
+  assert.ok(!html.includes('q-refetch-beam'), 'a stopped fetch must not animate a progress beam');
+  // Scoped to the HERO placeholder specifically — the step rail's current-stage dot also pulses,
+  // legitimately, and says nothing about the fetch.
+  assert.ok(heroGhostOf(html) !== null, 'the hero placeholder should still hold the footprint');
+  assert.ok(
+    !(heroGhostOf(html) ?? '').includes('animate-pulse'),
+    'nor a pulsing hero placeholder — motion is a progress claim',
+  );
+  assert.ok(
+    !html.includes('Ranking facilities for this plan…'),
+    'a failed refetch is not a first load and must not render the skeleton',
+  );
+});
+
+test('F2: the failed refetch offers a REAL retry control, not just the words "try again"', () => {
+  const html = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: snapshotFixture(), snapshotError: 'failed', staleAfterError: true }),
+    }),
+  );
+  const banner = html.slice(html.indexOf('could not be refreshed'));
+  assert.match(
+    banner,
+    /<button type="button"[^>]*>Try again<\/button>/,
+    'retry must be a native <button type="button"> — not a link, not a span with a handler',
+  );
+});
+
+test('F2: an in-flight refetch still claims progress; only a FAILED one goes quiet', () => {
+  const inFlight = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: snapshotFixture(), refetching: true, staleAfterError: false }),
+    }),
+  );
+  // The pre-existing treatment is untouched: dim + beam + pulse while genuinely fetching.
+  assert.match(inFlight, /opacity-60/);
+  assert.match(inFlight, /q-refetch-beam/, 'a running fetch DOES animate its progress beam');
+  assert.ok(
+    (heroGhostOf(inFlight) ?? '').includes('animate-pulse'),
+    'and its hero placeholder DOES pulse — this is the treatment F2 must not have broken',
+  );
+  assert.ok(!inFlight.includes('could not be refreshed'), 'and says nothing about failure');
 });
 
 test('going back to the search step announces the STAGE, not the stale result', () => {
