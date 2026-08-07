@@ -576,12 +576,25 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
     detail: { field: kind, window: serializeQualifyWindow(window) },
   });
 
-  // ── Phase E: the AUTO-WINDOW sufficiency ladder (one bucketed query, never five probes). Runs
-  // BEFORE the payer resolve so the chosen window scopes everything downstream. Manual windows
-  // (input.auto falsy) skip it entirely — the Range menu stays the biller's override.
-  let window2: QualifyWindow = window;
-  let ladder: QualifyWindowLadder | null = null;
-  if (input.auto === true && kind === 'prefix' && deps.loadWindowRungs) {
+  // ── Phase E: the AUTO-WINDOW sufficiency ladder (one bucketed query, never five probes).
+  //
+  // F1 (2026-08-06 perf session): this used to be `await`ed to completion BEFORE the Phase B/0
+  // batch below, on the theory that `window2` (the ladder's chosen window) feeds those queries. It
+  // doesn't — NONE of resolvePayer/loadPolicy/loadVobFreshness/loadPayerSpread/loadPolicySpread take
+  // a window argument (loadPolicy* are UNWINDOWED by design: "identity is recognized if the token
+  // appears at ANY time"; see qualifyPolicyQuery.ts/qualifyQuery.ts). `window2` is first consumed
+  // AFTER this whole section, in `qualifyWindowBounds(window2, now)` below, which only feeds the
+  // THIRD leg (the ranking batch). So the ladder and the Phase B/0 batch have no real data
+  // dependency on each other — they were serial only because the code was written serial. EXPLAIN
+  // ANALYZE against claims_reader on a real 9,253-row prefix (2026-08-06) measured the ladder at
+  // ~353ms and resolvePayer (the slowest of the Phase B/0 batch) at ~676ms — SERIAL, that's
+  // ~1030ms before the ranking batch even starts; run concurrently, the critical path is the max of
+  // the two, ~676ms. Manual windows (input.auto falsy) skip the ladder entirely — the Range menu
+  // stays the biller's override — but the batch below always runs, so parallelizing is unconditional.
+  const ladderPromise: Promise<{ ladder: QualifyWindowLadder | null; window2: QualifyWindow }> = (async () => {
+    if (!(input.auto === true && kind === 'prefix' && deps.loadWindowRungs)) {
+      return { ladder: null, window2: window };
+    }
     const rungDays: QualifyTrailingDays[] = [30, 60, 90, 180, 365];
     const now = deps.now();
     const boundsOf = (d: QualifyTrailingDays) => qualifyWindowBounds({ kind: 'trailing', days: d }, now);
@@ -609,16 +622,20 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
         sufficient: byDay[d] >= QUALIFY_RATING_CONFIDENT_PATIENTS,
       }));
       const chosen = rungs.find((r) => r.sufficient) ?? rungs[rungs.length - 1]!;
-      ladder = { rungs, chosenDays: chosen.days, sufficient: chosen.sufficient };
-      window2 = { kind: 'trailing', days: chosen.days };
+      return {
+        ladder: { rungs, chosenDays: chosen.days, sufficient: chosen.sufficient },
+        window2: { kind: 'trailing' as const, days: chosen.days },
+      };
     } catch {
-      ladder = null; // ladder failure degrades to the caller's window — never blocks the search
+      return { ladder: null, window2: window }; // ladder failure degrades to the caller's window
     }
-  }
+  })();
 
   // ── Phase B/0: the policy on file behind the token + the global VOB feed freshness — parallel
-  // with the payer resolve. All three fail-soft; a VOB hiccup must not take down the claims read.
-  const [dominantPayer, policyRow, globalFresh, payerSpread, policySpread] = await Promise.all([
+  // with the payer resolve AND the Phase E ladder above (F1 restructuring). All fail-soft; a VOB
+  // hiccup must not take down the claims read.
+  const [{ ladder, window2 }, dominantPayer, policyRow, globalFresh, payerSpread, policySpread] = await Promise.all([
+    ladderPromise,
     deps.resolvePayer(token, kind, gate.entityIds),
     deps.loadPolicy ? deps.loadPolicy(token, kind).catch(() => null) : Promise.resolve(null),
     deps.loadVobFreshness ? deps.loadVobFreshness().catch(() => null) : Promise.resolve(null),
