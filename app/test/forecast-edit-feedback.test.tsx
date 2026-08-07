@@ -127,6 +127,22 @@ test('an idempotent delete of an already-gone row does NOT claim it removed some
   assert.match(real.text, /Edit removed/);
 });
 
+test('an already-gone delete STILL refetches — deleted:false means the tile is stale', async () => {
+  // Pinning a deliberate decision that reads like an inefficiency and was flagged as one in
+  // review (PR #146). `deleted` is ROW_COUNT > 0 on (id, business_entity_id), and the id came
+  // from this tile's own tenant-scoped render — so false means the row was there at load and is
+  // gone now, i.e. somebody else removed it. Not reloading would leave the vanished row on
+  // screen with a button that answers "already gone" forever.
+  const d = deps({ ok: true, deleted: false });
+  const r = await runForecastEdit(DEL, 'bxr', d);
+  assert.equal(r.outcome.tone, 'info', 'honest about having changed nothing itself');
+  assert.equal(
+    r.refetch,
+    true,
+    'and reloads anyway, because it just learned the tile is out of date',
+  );
+});
+
 test('success names the action in the past tense and carries the amount where there is one', () => {
   assert.match(forecastEditSuccess(ADD).text, /^Added — KWC · BCBS AR · 2026-09-01 · \$72,000\.00\.$/);
   assert.match(forecastEditSuccess(LANDED).text, /^Marked landed — /);

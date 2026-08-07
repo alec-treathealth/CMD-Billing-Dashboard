@@ -216,6 +216,23 @@ export async function runForecastEdit(
   try {
     if (intent.op === 'delete-edit') {
       const r = await deps.remove(intent.id, view);
+      // ⚠️ `refetch: true` EVEN WHEN `deleted === false`. This looks like a wasted reload and
+      // has already been flagged as one in review (PR #146) — it is not, and the reason is not
+      // guessable from this line alone.
+      //
+      // `deleted` is ROW_COUNT > 0 from
+      // `delete ... where id = $2 and business_entity_id = $1`. The id reaching here came from
+      // the tile's own render, via a loadUpcomingManual scoped to that same tenant. So
+      // `deleted === false` does not mean "nothing happened" — it means THE ROW EXISTED WHEN
+      // THIS TILE LOADED AND IS GONE NOW. The tile is stale: another super admin, or another
+      // tab, removed it in between. That is the strongest reason to reload there is.
+      //
+      // Skipping the refetch would leave the vanished row on screen with its Undo/Remove button
+      // still offering to delete it, answering every click with "already gone" forever — a dead
+      // control that reports its own deadness, which is the entire bug class this module exists
+      // to end. The only other path to `deleted === false` is a double-fire beating the `busy`
+      // latch, and there the FIRST call already returned refetch: true, so the second reload is
+      // redundant rather than wrong.
       return r.ok
         ? { outcome: forecastEditSuccess(intent, r.deleted), refetch: true }
         : {
