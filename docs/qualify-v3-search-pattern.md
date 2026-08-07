@@ -57,6 +57,36 @@ the answer stage's ladder.
 - The always-open trace, notices, ladder tiles, and policy-fact rows — all become collapsed
   disclosures on stage 4. Present, honest, not shouting.
 
+**Not a ruling — a casualty, corrected 2026-08-07.** The 2026-08-06 cutover also dropped two
+facility-level affordances — v2's Facility type-ahead in the primary search row, and the
+Heating Up ticker's clickable cards — and unlike the three drops above, *neither ever appeared
+in this list*: nothing here named them, so nothing tracked the loss, and it took a live gap
+report to notice. (The first dark-launch build made the search-box drop worse by promising
+"…or a facility name" without building it — typing a city name was HMAC'd down the member-id
+blind index and came back a confusing no-match; the fix that shipped deleted the promise
+rather than the capability.) Both are now RESTORED, in a v3-native shape rather than a v2 port,
+so this doc no longer has a silent gap for the next cutover to repeat:
+
+- **The area facet** (stage 4 only — `AreaLine` in `resolution-flow.tsx`) is what the Facility
+  type-ahead became. It narrows the RENDERED scorecard grid alone, never the fetch, over state
+  buckets derived from the facilities the ranking already returned — reusing the mobile PWA's
+  `deriveAreaChips` / `facilitiesInArea` (an unmapped facility buckets under "Other" and is
+  never dropped, never a typed term reaching the blind index).
+- **The answer-armed ticker.** Heating Up's cards are clickable again — a click seeds the area
+  facet rather than v2's {facility + dominant payer} pivot, because v3 resolves a member and
+  re-pivoting the whole surface on a click would throw the member away. That armed/inert split
+  is unchanged, but where the strip RENDERS is not: **updated 2026-08-07** (Alec, product
+  directive: *"I don't like the tickers on the post-click search page. Need them on all the
+  pages."*) — the strip now persists across **all four stages**, as a single mount that survives
+  every stage transition (so a click never resets the marquee's scroll position). This overturns
+  the sentence that shipped a few hours earlier in this same doc update, which had the strip
+  excluding PAYER and PLAN under the "must not compete with the question" rule below. Alec is the
+  ratifier of that rule and has overturned it *for the ticker specifically* — the rule itself
+  still governs everything else stages 2–3 exclude (see "The principle" and the bullets above).
+  Only stage 4, with a snapshot on screen, arms it as a control; IDENTIFY/PAYER/PLAN render it
+  `readOnly` — orientation, not a control, because a click on those three still has no honest
+  target (v3 has no facility-first resolve path).
+
 ## Motion
 
 GSAP stage transitions: outgoing stage clears, incoming slides up 14px/220ms ease-out, tiles
