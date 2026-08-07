@@ -42,6 +42,8 @@ import { IQ_BAND_LABELS, IQ_BAND_VERDICTS, PROVENANCE_LABELS, facilityFactorsDis
 import { CONFIDENCE_LEGEND, type QualifyConfidence } from '../../lib/qualify/confidence';
 import { bucketClass, confidenceClass, iqBandClass } from './colors';
 import type { QualifyFacility, QualifyFactorReading, QualifyProvenance } from '../../lib/qualify/contract';
+import type { QualifyFinding } from '../../lib/qualify/findings';
+import { FacilityFindings } from './facility-findings';
 
 function usd0(n: number): string {
   return `$${Math.round(n).toLocaleString('en-US')}`;
@@ -116,11 +118,12 @@ function EvidencePips({ patients }: { patients: number }) {
 
 /** The expanded "Why this score" factor list — ships the server-computed work verbatim (§5): each
  *  factor's weight, direction, and plain-language detail. Non-dollar by construction. */
-function FactorList({ f }: { f: QualifyFacility }) {
+function FactorList({ f, findings = [] }: { f: QualifyFacility; findings?: QualifyFinding[] }) {
   return (
     <div className="mt-1 rounded-xl border border-line bg-ground px-3 py-1">
       {f.factors.map((x) => (
-        <div key={x.key} className="flex items-start gap-2.5 border-b border-line py-2 last:border-b-0">
+        <div key={x.key} className="border-b border-line py-2 last:border-b-0">
+        <div className="flex items-start gap-2.5">
           <span className={['mt-px w-4 shrink-0 text-center text-[11px] font-bold', x.available ? DIR_META[x.direction].cls : 'text-ink400'].join(' ')} aria-hidden>
             {x.available ? DIR_META[x.direction].arrow : '·'}
           </span>
@@ -134,6 +137,10 @@ function FactorList({ f }: { f: QualifyFacility }) {
             <span className="block text-[11.5px] leading-snug text-ink600">{x.detail}</span>
           </span>
           <span className="shrink-0 font-mono text-[11.5px] tabular-nums text-ink400">{x.weight}%</span>
+        </div>
+        {/* ANCHORED beneath the factor it is about (the CCR FlagCard rule) — not collected into a
+            panel the reader has to map back onto rows themselves. */}
+        <FacilityFindings findings={findings.filter((fi) => fi.factorKey === x.key)} />
         </div>
       ))}
       <p className="py-1.5 text-[10.5px] text-ink400">
@@ -154,10 +161,14 @@ export function FacilityPanel({
   expandedKeys = EMPTY_KEYS,
   onExpandToggle,
   provenance = 'direct',
+  findingsByFacility = null,
 }: {
   facilities: readonly QualifyFacility[];
   hasAmounts: boolean;
   heatOn: boolean;
+  /** facilityKey -> findings anchored under that facility's factor rows (deriveFacilityFindings).
+   *  Null/absent renders the panel exactly as before, so every existing caller is unaffected. */
+  findingsByFacility?: ReadonlyMap<string, QualifyFinding[]> | null;
   /** facilityKeys currently in the compose filter — every matching row is HIGHLIGHTED so the ranking
    *  and the compose bar visibly agree. Highlighting never filters this ranking, and clicking a card
    *  never adds to this set (the Facility picker is the only way in — see the header). */
@@ -302,9 +313,29 @@ export function FacilityPanel({
                           UR {f.nextUrDate}
                         </span>
                       ) : null}
+                      {/* OCCUPANCY, not a bare free-bed count. 8 free at a 20-bed house and 8 free at
+                          a 12-bed house are opposite signals about whether they will take this
+                          patient, and the count alone cannot tell them apart. The denominator is the
+                          curated licensed-bed figure; when it is absent (outpatient — no beds — or a
+                          facility not yet curated) this falls back to the old count rather than
+                          inventing one. Tightness is a FACT shown, never folded into the rating. */}
                       {f.openBeds !== null && f.openBeds > 0 ? (
-                        <span className="inline-flex shrink-0 items-center rounded-full border border-line bg-surface px-1.5 py-px text-[10px] font-semibold text-ink600">
-                          {f.openBeds} open bed{f.openBeds === 1 ? '' : 's'}
+                        <span
+                          className={[
+                            'inline-flex shrink-0 items-center rounded-full border px-1.5 py-px text-[10px] font-semibold',
+                            f.bedCapacity !== null && f.bedCapacity > 0 && f.openBeds / f.bedCapacity <= 0.15
+                              ? 'border-status-warn/30 bg-status-warn/10 text-status-warn'
+                              : 'border-line bg-surface text-ink600',
+                          ].join(' ')}
+                          title={
+                            f.bedCapacity !== null && f.bedCapacity > 0
+                              ? `${f.openBeds} of ${f.bedCapacity} licensed beds open (${Math.round((f.openBeds / f.bedCapacity) * 100)}% free) on the latest census sync`
+                              : `${f.openBeds} open bed${f.openBeds === 1 ? '' : 's'} on the latest census sync — licensed bed count not on file, so occupancy is unknown`
+                          }
+                        >
+                          {f.bedCapacity !== null && f.bedCapacity > 0
+                            ? `${f.openBeds} of ${f.bedCapacity} beds`
+                            : `${f.openBeds} open bed${f.openBeds === 1 ? '' : 's'}`}
                         </span>
                       ) : null}
                     </span>
@@ -394,10 +425,10 @@ export function FacilityPanel({
                             {QUALIFY_RATING_MIN_PATIENTS} to show a number at all. A number built on that would be noise
                             wearing a color. Ask a biller.
                           </p>
-                          <FactorList f={f} />
+                          <FactorList f={f} findings={findingsByFacility?.get(f.facilityKey) ?? []} />
                         </div>
                       ) : (
-                        <FactorList f={f} />
+                        <FactorList f={f} findings={findingsByFacility?.get(f.facilityKey) ?? []} />
                       )
                     ) : null}
                   </>

@@ -143,6 +143,16 @@ export interface CoverageGroup {
   network: 'INN' | 'OON' | null;
   /** PRESENCE only — never the group number itself, which is PHI behind a blind index. */
   groupOnFile: boolean;
+  /**
+   * CLAIMS-SIDE `primary_payer` labels confirmed (alias map) to belong to this group's canonical
+   * payer WITHIN this identifier's own rows, ranked by line count (top 3). Non-PHI — payer labels
+   * are companies. Populated only on the CHOSEN group (one bounded query on the critical path);
+   * empty for rejected candidates, unmapped groups, and groups with no in-window claims. The answer
+   * stage passes [0] as the snapshot `payerOverride` so the facility ranking is scoped to the payer
+   * the user actually picked — without this bridge the ranking silently reverts to the identifier's
+   * dominant payer under a header naming the picked one (the PR #92 scope-honesty defect class).
+   */
+  claimsPayerLabels: string[];
   /** Distinct members in VOB on this group. Cross-tenant. */
   memberCount: number;
   /** ISO date of the freshest VOB row in the group, or null when there is no VOB row. */

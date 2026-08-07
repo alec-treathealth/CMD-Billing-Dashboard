@@ -16,7 +16,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { FacilityPanel } from '../components/qualify/facility-panel';
 import { CasesTable } from '../components/qualify/cases-table';
 import { CohortSheet } from '../components/qualify/cohort-sheet';
-import { BookKpiTiles, EvidenceGauge, HeatingUpCards } from '../components/qualify/overview';
+import { BookKpiTiles, EvidenceGauge } from '../components/qualify/overview';
+import { HeatingUpCards } from '../components/qualify/shared/heating-ticker';
 import { Spark } from '../components/qualify/spark';
 import { buildFacilityBucketMap } from '../components/qualify/colors';
 import { qualifyRating, ratingBucket, RATING_LEGEND } from '../lib/qualify/rating';
@@ -693,6 +694,11 @@ const POLICY: QualifyPolicyCard = {
   memberCount: 14,
   carrier: 'AETNA',
   employerName: 'Vanderbilt Univ. Medical Center',
+  // Unambiguous by default so the pre-existing assertions below keep testing the CONFIDENT rendering;
+  // the ambiguous path gets its own tests rather than silently changing every existing expectation.
+  employerCount: 1,
+  carrierCount: 1,
+  carriers: [],
   funding: 'Self-Funded',
   policyType: 'PPO',
   planType: 'OPEN ACCESS',
@@ -725,6 +731,51 @@ test('PolicyStrip — admissions_seat sees NO dollar strings; stale feed banner 
   assert.ok(html.includes('VOB feed is stale'), 'Phase 0: the confidently-wrong defence is loud');
   assert.ok(html.includes('Estimated read'), 'comparable provenance is labeled');
   assert.ok(html.includes('same employer plan'), 'and says what the estimate rests on');
+});
+
+// ── The SPREAD disclosure (2026-08-06). Measured: member-weighted, 86.8% of searches land on a
+// multi-carrier prefix and 57% on one where the displayed employer is a MINORITY. A bare modal chip
+// was confidently wrong more often than right; these pin that it now says so — and, just as
+// important, that an UNAMBIGUOUS prefix is not cluttered with a warning it doesn't warrant.
+
+test('PolicyStrip — an unambiguous prefix renders NO spread disclosure and NO "1 of" suffix', () => {
+  const html = renderToStaticMarkup(<PolicyStrip policy={POLICY} provenance="direct" hasAmounts prefixEcho="W29" />);
+  assert.ok(!html.includes('1 of '), 'no dominance suffix when every field has exactly one value');
+  assert.ok(!html.includes('is not one plan'), 'no spread sentence — it would be wallpaper');
+  assert.ok(html.includes('Vanderbilt'), 'and the self-funded banner still names the single employer');
+});
+
+test('PolicyStrip — a multi-carrier/multi-employer prefix says so on the chips AND in a sentence', () => {
+  const spread = { ...POLICY, memberCount: 46, carrierCount: 3, employerCount: 7 };
+  const html = renderToStaticMarkup(<PolicyStrip policy={spread} provenance="direct" hasAmounts prefixEcho="W20" />);
+  assert.ok(html.includes('1 of 3'), 'carrier chip carries its denominator');
+  assert.ok(html.includes('1 of 7'), 'employer chip carries its denominator');
+  assert.ok(html.includes('This prefix is not one plan'), 'the disclosure sentence fires');
+  assert.ok(html.includes('3 carriers') && html.includes('7 employers'), 'and states both counts');
+  assert.ok(html.includes('46'), 'against the member count they are drawn from');
+  // The self-funded line must stop naming ONE employer once several are on file — otherwise it
+  // re-asserts exactly the specificity the sentence above just withdrew.
+  assert.ok(!html.includes('Vanderbilt Univ. Medical Center carries the risk'));
+  assert.ok(html.includes('the employer carries the risk'));
+});
+
+test('PolicyStrip — one ambiguous field alone is enough to disclose, and only that field is marked', () => {
+  const html = renderToStaticMarkup(
+    <PolicyStrip policy={{ ...POLICY, carrierCount: 4 }} provenance="direct" hasAmounts prefixEcho="W20" />,
+  );
+  assert.ok(html.includes('1 of 4') && html.includes('4 carriers'), 'the carrier side discloses');
+  assert.ok(!html.includes('employers'), 'the unambiguous employer side stays silent');
+  assert.ok(html.includes('Vanderbilt'), 'and still names the sole employer on the self-funded line');
+});
+
+test('MobilePolicyLine and PolicyStrip agree on carrier ambiguity — the two shells cannot diverge', async () => {
+  const { MobilePolicyLine } = await import('../components/qualify/m/policy-line');
+  const spread = { ...POLICY, carrierCount: 3 };
+  const mobile = renderToStaticMarkup(<MobilePolicyLine policy={spread} provenance="direct" />);
+  const desktop = renderToStaticMarkup(<PolicyStrip policy={spread} provenance="direct" hasAmounts prefixEcho="W20" />);
+  assert.ok(mobile.includes('1 of 3') && desktop.includes('1 of 3'), 'both disclose the same denominator');
+  // The phone line's standing rule: plan shape only, never an employer identifier.
+  assert.ok(!mobile.includes('Vanderbilt'), 'employer name still never reaches the phone line');
 });
 
 test('PolicyStrip — not-found renders the honest VOB prompt, never an empty card', () => {
@@ -820,4 +871,186 @@ test('qualifyIdentifierNarrows: <=3 chars is the prefix narrow, anything longer 
     const c = qualifyIdentifierNarrows(raw);
     assert.ok(!(c.memberId !== '' && c.alphaPrefix !== ''));
   }
+});
+
+// ── PAYER RAIL (2026-08-06): the non-blocking drill-down. Measured — 80.6% of member-weighted
+// searches land on a multi-payer prefix, but the dominant payer is right ~84% of the time, so this
+// must NEVER become a gate. These pin both halves: it appears when there is a real choice, and it is
+// completely absent when there is not.
+
+const PAYER_OPTS = [
+  { payer: 'AETNA', lines: 120, patients: 9, lastPayment: '2026-07-30' },
+  { payer: 'CIGNA', lines: 44, patients: 4, lastPayment: '2026-06-02' },
+  { payer: 'BCBS', lines: 36, patients: 3, lastPayment: null },
+];
+
+test('PayerRail — renders every payer with its line count, and marks the active one', async () => {
+  const { PayerRail } = await import('../components/qualify/payer-rail');
+  const html = renderToStaticMarkup(
+    <PayerRail options={PAYER_OPTS} activePayer="AETNA" overridden={false} onSelect={() => {}} />,
+  );
+  for (const p of ['AETNA', 'CIGNA', 'BCBS']) assert.ok(html.includes(p), `${p} is offered`);
+  assert.ok(html.includes('3 payers'), 'the count is stated');
+  assert.ok(html.includes('120 lines') && html.includes('44 lines'), 'evidence rides each chip');
+  assert.ok(html.includes('aria-pressed="true"'), 'the active payer is marked for assistive tech');
+  assert.ok(html.includes('leads'), 'and is explained as the volume winner, not an arbitrary pick');
+});
+
+test('PayerRail — SELF-HIDES at one option or none: no rail, no implied choice', async () => {
+  const { PayerRail } = await import('../components/qualify/payer-rail');
+  const one = renderToStaticMarkup(
+    <PayerRail options={[PAYER_OPTS[0]!]} activePayer="AETNA" overridden={false} onSelect={() => {}} />,
+  );
+  assert.equal(one, '', 'a single payer is not a choice — 17.8% of searches must be untouched');
+  // Empty means "spread not loaded", NOT "one payer". Rendering anything would assert alternatives
+  // were checked and none existed — a claim the component cannot make here.
+  const none = renderToStaticMarkup(
+    <PayerRail options={[]} activePayer="AETNA" overridden={false} onSelect={() => {}} />,
+  );
+  assert.equal(none, '', 'an unloaded spread renders nothing rather than a false all-clear');
+});
+
+test('PayerRail — flags a MINORITY dominant payer instead of presenting it silently', async () => {
+  const { PayerRail } = await import('../components/qualify/payer-rail');
+  // 120 of 380 = 31.6%, under the half-the-lines bar — the 15.7% case.
+  const minority = [...PAYER_OPTS, { payer: 'UMR', lines: 180, patients: 12, lastPayment: '2026-07-01' }];
+  const html = renderToStaticMarkup(
+    <PayerRail options={minority} activePayer="AETNA" overridden={false} onSelect={() => {}} />,
+  );
+  assert.ok(html.includes('is only 120 of 380 claim lines'), 'the thinness is quantified, not hinted');
+  assert.ok(html.includes('check the others'));
+  assert.ok(!html.includes('leads'), 'and it must NOT simultaneously claim the payer leads');
+});
+
+test('PayerRail — a user drill-down is labelled as THEIR choice, not as our resolve', async () => {
+  const { PayerRail } = await import('../components/qualify/payer-rail');
+  const html = renderToStaticMarkup(
+    <PayerRail options={PAYER_OPTS} activePayer="CIGNA" overridden onSelect={() => {}} />,
+  );
+  assert.ok(html.includes('showing your selection'), '"you picked this" and "we picked this" differ');
+  assert.ok(!html.includes('ranked by volume'), 'the resolve wording must not also appear');
+  assert.ok(html.includes('never widens'), 'and the scope promise is stated on the surface');
+});
+
+test('PayerRail — carries NO dollars, so a blind seat and a sighted session see the same rail', async () => {
+  const { PayerRail } = await import('../components/qualify/payer-rail');
+  const html = renderToStaticMarkup(
+    <PayerRail options={PAYER_OPTS} activePayer="AETNA" overridden={false} onSelect={() => {}} />,
+  );
+  assert.ok(!html.includes('$'), 'zero dollar signs — this renders identically for admissions_seat');
+});
+
+// ── BED OCCUPANCY (2026-08-06). bed_capacity was WRITTEN hourly from the curated licensed-bed map
+// and read by nothing — the chip could say "8 open beds" but not "8 of 12". Those are different
+// facts: 8 free at a 20-bed house and 8 free at a 12-bed house are opposite signals about whether
+// the facility will take this patient.
+
+test('facility panel — open beds render as OCCUPANCY when the licensed count is on file', () => {
+  const withCapacity = [{ ...FACILITIES[0]!, openBeds: 8, bedCapacity: 20 }];
+  const html = renderToStaticMarkup(<FacilityPanel facilities={withCapacity} hasAmounts heatOn />);
+  assert.ok(html.includes('8 of 20 beds'), 'the denominator is shown, not just the free count');
+  assert.ok(html.includes('40% free'), 'and the percentage is spelled out in the tooltip');
+});
+
+test('facility panel — NO licensed count falls back to the bare count, never an invented denominator', () => {
+  // Outpatient (no beds) and not-yet-curated residential both land here. Showing a made-up capacity
+  // would be worse than showing less.
+  const noCapacity = [{ ...FACILITIES[0]!, openBeds: 8, bedCapacity: null }];
+  const html = renderToStaticMarkup(<FacilityPanel facilities={noCapacity} hasAmounts heatOn />);
+  assert.ok(html.includes('8 open beds'), 'the pre-existing wording is preserved exactly');
+  // Scoped to the occupancy shape: a bare `' of '` also matches unrelated copy elsewhere on the card.
+  assert.ok(!/\d+ of \d+ beds/.test(html), 'no denominator is implied');
+  assert.ok(html.includes('occupancy is unknown'), 'and the tooltip says WHY it is missing');
+});
+
+test('facility panel — a nearly-full house is flagged, a roomy one is not', () => {
+  const tight = renderToStaticMarkup(
+    <FacilityPanel facilities={[{ ...FACILITIES[0]!, openBeds: 1, bedCapacity: 12 }]} hasAmounts heatOn />,
+  );
+  assert.ok(tight.includes('text-status-warn'), '1 of 12 (8% free) reads as tight');
+  const roomy = renderToStaticMarkup(
+    <FacilityPanel facilities={[{ ...FACILITIES[0]!, openBeds: 6, bedCapacity: 12 }]} hasAmounts heatOn />,
+  );
+  assert.ok(!roomy.includes('text-status-warn'), '6 of 12 (50% free) does not');
+  // Occupancy is a FACT on the card, never folded into the score — the rating is unchanged by it.
+  assert.ok(tight.includes('of 12 beds') && roomy.includes('of 12 beds'));
+});
+
+test('facility panel — bed occupancy carries no dollars, so a blind seat sees the same chip', () => {
+  const html = renderToStaticMarkup(
+    <FacilityPanel facilities={[{ ...FACILITIES[0]!, openBeds: 8, bedCapacity: 20 }]} hasAmounts={false} heatOn />,
+  );
+  assert.ok(html.includes('8 of 20 beds'), 'occupancy is visible to admissions_seat');
+  assert.ok(!html.includes('$'), 'and still no dollars anywhere');
+});
+
+// ── ANCHORED FINDINGS + SEARCH TRACE (CCR-Agent port, 2026-08-06) ───────────────────────────────
+
+test('FacilityFindings — renders the claim, the verbatim rationale, and labelled evidence', async () => {
+  const { FacilityFindings } = await import('../components/qualify/facility-findings');
+  const html = renderToStaticMarkup(
+    <FacilityFindings
+      findings={[{
+        factorKey: 'ttp', severity: 'watch',
+        title: 'Time to payment is pulling this score down',
+        rationale: 'Median 130 days on paid lines.',
+        evidence: [{ label: 'Sample', value: '14 distinct patients' }, { label: 'Window', value: '90d' }],
+      }]}
+    />,
+  );
+  assert.ok(html.includes('Watch'), 'severity chip');
+  assert.ok(html.includes('pulling this score down'), 'the claim');
+  assert.ok(html.includes('Median 130 days'), 'the server sentence, verbatim');
+  assert.ok(html.includes('Evidence') && html.includes('14 distinct patients'), 'cited support');
+});
+
+test('FacilityFindings — a gap reads as neutral, NOT as an alarm', async () => {
+  const { FacilityFindings } = await import('../components/qualify/facility-findings');
+  const html = renderToStaticMarkup(
+    <FacilityFindings
+      findings={[{ factorKey: 'coding', severity: 'gap', title: 'Coding decision confidence could not be measured',
+        rationale: 'Registry not seeded yet.', evidence: [{ label: 'Effect on the score', value: '30 points renormalized away' }] }]}
+    />,
+  );
+  assert.ok(html.includes('No data'));
+  // An honest absence coloured like a defect trains the reader to ignore both.
+  assert.ok(!html.includes('status-warn'), 'a gap must not borrow the warning tone');
+  assert.ok(html.includes('renormalized away'), 'but it still says what the absence costs');
+});
+
+test('FacilityFindings — renders NOTHING when there is nothing to report', async () => {
+  const { FacilityFindings } = await import('../components/qualify/facility-findings');
+  assert.equal(renderToStaticMarkup(<FacilityFindings findings={[]} />), '', 'no reassuring placeholder');
+});
+
+test('SearchTrace — lists the decisions and labels itself a record, not a live feed', async () => {
+  const { SearchTrace } = await import('../components/qualify/search-trace');
+  const html = renderToStaticMarkup(
+    <SearchTrace lines={[
+      { tone: 'ok', text: '46 verified members on file behind this prefix' },
+      { tone: 'flag', text: 'Not one plan — 3 carriers and 7 employers behind it' },
+      { tone: 'note', text: 'Widened to 90d to reach 11 patients' },
+    ]} />,
+  );
+  assert.ok(html.includes('How this was resolved'));
+  assert.ok(html.includes('46 verified members') && html.includes('Widened to 90d'));
+  // The honesty line: getQualifySnapshot is one round trip, so this cannot be a live feed and the
+  // UI must not imply otherwise.
+  assert.ok(html.includes('a record of the decisions, not a live feed'));
+});
+
+test('SearchTrace — renders NOTHING for an empty trace', async () => {
+  const { SearchTrace } = await import('../components/qualify/search-trace');
+  assert.equal(renderToStaticMarkup(<SearchTrace lines={[]} />), '');
+});
+
+test('neither new component emits a dollar — admissions_seat parity holds', async () => {
+  const { SearchTrace } = await import('../components/qualify/search-trace');
+  const { FacilityFindings } = await import('../components/qualify/facility-findings');
+  const a = renderToStaticMarkup(<SearchTrace lines={[{ tone: 'ok', text: '12 facilities ranked' }]} />);
+  const b = renderToStaticMarkup(
+    <FacilityFindings findings={[{ factorKey: 'claims', severity: 'watch', title: 't', rationale: 'r',
+      evidence: [{ label: 'Sample', value: '14 distinct patients' }] }]} />,
+  );
+  assert.ok(!a.includes('$') && !b.includes('$'));
 });

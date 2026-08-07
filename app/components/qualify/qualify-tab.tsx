@@ -87,6 +87,12 @@ import {
 } from '@/lib/qualify/contract';
 import type { CmdEmployerOption } from '@/lib/actions';
 import { MultiSelectTagPicker, type PickerOption } from '@/components/ui/multi-select-tag-picker';
+import {
+  canonicalFacilityValue,
+  expandFacilitySelection,
+  indexFacilityCanonical,
+  indexFacilityVariants,
+} from '@/lib/qualify/facilityVariants';
 import { buildQualifySearchParams, parseQualifySearchParams } from '@/lib/qualify/urlState';
 import { deriveTileFlanks, NO_TILE_FLANKS } from '@/lib/qualify/tileFlanks';
 import { deriveOnFileTags } from '@/lib/qualify/onFileTags';
@@ -105,9 +111,26 @@ const POLICY_BAND_HEX: Record<'65' | '50' | '30' | '15' | '0', string> = {
 import { filterFacilitiesByLoc, type QualifyLocFilter } from '@/lib/qualify/groupClaims';
 import { FacilityPanel } from '@/components/qualify/facility-panel';
 import { PolicyStrip } from '@/components/qualify/policy-strip';
+import { PayerRail } from '@/components/qualify/payer-rail';
+import { effectivePayerOverride, type QualifyPayerOverride } from '@/lib/qualify/payerOverride';
+import { SearchTrace } from '@/components/qualify/search-trace';
+import { deriveSearchTrace } from '@/lib/qualify/searchTrace';
+import { deriveFacilityFindings, type QualifyFinding } from '@/lib/qualify/findings';
+
+/** facilityKey -> its anchored findings, for ONE snapshot. Module-scope and pure: a finding cites
+ *  the window, provenance and ladder of the snapshot it came from, so the two panels each derive
+ *  from their own rather than sharing a map. Empty map for a null snapshot — the panel then renders
+ *  exactly as it did before findings existed. */
+function findingsMapOf(snap: QualifySnapshot | null): ReadonlyMap<string, QualifyFinding[]> {
+  const m = new Map<string, QualifyFinding[]>();
+  if (snap === null) return m;
+  for (const f of snap.facilities) m.set(f.facilityKey, deriveFacilityFindings(f, snap));
+  return m;
+}
 import { WindowLadder } from '@/components/qualify/window-ladder';
 import { QualifyAiPanel } from '@/components/qualify/qualify-ai-panel';
-import { BookKpiTiles, EvidenceGauge, HeatingUpCards, HeatingUpSkeleton } from '@/components/qualify/overview';
+import { BookKpiTiles, EvidenceGauge } from '@/components/qualify/overview';
+import { HeatingUpCards, HeatingUpSkeleton } from '@/components/qualify/shared/heating-ticker';
 import { WindowControl } from '@/components/qualify/window-control';
 import { VobModal } from '@/components/qualify/vob-modal';
 import { QualifyLandingHero } from '@/components/qualify/landing-hero';
@@ -192,6 +215,12 @@ export function QualifyTab({
   //    gen-guarded like every other stream. `auto` fires once per NEW identifier (the ladder decides
   //    the window); later manual window changes refetch with the user's explicit choice respected.
   const [leadSnapshot, setLeadSnapshot] = useState<QualifySnapshot | null>(null);
+  /** Payer drill-down (the rail), PAIRED WITH THE IDENTIFIER IT WAS CHOSEN FOR. Storing the payer
+   *  alone and clearing it in an effect does NOT work: effects run after the commit, so the
+   *  snapshot fetch in the same commit still sends the previous patient's payer. See
+   *  effectivePayerOverride for the full failure list. The SERVER re-validates the value against
+   *  the identifier's own spread regardless — this pairing is a lifetime rule, not authorization. */
+  const [payerOverride, setPayerOverride] = useState<QualifyPayerOverride | null>(null);
   const leadGenRef = useRef(0);
   const lastAutoIdentifierRef = useRef<string | null>(null);
   const [expandedFacilities, setExpandedFacilities] = useState<ReadonlySet<string>>(new Set());
@@ -205,6 +234,20 @@ export function QualifyTab({
 
   // ── PICKER OPTION VOCABULARIES ────────────────────────────────────────────────────────────────────
   const [facilityOptions, setFacilityOptions] = useState<PickerOption[]>([]);
+  /** ANY raw CMD facility text → EVERY spelling of that same facility (including itself).
+   *
+   *  Keyed by every variant, not only the canonical one, on purpose: the value stored in
+   *  `facilitySelection` does not always come from the picker. A ticker-card click stores the trend
+   *  row's RAW `facilityKey`, and a URL restored from before this change can carry any spelling. A
+   *  canonical-only map would miss those and silently fall back to the single spelling — scoping the
+   *  search to 81 charge lines where the facility has 4,237. */
+  const [facilityVariants, setFacilityVariants] = useState<Record<string, string[]>>({});
+  /** ANY raw CMD facility text → the CANONICAL picker value for that facility.
+   *
+   *  A REF, not state, because `openTrendCard` must keep a stable identity: the Heating-Up marquee is
+   *  memoized on its props and remounting it mid-scroll restarts the animation (a Phase 2 invariant).
+   *  Reading the map through a ref keeps that callback's dep array empty. */
+  const facilityCanonicalRef = useRef<Record<string, string>>({});
   const [payerOptions, setPayerOptions] = useState<PickerOption[]>([]);
   // Employer is a SERVER type-ahead (the ~11.6k vocabulary is too large to load whole).
   const [employerOptions, setEmployerOptions] = useState<CmdEmployerOption[]>([]);
@@ -260,10 +303,30 @@ export function QualifyTab({
     document.getElementById('qualify-results')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, []);
 
+  /** ── FACILITY VARIANT EXPANSION ────────────────────────────────────────────────────────────────
+   *  One picker option is one FACILITY, but a facility can carry several raw CMD facility texts
+   *  (`LONESTAR MENTAL HEALTH` and `LONESTAR MENTAL HEALTH LLC` are the same LSMH, 4,156 + 81 charge
+   *  lines). `facilitySelection` holds the CANONICAL value per picked facility — so the chip count,
+   *  the scope label and the URL all stay one-entry-per-facility — and every predicate that actually
+   *  filters charge lines gets this EXPANDED list instead. Without the expansion, picking Lonestar
+   *  would silently scope to whichever spelling happened to be canonical.
+   *
+   *  Falls back to `[value]` for a selection whose variants have not loaded yet (a URL-restored
+   *  facility on first paint), which is why the map is a dependency of the fetch effects below: when
+   *  the option list lands, the count is recomputed over the complete variant set rather than
+   *  keeping a partial answer.
+   *
+   *  NOTE the name: `expandedFacilities` was already taken by the ranking's accordion state, which is
+   *  an unrelated ReadonlySet of open cards. */
+  const facilityFilterValues = useMemo(
+    () => expandFacilitySelection(facilitySelection, facilityVariants),
+    [facilitySelection, facilityVariants],
+  );
+
   // ── DERIVED: the compose filter + whether any restriction is active (client mirror of composeHasAny) ─
   const composeInput = useMemo<QualifyComposeInput>(
     () => ({
-      facilities: facilitySelection.length > 0 ? facilitySelection : undefined,
+      facilities: facilityFilterValues.length > 0 ? facilityFilterValues : undefined,
       payers: payerSelection.length > 0 ? payerSelection : undefined,
       employers: employerSelection.length > 0 ? employerSelection : undefined,
       funding: fundingSelection.length > 0 ? fundingSelection : undefined,
@@ -273,7 +336,7 @@ export function QualifyTab({
       clientName: clientName.trim() || undefined,
       window: windowSel,
     }),
-    [facilitySelection, payerSelection, employerSelection, fundingSelection, memberId, alphaPrefix, groupNumber, clientName, windowSel],
+    [facilityFilterValues, payerSelection, employerSelection, fundingSelection, memberId, alphaPrefix, groupNumber, clientName, windowSel],
   );
   const hasAnyFilter =
     facilitySelection.length > 0 ||
@@ -287,8 +350,11 @@ export function QualifyTab({
 
   // Cards whose facility is currently selected read pressed. STABLE identity while the selection is
   // unchanged (so the memoized ticker subtree below doesn't re-render on unrelated count updates).
-  const facilityKey = facilitySelection.join('');
-  const activeFacilityKeys = useMemo(() => new Set(facilitySelection), [facilityKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const facilityKey = facilityFilterValues.join('');
+  // EXPANDED, not the canonical selection: a trend card's facilityKey is the RAW CMD facility text, so
+  // a card spelled `LONESTAR MENTAL HEALTH` must read pressed when the LSMH option is picked even
+  // though the canonical stored value is the other spelling.
+  const activeFacilityKeys = useMemo(() => new Set(facilityFilterValues), [facilityKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const hasAmounts = viewerHasAmountsCapability;
 
   // A single PHI identifier (alpha prefix / member id) with NO payer chip → we resolve its dominant payer
@@ -333,7 +399,15 @@ export function QualifyTab({
 
     void loadQualifyFacilityOptions().then((r) => {
       if (!alive || !r.ok) return;
-      setFacilityOptions(r.facilities.map((f) => ({ value: f.facility, display: f.facility_name ?? f.facility, badge: f.care_setting })));
+      // ONE ROW PER FACILITY. The server already collapsed the raw-text grain by facility_code and
+      // labelled from display_acronym (falling back to facility_name, then the raw text), so the
+      // two `LONESTAR MENTAL HEALTH…` spellings arrive as a single option here.
+      setFacilityOptions(r.facilities.map((f) => ({ value: f.value, display: f.display, badge: f.care_setting })));
+      // Both maps are keyed by EVERY spelling, so a selection that did not come from the picker (a
+      // ticker-card click, an older URL) still expands and still canonicalizes. The indexes are pure
+      // and unit-tested (lib/qualify/facilityVariants.ts) — every failure mode here is silent.
+      setFacilityVariants(indexFacilityVariants(r.facilities));
+      facilityCanonicalRef.current = indexFacilityCanonical(r.facilities);
     });
     void loadQualifyPayerOptions().then((r) => {
       if (!alive || !r.ok) return;
@@ -388,7 +462,9 @@ export function QualifyTab({
     const t = setTimeout(() => {
       getQualifyBookKpis(windowSel, {
         payers: payerSelection.length > 0 ? payerSelection : undefined,
-        facilities: facilitySelection.length > 0 ? facilitySelection : undefined,
+        // EXPANDED: the tiles must be scoped to every raw spelling of the picked facility, or the
+        // KPI slice silently disagrees with the compose count below it.
+        facilities: facilityFilterValues.length > 0 ? facilityFilterValues : undefined,
       })
         .then((k) => {
           if (kpiGenRef.current !== kgen) return;
@@ -399,7 +475,7 @@ export function QualifyTab({
         });
     }, COMPOSE_DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [payerSelection, facilitySelection, windowSel]);
+  }, [payerSelection, facilityFilterValues, windowSel]);
 
   // ── HEATING-UP TICKER (Phase 2, Design B): refetch trends on PAYER + WINDOW only. FACILITY, employer,
   //    and funding are NOT deps — they never scope the ticker (facility especially: keeping it out means
@@ -491,6 +567,22 @@ export function QualifyTab({
       });
   }, [singleIdentifier]);
 
+  /* Derived DURING RENDER, not in an effect. On the render where singleIdentifier changes this is
+   * already null, so the very first fetch for a new patient cannot inherit the previous patient's
+   * payer scope — which an effect-based reset could not guarantee, because effects run after the
+   * commit that already fired the fetch. */
+  const activePayerOverride = effectivePayerOverride(payerOverride, singleIdentifier);
+
+  /* Both derivations are PURE functions of the snapshot — no fetch, no new server data. Memoized on
+   * the snapshot identity so scrolling or toggling a card does not recompute them. */
+  const searchTrace = useMemo(() => (leadSnapshot ? deriveSearchTrace(leadSnapshot) : []), [leadSnapshot]);
+  const leadFindings = useMemo(() => findingsMapOf(leadSnapshot), [leadSnapshot]);
+  /* The primary panel ranks from a DIFFERENT snapshot (panelSnapshot), and a finding cites its own
+   * snapshot's window, provenance and ladder — so it must be derived from the snapshot whose
+   * facilities it annotates. Reusing the lead map here would attach the identifier search's evidence
+   * to payer-wide rows. */
+  const panelFindings = useMemo(() => findingsMapOf(panelSnapshot), [panelSnapshot]);
+
   // ── v2 LEAD snapshot fetch: policy strip + ladder + (comparable) ranking for the searched
   //    identifier. AUTO only when the identifier CHANGED — a manual window change after a search
   //    refetches under the user's window (respect the override; the Range menu stays the biller path).
@@ -502,11 +594,13 @@ export function QualifyTab({
     }
     const lgen = ++leadGenRef.current;
     const auto = lastAutoIdentifierRef.current !== singleIdentifier;
+    // A payer drill-down is the SAME identifier, so `auto` is already false here and the ladder is
+    // not re-run — the drill-down re-scopes the payer, it must not silently re-window the surface.
     // Consume the auto flag SYNCHRONOUSLY: a window change mid-flight must re-enter as auto=false
     // (never override the user's pick), and a rejected auto fetch must not re-auto on the next
     // manual window change.
     lastAutoIdentifierRef.current = singleIdentifier;
-    getQualifySnapshot({ query: singleIdentifier, window: windowSel, auto })
+    getQualifySnapshot({ query: singleIdentifier, window: windowSel, auto, payerOverride: activePayerOverride })
       .then((snap) => {
         if (leadGenRef.current !== lgen) return;
         // The manual-window echo refetch (auto=false) carries ladder:null by design — PRESERVE the
@@ -525,8 +619,12 @@ export function QualifyTab({
       });
     // windowSel is deliberately IN deps: a post-search window change refetches the lead under the
     // manual window (auto=false), keeping the policy/estimate read on the same span as the panel.
+    // activePayerOverride likewise: selecting a payer in the rail IS the refetch trigger. It is the
+    // DERIVED value, not the raw state — the raw one changes on a search transition (to a stale
+    // pairing that no longer applies) and would fire a second, redundant fetch that also duplicates
+    // the server-side PHI audit row and discards the auto-window ladder.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [singleIdentifier, windowSel]);
+  }, [singleIdentifier, windowSel, activePayerOverride]);
 
   const toggleFacilityExpansion = useCallback((key: string) => {
     setExpandedFacilities((prev) => {
@@ -652,11 +750,18 @@ export function QualifyTab({
     if (!t.dominantPayer) return;
     userDrivenRef.current = true; // Step 2: a ticker-card click is a user interaction
     setTickerPinned(true);
-    setFacilitySelection([t.facilityKey]);
+    // CANONICALIZE. `t.facilityKey` is the RAW rollup facility text, which is not necessarily the
+    // canonical picker value for that facility. Storing the raw spelling would break two things at
+    // once: the chip would carry a value no picker option matches (so its dashed "derived" styling
+    // and its remove affordance would not line up), and the filter would scope to that one spelling
+    // instead of the facility. Canonicalizing keeps the selection in the picker's own vocabulary.
+    const canonical = canonicalFacilityValue(t.facilityKey, facilityCanonicalRef.current);
+    setFacilitySelection([canonical]);
     setPayerSelection([t.dominantPayer]);
     // Mark exactly these two as ticker-DERIVED so their chips read dashed + ↳ (a hand-picked chip stays
     // solid). Namespaces don't collide, so one set feeds both the facility and payer pickers.
-    setDerivedValues(new Set([t.facilityKey, t.dominantPayer]));
+    // Keyed on the CANONICAL value, matching what facilitySelection now holds.
+    setDerivedValues(new Set([canonical, t.dominantPayer]));
     setEmployerSelection([]);
     setFundingSelection([]);
     setMemberId('');
@@ -1211,6 +1316,20 @@ export function QualifyTab({
             />
           ) : null}
           {singleIdentifier && leadSnapshot?.ladder ? <WindowLadder ladder={leadSnapshot.ladder} /> : null}
+          {/* The decisions the ranked list cannot explain by itself: why this window, why this
+              payer, why an estimate. Retrospective by construction — see search-trace.tsx. */}
+          {singleIdentifier && leadSnapshot ? <SearchTrace lines={searchTrace} /> : null}
+          {/* ── PAYER RAIL: the drill-down for the ~80% of searches whose identifier bills under more
+              than one payer. Self-hiding at <=1 option, so an unambiguous search is untouched. Sits
+              directly under the policy strip because both answer "what am I actually looking at?" */}
+          {singleIdentifier && leadSnapshot ? (
+            <PayerRail
+              options={leadSnapshot.payerOptions}
+              activePayer={leadSnapshot.resolved?.payerName ?? null}
+              overridden={leadSnapshot.payerOverridden}
+              onSelect={(payer) => setPayerOverride({ identifier: singleIdentifier, payer })}
+            />
+          ) : null}
           {/* Lighter context line (the old resolved-payer hero band is gone). Non-dollar for admissions_seat. */}
           <div
             id="qualify-results"
@@ -1303,6 +1422,7 @@ export function QualifyTab({
                   payerLabel={panelPayer}
                   expandedKeys={expandedFacilities}
                   onExpandToggle={toggleFacilityExpansion}
+                  findingsByFacility={panelFindings}
                 />
               ) : panelError ? (
                 // A FAILED ranking is not a loading one, and not an empty one either. Say so, and
@@ -1338,6 +1458,7 @@ export function QualifyTab({
                   expandedKeys={expandedFacilities}
                   onExpandToggle={toggleFacilityExpansion}
                   provenance={leadSnapshot.provenance}
+                  findingsByFacility={leadFindings}
                 />
               ) : (
                 // An identifier was searched but resolved to no payer (never seen / misspelled).

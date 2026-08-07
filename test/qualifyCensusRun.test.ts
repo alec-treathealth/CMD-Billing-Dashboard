@@ -35,29 +35,49 @@ import {
 } from '../src/collections/qualifyCensusRun.js';
 import type { CensusSyncStats } from '../src/collections/qualifyCensusSync.js';
 
-/** A conformance entry; `missing` non-empty is the silent-zeroing case. */
-const conf = (boardId: string, missing: string[] = []) => ({
-  boardId,
-  facilityCode: 'NASH',
+/** A conformance entry, now FACILITY-grain (a facility can have several boards). `missingTitles`
+ *  non-empty is the silent-zeroing case; the other three gap causes are exercised below. */
+const conf = (
+  facilityCode: string,
+  missingTitles: string[] = [],
+  over: Partial<import('../src/collections/qualifyCensus.js').CensusConformance> = {},
+) => ({
+  facilityCode,
   family: 'residential' as const,
-  missing,
+  boardIds: ['b1'],
+  itemCount: 12,
+  // The exhaustive LOS partition: admittedCount === losSample + losUnbilledExcluded + losUncomputable.
+  admittedCount: 8,
+  losSample: 8,
+  losUnbilledExcluded: 0,
+  losUncomputable: 0,
+  missingTitles,
+  emptyTitles: [] as string[],
+  familyMismatch: null,
+  settingMismatch: null,
+  ...over,
 });
 
 /** Deliberately asymmetric defaults: 5/3/2 and capacity 7 vs 2 unmapped, so no two bound
  *  parameters share a value and a transposition cannot pass. */
 const stats = (over: Partial<CensusSyncStats> = {}): CensusSyncStats => ({
+  facilities_total: 4,
+  facilities_synced: 3,
+  facilities_failed: 1,
+  facilities_skipped_budget: 0,
   boards_total: 5,
   boards_synced: 3,
   boards_failed: 2,
-  conformance: [conf('b1'), conf('b2')],
+  conformance: [conf('f1'), conf('f2')],
   capacity_mapped: 7,
   capacity_unmapped: ['A', 'B'],
+  blocked_boards: [],
   ...over,
 });
 
 /** An all-clean run: nothing failed, no conformance gap. */
 const cleanStats = (over: Partial<CensusSyncStats> = {}): CensusSyncStats =>
-  stats({ boards_total: 5, boards_synced: 5, boards_failed: 0, ...over });
+  stats({ boards_total: 5, boards_synced: 5, boards_failed: 0, facilities_failed: 0, ...over });
 
 interface Call {
   sql: string;
@@ -122,35 +142,118 @@ const fakeClock = () => {
 // --- 2. status derivation ------------------------------------------------------
 
 test('status: every board synced, no gaps, is ok', () => {
-  assert.equal(deriveCensusRunStatus({ boards_total: 2, boards_synced: 2, boards_failed: 0, conformance: [conf('b1')] }), 'ok');
+  assert.equal(
+    deriveCensusRunStatus({ boards_total: 2, boards_synced: 2, boards_failed: 0, facilities_failed: 0, conformance: [conf('f1')] }),
+    'ok',
+  );
 });
 
 test('status: SOME synced and SOME failed is partial — the state that used to hide', () => {
-  assert.equal(deriveCensusRunStatus({ boards_total: 2, boards_synced: 1, boards_failed: 1, conformance: [] }), 'partial');
-});
-
-test('status: zero synced is failed — the 200-OK-but-dead-token case', () => {
-  assert.equal(deriveCensusRunStatus({ boards_total: 2, boards_synced: 0, boards_failed: 2, conformance: [] }), 'failed');
-});
-
-test('status: an empty board config is ok, not failed (nothing to sync is not an incident)', () => {
-  assert.equal(deriveCensusRunStatus({ boards_total: 0, boards_synced: 0, boards_failed: 0, conformance: [] }), 'ok');
-});
-
-test('status: a board that synced with MISSING columns demotes ok to partial', () => {
-  // The silent-zeroing case: the board reports itself synced, so without the conformance check
-  // this run would read a clean 'ok' over a facility row just overwritten with zeros.
   assert.equal(
-    deriveCensusRunStatus({ boards_total: 2, boards_synced: 2, boards_failed: 0, conformance: [conf('b1'), conf('b2', ['Admit Status'])] }),
+    deriveCensusRunStatus({ boards_total: 2, boards_synced: 1, boards_failed: 1, facilities_failed: 1, conformance: [] }),
     'partial',
   );
 });
 
-test('countConformanceGaps counts BOARDS with gaps, not missing columns', () => {
+test('status: zero synced is failed — the 200-OK-but-dead-token case', () => {
+  assert.equal(
+    deriveCensusRunStatus({ boards_total: 2, boards_synced: 0, boards_failed: 2, facilities_failed: 2, conformance: [] }),
+    'failed',
+  );
+});
+
+test('status: an empty board config is ok, not failed (nothing to sync is not an incident)', () => {
+  assert.equal(
+    deriveCensusRunStatus({ boards_total: 0, boards_synced: 0, boards_failed: 0, facilities_failed: 0, conformance: [] }),
+    'ok',
+  );
+});
+
+test('status: a facility that synced with MISSING columns demotes ok to partial', () => {
+  // The silent-zeroing case: the board reports itself synced, so without the conformance check
+  // this run would read a clean 'ok' over a facility row just overwritten with zeros.
+  assert.equal(
+    deriveCensusRunStatus({
+      boards_total: 2,
+      boards_synced: 2,
+      boards_failed: 0,
+      facilities_failed: 0,
+      conformance: [conf('f1'), conf('f2', ['Admit Status'])],
+    }),
+    'partial',
+  );
+});
+
+test('status: a facility skipped with every board healthy still demotes to partial', () => {
+  // Reachable two ways now that board -> facility is N:1: the upsert itself threw, or ONE board of
+  // a multi-board facility failed so the facility was skipped rather than upserted from a partial
+  // item set. Both leave boards_failed at 0 for the boards that did read.
+  assert.equal(
+    deriveCensusRunStatus({ boards_total: 2, boards_synced: 2, boards_failed: 0, facilities_failed: 1, conformance: [] }),
+    'partial',
+  );
+});
+
+test('status: a RESOLVED-BUT-EMPTY column demotes ok to partial — the LOS-formula case', () => {
+  // The exact defect this widening exists for: 'Days in RTC' resolved by title on all 30 boards and
+  // returned "" for every item, so a title-presence-only check reported conformance_gap_boards: 0
+  // while avg_los_days was NULL for every facility.
+  assert.equal(
+    deriveCensusRunStatus({
+      boards_total: 1,
+      boards_synced: 1,
+      boards_failed: 0,
+      facilities_failed: 0,
+      conformance: [conf('f1', [], { emptyTitles: ['Total Auth Days'] })],
+    }),
+    'partial',
+  );
+});
+
+test('status: a family or care_setting mismatch demotes ok to partial', () => {
+  assert.equal(
+    deriveCensusRunStatus({
+      boards_total: 1,
+      boards_synced: 1,
+      boards_failed: 0,
+      facilities_failed: 0,
+      conformance: [conf('f1', [], { familyMismatch: 'declared residential but lacks Admit Status' })],
+    }),
+    'partial',
+  );
+  assert.equal(
+    deriveCensusRunStatus({
+      boards_total: 1,
+      boards_synced: 1,
+      boards_failed: 0,
+      facilities_failed: 0,
+      conformance: [conf('f1', [], { settingMismatch: 'care_setting OP but a residential board expects IP' })],
+    }),
+    'partial',
+  );
+});
+
+test('countConformanceGaps counts FACILITIES with gaps, not individual causes', () => {
   assert.equal(countConformanceGaps({ conformance: [] }), 0);
-  assert.equal(countConformanceGaps({ conformance: [conf('b1'), conf('b2')] }), 0);
-  assert.equal(countConformanceGaps({ conformance: [conf('b1', ['a', 'b', 'c'])] }), 1, 'three missing columns on one board is ONE gapped board');
-  assert.equal(countConformanceGaps({ conformance: [conf('b1', ['a']), conf('b2'), conf('b3', ['b'])] }), 2);
+  assert.equal(countConformanceGaps({ conformance: [conf('f1'), conf('f2')] }), 0);
+  assert.equal(
+    countConformanceGaps({ conformance: [conf('f1', ['a', 'b', 'c'])] }),
+    1,
+    'three missing columns on one facility is ONE gapped facility',
+  );
+  assert.equal(countConformanceGaps({ conformance: [conf('f1', ['a']), conf('f2'), conf('f3', ['b'])] }), 2);
+  // All four causes are counted, and a facility with several causes still counts once.
+  assert.equal(
+    countConformanceGaps({
+      conformance: [
+        conf('f1', [], { emptyTitles: ['Total Auth Days'] }),
+        conf('f2', [], { familyMismatch: 'x' }),
+        conf('f3', [], { settingMismatch: 'y' }),
+        conf('f4', ['a'], { emptyTitles: ['b'], familyMismatch: 'c', settingMismatch: 'd' }),
+      ],
+    }),
+    4,
+  );
 });
 
 // --- 1. write ordering ---------------------------------------------------------
@@ -215,13 +318,12 @@ test('a conformance gap is persisted and labelled distinctly from a board failur
   const res = await runQualifyCensusSyncLogged({
     client,
     now: fakeClock(),
-    sync: async () =>
-      cleanStats({ conformance: [conf('b1'), conf('b2', ['Admit Status', 'Days in RTC'])] }),
+    sync: async () => cleanStats({ conformance: [conf('f1'), conf('f2', ['Admit Status', 'ADM Date'])] }),
   });
   const p = calls.find((c) => kind(c) === 'update_finish')!.params;
   assert.equal(p[1], 'partial', 'every board synced, but one wrote zeros');
   assert.equal(p[7], 1, 'conformance_gap_boards');
-  assert.match(String(p[8]), /missing monday columns/);
+  assert.match(String(p[8]), /conformance gap/);
   assert.doesNotMatch(String(p[8]), /board\(s\) failed/, 'a gap is NOT a failure — different operator response');
   assert.equal(res.conformance_gap_boards, 1);
 });

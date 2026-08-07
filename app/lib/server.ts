@@ -62,6 +62,7 @@ import {
   buildCmdExplorerQuery,
   buildCmdSearchSummaryQueries,
   buildCmdFacilityOptionsQuery,
+  buildQualifyFacilityOptionsQuery,
   buildCmdPayerOptionsQuery,
   buildCmdEmployerOptionsQuery,
   buildCohortCurveQueries,
@@ -82,6 +83,7 @@ import {
   type CmdSearchGroup,
   type CmdComboGroup,
   type CmdFacilityOption,
+  type QualifyFacilityOption,
   type CmdEmployerOption,
   type VobMarketFilter,
   type CohortCurvePoint,
@@ -149,6 +151,7 @@ export type {
   CmdComboGroup,
   CmdSearchSummary,
   CmdFacilityOption,
+  QualifyFacilityOption,
   CmdEmployerOption,
   CohortCurvePoint,
   CohortCurve,
@@ -159,6 +162,7 @@ export type {
 } from '../../src/collections/cmdExplorerQuery.js';
 import {
   buildResolvePayerQuery,
+  buildResolvePayerSpreadQuery,
   buildFacilityRankingQuery,
   buildIdentifierLandingFacilityQuery,
   buildFacilityCasesQuery,
@@ -171,6 +175,7 @@ import type { QualifyPatientCohortRaw } from './qualify/core';
 import type {
   QualifyTokenKind,
   QualifyResolvePayerRow,
+  QualifyPayerSpreadRow,
   QualifyFacilityRow,
   QualifyClaimRow,
   QualifyMoverRow,
@@ -2759,6 +2764,41 @@ export const cmdExplorerFacilities = unstable_cache(
 );
 
 /**
+ * Qualify's facility options — ONE ROW PER FACILITY, with every raw CMD spelling in `variants`.
+ *
+ * Separate from cmdExplorerFacilities on purpose: the Collections explorer keeps the raw-text-grain
+ * option list (it is production and out of scope), while Qualify's picker needs the de-duplicated
+ * shape so `LONESTAR MENTAL HEALTH` and `LONESTAR MENTAL HEALTH LLC` stop rendering as two
+ * indistinguishable rows. Same vocabulary, same crosswalk, different GROUP BY — see
+ * buildQualifyFacilityOptionsQuery.
+ *
+ * Own cache key, same 'cmd-facilities' tag and 1-hour timer as the explorer list: the vocabulary is
+ * the same near-static set, so both should warm and expire together.
+ */
+export const qualifyFacilityOptions = unstable_cache(
+  async (entityIds: string[]): Promise<QualifyFacilityOption[]> => {
+    const { sql, params } = buildQualifyFacilityOptionsQuery(entityIds);
+    const { rows } = await readerExecutor().query<{
+      display: string | null;
+      value: string;
+      variants: string[] | null;
+      care_setting: string | null;
+    }>(sql, params);
+    return rows.map((r) => ({
+      value: r.value,
+      // array_agg always contains at least the grouped row, but a null would silently drop the
+      // facility from the filter rather than the list — fall back to the canonical value.
+      variants: Array.isArray(r.variants) && r.variants.length > 0 ? r.variants : [r.value],
+      display: r.display ?? r.value,
+      care_setting:
+        r.care_setting === 'IP' || r.care_setting === 'OP' || r.care_setting === 'BOTH' ? r.care_setting : null,
+    }));
+  },
+  ['qualify-facility-options'],
+  { revalidate: 3600, tags: ['cmd-facilities'] },
+);
+
+/**
  * Payer options for the guided payer search (non-PHI): the distinct payer names present in the
  * caller's tenant slice (RBAC-clamped `entityIds`, part of the cache key). Like the facility
  * vocabulary, the payer set is near-static — a new payer name is rare and NOT a daily-refresh
@@ -2977,6 +3017,19 @@ export async function resolveQualifyPayer(
   const q = buildResolvePayerQuery(token, kind, entityIds);
   const { rows } = await readerExecutor().query<QualifyResolvePayerRow>(q.sql, q.params);
   return rows[0]?.primary_payer ?? null;
+}
+
+/** EVERY payer behind the token, ranked (row [0] === resolveQualifyPayer by construction). The
+ *  widening: 80.6% of member-weighted searches land on a prefix billing under more than one payer,
+ *  and the narrow resolve above discarded all but the top one. Reader-scoped; token stays opaque. */
+export async function loadQualifyPayerSpread(
+  token: string,
+  kind: QualifyTokenKind,
+  entityIds: string[],
+): Promise<QualifyPayerSpreadRow[]> {
+  const q = buildResolvePayerSpreadQuery(token, kind, entityIds);
+  const { rows } = await readerExecutor().query<QualifyPayerSpreadRow>(q.sql, q.params);
+  return rows;
 }
 
 /** Per-facility dollar-weighted ranking rows for a resolved payer, in-window, cross-tenant. */
