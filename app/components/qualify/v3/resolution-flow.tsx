@@ -1284,7 +1284,15 @@ function AreaLine(props: {
             }`}
           >
             {c.label}
-            <span className="font-mono tabular-nums text-ink400" aria-label={`${n} ranked facilities`}>
+            {/* Proper pluralization (review Finding 3) — the same `${n === 1 ? '' : 's'}` idiom
+                `panelProvenance` already uses for "member"/"charge line" (resolution.ts). Every
+                non-'All' chip in a real ranking routinely carries n=1 (three facilities across three
+                distinct states means every per-state chip's count IS 1), so "1 ranked facilities" was
+                not an edge case — it was the common case. */}
+            <span
+              className="font-mono tabular-nums text-ink400"
+              aria-label={`${n} ranked facilit${n === 1 ? 'y' : 'ies'}`}
+            >
               {' '}
               · {n}
             </span>
@@ -1376,6 +1384,12 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   const employerNarrow = filtersActive ? employerNarrowFor(props.candidates, filteredCandidates) : null;
   const rankingNarrowed =
     props.filters.funding.length > 0 || (employerNarrow !== null && 'employers' in employerNarrow);
+  // Hoisted ahead of `skipProvenance` (below) on purpose — the AI caption needs it too, and a
+  // `const` must precede every place that reads it. Trivial and `snap`-independent (props.area alone
+  // decides it), so hoisting costs nothing; the fuller AREA-facet block that DOES depend on `snap` —
+  // `rankedFacilities`, `areaChips`, `shownFacilities` — stays where it was, next to the grid it
+  // narrows. This is the ONLY declaration of `areaActive`; do not re-declare it below.
+  const areaActive = props.area !== AREA_ALL;
   /**
    * ⚠ THE DISCLOSURE'S CAPTIONS ARE FROZEN AT RESOLVE TIME AND A SKIP NEVER RE-RESOLVES.
    * `r.provenance` is minted SERVER-side inside `resolveCoverage` (resolutionService.ts:383-408) from
@@ -1397,9 +1411,24 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
       : `all plans — no plan chosen · this identifier's whole footprint${skipUnder}`,
     // Filters narrow rows; they never elect a policy. True either way.
     policy: 'no plan chosen — no single policy backs this screen',
-    ai: rankingNarrowed
-      ? `grounded in the ranking on screen — all plans, no plan chosen, narrowed by your filter selections${skipUnder}`
-      : `grounded in the ranking on screen — all plans, no plan chosen${skipUnder}`,
+    /**
+     * ⚠ "ON SCREEN" STOPS BEING TRUE THE MOMENT AN AREA CHIP IS PRESSED, for the same reason the hero
+     * rating comment a few dozen lines down explains for the numeral: `<QualifyAiPanel
+     * snapshot={snapshot}>` (resolution-flow-client.tsx) is handed the FULL, un-narrowed snapshot —
+     * never `shownFacilities` — because the area facet is a grid-only narrow (invariant (m), see the
+     * AREA-facet block below) with no code path to the AI panel's props. So while `areaActive`, the
+     * scorecard the user sees is a strict subset of what the AI actually read, and "grounded in the
+     * ranking on screen" would describe a ranking narrower than the one really behind the answer.
+     * Applying the SAME standard as the hero: say what IS true (the AI covers the full ranking, not
+     * the narrowed grid) instead of letting a grid-only control quietly relabel what backs the answer.
+     */
+    ai: areaActive
+      ? rankingNarrowed
+        ? `grounded in the full ranking behind this answer, not the narrowed grid — all plans, no plan chosen, narrowed by your filter selections${skipUnder}`
+        : `grounded in the full ranking behind this answer, not the narrowed grid — all plans, no plan chosen${skipUnder}`
+      : rankingNarrowed
+        ? `grounded in the ranking on screen — all plans, no plan chosen, narrowed by your filter selections${skipUnder}`
+        : `grounded in the ranking on screen — all plans, no plan chosen${skipUnder}`,
   };
   /**
    * ⚠ "EVERY deriveNotices KIND IS GROUP-SCOPED" — v1 of this fix asserted that and was wrong about
@@ -1465,7 +1494,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
     () => facilitiesInArea(rankedFacilities, props.area),
     [rankedFacilities, props.area],
   );
-  const areaActive = props.area !== AREA_ALL;
+  // `areaActive` is declared once, above `skipProvenance` — see the comment there.
   // Two real buckets, or an active narrow that must stay clearable. One bucket is not a choice, and
   // a row of one chip reading "All · 12" is noise — the same rule the mobile deck applies.
   const showAreaLine = areaChips.length > 2 || areaActive;
@@ -1803,8 +1832,14 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 rather than a bug. `derivePolicyRating` runs over `snap.facilities` — the whole
                 ranked scope — and recomputing it per area would let a grid-only control silently
                 move the headline number and its "N rated facilities" basis. So the number keeps its
-                meaning and the narrow states its own reach instead. */}
-            {areaActive ? (
+                meaning and the narrow states its own reach instead.
+                GATED ON `shownFacilities.length > 0` TOO (review Finding 2), not `areaActive` alone:
+                an area with nothing in it already gets its OWN sentence below ("No ranked facility is
+                in this area…"), and rendering both together put two overlapping `role="status"`
+                sentences on screen for the same click — "Showing 0 of 3…" right next to "No ranked
+                facility is in this area." The zero-count case has nothing left for this sentence to
+                say that the other one doesn't already say better. */}
+            {areaActive && shownFacilities.length > 0 ? (
               <p role="status" className="text-xs text-ink600">
                 Showing{' '}
                 <span className="ths-num" aria-label={`${shownFacilities.length} facilities shown`}>

@@ -261,7 +261,9 @@ export const INITIAL_SHELL_STATE: ShellState = {
 
 /**
  * Restore `useState`'s bail-out. Keyed off `Object.keys(next)` rather than a hand-listed field set,
- * so adding a sixteenth field cannot silently make two different states compare equal.
+ * so adding a sixteenth field cannot silently make two different states compare equal. ("Sixteenth" =
+ * one more than today's fifteen — the field-write table's header comment in
+ * qualifyV3FlowState.test.tsx:11 uses this same one-more-than-today rule, not by coincidence.)
  */
 function bailIfUnchanged(prev: ShellState, next: ShellState): ShellState {
   for (const k of Object.keys(next) as (keyof ShellState)[]) {

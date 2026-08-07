@@ -9,7 +9,11 @@
  *   1 · A FIELD-WRITE TABLE. Every action is dispatched against one maximally-dirty fixture and the
  *       result is compared to `{...before, ...declaredWrites}` — which pins the writes AND the
  *       non-writes in one assertion. If an action ever starts touching a sixteenth field, the row
- *       for it fails.
+ *       for it fails. ("Sixteenth" = one MORE than today's fifteen, the same convention
+ *       `bailIfUnchanged` uses at flow-state.ts:264 — NOT this header's own older habit of naming
+ *       the current total (this comment said "a fourteenth field" back when the module had fourteen,
+ *       i.e. named the count itself rather than the next one). Reconciled 2026-08-07 so the two
+ *       files share one rule instead of two that happened to differ by one.)
  *   2 · The named INVARIANTS from the module header (a–m), asserted directly, because "search
  *       clears everything downstream" and "retryNonce is never reset" are the claims a future
  *       refactor will be tempted to break.

@@ -65,8 +65,14 @@ export const HeatingUpCards = memo(function HeatingUpCards({
   /** Design B ticker scope: a payer name → the ticker is that payer's improvers; null → book-wide.
    *  Labeled next to the title so the scope is legible (the ticker is book-wide-within-payer). */
   scopePayer?: string | null;
-  /** facilityKeys of the cards whose facility is currently in the compose selection (marked pressed).
-   *  A SET — the compose bar can select several facilities, so more than one card can read pressed. */
+  /** facilityKeys of the cards that should render pressed, meaning something different per surface:
+   *  · v2's compose bar (`openAs: 'facility_payer'`) — the cards currently IN the compose selection.
+   *  · v3's answer stage (`openAs: 'area'`, resolution-flow-client.tsx `tickerActiveKeys`) — the cards
+   *    whose OWN `state` matches the answer-stage AREA facet that is currently active, i.e. every
+   *    trend row in the same bucket a click on this strip would seed. Book-wide trends, member-scoped
+   *    ranking: a pressed card here is a claim about the FACET, not about this member's history at
+   *    that facility.
+   *  A SET either way — several cards can share a bucket (or, on v2, be multi-selected). */
   activeFacilityKeys?: ReadonlySet<string>;
   /** tickerPinned — force-pause the marquee (a card click set it). A DISTINCT flag owned by the
    *  container, NOT derived from the facility selection; pointer/focus/scroll can't resume it, only the

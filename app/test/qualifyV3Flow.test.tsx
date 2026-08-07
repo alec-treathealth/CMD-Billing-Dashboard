@@ -1365,10 +1365,20 @@ test('the area chips render on the answer stage, counted, with selection as a WO
   const active = render(props('answer', fixture(), { answer: answerProps({ snapshot: threeStateSnapshot(), area: 'TN' }) }));
   assert.match(active, /TN<span[^>]*>[^<]*· 1<\/span> · showing/, 'the active chip says "showing"');
   assert.match(active, /aria-pressed="true"/);
+  // FINDING 3 (review r2): a THREE-facility ranking across three distinct states means every
+  // per-state chip's own count IS 1 — "1 ranked facilities" was the COMMON case, not an edge case.
+  // The 'All' chip above pins the plural at n=3; this pins the singular at n=1, so both branches of
+  // the ternary are covered rather than just the one that happened not to expose the bug.
+  assert.match(active, /aria-label="1 ranked facility"/, 'a count of one is singular, never "1 ranked facilities"');
+  assert.ok(!active.includes('1 ranked facilities'), 'the buggy plural must not survive at n=1');
 
   // ONE bucket is not a choice: a single-state ranking shows no row at all.
   const oneState = { ...snapshotFixture(), facilities: [facility({ state: 'TN' })] } as unknown as QualifySnapshot;
   const single = render(props('answer', fixture(), { answer: answerProps({ snapshot: oneState }) }));
+  // FINDING 7 (review r2): POSITIVE CONTROL. Without this, a refactor that stopped rendering the
+  // scorecard entirely would still pass the negative assertion below — it too would lack the string
+  // "Filter the ranked list by area", but for the wrong reason (nothing rendered at all).
+  assert.match(single, /NASHVILLE MENTAL HEALTH/, 'the scorecard itself rendered — otherwise the negative assertion below is vacuous');
   assert.ok(!single.includes('Filter the ranked list by area'), 'a one-chip row is noise, not a control');
 });
 
@@ -1407,6 +1417,18 @@ test('an area with no ranked facility is an honest empty state, not the no-histo
     'that sentence is about the payer and the window, and it would be false here',
   );
   assert.match(empty, /OR<span/, 'the chip for the empty area is still on screen, so the narrow is clearable');
+  // FINDING 2 (review r2): MUTUAL ABSENCE. Before the fix, `areaActive` alone gated the "Showing 0 of
+  // 3 ranked facilities in this area…" sentence, so it rendered RIGHT ALONGSIDE "No ranked facility
+  // is in this area" — two overlapping `role="status"` sentences making the same claim twice, one of
+  // them with a "Showing 0 of…" framing this test's OWN assertions above already prove is redundant.
+  // NOT a bare `!includes('Showing')` — the Window line legitimately renders "Showing trailing N
+  // days" on every render, area or not, and that sentence must stay untouched. `facilities shown` is
+  // the aria-label text unique to the suppressed sentence's count span.
+  assert.ok(!empty.includes('facilities shown'), 'the "Showing 0 of N" sentence must not render when the area is empty');
+  assert.ok(
+    !empty.includes('The ranking itself was not re-run'),
+    'that is the OTHER area-active sentence\'s tail — it must not co-render with the empty-area one',
+  );
 
   // And the genuinely-empty ranking keeps its own, different sentence.
   const noRows = { ...snapshotFixture(), facilities: [] } as unknown as QualifySnapshot;
@@ -1447,6 +1469,62 @@ test('HONESTY GUARD: an active area does NOT flip any caption that describes the
   // testing suppression rather than an unreachable branch.
   const funded = disclosureOf(skipped({ filters: { planTypes: [], funding: ['Self-Funded'], employers: [] } }));
   assert.match(funded, /narrowed by your filter selections/, 'a real fetch narrow still says so');
+});
+
+// FINDING 1 (review r2 — "the one that matters"). The skip disclosure's AI caption said "grounded
+// in the ranking on screen" unconditionally, but `<QualifyAiPanel snapshot={snapshot}>`
+// (resolution-flow-client.tsx) is handed the FULL snapshot, never `shownFacilities` — so with an
+// area chip active the grid shows a subset of the ranking while the AI answers over all of it, and
+// "on screen" became a claim about a ranking the AI was never actually confined to. Same standard
+// as the hero rating's "the rating above still covers all 3": say what backs the answer instead of
+// letting a grid-only control silently relabel it.
+test('the AI provenance caption stops claiming "on screen" grounding once an area narrows the grid', () => {
+  const r = fixture();
+  const skipped = (over: Partial<NonNullable<ResolutionStagesProps['answer']>>) =>
+    disclosureOf(
+      render(
+        props('answer', r, {
+          answer: answerProps({
+            snapshot: threeStateSnapshot(),
+            scopeSource: 'skipped',
+            candidates: orderedCandidates(r),
+            ...over,
+          }),
+        }),
+      ),
+    );
+
+  // No area: BYTE-IDENTICAL to the string that shipped before this fix — the no-area render may not
+  // move by one character. `threeStateSnapshot()` carries `resolved.payerName`, so `skipUnder`
+  // appends " under AETNA US HEALTHCARE"; the fixture-carried suffix is part of the frozen string.
+  const wide = skipped({});
+  assert.ok(
+    wide.includes(
+      '<dd class="text-sm text-ink900">grounded in the ranking on screen — all plans, no plan chosen under AETNA US HEALTHCARE</dd>',
+    ),
+    'without an area, "on screen" is still true and the caption must render unchanged',
+  );
+
+  // An active area: the grid is narrower than what the AI actually read, so "on screen" is now a
+  // false grounding claim and must not appear at all.
+  const narrowed = skipped({ area: 'TN' });
+  assert.ok(
+    !narrowed.includes('grounded in the ranking on screen'),
+    'the AI reads the full snapshot, not the area-narrowed grid — "on screen" is false with an area active',
+  );
+  assert.match(
+    narrowed,
+    /grounded in the full ranking behind this answer, not the narrowed grid — all plans, no plan chosen/,
+    'the corrected wording says what actually backs the answer instead',
+  );
+
+  // The `rankingNarrowed` arm is independent of the area arm — both must combine, not override.
+  const both = skipped({ area: 'TN', filters: { planTypes: [], funding: ['Self-Funded'], employers: [] } });
+  assert.match(
+    both,
+    /grounded in the full ranking behind this answer, not the narrowed grid — all plans, no plan chosen, narrowed by your filter selections/,
+    'an area AND a filter narrow combine into one honest sentence, not two competing ones',
+  );
 });
 
 // ── The re-armed ticker (v2's clickable strip, restored with a v3 meaning) ───────────────────────
