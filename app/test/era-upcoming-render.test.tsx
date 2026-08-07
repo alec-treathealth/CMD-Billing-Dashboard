@@ -28,9 +28,15 @@ import {
   payerSuggestions,
   centsFromText,
   EraUpcomingBody,
+  ForecastEditBanner,
+  forecastRowKey,
   paymentMethodLabel,
 } from '../components/dashboard/era-upcoming';
 import type { EraUpcomingGroup, EraUpcomingSummary } from '../../src/veris/era835Upcoming.js';
+import type {
+  ManualForecastRow,
+  ResolvedForecastRow,
+} from '../../src/veris/upcomingForecast.js';
 import type {
   UpcomingOverrideRow,
   UpcomingOverrideSummary,
@@ -519,8 +525,12 @@ test('an all-overdue book still surfaces stale 024 edits', () => {
   );
   assert.ok(html.includes('No future payments scheduled — 1 overdue'), 'third population');
   assert.ok(
-    html.includes('no longer match a forecast row'),
+    html.includes('1 manual edit not in effect'),
     'the stale edit is visible exactly when the operator is reconciling by hand',
+  );
+  assert.ok(
+    html.includes('No forecast row at this date, facility and payer'),
+    'and it says WHY — the strip heading is reason-neutral now that two reasons exist',
   );
 });
 
@@ -533,6 +543,222 @@ test('overdue truncation is announced per partition and names the drop direction
   );
   assert.ok(html.includes('Overdue list capped'), 'truncation is stated');
   assert.ok(html.includes('newest overdue were dropped'), 'oldest-first retention is stated');
+});
+
+// ---------------------------------------------------------------------------
+// OVERDUE CONTROLS. Overdue was the ONE row class with no buttons at all — the highest-value
+// row on the tile (Alec's ruling 2026-08-03) and the only one that could not be marked landed
+// or not-coming. With every live forecast row currently overdue, that made the entire forecast
+// half of the tile unactionable.
+// ---------------------------------------------------------------------------
+
+test('overdue rows carry Mark landed / Not coming for a super admin, labelled as overdue', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([], { overdueRows: [PROOF_OVERDUE] })}
+      canEdit
+    />,
+  );
+  assert.ok(
+    html.includes('aria-label="Mark landed: KWC BCBS AR 2026-05-26 (overdue)"'),
+    'the highest-value row can finally be confirmed landed',
+  );
+  assert.ok(
+    html.includes('aria-label="Mark not coming: KWC BCBS AR 2026-05-26 (overdue)"'),
+    '…and marked not coming',
+  );
+  // The context suffix is not decoration: a screen-reader user tabbing this flat list is a long
+  // way from the section heading, and the same row can also appear in the group table.
+  assert.ok(html.includes('(overdue)'), 'the section is named in the accessible label');
+});
+
+test('THE MISSED CALL SITE: the all-overdue empty state renders the controls too', () => {
+  // This branch fires only when the ENTIRE tile is overdue (zero remits, zero upcoming) — which
+  // is exactly the state the controls exist for, and a state no populated-tile fixture reaches.
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({})}
+      overrides={OS([], { overdueRows: [PROOF_OVERDUE] })}
+      canEdit
+    />,
+  );
+  assert.ok(
+    html.includes('No future payments scheduled — 1 overdue expected payment below.'),
+    'still the approved third-population wording',
+  );
+  assert.ok(
+    html.includes('aria-label="Mark landed: KWC BCBS AR 2026-05-26 (overdue)"'),
+    'and the second OverdueStrip call site is wired identically to the first',
+  );
+});
+
+test('overdue controls are absent for everyone but a super admin', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([], { overdueRows: [PROOF_OVERDUE] })}
+    />,
+  );
+  assert.ok(html.includes('$72,000.00') && html.includes('69 days overdue'), 'the read is intact');
+  assert.ok(!html.includes('Mark landed'), 'no controls');
+  assert.ok(!html.includes('Not coming'), 'none of them');
+  assert.ok(!html.includes('cannot be re-dated here'), 'and no editor-only prose');
+});
+
+test('a manual-origin overdue row offers Remove row but NOT the correct-amount form', () => {
+  // resolveForecast's adds loop never consults the correct map, so a correction keyed to a
+  // manual add is unconditionally orphaned. Offering the box would invite an operator to type a
+  // dollar figure straight into the not-in-effect strip.
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([])}
+      canEdit
+      manual={[
+        {
+          id: 7,
+          kind: 'add',
+          facility_code: 'KWC',
+          payer_label: 'TRICARE',
+          expected_date: '2026-07-01',
+          method_label: 'Check',
+          amount: '1234.00',
+          suppress_reason: null,
+          matched_era_key: null,
+        },
+      ]}
+    />,
+  );
+  assert.ok(html.includes('aria-label="Remove admin edit: KWC TRICARE 2026-07-01 (overdue)"'));
+  assert.ok(html.includes('Remove row'), 'a manual add is removed, not un-corrected');
+  assert.ok(
+    !html.includes('Correct amount: KWC TRICARE 2026-07-01 (overdue)'),
+    'no amount box on a row a correction cannot reach',
+  );
+});
+
+test('a corrected SHEET-origin overdue row keeps the amount form, at the RESOLVED amount', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([], { overdueRows: [PROOF_OVERDUE] })}
+      canEdit
+      manual={[
+        {
+          id: 9,
+          kind: 'correct',
+          facility_code: 'KWC',
+          payer_label: 'BCBS AR',
+          expected_date: '2026-05-26',
+          method_label: null,
+          amount: '36000.00',
+          suppress_reason: null,
+          matched_era_key: null,
+        },
+      ]}
+    />,
+  );
+  assert.ok(html.includes('aria-label="Correct amount: KWC BCBS AR 2026-05-26 (overdue)"'));
+  assert.ok(html.includes('value="36000.00"'), 'the box holds the corrected amount, not 72000.00');
+  assert.ok(html.includes('Undo correction'), 'and the delete button reads as an undo');
+});
+
+test('forecastRowKey is unique when two forecast rows share date, facility and payer', () => {
+  // 023 has no unique index and its header is explicit that two identical forecasts are legal,
+  // so the old `date-facility-payer` key collided on legitimate sheet-only data — independently
+  // of the duplicate-add defect. These rows also carry an uncontrolled amount input, where a
+  // colliding key lets React reuse one row's DOM node for another row's money.
+  const R = (over: Partial<ResolvedForecastRow>): ResolvedForecastRow => ({
+    expected_date: '2026-05-26',
+    facility_code: 'KWC',
+    payer_label: 'BCBS AR',
+    method_label: 'Check',
+    amount: '72000.00',
+    is_patient_specific: false,
+    origin: 'sheet',
+    corrected: false,
+    ...over,
+  });
+  const rows = [R({}), R({ amount: '5.00' }), R({})];
+  const keys = rows.map(forecastRowKey);
+  assert.equal(new Set(keys).size, 3, 'three rows, three keys');
+  // A pipe separator, not a hyphen: an ISO date carries its own hyphens, so 'BCBS-AR' at one
+  // facility could otherwise key-collide with a different facility/payer split.
+  assert.notEqual(
+    forecastRowKey(R({ facility_code: 'KWC', payer_label: 'BCBS-AR' }), 0),
+    forecastRowKey(R({ facility_code: 'KWC-BCBS', payer_label: 'AR' }), 0),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// DUPLICATE ADD (the resolver's 'duplicate_of_sheet_row'), end to end through the tile.
+// ---------------------------------------------------------------------------
+
+test('REGRESSION: an add duplicating the overdue sheet row renders $72,000 ONCE, not $144,000', () => {
+  // The live 2026-08-06 state, asserted through the whole tile: manual add id 15 duplicates the
+  // sheet's KWC / BCBS AR / 2026-05-26 row exactly. The strip rendered it twice and summed both.
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([], { overdueRows: [PROOF_OVERDUE] })}
+      manual={[
+        {
+          id: 15,
+          kind: 'add',
+          facility_code: 'KWC',
+          payer_label: 'BCBS AR',
+          expected_date: '2026-05-26',
+          method_label: 'Check',
+          amount: '72000.00',
+          suppress_reason: null,
+          matched_era_key: null,
+        },
+      ]}
+    />,
+  );
+  assert.ok(html.includes('across 1 expected payment'), 'one payment, one overdue row');
+  assert.ok(!html.includes('$144,000.00'), 'the double count is gone');
+  assert.ok(html.includes('$72,000.00'), 'and the money is still there, once');
+  assert.ok(
+    html.includes('The sheet already carries this facility, payer and date ($72,000.00)'),
+    'the dropped add is NAMED with the money that is counted instead — never silently skipped',
+  );
+  assert.ok(html.includes('1 manual edit not in effect'), 'under a reason-neutral heading');
+});
+
+// ---------------------------------------------------------------------------
+// EDIT FEEDBACK. Failure and success used to be visually identical.
+// ---------------------------------------------------------------------------
+
+test('the edit banner mounts BOTH live regions before any text exists', () => {
+  const html = renderToStaticMarkup(<ForecastEditBanner outcome={null} />);
+  assert.ok(html.includes('role="alert"'), 'the assertive region is in the DOM up front');
+  assert.ok(html.includes('role="status"'), 'and the polite one');
+  // A live region that is created already containing its text is silent on most screen readers,
+  // which is why these are mounted empty rather than rendered on demand.
+  assert.ok(!html.includes('ths-alert'), 'but nothing is styled as a message yet');
+  assert.ok(!html.includes('ths-tag'), 'and no tag is shown');
+});
+
+test('the banner is never colour-only — every tone carries a word', () => {
+  const err = renderToStaticMarkup(
+    <ForecastEditBanner outcome={{ tone: 'error', text: 'Could not remove that edit.' }} />,
+  );
+  assert.ok(err.includes('ths-alert') && err.includes('ths-tag-danger'), 'danger treatment');
+  assert.ok(err.includes('Not saved'), 'stated in words, not implied by red');
+  assert.ok(err.includes('Could not remove that edit.'), 'and the message itself');
+
+  const ok = renderToStaticMarkup(
+    <ForecastEditBanner outcome={{ tone: 'ok', text: 'Marked landed — KWC · BCBS AR · 2026-05-26.' }} />,
+  );
+  assert.ok(ok.includes('ths-tag-ok') && ok.includes('Saved'));
+  assert.ok(!ok.includes('ths-alert'), 'success is not an alert');
+
+  const info = renderToStaticMarkup(
+    <ForecastEditBanner outcome={{ tone: 'info', text: 'That edit was already gone.' }} />,
+  );
+  assert.ok(info.includes('No change'), 'an idempotent no-op is not reported as a success');
 });
 
 test('centsFromText is exact and rejects junk', () => {
@@ -612,4 +838,154 @@ test('payerSuggestions dedupes across both feeds, forecast vocabulary first', ()
     G({ payer_name: null }),
   ]);
   assert.deepEqual(out, ['AETNA', 'BCBS'], 'case-insensitive dedupe, unnamed payer dropped');
+});
+
+// --- HIDDEN BY YOU: an applied suppression must stay reversible on screen ----
+//
+// The one-way door. "Mark landed" writes a suppress, the resolver applies it, the money leaves
+// the tile — and before this strip there was no id on screen to delete it with, so the row
+// could never come back. These assert the way out actually renders, in every branch that can
+// reach it, and that it never becomes a total.
+
+/** One 'suppress' manual row, the shape the resolver folds. */
+const SUP = (over: Partial<ManualForecastRow> = {}): ManualForecastRow => ({
+  id: 7,
+  kind: 'suppress',
+  facility_code: 'KWC',
+  payer_label: 'BCBS AR',
+  expected_date: '2026-08-05',
+  method_label: null,
+  amount: null,
+  suppress_reason: 'landed',
+  matched_era_key: null,
+  ...over,
+});
+
+test('an applied suppression renders an Undo for a super admin', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([OR({ facility_code: 'KWC', payer_label: 'BCBS AR', expected_date: '2026-08-05', amount: '72000.00' })])}
+      manual={[SUP()]}
+      canEdit
+    />,
+  );
+  assert.ok(html.includes('Hidden by you'), 'the strip appears');
+  assert.ok(html.includes('$72,000.00'), 'and names the money that left the tile');
+  assert.ok(html.includes('marked landed'), 'in the operator vocabulary, not the 024 enum');
+  assert.ok(
+    html.includes('Undo hiding: KWC BCBS AR 2026-08-05'),
+    'with a distinctly-labelled control — several hidden rows can share a payer',
+  );
+});
+
+test('THE STATE THAT MOST NEEDS IT: hiding the last row still offers the Undo', () => {
+  // Suppressing the only forecast row drops the tile into the calm "nothing scheduled" branch.
+  // Without the strip there, the operator has just made money vanish and the screen offers
+  // nothing to click — the exact one-way door, reached in one plausible click.
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({})}
+      overrides={OS([OR({ facility_code: 'KWC', payer_label: 'BCBS AR', expected_date: '2026-08-05', amount: '72000.00' })])}
+      manual={[SUP()]}
+      canEdit
+    />,
+  );
+  assert.ok(html.includes('No future payments scheduled'), 'still the calm empty copy');
+  assert.ok(html.includes('Hidden by you'), 'and the way back is on screen');
+  assert.ok(html.includes('$72,000.00'));
+});
+
+test('hidden money is never summed into a tile total', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([OR({ facility_code: 'KWC', payer_label: 'BCBS AR', expected_date: '2026-08-05', amount: '72000.00' })])}
+      manual={[SUP()]}
+      canEdit
+    />,
+  );
+  assert.ok(
+    !html.includes('not included in the total above'),
+    'no Forecast line — the only forecast row is hidden, so there is no upcoming forecast money',
+  );
+  assert.ok(html.includes('$100.00'), 'the ERA headline is untouched by what was hidden');
+  assert.ok(
+    !/Hidden by you[\s\S]{0,400}?across .{0,40}\$72,000\.00 (?:total|hidden)/.test(html),
+    'per-row amounts only — a hidden subtotal would put the money back on the tile as a number',
+  );
+});
+
+test('the hidden strip is super-admin only', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([OR({ facility_code: 'KWC', payer_label: 'BCBS AR', expected_date: '2026-08-05', amount: '72000.00' })])}
+      manual={[SUP()]}
+    />,
+  );
+  assert.ok(!html.includes('Hidden by you'), 'a viewer who cannot undo is not shown the option');
+});
+
+test('a suppression that also killed a manual add says the add comes back', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([])}
+      manual={[
+        SUP({ id: 7, facility_code: 'KWC', payer_label: 'BCBS TN', expected_date: '2026-08-05' }),
+        SUP({
+          id: 8,
+          kind: 'add',
+          facility_code: 'KWC',
+          payer_label: 'BCBS TN',
+          expected_date: '2026-08-05',
+          method_label: 'EFT',
+          amount: '32000.00',
+          suppress_reason: null,
+        }),
+      ]}
+      canEdit
+    />,
+  );
+  assert.ok(html.includes('Hidden by you'));
+  assert.ok(
+    html.includes('including the row you added at this date'),
+    'the add is recoverable only through its suppress, so the copy has to say so',
+  );
+  assert.ok(html.includes('$32,000.00'), 'and name the amount that comes back');
+});
+
+// --- the stale strip is informational; its BUTTON is not ---------------------
+
+test('Remove edit is hidden from a non-super-admin, but the reason still shows', () => {
+  // loadUpcomingManual is deliberately open to any entitled viewer, so an entity admin reads
+  // these rows. This was the one edit control on the tile that was never gated — invisible
+  // while it failed silently, and a visibly-broken button once failures started speaking.
+  const staleProps = {
+    data: S({ total: '100.00', remits: 1, groups: [G({})] }),
+    overrides: OS([]),
+    manual: [SUP({ id: 9, kind: 'correct', amount: '500.00', suppress_reason: null })],
+  };
+  const viewer = renderToStaticMarkup(<EraUpcomingBody {...staleProps} />);
+  assert.ok(viewer.includes('not in effect'), 'the strip itself is informational and stays');
+  assert.ok(!viewer.includes('Remove edit'), 'but a viewer who cannot delete gets no button');
+
+  const admin = renderToStaticMarkup(<EraUpcomingBody {...staleProps} canEdit />);
+  assert.ok(admin.includes('Remove edit'), 'a super admin does');
+});
+
+test('the correct-amount box carries native validation, not a silent return', () => {
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([OR({ amount: '5000.00' })])}
+      canEdit
+    />,
+  );
+  assert.ok(html.includes('Correct amount:'), 'the box renders for a sheet-origin row');
+  assert.ok(
+    html.includes('pattern="\\d{1,10}(\\.\\d{1,2})?"'),
+    'a bad amount is blocked and announced ON THE FIELD rather than swallowed by a bare return',
+  );
 });
