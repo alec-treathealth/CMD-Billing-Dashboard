@@ -86,15 +86,18 @@ function hasModifier(node: ts.Node, kind: ts.SyntaxKind): boolean {
 }
 
 /**
- * Provably a function at runtime from syntax alone. An arrow or function expression qualifies; a
- * call expression (`withAuth(async () => {})`) does not — it may return anything, and this guard
- * refuses to guess. Restructure to a declaration if you hit that.
+ * Provably an async function at runtime from syntax alone. An async arrow or function expression
+ * qualifies; a call expression (`withAuth(async () => {})`) does not — it may return anything, and
+ * this guard refuses to guess. Restructure to a declaration if you hit that.
  */
-function isProvablyFunction(expr: ts.Expression | undefined): boolean {
+function isProvablyAsyncFunction(expr: ts.Expression | undefined): boolean {
   if (!expr) return false;
   let e: ts.Expression = expr;
   while (ts.isParenthesizedExpression(e)) e = e.expression;
-  return ts.isArrowFunction(e) || ts.isFunctionExpression(e);
+  return (
+    (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) &&
+    hasModifier(e, ts.SyntaxKind.AsyncKeyword)
+  );
 }
 
 /** True when the module's first statement is the 'use server' directive. */
@@ -126,8 +129,8 @@ export function findIllegalExports(src: string, fileName?: string): Array<{ line
     // `export default <expr>` and the TS-only `export = <expr>`.
     if (ts.isExportAssignment(st)) {
       if (st.isExportEquals) push(st, 'a TS `export =` assignment');
-      else if (!isProvablyFunction(st.expression)) {
-        push(st, 'a default export that is not provably a function (object, identifier or literal)');
+      else if (!isProvablyAsyncFunction(st.expression)) {
+        push(st, 'a default export that is not provably an async function (object, identifier or literal)');
       }
       continue;
     }
@@ -164,8 +167,8 @@ export function findIllegalExports(src: string, fileName?: string): Array<{ line
       push(st, 'a namespace (a runtime object)');
     } else if (ts.isVariableStatement(st)) {
       for (const d of st.declarationList.declarations) {
-        if (!isProvablyFunction(d.initializer)) {
-          push(d, 'a variable that is not provably a function (only async functions may be exported)');
+        if (!isProvablyAsyncFunction(d.initializer)) {
+          push(d, 'a variable that is not provably an async function (only async functions may be exported)');
         }
       }
     } else {
@@ -235,6 +238,9 @@ const ILLEGAL: ReadonlyArray<[string, string]> = [
   ['export default someIdentifier;', 'default identifier'],
   ['export default 42;', 'default literal'],
   ['export default function f() {}', 'default non-async function'],
+  ['export const f = () => {};', 'non-async arrow function'],
+  ['export default () => {};', 'non-async default arrow function'],
+  ['export const f = function () {};', 'non-async function expression'],
   ['export enum E { A }', 'enum — a runtime object in TS'],
   ['export namespace N { export const a = 1; }', 'namespace — a runtime object'],
   ['export { type T, value };', 'MIXED type + value: the value still ships'],
