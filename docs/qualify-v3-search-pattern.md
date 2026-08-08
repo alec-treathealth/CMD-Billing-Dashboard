@@ -746,3 +746,138 @@ so typing what CMD actually calls a facility finds it, for the 16 of 47 live opt
 `display_acronym` differs from their value. **`display` is deliberately not recomposed** into
 `ACRONYM — Full Name`: label parity with the score cards is the whole reason `display_acronym` is
 preferred, and the picker echoes `display` back inside the selected tag.
+
+## S5 — THE REFRESH CONTROL: re-run the search, date the data, announce the window (2026-08-08)
+
+Alec ruled **both** a refresh control and the freshness card. The reason is structural rather than
+aesthetic: the collections crons write hourly, so a ranking can go stale while a rep is still looking
+at it — and until S5 the only re-run affordance on the whole surface was the **"Try again" button
+inside the `refreshFailed` error banner**. Refresh existed only as failure recovery.
+
+### The control is a render promotion, not new machinery
+
+`retry_requested` was already a general "re-issue the current request": it is the one reducer case
+that bypasses `bailIfUnchanged` and returns a fresh object unconditionally, so it moves the fetch
+effect's dependency array with no error present and no input changed. So S5 adds **no second refetch
+path** — a second writer of the value the effect keys on is the shape `scopeKeyOf`'s header is a
+post-mortem of. One handler (`onRetrySnapshot`), two render sites.
+
+It lives **on the NARROW SEARCH card**, in the header row so it survives the disclosure, and the
+card's own rule is what puts it there: *everything on the control card re-issues the ranking request*
+— this is the only thing on the card that does nothing but that. The same rule keeps the two grid
+narrows (area, facility) **outside** the card; S5 is that rule applied in the other direction. It is
+**not** a `cardFacets` entry: a facet has an ON/OFF state the summary must report, and a refresh has
+neither.
+
+The wrapper's **empty-term guard is kept, and it matters more now than it did for the banner.** A
+failure implies a request implies a term; a standing control renders on every answer stage and can be
+pressed after a hot-reload has emptied the PHI ref. It returns **before** dispatching, so a press
+there arms nothing — silent no-op, not a nonce with no fetch behind it.
+
+### It needed its own in-flight signal, and it could not be a boolean
+
+Press refresh before S5 and **nothing moved for 1–2 seconds.** All three progress signals derive from
+`loadedKey !== scopeKey`, which a same-scope refresh cannot move; `showSkeleton` needs a null
+snapshot; `pending` is the *server action's* flag and a refresh does not re-run it. An operator who
+sees nothing presses again — and **every press writes one `SEARCH_QUALIFY_PHI` row**, because the
+core audits before any data. This repo already treats duplicate audit rows from one user action as a
+defect worth its own fix.
+
+The obvious repair — `useState(false)` — is the exact bug class the derived trio exists to prevent
+(the `refetching` boolean was set in four places, cleared in one, and permanently suppressed the
+answer stage's headline). So `refreshingNonce: number | null` is **armed in ONE place and cleared in
+SIX**: both terminal dispatches (`snapshot_resolved`, `snapshot_failed` — the only two outcomes a
+fetch has) plus all four navigations, which abandon the request it describes. The fetch effect's four
+early returns are each closed elsewhere: `term === ''` by the handler's guard, `isPending` by the
+control being disabled, `stage`/`predicateId` by the navigation clears.
+
+⚠ **`bailIfUnchanged` had to be reasoned about, not assumed.** An hourly pipeline usually returns
+byte-identical data, so *the refresh whose result changes nothing is the refresh most likely to
+happen* — and a bail there would leave the marker armed with no request behind it, i.e. the stuck
+flag arrived at through the guard rather than a handler. It is safe only because the marker is part
+of the comparison; pinned by a test that asserts the no-op resolve does **not** bail while in flight.
+
+In flight it renders the design system's **re-scope idiom (dim + progress beam), never a skeleton** —
+a standing control that blanks the answer on every press makes each refresh feel like a page rebuild.
+
+### "Ranking data rebuilt …" — the one source that means what it says
+
+`collections.rollup_refresh_run.finished_at`, newest ok run. **S5 is that table's first app-path
+reader** (0054 shipped writers only). `claims_reader` holds both gates already — grant at 0054:68,
+SELECT policy at 0054:89-90, RLS on — verified live as the reader's own privileges rather than read
+off the migration text, because 0089 is exactly the case where a grant existed, a policy did not, and
+the silent empty result became permanently wrong data behind a fail-soft catch. **No migration.**
+
+Two columns are one word away and both are wrong in the *alarming* direction, so both are pinned out
+at the SQL, in `test/rollupFreshnessQuery.test.ts`:
+
+| column | why not |
+|---|---|
+| `max(ingested_at)` | **first-seen** (`ON CONFLICT DO NOTHING`). Measured 3h25m / 3h54m old across three *successful* hourly refreshes; longest healthy gap over 14 days is **42 hours**. Also a 20,961-buffer parallel seq scan. |
+| `rollup_max_payment_date` | reads **into the future** — `FUTURE_PAYMENT_HORIZON_DAYS` is 14, so on 2026-08-07 it read **2026-08-12**. |
+
+The read also refuses `ok IS NULL` / `finished_at IS NULL`: 0054's header says a hard platform timeout
+kills the function before the completion UPDATE, and that "started but never finished" state **is** the
+failure signal. Ordered by `started_at desc` because that is the indexed column.
+
+**The copy names the rebuild, never the pull.** There is no run-log for `cmd-explorer` /
+`indigo-explorer` at all, and that cron's 210s wall-clock budget silently defers un-pulled customers
+to the next hour — so "last pulled" is a claim no `SELECT` in this database can back. The lag bound is
+derived from the schedule: BXR pulls at :00, Indigo at :30, the rebuild runs at :45, so a BXR row is
+invisible for 46 min at best and **1h45m** at worst (Indigo 17 min / 1h16m), before CMD's own posting
+lag. Hence *"up to about 2 hours"* and never a single number.
+
+Times render as **`Aug 8 at 4:45 PM PDT`** — a date and a named zone, never a bare HH:MM. This team
+spans timezones and the app anchors civil days to `America/Los_Angeles`, and without the date a
+stalled cron's twenty-hour-old timestamp reads as today. Built from `formatToParts`, because modern
+ICU puts a **narrow no-break space** (U+202F) before the day period and `format()` would ship a string
+that renders fine and fails every assertion written with an ordinary space.
+
+⚠ **It is its own action, not a field on `QualifySnapshot`** — a deliberate pick against the brief's
+default. The snapshot is a member-scoped, PHI-audited payload; this is a global operational fact with
+no tenant, no identifier and no user input. Riding along would make every v2-tab and mobile snapshot
+pay for a read neither renders, put an ops lookup inside the one call the surface waits on, and give
+the freshness read the *ranking's* failure mode — when the whole point is that it degrades to
+"freshness unknown" and leaves the answer untouched. The cost is one effect in the shell, keyed on
+`retryNonce` so the time moves when the operator asks for fresher data.
+
+### The window can move under the operator, and nothing said so
+
+`scopeKeyOf` serializes the automatic case as the literal string `'auto'` — **not** the ladder's
+chosen days. Automatic is the default. So a refresh re-runs the sufficiency ladder, can land on a
+different rung, and produces an **identical** request key: `loadedKey === scopeKey`, every staleness
+flag reads "nothing changed", the facet badge still says *"On · automatic"*, and `windowSentence`
+quietly renders a different number. On this surface that is a silent scope change.
+
+Both directions are genuinely reachable — new rows crossing the 10-patient floor **narrow** it; rows
+ageing out, or an `America/Los_Angeles` civil-day roll, **widen** it. `windowMove` is written by
+`snapshot_resolved` alone, set-or-clear on every resolve, and only when `loadedKey ===
+action.scopeKey`: a re-scope is a change the operator made, the key moved with it, and the dim + beam
+already marked it. Both ladders are coerced with `?? null` before comparison — `undefined !== null`
+would turn "no ladder before, no ladder after" into a window move, which is every manual-window
+resolve.
+
+The notice is a `role="status"` on the card carrying the S3 marker, and **`liveSentenceFor` announces
+the same bytes** — one call to `windowMoveNotice`, not a second sentence that agrees today. Three
+render gates, each preventing a different false sentence: `!stale` (RULE 2654416), `windowDays ===
+null` (it is a claim about the *automatic* window and would contradict *"— your selection"*), and
+`windowMove !== null` — **the negative control.** Most refreshes return the same rung; a notice that
+fired on every one would be noise, and noise is how the real one gets ignored. Pinned.
+
+**`memberCount` moving on a refresh is deliberately NOT announced.** Written down because it is a
+decision, not an omission: it is the same claim over fresher data, and the preface sentence re-renders
+with the new number in both the visible and the spoken channel. The window is different in kind — it
+changes what *period* the ranking covers while every sentence on screen goes on reading "automatic",
+and no flag can see it. Hence a `windowMove` and no `memberCountMove`.
+
+### The refresh must never re-enter the resolve
+
+Re-running `resolveCoverageAction` means dispatching `identifyAction` → `search_submitted`, which
+writes sixteen reducer fields and drops the operator back to the payer stage — i.e. a refresh would
+throw away the plan pick every time somebody asked for fresher numbers. Pinned from both sides: a
+reducer test that `retry_requested` moves none of the thirteen fields a navigation moves, and a
+**source scan** of `resolution-flow-client.tsx` (unimportable by anything hermetic) asserting
+`formAction` is called from exactly two places, neither of them the refresh handler. The button is
+`type="button"` for the same reason.
+
+**All new copy is unratified.**

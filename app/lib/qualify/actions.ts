@@ -36,6 +36,7 @@ import {
   loadQualifyPolicy,
   loadQualifyPolicySpread,
   loadQualifyVobFreshness,
+  loadRollupRefreshFreshness,
   loadQualifyWindowRungs,
   loadCurrentCodingDecisions,
   loadQualifyCensusAuth,
@@ -372,6 +373,38 @@ export async function loadQualifyFacilityOptions(): Promise<QualifyFacilityOptio
   if (!gate.ok) return { ok: false };
   try {
     return { ok: true, facilities: await qualifyFacilityOptions(gate.entityIds) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export type QualifyDataFreshnessResult = { ok: true; rebuiltAt: string | null } | { ok: false };
+
+/**
+ * WHEN THE RANKING INDEX WAS LAST REBUILT (S5) — `collections.rollup_refresh_run.finished_at` for
+ * the newest ok run, full UTC ISO. The answer stage renders it as "Ranking data rebuilt …" beside
+ * the refresh control, so the operator can tell whether pressing it can possibly help.
+ *
+ * ⚠ ITS OWN ACTION, NOT A FIELD ON `QualifySnapshot`, and the choice is deliberate. The snapshot is
+ * a member-scoped, PHI-audited payload built by `getQualifySnapshotCore`; this is a global
+ * operational fact with no tenant, no identifier and no user input. Folding it in would (a) make
+ * every v2-tab and mobile snapshot pay for a read neither renders, (b) put an ops lookup inside the
+ * one call the whole surface waits on, and (c) share a failure mode with the ranking — where the
+ * whole point is that a freshness failure must degrade to "unknown" and leave the answer untouched.
+ * The cost is one extra effect in the shell, keyed on the refresh nonce so the time moves when the
+ * operator asks for fresher data.
+ *
+ * Gated by `requireQualifyPrincipal` (Q-A roles only) like every other action here, even though the
+ * value is non-PHI: an ungated action is an ungated action. Fail-soft to `{ ok: false }` — the UI
+ * says "freshness unknown" rather than a number it cannot stand behind.
+ *
+ * Non-PHI: one timestamp. Nothing member-identifying exists on this path.
+ */
+export async function loadQualifyDataFreshness(): Promise<QualifyDataFreshnessResult> {
+  const gate = await requireQualifyPrincipal();
+  if (!gate.ok) return { ok: false };
+  try {
+    return { ok: true, rebuiltAt: await loadRollupRefreshFreshness() };
   } catch {
     return { ok: false };
   }

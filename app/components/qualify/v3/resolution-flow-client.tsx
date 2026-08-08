@@ -55,6 +55,7 @@ import { V3_INITIAL_STATE } from '../../../lib/qualify/v3FlowState';
 import {
   getQualifyFacilityTrends,
   getQualifySnapshot,
+  loadQualifyDataFreshness,
   loadQualifyFacilityOptions,
 } from '../../../lib/qualify/actions';
 import type { QualifyFacilityTrend } from '../../../lib/qualify/contract';
@@ -133,7 +134,19 @@ export function ResolutionFlowClient({
     area,
     facilityNarrow,
     narrowExpanded,
+    refreshingNonce,
+    windowMove,
   } = flow;
+
+  /* ── THE REFRESH'S OWN IN-FLIGHT SIGNAL (S5) ───────────────────────────────────────────────────
+   * DERIVED, like the three below it, and for the same reason — but from a field the reducer arms
+   * on the press itself (`retry_requested`) and clears at BOTH terminal dispatches, because the three
+   * below structurally cannot see this case. `stale`/`refetching`/`staleAfterError` all hang off
+   * `loadedKey !== scopeKey`, which a SAME-SCOPE refresh cannot move; `showSkeleton` needs a null
+   * snapshot; `isPending` belongs to the server action, which a refresh does not re-run. So without
+   * this the screen does not move for the 1-2s the request takes and the operator presses again.
+   * See flow-state.ts invariant (o) for the one-arm / six-clear discipline that keeps it unstuck. */
+  const refreshing = refreshingNonce !== null;
 
   // NOT in the reducer, deliberately: the ticker is a mount-once fetch that no flow field and no
   // handler touches. `null` = still loading (renders the skeleton, which reserves the strip's
@@ -150,6 +163,13 @@ export function ResolutionFlowClient({
   // and every billed-under press, and — worse — would put a facility list inside the payload the
   // narrow must never reach (invariant m).
   const [facilityOptions, setFacilityOptions] = useState<QualifyFacilityNarrowOption[]>([]);
+
+  // ── WHEN THE RANKING INDEX WAS LAST REBUILT (S5) ──────────────────────────────────────────────
+  // NOT in the reducer, for the `trends` reason exactly: no flow field and no handler touches it,
+  // and folding an orthogonal operational fact into a state machine only makes the machine harder
+  // to read. `null` is both the pre-load and the failed-load state, and it renders as "freshness
+  // unknown" rather than as a number nothing can stand behind.
+  const [dataRebuiltAt, setDataRebuiltAt] = useState<string | null>(null);
 
   // ONE clustering pass per resolution (clusterCarriers is O(n²)); the rail, receipt and both tile
   // stages read this instead of each re-deriving it — scroll-driven work on top of 4-5 re-derives
@@ -436,6 +456,34 @@ export function ResolutionFlowClient({
     };
   }, []);
 
+  // ── WHEN THE RANKING INDEX WAS LAST REBUILT: its own request, re-issued on every refresh ──────
+  //
+  // ⚠ NOT A SEGMENT OF THE SNAPSHOT CALL, and that is the S5 decision rather than an accident. The
+  // snapshot is member-scoped, PHI-audited and the one call this whole surface waits on; the rebuild
+  // time is a global operational fact with no tenant and no identifier. Riding along would make
+  // every v2-tab and mobile snapshot pay for a read neither renders, and — worse — would give the
+  // freshness read the RANKING's failure mode, when the whole point is that it degrades to "unknown"
+  // and leaves the answer untouched.
+  //
+  // KEYED ON `retryNonce`, WHICH IS WHAT MAKES THE REFRESH CONTROL HONEST: press it and the time
+  // moves with the data, rather than standing at whatever the answer stage first loaded. Gated on
+  // the answer stage because that is the only place it renders; a re-scope deliberately does NOT
+  // re-read it — the rebuild happens hourly, and a window chip does not change when it last ran.
+  useEffect(() => {
+    if (stage !== 'answer') return;
+    let alive = true;
+    loadQualifyDataFreshness()
+      .then((r) => {
+        if (alive) setDataRebuiltAt(r.ok ? r.rebuiltAt : null);
+      })
+      .catch(() => {
+        if (alive) setDataRebuiltAt(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [stage, retryNonce]);
+
   // ── Motion + focus ─────────────────────────────────────────────────────────────────────────────
   // ⚠ THE TWEEN TARGETS `[data-v3-stage]` — THE STAGE SUBTREE — NEVER THE <main>. An earlier version
   // animated `autoAlpha` on the <main> wrapper, which sets `visibility: hidden` on the h1, the rail,
@@ -678,7 +726,17 @@ export function ResolutionFlowClient({
                 skipped,
                 refetching,
                 staleAfterError,
+                // ONE HANDLER, TWO RENDER SITES (S5): the failure banner's "Try again" and the
+                // NARROW SEARCH card's standing "Refresh the ranking". A second refetch path would
+                // be a second writer of the value the fetch effect keys on.
                 onRetry: onRetrySnapshot,
+                // The refresh's own progress signal — see the derivation above for why the three
+                // fields beside it cannot cover a same-scope re-run.
+                refreshing,
+                dataRebuiltAt,
+                // The auto window landing on a different rung under an UNCHANGED request key: the
+                // one scope change on this surface that no staleness flag can observe.
+                windowMove,
                 candidates: answerCandidates,
                 filters,
                 onToggleFilter,

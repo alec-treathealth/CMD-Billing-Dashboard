@@ -8,13 +8,13 @@
  * TWO LAYERS:
  *   1 · A FIELD-WRITE TABLE. Every action is dispatched against one maximally-dirty fixture and the
  *       result is compared to `{...before, ...declaredWrites}` — which pins the writes AND the
- *       non-writes in one assertion. If an action ever starts touching a sixteenth field, the row
- *       for it fails. ("Sixteenth" = one MORE than today's fifteen, the same convention
- *       `bailIfUnchanged` uses at flow-state.ts:264 — NOT this header's own older habit of naming
+ *       non-writes in one assertion. If an action ever starts touching a nineteenth field, the row
+ *       for it fails. ("Nineteenth" = one MORE than today's eighteen, the same convention
+ *       `bailIfUnchanged` uses in flow-state.ts — NOT this header's own older habit of naming
  *       the current total (this comment said "a fourteenth field" back when the module had fourteen,
  *       i.e. named the count itself rather than the next one). Reconciled 2026-08-07 so the two
  *       files share one rule instead of two that happened to differ by one.)
- *   2 · The named INVARIANTS from the module header (a–m), asserted directly, because "search
+ *   2 · The named INVARIANTS from the module header (a–p), asserted directly, because "search
  *       clears everything downstream" and "retryNonce is never reset" are the claims a future
  *       refactor will be tempted to break.
  *
@@ -62,6 +62,11 @@ function dirty(over: Partial<ShellState> = {}): ShellState {
     area: 'TN',
     facilityNarrow: ['LONESTAR MENTAL HEALTH'],
     narrowExpanded: true,
+    // S5. `refreshingNonce` carries the retryNonce of the refresh in flight, so the fixture's 7
+    // matches its retryNonce — that is what a genuinely in-flight refresh looks like, and it makes
+    // `retry_requested`'s write to 8 visible in the table.
+    refreshingNonce: 7,
+    windowMove: { from: 30, to: 90 },
     ...over,
   };
 }
@@ -112,10 +117,14 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       area: AREA_ALL,
       facilityNarrow: NO_FACILITY_NARROW,
       narrowExpanded: false,
+      // S5: a navigation ABANDONS an in-flight refresh and any notice about a window that moved
+      // under a screen the operator has since left.
+      refreshingNonce: null,
+      windowMove: null,
     },
   },
   {
-    name: 'skipped writes twelve — and NOT windowDays or autoAsk',
+    name: 'skipped writes fourteen — and NOT windowDays or autoAsk',
     action: { type: 'skipped' },
     writes: {
       skipped: true,
@@ -132,10 +141,12 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       // Declared for the record; the table CANNOT see it (see INV n) because the fixture is already
       // `true`. INV n is what actually pins this write, from the opposite side.
       narrowExpanded: true,
+      refreshingNonce: null,
+      windowMove: null,
     },
   },
   {
-    name: 'plan_submitted writes nine — and NOT payerPick/planFilter/payerOverride/windowDays/autoAsk',
+    name: 'plan_submitted writes eleven — and NOT payerPick/planFilter/payerOverride/windowDays/autoAsk',
     action: { type: 'plan_submitted' },
     writes: {
       picked: true,
@@ -147,10 +158,12 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       area: AREA_ALL,
       facilityNarrow: NO_FACILITY_NARROW,
       narrowExpanded: false,
+      refreshingNonce: null,
+      windowMove: null,
     },
   },
   {
-    name: "went_back('identify') writes fourteen, payerPick among them",
+    name: "went_back('identify') writes sixteen, payerPick among them",
     action: { type: 'went_back', target: 'identify' },
     writes: {
       snapshot: null,
@@ -167,10 +180,12 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       area: AREA_ALL,
       facilityNarrow: NO_FACILITY_NARROW,
       narrowExpanded: false,
+      refreshingNonce: null,
+      windowMove: null,
     },
   },
   {
-    name: "went_back('payer') writes fourteen, payerPick among them",
+    name: "went_back('payer') writes sixteen, payerPick among them",
     action: { type: 'went_back', target: 'payer' },
     writes: {
       snapshot: null,
@@ -187,10 +202,12 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       area: AREA_ALL,
       facilityNarrow: NO_FACILITY_NARROW,
       narrowExpanded: false,
+      refreshingNonce: null,
+      windowMove: null,
     },
   },
   {
-    name: "went_back('plan') writes thirteen — the carrier pick SURVIVES",
+    name: "went_back('plan') writes fifteen — the carrier pick SURVIVES",
     action: { type: 'went_back', target: 'plan' },
     writes: {
       snapshot: null,
@@ -206,6 +223,8 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       area: AREA_ALL,
       facilityNarrow: NO_FACILITY_NARROW,
       narrowExpanded: false,
+      refreshingNonce: null,
+      windowMove: null,
     },
   },
   {
@@ -228,9 +247,14 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     writes: { filters: NO_ANSWER_FILTERS, area: AREA_ALL, facilityNarrow: NO_FACILITY_NARROW },
   },
   {
-    name: 'retry_requested writes snapshotError + retryNonce ONLY',
+    // S5 — THE ROW THAT PROMOTES A FAILURE-RECOVERY ACTION INTO A STANDING CONTROL. It now also
+    // ARMS the in-flight marker with the nonce it just minted, and clears any window-move notice
+    // from the PREVIOUS refresh (a notice about a window that moved a minute ago must not stand
+    // over the request that is replacing it). The non-writes are the point: nothing here touches
+    // payerPick / picked / skipped / backTo / filters, so a refresh cannot re-enter the resolve.
+    name: 'retry_requested writes snapshotError + retryNonce + the in-flight marker, and clears the window notice',
     action: { type: 'retry_requested' },
-    writes: { snapshotError: null, retryNonce: 8 },
+    writes: { snapshotError: null, retryNonce: 8, refreshingNonce: 8, windowMove: null },
   },
   {
     name: 'snapshot_requested writes snapshotError only',
@@ -238,14 +262,20 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     writes: { snapshotError: null },
   },
   {
-    name: 'snapshot_resolved writes snapshot + loadedKey only — and never the error',
+    // S5: a TERMINAL dispatch, so it clears the in-flight marker — and it is the one writer of
+    // `windowMove`. Here the incoming scope key differs from the fixture's `loadedKey`, i.e. this is
+    // a RE-SCOPE, not a same-scope refresh, so the notice is cleared rather than raised.
+    name: 'snapshot_resolved writes snapshot + loadedKey + both S5 fields — and never the error',
     action: { type: 'snapshot_resolved', snapshot: SNAP_B, scopeKey: 'p:BETA|w:90|f:|e:' },
-    writes: { snapshot: SNAP_B, loadedKey: 'p:BETA|w:90|f:|e:' },
+    writes: { snapshot: SNAP_B, loadedKey: 'p:BETA|w:90|f:|e:', refreshingNonce: null, windowMove: null },
   },
   {
-    name: 'snapshot_failed writes snapshotError ONLY — the F2 rule',
+    // S5 AMENDS THE F2 RULE'S WORDING, NOT ITS SUBSTANCE. It still touches nothing about the
+    // CONTENT — snapshot and loadedKey survive — but it is the second terminal dispatch, and an
+    // in-flight marker cleared by only one of the two outcomes is the stuck flag by construction.
+    name: 'snapshot_failed writes snapshotError + clears the in-flight marker — the F2 rule, content untouched',
     action: { type: 'snapshot_failed' },
-    writes: { snapshotError: 'failed' },
+    writes: { snapshotError: 'failed', refreshingNonce: null },
   },
   { name: 'ai_armed writes autoAsk only', action: { type: 'ai_armed' }, writes: { autoAsk: true } },
   { name: 'ai_disarmed writes autoAsk only', action: { type: 'ai_disarmed' }, writes: { autoAsk: false } },
@@ -303,7 +333,7 @@ for (const row of TABLE) {
   });
 }
 
-test('F3b: the initial state is the sixteen shell defaults, filters by shared reference', () => {
+test('F3b: the initial state is the eighteen shell defaults, filters by shared reference', () => {
   assert.deepEqual(INITIAL_SHELL_STATE, {
     payerPick: null,
     picked: false,
@@ -321,8 +351,10 @@ test('F3b: the initial state is the sixteen shell defaults, filters by shared re
     area: AREA_ALL,
     facilityNarrow: NO_FACILITY_NARROW,
     narrowExpanded: false,
+    refreshingNonce: null,
+    windowMove: null,
   });
-  assert.equal(Object.keys(INITIAL_SHELL_STATE).length, 16, 'sixteen fields, no more');
+  assert.equal(Object.keys(INITIAL_SHELL_STATE).length, 18, 'eighteen fields, no more');
   assert.equal(INITIAL_SHELL_STATE.filters, NO_ANSWER_FILTERS, 'the SHARED constant, not a copy');
   assert.equal(INITIAL_SHELL_STATE.area, AREA_ALL, 'the area facet starts unnarrowed');
   assert.equal(INITIAL_SHELL_STATE.facilityNarrow, NO_FACILITY_NARROW, 'and so does the facility one');
@@ -413,7 +445,7 @@ test('INV a: a new search clears EVERYTHING downstream, from any prior state', (
   assert.deepEqual(
     after,
     { ...INITIAL_SHELL_STATE, retryNonce: 1, loadedKey: 'k1' },
-    'fourteen fields back to their defaults; only the two carry-through fields differ',
+    'sixteen fields back to their defaults; only the two carry-through fields differ',
   );
 });
 
@@ -743,8 +775,17 @@ test('F3b: an action that changes nothing returns the IDENTICAL object, as useSt
   const clean = dirty({ snapshotError: null });
   assert.equal(shellReducer(clean, { type: 'snapshot_requested' }), clean, 'error already null');
 
-  const failed = dirty({ snapshotError: 'failed' });
+  // S5 narrows this one the same way `snapshot_resolved` is narrowed below: already-failed AND
+  // nothing in flight is a genuine no-op. Already-failed with a refresh running is NOT — a refresh
+  // that fails on top of a failure still has to disarm the marker it armed.
+  const failed = dirty({ snapshotError: 'failed', refreshingNonce: null });
   assert.equal(shellReducer(failed, { type: 'snapshot_failed' }), failed, 'already failed');
+  const failedInFlight = dirty({ snapshotError: 'failed', refreshingNonce: 7 });
+  assert.equal(
+    shellReducer(failedInFlight, { type: 'snapshot_failed' }).refreshingNonce,
+    null,
+    'a second failure still disarms the marker',
+  );
 
   const picked = dirty({ payerPick: 'ALPHA MUTUAL', backTo: null });
   assert.equal(shellReducer(picked, { type: 'payer_picked', payer: 'ALPHA MUTUAL' }), picked, 'same pick');
@@ -761,12 +802,26 @@ test('F3b: an action that changes nothing returns the IDENTICAL object, as useSt
   const inArea = dirty({ area: 'TN' });
   assert.equal(shellReducer(inArea, { type: 'area_selected', key: 'TN' }), inArea, 'same area chip');
 
-  const stamped = dirty();
+  // S5 NARROWS THIS CLAIM, AND THE NARROWING IS THE WHOLE POINT OF THE MARKER. With nothing in
+  // flight, re-resolving the same snapshot at the same scope is still not a state change.
+  const stamped = dirty({ refreshingNonce: null, windowMove: null });
   assert.equal(
     shellReducer(stamped, { type: 'snapshot_resolved', snapshot: SNAP_A, scopeKey: stamped.loadedKey ?? '' }),
     stamped,
     'the same snapshot at the same scope is not a state change',
   );
+  // ⚠ BUT WITH A REFRESH IN FLIGHT IT MUST NOT BAIL, and this is the common case rather than an
+  // edge one: an hourly pipeline usually returns byte-identical data, so the refresh whose result
+  // changes NOTHING is the refresh most likely to happen. A bail here would leave the marker set
+  // with no request behind it — the stuck flag, arrived at through the guard rather than a handler.
+  const inFlight = dirty({ refreshingNonce: 7 });
+  const settled = shellReducer(inFlight, {
+    type: 'snapshot_resolved',
+    snapshot: SNAP_A,
+    scopeKey: inFlight.loadedKey ?? '',
+  });
+  assert.notEqual(settled, inFlight, 'an unchanged refresh result still has to disarm the marker');
+  assert.equal(settled.refreshingNonce, null, 'and it disarms it');
 
   // A retry is NEVER a no-op — the nonce is what re-fires an otherwise identical request.
   assert.notEqual(shellReducer(clean, { type: 'retry_requested' }), clean, 'retry always produces new state');
@@ -776,4 +831,141 @@ test('F3b: an unrecognised action leaves the state exactly as it was', () => {
   const before = dirty();
   const after = shellReducer(before, { type: 'not_a_real_action' } as unknown as ShellAction);
   assert.equal(after, before);
+});
+
+// ── 5 · S5: the refresh's own in-flight marker, and the window that moves under it ───────────────
+
+/** A snapshot carrying an auto-window ladder — the only thing `windowMove` reads off either side. */
+function laddered(chosenDays: number): QualifySnapshot {
+  return { resolved: { payerName: 'ALPHA MUTUAL' }, ladder: { chosenDays } } as unknown as QualifySnapshot;
+}
+
+test('INV o: the in-flight marker is armed in ONE place and cleared in SIX — the stuck flag, inverted', () => {
+  /* ⚠ THIS IS THE `refetching` BOOLEAN'S POST-MORTEM, RUN IN REVERSE. That flag was set by four
+   * handlers and cleared in one place, so any click that did not move an effect dependency left it
+   * stuck true forever and the answer stage lost its headline permanently (Qodo, PR #126). The
+   * refresh needs a signal `isRefetching` structurally cannot provide — on a same-scope refresh
+   * loadedKey === scopeKey by construction, so all three derived progress signals are false for the
+   * whole in-flight period — and the temptation is a `useState(false)`. So: ONE writer that sets,
+   * SIX that clear, and the clears are the two terminal dispatches plus the four navigations. */
+  const armed = shellReducer(dirty({ refreshingNonce: null }), { type: 'retry_requested' });
+  assert.equal(armed.refreshingNonce, armed.retryNonce, 'it carries the nonce of the request it minted');
+
+  const clears: ShellAction[] = [
+    { type: 'snapshot_resolved', snapshot: SNAP_B, scopeKey: 'k-new' },
+    { type: 'snapshot_failed' },
+    { type: 'search_submitted' },
+    { type: 'skipped' },
+    { type: 'plan_submitted' },
+    { type: 'went_back', target: 'plan' },
+  ];
+  for (const action of clears) {
+    const label = action.type === 'went_back' ? `went_back('${action.target}')` : action.type;
+    assert.equal(shellReducer(dirty(), action).refreshingNonce, null, `${label} must disarm the marker`);
+  }
+
+  /* And NOTHING ELSE may arm it. A marker an action can raise without a request behind it is the
+   * same bug in a new field — most of all `snapshot_requested`, which fires at the top of EVERY
+   * fetch including first loads and re-scopes, both of which already carry their own treatment. */
+  for (const action of EVERY_ACTION) {
+    if (action.type === 'retry_requested') continue;
+    const after = shellReducer(dirty({ refreshingNonce: null }), action);
+    assert.equal(after.refreshingNonce, null, `${action.type} must never arm the refresh marker`);
+  }
+});
+
+test('INV o: a refresh cannot re-enter the resolve — retry_requested writes nothing a navigation writes', () => {
+  /* The stage machine is driven by `resolveCoverageAction` through `useActionState`, and re-running
+   * it means dispatching `identifyAction` → `search_submitted`, which writes SIXTEEN fields and
+   * drops the operator back to the payer stage. A standing refresh control that did that would
+   * throw away the plan pick every time an operator asked for fresher numbers. The reducer half of
+   * the guarantee is here; the transport half (that no `formAction` call is reachable from the
+   * refresh handler) is a source scan in qualifyV3Flow.test.tsx. */
+  const before = dirty();
+  const after = shellReducer(before, { type: 'retry_requested' });
+  for (const field of ['payerPick', 'picked', 'skipped', 'backTo', 'filters', 'planFilter', 'snapshot', 'loadedKey', 'payerOverride', 'windowDays', 'area', 'facilityNarrow', 'narrowExpanded'] as const) {
+    assert.equal(after[field], before[field], `a refresh must not move ${field} — that is the resolve's job`);
+  }
+});
+
+test('INV p: the auto window moving across a SAME-SCOPE re-run is announced; an unchanged one is not', () => {
+  /* ⚠ THE SILENT SCOPE CHANGE THIS EXISTS FOR. `scopeKeyOf` serializes the automatic case as the
+   * literal string 'auto' and NOT as the chosen days, so a refresh that re-runs the sufficiency
+   * ladder and lands on a different rung produces an IDENTICAL key: loadedKey === scopeKey, every
+   * staleness flag reads "nothing changed", and `windowSentence` quietly renders a different number.
+   * On this surface that is exactly the class the whole scope-honesty lineage exists to stop. */
+  const at30 = dirty({ snapshot: laddered(30), loadedKey: 'same', windowMove: null });
+  const widened = shellReducer(at30, { type: 'snapshot_resolved', snapshot: laddered(90), scopeKey: 'same' });
+  assert.deepEqual(widened.windowMove, { from: 30, to: 90 }, 'the ladder moved under an unchanged key — say so');
+
+  const narrowed = shellReducer(
+    dirty({ snapshot: laddered(90), loadedKey: 'same', windowMove: null }),
+    { type: 'snapshot_resolved', snapshot: laddered(30), scopeKey: 'same' },
+  );
+  assert.deepEqual(narrowed.windowMove, { from: 90, to: 30 }, 'both directions are reachable');
+
+  // ⚠ THE NEGATIVE CONTROL. A refresh whose ladder did not move must raise NOTHING — a notice that
+  // fires on every refresh is noise, and noise is how the real one gets ignored.
+  const same = shellReducer(
+    dirty({ snapshot: laddered(90), loadedKey: 'same', windowMove: null }),
+    { type: 'snapshot_resolved', snapshot: laddered(90), scopeKey: 'same' },
+  );
+  assert.equal(same.windowMove, null, 'unchanged ladder, unchanged window, no notice');
+
+  // A RE-SCOPE is not a silent change — the operator moved something, the key moved with it, and
+  // the dim + beam already marked it. Announcing there would double-report a change they made.
+  const rescoped = shellReducer(
+    dirty({ snapshot: laddered(30), loadedKey: 'old', windowMove: null }),
+    { type: 'snapshot_resolved', snapshot: laddered(90), scopeKey: 'new' },
+  );
+  assert.equal(rescoped.windowMove, null, 'a different scope key is a change the operator made');
+
+  /* ⚠ ABSENT LADDERS ARE COERCED, NEVER COMPARED AS undefined. A manual window returns no ladder at
+   * all, and `undefined !== null` would make "no ladder before, no ladder after" read as a move. */
+  const noLadder = { resolved: { payerName: 'X' } } as unknown as QualifySnapshot;
+  assert.equal(
+    shellReducer(dirty({ snapshot: noLadder, loadedKey: 'same', windowMove: null }), {
+      type: 'snapshot_resolved',
+      snapshot: noLadder,
+      scopeKey: 'same',
+    }).windowMove,
+    null,
+    'two absent ladders are not a window move',
+  );
+  assert.equal(
+    shellReducer(dirty({ snapshot: noLadder, loadedKey: 'same', windowMove: null }), {
+      type: 'snapshot_resolved',
+      snapshot: laddered(90),
+      scopeKey: 'same',
+    }).windowMove,
+    null,
+    'a ladder arriving where there was none is not a MOVE — there is no "from" to name',
+  );
+
+  // A stale notice never outlives the request that replaces it: the next refresh clears it at
+  // request start, and every navigation clears it too (INV o's clear set, same six sites).
+  assert.equal(shellReducer(dirty(), { type: 'retry_requested' }).windowMove, null);
+  for (const action of [{ type: 'search_submitted' }, { type: 'skipped' }, { type: 'plan_submitted' }, { type: 'went_back', target: 'plan' }] as ShellAction[]) {
+    assert.equal(shellReducer(dirty(), action).windowMove, null, `${action.type} clears the notice`);
+  }
+});
+
+test('INV p: memberCount moving on a refresh is deliberately NOT announced — the decision, written down', () => {
+  /* Ruled at S5 (2026-08-08). A member count that moves across a refresh is the SAME claim over
+   * fresher data — the preface sentence re-renders with the new number and says the new thing in
+   * words, in both the visible and the spoken channel. The window is different in kind: it changes
+   * WHAT PERIOD the ranking covers while every sentence on the screen goes on reading "automatic",
+   * and `scopeKeyOf` cannot see it. So the reducer carries a `windowMove` and no `memberCountMove`,
+   * and this test is the record of that asymmetry rather than an accident of what got built.
+   *
+   * A snapshot's memberCount is not read by the reducer at all — pinned here so a future change
+   * that starts reading it has to come past this sentence. */
+  const withCount = (n: number): QualifySnapshot =>
+    ({ resolved: { payerName: 'A' }, ladder: { chosenDays: 90 }, memberCount: n }) as unknown as QualifySnapshot;
+  const after = shellReducer(
+    dirty({ snapshot: withCount(3), loadedKey: 'same', windowMove: null }),
+    { type: 'snapshot_resolved', snapshot: withCount(11), scopeKey: 'same' },
+  );
+  assert.equal(after.windowMove, null, 'the member count moved and the window did not — nothing to announce');
+  assert.ok(!Object.keys(after).some((k) => k.toLowerCase().includes('member')), 'no memberCount field exists in the machine');
 });

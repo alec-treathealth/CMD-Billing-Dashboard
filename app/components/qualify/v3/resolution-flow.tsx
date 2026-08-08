@@ -77,6 +77,9 @@ import { EMPTY_FACILITIES, scopedPayerOf } from '../../../lib/qualify/contract';
 export { bookIsOnScreen, bookLeadsAnswer } from '../../../lib/qualify/bookPlacement';
 import { bookIsOnScreen, bookLeadsAnswer } from '../../../lib/qualify/bookPlacement';
 import { derivePolicyRating } from '../../../lib/qualify/policyRating';
+// The ladder's own stopping threshold. The window-move notice NAMES it rather than typing "10", so
+// the sentence cannot outlive the constant it describes.
+import { QUALIFY_RATING_CONFIDENT_PATIENTS } from '../../../lib/qualify/sampleGate';
 // The preface's ONE derivation — shared by the visible line, the receipt and the aria announcement,
 // so the seen claim and the spoken claim cannot be two expressions that merely happen to agree.
 import {
@@ -481,6 +484,21 @@ export function scopeKeyOf(parts: {
 }
 
 /**
+ * THE AUTOMATIC WINDOW LANDING ON A DIFFERENT RUNG ACROSS A SAME-SCOPE RE-RUN (flow-state invariant
+ * p). `from`/`to` are the LADDER's chosen days on either side — never the operator's own selection,
+ * because a manual window returns no ladder at all, which makes this shape unreachable there by
+ * construction rather than by a guard.
+ *
+ * Declared HERE rather than in `flow-state.ts` even though the reducer owns the field: that module
+ * already imports from this one, and defining the shape there would close a cycle. The copy that
+ * reads it (`windowMoveNotice`, below) lives beside the render, so the type does too.
+ */
+export interface WindowMove {
+  from: QualifyTrailingDays;
+  to: QualifyTrailingDays;
+}
+
+/**
  * True only when content is on screen AND it describes a scope the user has since moved off.
  * `hasSnapshot` false is a FIRST LOAD (skeleton), never a refetch — the two treatments differ.
  */
@@ -541,6 +559,14 @@ export function liveSentenceFor(
      * scope changed and not what to. Omit and the announcement is byte-identical to S2's.
      */
     bookLedPayer?: string | null;
+    /**
+     * S5: the AUTOMATIC window landed on a different rung across a same-scope re-run, or null/omitted
+     * when it did not. The sr-only region carries no dim and no beam, so a screen-reader user has no
+     * other signal at all that the period under the ranking just changed — and `scopeKeyOf` cannot
+     * see the change either, so nothing else in this sentence would mention it. Omit and the
+     * announcement is byte-identical to S3's.
+     */
+    windowMoved?: WindowMove | null;
   } & LiveSentenceClassifier = {},
 ): string {
   if (!resolution) return reason ? UNRESOLVABLE_COPY[reason] : '';
@@ -569,8 +595,13 @@ export function liveSentenceFor(
    * over the identify screen, with no ranking below it at all. The preface has always been safe there
    * (it is a fact about the identifier, not about a list); this clause names a list by position, so it
    * needs the stage the position refers to. */
+  /* ⚠ S5's CLAUSE IS THE SAME BYTES AS THE VISIBLE NOTICE — one call to `windowMoveNotice`, not a
+   * second sentence that agrees today. It is stage-gated with the book clause and for the identical
+   * reason: "the ranking below covers a longer period" said over the search box names a list that is
+   * not there, and the SKIPPED arm returns before every stage check, so the gate has to live here. */
+  const windowClause = opts.windowMoved == null ? '' : ` ${windowMoveNotice(opts.windowMoved)}`;
   const say = (rest: string): string =>
-    (preface === null ? rest : `${preface} ${rest}`) + (stage === 'answer' ? bookClause : '');
+    (preface === null ? rest : `${preface} ${rest}`) + (stage === 'answer' ? bookClause + windowClause : '');
   // A skipped search resolved NOTHING past the identifier: announcing the pre-selected candidate's
   // employer as "Resolved: …" told a screen-reader user a plan had been chosen when none was — the
   // same claim the receipt and the identity line had to stop making.
@@ -1311,6 +1342,78 @@ function windowSentence(snapshot: QualifySnapshot, windowDays: QualifyTrailingDa
     : `Showing trailing ${ladder.chosenDays} days — needed this far back to reach a reliable sample.`;
 }
 
+/**
+ * ── "RANKING DATA REBUILT …" — THE ONE HONEST FRESHNESS CLAIM THIS SURFACE CAN MAKE (S5) ─────────
+ *
+ * The input is `collections.rollup_refresh_run.finished_at` for the newest run that reported ok
+ * (`buildRollupRefreshFreshnessQuery`, which carries the full argument for why that column and not
+ * the two beside it). This function turns it into a sentence, and every clause is load-bearing:
+ *
+ * · **"Ranking data rebuilt"** names the ROLLUP REBUILD, not the CMD pull. The pull is not
+ *   observable at all — there is no run-log for `cmd-explorer`/`indigo-explorer`, and that cron's
+ *   210s wall-clock budget silently defers un-pulled customers to the next hour. A sentence saying
+ *   "last pulled" would be a claim no SELECT in this database can back.
+ * · **A DATE AND A NAMED ZONE, NEVER A BARE HH:MM.** This team spans timezones and the app anchors
+ *   civil days to America/Los_Angeles (contract.ts), so "rebuilt at 4:45" is a different claim to
+ *   each reader; and without the date a stalled cron's twenty-hour-old timestamp reads as today.
+ * · **"up to about 2 hours"** is derived from the schedule rather than guessed: BXR pulls at :00,
+ *   Indigo at :30, the rebuild runs at :45 — so a BXR row is invisible for 46 min at best and
+ *   **1h45m** at worst (Indigo 17 min / 1h16m), before CMD's own posting lag. Any single-number
+ *   staleness claim would be false most of the time; this is the defensible bound.
+ *
+ * ⚠ BUILT FROM `formatToParts`, NOT `format`. Modern ICU puts a NARROW NO-BREAK SPACE (U+202F)
+ * before the day period, so `format()` yields a string that renders fine and fails every assertion
+ * written with an ordinary space, invisibly in a diff. Assembling the parts makes the separators ours.
+ *
+ * PURE, and deliberately takes no `now`: a relative form ("41 min ago") would need one, and a `now`
+ * read during render is both untestable and a hydration mismatch. Null / unparseable → the honest
+ * unknown, because a freshness read that FAILED must never be dressed as a freshness answer.
+ */
+const REBUILT_AT_UNKNOWN = 'Ranking data freshness unknown — the rollup rebuild log could not be read.';
+
+export function rebuiltAtSentence(rebuiltAt: string | null): string {
+  if (rebuiltAt === null) return REBUILT_AT_UNKNOWN;
+  const t = Date.parse(rebuiltAt);
+  if (Number.isNaN(t)) return REBUILT_AT_UNKNOWN;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  }).formatToParts(new Date(t));
+  const at = (type: Intl.DateTimeFormatPartTypes): string => parts.find((p) => p.type === type)?.value ?? '';
+  const stamp = `${at('month')} ${at('day')} at ${at('hour')}:${at('minute')} ${at('dayPeriod')} ${at('timeZoneName')}`;
+  return `Ranking data rebuilt ${stamp} — the hourly rollup rebuild, so it can trail CMD by up to about 2 hours.`;
+}
+
+/**
+ * ── THE WINDOW MOVED UNDER YOU, SAID OUT LOUD (S5) ───────────────────────────────────────────────
+ *
+ * `scopeKeyOf` serializes the automatic case as the literal string `'auto'` and NOT as the ladder's
+ * chosen days, so a refresh that re-runs the sufficiency ladder onto a different rung produces an
+ * IDENTICAL request key: `loadedKey === scopeKey`, every staleness flag reads "nothing changed", the
+ * facet badge goes on saying "On · automatic", and `windowSentence` quietly renders a different
+ * number. On a surface whose whole lineage is scope honesty, that is the one silent scope change
+ * left — so it gets a sentence rather than a differently-worded paragraph the reader must diff.
+ *
+ * NAMES THE FLOOR IT MOVED AGAINST. `QUALIFY_RATING_CONFIDENT_PATIENTS` is the threshold the ladder
+ * stops at, and "the sample no longer clears the floor" without saying WHICH floor is a mechanism
+ * the operator cannot check. Interpolated from the constant rather than typed as "10", so the copy
+ * cannot outlive the number.
+ *
+ * ONE FUNCTION, TWO CHANNELS: the visible `role="status"` notice and `liveSentenceFor` both call it,
+ * so the seen and the spoken claim are the same bytes rather than two sentences that agree today.
+ * Copy unratified.
+ */
+export function windowMoveNotice(move: WindowMove): string {
+  const floor = `${QUALIFY_RATING_CONFIDENT_PATIENTS}-patient reliability floor`;
+  return move.to > move.from
+    ? `The automatic window widened from ${move.from} to ${move.to} days on this refresh — the ${move.from}-day sample no longer clears the ${floor}, so the ranking below covers a longer period than it did a moment ago.`
+    : `The automatic window narrowed from ${move.from} to ${move.to} days on this refresh — the freshest ${move.to} days now clear the ${floor} on their own, so the ranking below covers a shorter period than it did a moment ago.`;
+}
+
 function FactorRows({ facility }: { facility: QualifyFacility }): React.ReactElement {
   return (
     <ul className="flex list-none flex-col gap-1.5 p-0">
@@ -1701,11 +1804,46 @@ export interface StageAnswerProps {
    */
   staleAfterError: boolean;
   /**
-   * Re-issue the identical snapshot request after a failure. The shell carries a nonce to make this
-   * possible: a retry's scope key is unchanged by construction and the fetch effect keys on it, so
-   * without an explicit trigger, clicking the same chip again is a no-op.
+   * Re-issue the identical snapshot request. The shell carries a nonce to make this possible: the
+   * scope key is unchanged by construction and the fetch effect keys on it, so without an explicit
+   * trigger, clicking the same chip again is a no-op.
+   *
+   * ⚠ TWO RENDER SITES, ONE HANDLER (S5). It was minted for the `refreshFailed` banner's "Try
+   * again"; the NARROW SEARCH card's standing "Refresh the ranking" is the same call. Promoting it
+   * needed no second refetch path — `retry_requested` is the one reducer case that bypasses the
+   * bail-out guard, so it fires with no error present and no input moved — and a second path would
+   * be a second writer of the thing the fetch effect keys on.
+   *
+   * It carries the shell's empty-term guard, which now matters MORE than it did for the banner: a
+   * failure implies a request implies a term, but a STANDING control renders on every answer stage
+   * and can be pressed after a hot-reload has emptied the PHI ref. It no-ops silently there.
    */
   onRetry: () => void;
+  /**
+   * A REFRESH IS IN FLIGHT — the refresh's own progress signal, and the reason it needs one is that
+   * the other three structurally cannot give it (flow-state.ts invariant o). `refetching` and
+   * `staleAfterError` both derive from `loadedKey !== scopeKey`, which on a same-scope re-run is
+   * false for the whole in-flight period; `showSkeleton` needs a null snapshot; `pending` is the
+   * SERVER ACTION's flag and a refresh does not re-run it. Without this the screen does not move for
+   * the 1-2s the request takes and the operator presses again — each press writing one
+   * `SEARCH_QUALIFY_PHI` row into a compliance log.
+   *
+   * Rendered as the design system's RE-SCOPE idiom (dim + progress beam), never a skeleton: a
+   * standing control that blanks the answer on every press makes each refresh feel like a rebuild.
+   */
+  refreshing: boolean;
+  /**
+   * WHEN THE RANKING INDEX WAS LAST REBUILT — `collections.rollup_refresh_run.finished_at` for the
+   * newest ok run, full UTC ISO, or null when the read failed or has not returned. Loaded by the
+   * shell as its OWN request (the ticker's mount-once, fail-soft shape), never as a segment of the
+   * audited snapshot call. `rebuiltAtSentence` owns the copy and the two columns it must not use.
+   */
+  dataRebuiltAt: string | null;
+  /**
+   * THE AUTOMATIC WINDOW MOVED ACROSS A SAME-SCOPE RE-RUN, or null. The one scope change on this
+   * surface that no staleness flag can observe — see `windowMoveNotice` and flow-state invariant p.
+   */
+  windowMove: WindowMove | null;
   /**
    * Is the NARROW SEARCH card showing its FIELDS? The reducer's own bit (flow-state.ts invariant n),
    * threaded rather than held locally: a Skip must land the card open and a plan pick must land it
@@ -2181,9 +2319,13 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // banner, where `firstLoadFailed` has nothing to preserve and shows the bare error.
   const firstLoadFailed = props.snapshotError !== null && snap === null;
   const refreshFailed = props.snapshotError !== null && snap !== null;
-  // Dim for either reason — both mean "this describes a scope you moved off". The BEAM stays tied
-  // to props.refetching alone (see below): dimming says provisional, the beam claims progress.
-  const stale = props.refetching || props.staleAfterError;
+  /* Dim for any of the three — all mean "what is on screen is provisional". The first two are
+   * "you moved off this scope"; the third (S5) is "you asked for this same scope again", which is
+   * invisible to `isRefetching` by construction and would otherwise leave a standing refresh control
+   * looking dead for 1-2s. Dimming says provisional; the BEAM claims progress, so it stays tied to
+   * the two states where a request is genuinely running and drops `staleAfterError`. */
+  const stale = props.refetching || props.staleAfterError || props.refreshing;
+  const inFlight = props.refetching || props.refreshing;
   // Equivalent to the previous inline expression for every reachable state: with snap === null it
   // reduces to the same `pending || !error`, and with a snapshot present it is false — the old
   // `pending && !refetching` arm was unreachable because all four submit paths null the snapshot
@@ -2773,7 +2915,10 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
         // a thin indeterminate bar — a re-scope is not a first load, and blanking to a skeleton
         // makes every chip click feel like a page rebuild.
         <div className={`relative flex flex-col gap-4 ${stale ? 'opacity-60 transition-opacity duration-150' : ''}`}>
-          {props.refetching ? (
+          {/* `inFlight`, not `props.refetching`: a same-scope REFRESH is a running request too, and
+              the whole point of S5's marker is that `isRefetching` cannot see it. `staleAfterError`
+              is still excluded — motion is a progress claim, and a stopped fetch has none. */}
+          {inFlight ? (
             <span aria-hidden className="q-refetch-bar absolute inset-x-0 -top-2 h-0.5 overflow-hidden rounded-full">
               <span className="q-refetch-beam block h-full w-1/3 rounded-full bg-teal500" />
             </span>
@@ -2938,18 +3083,58 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               <h3 id="qualify-narrow-heading" className="text-xs font-semibold uppercase tracking-wide text-teal200">
                 Narrow search
               </h3>
-              <button
-                type="button"
-                aria-expanded={props.narrowExpanded}
-                aria-controls="qualify-narrow-fields"
-                onClick={props.onToggleNarrow}
-                className="flex items-center gap-1.5 rounded-full border border-teal200/40 bg-white/10 px-3 py-1 text-xs font-semibold text-white transition-colors hover:border-teal200 hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/60"
-              >
-                {props.narrowExpanded ? 'Hide the fields' : 'Change these'}
-                <span aria-hidden className={`text-teal200 transition-transform ${props.narrowExpanded ? 'rotate-180' : ''}`}>
-                  ▾
-                </span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                {/* ── THE REFRESH CONTROL (S5, 2026-08-08) ────────────────────────────────────────
+                    ON THE CARD, and the card's own rule is exactly why: *everything on the control
+                    card re-issues the ranking request*, and this is the only thing here that does
+                    nothing BUT that. The same rule keeps the two grid narrows (area, facility)
+                    outside the card; this is it applied in the other direction.
+
+                    IN THE HEADER ROW, so it survives the disclosure. The collapsed card is what an
+                    operator meets on every path except a Skip, and a refresh that costs a click to
+                    reach is a refresh nobody presses.
+
+                    ⚠ SAME HANDLER AS THE FAILURE BANNER'S "Try again", not a second one.
+                    `retry_requested` was always general — the one reducer case that bypasses the
+                    bail-out guard, so it fires with no error present and no input moved. A second
+                    refetch path would be a second writer of the value the fetch effect keys on,
+                    which is the shape `scopeKeyOf`'s header is a post-mortem of.
+
+                    ⚠ DISABLED WHILE IN FLIGHT, AND WHILE THE RESOLVE IS PENDING. Every press writes
+                    one `SEARCH_QUALIFY_PHI` row (the core audits BEFORE any data), and this repo has
+                    already treated duplicate audit rows from one user action as a defect worth its
+                    own fix (payerOverride.ts). `pending` is in the guard because the fetch effect
+                    returns early while the server action runs — a press there would arm the
+                    in-flight marker with no request behind it.
+
+                    ⚠ `type="button"`. A submit would reach a form action and re-run
+                    `resolveCoverageAction`, which writes sixteen reducer fields and drops the
+                    operator back to the payer stage. Copy unratified. ── */}
+                <button
+                  type="button"
+                  onClick={props.onRetry}
+                  disabled={props.refreshing || props.pending}
+                  aria-busy={props.refreshing}
+                  className="flex items-center gap-1.5 rounded-full border border-teal200/40 bg-white/10 px-3 py-1 text-xs font-semibold text-white transition-colors hover:border-teal200 hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/60 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <span aria-hidden className={props.refreshing ? 'animate-spin' : ''}>
+                    ↻
+                  </span>
+                  {props.refreshing ? 'Refreshing the ranking…' : 'Refresh the ranking'}
+                </button>
+                <button
+                  type="button"
+                  aria-expanded={props.narrowExpanded}
+                  aria-controls="qualify-narrow-fields"
+                  onClick={props.onToggleNarrow}
+                  className="flex items-center gap-1.5 rounded-full border border-teal200/40 bg-white/10 px-3 py-1 text-xs font-semibold text-white transition-colors hover:border-teal200 hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/60"
+                >
+                  {props.narrowExpanded ? 'Hide the fields' : 'Change these'}
+                  <span aria-hidden className={`text-teal200 transition-transform ${props.narrowExpanded ? 'rotate-180' : ''}`}>
+                    ▾
+                  </span>
+                </button>
+              </div>
             </div>
 
             {/* ── THE SUMMARY. Every line below is a STATEMENT about the search, which is why it is
@@ -2986,9 +3171,56 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                   said the content shows the previous scope — "Showing trailing 365 days" printed
                   beside that banner would be a direct contradiction. The Window CHIPS stay behind the
                   disclosure — they are the user's controls (and, after a failure, the escape route). */}
-              {props.staleAfterError || (props.refetching && props.windowDays === null) ? null : (
+              {props.staleAfterError || (inFlight && props.windowDays === null) ? null : (
                 <p className="text-sm text-teal50">{windowSentence(snap, props.windowDays)}</p>
               )}
+
+              {/* ── THE WINDOW MOVED UNDER THE OPERATOR (S5) ──────────────────────────────────────
+                  `scopeKeyOf` serializes the automatic case as the literal 'auto' and NOT the
+                  ladder's chosen days, so a refresh that lands on a different rung leaves
+                  `loadedKey === scopeKey`: every staleness flag reads "nothing changed", the facet
+                  badge above still says "On · automatic", and the sentence one line up quietly
+                  renders a different number. That is a scope change nobody is told about, on the
+                  surface this whole lineage exists to keep honest.
+
+                  ⚠ THREE GATES, AND EACH ONE IS A DIFFERENT FALSE SENTENCE IT PREVENTS.
+                    · `!stale` — RULE 2654416: it is a categorical claim about the data, so it waits
+                      like every other one rather than describing the set being replaced.
+                    · `windowDays === null` — it is a claim about the AUTOMATIC window. Rendered
+                      beside "Showing trailing 180 days — your selection" it would be two
+                      contradictory sentences about the same control. The reducer cannot know a
+                      manual selection arrived after the resolve, so the render decides.
+                    · `windowMove !== null` — THE NEGATIVE CONTROL. Most refreshes return the same
+                      rung; a notice that fired on every one would be noise, and noise is how the
+                      real one gets ignored.
+
+                  ONE EXPRESSION, TWO CHANNELS: `liveSentenceFor` announces this exact string. ── */}
+              {/* [BOOK-LED EXEMPT: it describes the WINDOW the request used, not which list came back]
+                  Both the member's footprint and the payer's book are loaded over the same chosen
+                  window, so the sentence is true word for word in either mode. */}
+              {!stale && props.windowDays === null && props.windowMove !== null ? (
+                <p role="status" className="rounded-lg border border-teal200/40 bg-white/10 p-2.5 text-xs font-medium text-white">
+                  {windowMoveNotice(props.windowMove)}
+                </p>
+              ) : null}
+
+              {/* ── WHEN THIS DATA WAS BUILT (S5) ─────────────────────────────────────────────────
+                  The refresh control's own basis line: what it is refreshing FROM. It sits in the
+                  summary rather than beside the button because it is a STATEMENT, and this card's
+                  one sorting rule is statements-in-the-summary / controls-behind-the-click.
+
+                  ⚠ NOT SUPPRESSED IN FLIGHT, unlike every sentence above it, and the exception is
+                  principled rather than convenient: those describe the SET being replaced, this
+                  describes the PIPELINE. Blanking it during the very refresh it explains would
+                  remove the one line that answers "is this even going to be newer?" at the only
+                  moment the operator is asking.
+
+                  `rebuiltAtSentence` owns the copy, the named timezone, and the argument for why
+                  `max(ingested_at)` and `rollup_max_payment_date` are both disqualified. ── */}
+              {/* [BOOK-LED EXEMPT: it dates the index rebuild, not the list that came back]
+                  `facilities` and `bookFacilities` are two queries over one matview, so one rebuild
+                  time is the honest answer in either mode. */}
+              <p className="text-xs text-teal200">{rebuiltAtSentence(props.dataRebuiltAt)}</p>
               {/* THE PAYER-SCOPE CLAIM. "You picked this" / "your plan pick implies this" / "we
                   defaulted" are three different claims, and a REJECTED override must never render as
                   honoured. It sits in the SUMMARY rather than beside its chips because it is a
@@ -3240,7 +3472,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               // there is no progress to claim once the request has stopped.
               <span
                 aria-hidden
-                className={`h-14 w-full max-w-sm rounded-lg bg-ground ${props.refetching ? 'animate-pulse' : ''}`}
+                className={`h-14 w-full max-w-sm rounded-lg bg-ground ${inFlight ? 'animate-pulse' : ''}`}
               />
             ) : (
               <>
@@ -3758,6 +3990,18 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
             props.answer?.refetching || props.answer?.staleAfterError || !bookLeadsAnswer(props.answer?.snapshot)
               ? null
               : scopedPayerOf(props.answer?.snapshot?.resolved),
+          /* S5: THE WINDOW MOVE, ANNOUNCED — gated on exactly the three conditions the visible
+           * notice is gated on, because two channels making the same claim under different
+           * conditions is the disagreement this whole one-derivation discipline exists to prevent.
+           * `refreshing` joins the in-flight suppression here: a claim about a window that is being
+           * re-derived right now is a claim about the set being replaced. */
+          windowMoved:
+            props.answer?.refetching ||
+            props.answer?.staleAfterError ||
+            props.answer?.refreshing ||
+            props.answer?.windowDays != null
+              ? null
+              : (props.answer?.windowMove ?? null),
         })}
       </p>
 

@@ -1,5 +1,5 @@
 /**
- * Qualify v3 — THE SHELL'S STATE MACHINE. Sixteen fields, nineteen actions, one place each field
+ * Qualify v3 — THE SHELL'S STATE MACHINE. Eighteen fields, nineteen actions, one place each field
  * is written.
  *
  * Extracted from `resolution-flow-client.tsx` (F3b). The shell was carrying FIFTEEN `useState` hooks
@@ -48,27 +48,31 @@
  *                                filters=NO_ANSWER_FILTERS, planFilter='',
  *                                autoAsk=false, backTo=null, snapshot=null, snapshotError=null,
  *                                payerOverride=null, windowDays=null, area=AREA_ALL,
- *                                facilityNarrow=NO_FACILITY_NARROW, narrowExpanded=false.
+ *                                facilityNarrow=NO_FACILITY_NARROW, narrowExpanded=false,
+ *                                refreshingNonce=null, windowMove=null.
  *                                KEEPS retryNonce, loadedKey.
- *  2 · skipped                 — "skip the questions, answer over the whole footprint". WRITES TWELVE:
+ *  2 · skipped                 — "skip the questions, answer over the whole footprint". WRITES FOURTEEN:
  *                                skipped=true, picked=false, payerPick=null, planFilter='',
  *                                backTo=null, filters=NO_ANSWER_FILTERS,
  *                                payerOverride=null, snapshot=null, snapshotError=null,
  *                                area=AREA_ALL, facilityNarrow=NO_FACILITY_NARROW,
- *                                narrowExpanded=true (invariant n).
+ *                                narrowExpanded=true (invariant n),
+ *                                refreshingNonce=null, windowMove=null.
  *                                KEEPS windowDays, autoAsk, retryNonce, loadedKey (see invariant f).
- *  3 · plan_submitted          — a plan pick. WRITES NINE:
+ *  3 · plan_submitted          — a plan pick. WRITES ELEVEN:
  *                                picked=true, skipped=false, filters=NO_ANSWER_FILTERS,
  *                                backTo=null, snapshot=null, snapshotError=null,
  *                                area=AREA_ALL, facilityNarrow=NO_FACILITY_NARROW,
- *                                narrowExpanded=false (invariant n).
+ *                                narrowExpanded=false (invariant n),
+ *                                refreshingNonce=null, windowMove=null.
  *                                KEEPS payerPick, planFilter, payerOverride, windowDays, autoAsk,
  *                                retryNonce, loadedKey (see invariant g).
- *  4 · went_back {target}      — a receipt "Change". WRITES FOURTEEN:
+ *  4 · went_back {target}      — a receipt "Change". WRITES SIXTEEN:
  *                                snapshot=null, snapshotError=null, autoAsk=false,
  *                                payerOverride=null, windowDays=null, picked=false, skipped=false,
  *                                filters=NO_ANSWER_FILTERS, planFilter='', narrowExpanded=false,
  *                                area=AREA_ALL, facilityNarrow=NO_FACILITY_NARROW, backTo=target,
+ *                                refreshingNonce=null, windowMove=null,
  *                                and payerPick=null ONLY when target !== 'plan' (the machine's one
  *                                conditional write — invariant h).
  *                                KEEPS retryNonce, loadedKey.
@@ -93,16 +97,21 @@
  *                                NAVIGATION, structurally rather than by a reducer write: all four
  *                                move the stage, exactly one stage section renders at a time, so
  *                                `StageAnswer` unmounts and the picker's state goes with it.
- *  9 · retry_requested         — WRITES snapshotError=null, retryNonce=prev+1. NOTHING ELSE, ever.
+ *  9 · retry_requested         — WRITES snapshotError=null, retryNonce=prev+1,
+ *                                refreshingNonce=prev+1, windowMove=null. NOTHING ELSE, ever — and
+ *                                the "nothing else" is what makes it safe to promote from a failure
+ *                                banner to a STANDING refresh control (S5, invariant o).
  * 10 · snapshot_requested      — WRITES snapshotError=null. Dispatched at the top of the fetch
  *                                effect so `refetching` can only claim progress while a request is
  *                                genuinely in flight (invariant k).
  * 11 · snapshot_resolved {snapshot, scopeKey}
- *                              — WRITES snapshot=action.snapshot, loadedKey=action.scopeKey.
+ *                              — WRITES snapshot=action.snapshot, loadedKey=action.scopeKey,
+ *                                refreshingNonce=null, windowMove=<computed, invariant p>.
  *                                THE SCOPE KEY RIDES IN THE PAYLOAD: the old `setLoadedKey(scopeKey)`
  *                                closed over a value computed in render scope, which a reducer
  *                                cannot see. The effect already captures the right one; it passes it.
- * 12 · snapshot_failed         — WRITES snapshotError='failed'. AND NOTHING ELSE (invariant e).
+ * 12 · snapshot_failed         — WRITES snapshotError='failed' and refreshingNonce=null. AND NOTHING
+ *                                ELSE — nothing about the CONTENT (invariant e).
  * 13 · ai_armed                — WRITES autoAsk=true.
  * 14 · ai_disarmed             — WRITES autoAsk=false.
  * 15 · payer_override_changed {label} — WRITES payerOverride=label.
@@ -143,8 +152,12 @@
  * d · `loadedKey` STAMPS ONLY ON SNAPSHOT SUCCESS. One write site: `snapshot_resolved`. No handler
  *     clears it, no failure stamps it — it must keep describing the scope the RENDERED snapshot
  *     actually covers, which is what lets the answer stage tell stale content from current content.
- * e · A FAILED FETCH KEEPS THE SNAPSHOT (F2). `snapshot_failed` writes `snapshotError` alone. The
- *     last-known-good answer was valid a moment ago and is no less valid because a re-scope failed.
+ * e · A FAILED FETCH KEEPS THE SNAPSHOT (F2). `snapshot_failed` writes `snapshotError` and disarms
+ *     the in-flight marker, and touches nothing about the CONTENT: the last-known-good answer was
+ *     valid a moment ago and is no less valid because a re-scope failed. (Until S5 this read "writes
+ *     `snapshotError` alone". The marker had to join it — it is one of the only two terminal
+ *     dispatches, and a signal cleared by one of two outcomes is a stuck flag by construction.
+ *     Wording amended, substance unchanged: `snapshot` and `loadedKey` are still untouched.)
  * f · SKIP CLEARS THE PICK BUT KEEPS THE TERM — and, asymmetrically, keeps `windowDays` and
  *     `autoAsk`. The term is untouched because it lives in `termRef`, outside this machine.
  * g · CHOOSING A PLAN SUPERSEDES A PRIOR SKIP (`skipped=false`) and blanks the snapshot to the
@@ -197,6 +210,51 @@
  *     `area` it is structurally unable to reach a request. What it must never become is a gate on
  *     the ON/OFF inventory — the card's SUMMARY carries that in both states, and only the CONTROLS
  *     live behind the disclosure.
+ * o · `refreshingNonce` IS ARMED IN ONE PLACE AND CLEARED IN SIX — the stuck-flag post-mortem, run
+ *     deliberately in reverse (S5, 2026-08-08). The refresh needs a progress signal that the derived
+ *     trio structurally cannot give it: `stale`/`refetching`/`staleAfterError` all hang off
+ *     `loadedKey !== scopeKey`, which on a SAME-SCOPE re-run is false for the whole in-flight period
+ *     by construction, and `showSkeleton` needs `snapshot === null`. So without a signal of its own
+ *     the screen does not move for the 1-2s the request takes and the operator presses again —
+ *     each press writing a `SEARCH_QUALIFY_PHI` row into a compliance log.
+ *
+ *     ARMED BY: `retry_requested`, and nothing else — most of all NOT `snapshot_requested`, which
+ *     fires at the top of every fetch including first loads and re-scopes, both of which already
+ *     carry their own treatment.
+ *     CLEARED BY: both TERMINAL dispatches (`snapshot_resolved`, `snapshot_failed`) — the only two
+ *     outcomes a fetch has — plus all four navigations, which abandon the request the marker
+ *     describes. Six clears against one arm is the inverse of the `refetching` boolean that was set
+ *     in four places and cleared in one.
+ *
+ *     ⚠ IT CARRIES THE NONCE, NOT A BOOLEAN, so a reader can say WHICH request is in flight rather
+ *     than only that one is. The residual risk is a dispatch with no fetch behind it, and the fetch
+ *     effect's four early returns are each closed elsewhere: `term === ''` by the shell's own
+ *     `onRetrySnapshot` guard (it returns BEFORE dispatching), `isPending` by the control being
+ *     disabled while the server action runs, and `stage !== 'answer'` / `predicateId === null` by
+ *     the four navigation clears above — those are the only ways to leave the answer stage.
+ * p · `windowMove` IS THE ONE SILENT SCOPE CHANGE THIS SURFACE COULD STILL MAKE, MADE LOUD.
+ *     `scopeKeyOf` serializes the automatic window as the literal string `'auto'` and NOT as the
+ *     ladder's chosen days. So a refresh under Automatic — the default — can re-run the sufficiency
+ *     ladder, land on a different rung, and produce an IDENTICAL key: `loadedKey === scopeKey`,
+ *     every staleness flag reads "nothing changed", and `windowSentence` quietly renders a different
+ *     number. Both directions are reachable (new rows crossing the 10-patient floor NARROW it; rows
+ *     ageing out, or an America/Los_Angeles civil-day roll, WIDEN it).
+ *
+ *     Written by `snapshot_resolved` ALONE, set-or-clear on every resolve, and only when
+ *     `loadedKey === action.scopeKey` — i.e. only when the request identity did NOT move, which is
+ *     exactly the case no other signal can see. A re-scope is excluded on purpose: the operator
+ *     changed something, the key moved with it, and the dim + beam already marked it.
+ *
+ *     ⚠ BOTH LADDERS ARE COERCED WITH `?? null` BEFORE COMPARISON. A manual window returns no
+ *     ladder at all, and `undefined !== null` would turn "no ladder before, no ladder after" into a
+ *     window move. A ladder ARRIVING where there was none is also not a move — there is no "from"
+ *     to name — so both sides must be present.
+ *
+ *     ⚠ `memberCount` MOVING ON A REFRESH IS DELIBERATELY NOT ANNOUNCED, and this is the record of
+ *     that decision rather than an omission. It is the SAME claim over fresher data, and the preface
+ *     sentence re-renders with the new number in both the visible and the spoken channel. The window
+ *     is different in kind: it changes what PERIOD the ranking covers while every sentence on screen
+ *     goes on reading "automatic". Hence a `windowMove` and no `memberCountMove`.
  *
  * The asymmetries in (f), (g) and (h) are OBSERVED BEHAVIOR carried over verbatim, not oversights to
  * normalize. Changing one is a product decision, not a refactor.
@@ -232,12 +290,23 @@ import type { QualifySnapshot, QualifyTrailingDays } from '../../../lib/qualify/
 // answer stage and the mobile deck now speak the same area vocabulary (AREA_ALL | state | 'other'),
 // and two constants that merely happen to both be 'all' is how they stop being the same vocabulary.
 import { AREA_ALL } from '../m/area-chips';
-import { NO_ANSWER_FILTERS, NO_FACILITY_NARROW, type AnswerFilters, type FlowStage } from './resolution-flow';
+// ⚠ `WindowMove` IS DEFINED IN resolution-flow.tsx AND IMPORTED HERE, NOT THE REVERSE. This module
+// already depends on that one (NO_ANSWER_FILTERS, AnswerFilters, FlowStage); defining the shape here
+// and importing it back would make the presentation module depend on the machine and close a cycle.
+// The copy that reads it (`windowMoveNotice`) lives beside the render, so the type does too.
+import {
+  NO_ANSWER_FILTERS,
+  NO_FACILITY_NARROW,
+  type AnswerFilters,
+  type FlowStage,
+  type WindowMove,
+} from './resolution-flow';
 
-/** The sixteen fields the staged flow moves between screens. No PHI: the term lives in a ref.
+/** The eighteen fields the staged flow moves between screens. No PHI: the term lives in a ref.
  *  (Sixteen until 2026-08-07: `employerQuery` went with the hand-rolled employer tag-search it fed —
  *  the shared `MultiSelectTagPicker` that replaced it owns its own typed draft, and a machine field
- *  nothing reads is a field the next reader wires something to.) */
+ *  nothing reads is a field the next reader wires something to. Eighteen since S5, 2026-08-08:
+ *  `refreshingNonce` + `windowMove`, invariants o and p.) */
 export interface ShellState {
   /** The carrier the user picked on stage 2, in VOB vocabulary. */
   payerPick: string | null;
@@ -291,6 +360,23 @@ export interface ShellState {
    * to stand in front of it.
    */
   narrowExpanded: boolean;
+  /**
+   * The REFRESH'S OWN IN-FLIGHT SIGNAL (S5) — the `retryNonce` of the request currently running, or
+   * null when nothing is. See invariant (o) for why this is a nonce rather than a boolean, why it is
+   * armed in one place and cleared in six, and why the three DERIVED progress signals structurally
+   * cannot cover this case.
+   *
+   * Non-PHI: an integer. It never reaches the wire — `scopeKeyOf` does not read it, so like `area`
+   * and `narrowExpanded` it is structurally unable to shape a request.
+   */
+  refreshingNonce: number | null;
+  /**
+   * THE AUTOMATIC WINDOW MOVED UNDER AN UNCHANGED REQUEST IDENTITY (S5), or null. Invariant (p) owns
+   * the rule; the short version is that `scopeKeyOf` serializes the auto case as the literal `'auto'`
+   * and not the chosen days, so this is the one scope change on this surface that no staleness flag
+   * can see. Cleared on the next resolve, on a new refresh, and on every navigation.
+   */
+  windowMove: WindowMove | null;
 }
 
 export type ShellAction =
@@ -331,12 +417,14 @@ export const INITIAL_SHELL_STATE: ShellState = {
   area: AREA_ALL,
   facilityNarrow: NO_FACILITY_NARROW,
   narrowExpanded: false,
+  refreshingNonce: null,
+  windowMove: null,
 };
 
 /**
  * Restore `useState`'s bail-out. Keyed off `Object.keys(next)` rather than a hand-listed field set,
- * so adding a seventeenth field cannot silently make two different states compare equal.
- * ("Seventeenth" = one more than today's sixteen — the field-write table's header comment in
+ * so adding a nineteenth field cannot silently make two different states compare equal.
+ * ("Nineteenth" = one more than today's eighteen — the field-write table's header comment in
  * qualifyV3FlowState.test.tsx uses this same one-more-than-today rule, not by coincidence.)
  */
 function bailIfUnchanged(prev: ShellState, next: ShellState): ShellState {
@@ -366,6 +454,10 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         area: AREA_ALL,
         facilityNarrow: NO_FACILITY_NARROW,
         narrowExpanded: false,
+        // A navigation ABANDONS an in-flight refresh (invariant o) and any notice about a window
+        // that moved under a screen the operator has since left (invariant p).
+        refreshingNonce: null,
+        windowMove: null,
       });
 
     // Straight to the answer over the whole footprint. Clears any half-made narrowing so the general
@@ -387,6 +479,8 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         // A skip has just made the search as WIDE as it goes, so narrowing is the next move — and
         // the skip reveal needs the fields present to have anything to stagger (invariant n).
         narrowExpanded: true,
+        refreshingNonce: null,
+        windowMove: null,
       });
 
     // A NEW plan is a new population — a genuine first load, so the snapshot blanks to the skeleton
@@ -403,6 +497,8 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         area: AREA_ALL,
         facilityNarrow: NO_FACILITY_NARROW,
         narrowExpanded: false,
+        refreshingNonce: null,
+        windowMove: null,
       });
 
     // Going back CLEARS what was decided at and after that stage — a kept-but-hidden choice is how
@@ -424,6 +520,8 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         area: AREA_ALL,
         facilityNarrow: NO_FACILITY_NARROW,
         narrowExpanded: false,
+        refreshingNonce: null,
+        windowMove: null,
       });
 
     case 'payer_picked':
@@ -455,20 +553,60 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         facilityNarrow: NO_FACILITY_NARROW,
       });
 
-    // The ONLY write to retryNonce in the whole machine, and it only ever goes up (invariant c).
-    case 'retry_requested':
-      return { ...state, snapshotError: null, retryNonce: state.retryNonce + 1 };
+    /* The ONLY write to retryNonce in the whole machine, and it only ever goes up (invariant c).
+     *
+     * S5 PROMOTED THIS FROM FAILURE RECOVERY TO A STANDING CONTROL, and it needed no new refetch
+     * path to do it: this is already the one case that bypasses `bailIfUnchanged` and returns a
+     * fresh object unconditionally, so it moves the fetch effect's dependency array with no error
+     * present and no input changed. What it gained is the in-flight MARKER (invariant o) — armed
+     * here and nowhere else, carrying the nonce it just minted — and a clear of any window-move
+     * notice from the PREVIOUS refresh, because a sentence about a window that moved a minute ago
+     * must not stand over the request replacing it.
+     *
+     * The NON-writes are what make the promotion safe: nothing here touches payerPick / picked /
+     * skipped / backTo / filters, so a refresh cannot re-enter `resolveCoverageAction` — which
+     * would write sixteen fields and drop the operator back to the payer stage. */
+    case 'retry_requested': {
+      const nonce = state.retryNonce + 1;
+      return { ...state, snapshotError: null, retryNonce: nonce, refreshingNonce: nonce, windowMove: null };
+    }
 
     case 'snapshot_requested':
       return bailIfUnchanged(state, { ...state, snapshotError: null });
 
-    // The scope key rides in the payload because the reducer cannot see the effect's render scope.
-    case 'snapshot_resolved':
-      return bailIfUnchanged(state, { ...state, snapshot: action.snapshot, loadedKey: action.scopeKey });
+    /* The scope key rides in the payload because the reducer cannot see the effect's render scope.
+     *
+     * A TERMINAL DISPATCH, so it disarms the refresh marker (invariant o) — and it is the SOLE
+     * writer of `windowMove` (invariant p), set-or-clear on every resolve.
+     *
+     * ⚠ THE `bailIfUnchanged` GUARD STILL APPLIES, AND THAT IS SAFE ONLY BECAUSE THE MARKER IS PART
+     * OF THE COMPARISON. An hourly pipeline usually returns byte-identical data, so the refresh
+     * whose result changes NOTHING is the refresh most likely to happen — and a bail there would
+     * leave the marker armed with no request behind it, i.e. the stuck flag arrived at through the
+     * guard rather than through a handler. Because `refreshingNonce` moves from a number to null on
+     * exactly that path, the guard sees a change and returns the new object. */
+    case 'snapshot_resolved': {
+      /* BOTH SIDES COERCED WITH `?? null` — `undefined !== null` would read "no ladder before, no
+       * ladder after" as a window move, which is every manual-window resolve. */
+      const from = state.snapshot?.ladder?.chosenDays ?? null;
+      const to = action.snapshot.ladder?.chosenDays ?? null;
+      // ONLY when the request identity did not move. A re-scope is a change the operator made, the
+      // key moved with it, and the dim + beam already marked it.
+      const sameScope = state.loadedKey !== null && state.loadedKey === action.scopeKey;
+      return bailIfUnchanged(state, {
+        ...state,
+        snapshot: action.snapshot,
+        loadedKey: action.scopeKey,
+        refreshingNonce: null,
+        windowMove: sameScope && from !== null && to !== null && from !== to ? { from, to } : null,
+      });
+    }
 
-    // KEEP the last-known-good snapshot, and do NOT stamp loadedKey (invariants d, e).
+    // KEEP the last-known-good snapshot, and do NOT stamp loadedKey (invariants d, e). The SECOND
+    // terminal dispatch, so it disarms the refresh marker too: a signal cleared by one of a fetch's
+    // two outcomes is a stuck flag by construction (invariant o).
     case 'snapshot_failed':
-      return bailIfUnchanged(state, { ...state, snapshotError: 'failed' });
+      return bailIfUnchanged(state, { ...state, snapshotError: 'failed', refreshingNonce: null });
 
     case 'ai_armed':
       return bailIfUnchanged(state, { ...state, autoAsk: true });

@@ -26,6 +26,8 @@ import {
   bookIsOnScreen,
   bookLeadsAnswer,
   gridNarrowEmptyCopy,
+  rebuiltAtSentence,
+  windowMoveNotice,
   NO_FACILITY_NARROW,
   UNRESOLVABLE_COPY,
   deriveStage,
@@ -228,6 +230,11 @@ function props(stage: FlowStage, r: QualifyResolution | null, over: Partial<Reso
           onToggleFacility: noop,
           narrowExpanded: false,
           onToggleNarrow: noop,
+          // S5: idle, fresh-unknown, no window move — the state every pre-S5 case was implicitly in,
+          // so nothing in this file changes render unless it opts in by name.
+          refreshing: false,
+          dataRebuiltAt: null,
+          windowMove: null,
         }
       : null,
     ...over,
@@ -268,6 +275,11 @@ function answerProps(over: Partial<NonNullable<ResolutionStagesProps['answer']>>
     // dependent on a default nobody wrote down. Tests about the CONTROLS opt in by name.
     narrowExpanded: false,
     onToggleNarrow: noop,
+    // S5: see the note in `props()` — idle and freshness-unknown is the default, and tests about the
+    // refresh control or the rebuild time opt in by name.
+    refreshing: false,
+    dataRebuiltAt: null,
+    windowMove: null,
     ...over,
   };
 }
@@ -3912,4 +3924,223 @@ test('S4 STRUCTURAL — the facility selection never reaches scopeKeyOf or the s
   // The vocabulary fetch is the ticker's shape — mount-once and fail-soft — never folded into the
   // snapshot effect, whose deps are the request identity and nothing else.
   assert.match(src, /loadQualifyFacilityOptions/, 'the vocabulary is loaded by the shell');
+});
+
+// ── S5 — THE REFRESH CONTROL, THE ONE HONEST FRESHNESS SOURCE, AND THE WINDOW THAT MOVES SILENTLY ─
+//
+// WHAT THESE PIN. Until S5 the only re-run affordance on this surface was the "Try again" button
+// INSIDE the `refreshFailed` banner: refresh existed only as failure recovery, on a screen whose
+// underlying crons write hourly. Promoting it to a standing control is a render change — the handler
+// (`retry_requested` → `retryNonce` → the fetch effect's dep array) was already general — but it
+// brings three problems the banner never had, and each has its own block below:
+//
+//   1 · IT LOOKS DEAD. All three progress signals derive from `loadedKey !== scopeKey`, which a
+//       same-scope refresh cannot move; `showSkeleton` needs a null snapshot. So the refresh needs
+//       its own in-flight signal, rendered as the design system's RE-SCOPE idiom (dim + beam), never
+//       as a skeleton — a standing control that blanks the answer every press is worse than none.
+//   2 · IT INVITES "IS THIS EVEN NEW?". Answered from `collections.rollup_refresh_run` — the one
+//       source that means what it says. `max(ingested_at)` is first-seen (42h stale on a healthy
+//       weekend) and `rollup_max_payment_date` reads FIVE DAYS INTO THE FUTURE. Both are pinned out
+//       in test/rollupFreshnessQuery.test.ts, at the SQL, where they are reachable.
+//   3 · IT CAN MOVE THE WINDOW WITHOUT SAYING SO. See the window-move block.
+
+test('S5: the rebuilt-at line names the ROLLUP REBUILD, in a named timezone, and never a bare HH:MM', () => {
+  // 2026-08-08T23:45:37Z is 16:45 in America/Los_Angeles — the :45 rollup rebuild, ~86s after start.
+  const s = rebuiltAtSentence('2026-08-08T23:45:37Z');
+  assert.match(s, /Ranking data rebuilt/, 'it names WHAT was rebuilt — the index, never the CMD pull');
+  assert.match(s, /Aug 8 at 4:45 PM PDT/, 'a DATE, a time and a NAMED zone');
+  /* ⚠ A BARE HH:MM IS THE BANNED FORM. This team spans timezones and the app anchors civil days to
+   * America/Los_Angeles; "rebuilt at 4:45" is a different claim to each reader. The zone abbreviation
+   * is what makes it one claim, and the date is what stops a stalled cron from reading as "today". */
+  assert.ok(/PDT|PST/.test(s), 'the zone is named, not implied');
+  // The lag bound is the DEFENSIBLE one, derived from the schedule: BXR pulls at :00 and the rebuild
+  // runs at :45, so worst case is 1h45m before CMD's own posting lag. Never a single-number claim.
+  assert.match(s, /up to about 2 hours/);
+  assert.ok(!s.includes('data through'), 'that phrasing belongs to rollup_max_payment_date, which reads into the future');
+
+  // FAIL-SOFT: the freshness read must never block or fake the ranking. Unknown says unknown.
+  const unknown = rebuiltAtSentence(null);
+  assert.match(unknown, /freshness unknown/i);
+  assert.ok(!/\d/.test(unknown), 'an unreadable log must not produce a number of any kind');
+  // A malformed timestamp is the same answer, not a crash and not an Invalid Date on screen.
+  assert.equal(rebuiltAtSentence('not-a-timestamp'), unknown);
+});
+
+test('S5: the refresh control stands ON the NARROW SEARCH card, in BOTH positions, as a plain button', () => {
+  for (const narrowExpanded of [false, true]) {
+    const html = render(
+      props('answer', fixture(), {
+        answer: answerProps({ snapshot: snapshotFixture(), narrowExpanded, dataRebuiltAt: '2026-08-08T23:45:37Z' }),
+      }),
+    );
+    // BOUNDED to the card (the S1/S2 lesson: an unbounded slice runs to the end of the document and
+    // would be satisfied by the banner's "Try again" or by anything else below).
+    const card = inventoryRegion(html);
+    assert.match(card, /Refresh the ranking/, `expanded=${narrowExpanded}: the control is on the card`);
+    /* ⚠ THE CARD'S OWN RULE IS WHY IT BELONGS HERE: everything on the control card re-issues the
+     * ranking request, and this does exactly that — which is also why the two GRID narrows (area,
+     * facility) are deliberately outside it. */
+    assert.match(card, /Ranking data rebuilt/, 'and the basis line beside it');
+    /* ⚠ type="button" IS LOAD-BEARING, NOT STYLE. A submit inside a form would reach `planAction`
+     * and re-run `resolveCoverageAction`, which writes sixteen reducer fields and drops the operator
+     * back to the payer stage — the thing this control must never do. */
+    const btn = card.slice(card.indexOf('Refresh the ranking') - 400, card.indexOf('Refresh the ranking'));
+    assert.match(btn, /type="button"/, `expanded=${narrowExpanded}: never a submit`);
+  }
+});
+
+test('S5: while refreshing the card says so, the control is disabled, and the answer DIMS rather than blanking', () => {
+  const html = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: snapshotFixture(), refreshing: true, dataRebuiltAt: '2026-08-08T23:45:37Z' }),
+    }),
+  );
+  const card = inventoryRegion(html);
+  assert.match(card, /Refreshing the ranking/, 'the label states the state — the press must visibly take');
+  assert.match(card, /aria-busy="true"/, 'and the spoken channel learns it too');
+  assert.match(card, /disabled=""/, 'DISABLED: every press writes one SEARCH_QUALIFY_PHI row into a compliance log');
+  // The design system's re-scope idiom, and NOT a skeleton: a standing control that blanks the
+  // answer on every press makes each refresh feel like a page rebuild.
+  assert.match(html, /opacity-60/, 'dimmed — what is on screen is about to be replaced');
+  assert.match(html, /q-refetch-beam/, 'with the progress beam, because a request really is running');
+  assert.ok(!html.includes('Ranking facilities for this plan…'), 'never the first-load skeleton');
+  assert.ok(!/policy rating \d+ out of 100/.test(html), 'and the categorical claims wait, as on any re-scope (RULE 2654416)');
+
+  // NEGATIVE CONTROL: idle, the control is live and nothing claims progress.
+  const idle = inventoryRegion(
+    render(props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture() }) })),
+  );
+  assert.match(idle, /Refresh the ranking/);
+  assert.ok(!idle.includes('aria-busy="true"'), 'nothing is in flight');
+  assert.ok(!idle.includes('disabled=""'), 'and the control is pressable');
+});
+
+test('S5: freshness fails SOFT — an unreadable run-log leaves the ranking untouched and says "unknown"', () => {
+  const html = render(
+    props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), dataRebuiltAt: null }) }),
+  );
+  assert.match(inventoryRegion(html), /freshness unknown/i);
+  assert.match(html, /NASHVILLE MENTAL HEALTH/, 'the ranking is entirely unaffected — it is a separate read');
+});
+
+test('S5: windowMoveNotice states the direction, the two windows and the FLOOR that moved them', () => {
+  const wider = windowMoveNotice({ from: 30, to: 90 });
+  assert.match(wider, /widened from 30 to 90 days/);
+  assert.match(wider, /10-patient/, 'the floor is NAMED — copy basis discipline: say what it was measured against');
+  assert.match(wider, /longer period/, 'and what it means for the list below');
+
+  const narrower = windowMoveNotice({ from: 90, to: 30 });
+  assert.match(narrower, /narrowed from 90 to 30 days/);
+  assert.match(narrower, /shorter period/);
+  // Both directions are genuinely reachable: new rows crossing the floor NARROW it, rows ageing out
+  // (or an America/Los_Angeles civil-day roll) WIDEN it.
+  assert.notEqual(wider, narrower);
+});
+
+test('S5: a window that moved under an unchanged scope key is ANNOUNCED — and an unchanged one is not', () => {
+  /* ⚠ THE SILENT SCOPE CHANGE. `scopeKeyOf` serializes the automatic case as the literal 'auto',
+   * so a refresh that re-runs the ladder onto another rung leaves loadedKey === scopeKey: every
+   * staleness flag reads "nothing changed" while `windowSentence` quietly renders a different
+   * number and the facet badge still says "On · automatic". */
+  const moved = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: snapshotFixture(), windowMove: { from: 30, to: 90 } }),
+    }),
+  );
+  // BOUNDED TO THE CARD, because the flow's sr-only region carries the same sentence and sits FIRST
+  // in the document — an unbounded search finds the SPOKEN copy and would pass with nothing drawn.
+  const card = inventoryRegion(moved);
+  assert.match(card, /widened from 30 to 90 days/, 'the visible notice, on the card');
+  const noticeAt = card.indexOf('widened from 30 to 90 days');
+  assert.match(card.slice(Math.max(0, noticeAt - 400), noticeAt), /role="status"/, 'and it is announced, not just drawn');
+  assert.match(moved, /aria-live="polite"[^>]*>[^<]*widened from 30 to 90 days/, 'and the live region carries it too');
+
+  /* ⚠ THE NEGATIVE CONTROL, and it is the assertion that keeps the notice worth reading. Most
+   * refreshes return the same rung; one that announced anyway would be noise, and noise is how the
+   * real one gets ignored. */
+  const still = render(
+    props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), windowMove: null }) }),
+  );
+  // ⚠ "automatic window" ALONE WOULD BE A VACUOUS NEGATIVE: `resolvedScopeSentence` already ends
+  // "· automatic window" on every auto search. The notice's own phrasing is what must be absent.
+  assert.match(still, /automatic window/, 'positive control: the resolved-scope line really does say it');
+  assert.ok(!still.includes('on this refresh'), 'a refresh whose ladder did not move says nothing');
+
+  /* A MANUAL window cannot produce this notice and must not render one even if a stale move survived
+   * into the render: "the automatic window widened" over a screen reading "trailing 180 days — your
+   * selection" would be two contradictory sentences about the same control. */
+  const manual = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: snapshotFixture(), windowDays: 180, windowMove: { from: 30, to: 90 } }),
+    }),
+  );
+  assert.ok(!manual.includes('widened from 30 to 90 days'), 'the notice is about the AUTOMATIC window only');
+  assert.match(manual, /Showing trailing 180 days — your selection\./, 'positive control: the manual sentence really is on screen');
+
+  // And it waits during a re-fetch like every other categorical sentence (RULE 2654416).
+  const inFlight = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: snapshotFixture(), refetching: true, windowMove: { from: 30, to: 90 } }),
+    }),
+  );
+  assert.ok(!inFlight.includes('widened from 30 to 90 days'), 'a claim about the set being replaced waits');
+});
+
+test('S5: the SPOKEN channel carries the same window-move sentence, word for word, and is stage-gated', () => {
+  /* One expression, two channels. The sr-only region carries no dim and no beam, so a screen-reader
+   * user has no other signal that the window moved — and a second wording here is how the seen and
+   * the spoken claim drift, which is the failure `liveSentenceFor`'s own header warns about. */
+  const r = fixture();
+  const move = { from: 30, to: 90 } as const;
+  const spoken = liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1, windowMoved: move });
+  assert.ok(spoken.includes(windowMoveNotice(move)), 'byte-identical to the visible notice');
+  // Omitting it is byte-identical to the pre-S5 announcement.
+  assert.equal(
+    liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1 }),
+    liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1, windowMoved: null }),
+  );
+  // STAGE-GATED, the S3-M1 lesson: "the ranking below now covers a longer period" said over the
+  // search box describes a list that is not there.
+  for (const stage of ['identify', 'payer', 'plan'] as const) {
+    assert.ok(
+      !liveSentenceFor(stage, r, null, { skipped: true, memberCount: 1, memberFacilityCount: 1, windowMoved: move }).includes('on this refresh'),
+      `stage=${stage} announces a window change for a ranking that is not on screen`,
+    );
+  }
+  // The skipped arm returns before every stage check, so it needs the clause explicitly.
+  assert.ok(
+    liveSentenceFor('answer', r, null, { skipped: true, memberCount: 1, memberFacilityCount: 1, windowMoved: move }).includes('on this refresh'),
+    'a skipped answer stage is still an answer stage',
+  );
+});
+
+test('S5 STRUCTURAL — a refresh cannot re-enter the resolve: no formAction is reachable from its handler', () => {
+  /* ⚠ THE HALF A RENDER TEST CANNOT SEE, scanned for the S4 reason: `resolution-flow-client.tsx`
+   * reaches the `'use server'` chain, so nothing hermetic can import it. `resolveCoverageAction` is
+   * driven by `useActionState`'s `formAction`, and re-running it writes sixteen reducer fields and
+   * drops the operator back to the payer stage. So the claim is structural: `formAction` is called
+   * from exactly the two places that MEAN to navigate, and the refresh handler is neither. */
+  const src = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/resolution-flow-client.tsx', import.meta.url)),
+    'utf8',
+  );
+  const calls = [...src.matchAll(/formAction\(/g)];
+  assert.equal(calls.length, 2, 'exactly two: identifyAction and planAction — a third is a new navigation path');
+  // The retry/refresh handler in full, walked by brace depth from its declaration.
+  const at = src.indexOf('const onRetrySnapshot');
+  assert.ok(at >= 0, 'the refresh handler is not in the client — this scan would be vacuous');
+  const body = src.slice(at, src.indexOf('}, []);', at) + 7);
+  assert.ok(!body.includes('formAction'), 'the refresh handler must never reach the server action');
+  assert.match(body, /retry_requested/, 'positive control: it really is the one dispatch');
+  /* ⚠ THE EMPTY-TERM GUARD SURVIVES THE PROMOTION, and it matters MORE now than it did for a banner.
+   * A failure banner implies a request implies a term; a STANDING control renders on every answer
+   * stage and can be pressed after a hot-reload has emptied the PHI ref. It must no-op silently
+   * rather than dispatch a nonce no fetch will follow — which would arm the in-flight marker with
+   * nothing behind it. The guard is BEFORE the dispatch, which is the ordering that makes that true. */
+  assert.ok(body.indexOf("termRef.current === ''") < body.indexOf('retry_requested'), 'the guard precedes the dispatch');
+  // The freshness read is its own request, on the ticker's mount-once/fail-soft shape — never folded
+  // into the snapshot call, which is audited, PHI-scoped and must not be slowed by an ops lookup.
+  assert.match(src, /loadQualifyDataFreshness/, 'the shell loads the rebuild time itself');
+  const request = src.slice(src.indexOf('getQualifySnapshot('), src.indexOf('getQualifySnapshot(') + 600);
+  assert.ok(!/freshness|rebuilt/i.test(request), 'and it is not a segment of the ranking request');
 });
