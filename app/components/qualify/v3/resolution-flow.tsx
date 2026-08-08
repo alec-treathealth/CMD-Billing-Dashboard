@@ -48,10 +48,12 @@ import { MultiSelectTagPicker } from '../../ui/multi-select-tag-picker';
 import {
   andList,
   facilitiesElsewhere,
+  facilityCount,
   facilityDisplayNames,
   facilityNarrowKeys,
   narrowByFacility,
   offerableFacilityOptions,
+  picksWithRows,
   type QualifyFacilityNarrowOption,
 } from '../../../lib/qualify/facilityVariants';
 import type {
@@ -1875,6 +1877,16 @@ export function AreaLine(props: {
   chips: readonly AreaChip[];
   active: string;
   counts: ReadonlyMap<string, number>;
+  /**
+   * How many rows are ACTUALLY on screen — after every grid narrow, not just this one.
+   *
+   * ⚠ IT EXISTS BECAUSE A SECOND GRID NARROW ARRIVED (S4). Until then the area was the only narrow, so
+   * a lit chip meant rows by construction and " · showing" could not be false. Composed with a facility
+   * narrow it can be: "All · 2 · showing" renders above ZERO cards. The counts stay over the RANKING —
+   * they are the area's own denominators, and their aria-labels say "ranked" — but the WORD has to
+   * describe the screen.
+   */
+  shown: number;
   onSelect: (key: string) => void;
 }): React.ReactElement {
   // AREA IS A FACET OF THE INVENTORY EVEN THOUGH IT DOES NOT LIVE ON THE CONTROL CARD (2026-08-07).
@@ -1924,7 +1936,10 @@ export function AreaLine(props: {
               {' '}
               · {n}
             </span>
-            {on ? ' · showing' : ''}
+            {/* I9 says selection carries a WORD, never hue alone — so the word stays either way; it
+                just has to be a TRUE one. The chip IS selected; over an empty grid it is not showing
+                anything. `selected` is the house vocabulary the window chips already use. */}
+            {on ? (props.shown > 0 ? ' · showing' : ' · selected') : ''}
           </button>
         );
       })}
@@ -1947,7 +1962,7 @@ export function AreaLine(props: {
  * the common render rather than an edge case. A fetch narrow's empty screen can only say "no history
  * at NASHVILLE". A narrow over the already-fetched set can say *"no history at NASHVILLE — this
  * member billed at LSMH and KWC"*, because the un-narrowed list is still in hand. Strictly more
- * information, zero extra round trips, and no refetch on toggle. See `facilityNarrowEmptyCopy`.
+ * information, zero extra round trips, and no refetch on toggle. See `gridNarrowEmptyCopy`.
  *
  * ⚠ IT RENDERS **BESIDE THE GRID WITH AREA**, NEVER ON THE NARROW SEARCH CARD (controller ruling
  * 2026-08-08, flagged to Alec). His earlier "folds into the card" wording yields to his later
@@ -1973,15 +1988,33 @@ export function FacilityNarrowLine(props: {
   selected: readonly string[];
   onToggle: (value: string) => void;
 }): React.ReactElement {
+  /* ⚠ `facetReading(selected, 0)` PRINTS "On · 1 of 0". Reachable rather than theoretical: a failed
+     vocabulary reload leaves the selection behind, and `showFacilityLine` deliberately keeps the
+     control on screen in that state so the narrow stays clearable. GUARDED rather than commented — a
+     denominator of zero under a numerator of one is a broken readout, and the honest thing to say is
+     that the list is missing. */
+  const reading =
+    props.options.length === 0
+      ? { on: props.selected.length > 0, text: `${props.selected.length} picked · list unavailable` }
+      : facetReading(props.selected, props.options.length);
   return (
     <div data-v3-facet className="min-w-[15rem] max-w-md flex-1">
       <MultiSelectTagPicker
         label="Facility"
-        badge={<FacetState {...facetReading(props.selected, props.options.length)} />}
+        badge={<FacetState {...reading} />}
         placeholder="Type a facility name…"
         icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
-        options={props.options.map((o) => ({ value: o.value, display: o.display, badge: o.careSetting }))}
-        selected={[...props.selected]}
+        /* `searchText` carries every RAW CMD spelling plus the canonical value, so an operator typing
+           what CMD calls the facility finds it. `display` is NOT recomposed into "ACRONYM — Full Name":
+           label parity with the score cards is the whole reason display_acronym is preferred, and the
+           picker echoes `display` back inside the selected tag. See `pickerMatches`. */
+        options={props.options.map((o) => ({
+          value: o.value,
+          display: o.display,
+          badge: o.careSetting,
+          searchText: [...o.variants, o.value],
+        }))}
+        selected={props.selected}
         onToggle={props.onToggle}
         /* The Employers precedent: `onClear` walks the selection back through the SAME toggle rather
            than reaching for a second reducer action. `facility_narrow_toggled` is the machine's only
@@ -1997,68 +2030,120 @@ export function FacilityNarrowLine(props: {
 }
 
 /**
- * THE SENTENCE THE WHOLE FEATURE EXISTS FOR — four arms, four different claims, none borrowed.
+ * THE SENTENCE THE WHOLE FEATURE EXISTS FOR — and, since fix round 1, the AREA arm too.
+ *
+ * ⚠ IT OWNS **BOTH** BLAMED ARMS, WHICH IS A CHANGE OF SCOPE AND THE POINT OF IT. S4 shipped the area
+ * sentence as an inline literal beside this function, and that split made an EXISTING claim false: both
+ * arms computed "the N facilities behind this answer" from the UN-narrowed leading list while
+ * instructing the operator to clear ONE control. With `facility=['PHX']` and `area='TN'`, "The 3
+ * facilities … choose All above to see them" resolves to ONE row, because the facility narrow is still
+ * on. That is the PRE-S4 string, so the regression was a truth regression in shipped copy, not merely
+ * a loose new claim. The recovery clause now promises what clearing THAT control actually yields, and
+ * names BOTH controls when one click cannot get back to everything.
  *
  * Pure and exported so the copy is testable without a render, and because the branch it makes is a
- * DECISION (which emptiness is this?) rather than markup. The JSX site keeps the `role="status"` and
- * its book-led marker; this owns the words.
+ * DECISION (which emptiness is this, and what is the way out?) rather than markup. The JSX site keeps
+ * the `role="status"` and its book-led marker; this owns the words.
  *
- * The arms, and why each is a different claim:
- *  1 · BOOK-LED, and the member HAS billed there. The member ranking is FLOORLESS and the book applies
- *      `QUALIFY_MIN_LINES`, so a facility the member billed 1-2 lines at is in `facilities` and NOT in
- *      `bookFacilities`. "No history there" would be flatly false about the one fact on the screen
- *      that decides an admission. The floor is the only possible cause (both loads are the same query
- *      over the same rollup with the same payer, window and market — the member's rows are a SUBSET of
- *      the book's before it), which is why this sentence may name it.
+ * The facility arms, and why each is a different claim:
+ *  1 · BOOK-LED, and the member HAS billed at some of the picks. The member ranking is FLOORLESS and
+ *      the book applies `QUALIFY_MIN_LINES`, so a facility they billed 1-2 lines at is in `facilities`
+ *      and NOT in `bookFacilities`. "No history there" would be flatly false about the one fact on the
+ *      screen that decides an admission. The floor is the only possible cause (both loads are the same
+ *      query over the same rollup with the same payer, window and market — the member's rows are a
+ *      SUBSET of the book's before it), which is why this sentence may name it.
+ *      ⚠ ITS SUBJECT IS `pickedWithHistory`, NOT `picked`. A boolean over the whole selection let
+ *      picks ['NASH','KWC'] against a footprint of NASH alone assert paid claims at a facility with
+ *      zero rows — fabricated history, reachable through exactly the "show me these two houses" case
+ *      multi-select exists for. The picks with nothing get their own disclaiming clause rather than
+ *      being silently dropped.
  *  2 · BOOK-LED, and they have not. The claim is about the PAYER'S BOOK, not about the member, so the
  *      member's own footprint is named separately rather than folded in.
- *  3 · MEMBER-LED, with somewhere else to name. Alec's ruling rationale, verbatim.
+ *  3 · MEMBER-LED, with somewhere else to name. Alec's ruling rationale.
  *  4 · MEMBER-LED, with nowhere else to name. Reachable: `facilitiesElsewhere` strips the
  *      `No Facility` placeholder, so every other row can be a bucket rather than a place. "This member
  *      billed at " with nothing after it would be the fabricated-place claim in its most literal form.
  *
+ * EVERY ARM NAMES ITS WINDOW (basis discipline, S2). Arms 1 and 3 shipped without one while 2 and 4
+ * had it, which is a mixed-basis screen by omission.
+ *
  * Copy unratified.
  */
-export function facilityNarrowEmptyCopy(input: {
-  /** Display labels of the picked facilities. */
+export function gridNarrowEmptyCopy(input: {
+  /** WHICH narrow emptied the grid — computed by the caller, never guessed. */
+  blame: 'area' | 'facility';
+  areaActive: boolean;
+  facilityActive: boolean;
+  /** Display labels of every picked facility. */
   picked: readonly string[];
+  /** Display labels of the picks the member's OWN footprint actually covers. A subset of `picked`. */
+  pickedWithHistory: readonly string[];
   bookLeads: boolean;
   bookPayer: string | null;
-  /** The LEADING list's length — what "still there" is counting. */
+  /** The LEADING list's length — what clearing BOTH narrows yields. */
   rankedTotal: number;
-  /** Does the searched identifier's OWN footprint contain a picked facility? */
-  memberHasHistoryHere: boolean;
+  /** Rows left after clearing the FACILITY narrow (i.e. the area narrow alone). */
+  afterClearingFacility: number;
+  /** Rows left after clearing the AREA narrow (i.e. the facility narrow alone). */
+  afterClearingArea: number;
   /** The member's other facilities, by name, placeholder already removed. */
   elsewhere: readonly string[];
 }): string {
-  const where = andList(input.picked);
-  const back = `clear the facility above to see them`;
-  const still = `The ${input.rankedTotal} facilities behind this answer are still there — ${back}.`;
-  if (input.bookLeads) {
-    // "This book" rather than "null's book": `scopedPayerOf` refuses a name the scope contradicts,
-    // and a possessive built on that null is how a caption starts naming nobody in particular.
-    const whoseMid = input.bookPayer === null ? 'this book' : `${input.bookPayer}'s book`;
-    if (input.memberHasHistoryHere) {
+  const all = facilityCount(input.rankedTotal);
+  /* THE WAY BACK, AND THE COUNT IT REALLY DELIVERS. A narrow with no stated way out is a trap; a way
+     out that promises a number it cannot produce is worse, because the operator believes it. */
+  const recovery = ((): string => {
+    if (input.blame === 'facility') {
+      if (!input.areaActive) return `Clear the facility above to see all ${all}.`;
+      if (input.afterClearingFacility > 0) {
+        return (
+          `Clear the facility above to see the ${facilityCount(input.afterClearingFacility)} in this area,` +
+          ` or clear the area too to see all ${input.rankedTotal}.`
+        );
+      }
+      // BOTH NARROWS INDEPENDENTLY EMPTY. Clearing either one alone still shows nothing, so a
+      // single-click promise would resolve to ZERO — say so and name both controls.
+      return `Both narrows are on and neither has rows of its own — clear the area and the facility above to see all ${all}.`;
+    }
+    if (!input.facilityActive) return `The ${all} behind this answer ${input.rankedTotal === 1 ? 'is' : 'are'} still there — choose All above to see them.`;
+    if (input.afterClearingArea > 0) {
       return (
-        `This member HAS billed at ${where}, but ${whoseMid} does not rank it: the book applies a` +
-        ` volume floor and this member's own lines are below it. ${still}`
+        `Choose All above to see the ${facilityCount(input.afterClearingArea)} you picked,` +
+        ` or clear the facility too to see all ${input.rankedTotal}.`
       );
     }
+    return `Both narrows are on and neither has rows of its own — choose All above and clear the facility to see all ${all}.`;
+  })();
+
+  if (input.blame === 'area') return `No ranked facility is in this area. ${recovery}`;
+
+  const where = andList(input.picked);
+  if (input.bookLeads) {
+    // "This book" rather than "null's book": `scopedPayerOf` refuses a name the scope contradicts, and
+    // a possessive built on that null is how a caption starts naming nobody in particular.
+    const whoseMid = input.bookPayer === null ? 'this book' : `${input.bookPayer}'s book`;
     const whoseCap = input.bookPayer === null ? 'This book' : `${input.bookPayer}'s book`;
-    const elsewhere =
-      input.elsewhere.length > 0 ? ` This member billed at ${andList(input.elsewhere)}.` : '';
-    return `${whoseCap} has no rows at ${where} in the window shown. ${still}${elsewhere}`;
+    if (input.pickedWithHistory.length > 0) {
+      const seen = andList(input.pickedWithHistory);
+      const unseen = input.picked.filter((p) => !input.pickedWithHistory.includes(p));
+      // The pronoun follows the SUBJECT of the claim, not the size of the selection.
+      const it = input.pickedWithHistory.length === 1 ? 'it' : 'them';
+      const disclaimer = unseen.length > 0 ? ` ${whoseCap} has no rows at ${andList(unseen)} at all.` : '';
+      return (
+        `This member HAS billed at ${seen}, but ${whoseMid} does not rank ${it} in the window shown:` +
+        ` the book applies a volume floor and this member's own lines there are below it.` +
+        `${disclaimer} ${recovery}`
+      );
+    }
+    const elsewhere = input.elsewhere.length > 0 ? ` This member billed at ${andList(input.elsewhere)}.` : '';
+    return `${whoseCap} has no rows at ${where} in the window shown.${elsewhere} ${recovery}`;
   }
   if (input.elsewhere.length > 0) {
-    return (
-      `No history at ${where} — this member billed at ${andList(input.elsewhere)}.` +
-      ` Clear the facility above to see all ${input.rankedTotal}.`
-    );
+    return `No history at ${where} in the window shown — this member billed at ${andList(input.elsewhere)}. ${recovery}`;
   }
   return (
     `No history at ${where} in the window shown. The other rows behind this answer have no facility` +
-    ` on them at all, so there is nowhere else to name — clear the facility above to see all` +
-    ` ${input.rankedTotal}.`
+    ` on them at all, so there is nowhere else to name. ${recovery}`
   );
 }
 
@@ -2541,20 +2626,39 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
     () => narrowByFacility(facilitiesInArea(rankedFacilities, props.area), facilityKeys),
     [rankedFacilities, props.area, facilityKeys],
   );
-  /* WHICH NARROW EMPTIED THE GRID. With both on, "no ranked facility is in this area" and "no history
-   * at NASHVILLE" are different diagnoses of the same empty screen, and offering the wrong one sends
-   * the operator to undo the wrong control. Asking the facility narrow ALONE separates them: if the
-   * facility narrow on its own still has rows, the AREA is what emptied the grid. */
+  /* WHICH NARROW EMPTIED THE GRID, and WHAT CLEARING EACH ONE WOULD ACTUALLY SHOW. Two questions, one
+   * pair of derivations: each narrow applied ALONE. "No ranked facility is in this area" and "no
+   * history at NASHVILLE" are different diagnoses of the same empty screen, and offering the wrong one
+   * sends the operator to undo the wrong control — so if the facility narrow on its own still has rows,
+   * the AREA is what emptied the grid. The same two numbers are what the recovery clause may promise:
+   * a way back that names one control must count what THAT control delivers, not the un-narrowed total
+   * (fix round 1, I1 — the pre-S4 area string became false the day a second narrow could compose). */
   const facilityOnlyFacilities = useMemo(
     () => narrowByFacility(rankedFacilities, facilityKeys),
     [rankedFacilities, facilityKeys],
   );
+  const areaOnlyFacilities = useMemo(
+    () => facilitiesInArea(rankedFacilities, props.area),
+    [rankedFacilities, props.area],
+  );
   /* THE FACTS THE EMPTY STATE NEEDS, all from lists already in hand — which is the whole argument for
    * a display narrow. `snap.facilities` is the SEARCHED IDENTIFIER's own footprint in both modes (the
    * flip moves which list LEADS, never what `facilities` means), so it answers "has this member been
-   * here" and "where have they been" even when the book is the grid. */
-  const memberHasHistoryHere =
-    facilityKeys !== null && snap !== null && narrowByFacility(snap.facilities, facilityKeys).length > 0;
+   * here" and "where have they been" even when the book is the grid.
+   *
+   * ⚠ PER PICK, NOT A BOOLEAN OVER THE SET. See `picksWithRows` — a set-wide `true` rendered every
+   * picked name as the subject of "This member HAS billed at …", which fabricates history at the picks
+   * with no rows. */
+  const picksWithMemberHistory = useMemo(
+    () =>
+      snap === null
+        ? []
+        : facilityDisplayNames(
+            picksWithRows(props.facilityNarrow, props.facilityOptions, snap.facilities),
+            props.facilityOptions,
+          ),
+    [props.facilityNarrow, props.facilityOptions, snap],
+  );
   const memberElsewhere = useMemo(
     () => (facilityKeys === null || snap === null ? [] : facilitiesElsewhere(snap.facilities, facilityKeys)),
     [facilityKeys, snap],
@@ -2562,6 +2666,27 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   const pickedFacilityNames = useMemo(
     () => facilityDisplayNames(props.facilityNarrow, props.facilityOptions),
     [props.facilityNarrow, props.facilityOptions],
+  );
+  /* THE BLAME, RESOLVED ONCE. Three consumers read it — the empty state, the "Not in this book" line's
+   * suppression, and (through `shownFacilities`) the area chips' word — and a diagnosis re-derived per
+   * surface is how three sentences come to disagree about which control the operator should press. */
+  const blamedNarrow: 'area' | 'facility' | null =
+    rankedFacilities.length === 0 || shownFacilities.length > 0
+      ? null
+      : facilityNarrowActive && facilityOnlyFacilities.length === 0
+        ? 'facility'
+        : 'area';
+  /* IS THE FLOOR ARM SPEAKING? S3's "Not in this book: X. This member has history there, but it is
+   * below the volume floor…" and that arm state the IDENTICAL fact ~340 characters apart, on the exact
+   * screen the arm exists for. The S3 line is not deleted — it still speaks for the member facilities
+   * the empty state is NOT about — its set is SUBTRACTED, so each facility is named once. */
+  const floorArmSpeaking = blamedNarrow === 'facility' && bookLeads && picksWithMemberHistory.length > 0;
+  const unlistedShown = useMemo(
+    () =>
+      floorArmSpeaking && facilityKeys !== null
+        ? unlistedMemberFacilities.filter((f) => !facilityKeys.has(f.facilityKey))
+        : unlistedMemberFacilities,
+    [floorArmSpeaking, facilityKeys, unlistedMemberFacilities],
   );
   // `areaActive` is declared once, above `skipProvenance` — see the comment there.
   // Two real buckets, or an active narrow that must stay clearable. One bucket is not a choice, and
@@ -3200,7 +3325,15 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
             {showAreaLine || showFacilityLine ? (
               <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
                 {showAreaLine ? (
-                  <AreaLine chips={areaChips} active={props.area} counts={areaCounts} onSelect={props.onSelectArea} />
+                  <AreaLine
+                    chips={areaChips}
+                    active={props.area}
+                    counts={areaCounts}
+                    /* The count on SCREEN, after both grid narrows — so a lit chip cannot say
+                       " · showing" over an empty grid. See the prop's own doc. */
+                    shown={shownFacilities.length}
+                    onSelect={props.onSelectArea}
+                  />
                 ) : null}
                 {showFacilityLine ? (
                   <FacilityNarrowLine
@@ -3267,15 +3400,20 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 fact on the screen — "they have been here" — for precisely the thinnest facilities,
                 which are the ones a 1.14-facility member is most likely to have. Names only: they
                 are non-PHI and already render on every card. Copy unratified. */}
-            {unlistedMemberFacilities.length > 0 ? (
+            {/* ⚠ READS `unlistedShown`, NOT `unlistedMemberFacilities` (fix round 1, I3). When the
+                facility narrow's FLOOR arm is speaking below, it already states this exact fact about
+                the picked facilities — so those are subtracted here rather than the whole line being
+                suppressed, which would silently drop the member facilities the empty state is not
+                about. Each facility is named once, by the sentence that is about it. */}
+            {unlistedShown.length > 0 ? (
               <p className="text-xs text-ink600">
                 Not in this book:{' '}
                 <span className="font-semibold text-ink900">
-                  {unlistedMemberFacilities.map((f) => f.name).join(' · ')}
+                  {unlistedShown.map((f) => f.name).join(' · ')}
                 </span>
-                . This member has history there, but {unlistedMemberFacilities.length === 1 ? 'it is' : 'they are'}{' '}
+                . This member has history there, but {unlistedShown.length === 1 ? 'it is' : 'they are'}{' '}
                 below the volume floor for {bookPayer} in this window, so the book cannot rank{' '}
-                {unlistedMemberFacilities.length === 1 ? 'it' : 'them'}.
+                {unlistedShown.length === 1 ? 'it' : 'them'}.
               </p>
             ) : null}
             {/* THREE different emptinesses, three different sentences (S4 added the third). "Nothing
@@ -3297,22 +3435,27 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 No facility has claims history under this scope in the window shown.
               </p>
             ) : /* [BOOK-LED SURFACE]
-                   The FACILITY arm re-bases explicitly — `facilityNarrowEmptyCopy` takes `bookLeads`
-                   and says a different thing in each mode, because "no history at NASHVILLE" is a
-                   claim about the MEMBER while a book-led grid is a claim about the PAYER. The AREA
-                   arm's count is of the LEADING list and follows the flip by construction. */
-            shownFacilities.length === 0 ? (
+                   BOTH blamed arms now come from ONE builder (fix round 1, I1) — the area arm was an
+                   inline literal here, and splitting it is what let it keep promising the un-narrowed
+                   total after a second narrow could compose with it. The facility arms re-base on
+                   `bookLeads` explicitly, because "no history at NASHVILLE" is a claim about the MEMBER
+                   while a book-led grid is a claim about the PAYER; the area arm's count is of the
+                   LEADING list and follows the flip by construction. */
+            blamedNarrow !== null ? (
               <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
-                {facilityNarrowActive && facilityOnlyFacilities.length === 0
-                  ? facilityNarrowEmptyCopy({
-                      picked: pickedFacilityNames,
-                      bookLeads,
-                      bookPayer,
-                      rankedTotal: rankedFacilities.length,
-                      memberHasHistoryHere,
-                      elsewhere: memberElsewhere,
-                    })
-                  : `No ranked facility is in this area. The ${rankedFacilities.length} facilities behind this answer are still there — choose All above to see them.`}
+                {gridNarrowEmptyCopy({
+                  blame: blamedNarrow,
+                  areaActive,
+                  facilityActive: facilityNarrowActive,
+                  picked: pickedFacilityNames,
+                  pickedWithHistory: picksWithMemberHistory,
+                  bookLeads,
+                  bookPayer,
+                  rankedTotal: rankedFacilities.length,
+                  afterClearingFacility: areaOnlyFacilities.length,
+                  afterClearingArea: facilityOnlyFacilities.length,
+                  elsewhere: memberElsewhere,
+                })}
               </p>
             ) : null}
           </section>

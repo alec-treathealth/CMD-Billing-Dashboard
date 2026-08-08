@@ -662,6 +662,16 @@ test('facility_narrow_toggled is MULTI-select and its own inverse — the picker
   assert.deepEqual(s.facilityNarrow, ['B'], 'and the same action removes — this is what Clear N walks');
   s = shellReducer(s, { type: 'facility_narrow_toggled', value: 'B' });
   assert.deepEqual(s.facilityNarrow, [], 'emptied by toggling, and an empty selection is NO restriction');
+  // ⚠ BY REFERENCE, and this is the path the ⚠ comment in the reducer claims is load-bearing. Toggling
+  // the LAST chip off is exactly when a fresh `[]` would start invalidating the narrow's memo chain on
+  // every render, and `deepEqual` above is reference-blind — the mutation that returns a fresh literal
+  // ran 200/0 until this line existed. The MUT-F lesson, one field over.
+  assert.equal(s.facilityNarrow, NO_FACILITY_NARROW, 'the SHARED constant, not a fresh equal literal');
+  // The `Clear N` path is the same action walked over the whole selection, so it lands here too.
+  let cleared = shellReducer(INITIAL_SHELL_STATE, { type: 'facility_narrow_toggled', value: 'A' });
+  cleared = shellReducer(cleared, { type: 'facility_narrow_toggled', value: 'B' });
+  for (const v of [...cleared.facilityNarrow]) cleared = shellReducer(cleared, { type: 'facility_narrow_toggled', value: v });
+  assert.equal(cleared.facilityNarrow, NO_FACILITY_NARROW, 'the picker’s Clear N ends on the shared constant too');
 });
 
 test('area_selected: All, a state and the Other bucket are all just keys — and All is a real value', () => {

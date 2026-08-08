@@ -191,3 +191,35 @@ export function andList(items: readonly string[]): string {
   if (items.length === 1) return items[0]!;
   return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]!}`;
 }
+
+/**
+ * Which of the PICKED values the given rows actually cover — per pick, never once for the whole set.
+ *
+ * ⚠ THIS EXISTS BECAUSE A BOOLEAN LIED. The first build asked "does the member have history at ANY
+ * picked facility", got `true`, and then rendered EVERY picked name as the subject of "This member HAS
+ * billed at …". With picks `['LSMH','NASH']` against a footprint of LSMH alone, that sentence asserted
+ * paid claims at a facility with zero rows — the fabricated-history class S3 suppressed the `No
+ * Facility` annotation for, reachable through exactly the multi-select case that justified multi-select.
+ *
+ * Variant-aware like everything else here: the pick is a canonical value, the row carries a raw
+ * spelling, and they are the same facility.
+ */
+export function picksWithRows(
+  selection: readonly string[],
+  options: readonly FacilityVariantSource[],
+  rows: readonly { facilityKey: string }[],
+): string[] {
+  if (selection.length === 0 || rows.length === 0) return [];
+  const present = new Set(rows.map((r) => r.facilityKey));
+  const variants = indexFacilityVariants(options);
+  return selection.filter((v) => (variants[v] ?? [v]).some((k) => present.has(k)));
+}
+
+/**
+ * `1 facility` · `3 facilities`. ONE derivation, because four sentences on the answer stage count
+ * facilities and the PRE-S4 area empty state already shipped "The 1 facilities behind this answer" —
+ * a bug the three new arms would have inherited by copying the phrasing that had it.
+ */
+export function facilityCount(n: number): string {
+  return `${n} facilit${n === 1 ? 'y' : 'ies'}`;
+}

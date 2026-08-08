@@ -645,10 +645,12 @@ Blaming the wrong control sends the operator to clear the wrong one.
 
 `facilityNarrowEmptyCopy` (pure, in `resolution-flow.tsx`, unit-tested) has four arms:
 
-1. **Book-led, and the member HAS billed there.** The member ranking is floorless and the book applies
-   `QUALIFY_MIN_LINES`, so a facility they billed 1–2 lines at is in `facilities` and not in
-   `bookFacilities`. *"No history there"* would be flatly false about the one fact on the screen that
-   decides an admission. The floor is the only possible cause, so the sentence names it.
+1. **Book-led, and the member HAS billed at some of the picks.** The member ranking is floorless and
+   the book applies `QUALIFY_MIN_LINES`, so a facility they billed 1–2 lines at is in `facilities` and
+   not in `bookFacilities`. *"No history there"* would be flatly false about the one fact on the screen
+   that decides an admission. The floor is the only possible cause, so the sentence names it. Its
+   subject is **the picks the member's own footprint actually covers**, never the whole selection —
+   see fix round 1 below.
 2. **Book-led, and they have not.** The claim is about the payer's **book**; the member's own
    footprint is named separately rather than folded into it.
 3. **Member-led, with somewhere else to name.** *"No history at {facility} — this member billed at {A}
@@ -690,3 +692,57 @@ never inside the snapshot request. An empty vocabulary renders no control at all
 still unresolved, so adding one here would be a new surface rather than a restoration.
 
 **All new copy is unratified.**
+
+### Fix round 1 (2026-08-08) — four corrections, and one of them was a truth regression
+
+**The floor arm was fabricating history under multi-select.** *"Has this member been to any picked
+facility"* was a boolean, and the sentence rendered **every** picked name as its subject — so picks
+`['NASH','KWC']` against a footprint of NASH alone asserted paid claims at a facility with zero rows.
+That is the fabricated-history class S3 suppressed the `No Facility` annotation for, reachable through
+exactly the *"show me these two houses"* case that justified multi-select in the first place. The
+subject is now `picksWithRows` — per pick, variant-aware — the pronoun follows the subject rather than
+the selection size, and the picks with **no** rows get their own disclaiming clause instead of being
+silently dropped.
+
+**The recovery clause promised a count the other live narrow would not deliver — and it made an
+EXISTING sentence false.** Both blamed arms computed *"the N facilities behind this answer"* from the
+un-narrowed leading list while instructing the operator to clear **one** control. With
+`facility=['PHX']` and `area='TN'`, *"The 3 facilities … choose All above to see them"* resolves to one
+row. That string is the **pre-S4 area empty state**, so composing a second grid narrow onto the screen
+turned a shipped `role="status"` line into a lie — a truth regression, not merely a loose new claim.
+Both arms now come from **one builder** (`gridNarrowEmptyCopy`); splitting the area arm off as an
+inline literal is precisely what let it rot. The clause names what clearing **that** control yields,
+and names **both** controls when one click cannot reach everything — including the case where each
+narrow is independently empty and *"see all 3"* would clear to **zero**.
+
+**A lit area chip claimed to be "showing" over an empty grid.** Pre-S4 the area was the only narrow, so
+a lit chip meant rows *by construction*. Composed with a facility narrow, *"All · 2 · showing"* renders
+above zero cards. The word stays — I9 requires selection to carry a word, never hue alone — but it
+becomes *"· selected"*, which is true, and is already the vocabulary the window chips use. The chip
+**counts** deliberately stay over the ranking; their aria-labels say *"ranked"*.
+
+**S3's "Not in this book" line and the floor arm said the identical fact ~340 characters apart**, on
+the exact screen the arm exists for. The S3 line is not deleted — it still speaks for member facilities
+the empty state is *not* about — its set is **subtracted**, so each facility is named once, by the
+sentence that is about it.
+
+Minors in the same round: every arm now names its window (arms 1 and 3 had none while 2 and 4 did);
+`facilityCount` pluralises in one place, which also fixes the **pre-existing** *"The 1 facilities behind
+this answer"*; a lost vocabulary renders *"1 picked · list unavailable"* rather than *"On · 1 of 0"*;
+and the reducer's shared-constant claim on the toggle-to-empty path is now pinned by reference rather
+than asserted in a comment.
+
+### The shared picker got its first test, and only then a change
+
+`MultiSelectTagPicker` is rendered by four surfaces and had **zero** direct test coverage — which was
+the stated reason not to touch its filter. So: `pickerMatches` is extracted as a pure export and unit
+tested in `app/test/multiSelectTagPicker.test.tsx` (`'use client'` is inert under the test loader), and
+`PickerOption` gains an optional `searchText?: readonly string[]` folded into the haystack. No existing
+caller passes it, and the compatibility claim is asserted rather than reasoned: a query sweep compares
+the new predicate against the old display-only expression over a Collections-shaped option list.
+
+Only the facility narrow opts in, passing each option's raw CMD spellings plus its canonical value —
+so typing what CMD actually calls a facility finds it, for the 16 of 47 live options whose
+`display_acronym` differs from their value. **`display` is deliberately not recomposed** into
+`ACRONYM — Full Name`: label parity with the score cards is the whole reason `display_acronym` is
+preferred, and the picker echoes `display` back inside the selected tag.

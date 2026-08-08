@@ -25,7 +25,7 @@ import {
   areaChipsWithActive,
   bookIsOnScreen,
   bookLeadsAnswer,
-  facilityNarrowEmptyCopy,
+  gridNarrowEmptyCopy,
   NO_FACILITY_NARROW,
   UNRESOLVABLE_COPY,
   deriveStage,
@@ -2166,7 +2166,7 @@ test('THE SKIP INVENTORY covers AREA too, even though its control lives beside t
 test('the AREA badge counts area chips, and does not assume the list shape', () => {
   const renderArea = (chips: readonly { key: string; label: string }[], active: string) =>
     renderToStaticMarkup(
-      <AreaLine chips={chips as never} active={active} counts={new Map()} onSelect={() => {}} />,
+      <AreaLine chips={chips as never} active={active} counts={new Map()} shown={1} onSelect={() => {}} />,
     );
 
   // A list with NO All chip: subtraction under-counts by one, filtering is right. If this ever goes
@@ -3479,11 +3479,14 @@ test('S4 empty, MEMBER-LED — “No history at X — this member billed at A an
   // un-narrowed list would not be in hand — and at 86.9% single-facility members it is the COMMON
   // render, not an edge case.
   const html = gridRegion(withFacility(threeStateSnapshot(), { facilityNarrow: ['KWC'] }));
+  // ⚠ "IN THE WINDOW SHOWN" WAS ADDED IN FIX ROUND 1 (basis discipline): this arm and the floor arm
+  // shipped with no window clause while the other two had one, which is a mixed-basis screen by
+  // omission. The ruling's own clause — "no history at X — this member billed at A and B" — is intact.
   assert.match(
     html,
-    /No history at KENTUCKY WELLNESS CENTER — this member billed at NASHVILLE MENTAL HEALTH, PHOENIX RENEWAL and UNLISTED BH\./,
+    /No history at KENTUCKY WELLNESS CENTER in the window shown — this member billed at NASHVILLE MENTAL HEALTH, PHOENIX RENEWAL and UNLISTED BH\./,
   );
-  assert.match(html, /Clear the facility above to see all 3\./, 'a narrow with no way back is a trap');
+  assert.match(html, /Clear the facility above to see all 3 facilities\./, 'a narrow with no way back is a trap');
   // The OTHER two emptinesses must not co-render: this is neither "nothing ranked at all" nor "no
   // ranked facility is in this area", and two role="status" sentences for one click is the overlap
   // review Finding 2 removed for the area.
@@ -3496,7 +3499,9 @@ test('S4 empty, BOOK-LED — it names where the BOOK does have rows, and the mem
   const html = withFacility(ledSnapshot(), { facilityNarrow: ['KWC'] });
   assert.match(html, /Where AETNA US HEALTHCARE pays — the whole book/, 'positive control: the book leads');
   assert.match(html, /AETNA US HEALTHCARE&#x27;s book has no rows at KENTUCKY WELLNESS CENTER in the window shown\./);
-  assert.match(html, /The 3 facilities behind this answer are still there — clear the facility above to see them\./);
+  // The recovery clause is now the SHARED one (fix round 1, I1) — it names the count that clearing
+  // THIS control actually yields, which with no area narrow on is the whole leading list.
+  assert.match(html, /Clear the facility above to see all 3 facilities\./);
   assert.match(html, /This member billed at NASHVILLE MENTAL HEALTH\./, 'the member’s own history is still named');
 });
 
@@ -3518,26 +3523,276 @@ test('S4 empty, BOOK-LED — a facility the member HAS billed at is never called
   assert.ok(!html.includes('No history at NASHVILLE MENTAL HEALTH'), 'and so would the member-led one');
 });
 
-test('S4 — facilityNarrowEmptyCopy: four arms, four different claims, none borrowed', () => {
-  const base = { picked: ['NASH'], bookPayer: 'AETNA', rankedTotal: 3 };
-  const memberLed = facilityNarrowEmptyCopy({ ...base, bookLeads: false, memberHasHistoryHere: false, elsewhere: ['A', 'B'] });
-  const memberLedBare = facilityNarrowEmptyCopy({ ...base, bookLeads: false, memberHasHistoryHere: false, elsewhere: [] });
-  const bookLed = facilityNarrowEmptyCopy({ ...base, bookLeads: true, memberHasHistoryHere: false, elsewhere: ['A'] });
-  const bookLedFloor = facilityNarrowEmptyCopy({ ...base, bookLeads: true, memberHasHistoryHere: true, elsewhere: [] });
-  assert.equal(new Set([memberLed, memberLedBare, bookLed, bookLedFloor]).size, 4, 'four distinct sentences');
-  assert.match(memberLed, /No history at NASH — this member billed at A and B\./);
-  // ⚠ NOTHING BUT THE PLACEHOLDER LEFT. `facilitiesElsewhere` strips `No Facility`, so `elsewhere`
-  // can be empty with rows still on the ranking — and "this member billed at " with nothing after it
-  // would be the fabricated-place claim in its most literal form.
+test('S4 — gridNarrowEmptyCopy: every arm is a DIFFERENT claim, and none borrows another’s', () => {
+  const base = {
+    picked: ['NASH'],
+    pickedWithHistory: [] as string[],
+    bookPayer: 'AETNA',
+    rankedTotal: 3,
+    areaActive: false,
+    facilityActive: true,
+    afterClearingFacility: 3,
+    afterClearingArea: 3,
+    blame: 'facility' as const,
+  };
+  const memberLed = gridNarrowEmptyCopy({ ...base, bookLeads: false, elsewhere: ['A', 'B'] });
+  const memberLedBare = gridNarrowEmptyCopy({ ...base, bookLeads: false, elsewhere: [] });
+  const bookLed = gridNarrowEmptyCopy({ ...base, bookLeads: true, elsewhere: ['A'] });
+  const bookLedFloor = gridNarrowEmptyCopy({ ...base, bookLeads: true, pickedWithHistory: ['NASH'], elsewhere: [] });
+  const areaBlamed = gridNarrowEmptyCopy({
+    ...base,
+    blame: 'area',
+    areaActive: true,
+    facilityActive: false,
+    bookLeads: false,
+    elsewhere: [],
+  });
+  assert.equal(new Set([memberLed, memberLedBare, bookLed, bookLedFloor, areaBlamed]).size, 5, 'five distinct sentences');
+  assert.match(memberLed, /No history at NASH in the window shown — this member billed at A and B\./);
+  // ⚠ NOTHING BUT THE PLACEHOLDER LEFT. `facilitiesElsewhere` strips `No Facility`, so `elsewhere` can
+  // be empty with rows still on the ranking — and "this member billed at " with nothing after it would
+  // be the fabricated-place claim in its most literal form.
   assert.ok(!memberLedBare.includes('billed at'), 'no place is named when there is no place to name');
   assert.match(memberLedBare, /no facility on them/);
-  assert.match(bookLed, /AETNA's book has no rows at NASH/);
+  assert.match(bookLed, /AETNA's book has no rows at NASH in the window shown/);
   assert.match(bookLedFloor, /This member HAS billed at NASH/);
+  // BASIS DISCIPLINE (S2): every arm names the window it counted over — arms 1 and 3 carried no
+  // window clause at all while 2 and 4 did, which is a mixed-basis screen by omission.
+  for (const [label, arm] of Object.entries({ memberLed, memberLedBare, bookLed, bookLedFloor })) {
+    assert.match(arm, /in the window shown/, `${label} must name its window`);
+  }
   // An unnameable book still gets an honest subject rather than "null's book".
   assert.match(
-    facilityNarrowEmptyCopy({ ...base, bookPayer: null, bookLeads: true, memberHasHistoryHere: false, elsewhere: [] }),
+    gridNarrowEmptyCopy({ ...base, bookPayer: null, bookLeads: true, elsewhere: [] }),
     /^This book has no rows at NASH/,
   );
+});
+
+test('S4/C1 — the floor arm names ONLY the picked facilities the member actually billed at', () => {
+  /* ⚠ THE FABRICATION. `memberHasHistoryHere` was a boolean over the WHOLE picked set while the
+   * sentence rendered EVERY picked name as its subject, so picks ['NASH','KWC'] against a footprint of
+   * NASH alone asserted paid claims at a facility with zero rows. It is the fabricated-history class
+   * S3 suppressed the placeholder annotation for, and it is reachable through exactly the "show me
+   * these two houses" case that justified multi-select at all. */
+  const partial = gridNarrowEmptyCopy({
+    picked: ['NASH', 'KWC'],
+    pickedWithHistory: ['NASH'],
+    bookLeads: true,
+    bookPayer: 'AETNA',
+    rankedTotal: 3,
+    elsewhere: [],
+    areaActive: false,
+    facilityActive: true,
+    afterClearingFacility: 3,
+    afterClearingArea: 3,
+    blame: 'facility',
+  });
+  assert.match(partial, /This member HAS billed at NASH, but AETNA's book does not rank it/);
+  assert.ok(!partial.includes('HAS billed at NASH and KWC'), 'KWC has zero rows — it may not ride the claim');
+  // ...and the pick with NO history is still accounted for rather than silently dropped.
+  assert.match(partial, /AETNA's book has no rows at KWC at all\./);
+
+  // BOTH picks with history ⇒ plural pronoun. "does not rank it" over two facilities is the same
+  // sentence being wrong in the other direction.
+  const both = gridNarrowEmptyCopy({
+    picked: ['NASH', 'KWC'],
+    pickedWithHistory: ['NASH', 'KWC'],
+    bookLeads: true,
+    bookPayer: 'AETNA',
+    rankedTotal: 3,
+    elsewhere: [],
+    areaActive: false,
+    facilityActive: true,
+    afterClearingFacility: 3,
+    afterClearingArea: 3,
+    blame: 'facility',
+  });
+  assert.match(both, /HAS billed at NASH and KWC, but AETNA's book does not rank them/);
+  assert.ok(!both.includes('no rows at'), 'nothing is left over to disclaim');
+});
+
+test('S4/I1 — the recovery clause promises the count that CLEARING THAT CONTROL actually yields', () => {
+  /* ⚠ BOTH ARMS PROMISED THE UN-NARROWED TOTAL WHILE INSTRUCTING ONE CLICK. With `facility=['PHX']`
+   * and `area='TN'`, "The 3 facilities … choose All above to see them" resolves to ONE row, because
+   * the facility narrow is still on. That is the PRE-S4 area sentence, so S4 made an existing
+   * role="status" line false — a truth regression, not just a new claim being loose. */
+  const areaBlamed = (over: Record<string, unknown>) =>
+    gridNarrowEmptyCopy({
+      blame: 'area',
+      picked: ['PHX'],
+      pickedWithHistory: [],
+      bookLeads: false,
+      bookPayer: null,
+      elsewhere: [],
+      rankedTotal: 3,
+      areaActive: true,
+      facilityActive: true,
+      afterClearingFacility: 0,
+      afterClearingArea: 1,
+      ...over,
+    } as Parameters<typeof gridNarrowEmptyCopy>[0]);
+
+  // (a) AREA alone — byte-identical to what shipped before S4, because it was true then.
+  assert.match(
+    areaBlamed({ facilityActive: false, afterClearingArea: 3 }),
+    /No ranked facility is in this area\. The 3 facilities behind this answer are still there — choose All above to see them\./,
+  );
+  // (b) BOTH live: naming one control means naming the count that control delivers, and the other way
+  //     back must be named too or the "all 3" is unreachable in one click.
+  const both = areaBlamed({});
+  assert.match(both, /Choose All above to see the 1 facility you picked/, 'the honest one-click count');
+  assert.match(both, /clear the facility too to see all 3/, 'and the way back to everything');
+  assert.ok(!/still there — choose All above to see them/.test(both), 'the false single-click promise is gone');
+
+  // (c) THE BOTH-EMPTY ROW. Each narrow is independently empty, so clearing either one alone still
+  //     shows nothing — "see all 3" would clear to ZERO. It must say clear BOTH.
+  const dead = gridNarrowEmptyCopy({
+    blame: 'facility',
+    picked: ['KWC'],
+    pickedWithHistory: [],
+    bookLeads: false,
+    bookPayer: null,
+    elsewhere: ['A'],
+    rankedTotal: 3,
+    areaActive: true,
+    facilityActive: true,
+    afterClearingFacility: 0,
+    afterClearingArea: 0,
+  });
+  assert.match(dead, /neither has rows of its own/, 'it says why one click is not enough');
+  assert.match(dead, /clear the area and the facility above to see all 3 facilities/);
+  assert.ok(!/Clear the facility above to see all 3\./.test(dead), 'the one-click promise would clear to zero');
+
+  // (d) FACILITY blamed with the area live and rows behind it — one click is enough, and says so.
+  const oneClick = gridNarrowEmptyCopy({
+    blame: 'facility',
+    picked: ['KWC'],
+    pickedWithHistory: [],
+    bookLeads: false,
+    bookPayer: null,
+    elsewhere: ['A'],
+    rankedTotal: 3,
+    areaActive: true,
+    facilityActive: true,
+    afterClearingFacility: 1,
+    afterClearingArea: 0,
+  });
+  assert.match(oneClick, /Clear the facility above to see the 1 facility in this area/);
+  assert.match(oneClick, /clear the area too to see all 3/);
+});
+
+test('S4/M — "The 1 facilities" is fixed in the SHARED derivation, so all four sentences get it', () => {
+  const one = (over: Record<string, unknown>) =>
+    gridNarrowEmptyCopy({
+      blame: 'area',
+      picked: ['PHX'],
+      pickedWithHistory: [],
+      bookLeads: false,
+      bookPayer: null,
+      elsewhere: [],
+      rankedTotal: 1,
+      areaActive: true,
+      facilityActive: false,
+      afterClearingFacility: 1,
+      afterClearingArea: 1,
+      ...over,
+    } as Parameters<typeof gridNarrowEmptyCopy>[0]);
+  assert.match(one({}), /The 1 facility behind this answer is still there/, 'the PRE-S4 string had this bug');
+  assert.ok(!one({}).includes('1 facilities'));
+  const fac = one({ blame: 'facility', areaActive: false, facilityActive: true, elsewhere: ['A'] });
+  assert.match(fac, /see all 1 facility\./);
+  assert.ok(!fac.includes('1 facilities'));
+});
+
+test('S4/I2 — a lit area chip over an EMPTY grid says "selected", never "showing"', () => {
+  /* ⚠ PRE-S4 A LIT CHIP COULD NEVER SIT OVER AN EMPTY GRID: the area was the only narrow, so a lit
+   * chip meant rows. With a facility narrow composed on top, "All · 2 · showing" renders above zero
+   * cards. The word must stay (I9: selection carries a WORD, never hue alone) but it must be a TRUE
+   * word — the chip IS selected; it is not showing anything. */
+  const chips = [{ key: AREA_ALL, label: 'All' }, { key: 'TN', label: 'TN' }];
+  const renderArea = (shown: number) =>
+    renderToStaticMarkup(
+      <AreaLine chips={chips as never} active={AREA_ALL} counts={new Map([[AREA_ALL, 2]])} shown={shown} onSelect={() => {}} />,
+    );
+  assert.match(renderArea(2), / · showing/, 'rows on screen: the shipped word, unchanged');
+  const empty = renderArea(0);
+  assert.ok(!empty.includes(' · showing'), 'nothing is showing, so nothing may say it is');
+  assert.match(empty, / · selected/, 'but the selection still carries a WORD, not hue alone (I9)');
+  assert.match(empty, /aria-pressed="true"/, 'and the pressed state is unchanged');
+});
+
+test('S4/I2 — end to end: the facility narrow empties the grid and the area chip stops claiming to show', () => {
+  const html = withFacility(threeStateSnapshot(), { area: 'TN', facilityNarrow: ['KWC'] });
+  const grid = gridRegion(html);
+  assert.ok(!grid.includes('data-v3-tile'), 'positive control: the grid really is empty');
+  assert.ok(!grid.includes(' · showing'), 'no chip may claim to be showing rows over an empty grid');
+  assert.match(grid, /TN<span[^>]*>[^<]*<\/span> · selected/, 'the lit chip says what is true instead');
+});
+
+test('S4/I3 — the floor case says the fact ONCE: “Not in this book” yields to the empty state', () => {
+  /* ⚠ VERBATIM DUPLICATION ON THE EXACT SCREEN THE ARM EXISTS FOR. S3's "Not in this book: NASH. This
+   * member has history there, but it is below the volume floor…" and S4's floor arm state the identical
+   * fact ~340 characters apart. The S3 line is not deleted — it still speaks for facilities the empty
+   * state is NOT about — it is subtracted. */
+  const thinBook = ledSnapshot({
+    bookFacilities: [
+      facility({ rank: 1, name: 'SUMMIT RIDGE RECOVERY', facilityKey: 'SUMMIT', payerCount: 1 }),
+      facility({ rank: 2, name: 'PHOENIX RENEWAL', facilityKey: 'PHX', city: 'Phoenix', state: 'AZ', payerCount: 1 }),
+    ],
+    facilities: [
+      facility({ rank: 1, name: 'NASHVILLE MENTAL HEALTH', facilityKey: 'NASH' }),
+      facility({ rank: 2, name: 'KENTUCKY WELLNESS CENTER', facilityKey: 'KWC' }),
+    ],
+  } as Partial<QualifySnapshot>);
+  // POSITIVE CONTROL: un-narrowed, BOTH member facilities are named by the S3 line.
+  const wide = gridRegion(withFacility(thinBook));
+  assert.match(wide, /Not in this book:/);
+  assert.match(wide, /NASHVILLE MENTAL HEALTH · KENTUCKY WELLNESS CENTER/);
+
+  // Narrowed to NASH: the empty state now says the NASH fact, so the S3 line must not repeat it —
+  // and must still carry KWC, which the empty state is silent about.
+  const narrowed = gridRegion(withFacility(thinBook, { facilityNarrow: ['NASH'] }));
+  assert.match(narrowed, /This member HAS billed at NASHVILLE MENTAL HEALTH/, 'the empty state speaks');
+  // ⚠ BOUND TO THE S3 LINE, not the whole region: the picker echoes the selection back inside its own
+  // tag (and again in the tag's "Remove …" label), so a document-wide occurrence count answers a
+  // question about the CONTROL rather than about the two sentences.
+  // Bounded on the <p>, not the nearest <div> — `rowAround` walks back to a div and lands inside the
+  // picker's own chip box, which is markup about the CONTROL rather than about either sentence.
+  const notInBook = outerHtmlFrom(narrowed, narrowed.lastIndexOf('<p', narrowed.indexOf('Not in this book')));
+  assert.match(notInBook, /KENTUCKY WELLNESS CENTER/, 'KWC is not lost — the empty state is silent about it');
+  assert.ok(
+    !notInBook.includes('NASHVILLE MENTAL HEALTH'),
+    'the facility is named by the sentence that is about it, and only there',
+  );
+
+  // Narrowed to BOTH: the empty state covers the whole set, so the S3 line has nothing left to say.
+  const all = gridRegion(withFacility(thinBook, { facilityNarrow: ['NASH', 'KWC'] }));
+  assert.match(all, /HAS billed at NASHVILLE MENTAL HEALTH and KENTUCKY WELLNESS CENTER/);
+  assert.ok(!all.includes('Not in this book'), 'nothing left for it to add');
+});
+
+test('S4/M — a lost vocabulary never renders "On · 1 of 0"', () => {
+  // REACHABLE: a failed options reload leaves the selection behind, and `showFacilityLine` keeps the
+  // control on screen precisely so the narrow stays clearable. `facetReading(selected, 0)` would then
+  // print a denominator of zero under a numerator of one. GUARDED, not merely commented.
+  const html = answerHtml(threeStateSnapshot(), { facilityOptions: [], facilityNarrow: ['NASH'] });
+  assert.match(html, /aria-label="Facility"/, 'positive control: the control is still on screen, still clearable');
+  assert.ok(!html.includes('of 0'), 'no denominator of zero');
+  assert.match(html, /1 picked · list unavailable/, 'it says what it knows and nothing else');
+});
+
+test('S4/M — the facility picker searches the RAW CMD spellings, not just the acronym label', () => {
+  // The wiring half of the picker fix; `pickerMatches` itself is unit-tested in
+  // app/test/multiSelectTagPicker.test.tsx. `display` is NOT recomposed — label parity with the score
+  // cards is why display_acronym exists — so the raw spellings ride as `searchText`.
+  const src = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/resolution-flow.tsx', import.meta.url)),
+    'utf8',
+  );
+  const line = src.split('\n').find((l) => l.includes('searchText:'));
+  assert.ok(line !== undefined, 'the facility picker must opt in to searchText');
+  assert.match(line!, /variants/, 'every raw CMD spelling');
+  assert.match(line!, /o\.value/, 'and the canonical value');
 });
 
 test('S4 — the SECONDARY book section is NOT narrowed, matching what AREA does there today', () => {

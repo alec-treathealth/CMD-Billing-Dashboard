@@ -11,12 +11,14 @@ import {
   canonicalFacilityValue,
   expandFacilitySelection,
   facilitiesElsewhere,
+  facilityCount,
   facilityDisplayNames,
   facilityNarrowKeys,
   indexFacilityCanonical,
   indexFacilityVariants,
   narrowByFacility,
   offerableFacilityOptions,
+  picksWithRows,
 } from '@/lib/qualify/facilityVariants';
 
 const LSMH = { value: 'LONESTAR MENTAL HEALTH', variants: ['LONESTAR MENTAL HEALTH', 'LONESTAR MENTAL HEALTH LLC'] };
@@ -171,4 +173,34 @@ test('S4 — andList reads as English at one, two and three; empty is the empty 
   assert.equal(andList(['A']), 'A');
   assert.equal(andList(['A', 'B']), 'A and B');
   assert.equal(andList(['A', 'B', 'C']), 'A, B and C');
+});
+
+// ── S4 fix round 1 ───────────────────────────────────────────────────────────────────────────────
+
+test('S4/C1 — picksWithRows answers PER PICK, not once for the whole selection', () => {
+  // ⚠ THE FABRICATION THIS REPLACES. The first build asked "does the member have history at ANY picked
+  // facility" and got a boolean, then rendered EVERY picked name as the subject of "This member HAS
+  // billed at …". With picks ['LSMH','NASH'] and a footprint of LSMH alone, that sentence asserted
+  // paid claims at a facility with zero rows — the fabricated-history class, reachable through exactly
+  // the "show me these two houses" case that justified multi-select.
+  const rows = [row('LONESTAR MENTAL HEALTH LLC', 'LSMH')];
+  assert.deepEqual(
+    picksWithRows(['LONESTAR MENTAL HEALTH', 'NASHVILLE MENTAL HEALTH LLC'], NARROW_OPTIONS, rows),
+    ['LONESTAR MENTAL HEALTH'],
+    'only the pick the rows actually cover',
+  );
+  // Variant-aware, like everything else here: the pick is the CANONICAL value, the row is the other
+  // spelling, and they are the same facility.
+  assert.deepEqual(picksWithRows(['LONESTAR MENTAL HEALTH'], NARROW_OPTIONS, rows), ['LONESTAR MENTAL HEALTH']);
+  assert.deepEqual(picksWithRows(['NASHVILLE MENTAL HEALTH LLC'], NARROW_OPTIONS, rows), []);
+  assert.deepEqual(picksWithRows([], NARROW_OPTIONS, rows), []);
+  assert.deepEqual(picksWithRows(['LONESTAR MENTAL HEALTH'], NARROW_OPTIONS, []), [], 'no rows, no claim');
+});
+
+test('S4/M — facilityCount pluralises in ONE place, because four sentences count facilities', () => {
+  // "The 1 facilities behind this answer" shipped in the PRE-S4 area empty state, and three new arms
+  // would have inherited it. One derivation, so a fix lands everywhere at once.
+  assert.equal(facilityCount(0), '0 facilities');
+  assert.equal(facilityCount(1), '1 facility');
+  assert.equal(facilityCount(2), '2 facilities');
 });

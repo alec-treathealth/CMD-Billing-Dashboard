@@ -122,7 +122,7 @@
  *                                `filters` or `snapshot` would be a presentation control silently
  *                                re-issuing a ranking request (invariant n).
  *
- * TWENTY SWITCH ARMS, NINETEEN ACTIONS. The nineteenth is `default: return state` — an arm the
+ * TWENTY SWITCH ARMS, NINETEEN ACTIONS. The twentieth is `default: return state` — an arm the
  * `ShellAction` union makes unreachable through the type system, kept because the type system is not
  * the only caller: a hot-reloaded action queued against a newer reducer, or a hand-written dispatch
  * in a future test, would otherwise fall off the end and return `undefined` as the whole state. It
