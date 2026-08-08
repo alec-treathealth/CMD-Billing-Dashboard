@@ -1756,9 +1756,15 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
       ? null
       : [
           skipped ? 'All plans — no plan chosen' : 'The plan you picked',
+          // ⚠ "RANKED", NOT A BARE "UNDER". On the pick-rejected path this line renders directly above
+          // a caption reading "Could not scope to the picked plan — showing the largest by volume", and
+          // "The plan you picked · under AETNA US HEALTHCARE" invited the label to be read as the
+          // PICK'S. Both sentences were true; adjacent, they misread. The verb attaches the label to
+          // the ranking. HOW that label was chosen stays the caption's job alone — restating its
+          // four-way claim here would be a second derivation of one fact, which is how they drift.
           allPayers
-            ? `across all ${snap.payerOptions.length} billed-under labels`
-            : `under ${scopePayer ?? 'one billed-under label'}`,
+            ? `ranked across all ${snap.payerOptions.length} billed-under labels`
+            : `ranked under ${scopePayer ?? 'one billed-under label'}`,
           props.windowDays === null ? 'automatic window' : `trailing ${props.windowDays} days`,
         ].join(' · ');
   /**
@@ -2110,10 +2116,22 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               {/* THE TALLY — the aggregate a reader takes in at a glance, beside the named strip that
                   says WHICH. Derived by counting `cardFacets`, never a hand-written total: a facet
                   that stops rendering (its options ran out, or a future ruling drops it) leaves the
-                  list and the tally together. WINDOW IS ALWAYS ON, so "1 on" is this card's honest
-                  floor rather than a bug — the headline sentence names that exception in words. */}
+                  list and the tally together. WINDOW IS ALWAYS ON, so "1" is this card's honest floor
+                  rather than a bug — the headline sentence names that exception in words.
+
+                  ⚠ "OF THESE" IS LOAD-BEARING, AND SO IS THE AREA CLAUSE. This read a bare "1 on ·
+                  4 off", which is a claim about the SCREEN in a card that holds five of the screen's
+                  six facets. With an area narrow on and every in-card switch off, the card said
+                  "Some switches are on" and then counted one — the Window, which the headline's other
+                  arm explicitly discounts. Two live narrows, a tally of one, and nothing pointing at
+                  the one that is elsewhere.
+                  The fix is NOT to fold AREA into `cardFacets`: its control lives beside the grid it
+                  narrows and that placement is the honesty argument made in layout (see AreaLine).
+                  Instead the tally scopes its claim to this card ("of these") and NAMES the narrow
+                  that is not in it when that narrow is live. Wording is unratified — plain on purpose. */}
               <p className="text-xs text-teal200">
-                <span className="font-semibold text-white">{cardFacetsOn} on</span> · {cardFacets.length - cardFacetsOn} off
+                <span className="font-semibold text-white">{cardFacetsOn} of these {cardFacets.length} switches on</span>
+                {areaActive ? ' · plus the area narrow, beside the list' : ''}
                 {props.narrowExpanded ? '' : ' — open the fields to change any of them'}
               </p>
 
@@ -2152,155 +2170,155 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 id="qualify-narrow-fields"
                 className="q-narrow-fields relative flex flex-col gap-2.5 rounded-lg border border-line bg-surface px-3.5 py-3"
               >
-            <div data-v3-facet className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-medium uppercase tracking-wide text-ink400">Window</span>
-              {/* THE ONE FACET THAT IS NEVER OFF, and the inventory says so rather than pretending
-                  otherwise. A ranking always has a window; "Automatic" is a CHOICE OF window, not the
-                  absence of one — so this reads "On · automatic" or "On · 90 days", never "Off". The
-                  Collections model carries the same caveat (its 90-day recency chip is a real default
-                  narrowing, captioned as "· Last 90 days" rather than hidden). */}
-              <FacetState on text={props.windowDays === null ? 'automatic' : `${props.windowDays} days`} />
-              {WINDOW_CHOICES.map((d) => {
-                const active = props.windowDays === d;
-                return (
+                <div data-v3-facet className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-medium uppercase tracking-wide text-ink400">Window</span>
+                  {/* THE ONE FACET THAT IS NEVER OFF, and the inventory says so rather than pretending
+                      otherwise. A ranking always has a window; "Automatic" is a CHOICE OF window, not the
+                      absence of one — so this reads "On · automatic" or "On · 90 days", never "Off". The
+                      Collections model carries the same caveat (its 90-day recency chip is a real default
+                      narrowing, captioned as "· Last 90 days" rather than hidden). */}
+                  <FacetState on text={props.windowDays === null ? 'automatic' : `${props.windowDays} days`} />
+                  {WINDOW_CHOICES.map((d) => {
+                    const active = props.windowDays === d;
+                    return (
+                      <button
+                        key={d}
+                        type="button"
+                        aria-pressed={active}
+                        onClick={() => props.onWindowDays(d)}
+                        className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
+                          active ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
+                        }`}
+                      >
+                        {d} days{active ? ' · selected' : ''}
+                      </button>
+                    );
+                  })}
                   <button
-                    key={d}
                     type="button"
-                    aria-pressed={active}
-                    onClick={() => props.onWindowDays(d)}
+                    aria-pressed={props.windowDays === null}
+                    onClick={() => props.onWindowDays(null)}
                     className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
-                      active ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
+                      props.windowDays === null ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
                     }`}
                   >
-                    {d} days{active ? ' · selected' : ''}
+                    Automatic{props.windowDays === null ? ' · selected' : ''}
                   </button>
-                );
-              })}
-              <button
-                type="button"
-                aria-pressed={props.windowDays === null}
-                onClick={() => props.onWindowDays(null)}
-                className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
-                  props.windowDays === null ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
-                }`}
-              >
-                Automatic{props.windowDays === null ? ' · selected' : ''}
-              </button>
-            </div>
+                </div>
 
-            <FilterLine
-              label="Plan type"
-              options={facets.planTypes}
-              selected={props.filters.planTypes}
-              onToggle={(v) => props.onToggleFilter('planType', v)}
-            />
-            <FilterLine
-              label="Funding"
-              options={facets.funding}
-              selected={props.filters.funding}
-              onToggle={(v) => props.onToggleFilter('funding', v)}
-            />
+                <FilterLine
+                  label="Plan type"
+                  options={facets.planTypes}
+                  selected={props.filters.planTypes}
+                  onToggle={(v) => props.onToggleFilter('planType', v)}
+                />
+                <FilterLine
+                  label="Funding"
+                  options={facets.funding}
+                  selected={props.filters.funding}
+                  onToggle={(v) => props.onToggleFilter('funding', v)}
+                />
 
-            {/* The employer tag-search: a visible dropdown whose SUMMARY states the current reach,
-                so the count is readable without opening it. */}
-            {facets.employers.length > 0 ? (
-              <details data-v3-facet className="group/emp text-xs">
-                {/* A REAL dropdown control, not a text link: same pill geometry as every other chip
-                    on these lines, with its own caret. `list-none` + the webkit rule kill the
-                    native marker so the caret is ours and points the right way when open.
-                    The state badge sits INSIDE the summary because this facet's controls are behind
-                    the disclosure — the inventory has to be readable without opening it. */}
-                <summary className="flex w-fit cursor-pointer list-none items-center gap-2 rounded-full border border-line bg-surface px-3 py-1 text-xs font-semibold text-ink900 transition-colors hover:border-teal500 hover:text-teal700 [&::-webkit-details-marker]:hidden">
-                  <span className="text-xs font-medium uppercase tracking-wide text-ink400">Employers</span>
-                  <FacetState {...facetReading(props.filters.employers, facets.employers.length)} />
-                  <span aria-hidden className="text-ink400 transition-transform group-open/emp:rotate-180">
-                    ▾
-                  </span>
-                </summary>
-                <div className="mt-2 flex flex-col gap-2 rounded-xl border border-line bg-ground p-3">
-                  <label htmlFor="qualify-answer-employers" className="text-xs font-medium text-ink900">
-                    Find an employer
-                  </label>
-                  <input
-                    id="qualify-answer-employers"
-                    type="text"
-                    value={props.employerQuery}
-                    onChange={(e) => props.onEmployerQuery(e.target.value)}
-                    autoComplete="off"
-                    className="max-w-sm rounded-lg border border-line bg-surface px-3 py-1.5 text-sm text-ink900 outline-none transition-colors focus:border-teal500 focus:ring-2 focus:ring-teal500/25"
-                  />
-                  <div className="flex max-h-56 flex-wrap gap-1.5 overflow-y-auto">
-                    {employerOptions.map((o) => {
-                      const on = props.filters.employers.includes(o.value);
+                {/* The employer tag-search: a visible dropdown whose SUMMARY states the current reach,
+                    so the count is readable without opening it. */}
+                {facets.employers.length > 0 ? (
+                  <details data-v3-facet className="group/emp text-xs">
+                    {/* A REAL dropdown control, not a text link: same pill geometry as every other chip
+                        on these lines, with its own caret. `list-none` + the webkit rule kill the
+                        native marker so the caret is ours and points the right way when open.
+                        The state badge sits INSIDE the summary because this facet's controls are behind
+                        the disclosure — the inventory has to be readable without opening it. */}
+                    <summary className="flex w-fit cursor-pointer list-none items-center gap-2 rounded-full border border-line bg-surface px-3 py-1 text-xs font-semibold text-ink900 transition-colors hover:border-teal500 hover:text-teal700 [&::-webkit-details-marker]:hidden">
+                      <span className="text-xs font-medium uppercase tracking-wide text-ink400">Employers</span>
+                      <FacetState {...facetReading(props.filters.employers, facets.employers.length)} />
+                      <span aria-hidden className="text-ink400 transition-transform group-open/emp:rotate-180">
+                        ▾
+                      </span>
+                    </summary>
+                    <div className="mt-2 flex flex-col gap-2 rounded-xl border border-line bg-ground p-3">
+                      <label htmlFor="qualify-answer-employers" className="text-xs font-medium text-ink900">
+                        Find an employer
+                      </label>
+                      <input
+                        id="qualify-answer-employers"
+                        type="text"
+                        value={props.employerQuery}
+                        onChange={(e) => props.onEmployerQuery(e.target.value)}
+                        autoComplete="off"
+                        className="max-w-sm rounded-lg border border-line bg-surface px-3 py-1.5 text-sm text-ink900 outline-none transition-colors focus:border-teal500 focus:ring-2 focus:ring-teal500/25"
+                      />
+                      <div className="flex max-h-56 flex-wrap gap-1.5 overflow-y-auto">
+                        {employerOptions.map((o) => {
+                          const on = props.filters.employers.includes(o.value);
+                          return (
+                            <button
+                              key={o.value}
+                              type="button"
+                              aria-pressed={on}
+                              onClick={() => props.onToggleFilter('employer', o.value)}
+                              className={`rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors ${
+                                on ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
+                              }`}
+                            >
+                              {o.value}
+                              <span className="font-mono tabular-nums text-ink400"> · {o.members.toLocaleString()}</span>
+                              {on ? ' · on' : ''}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {employerOptions.length < employerMatches.length ? (
+                        <p className="text-ink600">
+                          Showing the {employerOptions.length} largest of {employerMatches.length} matches — type to narrow.
+                        </p>
+                      ) : null}
+                    </div>
+                  </details>
+                ) : null}
+
+                {/* Claims-side scope: which billed-under label the ranking is scoped to. MOVED INSIDE the
+                    inventory block 2026-08-07 — it was the one facet living outside the panel that claims
+                    to list every facet, and after a Skip it is the facet that matters most (it is the
+                    un-blend). Its state badge reads "Off · all N labels" when nothing is selected, which
+                    is now a REACHABLE state rather than a hypothetical: before the identifier-wide skip,
+                    the core always resolved a dominant label and one chip was always lit.
+                    Its CAPTION moved up to the card's summary with the card change — a sentence that
+                    appears only once you open the disclosure cannot do the job it exists for. */}
+                {snap.payerOptions.length > 1 ? (
+                  <div data-v3-facet className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-medium uppercase tracking-wide text-ink400">Billed under</span>
+                    <FacetState
+                      on={!allPayers}
+                      text={allPayers ? `all ${snap.payerOptions.length} labels` : (scopePayer ?? '1 label')}
+                    />
+                    {snap.payerOptions.map((p) => {
+                      // ⚠ COMPARE AGAINST THE SCOPE, NOT THE NAME. `resolved.payerName` is null under an
+                      // all-payers ranking, so `=== p.payer` is false for every chip and none lights —
+                      // which is the correct reading and the Collections model exactly (nothing selected
+                      // means no restriction). Going through `scopePayer` states that rather than relying
+                      // on a null comparison to happen to do the right thing.
+                      const active = !allPayers && scopePayer === p.payer;
                       return (
                         <button
-                          key={o.value}
+                          key={p.payer}
                           type="button"
-                          aria-pressed={on}
-                          onClick={() => props.onToggleFilter('employer', o.value)}
-                          className={`rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors ${
-                            on ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
+                          aria-pressed={active}
+                          onClick={() => props.onPayerOverride(active ? null : p.payer)}
+                          className={`rounded-full border px-3 py-1 text-xs font-semibold ${
+                            active ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600'
                           }`}
                         >
-                          {o.value}
-                          <span className="font-mono tabular-nums text-ink400"> · {o.members.toLocaleString()}</span>
-                          {on ? ' · on' : ''}
+                          {p.payer}
+                          <span className="ths-num" aria-label={`${p.lines} charge lines under this label`}>
+                            {' '}
+                            · {p.lines.toLocaleString()}
+                          </span>
+                          {active ? ' · showing' : ''}
                         </button>
                       );
                     })}
                   </div>
-                  {employerOptions.length < employerMatches.length ? (
-                    <p className="text-ink600">
-                      Showing the {employerOptions.length} largest of {employerMatches.length} matches — type to narrow.
-                    </p>
-                  ) : null}
-                </div>
-              </details>
-            ) : null}
-
-            {/* Claims-side scope: which billed-under label the ranking is scoped to. MOVED INSIDE the
-                inventory block 2026-08-07 — it was the one facet living outside the panel that claims
-                to list every facet, and after a Skip it is the facet that matters most (it is the
-                un-blend). Its state badge reads "Off · all N labels" when nothing is selected, which
-                is now a REACHABLE state rather than a hypothetical: before the identifier-wide skip,
-                the core always resolved a dominant label and one chip was always lit.
-                Its CAPTION moved up to the card's summary with the card change — a sentence that
-                appears only once you open the disclosure cannot do the job it exists for. */}
-            {snap.payerOptions.length > 1 ? (
-              <div data-v3-facet className="flex flex-wrap items-center gap-2">
-                <span className="text-xs font-medium uppercase tracking-wide text-ink400">Billed under</span>
-                <FacetState
-                  on={!allPayers}
-                  text={allPayers ? `all ${snap.payerOptions.length} labels` : (scopePayer ?? '1 label')}
-                />
-                {snap.payerOptions.map((p) => {
-                  // ⚠ COMPARE AGAINST THE SCOPE, NOT THE NAME. `resolved.payerName` is null under an
-                  // all-payers ranking, so `=== p.payer` is false for every chip and none lights —
-                  // which is the correct reading and the Collections model exactly (nothing selected
-                  // means no restriction). Going through `scopePayer` states that rather than relying
-                  // on a null comparison to happen to do the right thing.
-                  const active = !allPayers && scopePayer === p.payer;
-                  return (
-                    <button
-                      key={p.payer}
-                      type="button"
-                      aria-pressed={active}
-                      onClick={() => props.onPayerOverride(active ? null : p.payer)}
-                      className={`rounded-full border px-3 py-1 text-xs font-semibold ${
-                        active ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600'
-                      }`}
-                    >
-                      {p.payer}
-                      <span className="ths-num" aria-label={`${p.lines} charge lines under this label`}>
-                        {' '}
-                        · {p.lines.toLocaleString()}
-                      </span>
-                      {active ? ' · showing' : ''}
-                    </button>
-                  );
-                })}
-              </div>
-            ) : null}
+                ) : null}
               </div>
             ) : null}
           </section>

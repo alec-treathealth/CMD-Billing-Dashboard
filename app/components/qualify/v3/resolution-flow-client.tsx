@@ -178,9 +178,12 @@ export function ResolutionFlowClient({
 
   /** The NARROW SEARCH card's disclosure. A pure presentation flip that reaches no request — it
    *  writes the one reducer field `scopeKeyOf` does not read, so the fetch effect below cannot
-   *  observe it (flow-state.ts invariant n). It is in the reducer rather than local state because a
-   *  Skip must land the card OPEN and a plan pick must land it CLOSED, which no local `useState`
-   *  could express in a component this test suite cannot mount. */
+   *  observe it (flow-state.ts invariant n). It is in the reducer for the reason the reducer's own
+   *  header gives: two navigations have to WRITE it — a Skip must land the card OPEN and a plan pick
+   *  must land it CLOSED — so it fails the `trends` orthogonality test that keeps state out. (An
+   *  earlier version of this comment claimed no local `useState` could express that. Not true: a
+   *  `useState` plus an effect keyed on `skipped` could. It would just put a navigation rule outside
+   *  the machine that owns every other one, and out of reach of the field-write table.) */
   const onToggleNarrow = useCallback(() => {
     dispatch({ type: 'narrow_toggled' });
   }, []);

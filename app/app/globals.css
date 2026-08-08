@@ -534,9 +534,14 @@
   }
 }
 
-/* The NARROW SEARCH card's fields, on expand. The flow's OWN motion vocabulary and no second one:
- * 220ms, ease-out, a small rise — the same beat the stage entrance and the skip reveal already use
- * (resolution-flow-client.tsx). Deliberately CSS and not GSAP: the shell's layout effect keys on
+/* The NARROW SEARCH card's fields, on expand. 220ms and a small rise — the same duration and
+ * direction as the stage entrance and the skip reveal (resolution-flow-client.tsx), using the same
+ * `ease-out` this file already uses in four other places.
+ * ⚠ NOT LITERALLY THE SAME CURVE, and the first version of this comment ("the flow's OWN motion
+ * vocabulary and no second one") overstated it: CSS `ease-out` is cubic-bezier(0, 0, 0.58, 1) and
+ * GSAP's `power2.out` is a different curve. What is true is that this matches the ratified contract
+ * as written ("220ms ease-out … One easing") and introduces no new timing idiom to the surface.
+ * Deliberately CSS and not GSAP: the shell's layout effect keys on
  * `[stage, hasSnapshot]`, and adding the expand bit to those deps would replay `ctx.revert()` — the
  * 14px stage rise AND `gsap.set(tiles, {autoAlpha: 0})` — re-hiding the whole scorecard grid on every
  * toggle. CSS also inherits the global prefers-reduced-motion reset above for free, where a JS tween

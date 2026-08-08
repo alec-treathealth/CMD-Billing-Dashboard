@@ -1407,16 +1407,35 @@ test('the window sentence: ladder variants wait while stale; nothing speaks over
 
   // Failed refetch: BOTH variants wait — the failure banner owns the description of what is shown.
   for (const windowDays of [365, null] as const) {
-    const failed = render(
-      props('answer', fixture(), {
-        answer: answerProps({ snapshot: snapshotFixture(), windowDays, snapshotError: 'failed', staleAfterError: true }),
-      }),
-    );
+    const base = { snapshot: snapshotFixture(), windowDays, snapshotError: 'failed', staleAfterError: true } as const;
+    const failed = render(props('answer', fixture(), { answer: answerProps(base) }));
     assert.ok(
       !failed.includes('Showing trailing'),
       `after a failed refetch the sentence must not contradict the banner (windowDays=${windowDays})`,
     );
-    assert.match(failed, />Window</, 'the Window control line stays — it is the escape route');
+    // ⚠ TWO CLAIMS, TWO RENDERS, BECAUSE THE CARD SPLIT THEM. This was one assertion —
+    // `assert.match(failed, />Window</, 'the Window control line stays — it is the escape route')` —
+    // and once the controls moved behind the disclosure it re-targeted itself onto the COLLAPSED
+    // SUMMARY BADGE's label while keeping a message about the control row. Probed on this exact
+    // render: `>Window<` true, the window chips false, the fields well false. It passed; the thing it
+    // named was not in the document. That is precisely the shape `inventoryRegion` exists to remove,
+    // so it is split rather than merely opted in.
+    //
+    // COLLAPSED — the card still STATES the window. A real guarantee in its own right: a failed
+    // refetch suppresses the ladder SENTENCE (above) and must not also blank the inventory.
+    assert.match(
+      inventoryRegion(failed),
+      />Window<\/span><span class="[^"]*">On · /,
+      `the card still states the window's state after a failure (windowDays=${windowDays})`,
+    );
+    // EXPANDED — and the CHIPS are the escape route. Changing the window is how an operator gets out
+    // of a failed refetch, so they must survive it live, with the current one still reading pressed.
+    const open = render(props('answer', fixture(), { answer: answerProps({ ...base, narrowExpanded: true }) }));
+    assert.match(
+      open,
+      windowDays === null ? /aria-pressed="true"[^>]*>Automatic · selected/ : /aria-pressed="true"[^>]*>365 days · selected/,
+      `the Window control line stays — it is the escape route (windowDays=${windowDays})`,
+    );
   }
 });
 
@@ -1792,7 +1811,58 @@ test('THE NARROW SEARCH CARD, COLLAPSED: it states what the search resolved to, 
   const off = (shut.match(/>Off · /g) ?? []).length;
   assert.equal(on, 1, 'window is on and never off — the honest floor for this card, not a bug');
   assert.equal(off, 4, 'plan type, funding, employers, billed under');
-  assert.match(shut, new RegExp(`>${on} on</span> · ${off} off`), 'the tally states what the strip shows');
+  assert.match(
+    shut,
+    new RegExp(`>${on} of these ${on + off} switches on</span>`),
+    'the tally states what the strip shows',
+  );
+  // "OF THESE" IS LOAD-BEARING, not filler. The card holds five of the screen's six facets — AREA's
+  // control lives beside the grid — so an unqualified "1 on" reads as a claim about the whole screen
+  // and can contradict the headline one line above it. See the AREA test below.
+  assert.ok(!shut.includes('area narrow'), 'no area narrow here, so nothing to point at');
+});
+
+test('THE NARROW SEARCH CARD, COLLAPSED: an active AREA narrow is NAMED, so the tally cannot contradict the headline', () => {
+  // ⚠ THE COLLAPSED CARD IS THE ONLY THING ON SCREEN ANSWERING "IS ANYTHING NARROWING THIS SEARCH",
+  // and with an area narrow it was answering incompletely. Every in-card switch off + area on gives:
+  // headline "Some switches are on" (correct — `anyFacetOn` has counted area since 2026-08-07), then
+  // a strip whose only On is the Window, which the headline's OTHER arm explicitly discounts
+  // ("apart from the window, nothing is narrowing this search"). The numeric tally turned that soft
+  // mismatch into a countable one: "1 on" while two narrows are live.
+  //
+  // AREA STAYS OUT OF `cardFacets` — its control is beside the grid it narrows, and "which switches
+  // are on IN HERE" is a different question from "is anything narrowing this AT ALL". So the tally
+  // POINTS at it rather than absorbing it, and keeps the card's own count honest.
+  const r = fixture();
+  const base = threeStateSnapshot();
+  const allPayersThreeStates = {
+    ...base,
+    resolved: { ...base.resolved, payerName: null, payerScope: 'all' },
+  } as unknown as QualifySnapshot;
+  const withArea = (area: string) =>
+    inventoryRegion(
+      render(
+        props('answer', r, {
+          answer: answerProps({
+            snapshot: allPayersThreeStates,
+            skipped: true,
+            scopeSource: 'dominant',
+            candidates: orderedCandidates(r),
+            area,
+          }),
+        }),
+      ),
+    );
+
+  const narrowed = withArea('TN');
+  assert.match(narrowed, /Some switches are on/, 'the headline counts area — it always has');
+  assert.match(narrowed, /plus the area narrow, beside the list/, 'and the tally says where the other one is');
+
+  // NEGATIVE CONTROL. Without it the clause could be unconditional, which would name a narrow that
+  // is not on — the mirror image of the bug being fixed.
+  const wide = withArea(AREA_ALL);
+  assert.ok(!wide.includes('area narrow'), 'no area narrow, no clause');
+  assert.match(wide, /No filters are on/, 'and the headline agrees that nothing is on');
 });
 
 // The AREA facet is the one whose control does NOT live on the control card (#164 put it beside the
@@ -1923,6 +1993,21 @@ test('the inventory sentence is a SKIP affordance — it does not intrude on a r
   // picked path would be exactly the kind of drift this file keeps out. ⚠ BOUNDED: unbounded, the
   // AREA badge below the card satisfied this on its own, so the assertion said nothing about the card.
   assert.match(inventoryRegion(picked), /Off · all \d+/);
+});
+
+test('THE NARROW SEARCH CARD: the scope line attributes the label to the RANKING, not to the picked plan', () => {
+  // ⚠ ADJACENCY, NOT FALSEHOOD. On the pick-rejected path the collapsed card renders its scope line
+  // directly above the billed-under caption, and "The plan you picked · under AETNA US HEALTHCARE"
+  // invited a reader to take that label as the picked plan's — one line above a caption saying the
+  // pick could NOT be scoped. Both sentences were true; adjacent, they misread. The verb attaches the
+  // label to the RANKING, and the caption below keeps sole ownership of HOW the label was chosen —
+  // re-deriving that four-way claim up here is how two sentences about one fact start to drift.
+  const card = inventoryRegion(
+    render(props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'pick' }) })),
+  );
+  assert.match(card, /The plan you picked · ranked under AETNA US HEALTHCARE/);
+  assert.match(card, /Could not scope to the picked plan — showing the largest by volume\./);
+  assert.ok(!/picked · under /.test(card), 'the bare "· under X" reading is the one that misled');
 });
 
 test('a dominant-scoped ranking under a multi-plan pick states the mismatch in words, not chips', () => {
@@ -2259,3 +2344,4 @@ test('a ticker click seeds the area the SAME way the grid buckets it', () => {
     assert.ok(chips.some((c) => c.key === key), `a click on ${t.name} always lands on a chip that exists`);
   }
 });
+
