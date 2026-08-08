@@ -8,6 +8,7 @@
  */
 import { qualifyRating, QUALIFY_MIN_LINES } from './rating';
 import { computeRatingV2, QUALIFY_AUTH_FIT_MIN_SAMPLE, type QualifyProvenance } from './ratingV2';
+import { bedAvailabilityTier, bedStateOf } from './bedState';
 import { QUALIFY_RATING_CONFIDENT_PATIENTS } from './sampleGate';
 import { confidenceOf } from './confidence';
 import { facilityLocation } from './facilityLocations';
@@ -408,11 +409,25 @@ function entityLabel(entityIds: string[] | null | undefined): 'BXR' | 'Indigo' |
 /**
  * Shape + rate + sort the facility rows. v2 (qualify-v2-build-plan §5): every card carries the
  * five-factor reading (computed HERE, server-side, from NON-DOLLAR inputs only — the wire ships the
- * work, the client never re-derives it), and the RANK is by ratingV2 desc — the factor model is the
- * sort key. Fallbacks keep it total: ratingV2 null (suppressed) sorts after rated cards, then the
- * value-first v1 pct, then name — deterministic under every data shape. FLOOR unchanged: drop
- * < QUALIFY_MIN_LINES flukes on payer-wide paths only.
+ * work, the client never re-derives it).
+ *
+ * THE RANK IS AVAILABILITY FIRST, THEN ratingV2 desc (S1, 2026-08-08). A confirmed-full facility
+ * sorts after every facility that can take a patient today; within a tier nothing changed — the
+ * factor model is still the sort key, then the value-first v1 pct, then name, deterministic under
+ * every data shape. Absence of census data is NEUTRAL, never a demotion. See the comparator.
+ *
+ * This is the ONE layer every surface inherits: SQL emits a deterministic base only
+ * (`order by pct_allowed desc, facility`), the v3 answer grid, the mobile deck and the AI payload
+ * all consume `snapshot.facilities` in array order, and `rank` is stamped here. FLOOR unchanged:
+ * drop < QUALIFY_MIN_LINES flukes on payer-wide paths only.
  */
+/** Round to 1dp about ZERO rather than about +∞ — see `authHeadroomDays`. `+ 0` normalises the -0
+ *  that a tiny negative produces, so a JSON round-trip cannot turn "no headroom" into "-0". */
+function signedRound1(d: number): number {
+  const magnitude = Math.round(Math.abs(d) * 10) / 10;
+  return (d < 0 ? -magnitude : magnitude) + 0;
+}
+
 function assembleFacilities(
   rows: QualifyFacilityRow[],
   ctx: QualifyFactorContext,
@@ -475,6 +490,34 @@ function assembleFacilities(
         outcome.avg_auth_days !== null &&
         outcome.auth_sample >= QUALIFY_AUTH_FIT_MIN_SAMPLE &&
         outcome.stays_sample >= QUALIFY_AUTH_FIT_MIN_SAMPLE;
+      /* THE WINNING BASIS, RESOLVED ONCE (2026-08-08). These four used to be four inline ternaries in
+       * the computeRatingV2 call below, and the wire then shipped a FIFTH and SIXTH expression that
+       * read the raw census — so the card could carry a 373.5-day LOS while the rating beneath it had
+       * scored a 40.1-day one. Same drift class as `payerCount`. Naming the basis makes "what the
+       * rating used" and "what the card says" the same values by construction. */
+      const censusFamily =
+        census?.board_family === 'outpatient' || census?.board_family === 'residential' ? census.board_family : null;
+      const basisAuthDays = useOutcomes ? outcome!.avg_auth_days : (census?.avg_auth_days ?? null);
+      const basisLosDays = useOutcomes ? outcome!.avg_los_days : (census?.avg_los_days ?? null);
+      const basisAuthSample = useOutcomes ? outcome!.auth_sample : (census?.auth_sample ?? null);
+      const basisLosSample = useOutcomes ? outcome!.stays_sample : (census?.los_sample ?? null);
+      /* MAY THE CARD SAY THESE NUMBERS OUT LOUD? Stricter than the SCORING gate, on purpose, and the
+       * difference is the point. `censusSampleBelowFloor` deliberately lets an UNDEFINED sample score
+       * (pre-0088 rows carried no `los_sample` at all and suppressing them would have blanked the
+       * factor for every facility). A DISPLAYED average has no such history to protect: an unknown
+       * sample is not a passing one, so a null count withholds rather than publishes. Outpatient is
+       * excluded for the reason ruling 2026-08-05 already gives — those boards do not maintain
+       * authorization or discharge dates, so the quantity does not exist there, at any sample size. */
+      const authBasisShowable =
+        censusFamily !== 'outpatient' &&
+        basisAuthDays !== null &&
+        basisLosDays !== null &&
+        Number.isFinite(basisAuthDays) &&
+        Number.isFinite(basisLosDays) &&
+        basisAuthSample !== null &&
+        basisLosSample !== null &&
+        basisAuthSample >= QUALIFY_AUTH_FIT_MIN_SAMPLE &&
+        basisLosSample >= QUALIFY_AUTH_FIT_MIN_SAMPLE;
       // Coding lookup: payer-scoped (registry decisions are per payer family). The comparable path
       // carries payer=null → no row → the factor reads "no decision on file", which is the truth.
       const decision = ctx.coding.seeded
@@ -497,11 +540,11 @@ function assembleFacilities(
         codingDecidedOn: decision?.decided_on ?? null,
         codingCodesLabel: decision ? codingCodesLabel(decision) : null,
         medianDaysToPayment: r.median_days_to_payment ?? null,
-        avgAuthDays: useOutcomes ? outcome!.avg_auth_days : (census?.avg_auth_days ?? null),
-        avgLosDays: useOutcomes ? outcome!.avg_los_days : (census?.avg_los_days ?? null),
-        censusFamily: census?.board_family === 'outpatient' || census?.board_family === 'residential' ? census.board_family : null,
-        authSample: useOutcomes ? outcome!.auth_sample : (census?.auth_sample ?? null),
-        losSample: useOutcomes ? outcome!.stays_sample : (census?.los_sample ?? null),
+        avgAuthDays: basisAuthDays,
+        avgLosDays: basisLosDays,
+        censusFamily,
+        authSample: basisAuthSample,
+        losSample: basisLosSample,
         losBasis: useOutcomes ? 'completed' : census?.avg_los_days != null ? 'in_progress' : null,
         losWindowDays: useOutcomes ? outcome!.window_days : null,
         now: ctx.now,
@@ -539,17 +582,40 @@ function assembleFacilities(
         entity: entityLabel(r.entity_ids),
         // v2 — all non-dollar; survive the amounts strip unchanged.
         medianDaysToPayment: r.median_days_to_payment ?? null,
-        avgAuthDays: census?.avg_auth_days ?? null,
-        avgLosDays: census?.avg_los_days ?? null,
+        /* THE SAME BASIS THE RATING SCORED ON, AND ONLY WHEN IT MAY BE SAID OUT LOUD. Until
+         * 2026-08-08 these two read `census?.avg_*` directly — ungated and basis-mismatched — so the
+         * wire could carry the in-progress snapshot while `authFit` two lines up had scored completed
+         * stays, and FRCA's 373.5-day LOS over a `los_sample` of 2 shipped verbatim. Nothing rendered
+         * them, which made it a loaded trap rather than a visible bug; S1 gives them a renderer, so
+         * the gate had to land in the same change. See `authBasisShowable` above for why the display
+         * floor is stricter than the scoring floor. */
+        avgAuthDays: authBasisShowable ? basisAuthDays : null,
+        avgLosDays: authBasisShowable ? basisLosDays : null,
+        /* AUTHORIZED DAYS MINUS ACTUAL LOS — subtracted HERE, once, from the same two gated numbers,
+         * because a client that subtracts them itself is a client re-deriving policy it cannot see
+         * the provenance of. Rounded to 1dp: both inputs are numeric(6,2), and 22.6 - 16.8 in binary
+         * floating point is 5.799999999999997, which no card should ever have to think about.
+         * SIGN-SYMMETRIC rounding, and on a deliberately signed field that is not pedantry:
+         * `Math.round` breaks ties toward +∞, so a raw round would send +3.75 to 3.8 and -3.75 to
+         * -3.7 — the same half-day of headroom rounded two different ways depending on whether the
+         * facility runs under or over its authorization. Round the magnitude, restore the sign. */
+        authHeadroomDays: authBasisShowable ? signedRound1(basisAuthDays! - basisLosDays!) : null,
         // NO censusFamily HERE. It is a rating INPUT (see the computeRatingV2 call above), not part
         // of the client contract — `QualifyFacility` in contract.ts declares no such field, and
         // contract.ts is the frozen single source of truth for what crosses the wire. A mechanical
         // edit put it on both objects; on this one it was undeclared payload that nothing read.
+        // What the client DOES get is `bedState` below: the family's DECISION, not the family.
         nextUrDate: census?.next_ur_date ?? null,
         openBeds: census?.open_beds ?? null,
         // Licensed beds (curated FACILITY_BED_CAPACITY). Null for outpatient — they have no beds,
         // which is correct rather than missing — and for any residential facility not yet curated.
         bedCapacity: census?.bed_capacity ?? null,
+        /* THE BED DECISION, MADE WHERE `board_family` LIVES. The client cannot make it: with only
+         * openBeds/bedCapacity on the wire, `bedCapacity: null` is ambiguous between "outpatient, no
+         * beds" and "residential, uncurated", and every outpatient row carries a written
+         * `open_beds = 0` that a naive reader calls full. This single value drives BOTH the
+         * availability sort tier below and the bed chip's copy, so order and words cannot drift. */
+        bedState: bedStateOf(census?.open_beds ?? null, census?.bed_capacity ?? null, census?.board_family ?? null),
         ratingV2: v2.rating,
         iqBand: v2.band,
         factors: v2.factors,
@@ -557,6 +623,26 @@ function assembleFacilities(
       };
     })
     .sort((a, b) => {
+      /* ── TIER 0 — CAN THEY PHYSICALLY GO THERE? (Alec, 2026-08-08) ────────────────────────────
+       *
+       * The FIRST question of the search tree, ahead of every money signal, because a perfect payer
+       * at a house with no bed is not an answer to "where do I send them right now". Measured the
+       * same day: 6 of 12 residential facilities had zero open beds.
+       *
+       * CENSUS SORTS, IT NEVER FILTERS. A full house drops below every facility that can take the
+       * patient and STAYS IN THE LIST, greyed, with the reason on its own card — the rep is also
+       * keeping a map of where they could send someone tomorrow.
+       *
+       * Only CONFIRMED FULL sinks (`bedAvailabilityTier`). Outpatient, uncurated and no-census-row
+       * all stay tier 0: absence of data must not punish, and on a census-cron outage every row
+       * falls to 'unknown', which collapses this term to a constant and leaves the order below
+       * exactly as it was. That is the difference between degrading and reshuffling.
+       *
+       * `rank` is stamped i+1 AFTER this sort, so a full facility's rank reflects its sunk position.
+       * Deliberate: rank answers "where do I send them right now", not "how good is the paying". */
+      const at = bedAvailabilityTier(a.bedState);
+      const bt = bedAvailabilityTier(b.bedState);
+      if (at !== bt) return at - bt;
       // v2 rank: factor rating desc, nulls (suppressed) last …
       if (a.ratingV2 === null && b.ratingV2 !== null) return 1;
       if (b.ratingV2 === null && a.ratingV2 !== null) return -1;

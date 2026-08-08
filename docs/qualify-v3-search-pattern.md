@@ -220,3 +220,65 @@ off"* was false one click in: Skip, then "90 days", and the headline denied any 
 Window row beneath read `On · 90 days`. The window is a real narrowing that can never be turned off,
 so the sentence says so — *"No filters are on — apart from the window, nothing is narrowing this
 search"* — rather than pretending the screen has no exceptions.
+
+## Census on the answer stage — availability is the first sort tier (2026-08-08)
+
+**Added, not amended.** Nothing above is altered; this records a ruling the answer stage did not
+previously implement.
+
+Alec's ruling: *"surfacing facility census is very important"*, and **census SORTS, it never
+filters.** The rep on the phone is answering *"where is the best place to send them right now"*, and
+the answer stage was silent on the one input to that question — v3 rendered no bed chip, no UR date
+and no length-of-stay at all. #163's *"a FULL house says so"* fix had landed only on the v2
+`FacilityPanel`, which is behind `QUALIFY_V3_FLOW=off` and therefore invisible to everyone. Census
+still moved the rating through the `authFit` factor, so the surface was shaped by a fact it refused
+to state.
+
+**The measured context that makes this the first tier, not a decoration.** On 2026-08-08, **6 of the
+12 residential facilities had zero open beds**. A ranking that puts a facility with no bed at the top
+because it pays well is not answering the question that was asked.
+
+- **Tier 0 — can they physically go there.** An open bed, a facility beds do not apply to
+  (outpatient), or **no census reading at all**. Absence of data must not punish: the census cron is
+  hourly and fail-soft, so on an outage every row falls to `unknown`, the tier collapses to a
+  constant, and the book degrades to exactly the previous rating order instead of reshuffling itself.
+- **Tier 1 — confirmed full only.** Residential, a real licensed-bed denominator, zero of it free.
+  Within a tier nothing changed: ratingV2 desc, then the value-first pct, then name.
+
+**A full facility stays on screen, greyed, and says why.** The rep is also building a map of where
+they could send someone tomorrow. `rank` is stamped after the sort, so a full facility's rank shows
+its sunk position — deliberately: rank answers *"where do I send them right now"*, not *"how good is
+the paying"*. The card states the reason in words (*"No open beds — ranked below every facility that
+can admit today. The rating is unchanged."*) rather than letting appearance carry the claim.
+
+> **The ratified `opacity-60` dim was measured and rejected for this card.** That idiom
+> (design-system §Motion) is a TRANSIENT treatment for content about to be replaced. Applied
+> persistently to a whole card it composites every text token against the background: ink900 falls
+> 14.73:1 → **4.07**, ink600 7.07 → **2.79**, the 30px band numeral 2.99–5.05 → **1.86–2.55** — below
+> AA for body text and below AA-large for the numeral, on the row carrying the most operationally
+> important sentence on the screen. The sink is expressed instead by dropping the card's IQ-band wash
+> for the neutral ground tone, which makes it recede from its coloured neighbours while every text
+> token *gains* contrast. Chip text is ink900 for the same reason: `text-status-warn` on its own 10%
+> wash measures **2.71:1**, which the v2 chips inherit and which is not something to carry forward.
+
+**Two zeroes, one derivation.** `open_beds = 0` is written for every outpatient row — those boards
+carry no "Open Bed" status labels — so it means *"beds do not apply"* there and *"full"* on a
+residential board with a real denominator. Eleven of the twenty-three registered facilities are
+outpatient, so a naive `openBeds === 0` reading marks half the book at capacity; the inverse mistake
+(`openBeds > 0` as the render guard) is what silenced five genuinely full houses before #163. The
+disambiguator is `board_family`, which lives on the server row and has never crossed the wire — so
+the **server ships the decision** (`bedState`), not the field, and the sort tier, the greying and the
+chip copy all read that one value. Same precedent as `payerCount`/`solePayer`: decide once, where the
+inputs are.
+
+**Auth headroom.** `avg_auth_days − avg_los_days`, computed server-side from the same basis the
+rating selected (completed outcomes beat the census snapshot at a sample of 3+), rendered only when
+both halves clear the sample floor. Measured live: NASH 22.6 vs 16.8, LSMH 21.1 vs 12.6 — roughly
+6–8 authorized days routinely unused. Shipped **signed**, so an overrun reads as an overrun instead
+of being silently dropped.
+
+**One footgun closed on the way.** `avgAuthDays`/`avgLosDays` crossed the wire ungated and
+basis-mismatched — always the raw in-progress snapshot, even when the rating had scored completed
+outcomes — so `FRCA`'s 373.5-day average over a `los_sample` of **2** reached the client verbatim.
+Nothing rendered them, which made it a loaded trap rather than a live defect. S1 gave them a
+renderer, so the gate landed in the same change.

@@ -7,6 +7,7 @@
  */
 import type { QualifyConfidence } from './confidence';
 import type { QualifyProvenance, QualifyIqBand, QualifyFactorReading } from './ratingV2';
+import type { QualifyBedState } from './bedState';
 
 // Rating-v2 vocabulary re-exported so client surfaces keep ONE import seam (contract.ts) — the
 // engine itself (ratingV2.ts) is a pure leaf both may import directly for helpers.
@@ -577,9 +578,34 @@ export interface QualifyFacility {
    *  lines — the TTP factor's input. Paid-lines-only by construction (the window is payment-dated);
    *  the factor detail discloses that rather than pretending unpaid claims are visible. */
   medianDaysToPayment: number | null;
-  /** monday census aggregates (Phase G; fail-soft null until the census snapshot table is live). */
+  /**
+   * monday census aggregates — average AUTHORIZED days and average LENGTH OF STAY, in days.
+   *
+   * ⚠ GATED AND BASIS-ALIGNED SINCE 2026-08-08, and both halves of that matter. These used to ship
+   * `census.avg_*` RAW: no sample floor, and no alignment with the basis the rating had just scored
+   * on three lines earlier. FRCA's 373.5-day average LOS over a `los_sample` of **2** crossed the
+   * wire verbatim — outpatient enrolment measured as if it were a residential stay. Nothing rendered
+   * it, so it was a loaded trap rather than a live defect; it is closed now rather than documented.
+   *
+   * What ships now is exactly what `authFit` scored: completed stays (0091) when that basis won,
+   * the census snapshot otherwise, and NULL whenever either side is below
+   * QUALIFY_AUTH_FIT_MIN_SAMPLE or the facility is outpatient (where the ruling of 2026-08-05 is
+   * that authorization is not measured at all). A card may therefore render these next to the
+   * authFit factor row without the two contradicting each other.
+   */
   avgAuthDays: number | null;
   avgLosDays: number | null;
+  /**
+   * AUTHORIZED DAYS MINUS ACTUAL LOS — the headroom KPI, computed server-side from the SAME gated
+   * basis as the two fields above so the client never subtracts two numbers it cannot see the
+   * provenance of (the payerCount/solePayer precedent: decide once, on the server).
+   *
+   * SIGNED, deliberately. Positive is unused authorization — measured live 2026-08-08, NASH 22.6
+   * authorized vs 16.8 actual and LSMH 21.1 vs 12.6, so ~6-8 authorized days routinely go unused.
+   * Negative is an OVERRUN, which is the same fact read the other way and must not be silently
+   * dropped. Null whenever `avgAuthDays`/`avgLosDays` are null, and for the same reasons.
+   */
+  authHeadroomDays: number | null;
   /** Next UR (utilization review) date on this facility's census, ISO — the §5 UR banner ("auth may
    *  change soon"), a banner not a factor. Null when no census data / nothing scheduled. */
   nextUrDate: string | null;
@@ -590,6 +616,21 @@ export interface QualifyFacility {
    *  residential facilities not yet in the curated map. A count, never a dollar: identical for an
    *  admissions_seat session. */
   bedCapacity: number | null;
+  /**
+   * WHAT WE CAN HONESTLY SAY ABOUT BEDS — the computed answer, not the raw inputs.
+   *
+   * `openBeds`/`bedCapacity` alone CANNOT express this and never could: `bedCapacity: null` means
+   * "outpatient, beds do not apply" AND "residential, not yet curated", and `openBeds: 0` is written
+   * for every outpatient row because those boards carry no "Open Bed" labels. The disambiguator is
+   * `board_family`, which is on the SERVER row and deliberately not on this one (see core.ts) — so
+   * the server ships the DECISION rather than the field the client would have to re-derive policy
+   * from. Same precedent as `payerCount`/`solePayer`: decide once, where the inputs actually live.
+   *
+   * It drives two things in lockstep: the availability SORT TIER (`bedAvailabilityTier`, at the head
+   * of the assembleFacilities comparator) and the bed chip's copy. One derivation, so the grey, the
+   * order and the words can never drift apart. See `bedState.ts` for the truth table.
+   */
+  bedState: QualifyBedState;
   /** The five-factor rating (0-100 over available weights) — the v2 SORT KEY and numeral. Null =
    *  suppressed (sample floor / no money evidence) → the honest-restraint card. */
   ratingV2: number | null;

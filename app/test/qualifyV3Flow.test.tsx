@@ -1603,6 +1603,89 @@ test('the answer stage: window disclosed in one line, hero named, unrated card i
   assert.match(html, /Billed under/);
 });
 
+// ── CENSUS ON THE DEFAULT SURFACE (S1, 2026-08-08) ───────────────────────────────────────────────
+//
+// v3 is what everyone actually sees (`qualifyV3FlowEnabled()` in app/app/qualify/page.tsx), and it
+// rendered NO census at all: no bed chip, no UR date, no length-of-stay. #163's "a FULL house says
+// so" fix landed on the v2 FacilityPanel, which is behind QUALIFY_V3_FLOW=off. So the most
+// actionable fact the card can carry — do not route a patient here — was invisible on the shipped
+// surface while quietly moving the rating through the authFit factor.
+//
+// These pin the three states on the v3 card, and the honesty rule that comes with the new sort:
+// a card the ranking SANK must SAY why on its own markup.
+
+const bedCard = (over: Partial<QualifyFacility>) =>
+  render(
+    props('answer', fixture(), {
+      answer: answerProps({
+        snapshot: { ...snapshotFixture(), facilities: [facility(over)] } as unknown as QualifySnapshot,
+      }),
+    }),
+  );
+
+test('v3 card — open beds render as OCCUPANCY, with the denominator', () => {
+  const html = bedCard({ openBeds: 3, bedCapacity: 12, bedState: 'open' });
+  assert.match(html, /3 of 12 beds open/);
+});
+
+test('v3 card — no licensed count falls back to the bare count, never an invented denominator', () => {
+  const html = bedCard({ openBeds: 3, bedCapacity: null, bedState: 'open' });
+  assert.match(html, /3 open beds/);
+  assert.ok(!/\d+ of \d+ beds/.test(html), 'no denominator is implied');
+});
+
+test('v3 card — a FULL house says so, in #163’s ratified words, and STAYS ON SCREEN', () => {
+  const html = bedCard({ openBeds: 0, bedCapacity: 12, bedState: 'full', name: 'FULL HOUSE' });
+  assert.match(html, /Full · 0 of 12/, 'the #163 copy, unchanged');
+  // CENSUS SORTS, IT NEVER FILTERS. The card is still rendered, still named, still rated, and its
+  // explanation is still openable — greying is a visual weight, never a removal.
+  assert.match(html, /FULL HOUSE/);
+  assert.match(html, /aria-label="rating 62 out of 100"/);
+  assert.match(html, /Why this score/);
+  // It SAYS why it is sunk. Hue alone never carries a claim on this surface (house rule), and a
+  // greyed row with no sentence is exactly a claim carried by hue alone.
+  assert.match(html, /ranked below every facility that can admit today/);
+  // Nothing about the sink removes it from the accessibility tree or freezes its controls.
+  assert.ok(!/aria-hidden="true"[^>]*>[^<]*FULL HOUSE/.test(html), 'not hidden from assistive tech');
+  assert.ok(!html.includes('visibility:hidden') && !html.includes('visibility: hidden'));
+  assert.ok(!/<summary[^>]+(disabled|inert)/.test(html), 'the disclosure stays interactive');
+});
+
+test('v3 card — an OUTPATIENT facility claims nothing about beds, and is not greyed', () => {
+  // The pre-#163 error class, which a new consumer reintroduces for free: every outpatient row
+  // carries a written open_beds = 0. Eleven of twenty-three facilities are outpatient.
+  const html = bedCard({ openBeds: 0, bedCapacity: null, bedState: 'not_applicable' });
+  assert.ok(!html.includes('Full'), 'no bed facility, no bed claim');
+  assert.ok(!/\d+ open bed/.test(html), 'and no count either');
+  assert.ok(!html.includes('ranked below every facility'), 'and no sink sentence — it was not sunk');
+});
+
+test('v3 card — no census row stays silent, and is not read as full', () => {
+  const html = bedCard({ openBeds: null, bedCapacity: 12, bedState: 'unknown' });
+  assert.ok(!html.includes('Full'), 'unknown is not full');
+  assert.ok(!/\d+ of 12 beds/.test(html), 'and no occupancy is invented from the capacity alone');
+});
+
+test('v3 card — a scheduled UR is shown, because authorization may change under the rep', () => {
+  const html = bedCard({ nextUrDate: '2026-08-20' });
+  assert.match(html, /UR 2026-08-20/);
+});
+
+test('v3 card — AUTH HEADROOM: the authorized days nobody is using, and the overrun, both plain', () => {
+  // Measured live 2026-08-08: NASH 22.6 authorized vs 16.8 actual, LSMH 21.1 vs 12.6 — 6-8
+  // authorized days routinely unused, and nothing on any surface said so.
+  const spare = bedCard({ avgAuthDays: 22.6, avgLosDays: 16.8, authHeadroomDays: 5.8 });
+  assert.match(spare, /~6d auth headroom/);
+  // The same fact read the other way must not be silently dropped: an overrun is the half that
+  // costs money, and the card that shows only the flattering direction is not a KPI.
+  const over = bedCard({ avgAuthDays: 36.35, avgLosDays: 40.1, authHeadroomDays: -3.8 });
+  assert.match(over, /~4d over auth/);
+  // Below the sample floor the server ships null, and the card must then say NOTHING rather than
+  // render a zero — "we withheld this" and "there is no headroom" are different statements.
+  const withheld = bedCard({ avgAuthDays: null, avgLosDays: null, authHeadroomDays: null });
+  assert.ok(!withheld.includes('auth headroom') && !withheld.includes('over auth'));
+});
+
 // ── Scope honesty (review Critical 1): the ranking's payer scope is a CLAIM and must be labelled ──
 
 test('the billed-under caption distinguishes "you picked", "your plan implies", "we defaulted", and a REJECTED override', () => {

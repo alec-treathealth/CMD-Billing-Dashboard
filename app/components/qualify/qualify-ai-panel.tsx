@@ -57,6 +57,13 @@ function buildInput(question: ChipId, snap: QualifySnapshot, blind: boolean): Qu
       lineCount: f.lineCount,
       medianDaysToPayment: f.medianDaysToPayment,
       payerCount: f.payerCount,
+      /* WHY THIS ARRAY IS IN THIS ORDER (2026-08-08). The slice is deliberately the first TEN in
+       * array order, and that order is now availability-first — so without this field the model
+       * reads a list that has been re-sorted for a reason it cannot see, and calls whatever leads it
+       * "the top read". The prompt's ordering rule is only actionable if the state travels with it.
+       * Nothing else census-shaped is mapped: bed counts, UR dates and LOS averages stay out of the
+       * payload, because the model's job here is to explain the read, not to re-derive the sort. */
+      bedState: f.bedState,
       factors: f.factors.map((x) => ({
         key: x.key,
         label: x.label,

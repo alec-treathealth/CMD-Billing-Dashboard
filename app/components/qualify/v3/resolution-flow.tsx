@@ -73,7 +73,7 @@ import {
   facilitiesInArea,
   type AreaChip,
 } from '../m/area-chips';
-import { IQ_BAND_HEX, IQ_BAND_WASH } from '../tokens';
+import { IQ_BAND_HEX, IQ_BAND_WASH, QUALIFY_PALETTE } from '../tokens';
 
 // ── Pure derivations (exported for the shell and the tests) ─────────────────────────────────────
 
@@ -1173,20 +1173,128 @@ function FactorRows({ facility }: { facility: QualifyFacility }): React.ReactEle
 }
 
 /**
+ * THE CENSUS ROW ON THE V3 CARD (S1, 2026-08-08) — beds, UR, auth headroom.
+ *
+ * v3 is the shipped surface and it carried NO census at all: the #163 bed chip lives on the v2
+ * FacilityPanel, which only renders with QUALIFY_V3_FLOW=off. Census still moved the score through
+ * `authFit`, so the rep saw a rating shaped by a fact the card refused to state — and after S1 it
+ * also moves the ORDER, which makes stating it non-negotiable: a facility cannot be sorted on
+ * something the operator cannot see.
+ *
+ * The bed STATE is not re-derived here. `f.bedState` is the server's answer (bedState.ts), the same
+ * value that decided the sort tier, so the greying, the ordering and these words cannot drift apart.
+ * The COPY is this surface's own — "3 of 12 beds open" reads better on a wide card than the v2
+ * chip's "3 of 12 beds" — with ONE exception: the full case keeps #163's ratified `Full · 0 of N`
+ * verbatim, because that sentence was argued over and is pinned by its own tests.
+ *
+ * CONTRAST. Every chip is 12px (the surface's floor), so every one needs 4.5:1. `text-status-warn`
+ * (#C9881E) on its own 10% wash measures **2.71:1** — the v2 chips inherit that and it is not
+ * something to propagate into new markup. So hue lives in the BORDER and the WASH and the text is
+ * ink900 (≈13.9:1 on either card background). Colour accompanies the word; it never carries it.
+ */
+interface CensusChip {
+  key: string;
+  label: string;
+  title: string;
+  tone: 'warn' | 'plain';
+}
+
+function censusChipsOf(f: QualifyFacility): CensusChip[] {
+  const chips: CensusChip[] = [];
+  const cap = f.bedCapacity;
+  if (f.bedState === 'full' && cap !== null) {
+    chips.push({
+      key: 'beds',
+      // #163's ratified copy, unchanged and deliberately so.
+      label: `Full · 0 of ${cap}`,
+      title: `No open beds — all ${cap} licensed beds occupied on the latest census sync`,
+      tone: 'warn',
+    });
+  } else if (f.bedState === 'open' && f.openBeds !== null) {
+    const tight = cap !== null && cap > 0 && f.openBeds / cap <= 0.15;
+    chips.push({
+      key: 'beds',
+      label: cap !== null && cap > 0 ? `${f.openBeds} of ${cap} beds open` : `${f.openBeds} open bed${f.openBeds === 1 ? '' : 's'}`,
+      title:
+        cap !== null && cap > 0
+          ? `${f.openBeds} of ${cap} licensed beds open (${Math.round((f.openBeds / cap) * 100)}% free) on the latest census sync`
+          : `${f.openBeds} open bed${f.openBeds === 1 ? '' : 's'} on the latest census sync — licensed bed count not on file, so occupancy is unknown`,
+      tone: tight ? 'warn' : 'plain',
+    });
+  }
+  // 'not_applicable' (outpatient) and 'unknown' (no census row / no usable denominator) render
+  // NOTHING. Both are "we cannot say", and a card that says nothing is the honest form of that.
+  if (f.nextUrDate) {
+    chips.push({
+      key: 'ur',
+      label: `UR ${f.nextUrDate}`,
+      title: "A utilization review is scheduled on this facility's census — authorization may change",
+      tone: 'warn',
+    });
+  }
+  /* AUTH HEADROOM — authorized days the facility is not using. Server-computed and server-gated
+   * (`authHeadroomDays`), so this only formats. Rendered from ONE day out, because "~0d" is not a
+   * reading; below that the two averages are the same number and the chip has nothing to add. */
+  const h = f.authHeadroomDays;
+  if (h !== null && Math.abs(h) >= 0.5) {
+    const days = Math.round(Math.abs(h));
+    if (days >= 1) {
+      chips.push({
+        key: 'headroom',
+        label: h > 0 ? `~${days}d auth headroom` : `~${days}d over auth`,
+        title:
+          h > 0
+            ? `Average authorized stay ${f.avgAuthDays}d vs average actual ${f.avgLosDays}d — about ${days} authorized day${days === 1 ? '' : 's'} typically unused here`
+            : `Average actual stay ${f.avgLosDays}d against ${f.avgAuthDays}d authorized — about ${days} day${days === 1 ? '' : 's'} beyond authorization, on the same basis the rating scored`,
+        tone: h > 0 ? 'plain' : 'warn',
+      });
+    }
+  }
+  return chips;
+}
+
+/**
  * `allPayers` is the RANKING's scope, passed down rather than inferred from `f.payerCount`: a
  * single-label card under an all-payers ranking and the same card under a payer-scoped one carry
  * identical counts and are different claims. See the blend disclosure in the body.
  */
 function ScoreCard({ f, allPayers }: { f: QualifyFacility; allPayers: boolean }): React.ReactElement {
   const location = [f.city, f.state].filter(Boolean).join(', ');
+  const chips = censusChipsOf(f);
+  /* SUNK, NOT REMOVED (Alec, 2026-08-08). Census sorts, it never filters: a full house drops below
+   * everything that can admit today and stays on screen, because the rep is also building a map of
+   * where they could send someone tomorrow.
+   *
+   * ⚠ THE RATIFIED `opacity-60` DIM WAS MEASURED AND REJECTED FOR THIS CARD, and the numbers are
+   * the reason rather than taste. That idiom (design-system §Motion; live at the refetch treatment
+   * below) is a TRANSIENT state on content that is about to be replaced. Applied persistently to a
+   * whole card it composites every text token against the background: ink900 falls 14.73:1 → 4.07,
+   * ink600 7.07 → 2.79, and the 30px band numeral 2.99-5.05 → 1.86-2.55. That is below AA for body
+   * text and below AA-large for the numeral — an accessibility regression aimed squarely at the row
+   * carrying the most operationally important sentence on the screen.
+   *
+   * So the sink is expressed WITHOUT touching text alpha: the card drops its IQ-band wash for the
+   * neutral ground tone (so it visibly recedes from its coloured neighbours, and every text token
+   * gains contrast rather than losing it), carries the amber Full chip, and STATES the reason in
+   * words. Nothing here gates input, hides the row from assistive technology, or changes its
+   * markup order. */
+  const sunk = f.bedState === 'full';
   return (
     <li
       data-v3-tile
+      data-bed-state={f.bedState}
       className="rounded-xl border border-line bg-surface p-4 shadow-ths-sm"
       // IQ_BAND_WASH at card level (Phase 5): the wash EXTENDS the numeral's hue, which already sits
       // beside its verdict word — colour accompanies the word, never replaces it. Unrated cards keep
-      // the plain surface: honest restraint stays visually colourless.
-      style={f.iqBand && f.ratingV2 !== null ? { backgroundColor: IQ_BAND_WASH[f.iqBand] } : undefined}
+      // the plain surface: honest restraint stays visually colourless. A SUNK card also gives it up —
+      // the wash is a claim about the paying, and this card's headline is that you cannot use it.
+      style={
+        sunk
+          ? { backgroundColor: QUALIFY_PALETTE.ground }
+          : f.iqBand && f.ratingV2 !== null
+            ? { backgroundColor: IQ_BAND_WASH[f.iqBand] }
+            : undefined
+      }
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 flex-col">
@@ -1282,6 +1390,33 @@ function ScoreCard({ f, allPayers }: { f: QualifyFacility; allPayers: boolean })
           )}
         </div>
       </div>
+      {/* CENSUS — "can they physically go there", which is the first question of the search tree and
+          the one this surface used to answer nowhere. 12px, ink text on tinted borders/washes (see
+          censusChipsOf for the measured reason the text is not tinted). */}
+      {chips.length > 0 ? (
+        <span className="mt-2 flex flex-wrap items-center gap-1.5">
+          {chips.map((c) => (
+            <span
+              key={c.key}
+              className={[
+                'inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-xs font-semibold text-ink900',
+                c.tone === 'warn' ? 'border-status-warn/40 bg-status-warn/10' : 'border-line bg-surface',
+              ].join(' ')}
+              title={c.title}
+            >
+              {c.label}
+            </span>
+          ))}
+        </span>
+      ) : null}
+      {/* THE ROW SAYS WHY IT IS SUNK. A card that dropped below worse-paying facilities without
+          explaining itself would be the ranking making a claim it refuses to show its work for —
+          and greying alone is a claim carried by appearance, which this surface does not do. */}
+      {sunk ? (
+        <p className="mt-1.5 text-xs text-ink600">
+          No open beds — ranked below every facility that can admit today. The rating is unchanged.
+        </p>
+      ) : null}
       <details className="mt-2">
         <summary className="cursor-pointer text-xs font-semibold text-teal700">Why this score</summary>
         <div className="mt-2">
