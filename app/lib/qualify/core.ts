@@ -421,8 +421,13 @@ function entityLabel(entityIds: string[] | null | undefined): 'BXR' | 'Indigo' |
  * all consume `snapshot.facilities` in array order, and `rank` is stamped here. FLOOR unchanged:
  * drop < QUALIFY_MIN_LINES flukes on payer-wide paths only.
  */
-/** Round to 1dp about ZERO rather than about +∞ — see `authHeadroomDays`. `+ 0` normalises the -0
- *  that a tiny negative produces, so a JSON round-trip cannot turn "no headroom" into "-0". */
+/** Round to 1dp about ZERO rather than about +∞ — see `authHeadroomDays`.
+ *
+ *  `+ 0` normalises the -0 a tiny negative produces. NOT for the JSON round-trip, which was the
+ *  reason this comment used to give and is simply untrue: `JSON.stringify(-0)` is already `"0"`.
+ *  It is for the IN-PROCESS value, where -0 survives and leaks through anything that formats or
+ *  compares by sign — `String(-0)` is `"-0"`, and a renderer branching on `h > 0` sends it down the
+ *  overrun path to read "~0d over auth" for a facility with no measurable difference at all. */
 function signedRound1(d: number): number {
   const magnitude = Math.round(Math.abs(d) * 10) / 10;
   return (d < 0 ? -magnitude : magnitude) + 0;
@@ -507,13 +512,22 @@ function assembleFacilities(
        * factor for every facility). A DISPLAYED average has no such history to protect: an unknown
        * sample is not a passing one, so a null count withholds rather than publishes. Outpatient is
        * excluded for the reason ruling 2026-08-05 already gives — those boards do not maintain
-       * authorization or discharge dates, so the quantity does not exist there, at any sample size. */
+       * authorization or discharge dates, so the quantity does not exist there, at any sample size.
+       *
+       * ⚠ `basisAuthDays > 0` MIRRORS THE SCORING GATE (`auth > 0`, ratingV2.ts) and is not
+       * defensive noise. ratingV2 routes a zero authorization to "No authorization … data for this
+       * facility yet"; without the same test here, an authorization of 0 against a 30-day LOS
+       * rendered "~30d over auth" on the card DIRECTLY ABOVE that factor row. Two statements about
+       * the same facility, on the same card, contradicting each other. Latent today — the census
+       * writes NULL rather than 0 and 0091 has no CHECK constraining it — which is exactly what the
+       * raw-wire footgun was until this surface gave it a renderer. */
       const authBasisShowable =
         censusFamily !== 'outpatient' &&
         basisAuthDays !== null &&
         basisLosDays !== null &&
         Number.isFinite(basisAuthDays) &&
         Number.isFinite(basisLosDays) &&
+        basisAuthDays > 0 &&
         basisAuthSample !== null &&
         basisLosSample !== null &&
         basisAuthSample >= QUALIFY_AUTH_FIT_MIN_SAMPLE &&

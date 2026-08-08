@@ -1236,19 +1236,20 @@ function censusChipsOf(f: QualifyFacility): CensusChip[] {
    * (`authHeadroomDays`), so this only formats. Rendered from ONE day out, because "~0d" is not a
    * reading; below that the two averages are the same number and the chip has nothing to add. */
   const h = f.authHeadroomDays;
-  if (h !== null && Math.abs(h) >= 0.5) {
-    const days = Math.round(Math.abs(h));
-    if (days >= 1) {
-      chips.push({
-        key: 'headroom',
-        label: h > 0 ? `~${days}d auth headroom` : `~${days}d over auth`,
-        title:
-          h > 0
-            ? `Average authorized stay ${f.avgAuthDays}d vs average actual ${f.avgLosDays}d — about ${days} authorized day${days === 1 ? '' : 's'} typically unused here`
-            : `Average actual stay ${f.avgLosDays}d against ${f.avgAuthDays}d authorized — about ${days} day${days === 1 ? '' : 's'} beyond authorization, on the same basis the rating scored`,
-        tone: h > 0 ? 'plain' : 'warn',
-      });
-    }
+  const days = h === null ? 0 : Math.round(Math.abs(h));
+  // `days >= 1` is the WHOLE condition. It previously sat behind an `Math.abs(h) >= 0.5` guard that
+  // could not fail — Math.round(0.5) is 1, so the two tests are the same test — and a branch that
+  // cannot be false reads as coverage without being any. One reading, one condition.
+  if (h !== null && days >= 1) {
+    chips.push({
+      key: 'headroom',
+      label: h > 0 ? `~${days}d auth headroom` : `~${days}d over auth`,
+      title:
+        h > 0
+          ? `Average authorized stay ${f.avgAuthDays}d vs average actual ${f.avgLosDays}d — about ${days} authorized day${days === 1 ? '' : 's'} typically unused here`
+          : `Average actual stay ${f.avgLosDays}d against ${f.avgAuthDays}d authorized — about ${days} day${days === 1 ? '' : 's'} beyond authorization, on the same basis the rating scored`,
+      tone: h > 0 ? 'plain' : 'warn',
+    });
   }
   return chips;
 }

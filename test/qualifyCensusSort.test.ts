@@ -287,3 +287,73 @@ test('an admissions_seat sees the SAME bed state, headroom and order as a super_
     assert.ok(sighted.facilities[0]!.billedAmount !== null);
   });
 });
+
+// ── M1: the MIXED book, which is the only shape production actually has ──────────────────────────
+
+const MIDDLE: QualifyFacilityRow = {
+  ...STRONG,
+  facility: 'middle house',
+  facility_name: 'MIDDLE HOUSE',
+  facility_code: 'UNMAPPED',
+  allowed: 50000,
+  pct_allowed: 50,
+};
+
+test('a MIXED book partitions by tier AND keeps rating order inside each tier', async () => {
+  /* WHY A THIRD FIXTURE EARNS ITS KEEP. A two-facility set where BOTH rows share a bed state cannot
+   * see a uniform demotion: mutate the tier so 'unknown' returns 1 instead of 0 and a
+   * both-unknown fixture stays green, because every row moved together. Production is never
+   * uniform — the curated census covers the registered facilities, but the BOOK is the claims
+   * rollup and contains facilities with no census row at all, so a real ranking mixes open, full
+   * and no-reading rows in one list. This pins the partition against a set that has all three. */
+  const snap = await getQualifySnapshotCore(
+    deps({
+      loadFacilities: async () => [STRONG, WEAK, MIDDLE],
+      loadCensusAuth: async () => [
+        census({ facility_code: 'NASH', open_beds: 0, bed_capacity: 12 }), // STRONG (62%) — full
+        census({ facility_code: 'LSMH', open_beds: 3, bed_capacity: 12 }), // WEAK (40%) — open
+        // MIDDLE (50%) has NO census row at all — 'unknown', and therefore tier 0.
+      ],
+    }),
+    IN,
+  );
+  assert.deepEqual(namesOf(snap.facilities), ['MIDDLE HOUSE', 'WEAK HOUSE', 'STRONG HOUSE']);
+  // The partition: everything that can admit today, then the confirmed-full house.
+  assert.deepEqual(
+    snap.facilities.map((f) => f.bedState),
+    ['unknown', 'open', 'full'],
+  );
+  // And INSIDE tier 0, ratingV2 still decides — 50% ahead of 40%, untouched by the tier.
+  assert.ok(snap.facilities[0]!.ratingV2! > snap.facilities[1]!.ratingV2!);
+  // The best-paying facility in the book is last, and its rating says so while its rank does not.
+  assert.equal(snap.facilities[2]!.rank, 3);
+  assert.ok(snap.facilities[2]!.ratingV2! > snap.facilities[0]!.ratingV2!);
+});
+
+// ── M2: the DISPLAY gate must refuse a zero authorization exactly as the SCORING gate does ───────
+
+test('avg_auth_days of ZERO is withheld — the card cannot claim an overrun the factor calls missing', async () => {
+  /* THE CONTRADICTION THIS CLOSES. ratingV2's authFit requires `auth > 0` (ratingV2.ts) and routes a
+   * zero to "No authorization … data for this facility yet". The display gate checked null and
+   * finiteness but not positivity, so a zero authorization rendered "~30d over auth" on the card
+   * directly above a factor row saying there is no authorized-days data at all. Latent — the census
+   * writes NULL rather than 0, and 0091 carries no CHECK — but "latent" is what the raw-wire footgun
+   * was too, right up until this task gave it a renderer. */
+  const snap = await getQualifySnapshotCore(
+    deps({
+      loadFacilities: async () => [STRONG],
+      loadCensusAuth: async () => [census({ facility_code: 'NASH' })],
+      loadFacilityOutcomes: async () => [
+        { facility_code: 'NASH', stays_sample: 40, auth_sample: 40, avg_los_days: 30, avg_auth_days: 0, window_days: 365 },
+      ],
+    }),
+    IN,
+  );
+  assert.equal(snap.facilities[0]!.authHeadroomDays, null, 'no headroom against an authorization of zero');
+  assert.equal(snap.facilities[0]!.avgAuthDays, null);
+  assert.equal(snap.facilities[0]!.avgLosDays, null, 'and the LOS half goes with it — they are one reading');
+  // The card and the factor row now say the same thing.
+  const authFit = snap.facilities[0]!.factors.find((f) => f.key === 'authFit')!;
+  assert.equal(authFit.available, false);
+  assert.match(authFit.detail, /no authorized-days data/i);
+});

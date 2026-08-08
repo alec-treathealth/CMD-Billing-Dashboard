@@ -16,67 +16,17 @@
 import { useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import { generateQualifyAiExplanation } from '@/lib/qualify/ai-actions';
 import { parseAiSections } from '../../../src/collections/aiAnalysis';
-import type { QualifyAiInput } from '../../../src/collections/qualifyAi';
 import type { QualifySnapshot } from '../../lib/qualify/contract';
 import { qualifyAiChips, type QualifyAiChipId } from '../../lib/qualify/aiChips';
-import { deriveTopRanks } from '../../lib/qualify/policyRating';
+import { deriveTopRanks, qualifyRanksHeading } from '../../lib/qualify/policyRating';
+// The payload MAP lives in a pure module so it can be tested — see aiPayload.ts for why that is not
+// a tidying preference (an untested optional field silently stopped reaching the model once).
+import { buildQualifyAiInput } from '../../lib/qualify/aiPayload';
 // The scope claim's ONE home — see scopeLabel.ts for why it does not live in this file.
 import { aiScopeLabel } from '../../lib/qualify/scopeLabel';
 import { IQ_BAND_HEX } from './tokens';
 
 type ChipId = QualifyAiChipId;
-
-function buildInput(question: ChipId, snap: QualifySnapshot, blind: boolean): QualifyAiInput {
-  return {
-    question,
-    // The scope, stated to the model rather than left to be inferred from a null payerName — after
-    // the identifier-wide Skip that null means "several labels", not "none". See QualifyAiInput.
-    payerName: snap.resolved?.payerName ?? null,
-    payerScope: snap.resolved === null ? 'none' : snap.resolved.payerScope,
-    policy: snap.policy?.found
-      ? {
-          carrier: snap.policy.carrier,
-          funding: snap.policy.funding,
-          policyType: snap.policy.policyType,
-          planType: snap.policy.planType,
-          network: snap.policy.network,
-          memberCount: snap.policy.memberCount,
-          vobStale: snap.policy.vobStale,
-        }
-      : null,
-    provenance: snap.provenance,
-    windowDays: snap.ladder?.chosenDays ?? 90,
-    windowSufficient: snap.ladder?.sufficient ?? true,
-    facilities: snap.facilities.slice(0, 10).map((f) => ({
-      name: f.name,
-      careSetting: f.careSetting,
-      ratingV2: f.ratingV2,
-      iqBand: f.iqBand,
-      pctAllowedOfBilled: f.pctAllowedOfBilled,
-      distinctPatients: f.distinctPatients,
-      lineCount: f.lineCount,
-      medianDaysToPayment: f.medianDaysToPayment,
-      payerCount: f.payerCount,
-      /* WHY THIS ARRAY IS IN THIS ORDER (2026-08-08). The slice is deliberately the first TEN in
-       * array order, and that order is now availability-first — so without this field the model
-       * reads a list that has been re-sorted for a reason it cannot see, and calls whatever leads it
-       * "the top read". The prompt's ordering rule is only actionable if the state travels with it.
-       * Nothing else census-shaped is mapped: bed counts, UR dates and LOS averages stay out of the
-       * payload, because the model's job here is to explain the read, not to re-derive the sort. */
-      bedState: f.bedState,
-      factors: f.factors.map((x) => ({
-        key: x.key,
-        label: x.label,
-        weight: x.weight,
-        score: x.score,
-        available: x.available,
-        direction: x.direction,
-        detail: x.detail.slice(0, 300),
-      })),
-    })),
-    amountsBlind: blind,
-  };
-}
 
 export function QualifyAiPanel({
   snapshot,
@@ -144,7 +94,7 @@ export function QualifyAiPanel({
       setError(null);
       setStreaming(true);
       try {
-        const res = await generateQualifyAiExplanation(buildInput(id, snapshot, blind));
+        const res = await generateQualifyAiExplanation(buildQualifyAiInput(id, snapshot, blind));
         if (genRef.current !== gen) {
           // Superseded while the action was still resolving (gate + audit + first token is 1-3s).
           // Cancel rather than drop it: an unread stream keeps the model call — and the billing —
@@ -287,21 +237,43 @@ export function QualifyAiPanel({
               ) : null}
               {/* RANKS TABLE — shown when the answer IS a ranking, once the stream finishes. Derived
                   from the snapshot rather than parsed from the prose: the model writes the reasoning,
-                  the numbers stay ours, so this can never disagree with the cards or the bar. */}
+                  the numbers stay ours.
+
+                  ⚠ IT CAN DISAGREE WITH THE GRID, and the previous comment here flatly denied it
+                  ("this can never disagree with the cards or the bar"). Since the availability tier
+                  landed at the head of the grid's comparator, this table — which sorts by ratingV2
+                  alone — can lead with a facility the grid ranked second, so one facility wears a
+                  "2" on its card and a "1" here, on the same screen, under prose that says it is
+                  full. Fixed by DISCLOSURE rather than by re-sorting: this answers "which pays
+                  best", a rating question, and re-ordering it on beds would delete the only reading
+                  on screen that answers it. The heading states the basis (qualifyRanksHeading) and
+                  a full row says so on its own line. The bare ordinal was REMOVED — it was the
+                  colliding number, and the rows are already in order with their rating beside them. */}
               {!streaming && text && active === 'ranks' && ranks.length > 1 ? (
                 <div className="mt-3 border-t border-line pt-2.5">
                   <div className="font-mono text-xs font-semibold uppercase tracking-wide text-teal700">
-                    Top {ranks.length} facilities · {aiScopeLabel(snapshot, 'lower')}
+                    {qualifyRanksHeading(ranks, aiScopeLabel(snapshot, 'lower'))}
                   </div>
                   <div className="mt-2 flex flex-col">
                     {ranks.map((r) => (
                       <div
                         key={r.facilityKey}
-                        className="grid grid-cols-[20px_minmax(0,1fr)_auto_auto] items-center gap-3 rounded-lg px-2 py-1.5 odd:bg-surface"
+                        className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 rounded-lg px-2 py-1.5 odd:bg-surface"
                       >
-                        <span className="font-mono text-xs font-semibold text-ink400">{r.rank}</span>
-                        <span className="truncate text-[13px] font-semibold text-ink900" title={r.name}>
-                          {r.name}
+                        <span className="flex min-w-0 items-baseline gap-1.5">
+                          <span className="truncate text-[13px] font-semibold text-ink900" title={r.name}>
+                            {r.name}
+                          </span>
+                          {/* The placement caveat, ON the row that needs it. A strip that ranks by
+                              money must not let a house with no bed read as a recommendation. */}
+                          {r.bedState === 'full' ? (
+                            <span
+                              className="shrink-0 rounded-full border border-status-warn/40 bg-status-warn/10 px-1.5 py-0.5 text-xs font-semibold text-ink900"
+                              title="No open beds on the latest census — this facility pays well but cannot admit anyone today"
+                            >
+                              Full
+                            </span>
+                          ) : null}
                         </span>
                         <span className="whitespace-nowrap text-xs text-ink400">{r.evidence}</span>
                         <span

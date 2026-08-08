@@ -22,6 +22,7 @@
  * admissions_seat session derives the identical number and band.
  */
 import type { QualifyFacility } from './contract';
+import type { QualifyBedState } from './bedState';
 import { iqBandOf, IQ_BAND_LABELS, IQ_BAND_VERDICTS, type QualifyIqBand } from './ratingV2';
 import { ratingSampleTier } from './sampleGate';
 
@@ -63,6 +64,45 @@ export interface QualifyRankRow {
   band: QualifyIqBand;
   /** Non-dollar evidence caption — the sample behind the row. */
   evidence: string;
+  /**
+   * Bed availability for THIS row, carried so the strip cannot present a facility that cannot admit
+   * anyone as a placement. It is NOT a sort input here — see `qualifyRanksHeading` for why this
+   * table deliberately stays in rating order while the grid does not.
+   */
+  bedState: QualifyBedState;
+}
+
+/** The clause that stops the strip from silently contradicting the grid. Exported so the caption and
+ *  its test read the same string, and so any future surface reusing the strip inherits the disclosure. */
+export const QUALIFY_RANKS_BASIS_NOTE = 'by rating, not bed availability';
+
+/**
+ * THE STRIP'S HEADING — its population AND its ordering basis, in one line.
+ *
+ * WHY THIS EXISTS (S1 review, 2026-08-08). `deriveTopRanks` sorts by ratingV2 alone; since the
+ * availability tier landed at the head of the grid's comparator the two orders can DISAGREE ON THE
+ * SAME SCREEN. Reproduced: the grid showed an open house at rank 1 above a full house at rank 2
+ * while this strip led with the full one, so one facility wore a "2" on its card and a "1" here —
+ * and the strip renders precisely for the 'ranks' question, directly under prose the new prompt rule
+ * makes say that facility is full and ranked below. The comment above the strip claimed it "can
+ * never disagree with the cards or the bar". It could, and did.
+ *
+ * RESOLVED BY SAYING SO, NOT BY RE-SORTING, and the distinction is the point: this strip answers
+ * "which of these PAYS best", which is a rating question. Re-ordering it on beds would delete the
+ * only thing on screen that answers that — the grid already carries the availability answer, and two
+ * views of one order is not worth losing the second reading. So the strip keeps its order and stops
+ * being ambiguous about which question it is answering. When one of its own rows is full, that is
+ * named here too, rather than left to a chip further down the row that a reader may never reach.
+ */
+export function qualifyRanksHeading(rows: readonly QualifyRankRow[], scopeLabel: string): string {
+  const anyFull = rows.some((r) => r.bedState === 'full');
+  return [
+    `Top ${rows.length} facilities`,
+    scopeLabel,
+    // Stated UNCONDITIONALLY. "It happens to match the grid today" is not a reason to leave the
+    // basis unsaid tomorrow — that is exactly how the claim this replaces became false.
+    anyFull ? `${QUALIFY_RANKS_BASIS_NOTE} — one or more are full` : QUALIFY_RANKS_BASIS_NOTE,
+  ].join(' · ');
 }
 
 export function deriveTopRanks(facilities: readonly QualifyFacility[], limit = 5): QualifyRankRow[] {
@@ -81,6 +121,8 @@ export function deriveTopRanks(facilities: readonly QualifyFacility[], limit = 5
       rating: f.ratingV2,
       // Every row here is rated, so iqBandOf cannot return null — assert it rather than widen the type.
       band: iqBandOf(f.ratingV2)!,
+      // Carried, never sorted on — the heading discloses the basis instead. See qualifyRanksHeading.
+      bedState: f.bedState,
       evidence: `${f.distinctPatients} patient${f.distinctPatients === 1 ? '' : 's'} · ${f.lineCount.toLocaleString('en-US')} lines`,
     }));
 }
