@@ -115,7 +115,6 @@ export function ResolutionFlowClient({
     picked,
     skipped,
     filters,
-    employerQuery,
     planFilter,
     autoAsk,
     backTo,
@@ -161,7 +160,7 @@ export function ResolutionFlowClient({
     dispatch({ type: 'skipped' });
   }, []);
 
-  const onToggleFilter = useCallback((facet: 'planType' | 'funding' | 'employer', value: string) => {
+  const onToggleFilter = useCallback((facet: 'funding' | 'employer', value: string) => {
     dispatch({ type: 'filter_toggled', facet, value });
   }, []);
 
@@ -265,8 +264,16 @@ export function ResolutionFlowClient({
     return cluster ? all.filter((c) => cluster.names.has(c.payerDisplayName)) : all;
   }, [state.resolution, skipped, payerPick, payerGroups]);
 
-  // funding goes to the market directly (a closed vocabulary the action intersects); plan type has
-  // no market field, so it narrows by way of the employer set the filtered candidates resolve to.
+  // Funding goes to the market directly (a closed vocabulary the action intersects); the employer
+  // selection goes by way of `employerNarrowFor`, which sends it only when it is a PROPER SUBSET
+  // within the 200 bound.
+  //
+  // ⚠ THIS MEMO IS THE WHOLE REASON PLAN TYPE STOPPED BEING A FILTER (2026-08-07). It is the seam
+  // where a facet with no market field of its own still becomes a request: `filterCandidates`
+  // narrows the candidate set, and the EMPLOYERS of whatever survives are sent as `market.employers`.
+  // That made plan type LOOK inert — it was not. Anything added to `AnswerFilters` from here on
+  // inherits the same reach; assume a new facet re-ranks the screen until you have shown it cannot
+  // move `narrow.employers`.
   const narrow = useMemo(() => {
     if (!answerFiltersActive(filters)) return { employers: null as string[] | null, tooMany: null as number | null };
     const filtered = filterCandidates(answerCandidates, filters);
@@ -611,8 +618,6 @@ export function ResolutionFlowClient({
                 filters,
                 onToggleFilter,
                 onClearFilters,
-                employerQuery,
-                onEmployerQuery: (v) => dispatch({ type: 'employer_query_changed', value: v }),
                 employerNarrowTooMany: narrow.tooMany,
                 area,
                 onSelectArea,

@@ -34,9 +34,15 @@
 // useMemo only — no useEffect/useLayoutEffect and no browser API, so this module stays renderable
 // by renderToStaticMarkup in the hermetic suite. The memos matter: facetsOf + filterCandidates walk
 // the whole candidate universe (311 plans on a real prefix) and would otherwise re-run on every
-// keystroke in the employer tag-search.
+// render of the answer stage.
+// ⚠ ONE CHILD DOES CARRY EFFECTS: `MultiSelectTagPicker` (the shared employer type-ahead) runs a
+// `useEffect` that touches `document` for Escape/outside-click dismissal. That is still SSR-safe —
+// renderToStaticMarkup never runs effects — and the picker owns its own typed draft, which is why
+// this file no longer threads an employer query prop. The rule above is about THIS module; do not
+// read it as a ban on mounting a client control.
 import { useMemo } from 'react';
-import { ChevronRight } from 'lucide-react';
+import { Briefcase, ChevronRight } from 'lucide-react';
+import { MultiSelectTagPicker } from '../../ui/multi-select-tag-picker';
 import type {
   CoverageGroupSummary,
   QualifyResolution,
@@ -256,23 +262,37 @@ export function scopeSourceOf(args: { payerOverride: string | null; pickLabel: s
 
 // ── Answer-stage filters (the general-search escape hatch) ───────────────────────────────────────
 
-/** Multiselect narrows on the answer stage. Empty array = no restriction on that facet. */
+/**
+ * Multiselect narrows on the answer stage. Empty array = no restriction on that facet.
+ *
+ * ⚠ THERE IS NO `planTypes` HERE ANY MORE, AND ITS ABSENCE IS THE POINT (Alec, 2026-08-07). Removing
+ * the plan-type row was not a decluttering pass: plan type reached the SERVER, indirectly, and that
+ * is why nothing about it may survive in this bag. It is absent from `scopeKeyOf`, which made it look
+ * like a pure client-side narrow — but `filterCandidates` feeds `employerNarrowFor`
+ * (resolution-flow-client.tsx), whose `{ employers }` result IS a scope-key segment and IS sent as
+ * `market.employers`. So one plan-type press could silently re-rank the facilities over just the
+ * employers holding plans of that type, with nothing on screen mentioning employers. Measured on a
+ * real search: POS 257 · PPO 30 · EPO 27 · HMO 9 · ASO 1 · OAP 1 — POS (79% of the mass) is not a
+ * proper subset so it does nothing at all, while ASO collapses the ranking to one employer. The same
+ * control, opposite force, no disclosure.
+ *
+ * THE TAG STAYED, THE FILTER WENT. Plan type still renders on every plan tile and in the resolved
+ * identity line; it is a fact about a plan, and reading it costs nobody a re-ranked screen.
+ */
 export interface AnswerFilters {
-  planTypes: string[];
   funding: string[];
   employers: string[];
 }
 
-export const NO_ANSWER_FILTERS: AnswerFilters = { planTypes: [], funding: [], employers: [] };
+export const NO_ANSWER_FILTERS: AnswerFilters = { funding: [], employers: [] };
 
 export function answerFiltersActive(f: AnswerFilters): boolean {
-  return f.planTypes.length > 0 || f.funding.length > 0 || f.employers.length > 0;
+  return f.funding.length > 0 || f.employers.length > 0;
 }
 
 /** AND across facets, OR within one — the standard multiselect reading. */
 export function filterCandidates(all: readonly OrderedCandidate[], f: AnswerFilters): OrderedCandidate[] {
   return all.filter((c) => {
-    if (f.planTypes.length > 0 && !(c.planType !== null && f.planTypes.includes(c.planType))) return false;
     if (f.funding.length > 0 && !(c.funding !== null && f.funding.includes(c.funding))) return false;
     if (f.employers.length > 0 && !(c.employerLabel !== null && f.employers.includes(c.employerLabel))) return false;
     return true;
@@ -335,9 +355,12 @@ export interface Facet {
 }
 
 /** Distinct values per facet, member-weighted and ranked — the biggest option first, so the list
- *  reads as "what this identifier actually has" rather than an alphabet. */
+ *  reads as "what this identifier actually has" rather than an alphabet.
+ *
+ *  ⚠ THE KEY SET HERE IS THE CARD'S VOCABULARY. A `planTypes` key would be a plan-type control on
+ *  screen whatever the row that renders it is called, so it went with the filter (see
+ *  `AnswerFilters`) rather than being left behind as a tally nothing consumes. */
 export function facetsOf(all: readonly OrderedCandidate[]): {
-  planTypes: Facet[];
   funding: Facet[];
   employers: Facet[];
 } {
@@ -353,7 +376,6 @@ export function facetsOf(all: readonly OrderedCandidate[]): {
       .sort((a, b) => b.members - a.members || a.value.localeCompare(b.value));
   };
   return {
-    planTypes: tally((c) => c.planType),
     funding: tally((c) => c.funding),
     employers: tally((c) => c.employerLabel),
   };
@@ -384,8 +406,9 @@ export const ANSWER_EMPLOYER_SEND_MAX = 200;
  *   · clicking "Automatic" in its DEFAULT state — the very first thing on screen;
  *   · clicking the active billed-under chip, which sends `onPayerOverride(null)` when the override
  *     is already null;
- *   · toggling a plan type whose employer set is not a proper subset, or exceeds the 200 bound —
- *     both leave `market.employers` null and the market key unchanged.
+ *   · toggling a filter whose employer set is not a proper subset, or exceeds the 200 bound — both
+ *     leave `market.employers` null and the market key unchanged. (The reported case was a plan-type
+ *     chip; that facet was removed 2026-08-07, but funding reaches the same dead end.)
  * React bails out of a no-op setState, so the deps never changed and the effect never ran.
  *
  * Deriving the flag from "what is requested vs what is rendered" makes the stuck state
@@ -958,10 +981,6 @@ export function StagePayer(props: {
 /** Above this many plans, a type-to-narrow filter appears (a prefix can span 186 employers). */
 export const PLAN_FILTER_THRESHOLD = 8;
 
-/** Employer chips rendered at once in the answer-stage tag-search. Selected chips are always shown
- *  on top of this, so a narrow is never hidden by the cap. */
-const EMPLOYER_CHIP_CAP = 40;
-
 export function StagePlan(props: {
   resolution: QualifyResolution;
   payerPick: string | null;
@@ -1307,10 +1326,8 @@ export interface StageAnswerProps {
    *  after a Skip — every plan behind the identifier. Supplied by the shell so this stays pure. */
   candidates: readonly OrderedCandidate[];
   filters: AnswerFilters;
-  onToggleFilter: (facet: 'planType' | 'funding' | 'employer', value: string) => void;
+  onToggleFilter: (facet: 'funding' | 'employer', value: string) => void;
   onClearFilters: () => void;
-  employerQuery: string;
-  onEmployerQuery: (v: string) => void;
   /** Set when the employer narrow could not be sent because it exceeded the action's 200 bound —
    *  the caption says the ranking is NOT employer-narrowed rather than implying it is. */
   employerNarrowTooMany: number | null;
@@ -1664,8 +1681,8 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
    * (flow-state.ts, invariants g/h), and `props.scopeSource` is `scopeSourceOf(payerOverride,
    * pickLabel)` (resolution-flow-client.tsx:212), which reads the two payer-label inputs and nothing
    * else. But the fetch effect DOES fold active filters into a real `market` payload
-   * (client :269-282): funding goes straight through, and plan type / employer narrow by way of the
-   * employer set `employerNarrowFor` resolves them to. So "Skip, then one Funding chip" was rendering
+   * (client :269-282): funding goes straight through, and the employer selection narrows by way of
+   * the employer set `employerNarrowFor` resolves it to. So "Skip, then one Funding chip" was rendering
    * "this identifier's whole footprint" over a funding-narrowed snapshot, flatly contradicting the
    * "Ranking over N of M plans" line a few rows above it.
    *
@@ -1705,7 +1722,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
    * `Math.max(1, …)` floor. A summary that re-counts is that bug pre-installed.
    *
    * ⚠ THE GATES MIRROR THE ROWS' OWN SELF-HIDES, EXACTLY. `FilterLine` returns null at zero options,
-   * the employer disclosure is gated on `facets.employers.length > 0`, and the billed-under row on
+   * the employer type-ahead is gated on `facets.employers.length > 0`, and the billed-under row on
    * `> 1` label. A strip that listed a facet whose control does not render would point the operator
    * at a switch that is not there.
    *
@@ -1721,9 +1738,6 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
           // The one facet that is never off — a ranking always has a window; "Automatic" is a CHOICE
           // of window, not the absence of one.
           { label: 'Window', on: true, text: props.windowDays === null ? 'automatic' : `${props.windowDays} days` },
-          ...(facets.planTypes.length > 0
-            ? [{ label: 'Plan type', ...facetReading(props.filters.planTypes, facets.planTypes.length) }]
-            : []),
           ...(facets.funding.length > 0
             ? [{ label: 'Funding', ...facetReading(props.filters.funding, facets.funding.length) }]
             : []),
@@ -1836,19 +1850,26 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // ⟺ the identifier has no VOB row anywhere (see above). Picking a plan therefore cannot surface
   // benefits notes, so the explanation below must not offer that as a way to see them.
   const identifierHasNoVob = skipSurvivingNotices.length > 0;
-  // Employer options: filtered by the tag-search text, then capped for render — a 311-employer chip
-  // wall is not a control. Selected employers are always shown so a narrow is never invisible.
-  const employerNeedle = props.employerQuery.trim().toLowerCase();
-  const employerMatches = useMemo(
-    () => facets.employers.filter((o) => employerNeedle === '' || o.value.toLowerCase().includes(employerNeedle)),
-    [facets.employers, employerNeedle],
-  );
-  const employerOptions = useMemo(
-    () => [
-      ...facets.employers.filter((o) => props.filters.employers.includes(o.value)),
-      ...employerMatches.filter((o) => !props.filters.employers.includes(o.value)).slice(0, EMPLOYER_CHIP_CAP),
-    ],
-    [facets.employers, employerMatches, props.filters.employers],
+  /**
+   * THE EMPLOYER TYPE-AHEAD'S OPTION LIST — the WHOLE local vocabulary, uncapped and unfiltered.
+   *
+   * ⚠ CLIENT MODE, DELIBERATELY, AND IT IS NOT AN OPTIMISATION. Collections runs this same picker in
+   * SERVER mode (`onQueryChange` + `minChars`) because its employer vocabulary is ~10k rows and
+   * cannot be shipped whole. This surface's employers come from `facetsOf(props.candidates)` — they
+   * are already in hand, already per-identifier, already member-ranked. Wiring `onQueryChange` here
+   * would flip the picker to server mode, which stops it filtering client-side, and would break
+   * `employerNarrowFor`: that function decides whether a selection is a narrow AT ALL by comparing it
+   * against the FULL local universe (`picked.length >= allEmployers.size`), so a query-filtered
+   * universe would make the proper-subset guard mis-fire silently.
+   *
+   * `display` is the employer text and nothing else. The member counts the old chip wall printed are
+   * facts about the UNFILTERED universe, and the picker re-renders `display` inside the selected TAG
+   * — so a count there would sit beside a narrowed ranking describing a different set. The ordering
+   * (biggest first) survives, because the picker preserves option order.
+   */
+  const employerPickerOptions = useMemo(
+    () => facets.employers.map((o) => ({ value: o.value, display: o.value })),
+    [facets.employers],
   );
   // ── The AREA facet, applied ────────────────────────────────────────────────────────────────────
   // Everything below is derived from `snap.facilities` — the rows the ranking ALREADY returned. No
@@ -2019,8 +2040,19 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
           <section
             data-v3-inventory
             aria-labelledby="qualify-narrow-heading"
-            className="q-subject relative isolate flex flex-col gap-3 overflow-hidden rounded-xl px-4 py-3.5 shadow-ths-sm"
+            className="relative isolate flex flex-col gap-3 rounded-xl px-4 py-3.5 shadow-ths-sm"
           >
+            {/* ⚠ THE SURFACE IS ITS OWN LAYER, AND THE REASON IS THE TYPE-AHEAD BELOW. `.q-subject`
+                and `overflow-hidden` used to sit on the <section>: the class paints the dark teal
+                gradient, and its `::after` is a coral glow positioned OUTSIDE the box (right:-40px,
+                top:-60px), so something has to clip it. But `overflow-hidden` on the card also clips
+                every absolutely-positioned DESCENDANT — and MultiSelectTagPicker's dropdown is one,
+                opening downward from a row near the card's bottom edge. That would have shipped a
+                type-ahead whose matches are cut off, with nothing wrong in the DOM to notice.
+                So the clip moved down onto a layer that holds nothing but paint. It is FIRST in DOM
+                order and every sibling below is `relative`, so painting order alone puts the content
+                above it — no z-index, no `isolate` dependency beyond the one already here. */}
+            <span aria-hidden className="q-subject absolute inset-0 overflow-hidden rounded-xl" />
             {/* LIGHT-ON-DARK. `.q-subject` is the app's dark teal gradient band; every label on it is
                 the design system's blessed eyebrow at its dark-surface palette (teal200 on #0e3a3a
                 clears AA), and nothing here goes below `text-xs` — 13px in this config, which is the
@@ -2159,12 +2191,15 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
             </div>
 
             {/* ── THE FIELDS. Conditionally rendered, so "collapsed" is a fact about the DOM and a
-                test can tell a hidden control from an absent one. They sit in a light well rather
-                than inheriting the dark palette: every chip, badge and disclosure in here is moved
-                VERBATIM from the pre-card layout, and re-tinting a dozen shipped controls on the way
-                past is how a "fold the region into a card" change turns into a restyle nobody
-                reviewed. Task 2 replaces two of these rows with type-ahead pickers, which carry their
-                own light styling — the well is where they will land. ── */}
+                test can tell a hidden control from an absent one. They sit in a LIGHT WELL rather
+                than inheriting the dark palette, and that decision is now load-bearing rather than
+                merely conservative: the shared type-ahead below carries the dashboard's own light
+                tokens, so a dark well would have meant forking it.
+
+                THE HYBRID (Alec, 2026-08-07): short vocabularies stay counted chips (Window,
+                Funding, Billed under — every option visible, each with its own count and toggle),
+                long ones become the shared type-ahead (Employers, and Facility when Task 3 lands
+                beside it). Plan type is not here in either form; `AnswerFilters` records why. ── */}
             {props.narrowExpanded ? (
               <div
                 id="qualify-narrow-fields"
@@ -2206,12 +2241,11 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                   </button>
                 </div>
 
-                <FilterLine
-                  label="Plan type"
-                  options={facets.planTypes}
-                  selected={props.filters.planTypes}
-                  onToggle={(v) => props.onToggleFilter('planType', v)}
-                />
+                {/* SHORT LIST → COUNTED CHIPS (Alec's hybrid ruling, 2026-08-07). Funding is two or
+                    three values on any real search, so every option stays on screen with its member
+                    count and its own aria-pressed toggle. PLAN TYPE used to sit here and does not any
+                    more — see `AnswerFilters` for why removing it was a correctness change, not a
+                    decluttering one. */}
                 <FilterLine
                   label="Funding"
                   options={facets.funding}
@@ -2219,61 +2253,39 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                   onToggle={(v) => props.onToggleFilter('funding', v)}
                 />
 
-                {/* The employer tag-search: a visible dropdown whose SUMMARY states the current reach,
-                    so the count is readable without opening it. */}
+                {/* LONG LIST → TYPE-AHEAD (the other half of the hybrid ruling), and specifically the
+                    SHARED picker: `MultiSelectTagPicker` is the same primitive the Collections
+                    explorer and the v2 Qualify tab render, extracted out of cmd-explorer so these
+                    surfaces cannot drift into three employer controls. There was nothing to port and
+                    nothing to fork — it already carries a Qualify-only `tone` prop.
+
+                    THE BADGE RIDES THE PICKER'S OWN LABEL ROW. This card's contract is that every
+                    facet states ON/OFF beside its own control, and the picker owns the only label
+                    this facet has; a second "Employers" heading above it would say the word twice to
+                    a screen reader. Same `facetReading` expression as every other badge — the
+                    collapsed summary reads it too, and one expression is what stops the two from
+                    drifting (see `cardFacets`).
+
+                    `onClear` walks the selection through `onToggleFilter` rather than reaching for a
+                    new reducer action. `filter_toggled` is the machine's ONLY facet-scoped write to
+                    `filters`; a second one would be a second writer of the field the fetch effect
+                    keys on, which is the shape `scopeKeyOf`'s header is a post-mortem of. */}
                 {facets.employers.length > 0 ? (
-                  <details data-v3-facet className="group/emp text-xs">
-                    {/* A REAL dropdown control, not a text link: same pill geometry as every other chip
-                        on these lines, with its own caret. `list-none` + the webkit rule kill the
-                        native marker so the caret is ours and points the right way when open.
-                        The state badge sits INSIDE the summary because this facet's controls are behind
-                        the disclosure — the inventory has to be readable without opening it. */}
-                    <summary className="flex w-fit cursor-pointer list-none items-center gap-2 rounded-full border border-line bg-surface px-3 py-1 text-xs font-semibold text-ink900 transition-colors hover:border-teal500 hover:text-teal700 [&::-webkit-details-marker]:hidden">
-                      <span className="text-xs font-medium uppercase tracking-wide text-ink400">Employers</span>
-                      <FacetState {...facetReading(props.filters.employers, facets.employers.length)} />
-                      <span aria-hidden className="text-ink400 transition-transform group-open/emp:rotate-180">
-                        ▾
-                      </span>
-                    </summary>
-                    <div className="mt-2 flex flex-col gap-2 rounded-xl border border-line bg-ground p-3">
-                      <label htmlFor="qualify-answer-employers" className="text-xs font-medium text-ink900">
-                        Find an employer
-                      </label>
-                      <input
-                        id="qualify-answer-employers"
-                        type="text"
-                        value={props.employerQuery}
-                        onChange={(e) => props.onEmployerQuery(e.target.value)}
-                        autoComplete="off"
-                        className="max-w-sm rounded-lg border border-line bg-surface px-3 py-1.5 text-sm text-ink900 outline-none transition-colors focus:border-teal500 focus:ring-2 focus:ring-teal500/25"
-                      />
-                      <div className="flex max-h-56 flex-wrap gap-1.5 overflow-y-auto">
-                        {employerOptions.map((o) => {
-                          const on = props.filters.employers.includes(o.value);
-                          return (
-                            <button
-                              key={o.value}
-                              type="button"
-                              aria-pressed={on}
-                              onClick={() => props.onToggleFilter('employer', o.value)}
-                              className={`rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors ${
-                                on ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
-                              }`}
-                            >
-                              {o.value}
-                              <span className="font-mono tabular-nums text-ink400"> · {o.members.toLocaleString()}</span>
-                              {on ? ' · on' : ''}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      {employerOptions.length < employerMatches.length ? (
-                        <p className="text-ink600">
-                          Showing the {employerOptions.length} largest of {employerMatches.length} matches — type to narrow.
-                        </p>
-                      ) : null}
-                    </div>
-                  </details>
+                  <div data-v3-facet>
+                    <MultiSelectTagPicker
+                      label="Employers"
+                      badge={<FacetState {...facetReading(props.filters.employers, facets.employers.length)} />}
+                      placeholder="Type to find an employer…"
+                      icon={<Briefcase className="h-3.5 w-3.5" aria-hidden />}
+                      options={employerPickerOptions}
+                      selected={props.filters.employers}
+                      onToggle={(v) => props.onToggleFilter('employer', v)}
+                      onClear={() => {
+                        for (const v of props.filters.employers) props.onToggleFilter('employer', v);
+                      }}
+                      tone="list"
+                    />
+                  </div>
                 ) : null}
 
                 {/* Claims-side scope: which billed-under label the ranking is scoped to. MOVED INSIDE the

@@ -2,9 +2,9 @@
 
 /**
  * Shared guided multi-select "type-ahead + tags" picker — the search primitive used by the Collections
- * explorer (facility / payer / employer / funding) and the desktop Qualify tab (employer / funding).
- * Extracted from cmd-explorer so both surfaces render ONE consistent control (dashboard tokens only —
- * no new design language). Two modes:
+ * explorer (facility / payer / employer / funding), the desktop Qualify tab (employer / funding) and
+ * the Qualify v3 NARROW SEARCH card (employer). Extracted from cmd-explorer so every surface renders
+ * ONE consistent control (dashboard tokens only — no new design language). Two modes:
  *   - CLIENT (default): the parent loads the full option list ONCE (facility ~30, payer ~260) and this
  *     picker filters it instantly client-side as the user types.
  *   - SERVER (pass `onQueryChange`): the parent owns the option list and re-fetches it per (debounced)
@@ -22,6 +22,7 @@ export type PickerOption = { value: string; display: string; badge?: 'IP' | 'OP'
 
 export function MultiSelectTagPicker({
   label,
+  badge,
   placeholder,
   icon,
   options,
@@ -36,6 +37,12 @@ export function MultiSelectTagPicker({
   derivedValues,
 }: {
   label: string;
+  /** Optional state readout rendered INSIDE the label row, between the label and `Clear N`.
+   *  Qualify v3's NARROW SEARCH card passes its shared ON/OFF badge here: that card's contract is
+   *  that every facet states its own state beside its own control, and the picker owns the only label
+   *  this facet has — a second label above it would say "Employers" twice to a screen reader. Omitted
+   *  everywhere else, which leaves the label row byte-identical to what Collections ships. */
+  badge?: React.ReactNode;
   placeholder: string;
   icon: React.ReactNode;
   options: PickerOption[];
@@ -118,9 +125,14 @@ export function MultiSelectTagPicker({
 
   return (
     <div ref={boxRef} className="relative min-w-[15rem] flex-1">
-      <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+      {/* `text-xs` (13px in this config), NOT the `text-[11px]` this row shipped with: the design
+          system's 12px floor for meaning-bearing text is repo-wide ("no text-[…px] below it,
+          anywhere"), and mounting this picker inside Qualify v3 put the row under that surface's
+          machine-enforced sweep for the first time. A label is meaning-bearing by definition. */}
+      <div className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         {icon}
         {label}
+        {badge}
         {selected.length > 0 && (
           <button
             type="button"
@@ -244,8 +256,11 @@ export function MultiSelectTagPicker({
               );
             })
           )}
+          {/* `text-xs`, same 12px-floor correction as the label row above. This one never reaches the
+              SSR sweep (the dropdown is closed until focus) — it is fixed because the rule is the
+              rule, not because a test found it. */}
           {matches.length > CAP && (
-            <p className="px-2 py-1.5 text-[11px] text-ink400">
+            <p className="px-2 py-1.5 text-xs text-ink400">
               Showing first {CAP} of {matches.length.toLocaleString()} — keep typing to narrow.
             </p>
           )}

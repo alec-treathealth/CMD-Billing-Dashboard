@@ -49,8 +49,7 @@ function dirty(over: Partial<ShellState> = {}): ShellState {
     payerPick: 'ALPHA MUTUAL',
     picked: true,
     skipped: true,
-    filters: { planTypes: ['PPO'], funding: ['self_funded'], employers: ['NORTHWIND LOGISTICS'] },
-    employerQuery: 'north',
+    filters: { funding: ['self_funded'], employers: ['NORTHWIND LOGISTICS'] },
     planFilter: 'gold',
     autoAsk: true,
     backTo: 'payer',
@@ -76,8 +75,7 @@ const EVERY_ACTION: ShellAction[] = [
   { type: 'went_back', target: 'plan' },
   { type: 'payer_picked', payer: 'BETA MUTUAL' },
   { type: 'plan_filter_changed', value: 'silver' },
-  { type: 'employer_query_changed', value: 'south' },
-  { type: 'filter_toggled', facet: 'planType', value: 'HMO' },
+  { type: 'filter_toggled', facet: 'funding', value: 'fully_insured' },
   { type: 'filters_cleared' },
   { type: 'retry_requested' },
   { type: 'snapshot_requested' },
@@ -95,14 +93,13 @@ const EVERY_ACTION: ShellAction[] = [
 
 const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[] = [
   {
-    name: 'search_submitted writes fourteen and keeps retryNonce + loadedKey',
+    name: 'search_submitted writes thirteen and keeps retryNonce + loadedKey',
     action: { type: 'search_submitted' },
     writes: {
       payerPick: null,
       picked: false,
       skipped: false,
       filters: NO_ANSWER_FILTERS,
-      employerQuery: '',
       planFilter: '',
       autoAsk: false,
       backTo: null,
@@ -115,7 +112,7 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     },
   },
   {
-    name: 'skipped writes twelve — and NOT windowDays or autoAsk',
+    name: 'skipped writes eleven — and NOT windowDays or autoAsk',
     action: { type: 'skipped' },
     writes: {
       skipped: true,
@@ -124,7 +121,6 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       planFilter: '',
       backTo: null,
       filters: NO_ANSWER_FILTERS,
-      employerQuery: '',
       payerOverride: null,
       snapshot: null,
       snapshotError: null,
@@ -135,13 +131,12 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     },
   },
   {
-    name: 'plan_submitted writes nine — and NOT payerPick/planFilter/payerOverride/windowDays/autoAsk',
+    name: 'plan_submitted writes eight — and NOT payerPick/planFilter/payerOverride/windowDays/autoAsk',
     action: { type: 'plan_submitted' },
     writes: {
       picked: true,
       skipped: false,
       filters: NO_ANSWER_FILTERS,
-      employerQuery: '',
       backTo: null,
       snapshot: null,
       snapshotError: null,
@@ -150,7 +145,7 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     },
   },
   {
-    name: "went_back('identify') writes fourteen, payerPick among them",
+    name: "went_back('identify') writes thirteen, payerPick among them",
     action: { type: 'went_back', target: 'identify' },
     writes: {
       snapshot: null,
@@ -161,7 +156,6 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       picked: false,
       skipped: false,
       filters: NO_ANSWER_FILTERS,
-      employerQuery: '',
       payerPick: null,
       planFilter: '',
       backTo: 'identify',
@@ -170,7 +164,7 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     },
   },
   {
-    name: "went_back('payer') writes fourteen, payerPick among them",
+    name: "went_back('payer') writes thirteen, payerPick among them",
     action: { type: 'went_back', target: 'payer' },
     writes: {
       snapshot: null,
@@ -181,7 +175,6 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       picked: false,
       skipped: false,
       filters: NO_ANSWER_FILTERS,
-      employerQuery: '',
       payerPick: null,
       planFilter: '',
       backTo: 'payer',
@@ -190,7 +183,7 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     },
   },
   {
-    name: "went_back('plan') writes thirteen — the carrier pick SURVIVES",
+    name: "went_back('plan') writes twelve — the carrier pick SURVIVES",
     action: { type: 'went_back', target: 'plan' },
     writes: {
       snapshot: null,
@@ -201,7 +194,6 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       picked: false,
       skipped: false,
       filters: NO_ANSWER_FILTERS,
-      employerQuery: '',
       planFilter: '',
       backTo: 'plan',
       area: AREA_ALL,
@@ -219,14 +211,13 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     writes: { planFilter: 'silver' },
   },
   {
-    name: 'employer_query_changed writes employerQuery only',
-    action: { type: 'employer_query_changed', value: 'south' },
-    writes: { employerQuery: 'south' },
-  },
-  {
-    name: 'filters_cleared writes filters + employerQuery + area only',
+    // The employer DRAFT is no longer machine state (2026-08-07): the shared type-ahead that replaced
+    // the hand-rolled tag-search owns its own typed query, so there is no `employer_query_changed`
+    // row here and no `employerQuery` in any reset below. What this button still clears is the
+    // SELECTION, through `filters`.
+    name: 'filters_cleared writes filters + area only',
     action: { type: 'filters_cleared' },
-    writes: { filters: NO_ANSWER_FILTERS, employerQuery: '', area: AREA_ALL },
+    writes: { filters: NO_ANSWER_FILTERS, area: AREA_ALL },
   },
   {
     name: 'retry_requested writes snapshotError + retryNonce ONLY',
@@ -287,13 +278,12 @@ for (const row of TABLE) {
   });
 }
 
-test('F3b: the initial state is the sixteen shell defaults, filters by shared reference', () => {
+test('F3b: the initial state is the fifteen shell defaults, filters by shared reference', () => {
   assert.deepEqual(INITIAL_SHELL_STATE, {
     payerPick: null,
     picked: false,
     skipped: false,
-    filters: { planTypes: [], funding: [], employers: [] },
-    employerQuery: '',
+    filters: { funding: [], employers: [] },
     planFilter: '',
     autoAsk: false,
     backTo: null,
@@ -306,14 +296,14 @@ test('F3b: the initial state is the sixteen shell defaults, filters by shared re
     area: AREA_ALL,
     narrowExpanded: false,
   });
-  assert.equal(Object.keys(INITIAL_SHELL_STATE).length, 16, 'sixteen fields, no more');
+  assert.equal(Object.keys(INITIAL_SHELL_STATE).length, 15, 'fifteen fields, no more');
   assert.equal(INITIAL_SHELL_STATE.filters, NO_ANSWER_FILTERS, 'the SHARED constant, not a copy');
   assert.equal(INITIAL_SHELL_STATE.area, AREA_ALL, 'the area facet starts unnarrowed');
 });
 
 test('F3b: every filters reset is the SHARED constant BY REFERENCE — and clears the area with it', () => {
   // BY REFERENCE, deliberately. The field-write table above compares with deepEqual, which is
-  // reference-blind: swapping all five of these resets to `{ planTypes: [], funding: [], employers: [] }`
+  // reference-blind: swapping all five of these resets to `{ funding: [], employers: [] }`
   // left the whole suite green (review MUT-F), even though `narrow`'s useMemo depends on `filters`
   // by identity and a fresh-but-equal object invalidates it on every single navigation. The header
   // calls this rule load-bearing; until now only INITIAL_SHELL_STATE pinned it.
@@ -343,7 +333,7 @@ test('F3b: every filters reset is the SHARED constant BY REFERENCE — and clear
 
 test('F3b: every filters reset is the SHARED constant BY REFERENCE, not a fresh equal literal', () => {
   // BY REFERENCE, deliberately. The field-write table above compares with deepEqual, which is
-  // reference-blind: swapping all five of these resets to `{ planTypes: [], funding: [], employers: [] }`
+  // reference-blind: swapping all five of these resets to `{ funding: [], employers: [] }`
   // left the whole suite green (review MUT-F), even though `narrow`'s useMemo depends on `filters`
   // by identity and a fresh-but-equal object invalidates it on every single navigation. The header
   // calls this rule load-bearing; until now only INITIAL_SHELL_STATE pinned it.
@@ -374,7 +364,7 @@ test('INV a: a new search clears EVERYTHING downstream, from any prior state', (
   s = shellReducer(s, { type: 'payer_picked', payer: 'ALPHA MUTUAL' });
   s = shellReducer(s, { type: 'plan_submitted' });
   s = shellReducer(s, { type: 'filter_toggled', facet: 'funding', value: 'self_funded' });
-  s = shellReducer(s, { type: 'employer_query_changed', value: 'north' });
+  s = shellReducer(s, { type: 'filter_toggled', facet: 'employer', value: 'NORTHWIND LOGISTICS' });
   s = shellReducer(s, { type: 'window_days_changed', days: 365 });
   s = shellReducer(s, { type: 'payer_override_changed', label: 'ALPHA MUTUAL OF THE MIDWEST' });
   s = shellReducer(s, { type: 'ai_armed' });
@@ -386,7 +376,7 @@ test('INV a: a new search clears EVERYTHING downstream, from any prior state', (
   assert.deepEqual(
     after,
     { ...INITIAL_SHELL_STATE, retryNonce: 1, loadedKey: 'k1' },
-    'twelve fields back to their defaults; only the two carry-through fields differ',
+    'thirteen fields back to their defaults; only the two carry-through fields differ',
   );
 });
 
@@ -528,10 +518,14 @@ test('INV l: autoAsk is one-shot — armed once, disarmed by the panel, by a sea
   assert.equal(shellReducer(dirty(), { type: 'plan_submitted' }).autoAsk, true, 'nor does a plan pick');
 });
 
-// ── 3 · filter_toggled, both directions, all three facets ────────────────────────────────────────
+// ── 3 · filter_toggled, both directions, both facets ─────────────────────────────────────────────
 
-const FACETS: { facet: 'planType' | 'funding' | 'employer'; key: 'planTypes' | 'funding' | 'employers' }[] = [
-  { facet: 'planType', key: 'planTypes' },
+// ⚠ TWO FACETS, NOT THREE. `planType` was removed 2026-08-07 — not for tidiness: `filterCandidates`
+// feeds `employerNarrowFor`, whose employer set IS sent as `market.employers`, so a plan-type press
+// could re-rank the whole screen over a narrow nothing on it disclosed. The behavioural proof lives
+// in qualifyV3Flow.test.tsx ("a plan type cannot influence the employer narrow"); what this table
+// pins is that the reducer offers no arm to press.
+const FACETS: { facet: 'funding' | 'employer'; key: 'funding' | 'employers' }[] = [
   { facet: 'funding', key: 'funding' },
   { facet: 'employer', key: 'employers' },
 ];
@@ -547,7 +541,7 @@ for (const { facet, key } of FACETS) {
     const off = shellReducer(two, { type: 'filter_toggled', facet, value: 'X' });
     assert.deepEqual(off.filters[key], ['Y'], 'present → removed');
 
-    // The other two facets are untouched by any of it.
+    // The other facet is untouched by any of it.
     for (const other of FACETS) {
       if (other.key === key) continue;
       assert.deepEqual(off.filters[other.key], [], `${other.facet} is not collateral damage`);

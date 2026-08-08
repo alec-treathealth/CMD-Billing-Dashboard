@@ -1,5 +1,5 @@
 /**
- * Qualify v3 — THE SHELL'S STATE MACHINE. Sixteen fields, nineteen actions, one place each field
+ * Qualify v3 — THE SHELL'S STATE MACHINE. Fifteen fields, eighteen actions, one place each field
  * is written.
  *
  * Extracted from `resolution-flow-client.tsx` (F3b). The shell was carrying FIFTEEN `useState` hooks
@@ -45,64 +45,75 @@
  *
  *  1 · search_submitted        — a new identify submit. WRITES THIRTEEN:
  *                                payerPick=null, picked=false, skipped=false,
- *                                filters=NO_ANSWER_FILTERS, employerQuery='', planFilter='',
+ *                                filters=NO_ANSWER_FILTERS, planFilter='',
  *                                autoAsk=false, backTo=null, snapshot=null, snapshotError=null,
- *                                payerOverride=null, windowDays=null, area=AREA_ALL.
+ *                                payerOverride=null, windowDays=null, area=AREA_ALL,
+ *                                narrowExpanded=false.
  *                                KEEPS retryNonce, loadedKey.
  *  2 · skipped                 — "skip the questions, answer over the whole footprint". WRITES ELEVEN:
  *                                skipped=true, picked=false, payerPick=null, planFilter='',
- *                                backTo=null, filters=NO_ANSWER_FILTERS, employerQuery='',
+ *                                backTo=null, filters=NO_ANSWER_FILTERS,
  *                                payerOverride=null, snapshot=null, snapshotError=null,
- *                                area=AREA_ALL.
+ *                                area=AREA_ALL, narrowExpanded=true (invariant n).
  *                                KEEPS windowDays, autoAsk, retryNonce, loadedKey (see invariant f).
  *  3 · plan_submitted          — a plan pick. WRITES EIGHT:
  *                                picked=true, skipped=false, filters=NO_ANSWER_FILTERS,
- *                                employerQuery='', backTo=null, snapshot=null, snapshotError=null,
- *                                area=AREA_ALL.
+ *                                backTo=null, snapshot=null, snapshotError=null,
+ *                                area=AREA_ALL, narrowExpanded=false (invariant n).
  *                                KEEPS payerPick, planFilter, payerOverride, windowDays, autoAsk,
  *                                retryNonce, loadedKey (see invariant g).
  *  4 · went_back {target}      — a receipt "Change". WRITES THIRTEEN:
  *                                snapshot=null, snapshotError=null, autoAsk=false,
  *                                payerOverride=null, windowDays=null, picked=false, skipped=false,
- *                                filters=NO_ANSWER_FILTERS, employerQuery='', planFilter='',
+ *                                filters=NO_ANSWER_FILTERS, planFilter='', narrowExpanded=false,
  *                                area=AREA_ALL, backTo=target, and payerPick=null ONLY when
  *                                target !== 'plan' (the machine's one conditional write —
  *                                invariant h).
  *                                KEEPS retryNonce, loadedKey.
  *  5 · payer_picked {payer}    — WRITES payerPick=payer, backTo=null.
  *  6 · plan_filter_changed {value}     — WRITES planFilter=value.
- *  7 · employer_query_changed {value}  — WRITES employerQuery=value.
- *  8 · filter_toggled {facet,value}    — WRITES filters (add/remove `value` in the facet's array;
- *                                        facet 'planType'→planTypes, 'funding'→funding,
- *                                        'employer'→employers).
- *  9 · filters_cleared         — WRITES filters=NO_ANSWER_FILTERS, employerQuery='', area=AREA_ALL.
+ *  7 · filter_toggled {facet,value}    — WRITES filters (add/remove `value` in the facet's array;
+ *                                        facet 'funding'→funding, 'employer'→employers).
+ *                                        ⚠ THERE IS NO 'planType' ARM (2026-08-07). It was not a
+ *                                        client-only narrow: `filterCandidates` feeds
+ *                                        `employerNarrowFor`, whose employer set IS sent, so a
+ *                                        plan-type press could re-rank over a silent employer
+ *                                        narrow. See `AnswerFilters` in resolution-flow.tsx.
+ *  8 · filters_cleared         — WRITES filters=NO_ANSWER_FILTERS, area=AREA_ALL.
  *                                The area rides along because "Clear filters" is one button and the
  *                                answer stage has one control surface: a narrow that survived it
  *                                would be a narrow the user believes they just cleared.
- * 10 · retry_requested         — WRITES snapshotError=null, retryNonce=prev+1. NOTHING ELSE, ever.
- * 11 · snapshot_requested      — WRITES snapshotError=null. Dispatched at the top of the fetch
+ *                                ⚠ IT NO LONGER CLEARS A TYPED EMPLOYER DRAFT, because the machine
+ *                                no longer holds one — the shared type-ahead owns its own. Its
+ *                                `Clear N` affordance is the picker's, and it walks the selection
+ *                                back through `filter_toggled`. The draft still dies on every
+ *                                NAVIGATION, structurally rather than by a reducer write: all four
+ *                                move the stage, exactly one stage section renders at a time, so
+ *                                `StageAnswer` unmounts and the picker's state goes with it.
+ *  9 · retry_requested         — WRITES snapshotError=null, retryNonce=prev+1. NOTHING ELSE, ever.
+ * 10 · snapshot_requested      — WRITES snapshotError=null. Dispatched at the top of the fetch
  *                                effect so `refetching` can only claim progress while a request is
  *                                genuinely in flight (invariant k).
- * 12 · snapshot_resolved {snapshot, scopeKey}
+ * 11 · snapshot_resolved {snapshot, scopeKey}
  *                              — WRITES snapshot=action.snapshot, loadedKey=action.scopeKey.
  *                                THE SCOPE KEY RIDES IN THE PAYLOAD: the old `setLoadedKey(scopeKey)`
  *                                closed over a value computed in render scope, which a reducer
  *                                cannot see. The effect already captures the right one; it passes it.
- * 13 · snapshot_failed         — WRITES snapshotError='failed'. AND NOTHING ELSE (invariant e).
- * 14 · ai_armed                — WRITES autoAsk=true.
- * 15 · ai_disarmed             — WRITES autoAsk=false.
- * 16 · payer_override_changed {label} — WRITES payerOverride=label.
- * 17 · window_days_changed {days}     — WRITES windowDays=days.
- * 18 · area_selected {key}            — WRITES area=key. AND NOTHING ELSE — most of all not
+ * 12 · snapshot_failed         — WRITES snapshotError='failed'. AND NOTHING ELSE (invariant e).
+ * 13 · ai_armed                — WRITES autoAsk=true.
+ * 14 · ai_disarmed             — WRITES autoAsk=false.
+ * 15 · payer_override_changed {label} — WRITES payerOverride=label.
+ * 16 · window_days_changed {days}     — WRITES windowDays=days.
+ * 17 · area_selected {key}            — WRITES area=key. AND NOTHING ELSE — most of all not
  *                                       `snapshot`, `loadedKey` or anything `scopeKeyOf` reads
  *                                       (invariant m). Single-select, the mobile chip model:
  *                                       AREA_ALL | a 2-letter state | AREA_OTHER.
- * 19 · narrow_toggled          — WRITES narrowExpanded = !narrowExpanded. AND NOTHING ELSE: the
+ * 18 · narrow_toggled          — WRITES narrowExpanded = !narrowExpanded. AND NOTHING ELSE: the
  *                                NARROW SEARCH card is a disclosure, and a disclosure that touched
  *                                `filters` or `snapshot` would be a presentation control silently
  *                                re-issuing a ranking request (invariant n).
  *
- * TWENTY SWITCH ARMS, NINETEEN ACTIONS. The twentieth is `default: return state` — an arm the
+ * NINETEEN SWITCH ARMS, EIGHTEEN ACTIONS. The nineteenth is `default: return state` — an arm the
  * `ShellAction` union makes unreachable through the type system, kept because the type system is not
  * the only caller: a hot-reloaded action queued against a newer reducer, or a hand-written dispatch
  * in a future test, would otherwise fall off the end and return `undefined` as the whole state. It
@@ -112,7 +123,7 @@
  *
  * ── INVARIANTS (each one is pinned by a test in app/test/qualifyV3FlowState.test.tsx) ────────────
  * a · A NEW SEARCH CLEARS EVERYTHING DOWNSTREAM. `search_submitted` from ANY prior state lands on
- *     the same twelve values above — a kept-but-hidden choice is how one client's ranking ends up
+ *     the same thirteen values above — a kept-but-hidden choice is how one client's ranking ends up
  *     scoped to another client's payer.
  * b · ALL FOUR NAVIGATION PATHS CLEAR `snapshot` AND `snapshotError` TOGETHER — search_submitted,
  *     skipped, plan_submitted, went_back. The retry design (invariant c) depends on exactly this.
@@ -204,7 +215,10 @@ import type { QualifySnapshot, QualifyTrailingDays } from '../../../lib/qualify/
 import { AREA_ALL } from '../m/area-chips';
 import { NO_ANSWER_FILTERS, type AnswerFilters, type FlowStage } from './resolution-flow';
 
-/** The fifteen fields the staged flow moves between screens. No PHI: the term lives in a ref. */
+/** The fifteen fields the staged flow moves between screens. No PHI: the term lives in a ref.
+ *  (Sixteen until 2026-08-07: `employerQuery` went with the hand-rolled employer tag-search it fed —
+ *  the shared `MultiSelectTagPicker` that replaced it owns its own typed draft, and a machine field
+ *  nothing reads is a field the next reader wires something to.) */
 export interface ShellState {
   /** The carrier the user picked on stage 2, in VOB vocabulary. */
   payerPick: string | null;
@@ -214,7 +228,6 @@ export interface ShellState {
    *  different claim from choosing, and the answer stage says which. */
   skipped: boolean;
   filters: AnswerFilters;
-  employerQuery: string;
   planFilter: string;
   /** One-shot arm for the AI panel — see invariant (l). */
   autoAsk: boolean;
@@ -253,8 +266,7 @@ export type ShellAction =
   | { type: 'went_back'; target: 'identify' | 'payer' | 'plan' }
   | { type: 'payer_picked'; payer: string }
   | { type: 'plan_filter_changed'; value: string }
-  | { type: 'employer_query_changed'; value: string }
-  | { type: 'filter_toggled'; facet: 'planType' | 'funding' | 'employer'; value: string }
+  | { type: 'filter_toggled'; facet: 'funding' | 'employer'; value: string }
   | { type: 'filters_cleared' }
   | { type: 'retry_requested' }
   | { type: 'snapshot_requested' }
@@ -272,7 +284,6 @@ export const INITIAL_SHELL_STATE: ShellState = {
   picked: false,
   skipped: false,
   filters: NO_ANSWER_FILTERS,
-  employerQuery: '',
   planFilter: '',
   autoAsk: false,
   backTo: null,
@@ -288,8 +299,8 @@ export const INITIAL_SHELL_STATE: ShellState = {
 
 /**
  * Restore `useState`'s bail-out. Keyed off `Object.keys(next)` rather than a hand-listed field set,
- * so adding a seventeenth field cannot silently make two different states compare equal.
- * ("Seventeenth" = one more than today's sixteen — the field-write table's header comment in
+ * so adding a sixteenth field cannot silently make two different states compare equal.
+ * ("Sixteenth" = one more than today's fifteen — the field-write table's header comment in
  * qualifyV3FlowState.test.tsx uses this same one-more-than-today rule, not by coincidence.)
  */
 function bailIfUnchanged(prev: ShellState, next: ShellState): ShellState {
@@ -309,7 +320,6 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         picked: false,
         skipped: false,
         filters: NO_ANSWER_FILTERS,
-        employerQuery: '',
         planFilter: '',
         autoAsk: false,
         backTo: null,
@@ -332,7 +342,6 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         planFilter: '',
         backTo: null,
         filters: NO_ANSWER_FILTERS,
-        employerQuery: '',
         payerOverride: null,
         snapshot: null,
         snapshotError: null,
@@ -350,7 +359,6 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         picked: true,
         skipped: false, // choosing a plan supersedes a prior skip
         filters: NO_ANSWER_FILTERS,
-        employerQuery: '',
         backTo: null,
         snapshot: null,
         snapshotError: null,
@@ -371,7 +379,6 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         picked: false,
         skipped: false, // stepping back into the funnel un-skips it
         filters: NO_ANSWER_FILTERS,
-        employerQuery: '',
         payerPick: action.target !== 'plan' ? null : state.payerPick,
         planFilter: '',
         backTo: action.target,
@@ -385,12 +392,11 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
     case 'plan_filter_changed':
       return bailIfUnchanged(state, { ...state, planFilter: action.value });
 
-    case 'employer_query_changed':
-      return bailIfUnchanged(state, { ...state, employerQuery: action.value });
-
     case 'filter_toggled': {
-      const key =
-        action.facet === 'planType' ? 'planTypes' : action.facet === 'funding' ? 'funding' : 'employers';
+      // Exhaustive over the union above — the removed 'planType' arm used to sit in front of this
+      // ternary, and the union is what stops a future third facet from silently landing in
+      // `employers` instead of failing to compile.
+      const key = action.facet === 'funding' ? 'funding' : 'employers';
       const cur = state.filters[key];
       const next = cur.includes(action.value)
         ? cur.filter((v) => v !== action.value)
@@ -405,7 +411,6 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
       return bailIfUnchanged(state, {
         ...state,
         filters: NO_ANSWER_FILTERS,
-        employerQuery: '',
         area: AREA_ALL,
       });
 
