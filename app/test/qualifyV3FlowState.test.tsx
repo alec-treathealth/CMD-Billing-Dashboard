@@ -25,7 +25,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { QualifySnapshot } from '../lib/qualify/contract';
 import { AREA_ALL, AREA_OTHER } from '../components/qualify/m/area-chips';
-import { NO_ANSWER_FILTERS } from '../components/qualify/v3/resolution-flow';
+import { NO_ANSWER_FILTERS, NO_FACILITY_NARROW } from '../components/qualify/v3/resolution-flow';
 import {
   INITIAL_SHELL_STATE,
   shellReducer,
@@ -60,6 +60,7 @@ function dirty(over: Partial<ShellState> = {}): ShellState {
     windowDays: 180,
     loadedKey: 'p:ALPHA|w:180|f:|e:',
     area: 'TN',
+    facilityNarrow: ['LONESTAR MENTAL HEALTH'],
     narrowExpanded: true,
     ...over,
   };
@@ -86,6 +87,7 @@ const EVERY_ACTION: ShellAction[] = [
   { type: 'payer_override_changed', label: 'BETA MUTUAL INC' },
   { type: 'window_days_changed', days: 30 },
   { type: 'area_selected', key: 'CA' },
+  { type: 'facility_narrow_toggled', value: 'NASHVILLE MENTAL HEALTH LLC' },
   { type: 'narrow_toggled' },
 ];
 
@@ -93,7 +95,7 @@ const EVERY_ACTION: ShellAction[] = [
 
 const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[] = [
   {
-    name: 'search_submitted writes thirteen and keeps retryNonce + loadedKey',
+    name: 'search_submitted writes fourteen and keeps retryNonce + loadedKey',
     action: { type: 'search_submitted' },
     writes: {
       payerPick: null,
@@ -108,11 +110,12 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       payerOverride: null,
       windowDays: null,
       area: AREA_ALL,
+      facilityNarrow: NO_FACILITY_NARROW,
       narrowExpanded: false,
     },
   },
   {
-    name: 'skipped writes eleven — and NOT windowDays or autoAsk',
+    name: 'skipped writes twelve — and NOT windowDays or autoAsk',
     action: { type: 'skipped' },
     writes: {
       skipped: true,
@@ -125,13 +128,14 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       snapshot: null,
       snapshotError: null,
       area: AREA_ALL,
+      facilityNarrow: NO_FACILITY_NARROW,
       // Declared for the record; the table CANNOT see it (see INV n) because the fixture is already
       // `true`. INV n is what actually pins this write, from the opposite side.
       narrowExpanded: true,
     },
   },
   {
-    name: 'plan_submitted writes eight — and NOT payerPick/planFilter/payerOverride/windowDays/autoAsk',
+    name: 'plan_submitted writes nine — and NOT payerPick/planFilter/payerOverride/windowDays/autoAsk',
     action: { type: 'plan_submitted' },
     writes: {
       picked: true,
@@ -141,11 +145,12 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       snapshot: null,
       snapshotError: null,
       area: AREA_ALL,
+      facilityNarrow: NO_FACILITY_NARROW,
       narrowExpanded: false,
     },
   },
   {
-    name: "went_back('identify') writes thirteen, payerPick among them",
+    name: "went_back('identify') writes fourteen, payerPick among them",
     action: { type: 'went_back', target: 'identify' },
     writes: {
       snapshot: null,
@@ -160,11 +165,12 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       planFilter: '',
       backTo: 'identify',
       area: AREA_ALL,
+      facilityNarrow: NO_FACILITY_NARROW,
       narrowExpanded: false,
     },
   },
   {
-    name: "went_back('payer') writes thirteen, payerPick among them",
+    name: "went_back('payer') writes fourteen, payerPick among them",
     action: { type: 'went_back', target: 'payer' },
     writes: {
       snapshot: null,
@@ -179,11 +185,12 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       planFilter: '',
       backTo: 'payer',
       area: AREA_ALL,
+      facilityNarrow: NO_FACILITY_NARROW,
       narrowExpanded: false,
     },
   },
   {
-    name: "went_back('plan') writes twelve — the carrier pick SURVIVES",
+    name: "went_back('plan') writes thirteen — the carrier pick SURVIVES",
     action: { type: 'went_back', target: 'plan' },
     writes: {
       snapshot: null,
@@ -197,6 +204,7 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       planFilter: '',
       backTo: 'plan',
       area: AREA_ALL,
+      facilityNarrow: NO_FACILITY_NARROW,
       narrowExpanded: false,
     },
   },
@@ -215,9 +223,9 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     // the hand-rolled tag-search owns its own typed query, so there is no `employer_query_changed`
     // row here and no `employerQuery` in any reset below. What this button still clears is the
     // SELECTION, through `filters`.
-    name: 'filters_cleared writes filters + area only',
+    name: 'filters_cleared writes filters + BOTH grid narrows only',
     action: { type: 'filters_cleared' },
-    writes: { filters: NO_ANSWER_FILTERS, area: AREA_ALL },
+    writes: { filters: NO_ANSWER_FILTERS, area: AREA_ALL, facilityNarrow: NO_FACILITY_NARROW },
   },
   {
     name: 'retry_requested writes snapshotError + retryNonce ONLY',
@@ -260,6 +268,23 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     writes: { area: 'CA' },
   },
   {
+    // S4. THE SECOND GRID NARROW, AND THE ROW EXISTS FOR THE SAME NON-WRITES AS AREA'S. A facility
+    // selection that touched `filters`, `snapshot` or `loadedKey` would have become a FETCH narrow —
+    // and a fetch narrow cannot say "no history at NASHVILLE; they billed at LSMH and KWC", because
+    // the un-narrowed list would no longer be in hand. Multi-select: this ADDS to the array.
+    name: 'facility_narrow_toggled writes facilityNarrow ONLY — never filters, never the snapshot (invariant m)',
+    action: { type: 'facility_narrow_toggled', value: 'NASHVILLE MENTAL HEALTH LLC' },
+    writes: { facilityNarrow: ['LONESTAR MENTAL HEALTH', 'NASHVILLE MENTAL HEALTH LLC'] },
+  },
+  {
+    // ...and the same action REMOVES a value already picked. One action, both directions — exactly
+    // `filter_toggled`, so the picker's own `Clear N` can walk the selection back through it rather
+    // than earning a second writer of the field.
+    name: 'facility_narrow_toggled removes a value already picked — one action, both directions',
+    action: { type: 'facility_narrow_toggled', value: 'LONESTAR MENTAL HEALTH' },
+    writes: { facilityNarrow: [] },
+  },
+  {
     // The NARROW SEARCH card's open/closed bit. Its value here is unremarkable; the row exists for
     // the NON-writes — a disclosure toggle that touched `filters`, `snapshot` or `loadedKey` would be
     // a presentation control quietly re-issuing a ranking request.
@@ -278,7 +303,7 @@ for (const row of TABLE) {
   });
 }
 
-test('F3b: the initial state is the fifteen shell defaults, filters by shared reference', () => {
+test('F3b: the initial state is the sixteen shell defaults, filters by shared reference', () => {
   assert.deepEqual(INITIAL_SHELL_STATE, {
     payerPick: null,
     picked: false,
@@ -294,11 +319,13 @@ test('F3b: the initial state is the fifteen shell defaults, filters by shared re
     windowDays: null,
     loadedKey: null,
     area: AREA_ALL,
+    facilityNarrow: NO_FACILITY_NARROW,
     narrowExpanded: false,
   });
-  assert.equal(Object.keys(INITIAL_SHELL_STATE).length, 15, 'fifteen fields, no more');
+  assert.equal(Object.keys(INITIAL_SHELL_STATE).length, 16, 'sixteen fields, no more');
   assert.equal(INITIAL_SHELL_STATE.filters, NO_ANSWER_FILTERS, 'the SHARED constant, not a copy');
   assert.equal(INITIAL_SHELL_STATE.area, AREA_ALL, 'the area facet starts unnarrowed');
+  assert.equal(INITIAL_SHELL_STATE.facilityNarrow, NO_FACILITY_NARROW, 'and so does the facility one');
 });
 
 test('F3b: every filters reset is the SHARED constant BY REFERENCE — and clears the area with it', () => {
@@ -328,6 +355,14 @@ test('F3b: every filters reset is the SHARED constant BY REFERENCE — and clear
     // on the answer stage can never drift into clearing at different moments. It is a string, so
     // there is no reference to preserve; what is pinned is the SET of reset sites.
     assert.equal(after.area, AREA_ALL, `${target} must clear the area facet alongside the filters`);
+    // S4: the SECOND grid narrow clears at exactly the same sites, and BY REFERENCE — it is an
+    // array, so a fresh-but-equal literal here would invalidate the narrow's memo chain on every
+    // navigation, which is the MUT-F lesson one field over.
+    assert.equal(
+      after.facilityNarrow,
+      NO_FACILITY_NARROW,
+      `${target} must clear the facility narrow to the shared constant, not to an equal copy`,
+    );
   }
 });
 
@@ -371,12 +406,14 @@ test('INV a: a new search clears EVERYTHING downstream, from any prior state', (
   s = shellReducer(s, { type: 'snapshot_resolved', snapshot: SNAP_A, scopeKey: 'k1' });
   s = shellReducer(s, { type: 'snapshot_failed' });
   s = shellReducer(s, { type: 'retry_requested' });
+  s = shellReducer(s, { type: 'area_selected', key: 'TN' });
+  s = shellReducer(s, { type: 'facility_narrow_toggled', value: 'LONESTAR MENTAL HEALTH' });
 
   const after = shellReducer(s, { type: 'search_submitted' });
   assert.deepEqual(
     after,
     { ...INITIAL_SHELL_STATE, retryNonce: 1, loadedKey: 'k1' },
-    'thirteen fields back to their defaults; only the two carry-through fields differ',
+    'fourteen fields back to their defaults; only the two carry-through fields differ',
   );
 });
 
@@ -579,6 +616,52 @@ test('INV m: a re-scope KEEPS the area — it narrows the grid, and the grid is 
   ]) {
     assert.equal(shellReducer(dirty(), action).area, 'TN', `${action.type} must not clear the area`);
   }
+});
+
+test('INV m: facility_narrow_toggled reaches NOTHING the fetch reads either (S4)', () => {
+  // The SAME structural claim as area_selected's, one field over. It matters more here, not less:
+  // a facility narrow is the one narrow with an obvious SQL form (`facility = any($n)`), so the
+  // temptation to make it shape the fetch is real — and the measured reason not to is that 86.9% of
+  // members bill at exactly ONE facility, which makes the EMPTY state the common case, and only a
+  // display narrow still holds the un-narrowed list needed to say where they DID bill.
+  const before = dirty();
+  const after = shellReducer(before, { type: 'facility_narrow_toggled', value: 'NASHVILLE MENTAL HEALTH LLC' });
+  assert.deepEqual(after.facilityNarrow, ['LONESTAR MENTAL HEALTH', 'NASHVILLE MENTAL HEALTH LLC']);
+  assert.equal(after.filters, before.filters, 'the filter bag is not even re-created');
+  assert.equal(after.snapshot, before.snapshot, 'the answer on screen is untouched');
+  assert.equal(after.loadedKey, before.loadedKey, 'so nothing reads as stale and no refetch is implied');
+  assert.equal(after.snapshotError, before.snapshotError);
+  assert.equal(after.windowDays, before.windowDays);
+  assert.equal(after.payerOverride, before.payerOverride);
+  assert.equal(after.area, before.area, 'and the OTHER grid narrow is independent of it');
+});
+
+test('INV m: a re-scope KEEPS the facility narrow too — same asymmetry as the area (S4)', () => {
+  for (const action of [
+    { type: 'payer_override_changed', label: 'BETA MUTUAL INC' } as const,
+    { type: 'window_days_changed', days: 30 } as const,
+    { type: 'snapshot_requested' } as const,
+    { type: 'snapshot_resolved', snapshot: SNAP_B, scopeKey: 'k9' } as const,
+    { type: 'snapshot_failed' } as const,
+    { type: 'retry_requested' } as const,
+  ]) {
+    assert.deepEqual(
+      shellReducer(dirty(), action).facilityNarrow,
+      ['LONESTAR MENTAL HEALTH'],
+      `${action.type} must not clear the facility narrow`,
+    );
+  }
+});
+
+test('facility_narrow_toggled is MULTI-select and its own inverse — the picker needs no second action', () => {
+  let s = shellReducer(INITIAL_SHELL_STATE, { type: 'facility_narrow_toggled', value: 'A' });
+  assert.deepEqual(s.facilityNarrow, ['A']);
+  s = shellReducer(s, { type: 'facility_narrow_toggled', value: 'B' });
+  assert.deepEqual(s.facilityNarrow, ['A', 'B'], 'multi-select: the picker is multi by nature');
+  s = shellReducer(s, { type: 'facility_narrow_toggled', value: 'A' });
+  assert.deepEqual(s.facilityNarrow, ['B'], 'and the same action removes — this is what Clear N walks');
+  s = shellReducer(s, { type: 'facility_narrow_toggled', value: 'B' });
+  assert.deepEqual(s.facilityNarrow, [], 'emptied by toggling, and an empty selection is NO restriction');
 });
 
 test('area_selected: All, a state and the Other bucket are all just keys — and All is a real value', () => {

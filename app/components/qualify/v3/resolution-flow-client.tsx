@@ -52,8 +52,13 @@ import { resolveCoverageAction } from '../../../lib/qualify/v3-actions';
 // V3_INITIAL_STATE comes from a PLAIN module, never the 'use server' one: a non-function export
 // there is registered as a Server Action and 500s every action on the page (see v3FlowState.ts).
 import { V3_INITIAL_STATE } from '../../../lib/qualify/v3FlowState';
-import { getQualifyFacilityTrends, getQualifySnapshot } from '../../../lib/qualify/actions';
+import {
+  getQualifyFacilityTrends,
+  getQualifySnapshot,
+  loadQualifyFacilityOptions,
+} from '../../../lib/qualify/actions';
 import type { QualifyFacilityTrend } from '../../../lib/qualify/contract';
+import type { QualifyFacilityNarrowOption } from '../../../lib/qualify/facilityVariants';
 import { QualifyAiPanel } from '../qualify-ai-panel';
 import { bookPlacementFor } from '../../../lib/qualify/bookPlacement';
 import { HeatingUpCards, HeatingUpSkeleton } from '../shared/heating-ticker';
@@ -126,6 +131,7 @@ export function ResolutionFlowClient({
     windowDays,
     loadedKey,
     area,
+    facilityNarrow,
     narrowExpanded,
   } = flow;
 
@@ -133,6 +139,17 @@ export function ResolutionFlowClient({
   // handler touches. `null` = still loading (renders the skeleton, which reserves the strip's
   // height so a 2.5-5s trend query cannot shove the search box down the page); [] = loaded empty.
   const [trends, setTrends] = useState<QualifyFacilityTrend[] | null>(null);
+
+  // ── The FACILITY narrow's VOCABULARY (S4) ─────────────────────────────────────────────────────
+  // NOT in the reducer either, and for the same `trends` reason: it is a mount-once fetch that no
+  // flow field and no handler touches. `[]` is both the pre-load and the failed-load state, and it
+  // renders NO control rather than an empty picker — the answer stage's other honest silence.
+  //
+  // ⚠ IT IS ITS OWN REQUEST, NEVER PART OF THE SNAPSHOT ONE. Folding a near-static, `unstable_cache`d,
+  // tenant-scoped, non-PHI vocabulary into the ranking request would re-fetch it on every window chip
+  // and every billed-under press, and — worse — would put a facility list inside the payload the
+  // narrow must never reach (invariant m).
+  const [facilityOptions, setFacilityOptions] = useState<QualifyFacilityNarrowOption[]>([]);
 
   // ONE clustering pass per resolution (clusterCarriers is O(n²)); the rail, receipt and both tile
   // stages read this instead of each re-deriving it — scroll-driven work on top of 4-5 re-derives
@@ -174,6 +191,15 @@ export function ResolutionFlowClient({
    *  snapshot request is issued (flow-state.ts invariant m). */
   const onSelectArea = useCallback((key: string) => {
     dispatch({ type: 'area_selected', key });
+  }, []);
+
+  /** The FACILITY facet (S4) — the restored v2 type-ahead. Grid-only by exactly the same construction
+   *  as the area above: it writes one reducer field that `scopeKeyOf` does not read, so the fetch
+   *  effect below cannot observe it and no snapshot request is issued (flow-state.ts invariant m).
+   *  One handler in both directions, because the picker's own `Clear N` walks the selection back
+   *  through it — see the reducer's `facility_narrow_toggled` arm. */
+  const onToggleFacility = useCallback((value: string) => {
+    dispatch({ type: 'facility_narrow_toggled', value });
   }, []);
 
   /** The NARROW SEARCH card's disclosure. A pure presentation flip that reaches no request — it
@@ -375,6 +401,35 @@ export function ResolutionFlowClient({
       })
       .catch(() => {
         if (alive) setTrends([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // ── The FACILITY vocabulary: fetched ONCE on mount, tenant-scoped, independent of the search ───
+  // The ticker's shape exactly (mount-once, fail-soft, no dependency on the flow), because it is the
+  // same kind of thing: near-static reference data that must never block or shape the answer. The
+  // action is `unstable_cache`d for an hour behind the 'cmd-facilities' tag, so this costs a warm
+  // cache read rather than a query, and a failure leaves the narrow simply absent.
+  useEffect(() => {
+    let alive = true;
+    loadQualifyFacilityOptions()
+      .then((r) => {
+        if (!alive) return;
+        setFacilityOptions(
+          r.ok
+            ? r.facilities.map((f) => ({
+                value: f.value,
+                variants: f.variants,
+                display: f.display,
+                careSetting: f.care_setting,
+              }))
+            : [],
+        );
+      })
+      .catch(() => {
+        if (alive) setFacilityOptions([]);
       });
     return () => {
       alive = false;
@@ -631,6 +686,11 @@ export function ResolutionFlowClient({
                 employerNarrowTooMany: narrow.tooMany,
                 area,
                 onSelectArea,
+                // The SECOND grid narrow (S4). Both of these ride here rather than through
+                // `scopeKey`, and that absence from the fetch effect's inputs is the whole guarantee.
+                facilityOptions,
+                facilityNarrow,
+                onToggleFacility,
                 payerOverride,
                 // Re-scopes are REFETCHES of content already on screen: the snapshot stays rendered
                 // (dimmed, with the progress bar) rather than blanking — the design system's rule.

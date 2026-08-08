@@ -25,6 +25,8 @@ import {
   areaChipsWithActive,
   bookIsOnScreen,
   bookLeadsAnswer,
+  facilityNarrowEmptyCopy,
+  NO_FACILITY_NARROW,
   UNRESOLVABLE_COPY,
   deriveStage,
   liveSentenceFor,
@@ -44,7 +46,8 @@ import {
 import { deriveNotices, panelProvenance } from '../lib/qualify/resolution';
 import type { PanelEvidence, PanelId, QualifyResolution } from '../lib/qualify/resolution';
 import type { QualifyFacility, QualifySnapshot } from '../lib/qualify/contract';
-import { trailingWindow } from '../lib/qualify/contract';
+import { QUALIFY_NO_FACILITY, trailingWindow } from '../lib/qualify/contract';
+import type { QualifyFacilityNarrowOption } from '../lib/qualify/facilityVariants';
 import { HeatingUpCards, HeatingUpSkeleton } from '../components/qualify/shared/heating-ticker';
 import { AREA_ALL, AREA_OTHER, areaKeyFor, facilitiesInArea } from '../components/qualify/m/area-chips';
 import { TRENDS } from './helpers/qualifyTrends';
@@ -217,6 +220,12 @@ function props(stage: FlowStage, r: QualifyResolution | null, over: Partial<Reso
           employerNarrowTooMany: null,
           area: AREA_ALL,
           onSelectArea: noop,
+          // S4: EMPTY by default, which is the pre-vocabulary state a real mount also passes through
+          // (the options are a mount-once fail-soft fetch). An empty vocabulary renders no control at
+          // all, so every case in this file that does not opt in is byte-identical to before S4.
+          facilityOptions: [],
+          facilityNarrow: NO_FACILITY_NARROW,
+          onToggleFacility: noop,
           narrowExpanded: false,
           onToggleNarrow: noop,
         }
@@ -248,6 +257,11 @@ function answerProps(over: Partial<NonNullable<ResolutionStagesProps['answer']>>
     employerNarrowTooMany: null,
     area: AREA_ALL,
     onSelectArea: noop,
+    // S4: see the note in `props()` — an empty vocabulary means no facility control, so tests about
+    // it opt in by name exactly as the ones about the card's CONTROLS do.
+    facilityOptions: [],
+    facilityNarrow: NO_FACILITY_NARROW,
+    onToggleFacility: noop,
     // CLOSED, because that is `INITIAL_SHELL_STATE.narrowExpanded` and therefore what an operator
     // meets on every path except a Skip. Deliberately NOT mirrored off `skipped` here: a helper that
     // quietly opened the card would leave every "the toggles are live" assertion below silently
@@ -1108,6 +1122,23 @@ test('I9: no meaning-bearing text below 12px anywhere in the flow', () => {
       fixture(),
       { answer: answerProps({ snapshot: snapshotFixture(), area: 'TN' }) },
       /ranked facilities in this area/,
+    ],
+    // S4: the FACILITY narrow's own markup — the shared type-ahead's label row, its ON badge, its
+    // selected tag, and the composed narrowing sentence. The picker was already inside the card for
+    // employers, but never on THIS surface (outside the card, light-on-light) and never carrying a
+    // selected tag, which is the markup a floor sweep has to see.
+    [
+      'answer + facility narrow active',
+      'answer',
+      fixture(),
+      {
+        answer: answerProps({
+          snapshot: threeStateSnapshot(),
+          facilityOptions: FACILITY_OPTIONS,
+          facilityNarrow: ['NASH'],
+        }),
+      },
+      /at NASHVILLE MENTAL HEALTH/,
     ],
     // THE NARROW SEARCH CARD, BOTH POSITIONS (2026-08-07). Two rows, not one: collapsed and expanded
     // render DIFFERENT markup — the badge strip and the tally on one side, the chip rows and the
@@ -3318,4 +3349,312 @@ test('S3 M1 — the sr-only book clause is STAGE-GATED: no "ranking below" where
       `stage=${stage} announces a ranking that is not on screen`,
     );
   }
+});
+
+
+// ── S4 — THE FACILITY NARROW, BESIDE THE GRID (2026-08-08) ───────────────────────────────────────
+//
+// WHAT THESE PIN. The v2 tab's Facility type-ahead was a casualty of the v3 cutover, and it comes
+// back as a DISPLAY narrow over rows the ranking already returned — not as a fetch narrow. The
+// measured reason is the whole feature: 86.9% of members bill at exactly ONE facility in 365 days,
+// so a facility narrow on a member search empties the screen ~87% of the time, and only a display
+// narrow still holds the un-narrowed list needed to say WHERE they did bill. A fetch narrow could
+// say "no history at NASHVILLE" and nothing more.
+//
+// Placement is BESIDE the grid with AREA, never on the NARROW SEARCH card: everything on that card
+// re-issues the ranking request, and this does not.
+
+/** The picker vocabulary, at the grain the real loader returns: `value`/`variants` are RAW rollup
+ *  facility text (== QualifyFacility.facilityKey) and `display` is the label. The placeholder is
+ *  included ON PURPOSE — the offerable-set assertion below is what removes it. */
+const FACILITY_OPTIONS: QualifyFacilityNarrowOption[] = [
+  { value: 'NASH', display: 'NASHVILLE MENTAL HEALTH', variants: ['NASH'], careSetting: 'IP' },
+  { value: 'PHX', display: 'PHOENIX RENEWAL', variants: ['PHX'], careSetting: 'OP' },
+  { value: 'KWC', display: 'KENTUCKY WELLNESS CENTER', variants: ['KWC'], careSetting: null },
+  { value: 'SUMMIT', display: 'SUMMIT RIDGE RECOVERY', variants: ['SUMMIT'], careSetting: null },
+  { value: 'UNL', display: 'UNLISTED BH', variants: ['UNL'], careSetting: null },
+  { value: QUALIFY_NO_FACILITY, display: 'No Facility', variants: [QUALIFY_NO_FACILITY], careSetting: null },
+];
+
+const withFacility = (
+  snap: QualifySnapshot,
+  over: Partial<NonNullable<ResolutionStagesProps['answer']>> = {},
+) => answerHtml(snap, { facilityOptions: FACILITY_OPTIONS, ...over });
+
+/** ⚠ BOUND ROW ASSERTIONS TO THE GRID, because the PICKER ECHOES ITS OWN SELECTION. A selected
+ *  facility renders as a tag carrying that facility's display name, so an unbounded
+ *  `!html.includes('PHOENIX RENEWAL')` is satisfied-or-defeated by the control rather than by the
+ *  list it narrows — the `inventoryRegion` lesson, one region over. */
+const gridRegion = (html: string): string =>
+  outerHtmlFrom(html, html.lastIndexOf('<section', html.indexOf('qualify-scorecard-heading')));
+
+test('S4 — the facility type-ahead renders BESIDE the grid, and NEVER inside the NARROW SEARCH card', () => {
+  const html = withFacility(threeStateSnapshot(), { candidates: orderedCandidates(fixture()) });
+  // POSITIVE CONTROL: the grid rendered, so the negative below is about a real screen.
+  assert.match(html, /NASHVILLE MENTAL HEALTH/, 'the scorecard rendered — otherwise this test is vacuous');
+  assert.match(html, /aria-label="Facility"/, 'the shared type-ahead is on screen');
+  // ⚠ THE PLACEMENT RULING, MECHANISED. Everything on the control card re-issues the ranking request
+  // and this does not, so a facility field inside the card would break the card's own honesty rule —
+  // the same rule that kept AREA out of it.
+  assert.ok(
+    !inventoryRegion(html).includes('aria-label="Facility"'),
+    'the facility control must not live on the card that claims every switch re-issues the request',
+  );
+  // It is a beat of the skip reveal and states ON/OFF in the same vocabulary as every other facet.
+  const row = outerHtmlFrom(html, html.lastIndexOf('<div data-v3-facet', html.indexOf('aria-label="Facility"')));
+  assert.match(row, /Off · all 5/, 'five offerable facilities, and it says so while off');
+  assert.match(row.slice(0, 60), /data-v3-facet/, 'it carries the reveal hook so the stagger includes it');
+  // AND THE CARD'S OWN TALLY IS UNMOVED. Facility is not a card facet, so `cardFacets` must not grow —
+  // the hardcoded `off === 3` assertion above stays about the CARD's facets and is untouched by S4.
+  assert.match(inventoryRegion(html), /of these 4 switches on/, 'four card facets, and facility is not one');
+});
+
+test('S4 — “No Facility” is never OFFERABLE: you cannot send someone to a placeholder', () => {
+  // The row keeps its rank everywhere (dropping it would hide $29,081,575.38 of charges) — it is only
+  // un-offerable, because picking it asks whether a patient can be admitted to a bucket.
+  const html = withFacility(threeStateSnapshot());
+  assert.match(html, /aria-label="Facility"/, 'positive control: the picker rendered at all');
+  assert.match(html, /Off · all 5/, 'six options in, five offered — the placeholder is the one removed');
+  assert.ok(!html.includes('Off · all 6'), 'the placeholder was not counted into the denominator');
+});
+
+test('S4 — the narrow hides what it excludes, states its reach, and composes with AREA as AND', () => {
+  const one = gridRegion(withFacility(threeStateSnapshot(), { facilityNarrow: ['NASH'] }));
+  assert.equal(one.split('data-v3-tile').length - 1, 1, 'one card, not three — the picker echoes the name too');
+  assert.match(one, /NASHVILLE MENTAL HEALTH/, 'the picked facility stays');
+  assert.ok(!one.includes('PHOENIX RENEWAL'), 'the others are hidden');
+  assert.ok(!one.includes('UNLISTED BH'));
+  assert.match(one, /at NASHVILLE MENTAL HEALTH\. The ranking itself was not re-run/, 'it names its own reach');
+  assert.match(one, /the rating above still covers all 3/, 'and refuses to claim the hero moved with it');
+  assert.match(one, /On · 1 of 5/, 'the facet badge counts the picks');
+
+  // MULTI-SELECT: the picker is multi by nature and the narrow is a union within the facet.
+  const two = gridRegion(withFacility(threeStateSnapshot(), { facilityNarrow: ['NASH', 'PHX'] }));
+  assert.equal(two.split('data-v3-tile').length - 1, 2, 'two cards');
+  assert.match(two, /NASHVILLE MENTAL HEALTH/);
+  assert.match(two, /PHOENIX RENEWAL/);
+  assert.ok(!two.includes('UNLISTED BH'));
+  assert.match(two, /at the 2 facilities you picked/, 'more than one pick is counted, not enumerated');
+
+  // AND ACROSS THE TWO GRID NARROWS. NASH is in TN; asking for PHX inside TN is empty by
+  // construction, and BOTH reaches are named so the operator can see which one to undo.
+  const both = gridRegion(withFacility(threeStateSnapshot(), { facilityNarrow: ['NASH'], area: 'TN' }));
+  assert.match(both, /in this area, at NASHVILLE MENTAL HEALTH/, 'both narrows named, in one sentence');
+  const conflict = gridRegion(withFacility(threeStateSnapshot(), { facilityNarrow: ['PHX'], area: 'TN' }));
+  assert.match(conflict, />Facilities, ranked</, 'positive control: the grid region really was found');
+  assert.ok(!conflict.includes('data-v3-tile'), 'AND, not OR — an AZ facility does not survive a TN area');
+  // ...AND THE BLAME IS COMPUTED RATHER THAN GUESSED. The facility narrow on its own still has a row
+  // (PHX), so the AREA is what emptied the grid and the area sentence is the honest diagnosis. Blame
+  // the facility narrow here and the operator clears the wrong control.
+  assert.match(conflict, /No ranked facility is in this area\./);
+  assert.ok(!conflict.includes('No history at'), 'the facility narrow did not empty this one');
+});
+
+test('S4 — a GRID narrow may not move the headline number, exactly as the area may not', () => {
+  // ⚠ THE RATINGS MUST DIFFER OR THIS TEST CANNOT FAIL. `threeStateSnapshot()` gives every row the
+  // fixture's uniform ratingV2 of 62, so a hero re-derived from the NARROWED list prints the same
+  // number and the guard reads as coverage while proving nothing — measured, not assumed: mutating
+  // `answerFacilities` to apply the narrow left this green against the uniform fixture. Spread them
+  // and the patient-weighted mean genuinely moves with the set it is taken over.
+  const spread = {
+    ...threeStateSnapshot(),
+    facilities: [
+      facility({ rank: 1, name: 'NASHVILLE MENTAL HEALTH', facilityKey: 'NASH', state: 'TN', ratingV2: 90, distinctPatients: 40 }),
+      facility({ rank: 2, name: 'PHOENIX RENEWAL', facilityKey: 'PHX', city: 'Phoenix', state: 'AZ', ratingV2: 20, distinctPatients: 40 }),
+      facility({ rank: 3, name: 'UNLISTED BH', facilityKey: 'UNL', city: null, state: null, ratingV2: 20, distinctPatients: 40 }),
+    ],
+  } as unknown as QualifySnapshot;
+  const heroOf = (h: string) => /aria-label="policy rating (\d+) out of 100"/.exec(h)?.[1] ?? null;
+  const wide = withFacility(spread);
+  const narrowed = withFacility(spread, { facilityNarrow: ['NASH'] });
+  assert.ok(heroOf(wide) !== null, 'the unfiltered hero rendered a number');
+  assert.notEqual(heroOf(wide), '90', 'the whole-set hero is not the NASH-only one — the fixture can tell them apart');
+  assert.equal(heroOf(narrowed), heroOf(wide), 'the rating covers the whole ranking, narrow or not');
+  // And the sentence beside it says so, rather than leaving the reader to infer the hero's reach.
+  assert.match(gridRegion(narrowed), /the rating above still covers all 3/);
+});
+
+test('S4 empty, MEMBER-LED — “No history at X — this member billed at A and B.”', () => {
+  // ⚠ THIS SENTENCE IS THE FEATURE. It is the one a fetch narrow could not say, because the
+  // un-narrowed list would not be in hand — and at 86.9% single-facility members it is the COMMON
+  // render, not an edge case.
+  const html = gridRegion(withFacility(threeStateSnapshot(), { facilityNarrow: ['KWC'] }));
+  assert.match(
+    html,
+    /No history at KENTUCKY WELLNESS CENTER — this member billed at NASHVILLE MENTAL HEALTH, PHOENIX RENEWAL and UNLISTED BH\./,
+  );
+  assert.match(html, /Clear the facility above to see all 3\./, 'a narrow with no way back is a trap');
+  // The OTHER two emptinesses must not co-render: this is neither "nothing ranked at all" nor "no
+  // ranked facility is in this area", and two role="status" sentences for one click is the overlap
+  // review Finding 2 removed for the area.
+  assert.ok(!html.includes('No facility has claims history under this scope'));
+  assert.ok(!html.includes('No ranked facility is in this area'));
+  assert.ok(!html.includes('facilities shown'), 'and the "Showing 0 of N" framing is suppressed');
+});
+
+test('S4 empty, BOOK-LED — it names where the BOOK does have rows, and the member’s own facilities', () => {
+  const html = withFacility(ledSnapshot(), { facilityNarrow: ['KWC'] });
+  assert.match(html, /Where AETNA US HEALTHCARE pays — the whole book/, 'positive control: the book leads');
+  assert.match(html, /AETNA US HEALTHCARE&#x27;s book has no rows at KENTUCKY WELLNESS CENTER in the window shown\./);
+  assert.match(html, /The 3 facilities behind this answer are still there — clear the facility above to see them\./);
+  assert.match(html, /This member billed at NASHVILLE MENTAL HEALTH\./, 'the member’s own history is still named');
+});
+
+test('S4 empty, BOOK-LED — a facility the member HAS billed at is never called “no history”', () => {
+  // THE LIE THIS ARM EXISTS TO PREVENT. The member ranking is floorless and the book applies
+  // QUALIFY_MIN_LINES, so a facility the member billed 1-2 lines at is in `facilities` and NOT in
+  // `bookFacilities`. Narrowing to it empties the book-led grid — and "no history there" would be
+  // flatly false about the one fact on the screen that decides an admission.
+  const thinBook = ledSnapshot({
+    bookFacilities: [
+      facility({ rank: 1, name: 'SUMMIT RIDGE RECOVERY', facilityKey: 'SUMMIT', payerCount: 1 }),
+      facility({ rank: 2, name: 'PHOENIX RENEWAL', facilityKey: 'PHX', city: 'Phoenix', state: 'AZ', payerCount: 1 }),
+    ],
+  } as Partial<QualifySnapshot>);
+  const html = withFacility(thinBook, { facilityNarrow: ['NASH'] });
+  assert.match(html, /This member HAS billed at NASHVILLE MENTAL HEALTH/, 'the fact that decides the admission');
+  assert.match(html, /below it/, 'and the volume floor is named as the only possible cause');
+  assert.ok(!html.includes('has no rows at NASHVILLE MENTAL HEALTH'), 'the other arm’s claim would be false here');
+  assert.ok(!html.includes('No history at NASHVILLE MENTAL HEALTH'), 'and so would the member-led one');
+});
+
+test('S4 — facilityNarrowEmptyCopy: four arms, four different claims, none borrowed', () => {
+  const base = { picked: ['NASH'], bookPayer: 'AETNA', rankedTotal: 3 };
+  const memberLed = facilityNarrowEmptyCopy({ ...base, bookLeads: false, memberHasHistoryHere: false, elsewhere: ['A', 'B'] });
+  const memberLedBare = facilityNarrowEmptyCopy({ ...base, bookLeads: false, memberHasHistoryHere: false, elsewhere: [] });
+  const bookLed = facilityNarrowEmptyCopy({ ...base, bookLeads: true, memberHasHistoryHere: false, elsewhere: ['A'] });
+  const bookLedFloor = facilityNarrowEmptyCopy({ ...base, bookLeads: true, memberHasHistoryHere: true, elsewhere: [] });
+  assert.equal(new Set([memberLed, memberLedBare, bookLed, bookLedFloor]).size, 4, 'four distinct sentences');
+  assert.match(memberLed, /No history at NASH — this member billed at A and B\./);
+  // ⚠ NOTHING BUT THE PLACEHOLDER LEFT. `facilitiesElsewhere` strips `No Facility`, so `elsewhere`
+  // can be empty with rows still on the ranking — and "this member billed at " with nothing after it
+  // would be the fabricated-place claim in its most literal form.
+  assert.ok(!memberLedBare.includes('billed at'), 'no place is named when there is no place to name');
+  assert.match(memberLedBare, /no facility on them/);
+  assert.match(bookLed, /AETNA's book has no rows at NASH/);
+  assert.match(bookLedFloor, /This member HAS billed at NASH/);
+  // An unnameable book still gets an honest subject rather than "null's book".
+  assert.match(
+    facilityNarrowEmptyCopy({ ...base, bookPayer: null, bookLeads: true, memberHasHistoryHere: false, elsewhere: [] }),
+    /^This book has no rows at NASH/,
+  );
+});
+
+test('S4 — the SECONDARY book section is NOT narrowed, matching what AREA does there today', () => {
+  // DECIDED AND STATED. The area narrow does not reach the secondary section either — it renders
+  // `bookFacilities.slice(0, QUALIFY_BOOK_PREVIEW)` straight — and the reason is that the section is
+  // an ANSWER TO A DIFFERENT QUESTION ("does this policy pay anywhere"), whose value is precisely
+  // that it is not scoped to what the operator is currently looking at. Narrowing it would make the
+  // "N facilities — every facility {payer} paid at" sentence above it false.
+  const html = withFacility(secondaryBookSnapshot(), { facilityNarrow: ['NASH'], area: 'TN' });
+  const book = bookRegion(html);
+  for (const name of ['SUMMIT RIDGE RECOVERY', 'PHOENIX RENEWAL', 'NASHVILLE MENTAL HEALTH']) {
+    assert.ok(book.includes(name), `${name} survives in the secondary book — the grid narrows, the book does not`);
+  }
+  assert.match(book, /3<\/span> facilities/, 'and its own count still describes the whole book');
+});
+
+test('S4 — the inventory counts the facility narrow: one pick can never read “nothing is narrowing”', () => {
+  // The AREA precedent exactly (2026-08-07). `anyFacetOn` is what stops the card's headline saying
+  // "nothing is narrowing this search" beside a lit control that is narrowing it.
+  const base = threeStateSnapshot();
+  const allPayersThreeStates = {
+    ...base,
+    resolved: { ...base.resolved, payerName: null, payerScope: 'all' },
+  } as unknown as QualifySnapshot;
+  const wide = withFacility(allPayersThreeStates, { skipped: true, scopeSource: 'dominant' });
+  assert.match(inventoryRegion(wide), /No filters are on — apart from the window/, 'positive control');
+  const narrowed = withFacility(allPayersThreeStates, {
+    skipped: true,
+    scopeSource: 'dominant',
+    facilityNarrow: ['NASH'],
+  });
+  assert.match(inventoryRegion(narrowed), /Some switches are on — everything marked Off is unrestricted\./);
+  assert.ok(!inventoryRegion(narrowed).includes('No filters are on'), 'an active facility IS a filter that is on');
+});
+
+test('S4 — the tally names BOTH beside-the-grid narrows, or one, or neither', () => {
+  // The card holds FOUR of the screen's six facets. "Of these" scopes its count to the card; the
+  // clause points at whichever of the two outside narrows is live. Enumerated rather than counted,
+  // because "plus 2 narrows" makes an operator hunt for the second one.
+  const base = threeStateSnapshot();
+  const allPayersThreeStates = {
+    ...base,
+    resolved: { ...base.resolved, payerName: null, payerScope: 'all' },
+  } as unknown as QualifySnapshot;
+  const tally = (over: Partial<NonNullable<ResolutionStagesProps['answer']>>) =>
+    inventoryRegion(
+      withFacility(allPayersThreeStates, {
+        skipped: true,
+        scopeSource: 'dominant',
+        // The card only HOLDS four facets when it has a candidate universe to derive funding and
+        // employers from — without it the tally is honest but says "2", and this test is about the
+        // clause beside the tally rather than about an empty card.
+        candidates: orderedCandidates(fixture()),
+        ...over,
+      }),
+    );
+
+  assert.match(tally({ area: 'TN' }), / · plus the area narrow, beside the list/);
+  assert.match(tally({ facilityNarrow: ['NASH'] }), / · plus the facility narrow, beside the list/);
+  assert.match(tally({ area: 'TN', facilityNarrow: ['NASH'] }), / · plus the area and facility narrows, beside the list/);
+  // NEGATIVE CONTROL: without it the clause could be unconditional, naming narrows that are off.
+  const none = tally({});
+  assert.ok(!none.includes('area narrow'), 'no area narrow, no clause');
+  assert.ok(!none.includes('facility narrow'), 'no facility narrow, no clause');
+  assert.match(none, /1 of these 4 switches on/, 'and the CARD’s own tally never counts either of them');
+});
+
+test('S4 HONESTY GUARD — the facility narrow reaches nothing that describes the FETCH', () => {
+  // flow-state invariant (m), asserted from the render side: `rankingNarrowed` keys on
+  // filters.funding and the employer narrow, and the facility selection is a sibling of `filters`,
+  // never a member. Fold it into AnswerFilters and this goes red.
+  const r = fixture();
+  const html = render(
+    props('answer', r, {
+      answer: answerProps({
+        snapshot: threeStateSnapshot(),
+        skipped: true,
+        candidates: orderedCandidates(r),
+        facilityOptions: FACILITY_OPTIONS,
+        facilityNarrow: ['NASH'],
+      }),
+    }),
+  );
+  assert.match(html, /aria-label="Facility"/, 'positive control: the narrow really is on screen');
+  assert.ok(!html.includes('narrowed by your filter selections'), 'the request was not narrowed and must not claim it was');
+  assert.ok(!html.includes('Ranking over'), 'no plan-count caption implying the ranking was re-scoped');
+});
+
+test('S4 STRUCTURAL — the facility selection never reaches scopeKeyOf or the snapshot request', () => {
+  /* ⚠ THE ONE THING A RENDER TEST CANNOT SEE. `resolution-flow-client.tsx` reaches the `'use server'`
+   * chain, so nothing hermetic can import it — the S3 review measured that INVERTING a ternary there
+   * shipped app 557/0 with a clean build. The wiring that decides whether this narrow is a DISPLAY
+   * narrow or a FETCH narrow lives in exactly that unimportable file, so it is scanned instead. */
+  const src = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/resolution-flow-client.tsx', import.meta.url)),
+    'utf8',
+  );
+  /** The argument text of a call, walked by paren depth from the marker. */
+  const callArgs = (marker: string): string => {
+    const at = src.indexOf(marker);
+    assert.ok(at >= 0, `\`${marker}\` is not in the client — this scan would be vacuous`);
+    let depth = 0;
+    for (let i = at + marker.length - 1; i < src.length; i++) {
+      if (src[i] === '(') depth++;
+      else if (src[i] === ')' && --depth === 0) return src.slice(at, i + 1);
+    }
+    return assert.fail(`unbalanced call at ${marker}`);
+  };
+  // POSITIVE CONTROLS first: both calls really were found and really carry their known arguments.
+  const scope = callArgs('scopeKeyOf(');
+  assert.match(scope, /payerLabel/, 'the scope key really is the one built from the request inputs');
+  const request = callArgs('getQualifySnapshot(');
+  assert.match(request, /query: term/, 'the snapshot request really is the one carrying the term');
+  // ...and now the negatives mean something.
+  assert.ok(!/facilit/i.test(scope), 'a facility in the scope key would make this a fetch narrow');
+  assert.ok(!/facilit/i.test(request), 'and a facility on the wire would throw away the empty state');
+  // The vocabulary fetch is the ticker's shape — mount-once and fail-soft — never folded into the
+  // snapshot effect, whose deps are the request identity and nothing else.
+  assert.match(src, /loadQualifyFacilityOptions/, 'the vocabulary is loaded by the shell');
 });

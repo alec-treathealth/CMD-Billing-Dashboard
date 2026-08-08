@@ -41,8 +41,19 @@
 // this file no longer threads an employer query prop. The rule above is about THIS module; do not
 // read it as a ban on mounting a client control.
 import { useMemo } from 'react';
-import { Briefcase, ChevronRight } from 'lucide-react';
+import { Briefcase, ChevronRight, Building2 } from 'lucide-react';
 import { MultiSelectTagPicker } from '../../ui/multi-select-tag-picker';
+// S4 — the facility grid narrow's set operations, PURE and unit-tested next door. Nothing here
+// reaches a request; see flow-state.ts invariant (m) and `FacilityNarrowLine` below.
+import {
+  andList,
+  facilitiesElsewhere,
+  facilityDisplayNames,
+  facilityNarrowKeys,
+  narrowByFacility,
+  offerableFacilityOptions,
+  type QualifyFacilityNarrowOption,
+} from '../../../lib/qualify/facilityVariants';
 import type {
   CoverageGroupSummary,
   QualifyResolution,
@@ -304,6 +315,16 @@ export interface AnswerFilters {
 }
 
 export const NO_ANSWER_FILTERS: AnswerFilters = { funding: [], employers: [] };
+
+/**
+ * "No facility is picked" — the S4 grid narrow's empty selection, as ONE shared reference.
+ *
+ * It sits beside `NO_ANSWER_FILTERS` and for the identical reason: the reducer resets it at five
+ * sites and the answer stage memoizes off it, so a fresh-but-equal `[]` at any of those sites would
+ * invalidate the whole narrow memo chain on every navigation. `area` needs no such constant because
+ * it is a string; this one does because it is an array (flow-state.ts's referential bail-out note).
+ */
+export const NO_FACILITY_NARROW: readonly string[] = [];
 
 export function answerFiltersActive(f: AnswerFilters): boolean {
   return f.funding.length > 0 || f.employers.length > 0;
@@ -1644,6 +1665,20 @@ export interface StageAnswerProps {
    */
   area: string;
   onSelectArea: (key: string) => void;
+  /**
+   * The FACILITY narrow's vocabulary — `qualifyFacilityOptions`, loaded ONCE by the shell the way the
+   * ticker loads trends (mount-once, fail-soft), never inside the snapshot request. EMPTY is a real
+   * state, not an error: it is what a first paint and a failed load both look like, and it renders no
+   * control at all rather than an empty picker claiming a vocabulary it does not have.
+   */
+  facilityOptions: readonly QualifyFacilityNarrowOption[];
+  /**
+   * The picked facilities — canonical picker values. Narrows the RENDERED grid only, exactly like
+   * `area`: a sibling of `filters`, never a member, so it reaches no request (flow-state.ts invariant
+   * m). Multi-select. See `FacilityNarrowLine` for the measurement behind "display, not fetch".
+   */
+  facilityNarrow: readonly string[];
+  onToggleFacility: (value: string) => void;
   payerOverride: string | null;
   onPayerOverride: (label: string | null) => void;
   windowDays: QualifyTrailingDays | null;
@@ -1897,6 +1932,136 @@ export function AreaLine(props: {
   );
 }
 
+/**
+ * ── THE FACILITY NARROW (S4, Alec 2026-08-08) ───────────────────────────────────────────────────
+ *
+ * WHAT WAS LOST. v2's tab carried a Facility type-ahead in its primary search row; the 2026-08-06 v3
+ * cutover dropped it, and — like the AREA facet above — the drop is absent from the ratified pattern
+ * doc's deliberate-drops list, so it was a casualty rather than a ruling.
+ *
+ * ⚠ IT NARROWS THE FETCHED SET, NOT THE FETCH, AND THAT IS A MEASURED DECISION RATHER THAN A
+ * STRUCTURAL CONVENIENCE. The obvious build is a fetch narrow — the ranking query would take
+ * `upper(facility) = any($n::text[])` today and it measures AT OR BELOW baseline. It is still the
+ * wrong build: **86.9% of members (3,759 of 4,324) bill at exactly ONE facility in 365 days**, so a
+ * facility narrow on a member search is a 1-or-0 outcome almost always — which makes the EMPTY state
+ * the common render rather than an edge case. A fetch narrow's empty screen can only say "no history
+ * at NASHVILLE". A narrow over the already-fetched set can say *"no history at NASHVILLE — this
+ * member billed at LSMH and KWC"*, because the un-narrowed list is still in hand. Strictly more
+ * information, zero extra round trips, and no refetch on toggle. See `facilityNarrowEmptyCopy`.
+ *
+ * ⚠ IT RENDERS **BESIDE THE GRID WITH AREA**, NEVER ON THE NARROW SEARCH CARD (controller ruling
+ * 2026-08-08, flagged to Alec). His earlier "folds into the card" wording yields to his later
+ * fetched-set ruling plus the card's own documented rule — *everything on the control card re-issues
+ * the ranking request, and this does not*. That rule is exactly why AREA was sorted out of the card
+ * and kept out of `cardFacets`; a requestless field inside the card would either break it or force
+ * it to be re-ruled. So the two beside-the-grid narrows sit together, and the card's tally NAMES
+ * them rather than absorbing them.
+ *
+ * THE SHARED PICKER, IN CLIENT MODE. `MultiSelectTagPicker` is the same primitive Collections and the
+ * v2 tab render; the vocabulary is 47 options, small enough to load once and filter locally, so no
+ * `onQueryChange` and no `minChars`. MULTI-select, because the picker is multi by nature and "show me
+ * these two houses" is a real question — single-select would be a restriction invented to simplify
+ * the empty state, and the empty state handles a list already.
+ *
+ * The badge rides the picker's own label row (the Employers precedent): the picker owns the only
+ * label this facet has, and a second "Facility" heading above it would say the word twice to a
+ * screen reader. `data-v3-facet` enrols it in the skip reveal's stagger, which selects across the
+ * stage rather than inside the card.
+ */
+export function FacilityNarrowLine(props: {
+  options: readonly QualifyFacilityNarrowOption[];
+  selected: readonly string[];
+  onToggle: (value: string) => void;
+}): React.ReactElement {
+  return (
+    <div data-v3-facet className="min-w-[15rem] max-w-md flex-1">
+      <MultiSelectTagPicker
+        label="Facility"
+        badge={<FacetState {...facetReading(props.selected, props.options.length)} />}
+        placeholder="Type a facility name…"
+        icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
+        options={props.options.map((o) => ({ value: o.value, display: o.display, badge: o.careSetting }))}
+        selected={[...props.selected]}
+        onToggle={props.onToggle}
+        /* The Employers precedent: `onClear` walks the selection back through the SAME toggle rather
+           than reaching for a second reducer action. `facility_narrow_toggled` is the machine's only
+           write to this field, and a second writer of a narrowing field is the shape `scopeKeyOf`'s
+           header is a post-mortem of. */
+        onClear={() => {
+          for (const v of props.selected) props.onToggle(v);
+        }}
+        tone="score"
+      />
+    </div>
+  );
+}
+
+/**
+ * THE SENTENCE THE WHOLE FEATURE EXISTS FOR — four arms, four different claims, none borrowed.
+ *
+ * Pure and exported so the copy is testable without a render, and because the branch it makes is a
+ * DECISION (which emptiness is this?) rather than markup. The JSX site keeps the `role="status"` and
+ * its book-led marker; this owns the words.
+ *
+ * The arms, and why each is a different claim:
+ *  1 · BOOK-LED, and the member HAS billed there. The member ranking is FLOORLESS and the book applies
+ *      `QUALIFY_MIN_LINES`, so a facility the member billed 1-2 lines at is in `facilities` and NOT in
+ *      `bookFacilities`. "No history there" would be flatly false about the one fact on the screen
+ *      that decides an admission. The floor is the only possible cause (both loads are the same query
+ *      over the same rollup with the same payer, window and market — the member's rows are a SUBSET of
+ *      the book's before it), which is why this sentence may name it.
+ *  2 · BOOK-LED, and they have not. The claim is about the PAYER'S BOOK, not about the member, so the
+ *      member's own footprint is named separately rather than folded in.
+ *  3 · MEMBER-LED, with somewhere else to name. Alec's ruling rationale, verbatim.
+ *  4 · MEMBER-LED, with nowhere else to name. Reachable: `facilitiesElsewhere` strips the
+ *      `No Facility` placeholder, so every other row can be a bucket rather than a place. "This member
+ *      billed at " with nothing after it would be the fabricated-place claim in its most literal form.
+ *
+ * Copy unratified.
+ */
+export function facilityNarrowEmptyCopy(input: {
+  /** Display labels of the picked facilities. */
+  picked: readonly string[];
+  bookLeads: boolean;
+  bookPayer: string | null;
+  /** The LEADING list's length — what "still there" is counting. */
+  rankedTotal: number;
+  /** Does the searched identifier's OWN footprint contain a picked facility? */
+  memberHasHistoryHere: boolean;
+  /** The member's other facilities, by name, placeholder already removed. */
+  elsewhere: readonly string[];
+}): string {
+  const where = andList(input.picked);
+  const back = `clear the facility above to see them`;
+  const still = `The ${input.rankedTotal} facilities behind this answer are still there — ${back}.`;
+  if (input.bookLeads) {
+    // "This book" rather than "null's book": `scopedPayerOf` refuses a name the scope contradicts,
+    // and a possessive built on that null is how a caption starts naming nobody in particular.
+    const whoseMid = input.bookPayer === null ? 'this book' : `${input.bookPayer}'s book`;
+    if (input.memberHasHistoryHere) {
+      return (
+        `This member HAS billed at ${where}, but ${whoseMid} does not rank it: the book applies a` +
+        ` volume floor and this member's own lines are below it. ${still}`
+      );
+    }
+    const whoseCap = input.bookPayer === null ? 'This book' : `${input.bookPayer}'s book`;
+    const elsewhere =
+      input.elsewhere.length > 0 ? ` This member billed at ${andList(input.elsewhere)}.` : '';
+    return `${whoseCap} has no rows at ${where} in the window shown. ${still}${elsewhere}`;
+  }
+  if (input.elsewhere.length > 0) {
+    return (
+      `No history at ${where} — this member billed at ${andList(input.elsewhere)}.` +
+      ` Clear the facility above to see all ${input.rankedTotal}.`
+    );
+  }
+  return (
+    `No history at ${where} in the window shown. The other rows behind this answer have no facility` +
+    ` on them at all, so there is nowhere else to name — clear the facility above to see all` +
+    ` ${input.rankedTotal}.`
+  );
+}
+
 /** First-load ghost sized to the real footprint (window line + hero + two scorecard rows), so the
  *  swap to content does not shift layout. aria-hidden — the visible status line above it announces. */
 function AnswerSkeleton(): React.ReactElement {
@@ -2011,11 +2176,16 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // `rankedFacilities`, `areaChips`, `shownFacilities` — stays where it was, next to the grid it
   // narrows. This is the ONLY declaration of `areaActive`; do not re-declare it below.
   const areaActive = props.area !== AREA_ALL;
-  // AREA COUNTS AS A FACET (2026-08-07), which is why this sits BELOW `areaActive` rather than beside
-  // `payerFacetOn` above. Area is the one facet whose control lives outside the control card — see
-  // AreaLine for why that placement is right and why it does not exempt it from the inventory —
-  // and omitting it let one click produce "nothing is restricting this search" beside a lit Area chip.
-  const anyFacetOn = filtersActive || payerFacetOn || areaActive;
+  // The SECOND beside-the-grid narrow (S4), hoisted for the same reason `areaActive` is: the headline
+  // sentence, the tally and the empty states all read it, and a facet re-derived per surface is how
+  // they come to disagree.
+  const facilityNarrowActive = props.facilityNarrow.length > 0;
+  // BOTH BESIDE-THE-GRID NARROWS COUNT AS FACETS (area 2026-08-07, facility 2026-08-08), which is why
+  // this sits BELOW them rather than beside `payerFacetOn` above. They are the two facets whose
+  // controls live outside the control card — see AreaLine and FacilityNarrowLine for why that
+  // placement is right and why it does not exempt them from the inventory — and omitting either let
+  // one click produce "nothing is restricting this search" beside a lit control that is restricting it.
+  const anyFacetOn = filtersActive || payerFacetOn || areaActive || facilityNarrowActive;
   /* ── THE PAYER'S WHOLE BOOK (S2, 2026-08-08) ────────────────────────────────────────────────────
    *
    * A SECOND ranked list, loaded by the core alongside the identifier's own footprint. It exists
@@ -2348,14 +2518,71 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
     }
     return m;
   }, [rankedFacilities]);
+  // ── The FACILITY facet, applied (S4) ───────────────────────────────────────────────────────────
+  // Same block, same law: derived from the rows the ranking ALREADY returned, and grep this region
+  // for `props.filters` — there is nothing to find, which is the structural half of invariant (m).
+  //
+  // ⚠ THE PLACEHOLDER IS DROPPED FROM THE OPTIONS, NOT FROM THE ROWS. `No Facility` keeps its rank in
+  // every grid on this surface (dropping it would hide $29,081,575.38 of charges) and is simply not
+  // offerable — you cannot send a patient to a bucket. Because it can never be PICKED, the narrow can
+  // never be "show me the placeholder", and the empty states below never have to defend that claim.
+  const facilityOptions = useMemo(
+    () => offerableFacilityOptions(props.facilityOptions),
+    [props.facilityOptions],
+  );
+  const facilityKeys = useMemo(
+    () => facilityNarrowKeys(props.facilityNarrow, props.facilityOptions),
+    [props.facilityNarrow, props.facilityOptions],
+  );
+  // AND ACROSS THE TWO NARROWS — the standard multiselect reading, and what the "Showing N of M"
+  // sentence below describes. `narrowByFacility` returns the SAME array when nothing is picked, so a
+  // facility-free render is byte-identical to the pre-S4 one and costs no memo churn.
   const shownFacilities = useMemo(
-    () => facilitiesInArea(rankedFacilities, props.area),
-    [rankedFacilities, props.area],
+    () => narrowByFacility(facilitiesInArea(rankedFacilities, props.area), facilityKeys),
+    [rankedFacilities, props.area, facilityKeys],
+  );
+  /* WHICH NARROW EMPTIED THE GRID. With both on, "no ranked facility is in this area" and "no history
+   * at NASHVILLE" are different diagnoses of the same empty screen, and offering the wrong one sends
+   * the operator to undo the wrong control. Asking the facility narrow ALONE separates them: if the
+   * facility narrow on its own still has rows, the AREA is what emptied the grid. */
+  const facilityOnlyFacilities = useMemo(
+    () => narrowByFacility(rankedFacilities, facilityKeys),
+    [rankedFacilities, facilityKeys],
+  );
+  /* THE FACTS THE EMPTY STATE NEEDS, all from lists already in hand — which is the whole argument for
+   * a display narrow. `snap.facilities` is the SEARCHED IDENTIFIER's own footprint in both modes (the
+   * flip moves which list LEADS, never what `facilities` means), so it answers "has this member been
+   * here" and "where have they been" even when the book is the grid. */
+  const memberHasHistoryHere =
+    facilityKeys !== null && snap !== null && narrowByFacility(snap.facilities, facilityKeys).length > 0;
+  const memberElsewhere = useMemo(
+    () => (facilityKeys === null || snap === null ? [] : facilitiesElsewhere(snap.facilities, facilityKeys)),
+    [facilityKeys, snap],
+  );
+  const pickedFacilityNames = useMemo(
+    () => facilityDisplayNames(props.facilityNarrow, props.facilityOptions),
+    [props.facilityNarrow, props.facilityOptions],
   );
   // `areaActive` is declared once, above `skipProvenance` — see the comment there.
   // Two real buckets, or an active narrow that must stay clearable. One bucket is not a choice, and
   // a row of one chip reading "All · 12" is noise — the same rule the mobile deck applies.
   const showAreaLine = areaChips.length > 2 || areaActive;
+  // The picker needs a vocabulary; an active narrow must stay clearable even if the vocabulary is
+  // gone (a failed reload leaves the selection behind). Same shape as `showAreaLine`'s second arm.
+  const showFacilityLine = facilityOptions.length > 0 || facilityNarrowActive;
+  /* WHAT THE TWO GRID NARROWS ARE REACHING, in one clause, so one sentence covers both. Written as a
+   * phrase rather than two sentences because two `role="status"` lines for one screen state is the
+   * overlap review Finding 2 removed for the area alone. A single pick is NAMED — "at NASHVILLE" is
+   * what the operator asked for, and repeating it back is how they know the control took. */
+  const facilityReach =
+    pickedFacilityNames.length === 1
+      ? `at ${pickedFacilityNames[0]}`
+      : `at the ${pickedFacilityNames.length} facilities you picked`;
+  const narrowReach = areaActive
+    ? facilityNarrowActive
+      ? `in this area, ${facilityReach}`
+      : 'in this area'
+    : facilityReach;
   return (
     <Stage id="qualify-s-answer" question="Does this payer pay us — and where?">
       {/* [BOOK-LED EXEMPT: it names the payer and the plan-or-no-plan, not the ranking]
@@ -2685,10 +2912,21 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                   The fix is NOT to fold AREA into `cardFacets`: its control lives beside the grid it
                   narrows and that placement is the honesty argument made in layout (see AreaLine).
                   Instead the tally scopes its claim to this card ("of these") and NAMES the narrow
-                  that is not in it when that narrow is live. Wording is unratified — plain on purpose. */}
+                  that is not in it when that narrow is live. Wording is unratified — plain on purpose.
+
+                  ⚠ S4 MADE IT TWO. The facility narrow lands beside the area one, outside this card
+                  for the identical reason, so the clause ENUMERATES rather than counts: "plus 2
+                  narrows beside the list" is arithmetically honest and operationally useless — it
+                  sends an operator hunting for the second one. Naming both costs four words. */}
               <p className="text-xs text-teal200">
                 <span className="font-semibold text-white">{cardFacetsOn} of these {cardFacets.length} switches on</span>
-                {areaActive ? ' · plus the area narrow, beside the list' : ''}
+                {areaActive && facilityNarrowActive
+                  ? ' · plus the area and facility narrows, beside the list'
+                  : areaActive
+                    ? ' · plus the area narrow, beside the list'
+                    : facilityNarrowActive
+                      ? ' · plus the facility narrow, beside the list'
+                      : ''}
                 {props.narrowExpanded ? '' : ' — open the fields to change any of them'}
               </p>
 
@@ -2947,8 +3185,31 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 book leads and this member&apos;s own history is marked on the facilities they have been to.
               </p>
             ) : null}
-            {showAreaLine ? (
-              <AreaLine chips={areaChips} active={props.area} counts={areaCounts} onSelect={props.onSelectArea} />
+            {/* ── THE GRID-NARROW ROW: the two controls that hide rows without re-asking for them.
+                They share a row because they share a rule — everything on the control card above
+                re-issues the ranking request, and neither of these does. AREA first, then FACILITY:
+                DOM order is the reveal's stagger order, and the type-ahead (which opens a dropdown
+                downward) belongs at the bottom edge of the row rather than above a chip wall.
+
+                ⚠ NO CLIPPING ANCESTOR HERE, AND THAT IS CHECKED RATHER THAN ASSUMED. The picker's
+                option list is absolutely positioned; the NARROW SEARCH card moved its
+                `overflow-hidden` down onto a paint-only layer for exactly that reason. This row sits
+                OUTSIDE that card, in the scorecard section, whose chain to `[data-v3-stage]` carries
+                no `overflow-hidden` at all — verified 2026-08-08, and a future wrapper that adds one
+                would clip these matches with nothing wrong in the DOM to notice. ── */}
+            {showAreaLine || showFacilityLine ? (
+              <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
+                {showAreaLine ? (
+                  <AreaLine chips={areaChips} active={props.area} counts={areaCounts} onSelect={props.onSelectArea} />
+                ) : null}
+                {showFacilityLine ? (
+                  <FacilityNarrowLine
+                    options={facilityOptions}
+                    selected={props.facilityNarrow}
+                    onToggle={props.onToggleFacility}
+                  />
+                ) : null}
+              </div>
             ) : null}
             {/* ⚠ THE HERO IS NOT RE-DERIVED FOR THE AREA, and this sentence is why that is honest
                 rather than a bug. `derivePolicyRating` runs over `answerFacilities` — the whole
@@ -2968,7 +3229,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 rating above still covers all M" clause both follow the flip by construction rather
                 than by a branch. Marked so the grep finds it anyway: it is a claim about what is on
                 screen, and the day it hard-codes `snap.facilities` it lies. */}
-            {areaActive && shownFacilities.length > 0 ? (
+            {(areaActive || facilityNarrowActive) && shownFacilities.length > 0 ? (
               <p role="status" className="text-xs text-ink600">
                 Showing{' '}
                 <span className="ths-num" aria-label={`${shownFacilities.length} facilities shown`}>
@@ -2978,7 +3239,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 <span className="ths-num" aria-label={`${rankedFacilities.length} ranked facilities in total`}>
                   {rankedFacilities.length}
                 </span>{' '}
-                ranked facilities in this area. The ranking itself was not re-run — the rating above
+                ranked facilities {narrowReach}. The ranking itself was not re-run — the rating above
                 still covers all {rankedFacilities.length}.
               </p>
             ) : null}
@@ -3017,9 +3278,16 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 {unlistedMemberFacilities.length === 1 ? 'it' : 'them'}.
               </p>
             ) : null}
-            {/* Two different emptinesses, two different sentences. "Nothing ranked at all" is a
-                statement about the payer and the window; "nothing in TN" is a statement about the
-                chip the user just pressed, and the fix for it is one click away. */}
+            {/* THREE different emptinesses, three different sentences (S4 added the third). "Nothing
+                ranked at all" is a statement about the payer and the window; "nothing in TN" is a
+                statement about the chip the user just pressed; "no history at NASHVILLE" is a
+                statement about a PLACE, and it is the one an admissions seat is actually asking.
+                Each fix is one click away and each sentence says which click.
+
+                ⚠ WHICH NARROW GETS BLAMED IS COMPUTED, NOT GUESSED. With both narrows on, asking the
+                facility narrow ALONE separates the diagnoses: rows survive it ⇒ the AREA emptied the
+                grid and the area sentence is the honest one; nothing survives it ⇒ the facility
+                narrow did. Blaming the wrong control sends the operator to undo the wrong thing. */}
             {/* [BOOK-LED SURFACE]
                 Unreachable while the book leads (a leading book is non-empty by `bookLeadsAnswer`'s
                 own precondition), which is WHY it still speaks of the member's scope. If that
@@ -3028,11 +3296,23 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
                 No facility has claims history under this scope in the window shown.
               </p>
-            ) : /* [BOOK-LED SURFACE] — the count is of the LEADING list. */
+            ) : /* [BOOK-LED SURFACE]
+                   The FACILITY arm re-bases explicitly — `facilityNarrowEmptyCopy` takes `bookLeads`
+                   and says a different thing in each mode, because "no history at NASHVILLE" is a
+                   claim about the MEMBER while a book-led grid is a claim about the PAYER. The AREA
+                   arm's count is of the LEADING list and follows the flip by construction. */
             shownFacilities.length === 0 ? (
               <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
-                No ranked facility is in this area. The {rankedFacilities.length} facilities behind this
-                answer are still there — choose All above to see them.
+                {facilityNarrowActive && facilityOnlyFacilities.length === 0
+                  ? facilityNarrowEmptyCopy({
+                      picked: pickedFacilityNames,
+                      bookLeads,
+                      bookPayer,
+                      rankedTotal: rankedFacilities.length,
+                      memberHasHistoryHere,
+                      elsewhere: memberElsewhere,
+                    })
+                  : `No ranked facility is in this area. The ${rankedFacilities.length} facilities behind this answer are still there — choose All above to see them.`}
               </p>
             ) : null}
           </section>

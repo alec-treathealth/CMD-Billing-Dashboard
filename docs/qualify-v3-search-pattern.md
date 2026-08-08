@@ -581,3 +581,112 @@ at equal footing would be the same fabricated claim expressed as an ordering, wi
 card to explain the move. The row keeps its rank; only the personal claim is withheld.
 
 **All new copy is unratified.**
+
+---
+
+## S4 — THE FACILITY NARROW, beside the grid, with two honest emptinesses (2026-08-08)
+
+v2's tab carried a Facility type-ahead in its primary search row. The 2026-08-06 v3 cutover dropped
+it, and — like the AREA facet — the drop is absent from this doc's own deliberate-drops list, so it
+was a casualty rather than a ruling. S4 restores it.
+
+### It narrows the FETCHED SET, and that is a measurement, not a convenience
+
+Alec's ruling (2026-08-07): a facility name narrows the fetched set, like AREA. The obvious build is
+the other one — the ranking query would take `upper(facility) = any($n::text[])` today, and it
+measures **at or below baseline** (13.9ms vs a 19.7ms baseline at 365d on the busiest prefix). It is
+still the wrong build, for one measured reason:
+
+> **86.9% of members (3,759 of 4,324) bill at exactly ONE facility in 365 days.** Max is 5.
+
+So a facility narrow on the member search an admissions seat actually runs is a 1-or-0 outcome almost
+always — which makes the **empty state the common render, not an edge case**. And a fetch narrow
+throws away the very thing that makes that empty state useful. A fetch narrow's empty screen can say
+*"no history at NASHVILLE"*. A narrow over the already-fetched set can say **"no history at NASHVILLE
+— this member billed at LSMH and KWC"**, because the un-narrowed list is still in hand. Strictly more
+information, zero extra round trips, no refetch on toggle.
+
+⚠ **There is a predicate-form trap on the road not taken, and it is recorded so nobody re-discovers
+it.** Writing that predicate the obvious way — `facility = any($n::text[])`, byte-identical to
+Collections' shared idiom — is **trigram-eligible**, so the planner grabs the 19 MB
+`cmd_charge_rollup_facility_trgm` GIN and throws away the token∩window BitmapAnd: **98.1ms / 1,796
+buffers against a 19.7ms / 1,473 baseline** on a prefix search at 365 days, and **118×** on a
+member-id token. It does **not** do this at 30 days, so it ships green and degrades only on the
+auto-ladder's widest rung. If a fetch narrow is ever built, write `upper(facility) = any(…)` and
+uppercase the values in JS.
+
+### It renders BESIDE the grid with AREA — never on the NARROW SEARCH card
+
+Controller ruling 2026-08-08, **flagged to Alec**: his earlier "folds into the card" wording yields to
+his later fetched-set ruling plus the card's own documented rule — *everything on the control card
+re-issues the ranking request, and this does not.* That rule is exactly why AREA was sorted out of the
+card and kept out of `cardFacets`; a requestless field inside the card would either break it or force
+it to be re-ruled. So the two beside-the-grid narrows share a row, and the card's tally **names** them
+rather than absorbing them: *"1 of these 4 switches on · plus the area and facility narrows, beside
+the list"*. Enumerated, not counted — "plus 2 narrows" is arithmetically honest and sends an operator
+hunting for the second one.
+
+`anyFacetOn` counts it, on the AREA precedent: one click must never produce *"nothing is narrowing
+this search"* beside a lit control that is narrowing it.
+
+### The three emptinesses, and which control gets blamed
+
+There are now three, and each names its own fix:
+
+| state | sentence |
+|---|---|
+| nothing ranked at all | *No facility has claims history under this scope in the window shown.* |
+| the AREA emptied it | *No ranked facility is in this area. The N facilities behind this answer are still there — choose All above to see them.* |
+| the FACILITY narrow emptied it | four arms, below |
+
+**Which narrow gets blamed is computed, not guessed.** With both on, the facility narrow is asked
+*alone*: if rows survive it, the AREA emptied the grid and the area sentence is the honest diagnosis.
+Blaming the wrong control sends the operator to clear the wrong one.
+
+`facilityNarrowEmptyCopy` (pure, in `resolution-flow.tsx`, unit-tested) has four arms:
+
+1. **Book-led, and the member HAS billed there.** The member ranking is floorless and the book applies
+   `QUALIFY_MIN_LINES`, so a facility they billed 1–2 lines at is in `facilities` and not in
+   `bookFacilities`. *"No history there"* would be flatly false about the one fact on the screen that
+   decides an admission. The floor is the only possible cause, so the sentence names it.
+2. **Book-led, and they have not.** The claim is about the payer's **book**; the member's own
+   footprint is named separately rather than folded into it.
+3. **Member-led, with somewhere else to name.** *"No history at {facility} — this member billed at {A}
+   and {B}."* Alec's ruling rationale, verbatim.
+4. **Member-led, with nowhere else to name.** Reachable, because `facilitiesElsewhere` strips the
+   `No Facility` placeholder — every other row can be a bucket rather than a place. *"This member
+   billed at "* with nothing after it would be the fabricated-place claim in its most literal form.
+
+### Two things pinned so they cannot drift
+
+**`No Facility` is not OFFERABLE.** It keeps its rank in every grid (dropping it would hide
+$29,081,575.38 of charges, `QUALIFY_NO_FACILITY`), and it is simply absent from the picker's options —
+you cannot send a patient to a bucket. Because it can never be picked, the narrow can never *be* the
+placeholder, and the empty states never have to defend that claim.
+
+**The SECONDARY book section is NOT narrowed**, which is what AREA does there today: that section
+renders `bookFacilities.slice(0, QUALIFY_BOOK_PREVIEW)` straight. It answers a different question
+("does this policy pay *anywhere*"), and its value is precisely that it is not scoped to what the
+operator is currently looking at — narrowing it would make the *"N facilities — every facility {payer}
+paid at"* sentence above it false. Pinned by a test.
+
+### The state, and why it cannot reach a request
+
+`facilityNarrow: readonly string[]` is a **sibling of `filters`, never a member** — flow-state
+invariant (m), the same law as `area`, and the field where the temptation to break it is real. It
+clears at exactly the five sites `area` clears (four navigations + `filters_cleared`), to the shared
+`NO_FACILITY_NARROW` reference, and survives both re-scopes. It is **not in `scopeKeyOf`** and **not
+on the wire**; because `resolution-flow-client.tsx` reaches the `'use server'` chain and nothing
+hermetic can import it, that is enforced by a **source scan** of the `scopeKeyOf(` and
+`getQualifySnapshot(` call arguments — the S3-I1 lesson (inverting a ternary in that file shipped
+app 557/0 with a clean build).
+
+The vocabulary (`loadQualifyFacilityOptions` → `qualifyFacilityOptions`, 47 options, `unstable_cache`d
+for an hour, tenant-scoped, non-PHI) was **orphaned in v3** — its only caller mounted behind
+`QUALIFY_V3_FLOW=off`. It is loaded the way the ticker loads trends: **mount-once and fail-soft**,
+never inside the snapshot request. An empty vocabulary renders no control at all.
+
+**Not persisted to the URL.** v3 writes no URL at all, and the `employer_norm`-in-a-URL posture is
+still unresolved, so adding one here would be a new surface rather than a restoration.
+
+**All new copy is unratified.**

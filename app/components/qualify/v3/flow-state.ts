@@ -1,5 +1,5 @@
 /**
- * Qualify v3 — THE SHELL'S STATE MACHINE. Fifteen fields, eighteen actions, one place each field
+ * Qualify v3 — THE SHELL'S STATE MACHINE. Sixteen fields, nineteen actions, one place each field
  * is written.
  *
  * Extracted from `resolution-flow-client.tsx` (F3b). The shell was carrying FIFTEEN `useState` hooks
@@ -43,32 +43,34 @@
  * absent from every list but `retry_requested` and `snapshot_resolved` respectively — that is the
  * point, not an omission.
  *
- *  1 · search_submitted        — a new identify submit. WRITES THIRTEEN:
+ *  1 · search_submitted        — a new identify submit. WRITES FOURTEEN:
  *                                payerPick=null, picked=false, skipped=false,
  *                                filters=NO_ANSWER_FILTERS, planFilter='',
  *                                autoAsk=false, backTo=null, snapshot=null, snapshotError=null,
  *                                payerOverride=null, windowDays=null, area=AREA_ALL,
- *                                narrowExpanded=false.
+ *                                facilityNarrow=NO_FACILITY_NARROW, narrowExpanded=false.
  *                                KEEPS retryNonce, loadedKey.
- *  2 · skipped                 — "skip the questions, answer over the whole footprint". WRITES ELEVEN:
+ *  2 · skipped                 — "skip the questions, answer over the whole footprint". WRITES TWELVE:
  *                                skipped=true, picked=false, payerPick=null, planFilter='',
  *                                backTo=null, filters=NO_ANSWER_FILTERS,
  *                                payerOverride=null, snapshot=null, snapshotError=null,
- *                                area=AREA_ALL, narrowExpanded=true (invariant n).
+ *                                area=AREA_ALL, facilityNarrow=NO_FACILITY_NARROW,
+ *                                narrowExpanded=true (invariant n).
  *                                KEEPS windowDays, autoAsk, retryNonce, loadedKey (see invariant f).
- *  3 · plan_submitted          — a plan pick. WRITES EIGHT:
+ *  3 · plan_submitted          — a plan pick. WRITES NINE:
  *                                picked=true, skipped=false, filters=NO_ANSWER_FILTERS,
  *                                backTo=null, snapshot=null, snapshotError=null,
- *                                area=AREA_ALL, narrowExpanded=false (invariant n).
+ *                                area=AREA_ALL, facilityNarrow=NO_FACILITY_NARROW,
+ *                                narrowExpanded=false (invariant n).
  *                                KEEPS payerPick, planFilter, payerOverride, windowDays, autoAsk,
  *                                retryNonce, loadedKey (see invariant g).
- *  4 · went_back {target}      — a receipt "Change". WRITES THIRTEEN:
+ *  4 · went_back {target}      — a receipt "Change". WRITES FOURTEEN:
  *                                snapshot=null, snapshotError=null, autoAsk=false,
  *                                payerOverride=null, windowDays=null, picked=false, skipped=false,
  *                                filters=NO_ANSWER_FILTERS, planFilter='', narrowExpanded=false,
- *                                area=AREA_ALL, backTo=target, and payerPick=null ONLY when
- *                                target !== 'plan' (the machine's one conditional write —
- *                                invariant h).
+ *                                area=AREA_ALL, facilityNarrow=NO_FACILITY_NARROW, backTo=target,
+ *                                and payerPick=null ONLY when target !== 'plan' (the machine's one
+ *                                conditional write — invariant h).
  *                                KEEPS retryNonce, loadedKey.
  *  5 · payer_picked {payer}    — WRITES payerPick=payer, backTo=null.
  *  6 · plan_filter_changed {value}     — WRITES planFilter=value.
@@ -79,10 +81,11 @@
  *                                        `employerNarrowFor`, whose employer set IS sent, so a
  *                                        plan-type press could re-rank over a silent employer
  *                                        narrow. See `AnswerFilters` in resolution-flow.tsx.
- *  8 · filters_cleared         — WRITES filters=NO_ANSWER_FILTERS, area=AREA_ALL.
- *                                The area rides along because "Clear filters" is one button and the
- *                                answer stage has one control surface: a narrow that survived it
- *                                would be a narrow the user believes they just cleared.
+ *  8 · filters_cleared         — WRITES filters=NO_ANSWER_FILTERS, area=AREA_ALL,
+ *                                facilityNarrow=NO_FACILITY_NARROW.
+ *                                BOTH grid narrows ride along because "Clear filters" is one button
+ *                                and the answer stage has one control surface: a narrow that survived
+ *                                it would be a narrow the user believes they just cleared.
  *                                ⚠ IT NO LONGER CLEARS A TYPED EMPLOYER DRAFT, because the machine
  *                                no longer holds one — the shared type-ahead owns its own. Its
  *                                `Clear N` affordance is the picker's, and it walks the selection
@@ -108,12 +111,18 @@
  *                                       `snapshot`, `loadedKey` or anything `scopeKeyOf` reads
  *                                       (invariant m). Single-select, the mobile chip model:
  *                                       AREA_ALL | a 2-letter state | AREA_OTHER.
- * 18 · narrow_toggled          — WRITES narrowExpanded = !narrowExpanded. AND NOTHING ELSE: the
+ * 18 · facility_narrow_toggled {value}
+ *                              — WRITES facilityNarrow (add/remove `value`). AND NOTHING ELSE — the
+ *                                SECOND grid narrow, and the same law as `area_selected` (invariant
+ *                                m). MULTI-select, because the shared type-ahead is multi by nature;
+ *                                one action in both directions, so the picker's own `Clear N` walks
+ *                                the selection back through it rather than earning a second writer.
+ * 19 · narrow_toggled          — WRITES narrowExpanded = !narrowExpanded. AND NOTHING ELSE: the
  *                                NARROW SEARCH card is a disclosure, and a disclosure that touched
  *                                `filters` or `snapshot` would be a presentation control silently
  *                                re-issuing a ranking request (invariant n).
  *
- * NINETEEN SWITCH ARMS, EIGHTEEN ACTIONS. The nineteenth is `default: return state` — an arm the
+ * TWENTY SWITCH ARMS, NINETEEN ACTIONS. The nineteenth is `default: return state` — an arm the
  * `ShellAction` union makes unreachable through the type system, kept because the type system is not
  * the only caller: a hot-reloaded action queued against a newer reducer, or a hand-written dispatch
  * in a future test, would otherwise fall off the end and return `undefined` as the whole state. It
@@ -165,6 +174,16 @@
  *     makes the honesty guarantee STRUCTURAL: there is no code path from this field to a request.
  *     It resets wherever `filters` resets (the four navigations + `filters_cleared`) and nowhere
  *     else — notably NOT on the two re-scopes, which keep their content on screen.
+ *
+ *     ⚠ `facilityNarrow` IS THE SAME FIELD CLASS AND THE SAME LAW (S4, 2026-08-08), and it is the one
+ *     where the temptation to break it is real: a facility narrow has an obvious SQL form
+ *     (`upper(facility) = any($n::text[])`) and the ranking query would take it. It is a DISPLAY
+ *     narrow anyway, for a measured reason rather than a structural one — 86.9% of members bill at
+ *     exactly ONE facility in 365 days, so a fetch-shaping facility narrow would empty the screen
+ *     ~87% of the time WHILE DISCARDING the very list that makes the empty state useful ("no history
+ *     at NASHVILLE; this member billed at LSMH and KWC"). A fetch narrow can say the first clause and
+ *     never the second. Both narrows reset at exactly the same five sites, as ONE list, so the answer
+ *     stage's two grid narrows can never drift into clearing at different moments.
  * n · `narrowExpanded` IS NAVIGATION-COUPLED, WHICH IS THE ONLY REASON IT IS IN HERE. The admission
  *     test this header sets for itself is the `trends` rule above — "does any handler or flow field
  *     touch it" — and two navigations must write this one: a Skip lands the NARROW SEARCH card OPEN
@@ -213,9 +232,9 @@ import type { QualifySnapshot, QualifyTrailingDays } from '../../../lib/qualify/
 // answer stage and the mobile deck now speak the same area vocabulary (AREA_ALL | state | 'other'),
 // and two constants that merely happen to both be 'all' is how they stop being the same vocabulary.
 import { AREA_ALL } from '../m/area-chips';
-import { NO_ANSWER_FILTERS, type AnswerFilters, type FlowStage } from './resolution-flow';
+import { NO_ANSWER_FILTERS, NO_FACILITY_NARROW, type AnswerFilters, type FlowStage } from './resolution-flow';
 
-/** The fifteen fields the staged flow moves between screens. No PHI: the term lives in a ref.
+/** The sixteen fields the staged flow moves between screens. No PHI: the term lives in a ref.
  *  (Sixteen until 2026-08-07: `employerQuery` went with the hand-rolled employer tag-search it fed —
  *  the shared `MultiSelectTagPicker` that replaced it owns its own typed draft, and a machine field
  *  nothing reads is a field the next reader wires something to.) */
@@ -250,6 +269,21 @@ export interface ShellState {
    */
   area: string;
   /**
+   * The answer stage's FACILITY narrow — canonical picker values from `qualifyFacilityOptions`,
+   * MULTI-select, empty = no restriction (never "match nothing"). The restored v2 facility
+   * type-ahead, rendered beside the grid with the AREA row.
+   *
+   * NAMED `facilityNarrow`, NOT `facilities`, on purpose: `QualifySnapshot.facilities` is the ranked
+   * list this field narrows, and two adjacent call sites spelling different things the same way is
+   * exactly the drift the `payerCount`/`solePayer` class is made of.
+   *
+   * Deliberately NOT a member of `filters` — see invariant (m). Non-PHI (facility names already
+   * render on every card) and never persisted to the URL: v3 writes no URL at all, and the
+   * `employer_norm`-in-a-URL posture is still unresolved, so adding one here would be a new surface
+   * rather than a restoration.
+   */
+  facilityNarrow: readonly string[];
+  /**
    * Is the answer stage's NARROW SEARCH card showing its FIELDS? See invariant (n) for why a
    * presentation bit lives in the machine at all. It gates the CONTROLS only — the card's summary
    * states the resolved scope and every facet's ON/OFF state in both positions, because "at the end
@@ -277,6 +311,7 @@ export type ShellAction =
   | { type: 'payer_override_changed'; label: string | null }
   | { type: 'window_days_changed'; days: QualifyTrailingDays | null }
   | { type: 'area_selected'; key: string }
+  | { type: 'facility_narrow_toggled'; value: string }
   | { type: 'narrow_toggled' };
 
 export const INITIAL_SHELL_STATE: ShellState = {
@@ -294,13 +329,14 @@ export const INITIAL_SHELL_STATE: ShellState = {
   windowDays: null,
   loadedKey: null,
   area: AREA_ALL,
+  facilityNarrow: NO_FACILITY_NARROW,
   narrowExpanded: false,
 };
 
 /**
  * Restore `useState`'s bail-out. Keyed off `Object.keys(next)` rather than a hand-listed field set,
- * so adding a sixteenth field cannot silently make two different states compare equal.
- * ("Sixteenth" = one more than today's fifteen — the field-write table's header comment in
+ * so adding a seventeenth field cannot silently make two different states compare equal.
+ * ("Seventeenth" = one more than today's sixteen — the field-write table's header comment in
  * qualifyV3FlowState.test.tsx uses this same one-more-than-today rule, not by coincidence.)
  */
 function bailIfUnchanged(prev: ShellState, next: ShellState): ShellState {
@@ -328,6 +364,7 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         payerOverride: null,
         windowDays: null,
         area: AREA_ALL,
+        facilityNarrow: NO_FACILITY_NARROW,
         narrowExpanded: false,
       });
 
@@ -346,6 +383,7 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         snapshot: null,
         snapshotError: null,
         area: AREA_ALL,
+        facilityNarrow: NO_FACILITY_NARROW,
         // A skip has just made the search as WIDE as it goes, so narrowing is the next move — and
         // the skip reveal needs the fields present to have anything to stagger (invariant n).
         narrowExpanded: true,
@@ -363,6 +401,7 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         snapshot: null,
         snapshotError: null,
         area: AREA_ALL,
+        facilityNarrow: NO_FACILITY_NARROW,
         narrowExpanded: false,
       });
 
@@ -383,6 +422,7 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         planFilter: '',
         backTo: action.target,
         area: AREA_ALL,
+        facilityNarrow: NO_FACILITY_NARROW,
         narrowExpanded: false,
       });
 
@@ -404,14 +444,15 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
       return bailIfUnchanged(state, { ...state, filters: { ...state.filters, [key]: next } });
     }
 
-    // "Clear filters" is one button over one control surface, so it clears the area too — a narrow
-    // that outlived the button that claims to clear it is the kept-but-hidden choice this machine
-    // exists to prevent.
+    // "Clear filters" is one button over one control surface, so it clears BOTH grid narrows too — a
+    // narrow that outlived the button that claims to clear it is the kept-but-hidden choice this
+    // machine exists to prevent.
     case 'filters_cleared':
       return bailIfUnchanged(state, {
         ...state,
         filters: NO_ANSWER_FILTERS,
         area: AREA_ALL,
+        facilityNarrow: NO_FACILITY_NARROW,
       });
 
     // The ONLY write to retryNonce in the whole machine, and it only ever goes up (invariant c).
@@ -447,6 +488,25 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
     // fetch effect cannot see it and no request is issued (invariant m).
     case 'area_selected':
       return bailIfUnchanged(state, { ...state, area: action.key });
+
+    // The SECOND grid narrow, under the same law (invariant m). MULTI-select and its own inverse, so
+    // the shared picker's `Clear N` walks the selection back through this one action — a second
+    // "clear the facilities" action would be a second writer of the field, which is the shape
+    // `scopeKeyOf`'s header is a post-mortem of.
+    //
+    // ⚠ EMPTIES TO THE SHARED CONSTANT, not to a fresh `[]`. Identity is load-bearing for the memo
+    // chain the narrow feeds, and toggling the last chip off is exactly when a fresh-but-equal array
+    // would silently start invalidating it on every render.
+    case 'facility_narrow_toggled': {
+      const cur = state.facilityNarrow;
+      const next = cur.includes(action.value)
+        ? cur.filter((v) => v !== action.value)
+        : [...cur, action.value];
+      return bailIfUnchanged(state, {
+        ...state,
+        facilityNarrow: next.length === 0 ? NO_FACILITY_NARROW : next,
+      });
+    }
 
     // A DISCLOSURE, not a re-scope: it writes the one presentation bit and nothing `scopeKeyOf`
     // reads, so no request can follow from opening or closing the card (invariant n).
