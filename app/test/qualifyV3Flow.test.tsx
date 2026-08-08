@@ -21,6 +21,7 @@ import {
   scopeKeyOf,
   tickerIsLive,
   areaChipsWithActive,
+  bookIsOnScreen,
   UNRESOLVABLE_COPY,
   deriveStage,
   liveSentenceFor,
@@ -2590,10 +2591,26 @@ function bookRegion(html: string): string {
   return outerHtmlFrom(html, html.lastIndexOf('<', attr));
 }
 
-test('S2 preface — ONE member is stated plainly, with the facility count that is actually on screen', () => {
+test('S2 preface — ONE member, and EVERY number states the basis it was counted on', () => {
   const html = answerHtml(bookSnapshot());
   // The 58.8% case. It does NOT call one row a ranking, and it does not hide it either.
-  assert.match(html, /One member matches this search — 1 facility of history\./);
+  //
+  // ⚠ TWO NUMBERS, TWO WINDOWS, BOTH NAMED (fix round 1, I1). `memberCount` is ALWAYS the 365-day
+  // rung — deliberately, so the classifier cannot move when a Range chip is pressed — while the
+  // facility count is the CHOSEN window. Joined by a bare em-dash those made one mixed-basis claim,
+  // and the contradiction was reachable rather than theoretical: see the 30-day test below.
+  assert.match(html, /One member has a paid claim behind this search in the last 12 months/);
+  assert.match(html, /1 facility of history in the window shown\./);
+});
+
+test('S2 preface — a 30-day window on a member paid 200 days ago no longer contradicts itself', () => {
+  // THE EXACT DEFECT I1 NAMES. Pre-fix this rendered "One member matches this search — 0 facilities
+  // of history." beside an empty grid: the member half true at 365d, the facility half true at 30d,
+  // and the sentence false at both. Now each clause carries its own window and the pair is coherent —
+  // paid within the year, nothing inside the window on screen.
+  const html = answerHtml(bookSnapshot({ facilities: [] } as Partial<QualifySnapshot>), { windowDays: 30 });
+  assert.match(html, /One member has a paid claim behind this search in the last 12 months/);
+  assert.match(html, /0 facilities of history in the window shown\./);
 });
 
 test('S2 preface — the 2-9 bucket offers the control that EXISTS, and the 10+ bucket names a population', () => {
@@ -2601,30 +2618,55 @@ test('S2 preface — the 2-9 bucket offers the control that EXISTS, and the 10+ 
   // "Continue to search across all of them" names the Skip, which ALREADY EXISTS. A member-by-member
   // pick does not, and is descoped: raw member ids can never render, so picking one needs a
   // server-side per-response ordinal enumeration plus a pick-by-ordinal predicate.
-  assert.match(few, /4 members share this prefix\./);
+  assert.match(few, /4 members have a paid claim behind this prefix in the last 12 months\./);
   assert.match(few, /Continue to search across all of them, or refine the prefix\./);
   const many = answerHtml(bookSnapshot({ memberCount: 31 }));
-  assert.match(many, /A population — 31 members behind this prefix\./);
+  assert.match(many, /A population — 31 members have a paid claim behind this prefix in the last 12 months\./);
 });
 
 test('S2 preface — an UNAVAILABLE count says nothing new, and a ZERO count does not claim an empty person', () => {
   // null = the rungs loader is absent or failed soft. The screen must be exactly as it was.
   const unknown = answerHtml(bookSnapshot({ memberCount: null }));
-  assert.ok(!unknown.includes('matches this search'), 'no preface at all');
-  assert.ok(!unknown.includes('members share this prefix'));
+  assert.ok(!unknown.includes('a paid claim behind this'), 'no preface at all');
+  assert.ok(!unknown.includes('member') || !unknown.includes('in the last 12 months'));
   // 0 = the count RAN and nobody with claims is behind the token. Still no preface: the provenance
   // banner already owns that story, and "0 members match" is a sentence nobody needs.
   const none = answerHtml(bookSnapshot({ memberCount: 0 }));
-  assert.ok(!none.includes('matches this search'));
+  assert.ok(!none.includes('a paid claim behind this'));
+  // ⚠ AND THE RECEIPT IS SILENT ON BOTH, THROUGH THE SAME GATE. The chip prints the COUNT rather
+  // than the sentence, but WHETHER it prints is `memberBucketOf` — not a second null/zero ternary
+  // that could drift from the one the preface uses. Both nothings, asserted.
+  for (const count of [null, 0]) {
+    const receipt = outerHtmlFrom(
+      answerHtml(bookSnapshot({ memberCount: count } as Partial<QualifySnapshot>)),
+      answerHtml(bookSnapshot({ memberCount: count } as Partial<QualifySnapshot>)).indexOf('<nav aria-label="Your search so far"'),
+    );
+    assert.ok(!receipt.includes('member'), `the receipt says nothing for memberCount=${String(count)}`);
+  }
 });
 
 test('S2 preface — SUPPRESSED IN FLIGHT (rule 2654416), like every other categorical claim', () => {
   // It is a statement about the data, so while a re-scope is in flight it must not describe the set
   // being replaced. The dim + beam treatment is the marker; this sentence waits.
   const inFlight = answerHtml(bookSnapshot(), { refetching: true });
-  assert.ok(!inFlight.includes('One member matches this search'), 'a claim about a superseded scope');
+  assert.ok(!inFlight.includes('a paid claim behind this search'), 'a claim about a superseded scope');
   const failed = answerHtml(bookSnapshot(), { staleAfterError: true });
-  assert.ok(!failed.includes('One member matches this search'));
+  assert.ok(!failed.includes('a paid claim behind this search'));
+});
+
+test('S2 preface — it is NOT a role="status": the sr-only live region already announces it', () => {
+  // The one string on this surface that would otherwise be announced TWICE — once by its own status
+  // role and once by the flow's single live region, which carries the same sentence through
+  // `liveSentenceFor`. The team already ruled against overlapping status sentences for exactly this
+  // (two `role="status"` lines for one area click). The visible line is text; the announcement is
+  // the live region's job, and it is the only one that can sequence with the rest of the flow.
+  const html = answerHtml(bookSnapshot());
+  const at = html.indexOf('One member has a paid claim behind this search');
+  assert.ok(at >= 0, 'the preface is on screen — the check below would be vacuous otherwise');
+  const para = outerHtmlFrom(html, html.lastIndexOf('<p', at));
+  assert.ok(!para.includes('role="status"'), 'no second announcer for a sentence the live region owns');
+  // The live region still carries it — this is a claim about DUPLICATION, not about silence.
+  assert.ok(html.includes('aria-live="polite"'));
 });
 
 test('S2 preface — the RECEIPT carries the same count, on the entry that is actually revisitable', () => {
@@ -2640,27 +2682,53 @@ test('S2 preface — the RECEIPT carries the same count, on the entry that is ac
 test('S2 preface — the ARIA channel announces the SAME claim, and never a second facility count', () => {
   const r = fixture();
   // ⚠ THE aria SENTENCE ALREADY CARRIED A FACILITY COUNT — `claimEvidence.distinctFacilities`, which
-  // is rendered NOWHERE on screen. Appending the preface's on-screen count beside it would announce
-  // two different numbers for one question. The preface REPLACES it, so the spoken claim and the
-  // visible claim are the same claim.
+  // is rendered NOWHERE on screen. The ONE-member preface names a facility count of its own, so
+  // announcing both would read out two different numbers for one question. It replaces the clause.
   const spoken = liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1 });
-  assert.match(spoken, /One member matches this search — 1 facility of history\./);
+  assert.match(spoken, /One member has a paid claim behind this search in the last 12 months/);
+  assert.match(spoken, /1 facility of history in the window shown\./);
   assert.ok(!spoken.includes('28 facilities with history'), 'the invisible resolution count steps aside');
   // Unknown → byte-identical to what shipped before S2.
-  assert.equal(liveSentenceFor('answer', r, null, {}), liveSentenceFor('answer', r, null, { memberCount: null }));
+  assert.equal(
+    liveSentenceFor('answer', r, null, {}),
+    liveSentenceFor('answer', r, null, { memberCount: null, memberFacilityCount: 0 }),
+  );
   assert.match(liveSentenceFor('answer', r, null, {}), /28 facilities with history\./);
   // A skipped search announces it too — that arm is the identifier-wide one, and it is where an
   // unfixed claim survives a browser pass.
-  const skipSpoken = liveSentenceFor('answer', r, null, { skipped: true, scopeAllPayers: true, memberCount: 31 });
-  assert.match(skipSpoken, /A population — 31 members behind this prefix\./);
+  const skipSpoken = liveSentenceFor('answer', r, null, {
+    skipped: true,
+    scopeAllPayers: true,
+    memberCount: 31,
+    memberFacilityCount: 9,
+  });
+  assert.match(skipSpoken, /A population — 31 members have a paid claim behind this prefix in the last 12 months\./);
   assert.match(skipSpoken, /You skipped the plan questions/, 'and it keeps the claim it already made');
+});
+
+test('S2 preface — the 2-9 and 10+ arms KEEP the resolution facility count, because they name none', () => {
+  // ⚠ THE REPLACEMENT RULE IS "ONLY WHEN THE PREFACE CARRIES A COUNT OF ITS OWN", not "whenever a
+  // preface exists" (fix round 1, M6). The one-member arm names a facility count and would collide;
+  // the 2-9 and 10+ arms name none, so replacing would leave a screen-reader user hearing NO
+  // facility count at all while the grid visibly has one — silence where the sighted read has a
+  // number. There is nothing to collide with, so the pre-existing clause stands untouched.
+  const r = fixture();
+  for (const memberCount of [4, 31]) {
+    const spoken = liveSentenceFor('answer', r, null, { memberCount, memberFacilityCount: 3 });
+    assert.match(spoken, /in the last 12 months/, 'the classification is announced');
+    assert.match(spoken, /28 facilities with history\./, 'and the facility count is NOT dropped');
+  }
 });
 
 test('S2 book — a clearly-labelled SECOND section, named for the payer, with its own basis', () => {
   const book = bookRegion(answerHtml(bookSnapshot()));
   assert.match(book, /Where AETNA US HEALTHCARE pays — across the whole book/);
-  // The COUNT, so the section states its own size rather than leaving it to be counted off the grid.
-  assert.match(book, /3 facilities/);
+  /* THE COUNT, IN BOTH CHANNELS, NAMED SEPARATELY. A bare /3 facilities/ was satisfied by the
+   * aria-label ALONE — proven by mutation — so it could not tell "the section states its size" from
+   * "the section has an accessible name and shows nothing". Both are required, because a numeral
+   * needs its accessible name and the sighted reader needs the word beside it. */
+  assert.match(book, /aria-label="3 facilities in this payer&#x27;s book"/, 'the numeral has an accessible name');
+  assert.match(book, />3<\/span> facilities/, 'and the visible text says it too');
   // ⚠ ITS OWN BASIS LABEL. The member ranking's claims describe the member; this list does not, and a
   // section that borrowed them would be the scope lie this whole surface is built against.
   assert.match(book, /not this member/i);
@@ -2710,7 +2778,7 @@ test('S2 book — ABSENT on the identifier-wide Skip, where no single payer has 
   assert.ok(!html.includes('across the whole book'), 'no book heading');
   assert.ok(!html.includes('data-v3-book'), 'and no section at all');
   // The preface still lands — the classifier is independent of whether a book could be loaded.
-  assert.match(html, /A population — 31 members behind this prefix\./);
+  assert.match(html, /A population — 31 members have a paid claim behind this prefix in the last 12 months\./);
 });
 
 test('S2 book — the AI grounding caption stops saying "the ranking on screen" once TWO rankings are', () => {
@@ -2739,4 +2807,91 @@ test('S2 book — the AI grounding caption stops saying "the ranking on screen" 
     ),
   );
   assert.match(noBook, /grounded in the ranking on screen/);
+});
+
+
+// ── FIX ROUND 1/5 — the cap, and the one predicate behind "is a book on screen" ──────────────────
+
+/** A book of nine, so the truncating branch actually renders. Every S2 fixture had THREE against a
+ *  cap of eight, which meant the slice, the cap sentence and its total had never once been executed
+ *  under test — mutation-proven: replacing the sentence with garbage and the total with a wrong
+ *  number left the suite fully green. A real payer's book is 48 facilities, so this is the COMMON
+ *  path, not an edge. */
+function bigBookSnapshot(over: Partial<QualifySnapshot> = {}): QualifySnapshot {
+  return {
+    ...bookSnapshot(),
+    bookFacilities: Array.from({ length: 9 }, (_, i) =>
+      facility({ rank: i + 1, name: `BOOK FACILITY ${i + 1}`, facilityKey: `BF${i + 1}`, payerCount: 1 }),
+    ),
+    ...over,
+  } as unknown as QualifySnapshot;
+}
+
+test('S2 book — the CAP renders, states the REAL total, and names what a cap costs', () => {
+  const book = bookRegion(answerHtml(bigBookSnapshot()));
+  // The exact sentence, with the true denominator — not "of 8", and not a count re-derived from the
+  // sliced array, which is how a truncation notice comes to describe itself instead of the set.
+  assert.match(book, /Showing the 8 best-ranked of 9\./);
+  // ⚠ AND WHY THAT MATTERS HERE SPECIFICALLY: availability leads the sort (S1), so the rows a cap
+  // removes are systematically the FULL ones. A cap that hid them silently would turn "census sorts,
+  // it never filters" into a filter by omission.
+  assert.match(book, /A facility with no open beds sorts to the end, so it will be in the part not shown\./);
+  // The slice is real: eight cards, not nine, not three.
+  assert.equal(book.split('data-v3-tile').length - 1, 8, 'exactly QUALIFY_BOOK_PREVIEW cards render');
+  assert.ok(book.includes('BOOK FACILITY 8'));
+  assert.ok(!book.includes('BOOK FACILITY 9'), 'the ninth is cut — and the sentence above says so');
+  // The section's own count still names the WHOLE book, not the slice.
+  assert.match(book, />9<\/span> facilities/);
+});
+
+test('S2 book — AT the cap there is no truncation notice, because nothing is truncated', () => {
+  // The off-by-one that a 9-row fixture alone cannot catch: `> QUALIFY_BOOK_PREVIEW`, not `>=`.
+  const book = bookRegion(
+    answerHtml(
+      bigBookSnapshot({
+        bookFacilities: Array.from({ length: 8 }, (_, i) =>
+          facility({ rank: i + 1, name: `BOOK FACILITY ${i + 1}`, facilityKey: `BF${i + 1}`, payerCount: 1 }),
+        ),
+      } as Partial<QualifySnapshot>),
+    ),
+  );
+  assert.equal(book.split('data-v3-tile').length - 1, 8);
+  assert.ok(!book.includes('best-ranked of'), 'no notice when the whole book is on screen');
+});
+
+test('S2 book — an EMPTY book says so in words rather than rendering a headed void', () => {
+  // Reachable: the payer-wide floor drops every facility below QUALIFY_MIN_LINES, so a payer with
+  // nothing but thin rows in the window has a real, empty book. A heading and a count of zero with
+  // no sentence would read as a section that failed to load.
+  const book = bookRegion(answerHtml(bookSnapshot({ bookFacilities: [] } as Partial<QualifySnapshot>)));
+  assert.match(book, /No facility in AETNA US HEALTHCARE&#x27;s book clears the volume floor in the window shown\./);
+  assert.equal(book.split('data-v3-tile').length - 1, 0, 'no cards');
+  assert.ok(!book.includes('best-ranked of'), 'and no truncation notice over an empty list');
+});
+
+test('S2 book — ONE predicate decides whether a book is on screen, and both consumers read it', () => {
+  /* Two derivations shipped in S2: the shell asked `snapshot.bookFacilities !== null` to caption the
+   * AI panel, while the stage rendered the section on `bookFacilities !== null && bookPayer !== null`.
+   * They agree today and disagree the moment either moves — and S3 changes this render condition BY
+   * DESIGN. So the predicate is one exported function, and this pins that it answers the harder case
+   * (a book with no nameable payer scope) the way the RENDER does, not the way the caption did. */
+  assert.equal(bookIsOnScreen(bookSnapshot()), true);
+  assert.equal(bookIsOnScreen(null), false, 'no snapshot, no book');
+  assert.equal(bookIsOnScreen({ ...bookSnapshot(), bookFacilities: null } as unknown as QualifySnapshot), false);
+  // ⚠ ABSENT IS NOT PRESENT-AND-NULL, and `undefined !== null` is TRUE. A pre-S2 payload (or any
+  // fixture predating the field) would otherwise answer "yes" and send the section into
+  // `bookFacilities!.length` on nothing — which is precisely what happened when this predicate was
+  // first extracted with a bare `!== null`, breaking 40 unrelated renders at once.
+  assert.equal(bookIsOnScreen(snapshotFixture()), false, 'a payload without the field has no book');
+  // An empty book IS on screen — the section renders with its heading and its empty sentence.
+  assert.equal(bookIsOnScreen({ ...bookSnapshot(), bookFacilities: [] } as unknown as QualifySnapshot), true);
+  // The case the two derivations disagreed on: rows present, but the scope names no single payer, so
+  // the section cannot render a heading and does not render at all. `scopedPayerOf` is the judge.
+  const unnameable = {
+    ...bookSnapshot(),
+    resolved: { payerName: null, payerScope: 'all' },
+  } as unknown as QualifySnapshot;
+  assert.equal(bookIsOnScreen(unnameable), false, 'a book nobody can name is not a book on screen');
+  // And the render agrees with the predicate — the whole point of unifying them.
+  assert.ok(!answerHtml(unnameable).includes('data-v3-book'));
 });

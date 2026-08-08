@@ -58,7 +58,7 @@ import { scopedPayerOf } from '../../../lib/qualify/contract';
 import { derivePolicyRating } from '../../../lib/qualify/policyRating';
 // The preface's ONE derivation — shared by the visible line, the receipt and the aria announcement,
 // so the seen claim and the spoken claim cannot be two expressions that merely happen to agree.
-import { memberPrefaceFor } from '../../../lib/qualify/memberPreface';
+import { memberBucketOf, memberPrefaceFor, prefaceNamesFacilityCount } from '../../../lib/qualify/memberPreface';
 // The scope claim's ONE home — shared with the AI panel so the two cannot phrase it differently.
 import { ALL_PAYERS_LABEL } from '../../../lib/qualify/scopeLabel';
 import { IQ_BAND_LABELS, IQ_BAND_VERDICTS } from '../../../lib/qualify/ratingV2';
@@ -463,6 +463,26 @@ export function employerNarrowFor(
   return { employers: picked };
 }
 
+/**
+ * THE CLASSIFIER HALF OF `liveSentenceFor`'s OPTIONS — ALL OR NOTHING, AT THE TYPE LEVEL.
+ *
+ * These two travel together or not at all. `memberFacilityCount` was previously optional with a
+ * `?? 0` default, which meant a caller who passed the member count and forgot the facility count
+ * got a silent, confident "0 facilities of history in the window shown" announced to a screen-reader
+ * user over a grid full of facilities. A runtime default cannot make that loud; a union can make it
+ * impossible. Supplying neither is still fine — that is the pre-S2 announcement, unchanged.
+ */
+type LiveSentenceClassifier =
+  | { memberCount?: undefined; memberFacilityCount?: undefined }
+  | {
+      /** Distinct members behind the searched token (`QualifySnapshot.memberCount`). `null` means the
+       *  classifier is unavailable and the announcement is byte-identical to pre-S2. */
+      memberCount: number | null;
+      /** The facility count the VISIBLE preface uses — `snapshot.facilities.length`. Passed rather
+       *  than read off the resolution so the spoken and the seen sentence carry ONE number. */
+      memberFacilityCount: number;
+    };
+
 /** The live-region sentence for the current state — announced once, as a full sentence.
  *
  *  `opts.payerGroups` is the shell's memoized cluster set. It rides in the EXISTING opts bag rather
@@ -478,19 +498,17 @@ export function liveSentenceFor(
      *  true while the snapshot is still in flight — announce the wider scope only once it is real. */
     scopeAllPayers?: boolean;
     payerGroups?: PayerGroup[];
-    /** S2: distinct members behind the searched token (`QualifySnapshot.memberCount`). Null/omitted
-     *  means the classifier is unavailable and the announcement is byte-identical to pre-S2. */
-    memberCount?: number | null;
-    /** The facility count the VISIBLE preface uses — `snapshot.facilities.length`. Passed rather than
-     *  read off the resolution so the spoken and the seen sentence carry ONE number. */
-    memberFacilityCount?: number;
-  } = {},
+  } & LiveSentenceClassifier = {},
 ): string {
   if (!resolution) return reason ? UNRESOLVABLE_COPY[reason] : '';
   /* THE PREFACE, ANNOUNCED. The visible line and this one come from the SAME pure function on the
    * SAME inputs — a second derivation is how the aria channel and the screen come to disagree, and
-   * the sr-only line is exactly where that survives a browser pass. Empty string when the classifier
-   * is unavailable, so every pre-S2 call site renders an unchanged sentence. */
+   * the sr-only line is exactly where that survives a browser pass. Null when the classifier is
+   * unavailable, so every pre-S2 call site renders an unchanged sentence.
+   *
+   * `?? 0` IS UNREACHABLE, and by the TYPE rather than by hope: `LiveSentenceClassifier` makes the
+   * pair all-or-nothing, so no caller can supply a count without the facility count it is joined to.
+   * It stays only because TS cannot narrow the pair through the intersection above. */
   const preface = memberPrefaceFor(opts.memberCount ?? null, opts.memberFacilityCount ?? 0);
   const say = (rest: string): string => (preface === null ? rest : `${preface} ${rest}`);
   // A skipped search resolved NOTHING past the identifier: announcing the pre-selected candidate's
@@ -520,23 +538,29 @@ export function liveSentenceFor(
     return `${resolution.candidates.total} plans match. Pick one, or ask the AI about one.`;
   }
   const g = resolution.group;
-  /* ⚠ THE PREFACE REPLACES THE RESOLUTION'S FACILITY COUNT, IT DOES NOT SIT BESIDE IT.
+  /* ⚠ THE PREFACE REPLACES THE RESOLUTION'S FACILITY COUNT ONLY WHEN IT CARRIES ONE OF ITS OWN.
    * `claimEvidence.distinctFacilities` is minted by the resolution service and is rendered NOWHERE
-   * on this screen (grep: this line is its only consumer). The preface's count is the one the
-   * operator can SEE — `snapshot.facilities.length`. The two can legitimately differ (different
-   * source, different window), so announcing both would read out two numbers for one question and
-   * leave a screen-reader user unable to tell which describes the grid in front of them. When there
-   * is no preface the old clause is untouched, byte for byte. */
-  const facilitiesClause =
-    preface === null ? ` ${g.claimEvidence.distinctFacilities} facilities with history.` : ` ${preface}`;
-  return (
+   * on this screen (grep: this line is its only consumer). The ONE-MEMBER preface names a facility
+   * count that the operator can SEE (`snapshot.facilities.length`); the two can legitimately differ
+   * (different source, different window), so announcing both would read out two numbers for one
+   * question and leave a screen-reader user unable to tell which describes the grid in front of them.
+   *
+   * The 2-9 and 10+ prefaces name NO facility count, so there is nothing to collide with — and
+   * replacing the clause there would leave the spoken channel with no facility count at all while
+   * the sighted reader has a grid full of them. Silence is not parity. `prefaceNamesFacilityCount`
+   * is the judge, so the rule follows the COPY: the day a 2-9 sentence grows a facility clause, the
+   * predicate moves with it instead of this branch quietly becoming wrong. */
+  const announcedFacilities = prefaceNamesFacilityCount(opts.memberCount ?? null)
+    ? ''
+    : ` ${g.claimEvidence.distinctFacilities} facilities with history.`;
+  return say(
     `Resolved: ${g.payerDisplayName}` +
-    (g.employerLabel ? ` · ${g.employerLabel}` : '') +
-    (g.funding ? ` · ${g.funding}` : '') +
-    `.${facilitiesClause}` +
-    (resolution.candidates.wasAmbiguous
-      ? ` ${resolution.candidates.total} plans matched; this one is selected.`
-      : ' Only one plan matched.')
+      (g.employerLabel ? ` · ${g.employerLabel}` : '') +
+      (g.funding ? ` · ${g.funding}` : '') +
+      `.${announcedFacilities}` +
+      (resolution.candidates.wasAmbiguous
+        ? ` ${resolution.candidates.total} plans matched; this one is selected.`
+        : ' Only one plan matched.'),
   );
 }
 
@@ -709,6 +733,34 @@ export const SKIP_CARRIER_MAX = 3;
 export const QUALIFY_BOOK_PREVIEW = 8;
 
 /**
+ * IS THE PAYER'S BOOK SECTION ON SCREEN? — the ONE predicate, read by the stage that renders it and
+ * by the shell that captions the AI panel around it.
+ *
+ * S2 shipped this as two expressions: the shell asked `snapshot.bookFacilities !== null` while the
+ * stage rendered on `bookFacilities !== null && bookPayer !== null`. They agreed on every state
+ * reachable today and disagree on one that is not (rows present under a scope that names no single
+ * payer, where the section cannot render a heading and so does not render at all) — and S3 changes
+ * this render condition BY DESIGN, which is exactly when two copies become one lie.
+ *
+ * `scopedPayerOf` is the second half rather than a bare null check because the section's heading
+ * NAMES whose book it is; a book nobody can name is not a book on screen.
+ *
+ * An EMPTY book is on screen: the section renders its heading, its count and a sentence saying the
+ * floor cleared nothing. That is a state, not an absence.
+ *
+ * ⚠ `?? null`, NOT A BARE `!== null`, AND THIS BIT A REAL RENDER. `undefined !== null` is TRUE, so a
+ * payload where the field is ABSENT rather than null — every pre-S2 fixture, and any cached snapshot
+ * minted before this field existed — would answer "yes" and send the section into `bookFacilities!.
+ * length` on nothing. The contract declares the field required and the core always sets it, so this
+ * is a boundary guard rather than a live case; it is here because the local expression it replaced
+ * had it, and dropping a coercion during a unification is exactly how a unification regresses.
+ */
+export function bookIsOnScreen(snapshot: QualifySnapshot | null | undefined): boolean {
+  if (!snapshot) return false;
+  return (snapshot.bookFacilities ?? null) !== null && scopedPayerOf(snapshot.resolved) !== null;
+}
+
+/**
  * The escape hatch: stop answering questions and go straight to the answer over the identifier's
  * WHOLE footprint, then narrow (or not) with the answer stage's filter lines. Declining to choose is
  * a real answer, and the answer stage says which one it got.
@@ -794,13 +846,20 @@ export function FlowReceipt({
   const payers = payerGroups ?? payerGroupsOf(resolution);
   const entry = 'flex items-center gap-2 rounded-full border border-line bg-surface py-1 pl-3 pr-1';
   const change = 'rounded-full px-2 py-0.5 text-xs font-semibold text-teal700 hover:bg-teal50';
-  /* HOW MANY PEOPLE THAT SEARCH ACTUALLY MATCHED — the count, not the bucket. The receipt is a
+  /* HOW MANY PEOPLE THAT SEARCH ACTUALLY MATCHED — the COUNT, not the sentence. The receipt is a
    * compressed trail, so it states the number and leaves the interpretation to the preface on the
    * answer stage; two full sentences saying the same thing in different words is how they drift.
-   * `> 0` is the whole gate: null is "not counted" and 0 is "nobody", and neither is worth a chip.
+   *
+   * ⚠ THE GATE IS `memberBucketOf`, NOT A SECOND null/zero TERNARY. It used to be
+   * `memberCount !== null && memberCount > 0`, which is the same logic re-derived — and "one
+   * derivation, three surfaces" is only true if the SILENCE rule is shared too, not just the words.
+   * 'unknown' (the count was unavailable) and 'none' (it ran and found nobody) are the two states
+   * that say nothing; both live in memberPreface.ts, and this reads them rather than restating them.
+   *
    * Rendered as ONE element rather than a second entry — see ReceiptProps.memberCount. */
+  const memberBucket = memberBucketOf(memberCount);
   const memberChip =
-    memberCount !== null && memberCount > 0 ? (
+    memberCount !== null && memberBucket !== 'unknown' && memberBucket !== 'none' ? (
       <span className="text-xs text-ink600">
         ·{' '}
         <span
@@ -1938,7 +1997,13 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
    * tolerable for the identity line's shipped wording and would be a fabricated basis on a heading
    * that names whose book this is. */
   const bookPayer = scopedPayerOf(snap?.resolved);
-  const bookOnScreen = bookFacilities !== null && bookPayer !== null;
+  // ONE PREDICATE, TWO CONSUMERS — see `bookIsOnScreen`. The shell asks the same question to caption
+  // the AI panel, and S3 changes this render condition by design.
+  const bookOnScreen = bookIsOnScreen(snap);
+  /* THE PREFACE SENTENCE, DERIVED ONCE PER RENDER. It was called twice — once to test for null and
+   * once to print — which is a second call to a pure function on identical inputs, i.e. the shape
+   * that only ever costs and never pays. */
+  const preface = snap === null ? null : memberPrefaceFor(snap.memberCount, snap.facilities.length);
   /**
    * ── THE NARROW SEARCH CARD'S FACETS, DERIVED ONCE ────────────────────────────────────────────
    *
@@ -2216,12 +2281,19 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               a statement about the data, and during a re-scope it would describe the set being
               replaced. The dim + beam is the marker; this waits.
 
-              ONE DERIVATION, THREE SURFACES — this line, the receipt chip and `liveSentenceFor` all
-              call `memberPrefaceFor`, so the seen and the spoken claim cannot drift. */}
-          {!stale && memberPrefaceFor(snap.memberCount, snap.facilities.length) !== null ? (
-            <p role="status" className="text-sm font-semibold text-ink900">
-              {memberPrefaceFor(snap.memberCount, snap.facilities.length)}
-            </p>
+              ONE MODULE, THREE SURFACES — this line and `liveSentenceFor` both call
+              `memberPrefaceFor`; the RECEIPT prints the count rather than the sentence, but it gates
+              on `memberBucketOf`, so all three share the same silence rule as well as the same
+              words. (This comment used to claim the receipt called `memberPrefaceFor`. It does not,
+              and never did — the chip is a numeral in a pill, not a sentence.)
+
+              ⚠ NOT a `role="status"`. The flow's single sr-only live region already announces this
+              exact string through `liveSentenceFor`, so a status role here would make it the one
+              doubly-announced sentence on the surface — the same overlap the team ruled against for
+              the area narrow's two competing status lines a few hundred rows below. The visible line
+              is text; announcing is the live region's job, and only it can sequence with the flow. */}
+          {!stale && preface !== null ? (
+            <p className="text-sm font-semibold text-ink900">{preface}</p>
           ) : null}
 
           {/* SCOPE HONESTY (review Critical 1). When the pick couldn't be bridged to a claims label

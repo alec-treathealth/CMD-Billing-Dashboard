@@ -328,11 +328,20 @@ Four buckets, one sentence each — and **two different nothings, which must not
 
 | `memberCount` | says |
 |---|---|
-| `1` | `One member matches this search — N facilities of history.` |
-| `2–9` | `N members share this prefix. Continue to search across all of them, or refine the prefix.` |
-| `10+` | `A population — N members behind this prefix.` |
+| `1` | `One member has a paid claim behind this search in the last 12 months — N facilities of history in the window shown.` |
+| `2–9` | `N members have a paid claim behind this prefix in the last 12 months. Continue to search across all of them, or refine the prefix.` |
+| `10+` | `A population — N members have a paid claim behind this prefix in the last 12 months.` |
 | `0` | nothing — the provenance banner already owns "no claims of its own" |
 | `null` | nothing — the count was **unavailable**, and a failed query must never render as a fact |
+
+> **EVERY NUMBER STATES THE BASIS IT WAS COUNTED ON, and the first version of this copy did not.**
+> `memberCount` is the 365-day rung filtered on `payment_received` — "members with a **paid claim**
+> in the last 12 months" — while the facility count is the **chosen window**. Joined by a bare
+> em-dash they made one mixed-basis claim, and the contradiction was reachable rather than
+> theoretical: a 30-day window on a member last paid 200 days ago rendered *"One member matches this
+> search — 0 facilities of history."* beside an empty grid, each half true at its own window and the
+> sentence false at both. Fixed in **copy, not in SQL**: an unbounded count would make the classifier
+> drift with the window, which is the one property this design exists to protect.
 
 Copy is **unratified**. `memberPreface.ts` owns the bucketing and the words; the visible line, the
 receipt chip and the `aria-live` announcement all call the same function, so the seen claim and the
@@ -374,7 +383,18 @@ floorless: two lists, two honest floors.
   says nothing rather than printing "1 payer · AETNA" on every card.
 - **The preview cap is stated, never silent.** A secondary section that pushes the answer off the
   screen has stopped being secondary, so the list is capped — and because availability leads the
-  sort, the rows a cap removes are systematically the full ones. Both facts ride the same line.
+  sort, the rows a cap removes are systematically the full ones. Both facts ride the same line, the
+  notice counts the **whole** book rather than the slice, and an empty book says so in words instead
+  of rendering a headed void.
+
+> **MEASURED, 2026-08-08, live against prod.** The book load on the busiest payer (27,669 rows) is
+> **~130–230 ms**, served by `cmd_charge_rollup_entity_payer_payment` with a **3.6 MB external-merge
+> sort spilling to disk**; typical payers roughly half that. The member ranking beside it is
+> **3–20 ms**, and the `Promise.all` is parallel — so on a big-payer search **the book is now the
+> critical path**. The wire is bounded by reality (the whole book is 48 facilities), so no core-side
+> slice is warranted. **If search p95 regresses, this load is the lever:** lazy-load the section on
+> expand via its own action, or a per-`(payer, window, entityIds)` TTL cache — *it does not vary by
+> member*, which is what makes both cheap. Neither is built; S3 inherits the decision explicitly.
 
 **Two rankings on screen make "the ranking on screen" identify nothing**, so both AI grounding
 captions now name which list the model read. The payload is still `snap.facilities.slice(0, 10)` —

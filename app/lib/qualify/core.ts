@@ -965,6 +965,23 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
      * IDENTIFIER-scoped load is still the first `loadFacilities` call this path makes — several
      * tests read `facilitiesArgs[0]` to assert the token narrows the ranking, and the primary load
      * staying primary is the honest shape anyway: the book is the addition.
+     *
+     * ── ⚠ MEASURED COST, AND THE LEVER IF IT EVER BITES (2026-08-08, live against prod) ──────────
+     *
+     * Busiest payer, 27,669 rows in the real query shape: **~130-230ms**, served by the correct
+     * composite index (`cmd_charge_rollup_entity_payer_payment`) with a **3.6MB external-merge sort
+     * spilling to disk**. Typical payers roughly half that. The member ranking beside it is
+     * **3-20ms**. The `Promise.all` is parallel, so wall clock is the MAX — which means that on a
+     * big-payer search THE BOOK IS NOW THE CRITICAL PATH, not the identifier's own ranking.
+     *
+     * The WIRE is bounded by reality rather than by a slice: the whole book is 48 facilities, so
+     * this can never ship more than ~48 card objects and no core-side cap is warranted.
+     *
+     * IF SEARCH p95 REGRESSES, THIS LOAD IS THE LEVER — lazy-load the book section on expand via its
+     * own action, or put a per-(payer, window, entityIds) TTL cache in front of it; **it does not
+     * vary by member**, which is what makes both options cheap. Neither is built, deliberately: an
+     * unmeasured regression is not a reason to add a cache, and S3 should inherit that decision
+     * explicitly rather than find a cache it never asked for.
      */
     // Factor context (coding + census) is independent of the row loads — run all four together
     // (review finding #11: two avoidable serial round-trips on a latency-sensitive surface).

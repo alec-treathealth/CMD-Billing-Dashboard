@@ -45,11 +45,30 @@ export function memberBucketOf(memberCount: number | null): QualifyMemberBucket 
 /**
  * THE SENTENCE, or silence.
  *
- * `facilityCount` is the count of the facilities ACTUALLY ON SCREEN in the member ranking, passed in
- * rather than re-derived, so the visible line, the receipt and the aria announcement cannot print
- * three different numbers for one fact.
+ * ⚠ TWO NUMBERS, TWO WINDOWS, AND BOTH ARE NAMED (fix round 1, 2026-08-08). The two counts this
+ * function joins are measured on DIFFERENT bases, and the first version of this copy hid that
+ * behind an em-dash:
  *
- * ⚠ COPY IS UNRATIFIED (S2, flagged for Alec). Plain on purpose.
+ *   · `memberCount` is always the ladder's 365-day rung, and it is `count(distinct member_id_bidx)`
+ *     filtered on `payment_received` — so it means "members with a PAID CLAIM in the last 12
+ *     months", not "members who exist". It does not follow the chosen window ON PURPOSE: "is this a
+ *     person or a population" is a fact about the identifier, and a classifier that moved when an
+ *     operator pressed a Range chip would be telling them the answer depends on the window.
+ *   · `facilityCount` is the facilities on screen in the CHOSEN window.
+ *
+ * Joined without labels those made one mixed-basis claim, and the contradiction was reachable, not
+ * theoretical: a 30-day window on a member last paid 200 days ago rendered "One member matches this
+ * search — 0 facilities of history." beside an empty grid. Each clause now carries its own window,
+ * so the pair reads as what it is — paid inside the year, nothing inside the window shown.
+ *
+ * The DESIGN did not change and should not: fixing this in SQL (an unbounded count) would make the
+ * classifier drift with the window and cost a second aggregate. The fix is copy that states its own
+ * basis.
+ *
+ * `facilityCount` is passed in rather than re-derived, so the visible line, the receipt and the aria
+ * announcement cannot print three different numbers for one fact.
+ *
+ * ⚠ COPY IS UNRATIFIED (flagged for Alec). Plain on purpose.
  *
  * "prefix" in the 2-9 and 10+ sentences is safe for every reachable input: an exact member-id token
  * counts `distinct member_id_bidx` where `member_id_bidx = token`, which is 0 or 1 by construction,
@@ -60,19 +79,41 @@ export function memberPrefaceFor(memberCount: number | null, facilityCount: numb
     case 'one':
       // The 58.8% case. NOT "their top facility" — with 1.14 facilities of history a ranking is not
       // thin, it is malformed, so the sentence states the size of the evidence and nothing more.
-      return `One member matches this search — ${facilityCount} ${facilityCount === 1 ? 'facility' : 'facilities'} of history.`;
+      return (
+        'One member has a paid claim behind this search in the last 12 months' +
+        ` — ${facilityCount} ${facilityCount === 1 ? 'facility' : 'facilities'} of history in the window shown.`
+      );
     case 'few':
       // "Continue" names the control that already exists (Skip = search across all of them). A
       // member-by-member pick is DESCOPED: raw member ids can never render, so picking one needs a
       // server-side per-response ordinal enumeration (the assembleClaims patientKey precedent) plus
       // a pick-by-ordinal predicate. Recorded as a follow-up; deliberately not built.
-      return `${memberCount} members share this prefix. Continue to search across all of them, or refine the prefix.`;
+      return (
+        `${memberCount} members have a paid claim behind this prefix in the last 12 months.` +
+        ' Continue to search across all of them, or refine the prefix.'
+      );
     case 'many':
-      return `A population — ${memberCount} members behind this prefix.`;
+      return `A population — ${memberCount} members have a paid claim behind this prefix in the last 12 months.`;
     // 'unknown' says nothing NEW — the rest of the screen is unchanged, which is the honest degrade.
     // 'none' says nothing either: there is no member history to describe, and the provenance banner
     // above the ranking already states that in its own words.
     default:
       return null;
   }
+}
+
+/**
+ * DOES THE PREFACE ITSELF NAME A FACILITY COUNT?
+ *
+ * Only the one-member arm does. It exists so `liveSentenceFor` can decide whether the preface
+ * COLLIDES with the resolution's own `distinctFacilities` clause (in which case the preface, whose
+ * number is the one on screen, replaces it) or merely adds to it (in which case dropping the
+ * existing clause would leave a screen-reader user with no facility count at all, while the sighted
+ * reader has a grid full of them).
+ *
+ * A named predicate rather than an inline `=== 'one'` because it encodes WHY, and because the answer
+ * changes the moment the 2-9 or 10+ copy grows a facility clause of its own.
+ */
+export function prefaceNamesFacilityCount(memberCount: number | null): boolean {
+  return memberBucketOf(memberCount) === 'one';
 }

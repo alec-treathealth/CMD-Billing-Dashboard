@@ -60,6 +60,7 @@ import { staggerDelayMs } from '../tokens';
 import { AREA_ALL, areaKeyFor } from '../m/area-chips';
 import {
   answerFiltersActive,
+  bookIsOnScreen,
   deriveStage,
   employerNarrowFor,
   filterCandidates,
@@ -602,7 +603,11 @@ export function ResolutionFlowClient({
                     // whenever the core loaded one, so the panel's grounding caption has to name
                     // which of the two it read. TOLD, not derived from the field — it is on the wire
                     // for the v2 tab too, and v2 draws no book (see the prop's own doc).
-                    bookOnScreen={snapshot.bookFacilities !== null}
+                    //
+                    // ⚠ THE SAME PREDICATE THE STAGE RENDERS ON. This was a second expression
+                    // (`bookFacilities !== null`) that merely agreed with the stage's; a caption
+                    // claiming a list the stage declined to draw is the defect that shape produces.
+                    bookOnScreen={bookIsOnScreen(snapshot)}
                     autoAsk={autoAsk}
                     // ONE-SHOT (review Critical 2): without the disarm, every re-scope (window,
                     // billed-under chip) nulls the snapshot, unmounts the panel, and the remount

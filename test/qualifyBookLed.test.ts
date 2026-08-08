@@ -29,7 +29,7 @@ import {
   getQualifySnapshotByPayerCore,
   type QualifyDeps,
 } from '../app/lib/qualify/core.js';
-import { memberBucketOf, memberPrefaceFor } from '../app/lib/qualify/memberPreface.js';
+import { memberBucketOf, memberPrefaceFor, prefaceNamesFacilityCount } from '../app/lib/qualify/memberPreface.js';
 import { requireQualifyPrincipalFromAccess } from '../app/lib/qualify/principal.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../src/tenants.js';
 import type { QualifyFacilityRow } from '../src/collections/qualifyQuery.js';
@@ -189,20 +189,51 @@ test('memberBucketOf — a PERSON, a small set, a POPULATION, and two kinds of n
   assert.equal(memberBucketOf(-1), 'none');
 });
 
-test('memberPrefaceFor — one sentence per world, and SILENCE when the world is unknown', () => {
-  assert.equal(memberPrefaceFor(1, 1), 'One member matches this search — 1 facility of history.');
-  assert.equal(memberPrefaceFor(1, 3), 'One member matches this search — 3 facilities of history.');
-  // Zero facilities is a real state (the member's claims fell outside the window) and must still
-  // read as English rather than "0 facility".
-  assert.equal(memberPrefaceFor(1, 0), 'One member matches this search — 0 facilities of history.');
+test('memberPrefaceFor — one sentence per world, and EVERY number states its own basis', () => {
+  /* ⚠ TWO WINDOWS IN ONE SENTENCE, BOTH NAMED (fix round 1). `memberCount` is always the 365-day
+   * rung and is filtered on `payment_received`, so it means "members with a PAID CLAIM in the last
+   * 12 months"; the facility count is the CHOSEN window. Joined by a bare em-dash — which is how
+   * this first shipped — they made one mixed-basis claim, and the contradiction was REACHABLE: a
+   * 30-day window on a member last paid 200 days ago read "One member matches this search — 0
+   * facilities of history." beside an empty grid, both halves individually true and the sentence
+   * false at both bases. The DESIGN is unchanged (the classifier must not move when a Range chip is
+   * pressed); the copy now says what each number was counted over. */
+  assert.equal(
+    memberPrefaceFor(1, 1),
+    'One member has a paid claim behind this search in the last 12 months — 1 facility of history in the window shown.',
+  );
+  assert.equal(
+    memberPrefaceFor(1, 3),
+    'One member has a paid claim behind this search in the last 12 months — 3 facilities of history in the window shown.',
+  );
+  // THE DEFECT'S OWN CASE, now coherent rather than contradictory: paid inside the year, nothing
+  // inside the window on screen. Still English, never "0 facility".
+  assert.equal(
+    memberPrefaceFor(1, 0),
+    'One member has a paid claim behind this search in the last 12 months — 0 facilities of history in the window shown.',
+  );
   assert.equal(
     memberPrefaceFor(4, 9),
-    '4 members share this prefix. Continue to search across all of them, or refine the prefix.',
+    '4 members have a paid claim behind this prefix in the last 12 months. Continue to search across all of them, or refine the prefix.',
   );
-  assert.equal(memberPrefaceFor(31, 9), 'A population — 31 members behind this prefix.');
+  assert.equal(
+    memberPrefaceFor(31, 9),
+    'A population — 31 members have a paid claim behind this prefix in the last 12 months.',
+  );
   // Unknown says NOTHING NEW — the rest of the screen is unchanged, which is the honest degrade.
   assert.equal(memberPrefaceFor(null, 3), null);
   assert.equal(memberPrefaceFor(0, 0), null);
+});
+
+test('prefaceNamesFacilityCount — only the ONE-member arm carries a facility count of its own', () => {
+  // The judge for whether the aria sentence REPLACES the resolution's own facility clause (a
+  // collision) or merely prepends to it (an addition). Getting this wrong in the 2-9/10+ direction
+  // leaves a screen-reader user with NO facility count while the grid visibly has one.
+  assert.equal(prefaceNamesFacilityCount(1), true);
+  assert.equal(prefaceNamesFacilityCount(4), false);
+  assert.equal(prefaceNamesFacilityCount(31), false);
+  assert.equal(prefaceNamesFacilityCount(0), false);
+  assert.equal(prefaceNamesFacilityCount(null), false);
 });
 
 // ── (2) memberCount on the snapshot, for ALL token kinds ─────────────────────────────────────────
