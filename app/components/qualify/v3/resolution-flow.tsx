@@ -806,8 +806,48 @@ export function StepRail(props: {
  * the carrier is effectively already known, so declining to pick costs nothing. The PLAN stage always
  * offers it: by then the population is one carrier's plans, and "I don't know which plan" is the
  * common real case.
+ *
+ * ⚠ THE PARAGRAPH ABOVE IS LEFT AS RATIFIED, AND ITS PREMISE IS NO LONGER TRUE (recorded S6,
+ * 2026-08-08). The 2026-08-07 reversal — "the Skip ranks the whole radius, not one label" — made a
+ * skip an ALL-PAYERS request: `allPayers = skipped && payerOverride === null` in
+ * resolution-flow-client.tsx becomes `payerScope: 'all'` on the wire, and `QualifyResolved.payerName`
+ * is null. So a skip no longer "resolves the ranking to whichever payer happens to dominate"; there
+ * is no dominant-payer pick left in that path to be arbitrary.
+ *
+ * THE RULING IS PRESERVED ANYWAY, and S6 preserved it deliberately rather than dropping it with its
+ * premise, for a reason the reversal itself supplies: an all-payers ranking is dollar-weighted across
+ * every label behind the rows (the reversal's own rule 2 — "a blended percentage is never a payer
+ * contract rate", Simpson's paradox on the exact surface admissions staff act on). At two carriers
+ * the blend is legible and the chips un-blend it in one click. At a dozen it is a blend the operator
+ * cannot reason about, offered as a shortcut past the one question that would have prevented it —
+ * and S6's hoist makes that offer LOUDER, which strengthens the case for the gate rather than
+ * weakening it. That is a different argument from the one ratified, over the same threshold and the
+ * same behaviour. It wants Alec's re-ratification; it does not want a silent drop.
  */
 export const SKIP_CARRIER_MAX = 3;
+
+/**
+ * WHICH STAGES OFFER THE SKIP — the suppression ruling above, expressed once (S6, 2026-08-08).
+ *
+ * PURE, and deliberately the only place the rule lives now: the affordance moved from three render
+ * sites inside the stage bodies to ONE beneath the step rail, and three call sites that each carried
+ * their own condition were three places a rule could drift. `identify` has nothing to skip yet (no
+ * resolution, no footprint) and `answer` is past every question there is.
+ *
+ * `groups` is the shell's memoized `payerGroupsOf` — the SAME derivation the rail, the receipt, the
+ * stage machine and the live sentence read. Re-deriving here would give a count-based rule a second
+ * source of truth.
+ */
+export function skipOffered(
+  stage: FlowStage,
+  resolution: QualifyResolution | null,
+  groups?: PayerGroup[],
+): boolean {
+  if (resolution === null) return false;
+  if (stage === 'plan') return true;
+  if (stage !== 'payer') return false;
+  return (groups ?? payerGroupsOf(resolution)).length < SKIP_CARRIER_MAX;
+}
 
 /**
  * How many of the payer's book the SECONDARY section renders (S2, 2026-08-08).
@@ -828,6 +868,29 @@ export const QUALIFY_BOOK_PREVIEW = 8;
  * The escape hatch: stop answering questions and go straight to the answer over the identifier's
  * WHOLE footprint, then narrow (or not) with the answer stage's filter lines. Declining to choose is
  * a real answer, and the answer stage says which one it got.
+ *
+ * ── HOISTED, AND SPARKLING (S6, 2026-08-08) ────────────────────────────────────────────────────────
+ * Alec, verbatim: "If there is the option to 'skip — search all plans' this button should be very
+ * visible, sparkly with movement just underneath the green timeline." It used to render from THREE
+ * sites inside the stage bodies (StagePayer, gated; StagePlan, twice — the pinned header and the
+ * empty-cluster early return). It now renders from ONE site in `ResolutionStages`, directly beneath
+ * `<StepRail>`, gated by `skipOffered`.
+ *
+ * ⚠ THAT PUTS IT IN THE CHROME, WHICH IS THE POINT AND ALSO THE CONSTRAINT. Everything above
+ * `[data-v3-stage]` is outside the shell's GSAP entrance — and the entrance animates `autoAlpha`,
+ * which sets `visibility: hidden`. A control that is the loudest thing on the screen must not be
+ * unclickable and out of the accessibility tree for the first 220ms of every stage it appears on.
+ * Outside the subtree it is live from frame zero, and the shimmer is pure decoration over it.
+ *
+ * ⚠ IT NOW PRECEDES THE QUESTION IN TAB ORDER, and that is a real consequence, not an oversight.
+ * The shell moves focus to the stage's own `<h2>` on a stage swap, so a keyboard user reaches this
+ * by SHIFT-tab from the question rather than by tabbing forward into it. That is the same
+ * relationship the receipt strip's "Change" buttons already have on this surface — revisit and
+ * escape affordances live in the chrome above the question — so it is a consistent position rather
+ * than a new one. The single live region is untouched: it announces the QUESTION, never this.
+ *
+ * The sparkle itself is `.q-skip-spark` in globals.css, where the motion-contract deviation, the
+ * refused sizes and the contrast reasoning are all written down.
  */
 function SkipStep(props: { onSkip: () => void; what: string }): React.ReactElement {
   return (
@@ -835,9 +898,12 @@ function SkipStep(props: { onSkip: () => void; what: string }): React.ReactEleme
       type="button"
       onClick={props.onSkip}
       aria-label={`Skip ${props.what} and search across all plans for this member`}
-      className="w-fit rounded-lg border border-line bg-surface px-3 py-1.5 text-sm font-semibold text-ink600 transition-colors hover:border-teal500 hover:text-teal700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40"
+      className="w-fit rounded-xl border border-teal500/60 bg-gradient-to-br from-teal900 to-teal700 px-4 py-2 text-sm font-semibold shadow-ths-sm transition-[box-shadow,transform] duration-150 ease-out hover:-translate-y-0.5 hover:shadow-ths focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/50"
     >
-      Skip <span className="font-normal text-ink400">— search all plans</span>
+      {/* One span, so the gradient clip has a single text box to run across. The words are the
+          control's visible label; the accessible name is the aria-label above, which says what the
+          skip actually does rather than what the button says. */}
+      <span className="q-skip-spark">Skip — search all plans</span>
     </button>
   );
 }
@@ -1079,7 +1145,6 @@ function payerAccent(g: PayerGroup): string {
 export function StagePayer(props: {
   resolution: QualifyResolution;
   onPick: (payer: string) => void;
-  onSkip: () => void;
   /** Optional pre-computed clusters (the shell memoizes one call per resolution). */
   payerGroups?: PayerGroup[];
 }): React.ReactElement {
@@ -1104,7 +1169,8 @@ export function StagePayer(props: {
           </span>
         ) : null}
       </p>
-      {groups.length < SKIP_CARRIER_MAX ? <SkipStep onSkip={props.onSkip} what="the carrier step" /> : null}
+      {/* S6: the Skip moved OUT of this body to a single site beneath the step rail — with the
+          carrier-count suppression intact, now expressed by `skipOffered`. */}
       <ul data-v3-grid className="grid list-none grid-cols-1 gap-2.5 p-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {groups.map((g, i) => (
           <li key={g.payer}>
@@ -1181,7 +1247,6 @@ export function StagePlan(props: {
   onPlanFilter: (v: string) => void;
   planAction: (fd: FormData) => void;
   onAskAi: () => void;
-  onSkip: () => void;
   pending: boolean;
   /** Optional pre-computed clusters (the shell memoizes one call per resolution). */
   payerGroups?: PayerGroup[];
@@ -1209,7 +1274,10 @@ export function StagePlan(props: {
           No plans are on file under {payer} in this result. Use the receipt above to change the
           carrier or search again.
         </p>
-        <SkipStep onSkip={props.onSkip} what="the plan step" />
+        {/* S6: no Skip here any more — and this branch is the reason the hoist is a fix rather than
+            a move. A dead end has to offer the way out, and an escape hatch rendered from inside a
+            rarely-taken early return is one branch away from being lost. It is now rendered above
+            every plan-stage body, including this one, from a single site. */}
       </Stage>
     );
   }
@@ -1234,7 +1302,6 @@ export function StagePlan(props: {
             under {payer}. These are every possibility we have on file — pick the one on the card, or ask the AI
             about one. The largest is a guess, not an answer.
           </p>
-          <SkipStep onSkip={props.onSkip} what="the plan step" />
           {underPayer.length > PLAN_FILTER_THRESHOLD ? (
             <div className="flex max-w-md flex-col gap-1">
               <label htmlFor="qualify-plan-filter" className="text-sm font-medium text-ink900">
@@ -1295,8 +1362,18 @@ export function StagePlan(props: {
                 >
                   Use this plan
                 </button>
+                {/* ⚠ `type="button"`, AND THAT ONE WORD IS THE WHOLE FIX (S6, 2026-08-08). It was
+                    `type="submit"` inside `<form action={planAction}>`, so a single press fired
+                    `ai_armed` AND the form's own submission: asking about a plan PICKED it. The
+                    receipt then recorded a "PLAN <employer>" decision the operator never made — the
+                    same class of false decision-claim the skip guards exist for, reached through the
+                    one control whose entire purpose is to interrogate a plan BEFORE committing.
+                    Leaving exactly one submit in the tile also gives the form a single, unambiguous
+                    default submission. `autoAsk` is one-shot and survives `plan_submitted`
+                    (flow-state invariant l), so arming here and then picking still auto-asks on the
+                    answer stage — the two presses are the flow, not a regression of it. */}
                 <button
-                  type="submit"
+                  type="button"
                   disabled={props.pending}
                   onClick={props.onAskAi}
                   className="rounded-lg border border-teal200 bg-teal50 px-2.5 py-1 text-xs font-semibold text-teal700 transition-colors hover:bg-teal200/60 disabled:opacity-60"
@@ -3927,7 +4004,9 @@ export interface ResolutionStagesProps {
   onPlanFilter: (v: string) => void;
   onAskAi: () => void;
   onChange: (backTo: 'identify' | 'payer' | 'plan') => void;
-  /** The Skip escape hatch, offered on both narrowing stages. */
+  /** The Skip escape hatch. Since S6 it is dispatched from ONE control, rendered beneath the step
+   *  rail on the two narrowing stages — see `skipOffered` and `SkipStep`. Same `skipped` action; no
+   *  reducer change. */
   onSkip: () => void;
   /**
    * The "Facilities Heating Up" trend strip, passed as a SLOT (the shell owns its fetch and its
@@ -3998,6 +4077,21 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
       </h1>
 
       <StepRail stage={props.stage} resolution={props.resolution} payerGroups={props.payerGroups} />
+
+      {/* ── THE SKIP, DIRECTLY BENEATH THE RAIL (S6, 2026-08-08) ──────────────────────────────────
+          "Just underneath the green timeline", and one site rather than the three it used to render
+          from. `skipOffered` carries the per-stage gating — including the preserved 2026-08-06
+          carrier-count suppression, whose recorded premise died in the 2026-08-07 reversal and whose
+          RULING did not (see `SKIP_CARRIER_MAX`). It reads the same memoized clusters as the rail
+          immediately above it, so the two cannot count carriers differently.
+
+          It sits OUTSIDE `[data-v3-stage]` on purpose: the shell's entrance tween animates
+          `autoAlpha` over that subtree and `autoAlpha` means `visibility: hidden`, which would make
+          the loudest control on the screen unclickable and invisible to AT for the first frames of
+          every stage. Chrome does not blink; this control is live from frame zero. */}
+      {skipOffered(props.stage, props.resolution, props.payerGroups) ? (
+        <SkipStep onSkip={props.onSkip} what={props.stage === 'payer' ? 'the carrier step' : 'the plan step'} />
+      ) : null}
 
       {/* THE single live region — one, not one per panel; the important sentence must not queue. */}
       <p aria-live="polite" className="sr-only">
@@ -4085,12 +4179,7 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
         ) : null}
 
         {props.stage === 'payer' && props.resolution ? (
-          <StagePayer
-            resolution={props.resolution}
-            onPick={props.onPickPayer}
-            onSkip={props.onSkip}
-            payerGroups={props.payerGroups}
-          />
+          <StagePayer resolution={props.resolution} onPick={props.onPickPayer} payerGroups={props.payerGroups} />
         ) : null}
 
         {props.stage === 'plan' && props.resolution ? (
@@ -4101,7 +4190,6 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
             onPlanFilter={props.onPlanFilter}
             planAction={props.planAction}
             onAskAi={props.onAskAi}
-            onSkip={props.onSkip}
             pending={props.pending}
             payerGroups={props.payerGroups}
           />

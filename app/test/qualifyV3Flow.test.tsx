@@ -21,6 +21,7 @@ import {
   filterCandidates,
   isRefetching,
   scopeKeyOf,
+  skipOffered,
   tickerIsLive,
   areaChipsWithActive,
   bookIsOnScreen,
@@ -569,10 +570,10 @@ test('a NO-OP scope click cannot flip the refetch flag — the stuck-headline bu
   assert.equal(isRefetching(true, null, key), false, 'content present but nothing stamped yet');
 });
 
-test('Skip is withheld on the carrier stage when the carrier choice is NOT obvious', () => {
-  // With a dozen carriers behind a prefix, skipping resolves the ranking to whichever payer happens
-  // to dominate the claims — arbitrary, not general, and indistinguishable from the answer screen.
-  const many = fixture({
+/** Six carriers behind one prefix — the NON-obvious carrier set the suppression ruling is about.
+ *  Extracted for S6, which pins the same ruling through the hoisted control. */
+function crowdedCarriers(): QualifyResolution {
+  return fixture({
     candidates: {
       total: 6,
       chosenIndex: 0,
@@ -589,6 +590,19 @@ test('Skip is withheld on the carrier stage when the carrier choice is NOT obvio
       })),
     },
   });
+}
+
+test('Skip is withheld on the carrier stage when the carrier choice is NOT obvious', () => {
+  // AS RATIFIED 2026-08-06, left readable rather than rewritten: "with a dozen carriers behind a
+  // prefix, skipping resolves the ranking to whichever payer happens to dominate the claims —
+  // arbitrary, not general, and indistinguishable from the answer screen."
+  //
+  // ⚠ THAT PREMISE DIED ON 2026-08-07 AND THE RULING DID NOT — see the constant's own header in
+  // resolution-flow.tsx. A Skip has ranked ALL payers since the reversal (`payerScope: 'all'`), so
+  // "whichever payer happens to dominate" describes behaviour this branch no longer has. The
+  // BEHAVIOUR under test is unchanged and deliberately preserved through S6's hoist; what changed is
+  // the reason it is defensible, which is now the blend rather than the arbitrary pick.
+  const many = crowdedCarriers();
   assert.ok(payerGroupsOf(many).length >= SKIP_CARRIER_MAX, 'fixture has a non-obvious carrier set');
   const crowded = render(props('payer', many));
   assert.ok(!crowded.includes('search all plans'), 'no Skip offered when the carrier is a real question');
@@ -4237,4 +4251,266 @@ test('S5 FIX — the first-ever read of rollup_refresh_run does not swallow its 
    * driver's own message can carry query text; the code alone answers the question. */
   assert.ok(!/err\.message|\berr\b\s*\)/.test(body.replace(/catch \(err\)/, '')), 'the message itself never reaches a log line');
   assert.match(body, /requireQualifyPrincipal/, 'positive control: still gated like every action here');
+});
+
+// ── S6 — THE PROMINENT SKIP BENEATH THE RAIL, AND THE ASK-AI UN-SUBMIT (2026-08-08) ─────────────
+//
+// Alec, verbatim: "If there is the option to 'skip — search all plans' this button should be very
+// visible, sparkly with movement just underneath the green timeline."
+//
+// The affordance leaves the stage bodies — three call sites, StagePayer gated and StagePlan twice —
+// for ONE site directly beneath <StepRail>. That puts it in the CHROME (outside `[data-v3-stage]`),
+// which is why it is interactive from frame zero: the shell's GSAP entrance sets `autoAlpha`, and
+// `autoAlpha` means `visibility: hidden`. What the hoist must NOT change is the 2026-08-06
+// suppression ruling, and it is pinned twice below — once as a predicate, once through the render.
+
+const GLOBALS_CSS = readFileSync(fileURLToPath(new URL('../app/globals.css', import.meta.url)), 'utf8');
+
+/** The hoisted Skip control's own `<button>`, bounded at its closing tag. Returns null when the
+ *  surface offers none — an ABSENCE this file has to be able to assert positively, because the
+ *  suppression ruling is a claim about absence. */
+function skipControlOf(html: string): string | null {
+  const at = html.indexOf('aria-label="Skip ');
+  if (at < 0) return null;
+  return outerHtmlFrom(html, html.lastIndexOf('<button', at));
+}
+
+test('S6: the Skip is HOISTED — one control, beneath the rail, above the animated stage', () => {
+  for (const [stage, over] of [
+    ['payer', {}],
+    ['plan', { payerPick: 'Aetna' }],
+  ] as Array<[FlowStage, Partial<ResolutionStagesProps>]>) {
+    const html = render(props(stage, fixture(), over));
+    // ONE control. Three call sites used to be able to disagree with each other; on the plan stage
+    // two of them rendered in mutually exclusive branches, which is a duplication a reader has to
+    // hold in their head rather than one the markup shows.
+    assert.equal(html.match(/aria-label="Skip /g)?.length, 1, `${stage}: exactly one Skip control`);
+    // "Just underneath the green timeline", in DOM terms: after the rail, before the stage subtree.
+    const rail = html.indexOf('data-v3-rail');
+    const skip = html.indexOf('aria-label="Skip ');
+    const stageAt = html.indexOf('data-v3-stage');
+    assert.ok(rail >= 0 && stageAt >= 0, `${stage}: positive control — rail and stage both rendered`);
+    assert.ok(rail < skip, `${stage}: the Skip must follow the rail`);
+    assert.ok(skip < stageAt, `${stage}: ...and precede the stage subtree, or it is not hoisted at all`);
+    // Still says what it does, per stage. The accessible name is the whole promise.
+    assert.match(
+      html,
+      /aria-label="Skip the (carrier|plan) step and search across all plans for this member"/,
+      `${stage}: the Skip names the step it declines`,
+    );
+  }
+  // The two stages with nothing to skip offer nothing: identify has no question behind it yet, and
+  // the answer is past every question there is.
+  assert.equal(skipControlOf(render(props('identify', null))), null, 'identify has nothing to skip');
+  assert.equal(
+    skipControlOf(render(props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture() }) }))),
+    null,
+    'the answer stage is past it',
+  );
+});
+
+test('S6: the plan stage keeps its Skip even when the carrier resolves to NO plans', () => {
+  // The empty-cluster arm (a stale carrier pick after a re-resolve) was one of the three call sites,
+  // and it is the one whose loss would be silent: it renders an early-return <Stage> that shares no
+  // markup with the ordinary plan grid. The hoist is what makes it structurally impossible to lose —
+  // the control is no longer inside the branch.
+  const html = render(props('plan', fixture(), { payerPick: 'NOT A CARRIER ON FILE' }));
+  assert.match(html, /No plans are on file under NOT A CARRIER ON FILE/, 'positive control: the empty arm rendered');
+  assert.ok(skipControlOf(html) !== null, 'a dead end must still offer the way out');
+});
+
+test('S6: the carrier-count suppression ruling SURVIVES the hoist — same gate, one control', () => {
+  const two = fixture();
+  const many = crowdedCarriers();
+  assert.equal(payerGroupsOf(two).length, 2, 'positive control: the obvious case is below the max');
+  assert.ok(payerGroupsOf(many).length >= SKIP_CARRIER_MAX, 'positive control: the crowded case is at or above it');
+
+  // The predicate, which is the ruling written down once instead of inlined at each render site.
+  assert.equal(skipOffered('payer', two), true, 'payer, nearly obvious → offered');
+  assert.equal(skipOffered('payer', many), false, 'payer, a real question → SUPPRESSED (ruled 2026-08-06)');
+  assert.equal(skipOffered('plan', many), true, "plan always offers it — the population is one carrier's plans");
+  assert.equal(skipOffered('plan', two), true);
+  assert.equal(skipOffered('identify', two), false, 'nothing has been narrowed yet');
+  assert.equal(skipOffered('answer', two), false, 'the answer is past it');
+  assert.equal(skipOffered('payer', null), false, 'no resolution, no footprint to search');
+  // It reads the THREADED clusters when it has them — the same single derivation the rail, the
+  // receipt, the stage machine and the live sentence all share. A second `payerGroupsOf` call here
+  // would be a second source of truth for a rule expressed as a count.
+  assert.equal(skipOffered('payer', many, payerGroupsOf(two)), true, 'the threaded groups are honoured');
+  assert.equal(skipOffered('payer', two, payerGroupsOf(many)), false, 'in both directions');
+
+  // ...and the render agrees with the predicate, which is the half a pure unit cannot prove.
+  assert.equal(skipControlOf(render(props('payer', many))), null, 'no Skip on a crowded carrier stage');
+  assert.ok(!render(props('payer', many)).includes('search all plans'), 'not anywhere else on it either');
+  assert.ok(skipControlOf(render(props('plan', many, { payerPick: 'Aetna' }))) !== null, 'but the plan stage keeps it');
+});
+
+test('S6: the sparkle borrows the beta badge’s IDIOM and not its sizes — every declared size clears 12px', () => {
+  // The floor sweep above scans `text-[Npx]` classes in rendered markup. This treatment sizes its ✦
+  // in the stylesheet, where that sweep cannot see it — so it is swept HERE, at the source it lives
+  // in. The badge it is modelled on runs 8px text / 7px star, which is exactly what must not travel.
+  const rules = [...GLOBALS_CSS.matchAll(/\.q-skip-spark(?:::after)?\s*\{[^}]*\}/g)].map((m) => m[0]);
+  assert.equal(rules.length, 2, 'the shimmer and its ✦ — and nothing else claiming the name');
+  let sizes = 0;
+  for (const rule of rules) {
+    for (const m of rule.matchAll(/font-size:\s*(\d+(?:\.\d+)?)px/g)) {
+      sizes += 1;
+      assert.ok(Number(m[1]) >= 12, `sub-12px in the sparkle: ${m[0]}`);
+    }
+  }
+  assert.ok(sizes >= 1, 'positive control: a size really is declared here, so the sweep is not vacuous');
+  // NEGATIVE CONTROL, and the reason this test exists: the source idiom IS below the floor. If the
+  // badge is ever resized, re-read this line rather than deleting it.
+  assert.match(GLOBALS_CSS, /\.q-beta-badge\s*\{[^}]*font-size:\s*8px/, 'the badge is 8px — decorative, aria-hidden, in the nav');
+  // The control's own label rides `text-sm` (0.9375rem = 15px in this scale), never an arbitrary size.
+  const btn = skipControlOf(render(props('payer', fixture())));
+  assert.ok(btn !== null && /text-sm/.test(btn), 'the label is a scale step, not a one-off');
+});
+
+test('S6: both sparkle animations collapse under the GLOBAL reduced-motion reset — verified, not assumed', () => {
+  // The reset is a UNIVERSAL rule, so the only way an animation escapes it is a selector that `*`,
+  // `*::before` and `*::after` do not match. Assert the reset's shape first — every motion claim in
+  // this file is void if it has drifted.
+  const reset = GLOBALS_CSS.match(/@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(reset !== undefined, 'the global reduced-motion reset is gone');
+  for (const sel of ['*,', '*::before,', '*::after {']) {
+    assert.ok(reset.includes(sel), `the reset must cover ${sel}`);
+  }
+  assert.match(reset, /animation-duration:\s*0\.01ms\s*!important/, 'duration is what collapses a shimmer');
+  assert.match(reset, /animation-iteration-count:\s*1\s*!important/, '...and the count is what stops an infinite one');
+
+  // Then that BOTH animations hang off selectors it reaches: the element itself, and its ::after.
+  assert.match(GLOBALS_CSS, /\.q-skip-spark\s*\{[^}]*animation:\s*q-skip-shimmer/, 'the shimmer is on the element');
+  assert.match(GLOBALS_CSS, /\.q-skip-spark::after\s*\{[^}]*animation:\s*q-skip-twinkle/, 'the twinkle is on ::after');
+  for (const kf of ['q-skip-shimmer', 'q-skip-twinkle']) {
+    assert.match(GLOBALS_CSS, new RegExp(`@keyframes ${kf}\\b`), `${kf} has no keyframes at all`);
+  }
+  // And neither re-arms itself behind its own media query, which is the one way to defeat the reset
+  // from the component side.
+  assert.ok(
+    !/@media[^{]*prefers-reduced-motion[^{]*\{[\s\S]{0,400}?q-skip-/.test(GLOBALS_CSS),
+    'the sparkle must not carry a reduced-motion opt-out of its own',
+  );
+});
+
+test('S6: the sparkle is decoration over a LIVE control — motion narrates, it never gates input', () => {
+  const btn = skipControlOf(render(props('payer', fixture())));
+  assert.ok(btn !== null, 'positive control: there is a control to interrogate');
+  assert.match(btn, /^<button type="button"/, 'a plain button — never a submit inside a form it does not own');
+  assert.ok(!/\bdisabled\b/.test(btn), 'never disabled: there is no in-flight state that should refuse a skip');
+  assert.ok(!/aria-hidden/.test(btn), 'never hidden from AT');
+  assert.ok(!/tabindex/.test(btn), 'reachable in DOM order, with no tabindex games');
+  assert.ok(!/pointer-events/.test(btn), 'no pointer-events games on the control');
+  // `pointer-events: none` is the one thing the badge idiom carries that WOULD gate input — the badge
+  // is decoration sitting on a link; this is the control itself.
+  const spark = GLOBALS_CSS.match(/\.q-skip-spark\s*\{[^}]*\}/)?.[0] ?? '';
+  assert.ok(spark.length > 0 && !/pointer-events/.test(spark), 'nor in the class that paints it');
+  // It carries no motion hook of its own, so neither the tile stagger nor the facet reveal claims it.
+  assert.ok(!/data-v3-tile|data-v3-facet/.test(btn), 'no motion hook on the control');
+});
+
+test('S6: the hoist cannot break the skip reveal — the stagger keys on the stage subtree, not the button', () => {
+  // The reveal selects `[data-v3-facet]` INSIDE `[data-v3-stage]`. The Skip now lives ABOVE that
+  // element, so the target set is unchanged by construction — asserted from both ends rather than
+  // argued, because "by construction" is exactly the claim that rots.
+  const shell = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/resolution-flow-client.tsx', import.meta.url)),
+    'utf8',
+  );
+  assert.match(shell, /toArray<HTMLElement>\('\[data-v3-facet\]', stageEl\)/, 'the reveal is scoped to the stage subtree');
+  assert.match(shell, /querySelector<HTMLElement>\('\[data-v3-stage\]'\)/, 'and stageEl is that subtree');
+
+  const html = render(
+    props('answer', fixture(), {
+      answer: answerProps({
+        snapshot: allPayersSnapshot(),
+        skipped: true,
+        scopeSource: 'dominant',
+        candidates: orderedCandidates(fixture()),
+        narrowExpanded: true,
+      }),
+    }),
+  );
+  const stageHtml = outerHtmlFrom(html, html.lastIndexOf('<', html.indexOf('data-v3-stage')));
+  const beats = html.match(/data-v3-facet/g)?.length ?? 0;
+  assert.ok(beats >= 5, `the reveal needs its beats — found ${beats}`);
+  assert.equal(stageHtml.match(/data-v3-facet/g)?.length, beats, 'every beat is inside the animated subtree');
+  // ...and the landing screen of a Skip offers no Skip, so the hoisted control can neither add a beat
+  // nor steal one from the stagger.
+  assert.equal(skipControlOf(html), null, 'the skip reveal screen carries no Skip control');
+});
+
+test('S6: the Skip precedes the question — and the live region still announces the QUESTION', () => {
+  for (const stage of ['payer', 'plan'] as const) {
+    const html = render(props(stage, fixture(), stage === 'plan' ? { payerPick: 'Aetna' } : {}));
+    const from = html.indexOf('aria-live="polite"');
+    assert.ok(from >= 0, `${stage}: positive control — the single live region rendered`);
+    const live = outerHtmlFrom(html, html.lastIndexOf('<p', from));
+    assert.ok(live.length > 0 && /Pick/.test(live), `${stage}: something real is announced`);
+    assert.ok(!/Skip|search all plans/i.test(live), `${stage}: the Skip is not announced as if it were the question`);
+    // Tab order: the Skip comes FIRST, which is the point of the hoist. The consequence is that a
+    // keyboard user reaches it by shift-tab from the heading the shell focuses on a stage swap —
+    // the same relationship the receipt's "Change" buttons already have, one region up.
+    assert.ok(
+      html.indexOf('aria-label="Skip ') < html.indexOf(`id="qualify-s-${stage}-heading"`),
+      `${stage}: the Skip precedes the question`,
+    );
+    assert.match(
+      html,
+      new RegExp(`id="qualify-s-${stage}-heading"[^>]*tabindex="-1"`),
+      `${stage}: the shell's focus target still exists, so a stage swap still lands on the question`,
+    );
+  }
+});
+
+test('S6: asking the AI about a plan no longer PICKS it — the Ask control is a button, not a submit', () => {
+  // It was `type="submit"` with `onClick={onAskAi}` inside `<form action={planAction}>`: one press
+  // fired `ai_armed` AND `plan_submitted`, so interrogating a plan committed to it — and the receipt
+  // then recorded a "PLAN <employer>" decision the operator never made.
+  const html = render(props('plan', fixture(), { payerPick: 'Aetna' }));
+  const tiles = html.split('name="candidate"').slice(1);
+  assert.equal(tiles.length, 2, 'positive control: two plan tiles under Aetna');
+  for (const t of tiles) {
+    const form = t.slice(0, t.indexOf('</form>'));
+    const ask = outerHtmlFrom(form, form.lastIndexOf('<button', form.indexOf('Ask AI about this plan')));
+    assert.match(ask, /^<button type="button"/, 'the Ask control must not submit the form it sits inside');
+    assert.ok(!/type="submit"/.test(ask));
+    // Exactly ONE submit is left in the tile — the pick path — so the form has a single, unambiguous
+    // default submission and there is no second candidate for implicit submission.
+    assert.equal(form.match(/type="submit"/g)?.length, 1, 'one submit per tile: Use this plan');
+    // The pick path is BYTE-unchanged. Asserted as bytes on purpose: this is the path that must not
+    // move while the control beside it does.
+    const use = outerHtmlFrom(form, form.lastIndexOf('<button', form.indexOf('Use this plan')));
+    assert.match(
+      use,
+      /^<button type="submit" class="rounded-lg bg-teal700 px-2\.5 py-1 text-xs font-semibold text-white transition-colors hover:bg-teal900 disabled:opacity-60">Use this plan<\/button>$/,
+      'the tile pick path is byte-unchanged',
+    );
+    assert.match(t, /^ value="\d+"\/>/, 'and the candidate index still rides the form as a hidden field');
+  }
+});
+
+test('S6: arming the AI leaves the operator on the plan stage — and a later pick still auto-asks', () => {
+  const r = fixture();
+  const at = (s: { payerPick: string | null; picked: boolean; skipped: boolean }): FlowStage =>
+    deriveStage({ resolution: r, payerPick: s.payerPick, picked: s.picked, skipped: s.skipped });
+
+  const armed = ([{ type: 'payer_picked', payer: 'Aetna' }, { type: 'ai_armed' }] as ShellAction[]).reduce(
+    shellReducer,
+    INITIAL_SHELL_STATE,
+  );
+  assert.equal(armed.autoAsk, true, 'the ask is armed');
+  assert.equal(armed.picked, false, 'and asking about a plan is NOT picking one');
+  assert.equal(at(armed), 'plan', 'so the stage does not move');
+
+  // Invariant (l) is unchanged by this fix and is the reason the two-press flow works at all:
+  // `plan_submitted` deliberately does not disarm, so the answer stage's panel auto-asks on arrival.
+  const after = shellReducer(armed, { type: 'plan_submitted' });
+  assert.equal(after.autoAsk, true, 'invariant (l): plan_submitted deliberately does not disarm autoAsk');
+  assert.equal(at(after), 'answer');
+  // The three that DO disarm, unchanged. Coerced with `?? false` rather than compared to a literal
+  // absence — an undefined field would satisfy `!== true` and prove nothing.
+  for (const action of [{ type: 'ai_disarmed' }, { type: 'search_submitted' }, { type: 'went_back', target: 'plan' }] as ShellAction[]) {
+    assert.equal(shellReducer(armed, action).autoAsk ?? false, false, `${action.type} disarms`);
+  }
 });

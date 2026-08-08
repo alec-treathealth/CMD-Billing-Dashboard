@@ -941,3 +941,118 @@ that in-flight state is where the bugs live.
 
 The ICU dependency in `rebuiltAtSentence` is left as-is: a fixed UTC instant, no DST hazard, and it
 fails loudly rather than silently on a small-icu runtime.
+
+## S6 — THE PROMINENT SKIP beneath the rail, and the Ask-AI un-submit (2026-08-08)
+
+Alec, verbatim: *"If there is the option to 'skip — search all plans' this button should be very
+visible, sparkly with movement just underneath the green timeline."*
+
+### The hoist — three render sites become one, above the animated subtree
+
+`SkipStep` used to render from **three** places inside the stage bodies: `StagePayer` (gated on the
+carrier count), and `StagePlan` **twice** — the pinned header, and the empty-cluster early return
+that fires when a stale carrier pick leaves no plans under it. It now renders from **one** site in
+`ResolutionStages`, directly beneath `<StepRail>`, gated by a new pure `skipOffered(stage,
+resolution, groups)`. It dispatches the same `skipped` action; the reducer is untouched.
+
+Three things that follow, none of them cosmetic:
+
+1. **It is CHROME now, not stage content.** Everything above `[data-v3-stage]` sits outside the
+   shell's entrance tween, and that tween animates `autoAlpha` — which sets `visibility: hidden`.
+   A control that is the loudest thing on the screen must not be unclickable and out of the
+   accessibility tree for the first frames of every stage it appears on. This is the same
+   `autoAlpha`-vs-`opacity` constraint the skip reveal already documents, arriving from the other
+   direction: there, live controls could not take `autoAlpha`; here, the control simply leaves the
+   subtree that applies it.
+2. **The empty-cluster dead end can no longer lose its escape hatch.** An affordance rendered from
+   inside a rarely-taken early return is one refactor away from vanishing exactly where it matters
+   most. Pinned by its own test.
+3. **It precedes the question in tab order,** which is the point (visibility) and a real
+   consequence. The shell focuses the stage's `<h2>` on a stage swap, so a keyboard user now reaches
+   the Skip by **shift-tab** from the question rather than by tabbing forward. That is the same
+   relationship the receipt strip's "Change" buttons already have — escape and revisit affordances
+   live in the chrome above the question — so it is a consistent position rather than a new one.
+   The single live region is untouched: it announces the QUESTION, never this control.
+
+### The carrier-count suppression is PRESERVED — and its recorded premise is dead
+
+`SKIP_CARRIER_MAX = 3` still suppresses the Skip on the carrier stage above three clusters, and the
+hoisted control carries the identical gate. **But the reasoning ratified on 2026-08-06 no longer
+describes this branch, and the ruling was preserved anyway rather than dropped with it.**
+
+The ratified reason was: *"with a dozen carriers behind a prefix, skip resolves the ranking to
+whichever payer happens to dominate the identifier's claims, which is ARBITRARY rather than
+general."* The **2026-08-07 reversal above** — *the Skip ranks the whole radius, not one label* —
+removed that mechanism entirely: `allPayers = skipped && payerOverride === null` becomes
+`payerScope: 'all'` on the wire and `QualifyResolved.payerName` is null, so there is no
+dominant-payer pick left in the skip path to be arbitrary about.
+
+The gate still has a reason, and it is the reversal's **own rule 2**: an all-payers ranking is
+dollar-weighted across every label behind the rows, so `pctAllowedOfBilled` and therefore `ratingV2`
+are a blend — Simpson's paradox on the exact surface admissions staff act on. At two carriers that
+blend is legible and one BILLED UNDER chip un-blends it. At a dozen it is a blend the operator
+cannot reason about, offered as a shortcut past the one question that would have prevented it. S6's
+hoist makes that offer **louder**, which strengthens the case for the gate rather than weakening it.
+
+That is a **different argument over the same threshold and the same behaviour**. It is recorded here
+and in the constant's own header, and it wants Alec's re-ratification. It did not want a silent drop,
+and the ratified paragraph is left readable in both places rather than rewritten.
+
+### The sparkle — and a knowing exception to the motion contract
+
+`.q-skip-spark` in `globals.css` reuses the `.q-beta-badge` idiom: a gradient-clipped shimmer plus a
+✦ that twinkles, same 2.6s / 1.9s vocabulary.
+
+> ⚠ **A PERSISTENT SHIMMER CONTRADICTS THE HOUSE MOTION CONTRACT, and it is shipped as a knowing
+> exception, not a precedent.** The contract reads *"motion narrates progression; it never gates
+> input"* — and a persistent shimmer does not narrate, because narration **ends** and this does not.
+> It is the ratifier's explicit request. Nothing else on this surface may borrow it without its own
+> ruling.
+>
+> **The half of the contract about input still holds absolutely.** The control is fully interactive
+> from frame zero: no `pointer-events: none` (the badge idiom's one input-gating property — correct
+> there, because the badge sits *on* a link and is not itself the control), no `visibility`, no GSAP
+> `autoAlpha`, and no motion hook of its own. Pinned by test.
+
+Two things from the badge deliberately did **not** travel, and both are swept at the stylesheet
+because the markup sweep only ever sees `text-[Npx]` classes:
+
+- **Its sizes.** The badge is 8px text / 7px star — legitimate for an aria-hidden decoration in the
+  nav, and below the 12px floor this surface machine-sweeps. The ✦ here is **13px** beside a
+  `text-sm` (15px) label.
+- **Its gradient range.** The badge runs to `#ffe0d5` on a light ground. On a 15px control label
+  that would carry the words through an illegible phase every 2.6s. The stops here are teal50 →
+  white → coral400 over the button's `#0E3A3A…#135E5A` fill, all ≥ 4.5:1 — readable at every frame
+  **including the static frame a reduced-motion user gets**.
+
+Both animations collapse under the global `prefers-reduced-motion` reset, which is a universal
+`*` / `*::before` / `*::after` rule and therefore reaches an element and its `::after` alike. That is
+**verified rather than assumed**: a test asserts the reset's shape, that both animations hang off
+selectors it matches, and that neither carries a media query of its own — which is the only way to
+defeat it from the component side.
+
+The **skip reveal** (the GSAP stagger over `[data-v3-facet]`) is unaffected by construction: it
+selects inside `stageEl` — `[data-v3-stage]` — and the hoisted button now lives above that element.
+Asserted from both ends rather than argued.
+
+### The Ask-AI rider — asking about a plan was picking it
+
+The plan tile's *"✦ Ask AI about this plan"* was `type="submit"` with `onClick={onAskAi}` **inside**
+`<form action={planAction}>`. One press therefore fired `ai_armed` **and** the form's own submission:
+interrogating a plan committed to it, and the receipt then recorded a *"PLAN &lt;employer&gt;"*
+decision the operator never made — the same class of false decision-claim the skip guards exist for,
+reached through the one control whose entire purpose is to look *before* committing.
+
+The fix is `type="button"`. It leaves exactly one submit in the tile, so the form also gains a
+single unambiguous default submission. The pick path is byte-unchanged and asserted as bytes.
+
+`autoAsk` is one-shot and **survives `plan_submitted`** (flow-state invariant l, unchanged), so
+arming here and then picking still auto-asks on the answer stage: the two presses are the flow, not
+a regression of it.
+
+> ⚠ **KNOWN CONSEQUENCE, NOT FIXED HERE.** The `QualifyAiPanel` mounts only on the answer stage, so
+> pressing Ask-AI on the plan stage now produces **no visible feedback at all** until the operator
+> separately picks a plan or skips. That is strictly less harmful than the bug (a silent no-op
+> instead of a false decision record) but it is a dead end, and the honest close is either an armed
+> state on the tile (`aria-pressed` + a disarm press, which needs `autoAsk` threaded down to
+> `StagePlan`) or copy that says what the press actually does. Both are product calls.

@@ -334,6 +334,76 @@
 }
 
 /*
+ * ── THE PROMINENT SKIP (S6, 2026-08-08) — the sparkle on "Skip — search all plans", hoisted to sit
+ *    directly beneath the Qualify v3 step rail on the carrier and plan stages. See `SkipStep` in
+ *    components/qualify/v3/resolution-flow.tsx. Alec, verbatim: "this button should be very visible,
+ *    sparkly with movement just underneath the green timeline". ──
+ *
+ * ⚠ A KNOWING DEVIATION FROM THE HOUSE MOTION CONTRACT, recorded rather than smuggled. The contract
+ * reads "motion narrates progression; it never gates input" — and a PERSISTENT shimmer does not
+ * narrate, because narration ends and this does not. It is a ratifier's explicit request, written up
+ * as an exception (not a precedent) in docs/qualify-v3-search-pattern.md. The half of the contract
+ * that still holds absolutely is the half about input: this control is fully interactive from frame
+ * zero. No `pointer-events: none` — that is the badge idiom's one input-gating property, correct
+ * there because the badge sits ON a link and is not itself the control — no `visibility`, and no
+ * GSAP `autoAlpha`, because the hoist puts the button OUTSIDE `[data-v3-stage]`, the only subtree
+ * the shell's entrance tween touches.
+ *
+ * ⚠ THE BADGE'S SIZES DO NOT TRAVEL. `.q-beta-badge` above is 8px text / 7px star: fine for an
+ * aria-hidden decoration in the nav, and below the 12px floor this surface machine-sweeps. The ✦
+ * here is 13px beside a `text-sm` (15px) label. It is swept at the STYLESHEET by
+ * app/test/qualifyV3Flow.test.tsx, because the markup sweep only sees `text-[Npx]` classes and would
+ * never have looked here.
+ *
+ * ⚠ EVERY GRADIENT STOP CLEARS CONTRAST ON THE DARK FILL, which is the other thing that could not be
+ * copied. The badge runs to #ffe0d5 on a light ground — fine at 8px, not fine on a 15px control
+ * label, where it would carry the words through an illegible phase every 2.6s. These stops are
+ * teal50 → white → coral400 over the button's #0E3A3A…#135E5A fill, all ≥ 4.5:1, so the label reads
+ * at every frame INCLUDING the static frame a reduced-motion user gets.
+ *
+ * Both animations collapse under the global prefers-reduced-motion reset above — the universal
+ * `*` / `*::before` / `*::after` rule reaches an element and its ::after alike, so there is no
+ * per-component opt-out here and adding one would be the only way to defeat it.
+ */
+.q-skip-spark {
+  background: linear-gradient(100deg, #eaf4f2 0%, #ffffff 40%, #f0917c 58%, #eaf4f2 100%);
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: q-skip-shimmer 2.6s linear infinite;
+}
+.q-skip-spark::after {
+  content: '\2726'; /* ✦ four-pointed star — the badge's glyph, at a size that clears the floor */
+  margin-left: 6px;
+  font-size: 13px;
+  display: inline-block;
+  -webkit-text-fill-color: #f0917c;
+  color: #f0917c;
+  animation: q-skip-twinkle 1.9s ease-in-out infinite;
+}
+@keyframes q-skip-shimmer {
+  0% {
+    background-position: 220% 0;
+  }
+  100% {
+    background-position: -220% 0;
+  }
+}
+@keyframes q-skip-twinkle {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.85) rotate(0deg);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15) rotate(120deg);
+  }
+}
+
+/*
  * ── Qualify LANDING HERO — the animated brand atmosphere that fills the resolved-subject area on a
  *    FRESH landing (see components/qualify/landing-hero.tsx). Warm-clinical teal: slow-drifting radial
  *    glows, a faint payer↔facility↔member constellation whose links flow + nodes breathe, and a
