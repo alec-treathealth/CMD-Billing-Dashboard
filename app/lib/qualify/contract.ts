@@ -641,6 +641,51 @@ export interface QualifyFacility {
   factors: QualifyFactorReading[];
   /** Sum of available factor weights (renormalization denominator) — "scored on N of 100 weighting". */
   availableWeight: number;
+  /**
+   * ── WHAT THE SEARCHED IDENTIFIER HAS DONE AT THIS FACILITY (S3, 2026-08-08) ────────────────────
+   *
+   * Alec's ruling: **the book ranks, member history annotates.** At one member the answer LEADS with
+   * the payer's whole book (a ranking over 1.14 facilities is not thin, it is malformed — there is
+   * nothing to compare), and this block is how the most specific fact the rep holds survives the
+   * flip: continuity, the facility knows them, prior-auth precedent.
+   *
+   * ⚠ NON-NULL ONLY ON A LIST THAT IS **NOT ITSELF** MEMBER-SCOPED — in practice `bookFacilities`.
+   * On `facilities` (the identifier's own footprint) it is ALWAYS null, and that is a stated
+   * invariant rather than an oversight: every row there IS member history, so an annotation would be
+   * a tautology on all of them — and worse, a reader meeting it there would reasonably conclude the
+   * rows WITHOUT it are facilities the member has never been to. Pinned in test/qualifyBookLed.test.ts.
+   *
+   * WHY A FIELD ON THE ROW AND NOT A PARALLEL MAP ON THE SNAPSHOT. Two reasons, both structural:
+   * the comparator needs it AT ASSEMBLY TIME (it is the weakest tiebreak — see core.ts), and a value
+   * that travels with its row cannot be mis-joined at a render site. A map keyed by `facilityKey`
+   * would have to be threaded to every consumer and re-joined at each one, which is the same class
+   * of second derivation `payerCount`/`solePayer` were centralised to avoid. `QualifyFacility` stays
+   * reusable for BOTH lists because the field is nullable and the null carries a documented meaning.
+   *
+   * ⚠ COUNTS ONLY, AND THAT IS A PHI DECISION, NOT A CONVENIENCE. A count of lines or patients is
+   * non-PHI and may travel. A member-specific claim DATE (or date range) is individually
+   * identifying: it would be permissible in the authorised UI and is FORBIDDEN in the AI payload —
+   * so it is not expressible here at all, and `buildQualifyAiInput` maps this block nowhere
+   * (pinned in app/test/qualifyAiPayload.test.tsx). If a date is ever added, that test is the wall
+   * it has to get past.
+   *
+   * NON-DOLLAR ⇒ it survives `stripSnapshotAmounts` untouched and an admissions_seat sees the
+   * identical annotation.
+   */
+  memberHistory: QualifyMemberHistory | null;
+}
+
+/**
+ * The searched identifier's own footprint AT ONE FACILITY — the annotation block. Counts only; see
+ * `QualifyFacility.memberHistory` for why, and for the one list it is ever non-null on.
+ */
+export interface QualifyMemberHistory {
+  /** In-window logical charge lines the identifier billed here — the same unit as `lineCount`. */
+  lineCount: number;
+  /** Distinct patients behind those lines. 1 by construction in the book-led (one-member) case; it
+   *  can be >1 in the 2-9 bucket, where the annotation is about the SEARCH rather than about a
+   *  person, and the copy says so (`memberHistoryChipFor`). */
+  distinctPatients: number;
 }
 
 /** ONE claim (charge) line — claim grain (Direction B, ruling 1): one row per charge from the 0050 rollup,

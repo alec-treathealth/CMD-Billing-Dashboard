@@ -61,6 +61,7 @@ import { AREA_ALL, areaKeyFor } from '../m/area-chips';
 import {
   answerFiltersActive,
   bookIsOnScreen,
+  bookLeadsAnswer,
   deriveStage,
   employerNarrowFor,
   filterCandidates,
@@ -599,15 +600,19 @@ export function ResolutionFlowClient({
                   <QualifyAiPanel
                     snapshot={snapshot}
                     blind={!viewerHasAmountsCapability}
-                    // S2: the answer stage renders the payer's whole book BELOW the member ranking
-                    // whenever the core loaded one, so the panel's grounding caption has to name
-                    // which of the two it read. TOLD, not derived from the field — it is on the wire
-                    // for the v2 tab too, and v2 draws no book (see the prop's own doc).
+                    // WHERE the answer stage drew the payer's book, so the panel's grounding caption
+                    // names the list the model actually read. TOLD, not derived from the field — it is
+                    // on the wire for the v2 tab too, and v2 draws no book (see the prop's own doc).
                     //
-                    // ⚠ THE SAME PREDICATE THE STAGE RENDERS ON. This was a second expression
-                    // (`bookFacilities !== null`) that merely agreed with the stage's; a caption
-                    // claiming a list the stage declined to draw is the defect that shape produces.
-                    bookOnScreen={bookIsOnScreen(snapshot)}
+                    // ⚠ THE SAME TWO PREDICATES THE STAGE RENDERS ON, composed in the order the stage
+                    // composes them: `bookLeadsAnswer` (S3's flip) is asked FIRST, because when the
+                    // book leads it is not "also on screen" — it IS the grid, and the member ranking
+                    // the model read is no longer drawn as one at all. Both were once local
+                    // expressions that merely agreed with the stage's; a caption claiming a placement
+                    // the stage did not draw is precisely the defect that shape produces.
+                    bookPlacement={
+                      bookLeadsAnswer(snapshot) ? 'leading' : bookIsOnScreen(snapshot) ? 'secondary' : 'none'
+                    }
                     autoAsk={autoAsk}
                     // ONE-SHOT (review Critical 2): without the disarm, every re-scope (window,
                     // billed-under chip) nulls the snapshot, unmounts the panel, and the remount

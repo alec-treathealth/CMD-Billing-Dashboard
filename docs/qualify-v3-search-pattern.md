@@ -406,3 +406,124 @@ new `payerScope` value near the strict-zod firewall.
 The book is loaded, rated, sorted, disclosed and **below** the member ranking. S3 flips prominence
 for the 1-member case and annotates the book with the member's own history. The preview cap is the
 first thing that flip should reconsider.
+
+---
+
+## S3 — THE INVERSION: the book leads, the member's history annotates (2026-08-08)
+
+Alec's ruling, delegated and decided: **the book ranks, member history annotates — and may break a
+tie.** S2 loaded the payer's whole book and drew it *below* the member's footprint. S3 turns that
+round for the one bucket where the member's footprint cannot carry a ranking at all.
+
+### The rule, and the buckets it fires in
+
+`bookLeadsAnswer(snapshot)` is the one predicate. It is **built on `bookIsOnScreen`, never beside
+it** — "is there a book" keeps a single home, including the `?? null` absent-field coercion whose
+loss once broke 40 renders — and adds two conditions:
+
+| condition | why |
+|---|---|
+| `memberBucketOf(memberCount) === 'one'` | 58.8% of prefixes; 1.14 facilities of history. Ranking that is not thin, it is **malformed** — a ranking is a comparative claim and there is nothing to compare. |
+| `bookFacilities.length > 0` | **An empty book cannot lead.** `bookIsOnScreen` is deliberately TRUE for an empty book (the secondary section renders a real "nothing cleared the floor" sentence — a state, not an absence), but leading with it would put a void where the answer goes *and* hide the member's own facilities behind it. |
+
+Modes that keep the member-led render, each for its own reason, each pinned by a test: **2–9** and
+**10+** (a real population with a real ranking of its own), **`null`** (the engine could not classify
+and must not guess), **`0`** (no history to annotate with), the **identifier-wide Skip** (no book
+exists — the builder throws), and an **empty book**.
+
+### What follows the flip — and what deliberately does not
+
+Every claim surface either re-bases or states the split. This is where the review lives, so the list
+is exhaustive:
+
+- **The ranked grid** becomes the book, with its own heading (*"Where {payer} pays — the whole
+  book"*), its own basis line, and `[data-v3-book]` moved onto it — exactly one book section is ever
+  on the page. The AREA facet, its counts and the "showing N of M" sentence follow the grid.
+- **The HERO.** `derivePolicyRating` now runs over the list that leads and takes an optional
+  **basis scope** (`"{payer}'s whole book"`), which reaches the not-rated arm too. A bar that
+  patient-weights a list nobody drew breaks the reconciled-by-construction invariant in the one place
+  that invariant exists to hold. The scope is *passed*, not derived: `policyRating.ts` cannot tell two
+  `QualifyFacility[]`s apart, and a guess there would be the second derivation that drifts.
+- **`resolvedScopeSentence`** keeps "ranked under {label}" — the book *is* payer-scoped — and adds the
+  population, because the label alone is true of both lists and identifies neither.
+- **The skip banner** gains a book-led arm. "Every facility this member has history at under that one
+  label" is false of a book-led grid, and Skip-then-billed-under-chip reaches it.
+- **`skipProvenance.ranking`** gains a book-led basis; the filter-narrowed arm keeps its wording
+  because the same `market` is passed to *both* loads, so a narrow is true of the book too.
+- **`skipProvenance.ai` and the AI panel's idle caption.** The panel's prop became a three-state
+  `bookPlacement` (`'none' | 'secondary' | 'leading'`) rather than two booleans a call site could set
+  to an impossible pair.
+- **M8 — the trace panel.** "Facility ranking" was singular over a screen with two. It now says
+  *rankings*, names both, and says which leads. The **KPI** row keeps its ratified "book-wide, not
+  this client" and appends the one clause the flip requires: that contrast has collapsed, because the
+  ranking above is now book-wide as well.
+- **`liveSentenceFor`** takes `bookLedPayer` — a NAME, not a boolean, because "the ranking is a whole
+  book" leaves a screen-reader user knowing the scope changed and not what to. Suppressed in flight on
+  the same condition as the visible claims.
+
+**Not following it, deliberately:** the **AI payload** (`buildQualifyAiInput` still maps
+`snap.facilities`, unchanged schema — sending the book is a schema + system-prompt + firewall change
+and a **separate ruling**, so the captions say what backs the answer instead); **`billedUnderCaption`**
+(all nine rows describe how the *label* was arrived at, and the book is scoped to that same label);
+the **identity line** (a fact about the resolution, not the ranking); and **`/qualify/m`**.
+
+### The annotation
+
+`QualifyFacility.memberHistory: { lineCount, distinctPatients } | null`, joined server-side on the
+**raw rollup `facility` text**. Both loads are the same query over the same rollup with the same
+`group by facility`, window and payer predicate, so an exact match is correct — `FACILITY_DIM_JOINS`'
+`upper()` enriches the *display name* and never touches the grouping key.
+
+- **A field on the row, not a map on the snapshot.** The comparator needs it at assembly time, and a
+  value that travels with its row cannot be mis-joined at a render site.
+- **Non-null ONLY on a list that is not itself member-scoped.** On `facilities` it is always null —
+  an annotation there is a tautology on every row, and worse, a reader would take the *unmarked* rows
+  for facilities the member has never been to.
+- **Counts only, and that is a PHI decision.** A count is non-PHI. A member-specific claim **date** is
+  individually identifying — permissible in the authorised UI, forbidden in the AI payload — so it is
+  not expressible in the shape at all, and a test pins that neither the annotation nor
+  `bookFacilities` reaches `buildQualifyAiInput`.
+- **The words depend on the bucket** (`memberHistoryChipFor`): *"Seen here before — N claim lines in
+  this window"* at one member, *"This search has N claim lines here in this window"* above it, because
+  at 2–9 those lines belong to several different people. Every count names its basis — these are the
+  **chosen window**, never `memberCount`'s 12 months.
+
+### The tiebreak, and what "equal footing" means
+
+Inside the `assembleFacilities` comparator, **after** S1's availability tier and **after** `ratingV2`:
+
+> **Equal footing = the same availability tier AND the same `ratingV2`** (including both suppressed,
+> where the cards show no number and the reader has nothing else to choose on).
+
+So it outranks the v1-rating / pct / alphabetical fallbacks — which decide an order the operator
+cannot see a reason for — and is beaten by everything the card displays as its verdict. History
+**breaks ties; it never beats a better-paying facility and never floats a full house.** Inert on any
+list with no annotations. The card's mark is the *visible reason* for the reorder: without it the grid
+would re-sort for a cause nothing on screen states.
+
+### Two decisions worth arguing with
+
+**The book-led grid is NOT capped.** S2's `QUALIFY_BOOK_PREVIEW = 8` stays on the secondary section,
+where a list that pushes the answer off screen has stopped being secondary. When the book *is* the
+answer that argument inverts: availability leads the sort, so a cap systematically removes the FULL
+houses — a filter by omission on the primary grid, which is exactly what "census sorts, it never
+filters" forbids. The whole book is ≤48 facilities; up to 48 cards each with a `<details>` and a
+factor table is a real DOM cost and the accepted one. The AREA line is the narrow.
+
+**The floor asymmetry leaves a hole, and it is named rather than swallowed.** The member ranking is
+floorless and the book applies `QUALIFY_MIN_LINES`, so a facility the member billed 1–2 lines at is in
+`facilities` and NOT in `bookFacilities` — and once the member grid stops rendering, its annotation has
+nowhere to land. "Its information survives as annotations" would then be false for exactly the rows
+where n is smallest. The book-led render names those facilities in words and states the cause; the
+floor is the only possible one, because the member's rows are a subset of the book's before it.
+
+### Mobile is EXEMPT, as a decision
+
+`/qualify/m` keeps the member-scoped deck. Three reasons: it is a swipe-through-cards interface with
+paging, and 1.14 → 48 facilities is a different interaction rather than a different list; `SwipeRow`
+has no chip row, so a book-led deck would render the payer's book with the member's history
+**invisible** — strictly worse than today; and every mobile scope sentence is written about the member.
+A static-scan test fails if `bookFacilities` / `bookLeadsAnswer` ever reach that module, so the
+divergence stays a decision. **Flagged for Alec.**
+
+**All new copy is unratified.**

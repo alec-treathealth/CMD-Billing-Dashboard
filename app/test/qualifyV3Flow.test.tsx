@@ -22,6 +22,7 @@ import {
   tickerIsLive,
   areaChipsWithActive,
   bookIsOnScreen,
+  bookLeadsAnswer,
   UNRESOLVABLE_COPY,
   deriveStage,
   liveSentenceFor,
@@ -1553,6 +1554,11 @@ function facility(over: Partial<QualifyFacility>): QualifyFacility {
     state: 'TN',
     ratingV2: 62,
     iqBand: '50', // the real QualifyIqBand vocabulary — renders as "Solid · 50%+"
+    // ⚠ STATED, NOT OMITTED (S3). The core sets this on EVERY row of every list, and a fixture that
+    // leaves it absent is the S2-D6 defect again: `undefined` is not `null`, so a render guard
+    // written as `=== null` would fall through under test while working in production — or, as here,
+    // the reverse. `null` is the invariant on the member's own footprint; the book fixtures override.
+    memberHistory: null,
     distinctPatients: 14,
     lineCount: 210,
     careSetting: 'IP',
@@ -2579,6 +2585,18 @@ function bookSnapshot(over: Partial<QualifySnapshot> = {}): QualifySnapshot {
   } as unknown as QualifySnapshot;
 }
 
+/**
+ * THE SAME SNAPSHOT IN THE MODE THAT DOES **NOT** FLIP (S3, 2026-08-08).
+ *
+ * `bookSnapshot()` carries `memberCount: 1`, and S3 made that the BOOK-LED case: the payer's book
+ * becomes the answer's own ranked grid and the member's footprint survives as annotations on it. So
+ * every S2 assertion about the book as a *secondary section below the member ranking* now describes
+ * the 2-9 bucket, not the 1-member one. Those tests are re-aimed onto this helper rather than
+ * deleted — each still pins a real, reachable render; it is the MODE that moved, not the claim.
+ */
+const secondaryBookSnapshot = (over: Partial<QualifySnapshot> = {}): QualifySnapshot =>
+  bookSnapshot({ memberCount: 4, ...over } as Partial<QualifySnapshot>);
+
 const answerHtml = (snap: QualifySnapshot, over: Partial<NonNullable<ResolutionStagesProps['answer']>> = {}) =>
   render(props('answer', fixture(), { answer: answerProps({ snapshot: snap, ...over }) }));
 
@@ -2721,7 +2739,9 @@ test('S2 preface — the 2-9 and 10+ arms KEEP the resolution facility count, be
 });
 
 test('S2 book — a clearly-labelled SECOND section, named for the payer, with its own basis', () => {
-  const book = bookRegion(answerHtml(bookSnapshot()));
+  // RE-AIMED BY S3: the SECONDARY placement is the 2-9 bucket's render. At one member the book is
+  // the answer's own grid — pinned separately below.
+  const book = bookRegion(answerHtml(secondaryBookSnapshot()));
   assert.match(book, /Where AETNA US HEALTHCARE pays — across the whole book/);
   /* THE COUNT, IN BOTH CHANNELS, NAMED SEPARATELY. A bare /3 facilities/ was satisfied by the
    * aria-label ALONE — proven by mutation — so it could not tell "the section states its size" from
@@ -2738,7 +2758,9 @@ test('S2 book — a clearly-labelled SECOND section, named for the payer, with i
 });
 
 test('S2 book — the MEMBER ranking is untouched: its heading, its cards and its counts still describe the member', () => {
-  const html = answerHtml(bookSnapshot());
+  // RE-AIMED BY S3, and the re-aim is the point: this is the claim the 1-member flip DELIBERATELY
+  // stops making. In every OTHER bucket the member ranking still leads and the book sits below it.
+  const html = answerHtml(secondaryBookSnapshot());
   assert.match(html, />Facilities, ranked</, 'the member ranking keeps its heading');
   // The member grid holds exactly the member's own facility — the book did not leak into it.
   const memberSection = outerHtmlFrom(html, html.lastIndexOf('<section', html.indexOf('qualify-scorecard-heading')));
@@ -2751,7 +2773,7 @@ test('S2 book — a book card carries NO payer-scope disclosure at all: there is
   // by construction — `bookFacilities` is null on the only ranking that spans several labels. So the
   // right degrade is silence, not "1 payer · AETNA" on every card: at one label the count is a fact
   // nobody asked for, printed beside a heading that already names the payer.
-  const book = bookRegion(answerHtml(bookSnapshot()));
+  const book = bookRegion(answerHtml(secondaryBookSnapshot()));
   assert.ok(!book.includes('blended across'), 'nothing is blended — one label by the equality that built it');
   // ⚠ THE SECOND HALF IS WHAT MAKES THIS MUTATION-DETECTABLE. Passing the member ranking's
   // `allPayers` through instead of `false` would not print "blended across" (payerCount is 1) — it
@@ -2759,6 +2781,8 @@ test('S2 book — a book card carries NO payer-scope disclosure at all: there is
   assert.ok(!book.includes('billed-under label'), 'and no per-card payer count either');
   // Positive control on the same render: the member ranking beside it is equally silent, so the
   // absence above is a property of the SCOPE and not of a fixture that forgot to set payerCount.
+  assert.ok(!answerHtml(secondaryBookSnapshot()).includes('blended across'));
+  // And in the BOOK-LED mode, where the same cards are the answer's own grid, still silent.
   assert.ok(!answerHtml(bookSnapshot()).includes('blended across'));
 });
 
@@ -2785,10 +2809,12 @@ test('S2 book — the AI grounding caption stops saying "the ranking on screen" 
   // The payload is `snap.facilities.slice(0,10)` — the MEMBER ranking. With a second ranking on
   // screen, "the ranking on screen" no longer identifies which one the model read. Same standard the
   // area narrow already forced: say what backs the answer instead of letting the screen relabel it.
+  // RE-AIMED BY S3: "the whole-book list BELOW" is the secondary placement, i.e. the 2-9 bucket. The
+  // book-led arm ("not the book ranked above") is pinned in the S3 block.
   const withBook = disclosureOf(
     render(
       props('answer', fixture(), {
-        answer: answerProps({ snapshot: bookSnapshot(), skipped: true, scopeSource: 'dominant' }),
+        answer: answerProps({ snapshot: secondaryBookSnapshot(), skipped: true, scopeSource: 'dominant' }),
       }),
     ),
   );
@@ -2819,7 +2845,9 @@ test('S2 book — the AI grounding caption stops saying "the ranking on screen" 
  *  path, not an edge. */
 function bigBookSnapshot(over: Partial<QualifySnapshot> = {}): QualifySnapshot {
   return {
-    ...bookSnapshot(),
+    // RE-AIMED BY S3: the cap belongs to the SECONDARY section. A book-LED answer is not capped at
+    // all (see the S3 block) — a cap on the list that IS the answer would be a silent filter.
+    ...secondaryBookSnapshot(),
     bookFacilities: Array.from({ length: 9 }, (_, i) =>
       facility({ rank: i + 1, name: `BOOK FACILITY ${i + 1}`, facilityKey: `BF${i + 1}`, payerCount: 1 }),
     ),
@@ -2863,7 +2891,9 @@ test('S2 book — an EMPTY book says so in words rather than rendering a headed 
   // Reachable: the payer-wide floor drops every facility below QUALIFY_MIN_LINES, so a payer with
   // nothing but thin rows in the window has a real, empty book. A heading and a count of zero with
   // no sentence would read as a section that failed to load.
-  const book = bookRegion(answerHtml(bookSnapshot({ bookFacilities: [] } as Partial<QualifySnapshot>)));
+  // RE-AIMED BY S3 for consistency with its siblings; the empty book ALSO cannot lead (S3 pins that
+  // separately), so this render would be the secondary section at any member count.
+  const book = bookRegion(answerHtml(secondaryBookSnapshot({ bookFacilities: [] } as Partial<QualifySnapshot>)));
   assert.match(book, /No facility in AETNA US HEALTHCARE&#x27;s book clears the volume floor in the window shown\./);
   assert.equal(book.split('data-v3-tile').length - 1, 0, 'no cards');
   assert.ok(!book.includes('best-ranked of'), 'and no truncation notice over an empty list');
@@ -2894,4 +2924,273 @@ test('S2 book — ONE predicate decides whether a book is on screen, and both co
   assert.equal(bookIsOnScreen(unnameable), false, 'a book nobody can name is not a book on screen');
   // And the render agrees with the predicate — the whole point of unifying them.
   assert.ok(!answerHtml(unnameable).includes('data-v3-book'));
+});
+
+
+// ── S3 (2026-08-08) — THE INVERSION: the book LEADS, the member's history ANNOTATES ──────────────
+//
+// Alec's ruling, delegated and decided: **the book ranks, member history annotates.** For the 58.8%
+// of searches that resolve to ONE member carrying 1.14 facilities, a "ranking" of their own history
+// is not thin — it is MALFORMED, because a ranking is a comparative claim and there is nothing to
+// compare. So at one member the payer's whole book becomes the answer's own ranked grid, and the
+// member's footprint survives on it as a mark and a weak tiebreak.
+//
+// EVERY OTHER BUCKET IS UNCHANGED. 2-9, 10+, an unavailable count, a zero count, the identifier-wide
+// Skip (no book exists) and an EMPTY book all keep the member-led render with S2's secondary
+// section. Each is pinned below, because a flip that fired one bucket wider than its evidence would
+// be the same overclaim in the opposite direction.
+
+/** The book-led fixture: one member, a book of three, and the member's own facility annotated on it.
+ *  `NASH` is deliberately rank 2 in the book — so an assertion about the annotation cannot be
+ *  satisfied by the first card, and the flip cannot be faked by rendering the member list. */
+function ledSnapshot(over: Partial<QualifySnapshot> = {}): QualifySnapshot {
+  return bookSnapshot({
+    bookFacilities: [
+      facility({ rank: 1, name: 'SUMMIT RIDGE RECOVERY', facilityKey: 'SUMMIT', payerCount: 1 }),
+      facility({
+        rank: 2,
+        name: 'NASHVILLE MENTAL HEALTH',
+        facilityKey: 'NASH',
+        payerCount: 1,
+        memberHistory: { lineCount: 210, distinctPatients: 1 },
+      }),
+      facility({ rank: 3, name: 'PHOENIX RENEWAL', facilityKey: 'PHX', city: 'Phoenix', state: 'AZ', payerCount: 1 }),
+    ],
+    ...over,
+  } as Partial<QualifySnapshot>);
+}
+
+test('S3 — bookLeadsAnswer: ONE member, a NON-EMPTY book, and a payer the heading can name', () => {
+  assert.equal(bookLeadsAnswer(ledSnapshot()), true);
+  // The buckets that keep the member-led answer. 2-9 and 10+ have a real ranking of their own; an
+  // unavailable count must never be guessed into one; and zero has no member to annotate with.
+  for (const memberCount of [0, 2, 4, 9, 10, 31, null]) {
+    assert.equal(
+      bookLeadsAnswer(ledSnapshot({ memberCount } as Partial<QualifySnapshot>)),
+      false,
+      `memberCount=${String(memberCount)} does not flip`,
+    );
+  }
+  // ⚠ AN EMPTY BOOK CANNOT LEAD. `bookIsOnScreen` is TRUE for an empty book (the section renders its
+  // own "nothing cleared the floor" sentence, which is a state and not an absence) — but leading
+  // with an empty list would put a void where the answer goes and HIDE the member's own facilities
+  // behind it. Where the book has nothing, the member's footprint, however thin, is the only
+  // evidence on the surface and it keeps the grid.
+  assert.equal(bookLeadsAnswer(ledSnapshot({ bookFacilities: [] } as Partial<QualifySnapshot>)), false);
+  // No book at all (the identifier-wide Skip), no snapshot, and a book nobody can name.
+  assert.equal(bookLeadsAnswer(ledSnapshot({ bookFacilities: null } as Partial<QualifySnapshot>)), false);
+  assert.equal(bookLeadsAnswer(null), false);
+  assert.equal(
+    bookLeadsAnswer({ ...ledSnapshot(), resolved: { payerName: null, payerScope: 'all' } } as unknown as QualifySnapshot),
+    false,
+  );
+  // And it is BUILT ON `bookIsOnScreen`, not a second copy of it: the absent-field coercion that
+  // broke 40 renders when the predicate was first extracted must not come back through this door.
+  assert.equal(bookLeadsAnswer(snapshotFixture()), false, 'a payload without the field has no book to lead');
+});
+
+test('S3 flip — the BOOK is the answer’s own ranked grid, and the member list is no longer a second one', () => {
+  const html = answerHtml(ledSnapshot());
+  const grid = outerHtmlFrom(html, html.lastIndexOf('<section', html.indexOf('qualify-scorecard-heading')));
+  // The heading NAMES whose book this is — it does not inherit "Facilities, ranked", which after the
+  // flip would describe the payer's book in words minted for the member's footprint.
+  assert.match(grid, /Where AETNA US HEALTHCARE pays — the whole book/);
+  assert.ok(!grid.includes('>Facilities, ranked<'), 'the member-led heading is gone in this mode');
+  // All three book cards are the answer.
+  for (const name of ['SUMMIT RIDGE RECOVERY', 'NASHVILLE MENTAL HEALTH', 'PHOENIX RENEWAL']) {
+    assert.ok(grid.includes(name), `${name} is in the ranked grid`);
+  }
+  assert.equal(grid.split('data-v3-tile').length - 1, 3, 'three cards, not six — the member list is not a second grid');
+  // And there is exactly ONE book section on the page: the secondary one must not render beneath the
+  // grid that already IS the book.
+  assert.equal(html.split('data-v3-book').length - 1, 1);
+  assert.ok(!html.includes('across the whole book'), 'S2’s secondary heading is absent in this mode');
+  // The basis is stated on the list itself, in its own words, and it says what the annotation means.
+  assert.match(grid, /every facility AETNA US HEALTHCARE paid at in the window shown/);
+  assert.match(grid, /not just this member/i);
+});
+
+test('S3 flip — the HERO is derived from the list that LEADS, and its basis SAYS which list that is', () => {
+  // `derivePolicyRating` ran over `snap.facilities` at HEAD. In book-led mode the honest basis for
+  // "should I take this policy" is the BOOK — the list on screen — and a bar averaging a hidden list
+  // is the reconciled-by-construction invariant broken in the one place it exists to hold.
+  const html = answerHtml(
+    ledSnapshot({
+      // The member's own facility rates 62; the book rates 30 across two rated rows. If the hero
+      // still read `facilities` it would print 62 over a grid of 30s.
+      facilities: [facility({ ratingV2: 62, iqBand: '50', distinctPatients: 14 })],
+      bookFacilities: [
+        facility({ rank: 1, name: 'SUMMIT RIDGE RECOVERY', facilityKey: 'SUMMIT', ratingV2: 30, iqBand: '30', distinctPatients: 10 }),
+        facility({ rank: 2, name: 'PHOENIX RENEWAL', facilityKey: 'PHX', ratingV2: 30, iqBand: '30', distinctPatients: 10 }),
+      ],
+    } as Partial<QualifySnapshot>),
+  );
+  assert.match(html, /aria-label="policy rating 30 out of 100"/);
+  assert.ok(!html.includes('policy rating 62 out of 100'), 'the member-scoped hero is not what leads');
+  // THE CAPTION NAMES THE POPULATION. "patient-weighted across 2 rated facilities" is true of both
+  // lists and therefore identifies neither.
+  assert.match(html, /patient-weighted across 2 rated facilities in AETNA US HEALTHCARE&#x27;s whole book/);
+});
+
+test('S3 annotation — the facility the member has been to is MARKED; the others are not', () => {
+  const html = answerHtml(ledSnapshot());
+  assert.match(html, /Seen here before — 210 claim lines/);
+  // ONE mark, not three. A mark on every card would say nothing; a mark on the wrong card is worse.
+  assert.equal(html.split('Seen here before').length - 1, 1);
+  // The 2-9 bucket annotates too — the join is a fact about the data, not about the flip — but it
+  // must not say "seen here before" about a set of four different people.
+  const few = answerHtml(ledSnapshot({ memberCount: 4 } as Partial<QualifySnapshot>));
+  assert.ok(!few.includes('Seen here before'), 'four members are not "here before"');
+  assert.match(few, /This search has 210 claim lines here/);
+});
+
+test('S3 — a member facility the BOOK’S FLOOR dropped is NAMED, never silently lost', () => {
+  /* THE HOLE THE FLIP OPENS, CLOSED. The member ranking is floorless and the book applies
+   * QUALIFY_MIN_LINES, so a facility the member billed 1-2 lines at exists in `facilities` and NOT in
+   * `bookFacilities` — and since the member grid stops rendering, its annotation has nothing to ride
+   * on. "Its information survives as annotations" is only true if that case is stated. */
+  const html = answerHtml(
+    ledSnapshot({
+      facilities: [
+        facility({ rank: 1, name: 'NASHVILLE MENTAL HEALTH', facilityKey: 'NASH' }),
+        facility({ rank: 2, name: 'TINY CLINIC', facilityKey: 'TINY', lineCount: 2, distinctPatients: 1 }),
+      ],
+    } as Partial<QualifySnapshot>),
+  );
+  assert.match(html, /TINY CLINIC/, 'the facility is named on screen');
+  assert.match(html, /below the volume floor/i, 'and the reason is stated, not implied');
+  // The one that IS in the book is not double-reported — it is marked on its card instead.
+  const sentence = html.slice(html.indexOf('TINY CLINIC') - 400, html.indexOf('TINY CLINIC') + 400);
+  assert.ok(!sentence.includes('NASHVILLE MENTAL HEALTH'), 'only the missing ones are named here');
+  // With nothing missing the sentence does not render at all.
+  assert.ok(!answerHtml(ledSnapshot()).includes('below the volume floor'));
+});
+
+test('S3 — a book-LED answer is NOT capped: a cap on the list that IS the answer is a silent filter', () => {
+  // S2 capped the SECONDARY section at QUALIFY_BOOK_PREVIEW = 8 with the cap stated, because a
+  // secondary section that pushes the answer off screen has stopped being secondary. When the book
+  // LEADS that argument inverts: availability leads the sort, so a cap systematically removes the
+  // full houses — turning "census sorts, it never filters" into a filter by omission on the primary
+  // grid. The whole book is <=48 facilities, which is a real DOM cost and the accepted one; the AREA
+  // facet beside the grid is the narrow.
+  const nine = ledSnapshot({
+    bookFacilities: Array.from({ length: 9 }, (_, i) =>
+      facility({ rank: i + 1, name: `BOOK FACILITY ${i + 1}`, facilityKey: `BF${i + 1}`, payerCount: 1 }),
+    ),
+  } as Partial<QualifySnapshot>);
+  const html = answerHtml(nine);
+  assert.equal(html.split('data-v3-tile').length - 1, 9, 'all nine render');
+  assert.ok(html.includes('BOOK FACILITY 9'));
+  assert.ok(!html.includes('best-ranked of'), 'and no truncation notice, because nothing is truncated');
+});
+
+test('S3 — the modes that do NOT flip keep the member-led render, each for its own reason', () => {
+  // 2-9 and 10+: a real population with a real ranking of its own. The book stays SECONDARY.
+  for (const memberCount of [4, 31]) {
+    const html = answerHtml(ledSnapshot({ memberCount } as Partial<QualifySnapshot>));
+    assert.match(html, />Facilities, ranked</, `memberCount=${memberCount} keeps the member heading`);
+    assert.match(html, /across the whole book/, 'and the book is the secondary section');
+    assert.equal(html.split('data-v3-book').length - 1, 1, 'exactly one book section, below');
+  }
+  // An unavailable count must never be GUESSED into a flip: `null` is "we could not classify".
+  const unknown = answerHtml(ledSnapshot({ memberCount: null } as Partial<QualifySnapshot>));
+  assert.match(unknown, />Facilities, ranked</);
+  // Zero: the count ran and nobody is behind the token, so there is no history to annotate with.
+  assert.match(answerHtml(ledSnapshot({ memberCount: 0 } as Partial<QualifySnapshot>)), />Facilities, ranked</);
+  // The identifier-wide Skip has no book at all — the hard boundary S2 pinned, unchanged.
+  const skip = render(
+    props('answer', fixture(), {
+      answer: answerProps({
+        snapshot: allPayersSnapshot({ memberCount: 1, bookFacilities: null } as Partial<QualifySnapshot>),
+        skipped: true,
+        scopeSource: 'dominant',
+      }),
+    }),
+  );
+  assert.match(skip, />Facilities, ranked</, 'one member and no book still ranks the member’s footprint');
+  assert.ok(!skip.includes('data-v3-book'));
+});
+
+test('S3 — every claim surface follows the flip: the scope sentence, the skip banner, the empty state', () => {
+  const led = answerHtml(ledSnapshot(), { narrowExpanded: true });
+  // The resolved-scope sentence still names the label (the book IS payer-scoped) and now names the
+  // POPULATION too, because "ranked under AETNA" is true of both lists and identifies neither.
+  assert.match(led, /ranked under AETNA US HEALTHCARE — the whole book, not this member&#x27;s history/);
+  // The skip banner's payer-scoped arm claimed "every facility this member has history at under that
+  // one label" — flatly false of a book-led grid.
+  const skipped = answerHtml(ledSnapshot(), { skipped: true, scopeSource: 'dominant' });
+  assert.ok(
+    !skipped.includes('every facility this member has history at under that one label'),
+    'the member-footprint promise cannot survive a book-led grid',
+  );
+  assert.match(skipped, /the ranking is AETNA US HEALTHCARE&#x27;s whole book/);
+  // An empty grid in book-led mode is the BOOK's emptiness, and says so in the book's own words.
+  const emptyBook = answerHtml(
+    ledSnapshot({ bookFacilities: [], facilities: [] } as Partial<QualifySnapshot>),
+  );
+  assert.ok(!emptyBook.includes('Where AETNA US HEALTHCARE pays — the whole book'), 'an empty book cannot lead');
+});
+
+test('S3 — the AI captions say what backs the answer now that the book is ABOVE, not below', () => {
+  // The payload is still `snap.facilities.slice(0,10)` — the MEMBER-scoped list, unchanged schema.
+  // That makes S2's caption ("not the whole-book list below") false by position and the pre-S2 one
+  // ("the ranking on screen") false by identity: the ranking on screen is the one the model has
+  // never seen. Same standard, third time: say what backs the answer.
+  const led = disclosureOf(
+    render(
+      props('answer', fixture(), {
+        answer: answerProps({ snapshot: ledSnapshot(), skipped: true, scopeSource: 'dominant' }),
+      }),
+    ),
+  );
+  assert.ok(!led.includes('grounded in the ranking on screen'));
+  assert.ok(!led.includes('not the whole-book list below'), 'the book is not below any more');
+  assert.match(led, /grounded in this member&#x27;s own history, not the book ranked above/);
+});
+
+test('S3 M8 — the trace panel names BOTH rankings and which one leads', () => {
+  // "Facility ranking" (singular) and, on a Skip, "this identifier's whole footprint": true of the
+  // member list, false of the book, and after the flip false of the screen.
+  const led = disclosureOf(answerHtml(ledSnapshot()));
+  assert.match(led, />Facility rankings</, 'plural — there are two');
+  assert.match(led, /AETNA US HEALTHCARE&#x27;s whole book leads/);
+  assert.match(led, /this member&#x27;s own history/, 'and the second one is named, not dropped');
+  // The KPI tiles' provenance line is the ratified "book-wide, not this client" — a distinction that
+  // stops distinguishing anything once the ranking above it is also book-wide. It says so.
+  assert.match(led, /book-wide, not this client/, 'the ratified wording is untouched');
+  assert.match(led, /so is the ranking above/);
+  // Unchanged in every non-flip mode: singular, and the pre-S3 strings byte for byte.
+  const few = disclosureOf(answerHtml(ledSnapshot({ memberCount: 4 } as Partial<QualifySnapshot>)));
+  assert.match(few, />Facility ranking</);
+  assert.ok(!few.includes('Facility rankings'));
+  assert.ok(!few.includes('so is the ranking above'));
+});
+
+test('S3 — the ARIA channel carries the basis too, or the spoken answer describes a list nobody drew', () => {
+  const r = fixture();
+  const spoken = liveSentenceFor('answer', r, null, {
+    memberCount: 1,
+    memberFacilityCount: 1,
+    bookLedPayer: 'AETNA US HEALTHCARE',
+  });
+  assert.match(spoken, /One member has a paid claim behind this search/, 'the preface is unchanged');
+  assert.match(spoken, /the ranking below is AETNA US HEALTHCARE's whole book, not this member's own history/i);
+  // THE ANNOTATION IS ANNOUNCED TOO. Naming the basis without naming the mark would tell a
+  // screen-reader user the member's history had been REPLACED, when it has been moved onto the rows.
+  assert.match(spoken, /the facilities they have been to are marked on it/i);
+  // Omitted → byte-identical to S2's sentence. Every non-flip bucket announces exactly as before.
+  assert.equal(
+    liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1 }),
+    liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1, bookLedPayer: null }),
+  );
+  // And the skipped arm carries it as well — a Skip plus one billed-under chip IS a book-led screen,
+  // and the sr-only line is where an unfixed scope claim survives a browser pass.
+  const skipSpoken = liveSentenceFor('answer', r, null, {
+    skipped: true,
+    memberCount: 1,
+    memberFacilityCount: 1,
+    bookLedPayer: 'AETNA US HEALTHCARE',
+  });
+  assert.match(skipSpoken, /You skipped the plan questions/);
+  assert.match(skipSpoken, /whole book/);
 });

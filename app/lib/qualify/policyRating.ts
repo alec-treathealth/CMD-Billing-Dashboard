@@ -136,18 +136,40 @@ const NOT_RATED: QualifyPolicyRating = {
   basis: 'no facility clears the sample floor',
 };
 
-export function derivePolicyRating(facilities: readonly QualifyFacility[]): QualifyPolicyRating {
+/**
+ * @param basisScope OPTIONAL name for the POPULATION these facilities are (S3, 2026-08-08) — e.g.
+ * `"AETNA US HEALTHCARE's whole book"`. Omit and the basis line is byte-identical to what shipped.
+ *
+ * WHY IT IS PASSED IN AND NOT DERIVED. Since the book-led flip the same function is handed two
+ * genuinely different populations — the searched identifier's own footprint, and the payer's whole
+ * book — and "patient-weighted across 2 rated facilities" is true of both, so it identifies neither.
+ * This module cannot tell them apart (a `QualifyFacility[]` is a `QualifyFacility[]`), and inventing
+ * a guess from the rows would be exactly the second derivation the header's reconciled-by-
+ * construction argument exists to prevent. The caller knows which list it drew; it says so.
+ *
+ * It reaches the NOT_RATED arm too. "No facility clears the sample floor" over an unnamed list is
+ * the same unattributed claim as the rated basis — and it is the arm a thin book actually hits.
+ */
+export function derivePolicyRating(
+  facilities: readonly QualifyFacility[],
+  basisScope?: string,
+): QualifyPolicyRating {
+  const inScope = basisScope === undefined ? '' : ` in ${basisScope}`;
+  const notRated: QualifyPolicyRating =
+    basisScope === undefined
+      ? NOT_RATED
+      : { ...NOT_RATED, basis: `no facility in ${basisScope} clears the sample floor` };
   // Only facilities whose CARD shows a number: rated, and above the sample-gate floor.
   const rated = facilities.filter(
     (f): f is QualifyFacility & { ratingV2: number } =>
       f.ratingV2 !== null && ratingSampleTier(f.distinctPatients) !== 'insufficient',
   );
-  if (rated.length === 0) return NOT_RATED;
+  if (rated.length === 0) return notRated;
 
   const patients = rated.reduce((t, f) => t + f.distinctPatients, 0);
   // Every rated facility sits above the floor (>=3 patients), so this denominator cannot be 0 —
   // but guard anyway rather than emit NaN onto the bar if that floor ever changes.
-  if (patients <= 0) return NOT_RATED;
+  if (patients <= 0) return notRated;
 
   const rating = Math.round(rated.reduce((t, f) => t + f.ratingV2 * f.distinctPatients, 0) / patients);
   const band = iqBandOf(rating);
@@ -157,6 +179,6 @@ export function derivePolicyRating(facilities: readonly QualifyFacility[]): Qual
     verdict: band ? `${IQ_BAND_VERDICTS[band]} · ${IQ_BAND_LABELS[band]}` : 'Not rated',
     ratedCount: rated.length,
     patients,
-    basis: `patient-weighted across ${rated.length} rated ${rated.length === 1 ? 'facility' : 'facilities'}`,
+    basis: `patient-weighted across ${rated.length} rated ${rated.length === 1 ? 'facility' : 'facilities'}${inScope}`,
   };
 }

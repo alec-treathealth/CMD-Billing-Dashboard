@@ -42,6 +42,7 @@ import {
   type QualifySnapshot,
   type QualifyResolved,
   type QualifyFacility,
+  type QualifyMemberHistory,
   type QualifyClaim,
   type QualifyMovers,
   type QualifyMover,
@@ -445,10 +446,37 @@ function signedRound1(d: number): number {
   return (d < 0 ? -magnitude : magnitude) + 0;
 }
 
+/**
+ * THE ANNOTATION JOIN (S3, 2026-08-08) — the searched identifier's own footprint, keyed for the book.
+ *
+ * ⚠ THE KEY IS THE RAW ROLLUP `facility` TEXT, AND AN EXACT MATCH IS CORRECT HERE. Both loads are
+ * the same `buildFacilityRankingQuery` over the same rollup with the same `group by facility`, the
+ * same window and the same payer predicate — one column, one grouping, so the two lists' keys are
+ * byte-identical by construction. FACILITY_DIM_JOINS' `upper()` exists to enrich the DISPLAY name
+ * off `collections.facilities`; it never touches the grouping key, so normalising here would invent
+ * a difference rather than absorb one.
+ *
+ * Built from the ALREADY-ASSEMBLED member list rather than from its raw rows, so the annotation and
+ * the member grid can never describe different numbers.
+ */
+function memberHistoryIndex(memberFacilities: readonly QualifyFacility[]): Map<string, QualifyMemberHistory> {
+  return new Map(
+    memberFacilities.map((f) => [f.facilityKey, { lineCount: f.lineCount, distinctPatients: f.distinctPatients }]),
+  );
+}
+
 function assembleFacilities(
   rows: QualifyFacilityRow[],
   ctx: QualifyFactorContext,
   applyFloor = true,
+  /**
+   * The identifier's own footprint, keyed by raw facility text — see `memberHistoryIndex`. NULL on
+   * every list that IS the identifier's own footprint (and on the payer/name/cohort paths, which
+   * searched no identifier to annotate with): the annotation exists to mark a list that is NOT about
+   * the member, and on the member's own list it would be a tautology on every row. See
+   * `QualifyFacility.memberHistory`.
+   */
+  memberHistory: ReadonlyMap<string, QualifyMemberHistory> | null = null,
 ): QualifyFacility[] {
   return rows
     // FLOOR (payer-wide only): drop < QUALIFY_MIN_LINES flukes. An IDENTIFIER-scoped ranking passes
@@ -646,6 +674,12 @@ function assembleFacilities(
         iqBand: v2.band,
         factors: v2.factors,
         availableWeight: v2.availableWeight,
+        /* S3: has the SEARCHED identifier been here? `?? null` rather than `.get(...)` alone, so an
+         * absent key is the documented "no history" null and never `undefined` — the same
+         * absent-vs-null distinction that broke 40 renders when `bookIsOnScreen` was extracted with
+         * a bare `!== null`. With no index at all every row is null, which is exactly what a list
+         * that IS the member's own footprint should carry. */
+        memberHistory: memberHistory?.get(r.facility) ?? null,
       };
     })
     .sort((a, b) => {
@@ -673,6 +707,26 @@ function assembleFacilities(
       if (a.ratingV2 === null && b.ratingV2 !== null) return 1;
       if (b.ratingV2 === null && a.ratingV2 !== null) return -1;
       if (a.ratingV2 !== null && b.ratingV2 !== null && b.ratingV2 !== a.ratingV2) return b.ratingV2 - a.ratingV2;
+      /* ── THE MEMBER-HISTORY TIEBREAK (S3, Alec 2026-08-08) — DELIBERATELY THE WEAKEST TERM ─────
+       *
+       * "The book ranks, member history annotates — and may break a tie." This is the "may break a
+       * tie" half, and its placement IS the ruling: history never beats a better-paying facility and
+       * never floats a full house.
+       *
+       * EQUAL FOOTING, DEFINED FROM THE TIERS ABOVE RATHER THAN INVENTED: the two rows are on equal
+       * footing when they share the AVAILABILITY TIER (`bedAvailabilityTier`, tier 0) and the SAME
+       * `ratingV2` — including both-suppressed, where the cards show no number at all and the reader
+       * has nothing else to choose on. That is the narrowest reading that is still a reading.
+       *
+       * It therefore sits ABOVE the v1 rating / pct / alphabetical fallbacks and below everything
+       * the card actually displays as its verdict. Those three decide an order the operator cannot
+       * see the reason for; "you have sent someone here before" is a reason they can act on.
+       *
+       * INERT on any list with no annotations (every member-scoped, by-payer, by-name and cohort
+       * ranking), where both sides are null and this collapses to a constant. */
+      const ah = a.memberHistory === null ? 1 : 0;
+      const bh = b.memberHistory === null ? 1 : 0;
+      if (ah !== bh) return ah - bh;
       // … then the value-first v1 rating, then pct, then name — deterministic everywhere.
       const br = b.rating ?? -1;
       const ar = a.rating ?? -1;
@@ -1000,8 +1054,21 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
      *
      * FLOOR ON, unlike the member list one line up. This is a payer-wide ranking, so it drops the
      * "100% on one claim" flukes exactly as the by-payer core does; the identifier's own footprint
-     * keeps every facility it billed, however thin. Two different lists, two honest floors. */
-    const bookFacilities = bookRows === null ? null : assembleFacilities(bookRows, ctx, true);
+     * keeps every facility it billed, however thin. Two different lists, two honest floors.
+     *
+     * ── ANNOTATED WITH THE MEMBER'S OWN FOOTPRINT (S3, 2026-08-08) ──────────────────────────────
+     * The fourth argument is what makes "the book ranks, member history annotates" true in the data
+     * rather than only in the render: each book row learns whether the SEARCHED identifier has
+     * billed there, which the card marks and the comparator uses as its weakest tiebreak.
+     *
+     * ⚠ THE FLOOR ASYMMETRY MEANS THE JOIN CAN BE INCOMPLETE, BY DESIGN, AND THE UI MUST SAY SO.
+     * The member list is floorless and the book is not, so a facility the identifier billed 1-2
+     * lines at exists in `facilities` and NOT in `bookFacilities` — its annotation has nowhere to
+     * land. That is correct for the BOOK (a payer-wide ranking should not carry a fluke) and it is
+     * why the book-led render names those facilities in words instead of letting the most decisive
+     * fact vanish exactly where n is small. See resolution-flow.tsx `unlistedMemberFacilities`. */
+    const bookFacilities =
+      bookRows === null ? null : assembleFacilities(bookRows, ctx, true, memberHistoryIndex(facilities));
     const identifierLandingFacility =
       landingRaw !== null && facilities.some((f) => f.facilityKey === landingRaw) ? landingRaw : null;
     const resolved: QualifyResolved = {

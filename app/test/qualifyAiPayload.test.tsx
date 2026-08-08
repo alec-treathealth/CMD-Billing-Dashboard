@@ -102,3 +102,32 @@ test('no dollars cross, for any viewer — the payload is dollar-free by constru
   assert.ok(!wire.includes('999999.99') && !wire.includes('888888.88'));
   assert.ok(!wire.includes('billedAmount') && !wire.includes('allowedAmount'));
 });
+
+test('S3 — the MEMBER-HISTORY annotation never crosses into the payload, in either list', () => {
+  /* THE PHI LINE, PINNED AT THE MAPPING (S3, 2026-08-08). Counts are non-PHI and travel freely to
+   * the UI; the annotation block is deliberately counts-only for that reason. But the payload is a
+   * `.strict()` firewall with NO identifier field expressible in it, and the reason the block must
+   * stay out is not the counts — it is that "this member has been here" is a per-member fact about a
+   * named facility, and the shape is the natural place a future `lastPaymentDate` would be added.
+   * The explicit field-by-field mapping is the guard; this is what makes the guard load-bearing.
+   *
+   * ⚠ AND THE BOOK IS NOT MAPPED AT ALL. `bookFacilities` is on the wire for every direct-core
+   * caller, so a "just spread the snapshot" refactor would ship a second, payer-wide facility list to
+   * the model under a schema that cannot describe it. Both absences are asserted. */
+  const annotated = facility({ memberHistory: { lineCount: 210, distinctPatients: 1 } } as Partial<QualifyFacility>);
+  const snap = {
+    ...snapshot([annotated]),
+    bookFacilities: [facility({ name: 'SUMMIT RIDGE RECOVERY', facilityKey: 'SUMMIT' })],
+  } as unknown as QualifySnapshot;
+  const input = buildQualifyAiInput('ranks', snap, false);
+  const wire = JSON.stringify(input);
+  assert.ok(!wire.includes('memberHistory'), 'the annotation key is not in the payload');
+  assert.ok(!wire.includes('bookFacilities'), 'and neither is the payer-wide list');
+  assert.ok(!wire.includes('SUMMIT RIDGE RECOVERY'), 'no book facility reaches the model by any route');
+  assert.equal(input.facilities.length, 1, 'the payload is still the member-scoped ranking');
+  // And it still parses: a leaked key would fail the strict schema, which is the loud failure the
+  // firewall is designed for — but a test that only checked parsing would miss a key the schema
+  // happens to allow, so the string assertions above are the ones that matter.
+  const r = QualifyAiInputSchema.safeParse(input);
+  assert.ok(r.success, r.success ? '' : JSON.stringify(r.error?.issues));
+});

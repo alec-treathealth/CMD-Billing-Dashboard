@@ -169,3 +169,24 @@ test('the strip states its own basis, and says so louder when its leader cannot 
   const withFull = qualifyRanksHeading(deriveTopRanks([{ ...fac('A', 80, 20), bedState: 'full' }, { ...fac('B', 60, 20), bedState: 'open' }]), 'this policy');
   assert.match(withFull, /full/i);
 });
+
+test('S3 — the hero can NAME the population it averaged, and says so when nothing clears the floor', () => {
+  /* "patient-weighted across 2 rated facilities" is true of the member's own footprint AND of the
+   * payer's whole book, so once the book can LEAD the answer that basis line identifies neither.
+   * The scope is passed in rather than derived here: this module has no idea which list it was
+   * handed, and inventing one from the rows would be the second derivation that drifts. */
+  const scope = "AETNA US HEALTHCARE's whole book";
+  assert.equal(
+    derivePolicyRating([fac('ALPHA', 70, 30), fac('BETA', 40, 10)], scope).basis,
+    "patient-weighted across 2 rated facilities in AETNA US HEALTHCARE's whole book",
+  );
+  // ⚠ THE NOT-RATED ARM CARRIES IT TOO. "no facility clears the sample floor" over a hidden list is
+  // the same unattributed claim as the rated basis — and it is the arm a thin book actually hits.
+  assert.equal(
+    derivePolicyRating([], scope).basis,
+    "no facility in AETNA US HEALTHCARE's whole book clears the sample floor",
+  );
+  // Omitted ⇒ BYTE-IDENTICAL to what shipped. v2's tab and every non-flip v3 render pass nothing.
+  assert.equal(derivePolicyRating([fac('A', 70, 20)]).basis, 'patient-weighted across 1 rated facility');
+  assert.equal(derivePolicyRating([]).basis, 'no facility clears the sample floor');
+});

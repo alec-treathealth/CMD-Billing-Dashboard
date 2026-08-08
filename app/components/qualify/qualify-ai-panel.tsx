@@ -33,7 +33,7 @@ export function QualifyAiPanel({
   blind,
   autoAsk = false,
   onAutoAsked,
-  bookOnScreen = false,
+  bookPlacement = 'none',
 }: {
   snapshot: QualifySnapshot;
   blind: boolean;
@@ -47,17 +47,29 @@ export function QualifyAiPanel({
    *  per-mount guard and re-fires an unrequested, audited, billed model call. One ask per arm. */
   onAutoAsked?: () => void;
   /**
-   * S2 (2026-08-08): is a SECOND ranked facility list — the payer's whole book — rendered beside
-   * this panel? The payload is `snap.facilities.slice(0, 10)`, i.e. the identifier's own ranking, so
-   * with a book on screen "the exact numbers on this screen" no longer identifies which list the
-   * model actually read.
+   * WHERE THE PAYER'S WHOLE BOOK IS DRAWN, relative to this panel (S2, extended by S3 2026-08-08).
    *
-   * ⚠ AN EXPLICIT PROP, NOT `snapshot.bookFacilities !== null`. The field is on the wire for every
-   * caller of the direct core, INCLUDING the v2 tab, which renders no book section at all — deriving
-   * the caption from the data would have made the v2 panel disclaim a list that is not there. Only
-   * the surface knows what it drew. Defaults false, so v2 and every existing caller are byte-identical.
+   * The payload is `snap.facilities.slice(0, 10)` — the identifier's OWN ranking — in every mode, so
+   * with a book anywhere on screen "the exact numbers on this screen" no longer identifies which list
+   * the model read. THREE states, because the honest sentence differs in each:
+   *
+   *   'none'      — no book drawn. The caption is byte-identical to the pre-S2 one.
+   *   'secondary' — the book sits BELOW the member ranking (the 2-9 and 10+ buckets). The model read
+   *                 the list above.
+   *   'leading'   — the book IS the ranked grid and the member's footprint is a MARK on its rows (one
+   *                 member; S3's flip). The model read the member's own history, which is no longer a
+   *                 grid at all — so "the ranking above" would point at the one list it never saw.
+   *
+   * ⚠ AN EXPLICIT PROP, NOT DERIVED FROM `snapshot`. `bookFacilities` is on the wire for every caller
+   * of the direct core, INCLUDING the v2 tab, which renders no book section — deriving the caption
+   * from the data would make the v2 panel disclaim a list that is not there. Only the surface knows
+   * what it drew. Defaults 'none', so v2 and every existing caller stay byte-identical.
+   *
+   * ⚠ AND AN ENUM RATHER THAN TWO BOOLEANS, on purpose: `bookOnScreen && bookLeads` is a pair that a
+   * call site can set to an impossible combination, and this caption is precisely the surface where
+   * an impossible combination renders as a confident sentence.
    */
-  bookOnScreen?: boolean;
+  bookPlacement?: 'none' | 'secondary' | 'leading';
 }) {
   const [active, setActive] = useState<ChipId | null>(null);
   const [text, setText] = useState('');
@@ -209,14 +221,18 @@ export function QualifyAiPanel({
 
       {active === null ? (
         <p className="px-4 pb-3.5 text-[12px] leading-relaxed text-muted-foreground">
-          {/* "ON THIS SCREEN" IDENTIFIES NOTHING ONCE TWO RANKINGS ARE ON IT (S2). The payload is the
-              first ten of `snapshot.facilities` — the identifier's own ranking — and the payer's
-              whole book is never mapped into it. Where that book is rendered, this says which list
-              it read; where it is not (v2, and any payer-scoped v3 answer with no book), the string
-              is byte-identical to what shipped. */}
-          {bookOnScreen
-            ? 'Preset questions only — each streams a short read grounded in the exact numbers in the ranking above, not the whole-book list below. Nothing here is a guarantee of payment.'
-            : 'Preset questions only — each streams a short read grounded in the exact numbers on this screen. Nothing here is a guarantee of payment.'}
+          {/* "ON THIS SCREEN" IDENTIFIES NOTHING ONCE TWO RANKINGS ARE ON IT (S2), AND "THE RANKING
+              ABOVE" STOPS BEING THE MEMBER'S ONCE THE BOOK LEADS (S3). The payload is the first ten
+              of `snapshot.facilities` — the identifier's own ranking — in every mode; the payer's book
+              is never mapped into it (a book payload is a schema + prompt + firewall change and a
+              separate ruling). So the caption names the list the model actually read, by POSITION.
+              With no book drawn (v2, and any v3 answer without one) the string is byte-identical to
+              what shipped. */}
+          {bookPlacement === 'leading'
+            ? "Preset questions only — each streams a short read grounded in the exact numbers in this member's own history, not the whole-book ranking above. Nothing here is a guarantee of payment."
+            : bookPlacement === 'secondary'
+              ? 'Preset questions only — each streams a short read grounded in the exact numbers in the ranking above, not the whole-book list below. Nothing here is a guarantee of payment.'
+              : 'Preset questions only — each streams a short read grounded in the exact numbers on this screen. Nothing here is a guarantee of payment.'}
         </p>
       ) : (
         <div className="px-4 pb-4">

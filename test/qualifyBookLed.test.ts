@@ -29,7 +29,12 @@ import {
   getQualifySnapshotByPayerCore,
   type QualifyDeps,
 } from '../app/lib/qualify/core.js';
-import { memberBucketOf, memberPrefaceFor, prefaceNamesFacilityCount } from '../app/lib/qualify/memberPreface.js';
+import {
+  memberBucketOf,
+  memberHistoryChipFor,
+  memberPrefaceFor,
+  prefaceNamesFacilityCount,
+} from '../app/lib/qualify/memberPreface.js';
 import { requireQualifyPrincipalFromAccess } from '../app/lib/qualify/principal.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../src/tenants.js';
 import type { QualifyFacilityRow } from '../src/collections/qualifyQuery.js';
@@ -400,4 +405,137 @@ test('the by-payer path carries NO second book — `facilities` already IS the b
   assert.equal(snap.bookFacilities, null, 'rendering the same list twice is not a second answer');
   assert.equal(snap.memberCount, null, 'and no identifier was searched, so there is no member count');
   assert.equal(snap.resolved!.identifierScoped, false);
+});
+
+// ── S3 (2026-08-08) — THE INVERSION: history annotates the book, and breaks its ties ─────────────
+//
+// Alec's ruling: **the book ranks, member history annotates.** A ranking is a comparative claim and
+// 58.8% of searches carry 1.14 facilities — ranking those is not thin, it is MALFORMED. But the
+// member's own history is the most specific fact the rep holds (continuity, the facility knows them,
+// prior-auth precedent), so it must stay visible: as a mark on the list that has statistical power,
+// and as a WEAK tiebreak inside it.
+//
+// These pin the SERVER half — the join, the annotation's non-PHI shape, the tiebreak's exact
+// footing, and the four paths that carry no annotation at all. The render half (which list LEADS)
+// is pinned in app/test/qualifyV3Flow.test.tsx.
+
+const annotationOf = (fs: readonly { name: string; memberHistory: unknown }[] | null) =>
+  (fs ?? []).map((f) => [f.name, f.memberHistory] as const);
+
+test('memberHistoryChipFor — a PERSON has been here before; a PREFIX of four people has not', () => {
+  // ⚠ THE BUCKET DECIDES THE SENTENCE, and getting it wrong is a claim about people. At one member
+  // "Seen here before" is personally true and is the fact that decides a placement. At 2-9 the same
+  // lines belong to SEVERAL people, and the same words would tell a rep that one patient has a
+  // relationship with a facility when what the data says is that some of four do.
+  assert.equal(memberHistoryChipFor(1, { lineCount: 210 }), 'Seen here before — 210 claim lines in this window');
+  assert.equal(memberHistoryChipFor(1, { lineCount: 1 }), 'Seen here before — 1 claim line in this window');
+  assert.equal(memberHistoryChipFor(4, { lineCount: 210 }), 'This search has 210 claim lines here in this window');
+  // An unclassified search must not be narrated as a person either — but the JOIN still happened, so
+  // the lines are real and dropping them would hide evidence that is on the screen's own rows.
+  assert.equal(memberHistoryChipFor(null, { lineCount: 9 }), 'This search has 9 claim lines here in this window');
+  // ⚠ THE BASIS IS THE CHOSEN WINDOW, NEVER `memberCount`'s 12 MONTHS. These lines come from the
+  // same rows the grid was ranked on; borrowing the classifier's basis would be S2's I1 defect again.
+  assert.ok(!memberHistoryChipFor(1, { lineCount: 1 })!.includes('12 months'));
+  // No annotation, no chip — the render site gets no second null rule of its own.
+  assert.equal(memberHistoryChipFor(1, null), null);
+});
+
+test('S3 — the BOOK carries the member’s own lines, joined on the RAW rollup facility text', async () => {
+  // The join key is `QualifyFacility.facilityKey` === the rollup's `facility` column, which BOTH
+  // loads group by — same column, same window, same payer predicate — so an exact text match is
+  // correct and no upper() normalisation belongs here. (FACILITY_DIM_JOINS' upper() exists to enrich
+  // the DISPLAY name off collections.facilities; it never touches the grouping key.)
+  const { deps: d } = recordingDeps([STRONG], [STRONG, WEAK]);
+  const snap = await getQualifySnapshotCore(d, PREFIX_IN);
+  assert.deepEqual(annotationOf(snap.bookFacilities), [
+    ['STRONG HOUSE', { lineCount: 120, distinctPatients: 22 }],
+    // The member never billed here, so the book row says nothing about them. NULL, not a zeroed
+    // block: "0 lines" is a claim, "no history" is the absence of one.
+    ['WEAK HOUSE', null],
+  ]);
+});
+
+test('S3 — the MEMBER list is never annotated: every row there IS member history already', async () => {
+  // The annotation answers "has this member been here" about a list that is NOT about this member.
+  // On the member's own footprint it would be a tautology on every row, and a reader meeting it
+  // there would reasonably conclude the ABSENT ones are facilities the member has not been to.
+  const { deps: d } = recordingDeps([STRONG, WEAK], [STRONG, WEAK]);
+  const snap = await getQualifySnapshotCore(d, PREFIX_IN);
+  for (const f of snap.facilities) assert.equal(f.memberHistory, null, `${f.name} carries no annotation`);
+  assert.ok(snap.bookFacilities!.some((f) => f.memberHistory !== null), 'the book does — otherwise this is vacuous');
+});
+
+/** Two book rows identical in every rating input, so the ONLY thing between them is the annotation.
+ *  `ZED` sorts alphabetically LAST, which is the pre-S3 tiebreak — so a test that passes because of
+ *  the name would still fail here. */
+const TIE_A: QualifyFacilityRow = { ...STRONG, facility: 'alpha house', facility_name: 'ALPHA HOUSE', facility_code: 'ALPH' };
+const TIE_Z: QualifyFacilityRow = { ...STRONG, facility: 'zed house', facility_name: 'ZED HOUSE', facility_code: 'ZEDH' };
+
+test('S3 tiebreak — at EQUAL footing the annotated facility wins, over the alphabetical fallback', async () => {
+  // EQUAL FOOTING, DEFINED FROM THE COMPARATOR'S OWN TIERS: the same availability tier (S1) AND the
+  // same `ratingV2` — including both-suppressed. That is the narrowest reading that is still a
+  // reading, and it is what makes the tiebreak WEAK by construction.
+  const { deps: d } = recordingDeps([TIE_Z], [TIE_A, TIE_Z]);
+  const snap = await getQualifySnapshotCore(d, PREFIX_IN);
+  assert.deepEqual(namesOf(snap.bookFacilities), ['ZED HOUSE', 'ALPHA HOUSE']);
+  assert.equal(snap.bookFacilities![0]!.rank, 1, 'and `rank` is stamped after the sort, so the card agrees');
+});
+
+test('S3 tiebreak — history NEVER beats a better rating: it breaks ties, it does not win arguments', async () => {
+  // ALPHA pays better (80% vs 62%). The member has been to ZED. The rating still leads, because the
+  // whole reason the book ranks is that a comparative claim needs a comparison — and "we know them"
+  // is not evidence about what the payer allows.
+  const better: QualifyFacilityRow = { ...TIE_A, allowed: 80000, pct_allowed: 80 };
+  const { deps: d } = recordingDeps([TIE_Z], [better, TIE_Z]);
+  const snap = await getQualifySnapshotCore(d, PREFIX_IN);
+  assert.deepEqual(namesOf(snap.bookFacilities), ['ALPHA HOUSE', 'ZED HOUSE']);
+  // ⚠ WITHOUT THIS THE TEST PASSES ON AN UNBUILT FEATURE. The pre-S3 order is already
+  // ALPHA-then-ZED, so the assertion above is satisfied by an engine that has never heard of an
+  // annotation. Naming the annotation makes the negative a negative ABOUT the tiebreak.
+  assert.deepEqual(snap.bookFacilities!.find((f) => f.name === 'ZED HOUSE')!.memberHistory, {
+    lineCount: 120,
+    distinctPatients: 22,
+  });
+});
+
+test('S3 tiebreak — history NEVER floats a FULL house above one that can admit today', async () => {
+  // The availability tier is TIER 0 and stays there. A facility the rep cannot use is not an answer
+  // to "where do I send them right now", however well the member knows it.
+  const { deps: d } = recordingDeps([TIE_Z], [TIE_A, TIE_Z], {
+    loadCensusAuth: async () => [
+      census({ facility_code: 'ZEDH', open_beds: 0, bed_capacity: 12 }), // annotated AND full
+      census({ facility_code: 'ALPH', open_beds: 4, bed_capacity: 20 }),
+    ],
+  });
+  const snap = await getQualifySnapshotCore(d, PREFIX_IN);
+  assert.deepEqual(namesOf(snap.bookFacilities), ['ALPHA HOUSE', 'ZED HOUSE']);
+  assert.equal(snap.bookFacilities![1]!.bedState, 'full');
+  // ⚠ NOT `notEqual(…, null)`. `undefined !== null` is TRUE, so that form is satisfied by a build
+  // where the field does not exist at all — the same absent-vs-null trap that broke 40 renders when
+  // `bookIsOnScreen` was first extracted with a bare `!== null`. State the block.
+  assert.deepEqual(
+    snap.bookFacilities![1]!.memberHistory,
+    { lineCount: 120, distinctPatients: 22 },
+    'the annotation is still THERE — it just did not win',
+  );
+});
+
+test('S3 — the annotation survives the amounts strip: a count is not a dollar', async () => {
+  const { deps: d } = recordingDeps([STRONG], [STRONG, WEAK], {}, SEAT);
+  const snap = await getQualifySnapshotCore(d, PREFIX_IN);
+  assert.equal(snap.viewerHasAmountsCapability, false);
+  const strong = snap.bookFacilities!.find((f) => f.name === 'STRONG HOUSE')!;
+  assert.equal(strong.billedAmount, null, 'dollars are gone');
+  assert.deepEqual(strong.memberHistory, { lineCount: 120, distinctPatients: 22 }, 'the counts are not');
+});
+
+test('S3 — the four paths with no book carry no annotation either, and nothing throws', async () => {
+  // IDENTIFIER-WIDE (the Skip): no book to annotate — the hard boundary S2 pinned.
+  const { deps: wide } = recordingDeps([STRONG, WEAK], [STRONG, WEAK]);
+  const skip = await getQualifySnapshotCore(wide, { ...PREFIX_IN, payerScope: 'all' });
+  assert.equal(skip.bookFacilities, null);
+  for (const f of skip.facilities) assert.equal(f.memberHistory, null);
+  // BY-PAYER: `facilities` already IS the book, and no identifier was searched to annotate it with.
+  const byPayer = await getQualifySnapshotByPayerCore(deps(), { payer: 'AETNA', window: { kind: 'trailing', days: 30 } });
+  for (const f of byPayer.facilities) assert.equal(f.memberHistory, null);
 });

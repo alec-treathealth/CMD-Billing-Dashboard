@@ -117,3 +117,45 @@ export function memberPrefaceFor(memberCount: number | null, facilityCount: numb
 export function prefaceNamesFacilityCount(memberCount: number | null): boolean {
   return memberBucketOf(memberCount) === 'one';
 }
+
+/**
+ * THE MARK ON A BOOK CARD — "has the searched identifier been here?" (S3, 2026-08-08).
+ *
+ * The other half of Alec's ruling: the book ranks, and this is the annotation. It lives beside the
+ * bucket rather than in the render, because the SENTENCE depends on the bucket and getting that
+ * wrong is a claim about people:
+ *
+ *   · ONE member — "Seen here before" is exactly, personally true, and it is the fact that decides
+ *     placements (continuity, the facility knows them, prior-auth precedent).
+ *   · 2-9 (and any other bucket where the book still renders, secondary) — the same join, but the
+ *     lines belong to SEVERAL DIFFERENT PEOPLE. "Seen here before" would tell a rep one patient has
+ *     a relationship with a facility when what the data says is that some of four do. So the copy
+ *     talks about the SEARCH instead of about a person.
+ *
+ * ⚠ EVERY COUNT NAMES ITS BASIS, the discipline S2's preface fix established. These lines are the
+ * CHOSEN window (they come from the same rows the grid was ranked on), so the string says "in this
+ * window" — never the 12-month basis `memberCount` carries.
+ *
+ * ⚠ COPY IS UNRATIFIED (flagged for Alec).
+ *
+ * Null when there is no annotation, so the render site has no second null rule of its own.
+ */
+export function memberHistoryChipFor(
+  memberCount: number | null,
+  /** `undefined` is accepted and treated as "no annotation" — see the coercion note in the body. */
+  history: { lineCount: number } | null | undefined,
+): string | null {
+  /* ⚠ `== null`, NOT `=== null`, AND FOR THE SAME REASON `bookIsOnScreen` CARRIES `?? null`. The
+   * contract declares `memberHistory` required, but any snapshot serialized before the field existed
+   * carries it ABSENT — and `undefined === null` is false, so a strict check would fall through and
+   * read `.lineCount` off nothing. The absent-vs-null distinction has now bitten this surface twice;
+   * this is the boundary guard, not a widening of the contract. */
+  if (history == null) return null;
+  const lines = `${history.lineCount.toLocaleString('en-US')} claim line${history.lineCount === 1 ? '' : 's'}`;
+  // 'unknown' and 'none' fall to the impersonal arm: an unclassified search must not be narrated as
+  // a person, and a zero count cannot be — but the JOIN still happened, so the lines are real and
+  // saying nothing about them would drop evidence that is on the screen's own rows.
+  return memberBucketOf(memberCount) === 'one'
+    ? `Seen here before — ${lines} in this window`
+    : `This search has ${lines} here in this window`;
+}

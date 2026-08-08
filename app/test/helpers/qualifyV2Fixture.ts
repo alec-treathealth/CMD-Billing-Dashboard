@@ -26,6 +26,10 @@ export const QUALIFY_FACILITY_V2_NULLS: Pick<
   // nothing about payer scope means. Only an identifier-wide ranking produces >1.
   | 'payerCount'
   | 'solePayer'
+  // The member-history annotation (S3, 2026-08-08). Null is the honest default AND the invariant on
+  // every member-scoped list: only a list that is NOT about the searched identifier (the payer's
+  // book) ever carries one. A fixture that wants the annotation states it.
+  | 'memberHistory'
   | 'ratingV2'
   | 'iqBand'
   | 'factors'
@@ -43,6 +47,7 @@ export const QUALIFY_FACILITY_V2_NULLS: Pick<
   bedState: 'unknown',
   payerCount: 1,
   solePayer: null,
+  memberHistory: null,
   ratingV2: null,
   iqBand: null,
   factors: [],
