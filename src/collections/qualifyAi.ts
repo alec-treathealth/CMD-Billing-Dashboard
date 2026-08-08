@@ -53,6 +53,26 @@ const facilitySchema = z
      * firewall exists to stop PHI and dollars crossing, not to refuse an honest count.
      */
     payerCount: z.number().int().min(0).max(1000),
+    /**
+     * BED AVAILABILITY, as the server decided it (app/lib/qualify/bedState.ts) — the field that
+     * explains the ORDER the model is reading.
+     *
+     * Since 2026-08-08 the facility array is sorted availability-first: a 'full' facility sits below
+     * every facility that can admit today, however well it pays. Without this field the model sees a
+     * re-ordered list with no reason for the re-ordering and narrates the top of it as the best read
+     * — which is the one sentence the sort exists to prevent.
+     *
+     * A CLOSED enum, like every other on this schema, and deliberately the COMPUTED state rather
+     * than raw bed counts: `openBeds: 0` means "full" on a residential board and "beds do not apply"
+     * on an outpatient one, and a model asked to disambiguate that will eventually get it wrong.
+     * Non-PHI and non-dollar — a bed count is a facility fact, not a patient one.
+     *
+     * OPTIONAL because the firewall is strict in BOTH directions: a caller built before this field
+     * existed (or a snapshot from a cached older payload) must degrade to "the model is not told
+     * about beds", never to a hard-rejected request that kills Ask AI for the whole snapshot. That
+     * is the exact failure `payerCount`'s min(1) caused, one field up.
+     */
+    bedState: z.enum(['open', 'full', 'not_applicable', 'unknown']).optional(),
     factors: z.array(factorSchema).max(6),
   })
   .strict();
@@ -157,6 +177,17 @@ const SYSTEM_PROMPT = [
   '  by one label\'s mix, so a facility can read strong overall and weak under the label that matters.',
   '  Tell the rep the BILLED UNDER chips scope it to one label. payerScope "payer" means payerName is',
   '  the only label in the read.',
+  '- THE FACILITY LIST IS ORDERED BY BED AVAILABILITY FIRST, then by rating. A facility with',
+  '  bedState "full" (no open beds on the latest census) sits BELOW every facility that can admit',
+  '  today, however well it pays — so the first entry is the best AVAILABLE read, not necessarily the',
+  '  best-paying one. Never call a "full" facility top-ranked, best or recommended without saying it',
+  '  has no open beds right now; a strong rating there is a fact about future placements, not this',
+  '  one. bedState "not_applicable" means an outpatient facility where beds are not the unit of',
+  '  admission (NOT a full one), and "unknown" means no census reading — neither is a bed problem and',
+  '  neither should be described as one.',
+  '- You receive at most the first ten facilities in that order. On a longer ranking, full facilities',
+  '  can fall past the tenth and be absent here while still shown to the rep — so never state or',
+  '  imply that this is every facility in the read.',
   '- policy.vobStale true: the VOB feed is stale — tell the rep to verify benefits before quoting.',
   '- Self-funded plans: the employer\'s administrator decides exceptions, not a payer rate sheet.',
   '- Median days-to-payment covers PAID lines only — unresolved claims are invisible on that axis.',

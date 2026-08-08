@@ -16,9 +16,48 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, X } from 'lucide-react';
 
-/** One option in a guided picker. `value` is the raw filter value the query matches on; `display` is
- *  the friendly label shown; `badge` (facility only) shows the IP/OP/Both care setting. */
-export type PickerOption = { value: string; display: string; badge?: 'IP' | 'OP' | 'BOTH' | null };
+/** One option in a guided picker. `value` is the raw filter value the selection carries; `display` is
+ *  the friendly label shown AND the text the type-ahead matches on; `badge` (facility only) shows the
+ *  IP/OP/Both care setting. */
+export type PickerOption = {
+  value: string;
+  display: string;
+  badge?: 'IP' | 'OP' | 'BOTH' | null;
+  /**
+   * EXTRA HAYSTACK for the type-ahead — matched in addition to `display`, never shown.
+   *
+   * Added 2026-08-08 for Qualify's facility narrow, where `display` is `display_acronym` and 16 of 47
+   * live options therefore have `display !== value`: typing what CMD actually calls the facility
+   * returned "No matches" for a facility that was right there. The alternative — composing `display`
+   * into `ACRONYM — Full Name` — was rejected, because label parity with the score cards is the whole
+   * reason `display_acronym` is preferred in the first place.
+   *
+   * OPTIONAL AND DEFAULTED TO EMPTY, so every pre-existing caller (Collections' four pickers, the v2
+   * tab's two, the v3 card's employer field) filters byte-for-byte as before. Pinned by a query sweep
+   * in app/test/multiSelectTagPicker.test.tsx that compares the predicate against the old expression.
+   */
+  searchText?: readonly string[];
+};
+
+/**
+ * Does this option match the typed query? CLIENT mode only — see the `serverDriven` short-circuit at
+ * the call site, which must stay in FRONT of this rather than inside it: in server mode the parent has
+ * already filtered for the query, and re-filtering here would drop rows the server deliberately
+ * returned (`employerNarrowFor` needs the full returned set to decide whether a selection is even a
+ * narrow).
+ *
+ * Case-insensitive SUBSTRING, over `display` plus any `searchText`. No token splitting, no fuzzy, no
+ * diacritic folding — that is the shipped behaviour and this extraction does not change it.
+ *
+ * EXPORTED AND PURE because this component had no direct test coverage at all until 2026-08-08, and
+ * "the filter four surfaces depend on" is not something to change without one.
+ */
+export function pickerMatches(option: PickerOption, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (q === '') return true;
+  if (option.display.toLowerCase().includes(q)) return true;
+  return (option.searchText ?? []).some((t) => t.toLowerCase().includes(q));
+}
 
 export function MultiSelectTagPicker({
   label,
@@ -46,7 +85,10 @@ export function MultiSelectTagPicker({
   placeholder: string;
   icon: React.ReactNode;
   options: PickerOption[];
-  selected: string[];
+  /** READONLY: the picker only reads it (map, length, Set), and a caller holding a `readonly string[]`
+   *  in state had to spread a defensive copy to satisfy `string[]` — which defeats the memo below on
+   *  every render. Every existing caller passes a `string[]`, which is assignable. */
+  selected: readonly string[];
   onToggle: (value: string) => void;
   onClear: () => void;
   /** SERVER mode: when provided, the parent owns `options` (fetched per query) and this picker does
@@ -104,7 +146,7 @@ export function MultiSelectTagPicker({
   const CAP = 50;
   // SERVER mode: `options` already reflect the query (the server filtered) — never re-filter here.
   const matches = useMemo(
-    () => (serverDriven || q === '' ? options : options.filter((o) => o.display.toLowerCase().includes(q))),
+    () => (serverDriven || q === '' ? options : options.filter((o) => pickerMatches(o, q))),
     [options, q, serverDriven],
   );
   const shown = matches.slice(0, CAP);

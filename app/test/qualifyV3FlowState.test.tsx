@@ -8,13 +8,13 @@
  * TWO LAYERS:
  *   1 · A FIELD-WRITE TABLE. Every action is dispatched against one maximally-dirty fixture and the
  *       result is compared to `{...before, ...declaredWrites}` — which pins the writes AND the
- *       non-writes in one assertion. If an action ever starts touching a sixteenth field, the row
- *       for it fails. ("Sixteenth" = one MORE than today's fifteen, the same convention
- *       `bailIfUnchanged` uses at flow-state.ts:264 — NOT this header's own older habit of naming
+ *       non-writes in one assertion. If an action ever starts touching a nineteenth field, the row
+ *       for it fails. ("Nineteenth" = one MORE than today's eighteen, the same convention
+ *       `bailIfUnchanged` uses in flow-state.ts — NOT this header's own older habit of naming
  *       the current total (this comment said "a fourteenth field" back when the module had fourteen,
  *       i.e. named the count itself rather than the next one). Reconciled 2026-08-07 so the two
  *       files share one rule instead of two that happened to differ by one.)
- *   2 · The named INVARIANTS from the module header (a–m), asserted directly, because "search
+ *   2 · The named INVARIANTS from the module header (a–p), asserted directly, because "search
  *       clears everything downstream" and "retryNonce is never reset" are the claims a future
  *       refactor will be tempted to break.
  *
@@ -23,11 +23,14 @@
  */
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { QualifySnapshot } from '../lib/qualify/contract';
 import { AREA_ALL, AREA_OTHER } from '../components/qualify/m/area-chips';
-import { NO_ANSWER_FILTERS } from '../components/qualify/v3/resolution-flow';
+import { NO_ANSWER_FILTERS, NO_FACILITY_NARROW } from '../components/qualify/v3/resolution-flow';
 import {
   INITIAL_SHELL_STATE,
+  makeRetryHandler,
   shellReducer,
   type ShellAction,
   type ShellState,
@@ -60,7 +63,13 @@ function dirty(over: Partial<ShellState> = {}): ShellState {
     windowDays: 180,
     loadedKey: 'p:ALPHA|w:180|f:|e:',
     area: 'TN',
+    facilityNarrow: ['LONESTAR MENTAL HEALTH'],
     narrowExpanded: true,
+    // S5. `refreshingNonce` carries the retryNonce of the refresh in flight, so the fixture's 7
+    // matches its retryNonce — that is what a genuinely in-flight refresh looks like, and it makes
+    // `retry_requested`'s write to 8 visible in the table.
+    refreshingNonce: 7,
+    windowMove: { from: 30, to: 90 },
     ...over,
   };
 }
@@ -86,6 +95,7 @@ const EVERY_ACTION: ShellAction[] = [
   { type: 'payer_override_changed', label: 'BETA MUTUAL INC' },
   { type: 'window_days_changed', days: 30 },
   { type: 'area_selected', key: 'CA' },
+  { type: 'facility_narrow_toggled', value: 'NASHVILLE MENTAL HEALTH LLC' },
   { type: 'narrow_toggled' },
 ];
 
@@ -93,7 +103,7 @@ const EVERY_ACTION: ShellAction[] = [
 
 const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[] = [
   {
-    name: 'search_submitted writes thirteen and keeps retryNonce + loadedKey',
+    name: 'search_submitted writes fourteen and keeps retryNonce + loadedKey',
     action: { type: 'search_submitted' },
     writes: {
       payerPick: null,
@@ -108,11 +118,16 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       payerOverride: null,
       windowDays: null,
       area: AREA_ALL,
+      facilityNarrow: NO_FACILITY_NARROW,
       narrowExpanded: false,
+      // S5: a navigation ABANDONS an in-flight refresh and any notice about a window that moved
+      // under a screen the operator has since left.
+      refreshingNonce: null,
+      windowMove: null,
     },
   },
   {
-    name: 'skipped writes eleven — and NOT windowDays or autoAsk',
+    name: 'skipped writes fourteen — and NOT windowDays or autoAsk',
     action: { type: 'skipped' },
     writes: {
       skipped: true,
@@ -125,13 +140,16 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       snapshot: null,
       snapshotError: null,
       area: AREA_ALL,
+      facilityNarrow: NO_FACILITY_NARROW,
       // Declared for the record; the table CANNOT see it (see INV n) because the fixture is already
       // `true`. INV n is what actually pins this write, from the opposite side.
       narrowExpanded: true,
+      refreshingNonce: null,
+      windowMove: null,
     },
   },
   {
-    name: 'plan_submitted writes eight — and NOT payerPick/planFilter/payerOverride/windowDays/autoAsk',
+    name: 'plan_submitted writes eleven — and NOT payerPick/planFilter/payerOverride/windowDays/autoAsk',
     action: { type: 'plan_submitted' },
     writes: {
       picked: true,
@@ -141,11 +159,14 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       snapshot: null,
       snapshotError: null,
       area: AREA_ALL,
+      facilityNarrow: NO_FACILITY_NARROW,
       narrowExpanded: false,
+      refreshingNonce: null,
+      windowMove: null,
     },
   },
   {
-    name: "went_back('identify') writes thirteen, payerPick among them",
+    name: "went_back('identify') writes sixteen, payerPick among them",
     action: { type: 'went_back', target: 'identify' },
     writes: {
       snapshot: null,
@@ -160,11 +181,14 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       planFilter: '',
       backTo: 'identify',
       area: AREA_ALL,
+      facilityNarrow: NO_FACILITY_NARROW,
       narrowExpanded: false,
+      refreshingNonce: null,
+      windowMove: null,
     },
   },
   {
-    name: "went_back('payer') writes thirteen, payerPick among them",
+    name: "went_back('payer') writes sixteen, payerPick among them",
     action: { type: 'went_back', target: 'payer' },
     writes: {
       snapshot: null,
@@ -179,11 +203,14 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       planFilter: '',
       backTo: 'payer',
       area: AREA_ALL,
+      facilityNarrow: NO_FACILITY_NARROW,
       narrowExpanded: false,
+      refreshingNonce: null,
+      windowMove: null,
     },
   },
   {
-    name: "went_back('plan') writes twelve — the carrier pick SURVIVES",
+    name: "went_back('plan') writes fifteen — the carrier pick SURVIVES",
     action: { type: 'went_back', target: 'plan' },
     writes: {
       snapshot: null,
@@ -197,7 +224,10 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       planFilter: '',
       backTo: 'plan',
       area: AREA_ALL,
+      facilityNarrow: NO_FACILITY_NARROW,
       narrowExpanded: false,
+      refreshingNonce: null,
+      windowMove: null,
     },
   },
   {
@@ -215,14 +245,19 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     // the hand-rolled tag-search owns its own typed query, so there is no `employer_query_changed`
     // row here and no `employerQuery` in any reset below. What this button still clears is the
     // SELECTION, through `filters`.
-    name: 'filters_cleared writes filters + area only',
+    name: 'filters_cleared writes filters + BOTH grid narrows only',
     action: { type: 'filters_cleared' },
-    writes: { filters: NO_ANSWER_FILTERS, area: AREA_ALL },
+    writes: { filters: NO_ANSWER_FILTERS, area: AREA_ALL, facilityNarrow: NO_FACILITY_NARROW },
   },
   {
-    name: 'retry_requested writes snapshotError + retryNonce ONLY',
+    // S5 — THE ROW THAT PROMOTES A FAILURE-RECOVERY ACTION INTO A STANDING CONTROL. It now also
+    // ARMS the in-flight marker with the nonce it just minted, and clears any window-move notice
+    // from the PREVIOUS refresh (a notice about a window that moved a minute ago must not stand
+    // over the request that is replacing it). The non-writes are the point: nothing here touches
+    // payerPick / picked / skipped / backTo / filters, so a refresh cannot re-enter the resolve.
+    name: 'retry_requested writes snapshotError + retryNonce + the in-flight marker, and clears the window notice',
     action: { type: 'retry_requested' },
-    writes: { snapshotError: null, retryNonce: 8 },
+    writes: { snapshotError: null, retryNonce: 8, refreshingNonce: 8, windowMove: null },
   },
   {
     name: 'snapshot_requested writes snapshotError only',
@@ -230,14 +265,20 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     writes: { snapshotError: null },
   },
   {
-    name: 'snapshot_resolved writes snapshot + loadedKey only — and never the error',
+    // S5: a TERMINAL dispatch, so it clears the in-flight marker — and it is the one writer of
+    // `windowMove`. Here the incoming scope key differs from the fixture's `loadedKey`, i.e. this is
+    // a RE-SCOPE, not a same-scope refresh, so the notice is cleared rather than raised.
+    name: 'snapshot_resolved writes snapshot + loadedKey + both S5 fields — and never the error',
     action: { type: 'snapshot_resolved', snapshot: SNAP_B, scopeKey: 'p:BETA|w:90|f:|e:' },
-    writes: { snapshot: SNAP_B, loadedKey: 'p:BETA|w:90|f:|e:' },
+    writes: { snapshot: SNAP_B, loadedKey: 'p:BETA|w:90|f:|e:', refreshingNonce: null, windowMove: null },
   },
   {
-    name: 'snapshot_failed writes snapshotError ONLY — the F2 rule',
+    // S5 AMENDS THE F2 RULE'S WORDING, NOT ITS SUBSTANCE. It still touches nothing about the
+    // CONTENT — snapshot and loadedKey survive — but it is the second terminal dispatch, and an
+    // in-flight marker cleared by only one of the two outcomes is the stuck flag by construction.
+    name: 'snapshot_failed writes snapshotError + clears the in-flight marker — the F2 rule, content untouched',
     action: { type: 'snapshot_failed' },
-    writes: { snapshotError: 'failed' },
+    writes: { snapshotError: 'failed', refreshingNonce: null },
   },
   { name: 'ai_armed writes autoAsk only', action: { type: 'ai_armed' }, writes: { autoAsk: true } },
   { name: 'ai_disarmed writes autoAsk only', action: { type: 'ai_disarmed' }, writes: { autoAsk: false } },
@@ -260,6 +301,23 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     writes: { area: 'CA' },
   },
   {
+    // S4. THE SECOND GRID NARROW, AND THE ROW EXISTS FOR THE SAME NON-WRITES AS AREA'S. A facility
+    // selection that touched `filters`, `snapshot` or `loadedKey` would have become a FETCH narrow —
+    // and a fetch narrow cannot say "no history at NASHVILLE; they billed at LSMH and KWC", because
+    // the un-narrowed list would no longer be in hand. Multi-select: this ADDS to the array.
+    name: 'facility_narrow_toggled writes facilityNarrow ONLY — never filters, never the snapshot (invariant m)',
+    action: { type: 'facility_narrow_toggled', value: 'NASHVILLE MENTAL HEALTH LLC' },
+    writes: { facilityNarrow: ['LONESTAR MENTAL HEALTH', 'NASHVILLE MENTAL HEALTH LLC'] },
+  },
+  {
+    // ...and the same action REMOVES a value already picked. One action, both directions — exactly
+    // `filter_toggled`, so the picker's own `Clear N` can walk the selection back through it rather
+    // than earning a second writer of the field.
+    name: 'facility_narrow_toggled removes a value already picked — one action, both directions',
+    action: { type: 'facility_narrow_toggled', value: 'LONESTAR MENTAL HEALTH' },
+    writes: { facilityNarrow: [] },
+  },
+  {
     // The NARROW SEARCH card's open/closed bit. Its value here is unremarkable; the row exists for
     // the NON-writes — a disclosure toggle that touched `filters`, `snapshot` or `loadedKey` would be
     // a presentation control quietly re-issuing a ranking request.
@@ -278,7 +336,7 @@ for (const row of TABLE) {
   });
 }
 
-test('F3b: the initial state is the fifteen shell defaults, filters by shared reference', () => {
+test('F3b: the initial state is the eighteen shell defaults, filters by shared reference', () => {
   assert.deepEqual(INITIAL_SHELL_STATE, {
     payerPick: null,
     picked: false,
@@ -294,11 +352,15 @@ test('F3b: the initial state is the fifteen shell defaults, filters by shared re
     windowDays: null,
     loadedKey: null,
     area: AREA_ALL,
+    facilityNarrow: NO_FACILITY_NARROW,
     narrowExpanded: false,
+    refreshingNonce: null,
+    windowMove: null,
   });
-  assert.equal(Object.keys(INITIAL_SHELL_STATE).length, 15, 'fifteen fields, no more');
+  assert.equal(Object.keys(INITIAL_SHELL_STATE).length, 18, 'eighteen fields, no more');
   assert.equal(INITIAL_SHELL_STATE.filters, NO_ANSWER_FILTERS, 'the SHARED constant, not a copy');
   assert.equal(INITIAL_SHELL_STATE.area, AREA_ALL, 'the area facet starts unnarrowed');
+  assert.equal(INITIAL_SHELL_STATE.facilityNarrow, NO_FACILITY_NARROW, 'and so does the facility one');
 });
 
 test('F3b: every filters reset is the SHARED constant BY REFERENCE — and clears the area with it', () => {
@@ -328,6 +390,14 @@ test('F3b: every filters reset is the SHARED constant BY REFERENCE — and clear
     // on the answer stage can never drift into clearing at different moments. It is a string, so
     // there is no reference to preserve; what is pinned is the SET of reset sites.
     assert.equal(after.area, AREA_ALL, `${target} must clear the area facet alongside the filters`);
+    // S4: the SECOND grid narrow clears at exactly the same sites, and BY REFERENCE — it is an
+    // array, so a fresh-but-equal literal here would invalidate the narrow's memo chain on every
+    // navigation, which is the MUT-F lesson one field over.
+    assert.equal(
+      after.facilityNarrow,
+      NO_FACILITY_NARROW,
+      `${target} must clear the facility narrow to the shared constant, not to an equal copy`,
+    );
   }
 });
 
@@ -371,12 +441,14 @@ test('INV a: a new search clears EVERYTHING downstream, from any prior state', (
   s = shellReducer(s, { type: 'snapshot_resolved', snapshot: SNAP_A, scopeKey: 'k1' });
   s = shellReducer(s, { type: 'snapshot_failed' });
   s = shellReducer(s, { type: 'retry_requested' });
+  s = shellReducer(s, { type: 'area_selected', key: 'TN' });
+  s = shellReducer(s, { type: 'facility_narrow_toggled', value: 'LONESTAR MENTAL HEALTH' });
 
   const after = shellReducer(s, { type: 'search_submitted' });
   assert.deepEqual(
     after,
     { ...INITIAL_SHELL_STATE, retryNonce: 1, loadedKey: 'k1' },
-    'thirteen fields back to their defaults; only the two carry-through fields differ',
+    'sixteen fields back to their defaults; only the two carry-through fields differ',
   );
 });
 
@@ -581,6 +653,62 @@ test('INV m: a re-scope KEEPS the area — it narrows the grid, and the grid is 
   }
 });
 
+test('INV m: facility_narrow_toggled reaches NOTHING the fetch reads either (S4)', () => {
+  // The SAME structural claim as area_selected's, one field over. It matters more here, not less:
+  // a facility narrow is the one narrow with an obvious SQL form (`facility = any($n)`), so the
+  // temptation to make it shape the fetch is real — and the measured reason not to is that 86.9% of
+  // members bill at exactly ONE facility, which makes the EMPTY state the common case, and only a
+  // display narrow still holds the un-narrowed list needed to say where they DID bill.
+  const before = dirty();
+  const after = shellReducer(before, { type: 'facility_narrow_toggled', value: 'NASHVILLE MENTAL HEALTH LLC' });
+  assert.deepEqual(after.facilityNarrow, ['LONESTAR MENTAL HEALTH', 'NASHVILLE MENTAL HEALTH LLC']);
+  assert.equal(after.filters, before.filters, 'the filter bag is not even re-created');
+  assert.equal(after.snapshot, before.snapshot, 'the answer on screen is untouched');
+  assert.equal(after.loadedKey, before.loadedKey, 'so nothing reads as stale and no refetch is implied');
+  assert.equal(after.snapshotError, before.snapshotError);
+  assert.equal(after.windowDays, before.windowDays);
+  assert.equal(after.payerOverride, before.payerOverride);
+  assert.equal(after.area, before.area, 'and the OTHER grid narrow is independent of it');
+});
+
+test('INV m: a re-scope KEEPS the facility narrow too — same asymmetry as the area (S4)', () => {
+  for (const action of [
+    { type: 'payer_override_changed', label: 'BETA MUTUAL INC' } as const,
+    { type: 'window_days_changed', days: 30 } as const,
+    { type: 'snapshot_requested' } as const,
+    { type: 'snapshot_resolved', snapshot: SNAP_B, scopeKey: 'k9' } as const,
+    { type: 'snapshot_failed' } as const,
+    { type: 'retry_requested' } as const,
+  ]) {
+    assert.deepEqual(
+      shellReducer(dirty(), action).facilityNarrow,
+      ['LONESTAR MENTAL HEALTH'],
+      `${action.type} must not clear the facility narrow`,
+    );
+  }
+});
+
+test('facility_narrow_toggled is MULTI-select and its own inverse — the picker needs no second action', () => {
+  let s = shellReducer(INITIAL_SHELL_STATE, { type: 'facility_narrow_toggled', value: 'A' });
+  assert.deepEqual(s.facilityNarrow, ['A']);
+  s = shellReducer(s, { type: 'facility_narrow_toggled', value: 'B' });
+  assert.deepEqual(s.facilityNarrow, ['A', 'B'], 'multi-select: the picker is multi by nature');
+  s = shellReducer(s, { type: 'facility_narrow_toggled', value: 'A' });
+  assert.deepEqual(s.facilityNarrow, ['B'], 'and the same action removes — this is what Clear N walks');
+  s = shellReducer(s, { type: 'facility_narrow_toggled', value: 'B' });
+  assert.deepEqual(s.facilityNarrow, [], 'emptied by toggling, and an empty selection is NO restriction');
+  // ⚠ BY REFERENCE, and this is the path the ⚠ comment in the reducer claims is load-bearing. Toggling
+  // the LAST chip off is exactly when a fresh `[]` would start invalidating the narrow's memo chain on
+  // every render, and `deepEqual` above is reference-blind — the mutation that returns a fresh literal
+  // ran 200/0 until this line existed. The MUT-F lesson, one field over.
+  assert.equal(s.facilityNarrow, NO_FACILITY_NARROW, 'the SHARED constant, not a fresh equal literal');
+  // The `Clear N` path is the same action walked over the whole selection, so it lands here too.
+  let cleared = shellReducer(INITIAL_SHELL_STATE, { type: 'facility_narrow_toggled', value: 'A' });
+  cleared = shellReducer(cleared, { type: 'facility_narrow_toggled', value: 'B' });
+  for (const v of [...cleared.facilityNarrow]) cleared = shellReducer(cleared, { type: 'facility_narrow_toggled', value: v });
+  assert.equal(cleared.facilityNarrow, NO_FACILITY_NARROW, 'the picker’s Clear N ends on the shared constant too');
+});
+
 test('area_selected: All, a state and the Other bucket are all just keys — and All is a real value', () => {
   let s = shellReducer(INITIAL_SHELL_STATE, { type: 'area_selected', key: 'TN' });
   assert.equal(s.area, 'TN');
@@ -650,8 +778,17 @@ test('F3b: an action that changes nothing returns the IDENTICAL object, as useSt
   const clean = dirty({ snapshotError: null });
   assert.equal(shellReducer(clean, { type: 'snapshot_requested' }), clean, 'error already null');
 
-  const failed = dirty({ snapshotError: 'failed' });
+  // S5 narrows this one the same way `snapshot_resolved` is narrowed below: already-failed AND
+  // nothing in flight is a genuine no-op. Already-failed with a refresh running is NOT — a refresh
+  // that fails on top of a failure still has to disarm the marker it armed.
+  const failed = dirty({ snapshotError: 'failed', refreshingNonce: null });
   assert.equal(shellReducer(failed, { type: 'snapshot_failed' }), failed, 'already failed');
+  const failedInFlight = dirty({ snapshotError: 'failed', refreshingNonce: 7 });
+  assert.equal(
+    shellReducer(failedInFlight, { type: 'snapshot_failed' }).refreshingNonce,
+    null,
+    'a second failure still disarms the marker',
+  );
 
   const picked = dirty({ payerPick: 'ALPHA MUTUAL', backTo: null });
   assert.equal(shellReducer(picked, { type: 'payer_picked', payer: 'ALPHA MUTUAL' }), picked, 'same pick');
@@ -668,12 +805,26 @@ test('F3b: an action that changes nothing returns the IDENTICAL object, as useSt
   const inArea = dirty({ area: 'TN' });
   assert.equal(shellReducer(inArea, { type: 'area_selected', key: 'TN' }), inArea, 'same area chip');
 
-  const stamped = dirty();
+  // S5 NARROWS THIS CLAIM, AND THE NARROWING IS THE WHOLE POINT OF THE MARKER. With nothing in
+  // flight, re-resolving the same snapshot at the same scope is still not a state change.
+  const stamped = dirty({ refreshingNonce: null, windowMove: null });
   assert.equal(
     shellReducer(stamped, { type: 'snapshot_resolved', snapshot: SNAP_A, scopeKey: stamped.loadedKey ?? '' }),
     stamped,
     'the same snapshot at the same scope is not a state change',
   );
+  // ⚠ BUT WITH A REFRESH IN FLIGHT IT MUST NOT BAIL, and this is the common case rather than an
+  // edge one: an hourly pipeline usually returns byte-identical data, so the refresh whose result
+  // changes NOTHING is the refresh most likely to happen. A bail here would leave the marker set
+  // with no request behind it — the stuck flag, arrived at through the guard rather than a handler.
+  const inFlight = dirty({ refreshingNonce: 7 });
+  const settled = shellReducer(inFlight, {
+    type: 'snapshot_resolved',
+    snapshot: SNAP_A,
+    scopeKey: inFlight.loadedKey ?? '',
+  });
+  assert.notEqual(settled, inFlight, 'an unchanged refresh result still has to disarm the marker');
+  assert.equal(settled.refreshingNonce, null, 'and it disarms it');
 
   // A retry is NEVER a no-op — the nonce is what re-fires an otherwise identical request.
   assert.notEqual(shellReducer(clean, { type: 'retry_requested' }), clean, 'retry always produces new state');
@@ -683,4 +834,238 @@ test('F3b: an unrecognised action leaves the state exactly as it was', () => {
   const before = dirty();
   const after = shellReducer(before, { type: 'not_a_real_action' } as unknown as ShellAction);
   assert.equal(after, before);
+});
+
+// ── 5 · S5: the refresh's own in-flight marker, and the window that moves under it ───────────────
+
+/** A snapshot carrying an auto-window ladder — the only thing `windowMove` reads off either side. */
+function laddered(chosenDays: number): QualifySnapshot {
+  return { resolved: { payerName: 'ALPHA MUTUAL' }, ladder: { chosenDays } } as unknown as QualifySnapshot;
+}
+
+test('INV o: the in-flight marker is armed in ONE place and cleared in SIX — the stuck flag, inverted', () => {
+  /* ⚠ THIS IS THE `refetching` BOOLEAN'S POST-MORTEM, RUN IN REVERSE. That flag was set by four
+   * handlers and cleared in one place, so any click that did not move an effect dependency left it
+   * stuck true forever and the answer stage lost its headline permanently (Qodo, PR #126). The
+   * refresh needs a signal `isRefetching` structurally cannot provide — on a same-scope refresh
+   * loadedKey === scopeKey by construction, so all three derived progress signals are false for the
+   * whole in-flight period — and the temptation is a `useState(false)`. So: ONE writer that sets,
+   * SIX that clear, and the clears are the two terminal dispatches plus the four navigations. */
+  const armed = shellReducer(dirty({ refreshingNonce: null }), { type: 'retry_requested' });
+  assert.equal(armed.refreshingNonce, armed.retryNonce, 'it carries the nonce of the request it minted');
+
+  const clears: ShellAction[] = [
+    { type: 'snapshot_resolved', snapshot: SNAP_B, scopeKey: 'k-new' },
+    { type: 'snapshot_failed' },
+    { type: 'search_submitted' },
+    { type: 'skipped' },
+    { type: 'plan_submitted' },
+    { type: 'went_back', target: 'plan' },
+  ];
+  for (const action of clears) {
+    const label = action.type === 'went_back' ? `went_back('${action.target}')` : action.type;
+    assert.equal(shellReducer(dirty(), action).refreshingNonce, null, `${label} must disarm the marker`);
+  }
+
+  /* And NOTHING ELSE may arm it. A marker an action can raise without a request behind it is the
+   * same bug in a new field — most of all `snapshot_requested`, which fires at the top of EVERY
+   * fetch including first loads and re-scopes, both of which already carry their own treatment. */
+  for (const action of EVERY_ACTION) {
+    if (action.type === 'retry_requested') continue;
+    const after = shellReducer(dirty({ refreshingNonce: null }), action);
+    assert.equal(after.refreshingNonce, null, `${action.type} must never arm the refresh marker`);
+  }
+});
+
+test('INV o: a refresh cannot re-enter the resolve — retry_requested writes nothing a navigation writes', () => {
+  /* The stage machine is driven by `resolveCoverageAction` through `useActionState`, and re-running
+   * it means dispatching `identifyAction` → `search_submitted`, which writes SIXTEEN fields and
+   * drops the operator back to the payer stage. A standing refresh control that did that would
+   * throw away the plan pick every time an operator asked for fresher numbers. The reducer half of
+   * the guarantee is here; the transport half (that no `formAction` call is reachable from the
+   * refresh handler) is a source scan in qualifyV3Flow.test.tsx. */
+  const before = dirty();
+  const after = shellReducer(before, { type: 'retry_requested' });
+  for (const field of ['payerPick', 'picked', 'skipped', 'backTo', 'filters', 'planFilter', 'snapshot', 'loadedKey', 'payerOverride', 'windowDays', 'area', 'facilityNarrow', 'narrowExpanded'] as const) {
+    assert.equal(after[field], before[field], `a refresh must not move ${field} — that is the resolve's job`);
+  }
+});
+
+test('INV p: the auto window moving across a SAME-SCOPE re-run is announced; an unchanged one is not', () => {
+  /* ⚠ THE SILENT SCOPE CHANGE THIS EXISTS FOR. `scopeKeyOf` serializes the automatic case as the
+   * literal string 'auto' and NOT as the chosen days, so a refresh that re-runs the sufficiency
+   * ladder and lands on a different rung produces an IDENTICAL key: loadedKey === scopeKey, every
+   * staleness flag reads "nothing changed", and `windowSentence` quietly renders a different number.
+   * On this surface that is exactly the class the whole scope-honesty lineage exists to stop. */
+  const at30 = dirty({ snapshot: laddered(30), loadedKey: 'same', windowMove: null });
+  const widened = shellReducer(at30, { type: 'snapshot_resolved', snapshot: laddered(90), scopeKey: 'same' });
+  assert.deepEqual(widened.windowMove, { from: 30, to: 90 }, 'the ladder moved under an unchanged key — say so');
+
+  const narrowed = shellReducer(
+    dirty({ snapshot: laddered(90), loadedKey: 'same', windowMove: null }),
+    { type: 'snapshot_resolved', snapshot: laddered(30), scopeKey: 'same' },
+  );
+  assert.deepEqual(narrowed.windowMove, { from: 90, to: 30 }, 'both directions are reachable');
+
+  // ⚠ THE NEGATIVE CONTROL. A refresh whose ladder did not move must raise NOTHING — a notice that
+  // fires on every refresh is noise, and noise is how the real one gets ignored.
+  const same = shellReducer(
+    dirty({ snapshot: laddered(90), loadedKey: 'same', windowMove: null }),
+    { type: 'snapshot_resolved', snapshot: laddered(90), scopeKey: 'same' },
+  );
+  assert.equal(same.windowMove, null, 'unchanged ladder, unchanged window, no notice');
+
+  // A RE-SCOPE is not a silent change — the operator moved something, the key moved with it, and
+  // the dim + beam already marked it. Announcing there would double-report a change they made.
+  const rescoped = shellReducer(
+    dirty({ snapshot: laddered(30), loadedKey: 'old', windowMove: null }),
+    { type: 'snapshot_resolved', snapshot: laddered(90), scopeKey: 'new' },
+  );
+  assert.equal(rescoped.windowMove, null, 'a different scope key is a change the operator made');
+
+  /* ⚠ ABSENT LADDERS ARE COERCED, NEVER COMPARED AS undefined. A manual window returns no ladder at
+   * all, and `undefined !== null` would make "no ladder before, no ladder after" read as a move. */
+  const noLadder = { resolved: { payerName: 'X' } } as unknown as QualifySnapshot;
+  assert.equal(
+    shellReducer(dirty({ snapshot: noLadder, loadedKey: 'same', windowMove: null }), {
+      type: 'snapshot_resolved',
+      snapshot: noLadder,
+      scopeKey: 'same',
+    }).windowMove,
+    null,
+    'two absent ladders are not a window move',
+  );
+  assert.equal(
+    shellReducer(dirty({ snapshot: noLadder, loadedKey: 'same', windowMove: null }), {
+      type: 'snapshot_resolved',
+      snapshot: laddered(90),
+      scopeKey: 'same',
+    }).windowMove,
+    null,
+    'a ladder arriving where there was none is not a MOVE — there is no "from" to name',
+  );
+
+  // A stale notice never outlives the request that replaces it: the next refresh clears it at
+  // request start, and every navigation clears it too (INV o's clear set, same six sites).
+  assert.equal(shellReducer(dirty(), { type: 'retry_requested' }).windowMove, null);
+  for (const action of [{ type: 'search_submitted' }, { type: 'skipped' }, { type: 'plan_submitted' }, { type: 'went_back', target: 'plan' }] as ShellAction[]) {
+    assert.equal(shellReducer(dirty(), action).windowMove, null, `${action.type} clears the notice`);
+  }
+});
+
+test('INV p: memberCount moving on a refresh is deliberately NOT announced — the decision, written down', () => {
+  /* Ruled at S5 (2026-08-08). A member count that moves across a refresh is the SAME claim over
+   * fresher data — the preface sentence re-renders with the new number and says the new thing in
+   * words, in both the visible and the spoken channel. The window is different in kind: it changes
+   * WHAT PERIOD the ranking covers while every sentence on the screen goes on reading "automatic",
+   * and `scopeKeyOf` cannot see it. So the reducer carries a `windowMove` and no `memberCountMove`,
+   * and this test is the record of that asymmetry rather than an accident of what got built.
+   *
+   * A snapshot's memberCount is not read by the reducer at all — pinned here so a future change
+   * that starts reading it has to come past this sentence. */
+  const withCount = (n: number): QualifySnapshot =>
+    ({ resolved: { payerName: 'A' }, ladder: { chosenDays: 90 }, memberCount: n }) as unknown as QualifySnapshot;
+  const after = shellReducer(
+    dirty({ snapshot: withCount(3), loadedKey: 'same', windowMove: null }),
+    { type: 'snapshot_resolved', snapshot: withCount(11), scopeKey: 'same' },
+  );
+  assert.equal(after.windowMove, null, 'the member count moved and the window did not — nothing to announce');
+  assert.ok(!Object.keys(after).some((k) => k.toLowerCase().includes('member')), 'no memberCount field exists in the machine');
+});
+
+// ── 6 · S5 fix round: the two guards that stand between a press and the marker ───────────────────
+
+/** Collect what a handler dispatches, with a scripted term and busy state. */
+function pressWith(term: string, busy: boolean): ShellAction[] {
+  const seen: ShellAction[] = [];
+  makeRetryHandler({ getTerm: () => term, isBusy: () => busy, dispatch: (a) => seen.push(a) })();
+  return seen;
+}
+
+test('S5 FIX — the empty-term guard is BEHAVIOUR, not a string in a file (MUT-25)', () => {
+  /* ⚠ THIS TEST EXISTS BECAUSE THE SOURCE SCAN THAT WAS SUPPOSED TO COVER IT COULD NOT FAIL.
+   * It asserted `body.indexOf("termRef.current === ''") < body.indexOf('retry_requested')` — and
+   * `indexOf` returns -1 for an absent needle, so DELETING the guard entirely made the assertion
+   * `-1 < positive`, i.e. TRUE. The mutation ran 156/0.
+   *
+   * What it would have shipped is the stuck-flag class reached around the reducer rather than
+   * through it: a press on an emptied PHI ref (a hot-reload mid-flow) arms `refreshingNonce`, the
+   * fetch effect's own `term === ''` early return fires so NO request starts, and therefore neither
+   * terminal dispatch ever runs. The card locks at "Refreshing the ranking…", aria-busy, with the
+   * control unpressable — permanently, with no way back short of a navigation.
+   *
+   * So the guard moved OUT of an inline closure and into a pure factory that a test can call. The
+   * PHI still lives in the shell's ref: the factory takes a GETTER and never stores what it reads. */
+  assert.deepEqual(pressWith('', false), [], 'no term held → nothing dispatched, and above all no marker armed');
+  assert.deepEqual(pressWith('XDP', false), [{ type: 'retry_requested' }], 'a held term → exactly one dispatch');
+});
+
+test('S5 FIX — a second press DURING a refresh is a no-op, so the control can stay focusable (M3)', () => {
+  /* The busy guard used to live only in the DOM, as `disabled`. That drops keyboard focus to
+   * <body> the instant the attribute lands (the element the user is standing on stops being
+   * focusable), and a disabled control's state change is not reliably announced. So the render
+   * layer now carries `aria-disabled` — focus stays put, AT hears the change — and the REFUSAL
+   * moved here, where it is a behaviour rather than a browser side effect.
+   *
+   * It refuses for the same reason the attribute did: every press writes one SEARCH_QUALIFY_PHI row,
+   * because the core audits BEFORE any data. */
+  assert.deepEqual(pressWith('XDP', true), [], 'busy → the press does nothing at all');
+  // Both guards, independently: neither one alone is what makes the handler safe.
+  assert.deepEqual(pressWith('', true), []);
+  assert.deepEqual(pressWith('XDP', false).length, 1, 'positive control: idle with a term still fires');
+});
+
+test('S5 FIX — EVERY_ACTION really is every action (M2)', () => {
+  /* The INV o sweep ("nothing but retry_requested may arm the marker") loops over EVERY_ACTION, so
+   * a twentieth action added to the reducer and forgotten here would slip the sweep silently — the
+   * guard would still be green while covering less. The expected set is DERIVED from the reducer's
+   * own arms rather than hand-counted, so the list cannot drift from the machine. */
+  const src = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/flow-state.ts', import.meta.url)),
+    'utf8',
+  );
+  const arms = [...src.matchAll(/^\s*case '([a-z_]+)':/gm)].map((m) => m[1]!);
+  assert.ok(arms.length >= 19, `expected the known reducer arms, found ${arms.length} — the scan is mis-bounded`);
+  const covered = new Set(EVERY_ACTION.map((a) => a.type));
+  assert.deepEqual(
+    arms.filter((a) => !covered.has(a as ShellAction['type'])),
+    [],
+    'a reducer arm no cross-cutting invariant sweep ever dispatches',
+  );
+  // ...and nothing in the list that the reducer does not handle, which would make a row vacuous.
+  assert.deepEqual([...covered].filter((t) => !arms.includes(t)), []);
+});
+
+test('INV p: the window notice is structurally a REFRESH claim — no marker, no announcement (M1)', () => {
+  /* `loadedKey === scopeKey` was doing double duty: identifying a same-scope re-run AND standing in
+   * for "this was a refresh". The second job was only INCIDENTALLY safe — the four navigations null
+   * the snapshot, so `from` came back null and the arm could not fire. That is a guarantee held by a
+   * neighbouring field's behaviour rather than by this one, and the reducer already holds the marker
+   * that answers the question directly. */
+  const asIfKept = dirty({ snapshot: laddered(30), loadedKey: 'same', refreshingNonce: null, windowMove: null });
+  assert.equal(
+    shellReducer(asIfKept, { type: 'snapshot_resolved', snapshot: laddered(90), scopeKey: 'same' }).windowMove,
+    null,
+    'no refresh in flight → no window-move claim, whatever the keys happen to collide on',
+  );
+  /* THE SCENARIO THAT MADE IT WORTH CLOSING: a NEW identify submit whose request identity happens to
+   * serialize identically to the previous member's (same payer label, same auto window, no filters —
+   * `scopeKeyOf` carries no identifier at all). If anything ever stopped nulling the snapshot on that
+   * path, the old rule would announce "the automatic window widened" about a DIFFERENT PERSON. */
+  const newSearch = shellReducer(
+    dirty({ snapshot: laddered(30), loadedKey: '#auto###', windowMove: null }),
+    { type: 'search_submitted' },
+  );
+  assert.equal(newSearch.refreshingNonce, null, 'a navigation disarms the marker');
+  assert.equal(
+    shellReducer(newSearch, { type: 'snapshot_resolved', snapshot: laddered(90), scopeKey: '#auto###' }).windowMove,
+    null,
+    'a colliding scope key across two different searches is not a window move',
+  );
+  // POSITIVE CONTROL: with the marker armed, the same collision IS the announcement.
+  const refreshed = shellReducer(dirty({ snapshot: laddered(30), loadedKey: 'same', windowMove: null }), { type: 'retry_requested' });
+  assert.deepEqual(
+    shellReducer(refreshed, { type: 'snapshot_resolved', snapshot: laddered(90), scopeKey: 'same' }).windowMove,
+    { from: 30, to: 90 },
+  );
 });

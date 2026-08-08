@@ -16,66 +16,27 @@
 import { useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import { generateQualifyAiExplanation } from '@/lib/qualify/ai-actions';
 import { parseAiSections } from '../../../src/collections/aiAnalysis';
-import type { QualifyAiInput } from '../../../src/collections/qualifyAi';
 import type { QualifySnapshot } from '../../lib/qualify/contract';
 import { qualifyAiChips, type QualifyAiChipId } from '../../lib/qualify/aiChips';
-import { deriveTopRanks } from '../../lib/qualify/policyRating';
+import { deriveTopRanks, qualifyRanksHeading } from '../../lib/qualify/policyRating';
+// The caption's WORDS and the placement's THREE states both live in a plain lib module, because
+// this file cannot be imported by a hermetic test — see bookPlacement.ts's header.
+import { aiGroundingCaption, type QualifyBookPlacement } from '../../lib/qualify/bookPlacement';
+// The payload MAP lives in a pure module so it can be tested — see aiPayload.ts for why that is not
+// a tidying preference (an untested optional field silently stopped reaching the model once).
+import { buildQualifyAiInput } from '../../lib/qualify/aiPayload';
 // The scope claim's ONE home — see scopeLabel.ts for why it does not live in this file.
 import { aiScopeLabel } from '../../lib/qualify/scopeLabel';
 import { IQ_BAND_HEX } from './tokens';
 
 type ChipId = QualifyAiChipId;
 
-function buildInput(question: ChipId, snap: QualifySnapshot, blind: boolean): QualifyAiInput {
-  return {
-    question,
-    // The scope, stated to the model rather than left to be inferred from a null payerName — after
-    // the identifier-wide Skip that null means "several labels", not "none". See QualifyAiInput.
-    payerName: snap.resolved?.payerName ?? null,
-    payerScope: snap.resolved === null ? 'none' : snap.resolved.payerScope,
-    policy: snap.policy?.found
-      ? {
-          carrier: snap.policy.carrier,
-          funding: snap.policy.funding,
-          policyType: snap.policy.policyType,
-          planType: snap.policy.planType,
-          network: snap.policy.network,
-          memberCount: snap.policy.memberCount,
-          vobStale: snap.policy.vobStale,
-        }
-      : null,
-    provenance: snap.provenance,
-    windowDays: snap.ladder?.chosenDays ?? 90,
-    windowSufficient: snap.ladder?.sufficient ?? true,
-    facilities: snap.facilities.slice(0, 10).map((f) => ({
-      name: f.name,
-      careSetting: f.careSetting,
-      ratingV2: f.ratingV2,
-      iqBand: f.iqBand,
-      pctAllowedOfBilled: f.pctAllowedOfBilled,
-      distinctPatients: f.distinctPatients,
-      lineCount: f.lineCount,
-      medianDaysToPayment: f.medianDaysToPayment,
-      payerCount: f.payerCount,
-      factors: f.factors.map((x) => ({
-        key: x.key,
-        label: x.label,
-        weight: x.weight,
-        score: x.score,
-        available: x.available,
-        direction: x.direction,
-        detail: x.detail.slice(0, 300),
-      })),
-    })),
-    amountsBlind: blind,
-  };
-}
-
 export function QualifyAiPanel({
   snapshot,
   blind,
   autoAsk = false,
   onAutoAsked,
+  bookPlacement = 'none',
 }: {
   snapshot: QualifySnapshot;
   blind: boolean;
@@ -88,6 +49,30 @@ export function QualifyAiPanel({
    *  unmounts and remounts the panel (v3 nulls the snapshot on every window/payer change) resets the
    *  per-mount guard and re-fires an unrequested, audited, billed model call. One ask per arm. */
   onAutoAsked?: () => void;
+  /**
+   * WHERE THE PAYER'S WHOLE BOOK IS DRAWN, relative to this panel (S2, extended by S3 2026-08-08).
+   *
+   * The payload is `snap.facilities.slice(0, 10)` — the identifier's OWN ranking — in every mode, so
+   * with a book anywhere on screen "the exact numbers on this screen" no longer identifies which list
+   * the model read. THREE states, because the honest sentence differs in each:
+   *
+   *   'none'      — no book drawn. The caption is byte-identical to the pre-S2 one.
+   *   'secondary' — the book sits BELOW the member ranking (the 2-9 and 10+ buckets). The model read
+   *                 the list above.
+   *   'leading'   — the book IS the ranked grid and the member's footprint is a MARK on its rows (one
+   *                 member; S3's flip). The model read the member's own history, which is no longer a
+   *                 grid at all — so "the ranking above" would point at the one list it never saw.
+   *
+   * ⚠ AN EXPLICIT PROP, NOT DERIVED FROM `snapshot`. `bookFacilities` is on the wire for every caller
+   * of the direct core, INCLUDING the v2 tab, which renders no book section — deriving the caption
+   * from the data would make the v2 panel disclaim a list that is not there. Only the surface knows
+   * what it drew. Defaults 'none', so v2 and every existing caller stay byte-identical.
+   *
+   * ⚠ AND AN ENUM RATHER THAN TWO BOOLEANS, on purpose: `bookOnScreen && bookLeads` is a pair that a
+   * call site can set to an impossible combination, and this caption is precisely the surface where
+   * an impossible combination renders as a confident sentence.
+   */
+  bookPlacement?: QualifyBookPlacement;
 }) {
   const [active, setActive] = useState<ChipId | null>(null);
   const [text, setText] = useState('');
@@ -137,7 +122,7 @@ export function QualifyAiPanel({
       setError(null);
       setStreaming(true);
       try {
-        const res = await generateQualifyAiExplanation(buildInput(id, snapshot, blind));
+        const res = await generateQualifyAiExplanation(buildQualifyAiInput(id, snapshot, blind));
         if (genRef.current !== gen) {
           // Superseded while the action was still resolving (gate + audit + first token is 1-3s).
           // Cancel rather than drop it: an unread stream keeps the model call — and the billing —
@@ -239,8 +224,11 @@ export function QualifyAiPanel({
 
       {active === null ? (
         <p className="px-4 pb-3.5 text-[12px] leading-relaxed text-muted-foreground">
-          Preset questions only — each streams a short read grounded in the exact numbers on this screen. Nothing here
-          is a guarantee of payment.
+          {/* THE WORDS LIVE IN `aiGroundingCaption` (bookPlacement.ts), NOT HERE, and that is the fix
+              for a real hole: this module reaches the `'use server'` chain, so a string chosen inside
+              it is unreachable from every hermetic test — the reviewer inverted the three arms and the
+              whole gate stayed green. All three are pinned in app/test/bookPlacement.test.tsx now. */}
+          {aiGroundingCaption(bookPlacement)}
         </p>
       ) : (
         <div className="px-4 pb-4">
@@ -280,21 +268,43 @@ export function QualifyAiPanel({
               ) : null}
               {/* RANKS TABLE — shown when the answer IS a ranking, once the stream finishes. Derived
                   from the snapshot rather than parsed from the prose: the model writes the reasoning,
-                  the numbers stay ours, so this can never disagree with the cards or the bar. */}
+                  the numbers stay ours.
+
+                  ⚠ IT CAN DISAGREE WITH THE GRID, and the previous comment here flatly denied it
+                  ("this can never disagree with the cards or the bar"). Since the availability tier
+                  landed at the head of the grid's comparator, this table — which sorts by ratingV2
+                  alone — can lead with a facility the grid ranked second, so one facility wears a
+                  "2" on its card and a "1" here, on the same screen, under prose that says it is
+                  full. Fixed by DISCLOSURE rather than by re-sorting: this answers "which pays
+                  best", a rating question, and re-ordering it on beds would delete the only reading
+                  on screen that answers it. The heading states the basis (qualifyRanksHeading) and
+                  a full row says so on its own line. The bare ordinal was REMOVED — it was the
+                  colliding number, and the rows are already in order with their rating beside them. */}
               {!streaming && text && active === 'ranks' && ranks.length > 1 ? (
                 <div className="mt-3 border-t border-line pt-2.5">
                   <div className="font-mono text-xs font-semibold uppercase tracking-wide text-teal700">
-                    Top {ranks.length} facilities · {aiScopeLabel(snapshot, 'lower')}
+                    {qualifyRanksHeading(ranks, aiScopeLabel(snapshot, 'lower'), bookPlacement)}
                   </div>
                   <div className="mt-2 flex flex-col">
                     {ranks.map((r) => (
                       <div
                         key={r.facilityKey}
-                        className="grid grid-cols-[20px_minmax(0,1fr)_auto_auto] items-center gap-3 rounded-lg px-2 py-1.5 odd:bg-surface"
+                        className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 rounded-lg px-2 py-1.5 odd:bg-surface"
                       >
-                        <span className="font-mono text-xs font-semibold text-ink400">{r.rank}</span>
-                        <span className="truncate text-[13px] font-semibold text-ink900" title={r.name}>
-                          {r.name}
+                        <span className="flex min-w-0 items-baseline gap-1.5">
+                          <span className="truncate text-[13px] font-semibold text-ink900" title={r.name}>
+                            {r.name}
+                          </span>
+                          {/* The placement caveat, ON the row that needs it. A strip that ranks by
+                              money must not let a house with no bed read as a recommendation. */}
+                          {r.bedState === 'full' ? (
+                            <span
+                              className="shrink-0 rounded-full border border-status-warn/40 bg-status-warn/10 px-1.5 py-0.5 text-xs font-semibold text-ink900"
+                              title="No open beds on the latest census — this facility pays well but cannot admit anyone today"
+                            >
+                              Full
+                            </span>
+                          ) : null}
                         </span>
                         <span className="whitespace-nowrap text-xs text-ink400">{r.evidence}</span>
                         <span
