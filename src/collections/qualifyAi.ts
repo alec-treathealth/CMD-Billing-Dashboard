@@ -99,33 +99,8 @@ export const QualifyAiInputSchema = z
   .object({
     /** Which preset chip fired — the question shapes the read. */
     question: z.enum(QUALIFY_AI_QUESTIONS),
-    /** The resolved payer LABEL (non-PHI rollup dimension) — null on comparable/none paths AND in
-     *  identifier-wide mode. `payerScope` is what tells those apart; never infer from the null. */
-    payerName: short(120).nullable(),
-    /**
-     * WHAT THE RANKING IS SCOPED TO (2026-08-07). REQUIRED, deliberately — a null `payerName` used to
-     * mean exactly one thing ("no payer on this estimated read") and now means two, so an explainer
-     * reading only the null would narrate an all-payers ranking as an unscoped estimate.
-     *
-     *   'payer' — one billed-under label, named in payerName.
-     *   'all'   — EVERY label the searched identifier bills under. Each facility's
-     *             pctAllowedOfBilled is then a cross-label BLEND (payerCount says across how many).
-     *   'none'  — nothing resolved (comparable-cohort / VOB-only reads).
-     */
+    /** Aggregate ranking scope; no payer or policy identifiers are sent to the model. */
     payerScope: z.enum(['payer', 'all', 'none']),
-    /** Policy facts on file (plan-level, non-PHI; NO employer, NO identifiers, NO benefit dollars). */
-    policy: z
-      .object({
-        carrier: short(120).nullable(),
-        funding: short(40).nullable(),
-        policyType: short(40).nullable(),
-        planType: short(60).nullable(),
-        network: z.enum(['INN', 'OON']).nullable(),
-        memberCount: z.number().int().min(0),
-        vobStale: z.boolean(),
-      })
-      .strict()
-      .nullable(),
     /** What the ranking's evidence is built ON (§6) — the model must hedge on comparable/none. */
     provenance: z.enum(['direct', 'comparable_employer', 'comparable_funding', 'none']),
     windowDays: z.number().int().min(1).max(366),
@@ -140,9 +115,9 @@ export const QualifyAiInputSchema = z
 
 export type QualifyAiInput = z.infer<typeof QualifyAiInputSchema>;
 
-/** Chips only make sense with something to explain: at least one facility OR a found policy. */
+/** Chips only make sense with something to explain: at least one facility. */
 export function isQualifyAiSufficient(input: QualifyAiInput): boolean {
-  return input.facilities.length > 0 || input.policy !== null;
+  return input.facilities.length > 0;
 }
 
 export const QUALIFY_AI_INSUFFICIENT_COPY =
@@ -158,8 +133,7 @@ const SYSTEM_PROMPT = [
   'facility-fit read to an admissions rep who is on the phone with a prospective client. You get',
   'AGGREGATE, non-dollar metrics only: a five-factor rating per facility (0-100, renormalized over',
   'the factors that have data), the IQ verdict bands the billing team uses (65%+/50%+/30%+/15%+/0%),',
-  'reliable allowed-of-billed percentages, distinct-patient counts, median days-to-payment, and the',
-  'policy facts on file (carrier, funding, plan type, network when captured).',
+  'reliable allowed-of-billed percentages, distinct-patient counts, and median days-to-payment.',
   '',
   'Honesty rules — these outrank helpfulness:',
   '- provenance "direct" means the policy\'s own claims; "comparable_*" means an ESTIMATED read from',
@@ -188,8 +162,6 @@ const SYSTEM_PROMPT = [
   '- You receive at most the first ten facilities in that order. On a longer ranking, full facilities',
   '  can fall past the tenth and be absent here while still shown to the rep — so never state or',
   '  imply that this is every facility in the read.',
-  '- policy.vobStale true: the VOB feed is stale — tell the rep to verify benefits before quoting.',
-  '- Self-funded plans: the employer\'s administrator decides exceptions, not a payer rate sheet.',
   '- Median days-to-payment covers PAID lines only — unresolved claims are invisible on that axis.',
   '- Use ONLY the numbers provided. Never invent payer names, facilities, dollar figures, patient',
   '  detail, or trends not present in the data. No dollar amounts exist in this data; never imply',

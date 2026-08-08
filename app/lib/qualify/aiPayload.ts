@@ -22,21 +22,9 @@ export function buildQualifyAiInput(
 ): QualifyAiInput {
   return {
     question,
-    // The scope, stated to the model rather than left to be inferred from a null payerName — after
-    // the identifier-wide Skip that null means "several labels", not "none". See QualifyAiInput.
-    payerName: snap.resolved?.payerName ?? null,
+    // Keep insurance and policy details out of the model payload. The scope is an
+    // aggregate ranking dimension, not an identifier or policy field.
     payerScope: snap.resolved === null ? 'none' : snap.resolved.payerScope,
-    policy: snap.policy?.found
-      ? {
-          carrier: snap.policy.carrier,
-          funding: snap.policy.funding,
-          policyType: snap.policy.policyType,
-          planType: snap.policy.planType,
-          network: snap.policy.network,
-          memberCount: snap.policy.memberCount,
-          vobStale: snap.policy.vobStale,
-        }
-      : null,
     provenance: snap.provenance,
     windowDays: snap.ladder?.chosenDays ?? 90,
     windowSufficient: snap.ladder?.sufficient ?? true,
