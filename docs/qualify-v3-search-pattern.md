@@ -282,3 +282,107 @@ basis-mismatched — always the raw in-progress snapshot, even when the rating h
 outcomes — so `FRCA`'s 373.5-day average over a `los_sample` of **2** reached the client verbatim.
 Nothing rendered them, which made it a loaded trap rather than a live defect. S1 gave them a
 renderer, so the gate landed in the same change.
+
+## The preface, and the payer's book beside the member's footprint (2026-08-08)
+
+**Added, not amended.** Nothing above is altered. S2 of the search-tree series; the census tier
+recorded in the section above is S1, and the prominence flip described at the end here is S3's.
+
+### The measurement that forced it
+
+`.superpowers/sdd/qualify-search-tree.md` §M2, measured live 2026-08-08:
+
+| members behind the prefix | prefixes | % | avg facilities |
+|---|---|---|---|
+| 1 | 948 | **58.8%** | **1.14** |
+| 2–3 | 434 | 26.9% | 2.38 |
+| 4–9 | 163 | 10.1% | 4.97 |
+| 10–24 | 50 | 3.1% | 8.92 |
+| 25+ | 17 | 1.1% | 18.82 |
+
+And §M1: the auto-window ladder never clears its 10-patient floor for **1,545 of 1,612** prefixes,
+because **85.7% of prefixes have ≤9 members in total** — no window can reach a floor the population
+does not contain. The ladder issues five counted rungs to discover it has no choice.
+
+So the majority of searches were being answered as if they were rankings over a population, in the
+same words, on the same screen, as the 4.2% that actually are one. **A ranking is a comparative
+claim, and 1.14 facilities is not thin evidence for one — it is the wrong shape of question.**
+
+### The preface — the engine says which world it is in, before it claims anything
+
+One `count(distinct member_id_bidx)` over the token classifies the search. The ladder query has
+always computed it (`p365`, the widest rung) and then **threw it away on every path except an auto
+prefix search**, because one gate answered two questions at once.
+
+Those two questions are now separate, and the split is the ruling:
+
+- **The COUNT runs for every token kind and every window mode.** "Is this a person or a population"
+  is a fact about the IDENTIFIER, so a preface that vanished when an operator pressed a Range chip
+  would be telling them the answer depends on the window. It costs one token-scoped scan (~20 ms /
+  1,473 buffers at the 365-day worst case) already running in parallel with the policy batch.
+- **The WINDOW CHOICE stays gated on `auto && kind === 'prefix'`**, exactly as before. A 10-patient
+  floor is meaningless for an N-of-1 member-id search, and the Range menu remains the biller's
+  override. Nothing about `window2`, the ladder object or the 365-day fallback moved.
+
+Four buckets, one sentence each — and **two different nothings, which must not collapse**:
+
+| `memberCount` | says |
+|---|---|
+| `1` | `One member matches this search — N facilities of history.` |
+| `2–9` | `N members share this prefix. Continue to search across all of them, or refine the prefix.` |
+| `10+` | `A population — N members behind this prefix.` |
+| `0` | nothing — the provenance banner already owns "no claims of its own" |
+| `null` | nothing — the count was **unavailable**, and a failed query must never render as a fact |
+
+Copy is **unratified**. `memberPreface.ts` owns the bucketing and the words; the visible line, the
+receipt chip and the `aria-live` announcement all call the same function, so the seen claim and the
+spoken claim cannot be two expressions that merely happen to agree. The announcement **replaces**
+the resolution's own facility count rather than sitting beside it: that number is rendered nowhere
+on screen, and two facility counts in one spoken sentence leave a screen-reader user unable to tell
+which describes the grid in front of them.
+
+The count rides the **SEARCH** entry of the receipt, not a Scope entry of its own. The receipt
+records DECISIONS and every entry is revisitable; a member count is a fact *about* the decision on
+the Search entry.
+
+**"Pick one of the N members" is DESCOPED, and this is the record of why.** Raw member ids can never
+render, so a member picker needs a server-side per-response ordinal enumeration (the `assembleClaims`
+`patientKey` precedent) plus a pick-by-ordinal predicate, and it would have to reconcile with
+`SKIP_CARRIER_MAX`. "Search across all of them" is the Skip, which already exists — so the 2–9
+sentence names the control that is there rather than promising one that is not.
+
+### The payer's book, rendered SECONDARY
+
+`bookFacilities` is the SAME `loadFacilities` dep with token/kind omitted — byte-for-byte the load
+`getQualifySnapshotByPayerCore` already makes — added as a fourth element of the existing
+`Promise.all`, on the same window as the member ranking so the two lists are comparable. The
+payer-wide **floor** applies to it (`QUALIFY_MIN_LINES`) while the identifier's own footprint stays
+floorless: two lists, two honest floors.
+
+- **It is null whenever there is no single payer to have a book** — the identifier-wide Skip. The
+  ranking builder correctly *throws* on (null payer, no market, no token), and the all-payers whole
+  book is the 206–713 ms scan that spills to disk: an hourly cache's job (build order D), never a
+  per-search load. Nothing attempts the fetch in that mode.
+- **`facilities` was NOT repurposed.** The hero rating, `resolved.totalCharges`/`facilityCount`, the
+  area facet, the drill seed, the mobile deck and the AI payload all hang off it, and every one is a
+  scope claim about the searched identifier.
+- **It carries its own basis label** and borrows none: *"N facilities — every facility {payer} paid
+  at in this window, not this member's history."* It renders through the same `ScoreCard`, so S1's
+  census chips, the sunk treatment and the rating words cannot fork — with `allPayers={false}`,
+  because the book is payer-scoped by construction and `count(distinct primary_payer)` under a payer
+  predicate is 1 by the equality that built it. The blend disclosure has nothing to disclose, so it
+  says nothing rather than printing "1 payer · AETNA" on every card.
+- **The preview cap is stated, never silent.** A secondary section that pushes the answer off the
+  screen has stopped being secondary, so the list is capped — and because availability leads the
+  sort, the rows a cap removes are systematically the full ones. Both facts ride the same line.
+
+**Two rankings on screen make "the ranking on screen" identify nothing**, so both AI grounding
+captions now name which list the model read. The payload is still `snap.facilities.slice(0, 10)` —
+the member ranking — and `bookFacilities` is **not** in it: no schema change, no prompt change, no
+new `payerScope` value near the strict-zod firewall.
+
+### What S3 inherits
+
+The book is loaded, rated, sorted, disclosed and **below** the member ranking. S3 flips prominence
+for the 1-member case and annotates the book with the member's own history. The preview cap is the
+first thing that flip should reconsider.

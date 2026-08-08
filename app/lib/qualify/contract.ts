@@ -805,6 +805,46 @@ export interface QualifySnapshot {
   /** The auto-window ladder actually run for THIS snapshot (Phase E). Null when the caller passed an
    *  explicit window (manual Range) or the path carries no identifier. */
   ladder: QualifyWindowLadder | null;
+  /**
+   * HOW MANY DISTINCT MEMBERS SIT BEHIND THE SEARCHED TOKEN — the preface signal (S2, 2026-08-08).
+   *
+   * `count(distinct member_id_bidx)` over the token at 365 days, i.e. the ladder query's widest rung.
+   * It classifies the search before anything renders: 1 member (58.8% of prefixes, carrying 1.14
+   * facilities of history), 2-9 (37.0%), 10+ (4.2% — the only bucket where the auto-window ladder or
+   * the payer blend disclosure mean anything). `memberPreface.ts` owns the bucketing and the copy.
+   *
+   * ⚠ IT IS A 365-DAY COUNT AND IT DOES NOT FOLLOW THE CHOSEN WINDOW. "Is this a person or a
+   * population" is a fact about the identifier, so it must not change when an operator presses a
+   * Range chip — which is exactly what would happen if it were re-counted per window.
+   *
+   * ⚠ NULL IS "NOT AVAILABLE", NEVER "NOBODY". Null when the rungs loader is absent or failed soft
+   * (the ladder's pre-existing fail-soft), and on every path that searches no identifier at all
+   * (resolve-by-payer, resolve-by-name). ZERO is a real and DIFFERENT answer: the count ran and no
+   * member with claims sits behind this token. Do not `?? 0` it.
+   *
+   * NON-PHI: a count. Nothing member-identifying crosses with it.
+   */
+  memberCount: number | null;
+  /**
+   * THE RESOLVED PAYER'S WHOLE BOOK, ranked — the same facility ranking `getQualifySnapshotByPayerCore`
+   * produces, loaded alongside the identifier's own footprint so the answer stage can show "does this
+   * policy pay, anywhere" beside "where has this member been" (S2, 2026-08-08).
+   *
+   * ⚠ NOT A REPLACEMENT FOR `facilities`. The hero rating, `resolved.totalCharges`/`facilityCount`,
+   * the AI payload, the area facet, the mobile deck and the drill seed all hang off `facilities`, and
+   * every one of them is a scope claim about the SEARCHED IDENTIFIER. This field is strictly additive;
+   * S2 renders it as a clearly-labelled secondary section carrying its own basis label.
+   *
+   * ⚠ NULL WHENEVER THERE IS NO SINGLE PAYER TO HAVE A BOOK. That is the identifier-wide Skip
+   * (`resolved.payerScope === 'all'`), where `buildFacilityRankingQuery` correctly THROWS on a null
+   * payer with no market and no token — the all-payers whole book is a 206-713ms scan that sorts to
+   * disk and belongs in an hourly cache, never in a per-search load. Also null on the by-payer path,
+   * where `facilities` already IS the book, and on the comparable-cohort and empty paths.
+   *
+   * Same window as `facilities` (the ladder's chosen window), so the two lists are comparable, and the
+   * payer-wide FLOOR applies to it (`QUALIFY_MIN_LINES`) exactly as it does on the by-payer path.
+   */
+  bookFacilities: QualifyFacility[] | null;
   /** What the ranking's evidence is built ON (§6). 'direct' on the identifier/payer paths with own
    *  claims; 'comparable_*' when the ranking fell back to an employer/funding cohort; 'none' when
    *  there is nothing to rank on. Factor math consumes the same value — one source of truth. */

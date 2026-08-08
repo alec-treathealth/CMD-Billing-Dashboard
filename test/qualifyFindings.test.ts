@@ -33,6 +33,10 @@ function snap(over: Partial<QualifySnapshot> = {}): QualifySnapshot {
     resolved: null, facilities: [], identifierLandingFacility: null,
     viewerHasAmountsCapability: true, tenantScope: QUALIFY_TENANT_SCOPE,
     policy: null, ladder: null, provenance: 'direct', payerOptions: [], payerOverridden: false,
+    // S2 fields at their honest "nothing was searched here" values. Neither derivation under test
+    // reads them; they are declared because `QualifySnapshot` is the frozen contract and a fixture
+    // that omits a required field has stopped describing the real wire.
+    memberCount: null, bookFacilities: null,
     ...over,
   };
 }

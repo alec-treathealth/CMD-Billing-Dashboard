@@ -52,7 +52,13 @@ import type {
   QualifySnapshot,
   QualifyTrailingDays,
 } from '../../../lib/qualify/contract';
+// "Give me THE label, or null" — refuses a name the scope contradicts, so a wider ranking can never
+// be captioned with one payer's. Used by the book section's heading, which names whose book it is.
+import { scopedPayerOf } from '../../../lib/qualify/contract';
 import { derivePolicyRating } from '../../../lib/qualify/policyRating';
+// The preface's ONE derivation — shared by the visible line, the receipt and the aria announcement,
+// so the seen claim and the spoken claim cannot be two expressions that merely happen to agree.
+import { memberPrefaceFor } from '../../../lib/qualify/memberPreface';
 // The scope claim's ONE home — shared with the AI panel so the two cannot phrase it differently.
 import { ALL_PAYERS_LABEL } from '../../../lib/qualify/scopeLabel';
 import { IQ_BAND_LABELS, IQ_BAND_VERDICTS } from '../../../lib/qualify/ratingV2';
@@ -472,9 +478,21 @@ export function liveSentenceFor(
      *  true while the snapshot is still in flight — announce the wider scope only once it is real. */
     scopeAllPayers?: boolean;
     payerGroups?: PayerGroup[];
+    /** S2: distinct members behind the searched token (`QualifySnapshot.memberCount`). Null/omitted
+     *  means the classifier is unavailable and the announcement is byte-identical to pre-S2. */
+    memberCount?: number | null;
+    /** The facility count the VISIBLE preface uses — `snapshot.facilities.length`. Passed rather than
+     *  read off the resolution so the spoken and the seen sentence carry ONE number. */
+    memberFacilityCount?: number;
   } = {},
 ): string {
   if (!resolution) return reason ? UNRESOLVABLE_COPY[reason] : '';
+  /* THE PREFACE, ANNOUNCED. The visible line and this one come from the SAME pure function on the
+   * SAME inputs — a second derivation is how the aria channel and the screen come to disagree, and
+   * the sr-only line is exactly where that survives a browser pass. Empty string when the classifier
+   * is unavailable, so every pre-S2 call site renders an unchanged sentence. */
+  const preface = memberPrefaceFor(opts.memberCount ?? null, opts.memberFacilityCount ?? 0);
+  const say = (rest: string): string => (preface === null ? rest : `${preface} ${rest}`);
   // A skipped search resolved NOTHING past the identifier: announcing the pre-selected candidate's
   // employer as "Resolved: …" told a screen-reader user a plan had been chosen when none was — the
   // same claim the receipt and the identity line had to stop making.
@@ -483,10 +501,10 @@ export function liveSentenceFor(
     // same three-way branch. "across all plans under AETNA" said aloud over an all-payers ranking is
     // the identical lie, just less visible — and the sr-only line is exactly where an unfixed claim
     // survives a browser pass.
-    return (
+    return say(
       'You skipped the plan questions. Showing a general search across all plans' +
-      (opts.scopeAllPayers ? ' and all payers on file' : opts.scopePayer ? ` under ${opts.scopePayer}` : '') +
-      '.'
+        (opts.scopeAllPayers ? ' and all payers on file' : opts.scopePayer ? ` under ${opts.scopePayer}` : '') +
+        '.',
     );
   }
   if (stage === 'identify') {
@@ -502,11 +520,20 @@ export function liveSentenceFor(
     return `${resolution.candidates.total} plans match. Pick one, or ask the AI about one.`;
   }
   const g = resolution.group;
+  /* ⚠ THE PREFACE REPLACES THE RESOLUTION'S FACILITY COUNT, IT DOES NOT SIT BESIDE IT.
+   * `claimEvidence.distinctFacilities` is minted by the resolution service and is rendered NOWHERE
+   * on this screen (grep: this line is its only consumer). The preface's count is the one the
+   * operator can SEE — `snapshot.facilities.length`. The two can legitimately differ (different
+   * source, different window), so announcing both would read out two numbers for one question and
+   * leave a screen-reader user unable to tell which describes the grid in front of them. When there
+   * is no preface the old clause is untouched, byte for byte. */
+  const facilitiesClause =
+    preface === null ? ` ${g.claimEvidence.distinctFacilities} facilities with history.` : ` ${preface}`;
   return (
     `Resolved: ${g.payerDisplayName}` +
     (g.employerLabel ? ` · ${g.employerLabel}` : '') +
     (g.funding ? ` · ${g.funding}` : '') +
-    `. ${g.claimEvidence.distinctFacilities} facilities with history.` +
+    `.${facilitiesClause}` +
     (resolution.candidates.wasAmbiguous
       ? ` ${resolution.candidates.total} plans matched; this one is selected.`
       : ' Only one plan matched.')
@@ -668,6 +695,20 @@ export function StepRail(props: {
 export const SKIP_CARRIER_MAX = 3;
 
 /**
+ * How many of the payer's book the SECONDARY section renders (S2, 2026-08-08).
+ *
+ * The book is the whole payer's ranking — on a real payer that is dozens of facilities, and a
+ * secondary section that pushes the answer it is secondary to off the screen has stopped being
+ * secondary. Capped, and the cap is STATED beside the list: a truncated ranking that does not say
+ * it is truncated makes a completeness claim it has not earned, and because availability leads the
+ * sort (S1) the rows a cap removes are systematically the FULL ones.
+ *
+ * Not a scroll box and not a `<details>`: both hide rows in ways an assertion cannot tell from an
+ * absence. When S3 flips prominence this number is the first thing it should reconsider.
+ */
+export const QUALIFY_BOOK_PREVIEW = 8;
+
+/**
  * The escape hatch: stop answering questions and go straight to the answer over the identifier's
  * WHOLE footprint, then narrow (or not) with the answer stage's filter lines. Declining to choose is
  * a real answer, and the answer stage says which one it got.
@@ -708,6 +749,14 @@ export interface ReceiptProps {
    * deriving this from the payer-scope enum is exactly the masquerade `ScopeSource` documents.
    */
   skipped?: boolean;
+  /**
+   * S2: distinct members behind the searched token. It rides the SEARCH entry rather than becoming
+   * an entry of its own, and that placement is the receipt's own contract rather than a layout
+   * preference — this strip records DECISIONS and every entry is revisitable ("Change"). A member
+   * count is neither: it is a fact ABOUT the decision on the Search entry, so it qualifies that
+   * entry. Null/omitted renders nothing at all.
+   */
+  memberCount?: number | null;
   /** The payer the RANKING actually used, for the skipped scope entry. Null when there is none. */
   scopePayer?: string | null;
   /** The ranking spans EVERY billed-under label (identifier-wide). Distinct from `scopePayer ===
@@ -734,6 +783,7 @@ export function FlowReceipt({
   onChange,
   payerGroups,
   skipped = false,
+  memberCount = null,
   scopePayer = null,
   scopeAllPayers = false,
   scopeByUser = false,
@@ -744,6 +794,24 @@ export function FlowReceipt({
   const payers = payerGroups ?? payerGroupsOf(resolution);
   const entry = 'flex items-center gap-2 rounded-full border border-line bg-surface py-1 pl-3 pr-1';
   const change = 'rounded-full px-2 py-0.5 text-xs font-semibold text-teal700 hover:bg-teal50';
+  /* HOW MANY PEOPLE THAT SEARCH ACTUALLY MATCHED — the count, not the bucket. The receipt is a
+   * compressed trail, so it states the number and leaves the interpretation to the preface on the
+   * answer stage; two full sentences saying the same thing in different words is how they drift.
+   * `> 0` is the whole gate: null is "not counted" and 0 is "nobody", and neither is worth a chip.
+   * Rendered as ONE element rather than a second entry — see ReceiptProps.memberCount. */
+  const memberChip =
+    memberCount !== null && memberCount > 0 ? (
+      <span className="text-xs text-ink600">
+        ·{' '}
+        <span
+          className="ths-num"
+          aria-label={memberCount === 1 ? '1 member matches this search' : `${memberCount} members match this search`}
+        >
+          {memberCount.toLocaleString()}
+        </span>{' '}
+        member{memberCount === 1 ? '' : 's'}
+      </span>
+    ) : null;
 
   // ⚠ A SKIPPED SEARCH DECIDED NOTHING BEYOND THE IDENTIFIER. Rendering the pre-selected candidate's
   // employer as a "PLAN" entry claimed a decision the user explicitly declined to make. The receipt
@@ -754,6 +822,7 @@ export function FlowReceipt({
         <span className={entry}>
           <span className="text-xs font-medium uppercase tracking-wide text-ink400">Search</span>
           <span className="ths-num text-sm text-ink900">{idLabel}</span>
+          {memberChip}
           <button type="button" className={change} onClick={() => onChange('identify')}>
             Change
           </button>
@@ -780,6 +849,7 @@ export function FlowReceipt({
       <span className={entry}>
         <span className="text-xs font-medium uppercase tracking-wide text-ink400">Search</span>
         <span className="ths-num text-sm text-ink900">{idLabel}</span>
+        {memberChip}
         <button type="button" className={change} onClick={() => onChange('identify')}>
           Change
         </button>
@@ -1844,6 +1914,31 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // AreaLine for why that placement is right and why it does not exempt it from the inventory —
   // and omitting it let one click produce "nothing is restricting this search" beside a lit Area chip.
   const anyFacetOn = filtersActive || payerFacetOn || areaActive;
+  /* ── THE PAYER'S WHOLE BOOK (S2, 2026-08-08) ────────────────────────────────────────────────────
+   *
+   * A SECOND ranked list, loaded by the core alongside the identifier's own footprint. It exists
+   * because 58.8% of searches resolve to ONE member carrying 1.14 facilities of history — ranking
+   * that is not thin, it is malformed, and the list that actually answers "does this policy pay,
+   * anywhere" is the payer's book.
+   *
+   * NULL, NOT EMPTY, when there is no single payer to have a book (the identifier-wide Skip): the
+   * all-payers whole book is a 206-713ms scan that spills to disk and belongs in an hourly cache.
+   * Rendering an empty shell there would claim a list that was never fetched.
+   *
+   * Declared HERE, above `skipProvenance`, because the AI grounding caption needs it — "the ranking
+   * on screen" identifies nothing once there are two rankings on screen.
+   *
+   * S2 RENDERS IT SECONDARY, BELOW THE MEMBER RANKING. The prominence flip is S3's, not this file's.
+   */
+  const bookFacilities: readonly QualifyFacility[] | null = snap?.bookFacilities ?? null;
+  /* THE NAME THE BOOK IS ABOUT, taken from the SCOPE rather than from the payer name — `scopedPayerOf`
+   * refuses a label whose `payerScope` contradicts it, which is the guard that stops a wider ranking
+   * being captioned with one payer's name. Deliberately NOT `scopePayer` a few dozen lines above:
+   * that value falls back to `g.payerDisplayName`, the DECLINED candidate's carrier, which is
+   * tolerable for the identity line's shipped wording and would be a fabricated basis on a heading
+   * that names whose book this is. */
+  const bookPayer = scopedPayerOf(snap?.resolved);
+  const bookOnScreen = bookFacilities !== null && bookPayer !== null;
   /**
    * ── THE NARROW SEARCH CARD'S FACETS, DERIVED ONCE ────────────────────────────────────────────
    *
@@ -1948,14 +2043,24 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
      * ranking on screen" would describe a ranking narrower than the one really behind the answer.
      * Applying the SAME standard as the hero: say what IS true (the AI covers the full ranking, not
      * the narrowed grid) instead of letting a grid-only control quietly relabel what backs the answer.
+     *
+     * ⚠ AND "THE RANKING" STOPS IDENTIFYING ANYTHING THE MOMENT THERE ARE TWO (S2, 2026-08-08). The
+     * payload is `snap.facilities.slice(0, 10)` — the MEMBER ranking — and the book section below
+     * puts a SECOND ranked list of facilities on the same screen that the model has never seen. So
+     * with a book present the caption names which one, on exactly the same principle.
+     *
+     * The four pre-S2 strings are reproduced BYTE FOR BYTE by the composition below (one of them is
+     * frozen character-for-character by a test): the grounding half is chosen by the two conditions
+     * that can make "on screen" false, and the tail is unchanged. Composed rather than written out
+     * eight times, because three independent conditions is where a copy-paste table starts to rot.
      */
-    ai: areaActive
-      ? rankingNarrowed
-        ? `grounded in the full ranking behind this answer, not the narrowed grid — all plans, no plan chosen, narrowed by your filter selections${skipUnder}`
-        : `grounded in the full ranking behind this answer, not the narrowed grid — all plans, no plan chosen${skipUnder}`
-      : rankingNarrowed
-        ? `grounded in the ranking on screen — all plans, no plan chosen, narrowed by your filter selections${skipUnder}`
-        : `grounded in the ranking on screen — all plans, no plan chosen${skipUnder}`,
+    ai:
+      (areaActive
+        ? 'grounded in the full ranking behind this answer, not the narrowed grid'
+        : bookOnScreen
+          ? "grounded in this member's ranking, not the whole-book list below"
+          : 'grounded in the ranking on screen') +
+      ` — all plans, no plan chosen${rankingNarrowed ? ', narrowed by your filter selections' : ''}${skipUnder}`,
   };
   /**
    * ⚠ "EVERY deriveNotices KIND IS GROUP-SCOPED" — v1 of this fix asserted that and was wrong about
@@ -2094,6 +2199,31 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               <span className="q-refetch-beam block h-full w-1/3 rounded-full bg-teal500" />
             </span>
           ) : null}
+
+          {/* ── THE PREFACE (S2, Alec's tree, 2026-08-08) ────────────────────────────────────────
+              WHICH WORLD THIS SEARCH IS IN, said BEFORE anything below claims anything.
+
+              Measured the same day: 58.8% of prefixes are ONE member carrying 1.14 facilities of
+              history, 37.0% are 2-9, and only 4.2% are the population the ladder, the confidence
+              floor and the blend disclosure were all designed around. Until this line, all three
+              were answered in identical words — so the majority case read as a thin ranking rather
+              than as what it is: a person, and the wrong shape of question.
+
+              It sits FIRST inside the answer block, above every scope banner, because a preface that
+              arrives after the claims is not a preface.
+
+              SUPPRESSED IN FLIGHT (rule 2654416), like every other categorical sentence here: it is
+              a statement about the data, and during a re-scope it would describe the set being
+              replaced. The dim + beam is the marker; this waits.
+
+              ONE DERIVATION, THREE SURFACES — this line, the receipt chip and `liveSentenceFor` all
+              call `memberPrefaceFor`, so the seen and the spoken claim cannot drift. */}
+          {!stale && memberPrefaceFor(snap.memberCount, snap.facilities.length) !== null ? (
+            <p role="status" className="text-sm font-semibold text-ink900">
+              {memberPrefaceFor(snap.memberCount, snap.facilities.length)}
+            </p>
+          ) : null}
+
           {/* SCOPE HONESTY (review Critical 1). When the pick couldn't be bridged to a claims label
               — no claims history for this plan, or an unmapped payer — the ranking below is the
               identifier's DOMINANT payer, and that must be said in words, not implied by chips.
@@ -2580,6 +2710,61 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               </p>
             ) : null}
           </section>
+
+          {/* ── THE PAYER'S WHOLE BOOK, SECONDARY (S2, 2026-08-08) ───────────────────────────────
+              "Does this policy pay, ANYWHERE" — the question the member's own footprint cannot
+              answer when that footprint is 1.14 facilities, which it is 58.8% of the time.
+
+              ⚠ IT CARRIES ITS OWN BASIS LABEL AND BORROWS NONE. Every claim surface above this
+              section — the identity line, the resolved-scope sentence, the skip banner, the hero's
+              "N rated facilities", the AI grounding caption — describes the SEARCHED IDENTIFIER, and
+              a second ranked list that quietly inherited any of them would be exactly the scope lie
+              PRs #92 / #148 / #157 were each spent removing. So this states what it is, in its own
+              words, above its own grid.
+
+              ⚠ SAME `ScoreCard`, DELIBERATELY. S1's census chips, the sunk treatment and the rating
+              words come free and cannot fork. `allPayers={false}` is not a convenience: the book is
+              payer-scoped BY CONSTRUCTION (it is null whenever the ranking is identifier-wide), so
+              `count(distinct primary_payer)` over its rows is 1 by the equality that built them and
+              the blend disclosure has nothing to disclose. Passing the member ranking's `allPayers`
+              through would have printed "1 payer · AETNA" on every book card — noise dressed as a
+              finding.
+
+              PROMINENCE IS S3's. This is below the member ranking on purpose. */}
+          {bookOnScreen && bookPayer !== null ? (
+            <section data-v3-book aria-labelledby="qualify-book-heading" className="flex flex-col gap-2">
+              <h3 id="qualify-book-heading" className="ths-h text-base font-semibold text-ink900">
+                Where {bookPayer} pays — across the whole book
+              </h3>
+              <p className="text-xs text-ink600">
+                <span className="ths-num" aria-label={`${bookFacilities!.length} facilities in this payer's book`}>
+                  {bookFacilities!.length}
+                </span>{' '}
+                facilities — every facility {bookPayer} paid at in this window, not this member&apos;s
+                history. Ranked the same way: a facility that can admit today first, then the rating.
+              </p>
+              <ul className="grid list-none grid-cols-1 gap-3 p-0 lg:grid-cols-2">
+                {bookFacilities!.slice(0, QUALIFY_BOOK_PREVIEW).map((f) => (
+                  <ScoreCard key={f.facilityKey} f={f} allPayers={false} />
+                ))}
+              </ul>
+              {/* THE CAP IS STATED, NEVER SILENT. A secondary section must not push the answer off
+                  the screen, but a truncated list that does not say it is truncated is a list making
+                  a completeness claim it has not earned — and because availability leads the sort,
+                  the rows a cap removes are systematically the full ones. Both facts, in one line. */}
+              {bookFacilities!.length > QUALIFY_BOOK_PREVIEW ? (
+                <p className="text-xs text-ink600">
+                  Showing the {QUALIFY_BOOK_PREVIEW} best-ranked of {bookFacilities!.length}. A facility
+                  with no open beds sorts to the end, so it will be in the part not shown.
+                </p>
+              ) : null}
+              {bookFacilities!.length === 0 ? (
+                <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
+                  No facility in {bookPayer}&apos;s book clears the volume floor in the window shown.
+                </p>
+              ) : null}
+            </section>
+          ) : null}
         </div>
       ) : null}
 
@@ -2759,6 +2944,17 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
           scopePayer,
           scopeAllPayers,
           payerGroups: props.payerGroups,
+          /* S2: the preface, ANNOUNCED — and suppressed on exactly the same condition as the visible
+           * line. The sr-only region carries no dim and no beam, so a screen-reader user has no
+           * signal that what they are hearing describes a scope already being replaced; withholding
+           * the classification is the only way to say "provisional" in this channel. Without this
+           * gate the spoken claim would outlive the seen one, which is the disagreement the whole
+           * one-derivation discipline exists to prevent. */
+          memberCount:
+            props.answer?.refetching || props.answer?.staleAfterError
+              ? null
+              : (props.answer?.snapshot?.memberCount ?? null),
+          memberFacilityCount: props.answer?.snapshot?.facilities.length ?? 0,
         })}
       </p>
 
@@ -2776,6 +2972,7 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
           onChange={props.onChange}
           payerGroups={props.payerGroups}
           skipped={skipped}
+          memberCount={props.answer?.snapshot?.memberCount ?? null}
           scopePayer={scopePayer}
           scopeAllPayers={scopeAllPayers}
           scopeByUser={scopeByUser}

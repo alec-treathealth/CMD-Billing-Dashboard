@@ -598,6 +598,11 @@ export function ResolutionFlowClient({
                   <QualifyAiPanel
                     snapshot={snapshot}
                     blind={!viewerHasAmountsCapability}
+                    // S2: the answer stage renders the payer's whole book BELOW the member ranking
+                    // whenever the core loaded one, so the panel's grounding caption has to name
+                    // which of the two it read. TOLD, not derived from the field — it is on the wire
+                    // for the v2 tab too, and v2 draws no book (see the prop's own doc).
+                    bookOnScreen={snapshot.bookFacilities !== null}
                     autoAsk={autoAsk}
                     // ONE-SHOT (review Critical 2): without the disarm, every re-scope (window,
                     // billed-under chip) nulls the snapshot, unmounts the panel, and the remount

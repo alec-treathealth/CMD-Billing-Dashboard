@@ -33,6 +33,7 @@ export function QualifyAiPanel({
   blind,
   autoAsk = false,
   onAutoAsked,
+  bookOnScreen = false,
 }: {
   snapshot: QualifySnapshot;
   blind: boolean;
@@ -45,6 +46,18 @@ export function QualifyAiPanel({
    *  unmounts and remounts the panel (v3 nulls the snapshot on every window/payer change) resets the
    *  per-mount guard and re-fires an unrequested, audited, billed model call. One ask per arm. */
   onAutoAsked?: () => void;
+  /**
+   * S2 (2026-08-08): is a SECOND ranked facility list — the payer's whole book — rendered beside
+   * this panel? The payload is `snap.facilities.slice(0, 10)`, i.e. the identifier's own ranking, so
+   * with a book on screen "the exact numbers on this screen" no longer identifies which list the
+   * model actually read.
+   *
+   * ⚠ AN EXPLICIT PROP, NOT `snapshot.bookFacilities !== null`. The field is on the wire for every
+   * caller of the direct core, INCLUDING the v2 tab, which renders no book section at all — deriving
+   * the caption from the data would have made the v2 panel disclaim a list that is not there. Only
+   * the surface knows what it drew. Defaults false, so v2 and every existing caller are byte-identical.
+   */
+  bookOnScreen?: boolean;
 }) {
   const [active, setActive] = useState<ChipId | null>(null);
   const [text, setText] = useState('');
@@ -196,8 +209,14 @@ export function QualifyAiPanel({
 
       {active === null ? (
         <p className="px-4 pb-3.5 text-[12px] leading-relaxed text-muted-foreground">
-          Preset questions only — each streams a short read grounded in the exact numbers on this screen. Nothing here
-          is a guarantee of payment.
+          {/* "ON THIS SCREEN" IDENTIFIES NOTHING ONCE TWO RANKINGS ARE ON IT (S2). The payload is the
+              first ten of `snapshot.facilities` — the identifier's own ranking — and the payer's
+              whole book is never mapped into it. Where that book is rendered, this says which list
+              it read; where it is not (v2, and any payer-scoped v3 answer with no book), the string
+              is byte-identical to what shipped. */}
+          {bookOnScreen
+            ? 'Preset questions only — each streams a short read grounded in the exact numbers in the ranking above, not the whole-book list below. Nothing here is a guarantee of payment.'
+            : 'Preset questions only — each streams a short read grounded in the exact numbers on this screen. Nothing here is a guarantee of payment.'}
         </p>
       ) : (
         <div className="px-4 pb-4">

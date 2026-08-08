@@ -289,6 +289,14 @@ function stripSnapshotAmounts(snap: QualifySnapshot): QualifySnapshot {
   return {
     ...snap,
     facilities: snap.facilities.map((f) => ({ ...f, billedAmount: null, allowedAmount: null })),
+    // S2: the payer's book is a SECOND facility array on the same wire, so it needs the same nulling.
+    // A new list that skipped this choke point would hand an amounts-blind session a full billed and
+    // allowed set — the exact leak this function is the single defence against. `memberCount` needs
+    // nothing: it is a count, not a dollar.
+    bookFacilities:
+      snap.bookFacilities === null
+        ? null
+        : snap.bookFacilities.map((f) => ({ ...f, billedAmount: null, allowedAmount: null })),
     policy: snap.policy
       ? { ...snap.policy, deductible: null, deductibleMet: null, oopMax: null, oopMet: null }
       : null,
@@ -309,6 +317,10 @@ function emptySnapshot(hasAmounts: boolean): QualifySnapshot {
     tenantScope: QUALIFY_TENANT_SCOPE,
     policy: null,
     ladder: null,
+    // NOT 0. Nothing was counted here — no token was searched, or the term never minted one — and
+    // "zero members are behind this search" is a factual claim the empty snapshot has not earned.
+    memberCount: null,
+    bookFacilities: null, // no resolved payer ⇒ no book to rank
     provenance: 'none',
     // Empty = "not loaded", which is exactly right here: an empty snapshot resolved no identifier,
     // so there is no payer set to disambiguate. Never conflate with "exactly one payer".
@@ -746,12 +758,38 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
   // ANALYZE against claims_reader on a real 9,253-row prefix (2026-08-06) measured the ladder at
   // ~353ms and resolvePayer (the slowest of the Phase B/0 batch) at ~676ms — SERIAL, that's
   // ~1030ms before the ranking batch even starts; run concurrently, the critical path is the max of
-  // the two, ~676ms. Manual windows (input.auto falsy) skip the ladder entirely — the Range menu
-  // stays the biller's override — but the batch below always runs, so parallelizing is unconditional.
-  const ladderPromise: Promise<{ ladder: QualifyWindowLadder | null; window2: QualifyWindow }> = (async () => {
-    if (!(input.auto === true && kind === 'prefix' && deps.loadWindowRungs)) {
-      return { ladder: null, window2: window };
-    }
+  // the two, ~676ms.
+  //
+  // ── S2 (2026-08-08): THE GATE CONFLATED TWO DECISIONS. THEY ARE NOW SPLIT. ────────────────────
+  //
+  // The old condition — `auto && kind === 'prefix'` — answered "should we CHOOSE the window from the
+  // member count" and, as a side effect, decided "should we COUNT the members at all". Those are not
+  // the same question:
+  //
+  //   · THE COUNT is the search's classifier and it is useful on EVERY path. Measured 2026-08-08:
+  //     58.8% of prefixes resolve to ONE member and 85.7% can never reach the 10-patient floor at any
+  //     window, so the engine must say whether it is looking at a person or a population before it
+  //     claims anything. It costs one token-scoped scan (~20ms / 1,473 buffers at the 365d worst
+  //     case) that is ALREADY running in parallel with the Phase B/0 batch, the rungs SQL already
+  //     switches to `member_id_bidx` for an exact member id (qualifyPolicyQuery.ts), and a manual
+  //     window must not silence the preface — "which world is this" is a fact about the IDENTIFIER,
+  //     not about the window the operator picked.
+  //   · THE WINDOW CHOICE stays gated exactly as it was: `auto === true && kind === 'prefix'`. A
+  //     10-patient floor is meaningless for an N-of-1 member-id search, and the Range menu remains
+  //     the biller's override. Nothing about `window2`, the ladder object, or the 365d fallback moves.
+  //
+  // So the loader runs whenever it exists; only the RETURN of `ladder`/`window2` is still gated. A
+  // failure still degrades to `{ ladder: null, window2: window }` — and `memberCount: null` with it,
+  // because "not available" and "nobody" are different answers (see QualifySnapshot.memberCount).
+  const ladderPromise: Promise<{
+    ladder: QualifyWindowLadder | null;
+    window2: QualifyWindow;
+    memberCount: number | null;
+  }> = (async () => {
+    if (!deps.loadWindowRungs) return { ladder: null, window2: window, memberCount: null };
+    // Whether the COUNTS may pick the window. Kept as its own named value so the split above cannot
+    // be quietly re-merged by someone reading only the `if`.
+    const mayChooseWindow = input.auto === true && kind === 'prefix';
     const rungDays: QualifyTrailingDays[] = [30, 60, 90, 180, 365];
     const now = deps.now();
     const boundsOf = (d: QualifyTrailingDays) => qualifyWindowBounds({ kind: 'trailing', days: d }, now);
@@ -765,6 +803,10 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
     };
     try {
       const counts = await deps.loadWindowRungs(token, kind, gate.entityIds, froms, to);
+      // THE CLASSIFIER: the widest rung is `count(distinct member_id_bidx)` over the token at 365d.
+      // Surfaced whatever the window mode, because it describes the identifier, not the window.
+      const memberCount = counts.p365;
+      if (!mayChooseWindow) return { ladder: null, window2: window, memberCount };
       const byDay: Record<QualifyTrailingDays, number> = {
         30: counts.p30,
         60: counts.p60,
@@ -782,16 +824,20 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
       return {
         ladder: { rungs, chosenDays: chosen.days, sufficient: chosen.sufficient },
         window2: { kind: 'trailing' as const, days: chosen.days },
+        memberCount,
       };
     } catch {
-      return { ladder: null, window2: window }; // ladder failure degrades to the caller's window
+      // Ladder failure degrades to the caller's window — and to an UNKNOWN classification, never a
+      // zero. A failed count that rendered as "nobody is behind this search" would be worse than
+      // saying nothing, which is what null makes the preface do.
+      return { ladder: null, window2: window, memberCount: null };
     }
   })();
 
   // ── Phase B/0: the policy on file behind the token + the global VOB feed freshness — parallel
   // with the payer resolve AND the Phase E ladder above (F1 restructuring). All fail-soft; a VOB
   // hiccup must not take down the claims read.
-  const [{ ladder, window2 }, dominantPayer, policyRow, globalFresh, payerSpread, policySpread] = await Promise.all([
+  const [{ ladder, window2, memberCount }, dominantPayer, policyRow, globalFresh, payerSpread, policySpread] = await Promise.all([
     ladderPromise,
     deps.resolvePayer(token, kind, gate.entityIds),
     deps.loadPolicy ? deps.loadPolicy(token, kind).catch(() => null) : Promise.resolve(null),
@@ -898,14 +944,47 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
     // The scope claim, computed ONCE and used for the loads, the rating context AND `resolved` — so
     // "what we ranked" and "what we say we ranked" cannot drift apart.
     const rankPayer = allPayers ? null : payerName;
-    // Factor context (coding + census) is independent of the row loads — run all three together
+    /* ── THE PAYER'S WHOLE BOOK, LOADED BESIDE THE MEMBER'S FOOTPRINT (S2, 2026-08-08) ──────────
+     *
+     * The SAME `loadFacilities` dep with token/kind OMITTED, which is byte-for-byte the load
+     * `getQualifySnapshotByPayerCore` already does — so the wiring, the builder and the SQL are all
+     * untouched, and it rides this Promise.all fully in parallel with the loads already there.
+     *
+     * WHY IT EXISTS: 58.8% of prefixes carry ONE member with 1.14 facilities of history. Ranking
+     * that is not thin, it is malformed — a ranking is a comparative claim and there is nothing to
+     * compare. The payer's book is the list that actually answers "does this policy pay, anywhere".
+     * S2 ships it as a secondary section; the prominence flip is S3.
+     *
+     * ⚠ NULL WHEN `rankPayer` IS NULL, AND NOTHING MAY TRY. In identifier-wide (Skip) mode there is
+     * no single payer, and `buildFacilityRankingQuery` correctly THROWS on (null payer, no market,
+     * no token): the all-payers whole book is the 206-713ms scan that spills to disk, an hourly
+     * cache's job, never a per-search load. The ternary is the guard — do not "simplify" it into an
+     * unconditional call with a catch, which would turn a designed boundary into a swallowed error.
+     *
+     * IT IS LAST IN THE ARRAY ON PURPOSE. Array elements evaluate left to right, so the
+     * IDENTIFIER-scoped load is still the first `loadFacilities` call this path makes — several
+     * tests read `facilitiesArgs[0]` to assert the token narrows the ranking, and the primary load
+     * staying primary is the honest shape anyway: the book is the addition.
+     */
+    // Factor context (coding + census) is independent of the row loads — run all four together
     // (review finding #11: two avoidable serial round-trips on a latency-sensitive surface).
-    const [ctx, facRows, landingRaw] = await Promise.all([
+    const [ctx, facRows, landingRaw, bookRows] = await Promise.all([
       factorContext(deps, rankPayer, from, to, 'direct', allPayers),
       deps.loadFacilities(rankPayer, from, to, gate.entityIds, input.market, token, kind),
       deps.loadIdentifierLandingFacility(token, kind, rankPayer, from, to, gate.entityIds),
+      rankPayer === null
+        ? Promise.resolve(null)
+        : deps.loadFacilities(rankPayer, from, to, gate.entityIds, input.market),
     ]);
     const facilities = assembleFacilities(facRows, ctx, false); // no floor — every billed facility is relevant
+    /* THE SAME `ctx`, DELIBERATELY: the coding registry is keyed on the resolved payer and the book
+     * is scoped to that same payer, while the census and outcomes maps are facility-keyed and global.
+     * A second `factorContext` call would be a second round-trip for an identical answer.
+     *
+     * FLOOR ON, unlike the member list one line up. This is a payer-wide ranking, so it drops the
+     * "100% on one claim" flukes exactly as the by-payer core does; the identifier's own footprint
+     * keeps every facility it billed, however thin. Two different lists, two honest floors. */
+    const bookFacilities = bookRows === null ? null : assembleFacilities(bookRows, ctx, true);
     const identifierLandingFacility =
       landingRaw !== null && facilities.some((f) => f.facilityKey === landingRaw) ? landingRaw : null;
     const resolved: QualifyResolved = {
@@ -928,6 +1007,8 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
       tenantScope: QUALIFY_TENANT_SCOPE,
       policy,
       ladder,
+      memberCount,
+      bookFacilities,
       provenance: 'direct',
       // The DIRECT path is the only one where alternatives exist to offer: the identifier has its own
       // claims, and payerOptions[0] is the payerName resolved just above.
@@ -981,6 +1062,14 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
           tenantScope: QUALIFY_TENANT_SCOPE,
           policy,
           ladder,
+          // The rungs are token-scoped and this path still has a token, so whatever the count found
+          // is carried rather than blanked — typically 0, because reaching comparable provenance
+          // means the identifier resolved no payer of its own. Carried rather than nulled because 0
+          // and "unavailable" are different answers; the preface happens to say nothing for either.
+          memberCount,
+          // No resolved payer on this path (the cohort ranks across all of them), so there is no
+          // book to rank — and the ranking above is already cohort-shaped, not an identifier's.
+          bookFacilities: null,
           provenance: facilities.length > 0 ? comparable.provenance : 'none',
           // COMPARABLE provenance means this identifier has NO claims of its own, so payerSpread is
           // empty by construction — there is nothing to disambiguate. Stated explicitly rather than
@@ -996,7 +1085,10 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
   }
 
   const empty = emptySnapshot(gate.hasAmounts);
-  const snap: QualifySnapshot = { ...empty, policy, ladder };
+  // `memberCount` rides the plain-VOB path too: it is the one fact this path DOES know about the
+  // identifier, and it is what tells "we have never seen this member" apart from "we have, but not
+  // in a way that ranks". `bookFacilities` stays at the empty snapshot's null — no payer resolved.
+  const snap: QualifySnapshot = { ...empty, policy, ladder, memberCount };
   return gate.hasAmounts ? snap : stripSnapshotAmounts(snap);
 }
 
@@ -1060,6 +1152,12 @@ export async function getQualifySnapshotByPayerCore(
     payerOverridden: false,
     policy: null, // a payer label carries no member identity → nothing to resolve a policy from
     ladder: null,
+    // No identifier was searched, so there is nothing to count members BEHIND. Null, not 0.
+    memberCount: null,
+    // `facilities` above ALREADY IS this payer's book — same loader, same floor, same window. A
+    // second copy under `bookFacilities` would render the identical list twice on any surface that
+    // shows both, which is not a second answer.
+    bookFacilities: null,
     provenance: 'direct',
   };
   return gate.hasAmounts ? snap : stripSnapshotAmounts(snap); // stripAmounts LAST
@@ -1147,6 +1245,13 @@ export async function getQualifySnapshotByNameCore(
     payerOverridden: false,
     policy: null, // name resolution carries no prefix → no policy lookup (a name is not a plan)
     ladder: null,
+    // The rungs query is keyed on member_id_bidx / member_id_prefix_bidx and has no client_name
+    // column — a name token cannot be counted by it at all, so this is "not available", not zero.
+    memberCount: null,
+    // KNOWN GAP, same shape as `payerOptions` above: a client-name resolve is identifier-shaped and
+    // deserves the payer's book exactly like a prefix does. It does not get it here because the
+    // Client Name surface is still gated off, so the change would ship unverifiable against real use.
+    bookFacilities: null,
     provenance: 'direct',
   };
   return gate.hasAmounts ? snap : stripSnapshotAmounts(snap); // stripAmounts LAST

@@ -1565,7 +1565,13 @@ function facility(over: Partial<QualifyFacility>): QualifyFacility {
 
 function snapshotFixture(): QualifySnapshot {
   return {
-    resolved: { payerName: 'AETNA US HEALTHCARE' },
+    // ⚠ `payerScope` IS PART OF THE SCOPE CLAIM, NOT DECORATION, and this fixture omitted it until
+    // S2 (2026-08-08). The core sets it on every path and `scopedPayerOf` REFUSES a payerName whose
+    // scope does not agree — so a fixture without it reads as "not payer-scoped", and any consumer
+    // that goes through that guard silently renders nothing here while working in production. Same
+    // class as the provenance gap this file documents above: a fixture that diverges from the mint
+    // tests nothing about the mint.
+    resolved: { payerName: 'AETNA US HEALTHCARE', payerScope: 'payer' },
     facilities: [
       facility({}),
       facility({ rank: 2, name: 'KENTUCKY WELLNESS CENTER', facilityKey: 'KWC', city: null, state: null, ratingV2: null, iqBand: null, distinctPatients: 2, lineCount: 9 }),
@@ -2545,3 +2551,192 @@ test('a ticker click seeds the area the SAME way the grid buckets it', () => {
   }
 });
 
+
+// ── S2 (2026-08-08) — THE PREFACE AND THE PAYER'S BOOK ───────────────────────────────────────────
+//
+// Measured the same day: 58.8% of member-ID prefixes resolve to exactly ONE member carrying 1.14
+// facilities of history, and 85.7% can never reach the 10-patient confidence floor at any window.
+// So the majority of searches were being answered with a "ranking" of one row, presented in the same
+// words as a ranking over a real population. The engine now says which world it is in BEFORE it
+// claims anything, and — for the person case — puts the payer's whole book on screen beside the
+// member's own footprint, because that is the list that answers "does this policy pay, anywhere".
+//
+// S2 renders the book SECONDARY. The prominence flip is S3 and is deliberately not built here.
+
+/** A snapshot carrying both S2 fields. `facilities` stays the MEMBER ranking — never repurposed. */
+function bookSnapshot(over: Partial<QualifySnapshot> = {}): QualifySnapshot {
+  return {
+    ...snapshotFixture(),
+    memberCount: 1,
+    facilities: [facility({ rank: 1, name: 'NASHVILLE MENTAL HEALTH', facilityKey: 'NASH' })],
+    bookFacilities: [
+      facility({ rank: 1, name: 'SUMMIT RIDGE RECOVERY', facilityKey: 'SUMMIT', payerCount: 1, solePayer: 'AETNA US HEALTHCARE' }),
+      facility({ rank: 2, name: 'PHOENIX RENEWAL', facilityKey: 'PHX', city: 'Phoenix', state: 'AZ', payerCount: 1, solePayer: 'AETNA US HEALTHCARE' }),
+      facility({ rank: 3, name: 'NASHVILLE MENTAL HEALTH', facilityKey: 'NASH', payerCount: 1, solePayer: 'AETNA US HEALTHCARE' }),
+    ],
+    ...over,
+  } as unknown as QualifySnapshot;
+}
+
+const answerHtml = (snap: QualifySnapshot, over: Partial<NonNullable<ResolutionStagesProps['answer']>> = {}) =>
+  render(props('answer', fixture(), { answer: answerProps({ snapshot: snap, ...over }) }));
+
+/** The book section's OWN markup, bounded at its closing tag — the same discipline as
+ *  `inventoryRegion`, and for the same reason: an unbounded slice lets a claim rendered ANYWHERE
+ *  below satisfy an assertion about what the book section says. */
+function bookRegion(html: string): string {
+  const attr = html.indexOf('data-v3-book');
+  assert.ok(attr >= 0, 'no [data-v3-book] element in this render — a region check would be vacuous');
+  return outerHtmlFrom(html, html.lastIndexOf('<', attr));
+}
+
+test('S2 preface — ONE member is stated plainly, with the facility count that is actually on screen', () => {
+  const html = answerHtml(bookSnapshot());
+  // The 58.8% case. It does NOT call one row a ranking, and it does not hide it either.
+  assert.match(html, /One member matches this search — 1 facility of history\./);
+});
+
+test('S2 preface — the 2-9 bucket offers the control that EXISTS, and the 10+ bucket names a population', () => {
+  const few = answerHtml(bookSnapshot({ memberCount: 4 }));
+  // "Continue to search across all of them" names the Skip, which ALREADY EXISTS. A member-by-member
+  // pick does not, and is descoped: raw member ids can never render, so picking one needs a
+  // server-side per-response ordinal enumeration plus a pick-by-ordinal predicate.
+  assert.match(few, /4 members share this prefix\./);
+  assert.match(few, /Continue to search across all of them, or refine the prefix\./);
+  const many = answerHtml(bookSnapshot({ memberCount: 31 }));
+  assert.match(many, /A population — 31 members behind this prefix\./);
+});
+
+test('S2 preface — an UNAVAILABLE count says nothing new, and a ZERO count does not claim an empty person', () => {
+  // null = the rungs loader is absent or failed soft. The screen must be exactly as it was.
+  const unknown = answerHtml(bookSnapshot({ memberCount: null }));
+  assert.ok(!unknown.includes('matches this search'), 'no preface at all');
+  assert.ok(!unknown.includes('members share this prefix'));
+  // 0 = the count RAN and nobody with claims is behind the token. Still no preface: the provenance
+  // banner already owns that story, and "0 members match" is a sentence nobody needs.
+  const none = answerHtml(bookSnapshot({ memberCount: 0 }));
+  assert.ok(!none.includes('matches this search'));
+});
+
+test('S2 preface — SUPPRESSED IN FLIGHT (rule 2654416), like every other categorical claim', () => {
+  // It is a statement about the data, so while a re-scope is in flight it must not describe the set
+  // being replaced. The dim + beam treatment is the marker; this sentence waits.
+  const inFlight = answerHtml(bookSnapshot(), { refetching: true });
+  assert.ok(!inFlight.includes('One member matches this search'), 'a claim about a superseded scope');
+  const failed = answerHtml(bookSnapshot(), { staleAfterError: true });
+  assert.ok(!failed.includes('One member matches this search'));
+});
+
+test('S2 preface — the RECEIPT carries the same count, on the entry that is actually revisitable', () => {
+  const html = answerHtml(bookSnapshot({ memberCount: 4 }));
+  // The receipt is a record of DECISIONS and every entry is revisitable. A member count is not a
+  // decision, so it does not become an entry of its own — it qualifies the SEARCH entry, which is
+  // the decision it is about and the one carrying "Change".
+  const receipt = outerHtmlFrom(html, html.indexOf('<nav aria-label="Your search so far"'));
+  assert.match(receipt, /XDP/, 'the slice really is the receipt');
+  assert.match(receipt, /4 members/);
+});
+
+test('S2 preface — the ARIA channel announces the SAME claim, and never a second facility count', () => {
+  const r = fixture();
+  // ⚠ THE aria SENTENCE ALREADY CARRIED A FACILITY COUNT — `claimEvidence.distinctFacilities`, which
+  // is rendered NOWHERE on screen. Appending the preface's on-screen count beside it would announce
+  // two different numbers for one question. The preface REPLACES it, so the spoken claim and the
+  // visible claim are the same claim.
+  const spoken = liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1 });
+  assert.match(spoken, /One member matches this search — 1 facility of history\./);
+  assert.ok(!spoken.includes('28 facilities with history'), 'the invisible resolution count steps aside');
+  // Unknown → byte-identical to what shipped before S2.
+  assert.equal(liveSentenceFor('answer', r, null, {}), liveSentenceFor('answer', r, null, { memberCount: null }));
+  assert.match(liveSentenceFor('answer', r, null, {}), /28 facilities with history\./);
+  // A skipped search announces it too — that arm is the identifier-wide one, and it is where an
+  // unfixed claim survives a browser pass.
+  const skipSpoken = liveSentenceFor('answer', r, null, { skipped: true, scopeAllPayers: true, memberCount: 31 });
+  assert.match(skipSpoken, /A population — 31 members behind this prefix\./);
+  assert.match(skipSpoken, /You skipped the plan questions/, 'and it keeps the claim it already made');
+});
+
+test('S2 book — a clearly-labelled SECOND section, named for the payer, with its own basis', () => {
+  const book = bookRegion(answerHtml(bookSnapshot()));
+  assert.match(book, /Where AETNA US HEALTHCARE pays — across the whole book/);
+  // The COUNT, so the section states its own size rather than leaving it to be counted off the grid.
+  assert.match(book, /3 facilities/);
+  // ⚠ ITS OWN BASIS LABEL. The member ranking's claims describe the member; this list does not, and a
+  // section that borrowed them would be the scope lie this whole surface is built against.
+  assert.match(book, /not this member/i);
+  // Rendered through the SAME ScoreCard, so S1's census chips, greying and rating words come free.
+  assert.match(book, /SUMMIT RIDGE RECOVERY/);
+  assert.match(book, /PHOENIX RENEWAL/);
+});
+
+test('S2 book — the MEMBER ranking is untouched: its heading, its cards and its counts still describe the member', () => {
+  const html = answerHtml(bookSnapshot());
+  assert.match(html, />Facilities, ranked</, 'the member ranking keeps its heading');
+  // The member grid holds exactly the member's own facility — the book did not leak into it.
+  const memberSection = outerHtmlFrom(html, html.lastIndexOf('<section', html.indexOf('qualify-scorecard-heading')));
+  assert.ok(memberSection.includes('NASHVILLE MENTAL HEALTH'));
+  assert.ok(!memberSection.includes('SUMMIT RIDGE RECOVERY'), 'the book list is NOT the ranked grid');
+});
+
+test('S2 book — a book card carries NO payer-scope disclosure at all: there is exactly one payer', () => {
+  // The blend disclosure is SCOPE-gated (`allPayers`), not count-gated, and the book is payer-scoped
+  // by construction — `bookFacilities` is null on the only ranking that spans several labels. So the
+  // right degrade is silence, not "1 payer · AETNA" on every card: at one label the count is a fact
+  // nobody asked for, printed beside a heading that already names the payer.
+  const book = bookRegion(answerHtml(bookSnapshot()));
+  assert.ok(!book.includes('blended across'), 'nothing is blended — one label by the equality that built it');
+  // ⚠ THE SECOND HALF IS WHAT MAKES THIS MUTATION-DETECTABLE. Passing the member ranking's
+  // `allPayers` through instead of `false` would not print "blended across" (payerCount is 1) — it
+  // would print the one-payer arm, and a test asserting only the blend string would sail past it.
+  assert.ok(!book.includes('billed-under label'), 'and no per-card payer count either');
+  // Positive control on the same render: the member ranking beside it is equally silent, so the
+  // absence above is a property of the SCOPE and not of a fixture that forgot to set payerCount.
+  assert.ok(!answerHtml(bookSnapshot()).includes('blended across'));
+});
+
+test('S2 book — ABSENT on the identifier-wide Skip, where no single payer has a book', () => {
+  // `buildFacilityRankingQuery` throws on (null payer, no market, no token) and the all-payers whole
+  // book is a 206-713ms scan that spills to disk — an hourly cache's job, never a per-search load.
+  // The section must not render an empty shell claiming a list that was never fetched.
+  const html = render(
+    props('answer', fixture(), {
+      answer: answerProps({
+        snapshot: allPayersSnapshot({ memberCount: 31, bookFacilities: null } as Partial<QualifySnapshot>),
+        skipped: true,
+        scopeSource: 'dominant',
+      }),
+    }),
+  );
+  assert.ok(!html.includes('across the whole book'), 'no book heading');
+  assert.ok(!html.includes('data-v3-book'), 'and no section at all');
+  // The preface still lands — the classifier is independent of whether a book could be loaded.
+  assert.match(html, /A population — 31 members behind this prefix\./);
+});
+
+test('S2 book — the AI grounding caption stops saying "the ranking on screen" once TWO rankings are', () => {
+  // The payload is `snap.facilities.slice(0,10)` — the MEMBER ranking. With a second ranking on
+  // screen, "the ranking on screen" no longer identifies which one the model read. Same standard the
+  // area narrow already forced: say what backs the answer instead of letting the screen relabel it.
+  const withBook = disclosureOf(
+    render(
+      props('answer', fixture(), {
+        answer: answerProps({ snapshot: bookSnapshot(), skipped: true, scopeSource: 'dominant' }),
+      }),
+    ),
+  );
+  assert.ok(!withBook.includes('grounded in the ranking on screen'), 'ambiguous the moment a book is beside it');
+  assert.match(withBook, /grounded in this member&#x27;s ranking, not the whole-book list/);
+  // WITHOUT a book the string is byte-identical to what shipped — the S1 test above freezes it.
+  const noBook = disclosureOf(
+    render(
+      props('answer', fixture(), {
+        answer: answerProps({
+          snapshot: { ...bookSnapshot(), bookFacilities: null } as unknown as QualifySnapshot,
+          skipped: true,
+          scopeSource: 'dominant',
+        }),
+      }),
+    ),
+  );
+  assert.match(noBook, /grounded in the ranking on screen/);
+});
