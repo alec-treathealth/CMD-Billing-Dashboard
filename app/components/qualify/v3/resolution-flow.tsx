@@ -1845,9 +1845,17 @@ export interface StageAnswerProps {
   /**
    * How the snapshot's payer scope was chosen — the shell's pick→ranking bridge (review Critical 1):
    * 'user' = a billed-under chip; 'pick' = the chosen plan's own claims label (claimsPayerLabels[0]);
-   * 'dominant' = nothing to send, the core resolved the identifier's largest payer. The captions
-   * below MUST distinguish these — "you picked this" and "we defaulted to this" are different claims
-   * about the same number.
+   * 'dominant' = no label was sent. The captions below MUST distinguish these — "you picked this"
+   * and "we defaulted to this" are different claims about the same number.
+   *
+   * ⚠ 'dominant' STOPPED MEANING ONE THING ON 2026-08-07; amended 2026-08-08 (S6 fix round). It read
+   * "nothing to send, the core resolved the identifier's largest payer", which since the reversal
+   * describes only HALF the cases that reach it: a plain Skip also sends no label, and the core
+   * answers THAT with `payerScope: 'all'` — every billed-under label ranked, no dominant pick made at
+   * all. So the value means "the client sent no label", and which of the two the core did with that
+   * is read from the RESULT (`resolved.payerScope` / `payerName`), never from here. The code already
+   * behaves that way — `billedUnderCaption` takes `allPayers` from the result and lets it outrank
+   * every scopeSource row — so this is comment rot cleared, not a behaviour change.
    *
    * It answers ONE question and says nothing about whether a plan was chosen — see `skipped` below
    * and the `ScopeSource` header for the live defect that separation exists to prevent.
@@ -2075,9 +2083,19 @@ function FilterLine(props: {
  * PICK and told the operator a pick had failed when they had declined to make one. `!== 'dominant'`
  * also swallowed a rejected CHIP into the same "picked plan" wording; that row is now its own too.
  *
- * The skipped copy describes the ranking AS IT BEHAVES TODAY — one dominant billed-under label, the
- * single-label equality in the ranking query. Widening it to the identifier's whole footprint is a
- * separate change, and copy must never pre-announce behaviour that is not shipped.
+ * ⚠ THE PARAGRAPH THAT STOOD HERE FORBADE THE CHANGE THAT THEN SHIPPED — amended 2026-08-08 (S6 fix
+ * round), and quoted rather than deleted because the instruction was right when it was written. It
+ * read: "The skipped copy describes the ranking AS IT BEHAVES TODAY — one dominant billed-under
+ * label, the single-label equality in the ranking query. Widening it to the identifier's whole
+ * footprint is a separate change, and copy must never pre-announce behaviour that is not shipped."
+ *
+ * That separate change IS the 2026-08-07 reversal, and it shipped. There is no single-label equality
+ * on the skip path any more: the request carries `payerScope: 'all'` and the result comes back with
+ * `payerName === null`. So the rule now reads the other way round — the copy must describe the WIDE
+ * ranking, and the table below already does, through the `allPayers` row that outranks every other.
+ * That row takes its value from the RESULT (`resolved.payerScope`), never from the request, so the
+ * caption cannot claim a widening the core declined to perform. Nothing about the discipline changed:
+ * copy still describes shipped behaviour. Only the shipped behaviour did.
  */
 /* [BOOK-LED EXEMPT: every row describes how the billed-under LABEL was chosen]
  * The book is scoped to that same label, so each row stays true word for word. The population

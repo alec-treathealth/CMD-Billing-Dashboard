@@ -1020,16 +1020,55 @@ because the markup sweep only ever sees `text-[Npx]` classes:
 - **Its sizes.** The badge is 8px text / 7px star — legitimate for an aria-hidden decoration in the
   nav, and below the 12px floor this surface machine-sweeps. The ✦ here is **13px** beside a
   `text-sm` (15px) label.
-- **Its gradient range.** The badge runs to `#ffe0d5` on a light ground. On a 15px control label
-  that would carry the words through an illegible phase every 2.6s. The stops here are teal50 →
-  white → coral400 over the button's `#0E3A3A…#135E5A` fill, all ≥ 4.5:1 — readable at every frame
-  **including the static frame a reduced-motion user gets**.
+- **Its gradient range** — and the correction below is the more useful half of this bullet. The
+  sweep is teal200 → white → teal50 → teal200 over the button's `#0E3A3A…#135E5A` fill, and every
+  stop clears 4.5:1 against the **lighter** end.
+
+> #### ⚠ CORRECTION (fix round 1, same day) — the first version of that bullet was measurably false
+>
+> It read *"the stops here are teal50 → white → **coral400** … all ≥ 4.5:1"*. Measured, coral400
+> `#f0917c` is **5.37:1 on teal900 but 3.26:1 on teal700** — and the fill runs `from-teal900
+> to-teal700`, so most of the label sits at or past the midpoint and the coral band crossed the
+> loudest control on the screen **below the floor every 2.6s**. The label is `text-sm` = 15px
+> semibold, which is *not* WCAG "large text", so 1.4.3 wants 4.5:1 with no 3:1 arm to fall back on.
+>
+> **The failure was a transplanted premise, and that is worth more than the fix.** The refusal of
+> `#ffe0d5` — *"would carry the words through an illegible phase"* — was reasoned about the badge's
+> **light** ground and then applied to a **dark** one, where that same stop measures **6.08:1**. The
+> rejected colour was the safer one all along. A rule inherited from a neighbouring surface arrives
+> with the neighbour's background baked in.
+>
+> Corrected sweep, measured against `#135E5A`, the worst case rather than the average:
+> **teal200 `#b7dad5` 5.04:1 · white `#ffffff` 7.56:1 · teal50 `#eaf4f2` 6.74:1.** A gradient
+> interpolates monotonically per channel and relative luminance is monotonic in each channel, so the
+> stops bound the whole sweep — there is no interior colour darker than the darkest stop. The coral
+> stays on the **✦ alone**, where 3.26:1 clears 1.4.11's 3:1 for a graphic: a decorative `content`
+> glyph, with the accessible name coming from the `aria-label`.
+>
+> **The arithmetic is a test now**, computed from the tailwind tokens and the CSS declaration
+> themselves, with the rejected coral stop kept as the negative control. A contrast claim in prose
+> is a claim; a computed one re-verifies itself on every run and survives a token edit. Reach for
+> this shape whenever a colour decision is being defended in a comment.
+
+**The transparency sits behind `@supports`.** `color: transparent` is survivable only where
+`background-clip: text` actually paints the letters; without it the primary control on the screen
+has no visible label at all — while the accessible name survives on the `aria-label`, which is
+exactly what would let that ship green past every test that reads markup. The base rule paints a
+solid teal50 (6.74:1 on the worst end of the fill) and only the supported branch goes transparent;
+the `-webkit-` form is in the condition because it is the only one Safari has ever supported.
 
 Both animations collapse under the global `prefers-reduced-motion` reset, which is a universal
 `*` / `*::before` / `*::after` rule and therefore reaches an element and its `::after` alike. That is
 **verified rather than assumed**: a test asserts the reset's shape, that both animations hang off
-selectors it matches, and that neither carries a media query of its own — which is the only way to
-defeat it from the component side.
+selectors it matches, and that no reduced-motion block in the sheet mentions the sparkle — an
+opt-out of its own being the only way to defeat the reset from the component side.
+
+> **Fix round 1 — that scan used to promise more than it delivered.** It was a regex bounded to 400
+> characters after the `@media`, under a comment claiming *"the only way"*. An opt-out written past
+> the bound passed it, demonstrated: the same mutation returns `false` from the old expression and
+> red from the new one. The blocks are now read **in full** by walking brace depth. The lesson is not
+> about regexes — it is that a **bounded** mechanism must not carry an **unbounded** comment, because
+> the comment is what the next reader trusts.
 
 The **skip reveal** (the GSAP stagger over `[data-v3-facet]`) is unaffected by construction: it
 selects inside `stageEl` — `[data-v3-stage]` — and the hoisted button now lives above that element.
@@ -1056,3 +1095,34 @@ a regression of it.
 > instead of a false decision record) but it is a dead end, and the honest close is either an armed
 > state on the tile (`aria-pressed` + a disarm press, which needs `autoAsk` threaded down to
 > `StagePlan`) or copy that says what the press actually does. Both are product calls.
+
+### Fix round 1 (2026-08-08) — the pick path was pinned everywhere except where it lives
+
+**The tile's server-action binding was unpinned, and the gap is a property of React 19 rather than
+an oversight.** `action` on a `<form>` takes a **function**, and a function prop emits no attribute —
+so deleting `action={props.planAction}` renders **byte-identically** to keeping it. The S6 report
+claimed the pick path was "byte-unchanged and asserted as bytes", and it was: the assertion covers
+the *button*, while nothing at all covered the form. A refactor that dropped the binding would have
+shipped the full suite green and made "Use this plan" silently do nothing.
+
+Closed with the same instrument the S5 refresh work already owns — a **structural source scan**,
+scoped to `StagePlan`'s own body so a form elsewhere in a 4,000-line module cannot satisfy it. The
+scan strips block comments before counting, because the Ask-AI fix's own comment *quotes*
+`<form action={planAction}>`: an un-stripped scan counts prose **about** the binding as the binding.
+That is the same confusion between a description and the thing described that this branch has now
+found in three separate shapes — the enumerated BOOK-LED index, the order-pinned empty-term guard,
+and now this.
+
+**The general rule this leaves behind:** `renderToStaticMarkup` can only see what serializes.
+Function props, event handlers and action bindings are invisible to it, so any claim about *wiring*
+needs a source scan — and any test asserting a control's bytes should be read as covering the
+control, never the wiring around it.
+
+**Also in this round.** The un-submit pin and the byte pin on the path it must not disturb were split
+into two tests: they were one, so a single deletion removed both halves of a claim that only means
+something when the halves are independent. And two comments elsewhere in the module were carrying
+premises the 2026-08-07 reversal had already killed — `scopeSource`'s *"'dominant' = the core
+resolved the identifier's largest payer"* (a plain Skip also sends no label, and the core answers
+that with `payerScope: 'all'`), and `billedUnderCaption`'s header paragraph, which **forbade the
+widening that then shipped**. Both are amended in place with the reversal's date, and both quote what
+they replace. No behaviour depended on either.

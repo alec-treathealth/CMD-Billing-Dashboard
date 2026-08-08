@@ -4265,6 +4265,53 @@ test('S5 FIX — the first-ever read of rollup_refresh_run does not swallow its 
 // suppression ruling, and it is pinned twice below — once as a predicate, once through the render.
 
 const GLOBALS_CSS = readFileSync(fileURLToPath(new URL('../app/globals.css', import.meta.url)), 'utf8');
+const TAILWIND_CONFIG = readFileSync(fileURLToPath(new URL('../tailwind.config.ts', import.meta.url)), 'utf8');
+
+/** A brand token's hex, read from the config rather than transcribed — so an edit to the palette
+ *  re-runs the contrast arithmetic below instead of quietly invalidating a comment about it. */
+function twToken(name: string): string {
+  const m = TAILWIND_CONFIG.match(new RegExp(`\\b${name}:\\s*'(#[0-9A-Fa-f]{6})'`));
+  assert.ok(m?.[1] !== undefined, `no \`${name}\` token in tailwind.config.ts`);
+  return m[1].toLowerCase();
+}
+
+/** WCAG 2.x relative luminance (sRGB). Written out rather than pulled in — this file takes no deps. */
+function relativeLuminance(hex: string): number {
+  const ch = [1, 3, 5].map((i) => {
+    const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  }) as [number, number, number];
+  return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
+}
+
+function contrastRatio(a: string, b: string): number {
+  const [hi, lo] = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x) as [number, number];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/** Every `{…}` block whose opening line matches `opener`, read IN FULL by walking brace depth.
+ *  A fixed-length lookahead cannot make an exhaustive claim; this can. */
+function cssBlocksMatching(css: string, opener: RegExp): string[] {
+  const out: string[] = [];
+  for (const m of css.matchAll(opener)) {
+    let depth = 0;
+    for (let i = (m.index ?? 0) + m[0].length - 1; i < css.length; i += 1) {
+      if (css[i] === '{') depth += 1;
+      else if (css[i] === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          out.push(css.slice(m.index ?? 0, i + 1));
+          break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** Every rule that styles the sparkle, wherever it sits (including inside the @supports gate). */
+const sparkRules = (): string[] =>
+  [...GLOBALS_CSS.matchAll(/\.q-skip-spark(?:::after)?\s*\{[^}]*\}/g)].map((m) => m[0]);
 
 /** The hoisted Skip control's own `<button>`, bounded at its closing tag. Returns null when the
  *  surface offers none — an ABSENCE this file has to be able to assert positively, because the
@@ -4349,8 +4396,8 @@ test('S6: the sparkle borrows the beta badge’s IDIOM and not its sizes — eve
   // The floor sweep above scans `text-[Npx]` classes in rendered markup. This treatment sizes its ✦
   // in the stylesheet, where that sweep cannot see it — so it is swept HERE, at the source it lives
   // in. The badge it is modelled on runs 8px text / 7px star, which is exactly what must not travel.
-  const rules = [...GLOBALS_CSS.matchAll(/\.q-skip-spark(?:::after)?\s*\{[^}]*\}/g)].map((m) => m[0]);
-  assert.equal(rules.length, 2, 'the shimmer and its ✦ — and nothing else claiming the name');
+  const rules = sparkRules();
+  assert.equal(rules.length, 3, 'the shimmer, its ✦, and the @supports fallback — nothing else claiming the name');
   let sizes = 0;
   for (const rule of rules) {
     for (const m of rule.matchAll(/font-size:\s*(\d+(?:\.\d+)?)px/g)) {
@@ -4385,12 +4432,99 @@ test('S6: both sparkle animations collapse under the GLOBAL reduced-motion reset
   for (const kf of ['q-skip-shimmer', 'q-skip-twinkle']) {
     assert.match(GLOBALS_CSS, new RegExp(`@keyframes ${kf}\\b`), `${kf} has no keyframes at all`);
   }
-  // And neither re-arms itself behind its own media query, which is the one way to defeat the reset
-  // from the component side.
+  // And no reduced-motion block anywhere in the sheet mentions the sparkle — an opt-out of its own
+  // being the one way to defeat the reset from the component side.
+  //
+  // ⚠ THIS SCAN USED TO BE BOUNDED TO 400 CHARACTERS AFTER THE `@media`, AND ITS COMMENT CLAIMED
+  // "the only way", which the regex did not deliver: an opt-out written past the bound passed. The
+  // blocks are now read in FULL by walking brace depth, so the claim and the mechanism agree. (The
+  // rule count in the test above catches realistic adjacent placements; this one is exhaustive.)
+  const rmBlocks = cssBlocksMatching(GLOBALS_CSS, /@media[^{]*prefers-reduced-motion[^{]*\{/g);
+  assert.ok(rmBlocks.length >= 1, 'positive control: a reduced-motion block exists to be read');
+  for (const block of rmBlocks) {
+    assert.ok(!block.includes('q-skip-'), 'the sparkle must not carry a reduced-motion opt-out of its own');
+  }
+});
+
+test('S6: every colour the shimmer sweeps clears WCAG 1.4.3 on the fill — computed, not asserted in prose', () => {
+  /* ⚠ THIS TEST EXISTS BECAUSE THE FIRST VERSION OF THIS TREATMENT SHIPPED A FALSE CONTRAST CLAIM IN
+   * THREE DOCUMENTS. The label is `text-sm` (15px) semibold — NOT WCAG "large text" (18.66px bold /
+   * 24px), so 1.4.3 wants **4.5:1**. The original sweep carried coral400 `#f0917c`, which measures
+   * 5.37:1 on teal900 and **3.26:1 on teal700** — and the fill is `from-teal900 to-teal700`, so most
+   * of the label sits at or past the midpoint and the coral band crossed the loudest control on the
+   * screen BELOW the floor every 2.6s. The refused stop `#ffe0d5` measured 6.08:1 on this fill: the
+   * refusal reasoned about the badge's LIGHT ground and got applied to a dark one.
+   *
+   * The arithmetic now lives here, over the real tokens and the real declaration, so this class of
+   * claim is self-verifying rather than re-argued. A gradient interpolates monotonically per channel
+   * and relative luminance is monotonic in each channel, so checking the STOPS bounds the whole
+   * sweep — there is no interior colour darker than the darkest stop. */
+  const btn = skipControlOf(render(props('payer', fixture())));
+  assert.ok(btn !== null, 'positive control: there is a control to measure');
+  // The FILL, read off the control's own classes and resolved through the tailwind tokens — so a
+  // token edit re-runs the arithmetic instead of silently invalidating a comment.
+  const from = btn.match(/from-(teal\d+)/)?.[1];
+  const to = btn.match(/to-(teal\d+)/)?.[1];
+  assert.ok(from !== undefined && to !== undefined, 'the control still paints a two-token gradient fill');
+  const fill = [twToken(from), twToken(to)];
+  // The WORST CASE for light text is the LIGHTEST end of the fill, not the average of the two.
+  const worst = fill.reduce((a, b) => (relativeLuminance(a) >= relativeLuminance(b) ? a : b));
+  assert.equal(worst, twToken('teal700'), 'positive control: teal700 really is the lighter end');
+
+  const spark = sparkRules().find((r) => r.includes('linear-gradient'));
+  assert.ok(spark !== undefined, 'the shimmer declares no gradient at all');
+  const stops = [...spark.matchAll(/#[0-9a-fA-F]{6}/g)].map((m) => m[0]);
+  assert.ok(stops.length >= 3, `positive control: the sweep really has stops — found ${stops.length}`);
+  for (const stop of stops) {
+    const ratio = contrastRatio(stop, worst);
+    assert.ok(ratio >= 4.5, `label stop ${stop} is ${ratio.toFixed(2)}:1 on ${worst} — 1.4.3 wants 4.5:1 at 15px`);
+  }
+
+  /* THE ✦ IS DECORATION, AND IS HELD TO 1.4.11's 3:1 DELIBERATELY. It is a `content` glyph on an
+   * `::after`, it carries no meaning, and the button's accessible name comes from its `aria-label` —
+   * so it is a graphical object, not text this rule has to read. Stated as the bar it is measured
+   * against rather than left for a reader to infer, because "the star is only 3:1" is exactly the
+   * finding that should land on the reasoning and not on the number. */
+  const after = sparkRules().find((r) => r.includes('::after'));
+  assert.ok(after !== undefined, 'the ✦ rule is gone');
+  const star = after.match(/(?:^|[^-])color:\s*(#[0-9a-fA-F]{6})/)?.[1];
+  assert.ok(star !== undefined, 'the ✦ declares no colour');
+  const starRatio = contrastRatio(star, worst);
+  assert.ok(starRatio >= 3, `the ✦ is ${starRatio.toFixed(2)}:1 on ${worst} — 1.4.11 wants 3:1 for a graphic`);
+
+  // NEGATIVE CONTROL — the arithmetic is real. The stop that shipped and had to be replaced fails
+  // this very check, so a green run is not the calculator agreeing with itself.
+  assert.ok(contrastRatio('#f0917c', twToken('teal700')) < 4.5, 'the rejected coral stop still fails, as measured');
+  assert.ok(contrastRatio('#ffffff', '#000000') > 20, 'and the calculator agrees with the known extreme');
+});
+
+test('S6: the label survives a UA without background-clip:text — transparency is behind @supports', () => {
+  /* `background-clip: text` + `color: transparent` is the whole shimmer, and the failure mode is
+   * total: with no support the label is transparent over the fill and the PRIMARY control on the
+   * screen has no visible text at all. The accessible name survives (it is an `aria-label`), which
+   * makes this exactly the class of defect that ships green and is invisible to every test that
+   * reads markup. The base rule therefore paints a solid, readable colour and only the @supports
+   * arm makes it transparent. */
+  const base = sparkRules().find((r) => r.includes('linear-gradient'));
+  assert.ok(base !== undefined, 'the base rule is gone');
+  assert.ok(!/(?:^|[^-])color:\s*transparent/.test(base), 'the BASE rule must not blank the label');
+  assert.ok(!/text-fill-color:\s*transparent/.test(base), 'nor blank it through -webkit-text-fill-color');
+  const fallback = base.match(/(?:^|[^-])color:\s*(#[0-9a-fA-F]{6})/)?.[1];
+  assert.ok(fallback !== undefined, 'the base rule declares no fallback colour');
+  const btn = skipControlOf(render(props('payer', fixture())));
+  const to = btn?.match(/to-(teal\d+)/)?.[1];
+  assert.ok(to !== undefined);
   assert.ok(
-    !/@media[^{]*prefers-reduced-motion[^{]*\{[\s\S]{0,400}?q-skip-/.test(GLOBALS_CSS),
-    'the sparkle must not carry a reduced-motion opt-out of its own',
+    contrastRatio(fallback, twToken(to)) >= 4.5,
+    `the fallback colour ${fallback} must itself be readable on the fill`,
   );
+
+  // ...and the transparency really is gated, on a condition that includes the -webkit- form, because
+  // that is the only one Safari has ever supported.
+  const supports = GLOBALS_CSS.match(/@supports \(([^{]*)\) \{\s*\.q-skip-spark[\s\S]*?\n\}/)?.[0];
+  assert.ok(supports !== undefined, 'the transparency is not behind an @supports gate at all');
+  assert.match(supports, /-webkit-background-clip:\s*text/, 'the gate must accept the -webkit- form');
+  assert.match(supports, /(?:^|[^-])color:\s*transparent/m, 'and it is where transparency lives');
 });
 
 test('S6: the sparkle is decoration over a LIVE control — motion narrates, it never gates input', () => {
@@ -4463,31 +4597,72 @@ test('S6: the Skip precedes the question — and the live region still announces
   }
 });
 
+/** Each plan tile's `<form>`, sliced at its closing tag. */
+function planTileForms(): string[] {
+  const html = render(props('plan', fixture(), { payerPick: 'Aetna' }));
+  const tiles = html.split('name="candidate"').slice(1);
+  assert.equal(tiles.length, 2, 'positive control: two plan tiles under Aetna');
+  return tiles.map((t) => t.slice(0, t.indexOf('</form>')));
+}
+
 test('S6: asking the AI about a plan no longer PICKS it — the Ask control is a button, not a submit', () => {
   // It was `type="submit"` with `onClick={onAskAi}` inside `<form action={planAction}>`: one press
   // fired `ai_armed` AND `plan_submitted`, so interrogating a plan committed to it — and the receipt
   // then recorded a "PLAN <employer>" decision the operator never made.
-  const html = render(props('plan', fixture(), { payerPick: 'Aetna' }));
-  const tiles = html.split('name="candidate"').slice(1);
-  assert.equal(tiles.length, 2, 'positive control: two plan tiles under Aetna');
-  for (const t of tiles) {
-    const form = t.slice(0, t.indexOf('</form>'));
+  for (const form of planTileForms()) {
     const ask = outerHtmlFrom(form, form.lastIndexOf('<button', form.indexOf('Ask AI about this plan')));
     assert.match(ask, /^<button type="button"/, 'the Ask control must not submit the form it sits inside');
     assert.ok(!/type="submit"/.test(ask));
     // Exactly ONE submit is left in the tile — the pick path — so the form has a single, unambiguous
     // default submission and there is no second candidate for implicit submission.
     assert.equal(form.match(/type="submit"/g)?.length, 1, 'one submit per tile: Use this plan');
-    // The pick path is BYTE-unchanged. Asserted as bytes on purpose: this is the path that must not
-    // move while the control beside it does.
+  }
+});
+
+test('S6: the plan tile PICK PATH is byte-unchanged — split from the un-submit deliberately', () => {
+  /* ⚠ SPLIT FROM THE TEST ABOVE (fix round 1). Both guards used to live in one test, so ONE deletion
+   * removed the un-submit pin AND the byte pin on the path it must not disturb — and those are the
+   * two halves of the S6 claim that only mean something when they are independent. */
+  for (const [i, form] of planTileForms().entries()) {
     const use = outerHtmlFrom(form, form.lastIndexOf('<button', form.indexOf('Use this plan')));
     assert.match(
       use,
       /^<button type="submit" class="rounded-lg bg-teal700 px-2\.5 py-1 text-xs font-semibold text-white transition-colors hover:bg-teal900 disabled:opacity-60">Use this plan<\/button>$/,
-      'the tile pick path is byte-unchanged',
+      `tile ${i}: the pick path is byte-unchanged`,
     );
-    assert.match(t, /^ value="\d+"\/>/, 'and the candidate index still rides the form as a hidden field');
+    assert.match(form, /^ value="\d+"\/>/, `tile ${i}: the candidate index still rides the form as a hidden field`);
   }
+});
+
+test('S6 STRUCTURAL — the plan tile is still WIRED to its server action, which no render test can see', () => {
+  /* ⚠ THE HALF renderToStaticMarkup IS BLIND TO, and it is the half the pick depends on. `action` on
+   * a <form> takes a FUNCTION in React 19, and a function prop emits no attribute — so deleting
+   * `action={props.planAction}` renders byte-identically to keeping it, ships the whole suite green,
+   * and makes "Use this plan" silently do nothing. Every byte assertion in this file covers the
+   * BUTTON; nothing covered the form. Same class of scan as the S5 STRUCTURAL test above, for the
+   * same reason: a binding a hermetic renderer cannot observe has to be read at the source.
+   *
+   * Scoped to StagePlan's own body, so a form elsewhere in this 4,000-line module cannot satisfy it. */
+  const src = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/resolution-flow.tsx', import.meta.url)),
+    'utf8',
+  );
+  const at = src.indexOf('export function StagePlan');
+  assert.ok(at >= 0, 'StagePlan is not in this module — the scan would be vacuous');
+  // COMMENTS STRIPPED FIRST. The Ask-AI fix's own comment quotes `<form action={planAction}>`, so an
+  // un-stripped scan counts prose ABOUT the binding as the binding — the exact confusion between a
+  // description and the thing described that this whole branch keeps finding in one form or another.
+  const body = src.slice(at, src.indexOf('\n// ── Stage 4', at)).replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.ok(body.length > 0 && body.includes('name="candidate"'), 'positive control: this really is the tile body');
+  const forms = [...body.matchAll(/<form\b/g)];
+  assert.equal(forms.length, 1, 'one form per tile, one tile template — a second is a second pick path');
+  assert.match(
+    body.slice(forms[0]!.index ?? 0, (forms[0]!.index ?? 0) + 200),
+    /<form\s+action=\{props\.planAction\}/,
+    'the tile form must be bound to planAction, or picking a plan does nothing at all',
+  );
+  // ...and the prop it binds is really the one the root threads down, not a same-named local.
+  assert.match(src, /planAction=\{props\.planAction\}/, 'the root threads its own planAction into the stage');
 });
 
 test('S6: arming the AI leaves the operator on the plan stage — and a later pick still auto-asks', () => {
