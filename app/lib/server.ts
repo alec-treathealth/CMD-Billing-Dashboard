@@ -3045,7 +3045,9 @@ export async function loadQualifyPayerSpread(
 
 /** Per-facility dollar-weighted ranking rows for a resolved payer, in-window, cross-tenant. */
 export async function loadQualifyFacilities(
-  payer: string,
+  /** NULL = comparable-cohort (market narrow) or identifier-wide (token narrow) — the builder's
+   *  chokepoint enforces that one of the two scopes is present. */
+  payer: string | null,
   from: string,
   to: string,
   entityIds: string[],
@@ -3064,7 +3066,8 @@ export async function loadQualifyFacilities(
 export async function loadQualifyIdentifierLandingFacility(
   token: string,
   kind: QualifyTokenKind,
-  payer: string,
+  /** NULL = identifier-wide (the v3 Skip): the most-recent in-window claim under ANY label. */
+  payer: string | null,
   from: string,
   to: string,
   entityIds: string[],

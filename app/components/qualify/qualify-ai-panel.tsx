@@ -20,6 +20,8 @@ import type { QualifyAiInput } from '../../../src/collections/qualifyAi';
 import type { QualifySnapshot } from '../../lib/qualify/contract';
 import { qualifyAiChips, type QualifyAiChipId } from '../../lib/qualify/aiChips';
 import { deriveTopRanks } from '../../lib/qualify/policyRating';
+// The scope claim's ONE home — see scopeLabel.ts for why it does not live in this file.
+import { aiScopeLabel } from '../../lib/qualify/scopeLabel';
 import { IQ_BAND_HEX } from './tokens';
 
 type ChipId = QualifyAiChipId;
@@ -27,7 +29,10 @@ type ChipId = QualifyAiChipId;
 function buildInput(question: ChipId, snap: QualifySnapshot, blind: boolean): QualifyAiInput {
   return {
     question,
+    // The scope, stated to the model rather than left to be inferred from a null payerName — after
+    // the identifier-wide Skip that null means "several labels", not "none". See QualifyAiInput.
     payerName: snap.resolved?.payerName ?? null,
+    payerScope: snap.resolved === null ? 'none' : snap.resolved.payerScope,
     policy: snap.policy?.found
       ? {
           carrier: snap.policy.carrier,
@@ -51,6 +56,7 @@ function buildInput(question: ChipId, snap: QualifySnapshot, blind: boolean): Qu
       distinctPatients: f.distinctPatients,
       lineCount: f.lineCount,
       medianDaysToPayment: f.medianDaysToPayment,
+      payerCount: f.payerCount,
       factors: f.factors.map((x) => ({
         key: x.key,
         label: x.label,
@@ -192,8 +198,11 @@ export function QualifyAiPanel({
       <div className="flex flex-wrap items-center gap-2 border-b border-line bg-gradient-to-b from-teal50 to-surface px-4 py-2.5">
         <span aria-hidden className="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-teal700 text-[13px] text-white">✦</span>
         <h2 className="font-head text-[15px] font-semibold tracking-tight">Ask about this policy</h2>
+        {/* The scope this panel answers over. `?? carrier ?? 'This search'` alone would print the VOB
+            CARRIER over an all-payers ranking — a narrower claim than the data — so all-payers gets
+            its own words rather than falling through the chain. */}
         <span className="text-xs text-muted-foreground">
-          {snapshot.resolved?.payerName ?? snapshot.policy?.carrier ?? 'This search'} · aggregates only
+          {aiScopeLabel(snapshot)} · aggregates only
           {blind ? ' · amounts withheld for this role' : ''}
         </span>
       </div>
@@ -275,7 +284,7 @@ export function QualifyAiPanel({
               {!streaming && text && active === 'ranks' && ranks.length > 1 ? (
                 <div className="mt-3 border-t border-line pt-2.5">
                   <div className="font-mono text-xs font-semibold uppercase tracking-wide text-teal700">
-                    Top {ranks.length} facilities · {snapshot.resolved?.payerName ?? snapshot.policy?.carrier ?? 'this search'}
+                    Top {ranks.length} facilities · {aiScopeLabel(snapshot, 'lower')}
                   </div>
                   <div className="mt-2 flex flex-col">
                     {ranks.map((r) => (

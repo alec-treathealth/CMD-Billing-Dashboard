@@ -19,7 +19,7 @@
  * class of bug, PR #124's lesson, applied here by construction).
  *
  * ── WHERE THE STATE RULES LIVE ──────────────────────────────────────────────────────────────────
- * In `./flow-state.ts` — `shellReducer`, fifteen fields, eighteen actions, with the full
+ * In `./flow-state.ts` — `shellReducer`, sixteen fields, nineteen actions, with the full
  * per-action field-write table and the lettered invariants (a–m) in its header. READ THAT FIRST
  * before changing any handler here. What is left in this file is deliberately only the three things
  * a reducer cannot hold: the PHI ref, the effects, and the values derived per render (`stage`,
@@ -29,6 +29,12 @@
  * GSAP, the requested idiom: the incoming stage slides up 14px/220ms ease-out; tiles stagger
  * min(index,3)×60ms (capped — a 186-plan list must not cascade forever). One easing. Disabled
  * entirely under prefers-reduced-motion. Motion narrates progression; it never gates input.
+ *
+ * THREE SURFACES SPEAK IT, and only three: the stage subtree (14px), the scorecard/plan tiles
+ * (6-10px, scroll-batched), and — added 2026-08-07 for the Skip — the answer stage's FACET INVENTORY
+ * (6px, staggered on arrival). Same duration, same ease, same stagger function. The inventory is the
+ * one that animates plain OPACITY instead of `autoAlpha`, because its rows are live controls and
+ * `visibility: hidden` would make them unclickable for the length of the stagger — see the effect.
  */
 import {
   useActionState,
@@ -62,10 +68,11 @@ import {
   payerGroupsOf,
   ResolutionStages,
   scopeKeyOf,
+  scopeSourceOf,
   tickerIsLive,
   type FlowStage,
 } from './resolution-flow';
-// The flow's fifteen fields and the rules that move them. Its header is the spec; this file is the
+// The flow's sixteen fields and the rules that move them. Its header is the spec; this file is the
 // transport (PHI ref, effects, derivations) wired to it.
 import { INITIAL_SHELL_STATE, shellReducer } from './flow-state';
 
@@ -91,7 +98,7 @@ export function ResolutionFlowClient({
   // The raw term — JS memory only. See the header block before moving this anywhere.
   const termRef = useRef<string>('');
 
-  // ONE state machine, not fifteen useState hooks. Destructured so every read site below is the
+  // ONE state machine, not sixteen useState hooks. Destructured so every read site below is the
   // same identifier it always was. Notable fields, restated here because they are easy to misuse:
   //   · retryNonce — monotonic, NEVER reset. It is the only way to re-fire a request whose inputs
   //     did not change: the snapshot effect keys on `scopeKey`, which is by construction identical
@@ -108,7 +115,6 @@ export function ResolutionFlowClient({
     picked,
     skipped,
     filters,
-    employerQuery,
     planFilter,
     autoAsk,
     backTo,
@@ -119,6 +125,7 @@ export function ResolutionFlowClient({
     windowDays,
     loadedKey,
     area,
+    narrowExpanded,
   } = flow;
 
   // NOT in the reducer, deliberately: the ticker is a mount-once fetch that no flow field and no
@@ -153,7 +160,7 @@ export function ResolutionFlowClient({
     dispatch({ type: 'skipped' });
   }, []);
 
-  const onToggleFilter = useCallback((facet: 'planType' | 'funding' | 'employer', value: string) => {
+  const onToggleFilter = useCallback((facet: 'funding' | 'employer', value: string) => {
     dispatch({ type: 'filter_toggled', facet, value });
   }, []);
 
@@ -166,6 +173,18 @@ export function ResolutionFlowClient({
    *  snapshot request is issued (flow-state.ts invariant m). */
   const onSelectArea = useCallback((key: string) => {
     dispatch({ type: 'area_selected', key });
+  }, []);
+
+  /** The NARROW SEARCH card's disclosure. A pure presentation flip that reaches no request — it
+   *  writes the one reducer field `scopeKeyOf` does not read, so the fetch effect below cannot
+   *  observe it (flow-state.ts invariant n). It is in the reducer for the reason the reducer's own
+   *  header gives: two navigations have to WRITE it — a Skip must land the card OPEN and a plan pick
+   *  must land it CLOSED — so it fails the `trends` orthogonality test that keeps state out. (An
+   *  earlier version of this comment claimed no local `useState` could express that. Not true: a
+   *  `useState` plus an effect keyed on `skipped` could. It would just put a navigation rule outside
+   *  the machine that owns every other one, and out of reach of the field-write table.) */
+  const onToggleNarrow = useCallback(() => {
+    dispatch({ type: 'narrow_toggled' });
   }, []);
 
   /** Re-issue the SAME snapshot request after a failure. Bumping the nonce is what moves the
@@ -216,8 +235,23 @@ export function ResolutionFlowClient({
   // the user explicitly declined to choose.
   const pickLabel = skipped ? null : (state.resolution?.group.claimsPayerLabels[0] ?? null);
   const sentOverride = payerOverride ?? pickLabel;
-  const scopeSource: 'user' | 'pick' | 'dominant' | 'skipped' =
-    payerOverride !== null ? 'user' : pickLabel !== null ? 'pick' : skipped ? 'skipped' : 'dominant';
+  // TWO CLAIMS, TWO VALUES. `scopeSource` answers "who chose the payer label" and nothing else; the
+  // reducer's `skipped` answers "was a plan chosen" and is threaded to the presentation as its own
+  // prop below. They used to be one enum, and because a billed-under chip legitimately outranks a
+  // skip for the FIRST question, one chip press after a Skip turned every skip guard off at once and
+  // re-presented the declined plan as a picked one. See `ScopeSource` in ./resolution-flow.
+  const scopeSource = scopeSourceOf({ payerOverride, pickLabel });
+  // ── IDENTIFIER-WIDE: what "Skip — search all plans" now actually asks for ──────────────────────
+  // Until 2026-08-07 a Skip sent NOTHING and the core resolved the dominant billed-under label, so
+  // the "general search" covered one label out of up to seventeen — measured on a live prefix, AETNA
+  // 5,308 lines ranked while AETNA US HEALTHCARE (1,038) and AETNA - FIRST HEALTH NETWORK (7) were
+  // silently excluded, along with the two facilities the member billed ONLY under those. Alec's
+  // ruling: rank the whole footprint. `payerScope: 'all'` is that request.
+  //
+  // A BILLED UNDER chip still wins. `payerOverride !== null` means the operator explicitly re-scoped
+  // to one label AFTER skipping, the chip renders as "showing", and the core would refuse to honour
+  // both anyway — so this client asks for exactly one of them, and the two never race.
+  const allPayers = skipped && payerOverride === null;
 
   // ── The answer-stage filter universe and the market narrow ────────────────────────────────────
   // Universe: after a Skip, every candidate behind the identifier; otherwise the picked carrier's
@@ -230,8 +264,16 @@ export function ResolutionFlowClient({
     return cluster ? all.filter((c) => cluster.names.has(c.payerDisplayName)) : all;
   }, [state.resolution, skipped, payerPick, payerGroups]);
 
-  // funding goes to the market directly (a closed vocabulary the action intersects); plan type has
-  // no market field, so it narrows by way of the employer set the filtered candidates resolve to.
+  // Funding goes to the market directly (a closed vocabulary the action intersects); the employer
+  // selection goes by way of `employerNarrowFor`, which sends it only when it is a PROPER SUBSET
+  // within the 200 bound.
+  //
+  // ⚠ THIS MEMO IS THE WHOLE REASON PLAN TYPE STOPPED BEING A FILTER (2026-08-07). It is the seam
+  // where a facet with no market field of its own still becomes a request: `filterCandidates`
+  // narrows the candidate set, and the EMPLOYERS of whatever survives are sent as `market.employers`.
+  // That made plan type LOOK inert — it was not. Anything added to `AnswerFilters` from here on
+  // inherits the same reach; assume a new facet re-ranks the screen until you have shown it cannot
+  // move `narrow.employers`.
   const narrow = useMemo(() => {
     if (!answerFiltersActive(filters)) return { employers: null as string[] | null, tooMany: null as number | null };
     const filtered = filterCandidates(answerCandidates, filters);
@@ -249,6 +291,7 @@ export function ResolutionFlowClient({
     windowDays,
     funding: filters.funding,
     employers: narrow.employers,
+    allPayers,
   });
   // THREE states, not one boolean — because a failed refetch now KEEPS its snapshot, and
   // `isRefetching` cannot tell "a request is running" from "a request stopped, badly".
@@ -286,6 +329,8 @@ export function ResolutionFlowClient({
       window: { kind: 'trailing', days: windowDays ?? 90 },
       auto: windowDays === null,
       ...(sentOverride !== null ? { payerOverride: sentOverride } : {}),
+      // Mutually exclusive with payerOverride by construction (see `allPayers` above).
+      ...(allPayers ? { payerScope: 'all' as const } : {}),
       ...(market ? { market } : {}),
     })
       .then((s) => {
@@ -404,6 +449,51 @@ export function ResolutionFlowClient({
         });
       }
 
+      // ── THE SKIP REVEAL (Alec, 2026-08-07) ──────────────────────────────────────────────────────
+      // The Skip lands on an inventory of every facet and its ON/OFF state, and the motion carries
+      // the eye down through that inventory — the same 220ms / power2.out / min(i,3)×60ms vocabulary
+      // the stage and the tiles already speak, at the tiles' lower amplitude. No second easing, no
+      // second timing curve, no new idiom.
+      //
+      // CONCURRENT WITH THE STAGE ENTRANCE, not sequenced after it. Both tweens are created in the
+      // same `gsap.context` on the same tick and start together; what separates them visually is the
+      // STAGGER (0 / 60 / 120 / 180ms, capped) against the stage's single 14px rise, so the rows
+      // resolve just behind it. Stating that plainly, because "the stage lands first and the rows
+      // follow" would describe a timeline this code does not build and send a reader hunting a delay.
+      //
+      // ⚠ OPACITY, NOT `autoAlpha`, AND THAT IS THE WHOLE CONSTRAINT. `autoAlpha` sets
+      // `visibility: hidden`, which makes an element genuinely unclickable and drops it out of the
+      // accessibility tree — so the tile treatment above, correct for a scroll-revealed LIST, would
+      // here make the last row's toggles dead for ~400ms after a Skip. These rows are CONTROLS, and
+      // the ruling is that motion narrates progression and never gates input. With plain opacity the
+      // switches are clickable, focusable and announced from the first frame; the animation is
+      // decoration over a live surface, which is the only honest way to animate a control.
+      //
+      // Runs off the same layout effect (and therefore the same reduced-motion guard) as everything
+      // else here: under `prefers-reduced-motion` the inventory renders complete and immediately.
+      // Selected across the STAGE, not inside `[data-v3-inventory]`, because one facet's control does
+      // not live on the control card: the AREA row sits beside the grid it narrows (see AreaLine —
+      // everything on the control card re-issues the ranking request and area does not). It is still
+      // a facet of the inventory, so it is still a beat of the reveal, and DOM order puts it last,
+      // which is where it belongs — the last thing between the operator and the list.
+      const facetRows = gsap.utils.toArray<HTMLElement>('[data-v3-facet]', stageEl);
+      if (facetRows.length > 0) {
+        gsap.fromTo(
+          facetRows,
+          { opacity: 0, y: 6 },
+          {
+            opacity: 1,
+            y: 0,
+            duration: 0.22,
+            ease: 'power2.out',
+            stagger: (i: number) => staggerDelayMs(i) / 1000,
+            // Belt and braces: if a tween is ever interrupted mid-flight (a re-scope unmounting the
+            // block), the row must not be left at a fractional opacity.
+            onInterrupt: () => gsap.set(facetRows, { opacity: 1, y: 0 }),
+          },
+        );
+      }
+
       // The plan stage's sticky header: CSS `position: sticky` does the pinning; ScrollTrigger only
       // ADDS the elevation (`q-stuck` in globals.css) once the grid has scrolled beneath it — no
       // `pin: true`, whose spacer elements fight the grid layout.
@@ -517,6 +607,10 @@ export function ResolutionFlowClient({
                 ) : null,
                 pending: isPending,
                 scopeSource,
+                // The reducer field itself. Everything that must not claim a plan was chosen —
+                // the receipt, the identity line, the skip banner, the suppressed notices and
+                // provenance — reads THIS, so a re-scope cannot un-skip the presentation.
+                skipped,
                 refetching,
                 staleAfterError,
                 onRetry: onRetrySnapshot,
@@ -524,8 +618,6 @@ export function ResolutionFlowClient({
                 filters,
                 onToggleFilter,
                 onClearFilters,
-                employerQuery,
-                onEmployerQuery: (v) => dispatch({ type: 'employer_query_changed', value: v }),
                 employerNarrowTooMany: narrow.tooMany,
                 area,
                 onSelectArea,
@@ -536,6 +628,8 @@ export function ResolutionFlowClient({
                 onPayerOverride: (label) => dispatch({ type: 'payer_override_changed', label }),
                 windowDays,
                 onWindowDays: (d) => dispatch({ type: 'window_days_changed', days: d }),
+                narrowExpanded,
+                onToggleNarrow,
               }
             : null
         }

@@ -963,6 +963,56 @@ test('facility panel — a nearly-full house is flagged, a roomy one is not', ()
   assert.ok(tight.includes('of 12 beds') && roomy.includes('of 12 beds'));
 });
 
+test('facility panel — a FULL house says so; it does not go silent like missing data', () => {
+  // THE REGRESSION THIS LOCKS. The chip used to be gated on `openBeds > 0`, so a residential house
+  // with every bed occupied rendered nothing at all — indistinguishable from "no census row". That
+  // hid the status of 5 of 23 facilities on 2026-08-07, and it hid the single most actionable fact
+  // the card can carry: do not route a patient here.
+  const html = renderToStaticMarkup(
+    <FacilityPanel facilities={[{ ...FACILITIES[0]!, openBeds: 0, bedCapacity: 12 }]} hasAmounts heatOn />,
+  );
+  assert.ok(html.includes('Full · 0 of 12'), 'full is stated, with its denominator');
+  assert.ok(html.includes('text-status-warn'), 'and reads as tight, because it is');
+  assert.ok(
+    html.includes('all 12 licensed beds occupied'),
+    'the tooltip says what happened, not merely that the number is zero',
+  );
+});
+
+test('facility panel — an outpatient board reports no beds rather than claiming to be full', () => {
+  // The other zero. Outpatient boards legitimately have no beds, so a denominator-less 0 must stay
+  // silent — otherwise every outpatient facility would announce itself at capacity.
+  const html = renderToStaticMarkup(
+    <FacilityPanel facilities={[{ ...FACILITIES[0]!, openBeds: 0, bedCapacity: null }]} hasAmounts heatOn />,
+  );
+  assert.ok(!html.includes('Full'), 'no bed facility, no bed claim');
+  assert.ok(!/\d+ open bed/.test(html), 'and no count either');
+});
+
+test('facility panel — no census row at all stays silent, and is not read as full', () => {
+  const html = renderToStaticMarkup(
+    <FacilityPanel facilities={[{ ...FACILITIES[0]!, openBeds: null, bedCapacity: 12 }]} hasAmounts heatOn />,
+  );
+  assert.ok(!html.includes('Full'), 'unknown is not full');
+  assert.ok(!/\d+ of 12 beds/.test(html), 'and no occupancy is invented from the capacity alone');
+});
+
+test('bedChip — the three states are decided by the denominator, not by truthiness', async () => {
+  const { bedChip } = await import('../components/qualify/facility-panel');
+  // The pair that motivated the fix: same openBeds, opposite meanings.
+  assert.equal(bedChip(0, 12)?.tone, 'tight', 'capacity known + 0 open = FULL');
+  assert.equal(bedChip(0, null), null, 'capacity absent + 0 open = not a bed facility');
+  assert.equal(bedChip(null, 12), null, 'no census row = unknown');
+  // The pre-existing behaviour is unchanged.
+  assert.equal(bedChip(8, 20)?.label, '8 of 20 beds');
+  assert.equal(bedChip(8, 20)?.tone, 'roomy', '40% free');
+  assert.equal(bedChip(1, 12)?.tone, 'tight', '8% free is at/under the 15% floor');
+  assert.equal(bedChip(8, null)?.label, '8 open beds', 'bare count when no denominator is on file');
+  assert.equal(bedChip(1, null)?.label, '1 open bed', 'and it is singular at one');
+  // A zero capacity is not a usable denominator — treat it like an absent one, never divide by it.
+  assert.equal(bedChip(0, 0), null, 'capacity 0 is absent, not full');
+});
+
 test('facility panel — bed occupancy carries no dollars, so a blind seat sees the same chip', () => {
   const html = renderToStaticMarkup(
     <FacilityPanel facilities={[{ ...FACILITIES[0]!, openBeds: 8, bedCapacity: 20 }]} hasAmounts={false} heatOn />,

@@ -49,8 +49,7 @@ function dirty(over: Partial<ShellState> = {}): ShellState {
     payerPick: 'ALPHA MUTUAL',
     picked: true,
     skipped: true,
-    filters: { planTypes: ['PPO'], funding: ['self_funded'], employers: ['NORTHWIND LOGISTICS'] },
-    employerQuery: 'north',
+    filters: { funding: ['self_funded'], employers: ['NORTHWIND LOGISTICS'] },
     planFilter: 'gold',
     autoAsk: true,
     backTo: 'payer',
@@ -61,6 +60,7 @@ function dirty(over: Partial<ShellState> = {}): ShellState {
     windowDays: 180,
     loadedKey: 'p:ALPHA|w:180|f:|e:',
     area: 'TN',
+    narrowExpanded: true,
     ...over,
   };
 }
@@ -75,8 +75,7 @@ const EVERY_ACTION: ShellAction[] = [
   { type: 'went_back', target: 'plan' },
   { type: 'payer_picked', payer: 'BETA MUTUAL' },
   { type: 'plan_filter_changed', value: 'silver' },
-  { type: 'employer_query_changed', value: 'south' },
-  { type: 'filter_toggled', facet: 'planType', value: 'HMO' },
+  { type: 'filter_toggled', facet: 'funding', value: 'fully_insured' },
   { type: 'filters_cleared' },
   { type: 'retry_requested' },
   { type: 'snapshot_requested' },
@@ -87,6 +86,7 @@ const EVERY_ACTION: ShellAction[] = [
   { type: 'payer_override_changed', label: 'BETA MUTUAL INC' },
   { type: 'window_days_changed', days: 30 },
   { type: 'area_selected', key: 'CA' },
+  { type: 'narrow_toggled' },
 ];
 
 // ── 1 · The field-write table ────────────────────────────────────────────────────────────────────
@@ -100,7 +100,6 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       picked: false,
       skipped: false,
       filters: NO_ANSWER_FILTERS,
-      employerQuery: '',
       planFilter: '',
       autoAsk: false,
       backTo: null,
@@ -109,6 +108,7 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       payerOverride: null,
       windowDays: null,
       area: AREA_ALL,
+      narrowExpanded: false,
     },
   },
   {
@@ -121,11 +121,13 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       planFilter: '',
       backTo: null,
       filters: NO_ANSWER_FILTERS,
-      employerQuery: '',
       payerOverride: null,
       snapshot: null,
       snapshotError: null,
       area: AREA_ALL,
+      // Declared for the record; the table CANNOT see it (see INV n) because the fixture is already
+      // `true`. INV n is what actually pins this write, from the opposite side.
+      narrowExpanded: true,
     },
   },
   {
@@ -135,11 +137,11 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       picked: true,
       skipped: false,
       filters: NO_ANSWER_FILTERS,
-      employerQuery: '',
       backTo: null,
       snapshot: null,
       snapshotError: null,
       area: AREA_ALL,
+      narrowExpanded: false,
     },
   },
   {
@@ -154,11 +156,11 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       picked: false,
       skipped: false,
       filters: NO_ANSWER_FILTERS,
-      employerQuery: '',
       payerPick: null,
       planFilter: '',
       backTo: 'identify',
       area: AREA_ALL,
+      narrowExpanded: false,
     },
   },
   {
@@ -173,11 +175,11 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       picked: false,
       skipped: false,
       filters: NO_ANSWER_FILTERS,
-      employerQuery: '',
       payerPick: null,
       planFilter: '',
       backTo: 'payer',
       area: AREA_ALL,
+      narrowExpanded: false,
     },
   },
   {
@@ -192,10 +194,10 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       picked: false,
       skipped: false,
       filters: NO_ANSWER_FILTERS,
-      employerQuery: '',
       planFilter: '',
       backTo: 'plan',
       area: AREA_ALL,
+      narrowExpanded: false,
     },
   },
   {
@@ -209,14 +211,13 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     writes: { planFilter: 'silver' },
   },
   {
-    name: 'employer_query_changed writes employerQuery only',
-    action: { type: 'employer_query_changed', value: 'south' },
-    writes: { employerQuery: 'south' },
-  },
-  {
-    name: 'filters_cleared writes filters + employerQuery + area only',
+    // The employer DRAFT is no longer machine state (2026-08-07): the shared type-ahead that replaced
+    // the hand-rolled tag-search owns its own typed query, so there is no `employer_query_changed`
+    // row here and no `employerQuery` in any reset below. What this button still clears is the
+    // SELECTION, through `filters`.
+    name: 'filters_cleared writes filters + area only',
     action: { type: 'filters_cleared' },
-    writes: { filters: NO_ANSWER_FILTERS, employerQuery: '', area: AREA_ALL },
+    writes: { filters: NO_ANSWER_FILTERS, area: AREA_ALL },
   },
   {
     name: 'retry_requested writes snapshotError + retryNonce ONLY',
@@ -258,6 +259,14 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     action: { type: 'area_selected', key: 'CA' },
     writes: { area: 'CA' },
   },
+  {
+    // The NARROW SEARCH card's open/closed bit. Its value here is unremarkable; the row exists for
+    // the NON-writes — a disclosure toggle that touched `filters`, `snapshot` or `loadedKey` would be
+    // a presentation control quietly re-issuing a ranking request.
+    name: 'narrow_toggled flips narrowExpanded ONLY — a disclosure is not a re-scope',
+    action: { type: 'narrow_toggled' },
+    writes: { narrowExpanded: false },
+  },
 ];
 
 for (const row of TABLE) {
@@ -274,8 +283,7 @@ test('F3b: the initial state is the fifteen shell defaults, filters by shared re
     payerPick: null,
     picked: false,
     skipped: false,
-    filters: { planTypes: [], funding: [], employers: [] },
-    employerQuery: '',
+    filters: { funding: [], employers: [] },
     planFilter: '',
     autoAsk: false,
     backTo: null,
@@ -286,6 +294,7 @@ test('F3b: the initial state is the fifteen shell defaults, filters by shared re
     windowDays: null,
     loadedKey: null,
     area: AREA_ALL,
+    narrowExpanded: false,
   });
   assert.equal(Object.keys(INITIAL_SHELL_STATE).length, 15, 'fifteen fields, no more');
   assert.equal(INITIAL_SHELL_STATE.filters, NO_ANSWER_FILTERS, 'the SHARED constant, not a copy');
@@ -294,7 +303,7 @@ test('F3b: the initial state is the fifteen shell defaults, filters by shared re
 
 test('F3b: every filters reset is the SHARED constant BY REFERENCE — and clears the area with it', () => {
   // BY REFERENCE, deliberately. The field-write table above compares with deepEqual, which is
-  // reference-blind: swapping all five of these resets to `{ planTypes: [], funding: [], employers: [] }`
+  // reference-blind: swapping all five of these resets to `{ funding: [], employers: [] }`
   // left the whole suite green (review MUT-F), even though `narrow`'s useMemo depends on `filters`
   // by identity and a fresh-but-equal object invalidates it on every single navigation. The header
   // calls this rule load-bearing; until now only INITIAL_SHELL_STATE pinned it.
@@ -324,7 +333,7 @@ test('F3b: every filters reset is the SHARED constant BY REFERENCE — and clear
 
 test('F3b: every filters reset is the SHARED constant BY REFERENCE, not a fresh equal literal', () => {
   // BY REFERENCE, deliberately. The field-write table above compares with deepEqual, which is
-  // reference-blind: swapping all five of these resets to `{ planTypes: [], funding: [], employers: [] }`
+  // reference-blind: swapping all five of these resets to `{ funding: [], employers: [] }`
   // left the whole suite green (review MUT-F), even though `narrow`'s useMemo depends on `filters`
   // by identity and a fresh-but-equal object invalidates it on every single navigation. The header
   // calls this rule load-bearing; until now only INITIAL_SHELL_STATE pinned it.
@@ -355,7 +364,7 @@ test('INV a: a new search clears EVERYTHING downstream, from any prior state', (
   s = shellReducer(s, { type: 'payer_picked', payer: 'ALPHA MUTUAL' });
   s = shellReducer(s, { type: 'plan_submitted' });
   s = shellReducer(s, { type: 'filter_toggled', facet: 'funding', value: 'self_funded' });
-  s = shellReducer(s, { type: 'employer_query_changed', value: 'north' });
+  s = shellReducer(s, { type: 'filter_toggled', facet: 'employer', value: 'NORTHWIND LOGISTICS' });
   s = shellReducer(s, { type: 'window_days_changed', days: 365 });
   s = shellReducer(s, { type: 'payer_override_changed', label: 'ALPHA MUTUAL OF THE MIDWEST' });
   s = shellReducer(s, { type: 'ai_armed' });
@@ -367,7 +376,7 @@ test('INV a: a new search clears EVERYTHING downstream, from any prior state', (
   assert.deepEqual(
     after,
     { ...INITIAL_SHELL_STATE, retryNonce: 1, loadedKey: 'k1' },
-    'twelve fields back to their defaults; only the two carry-through fields differ',
+    'thirteen fields back to their defaults; only the two carry-through fields differ',
   );
 });
 
@@ -509,10 +518,14 @@ test('INV l: autoAsk is one-shot — armed once, disarmed by the panel, by a sea
   assert.equal(shellReducer(dirty(), { type: 'plan_submitted' }).autoAsk, true, 'nor does a plan pick');
 });
 
-// ── 3 · filter_toggled, both directions, all three facets ────────────────────────────────────────
+// ── 3 · filter_toggled, both directions, both facets ─────────────────────────────────────────────
 
-const FACETS: { facet: 'planType' | 'funding' | 'employer'; key: 'planTypes' | 'funding' | 'employers' }[] = [
-  { facet: 'planType', key: 'planTypes' },
+// ⚠ TWO FACETS, NOT THREE. `planType` was removed 2026-08-07 — not for tidiness: `filterCandidates`
+// feeds `employerNarrowFor`, whose employer set IS sent as `market.employers`, so a plan-type press
+// could re-rank the whole screen over a narrow nothing on it disclosed. The behavioural proof lives
+// in qualifyV3Flow.test.tsx ("a plan type cannot influence the employer narrow"); what this table
+// pins is that the reducer offers no arm to press.
+const FACETS: { facet: 'funding' | 'employer'; key: 'funding' | 'employers' }[] = [
   { facet: 'funding', key: 'funding' },
   { facet: 'employer', key: 'employers' },
 ];
@@ -528,7 +541,7 @@ for (const { facet, key } of FACETS) {
     const off = shellReducer(two, { type: 'filter_toggled', facet, value: 'X' });
     assert.deepEqual(off.filters[key], ['Y'], 'present → removed');
 
-    // The other two facets are untouched by any of it.
+    // The other facet is untouched by any of it.
     for (const other of FACETS) {
       if (other.key === key) continue;
       assert.deepEqual(off.filters[other.key], [], `${other.facet} is not collateral damage`);
@@ -575,6 +588,58 @@ test('area_selected: All, a state and the Other bucket are all just keys — and
   assert.equal(s.area, AREA_OTHER, 'the unmapped bucket is selectable, not a null hole');
   s = shellReducer(s, { type: 'area_selected', key: AREA_ALL });
   assert.equal(s.area, AREA_ALL, 'pressing All is how a narrow is undone from the chip row');
+});
+
+/**
+ * INV n — the NARROW SEARCH card's open/closed bit.
+ *
+ * ⚠ THE FIELD-WRITE TABLE ABOVE CANNOT PIN THE `skipped` HALF OF THIS, and that is why this test
+ * exists rather than a fourth column in the table. The table's fixture sets every field to a
+ * NON-default value and compares `{...dirty(), ...writes}` — so any action whose declared write
+ * happens to EQUAL the fixture value is invisible there. `narrowExpanded: true` is exactly that case
+ * for `skipped` (the same blind spot the pre-existing `skipped: true` row already has). Every case
+ * below therefore starts from the OPPOSITE value: a reducer that merely carried the field through
+ * fails all of them.
+ *
+ * The rule being pinned: OPEN is a claim that there is something to narrow. A Skip has just widened
+ * the search to the whole footprint, so the fields are the operator's next move and the reveal has
+ * rows to stagger; a plan pick has already narrowed it, so the card states what it resolved to and
+ * stays shut. Every other navigation is invariant (a) — a kept-open card over a state the user has
+ * left is the same kept-but-hidden class, at lower stakes.
+ */
+test('INV n: Skip lands the NARROW SEARCH card OPEN, every navigation lands it CLOSED, Clear filters leaves it alone', () => {
+  assert.equal(
+    shellReducer(dirty({ narrowExpanded: false }), { type: 'skipped' }).narrowExpanded,
+    true,
+    'a skip must OPEN the card — the fields are the next move, and the reveal needs them to stagger',
+  );
+  for (const action of [
+    { type: 'plan_submitted' },
+    { type: 'search_submitted' },
+    { type: 'went_back', target: 'identify' },
+    { type: 'went_back', target: 'payer' },
+    { type: 'went_back', target: 'plan' },
+  ] as ShellAction[]) {
+    const label = action.type === 'went_back' ? `went_back('${action.target}')` : action.type;
+    assert.equal(
+      shellReducer(dirty({ narrowExpanded: true }), action).narrowExpanded,
+      false,
+      `${label} must CLOSE the card — invariant (a): nothing downstream survives a navigation`,
+    );
+  }
+  // The deliberate NON-write. "Clear filters" is a filter reset pressed from inside this card's own
+  // summary, not a navigation: forcing the card either way would move a surface the operator is
+  // standing on, and neither direction is the honest default.
+  for (const open of [true, false]) {
+    assert.equal(
+      shellReducer(dirty({ narrowExpanded: open }), { type: 'filters_cleared' }).narrowExpanded,
+      open,
+      'filters_cleared must leave the card exactly as the operator left it',
+    );
+  }
+  // And the toggle itself flips from either side — not "sets true".
+  assert.equal(shellReducer(dirty({ narrowExpanded: false }), { type: 'narrow_toggled' }).narrowExpanded, true);
+  assert.equal(shellReducer(dirty({ narrowExpanded: true }), { type: 'narrow_toggled' }).narrowExpanded, false);
 });
 
 // ── 4 · The useState bail-out, preserved ─────────────────────────────────────────────────────────

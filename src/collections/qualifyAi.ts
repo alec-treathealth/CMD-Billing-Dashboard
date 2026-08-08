@@ -42,6 +42,17 @@ const facilitySchema = z
     distinctPatients: z.number().int().min(0),
     lineCount: z.number().int().min(0),
     medianDaysToPayment: z.number().min(0).max(3650).nullable(),
+    /**
+     * Distinct billed-under labels behind THIS facility's rows. 1 under a payer-scoped read; >1 means
+     * pctAllowedOfBilled above is a blend across that many labels and must not be narrated as one
+     * payer's contract rate. A count, never a dollar.
+     *
+     * ⚠ min(0), NOT min(1). Zero is a legal answer — `count(distinct primary_payer)` over a group
+     * whose values are all NULL — and this schema is a STRICT firewall, so min(1) did not degrade
+     * that one facility, it hard-REJECTED the request and killed Ask AI for the whole snapshot. The
+     * firewall exists to stop PHI and dollars crossing, not to refuse an honest count.
+     */
+    payerCount: z.number().int().min(0).max(1000),
     factors: z.array(factorSchema).max(6),
   })
   .strict();
@@ -68,8 +79,20 @@ export const QualifyAiInputSchema = z
   .object({
     /** Which preset chip fired — the question shapes the read. */
     question: z.enum(QUALIFY_AI_QUESTIONS),
-    /** The resolved payer LABEL (non-PHI rollup dimension) — null on comparable/none paths. */
+    /** The resolved payer LABEL (non-PHI rollup dimension) — null on comparable/none paths AND in
+     *  identifier-wide mode. `payerScope` is what tells those apart; never infer from the null. */
     payerName: short(120).nullable(),
+    /**
+     * WHAT THE RANKING IS SCOPED TO (2026-08-07). REQUIRED, deliberately — a null `payerName` used to
+     * mean exactly one thing ("no payer on this estimated read") and now means two, so an explainer
+     * reading only the null would narrate an all-payers ranking as an unscoped estimate.
+     *
+     *   'payer' — one billed-under label, named in payerName.
+     *   'all'   — EVERY label the searched identifier bills under. Each facility's
+     *             pctAllowedOfBilled is then a cross-label BLEND (payerCount says across how many).
+     *   'none'  — nothing resolved (comparable-cohort / VOB-only reads).
+     */
+    payerScope: z.enum(['payer', 'all', 'none']),
     /** Policy facts on file (plan-level, non-PHI; NO employer, NO identifiers, NO benefit dollars). */
     policy: z
       .object({
@@ -126,6 +149,14 @@ const SYSTEM_PROMPT = [
   '  number is directional; say "directional, not confirmed".',
   '- A facility below 10 distinct patients is a thin sample; below 3 it is unrated — never invent a',
   '  number for it, and never average away a thin sample\'s uncertainty.',
+  '- payerCount 0 on a facility means its rows carry NO billed-under label at all — say the label is',
+  '  unknown there; never call it one payer, and never treat its percentage as attributable.',
+  '- payerScope "all" means the ranking spans EVERY billed-under label this member carries, not one',
+  '  payer. Each facility\'s allowed-of-billed is then a BLEND across payerCount labels — say so, and',
+  '  never call a blended percentage a payer\'s rate. Where payerCount > 1 the number can be carried',
+  '  by one label\'s mix, so a facility can read strong overall and weak under the label that matters.',
+  '  Tell the rep the BILLED UNDER chips scope it to one label. payerScope "payer" means payerName is',
+  '  the only label in the read.',
   '- policy.vobStale true: the VOB feed is stale — tell the rep to verify benefits before quoting.',
   '- Self-funded plans: the employer\'s administrator decides exceptions, not a payer rate sheet.',
   '- Median days-to-payment covers PAID lines only — unresolved claims are invisible on that axis.',
@@ -146,9 +177,11 @@ const SYSTEM_PROMPT = [
 const QUESTION_FRAMING: Record<QualifyAiInput['question'], string> = {
   explain: 'Question: WHY does the top facility score what it scores? Walk the factors that carry and drag it.',
   placement: 'Question: SHOULD the rep place this client here? A placement read — direct about risk, never a guarantee.',
-  speed: 'Question: HOW FAST does this policy pay? Read days-to-payment and what drags it.',
+  // "this policy" presumes ONE payer, which payerScope 'all' does not have — the framing would then
+  // fight the scope rule in SYSTEM_PROMPT rather than reinforce it (2026-08-07).
+  speed: 'Question: HOW FAST does this read pay? Read days-to-payment and what drags it. Under payerScope "all" that is the member\'s claims across every label, not one policy.',
   improve: 'Question: WHAT WOULD MOVE this rating? Only factors reading negative are levers; unavailable factors need data, not effort.',
-  ranks: 'Question: WHICH facility does this policy pay best, and how real is the gap between them?',
+  ranks: 'Question: WHICH facility does this read pay best at, and how real is the gap between them? Under payerScope "all" the comparison is between BLENDS — name payerCount where it differs, because a gap can be payer mix rather than facility performance.',
   thin: 'Question: IS THERE ENOUGH HISTORY here to trust these numbers? Distinct patients — not lines — are the unit of evidence; read the sample honestly and say what "directional" means for this rep.',
   takeit: 'Question: SHOULD WE BE TAKING this policy at all? Nothing in the set reads strong — weigh the best available evidence against declining, and be direct about which way it leans.',
   plantype: 'Question: NARROW PLAN (EPO/HMO) — is there a realistic path to payment? Read what the plan type means for access and authorization, using only the policy facts provided.',
