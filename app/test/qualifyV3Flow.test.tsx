@@ -3984,7 +3984,10 @@ test('S5: the refresh control stands ON the NARROW SEARCH card, in BOTH position
     /* ⚠ type="button" IS LOAD-BEARING, NOT STYLE. A submit inside a form would reach `planAction`
      * and re-run `resolveCoverageAction`, which writes sixteen reducer fields and drops the operator
      * back to the payer stage — the thing this control must never do. */
-    const btn = card.slice(card.indexOf('Refresh the ranking') - 400, card.indexOf('Refresh the ranking'));
+    // Walk back to the button's own opening tag rather than guessing a slice width — the control's
+    // attributes grew in the fix round and a fixed-width lookback silently stopped reaching them.
+    const labelAt = card.indexOf('Refresh the ranking');
+    const btn = card.slice(card.lastIndexOf('<button', labelAt), labelAt);
     assert.match(btn, /type="button"/, `expanded=${narrowExpanded}: never a submit`);
   }
 });
@@ -3998,7 +4001,14 @@ test('S5: while refreshing the card says so, the control is disabled, and the an
   const card = inventoryRegion(html);
   assert.match(card, /Refreshing the ranking/, 'the label states the state — the press must visibly take');
   assert.match(card, /aria-busy="true"/, 'and the spoken channel learns it too');
-  assert.match(card, /disabled=""/, 'DISABLED: every press writes one SEARCH_QUALIFY_PHI row into a compliance log');
+  /* ⚠ `aria-disabled`, NEVER THE `disabled` ATTRIBUTE (M3). The real attribute makes the element
+   * unfocusable the instant it lands — so the control the operator is STANDING ON stops being
+   * focusable mid-press and focus falls to <body>, which is the exact regression the stage's focus
+   * effect exists to prevent one layer up. It is also not reliably announced. The refusal moved into
+   * `makeRetryHandler`, where it is a behaviour rather than a browser side effect, and this
+   * assertion is the static half: the state is exposed, and focus is not taken away. */
+  assert.match(card, /aria-disabled="true"/, 'the state is EXPOSED to AT');
+  assert.ok(!/\sdisabled=""/.test(card), 'and never as the focus-stealing attribute');
   // The design system's re-scope idiom, and NOT a skeleton: a standing control that blanks the
   // answer on every press makes each refresh feel like a page rebuild.
   assert.match(html, /opacity-60/, 'dimmed — what is on screen is about to be replaced');
@@ -4012,7 +4022,7 @@ test('S5: while refreshing the card says so, the control is disabled, and the an
   );
   assert.match(idle, /Refresh the ranking/);
   assert.ok(!idle.includes('aria-busy="true"'), 'nothing is in flight');
-  assert.ok(!idle.includes('disabled=""'), 'and the control is pressable');
+  assert.ok(!idle.includes('aria-disabled="true"'), 'and the control is pressable');
 });
 
 test('S5: freshness fails SOFT — an unreadable run-log leaves the ranking untouched and says "unknown"', () => {
@@ -4027,11 +4037,22 @@ test('S5: windowMoveNotice states the direction, the two windows and the FLOOR t
   const wider = windowMoveNotice({ from: 30, to: 90 });
   assert.match(wider, /widened from 30 to 90 days/);
   assert.match(wider, /10-patient/, 'the floor is NAMED — copy basis discipline: say what it was measured against');
-  assert.match(wider, /longer period/, 'and what it means for the list below');
+  assert.match(wider, /this ranking spans 90 days/, 'and which of the two numbers describes the list on screen');
 
   const narrower = windowMoveNotice({ from: 90, to: 30 });
   assert.match(narrower, /narrowed from 90 to 30 days/);
-  assert.match(narrower, /shorter period/);
+  assert.match(narrower, /this ranking spans 30 days/);
+
+  /* ⚠ THE NOTICE NEVER AUTO-DISMISSES, so its copy may not be anchored to a MOMENT (M4). It
+   * survives every grid-narrow toggle by design — `windowMove` clears only on the next resolve, a
+   * new refresh, or a navigation — so an operator can sit with it on screen for minutes, and "than
+   * it did a moment ago" quietly stops being true while the sentence keeps asserting it. Fixed in
+   * COPY rather than with dismissal machinery: it names the REFRESH (a durable event) and states
+   * the span as a fact about the list in front of them. */
+  for (const s of [wider, narrower]) {
+    assert.ok(!/a moment ago/.test(s), 'no claim anchored to a moment that has passed');
+    assert.match(s, /on the last refresh/, 'it names the event, not the moment');
+  }
   // Both directions are genuinely reachable: new rows crossing the floor NARROW it, rows ageing out
   // (or an America/Los_Angeles civil-day roll) WIDEN it.
   assert.notEqual(wider, narrower);
@@ -4064,7 +4085,7 @@ test('S5: a window that moved under an unchanged scope key is ANNOUNCED — and 
   // ⚠ "automatic window" ALONE WOULD BE A VACUOUS NEGATIVE: `resolvedScopeSentence` already ends
   // "· automatic window" on every auto search. The notice's own phrasing is what must be absent.
   assert.match(still, /automatic window/, 'positive control: the resolved-scope line really does say it');
-  assert.ok(!still.includes('on this refresh'), 'a refresh whose ladder did not move says nothing');
+  assert.ok(!still.includes('on the last refresh'), 'a refresh whose ladder did not move says nothing');
 
   /* A MANUAL window cannot produce this notice and must not render one even if a stale move survived
    * into the render: "the automatic window widened" over a screen reading "trailing 180 days — your
@@ -4103,13 +4124,13 @@ test('S5: the SPOKEN channel carries the same window-move sentence, word for wor
   // search box describes a list that is not there.
   for (const stage of ['identify', 'payer', 'plan'] as const) {
     assert.ok(
-      !liveSentenceFor(stage, r, null, { skipped: true, memberCount: 1, memberFacilityCount: 1, windowMoved: move }).includes('on this refresh'),
+      !liveSentenceFor(stage, r, null, { skipped: true, memberCount: 1, memberFacilityCount: 1, windowMoved: move }).includes('on the last refresh'),
       `stage=${stage} announces a window change for a ranking that is not on screen`,
     );
   }
   // The skipped arm returns before every stage check, so it needs the clause explicitly.
   assert.ok(
-    liveSentenceFor('answer', r, null, { skipped: true, memberCount: 1, memberFacilityCount: 1, windowMoved: move }).includes('on this refresh'),
+    liveSentenceFor('answer', r, null, { skipped: true, memberCount: 1, memberFacilityCount: 1, windowMoved: move }).includes('on the last refresh'),
     'a skipped answer stage is still an answer stage',
   );
 });
@@ -4126,21 +4147,94 @@ test('S5 STRUCTURAL — a refresh cannot re-enter the resolve: no formAction is 
   );
   const calls = [...src.matchAll(/formAction\(/g)];
   assert.equal(calls.length, 2, 'exactly two: identifyAction and planAction — a third is a new navigation path');
-  // The retry/refresh handler in full, walked by brace depth from its declaration.
+  // The retry/refresh handler in full, walked from its declaration to the end of the memo call.
   const at = src.indexOf('const onRetrySnapshot');
   assert.ok(at >= 0, 'the refresh handler is not in the client — this scan would be vacuous');
-  const body = src.slice(at, src.indexOf('}, []);', at) + 7);
+  const body = src.slice(at, src.indexOf(');', src.indexOf('makeRetryHandler', at)) + 2);
   assert.ok(!body.includes('formAction'), 'the refresh handler must never reach the server action');
-  assert.match(body, /retry_requested/, 'positive control: it really is the one dispatch');
-  /* ⚠ THE EMPTY-TERM GUARD SURVIVES THE PROMOTION, and it matters MORE now than it did for a banner.
-   * A failure banner implies a request implies a term; a STANDING control renders on every answer
-   * stage and can be pressed after a hot-reload has emptied the PHI ref. It must no-op silently
-   * rather than dispatch a nonce no fetch will follow — which would arm the in-flight marker with
-   * nothing behind it. The guard is BEFORE the dispatch, which is the ordering that makes that true. */
-  assert.ok(body.indexOf("termRef.current === ''") < body.indexOf('retry_requested'), 'the guard precedes the dispatch');
+  /* ⚠ THE GUARDS THEMSELVES ARE NO LONGER SCANNED FOR, BECAUSE THE SCAN COULD NOT FAIL (MUT-25).
+   * This block used to assert `body.indexOf("termRef.current === ''") < body.indexOf('retry_requested')`
+   * — and `indexOf` returns -1 for an absent needle, so DELETING the guard made it `-1 < positive`,
+   * i.e. true, and the mutation ran 156/0. Both guards now live in `makeRetryHandler`, where
+   * qualifyV3FlowState.test.tsx calls them; what is left here is the WIRING, which is the only part
+   * a hermetic test genuinely cannot reach. */
+  assert.match(body, /makeRetryHandler/, 'the shell uses the tested factory rather than an inline closure');
+  assert.match(body, /termRef\.current/, 'the PHI stays in the ref and reaches the factory as a GETTER');
+  assert.ok(!/getTerm:\s*\(\)\s*=>\s*''/.test(body), 'and not as a hardcoded empty that would disable the control');
+  assert.match(body, /isBusy/, 'and the busy refusal is wired, not left to the DOM');
   // The freshness read is its own request, on the ticker's mount-once/fail-soft shape — never folded
   // into the snapshot call, which is audited, PHI-scoped and must not be slowed by an ops lookup.
   assert.match(src, /loadQualifyDataFreshness/, 'the shell loads the rebuild time itself');
   const request = src.slice(src.indexOf('getQualifySnapshot('), src.indexOf('getQualifySnapshot(') + 600);
   assert.ok(!/freshness|rebuilt/i.test(request), 'and it is not a segment of the ranking request');
+});
+
+test('S5 FIX — a rebuilt-at line may not describe a grid the failed refresh did not produce', () => {
+  /* ⚠ THE TWO EFFECTS ARE INDEPENDENT, AND THE HEAVY ONE IS THE LIKELIER TO FAIL. The freshness read
+   * is a one-row index scan on `collections.rollup_refresh_run`; the ranking is the query
+   * `statement_timeout` exists for. Both fire on `retryNonce`, so this sequence is ordinary rather
+   * than exotic: press refresh → freshness succeeds and ADVANCES to 5:45 PM → the snapshot fails →
+   * invariant (e) deliberately retains the OLD grid. The card then reads "Ranking data rebuilt
+   * 5:45 PM PDT" directly above a ranking built BEFORE that rebuild, and it says so until a retry
+   * succeeds. This line is the only BASIS claim on the screen, so it is exactly the sentence an
+   * operator would use to decide the numbers are current.
+   *
+   * ⚠ WHY IT IS CAPTIONED AND NOT GATED. A commit-time gate ("don't advance while failed") narrows
+   * the window without closing it, because the race runs BOTH ways — the snapshot can fail AFTER
+   * freshness has committed. A render-time caption is correct in either ordering. */
+  const failedRefresh = rebuiltAtSentence('2026-08-08T23:45:37Z', { refreshFailed: true });
+  assert.match(failedRefresh, /Aug 8 at 4:45 PM PDT/, 'the timestamp is still stated — it is true about the REBUILD');
+  assert.match(failedRefresh, /may predate that rebuild/, 'but it no longer claims to describe the grid');
+  assert.ok(!failedRefresh.includes('up to about 2 hours'), 'the CMD lag bound is the lesser caveat and would bury this one');
+
+  // POSITIVE CONTROL — the ordinary arm is untouched, and the two are genuinely different sentences.
+  const ok = rebuiltAtSentence('2026-08-08T23:45:37Z');
+  assert.match(ok, /up to about 2 hours/);
+  assert.ok(!ok.includes('may predate'), 'a successful refresh makes no such caveat');
+  assert.notEqual(ok, failedRefresh);
+  // An unreadable log needs no second caveat: "unknown" already claims nothing about anything.
+  assert.equal(rebuiltAtSentence(null, { refreshFailed: true }), rebuiltAtSentence(null));
+
+  // ...and the caveat really does reach the card, on exactly the state that produces it.
+  const html = render(
+    props('answer', fixture(), {
+      answer: answerProps({
+        snapshot: snapshotFixture(),
+        snapshotError: 'failed', // snapshot present + error = refreshFailed
+        dataRebuiltAt: '2026-08-08T23:45:37Z',
+      }),
+    }),
+  );
+  assert.match(inventoryRegion(html), /may predate that rebuild/, 'the card carries the caveat');
+  assert.match(html, /could not be refreshed/, 'positive control: this really is the failed-refresh state');
+  const clean = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: snapshotFixture(), dataRebuiltAt: '2026-08-08T23:45:37Z' }),
+    }),
+  );
+  assert.ok(!clean.includes('may predate that rebuild'), 'and a healthy screen does not');
+});
+
+test('S5 FIX — the first-ever read of rollup_refresh_run does not swallow its failure silently', () => {
+  /* ⚠ THE DISCOVERABILITY HALF OF THE 0089 RULE. Correctness was never in doubt: a 42501 cannot
+   * fabricate a timestamp, and the unknown arm contains no digit. But this table's SELECT policy has
+   * never been exercised on the app path, and a bare `catch { return { ok: false } }` makes a
+   * PERMISSION failure indistinguishable from an empty log — in the UI *and* in the server logs.
+   * That is precisely how 0089 turned a swallowed 42501 into permanently wrong data rather than a
+   * visible failure. The sibling loader twenty-five lines away already states the rule out loud:
+   * "the swallow must stay discoverable in server logs".
+   *
+   * Scanned rather than executed: `actions.ts` is a `'use server'` module and nothing hermetic can
+   * import it, so the assertion is that the catch is not bare and logs the non-PHI SQLSTATE. */
+  const src = readFileSync(fileURLToPath(new URL('../lib/qualify/actions.ts', import.meta.url)), 'utf8');
+  const at = src.indexOf('export async function loadQualifyDataFreshness');
+  assert.ok(at >= 0, 'the freshness action is not in actions.ts — this scan would be vacuous');
+  const body = src.slice(at, src.indexOf('\n}', at) + 2);
+  assert.match(body, /catch \(err\)/, 'the error is BOUND, not discarded by a bare catch');
+  assert.match(body, /console\.error/, 'and the swallow leaves a trace a human can find');
+  assert.match(body, /sqlstate/i, 'naming the SQLSTATE, which is what tells 42501 from an empty log');
+  /* ⚠ AND NOTHING ELSE FROM THE ERROR. `rollup_refresh_run.error` holds a caught DB message and the
+   * driver's own message can carry query text; the code alone answers the question. */
+  assert.ok(!/err\.message|\berr\b\s*\)/.test(body.replace(/catch \(err\)/, '')), 'the message itself never reaches a log line');
+  assert.match(body, /requireQualifyPrincipal/, 'positive control: still gated like every action here');
 });

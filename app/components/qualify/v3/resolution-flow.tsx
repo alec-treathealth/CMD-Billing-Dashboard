@@ -1371,7 +1371,19 @@ function windowSentence(snapshot: QualifySnapshot, windowDays: QualifyTrailingDa
  */
 const REBUILT_AT_UNKNOWN = 'Ranking data freshness unknown — the rollup rebuild log could not be read.';
 
-export function rebuiltAtSentence(rebuiltAt: string | null): string {
+export function rebuiltAtSentence(
+  rebuiltAt: string | null,
+  opts: {
+    /**
+     * The most recent ranking request FAILED with an answer still on screen. The freshness read and
+     * the snapshot read are independent requests fired by the same press, and the heavy one is far
+     * the likelier to fail — so this timestamp can legitimately have advanced past the grid beneath
+     * it. Say so; do not let the only basis claim on the screen describe a rebuild the rendered list
+     * never came from.
+     */
+    refreshFailed?: boolean;
+  } = {},
+): string {
   if (rebuiltAt === null) return REBUILT_AT_UNKNOWN;
   const t = Date.parse(rebuiltAt);
   if (Number.isNaN(t)) return REBUILT_AT_UNKNOWN;
@@ -1385,6 +1397,13 @@ export function rebuiltAtSentence(rebuiltAt: string | null): string {
   }).formatToParts(new Date(t));
   const at = (type: Intl.DateTimeFormatPartTypes): string => parts.find((p) => p.type === type)?.value ?? '';
   const stamp = `${at('month')} ${at('day')} at ${at('hour')}:${at('minute')} ${at('dayPeriod')} ${at('timeZoneName')}`;
+  /* ⚠ THE FAILED ARM DROPS THE CMD LAG BOUND, ON PURPOSE. Two caveats in one sentence bury each
+   * other, and "the list you are looking at may not even be from this rebuild" strictly dominates
+   * "this rebuild may trail CMD by two hours". The timestamp itself is still stated, because it is
+   * true about the REBUILD; what it stops claiming is that it describes the grid. */
+  if (opts.refreshFailed === true) {
+    return `Ranking data rebuilt ${stamp} — but the last refresh failed, so the ranking below may predate that rebuild.`;
+  }
   return `Ranking data rebuilt ${stamp} — the hourly rollup rebuild, so it can trail CMD by up to about 2 hours.`;
 }
 
@@ -1405,13 +1424,23 @@ export function rebuiltAtSentence(rebuiltAt: string | null): string {
  *
  * ONE FUNCTION, TWO CHANNELS: the visible `role="status"` notice and `liveSentenceFor` both call it,
  * so the seen and the spoken claim are the same bytes rather than two sentences that agree today.
+ *
+ * ⚠ NOT ANCHORED TO A MOMENT, AND THAT IS A FIX RATHER THAN A STYLE CHOICE (S5 fix round, M4). This
+ * notice NEVER auto-dismisses — `windowMove` clears only on the next resolve, a new refresh, or a
+ * navigation — and it correctly survives every grid-narrow toggle, so an operator can sit with it on
+ * screen for minutes. The first wording ended "than it did a moment ago", which quietly stops being
+ * true while the sentence goes on asserting it. Fixed in COPY, deliberately not with dismissal
+ * machinery: naming the REFRESH (a durable event) and stating the span as a fact about the list in
+ * front of them is true at any age, and a timer would be new state on a surface whose whole S5 lesson
+ * is that in-flight state is where the bugs live.
+ *
  * Copy unratified.
  */
 export function windowMoveNotice(move: WindowMove): string {
   const floor = `${QUALIFY_RATING_CONFIDENT_PATIENTS}-patient reliability floor`;
   return move.to > move.from
-    ? `The automatic window widened from ${move.from} to ${move.to} days on this refresh — the ${move.from}-day sample no longer clears the ${floor}, so the ranking below covers a longer period than it did a moment ago.`
-    : `The automatic window narrowed from ${move.from} to ${move.to} days on this refresh — the freshest ${move.to} days now clear the ${floor} on their own, so the ranking below covers a shorter period than it did a moment ago.`;
+    ? `The automatic window widened from ${move.from} to ${move.to} days on the last refresh — the ${move.from}-day sample no longer clears the ${floor}, so this ranking spans ${move.to} days.`
+    : `The automatic window narrowed from ${move.from} to ${move.to} days on the last refresh — the freshest ${move.to} days now clear the ${floor} on their own, so this ranking spans ${move.to} days.`;
 }
 
 function FactorRows({ facility }: { facility: QualifyFacility }): React.ReactElement {
@@ -3113,9 +3142,16 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 <button
                   type="button"
                   onClick={props.onRetry}
-                  disabled={props.refreshing || props.pending}
+                  /* ⚠ `aria-disabled`, NOT THE REAL ATTRIBUTE (fix round M3). `disabled` makes the
+                     element unfocusable the instant it lands — so the control the operator is
+                     STANDING ON stops being focusable mid-press and focus falls to <body>, the exact
+                     regression the shell's focus effect exists to prevent one layer up; it is also
+                     not reliably announced. The REFUSAL moved into `makeRetryHandler`, where a
+                     second press during flight is a tested no-op rather than a browser side effect,
+                     and the visual treatment is unchanged. */
+                  aria-disabled={props.refreshing || props.pending}
                   aria-busy={props.refreshing}
-                  className="flex items-center gap-1.5 rounded-full border border-teal200/40 bg-white/10 px-3 py-1 text-xs font-semibold text-white transition-colors hover:border-teal200 hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/60 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="flex items-center gap-1.5 rounded-full border border-teal200/40 bg-white/10 px-3 py-1 text-xs font-semibold text-white transition-colors hover:border-teal200 hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/60 aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
                 >
                   <span aria-hidden className={props.refreshing ? 'animate-spin' : ''}>
                     ↻
@@ -3220,7 +3256,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               {/* [BOOK-LED EXEMPT: it dates the index rebuild, not the list that came back]
                   `facilities` and `bookFacilities` are two queries over one matview, so one rebuild
                   time is the honest answer in either mode. */}
-              <p className="text-xs text-teal200">{rebuiltAtSentence(props.dataRebuiltAt)}</p>
+              <p className="text-xs text-teal200">{rebuiltAtSentence(props.dataRebuiltAt, { refreshFailed })}</p>
               {/* THE PAYER-SCOPE CLAIM. "You picked this" / "your plan pick implies this" / "we
                   defaulted" are three different claims, and a REJECTED override must never render as
                   honoured. It sits in the SUMMARY rather than beside its chips because it is a

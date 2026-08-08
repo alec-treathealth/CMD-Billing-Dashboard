@@ -881,3 +881,63 @@ reducer test that `retry_requested` moves none of the thirteen fields a navigati
 `type="button"` for the same reason.
 
 **All new copy is unratified.**
+
+### Fix round 1 (2026-08-08) — a guard that could not fail, a basis line that could lie, and a swallow nobody could find
+
+**The empty-term guard was pinned by ORDER, not PRESENCE, so deleting it was invisible.** The scan
+asserted `body.indexOf("termRef.current === ''") < body.indexOf('retry_requested')` — and `indexOf`
+returns `-1` for an absent needle, so removing the guard made it `-1 < positive`, i.e. **true**. The
+mutation ran a full green suite. What it would have shipped is the stuck-flag class reached *around*
+the reducer rather than through it: a press on an emptied PHI ref arms `refreshingNonce`, the fetch
+effect's own `term === ''` early return fires so no request starts, and therefore **neither terminal
+dispatch ever runs** — the card locks at *"Refreshing the ranking…"*, unpressable, until a navigation.
+
+Both guards moved into `makeRetryHandler` (flow-state.ts), a pure factory over injected getters, so
+they are **behaviour a test calls** rather than lines a scan has to recognise. The PHI stays in the
+shell's ref: the factory takes a `getTerm` **getter** and never stores what it reads. What is left in
+the source scan is the *wiring*, which is the only part a hermetic test genuinely cannot reach.
+
+**A refresh whose snapshot failed still advanced the rebuilt-at line.** The freshness effect and the
+snapshot effect are independent, both fire on `retryNonce`, and the heavy one is far the likelier to
+fail (`statement_timeout` vs a one-row index scan). Sequence: press → freshness succeeds and advances
+→ snapshot fails → invariant (e) deliberately retains the **old** grid → the card reads *"Ranking data
+rebuilt 5:45 PM PDT"* above a ranking built before that rebuild, and keeps saying so until a retry
+succeeds. This is the only **basis** claim on the screen.
+
+Fixed by **captioning, not gating**, and the reason is that a gate cannot make it unrepresentable: the
+race runs both ways — the snapshot can fail *after* freshness has committed — so a commit-time check
+narrows the window without closing it, while a render-time caption is correct in either ordering.
+`rebuiltAtSentence(…, { refreshFailed })` states the timestamp (still true about the *rebuild*) and
+stops claiming it describes the grid: *"— but the last refresh failed, so the ranking below may
+predate that rebuild."* The CMD lag bound is dropped in that arm; two caveats bury each other, and
+this one dominates. The **bounded** sibling — both succeed, freshness landing ~1s early over a dimmed
+grid — is left alone.
+
+**The first-ever read of `rollup_refresh_run` failed soft silently.** Correctness was never at risk (a
+42501 cannot fabricate a timestamp; the unknown arm carries no digit) — but a bare `catch` made a
+**permission** failure indistinguishable from an empty log in the UI *and* the server logs, on a table
+whose SELECT policy has never been exercised on the app path. That is the discoverability half of the
+0089 rule, and the sibling loader twenty-five lines away already states it: *"the swallow must stay
+discoverable in server logs."* The catch now logs the **SQLSTATE only** — the driver's message can
+carry query text and answers nothing here.
+
+**Minors.** `windowMove` is now conditioned on `refreshingNonce !== null` as well as the key match:
+"same request identity" was doing double duty as "this was a refresh", and `scopeKeyOf` carries **no
+identifier at all**, so a new member's first resolve can serialize identically to the previous
+member's — safe today only because the navigations happen to null the snapshot, i.e. a guarantee held
+by a neighbouring field. `EVERY_ACTION`'s completeness is now **derived from the reducer's own arms**,
+so a twentieth action cannot slip the INV o sweep. The refresh control swapped `disabled` for
+`aria-disabled`: the real attribute makes the element unfocusable the instant it lands, so the control
+the operator is standing on stops being focusable mid-press and focus falls to `<body>` — the exact
+regression the shell's focus effect prevents one layer up — and it is not reliably announced; the
+refusal moved into `makeRetryHandler` where a second press during flight is a tested no-op.
+
+**And the window notice's copy stopped being anchored to a moment.** It never auto-dismisses and
+correctly survives every grid-narrow toggle, so an operator can sit with it on screen for minutes
+while *"than it did a moment ago"* quietly stops being true. Fixed in **copy** — it names the refresh
+(a durable event) and states the span as a fact about the list in front of them — deliberately **not**
+with dismissal machinery: a timer would be new in-flight state on the surface whose whole S5 lesson is
+that in-flight state is where the bugs live.
+
+The ICU dependency in `rebuiltAtSentence` is left as-is: a fixed UTC instant, no DST hazard, and it
+fails loudly rather than silently on a small-icu runtime.

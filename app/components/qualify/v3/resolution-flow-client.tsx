@@ -81,7 +81,7 @@ import {
 } from './resolution-flow';
 // The flow's sixteen fields and the rules that move them. Its header is the spec; this file is the
 // transport (PHI ref, effects, derivations) wired to it.
-import { INITIAL_SHELL_STATE, shellReducer } from './flow-state';
+import { INITIAL_SHELL_STATE, makeRetryHandler, shellReducer } from './flow-state';
 
 // ScrollTrigger ships inside the gsap package — no new dependency. Client components also render on
 // the server once, so guard the registration behind a window check.
@@ -234,16 +234,28 @@ export function ResolutionFlowClient({
     dispatch({ type: 'narrow_toggled' });
   }, []);
 
-  /** Re-issue the SAME snapshot request after a failure. Bumping the nonce is what moves the
+  /** Re-issue the SAME snapshot request — the failure banner's "Try again" and the NARROW SEARCH
+   *  card's standing "Refresh the ranking" are this one call. Bumping the nonce is what moves the
    *  effect's dependency array; nothing about the request itself changes (the term is still in
-   *  `termRef`, the scope still in state), so nothing is stashed anywhere to support this. The
-   *  empty-term guard mirrors the effect's own early return at the top — without it, clearing the
-   *  error here would leave a banner-free stage with no fetch behind it. It stays in this wrapper
-   *  rather than in the reducer because the reducer must never read the PHI ref. */
-  const onRetrySnapshot = useCallback(() => {
-    if (termRef.current === '') return;
-    dispatch({ type: 'retry_requested' });
-  }, []);
+   *  `termRef`, the scope still in state), so nothing is stashed anywhere to support this.
+   *
+   *  ⚠ THE TWO GUARDS LIVE IN `makeRetryHandler`, WHICH IS WHY THEY ARE TESTED (S5 fix round). They
+   *  used to be an inline `if` in this closure, covered only by a source scan — and that scan
+   *  compared two `indexOf` results, so deleting the guard made it `-1 < positive` and the mutation
+   *  ran a full green suite. The factory is pure and hermetic; this call site is the wiring. The PHI
+   *  never leaves the ref: `getTerm` is a GETTER, read inside the handler and never stored.
+   *
+   *  `isBusy` folds in what the DOM's `disabled` attribute used to enforce — see the control itself
+   *  for why that attribute had to go (it steals keyboard focus the instant it lands). */
+  const onRetrySnapshot = useMemo(
+    () =>
+      makeRetryHandler({
+        getTerm: () => termRef.current,
+        isBusy: () => refreshing || isPending,
+        dispatch,
+      }),
+    [refreshing, isPending],
+  );
 
   /** A plan pick: inject the held term (never from the DOM), mark picked, dispatch. A NEW plan is a
    *  new population — a genuine first load, so the snapshot blanks to the skeleton (unlike a

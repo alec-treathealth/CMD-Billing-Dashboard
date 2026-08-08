@@ -24,8 +24,11 @@
  * ── WHAT IS DELIBERATELY *NOT* IN HERE ──────────────────────────────────────────────────────────
  * · `termRef` — the raw typed identifier. PHI, and JS-memory-only by the IdentityForm discipline
  *   (see the shell's header). Reducer state gets asserted on in unit tests and inspected in
- *   devtools; PHI must never enter it. The guards that READ the ref (retry's empty-term check, the
- *   effect's early return) therefore stay in the shell's handler wrappers, not in a reducer case.
+ *   devtools; PHI must never enter it. The guards that READ the ref therefore never live in a
+ *   reducer case: the fetch effect's early return stays in the shell, and the refresh's empty-term
+ *   check moved into `makeRetryHandler` below — a factory over a GETTER, which keeps the term out of
+ *   this module's state while making the guard a behaviour a test can call. That mattered: the
+ *   source scan that stood in for it could not fail (S5 fix round, MUT-25).
  * · The `useActionState` triple (`state` / `formAction` / `isPending`) — React's server-action
  *   machinery owns it.
  * · `trends` — the landing ticker. It is a mount-once fetch that no handler and no flow field ever
@@ -240,10 +243,15 @@
  *     number. Both directions are reachable (new rows crossing the 10-patient floor NARROW it; rows
  *     ageing out, or an America/Los_Angeles civil-day roll, WIDEN it).
  *
- *     Written by `snapshot_resolved` ALONE, set-or-clear on every resolve, and only when
- *     `loadedKey === action.scopeKey` — i.e. only when the request identity did NOT move, which is
- *     exactly the case no other signal can see. A re-scope is excluded on purpose: the operator
- *     changed something, the key moved with it, and the dim + beam already marked it.
+ *     Written by `snapshot_resolved` ALONE, set-or-clear on every resolve, and only when BOTH the
+ *     in-flight marker was armed (this really was a refresh) AND `loadedKey === action.scopeKey`
+ *     (the request identity did not move). A re-scope is excluded on purpose: the operator changed
+ *     something, the key moved with it, and the dim + beam already marked it.
+ *
+ *     ⚠ THE MARKER CONDITION IS NOT REDUNDANT, though it looks it. `scopeKeyOf` carries no
+ *     identifier at all, so a NEW member's first resolve can serialize identically to the previous
+ *     member's — and the key test alone was safe only because the four navigations happen to null
+ *     the snapshot, i.e. a guarantee held by a neighbouring field rather than by this rule.
  *
  *     ⚠ BOTH LADDERS ARE COERCED WITH `?? null` BEFORE COMPARISON. A manual window returns no
  *     ladder at all, and `undefined !== null` would turn "no ladder before, no ladder after" into a
@@ -434,6 +442,49 @@ function bailIfUnchanged(prev: ShellState, next: ShellState): ShellState {
   return prev;
 }
 
+/**
+ * ── THE TWO GUARDS THAT STAND BETWEEN A PRESS AND THE MARKER (S5 fix round) ──────────────────────
+ *
+ * The refresh handler, as a factory over injected getters, so both guards are BEHAVIOUR a test can
+ * call rather than lines a source scan has to recognise. That distinction is not academic: the scan
+ * written for the empty-term guard asserted
+ * `body.indexOf("termRef.current === ''") < body.indexOf('retry_requested')`, and `indexOf` returns
+ * -1 for an absent needle — so DELETING the guard made it `-1 < positive`, i.e. TRUE. The mutation
+ * ran a full green suite.
+ *
+ * ⚠ THE PHI STILL LIVES IN THE SHELL'S REF. This takes a GETTER and never stores what it reads,
+ * which is what lets the guard leave its inline closure without leaving the discipline this module's
+ * header sets: the term must not enter reducer state, and it does not — no action carries it, and
+ * nothing here retains it past the call.
+ *
+ * ⚠ WHY THE REDUCER CANNOT HOLD EITHER GUARD. The empty-term one reads the PHI ref, which the
+ * reducer is forbidden to touch. The busy one reads `isPending`, which belongs to `useActionState`
+ * and is not machine state at all. Both are shell facts; this is the shell's smallest testable piece.
+ *
+ * `isBusy` — a refresh already in flight, or the resolve's server action pending. It refuses for the
+ * reason the DOM's `disabled` attribute used to: every press writes one `SEARCH_QUALIFY_PHI` row,
+ * because the core audits BEFORE any data. The attribute itself is gone (it drops keyboard focus to
+ * `<body>` the moment it lands, and a disabled control's state change is not reliably announced);
+ * the render layer carries `aria-disabled` and the REFUSAL lives here.
+ *
+ * `getTerm` — empty means nothing is held (a hot-reload mid-flow). A press there must dispatch
+ * NOTHING: the fetch effect has the same early return, so a nonce dispatched here would arm
+ * `refreshingNonce` with no request behind it and neither terminal dispatch would ever run. The card
+ * would lock at "Refreshing the ranking…" permanently — the stuck-flag class, reached around the
+ * reducer rather than through it.
+ */
+export function makeRetryHandler(deps: {
+  getTerm: () => string;
+  isBusy: () => boolean;
+  dispatch: (action: ShellAction) => void;
+}): () => void {
+  return () => {
+    if (deps.isBusy()) return;
+    if (deps.getTerm() === '') return;
+    deps.dispatch({ type: 'retry_requested' });
+  };
+}
+
 export function shellReducer(state: ShellState, action: ShellAction): ShellState {
   switch (action.type) {
     // A new identify submit invalidates every downstream choice. retryNonce and loadedKey survive.
@@ -590,15 +641,21 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
        * ladder after" as a window move, which is every manual-window resolve. */
       const from = state.snapshot?.ladder?.chosenDays ?? null;
       const to = action.snapshot.ladder?.chosenDays ?? null;
-      // ONLY when the request identity did not move. A re-scope is a change the operator made, the
-      // key moved with it, and the dim + beam already marked it.
+      /* ⚠ TWO CONDITIONS, AND THE SECOND USED TO BE INCIDENTAL (S5 fix round, M1). "Same request
+       * identity" is necessary but not sufficient: `scopeKeyOf` carries NO identifier at all, so a
+       * NEW member's first resolve can serialize identically to the previous member's (same payer
+       * label, same auto window, no filters). The old rule was safe only because the four
+       * navigations null the snapshot, which made `from` null — i.e. a guarantee held by a
+       * NEIGHBOURING field's behaviour rather than by this arm. The reducer already holds the marker
+       * that answers "was this a refresh" directly, so it asks it directly. */
       const sameScope = state.loadedKey !== null && state.loadedKey === action.scopeKey;
+      const wasRefresh = state.refreshingNonce !== null;
       return bailIfUnchanged(state, {
         ...state,
         snapshot: action.snapshot,
         loadedKey: action.scopeKey,
         refreshingNonce: null,
-        windowMove: sameScope && from !== null && to !== null && from !== to ? { from, to } : null,
+        windowMove: wasRefresh && sameScope && from !== null && to !== null && from !== to ? { from, to } : null,
       });
     }
 

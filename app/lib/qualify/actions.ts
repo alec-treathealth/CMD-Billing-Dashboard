@@ -405,7 +405,16 @@ export async function loadQualifyDataFreshness(): Promise<QualifyDataFreshnessRe
   if (!gate.ok) return { ok: false };
   try {
     return { ok: true, rebuiltAt: await loadRollupRefreshFreshness() };
-  } catch {
+  } catch (err) {
+    /* ⚠ THE SWALLOW MUST STAY DISCOVERABLE — the sibling loaders' own words, and the 0089 rule's
+     * other half. Correctness is not the exposure here: a 42501 cannot fabricate a timestamp, and
+     * the unknown arm carries no digit. The exposure is that this table's SELECT POLICY has never
+     * been exercised on the app path, so the FIRST failure is the one that matters most — and a bare
+     * catch makes a permission error indistinguishable from an empty log, in the UI and in the logs.
+     * 0089 is exactly that: a swallowed 42501 became permanently wrong data instead of a visible
+     * failure. SQLSTATE only; the driver's message can carry query text and answers nothing here. */
+    const code = typeof err === 'object' && err !== null ? String((err as { code?: unknown }).code) : 'unknown';
+    console.error(`qualify data freshness read failed (sqlstate ${code}) — rendering "freshness unknown"`);
     return { ok: false };
   }
 }

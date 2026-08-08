@@ -23,11 +23,14 @@
  */
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { QualifySnapshot } from '../lib/qualify/contract';
 import { AREA_ALL, AREA_OTHER } from '../components/qualify/m/area-chips';
 import { NO_ANSWER_FILTERS, NO_FACILITY_NARROW } from '../components/qualify/v3/resolution-flow';
 import {
   INITIAL_SHELL_STATE,
+  makeRetryHandler,
   shellReducer,
   type ShellAction,
   type ShellState,
@@ -968,4 +971,101 @@ test('INV p: memberCount moving on a refresh is deliberately NOT announced — t
   );
   assert.equal(after.windowMove, null, 'the member count moved and the window did not — nothing to announce');
   assert.ok(!Object.keys(after).some((k) => k.toLowerCase().includes('member')), 'no memberCount field exists in the machine');
+});
+
+// ── 6 · S5 fix round: the two guards that stand between a press and the marker ───────────────────
+
+/** Collect what a handler dispatches, with a scripted term and busy state. */
+function pressWith(term: string, busy: boolean): ShellAction[] {
+  const seen: ShellAction[] = [];
+  makeRetryHandler({ getTerm: () => term, isBusy: () => busy, dispatch: (a) => seen.push(a) })();
+  return seen;
+}
+
+test('S5 FIX — the empty-term guard is BEHAVIOUR, not a string in a file (MUT-25)', () => {
+  /* ⚠ THIS TEST EXISTS BECAUSE THE SOURCE SCAN THAT WAS SUPPOSED TO COVER IT COULD NOT FAIL.
+   * It asserted `body.indexOf("termRef.current === ''") < body.indexOf('retry_requested')` — and
+   * `indexOf` returns -1 for an absent needle, so DELETING the guard entirely made the assertion
+   * `-1 < positive`, i.e. TRUE. The mutation ran 156/0.
+   *
+   * What it would have shipped is the stuck-flag class reached around the reducer rather than
+   * through it: a press on an emptied PHI ref (a hot-reload mid-flow) arms `refreshingNonce`, the
+   * fetch effect's own `term === ''` early return fires so NO request starts, and therefore neither
+   * terminal dispatch ever runs. The card locks at "Refreshing the ranking…", aria-busy, with the
+   * control unpressable — permanently, with no way back short of a navigation.
+   *
+   * So the guard moved OUT of an inline closure and into a pure factory that a test can call. The
+   * PHI still lives in the shell's ref: the factory takes a GETTER and never stores what it reads. */
+  assert.deepEqual(pressWith('', false), [], 'no term held → nothing dispatched, and above all no marker armed');
+  assert.deepEqual(pressWith('XDP', false), [{ type: 'retry_requested' }], 'a held term → exactly one dispatch');
+});
+
+test('S5 FIX — a second press DURING a refresh is a no-op, so the control can stay focusable (M3)', () => {
+  /* The busy guard used to live only in the DOM, as `disabled`. That drops keyboard focus to
+   * <body> the instant the attribute lands (the element the user is standing on stops being
+   * focusable), and a disabled control's state change is not reliably announced. So the render
+   * layer now carries `aria-disabled` — focus stays put, AT hears the change — and the REFUSAL
+   * moved here, where it is a behaviour rather than a browser side effect.
+   *
+   * It refuses for the same reason the attribute did: every press writes one SEARCH_QUALIFY_PHI row,
+   * because the core audits BEFORE any data. */
+  assert.deepEqual(pressWith('XDP', true), [], 'busy → the press does nothing at all');
+  // Both guards, independently: neither one alone is what makes the handler safe.
+  assert.deepEqual(pressWith('', true), []);
+  assert.deepEqual(pressWith('XDP', false).length, 1, 'positive control: idle with a term still fires');
+});
+
+test('S5 FIX — EVERY_ACTION really is every action (M2)', () => {
+  /* The INV o sweep ("nothing but retry_requested may arm the marker") loops over EVERY_ACTION, so
+   * a twentieth action added to the reducer and forgotten here would slip the sweep silently — the
+   * guard would still be green while covering less. The expected set is DERIVED from the reducer's
+   * own arms rather than hand-counted, so the list cannot drift from the machine. */
+  const src = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/flow-state.ts', import.meta.url)),
+    'utf8',
+  );
+  const arms = [...src.matchAll(/^\s*case '([a-z_]+)':/gm)].map((m) => m[1]!);
+  assert.ok(arms.length >= 19, `expected the known reducer arms, found ${arms.length} — the scan is mis-bounded`);
+  const covered = new Set(EVERY_ACTION.map((a) => a.type));
+  assert.deepEqual(
+    arms.filter((a) => !covered.has(a as ShellAction['type'])),
+    [],
+    'a reducer arm no cross-cutting invariant sweep ever dispatches',
+  );
+  // ...and nothing in the list that the reducer does not handle, which would make a row vacuous.
+  assert.deepEqual([...covered].filter((t) => !arms.includes(t)), []);
+});
+
+test('INV p: the window notice is structurally a REFRESH claim — no marker, no announcement (M1)', () => {
+  /* `loadedKey === scopeKey` was doing double duty: identifying a same-scope re-run AND standing in
+   * for "this was a refresh". The second job was only INCIDENTALLY safe — the four navigations null
+   * the snapshot, so `from` came back null and the arm could not fire. That is a guarantee held by a
+   * neighbouring field's behaviour rather than by this one, and the reducer already holds the marker
+   * that answers the question directly. */
+  const asIfKept = dirty({ snapshot: laddered(30), loadedKey: 'same', refreshingNonce: null, windowMove: null });
+  assert.equal(
+    shellReducer(asIfKept, { type: 'snapshot_resolved', snapshot: laddered(90), scopeKey: 'same' }).windowMove,
+    null,
+    'no refresh in flight → no window-move claim, whatever the keys happen to collide on',
+  );
+  /* THE SCENARIO THAT MADE IT WORTH CLOSING: a NEW identify submit whose request identity happens to
+   * serialize identically to the previous member's (same payer label, same auto window, no filters —
+   * `scopeKeyOf` carries no identifier at all). If anything ever stopped nulling the snapshot on that
+   * path, the old rule would announce "the automatic window widened" about a DIFFERENT PERSON. */
+  const newSearch = shellReducer(
+    dirty({ snapshot: laddered(30), loadedKey: '#auto###', windowMove: null }),
+    { type: 'search_submitted' },
+  );
+  assert.equal(newSearch.refreshingNonce, null, 'a navigation disarms the marker');
+  assert.equal(
+    shellReducer(newSearch, { type: 'snapshot_resolved', snapshot: laddered(90), scopeKey: '#auto###' }).windowMove,
+    null,
+    'a colliding scope key across two different searches is not a window move',
+  );
+  // POSITIVE CONTROL: with the marker armed, the same collision IS the announcement.
+  const refreshed = shellReducer(dirty({ snapshot: laddered(30), loadedKey: 'same', windowMove: null }), { type: 'retry_requested' });
+  assert.deepEqual(
+    shellReducer(refreshed, { type: 'snapshot_resolved', snapshot: laddered(90), scopeKey: 'same' }).windowMove,
+    { from: 30, to: 90 },
+  );
 });
