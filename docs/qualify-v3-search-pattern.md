@@ -178,6 +178,29 @@ facet is ON or OFF: window (never off — it says which window instead), plan ty
 employers, billed under. Every row is toggleable **in place**: the inventory is the controls,
 not a summary beside them.
 
+> **AMENDED 2026-08-07 — two changes. The paragraph above is left as ratified rather than rewritten,
+> because what was ratified is worth being able to read.**
+>
+> 1. **The rows now live inside a NARROW SEARCH card you click to expand.** The promise above is
+>    unchanged and is the constraint the card was built under: a collapse may put the TOGGLES behind
+>    a click and may **not** put the ON/OFF reading behind one. Collapsed, the card's summary states
+>    the resolved scope and carries a named ON/OFF badge per facet plus a tally; expanded, those
+>    badges move back beside their own controls. "Toggleable in place" now reads: *once the card is
+>    open, every facet's control and its state are in the same markup.*
+> 2. **Plan type is no longer one of the facets.** Not a decluttering pass — it reached the server
+>    indirectly. `planTypes` was absent from `scopeKeyOf`, which made it look client-only, but
+>    `filterCandidates` feeds `employerNarrowFor`, whose employer set **is** sent as
+>    `market.employers`. One plan-type press could therefore re-rank the facilities over the
+>    employers holding plans of that type, with nothing on screen mentioning employers. Measured on
+>    one real search: POS 257 · PPO 30 · EPO 27 · HMO 9 · ASO 1 · OAP 1 — POS (79%) was not a proper
+>    subset and changed nothing at all, while ASO collapsed the ranking to a single employer. The
+>    plan-type **tag** stayed (plan tiles, resolved identity line); the filter went. The inventory is
+>    therefore window · funding · employers · billed under, plus `area` beside the grid.
+>
+> Employers also stopped being a chip wall behind a `<details>` and became the shared
+> `MultiSelectTagPicker` — the same control Collections and the v2 Qualify tab render, in CLIENT
+> mode because this surface's vocabulary is already in hand.
+
 One deviation from the tile treatment, and it is the constraint rather than a detail: the
 inventory animates plain `opacity`, never `autoAlpha`. `autoAlpha` sets `visibility: hidden`,
 which would make live controls genuinely unclickable and drop them out of the accessibility

@@ -34,9 +34,15 @@
 // useMemo only — no useEffect/useLayoutEffect and no browser API, so this module stays renderable
 // by renderToStaticMarkup in the hermetic suite. The memos matter: facetsOf + filterCandidates walk
 // the whole candidate universe (311 plans on a real prefix) and would otherwise re-run on every
-// keystroke in the employer tag-search.
+// render of the answer stage.
+// ⚠ ONE CHILD DOES CARRY EFFECTS: `MultiSelectTagPicker` (the shared employer type-ahead) runs a
+// `useEffect` that touches `document` for Escape/outside-click dismissal. That is still SSR-safe —
+// renderToStaticMarkup never runs effects — and the picker owns its own typed draft, which is why
+// this file no longer threads an employer query prop. The rule above is about THIS module; do not
+// read it as a ban on mounting a client control.
 import { useMemo } from 'react';
-import { ChevronRight } from 'lucide-react';
+import { Briefcase, ChevronRight } from 'lucide-react';
+import { MultiSelectTagPicker } from '../../ui/multi-select-tag-picker';
 import type {
   CoverageGroupSummary,
   QualifyResolution,
@@ -256,23 +262,37 @@ export function scopeSourceOf(args: { payerOverride: string | null; pickLabel: s
 
 // ── Answer-stage filters (the general-search escape hatch) ───────────────────────────────────────
 
-/** Multiselect narrows on the answer stage. Empty array = no restriction on that facet. */
+/**
+ * Multiselect narrows on the answer stage. Empty array = no restriction on that facet.
+ *
+ * ⚠ THERE IS NO `planTypes` HERE ANY MORE, AND ITS ABSENCE IS THE POINT (Alec, 2026-08-07). Removing
+ * the plan-type row was not a decluttering pass: plan type reached the SERVER, indirectly, and that
+ * is why nothing about it may survive in this bag. It is absent from `scopeKeyOf`, which made it look
+ * like a pure client-side narrow — but `filterCandidates` feeds `employerNarrowFor`
+ * (resolution-flow-client.tsx), whose `{ employers }` result IS a scope-key segment and IS sent as
+ * `market.employers`. So one plan-type press could silently re-rank the facilities over just the
+ * employers holding plans of that type, with nothing on screen mentioning employers. Measured on a
+ * real search: POS 257 · PPO 30 · EPO 27 · HMO 9 · ASO 1 · OAP 1 — POS (79% of the mass) is not a
+ * proper subset so it does nothing at all, while ASO collapses the ranking to one employer. The same
+ * control, opposite force, no disclosure.
+ *
+ * THE TAG STAYED, THE FILTER WENT. Plan type still renders on every plan tile and in the resolved
+ * identity line; it is a fact about a plan, and reading it costs nobody a re-ranked screen.
+ */
 export interface AnswerFilters {
-  planTypes: string[];
   funding: string[];
   employers: string[];
 }
 
-export const NO_ANSWER_FILTERS: AnswerFilters = { planTypes: [], funding: [], employers: [] };
+export const NO_ANSWER_FILTERS: AnswerFilters = { funding: [], employers: [] };
 
 export function answerFiltersActive(f: AnswerFilters): boolean {
-  return f.planTypes.length > 0 || f.funding.length > 0 || f.employers.length > 0;
+  return f.funding.length > 0 || f.employers.length > 0;
 }
 
 /** AND across facets, OR within one — the standard multiselect reading. */
 export function filterCandidates(all: readonly OrderedCandidate[], f: AnswerFilters): OrderedCandidate[] {
   return all.filter((c) => {
-    if (f.planTypes.length > 0 && !(c.planType !== null && f.planTypes.includes(c.planType))) return false;
     if (f.funding.length > 0 && !(c.funding !== null && f.funding.includes(c.funding))) return false;
     if (f.employers.length > 0 && !(c.employerLabel !== null && f.employers.includes(c.employerLabel))) return false;
     return true;
@@ -335,9 +355,12 @@ export interface Facet {
 }
 
 /** Distinct values per facet, member-weighted and ranked — the biggest option first, so the list
- *  reads as "what this identifier actually has" rather than an alphabet. */
+ *  reads as "what this identifier actually has" rather than an alphabet.
+ *
+ *  ⚠ THE KEY SET HERE IS THE CARD'S VOCABULARY. A `planTypes` key would be a plan-type control on
+ *  screen whatever the row that renders it is called, so it went with the filter (see
+ *  `AnswerFilters`) rather than being left behind as a tally nothing consumes. */
 export function facetsOf(all: readonly OrderedCandidate[]): {
-  planTypes: Facet[];
   funding: Facet[];
   employers: Facet[];
 } {
@@ -353,7 +376,6 @@ export function facetsOf(all: readonly OrderedCandidate[]): {
       .sort((a, b) => b.members - a.members || a.value.localeCompare(b.value));
   };
   return {
-    planTypes: tally((c) => c.planType),
     funding: tally((c) => c.funding),
     employers: tally((c) => c.employerLabel),
   };
@@ -384,8 +406,9 @@ export const ANSWER_EMPLOYER_SEND_MAX = 200;
  *   · clicking "Automatic" in its DEFAULT state — the very first thing on screen;
  *   · clicking the active billed-under chip, which sends `onPayerOverride(null)` when the override
  *     is already null;
- *   · toggling a plan type whose employer set is not a proper subset, or exceeds the 200 bound —
- *     both leave `market.employers` null and the market key unchanged.
+ *   · toggling a filter whose employer set is not a proper subset, or exceeds the 200 bound — both
+ *     leave `market.employers` null and the market key unchanged. (The reported case was a plan-type
+ *     chip; that facet was removed 2026-08-07, but funding reaches the same dead end.)
  * React bails out of a no-op setState, so the deps never changed and the effect never ran.
  *
  * Deriving the flag from "what is requested vs what is rendered" makes the stuck state
@@ -958,10 +981,6 @@ export function StagePayer(props: {
 /** Above this many plans, a type-to-narrow filter appears (a prefix can span 186 employers). */
 export const PLAN_FILTER_THRESHOLD = 8;
 
-/** Employer chips rendered at once in the answer-stage tag-search. Selected chips are always shown
- *  on top of this, so a narrow is never hidden by the cap. */
-const EMPLOYER_CHIP_CAP = 40;
-
 export function StagePlan(props: {
   resolution: QualifyResolution;
   payerPick: string | null;
@@ -1307,10 +1326,8 @@ export interface StageAnswerProps {
    *  after a Skip — every plan behind the identifier. Supplied by the shell so this stays pure. */
   candidates: readonly OrderedCandidate[];
   filters: AnswerFilters;
-  onToggleFilter: (facet: 'planType' | 'funding' | 'employer', value: string) => void;
+  onToggleFilter: (facet: 'funding' | 'employer', value: string) => void;
   onClearFilters: () => void;
-  employerQuery: string;
-  onEmployerQuery: (v: string) => void;
   /** Set when the employer narrow could not be sent because it exceeded the action's 200 bound —
    *  the caption says the ranking is NOT employer-narrowed rather than implying it is. */
   employerNarrowTooMany: number | null;
@@ -1346,6 +1363,17 @@ export interface StageAnswerProps {
    * without an explicit trigger, clicking the same chip again is a no-op.
    */
   onRetry: () => void;
+  /**
+   * Is the NARROW SEARCH card showing its FIELDS? The reducer's own bit (flow-state.ts invariant n),
+   * threaded rather than held locally: a Skip must land the card open and a plan pick must land it
+   * closed, and a `useState` in a component that needs `useActionState` is untestable.
+   *
+   * ⚠ IT GATES THE CONTROLS, NEVER THE INVENTORY. The card's summary states the resolved scope and
+   * every facet's ON/OFF reading in BOTH positions — see the card itself for why that is not a style
+   * choice but the ratified promise.
+   */
+  narrowExpanded: boolean;
+  onToggleNarrow: () => void;
 }
 
 /**
@@ -1362,6 +1390,22 @@ export interface StageAnswerProps {
  * restriction here exactly as it does in `cmdExplorerQuery.ts` — never `= any(ARRAY[])`, which would
  * match nothing.
  */
+/**
+ * THE ONE EXPRESSION BEHIND EVERY MULTISELECT FACET'S BADGE — read by the row that carries the
+ * controls AND by the NARROW SEARCH card's collapsed summary, which is the whole reason it exists as
+ * a function rather than three copies of a ternary.
+ *
+ * Direct precedent, and it is not hypothetical: the AREA badge's denominator was computed a SECOND
+ * way (`chips.length - 1`) and drifted from the list it claimed to count, with a `Math.max(1, …)`
+ * floor making the failure silent. A collapsed summary that re-derives "how many of how many" is the
+ * same bug with a different denominator. One function, two call sites, no second derivation.
+ */
+export function facetReading(selected: readonly string[], optionCount: number): { on: boolean; text: string } {
+  return selected.length > 0
+    ? { on: true, text: `${selected.length} of ${optionCount}` }
+    : { on: false, text: `all ${optionCount}` };
+}
+
 function FacetState(props: { on: boolean; text: string }): React.ReactElement {
   return (
     <span
@@ -1391,14 +1435,7 @@ function FilterLine(props: {
   return (
     <div data-v3-facet className="flex flex-wrap items-center gap-2">
       <span className="text-xs font-medium uppercase tracking-wide text-ink400">{props.label}</span>
-      <FacetState
-        on={props.selected.length > 0}
-        text={
-          props.selected.length > 0
-            ? `${props.selected.length} of ${props.options.length}`
-            : `all ${props.options.length}`
-        }
-      />
+      <FacetState {...facetReading(props.selected, props.options.length)} />
       {props.options.map((o) => {
         const on = props.selected.includes(o.value);
         return (
@@ -1644,8 +1681,8 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
    * (flow-state.ts, invariants g/h), and `props.scopeSource` is `scopeSourceOf(payerOverride,
    * pickLabel)` (resolution-flow-client.tsx:212), which reads the two payer-label inputs and nothing
    * else. But the fetch effect DOES fold active filters into a real `market` payload
-   * (client :269-282): funding goes straight through, and plan type / employer narrow by way of the
-   * employer set `employerNarrowFor` resolves them to. So "Skip, then one Funding chip" was rendering
+   * (client :269-282): funding goes straight through, and the employer selection narrows by way of
+   * the employer set `employerNarrowFor` resolves it to. So "Skip, then one Funding chip" was rendering
    * "this identifier's whole footprint" over a funding-narrowed snapshot, flatly contradicting the
    * "Ranking over N of M plans" line a few rows above it.
    *
@@ -1671,6 +1708,79 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // AreaLine for why that placement is right and why it does not exempt it from the inventory —
   // and omitting it let one click produce "nothing is restricting this search" beside a lit Area chip.
   const anyFacetOn = filtersActive || payerFacetOn || areaActive;
+  /**
+   * ── THE NARROW SEARCH CARD'S FACETS, DERIVED ONCE ────────────────────────────────────────────
+   *
+   * The card folds the answer stage's filter region behind a click (Alec, 2026-08-07). What may NOT
+   * go behind that click is the inventory: the ratified pattern doc's own words are "at the end show
+   * which filters are ON and which are OFF so they can toggle them", so the card's SUMMARY carries
+   * the ON/OFF reading in both positions and only the CONTROLS live in the disclosure.
+   *
+   * ⚠ ONE DERIVATION, TWO RENDER SITES. The collapsed strip and the expanded rows read the SAME
+   * `facetReading` on the SAME inputs — never a parallel count. That is not tidiness: the AREA
+   * badge's denominator was once computed a second way and drifted, silently, behind a
+   * `Math.max(1, …)` floor. A summary that re-counts is that bug pre-installed.
+   *
+   * ⚠ THE GATES MIRROR THE ROWS' OWN SELF-HIDES, EXACTLY. `FilterLine` returns null at zero options,
+   * the employer type-ahead is gated on `facets.employers.length > 0`, and the billed-under row on
+   * `> 1` label. A strip that listed a facet whose control does not render would point the operator
+   * at a switch that is not there.
+   *
+   * AREA IS ABSENT ON PURPOSE and is the one facet counted by `anyFacetOn` but not by this list: its
+   * control lives beside the grid it narrows (see AreaLine), so it is not a member of this card and
+   * not a member of this card's tally. "Which switches are on IN HERE" and "is anything narrowing
+   * this search AT ALL" are different questions, and the sentence above answers the second.
+   */
+  const cardFacets: readonly { label: string; on: boolean; text: string }[] =
+    snap === null
+      ? []
+      : [
+          // The one facet that is never off — a ranking always has a window; "Automatic" is a CHOICE
+          // of window, not the absence of one.
+          { label: 'Window', on: true, text: props.windowDays === null ? 'automatic' : `${props.windowDays} days` },
+          ...(facets.funding.length > 0
+            ? [{ label: 'Funding', ...facetReading(props.filters.funding, facets.funding.length) }]
+            : []),
+          ...(facets.employers.length > 0
+            ? [{ label: 'Employers', ...facetReading(props.filters.employers, facets.employers.length) }]
+            : []),
+          ...(snap.payerOptions.length > 1
+            ? [
+                {
+                  label: 'Billed under',
+                  on: !allPayers,
+                  text: allPayers ? `all ${snap.payerOptions.length} labels` : (scopePayer ?? '1 label'),
+                },
+              ]
+            : []),
+        ];
+  const cardFacetsOn = cardFacets.filter((f) => f.on).length;
+  /**
+   * WHAT THE SEARCH RESOLVED TO, in one line, for the reader who never opens the card: plan-or-all-
+   * plans, the billed-under scope, and the window. Three facts, three sources, none of them re-derived
+   *   · the plan half is `skipped`, the reducer's own "was a plan chosen" field;
+   *   · the payer half is `resolved.payerScope`, what the CORE actually ranked — never `skipped`,
+   *     which is an intention (a Skip plus one chip is a payer-scoped ranking with skipped still true);
+   *   · the window half names the MODE only. The DAYS are stated by `windowSentence` a line below,
+   *     which reads the ladder; printing a number here would be a second derivation of it.
+   * A categorical sentence about the data, so it is suppressed in flight under RULE 2654416.
+   */
+  const resolvedScopeSentence =
+    snap === null
+      ? null
+      : [
+          skipped ? 'All plans — no plan chosen' : 'The plan you picked',
+          // ⚠ "RANKED", NOT A BARE "UNDER". On the pick-rejected path this line renders directly above
+          // a caption reading "Could not scope to the picked plan — showing the largest by volume", and
+          // "The plan you picked · under AETNA US HEALTHCARE" invited the label to be read as the
+          // PICK'S. Both sentences were true; adjacent, they misread. The verb attaches the label to
+          // the ranking. HOW that label was chosen stays the caption's job alone — restating its
+          // four-way claim here would be a second derivation of one fact, which is how they drift.
+          allPayers
+            ? `ranked across all ${snap.payerOptions.length} billed-under labels`
+            : `ranked under ${scopePayer ?? 'one billed-under label'}`,
+          props.windowDays === null ? 'automatic window' : `trailing ${props.windowDays} days`,
+        ].join(' · ');
   /**
    * ⚠ THE DISCLOSURE'S CAPTIONS ARE FROZEN AT RESOLVE TIME AND A SKIP NEVER RE-RESOLVES.
    * `r.provenance` is minted SERVER-side inside `resolveCoverage` (resolutionService.ts:383-408) from
@@ -1740,19 +1850,26 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // ⟺ the identifier has no VOB row anywhere (see above). Picking a plan therefore cannot surface
   // benefits notes, so the explanation below must not offer that as a way to see them.
   const identifierHasNoVob = skipSurvivingNotices.length > 0;
-  // Employer options: filtered by the tag-search text, then capped for render — a 311-employer chip
-  // wall is not a control. Selected employers are always shown so a narrow is never invisible.
-  const employerNeedle = props.employerQuery.trim().toLowerCase();
-  const employerMatches = useMemo(
-    () => facets.employers.filter((o) => employerNeedle === '' || o.value.toLowerCase().includes(employerNeedle)),
-    [facets.employers, employerNeedle],
-  );
-  const employerOptions = useMemo(
-    () => [
-      ...facets.employers.filter((o) => props.filters.employers.includes(o.value)),
-      ...employerMatches.filter((o) => !props.filters.employers.includes(o.value)).slice(0, EMPLOYER_CHIP_CAP),
-    ],
-    [facets.employers, employerMatches, props.filters.employers],
+  /**
+   * THE EMPLOYER TYPE-AHEAD'S OPTION LIST — the WHOLE local vocabulary, uncapped and unfiltered.
+   *
+   * ⚠ CLIENT MODE, DELIBERATELY, AND IT IS NOT AN OPTIMISATION. Collections runs this same picker in
+   * SERVER mode (`onQueryChange` + `minChars`) because its employer vocabulary is ~10k rows and
+   * cannot be shipped whole. This surface's employers come from `facetsOf(props.candidates)` — they
+   * are already in hand, already per-identifier, already member-ranked. Wiring `onQueryChange` here
+   * would flip the picker to server mode, which stops it filtering client-side, and would break
+   * `employerNarrowFor`: that function decides whether a selection is a narrow AT ALL by comparing it
+   * against the FULL local universe (`picked.length >= allEmployers.size`), so a query-filtered
+   * universe would make the proper-subset guard mis-fire silently.
+   *
+   * `display` is the employer text and nothing else. The member counts the old chip wall printed are
+   * facts about the UNFILTERED universe, and the picker re-renders `display` inside the selected TAG
+   * — so a count there would sit beside a narrowed ranking describing a different set. The ordering
+   * (biggest first) survives, because the picker preserves option order.
+   */
+  const employerPickerOptions = useMemo(
+    () => facets.employers.map((o) => ({ value: o.value, display: o.value })),
+    [facets.employers],
   );
   // ── The AREA facet, applied ────────────────────────────────────────────────────────────────────
   // Everything below is derived from `snap.facilities` — the rows the ranking ALREADY returned. No
@@ -1890,237 +2007,333 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
             </p>
           ) : null}
 
-          {/* ── The control lines. All visible, none behind a dropdown (the employer tag-search is
-              the one exception — 311 employers cannot be chips). Each is the "BILLED UNDER" idiom:
-              a label, then an ON/OFF state badge, then toggles. Window is SINGLE-select (a window is
-              one value); the three facets are multiselect.
+          {/* ── THE NARROW SEARCH CARD (Alec, 2026-08-07) ────────────────────────────────────────
+              The answer stage's filter region folds into a card you click to expand. Two halves, and
+              which half a thing belongs in is decided by ONE rule:
 
-              ── THE SKIP LANDS HERE (Alec, 2026-08-07) ────────────────────────────────────────────
-              After a Skip this block IS the answer to "what did the search just do": every facet, its
-              state in words, and its toggles — one surface, not a summary beside the controls it
-              describes. `data-v3-inventory` marks it for the shell's reveal timeline; each row is
-              tagged `data-v3-facet`. The motion is the flow's existing vocabulary (14px / 220ms
-              power2.out, stagger min(i,3)×60ms) and animates OPACITY, never `autoAlpha` — see the
-              shell for why that distinction is what keeps the toggles live throughout. ── */}
-          <div data-v3-inventory className="flex flex-col gap-2.5 rounded-lg border border-line bg-surface px-4 py-3">
-            {/* The inventory's own sentence, shown only after a Skip — the state where "nothing is
-                filtered" is a fact worth asserting rather than left to be read off six unlit rows. */}
-            {skipped && !stale ? (
-              <p data-v3-facet className="text-xs font-semibold text-ink600">
-                {/* ⚠ "EVERY SWITCH IS OFF" WAS FALSE ONE CLICK IN. Skip, then press "90 days": no
-                    filter is active, no label is scoped, so the old sentence claimed nothing was
-                    restricting the search — directly above a Window row reading "On · 90 days". Both
-                    halves were wrong at once. The window is a real narrowing that can never be turned
-                    off (see its FacetState), so the sentence names it as the standing exception
-                    instead of pretending the screen has none. */}
-                {anyFacetOn
-                  ? 'Some switches are on — everything marked Off is unrestricted.'
-                  : 'No filters are on — apart from the window, nothing is narrowing this search. Turn any switch on to narrow it.'}
-              </p>
-            ) : null}
-            {/* GRANULAR suppression, honouring the RULE 2654416 ruling rather than blanketing it.
-                The MANUAL variant ("— your selection") states the user's own action — a fact,
-                allowed to speak immediately under the dim+beam marker (the standing ruling in the
-                RULE 2654416 test). But the AUTO variants read the RENDERED snapshot's LADDER — a
-                data claim about the set being replaced — so they wait like every other categorical
-                sentence. And after a FAILED refetch (staleAfterError) the WHOLE sentence waits:
-                there is no beam, the duration is unbounded post-F2, and the failure banner just
-                said the content shows the previous scope — "Showing trailing 365 days" printed
-                beside that banner would be a direct contradiction. The Window CHIPS below stay —
-                they are the user's controls (and, after a failure, the escape route). */}
-            {props.staleAfterError || (props.refetching && props.windowDays === null) ? null : (
-              <p className="text-sm text-ink900">{windowSentence(snap, props.windowDays)}</p>
-            )}
-            <div data-v3-facet className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-medium uppercase tracking-wide text-ink400">Window</span>
-              {/* THE ONE FACET THAT IS NEVER OFF, and the inventory says so rather than pretending
-                  otherwise. A ranking always has a window; "Automatic" is a CHOICE OF window, not the
-                  absence of one — so this reads "On · automatic" or "On · 90 days", never "Off". The
-                  Collections model carries the same caveat (its 90-day recency chip is a real default
-                  narrowing, captioned as "· Last 90 days" rather than hidden). */}
-              <FacetState on text={props.windowDays === null ? 'automatic' : `${props.windowDays} days`} />
-              {WINDOW_CHOICES.map((d) => {
-                const active = props.windowDays === d;
-                return (
-                  <button
-                    key={d}
-                    type="button"
-                    aria-pressed={active}
-                    onClick={() => props.onWindowDays(d)}
-                    className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
-                      active ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
-                    }`}
-                  >
-                    {d} days{active ? ' · selected' : ''}
-                  </button>
-                );
-              })}
+                  STATEMENTS GO IN THE SUMMARY · CONTROLS GO BEHIND THE CLICK.
+
+              ⚠ THE COLLAPSED SUMMARY *IS* THE INVENTORY, AND THAT IS NOT A STYLE CHOICE. The ratified
+              pattern doc records Alec's own words — "at the end show which filters are ON and which
+              are OFF so they can toggle them" — so a collapse may put the toggles behind a click but
+              may NOT put the on/off reading behind one. Collapsed, this card still carries the scope
+              it resolved to, the anyFacetOn sentence, a named ON/OFF badge per facet, and the tally.
+              Expanding swaps the badge strip for the rows that carry those same badges next to their
+              controls. Nothing about "which switches are on" ever costs a click.
+
+              ⚠ THIS REVERSES THE COMMENT THAT STOOD HERE ONE DAY ("All visible, none behind a
+              dropdown"), which is recorded rather than deleted because that ruling was right for a
+              screen with no card and wrong for one with a summary that states what the fields hold.
+
+              ⚠ AND IT IS NOT A `<details>`. A closed <details> serializes its children, so the whole
+              inventory would sit in the SSR string — every existing assertion green, the operator
+              seeing none of it. The fields are CONDITIONALLY RENDERED and the tests assert their
+              absence against an expanded positive control.
+
+              `data-v3-inventory` marks the card for the shell's reveal timeline and `data-v3-facet`
+              marks each beat — ON THE SUMMARY BADGES WHEN COLLAPSED, on the rows when expanded, so
+              the stagger has 5-6 beats in either position. Without that re-homing a collapse would
+              leave AREA as the only beat on the stage and `staggerDelayMs(0) === 0` would make the
+              reveal a silent no-op. The shell's layout effect keys on `[stage, hasSnapshot]` and this
+              bit is deliberately NOT added to it: `ctx.revert()` would replay the 14px stage rise and
+              re-hide the entire scorecard grid on every toggle. ── */}
+          <section
+            data-v3-inventory
+            aria-labelledby="qualify-narrow-heading"
+            className="relative isolate flex flex-col gap-3 rounded-xl px-4 py-3.5 shadow-ths-sm"
+          >
+            {/* ⚠ THE SURFACE IS ITS OWN LAYER, AND THE REASON IS THE TYPE-AHEAD BELOW. `.q-subject`
+                and `overflow-hidden` used to sit on the <section>: the class paints the dark teal
+                gradient, and its `::after` is a coral glow positioned OUTSIDE the box (right:-40px,
+                top:-60px), so something has to clip it. But `overflow-hidden` on the card also clips
+                every absolutely-positioned DESCENDANT — and MultiSelectTagPicker's dropdown is one,
+                opening downward from a row near the card's bottom edge. That would have shipped a
+                type-ahead whose matches are cut off, with nothing wrong in the DOM to notice.
+                So the clip moved down onto a layer that holds nothing but paint. It is FIRST in DOM
+                order and every sibling below is `relative`, so painting order alone puts the content
+                above it — no z-index, no `isolate` dependency beyond the one already here. */}
+            <span aria-hidden className="q-subject absolute inset-0 overflow-hidden rounded-xl" />
+            {/* LIGHT-ON-DARK. `.q-subject` is the app's dark teal gradient band; every label on it is
+                the design system's blessed eyebrow at its dark-surface palette (teal200 on #0e3a3a
+                clears AA), and nothing here goes below `text-xs` — 13px in this config, which is the
+                house floor. */}
+            <div className="relative flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+              <h3 id="qualify-narrow-heading" className="text-xs font-semibold uppercase tracking-wide text-teal200">
+                Narrow search
+              </h3>
               <button
                 type="button"
-                aria-pressed={props.windowDays === null}
-                onClick={() => props.onWindowDays(null)}
-                className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
-                  props.windowDays === null ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
-                }`}
+                aria-expanded={props.narrowExpanded}
+                aria-controls="qualify-narrow-fields"
+                onClick={props.onToggleNarrow}
+                className="flex items-center gap-1.5 rounded-full border border-teal200/40 bg-white/10 px-3 py-1 text-xs font-semibold text-white transition-colors hover:border-teal200 hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/60"
               >
-                Automatic{props.windowDays === null ? ' · selected' : ''}
+                {props.narrowExpanded ? 'Hide the fields' : 'Change these'}
+                <span aria-hidden className={`text-teal200 transition-transform ${props.narrowExpanded ? 'rotate-180' : ''}`}>
+                  ▾
+                </span>
               </button>
             </div>
 
-            <FilterLine
-              label="Plan type"
-              options={facets.planTypes}
-              selected={props.filters.planTypes}
-              onToggle={(v) => props.onToggleFilter('planType', v)}
-            />
-            <FilterLine
-              label="Funding"
-              options={facets.funding}
-              selected={props.filters.funding}
-              onToggle={(v) => props.onToggleFilter('funding', v)}
-            />
+            {/* ── THE SUMMARY. Every line below is a STATEMENT about the search, which is why it is
+                here and not behind the disclosure. ── */}
+            <div className="relative flex flex-col gap-2">
+              {/* WHAT THE SEARCH RESOLVED TO, for the reader who never clicks. A categorical sentence
+                  about the data, so RULE 2654416 suppresses it in flight rather than letting it
+                  describe the set being replaced. */}
+              {stale || resolvedScopeSentence === null ? null : (
+                <p className="text-sm font-medium text-white">{resolvedScopeSentence}</p>
+              )}
+              {/* The inventory's own sentence, shown only after a Skip — the state where "nothing is
+                  filtered" is a fact worth asserting rather than left to be read off unlit rows. */}
+              {skipped && !stale ? (
+                <p data-v3-facet className="text-xs font-semibold text-teal50">
+                  {/* ⚠ "EVERY SWITCH IS OFF" WAS FALSE ONE CLICK IN. Skip, then press "90 days": no
+                      filter is active, no label is scoped, so the old sentence claimed nothing was
+                      restricting the search — directly above a Window row reading "On · 90 days".
+                      Both halves were wrong at once. The window is a real narrowing that can never be
+                      turned off (see its FacetState), so the sentence names it as the standing
+                      exception instead of pretending the screen has none. */}
+                  {anyFacetOn
+                    ? 'Some switches are on — everything marked Off is unrestricted.'
+                    : 'No filters are on — apart from the window, nothing is narrowing this search. Turn any switch on to narrow it.'}
+                </p>
+              ) : null}
+              {/* GRANULAR suppression, honouring the RULE 2654416 ruling rather than blanketing it.
+                  The MANUAL variant ("— your selection") states the user's own action — a fact,
+                  allowed to speak immediately under the dim+beam marker (the standing ruling in the
+                  RULE 2654416 test). But the AUTO variants read the RENDERED snapshot's LADDER — a
+                  data claim about the set being replaced — so they wait like every other categorical
+                  sentence. And after a FAILED refetch (staleAfterError) the WHOLE sentence waits:
+                  there is no beam, the duration is unbounded post-F2, and the failure banner just
+                  said the content shows the previous scope — "Showing trailing 365 days" printed
+                  beside that banner would be a direct contradiction. The Window CHIPS stay behind the
+                  disclosure — they are the user's controls (and, after a failure, the escape route). */}
+              {props.staleAfterError || (props.refetching && props.windowDays === null) ? null : (
+                <p className="text-sm text-teal50">{windowSentence(snap, props.windowDays)}</p>
+              )}
+              {/* THE PAYER-SCOPE CLAIM. "You picked this" / "your plan pick implies this" / "we
+                  defaulted" are three different claims, and a REJECTED override must never render as
+                  honoured. It sits in the SUMMARY rather than beside its chips because it is a
+                  sentence about what the ranking IS, not a control — and because a caption that only
+                  appears once you open the card cannot do the job it exists for. SUPPRESSED IN FLIGHT
+                  (rule 2654416); the chips themselves stay live below, they are controls, not claims. */}
+              {snap.payerOptions.length > 1 && !stale ? (
+                <p className="text-xs text-teal200">
+                  {billedUnderCaption({
+                    skipped,
+                    payerOverridden: snap.payerOverridden,
+                    scopeSource: props.scopeSource,
+                    allPayers,
+                  })}
+                </p>
+              ) : null}
 
-            {/* The employer tag-search: a visible dropdown whose SUMMARY states the current reach,
-                so the count is readable without opening it. */}
-            {facets.employers.length > 0 ? (
-              <details data-v3-facet className="group/emp text-xs">
-                {/* A REAL dropdown control, not a text link: same pill geometry as every other chip
-                    on these lines, with its own caret. `list-none` + the webkit rule kill the
-                    native marker so the caret is ours and points the right way when open.
-                    The state badge sits INSIDE the summary because this facet's controls are behind
-                    the disclosure — the inventory has to be readable without opening it. */}
-                <summary className="flex w-fit cursor-pointer list-none items-center gap-2 rounded-full border border-line bg-surface px-3 py-1 text-xs font-semibold text-ink900 transition-colors hover:border-teal500 hover:text-teal700 [&::-webkit-details-marker]:hidden">
-                  <span className="text-xs font-medium uppercase tracking-wide text-ink400">Employers</span>
-                  <FacetState
-                    on={props.filters.employers.length > 0}
-                    text={
-                      props.filters.employers.length > 0
-                        ? `${props.filters.employers.length} of ${facets.employers.length}`
-                        : `all ${facets.employers.length}`
-                    }
-                  />
-                  <span aria-hidden className="text-ink400 transition-transform group-open/emp:rotate-180">
-                    ▾
+              {/* ── THE ON/OFF STRIP, collapsed only. Expanded, each row states its own badge beside
+                  its own controls (which is strictly better — the state sits next to the thing that
+                  changes it), so rendering both would print the inventory twice. Each badge is a
+                  `data-v3-facet` beat: this is what keeps the skip reveal alive through the collapse.
+                  Values come from `cardFacets`, the SINGLE derivation the rows read too. ── */}
+              {props.narrowExpanded ? null : (
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                  {cardFacets.map((f) => (
+                    <span key={f.label} data-v3-facet className="flex items-center gap-2">
+                      <span className="text-xs font-medium uppercase tracking-wide text-teal200">{f.label}</span>
+                      <FacetState on={f.on} text={f.text} />
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {/* THE TALLY — the aggregate a reader takes in at a glance, beside the named strip that
+                  says WHICH. Derived by counting `cardFacets`, never a hand-written total: a facet
+                  that stops rendering (its options ran out, or a future ruling drops it) leaves the
+                  list and the tally together. WINDOW IS ALWAYS ON, so "1" is this card's honest floor
+                  rather than a bug — the headline sentence names that exception in words.
+
+                  ⚠ "OF THESE" IS LOAD-BEARING, AND SO IS THE AREA CLAUSE. This read a bare "1 on ·
+                  4 off", which is a claim about the SCREEN in a card that holds five of the screen's
+                  six facets. With an area narrow on and every in-card switch off, the card said
+                  "Some switches are on" and then counted one — the Window, which the headline's other
+                  arm explicitly discounts. Two live narrows, a tally of one, and nothing pointing at
+                  the one that is elsewhere.
+                  The fix is NOT to fold AREA into `cardFacets`: its control lives beside the grid it
+                  narrows and that placement is the honesty argument made in layout (see AreaLine).
+                  Instead the tally scopes its claim to this card ("of these") and NAMES the narrow
+                  that is not in it when that narrow is live. Wording is unratified — plain on purpose. */}
+              <p className="text-xs text-teal200">
+                <span className="font-semibold text-white">{cardFacetsOn} of these {cardFacets.length} switches on</span>
+                {areaActive ? ' · plus the area narrow, beside the list' : ''}
+                {props.narrowExpanded ? '' : ' — open the fields to change any of them'}
+              </p>
+
+              {/* What the filters DID to the ranking — stated, never inferred. It is a STATEMENT, so
+                  it lives here; "Clear filters" rides with it because a narrow the operator cannot
+                  reach without first opening the card is a narrow that outlived its own reset. */}
+              {filtersActive ? (
+                <p className="flex flex-wrap items-center gap-2 text-xs text-teal50">
+                  <span>
+                    Ranking over {filteredCandidates.length} of {props.candidates.length} plans
+                    {props.employerNarrowTooMany !== null
+                      ? ` — too many employers (${props.employerNarrowTooMany}) to narrow the ranking by employer, so it is not`
+                      : ''}
+                    .
                   </span>
-                </summary>
-                <div className="mt-2 flex flex-col gap-2 rounded-xl border border-line bg-ground p-3">
-                  <label htmlFor="qualify-answer-employers" className="text-xs font-medium text-ink900">
-                    Find an employer
-                  </label>
-                  <input
-                    id="qualify-answer-employers"
-                    type="text"
-                    value={props.employerQuery}
-                    onChange={(e) => props.onEmployerQuery(e.target.value)}
-                    autoComplete="off"
-                    className="max-w-sm rounded-lg border border-line bg-surface px-3 py-1.5 text-sm text-ink900 outline-none transition-colors focus:border-teal500 focus:ring-2 focus:ring-teal500/25"
-                  />
-                  <div className="flex max-h-56 flex-wrap gap-1.5 overflow-y-auto">
-                    {employerOptions.map((o) => {
-                      const on = props.filters.employers.includes(o.value);
+                  <button
+                    type="button"
+                    onClick={props.onClearFilters}
+                    className="rounded-full border border-teal200/50 px-2.5 py-0.5 font-semibold text-white hover:bg-white/15"
+                  >
+                    Clear filters
+                  </button>
+                </p>
+              ) : null}
+            </div>
+
+            {/* ── THE FIELDS. Conditionally rendered, so "collapsed" is a fact about the DOM and a
+                test can tell a hidden control from an absent one. They sit in a LIGHT WELL rather
+                than inheriting the dark palette, and that decision is now load-bearing rather than
+                merely conservative: the shared type-ahead below carries the dashboard's own light
+                tokens, so a dark well would have meant forking it.
+
+                THE HYBRID (Alec, 2026-08-07): short vocabularies stay counted chips (Window,
+                Funding, Billed under — every option visible, each with its own count and toggle),
+                long ones become the shared type-ahead (Employers, and Facility when Task 3 lands
+                beside it). Plan type is not here in either form; `AnswerFilters` records why. ── */}
+            {props.narrowExpanded ? (
+              <div
+                id="qualify-narrow-fields"
+                className="q-narrow-fields relative flex flex-col gap-2.5 rounded-lg border border-line bg-surface px-3.5 py-3"
+              >
+                <div data-v3-facet className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-medium uppercase tracking-wide text-ink400">Window</span>
+                  {/* THE ONE FACET THAT IS NEVER OFF, and the inventory says so rather than pretending
+                      otherwise. A ranking always has a window; "Automatic" is a CHOICE OF window, not the
+                      absence of one — so this reads "On · automatic" or "On · 90 days", never "Off". The
+                      Collections model carries the same caveat (its 90-day recency chip is a real default
+                      narrowing, captioned as "· Last 90 days" rather than hidden). */}
+                  <FacetState on text={props.windowDays === null ? 'automatic' : `${props.windowDays} days`} />
+                  {WINDOW_CHOICES.map((d) => {
+                    const active = props.windowDays === d;
+                    return (
+                      <button
+                        key={d}
+                        type="button"
+                        aria-pressed={active}
+                        onClick={() => props.onWindowDays(d)}
+                        className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
+                          active ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
+                        }`}
+                      >
+                        {d} days{active ? ' · selected' : ''}
+                      </button>
+                    );
+                  })}
+                  <button
+                    type="button"
+                    aria-pressed={props.windowDays === null}
+                    onClick={() => props.onWindowDays(null)}
+                    className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
+                      props.windowDays === null ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
+                    }`}
+                  >
+                    Automatic{props.windowDays === null ? ' · selected' : ''}
+                  </button>
+                </div>
+
+                {/* SHORT LIST → COUNTED CHIPS (Alec's hybrid ruling, 2026-08-07). Funding is two or
+                    three values on any real search, so every option stays on screen with its member
+                    count and its own aria-pressed toggle. PLAN TYPE used to sit here and does not any
+                    more — see `AnswerFilters` for why removing it was a correctness change, not a
+                    decluttering one. */}
+                <FilterLine
+                  label="Funding"
+                  options={facets.funding}
+                  selected={props.filters.funding}
+                  onToggle={(v) => props.onToggleFilter('funding', v)}
+                />
+
+                {/* LONG LIST → TYPE-AHEAD (the other half of the hybrid ruling), and specifically the
+                    SHARED picker: `MultiSelectTagPicker` is the same primitive the Collections
+                    explorer and the v2 Qualify tab render, extracted out of cmd-explorer so these
+                    surfaces cannot drift into three employer controls. There was nothing to port and
+                    nothing to fork — it already carries a Qualify-only `tone` prop.
+
+                    THE BADGE RIDES THE PICKER'S OWN LABEL ROW. This card's contract is that every
+                    facet states ON/OFF beside its own control, and the picker owns the only label
+                    this facet has; a second "Employers" heading above it would say the word twice to
+                    a screen reader. Same `facetReading` expression as every other badge — the
+                    collapsed summary reads it too, and one expression is what stops the two from
+                    drifting (see `cardFacets`).
+
+                    `onClear` walks the selection through `onToggleFilter` rather than reaching for a
+                    new reducer action. `filter_toggled` is the machine's ONLY facet-scoped write to
+                    `filters`; a second one would be a second writer of the field the fetch effect
+                    keys on, which is the shape `scopeKeyOf`'s header is a post-mortem of. */}
+                {facets.employers.length > 0 ? (
+                  <div data-v3-facet>
+                    <MultiSelectTagPicker
+                      label="Employers"
+                      badge={<FacetState {...facetReading(props.filters.employers, facets.employers.length)} />}
+                      placeholder="Type to find an employer…"
+                      icon={<Briefcase className="h-3.5 w-3.5" aria-hidden />}
+                      options={employerPickerOptions}
+                      selected={props.filters.employers}
+                      onToggle={(v) => props.onToggleFilter('employer', v)}
+                      onClear={() => {
+                        for (const v of props.filters.employers) props.onToggleFilter('employer', v);
+                      }}
+                      tone="list"
+                    />
+                  </div>
+                ) : null}
+
+                {/* Claims-side scope: which billed-under label the ranking is scoped to. MOVED INSIDE the
+                    inventory block 2026-08-07 — it was the one facet living outside the panel that claims
+                    to list every facet, and after a Skip it is the facet that matters most (it is the
+                    un-blend). Its state badge reads "Off · all N labels" when nothing is selected, which
+                    is now a REACHABLE state rather than a hypothetical: before the identifier-wide skip,
+                    the core always resolved a dominant label and one chip was always lit.
+                    Its CAPTION moved up to the card's summary with the card change — a sentence that
+                    appears only once you open the disclosure cannot do the job it exists for. */}
+                {snap.payerOptions.length > 1 ? (
+                  <div data-v3-facet className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-medium uppercase tracking-wide text-ink400">Billed under</span>
+                    <FacetState
+                      on={!allPayers}
+                      text={allPayers ? `all ${snap.payerOptions.length} labels` : (scopePayer ?? '1 label')}
+                    />
+                    {snap.payerOptions.map((p) => {
+                      // ⚠ COMPARE AGAINST THE SCOPE, NOT THE NAME. `resolved.payerName` is null under an
+                      // all-payers ranking, so `=== p.payer` is false for every chip and none lights —
+                      // which is the correct reading and the Collections model exactly (nothing selected
+                      // means no restriction). Going through `scopePayer` states that rather than relying
+                      // on a null comparison to happen to do the right thing.
+                      const active = !allPayers && scopePayer === p.payer;
                       return (
                         <button
-                          key={o.value}
+                          key={p.payer}
                           type="button"
-                          aria-pressed={on}
-                          onClick={() => props.onToggleFilter('employer', o.value)}
-                          className={`rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors ${
-                            on ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600 hover:border-teal200'
+                          aria-pressed={active}
+                          onClick={() => props.onPayerOverride(active ? null : p.payer)}
+                          className={`rounded-full border px-3 py-1 text-xs font-semibold ${
+                            active ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600'
                           }`}
                         >
-                          {o.value}
-                          <span className="font-mono tabular-nums text-ink400"> · {o.members.toLocaleString()}</span>
-                          {on ? ' · on' : ''}
+                          {p.payer}
+                          <span className="ths-num" aria-label={`${p.lines} charge lines under this label`}>
+                            {' '}
+                            · {p.lines.toLocaleString()}
+                          </span>
+                          {active ? ' · showing' : ''}
                         </button>
                       );
                     })}
                   </div>
-                  {employerOptions.length < employerMatches.length ? (
-                    <p className="text-ink600">
-                      Showing the {employerOptions.length} largest of {employerMatches.length} matches — type to narrow.
-                    </p>
-                  ) : null}
-                </div>
-              </details>
-            ) : null}
-
-            {/* What the filters DID to the ranking — stated, never inferred. */}
-            {filtersActive ? (
-              <p className="flex flex-wrap items-center gap-2 text-xs text-ink600">
-                <span>
-                  Ranking over {filteredCandidates.length} of {props.candidates.length} plans
-                  {props.employerNarrowTooMany !== null
-                    ? ` — too many employers (${props.employerNarrowTooMany}) to narrow the ranking by employer, so it is not`
-                    : ''}
-                  .
-                </span>
-                <button
-                  type="button"
-                  onClick={props.onClearFilters}
-                  className="rounded-full border border-line px-2.5 py-0.5 font-semibold text-teal700 hover:bg-teal50"
-                >
-                  Clear filters
-                </button>
-              </p>
-            ) : null}
-
-            {/* Claims-side scope: which billed-under label the ranking is scoped to. MOVED INSIDE the
-                inventory block 2026-08-07 — it was the one facet living outside the panel that claims
-                to list every facet, and after a Skip it is the facet that matters most (it is the
-                un-blend). Its state badge reads "Off · all N labels" when nothing is selected, which
-                is now a REACHABLE state rather than a hypothetical: before the identifier-wide skip,
-                the core always resolved a dominant label and one chip was always lit. */}
-            {snap.payerOptions.length > 1 ? (
-              <div data-v3-facet className="flex flex-wrap items-center gap-2">
-                <span className="text-xs font-medium uppercase tracking-wide text-ink400">Billed under</span>
-                <FacetState
-                  on={!allPayers}
-                  text={allPayers ? `all ${snap.payerOptions.length} labels` : (scopePayer ?? '1 label')}
-                />
-                {snap.payerOptions.map((p) => {
-                  // ⚠ COMPARE AGAINST THE SCOPE, NOT THE NAME. `resolved.payerName` is null under an
-                  // all-payers ranking, so `=== p.payer` is false for every chip and none lights —
-                  // which is the correct reading and the Collections model exactly (nothing selected
-                  // means no restriction). Going through `scopePayer` states that rather than relying
-                  // on a null comparison to happen to do the right thing.
-                  const active = !allPayers && scopePayer === p.payer;
-                  return (
-                    <button
-                      key={p.payer}
-                      type="button"
-                      aria-pressed={active}
-                      onClick={() => props.onPayerOverride(active ? null : p.payer)}
-                      className={`rounded-full border px-3 py-1 text-xs font-semibold ${
-                        active ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-surface text-ink600'
-                      }`}
-                    >
-                      {p.payer}
-                      <span className="ths-num" aria-label={`${p.lines} charge lines under this label`}>
-                        {' '}
-                        · {p.lines.toLocaleString()}
-                      </span>
-                      {active ? ' · showing' : ''}
-                    </button>
-                  );
-                })}
-                {/* "You picked this" / "your plan pick implies this" / "we defaulted" are three
-                    different claims — and a REJECTED override must never render as honoured. The
-                    caption is SUPPRESSED IN FLIGHT (rule 2654416): it asserts one of four scope
-                    claims about a set that has not answered yet. The chips themselves stay — they
-                    are the user's controls, not claims. */}
-                {stale ? null : (
-                  <span className="text-xs text-ink600">
-                    {billedUnderCaption({
-                      skipped,
-                      payerOverridden: snap.payerOverridden,
-                      scopeSource: props.scopeSource,
-                      allPayers,
-                    })}
-                  </span>
-                )}
+                ) : null}
               </div>
             ) : null}
-          </div>
+          </section>
 
           {/* The hero: ONE number, patient-weighted, with its basis stated. The band wash sits
               behind it (Phase 5); the verdict WORD beside the numeral still carries the meaning.

@@ -19,7 +19,7 @@
  * class of bug, PR #124's lesson, applied here by construction).
  *
  * ── WHERE THE STATE RULES LIVE ──────────────────────────────────────────────────────────────────
- * In `./flow-state.ts` — `shellReducer`, fifteen fields, eighteen actions, with the full
+ * In `./flow-state.ts` — `shellReducer`, sixteen fields, nineteen actions, with the full
  * per-action field-write table and the lettered invariants (a–m) in its header. READ THAT FIRST
  * before changing any handler here. What is left in this file is deliberately only the three things
  * a reducer cannot hold: the PHI ref, the effects, and the values derived per render (`stage`,
@@ -72,7 +72,7 @@ import {
   tickerIsLive,
   type FlowStage,
 } from './resolution-flow';
-// The flow's fifteen fields and the rules that move them. Its header is the spec; this file is the
+// The flow's sixteen fields and the rules that move them. Its header is the spec; this file is the
 // transport (PHI ref, effects, derivations) wired to it.
 import { INITIAL_SHELL_STATE, shellReducer } from './flow-state';
 
@@ -98,7 +98,7 @@ export function ResolutionFlowClient({
   // The raw term — JS memory only. See the header block before moving this anywhere.
   const termRef = useRef<string>('');
 
-  // ONE state machine, not fifteen useState hooks. Destructured so every read site below is the
+  // ONE state machine, not sixteen useState hooks. Destructured so every read site below is the
   // same identifier it always was. Notable fields, restated here because they are easy to misuse:
   //   · retryNonce — monotonic, NEVER reset. It is the only way to re-fire a request whose inputs
   //     did not change: the snapshot effect keys on `scopeKey`, which is by construction identical
@@ -115,7 +115,6 @@ export function ResolutionFlowClient({
     picked,
     skipped,
     filters,
-    employerQuery,
     planFilter,
     autoAsk,
     backTo,
@@ -126,6 +125,7 @@ export function ResolutionFlowClient({
     windowDays,
     loadedKey,
     area,
+    narrowExpanded,
   } = flow;
 
   // NOT in the reducer, deliberately: the ticker is a mount-once fetch that no flow field and no
@@ -160,7 +160,7 @@ export function ResolutionFlowClient({
     dispatch({ type: 'skipped' });
   }, []);
 
-  const onToggleFilter = useCallback((facet: 'planType' | 'funding' | 'employer', value: string) => {
+  const onToggleFilter = useCallback((facet: 'funding' | 'employer', value: string) => {
     dispatch({ type: 'filter_toggled', facet, value });
   }, []);
 
@@ -173,6 +173,18 @@ export function ResolutionFlowClient({
    *  snapshot request is issued (flow-state.ts invariant m). */
   const onSelectArea = useCallback((key: string) => {
     dispatch({ type: 'area_selected', key });
+  }, []);
+
+  /** The NARROW SEARCH card's disclosure. A pure presentation flip that reaches no request — it
+   *  writes the one reducer field `scopeKeyOf` does not read, so the fetch effect below cannot
+   *  observe it (flow-state.ts invariant n). It is in the reducer for the reason the reducer's own
+   *  header gives: two navigations have to WRITE it — a Skip must land the card OPEN and a plan pick
+   *  must land it CLOSED — so it fails the `trends` orthogonality test that keeps state out. (An
+   *  earlier version of this comment claimed no local `useState` could express that. Not true: a
+   *  `useState` plus an effect keyed on `skipped` could. It would just put a navigation rule outside
+   *  the machine that owns every other one, and out of reach of the field-write table.) */
+  const onToggleNarrow = useCallback(() => {
+    dispatch({ type: 'narrow_toggled' });
   }, []);
 
   /** Re-issue the SAME snapshot request after a failure. Bumping the nonce is what moves the
@@ -252,8 +264,16 @@ export function ResolutionFlowClient({
     return cluster ? all.filter((c) => cluster.names.has(c.payerDisplayName)) : all;
   }, [state.resolution, skipped, payerPick, payerGroups]);
 
-  // funding goes to the market directly (a closed vocabulary the action intersects); plan type has
-  // no market field, so it narrows by way of the employer set the filtered candidates resolve to.
+  // Funding goes to the market directly (a closed vocabulary the action intersects); the employer
+  // selection goes by way of `employerNarrowFor`, which sends it only when it is a PROPER SUBSET
+  // within the 200 bound.
+  //
+  // ⚠ THIS MEMO IS THE WHOLE REASON PLAN TYPE STOPPED BEING A FILTER (2026-08-07). It is the seam
+  // where a facet with no market field of its own still becomes a request: `filterCandidates`
+  // narrows the candidate set, and the EMPLOYERS of whatever survives are sent as `market.employers`.
+  // That made plan type LOOK inert — it was not. Anything added to `AnswerFilters` from here on
+  // inherits the same reach; assume a new facet re-ranks the screen until you have shown it cannot
+  // move `narrow.employers`.
   const narrow = useMemo(() => {
     if (!answerFiltersActive(filters)) return { employers: null as string[] | null, tooMany: null as number | null };
     const filtered = filterCandidates(answerCandidates, filters);
@@ -598,8 +618,6 @@ export function ResolutionFlowClient({
                 filters,
                 onToggleFilter,
                 onClearFilters,
-                employerQuery,
-                onEmployerQuery: (v) => dispatch({ type: 'employer_query_changed', value: v }),
                 employerNarrowTooMany: narrow.tooMany,
                 area,
                 onSelectArea,
@@ -610,6 +628,8 @@ export function ResolutionFlowClient({
                 onPayerOverride: (label) => dispatch({ type: 'payer_override_changed', label }),
                 windowDays,
                 onWindowDays: (d) => dispatch({ type: 'window_days_changed', days: d }),
+                narrowExpanded,
+                onToggleNarrow,
               }
             : null
         }
