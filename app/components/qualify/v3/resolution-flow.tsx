@@ -992,9 +992,21 @@ export function FlowReceipt({
     memberCount !== null && memberBucket !== 'unknown' && memberBucket !== 'none' ? (
       <span className="text-xs text-ink600">
         ·{' '}
+        {/* ⚠ THE ACCESSIBLE NAME STATES THE BASIS, because the numeral cannot (final review,
+            2026-08-08). It read "N members match this search" — the EXACT mixed-basis wording S2-I1
+            removed from the visible preface, kept alive in the one channel a browser pass never sees.
+            `memberCount` is the ladder's 365-day rung filtered on `payment_received`, so it means
+            "members with a PAID CLAIM in the last 12 months" and never "members who exist". "One
+            derivation, three surfaces" is only true if the BASIS travels with the number.
+
+            ⚠ IT DELIBERATELY DOES **NOT** REUSE THE PREFACE'S "behind this search" CLAUSE. This chip
+            already sits inside the entry labelled SEARCH, so the clause is redundant here — and, more
+            to the point, the receipt is NOT suppressed in flight while the preface is. Sharing the
+            preface's exact phrase would put its words on screen during a re-scope through a surface
+            that is exempt from the rule, which is the suppression being defeated by wording. */}
         <span
           className="ths-num"
-          aria-label={memberCount === 1 ? '1 member matches this search' : `${memberCount} members match this search`}
+          aria-label={`${memberCount} member${memberCount === 1 ? '' : 's'} with a paid claim in the last 12 months`}
         >
           {memberCount.toLocaleString()}
         </span>{' '}
@@ -2561,6 +2573,14 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
    * tolerable for the identity line's shipped wording and would be a fabricated basis on a heading
    * that names whose book this is. */
   const bookPayer = scopedPayerOf(snap?.resolved);
+  /* HOW MANY OF THE ROWS THE SECONDARY CAP REMOVES HAVE NO OPEN BEDS — a COUNT of this render, which
+   * is what the cap sentence says instead of predicting where the full houses are. See that sentence's
+   * own note for why the prediction was false in two reachable states. Reads `bedState` (the server's
+   * answer, and the same value that decided the sort tier) rather than re-deriving fullness from
+   * `openBeds === 0`, which is written on every outpatient row. */
+  const bookHiddenFull = (bookFacilities ?? EMPTY_FACILITIES)
+    .slice(QUALIFY_BOOK_PREVIEW)
+    .filter((f) => f.bedState === 'full').length;
   // ONE PREDICATE, TWO CONSUMERS — see `bookIsOnScreen`. The shell asks the same question to caption
   // the AI panel.
   const bookOnScreen = bookIsOnScreen(snap);
@@ -2756,11 +2776,19 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   const rankingBasis = bookLeads
     ? `${bookPayer}'s whole book, with this identifier's own history marked on it`
     : "this identifier's whole footprint";
+  /* ⚠ `skipUnder` IS DROPPED WHERE THE BASIS ALREADY NAMES THE PAYER (final review, 2026-08-08). Both
+   * strings are true and both were appended, so the book-led trace row read "… AETNA US HEALTHCARE's
+   * whole book, with this identifier's own history marked on it UNDER AETNA US HEALTHCARE" — one
+   * sentence naming one payer twice, which reads as two scopes rather than one. The member-led arm is
+   * untouched: "this identifier's whole footprint" names nobody, so it still needs the label. The
+   * `ai` row below keeps `skipUnder` unconditionally — its book-led arm ("not the book ranked above")
+   * names no payer, so there is nothing there to duplicate. */
+  const skipRankingUnder = bookLeads ? '' : skipUnder;
   /* [BOOK-LED SURFACE] — `ranking` and `ai` both re-base; `policy` is a claim about the plan. */
   const skipProvenance: Record<'ranking' | 'policy' | 'ai', string> = {
     ranking: rankingNarrowed
-      ? `all plans — no plan chosen, then narrowed by your filter selections${bookLeads ? ` · ${rankingBasis}` : ''}${skipUnder}`
-      : `all plans — no plan chosen · ${rankingBasis}${skipUnder}`,
+      ? `all plans — no plan chosen, then narrowed by your filter selections${bookLeads ? ` · ${rankingBasis}` : ''}${skipRankingUnder}`
+      : `all plans — no plan chosen · ${rankingBasis}${skipRankingUnder}`,
     // Filters narrow rows; they never elect a policy. True either way.
     policy: 'no plan chosen — no single policy backs this screen',
     /**
@@ -3140,8 +3168,9 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                    own sentence rather than inheriting one written for the other. */
                 <>
                   You skipped the plan questions, and the ranking is {snap.resolved.payerName}&apos;s whole book:
-                  every facility that label paid at in this window, with the ones this member has been to
-                  marked. Turn the BILLED UNDER switch off to search across every label again.
+                  every facility that label paid at above the volume floor in this window, with the ones
+                  this member has been to marked. Turn the BILLED UNDER switch off to search across every
+                  label again.
                 </>
               ) : (
                 <>
@@ -3668,9 +3697,19 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 <span className="ths-num" aria-label={`${rankedFacilities.length} facilities in this payer's book`}>
                   {rankedFacilities.length}
                 </span>{' '}
-                facilities — every facility {bookPayer} paid at in the window shown, not just this
-                member&apos;s. One member is behind this search and 1.14 facilities is not a ranking, so the
-                book leads and this member&apos;s own history is marked on the facilities they have been to.
+                {/* ⚠ "ABOVE THE VOLUME FLOOR" IS NOT HEDGING — WITHOUT IT THIS SENTENCE CONTRADICTS
+                    THE ONE BELOW IT (final review, 2026-08-08). The book load runs
+                    `assembleFacilities(..., applyFloor = true)` and the member load does not
+                    (core.ts), which is why this very screen can render "…is below the volume floor
+                    for {payer} in this window" a few rows down. "Every facility {payer} paid at",
+                    unqualified, is false of a floored list and is contradicted in place by its own
+                    neighbour. THE THRESHOLD ITSELF IS NOT SPELLED OUT HERE, deliberately: it lives
+                    with `QUALIFY_MIN_LINES` (rating.ts) and three hand-copied numerals in three
+                    sentences is three places for it to rot. Copy unratified. */}
+                facilities — every facility {bookPayer} paid at above the volume floor in the window
+                shown, not just this member&apos;s. One member is behind this search and 1.14 facilities is
+                not a ranking, so the book leads and this member&apos;s own history is marked on the
+                facilities they have been to.
               </p>
             ) : null}
             {/* ── THE GRID-NARROW ROW: the two controls that hide rows without re-asking for them.
@@ -3855,8 +3894,12 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 <span className="ths-num" aria-label={`${bookFacilities!.length} facilities in this payer's book`}>
                   {bookFacilities!.length}
                 </span>{' '}
-                facilities — every facility {bookPayer} paid at in this window, not this member&apos;s
-                history. Ranked the same way: a facility that can admit today first, then the rating.
+                {/* THE FLOOR, STATED — see the leading basis line's note. Here the contradiction is
+                    starker still: at an EMPTY book this sentence reads "0 facilities — every facility
+                    {payer} paid at" directly above "No facility … clears the volume floor". */}
+                facilities — every facility {bookPayer} paid at above the volume floor in this window,
+                not this member&apos;s history. Ranked the same way: a facility that can admit today first,
+                then the rating.
               </p>
               <ul className="grid list-none grid-cols-1 gap-3 p-0 lg:grid-cols-2">
                 {bookFacilities!.slice(0, QUALIFY_BOOK_PREVIEW).map((f) => (
@@ -3877,11 +3920,27 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               {/* THE CAP IS STATED, NEVER SILENT. A secondary section must not push the answer off
                   the screen, but a truncated list that does not say it is truncated is a list making
                   a completeness claim it has not earned — and because availability leads the sort,
-                  the rows a cap removes are systematically the full ones. Both facts, in one line. */}
+                  the rows a cap removes skew toward the full ones. Both facts, in one line.
+
+                  ⚠ THE SECOND FACT IS NOW **COUNTED**, NOT PREDICTED (final review, 2026-08-08). It
+                  read "A facility with no open beds sorts to the end, so it will be in the part not
+                  shown" — a claim about WHERE the full houses are, and it holds only while the book
+                  has fewer than QUALIFY_BOOK_PREVIEW open facilities. With eight or more open ones,
+                  a full house is beyond the cap because there are simply more than eight, not because
+                  it is full; and with a full house INSIDE the first eight the sentence is false
+                  outright. Both states are reachable on a 48-facility book and both are pinned.
+
+                  So it states what is true of THIS render: how many of the rows the cap removed have
+                  no open beds. Zero is a real and honest answer ("0 of the 6 not shown…"), which is
+                  precisely what a predicted claim could not say. `f.bedState` is the server's answer
+                  — the same value that decided the sort tier — never a second derivation from
+                  `openBeds`, which is 0 on every outpatient row. */}
               {bookFacilities!.length > QUALIFY_BOOK_PREVIEW ? (
                 <p className="text-xs text-ink600">
                   Showing the {QUALIFY_BOOK_PREVIEW} best-ranked of {bookFacilities!.length}. A facility
-                  with no open beds sorts to the end, so it will be in the part not shown.
+                  with no open beds sorts below one that can admit today, and{' '}
+                  {bookHiddenFull} of the {bookFacilities!.length - QUALIFY_BOOK_PREVIEW} not shown{' '}
+                  {bookHiddenFull === 1 ? 'has' : 'have'} no open beds.
                 </p>
               ) : null}
               {/* [BOOK-LED EXEMPT: renders only when the book does NOT lead] */}
@@ -4123,17 +4182,27 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
            * signal that what they are hearing describes a scope already being replaced; withholding
            * the classification is the only way to say "provisional" in this channel. Without this
            * gate the spoken claim would outlive the seen one, which is the disagreement the whole
-           * one-derivation discipline exists to prevent. */
+           * one-derivation discipline exists to prevent.
+           *
+           * ⚠ `refreshing` JOINS THE OTHER TWO (final review, 2026-08-08). The VISIBLE preface gates
+           * on `stale` — all three — and this gated on two, so a same-scope REFRESH left the spoken
+           * classification standing while the seen one waited. The aria channel must never say what
+           * the visible channel suppresses; S5's `windowMoved` gate below already carried all three,
+           * which is what made the gap visible. `bookLedPayer` deliberately keeps the two-state gate:
+           * its visible counterpart (the grid heading) is not suppressed on a refresh either, only
+           * dimmed, so adding `refreshing` there would make the spoken channel say LESS than the seen
+           * one — the same disagreement in the opposite direction. */
           memberCount:
-            props.answer?.refetching || props.answer?.staleAfterError
+            props.answer?.refetching || props.answer?.staleAfterError || props.answer?.refreshing
               ? null
               : (props.answer?.snapshot?.memberCount ?? null),
           memberFacilityCount: props.answer?.snapshot?.facilities.length ?? 0,
           /* S3: WHICH LIST THE GRID IS, ANNOUNCED. `bookLeadsAnswer` is the same predicate the stage
            * renders on — the sr-only line is exactly where a scope claim survives a browser pass, and
            * after the flip the un-updated sentence would describe the member's ranking over a grid
-           * showing the payer's whole book. SUPPRESSED IN FLIGHT on the same condition as the
-           * classification above, and for the same reason: it is a claim about the set being replaced. */
+           * showing the payer's whole book. SUPPRESSED IN FLIGHT on the two conditions that replace
+           * the SET (a re-scope, a failed re-scope) — deliberately NOT on `refreshing`; see the note
+           * on the classification above for why the third state is asymmetric here. */
           bookLedPayer:
             props.answer?.refetching || props.answer?.staleAfterError || !bookLeadsAnswer(props.answer?.snapshot)
               ? null

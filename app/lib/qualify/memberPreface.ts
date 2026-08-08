@@ -29,14 +29,32 @@
  */
 export type QualifyMemberBucket = 'unknown' | 'none' | 'one' | 'few' | 'many';
 
-export function memberBucketOf(memberCount: number | null): QualifyMemberBucket {
-  if (memberCount === null) return 'unknown';
-  if (memberCount <= 0) return 'none';
-  if (memberCount === 1) return 'one';
+/**
+ * ⚠ `?? null`, NOT A BARE `=== null` — AND THIS IS THE FOURTH TIME THE SAME TRAP HAS BEEN FOUND ON
+ * THIS BRANCH (final review, 2026-08-08). Both sibling boundary guards already carried the coercion —
+ * `bookIsOnScreen` (`?? null`, whose loss broke 40 renders) and `memberHistoryChipFor` (`== null`) —
+ * and this one, the guard the other two read, did not.
+ *
+ * `undefined === null` is FALSE and every numeric comparison against `undefined` is false too, so an
+ * ABSENT `memberCount` fell all the way through to `'many'`: a POPULATION preface, printed as
+ * "A population — undefined members have a paid claim…", over a screen with no basis for the claim.
+ * Reachable from any snapshot serialized before the field existed (a cached payload, an older
+ * fixture) — the contract declares it required and the core always sets it, so this is a boundary
+ * guard rather than a live case, exactly like its two siblings.
+ *
+ * THE COERCION LIVES HERE AND NOWHERE ELSE. The three functions below delegate to this one, so the
+ * absent-field rule has a single home and cannot be half-applied — which is how it came to be missing
+ * from one of three guards in the first place.
+ */
+export function memberBucketOf(memberCount: number | null | undefined): QualifyMemberBucket {
+  const count = memberCount ?? null;
+  if (count === null) return 'unknown';
+  if (count <= 0) return 'none';
+  if (count === 1) return 'one';
   // 2-9. The 10-patient confidence floor (QUALIFY_RATING_CONFIDENT_PATIENTS) is unreachable for
   // every prefix in this bucket at EVERY window — measured: 85.7% of prefixes have <=9 members in
   // total — so the auto-window ladder can only ever report that it had no choice.
-  if (memberCount <= 9) return 'few';
+  if (count <= 9) return 'few';
   // 10+. The ONLY bucket where the ladder means anything and where a payer blend is routine
   // (3.3-3.7 payers measured), i.e. the only bucket the Simpson's disclosure was written for.
   return 'many';
@@ -74,7 +92,7 @@ export function memberBucketOf(memberCount: number | null): QualifyMemberBucket 
  * counts `distinct member_id_bidx` where `member_id_bidx = token`, which is 0 or 1 by construction,
  * so only the `one` and `none` arms are reachable on that kind.
  */
-export function memberPrefaceFor(memberCount: number | null, facilityCount: number): string | null {
+export function memberPrefaceFor(memberCount: number | null | undefined, facilityCount: number): string | null {
   switch (memberBucketOf(memberCount)) {
     case 'one':
       // The 58.8% case. NOT "their top facility" — with 1.14 facilities of history a ranking is not
@@ -84,13 +102,21 @@ export function memberPrefaceFor(memberCount: number | null, facilityCount: numb
         ` — ${facilityCount} ${facilityCount === 1 ? 'facility' : 'facilities'} of history in the window shown.`
       );
     case 'few':
-      // "Continue" names the control that already exists (Skip = search across all of them). A
-      // member-by-member pick is DESCOPED: raw member ids can never render, so picking one needs a
-      // server-side per-response ordinal enumeration (the assembleClaims patientKey precedent) plus
-      // a pick-by-ordinal predicate. Recorded as a follow-up; deliberately not built.
+      /* ⚠ IT NAMES NO CONTROL AND NO POSITION, AND BOTH HALVES OF THAT ARE CORRECTIONS (final review,
+       * 2026-08-08). The shipped copy said "Continue to search across all of them" — "Continue" named
+       * the SKIP, which lives on the carrier and plan stages and does not exist on the ANSWER stage,
+       * the only stage this sentence renders on. And a positional replacement ("the ranking below")
+       * would be false too: `liveSentenceFor`'s SKIPPED arm returns BEFORE every stage check, so this
+       * sentence can be announced over the identify screen, which is exactly the defect S3-M1 fixed
+       * for the book clause. "This search covers all of them" is true at every stage and in both
+       * channels, and "refine the prefix" is reachable from all of them through the receipt.
+       *
+       * A member-by-member pick stays DESCOPED: raw member ids can never render, so picking one needs
+       * a server-side per-response ordinal enumeration (the assembleClaims patientKey precedent) plus
+       * a pick-by-ordinal predicate. Recorded as a follow-up; deliberately not built. */
       return (
         `${memberCount} members have a paid claim behind this prefix in the last 12 months.` +
-        ' Continue to search across all of them, or refine the prefix.'
+        ' This search covers all of them — refine the prefix to narrow it to one.'
       );
     case 'many':
       return `A population — ${memberCount} members have a paid claim behind this prefix in the last 12 months.`;
@@ -114,7 +140,7 @@ export function memberPrefaceFor(memberCount: number | null, facilityCount: numb
  * A named predicate rather than an inline `=== 'one'` because it encodes WHY, and because the answer
  * changes the moment the 2-9 or 10+ copy grows a facility clause of its own.
  */
-export function prefaceNamesFacilityCount(memberCount: number | null): boolean {
+export function prefaceNamesFacilityCount(memberCount: number | null | undefined): boolean {
   return memberBucketOf(memberCount) === 'one';
 }
 
@@ -141,7 +167,7 @@ export function prefaceNamesFacilityCount(memberCount: number | null): boolean {
  * Null when there is no annotation, so the render site has no second null rule of its own.
  */
 export function memberHistoryChipFor(
-  memberCount: number | null,
+  memberCount: number | null | undefined,
   /** `undefined` is accepted and treated as "no annotation" — see the coercion note in the body. */
   history: { lineCount: number } | null | undefined,
 ): string | null {

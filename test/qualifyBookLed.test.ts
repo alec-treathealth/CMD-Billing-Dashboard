@@ -193,6 +193,28 @@ test('memberBucketOf — a PERSON, a small set, a POPULATION, and two kinds of n
   assert.equal(memberBucketOf(0), 'none');
   // Negative is unreachable from a count(distinct) but must not fall through to a claim.
   assert.equal(memberBucketOf(-1), 'none');
+
+  /* ⚠ AND THE THIRD NOTHING: AN **ABSENT** FIELD (final review, 2026-08-08 — the fourth sighting of
+   * the `undefined !== null` trap on this branch). `undefined === null` is false and every numeric
+   * comparison against `undefined` is false too, so before the `?? null` coercion this fell all the
+   * way through to `'many'` — a POPULATION classification from a payload carrying no count at all,
+   * which rendered as "A population — undefined members have a paid claim…". Reachable from any
+   * snapshot serialized before the field existed.
+   *
+   * PINNED WITH THE ABSENT-FIELD SHAPE, NEVER WITH A LITERAL `null`: `null` was always handled, so a
+   * test that passes `null` proves nothing about the trap. This is the same guard `bookIsOnScreen`
+   * carries (`?? null`, whose loss broke 40 renders) and `memberHistoryChipFor` carries (`== null`);
+   * the coercion now lives in `memberBucketOf` alone and the other three delegate to it, so it can
+   * no longer be half-applied — which is exactly how it came to be missing from one of three. */
+  const absent = ({} as { memberCount?: number | null }).memberCount;
+  assert.equal(memberBucketOf(absent), 'unknown', 'an absent count is UNCLASSIFIED, not a population');
+  assert.equal(memberPrefaceFor(absent, 3), null, 'and so it says nothing, like every other unknown');
+  assert.equal(prefaceNamesFacilityCount(absent), false);
+  assert.equal(
+    memberHistoryChipFor(absent, { lineCount: 210 }),
+    'This search has 210 claim lines here in this window',
+    'an unclassified search is never narrated as one person',
+  );
 });
 
 test('memberPrefaceFor — one sentence per world, and EVERY number states its own basis', () => {
@@ -218,9 +240,14 @@ test('memberPrefaceFor — one sentence per world, and EVERY number states its o
     memberPrefaceFor(1, 0),
     'One member has a paid claim behind this search in the last 12 months — 0 facilities of history in the window shown.',
   );
+  /* ⚠ THE 2-9 ARM NAMES NO CONTROL AND NO POSITION (final review, 2026-08-08). It said "Continue to
+   * search across all of them" — "Continue" named the SKIP, which lives on the carrier and plan
+   * stages and does NOT exist on the answer stage, the only stage this sentence renders on. A
+   * positional replacement would be wrong too: `liveSentenceFor`'s skipped arm returns before every
+   * stage check, so this sentence can be announced over the identify screen (the S3-M1 defect). */
   assert.equal(
     memberPrefaceFor(4, 9),
-    '4 members have a paid claim behind this prefix in the last 12 months. Continue to search across all of them, or refine the prefix.',
+    '4 members have a paid claim behind this prefix in the last 12 months. This search covers all of them — refine the prefix to narrow it to one.',
   );
   assert.equal(
     memberPrefaceFor(31, 9),

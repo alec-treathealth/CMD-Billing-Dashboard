@@ -264,6 +264,27 @@
  *     is different in kind: it changes what PERIOD the ranking covers while every sentence on screen
  *     goes on reading "automatic". Hence a `windowMove` and no `memberCountMove`.
  *
+ *     ⚠ AND THE BLAST RADIUS IS LARGER THAN "THE SAME CLAIM OVER FRESHER DATA" SOUNDS — NAMED HERE
+ *     RATHER THAN LEFT TO BE DISCOVERED (final review, 2026-08-08). Since S3 the preface no longer
+ *     only WORDS the answer, it DRIVES it: `bookLeadsAnswer` is `memberBucketOf(memberCount) ===
+ *     'one'` plus a non-empty book, so a count that crosses 1↔2 on a refresh flips the whole answer
+ *     stage — the grid becomes the payer's book (or stops being it), the heading, the hero's basis,
+ *     the scope sentence, the skip banner, the AI grounding caption and the sr-only line all re-base,
+ *     and the member's own facilities move from a ranked list to marks on someone else's. Under a
+ *     silent refresh that is a layout change with no sentence attached to it.
+ *
+ *     RULED ACCEPTABLE, and the reason is atomicity rather than size: every one of those surfaces
+ *     re-derives from the SAME `snapshot_resolved` payload in the SAME render, so there is no window
+ *     in which half the screen describes the old bucket and half the new — which is the failure mode
+ *     `windowMove` exists for (there, `windowSentence` moved while every other sentence went on
+ *     reading "automatic", so the screen contradicted itself). A flip is loud, self-consistent and
+ *     fully described by the new copy; a moved window was quiet and left the screen disagreeing.
+ *     The residual is real and is stated so a future reader weighs it rather than rediscovers it: an
+ *     operator who looks away during a refresh can look back at a differently-shaped answer with
+ *     nothing saying it changed shape. If that is ever judged too quiet, the fix is a `bucketMove`
+ *     modelled on `windowMove` — NOT a suppression, which would leave the layout flipped and the
+ *     copy describing the previous bucket.
+ *
  * The asymmetries in (f), (g) and (h) are OBSERVED BEHAVIOR carried over verbatim, not oversights to
  * normalize. Changing one is a product decision, not a refactor.
  *

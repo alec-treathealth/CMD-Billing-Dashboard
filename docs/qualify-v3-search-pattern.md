@@ -329,7 +329,7 @@ Four buckets, one sentence each — and **two different nothings, which must not
 | `memberCount` | says |
 |---|---|
 | `1` | `One member has a paid claim behind this search in the last 12 months — N facilities of history in the window shown.` |
-| `2–9` | `N members have a paid claim behind this prefix in the last 12 months. Continue to search across all of them, or refine the prefix.` |
+| `2–9` | `N members have a paid claim behind this prefix in the last 12 months. This search covers all of them — refine the prefix to narrow it to one.` |
 | `10+` | `A population — N members have a paid claim behind this prefix in the last 12 months.` |
 | `0` | nothing — the provenance banner already owns "no claims of its own" |
 | `null` | nothing — the count was **unavailable**, and a failed query must never render as a fact |
@@ -357,8 +357,16 @@ the Search entry.
 **"Pick one of the N members" is DESCOPED, and this is the record of why.** Raw member ids can never
 render, so a member picker needs a server-side per-response ordinal enumeration (the `assembleClaims`
 `patientKey` precedent) plus a pick-by-ordinal predicate, and it would have to reconcile with
-`SKIP_CARRIER_MAX`. "Search across all of them" is the Skip, which already exists — so the 2–9
-sentence names the control that is there rather than promising one that is not.
+`SKIP_CARRIER_MAX`.
+
+> **Corrected 2026-08-08 — the 2–9 sentence now names NO control at all.** It used to end *"Continue
+> to search across all of them, or refine the prefix"*, and this paragraph justified that by pointing
+> at the Skip. But the Skip lives on the **carrier and plan** stages and the preface renders on the
+> **answer** stage, where there is no Continue; and `liveSentenceFor`'s skipped arm returns before
+> every stage check, so the same sentence can be *announced* over the identify screen — the defect
+> S3-M1 fixed for the book clause. A positional replacement ("the ranking below") would inherit that
+> second problem. The landed copy names only the search, which is true at every stage and in both
+> channels. The DESCOPE above is unchanged.
 
 ### The payer's book, rendered SECONDARY
 
@@ -376,16 +384,36 @@ floorless: two lists, two honest floors.
   area facet, the drill seed, the mobile deck and the AI payload all hang off it, and every one is a
   scope claim about the searched identifier.
 - **It carries its own basis label** and borrows none: *"N facilities — every facility {payer} paid
-  at in this window, not this member's history."* It renders through the same `ScoreCard`, so S1's
+  at **above the volume floor** in this window, not this member's history."* The floor clause is not
+  hedging — corrected 2026-08-08 after the review found the unqualified form ("every facility {payer}
+  paid at in this window") contradicting the two sentences this same screen renders about the floor
+  (*"…is below the volume floor for {payer} in this window"* and, at an empty book, *"No facility …
+  clears the volume floor"*). The book load runs `assembleFacilities(…, applyFloor = true)` and the
+  member load does not, so "every" was false of a floored list. All three sites carrying the phrase —
+  the book-led basis line, this secondary one, and the skip banner's book-led arm — were fixed
+  together, and the composition is pinned rather than each sentence alone. The **threshold itself**
+  (`QUALIFY_MIN_LINES`) is deliberately not spelled out in the copy: three hand-copied numerals is
+  three places for one constant to rot. It renders through the same `ScoreCard`, so S1's
   census chips, the sunk treatment and the rating words cannot fork — with `allPayers={false}`,
   because the book is payer-scoped by construction and `count(distinct primary_payer)` under a payer
   predicate is 1 by the equality that built it. The blend disclosure has nothing to disclose, so it
   says nothing rather than printing "1 payer · AETNA" on every card.
 - **The preview cap is stated, never silent.** A secondary section that pushes the answer off the
   screen has stopped being secondary, so the list is capped — and because availability leads the
-  sort, the rows a cap removes are systematically the full ones. Both facts ride the same line, the
+  sort, the rows a cap removes skew toward the full ones. Both facts ride the same line, the
   notice counts the **whole** book rather than the slice, and an empty book says so in words instead
   of rendering a headed void.
+
+  > **Corrected 2026-08-08 — the second fact is now COUNTED, not predicted.** The line ended *"A
+  > facility with no open beds sorts to the end, so it will be in the part not shown"*, which is a
+  > claim about *where* the full houses are and holds only while the book has fewer than
+  > `QUALIFY_BOOK_PREVIEW` **open** facilities. With eight or more open ones a full house is beyond
+  > the cap because there are simply more than eight, not because it is full; with a full house inside
+  > the first eight the sentence is false outright. Both states are reachable on a 48-facility book.
+  > It now reads *"…sorts below one that can admit today, and **M of the K not shown** have no open
+  > beds"* — a fact about this render in every state, zero included, which is precisely what a
+  > predicted claim could not say. Counted off `bedState` (the server's answer, and the value that
+  > decided the sort tier), never re-derived from `openBeds === 0`, which every outpatient row carries.
 
 > **MEASURED, 2026-08-08, live against prod.** The book load on the busiest payer (27,669 rows) is
 > **~130–230 ms**, served by `cmd_charge_rollup_entity_payer_payment` with a **3.6 MB external-merge
@@ -670,7 +698,7 @@ placeholder, and the empty states never have to defend that claim.
 renders `bookFacilities.slice(0, QUALIFY_BOOK_PREVIEW)` straight. It answers a different question
 ("does this policy pay *anywhere*"), and its value is precisely that it is not scoped to what the
 operator is currently looking at — narrowing it would make the *"N facilities — every facility {payer}
-paid at"* sentence above it false. Pinned by a test.
+paid at above the volume floor"* sentence above it false. Pinned by a test.
 
 ### The state, and why it cannot reach a request
 
@@ -857,6 +885,19 @@ already marked it. Both ladders are coerced with `?? null` before comparison —
 would turn "no ladder before, no ladder after" into a window move, which is every manual-window
 resolve.
 
+> **Correction, 2026-08-08 — the paragraph above states one gate and the landed reducer has two.**
+> The original is kept as written because it records what was ratified; this note records what
+> shipped. `snapshot_resolved` writes `windowMove` only when `wasRefresh && sameScope && from !== null
+> && to !== null && from !== to`, where `wasRefresh` is `state.refreshingNonce !== null` — the
+> in-flight refresh marker, added by the S5 fix round (M1). `loadedKey === action.scopeKey` alone is
+> **necessary but not sufficient**: `scopeKeyOf` carries no identifier, so a NEW member's first
+> resolve can serialize identically to the previous member's (same payer label, same automatic
+> window, no filters) and would have been announced as that member's window moving. The key test was
+> safe before only because the four navigations happen to null the snapshot, making `from` null — a
+> guarantee held by a neighbouring field rather than by this rule. The reducer already holds the
+> marker that answers "was this a refresh", so it now asks it directly. Recorded as invariant (p) in
+> `app/components/qualify/v3/flow-state.ts`, which is authoritative.
+
 The notice is a `role="status"` on the card carrying the S3 marker, and **`liveSentenceFor` announces
 the same bytes** — one call to `windowMoveNotice`, not a second sentence that agrees today. Three
 render gates, each preventing a different false sentence: `!stale` (RULE 2654416), `windowDays ===
@@ -976,9 +1017,13 @@ Three things that follow, none of them cosmetic:
 
 ### The carrier-count suppression is PRESERVED — and its recorded premise is dead
 
-`SKIP_CARRIER_MAX = 3` still suppresses the Skip on the carrier stage above three clusters, and the
-hoisted control carries the identical gate. **But the reasoning ratified on 2026-08-06 no longer
-describes this branch, and the ruling was preserved anyway rather than dropped with it.**
+`SKIP_CARRIER_MAX = 3` still suppresses the Skip on the carrier stage **at three clusters and above**,
+and the hoisted control carries the identical gate. The landed gate is
+`(groups ?? payerGroupsOf(resolution)).length < SKIP_CARRIER_MAX` (`resolution-flow.tsx`), so the Skip
+is **offered at one or two carriers and suppressed from three onward**. *(Corrected 2026-08-08: this
+line read "above three clusters", i.e. four and up — off by one against the code it describes. The
+gate itself never changed.)* **But the reasoning ratified on 2026-08-06 no longer describes this
+branch, and the ruling was preserved anyway rather than dropped with it.**
 
 The ratified reason was: *"with a dozen carriers behind a prefix, skip resolves the ranking to
 whichever payer happens to dominate the identifier's claims, which is ARBITRARY rather than

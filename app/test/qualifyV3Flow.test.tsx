@@ -1211,11 +1211,22 @@ test('I9: no meaning-bearing text below 12px anywhere in the flow', () => {
     const html = render(props(stage, r, over));
     // POSITIVE CONTROL — prove this case rendered the markup it claims to be sweeping.
     assert.match(html, mustRender, `${label}: rendered nothing to scan — the floor check would be vacuous`);
-    // A regex sweep, not a literal blocklist: the old list enumerated seven exact strings, so
-    // text-[8px] or text-[11.75px] would have passed silently. px-only, deliberately — no rem/em
-    // arbitrary text sizes exist anywhere in app/components/qualify today.
-    for (const m of html.matchAll(/text-\[(\d+(?:\.\d+)?)px\]/g)) {
-      assert.ok(Number(m[1]) >= 12, `sub-12px class on ${label}: text-[${m[1]}px]`);
+    /* A regex sweep, not a literal blocklist: the old list enumerated seven exact strings, so
+     * text-[8px] or text-[11.75px] would have passed silently.
+     *
+     * ⚠ REM IS SWEPT TOO NOW, AND ITS COVERAGE IS HONEST RATHER THAN ASSERTED (final review,
+     * 2026-08-08). The sweep was px-only, so `text-[0.6rem]` — 9.6px at the default root size, and a
+     * perfectly ordinary way to write a Tailwind arbitrary size — walked straight through a guard
+     * whose whole purpose is the 12px floor. Converted at 16px/rem, which is the root size this app
+     * never overrides (`app/app/globals.css` sets no `html { font-size }`); a future override would
+     * make this arm optimistic and is the one assumption to re-check.
+     *
+     * ⚠ AND THE GAP THAT REMAINS, NAMED. There is no rem-denominated arbitrary text class anywhere in
+     * app/components/qualify today, so the rem arm has NO positive control — it is a tripwire for the
+     * next author, not a covered path. `em`, `pt` and clamp() are still unswept. */
+    for (const m of html.matchAll(/text-\[(\d+(?:\.\d+)?)(px|rem)\]/g)) {
+      const px = m[2] === 'rem' ? Number(m[1]) * 16 : Number(m[1]);
+      assert.ok(px >= 12, `sub-12px class on ${label}: text-[${m[1]}${m[2]}] (= ${px}px)`);
     }
   }
 });
@@ -1702,7 +1713,14 @@ test('v3 card — open beds render as OCCUPANCY, with the denominator', () => {
 
 test('v3 card — no licensed count falls back to the bare count, never an invented denominator', () => {
   const html = bedCard({ openBeds: 3, bedCapacity: null, bedState: 'open' });
-  assert.match(html, /3 open beds/);
+  /* ⚠ BOUND TO THE VISIBLE TEXT NODE, NOT TO THE STRING ANYWHERE (final review, 2026-08-08). The
+   * chip's `title` is "3 open beds on the latest census sync — licensed bed count not on file…", so a
+   * bare /3 open beds/ was satisfied by the TOOLTIP alone: delete the visible label and this test
+   * stayed green while the card showed nothing. The claim-vs-control pattern this file already applies
+   * to the facility picker and the book's own count — a claim must be asserted where a reader sees it. */
+  assert.match(html, />3 open beds<\/span>/, 'the VISIBLE label, not the title attribute');
+  // ...and the tooltip still carries its own longer reading. This is a claim about WHERE, not silence.
+  assert.match(html, /title="3 open beds on the latest census sync/);
   assert.ok(!/\d+ of \d+ beds/.test(html), 'no denominator is implied');
 });
 
@@ -2690,13 +2708,16 @@ test('S2 preface — a 30-day window on a member paid 200 days ago no longer con
   assert.match(html, /0 facilities of history in the window shown\./);
 });
 
-test('S2 preface — the 2-9 bucket offers the control that EXISTS, and the 10+ bucket names a population', () => {
+test('S2 preface — the 2-9 bucket names no absent control, and the 10+ bucket names a population', () => {
   const few = answerHtml(bookSnapshot({ memberCount: 4 }));
-  // "Continue to search across all of them" names the Skip, which ALREADY EXISTS. A member-by-member
-  // pick does not, and is descoped: raw member ids can never render, so picking one needs a
+  // A member-by-member pick stays descoped: raw member ids can never render, so picking one needs a
   // server-side per-response ordinal enumeration plus a pick-by-ordinal predicate.
   assert.match(few, /4 members have a paid claim behind this prefix in the last 12 months\./);
-  assert.match(few, /Continue to search across all of them, or refine the prefix\./);
+  /* ⚠ RE-AIMED BY THE FINAL FIX ROUND (2026-08-08). "Continue to search across all of them" named the
+   * SKIP — a control that does not exist on the ANSWER stage, the only stage this sentence renders on,
+   * and the same sentence is announced by `liveSentenceFor`'s skipped arm over the identify screen.
+   * The replacement names no control and no position. FF-m8 pins the whole string. */
+  assert.match(few, /This search covers all of them — refine the prefix to narrow it to one\./);
   const many = answerHtml(bookSnapshot({ memberCount: 31 }));
   assert.match(many, /A population — 31 members have a paid claim behind this prefix in the last 12 months\./);
 });
@@ -2919,10 +2940,17 @@ test('S2 book — the CAP renders, states the REAL total, and names what a cap c
   // The exact sentence, with the true denominator — not "of 8", and not a count re-derived from the
   // sliced array, which is how a truncation notice comes to describe itself instead of the set.
   assert.match(book, /Showing the 8 best-ranked of 9\./);
-  // ⚠ AND WHY THAT MATTERS HERE SPECIFICALLY: availability leads the sort (S1), so the rows a cap
-  // removes are systematically the FULL ones. A cap that hid them silently would turn "census sorts,
-  // it never filters" into a filter by omission.
-  assert.match(book, /A facility with no open beds sorts to the end, so it will be in the part not shown\./);
+  /* ⚠ AND WHY THAT MATTERS HERE SPECIFICALLY: availability leads the sort (S1), so the rows a cap
+   * removes skew toward the FULL ones. A cap that hid them silently would turn "census sorts, it
+   * never filters" into a filter by omission.
+   *
+   * ⚠ THE SECOND CLAUSE IS A COUNT, NOT A PREDICTION (final review, 2026-08-08). It used to say the
+   * full houses "will be in the part not shown", which is false whenever a full house is inside the
+   * cap and misleading whenever the cap is filled by open ones. This fixture's nine facilities carry
+   * no `bedState` at all, so the honest count here is ZERO — and the sentence says zero rather than
+   * predicting. Both non-trivial states are pinned by FF-I2. */
+  assert.match(book, /0 of the 1 not shown have no open beds\./);
+  assert.ok(!book.includes('sorts to the end'), 'the prediction is gone');
   // The slice is real: eight cards, not nine, not three.
   assert.equal(book.split('data-v3-tile').length - 1, 8, 'exactly QUALIFY_BOOK_PREVIEW cards render');
   assert.ok(book.includes('BOOK FACILITY 8'));
@@ -3065,7 +3093,9 @@ test('S3 flip — the BOOK is the answer’s own ranked grid, and the member lis
   assert.equal(html.split('data-v3-book').length - 1, 1);
   assert.ok(!html.includes('across the whole book'), 'S2’s secondary heading is absent in this mode');
   // The basis is stated on the list itself, in its own words, and it says what the annotation means.
-  assert.match(grid, /every facility AETNA US HEALTHCARE paid at in the window shown/);
+  // The floor clause is not decoration — see FF-I4: without it this sentence contradicts the "below
+  // the volume floor" line the same screen renders a few rows down.
+  assert.match(grid, /every facility AETNA US HEALTHCARE paid at above the volume floor in the window shown/);
   assert.match(grid, /not just this member/i);
 });
 
@@ -3317,6 +3347,40 @@ test('S3 C1 — the SCOPE-HONESTY banner follows the flip, in BOTH arms', () => 
   assert.match(few, /it shows this identifier&#x27;s history under AETNA US HEALTHCARE, its largest payer by volume\./);
 });
 
+/**
+ * THE SWEEP ITSELF — extracted so it can be run against a FIXTURE of known evaders as well as against
+ * the real file, which is the only way a scan can be trusted at all.
+ *
+ * ⚠ IT USED TO BE `/<[a-zA-Z]+ role="status"/` — THE ATTRIBUTE ONLY IN FIRST POSITION (final review,
+ * 2026-08-08). `<p data-x role="status">` escaped it entirely, and so did every multi-line tag whose
+ * `role` sits on its own line. A guard whose STATED PURPOSE is "the next claim surface cannot hide"
+ * had a one-token hiding place in it — the same shape as the hand-maintained index it replaced.
+ *
+ * Two exclusions keep prose out, and they are separate rules because the prose in this file takes two
+ * forms: BACKTICKED mentions inside block comments (stripped), and bare mentions on comment lines
+ * (`*`, `//`, `/*`). Either alone lets the other class through.
+ */
+function statusAttrLines(lines: readonly string[]): number[] {
+  const isProse = (l: string) => /^\s*(\*|\/\/|\/\*)/.test(l);
+  const deBacktick = (l: string) => l.replace(/`[^`]*`/g, '');
+  return lines
+    .map((l, i) => (!isProse(l) && /\brole="status"/.test(deBacktick(l)) ? i : -1))
+    .filter((i) => i >= 0);
+}
+
+/** NEGATIVE CONTROLS FOR THE SWEEP. Lines 0/1/4 must be found; 5/6/7 must not. Line 1 is the exact
+ *  attribute-ordered evader the old regex missed, so this fixture fails against the old scan. */
+const MARKER_SWEEP_FIXTURE = [
+  /* 0 */ '      <p role="status" className="x">first attribute — the only form the old scan caught</p>',
+  /* 1 */ '      <p data-v3-book role="status">attribute-ordered evader — invisible to the old scan</p>',
+  /* 2 */ '      <p',
+  /* 3 */ '        data-x',
+  /* 4 */ '        role="status"',
+  /* 5 */ '      >a multi-line tag, whose attribute line is the one that counts</p>',
+  /* 6 */ '   * a block comment mentioning `role="status"` as backticked prose',
+  /* 7 */ '  // role="status" named in a line comment, unbackticked',
+].join('\n');
+
 test('S3 C1 — EVERY role="status" in the flow carries a book-led marker, so the next one cannot hide', () => {
   /* ⚠ THIS TEST EXISTS BECAUSE A HAND-MAINTAINED INDEX HID A DEFECT. The flip's comment block used
    * to ENUMERATE the surfaces that follow it and the ones that do not — and both the author and the
@@ -3338,10 +3402,12 @@ test('S3 C1 — EVERY role="status" in the flow carries a book-led marker, so th
     'utf8',
   );
   const lines = src.split('\n');
-  // Only real JSX attributes — the two `role="status"` mentions INSIDE comments are backticked prose.
-  const statusLines = lines
-    .map((l, i) => (/<[a-zA-Z]+ role="status"/.test(l) ? i : -1))
-    .filter((i) => i >= 0);
+  assert.deepEqual(
+    statusAttrLines(MARKER_SWEEP_FIXTURE.split('\n')),
+    [0, 1, 4],
+    'the sweep itself is checked against the evaders BEFORE it is trusted against the file',
+  );
+  const statusLines = statusAttrLines(lines);
   assert.ok(statusLines.length >= 12, `expected the known status surfaces, found ${statusLines.length}`);
 
   const MARKER = /\[BOOK-LED (SURFACE\]|EXEMPT: [^\]]+\])/;
@@ -4688,4 +4754,204 @@ test('S6: arming the AI leaves the operator on the plan stage — and a later pi
   for (const action of [{ type: 'ai_disarmed' }, { type: 'search_submitted' }, { type: 'went_back', target: 'plan' }] as ShellAction[]) {
     assert.equal(shellReducer(armed, action).autoAsk ?? false, false, `${action.type} disarms`);
   }
+});
+
+// ── FINAL FIX ROUND (2026-08-08) — the four Importants, and the minors that carry a claim ─────────
+//
+// Five-lens adversarial whole-branch review, each finding survived an independent refutation pass.
+// What they share: a sentence, a guard or a coercion that is TRUE ON THE PATH IT WAS WRITTEN FOR and
+// false on a neighbouring one nobody re-read. That is the same class this branch has been closing
+// since S2-I1, which is why these are pinned rather than fixed quietly.
+
+test('FF-I1 — a snapshot with NO memberCount renders no population claim, and no "undefined members"', () => {
+  /* THE RENDER HALF of the `undefined !== null` trap — the fourth sighting on this branch. The pure
+   * classifier is pinned in the ROOT suite (`test/qualifyBookLed.test.ts`, `memberBucketOf`), where
+   * the module lives and where tsc is stricter; this is the consequence on the surface, which is what
+   * makes it an Important rather than a tidy-up.
+   *
+   * Before the `?? null` coercion an ABSENT `memberCount` classified as `'many'`, and the 10+ arm
+   * interpolates the count — so a pre-S2 cached snapshot printed the literal string "undefined" as a
+   * number of people, in bold, above the ranking. `delete` rather than `memberCount: undefined`,
+   * because an explicitly-undefined property is not the shape a JSON round-trip produces. */
+  const noCount = { ...bookSnapshot() } as { memberCount?: number | null };
+  delete noCount.memberCount;
+  const html = answerHtml(noCount as unknown as QualifySnapshot);
+  // POSITIVE CONTROL — the answer stage really rendered, so every negative below is about a screen.
+  assert.match(html, /Where AETNA US HEALTHCARE pays|Facilities, ranked/, 'the answer stage rendered');
+  assert.ok(!html.includes('undefined'), 'no "undefined" reaches the markup');
+  assert.ok(!html.includes('A population'), 'an absent count is not a population');
+  assert.ok(!html.includes('a paid claim behind this'), 'and it makes no preface claim at all');
+  // The receipt gates on the same bucket, so it is silent too rather than crashing on `.toLocaleString`.
+  const receipt = outerHtmlFrom(html, html.indexOf('<nav aria-label="Your search so far"'));
+  assert.ok(!receipt.includes('member'), 'the receipt chip shares the silence rule, not just the words');
+});
+
+test('FF-I2 — the secondary cap sentence is true in BOTH states, not only when tier-0 leaves room', () => {
+  /* THE SENTENCE THAT WAS FALSE WHEN THE CAP FILLED. "A facility with no open beds sorts to the end,
+   * so it will be in the part not shown" is a claim about WHERE the full houses are, and it holds
+   * only when the book has fewer than `QUALIFY_BOOK_PREVIEW` open facilities. With >= 8 open ones the
+   * full houses are beyond the cap for a DIFFERENT reason (there are simply more than eight), and
+   * with a full house inside the first eight it is false outright — asserted below, on a render.
+   *
+   * The replacement COUNTS instead of predicting: how many of the not-shown have no open beds. That
+   * is a fact about this render in every state, including zero. */
+  const bookOf = (states: readonly ('full' | 'open')[]) =>
+    bookRegion(
+      answerHtml(
+        secondaryBookSnapshot({
+          bookFacilities: states.map((s, i) =>
+            facility({
+              rank: i + 1,
+              name: `BOOK FACILITY ${i + 1}`,
+              facilityKey: `BF${i + 1}`,
+              payerCount: 1,
+              bedState: s,
+              openBeds: s === 'full' ? 0 : 3,
+              bedCapacity: 12,
+            }),
+          ),
+        } as Partial<QualifySnapshot>),
+      ),
+    );
+  // STATE 1 — the full houses really are beyond the cap. Nine facilities, the ninth full.
+  const sunkBeyond = bookOf([...Array(8).fill('open'), 'full'] as ('full' | 'open')[]);
+  assert.match(sunkBeyond, /Showing the 8 best-ranked of 9\./, 'the cap still states the REAL total');
+  assert.match(sunkBeyond, /1 of the 1 not shown has no open beds\./);
+  // STATE 2 — a full house INSIDE the first eight, which is where the old sentence was false outright.
+  const sunkInside = bookOf(['full', ...Array(8).fill('open')] as ('full' | 'open')[]);
+  assert.match(sunkInside, /Full · 0 of 12/, 'positive control: a full house really did render inside the cap');
+  assert.match(sunkInside, /0 of the 1 not shown have no open beds\./);
+  // The prediction is GONE from both — a sentence that is true on one render and false on the next is
+  // not a weaker claim, it is an untrue one.
+  for (const book of [sunkBeyond, sunkInside]) {
+    assert.ok(!book.includes('sorts to the end, so it will be in the part not shown'), 'the false prediction is gone');
+    // ...and the fact the prediction was reaching for is still stated, in a form that survives both.
+    assert.match(book, /sorts below one that can admit today/);
+  }
+});
+
+test('FF-I4 — the book basis lines state the FLOOR, so they cannot contradict the floor arm beside them', () => {
+  /* THREE SURFACES CLAIMED "every facility {payer} paid at" WHILE THE BOOK APPLIES QUALIFY_MIN_LINES.
+   * The book load runs `assembleFacilities(..., applyFloor = true)` (core.ts) and the member load does
+   * not — which is exactly why this surface already has TWO sentences that say so out loud ("below the
+   * volume floor for {payer} in this window", "clears the volume floor in the window shown"). Rendered
+   * beside an unqualified "every facility", those two sentences contradict the heading above them.
+   *
+   * COMPOSED, not per-sentence: each half was independently defensible and it is only the pair on one
+   * screen that is a lie, which is precisely the shape a per-surface review misses. */
+
+  // COMPOSITION 1 — the BOOK-LED screen, where the member's own thin facility is named as dropped.
+  const led = answerHtml(
+    ledSnapshot({
+      facilities: [
+        facility({ rank: 1, name: 'NASHVILLE MENTAL HEALTH', facilityKey: 'NASH' }),
+        facility({ rank: 2, name: 'TINY CLINIC', facilityKey: 'TINY', lineCount: 2, distinctPatients: 1 }),
+      ],
+    } as Partial<QualifySnapshot>),
+  );
+  assert.match(led, /below the volume floor for AETNA US HEALTHCARE in this window/, 'positive control: the floor arm speaks');
+  assert.match(led, /every facility AETNA US HEALTHCARE paid at above the volume floor in the window shown/);
+  assert.ok(
+    !led.includes('paid at in the window shown'),
+    'the unqualified promise cannot stand on a screen that names a facility the floor dropped',
+  );
+
+  // COMPOSITION 2 — the SECONDARY screen with an EMPTY book: "0 facilities — every facility AETNA
+  // paid at" beside "no facility clears the volume floor" was the same contradiction, inverted.
+  const empty = bookRegion(answerHtml(secondaryBookSnapshot({ bookFacilities: [] } as Partial<QualifySnapshot>)));
+  assert.match(empty, /clears the volume floor in the window shown/, 'positive control: the empty-book arm speaks');
+  assert.match(empty, /every facility AETNA US HEALTHCARE paid at above the volume floor in this window/);
+  assert.ok(!empty.includes('paid at in this window'), 'and the unqualified form is gone from the secondary section too');
+
+  // COMPOSITION 3 — the SKIP banner's book-led arm, the third site carrying the phrase.
+  const skipped = answerHtml(ledSnapshot(), { skipped: true, scopeSource: 'dominant' });
+  assert.match(skipped, /every facility that label paid at above the volume floor in this window/);
+  assert.ok(!skipped.includes('every facility that label paid at in this window'));
+});
+
+test('FF-m4 — the sr-only classification waits on ALL THREE stale states, exactly like the visible line', () => {
+  /* THE ARIA CHANNEL MUST NEVER SAY WHAT THE VISIBLE CHANNEL SUPPRESSES. The visible preface is gated
+   * on `stale` = refetching || staleAfterError || refreshing; the sr-only classification was gated on
+   * the first two only, so a same-scope REFRESH left a screen-reader user hearing a classification the
+   * sighted reader could not see — and hearing it with no dim and no beam to mark it as provisional. */
+  const spokenOf = (html: string) => outerHtmlFrom(html, html.indexOf('<p aria-live="polite"'));
+  /* ⚠ THE VISIBLE CHANNEL IS THE PAGE **MINUS** THE LIVE REGION. Both channels carry the same bytes by
+   * design (one call to `memberPrefaceFor`), so an unscoped `!html.includes(...)` is satisfied — or
+   * defeated — by whichever channel happens still to be speaking. Measured: it reported the VISIBLE
+   * line as unsuppressed on `refreshing` when the visible line was correctly absent and the sr-only
+   * one was not, i.e. it named the wrong channel as the defect. Separate them or assert nothing. */
+  const visibleOf = (html: string) => html.replace(spokenOf(html), '');
+  // POSITIVE CONTROL — idle, both channels carry it. Otherwise every negative below is vacuous.
+  const idle = answerHtml(bookSnapshot());
+  assert.match(visibleOf(idle), /One member has a paid claim behind this search/, 'the visible line is there when idle');
+  assert.match(spokenOf(idle), /One member has a paid claim behind this search/, 'and so is the spoken one');
+  for (const flag of ['refetching', 'staleAfterError', 'refreshing'] as const) {
+    const html = answerHtml(bookSnapshot(), { [flag]: true });
+    assert.ok(
+      !visibleOf(html).includes('a paid claim behind this search'),
+      `the visible line waits on ${flag}`,
+    );
+    assert.ok(
+      !spokenOf(html).includes('a paid claim behind this search'),
+      `and the spoken one waits on ${flag} — an aria channel outliving the seen claim is the disagreement`,
+    );
+  }
+});
+
+test('FF-m6 — the receipt chip’s accessible name states its BASIS, like the preface it sits beside', () => {
+  /* "N members match this search" is the EXACT mixed-basis wording S2-I1 removed from the visible
+   * preface: `memberCount` is the ladder's 365-day rung filtered on `payment_received`, so it means
+   * "members with a PAID CLAIM in the last 12 months" and never "members who exist". The visible copy
+   * was fixed and the aria-label kept the retired sentence — the one channel a browser pass cannot
+   * see. One derivation, three surfaces is only true if the BASIS is shared too, not just the number. */
+  const receiptOf = (snap: QualifySnapshot) => {
+    const html = answerHtml(snap);
+    return outerHtmlFrom(html, html.indexOf('<nav aria-label="Your search so far"'));
+  };
+  const few = receiptOf(bookSnapshot({ memberCount: 4 }));
+  assert.match(few, /aria-label="4 members with a paid claim in the last 12 months"/);
+  const one = receiptOf(bookSnapshot());
+  assert.match(one, /aria-label="1 member with a paid claim in the last 12 months"/);
+  for (const receipt of [few, one]) {
+    assert.ok(!receipt.includes('match this search'), 'the retired mixed-basis wording is gone from the aria channel');
+    /* ⚠ AND IT IS NOT THE PREFACE'S SENTENCE EITHER. The receipt is exempt from the in-flight
+     * suppression (it is a trail of decisions, not a claim about the ranking), so borrowing the
+     * preface's "behind this search" clause would put the suppressed words on screen during a
+     * re-scope through the one surface the rule does not cover. Same basis, different sentence. */
+    assert.ok(!receipt.includes('behind this search'), 'it states the basis without borrowing the suppressed sentence');
+  }
+  // The suppression the wording protects, asserted where it matters: mid-refetch the preface is gone
+  // from BOTH channels and the receipt still carries its number.
+  const inFlight = answerHtml(bookSnapshot({ memberCount: 4 }), { refetching: true });
+  assert.ok(!inFlight.includes('a paid claim behind this'), 'the preface is suppressed');
+  assert.match(inFlight, /aria-label="4 members with a paid claim in the last 12 months"/, 'the receipt is not');
+});
+
+test('FF-m7 — the book-led skip trace names the payer ONCE', () => {
+  /* `rankingBasis` already opens with "{payer}'s whole book" and `skipUnder` appended " under
+   * {payer}" behind it, so the trace row read "… AETNA US HEALTHCARE's whole book, with this
+   * identifier's own history marked on it under AETNA US HEALTHCARE". Both halves true; together,
+   * a sentence that reads as two different scopes. */
+  const html = answerHtml(ledSnapshot(), { skipped: true, scopeSource: 'dominant' });
+  const trace = html.slice(html.indexOf('no plan chosen · AETNA'));
+  assert.ok(trace.length > 0, 'positive control: the book-led ranking trace really rendered');
+  const row = trace.slice(0, trace.indexOf('<'));
+  assert.match(row, /whole book, with this identifier&#x27;s own history marked on it/, 'the basis is unchanged');
+  assert.equal(
+    row.split('AETNA US HEALTHCARE').length - 1,
+    1,
+    `the payer is named once in the trace row, not twice: ${row}`,
+  );
+});
+
+test('FF-m8 — the 2-9 preface names an action available on the stage it renders on', () => {
+  /* "Continue to search across all of them" named the SKIP — a control that lives on the carrier and
+   * plan stages and does not exist on the ANSWER stage, which is the only stage this sentence renders
+   * on. And the same string is announced by `liveSentenceFor`'s SKIPPED arm, which returns BEFORE
+   * every stage check, so it can also be heard over the identify screen. So the replacement names no
+   * POSITION and no stage-local control — only the search itself, which is true anywhere. The exact
+   * string is pinned in the ROOT suite beside the module; this pins that the SURFACE renders it. */
+  const html = answerHtml(bookSnapshot({ memberCount: 4 }));
+  assert.match(html, /This search covers all of them — refine the prefix to narrow it to one\./);
+  assert.ok(!html.includes('Continue to search across all of them'), 'no Continue control exists on this stage');
 });

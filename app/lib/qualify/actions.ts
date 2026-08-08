@@ -413,7 +413,19 @@ export async function loadQualifyDataFreshness(): Promise<QualifyDataFreshnessRe
      * catch makes a permission error indistinguishable from an empty log, in the UI and in the logs.
      * 0089 is exactly that: a swallowed 42501 became permanently wrong data instead of a visible
      * failure. SQLSTATE only; the driver's message can carry query text and answers nothing here. */
-    const code = typeof err === 'object' && err !== null ? String((err as { code?: unknown }).code) : 'unknown';
+    /* ⚠ `?? 'no-sqlstate'`, BECAUSE `String(undefined)` IS THE WORD "undefined" (final review,
+     * 2026-08-08). A thrown object WITHOUT a `code` — a TypeError from the driver, an AggregateError
+     * from a pool, anything that is not a Postgres error — logged "sqlstate undefined", which reads
+     * as a driver that returned a null SQLSTATE rather than as a throw that never had one. The whole
+     * point of this line is that the FIRST failure of an untested policy is legible; a log that
+     * misdescribes the shape of the error is the swallow this catch exists to avoid. */
+    const code = String(
+      typeof err === 'object' && err !== null
+        ? // `?? 'no-sqlstate'` — an object that IS an error but carries no SQLSTATE. Kept distinct
+          // from 'unknown' below, which means the throw was not an object at all.
+          ((err as { code?: unknown }).code ?? 'no-sqlstate')
+        : 'unknown',
+    );
     console.error(`qualify data freshness read failed (sqlstate ${code}) — rendering "freshness unknown"`);
     return { ok: false };
   }
