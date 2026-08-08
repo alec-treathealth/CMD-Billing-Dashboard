@@ -190,3 +190,34 @@ test('S3 — the hero can NAME the population it averaged, and says so when noth
   assert.equal(derivePolicyRating([fac('A', 70, 20)]).basis, 'patient-weighted across 1 rated facility');
   assert.equal(derivePolicyRating([]).basis, 'no facility clears the sample floor');
 });
+
+test('S3 fix — the RANKS STRIP re-bases its scope label when the book leads, because the caption cannot', () => {
+  /* THE MITIGATION S3 CITED NEVER RENDERS. The panel's idle caption (`active === null`) and this
+   * strip (`active === 'ranks'`) are MUTUALLY EXCLUSIVE — so the moment a reader asks the ranks
+   * question over a book-led screen, the caption naming the model's list disappears and the strip's
+   * only label is "Top N facilities · {payer} · by rating, not bed availability": a member-scoped
+   * table identified by nothing, directly beneath a grid showing that payer's whole book.
+   *
+   * The strip's POPULATION does not change (it describes what the model read, which is right); its
+   * LABEL says which population that is. */
+  const rows = deriveTopRanks([fac('ALPHA', 70, 30), fac('BETA', 40, 10)]);
+  const led = qualifyRanksHeading(rows, 'aetna us healthcare', 'leading');
+  assert.match(led, /this member's own history under aetna us healthcare/);
+  assert.match(led, /^Top 2 facilities · /, 'the count and the basis note are untouched');
+  assert.match(led, /by rating, not bed availability$/);
+  // ⚠ 'secondary' AND 'none' ARE BYTE-IDENTICAL TO WHAT SHIPPED, and 'secondary' is not an oversight:
+  // there the member ranking IS the primary grid and the book is the clearly-labelled second thing,
+  // so the bare payer label already describes the list the strip is about. Only the flip inverts it.
+  const plain = qualifyRanksHeading(rows, 'aetna us healthcare');
+  assert.equal(qualifyRanksHeading(rows, 'aetna us healthcare', 'none'), plain);
+  assert.equal(qualifyRanksHeading(rows, 'aetna us healthcare', 'secondary'), plain);
+  assert.equal(plain, 'Top 2 facilities · aetna us healthcare · by rating, not bed availability');
+  // The full-house disclosure survives the re-base — it is a claim about the ROWS, not the scope.
+  const full = qualifyRanksHeading(
+    deriveTopRanks([{ ...fac('A', 80, 20), bedState: 'full' }, fac('B', 60, 20)]),
+    'aetna',
+    'leading',
+  );
+  assert.match(full, /this member's own history under aetna/);
+  assert.match(full, /one or more are full/);
+});

@@ -55,13 +55,12 @@ import { V3_INITIAL_STATE } from '../../../lib/qualify/v3FlowState';
 import { getQualifyFacilityTrends, getQualifySnapshot } from '../../../lib/qualify/actions';
 import type { QualifyFacilityTrend } from '../../../lib/qualify/contract';
 import { QualifyAiPanel } from '../qualify-ai-panel';
+import { bookPlacementFor } from '../../../lib/qualify/bookPlacement';
 import { HeatingUpCards, HeatingUpSkeleton } from '../shared/heating-ticker';
 import { staggerDelayMs } from '../tokens';
 import { AREA_ALL, areaKeyFor } from '../m/area-chips';
 import {
   answerFiltersActive,
-  bookIsOnScreen,
-  bookLeadsAnswer,
   deriveStage,
   employerNarrowFor,
   filterCandidates,
@@ -604,15 +603,11 @@ export function ResolutionFlowClient({
                     // names the list the model actually read. TOLD, not derived from the field — it is
                     // on the wire for the v2 tab too, and v2 draws no book (see the prop's own doc).
                     //
-                    // ⚠ THE SAME TWO PREDICATES THE STAGE RENDERS ON, composed in the order the stage
-                    // composes them: `bookLeadsAnswer` (S3's flip) is asked FIRST, because when the
-                    // book leads it is not "also on screen" — it IS the grid, and the member ranking
-                    // the model read is no longer drawn as one at all. Both were once local
-                    // expressions that merely agreed with the stage's; a caption claiming a placement
-                    // the stage did not draw is precisely the defect that shape produces.
-                    bookPlacement={
-                      bookLeadsAnswer(snapshot) ? 'leading' : bookIsOnScreen(snapshot) ? 'secondary' : 'none'
-                    }
+                    // ⚠ ONE CALL, NOT A TERNARY HERE. The composition (leads-first, then on-screen)
+                    // used to be written inline in this file — which nothing hermetic imports, so
+                    // INVERTING IT shipped app 557/0 and a clean build with 'leading' unreachable.
+                    // The decision now lives in bookPlacement.ts with its own tests; this is JSX.
+                    bookPlacement={bookPlacementFor(snapshot)}
                     autoAsk={autoAsk}
                     // ONE-SHOT (review Critical 2): without the disarm, every re-scope (window,
                     // billed-under chip) nulls the snapshot, unmounts the panel, and the remount

@@ -494,6 +494,30 @@ export function scopedPayerOf(resolved: QualifyResolved | null | undefined): str
   return resolved.payerScope === 'payer' ? resolved.payerName : null;
 }
 
+/**
+ * THE ONE EMPTY FACILITY LIST — a shared constant, not three spellings of it.
+ *
+ * It lives here because three sites reach for "no facilities" (the answer stage's two fallbacks and
+ * the book-placement predicate) and the S3 review found each written differently — `?? []` twice and
+ * `?? EMPTY_FACILITIES` once. Three spellings of one unreachable state read as three states. A
+ * shared reference also keeps `useMemo` identities stable across renders that fall through to it.
+ */
+export const EMPTY_FACILITIES: readonly QualifyFacility[] = [];
+
+/**
+ * THE ROLLUP'S "no facility at all" LITERAL — a real bucket, not a null.
+ *
+ * CMD emits `facility = 'No Facility'` for charges that resolve to nowhere: interest lines (cpt INT
+ * / INTRST) plus a residual unattributed trickle. **11,414 charges / $29,081,575.38 at charge
+ * grain**, measured in `supabase/migrations/0084_cmd_explorer_pull_facility.sql`. It groups by
+ * itself and keeps its own row everywhere in this product — dropping it would hide money.
+ *
+ * It is named here because a surface that makes a claim about a PLACE has to be able to tell it
+ * apart from one. The first such claim is S3's member-history annotation ("Seen here before"), which
+ * is suppressed for this key at the join in core.ts.
+ */
+export const QUALIFY_NO_FACILITY = 'No Facility';
+
 export interface QualifyFacility {
   /** 1-based rank over the single cross-tenant list, ORDERED BY `rating` desc (ruling Q-G) — NOT by
    *  pctAllowedOfBilled. Do not "fix" the sort to pct: rating is the sort key, pct is a displayed value. */

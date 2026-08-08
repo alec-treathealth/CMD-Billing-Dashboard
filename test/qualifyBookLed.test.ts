@@ -26,6 +26,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   getQualifySnapshotCore,
+  getQualifySnapshotByNameCore,
   getQualifySnapshotByPayerCore,
   type QualifyDeps,
 } from '../app/lib/qualify/core.js';
@@ -538,4 +539,51 @@ test('S3 — the four paths with no book carry no annotation either, and nothing
   // BY-PAYER: `facilities` already IS the book, and no identifier was searched to annotate it with.
   const byPayer = await getQualifySnapshotByPayerCore(deps(), { payer: 'AETNA', window: { kind: 'trailing', days: 30 } });
   for (const f of byPayer.facilities) assert.equal(f.memberHistory, null);
+});
+
+// ── S3 fix round 1 (2026-08-08) ─────────────────────────────────────────────────────────────────
+
+/** The literal CMD emits when a charge resolves to no facility at all — 11,414 charges /
+ *  $29,081,575.38 at charge grain (supabase/migrations/0084_cmd_explorer_pull_facility.sql). It is a
+ *  real bucket in the rollup, so it reaches the ranking like any other text. */
+const NO_FACILITY: QualifyFacilityRow = {
+  ...STRONG,
+  facility: 'No Facility',
+  facility_name: 'No Facility',
+  facility_code: null,
+};
+
+test('S3 M3 — the “No Facility” bucket is never annotated: nobody was SEEN at a placeholder', async () => {
+  /* ⚠ THE CARD IS PRE-EXISTING; THE PERSONAL CLAIM IS NEW. "No Facility" has always been able to
+   * rank — it is a real bucket (interest lines and a residual unattributed trickle), and dropping it
+   * would hide money. But S3 puts "Seen here before — N claim lines" on annotated rows, and that
+   * sentence asserts a PLACE the member was treated. There is no such place here.
+   *
+   * SUPPRESSED AT THE JOIN, not at the chip, so the TIEBREAK goes with it: an annotation that
+   * silently floated the placeholder above a real facility at equal footing would be the same
+   * fabricated claim expressed as an ordering instead of as words. */
+  const { deps: d } = recordingDeps([NO_FACILITY, STRONG], [NO_FACILITY, STRONG]);
+  const book = await getQualifySnapshotCore(d, PREFIX_IN);
+  const placeholder = book.bookFacilities!.find((f) => f.name === 'No Facility')!;
+  assert.equal(placeholder.memberHistory, null, 'the placeholder carries no personal claim');
+  // The positive control on the SAME render: a real facility the member billed still gets its mark,
+  // so the absence above is a property of the placeholder and not of a broken join.
+  assert.deepEqual(book.bookFacilities!.find((f) => f.name === 'STRONG HOUSE')!.memberHistory, {
+    lineCount: 120,
+    distinctPatients: 22,
+  });
+  // And it is still RANKED — suppressing the annotation must not suppress the row.
+  assert.ok(namesOf(book.bookFacilities).includes('No Facility'), 'the bucket keeps its place in the list');
+});
+
+test('S3 M4 — the by-NAME path carries no annotation either (the test that used to claim four paths)', async () => {
+  // The previous version of this claim exercised two of the four it named. The by-name core is
+  // identifier-shaped and floorless like the direct path, so "does it annotate" is a real question
+  // there rather than a formality — it does not, because it loads no book to annotate.
+  const snap = await getQualifySnapshotByNameCore(deps(), {
+    name: 'ACME BEHAVIORAL',
+    window: { kind: 'trailing', days: 30 },
+  });
+  assert.equal(snap.bookFacilities, null, 'no book on the name path');
+  for (const f of snap.facilities) assert.equal(f.memberHistory, null);
 });

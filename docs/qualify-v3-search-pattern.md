@@ -431,10 +431,26 @@ Modes that keep the member-led render, each for its own reason, each pinned by a
 and must not guess), **`0`** (no history to annotate with), the **identifier-wide Skip** (no book
 exists — the builder throws), and an **empty book**.
 
-### What follows the flip — and what deliberately does not
+### What follows the flip — **grep for `BOOK-LED`**, do not read a list
 
-Every claim surface either re-bases or states the split. This is where the review lives, so the list
-is exhaustive:
+> **THE LIST THAT USED TO BE HERE HID A DEFECT, AND THAT IS THE LESSON WORTH KEEPING.** The first
+> version of this section — and a matching comment block in `resolution-flow.tsx` — *enumerated* the
+> surfaces that re-base and the ones that do not. The scope-honesty banner (a coral `role="status"`
+> alarm directly above the grid) was on neither list, so both the author and the reviewer checked the
+> **list** instead of the **file**, and it shipped claiming *"the ranking below is this identifier's
+> history under {payer}"* over a grid showing that payer's whole book. An index maintained by hand,
+> in a different place from the code it describes, rots in exactly one direction: it stays convincing
+> while it stops being true.
+>
+> So the index is now an **instruction**. Every claim surface in `resolution-flow.tsx` carries
+> exactly one of `[BOOK-LED SURFACE]` or `[BOOK-LED EXEMPT: <reason>]`, at the site, in its own
+> comment. A new surface with neither is the bug. `app/test/qualifyV3Flow.test.tsx` enforces it
+> mechanically for every `role="status"` in the file — the loud class, which is the class the missed
+> one belonged to — and that test says plainly that `role="status"` is a *proxy* for "claim surface",
+> not a definition of one: the non-status surfaces carry markers too, so the grep still enumerates
+> the whole set.
+
+The set as it stands (**verify by grep, not by this paragraph**):
 
 - **The ranked grid** becomes the book, with its own heading (*"Where {payer} pays — the whole
   book"*), its own basis line, and `[data-v3-book]` moved onto it — exactly one book section is ever
@@ -459,7 +475,11 @@ is exhaustive:
   ranking above is now book-wide as well.
 - **`liveSentenceFor`** takes `bookLedPayer` — a NAME, not a boolean, because "the ranking is a whole
   book" leaves a screen-reader user knowing the scope changed and not what to. Suppressed in flight on
-  the same condition as the visible claims.
+  the same condition as the visible claims, and **stage-gated**: the skipped arm returns before every
+  stage check, so a held skipped answer plus one step back announced "the ranking below is {payer}'s
+  whole book" over the identify screen, with no ranking below it at all.
+- **The SCOPE-HONESTY banner** (both arms). Its subject — the pick could not be bridged to a claims
+  label — stays true and stays alarming; only the half describing the LIST moves.
 
 **Not following it, deliberately:** the **AI payload** (`buildQualifyAiInput` still maps
 `snap.facilities`, unchanged schema — sending the book is a schema + system-prompt + firewall change
@@ -525,5 +545,39 @@ has no chip row, so a book-led deck would render the payer's book with the membe
 **invisible** — strictly worse than today; and every mobile scope sentence is written about the member.
 A static-scan test fails if `bookFacilities` / `bookLeadsAnswer` ever reach that module, so the
 divergence stays a decision. **Flagged for Alec.**
+
+### Where the book-led decisions live, and why they are not in a component
+
+`app/lib/qualify/bookPlacement.ts` owns `bookIsOnScreen`, `bookLeadsAnswer`, the three-state
+`QualifyBookPlacement`, the derivation `bookPlacementFor`, and the AI panel's grounding caption.
+
+**They were extracted because the wiring was invisible to the whole gate.** The placement ternary
+lived in `resolution-flow-client.tsx` and the caption in `qualify-ai-panel.tsx` — two `'use client'`
+modules whose import graphs reach the `'use server'` action chain, so nothing hermetic imports
+either. Measured: **inverting the ternary's arms so `'leading'` is unreachable ships app 557/0 with
+both typechecks clean and `next build` green.** Same class as the S1 review's deleted `bedState`
+mapping, same fix: the decision moves to a plain lib module with tests, the client keeps only JSX.
+`resolution-flow.tsx` re-exports the two predicates, so there is one definition behind two import
+paths — never two definitions.
+
+The **order** inside `bookPlacementFor` is itself a decision: `bookLeadsAnswer` is asked first,
+because when the book leads it is not "also on screen" — it *is* the grid.
+
+### Two more places the flip reaches
+
+**The ranks strip.** The panel's idle caption (`active === null`) and the strip (`active === 'ranks'`)
+are mutually exclusive, so the caption S3 cited as the mitigation *disappears* the moment a reader
+asks the ranks question. `qualifyRanksHeading` therefore takes the placement and re-bases its scope
+label when the book leads. Its **population** does not move — it describes what the model actually
+read, and re-deriving it from the book would put a table on screen the payload never saw.
+
+**The `'No Facility'` bucket is never annotated.** That literal is a real bucket in the rollup —
+11,414 charges / $29,081,575.38 at charge grain
+(`supabase/migrations/0084_cmd_explorer_pull_facility.sql`) — and it ranks like any other text,
+deliberately, because dropping it would hide money. But *"Seen here before"* asserts a **place** the
+member was treated, and there is no such place. Suppressed **at the join**, not at the chip, so the
+**tiebreak goes with it**: an annotation that silently floated the placeholder above a real facility
+at equal footing would be the same fabricated claim expressed as an ordering, with no mark on the
+card to explain the move. The row keeps its rank; only the personal claim is withheld.
 
 **All new copy is unratified.**

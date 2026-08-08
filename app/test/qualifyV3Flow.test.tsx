@@ -8,6 +8,8 @@
  */
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   AreaLine,
@@ -3178,10 +3180,19 @@ test('S3 — the ARIA channel carries the basis too, or the spoken answer descri
   // THE ANNOTATION IS ANNOUNCED TOO. Naming the basis without naming the mark would tell a
   // screen-reader user the member's history had been REPLACED, when it has been moved onto the rows.
   assert.match(spoken, /the facilities they have been to are marked on it/i);
-  // Omitted → byte-identical to S2's sentence. Every non-flip bucket announces exactly as before.
+  /* ⚠ THIS PAIR PINS THE NULL/OMITTED EQUIVALENCE, NOT BYTE-IDENTITY WITH S2 — the comment here
+   * used to claim the latter and pointed at an assertion that cannot show it. Byte-identity is
+   * already frozen by the S2 exact-string tests above (`liveSentenceFor(..., {})` vs the pre-S2
+   * sentence). What this adds is that an EXPLICIT `bookLedPayer: null` and an omitted one are the
+   * same announcement, so a caller that computes the payer and gets null cannot drift from one that
+   * never computed it. */
   assert.equal(
     liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1 }),
     liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1, bookLedPayer: null }),
+  );
+  assert.ok(
+    !liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1 }).includes('whole book'),
+    'and neither of them says anything about a book',
   );
   // And the skipped arm carries it as well — a Skip plus one billed-under chip IS a book-led screen,
   // and the sr-only line is where an unfixed scope claim survives a browser pass.
@@ -3193,4 +3204,118 @@ test('S3 — the ARIA channel carries the basis too, or the spoken answer descri
   });
   assert.match(skipSpoken, /You skipped the plan questions/);
   assert.match(skipSpoken, /whole book/);
+});
+
+
+// ── S3 FIX ROUND 1 (2026-08-08) — the 13th claim surface, and the marker that would have found it ─
+
+test('S3 C1 — the SCOPE-HONESTY banner follows the flip, in BOTH arms', () => {
+  /* THE ONE THE INDEX HID. This banner renders in the coral ALARM treatment with `role="status"`,
+   * directly above the grid, and its gate (`!stale && !skipped && scopeSource === 'dominant' &&
+   * resolved && candidates.total > 1`) never excluded `bookLeads`. So on the 58.8% path it claimed
+   * "the ranking below is this identifier's history under {payer}" over a grid showing that payer's
+   * WHOLE BOOK — the S2-I1 / PR #92 mixed-claim class, in the loudest voice on the surface.
+   *
+   * It is NOT suppressed: its subject (the pick could not be bridged to a claims label) is still
+   * true and still worth alarming about. Only the half that describes the LIST re-bases. */
+  const probe = (over: Partial<QualifyResolution> = {}) =>
+    render(
+      props('answer', fixture(over), {
+        answer: answerProps({ snapshot: ledSnapshot(), skipped: false, scopeSource: 'dominant' }),
+      }),
+    );
+
+  // ARM 1 — the picked plan has no claims of its own (`claimEvidence.lines === 0`).
+  const noHistory = probe({
+    group: { ...fixture().group, claimEvidence: { ...fixture().group.claimEvidence, lines: 0 } },
+  } as Partial<QualifyResolution>);
+  assert.match(noHistory, /Where AETNA US HEALTHCARE pays — the whole book/, 'the probe really is book-led');
+  assert.ok(
+    !noHistory.includes("the ranking below is this identifier&#x27;s history under"),
+    'the member-footprint claim cannot survive a book-led grid',
+  );
+  assert.match(noHistory, /This plan has no claims history of its own/, 'the alarm still fires — only its list-half moved');
+  assert.match(noHistory, /the ranking below is AETNA US HEALTHCARE&#x27;s whole book, not evidence about Aetna/);
+
+  // ARM 2 — the pick could not be scoped, and the ranking is the dominant label's book.
+  const notScoped = probe();
+  assert.ok(!notScoped.includes('it shows this identifier&#x27;s history under'), 'same lie, second arm');
+  assert.match(notScoped, /The ranking below could not be scoped to Aetna/, 'the alarm still fires');
+  assert.match(
+    notScoped,
+    /it shows AETNA US HEALTHCARE&#x27;s whole book, this identifier&#x27;s largest label by volume, not evidence about Aetna/,
+  );
+
+  // ⚠ AND THE PRE-S3 STRINGS ARE UNTOUCHED IN EVERY MODE THAT DOES NOT FLIP. Both arms are frozen
+  // by tests above this block; this asserts the re-base is gated, not global.
+  const few = render(
+    props('answer', fixture(), {
+      answer: answerProps({
+        snapshot: ledSnapshot({ memberCount: 4 } as Partial<QualifySnapshot>),
+        skipped: false,
+        scopeSource: 'dominant',
+      }),
+    }),
+  );
+  assert.match(few, /it shows this identifier&#x27;s history under AETNA US HEALTHCARE, its largest payer by volume\./);
+});
+
+test('S3 C1 — EVERY role="status" in the flow carries a book-led marker, so the next one cannot hide', () => {
+  /* ⚠ THIS TEST EXISTS BECAUSE A HAND-MAINTAINED INDEX HID A DEFECT. The flip's comment block used
+   * to ENUMERATE the surfaces that follow it and the ones that do not — and both the author and the
+   * reviewer checked the list instead of the file, so the scope-honesty banner (never on the list)
+   * shipped claiming the member's ranking over the book's grid.
+   *
+   * The index is now a GREP INSTRUCTION rather than a list: every claim surface carries
+   * `[BOOK-LED SURFACE]` or `[BOOK-LED EXEMPT: reason]` in its own comment, at the site, where it
+   * cannot rot separately from the code it describes.
+   *
+   * ⚠ WHAT THIS TEST CAN AND CANNOT ENFORCE, said plainly. `role="status"` is a MECHANICAL proxy for
+   * "claim surface", not a definition of one: it is the loudest class (C1 was one) and the only one a
+   * regex can find. Several real claim surfaces are NOT status roles — `resolvedScopeSentence`, the
+   * `billedUnderCaption` table, the trace panel's rows, the hero's basis. Those carry markers too, so
+   * `grep -n 'BOOK-LED' app/components/qualify/v3/resolution-flow.tsx` still enumerates the whole
+   * set; what the test enforces is that the LOUD class cannot grow a new member silently. */
+  const src = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/resolution-flow.tsx', import.meta.url)),
+    'utf8',
+  );
+  const lines = src.split('\n');
+  // Only real JSX attributes — the two `role="status"` mentions INSIDE comments are backticked prose.
+  const statusLines = lines
+    .map((l, i) => (/<[a-zA-Z]+ role="status"/.test(l) ? i : -1))
+    .filter((i) => i >= 0);
+  assert.ok(statusLines.length >= 12, `expected the known status surfaces, found ${statusLines.length}`);
+
+  const MARKER = /\[BOOK-LED (SURFACE\]|EXEMPT: [^\]]+\])/;
+  const unmarked = statusLines.filter((i) => !lines.slice(Math.max(0, i - 30), i + 1).some((l) => MARKER.test(l)));
+  assert.deepEqual(
+    unmarked.map((i) => `${i + 1}: ${lines[i]!.trim().slice(0, 80)}`),
+    [],
+    'a role="status" claim surface with no [BOOK-LED …] marker within 30 lines above it',
+  );
+
+  // Every marker is one of the TWO valid forms — a typo'd token is invisible to grep, which is the
+  // whole mechanism. And there is at least one per status surface, so a marker cannot be shared.
+  const markers = lines.filter((l) => l.includes('[BOOK-LED'));
+  for (const m of markers) assert.match(m, MARKER, `malformed marker: ${m.trim()}`);
+  assert.ok(markers.length >= statusLines.length, 'markers cannot be reused across surfaces');
+  // The index no longer enumerates — it points at the token. An enumerated list is what rotted.
+  assert.match(src, /grep for `BOOK-LED`/, 'the index must instruct, not enumerate');
+});
+
+test('S3 M1 — the sr-only book clause is STAGE-GATED: no "ranking below" where there is no ranking', () => {
+  // A held skipped answer plus a step back to the search box: the skipped arm returns BEFORE the
+  // stage checks, so the clause was announced over the identify screen — "the ranking below is
+  // AETNA's whole book" with no ranking below it at all. The `say()` comment asserted a guarantee
+  // ("called from exactly the two ANSWER-shaped arms") that the code did not hold.
+  const r = fixture();
+  const opts = { skipped: true, memberCount: 1, memberFacilityCount: 1, bookLedPayer: 'AETNA US HEALTHCARE' } as const;
+  assert.match(liveSentenceFor('answer', r, null, opts), /whole book/, 'the answer stage still says it');
+  for (const stage of ['identify', 'payer', 'plan'] as const) {
+    assert.ok(
+      !liveSentenceFor(stage, r, null, opts).includes('whole book'),
+      `stage=${stage} announces a ranking that is not on screen`,
+    );
+  }
 });

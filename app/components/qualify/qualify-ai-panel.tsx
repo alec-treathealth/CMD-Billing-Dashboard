@@ -19,6 +19,9 @@ import { parseAiSections } from '../../../src/collections/aiAnalysis';
 import type { QualifySnapshot } from '../../lib/qualify/contract';
 import { qualifyAiChips, type QualifyAiChipId } from '../../lib/qualify/aiChips';
 import { deriveTopRanks, qualifyRanksHeading } from '../../lib/qualify/policyRating';
+// The caption's WORDS and the placement's THREE states both live in a plain lib module, because
+// this file cannot be imported by a hermetic test — see bookPlacement.ts's header.
+import { aiGroundingCaption, type QualifyBookPlacement } from '../../lib/qualify/bookPlacement';
 // The payload MAP lives in a pure module so it can be tested — see aiPayload.ts for why that is not
 // a tidying preference (an untested optional field silently stopped reaching the model once).
 import { buildQualifyAiInput } from '../../lib/qualify/aiPayload';
@@ -69,7 +72,7 @@ export function QualifyAiPanel({
    * call site can set to an impossible combination, and this caption is precisely the surface where
    * an impossible combination renders as a confident sentence.
    */
-  bookPlacement?: 'none' | 'secondary' | 'leading';
+  bookPlacement?: QualifyBookPlacement;
 }) {
   const [active, setActive] = useState<ChipId | null>(null);
   const [text, setText] = useState('');
@@ -221,18 +224,11 @@ export function QualifyAiPanel({
 
       {active === null ? (
         <p className="px-4 pb-3.5 text-[12px] leading-relaxed text-muted-foreground">
-          {/* "ON THIS SCREEN" IDENTIFIES NOTHING ONCE TWO RANKINGS ARE ON IT (S2), AND "THE RANKING
-              ABOVE" STOPS BEING THE MEMBER'S ONCE THE BOOK LEADS (S3). The payload is the first ten
-              of `snapshot.facilities` — the identifier's own ranking — in every mode; the payer's book
-              is never mapped into it (a book payload is a schema + prompt + firewall change and a
-              separate ruling). So the caption names the list the model actually read, by POSITION.
-              With no book drawn (v2, and any v3 answer without one) the string is byte-identical to
-              what shipped. */}
-          {bookPlacement === 'leading'
-            ? "Preset questions only — each streams a short read grounded in the exact numbers in this member's own history, not the whole-book ranking above. Nothing here is a guarantee of payment."
-            : bookPlacement === 'secondary'
-              ? 'Preset questions only — each streams a short read grounded in the exact numbers in the ranking above, not the whole-book list below. Nothing here is a guarantee of payment.'
-              : 'Preset questions only — each streams a short read grounded in the exact numbers on this screen. Nothing here is a guarantee of payment.'}
+          {/* THE WORDS LIVE IN `aiGroundingCaption` (bookPlacement.ts), NOT HERE, and that is the fix
+              for a real hole: this module reaches the `'use server'` chain, so a string chosen inside
+              it is unreachable from every hermetic test — the reviewer inverted the three arms and the
+              whole gate stayed green. All three are pinned in app/test/bookPlacement.test.tsx now. */}
+          {aiGroundingCaption(bookPlacement)}
         </p>
       ) : (
         <div className="px-4 pb-4">
@@ -287,7 +283,7 @@ export function QualifyAiPanel({
               {!streaming && text && active === 'ranks' && ranks.length > 1 ? (
                 <div className="mt-3 border-t border-line pt-2.5">
                   <div className="font-mono text-xs font-semibold uppercase tracking-wide text-teal700">
-                    {qualifyRanksHeading(ranks, aiScopeLabel(snapshot, 'lower'))}
+                    {qualifyRanksHeading(ranks, aiScopeLabel(snapshot, 'lower'), bookPlacement)}
                   </div>
                   <div className="mt-2 flex flex-col">
                     {ranks.map((r) => (

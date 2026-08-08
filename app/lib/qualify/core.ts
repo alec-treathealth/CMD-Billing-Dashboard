@@ -30,6 +30,7 @@ import {
   qualifyWindowBounds,
   QUALIFY_TENANT_SCOPE,
   QUALIFY_MEMBER_ID_MASK,
+  QUALIFY_NO_FACILITY,
   QUALIFY_REVEAL_BATCH_CAP,
   type QualifyInput,
   type QualifyPayerInput,
@@ -461,7 +462,23 @@ function signedRound1(d: number): number {
  */
 function memberHistoryIndex(memberFacilities: readonly QualifyFacility[]): Map<string, QualifyMemberHistory> {
   return new Map(
-    memberFacilities.map((f) => [f.facilityKey, { lineCount: f.lineCount, distinctPatients: f.distinctPatients }]),
+    memberFacilities
+      /* ⚠ THE PLACEHOLDER IS NEVER ANNOTATED, AND THE SUPPRESSION BELONGS HERE, NOT AT THE CHIP.
+       *
+       * `'No Facility'` is the literal CMD emits when a charge resolves to no facility at all —
+       * interest lines plus a residual unattributed trickle: **11,414 charges / $29,081,575.38 at
+       * charge grain** (supabase/migrations/0084_cmd_explorer_pull_facility.sql). It is a REAL
+       * bucket in the rollup and it ranks like any other text, deliberately — dropping it would
+       * hide money, which is why the row itself stays.
+       *
+       * But the annotation reads "Seen here before", and that asserts a PLACE the member was
+       * treated. There is no such place. Suppressing at the JOIN rather than at the render means
+       * the TIEBREAK goes with it: an annotation that silently floated the placeholder above a real
+       * facility at equal footing would be the same fabricated claim expressed as an ORDERING
+       * instead of as words, and the card would carry no mark to explain the move. The row keeps
+       * its rank; only the personal claim is withheld. */
+      .filter((f) => f.facilityKey !== QUALIFY_NO_FACILITY)
+      .map((f) => [f.facilityKey, { lineCount: f.lineCount, distinctPatients: f.distinctPatients }]),
   );
 }
 

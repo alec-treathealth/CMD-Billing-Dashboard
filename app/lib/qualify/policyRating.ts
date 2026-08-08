@@ -23,6 +23,7 @@
  */
 import type { QualifyFacility } from './contract';
 import type { QualifyBedState } from './bedState';
+import type { QualifyBookPlacement } from './bookPlacement';
 import { iqBandOf, IQ_BAND_LABELS, IQ_BAND_VERDICTS, type QualifyIqBand } from './ratingV2';
 import { ratingSampleTier } from './sampleGate';
 
@@ -93,12 +94,33 @@ export const QUALIFY_RANKS_BASIS_NOTE = 'by rating, not bed availability';
  * views of one order is not worth losing the second reading. So the strip keeps its order and stops
  * being ambiguous about which question it is answering. When one of its own rows is full, that is
  * named here too, rather than left to a chip further down the row that a reader may never reach.
+ *
+ * @param placement WHERE the payer's book is drawn relative to this strip (S3 fix round 1).
+ *
+ * ⚠ THE MITIGATION S3 CLAIMED FOR THIS NEVER RENDERS. The panel's idle caption (`active === null`)
+ * and this strip (`active === 'ranks'`) are MUTUALLY EXCLUSIVE — so the moment a reader asks the
+ * ranks question over a book-led screen, the caption naming the model's list disappears and this
+ * heading's only label is "Top N facilities · {payer} · by rating, not bed availability": a
+ * member-scoped table identified by nothing, directly beneath a grid of that payer's whole book.
+ *
+ * The strip's POPULATION does not move — it describes what the model actually read, and re-deriving
+ * it from the book would put a table on screen the payload never saw. Its LABEL says which
+ * population that is.
+ *
+ * `'secondary'` and `'none'` are byte-identical to what shipped, and `'secondary'` is not an
+ * oversight: there the member ranking IS the primary grid and the book is the clearly-labelled second
+ * thing, so a bare payer label already describes the list this strip is about. Only the flip inverts
+ * which list a bare label reads as. Copy unratified.
  */
-export function qualifyRanksHeading(rows: readonly QualifyRankRow[], scopeLabel: string): string {
+export function qualifyRanksHeading(
+  rows: readonly QualifyRankRow[],
+  scopeLabel: string,
+  placement: QualifyBookPlacement = 'none',
+): string {
   const anyFull = rows.some((r) => r.bedState === 'full');
   return [
     `Top ${rows.length} facilities`,
-    scopeLabel,
+    placement === 'leading' ? `this member's own history under ${scopeLabel}` : scopeLabel,
     // Stated UNCONDITIONALLY. "It happens to match the grid today" is not a reason to leave the
     // basis unsaid tomorrow — that is exactly how the claim this replaces became false.
     anyFull ? `${QUALIFY_RANKS_BASIS_NOTE} — one or more are full` : QUALIFY_RANKS_BASIS_NOTE,
