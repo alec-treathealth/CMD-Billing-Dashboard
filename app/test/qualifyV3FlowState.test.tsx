@@ -61,6 +61,7 @@ function dirty(over: Partial<ShellState> = {}): ShellState {
     windowDays: 180,
     loadedKey: 'p:ALPHA|w:180|f:|e:',
     area: 'TN',
+    narrowExpanded: true,
     ...over,
   };
 }
@@ -87,13 +88,14 @@ const EVERY_ACTION: ShellAction[] = [
   { type: 'payer_override_changed', label: 'BETA MUTUAL INC' },
   { type: 'window_days_changed', days: 30 },
   { type: 'area_selected', key: 'CA' },
+  { type: 'narrow_toggled' },
 ];
 
 // ── 1 · The field-write table ────────────────────────────────────────────────────────────────────
 
 const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[] = [
   {
-    name: 'search_submitted writes thirteen and keeps retryNonce + loadedKey',
+    name: 'search_submitted writes fourteen and keeps retryNonce + loadedKey',
     action: { type: 'search_submitted' },
     writes: {
       payerPick: null,
@@ -109,10 +111,11 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       payerOverride: null,
       windowDays: null,
       area: AREA_ALL,
+      narrowExpanded: false,
     },
   },
   {
-    name: 'skipped writes eleven — and NOT windowDays or autoAsk',
+    name: 'skipped writes twelve — and NOT windowDays or autoAsk',
     action: { type: 'skipped' },
     writes: {
       skipped: true,
@@ -126,10 +129,13 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       snapshot: null,
       snapshotError: null,
       area: AREA_ALL,
+      // Declared for the record; the table CANNOT see it (see INV n) because the fixture is already
+      // `true`. INV n is what actually pins this write, from the opposite side.
+      narrowExpanded: true,
     },
   },
   {
-    name: 'plan_submitted writes eight — and NOT payerPick/planFilter/payerOverride/windowDays/autoAsk',
+    name: 'plan_submitted writes nine — and NOT payerPick/planFilter/payerOverride/windowDays/autoAsk',
     action: { type: 'plan_submitted' },
     writes: {
       picked: true,
@@ -140,10 +146,11 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       snapshot: null,
       snapshotError: null,
       area: AREA_ALL,
+      narrowExpanded: false,
     },
   },
   {
-    name: "went_back('identify') writes thirteen, payerPick among them",
+    name: "went_back('identify') writes fourteen, payerPick among them",
     action: { type: 'went_back', target: 'identify' },
     writes: {
       snapshot: null,
@@ -159,10 +166,11 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       planFilter: '',
       backTo: 'identify',
       area: AREA_ALL,
+      narrowExpanded: false,
     },
   },
   {
-    name: "went_back('payer') writes thirteen, payerPick among them",
+    name: "went_back('payer') writes fourteen, payerPick among them",
     action: { type: 'went_back', target: 'payer' },
     writes: {
       snapshot: null,
@@ -178,10 +186,11 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       planFilter: '',
       backTo: 'payer',
       area: AREA_ALL,
+      narrowExpanded: false,
     },
   },
   {
-    name: "went_back('plan') writes twelve — the carrier pick SURVIVES",
+    name: "went_back('plan') writes thirteen — the carrier pick SURVIVES",
     action: { type: 'went_back', target: 'plan' },
     writes: {
       snapshot: null,
@@ -196,6 +205,7 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       planFilter: '',
       backTo: 'plan',
       area: AREA_ALL,
+      narrowExpanded: false,
     },
   },
   {
@@ -258,6 +268,14 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
     action: { type: 'area_selected', key: 'CA' },
     writes: { area: 'CA' },
   },
+  {
+    // The NARROW SEARCH card's open/closed bit. Its value here is unremarkable; the row exists for
+    // the NON-writes — a disclosure toggle that touched `filters`, `snapshot` or `loadedKey` would be
+    // a presentation control quietly re-issuing a ranking request.
+    name: 'narrow_toggled flips narrowExpanded ONLY — a disclosure is not a re-scope',
+    action: { type: 'narrow_toggled' },
+    writes: { narrowExpanded: false },
+  },
 ];
 
 for (const row of TABLE) {
@@ -269,7 +287,7 @@ for (const row of TABLE) {
   });
 }
 
-test('F3b: the initial state is the fifteen shell defaults, filters by shared reference', () => {
+test('F3b: the initial state is the sixteen shell defaults, filters by shared reference', () => {
   assert.deepEqual(INITIAL_SHELL_STATE, {
     payerPick: null,
     picked: false,
@@ -286,8 +304,9 @@ test('F3b: the initial state is the fifteen shell defaults, filters by shared re
     windowDays: null,
     loadedKey: null,
     area: AREA_ALL,
+    narrowExpanded: false,
   });
-  assert.equal(Object.keys(INITIAL_SHELL_STATE).length, 15, 'fifteen fields, no more');
+  assert.equal(Object.keys(INITIAL_SHELL_STATE).length, 16, 'sixteen fields, no more');
   assert.equal(INITIAL_SHELL_STATE.filters, NO_ANSWER_FILTERS, 'the SHARED constant, not a copy');
   assert.equal(INITIAL_SHELL_STATE.area, AREA_ALL, 'the area facet starts unnarrowed');
 });
@@ -575,6 +594,58 @@ test('area_selected: All, a state and the Other bucket are all just keys — and
   assert.equal(s.area, AREA_OTHER, 'the unmapped bucket is selectable, not a null hole');
   s = shellReducer(s, { type: 'area_selected', key: AREA_ALL });
   assert.equal(s.area, AREA_ALL, 'pressing All is how a narrow is undone from the chip row');
+});
+
+/**
+ * INV n — the NARROW SEARCH card's open/closed bit.
+ *
+ * ⚠ THE FIELD-WRITE TABLE ABOVE CANNOT PIN THE `skipped` HALF OF THIS, and that is why this test
+ * exists rather than a fourth column in the table. The table's fixture sets every field to a
+ * NON-default value and compares `{...dirty(), ...writes}` — so any action whose declared write
+ * happens to EQUAL the fixture value is invisible there. `narrowExpanded: true` is exactly that case
+ * for `skipped` (the same blind spot the pre-existing `skipped: true` row already has). Every case
+ * below therefore starts from the OPPOSITE value: a reducer that merely carried the field through
+ * fails all of them.
+ *
+ * The rule being pinned: OPEN is a claim that there is something to narrow. A Skip has just widened
+ * the search to the whole footprint, so the fields are the operator's next move and the reveal has
+ * rows to stagger; a plan pick has already narrowed it, so the card states what it resolved to and
+ * stays shut. Every other navigation is invariant (a) — a kept-open card over a state the user has
+ * left is the same kept-but-hidden class, at lower stakes.
+ */
+test('INV n: Skip lands the NARROW SEARCH card OPEN, every navigation lands it CLOSED, Clear filters leaves it alone', () => {
+  assert.equal(
+    shellReducer(dirty({ narrowExpanded: false }), { type: 'skipped' }).narrowExpanded,
+    true,
+    'a skip must OPEN the card — the fields are the next move, and the reveal needs them to stagger',
+  );
+  for (const action of [
+    { type: 'plan_submitted' },
+    { type: 'search_submitted' },
+    { type: 'went_back', target: 'identify' },
+    { type: 'went_back', target: 'payer' },
+    { type: 'went_back', target: 'plan' },
+  ] as ShellAction[]) {
+    const label = action.type === 'went_back' ? `went_back('${action.target}')` : action.type;
+    assert.equal(
+      shellReducer(dirty({ narrowExpanded: true }), action).narrowExpanded,
+      false,
+      `${label} must CLOSE the card — invariant (a): nothing downstream survives a navigation`,
+    );
+  }
+  // The deliberate NON-write. "Clear filters" is a filter reset pressed from inside this card's own
+  // summary, not a navigation: forcing the card either way would move a surface the operator is
+  // standing on, and neither direction is the honest default.
+  for (const open of [true, false]) {
+    assert.equal(
+      shellReducer(dirty({ narrowExpanded: open }), { type: 'filters_cleared' }).narrowExpanded,
+      open,
+      'filters_cleared must leave the card exactly as the operator left it',
+    );
+  }
+  // And the toggle itself flips from either side — not "sets true".
+  assert.equal(shellReducer(dirty({ narrowExpanded: false }), { type: 'narrow_toggled' }).narrowExpanded, true);
+  assert.equal(shellReducer(dirty({ narrowExpanded: true }), { type: 'narrow_toggled' }).narrowExpanded, false);
 });
 
 // ── 4 · The useState bail-out, preserved ─────────────────────────────────────────────────────────

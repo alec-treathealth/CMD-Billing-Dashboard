@@ -19,7 +19,7 @@
  * class of bug, PR #124's lesson, applied here by construction).
  *
  * ── WHERE THE STATE RULES LIVE ──────────────────────────────────────────────────────────────────
- * In `./flow-state.ts` — `shellReducer`, fifteen fields, eighteen actions, with the full
+ * In `./flow-state.ts` — `shellReducer`, sixteen fields, nineteen actions, with the full
  * per-action field-write table and the lettered invariants (a–m) in its header. READ THAT FIRST
  * before changing any handler here. What is left in this file is deliberately only the three things
  * a reducer cannot hold: the PHI ref, the effects, and the values derived per render (`stage`,
@@ -72,7 +72,7 @@ import {
   tickerIsLive,
   type FlowStage,
 } from './resolution-flow';
-// The flow's fifteen fields and the rules that move them. Its header is the spec; this file is the
+// The flow's sixteen fields and the rules that move them. Its header is the spec; this file is the
 // transport (PHI ref, effects, derivations) wired to it.
 import { INITIAL_SHELL_STATE, shellReducer } from './flow-state';
 
@@ -98,7 +98,7 @@ export function ResolutionFlowClient({
   // The raw term — JS memory only. See the header block before moving this anywhere.
   const termRef = useRef<string>('');
 
-  // ONE state machine, not fifteen useState hooks. Destructured so every read site below is the
+  // ONE state machine, not sixteen useState hooks. Destructured so every read site below is the
   // same identifier it always was. Notable fields, restated here because they are easy to misuse:
   //   · retryNonce — monotonic, NEVER reset. It is the only way to re-fire a request whose inputs
   //     did not change: the snapshot effect keys on `scopeKey`, which is by construction identical
@@ -126,6 +126,7 @@ export function ResolutionFlowClient({
     windowDays,
     loadedKey,
     area,
+    narrowExpanded,
   } = flow;
 
   // NOT in the reducer, deliberately: the ticker is a mount-once fetch that no flow field and no
@@ -173,6 +174,15 @@ export function ResolutionFlowClient({
    *  snapshot request is issued (flow-state.ts invariant m). */
   const onSelectArea = useCallback((key: string) => {
     dispatch({ type: 'area_selected', key });
+  }, []);
+
+  /** The NARROW SEARCH card's disclosure. A pure presentation flip that reaches no request — it
+   *  writes the one reducer field `scopeKeyOf` does not read, so the fetch effect below cannot
+   *  observe it (flow-state.ts invariant n). It is in the reducer rather than local state because a
+   *  Skip must land the card OPEN and a plan pick must land it CLOSED, which no local `useState`
+   *  could express in a component this test suite cannot mount. */
+  const onToggleNarrow = useCallback(() => {
+    dispatch({ type: 'narrow_toggled' });
   }, []);
 
   /** Re-issue the SAME snapshot request after a failure. Bumping the nonce is what moves the
@@ -610,6 +620,8 @@ export function ResolutionFlowClient({
                 onPayerOverride: (label) => dispatch({ type: 'payer_override_changed', label }),
                 windowDays,
                 onWindowDays: (d) => dispatch({ type: 'window_days_changed', days: d }),
+                narrowExpanded,
+                onToggleNarrow,
               }
             : null
         }

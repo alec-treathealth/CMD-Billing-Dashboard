@@ -1,12 +1,10 @@
 /**
- * Qualify v3 — THE SHELL'S STATE MACHINE. Fifteen fields, eighteen actions, one place each field
+ * Qualify v3 — THE SHELL'S STATE MACHINE. Sixteen fields, nineteen actions, one place each field
  * is written.
  *
  * Extracted from `resolution-flow-client.tsx` (F3b). The shell was carrying FIFTEEN `useState` hooks
  * — the fourteen fields it then had, plus `trends`, which stays behind (see WHAT IS DELIBERATELY NOT
  * IN HERE) — bound at 58 setter sites: 56 direct calls, of which 2 are `setTrends`, plus 2 raw setters
- * — the fourteen fields below, plus `trends`, which stays behind (see WHAT IS DELIBERATELY NOT IN
- * HERE) — bound at 58 setter sites: 56 direct calls, of which 2 are `setTrends`, plus 2 raw setters
  * passed as props. They encoded the rules below only by repetition: "a new search clears
  * everything downstream" was twelve adjacent `setX(...)` lines, and the fact that Skip deliberately
  * does NOT clear `windowDays` was legible only by diffing two of those blocks by eye. Every rule in
@@ -99,16 +97,12 @@
  *                                       `snapshot`, `loadedKey` or anything `scopeKeyOf` reads
  *                                       (invariant m). Single-select, the mobile chip model:
  *                                       AREA_ALL | a 2-letter state | AREA_OTHER.
+ * 19 · narrow_toggled          — WRITES narrowExpanded = !narrowExpanded. AND NOTHING ELSE: the
+ *                                NARROW SEARCH card is a disclosure, and a disclosure that touched
+ *                                `filters` or `snapshot` would be a presentation control silently
+ *                                re-issuing a ranking request (invariant n).
  *
- * NINETEEN SWITCH ARMS, EIGHTEEN ACTIONS. The nineteenth is `default: return state` — an arm the
- * `ShellAction` union makes unreachable through the type system, kept because the type system is not
- * the only caller: a hot-reloaded action queued against a newer reducer, or a hand-written dispatch
- * in a future test, would otherwise fall off the end and return `undefined` as the whole state. It
- * returns the SAME object, so a stray dispatch cannot even cost a render. Pinned by a test that
- * dispatches a bogus type through a cast. It matches the `windowReducer` precedent
- * (app/lib/qualify/resolution.ts:417).
- *
- * EIGHTEEN SWITCH ARMS, SEVENTEEN ACTIONS. The eighteenth is `default: return state` — an arm the
+ * TWENTY SWITCH ARMS, NINETEEN ACTIONS. The twentieth is `default: return state` — an arm the
  * `ShellAction` union makes unreachable through the type system, kept because the type system is not
  * the only caller: a hot-reloaded action queued against a newer reducer, or a hand-written dispatch
  * in a future test, would otherwise fall off the end and return `undefined` as the whole state. It
@@ -160,6 +154,19 @@
  *     makes the honesty guarantee STRUCTURAL: there is no code path from this field to a request.
  *     It resets wherever `filters` resets (the four navigations + `filters_cleared`) and nowhere
  *     else — notably NOT on the two re-scopes, which keep their content on screen.
+ * n · `narrowExpanded` IS NAVIGATION-COUPLED, WHICH IS THE ONLY REASON IT IS IN HERE. The admission
+ *     test this header sets for itself is the `trends` rule above — "does any handler or flow field
+ *     touch it" — and two navigations must write this one: a Skip lands the NARROW SEARCH card OPEN
+ *     (the fields are the operator's next move, and the skip reveal needs rows to stagger), a plan
+ *     pick lands it CLOSED (the search is already narrow; the card states what it resolved to). The
+ *     other two navigations close it under invariant (a): a card left open over a state the user has
+ *     left is the same kept-but-hidden class, at lower stakes. `filters_cleared` deliberately does
+ *     NOT write it — that button is a filter reset pressed from inside the card's own summary, not a
+ *     navigation, and moving the surface the operator is standing on is not a default either way.
+ *     THE BIT IS PRESENTATION AND MUST STAY PRESENTATION: nothing in `scopeKeyOf` reads it, so like
+ *     `area` it is structurally unable to reach a request. What it must never become is a gate on
+ *     the ON/OFF inventory — the card's SUMMARY carries that in both states, and only the CONTROLS
+ *     live behind the disclosure.
  *
  * The asymmetries in (f), (g) and (h) are OBSERVED BEHAVIOR carried over verbatim, not oversights to
  * normalize. Changing one is a product decision, not a refactor.
@@ -229,6 +236,14 @@ export interface ShellState {
    * Non-PHI (facility city/state only) and never persisted to the URL.
    */
   area: string;
+  /**
+   * Is the answer stage's NARROW SEARCH card showing its FIELDS? See invariant (n) for why a
+   * presentation bit lives in the machine at all. It gates the CONTROLS only — the card's summary
+   * states the resolved scope and every facet's ON/OFF state in both positions, because "at the end
+   * show which filters are ON and which are OFF" is the ratified promise and a click is not allowed
+   * to stand in front of it.
+   */
+  narrowExpanded: boolean;
 }
 
 export type ShellAction =
@@ -249,7 +264,8 @@ export type ShellAction =
   | { type: 'ai_disarmed' }
   | { type: 'payer_override_changed'; label: string | null }
   | { type: 'window_days_changed'; days: QualifyTrailingDays | null }
-  | { type: 'area_selected'; key: string };
+  | { type: 'area_selected'; key: string }
+  | { type: 'narrow_toggled' };
 
 export const INITIAL_SHELL_STATE: ShellState = {
   payerPick: null,
@@ -267,13 +283,14 @@ export const INITIAL_SHELL_STATE: ShellState = {
   windowDays: null,
   loadedKey: null,
   area: AREA_ALL,
+  narrowExpanded: false,
 };
 
 /**
  * Restore `useState`'s bail-out. Keyed off `Object.keys(next)` rather than a hand-listed field set,
- * so adding a sixteenth field cannot silently make two different states compare equal. ("Sixteenth" =
- * one more than today's fifteen — the field-write table's header comment in
- * qualifyV3FlowState.test.tsx:11 uses this same one-more-than-today rule, not by coincidence.)
+ * so adding a seventeenth field cannot silently make two different states compare equal.
+ * ("Seventeenth" = one more than today's sixteen — the field-write table's header comment in
+ * qualifyV3FlowState.test.tsx uses this same one-more-than-today rule, not by coincidence.)
  */
 function bailIfUnchanged(prev: ShellState, next: ShellState): ShellState {
   for (const k of Object.keys(next) as (keyof ShellState)[]) {
@@ -301,6 +318,7 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         payerOverride: null,
         windowDays: null,
         area: AREA_ALL,
+        narrowExpanded: false,
       });
 
     // Straight to the answer over the whole footprint. Clears any half-made narrowing so the general
@@ -319,6 +337,9 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         snapshot: null,
         snapshotError: null,
         area: AREA_ALL,
+        // A skip has just made the search as WIDE as it goes, so narrowing is the next move — and
+        // the skip reveal needs the fields present to have anything to stagger (invariant n).
+        narrowExpanded: true,
       });
 
     // A NEW plan is a new population — a genuine first load, so the snapshot blanks to the skeleton
@@ -334,6 +355,7 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         snapshot: null,
         snapshotError: null,
         area: AREA_ALL,
+        narrowExpanded: false,
       });
 
     // Going back CLEARS what was decided at and after that stage — a kept-but-hidden choice is how
@@ -354,6 +376,7 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         planFilter: '',
         backTo: action.target,
         area: AREA_ALL,
+        narrowExpanded: false,
       });
 
     case 'payer_picked':
@@ -419,6 +442,11 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
     // fetch effect cannot see it and no request is issued (invariant m).
     case 'area_selected':
       return bailIfUnchanged(state, { ...state, area: action.key });
+
+    // A DISCLOSURE, not a re-scope: it writes the one presentation bit and nothing `scopeKeyOf`
+    // reads, so no request can follow from opening or closing the card (invariant n).
+    case 'narrow_toggled':
+      return bailIfUnchanged(state, { ...state, narrowExpanded: !state.narrowExpanded });
 
     default:
       return state;

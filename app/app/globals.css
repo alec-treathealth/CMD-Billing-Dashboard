@@ -533,3 +533,25 @@
     transform: translateX(420%);
   }
 }
+
+/* The NARROW SEARCH card's fields, on expand. The flow's OWN motion vocabulary and no second one:
+ * 220ms, ease-out, a small rise — the same beat the stage entrance and the skip reveal already use
+ * (resolution-flow-client.tsx). Deliberately CSS and not GSAP: the shell's layout effect keys on
+ * `[stage, hasSnapshot]`, and adding the expand bit to those deps would replay `ctx.revert()` — the
+ * 14px stage rise AND `gsap.set(tiles, {autoAlpha: 0})` — re-hiding the whole scorecard grid on every
+ * toggle. CSS also inherits the global prefers-reduced-motion reset above for free, where a JS tween
+ * would need its own guard. Opacity and transform only: `visibility` would drop live controls out of
+ * the accessibility tree, and motion never gates input. */
+.q-narrow-fields {
+  animation: q-narrow-in 220ms ease-out both;
+}
+@keyframes q-narrow-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
