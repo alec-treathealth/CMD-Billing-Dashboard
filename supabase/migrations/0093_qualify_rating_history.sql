@@ -36,6 +36,28 @@
 --   <= one row per distinct prefix (2,666 today) ≈ <1 MB. An estimate, not a promise — re-measure
 --   via pg_relation_size after the first backfill run.
 --
+-- ⚠ MEASURED AFTER APPLY (2026-08-09) — THE ESTIMATE ABOVE WAS 1.4x LOW. Comment-only addendum;
+--   no DDL below this line changed. First backfill: 180 dates (2026-02-10 → 2026-08-08), 214,407
+--   rows, 70 MB total (46 MB heap + 24 MB PK), 342 bytes/row, 398 kB/day → ~142 MB/yr projected,
+--   against an estimate of ~200 bytes/row, ~911 rows/day, ~100 MB/yr.
+--
+--   TWO ESTIMATION ERRORS, both worth not repeating:
+--   1. WRONG POPULATION AXIS. The 911 pairs/day benchmark was measured with
+--      `charge_date >= current_date - 90`, but this table's window rides `payment_received` — a
+--      different and larger population. Actual is 1,191 pairs/day. Benchmark a rollup on the
+--      SAME date axis the rollup itself uses.
+--   2. PRICED THE KEYS, FORGOT THE CONSTANT. 0092's lesson ("price an INCLUDE payload by its
+--      widest text column") was applied to the two 64-char token/payer keys and NOT to
+--      `tenant_scope` — a `text not null default 'cross-tenant-bxr-indigo'` identical in all
+--      214,407 rows, costing a measured 5,025 kB. The lesson generalises past INCLUDE payloads:
+--      **price every text column, including the ones whose value never varies.** 0094 drops it.
+--
+--   ALSO MEASURED, and the number that matters more than the bytes: **90.7% of rows (194,417) can
+--   never be rated** — they sit below the 3-member floor, which is the "a prefix is a person, not
+--   a population" finding surfacing in storage. Only 29 pairs are tape-eligible. The rows are kept
+--   deliberately: they are what lets an operator be told WHY a pair is unrated, and they are the
+--   history a future single-member "patient watcher" would read. Revisit only with that in hand.
+--
 -- Rollback: 0093_qualify_rating_history_rollback.sql
 
 -- 1. The daily snapshot table ---------------------------------------------------------------------
