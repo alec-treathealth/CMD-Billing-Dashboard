@@ -59,7 +59,7 @@
  *                                backTo=null, filters=NO_ANSWER_FILTERS,
  *                                payerOverride=null, snapshot=null, snapshotError=null,
  *                                area=AREA_ALL, facilityNarrow=NO_FACILITY_NARROW,
- *                                narrowExpanded=true (invariant n),
+ *                                narrowExpanded=false (invariant n),
  *                                refreshingNonce=null, windowMove=null.
  *                                KEEPS windowDays, autoAsk, retryNonce, loadedKey (see invariant f).
  *  3 · plan_submitted          — a plan pick. WRITES ELEVEN:
@@ -202,13 +202,27 @@
  *     stage's two grid narrows can never drift into clearing at different moments.
  * n · `narrowExpanded` IS NAVIGATION-COUPLED, WHICH IS THE ONLY REASON IT IS IN HERE. The admission
  *     test this header sets for itself is the `trends` rule above — "does any handler or flow field
- *     touch it" — and two navigations must write this one: a Skip lands the NARROW SEARCH card OPEN
- *     (the fields are the operator's next move, and the skip reveal needs rows to stagger), a plan
- *     pick lands it CLOSED (the search is already narrow; the card states what it resolved to). The
- *     other two navigations close it under invariant (a): a card left open over a state the user has
- *     left is the same kept-but-hidden class, at lower stakes. `filters_cleared` deliberately does
- *     NOT write it — that button is a filter reset pressed from inside the card's own summary, not a
- *     navigation, and moving the surface the operator is standing on is not a default either way.
+ *     touch it" — and EVERY navigation writes this one CLOSED. A plan pick lands it closed because
+ *     the search is already narrow and the card states what it resolved to; the other three close it
+ *     under invariant (a), since a card left open over a state the user has left is the same
+ *     kept-but-hidden class at lower stakes.
+ *
+ *     ⚠ SKIP USED TO LAND IT **OPEN**, ON TWO PREMISES, AND BOTH ARE GONE (2026-08-09, Alec on the
+ *     live screen: "the landing page on the search is way too much going on"). The premises were
+ *     (1) "the fields are the operator's next move" and (2) "the skip reveal needs rows to stagger".
+ *     (2) died when the collapse re-homed `data-v3-facet` onto the SUMMARY badges — the reveal has
+ *     5-6 beats in either position now, so an open card buys the animation nothing (see the NARROW
+ *     SEARCH card's own header in resolution-flow.tsx). (1) is the one Alec overturned: a Skip is
+ *     precisely the state with the MOST to read — the widened-scope notice, the scope sentence, the
+ *     "no filters are on" sentence, the window sentence, the rebuild stamp — and opening the fields
+ *     on top of all of it buries the answer the operator skipped ahead to get. The card still carries
+ *     its full ON/OFF inventory collapsed (that has never been behind the click, and must not
+ *     become so); "Change these" is one press away. Recorded rather than deleted, because the OLD
+ *     rule was correct for the screen it was written against — one with far fewer statements on it.
+ *
+ *     `filters_cleared` deliberately does NOT write it — that button is a filter reset pressed from
+ *     inside the card's own summary, not a navigation, and moving the surface the operator is
+ *     standing on is not a default either way.
  *     THE BIT IS PRESENTATION AND MUST STAY PRESENTATION: nothing in `scopeKeyOf` reads it, so like
  *     `area` it is structurally unable to reach a request. What it must never become is a gate on
  *     the ON/OFF inventory — the card's SUMMARY carries that in both states, and only the CONTROLS
@@ -548,9 +562,12 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         snapshotError: null,
         area: AREA_ALL,
         facilityNarrow: NO_FACILITY_NARROW,
-        // A skip has just made the search as WIDE as it goes, so narrowing is the next move — and
-        // the skip reveal needs the fields present to have anything to stagger (invariant n).
-        narrowExpanded: true,
+        // CLOSED, like every other navigation. A Skip lands on the screen with the most statements
+        // on it, and opening the fields on top of them buries the answer the operator skipped ahead
+        // to get (Alec, 2026-08-09). The collapsed card still carries the whole ON/OFF inventory —
+        // only the controls are behind the click. See invariant (n) for the two premises this
+        // reversed and why neither survives.
+        narrowExpanded: false,
         refreshingNonce: null,
         windowMove: null,
       });

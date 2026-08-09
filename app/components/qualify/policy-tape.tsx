@@ -77,7 +77,7 @@ export const PolicyTapeStrip = memo(function PolicyTapeStrip({
 }) {
   // Hook before any early return (rules of hooks). resetKey is the snapshot date: a new night's
   // data reads from the left.
-  const { ref: scrollRef, isOverflowing } = useMarquee<HTMLDivElement>(asOf, items.length);
+  const { ref: scrollRef, isOverflowing } = useMarquee<HTMLUListElement>(asOf, items.length);
   if (items.length === 0) return null;
 
   const item = (p: QualifyPolicyTapeItem, dup: boolean) => {
@@ -87,6 +87,11 @@ export const PolicyTapeStrip = memo(function PolicyTapeStrip({
         key={dup ? `dup-${p.token}-${p.payer}` : `${p.token}-${p.payer}`}
         // The duplicate half is decorative — AT and the tab order see each policy exactly once.
         aria-hidden={dup || undefined}
+        // `.q-marquee [data-dup='true']` is how reduced-motion hides the decorative half: the hook
+        // stops the auto-scroll but the strip stays hand-scrollable, and without this attribute a
+        // reduced-motion user would scroll past every policy twice. aria-hidden alone does not do it
+        // — it hides the duplicate from AT, not from eyes.
+        data-dup={dup ? 'true' : undefined}
         className="flex flex-none items-baseline gap-2.5 border-r border-white/10 px-5"
       >
         <span className="font-mono text-xs font-medium tracking-wide text-white">{handleOf(p)}</span>
@@ -108,15 +113,23 @@ export const PolicyTapeStrip = memo(function PolicyTapeStrip({
         </span>
       </div>
       <div className="overflow-hidden rounded-xl bg-teal900 shadow-ths-sm">
-        <div ref={scrollRef} className="q-marquee overflow-x-auto py-2.5">
-          <ul className="flex w-max items-center">
-            {items.map((p) => item(p, false))}
-            {/* Only duplicated once the real set genuinely overflows — otherwise a short list
-                would render every policy twice. `isOverflowing` is false until measured, and
-                effects never run under renderToStaticMarkup, so the hermetic tests see ONE set. */}
-            {isOverflowing && items.map((p) => item(p, true))}
-          </ul>
-        </div>
+        {/* ⚠ THE SCROLL CONTAINER IS THE <ul> ITSELF, AND THAT IS A REQUIREMENT, NOT A STYLE CHOICE.
+            `useMarquee` indexes `el.children` directly — `[itemsPerSet - 1]` to measure whether one
+            set overflows the strip, `[itemsPerSet]` to find the seamless-loop distance. This shipped
+            with the ref on a wrapper <div> holding a single <ul>, so `el.children` was `[ul]`: every
+            index past 0 read `undefined`, `isOverflowing` latched false forever, and the tape
+            therefore never auto-scrolled and never rendered its duplicate half. Nothing threw and
+            nothing looked broken in the DOM — the strip just sat still (fixed 2026-08-09, Alec:
+            "the scrolling for policies on the move does not work").
+            The ref element's DIRECT children must be the items. `policy-tape-render.test.tsx` pins
+            it, because this is invisible to every assertion about content. */}
+        <ul ref={scrollRef} className="q-marquee flex items-center py-2.5">
+          {items.map((p) => item(p, false))}
+          {/* Only duplicated once the real set genuinely overflows — otherwise a short list
+              would render every policy twice. `isOverflowing` is false until measured, and
+              effects never run under renderToStaticMarkup, so the hermetic tests see ONE set. */}
+          {isOverflowing && items.map((p) => item(p, true))}
+        </ul>
       </div>
       {/* The scope claim, stated rather than implied: this is the whole book, not a search. */}
       <p className="mt-1.5 px-0.5 text-xs text-ink400">

@@ -95,6 +95,28 @@ test('under static markup exactly ONE set renders — no marquee duplicate for A
   assert.equal(html.split('UNIQUEPAYER').length - 1, 1);
 });
 
+/**
+ * THE MARQUEE WIRING, PINNED STRUCTURALLY — the one defect on this component that no content
+ * assertion can see. `useMarquee` indexes `el.children` by ITEM position, so the element carrying the
+ * ref must be the element whose direct children are the <li>s. It shipped with the ref on a wrapper
+ * <div> around the <ul>: `el.children` was `[ul]`, `children[itemsPerSet - 1]` was undefined,
+ * `isOverflowing` stayed false forever, and the tape never auto-scrolled. Every test above stayed
+ * green through all of it.
+ */
+test('the marquee scroll container IS the list — its direct children are the items (useMarquee indexes el.children)', () => {
+  const html = renderToStaticMarkup(
+    <PolicyTapeStrip items={[item(), item({ payer: 'CIGNA' })]} asOf="2026-08-08" deltaDays={90} />,
+  );
+  // the q-marquee element is a <ul>, and an <li> is its FIRST child — no wrapper in between
+  assert.match(
+    html,
+    /<ul[^>]*class="[^"]*\bq-marquee\b[^"]*"[^>]*>\s*<li/,
+    'the ref element must be the <ul> and the items must be its direct children, or the marquee is inert',
+  );
+  // and nothing else on the page claims to be the scroll container
+  assert.equal(html.split('q-marquee').length - 1, 1, 'exactly one marquee container');
+});
+
 test('the scope is STATED, so the strip cannot be read as a search result', () => {
   const html = renderToStaticMarkup(
     <PolicyTapeStrip items={[item(), item({ payer: 'CIGNA' })]} asOf="2026-08-08" deltaDays={90} />,

@@ -17,6 +17,13 @@ import { useEffect, useRef, useState } from 'react';
  *    read from the left.
  *  - honors prefers-reduced-motion (no auto-motion; the strip stays manually scrollable).
  *
+ * ⚠ CONTRACT FOR CALLERS: THE REF ELEMENT'S **DIRECT CHILDREN** MUST BE THE ITEMS. Both effects index
+ * `el.children` by item position — `[itemsPerSet - 1]` to measure overflow, `[itemsPerSet]` to find the
+ * loop distance. Put the ref on a wrapper whose only child is a list and every index past 0 is
+ * `undefined`: `isOverflowing` latches false, no duplicate renders, and the strip silently never
+ * scrolls. Nothing throws and the DOM looks right — policy-tape.tsx shipped exactly that and it took a
+ * browser pass to catch (2026-08-09). Make the list itself the scroll container.
+ *
  * `itemsPerSet` is the count of cards in ONE set (the duplicate begins at that child index). Returns the
  * scroll-container ref plus `isOverflowing` — false until measured, so the caller renders exactly ONE set
  * (no phantom duplicate) unless the real set genuinely overflows the visible strip. Effects never run
