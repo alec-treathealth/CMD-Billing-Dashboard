@@ -149,6 +149,16 @@ grant select, insert, update on collections.qualify_policy_rating_daily to cmd_r
 grant select on collections.qualify_rating_run to claims_reader;
 grant select, insert, update on collections.qualify_rating_run to cmd_rollup_writer;
 
+-- Identity column: the non-owner cron writer also needs privileges on its backing sequence.
+do $$
+declare seq text;
+begin
+  seq := pg_get_serial_sequence('collections.qualify_rating_run', 'id');
+  if seq is not null then
+    execute format('grant usage, select on sequence %s to cmd_rollup_writer', seq);
+  end if;
+end $$;
+
 grant select on collections.qualify_prefix_echo to claims_reader;
 grant select, insert, update on collections.qualify_prefix_echo to cmd_rollup_writer;
 
