@@ -10,7 +10,7 @@ Two separate planes. Never put a file in the wrong directory.
 
 | Plane | Directory | Next number (as of 2026-08-08) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0094** — 0092 applied live 2026-08-06; 0093 authored on `design/qualify-smoke-shell`, NOT applied |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0094** — 0092 applied live 2026-08-06; 0093 applied live 2026-08-08 |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **032** — 029 applied live; **030 and 031 are AUTHORED BUT NOT APPLIED** (031 held on purpose — do not apply it to clear the backlog; see CLAUDE.md) |
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new

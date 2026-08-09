@@ -168,11 +168,20 @@ Two **separate** migration planes — never mix the directories:
 | Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0094** |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **032** |
 
-**0093 (Qualify rating history) is AUTHORED on `design/qualify-smoke-shell`, NOT APPLIED**
-(2026-08-08): `qualify_policy_rating_daily` + `qualify_rating_run` + `qualify_prefix_echo` +
-the `record_qualify_prefix_echo` definer. Plain transactional DDL — `apply_migration` is fine
-(no CONCURRENTLY in this pair). The `/api/cron/qualify-rating-history` route (daily 05:10)
-500s harmlessly until it is applied; its first run backfills ~180 daily snapshots.
+**0093 (Qualify rating history) is APPLIED LIVE 2026-08-08** via `apply_migration` — plain
+transactional DDL, so the 0081/0092 autocommit discipline does NOT apply here. It creates
+`collections.qualify_policy_rating_daily` + `qualify_rating_run` + `qualify_prefix_echo` and
+the `record_qualify_prefix_echo` definer. Verified at apply: reader SELECT true · writer
+INSERT/UPDATE true · **writer DELETE false** (least privilege, the 0091 shape) · **12 policies
+across the 3 tables** · RLS enabled on all 3 · definer is `security definer`, owner `postgres`,
+EXECUTE granted to `claims_reader` and revoked from `public`. Its input validation was exercised
+both ways — four malformed calls wrote nothing, a well-formed call upserted, test row deleted.
+
+⚠ **The table is applied but the CRON IS NOT DEPLOYED** — `/api/cron/qualify-rating-history`
+lives on `design/qualify-smoke-shell`, and production is `main`, so the 05:10 schedule cannot
+fire until that branch reaches `main` via staging. All three tables are EMPTY until then; that
+is the expected state, and `getQualifyPolicyTape()` correctly reads `available:true` with zero
+items (`available:false` means the RELATION is absent, which it no longer is).
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
 0077. 0080/0081/0082 (explorer perf) are **applied live 2026-08-04** — 0081
