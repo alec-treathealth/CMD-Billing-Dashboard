@@ -8,10 +8,10 @@ paths:
 
 Two separate planes. Never put a file in the wrong directory.
 
-| Plane | Directory | Next number (as of 2026-08-06) |
+| Plane | Directory | Next number (as of 2026-08-08) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0092** |
-| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **029** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0094** — 0092 applied live 2026-08-06; 0093 authored on `design/qualify-smoke-shell`, NOT applied |
+| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **032** — 029/030/031 applied live (see CLAUDE.md) |
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
 0077. 0080/0081/0082 (explorer perf: filter-options matview, rollup trigram

@@ -163,10 +163,16 @@ library from `../src` and is the Vercel app root.
 
 Two **separate** migration planes — never mix the directories:
 
-| Plane | Directory | Next number (as of 2026-08-06) |
+| Plane | Directory | Next number (as of 2026-08-08) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0093** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0094** |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **032** |
+
+**0093 (Qualify rating history) is AUTHORED on `design/qualify-smoke-shell`, NOT APPLIED**
+(2026-08-08): `qualify_policy_rating_daily` + `qualify_rating_run` + `qualify_prefix_echo` +
+the `record_qualify_prefix_echo` definer. Plain transactional DDL — `apply_migration` is fine
+(no CONCURRENTLY in this pair). The `/api/cron/qualify-rating-history` route (daily 05:10)
+500s harmlessly until it is applied; its first run backfills ~180 daily snapshots.
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
 0077. 0080/0081/0082 (explorer perf) are **applied live 2026-08-04** — 0081
@@ -277,8 +283,9 @@ Surfaces:
   `redirect('/')` stub. `<SearchConsole />` and the `/api/agent` path stay in git
   history; restoring means remounting the page *and* re-adding the nav entry.
 
-`app/vercel.json` declares **19 cron entries across 17 distinct routes**
-(`billing-audit-consolidated` runs on three schedules):
+`app/vercel.json` declares **21 cron entries across 19 distinct routes**
+(`billing-audit-consolidated` runs on three schedules; the previous 19/17 count
+predated `facility-outcomes`, and `qualify-rating-history` is new on this branch):
 
 | Route | Cadence |
 |---|---|
@@ -287,6 +294,8 @@ Surfaces:
 | `refresh-charge-rollup` | hourly, :45 |
 | `qualify-census` | hourly, :22 |
 | `upcoming-overrides` | hourly, :55 |
+| `facility-outcomes` | daily 04:10 |
+| `qualify-rating-history` | daily 05:10 — DB-only; inert 500 until mig 0093 applies |
 | `cmd-explorer-catchup` | daily 07:52 |
 | `era-835` | daily 08:50 |
 | `vob-sync` | daily 09:17 |

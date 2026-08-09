@@ -272,6 +272,17 @@ import {
   type RefreshChargeRollupHttpRequest,
 } from '../../src/routes/refreshChargeRollupHandler.js';
 import { refreshChargeRollup } from '../../src/collections/refreshChargeRollup.js';
+import {
+  handleQualifyRatingHistoryRequest,
+  type QualifyRatingHistoryHttpRequest,
+} from '../../src/routes/qualifyRatingHistoryHandler.js';
+import { runQualifyRatingHistory } from '../../src/collections/qualifyRatingHistory.js';
+import { computePairPolicyRating, type QualifyPairRatingContext } from './qualify/board';
+import {
+  loadCurrentCodingDecisions,
+  loadQualifyCensusAuth,
+  loadQualifyFacilityOutcomes,
+} from './qualify/loaders';
 import { cmdExplorerCron } from '../../src/collections/cmdExplorerCron.js';
 import { cmdCensusCron } from '../../src/collections/cmdCensusCron.js';
 import { cmdRunReportToZip, readZipEntries } from '../../src/collections/cmdPayer.js';
@@ -774,6 +785,57 @@ export function handleRefreshChargeRollup(req: RefreshChargeRollupHttpRequest) {
         );
       }
       return stats;
+    },
+  });
+}
+
+/**
+ * Nightly Qualify policy-rating history snapshot (Vercel Cron, daily 05:10 — after the 04:45
+ * matview refresh settles; DB-only, so the CMD-scoped :41–:59 rule and the partner slot do not
+ * bind it). GET only; gated on CRON_SECRET with the same constant-time Bearer check.
+ *
+ * RATING PARITY IS WIRED HERE: the src work module (runQualifyRatingHistory) supplies per-facility
+ * claim aggregates and THIS binder injects computePairPolicyRating — the same computeRatingV2 +
+ * derivePolicyRating the interactive surface ships — so the stored number is the number a user
+ * would see, never a parallel formula. Coding/census/outcomes context loads ONCE per run through
+ * the exact loaders the interactive factorContext uses (each already fail-soft on its unapplied-
+ * migration class); a context load failure beyond those degrades the affected factors to
+ * unavailable (renormalized away) rather than failing the night's snapshot — the same posture
+ * factorContext takes per request.
+ *
+ * ROLES: aggregate scan as claims_reader (readerExecutor — every table pre-granted for Qualify
+ * reads); run-log + upserts as cmd_rollup_writer (rollupWriterDb, 0093 grants). No PHI crosses
+ * this boundary: tokens in, counts/dates out (see qualifyRatingHistory.ts's PHI header).
+ */
+export function handleQualifyRatingHistory(req: QualifyRatingHistoryHttpRequest) {
+  return handleQualifyRatingHistoryRequest(req, {
+    secret: process.env.CRON_SECRET,
+    run: async () => {
+      // NO blanket .catch() here (review 2026-08-08, CONFIRMED finding): these loaders already
+      // fail-soft to empty on the known unapplied-migration SQLSTATEs and DELIBERATELY rethrow
+      // real outages (42501 included). Swallowing an outage would bake context-free ratings into
+      // PERMANENT ok=true history — for persisted snapshots, failing the night (dates stay
+      // missing, next run self-heals) beats persisting a silently degraded number. This is a
+      // stricter posture than factorContext's per-request catch, on purpose: a request repaints
+      // in a second; a frozen snapshot doesn't.
+      const [coding, censusRows, outcomeRows] = await Promise.all([
+        loadCurrentCodingDecisions(),
+        loadQualifyCensusAuth(),
+        loadQualifyFacilityOutcomes(),
+      ]);
+      const ctx: QualifyPairRatingContext = {
+        coding,
+        census: new Map(censusRows.map((r) => [r.facility_code, r])),
+        outcomes: new Map(outcomeRows.map((r) => [r.facility_code, r])),
+      };
+      return runQualifyRatingHistory({
+        readDb: readerExecutor(),
+        writeDb: rollupWriterDb(),
+        rate: ({ payer, facilities, asOf, windowDays }) =>
+          computePairPolicyRating(payer, facilities, asOf, windowDays, ctx),
+        entityIds: [BXR_TENANT_ID, INDIGO_TENANT_ID],
+        triggeredBy: 'cron',
+      });
     },
   });
 }

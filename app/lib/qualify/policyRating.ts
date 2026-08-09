@@ -94,10 +94,21 @@ const NOT_RATED: QualifyPolicyRating = {
   basis: 'no facility clears the sample floor',
 };
 
-export function derivePolicyRating(facilities: readonly QualifyFacility[]): QualifyPolicyRating {
+/** The two fields the policy fold actually reads. STRUCTURAL on purpose (2026-08-08): the nightly
+ *  rating-history cron (src/collections/qualifyRatingHistory.ts via board.ts) folds per-facility
+ *  aggregates that are not full QualifyFacility cards, and a parallel weighted-mean implementation
+ *  there is exactly how the stored number and the on-screen number would drift apart. Every
+ *  existing call site passes QualifyFacility[], which satisfies this by subset — a WIDENING of the
+ *  parameter, never a behavior change. */
+export interface PolicyRatable {
+  ratingV2: number | null;
+  distinctPatients: number;
+}
+
+export function derivePolicyRating(facilities: readonly PolicyRatable[]): QualifyPolicyRating {
   // Only facilities whose CARD shows a number: rated, and above the sample-gate floor.
   const rated = facilities.filter(
-    (f): f is QualifyFacility & { ratingV2: number } =>
+    (f): f is PolicyRatable & { ratingV2: number } =>
       f.ratingV2 !== null && ratingSampleTier(f.distinctPatients) !== 'insufficient',
   );
   if (rated.length === 0) return NOT_RATED;
