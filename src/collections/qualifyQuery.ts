@@ -298,8 +298,11 @@ const RANKING_RELIABLE_SELECT =
  * tier-filtered), billed (all lines), allowed + pct_allowed (RANKING_RELIABLE_SELECT above — the
  * 0059 `allowed_reliable` evidence, tier e2 excluded), and the resolved facility_name/facility_code
  * (facility_code is the join key to the in-code city/state lookup). ORDER BY is a DETERMINISTIC
- * base (pct desc, facility) only — the FINAL rank is by `rating` (app/lib/qualify/rating.ts),
- * applied in the data loader (ruling Q-G). [from, to) is half-open.
+ * base (pct desc, facility) only — the FINAL rank is applied in `assembleFacilities`
+ * (app/lib/qualify/core.ts), and it is BED AVAILABILITY first, then ratingV2 desc, then the
+ * value-first pct, then name (ruling Q-G, superseded on the key by the v2 rating and again on
+ * 2026-08-08 by the availability tier; this comment named `rating.ts` long after neither was true).
+ * [from, to) is half-open.
  *
  * DISPLAY DELTA (by design, ruled): e1 charges (netted-sum-reconciles) contribute the netted sum —
  * a DIFFERENT number than BUILD X's latest-positive — so facility allowed/pct values shift for the

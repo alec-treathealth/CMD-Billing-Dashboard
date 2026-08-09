@@ -329,9 +329,17 @@ predated `facility-outcomes`, and `qualify-rating-history` is new on this branch
 `/api/cron/qualify-census` was scheduled 2026-08-04 (hourly **:22**) in the
 explicitly-scoped Auth/LOS session the morning runbook reserved it for, after
 `MONDAY_SECRET_API_KEY` landed in Vercel. It feeds the Qualify auth-fit factor
-from Monday census boards; only NASH and LSMH boards are curated
-(`src/collections/qualifyCensus.ts`) — other facilities honestly show
-"no data yet" until an operator maps their boards.
+from Monday census boards. ⚠ **The curation claim that used to live here ("only
+NASH and LSMH") went stale within a day and stayed wrong until 2026-08-08.** The
+curated map (`MONDAY_CENSUS_FACILITIES`, `src/collections/qualifyCensus.ts`) has
+covered **23 facilities — 12 residential + 11 outpatient — since 2026-08-05**,
+and `collections.qualify_facility_census` carries a live row for every one of
+them (verified 2026-08-08, synced minutes earlier). Two semantics to respect
+when reading that table: outpatient rows carry `bed_capacity = null` and
+`open_beds = 0` because **beds do not apply** — 0 there is not "full"; and
+`avg_los_days` needs a sample gate (`los_sample`) before display — tiny
+outpatient samples produce 300–373-day "stays". Unmapped facilities still show
+"no data yet"; the map itself is the onboarding.
 
 VOB sync is scheduled by Vercel but *runs* as a GitHub Action
 (`.github/workflows/vob-sync.yml`) — it won't show output in the Vercel cron UI.
@@ -419,12 +427,17 @@ These are wrong in the code today. Fix opportunistically; never copy them.
   (:00/:15/:30/:35) for CMD's one-report-at-a-time partner slot. Probing during
   a :15 census on 2026-08-02 cost 13 BXR census fetches — they self-healed the
   next hour, but do not schedule CMD work near those minutes.
-- `dropFuturePaymentRows` is a bounded horizon now, but ships at
-  `FUTURE_PAYMENT_HORIZON_DAYS = 0` — identical to the old strict today-cutoff.
-  Do **not** flip it to 14 without also bounding the Collections reads at today:
-  Overview and Collections read the same rows through
-  `collections.daily_collections_resolved`, so the horizon alone would put
-  near-future money on the Collections tab.
+- ⚠ **This entry was itself stale until 2026-08-07.** It said
+  `FUTURE_PAYMENT_HORIZON_DAYS = 0` and warned against flipping it to 14. It has
+  been **14 and ACTIVE since 2026-08-03**, and flipping it was correct, because
+  the precondition the warning named was met in the same change: the read-time
+  split now exists (`futurePaymentBound`, `src/collections/daily.ts:65`), so
+  **Collections bounds at `<= today` while Overview does not**, and both still
+  read one row set through `collections.daily_collections_resolved`. Ingest keeps
+  near-future rows deliberately. Setting the constant back to `0` remains the
+  correct kill switch if forward-dated deposits turn out to be unreliable —
+  nothing else needs reverting. The authoritative note is the docblock at
+  `src/collections/cmdExplorer.ts:405-413`; trust it over this file.
 - `src/collections/cmdExplorer.ts` says the row fingerprint hashes 14 fields — it
   hashes **18** (15 non-PHI + 3 PHI, see `mapReportRows`).
 - `supabase/migrations/0067_*` looks applicable but is **stale**: as authored it

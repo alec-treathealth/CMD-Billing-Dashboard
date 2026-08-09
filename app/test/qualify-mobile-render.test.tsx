@@ -6,6 +6,8 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { SwipeRow } from '../components/qualify/m/swipe-row';
 import { MobileFacilityList } from '../components/qualify/m/facility-list';
@@ -617,5 +619,41 @@ test('floor sweep: no meaning-bearing text below 12px in any mobile Qualify comp
     for (const m of html.matchAll(/text-\[(\d+(?:\.\d+)?)px\]/g)) {
       assert.ok(Number(m[1]) >= 12, `sub-12px class on ${label}: text-[${m[1]}px]`);
     }
+  }
+});
+
+// ── S3 (2026-08-08) — MOBILE IS EXEMPT FROM THE BOOK-LED FLIP, AS A DECISION ─────────────────────
+
+test('S3 — /qualify/m keeps the MEMBER-scoped deck: the flip is desktop-only, on purpose', () => {
+  /* THE DIVERGENCE IS A DECISION, NOT AN ACCIDENT, and this is what makes it one.
+   *
+   * The desktop answer stage now LEADS with the payer's whole book whenever the search resolves to
+   * one member. `/qualify/m` renders `snap.facilities` and never re-sorts — and it must keep doing
+   * that until it gets its own pass, for reasons that are about the surface rather than the data:
+   *
+   *   · The mobile deck is a SWIPE-THROUGH-CARDS interface with paging. A member's 1.14 facilities
+   *     become up to 48 book facilities, which is a different interaction, not a different list.
+   *   · The annotation has no home there: `SwipeRow` carries no chip row, so a book-led mobile deck
+   *     would show the payer's book with the member's own history INVISIBLE — strictly worse than
+   *     today, which shows the member's history and nothing else.
+   *   · Every mobile scope sentence (the policy line, the area chips' counts, the detail sheet) is
+   *     written about the member. Flipping the list without them is the scope lie four desktop
+   *     surfaces were just rewritten to avoid.
+   *
+   * ⚠ A STATIC SCAN, like `useServerExports.test.tsx` and for the same reason: the mobile shell is a
+   * client component whose import graph reaches the `'use server'` action chain, so it cannot be
+   * imported hermetically. What this pins is that nobody wires the book into mobile WITHOUT coming
+   * back to this comment — the failure is loud and lands on the paragraph explaining the decision.
+   * FLAGGED FOR ALEC either way; the honest minimum was chosen over an unreviewed second flip. */
+  const src = readFileSync(
+    fileURLToPath(new URL('../components/qualify/m/qualify-mobile-app.tsx', import.meta.url)),
+    'utf8',
+  );
+  assert.ok(src.includes('snap.facilities'), 'the deck really is the member-scoped list — else this is vacuous');
+  for (const forbidden of ['bookFacilities', 'bookLeadsAnswer', 'bookIsOnScreen']) {
+    assert.ok(
+      !src.includes(forbidden),
+      `mobile reads ${forbidden}: the book-led flip reached /qualify/m without its own pass — see this test's comment`,
+    );
   }
 });

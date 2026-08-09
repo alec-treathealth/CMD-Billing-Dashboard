@@ -118,8 +118,13 @@ test('auto-window: the ladder stops at the FIRST sufficient rung (90d) and the s
   // The RESOLVED window spans exactly the chosen 90 days.
   const spanDays = (Date.parse(snap.resolved!.windowEnd) - Date.parse(snap.resolved!.windowStart)) / 86_400_000;
   assert.equal(spanDays, 90);
-  assert.equal(calls.length, 1);
-  assert.ok(calls[0]!.startsWith(snap.resolved!.windowStart));
+  // ⚠ TWO facility loads since S2 (2026-08-08), not one: the identifier's own footprint AND the
+  // resolved payer's whole book (`QualifySnapshot.bookFacilities`). The count moved deliberately.
+  // What this line is really about is that the ladder's CHOSEN window reaches the ranking, so the
+  // assertion now covers every load rather than only the first — a book on a different window
+  // would put two silent bases on one screen.
+  assert.equal(calls.length, 2, 'the member-scoped ranking + the payer book');
+  for (const c of calls) assert.ok(c.startsWith(snap.resolved!.windowStart), 'both loads ride the chosen window');
 });
 
 test('auto-window: NO rung reaches the floor → widest window, sufficient:false — disclosed, never silent', async () => {
@@ -140,7 +145,21 @@ test('auto-window: a rungs failure degrades to the caller window (ladder null), 
   assert.ok(snap.resolved, 'search still resolves');
 });
 
-test('manual window (auto absent): rungs never run, ladder null', async () => {
+/**
+ * ⚠ RENAMED AND RE-AIMED BY S2 (2026-08-08). It used to read "manual window (auto absent): rungs
+ * never run, ladder null" and assert `rungCalls === 0`.
+ *
+ * That assertion pinned a CONFLATION rather than a decision. One gate answered two questions — "may
+ * the counts choose the window" and "should we count the members at all" — so a manual Range press
+ * silently discarded the search's classifier along with the window choice. Measured 2026-08-08:
+ * 58.8% of prefixes are a single member, and "is this a person or a population" is a fact about the
+ * IDENTIFIER, so a preface that vanished the moment an operator pressed "365 days" would be telling
+ * them the answer depends on the window. It does not.
+ *
+ * The half that mattered is UNCHANGED and still asserted here: a manual window keeps the caller's
+ * window and produces NO ladder. The Range menu is still the biller's override.
+ */
+test('manual window (auto absent): the ladder never runs — but the member COUNT still does', async () => {
   let rungCalls = 0;
   const deps = v2deps(SUPER, {
     loadWindowRungs: async () => {
@@ -149,8 +168,11 @@ test('manual window (auto absent): rungs never run, ladder null', async () => {
     },
   });
   const snap = await getQualifySnapshotCore(deps, { query: 'W29', window: { kind: 'trailing', days: 30 } });
-  assert.equal(rungCalls, 0);
-  assert.equal(snap.ladder, null);
+  assert.equal(rungCalls, 1, 'the classifier is window-independent');
+  assert.equal(snap.memberCount, RUNGS_THIN.p365, 'and it is the 365d rung, not the chosen window');
+  assert.equal(snap.ladder, null, 'no window was chosen for the caller — that half is unchanged');
+  const spanDays = (Date.parse(snap.resolved!.windowEnd) - Date.parse(snap.resolved!.windowStart)) / 86_400_000;
+  assert.equal(spanDays, 30, "the caller's own window survives");
 });
 
 test('policy card: on-file fields attach; network is NULL today (Phase D extraction gap, by design)', async () => {
@@ -260,7 +282,14 @@ test('TTP factor rides the ranking row: median 41d lands in the facility factors
 });
 
 
-test('auto-window: an exact MEMBER-ID search skips the ladder (N-of-1 — a 10-patient floor is meaningless)', async () => {
+/**
+ * ⚠ S2 (2026-08-08) SPLIT THIS TEST'S SUBJECT IN TWO, and only one half moved. It used to assert
+ * `rungCalls === 0` for a member-id search; the rungs SQL has always supported that kind (it
+ * switches to `member_id_bidx`), and the count it produces is the preface's classifier, so the query
+ * now runs. What was true and stays true — the reason the test was written — is that a 10-patient
+ * confidence floor is meaningless at N-of-1, so no LADDER is built and no window is chosen.
+ */
+test('auto-window: an exact MEMBER-ID search still chooses NO window (N-of-1 — a 10-patient floor is meaningless)', async () => {
   let rungCalls = 0;
   const deps = v2deps(SUPER, {
     loadWindowRungs: async () => {
@@ -269,8 +298,9 @@ test('auto-window: an exact MEMBER-ID search skips the ladder (N-of-1 — a 10-p
     },
   });
   const snap = await getQualifySnapshotCore(deps, { query: 'AETMEMBER123', window: { kind: 'trailing', days: 30 }, auto: true });
-  assert.equal(rungCalls, 0);
-  assert.equal(snap.ladder, null);
+  assert.equal(rungCalls, 1, 'the count runs for every token kind');
+  assert.equal(snap.memberCount, RUNGS_THIN.p365);
+  assert.equal(snap.ladder, null, 'but no ladder — the floor cannot mean anything for one member');
   assert.ok(snap.resolved);
 });
 

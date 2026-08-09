@@ -41,8 +41,21 @@
 // this file no longer threads an employer query prop. The rule above is about THIS module; do not
 // read it as a ban on mounting a client control.
 import { useMemo } from 'react';
-import { Briefcase, ChevronRight } from 'lucide-react';
+import { Briefcase, ChevronRight, Building2 } from 'lucide-react';
 import { MultiSelectTagPicker } from '../../ui/multi-select-tag-picker';
+// S4 — the facility grid narrow's set operations, PURE and unit-tested next door. Nothing here
+// reaches a request; see flow-state.ts invariant (m) and `FacilityNarrowLine` below.
+import {
+  andList,
+  facilitiesElsewhere,
+  facilityCount,
+  facilityDisplayNames,
+  facilityNarrowKeys,
+  narrowByFacility,
+  offerableFacilityOptions,
+  picksWithRows,
+  type QualifyFacilityNarrowOption,
+} from '../../../lib/qualify/facilityVariants';
 import type {
   CoverageGroupSummary,
   QualifyResolution,
@@ -52,7 +65,29 @@ import type {
   QualifySnapshot,
   QualifyTrailingDays,
 } from '../../../lib/qualify/contract';
+// "Give me THE label, or null" — refuses a name the scope contradicts, so a wider ranking can never
+// be captioned with one payer's. Used by the book section's heading, which names whose book it is.
+import { EMPTY_FACILITIES, scopedPayerOf } from '../../../lib/qualify/contract';
+/* THE TWO BOOK PREDICATES NOW LIVE IN A PLAIN LIB MODULE and are RE-EXPORTED here (S3 fix round 1).
+ * They moved because the placement they feed — and the AI caption that placement chooses — sat in
+ * two `'use client'` files nothing hermetic can import, so inverting the derivation shipped a full
+ * green gate. Re-exported rather than relocated-and-rewritten so every existing import of
+ * `bookIsOnScreen` / `bookLeadsAnswer` from this module keeps reading the SAME functions: one
+ * definition, two import paths, never two definitions. */
+export { bookIsOnScreen, bookLeadsAnswer } from '../../../lib/qualify/bookPlacement';
+import { bookIsOnScreen, bookLeadsAnswer } from '../../../lib/qualify/bookPlacement';
 import { derivePolicyRating } from '../../../lib/qualify/policyRating';
+// The ladder's own stopping threshold. The window-move notice NAMES it rather than typing "10", so
+// the sentence cannot outlive the constant it describes.
+import { QUALIFY_RATING_CONFIDENT_PATIENTS } from '../../../lib/qualify/sampleGate';
+// The preface's ONE derivation — shared by the visible line, the receipt and the aria announcement,
+// so the seen claim and the spoken claim cannot be two expressions that merely happen to agree.
+import {
+  memberBucketOf,
+  memberHistoryChipFor,
+  memberPrefaceFor,
+  prefaceNamesFacilityCount,
+} from '../../../lib/qualify/memberPreface';
 // The scope claim's ONE home — shared with the AI panel so the two cannot phrase it differently.
 import { ALL_PAYERS_LABEL } from '../../../lib/qualify/scopeLabel';
 import { IQ_BAND_LABELS, IQ_BAND_VERDICTS } from '../../../lib/qualify/ratingV2';
@@ -73,7 +108,7 @@ import {
   facilitiesInArea,
   type AreaChip,
 } from '../m/area-chips';
-import { IQ_BAND_HEX, IQ_BAND_WASH } from '../tokens';
+import { IQ_BAND_HEX, IQ_BAND_WASH, QUALIFY_PALETTE } from '../tokens';
 
 // ── Pure derivations (exported for the shell and the tests) ─────────────────────────────────────
 
@@ -286,6 +321,16 @@ export interface AnswerFilters {
 
 export const NO_ANSWER_FILTERS: AnswerFilters = { funding: [], employers: [] };
 
+/**
+ * "No facility is picked" — the S4 grid narrow's empty selection, as ONE shared reference.
+ *
+ * It sits beside `NO_ANSWER_FILTERS` and for the identical reason: the reducer resets it at five
+ * sites and the answer stage memoizes off it, so a fresh-but-equal `[]` at any of those sites would
+ * invalidate the whole narrow memo chain on every navigation. `area` needs no such constant because
+ * it is a string; this one does because it is an array (flow-state.ts's referential bail-out note).
+ */
+export const NO_FACILITY_NARROW: readonly string[] = [];
+
 export function answerFiltersActive(f: AnswerFilters): boolean {
   return f.funding.length > 0 || f.employers.length > 0;
 }
@@ -439,6 +484,21 @@ export function scopeKeyOf(parts: {
 }
 
 /**
+ * THE AUTOMATIC WINDOW LANDING ON A DIFFERENT RUNG ACROSS A SAME-SCOPE RE-RUN (flow-state invariant
+ * p). `from`/`to` are the LADDER's chosen days on either side — never the operator's own selection,
+ * because a manual window returns no ladder at all, which makes this shape unreachable there by
+ * construction rather than by a guard.
+ *
+ * Declared HERE rather than in `flow-state.ts` even though the reducer owns the field: that module
+ * already imports from this one, and defining the shape there would close a cycle. The copy that
+ * reads it (`windowMoveNotice`, below) lives beside the render, so the type does too.
+ */
+export interface WindowMove {
+  from: QualifyTrailingDays;
+  to: QualifyTrailingDays;
+}
+
+/**
  * True only when content is on screen AND it describes a scope the user has since moved off.
  * `hasSnapshot` false is a FIRST LOAD (skeleton), never a refetch — the two treatments differ.
  */
@@ -457,6 +517,26 @@ export function employerNarrowFor(
   return { employers: picked };
 }
 
+/**
+ * THE CLASSIFIER HALF OF `liveSentenceFor`'s OPTIONS — ALL OR NOTHING, AT THE TYPE LEVEL.
+ *
+ * These two travel together or not at all. `memberFacilityCount` was previously optional with a
+ * `?? 0` default, which meant a caller who passed the member count and forgot the facility count
+ * got a silent, confident "0 facilities of history in the window shown" announced to a screen-reader
+ * user over a grid full of facilities. A runtime default cannot make that loud; a union can make it
+ * impossible. Supplying neither is still fine — that is the pre-S2 announcement, unchanged.
+ */
+type LiveSentenceClassifier =
+  | { memberCount?: undefined; memberFacilityCount?: undefined }
+  | {
+      /** Distinct members behind the searched token (`QualifySnapshot.memberCount`). `null` means the
+       *  classifier is unavailable and the announcement is byte-identical to pre-S2. */
+      memberCount: number | null;
+      /** The facility count the VISIBLE preface uses — `snapshot.facilities.length`. Passed rather
+       *  than read off the resolution so the spoken and the seen sentence carry ONE number. */
+      memberFacilityCount: number;
+    };
+
 /** The live-region sentence for the current state — announced once, as a full sentence.
  *
  *  `opts.payerGroups` is the shell's memoized cluster set. It rides in the EXISTING opts bag rather
@@ -472,9 +552,56 @@ export function liveSentenceFor(
      *  true while the snapshot is still in flight — announce the wider scope only once it is real. */
     scopeAllPayers?: boolean;
     payerGroups?: PayerGroup[];
-  } = {},
+    /**
+     * S3: the payer whose WHOLE BOOK is the ranked grid, or null/omitted when the grid is the
+     * identifier's own footprint. It is a NAME rather than a boolean because the sentence has to say
+     * whose book — "the ranking below is a whole book" would leave a screen-reader user knowing the
+     * scope changed and not what to. Omit and the announcement is byte-identical to S2's.
+     */
+    bookLedPayer?: string | null;
+    /**
+     * S5: the AUTOMATIC window landed on a different rung across a same-scope re-run, or null/omitted
+     * when it did not. The sr-only region carries no dim and no beam, so a screen-reader user has no
+     * other signal at all that the period under the ranking just changed — and `scopeKeyOf` cannot
+     * see the change either, so nothing else in this sentence would mention it. Omit and the
+     * announcement is byte-identical to S3's.
+     */
+    windowMoved?: WindowMove | null;
+  } & LiveSentenceClassifier = {},
 ): string {
   if (!resolution) return reason ? UNRESOLVABLE_COPY[reason] : '';
+  /* THE PREFACE, ANNOUNCED. The visible line and this one come from the SAME pure function on the
+   * SAME inputs — a second derivation is how the aria channel and the screen come to disagree, and
+   * the sr-only line is exactly where that survives a browser pass. Null when the classifier is
+   * unavailable, so every pre-S2 call site renders an unchanged sentence.
+   *
+   * `?? 0` IS UNREACHABLE, and by the TYPE rather than by hope: `LiveSentenceClassifier` makes the
+   * pair all-or-nothing, so no caller can supply a count without the facility count it is joined to.
+   * It stays only because TS cannot narrow the pair through the intersection above. */
+  const preface = memberPrefaceFor(opts.memberCount ?? null, opts.memberFacilityCount ?? 0);
+  /* ⚠ THE SPOKEN CHANNEL MUST FOLLOW THE FLIP TOO (S3). Without this the sr-only line goes on
+   * describing the identifier's own ranking while the grid on screen is the payer's whole book —
+   * a scope lie that no browser pass can see, which is precisely the failure mode this function's
+   * header warns about. Appended to BOTH the resolved and the skipped arms, because a Skip plus one
+   * billed-under chip is a book-led screen with `skipped` still true. */
+  const bookClause =
+    opts.bookLedPayer == null
+      ? ''
+      : ` The ranking below is ${opts.bookLedPayer}'s whole book, not this member's own history — the facilities they have been to are marked on it.`;
+  /* ⚠ THE CLAUSE IS STAGE-GATED, AND THE COMMENT THAT USED TO STAND HERE ASSERTED A GUARANTEE THE
+   * CODE DID NOT HOLD. It claimed `say` was "called from exactly the two ANSWER-shaped arms (the skip
+   * lands on the answer stage)". The SKIPPED arm returns BEFORE every stage check — so a held skipped
+   * answer plus one step back to the search box announced "the ranking below is {payer}'s whole book"
+   * over the identify screen, with no ranking below it at all. The preface has always been safe there
+   * (it is a fact about the identifier, not about a list); this clause names a list by position, so it
+   * needs the stage the position refers to. */
+  /* ⚠ S5's CLAUSE IS THE SAME BYTES AS THE VISIBLE NOTICE — one call to `windowMoveNotice`, not a
+   * second sentence that agrees today. It is stage-gated with the book clause and for the identical
+   * reason: "the ranking below covers a longer period" said over the search box names a list that is
+   * not there, and the SKIPPED arm returns before every stage check, so the gate has to live here. */
+  const windowClause = opts.windowMoved == null ? '' : ` ${windowMoveNotice(opts.windowMoved)}`;
+  const say = (rest: string): string =>
+    (preface === null ? rest : `${preface} ${rest}`) + (stage === 'answer' ? bookClause + windowClause : '');
   // A skipped search resolved NOTHING past the identifier: announcing the pre-selected candidate's
   // employer as "Resolved: …" told a screen-reader user a plan had been chosen when none was — the
   // same claim the receipt and the identity line had to stop making.
@@ -483,10 +610,10 @@ export function liveSentenceFor(
     // same three-way branch. "across all plans under AETNA" said aloud over an all-payers ranking is
     // the identical lie, just less visible — and the sr-only line is exactly where an unfixed claim
     // survives a browser pass.
-    return (
+    return say(
       'You skipped the plan questions. Showing a general search across all plans' +
-      (opts.scopeAllPayers ? ' and all payers on file' : opts.scopePayer ? ` under ${opts.scopePayer}` : '') +
-      '.'
+        (opts.scopeAllPayers ? ' and all payers on file' : opts.scopePayer ? ` under ${opts.scopePayer}` : '') +
+        '.',
     );
   }
   if (stage === 'identify') {
@@ -502,14 +629,29 @@ export function liveSentenceFor(
     return `${resolution.candidates.total} plans match. Pick one, or ask the AI about one.`;
   }
   const g = resolution.group;
-  return (
+  /* ⚠ THE PREFACE REPLACES THE RESOLUTION'S FACILITY COUNT ONLY WHEN IT CARRIES ONE OF ITS OWN.
+   * `claimEvidence.distinctFacilities` is minted by the resolution service and is rendered NOWHERE
+   * on this screen (grep: this line is its only consumer). The ONE-MEMBER preface names a facility
+   * count that the operator can SEE (`snapshot.facilities.length`); the two can legitimately differ
+   * (different source, different window), so announcing both would read out two numbers for one
+   * question and leave a screen-reader user unable to tell which describes the grid in front of them.
+   *
+   * The 2-9 and 10+ prefaces name NO facility count, so there is nothing to collide with — and
+   * replacing the clause there would leave the spoken channel with no facility count at all while
+   * the sighted reader has a grid full of them. Silence is not parity. `prefaceNamesFacilityCount`
+   * is the judge, so the rule follows the COPY: the day a 2-9 sentence grows a facility clause, the
+   * predicate moves with it instead of this branch quietly becoming wrong. */
+  const announcedFacilities = prefaceNamesFacilityCount(opts.memberCount ?? null)
+    ? ''
+    : ` ${g.claimEvidence.distinctFacilities} facilities with history.`;
+  return say(
     `Resolved: ${g.payerDisplayName}` +
-    (g.employerLabel ? ` · ${g.employerLabel}` : '') +
-    (g.funding ? ` · ${g.funding}` : '') +
-    `. ${g.claimEvidence.distinctFacilities} facilities with history.` +
-    (resolution.candidates.wasAmbiguous
-      ? ` ${resolution.candidates.total} plans matched; this one is selected.`
-      : ' Only one plan matched.')
+      (g.employerLabel ? ` · ${g.employerLabel}` : '') +
+      (g.funding ? ` · ${g.funding}` : '') +
+      `.${announcedFacilities}` +
+      (resolution.candidates.wasAmbiguous
+        ? ` ${resolution.candidates.total} plans matched; this one is selected.`
+        : ' Only one plan matched.'),
   );
 }
 
@@ -664,13 +806,91 @@ export function StepRail(props: {
  * the carrier is effectively already known, so declining to pick costs nothing. The PLAN stage always
  * offers it: by then the population is one carrier's plans, and "I don't know which plan" is the
  * common real case.
+ *
+ * ⚠ THE PARAGRAPH ABOVE IS LEFT AS RATIFIED, AND ITS PREMISE IS NO LONGER TRUE (recorded S6,
+ * 2026-08-08). The 2026-08-07 reversal — "the Skip ranks the whole radius, not one label" — made a
+ * skip an ALL-PAYERS request: `allPayers = skipped && payerOverride === null` in
+ * resolution-flow-client.tsx becomes `payerScope: 'all'` on the wire, and `QualifyResolved.payerName`
+ * is null. So a skip no longer "resolves the ranking to whichever payer happens to dominate"; there
+ * is no dominant-payer pick left in that path to be arbitrary.
+ *
+ * THE RULING IS PRESERVED ANYWAY, and S6 preserved it deliberately rather than dropping it with its
+ * premise, for a reason the reversal itself supplies: an all-payers ranking is dollar-weighted across
+ * every label behind the rows (the reversal's own rule 2 — "a blended percentage is never a payer
+ * contract rate", Simpson's paradox on the exact surface admissions staff act on). At two carriers
+ * the blend is legible and the chips un-blend it in one click. At a dozen it is a blend the operator
+ * cannot reason about, offered as a shortcut past the one question that would have prevented it —
+ * and S6's hoist makes that offer LOUDER, which strengthens the case for the gate rather than
+ * weakening it. That is a different argument from the one ratified, over the same threshold and the
+ * same behaviour. It wants Alec's re-ratification; it does not want a silent drop.
  */
 export const SKIP_CARRIER_MAX = 3;
+
+/**
+ * WHICH STAGES OFFER THE SKIP — the suppression ruling above, expressed once (S6, 2026-08-08).
+ *
+ * PURE, and deliberately the only place the rule lives now: the affordance moved from three render
+ * sites inside the stage bodies to ONE beneath the step rail, and three call sites that each carried
+ * their own condition were three places a rule could drift. `identify` has nothing to skip yet (no
+ * resolution, no footprint) and `answer` is past every question there is.
+ *
+ * `groups` is the shell's memoized `payerGroupsOf` — the SAME derivation the rail, the receipt, the
+ * stage machine and the live sentence read. Re-deriving here would give a count-based rule a second
+ * source of truth.
+ */
+export function skipOffered(
+  stage: FlowStage,
+  resolution: QualifyResolution | null,
+  groups?: PayerGroup[],
+): boolean {
+  if (resolution === null) return false;
+  if (stage === 'plan') return true;
+  if (stage !== 'payer') return false;
+  return (groups ?? payerGroupsOf(resolution)).length < SKIP_CARRIER_MAX;
+}
+
+/**
+ * How many of the payer's book the SECONDARY section renders (S2, 2026-08-08).
+ *
+ * The book is the whole payer's ranking — on a real payer that is dozens of facilities, and a
+ * secondary section that pushes the answer it is secondary to off the screen has stopped being
+ * secondary. Capped, and the cap is STATED beside the list: a truncated ranking that does not say
+ * it is truncated makes a completeness claim it has not earned, and because availability leads the
+ * sort (S1) the rows a cap removes are systematically the FULL ones.
+ *
+ * Not a scroll box and not a `<details>`: both hide rows in ways an assertion cannot tell from an
+ * absence. When S3 flips prominence this number is the first thing it should reconsider.
+ */
+export const QUALIFY_BOOK_PREVIEW = 8;
+
 
 /**
  * The escape hatch: stop answering questions and go straight to the answer over the identifier's
  * WHOLE footprint, then narrow (or not) with the answer stage's filter lines. Declining to choose is
  * a real answer, and the answer stage says which one it got.
+ *
+ * ── HOISTED, AND SPARKLING (S6, 2026-08-08) ────────────────────────────────────────────────────────
+ * Alec, verbatim: "If there is the option to 'skip — search all plans' this button should be very
+ * visible, sparkly with movement just underneath the green timeline." It used to render from THREE
+ * sites inside the stage bodies (StagePayer, gated; StagePlan, twice — the pinned header and the
+ * empty-cluster early return). It now renders from ONE site in `ResolutionStages`, directly beneath
+ * `<StepRail>`, gated by `skipOffered`.
+ *
+ * ⚠ THAT PUTS IT IN THE CHROME, WHICH IS THE POINT AND ALSO THE CONSTRAINT. Everything above
+ * `[data-v3-stage]` is outside the shell's GSAP entrance — and the entrance animates `autoAlpha`,
+ * which sets `visibility: hidden`. A control that is the loudest thing on the screen must not be
+ * unclickable and out of the accessibility tree for the first 220ms of every stage it appears on.
+ * Outside the subtree it is live from frame zero, and the shimmer is pure decoration over it.
+ *
+ * ⚠ IT NOW PRECEDES THE QUESTION IN TAB ORDER, and that is a real consequence, not an oversight.
+ * The shell moves focus to the stage's own `<h2>` on a stage swap, so a keyboard user reaches this
+ * by SHIFT-tab from the question rather than by tabbing forward into it. That is the same
+ * relationship the receipt strip's "Change" buttons already have on this surface — revisit and
+ * escape affordances live in the chrome above the question — so it is a consistent position rather
+ * than a new one. The single live region is untouched: it announces the QUESTION, never this.
+ *
+ * The sparkle itself is `.q-skip-spark` in globals.css, where the motion-contract deviation, the
+ * refused sizes and the contrast reasoning are all written down.
  */
 function SkipStep(props: { onSkip: () => void; what: string }): React.ReactElement {
   return (
@@ -678,9 +898,12 @@ function SkipStep(props: { onSkip: () => void; what: string }): React.ReactEleme
       type="button"
       onClick={props.onSkip}
       aria-label={`Skip ${props.what} and search across all plans for this member`}
-      className="w-fit rounded-lg border border-line bg-surface px-3 py-1.5 text-sm font-semibold text-ink600 transition-colors hover:border-teal500 hover:text-teal700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/40"
+      className="w-fit rounded-xl border border-teal500/60 bg-gradient-to-br from-teal900 to-teal700 px-4 py-2 text-sm font-semibold shadow-ths-sm transition-[box-shadow,transform] duration-150 ease-out hover:-translate-y-0.5 hover:shadow-ths focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500/50"
     >
-      Skip <span className="font-normal text-ink400">— search all plans</span>
+      {/* One span, so the gradient clip has a single text box to run across. The words are the
+          control's visible label; the accessible name is the aria-label above, which says what the
+          skip actually does rather than what the button says. */}
+      <span className="q-skip-spark">Skip — search all plans</span>
     </button>
   );
 }
@@ -708,6 +931,14 @@ export interface ReceiptProps {
    * deriving this from the payer-scope enum is exactly the masquerade `ScopeSource` documents.
    */
   skipped?: boolean;
+  /**
+   * S2: distinct members behind the searched token. It rides the SEARCH entry rather than becoming
+   * an entry of its own, and that placement is the receipt's own contract rather than a layout
+   * preference — this strip records DECISIONS and every entry is revisitable ("Change"). A member
+   * count is neither: it is a fact ABOUT the decision on the Search entry, so it qualifies that
+   * entry. Null/omitted renders nothing at all.
+   */
+  memberCount?: number | null;
   /** The payer the RANKING actually used, for the skipped scope entry. Null when there is none. */
   scopePayer?: string | null;
   /** The ranking spans EVERY billed-under label (identifier-wide). Distinct from `scopePayer ===
@@ -734,6 +965,7 @@ export function FlowReceipt({
   onChange,
   payerGroups,
   skipped = false,
+  memberCount = null,
   scopePayer = null,
   scopeAllPayers = false,
   scopeByUser = false,
@@ -744,6 +976,43 @@ export function FlowReceipt({
   const payers = payerGroups ?? payerGroupsOf(resolution);
   const entry = 'flex items-center gap-2 rounded-full border border-line bg-surface py-1 pl-3 pr-1';
   const change = 'rounded-full px-2 py-0.5 text-xs font-semibold text-teal700 hover:bg-teal50';
+  /* HOW MANY PEOPLE THAT SEARCH ACTUALLY MATCHED — the COUNT, not the sentence. The receipt is a
+   * compressed trail, so it states the number and leaves the interpretation to the preface on the
+   * answer stage; two full sentences saying the same thing in different words is how they drift.
+   *
+   * ⚠ THE GATE IS `memberBucketOf`, NOT A SECOND null/zero TERNARY. It used to be
+   * `memberCount !== null && memberCount > 0`, which is the same logic re-derived — and "one
+   * derivation, three surfaces" is only true if the SILENCE rule is shared too, not just the words.
+   * 'unknown' (the count was unavailable) and 'none' (it ran and found nobody) are the two states
+   * that say nothing; both live in memberPreface.ts, and this reads them rather than restating them.
+   *
+   * Rendered as ONE element rather than a second entry — see ReceiptProps.memberCount. */
+  const memberBucket = memberBucketOf(memberCount);
+  const memberChip =
+    memberCount !== null && memberBucket !== 'unknown' && memberBucket !== 'none' ? (
+      <span className="text-xs text-ink600">
+        ·{' '}
+        {/* ⚠ THE ACCESSIBLE NAME STATES THE BASIS, because the numeral cannot (final review,
+            2026-08-08). It read "N members match this search" — the EXACT mixed-basis wording S2-I1
+            removed from the visible preface, kept alive in the one channel a browser pass never sees.
+            `memberCount` is the ladder's 365-day rung filtered on `payment_received`, so it means
+            "members with a PAID CLAIM in the last 12 months" and never "members who exist". "One
+            derivation, three surfaces" is only true if the BASIS travels with the number.
+
+            ⚠ IT DELIBERATELY DOES **NOT** REUSE THE PREFACE'S "behind this search" CLAUSE. This chip
+            already sits inside the entry labelled SEARCH, so the clause is redundant here — and, more
+            to the point, the receipt is NOT suppressed in flight while the preface is. Sharing the
+            preface's exact phrase would put its words on screen during a re-scope through a surface
+            that is exempt from the rule, which is the suppression being defeated by wording. */}
+        <span
+          className="ths-num"
+          aria-label={`${memberCount} member${memberCount === 1 ? '' : 's'} with a paid claim in the last 12 months`}
+        >
+          {memberCount.toLocaleString()}
+        </span>{' '}
+        member{memberCount === 1 ? '' : 's'}
+      </span>
+    ) : null;
 
   // ⚠ A SKIPPED SEARCH DECIDED NOTHING BEYOND THE IDENTIFIER. Rendering the pre-selected candidate's
   // employer as a "PLAN" entry claimed a decision the user explicitly declined to make. The receipt
@@ -754,6 +1023,7 @@ export function FlowReceipt({
         <span className={entry}>
           <span className="text-xs font-medium uppercase tracking-wide text-ink400">Search</span>
           <span className="ths-num text-sm text-ink900">{idLabel}</span>
+          {memberChip}
           <button type="button" className={change} onClick={() => onChange('identify')}>
             Change
           </button>
@@ -780,6 +1050,7 @@ export function FlowReceipt({
       <span className={entry}>
         <span className="text-xs font-medium uppercase tracking-wide text-ink400">Search</span>
         <span className="ths-num text-sm text-ink900">{idLabel}</span>
+        {memberChip}
         <button type="button" className={change} onClick={() => onChange('identify')}>
           Change
         </button>
@@ -886,7 +1157,6 @@ function payerAccent(g: PayerGroup): string {
 export function StagePayer(props: {
   resolution: QualifyResolution;
   onPick: (payer: string) => void;
-  onSkip: () => void;
   /** Optional pre-computed clusters (the shell memoizes one call per resolution). */
   payerGroups?: PayerGroup[];
 }): React.ReactElement {
@@ -911,7 +1181,8 @@ export function StagePayer(props: {
           </span>
         ) : null}
       </p>
-      {groups.length < SKIP_CARRIER_MAX ? <SkipStep onSkip={props.onSkip} what="the carrier step" /> : null}
+      {/* S6: the Skip moved OUT of this body to a single site beneath the step rail — with the
+          carrier-count suppression intact, now expressed by `skipOffered`. */}
       <ul data-v3-grid className="grid list-none grid-cols-1 gap-2.5 p-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {groups.map((g, i) => (
           <li key={g.payer}>
@@ -988,7 +1259,6 @@ export function StagePlan(props: {
   onPlanFilter: (v: string) => void;
   planAction: (fd: FormData) => void;
   onAskAi: () => void;
-  onSkip: () => void;
   pending: boolean;
   /** Optional pre-computed clusters (the shell memoizes one call per resolution). */
   payerGroups?: PayerGroup[];
@@ -1011,11 +1281,15 @@ export function StagePlan(props: {
   if (underPayer.length === 0) {
     return (
       <Stage id="qualify-s-plan" question="Which plan is it?">
+        {/* [BOOK-LED EXEMPT: the plan stage has no ranking on screen yet] */}
         <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
           No plans are on file under {payer} in this result. Use the receipt above to change the
           carrier or search again.
         </p>
-        <SkipStep onSkip={props.onSkip} what="the plan step" />
+        {/* S6: no Skip here any more — and this branch is the reason the hoist is a fix rather than
+            a move. A dead end has to offer the way out, and an escape hatch rendered from inside a
+            rarely-taken early return is one branch away from being lost. It is now rendered above
+            every plan-stage body, including this one, from a single site. */}
       </Stage>
     );
   }
@@ -1040,7 +1314,6 @@ export function StagePlan(props: {
             under {payer}. These are every possibility we have on file — pick the one on the card, or ask the AI
             about one. The largest is a guess, not an answer.
           </p>
-          <SkipStep onSkip={props.onSkip} what="the plan step" />
           {underPayer.length > PLAN_FILTER_THRESHOLD ? (
             <div className="flex max-w-md flex-col gap-1">
               <label htmlFor="qualify-plan-filter" className="text-sm font-medium text-ink900">
@@ -1101,8 +1374,18 @@ export function StagePlan(props: {
                 >
                   Use this plan
                 </button>
+                {/* ⚠ `type="button"`, AND THAT ONE WORD IS THE WHOLE FIX (S6, 2026-08-08). It was
+                    `type="submit"` inside `<form action={planAction}>`, so a single press fired
+                    `ai_armed` AND the form's own submission: asking about a plan PICKED it. The
+                    receipt then recorded a "PLAN <employer>" decision the operator never made — the
+                    same class of false decision-claim the skip guards exist for, reached through the
+                    one control whose entire purpose is to interrogate a plan BEFORE committing.
+                    Leaving exactly one submit in the tile also gives the form a single, unambiguous
+                    default submission. `autoAsk` is one-shot and survives `plan_submitted`
+                    (flow-state invariant l), so arming here and then picking still auto-asks on the
+                    answer stage — the two presses are the flow, not a regression of it. */}
                 <button
-                  type="submit"
+                  type="button"
                   disabled={props.pending}
                   onClick={props.onAskAi}
                   className="rounded-lg border border-teal200 bg-teal50 px-2.5 py-1 text-xs font-semibold text-teal700 transition-colors hover:bg-teal200/60 disabled:opacity-60"
@@ -1114,6 +1397,7 @@ export function StagePlan(props: {
           </li>
         ))}
       </ul>
+      {/* [BOOK-LED EXEMPT: a claim about the plan-tile filter, on a stage with no ranking] */}
       {visible.length === 0 && needle !== '' ? (
         <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
           No plan sponsor matches that text. Clear the filter to see all {underPayer.length} plans.
@@ -1129,7 +1413,6 @@ const WINDOW_CHOICES: readonly QualifyTrailingDays[] = [30, 60, 90, 180, 270, 36
 
 /** A stable empty reference for the pre-snapshot render — a fresh `[]` would re-run every area memo
  *  on every keystroke in the employer search while the answer is still loading. */
-const EMPTY_FACILITIES: readonly QualifyFacility[] = [];
 
 /** windowDays is the shell's MANUAL selection (null = automatic requested). A null ladder on the
  *  automatic path is NOT "set manually" — the core only auto-sizes prefix searches, so a full
@@ -1146,6 +1429,107 @@ function windowSentence(snapshot: QualifySnapshot, windowDays: QualifyTrailingDa
   return ladder.chosenDays <= 30
     ? `Showing trailing ${ladder.chosenDays} days — the freshest window already carries a reliable sample.`
     : `Showing trailing ${ladder.chosenDays} days — needed this far back to reach a reliable sample.`;
+}
+
+/**
+ * ── "RANKING DATA REBUILT …" — THE ONE HONEST FRESHNESS CLAIM THIS SURFACE CAN MAKE (S5) ─────────
+ *
+ * The input is `collections.rollup_refresh_run.finished_at` for the newest run that reported ok
+ * (`buildRollupRefreshFreshnessQuery`, which carries the full argument for why that column and not
+ * the two beside it). This function turns it into a sentence, and every clause is load-bearing:
+ *
+ * · **"Ranking data rebuilt"** names the ROLLUP REBUILD, not the CMD pull. The pull is not
+ *   observable at all — there is no run-log for `cmd-explorer`/`indigo-explorer`, and that cron's
+ *   210s wall-clock budget silently defers un-pulled customers to the next hour. A sentence saying
+ *   "last pulled" would be a claim no SELECT in this database can back.
+ * · **A DATE AND A NAMED ZONE, NEVER A BARE HH:MM.** This team spans timezones and the app anchors
+ *   civil days to America/Los_Angeles (contract.ts), so "rebuilt at 4:45" is a different claim to
+ *   each reader; and without the date a stalled cron's twenty-hour-old timestamp reads as today.
+ * · **"up to about 2 hours"** is derived from the schedule rather than guessed: BXR pulls at :00,
+ *   Indigo at :30, the rebuild runs at :45 — so a BXR row is invisible for 46 min at best and
+ *   **1h45m** at worst (Indigo 17 min / 1h16m), before CMD's own posting lag. Any single-number
+ *   staleness claim would be false most of the time; this is the defensible bound.
+ *
+ * ⚠ BUILT FROM `formatToParts`, NOT `format`. Modern ICU puts a NARROW NO-BREAK SPACE (U+202F)
+ * before the day period, so `format()` yields a string that renders fine and fails every assertion
+ * written with an ordinary space, invisibly in a diff. Assembling the parts makes the separators ours.
+ *
+ * PURE, and deliberately takes no `now`: a relative form ("41 min ago") would need one, and a `now`
+ * read during render is both untestable and a hydration mismatch. Null / unparseable → the honest
+ * unknown, because a freshness read that FAILED must never be dressed as a freshness answer.
+ */
+const REBUILT_AT_UNKNOWN = 'Ranking data freshness unknown — the rollup rebuild log could not be read.';
+
+export function rebuiltAtSentence(
+  rebuiltAt: string | null,
+  opts: {
+    /**
+     * The most recent ranking request FAILED with an answer still on screen. The freshness read and
+     * the snapshot read are independent requests fired by the same press, and the heavy one is far
+     * the likelier to fail — so this timestamp can legitimately have advanced past the grid beneath
+     * it. Say so; do not let the only basis claim on the screen describe a rebuild the rendered list
+     * never came from.
+     */
+    refreshFailed?: boolean;
+  } = {},
+): string {
+  if (rebuiltAt === null) return REBUILT_AT_UNKNOWN;
+  const t = Date.parse(rebuiltAt);
+  if (Number.isNaN(t)) return REBUILT_AT_UNKNOWN;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  }).formatToParts(new Date(t));
+  const at = (type: Intl.DateTimeFormatPartTypes): string => parts.find((p) => p.type === type)?.value ?? '';
+  const stamp = `${at('month')} ${at('day')} at ${at('hour')}:${at('minute')} ${at('dayPeriod')} ${at('timeZoneName')}`;
+  /* ⚠ THE FAILED ARM DROPS THE CMD LAG BOUND, ON PURPOSE. Two caveats in one sentence bury each
+   * other, and "the list you are looking at may not even be from this rebuild" strictly dominates
+   * "this rebuild may trail CMD by two hours". The timestamp itself is still stated, because it is
+   * true about the REBUILD; what it stops claiming is that it describes the grid. */
+  if (opts.refreshFailed === true) {
+    return `Ranking data rebuilt ${stamp} — but the last refresh failed, so the ranking below may predate that rebuild.`;
+  }
+  return `Ranking data rebuilt ${stamp} — the hourly rollup rebuild, so it can trail CMD by up to about 2 hours.`;
+}
+
+/**
+ * ── THE WINDOW MOVED UNDER YOU, SAID OUT LOUD (S5) ───────────────────────────────────────────────
+ *
+ * `scopeKeyOf` serializes the automatic case as the literal string `'auto'` and NOT as the ladder's
+ * chosen days, so a refresh that re-runs the sufficiency ladder onto a different rung produces an
+ * IDENTICAL request key: `loadedKey === scopeKey`, every staleness flag reads "nothing changed", the
+ * facet badge goes on saying "On · automatic", and `windowSentence` quietly renders a different
+ * number. On a surface whose whole lineage is scope honesty, that is the one silent scope change
+ * left — so it gets a sentence rather than a differently-worded paragraph the reader must diff.
+ *
+ * NAMES THE FLOOR IT MOVED AGAINST. `QUALIFY_RATING_CONFIDENT_PATIENTS` is the threshold the ladder
+ * stops at, and "the sample no longer clears the floor" without saying WHICH floor is a mechanism
+ * the operator cannot check. Interpolated from the constant rather than typed as "10", so the copy
+ * cannot outlive the number.
+ *
+ * ONE FUNCTION, TWO CHANNELS: the visible `role="status"` notice and `liveSentenceFor` both call it,
+ * so the seen and the spoken claim are the same bytes rather than two sentences that agree today.
+ *
+ * ⚠ NOT ANCHORED TO A MOMENT, AND THAT IS A FIX RATHER THAN A STYLE CHOICE (S5 fix round, M4). This
+ * notice NEVER auto-dismisses — `windowMove` clears only on the next resolve, a new refresh, or a
+ * navigation — and it correctly survives every grid-narrow toggle, so an operator can sit with it on
+ * screen for minutes. The first wording ended "than it did a moment ago", which quietly stops being
+ * true while the sentence goes on asserting it. Fixed in COPY, deliberately not with dismissal
+ * machinery: naming the REFRESH (a durable event) and stating the span as a fact about the list in
+ * front of them is true at any age, and a timer would be new state on a surface whose whole S5 lesson
+ * is that in-flight state is where the bugs live.
+ *
+ * Copy unratified.
+ */
+export function windowMoveNotice(move: WindowMove): string {
+  const floor = `${QUALIFY_RATING_CONFIDENT_PATIENTS}-patient reliability floor`;
+  return move.to > move.from
+    ? `The automatic window widened from ${move.from} to ${move.to} days on the last refresh — the ${move.from}-day sample no longer clears the ${floor}, so this ranking spans ${move.to} days.`
+    : `The automatic window narrowed from ${move.from} to ${move.to} days on the last refresh — the freshest ${move.to} days now clear the ${floor} on their own, so this ranking spans ${move.to} days.`;
 }
 
 function FactorRows({ facility }: { facility: QualifyFacility }): React.ReactElement {
@@ -1173,20 +1557,144 @@ function FactorRows({ facility }: { facility: QualifyFacility }): React.ReactEle
 }
 
 /**
+ * THE CENSUS ROW ON THE V3 CARD (S1, 2026-08-08) — beds, UR, auth headroom.
+ *
+ * v3 is the shipped surface and it carried NO census at all: the #163 bed chip lives on the v2
+ * FacilityPanel, which only renders with QUALIFY_V3_FLOW=off. Census still moved the score through
+ * `authFit`, so the rep saw a rating shaped by a fact the card refused to state — and after S1 it
+ * also moves the ORDER, which makes stating it non-negotiable: a facility cannot be sorted on
+ * something the operator cannot see.
+ *
+ * The bed STATE is not re-derived here. `f.bedState` is the server's answer (bedState.ts), the same
+ * value that decided the sort tier, so the greying, the ordering and these words cannot drift apart.
+ * The COPY is this surface's own — "3 of 12 beds open" reads better on a wide card than the v2
+ * chip's "3 of 12 beds" — with ONE exception: the full case keeps #163's ratified `Full · 0 of N`
+ * verbatim, because that sentence was argued over and is pinned by its own tests.
+ *
+ * CONTRAST. Every chip is 12px (the surface's floor), so every one needs 4.5:1. `text-status-warn`
+ * (#C9881E) on its own 10% wash measures **2.71:1** — the v2 chips inherit that and it is not
+ * something to propagate into new markup. So hue lives in the BORDER and the WASH and the text is
+ * ink900 (≈13.9:1 on either card background). Colour accompanies the word; it never carries it.
+ */
+interface CensusChip {
+  key: string;
+  label: string;
+  title: string;
+  tone: 'warn' | 'plain';
+}
+
+function censusChipsOf(f: QualifyFacility): CensusChip[] {
+  const chips: CensusChip[] = [];
+  const cap = f.bedCapacity;
+  if (f.bedState === 'full' && cap !== null) {
+    chips.push({
+      key: 'beds',
+      // #163's ratified copy, unchanged and deliberately so.
+      label: `Full · 0 of ${cap}`,
+      title: `No open beds — all ${cap} licensed beds occupied on the latest census sync`,
+      tone: 'warn',
+    });
+  } else if (f.bedState === 'open' && f.openBeds !== null) {
+    const tight = cap !== null && cap > 0 && f.openBeds / cap <= 0.15;
+    chips.push({
+      key: 'beds',
+      label: cap !== null && cap > 0 ? `${f.openBeds} of ${cap} beds open` : `${f.openBeds} open bed${f.openBeds === 1 ? '' : 's'}`,
+      title:
+        cap !== null && cap > 0
+          ? `${f.openBeds} of ${cap} licensed beds open (${Math.round((f.openBeds / cap) * 100)}% free) on the latest census sync`
+          : `${f.openBeds} open bed${f.openBeds === 1 ? '' : 's'} on the latest census sync — licensed bed count not on file, so occupancy is unknown`,
+      tone: tight ? 'warn' : 'plain',
+    });
+  }
+  // 'not_applicable' (outpatient) and 'unknown' (no census row / no usable denominator) render
+  // NOTHING. Both are "we cannot say", and a card that says nothing is the honest form of that.
+  if (f.nextUrDate) {
+    chips.push({
+      key: 'ur',
+      label: `UR ${f.nextUrDate}`,
+      title: "A utilization review is scheduled on this facility's census — authorization may change",
+      tone: 'warn',
+    });
+  }
+  /* AUTH HEADROOM — authorized days the facility is not using. Server-computed and server-gated
+   * (`authHeadroomDays`), so this only formats. Rendered from ONE day out, because "~0d" is not a
+   * reading; below that the two averages are the same number and the chip has nothing to add. */
+  const h = f.authHeadroomDays;
+  const days = h === null ? 0 : Math.round(Math.abs(h));
+  // `days >= 1` is the WHOLE condition. It previously sat behind an `Math.abs(h) >= 0.5` guard that
+  // could not fail — Math.round(0.5) is 1, so the two tests are the same test — and a branch that
+  // cannot be false reads as coverage without being any. One reading, one condition.
+  if (h !== null && days >= 1) {
+    chips.push({
+      key: 'headroom',
+      label: h > 0 ? `~${days}d auth headroom` : `~${days}d over auth`,
+      title:
+        h > 0
+          ? `Average authorized stay ${f.avgAuthDays}d vs average actual ${f.avgLosDays}d — about ${days} authorized day${days === 1 ? '' : 's'} typically unused here`
+          : `Average actual stay ${f.avgLosDays}d against ${f.avgAuthDays}d authorized — about ${days} day${days === 1 ? '' : 's'} beyond authorization, on the same basis the rating scored`,
+      tone: h > 0 ? 'plain' : 'warn',
+    });
+  }
+  return chips;
+}
+
+/**
  * `allPayers` is the RANKING's scope, passed down rather than inferred from `f.payerCount`: a
  * single-label card under an all-payers ranking and the same card under a payer-scoped one carry
  * identical counts and are different claims. See the blend disclosure in the body.
  */
-function ScoreCard({ f, allPayers }: { f: QualifyFacility; allPayers: boolean }): React.ReactElement {
+function ScoreCard({
+  f,
+  allPayers,
+  /**
+   * S3: the member-history mark, ALREADY WORDED (`memberHistoryChipFor`) rather than derived here.
+   * The sentence depends on the member bucket, which is a snapshot-level fact this card has no
+   * business knowing — and one derivation is what keeps "Seen here before" from being said about a
+   * prefix that matched four different people. Null on every card with no annotation, which is every
+   * card of the identifier's own footprint by the invariant in `QualifyFacility.memberHistory`.
+   */
+  historyChip = null,
+}: {
+  f: QualifyFacility;
+  allPayers: boolean;
+  historyChip?: string | null;
+}): React.ReactElement {
   const location = [f.city, f.state].filter(Boolean).join(', ');
+  const chips = censusChipsOf(f);
+  /* SUNK, NOT REMOVED (Alec, 2026-08-08). Census sorts, it never filters: a full house drops below
+   * everything that can admit today and stays on screen, because the rep is also building a map of
+   * where they could send someone tomorrow.
+   *
+   * ⚠ THE RATIFIED `opacity-60` DIM WAS MEASURED AND REJECTED FOR THIS CARD, and the numbers are
+   * the reason rather than taste. That idiom (design-system §Motion; live at the refetch treatment
+   * below) is a TRANSIENT state on content that is about to be replaced. Applied persistently to a
+   * whole card it composites every text token against the background: ink900 falls 14.73:1 → 4.07,
+   * ink600 7.07 → 2.79, and the 30px band numeral 2.99-5.05 → 1.86-2.55. That is below AA for body
+   * text and below AA-large for the numeral — an accessibility regression aimed squarely at the row
+   * carrying the most operationally important sentence on the screen.
+   *
+   * So the sink is expressed WITHOUT touching text alpha: the card drops its IQ-band wash for the
+   * neutral ground tone (so it visibly recedes from its coloured neighbours, and every text token
+   * gains contrast rather than losing it), carries the amber Full chip, and STATES the reason in
+   * words. Nothing here gates input, hides the row from assistive technology, or changes its
+   * markup order. */
+  const sunk = f.bedState === 'full';
   return (
     <li
       data-v3-tile
+      data-bed-state={f.bedState}
       className="rounded-xl border border-line bg-surface p-4 shadow-ths-sm"
       // IQ_BAND_WASH at card level (Phase 5): the wash EXTENDS the numeral's hue, which already sits
       // beside its verdict word — colour accompanies the word, never replaces it. Unrated cards keep
-      // the plain surface: honest restraint stays visually colourless.
-      style={f.iqBand && f.ratingV2 !== null ? { backgroundColor: IQ_BAND_WASH[f.iqBand] } : undefined}
+      // the plain surface: honest restraint stays visually colourless. A SUNK card also gives it up —
+      // the wash is a claim about the paying, and this card's headline is that you cannot use it.
+      style={
+        sunk
+          ? { backgroundColor: QUALIFY_PALETTE.ground }
+          : f.iqBand && f.ratingV2 !== null
+            ? { backgroundColor: IQ_BAND_WASH[f.iqBand] }
+            : undefined
+      }
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 flex-col">
@@ -1282,6 +1790,48 @@ function ScoreCard({ f, allPayers }: { f: QualifyFacility; allPayers: boolean })
           )}
         </div>
       </div>
+      {/* CENSUS — "can they physically go there", which is the first question of the search tree and
+          the one this surface used to answer nowhere. 12px, ink text on tinted borders/washes (see
+          censusChipsOf for the measured reason the text is not tinted). */}
+      {/* ── THE MEMBER-HISTORY MARK (S3, 2026-08-08) ─────────────────────────────────────────────
+          "The book ranks, member history annotates." This is the annotation, and it is the most
+          operationally decisive thing on a book card: continuity, the facility already knows them,
+          prior-auth precedent. It sits ABOVE the census chips because it is about THIS SEARCH rather
+          than about the facility's general state, and it carries the teal accent the surface uses
+          for "this is about what you asked", never a colour alone — the words say it.
+
+          IT IS ALSO THE VISIBLE REASON FOR THE COMPARATOR'S TIEBREAK. At equal availability and
+          equal rating an annotated facility outranks an unannotated one (core.ts), so without this
+          mark the grid would reorder itself for a reason nothing on screen states. */}
+      {historyChip !== null ? (
+        <p data-v3-history className="mt-2 text-xs font-semibold text-teal700">
+          {historyChip}
+        </p>
+      ) : null}
+      {chips.length > 0 ? (
+        <span className="mt-2 flex flex-wrap items-center gap-1.5">
+          {chips.map((c) => (
+            <span
+              key={c.key}
+              className={[
+                'inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-xs font-semibold text-ink900',
+                c.tone === 'warn' ? 'border-status-warn/40 bg-status-warn/10' : 'border-line bg-surface',
+              ].join(' ')}
+              title={c.title}
+            >
+              {c.label}
+            </span>
+          ))}
+        </span>
+      ) : null}
+      {/* THE ROW SAYS WHY IT IS SUNK. A card that dropped below worse-paying facilities without
+          explaining itself would be the ranking making a claim it refuses to show its work for —
+          and greying alone is a claim carried by appearance, which this surface does not do. */}
+      {sunk ? (
+        <p className="mt-1.5 text-xs text-ink600">
+          No open beds — ranked below every facility that can admit today. The rating is unchanged.
+        </p>
+      ) : null}
       <details className="mt-2">
         <summary className="cursor-pointer text-xs font-semibold text-teal700">Why this score</summary>
         <div className="mt-2">
@@ -1307,9 +1857,17 @@ export interface StageAnswerProps {
   /**
    * How the snapshot's payer scope was chosen — the shell's pick→ranking bridge (review Critical 1):
    * 'user' = a billed-under chip; 'pick' = the chosen plan's own claims label (claimsPayerLabels[0]);
-   * 'dominant' = nothing to send, the core resolved the identifier's largest payer. The captions
-   * below MUST distinguish these — "you picked this" and "we defaulted to this" are different claims
-   * about the same number.
+   * 'dominant' = no label was sent. The captions below MUST distinguish these — "you picked this"
+   * and "we defaulted to this" are different claims about the same number.
+   *
+   * ⚠ 'dominant' STOPPED MEANING ONE THING ON 2026-08-07; amended 2026-08-08 (S6 fix round). It read
+   * "nothing to send, the core resolved the identifier's largest payer", which since the reversal
+   * describes only HALF the cases that reach it: a plain Skip also sends no label, and the core
+   * answers THAT with `payerScope: 'all'` — every billed-under label ranked, no dominant pick made at
+   * all. So the value means "the client sent no label", and which of the two the core did with that
+   * is read from the RESULT (`resolved.payerScope` / `payerName`), never from here. The code already
+   * behaves that way — `billedUnderCaption` takes `allPayers` from the result and lets it outrank
+   * every scopeSource row — so this is comment rot cleared, not a behaviour change.
    *
    * It answers ONE question and says nothing about whether a plan was chosen — see `skipped` below
    * and the `ScopeSource` header for the live defect that separation exists to prevent.
@@ -1338,6 +1896,20 @@ export interface StageAnswerProps {
    */
   area: string;
   onSelectArea: (key: string) => void;
+  /**
+   * The FACILITY narrow's vocabulary — `qualifyFacilityOptions`, loaded ONCE by the shell the way the
+   * ticker loads trends (mount-once, fail-soft), never inside the snapshot request. EMPTY is a real
+   * state, not an error: it is what a first paint and a failed load both look like, and it renders no
+   * control at all rather than an empty picker claiming a vocabulary it does not have.
+   */
+  facilityOptions: readonly QualifyFacilityNarrowOption[];
+  /**
+   * The picked facilities — canonical picker values. Narrows the RENDERED grid only, exactly like
+   * `area`: a sibling of `filters`, never a member, so it reaches no request (flow-state.ts invariant
+   * m). Multi-select. See `FacilityNarrowLine` for the measurement behind "display, not fetch".
+   */
+  facilityNarrow: readonly string[];
+  onToggleFacility: (value: string) => void;
   payerOverride: string | null;
   onPayerOverride: (label: string | null) => void;
   windowDays: QualifyTrailingDays | null;
@@ -1358,11 +1930,46 @@ export interface StageAnswerProps {
    */
   staleAfterError: boolean;
   /**
-   * Re-issue the identical snapshot request after a failure. The shell carries a nonce to make this
-   * possible: a retry's scope key is unchanged by construction and the fetch effect keys on it, so
-   * without an explicit trigger, clicking the same chip again is a no-op.
+   * Re-issue the identical snapshot request. The shell carries a nonce to make this possible: the
+   * scope key is unchanged by construction and the fetch effect keys on it, so without an explicit
+   * trigger, clicking the same chip again is a no-op.
+   *
+   * ⚠ TWO RENDER SITES, ONE HANDLER (S5). It was minted for the `refreshFailed` banner's "Try
+   * again"; the NARROW SEARCH card's standing "Refresh the ranking" is the same call. Promoting it
+   * needed no second refetch path — `retry_requested` is the one reducer case that bypasses the
+   * bail-out guard, so it fires with no error present and no input moved — and a second path would
+   * be a second writer of the thing the fetch effect keys on.
+   *
+   * It carries the shell's empty-term guard, which now matters MORE than it did for the banner: a
+   * failure implies a request implies a term, but a STANDING control renders on every answer stage
+   * and can be pressed after a hot-reload has emptied the PHI ref. It no-ops silently there.
    */
   onRetry: () => void;
+  /**
+   * A REFRESH IS IN FLIGHT — the refresh's own progress signal, and the reason it needs one is that
+   * the other three structurally cannot give it (flow-state.ts invariant o). `refetching` and
+   * `staleAfterError` both derive from `loadedKey !== scopeKey`, which on a same-scope re-run is
+   * false for the whole in-flight period; `showSkeleton` needs a null snapshot; `pending` is the
+   * SERVER ACTION's flag and a refresh does not re-run it. Without this the screen does not move for
+   * the 1-2s the request takes and the operator presses again — each press writing one
+   * `SEARCH_QUALIFY_PHI` row into a compliance log.
+   *
+   * Rendered as the design system's RE-SCOPE idiom (dim + progress beam), never a skeleton: a
+   * standing control that blanks the answer on every press makes each refresh feel like a rebuild.
+   */
+  refreshing: boolean;
+  /**
+   * WHEN THE RANKING INDEX WAS LAST REBUILT — `collections.rollup_refresh_run.finished_at` for the
+   * newest ok run, full UTC ISO, or null when the read failed or has not returned. Loaded by the
+   * shell as its OWN request (the ticker's mount-once, fail-soft shape), never as a segment of the
+   * audited snapshot call. `rebuiltAtSentence` owns the copy and the two columns it must not use.
+   */
+  dataRebuiltAt: string | null;
+  /**
+   * THE AUTOMATIC WINDOW MOVED ACROSS A SAME-SCOPE RE-RUN, or null. The one scope change on this
+   * surface that no staleness flag can observe — see `windowMoveNotice` and flow-state invariant p.
+   */
+  windowMove: WindowMove | null;
   /**
    * Is the NARROW SEARCH card showing its FIELDS? The reducer's own bit (flow-state.ts invariant n),
    * threaded rather than held locally: a Skip must land the card open and a plan pick must land it
@@ -1488,10 +2095,23 @@ function FilterLine(props: {
  * PICK and told the operator a pick had failed when they had declined to make one. `!== 'dominant'`
  * also swallowed a rejected CHIP into the same "picked plan" wording; that row is now its own too.
  *
- * The skipped copy describes the ranking AS IT BEHAVES TODAY — one dominant billed-under label, the
- * single-label equality in the ranking query. Widening it to the identifier's whole footprint is a
- * separate change, and copy must never pre-announce behaviour that is not shipped.
+ * ⚠ THE PARAGRAPH THAT STOOD HERE FORBADE THE CHANGE THAT THEN SHIPPED — amended 2026-08-08 (S6 fix
+ * round), and quoted rather than deleted because the instruction was right when it was written. It
+ * read: "The skipped copy describes the ranking AS IT BEHAVES TODAY — one dominant billed-under
+ * label, the single-label equality in the ranking query. Widening it to the identifier's whole
+ * footprint is a separate change, and copy must never pre-announce behaviour that is not shipped."
+ *
+ * That separate change IS the 2026-08-07 reversal, and it shipped. There is no single-label equality
+ * on the skip path any more: the request carries `payerScope: 'all'` and the result comes back with
+ * `payerName === null`. So the rule now reads the other way round — the copy must describe the WIDE
+ * ranking, and the table below already does, through the `allPayers` row that outranks every other.
+ * That row takes its value from the RESULT (`resolved.payerScope`), never from the request, so the
+ * caption cannot claim a widening the core declined to perform. Nothing about the discipline changed:
+ * copy still describes shipped behaviour. Only the shipped behaviour did.
  */
+/* [BOOK-LED EXEMPT: every row describes how the billed-under LABEL was chosen]
+ * The book is scoped to that same label, so each row stays true word for word. The population
+ * changed; the label's provenance did not. */
 export function billedUnderCaption(args: {
   skipped: boolean;
   payerOverridden: boolean;
@@ -1531,6 +2151,16 @@ export function AreaLine(props: {
   chips: readonly AreaChip[];
   active: string;
   counts: ReadonlyMap<string, number>;
+  /**
+   * How many rows are ACTUALLY on screen — after every grid narrow, not just this one.
+   *
+   * ⚠ IT EXISTS BECAUSE A SECOND GRID NARROW ARRIVED (S4). Until then the area was the only narrow, so
+   * a lit chip meant rows by construction and " · showing" could not be false. Composed with a facility
+   * narrow it can be: "All · 2 · showing" renders above ZERO cards. The counts stay over the RANKING —
+   * they are the area's own denominators, and their aria-labels say "ranked" — but the WORD has to
+   * describe the screen.
+   */
+  shown: number;
   onSelect: (key: string) => void;
 }): React.ReactElement {
   // AREA IS A FACET OF THE INVENTORY EVEN THOUGH IT DOES NOT LIVE ON THE CONTROL CARD (2026-08-07).
@@ -1580,11 +2210,214 @@ export function AreaLine(props: {
               {' '}
               · {n}
             </span>
-            {on ? ' · showing' : ''}
+            {/* I9 says selection carries a WORD, never hue alone — so the word stays either way; it
+                just has to be a TRUE one. The chip IS selected; over an empty grid it is not showing
+                anything. `selected` is the house vocabulary the window chips already use. */}
+            {on ? (props.shown > 0 ? ' · showing' : ' · selected') : ''}
           </button>
         );
       })}
     </div>
+  );
+}
+
+/**
+ * ── THE FACILITY NARROW (S4, Alec 2026-08-08) ───────────────────────────────────────────────────
+ *
+ * WHAT WAS LOST. v2's tab carried a Facility type-ahead in its primary search row; the 2026-08-06 v3
+ * cutover dropped it, and — like the AREA facet above — the drop is absent from the ratified pattern
+ * doc's deliberate-drops list, so it was a casualty rather than a ruling.
+ *
+ * ⚠ IT NARROWS THE FETCHED SET, NOT THE FETCH, AND THAT IS A MEASURED DECISION RATHER THAN A
+ * STRUCTURAL CONVENIENCE. The obvious build is a fetch narrow — the ranking query would take
+ * `upper(facility) = any($n::text[])` today and it measures AT OR BELOW baseline. It is still the
+ * wrong build: **86.9% of members (3,759 of 4,324) bill at exactly ONE facility in 365 days**, so a
+ * facility narrow on a member search is a 1-or-0 outcome almost always — which makes the EMPTY state
+ * the common render rather than an edge case. A fetch narrow's empty screen can only say "no history
+ * at NASHVILLE". A narrow over the already-fetched set can say *"no history at NASHVILLE — this
+ * member billed at LSMH and KWC"*, because the un-narrowed list is still in hand. Strictly more
+ * information, zero extra round trips, and no refetch on toggle. See `gridNarrowEmptyCopy`.
+ *
+ * ⚠ IT RENDERS **BESIDE THE GRID WITH AREA**, NEVER ON THE NARROW SEARCH CARD (controller ruling
+ * 2026-08-08, flagged to Alec). His earlier "folds into the card" wording yields to his later
+ * fetched-set ruling plus the card's own documented rule — *everything on the control card re-issues
+ * the ranking request, and this does not*. That rule is exactly why AREA was sorted out of the card
+ * and kept out of `cardFacets`; a requestless field inside the card would either break it or force
+ * it to be re-ruled. So the two beside-the-grid narrows sit together, and the card's tally NAMES
+ * them rather than absorbing them.
+ *
+ * THE SHARED PICKER, IN CLIENT MODE. `MultiSelectTagPicker` is the same primitive Collections and the
+ * v2 tab render; the vocabulary is 47 options, small enough to load once and filter locally, so no
+ * `onQueryChange` and no `minChars`. MULTI-select, because the picker is multi by nature and "show me
+ * these two houses" is a real question — single-select would be a restriction invented to simplify
+ * the empty state, and the empty state handles a list already.
+ *
+ * The badge rides the picker's own label row (the Employers precedent): the picker owns the only
+ * label this facet has, and a second "Facility" heading above it would say the word twice to a
+ * screen reader. `data-v3-facet` enrols it in the skip reveal's stagger, which selects across the
+ * stage rather than inside the card.
+ */
+export function FacilityNarrowLine(props: {
+  options: readonly QualifyFacilityNarrowOption[];
+  selected: readonly string[];
+  onToggle: (value: string) => void;
+}): React.ReactElement {
+  /* ⚠ `facetReading(selected, 0)` PRINTS "On · 1 of 0". Reachable rather than theoretical: a failed
+     vocabulary reload leaves the selection behind, and `showFacilityLine` deliberately keeps the
+     control on screen in that state so the narrow stays clearable. GUARDED rather than commented — a
+     denominator of zero under a numerator of one is a broken readout, and the honest thing to say is
+     that the list is missing. */
+  const reading =
+    props.options.length === 0
+      ? { on: props.selected.length > 0, text: `${props.selected.length} picked · list unavailable` }
+      : facetReading(props.selected, props.options.length);
+  return (
+    <div data-v3-facet className="min-w-[15rem] max-w-md flex-1">
+      <MultiSelectTagPicker
+        label="Facility"
+        badge={<FacetState {...reading} />}
+        placeholder="Type a facility name…"
+        icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
+        /* `searchText` carries every RAW CMD spelling plus the canonical value, so an operator typing
+           what CMD calls the facility finds it. `display` is NOT recomposed into "ACRONYM — Full Name":
+           label parity with the score cards is the whole reason display_acronym is preferred, and the
+           picker echoes `display` back inside the selected tag. See `pickerMatches`. */
+        options={props.options.map((o) => ({
+          value: o.value,
+          display: o.display,
+          badge: o.careSetting,
+          searchText: [...o.variants, o.value],
+        }))}
+        selected={props.selected}
+        onToggle={props.onToggle}
+        /* The Employers precedent: `onClear` walks the selection back through the SAME toggle rather
+           than reaching for a second reducer action. `facility_narrow_toggled` is the machine's only
+           write to this field, and a second writer of a narrowing field is the shape `scopeKeyOf`'s
+           header is a post-mortem of. */
+        onClear={() => {
+          for (const v of props.selected) props.onToggle(v);
+        }}
+        tone="score"
+      />
+    </div>
+  );
+}
+
+/**
+ * THE SENTENCE THE WHOLE FEATURE EXISTS FOR — and, since fix round 1, the AREA arm too.
+ *
+ * ⚠ IT OWNS **BOTH** BLAMED ARMS, WHICH IS A CHANGE OF SCOPE AND THE POINT OF IT. S4 shipped the area
+ * sentence as an inline literal beside this function, and that split made an EXISTING claim false: both
+ * arms computed "the N facilities behind this answer" from the UN-narrowed leading list while
+ * instructing the operator to clear ONE control. With `facility=['PHX']` and `area='TN'`, "The 3
+ * facilities … choose All above to see them" resolves to ONE row, because the facility narrow is still
+ * on. That is the PRE-S4 string, so the regression was a truth regression in shipped copy, not merely
+ * a loose new claim. The recovery clause now promises what clearing THAT control actually yields, and
+ * names BOTH controls when one click cannot get back to everything.
+ *
+ * Pure and exported so the copy is testable without a render, and because the branch it makes is a
+ * DECISION (which emptiness is this, and what is the way out?) rather than markup. The JSX site keeps
+ * the `role="status"` and its book-led marker; this owns the words.
+ *
+ * The facility arms, and why each is a different claim:
+ *  1 · BOOK-LED, and the member HAS billed at some of the picks. The member ranking is FLOORLESS and
+ *      the book applies `QUALIFY_MIN_LINES`, so a facility they billed 1-2 lines at is in `facilities`
+ *      and NOT in `bookFacilities`. "No history there" would be flatly false about the one fact on the
+ *      screen that decides an admission. The floor is the only possible cause (both loads are the same
+ *      query over the same rollup with the same payer, window and market — the member's rows are a
+ *      SUBSET of the book's before it), which is why this sentence may name it.
+ *      ⚠ ITS SUBJECT IS `pickedWithHistory`, NOT `picked`. A boolean over the whole selection let
+ *      picks ['NASH','KWC'] against a footprint of NASH alone assert paid claims at a facility with
+ *      zero rows — fabricated history, reachable through exactly the "show me these two houses" case
+ *      multi-select exists for. The picks with nothing get their own disclaiming clause rather than
+ *      being silently dropped.
+ *  2 · BOOK-LED, and they have not. The claim is about the PAYER'S BOOK, not about the member, so the
+ *      member's own footprint is named separately rather than folded in.
+ *  3 · MEMBER-LED, with somewhere else to name. Alec's ruling rationale.
+ *  4 · MEMBER-LED, with nowhere else to name. Reachable: `facilitiesElsewhere` strips the
+ *      `No Facility` placeholder, so every other row can be a bucket rather than a place. "This member
+ *      billed at " with nothing after it would be the fabricated-place claim in its most literal form.
+ *
+ * EVERY ARM NAMES ITS WINDOW (basis discipline, S2). Arms 1 and 3 shipped without one while 2 and 4
+ * had it, which is a mixed-basis screen by omission.
+ *
+ * Copy unratified.
+ */
+export function gridNarrowEmptyCopy(input: {
+  /** WHICH narrow emptied the grid — computed by the caller, never guessed. */
+  blame: 'area' | 'facility';
+  areaActive: boolean;
+  facilityActive: boolean;
+  /** Display labels of every picked facility. */
+  picked: readonly string[];
+  /** Display labels of the picks the member's OWN footprint actually covers. A subset of `picked`. */
+  pickedWithHistory: readonly string[];
+  bookLeads: boolean;
+  bookPayer: string | null;
+  /** The LEADING list's length — what clearing BOTH narrows yields. */
+  rankedTotal: number;
+  /** Rows left after clearing the FACILITY narrow (i.e. the area narrow alone). */
+  afterClearingFacility: number;
+  /** Rows left after clearing the AREA narrow (i.e. the facility narrow alone). */
+  afterClearingArea: number;
+  /** The member's other facilities, by name, placeholder already removed. */
+  elsewhere: readonly string[];
+}): string {
+  const all = facilityCount(input.rankedTotal);
+  /* THE WAY BACK, AND THE COUNT IT REALLY DELIVERS. A narrow with no stated way out is a trap; a way
+     out that promises a number it cannot produce is worse, because the operator believes it. */
+  const recovery = ((): string => {
+    if (input.blame === 'facility') {
+      if (!input.areaActive) return `Clear the facility above to see all ${all}.`;
+      if (input.afterClearingFacility > 0) {
+        return (
+          `Clear the facility above to see the ${facilityCount(input.afterClearingFacility)} in this area,` +
+          ` or clear the area too to see all ${input.rankedTotal}.`
+        );
+      }
+      // BOTH NARROWS INDEPENDENTLY EMPTY. Clearing either one alone still shows nothing, so a
+      // single-click promise would resolve to ZERO — say so and name both controls.
+      return `Both narrows are on and neither has rows of its own — clear the area and the facility above to see all ${all}.`;
+    }
+    if (!input.facilityActive) return `The ${all} behind this answer ${input.rankedTotal === 1 ? 'is' : 'are'} still there — choose All above to see them.`;
+    if (input.afterClearingArea > 0) {
+      return (
+        `Choose All above to see the ${facilityCount(input.afterClearingArea)} you picked,` +
+        ` or clear the facility too to see all ${input.rankedTotal}.`
+      );
+    }
+    return `Both narrows are on and neither has rows of its own — choose All above and clear the facility to see all ${all}.`;
+  })();
+
+  if (input.blame === 'area') return `No ranked facility is in this area. ${recovery}`;
+
+  const where = andList(input.picked);
+  if (input.bookLeads) {
+    // "This book" rather than "null's book": `scopedPayerOf` refuses a name the scope contradicts, and
+    // a possessive built on that null is how a caption starts naming nobody in particular.
+    const whoseMid = input.bookPayer === null ? 'this book' : `${input.bookPayer}'s book`;
+    const whoseCap = input.bookPayer === null ? 'This book' : `${input.bookPayer}'s book`;
+    if (input.pickedWithHistory.length > 0) {
+      const seen = andList(input.pickedWithHistory);
+      const unseen = input.picked.filter((p) => !input.pickedWithHistory.includes(p));
+      // The pronoun follows the SUBJECT of the claim, not the size of the selection.
+      const it = input.pickedWithHistory.length === 1 ? 'it' : 'them';
+      const disclaimer = unseen.length > 0 ? ` ${whoseCap} has no rows at ${andList(unseen)} at all.` : '';
+      return (
+        `This member HAS billed at ${seen}, but ${whoseMid} does not rank ${it} in the window shown:` +
+        ` the book applies a volume floor and this member's own lines there are below it.` +
+        `${disclaimer} ${recovery}`
+      );
+    }
+    const elsewhere = input.elsewhere.length > 0 ? ` This member billed at ${andList(input.elsewhere)}.` : '';
+    return `${whoseCap} has no rows at ${where} in the window shown.${elsewhere} ${recovery}`;
+  }
+  if (input.elsewhere.length > 0) {
+    return `No history at ${where} in the window shown — this member billed at ${andList(input.elsewhere)}. ${recovery}`;
+  }
+  return (
+    `No history at ${where} in the window shown. The other rows behind this answer have no facility` +
+    ` on them at all, so there is nowhere else to name. ${recovery}`
   );
 }
 
@@ -1622,9 +2455,13 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // banner, where `firstLoadFailed` has nothing to preserve and shows the bare error.
   const firstLoadFailed = props.snapshotError !== null && snap === null;
   const refreshFailed = props.snapshotError !== null && snap !== null;
-  // Dim for either reason — both mean "this describes a scope you moved off". The BEAM stays tied
-  // to props.refetching alone (see below): dimming says provisional, the beam claims progress.
-  const stale = props.refetching || props.staleAfterError;
+  /* Dim for any of the three — all mean "what is on screen is provisional". The first two are
+   * "you moved off this scope"; the third (S5) is "you asked for this same scope again", which is
+   * invisible to `isRefetching` by construction and would otherwise leave a standing refresh control
+   * looking dead for 1-2s. Dimming says provisional; the BEAM claims progress, so it stays tied to
+   * the two states where a request is genuinely running and drops `staleAfterError`. */
+  const stale = props.refetching || props.staleAfterError || props.refreshing;
+  const inFlight = props.refetching || props.refreshing;
   // Equivalent to the previous inline expression for every reachable state: with snap === null it
   // reduces to the same `pending || !error`, and with a snapshot present it is false — the old
   // `pending && !refetching` arm was unreachable because all four submit paths null the snapshot
@@ -1656,7 +2493,6 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
     g.planType ?? 'Plan type not captured',
     g.network ?? 'Network not captured on this VOB',
   ].join(' · ');
-  const rating = snap ? derivePolicyRating(snap.facilities) : null;
   const facets = useMemo(() => facetsOf(props.candidates), [props.candidates]);
   const filteredCandidates = useMemo(
     () => filterCandidates(props.candidates, props.filters),
@@ -1703,11 +2539,138 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // `rankedFacilities`, `areaChips`, `shownFacilities` — stays where it was, next to the grid it
   // narrows. This is the ONLY declaration of `areaActive`; do not re-declare it below.
   const areaActive = props.area !== AREA_ALL;
-  // AREA COUNTS AS A FACET (2026-08-07), which is why this sits BELOW `areaActive` rather than beside
-  // `payerFacetOn` above. Area is the one facet whose control lives outside the control card — see
-  // AreaLine for why that placement is right and why it does not exempt it from the inventory —
-  // and omitting it let one click produce "nothing is restricting this search" beside a lit Area chip.
-  const anyFacetOn = filtersActive || payerFacetOn || areaActive;
+  // The SECOND beside-the-grid narrow (S4), hoisted for the same reason `areaActive` is: the headline
+  // sentence, the tally and the empty states all read it, and a facet re-derived per surface is how
+  // they come to disagree.
+  const facilityNarrowActive = props.facilityNarrow.length > 0;
+  // BOTH BESIDE-THE-GRID NARROWS COUNT AS FACETS (area 2026-08-07, facility 2026-08-08), which is why
+  // this sits BELOW them rather than beside `payerFacetOn` above. They are the two facets whose
+  // controls live outside the control card — see AreaLine and FacilityNarrowLine for why that
+  // placement is right and why it does not exempt them from the inventory — and omitting either let
+  // one click produce "nothing is restricting this search" beside a lit control that is restricting it.
+  const anyFacetOn = filtersActive || payerFacetOn || areaActive || facilityNarrowActive;
+  /* ── THE PAYER'S WHOLE BOOK (S2, 2026-08-08) ────────────────────────────────────────────────────
+   *
+   * A SECOND ranked list, loaded by the core alongside the identifier's own footprint. It exists
+   * because 58.8% of searches resolve to ONE member carrying 1.14 facilities of history — ranking
+   * that is not thin, it is malformed, and the list that actually answers "does this policy pay,
+   * anywhere" is the payer's book.
+   *
+   * NULL, NOT EMPTY, when there is no single payer to have a book (the identifier-wide Skip): the
+   * all-payers whole book is a 206-713ms scan that spills to disk and belongs in an hourly cache.
+   * Rendering an empty shell there would claim a list that was never fetched.
+   *
+   * Declared HERE, above `skipProvenance`, because the AI grounding caption needs it — "the ranking
+   * on screen" identifies nothing once there are two rankings on screen.
+   *
+   * S2 RENDERS IT SECONDARY, BELOW THE MEMBER RANKING. The prominence flip is S3's, not this file's.
+   */
+  const bookFacilities: readonly QualifyFacility[] | null = snap?.bookFacilities ?? null;
+  /* THE NAME THE BOOK IS ABOUT, taken from the SCOPE rather than from the payer name — `scopedPayerOf`
+   * refuses a label whose `payerScope` contradicts it, which is the guard that stops a wider ranking
+   * being captioned with one payer's name. Deliberately NOT `scopePayer` a few dozen lines above:
+   * that value falls back to `g.payerDisplayName`, the DECLINED candidate's carrier, which is
+   * tolerable for the identity line's shipped wording and would be a fabricated basis on a heading
+   * that names whose book this is. */
+  const bookPayer = scopedPayerOf(snap?.resolved);
+  /* HOW MANY OF THE ROWS THE SECONDARY CAP REMOVES HAVE NO OPEN BEDS — a COUNT of this render, which
+   * is what the cap sentence says instead of predicting where the full houses are. See that sentence's
+   * own note for why the prediction was false in two reachable states. Reads `bedState` (the server's
+   * answer, and the same value that decided the sort tier) rather than re-deriving fullness from
+   * `openBeds === 0`, which is written on every outpatient row. */
+  const bookHiddenFull = (bookFacilities ?? EMPTY_FACILITIES)
+    .slice(QUALIFY_BOOK_PREVIEW)
+    .filter((f) => f.bedState === 'full').length;
+  // ONE PREDICATE, TWO CONSUMERS — see `bookIsOnScreen`. The shell asks the same question to caption
+  // the AI panel.
+  const bookOnScreen = bookIsOnScreen(snap);
+  /* ── THE INVERSION (S3, Alec 2026-08-08) ────────────────────────────────────────────────────────
+   *
+   * At ONE member the payer's book becomes the answer's own ranked grid and the identifier's
+   * footprint survives as annotations on it. `bookLeadsAnswer` owns the whole rule (including why an
+   * empty book cannot lead); everything below reads this one boolean, because a flip re-derived per
+   * surface is how six claim surfaces come to disagree about which list the screen is showing.
+   *
+   * ── ⚠ DO NOT PUT THE LIST OF SURFACES HERE. **grep for `BOOK-LED`.** ─────────────────────────
+   *
+   * This block used to ENUMERATE the surfaces that follow the flip and the ones that do not, and
+   * that list is what hid a defect through an entire review: the scope-honesty banner a few hundred
+   * lines below was never on it, so both the author and the reviewer checked the LIST instead of the
+   * FILE and shipped a coral alarm claiming the member's ranking over the book's grid. An index
+   * maintained by hand, in a different place from the code it describes, rots in exactly one
+   * direction — it stays convincing while it stops being true.
+   *
+   * So the index is now an INSTRUCTION, and the surfaces carry their own marks:
+   *
+   *     grep for `BOOK-LED` in this file. Every claim surface carries exactly one of
+   *       · `[BOOK-LED SURFACE]`          — it re-bases when the book leads, and says how, at the site
+   *       · `[BOOK-LED EXEMPT: <reason>]` — it does not, and the reason is written where it applies
+   *
+   * A new claim surface with neither is the bug. `app/test/qualifyV3Flow.test.tsx` enforces this
+   * mechanically for every `role="status"` in the file — the LOUD class, which is the class the
+   * missed one belonged to — and the test's own comment is explicit that `role="status"` is a proxy
+   * rather than a definition: the non-status surfaces (`resolvedScopeSentence`, `billedUnderCaption`,
+   * the trace rows, the hero's basis) carry markers too, so the grep still enumerates the whole set.
+   *
+   * ONE THING THAT IS NOT A RENDER DECISION AND SO CANNOT CARRY A MARKER: **the AI payload.**
+   * `buildQualifyAiInput` still maps `snap.facilities` — the member-scoped list — with an unchanged
+   * schema. Sending the book instead would be a schema + system-prompt + firewall change and is a
+   * SEPARATE RULING. That is why the captions say what actually backs the answer rather than letting
+   * the screen relabel it. Mobile (`/qualify/m`) is the other: it keeps the member-scoped deck until
+   * its own pass, pinned by a scan test in app/test/qualify-mobile-render.test.tsx.
+   */
+  const bookLeads = bookLeadsAnswer(snap);
+  /* THE LIST THAT LEADS, RESOLVED ONCE. Everything downstream — the area facet, the counts, the
+   * hero, the grid — reads this rather than choosing for itself. `bookLeads` implies a non-empty
+   * `bookFacilities` (its own precondition), so the `?? EMPTY_FACILITIES` is unreachable and kept
+   * only because TS cannot narrow through the predicate. */
+  const answerFacilities: readonly QualifyFacility[] = bookLeads
+    ? (bookFacilities ?? EMPTY_FACILITIES)
+    : (snap?.facilities ?? EMPTY_FACILITIES);
+  /* THE HERO, DERIVED FROM THE LIST THAT LEADS — and it SAYS which list that is.
+   *
+   * `derivePolicyRating(snap.facilities)` was right while the member ranking was the answer. In
+   * book-led mode the honest basis for "should I take this policy" IS the book: it is the list on
+   * screen, and a bar that patient-weights a list nobody drew breaks the reconciled-by-construction
+   * invariant in the one place that invariant exists to hold (policyRating.ts's own header). The
+   * scope label is passed rather than derived there, because that module cannot tell two
+   * `QualifyFacility[]`s apart and a guess would be a second derivation. */
+  const rating = snap
+    ? derivePolicyRating(answerFacilities, bookLeads && bookPayer !== null ? `${bookPayer}'s whole book` : undefined)
+    : null;
+  /* ── THE HOLE THE FLIP OPENS, NAMED RATHER THAN SWALLOWED ────────────────────────────────────────
+   *
+   * The member ranking is FLOORLESS and the book applies QUALIFY_MIN_LINES (core.ts, deliberately:
+   * every facility the identifier billed is relevant, but a payer-wide ranking should not carry a
+   * "100% on one claim" fluke). So a facility the member billed 1-2 lines at is in `facilities` and
+   * NOT in `bookFacilities` — and once the member grid stops rendering, its annotation has nothing
+   * to ride on. "Its information survives as annotations" would then be false for exactly the rows
+   * where n is smallest and continuity matters most.
+   *
+   * The FLOOR is the only possible cause, which is why the sentence can name it: both loads are the
+   * same query over the same rollup with the same payer, window and market: the member's rows are a
+   * SUBSET of the book's before the floor, so a missing key means the payer-wide line count is below
+   * it. Facility names are non-PHI (they already render on every card).
+   */
+  const unlistedMemberFacilities: readonly QualifyFacility[] = useMemo(() => {
+    if (!bookLeads || snap === null) return EMPTY_FACILITIES;
+    const inBook = new Set((bookFacilities ?? []).map((f) => f.facilityKey));
+    return snap.facilities.filter((f) => !inBook.has(f.facilityKey));
+  }, [bookLeads, snap, bookFacilities]);
+  /* M8 — THE TRACE PANEL'S RANKING ROW, BOOK-LED. Hoisted here rather than composed in the JSX
+   * because that `<details>` renders OUTSIDE the `snap !== null` block: `bookLeads` already implies
+   * a snapshot, but only a const computed where `snap` is narrowed can say so to the typechecker,
+   * and a `snap!` inside the panel would be the assertion that survives the day the guard moves. */
+  const bookLedRankingTrace: string | null =
+    bookLeads && snap !== null && bookPayer !== null
+      ? `two rankings: ${bookPayer}'s whole book leads the answer, and this member's own history` +
+        ` (${snap.facilities.length} ${snap.facilities.length === 1 ? 'facility' : 'facilities'} in this window)` +
+        ' is marked on it rather than ranked separately'
+      : null;
+  /* THE PREFACE SENTENCE, DERIVED ONCE PER RENDER. It was called twice — once to test for null and
+   * once to print — which is a second call to a pure function on identical inputs, i.e. the shape
+   * that only ever costs and never pays. */
+  const preface = snap === null ? null : memberPrefaceFor(snap.memberCount, snap.facilities.length);
   /**
    * ── THE NARROW SEARCH CARD'S FACETS, DERIVED ONCE ────────────────────────────────────────────
    *
@@ -1765,6 +2728,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
    *     which reads the ladder; printing a number here would be a second derivation of it.
    * A categorical sentence about the data, so it is suppressed in flight under RULE 2654416.
    */
+  /* [BOOK-LED SURFACE] — the population clause below. */
   const resolvedScopeSentence =
     snap === null
       ? null
@@ -1776,9 +2740,16 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
           // PICK'S. Both sentences were true; adjacent, they misread. The verb attaches the label to
           // the ranking. HOW that label was chosen stays the caption's job alone — restating its
           // four-way claim here would be a second derivation of one fact, which is how they drift.
+          /* ⚠ S3 ADDS THE POPULATION, BECAUSE THE LABEL ALONE STOPPED IDENTIFYING THE LIST. "Ranked
+           * under AETNA" is true of the member's footprint under AETNA AND of AETNA's whole book, so
+           * once the book can lead it names the scope without naming what was ranked. The label half
+           * is unchanged (the book IS payer-scoped); the clause is additive, and absent — byte for
+           * byte the pre-S3 sentence — in every mode that does not flip. */
           allPayers
             ? `ranked across all ${snap.payerOptions.length} billed-under labels`
-            : `ranked under ${scopePayer ?? 'one billed-under label'}`,
+            : `ranked under ${scopePayer ?? 'one billed-under label'}${
+                bookLeads ? " — the whole book, not this member's history" : ''
+              }`,
           props.windowDays === null ? 'automatic window' : `trailing ${props.windowDays} days`,
         ].join(' · ');
   /**
@@ -1796,10 +2767,28 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
    * ALONE — never on chosenBy/chosenIndex, because a Skip taken AFTER a plan pick leaves `r.group`
    * describing the previously-picked candidate rather than index 0.
    */
+  /* WHAT THE RANKING IS, IN THE TRACE PANEL'S OWN WORDS — and after S3 there are two answers.
+   * "This identifier's whole footprint" is true of the member list and FALSE of the book, so the
+   * book-led arm names the book AND says the footprint is still there, as a mark. Reachable on a
+   * skip: a Skip followed by one billed-under chip is a payer-scoped, book-led screen with `skipped`
+   * still true. Filters reach BOTH loads (the same `market` is passed to each), so the narrowed arm
+   * stays true of the book and simply gains the basis clause. */
+  const rankingBasis = bookLeads
+    ? `${bookPayer}'s whole book, with this identifier's own history marked on it`
+    : "this identifier's whole footprint";
+  /* ⚠ `skipUnder` IS DROPPED WHERE THE BASIS ALREADY NAMES THE PAYER (final review, 2026-08-08). Both
+   * strings are true and both were appended, so the book-led trace row read "… AETNA US HEALTHCARE's
+   * whole book, with this identifier's own history marked on it UNDER AETNA US HEALTHCARE" — one
+   * sentence naming one payer twice, which reads as two scopes rather than one. The member-led arm is
+   * untouched: "this identifier's whole footprint" names nobody, so it still needs the label. The
+   * `ai` row below keeps `skipUnder` unconditionally — its book-led arm ("not the book ranked above")
+   * names no payer, so there is nothing there to duplicate. */
+  const skipRankingUnder = bookLeads ? '' : skipUnder;
+  /* [BOOK-LED SURFACE] — `ranking` and `ai` both re-base; `policy` is a claim about the plan. */
   const skipProvenance: Record<'ranking' | 'policy' | 'ai', string> = {
     ranking: rankingNarrowed
-      ? `all plans — no plan chosen, then narrowed by your filter selections${skipUnder}`
-      : `all plans — no plan chosen · this identifier's whole footprint${skipUnder}`,
+      ? `all plans — no plan chosen, then narrowed by your filter selections${bookLeads ? ` · ${rankingBasis}` : ''}${skipRankingUnder}`
+      : `all plans — no plan chosen · ${rankingBasis}${skipRankingUnder}`,
     // Filters narrow rows; they never elect a policy. True either way.
     policy: 'no plan chosen — no single policy backs this screen',
     /**
@@ -1812,14 +2801,32 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
      * ranking on screen" would describe a ranking narrower than the one really behind the answer.
      * Applying the SAME standard as the hero: say what IS true (the AI covers the full ranking, not
      * the narrowed grid) instead of letting a grid-only control quietly relabel what backs the answer.
+     *
+     * ⚠ AND "THE RANKING" STOPS IDENTIFYING ANYTHING THE MOMENT THERE ARE TWO (S2, 2026-08-08). The
+     * payload is `snap.facilities.slice(0, 10)` — the MEMBER ranking — and the book section below
+     * puts a SECOND ranked list of facilities on the same screen that the model has never seen. So
+     * with a book present the caption names which one, on exactly the same principle.
+     *
+     * The four pre-S2 strings are reproduced BYTE FOR BYTE by the composition below (one of them is
+     * frozen character-for-character by a test): the grounding half is chosen by the two conditions
+     * that can make "on screen" false, and the tail is unchanged. Composed rather than written out
+     * eight times, because three independent conditions is where a copy-paste table starts to rot.
      */
-    ai: areaActive
-      ? rankingNarrowed
-        ? `grounded in the full ranking behind this answer, not the narrowed grid — all plans, no plan chosen, narrowed by your filter selections${skipUnder}`
-        : `grounded in the full ranking behind this answer, not the narrowed grid — all plans, no plan chosen${skipUnder}`
-      : rankingNarrowed
-        ? `grounded in the ranking on screen — all plans, no plan chosen, narrowed by your filter selections${skipUnder}`
-        : `grounded in the ranking on screen — all plans, no plan chosen${skipUnder}`,
+    /* ⚠ AND S3 ADDS A THIRD WAY FOR "ON SCREEN" TO BE FALSE — the strongest one. When the BOOK
+     * leads, the ranking on screen is the one list the model has NEVER seen (the payload is still
+     * `snap.facilities`, unchanged schema — a book payload is a separate ruling), and S2's own fix
+     * ("not the whole-book list below") is false by POSITION as well. So the book-led arm outranks
+     * the area arm: with the book leading, "the full ranking behind this answer" would point at the
+     * grid rather than at the member list the answer is actually grounded in. */
+    ai:
+      (bookLeads
+        ? "grounded in this member's own history, not the book ranked above"
+        : areaActive
+          ? 'grounded in the full ranking behind this answer, not the narrowed grid'
+          : bookOnScreen
+            ? "grounded in this member's ranking, not the whole-book list below"
+            : 'grounded in the ranking on screen') +
+      ` — all plans, no plan chosen${rankingNarrowed ? ', narrowed by your filter selections' : ''}${skipUnder}`,
   };
   /**
    * ⚠ "EVERY deriveNotices KIND IS GROUP-SCOPED" — v1 of this fix asserted that and was wrong about
@@ -1875,7 +2882,9 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // Everything below is derived from `snap.facilities` — the rows the ranking ALREADY returned. No
   // memo here feeds `scopeKey`, the fetch effect, or `rankingNarrowed`; grep this block for
   // `props.filters` and there is nothing to find, which is the structural half of invariant (m).
-  const rankedFacilities: readonly QualifyFacility[] = snap?.facilities ?? EMPTY_FACILITIES;
+  // S3: whichever list LEADS. The area facet, its counts and the "showing N of M" sentence all
+  // narrow the grid the operator is actually looking at — which after the flip is the book.
+  const rankedFacilities: readonly QualifyFacility[] = answerFacilities;
   const areaChips = useMemo(
     () => areaChipsWithActive(rankedFacilities, props.area),
     [rankedFacilities, props.area],
@@ -1888,17 +2897,116 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
     }
     return m;
   }, [rankedFacilities]);
+  // ── The FACILITY facet, applied (S4) ───────────────────────────────────────────────────────────
+  // Same block, same law: derived from the rows the ranking ALREADY returned, and grep this region
+  // for `props.filters` — there is nothing to find, which is the structural half of invariant (m).
+  //
+  // ⚠ THE PLACEHOLDER IS DROPPED FROM THE OPTIONS, NOT FROM THE ROWS. `No Facility` keeps its rank in
+  // every grid on this surface (dropping it would hide $29,081,575.38 of charges) and is simply not
+  // offerable — you cannot send a patient to a bucket. Because it can never be PICKED, the narrow can
+  // never be "show me the placeholder", and the empty states below never have to defend that claim.
+  const facilityOptions = useMemo(
+    () => offerableFacilityOptions(props.facilityOptions),
+    [props.facilityOptions],
+  );
+  const facilityKeys = useMemo(
+    () => facilityNarrowKeys(props.facilityNarrow, props.facilityOptions),
+    [props.facilityNarrow, props.facilityOptions],
+  );
+  // AND ACROSS THE TWO NARROWS — the standard multiselect reading, and what the "Showing N of M"
+  // sentence below describes. `narrowByFacility` returns the SAME array when nothing is picked, so a
+  // facility-free render is byte-identical to the pre-S4 one and costs no memo churn.
   const shownFacilities = useMemo(
+    () => narrowByFacility(facilitiesInArea(rankedFacilities, props.area), facilityKeys),
+    [rankedFacilities, props.area, facilityKeys],
+  );
+  /* WHICH NARROW EMPTIED THE GRID, and WHAT CLEARING EACH ONE WOULD ACTUALLY SHOW. Two questions, one
+   * pair of derivations: each narrow applied ALONE. "No ranked facility is in this area" and "no
+   * history at NASHVILLE" are different diagnoses of the same empty screen, and offering the wrong one
+   * sends the operator to undo the wrong control — so if the facility narrow on its own still has rows,
+   * the AREA is what emptied the grid. The same two numbers are what the recovery clause may promise:
+   * a way back that names one control must count what THAT control delivers, not the un-narrowed total
+   * (fix round 1, I1 — the pre-S4 area string became false the day a second narrow could compose). */
+  const facilityOnlyFacilities = useMemo(
+    () => narrowByFacility(rankedFacilities, facilityKeys),
+    [rankedFacilities, facilityKeys],
+  );
+  const areaOnlyFacilities = useMemo(
     () => facilitiesInArea(rankedFacilities, props.area),
     [rankedFacilities, props.area],
+  );
+  /* THE FACTS THE EMPTY STATE NEEDS, all from lists already in hand — which is the whole argument for
+   * a display narrow. `snap.facilities` is the SEARCHED IDENTIFIER's own footprint in both modes (the
+   * flip moves which list LEADS, never what `facilities` means), so it answers "has this member been
+   * here" and "where have they been" even when the book is the grid.
+   *
+   * ⚠ PER PICK, NOT A BOOLEAN OVER THE SET. See `picksWithRows` — a set-wide `true` rendered every
+   * picked name as the subject of "This member HAS billed at …", which fabricates history at the picks
+   * with no rows. */
+  const picksWithMemberHistory = useMemo(
+    () =>
+      snap === null
+        ? []
+        : facilityDisplayNames(
+            picksWithRows(props.facilityNarrow, props.facilityOptions, snap.facilities),
+            props.facilityOptions,
+          ),
+    [props.facilityNarrow, props.facilityOptions, snap],
+  );
+  const memberElsewhere = useMemo(
+    () => (facilityKeys === null || snap === null ? [] : facilitiesElsewhere(snap.facilities, facilityKeys)),
+    [facilityKeys, snap],
+  );
+  const pickedFacilityNames = useMemo(
+    () => facilityDisplayNames(props.facilityNarrow, props.facilityOptions),
+    [props.facilityNarrow, props.facilityOptions],
+  );
+  /* THE BLAME, RESOLVED ONCE. Three consumers read it — the empty state, the "Not in this book" line's
+   * suppression, and (through `shownFacilities`) the area chips' word — and a diagnosis re-derived per
+   * surface is how three sentences come to disagree about which control the operator should press. */
+  const blamedNarrow: 'area' | 'facility' | null =
+    rankedFacilities.length === 0 || shownFacilities.length > 0
+      ? null
+      : facilityNarrowActive && facilityOnlyFacilities.length === 0
+        ? 'facility'
+        : 'area';
+  /* IS THE FLOOR ARM SPEAKING? S3's "Not in this book: X. This member has history there, but it is
+   * below the volume floor…" and that arm state the IDENTICAL fact ~340 characters apart, on the exact
+   * screen the arm exists for. The S3 line is not deleted — it still speaks for the member facilities
+   * the empty state is NOT about — its set is SUBTRACTED, so each facility is named once. */
+  const floorArmSpeaking = blamedNarrow === 'facility' && bookLeads && picksWithMemberHistory.length > 0;
+  const unlistedShown = useMemo(
+    () =>
+      floorArmSpeaking && facilityKeys !== null
+        ? unlistedMemberFacilities.filter((f) => !facilityKeys.has(f.facilityKey))
+        : unlistedMemberFacilities,
+    [floorArmSpeaking, facilityKeys, unlistedMemberFacilities],
   );
   // `areaActive` is declared once, above `skipProvenance` — see the comment there.
   // Two real buckets, or an active narrow that must stay clearable. One bucket is not a choice, and
   // a row of one chip reading "All · 12" is noise — the same rule the mobile deck applies.
   const showAreaLine = areaChips.length > 2 || areaActive;
+  // The picker needs a vocabulary; an active narrow must stay clearable even if the vocabulary is
+  // gone (a failed reload leaves the selection behind). Same shape as `showAreaLine`'s second arm.
+  const showFacilityLine = facilityOptions.length > 0 || facilityNarrowActive;
+  /* WHAT THE TWO GRID NARROWS ARE REACHING, in one clause, so one sentence covers both. Written as a
+   * phrase rather than two sentences because two `role="status"` lines for one screen state is the
+   * overlap review Finding 2 removed for the area alone. A single pick is NAMED — "at NASHVILLE" is
+   * what the operator asked for, and repeating it back is how they know the control took. */
+  const facilityReach =
+    pickedFacilityNames.length === 1
+      ? `at ${pickedFacilityNames[0]}`
+      : `at the ${pickedFacilityNames.length} facilities you picked`;
+  const narrowReach = areaActive
+    ? facilityNarrowActive
+      ? `in this area, ${facilityReach}`
+      : 'in this area'
+    : facilityReach;
   return (
     <Stage id="qualify-s-answer" question="Does this payer pay us — and where?">
-      {/* The identity of what is on screen, restated in one line — never re-derived. */}
+      {/* [BOOK-LED EXEMPT: it names the payer and the plan-or-no-plan, not the ranking]
+          Facts about the RESOLUTION, not about the list beneath it.
+          The identity of what is on screen, restated in one line — never re-derived. */}
       <p className="text-sm text-ink900">
         {/* `scopePayer` is null exactly when the ranking spans every label — an empty <span> would
             silently drop the subject of this sentence, so the all-payers case is named. */}
@@ -1913,6 +3021,9 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
           one was in hand — the banner REPLACED the answer instead of annotating it. */}
       {showSkeleton ? (
         <>
+          {/* [BOOK-LED EXEMPT: the first-load skeleton names no list]
+              `bookLeads` is false with no snapshot, and a progress line makes no claim about which
+              list is on its way. */}
           <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
             Ranking facilities for this plan…
           </p>
@@ -1922,6 +3033,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
 
       {/* A genuine FIRST load failed: there is nothing to preserve and nothing to dim. Copy is
           unchanged, and deliberately carries no Retry — see the refresh banner below for why. */}
+      {/* [BOOK-LED EXEMPT: nothing loaded, so no list is on screen to describe] */}
       {firstLoadFailed ? (
         <p role="status" className="rounded-lg border border-line bg-coral50 p-4 text-sm text-ink900">
           The facility ranking could not be loaded. The plan resolution above still stands — try again, or
@@ -1932,6 +3044,8 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
       {/* A REFRESH failed with a good answer still in hand. Say what is on screen and offer a real
           control — the old copy said "try again" while providing nothing to click, and re-clicking
           the same chip was a genuine no-op (unchanged scope key ⇒ the fetch effect never re-ran). */}
+      {/* [BOOK-LED EXEMPT: a claim about the REQUEST, not about the list it returned]
+          "The ranking below could not be refreshed" is true of either list. */}
       {refreshFailed ? (
         <p role="status" className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-coral50 p-4 text-sm text-ink900">
           <span>
@@ -1953,11 +3067,46 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
         // a thin indeterminate bar — a re-scope is not a first load, and blanking to a skeleton
         // makes every chip click feel like a page rebuild.
         <div className={`relative flex flex-col gap-4 ${stale ? 'opacity-60 transition-opacity duration-150' : ''}`}>
-          {props.refetching ? (
+          {/* `inFlight`, not `props.refetching`: a same-scope REFRESH is a running request too, and
+              the whole point of S5's marker is that `isRefetching` cannot see it. `staleAfterError`
+              is still excluded — motion is a progress claim, and a stopped fetch has none. */}
+          {inFlight ? (
             <span aria-hidden className="q-refetch-bar absolute inset-x-0 -top-2 h-0.5 overflow-hidden rounded-full">
               <span className="q-refetch-beam block h-full w-1/3 rounded-full bg-teal500" />
             </span>
           ) : null}
+
+          {/* ── THE PREFACE (S2, Alec's tree, 2026-08-08) ────────────────────────────────────────
+              WHICH WORLD THIS SEARCH IS IN, said BEFORE anything below claims anything.
+
+              Measured the same day: 58.8% of prefixes are ONE member carrying 1.14 facilities of
+              history, 37.0% are 2-9, and only 4.2% are the population the ladder, the confidence
+              floor and the blend disclosure were all designed around. Until this line, all three
+              were answered in identical words — so the majority case read as a thin ranking rather
+              than as what it is: a person, and the wrong shape of question.
+
+              It sits FIRST inside the answer block, above every scope banner, because a preface that
+              arrives after the claims is not a preface.
+
+              SUPPRESSED IN FLIGHT (rule 2654416), like every other categorical sentence here: it is
+              a statement about the data, and during a re-scope it would describe the set being
+              replaced. The dim + beam is the marker; this waits.
+
+              ONE MODULE, THREE SURFACES — this line and `liveSentenceFor` both call
+              `memberPrefaceFor`; the RECEIPT prints the count rather than the sentence, but it gates
+              on `memberBucketOf`, so all three share the same silence rule as well as the same
+              words. (This comment used to claim the receipt called `memberPrefaceFor`. It does not,
+              and never did — the chip is a numeral in a pill, not a sentence.)
+
+              ⚠ NOT a `role="status"`. The flow's single sr-only live region already announces this
+              exact string through `liveSentenceFor`, so a status role here would make it the one
+              doubly-announced sentence on the surface — the same overlap the team ruled against for
+              the area narrow's two competing status lines a few hundred rows below. The visible line
+              is text; announcing is the live region's job, and only it can sequence with the flow. */}
+          {!stale && preface !== null ? (
+            <p className="text-sm font-semibold text-ink900">{preface}</p>
+          ) : null}
+
           {/* SCOPE HONESTY (review Critical 1). When the pick couldn't be bridged to a claims label
               — no claims history for this plan, or an unmapped payer — the ranking below is the
               identifier's DOMINANT payer, and that must be said in words, not implied by chips.
@@ -1967,11 +3116,24 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               sends nothing, so its scopeSource IS 'dominant' — and this banner says a pick could not
               be scoped. Without the guard, decoupling would have swapped one wrong sentence for
               another on the very screen it exists to fix. */}
+          {/* ⚠ [BOOK-LED SURFACE] — AND IT WAS THE THIRTEENTH, found in review after this file's own
+              index declared the set complete. Both arms re-base; NEITHER is suppressed. The banner
+              renders in the coral ALARM treatment directly above the grid, and its gate never
+              mentioned `bookLeads` — so on the 58.8% path it claimed "the ranking below is this
+              identifier's history under {payer}" over a grid showing that payer's WHOLE BOOK: the
+              S2-I1 / PR #92 mixed-claim class, in the loudest voice on the surface. The banner's
+              SUBJECT (the pick could not be bridged to a claims label) stays true and stays alarming;
+              only the half that describes the LIST moves, on the same discipline as the skip
+              banner's re-base below. Copy unratified. */}
           {!stale && !skipped && props.scopeSource === 'dominant' && snap.resolved && r.candidates.total > 1 ? (
             <p role="status" className="rounded-lg border border-line bg-coral50 p-4 text-sm text-ink900">
               {g.claimEvidence.lines === 0
-                ? `This plan has no claims history of its own — the ranking below is this identifier's history under ${snap.resolved.payerName}, not evidence about ${g.payerDisplayName}.`
-                : `The ranking below could not be scoped to ${g.payerDisplayName} — it shows this identifier's history under ${snap.resolved.payerName}, its largest payer by volume.`}
+                ? bookLeads
+                  ? `This plan has no claims history of its own — the ranking below is ${bookPayer}'s whole book, not evidence about ${g.payerDisplayName}.`
+                  : `This plan has no claims history of its own — the ranking below is this identifier's history under ${snap.resolved.payerName}, not evidence about ${g.payerDisplayName}.`
+                : bookLeads
+                  ? `The ranking below could not be scoped to ${g.payerDisplayName} — it shows ${bookPayer}'s whole book, this identifier's largest label by volume, not evidence about ${g.payerDisplayName}.`
+                  : `The ranking below could not be scoped to ${g.payerDisplayName} — it shows this identifier's history under ${snap.resolved.payerName}, its largest payer by volume.`}
             </p>
           ) : null}
 
@@ -1982,6 +3144,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               2026-08-07: the sentence used to end "under {payerName}", which was true of the label but
               not of the promise ("search all plans"). Now it can say what it always meant, and the
               payer-scoped arm survives for the case where a chip re-scoped it. */}
+          {/* [BOOK-LED SURFACE] — the third arm below is the book-led one. */}
           {!stale && skipped && snap.resolved ? (
             <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink900">
               {allPayers ? (
@@ -1996,6 +3159,18 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                     ? `across all ${snap.payerOptions.length} payers they bill under`
                     : 'across every payer they bill under'}
                   . Use the switches below to narrow it, or the receipt above to pick a plan.
+                </>
+              ) : bookLeads ? (
+                /* ⚠ THE PROMISE IN THE OTHER ARM IS FALSE UNDER A BOOK-LED GRID. "Every facility this
+                   member has history at" describes the member's footprint, and after the flip the
+                   list below is the payer's whole book — the member's history is a MARK on it. Same
+                   state (a Skip re-scoped by one billed-under chip), different list, so it gets its
+                   own sentence rather than inheriting one written for the other. */
+                <>
+                  You skipped the plan questions, and the ranking is {snap.resolved.payerName}&apos;s whole book:
+                  every facility that label paid at above the volume floor in this window, with the ones
+                  this member has been to marked. Turn the BILLED UNDER switch off to search across every
+                  label again.
                 </>
               ) : (
                 <>
@@ -2061,18 +3236,65 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               <h3 id="qualify-narrow-heading" className="text-xs font-semibold uppercase tracking-wide text-teal200">
                 Narrow search
               </h3>
-              <button
-                type="button"
-                aria-expanded={props.narrowExpanded}
-                aria-controls="qualify-narrow-fields"
-                onClick={props.onToggleNarrow}
-                className="flex items-center gap-1.5 rounded-full border border-teal200/40 bg-white/10 px-3 py-1 text-xs font-semibold text-white transition-colors hover:border-teal200 hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/60"
-              >
-                {props.narrowExpanded ? 'Hide the fields' : 'Change these'}
-                <span aria-hidden className={`text-teal200 transition-transform ${props.narrowExpanded ? 'rotate-180' : ''}`}>
-                  ▾
-                </span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                {/* ── THE REFRESH CONTROL (S5, 2026-08-08) ────────────────────────────────────────
+                    ON THE CARD, and the card's own rule is exactly why: *everything on the control
+                    card re-issues the ranking request*, and this is the only thing here that does
+                    nothing BUT that. The same rule keeps the two grid narrows (area, facility)
+                    outside the card; this is it applied in the other direction.
+
+                    IN THE HEADER ROW, so it survives the disclosure. The collapsed card is what an
+                    operator meets on every path except a Skip, and a refresh that costs a click to
+                    reach is a refresh nobody presses.
+
+                    ⚠ SAME HANDLER AS THE FAILURE BANNER'S "Try again", not a second one.
+                    `retry_requested` was always general — the one reducer case that bypasses the
+                    bail-out guard, so it fires with no error present and no input moved. A second
+                    refetch path would be a second writer of the value the fetch effect keys on,
+                    which is the shape `scopeKeyOf`'s header is a post-mortem of.
+
+                    ⚠ DISABLED WHILE IN FLIGHT, AND WHILE THE RESOLVE IS PENDING. Every press writes
+                    one `SEARCH_QUALIFY_PHI` row (the core audits BEFORE any data), and this repo has
+                    already treated duplicate audit rows from one user action as a defect worth its
+                    own fix (payerOverride.ts). `pending` is in the guard because the fetch effect
+                    returns early while the server action runs — a press there would arm the
+                    in-flight marker with no request behind it.
+
+                    ⚠ `type="button"`. A submit would reach a form action and re-run
+                    `resolveCoverageAction`, which writes sixteen reducer fields and drops the
+                    operator back to the payer stage. Copy unratified. ── */}
+                <button
+                  type="button"
+                  onClick={props.onRetry}
+                  /* ⚠ `aria-disabled`, NOT THE REAL ATTRIBUTE (fix round M3). `disabled` makes the
+                     element unfocusable the instant it lands — so the control the operator is
+                     STANDING ON stops being focusable mid-press and focus falls to <body>, the exact
+                     regression the shell's focus effect exists to prevent one layer up; it is also
+                     not reliably announced. The REFUSAL moved into `makeRetryHandler`, where a
+                     second press during flight is a tested no-op rather than a browser side effect,
+                     and the visual treatment is unchanged. */
+                  aria-disabled={props.refreshing || props.pending}
+                  aria-busy={props.refreshing}
+                  className="flex items-center gap-1.5 rounded-full border border-teal200/40 bg-white/10 px-3 py-1 text-xs font-semibold text-white transition-colors hover:border-teal200 hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/60 aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
+                >
+                  <span aria-hidden className={props.refreshing ? 'animate-spin' : ''}>
+                    ↻
+                  </span>
+                  {props.refreshing ? 'Refreshing the ranking…' : 'Refresh the ranking'}
+                </button>
+                <button
+                  type="button"
+                  aria-expanded={props.narrowExpanded}
+                  aria-controls="qualify-narrow-fields"
+                  onClick={props.onToggleNarrow}
+                  className="flex items-center gap-1.5 rounded-full border border-teal200/40 bg-white/10 px-3 py-1 text-xs font-semibold text-white transition-colors hover:border-teal200 hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/60"
+                >
+                  {props.narrowExpanded ? 'Hide the fields' : 'Change these'}
+                  <span aria-hidden className={`text-teal200 transition-transform ${props.narrowExpanded ? 'rotate-180' : ''}`}>
+                    ▾
+                  </span>
+                </button>
+              </div>
             </div>
 
             {/* ── THE SUMMARY. Every line below is a STATEMENT about the search, which is why it is
@@ -2109,9 +3331,56 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                   said the content shows the previous scope — "Showing trailing 365 days" printed
                   beside that banner would be a direct contradiction. The Window CHIPS stay behind the
                   disclosure — they are the user's controls (and, after a failure, the escape route). */}
-              {props.staleAfterError || (props.refetching && props.windowDays === null) ? null : (
+              {props.staleAfterError || (inFlight && props.windowDays === null) ? null : (
                 <p className="text-sm text-teal50">{windowSentence(snap, props.windowDays)}</p>
               )}
+
+              {/* ── THE WINDOW MOVED UNDER THE OPERATOR (S5) ──────────────────────────────────────
+                  `scopeKeyOf` serializes the automatic case as the literal 'auto' and NOT the
+                  ladder's chosen days, so a refresh that lands on a different rung leaves
+                  `loadedKey === scopeKey`: every staleness flag reads "nothing changed", the facet
+                  badge above still says "On · automatic", and the sentence one line up quietly
+                  renders a different number. That is a scope change nobody is told about, on the
+                  surface this whole lineage exists to keep honest.
+
+                  ⚠ THREE GATES, AND EACH ONE IS A DIFFERENT FALSE SENTENCE IT PREVENTS.
+                    · `!stale` — RULE 2654416: it is a categorical claim about the data, so it waits
+                      like every other one rather than describing the set being replaced.
+                    · `windowDays === null` — it is a claim about the AUTOMATIC window. Rendered
+                      beside "Showing trailing 180 days — your selection" it would be two
+                      contradictory sentences about the same control. The reducer cannot know a
+                      manual selection arrived after the resolve, so the render decides.
+                    · `windowMove !== null` — THE NEGATIVE CONTROL. Most refreshes return the same
+                      rung; a notice that fired on every one would be noise, and noise is how the
+                      real one gets ignored.
+
+                  ONE EXPRESSION, TWO CHANNELS: `liveSentenceFor` announces this exact string. ── */}
+              {/* [BOOK-LED EXEMPT: it describes the WINDOW the request used, not which list came back]
+                  Both the member's footprint and the payer's book are loaded over the same chosen
+                  window, so the sentence is true word for word in either mode. */}
+              {!stale && props.windowDays === null && props.windowMove !== null ? (
+                <p role="status" className="rounded-lg border border-teal200/40 bg-white/10 p-2.5 text-xs font-medium text-white">
+                  {windowMoveNotice(props.windowMove)}
+                </p>
+              ) : null}
+
+              {/* ── WHEN THIS DATA WAS BUILT (S5) ─────────────────────────────────────────────────
+                  The refresh control's own basis line: what it is refreshing FROM. It sits in the
+                  summary rather than beside the button because it is a STATEMENT, and this card's
+                  one sorting rule is statements-in-the-summary / controls-behind-the-click.
+
+                  ⚠ NOT SUPPRESSED IN FLIGHT, unlike every sentence above it, and the exception is
+                  principled rather than convenient: those describe the SET being replaced, this
+                  describes the PIPELINE. Blanking it during the very refresh it explains would
+                  remove the one line that answers "is this even going to be newer?" at the only
+                  moment the operator is asking.
+
+                  `rebuiltAtSentence` owns the copy, the named timezone, and the argument for why
+                  `max(ingested_at)` and `rollup_max_payment_date` are both disqualified. ── */}
+              {/* [BOOK-LED EXEMPT: it dates the index rebuild, not the list that came back]
+                  `facilities` and `bookFacilities` are two queries over one matview, so one rebuild
+                  time is the honest answer in either mode. */}
+              <p className="text-xs text-teal200">{rebuiltAtSentence(props.dataRebuiltAt, { refreshFailed })}</p>
               {/* THE PAYER-SCOPE CLAIM. "You picked this" / "your plan pick implies this" / "we
                   defaulted" are three different claims, and a REJECTED override must never render as
                   honoured. It sits in the SUMMARY rather than beside its chips because it is a
@@ -2160,10 +3429,21 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                   The fix is NOT to fold AREA into `cardFacets`: its control lives beside the grid it
                   narrows and that placement is the honesty argument made in layout (see AreaLine).
                   Instead the tally scopes its claim to this card ("of these") and NAMES the narrow
-                  that is not in it when that narrow is live. Wording is unratified — plain on purpose. */}
+                  that is not in it when that narrow is live. Wording is unratified — plain on purpose.
+
+                  ⚠ S4 MADE IT TWO. The facility narrow lands beside the area one, outside this card
+                  for the identical reason, so the clause ENUMERATES rather than counts: "plus 2
+                  narrows beside the list" is arithmetically honest and operationally useless — it
+                  sends an operator hunting for the second one. Naming both costs four words. */}
               <p className="text-xs text-teal200">
                 <span className="font-semibold text-white">{cardFacetsOn} of these {cardFacets.length} switches on</span>
-                {areaActive ? ' · plus the area narrow, beside the list' : ''}
+                {areaActive && facilityNarrowActive
+                  ? ' · plus the area and facility narrows, beside the list'
+                  : areaActive
+                    ? ' · plus the area narrow, beside the list'
+                    : facilityNarrowActive
+                      ? ' · plus the facility narrow, beside the list'
+                      : ''}
                 {props.narrowExpanded ? '' : ' — open the fields to change any of them'}
               </p>
 
@@ -2352,7 +3632,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               // there is no progress to claim once the request has stopped.
               <span
                 aria-hidden
-                className={`h-14 w-full max-w-sm rounded-lg bg-ground ${props.refetching ? 'animate-pulse' : ''}`}
+                className={`h-14 w-full max-w-sm rounded-lg bg-ground ${inFlight ? 'animate-pulse' : ''}`}
               />
             ) : (
               <>
@@ -2393,16 +3673,84 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
           {/* The scorecard. Ranked; each card explains itself behind ONE disclosure. The AREA row
               sits here rather than on the control card above BECAUSE it does not re-scope anything:
               it hides rows the ranking already returned. Layout carries that distinction. */}
-          <section aria-labelledby="qualify-scorecard-heading" className="flex flex-col gap-2">
+          <section
+            aria-labelledby="qualify-scorecard-heading"
+            /* THE SAME MARKER THE SECONDARY SECTION CARRIES, so "where is the payer's book" has one
+               answer in either position — and so a test asserting a book claim cannot be satisfied by
+               a sentence rendered in the other section. Exactly ONE `[data-v3-book]` is ever on the
+               page: leading here, or secondary below, never both. */
+            {...(bookLeads ? { 'data-v3-book': '' } : {})}
+            className="flex flex-col gap-2"
+          >
             <h3 id="qualify-scorecard-heading" className="ths-h text-base font-semibold text-ink900">
-              Facilities, ranked
+              {/* THE HEADING NAMES THE LIST (S3). "Facilities, ranked" was minted for the member's own
+                  footprint; over the payer's book it is the same words describing a different claim,
+                  which is how a surface starts lying without changing a sentence. */}
+              {bookLeads ? `Where ${bookPayer} pays — the whole book` : 'Facilities, ranked'}
             </h3>
-            {showAreaLine ? (
-              <AreaLine chips={areaChips} active={props.area} counts={areaCounts} onSelect={props.onSelectArea} />
+            {/* ── THE BOOK-LED BASIS LINE ──────────────────────────────────────────────────────────
+                It carries the same discipline S2's secondary section established — say what this
+                list IS, in its own words, and never borrow the claims above it — plus the one thing
+                only the LEADING position needs: what the mark on a card means. Copy unratified. */}
+            {bookLeads ? (
+              <p className="text-xs text-ink600">
+                <span className="ths-num" aria-label={`${rankedFacilities.length} facilities in this payer's book`}>
+                  {rankedFacilities.length}
+                </span>{' '}
+                {/* ⚠ "ABOVE THE VOLUME FLOOR" IS NOT HEDGING — WITHOUT IT THIS SENTENCE CONTRADICTS
+                    THE ONE BELOW IT (final review, 2026-08-08). The book load runs
+                    `assembleFacilities(..., applyFloor = true)` and the member load does not
+                    (core.ts), which is why this very screen can render "…is below the volume floor
+                    for {payer} in this window" a few rows down. "Every facility {payer} paid at",
+                    unqualified, is false of a floored list and is contradicted in place by its own
+                    neighbour. THE THRESHOLD ITSELF IS NOT SPELLED OUT HERE, deliberately: it lives
+                    with `QUALIFY_MIN_LINES` (rating.ts) and three hand-copied numerals in three
+                    sentences is three places for it to rot. Copy unratified. */}
+                facilities — every facility {bookPayer} paid at above the volume floor in the window
+                shown, not just this member&apos;s. One member is behind this search and 1.14 facilities is
+                not a ranking, so the book leads and this member&apos;s own history is marked on the
+                facilities they have been to.
+              </p>
+            ) : null}
+            {/* ── THE GRID-NARROW ROW: the two controls that hide rows without re-asking for them.
+                They share a row because they share a rule — everything on the control card above
+                re-issues the ranking request, and neither of these does. AREA first, then FACILITY:
+                DOM order is the reveal's stagger order, and the type-ahead (which opens a dropdown
+                downward) belongs at the bottom edge of the row rather than above a chip wall.
+
+                ⚠ NO CLIPPING ANCESTOR HERE, AND THAT IS CHECKED RATHER THAN ASSUMED. The picker's
+                option list is absolutely positioned; the NARROW SEARCH card moved its
+                `overflow-hidden` down onto a paint-only layer for exactly that reason. This row sits
+                OUTSIDE that card, in the scorecard section, whose chain to `[data-v3-stage]` carries
+                no `overflow-hidden` at all — verified 2026-08-08, and a future wrapper that adds one
+                would clip these matches with nothing wrong in the DOM to notice. ── */}
+            {showAreaLine || showFacilityLine ? (
+              <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
+                {showAreaLine ? (
+                  <AreaLine
+                    chips={areaChips}
+                    active={props.area}
+                    counts={areaCounts}
+                    /* The count on SCREEN, after both grid narrows — so a lit chip cannot say
+                       " · showing" over an empty grid. See the prop's own doc. */
+                    shown={shownFacilities.length}
+                    onSelect={props.onSelectArea}
+                  />
+                ) : null}
+                {showFacilityLine ? (
+                  <FacilityNarrowLine
+                    options={facilityOptions}
+                    selected={props.facilityNarrow}
+                    onToggle={props.onToggleFacility}
+                  />
+                ) : null}
+              </div>
             ) : null}
             {/* ⚠ THE HERO IS NOT RE-DERIVED FOR THE AREA, and this sentence is why that is honest
-                rather than a bug. `derivePolicyRating` runs over `snap.facilities` — the whole
-                ranked scope — and recomputing it per area would let a grid-only control silently
+                rather than a bug. `derivePolicyRating` runs over `answerFacilities` — the whole
+                LEADING list, whichever it is (it stopped being `snap.facilities` when the book-led
+                flip landed, and this citation said otherwise for a round) — and recomputing it per
+                area would let a grid-only control silently
                 move the headline number and its "N rated facilities" basis. So the number keeps its
                 meaning and the narrow states its own reach instead.
                 GATED ON `shownFacilities.length > 0` TOO (review Finding 2), not `areaActive` alone:
@@ -2411,7 +3759,12 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 sentences on screen for the same click — "Showing 0 of 3…" right next to "No ranked
                 facility is in this area." The zero-count case has nothing left for this sentence to
                 say that the other one doesn't already say better. */}
-            {areaActive && shownFacilities.length > 0 ? (
+            {/* [BOOK-LED SURFACE]
+                It reads `rankedFacilities`, which IS the leading list, so the "N of M" and the "the
+                rating above still covers all M" clause both follow the flip by construction rather
+                than by a branch. Marked so the grep finds it anyway: it is a claim about what is on
+                screen, and the day it hard-codes `snap.facilities` it lies. */}
+            {(areaActive || facilityNarrowActive) && shownFacilities.length > 0 ? (
               <p role="status" className="text-xs text-ink600">
                 Showing{' '}
                 <span className="ths-num" aria-label={`${shownFacilities.length} facilities shown`}>
@@ -2421,29 +3774,183 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 <span className="ths-num" aria-label={`${rankedFacilities.length} ranked facilities in total`}>
                   {rankedFacilities.length}
                 </span>{' '}
-                ranked facilities in this area. The ranking itself was not re-run — the rating above
+                ranked facilities {narrowReach}. The ranking itself was not re-run — the rating above
                 still covers all {rankedFacilities.length}.
               </p>
             ) : null}
+            {/* ⚠ NOT CAPPED WHEN THE BOOK LEADS, AND THE ARGUMENT INVERTS RATHER THAN WEAKENS.
+                S2 caps the SECONDARY section at QUALIFY_BOOK_PREVIEW because a secondary section
+                that pushes the answer off screen has stopped being secondary. Here the book IS the
+                answer, and availability leads the sort — so a cap would systematically remove the
+                FULL houses, turning "census sorts, it never filters" into a filter by omission on
+                the primary grid. The whole book is <=48 facilities; that is a real DOM cost (up to
+                48 cards, each with a `<details>` and a factor table) and it is the accepted one. The
+                AREA line above is the narrow, and it is why that line earns its place here. */}
             <ul className="grid list-none grid-cols-1 gap-3 p-0 lg:grid-cols-2">
               {shownFacilities.map((f) => (
-                <ScoreCard key={f.facilityKey} f={f} allPayers={allPayers} />
+                <ScoreCard
+                  key={f.facilityKey}
+                  f={f}
+                  allPayers={allPayers}
+                  historyChip={memberHistoryChipFor(snap.memberCount, f.memberHistory)}
+                />
               ))}
             </ul>
-            {/* Two different emptinesses, two different sentences. "Nothing ranked at all" is a
-                statement about the payer and the window; "nothing in TN" is a statement about the
-                chip the user just pressed, and the fix for it is one click away. */}
+            {/* ── THE MEMBER FACILITIES THE BOOK'S FLOOR DROPPED (S3) ─────────────────────────────
+                See `unlistedMemberFacilities` for why this can happen and why the floor is the only
+                possible cause. Without this line the flip would silently delete the most decisive
+                fact on the screen — "they have been here" — for precisely the thinnest facilities,
+                which are the ones a 1.14-facility member is most likely to have. Names only: they
+                are non-PHI and already render on every card. Copy unratified. */}
+            {/* ⚠ READS `unlistedShown`, NOT `unlistedMemberFacilities` (fix round 1, I3). When the
+                facility narrow's FLOOR arm is speaking below, it already states this exact fact about
+                the picked facilities — so those are subtracted here rather than the whole line being
+                suppressed, which would silently drop the member facilities the empty state is not
+                about. Each facility is named once, by the sentence that is about it. */}
+            {unlistedShown.length > 0 ? (
+              <p className="text-xs text-ink600">
+                Not in this book:{' '}
+                <span className="font-semibold text-ink900">
+                  {unlistedShown.map((f) => f.name).join(' · ')}
+                </span>
+                . This member has history there, but {unlistedShown.length === 1 ? 'it is' : 'they are'}{' '}
+                below the volume floor for {bookPayer} in this window, so the book cannot rank{' '}
+                {unlistedShown.length === 1 ? 'it' : 'them'}.
+              </p>
+            ) : null}
+            {/* THREE different emptinesses, three different sentences (S4 added the third). "Nothing
+                ranked at all" is a statement about the payer and the window; "nothing in TN" is a
+                statement about the chip the user just pressed; "no history at NASHVILLE" is a
+                statement about a PLACE, and it is the one an admissions seat is actually asking.
+                Each fix is one click away and each sentence says which click.
+
+                ⚠ WHICH NARROW GETS BLAMED IS COMPUTED, NOT GUESSED. With both narrows on, asking the
+                facility narrow ALONE separates the diagnoses: rows survive it ⇒ the AREA emptied the
+                grid and the area sentence is the honest one; nothing survives it ⇒ the facility
+                narrow did. Blaming the wrong control sends the operator to undo the wrong thing. */}
+            {/* [BOOK-LED SURFACE]
+                Unreachable while the book leads (a leading book is non-empty by `bookLeadsAnswer`'s
+                own precondition), which is WHY it still speaks of the member's scope. If that
+                precondition is ever relaxed, this sentence is the first thing to move. */}
             {rankedFacilities.length === 0 ? (
               <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
                 No facility has claims history under this scope in the window shown.
               </p>
-            ) : shownFacilities.length === 0 ? (
+            ) : /* [BOOK-LED SURFACE]
+                   BOTH blamed arms now come from ONE builder (fix round 1, I1) — the area arm was an
+                   inline literal here, and splitting it is what let it keep promising the un-narrowed
+                   total after a second narrow could compose with it. The facility arms re-base on
+                   `bookLeads` explicitly, because "no history at NASHVILLE" is a claim about the MEMBER
+                   while a book-led grid is a claim about the PAYER; the area arm's count is of the
+                   LEADING list and follows the flip by construction. */
+            blamedNarrow !== null ? (
               <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
-                No ranked facility is in this area. The {rankedFacilities.length} facilities behind this
-                answer are still there — choose All above to see them.
+                {gridNarrowEmptyCopy({
+                  blame: blamedNarrow,
+                  areaActive,
+                  facilityActive: facilityNarrowActive,
+                  picked: pickedFacilityNames,
+                  pickedWithHistory: picksWithMemberHistory,
+                  bookLeads,
+                  bookPayer,
+                  rankedTotal: rankedFacilities.length,
+                  afterClearingFacility: areaOnlyFacilities.length,
+                  afterClearingArea: facilityOnlyFacilities.length,
+                  elsewhere: memberElsewhere,
+                })}
               </p>
             ) : null}
           </section>
+
+          {/* ── THE PAYER'S WHOLE BOOK, SECONDARY (S2, 2026-08-08) ───────────────────────────────
+              "Does this policy pay, ANYWHERE" — the question the member's own footprint cannot
+              answer when that footprint is 1.14 facilities, which it is 58.8% of the time.
+
+              ⚠ IT CARRIES ITS OWN BASIS LABEL AND BORROWS NONE. Every claim surface above this
+              section — the identity line, the resolved-scope sentence, the skip banner, the hero's
+              "N rated facilities", the AI grounding caption — describes the SEARCHED IDENTIFIER, and
+              a second ranked list that quietly inherited any of them would be exactly the scope lie
+              PRs #92 / #148 / #157 were each spent removing. So this states what it is, in its own
+              words, above its own grid.
+
+              ⚠ SAME `ScoreCard`, DELIBERATELY. S1's census chips, the sunk treatment and the rating
+              words come free and cannot fork. `allPayers={false}` is not a convenience: the book is
+              payer-scoped BY CONSTRUCTION (it is null whenever the ranking is identifier-wide), so
+              `count(distinct primary_payer)` over its rows is 1 by the equality that built them and
+              the blend disclosure has nothing to disclose. Passing the member ranking's `allPayers`
+              through would have printed "1 payer · AETNA" on every book card — noise dressed as a
+              finding.
+
+              ⚠ SECONDARY ONLY WHEN THE BOOK DOES NOT LEAD (S3). At one member the book IS the grid
+              above and this section must not render a second copy of it; in every other bucket the
+              identifier has a real population of its own, keeps the lead, and this stays where S2
+              put it. `!bookLeads` is the whole difference — the section's own markup is unchanged. */}
+          {bookOnScreen && !bookLeads && bookPayer !== null ? (
+            <section data-v3-book aria-labelledby="qualify-book-heading" className="flex flex-col gap-2">
+              <h3 id="qualify-book-heading" className="ths-h text-base font-semibold text-ink900">
+                Where {bookPayer} pays — across the whole book
+              </h3>
+              <p className="text-xs text-ink600">
+                <span className="ths-num" aria-label={`${bookFacilities!.length} facilities in this payer's book`}>
+                  {bookFacilities!.length}
+                </span>{' '}
+                {/* THE FLOOR, STATED — see the leading basis line's note. Here the contradiction is
+                    starker still: at an EMPTY book this sentence reads "0 facilities — every facility
+                    {payer} paid at" directly above "No facility … clears the volume floor". */}
+                facilities — every facility {bookPayer} paid at above the volume floor in this window,
+                not this member&apos;s history. Ranked the same way: a facility that can admit today first,
+                then the rating.
+              </p>
+              <ul className="grid list-none grid-cols-1 gap-3 p-0 lg:grid-cols-2">
+                {bookFacilities!.slice(0, QUALIFY_BOOK_PREVIEW).map((f) => (
+                  /* THE ANNOTATION RIDES HERE TOO (S3). The join is a fact about the data, not about
+                     the flip — so where the searched identifier HAS billed at a facility in this
+                     payer's book, the card says so in every bucket. The WORDS differ (see
+                     `memberHistoryChipFor`): at 2-9 the lines belong to several people, and "seen
+                     here before" would tell a rep one patient has a relationship a facility that
+                     some of four do. */
+                  <ScoreCard
+                    key={f.facilityKey}
+                    f={f}
+                    allPayers={false}
+                    historyChip={memberHistoryChipFor(snap.memberCount, f.memberHistory)}
+                  />
+                ))}
+              </ul>
+              {/* THE CAP IS STATED, NEVER SILENT. A secondary section must not push the answer off
+                  the screen, but a truncated list that does not say it is truncated is a list making
+                  a completeness claim it has not earned — and because availability leads the sort,
+                  the rows a cap removes skew toward the full ones. Both facts, in one line.
+
+                  ⚠ THE SECOND FACT IS NOW **COUNTED**, NOT PREDICTED (final review, 2026-08-08). It
+                  read "A facility with no open beds sorts to the end, so it will be in the part not
+                  shown" — a claim about WHERE the full houses are, and it holds only while the book
+                  has fewer than QUALIFY_BOOK_PREVIEW open facilities. With eight or more open ones,
+                  a full house is beyond the cap because there are simply more than eight, not because
+                  it is full; and with a full house INSIDE the first eight the sentence is false
+                  outright. Both states are reachable on a 48-facility book and both are pinned.
+
+                  So it states what is true of THIS render: how many of the rows the cap removed have
+                  no open beds. Zero is a real and honest answer ("0 of the 6 not shown…"), which is
+                  precisely what a predicted claim could not say. `f.bedState` is the server's answer
+                  — the same value that decided the sort tier — never a second derivation from
+                  `openBeds`, which is 0 on every outpatient row. */}
+              {bookFacilities!.length > QUALIFY_BOOK_PREVIEW ? (
+                <p className="text-xs text-ink600">
+                  Showing the {QUALIFY_BOOK_PREVIEW} best-ranked of {bookFacilities!.length}. A facility
+                  with no open beds sorts below one that can admit today, and{' '}
+                  {bookHiddenFull} of the {bookFacilities!.length - QUALIFY_BOOK_PREVIEW} not shown{' '}
+                  {bookHiddenFull === 1 ? 'has' : 'have'} no open beds.
+                </p>
+              ) : null}
+              {/* [BOOK-LED EXEMPT: renders only when the book does NOT lead] */}
+              {bookFacilities!.length === 0 ? (
+                <p role="status" className="rounded-lg border border-line bg-teal50 p-4 text-sm text-ink600">
+                  No facility in {bookPayer}&apos;s book clears the volume floor in the window shown.
+                </p>
+              ) : null}
+            </section>
+          ) : null}
         </div>
       ) : null}
 
@@ -2486,19 +3993,49 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
             {(['ranking', 'policy', 'ai'] as const).map((panel) => (
               <div key={panel} className="flex flex-col">
                 <dt className="text-xs font-medium uppercase tracking-wide text-ink400">
-                  {panel === 'ranking' ? 'Facility ranking' : panel === 'policy' ? 'Policy card' : 'AI explainer'}
+                  {/* ⚠ M8 (S3): "Facility ranking" IS SINGULAR AND THE SCREEN HAS TWO. This panel is
+                      the one place a reader goes to ask what backs each region, so it is the last
+                      place the count of rankings may be left implicit. */}
+                  {panel === 'ranking'
+                    ? bookLeads
+                      ? 'Facility rankings'
+                      : 'Facility ranking'
+                    : panel === 'policy'
+                      ? 'Policy card'
+                      : 'AI explainer'}
                 </dt>
                 {/* See skipProvenance: r.provenance is resolve-time and names the DECLINED plan's
-                    employer and member/line counts. The panels are identifier-wide after a skip. */}
-                <dd className="text-sm text-ink900">{skipped ? skipProvenance[panel] : r.provenance[panel]}</dd>
+                    employer and member/line counts. The panels are identifier-wide after a skip.
+                    ⚠ AND ON THE NON-SKIPPED PATH `r.provenance.ranking` IS MINTED SERVER-SIDE from
+                    the chosen candidate — it describes a plan, and says nothing about which of the
+                    two rankings leads. The book-led arm replaces it rather than appending, because
+                    "which list is this" is the question this row exists to answer. The SKIPPED path
+                    already carries its own book-led arm through `skipProvenance.ranking`. */}
+                <dd className="text-sm text-ink900">
+                  {skipped
+                    ? skipProvenance[panel]
+                    : panel === 'ranking' && bookLedRankingTrace !== null
+                      ? bookLedRankingTrace
+                      : r.provenance[panel]}
+                </dd>
               </div>
             ))}
             <div className="flex flex-col">
               <dt className="text-xs font-medium uppercase tracking-wide text-ink400">KPI tiles</dt>
               {/* The ratified wording, verbatim — the book-wide tiles are deliberately NOT about this client.
                   CORRECT after a skip too: `panelProvenance`'s book_wide arm (resolution.ts:304-308) is
-                  minted unconditionally and makes no claim about any plan or employer. Left untouched. */}
-              <dd className="text-sm text-ink900">{r.provenance.kpis}</dd>
+                  minted unconditionally and makes no claim about any plan or employer. Left untouched.
+
+                  ⚠ S3: THE RATIFIED STRING STAYS, AND STOPS BEING A DISTINCTION ON ITS OWN. "Book-wide,
+                  not this client" earned its keep by contrasting the tiles with a client-scoped ranking
+                  beside them. Once the ranking above is ALSO the book, a reader meeting that sentence
+                  reasonably infers a difference that is no longer there. The wording is ratified copy
+                  and is not edited; the clause that follows it is this screen's own, and only renders
+                  where the contrast has collapsed. */}
+              <dd className="text-sm text-ink900">
+                {r.provenance.kpis}
+                {bookLeads ? ' — and so is the ranking above, now that the book leads' : ''}
+              </dd>
             </div>
           </dl>
           {/* ⚠ THE PREDICATE IS RE-CAPTIONED WHEN SKIPPED, NOT SUPPRESSED. `predicateIdFor` hashes the
@@ -2544,7 +4081,9 @@ export interface ResolutionStagesProps {
   onPlanFilter: (v: string) => void;
   onAskAi: () => void;
   onChange: (backTo: 'identify' | 'payer' | 'plan') => void;
-  /** The Skip escape hatch, offered on both narrowing stages. */
+  /** The Skip escape hatch. Since S6 it is dispatched from ONE control, rendered beneath the step
+   *  rail on the two narrowing stages — see `skipOffered` and `SkipStep`. Same `skipped` action; no
+   *  reducer change. */
   onSkip: () => void;
   /**
    * The "Facilities Heating Up" trend strip, passed as a SLOT (the shell owns its fetch and its
@@ -2616,6 +4155,21 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
 
       <StepRail stage={props.stage} resolution={props.resolution} payerGroups={props.payerGroups} />
 
+      {/* ── THE SKIP, DIRECTLY BENEATH THE RAIL (S6, 2026-08-08) ──────────────────────────────────
+          "Just underneath the green timeline", and one site rather than the three it used to render
+          from. `skipOffered` carries the per-stage gating — including the preserved 2026-08-06
+          carrier-count suppression, whose recorded premise died in the 2026-08-07 reversal and whose
+          RULING did not (see `SKIP_CARRIER_MAX`). It reads the same memoized clusters as the rail
+          immediately above it, so the two cannot count carriers differently.
+
+          It sits OUTSIDE `[data-v3-stage]` on purpose: the shell's entrance tween animates
+          `autoAlpha` over that subtree and `autoAlpha` means `visibility: hidden`, which would make
+          the loudest control on the screen unclickable and invisible to AT for the first frames of
+          every stage. Chrome does not blink; this control is live from frame zero. */}
+      {skipOffered(props.stage, props.resolution, props.payerGroups) ? (
+        <SkipStep onSkip={props.onSkip} what={props.stage === 'payer' ? 'the carrier step' : 'the plan step'} />
+      ) : null}
+
       {/* THE single live region — one, not one per panel; the important sentence must not queue. */}
       <p aria-live="polite" className="sr-only">
         {liveSentenceFor(props.stage, props.resolution, props.reason, {
@@ -2623,9 +4177,52 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
           scopePayer,
           scopeAllPayers,
           payerGroups: props.payerGroups,
+          /* S2: the preface, ANNOUNCED — and suppressed on exactly the same condition as the visible
+           * line. The sr-only region carries no dim and no beam, so a screen-reader user has no
+           * signal that what they are hearing describes a scope already being replaced; withholding
+           * the classification is the only way to say "provisional" in this channel. Without this
+           * gate the spoken claim would outlive the seen one, which is the disagreement the whole
+           * one-derivation discipline exists to prevent.
+           *
+           * ⚠ `refreshing` JOINS THE OTHER TWO (final review, 2026-08-08). The VISIBLE preface gates
+           * on `stale` — all three — and this gated on two, so a same-scope REFRESH left the spoken
+           * classification standing while the seen one waited. The aria channel must never say what
+           * the visible channel suppresses; S5's `windowMoved` gate below already carried all three,
+           * which is what made the gap visible. `bookLedPayer` deliberately keeps the two-state gate:
+           * its visible counterpart (the grid heading) is not suppressed on a refresh either, only
+           * dimmed, so adding `refreshing` there would make the spoken channel say LESS than the seen
+           * one — the same disagreement in the opposite direction. */
+          memberCount:
+            props.answer?.refetching || props.answer?.staleAfterError || props.answer?.refreshing
+              ? null
+              : (props.answer?.snapshot?.memberCount ?? null),
+          memberFacilityCount: props.answer?.snapshot?.facilities.length ?? 0,
+          /* S3: WHICH LIST THE GRID IS, ANNOUNCED. `bookLeadsAnswer` is the same predicate the stage
+           * renders on — the sr-only line is exactly where a scope claim survives a browser pass, and
+           * after the flip the un-updated sentence would describe the member's ranking over a grid
+           * showing the payer's whole book. SUPPRESSED IN FLIGHT on the two conditions that replace
+           * the SET (a re-scope, a failed re-scope) — deliberately NOT on `refreshing`; see the note
+           * on the classification above for why the third state is asymmetric here. */
+          bookLedPayer:
+            props.answer?.refetching || props.answer?.staleAfterError || !bookLeadsAnswer(props.answer?.snapshot)
+              ? null
+              : scopedPayerOf(props.answer?.snapshot?.resolved),
+          /* S5: THE WINDOW MOVE, ANNOUNCED — gated on exactly the three conditions the visible
+           * notice is gated on, because two channels making the same claim under different
+           * conditions is the disagreement this whole one-derivation discipline exists to prevent.
+           * `refreshing` joins the in-flight suppression here: a claim about a window that is being
+           * re-derived right now is a claim about the set being replaced. */
+          windowMoved:
+            props.answer?.refetching ||
+            props.answer?.staleAfterError ||
+            props.answer?.refreshing ||
+            props.answer?.windowDays != null
+              ? null
+              : (props.answer?.windowMove ?? null),
         })}
       </p>
 
+      {/* [BOOK-LED EXEMPT: an access decision, describing the viewer and never a list] */}
       {props.denied ? (
         <p role="status" className="rounded-md border border-line bg-teal50 p-4 text-sm text-ink900">
           {props.denied}
@@ -2640,6 +4237,7 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
           onChange={props.onChange}
           payerGroups={props.payerGroups}
           skipped={skipped}
+          memberCount={props.answer?.snapshot?.memberCount ?? null}
           scopePayer={scopePayer}
           scopeAllPayers={scopeAllPayers}
           scopeByUser={scopeByUser}
@@ -2658,6 +4256,7 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
               action={props.identifyAction}
               pending={props.pending}
             />
+            {/* [BOOK-LED EXEMPT: the identifier did not resolve, so no snapshot can lead] */}
             {!props.resolution && props.reason ? (
               <p role="status" className="mt-4 max-w-xl rounded-md border border-line bg-teal50 p-4 text-sm text-ink600">
                 {UNRESOLVABLE_COPY[props.reason]}
@@ -2667,12 +4266,7 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
         ) : null}
 
         {props.stage === 'payer' && props.resolution ? (
-          <StagePayer
-            resolution={props.resolution}
-            onPick={props.onPickPayer}
-            onSkip={props.onSkip}
-            payerGroups={props.payerGroups}
-          />
+          <StagePayer resolution={props.resolution} onPick={props.onPickPayer} payerGroups={props.payerGroups} />
         ) : null}
 
         {props.stage === 'plan' && props.resolution ? (
@@ -2683,7 +4277,6 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
             onPlanFilter={props.onPlanFilter}
             planAction={props.planAction}
             onAskAi={props.onAskAi}
-            onSkip={props.onSkip}
             pending={props.pending}
             payerGroups={props.payerGroups}
           />

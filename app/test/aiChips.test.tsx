@@ -93,6 +93,11 @@ function snap(over: Partial<QualifySnapshot>): QualifySnapshot {
     tenantScope: QUALIFY_TENANT_SCOPE,
     policy: null,
     ladder: null,
+    // S2 fields at their honest "not counted / no book" values. `aiChips` reads neither — the chip
+    // vocabulary comes from the member ranking and the policy card — but the contract declares them,
+    // and a fixture that omits a declared field has stopped describing the real wire.
+    memberCount: null,
+    bookFacilities: null,
     provenance: 'direct',
     payerOptions: [],
     payerOverridden: false,

@@ -22,6 +22,8 @@
  * admissions_seat session derives the identical number and band.
  */
 import type { QualifyFacility } from './contract';
+import type { QualifyBedState } from './bedState';
+import type { QualifyBookPlacement } from './bookPlacement';
 import { iqBandOf, IQ_BAND_LABELS, IQ_BAND_VERDICTS, type QualifyIqBand } from './ratingV2';
 import { ratingSampleTier } from './sampleGate';
 
@@ -63,6 +65,66 @@ export interface QualifyRankRow {
   band: QualifyIqBand;
   /** Non-dollar evidence caption — the sample behind the row. */
   evidence: string;
+  /**
+   * Bed availability for THIS row, carried so the strip cannot present a facility that cannot admit
+   * anyone as a placement. It is NOT a sort input here — see `qualifyRanksHeading` for why this
+   * table deliberately stays in rating order while the grid does not.
+   */
+  bedState: QualifyBedState;
+}
+
+/** The clause that stops the strip from silently contradicting the grid. Exported so the caption and
+ *  its test read the same string, and so any future surface reusing the strip inherits the disclosure. */
+export const QUALIFY_RANKS_BASIS_NOTE = 'by rating, not bed availability';
+
+/**
+ * THE STRIP'S HEADING — its population AND its ordering basis, in one line.
+ *
+ * WHY THIS EXISTS (S1 review, 2026-08-08). `deriveTopRanks` sorts by ratingV2 alone; since the
+ * availability tier landed at the head of the grid's comparator the two orders can DISAGREE ON THE
+ * SAME SCREEN. Reproduced: the grid showed an open house at rank 1 above a full house at rank 2
+ * while this strip led with the full one, so one facility wore a "2" on its card and a "1" here —
+ * and the strip renders precisely for the 'ranks' question, directly under prose the new prompt rule
+ * makes say that facility is full and ranked below. The comment above the strip claimed it "can
+ * never disagree with the cards or the bar". It could, and did.
+ *
+ * RESOLVED BY SAYING SO, NOT BY RE-SORTING, and the distinction is the point: this strip answers
+ * "which of these PAYS best", which is a rating question. Re-ordering it on beds would delete the
+ * only thing on screen that answers that — the grid already carries the availability answer, and two
+ * views of one order is not worth losing the second reading. So the strip keeps its order and stops
+ * being ambiguous about which question it is answering. When one of its own rows is full, that is
+ * named here too, rather than left to a chip further down the row that a reader may never reach.
+ *
+ * @param placement WHERE the payer's book is drawn relative to this strip (S3 fix round 1).
+ *
+ * ⚠ THE MITIGATION S3 CLAIMED FOR THIS NEVER RENDERS. The panel's idle caption (`active === null`)
+ * and this strip (`active === 'ranks'`) are MUTUALLY EXCLUSIVE — so the moment a reader asks the
+ * ranks question over a book-led screen, the caption naming the model's list disappears and this
+ * heading's only label is "Top N facilities · {payer} · by rating, not bed availability": a
+ * member-scoped table identified by nothing, directly beneath a grid of that payer's whole book.
+ *
+ * The strip's POPULATION does not move — it describes what the model actually read, and re-deriving
+ * it from the book would put a table on screen the payload never saw. Its LABEL says which
+ * population that is.
+ *
+ * `'secondary'` and `'none'` are byte-identical to what shipped, and `'secondary'` is not an
+ * oversight: there the member ranking IS the primary grid and the book is the clearly-labelled second
+ * thing, so a bare payer label already describes the list this strip is about. Only the flip inverts
+ * which list a bare label reads as. Copy unratified.
+ */
+export function qualifyRanksHeading(
+  rows: readonly QualifyRankRow[],
+  scopeLabel: string,
+  placement: QualifyBookPlacement = 'none',
+): string {
+  const anyFull = rows.some((r) => r.bedState === 'full');
+  return [
+    `Top ${rows.length} facilities`,
+    placement === 'leading' ? `this member's own history under ${scopeLabel}` : scopeLabel,
+    // Stated UNCONDITIONALLY. "It happens to match the grid today" is not a reason to leave the
+    // basis unsaid tomorrow — that is exactly how the claim this replaces became false.
+    anyFull ? `${QUALIFY_RANKS_BASIS_NOTE} — one or more are full` : QUALIFY_RANKS_BASIS_NOTE,
+  ].join(' · ');
 }
 
 export function deriveTopRanks(facilities: readonly QualifyFacility[], limit = 5): QualifyRankRow[] {
@@ -81,6 +143,8 @@ export function deriveTopRanks(facilities: readonly QualifyFacility[], limit = 5
       rating: f.ratingV2,
       // Every row here is rated, so iqBandOf cannot return null — assert it rather than widen the type.
       band: iqBandOf(f.ratingV2)!,
+      // Carried, never sorted on — the heading discloses the basis instead. See qualifyRanksHeading.
+      bedState: f.bedState,
       evidence: `${f.distinctPatients} patient${f.distinctPatients === 1 ? '' : 's'} · ${f.lineCount.toLocaleString('en-US')} lines`,
     }));
 }
@@ -105,18 +169,46 @@ export interface PolicyRatable {
   distinctPatients: number;
 }
 
-export function derivePolicyRating(facilities: readonly PolicyRatable[]): QualifyPolicyRating {
+/**
+ * @param basisScope OPTIONAL name for the POPULATION these facilities are (S3, 2026-08-08) — e.g.
+ * `"AETNA US HEALTHCARE's whole book"`. Omit and the basis line is byte-identical to what shipped.
+ *
+ * WHY IT IS PASSED IN AND NOT DERIVED. Since the book-led flip the same function is handed two
+ * genuinely different populations — the searched identifier's own footprint, and the payer's whole
+ * book — and "patient-weighted across 2 rated facilities" is true of both, so it identifies neither.
+ * This module cannot tell them apart (a row is a row), and inventing a guess from the rows would be
+ * exactly the second derivation the header's reconciled-by-construction argument exists to prevent.
+ * The caller knows which list it drew; it says so.
+ *
+ * It reaches the NOT_RATED arm too. "No facility clears the sample floor" over an unnamed list is
+ * the same unattributed claim as the rated basis — and it is the arm a thin book actually hits.
+ *
+ * ⚠ THE TWO 2026-08-08 CHANGES COMPOSE, and neither weakens the other: `basisScope` names the
+ * population for the on-screen basis line, while `PolicyRatable` widens WHICH rows may be folded.
+ * The nightly cron passes bare aggregates and no scope (its population is recorded per row in
+ * collections.qualify_policy_rating_daily, not in a sentence); every interactive caller keeps
+ * passing `QualifyFacility[]`, which satisfies `PolicyRatable` by subset.
+ */
+export function derivePolicyRating(
+  facilities: readonly PolicyRatable[],
+  basisScope?: string,
+): QualifyPolicyRating {
+  const inScope = basisScope === undefined ? '' : ` in ${basisScope}`;
+  const notRated: QualifyPolicyRating =
+    basisScope === undefined
+      ? NOT_RATED
+      : { ...NOT_RATED, basis: `no facility in ${basisScope} clears the sample floor` };
   // Only facilities whose CARD shows a number: rated, and above the sample-gate floor.
   const rated = facilities.filter(
     (f): f is PolicyRatable & { ratingV2: number } =>
       f.ratingV2 !== null && ratingSampleTier(f.distinctPatients) !== 'insufficient',
   );
-  if (rated.length === 0) return NOT_RATED;
+  if (rated.length === 0) return notRated;
 
   const patients = rated.reduce((t, f) => t + f.distinctPatients, 0);
   // Every rated facility sits above the floor (>=3 patients), so this denominator cannot be 0 —
   // but guard anyway rather than emit NaN onto the bar if that floor ever changes.
-  if (patients <= 0) return NOT_RATED;
+  if (patients <= 0) return notRated;
 
   const rating = Math.round(rated.reduce((t, f) => t + f.ratingV2 * f.distinctPatients, 0) / patients);
   const band = iqBandOf(rating);
@@ -126,6 +218,6 @@ export function derivePolicyRating(facilities: readonly PolicyRatable[]): Qualif
     verdict: band ? `${IQ_BAND_VERDICTS[band]} · ${IQ_BAND_LABELS[band]}` : 'Not rated',
     ratedCount: rated.length,
     patients,
-    basis: `patient-weighted across ${rated.length} rated ${rated.length === 1 ? 'facility' : 'facilities'}`,
+    basis: `patient-weighted across ${rated.length} rated ${rated.length === 1 ? 'facility' : 'facilities'}${inScope}`,
   };
 }

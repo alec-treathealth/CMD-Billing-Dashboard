@@ -430,3 +430,41 @@ test('the system prompt forbids narrating a blended percentage as one payer’s 
   assert.match(user, /"payerScope":"all"/);
   assert.match(user, /"payerCount":4/);
 });
+
+// ── CENSUS AVAILABILITY (S1, 2026-08-08) ─────────────────────────────────────────────────────────
+//
+// The facility array the model reads is `snap.facilities.slice(0, 10)` IN ARRAY ORDER, and that
+// order changed: a confirmed-full facility now sorts below every facility that can admit today. Two
+// consequences the prompt has to carry, or the explainer becomes the least honest thing on screen:
+//
+//   1. The model has always been free to call facilities[0] "the top" — under the new sort that is
+//      "the best AVAILABLE", which is a different sentence, and on a set where the strongest payer
+//      is full it is a materially different recommendation.
+//   2. On a ranking longer than ten, a full facility can now fall past the slice and vanish from the
+//      model's context entirely while remaining visible (greyed) in the grid. The model must not
+//      claim the set it sees is the whole set.
+
+test('bedState rides the firewall as a CLOSED enum — the model learns why a facility sank', () => {
+  const withBeds = {
+    ...VALID,
+    facilities: [{ ...VALID.facilities[0]!, bedState: 'full' as const }],
+  };
+  assert.ok(QualifyAiInputSchema.safeParse(withBeds).success);
+  for (const state of ['open', 'not_applicable', 'unknown'] as const) {
+    assert.ok(QualifyAiInputSchema.safeParse({ ...VALID, facilities: [{ ...VALID.facilities[0]!, bedState: state }] }).success);
+  }
+  // Closed, like every other enum on this schema: a free-text bed state is a channel.
+  assert.equal(
+    QualifyAiInputSchema.safeParse({ ...VALID, facilities: [{ ...VALID.facilities[0]!, bedState: 'FULL (12 of 12)' }] }).success,
+    false,
+  );
+});
+
+test('the prompt states the availability-first ORDER, so "top ranked" cannot mean "best paying"', () => {
+  const { system } = buildQualifyAiMessages(VALID);
+  assert.match(system, /bedState/);
+  assert.match(system, /"full"/);
+  // The two honesty rules above, in words the model can act on.
+  assert.match(system, /no open beds/i);
+  assert.match(system, /first ten|first 10/i);
+});

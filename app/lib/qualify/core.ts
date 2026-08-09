@@ -8,6 +8,7 @@
  */
 import { qualifyRating, QUALIFY_MIN_LINES } from './rating';
 import { computeRatingV2, QUALIFY_AUTH_FIT_MIN_SAMPLE, type QualifyProvenance } from './ratingV2';
+import { bedAvailabilityTier, bedStateOf } from './bedState';
 import { QUALIFY_RATING_CONFIDENT_PATIENTS } from './sampleGate';
 import { confidenceOf } from './confidence';
 import { facilityLocation } from './facilityLocations';
@@ -29,6 +30,7 @@ import {
   qualifyWindowBounds,
   QUALIFY_TENANT_SCOPE,
   QUALIFY_MEMBER_ID_MASK,
+  QUALIFY_NO_FACILITY,
   QUALIFY_REVEAL_BATCH_CAP,
   type QualifyInput,
   type QualifyPayerInput,
@@ -41,6 +43,7 @@ import {
   type QualifySnapshot,
   type QualifyResolved,
   type QualifyFacility,
+  type QualifyMemberHistory,
   type QualifyClaim,
   type QualifyMovers,
   type QualifyMover,
@@ -288,6 +291,14 @@ function stripSnapshotAmounts(snap: QualifySnapshot): QualifySnapshot {
   return {
     ...snap,
     facilities: snap.facilities.map((f) => ({ ...f, billedAmount: null, allowedAmount: null })),
+    // S2: the payer's book is a SECOND facility array on the same wire, so it needs the same nulling.
+    // A new list that skipped this choke point would hand an amounts-blind session a full billed and
+    // allowed set — the exact leak this function is the single defence against. `memberCount` needs
+    // nothing: it is a count, not a dollar.
+    bookFacilities:
+      snap.bookFacilities === null
+        ? null
+        : snap.bookFacilities.map((f) => ({ ...f, billedAmount: null, allowedAmount: null })),
     policy: snap.policy
       ? { ...snap.policy, deductible: null, deductibleMet: null, oopMax: null, oopMet: null }
       : null,
@@ -308,6 +319,10 @@ function emptySnapshot(hasAmounts: boolean): QualifySnapshot {
     tenantScope: QUALIFY_TENANT_SCOPE,
     policy: null,
     ladder: null,
+    // NOT 0. Nothing was counted here — no token was searched, or the term never minted one — and
+    // "zero members are behind this search" is a factual claim the empty snapshot has not earned.
+    memberCount: null,
+    bookFacilities: null, // no resolved payer ⇒ no book to rank
     provenance: 'none',
     // Empty = "not loaded", which is exactly right here: an empty snapshot resolved no identifier,
     // so there is no payer set to disambiguate. Never conflate with "exactly one payer".
@@ -408,15 +423,77 @@ function entityLabel(entityIds: string[] | null | undefined): 'BXR' | 'Indigo' |
 /**
  * Shape + rate + sort the facility rows. v2 (qualify-v2-build-plan §5): every card carries the
  * five-factor reading (computed HERE, server-side, from NON-DOLLAR inputs only — the wire ships the
- * work, the client never re-derives it), and the RANK is by ratingV2 desc — the factor model is the
- * sort key. Fallbacks keep it total: ratingV2 null (suppressed) sorts after rated cards, then the
- * value-first v1 pct, then name — deterministic under every data shape. FLOOR unchanged: drop
- * < QUALIFY_MIN_LINES flukes on payer-wide paths only.
+ * work, the client never re-derives it).
+ *
+ * THE RANK IS AVAILABILITY FIRST, THEN ratingV2 desc (S1, 2026-08-08). A confirmed-full facility
+ * sorts after every facility that can take a patient today; within a tier nothing changed — the
+ * factor model is still the sort key, then the value-first v1 pct, then name, deterministic under
+ * every data shape. Absence of census data is NEUTRAL, never a demotion. See the comparator.
+ *
+ * This is the ONE layer every surface inherits: SQL emits a deterministic base only
+ * (`order by pct_allowed desc, facility`), the v3 answer grid, the mobile deck and the AI payload
+ * all consume `snapshot.facilities` in array order, and `rank` is stamped here. FLOOR unchanged:
+ * drop < QUALIFY_MIN_LINES flukes on payer-wide paths only.
  */
+/** Round to 1dp about ZERO rather than about +∞ — see `authHeadroomDays`.
+ *
+ *  `+ 0` normalises the -0 a tiny negative produces. NOT for the JSON round-trip, which was the
+ *  reason this comment used to give and is simply untrue: `JSON.stringify(-0)` is already `"0"`.
+ *  It is for the IN-PROCESS value, where -0 survives and leaks through anything that formats or
+ *  compares by sign — `String(-0)` is `"-0"`, and a renderer branching on `h > 0` sends it down the
+ *  overrun path to read "~0d over auth" for a facility with no measurable difference at all. */
+function signedRound1(d: number): number {
+  const magnitude = Math.round(Math.abs(d) * 10) / 10;
+  return (d < 0 ? -magnitude : magnitude) + 0;
+}
+
+/**
+ * THE ANNOTATION JOIN (S3, 2026-08-08) — the searched identifier's own footprint, keyed for the book.
+ *
+ * ⚠ THE KEY IS THE RAW ROLLUP `facility` TEXT, AND AN EXACT MATCH IS CORRECT HERE. Both loads are
+ * the same `buildFacilityRankingQuery` over the same rollup with the same `group by facility`, the
+ * same window and the same payer predicate — one column, one grouping, so the two lists' keys are
+ * byte-identical by construction. FACILITY_DIM_JOINS' `upper()` exists to enrich the DISPLAY name
+ * off `collections.facilities`; it never touches the grouping key, so normalising here would invent
+ * a difference rather than absorb one.
+ *
+ * Built from the ALREADY-ASSEMBLED member list rather than from its raw rows, so the annotation and
+ * the member grid can never describe different numbers.
+ */
+function memberHistoryIndex(memberFacilities: readonly QualifyFacility[]): Map<string, QualifyMemberHistory> {
+  return new Map(
+    memberFacilities
+      /* ⚠ THE PLACEHOLDER IS NEVER ANNOTATED, AND THE SUPPRESSION BELONGS HERE, NOT AT THE CHIP.
+       *
+       * `'No Facility'` is the literal CMD emits when a charge resolves to no facility at all —
+       * interest lines plus a residual unattributed trickle: **11,414 charges / $29,081,575.38 at
+       * charge grain** (supabase/migrations/0084_cmd_explorer_pull_facility.sql). It is a REAL
+       * bucket in the rollup and it ranks like any other text, deliberately — dropping it would
+       * hide money, which is why the row itself stays.
+       *
+       * But the annotation reads "Seen here before", and that asserts a PLACE the member was
+       * treated. There is no such place. Suppressing at the JOIN rather than at the render means
+       * the TIEBREAK goes with it: an annotation that silently floated the placeholder above a real
+       * facility at equal footing would be the same fabricated claim expressed as an ORDERING
+       * instead of as words, and the card would carry no mark to explain the move. The row keeps
+       * its rank; only the personal claim is withheld. */
+      .filter((f) => f.facilityKey !== QUALIFY_NO_FACILITY)
+      .map((f) => [f.facilityKey, { lineCount: f.lineCount, distinctPatients: f.distinctPatients }]),
+  );
+}
+
 function assembleFacilities(
   rows: QualifyFacilityRow[],
   ctx: QualifyFactorContext,
   applyFloor = true,
+  /**
+   * The identifier's own footprint, keyed by raw facility text — see `memberHistoryIndex`. NULL on
+   * every list that IS the identifier's own footprint (and on the payer/name/cohort paths, which
+   * searched no identifier to annotate with): the annotation exists to mark a list that is NOT about
+   * the member, and on the member's own list it would be a tautology on every row. See
+   * `QualifyFacility.memberHistory`.
+   */
+  memberHistory: ReadonlyMap<string, QualifyMemberHistory> | null = null,
 ): QualifyFacility[] {
   return rows
     // FLOOR (payer-wide only): drop < QUALIFY_MIN_LINES flukes. An IDENTIFIER-scoped ranking passes
@@ -475,6 +552,43 @@ function assembleFacilities(
         outcome.avg_auth_days !== null &&
         outcome.auth_sample >= QUALIFY_AUTH_FIT_MIN_SAMPLE &&
         outcome.stays_sample >= QUALIFY_AUTH_FIT_MIN_SAMPLE;
+      /* THE WINNING BASIS, RESOLVED ONCE (2026-08-08). These four used to be four inline ternaries in
+       * the computeRatingV2 call below, and the wire then shipped a FIFTH and SIXTH expression that
+       * read the raw census — so the card could carry a 373.5-day LOS while the rating beneath it had
+       * scored a 40.1-day one. Same drift class as `payerCount`. Naming the basis makes "what the
+       * rating used" and "what the card says" the same values by construction. */
+      const censusFamily =
+        census?.board_family === 'outpatient' || census?.board_family === 'residential' ? census.board_family : null;
+      const basisAuthDays = useOutcomes ? outcome!.avg_auth_days : (census?.avg_auth_days ?? null);
+      const basisLosDays = useOutcomes ? outcome!.avg_los_days : (census?.avg_los_days ?? null);
+      const basisAuthSample = useOutcomes ? outcome!.auth_sample : (census?.auth_sample ?? null);
+      const basisLosSample = useOutcomes ? outcome!.stays_sample : (census?.los_sample ?? null);
+      /* MAY THE CARD SAY THESE NUMBERS OUT LOUD? Stricter than the SCORING gate, on purpose, and the
+       * difference is the point. `censusSampleBelowFloor` deliberately lets an UNDEFINED sample score
+       * (pre-0088 rows carried no `los_sample` at all and suppressing them would have blanked the
+       * factor for every facility). A DISPLAYED average has no such history to protect: an unknown
+       * sample is not a passing one, so a null count withholds rather than publishes. Outpatient is
+       * excluded for the reason ruling 2026-08-05 already gives — those boards do not maintain
+       * authorization or discharge dates, so the quantity does not exist there, at any sample size.
+       *
+       * ⚠ `basisAuthDays > 0` MIRRORS THE SCORING GATE (`auth > 0`, ratingV2.ts) and is not
+       * defensive noise. ratingV2 routes a zero authorization to "No authorization … data for this
+       * facility yet"; without the same test here, an authorization of 0 against a 30-day LOS
+       * rendered "~30d over auth" on the card DIRECTLY ABOVE that factor row. Two statements about
+       * the same facility, on the same card, contradicting each other. Latent today — the census
+       * writes NULL rather than 0 and 0091 has no CHECK constraining it — which is exactly what the
+       * raw-wire footgun was until this surface gave it a renderer. */
+      const authBasisShowable =
+        censusFamily !== 'outpatient' &&
+        basisAuthDays !== null &&
+        basisLosDays !== null &&
+        Number.isFinite(basisAuthDays) &&
+        Number.isFinite(basisLosDays) &&
+        basisAuthDays > 0 &&
+        basisAuthSample !== null &&
+        basisLosSample !== null &&
+        basisAuthSample >= QUALIFY_AUTH_FIT_MIN_SAMPLE &&
+        basisLosSample >= QUALIFY_AUTH_FIT_MIN_SAMPLE;
       // Coding lookup: payer-scoped (registry decisions are per payer family). The comparable path
       // carries payer=null → no row → the factor reads "no decision on file", which is the truth.
       const decision = ctx.coding.seeded
@@ -497,11 +611,11 @@ function assembleFacilities(
         codingDecidedOn: decision?.decided_on ?? null,
         codingCodesLabel: decision ? codingCodesLabel(decision) : null,
         medianDaysToPayment: r.median_days_to_payment ?? null,
-        avgAuthDays: useOutcomes ? outcome!.avg_auth_days : (census?.avg_auth_days ?? null),
-        avgLosDays: useOutcomes ? outcome!.avg_los_days : (census?.avg_los_days ?? null),
-        censusFamily: census?.board_family === 'outpatient' || census?.board_family === 'residential' ? census.board_family : null,
-        authSample: useOutcomes ? outcome!.auth_sample : (census?.auth_sample ?? null),
-        losSample: useOutcomes ? outcome!.stays_sample : (census?.los_sample ?? null),
+        avgAuthDays: basisAuthDays,
+        avgLosDays: basisLosDays,
+        censusFamily,
+        authSample: basisAuthSample,
+        losSample: basisLosSample,
         losBasis: useOutcomes ? 'completed' : census?.avg_los_days != null ? 'in_progress' : null,
         losWindowDays: useOutcomes ? outcome!.window_days : null,
         now: ctx.now,
@@ -539,28 +653,97 @@ function assembleFacilities(
         entity: entityLabel(r.entity_ids),
         // v2 — all non-dollar; survive the amounts strip unchanged.
         medianDaysToPayment: r.median_days_to_payment ?? null,
-        avgAuthDays: census?.avg_auth_days ?? null,
-        avgLosDays: census?.avg_los_days ?? null,
+        /* THE SAME BASIS THE RATING SCORED ON, AND ONLY WHEN IT MAY BE SAID OUT LOUD. Until
+         * 2026-08-08 these two read `census?.avg_*` directly — ungated and basis-mismatched — so the
+         * wire could carry the in-progress snapshot while `authFit` two lines up had scored completed
+         * stays, and FRCA's 373.5-day LOS over a `los_sample` of 2 shipped verbatim. Nothing rendered
+         * them, which made it a loaded trap rather than a visible bug; S1 gives them a renderer, so
+         * the gate had to land in the same change. See `authBasisShowable` above for why the display
+         * floor is stricter than the scoring floor. */
+        avgAuthDays: authBasisShowable ? basisAuthDays : null,
+        avgLosDays: authBasisShowable ? basisLosDays : null,
+        /* AUTHORIZED DAYS MINUS ACTUAL LOS — subtracted HERE, once, from the same two gated numbers,
+         * because a client that subtracts them itself is a client re-deriving policy it cannot see
+         * the provenance of. Rounded to 1dp: both inputs are numeric(6,2), and 22.6 - 16.8 in binary
+         * floating point is 5.799999999999997, which no card should ever have to think about.
+         * SIGN-SYMMETRIC rounding, and on a deliberately signed field that is not pedantry:
+         * `Math.round` breaks ties toward +∞, so a raw round would send +3.75 to 3.8 and -3.75 to
+         * -3.7 — the same half-day of headroom rounded two different ways depending on whether the
+         * facility runs under or over its authorization. Round the magnitude, restore the sign. */
+        authHeadroomDays: authBasisShowable ? signedRound1(basisAuthDays! - basisLosDays!) : null,
         // NO censusFamily HERE. It is a rating INPUT (see the computeRatingV2 call above), not part
         // of the client contract — `QualifyFacility` in contract.ts declares no such field, and
         // contract.ts is the frozen single source of truth for what crosses the wire. A mechanical
         // edit put it on both objects; on this one it was undeclared payload that nothing read.
+        // What the client DOES get is `bedState` below: the family's DECISION, not the family.
         nextUrDate: census?.next_ur_date ?? null,
         openBeds: census?.open_beds ?? null,
         // Licensed beds (curated FACILITY_BED_CAPACITY). Null for outpatient — they have no beds,
         // which is correct rather than missing — and for any residential facility not yet curated.
         bedCapacity: census?.bed_capacity ?? null,
+        /* THE BED DECISION, MADE WHERE `board_family` LIVES. The client cannot make it: with only
+         * openBeds/bedCapacity on the wire, `bedCapacity: null` is ambiguous between "outpatient, no
+         * beds" and "residential, uncurated", and every outpatient row carries a written
+         * `open_beds = 0` that a naive reader calls full. This single value drives BOTH the
+         * availability sort tier below and the bed chip's copy, so order and words cannot drift. */
+        bedState: bedStateOf(census?.open_beds ?? null, census?.bed_capacity ?? null, census?.board_family ?? null),
         ratingV2: v2.rating,
         iqBand: v2.band,
         factors: v2.factors,
         availableWeight: v2.availableWeight,
+        /* S3: has the SEARCHED identifier been here? `?? null` rather than `.get(...)` alone, so an
+         * absent key is the documented "no history" null and never `undefined` — the same
+         * absent-vs-null distinction that broke 40 renders when `bookIsOnScreen` was extracted with
+         * a bare `!== null`. With no index at all every row is null, which is exactly what a list
+         * that IS the member's own footprint should carry. */
+        memberHistory: memberHistory?.get(r.facility) ?? null,
       };
     })
     .sort((a, b) => {
+      /* ── TIER 0 — CAN THEY PHYSICALLY GO THERE? (Alec, 2026-08-08) ────────────────────────────
+       *
+       * The FIRST question of the search tree, ahead of every money signal, because a perfect payer
+       * at a house with no bed is not an answer to "where do I send them right now". Measured the
+       * same day: 6 of 12 residential facilities had zero open beds.
+       *
+       * CENSUS SORTS, IT NEVER FILTERS. A full house drops below every facility that can take the
+       * patient and STAYS IN THE LIST, greyed, with the reason on its own card — the rep is also
+       * keeping a map of where they could send someone tomorrow.
+       *
+       * Only CONFIRMED FULL sinks (`bedAvailabilityTier`). Outpatient, uncurated and no-census-row
+       * all stay tier 0: absence of data must not punish, and on a census-cron outage every row
+       * falls to 'unknown', which collapses this term to a constant and leaves the order below
+       * exactly as it was. That is the difference between degrading and reshuffling.
+       *
+       * `rank` is stamped i+1 AFTER this sort, so a full facility's rank reflects its sunk position.
+       * Deliberate: rank answers "where do I send them right now", not "how good is the paying". */
+      const at = bedAvailabilityTier(a.bedState);
+      const bt = bedAvailabilityTier(b.bedState);
+      if (at !== bt) return at - bt;
       // v2 rank: factor rating desc, nulls (suppressed) last …
       if (a.ratingV2 === null && b.ratingV2 !== null) return 1;
       if (b.ratingV2 === null && a.ratingV2 !== null) return -1;
       if (a.ratingV2 !== null && b.ratingV2 !== null && b.ratingV2 !== a.ratingV2) return b.ratingV2 - a.ratingV2;
+      /* ── THE MEMBER-HISTORY TIEBREAK (S3, Alec 2026-08-08) — DELIBERATELY THE WEAKEST TERM ─────
+       *
+       * "The book ranks, member history annotates — and may break a tie." This is the "may break a
+       * tie" half, and its placement IS the ruling: history never beats a better-paying facility and
+       * never floats a full house.
+       *
+       * EQUAL FOOTING, DEFINED FROM THE TIERS ABOVE RATHER THAN INVENTED: the two rows are on equal
+       * footing when they share the AVAILABILITY TIER (`bedAvailabilityTier`, tier 0) and the SAME
+       * `ratingV2` — including both-suppressed, where the cards show no number at all and the reader
+       * has nothing else to choose on. That is the narrowest reading that is still a reading.
+       *
+       * It therefore sits ABOVE the v1 rating / pct / alphabetical fallbacks and below everything
+       * the card actually displays as its verdict. Those three decide an order the operator cannot
+       * see the reason for; "you have sent someone here before" is a reason they can act on.
+       *
+       * INERT on any list with no annotations (every member-scoped, by-payer, by-name and cohort
+       * ranking), where both sides are null and this collapses to a constant. */
+      const ah = a.memberHistory === null ? 1 : 0;
+      const bh = b.memberHistory === null ? 1 : 0;
+      if (ah !== bh) return ah - bh;
       // … then the value-first v1 rating, then pct, then name — deterministic everywhere.
       const br = b.rating ?? -1;
       const ar = a.rating ?? -1;
@@ -646,12 +829,38 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
   // ANALYZE against claims_reader on a real 9,253-row prefix (2026-08-06) measured the ladder at
   // ~353ms and resolvePayer (the slowest of the Phase B/0 batch) at ~676ms — SERIAL, that's
   // ~1030ms before the ranking batch even starts; run concurrently, the critical path is the max of
-  // the two, ~676ms. Manual windows (input.auto falsy) skip the ladder entirely — the Range menu
-  // stays the biller's override — but the batch below always runs, so parallelizing is unconditional.
-  const ladderPromise: Promise<{ ladder: QualifyWindowLadder | null; window2: QualifyWindow }> = (async () => {
-    if (!(input.auto === true && kind === 'prefix' && deps.loadWindowRungs)) {
-      return { ladder: null, window2: window };
-    }
+  // the two, ~676ms.
+  //
+  // ── S2 (2026-08-08): THE GATE CONFLATED TWO DECISIONS. THEY ARE NOW SPLIT. ────────────────────
+  //
+  // The old condition — `auto && kind === 'prefix'` — answered "should we CHOOSE the window from the
+  // member count" and, as a side effect, decided "should we COUNT the members at all". Those are not
+  // the same question:
+  //
+  //   · THE COUNT is the search's classifier and it is useful on EVERY path. Measured 2026-08-08:
+  //     58.8% of prefixes resolve to ONE member and 85.7% can never reach the 10-patient floor at any
+  //     window, so the engine must say whether it is looking at a person or a population before it
+  //     claims anything. It costs one token-scoped scan (~20ms / 1,473 buffers at the 365d worst
+  //     case) that is ALREADY running in parallel with the Phase B/0 batch, the rungs SQL already
+  //     switches to `member_id_bidx` for an exact member id (qualifyPolicyQuery.ts), and a manual
+  //     window must not silence the preface — "which world is this" is a fact about the IDENTIFIER,
+  //     not about the window the operator picked.
+  //   · THE WINDOW CHOICE stays gated exactly as it was: `auto === true && kind === 'prefix'`. A
+  //     10-patient floor is meaningless for an N-of-1 member-id search, and the Range menu remains
+  //     the biller's override. Nothing about `window2`, the ladder object, or the 365d fallback moves.
+  //
+  // So the loader runs whenever it exists; only the RETURN of `ladder`/`window2` is still gated. A
+  // failure still degrades to `{ ladder: null, window2: window }` — and `memberCount: null` with it,
+  // because "not available" and "nobody" are different answers (see QualifySnapshot.memberCount).
+  const ladderPromise: Promise<{
+    ladder: QualifyWindowLadder | null;
+    window2: QualifyWindow;
+    memberCount: number | null;
+  }> = (async () => {
+    if (!deps.loadWindowRungs) return { ladder: null, window2: window, memberCount: null };
+    // Whether the COUNTS may pick the window. Kept as its own named value so the split above cannot
+    // be quietly re-merged by someone reading only the `if`.
+    const mayChooseWindow = input.auto === true && kind === 'prefix';
     const rungDays: QualifyTrailingDays[] = [30, 60, 90, 180, 365];
     const now = deps.now();
     const boundsOf = (d: QualifyTrailingDays) => qualifyWindowBounds({ kind: 'trailing', days: d }, now);
@@ -665,6 +874,10 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
     };
     try {
       const counts = await deps.loadWindowRungs(token, kind, gate.entityIds, froms, to);
+      // THE CLASSIFIER: the widest rung is `count(distinct member_id_bidx)` over the token at 365d.
+      // Surfaced whatever the window mode, because it describes the identifier, not the window.
+      const memberCount = counts.p365;
+      if (!mayChooseWindow) return { ladder: null, window2: window, memberCount };
       const byDay: Record<QualifyTrailingDays, number> = {
         30: counts.p30,
         60: counts.p60,
@@ -682,16 +895,20 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
       return {
         ladder: { rungs, chosenDays: chosen.days, sufficient: chosen.sufficient },
         window2: { kind: 'trailing' as const, days: chosen.days },
+        memberCount,
       };
     } catch {
-      return { ladder: null, window2: window }; // ladder failure degrades to the caller's window
+      // Ladder failure degrades to the caller's window — and to an UNKNOWN classification, never a
+      // zero. A failed count that rendered as "nobody is behind this search" would be worse than
+      // saying nothing, which is what null makes the preface do.
+      return { ladder: null, window2: window, memberCount: null };
     }
   })();
 
   // ── Phase B/0: the policy on file behind the token + the global VOB feed freshness — parallel
   // with the payer resolve AND the Phase E ladder above (F1 restructuring). All fail-soft; a VOB
   // hiccup must not take down the claims read.
-  const [{ ladder, window2 }, dominantPayer, policyRow, globalFresh, payerSpread, policySpread] = await Promise.all([
+  const [{ ladder, window2, memberCount }, dominantPayer, policyRow, globalFresh, payerSpread, policySpread] = await Promise.all([
     ladderPromise,
     deps.resolvePayer(token, kind, gate.entityIds),
     deps.loadPolicy ? deps.loadPolicy(token, kind).catch(() => null) : Promise.resolve(null),
@@ -798,14 +1015,77 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
     // The scope claim, computed ONCE and used for the loads, the rating context AND `resolved` — so
     // "what we ranked" and "what we say we ranked" cannot drift apart.
     const rankPayer = allPayers ? null : payerName;
-    // Factor context (coding + census) is independent of the row loads — run all three together
+    /* ── THE PAYER'S WHOLE BOOK, LOADED BESIDE THE MEMBER'S FOOTPRINT (S2, 2026-08-08) ──────────
+     *
+     * The SAME `loadFacilities` dep with token/kind OMITTED, which is byte-for-byte the load
+     * `getQualifySnapshotByPayerCore` already does — so the wiring, the builder and the SQL are all
+     * untouched, and it rides this Promise.all fully in parallel with the loads already there.
+     *
+     * WHY IT EXISTS: 58.8% of prefixes carry ONE member with 1.14 facilities of history. Ranking
+     * that is not thin, it is malformed — a ranking is a comparative claim and there is nothing to
+     * compare. The payer's book is the list that actually answers "does this policy pay, anywhere".
+     * S2 ships it as a secondary section; the prominence flip is S3.
+     *
+     * ⚠ NULL WHEN `rankPayer` IS NULL, AND NOTHING MAY TRY. In identifier-wide (Skip) mode there is
+     * no single payer, and `buildFacilityRankingQuery` correctly THROWS on (null payer, no market,
+     * no token): the all-payers whole book is the 206-713ms scan that spills to disk, an hourly
+     * cache's job, never a per-search load. The ternary is the guard — do not "simplify" it into an
+     * unconditional call with a catch, which would turn a designed boundary into a swallowed error.
+     *
+     * IT IS LAST IN THE ARRAY ON PURPOSE. Array elements evaluate left to right, so the
+     * IDENTIFIER-scoped load is still the first `loadFacilities` call this path makes — several
+     * tests read `facilitiesArgs[0]` to assert the token narrows the ranking, and the primary load
+     * staying primary is the honest shape anyway: the book is the addition.
+     *
+     * ── ⚠ MEASURED COST, AND THE LEVER IF IT EVER BITES (2026-08-08, live against prod) ──────────
+     *
+     * Busiest payer, 27,669 rows in the real query shape: **~130-230ms**, served by the correct
+     * composite index (`cmd_charge_rollup_entity_payer_payment`) with a **3.6MB external-merge sort
+     * spilling to disk**. Typical payers roughly half that. The member ranking beside it is
+     * **3-20ms**. The `Promise.all` is parallel, so wall clock is the MAX — which means that on a
+     * big-payer search THE BOOK IS NOW THE CRITICAL PATH, not the identifier's own ranking.
+     *
+     * The WIRE is bounded by reality rather than by a slice: the whole book is 48 facilities, so
+     * this can never ship more than ~48 card objects and no core-side cap is warranted.
+     *
+     * IF SEARCH p95 REGRESSES, THIS LOAD IS THE LEVER — lazy-load the book section on expand via its
+     * own action, or put a per-(payer, window, entityIds) TTL cache in front of it; **it does not
+     * vary by member**, which is what makes both options cheap. Neither is built, deliberately: an
+     * unmeasured regression is not a reason to add a cache, and S3 should inherit that decision
+     * explicitly rather than find a cache it never asked for.
+     */
+    // Factor context (coding + census) is independent of the row loads — run all four together
     // (review finding #11: two avoidable serial round-trips on a latency-sensitive surface).
-    const [ctx, facRows, landingRaw] = await Promise.all([
+    const [ctx, facRows, landingRaw, bookRows] = await Promise.all([
       factorContext(deps, rankPayer, from, to, 'direct', allPayers),
       deps.loadFacilities(rankPayer, from, to, gate.entityIds, input.market, token, kind),
       deps.loadIdentifierLandingFacility(token, kind, rankPayer, from, to, gate.entityIds),
+      rankPayer === null
+        ? Promise.resolve(null)
+        : deps.loadFacilities(rankPayer, from, to, gate.entityIds, input.market),
     ]);
     const facilities = assembleFacilities(facRows, ctx, false); // no floor — every billed facility is relevant
+    /* THE SAME `ctx`, DELIBERATELY: the coding registry is keyed on the resolved payer and the book
+     * is scoped to that same payer, while the census and outcomes maps are facility-keyed and global.
+     * A second `factorContext` call would be a second round-trip for an identical answer.
+     *
+     * FLOOR ON, unlike the member list one line up. This is a payer-wide ranking, so it drops the
+     * "100% on one claim" flukes exactly as the by-payer core does; the identifier's own footprint
+     * keeps every facility it billed, however thin. Two different lists, two honest floors.
+     *
+     * ── ANNOTATED WITH THE MEMBER'S OWN FOOTPRINT (S3, 2026-08-08) ──────────────────────────────
+     * The fourth argument is what makes "the book ranks, member history annotates" true in the data
+     * rather than only in the render: each book row learns whether the SEARCHED identifier has
+     * billed there, which the card marks and the comparator uses as its weakest tiebreak.
+     *
+     * ⚠ THE FLOOR ASYMMETRY MEANS THE JOIN CAN BE INCOMPLETE, BY DESIGN, AND THE UI MUST SAY SO.
+     * The member list is floorless and the book is not, so a facility the identifier billed 1-2
+     * lines at exists in `facilities` and NOT in `bookFacilities` — its annotation has nowhere to
+     * land. That is correct for the BOOK (a payer-wide ranking should not carry a fluke) and it is
+     * why the book-led render names those facilities in words instead of letting the most decisive
+     * fact vanish exactly where n is small. See resolution-flow.tsx `unlistedMemberFacilities`. */
+    const bookFacilities =
+      bookRows === null ? null : assembleFacilities(bookRows, ctx, true, memberHistoryIndex(facilities));
     const identifierLandingFacility =
       landingRaw !== null && facilities.some((f) => f.facilityKey === landingRaw) ? landingRaw : null;
     const resolved: QualifyResolved = {
@@ -828,6 +1108,8 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
       tenantScope: QUALIFY_TENANT_SCOPE,
       policy,
       ladder,
+      memberCount,
+      bookFacilities,
       provenance: 'direct',
       // The DIRECT path is the only one where alternatives exist to offer: the identifier has its own
       // claims, and payerOptions[0] is the payerName resolved just above.
@@ -881,6 +1163,14 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
           tenantScope: QUALIFY_TENANT_SCOPE,
           policy,
           ladder,
+          // The rungs are token-scoped and this path still has a token, so whatever the count found
+          // is carried rather than blanked — typically 0, because reaching comparable provenance
+          // means the identifier resolved no payer of its own. Carried rather than nulled because 0
+          // and "unavailable" are different answers; the preface happens to say nothing for either.
+          memberCount,
+          // No resolved payer on this path (the cohort ranks across all of them), so there is no
+          // book to rank — and the ranking above is already cohort-shaped, not an identifier's.
+          bookFacilities: null,
           provenance: facilities.length > 0 ? comparable.provenance : 'none',
           // COMPARABLE provenance means this identifier has NO claims of its own, so payerSpread is
           // empty by construction — there is nothing to disambiguate. Stated explicitly rather than
@@ -896,7 +1186,10 @@ export async function getQualifySnapshotCore(deps: QualifyDeps, input: QualifyIn
   }
 
   const empty = emptySnapshot(gate.hasAmounts);
-  const snap: QualifySnapshot = { ...empty, policy, ladder };
+  // `memberCount` rides the plain-VOB path too: it is the one fact this path DOES know about the
+  // identifier, and it is what tells "we have never seen this member" apart from "we have, but not
+  // in a way that ranks". `bookFacilities` stays at the empty snapshot's null — no payer resolved.
+  const snap: QualifySnapshot = { ...empty, policy, ladder, memberCount };
   return gate.hasAmounts ? snap : stripSnapshotAmounts(snap);
 }
 
@@ -960,6 +1253,12 @@ export async function getQualifySnapshotByPayerCore(
     payerOverridden: false,
     policy: null, // a payer label carries no member identity → nothing to resolve a policy from
     ladder: null,
+    // No identifier was searched, so there is nothing to count members BEHIND. Null, not 0.
+    memberCount: null,
+    // `facilities` above ALREADY IS this payer's book — same loader, same floor, same window. A
+    // second copy under `bookFacilities` would render the identical list twice on any surface that
+    // shows both, which is not a second answer.
+    bookFacilities: null,
     provenance: 'direct',
   };
   return gate.hasAmounts ? snap : stripSnapshotAmounts(snap); // stripAmounts LAST
@@ -1047,6 +1346,13 @@ export async function getQualifySnapshotByNameCore(
     payerOverridden: false,
     policy: null, // name resolution carries no prefix → no policy lookup (a name is not a plan)
     ladder: null,
+    // The rungs query is keyed on member_id_bidx / member_id_prefix_bidx and has no client_name
+    // column — a name token cannot be counted by it at all, so this is "not available", not zero.
+    memberCount: null,
+    // KNOWN GAP, same shape as `payerOptions` above: a client-name resolve is identifier-shaped and
+    // deserves the payer's book exactly like a prefix does. It does not get it here because the
+    // Client Name surface is still gated off, so the change would ship unverifiable against real use.
+    bookFacilities: null,
     provenance: 'direct',
   };
   return gate.hasAmounts ? snap : stripSnapshotAmounts(snap); // stripAmounts LAST

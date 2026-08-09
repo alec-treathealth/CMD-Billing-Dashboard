@@ -40,6 +40,7 @@ import { RATING_LEGEND, type RatingBucket } from '../../lib/qualify/rating';
 import { ratingSampleTier, ratingEvidencePips, QUALIFY_RATING_MIN_PATIENTS } from '../../lib/qualify/sampleGate';
 import { IQ_BAND_LABELS, IQ_BAND_VERDICTS, PROVENANCE_LABELS, facilityFactorsDisagree } from '../../lib/qualify/ratingV2';
 import { CONFIDENCE_LEGEND, type QualifyConfidence } from '../../lib/qualify/confidence';
+import { bedStateOf } from '../../lib/qualify/bedState';
 import { bucketClass, confidenceClass, iqBandClass } from './colors';
 import type { QualifyFacility, QualifyFactorReading, QualifyProvenance } from '../../lib/qualify/contract';
 import type { QualifyFinding } from '../../lib/qualify/findings';
@@ -166,18 +167,25 @@ function FactorList({ f, findings = [] }: { f: QualifyFacility; findings?: Quali
  *   · openBeds null            -> no census row at all. Genuinely unknown, correctly silent.
  *
  * Tightness stays a FACT SHOWN, never folded into the rating — same rule as before.
+ *
+ * ── 2026-08-08: the STATE now comes from `bedStateOf`, the copy still lives here ─────────────────
+ * S1 gave the same three-state question a second and third consumer (the v3 ScoreCard's chip and the
+ * availability SORT TIER), and this codebase has a standing lesson about a predicate expressed twice.
+ * So the branch structure moved into `lib/qualify/bedState.ts` and this function became its
+ * PRESENTATION. Behaviour is byte-identical — the shared derivation reproduces the denominator rule
+ * exactly when no `board_family` is passed, which is this caller's case: `QualifyFacility` has never
+ * carried the family, and the v2 panel predates the field that would let it. Every #163 test below
+ * (app/test/qualify-render.test.tsx) passes unchanged, which is the proof, not the claim.
  */
 export function bedChip(
   openBeds: number | null,
   bedCapacity: number | null,
 ): { label: string; title: string; tone: 'roomy' | 'tight' } | null {
-  if (openBeds === null) return null; // no census row — do not imply a count we do not have
-  const hasCapacity = bedCapacity !== null && bedCapacity > 0;
-
-  if (openBeds === 0) {
-    // Without a denominator a zero cannot be read as "full": outpatient boards report no beds at
-    // all, and every one of them would otherwise claim to be at capacity.
-    if (!hasCapacity) return null;
+  const state = bedStateOf(openBeds, bedCapacity);
+  // 'unknown' folds together "no census row" and "a zero with no usable denominator". Both are
+  // things we cannot state, and a chip that cannot state anything does not render.
+  if (state === 'unknown' || state === 'not_applicable') return null;
+  if (state === 'full') {
     return {
       label: `Full · 0 of ${bedCapacity}`,
       title: `No open beds — all ${bedCapacity} licensed beds occupied on the latest census sync`,
@@ -185,6 +193,11 @@ export function bedChip(
     };
   }
 
+  // 'open' — a POSITIVE count by construction (bedStateOf returns 'unknown' for null and never
+  // 'open' for a zero). Narrowed with a real guard rather than a cast, so if that truth table ever
+  // changes this goes silent-and-safe here instead of dividing by a null somewhere below.
+  if (openBeds === null || openBeds <= 0) return null;
+  const hasCapacity = bedCapacity !== null && bedCapacity > 0;
   if (!hasCapacity) {
     return {
       label: `${openBeds} open bed${openBeds === 1 ? '' : 's'}`,

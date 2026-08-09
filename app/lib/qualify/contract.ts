@@ -7,6 +7,7 @@
  */
 import type { QualifyConfidence } from './confidence';
 import type { QualifyProvenance, QualifyIqBand, QualifyFactorReading } from './ratingV2';
+import type { QualifyBedState } from './bedState';
 
 // Rating-v2 vocabulary re-exported so client surfaces keep ONE import seam (contract.ts) — the
 // engine itself (ratingV2.ts) is a pure leaf both may import directly for helpers.
@@ -493,6 +494,30 @@ export function scopedPayerOf(resolved: QualifyResolved | null | undefined): str
   return resolved.payerScope === 'payer' ? resolved.payerName : null;
 }
 
+/**
+ * THE ONE EMPTY FACILITY LIST — a shared constant, not three spellings of it.
+ *
+ * It lives here because three sites reach for "no facilities" (the answer stage's two fallbacks and
+ * the book-placement predicate) and the S3 review found each written differently — `?? []` twice and
+ * `?? EMPTY_FACILITIES` once. Three spellings of one unreachable state read as three states. A
+ * shared reference also keeps `useMemo` identities stable across renders that fall through to it.
+ */
+export const EMPTY_FACILITIES: readonly QualifyFacility[] = [];
+
+/**
+ * THE ROLLUP'S "no facility at all" LITERAL — a real bucket, not a null.
+ *
+ * CMD emits `facility = 'No Facility'` for charges that resolve to nowhere: interest lines (cpt INT
+ * / INTRST) plus a residual unattributed trickle. **11,414 charges / $29,081,575.38 at charge
+ * grain**, measured in `supabase/migrations/0084_cmd_explorer_pull_facility.sql`. It groups by
+ * itself and keeps its own row everywhere in this product — dropping it would hide money.
+ *
+ * It is named here because a surface that makes a claim about a PLACE has to be able to tell it
+ * apart from one. The first such claim is S3's member-history annotation ("Seen here before"), which
+ * is suppressed for this key at the join in core.ts.
+ */
+export const QUALIFY_NO_FACILITY = 'No Facility';
+
 export interface QualifyFacility {
   /** 1-based rank over the single cross-tenant list, ORDERED BY `rating` desc (ruling Q-G) — NOT by
    *  pctAllowedOfBilled. Do not "fix" the sort to pct: rating is the sort key, pct is a displayed value. */
@@ -577,9 +602,34 @@ export interface QualifyFacility {
    *  lines — the TTP factor's input. Paid-lines-only by construction (the window is payment-dated);
    *  the factor detail discloses that rather than pretending unpaid claims are visible. */
   medianDaysToPayment: number | null;
-  /** monday census aggregates (Phase G; fail-soft null until the census snapshot table is live). */
+  /**
+   * monday census aggregates — average AUTHORIZED days and average LENGTH OF STAY, in days.
+   *
+   * ⚠ GATED AND BASIS-ALIGNED SINCE 2026-08-08, and both halves of that matter. These used to ship
+   * `census.avg_*` RAW: no sample floor, and no alignment with the basis the rating had just scored
+   * on three lines earlier. FRCA's 373.5-day average LOS over a `los_sample` of **2** crossed the
+   * wire verbatim — outpatient enrolment measured as if it were a residential stay. Nothing rendered
+   * it, so it was a loaded trap rather than a live defect; it is closed now rather than documented.
+   *
+   * What ships now is exactly what `authFit` scored: completed stays (0091) when that basis won,
+   * the census snapshot otherwise, and NULL whenever either side is below
+   * QUALIFY_AUTH_FIT_MIN_SAMPLE or the facility is outpatient (where the ruling of 2026-08-05 is
+   * that authorization is not measured at all). A card may therefore render these next to the
+   * authFit factor row without the two contradicting each other.
+   */
   avgAuthDays: number | null;
   avgLosDays: number | null;
+  /**
+   * AUTHORIZED DAYS MINUS ACTUAL LOS — the headroom KPI, computed server-side from the SAME gated
+   * basis as the two fields above so the client never subtracts two numbers it cannot see the
+   * provenance of (the payerCount/solePayer precedent: decide once, on the server).
+   *
+   * SIGNED, deliberately. Positive is unused authorization — measured live 2026-08-08, NASH 22.6
+   * authorized vs 16.8 actual and LSMH 21.1 vs 12.6, so ~6-8 authorized days routinely go unused.
+   * Negative is an OVERRUN, which is the same fact read the other way and must not be silently
+   * dropped. Null whenever `avgAuthDays`/`avgLosDays` are null, and for the same reasons.
+   */
+  authHeadroomDays: number | null;
   /** Next UR (utilization review) date on this facility's census, ISO — the §5 UR banner ("auth may
    *  change soon"), a banner not a factor. Null when no census data / nothing scheduled. */
   nextUrDate: string | null;
@@ -590,6 +640,21 @@ export interface QualifyFacility {
    *  residential facilities not yet in the curated map. A count, never a dollar: identical for an
    *  admissions_seat session. */
   bedCapacity: number | null;
+  /**
+   * WHAT WE CAN HONESTLY SAY ABOUT BEDS — the computed answer, not the raw inputs.
+   *
+   * `openBeds`/`bedCapacity` alone CANNOT express this and never could: `bedCapacity: null` means
+   * "outpatient, beds do not apply" AND "residential, not yet curated", and `openBeds: 0` is written
+   * for every outpatient row because those boards carry no "Open Bed" labels. The disambiguator is
+   * `board_family`, which is on the SERVER row and deliberately not on this one (see core.ts) — so
+   * the server ships the DECISION rather than the field the client would have to re-derive policy
+   * from. Same precedent as `payerCount`/`solePayer`: decide once, where the inputs actually live.
+   *
+   * It drives two things in lockstep: the availability SORT TIER (`bedAvailabilityTier`, at the head
+   * of the assembleFacilities comparator) and the bed chip's copy. One derivation, so the grey, the
+   * order and the words can never drift apart. See `bedState.ts` for the truth table.
+   */
+  bedState: QualifyBedState;
   /** The five-factor rating (0-100 over available weights) — the v2 SORT KEY and numeral. Null =
    *  suppressed (sample floor / no money evidence) → the honest-restraint card. */
   ratingV2: number | null;
@@ -600,6 +665,51 @@ export interface QualifyFacility {
   factors: QualifyFactorReading[];
   /** Sum of available factor weights (renormalization denominator) — "scored on N of 100 weighting". */
   availableWeight: number;
+  /**
+   * ── WHAT THE SEARCHED IDENTIFIER HAS DONE AT THIS FACILITY (S3, 2026-08-08) ────────────────────
+   *
+   * Alec's ruling: **the book ranks, member history annotates.** At one member the answer LEADS with
+   * the payer's whole book (a ranking over 1.14 facilities is not thin, it is malformed — there is
+   * nothing to compare), and this block is how the most specific fact the rep holds survives the
+   * flip: continuity, the facility knows them, prior-auth precedent.
+   *
+   * ⚠ NON-NULL ONLY ON A LIST THAT IS **NOT ITSELF** MEMBER-SCOPED — in practice `bookFacilities`.
+   * On `facilities` (the identifier's own footprint) it is ALWAYS null, and that is a stated
+   * invariant rather than an oversight: every row there IS member history, so an annotation would be
+   * a tautology on all of them — and worse, a reader meeting it there would reasonably conclude the
+   * rows WITHOUT it are facilities the member has never been to. Pinned in test/qualifyBookLed.test.ts.
+   *
+   * WHY A FIELD ON THE ROW AND NOT A PARALLEL MAP ON THE SNAPSHOT. Two reasons, both structural:
+   * the comparator needs it AT ASSEMBLY TIME (it is the weakest tiebreak — see core.ts), and a value
+   * that travels with its row cannot be mis-joined at a render site. A map keyed by `facilityKey`
+   * would have to be threaded to every consumer and re-joined at each one, which is the same class
+   * of second derivation `payerCount`/`solePayer` were centralised to avoid. `QualifyFacility` stays
+   * reusable for BOTH lists because the field is nullable and the null carries a documented meaning.
+   *
+   * ⚠ COUNTS ONLY, AND THAT IS A PHI DECISION, NOT A CONVENIENCE. A count of lines or patients is
+   * non-PHI and may travel. A member-specific claim DATE (or date range) is individually
+   * identifying: it would be permissible in the authorised UI and is FORBIDDEN in the AI payload —
+   * so it is not expressible here at all, and `buildQualifyAiInput` maps this block nowhere
+   * (pinned in app/test/qualifyAiPayload.test.tsx). If a date is ever added, that test is the wall
+   * it has to get past.
+   *
+   * NON-DOLLAR ⇒ it survives `stripSnapshotAmounts` untouched and an admissions_seat sees the
+   * identical annotation.
+   */
+  memberHistory: QualifyMemberHistory | null;
+}
+
+/**
+ * The searched identifier's own footprint AT ONE FACILITY — the annotation block. Counts only; see
+ * `QualifyFacility.memberHistory` for why, and for the one list it is ever non-null on.
+ */
+export interface QualifyMemberHistory {
+  /** In-window logical charge lines the identifier billed here — the same unit as `lineCount`. */
+  lineCount: number;
+  /** Distinct patients behind those lines. 1 by construction in the book-led (one-member) case; it
+   *  can be >1 in the 2-9 bucket, where the annotation is about the SEARCH rather than about a
+   *  person, and the copy says so (`memberHistoryChipFor`). */
+  distinctPatients: number;
 }
 
 /** ONE claim (charge) line — claim grain (Direction B, ruling 1): one row per charge from the 0050 rollup,
@@ -764,6 +874,46 @@ export interface QualifySnapshot {
   /** The auto-window ladder actually run for THIS snapshot (Phase E). Null when the caller passed an
    *  explicit window (manual Range) or the path carries no identifier. */
   ladder: QualifyWindowLadder | null;
+  /**
+   * HOW MANY DISTINCT MEMBERS SIT BEHIND THE SEARCHED TOKEN — the preface signal (S2, 2026-08-08).
+   *
+   * `count(distinct member_id_bidx)` over the token at 365 days, i.e. the ladder query's widest rung.
+   * It classifies the search before anything renders: 1 member (58.8% of prefixes, carrying 1.14
+   * facilities of history), 2-9 (37.0%), 10+ (4.2% — the only bucket where the auto-window ladder or
+   * the payer blend disclosure mean anything). `memberPreface.ts` owns the bucketing and the copy.
+   *
+   * ⚠ IT IS A 365-DAY COUNT AND IT DOES NOT FOLLOW THE CHOSEN WINDOW. "Is this a person or a
+   * population" is a fact about the identifier, so it must not change when an operator presses a
+   * Range chip — which is exactly what would happen if it were re-counted per window.
+   *
+   * ⚠ NULL IS "NOT AVAILABLE", NEVER "NOBODY". Null when the rungs loader is absent or failed soft
+   * (the ladder's pre-existing fail-soft), and on every path that searches no identifier at all
+   * (resolve-by-payer, resolve-by-name). ZERO is a real and DIFFERENT answer: the count ran and no
+   * member with claims sits behind this token. Do not `?? 0` it.
+   *
+   * NON-PHI: a count. Nothing member-identifying crosses with it.
+   */
+  memberCount: number | null;
+  /**
+   * THE RESOLVED PAYER'S WHOLE BOOK, ranked — the same facility ranking `getQualifySnapshotByPayerCore`
+   * produces, loaded alongside the identifier's own footprint so the answer stage can show "does this
+   * policy pay, anywhere" beside "where has this member been" (S2, 2026-08-08).
+   *
+   * ⚠ NOT A REPLACEMENT FOR `facilities`. The hero rating, `resolved.totalCharges`/`facilityCount`,
+   * the AI payload, the area facet, the mobile deck and the drill seed all hang off `facilities`, and
+   * every one of them is a scope claim about the SEARCHED IDENTIFIER. This field is strictly additive;
+   * S2 renders it as a clearly-labelled secondary section carrying its own basis label.
+   *
+   * ⚠ NULL WHENEVER THERE IS NO SINGLE PAYER TO HAVE A BOOK. That is the identifier-wide Skip
+   * (`resolved.payerScope === 'all'`), where `buildFacilityRankingQuery` correctly THROWS on a null
+   * payer with no market and no token — the all-payers whole book is a 206-713ms scan that sorts to
+   * disk and belongs in an hourly cache, never in a per-search load. Also null on the by-payer path,
+   * where `facilities` already IS the book, and on the comparable-cohort and empty paths.
+   *
+   * Same window as `facilities` (the ladder's chosen window), so the two lists are comparable, and the
+   * payer-wide FLOOR applies to it (`QUALIFY_MIN_LINES`) exactly as it does on the by-payer path.
+   */
+  bookFacilities: QualifyFacility[] | null;
   /** What the ranking's evidence is built ON (§6). 'direct' on the identifier/payer paths with own
    *  claims; 'comparable_*' when the ranking fell back to an employer/funding cohort; 'none' when
    *  there is nothing to rank on. Factor math consumes the same value — one source of truth. */

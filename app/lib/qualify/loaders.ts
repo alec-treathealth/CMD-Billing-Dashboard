@@ -24,6 +24,7 @@ import {
   type CodingDecisionRow,
 } from '../../../src/collections/codingRegistryQuery';
 import { buildQualifyCensusReadQuery, buildQualifyOutcomesReadQuery } from '../../../src/collections/qualifyCensus';
+import { buildRollupRefreshFreshnessQuery } from '../../../src/collections/rollupFreshnessQuery';
 import type { QualifyTokenKind } from '../../../src/collections/qualifyQuery';
 import {
   buildPolicyTapeQuery,
@@ -85,6 +86,30 @@ export async function loadQualifyVobFreshness(): Promise<string | null> {
   const q = buildQualifyVobFreshnessQuery();
   const res = await qualifyV2Reader().query<{ fresh_as_of: string | null }>(q.sql, q.params);
   return res.rows[0]?.fresh_as_of ?? null;
+}
+
+/**
+ * WHEN THE RANKING INDEX WAS LAST REBUILT — `collections.rollup_refresh_run.finished_at` for the
+ * newest ok run, as a full UTC ISO timestamp. Null when the log is empty, when no run has ever
+ * completed ok, or when the read fails (see the caller's fail-soft).
+ *
+ * ⚠ THIS IS THE FIRST APP-PATH READER OF THAT TABLE (S5, 2026-08-08). Until now only writers existed
+ * — the hourly `/api/cron/refresh-charge-rollup` route as `cmd_rollup_writer`. `claims_reader` holds
+ * BOTH gates already (0054:68 grant, 0054:89-90 SELECT policy, RLS on), verified live as the
+ * reader's own privileges rather than read off the migration text: the 0089 incident is exactly the
+ * case where a GRANT existed, a POLICY did not, and the silent empty result became permanently wrong
+ * data behind a fail-soft catch. No migration, no new grant.
+ *
+ * ⚠ THE COLUMN CHOICE IS THE WHOLE DECISION, and `buildRollupRefreshFreshnessQuery` carries the
+ * argument: `max(ingested_at)` is first-seen (42h stale on a healthy weekend) and
+ * `rollup_max_payment_date` reads five days into the FUTURE. Both are pinned out at the SQL.
+ *
+ * Non-PHI: one operational timestamp, no tenant, no identifier, no user input.
+ */
+export async function loadRollupRefreshFreshness(): Promise<string | null> {
+  const q = buildRollupRefreshFreshnessQuery();
+  const res = await qualifyV2Reader().query<{ rebuilt_at: string | null }>(q.sql, q.params);
+  return res.rows[0]?.rebuilt_at ?? null;
 }
 
 /** The five-rung distinct-patient counts in ONE scan (Phase E). */
