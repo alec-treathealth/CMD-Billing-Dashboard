@@ -77,7 +77,7 @@ export const PolicyTapeStrip = memo(function PolicyTapeStrip({
 }) {
   // Hook before any early return (rules of hooks). resetKey is the snapshot date: a new night's
   // data reads from the left.
-  const { ref: scrollRef, isOverflowing } = useMarquee<HTMLDivElement>(asOf, items.length);
+  const { ref: scrollRef, isOverflowing } = useMarquee<HTMLUListElement>(asOf, items.length);
   if (items.length === 0) return null;
 
   const item = (p: QualifyPolicyTapeItem, dup: boolean) => {
@@ -108,15 +108,13 @@ export const PolicyTapeStrip = memo(function PolicyTapeStrip({
         </span>
       </div>
       <div className="overflow-hidden rounded-xl bg-teal900 shadow-ths-sm">
-        <div ref={scrollRef} className="q-marquee overflow-x-auto py-2.5">
-          <ul className="flex w-max items-center">
-            {items.map((p) => item(p, false))}
-            {/* Only duplicated once the real set genuinely overflows — otherwise a short list
-                would render every policy twice. `isOverflowing` is false until measured, and
-                effects never run under renderToStaticMarkup, so the hermetic tests see ONE set. */}
-            {isOverflowing && items.map((p) => item(p, true))}
-          </ul>
-        </div>
+        <ul ref={scrollRef} className="q-marquee flex w-max items-center overflow-x-auto py-2.5">
+          {items.map((p) => item(p, false))}
+          {/* Only duplicated once the real set genuinely overflows — otherwise a short list
+              would render every policy twice. `isOverflowing` is false until measured, and
+              effects never run under renderToStaticMarkup, so the hermetic tests see ONE set. */}
+          {isOverflowing && items.map((p) => item(p, true))}
+        </ul>
       </div>
       {/* The scope claim, stated rather than implied: this is the whole book, not a search. */}
       <p className="mt-1.5 px-0.5 text-xs text-ink400">
