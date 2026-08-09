@@ -163,10 +163,25 @@ library from `../src` and is the Vercel app root.
 
 Two **separate** migration planes — never mix the directories:
 
-| Plane | Directory | Next number (as of 2026-08-06) |
+| Plane | Directory | Next number (as of 2026-08-08) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0093** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0094** |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **032** |
+
+**0093 (Qualify rating history) is APPLIED LIVE 2026-08-08** via `apply_migration` — plain
+transactional DDL, so the 0081/0092 autocommit discipline does NOT apply here. It creates
+`collections.qualify_policy_rating_daily` + `qualify_rating_run` + `qualify_prefix_echo` and
+the `record_qualify_prefix_echo` definer. Verified at apply: reader SELECT true · writer
+INSERT/UPDATE true · **writer DELETE false** (least privilege, the 0091 shape) · **12 policies
+across the 3 tables** · RLS enabled on all 3 · definer is `security definer`, owner `postgres`,
+EXECUTE granted to `claims_reader` and revoked from `public`. Its input validation was exercised
+both ways — four malformed calls wrote nothing, a well-formed call upserted, test row deleted.
+
+⚠ **The table is applied but the CRON IS NOT DEPLOYED** — `/api/cron/qualify-rating-history`
+lives on `design/qualify-smoke-shell`, and production is `main`, so the 05:10 schedule cannot
+fire until that branch reaches `main` via staging. All three tables are EMPTY until then; that
+is the expected state, and `getQualifyPolicyTape()` correctly reads `available:true` with zero
+items (`available:false` means the RELATION is absent, which it no longer is).
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
 0077. 0080/0081/0082 (explorer perf) are **applied live 2026-08-04** — 0081
@@ -277,8 +292,9 @@ Surfaces:
   `redirect('/')` stub. `<SearchConsole />` and the `/api/agent` path stay in git
   history; restoring means remounting the page *and* re-adding the nav entry.
 
-`app/vercel.json` declares **19 cron entries across 17 distinct routes**
-(`billing-audit-consolidated` runs on three schedules):
+`app/vercel.json` declares **21 cron entries across 19 distinct routes**
+(`billing-audit-consolidated` runs on three schedules; the previous 19/17 count
+predated `facility-outcomes`, and `qualify-rating-history` is new on this branch):
 
 | Route | Cadence |
 |---|---|
@@ -287,6 +303,8 @@ Surfaces:
 | `refresh-charge-rollup` | hourly, :45 |
 | `qualify-census` | hourly, :22 |
 | `upcoming-overrides` | hourly, :55 |
+| `facility-outcomes` | daily 04:10 |
+| `qualify-rating-history` | daily 05:10 — DB-only; inert 500 until mig 0093 applies |
 | `cmd-explorer-catchup` | daily 07:52 |
 | `era-835` | daily 08:50 |
 | `vob-sync` | daily 09:17 |
@@ -320,9 +338,17 @@ Surfaces:
 `/api/cron/qualify-census` was scheduled 2026-08-04 (hourly **:22**) in the
 explicitly-scoped Auth/LOS session the morning runbook reserved it for, after
 `MONDAY_SECRET_API_KEY` landed in Vercel. It feeds the Qualify auth-fit factor
-from Monday census boards; only NASH and LSMH boards are curated
-(`src/collections/qualifyCensus.ts`) — other facilities honestly show
-"no data yet" until an operator maps their boards.
+from Monday census boards. ⚠ **The curation claim that used to live here ("only
+NASH and LSMH") went stale within a day and stayed wrong until 2026-08-08.** The
+curated map (`MONDAY_CENSUS_FACILITIES`, `src/collections/qualifyCensus.ts`) has
+covered **23 facilities — 12 residential + 11 outpatient — since 2026-08-05**,
+and `collections.qualify_facility_census` carries a live row for every one of
+them (verified 2026-08-08, synced minutes earlier). Two semantics to respect
+when reading that table: outpatient rows carry `bed_capacity = null` and
+`open_beds = 0` because **beds do not apply** — 0 there is not "full"; and
+`avg_los_days` needs a sample gate (`los_sample`) before display — tiny
+outpatient samples produce 300–373-day "stays". Unmapped facilities still show
+"no data yet"; the map itself is the onboarding.
 
 VOB sync is scheduled by Vercel but *runs* as a GitHub Action
 (`.github/workflows/vob-sync.yml`) — it won't show output in the Vercel cron UI.
@@ -410,12 +436,17 @@ These are wrong in the code today. Fix opportunistically; never copy them.
   (:00/:15/:30/:35) for CMD's one-report-at-a-time partner slot. Probing during
   a :15 census on 2026-08-02 cost 13 BXR census fetches — they self-healed the
   next hour, but do not schedule CMD work near those minutes.
-- `dropFuturePaymentRows` is a bounded horizon now, but ships at
-  `FUTURE_PAYMENT_HORIZON_DAYS = 0` — identical to the old strict today-cutoff.
-  Do **not** flip it to 14 without also bounding the Collections reads at today:
-  Overview and Collections read the same rows through
-  `collections.daily_collections_resolved`, so the horizon alone would put
-  near-future money on the Collections tab.
+- ⚠ **This entry was itself stale until 2026-08-07.** It said
+  `FUTURE_PAYMENT_HORIZON_DAYS = 0` and warned against flipping it to 14. It has
+  been **14 and ACTIVE since 2026-08-03**, and flipping it was correct, because
+  the precondition the warning named was met in the same change: the read-time
+  split now exists (`futurePaymentBound`, `src/collections/daily.ts:65`), so
+  **Collections bounds at `<= today` while Overview does not**, and both still
+  read one row set through `collections.daily_collections_resolved`. Ingest keeps
+  near-future rows deliberately. Setting the constant back to `0` remains the
+  correct kill switch if forward-dated deposits turn out to be unreliable —
+  nothing else needs reverting. The authoritative note is the docblock at
+  `src/collections/cmdExplorer.ts:405-413`; trust it over this file.
 - `src/collections/cmdExplorer.ts` says the row fingerprint hashes 14 fields — it
   hashes **18** (15 non-PHI + 3 PHI, see `mapReportRows`).
 - `supabase/migrations/0067_*` looks applicable but is **stale**: as authored it

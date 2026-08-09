@@ -8,6 +8,8 @@
  */
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   AreaLine,
@@ -19,8 +21,15 @@ import {
   filterCandidates,
   isRefetching,
   scopeKeyOf,
+  skipOffered,
   tickerIsLive,
   areaChipsWithActive,
+  bookIsOnScreen,
+  bookLeadsAnswer,
+  gridNarrowEmptyCopy,
+  rebuiltAtSentence,
+  windowMoveNotice,
+  NO_FACILITY_NARROW,
   UNRESOLVABLE_COPY,
   deriveStage,
   liveSentenceFor,
@@ -40,7 +49,8 @@ import {
 import { deriveNotices, panelProvenance } from '../lib/qualify/resolution';
 import type { PanelEvidence, PanelId, QualifyResolution } from '../lib/qualify/resolution';
 import type { QualifyFacility, QualifySnapshot } from '../lib/qualify/contract';
-import { trailingWindow } from '../lib/qualify/contract';
+import { QUALIFY_NO_FACILITY, trailingWindow } from '../lib/qualify/contract';
+import type { QualifyFacilityNarrowOption } from '../lib/qualify/facilityVariants';
 import { HeatingUpCards, HeatingUpSkeleton } from '../components/qualify/shared/heating-ticker';
 import { AREA_ALL, AREA_OTHER, areaKeyFor, facilitiesInArea } from '../components/qualify/m/area-chips';
 import { TRENDS } from './helpers/qualifyTrends';
@@ -213,8 +223,19 @@ function props(stage: FlowStage, r: QualifyResolution | null, over: Partial<Reso
           employerNarrowTooMany: null,
           area: AREA_ALL,
           onSelectArea: noop,
+          // S4: EMPTY by default, which is the pre-vocabulary state a real mount also passes through
+          // (the options are a mount-once fail-soft fetch). An empty vocabulary renders no control at
+          // all, so every case in this file that does not opt in is byte-identical to before S4.
+          facilityOptions: [],
+          facilityNarrow: NO_FACILITY_NARROW,
+          onToggleFacility: noop,
           narrowExpanded: false,
           onToggleNarrow: noop,
+          // S5: idle, fresh-unknown, no window move — the state every pre-S5 case was implicitly in,
+          // so nothing in this file changes render unless it opts in by name.
+          refreshing: false,
+          dataRebuiltAt: null,
+          windowMove: null,
         }
       : null,
     ...over,
@@ -244,12 +265,22 @@ function answerProps(over: Partial<NonNullable<ResolutionStagesProps['answer']>>
     employerNarrowTooMany: null,
     area: AREA_ALL,
     onSelectArea: noop,
+    // S4: see the note in `props()` — an empty vocabulary means no facility control, so tests about
+    // it opt in by name exactly as the ones about the card's CONTROLS do.
+    facilityOptions: [],
+    facilityNarrow: NO_FACILITY_NARROW,
+    onToggleFacility: noop,
     // CLOSED, because that is `INITIAL_SHELL_STATE.narrowExpanded` and therefore what an operator
     // meets on every path except a Skip. Deliberately NOT mirrored off `skipped` here: a helper that
     // quietly opened the card would leave every "the toggles are live" assertion below silently
     // dependent on a default nobody wrote down. Tests about the CONTROLS opt in by name.
     narrowExpanded: false,
     onToggleNarrow: noop,
+    // S5: see the note in `props()` — idle and freshness-unknown is the default, and tests about the
+    // refresh control or the rebuild time opt in by name.
+    refreshing: false,
+    dataRebuiltAt: null,
+    windowMove: null,
     ...over,
   };
 }
@@ -539,10 +570,10 @@ test('a NO-OP scope click cannot flip the refetch flag — the stuck-headline bu
   assert.equal(isRefetching(true, null, key), false, 'content present but nothing stamped yet');
 });
 
-test('Skip is withheld on the carrier stage when the carrier choice is NOT obvious', () => {
-  // With a dozen carriers behind a prefix, skipping resolves the ranking to whichever payer happens
-  // to dominate the claims — arbitrary, not general, and indistinguishable from the answer screen.
-  const many = fixture({
+/** Six carriers behind one prefix — the NON-obvious carrier set the suppression ruling is about.
+ *  Extracted for S6, which pins the same ruling through the hoisted control. */
+function crowdedCarriers(): QualifyResolution {
+  return fixture({
     candidates: {
       total: 6,
       chosenIndex: 0,
@@ -559,6 +590,19 @@ test('Skip is withheld on the carrier stage when the carrier choice is NOT obvio
       })),
     },
   });
+}
+
+test('Skip is withheld on the carrier stage when the carrier choice is NOT obvious', () => {
+  // AS RATIFIED 2026-08-06, left readable rather than rewritten: "with a dozen carriers behind a
+  // prefix, skipping resolves the ranking to whichever payer happens to dominate the claims —
+  // arbitrary, not general, and indistinguishable from the answer screen."
+  //
+  // ⚠ THAT PREMISE DIED ON 2026-08-07 AND THE RULING DID NOT — see the constant's own header in
+  // resolution-flow.tsx. A Skip has ranked ALL payers since the reversal (`payerScope: 'all'`), so
+  // "whichever payer happens to dominate" describes behaviour this branch no longer has. The
+  // BEHAVIOUR under test is unchanged and deliberately preserved through S6's hoist; what changed is
+  // the reason it is defensible, which is now the blend rather than the arbitrary pick.
+  const many = crowdedCarriers();
   assert.ok(payerGroupsOf(many).length >= SKIP_CARRIER_MAX, 'fixture has a non-obvious carrier set');
   const crowded = render(props('payer', many));
   assert.ok(!crowded.includes('search all plans'), 'no Skip offered when the carrier is a real question');
@@ -1105,6 +1149,23 @@ test('I9: no meaning-bearing text below 12px anywhere in the flow', () => {
       { answer: answerProps({ snapshot: snapshotFixture(), area: 'TN' }) },
       /ranked facilities in this area/,
     ],
+    // S4: the FACILITY narrow's own markup — the shared type-ahead's label row, its ON badge, its
+    // selected tag, and the composed narrowing sentence. The picker was already inside the card for
+    // employers, but never on THIS surface (outside the card, light-on-light) and never carrying a
+    // selected tag, which is the markup a floor sweep has to see.
+    [
+      'answer + facility narrow active',
+      'answer',
+      fixture(),
+      {
+        answer: answerProps({
+          snapshot: threeStateSnapshot(),
+          facilityOptions: FACILITY_OPTIONS,
+          facilityNarrow: ['NASH'],
+        }),
+      },
+      /at NASHVILLE MENTAL HEALTH/,
+    ],
     // THE NARROW SEARCH CARD, BOTH POSITIONS (2026-08-07). Two rows, not one: collapsed and expanded
     // render DIFFERENT markup — the badge strip and the tally on one side, the chip rows and the
     // employer disclosure on the other — so a single case would leave half the card outside the
@@ -1150,11 +1211,22 @@ test('I9: no meaning-bearing text below 12px anywhere in the flow', () => {
     const html = render(props(stage, r, over));
     // POSITIVE CONTROL — prove this case rendered the markup it claims to be sweeping.
     assert.match(html, mustRender, `${label}: rendered nothing to scan — the floor check would be vacuous`);
-    // A regex sweep, not a literal blocklist: the old list enumerated seven exact strings, so
-    // text-[8px] or text-[11.75px] would have passed silently. px-only, deliberately — no rem/em
-    // arbitrary text sizes exist anywhere in app/components/qualify today.
-    for (const m of html.matchAll(/text-\[(\d+(?:\.\d+)?)px\]/g)) {
-      assert.ok(Number(m[1]) >= 12, `sub-12px class on ${label}: text-[${m[1]}px]`);
+    /* A regex sweep, not a literal blocklist: the old list enumerated seven exact strings, so
+     * text-[8px] or text-[11.75px] would have passed silently.
+     *
+     * ⚠ REM IS SWEPT TOO NOW, AND ITS COVERAGE IS HONEST RATHER THAN ASSERTED (final review,
+     * 2026-08-08). The sweep was px-only, so `text-[0.6rem]` — 9.6px at the default root size, and a
+     * perfectly ordinary way to write a Tailwind arbitrary size — walked straight through a guard
+     * whose whole purpose is the 12px floor. Converted at 16px/rem, which is the root size this app
+     * never overrides (`app/app/globals.css` sets no `html { font-size }`); a future override would
+     * make this arm optimistic and is the one assumption to re-check.
+     *
+     * ⚠ AND THE GAP THAT REMAINS, NAMED. There is no rem-denominated arbitrary text class anywhere in
+     * app/components/qualify today, so the rem arm has NO positive control — it is a tripwire for the
+     * next author, not a covered path. `em`, `pt` and clamp() are still unswept. */
+    for (const m of html.matchAll(/text-\[(\d+(?:\.\d+)?)(px|rem)\]/g)) {
+      const px = m[2] === 'rem' ? Number(m[1]) * 16 : Number(m[1]);
+      assert.ok(px >= 12, `sub-12px class on ${label}: text-[${m[1]}${m[2]}] (= ${px}px)`);
     }
   }
 });
@@ -1552,6 +1624,11 @@ function facility(over: Partial<QualifyFacility>): QualifyFacility {
     state: 'TN',
     ratingV2: 62,
     iqBand: '50', // the real QualifyIqBand vocabulary — renders as "Solid · 50%+"
+    // ⚠ STATED, NOT OMITTED (S3). The core sets this on EVERY row of every list, and a fixture that
+    // leaves it absent is the S2-D6 defect again: `undefined` is not `null`, so a render guard
+    // written as `=== null` would fall through under test while working in production — or, as here,
+    // the reverse. `null` is the invariant on the member's own footprint; the book fixtures override.
+    memberHistory: null,
     distinctPatients: 14,
     lineCount: 210,
     careSetting: 'IP',
@@ -1565,7 +1642,13 @@ function facility(over: Partial<QualifyFacility>): QualifyFacility {
 
 function snapshotFixture(): QualifySnapshot {
   return {
-    resolved: { payerName: 'AETNA US HEALTHCARE' },
+    // ⚠ `payerScope` IS PART OF THE SCOPE CLAIM, NOT DECORATION, and this fixture omitted it until
+    // S2 (2026-08-08). The core sets it on every path and `scopedPayerOf` REFUSES a payerName whose
+    // scope does not agree — so a fixture without it reads as "not payer-scoped", and any consumer
+    // that goes through that guard silently renders nothing here while working in production. Same
+    // class as the provenance gap this file documents above: a fixture that diverges from the mint
+    // tests nothing about the mint.
+    resolved: { payerName: 'AETNA US HEALTHCARE', payerScope: 'payer' },
     facilities: [
       facility({}),
       facility({ rank: 2, name: 'KENTUCKY WELLNESS CENTER', facilityKey: 'KWC', city: null, state: null, ratingV2: null, iqBand: null, distinctPatients: 2, lineCount: 9 }),
@@ -1601,6 +1684,96 @@ test('the answer stage: window disclosed in one line, hero named, unrated card i
   assert.match(html, />No data</);
   // The claims-side scope chips render; the caption matrix has its own test below.
   assert.match(html, /Billed under/);
+});
+
+// ── CENSUS ON THE DEFAULT SURFACE (S1, 2026-08-08) ───────────────────────────────────────────────
+//
+// v3 is what everyone actually sees (`qualifyV3FlowEnabled()` in app/app/qualify/page.tsx), and it
+// rendered NO census at all: no bed chip, no UR date, no length-of-stay. #163's "a FULL house says
+// so" fix landed on the v2 FacilityPanel, which is behind QUALIFY_V3_FLOW=off. So the most
+// actionable fact the card can carry — do not route a patient here — was invisible on the shipped
+// surface while quietly moving the rating through the authFit factor.
+//
+// These pin the three states on the v3 card, and the honesty rule that comes with the new sort:
+// a card the ranking SANK must SAY why on its own markup.
+
+const bedCard = (over: Partial<QualifyFacility>) =>
+  render(
+    props('answer', fixture(), {
+      answer: answerProps({
+        snapshot: { ...snapshotFixture(), facilities: [facility(over)] } as unknown as QualifySnapshot,
+      }),
+    }),
+  );
+
+test('v3 card — open beds render as OCCUPANCY, with the denominator', () => {
+  const html = bedCard({ openBeds: 3, bedCapacity: 12, bedState: 'open' });
+  assert.match(html, /3 of 12 beds open/);
+});
+
+test('v3 card — no licensed count falls back to the bare count, never an invented denominator', () => {
+  const html = bedCard({ openBeds: 3, bedCapacity: null, bedState: 'open' });
+  /* ⚠ BOUND TO THE VISIBLE TEXT NODE, NOT TO THE STRING ANYWHERE (final review, 2026-08-08). The
+   * chip's `title` is "3 open beds on the latest census sync — licensed bed count not on file…", so a
+   * bare /3 open beds/ was satisfied by the TOOLTIP alone: delete the visible label and this test
+   * stayed green while the card showed nothing. The claim-vs-control pattern this file already applies
+   * to the facility picker and the book's own count — a claim must be asserted where a reader sees it. */
+  assert.match(html, />3 open beds<\/span>/, 'the VISIBLE label, not the title attribute');
+  // ...and the tooltip still carries its own longer reading. This is a claim about WHERE, not silence.
+  assert.match(html, /title="3 open beds on the latest census sync/);
+  assert.ok(!/\d+ of \d+ beds/.test(html), 'no denominator is implied');
+});
+
+test('v3 card — a FULL house says so, in #163’s ratified words, and STAYS ON SCREEN', () => {
+  const html = bedCard({ openBeds: 0, bedCapacity: 12, bedState: 'full', name: 'FULL HOUSE' });
+  assert.match(html, /Full · 0 of 12/, 'the #163 copy, unchanged');
+  // CENSUS SORTS, IT NEVER FILTERS. The card is still rendered, still named, still rated, and its
+  // explanation is still openable — greying is a visual weight, never a removal.
+  assert.match(html, /FULL HOUSE/);
+  assert.match(html, /aria-label="rating 62 out of 100"/);
+  assert.match(html, /Why this score/);
+  // It SAYS why it is sunk. Hue alone never carries a claim on this surface (house rule), and a
+  // greyed row with no sentence is exactly a claim carried by hue alone.
+  assert.match(html, /ranked below every facility that can admit today/);
+  // Nothing about the sink removes it from the accessibility tree or freezes its controls.
+  assert.ok(!/aria-hidden="true"[^>]*>[^<]*FULL HOUSE/.test(html), 'not hidden from assistive tech');
+  assert.ok(!html.includes('visibility:hidden') && !html.includes('visibility: hidden'));
+  assert.ok(!/<summary[^>]+(disabled|inert)/.test(html), 'the disclosure stays interactive');
+});
+
+test('v3 card — an OUTPATIENT facility claims nothing about beds, and is not greyed', () => {
+  // The pre-#163 error class, which a new consumer reintroduces for free: every outpatient row
+  // carries a written open_beds = 0. Eleven of twenty-three facilities are outpatient.
+  const html = bedCard({ openBeds: 0, bedCapacity: null, bedState: 'not_applicable' });
+  assert.ok(!html.includes('Full'), 'no bed facility, no bed claim');
+  assert.ok(!/\d+ open bed/.test(html), 'and no count either');
+  assert.ok(!html.includes('ranked below every facility'), 'and no sink sentence — it was not sunk');
+});
+
+test('v3 card — no census row stays silent, and is not read as full', () => {
+  const html = bedCard({ openBeds: null, bedCapacity: 12, bedState: 'unknown' });
+  assert.ok(!html.includes('Full'), 'unknown is not full');
+  assert.ok(!/\d+ of 12 beds/.test(html), 'and no occupancy is invented from the capacity alone');
+});
+
+test('v3 card — a scheduled UR is shown, because authorization may change under the rep', () => {
+  const html = bedCard({ nextUrDate: '2026-08-20' });
+  assert.match(html, /UR 2026-08-20/);
+});
+
+test('v3 card — AUTH HEADROOM: the authorized days nobody is using, and the overrun, both plain', () => {
+  // Measured live 2026-08-08: NASH 22.6 authorized vs 16.8 actual, LSMH 21.1 vs 12.6 — 6-8
+  // authorized days routinely unused, and nothing on any surface said so.
+  const spare = bedCard({ avgAuthDays: 22.6, avgLosDays: 16.8, authHeadroomDays: 5.8 });
+  assert.match(spare, /~6d auth headroom/);
+  // The same fact read the other way must not be silently dropped: an overrun is the half that
+  // costs money, and the card that shows only the flattering direction is not a KPI.
+  const over = bedCard({ avgAuthDays: 36.35, avgLosDays: 40.1, authHeadroomDays: -3.8 });
+  assert.match(over, /~4d over auth/);
+  // Below the sample floor the server ships null, and the card must then say NOTHING rather than
+  // render a zero — "we withheld this" and "there is no headroom" are different statements.
+  const withheld = bedCard({ avgAuthDays: null, avgLosDays: null, authHeadroomDays: null });
+  assert.ok(!withheld.includes('auth headroom') && !withheld.includes('over auth'));
 });
 
 // ── Scope honesty (review Critical 1): the ranking's payer scope is a CLAIM and must be labelled ──
@@ -2037,7 +2210,7 @@ test('THE SKIP INVENTORY covers AREA too, even though its control lives beside t
 test('the AREA badge counts area chips, and does not assume the list shape', () => {
   const renderArea = (chips: readonly { key: string; label: string }[], active: string) =>
     renderToStaticMarkup(
-      <AreaLine chips={chips as never} active={active} counts={new Map()} onSelect={() => {}} />,
+      <AreaLine chips={chips as never} active={active} counts={new Map()} shown={1} onSelect={() => {}} />,
     );
 
   // A list with NO All chip: subtraction under-counts by one, filtering is right. If this ever goes
@@ -2462,3 +2635,2323 @@ test('a ticker click seeds the area the SAME way the grid buckets it', () => {
   }
 });
 
+
+// ── S2 (2026-08-08) — THE PREFACE AND THE PAYER'S BOOK ───────────────────────────────────────────
+//
+// Measured the same day: 58.8% of member-ID prefixes resolve to exactly ONE member carrying 1.14
+// facilities of history, and 85.7% can never reach the 10-patient confidence floor at any window.
+// So the majority of searches were being answered with a "ranking" of one row, presented in the same
+// words as a ranking over a real population. The engine now says which world it is in BEFORE it
+// claims anything, and — for the person case — puts the payer's whole book on screen beside the
+// member's own footprint, because that is the list that answers "does this policy pay, anywhere".
+//
+// S2 renders the book SECONDARY. The prominence flip is S3 and is deliberately not built here.
+
+/** A snapshot carrying both S2 fields. `facilities` stays the MEMBER ranking — never repurposed. */
+function bookSnapshot(over: Partial<QualifySnapshot> = {}): QualifySnapshot {
+  return {
+    ...snapshotFixture(),
+    memberCount: 1,
+    facilities: [facility({ rank: 1, name: 'NASHVILLE MENTAL HEALTH', facilityKey: 'NASH' })],
+    bookFacilities: [
+      facility({ rank: 1, name: 'SUMMIT RIDGE RECOVERY', facilityKey: 'SUMMIT', payerCount: 1, solePayer: 'AETNA US HEALTHCARE' }),
+      facility({ rank: 2, name: 'PHOENIX RENEWAL', facilityKey: 'PHX', city: 'Phoenix', state: 'AZ', payerCount: 1, solePayer: 'AETNA US HEALTHCARE' }),
+      facility({ rank: 3, name: 'NASHVILLE MENTAL HEALTH', facilityKey: 'NASH', payerCount: 1, solePayer: 'AETNA US HEALTHCARE' }),
+    ],
+    ...over,
+  } as unknown as QualifySnapshot;
+}
+
+/**
+ * THE SAME SNAPSHOT IN THE MODE THAT DOES **NOT** FLIP (S3, 2026-08-08).
+ *
+ * `bookSnapshot()` carries `memberCount: 1`, and S3 made that the BOOK-LED case: the payer's book
+ * becomes the answer's own ranked grid and the member's footprint survives as annotations on it. So
+ * every S2 assertion about the book as a *secondary section below the member ranking* now describes
+ * the 2-9 bucket, not the 1-member one. Those tests are re-aimed onto this helper rather than
+ * deleted — each still pins a real, reachable render; it is the MODE that moved, not the claim.
+ */
+const secondaryBookSnapshot = (over: Partial<QualifySnapshot> = {}): QualifySnapshot =>
+  bookSnapshot({ memberCount: 4, ...over } as Partial<QualifySnapshot>);
+
+const answerHtml = (snap: QualifySnapshot, over: Partial<NonNullable<ResolutionStagesProps['answer']>> = {}) =>
+  render(props('answer', fixture(), { answer: answerProps({ snapshot: snap, ...over }) }));
+
+/** The book section's OWN markup, bounded at its closing tag — the same discipline as
+ *  `inventoryRegion`, and for the same reason: an unbounded slice lets a claim rendered ANYWHERE
+ *  below satisfy an assertion about what the book section says. */
+function bookRegion(html: string): string {
+  const attr = html.indexOf('data-v3-book');
+  assert.ok(attr >= 0, 'no [data-v3-book] element in this render — a region check would be vacuous');
+  return outerHtmlFrom(html, html.lastIndexOf('<', attr));
+}
+
+test('S2 preface — ONE member, and EVERY number states the basis it was counted on', () => {
+  const html = answerHtml(bookSnapshot());
+  // The 58.8% case. It does NOT call one row a ranking, and it does not hide it either.
+  //
+  // ⚠ TWO NUMBERS, TWO WINDOWS, BOTH NAMED (fix round 1, I1). `memberCount` is ALWAYS the 365-day
+  // rung — deliberately, so the classifier cannot move when a Range chip is pressed — while the
+  // facility count is the CHOSEN window. Joined by a bare em-dash those made one mixed-basis claim,
+  // and the contradiction was reachable rather than theoretical: see the 30-day test below.
+  assert.match(html, /One member has a paid claim behind this search in the last 12 months/);
+  assert.match(html, /1 facility of history in the window shown\./);
+});
+
+test('S2 preface — a 30-day window on a member paid 200 days ago no longer contradicts itself', () => {
+  // THE EXACT DEFECT I1 NAMES. Pre-fix this rendered "One member matches this search — 0 facilities
+  // of history." beside an empty grid: the member half true at 365d, the facility half true at 30d,
+  // and the sentence false at both. Now each clause carries its own window and the pair is coherent —
+  // paid within the year, nothing inside the window on screen.
+  const html = answerHtml(bookSnapshot({ facilities: [] } as Partial<QualifySnapshot>), { windowDays: 30 });
+  assert.match(html, /One member has a paid claim behind this search in the last 12 months/);
+  assert.match(html, /0 facilities of history in the window shown\./);
+});
+
+test('S2 preface — the 2-9 bucket names no absent control, and the 10+ bucket names a population', () => {
+  const few = answerHtml(bookSnapshot({ memberCount: 4 }));
+  // A member-by-member pick stays descoped: raw member ids can never render, so picking one needs a
+  // server-side per-response ordinal enumeration plus a pick-by-ordinal predicate.
+  assert.match(few, /4 members have a paid claim behind this prefix in the last 12 months\./);
+  /* ⚠ RE-AIMED BY THE FINAL FIX ROUND (2026-08-08). "Continue to search across all of them" named the
+   * SKIP — a control that does not exist on the ANSWER stage, the only stage this sentence renders on,
+   * and the same sentence is announced by `liveSentenceFor`'s skipped arm over the identify screen.
+   * The replacement names no control and no position. FF-m8 pins the whole string. */
+  assert.match(few, /This search covers all of them — refine the prefix to narrow it to one\./);
+  const many = answerHtml(bookSnapshot({ memberCount: 31 }));
+  assert.match(many, /A population — 31 members have a paid claim behind this prefix in the last 12 months\./);
+});
+
+test('S2 preface — an UNAVAILABLE count says nothing new, and a ZERO count does not claim an empty person', () => {
+  // null = the rungs loader is absent or failed soft. The screen must be exactly as it was.
+  const unknown = answerHtml(bookSnapshot({ memberCount: null }));
+  assert.ok(!unknown.includes('a paid claim behind this'), 'no preface at all');
+  assert.ok(!unknown.includes('member') || !unknown.includes('in the last 12 months'));
+  // 0 = the count RAN and nobody with claims is behind the token. Still no preface: the provenance
+  // banner already owns that story, and "0 members match" is a sentence nobody needs.
+  const none = answerHtml(bookSnapshot({ memberCount: 0 }));
+  assert.ok(!none.includes('a paid claim behind this'));
+  // ⚠ AND THE RECEIPT IS SILENT ON BOTH, THROUGH THE SAME GATE. The chip prints the COUNT rather
+  // than the sentence, but WHETHER it prints is `memberBucketOf` — not a second null/zero ternary
+  // that could drift from the one the preface uses. Both nothings, asserted.
+  for (const count of [null, 0]) {
+    const receipt = outerHtmlFrom(
+      answerHtml(bookSnapshot({ memberCount: count } as Partial<QualifySnapshot>)),
+      answerHtml(bookSnapshot({ memberCount: count } as Partial<QualifySnapshot>)).indexOf('<nav aria-label="Your search so far"'),
+    );
+    assert.ok(!receipt.includes('member'), `the receipt says nothing for memberCount=${String(count)}`);
+  }
+});
+
+test('S2 preface — SUPPRESSED IN FLIGHT (rule 2654416), like every other categorical claim', () => {
+  // It is a statement about the data, so while a re-scope is in flight it must not describe the set
+  // being replaced. The dim + beam treatment is the marker; this sentence waits.
+  const inFlight = answerHtml(bookSnapshot(), { refetching: true });
+  assert.ok(!inFlight.includes('a paid claim behind this search'), 'a claim about a superseded scope');
+  const failed = answerHtml(bookSnapshot(), { staleAfterError: true });
+  assert.ok(!failed.includes('a paid claim behind this search'));
+});
+
+test('S2 preface — it is NOT a role="status": the sr-only live region already announces it', () => {
+  // The one string on this surface that would otherwise be announced TWICE — once by its own status
+  // role and once by the flow's single live region, which carries the same sentence through
+  // `liveSentenceFor`. The team already ruled against overlapping status sentences for exactly this
+  // (two `role="status"` lines for one area click). The visible line is text; the announcement is
+  // the live region's job, and it is the only one that can sequence with the rest of the flow.
+  const html = answerHtml(bookSnapshot());
+  const at = html.indexOf('One member has a paid claim behind this search');
+  assert.ok(at >= 0, 'the preface is on screen — the check below would be vacuous otherwise');
+  const para = outerHtmlFrom(html, html.lastIndexOf('<p', at));
+  assert.ok(!para.includes('role="status"'), 'no second announcer for a sentence the live region owns');
+  // The live region still carries it — this is a claim about DUPLICATION, not about silence.
+  assert.ok(html.includes('aria-live="polite"'));
+});
+
+test('S2 preface — the RECEIPT carries the same count, on the entry that is actually revisitable', () => {
+  const html = answerHtml(bookSnapshot({ memberCount: 4 }));
+  // The receipt is a record of DECISIONS and every entry is revisitable. A member count is not a
+  // decision, so it does not become an entry of its own — it qualifies the SEARCH entry, which is
+  // the decision it is about and the one carrying "Change".
+  const receipt = outerHtmlFrom(html, html.indexOf('<nav aria-label="Your search so far"'));
+  assert.match(receipt, /XDP/, 'the slice really is the receipt');
+  assert.match(receipt, /4 members/);
+});
+
+test('S2 preface — the ARIA channel announces the SAME claim, and never a second facility count', () => {
+  const r = fixture();
+  // ⚠ THE aria SENTENCE ALREADY CARRIED A FACILITY COUNT — `claimEvidence.distinctFacilities`, which
+  // is rendered NOWHERE on screen. The ONE-member preface names a facility count of its own, so
+  // announcing both would read out two different numbers for one question. It replaces the clause.
+  const spoken = liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1 });
+  assert.match(spoken, /One member has a paid claim behind this search in the last 12 months/);
+  assert.match(spoken, /1 facility of history in the window shown\./);
+  assert.ok(!spoken.includes('28 facilities with history'), 'the invisible resolution count steps aside');
+  // Unknown → byte-identical to what shipped before S2.
+  assert.equal(
+    liveSentenceFor('answer', r, null, {}),
+    liveSentenceFor('answer', r, null, { memberCount: null, memberFacilityCount: 0 }),
+  );
+  assert.match(liveSentenceFor('answer', r, null, {}), /28 facilities with history\./);
+  // A skipped search announces it too — that arm is the identifier-wide one, and it is where an
+  // unfixed claim survives a browser pass.
+  const skipSpoken = liveSentenceFor('answer', r, null, {
+    skipped: true,
+    scopeAllPayers: true,
+    memberCount: 31,
+    memberFacilityCount: 9,
+  });
+  assert.match(skipSpoken, /A population — 31 members have a paid claim behind this prefix in the last 12 months\./);
+  assert.match(skipSpoken, /You skipped the plan questions/, 'and it keeps the claim it already made');
+});
+
+test('S2 preface — the 2-9 and 10+ arms KEEP the resolution facility count, because they name none', () => {
+  // ⚠ THE REPLACEMENT RULE IS "ONLY WHEN THE PREFACE CARRIES A COUNT OF ITS OWN", not "whenever a
+  // preface exists" (fix round 1, M6). The one-member arm names a facility count and would collide;
+  // the 2-9 and 10+ arms name none, so replacing would leave a screen-reader user hearing NO
+  // facility count at all while the grid visibly has one — silence where the sighted read has a
+  // number. There is nothing to collide with, so the pre-existing clause stands untouched.
+  const r = fixture();
+  for (const memberCount of [4, 31]) {
+    const spoken = liveSentenceFor('answer', r, null, { memberCount, memberFacilityCount: 3 });
+    assert.match(spoken, /in the last 12 months/, 'the classification is announced');
+    assert.match(spoken, /28 facilities with history\./, 'and the facility count is NOT dropped');
+  }
+});
+
+test('S2 book — a clearly-labelled SECOND section, named for the payer, with its own basis', () => {
+  // RE-AIMED BY S3: the SECONDARY placement is the 2-9 bucket's render. At one member the book is
+  // the answer's own grid — pinned separately below.
+  const book = bookRegion(answerHtml(secondaryBookSnapshot()));
+  assert.match(book, /Where AETNA US HEALTHCARE pays — across the whole book/);
+  /* THE COUNT, IN BOTH CHANNELS, NAMED SEPARATELY. A bare /3 facilities/ was satisfied by the
+   * aria-label ALONE — proven by mutation — so it could not tell "the section states its size" from
+   * "the section has an accessible name and shows nothing". Both are required, because a numeral
+   * needs its accessible name and the sighted reader needs the word beside it. */
+  assert.match(book, /aria-label="3 facilities in this payer&#x27;s book"/, 'the numeral has an accessible name');
+  assert.match(book, />3<\/span> facilities/, 'and the visible text says it too');
+  // ⚠ ITS OWN BASIS LABEL. The member ranking's claims describe the member; this list does not, and a
+  // section that borrowed them would be the scope lie this whole surface is built against.
+  assert.match(book, /not this member/i);
+  // Rendered through the SAME ScoreCard, so S1's census chips, greying and rating words come free.
+  assert.match(book, /SUMMIT RIDGE RECOVERY/);
+  assert.match(book, /PHOENIX RENEWAL/);
+});
+
+test('S2 book — the MEMBER ranking is untouched: its heading, its cards and its counts still describe the member', () => {
+  // RE-AIMED BY S3, and the re-aim is the point: this is the claim the 1-member flip DELIBERATELY
+  // stops making. In every OTHER bucket the member ranking still leads and the book sits below it.
+  const html = answerHtml(secondaryBookSnapshot());
+  assert.match(html, />Facilities, ranked</, 'the member ranking keeps its heading');
+  // The member grid holds exactly the member's own facility — the book did not leak into it.
+  const memberSection = outerHtmlFrom(html, html.lastIndexOf('<section', html.indexOf('qualify-scorecard-heading')));
+  assert.ok(memberSection.includes('NASHVILLE MENTAL HEALTH'));
+  assert.ok(!memberSection.includes('SUMMIT RIDGE RECOVERY'), 'the book list is NOT the ranked grid');
+});
+
+test('S2 book — a book card carries NO payer-scope disclosure at all: there is exactly one payer', () => {
+  // The blend disclosure is SCOPE-gated (`allPayers`), not count-gated, and the book is payer-scoped
+  // by construction — `bookFacilities` is null on the only ranking that spans several labels. So the
+  // right degrade is silence, not "1 payer · AETNA" on every card: at one label the count is a fact
+  // nobody asked for, printed beside a heading that already names the payer.
+  const book = bookRegion(answerHtml(secondaryBookSnapshot()));
+  assert.ok(!book.includes('blended across'), 'nothing is blended — one label by the equality that built it');
+  // ⚠ THE SECOND HALF IS WHAT MAKES THIS MUTATION-DETECTABLE. Passing the member ranking's
+  // `allPayers` through instead of `false` would not print "blended across" (payerCount is 1) — it
+  // would print the one-payer arm, and a test asserting only the blend string would sail past it.
+  assert.ok(!book.includes('billed-under label'), 'and no per-card payer count either');
+  // Positive control on the same render: the member ranking beside it is equally silent, so the
+  // absence above is a property of the SCOPE and not of a fixture that forgot to set payerCount.
+  assert.ok(!answerHtml(secondaryBookSnapshot()).includes('blended across'));
+  // And in the BOOK-LED mode, where the same cards are the answer's own grid, still silent.
+  assert.ok(!answerHtml(bookSnapshot()).includes('blended across'));
+});
+
+test('S2 book — ABSENT on the identifier-wide Skip, where no single payer has a book', () => {
+  // `buildFacilityRankingQuery` throws on (null payer, no market, no token) and the all-payers whole
+  // book is a 206-713ms scan that spills to disk — an hourly cache's job, never a per-search load.
+  // The section must not render an empty shell claiming a list that was never fetched.
+  const html = render(
+    props('answer', fixture(), {
+      answer: answerProps({
+        snapshot: allPayersSnapshot({ memberCount: 31, bookFacilities: null } as Partial<QualifySnapshot>),
+        skipped: true,
+        scopeSource: 'dominant',
+      }),
+    }),
+  );
+  assert.ok(!html.includes('across the whole book'), 'no book heading');
+  assert.ok(!html.includes('data-v3-book'), 'and no section at all');
+  // The preface still lands — the classifier is independent of whether a book could be loaded.
+  assert.match(html, /A population — 31 members have a paid claim behind this prefix in the last 12 months\./);
+});
+
+test('S2 book — the AI grounding caption stops saying "the ranking on screen" once TWO rankings are', () => {
+  // The payload is `snap.facilities.slice(0,10)` — the MEMBER ranking. With a second ranking on
+  // screen, "the ranking on screen" no longer identifies which one the model read. Same standard the
+  // area narrow already forced: say what backs the answer instead of letting the screen relabel it.
+  // RE-AIMED BY S3: "the whole-book list BELOW" is the secondary placement, i.e. the 2-9 bucket. The
+  // book-led arm ("not the book ranked above") is pinned in the S3 block.
+  const withBook = disclosureOf(
+    render(
+      props('answer', fixture(), {
+        answer: answerProps({ snapshot: secondaryBookSnapshot(), skipped: true, scopeSource: 'dominant' }),
+      }),
+    ),
+  );
+  assert.ok(!withBook.includes('grounded in the ranking on screen'), 'ambiguous the moment a book is beside it');
+  assert.match(withBook, /grounded in this member&#x27;s ranking, not the whole-book list/);
+  // WITHOUT a book the string is byte-identical to what shipped — the S1 test above freezes it.
+  const noBook = disclosureOf(
+    render(
+      props('answer', fixture(), {
+        answer: answerProps({
+          snapshot: { ...bookSnapshot(), bookFacilities: null } as unknown as QualifySnapshot,
+          skipped: true,
+          scopeSource: 'dominant',
+        }),
+      }),
+    ),
+  );
+  assert.match(noBook, /grounded in the ranking on screen/);
+});
+
+
+// ── FIX ROUND 1/5 — the cap, and the one predicate behind "is a book on screen" ──────────────────
+
+/** A book of nine, so the truncating branch actually renders. Every S2 fixture had THREE against a
+ *  cap of eight, which meant the slice, the cap sentence and its total had never once been executed
+ *  under test — mutation-proven: replacing the sentence with garbage and the total with a wrong
+ *  number left the suite fully green. A real payer's book is 48 facilities, so this is the COMMON
+ *  path, not an edge. */
+function bigBookSnapshot(over: Partial<QualifySnapshot> = {}): QualifySnapshot {
+  return {
+    // RE-AIMED BY S3: the cap belongs to the SECONDARY section. A book-LED answer is not capped at
+    // all (see the S3 block) — a cap on the list that IS the answer would be a silent filter.
+    ...secondaryBookSnapshot(),
+    bookFacilities: Array.from({ length: 9 }, (_, i) =>
+      facility({ rank: i + 1, name: `BOOK FACILITY ${i + 1}`, facilityKey: `BF${i + 1}`, payerCount: 1 }),
+    ),
+    ...over,
+  } as unknown as QualifySnapshot;
+}
+
+test('S2 book — the CAP renders, states the REAL total, and names what a cap costs', () => {
+  const book = bookRegion(answerHtml(bigBookSnapshot()));
+  // The exact sentence, with the true denominator — not "of 8", and not a count re-derived from the
+  // sliced array, which is how a truncation notice comes to describe itself instead of the set.
+  assert.match(book, /Showing the 8 best-ranked of 9\./);
+  /* ⚠ AND WHY THAT MATTERS HERE SPECIFICALLY: availability leads the sort (S1), so the rows a cap
+   * removes skew toward the FULL ones. A cap that hid them silently would turn "census sorts, it
+   * never filters" into a filter by omission.
+   *
+   * ⚠ THE SECOND CLAUSE IS A COUNT, NOT A PREDICTION (final review, 2026-08-08). It used to say the
+   * full houses "will be in the part not shown", which is false whenever a full house is inside the
+   * cap and misleading whenever the cap is filled by open ones. This fixture's nine facilities carry
+   * no `bedState` at all, so the honest count here is ZERO — and the sentence says zero rather than
+   * predicting. Both non-trivial states are pinned by FF-I2. */
+  assert.match(book, /0 of the 1 not shown have no open beds\./);
+  assert.ok(!book.includes('sorts to the end'), 'the prediction is gone');
+  // The slice is real: eight cards, not nine, not three.
+  assert.equal(book.split('data-v3-tile').length - 1, 8, 'exactly QUALIFY_BOOK_PREVIEW cards render');
+  assert.ok(book.includes('BOOK FACILITY 8'));
+  assert.ok(!book.includes('BOOK FACILITY 9'), 'the ninth is cut — and the sentence above says so');
+  // The section's own count still names the WHOLE book, not the slice.
+  assert.match(book, />9<\/span> facilities/);
+});
+
+test('S2 book — AT the cap there is no truncation notice, because nothing is truncated', () => {
+  // The off-by-one that a 9-row fixture alone cannot catch: `> QUALIFY_BOOK_PREVIEW`, not `>=`.
+  const book = bookRegion(
+    answerHtml(
+      bigBookSnapshot({
+        bookFacilities: Array.from({ length: 8 }, (_, i) =>
+          facility({ rank: i + 1, name: `BOOK FACILITY ${i + 1}`, facilityKey: `BF${i + 1}`, payerCount: 1 }),
+        ),
+      } as Partial<QualifySnapshot>),
+    ),
+  );
+  assert.equal(book.split('data-v3-tile').length - 1, 8);
+  assert.ok(!book.includes('best-ranked of'), 'no notice when the whole book is on screen');
+});
+
+test('S2 book — an EMPTY book says so in words rather than rendering a headed void', () => {
+  // Reachable: the payer-wide floor drops every facility below QUALIFY_MIN_LINES, so a payer with
+  // nothing but thin rows in the window has a real, empty book. A heading and a count of zero with
+  // no sentence would read as a section that failed to load.
+  // RE-AIMED BY S3 for consistency with its siblings; the empty book ALSO cannot lead (S3 pins that
+  // separately), so this render would be the secondary section at any member count.
+  const book = bookRegion(answerHtml(secondaryBookSnapshot({ bookFacilities: [] } as Partial<QualifySnapshot>)));
+  assert.match(book, /No facility in AETNA US HEALTHCARE&#x27;s book clears the volume floor in the window shown\./);
+  assert.equal(book.split('data-v3-tile').length - 1, 0, 'no cards');
+  assert.ok(!book.includes('best-ranked of'), 'and no truncation notice over an empty list');
+});
+
+test('S2 book — ONE predicate decides whether a book is on screen, and both consumers read it', () => {
+  /* Two derivations shipped in S2: the shell asked `snapshot.bookFacilities !== null` to caption the
+   * AI panel, while the stage rendered the section on `bookFacilities !== null && bookPayer !== null`.
+   * They agree today and disagree the moment either moves — and S3 changes this render condition BY
+   * DESIGN. So the predicate is one exported function, and this pins that it answers the harder case
+   * (a book with no nameable payer scope) the way the RENDER does, not the way the caption did. */
+  assert.equal(bookIsOnScreen(bookSnapshot()), true);
+  assert.equal(bookIsOnScreen(null), false, 'no snapshot, no book');
+  assert.equal(bookIsOnScreen({ ...bookSnapshot(), bookFacilities: null } as unknown as QualifySnapshot), false);
+  // ⚠ ABSENT IS NOT PRESENT-AND-NULL, and `undefined !== null` is TRUE. A pre-S2 payload (or any
+  // fixture predating the field) would otherwise answer "yes" and send the section into
+  // `bookFacilities!.length` on nothing — which is precisely what happened when this predicate was
+  // first extracted with a bare `!== null`, breaking 40 unrelated renders at once.
+  assert.equal(bookIsOnScreen(snapshotFixture()), false, 'a payload without the field has no book');
+  // An empty book IS on screen — the section renders with its heading and its empty sentence.
+  assert.equal(bookIsOnScreen({ ...bookSnapshot(), bookFacilities: [] } as unknown as QualifySnapshot), true);
+  // The case the two derivations disagreed on: rows present, but the scope names no single payer, so
+  // the section cannot render a heading and does not render at all. `scopedPayerOf` is the judge.
+  const unnameable = {
+    ...bookSnapshot(),
+    resolved: { payerName: null, payerScope: 'all' },
+  } as unknown as QualifySnapshot;
+  assert.equal(bookIsOnScreen(unnameable), false, 'a book nobody can name is not a book on screen');
+  // And the render agrees with the predicate — the whole point of unifying them.
+  assert.ok(!answerHtml(unnameable).includes('data-v3-book'));
+});
+
+
+// ── S3 (2026-08-08) — THE INVERSION: the book LEADS, the member's history ANNOTATES ──────────────
+//
+// Alec's ruling, delegated and decided: **the book ranks, member history annotates.** For the 58.8%
+// of searches that resolve to ONE member carrying 1.14 facilities, a "ranking" of their own history
+// is not thin — it is MALFORMED, because a ranking is a comparative claim and there is nothing to
+// compare. So at one member the payer's whole book becomes the answer's own ranked grid, and the
+// member's footprint survives on it as a mark and a weak tiebreak.
+//
+// EVERY OTHER BUCKET IS UNCHANGED. 2-9, 10+, an unavailable count, a zero count, the identifier-wide
+// Skip (no book exists) and an EMPTY book all keep the member-led render with S2's secondary
+// section. Each is pinned below, because a flip that fired one bucket wider than its evidence would
+// be the same overclaim in the opposite direction.
+
+/** The book-led fixture: one member, a book of three, and the member's own facility annotated on it.
+ *  `NASH` is deliberately rank 2 in the book — so an assertion about the annotation cannot be
+ *  satisfied by the first card, and the flip cannot be faked by rendering the member list. */
+function ledSnapshot(over: Partial<QualifySnapshot> = {}): QualifySnapshot {
+  return bookSnapshot({
+    bookFacilities: [
+      facility({ rank: 1, name: 'SUMMIT RIDGE RECOVERY', facilityKey: 'SUMMIT', payerCount: 1 }),
+      facility({
+        rank: 2,
+        name: 'NASHVILLE MENTAL HEALTH',
+        facilityKey: 'NASH',
+        payerCount: 1,
+        memberHistory: { lineCount: 210, distinctPatients: 1 },
+      }),
+      facility({ rank: 3, name: 'PHOENIX RENEWAL', facilityKey: 'PHX', city: 'Phoenix', state: 'AZ', payerCount: 1 }),
+    ],
+    ...over,
+  } as Partial<QualifySnapshot>);
+}
+
+test('S3 — bookLeadsAnswer: ONE member, a NON-EMPTY book, and a payer the heading can name', () => {
+  assert.equal(bookLeadsAnswer(ledSnapshot()), true);
+  // The buckets that keep the member-led answer. 2-9 and 10+ have a real ranking of their own; an
+  // unavailable count must never be guessed into one; and zero has no member to annotate with.
+  for (const memberCount of [0, 2, 4, 9, 10, 31, null]) {
+    assert.equal(
+      bookLeadsAnswer(ledSnapshot({ memberCount } as Partial<QualifySnapshot>)),
+      false,
+      `memberCount=${String(memberCount)} does not flip`,
+    );
+  }
+  // ⚠ AN EMPTY BOOK CANNOT LEAD. `bookIsOnScreen` is TRUE for an empty book (the section renders its
+  // own "nothing cleared the floor" sentence, which is a state and not an absence) — but leading
+  // with an empty list would put a void where the answer goes and HIDE the member's own facilities
+  // behind it. Where the book has nothing, the member's footprint, however thin, is the only
+  // evidence on the surface and it keeps the grid.
+  assert.equal(bookLeadsAnswer(ledSnapshot({ bookFacilities: [] } as Partial<QualifySnapshot>)), false);
+  // No book at all (the identifier-wide Skip), no snapshot, and a book nobody can name.
+  assert.equal(bookLeadsAnswer(ledSnapshot({ bookFacilities: null } as Partial<QualifySnapshot>)), false);
+  assert.equal(bookLeadsAnswer(null), false);
+  assert.equal(
+    bookLeadsAnswer({ ...ledSnapshot(), resolved: { payerName: null, payerScope: 'all' } } as unknown as QualifySnapshot),
+    false,
+  );
+  // And it is BUILT ON `bookIsOnScreen`, not a second copy of it: the absent-field coercion that
+  // broke 40 renders when the predicate was first extracted must not come back through this door.
+  assert.equal(bookLeadsAnswer(snapshotFixture()), false, 'a payload without the field has no book to lead');
+});
+
+test('S3 flip — the BOOK is the answer’s own ranked grid, and the member list is no longer a second one', () => {
+  const html = answerHtml(ledSnapshot());
+  const grid = outerHtmlFrom(html, html.lastIndexOf('<section', html.indexOf('qualify-scorecard-heading')));
+  // The heading NAMES whose book this is — it does not inherit "Facilities, ranked", which after the
+  // flip would describe the payer's book in words minted for the member's footprint.
+  assert.match(grid, /Where AETNA US HEALTHCARE pays — the whole book/);
+  assert.ok(!grid.includes('>Facilities, ranked<'), 'the member-led heading is gone in this mode');
+  // All three book cards are the answer.
+  for (const name of ['SUMMIT RIDGE RECOVERY', 'NASHVILLE MENTAL HEALTH', 'PHOENIX RENEWAL']) {
+    assert.ok(grid.includes(name), `${name} is in the ranked grid`);
+  }
+  assert.equal(grid.split('data-v3-tile').length - 1, 3, 'three cards, not six — the member list is not a second grid');
+  // And there is exactly ONE book section on the page: the secondary one must not render beneath the
+  // grid that already IS the book.
+  assert.equal(html.split('data-v3-book').length - 1, 1);
+  assert.ok(!html.includes('across the whole book'), 'S2’s secondary heading is absent in this mode');
+  // The basis is stated on the list itself, in its own words, and it says what the annotation means.
+  // The floor clause is not decoration — see FF-I4: without it this sentence contradicts the "below
+  // the volume floor" line the same screen renders a few rows down.
+  assert.match(grid, /every facility AETNA US HEALTHCARE paid at above the volume floor in the window shown/);
+  assert.match(grid, /not just this member/i);
+});
+
+test('S3 flip — the HERO is derived from the list that LEADS, and its basis SAYS which list that is', () => {
+  // `derivePolicyRating` ran over `snap.facilities` at HEAD. In book-led mode the honest basis for
+  // "should I take this policy" is the BOOK — the list on screen — and a bar averaging a hidden list
+  // is the reconciled-by-construction invariant broken in the one place it exists to hold.
+  const html = answerHtml(
+    ledSnapshot({
+      // The member's own facility rates 62; the book rates 30 across two rated rows. If the hero
+      // still read `facilities` it would print 62 over a grid of 30s.
+      facilities: [facility({ ratingV2: 62, iqBand: '50', distinctPatients: 14 })],
+      bookFacilities: [
+        facility({ rank: 1, name: 'SUMMIT RIDGE RECOVERY', facilityKey: 'SUMMIT', ratingV2: 30, iqBand: '30', distinctPatients: 10 }),
+        facility({ rank: 2, name: 'PHOENIX RENEWAL', facilityKey: 'PHX', ratingV2: 30, iqBand: '30', distinctPatients: 10 }),
+      ],
+    } as Partial<QualifySnapshot>),
+  );
+  assert.match(html, /aria-label="policy rating 30 out of 100"/);
+  assert.ok(!html.includes('policy rating 62 out of 100'), 'the member-scoped hero is not what leads');
+  // THE CAPTION NAMES THE POPULATION. "patient-weighted across 2 rated facilities" is true of both
+  // lists and therefore identifies neither.
+  assert.match(html, /patient-weighted across 2 rated facilities in AETNA US HEALTHCARE&#x27;s whole book/);
+});
+
+test('S3 annotation — the facility the member has been to is MARKED; the others are not', () => {
+  const html = answerHtml(ledSnapshot());
+  assert.match(html, /Seen here before — 210 claim lines/);
+  // ONE mark, not three. A mark on every card would say nothing; a mark on the wrong card is worse.
+  assert.equal(html.split('Seen here before').length - 1, 1);
+  // The 2-9 bucket annotates too — the join is a fact about the data, not about the flip — but it
+  // must not say "seen here before" about a set of four different people.
+  const few = answerHtml(ledSnapshot({ memberCount: 4 } as Partial<QualifySnapshot>));
+  assert.ok(!few.includes('Seen here before'), 'four members are not "here before"');
+  assert.match(few, /This search has 210 claim lines here/);
+});
+
+test('S3 — a member facility the BOOK’S FLOOR dropped is NAMED, never silently lost', () => {
+  /* THE HOLE THE FLIP OPENS, CLOSED. The member ranking is floorless and the book applies
+   * QUALIFY_MIN_LINES, so a facility the member billed 1-2 lines at exists in `facilities` and NOT in
+   * `bookFacilities` — and since the member grid stops rendering, its annotation has nothing to ride
+   * on. "Its information survives as annotations" is only true if that case is stated. */
+  const html = answerHtml(
+    ledSnapshot({
+      facilities: [
+        facility({ rank: 1, name: 'NASHVILLE MENTAL HEALTH', facilityKey: 'NASH' }),
+        facility({ rank: 2, name: 'TINY CLINIC', facilityKey: 'TINY', lineCount: 2, distinctPatients: 1 }),
+      ],
+    } as Partial<QualifySnapshot>),
+  );
+  assert.match(html, /TINY CLINIC/, 'the facility is named on screen');
+  assert.match(html, /below the volume floor/i, 'and the reason is stated, not implied');
+  // The one that IS in the book is not double-reported — it is marked on its card instead.
+  const sentence = html.slice(html.indexOf('TINY CLINIC') - 400, html.indexOf('TINY CLINIC') + 400);
+  assert.ok(!sentence.includes('NASHVILLE MENTAL HEALTH'), 'only the missing ones are named here');
+  // With nothing missing the sentence does not render at all.
+  assert.ok(!answerHtml(ledSnapshot()).includes('below the volume floor'));
+});
+
+test('S3 — a book-LED answer is NOT capped: a cap on the list that IS the answer is a silent filter', () => {
+  // S2 capped the SECONDARY section at QUALIFY_BOOK_PREVIEW = 8 with the cap stated, because a
+  // secondary section that pushes the answer off screen has stopped being secondary. When the book
+  // LEADS that argument inverts: availability leads the sort, so a cap systematically removes the
+  // full houses — turning "census sorts, it never filters" into a filter by omission on the primary
+  // grid. The whole book is <=48 facilities, which is a real DOM cost and the accepted one; the AREA
+  // facet beside the grid is the narrow.
+  const nine = ledSnapshot({
+    bookFacilities: Array.from({ length: 9 }, (_, i) =>
+      facility({ rank: i + 1, name: `BOOK FACILITY ${i + 1}`, facilityKey: `BF${i + 1}`, payerCount: 1 }),
+    ),
+  } as Partial<QualifySnapshot>);
+  const html = answerHtml(nine);
+  assert.equal(html.split('data-v3-tile').length - 1, 9, 'all nine render');
+  assert.ok(html.includes('BOOK FACILITY 9'));
+  assert.ok(!html.includes('best-ranked of'), 'and no truncation notice, because nothing is truncated');
+});
+
+test('S3 — the modes that do NOT flip keep the member-led render, each for its own reason', () => {
+  // 2-9 and 10+: a real population with a real ranking of its own. The book stays SECONDARY.
+  for (const memberCount of [4, 31]) {
+    const html = answerHtml(ledSnapshot({ memberCount } as Partial<QualifySnapshot>));
+    assert.match(html, />Facilities, ranked</, `memberCount=${memberCount} keeps the member heading`);
+    assert.match(html, /across the whole book/, 'and the book is the secondary section');
+    assert.equal(html.split('data-v3-book').length - 1, 1, 'exactly one book section, below');
+  }
+  // An unavailable count must never be GUESSED into a flip: `null` is "we could not classify".
+  const unknown = answerHtml(ledSnapshot({ memberCount: null } as Partial<QualifySnapshot>));
+  assert.match(unknown, />Facilities, ranked</);
+  // Zero: the count ran and nobody is behind the token, so there is no history to annotate with.
+  assert.match(answerHtml(ledSnapshot({ memberCount: 0 } as Partial<QualifySnapshot>)), />Facilities, ranked</);
+  // The identifier-wide Skip has no book at all — the hard boundary S2 pinned, unchanged.
+  const skip = render(
+    props('answer', fixture(), {
+      answer: answerProps({
+        snapshot: allPayersSnapshot({ memberCount: 1, bookFacilities: null } as Partial<QualifySnapshot>),
+        skipped: true,
+        scopeSource: 'dominant',
+      }),
+    }),
+  );
+  assert.match(skip, />Facilities, ranked</, 'one member and no book still ranks the member’s footprint');
+  assert.ok(!skip.includes('data-v3-book'));
+});
+
+test('S3 — every claim surface follows the flip: the scope sentence, the skip banner, the empty state', () => {
+  const led = answerHtml(ledSnapshot(), { narrowExpanded: true });
+  // The resolved-scope sentence still names the label (the book IS payer-scoped) and now names the
+  // POPULATION too, because "ranked under AETNA" is true of both lists and identifies neither.
+  assert.match(led, /ranked under AETNA US HEALTHCARE — the whole book, not this member&#x27;s history/);
+  // The skip banner's payer-scoped arm claimed "every facility this member has history at under that
+  // one label" — flatly false of a book-led grid.
+  const skipped = answerHtml(ledSnapshot(), { skipped: true, scopeSource: 'dominant' });
+  assert.ok(
+    !skipped.includes('every facility this member has history at under that one label'),
+    'the member-footprint promise cannot survive a book-led grid',
+  );
+  assert.match(skipped, /the ranking is AETNA US HEALTHCARE&#x27;s whole book/);
+  // An empty grid in book-led mode is the BOOK's emptiness, and says so in the book's own words.
+  const emptyBook = answerHtml(
+    ledSnapshot({ bookFacilities: [], facilities: [] } as Partial<QualifySnapshot>),
+  );
+  assert.ok(!emptyBook.includes('Where AETNA US HEALTHCARE pays — the whole book'), 'an empty book cannot lead');
+});
+
+test('S3 — the AI captions say what backs the answer now that the book is ABOVE, not below', () => {
+  // The payload is still `snap.facilities.slice(0,10)` — the MEMBER-scoped list, unchanged schema.
+  // That makes S2's caption ("not the whole-book list below") false by position and the pre-S2 one
+  // ("the ranking on screen") false by identity: the ranking on screen is the one the model has
+  // never seen. Same standard, third time: say what backs the answer.
+  const led = disclosureOf(
+    render(
+      props('answer', fixture(), {
+        answer: answerProps({ snapshot: ledSnapshot(), skipped: true, scopeSource: 'dominant' }),
+      }),
+    ),
+  );
+  assert.ok(!led.includes('grounded in the ranking on screen'));
+  assert.ok(!led.includes('not the whole-book list below'), 'the book is not below any more');
+  assert.match(led, /grounded in this member&#x27;s own history, not the book ranked above/);
+});
+
+test('S3 M8 — the trace panel names BOTH rankings and which one leads', () => {
+  // "Facility ranking" (singular) and, on a Skip, "this identifier's whole footprint": true of the
+  // member list, false of the book, and after the flip false of the screen.
+  const led = disclosureOf(answerHtml(ledSnapshot()));
+  assert.match(led, />Facility rankings</, 'plural — there are two');
+  assert.match(led, /AETNA US HEALTHCARE&#x27;s whole book leads/);
+  assert.match(led, /this member&#x27;s own history/, 'and the second one is named, not dropped');
+  // The KPI tiles' provenance line is the ratified "book-wide, not this client" — a distinction that
+  // stops distinguishing anything once the ranking above it is also book-wide. It says so.
+  assert.match(led, /book-wide, not this client/, 'the ratified wording is untouched');
+  assert.match(led, /so is the ranking above/);
+  // Unchanged in every non-flip mode: singular, and the pre-S3 strings byte for byte.
+  const few = disclosureOf(answerHtml(ledSnapshot({ memberCount: 4 } as Partial<QualifySnapshot>)));
+  assert.match(few, />Facility ranking</);
+  assert.ok(!few.includes('Facility rankings'));
+  assert.ok(!few.includes('so is the ranking above'));
+});
+
+test('S3 — the ARIA channel carries the basis too, or the spoken answer describes a list nobody drew', () => {
+  const r = fixture();
+  const spoken = liveSentenceFor('answer', r, null, {
+    memberCount: 1,
+    memberFacilityCount: 1,
+    bookLedPayer: 'AETNA US HEALTHCARE',
+  });
+  assert.match(spoken, /One member has a paid claim behind this search/, 'the preface is unchanged');
+  assert.match(spoken, /the ranking below is AETNA US HEALTHCARE's whole book, not this member's own history/i);
+  // THE ANNOTATION IS ANNOUNCED TOO. Naming the basis without naming the mark would tell a
+  // screen-reader user the member's history had been REPLACED, when it has been moved onto the rows.
+  assert.match(spoken, /the facilities they have been to are marked on it/i);
+  /* ⚠ THIS PAIR PINS THE NULL/OMITTED EQUIVALENCE, NOT BYTE-IDENTITY WITH S2 — the comment here
+   * used to claim the latter and pointed at an assertion that cannot show it. Byte-identity is
+   * already frozen by the S2 exact-string tests above (`liveSentenceFor(..., {})` vs the pre-S2
+   * sentence). What this adds is that an EXPLICIT `bookLedPayer: null` and an omitted one are the
+   * same announcement, so a caller that computes the payer and gets null cannot drift from one that
+   * never computed it. */
+  assert.equal(
+    liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1 }),
+    liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1, bookLedPayer: null }),
+  );
+  assert.ok(
+    !liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1 }).includes('whole book'),
+    'and neither of them says anything about a book',
+  );
+  // And the skipped arm carries it as well — a Skip plus one billed-under chip IS a book-led screen,
+  // and the sr-only line is where an unfixed scope claim survives a browser pass.
+  const skipSpoken = liveSentenceFor('answer', r, null, {
+    skipped: true,
+    memberCount: 1,
+    memberFacilityCount: 1,
+    bookLedPayer: 'AETNA US HEALTHCARE',
+  });
+  assert.match(skipSpoken, /You skipped the plan questions/);
+  assert.match(skipSpoken, /whole book/);
+});
+
+
+// ── S3 FIX ROUND 1 (2026-08-08) — the 13th claim surface, and the marker that would have found it ─
+
+test('S3 C1 — the SCOPE-HONESTY banner follows the flip, in BOTH arms', () => {
+  /* THE ONE THE INDEX HID. This banner renders in the coral ALARM treatment with `role="status"`,
+   * directly above the grid, and its gate (`!stale && !skipped && scopeSource === 'dominant' &&
+   * resolved && candidates.total > 1`) never excluded `bookLeads`. So on the 58.8% path it claimed
+   * "the ranking below is this identifier's history under {payer}" over a grid showing that payer's
+   * WHOLE BOOK — the S2-I1 / PR #92 mixed-claim class, in the loudest voice on the surface.
+   *
+   * It is NOT suppressed: its subject (the pick could not be bridged to a claims label) is still
+   * true and still worth alarming about. Only the half that describes the LIST re-bases. */
+  const probe = (over: Partial<QualifyResolution> = {}) =>
+    render(
+      props('answer', fixture(over), {
+        answer: answerProps({ snapshot: ledSnapshot(), skipped: false, scopeSource: 'dominant' }),
+      }),
+    );
+
+  // ARM 1 — the picked plan has no claims of its own (`claimEvidence.lines === 0`).
+  const noHistory = probe({
+    group: { ...fixture().group, claimEvidence: { ...fixture().group.claimEvidence, lines: 0 } },
+  } as Partial<QualifyResolution>);
+  assert.match(noHistory, /Where AETNA US HEALTHCARE pays — the whole book/, 'the probe really is book-led');
+  assert.ok(
+    !noHistory.includes("the ranking below is this identifier&#x27;s history under"),
+    'the member-footprint claim cannot survive a book-led grid',
+  );
+  assert.match(noHistory, /This plan has no claims history of its own/, 'the alarm still fires — only its list-half moved');
+  assert.match(noHistory, /the ranking below is AETNA US HEALTHCARE&#x27;s whole book, not evidence about Aetna/);
+
+  // ARM 2 — the pick could not be scoped, and the ranking is the dominant label's book.
+  const notScoped = probe();
+  assert.ok(!notScoped.includes('it shows this identifier&#x27;s history under'), 'same lie, second arm');
+  assert.match(notScoped, /The ranking below could not be scoped to Aetna/, 'the alarm still fires');
+  assert.match(
+    notScoped,
+    /it shows AETNA US HEALTHCARE&#x27;s whole book, this identifier&#x27;s largest label by volume, not evidence about Aetna/,
+  );
+
+  // ⚠ AND THE PRE-S3 STRINGS ARE UNTOUCHED IN EVERY MODE THAT DOES NOT FLIP. Both arms are frozen
+  // by tests above this block; this asserts the re-base is gated, not global.
+  const few = render(
+    props('answer', fixture(), {
+      answer: answerProps({
+        snapshot: ledSnapshot({ memberCount: 4 } as Partial<QualifySnapshot>),
+        skipped: false,
+        scopeSource: 'dominant',
+      }),
+    }),
+  );
+  assert.match(few, /it shows this identifier&#x27;s history under AETNA US HEALTHCARE, its largest payer by volume\./);
+});
+
+/**
+ * THE SWEEP ITSELF — extracted so it can be run against a FIXTURE of known evaders as well as against
+ * the real file, which is the only way a scan can be trusted at all.
+ *
+ * ⚠ IT USED TO BE `/<[a-zA-Z]+ role="status"/` — THE ATTRIBUTE ONLY IN FIRST POSITION (final review,
+ * 2026-08-08). `<p data-x role="status">` escaped it entirely, and so did every multi-line tag whose
+ * `role` sits on its own line. A guard whose STATED PURPOSE is "the next claim surface cannot hide"
+ * had a one-token hiding place in it — the same shape as the hand-maintained index it replaced.
+ *
+ * Two exclusions keep prose out, and they are separate rules because the prose in this file takes two
+ * forms: BACKTICKED mentions inside block comments (stripped), and bare mentions on comment lines
+ * (`*`, `//`, `/*`). Either alone lets the other class through.
+ */
+function statusAttrLines(lines: readonly string[]): number[] {
+  const isProse = (l: string) => /^\s*(\*|\/\/|\/\*)/.test(l);
+  const deBacktick = (l: string) => l.replace(/`[^`]*`/g, '');
+  return lines
+    .map((l, i) => (!isProse(l) && /\brole="status"/.test(deBacktick(l)) ? i : -1))
+    .filter((i) => i >= 0);
+}
+
+/** NEGATIVE CONTROLS FOR THE SWEEP. Lines 0/1/4 must be found; 5/6/7 must not. Line 1 is the exact
+ *  attribute-ordered evader the old regex missed, so this fixture fails against the old scan. */
+const MARKER_SWEEP_FIXTURE = [
+  /* 0 */ '      <p role="status" className="x">first attribute — the only form the old scan caught</p>',
+  /* 1 */ '      <p data-v3-book role="status">attribute-ordered evader — invisible to the old scan</p>',
+  /* 2 */ '      <p',
+  /* 3 */ '        data-x',
+  /* 4 */ '        role="status"',
+  /* 5 */ '      >a multi-line tag, whose attribute line is the one that counts</p>',
+  /* 6 */ '   * a block comment mentioning `role="status"` as backticked prose',
+  /* 7 */ '  // role="status" named in a line comment, unbackticked',
+].join('\n');
+
+test('S3 C1 — EVERY role="status" in the flow carries a book-led marker, so the next one cannot hide', () => {
+  /* ⚠ THIS TEST EXISTS BECAUSE A HAND-MAINTAINED INDEX HID A DEFECT. The flip's comment block used
+   * to ENUMERATE the surfaces that follow it and the ones that do not — and both the author and the
+   * reviewer checked the list instead of the file, so the scope-honesty banner (never on the list)
+   * shipped claiming the member's ranking over the book's grid.
+   *
+   * The index is now a GREP INSTRUCTION rather than a list: every claim surface carries
+   * `[BOOK-LED SURFACE]` or `[BOOK-LED EXEMPT: reason]` in its own comment, at the site, where it
+   * cannot rot separately from the code it describes.
+   *
+   * ⚠ WHAT THIS TEST CAN AND CANNOT ENFORCE, said plainly. `role="status"` is a MECHANICAL proxy for
+   * "claim surface", not a definition of one: it is the loudest class (C1 was one) and the only one a
+   * regex can find. Several real claim surfaces are NOT status roles — `resolvedScopeSentence`, the
+   * `billedUnderCaption` table, the trace panel's rows, the hero's basis. Those carry markers too, so
+   * `grep -n 'BOOK-LED' app/components/qualify/v3/resolution-flow.tsx` still enumerates the whole
+   * set; what the test enforces is that the LOUD class cannot grow a new member silently. */
+  const src = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/resolution-flow.tsx', import.meta.url)),
+    'utf8',
+  );
+  const lines = src.split('\n');
+  assert.deepEqual(
+    statusAttrLines(MARKER_SWEEP_FIXTURE.split('\n')),
+    [0, 1, 4],
+    'the sweep itself is checked against the evaders BEFORE it is trusted against the file',
+  );
+  const statusLines = statusAttrLines(lines);
+  assert.ok(statusLines.length >= 12, `expected the known status surfaces, found ${statusLines.length}`);
+
+  const MARKER = /\[BOOK-LED (SURFACE\]|EXEMPT: [^\]]+\])/;
+  const unmarked = statusLines.filter((i) => !lines.slice(Math.max(0, i - 30), i + 1).some((l) => MARKER.test(l)));
+  assert.deepEqual(
+    unmarked.map((i) => `${i + 1}: ${lines[i]!.trim().slice(0, 80)}`),
+    [],
+    'a role="status" claim surface with no [BOOK-LED …] marker within 30 lines above it',
+  );
+
+  // Every marker is one of the TWO valid forms — a typo'd token is invisible to grep, which is the
+  // whole mechanism. And there is at least one per status surface, so a marker cannot be shared.
+  const markers = lines.filter((l) => l.includes('[BOOK-LED'));
+  for (const m of markers) assert.match(m, MARKER, `malformed marker: ${m.trim()}`);
+  assert.ok(markers.length >= statusLines.length, 'markers cannot be reused across surfaces');
+  // The index no longer enumerates — it points at the token. An enumerated list is what rotted.
+  assert.match(src, /grep for `BOOK-LED`/, 'the index must instruct, not enumerate');
+});
+
+test('S3 M1 — the sr-only book clause is STAGE-GATED: no "ranking below" where there is no ranking', () => {
+  // A held skipped answer plus a step back to the search box: the skipped arm returns BEFORE the
+  // stage checks, so the clause was announced over the identify screen — "the ranking below is
+  // AETNA's whole book" with no ranking below it at all. The `say()` comment asserted a guarantee
+  // ("called from exactly the two ANSWER-shaped arms") that the code did not hold.
+  const r = fixture();
+  const opts = { skipped: true, memberCount: 1, memberFacilityCount: 1, bookLedPayer: 'AETNA US HEALTHCARE' } as const;
+  assert.match(liveSentenceFor('answer', r, null, opts), /whole book/, 'the answer stage still says it');
+  for (const stage of ['identify', 'payer', 'plan'] as const) {
+    assert.ok(
+      !liveSentenceFor(stage, r, null, opts).includes('whole book'),
+      `stage=${stage} announces a ranking that is not on screen`,
+    );
+  }
+});
+
+
+// ── S4 — THE FACILITY NARROW, BESIDE THE GRID (2026-08-08) ───────────────────────────────────────
+//
+// WHAT THESE PIN. The v2 tab's Facility type-ahead was a casualty of the v3 cutover, and it comes
+// back as a DISPLAY narrow over rows the ranking already returned — not as a fetch narrow. The
+// measured reason is the whole feature: 86.9% of members bill at exactly ONE facility in 365 days,
+// so a facility narrow on a member search empties the screen ~87% of the time, and only a display
+// narrow still holds the un-narrowed list needed to say WHERE they did bill. A fetch narrow could
+// say "no history at NASHVILLE" and nothing more.
+//
+// Placement is BESIDE the grid with AREA, never on the NARROW SEARCH card: everything on that card
+// re-issues the ranking request, and this does not.
+
+/** The picker vocabulary, at the grain the real loader returns: `value`/`variants` are RAW rollup
+ *  facility text (== QualifyFacility.facilityKey) and `display` is the label. The placeholder is
+ *  included ON PURPOSE — the offerable-set assertion below is what removes it. */
+const FACILITY_OPTIONS: QualifyFacilityNarrowOption[] = [
+  { value: 'NASH', display: 'NASHVILLE MENTAL HEALTH', variants: ['NASH'], careSetting: 'IP' },
+  { value: 'PHX', display: 'PHOENIX RENEWAL', variants: ['PHX'], careSetting: 'OP' },
+  { value: 'KWC', display: 'KENTUCKY WELLNESS CENTER', variants: ['KWC'], careSetting: null },
+  { value: 'SUMMIT', display: 'SUMMIT RIDGE RECOVERY', variants: ['SUMMIT'], careSetting: null },
+  { value: 'UNL', display: 'UNLISTED BH', variants: ['UNL'], careSetting: null },
+  { value: QUALIFY_NO_FACILITY, display: 'No Facility', variants: [QUALIFY_NO_FACILITY], careSetting: null },
+];
+
+const withFacility = (
+  snap: QualifySnapshot,
+  over: Partial<NonNullable<ResolutionStagesProps['answer']>> = {},
+) => answerHtml(snap, { facilityOptions: FACILITY_OPTIONS, ...over });
+
+/** ⚠ BOUND ROW ASSERTIONS TO THE GRID, because the PICKER ECHOES ITS OWN SELECTION. A selected
+ *  facility renders as a tag carrying that facility's display name, so an unbounded
+ *  `!html.includes('PHOENIX RENEWAL')` is satisfied-or-defeated by the control rather than by the
+ *  list it narrows — the `inventoryRegion` lesson, one region over. */
+const gridRegion = (html: string): string =>
+  outerHtmlFrom(html, html.lastIndexOf('<section', html.indexOf('qualify-scorecard-heading')));
+
+test('S4 — the facility type-ahead renders BESIDE the grid, and NEVER inside the NARROW SEARCH card', () => {
+  const html = withFacility(threeStateSnapshot(), { candidates: orderedCandidates(fixture()) });
+  // POSITIVE CONTROL: the grid rendered, so the negative below is about a real screen.
+  assert.match(html, /NASHVILLE MENTAL HEALTH/, 'the scorecard rendered — otherwise this test is vacuous');
+  assert.match(html, /aria-label="Facility"/, 'the shared type-ahead is on screen');
+  // ⚠ THE PLACEMENT RULING, MECHANISED. Everything on the control card re-issues the ranking request
+  // and this does not, so a facility field inside the card would break the card's own honesty rule —
+  // the same rule that kept AREA out of it.
+  assert.ok(
+    !inventoryRegion(html).includes('aria-label="Facility"'),
+    'the facility control must not live on the card that claims every switch re-issues the request',
+  );
+  // It is a beat of the skip reveal and states ON/OFF in the same vocabulary as every other facet.
+  const row = outerHtmlFrom(html, html.lastIndexOf('<div data-v3-facet', html.indexOf('aria-label="Facility"')));
+  assert.match(row, /Off · all 5/, 'five offerable facilities, and it says so while off');
+  assert.match(row.slice(0, 60), /data-v3-facet/, 'it carries the reveal hook so the stagger includes it');
+  // AND THE CARD'S OWN TALLY IS UNMOVED. Facility is not a card facet, so `cardFacets` must not grow —
+  // the hardcoded `off === 3` assertion above stays about the CARD's facets and is untouched by S4.
+  assert.match(inventoryRegion(html), /of these 4 switches on/, 'four card facets, and facility is not one');
+});
+
+test('S4 — “No Facility” is never OFFERABLE: you cannot send someone to a placeholder', () => {
+  // The row keeps its rank everywhere (dropping it would hide $29,081,575.38 of charges) — it is only
+  // un-offerable, because picking it asks whether a patient can be admitted to a bucket.
+  const html = withFacility(threeStateSnapshot());
+  assert.match(html, /aria-label="Facility"/, 'positive control: the picker rendered at all');
+  assert.match(html, /Off · all 5/, 'six options in, five offered — the placeholder is the one removed');
+  assert.ok(!html.includes('Off · all 6'), 'the placeholder was not counted into the denominator');
+});
+
+test('S4 — the narrow hides what it excludes, states its reach, and composes with AREA as AND', () => {
+  const one = gridRegion(withFacility(threeStateSnapshot(), { facilityNarrow: ['NASH'] }));
+  assert.equal(one.split('data-v3-tile').length - 1, 1, 'one card, not three — the picker echoes the name too');
+  assert.match(one, /NASHVILLE MENTAL HEALTH/, 'the picked facility stays');
+  assert.ok(!one.includes('PHOENIX RENEWAL'), 'the others are hidden');
+  assert.ok(!one.includes('UNLISTED BH'));
+  assert.match(one, /at NASHVILLE MENTAL HEALTH\. The ranking itself was not re-run/, 'it names its own reach');
+  assert.match(one, /the rating above still covers all 3/, 'and refuses to claim the hero moved with it');
+  assert.match(one, /On · 1 of 5/, 'the facet badge counts the picks');
+
+  // MULTI-SELECT: the picker is multi by nature and the narrow is a union within the facet.
+  const two = gridRegion(withFacility(threeStateSnapshot(), { facilityNarrow: ['NASH', 'PHX'] }));
+  assert.equal(two.split('data-v3-tile').length - 1, 2, 'two cards');
+  assert.match(two, /NASHVILLE MENTAL HEALTH/);
+  assert.match(two, /PHOENIX RENEWAL/);
+  assert.ok(!two.includes('UNLISTED BH'));
+  assert.match(two, /at the 2 facilities you picked/, 'more than one pick is counted, not enumerated');
+
+  // AND ACROSS THE TWO GRID NARROWS. NASH is in TN; asking for PHX inside TN is empty by
+  // construction, and BOTH reaches are named so the operator can see which one to undo.
+  const both = gridRegion(withFacility(threeStateSnapshot(), { facilityNarrow: ['NASH'], area: 'TN' }));
+  assert.match(both, /in this area, at NASHVILLE MENTAL HEALTH/, 'both narrows named, in one sentence');
+  const conflict = gridRegion(withFacility(threeStateSnapshot(), { facilityNarrow: ['PHX'], area: 'TN' }));
+  assert.match(conflict, />Facilities, ranked</, 'positive control: the grid region really was found');
+  assert.ok(!conflict.includes('data-v3-tile'), 'AND, not OR — an AZ facility does not survive a TN area');
+  // ...AND THE BLAME IS COMPUTED RATHER THAN GUESSED. The facility narrow on its own still has a row
+  // (PHX), so the AREA is what emptied the grid and the area sentence is the honest diagnosis. Blame
+  // the facility narrow here and the operator clears the wrong control.
+  assert.match(conflict, /No ranked facility is in this area\./);
+  assert.ok(!conflict.includes('No history at'), 'the facility narrow did not empty this one');
+});
+
+test('S4 — a GRID narrow may not move the headline number, exactly as the area may not', () => {
+  // ⚠ THE RATINGS MUST DIFFER OR THIS TEST CANNOT FAIL. `threeStateSnapshot()` gives every row the
+  // fixture's uniform ratingV2 of 62, so a hero re-derived from the NARROWED list prints the same
+  // number and the guard reads as coverage while proving nothing — measured, not assumed: mutating
+  // `answerFacilities` to apply the narrow left this green against the uniform fixture. Spread them
+  // and the patient-weighted mean genuinely moves with the set it is taken over.
+  const spread = {
+    ...threeStateSnapshot(),
+    facilities: [
+      facility({ rank: 1, name: 'NASHVILLE MENTAL HEALTH', facilityKey: 'NASH', state: 'TN', ratingV2: 90, distinctPatients: 40 }),
+      facility({ rank: 2, name: 'PHOENIX RENEWAL', facilityKey: 'PHX', city: 'Phoenix', state: 'AZ', ratingV2: 20, distinctPatients: 40 }),
+      facility({ rank: 3, name: 'UNLISTED BH', facilityKey: 'UNL', city: null, state: null, ratingV2: 20, distinctPatients: 40 }),
+    ],
+  } as unknown as QualifySnapshot;
+  const heroOf = (h: string) => /aria-label="policy rating (\d+) out of 100"/.exec(h)?.[1] ?? null;
+  const wide = withFacility(spread);
+  const narrowed = withFacility(spread, { facilityNarrow: ['NASH'] });
+  assert.ok(heroOf(wide) !== null, 'the unfiltered hero rendered a number');
+  assert.notEqual(heroOf(wide), '90', 'the whole-set hero is not the NASH-only one — the fixture can tell them apart');
+  assert.equal(heroOf(narrowed), heroOf(wide), 'the rating covers the whole ranking, narrow or not');
+  // And the sentence beside it says so, rather than leaving the reader to infer the hero's reach.
+  assert.match(gridRegion(narrowed), /the rating above still covers all 3/);
+});
+
+test('S4 empty, MEMBER-LED — “No history at X — this member billed at A and B.”', () => {
+  // ⚠ THIS SENTENCE IS THE FEATURE. It is the one a fetch narrow could not say, because the
+  // un-narrowed list would not be in hand — and at 86.9% single-facility members it is the COMMON
+  // render, not an edge case.
+  const html = gridRegion(withFacility(threeStateSnapshot(), { facilityNarrow: ['KWC'] }));
+  // ⚠ "IN THE WINDOW SHOWN" WAS ADDED IN FIX ROUND 1 (basis discipline): this arm and the floor arm
+  // shipped with no window clause while the other two had one, which is a mixed-basis screen by
+  // omission. The ruling's own clause — "no history at X — this member billed at A and B" — is intact.
+  assert.match(
+    html,
+    /No history at KENTUCKY WELLNESS CENTER in the window shown — this member billed at NASHVILLE MENTAL HEALTH, PHOENIX RENEWAL and UNLISTED BH\./,
+  );
+  assert.match(html, /Clear the facility above to see all 3 facilities\./, 'a narrow with no way back is a trap');
+  // The OTHER two emptinesses must not co-render: this is neither "nothing ranked at all" nor "no
+  // ranked facility is in this area", and two role="status" sentences for one click is the overlap
+  // review Finding 2 removed for the area.
+  assert.ok(!html.includes('No facility has claims history under this scope'));
+  assert.ok(!html.includes('No ranked facility is in this area'));
+  assert.ok(!html.includes('facilities shown'), 'and the "Showing 0 of N" framing is suppressed');
+});
+
+test('S4 empty, BOOK-LED — it names where the BOOK does have rows, and the member’s own facilities', () => {
+  const html = withFacility(ledSnapshot(), { facilityNarrow: ['KWC'] });
+  assert.match(html, /Where AETNA US HEALTHCARE pays — the whole book/, 'positive control: the book leads');
+  assert.match(html, /AETNA US HEALTHCARE&#x27;s book has no rows at KENTUCKY WELLNESS CENTER in the window shown\./);
+  // The recovery clause is now the SHARED one (fix round 1, I1) — it names the count that clearing
+  // THIS control actually yields, which with no area narrow on is the whole leading list.
+  assert.match(html, /Clear the facility above to see all 3 facilities\./);
+  assert.match(html, /This member billed at NASHVILLE MENTAL HEALTH\./, 'the member’s own history is still named');
+});
+
+test('S4 empty, BOOK-LED — a facility the member HAS billed at is never called “no history”', () => {
+  // THE LIE THIS ARM EXISTS TO PREVENT. The member ranking is floorless and the book applies
+  // QUALIFY_MIN_LINES, so a facility the member billed 1-2 lines at is in `facilities` and NOT in
+  // `bookFacilities`. Narrowing to it empties the book-led grid — and "no history there" would be
+  // flatly false about the one fact on the screen that decides an admission.
+  const thinBook = ledSnapshot({
+    bookFacilities: [
+      facility({ rank: 1, name: 'SUMMIT RIDGE RECOVERY', facilityKey: 'SUMMIT', payerCount: 1 }),
+      facility({ rank: 2, name: 'PHOENIX RENEWAL', facilityKey: 'PHX', city: 'Phoenix', state: 'AZ', payerCount: 1 }),
+    ],
+  } as Partial<QualifySnapshot>);
+  const html = withFacility(thinBook, { facilityNarrow: ['NASH'] });
+  assert.match(html, /This member HAS billed at NASHVILLE MENTAL HEALTH/, 'the fact that decides the admission');
+  assert.match(html, /below it/, 'and the volume floor is named as the only possible cause');
+  assert.ok(!html.includes('has no rows at NASHVILLE MENTAL HEALTH'), 'the other arm’s claim would be false here');
+  assert.ok(!html.includes('No history at NASHVILLE MENTAL HEALTH'), 'and so would the member-led one');
+});
+
+test('S4 — gridNarrowEmptyCopy: every arm is a DIFFERENT claim, and none borrows another’s', () => {
+  const base = {
+    picked: ['NASH'],
+    pickedWithHistory: [] as string[],
+    bookPayer: 'AETNA',
+    rankedTotal: 3,
+    areaActive: false,
+    facilityActive: true,
+    afterClearingFacility: 3,
+    afterClearingArea: 3,
+    blame: 'facility' as const,
+  };
+  const memberLed = gridNarrowEmptyCopy({ ...base, bookLeads: false, elsewhere: ['A', 'B'] });
+  const memberLedBare = gridNarrowEmptyCopy({ ...base, bookLeads: false, elsewhere: [] });
+  const bookLed = gridNarrowEmptyCopy({ ...base, bookLeads: true, elsewhere: ['A'] });
+  const bookLedFloor = gridNarrowEmptyCopy({ ...base, bookLeads: true, pickedWithHistory: ['NASH'], elsewhere: [] });
+  const areaBlamed = gridNarrowEmptyCopy({
+    ...base,
+    blame: 'area',
+    areaActive: true,
+    facilityActive: false,
+    bookLeads: false,
+    elsewhere: [],
+  });
+  assert.equal(new Set([memberLed, memberLedBare, bookLed, bookLedFloor, areaBlamed]).size, 5, 'five distinct sentences');
+  assert.match(memberLed, /No history at NASH in the window shown — this member billed at A and B\./);
+  // ⚠ NOTHING BUT THE PLACEHOLDER LEFT. `facilitiesElsewhere` strips `No Facility`, so `elsewhere` can
+  // be empty with rows still on the ranking — and "this member billed at " with nothing after it would
+  // be the fabricated-place claim in its most literal form.
+  assert.ok(!memberLedBare.includes('billed at'), 'no place is named when there is no place to name');
+  assert.match(memberLedBare, /no facility on them/);
+  assert.match(bookLed, /AETNA's book has no rows at NASH in the window shown/);
+  assert.match(bookLedFloor, /This member HAS billed at NASH/);
+  // BASIS DISCIPLINE (S2): every arm names the window it counted over — arms 1 and 3 carried no
+  // window clause at all while 2 and 4 did, which is a mixed-basis screen by omission.
+  for (const [label, arm] of Object.entries({ memberLed, memberLedBare, bookLed, bookLedFloor })) {
+    assert.match(arm, /in the window shown/, `${label} must name its window`);
+  }
+  // An unnameable book still gets an honest subject rather than "null's book".
+  assert.match(
+    gridNarrowEmptyCopy({ ...base, bookPayer: null, bookLeads: true, elsewhere: [] }),
+    /^This book has no rows at NASH/,
+  );
+});
+
+test('S4/C1 — the floor arm names ONLY the picked facilities the member actually billed at', () => {
+  /* ⚠ THE FABRICATION. `memberHasHistoryHere` was a boolean over the WHOLE picked set while the
+   * sentence rendered EVERY picked name as its subject, so picks ['NASH','KWC'] against a footprint of
+   * NASH alone asserted paid claims at a facility with zero rows. It is the fabricated-history class
+   * S3 suppressed the placeholder annotation for, and it is reachable through exactly the "show me
+   * these two houses" case that justified multi-select at all. */
+  const partial = gridNarrowEmptyCopy({
+    picked: ['NASH', 'KWC'],
+    pickedWithHistory: ['NASH'],
+    bookLeads: true,
+    bookPayer: 'AETNA',
+    rankedTotal: 3,
+    elsewhere: [],
+    areaActive: false,
+    facilityActive: true,
+    afterClearingFacility: 3,
+    afterClearingArea: 3,
+    blame: 'facility',
+  });
+  assert.match(partial, /This member HAS billed at NASH, but AETNA's book does not rank it/);
+  assert.ok(!partial.includes('HAS billed at NASH and KWC'), 'KWC has zero rows — it may not ride the claim');
+  // ...and the pick with NO history is still accounted for rather than silently dropped.
+  assert.match(partial, /AETNA's book has no rows at KWC at all\./);
+
+  // BOTH picks with history ⇒ plural pronoun. "does not rank it" over two facilities is the same
+  // sentence being wrong in the other direction.
+  const both = gridNarrowEmptyCopy({
+    picked: ['NASH', 'KWC'],
+    pickedWithHistory: ['NASH', 'KWC'],
+    bookLeads: true,
+    bookPayer: 'AETNA',
+    rankedTotal: 3,
+    elsewhere: [],
+    areaActive: false,
+    facilityActive: true,
+    afterClearingFacility: 3,
+    afterClearingArea: 3,
+    blame: 'facility',
+  });
+  assert.match(both, /HAS billed at NASH and KWC, but AETNA's book does not rank them/);
+  assert.ok(!both.includes('no rows at'), 'nothing is left over to disclaim');
+});
+
+test('S4/I1 — the recovery clause promises the count that CLEARING THAT CONTROL actually yields', () => {
+  /* ⚠ BOTH ARMS PROMISED THE UN-NARROWED TOTAL WHILE INSTRUCTING ONE CLICK. With `facility=['PHX']`
+   * and `area='TN'`, "The 3 facilities … choose All above to see them" resolves to ONE row, because
+   * the facility narrow is still on. That is the PRE-S4 area sentence, so S4 made an existing
+   * role="status" line false — a truth regression, not just a new claim being loose. */
+  const areaBlamed = (over: Record<string, unknown>) =>
+    gridNarrowEmptyCopy({
+      blame: 'area',
+      picked: ['PHX'],
+      pickedWithHistory: [],
+      bookLeads: false,
+      bookPayer: null,
+      elsewhere: [],
+      rankedTotal: 3,
+      areaActive: true,
+      facilityActive: true,
+      afterClearingFacility: 0,
+      afterClearingArea: 1,
+      ...over,
+    } as Parameters<typeof gridNarrowEmptyCopy>[0]);
+
+  // (a) AREA alone — byte-identical to what shipped before S4, because it was true then.
+  assert.match(
+    areaBlamed({ facilityActive: false, afterClearingArea: 3 }),
+    /No ranked facility is in this area\. The 3 facilities behind this answer are still there — choose All above to see them\./,
+  );
+  // (b) BOTH live: naming one control means naming the count that control delivers, and the other way
+  //     back must be named too or the "all 3" is unreachable in one click.
+  const both = areaBlamed({});
+  assert.match(both, /Choose All above to see the 1 facility you picked/, 'the honest one-click count');
+  assert.match(both, /clear the facility too to see all 3/, 'and the way back to everything');
+  assert.ok(!/still there — choose All above to see them/.test(both), 'the false single-click promise is gone');
+
+  // (c) THE BOTH-EMPTY ROW. Each narrow is independently empty, so clearing either one alone still
+  //     shows nothing — "see all 3" would clear to ZERO. It must say clear BOTH.
+  const dead = gridNarrowEmptyCopy({
+    blame: 'facility',
+    picked: ['KWC'],
+    pickedWithHistory: [],
+    bookLeads: false,
+    bookPayer: null,
+    elsewhere: ['A'],
+    rankedTotal: 3,
+    areaActive: true,
+    facilityActive: true,
+    afterClearingFacility: 0,
+    afterClearingArea: 0,
+  });
+  assert.match(dead, /neither has rows of its own/, 'it says why one click is not enough');
+  assert.match(dead, /clear the area and the facility above to see all 3 facilities/);
+  assert.ok(!/Clear the facility above to see all 3\./.test(dead), 'the one-click promise would clear to zero');
+
+  // (d) FACILITY blamed with the area live and rows behind it — one click is enough, and says so.
+  const oneClick = gridNarrowEmptyCopy({
+    blame: 'facility',
+    picked: ['KWC'],
+    pickedWithHistory: [],
+    bookLeads: false,
+    bookPayer: null,
+    elsewhere: ['A'],
+    rankedTotal: 3,
+    areaActive: true,
+    facilityActive: true,
+    afterClearingFacility: 1,
+    afterClearingArea: 0,
+  });
+  assert.match(oneClick, /Clear the facility above to see the 1 facility in this area/);
+  assert.match(oneClick, /clear the area too to see all 3/);
+});
+
+test('S4/M — "The 1 facilities" is fixed in the SHARED derivation, so all four sentences get it', () => {
+  const one = (over: Record<string, unknown>) =>
+    gridNarrowEmptyCopy({
+      blame: 'area',
+      picked: ['PHX'],
+      pickedWithHistory: [],
+      bookLeads: false,
+      bookPayer: null,
+      elsewhere: [],
+      rankedTotal: 1,
+      areaActive: true,
+      facilityActive: false,
+      afterClearingFacility: 1,
+      afterClearingArea: 1,
+      ...over,
+    } as Parameters<typeof gridNarrowEmptyCopy>[0]);
+  assert.match(one({}), /The 1 facility behind this answer is still there/, 'the PRE-S4 string had this bug');
+  assert.ok(!one({}).includes('1 facilities'));
+  const fac = one({ blame: 'facility', areaActive: false, facilityActive: true, elsewhere: ['A'] });
+  assert.match(fac, /see all 1 facility\./);
+  assert.ok(!fac.includes('1 facilities'));
+});
+
+test('S4/I2 — a lit area chip over an EMPTY grid says "selected", never "showing"', () => {
+  /* ⚠ PRE-S4 A LIT CHIP COULD NEVER SIT OVER AN EMPTY GRID: the area was the only narrow, so a lit
+   * chip meant rows. With a facility narrow composed on top, "All · 2 · showing" renders above zero
+   * cards. The word must stay (I9: selection carries a WORD, never hue alone) but it must be a TRUE
+   * word — the chip IS selected; it is not showing anything. */
+  const chips = [{ key: AREA_ALL, label: 'All' }, { key: 'TN', label: 'TN' }];
+  const renderArea = (shown: number) =>
+    renderToStaticMarkup(
+      <AreaLine chips={chips as never} active={AREA_ALL} counts={new Map([[AREA_ALL, 2]])} shown={shown} onSelect={() => {}} />,
+    );
+  assert.match(renderArea(2), / · showing/, 'rows on screen: the shipped word, unchanged');
+  const empty = renderArea(0);
+  assert.ok(!empty.includes(' · showing'), 'nothing is showing, so nothing may say it is');
+  assert.match(empty, / · selected/, 'but the selection still carries a WORD, not hue alone (I9)');
+  assert.match(empty, /aria-pressed="true"/, 'and the pressed state is unchanged');
+});
+
+test('S4/I2 — end to end: the facility narrow empties the grid and the area chip stops claiming to show', () => {
+  const html = withFacility(threeStateSnapshot(), { area: 'TN', facilityNarrow: ['KWC'] });
+  const grid = gridRegion(html);
+  assert.ok(!grid.includes('data-v3-tile'), 'positive control: the grid really is empty');
+  assert.ok(!grid.includes(' · showing'), 'no chip may claim to be showing rows over an empty grid');
+  assert.match(grid, /TN<span[^>]*>[^<]*<\/span> · selected/, 'the lit chip says what is true instead');
+});
+
+test('S4/I3 — the floor case says the fact ONCE: “Not in this book” yields to the empty state', () => {
+  /* ⚠ VERBATIM DUPLICATION ON THE EXACT SCREEN THE ARM EXISTS FOR. S3's "Not in this book: NASH. This
+   * member has history there, but it is below the volume floor…" and S4's floor arm state the identical
+   * fact ~340 characters apart. The S3 line is not deleted — it still speaks for facilities the empty
+   * state is NOT about — it is subtracted. */
+  const thinBook = ledSnapshot({
+    bookFacilities: [
+      facility({ rank: 1, name: 'SUMMIT RIDGE RECOVERY', facilityKey: 'SUMMIT', payerCount: 1 }),
+      facility({ rank: 2, name: 'PHOENIX RENEWAL', facilityKey: 'PHX', city: 'Phoenix', state: 'AZ', payerCount: 1 }),
+    ],
+    facilities: [
+      facility({ rank: 1, name: 'NASHVILLE MENTAL HEALTH', facilityKey: 'NASH' }),
+      facility({ rank: 2, name: 'KENTUCKY WELLNESS CENTER', facilityKey: 'KWC' }),
+    ],
+  } as Partial<QualifySnapshot>);
+  // POSITIVE CONTROL: un-narrowed, BOTH member facilities are named by the S3 line.
+  const wide = gridRegion(withFacility(thinBook));
+  assert.match(wide, /Not in this book:/);
+  assert.match(wide, /NASHVILLE MENTAL HEALTH · KENTUCKY WELLNESS CENTER/);
+
+  // Narrowed to NASH: the empty state now says the NASH fact, so the S3 line must not repeat it —
+  // and must still carry KWC, which the empty state is silent about.
+  const narrowed = gridRegion(withFacility(thinBook, { facilityNarrow: ['NASH'] }));
+  assert.match(narrowed, /This member HAS billed at NASHVILLE MENTAL HEALTH/, 'the empty state speaks');
+  // ⚠ BOUND TO THE S3 LINE, not the whole region: the picker echoes the selection back inside its own
+  // tag (and again in the tag's "Remove …" label), so a document-wide occurrence count answers a
+  // question about the CONTROL rather than about the two sentences.
+  // Bounded on the <p>, not the nearest <div> — `rowAround` walks back to a div and lands inside the
+  // picker's own chip box, which is markup about the CONTROL rather than about either sentence.
+  const notInBook = outerHtmlFrom(narrowed, narrowed.lastIndexOf('<p', narrowed.indexOf('Not in this book')));
+  assert.match(notInBook, /KENTUCKY WELLNESS CENTER/, 'KWC is not lost — the empty state is silent about it');
+  assert.ok(
+    !notInBook.includes('NASHVILLE MENTAL HEALTH'),
+    'the facility is named by the sentence that is about it, and only there',
+  );
+
+  // Narrowed to BOTH: the empty state covers the whole set, so the S3 line has nothing left to say.
+  const all = gridRegion(withFacility(thinBook, { facilityNarrow: ['NASH', 'KWC'] }));
+  assert.match(all, /HAS billed at NASHVILLE MENTAL HEALTH and KENTUCKY WELLNESS CENTER/);
+  assert.ok(!all.includes('Not in this book'), 'nothing left for it to add');
+});
+
+test('S4/M — a lost vocabulary never renders "On · 1 of 0"', () => {
+  // REACHABLE: a failed options reload leaves the selection behind, and `showFacilityLine` keeps the
+  // control on screen precisely so the narrow stays clearable. `facetReading(selected, 0)` would then
+  // print a denominator of zero under a numerator of one. GUARDED, not merely commented.
+  const html = answerHtml(threeStateSnapshot(), { facilityOptions: [], facilityNarrow: ['NASH'] });
+  assert.match(html, /aria-label="Facility"/, 'positive control: the control is still on screen, still clearable');
+  assert.ok(!html.includes('of 0'), 'no denominator of zero');
+  assert.match(html, /1 picked · list unavailable/, 'it says what it knows and nothing else');
+});
+
+test('S4/M — the facility picker searches the RAW CMD spellings, not just the acronym label', () => {
+  // The wiring half of the picker fix; `pickerMatches` itself is unit-tested in
+  // app/test/multiSelectTagPicker.test.tsx. `display` is NOT recomposed — label parity with the score
+  // cards is why display_acronym exists — so the raw spellings ride as `searchText`.
+  const src = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/resolution-flow.tsx', import.meta.url)),
+    'utf8',
+  );
+  const line = src.split('\n').find((l) => l.includes('searchText:'));
+  assert.ok(line !== undefined, 'the facility picker must opt in to searchText');
+  assert.match(line!, /variants/, 'every raw CMD spelling');
+  assert.match(line!, /o\.value/, 'and the canonical value');
+});
+
+test('S4 — the SECONDARY book section is NOT narrowed, matching what AREA does there today', () => {
+  // DECIDED AND STATED. The area narrow does not reach the secondary section either — it renders
+  // `bookFacilities.slice(0, QUALIFY_BOOK_PREVIEW)` straight — and the reason is that the section is
+  // an ANSWER TO A DIFFERENT QUESTION ("does this policy pay anywhere"), whose value is precisely
+  // that it is not scoped to what the operator is currently looking at. Narrowing it would make the
+  // "N facilities — every facility {payer} paid at" sentence above it false.
+  const html = withFacility(secondaryBookSnapshot(), { facilityNarrow: ['NASH'], area: 'TN' });
+  const book = bookRegion(html);
+  for (const name of ['SUMMIT RIDGE RECOVERY', 'PHOENIX RENEWAL', 'NASHVILLE MENTAL HEALTH']) {
+    assert.ok(book.includes(name), `${name} survives in the secondary book — the grid narrows, the book does not`);
+  }
+  assert.match(book, /3<\/span> facilities/, 'and its own count still describes the whole book');
+});
+
+test('S4 — the inventory counts the facility narrow: one pick can never read “nothing is narrowing”', () => {
+  // The AREA precedent exactly (2026-08-07). `anyFacetOn` is what stops the card's headline saying
+  // "nothing is narrowing this search" beside a lit control that is narrowing it.
+  const base = threeStateSnapshot();
+  const allPayersThreeStates = {
+    ...base,
+    resolved: { ...base.resolved, payerName: null, payerScope: 'all' },
+  } as unknown as QualifySnapshot;
+  const wide = withFacility(allPayersThreeStates, { skipped: true, scopeSource: 'dominant' });
+  assert.match(inventoryRegion(wide), /No filters are on — apart from the window/, 'positive control');
+  const narrowed = withFacility(allPayersThreeStates, {
+    skipped: true,
+    scopeSource: 'dominant',
+    facilityNarrow: ['NASH'],
+  });
+  assert.match(inventoryRegion(narrowed), /Some switches are on — everything marked Off is unrestricted\./);
+  assert.ok(!inventoryRegion(narrowed).includes('No filters are on'), 'an active facility IS a filter that is on');
+});
+
+test('S4 — the tally names BOTH beside-the-grid narrows, or one, or neither', () => {
+  // The card holds FOUR of the screen's six facets. "Of these" scopes its count to the card; the
+  // clause points at whichever of the two outside narrows is live. Enumerated rather than counted,
+  // because "plus 2 narrows" makes an operator hunt for the second one.
+  const base = threeStateSnapshot();
+  const allPayersThreeStates = {
+    ...base,
+    resolved: { ...base.resolved, payerName: null, payerScope: 'all' },
+  } as unknown as QualifySnapshot;
+  const tally = (over: Partial<NonNullable<ResolutionStagesProps['answer']>>) =>
+    inventoryRegion(
+      withFacility(allPayersThreeStates, {
+        skipped: true,
+        scopeSource: 'dominant',
+        // The card only HOLDS four facets when it has a candidate universe to derive funding and
+        // employers from — without it the tally is honest but says "2", and this test is about the
+        // clause beside the tally rather than about an empty card.
+        candidates: orderedCandidates(fixture()),
+        ...over,
+      }),
+    );
+
+  assert.match(tally({ area: 'TN' }), / · plus the area narrow, beside the list/);
+  assert.match(tally({ facilityNarrow: ['NASH'] }), / · plus the facility narrow, beside the list/);
+  assert.match(tally({ area: 'TN', facilityNarrow: ['NASH'] }), / · plus the area and facility narrows, beside the list/);
+  // NEGATIVE CONTROL: without it the clause could be unconditional, naming narrows that are off.
+  const none = tally({});
+  assert.ok(!none.includes('area narrow'), 'no area narrow, no clause');
+  assert.ok(!none.includes('facility narrow'), 'no facility narrow, no clause');
+  assert.match(none, /1 of these 4 switches on/, 'and the CARD’s own tally never counts either of them');
+});
+
+test('S4 HONESTY GUARD — the facility narrow reaches nothing that describes the FETCH', () => {
+  // flow-state invariant (m), asserted from the render side: `rankingNarrowed` keys on
+  // filters.funding and the employer narrow, and the facility selection is a sibling of `filters`,
+  // never a member. Fold it into AnswerFilters and this goes red.
+  const r = fixture();
+  const html = render(
+    props('answer', r, {
+      answer: answerProps({
+        snapshot: threeStateSnapshot(),
+        skipped: true,
+        candidates: orderedCandidates(r),
+        facilityOptions: FACILITY_OPTIONS,
+        facilityNarrow: ['NASH'],
+      }),
+    }),
+  );
+  assert.match(html, /aria-label="Facility"/, 'positive control: the narrow really is on screen');
+  assert.ok(!html.includes('narrowed by your filter selections'), 'the request was not narrowed and must not claim it was');
+  assert.ok(!html.includes('Ranking over'), 'no plan-count caption implying the ranking was re-scoped');
+});
+
+test('S4 STRUCTURAL — the facility selection never reaches scopeKeyOf or the snapshot request', () => {
+  /* ⚠ THE ONE THING A RENDER TEST CANNOT SEE. `resolution-flow-client.tsx` reaches the `'use server'`
+   * chain, so nothing hermetic can import it — the S3 review measured that INVERTING a ternary there
+   * shipped app 557/0 with a clean build. The wiring that decides whether this narrow is a DISPLAY
+   * narrow or a FETCH narrow lives in exactly that unimportable file, so it is scanned instead. */
+  const src = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/resolution-flow-client.tsx', import.meta.url)),
+    'utf8',
+  );
+  /** The argument text of a call, walked by paren depth from the marker. */
+  const callArgs = (marker: string): string => {
+    const at = src.indexOf(marker);
+    assert.ok(at >= 0, `\`${marker}\` is not in the client — this scan would be vacuous`);
+    let depth = 0;
+    for (let i = at + marker.length - 1; i < src.length; i++) {
+      if (src[i] === '(') depth++;
+      else if (src[i] === ')' && --depth === 0) return src.slice(at, i + 1);
+    }
+    return assert.fail(`unbalanced call at ${marker}`);
+  };
+  // POSITIVE CONTROLS first: both calls really were found and really carry their known arguments.
+  const scope = callArgs('scopeKeyOf(');
+  assert.match(scope, /payerLabel/, 'the scope key really is the one built from the request inputs');
+  const request = callArgs('getQualifySnapshot(');
+  assert.match(request, /query: term/, 'the snapshot request really is the one carrying the term');
+  // ...and now the negatives mean something.
+  assert.ok(!/facilit/i.test(scope), 'a facility in the scope key would make this a fetch narrow');
+  assert.ok(!/facilit/i.test(request), 'and a facility on the wire would throw away the empty state');
+  // The vocabulary fetch is the ticker's shape — mount-once and fail-soft — never folded into the
+  // snapshot effect, whose deps are the request identity and nothing else.
+  assert.match(src, /loadQualifyFacilityOptions/, 'the vocabulary is loaded by the shell');
+});
+
+// ── S5 — THE REFRESH CONTROL, THE ONE HONEST FRESHNESS SOURCE, AND THE WINDOW THAT MOVES SILENTLY ─
+//
+// WHAT THESE PIN. Until S5 the only re-run affordance on this surface was the "Try again" button
+// INSIDE the `refreshFailed` banner: refresh existed only as failure recovery, on a screen whose
+// underlying crons write hourly. Promoting it to a standing control is a render change — the handler
+// (`retry_requested` → `retryNonce` → the fetch effect's dep array) was already general — but it
+// brings three problems the banner never had, and each has its own block below:
+//
+//   1 · IT LOOKS DEAD. All three progress signals derive from `loadedKey !== scopeKey`, which a
+//       same-scope refresh cannot move; `showSkeleton` needs a null snapshot. So the refresh needs
+//       its own in-flight signal, rendered as the design system's RE-SCOPE idiom (dim + beam), never
+//       as a skeleton — a standing control that blanks the answer every press is worse than none.
+//   2 · IT INVITES "IS THIS EVEN NEW?". Answered from `collections.rollup_refresh_run` — the one
+//       source that means what it says. `max(ingested_at)` is first-seen (42h stale on a healthy
+//       weekend) and `rollup_max_payment_date` reads FIVE DAYS INTO THE FUTURE. Both are pinned out
+//       in test/rollupFreshnessQuery.test.ts, at the SQL, where they are reachable.
+//   3 · IT CAN MOVE THE WINDOW WITHOUT SAYING SO. See the window-move block.
+
+test('S5: the rebuilt-at line names the ROLLUP REBUILD, in a named timezone, and never a bare HH:MM', () => {
+  // 2026-08-08T23:45:37Z is 16:45 in America/Los_Angeles — the :45 rollup rebuild, ~86s after start.
+  const s = rebuiltAtSentence('2026-08-08T23:45:37Z');
+  assert.match(s, /Ranking data rebuilt/, 'it names WHAT was rebuilt — the index, never the CMD pull');
+  assert.match(s, /Aug 8 at 4:45 PM PDT/, 'a DATE, a time and a NAMED zone');
+  /* ⚠ A BARE HH:MM IS THE BANNED FORM. This team spans timezones and the app anchors civil days to
+   * America/Los_Angeles; "rebuilt at 4:45" is a different claim to each reader. The zone abbreviation
+   * is what makes it one claim, and the date is what stops a stalled cron from reading as "today". */
+  assert.ok(/PDT|PST/.test(s), 'the zone is named, not implied');
+  // The lag bound is the DEFENSIBLE one, derived from the schedule: BXR pulls at :00 and the rebuild
+  // runs at :45, so worst case is 1h45m before CMD's own posting lag. Never a single-number claim.
+  assert.match(s, /up to about 2 hours/);
+  assert.ok(!s.includes('data through'), 'that phrasing belongs to rollup_max_payment_date, which reads into the future');
+
+  // FAIL-SOFT: the freshness read must never block or fake the ranking. Unknown says unknown.
+  const unknown = rebuiltAtSentence(null);
+  assert.match(unknown, /freshness unknown/i);
+  assert.ok(!/\d/.test(unknown), 'an unreadable log must not produce a number of any kind');
+  // A malformed timestamp is the same answer, not a crash and not an Invalid Date on screen.
+  assert.equal(rebuiltAtSentence('not-a-timestamp'), unknown);
+});
+
+test('S5: the refresh control stands ON the NARROW SEARCH card, in BOTH positions, as a plain button', () => {
+  for (const narrowExpanded of [false, true]) {
+    const html = render(
+      props('answer', fixture(), {
+        answer: answerProps({ snapshot: snapshotFixture(), narrowExpanded, dataRebuiltAt: '2026-08-08T23:45:37Z' }),
+      }),
+    );
+    // BOUNDED to the card (the S1/S2 lesson: an unbounded slice runs to the end of the document and
+    // would be satisfied by the banner's "Try again" or by anything else below).
+    const card = inventoryRegion(html);
+    assert.match(card, /Refresh the ranking/, `expanded=${narrowExpanded}: the control is on the card`);
+    /* ⚠ THE CARD'S OWN RULE IS WHY IT BELONGS HERE: everything on the control card re-issues the
+     * ranking request, and this does exactly that — which is also why the two GRID narrows (area,
+     * facility) are deliberately outside it. */
+    assert.match(card, /Ranking data rebuilt/, 'and the basis line beside it');
+    /* ⚠ type="button" IS LOAD-BEARING, NOT STYLE. A submit inside a form would reach `planAction`
+     * and re-run `resolveCoverageAction`, which writes sixteen reducer fields and drops the operator
+     * back to the payer stage — the thing this control must never do. */
+    // Walk back to the button's own opening tag rather than guessing a slice width — the control's
+    // attributes grew in the fix round and a fixed-width lookback silently stopped reaching them.
+    const labelAt = card.indexOf('Refresh the ranking');
+    const btn = card.slice(card.lastIndexOf('<button', labelAt), labelAt);
+    assert.match(btn, /type="button"/, `expanded=${narrowExpanded}: never a submit`);
+  }
+});
+
+test('S5: while refreshing the card says so, the control is disabled, and the answer DIMS rather than blanking', () => {
+  const html = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: snapshotFixture(), refreshing: true, dataRebuiltAt: '2026-08-08T23:45:37Z' }),
+    }),
+  );
+  const card = inventoryRegion(html);
+  assert.match(card, /Refreshing the ranking/, 'the label states the state — the press must visibly take');
+  assert.match(card, /aria-busy="true"/, 'and the spoken channel learns it too');
+  /* ⚠ `aria-disabled`, NEVER THE `disabled` ATTRIBUTE (M3). The real attribute makes the element
+   * unfocusable the instant it lands — so the control the operator is STANDING ON stops being
+   * focusable mid-press and focus falls to <body>, which is the exact regression the stage's focus
+   * effect exists to prevent one layer up. It is also not reliably announced. The refusal moved into
+   * `makeRetryHandler`, where it is a behaviour rather than a browser side effect, and this
+   * assertion is the static half: the state is exposed, and focus is not taken away. */
+  assert.match(card, /aria-disabled="true"/, 'the state is EXPOSED to AT');
+  assert.ok(!/\sdisabled=""/.test(card), 'and never as the focus-stealing attribute');
+  // The design system's re-scope idiom, and NOT a skeleton: a standing control that blanks the
+  // answer on every press makes each refresh feel like a page rebuild.
+  assert.match(html, /opacity-60/, 'dimmed — what is on screen is about to be replaced');
+  assert.match(html, /q-refetch-beam/, 'with the progress beam, because a request really is running');
+  assert.ok(!html.includes('Ranking facilities for this plan…'), 'never the first-load skeleton');
+  assert.ok(!/policy rating \d+ out of 100/.test(html), 'and the categorical claims wait, as on any re-scope (RULE 2654416)');
+
+  // NEGATIVE CONTROL: idle, the control is live and nothing claims progress.
+  const idle = inventoryRegion(
+    render(props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture() }) })),
+  );
+  assert.match(idle, /Refresh the ranking/);
+  assert.ok(!idle.includes('aria-busy="true"'), 'nothing is in flight');
+  assert.ok(!idle.includes('aria-disabled="true"'), 'and the control is pressable');
+});
+
+test('S5: freshness fails SOFT — an unreadable run-log leaves the ranking untouched and says "unknown"', () => {
+  const html = render(
+    props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), dataRebuiltAt: null }) }),
+  );
+  assert.match(inventoryRegion(html), /freshness unknown/i);
+  assert.match(html, /NASHVILLE MENTAL HEALTH/, 'the ranking is entirely unaffected — it is a separate read');
+});
+
+test('S5: windowMoveNotice states the direction, the two windows and the FLOOR that moved them', () => {
+  const wider = windowMoveNotice({ from: 30, to: 90 });
+  assert.match(wider, /widened from 30 to 90 days/);
+  assert.match(wider, /10-patient/, 'the floor is NAMED — copy basis discipline: say what it was measured against');
+  assert.match(wider, /this ranking spans 90 days/, 'and which of the two numbers describes the list on screen');
+
+  const narrower = windowMoveNotice({ from: 90, to: 30 });
+  assert.match(narrower, /narrowed from 90 to 30 days/);
+  assert.match(narrower, /this ranking spans 30 days/);
+
+  /* ⚠ THE NOTICE NEVER AUTO-DISMISSES, so its copy may not be anchored to a MOMENT (M4). It
+   * survives every grid-narrow toggle by design — `windowMove` clears only on the next resolve, a
+   * new refresh, or a navigation — so an operator can sit with it on screen for minutes, and "than
+   * it did a moment ago" quietly stops being true while the sentence keeps asserting it. Fixed in
+   * COPY rather than with dismissal machinery: it names the REFRESH (a durable event) and states
+   * the span as a fact about the list in front of them. */
+  for (const s of [wider, narrower]) {
+    assert.ok(!/a moment ago/.test(s), 'no claim anchored to a moment that has passed');
+    assert.match(s, /on the last refresh/, 'it names the event, not the moment');
+  }
+  // Both directions are genuinely reachable: new rows crossing the floor NARROW it, rows ageing out
+  // (or an America/Los_Angeles civil-day roll) WIDEN it.
+  assert.notEqual(wider, narrower);
+});
+
+test('S5: a window that moved under an unchanged scope key is ANNOUNCED — and an unchanged one is not', () => {
+  /* ⚠ THE SILENT SCOPE CHANGE. `scopeKeyOf` serializes the automatic case as the literal 'auto',
+   * so a refresh that re-runs the ladder onto another rung leaves loadedKey === scopeKey: every
+   * staleness flag reads "nothing changed" while `windowSentence` quietly renders a different
+   * number and the facet badge still says "On · automatic". */
+  const moved = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: snapshotFixture(), windowMove: { from: 30, to: 90 } }),
+    }),
+  );
+  // BOUNDED TO THE CARD, because the flow's sr-only region carries the same sentence and sits FIRST
+  // in the document — an unbounded search finds the SPOKEN copy and would pass with nothing drawn.
+  const card = inventoryRegion(moved);
+  assert.match(card, /widened from 30 to 90 days/, 'the visible notice, on the card');
+  const noticeAt = card.indexOf('widened from 30 to 90 days');
+  assert.match(card.slice(Math.max(0, noticeAt - 400), noticeAt), /role="status"/, 'and it is announced, not just drawn');
+  assert.match(moved, /aria-live="polite"[^>]*>[^<]*widened from 30 to 90 days/, 'and the live region carries it too');
+
+  /* ⚠ THE NEGATIVE CONTROL, and it is the assertion that keeps the notice worth reading. Most
+   * refreshes return the same rung; one that announced anyway would be noise, and noise is how the
+   * real one gets ignored. */
+  const still = render(
+    props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), windowMove: null }) }),
+  );
+  // ⚠ "automatic window" ALONE WOULD BE A VACUOUS NEGATIVE: `resolvedScopeSentence` already ends
+  // "· automatic window" on every auto search. The notice's own phrasing is what must be absent.
+  assert.match(still, /automatic window/, 'positive control: the resolved-scope line really does say it');
+  assert.ok(!still.includes('on the last refresh'), 'a refresh whose ladder did not move says nothing');
+
+  /* A MANUAL window cannot produce this notice and must not render one even if a stale move survived
+   * into the render: "the automatic window widened" over a screen reading "trailing 180 days — your
+   * selection" would be two contradictory sentences about the same control. */
+  const manual = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: snapshotFixture(), windowDays: 180, windowMove: { from: 30, to: 90 } }),
+    }),
+  );
+  assert.ok(!manual.includes('widened from 30 to 90 days'), 'the notice is about the AUTOMATIC window only');
+  assert.match(manual, /Showing trailing 180 days — your selection\./, 'positive control: the manual sentence really is on screen');
+
+  // And it waits during a re-fetch like every other categorical sentence (RULE 2654416).
+  const inFlight = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: snapshotFixture(), refetching: true, windowMove: { from: 30, to: 90 } }),
+    }),
+  );
+  assert.ok(!inFlight.includes('widened from 30 to 90 days'), 'a claim about the set being replaced waits');
+});
+
+test('S5: the SPOKEN channel carries the same window-move sentence, word for word, and is stage-gated', () => {
+  /* One expression, two channels. The sr-only region carries no dim and no beam, so a screen-reader
+   * user has no other signal that the window moved — and a second wording here is how the seen and
+   * the spoken claim drift, which is the failure `liveSentenceFor`'s own header warns about. */
+  const r = fixture();
+  const move = { from: 30, to: 90 } as const;
+  const spoken = liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1, windowMoved: move });
+  assert.ok(spoken.includes(windowMoveNotice(move)), 'byte-identical to the visible notice');
+  // Omitting it is byte-identical to the pre-S5 announcement.
+  assert.equal(
+    liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1 }),
+    liveSentenceFor('answer', r, null, { memberCount: 1, memberFacilityCount: 1, windowMoved: null }),
+  );
+  // STAGE-GATED, the S3-M1 lesson: "the ranking below now covers a longer period" said over the
+  // search box describes a list that is not there.
+  for (const stage of ['identify', 'payer', 'plan'] as const) {
+    assert.ok(
+      !liveSentenceFor(stage, r, null, { skipped: true, memberCount: 1, memberFacilityCount: 1, windowMoved: move }).includes('on the last refresh'),
+      `stage=${stage} announces a window change for a ranking that is not on screen`,
+    );
+  }
+  // The skipped arm returns before every stage check, so it needs the clause explicitly.
+  assert.ok(
+    liveSentenceFor('answer', r, null, { skipped: true, memberCount: 1, memberFacilityCount: 1, windowMoved: move }).includes('on the last refresh'),
+    'a skipped answer stage is still an answer stage',
+  );
+});
+
+test('S5 STRUCTURAL — a refresh cannot re-enter the resolve: no formAction is reachable from its handler', () => {
+  /* ⚠ THE HALF A RENDER TEST CANNOT SEE, scanned for the S4 reason: `resolution-flow-client.tsx`
+   * reaches the `'use server'` chain, so nothing hermetic can import it. `resolveCoverageAction` is
+   * driven by `useActionState`'s `formAction`, and re-running it writes sixteen reducer fields and
+   * drops the operator back to the payer stage. So the claim is structural: `formAction` is called
+   * from exactly the two places that MEAN to navigate, and the refresh handler is neither. */
+  const src = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/resolution-flow-client.tsx', import.meta.url)),
+    'utf8',
+  );
+  const calls = [...src.matchAll(/formAction\(/g)];
+  assert.equal(calls.length, 2, 'exactly two: identifyAction and planAction — a third is a new navigation path');
+  // The retry/refresh handler in full, walked from its declaration to the end of the memo call.
+  const at = src.indexOf('const onRetrySnapshot');
+  assert.ok(at >= 0, 'the refresh handler is not in the client — this scan would be vacuous');
+  const body = src.slice(at, src.indexOf(');', src.indexOf('makeRetryHandler', at)) + 2);
+  assert.ok(!body.includes('formAction'), 'the refresh handler must never reach the server action');
+  /* ⚠ THE GUARDS THEMSELVES ARE NO LONGER SCANNED FOR, BECAUSE THE SCAN COULD NOT FAIL (MUT-25).
+   * This block used to assert `body.indexOf("termRef.current === ''") < body.indexOf('retry_requested')`
+   * — and `indexOf` returns -1 for an absent needle, so DELETING the guard made it `-1 < positive`,
+   * i.e. true, and the mutation ran 156/0. Both guards now live in `makeRetryHandler`, where
+   * qualifyV3FlowState.test.tsx calls them; what is left here is the WIRING, which is the only part
+   * a hermetic test genuinely cannot reach. */
+  assert.match(body, /makeRetryHandler/, 'the shell uses the tested factory rather than an inline closure');
+  assert.match(body, /termRef\.current/, 'the PHI stays in the ref and reaches the factory as a GETTER');
+  assert.ok(!/getTerm:\s*\(\)\s*=>\s*''/.test(body), 'and not as a hardcoded empty that would disable the control');
+  assert.match(body, /isBusy/, 'and the busy refusal is wired, not left to the DOM');
+  // The freshness read is its own request, on the ticker's mount-once/fail-soft shape — never folded
+  // into the snapshot call, which is audited, PHI-scoped and must not be slowed by an ops lookup.
+  assert.match(src, /loadQualifyDataFreshness/, 'the shell loads the rebuild time itself');
+  const request = src.slice(src.indexOf('getQualifySnapshot('), src.indexOf('getQualifySnapshot(') + 600);
+  assert.ok(!/freshness|rebuilt/i.test(request), 'and it is not a segment of the ranking request');
+});
+
+test('S5 FIX — a rebuilt-at line may not describe a grid the failed refresh did not produce', () => {
+  /* ⚠ THE TWO EFFECTS ARE INDEPENDENT, AND THE HEAVY ONE IS THE LIKELIER TO FAIL. The freshness read
+   * is a one-row index scan on `collections.rollup_refresh_run`; the ranking is the query
+   * `statement_timeout` exists for. Both fire on `retryNonce`, so this sequence is ordinary rather
+   * than exotic: press refresh → freshness succeeds and ADVANCES to 5:45 PM → the snapshot fails →
+   * invariant (e) deliberately retains the OLD grid. The card then reads "Ranking data rebuilt
+   * 5:45 PM PDT" directly above a ranking built BEFORE that rebuild, and it says so until a retry
+   * succeeds. This line is the only BASIS claim on the screen, so it is exactly the sentence an
+   * operator would use to decide the numbers are current.
+   *
+   * ⚠ WHY IT IS CAPTIONED AND NOT GATED. A commit-time gate ("don't advance while failed") narrows
+   * the window without closing it, because the race runs BOTH ways — the snapshot can fail AFTER
+   * freshness has committed. A render-time caption is correct in either ordering. */
+  const failedRefresh = rebuiltAtSentence('2026-08-08T23:45:37Z', { refreshFailed: true });
+  assert.match(failedRefresh, /Aug 8 at 4:45 PM PDT/, 'the timestamp is still stated — it is true about the REBUILD');
+  assert.match(failedRefresh, /may predate that rebuild/, 'but it no longer claims to describe the grid');
+  assert.ok(!failedRefresh.includes('up to about 2 hours'), 'the CMD lag bound is the lesser caveat and would bury this one');
+
+  // POSITIVE CONTROL — the ordinary arm is untouched, and the two are genuinely different sentences.
+  const ok = rebuiltAtSentence('2026-08-08T23:45:37Z');
+  assert.match(ok, /up to about 2 hours/);
+  assert.ok(!ok.includes('may predate'), 'a successful refresh makes no such caveat');
+  assert.notEqual(ok, failedRefresh);
+  // An unreadable log needs no second caveat: "unknown" already claims nothing about anything.
+  assert.equal(rebuiltAtSentence(null, { refreshFailed: true }), rebuiltAtSentence(null));
+
+  // ...and the caveat really does reach the card, on exactly the state that produces it.
+  const html = render(
+    props('answer', fixture(), {
+      answer: answerProps({
+        snapshot: snapshotFixture(),
+        snapshotError: 'failed', // snapshot present + error = refreshFailed
+        dataRebuiltAt: '2026-08-08T23:45:37Z',
+      }),
+    }),
+  );
+  assert.match(inventoryRegion(html), /may predate that rebuild/, 'the card carries the caveat');
+  assert.match(html, /could not be refreshed/, 'positive control: this really is the failed-refresh state');
+  const clean = render(
+    props('answer', fixture(), {
+      answer: answerProps({ snapshot: snapshotFixture(), dataRebuiltAt: '2026-08-08T23:45:37Z' }),
+    }),
+  );
+  assert.ok(!clean.includes('may predate that rebuild'), 'and a healthy screen does not');
+});
+
+test('S5 FIX — the first-ever read of rollup_refresh_run does not swallow its failure silently', () => {
+  /* ⚠ THE DISCOVERABILITY HALF OF THE 0089 RULE. Correctness was never in doubt: a 42501 cannot
+   * fabricate a timestamp, and the unknown arm contains no digit. But this table's SELECT policy has
+   * never been exercised on the app path, and a bare `catch { return { ok: false } }` makes a
+   * PERMISSION failure indistinguishable from an empty log — in the UI *and* in the server logs.
+   * That is precisely how 0089 turned a swallowed 42501 into permanently wrong data rather than a
+   * visible failure. The sibling loader twenty-five lines away already states the rule out loud:
+   * "the swallow must stay discoverable in server logs".
+   *
+   * Scanned rather than executed: `actions.ts` is a `'use server'` module and nothing hermetic can
+   * import it, so the assertion is that the catch is not bare and logs the non-PHI SQLSTATE. */
+  const src = readFileSync(fileURLToPath(new URL('../lib/qualify/actions.ts', import.meta.url)), 'utf8');
+  const at = src.indexOf('export async function loadQualifyDataFreshness');
+  assert.ok(at >= 0, 'the freshness action is not in actions.ts — this scan would be vacuous');
+  const body = src.slice(at, src.indexOf('\n}', at) + 2);
+  assert.match(body, /catch \(err\)/, 'the error is BOUND, not discarded by a bare catch');
+  assert.match(body, /console\.error/, 'and the swallow leaves a trace a human can find');
+  assert.match(body, /sqlstate/i, 'naming the SQLSTATE, which is what tells 42501 from an empty log');
+  /* ⚠ AND NOTHING ELSE FROM THE ERROR. `rollup_refresh_run.error` holds a caught DB message and the
+   * driver's own message can carry query text; the code alone answers the question. */
+  assert.ok(!/err\.message|\berr\b\s*\)/.test(body.replace(/catch \(err\)/, '')), 'the message itself never reaches a log line');
+  assert.match(body, /requireQualifyPrincipal/, 'positive control: still gated like every action here');
+});
+
+// ── S6 — THE PROMINENT SKIP BENEATH THE RAIL, AND THE ASK-AI UN-SUBMIT (2026-08-08) ─────────────
+//
+// Alec, verbatim: "If there is the option to 'skip — search all plans' this button should be very
+// visible, sparkly with movement just underneath the green timeline."
+//
+// The affordance leaves the stage bodies — three call sites, StagePayer gated and StagePlan twice —
+// for ONE site directly beneath <StepRail>. That puts it in the CHROME (outside `[data-v3-stage]`),
+// which is why it is interactive from frame zero: the shell's GSAP entrance sets `autoAlpha`, and
+// `autoAlpha` means `visibility: hidden`. What the hoist must NOT change is the 2026-08-06
+// suppression ruling, and it is pinned twice below — once as a predicate, once through the render.
+
+const GLOBALS_CSS = readFileSync(fileURLToPath(new URL('../app/globals.css', import.meta.url)), 'utf8');
+const TAILWIND_CONFIG = readFileSync(fileURLToPath(new URL('../tailwind.config.ts', import.meta.url)), 'utf8');
+
+/** A brand token's hex, read from the config rather than transcribed — so an edit to the palette
+ *  re-runs the contrast arithmetic below instead of quietly invalidating a comment about it. */
+function twToken(name: string): string {
+  const m = TAILWIND_CONFIG.match(new RegExp(`\\b${name}:\\s*'(#[0-9A-Fa-f]{6})'`));
+  assert.ok(m?.[1] !== undefined, `no \`${name}\` token in tailwind.config.ts`);
+  return m[1].toLowerCase();
+}
+
+/** WCAG 2.x relative luminance (sRGB). Written out rather than pulled in — this file takes no deps. */
+function relativeLuminance(hex: string): number {
+  const ch = [1, 3, 5].map((i) => {
+    const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  }) as [number, number, number];
+  return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
+}
+
+function contrastRatio(a: string, b: string): number {
+  const [hi, lo] = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x) as [number, number];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/** Every `{…}` block whose opening line matches `opener`, read IN FULL by walking brace depth.
+ *  A fixed-length lookahead cannot make an exhaustive claim; this can. */
+function cssBlocksMatching(css: string, opener: RegExp): string[] {
+  const out: string[] = [];
+  for (const m of css.matchAll(opener)) {
+    let depth = 0;
+    for (let i = (m.index ?? 0) + m[0].length - 1; i < css.length; i += 1) {
+      if (css[i] === '{') depth += 1;
+      else if (css[i] === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          out.push(css.slice(m.index ?? 0, i + 1));
+          break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** Every rule that styles the sparkle, wherever it sits (including inside the @supports gate). */
+const sparkRules = (): string[] =>
+  [...GLOBALS_CSS.matchAll(/\.q-skip-spark(?:::after)?\s*\{[^}]*\}/g)].map((m) => m[0]);
+
+/** The hoisted Skip control's own `<button>`, bounded at its closing tag. Returns null when the
+ *  surface offers none — an ABSENCE this file has to be able to assert positively, because the
+ *  suppression ruling is a claim about absence. */
+function skipControlOf(html: string): string | null {
+  const at = html.indexOf('aria-label="Skip ');
+  if (at < 0) return null;
+  return outerHtmlFrom(html, html.lastIndexOf('<button', at));
+}
+
+test('S6: the Skip is HOISTED — one control, beneath the rail, above the animated stage', () => {
+  for (const [stage, over] of [
+    ['payer', {}],
+    ['plan', { payerPick: 'Aetna' }],
+  ] as Array<[FlowStage, Partial<ResolutionStagesProps>]>) {
+    const html = render(props(stage, fixture(), over));
+    // ONE control. Three call sites used to be able to disagree with each other; on the plan stage
+    // two of them rendered in mutually exclusive branches, which is a duplication a reader has to
+    // hold in their head rather than one the markup shows.
+    assert.equal(html.match(/aria-label="Skip /g)?.length, 1, `${stage}: exactly one Skip control`);
+    // "Just underneath the green timeline", in DOM terms: after the rail, before the stage subtree.
+    const rail = html.indexOf('data-v3-rail');
+    const skip = html.indexOf('aria-label="Skip ');
+    const stageAt = html.indexOf('data-v3-stage');
+    assert.ok(rail >= 0 && stageAt >= 0, `${stage}: positive control — rail and stage both rendered`);
+    assert.ok(rail < skip, `${stage}: the Skip must follow the rail`);
+    assert.ok(skip < stageAt, `${stage}: ...and precede the stage subtree, or it is not hoisted at all`);
+    // Still says what it does, per stage. The accessible name is the whole promise.
+    assert.match(
+      html,
+      /aria-label="Skip the (carrier|plan) step and search across all plans for this member"/,
+      `${stage}: the Skip names the step it declines`,
+    );
+  }
+  // The two stages with nothing to skip offer nothing: identify has no question behind it yet, and
+  // the answer is past every question there is.
+  assert.equal(skipControlOf(render(props('identify', null))), null, 'identify has nothing to skip');
+  assert.equal(
+    skipControlOf(render(props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture() }) }))),
+    null,
+    'the answer stage is past it',
+  );
+});
+
+test('S6: the plan stage keeps its Skip even when the carrier resolves to NO plans', () => {
+  // The empty-cluster arm (a stale carrier pick after a re-resolve) was one of the three call sites,
+  // and it is the one whose loss would be silent: it renders an early-return <Stage> that shares no
+  // markup with the ordinary plan grid. The hoist is what makes it structurally impossible to lose —
+  // the control is no longer inside the branch.
+  const html = render(props('plan', fixture(), { payerPick: 'NOT A CARRIER ON FILE' }));
+  assert.match(html, /No plans are on file under NOT A CARRIER ON FILE/, 'positive control: the empty arm rendered');
+  assert.ok(skipControlOf(html) !== null, 'a dead end must still offer the way out');
+});
+
+test('S6: the carrier-count suppression ruling SURVIVES the hoist — same gate, one control', () => {
+  const two = fixture();
+  const many = crowdedCarriers();
+  assert.equal(payerGroupsOf(two).length, 2, 'positive control: the obvious case is below the max');
+  assert.ok(payerGroupsOf(many).length >= SKIP_CARRIER_MAX, 'positive control: the crowded case is at or above it');
+
+  // The predicate, which is the ruling written down once instead of inlined at each render site.
+  assert.equal(skipOffered('payer', two), true, 'payer, nearly obvious → offered');
+  assert.equal(skipOffered('payer', many), false, 'payer, a real question → SUPPRESSED (ruled 2026-08-06)');
+  assert.equal(skipOffered('plan', many), true, "plan always offers it — the population is one carrier's plans");
+  assert.equal(skipOffered('plan', two), true);
+  assert.equal(skipOffered('identify', two), false, 'nothing has been narrowed yet');
+  assert.equal(skipOffered('answer', two), false, 'the answer is past it');
+  assert.equal(skipOffered('payer', null), false, 'no resolution, no footprint to search');
+  // It reads the THREADED clusters when it has them — the same single derivation the rail, the
+  // receipt, the stage machine and the live sentence all share. A second `payerGroupsOf` call here
+  // would be a second source of truth for a rule expressed as a count.
+  assert.equal(skipOffered('payer', many, payerGroupsOf(two)), true, 'the threaded groups are honoured');
+  assert.equal(skipOffered('payer', two, payerGroupsOf(many)), false, 'in both directions');
+
+  // ...and the render agrees with the predicate, which is the half a pure unit cannot prove.
+  assert.equal(skipControlOf(render(props('payer', many))), null, 'no Skip on a crowded carrier stage');
+  assert.ok(!render(props('payer', many)).includes('search all plans'), 'not anywhere else on it either');
+  assert.ok(skipControlOf(render(props('plan', many, { payerPick: 'Aetna' }))) !== null, 'but the plan stage keeps it');
+});
+
+test('S6: the sparkle borrows the beta badge’s IDIOM and not its sizes — every declared size clears 12px', () => {
+  // The floor sweep above scans `text-[Npx]` classes in rendered markup. This treatment sizes its ✦
+  // in the stylesheet, where that sweep cannot see it — so it is swept HERE, at the source it lives
+  // in. The badge it is modelled on runs 8px text / 7px star, which is exactly what must not travel.
+  const rules = sparkRules();
+  assert.equal(rules.length, 3, 'the shimmer, its ✦, and the @supports fallback — nothing else claiming the name');
+  let sizes = 0;
+  for (const rule of rules) {
+    for (const m of rule.matchAll(/font-size:\s*(\d+(?:\.\d+)?)px/g)) {
+      sizes += 1;
+      assert.ok(Number(m[1]) >= 12, `sub-12px in the sparkle: ${m[0]}`);
+    }
+  }
+  assert.ok(sizes >= 1, 'positive control: a size really is declared here, so the sweep is not vacuous');
+  // NEGATIVE CONTROL, and the reason this test exists: the source idiom IS below the floor. If the
+  // badge is ever resized, re-read this line rather than deleting it.
+  assert.match(GLOBALS_CSS, /\.q-beta-badge\s*\{[^}]*font-size:\s*8px/, 'the badge is 8px — decorative, aria-hidden, in the nav');
+  // The control's own label rides `text-sm` (0.9375rem = 15px in this scale), never an arbitrary size.
+  const btn = skipControlOf(render(props('payer', fixture())));
+  assert.ok(btn !== null && /text-sm/.test(btn), 'the label is a scale step, not a one-off');
+});
+
+test('S6: both sparkle animations collapse under the GLOBAL reduced-motion reset — verified, not assumed', () => {
+  // The reset is a UNIVERSAL rule, so the only way an animation escapes it is a selector that `*`,
+  // `*::before` and `*::after` do not match. Assert the reset's shape first — every motion claim in
+  // this file is void if it has drifted.
+  const reset = GLOBALS_CSS.match(/@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(reset !== undefined, 'the global reduced-motion reset is gone');
+  for (const sel of ['*,', '*::before,', '*::after {']) {
+    assert.ok(reset.includes(sel), `the reset must cover ${sel}`);
+  }
+  assert.match(reset, /animation-duration:\s*0\.01ms\s*!important/, 'duration is what collapses a shimmer');
+  assert.match(reset, /animation-iteration-count:\s*1\s*!important/, '...and the count is what stops an infinite one');
+
+  // Then that BOTH animations hang off selectors it reaches: the element itself, and its ::after.
+  assert.match(GLOBALS_CSS, /\.q-skip-spark\s*\{[^}]*animation:\s*q-skip-shimmer/, 'the shimmer is on the element');
+  assert.match(GLOBALS_CSS, /\.q-skip-spark::after\s*\{[^}]*animation:\s*q-skip-twinkle/, 'the twinkle is on ::after');
+  for (const kf of ['q-skip-shimmer', 'q-skip-twinkle']) {
+    assert.match(GLOBALS_CSS, new RegExp(`@keyframes ${kf}\\b`), `${kf} has no keyframes at all`);
+  }
+  // And no reduced-motion block anywhere in the sheet mentions the sparkle — an opt-out of its own
+  // being the one way to defeat the reset from the component side.
+  //
+  // ⚠ THIS SCAN USED TO BE BOUNDED TO 400 CHARACTERS AFTER THE `@media`, AND ITS COMMENT CLAIMED
+  // "the only way", which the regex did not deliver: an opt-out written past the bound passed. The
+  // blocks are now read in FULL by walking brace depth, so the claim and the mechanism agree. (The
+  // rule count in the test above catches realistic adjacent placements; this one is exhaustive.)
+  const rmBlocks = cssBlocksMatching(GLOBALS_CSS, /@media[^{]*prefers-reduced-motion[^{]*\{/g);
+  assert.ok(rmBlocks.length >= 1, 'positive control: a reduced-motion block exists to be read');
+  for (const block of rmBlocks) {
+    assert.ok(!block.includes('q-skip-'), 'the sparkle must not carry a reduced-motion opt-out of its own');
+  }
+});
+
+test('S6: every colour the shimmer sweeps clears WCAG 1.4.3 on the fill — computed, not asserted in prose', () => {
+  /* ⚠ THIS TEST EXISTS BECAUSE THE FIRST VERSION OF THIS TREATMENT SHIPPED A FALSE CONTRAST CLAIM IN
+   * THREE DOCUMENTS. The label is `text-sm` (15px) semibold — NOT WCAG "large text" (18.66px bold /
+   * 24px), so 1.4.3 wants **4.5:1**. The original sweep carried coral400 `#f0917c`, which measures
+   * 5.37:1 on teal900 and **3.26:1 on teal700** — and the fill is `from-teal900 to-teal700`, so most
+   * of the label sits at or past the midpoint and the coral band crossed the loudest control on the
+   * screen BELOW the floor every 2.6s. The refused stop `#ffe0d5` measured 6.08:1 on this fill: the
+   * refusal reasoned about the badge's LIGHT ground and got applied to a dark one.
+   *
+   * The arithmetic now lives here, over the real tokens and the real declaration, so this class of
+   * claim is self-verifying rather than re-argued. A gradient interpolates monotonically per channel
+   * and relative luminance is monotonic in each channel, so checking the STOPS bounds the whole
+   * sweep — there is no interior colour darker than the darkest stop. */
+  const btn = skipControlOf(render(props('payer', fixture())));
+  assert.ok(btn !== null, 'positive control: there is a control to measure');
+  // The FILL, read off the control's own classes and resolved through the tailwind tokens — so a
+  // token edit re-runs the arithmetic instead of silently invalidating a comment.
+  const from = btn.match(/from-(teal\d+)/)?.[1];
+  const to = btn.match(/to-(teal\d+)/)?.[1];
+  assert.ok(from !== undefined && to !== undefined, 'the control still paints a two-token gradient fill');
+  const fill = [twToken(from), twToken(to)];
+  // The WORST CASE for light text is the LIGHTEST end of the fill, not the average of the two.
+  const worst = fill.reduce((a, b) => (relativeLuminance(a) >= relativeLuminance(b) ? a : b));
+  assert.equal(worst, twToken('teal700'), 'positive control: teal700 really is the lighter end');
+
+  const spark = sparkRules().find((r) => r.includes('linear-gradient'));
+  assert.ok(spark !== undefined, 'the shimmer declares no gradient at all');
+  const stops = [...spark.matchAll(/#[0-9a-fA-F]{6}/g)].map((m) => m[0]);
+  assert.ok(stops.length >= 3, `positive control: the sweep really has stops — found ${stops.length}`);
+  for (const stop of stops) {
+    const ratio = contrastRatio(stop, worst);
+    assert.ok(ratio >= 4.5, `label stop ${stop} is ${ratio.toFixed(2)}:1 on ${worst} — 1.4.3 wants 4.5:1 at 15px`);
+  }
+
+  /* THE ✦ IS DECORATION, AND IS HELD TO 1.4.11's 3:1 DELIBERATELY. It is a `content` glyph on an
+   * `::after`, it carries no meaning, and the button's accessible name comes from its `aria-label` —
+   * so it is a graphical object, not text this rule has to read. Stated as the bar it is measured
+   * against rather than left for a reader to infer, because "the star is only 3:1" is exactly the
+   * finding that should land on the reasoning and not on the number. */
+  const after = sparkRules().find((r) => r.includes('::after'));
+  assert.ok(after !== undefined, 'the ✦ rule is gone');
+  const star = after.match(/(?:^|[^-])color:\s*(#[0-9a-fA-F]{6})/)?.[1];
+  assert.ok(star !== undefined, 'the ✦ declares no colour');
+  const starRatio = contrastRatio(star, worst);
+  assert.ok(starRatio >= 3, `the ✦ is ${starRatio.toFixed(2)}:1 on ${worst} — 1.4.11 wants 3:1 for a graphic`);
+
+  // NEGATIVE CONTROL — the arithmetic is real. The stop that shipped and had to be replaced fails
+  // this very check, so a green run is not the calculator agreeing with itself.
+  assert.ok(contrastRatio('#f0917c', twToken('teal700')) < 4.5, 'the rejected coral stop still fails, as measured');
+  assert.ok(contrastRatio('#ffffff', '#000000') > 20, 'and the calculator agrees with the known extreme');
+});
+
+test('S6: the label survives a UA without background-clip:text — transparency is behind @supports', () => {
+  /* `background-clip: text` + `color: transparent` is the whole shimmer, and the failure mode is
+   * total: with no support the label is transparent over the fill and the PRIMARY control on the
+   * screen has no visible text at all. The accessible name survives (it is an `aria-label`), which
+   * makes this exactly the class of defect that ships green and is invisible to every test that
+   * reads markup. The base rule therefore paints a solid, readable colour and only the @supports
+   * arm makes it transparent. */
+  const base = sparkRules().find((r) => r.includes('linear-gradient'));
+  assert.ok(base !== undefined, 'the base rule is gone');
+  assert.ok(!/(?:^|[^-])color:\s*transparent/.test(base), 'the BASE rule must not blank the label');
+  assert.ok(!/text-fill-color:\s*transparent/.test(base), 'nor blank it through -webkit-text-fill-color');
+  const fallback = base.match(/(?:^|[^-])color:\s*(#[0-9a-fA-F]{6})/)?.[1];
+  assert.ok(fallback !== undefined, 'the base rule declares no fallback colour');
+  const btn = skipControlOf(render(props('payer', fixture())));
+  const to = btn?.match(/to-(teal\d+)/)?.[1];
+  assert.ok(to !== undefined);
+  assert.ok(
+    contrastRatio(fallback, twToken(to)) >= 4.5,
+    `the fallback colour ${fallback} must itself be readable on the fill`,
+  );
+
+  // ...and the transparency really is gated, on a condition that includes the -webkit- form, because
+  // that is the only one Safari has ever supported.
+  const supports = GLOBALS_CSS.match(/@supports \(([^{]*)\) \{\s*\.q-skip-spark[\s\S]*?\n\}/)?.[0];
+  assert.ok(supports !== undefined, 'the transparency is not behind an @supports gate at all');
+  assert.match(supports, /-webkit-background-clip:\s*text/, 'the gate must accept the -webkit- form');
+  assert.match(supports, /(?:^|[^-])color:\s*transparent/m, 'and it is where transparency lives');
+});
+
+test('S6: the sparkle is decoration over a LIVE control — motion narrates, it never gates input', () => {
+  const btn = skipControlOf(render(props('payer', fixture())));
+  assert.ok(btn !== null, 'positive control: there is a control to interrogate');
+  assert.match(btn, /^<button type="button"/, 'a plain button — never a submit inside a form it does not own');
+  assert.ok(!/\bdisabled\b/.test(btn), 'never disabled: there is no in-flight state that should refuse a skip');
+  assert.ok(!/aria-hidden/.test(btn), 'never hidden from AT');
+  assert.ok(!/tabindex/.test(btn), 'reachable in DOM order, with no tabindex games');
+  assert.ok(!/pointer-events/.test(btn), 'no pointer-events games on the control');
+  // `pointer-events: none` is the one thing the badge idiom carries that WOULD gate input — the badge
+  // is decoration sitting on a link; this is the control itself.
+  const spark = GLOBALS_CSS.match(/\.q-skip-spark\s*\{[^}]*\}/)?.[0] ?? '';
+  assert.ok(spark.length > 0 && !/pointer-events/.test(spark), 'nor in the class that paints it');
+  // It carries no motion hook of its own, so neither the tile stagger nor the facet reveal claims it.
+  assert.ok(!/data-v3-tile|data-v3-facet/.test(btn), 'no motion hook on the control');
+});
+
+test('S6: the hoist cannot break the skip reveal — the stagger keys on the stage subtree, not the button', () => {
+  // The reveal selects `[data-v3-facet]` INSIDE `[data-v3-stage]`. The Skip now lives ABOVE that
+  // element, so the target set is unchanged by construction — asserted from both ends rather than
+  // argued, because "by construction" is exactly the claim that rots.
+  const shell = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/resolution-flow-client.tsx', import.meta.url)),
+    'utf8',
+  );
+  assert.match(shell, /toArray<HTMLElement>\('\[data-v3-facet\]', stageEl\)/, 'the reveal is scoped to the stage subtree');
+  assert.match(shell, /querySelector<HTMLElement>\('\[data-v3-stage\]'\)/, 'and stageEl is that subtree');
+
+  const html = render(
+    props('answer', fixture(), {
+      answer: answerProps({
+        snapshot: allPayersSnapshot(),
+        skipped: true,
+        scopeSource: 'dominant',
+        candidates: orderedCandidates(fixture()),
+        narrowExpanded: true,
+      }),
+    }),
+  );
+  const stageHtml = outerHtmlFrom(html, html.lastIndexOf('<', html.indexOf('data-v3-stage')));
+  const beats = html.match(/data-v3-facet/g)?.length ?? 0;
+  assert.ok(beats >= 5, `the reveal needs its beats — found ${beats}`);
+  assert.equal(stageHtml.match(/data-v3-facet/g)?.length, beats, 'every beat is inside the animated subtree');
+  // ...and the landing screen of a Skip offers no Skip, so the hoisted control can neither add a beat
+  // nor steal one from the stagger.
+  assert.equal(skipControlOf(html), null, 'the skip reveal screen carries no Skip control');
+});
+
+test('S6: the Skip precedes the question — and the live region still announces the QUESTION', () => {
+  for (const stage of ['payer', 'plan'] as const) {
+    const html = render(props(stage, fixture(), stage === 'plan' ? { payerPick: 'Aetna' } : {}));
+    const from = html.indexOf('aria-live="polite"');
+    assert.ok(from >= 0, `${stage}: positive control — the single live region rendered`);
+    const live = outerHtmlFrom(html, html.lastIndexOf('<p', from));
+    assert.ok(live.length > 0 && /Pick/.test(live), `${stage}: something real is announced`);
+    assert.ok(!/Skip|search all plans/i.test(live), `${stage}: the Skip is not announced as if it were the question`);
+    // Tab order: the Skip comes FIRST, which is the point of the hoist. The consequence is that a
+    // keyboard user reaches it by shift-tab from the heading the shell focuses on a stage swap —
+    // the same relationship the receipt's "Change" buttons already have, one region up.
+    assert.ok(
+      html.indexOf('aria-label="Skip ') < html.indexOf(`id="qualify-s-${stage}-heading"`),
+      `${stage}: the Skip precedes the question`,
+    );
+    assert.match(
+      html,
+      new RegExp(`id="qualify-s-${stage}-heading"[^>]*tabindex="-1"`),
+      `${stage}: the shell's focus target still exists, so a stage swap still lands on the question`,
+    );
+  }
+});
+
+/** Each plan tile's `<form>`, sliced at its closing tag. */
+function planTileForms(): string[] {
+  const html = render(props('plan', fixture(), { payerPick: 'Aetna' }));
+  const tiles = html.split('name="candidate"').slice(1);
+  assert.equal(tiles.length, 2, 'positive control: two plan tiles under Aetna');
+  return tiles.map((t) => t.slice(0, t.indexOf('</form>')));
+}
+
+test('S6: asking the AI about a plan no longer PICKS it — the Ask control is a button, not a submit', () => {
+  // It was `type="submit"` with `onClick={onAskAi}` inside `<form action={planAction}>`: one press
+  // fired `ai_armed` AND `plan_submitted`, so interrogating a plan committed to it — and the receipt
+  // then recorded a "PLAN <employer>" decision the operator never made.
+  for (const form of planTileForms()) {
+    const ask = outerHtmlFrom(form, form.lastIndexOf('<button', form.indexOf('Ask AI about this plan')));
+    assert.match(ask, /^<button type="button"/, 'the Ask control must not submit the form it sits inside');
+    assert.ok(!/type="submit"/.test(ask));
+    // Exactly ONE submit is left in the tile — the pick path — so the form has a single, unambiguous
+    // default submission and there is no second candidate for implicit submission.
+    assert.equal(form.match(/type="submit"/g)?.length, 1, 'one submit per tile: Use this plan');
+  }
+});
+
+test('S6: the plan tile PICK PATH is byte-unchanged — split from the un-submit deliberately', () => {
+  /* ⚠ SPLIT FROM THE TEST ABOVE (fix round 1). Both guards used to live in one test, so ONE deletion
+   * removed the un-submit pin AND the byte pin on the path it must not disturb — and those are the
+   * two halves of the S6 claim that only mean something when they are independent. */
+  for (const [i, form] of planTileForms().entries()) {
+    const use = outerHtmlFrom(form, form.lastIndexOf('<button', form.indexOf('Use this plan')));
+    assert.match(
+      use,
+      /^<button type="submit" class="rounded-lg bg-teal700 px-2\.5 py-1 text-xs font-semibold text-white transition-colors hover:bg-teal900 disabled:opacity-60">Use this plan<\/button>$/,
+      `tile ${i}: the pick path is byte-unchanged`,
+    );
+    assert.match(form, /^ value="\d+"\/>/, `tile ${i}: the candidate index still rides the form as a hidden field`);
+  }
+});
+
+test('S6 STRUCTURAL — the plan tile is still WIRED to its server action, which no render test can see', () => {
+  /* ⚠ THE HALF renderToStaticMarkup IS BLIND TO, and it is the half the pick depends on. `action` on
+   * a <form> takes a FUNCTION in React 19, and a function prop emits no attribute — so deleting
+   * `action={props.planAction}` renders byte-identically to keeping it, ships the whole suite green,
+   * and makes "Use this plan" silently do nothing. Every byte assertion in this file covers the
+   * BUTTON; nothing covered the form. Same class of scan as the S5 STRUCTURAL test above, for the
+   * same reason: a binding a hermetic renderer cannot observe has to be read at the source.
+   *
+   * Scoped to StagePlan's own body, so a form elsewhere in this 4,000-line module cannot satisfy it. */
+  const src = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/resolution-flow.tsx', import.meta.url)),
+    'utf8',
+  );
+  const at = src.indexOf('export function StagePlan');
+  assert.ok(at >= 0, 'StagePlan is not in this module — the scan would be vacuous');
+  // COMMENTS STRIPPED FIRST. The Ask-AI fix's own comment quotes `<form action={planAction}>`, so an
+  // un-stripped scan counts prose ABOUT the binding as the binding — the exact confusion between a
+  // description and the thing described that this whole branch keeps finding in one form or another.
+  const body = src.slice(at, src.indexOf('\n// ── Stage 4', at)).replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.ok(body.length > 0 && body.includes('name="candidate"'), 'positive control: this really is the tile body');
+  const forms = [...body.matchAll(/<form\b/g)];
+  assert.equal(forms.length, 1, 'one form per tile, one tile template — a second is a second pick path');
+  assert.match(
+    body.slice(forms[0]!.index ?? 0, (forms[0]!.index ?? 0) + 200),
+    /<form\s+action=\{props\.planAction\}/,
+    'the tile form must be bound to planAction, or picking a plan does nothing at all',
+  );
+  // ...and the prop it binds is really the one the root threads down, not a same-named local.
+  assert.match(src, /planAction=\{props\.planAction\}/, 'the root threads its own planAction into the stage');
+});
+
+test('S6: arming the AI leaves the operator on the plan stage — and a later pick still auto-asks', () => {
+  const r = fixture();
+  const at = (s: { payerPick: string | null; picked: boolean; skipped: boolean }): FlowStage =>
+    deriveStage({ resolution: r, payerPick: s.payerPick, picked: s.picked, skipped: s.skipped });
+
+  const armed = ([{ type: 'payer_picked', payer: 'Aetna' }, { type: 'ai_armed' }] as ShellAction[]).reduce(
+    shellReducer,
+    INITIAL_SHELL_STATE,
+  );
+  assert.equal(armed.autoAsk, true, 'the ask is armed');
+  assert.equal(armed.picked, false, 'and asking about a plan is NOT picking one');
+  assert.equal(at(armed), 'plan', 'so the stage does not move');
+
+  // Invariant (l) is unchanged by this fix and is the reason the two-press flow works at all:
+  // `plan_submitted` deliberately does not disarm, so the answer stage's panel auto-asks on arrival.
+  const after = shellReducer(armed, { type: 'plan_submitted' });
+  assert.equal(after.autoAsk, true, 'invariant (l): plan_submitted deliberately does not disarm autoAsk');
+  assert.equal(at(after), 'answer');
+  // The three that DO disarm, unchanged. Coerced with `?? false` rather than compared to a literal
+  // absence — an undefined field would satisfy `!== true` and prove nothing.
+  for (const action of [{ type: 'ai_disarmed' }, { type: 'search_submitted' }, { type: 'went_back', target: 'plan' }] as ShellAction[]) {
+    assert.equal(shellReducer(armed, action).autoAsk ?? false, false, `${action.type} disarms`);
+  }
+});
+
+// ── FINAL FIX ROUND (2026-08-08) — the four Importants, and the minors that carry a claim ─────────
+//
+// Five-lens adversarial whole-branch review, each finding survived an independent refutation pass.
+// What they share: a sentence, a guard or a coercion that is TRUE ON THE PATH IT WAS WRITTEN FOR and
+// false on a neighbouring one nobody re-read. That is the same class this branch has been closing
+// since S2-I1, which is why these are pinned rather than fixed quietly.
+
+test('FF-I1 — a snapshot with NO memberCount renders no population claim, and no "undefined members"', () => {
+  /* THE RENDER HALF of the `undefined !== null` trap — the fourth sighting on this branch. The pure
+   * classifier is pinned in the ROOT suite (`test/qualifyBookLed.test.ts`, `memberBucketOf`), where
+   * the module lives and where tsc is stricter; this is the consequence on the surface, which is what
+   * makes it an Important rather than a tidy-up.
+   *
+   * Before the `?? null` coercion an ABSENT `memberCount` classified as `'many'`, and the 10+ arm
+   * interpolates the count — so a pre-S2 cached snapshot printed the literal string "undefined" as a
+   * number of people, in bold, above the ranking. `delete` rather than `memberCount: undefined`,
+   * because an explicitly-undefined property is not the shape a JSON round-trip produces. */
+  const noCount = { ...bookSnapshot() } as { memberCount?: number | null };
+  delete noCount.memberCount;
+  const html = answerHtml(noCount as unknown as QualifySnapshot);
+  // POSITIVE CONTROL — the answer stage really rendered, so every negative below is about a screen.
+  assert.match(html, /Where AETNA US HEALTHCARE pays|Facilities, ranked/, 'the answer stage rendered');
+  assert.ok(!html.includes('undefined'), 'no "undefined" reaches the markup');
+  assert.ok(!html.includes('A population'), 'an absent count is not a population');
+  assert.ok(!html.includes('a paid claim behind this'), 'and it makes no preface claim at all');
+  // The receipt gates on the same bucket, so it is silent too rather than crashing on `.toLocaleString`.
+  const receipt = outerHtmlFrom(html, html.indexOf('<nav aria-label="Your search so far"'));
+  assert.ok(!receipt.includes('member'), 'the receipt chip shares the silence rule, not just the words');
+});
+
+test('FF-I2 — the secondary cap sentence is true in BOTH states, not only when tier-0 leaves room', () => {
+  /* THE SENTENCE THAT WAS FALSE WHEN THE CAP FILLED. "A facility with no open beds sorts to the end,
+   * so it will be in the part not shown" is a claim about WHERE the full houses are, and it holds
+   * only when the book has fewer than `QUALIFY_BOOK_PREVIEW` open facilities. With >= 8 open ones the
+   * full houses are beyond the cap for a DIFFERENT reason (there are simply more than eight), and
+   * with a full house inside the first eight it is false outright — asserted below, on a render.
+   *
+   * The replacement COUNTS instead of predicting: how many of the not-shown have no open beds. That
+   * is a fact about this render in every state, including zero. */
+  const bookOf = (states: readonly ('full' | 'open')[]) =>
+    bookRegion(
+      answerHtml(
+        secondaryBookSnapshot({
+          bookFacilities: states.map((s, i) =>
+            facility({
+              rank: i + 1,
+              name: `BOOK FACILITY ${i + 1}`,
+              facilityKey: `BF${i + 1}`,
+              payerCount: 1,
+              bedState: s,
+              openBeds: s === 'full' ? 0 : 3,
+              bedCapacity: 12,
+            }),
+          ),
+        } as Partial<QualifySnapshot>),
+      ),
+    );
+  // STATE 1 — the full houses really are beyond the cap. Nine facilities, the ninth full.
+  const sunkBeyond = bookOf([...Array(8).fill('open'), 'full'] as ('full' | 'open')[]);
+  assert.match(sunkBeyond, /Showing the 8 best-ranked of 9\./, 'the cap still states the REAL total');
+  assert.match(sunkBeyond, /1 of the 1 not shown has no open beds\./);
+  // STATE 2 — a full house INSIDE the first eight, which is where the old sentence was false outright.
+  const sunkInside = bookOf(['full', ...Array(8).fill('open')] as ('full' | 'open')[]);
+  assert.match(sunkInside, /Full · 0 of 12/, 'positive control: a full house really did render inside the cap');
+  assert.match(sunkInside, /0 of the 1 not shown have no open beds\./);
+  // The prediction is GONE from both — a sentence that is true on one render and false on the next is
+  // not a weaker claim, it is an untrue one.
+  for (const book of [sunkBeyond, sunkInside]) {
+    assert.ok(!book.includes('sorts to the end, so it will be in the part not shown'), 'the false prediction is gone');
+    // ...and the fact the prediction was reaching for is still stated, in a form that survives both.
+    assert.match(book, /sorts below one that can admit today/);
+  }
+});
+
+test('FF-I4 — the book basis lines state the FLOOR, so they cannot contradict the floor arm beside them', () => {
+  /* THREE SURFACES CLAIMED "every facility {payer} paid at" WHILE THE BOOK APPLIES QUALIFY_MIN_LINES.
+   * The book load runs `assembleFacilities(..., applyFloor = true)` (core.ts) and the member load does
+   * not — which is exactly why this surface already has TWO sentences that say so out loud ("below the
+   * volume floor for {payer} in this window", "clears the volume floor in the window shown"). Rendered
+   * beside an unqualified "every facility", those two sentences contradict the heading above them.
+   *
+   * COMPOSED, not per-sentence: each half was independently defensible and it is only the pair on one
+   * screen that is a lie, which is precisely the shape a per-surface review misses. */
+
+  // COMPOSITION 1 — the BOOK-LED screen, where the member's own thin facility is named as dropped.
+  const led = answerHtml(
+    ledSnapshot({
+      facilities: [
+        facility({ rank: 1, name: 'NASHVILLE MENTAL HEALTH', facilityKey: 'NASH' }),
+        facility({ rank: 2, name: 'TINY CLINIC', facilityKey: 'TINY', lineCount: 2, distinctPatients: 1 }),
+      ],
+    } as Partial<QualifySnapshot>),
+  );
+  assert.match(led, /below the volume floor for AETNA US HEALTHCARE in this window/, 'positive control: the floor arm speaks');
+  assert.match(led, /every facility AETNA US HEALTHCARE paid at above the volume floor in the window shown/);
+  assert.ok(
+    !led.includes('paid at in the window shown'),
+    'the unqualified promise cannot stand on a screen that names a facility the floor dropped',
+  );
+
+  // COMPOSITION 2 — the SECONDARY screen with an EMPTY book: "0 facilities — every facility AETNA
+  // paid at" beside "no facility clears the volume floor" was the same contradiction, inverted.
+  const empty = bookRegion(answerHtml(secondaryBookSnapshot({ bookFacilities: [] } as Partial<QualifySnapshot>)));
+  assert.match(empty, /clears the volume floor in the window shown/, 'positive control: the empty-book arm speaks');
+  assert.match(empty, /every facility AETNA US HEALTHCARE paid at above the volume floor in this window/);
+  assert.ok(!empty.includes('paid at in this window'), 'and the unqualified form is gone from the secondary section too');
+
+  // COMPOSITION 3 — the SKIP banner's book-led arm, the third site carrying the phrase.
+  const skipped = answerHtml(ledSnapshot(), { skipped: true, scopeSource: 'dominant' });
+  assert.match(skipped, /every facility that label paid at above the volume floor in this window/);
+  assert.ok(!skipped.includes('every facility that label paid at in this window'));
+});
+
+test('FF-m4 — the sr-only classification waits on ALL THREE stale states, exactly like the visible line', () => {
+  /* THE ARIA CHANNEL MUST NEVER SAY WHAT THE VISIBLE CHANNEL SUPPRESSES. The visible preface is gated
+   * on `stale` = refetching || staleAfterError || refreshing; the sr-only classification was gated on
+   * the first two only, so a same-scope REFRESH left a screen-reader user hearing a classification the
+   * sighted reader could not see — and hearing it with no dim and no beam to mark it as provisional. */
+  const spokenOf = (html: string) => outerHtmlFrom(html, html.indexOf('<p aria-live="polite"'));
+  /* ⚠ THE VISIBLE CHANNEL IS THE PAGE **MINUS** THE LIVE REGION. Both channels carry the same bytes by
+   * design (one call to `memberPrefaceFor`), so an unscoped `!html.includes(...)` is satisfied — or
+   * defeated — by whichever channel happens still to be speaking. Measured: it reported the VISIBLE
+   * line as unsuppressed on `refreshing` when the visible line was correctly absent and the sr-only
+   * one was not, i.e. it named the wrong channel as the defect. Separate them or assert nothing. */
+  const visibleOf = (html: string) => html.replace(spokenOf(html), '');
+  // POSITIVE CONTROL — idle, both channels carry it. Otherwise every negative below is vacuous.
+  const idle = answerHtml(bookSnapshot());
+  assert.match(visibleOf(idle), /One member has a paid claim behind this search/, 'the visible line is there when idle');
+  assert.match(spokenOf(idle), /One member has a paid claim behind this search/, 'and so is the spoken one');
+  for (const flag of ['refetching', 'staleAfterError', 'refreshing'] as const) {
+    const html = answerHtml(bookSnapshot(), { [flag]: true });
+    assert.ok(
+      !visibleOf(html).includes('a paid claim behind this search'),
+      `the visible line waits on ${flag}`,
+    );
+    assert.ok(
+      !spokenOf(html).includes('a paid claim behind this search'),
+      `and the spoken one waits on ${flag} — an aria channel outliving the seen claim is the disagreement`,
+    );
+  }
+});
+
+test('FF-m6 — the receipt chip’s accessible name states its BASIS, like the preface it sits beside', () => {
+  /* "N members match this search" is the EXACT mixed-basis wording S2-I1 removed from the visible
+   * preface: `memberCount` is the ladder's 365-day rung filtered on `payment_received`, so it means
+   * "members with a PAID CLAIM in the last 12 months" and never "members who exist". The visible copy
+   * was fixed and the aria-label kept the retired sentence — the one channel a browser pass cannot
+   * see. One derivation, three surfaces is only true if the BASIS is shared too, not just the number. */
+  const receiptOf = (snap: QualifySnapshot) => {
+    const html = answerHtml(snap);
+    return outerHtmlFrom(html, html.indexOf('<nav aria-label="Your search so far"'));
+  };
+  const few = receiptOf(bookSnapshot({ memberCount: 4 }));
+  assert.match(few, /aria-label="4 members with a paid claim in the last 12 months"/);
+  const one = receiptOf(bookSnapshot());
+  assert.match(one, /aria-label="1 member with a paid claim in the last 12 months"/);
+  for (const receipt of [few, one]) {
+    assert.ok(!receipt.includes('match this search'), 'the retired mixed-basis wording is gone from the aria channel');
+    /* ⚠ AND IT IS NOT THE PREFACE'S SENTENCE EITHER. The receipt is exempt from the in-flight
+     * suppression (it is a trail of decisions, not a claim about the ranking), so borrowing the
+     * preface's "behind this search" clause would put the suppressed words on screen during a
+     * re-scope through the one surface the rule does not cover. Same basis, different sentence. */
+    assert.ok(!receipt.includes('behind this search'), 'it states the basis without borrowing the suppressed sentence');
+  }
+  // The suppression the wording protects, asserted where it matters: mid-refetch the preface is gone
+  // from BOTH channels and the receipt still carries its number.
+  const inFlight = answerHtml(bookSnapshot({ memberCount: 4 }), { refetching: true });
+  assert.ok(!inFlight.includes('a paid claim behind this'), 'the preface is suppressed');
+  assert.match(inFlight, /aria-label="4 members with a paid claim in the last 12 months"/, 'the receipt is not');
+});
+
+test('FF-m7 — the book-led skip trace names the payer ONCE', () => {
+  /* `rankingBasis` already opens with "{payer}'s whole book" and `skipUnder` appended " under
+   * {payer}" behind it, so the trace row read "… AETNA US HEALTHCARE's whole book, with this
+   * identifier's own history marked on it under AETNA US HEALTHCARE". Both halves true; together,
+   * a sentence that reads as two different scopes. */
+  const html = answerHtml(ledSnapshot(), { skipped: true, scopeSource: 'dominant' });
+  const trace = html.slice(html.indexOf('no plan chosen · AETNA'));
+  assert.ok(trace.length > 0, 'positive control: the book-led ranking trace really rendered');
+  const row = trace.slice(0, trace.indexOf('<'));
+  assert.match(row, /whole book, with this identifier&#x27;s own history marked on it/, 'the basis is unchanged');
+  assert.equal(
+    row.split('AETNA US HEALTHCARE').length - 1,
+    1,
+    `the payer is named once in the trace row, not twice: ${row}`,
+  );
+});
+
+test('FF-m8 — the 2-9 preface names an action available on the stage it renders on', () => {
+  /* "Continue to search across all of them" named the SKIP — a control that lives on the carrier and
+   * plan stages and does not exist on the ANSWER stage, which is the only stage this sentence renders
+   * on. And the same string is announced by `liveSentenceFor`'s SKIPPED arm, which returns BEFORE
+   * every stage check, so it can also be heard over the identify screen. So the replacement names no
+   * POSITION and no stage-local control — only the search itself, which is true anywhere. The exact
+   * string is pinned in the ROOT suite beside the module; this pins that the SURFACE renders it. */
+  const html = answerHtml(bookSnapshot({ memberCount: 4 }));
+  assert.match(html, /This search covers all of them — refine the prefix to narrow it to one\./);
+  assert.ok(!html.includes('Continue to search across all of them'), 'no Continue control exists on this stage');
+});

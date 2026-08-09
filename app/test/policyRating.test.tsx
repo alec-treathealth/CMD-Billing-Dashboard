@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { derivePolicyRating, deriveTopRanks } from '../lib/qualify/policyRating';
+import { derivePolicyRating, deriveTopRanks, qualifyRanksHeading } from '../lib/qualify/policyRating';
 import { QUALIFY_FACILITY_V2_NULLS } from './helpers/qualifyV2Fixture';
 import { QUALIFY_RATING_MIN_PATIENTS } from '../lib/qualify/sampleGate';
 import type { QualifyFacility } from '../lib/qualify/contract';
@@ -131,4 +131,93 @@ test('non-dollar by construction: no dollar field is read, so blind and sighted 
   // The server strips these two for admissions_seat; the derivation must not notice.
   const blind = sighted.map((f) => ({ ...f, billedAmount: null, allowedAmount: null }));
   assert.deepEqual(derivePolicyRating(blind), derivePolicyRating(sighted.map((f) => ({ ...f, billedAmount: 500000, allowedAmount: 250000 }))));
+});
+
+// ── THE RANKS STRIP vs THE GRID (S1 review, 2026-08-08) ──────────────────────────────────────────
+//
+// The strip re-sorts by ratingV2 ALONE while the grid sorts availability-first, so on a book with a
+// full facility the two disagree ON THE SAME SCREEN: the grid shows an open house at rank 1 above a
+// full house at rank 2, and the strip led with the full one. Worse, the strip renders for
+// `active === 'ranks'` — the ordering question — directly under prose the prompt now makes say that
+// facility is full and ranked below. The old comment claimed this "can never disagree with the
+// cards"; it could, and did.
+//
+// RESOLVED BY CAPTION, NOT BY RE-SORTING, because the strip's question is a genuinely different one:
+// "which of these PAYS best" is a rating question, and answering it in bed order would leave nothing
+// on screen that answers it at all. So the strip keeps its rating order, says out loud that it is
+// ordered that way, and carries each row's bed state so a full leader cannot read as a placement.
+
+test('ranks rows carry BED STATE, so the strip can never present a full house as a placement', () => {
+  const rows = deriveTopRanks([
+    { ...fac('FULL TOP', 80, 20), bedState: 'full' },
+    { ...fac('OPEN NEXT', 60, 20), bedState: 'open' },
+    { ...fac('OUTPATIENT', 50, 20), bedState: 'not_applicable' },
+    { ...fac('NO CENSUS', 40, 20), bedState: 'unknown' },
+  ]);
+  assert.deepEqual(rows.map((r) => r.name), ['FULL TOP', 'OPEN NEXT', 'OUTPATIENT', 'NO CENSUS'], 'still rating order');
+  assert.deepEqual(rows.map((r) => r.bedState), ['full', 'open', 'not_applicable', 'unknown']);
+});
+
+test('the strip states its own basis, and says so louder when its leader cannot admit anyone', () => {
+  const open = qualifyRanksHeading(deriveTopRanks([{ ...fac('A', 80, 20), bedState: 'open' }, { ...fac('B', 60, 20), bedState: 'open' }]), 'this policy');
+  assert.match(open, /Top 2 facilities/);
+  assert.match(open, /this policy/);
+  // The basis is stated unconditionally — a reader must never have to infer why this order differs
+  // from the grid's, and "it matches today" is not a reason to leave it unsaid tomorrow.
+  assert.match(open, /by rating, not bed availability/);
+  // And when a row in the strip is full, the heading does not wait for the reader to spot the chip.
+  const withFull = qualifyRanksHeading(deriveTopRanks([{ ...fac('A', 80, 20), bedState: 'full' }, { ...fac('B', 60, 20), bedState: 'open' }]), 'this policy');
+  assert.match(withFull, /full/i);
+});
+
+test('S3 — the hero can NAME the population it averaged, and says so when nothing clears the floor', () => {
+  /* "patient-weighted across 2 rated facilities" is true of the member's own footprint AND of the
+   * payer's whole book, so once the book can LEAD the answer that basis line identifies neither.
+   * The scope is passed in rather than derived here: this module has no idea which list it was
+   * handed, and inventing one from the rows would be the second derivation that drifts. */
+  const scope = "AETNA US HEALTHCARE's whole book";
+  assert.equal(
+    derivePolicyRating([fac('ALPHA', 70, 30), fac('BETA', 40, 10)], scope).basis,
+    "patient-weighted across 2 rated facilities in AETNA US HEALTHCARE's whole book",
+  );
+  // ⚠ THE NOT-RATED ARM CARRIES IT TOO. "no facility clears the sample floor" over a hidden list is
+  // the same unattributed claim as the rated basis — and it is the arm a thin book actually hits.
+  assert.equal(
+    derivePolicyRating([], scope).basis,
+    "no facility in AETNA US HEALTHCARE's whole book clears the sample floor",
+  );
+  // Omitted ⇒ BYTE-IDENTICAL to what shipped. v2's tab and every non-flip v3 render pass nothing.
+  assert.equal(derivePolicyRating([fac('A', 70, 20)]).basis, 'patient-weighted across 1 rated facility');
+  assert.equal(derivePolicyRating([]).basis, 'no facility clears the sample floor');
+});
+
+test('S3 fix — the RANKS STRIP re-bases its scope label when the book leads, because the caption cannot', () => {
+  /* THE MITIGATION S3 CITED NEVER RENDERS. The panel's idle caption (`active === null`) and this
+   * strip (`active === 'ranks'`) are MUTUALLY EXCLUSIVE — so the moment a reader asks the ranks
+   * question over a book-led screen, the caption naming the model's list disappears and the strip's
+   * only label is "Top N facilities · {payer} · by rating, not bed availability": a member-scoped
+   * table identified by nothing, directly beneath a grid showing that payer's whole book.
+   *
+   * The strip's POPULATION does not change (it describes what the model read, which is right); its
+   * LABEL says which population that is. */
+  const rows = deriveTopRanks([fac('ALPHA', 70, 30), fac('BETA', 40, 10)]);
+  const led = qualifyRanksHeading(rows, 'aetna us healthcare', 'leading');
+  assert.match(led, /this member's own history under aetna us healthcare/);
+  assert.match(led, /^Top 2 facilities · /, 'the count and the basis note are untouched');
+  assert.match(led, /by rating, not bed availability$/);
+  // ⚠ 'secondary' AND 'none' ARE BYTE-IDENTICAL TO WHAT SHIPPED, and 'secondary' is not an oversight:
+  // there the member ranking IS the primary grid and the book is the clearly-labelled second thing,
+  // so the bare payer label already describes the list the strip is about. Only the flip inverts it.
+  const plain = qualifyRanksHeading(rows, 'aetna us healthcare');
+  assert.equal(qualifyRanksHeading(rows, 'aetna us healthcare', 'none'), plain);
+  assert.equal(qualifyRanksHeading(rows, 'aetna us healthcare', 'secondary'), plain);
+  assert.equal(plain, 'Top 2 facilities · aetna us healthcare · by rating, not bed availability');
+  // The full-house disclosure survives the re-base — it is a claim about the ROWS, not the scope.
+  const full = qualifyRanksHeading(
+    deriveTopRanks([{ ...fac('A', 80, 20), bedState: 'full' }, fac('B', 60, 20)]),
+    'aetna',
+    'leading',
+  );
+  assert.match(full, /this member's own history under aetna/);
+  assert.match(full, /one or more are full/);
 });

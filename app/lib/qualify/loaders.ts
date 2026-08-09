@@ -24,7 +24,12 @@ import {
   type CodingDecisionRow,
 } from '../../../src/collections/codingRegistryQuery';
 import { buildQualifyCensusReadQuery, buildQualifyOutcomesReadQuery } from '../../../src/collections/qualifyCensus';
+import { buildRollupRefreshFreshnessQuery } from '../../../src/collections/rollupFreshnessQuery';
 import type { QualifyTokenKind } from '../../../src/collections/qualifyQuery';
+import {
+  buildPolicyTapeQuery,
+  type QualifyPolicyTapeRow,
+} from '../../../src/collections/qualifyRatingHistory';
 
 let executor: PgExecutor | null = null;
 /** Module-cached executor on a SEPARATE small claims_reader pool (the verisReaderPool precedent). */
@@ -81,6 +86,30 @@ export async function loadQualifyVobFreshness(): Promise<string | null> {
   const q = buildQualifyVobFreshnessQuery();
   const res = await qualifyV2Reader().query<{ fresh_as_of: string | null }>(q.sql, q.params);
   return res.rows[0]?.fresh_as_of ?? null;
+}
+
+/**
+ * WHEN THE RANKING INDEX WAS LAST REBUILT — `collections.rollup_refresh_run.finished_at` for the
+ * newest ok run, as a full UTC ISO timestamp. Null when the log is empty, when no run has ever
+ * completed ok, or when the read fails (see the caller's fail-soft).
+ *
+ * ⚠ THIS IS THE FIRST APP-PATH READER OF THAT TABLE (S5, 2026-08-08). Until now only writers existed
+ * — the hourly `/api/cron/refresh-charge-rollup` route as `cmd_rollup_writer`. `claims_reader` holds
+ * BOTH gates already (0054:68 grant, 0054:89-90 SELECT policy, RLS on), verified live as the
+ * reader's own privileges rather than read off the migration text: the 0089 incident is exactly the
+ * case where a GRANT existed, a POLICY did not, and the silent empty result became permanently wrong
+ * data behind a fail-soft catch. No migration, no new grant.
+ *
+ * ⚠ THE COLUMN CHOICE IS THE WHOLE DECISION, and `buildRollupRefreshFreshnessQuery` carries the
+ * argument: `max(ingested_at)` is first-seen (42h stale on a healthy weekend) and
+ * `rollup_max_payment_date` reads five days into the FUTURE. Both are pinned out at the SQL.
+ *
+ * Non-PHI: one operational timestamp, no tenant, no identifier, no user input.
+ */
+export async function loadRollupRefreshFreshness(): Promise<string | null> {
+  const q = buildRollupRefreshFreshnessQuery();
+  const res = await qualifyV2Reader().query<{ rebuilt_at: string | null }>(q.sql, q.params);
+  return res.rows[0]?.rebuilt_at ?? null;
 }
 
 /** The five-rung distinct-patient counts in ONE scan (Phase E). */
@@ -194,6 +223,28 @@ export async function loadQualifyFacilityOutcomes(): Promise<
     if (code === '42P01') {
       console.error('qualify facility outcomes table absent (0091 unapplied) — auth-fit falls back to the census snapshot');
       return [];
+    }
+    throw err;
+  }
+}
+
+/** The smoke-shell policy tape (mig 0093) — FAIL-SOFT to null on the absent-relation class
+ *  (42P01/3F000) while 0093 is unapplied, the exact loaders.ts discipline: the board renders the
+ *  tape lane honestly empty instead of 500ing (PR-migrations-not-auto-applied incident pattern).
+ *  Any OTHER error rethrows — 42501 or an outage must never masquerade as "no snapshots yet".
+ *  Its OWN absent-check rather than registryAbsent(): that helper's log line names the CODING
+ *  REGISTRY, which would misdirect an operator diagnosing an unapplied 0093 (review 2026-08-08). */
+export async function loadQualifyPolicyTape(): Promise<QualifyPolicyTapeRow[] | null> {
+  const q = buildPolicyTapeQuery();
+  try {
+    const res = await qualifyV2Reader().query<QualifyPolicyTapeRow>(q.sql, q.params);
+    return res.rows;
+  } catch (err) {
+    const code = typeof err === 'object' && err !== null ? String((err as { code?: unknown }).code) : '';
+    if (code === '42P01' || code === '3F000') {
+      // SQLSTATE is non-PHI; the swallow must stay discoverable in server logs.
+      console.error(`qualify rating history unavailable (sqlstate ${code}) — mig 0093 unapplied? tape reads as absent`);
+      return null;
     }
     throw err;
   }

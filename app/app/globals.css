@@ -334,6 +334,106 @@
 }
 
 /*
+ * ── THE PROMINENT SKIP (S6, 2026-08-08) — the sparkle on "Skip — search all plans", hoisted to sit
+ *    directly beneath the Qualify v3 step rail on the carrier and plan stages. See `SkipStep` in
+ *    components/qualify/v3/resolution-flow.tsx. Alec, verbatim: "this button should be very visible,
+ *    sparkly with movement just underneath the green timeline". ──
+ *
+ * ⚠ A KNOWING DEVIATION FROM THE HOUSE MOTION CONTRACT, recorded rather than smuggled. The contract
+ * reads "motion narrates progression; it never gates input" — and a PERSISTENT shimmer does not
+ * narrate, because narration ends and this does not. It is a ratifier's explicit request, written up
+ * as an exception (not a precedent) in docs/qualify-v3-search-pattern.md. The half of the contract
+ * that still holds absolutely is the half about input: this control is fully interactive from frame
+ * zero. No `pointer-events: none` — that is the badge idiom's one input-gating property, correct
+ * there because the badge sits ON a link and is not itself the control — no `visibility`, and no
+ * GSAP `autoAlpha`, because the hoist puts the button OUTSIDE `[data-v3-stage]`, the only subtree
+ * the shell's entrance tween touches.
+ *
+ * ⚠ THE BADGE'S SIZES DO NOT TRAVEL. `.q-beta-badge` above is 8px text / 7px star: fine for an
+ * aria-hidden decoration in the nav, and below the 12px floor this surface machine-sweeps. The ✦
+ * here is 13px beside a `text-sm` (15px) label. It is swept at the STYLESHEET by
+ * app/test/qualifyV3Flow.test.tsx, because the markup sweep only sees `text-[Npx]` classes and would
+ * never have looked here.
+ *
+ * ⚠ THE SWEEP CARRIES NO CORAL, AND THE FIRST VERSION OF THIS RULE SHIPPED A FALSE CLAIM THAT IT
+ * COULD. That version swept teal50 → white → coral400 and this comment read "all ≥ 4.5:1". Measured:
+ * coral400 #f0917c is 5.37:1 on teal900 but **3.26:1 on teal700** — and the fill runs
+ * `from-teal900 to-teal700`, so most of the label sits at or past the midpoint and the coral band
+ * crossed the loudest control on the screen BELOW the floor every 2.6s. (The stop that version
+ * REFUSED, #ffe0d5, measures 6.08:1 here — the refusal reasoned about the badge's LIGHT ground and
+ * then got applied to a dark one.) The label is `text-sm` = 15px semibold, which is not WCAG "large
+ * text", so 1.4.3 wants 4.5:1 and there is no 3:1 arm to fall back on.
+ *
+ * The sweep is now teal200 → white → teal50 → teal200, measured against the LIGHTER end of the fill
+ * (#135E5A), which is the worst case rather than the average:
+ *
+ *     teal200 #b7dad5  5.04:1   ·   white #ffffff  7.56:1   ·   teal50 #eaf4f2  6.74:1
+ *
+ * A gradient interpolates monotonically per channel and relative luminance is monotonic in each
+ * channel, so checking the STOPS bounds the whole sweep — there is no interior colour darker than
+ * the darkest stop. The coral stays on the ✦ alone, where 3.26:1 clears 1.4.11's **3:1 for a
+ * graphic**: it is a decorative `content` glyph carrying no meaning, and the button's accessible
+ * name comes from its aria-label. All of this is COMPUTED in app/test/qualifyV3Flow.test.tsx from
+ * these declarations and the tailwind tokens, so the claim re-verifies itself rather than being
+ * re-argued — including the rejected coral stop, kept as the negative control.
+ *
+ * ⚠ THE TRANSPARENCY SITS BEHIND @supports, because its failure mode is total. `color: transparent`
+ * is survivable only where `background-clip: text` actually paints the letters; without it the
+ * PRIMARY control on the screen has no visible label at all — while the accessible name survives
+ * (aria-label), which is exactly what would let that ship green past every test that reads markup.
+ * The base rule paints a solid teal50 (6.74:1 on the worst end of the fill) and only the supported
+ * branch goes transparent. The `-webkit-` form is in the condition because it is the only one Safari
+ * has ever supported.
+ *
+ * Both animations collapse under the global prefers-reduced-motion reset above — the universal
+ * `*` / `*::before` / `*::after` rule reaches an element and its ::after alike, so there is no
+ * per-component opt-out here and adding one would be the only way to defeat it.
+ */
+.q-skip-spark {
+  background: linear-gradient(100deg, #b7dad5 0%, #ffffff 40%, #eaf4f2 58%, #b7dad5 100%);
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  /* THE FALLBACK PAINT, not the intended one — see the @supports gate below. */
+  color: #eaf4f2;
+  animation: q-skip-shimmer 2.6s linear infinite;
+}
+@supports (background-clip: text) or (-webkit-background-clip: text) {
+  .q-skip-spark {
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+}
+.q-skip-spark::after {
+  content: '\2726'; /* ✦ four-pointed star — the badge's glyph, at a size that clears the floor */
+  margin-left: 6px;
+  font-size: 13px;
+  display: inline-block;
+  -webkit-text-fill-color: #f0917c;
+  color: #f0917c;
+  animation: q-skip-twinkle 1.9s ease-in-out infinite;
+}
+@keyframes q-skip-shimmer {
+  0% {
+    background-position: 220% 0;
+  }
+  100% {
+    background-position: -220% 0;
+  }
+}
+@keyframes q-skip-twinkle {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.85) rotate(0deg);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15) rotate(120deg);
+  }
+}
+
+/*
  * ── Qualify LANDING HERO — the animated brand atmosphere that fills the resolved-subject area on a
  *    FRESH landing (see components/qualify/landing-hero.tsx). Warm-clinical teal: slow-drifting radial
  *    glows, a faint payer↔facility↔member constellation whose links flow + nodes breathe, and a

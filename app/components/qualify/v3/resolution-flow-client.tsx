@@ -52,9 +52,16 @@ import { resolveCoverageAction } from '../../../lib/qualify/v3-actions';
 // V3_INITIAL_STATE comes from a PLAIN module, never the 'use server' one: a non-function export
 // there is registered as a Server Action and 500s every action on the page (see v3FlowState.ts).
 import { V3_INITIAL_STATE } from '../../../lib/qualify/v3FlowState';
-import { getQualifyFacilityTrends, getQualifySnapshot } from '../../../lib/qualify/actions';
+import {
+  getQualifyFacilityTrends,
+  getQualifySnapshot,
+  loadQualifyDataFreshness,
+  loadQualifyFacilityOptions,
+} from '../../../lib/qualify/actions';
 import type { QualifyFacilityTrend } from '../../../lib/qualify/contract';
+import type { QualifyFacilityNarrowOption } from '../../../lib/qualify/facilityVariants';
 import { QualifyAiPanel } from '../qualify-ai-panel';
+import { bookPlacementFor } from '../../../lib/qualify/bookPlacement';
 import { HeatingUpCards, HeatingUpSkeleton } from '../shared/heating-ticker';
 import { staggerDelayMs } from '../tokens';
 import { AREA_ALL, areaKeyFor } from '../m/area-chips';
@@ -74,7 +81,7 @@ import {
 } from './resolution-flow';
 // The flow's sixteen fields and the rules that move them. Its header is the spec; this file is the
 // transport (PHI ref, effects, derivations) wired to it.
-import { INITIAL_SHELL_STATE, shellReducer } from './flow-state';
+import { INITIAL_SHELL_STATE, makeRetryHandler, shellReducer } from './flow-state';
 
 // ScrollTrigger ships inside the gsap package — no new dependency. Client components also render on
 // the server once, so guard the registration behind a window check.
@@ -125,13 +132,44 @@ export function ResolutionFlowClient({
     windowDays,
     loadedKey,
     area,
+    facilityNarrow,
     narrowExpanded,
+    refreshingNonce,
+    windowMove,
   } = flow;
+
+  /* ── THE REFRESH'S OWN IN-FLIGHT SIGNAL (S5) ───────────────────────────────────────────────────
+   * DERIVED, like the three below it, and for the same reason — but from a field the reducer arms
+   * on the press itself (`retry_requested`) and clears at BOTH terminal dispatches, because the three
+   * below structurally cannot see this case. `stale`/`refetching`/`staleAfterError` all hang off
+   * `loadedKey !== scopeKey`, which a SAME-SCOPE refresh cannot move; `showSkeleton` needs a null
+   * snapshot; `isPending` belongs to the server action, which a refresh does not re-run. So without
+   * this the screen does not move for the 1-2s the request takes and the operator presses again.
+   * See flow-state.ts invariant (o) for the one-arm / six-clear discipline that keeps it unstuck. */
+  const refreshing = refreshingNonce !== null;
 
   // NOT in the reducer, deliberately: the ticker is a mount-once fetch that no flow field and no
   // handler touches. `null` = still loading (renders the skeleton, which reserves the strip's
   // height so a 2.5-5s trend query cannot shove the search box down the page); [] = loaded empty.
   const [trends, setTrends] = useState<QualifyFacilityTrend[] | null>(null);
+
+  // ── The FACILITY narrow's VOCABULARY (S4) ─────────────────────────────────────────────────────
+  // NOT in the reducer either, and for the same `trends` reason: it is a mount-once fetch that no
+  // flow field and no handler touches. `[]` is both the pre-load and the failed-load state, and it
+  // renders NO control rather than an empty picker — the answer stage's other honest silence.
+  //
+  // ⚠ IT IS ITS OWN REQUEST, NEVER PART OF THE SNAPSHOT ONE. Folding a near-static, `unstable_cache`d,
+  // tenant-scoped, non-PHI vocabulary into the ranking request would re-fetch it on every window chip
+  // and every billed-under press, and — worse — would put a facility list inside the payload the
+  // narrow must never reach (invariant m).
+  const [facilityOptions, setFacilityOptions] = useState<QualifyFacilityNarrowOption[]>([]);
+
+  // ── WHEN THE RANKING INDEX WAS LAST REBUILT (S5) ──────────────────────────────────────────────
+  // NOT in the reducer, for the `trends` reason exactly: no flow field and no handler touches it,
+  // and folding an orthogonal operational fact into a state machine only makes the machine harder
+  // to read. `null` is both the pre-load and the failed-load state, and it renders as "freshness
+  // unknown" rather than as a number nothing can stand behind.
+  const [dataRebuiltAt, setDataRebuiltAt] = useState<string | null>(null);
 
   // ONE clustering pass per resolution (clusterCarriers is O(n²)); the rail, receipt and both tile
   // stages read this instead of each re-deriving it — scroll-driven work on top of 4-5 re-derives
@@ -175,6 +213,15 @@ export function ResolutionFlowClient({
     dispatch({ type: 'area_selected', key });
   }, []);
 
+  /** The FACILITY facet (S4) — the restored v2 type-ahead. Grid-only by exactly the same construction
+   *  as the area above: it writes one reducer field that `scopeKeyOf` does not read, so the fetch
+   *  effect below cannot observe it and no snapshot request is issued (flow-state.ts invariant m).
+   *  One handler in both directions, because the picker's own `Clear N` walks the selection back
+   *  through it — see the reducer's `facility_narrow_toggled` arm. */
+  const onToggleFacility = useCallback((value: string) => {
+    dispatch({ type: 'facility_narrow_toggled', value });
+  }, []);
+
   /** The NARROW SEARCH card's disclosure. A pure presentation flip that reaches no request — it
    *  writes the one reducer field `scopeKeyOf` does not read, so the fetch effect below cannot
    *  observe it (flow-state.ts invariant n). It is in the reducer for the reason the reducer's own
@@ -187,16 +234,28 @@ export function ResolutionFlowClient({
     dispatch({ type: 'narrow_toggled' });
   }, []);
 
-  /** Re-issue the SAME snapshot request after a failure. Bumping the nonce is what moves the
+  /** Re-issue the SAME snapshot request — the failure banner's "Try again" and the NARROW SEARCH
+   *  card's standing "Refresh the ranking" are this one call. Bumping the nonce is what moves the
    *  effect's dependency array; nothing about the request itself changes (the term is still in
-   *  `termRef`, the scope still in state), so nothing is stashed anywhere to support this. The
-   *  empty-term guard mirrors the effect's own early return at the top — without it, clearing the
-   *  error here would leave a banner-free stage with no fetch behind it. It stays in this wrapper
-   *  rather than in the reducer because the reducer must never read the PHI ref. */
-  const onRetrySnapshot = useCallback(() => {
-    if (termRef.current === '') return;
-    dispatch({ type: 'retry_requested' });
-  }, []);
+   *  `termRef`, the scope still in state), so nothing is stashed anywhere to support this.
+   *
+   *  ⚠ THE TWO GUARDS LIVE IN `makeRetryHandler`, WHICH IS WHY THEY ARE TESTED (S5 fix round). They
+   *  used to be an inline `if` in this closure, covered only by a source scan — and that scan
+   *  compared two `indexOf` results, so deleting the guard made it `-1 < positive` and the mutation
+   *  ran a full green suite. The factory is pure and hermetic; this call site is the wiring. The PHI
+   *  never leaves the ref: `getTerm` is a GETTER, read inside the handler and never stored.
+   *
+   *  `isBusy` folds in what the DOM's `disabled` attribute used to enforce — see the control itself
+   *  for why that attribute had to go (it steals keyboard focus the instant it lands). */
+  const onRetrySnapshot = useMemo(
+    () =>
+      makeRetryHandler({
+        getTerm: () => termRef.current,
+        isBusy: () => refreshing || isPending,
+        dispatch,
+      }),
+    [refreshing, isPending],
+  );
 
   /** A plan pick: inject the held term (never from the DOM), mark picked, dispatch. A NEW plan is a
    *  new population — a genuine first load, so the snapshot blanks to the skeleton (unlike a
@@ -379,6 +438,63 @@ export function ResolutionFlowClient({
       alive = false;
     };
   }, []);
+
+  // ── The FACILITY vocabulary: fetched ONCE on mount, tenant-scoped, independent of the search ───
+  // The ticker's shape exactly (mount-once, fail-soft, no dependency on the flow), because it is the
+  // same kind of thing: near-static reference data that must never block or shape the answer. The
+  // action is `unstable_cache`d for an hour behind the 'cmd-facilities' tag, so this costs a warm
+  // cache read rather than a query, and a failure leaves the narrow simply absent.
+  useEffect(() => {
+    let alive = true;
+    loadQualifyFacilityOptions()
+      .then((r) => {
+        if (!alive) return;
+        setFacilityOptions(
+          r.ok
+            ? r.facilities.map((f) => ({
+                value: f.value,
+                variants: f.variants,
+                display: f.display,
+                careSetting: f.care_setting,
+              }))
+            : [],
+        );
+      })
+      .catch(() => {
+        if (alive) setFacilityOptions([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // ── WHEN THE RANKING INDEX WAS LAST REBUILT: its own request, re-issued on every refresh ──────
+  //
+  // ⚠ NOT A SEGMENT OF THE SNAPSHOT CALL, and that is the S5 decision rather than an accident. The
+  // snapshot is member-scoped, PHI-audited and the one call this whole surface waits on; the rebuild
+  // time is a global operational fact with no tenant and no identifier. Riding along would make
+  // every v2-tab and mobile snapshot pay for a read neither renders, and — worse — would give the
+  // freshness read the RANKING's failure mode, when the whole point is that it degrades to "unknown"
+  // and leaves the answer untouched.
+  //
+  // KEYED ON `retryNonce`, WHICH IS WHAT MAKES THE REFRESH CONTROL HONEST: press it and the time
+  // moves with the data, rather than standing at whatever the answer stage first loaded. Gated on
+  // the answer stage because that is the only place it renders; a re-scope deliberately does NOT
+  // re-read it — the rebuild happens hourly, and a window chip does not change when it last ran.
+  useEffect(() => {
+    if (stage !== 'answer') return;
+    let alive = true;
+    loadQualifyDataFreshness()
+      .then((r) => {
+        if (alive) setDataRebuiltAt(r.ok ? r.rebuiltAt : null);
+      })
+      .catch(() => {
+        if (alive) setDataRebuiltAt(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [stage, retryNonce]);
 
   // ── Motion + focus ─────────────────────────────────────────────────────────────────────────────
   // ⚠ THE TWEEN TARGETS `[data-v3-stage]` — THE STAGE SUBTREE — NEVER THE <main>. An earlier version
@@ -598,6 +714,15 @@ export function ResolutionFlowClient({
                   <QualifyAiPanel
                     snapshot={snapshot}
                     blind={!viewerHasAmountsCapability}
+                    // WHERE the answer stage drew the payer's book, so the panel's grounding caption
+                    // names the list the model actually read. TOLD, not derived from the field — it is
+                    // on the wire for the v2 tab too, and v2 draws no book (see the prop's own doc).
+                    //
+                    // ⚠ ONE CALL, NOT A TERNARY HERE. The composition (leads-first, then on-screen)
+                    // used to be written inline in this file — which nothing hermetic imports, so
+                    // INVERTING IT shipped app 557/0 and a clean build with 'leading' unreachable.
+                    // The decision now lives in bookPlacement.ts with its own tests; this is JSX.
+                    bookPlacement={bookPlacementFor(snapshot)}
                     autoAsk={autoAsk}
                     // ONE-SHOT (review Critical 2): without the disarm, every re-scope (window,
                     // billed-under chip) nulls the snapshot, unmounts the panel, and the remount
@@ -613,7 +738,17 @@ export function ResolutionFlowClient({
                 skipped,
                 refetching,
                 staleAfterError,
+                // ONE HANDLER, TWO RENDER SITES (S5): the failure banner's "Try again" and the
+                // NARROW SEARCH card's standing "Refresh the ranking". A second refetch path would
+                // be a second writer of the value the fetch effect keys on.
                 onRetry: onRetrySnapshot,
+                // The refresh's own progress signal — see the derivation above for why the three
+                // fields beside it cannot cover a same-scope re-run.
+                refreshing,
+                dataRebuiltAt,
+                // The auto window landing on a different rung under an UNCHANGED request key: the
+                // one scope change on this surface that no staleness flag can observe.
+                windowMove,
                 candidates: answerCandidates,
                 filters,
                 onToggleFilter,
@@ -621,6 +756,11 @@ export function ResolutionFlowClient({
                 employerNarrowTooMany: narrow.tooMany,
                 area,
                 onSelectArea,
+                // The SECOND grid narrow (S4). Both of these ride here rather than through
+                // `scopeKey`, and that absence from the fetch effect's inputs is the whole guarantee.
+                facilityOptions,
+                facilityNarrow,
+                onToggleFacility,
                 payerOverride,
                 // Re-scopes are REFETCHES of content already on screen: the snapshot stays rendered
                 // (dimmed, with the progress bar) rather than blanking — the design system's rule.

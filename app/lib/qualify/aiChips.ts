@@ -23,7 +23,14 @@
  *   pol.funding    → policy.funding ('Self-Funded' | 'Fully Insured', raw VOB casing).
  *   scoped         → exactly one ranked facility (the payer-level panel has no facility selection;
  *                    a single-facility set is the real analogue of the mockup's facility scope).
- *   subject        → facilities[0] (rank-1; the list is ORDER BY rating desc, ruling Q-G).
+ *   subject        → facilities[0] (rank-1). ⚠ RANK-1 CHANGED MEANING ON 2026-08-08 and the chips
+ *                    follow it deliberately. This used to read "the list is ORDER BY rating desc,
+ *                    ruling Q-G"; the comparator in core.ts now leads with a bed-availability tier,
+ *                    so rank-1 is the best facility that can ADMIT TODAY — the best available read,
+ *                    not the best-paying one. That is the right subject for chips a rep presses
+ *                    while on the phone with a prospective client ("should we place them here?"
+ *                    about a full house is not a question). The AI payload carries `bedState` so the
+ *                    explainer can say so rather than implying a ranking it cannot see the basis of.
  *   f.conflict     → a facility whose available factors disagree: at least one 'pos' AND one 'neg'
  *                    (the mockup's "reliability carries it, aging drags it" shape).
  */

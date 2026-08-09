@@ -154,6 +154,16 @@ const IN = { query: 'AETMEMBER123', window: W30 }; // long → member_id kind
 // SORT now follows ratingV2, where data confidence (sample × age × provenance) carries 20 points —
 // deliberately, so a 3-patient 60% cannot outrank a 40-patient 55% and "a rep can't manufacture a
 // flattering rating from two claims". Both orderings are pinned here so neither drifts silently.
+//
+// ⚠ SECOND SUPERSESSION (S1, 2026-08-08): ratingV2 is no longer the FIRST key. `assembleFacilities`
+// now leads with a bed-availability tier, so a confirmed-full facility sorts below every facility
+// that can admit today. THIS TEST IS DELIBERATELY UNCHANGED, and what it now also proves is the
+// property that made the new key safe to add: `makeDeps` supplies no `loadCensusAuth`, so every
+// facility here resolves `bedState: 'unknown'`, the tier is constant across the set, and the
+// comparator falls straight through to the ratingV2 chain these assertions pin. An hourly, fail-soft
+// census cron REQUIRES that — an outage must degrade to exactly this order, never reshuffle the
+// book. Loosening an assertion here to accommodate the new key would have destroyed the evidence
+// for it. The availability tier is pinned on its own fixtures, in test/qualifyCensusSort.test.ts.
 test('snapshot: rank is ratingV2 — a confident mid-% book outranks a thin high-% slice; v1 rating stays the raw pct', async () => {
   const snap = await getQualifySnapshotCore(makeDeps(SUPER, cap()), IN);
   assert.equal(snap.facilities[0]!.name, '405 RECOVERY'); // 55% on 40 patients → conf 1.0 → v2 75
@@ -392,7 +402,14 @@ test('initial: combines movers + top-payer snapshot + rank-1 seed cases, preserv
   assert.equal(init.topPayer, 'AETNA'); // top mover (delta 30)
   assert.equal(init.snapshot?.resolved?.payerName, 'AETNA');
   assert.equal(init.snapshot?.facilities.length, 2);
-  // seeded the rank-1 facility's cases (facilityKey of facilities[0], the value-first winner)
+  // Seeded the rank-1 facility's cases (facilityKey of facilities[0]).
+  //
+  // WHAT RANK-1 MEANS CHANGED ON 2026-08-08, and the assertion is written to survive that on
+  // purpose: it pins the RELATIONSHIP (the seed is whatever sorts first), not a facility name. The
+  // comparator now leads with bed availability, so the auto-opened drill is "the best facility that
+  // can admit today" rather than "the best-paying one" — chosen, not inherited, and correct for a
+  // screen an admissions rep opens mid-call. These fixtures carry no census, so the seed here is
+  // still the value-first winner.
   assert.equal(init.seedFacility, init.snapshot?.facilities[0]?.facilityKey);
   assert.ok(init.seedFacility);
   assert.equal(init.seedCases.length, 1);
@@ -553,7 +570,10 @@ test('by-payer: resolves facilities in rating order WITHOUT the PHI resolve (min
   assert.equal(snap.resolved?.payerName, 'AETNA');
   assert.equal(snap.resolved?.matchedOn, 'payer');
   assert.equal(snap.resolved?.matchedValue, ''); // no PHI prefix echo on this path
-  assert.equal(snap.facilities[0]!.name, '405 RECOVERY'); // v2 confidence-weighted order (same as PHI path)
+  // v2 confidence-weighted order (same as the PHI path). Unchanged by the 2026-08-08 availability
+  // tier for the same reason the #1 RANK ORDER guard above is: no census fixture → every row is
+  // bedState 'unknown' → the tier is constant → the ratingV2 chain decides, exactly as pinned.
+  assert.equal(snap.facilities[0]!.name, '405 RECOVERY');
   assert.equal(snap.facilities[1]!.name, 'CA MENTAL HEALTH');
 });
 

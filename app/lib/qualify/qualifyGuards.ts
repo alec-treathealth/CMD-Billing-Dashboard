@@ -73,8 +73,11 @@ export function identifierEmptyTerm(resolved: QualifyResolved | null): string {
  *     member's most-recent in-window claim facility). The search answered a specific question; the rest of
  *     the payer's ranked set is not that answer. Honest-empty (landingKey === null) → [] — the caller's
  *     isIdentifierEmpty branch renders the widen-window nudge, so a below-floor id never shows a random card.
- *   - BROWSE (resolve-by-payer / matchedOn 'payer', or no resolution) → the FULL ranked list (rating order),
- *     which the area/LOC filters + 5-up pager then operate on.
+ *   - BROWSE (resolve-by-payer / matchedOn 'payer', or no resolution) → the FULL ranked list, which the
+ *     area/LOC filters + 5-up pager then operate on. That list is ordered AVAILABILITY-FIRST, then by
+ *     ratingV2 (assembleFacilities, 2026-08-08) — this said "rating order", which stopped being true
+ *     when a confirmed-full facility started sorting below every facility that can admit today. This
+ *     function does not re-order and never has; it only decides WHICH rows are in scope.
  *  Pure + total; never mutates the input; returns a fresh array. */
 export function scopeFacilitiesForList(
   facilities: readonly QualifyFacility[],
