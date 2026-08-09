@@ -1,7 +1,12 @@
 'use client';
 
 /**
- * "Facilities Heating Up" — the auto-scrolling trend ticker. SHARED by both Qualify surfaces.
+ * "Facility Momentum" — the auto-scrolling trend ticker. SHARED by both Qualify surfaces.
+ *
+ * RENAMED FROM "Facilities Heating Up" 2026-08-09, in the same change that removed the top-15 cut
+ * (`QUALIFY_TREND_TOP_N`). The strip now carries every facility that clears the sample gates, in
+ * rank order by rating delta — risers at the head, decliners at the tail — so the old one-directional
+ * name would have been contradicted by its own cards. See the title's comment for the argument.
  *
  * WHY IT LIVES HERE (moved out of `overview.tsx` 2026-08-06). It was one of four exports in a
  * 417-line module whose other three are the book KPI tiles and the evidence gauge. The v3 staged
@@ -59,6 +64,8 @@ export const HeatingUpCards = memo(function HeatingUpCards({
   readOnly = false,
   openAs = 'facility_payer',
   onOpen,
+  onExplain,
+  explainingKey = null,
 }: {
   trends: readonly QualifyFacilityTrend[];
   window: QualifyWindow;
@@ -105,12 +112,33 @@ export const HeatingUpCards = memo(function HeatingUpCards({
   openAs?: 'facility_payer' | 'area';
   /** Ticker-card click. `openAs` says what the container does with it. Optional for tests. */
   onOpen?: (trend: QualifyFacilityTrend) => void;
+  /**
+   * ASK THE MODEL WHY THIS CARD READS AS IT DOES (Alec, 2026-08-09: *"If a user clicks on any one of
+   * the tickers, they should be able to receive an AI response that explains the meaning behind why
+   * the ticker has the rating that it has"*).
+   *
+   * ⚠ WHEN PRESENT IT **OVERRIDES** `onOpen` AND `readOnly` — every card becomes a live explain
+   * target. That is a deliberate supersede, not an oversight, and it costs v3's answer stage its
+   * area-seeding shortcut: a click there used to narrow the ranked grid to the card's state. Nothing
+   * is lost that the operator cannot reach — AREA is a first-class control sitting beside the grid it
+   * narrows (`AreaLine`), which is where that ruling put its real home; the ticker was a shortcut to
+   * it. Alec's newer instruction assigns the click ONE meaning across every strip and every stage,
+   * and two different meanings for the same gesture depending on which stage you were on is the
+   * ambiguity worth trading the shortcut away for.
+   *
+   * v2's tab and the mobile surface pass nothing here, so their `onOpen` behaviour is byte-unchanged.
+   */
+  onExplain?: (trend: QualifyFacilityTrend) => void;
+  /** facilityKey of the card whose explanation is open — renders it pressed. */
+  explainingKey?: string | null;
 }) {
   // Hook BEFORE the early return (rules of hooks — the call must run on every render).
   const { ref: scrollRef, isOverflowing } = useMarquee<HTMLDivElement>(
     serializeQualifyWindow(window),
     trends.length,
-    pinned,
+    // Force-paused while an explanation is open too: the strip must not scroll the card the reader
+    // is being told about out from under them.
+    pinned || explainingKey !== null,
   );
   if (trends.length === 0) return null;
   const range = qualifyWindowLabel(window);
@@ -118,14 +146,18 @@ export const HeatingUpCards = memo(function HeatingUpCards({
   const card = (t: QualifyFacilityTrend, i: number, dup: boolean) => {
     const bucket = ratingBucket(t.currentRating);
     const hex = RATING_HEX[bucket];
-    const active = activeFacilityKeys.has(t.facilityKey);
+    const explains = onExplain !== undefined;
+    const active = explains ? explainingKey === t.facilityKey : activeFacilityKeys.has(t.facilityKey);
     const loc = [t.city, t.state].filter(Boolean).join(', ');
     // A card that can't drive anything renders inert (no hover-lift, default cursor, disabled)
     // rather than as a button whose click silently no-ops. readOnly kills the whole strip; past
     // that, what makes a card drivable depends on what the click MEANS — see `openAs`. In 'area'
     // mode an unmapped card is still drivable (it seeds 'Other'), which is why this is not simply
     // `!!t.dominantPayer` any more.
-    const openable = !readOnly && (openAs === 'area' || !!t.dominantPayer);
+    // ⚠ `explains` short-circuits all of it: with an explain handler EVERY card is live, including
+    // the ones `readOnly` would have made inert — that is the whole point of the 2026-08-09 ruling
+    // (see `onExplain`). The dead-target rule is still honoured; the target simply exists now.
+    const openable = explains || (!readOnly && (openAs === 'area' || !!t.dominantPayer));
     return (
       <button
         key={dup ? `dup-${t.facilityKey}` : t.facilityKey}
@@ -136,11 +168,13 @@ export const HeatingUpCards = memo(function HeatingUpCards({
         // state twice. `undefined` omits the attribute entirely on the duplicate.
         aria-pressed={dup ? undefined : active}
         disabled={!openable}
-        onClick={() => onOpen?.(t)}
+        onClick={() => (explains ? onExplain(t) : onOpen?.(t))}
         // The duplicate half is decorative: hide it from AT + the tab order (each facility appears once).
         {...(dup ? ({ 'aria-hidden': true, tabIndex: -1, 'data-dup': 'true' } as const) : {})}
         title={
-          readOnly
+          explains
+            ? `Why is ${t.name} rated this way?`
+            : readOnly
             ? `${t.name} — trend for orientation`
             : openAs === 'area'
               ? // `t.state`, NOT `loc`: a card with a city but no state is an UNMAPPED-area card,
@@ -218,13 +252,22 @@ export const HeatingUpCards = memo(function HeatingUpCards({
   return (
     <section>
       <div className="mb-2.5 flex items-center gap-2 px-0.5">
-        <h2 className="font-head text-[15px] font-semibold tracking-tight">Facilities Heating Up</h2>
+        {/* ── THE TITLE IS "MOMENTUM", NOT "HEATING UP" (Alec, 2026-08-09) ──────────────────────────
+            The old name was accurate only because the strip was structurally incapable of showing a
+            decline: it took the top 15 of an ORDER BY `delta desc`, so a falling facility could never
+            reach the screen. With the cut removed (`QUALIFY_TREND_TOP_N`) the strip now carries the
+            whole book in rank order — biggest riser first, biggest faller last — and "Heating Up"
+            over a card reading ▼ -7 pts would be the title contradicting the data beneath it.
+            "Momentum" is signed: it covers both directions and still means movement, which is what
+            the ranking is. The eyebrow says the direction out loud rather than leaving it to be
+            inferred from the arrows. ── */}
+        <h2 className="font-head text-[15px] font-semibold tracking-tight">Facility Momentum</h2>
         {/* The v3 flow's house eyebrow (resolution-flow.tsx:587, :1128 and 9 more): text-xs /
             font-medium / tracking-wide. `extrabold` + `tracking-widest` existed only to make 10px
             readable. Must stay in lockstep with the skeleton's eyebrow below — see the CLS note. */}
         <span className="inline-flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-ink400">
           <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-status-ok" />
-          Trending · {range} · {scopePayer ?? 'across the book'}
+          Rising and falling · {range} · {scopePayer ?? 'across the book'}
         </span>
       </div>
       {/* Marquee = a real horizontal scroll container (useMarquee drives scrollLeft). role/list omitted
@@ -251,10 +294,12 @@ export function HeatingUpSkeleton() {
   return (
     <section aria-hidden>
       <div className="mb-2.5 flex items-center gap-2 px-0.5">
-        <h2 className="font-head text-[15px] font-semibold tracking-tight text-ink400">Facilities Heating Up</h2>
+        <h2 className="font-head text-[15px] font-semibold tracking-tight text-ink400">Facility Momentum</h2>
         {/* IDENTICAL to the real header's eyebrow above, and not merely for tidiness: the shell
             swaps this exact node for that one when trends resolve (resolution-flow-client.tsx:403-411),
-            so a size mismatch here is a layout shift on every load. Move the two together. */}
+            so a size mismatch here is a layout shift on every load. Move the two together — the title
+            included: the 2026-08-09 rename had to land in BOTH or the strip would change its own name
+            the moment its data arrived. */}
         <span className="text-xs font-medium uppercase tracking-wide text-ink400">Loading trends…</span>
       </div>
       <div className="flex gap-2.5 overflow-hidden pb-2 pl-0.5 pr-0.5 pt-0.5">

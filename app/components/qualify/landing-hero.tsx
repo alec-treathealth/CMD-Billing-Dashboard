@@ -57,8 +57,8 @@ export function QualifyLandingHero() {
           {QUALIFY_CLIENT_NAME_ENABLED
             ? 'a member ID, a 3-letter alpha prefix, or a client name'
             : 'a member ID or a 3-letter alpha prefix'}{' '}
-          — or tap a <span className="font-semibold text-teal700">Facility Heating Up</span> above to resolve its
-          payer.
+          — or tap a <span className="font-semibold text-teal700">Facility Momentum</span> card above to resolve
+          its payer.
         </p>
         <div className="mt-5 flex flex-wrap items-center justify-center gap-2 text-xs font-semibold">
           {(QUALIFY_CLIENT_NAME_ENABLED

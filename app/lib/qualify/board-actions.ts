@@ -18,9 +18,13 @@
  * counts). No audit, matching the movers/KPIs/trends gate-only posture for non-PHI aggregates.
  */
 import { requireQualifyPrincipal } from './gate';
-import { loadQualifyPolicyTape } from './loaders';
+import { loadQualifyPolicyTape, loadQualifyPolicyTapeContext } from './loaders';
 import { getQualifyPolicyTapeCore, type QualifyPolicyTapeResult } from './board';
 import { QUALIFY_TAPE_DELTA_DAYS } from '../../../src/collections/qualifyRatingHistory';
+// SERVER-ONLY by construction (it reaches blindIndex, which hard-fails in a browser): resolves the
+// masked token tail back to the readable 3-character prefix. See prefixLabel.ts for exactly what
+// that discloses, why it is defensible on this gated surface, and how to switch it off.
+import { prefixLabelsFor } from '../../../src/collections/prefixLabel';
 
 export type QualifyPolicyTapeActionResult = { ok: true; tape: QualifyPolicyTapeResult } | { ok: false };
 
@@ -35,6 +39,10 @@ export async function getQualifyPolicyTape(): Promise<QualifyPolicyTapeActionRes
     const tape = await getQualifyPolicyTapeCore({
       requirePrincipal: requireQualifyPrincipal,
       loadTape: loadQualifyPolicyTape,
+      // Display enrichment (2026-08-09). Both are optional deps and BOTH fail soft INSIDE the core:
+      // a thrown resolver or a failed context read costs the strip its labels, never its rows.
+      resolvePrefixes: prefixLabelsFor,
+      loadContext: loadQualifyPolicyTapeContext,
       deltaDays: QUALIFY_TAPE_DELTA_DAYS,
     });
     return { ok: true, tape };

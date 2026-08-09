@@ -385,7 +385,7 @@ test('cases table — a facility-scoped set still omits dollars for a no-amounts
   for (const v of ['1,000', '2,000', '1,100', '1,200']) assert.ok(!html.includes(v), `dollar ${v} absent even though the fixture carries it`);
 });
 
-// ── Redesign OVERVIEW: book KPI tiles + "Facilities Heating Up" trend cards ─────────────────────────
+// ── Redesign OVERVIEW: book KPI tiles + "Facility Momentum" trend cards ─────────────────────────
 const W30 = trailingWindow(30);
 const KPIS: QualifyBookKpis = {
   pctAllowedOfBilled: 44.4, pctPaidOfAllowed: 82.1, pctPaidOfBilled: 36.2, distinctPatients: 120,
@@ -431,9 +431,38 @@ test('KPI tiles — SAMPLE GATE: >=10 patients renders unchanged (no thin/insuff
   assert.ok(!html.includes('thin sample') && !html.includes('insufficient data'), 'no gate flag at full confidence');
 });
 
+/**
+ * THE CLICK NOW EXPLAINS (Alec, 2026-08-09). `onExplain` overrides `readOnly` — every card goes live
+ * on every stage, which is what "click on any one of the tickers" asks for, and it retires the inert
+ * branch that existed only because there was nowhere for a click to go on the first three stages.
+ * `readOnly` is deliberately PASSED here so the override is what the case proves; without it the
+ * assertion would pass for the wrong reason.
+ */
+test('momentum cards: onExplain OVERRIDES readOnly — every card is live, and the pressed one is the open one', () => {
+  const html = renderToStaticMarkup(
+    <HeatingUpCards
+      trends={TRENDS}
+      window={W30}
+      readOnly
+      onExplain={() => {}}
+      explainingKey={TRENDS[0]!.facilityKey}
+    />,
+  );
+  assert.ok(!html.includes('disabled'), 'a readOnly strip with an explain handler has no inert card');
+  assert.ok(html.includes('Why is'), 'the tooltip states what the click does');
+  assert.ok(!html.includes('trend for orientation'), 'the inert copy must not survive the override');
+  assert.equal(html.split('aria-pressed="true"').length - 1, 1, 'exactly one card reads pressed');
+});
+
+test('momentum cards WITHOUT onExplain keep the shipped readOnly inertness — v2 and mobile are untouched', () => {
+  const html = renderToStaticMarkup(<HeatingUpCards trends={TRENDS} window={W30} readOnly />);
+  assert.ok(html.includes('disabled'), 'no handler means no live target — the dead-target rule holds');
+  assert.ok(html.includes('trend for orientation'));
+});
+
 test('heating-up cards — defined "n" (claim lines), Δpts ticker (+/−), NEW for null-prior, sparkline present', () => {
   const html = renderToStaticMarkup(<HeatingUpCards trends={TRENDS} window={W30} onOpen={() => {}} />);
-  assert.ok(html.includes('Facilities Heating Up'), 'section title');
+  assert.ok(html.includes('Facility Momentum'), 'section title');
   assert.ok(html.includes('210 claim lines'), 'Change A: n is DEFINED as claim lines, never a bare n=');
   assert.ok(!/\bn=\d/.test(html), 'no bare "n=" anywhere');
   assert.ok(html.includes('+5.1 pts'), 'positive delta ticker');
@@ -1304,7 +1333,7 @@ test('floor sweep: no meaning-bearing text below 12px in any Qualify component t
     [
       'HeatingUpCards (real trends)',
       renderToStaticMarkup(<HeatingUpCards trends={TRENDS} window={W30} onOpen={noop} />),
-      /Facilities Heating Up/,
+      /Facility Momentum/,
     ],
     [
       'Spark (2-point draw-in)',

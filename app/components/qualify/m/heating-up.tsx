@@ -1,11 +1,17 @@
 'use client';
 
 /**
- * Qualify mobile — "Facilities Heating Up" chips (redesign). FACILITY-shaped now (name + rating +
+ * Qualify mobile — "Facility Momentum" chips (redesign). FACILITY-shaped now (name + rating +
  * Δpts + defined n), fed by the same getQualifyOverview trend rows desktop's cards use — the old
  * payer-mover chips are superseded. Tap = the Change-E HYBRID: resolve the facility's dominant payer
  * AND scope to the facility (wired by the container via onOpen(trend)). Colors come from the SHARED
  * tokens module (Phase 0) — no per-file hex.
+ *
+ * RENAMED FROM "Facilities Heating Up" 2026-08-09 — NOT for consistency's sake, but because this
+ * surface reads the SAME query as desktop and the top-15 improvers cut that made the old name true
+ * was removed there (`QUALIFY_TREND_TOP_N`). Decliners now reach this strip too, so leaving the old
+ * title would have put "Heating Up" above a chip reading ▼. The flame glyph stays: it marks the
+ * strip's identity, and the head of the rank order is still the hottest facility in the book.
  */
 import { FlameIcon } from './icons';
 import { ratingBucket } from '../../../lib/qualify/rating';
@@ -30,7 +36,7 @@ export function HeatingUp({
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
         <FlameIcon size={14} color={GOLD} />
         <span className="ths-h" style={{ fontSize: 13, fontWeight: 600, color: QUALIFY_PALETTE.ink900 }}>
-          Facilities Heating Up
+          Facility Momentum
         </span>
         <span style={{ fontSize: 11, color: QUALIFY_PALETTE.ink400, marginLeft: 'auto' }}>{qualifyWindowLabel(win)}</span>
       </div>

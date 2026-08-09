@@ -762,9 +762,23 @@ export function buildBookKpisQuery(
 /** Number of evenly-spaced sub-window buckets in a facility sparkline (fixed so density is consistent
  *  across 30/60/90 and calendar windows — weekly buckets would give only ~4 points at 30d). */
 export const QUALIFY_TREND_BUCKETS = 8;
-/** Default "Facilities Heating Up" size (top-N by rating delta). 15 — the ticker is a continuous
- *  marquee, so more cards just make a longer, richer loop (was 8). */
-export const QUALIFY_TREND_TOP_N = 15;
+/**
+ * SAFETY BOUND on the facility-momentum strip — no longer a "top N" selection.
+ *
+ * ⚠ 15 USED TO MEAN "the 15 biggest IMPROVERS", and since the ORDER BY is `delta desc` that made the
+ * strip structurally incapable of showing a decline: every facility whose rating fell sorted below
+ * the cut, so the surface only ever reported good news. Alec ruled the whole book visible
+ * (2026-08-09: "not show ONLY the top 15, show the trends for all the facilities, whether they're
+ * falling or rising, but keep the ranking"). The ranking is unchanged — biggest riser first, biggest
+ * faller last — the cut is simply gone.
+ *
+ * 100 is a BOUND, not a filter: the live roster is 47 facilities of which 39 clear the sample gates
+ * at 90d (measured 2026-08-09), so nothing is being truncated today. It exists so a data accident
+ * (an alias explosion, a bad facility-text ingest) cannot stream ten thousand cards into a marquee.
+ * If the roster ever approaches it, raise it deliberately rather than letting it start truncating —
+ * a silent cut here is exactly the failure this constant just stopped causing.
+ */
+export const QUALIFY_TREND_TOP_N = 100;
 /** Trend floor — a facility needs at least this many CURRENT-window lines to rank (kills 1–2-line
  *  flukes). Mirrors rating.ts QUALIFY_MIN_LINES; kept as a local literal so this src/ module never
  *  imports from app/ (the dependency points the wrong way). Keep the two values in lockstep. */

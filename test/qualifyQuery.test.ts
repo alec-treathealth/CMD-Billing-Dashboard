@@ -15,6 +15,7 @@ import {
   QUALIFY_MOVERS_MIN_CHARGES,
   QUALIFY_TREND_BUCKETS,
   QUALIFY_TREND_MIN_PATIENTS,
+  QUALIFY_TREND_TOP_N,
 } from '../src/collections/qualifyQuery.js';
 import {
   buildCmdSearchSummaryQueries,
@@ -465,6 +466,34 @@ test('overview aggregates: cross-tenant + read the rollup + route through assert
   }
   assert.throws(() => buildBookKpisQuery({ from: '2026-01-01', to: '2026-02-01' }, []), /entityIds required/);
   assert.throws(() => buildFacilityTrendQuery('2026-01-01', '2026-02-01', '2025-12-01', []), /entityIds required/);
+});
+
+/**
+ * THE MOMENTUM STRIP MUST BE ABLE TO SHOW A DECLINE (Alec, 2026-08-09).
+ *
+ * The strip ORDERs BY `delta desc`, so any limit small enough to bite is structurally a
+ * "hide every falling facility" filter — which is exactly what the old top-15 cut was, and why the
+ * surface could only ever report good news. This pins the two halves of the fix together: the rank
+ * order is UNCHANGED (risers first — "keep the ranking"), and the bound is now far above the live
+ * roster (47 facilities, 39 clearing the 90d gates as measured 2026-08-09) so it selects nothing.
+ * If someone re-tightens the cap, this fails and says why.
+ */
+test('facility momentum: ranked by delta desc, and the row cap is a SAFETY BOUND that cannot hide decliners', () => {
+  const { sql, params } = buildFacilityTrendQuery('2026-05-11', '2026-08-09', '2026-02-10', BOTH);
+  assert.match(
+    sql,
+    /order by \(agg\.cur_rating - agg\.prior_rating\) desc nulls last/,
+    'the ranking is by rating delta, biggest riser first — unchanged by the 2026-08-09 uncapping',
+  );
+  assert.ok(
+    QUALIFY_TREND_TOP_N >= 60,
+    `the cap must stay well clear of the ~47-facility roster; at ${QUALIFY_TREND_TOP_N} a delta-ordered ` +
+      'limit starts truncating the TAIL, which is where every declining facility lives',
+  );
+  // The cap is a BOUND PARAM, not an inlined literal (paramList discipline) — so assert the shape
+  // and the value it binds, which is what an inlined-literal assertion would have missed entirely.
+  assert.match(sql.trimEnd(), /limit \$\d+$/, 'the row cap is a bound param, never string-built');
+  assert.equal(params[params.length - 1], QUALIFY_TREND_TOP_N, 'and the constant is what it binds');
 });
 
 test('book KPIs: three guarded ratios + distinct-patient count, e2 excluded, NO raw dollars projected', () => {

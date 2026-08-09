@@ -63,6 +63,8 @@ import type { QualifyFacilityNarrowOption } from '../../../lib/qualify/facilityV
 import { QualifyAiPanel } from '../qualify-ai-panel';
 import { bookPlacementFor } from '../../../lib/qualify/bookPlacement';
 import { HeatingUpCards, HeatingUpSkeleton } from '../shared/heating-ticker';
+import { TickerExplainer } from '../ticker-explainer';
+import { buildTrendAiInput } from '../../../lib/qualify/tickerAiPayload';
 import { staggerDelayMs } from '../tokens';
 import { AREA_ALL, areaKeyFor } from '../m/area-chips';
 import {
@@ -89,8 +91,22 @@ if (typeof window !== 'undefined') {
   gsap.registerPlugin(ScrollTrigger);
 }
 
-/** The ticker's own window — see the fetch effect for why a trailing window rather than 30 days. */
-const TICKER_WINDOW = { kind: 'trailing', days: 60 } as const;
+/**
+ * The momentum strip's own window. **90 DAYS since 2026-08-09** (was 60), for two reasons that point
+ * the same way:
+ *
+ *  · CONSISTENCY — the policy tape directly above it reports a 90-day rating change (Alec's 2026-08-08
+ *    ruling, `QUALIFY_RATING_HISTORY_WINDOW_DAYS`). Two strips stacked on one screen reporting
+ *    "movement" over different horizons invites exactly the comparison neither one supports.
+ *  · SAMPLE — `payment_received` lags service, so the median claim in this book is ~150 days old
+ *    (measured). A 30-day window sees ~10-12% of the evidence and a 90-day one ~30%, which is the
+ *    difference between a delta that moves on one reversal and one that moves on a trend.
+ *
+ * Coverage was NOT the tiebreaker and should not be cited as one: 30/60/90 clear the sample gates for
+ * 40/42/39 facilities respectively (measured 2026-08-09) — near-identical. The argument is horizon
+ * agreement and evidence depth, not how many cards appear.
+ */
+const TICKER_WINDOW = { kind: 'trailing', days: 90 } as const;
 
 /** Stable empty reference for "no ticker card is pressed" — a fresh Set would defeat the strip's memo. */
 const NO_TICKER_KEYS: ReadonlySet<string> = new Set();
@@ -663,6 +679,10 @@ export function ResolutionFlowClient({
         : new Set(trends.filter((t) => areaKeyFor(t.state) === area).map((t) => t.facilityKey)),
     [trends, area],
   );
+  /** The momentum card whose explanation is open (2026-08-09). Plain local state, NOT a reducer
+   *  field: it shapes no request, survives no navigation, and `flow-state.ts`'s own admission test
+   *  ("does any handler or flow field touch it") says a bit like this stays out of there. */
+  const [explainTrend, setExplainTrend] = useState<QualifyFacilityTrend | null>(null);
 
   return (
     // THE PAGE CHROME. Matching the v2 tab's <main> exactly, because the route layout supplies none:
@@ -679,14 +699,31 @@ export function ResolutionFlowClient({
             // and inert cards beat buttons that no-op. `scopePayer` stays null on BOTH stages: these
             // trends were fetched book-wide, and labelling the strip with the resolved payer would
             // claim a scope the query never had.
-            <HeatingUpCards
-              trends={trends}
-              window={TICKER_WINDOW}
-              readOnly={!tickerLive}
-              openAs="area"
-              activeFacilityKeys={tickerActiveKeys}
-              onOpen={onTickerOpen}
-            />
+            /* ── A CLICK NOW EXPLAINS (Alec, 2026-08-09) ────────────────────────────────────────
+               `onExplain` overrides `readOnly`/`onOpen` inside the strip, so every card is live on
+               every stage — which is what "click on any one of the tickers" asks for, and it also
+               retires the readOnly/inert branch that existed only because there was nowhere for a
+               click to go on the first three stages.
+               THE COST, STATED: the answer stage's area-seeding shortcut is gone. AREA remains a
+               first-class control beside the grid it narrows (`AreaLine`) — the ticker was a
+               shortcut to it, never its home. `tickerLive`/`tickerActiveKeys` are kept and still
+               passed: they describe the AREA facet's state, and reviving the shortcut later must not
+               require rebuilding the derivations that made it honest. */
+            <>
+              <HeatingUpCards
+                trends={trends}
+                window={TICKER_WINDOW}
+                readOnly={!tickerLive}
+                openAs="area"
+                activeFacilityKeys={tickerActiveKeys}
+                onOpen={onTickerOpen}
+                onExplain={setExplainTrend}
+                explainingKey={explainTrend?.facilityKey ?? null}
+              />
+              {explainTrend ? (
+                <TrendExplainer trend={explainTrend} onClose={() => setExplainTrend(null)} />
+              ) : null}
+            </>
           )
         }
         payerGroups={payerGroups}
@@ -775,5 +812,33 @@ export function ResolutionFlowClient({
         }
       />
     </main>
+  );
+}
+
+/**
+ * The momentum card's explainer, with its payload memoized HERE and not in the shell.
+ *
+ * `TickerExplainer` re-asks whenever its `input` identity changes, and this shell re-renders on
+ * every keystroke, every stage move and every fetch tick. Building the payload inline would mint a
+ * fresh object each time and fire another audited, billed model call per render. Scoping the memo to
+ * its own component makes the dependency exactly the clicked card.
+ *
+ * `blind: false`: the trend query projects no dollar column, so there are no amounts to withhold —
+ * and the server re-derives the real capability from the principal regardless. This field only tunes
+ * the model's phrasing about dollars it was never given; it is a hint, never the control.
+ */
+function TrendExplainer({ trend, onClose }: { trend: QualifyFacilityTrend; onClose: () => void }) {
+  const input = useMemo(() => buildTrendAiInput(trend, TICKER_WINDOW.days, false), [trend]);
+  const delta =
+    trend.deltaPts === null
+      ? 'no prior window'
+      : `${trend.deltaPts > 0 ? '▲ +' : trend.deltaPts < 0 ? '▼ ' : '◆ '}${trend.deltaPts.toFixed(1)} pts`;
+  return (
+    <TickerExplainer
+      title={trend.name}
+      subtitle={`${trend.currentRating === null ? '—' : Math.round(trend.currentRating)}% · ${delta} · trailing ${TICKER_WINDOW.days} days`}
+      input={input}
+      onClose={onClose}
+    />
   );
 }

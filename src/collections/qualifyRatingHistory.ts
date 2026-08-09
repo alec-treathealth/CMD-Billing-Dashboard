@@ -313,7 +313,16 @@ export function buildPolicyTapeQuery(opts?: {
   const deltaDays = Math.min(Math.max(Math.trunc(opts?.deltaDays ?? QUALIFY_TAPE_DELTA_DAYS), 1), 3650);
   const minMembers = Math.min(Math.max(Math.trunc(opts?.minMembers ?? QUALIFY_TAPE_MIN_MEMBERS), 0), 1000);
   const limit = Math.min(Math.max(Math.trunc(opts?.limit ?? QUALIFY_TAPE_TOP_N), 1), 100);
-  const sql =
+  // ⚠ SELECTION AND DISPLAY ORDER ARE TWO DIFFERENT ORDERINGS, and separating them is the whole point
+  // of the wrapper below (Alec, 2026-08-09: "The ratings should be in order, keep the title").
+  //   · The INNER order picks WHICH pairs the tape carries — biggest absolute movement first. That is
+  //     what makes the strip "Policies on the Move", and the title he kept is the reason it must not
+  //     change: ordering the LIMIT by rating would silently turn the tape into a leaderboard of the
+  //     best-rated policies, most of which have not moved at all.
+  //   · The OUTER order decides how those twenty are READ — by rating, descending. A strip ordered by
+  //     |delta| interleaves 39 and 12 with no pattern the eye can hold; ordered by rating it is
+  //     scannable, and the delta still rides on every card.
+  const inner =
     'with latest as (select max(as_of_date) as d from collections.qualify_policy_rating_daily) ' +
     'select cur.member_id_prefix_bidx, ' +
     'right(cur.member_id_prefix_bidx, 6) as token_tail, ' +
@@ -336,7 +345,89 @@ export function buildPolicyTapeQuery(opts?: {
     'and cur.distinct_members >= $2::int ' +
     'order by abs(cur.rating - prev.rating) desc, cur.rating desc, cur.primary_payer asc, cur.member_id_prefix_bidx asc ' +
     'limit $3::int';
+  const sql =
+    `select * from (${inner}) movers ` +
+    'order by movers.rating_now desc, abs(movers.delta_pts) desc, movers.primary_payer asc, ' +
+    'movers.member_id_prefix_bidx asc';
   return { sql, params: [deltaDays, minMembers, limit] };
+}
+
+/**
+ * WHAT KIND OF POLICY, AND WHERE — the tape's second read (2026-08-09).
+ *
+ * Alec, on the live strip: *"we will want to show a prefix along with another unique identifier that
+ * tells the user what kind of policy it is, area would also help."* The prefix comes from
+ * `prefixLabel.ts` (no query — the token resolves in-process). Everything else has to be looked up,
+ * because `qualify_policy_rating_daily` stores the RATING and its claim aggregates and no dimension
+ * at all: no facility, no care setting, no location. That is not an oversight in 0093 — the snapshot
+ * is deliberately one row per (prefix, payer) — so the dimensions are joined at READ time, for the
+ * ≤20 tokens actually on the strip, instead of widening the nightly table.
+ *
+ * Per (token, payer) it returns the DOMINANT facility — the one carrying the most claim lines in the
+ * window — as its `facility_code` and `care_setting`, plus how many facilities the pair touches at
+ * all. The app turns the code into "City, ST" through `facilityLocations.ts` (the only source of
+ * geography in this system; `collections.facilities` carries none).
+ *
+ * DOMINANT, NOT AGGREGATED, and the distinction is the honest one: a policy whose members were
+ * treated at four facilities does not have "a" care setting or "a" state, so the strip names the
+ * facility that actually carries the claims and `facility_count` tells the UI when to say the pair is
+ * spread wider than the one it names. An averaged or majority-voted answer would read as a fact about
+ * the policy when it is a fact about one facility.
+ *
+ * MEASURED IN THE SHIPPED SHAPE: 8.6ms / 407 buffers over 90 days at 20 tokens (2026-08-09,
+ * EXPLAIN ANALYZE with the entity array and the window as literals). An earlier probe read 481ms and
+ * that number was an artefact of the probe's own entity subquery, not of this query — the same
+ * measure-the-shipped-shape trap 0092's header records. The plan is a BitmapAnd of
+ * `cmd_charge_rollup_prefix` and `cmd_charge_rollup_entity_payment`.
+ *
+ * NON-PHI: the token is the pair's identity (doctrine — blindIndex.ts), payer/facility/care-setting
+ * are the allowlisted rollup dimensions every Qualify aggregate ships, and NO dollar column is
+ * projected — so an admissions_seat receives identical bytes.
+ */
+export function buildPolicyTapeContextQuery(
+  entityIds: string[],
+  tokens: readonly string[],
+  from: string,
+  to: string,
+): { sql: string; params: unknown[] } {
+  assertEntityScope(entityIds, 'qualifyRatingHistory.buildPolicyTapeContextQuery');
+  const sql =
+    'with agg as (' +
+    'select member_id_prefix_bidx, primary_payer, facility, count(*)::int as lines ' +
+    'from collections.cmd_explorer_charge_rollup ' +
+    'where business_entity_id = any($1::uuid[]) ' +
+    'and payment_received >= $3::date and payment_received < $4::date ' +
+    'and member_id_prefix_bidx = any($2::text[]) ' +
+    "and primary_payer is not null and btrim(primary_payer) <> '' " +
+    "and facility is not null and btrim(facility) <> '' " +
+    'group by member_id_prefix_bidx, primary_payer, facility' +
+    '), dim as (' +
+    'select agg.member_id_prefix_bidx as token, agg.primary_payer as payer, agg.lines, ' +
+    'coalesce(fe.facility_code, a.facility_code) as facility_code, ' +
+    'f.care_setting ' +
+    'from agg ' +
+    // the FACILITY_DIM_JOINS crosswalk, restated (this module never imports qualifyQuery.ts — see
+    // buildRatingHistoryAggQuery's header for why that boundary exists)
+    'left join collections.facilities fe on upper(fe.facility_name) = upper(agg.facility) ' +
+    'left join collections.cmd_facility_aliases a on upper(a.facility_text) = upper(agg.facility) ' +
+    'left join collections.facilities f on f.facility_code = coalesce(fe.facility_code, a.facility_code)' +
+    ') ' +
+    'select distinct on (token, payer) token, payer, facility_code, care_setting, ' +
+    // Window functions are evaluated BEFORE DISTINCT ON, so this counts every facility row in the
+    // pair's group and survives the row that DISTINCT ON keeps.
+    'count(*) over (partition by token, payer)::int as facility_count ' +
+    'from dim ' +
+    'order by token, payer, lines desc nulls last, facility_code nulls last';
+  return { sql, params: [entityIds, tokens, from, to] };
+}
+
+/** One (token, payer) context row — the dimensions the daily snapshot does not carry. */
+export interface QualifyPolicyTapeContextRow {
+  token: string;
+  payer: string;
+  facility_code: string | null;
+  care_setting: 'IP' | 'OP' | 'BOTH' | null;
+  facility_count: number;
 }
 
 /** Raw tape row (loader-side type; the app contract mirrors it in camelCase). */
