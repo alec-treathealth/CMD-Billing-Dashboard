@@ -141,9 +141,9 @@ const TABLE: { name: string; action: ShellAction; writes: Partial<ShellState> }[
       snapshotError: null,
       area: AREA_ALL,
       facilityNarrow: NO_FACILITY_NARROW,
-      // Declared for the record; the table CANNOT see it (see INV n) because the fixture is already
-      // `true`. INV n is what actually pins this write, from the opposite side.
-      narrowExpanded: true,
+      // Since 2026-08-09 this differs from the `dirty()` fixture (`true`), so the table DOES see it
+      // now — but INV n stays the real pin, because it is the case that asserts the direction.
+      narrowExpanded: false,
       refreshingNonce: null,
       windowMove: null,
     },
@@ -721,25 +721,28 @@ test('area_selected: All, a state and the Other bucket are all just keys — and
 /**
  * INV n — the NARROW SEARCH card's open/closed bit.
  *
- * ⚠ THE FIELD-WRITE TABLE ABOVE CANNOT PIN THE `skipped` HALF OF THIS, and that is why this test
- * exists rather than a fourth column in the table. The table's fixture sets every field to a
- * NON-default value and compares `{...dirty(), ...writes}` — so any action whose declared write
- * happens to EQUAL the fixture value is invisible there. `narrowExpanded: true` is exactly that case
- * for `skipped` (the same blind spot the pre-existing `skipped: true` row already has). Every case
- * below therefore starts from the OPPOSITE value: a reducer that merely carried the field through
- * fails all of them.
+ * ⚠ THE FIELD-WRITE TABLE ABOVE CANNOT PIN THIS, and that is why this test exists rather than a
+ * fourth column in the table. The table's fixture sets every field to a NON-default value and
+ * compares `{...dirty(), ...writes}` — so any action whose declared write happens to EQUAL the
+ * fixture value is invisible there. Every case below therefore starts from the OPPOSITE value: a
+ * reducer that merely carried the field through fails all of them.
  *
- * The rule being pinned: OPEN is a claim that there is something to narrow. A Skip has just widened
- * the search to the whole footprint, so the fields are the operator's next move and the reveal has
- * rows to stagger; a plan pick has already narrowed it, so the card states what it resolved to and
- * stays shut. Every other navigation is invariant (a) — a kept-open card over a state the user has
- * left is the same kept-but-hidden class, at lower stakes.
+ * The rule being pinned: EVERY navigation lands the card CLOSED. A plan pick has already narrowed
+ * the search, so the card states what it resolved to and stays shut; the rest are invariant (a) — a
+ * kept-open card over a state the user has left is the same kept-but-hidden class, at lower stakes.
+ *
+ * ⚠ SKIP MOVED INTO THAT LIST ON 2026-08-09 (Alec, on the live screen: "the landing page on the
+ * search is way too much going on"). It used to land OPEN on two premises — "the fields are the next
+ * move" and "the reveal needs rows to stagger" — and the second had already died when the collapse
+ * re-homed `data-v3-facet` onto the summary badges. The negative direction is what this case now
+ * guards: a skip that re-opens the card is the regression, and the assertion starts from `true` so a
+ * pass-through cannot fake it.
  */
-test('INV n: Skip lands the NARROW SEARCH card OPEN, every navigation lands it CLOSED, Clear filters leaves it alone', () => {
+test('INV n: EVERY navigation lands the NARROW SEARCH card CLOSED — Skip included since 2026-08-09 — and Clear filters leaves it alone', () => {
   assert.equal(
-    shellReducer(dirty({ narrowExpanded: false }), { type: 'skipped' }).narrowExpanded,
-    true,
-    'a skip must OPEN the card — the fields are the next move, and the reveal needs them to stagger',
+    shellReducer(dirty({ narrowExpanded: true }), { type: 'skipped' }).narrowExpanded,
+    false,
+    'a skip must CLOSE the card — it lands on the screen with the most statements on it already',
   );
   for (const action of [
     { type: 'plan_submitted' },
