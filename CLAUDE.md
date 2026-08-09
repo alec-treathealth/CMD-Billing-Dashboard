@@ -163,9 +163,9 @@ library from `../src` and is the Vercel app root.
 
 Two **separate** migration planes — never mix the directories:
 
-| Plane | Directory | Next number (as of 2026-08-08) |
+| Plane | Directory | Next number (as of 2026-08-09) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0094** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0095** |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **032** |
 
 **0093 (Qualify rating history) is APPLIED LIVE 2026-08-08** via `apply_migration` — plain
@@ -177,11 +177,31 @@ across the 3 tables** · RLS enabled on all 3 · definer is `security definer`, 
 EXECUTE granted to `claims_reader` and revoked from `public`. Its input validation was exercised
 both ways — four malformed calls wrote nothing, a well-formed call upserted, test row deleted.
 
-⚠ **The table is applied but the CRON IS NOT DEPLOYED** — `/api/cron/qualify-rating-history`
-lives on `design/qualify-smoke-shell`, and production is `main`, so the 05:10 schedule cannot
-fire until that branch reaches `main` via staging. All three tables are EMPTY until then; that
-is the expected state, and `getQualifyPolicyTape()` correctly reads `available:true` with zero
-items (`available:false` means the RELATION is absent, which it no longer is).
+**BACKFILLED 2026-08-09** (manual dashboard trigger; today's 05:10 slot had passed before the
+06:54 deploy): 180/180 dates ok, 2026-02-10 → 2026-08-08, no gaps, **70 seconds** total,
+214,407 rows. The tape returns real movers.
+
+⚠ **0093's SIZE ESTIMATE WAS 1.4x LOW — and the 0092 lesson needs widening.** Measured: 70 MB
+(46 heap + 24 PK), 342 bytes/row, **~142 MB/yr** vs an estimated ~200 bytes/row and ~100 MB/yr.
+Two errors: (1) the 911-pairs/day benchmark was measured on `charge_date` while the table windows
+on **`payment_received`** — a different, larger population (actual 1,191/day); **benchmark a
+rollup on the same date axis it uses.** (2) The keys were priced and `tenant_scope` — a constant
+`'cross-tenant-bxr-indigo'` on every row, 5,025 kB measured — was not. So: **price EVERY text
+column, including ones whose value never varies**, not just INCLUDE payloads. **0094 drops that
+column** and moves the invariant into a table COMMENT.
+
+**90.7% of rows (194,417) can never be rated** — below the 3-member floor, the "a prefix is a
+person, not a population" finding showing up in storage; only **29 pairs are tape-eligible**.
+They are kept ON PURPOSE: they are what explains WHY a pair is unrated, and they are the history
+a single-member "patient watcher" would read. Two levers stay OPEN and unratified — dropping
+never-rateable rows (~90% smaller, but blinds the majority persona) and a retention cap
+(bounds growth; keep ≥400 days or year-over-year and the January deductible-reset explanation
+are both lost).
+
+`collections.qualify_prefix_echo` is still EMPTY and that is correct — the search rewrite does
+not yet call `record_qualify_prefix_echo`, so tape items show a token tail instead of a `GGS`
+echo. Note also that `getQualifyPolicyTape()` reads `available:true` with zero items when the
+table is applied-but-empty; `available:false` means the RELATION is absent.
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
 0077. 0080/0081/0082 (explorer perf) are **applied live 2026-08-04** — 0081

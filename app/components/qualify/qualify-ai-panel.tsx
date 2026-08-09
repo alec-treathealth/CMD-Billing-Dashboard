@@ -28,6 +28,9 @@ import { buildQualifyAiInput } from '../../lib/qualify/aiPayload';
 // The scope claim's ONE home — see scopeLabel.ts for why it does not live in this file.
 import { aiScopeLabel } from '../../lib/qualify/scopeLabel';
 import { IQ_BAND_HEX } from './tokens';
+// The model is ASKED for markdown by SYSTEM_PROMPT; this is what turns it into markup instead of
+// printing the delimiters. Pure + hermetically tested (app/test/markdown-render.test.tsx).
+import { Markdown } from '../ui/markdown';
 
 type ChipId = QualifyAiChipId;
 
@@ -243,16 +246,29 @@ export function QualifyAiPanel({
               <p role="status" className="sr-only">
                 {!streaming && text ? 'Answer ready.' : ''}
               </p>
+              {/* ── THE THREE SECTIONS, AS MARKUP (2026-08-09) ────────────────────────────────────
+                  These rendered into `whitespace-pre-wrap`, which printed the model's markdown
+                  verbatim: SYSTEM_PROMPT asks for "2-4 short bullets" and names payers in `**bold**`,
+                  and all of it arrived on screen as literal `-`, `**` and `##`. `parseAiSections`
+                  consumes the three top-level `##` headers, which is exactly why this went unnoticed
+                  — the headers looked fine and every line under them did not.
+                  <Markdown> builds elements from a token scan (no raw-HTML sink; see its header) and
+                  renders nothing for empty text, so it can mount mid-stream. The caret stays OUTSIDE
+                  it: it is chrome, not content, and must not be re-parsed on every token. */}
               <div className="font-mono text-xs font-semibold uppercase tracking-wide text-teal700">TL;DR</div>
-              <p className="mt-1 text-[13.5px] leading-relaxed text-ink900">
-                {sections['TL;DR'] || (streaming && !text ? 'Reading the numbers…' : sections['TL;DR'])}
+              <div className="mt-1 text-[13.5px] leading-relaxed text-ink900">
+                {sections['TL;DR'] ? (
+                  <Markdown text={sections['TL;DR']} />
+                ) : streaming && !text ? (
+                  <p>Reading the numbers…</p>
+                ) : null}
                 {sections.Signals === '' && sections.Risks === '' ? caret : null}
-              </p>
+              </div>
               {sections.Signals ? (
                 <div className="mt-3 border-t border-line pt-2.5">
                   <div className="font-mono text-xs font-semibold uppercase tracking-wide text-status-ok">Signals</div>
-                  <div className="prose-sm mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-ink900">
-                    {sections.Signals}
+                  <div className="mt-1 text-[13px] leading-relaxed text-ink900">
+                    <Markdown text={sections.Signals} />
                     {sections.Risks === '' ? caret : null}
                   </div>
                 </div>
@@ -260,8 +276,8 @@ export function QualifyAiPanel({
               {sections.Risks ? (
                 <div className="mt-3 border-t border-line pt-2.5">
                   <div className="font-mono text-xs font-semibold uppercase tracking-wide text-status-danger">Risks</div>
-                  <div className="prose-sm mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-ink900">
-                    {sections.Risks}
+                  <div className="mt-1 text-[13px] leading-relaxed text-ink900">
+                    <Markdown text={sections.Risks} />
                     {caret}
                   </div>
                 </div>

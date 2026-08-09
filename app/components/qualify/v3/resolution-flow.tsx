@@ -4149,6 +4149,23 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
   const scopeByUser = props.answer?.scopeSource === 'user' && (props.answer?.snapshot?.payerOverridden ?? false);
   return (
     <div role="region" aria-labelledby="qualify-v3-flow-heading" className="flex flex-col gap-5">
+      {/* ── THE TREND STRIP, ABOVE THE HEADING (Alec, 2026-08-09) ─────────────────────────────────
+          It used to sit between the receipt and the stage. Moved so the two orientation strips read
+          as ONE band at the top of the page — "Policies on the Move" (mounted by page.tsx, above
+          this whole region) and then "Facilities Heating Up" — with "Qualify a client" beginning the
+          part of the screen the operator acts on. Policies, then places, then the question.
+
+          EVERYTHING THAT MADE THIS A SINGLE UNCONDITIONAL CALL SITE STILL HOLDS: one mount for all
+          four stages (2026-08-07 directive), outside `[data-v3-stage]` so the shell's entrance tween
+          never touches it, and no per-stage branch that could unmount it and reset the marquee's
+          scroll position on every click. Moving it UP strengthens that — it is now further from the
+          animated subtree, not closer.
+
+          It precedes the `<h1>` that labels this region, which is deliberate and not a naming bug:
+          the strip carries its own `aria-label`ed section, so AT announces it as its own landmark
+          rather than as unlabelled content under the heading. ── */}
+      {props.ticker}
+
       <h1 id="qualify-v3-flow-heading" className="font-head text-2xl font-semibold tracking-tight text-ink900">
         Qualify a client
       </h1>
@@ -4243,9 +4260,6 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
           scopeByUser={scopeByUser}
         />
       ) : null}
-
-      {/* ALL FOUR STAGES, one persistent mount (2026-08-07 directive — see `ticker`'s doc above). */}
-      {props.ticker}
 
       <div data-v3-stage>
         {props.stage === 'identify' ? (

@@ -235,6 +235,104 @@ test('an applied-but-empty table reads available:true with empty items — the d
   assert.deepEqual(res, { available: true, asOf: null, deltaDays: 90, items: [] });
 });
 
+// ── display enrichment (2026-08-09): the readable prefix + the kind/place context ────────────────
+//
+// Both legs are OPTIONAL deps and both must FAIL SOFT. The tape is orientation, never the answer —
+// a strip that vanishes because a caption failed is strictly worse than a strip with worse captions.
+
+test('enrichment fills the prefix and the context, keyed per (token, payer)', async () => {
+  const tokenA = 'a'.repeat(64);
+  const tokenB = 'b'.repeat(64);
+  const res = await getQualifyPolicyTapeCore({
+    requirePrincipal: GATE_OK,
+    loadTape: async () => [
+      tapeRow({ member_id_prefix_bidx: tokenA, primary_payer: 'AETNA' }),
+      tapeRow({ member_id_prefix_bidx: tokenB, primary_payer: 'CIGNA' }),
+    ],
+    resolvePrefixes: () => new Map([[tokenA, 'GGS']]),
+    loadContext: async () => [
+      { token: tokenA, payer: 'AETNA', careSetting: 'IP', area: 'Sacramento, CA', facilityCount: 1 },
+      { token: tokenB, payer: 'CIGNA', careSetting: 'OP', area: null, facilityCount: 3 },
+    ],
+    deltaDays: 90,
+  });
+  assert.equal(res.items[0]!.prefix, 'GGS');
+  assert.equal(res.items[0]!.area, 'Sacramento, CA');
+  assert.equal(res.items[0]!.careSetting, 'IP');
+  assert.equal(res.items[0]!.facilityCount, 1);
+  // Token B resolved no prefix — null, never a guess or the other row's label.
+  assert.equal(res.items[1]!.prefix, null);
+  assert.equal(res.items[1]!.careSetting, 'OP');
+  assert.equal(res.items[1]!.facilityCount, 3);
+});
+
+test('CONTEXT IS KEYED ON THE PAIR, not the token — same prefix under two payers cannot cross-fill', async () => {
+  // A prefix genuinely appears under several payers (the tape's rows ARE pairs). Keying on the token
+  // alone would give both rows the first pair's facility and area.
+  const token = 'c'.repeat(64);
+  const res = await getQualifyPolicyTapeCore({
+    requirePrincipal: GATE_OK,
+    loadTape: async () => [
+      tapeRow({ member_id_prefix_bidx: token, primary_payer: 'AETNA' }),
+      tapeRow({ member_id_prefix_bidx: token, primary_payer: 'CIGNA' }),
+    ],
+    loadContext: async () => [
+      { token, payer: 'AETNA', careSetting: 'IP', area: 'Nashville, TN', facilityCount: 1 },
+      { token, payer: 'CIGNA', careSetting: 'OP', area: 'Sacramento, CA', facilityCount: 1 },
+    ],
+    deltaDays: 90,
+  });
+  assert.equal(res.items[0]!.area, 'Nashville, TN');
+  assert.equal(res.items[1]!.area, 'Sacramento, CA');
+});
+
+test('FAIL SOFT: a throwing prefix resolver costs the labels, never the rows', async () => {
+  const res = await getQualifyPolicyTapeCore({
+    requirePrincipal: GATE_OK,
+    loadTape: async () => [tapeRow()],
+    resolvePrefixes: () => {
+      throw new Error('INDEX_HMAC_KEY is not set');
+    },
+    deltaDays: 90,
+  });
+  assert.equal(res.items.length, 1, 'the strip still renders');
+  assert.equal(res.items[0]!.prefix, null);
+  assert.equal(res.items[0]!.tokenTail, 'ffffff', 'and degrades to the masked handle it shipped with');
+});
+
+test('FAIL SOFT: a failing context read costs the captions, never the rows', async () => {
+  const res = await getQualifyPolicyTapeCore({
+    requirePrincipal: GATE_OK,
+    loadTape: async () => [tapeRow()],
+    loadContext: async () => {
+      throw new Error('42501');
+    },
+    deltaDays: 90,
+  });
+  assert.equal(res.items.length, 1);
+  assert.equal(res.items[0]!.careSetting, null);
+  assert.equal(res.items[0]!.area, null);
+  assert.equal(res.items[0]!.facilityCount, 0);
+});
+
+test('with NEITHER enrichment dep the contract still fills every new field — no undefined on the wire', async () => {
+  // The deps are optional, so an older caller must produce a COMPLETE item. `undefined` here would
+  // pass `x !== null` at every render site in this app — the trap that has bitten this build before.
+  const res = await getQualifyPolicyTapeCore({
+    requirePrincipal: GATE_OK,
+    loadTape: async () => [tapeRow()],
+    deltaDays: 90,
+  });
+  const item = res.items[0]!;
+  assert.equal(item.prefix, null);
+  assert.equal(item.careSetting, null);
+  assert.equal(item.area, null);
+  assert.equal(item.facilityCount, 0);
+  for (const key of ['prefix', 'careSetting', 'area'] as const) {
+    assert.ok(key in item && item[key] === null, `${key} must be explicitly null, never absent`);
+  }
+});
+
 test('rows map to the contract; a corrupt stored band is recomputed from the number', async () => {
   const res = await getQualifyPolicyTapeCore({
     requirePrincipal: GATE_OK,

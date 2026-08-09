@@ -45,11 +45,38 @@ export interface QualifyPolicyTapeItem {
   /** The pair's identity — the keyed-HMAC prefix token (doctrine: not PHI, safe on this gated
    *  surface). Future lane-open actions key on it. */
   token: string;
-  /** Last 6 hex chars — the masked display handle when no echo is on file ("⋯8841" idiom). */
+  /** Last 6 hex chars — the masked display handle of LAST resort, when neither `prefix` nor `echo`
+   *  resolves. Alec's 2026-08-09 note ("the user doesn't know what these characters mean") is about
+   *  this field being the only handle the strip had. */
   tokenTail: string;
   /** The operator-typed <=3-char prefix echo, when one is on file (0093 seam) — else null. */
   echo: string | null;
+  /**
+   * THE READABLE HANDLE — the 3-character alpha prefix behind `token`, resolved in-process by
+   * `prefixLabel.ts`, or null when the prefix falls outside that resolver's candidate alphabet.
+   *
+   * Distinct from `echo` on purpose even though both hold the same KIND of string: `echo` is a
+   * recorded fact ("somebody searched this"), `prefix` is a derivation. Keeping them apart means the
+   * UI can prefer the recorded one and the tape does not have to pretend a derived label was typed.
+   */
+  prefix: string | null;
   payer: string;
+  /**
+   * WHAT KIND OF POLICY THIS IS, AND WHERE — the dimensions the nightly snapshot does not store,
+   * joined at read time for the ≤20 tokens on the strip (`buildPolicyTapeContextQuery`).
+   *
+   * All three describe the pair's DOMINANT facility — the one carrying the most claim lines in the
+   * window — not an average across its facilities. `facilityCount > 1` is what tells the UI the pair
+   * is wider than the one place it names, so a two-state policy is never rendered as a one-state fact.
+   * Null throughout when the context read found nothing (a pair whose claims fell outside the window,
+   * an unmapped facility): the UI drops the clause rather than inventing one.
+   */
+  careSetting: 'IP' | 'OP' | 'BOTH' | null;
+  /** "City, ST" for the dominant facility, via facilityLocations.ts — null when unmapped (four
+   *  facilities have no address on file) or when there is no context row. */
+  area: string | null;
+  /** How many distinct facilities the pair billed at in the window. 0 when there is no context. */
+  facilityCount: number;
   ratingNow: number;
   bandNow: QualifyIqBand | null;
   ratingThen: number;
@@ -171,7 +198,33 @@ export interface QualifyBoardDeps {
   requirePrincipal: () => Promise<{ ok: true } | { ok: false; error: string }>;
   /** Tape rows from the loader; null = the history table is absent/unapplied (fail-soft). */
   loadTape: () => Promise<QualifyPolicyTapeRow[] | null>;
+  /**
+   * The readable prefix per token (`prefixLabel.ts`), and the dimension context per (token, payer).
+   * BOTH ARE OPTIONAL AND BOTH FAIL SOFT TO ABSENT, which is the point: they are display enrichment
+   * on a strip that is orientation, never the answer. A resolver that throws (a missing
+   * INDEX_HMAC_KEY) or a context read that fails must cost the tape its labels, never its rows —
+   * the binder catches and omits, and every item degrades to the masked tail it shipped with.
+   */
+  resolvePrefixes?: (tokens: readonly string[]) => Map<string, string>;
+  loadContext?: (tokens: readonly string[]) => Promise<QualifyPolicyTapeContext[]>;
   deltaDays: number;
+}
+
+/** One (token, payer) context row, already crosswalked to a display area by the binder. */
+export interface QualifyPolicyTapeContext {
+  token: string;
+  payer: string;
+  careSetting: 'IP' | 'OP' | 'BOTH' | null;
+  area: string | null;
+  facilityCount: number;
+}
+
+/** The pair key. A literal control character, matching the facilityKey precedent in this repo — a
+ *  separator that cannot occur inside a hex token or a payer label. */
+const TAPE_PAIR_SEP = '';
+
+export function tapePairKey(token: string, payer: string): string {
+  return `${token}${TAPE_PAIR_SEP}${payer}`;
 }
 
 const TAPE_BANDS: ReadonlySet<string> = new Set(['65', '50', '30', '15', '0']);
@@ -184,11 +237,35 @@ export async function getQualifyPolicyTapeCore(deps: QualifyBoardDeps): Promise<
   const rows = await deps.loadTape();
   if (rows === null) return { available: false, asOf: null, deltaDays: deps.deltaDays, items: [] };
 
+  // ── DISPLAY ENRICHMENT, FAIL-SOFT ON BOTH LEGS (2026-08-09) ──────────────────────────────────
+  // Neither of these may cost the tape its rows. A missing INDEX_HMAC_KEY, a context read that
+  // errors, an unapplied index — each degrades the strip to the handles it already had, which is a
+  // worse label and a working surface. The alternative is a strip that disappears because a caption
+  // failed, on a surface whose whole contract is "orientation, never the answer".
+  const tokens = [...new Set(rows.map((r) => r.member_id_prefix_bidx))];
+  let prefixes = new Map<string, string>();
+  try {
+    prefixes = deps.resolvePrefixes?.(tokens) ?? prefixes;
+  } catch {
+    // The resolver's only throw is a missing/malformed key — a deployment fault, not a data one.
+    console.error('qualify policy tape: prefix labels unavailable — falling back to masked handles');
+  }
+  const context = new Map<string, QualifyPolicyTapeContext>();
+  try {
+    for (const c of (await deps.loadContext?.(tokens)) ?? []) context.set(tapePairKey(c.token, c.payer), c);
+  } catch {
+    console.error('qualify policy tape: context read failed — rendering without care setting or area');
+  }
+
   const items: QualifyPolicyTapeItem[] = rows.map((r) => ({
     token: r.member_id_prefix_bidx,
     tokenTail: r.token_tail,
     echo: r.echo,
+    prefix: prefixes.get(r.member_id_prefix_bidx) ?? null,
     payer: r.primary_payer,
+    careSetting: context.get(tapePairKey(r.member_id_prefix_bidx, r.primary_payer))?.careSetting ?? null,
+    area: context.get(tapePairKey(r.member_id_prefix_bidx, r.primary_payer))?.area ?? null,
+    facilityCount: context.get(tapePairKey(r.member_id_prefix_bidx, r.primary_payer))?.facilityCount ?? 0,
     ratingNow: r.rating_now,
     // Recompute the band from the number rather than trusting stored text — the two cannot drift.
     bandNow: TAPE_BANDS.has(r.band_now ?? '') ? (r.band_now as QualifyIqBand) : iqBandOf(r.rating_now),

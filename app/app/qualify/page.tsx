@@ -17,6 +17,7 @@ import { qualifyMaintenanceBlocks } from '@/lib/qualify/maintenance';
 import { qualifyV3FlowEnabled } from '@/lib/qualify/v3Flags';
 import { QualifyTab } from '@/components/qualify/qualify-tab';
 import { ResolutionFlowClient } from '@/components/qualify/v3/resolution-flow-client';
+import { PolicyTapeMount } from '@/components/qualify/policy-tape-mount';
 
 export const metadata: Metadata = { title: 'Qualify | CMD Billing' };
 
@@ -56,7 +57,18 @@ export default async function QualifyPage() {
   // Authorization is re-checked inside the action by requireQualifyPrincipal; this page gate is the
   // routing mirror, not the control.
   if (qualifyV3FlowEnabled()) {
-    return <ResolutionFlowClient viewerHasAmountsCapability={viewerHasAmountsCapability} />;
+    // The policy tape sits ABOVE the flow and owns its own fetch, so it adds no latency to the
+    // page and no state to the flow shell. It renders as ABSENT (not as an empty bar) whenever
+    // there is nothing to show, so a quiet book costs no vertical space. Its own <main> matches
+    // the flow's chrome — the route layout supplies none.
+    return (
+      <>
+        <div className="mx-auto max-w-[1680px] px-6 pt-6 sm:px-8 sm:pt-8">
+          <PolicyTapeMount />
+        </div>
+        <ResolutionFlowClient viewerHasAmountsCapability={viewerHasAmountsCapability} />
+      </>
+    );
   }
 
   return (

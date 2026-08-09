@@ -459,7 +459,7 @@ test('mobile heating-up chips — facility-shaped with rating, Δpts, and the DE
     },
   ];
   const html = renderToStaticMarkup(<HeatingUp trends={trends} window={trailingWindow(30)} onOpen={() => {}} />);
-  assert.ok(html.includes('Facilities Heating Up'), 'facility-shaped module title');
+  assert.ok(html.includes('Facility Momentum'), 'facility-shaped module title');
   assert.ok(html.includes('SUMMIT RIDGE RECOVERY'), 'facility name renders');
   assert.ok(html.includes('210 claim lines'), 'Change A: n defined as claim lines on mobile too');
   assert.ok(!/\bn=\d/.test(html), 'no bare n=');
