@@ -27,7 +27,11 @@ function item(over: Partial<QualifyPolicyTapeItem> = {}): QualifyPolicyTapeItem 
     token: TOKEN,
     tokenTail: TOKEN.slice(-6),
     echo: null,
+    prefix: null,
     payer: 'AETNA US HEALTHCARE',
+    careSetting: null,
+    area: null,
+    facilityCount: 0,
     ratingNow: 35,
     bandNow: '30',
     ratingThen: 19,
@@ -78,6 +82,103 @@ test('the RAW token never reaches the DOM — masked tail when there is no echo'
   assert.doesNotMatch(html, new RegExp(TOKEN));
   // a short masked handle instead
   assert.match(html, /⋯ffff/);
+});
+
+// ── the readable handle + the kind/place clause (2026-08-09) ─────────────────────────────────────
+
+test('THE REPORTED BUG: a resolved prefix replaces the meaningless ⋯hex handle', () => {
+  const html = renderToStaticMarkup(
+    <PolicyTapeStrip items={[item({ prefix: 'GGS' })]} asOf="2026-08-08" deltaDays={90} />,
+  );
+  assert.match(html, />GGS</);
+  assert.doesNotMatch(html, /⋯/, 'the masked tail is the LAST fallback, not a companion');
+});
+
+test('a RECORDED echo outranks a DERIVED prefix — the operator sees what the system recorded', () => {
+  const html = renderToStaticMarkup(
+    <PolicyTapeStrip items={[item({ echo: 'ECH', prefix: 'GGS' })]} asOf="2026-08-08" deltaDays={90} />,
+  );
+  assert.match(html, />ECH</);
+  assert.doesNotMatch(html, />GGS</);
+});
+
+test('with neither, the masked tail still renders — the strip never shows a blank handle', () => {
+  const html = renderToStaticMarkup(
+    <PolicyTapeStrip items={[item({ echo: null, prefix: null })]} asOf="2026-08-08" deltaDays={90} />,
+  );
+  assert.match(html, /⋯ffff/);
+});
+
+test('the kind-and-place clause renders care setting AND area for a single-facility policy', () => {
+  const html = renderToStaticMarkup(
+    <PolicyTapeStrip
+      items={[item({ careSetting: 'IP', area: 'Sacramento, CA', facilityCount: 1 })]}
+      asOf="2026-08-08"
+      deltaDays={90}
+    />,
+  );
+  assert.match(html, /IP · Sacramento, CA/);
+});
+
+test('a MULTI-facility policy replaces the area with the count — one city is not the policy', () => {
+  // The area is ONE facility's city (the dominant one). Printing it beside a policy treated in three
+  // places states a fact about the facility as though it were a fact about the policy.
+  const html = renderToStaticMarkup(
+    <PolicyTapeStrip
+      items={[item({ careSetting: 'OP', area: 'Sacramento, CA', facilityCount: 3 })]}
+      asOf="2026-08-08"
+      deltaDays={90}
+    />,
+  );
+  assert.match(html, /OP · 3 facilities/);
+  assert.doesNotMatch(html, /Sacramento/, 'the dominant city must not stand in for a spread policy');
+});
+
+test('no context at all renders NO clause — never an em-dash placeholder', () => {
+  const html = renderToStaticMarkup(
+    <PolicyTapeStrip
+      items={[item({ careSetting: null, area: null, facilityCount: 0 })]}
+      asOf="2026-08-08"
+      deltaDays={90}
+    />,
+  );
+  assert.doesNotMatch(html, /—|·\s*·/, 'a strip of dashes teaches the eye to skip the slot');
+});
+
+test('WITHOUT onExplain every card is inert — no button, no tab stop', () => {
+  const html = renderToStaticMarkup(
+    <PolicyTapeStrip items={[item()]} asOf="2026-08-08" deltaDays={90} />,
+  );
+  assert.doesNotMatch(html, /<button/, 'the shipped read-only strip must stay read-only');
+});
+
+test('WITH onExplain each card is a button carrying ONE accessible name for the whole card', () => {
+  const html = renderToStaticMarkup(
+    <PolicyTapeStrip
+      items={[item({ prefix: 'GGS', careSetting: 'IP', area: 'Sacramento, CA', facilityCount: 1 })]}
+      asOf="2026-08-08"
+      deltaDays={90}
+      onExplain={() => {}}
+    />,
+  );
+  assert.match(html, /<button/);
+  // The name must carry the policy, its numbers AND the movement — five adjacent spans read as five
+  // unrelated fragments otherwise, with the delta detached from what moved.
+  assert.match(html, /aria-label="GGS, AETNA US HEALTHCARE, IP · Sacramento, CA\. Rating 35, up 16 points over 90 days\. Explain this move\."/);
+});
+
+test('the PRESSED card is the one being explained, and only the real half advertises it', () => {
+  const html = renderToStaticMarkup(
+    <PolicyTapeStrip
+      items={[item()]}
+      asOf="2026-08-08"
+      deltaDays={90}
+      onExplain={() => {}}
+      explainingKey={`${'f'.repeat(64)}-AETNA US HEALTHCARE`}
+    />,
+  );
+  assert.match(html, /aria-pressed="true"/);
+  assert.equal(html.split('aria-pressed').length - 1, 1, 'exactly one pressed claim reaches AT');
 });
 
 test('a recorded echo is shown in place of the tail', () => {

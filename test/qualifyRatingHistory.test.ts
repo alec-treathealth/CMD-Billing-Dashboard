@@ -18,6 +18,7 @@ import {
   addDaysIso,
   buildMissingAsOfDatesQuery,
   buildPolicyTapeQuery,
+  buildPolicyTapeContextQuery,
   buildRatingDailyUpsert,
   buildRatingHistoryAggQuery,
   runQualifyRatingHistory,
@@ -31,6 +32,7 @@ import {
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../src/tenants.js';
 
 const ENTITY_IDS = [BXR_ENTITY_ID, INDIGO_ENTITY_ID];
+const BOTH = ENTITY_IDS;
 
 // ── date helper ──────────────────────────────────────────────────────────────────────────────────
 
@@ -141,6 +143,48 @@ test('buildPolicyTapeQuery: bounded params, member floor, and a NON-DOLLAR proje
   // clamps
   const clamped = buildPolicyTapeQuery({ deltaDays: 999999, minMembers: -5, limit: 5000 });
   assert.deepEqual(clamped.params, [3650, 0, 100]);
+});
+
+/**
+ * SELECTION vs DISPLAY ORDER (Alec, 2026-08-09: "The ratings should be in order, keep the title").
+ *
+ * These are two different orderings and the test exists because collapsing them is the tempting,
+ * wrong fix: ordering the LIMIT by rating would quietly turn "Policies on the Move" into a
+ * leaderboard of well-rated policies, most of which have not moved. The inner query still picks the
+ * biggest movers; only the outer read order changed.
+ */
+test('buildPolicyTapeQuery: SELECTS by movement, DISPLAYS by rating — the limit stays on the mover order', () => {
+  const { sql } = buildPolicyTapeQuery();
+  const limitAt = sql.indexOf('limit $3::int');
+  const moverOrderAt = sql.indexOf('order by abs(cur.rating - prev.rating) desc');
+  const displayOrderAt = sql.lastIndexOf('order by movers.rating_now desc');
+  assert.ok(moverOrderAt > -1, 'the mover ordering must survive — it is what the title claims');
+  assert.ok(moverOrderAt < limitAt, 'the LIMIT applies to the mover ordering, not to the rating one');
+  assert.ok(displayOrderAt > limitAt, 'the rating ordering is applied AFTER the cut, to the twenty kept');
+  // and the tiebreak still separates equal ratings by how far they moved
+  assert.match(sql, /order by movers\.rating_now desc, abs\(movers\.delta_pts\) desc/);
+});
+
+test('buildPolicyTapeContextQuery: tenant-scoped, token-bounded, and NO dollar or member column', () => {
+  const q = buildPolicyTapeContextQuery(BOTH, ['tok1', 'tok2'], '2026-05-11', '2026-08-10');
+  assert.match(q.sql, /business_entity_id = any\(\$1::uuid\[\]\)/, 'tenant predicate present');
+  assert.match(q.sql, /member_id_prefix_bidx = any\(\$2::text\[\]\)/, 'bounded to the strip’s own tokens');
+  assert.match(q.sql, /payment_received >= \$3::date and payment_received < \$4::date/, 'half-open window');
+  assert.deepEqual(q.params, [BOTH, ['tok1', 'tok2'], '2026-05-11', '2026-08-10']);
+  assert.throws(
+    () => buildPolicyTapeContextQuery([], ['tok1'], '2026-05-11', '2026-08-10'),
+    /entityIds required/,
+    'an unscoped read must be impossible, like every other Qualify query',
+  );
+  // ⚠ member_id_bidx is the PATIENT token. It is not needed here and must never be projected —
+  // this read is about facilities, and a dimension query is exactly where one gets added by accident.
+  assert.doesNotMatch(q.sql, /member_id_bidx/, 'the patient blind index must not appear at all');
+  assert.doesNotMatch(q.sql, /charge_amount|allowed|insurance_payments|paid/, 'non-dollar by construction');
+  // The dominant facility is picked by CLAIM LINES, and the facility spread rides a window function
+  // (evaluated before DISTINCT ON) so the count survives the row that DISTINCT ON keeps.
+  assert.match(q.sql, /distinct on \(token, payer\)/);
+  assert.match(q.sql, /order by token, payer, lines desc nulls last/);
+  assert.match(q.sql, /count\(\*\) over \(partition by token, payer\)::int as facility_count/);
 });
 
 // ── orchestration fakes ──────────────────────────────────────────────────────────────────────────

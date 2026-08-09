@@ -61,30 +61,101 @@ function DeltaText({ deltaPts }: { deltaPts: number }) {
   );
 }
 
-/** What the operator reads as the policy's handle: the recorded echo, else the opaque token tail. */
+/**
+ * THE HANDLE — what the operator reads as this policy's name, best available first.
+ *
+ * Alec, 2026-08-09: *"showing '⋯820b' but the user doesn't know what these characters mean."* He was
+ * looking at the LAST fallback, because it was the only branch that could fire: the echo table is
+ * empty and nothing else resolved a label. `prefix` (derived in-process from the token — see
+ * prefixLabel.ts) now fills that gap for every prefix in [A-Z0-9].
+ *
+ * ORDER, and why: a RECORDED echo wins over a DERIVED prefix even though both hold the same kind of
+ * string. They can only ever disagree if the recording is wrong, and if that day comes the operator
+ * should see what the system actually recorded, not a value this process re-computed.
+ */
 function handleOf(item: QualifyPolicyTapeItem): string {
-  return item.echo ?? `⋯${item.tokenTail.slice(-4)}`;
+  return item.echo ?? item.prefix ?? `⋯${item.tokenTail.slice(-4)}`;
+}
+
+/**
+ * THE KIND-AND-PLACE CLAUSE — "IP · Sacramento, CA", "OP · 3 facilities", or nothing at all.
+ *
+ * Answers the second half of Alec's ask ("another unique identifier that tells the user what kind of
+ * policy it is, area would also help") from the dominant facility behind the pair.
+ *
+ * ⚠ THE AREA IS SUPPRESSED WHEN THE PAIR SPANS FACILITIES, and that is the honest reading rather than
+ * a layout choice. `area` is ONE facility's city — the one carrying the most claim lines — so
+ * printing it beside a policy whose members were treated in three places states a fact about the
+ * facility as though it were a fact about the policy. The count replaces it and says the true thing:
+ * this policy is treated in several places. Care setting survives the spread because it is the same
+ * question ("what kind of care does this policy buy") at either width, and the dominant facility is a
+ * fair answer to it.
+ */
+function kindAndPlaceOf(item: QualifyPolicyTapeItem): string | null {
+  const parts: string[] = [];
+  if (item.careSetting !== null) parts.push(item.careSetting === 'BOTH' ? 'IP+OP' : item.careSetting);
+  if (item.facilityCount > 1) parts.push(`${item.facilityCount} facilities`);
+  else if (item.area !== null) parts.push(item.area);
+  return parts.length > 0 ? parts.join(' · ') : null;
 }
 
 export const PolicyTapeStrip = memo(function PolicyTapeStrip({
   items,
   asOf,
   deltaDays,
+  onExplain,
+  explainingKey = null,
 }: {
   items: readonly QualifyPolicyTapeItem[];
   asOf: string | null;
   deltaDays: number;
+  /**
+   * ASK THE MODEL WHY THIS MOVED (2026-08-09). Optional: without it every item renders inert, which
+   * is the state this component's header describes as "READ-ONLY BY CONSTRUCTION" — that rule is not
+   * being broken, it is being retired on the terms it set for itself ("When there is a seed path,
+   * this becomes buttons in one deliberate change"). There is now somewhere for a click to go.
+   */
+  onExplain?: (item: QualifyPolicyTapeItem) => void;
+  /** `${token}-${payer}` of the item whose explanation is open — renders that card pressed. */
+  explainingKey?: string | null;
 }) {
   // Hook before any early return (rules of hooks). resetKey is the snapshot date: a new night's
-  // data reads from the left.
-  const { ref: scrollRef, isOverflowing } = useMarquee<HTMLUListElement>(asOf, items.length);
+  // data reads from the left. `pinned` while an explanation is open: the strip must not scroll the
+  // card the operator is reading about out from under them.
+  const { ref: scrollRef, isOverflowing } = useMarquee<HTMLUListElement>(
+    asOf,
+    items.length,
+    explainingKey !== null,
+  );
   if (items.length === 0) return null;
 
   const item = (p: QualifyPolicyTapeItem, dup: boolean) => {
     const band = p.bandNow ?? '0';
+    const key = `${p.token}-${p.payer}`;
+    const clause = kindAndPlaceOf(p);
+    const move = p.deltaPts > 0 ? `up ${p.deltaPts}` : p.deltaPts < 0 ? `down ${Math.abs(p.deltaPts)}` : 'flat';
+    // ONE accessible name for the whole card, on the interactive element — otherwise AT reads five
+    // adjacent spans as five unrelated fragments and the movement arrives detached from the policy.
+    const label =
+      `${handleOf(p)}, ${p.payer}${clause ? `, ${clause}` : ''}. ` +
+      `Rating ${p.ratingNow}, ${move} points over ${deltaDays} days.` +
+      (onExplain ? ' Explain this move.' : '');
+    const body = (
+      <>
+        <span className="font-mono text-xs font-medium tracking-wide text-white">{handleOf(p)}</span>
+        <span className="max-w-[168px] truncate text-xs text-white/60">{p.payer}</span>
+        {/* The kind-and-place clause. Absent entirely when the context read gave nothing, rather than
+            rendered as an em-dash placeholder — a strip of dashes teaches the eye to skip the slot. */}
+        {clause ? <span className="whitespace-nowrap text-xs text-white/45">{clause}</span> : null}
+        <span className="font-mono text-[15px] font-semibold" style={{ color: IQ_BAND_HEX[band] }}>
+          {p.ratingNow}
+        </span>
+        <DeltaText deltaPts={p.deltaPts} />
+      </>
+    );
     return (
       <li
-        key={dup ? `dup-${p.token}-${p.payer}` : `${p.token}-${p.payer}`}
+        key={dup ? `dup-${key}` : key}
         // The duplicate half is decorative — AT and the tab order see each policy exactly once.
         aria-hidden={dup || undefined}
         // `.q-marquee [data-dup='true']` is how reduced-motion hides the decorative half: the hook
@@ -92,14 +163,31 @@ export const PolicyTapeStrip = memo(function PolicyTapeStrip({
         // reduced-motion user would scroll past every policy twice. aria-hidden alone does not do it
         // — it hides the duplicate from AT, not from eyes.
         data-dup={dup ? 'true' : undefined}
-        className="flex flex-none items-baseline gap-2.5 border-r border-white/10 px-5"
+        className="flex flex-none border-r border-white/10"
       >
-        <span className="font-mono text-xs font-medium tracking-wide text-white">{handleOf(p)}</span>
-        <span className="max-w-[168px] truncate text-xs text-white/60">{p.payer}</span>
-        <span className="font-mono text-[15px] font-semibold" style={{ color: IQ_BAND_HEX[band] }}>
-          {p.ratingNow}
-        </span>
-        <DeltaText deltaPts={p.deltaPts} />
+        {onExplain ? (
+          <button
+            type="button"
+            // Only the REAL card is interactive; the decorative duplicate must never advertise state
+            // or take a tab stop (the heating-ticker's rule, applied here for the same reason).
+            aria-pressed={dup ? undefined : explainingKey === key}
+            tabIndex={dup ? -1 : undefined}
+            aria-label={label}
+            onClick={() => onExplain(p)}
+            className={[
+              'flex items-baseline gap-2.5 px-5 py-0.5 text-left transition-colors',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/70',
+              explainingKey === key ? 'bg-white/15' : 'hover:bg-white/10',
+            ].join(' ')}
+          >
+            {body}
+          </button>
+        ) : (
+          // Inert: no aria-label here. A name on a plain <span> is ignored by most AT (it is only
+          // honoured on interactive or role-bearing elements), so adding one would look like an
+          // accessibility improvement and be nothing. The spans read in order, as they shipped.
+          <span className="flex items-baseline gap-2.5 px-5">{body}</span>
+        )}
       </li>
     );
   };

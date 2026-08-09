@@ -93,7 +93,65 @@ export const QUALIFY_AI_QUESTIONS = [
   'plantype',
   'funding',
   'network',
+  // 2026-08-09 — the two ticker questions. Not chips: they fire from a click on a strip card, and
+  // each is answered from `ticker` below rather than from `facilities`/`policy`.
+  'tape_move',
+  'trend_move',
 ] as const;
+
+/**
+ * ONE TICKER CARD, as the model may see it (2026-08-09). Alec: *"If a user clicks on any one of the
+ * tickers, they should be able to receive an AI response that explains the meaning behind why the
+ * ticker has the rating that it has, using the data it has on hand."*
+ *
+ * ⚠ THE POLICY HANDLE IS ABSENT ON PURPOSE, AND THIS IS THE FILE'S OLDEST RULE. The header above:
+ * *"NO IDENTIFIERS, structurally: no member id, no prefix (not even the ≤3-char echo)."* The policy
+ * tape now RENDERS a readable alpha prefix (prefixLabel.ts) — and it still must not cross this line.
+ * There is no field here that can carry it: a policy card is described to the model by its payer, its
+ * care setting, its area and its numbers, which is everything needed to explain a MOVE and nothing
+ * that identifies whose policy moved. `facilityName` exists because a facility name is an allowlisted
+ * rollup dimension the model already receives in `facilities[]`; a prefix is not.
+ *
+ * Non-dollar like every other shape in this file, so blind parity stays structural.
+ */
+const tickerSchema = z
+  .object({
+    /** Which strip was clicked. 'policy' = a (prefix, payer) pair on the tape; 'facility' = a card on
+     *  the momentum strip. The two have genuinely different explanations available, so the framing
+     *  and the honesty rules branch on it rather than pretending one shape fits both. */
+    kind: z.enum(['policy', 'facility']),
+    /** Facility mode only — the allowlisted dimension name. NULL in policy mode (see the ⚠ above). */
+    facilityName: short(120).nullable(),
+    /** The billed-under label. Present on a tape card (the pair IS a payer); on a facility card it is
+     *  the DOMINANT payer by allowed dollars, which is a mix statement, not the only payer there. */
+    payer: short(120).nullable(),
+    careSetting: z.enum(['IP', 'OP', 'BOTH']).nullable(),
+    /** "City, ST" of the facility this card is about (or the pair's dominant facility). Non-PHI: a
+     *  facility's own address, from the operator-provided location sheets. */
+    area: short(80).nullable(),
+    /** How many facilities the pair touched in the window. 0 = unknown, 1 = the area is the whole
+     *  story, >1 = `area` names only the dominant one and the model must not generalise from it. */
+    facilityCount: z.number().int().min(0).max(10_000),
+    ratingNow: z.number().min(0).max(100).nullable(),
+    /** The same rating one delta-window earlier. Null on a facility card with no prior window. */
+    ratingThen: z.number().min(0).max(100).nullable(),
+    deltaPts: z.number().min(-100).max(100).nullable(),
+    iqBand: z.enum(['65', '50', '30', '15', '0']).nullable(),
+    /** Distinct members behind a tape pair. 0 on a facility card, which counts patients differently
+     *  and reports them through `distinctPatients`. */
+    distinctMembers: z.number().int().min(0).max(1_000_000),
+    distinctPatients: z.number().int().min(0).max(1_000_000),
+    lineCount: z.number().int().min(0).max(100_000_000),
+    /** The rating window in days, and separately the delta horizon — they are NOT the same number on
+     *  the tape (a 90-day rating compared against the 90-day-earlier snapshot). */
+    windowDays: z.number().int().min(1).max(366),
+    deltaDays: z.number().int().min(1).max(3650),
+    /** Facility mode: the current window sliced into even sub-buckets, each a reliable allowed% —
+     *  the sparkline the operator is looking at. Thin buckets are already dropped upstream, never
+     *  fabricated, so a short array means thin evidence and not a shorter window. */
+    points: z.array(z.number().min(0).max(999)).max(24),
+  })
+  .strict();
 
 export const QualifyAiInputSchema = z
   .object({
@@ -132,6 +190,13 @@ export const QualifyAiInputSchema = z
     /** False when even 365d never reached the confident sample floor — the model must say so. */
     windowSufficient: z.boolean(),
     facilities: z.array(facilitySchema).max(10),
+    /**
+     * THE CLICKED TICKER CARD (2026-08-09) — present only for the two ticker questions, absent for
+     * every chip. OPTIONAL, so every caller written before this field keeps validating: the firewall
+     * is strict in both directions, and a hard reject here would kill Ask AI for the whole snapshot
+     * (the `payerCount: min(1)` lesson, recorded on facilitySchema).
+     */
+    ticker: tickerSchema.nullable().optional(),
     /** Amounts-blind viewer? Identical prompt either way (no dollars exist here); the flag only
      *  lets the model avoid phrases like "check the dollar figures" for a viewer who has none. */
     amountsBlind: z.boolean(),
@@ -140,9 +205,15 @@ export const QualifyAiInputSchema = z
 
 export type QualifyAiInput = z.infer<typeof QualifyAiInputSchema>;
 
-/** Chips only make sense with something to explain: at least one facility OR a found policy. */
+/**
+ * Something to explain: at least one facility, a found policy, OR a clicked ticker card.
+ *
+ * The ticker arm is its own: a strip card is clickable from the LANDING state, where there is no
+ * search, no resolved policy and no facility ranking — so requiring either of those would make the
+ * feature un-runnable exactly where Alec asked for it. A card carries its own numbers.
+ */
 export function isQualifyAiSufficient(input: QualifyAiInput): boolean {
-  return input.facilities.length > 0 || input.policy !== null;
+  return input.facilities.length > 0 || input.policy !== null || (input.ticker ?? null) !== null;
 }
 
 export const QUALIFY_AI_INSUFFICIENT_COPY =
@@ -195,6 +266,28 @@ const SYSTEM_PROMPT = [
   '  detail, or trends not present in the data. No dollar amounts exist in this data; never imply',
   '  the reader should "check the dollars" when amountsBlind is true.',
   '',
+  'When `ticker` is present, the reader clicked ONE card on a scrolling strip and wants to know what',
+  'its number means. Extra rules for that case, and they are the strict kind:',
+  '- The card is ALL you have about it. There is no facility ranking and usually no resolved policy',
+  '  behind a ticker click — do not refer to "the ranking above" or "the other facilities"; nothing',
+  '  else is on screen. Answer from the card.',
+  '- TWO SEPARATE FACTS: the LEVEL (ratingNow, iqBand) and the MOVE (deltaPts over deltaDays). A',
+  '  facility falling from 62 is not the same story as one climbing to 22, and a reader who only',
+  '  hears "up 8 points" will act on the wrong one. Say both.',
+  '- A MOVE IS NOT A TREND. These ratings are allowed-of-billed over a window, so a delta can come',
+  '  from genuinely better payment OR from the claim MIX changing — a few large reversals, a new',
+  '  service line, one slow claim finally paying. At small samples the second is more likely than the',
+  '  first. Name the mechanism as a possibility, never as a finding, and scale that hedge to the',
+  '  sample (distinctMembers / distinctPatients / lineCount): under ~10 members or patients say',
+  '  plainly that the move may be a handful of claims.',
+  '- facilityCount > 1 means `area` and careSetting describe only the DOMINANT facility behind the',
+  '  card, not the whole policy. Never state or imply the policy is treated only there.',
+  '- `points` is the current window in equal sub-buckets, oldest first, with thin buckets DROPPED —',
+  '  so a short array means thin evidence, not a shorter window, and gaps are not zeroes. Read shape',
+  '  (steady / recovering / slipping), never a per-bucket story.',
+  '- A tape card has no facility name and no identifier by design. Call it "this policy" — never',
+  '  guess whose it is, where it is, or what plan it is.',
+  '',
   'Output EXACTLY these three markdown sections, in this order, and nothing else:',
   '## TL;DR',
   'One or two sentences — the direct answer to the question asked.',
@@ -218,6 +311,16 @@ const QUESTION_FRAMING: Record<QualifyAiInput['question'], string> = {
   plantype: 'Question: NARROW PLAN (EPO/HMO) — is there a realistic path to payment? Read what the plan type means for access and authorization, using only the policy facts provided.',
   funding: "Question: WHO actually DECIDES this claim? Self-funded means the employer's administrator sets exceptions, not a payer rate sheet; fully insured means the carrier does. Read what that does to flexibility.",
   network: 'Question: WHAT does the NETWORK POSTURE mean for us here? Read INN/OON from the policy facts and what it implies for billing strength and denial risk — never guess a posture that is not provided.',
+  tape_move:
+    'Question: WHY does this POLICY carry the rating it carries, and what does its move mean? You have ' +
+    'one card from the "Policies on the Move" tape in `ticker`. Read the rating, the move, and the ' +
+    'evidence behind them (members, claim lines, window) — then say what an admissions rep should do ' +
+    'differently, if anything. A move is not a trend: name what could produce it at this sample size.',
+  trend_move:
+    'Question: WHY is this FACILITY rated where it is, and what is its trajectory? You have one card ' +
+    'from the "Facility Momentum" strip in `ticker`, including the sub-window sparkline in `points`. ' +
+    'Read the level and the direction as two separate facts — a facility can be falling from a strong ' +
+    'rating or rising toward a weak one, and only one of those is good news.',
 };
 
 /** Build the {system, user} messages for one explainer call. The user turn is the JSON aggregate. */

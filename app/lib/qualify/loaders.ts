@@ -28,8 +28,15 @@ import { buildRollupRefreshFreshnessQuery } from '../../../src/collections/rollu
 import type { QualifyTokenKind } from '../../../src/collections/qualifyQuery';
 import {
   buildPolicyTapeQuery,
+  buildPolicyTapeContextQuery,
+  QUALIFY_RATING_HISTORY_WINDOW_DAYS,
+  addDaysIso,
   type QualifyPolicyTapeRow,
+  type QualifyPolicyTapeContextRow,
 } from '../../../src/collections/qualifyRatingHistory';
+import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../../../src/tenants';
+import { facilityLocation } from './facilityLocations';
+import type { QualifyPolicyTapeContext } from './board';
 
 let executor: PgExecutor | null = null;
 /** Module-cached executor on a SEPARATE small claims_reader pool (the verisReaderPool precedent). */
@@ -248,4 +255,46 @@ export async function loadQualifyPolicyTape(): Promise<QualifyPolicyTapeRow[] | 
     }
     throw err;
   }
+}
+
+/**
+ * The tape's DIMENSION context (2026-08-09) — care setting + area + facility spread per (token,
+ * payer), for the ≤20 tokens the strip is about to render. See `buildPolicyTapeContextQuery` for why
+ * this is a second read rather than columns on the nightly snapshot, and for the measured cost.
+ *
+ * The window is the SAME 90 days the snapshot rated over (`QUALIFY_RATING_HISTORY_WINDOW_DAYS`), so
+ * the facility this names is the facility the rating was computed from. Anchored on TODAY rather than
+ * on the snapshot's as_of, which is deliberate and worth stating: the caption answers "where does
+ * this policy get treated", a present-tense operational question, while the rating answers "how did
+ * it pay over the rated window". Anchoring the caption a day back to match the snapshot would buy
+ * exact agreement on a question nobody is asking.
+ *
+ * NO try/catch HERE. The CORE owns the fail-soft (getQualifyPolicyTapeCore wraps this call), so a
+ * failure degrades the captions and keeps the rows. Catching here as well would hide the cause from
+ * the one place that logs it.
+ */
+export async function loadQualifyPolicyTapeContext(
+  tokens: readonly string[],
+): Promise<QualifyPolicyTapeContext[]> {
+  if (tokens.length === 0) return [];
+  const today = new Date().toISOString().slice(0, 10);
+  const q = buildPolicyTapeContextQuery(
+    [BXR_ENTITY_ID, INDIGO_ENTITY_ID],
+    tokens,
+    addDaysIso(today, -(QUALIFY_RATING_HISTORY_WINDOW_DAYS - 1)),
+    addDaysIso(today, 1),
+  );
+  const res = await qualifyV2Reader().query<QualifyPolicyTapeContextRow>(q.sql, q.params);
+  return res.rows.map((r) => {
+    // facilityLocations.ts is the ONLY source of geography in this system — collections.facilities
+    // carries no city/state. Unmapped codes return null and the UI drops the clause.
+    const loc = facilityLocation(r.facility_code);
+    return {
+      token: r.token,
+      payer: r.payer,
+      careSetting: r.care_setting,
+      area: loc && loc.state ? `${loc.city}, ${loc.state}` : null,
+      facilityCount: r.facility_count,
+    };
+  });
 }

@@ -431,7 +431,7 @@ test('F3a: threading the memoized payerGroups cannot change what deriveStage or 
 // supersedes it outright, and if it needs correcting that is a product call for him, not a technical
 // one. REWRITTEN, not deleted, so the reversal stays on record instead of vanishing from history.
 test('the trend ticker persists across ALL FOUR stages (2026-08-07 directive overturns IDENTIFY+ANSWER-only)', () => {
-  const ticker = <div data-testid="ticker-slot">Facilities Heating Up</div>;
+  const ticker = <div data-testid="ticker-slot">Facility Momentum</div>;
   const cases: Array<[FlowStage, QualifyResolution | null, Partial<ResolutionStagesProps>]> = [
     ['identify', null, {}],
     ['payer', fixture(), {}],
@@ -473,7 +473,7 @@ test('the trend ticker persists across ALL FOUR stages (2026-08-07 directive ove
     ['plan', fixture(), { payerPick: 'Aetna' }],
   ] as Array<[FlowStage, QualifyResolution | null, Partial<ResolutionStagesProps>]>) {
     const html = rungThrough(stage, r, false, over);
-    assert.match(html, /Facilities Heating Up/, `${stage}: the ticker rendered — otherwise the inert check below is vacuous`);
+    assert.match(html, /Facility Momentum/, `${stage}: the ticker rendered — otherwise the inert check below is vacuous`);
     assert.ok(!html.includes('Narrow the ranked list'), `${stage}: an inert ticker must not promise a narrow`);
     assert.match(html, /trend for orientation/, `${stage}: an inert card says what it is instead of promising a filter`);
   }
@@ -1129,13 +1129,13 @@ test('I9: no meaning-bearing text below 12px anywhere in the flow', () => {
     ['answer (skeleton)', 'answer', fixture(), {}, /Ranking facilities for this plan/],
     // The two branches the shell actually mounts on the landing. `readOnly` and the 60-day window
     // mirror production exactly (TICKER_WINDOW, resolution-flow-client.tsx:60).
-    ['identify + real ticker', 'identify', null, { ticker }, /Facilities Heating Up/],
+    ['identify + real ticker', 'identify', null, { ticker }, /Facility Momentum/],
     ['identify + ticker skeleton', 'identify', null, { ticker: <HeatingUpSkeleton /> }, /Loading trends/],
     // The 2026-08-07 directive put the (inert) strip on PAYER and PLAN too — markup this sweep never
     // saw before, because every case above it either predates the reversal or is the landing. Same
     // readOnly ticker as the identify case; different surrounding stage markup underneath it.
-    ['payer + inert ticker', 'payer', fixture(), { ticker }, /Facilities Heating Up/],
-    ['plan + inert ticker', 'plan', fixture(), { payerPick: 'Aetna', ticker }, /Facilities Heating Up/],
+    ['payer + inert ticker', 'payer', fixture(), { ticker }, /Facility Momentum/],
+    ['plan + inert ticker', 'plan', fixture(), { payerPick: 'Aetna', ticker }, /Facility Momentum/],
     // The answer stage with data — the branch the skeleton case above never reaches. Added
     // 2026-08-06 and green on arrival; it found nothing at the time, it is coverage, not a fix.
     ['answer + snapshot', 'answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture() }) }, /NASHVILLE MENTAL HEALTH/],
@@ -1203,7 +1203,7 @@ test('I9: no meaning-bearing text below 12px anywhere in the flow', () => {
         answer: answerProps({ snapshot: snapshotFixture() }),
         ticker: <HeatingUpCards trends={TRENDS} window={trailingWindow(60)} openAs="area" onOpen={noop} />,
       },
-      /Facilities Heating Up/,
+      /Facility Momentum/,
     ],
   ];
 

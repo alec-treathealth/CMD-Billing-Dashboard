@@ -72,6 +72,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ControlSelect, Pager } from '@/components/data-grid';
 import { MultiSelectTagPicker, type PickerOption } from '@/components/ui/multi-select-tag-picker';
+// The AI panel's prompt ASKS for markdown; this renders it as markup instead of printing `**`/`##`.
+import { Markdown } from '@/components/ui/markdown';
 import { PHI_MASK } from '@/lib/phi';
 import {
   loadCmdReport,
@@ -2000,26 +2002,23 @@ type AiState =
   | { kind: 'error' }
   | { kind: 'insufficient' };
 
-/** Render one parsed section (TL;DR as prose; Signals/Risks as bullets, tolerant of streaming text). */
+/**
+ * Render one parsed section of a streamed answer.
+ *
+ * ⚠ THIS USED TO HALF-PARSE THE MARKDOWN AND LOSE THE OTHER HALF (fixed 2026-08-09). It stripped a
+ * leading `-`/`*` off each line to fake a list, then printed the rest into `whitespace-pre-wrap` —
+ * so a bullet became a bullet and the `**AETNA**` inside it stayed literal asterisks, on the same
+ * line. The list-vs-prose branch was also decided by the section TITLE rather than by the content,
+ * so a TL;DR the model chose to bullet rendered as one run-on paragraph.
+ * <Markdown> replaces both halves with one scan (headings, both list kinds, bold/em/code) and no
+ * raw-HTML sink — see its header. Empty/whitespace bodies still render nothing.
+ */
 function AiSection({ title, body }: { title: string; body: string }) {
   if (!body.trim()) return null;
-  const bullets = body
-    .split('\n')
-    .map((l) => l.replace(/^[-*]\s+/, '').trim())
-    .filter(Boolean);
-  const asList = title !== 'TL;DR' && bullets.length > 0;
   return (
     <div>
       <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</div>
-      {asList ? (
-        <ul className="mt-0.5 list-disc space-y-0.5 pl-4 text-sm text-ink900">
-          {bullets.map((b, i) => (
-            <li key={i}>{b}</li>
-          ))}
-        </ul>
-      ) : (
-        <p className="mt-0.5 whitespace-pre-wrap text-sm text-ink900">{body.trim()}</p>
-      )}
+      <Markdown text={body.trim()} className="mt-0.5 text-sm text-ink900" />
     </div>
   );
 }
