@@ -1,0 +1,1021 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Qualify — Smoke shell (design mockup)</title>
+<!--
+  ═══════════════════════════════════════════════════════════════════════════════════════
+  QUALIFY × SMOKE — design mockup. STATIC, SYNTHETIC DATA ONLY (no PHI: every member
+  handle below is invented and masked; facility/payer names are business entities).
+
+  What this demonstrates, mapped to the phase plan (see qualify-smoke-NOTES.md):
+    · Phase 0 — the CSS custom properties below ARE the merged tokens.json values,
+      named exactly as Style Dictionary would emit them (color.surface.canvas →
+      --color-surface-canvas). Restyling this file = editing tokens, nothing else.
+    · Phase 1 — two-pane shell. LEFT: the guardrailed lane (horizontal stepper →
+      receipt checklist → streamed answer → derived chips). RIGHT: the board that
+      resolves progressively as the rail advances. Click the stepper or ⟲ Replay.
+    · Phase 2 — chip-driven AI, "fill in the blanks": sentence templates whose only
+      editable parts are enum SLOTS (styled selects). Template id + slot values are
+      what would reach the server — user prose structurally cannot.
+
+  Backend seam: everything under "SYNTHETIC FIXTURE" would bind to the rewritten
+  search actions. The UI contract is: stage events in, board sections out.
+  ═══════════════════════════════════════════════════════════════════════════════════════
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..700&family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+/* ── Phase 0 tokens — compiled form of tokens.json (light set) ─────────────────────── */
+:root{
+  --color-surface-canvas:#FBF8F4; --color-surface-raised:#FDFBF8; --color-surface-sunken:#F5F1EA;
+  --color-surface-inverse:#0E3A3A;
+  --color-brand-bar:#0E3A3A; --color-brand-ink:#135E5A; --color-brand-accent:#1C8B82; --color-brand-soft:#EAF4F2;
+  --color-text-primary:#1B2B2A; --color-text-muted:#4A5C5A; --color-text-subtle:#736262; --color-text-on-brand:#FFFFFF;
+  --color-border-default:#E4E9E6; --color-border-strong:#CFD8D4;
+  --color-intent-success:#2E8B57; --color-intent-success-soft:#E6F4EC;
+  --color-intent-warn:#B8860B;    --color-intent-warn-soft:#FFF4DC;
+  --color-intent-danger:#BF3F35;  --color-intent-danger-soft:#FBEAE8;
+  --color-intent-info:#5E8CC8;    --color-intent-info-soft:#EAF1F9;
+  /* dark-tape variants (from the dark token set — the tape is an inverse surface) */
+  --tape-up:#46C4B8; --tape-down:#F0917C;
+  --radius-sm:4px; --radius-md:12px; --radius-lg:24px; --radius-pill:999px;
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px; --space-5:24px; --space-6:32px; --space-7:48px;
+  --size-control:48px; --size-row:44px; --size-palette-input:56px;
+  --shadow-flat:0 1px 2px #1B2B2A0D, 0 1px 1px #1B2B2A0A;
+  --shadow-raised:0 4px 12px #1B2B2A14;
+  --shadow-overlay:0 20px 50px #100C0826;
+  --font-heading:'Space Grotesk',Inter,sans-serif;
+  --font-body:Inter,system-ui,sans-serif;
+  --font-mono:'IBM Plex Mono',ui-monospace,monospace;
+  --font-editorial:'Fraunces',Georgia,serif;
+  --ease-emphasized:cubic-bezier(.2,0,0,1); --ease-standard:cubic-bezier(.2,0,.2,1);
+  --dur-fast:150ms; --dur-overlay:220ms; --dur-expand:300ms;
+}
+
+*{box-sizing:border-box;margin:0;padding:0;border-color:var(--color-border-default)}
+html,body{height:100%}
+body{
+  background:var(--color-surface-canvas); color:var(--color-text-primary);
+  font:400 14px/1.45 var(--font-body); letter-spacing:-.006em;
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+::selection{background:var(--color-brand-soft)}
+
+/* ── App frame ─────────────────────────────────────────────────────────────────────── */
+.app{display:grid;grid-template-columns:416px 1fr;height:100vh;overflow:hidden}
+@media (max-width:1080px){ .app{grid-template-columns:1fr;height:auto;overflow:visible}
+  .rail{border-right:0;border-bottom:1px solid var(--color-border-default);max-height:none} }
+
+/* ═══ LEFT — the lane rail ═════════════════════════════════════════════════════════ */
+.rail{
+  display:flex;flex-direction:column;min-height:0;
+  background:var(--color-surface-raised);
+  border-right:1px solid var(--color-border-default);
+}
+.rail__head{
+  display:flex;align-items:center;gap:var(--space-3);
+  padding:var(--space-3) var(--space-4);
+  border-bottom:1px solid var(--color-border-default);
+}
+.iconbtn{
+  width:32px;height:32px;border-radius:var(--radius-md);
+  display:grid;place-items:center;color:var(--color-text-muted);
+  transition:background var(--dur-fast) var(--ease-standard);
+  font-size:17px;line-height:1;
+}
+.iconbtn:hover{background:var(--color-surface-sunken)}
+.rail__session{
+  flex:1;display:flex;align-items:center;gap:8px;min-width:0;
+  font:500 13px/1.2 var(--font-body);color:var(--color-text-primary);
+  padding:8px 10px;border-radius:var(--radius-md);
+}
+.rail__session:hover{background:var(--color-surface-sunken)}
+.rail__session .crumb{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rail__session .chev{color:var(--color-text-subtle);font-size:11px}
+
+/* lane lock strip */
+.lane{
+  display:flex;align-items:center;gap:10px;
+  padding:10px var(--space-4);
+  background:var(--color-brand-soft);
+  border-bottom:1px solid var(--color-border-default);
+}
+.lane__key{
+  font:500 12px/1 var(--font-mono);letter-spacing:.2px;
+  background:var(--color-brand-bar);color:var(--color-text-on-brand);
+  border-radius:var(--radius-sm);padding:5px 8px;
+}
+.lane__note{font:500 11px/1.3 var(--font-body);color:var(--color-brand-ink);letter-spacing:.2px}
+.lane__lock{margin-left:auto;font-size:13px;color:var(--color-brand-ink)}
+
+/* horizontal stepper — the timeline, one swimlane */
+.stepper{display:flex;padding:var(--space-4) var(--space-4) var(--space-2);gap:0}
+.step{flex:1;position:relative;text-align:left;padding-top:18px}
+.step::before{ /* connector */
+  content:"";position:absolute;top:6px;left:14px;right:-14px;height:2px;
+  background:var(--color-border-default);border-radius:2px;
+  transition:background var(--dur-expand) var(--ease-emphasized);
+}
+.step:last-child::before{display:none}
+.step__dot{
+  position:absolute;top:0;left:0;width:14px;height:14px;border-radius:50%;
+  border:2px solid var(--color-border-strong);background:var(--color-surface-raised);
+  transition:all var(--dur-expand) var(--ease-emphasized);
+}
+.step__label{
+  font:600 11px/1 var(--font-heading);letter-spacing:.4px;text-transform:uppercase;
+  color:var(--color-text-subtle);transition:color var(--dur-fast);
+}
+.step__meta{display:block;font:400 11px/1.4 var(--font-mono);color:var(--color-text-subtle);
+  margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:88px;
+  opacity:0;transition:opacity var(--dur-overlay)}
+.step.is-done .step__dot{background:var(--color-brand-accent);border-color:var(--color-brand-accent)}
+.step.is-done .step__dot::after{content:"✓";position:absolute;inset:0;display:grid;place-items:center;
+  font:700 9px/1 var(--font-body);color:#fff}
+.step.is-done::before{background:var(--color-brand-accent)}
+.step.is-done .step__label{color:var(--color-brand-ink)}
+.step.is-done .step__meta{opacity:1}
+.step.is-active .step__dot{border-color:var(--color-brand-accent);box-shadow:0 0 0 4px var(--color-brand-soft)}
+.step.is-active .step__label{color:var(--color-text-primary)}
+
+/* scrolling body of the rail */
+.rail__scroll{flex:1;overflow-y:auto;padding:var(--space-3) var(--space-4) var(--space-4);
+  display:flex;flex-direction:column;gap:var(--space-3);min-height:0}
+
+/* receipt checklist card (smoke's "Setting up…" card) */
+.receipt{
+  background:var(--color-surface-canvas);
+  border:1px solid var(--color-border-default);
+  border-radius:var(--radius-md);box-shadow:var(--shadow-flat);
+  padding:var(--space-4);
+}
+.receipt__head{display:flex;align-items:center;gap:10px;margin-bottom:var(--space-3)}
+.receipt__spin{width:16px;height:16px;border-radius:50%;border:2px solid var(--color-brand-soft);
+  border-top-color:var(--color-brand-accent);animation:spin 1.1s linear infinite}
+[data-stage="3"] .receipt__spin{animation:none;border-color:var(--color-intent-success);position:relative}
+[data-stage="3"] .receipt__spin::after{content:"✓";position:absolute;inset:0;display:grid;place-items:center;
+  font:700 9px/1 var(--font-body);color:var(--color-intent-success)}
+@keyframes spin{to{transform:rotate(360deg)}}
+.receipt__title{font:600 14px/1.2 var(--font-heading);letter-spacing:-.01em}
+.receipt__count{margin-left:auto;font:500 12px/1 var(--font-mono);color:var(--color-text-muted)}
+.receipt ol{list-style:none;display:flex;flex-direction:column}
+.ritem{display:flex;align-items:center;gap:10px;min-height:34px;position:relative}
+.ritem::before{content:"";position:absolute;left:9px;top:26px;bottom:-8px;width:2px;
+  background:var(--color-border-default)}
+.ritem:last-child::before{display:none}
+.ritem__dot{width:20px;height:20px;border-radius:50%;flex:none;display:grid;place-items:center;
+  font:600 11px/1 var(--font-body);color:var(--color-text-subtle);
+  border:1.5px solid var(--color-border-strong);background:var(--color-surface-raised);
+  transition:all var(--dur-overlay) var(--ease-standard)}
+.ritem__txt{font:400 13px/1.4 var(--font-body);color:var(--color-text-primary)}
+.ritem__val{font:400 12px/1 var(--font-mono);color:var(--color-text-muted);margin-left:auto;
+  opacity:0;transform:translateY(2px);transition:all var(--dur-overlay) var(--ease-standard)}
+.ritem.is-done .ritem__dot{background:var(--color-brand-accent);border-color:var(--color-brand-accent);color:#fff}
+.ritem.is-done .ritem__txt{color:var(--color-text-subtle);text-decoration:line-through;
+  text-decoration-color:var(--color-border-strong)}
+.ritem.is-done .ritem__val{opacity:1;transform:none}
+.ritem.is-active .ritem__dot{border-color:var(--color-brand-accent);color:var(--color-brand-ink)}
+
+/* event feed (smoke's grey system lines) */
+.feed{display:flex;flex-direction:column;gap:6px}
+.feed__line{
+  display:flex;align-items:center;gap:8px;
+  font:400 12px/1.4 var(--font-body);color:var(--color-text-muted);
+  opacity:0;transform:translateY(4px);
+  transition:all var(--dur-overlay) var(--ease-standard);
+}
+.feed__line .g{font-size:12px;color:var(--color-brand-accent)}
+.feed__line.show{opacity:1;transform:none}
+.feed__line--guard{color:var(--color-brand-ink);font-weight:500}
+
+/* streamed answer */
+.stream{display:none;flex-direction:column;gap:var(--space-3);padding-top:var(--space-2)}
+[data-stage="3"] .stream{display:flex}
+.stream__sec{font:500 11px/1.5 var(--font-body);letter-spacing:1.2px;text-transform:uppercase;
+  color:var(--color-text-subtle)}
+.stream__tldr{font:400 14px/1.6 var(--font-body)}
+.caret{display:inline-block;width:7px;height:15px;background:var(--color-brand-accent);
+  vertical-align:-2px;margin-left:2px;animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+.stream__list{list-style:none;display:flex;flex-direction:column;gap:6px}
+.stream__list li{
+  font:400 13px/1.5 var(--font-body);padding-left:18px;position:relative;
+  opacity:0;transform:translateY(4px);transition:all var(--dur-overlay) var(--ease-standard);
+}
+.stream__list li::before{content:"";position:absolute;left:2px;top:7px;width:6px;height:6px;border-radius:2px}
+.stream__list--sig li::before{background:var(--color-brand-accent)}
+.stream__list--risk li::before{background:var(--color-intent-danger)}
+.stream__list li.show{opacity:1;transform:none}
+.stream__hide{visibility:hidden}
+.guardline{
+  font:400 11px/1.5 var(--font-mono);color:var(--color-text-subtle);
+  border-top:1px dashed var(--color-border-default);padding-top:var(--space-2);
+}
+
+/* derived chips — sentence templates with slot pills */
+.chips{display:none;flex-direction:column;gap:8px}
+[data-stage="3"] .chips{display:flex}
+.chips__label{font:500 11px/1.5 var(--font-body);letter-spacing:1.2px;text-transform:uppercase;
+  color:var(--color-text-subtle)}
+.chip{
+  display:block;text-align:left;width:100%;
+  border:1px solid var(--color-border-default);border-radius:var(--radius-md);
+  background:var(--color-surface-canvas);padding:10px 12px;
+  font:400 13px/1.7 var(--font-body);box-shadow:var(--shadow-flat);
+  transition:all var(--dur-fast) var(--ease-standard);
+  opacity:0;transform:translateY(6px);
+}
+.chip.show{opacity:1;transform:none}
+.chip:hover{border-color:var(--color-brand-accent);box-shadow:var(--shadow-raised);transform:translateY(-1px)}
+.chip--suggested{border-color:var(--color-brand-accent);background:var(--color-brand-soft)}
+.chip .star{color:var(--color-brand-ink);margin-right:4px}
+.slot{
+  display:inline-block;padding:1px 8px;border-radius:var(--radius-pill);
+  background:var(--color-surface-raised);border:1px solid var(--color-border-strong);
+  font:500 12px/1.5 var(--font-body);color:var(--color-brand-ink);white-space:nowrap;
+}
+.slot--open::after{content:" ▾";font-size:9px;color:var(--color-text-subtle)}
+.slot--locked{background:var(--color-brand-bar);color:var(--color-text-on-brand);border-color:var(--color-brand-bar)}
+
+/* composer — the slotted question builder */
+.composer{
+  margin:0 var(--space-4) var(--space-4);
+  border:1px solid var(--color-border-strong);border-radius:var(--radius-lg);
+  background:var(--color-surface-raised);box-shadow:var(--shadow-raised);
+  padding:var(--space-3) var(--space-3) var(--space-2);
+}
+.composer__row{display:flex;align-items:center;gap:8px}
+.composer__build{flex:1;display:flex;flex-wrap:wrap;align-items:center;gap:6px;
+  font:400 13px/2 var(--font-body);color:var(--color-text-muted);min-height:36px}
+select.slotsel{
+  appearance:none;-webkit-appearance:none;
+  padding:2px 22px 2px 10px;border-radius:var(--radius-pill);
+  background:var(--color-brand-soft) url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="8" height="6"><path d="M1 1l3 3 3-3" fill="none" stroke="%23135E5A" stroke-width="1.5"/></svg>') right 8px center no-repeat;
+  border:1px solid var(--color-border-strong);
+  font:500 12px/1.6 var(--font-body);color:var(--color-brand-ink);cursor:pointer;
+}
+select.slotsel:focus{outline:2px solid var(--color-brand-accent);outline-offset:1px}
+.composer__send{
+  width:36px;height:36px;border-radius:50%;flex:none;
+  background:var(--color-brand-ink);color:#fff;display:grid;place-items:center;font-size:15px;
+  transition:transform var(--dur-fast) var(--ease-standard), background var(--dur-fast);
+}
+.composer__send:hover{background:var(--color-brand-bar);transform:translateY(-1px)}
+.composer__foot{
+  font:400 10.5px/1.6 var(--font-mono);color:var(--color-text-subtle);
+  padding:6px 4px 2px;letter-spacing:.2px;
+}
+
+/* ═══ RIGHT — the board ════════════════════════════════════════════════════════════ */
+.board{overflow-y:auto;min-height:0;padding:var(--space-6) var(--space-7) var(--space-7)}
+@media (max-width:1400px){.board{padding:var(--space-5)}}
+.board__meta{display:flex;align-items:center;gap:14px;
+  font:400 12px/1 var(--font-mono);color:var(--color-text-subtle);letter-spacing:.2px}
+.board__meta .live{display:inline-flex;align-items:center;gap:6px;color:var(--color-brand-ink)}
+.live__dot{width:7px;height:7px;border-radius:50%;background:var(--color-brand-accent);
+  animation:pulse 2.4s var(--ease-standard) infinite}
+@keyframes pulse{50%{box-shadow:0 0 0 5px #1C8B8222}}
+.board h1{
+  font:400 44px/1.05 var(--font-editorial);letter-spacing:-.01em;
+  margin:var(--space-3) 0 var(--space-1);
+}
+.board__sub{font:400 15px/1.5 var(--font-body);color:var(--color-text-muted)}
+
+/* section rule — label + hairline */
+.rule{display:flex;align-items:center;gap:var(--space-3);margin:var(--space-6) 0 var(--space-4)}
+.rule__label{font:600 13px/1 var(--font-heading);letter-spacing:.2px;white-space:nowrap}
+.rule__tag{font:500 10px/1 var(--font-mono);letter-spacing:1px;color:var(--color-text-subtle);
+  text-transform:uppercase;white-space:nowrap}
+.rule::after{content:"";flex:1;height:1px;background:var(--color-border-default)}
+.rule .act{font:500 12px/1 var(--font-body);color:var(--color-brand-ink);white-space:nowrap}
+.rule .act:hover{text-decoration:underline}
+
+/* ── the tape ──────────────────────────────────────────────────────────────────────── */
+.tape{
+  border-radius:var(--radius-md);overflow:hidden;position:relative;
+  background:var(--color-surface-inverse);box-shadow:var(--shadow-flat);
+}
+.tape+.tape{margin-top:var(--space-2)}
+.tape__mask{overflow:hidden;white-space:nowrap;padding:9px 0}
+.tape__track{display:inline-flex;align-items:center;will-change:transform;
+  animation:tape var(--tape-dur,32s) linear infinite}
+.tape:hover .tape__track{animation-play-state:paused}
+@keyframes tape{to{transform:translateX(-50%)}}
+.tape__badge{
+  position:absolute;left:0;top:0;bottom:0;z-index:2;display:flex;align-items:center;
+  padding:0 12px 0 14px;gap:8px;
+  background:linear-gradient(90deg,var(--color-surface-inverse) 72%,transparent);
+  font:600 10px/1 var(--font-mono);letter-spacing:1.4px;color:#FFFFFFB8;text-transform:uppercase;
+}
+.tk{display:inline-flex;align-items:baseline;gap:7px;padding:0 18px;color:#fff}
+.tk__sep{width:3px;height:3px;border-radius:50%;background:#FFFFFF2E;flex:none;align-self:center}
+.tk__sym{font:500 12px/1 var(--font-mono);letter-spacing:.5px}
+.tk__name{font:400 11px/1 var(--font-body);color:#FFFFFF8A;max-width:150px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.tk__val{font:600 15px/1 var(--font-editorial)}
+.tk__d{font:500 11px/1 var(--font-mono)}
+.tk--up .tk__d{color:var(--tape-up)} .tk--up .tk__val{color:var(--tape-up)}
+.tk--dn .tk__d{color:var(--tape-down)} .tk--dn .tk__val{color:var(--tape-down)}
+.tape--lite{background:var(--color-surface-raised);border:1px solid var(--color-border-default)}
+.tape--lite .tape__badge{background:linear-gradient(90deg,var(--color-surface-raised) 72%,transparent);
+  color:var(--color-text-subtle)}
+.tape--lite .tk{color:var(--color-text-primary)}
+.tape--lite .tk__name{color:var(--color-text-subtle)}
+.tape--lite .tk__sep{background:var(--color-border-strong)}
+.tape--lite .tk--up .tk__val,.tape--lite .tk--up .tk__d{color:var(--color-intent-success)}
+.tape--lite .tk--dn .tk__val,.tape--lite .tk--dn .tk__d{color:var(--color-intent-danger)}
+
+/* ── resolution zone ───────────────────────────────────────────────────────────────── */
+.zone{position:relative}
+.zone__empty{
+  border:1.5px dashed var(--color-border-strong);border-radius:var(--radius-md);
+  padding:var(--space-6);text-align:center;color:var(--color-text-subtle);
+  font:400 13px/1.6 var(--font-body);
+}
+.zone__empty b{color:var(--color-text-muted);font-weight:500}
+.reveal{opacity:0;transform:translateY(10px);
+  transition:opacity var(--dur-expand) var(--ease-emphasized),transform var(--dur-expand) var(--ease-emphasized)}
+.reveal.show{opacity:1;transform:none}
+.hide{display:none!important}
+
+/* matched strip (stage 1) */
+.matched{
+  display:flex;align-items:center;gap:12px;
+  background:var(--color-brand-soft);border:1px solid var(--color-border-default);
+  border-radius:var(--radius-md);padding:12px var(--space-4);
+  font:400 13px/1.4 var(--font-body);color:var(--color-brand-ink);
+}
+.matched .k{font:500 12px/1 var(--font-mono);background:var(--color-brand-bar);color:#fff;
+  border-radius:var(--radius-sm);padding:4px 7px}
+
+/* payer hero (stage ≥2) */
+.hero{
+  background:var(--color-surface-inverse);color:var(--color-text-on-brand);
+  border-radius:var(--radius-md);box-shadow:var(--shadow-raised);
+  padding:var(--space-4) var(--space-5);
+  display:flex;align-items:center;gap:var(--space-5);flex-wrap:wrap;
+}
+.hero__id{min-width:220px}
+.hero__eyebrow{font:500 10px/1 var(--font-mono);letter-spacing:1.6px;color:#FFFFFF8A;
+  text-transform:uppercase;margin-bottom:6px}
+.hero__name{font:600 21px/1.1 var(--font-heading);letter-spacing:-.01em}
+.hero__via{display:inline-flex;gap:6px;margin-top:8px}
+.hero__via span{font:500 10px/1 var(--font-mono);letter-spacing:.6px;padding:4px 8px;
+  border-radius:var(--radius-pill);background:#FFFFFF14;color:#FFFFFFC7}
+.hero__via .hot{background:var(--tape-up);color:var(--color-surface-inverse)}
+.hero__stats{display:flex;gap:var(--space-5);margin-left:auto;flex-wrap:wrap}
+.hstat{text-align:left}
+.hstat__n{font:600 24px/1 var(--font-editorial)}
+.hstat__l{font:400 11px/1.5 var(--font-body);color:#FFFFFF8A;margin-top:3px}
+.hero__rating{display:flex;align-items:center;gap:12px;padding-left:var(--space-5);
+  border-left:1px solid #FFFFFF1F}
+.hero__rating .n{font:600 46px/1 var(--font-editorial);color:var(--tape-up)}
+.hero__rating .lbl{font:500 10px/1.6 var(--font-mono);letter-spacing:1.4px;color:#FFFFFF8A;
+  text-transform:uppercase}
+.band{display:inline-block;font:600 11px/1 var(--font-body);padding:5px 10px;
+  border-radius:var(--radius-pill);letter-spacing:.3px}
+.band--strong{background:var(--tape-up);color:var(--color-surface-inverse)}
+.band--watch{background:var(--color-intent-warn-soft);color:#7A5A08}
+.band--weak{background:var(--color-intent-danger-soft);color:var(--color-intent-danger)}
+
+/* on-file chip row */
+.onfile{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:var(--space-3)}
+.onfile__cap{font:500 10px/1 var(--font-mono);letter-spacing:1.4px;color:var(--color-text-subtle);
+  text-transform:uppercase;margin-right:4px}
+.of{display:inline-flex;align-items:baseline;gap:7px;padding:7px 12px;
+  border:1px solid var(--color-border-default);border-radius:var(--radius-pill);
+  background:var(--color-surface-raised);box-shadow:var(--shadow-flat)}
+.of b{font:500 10px/1 var(--font-mono);letter-spacing:1px;color:var(--color-text-subtle);
+  text-transform:uppercase}
+.of span{font:500 12.5px/1 var(--font-body)}
+
+/* KPI triplet */
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--space-3);margin-top:var(--space-4)}
+@media (max-width:1400px){.kpis{grid-template-columns:1fr 1fr}}
+.kpi{border-radius:var(--radius-md);padding:var(--space-4);border:1px solid var(--color-border-default)}
+.kpi--warn{background:var(--color-intent-warn-soft)}
+.kpi--ok{background:var(--color-intent-success-soft)}
+.kpi--info{background:var(--color-intent-info-soft)}
+.kpi__l{font:500 10px/1.4 var(--font-mono);letter-spacing:1.2px;text-transform:uppercase;
+  color:var(--color-text-muted)}
+.kpi__n{font:600 34px/1.1 var(--font-editorial);margin:6px 0 4px}
+.kpi__range{font:400 11px/1.5 var(--font-mono);color:var(--color-text-subtle)}
+
+/* facilities scorecard */
+.fac{border:1px solid var(--color-border-default);border-radius:var(--radius-md);
+  background:var(--color-surface-raised);box-shadow:var(--shadow-flat);overflow:hidden}
+.frow{display:grid;grid-template-columns:44px 1fr 190px;gap:var(--space-4);
+  padding:var(--space-4) var(--space-5);align-items:center;
+  border-bottom:1px solid var(--color-border-default);position:relative;
+  transition:background var(--dur-fast)}
+.frow:last-child{border-bottom:0}
+.frow:hover{background:var(--color-surface-canvas)}
+.frow__rank{font:600 15px/1 var(--font-mono);color:var(--color-text-subtle)}
+.frow__name{font:600 14.5px/1.2 var(--font-heading);letter-spacing:-.01em;
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.tag{font:600 9.5px/1 var(--font-mono);letter-spacing:.8px;padding:3px 6px;
+  border-radius:var(--radius-sm);background:var(--color-brand-soft);color:var(--color-brand-ink)}
+.tag--warn{background:var(--color-intent-warn-soft);color:#7A5A08}
+.tag--danger{background:var(--color-intent-danger-soft);color:var(--color-intent-danger)}
+.frow__loc{font:400 11.5px/1.6 var(--font-mono);color:var(--color-text-subtle);margin-top:2px}
+.meter{height:6px;border-radius:3px;background:var(--color-surface-sunken);
+  margin-top:10px;position:relative;overflow:hidden;max-width:420px}
+.meter__allowed{position:absolute;inset:0 auto 0 0;background:var(--color-brand-accent);
+  border-radius:3px;width:0;z-index:1;transition:width .9s var(--ease-emphasized)}
+.meter__paid{position:absolute;inset:0 auto 0 0;background:var(--color-brand-bar);
+  border-radius:3px;width:0;z-index:2;transition:width 1.2s var(--ease-emphasized)}
+.frow__why{font:500 11.5px/1 var(--font-body);color:var(--color-brand-ink);margin-top:10px;
+  display:inline-block}
+.frow__why:hover{text-decoration:underline}
+.frow__score{text-align:right}
+.frow__n{font:600 38px/1 var(--font-editorial)}
+.frow__n--ok{color:var(--color-intent-success)}
+.frow__n--brand{color:var(--color-brand-accent)}
+.frow__n--warn{color:#B8860B}
+.frow__sub{font:400 11px/1.6 var(--font-mono);color:var(--color-text-subtle);margin-top:4px}
+
+/* skeletons */
+.skel .sk{height:13px;border-radius:var(--radius-sm);background:var(--color-surface-sunken);
+  position:relative;overflow:hidden;margin:12px var(--space-5)}
+.skel .sk::after{content:"";position:absolute;inset:0;transform:translateX(-100%);
+  background:linear-gradient(90deg,transparent,#FFFFFFA6,transparent);
+  animation:shimmer 1.4s var(--ease-standard) infinite}
+@keyframes shimmer{to{transform:translateX(100%)}}
+
+/* watchers */
+.watchgrid{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-4)}
+@media (max-width:1400px){.watchgrid{grid-template-columns:1fr}}
+.wcol__cap{display:flex;align-items:baseline;gap:8px;margin-bottom:var(--space-3)}
+.wcol__cap h3{font:600 13px/1 var(--font-heading)}
+.wcol__cap span{font:400 10.5px/1 var(--font-mono);color:var(--color-text-subtle);letter-spacing:.4px}
+.twcard{
+  display:flex;align-items:center;gap:var(--space-4);
+  border:1px solid var(--color-border-default);border-radius:var(--radius-md);
+  background:var(--color-surface-raised);box-shadow:var(--shadow-flat);
+  padding:12px var(--space-4);margin-bottom:8px;
+  transition:all var(--dur-fast) var(--ease-standard);
+}
+.twcard:hover{box-shadow:var(--shadow-raised);transform:translateY(-1px)}
+.twcard__sym{font:500 12px/1 var(--font-mono);background:var(--color-brand-soft);
+  color:var(--color-brand-ink);border-radius:var(--radius-sm);padding:5px 7px}
+.twcard__name{font:500 13px/1.3 var(--font-body)}
+.twcard__meta{font:400 10.5px/1.5 var(--font-mono);color:var(--color-text-subtle)}
+.twcard__spark{margin-left:auto}
+.twcard__val{text-align:right;min-width:64px}
+.twcard__val .n{font:600 20px/1 var(--font-editorial)}
+.twcard__val .d{font:500 11px/1.4 var(--font-mono)}
+.up{color:var(--color-intent-success)} .dn{color:var(--color-intent-danger)}
+.pwrow{
+  display:flex;align-items:center;gap:12px;
+  border:1px solid var(--color-border-default);border-radius:var(--radius-md);
+  background:var(--color-surface-raised);box-shadow:var(--shadow-flat);
+  padding:11px var(--space-4);margin-bottom:8px;min-height:var(--size-row);
+}
+.pwrow__lock{font-size:13px;color:var(--color-text-subtle)}
+.pwrow__id{font:500 13px/1 var(--font-mono);letter-spacing:.5px}
+.pwrow__plan{font:400 12px/1.4 var(--font-body);color:var(--color-text-muted)}
+.pwrow__pill{margin-left:auto;font:500 10.5px/1 var(--font-body);padding:5px 9px;
+  border-radius:var(--radius-pill)}
+.pwrow__pill--ok{background:var(--color-intent-success-soft);color:var(--color-intent-success)}
+.pwrow__pill--warn{background:var(--color-intent-warn-soft);color:#7A5A08}
+.pwrow__pill--mut{background:var(--color-surface-sunken);color:var(--color-text-subtle)}
+.wfoot{font:400 10.5px/1.6 var(--font-mono);color:var(--color-text-subtle);margin-top:4px}
+
+/* recent searches */
+.recents{display:grid;grid-template-columns:repeat(auto-fill,minmax(172px,1fr));gap:var(--space-3)}
+.rcard{
+  border:1px solid var(--color-border-default);border-radius:var(--radius-md);
+  background:var(--color-surface-raised);box-shadow:var(--shadow-flat);
+  padding:var(--space-4);text-align:left;
+  transition:all var(--dur-fast) var(--ease-standard);
+}
+.rcard:hover{box-shadow:var(--shadow-raised);transform:translateY(-2px);
+  border-color:var(--color-border-strong)}
+.rcard__glyph{width:34px;height:34px;border-radius:var(--radius-md);
+  background:var(--color-brand-soft);color:var(--color-brand-ink);
+  display:grid;place-items:center;font:600 13px/1 var(--font-heading);margin-bottom:10px}
+.rcard__t{font:500 13px/1.3 var(--font-body)}
+.rcard__m{font:400 11px/1.6 var(--font-mono);color:var(--color-text-subtle);margin-top:3px}
+.rcard__go{font:500 11px/1 var(--font-body);color:var(--color-brand-ink);margin-top:10px;display:block}
+
+/* replay pill */
+.replay{
+  position:fixed;left:16px;bottom:16px;z-index:9;
+  display:inline-flex;align-items:center;gap:8px;
+  background:var(--color-brand-bar);color:#fff;border-radius:var(--radius-pill);
+  padding:10px 16px;font:500 12px/1 var(--font-body);box-shadow:var(--shadow-overlay);
+  transition:transform var(--dur-fast) var(--ease-standard);
+}
+.replay:hover{transform:translateY(-2px)}
+
+@media (prefers-reduced-motion: reduce){
+  *{animation:none!important;transition:none!important}
+  .tape__mask{overflow-x:auto}
+}
+</style>
+</head>
+<body data-stage="0">
+
+<div class="app">
+
+  <!-- ═══ LEFT RAIL — the guardrailed lane ═══ -->
+  <aside class="rail" aria-label="Qualification lane">
+    <div class="rail__head">
+      <button class="iconbtn" title="New qualification">+</button>
+      <button class="rail__session">
+        <span class="crumb">Qualify · GGS — Anthem Blue Cross CA</span>
+        <span class="chev">▾</span>
+      </button>
+      <button class="iconbtn" title="Expand">⤢</button>
+    </div>
+
+    <div class="lane">
+      <span class="lane__key">LANE · GGS</span>
+      <span class="lane__note">AI is guardrailed to this search</span>
+      <span class="lane__lock" title="Scoped: answers draw on matched lines only">🔒</span>
+    </div>
+
+    <!-- horizontal timeline -->
+    <nav class="stepper" aria-label="Resolution stages">
+      <button class="step" data-goto="1">
+        <span class="step__dot"></span>
+        <span class="step__label">Identify</span>
+        <span class="step__meta">GGS•••</span>
+      </button>
+      <button class="step" data-goto="2">
+        <span class="step__dot"></span>
+        <span class="step__label">Carrier</span>
+        <span class="step__meta">Anthem BCC</span>
+      </button>
+      <button class="step" data-goto="3">
+        <span class="step__dot"></span>
+        <span class="step__label">Plan</span>
+        <span class="step__meta">PPO · Self-fund</span>
+      </button>
+      <button class="step" data-goto="3">
+        <span class="step__dot"></span>
+        <span class="step__label">Answer</span>
+        <span class="step__meta">71 · Strong</span>
+      </button>
+    </nav>
+
+    <div class="rail__scroll">
+
+      <!-- receipt checklist -->
+      <section class="receipt" aria-label="Qualification receipt">
+        <div class="receipt__head">
+          <span class="receipt__spin" aria-hidden="true"></span>
+          <span class="receipt__title">Qualifying prefix GGS</span>
+          <span class="receipt__count" id="receiptCount">0/4</span>
+        </div>
+        <ol>
+          <li class="ritem" data-done-at="1">
+            <span class="ritem__dot">1</span>
+            <span class="ritem__txt">Identify — who are we looking at?</span>
+            <span class="ritem__val">GGS•••</span>
+          </li>
+          <li class="ritem" data-done-at="2">
+            <span class="ritem__dot">2</span>
+            <span class="ritem__txt">Carrier — which is on the card?</span>
+            <span class="ritem__val">Anthem BCC</span>
+          </li>
+          <li class="ritem" data-done-at="3">
+            <span class="ritem__dot">3</span>
+            <span class="ritem__txt">Plan — which plan is it?</span>
+            <span class="ritem__val">PPO · GGS0041</span>
+          </li>
+          <li class="ritem" data-done-at="4">
+            <span class="ritem__dot">4</span>
+            <span class="ritem__txt">Answer — do they pay us, where?</span>
+            <span class="ritem__val">71 · Strong</span>
+          </li>
+        </ol>
+      </section>
+
+      <!-- event feed -->
+      <div class="feed" aria-live="polite">
+        <div class="feed__line" data-show-at="1"><span class="g">◉</span> Matched via prefix <b>&nbsp;GGS&nbsp;</b> — 8 carriers possible, 347 charge lines in the book</div>
+        <div class="feed__line feed__line--guard" data-show-at="2"><span class="g">⊘</span> Lane locked — answers now draw on Anthem BCC matches only</div>
+        <div class="feed__line" data-show-at="3"><span class="g">◉</span> Plan picked: PPO · Self-funded · Google LLC · group GGS0041</div>
+      </div>
+
+      <!-- streamed answer -->
+      <section class="stream" aria-label="AI answer">
+        <div>
+          <div class="stream__sec">TL;DR</div>
+          <p class="stream__tldr"><span id="tldr"></span><span class="caret" id="caret"></span></p>
+        </div>
+        <div id="sigBlock" class="stream__hide">
+          <div class="stream__sec">Signals</div>
+          <ul class="stream__list stream__list--sig">
+            <li>▲ +4.2 pts over 90d — the tape has GGS trending up</li>
+            <li>Self-funded PPO under Google LLC — the plan class this book collects on</li>
+            <li>9 of 24 facilities clear the sample gate in this window</li>
+          </ul>
+        </div>
+        <div id="riskBlock" class="stream__hide">
+          <div class="stream__sec">Risks</div>
+          <ul class="stream__list stream__list--risk">
+            <li>Hillside Horizon is thin — 6 patients in window; treat its 48 as provisional</li>
+            <li>OON network: member liability swings — confirm at VOB before admit</li>
+          </ul>
+        </div>
+        <div class="guardline">⊘ scoped to GGS · Anthem BCC — answered from 347 matched lines, nothing outside the lane</div>
+      </section>
+
+      <!-- derived chips: fill-in-the-blank -->
+      <section class="chips" aria-label="Suggested questions">
+        <div class="chips__label">Ask about what came back</div>
+        <button class="chip chip--suggested"><span class="star">✦</span>Why is
+          <span class="slot slot--locked">Treat MH California</span> first for
+          <span class="slot slot--open">GGS0041</span>?</button>
+        <button class="chip">What's the risk at <span class="slot slot--open">Hillside Horizon</span>
+          in the next <span class="slot slot--open">30 days</span>?</button>
+        <button class="chip">Compare <span class="slot slot--locked">Treat MH California</span> vs
+          <span class="slot slot--open">Opus Health</span> on <span class="slot slot--open">% allowed</span></button>
+        <button class="chip">Has <span class="slot slot--locked">GGS</span> slowed paying over
+          <span class="slot slot--open">90d</span>?</button>
+      </section>
+    </div>
+
+    <!-- slotted composer -->
+    <div class="composer">
+      <div class="composer__row">
+        <button class="iconbtn" title="More templates">+</button>
+        <div class="composer__build" aria-label="Question builder">
+          Where does
+          <select class="slotsel" aria-label="Payer"><option>Anthem BCC</option></select>
+          pay best for
+          <select class="slotsel" aria-label="Care setting">
+            <option>Detox</option><option>RTC</option><option>PHP</option><option>IOP</option>
+          </select>
+          in
+          <select class="slotsel" aria-label="Area">
+            <option>California</option><option>the West</option><option>anywhere</option>
+          </select>
+          ?
+        </div>
+        <button class="composer__send" title="Ask">↑</button>
+      </div>
+      <div class="composer__foot">slots only — free text never reaches the model · template id + slot enums are all the server sees</div>
+    </div>
+  </aside>
+
+  <!-- ═══ RIGHT — the board ═══ -->
+  <main class="board">
+    <div class="board__meta">
+      <span>FRI AUG 8 · 90-DAY LENS · ACROSS THE BOOK</span>
+      <span class="live"><span class="live__dot"></span>TAPE LIVE</span>
+    </div>
+    <h1>Welcome back, Alec.</h1>
+    <p class="board__sub">The book is moving. Two lanes of tape, then whatever your search resolves.</p>
+
+    <!-- ── tape ── -->
+    <div class="rule"><span class="rule__label">The tape</span><span class="rule__tag">TOP 20 · PREFIX / POLICY · 90D Δ</span></div>
+
+    <div class="tape" style="--tape-dur:34s">
+      <div class="tape__badge">PREFIXES</div>
+      <div class="tape__mask"><div class="tape__track" id="tapePrefix">
+        <span class="tk tk--up"><span class="tk__sym">GGS</span><span class="tk__name">Anthem BCC</span><span class="tk__val">71</span><span class="tk__d">▲ +4.2</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">YRK</span><span class="tk__name">Cigna</span><span class="tk__val">58</span><span class="tk__d">▲ +2.8</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">TRV</span><span class="tk__name">Meritain</span><span class="tk__val">44</span><span class="tk__d">▲ +6.1</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">W29</span><span class="tk__name">Aetna</span><span class="tk__val">45</span><span class="tk__d">▲ +1.1</span></span><span class="tk__sep"></span>
+        <span class="tk tk--dn"><span class="tk__sym">MHN</span><span class="tk__name">Health Net</span><span class="tk__val">37</span><span class="tk__d">▼ −2.4</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">XQT</span><span class="tk__name">Kaiser NorCal</span><span class="tk__val">64</span><span class="tk__d">▲ +3.3</span></span><span class="tk__sep"></span>
+        <span class="tk tk--dn"><span class="tk__sym">110</span><span class="tk__name">UHC</span><span class="tk__val">23</span><span class="tk__d">▼ −5.0</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">JLP</span><span class="tk__name">Blue Shield CA</span><span class="tk__val">52</span><span class="tk__d">▲ +0.9</span></span><span class="tk__sep"></span>
+        <span class="tk tk--dn"><span class="tk__sym">ZBH</span><span class="tk__name">BCBSTX</span><span class="tk__val">21</span><span class="tk__d">▼ −1.9</span></span><span class="tk__sep"></span>
+        <span class="tk tk--dn"><span class="tk__sym">KDR</span><span class="tk__name">Ambetter</span><span class="tk__val">49</span><span class="tk__d">▼ −0.6</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">PBC</span><span class="tk__name">Premera</span><span class="tk__val">41</span><span class="tk__d">▲ +2.2</span></span><span class="tk__sep"></span>
+        <span class="tk tk--dn"><span class="tk__sym">NWM</span><span class="tk__name">Moda</span><span class="tk__val">39</span><span class="tk__d">▼ −3.7</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">QAH</span><span class="tk__name">GEHA</span><span class="tk__val">36</span><span class="tk__d">▲ +1.4</span></span><span class="tk__sep"></span>
+        <span class="tk tk--dn"><span class="tk__sym">UHG</span><span class="tk__name">UMR</span><span class="tk__val">33</span><span class="tk__d">▼ −0.8</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">SBL</span><span class="tk__name">Regence</span><span class="tk__val">31</span><span class="tk__d">▲ +2.9</span></span><span class="tk__sep"></span>
+        <span class="tk tk--dn"><span class="tk__sym">DMR</span><span class="tk__name">Magellan</span><span class="tk__val">29</span><span class="tk__d">▼ −4.1</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">LHS</span><span class="tk__name">Lucent</span><span class="tk__val">27</span><span class="tk__d">▲ +0.4</span></span><span class="tk__sep"></span>
+        <span class="tk tk--dn"><span class="tk__sym">VNT</span><span class="tk__name">Oscar</span><span class="tk__val">25</span><span class="tk__d">▼ −2.2</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">RXK</span><span class="tk__name">Sana</span><span class="tk__val">24</span><span class="tk__d">▲ +1.7</span></span><span class="tk__sep"></span>
+        <span class="tk tk--dn"><span class="tk__sym">BND</span><span class="tk__name">Bind / Surest</span><span class="tk__val">19</span><span class="tk__d">▼ −6.3</span></span><span class="tk__sep"></span>
+      </div></div>
+    </div>
+
+    <div class="tape tape--lite" style="--tape-dur:52s">
+      <div class="tape__badge">FACILITIES</div>
+      <div class="tape__mask"><div class="tape__track" id="tapeFac">
+        <span class="tk tk--up"><span class="tk__sym">#2</span><span class="tk__name">405 Recovery · Newport Beach</span><span class="tk__val">35%</span><span class="tk__d">▲ +13.1 pts</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">#4</span><span class="tk__name">Treat MH Washington · Bellevue</span><span class="tk__val">38%</span><span class="tk__d">▲ +11.7</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">#5</span><span class="tk__name">CA Mental Health · San Martin</span><span class="tk__val">45%</span><span class="tk__d">▲ +10.1</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">#6</span><span class="tk__name">Pacific Coast MH · Costa Mesa</span><span class="tk__val">39%</span><span class="tk__d">▲ +9.3</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">#7</span><span class="tk__name">Treat MH Texas · Cedar Park</span><span class="tk__val">17%</span><span class="tk__d">▲ +8.6</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">#8</span><span class="tk__name">Adolescent MH · Laguna Hills</span><span class="tk__val">30%</span><span class="tk__d">▲ +6.3</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">#9</span><span class="tk__name">CA Treatment Collective · Newport</span><span class="tk__val">26%</span><span class="tk__d">▲ +5.7</span></span><span class="tk__sep"></span>
+        <span class="tk tk--dn"><span class="tk__sym">#12</span><span class="tk__name">Hillside Horizon · Canyon Lake</span><span class="tk__val">48%</span><span class="tk__d">▼ −2.0</span></span><span class="tk__sep"></span>
+        <span class="tk tk--up"><span class="tk__sym">#14</span><span class="tk__name">Opus Health · Costa Mesa</span><span class="tk__val">45%</span><span class="tk__d">▲ +1.2</span></span><span class="tk__sep"></span>
+        <span class="tk tk--dn"><span class="tk__sym">#17</span><span class="tk__name">MH Modesto · Modesto</span><span class="tk__val">43%</span><span class="tk__d">▼ −0.8</span></span><span class="tk__sep"></span>
+      </div></div>
+    </div>
+
+    <!-- ── resolution zone ── -->
+    <div class="rule"><span class="rule__label">This search</span><span class="rule__tag" id="zoneTag">NOTHING RESOLVED YET</span></div>
+
+    <div class="zone">
+      <div class="zone__empty" id="zoneEmpty">
+        Nothing resolved yet — <b>the board fills in as you answer the rail</b>.<br/>
+        Start with a member ID prefix or a full member ID on the left.
+      </div>
+
+      <div class="matched reveal hide" id="zoneMatched">
+        <span class="k">GGS</span>
+        matched — 8 carriers possible · <b>347 charge lines</b> across the book carry this prefix
+      </div>
+
+      <section class="reveal hide" id="zoneHero" aria-label="Resolved payer">
+        <div class="hero">
+          <div class="hero__id">
+            <div class="hero__eyebrow">Resolved payer</div>
+            <div class="hero__name">ANTHEM BLUE CROSS CALIFORNIA</div>
+            <div class="hero__via"><span>matched via prefix GGS</span><span class="hot">surged · into the light</span></div>
+          </div>
+          <div class="hero__stats">
+            <div class="hstat"><div class="hstat__n">347</div><div class="hstat__l">charge lines<br/>match your lane</div></div>
+            <div class="hstat"><div class="hstat__n">60</div><div class="hstat__l">clients<br/>enough to rate</div></div>
+            <div class="hstat"><div class="hstat__n">$1,059,000</div><div class="hstat__l">billed<br/>in window</div></div>
+          </div>
+          <div class="hero__rating">
+            <div>
+              <div class="lbl">Policy rating</div>
+              <div style="margin-top:6px"><span class="band band--strong">Strong</span></div>
+            </div>
+            <div class="n">71</div>
+          </div>
+        </div>
+        <div class="onfile">
+          <span class="onfile__cap">On file</span>
+          <span class="of"><b>Payer</b><span>Anthem Blue Cross of California</span></span>
+          <span class="of"><b>Employer</b><span>Google LLC</span></span>
+          <span class="of"><b>Funding</b><span>Self-funded</span></span>
+          <span class="of"><b>Group #</b><span>GGS0041</span></span>
+          <span class="of"><b>Policy type</b><span>PPO</span></span>
+          <span class="of"><b>Network</b><span>OON</span></span>
+        </div>
+      </section>
+
+      <section class="reveal hide" id="zoneKpis" aria-label="Window KPIs">
+        <div class="kpis">
+          <div class="kpi kpi--warn">
+            <div class="kpi__l">% allowed of billed</div>
+            <div class="kpi__n">49%</div>
+            <div class="kpi__range">worst 12% · best 63% · across facilities in window</div>
+          </div>
+          <div class="kpi kpi--ok">
+            <div class="kpi__l">% paid of allowed</div>
+            <div class="kpi__n">82%</div>
+            <div class="kpi__range">worst 58% · best 97% · once allowed, it pays</div>
+          </div>
+          <div class="kpi kpi--info">
+            <div class="kpi__l">% paid of billed</div>
+            <div class="kpi__n">46%</div>
+            <div class="kpi__range">worst 9% · best 60% · the number that funds admits</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- facilities: skeleton first, then ranked -->
+      <section class="reveal hide" id="zoneFacSkel" aria-hidden="true" style="margin-top:var(--space-4)">
+        <div class="fac skel">
+          <div class="sk" style="width:72%"></div>
+          <div class="sk" style="width:54%"></div>
+          <div class="sk" style="width:63%"></div>
+          <div class="sk" style="width:41%;margin-bottom:16px"></div>
+        </div>
+      </section>
+
+      <section class="reveal hide" id="zoneFac" aria-label="Ranked facilities" style="margin-top:var(--space-4)">
+        <div class="rule" style="margin:0 0 var(--space-3)"><span class="rule__label">Facilities</span><span class="rule__tag">BY REIMBURSEMENT RATING · 24 IN BOOK · 9 CLEAR THE GATE</span><button class="act">rank by $ instead →</button></div>
+        <div class="fac">
+          <div class="frow">
+            <div class="frow__rank">1</div>
+            <div>
+              <div class="frow__name">TREAT MENTAL HEALTH CALIFORNIA <span class="tag">OP</span><span class="tag">9 patients</span></div>
+              <div class="frow__loc">Van Nuys, CA · median 23d to payment</div>
+              <div class="meter"><div class="meter__paid" data-w="46%"></div><div class="meter__allowed" data-w="55%"></div></div>
+              <button class="frow__why">Why this score →</button>
+            </div>
+            <div class="frow__score">
+              <div class="frow__n frow__n--ok">70</div>
+              <div class="frow__sub">Strong · 55% allowed<br/>$273k / $497k · 5 of 5 factors</div>
+            </div>
+          </div>
+          <div class="frow">
+            <div class="frow__rank">2</div>
+            <div>
+              <div class="frow__name">HILLSIDE HORIZON FOR TEENS <span class="tag">IP</span><span class="tag tag--warn">thin sample · 6</span></div>
+              <div class="frow__loc">Canyon Lake, CA · last remit 2026-06-30</div>
+              <div class="meter"><div class="meter__paid" data-w="34%"></div><div class="meter__allowed" data-w="42%"></div></div>
+              <button class="frow__why">Why this score →</button>
+            </div>
+            <div class="frow__score">
+              <div class="frow__n frow__n--warn">48</div>
+              <div class="frow__sub">Watch · 42% allowed<br/>$108k / $258k · 3 of 5 factors</div>
+            </div>
+          </div>
+          <div class="frow">
+            <div class="frow__rank">3</div>
+            <div>
+              <div class="frow__name">OPUS HEALTH <span class="tag">IP</span><span class="tag tag--danger">factors diverge</span></div>
+              <div class="frow__loc">Costa Mesa, CA · median 41d to payment</div>
+              <div class="meter"><div class="meter__paid" data-w="30%"></div><div class="meter__allowed" data-w="38%"></div></div>
+              <button class="frow__why">Why this score →</button>
+            </div>
+            <div class="frow__score">
+              <div class="frow__n frow__n--warn">45</div>
+              <div class="frow__sub">Watch · 38% allowed<br/>$141k / $371k · 8 patients</div>
+            </div>
+          </div>
+          <div class="frow">
+            <div class="frow__rank">4</div>
+            <div>
+              <div class="frow__name">MENTAL HEALTH MODESTO <span class="tag">OP</span></div>
+              <div class="frow__loc">Modesto, CA · median 35d to payment</div>
+              <div class="meter"><div class="meter__paid" data-w="27%"></div><div class="meter__allowed" data-w="35%"></div></div>
+              <button class="frow__why">Why this score →</button>
+            </div>
+            <div class="frow__score">
+              <div class="frow__n frow__n--warn">43</div>
+              <div class="frow__sub">Watch · 35% allowed<br/>$132k / $377k · 11 patients</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ── watchers ── -->
+    <div class="rule"><span class="rule__label">Watchers</span><span class="rule__tag">SAVED FROM PAST SEARCHES · ALERTS ON MOVEMENT</span><button class="act">+ watch this search</button></div>
+    <div class="watchgrid">
+      <div>
+        <div class="wcol__cap"><h3>Trendwatchers</h3><span>prefixes & policies you follow</span></div>
+        <div class="twcard">
+          <span class="twcard__sym">GGS</span>
+          <div><div class="twcard__name">Anthem BCC · PPO book</div><div class="twcard__meta">since Jul 28 · alert ±3 pts</div></div>
+          <svg class="twcard__spark" width="90" height="26" aria-hidden="true"><polyline points="0,20 12,18 24,19 36,15 48,16 60,11 72,9 84,5" fill="none" stroke="#1C8B82" stroke-width="1.8"/><circle cx="84" cy="5" r="2.4" fill="#1C8B82"/></svg>
+          <div class="twcard__val"><div class="n">71</div><div class="d up">▲ +4.2</div></div>
+        </div>
+        <div class="twcard">
+          <span class="twcard__sym">YRK</span>
+          <div><div class="twcard__name">Cigna · national</div><div class="twcard__meta">since Jul 30 · alert ±3 pts</div></div>
+          <svg class="twcard__spark" width="90" height="26" aria-hidden="true"><polyline points="0,16 12,17 24,14 36,15 48,12 60,13 72,10 84,9" fill="none" stroke="#1C8B82" stroke-width="1.8"/><circle cx="84" cy="9" r="2.4" fill="#1C8B82"/></svg>
+          <div class="twcard__val"><div class="n">58</div><div class="d up">▲ +2.8</div></div>
+        </div>
+        <div class="twcard">
+          <span class="twcard__sym">110</span>
+          <div><div class="twcard__name">UHC · commercial</div><div class="twcard__meta">since Aug 1 · alert ±3 pts</div></div>
+          <svg class="twcard__spark" width="90" height="26" aria-hidden="true"><polyline points="0,7 12,9 24,8 36,12 48,14 60,13 72,18 84,21" fill="none" stroke="#BF3F35" stroke-width="1.8"/><circle cx="84" cy="21" r="2.4" fill="#BF3F35"/></svg>
+          <div class="twcard__val"><div class="n">23</div><div class="d dn">▼ −5.0</div></div>
+        </div>
+      </div>
+      <div>
+        <div class="wcol__cap"><h3>Patient watchers</h3><span>token-stored · never the raw ID</span></div>
+        <div class="pwrow">
+          <span class="pwrow__lock">🔒</span>
+          <span class="pwrow__id">GGS •••• 8841</span>
+          <span class="pwrow__plan">Anthem PPO · Self-funded</span>
+          <span class="pwrow__pill pwrow__pill--mut">no new claims · 14d</span>
+        </div>
+        <div class="pwrow">
+          <span class="pwrow__lock">🔒</span>
+          <span class="pwrow__id">XQT •••• 2210</span>
+          <span class="pwrow__plan">Kaiser NorCal HMO</span>
+          <span class="pwrow__pill pwrow__pill--ok">new ERA posted</span>
+        </div>
+        <div class="pwrow">
+          <span class="pwrow__lock">🔒</span>
+          <span class="pwrow__id">ZBH •••• 0937</span>
+          <span class="pwrow__plan">BCBSTX PPO</span>
+          <span class="pwrow__pill pwrow__pill--warn">auth window closing</span>
+        </div>
+        <div class="wfoot">watchers persist the keyed-HMAC token + a masked echo only — the raw member ID is never stored</div>
+      </div>
+    </div>
+
+    <!-- ── recent searches ── -->
+    <div class="rule"><span class="rule__label">Recent searches</span><span class="rule__tag">NON-PHI FACETS ONLY · RE-RUN RESOLVES FRESH</span></div>
+    <div class="recents">
+      <button class="rcard"><span class="rcard__glyph">A</span><div class="rcard__t">Anthem BCC · GGS</div><div class="rcard__m">PPO · Self-funded · CA<br/>today 14:22</div><span class="rcard__go">↻ Re-run</span></button>
+      <button class="rcard"><span class="rcard__glyph">Æ</span><div class="rcard__t">Aetna · W29</div><div class="rcard__m">HMO · Fully insured<br/>today 14:07</div><span class="rcard__go">↻ Re-run</span></button>
+      <button class="rcard"><span class="rcard__glyph">C</span><div class="rcard__t">Cigna · YRK</div><div class="rcard__m">PPO · national<br/>yesterday 16:48</div><span class="rcard__go">↻ Re-run</span></button>
+      <button class="rcard"><span class="rcard__glyph">U</span><div class="rcard__t">UHC · 110</div><div class="rcard__m">EPO · commercial<br/>Aug 5 · 11:19</div><span class="rcard__go">↻ Re-run</span></button>
+      <button class="rcard"><span class="rcard__glyph">H</span><div class="rcard__t">Health Net · MHN</div><div class="rcard__m">HMO · CA<br/>Aug 4 · 09:33</div><span class="rcard__go">↻ Re-run</span></button>
+    </div>
+  </main>
+</div>
+
+<button class="replay" id="replay">⟲ Replay the drill</button>
+
+<script>
+/* ── SYNTHETIC FIXTURE + stage machine (the seam the rewritten search binds into) ──── */
+(function(){
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const body = document.body;
+  const steps = [...document.querySelectorAll('.step')];
+  const ritems = [...document.querySelectorAll('.ritem')];
+  const feeds = [...document.querySelectorAll('.feed__line')];
+  const count = document.getElementById('receiptCount');
+  const zoneTag = document.getElementById('zoneTag');
+  const zones = {
+    empty:  document.getElementById('zoneEmpty'),
+    matched:document.getElementById('zoneMatched'),
+    hero:   document.getElementById('zoneHero'),
+    kpis:   document.getElementById('zoneKpis'),
+    skel:   document.getElementById('zoneFacSkel'),
+    fac:    document.getElementById('zoneFac'),
+  };
+  const TAGS = ['NOTHING RESOLVED YET','PREFIX MATCHED · PICK A CARRIER','CARRIER LOCKED · PICK A PLAN','GGS · ANTHEM BCC · PPO — ANSWERED'];
+  const TLDR = 'Anthem BCC under prefix GGS is a strong send. The lane holds 347 charge lines across 60 clients, allowing 49% of billed and paying 82% of what it allows. Treat Mental Health California is the standout at 70 — OP volume clears the sample gate and payment lands in a median 23 days.';
+
+  let streamTimer = null, chipTimers = [];
+
+  function show(el, on){ if(!el) return;
+    if(on){ el.classList.remove('hide'); requestAnimationFrame(()=>requestAnimationFrame(()=>el.classList.add('show'))); }
+    else { el.classList.remove('show'); el.classList.add('hide'); }
+  }
+
+  function meters(on){
+    document.querySelectorAll('.meter [data-w]').forEach(m=>{ m.style.width = on ? m.dataset.w : '0'; });
+  }
+
+  function stopStream(){
+    clearTimeout(streamTimer); chipTimers.forEach(clearTimeout); chipTimers = [];
+    document.getElementById('tldr').textContent = '';
+    document.getElementById('caret').style.display = '';
+    ['sigBlock','riskBlock'].forEach(id=>document.getElementById(id).classList.add('stream__hide'));
+    document.querySelectorAll('.stream__list li,.chip').forEach(el=>el.classList.remove('show'));
+  }
+
+  function stream(){
+    stopStream();
+    const tldr = document.getElementById('tldr'), caret = document.getElementById('caret');
+    const words = TLDR.split(' ');
+    if(reduced){ tldr.textContent = TLDR; caret.style.display='none'; revealRest(0); return; }
+    let i = 0;
+    (function tick(){
+      if(i < words.length){ tldr.textContent += (i?' ':'') + words[i++]; streamTimer = setTimeout(tick, 34); }
+      else { caret.style.display='none'; revealRest(280); }
+    })();
+  }
+
+  function revealRest(base){
+    ['sigBlock','riskBlock'].forEach((id,bi)=>{
+      chipTimers.push(setTimeout(()=>{
+        const b = document.getElementById(id); b.classList.remove('stream__hide');
+        b.querySelectorAll('li').forEach((li,i)=>chipTimers.push(setTimeout(()=>li.classList.add('show'), i*90)));
+      }, base + bi*320));
+    });
+    document.querySelectorAll('.chip').forEach((c,i)=>
+      chipTimers.push(setTimeout(()=>c.classList.add('show'), base + 700 + Math.min(i,3)*60)));
+  }
+
+  function setStage(n){
+    body.dataset.stage = String(n);
+    zoneTag.textContent = TAGS[n];
+    steps.forEach((s,i)=>{ s.classList.toggle('is-done', i < n); s.classList.toggle('is-active', i === n && n < 4); });
+    if(n === 3){ steps[3].classList.add('is-done'); }
+    ritems.forEach(r=>{
+      const at = +r.dataset.doneAt;
+      r.classList.toggle('is-done', n >= at || (n===3 && at===4));
+      r.classList.toggle('is-active', at === n+1 && n < 3);
+    });
+    count.textContent = (n===3?4:n) + '/4';
+    feeds.forEach(f=>f.classList.toggle('show', n >= +f.dataset.showAt));
+    zones.empty.classList.toggle('hide', n !== 0);
+    show(zones.matched, n === 1);
+    show(zones.hero, n >= 2);
+    show(zones.kpis, n >= 3);
+    show(zones.skel, n === 2);
+    show(zones.fac, n >= 3);
+    meters(n >= 3);
+    if(n === 3) stream(); else stopStream();
+  }
+
+  /* stepper is clickable; replay walks the drill */
+  steps.forEach(s=>s.addEventListener('click', ()=>setStage(+s.dataset.goto)));
+  document.getElementById('replay').addEventListener('click', run);
+
+  function run(){
+    if(reduced){ setStage(3); return; }
+    setStage(0);
+    setTimeout(()=>setStage(1), 1100);
+    setTimeout(()=>setStage(2), 2400);
+    setTimeout(()=>setStage(3), 3900);
+  }
+
+  /* seamless tapes: duplicate track content once */
+  ['tapePrefix','tapeFac'].forEach(id=>{ const t = document.getElementById(id); t.innerHTML += t.innerHTML; });
+
+  run();
+})();
+</script>
+</body>
+</html>
