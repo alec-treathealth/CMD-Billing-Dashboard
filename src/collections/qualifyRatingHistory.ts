@@ -212,8 +212,9 @@ export function buildRatingHistoryAggQuery(
     'percentile_cont(0.5) within group (order by (payment_received - charge_date)::float8) ' +
     'filter (where charge_date is not null and payment_received is not null)::float8 as median_days_to_payment ' +
     'from collections.cmd_explorer_charge_rollup ' +
+    // Deliberate cross-tenant exception: this aggregate is requested for the validated entity scope.
     'where business_entity_id = any($1::uuid[]) ' +
-    'and payment_received >= $2::date and payment_received < $3::date ' +
+    'and payment_received >= $2::date and payment_received < $3::date ',
     'and member_id_prefix_bidx is not null ' +
     "and primary_payer is not null and btrim(primary_payer) <> '' " +
     "and facility is not null and btrim(facility) <> '' " +
