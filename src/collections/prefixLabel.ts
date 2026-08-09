@@ -24,13 +24,26 @@
  * theirs). We are the key holder, inside the process that already computes these same tokens to run
  * a search. Nothing here weakens the index for anyone who is not already the application.
  *
- * ⚠ WHAT IT DISCLOSES, STATED PLAINLY, because this is a judgement Alec owns. A three-character
- * member-id prefix is a PLAN routing code, not a person: for BCBS-style ids it is the published alpha
- * prefix that identifies the plan and the home state. The app already displays it — the search echoes
- * the typed prefix back (`core.ts alphaEcho`, `policy-strip.tsx`) — and the tape only ever shows
- * pairs carrying at least QUALIFY_TAPE_MIN_MEMBERS (3) distinct members, on a surface gated to
- * super_admin + admissions_seat. What CHANGES is that a prefix nobody searched can now appear. If
- * that trade is ever revisited, the whole capability is this one module: return null from
+ * ── ✅ RATIFIED BY ALEC, 2026-08-09 ─────────────────────────────────────────────────────────────
+ * *"yes on decision — prefix labels on the tape: a prefix nobody searched now appears (gated
+ * surface, ≥3 members/row)."* Recorded here rather than in a session note so the next reader finds a
+ * DECISION, not an open question — do not re-litigate it, and do not soften it back to the masked
+ * tail without a new ruling from him.
+ *
+ * WHAT IT DISCLOSES, stated plainly, because that is what was ratified. A three-character member-id
+ * prefix is a PLAN routing code, not a person: for BCBS-style ids it is the published alpha prefix
+ * identifying the plan and its home state. The app already displays it — the search echoes the typed
+ * prefix back (`core.ts alphaEcho`, `policy-strip.tsx`) — and the tape only ever shows pairs carrying
+ * at least QUALIFY_TAPE_MIN_MEMBERS (3) distinct members, on a surface gated to super_admin +
+ * admissions_seat. What CHANGED is that a prefix NOBODY SEARCHED can now appear.
+ *
+ * The boundary this does NOT move: the label stays between the database and the browser. It never
+ * reaches the model — `qualifyAi.ts`'s schema has no field that can carry it, and
+ * `app/test/tickerAiPayload.test.tsx` asserts that against an item that HAS one (2026-08-09: "the
+ * prefix doesn't need to reach the model anyways, correct? It can be preserved and shown on the app
+ * side still" — correct, and that is exactly the split).
+ *
+ * If the ratification is ever withdrawn, the whole capability is this one module: return null from
  * `prefixLabelFor` and every caller degrades to the masked tail it used before.
  *
  * NULL-ON-MISS, NEVER FABRICATED. Normalization only upper-cases, strips whitespace and strips a
