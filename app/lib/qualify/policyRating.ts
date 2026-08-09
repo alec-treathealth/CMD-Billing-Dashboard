@@ -158,6 +158,17 @@ const NOT_RATED: QualifyPolicyRating = {
   basis: 'no facility clears the sample floor',
 };
 
+/** The two fields the policy fold actually reads. STRUCTURAL on purpose (2026-08-08): the nightly
+ *  rating-history cron (src/collections/qualifyRatingHistory.ts via board.ts) folds per-facility
+ *  aggregates that are not full QualifyFacility cards, and a parallel weighted-mean implementation
+ *  there is exactly how the stored number and the on-screen number would drift apart. Every
+ *  existing call site passes QualifyFacility[], which satisfies this by subset — a WIDENING of the
+ *  parameter, never a behavior change. */
+export interface PolicyRatable {
+  ratingV2: number | null;
+  distinctPatients: number;
+}
+
 /**
  * @param basisScope OPTIONAL name for the POPULATION these facilities are (S3, 2026-08-08) — e.g.
  * `"AETNA US HEALTHCARE's whole book"`. Omit and the basis line is byte-identical to what shipped.
@@ -165,15 +176,21 @@ const NOT_RATED: QualifyPolicyRating = {
  * WHY IT IS PASSED IN AND NOT DERIVED. Since the book-led flip the same function is handed two
  * genuinely different populations — the searched identifier's own footprint, and the payer's whole
  * book — and "patient-weighted across 2 rated facilities" is true of both, so it identifies neither.
- * This module cannot tell them apart (a `QualifyFacility[]` is a `QualifyFacility[]`), and inventing
- * a guess from the rows would be exactly the second derivation the header's reconciled-by-
- * construction argument exists to prevent. The caller knows which list it drew; it says so.
+ * This module cannot tell them apart (a row is a row), and inventing a guess from the rows would be
+ * exactly the second derivation the header's reconciled-by-construction argument exists to prevent.
+ * The caller knows which list it drew; it says so.
  *
  * It reaches the NOT_RATED arm too. "No facility clears the sample floor" over an unnamed list is
  * the same unattributed claim as the rated basis — and it is the arm a thin book actually hits.
+ *
+ * ⚠ THE TWO 2026-08-08 CHANGES COMPOSE, and neither weakens the other: `basisScope` names the
+ * population for the on-screen basis line, while `PolicyRatable` widens WHICH rows may be folded.
+ * The nightly cron passes bare aggregates and no scope (its population is recorded per row in
+ * collections.qualify_policy_rating_daily, not in a sentence); every interactive caller keeps
+ * passing `QualifyFacility[]`, which satisfies `PolicyRatable` by subset.
  */
 export function derivePolicyRating(
-  facilities: readonly QualifyFacility[],
+  facilities: readonly PolicyRatable[],
   basisScope?: string,
 ): QualifyPolicyRating {
   const inScope = basisScope === undefined ? '' : ` in ${basisScope}`;
@@ -183,7 +200,7 @@ export function derivePolicyRating(
       : { ...NOT_RATED, basis: `no facility in ${basisScope} clears the sample floor` };
   // Only facilities whose CARD shows a number: rated, and above the sample-gate floor.
   const rated = facilities.filter(
-    (f): f is QualifyFacility & { ratingV2: number } =>
+    (f): f is PolicyRatable & { ratingV2: number } =>
       f.ratingV2 !== null && ratingSampleTier(f.distinctPatients) !== 'insufficient',
   );
   if (rated.length === 0) return notRated;

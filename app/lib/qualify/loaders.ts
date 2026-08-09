@@ -26,6 +26,10 @@ import {
 import { buildQualifyCensusReadQuery, buildQualifyOutcomesReadQuery } from '../../../src/collections/qualifyCensus';
 import { buildRollupRefreshFreshnessQuery } from '../../../src/collections/rollupFreshnessQuery';
 import type { QualifyTokenKind } from '../../../src/collections/qualifyQuery';
+import {
+  buildPolicyTapeQuery,
+  type QualifyPolicyTapeRow,
+} from '../../../src/collections/qualifyRatingHistory';
 
 let executor: PgExecutor | null = null;
 /** Module-cached executor on a SEPARATE small claims_reader pool (the verisReaderPool precedent). */
@@ -219,6 +223,28 @@ export async function loadQualifyFacilityOutcomes(): Promise<
     if (code === '42P01') {
       console.error('qualify facility outcomes table absent (0091 unapplied) — auth-fit falls back to the census snapshot');
       return [];
+    }
+    throw err;
+  }
+}
+
+/** The smoke-shell policy tape (mig 0093) — FAIL-SOFT to null on the absent-relation class
+ *  (42P01/3F000) while 0093 is unapplied, the exact loaders.ts discipline: the board renders the
+ *  tape lane honestly empty instead of 500ing (PR-migrations-not-auto-applied incident pattern).
+ *  Any OTHER error rethrows — 42501 or an outage must never masquerade as "no snapshots yet".
+ *  Its OWN absent-check rather than registryAbsent(): that helper's log line names the CODING
+ *  REGISTRY, which would misdirect an operator diagnosing an unapplied 0093 (review 2026-08-08). */
+export async function loadQualifyPolicyTape(): Promise<QualifyPolicyTapeRow[] | null> {
+  const q = buildPolicyTapeQuery();
+  try {
+    const res = await qualifyV2Reader().query<QualifyPolicyTapeRow>(q.sql, q.params);
+    return res.rows;
+  } catch (err) {
+    const code = typeof err === 'object' && err !== null ? String((err as { code?: unknown }).code) : '';
+    if (code === '42P01' || code === '3F000') {
+      // SQLSTATE is non-PHI; the swallow must stay discoverable in server logs.
+      console.error(`qualify rating history unavailable (sqlstate ${code}) — mig 0093 unapplied? tape reads as absent`);
+      return null;
     }
     throw err;
   }
