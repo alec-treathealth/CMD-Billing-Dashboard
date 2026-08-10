@@ -4631,8 +4631,14 @@ test('S6: the hoist cannot break the skip reveal — the stagger keys on the rev
     'utf8',
   );
   assert.match(shell, /toArray<HTMLElement>\('\[data-v3-facet\]', revealRoot\)/, 'the reveal is scoped to the derived root');
+  // BOTH reveals, not only this one: the tile stagger is the other half of the same fix, and
+  // reverting just it to `stageEl` would re-break shell-mode tiles under a fully green suite.
+  assert.match(shell, /toArray<HTMLElement>\('\[data-v3-tile\]', revealRoot\)/, 'and so is the tile stagger');
   assert.match(shell, /const revealRoot = revealScopeFor\(shellMode, root, stageEl\)/, 'and that root is the derivation');
   assert.match(shell, /querySelector<HTMLElement>\('\[data-v3-stage\]'\)/, 'and stageEl is that subtree');
+  // The ENTRANCE must NOT take the widened scope — it animates autoAlpha (visibility: hidden), which
+  // over the shell root would hide the board, the composer and the watchers on every stage change.
+  assert.match(shell, /gsap\.fromTo\(\s*stageEl,/, 'the entrance stays on the stage subtree');
 
   const html = render(
     props('answer', fixture(), {

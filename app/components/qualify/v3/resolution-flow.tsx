@@ -4071,6 +4071,21 @@ export interface ResolutionStagesProps {
   resolution: QualifyResolution | null;
   reason: 'empty' | 'prefix_too_short' | 'no_match' | null;
   echo: string;
+  /**
+   * THE SESSION WAS RESET AND THE HELD TERM WAS DROPPED (Smoke shell's "Start over"). It gates
+   * exactly two things on the identify stage — the input's `defaultValue` and the "We read as …"
+   * sentence — because both are claims about a search that no longer exists.
+   *
+   * ⚠ IT IS NOT "the stage went back to identify". The receipt's Change on the Search row lands on
+   * this same screen with the term still HELD, and there pre-filling the prefix is the point: the
+   * operator is editing a search, not starting one. Only a reset drops the term, so only a reset
+   * must empty the box. That distinction is the whole reason this is its own prop rather than
+   * `props.stage === 'identify'`.
+   *
+   * DEFAULTS FALSE, which is what makes the single-column v3 path byte-identical: no caller outside
+   * the shell passes it, and `false` reduces both expressions below to exactly what they were.
+   */
+  laneCleared?: boolean;
   denied?: string | null;
   pending: boolean;
   payerPick: string | null;
@@ -4273,9 +4288,16 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
       <div data-v3-stage>
         {props.stage === 'identify' ? (
           <>
+            {/* ── BOTH HALVES OF THE PRE-FILL GATE ON ONE BIT ──────────────────────────────────
+                `echo` becomes the input's `defaultValue` and `readAs` becomes "We read as a
+                3-character member-ID prefix." — two claims about the LAST resolved identifier. After
+                a Smoke-shell reset the term has been dropped and the rail says "No lane yet", so
+                both are stale; leaving either one behind is how the strip ends up contradicting the
+                search box 12px below it. Gated together, here, so the next reader sees the pair.
+                `laneCleared` defaults false, so single-column v3 renders exactly what it did. */}
             <StageIdentify
-              echo={props.echo}
-              readAs={props.resolution ? props.resolution.handle.readAs : null}
+              echo={props.laneCleared ? '' : props.echo}
+              readAs={props.laneCleared || !props.resolution ? null : props.resolution.handle.readAs}
               action={props.identifyAction}
               pending={props.pending}
             />

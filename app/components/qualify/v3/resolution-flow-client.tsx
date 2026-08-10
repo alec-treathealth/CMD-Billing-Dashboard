@@ -279,6 +279,9 @@ export function ResolutionFlowClient({
       // mode: nothing there reads either, and the setState is a no-op write of `false` over `false`.
       searchSeqRef.current += 1;
       setSessionCleared(false);
+      // The third of the same kind: a "watcher not saved" notice belongs to the search that failed
+      // to save, not to the one being typed now. Same inertness argument — null over null.
+      setWatcherSaveFailed(null);
       dispatch({ type: 'search_submitted' });
       formAction(fd);
     },
@@ -883,8 +886,21 @@ export function ResolutionFlowClient({
 
   /** ── THE RAIL'S LOCK STATE, DERIVED ────────────────────────────────────────────────────────────
    *  What the strip says must describe the SESSION, not the server action's leftover state. See
-   *  `laneIsOpen` for why the shell cannot simply null `state.resolution`. */
-  const laneOpen = laneIsOpen(state.resolution !== null, sessionCleared);
+   *  `laneIsOpen` for why the shell cannot simply null `state.resolution`.
+   *
+   *  ⚠ `stageIsIdentify` IS THE SECOND DOOR, and it was open until now. `onChange('identify')` — the
+   *  receipt's Change on the Search row — dispatches the SAME `went_back{target:'identify'}` as the
+   *  reset but through a handler that arms nothing, so the board zone rendered "Nothing resolved yet"
+   *  while the strip beside it still said "🔒 Locked to GGS". Reading the STAGE closes every route
+   *  back to that screen at once, including a future one, instead of arming a bit per handler. It
+   *  does not disturb the pending-window behaviour documented on `sessionCleared`: there the stage is
+   *  'payer', not 'identify' (a new submit clears `backTo`, and `deriveStage` sees the previous
+   *  resolution). */
+  const laneOpen = laneIsOpen({
+    resolutionPresent: state.resolution !== null,
+    sessionCleared,
+    stageIsIdentify: stage === 'identify',
+  });
 
   /** Rail head "Start over": drop the held term, step the machine back to identify, clear the
    *  pending ask, and CLOSE THE LANE. Watchers and history deliberately survive — they are the
@@ -899,6 +915,8 @@ export function ResolutionFlowClient({
     // ⚠ THIS is what makes the strip say "No lane yet" — dispatching `went_back` cannot, because
     // `state.resolution` lives in `useActionState` and no client dispatch replaces it.
     setSessionCleared(true);
+    // A watcher notice is about a search that no longer exists — it must not stand over a new lane.
+    setWatcherSaveFailed(null);
     // Belt and braces, no longer load-bearing: with the search counter in the key (see the
     // recording effect) a post-reset search mints new keys anyway. Kept because it bounds the set
     // to one session's worth of entries rather than the mount's.
@@ -1169,6 +1187,17 @@ export function ResolutionFlowClient({
       resolution={state.resolution}
       reason={state.reason}
       echo={state.echo}
+      // ── THE SEARCH BOX MUST NOT CONTRADICT THE STRIP 12px ABOVE IT ────────────────────────────
+      // `echo` becomes StageIdentify's `defaultValue` and the resolution's `readAs` becomes
+      // "We read as a 3-character member-ID prefix." — both claims about a search that a reset has
+      // dropped. Before the lock-strip fix these were stale AND AGREED with the strip; fixing one
+      // and not the other would leave the rail arguing with itself.
+      //
+      // ⚠ `sessionCleared`, NOT `!laneOpen`. The receipt's Change lands on this same screen with the
+      // term still held, and there the pre-fill is the point — the operator is editing a search, not
+      // starting one. Only a reset drops the term. Passing `!laneOpen` here would also change the
+      // SINGLE-COLUMN path, where a Change legitimately pre-fills today.
+      laneCleared={sessionCleared}
       denied={state.denied}
       pending={isPending}
       payerPick={payerPick}

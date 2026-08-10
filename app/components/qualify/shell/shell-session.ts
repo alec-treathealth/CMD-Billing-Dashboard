@@ -26,14 +26,37 @@
  * is what left the lock strip naming the lane the operator just abandoned ("Locked to GGS — answers
  * come only from this lane").
  *
- * The session's own bit is therefore the second input, and it is the shell's, not the reducer's:
- * a reducer arm cannot express "the server action's state is stale" because the reducer cannot see
- * that state. Armed by the reset, disarmed by the next identify submit (a new search opens a new
- * lane), and READ here rather than stored as a "hasResolution" flag — the shell's header records why
+ * THREE INPUTS, NOT TWO, AND AN OBJECT RATHER THAN THREE POSITIONAL BOOLEANS — which would be the
+ * "two adjacent call sites spelling different things the same way" hazard in its purest form.
+ *
+ *  · `resolutionPresent` — the server action resolved something.
+ *  · `sessionCleared` — the shell's own bit, armed by "Start over" and disarmed by the next identify
+ *    submit. It is the shell's and not the reducer's: a reducer arm cannot express "the server
+ *    action's state is stale" because the reducer cannot see that state.
+ *  · `stageIsIdentify` — THE SECOND WAY BACK TO THE SAME SCREEN, and the one the first fix missed.
+ *    The receipt's "Change" on the Search row (`onChange`) dispatches the SAME
+ *    `went_back{target:'identify'}` as the reset, through a handler that arms nothing. The board zone
+ *    renders "Nothing resolved yet" off the stage while the rail strip beside it went on claiming a
+ *    lock — the two-panes-disagreeing failure that the disarm-at-submit trade-off is itself justified
+ *    by. Whatever puts the flow back on the identify question closes the lane.
+ *
+ * `sessionCleared` IS NOT REDUNDANT AGAINST `stageIsIdentify`, though today every reachable state
+ * where the former is true has the latter true as well (the reset dispatches `went_back`, which
+ * writes `backTo='identify'`). Keeping both means the rule holds by its own statement rather than by
+ * a proof about a neighbouring field's behaviour — the exact dependency `snapshot_resolved`'s
+ * `wasRefresh` condition needed its own marker to escape (flow-state invariant p). And the two are
+ * genuinely different claims elsewhere: only `sessionCleared` separates a RESET (term dropped, so the
+ * search box must be empty) from a CHANGE (term kept, so the box should pre-fill).
+ *
+ * READ per render rather than stored as a "hasResolution" flag — the shell's header records why
  * derived beats stored on this surface.
  */
-export function laneIsOpen(resolutionPresent: boolean, sessionCleared: boolean): boolean {
-  return resolutionPresent && !sessionCleared;
+export function laneIsOpen(input: {
+  resolutionPresent: boolean;
+  sessionCleared: boolean;
+  stageIsIdentify: boolean;
+}): boolean {
+  return input.resolutionPresent && !input.sessionCleared && !input.stageIsIdentify;
 }
 
 /**
