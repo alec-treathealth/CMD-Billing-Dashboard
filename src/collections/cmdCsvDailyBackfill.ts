@@ -36,7 +36,20 @@ import { aliasIndigoFacilityColumn, aggregateDailyDeposits, dropFuturePaymentRow
 import { replaceCmdDailyForFacility, makeClient } from './db.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../tenants.js';
 
-/** Indigo facility_code (CMD customer id) -> name. Mirrors migration 0034 / INDIGO_CUSTOMERS. */
+/**
+ * Indigo facility_code (CMD customer id) -> name. Mirrors migration 0034 / the
+ * `collections.facilities` seed, and DELIBERATELY INCLUDES DEFUNCT FACILITIES — it does NOT
+ * mirror INDIGO_CUSTOMERS, which is the live polling roster.
+ *
+ * That divergence is required, not drift: this script labels HISTORICAL deposit rows, so it must
+ * name every facility that existed during the period being backfilled, including accounts closed
+ * since. Narrowing it to the active roster would leave older rows unlabelled.
+ *
+ * Currently 32 entries against the roster's 29. The extra three are exactly the retired-but-owned
+ * facilities enumerated in INDIGO_RETIRED_CUSTOMERS (cmdCustomers.ts): 10035467 RESTORED HOPE
+ * RECOVERY, 10036020 MADISON RECOVERY CENTER, 10036030 MISSOURI BEHAVIORAL HEALTH. Do not "fix"
+ * the gap by deleting them here.
+ */
 const INDIGO_NAME_BY_CODE: Readonly<Record<string, string>> = {
   '10026460': '405 RECOVERY', '10029373': 'ADDICTION FREE RECOVERY SERVICES', '10029528': 'ADOLESCENT MENTAL HEALTH',
   '10031413': 'BRITE RECOVERY', '10028848': 'CALIFORNIA TREATMENT COLLECTIVE', '10028842': 'COVENANT HILLS TREATMENT CENTERS',
