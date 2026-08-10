@@ -147,19 +147,68 @@ export const INDIGO_CUSTOMERS: readonly CmdCustomer[] = [
 ];
 
 /**
+ * Indigo facilities REMOVED from the polling roster above that Indigo STILL OWNS.
+ *
+ * The roster answers three different questions and only ONE of them is "poll CMD for this":
+ *   1. ingest    — which accounts the crons call (INDIGO_CUSTOMERS / ALL_CMD_CUSTOMERS)
+ *   2. ownership — "whose facility is this code?" (facilityBelongsToEntity)
+ *   3. options   — which facilities an admin may target (facilityCodesForEntity, and
+ *                  loadResolutionFacilityOptions in app/lib/server.ts)
+ * Deleting a row from the roster is the correct way to stop (1). It is the WRONG way to answer
+ * (2) and (3): a closed account does not stop being Indigo's. Its history, its
+ * collections.facilities dimension row, and its reported revenue all remain, so a guard that
+ * says "not in tenant" is answering a LIVENESS question with a TENANCY error.
+ *
+ * Membership is measured, not assumed (2026-08-10), which is why this is three codes and not all
+ * eight removals: 10035467 retains 8 collections.daily_collections rows ($28,843.12, 2026-05-16
+ * -> 2026-06-18) plus its dimension row; 10036020 and 10036030 retain dimension rows with zero
+ * data rows; the 2026-07-09 batch (10034063, 10035913, 10032612, 10029219, 10034039) has neither
+ * a dimension row nor any data, so those are genuinely gone and are deliberately NOT listed.
+ *
+ * ⚠ NEVER add this list to an ingest loop, and never merge it into ALL_CMD_CUSTOMERS. It exists
+ * so ingest can stay narrow while ownership stays truthful. Ingest reads ALL_CMD_CUSTOMERS;
+ * ownership and pickers read OWNED_CMD_CUSTOMERS. Re-activating a facility means moving its row
+ * back up into INDIGO_CUSTOMERS, not adding it here twice.
+ */
+export const INDIGO_RETIRED_CUSTOMERS: readonly CmdCustomer[] = [
+  { customerId: '10035467', facilityCode: '10035467', businessEntityId: INDIGO_ENTITY_ID }, // RESTORED HOPE RECOVERY   — closed CMD-side 2026-08-06; 8 daily rows + dimension row retained
+  { customerId: '10036020', facilityCode: '10036020', businessEntityId: INDIGO_ENTITY_ID }, // MADISON RECOVERY CENTER  — hard INVALID CRITERIA 2026-08-02; dimension row only
+  { customerId: '10036030', facilityCode: '10036030', businessEntityId: INDIGO_ENTITY_ID }, // MISSOURI BEHAVIORAL HEALTH — hard INVALID CRITERIA 2026-08-02; dimension row only
+];
+
+/**
  * The Collections Explorer / Master BXR chart cron is BXR-only today, so its roster is
  * unchanged: CMD_EXPLORER_CUSTOMERS keeps the SAME name and the SAME value (BXR's 15) so
  * that cron and its tests are byte-for-byte unaffected by Indigo onboarding.
  */
 export const CMD_EXPLORER_CUSTOMERS: readonly CmdCustomer[] = BXR_CUSTOMERS;
 
-/** BXR + Indigo — the full customer roster for tenant-aware ingest loops (era_ingest). */
+/**
+ * BXR + Indigo — the ACTIVE customer roster for tenant-aware ingest loops (era_ingest).
+ * POLLING ONLY. Retired facilities are deliberately absent: adding one here would resume CMD
+ * calls against a closed account. For "does this tenant own this code", use OWNED_CMD_CUSTOMERS.
+ */
 export const ALL_CMD_CUSTOMERS: readonly CmdCustomer[] = [...BXR_CUSTOMERS, ...INDIGO_CUSTOMERS];
 
 /**
- * Every facilityCode the given tenant owns. THE ROSTER IS THE SOURCE OF TRUTH for "which book
- * does this facility belong to" — `collections.facilities` is tenant-agnostic reference data
- * and cannot answer it.
+ * Every facility either tenant OWNS — the active roster plus retired-but-still-owned.
+ *
+ * This, not ALL_CMD_CUSTOMERS, is the correct basis for ownership guards and for any picker
+ * offering "a facility in this book". Keeping them as two named constants is the whole point:
+ * a future removal edits INDIGO_CUSTOMERS (stopping the cron) and adds to
+ * INDIGO_RETIRED_CUSTOMERS (keeping ownership true), and neither edit can silently do the
+ * other's job.
+ */
+export const OWNED_CMD_CUSTOMERS: readonly CmdCustomer[] = [
+  ...ALL_CMD_CUSTOMERS,
+  ...INDIGO_RETIRED_CUSTOMERS,
+];
+
+/**
+ * Every facilityCode the given tenant owns — active AND retired. THIS MODULE IS THE SOURCE OF
+ * TRUTH for "which book does this facility belong to" — `collections.facilities` is
+ * tenant-agnostic reference data and cannot answer it. Specifically OWNED_CMD_CUSTOMERS is that
+ * source, not the polling roster: liveness and ownership are separate questions.
  *
  * Exists for the forecast-edit write path (migration 024): a super admin picks a facility for a
  * hand-added expected payment, and without this check a facility from the OTHER book could be
@@ -168,14 +217,19 @@ export const ALL_CMD_CUSTOMERS: readonly CmdCustomer[] = [...BXR_CUSTOMERS, ...I
  * component as well as from the server.
  */
 export function facilityCodesForEntity(businessEntityId: string): string[] {
-  return ALL_CMD_CUSTOMERS.filter((c) => c.businessEntityId === businessEntityId).map(
+  return OWNED_CMD_CUSTOMERS.filter((c) => c.businessEntityId === businessEntityId).map(
     (c) => c.facilityCode,
   );
 }
 
-/** True when `facilityCode` is on the given tenant's roster. Case-sensitive: codes are canonical. */
+/**
+ * True when `facilityCode` is owned by the given tenant. Case-sensitive: codes are canonical.
+ *
+ * Reads OWNED_CMD_CUSTOMERS, NOT the polling roster, so a facility removed from CMD polling
+ * still answers truthfully about whose book it is. Ownership is permanent; polling is not.
+ */
 export function facilityBelongsToEntity(facilityCode: string, businessEntityId: string): boolean {
-  return ALL_CMD_CUSTOMERS.some(
+  return OWNED_CMD_CUSTOMERS.some(
     (c) => c.businessEntityId === businessEntityId && c.facilityCode === facilityCode,
   );
 }

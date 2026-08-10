@@ -23,8 +23,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  ALL_CMD_CUSTOMERS,
   BXR_CUSTOMERS,
   INDIGO_CUSTOMERS,
+  INDIGO_RETIRED_CUSTOMERS,
+  OWNED_CMD_CUSTOMERS,
   facilityBelongsToEntity,
   facilityCodesForEntity,
 } from '../src/collections/cmdCustomers.js';
@@ -604,16 +607,65 @@ test('suggestions are deterministic regardless of input order', () => {
 // payment under BXR. 024 has no FK on facility_code and collections.facilities is
 // tenant-agnostic, so the roster is the only thing that can answer "whose facility is this".
 
-test('facilityCodesForEntity returns exactly one tenant roster', () => {
+test('facilityCodesForEntity returns exactly one tenant, and covers OWNED (not just polled)', () => {
   const bxr = facilityCodesForEntity(BXR_ENTITY_ID);
   const indigo = facilityCodesForEntity(INDIGO_ENTITY_ID);
-  assert.equal(bxr.length, BXR_CUSTOMERS.length);
-  assert.equal(indigo.length, INDIGO_CUSTOMERS.length);
+  assert.equal(bxr.length, BXR_CUSTOMERS.length, 'BXR has no retired facilities today');
+  // Ownership spans active + retired. Asserting against INDIGO_CUSTOMERS alone would re-encode
+  // the bug this separation exists to prevent (a removed facility losing its owner).
+  assert.equal(indigo.length, INDIGO_CUSTOMERS.length + INDIGO_RETIRED_CUSTOMERS.length);
   assert.ok(bxr.includes('CAMH'), 'a known BXR short code');
   // THE POINT OF THE GUARD: no facility may appear on both rosters, or "whose is it" has no
   // answer and the guard would wave a cross-tenant write through.
   const overlap = bxr.filter((c) => indigo.includes(c));
   assert.deepEqual(overlap, [], 'the two books share no facility code');
+});
+
+// --- polling roster vs ownership set: the separation must not collapse -----------------
+// Removing a facility from CMD polling must never remove it from its tenant's ownership. These
+// lock both halves so a future removal cannot silently answer a liveness question with a
+// tenancy error (and cannot silently resume polling a closed account).
+
+test('retired facilities are OWNED but never POLLED', () => {
+  assert.ok(INDIGO_RETIRED_CUSTOMERS.length > 0, 'the list is load-bearing; keep it populated');
+  for (const retired of INDIGO_RETIRED_CUSTOMERS) {
+    // Not in any ingest roster — polling must stay stopped.
+    assert.ok(
+      !ALL_CMD_CUSTOMERS.some((c) => c.customerId === retired.customerId),
+      `${retired.customerId} must NOT be in the polling roster`,
+    );
+    // But still owned, so guards and pickers answer truthfully.
+    assert.ok(
+      OWNED_CMD_CUSTOMERS.some((c) => c.facilityCode === retired.facilityCode),
+      `${retired.facilityCode} must be in the owned set`,
+    );
+    assert.ok(
+      facilityBelongsToEntity(retired.facilityCode, retired.businessEntityId),
+      `${retired.facilityCode} must still belong to its tenant`,
+    );
+    assert.ok(
+      !facilityBelongsToEntity(retired.facilityCode, BXR_ENTITY_ID),
+      'a retired Indigo facility is still not BXR\'s',
+    );
+  }
+});
+
+test('10035467 stays owned — it holds reported revenue that must remain attributable', () => {
+  // Measured 2026-08-10: 8 collections.daily_collections rows, $28,843.12, plus its
+  // collections.facilities dimension row. Reporting reads the DB and is roster-independent, but
+  // the forecast-edit guard and the assignment picker read the roster — so dropping ownership
+  // here would reject legitimate edits to this facility's history.
+  assert.ok(facilityBelongsToEntity('10035467', INDIGO_ENTITY_ID));
+  assert.ok(facilityCodesForEntity(INDIGO_ENTITY_ID).includes('10035467'));
+});
+
+test('OWNED_CMD_CUSTOMERS is the active roster plus retired, with no duplicates', () => {
+  assert.equal(
+    OWNED_CMD_CUSTOMERS.length,
+    ALL_CMD_CUSTOMERS.length + INDIGO_RETIRED_CUSTOMERS.length,
+  );
+  const codes = OWNED_CMD_CUSTOMERS.map((c) => c.facilityCode);
+  assert.equal(new Set(codes).size, codes.length, 'a facility must not be both active and retired');
 });
 
 test('facilityBelongsToEntity is exact and rejects the other tenant', () => {
