@@ -174,7 +174,7 @@
      shipped #2D7393 measures 5.27:1; and .kpi__range (mock line 771) collapses
      the worst/best flanks onto one line WITHOUT the facility names, which is the
      entire point of them (app/lib/qualify/tileFlanks.ts). Diff before porting.
-     Contrast figures here are asserted by app/test/ths-tokens-contrast.test.ts. */
+     Contrast figures here are asserted by app/test/ths-tokens-contrast.test.tsx. */
 
   /* The dark tape surface. Not an inverted --color-text: it is the brand deep, so
      the strip reads as brand chrome rather than as a modal scrim. */

@@ -8,6 +8,9 @@
  * tsc and every render test; only this file would go red.
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import {
   buildRecentSearchListQuery,
@@ -16,10 +19,15 @@ import {
   foldWatcherSeries,
   MASKED_ECHO_MIN_HIDDEN,
   maskedPatientEcho,
+  QUALIFY_RECENT_MAX,
+  QUALIFY_WATCHER_MAX,
   recentSearchEcho,
   watcherSeriesKey,
   type QualifyWatcherSeriesRow,
 } from '../src/collections/qualifyWatchers';
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const MIGRATION_0096 = join(REPO_ROOT, 'supabase/migrations/0096_qualify_watchers.sql');
 
 // ── Builders ────────────────────────────────────────────────────────────────────────────────────
 test('list queries are parameterized and user-scoped', () => {
@@ -124,4 +132,30 @@ test('recentSearchEcho is the ≤3-char [A-Z0-9] facet or null — the CHECK con
   assert.equal(recentSearchEcho('w2'), 'W2');
   assert.equal(recentSearchEcho('---'), null);
   assert.equal(recentSearchEcho(''), null);
+});
+
+// ── Constant/definer agreement ──────────────────────────────────────────────────────────────────
+// QUALIFY_WATCHER_MAX and QUALIFY_RECENT_MAX exist so a rep-facing surface can explain a refusal in
+// the same terms the DB enforces it in — but the DB is the real source of truth (0096's
+// `claims.save_qualify_watcher` / `claims.record_qualify_recent_search`), and a literal duplicated
+// in two files can drift without either one erroring. These tests fail loudly the moment they do,
+// which is the "at minimum" bar for a constant whose only other job is to look like a source of
+// truth it is not.
+test('QUALIFY_WATCHER_MAX matches the cap literal in 0096\'s save_qualify_watcher', () => {
+  const sql = readFileSync(MIGRATION_0096, 'utf8');
+  const match = sql.match(/>=\s*(\d+)\s+then\s+raise exception 'save_qualify_watcher: watcher limit reached/);
+  assert.ok(match, 'could not find the watcher-cap raise in 0096 — did the definer change shape?');
+  assert.equal(Number(match![1]), QUALIFY_WATCHER_MAX);
+});
+
+test('QUALIFY_RECENT_MAX matches the prune literal in 0096\'s record_qualify_recent_search', () => {
+  const sql = readFileSync(MIGRATION_0096, 'utf8');
+  const match = sql.match(/record_qualify_recent_search[\s\S]*?order by searched_at desc, id desc\s+limit\s+(\d+)/);
+  assert.ok(match, 'could not find the recent-search prune LIMIT in 0096 — did the definer change shape?');
+  assert.equal(Number(match![1]), QUALIFY_RECENT_MAX);
+});
+
+test('buildRecentSearchListQuery is wired to QUALIFY_RECENT_MAX, not a bare literal', () => {
+  const q = buildRecentSearchListQuery('u-1');
+  assert.match(q.sql, new RegExp(`limit ${QUALIFY_RECENT_MAX}$`));
 });

@@ -58,22 +58,26 @@ The search logic is being rewritten (another session). Everything below the
 board sections out. UI build proceeds; the LANE binds to the rewrite when it lands.
 
 **BUILT on this branch (2026-08-08) — the tape is no longer parked:**
-- **Mig 0093** (`supabase/migrations/0093_qualify_rating_history.sql`, NOT applied):
-  `collections.qualify_policy_rating_daily` (one row per active prefix-token × payer
-  per day — the five-factor policy rating + the claims aggregates that fed it),
-  `collections.qualify_rating_run` (catch-up ledger), and
+- **Mig 0093** (`supabase/migrations/0093_qualify_rating_history.sql`) — **APPLIED LIVE
+  2026-08-09** and backfilled the same day (180/180 dates, 2026-02-10 → 2026-08-08, no
+  gaps, 70 seconds, 214,407 rows; see CLAUDE.md's 0093 note for the verified apply
+  detail). Creates `collections.qualify_policy_rating_daily` (one row per active
+  prefix-token × payer per day — the five-factor policy rating + the claims aggregates
+  that fed it), `collections.qualify_rating_run` (catch-up ledger), and
   `collections.qualify_prefix_echo` + SECURITY DEFINER
   `collections.record_qualify_prefix_echo(token, echo)` — the echo seam the search
-  rewrite calls at term-mint time so tape items gain their 'GGS' labels.
+  rewrite calls at term-mint time so tape items gain their 'GGS' labels (still unwired —
+  superseded by `prefixLabel.ts`, see the UI binding map below).
 - **Nightly cron** `/api/cron/qualify-rating-history` (daily 05:10 UTC, DB-only):
-  self-healing catch-up over a 180-day horizon — the FIRST run backfills ~180 daily
-  snapshots so the 90d delta works immediately. Backfill is a disclosed
-  reconstruction: claims factors are exact as-of; coding/census context is
-  current-state (see qualifyRatingHistory.ts header). Rating parity by injection:
-  app/lib/server.ts wires the real computeRatingV2 + derivePolicyRating.
+  self-healing catch-up over a 180-day horizon — the FIRST run backfilled ~180 daily
+  snapshots so the 90d delta works immediately (confirmed: the 2026-08-09 backfill above).
+  Backfill is a disclosed reconstruction: claims factors are exact as-of; coding/census
+  context is current-state (see qualifyRatingHistory.ts header). Rating parity by
+  injection: app/lib/server.ts wires the real computeRatingV2 + derivePolicyRating.
 - **Tape read API**: `getQualifyPolicyTape()` (app/lib/qualify/board-actions.ts →
-  board.ts core → loaders.ts `loadQualifyPolicyTape`, fail-soft while 0093 is
-  unapplied). Reads as of YESTERDAY's close (the newest fully-ingested date).
+  board.ts core → loaders.ts `loadQualifyPolicyTape`, fail-soft while 0093 was
+  unapplied — now returns live data). Reads as of YESTERDAY's close (the newest
+  fully-ingested date).
   Top 20 by |Δ90|, member floor 3, NON-DOLLAR payload
   (`QualifyPolicyTapeItem`: token, tokenTail, echo, payer, ratingNow/Then, deltaPts,
   members, lines). **This is the contract the new UI's prefix tape binds to.**

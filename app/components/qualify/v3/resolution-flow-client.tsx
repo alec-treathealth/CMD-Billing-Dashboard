@@ -92,7 +92,7 @@ import { INITIAL_SHELL_STATE, makeRetryHandler, shellReducer } from './flow-stat
 import { StageAnswer } from './resolution-flow';
 import { LaneRail } from '../shell/lane-rail';
 import { QualifyComposer } from '../shell/composer';
-import { ThisSearchZone, ZoneRule } from '../shell/board-zone';
+import { ThisSearchZone } from '../shell/board-zone';
 import { WatchersPanel } from '../shell/watchers-panel';
 import { RecentSearches } from '../shell/recent-searches';
 // The shell's own pure derivations — each one a defect the review confirmed in THIS file's wiring,

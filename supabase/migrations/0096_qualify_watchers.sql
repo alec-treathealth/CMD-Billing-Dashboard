@@ -133,7 +133,15 @@ create policy qualify_recent_reader_select on claims.qualify_recent_search
 
 -- Upsert one watcher for p_user. Enforces the per-kind shape (redundant with the CHECKs, but a
 -- definer that validates loudly beats a constraint violation surfacing as a 500) and a 40-watcher
--- per-user cap. Returns the row id.
+-- per-user cap ON NEW WATCHERS ONLY.
+--
+-- CORRECTED (caught in review before apply, 2026-08-10): the first draft counted existing rows and
+-- raised BEFORE the upsert, unconditionally — so once a user had 40 watchers, the cap also blocked
+-- editing one already on file (e.g. changing a trend watcher's alert threshold), even though the
+-- statement below is an UPDATE for that row, not an INSERT. The fix checks whether a row matching
+-- the same conflict key (app_user_id, kind, subject_token, payer_label — the qualify_watcher_subject_uq
+-- shape) already exists; the cap applies only when it does not, i.e. only to rows that would actually
+-- grow the count. Returns the row id.
 create or replace function claims.save_qualify_watcher(
   p_user      uuid,
   p_kind      text,
@@ -148,6 +156,7 @@ set search_path = claims, pg_catalog
 as $$
 declare
   v_id bigint;
+  v_is_new boolean;
 begin
   if p_user is null then
     raise exception 'save_qualify_watcher: user required' using errcode = 'check_violation';
@@ -168,7 +177,18 @@ begin
   if p_threshold is not null and p_threshold not between 1 and 100 then
     raise exception 'save_qualify_watcher: threshold out of range' using errcode = 'check_violation';
   end if;
-  if (select count(*) from claims.qualify_watcher where app_user_id = p_user) >= 40 then
+
+  -- Same key the ON CONFLICT below targets: a match here means this call UPDATES an existing row,
+  -- so it must never count against the cap meant to bound how many DISTINCT watchers a user holds.
+  select not exists (
+    select 1 from claims.qualify_watcher
+     where app_user_id = p_user
+       and kind = p_kind
+       and coalesce(subject_token, '') = coalesce(p_token, '')
+       and coalesce(payer_label, '') = coalesce(p_payer, '')
+  ) into v_is_new;
+
+  if v_is_new and (select count(*) from claims.qualify_watcher where app_user_id = p_user) >= 40 then
     raise exception 'save_qualify_watcher: watcher limit reached (40)' using errcode = 'check_violation';
   end if;
 

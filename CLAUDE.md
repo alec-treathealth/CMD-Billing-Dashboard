@@ -197,15 +197,18 @@ Two **separate** migration planes — never mix the directories:
 | Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0097** — 0096 (qualify watchers, claims plane) is AUTHORED on `feat/qualify-smoke-tokens-chips`, **NOT applied**; its panels run session-only until `apply_migration` |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **032** |
 
-**0095 consumed its slot without leaving a file — the next number is 0096, not 0095.**
-`0095_qualify_rating_history_prune` is in the live ledger (version `20260809073608`) but has no
-`.sql` and no `_rollback.sql` on any ref: it was an intentional **one-shot retention job**. The
-definer it created, `collections.prune_qualify_rating_history(date)`, was applied at 07:36:08 UTC,
-used once to prune `qualify_policy_rating_daily` below `current_date - 120` (= 2026-04-11, the
-surviving floor), then **dropped in the same session at 07:42:39 UTC** and verified gone. A
-version number is consumed the moment it lands in the ledger — **never reuse one**, even when the
-migration left no file behind, because the ledger row is permanent and a second 0095 would collide
-with it.
+**0095 consumed its slot without leaving a file, and 0096 is now authored (not yet applied) on this
+branch — the next NEW number is 0097, not 0096.** `0095_qualify_rating_history_prune` is in the live
+ledger (version `20260809073608`) but has no `.sql` and no `_rollback.sql` on any ref: it was an
+intentional **one-shot retention job**. The definer it created,
+`collections.prune_qualify_rating_history(date)`, was applied at 07:36:08 UTC, used once to prune
+`qualify_policy_rating_daily` below `current_date - 120` (= 2026-04-11, the surviving floor), then
+**dropped in the same session at 07:42:39 UTC** and verified gone. A version number is consumed the
+moment it lands in the ledger — **never reuse one**, even when the migration left no file behind,
+because the ledger row is permanent and a second 0095 would collide with it. The same rule is why
+0096 (`supabase/migrations/0096_qualify_watchers.sql`, authored-not-applied) is not up for grabs
+either — editing it in place is fine until it applies, but a fresh session should author 0097, never
+re-litigate 0096's number.
 
 **0093 (Qualify rating history) is APPLIED LIVE 2026-08-09** via `apply_migration` — plain
 transactional DDL, so the 0081/0092 autocommit discipline does NOT apply here. It creates

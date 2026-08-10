@@ -4,14 +4,20 @@
 this was written; watchers are now BUILT on `feat/qualify-smoke-tokens-chips` — migration
 `supabase/migrations/0096_qualify_watchers.sql` (AUTHORED, **NOT applied**; fail-soft session-only
 mode until it is), core `app/lib/qualify/watchers.ts`, actions `watcher-actions.ts`, panels under
-`app/components/qualify/shell/`. Two deltas from the design below, both deliberate:
+`app/components/qualify/shell/`. Three deltas from the design below, all deliberate:
   · kinds shipped as `'trend' | 'patient'` (a trend watcher's optional `subject_token` IS the
     prefix pin, so a separate `trend_prefix` kind was one enum arm too many);
   · the schema is the **claims plane** per 0046's own header (per-user UI state FKs to
     `claims.app_user`), not `collections.qualify_watcher` — §2's sketch had the right pattern and
-    the wrong plane.
-§1 (echo asymmetry), §4's ERA-alert + retention questions, and §5's prohibitions remain live and
-correct. Read the rest as design rationale, not as a to-do.
+    the wrong plane;
+  · 0096 SHIPPED a retention answer §4 below left open: a 40-watcher-per-user cap
+    (`claims.save_qualify_watcher`) and a 20-row recent-search history prune
+    (`claims.record_qualify_recent_search`, self-pruning on every insert). It shipped **NO
+    `last_seen_at` column** — §4's "a prune job has an axis if one is ever wanted" sentence
+    describes a column that was never built; the cap and prune below need no such axis.
+§1 (echo asymmetry) and §5's prohibitions remain live and correct. Of §4's two open questions, the
+ERA-alert one is still open; the retention one is now ANSWERED by what shipped — see §4's corrected
+paragraph. Read the rest as design rationale, not as a to-do.
 
 ---
 
@@ -114,8 +120,13 @@ wrote nothing, one well-formed call upserted, test row deleted; do the same here
 - **Patient-watcher alerts** ("a new ERA posted"). Feasible by joining era-835 output against
   watcher tokens through the same blind index, but it is a second scoped session: it makes a
   background job that reads PHI-adjacent state on a schedule.
-- **Retention.** No cap proposed. A watcher is small, but `last_seen_at` exists so a prune job has
-  an axis if one is ever wanted.
+- **Retention — ANSWERED by 0096, not open.** Watchers are capped at 40 per user, enforced in
+  `claims.save_qualify_watcher` (checked against existing rows before an INSERT only, so hitting the
+  cap still permits editing an existing watcher's threshold — see the definer's header). Recent
+  searches self-prune to the newest 20 rows per user inside `claims.record_qualify_recent_search`,
+  so no separate cron and no app code owns that retention. There is no `last_seen_at` column on
+  either table — this paragraph previously proposed one as a future prune axis; 0096 shipped the
+  prune without it.
 - **Cross-tenant.** Every other `collections` surface carries a tenant scope. Watchers are
   per-USER and the Qualify surface is already cross-tenant for super_admin (by design — see the
   QA-pass ruling; do not re-flag it). Decide explicitly whether a watcher is user-scoped only or

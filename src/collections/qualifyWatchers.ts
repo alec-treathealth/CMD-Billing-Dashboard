@@ -19,9 +19,18 @@
  */
 
 export const QUALIFY_WATCHER_SERIES_DAYS = 90;
-/** The per-user watcher cap the 0096 definer enforces; the UI reads this to disable "watch" adds. */
+/**
+ * The per-user watcher cap `claims.save_qualify_watcher` (0096) enforces on NEW rows. The real limit
+ * lives in that definer as a literal, not here — this constant exists so the two can be asserted
+ * equal (`test/qualifyWatchers.test.ts`) instead of silently drifting apart, which is the failure
+ * mode a source-of-truth constant with no consumer invites.
+ */
 export const QUALIFY_WATCHER_MAX = 40;
-/** Recent-search history depth (the 0096 definer prunes past this). */
+/**
+ * Recent-search history depth `claims.record_qualify_recent_search` (0096) prunes past. Consumed
+ * directly by `buildRecentSearchListQuery`'s LIMIT below, and asserted against the definer's own
+ * literal in `test/qualifyWatchers.test.ts` so the two cannot silently diverge.
+ */
 export const QUALIFY_RECENT_MAX = 20;
 
 export interface QualifyWatcherRow {
@@ -67,7 +76,11 @@ export function buildRecentSearchListQuery(userId: string): { sql: string; param
       'select id, payer_label, prefix_echo, plan_class, ' +
       "to_char(searched_at at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') as searched_at " +
       'from claims.qualify_recent_search where app_user_id = $1::uuid ' +
-      'order by searched_at desc, id desc limit 20',
+      // QUALIFY_RECENT_MAX, not a bound param: the 0096 definer already prunes to this many rows,
+      // so this LIMIT is a display-side belt-and-braces bound, not the source of truth. It is a
+      // fixed literal baked in at build time (never user input), same as every other fixed
+      // identifier in this file.
+      `order by searched_at desc, id desc limit ${QUALIFY_RECENT_MAX}`,
     params: [userId],
   };
 }
