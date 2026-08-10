@@ -1,0 +1,80 @@
+-- =============================================================================
+-- Migration 034: DROP staging.expected_payment_manual_live_idx — a partial index
+--   033 created for a query that does not exist and was never going to.
+-- Sequence: SQL Schemas/0NN_* (Veris). Apply via apply_migration (as postgres).
+-- Gate-review: show before applying. Nothing touches the DB until confirmed.
+-- Rollback: 034_drop_expected_payment_manual_live_idx_rollback.sql
+--
+-- WHY: 033 shipped
+--
+--     CREATE INDEX expected_payment_manual_live_idx
+--       ON staging.expected_payment_manual (business_entity_id, expected_date)
+--       WHERE removed_at IS NULL;
+--
+--   and justified it as serving "the tile's live path", claiming the resolver wants one
+--   tenant's LIVE rows and that fetching tombstones is wasted I/O.
+--
+--   THAT JUSTIFICATION WAS WRONG WHEN IT WAS WRITTEN, and 033's own sibling change says so.
+--   `getUpcomingManual` (app/lib/server.ts) deliberately does NOT filter `removed_at`:
+--
+--     "Both are SELECTED, not filtered in SQL: the resolver returns removed rows as their own
+--      output so an operator can see what was taken back and by whom, which a
+--      `where removed_at is null` here would make impossible."
+--
+--   Its only predicate is `business_entity_id = $1`. Postgres uses a partial index only when it
+--   can PROVE the query's WHERE implies the index predicate, and nothing about a tenant id
+--   implies `removed_at IS NULL` — so the planner could never choose it. Two files in one
+--   migration contradicting each other, and the index was the half that was wrong.
+--
+-- MEASURED LIVE 2026-08-10, which is what turned this from an argument into a fact:
+--     expected_payment_manual_live_idx       idx_scan =   0   <- this one
+--     expected_payment_manual_upcoming_idx   idx_scan = 155   <- 024's non-partial index
+--   The 024 index on the same leading columns, WITHOUT the partial predicate, is serving every
+--   read. 033's addition has never been scanned once.
+--
+-- WHY DROP RATHER THAN ADD A LIVE-ONLY READ (the other option on the table):
+--   Keeping it would mean splitting the read in two — a live-only query for the tile plus a
+--   second query for the removed rows the UI must still show. That is a real design for a big
+--   table. This one is bounded BY CONSTRUCTION to one row per human decision about roughly nine
+--   sheet rows; it holds 3. Inventing a second read path, a second round trip and a second
+--   failure mode to make a 16 kB index reachable would be complexity in the service of a
+--   comment. Soft delete does let tombstones accumulate without bound, but at one row per
+--   super-admin judgement the table will not reach a size where a seq scan is measurable.
+--
+-- ⚠️ 033 IS NOT EDITED IN PLACE. It is applied live (2026-08-10), and an applied migration file
+--   must keep describing what was actually run — editing it would make the repo lie about the
+--   database. The correction lives here and in veris-data-notes.md instead. Same discipline as
+--   023/024/025.
+--
+-- PHI DISCIPLINE: drops an index. No column, no data, no grant, no policy is touched.
+-- OWNERSHIP: `staging` is the claims_admin plane, so the DROP runs under SET ROLE claims_admin,
+--   matching 013–033. (The OPPOSITE of `collections`, where relations are postgres-owned and a
+--   SET ROLE downgrades the applying role — see CLAUDE.md.)
+-- IDEMPOTENT: DROP INDEX IF EXISTS. Re-running is a no-op.
+-- DEPENDENCY: 033 (which created the index).
+--
+-- NOT CONCURRENTLY, deliberately: this table has 3 rows, so the ACCESS EXCLUSIVE lock is held
+--   for microseconds, and DROP INDEX CONCURRENTLY cannot run inside a transaction block — which
+--   would force the same autocommit statement-splitting dance 0081/0092 needed, for no benefit.
+-- =============================================================================
+
+SET ROLE claims_admin;
+
+DROP INDEX IF EXISTS staging.expected_payment_manual_live_idx;
+
+RESET ROLE;
+
+-- Verification (run manually after apply) -------------------------------------
+-- SELECT indexrelname FROM pg_stat_user_indexes
+--  WHERE schemaname='staging' AND relname='expected_payment_manual' ORDER BY 1;
+--   -- expect exactly 3: _decision_uidx, _pkey, _upcoming_idx. No _live_idx.
+--
+-- -- and the read path is unaffected, because it was never using it:
+-- EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT id, kind, facility_code, payer_label, expected_date::text, method_label,
+--          amount::text, suppress_reason, matched_era_key, status, removed_at::text
+--     FROM staging.expected_payment_manual
+--    WHERE business_entity_id = '<bxr>'
+--    ORDER BY expected_date, facility_code, payer_label, id;
+--   -- expect a Seq Scan at this row count either way; the point is that it is no SLOWER.
+-- =============================================================================

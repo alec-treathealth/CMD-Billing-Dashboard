@@ -195,7 +195,7 @@ Two **separate** migration planes — never mix the directories:
 | Plane | Directory | Next number (as of 2026-08-10) |
 |---|---|---|
 | Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0096** |
-| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **034** |
+| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **035** |
 
 **Veris 032 and 033 are APPLIED LIVE.** 032 (`intel` writer SELECT grant) arrived on `main`
 before this table said so, which is why "next = 032" was briefly wrong in two places at once —

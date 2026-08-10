@@ -4686,3 +4686,40 @@ evidence either way. Sequential statements in a `DO` block are what actually ans
   not even a payer, because `aggregateDailyDeposits` emits `{facility_code, payment_date, checks,
   eft, gross}` stamped with the *pulled customer's* code. Amounts cannot substitute: a remittance
   differs from an expected billed amount by contractual adjustment as a matter of course.
+
+### CORRECTION (2026-08-10, same day) — 033's partial index was dead on arrival; 034 drops it
+
+033 created `expected_payment_manual_live_idx (business_entity_id, expected_date) WHERE
+removed_at IS NULL` and justified it as serving "the tile's live path". **That justification was
+wrong when it was written**, and 033's own sibling change contradicted it in the same commit:
+`getUpcomingManual` deliberately does NOT filter `removed_at`, because the resolver returns
+removed rows as a first-class output so an operator can see what was taken back and by whom.
+
+Its only predicate is `business_entity_id = $1`. **Postgres uses a partial index only when it can
+PROVE the query's WHERE implies the index predicate**, and a tenant id implies nothing about
+`removed_at`. The planner could never have chosen it.
+
+Measured live 2026-08-10, which settled it:
+
+| index | idx_scan |
+|---|---|
+| `expected_payment_manual_live_idx` (033, partial) | **0** |
+| `expected_payment_manual_upcoming_idx` (024, non-partial, same leading columns) | **155** |
+
+024's index was doing the work the whole time. Caught by Qodo on PR #187, verified against
+`pg_stat_user_indexes` rather than taken on faith.
+
+**Dropped rather than justified.** The alternative was to split the read — a live-only query for
+the tile plus a second one for the removed rows the UI still has to show. That is the right shape
+for a big table; this one is bounded by construction to one row per human decision about ~9 sheet
+rows and currently holds 3. A second read path, a second round trip and a second failure mode to
+make a 16 kB index reachable is complexity in the service of a comment.
+
+**033 was NOT edited in place** — it is applied live, and an applied migration file must keep
+describing what actually ran. The correction lives in 034's header and here.
+
+⚠️ THE GENERALISABLE LESSON: **an index whose predicate the query cannot imply is not a slow
+index, it is an absent one.** Before adding a partial index, write the exact query beside it and
+check the predicate is present in the WHERE — and confirm with `idx_scan` after apply rather than
+assuming. A partial index also cannot be caught by a typecheck, a test, or a review that reads
+only the migration: both halves have to be read together, which is exactly what did not happen.
