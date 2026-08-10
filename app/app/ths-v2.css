@@ -147,6 +147,66 @@
   --dur-1: 0.12s;
   --dur-2: 0.22s;
   --dur-3: 0.36s;
+
+  /* ---- Smoke primitives (Phase 0, 2026-08-10) ---------------------------
+     The four things docs/mockups/qualify-smoke.html needs that this system did
+     not already carry. Everything ELSE in that mock's :root duplicates a token
+     above, and porting it wholesale is a trap:
+
+       token         mock    this file
+       --space-1     4px     2.8px
+       --space-2     8px     5.6px
+       --space-3     12px    8.4px
+       --space-4     16px    11.2px
+       --space-6     32px    16.8px
+       --radius-md   12px    8px
+       --radius-lg   24px    14px
+
+     Seven live names, different values. The mock was authored standalone — it has
+     no ths-v2 to reconcile against — so its :root is a self-contained sketch, not
+     a patch. Dropping it in rescales every ths-* component in the app (49
+     .ths-num, 33 .ths-card-meta, 31 .ths-sm) SILENTLY: no type error, no failing
+     test, no build error, just everything ~40% roomier overnight. The names below
+     are deliberately new ones for that reason. Add, never overwrite.
+
+     The mock is a DIRECTION, not a spec, and it is behind the shipped surface in
+     two known places: --color-intent-info #5E8CC8 measures 3.46:1 where the
+     shipped #2D7393 measures 5.27:1; and .kpi__range (mock line 771) collapses
+     the worst/best flanks onto one line WITHOUT the facility names, which is the
+     entire point of them (app/lib/qualify/tileFlanks.ts). Diff before porting.
+     Contrast figures here are asserted by app/test/ths-tokens-contrast.test.tsx. */
+
+  /* The dark tape surface. Not an inverted --color-text: it is the brand deep, so
+     the strip reads as brand chrome rather than as a modal scrim. */
+  --color-surface-inverse: #0e3a3a;
+  --color-on-inverse: #ffffff; /* 12.5:1 on the above */
+
+  /* Movement colors for the inverse surface ONLY. The on-white accent/danger pair
+     drops to roughly 1.9:1 there, so the tape needs its own two. Both measured
+     against --color-surface-inverse, never against white. */
+  --tape-up: #46c4b8; /* 5.8:1 on inverse */
+  --tape-down: #f0917c; /* 5.4:1 on inverse */
+
+  /* ⚠ THE SIX NAMES BELOW HAVE NO CONSUMER YET, AND THAT IS ON PURPOSE — DO NOT
+     DELETE THEM AS DEAD CODE. They are a token VOCABULARY: the shell's radii and
+     hit-target floors written down once, in the stylesheet, so the components
+     that adopt them arrive at the same numbers instead of each inventing one.
+     The two --tape-* / --color-*-inverse names above ARE consumed (their TS
+     mirror TAPE_PALETTE paints policy-tape.tsx). These are the deliberate
+     forward half, and app/test/ths-tokens-contrast.test.tsx asserts their
+     presence and their values so "unused" can never quietly become "wrong". */
+
+  /* Smoke's card radius sits above this system's 14px --radius-lg. A NEW step
+     rather than a redefinition, so existing cards keep their shape. */
+  --radius-xl: 24px;
+  --radius-pill: 999px;
+
+  /* Minimum hit targets. The rep uses this on a phone, one-handed, mid-call;
+     44px is the WCAG 2.5.5 floor and --size-control is its comfortable desktop
+     equivalent. Absent above because every ths-* control had been sized ad hoc. */
+  --size-control: 48px;
+  --size-row: 44px;
+  --size-field: 56px;
 }
 
 /* Comfortable density multiplies the compact scale by 1.45. Opt-in per subtree. */
@@ -610,6 +670,41 @@
 /* Wide content scrolls inside its own box; the page never scrolls sideways. */
 [data-ths='v2'] .ths-scroll-x {
   overflow-x: auto;
+}
+
+/* ---- Bounded panel height --------------------------------------------------
+   The All Facilities table and the Future Payments tile are reveal panels whose
+   height is driven by row count — 15 facilities plus a header, or an ERA tile
+   carrying a group list, an overdue strip and two edit strips. Unbounded, they
+   push the Master chart entirely below the fold, so opening one to check a
+   number costs you the chart you were comparing it against.
+
+   min(60vh, 30rem): 60vh keeps roughly a third of the viewport for the page
+   around it on any screen, and the 30rem ceiling stops a very tall monitor from
+   handing back a panel so long the bound does nothing. Both panels get the SAME
+   value so two open at once stay predictable.
+
+   `overscroll-behavior: contain` stops a scroll that reaches the panel's end
+   from continuing into the page — otherwise flicking through facilities jumps
+   the whole Overview, which reads as the page having lost your place.
+--------------------------------------------------------------------------- */
+[data-ths='v2'] .ths-panel-scroll {
+  max-height: min(60vh, 30rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Inside a bounded panel, the two rows a reader navigates BY stay put: the
+   header names the columns and the TOTALS row is the figure the whole table
+   exists to produce. Letting either scroll away turns a bounded table into a
+   worse version of an unbounded one — you would scroll to the end just to read
+   the total, which is exactly what the height bound was meant to save.
+   z-index 2 beats the sticky thead's 1 so the two never fight at the seam. */
+[data-ths='v2'] .ths-panel-scroll .ths-table-total td {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  background: var(--color-surface);
 }
 
 /* ---- Clickable chart -------------------------------------------------------

@@ -15,6 +15,9 @@
  *   no patient anything. `.strict()` at every level rejects unknown keys outright.
  */
 import { z } from 'zod';
+// The situation-tuning layer (audience voice + payload-situation branches). Type-only in the other
+// direction (qualifyPromptTree imports only `type QualifyAiInput`), so no runtime cycle exists.
+import { composePromptSystem, promptSituationNotes } from './qualifyPromptTree';
 
 const short = (max: number) => z.string().min(0).max(max);
 
@@ -155,8 +158,40 @@ const tickerSchema = z
 
 export const QualifyAiInputSchema = z
   .object({
-    /** Which preset chip fired — the question shapes the read. */
+    /** Which preset chip fired — the question shapes the read. Since Phase 2 this is equally the
+     *  TEMPLATE ID: the chip is a sentence template and `slots` below carries its variable parts. */
     question: z.enum(QUALIFY_AI_QUESTIONS),
+    /**
+     * SLOT VALUES for the template named by `question` (Smoke Phase 2, 2026-08-10).
+     *
+     * THE FIREWALL'S POINT, restated because this is the field most likely to be "improved" into a
+     * hole: there is deliberately NO string slot here, and none may be added. Every value is either
+     * a closed enum or an INDEX into `facilities` above. The mock's composer lets a rep pick a
+     * facility by name, and the tempting shape is `facility: z.string()` — but a string field is a
+     * place prose can live, and on this surface prose means a rep pastes a member ID into a model
+     * prompt. `facility: 2` resolves server-side against the array this schema already validated, so
+     * the name never crosses the boundary and no new data reaches the model. A compromised client's
+     * widest possible statement is "the third one".
+     *
+     * The index bound (0-9) matches `facilities`' own `.max(10)`. An index past the end of a SHORTER
+     * list is not an error — buildQualifyAiMessages degrades to omitting that clause, because a
+     * ranking can shrink between render and click and a hard reject would kill Ask AI over a race.
+     *
+     * OPTIONAL + nullable for the reason recorded on `bedState` and `ticker`: a caller built before
+     * this field must degrade to "the model is told no slots", never hard-reject. That is the exact
+     * failure `payerCount: min(1)` caused. `.strict()` still rejects an unknown KEY outright.
+     */
+    slots: z
+      .object({
+        facility: z.number().int().min(0).max(9).nullable(),
+        comparator: z.number().int().min(0).max(9).nullable(),
+        metric: z.enum(['allowed', 'paidOfAllowed', 'paidOfBilled', 'speed', 'rating']).nullable(),
+        horizonDays: z.union([z.literal(30), z.literal(90), z.literal(180), z.literal(365)]).nullable(),
+        careSetting: z.enum(['IP', 'OP', 'BOTH', 'ANY']).nullable(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
     /** The resolved payer LABEL (non-PHI rollup dimension) — null on comparable/none paths AND in
      *  identifier-wide mode. `payerScope` is what tells those apart; never infer from the null. */
     payerName: short(120).nullable(),
@@ -323,17 +358,82 @@ const QUESTION_FRAMING: Record<QualifyAiInput['question'], string> = {
     'rating or rising toward a weak one, and only one of those is good news.',
 };
 
-/** Build the {system, user} messages for one explainer call. The user turn is the JSON aggregate. */
+/** How each slot metric reads in a sentence. Prompt-side only — never sent by the client. */
+const SLOT_METRIC_PHRASE: Record<string, string> = {
+  allowed: 'percent allowed of billed',
+  paidOfAllowed: 'percent paid of allowed',
+  paidOfBilled: 'percent paid of billed',
+  speed: 'days to payment',
+  rating: 'the overall five-factor rating',
+};
+
+const SLOT_CARE_SETTING_PHRASE: Record<string, string> = {
+  IP: 'residential (IP)',
+  OP: 'outpatient (OP)',
+  BOTH: 'combined-setting',
+  ANY: '',
+};
+
+/**
+ * The template's slot values, resolved into a sentence for the prompt.
+ *
+ * FACILITY INDICES ARE RESOLVED HERE AND ONLY HERE — this is the server side of the boundary
+ * described on the `slots` schema field, and the one place an index becomes a name.
+ *
+ * An index past the end of a shorter `facilities` list DEGRADES to omitting that clause rather than
+ * throwing. The ranking can shrink between the render that offered the choice and the click that
+ * used it (a refetch, a narrowed window), and killing Ask AI over that race would repeat the
+ * `payerCount: min(1)` failure at a different seam. The model simply is not told which facility was
+ * picked, which is honest — nothing tells it a wrong one.
+ */
+function describeSlots(input: QualifyAiInput): string | null {
+  const slots = input.slots ?? null;
+  if (!slots) return null;
+  const parts: string[] = [];
+  const nameAt = (i: number | null): string | null =>
+    i === null ? null : input.facilities[i]?.name ?? null;
+
+  const facility = nameAt(slots.facility);
+  if (facility) parts.push(`The rep is asking specifically about ${facility}.`);
+  const comparator = nameAt(slots.comparator);
+  if (comparator) parts.push(`Compare it against ${comparator}.`);
+  if (slots.metric) parts.push(`The measure they chose is ${SLOT_METRIC_PHRASE[slots.metric] ?? slots.metric}.`);
+  if (slots.horizonDays !== null) {
+    // The horizon is the REP'S framing, not a re-scoping of the data: every number in this payload
+    // was computed over `windowDays`. Saying so stops the model narrating a 30-day answer off a
+    // 90-day aggregate, which it will otherwise do because the slot sounds authoritative.
+    parts.push(
+      `They framed the question over ${slots.horizonDays} days; the figures here still cover ` +
+        `${input.windowDays} days, so answer on the data's window and say so if the two differ.`,
+    );
+  }
+  const setting = slots.careSetting ? SLOT_CARE_SETTING_PHRASE[slots.careSetting] ?? '' : '';
+  if (setting) parts.push(`Limit the comparison to ${setting} facilities where the data allows.`);
+  return parts.length > 0 ? parts.join(' ') : null;
+}
+
+/**
+ * Build the {system, user} messages for one explainer call. The user turn is the JSON aggregate.
+ *
+ * SINCE THE PROMPT TREE (2026-08-10) this is a composition, not a constant: the ratified honesty
+ * core (SYSTEM_PROMPT above, VERBATIM — tests pin its phrases) + the admissions audience layer +
+ * whichever situation branches this payload walks (qualifyPromptTree.ts — deterministic, pure,
+ * path inspectable via promptTreePath). The `Question:` framing stays LINE 1 of the user turn
+ * (test-pinned); situation notes and the slot sentence follow it.
+ */
 export function buildQualifyAiMessages(input: QualifyAiInput): { system: string; user: string } {
+  const slotLine = describeSlots(input);
   const user = [
     QUESTION_FRAMING[input.question],
+    ...promptSituationNotes(input),
+    ...(slotLine ? [slotLine] : []),
     '',
     'Aggregates (JSON):',
     JSON.stringify(input),
     '',
     'Write the TL;DR / Signals / Risks sections now.',
   ].join('\n');
-  return { system: SYSTEM_PROMPT, user };
+  return { system: composePromptSystem(SYSTEM_PROMPT, input), user };
 }
 
 // ── Blind-role defensive scrub (2026-08-04) ──────────────────────────────────────────────────────

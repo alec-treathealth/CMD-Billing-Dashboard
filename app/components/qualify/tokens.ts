@@ -66,6 +66,31 @@ export const IQ_BAND_WASH: Record<'65' | '50' | '30' | '15' | '0', string> = {
 };
 
 /**
+ * THE TAPE'S INVERSE SURFACE (Smoke Phase 0, 2026-08-10) — the JS mirror of the `--color-surface-
+ * inverse` / `--tape-*` block in ths-v2.css, for the same reason every other hex here is mirrored:
+ * a surface that styles inline cannot read a CSS custom property.
+ *
+ * CONSUMED BY `policy-tape.tsx`'s `DeltaText`, which is the only place these are painted today, plus
+ * `ths-tokens-contrast.test.tsx`, which asserts both the AA ratios and that this object has not
+ * drifted from the stylesheet. It briefly had NO production consumer at all — the tape kept a private
+ * `TAPE_UP`/`TAPE_DOWN` pair with the same hexes — so the guard covered two copies and missed the
+ * render site. If you add a third caller, add it here; if you ever find this unconsumed again, wire
+ * it rather than deleting it, because the CSS side is what the desktop strip's `bg-teal900` paints.
+ *
+ * ⚠ THESE ARE NOT RATING_HEX AND MUST NOT BE SWAPPED FOR IT. Every other palette in this file is
+ * measured against white or `ground`; these are measured against `#0E3A3A`. Running RATING_HEX.ok
+ * (#2E8B6F) on the tape yields roughly 1.9:1 — invisible — and the mistake is not visible in a diff
+ * because both are plausible greens named for the same idea. The direction of a move on a DARK strip
+ * is a different token from the direction of a rating on a light card.
+ */
+export const TAPE_PALETTE = {
+  surfaceInverse: '#0E3A3A',
+  onInverse: '#FFFFFF', // 12.5:1 on surfaceInverse
+  up: '#46C4B8', // 5.8:1 on surfaceInverse
+  down: '#F0917C', // 5.4:1 on surfaceInverse
+} as const;
+
+/**
  * Staged-reveal per-item animation delay (ms), CAPPED so the total stagger stays bounded no matter how
  * many siblings render — the design-system's `min(i, 3) * 60ms` rule in one place. Pair with the
  * `animate-ths-reveal` utility (Tailwind) / inline `animationDelay`. Collapses under

@@ -18,6 +18,18 @@ import { generateQualifyAiExplanation } from '@/lib/qualify/ai-actions';
 import { parseAiSections } from '../../../src/collections/aiAnalysis';
 import type { QualifySnapshot } from '../../lib/qualify/contract';
 import { qualifyAiChips, type QualifyAiChipId } from '../../lib/qualify/aiChips';
+import {
+  QUALIFY_CHIP_TEMPLATES,
+  defaultSlots,
+  narrowSlotsToTemplate,
+  slotChoices,
+  type QualifyChipSlots,
+} from '../../lib/qualify/chipTemplates';
+// The slotted chip is its OWN module so a hermetic test can render it — this file cannot be
+// imported by one (it reaches the 'use server' chain). Same reason aiPayload.ts was extracted.
+import { SlotChip } from './slot-chip';
+// What the three sections are CALLED for this audience — the wire markers do not change.
+import { QUALIFY_AI_SECTION_LABELS } from '../../lib/qualify/aiSectionLabels';
 import { deriveTopRanks, qualifyRanksHeading } from '../../lib/qualify/policyRating';
 // The caption's WORDS and the placement's THREE states both live in a plain lib module, because
 // this file cannot be imported by a hermetic test — see bookPlacement.ts's header.
@@ -27,6 +39,10 @@ import { aiGroundingCaption, type QualifyBookPlacement } from '../../lib/qualify
 import { buildQualifyAiInput } from '../../lib/qualify/aiPayload';
 // The scope claim's ONE home — see scopeLabel.ts for why it does not live in this file.
 import { aiScopeLabel } from '../../lib/qualify/scopeLabel';
+// The externalAsk one-shot-per-nonce decision lives here, not inline, for the reason aiPayload.ts
+// and bookPlacement.ts do: this file reaches the 'use server' chain, so a hermetic test cannot
+// exercise a decision written only here. See externalAsk.ts for the rule and why it is nonce-keyed.
+import { decideExternalAsk, type QualifyExternalAsk } from '../../lib/qualify/externalAsk';
 import { IQ_BAND_HEX } from './tokens';
 // The model is ASKED for markdown by SYSTEM_PROMPT; this is what turns it into markup instead of
 // printing the delimiters. Pure + hermetically tested (app/test/markdown-render.test.tsx).
@@ -39,6 +55,8 @@ export function QualifyAiPanel({
   blind,
   autoAsk = false,
   onAutoAsked,
+  externalAsk = null,
+  onExternalAsked,
   bookPlacement = 'none',
 }: {
   snapshot: QualifySnapshot;
@@ -52,6 +70,16 @@ export function QualifyAiPanel({
    *  unmounts and remounts the panel (v3 nulls the snapshot on every window/payer change) resets the
    *  per-mount guard and re-fires an unrequested, audited, billed model call. One ask per arm. */
   onAutoAsked?: () => void;
+  /**
+   * THE COMPOSER'S SEAM (Smoke shell, 2026-08-10): the lane rail's slots-only composer lives in a
+   * different pane from this panel, so its Ask arrives as a prop — a question id + slot values +
+   * a NONCE. The nonce is what the consume effect keys on: two identical composer asks in a row
+   * are two distinct requests (the operator pressed Ask twice), which object identity alone would
+   * conflate. Same one-shot discipline as autoAsk: consumed once, then the owner disarms via
+   * onExternalAsked — an unmount/remount must not re-fire an audited, billed model call.
+   */
+  externalAsk?: QualifyExternalAsk | null;
+  onExternalAsked?: () => void;
   /**
    * WHERE THE PAYER'S WHOLE BOOK IS DRAWN, relative to this panel (S2, extended by S3 2026-08-08).
    *
@@ -78,6 +106,9 @@ export function QualifyAiPanel({
   bookPlacement?: QualifyBookPlacement;
 }) {
   const [active, setActive] = useState<ChipId | null>(null);
+  /** Per-chip slot values, lazily defaulted. Keyed by chip so switching between two slotted chips
+   *  does not discard what the rep already picked on the first one. */
+  const [slotState, setSlotState] = useState<Partial<Record<ChipId, QualifyChipSlots>>>({});
   const [text, setText] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -112,20 +143,24 @@ export function QualifyAiPanel({
     setText('');
     setError(null);
     setStreaming(false);
+    // Slot values are indices into THIS snapshot's facility ranking, so they are meaningless against
+    // the next one — clearing here is a correctness requirement, not tidiness. A stale `facility: 2`
+    // carried across a re-scope would silently ask about a different facility than the rep picked.
+    setSlotState({});
   }, [snapshot]);
 
   const { chips, suggestedId } = useMemo(() => qualifyAiChips(snapshot), [snapshot]);
   const ranks = useMemo(() => deriveTopRanks(snapshot.facilities), [snapshot.facilities]);
 
   const run = useCallback(
-    async (id: ChipId) => {
+    async (id: ChipId, slotValues: QualifyChipSlots | null = null) => {
       const gen = ++genRef.current;
       setActive(id);
       setText('');
       setError(null);
       setStreaming(true);
       try {
-        const res = await generateQualifyAiExplanation(buildQualifyAiInput(id, snapshot, blind));
+        const res = await generateQualifyAiExplanation(buildQualifyAiInput(id, snapshot, blind, slotValues));
         if (genRef.current !== gen) {
           // Superseded while the action was still resolving (gate + audit + first token is 1-3s).
           // Cancel rather than drop it: an unread stream keeps the model call — and the billing —
@@ -178,6 +213,19 @@ export function QualifyAiPanel({
     void run(suggestedId);
   }, [autoAsk, active, run, suggestedId, onAutoAsked]);
 
+  // The composer's ask — same shape as autoAsk above but keyed on the NONCE, so a repeated
+  // identical ask still fires (a second press is a second request) while a remount with the same
+  // consumed nonce does not (the ref survives only this mount; the OWNER's disarm is what protects
+  // across remounts, exactly as onAutoAsked does one effect up).
+  const externalConsumedRef = useRef<number | null>(null);
+  useEffect(() => {
+    const decision = decideExternalAsk(externalAsk, externalConsumedRef.current);
+    if (!decision.fire) return;
+    externalConsumedRef.current = decision.nextConsumed;
+    onExternalAsked?.();
+    void run(decision.ask.question, decision.ask.slots);
+  }, [externalAsk, run, onExternalAsked]);
+
   const sections = parseAiSections(text);
   const caret = streaming ? <span aria-hidden className="q-ai-caret ml-0.5 inline-block h-[13px] w-[7px] bg-teal500 align-[-2px]" /> : null;
 
@@ -199,6 +247,33 @@ export function QualifyAiPanel({
         {chips.map((chip) => {
           // The suggestion is a resting-state nudge only — it clears the moment any chip runs.
           const suggested = chip.id === suggestedId && active === null;
+          const template = QUALIFY_CHIP_TEMPLATES[chip.id];
+          // A template is only USABLE when every slot it declares has something to offer. A facility
+          // slot on a snapshot with no ranked facilities would render an empty <select> — a control
+          // that looks interactive and cannot be used. Those chips fall back to their fixed label,
+          // which is exactly what shipped before Phase 2, so the degraded path is the proven one.
+          const slotKeys = template
+            ? template.segments.flatMap((s) => (s.kind === 'slot' ? [s.slot] : []))
+            : [];
+          const usable =
+            template !== undefined &&
+            slotKeys.length > 0 &&
+            slotKeys.every((k) => slotChoices(snapshot, k).length > 0);
+          if (template && usable) {
+            const current = slotState[chip.id] ?? defaultSlots(snapshot, template);
+            return (
+              <SlotChip
+                key={chip.id}
+                template={template}
+                snapshot={snapshot}
+                slots={current}
+                active={active === chip.id}
+                suggested={suggested}
+                onChange={(next) => setSlotState((prev) => ({ ...prev, [chip.id]: next }))}
+                onAsk={() => void run(chip.id, narrowSlotsToTemplate(current, template))}
+              />
+            );
+          }
           return (
             <button
               key={chip.id}
@@ -255,7 +330,13 @@ export function QualifyAiPanel({
                   <Markdown> builds elements from a token scan (no raw-HTML sink; see its header) and
                   renders nothing for empty text, so it can mount mid-stream. The caret stays OUTSIDE
                   it: it is chrome, not content, and must not be re-parsed on every token. */}
-              <div className="font-mono text-xs font-semibold uppercase tracking-wide text-teal700">TL;DR</div>
+              {/* ADMISSIONS LABELS (2026-08-10): the WIRE still carries TL;DR/Signals/Risks —
+                  parseAiSections and the collections panel depend on those markers — but the
+                  HEADINGS this audience reads come from QUALIFY_AI_SECTION_LABELS. Presentation
+                  only; see aiSectionLabels.ts for why the two vocabularies must not merge. */}
+              <div className="font-mono text-xs font-semibold uppercase tracking-wide text-teal700">
+                {QUALIFY_AI_SECTION_LABELS['TL;DR']}
+              </div>
               <div className="mt-1 text-[13.5px] leading-relaxed text-ink900">
                 {sections['TL;DR'] ? (
                   <Markdown text={sections['TL;DR']} />
@@ -266,7 +347,9 @@ export function QualifyAiPanel({
               </div>
               {sections.Signals ? (
                 <div className="mt-3 border-t border-line pt-2.5">
-                  <div className="font-mono text-xs font-semibold uppercase tracking-wide text-status-ok">Signals</div>
+                  <div className="font-mono text-xs font-semibold uppercase tracking-wide text-status-ok">
+                    {QUALIFY_AI_SECTION_LABELS.Signals}
+                  </div>
                   <div className="mt-1 text-[13px] leading-relaxed text-ink900">
                     <Markdown text={sections.Signals} />
                     {sections.Risks === '' ? caret : null}
@@ -275,7 +358,9 @@ export function QualifyAiPanel({
               ) : null}
               {sections.Risks ? (
                 <div className="mt-3 border-t border-line pt-2.5">
-                  <div className="font-mono text-xs font-semibold uppercase tracking-wide text-status-danger">Risks</div>
+                  <div className="font-mono text-xs font-semibold uppercase tracking-wide text-status-danger">
+                    {QUALIFY_AI_SECTION_LABELS.Risks}
+                  </div>
                   <div className="mt-1 text-[13px] leading-relaxed text-ink900">
                     <Markdown text={sections.Risks} />
                     {caret}

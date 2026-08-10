@@ -37,7 +37,10 @@ import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../src/tenants.js';
 import {
   amountFromCents,
   centsFromAmount,
+  expectedCentsByFacilityForMonth,
+  isRemoved,
   manualRowFromDb,
+  manualStatus,
   matchKey,
   payersCorrespond,
   resolveForecast,
@@ -203,7 +206,25 @@ test('manualRowFromDb narrows the driver\'s bigint text and leaves every other f
   // numeric-literal fixture stays valid.
   assert.equal(manualRowFromDb({ ...dbRow(), id: 15 }).id, 15);
   const raw = dbRow({ id: '15' });
-  assert.deepEqual(manualRowFromDb(raw), { ...raw, id: 15 }, 'nothing else is touched');
+  // 033 added TWO deliberate normalizations beside the id narrowing, and they are asserted
+  // here rather than loosened out of the deepEqual: an absent `status` becomes 'expected' and
+  // an absent `removed_at` becomes null. Both matter downstream — `isRemoved` exists precisely
+  // because `undefined !== null` is TRUE, so leaving removed_at undefined here would let a
+  // bare comparison anywhere downstream read every live row as removed.
+  assert.deepEqual(
+    manualRowFromDb(raw),
+    { ...raw, id: 15, status: 'expected', removed_at: null },
+    'the id is narrowed, the two lifecycle fields are defaulted, nothing else is touched',
+  );
+});
+
+test('manualRowFromDb preserves lifecycle fields that ARE present', () => {
+  // The defaulting above must not clobber real values coming off the wire.
+  const r = manualRowFromDb(
+    dbRow({ id: '21', status: 'needs_review', removed_at: '2026-08-09T12:00:00Z' }),
+  );
+  assert.equal(r.status, 'needs_review');
+  assert.equal(r.removed_at, '2026-08-09T12:00:00Z');
 });
 
 test('manualRowFromDb THROWS rather than truncating — a wrong id deletes the wrong decision', () => {
@@ -734,4 +755,241 @@ test('every alias the sheet parser can produce is a real BXR facility', async ()
   for (const code of knownFacilityCodes()) {
     assert.ok(bxr.includes(code), `alias target ${code} must be on the BXR roster`);
   }
+});
+
+// ===========================================================================
+// 033 — SOFT DELETE, RECONCILIATION STATUS, AND THE CHART'S EXPECTED SERIES
+// ===========================================================================
+// Migration 033 gave the manual table a lifecycle: removal became a tombstone instead of a
+// DELETE, and a manual 'add' gained somewhere to record that an 835 has since covered it.
+// The resolver is where all three states become (or stop being) money on a screen, so this is
+// where they are pinned.
+
+// --- THE undefined !== null TRAP -------------------------------------------
+// `status` and `removed_at` are OPTIONAL on ManualForecastRow, because every pre-033 fixture
+// omits them. That makes a bare `m.removed_at !== null` evaluate TRUE for a live row — which
+// would invert the filter and hide the entire tile while showing only tombstones. isRemoved()
+// exists solely to close that, and this is the test that would have caught it.
+
+test('isRemoved: an ABSENT removed_at is not a removal (the undefined !== null trap)', () => {
+  const live = manual({ kind: 'add', method_label: 'EFT' });
+  assert.equal('removed_at' in live, false, 'the fixture genuinely omits the field');
+  assert.equal(isRemoved(live), false, 'absent must read as NOT removed');
+  // The exact expression this helper exists to replace, proving it would have been wrong.
+  assert.equal((live as { removed_at?: string | null }).removed_at !== null, true);
+  assert.equal(isRemoved({ removed_at: null }), false);
+  assert.equal(isRemoved({ removed_at: '2026-08-09T12:00:00Z' }), true);
+});
+
+test('manualStatus: an ABSENT status defaults to the honest "expected"', () => {
+  assert.equal(manualStatus(manual()), 'expected');
+  assert.equal(manualStatus({ status: 'matched' }), 'matched');
+  assert.equal(manualStatus({ status: 'needs_review' }), 'needs_review');
+});
+
+// --- Soft delete ------------------------------------------------------------
+
+test('a removed ADD contributes no money and is reported as removed', () => {
+  const r = resolveForecast(
+    [],
+    [
+      manual({
+        kind: 'add',
+        method_label: 'EFT',
+        amount: '32000.00',
+        facility_code: 'KWC',
+        payer_label: 'BCBS TN',
+        expected_date: '2026-08-05',
+        removed_at: '2026-08-09T12:00:00Z',
+      }),
+    ],
+  );
+  assert.equal(r.rows.length, 0, 'a decision taken back is not on the tile');
+  assert.equal(r.totalCents, 0, 'and contributes nothing to the total');
+  assert.equal(r.removed.length, 1, 'but is still reported, so the audit row resolves');
+  assert.equal(r.stale.length, 0, 'a removal is not an orphaned edit');
+});
+
+test('a removed SUPPRESS stops hiding the sheet row — the money comes back', () => {
+  // THE POINT OF SOFT DELETE, operationally. Removal must un-apply the decision, not merely
+  // stop listing it. If the resolver kept honouring a tombstoned suppress, the operator would
+  // remove it, see nothing change, and have no way to get the row back short of SQL.
+  const s = sheet({ amount: '16117.31' });
+  const kill = (over: Partial<ManualForecastRow>) =>
+    manual({ kind: 'suppress', method_label: null, amount: null, suppress_reason: 'landed', ...over });
+
+  const applied = resolveForecast([s], [kill({})]);
+  assert.equal(applied.rows.length, 0, 'baseline: a live suppress hides it');
+  assert.equal(applied.hidden.length, 1);
+
+  const undone = resolveForecast([s], [kill({ removed_at: '2026-08-09T12:00:00Z' })]);
+  assert.equal(undone.rows.length, 1, 'the sheet row is back');
+  assert.equal(undone.totalCents, 1611731, 'and its money is counted again');
+  assert.equal(undone.hidden.length, 0, 'nothing is hidden any more');
+  assert.equal(undone.removed.length, 1);
+});
+
+test('a removed CORRECT reverts to the sheet amount rather than going stale', () => {
+  const s = sheet({ amount: '16117.31' });
+  const r = resolveForecast(
+    [s],
+    [manual({ kind: 'correct', amount: '20000.00', removed_at: '2026-08-09T12:00:00Z' })],
+  );
+  assert.equal(r.rows.length, 1);
+  assert.equal(r.rows[0]?.amount, '16117.31', 'the correction is not applied');
+  assert.equal(r.rows[0]?.corrected, false);
+  assert.equal(r.stale.length, 0, 'a removed correction is removed, not orphaned');
+});
+
+// --- Reconciliation status --------------------------------------------------
+
+test('a MATCHED add renders once, not twice — it leaves rows and totals', () => {
+  // THE DUPLICATION GUARD. Once a human confirms an 835 covers this forecast, the 835 is
+  // already on the tile through the confirmed half. Emitting the forecast beside it renders
+  // one payment twice and doubles its money.
+  const add = manual({
+    kind: 'add',
+    method_label: 'EFT',
+    amount: '32000.00',
+    facility_code: 'KWC',
+    payer_label: 'BCBS TN',
+    expected_date: '2026-08-05',
+    status: 'matched',
+    matched_era_key: '2026-08-06|KWC|BLUE CROSS BLUE SHIELD OF TENNESSEE',
+  });
+  const r = resolveForecast([], [add]);
+  assert.equal(r.rows.length, 0, 'not rendered as expected money');
+  assert.equal(r.totalCents, 0, 'and not counted');
+  assert.equal(r.matched.length, 1, 'surfaced so it can be undone — never silently evaporated');
+  assert.equal(r.matched[0]?.amount, '32000.00', 'carrying what it would contribute if undone');
+  assert.equal(
+    r.matched[0]?.eraKey,
+    '2026-08-06|KWC|BLUE CROSS BLUE SHIELD OF TENNESSEE',
+    'and the remit a human agreed it was',
+  );
+});
+
+test('a NEEDS_REVIEW add is STILL rendered and STILL counted, only flagged', () => {
+  // The distinction that makes suggest-then-confirm safe. A low-confidence match is a prompt,
+  // never a suppression — hiding money on a guess is exactly what suggestLandedMatches refuses
+  // to do, and doing it through a status column would be the same mistake in a new place.
+  const r = resolveForecast(
+    [],
+    [
+      manual({
+        kind: 'add',
+        method_label: 'EFT',
+        amount: '32000.00',
+        status: 'needs_review',
+        matched_era_key: '2026-08-06|CAMH|AETNA',
+      }),
+    ],
+  );
+  assert.equal(r.rows.length, 1, 'still on the tile');
+  assert.equal(r.totalCents, 3200000, 'still counted — a guess must not remove money');
+  assert.equal(r.rows[0]?.needsReview, true, 'but flagged for a human');
+  assert.equal(r.rows[0]?.candidateEraKey, '2026-08-06|CAMH|AETNA');
+  assert.equal(r.matched.length, 0);
+});
+
+test('removal beats a matched status — a removed matched row is removed, not matched', () => {
+  // Order matters in the classification pass: a row that is both must land in exactly one
+  // bucket, and "the operator took it back" is the later, stronger statement.
+  const r = resolveForecast(
+    [],
+    [
+      manual({
+        kind: 'add',
+        method_label: 'EFT',
+        amount: '32000.00',
+        status: 'matched',
+        matched_era_key: 'k',
+        removed_at: '2026-08-09T12:00:00Z',
+      }),
+    ],
+  );
+  assert.equal(r.removed.length, 1);
+  assert.equal(r.matched.length, 0);
+  assert.equal(r.rows.length, 0);
+});
+
+test('a matched status on a SUPPRESS is ignored by the matched branch', () => {
+  // 033's status coherence CHECK confines a non-'expected' status to an 'add'. The resolver
+  // guards on kind anyway, so a hand-inserted row cannot make a suppression silently stop
+  // suppressing — which would put hidden money back on the tile.
+  const s = sheet();
+  const r = resolveForecast(
+    [s],
+    [
+      manual({
+        kind: 'suppress',
+        method_label: null,
+        amount: null,
+        suppress_reason: 'landed',
+        status: 'matched' as ManualForecastRow['status'],
+        matched_era_key: 'k',
+      }),
+    ],
+  );
+  assert.equal(r.rows.length, 0, 'the suppression still applies');
+  assert.equal(r.hidden.length, 1);
+  assert.equal(r.matched.length, 0, 'and it is not reported as a reconciled add');
+});
+
+// --- The chart's expected series -------------------------------------------
+
+test('expectedCentsByFacilityForMonth sums per facility within the month only', () => {
+  const rows = resolveForecast(
+    [],
+    [
+      manual({ kind: 'add', method_label: 'EFT', amount: '32000.00', facility_code: 'KWC', expected_date: '2026-08-05' }),
+      manual({ kind: 'add', method_label: 'EFT', amount: '1000.50', facility_code: 'KWC', expected_date: '2026-08-28' }),
+      manual({ kind: 'add', method_label: 'EFT', amount: '500.00', facility_code: 'CAMH', expected_date: '2026-08-01' }),
+      // Adjacent months on BOTH sides — the prefix match must exclude them.
+      manual({ kind: 'add', method_label: 'EFT', amount: '99999.00', facility_code: 'KWC', expected_date: '2026-07-31' }),
+      manual({ kind: 'add', method_label: 'EFT', amount: '88888.00', facility_code: 'KWC', expected_date: '2026-09-01' }),
+    ],
+  ).rows;
+  const m = expectedCentsByFacilityForMonth(rows, 2026, 8);
+  assert.equal(m.get('KWC'), 3300050, 'both August KWC rows, exact cents, no float drift');
+  assert.equal(m.get('CAMH'), 50000);
+  assert.equal(m.size, 2, 'July and September contribute nothing');
+});
+
+test('expectedCentsByFacilityForMonth zero-pads the month — 2026-09 is not 2026-9', () => {
+  const rows = resolveForecast(
+    [],
+    [manual({ kind: 'add', method_label: 'EFT', amount: '100.00', facility_code: 'KWC', expected_date: '2026-09-02' })],
+  ).rows;
+  assert.equal(expectedCentsByFacilityForMonth(rows, 2026, 9).get('KWC'), 10000);
+  assert.equal(expectedCentsByFacilityForMonth(rows, 2026, 1).size, 0, 'no accidental prefix hit');
+});
+
+test('a facility whose only forecast amount is unreadable gets NO entry, not a zero bar', () => {
+  const rows = resolveForecast(
+    [],
+    [manual({ kind: 'add', method_label: 'EFT', amount: 'not-a-number', facility_code: 'KWC', expected_date: '2026-08-05' })],
+  ).rows;
+  assert.equal(expectedCentsByFacilityForMonth(rows, 2026, 8).size, 0);
+});
+
+test('THE CHART CANNOT SEE HIDDEN OR MATCHED MONEY — only resolved.rows feeds it', () => {
+  // The chart passes resolveForecast(...).rows and nothing else. This pins WHY: `hidden` is
+  // money a human removed and `matched` is money an 835 already covers, so either one folded
+  // into the expected series would put settled money back on screen as outstanding.
+  const key = { facility_code: 'KWC', payer_label: 'BCBS TN', expected_date: '2026-08-05' };
+  const r = resolveForecast(
+    [],
+    [
+      manual({ kind: 'add', method_label: 'EFT', amount: '32000.00', ...key }),
+      manual({ kind: 'suppress', method_label: null, amount: null, suppress_reason: 'landed', ...key }),
+      manual({
+        kind: 'add', method_label: 'EFT', amount: '77000.00', status: 'matched', matched_era_key: 'k',
+        facility_code: 'CAMH', payer_label: 'AETNA', expected_date: '2026-08-07',
+      }),
+    ],
+  );
+  assert.equal(r.hidden.length, 1, 'the KWC add is hidden by its suppress');
+  assert.equal(r.matched.length, 1, 'the CAMH add is reconciled');
+  assert.equal(expectedCentsByFacilityForMonth(r.rows, 2026, 8).size, 0, 'neither reaches the chart');
 });

@@ -1191,9 +1191,15 @@ export async function getUpcomingManual(entityIds: string[]): Promise<ManualFore
       // correction" button on the tile a silent no-op: deleteUpcomingManual guards with
       // Number.isSafeInteger, and Number.isSafeInteger("15") is false. The generic is the
       // *Db* row on purpose, so returning res.rows unmapped is a tsc error, not a review miss.
+      // 033 adds status/removed_at. Both are SELECTED, not filtered in SQL: the resolver
+      // returns removed rows as their own output so an operator can see what was taken back
+      // and by whom, which a `where removed_at is null` here would make impossible. The
+      // volume argument that would justify filtering does not apply — this is one decision
+      // per human judgement about ~9 sheet rows.
       const res = await client.query<ManualForecastDbRow>(
         `select id, kind, facility_code, payer_label, expected_date::text as expected_date,
-                method_label, amount::text as amount, suppress_reason, matched_era_key
+                method_label, amount::text as amount, suppress_reason, matched_era_key,
+                status, removed_at::text as removed_at
            from staging.expected_payment_manual
           where business_entity_id = $1::uuid
           order by expected_date asc, facility_code asc, payer_label asc, id asc`,
@@ -1254,16 +1260,152 @@ export async function saveUpcomingManualRow(input: {
   return id;
 }
 
-/** Remove one edit. Returns false when the id did not exist for this tenant (idempotent). */
+/**
+ * Remove one edit — a SOFT delete since 033.
+ *
+ * Returns false when no LIVE row matched for this tenant, which covers both "already removed"
+ * and "never existed" and makes a double-click harmless. 033's function carries the
+ * `removed_at IS NULL` predicate, so a second call cannot overwrite the first remover's name.
+ *
+ * ⚠️ NOT staging.delete_expected_payment_manual. That function still exists and still works,
+ * but it is a HARD delete: it destroys the row an existing claims.access_audit entry names,
+ * leaving the audit trail pointing at an id that resolves to nothing. It stays available for a
+ * deliberate hand-run purge; the app path must not use it.
+ */
 export async function removeUpcomingManualRow(
   businessEntityId: string,
   id: number,
+  actorUserId: string,
 ): Promise<boolean> {
-  const { rows } = await readerExecutor().query<{ deleted: boolean }>(
-    'select staging.delete_expected_payment_manual($1::uuid, $2::bigint) as deleted',
-    [businessEntityId, id],
+  const { rows } = await readerExecutor().query<{ removed: boolean }>(
+    'select staging.remove_expected_payment_manual($1::uuid, $2::bigint, $3::uuid) as removed',
+    [businessEntityId, id, actorUserId],
   );
-  return rows[0]?.deleted === true;
+  return rows[0]?.removed === true;
+}
+
+/**
+ * Record a reconciliation decision against an 835 (033).
+ *
+ * 'matched' takes the forecast row out of the tile's count because the 835 is already there;
+ * 'needs_review' leaves it counted and flags it; 'expected' is the undo. The DB function
+ * refuses a non-'expected' status with no era key, and only touches kind='add'.
+ *
+ * NOTHING HERE DECIDES A MATCH. `suggestLandedMatches` proposes and a super admin confirms —
+ * a wrong automatic match silently deletes money from a forecast (024's ruling, still live).
+ */
+export async function setUpcomingManualStatusRow(
+  businessEntityId: string,
+  id: number,
+  status: 'expected' | 'needs_review' | 'matched',
+  matchedEraKey: string | null,
+  actorUserId: string,
+): Promise<boolean> {
+  const { rows } = await readerExecutor().query<{ updated: boolean }>(
+    'select staging.set_expected_payment_manual_status(' +
+      '$1::uuid, $2::bigint, $3, $4, $5::uuid) as updated',
+    [businessEntityId, id, status, matchedEraKey, actorUserId],
+  );
+  return rows[0]?.updated === true;
+}
+
+// --- MANUAL DEPOSITS (collections.daily_collections, source_tag='manual', 0096) ---------
+
+/** One operator-recorded deposit CMD has not posted yet. Non-PHI: facility, day, money. */
+export interface ManualDepositRow {
+  /** bigint — narrowed at the read boundary; see the note on the read below. */
+  id: number;
+  facility_code: string;
+  payment_date: string;
+  checks_amount: string;
+  eft_amount: string;
+  gross_amount: string;
+  created_at: string;
+  /**
+   * A CMD deposit now exists for the same facility + day, so this row is probably counted
+   * twice. NOT auto-removed (Alec, 2026-08-10): auto-suppressing would swallow a genuine
+   * second same-day payment invisibly. The UI prompts; a human decides.
+   */
+  cmd_now_covers: boolean;
+}
+
+/**
+ * Live manual deposits for an already-clamped entity scope, each flagged with whether CMD has
+ * since posted a deposit for the same facility-day.
+ *
+ * Uses the 0096 partial index (business_entity_id, facility_code, payment_date)
+ * WHERE source_tag='manual' AND removed_at IS NULL — and unlike 033's dropped index, the
+ * predicate is genuinely present in this query, which is the whole reason it can be used.
+ */
+export async function getManualDeposits(entityIds: string[]): Promise<ManualDepositRow[]> {
+  if (entityIds.length === 0) throw new Error('getManualDeposits: empty entity scope');
+  const { rows } = await readerExecutor().query<Omit<ManualDepositRow, 'id'> & { id: string }>(
+    `select d.id, d.facility_code, d.payment_date::text as payment_date,
+            d.checks_amount::text as checks_amount, d.eft_amount::text as eft_amount,
+            d.gross_amount::text as gross_amount, d.created_at::text as created_at,
+            exists (
+              select 1 from collections.daily_collections c
+               where c.business_entity_id = d.business_entity_id
+                 and c.facility_code = d.facility_code
+                 and c.payment_date = d.payment_date
+                 and c.source_tag = 'cmd'
+                 and c.removed_at is null
+            ) as cmd_now_covers
+       from collections.daily_collections d
+      where d.business_entity_id = any($1::uuid[])
+        and d.source_tag = 'manual'
+        and d.removed_at is null
+      order by d.payment_date desc, d.facility_code asc, d.id asc`,
+    [entityIds],
+  );
+  // int8 arrives as TEXT and this repo registers no type parser, so a raw pass-through would
+  // put the STRING "21" in a field typed `number` — the exact lie that made every Remove
+  // button on the forecast tile a silent no-op for two days (see upcomingForecast.ts).
+  return rows.map((r) => {
+    const id = Number(r.id);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new Error(`getManualDeposits: daily_collections.id is not a safe integer (${r.id})`);
+    }
+    return { ...r, id };
+  });
+}
+
+/** Record a deposit CMD has not posted yet. Returns the new row id. */
+export async function addManualDepositRow(input: {
+  businessEntityId: string;
+  facilityCode: string;
+  paymentDate: string;
+  method: 'EFT' | 'Check';
+  amount: string;
+  actorUserId: string;
+}): Promise<string> {
+  const { rows } = await readerExecutor().query<{ id: string }>(
+    'select collections.add_manual_deposit($1::uuid, $2, $3::date, $4, $5::numeric, $6::uuid) as id',
+    [
+      input.businessEntityId,
+      input.facilityCode,
+      input.paymentDate,
+      input.method,
+      input.amount,
+      input.actorUserId,
+    ],
+  );
+  const id = rows[0]?.id;
+  if (!id) throw new Error('addManualDepositRow: insert returned no id');
+  return id;
+}
+
+/** Soft-remove one manual deposit. False when no LIVE manual row matched (idempotent). */
+export async function removeManualDepositRow(
+  businessEntityId: string,
+  id: number,
+  actorUserId: string,
+): Promise<boolean> {
+  const { rows } = await readerExecutor().query<{ removed: boolean }>(
+    'select collections.remove_manual_deposit($1::uuid, $2::bigint, $3::uuid) as removed',
+    [businessEntityId, id, actorUserId],
+  );
+  return rows[0]?.removed === true;
 }
 
 /**

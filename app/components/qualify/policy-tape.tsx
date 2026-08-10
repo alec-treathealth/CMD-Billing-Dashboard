@@ -34,17 +34,28 @@
  */
 import { memo } from 'react';
 import type { QualifyPolicyTapeItem } from '../../lib/qualify/board';
-import { IQ_BAND_HEX } from './tokens';
+import { IQ_BAND_HEX, TAPE_PALETTE } from './tokens';
 import { useMarquee } from './useMarquee';
 
 /**
- * Movement colours for the INVERSE (dark teal) ground this strip sits on. The status palette in
- * tailwind.config is tuned for the light card ground and reads muddy here — status-ok #2E8B6F is
- * 2.1:1 on teal900. These are the dark-set values from the merged token file, both >= 7:1 on
- * #0E3A3A. Colour is reinforcement only; the arrow and the "pts" wording carry the meaning.
+ * MOVEMENT COLOURS COME FROM `TAPE_PALETTE`, NOT FROM A PRIVATE PAIR HERE.
+ *
+ * These hexes existed in THREE places — `--tape-up`/`--tape-down` in ths-v2.css, `TAPE_PALETTE` in
+ * tokens.ts, and a local `const TAPE_UP`/`TAPE_DOWN` right here — and `ths-tokens-contrast.test.tsx`
+ * pinned the first two to each other while this file, the only place the colour is actually PAINTED,
+ * drifted freely. A guard that covers two copies and not the render site is a guard over the wrong
+ * thing. Reading the token means the AA-on-inverse assertion in that test now protects what ships.
+ *
+ * Why the tape needs its own pair at all: the status palette in tailwind.config is tuned for the
+ * light card ground and reads muddy on this dark teal — status-ok #2E8B6F is ~2.1:1 on teal900.
+ * `TAPE_PALETTE`'s values are measured against `surfaceInverse` and are the ONLY ones that may be
+ * used here (its own header spells out why RATING_HEX must never be substituted). Colour is
+ * reinforcement only; the arrow and the "pts" wording carry the meaning.
+ *
+ * The flat case stays a literal: it is white at 54% alpha, an 8-digit value with no token because it
+ * is a de-emphasis of `onInverse` rather than a colour of its own.
  */
-const TAPE_UP = '#46C4B8';
-const TAPE_DOWN = '#F0917C';
+const FLAT_HEX = '#FFFFFF8A';
 
 /** Ratings move in whole points, so anything non-zero is real movement — no dead-band needed. */
 function DeltaText({ deltaPts }: { deltaPts: number }) {
@@ -52,7 +63,7 @@ function DeltaText({ deltaPts }: { deltaPts: number }) {
   return (
     <span
       className="font-mono text-xs font-medium"
-      style={{ color: up ? TAPE_UP : deltaPts < 0 ? TAPE_DOWN : '#FFFFFF8A' }}
+      style={{ color: up ? TAPE_PALETTE.up : deltaPts < 0 ? TAPE_PALETTE.down : FLAT_HEX }}
     >
       {up ? '▲ +' : deltaPts < 0 ? '▼ ' : '◆ '}
       {deltaPts}

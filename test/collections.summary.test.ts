@@ -6,7 +6,12 @@ import {
   validateDateBound,
   type CollectionsSummaryContext,
 } from '../src/collections/summary.js';
-import { facilityLabel } from '../src/collections/summaryTypes.js';
+import {
+  OTHER_FACILITY_LABEL,
+  UNASSIGNED_FACILITY_LABEL,
+  facilityLabel,
+  overviewFacilityLabel,
+} from '../src/collections/summaryTypes.js';
 import { BXR_ENTITY_ID } from '../src/tenants.js';
 import type { ExecResult, QueryExecutor } from '../src/queries/types.js';
 
@@ -157,4 +162,37 @@ test('emits exactly one non-PHI audit line (no PHI, no query_log)', async () => 
   assert.deepEqual(audit.args_shape, { from: '2026-01-01', to: null });
   assert.equal(audit.rows_returned, 1);
   assert.equal(audit.rows_analyzed, 1);
+});
+
+// ---------------------------------------------------------------------------
+// TWO LABELS FOR ONE BUCKET, ON PURPOSE (2026-08-10)
+// ---------------------------------------------------------------------------
+// The Overview tab renders a no-facility row as "Interest Payments/Other" (Alec's wording).
+// The Collections tab keeps "(unassigned)". They are separate because they are describing the
+// bucket to different readers about different data: on Collections it genuinely is
+// source_group_code lineage (TREAT_FRCA / LSMH_DMH), where calling it interest would be false.
+//
+// These two tests exist so a future "tidy-up" that collapses them into one constant has to
+// delete an assertion that says why, rather than silently restyling a tab nobody asked to touch.
+
+test('overviewFacilityLabel names the bucket "Interest Payments/Other"', () => {
+  assert.equal(OTHER_FACILITY_LABEL, 'Interest Payments/Other');
+  assert.equal(overviewFacilityLabel({ facility_name: null }), 'Interest Payments/Other');
+  // A real facility is untouched — the label is a fallback, never an override.
+  assert.equal(overviewFacilityLabel({ facility_name: 'CA MENTAL HEALTH' }), 'CA MENTAL HEALTH');
+});
+
+test('facilityLabel is UNCHANGED — the Collections tab must not move', () => {
+  // Collections is explicitly out of scope for the Overview relabel. If this flips, that tab's
+  // rendering changed without anyone asking for it.
+  assert.equal(UNASSIGNED_FACILITY_LABEL, '(unassigned)');
+  assert.equal(facilityLabel({ facility_name: null }), '(unassigned)');
+  assert.notEqual(facilityLabel({ facility_name: null }), overviewFacilityLabel({ facility_name: null }));
+});
+
+test('"/Other" is load-bearing — the label must not claim everything is interest', () => {
+  // Deposit rows carry no CPT, so nothing at this grain can prove a row IS interest. The
+  // bucket also holds group-code lineage and unmapped facilities. Shortening this to
+  // "Interest Payments" would assert a classification the data cannot support.
+  assert.ok(OTHER_FACILITY_LABEL.includes('/Other'), 'the hedge stays in the name');
 });

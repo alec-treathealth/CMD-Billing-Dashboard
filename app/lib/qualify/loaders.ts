@@ -37,6 +37,14 @@ import {
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../../../src/tenants';
 import { facilityLocation } from './facilityLocations';
 import type { QualifyPolicyTapeContext } from './board';
+import {
+  buildRecentSearchListQuery,
+  buildWatcherListQuery,
+  buildWatcherSeriesQuery,
+  type QualifyRecentSearchRow,
+  type QualifyWatcherRow,
+  type QualifyWatcherSeriesRow,
+} from '../../../src/collections/qualifyWatchers';
 
 let executor: PgExecutor | null = null;
 /** Module-cached executor on a SEPARATE small claims_reader pool (the verisReaderPool precedent). */
@@ -297,4 +305,134 @@ export async function loadQualifyPolicyTapeContext(
       facilityCount: r.facility_count,
     };
   });
+}
+
+// ── Watchers + recent searches (mig 0097, APPLIED LIVE 2026-08-10, ledger 20260810120258) ────────
+//
+// SAME FAIL-SOFT CLASS AS THE TAPE ABOVE: 42P01 (undefined_table) / 3F000 (invalid_schema_name)
+// degrade to "relations absent" (null / persisted:false) so the board runs session-only instead of
+// 500ing. That path REMAINS, but it is now a SHOULD-NEVER-SEE state meaning the relations went
+// missing — not the expected pre-apply mode it was written for. Any other error rethrows: a 42501
+// must never masquerade as "not provisioned yet" (the 0089 lesson).
+//
+// ⚠ 42883 (undefined_function) IS DELIBERATELY NOT IN THIS SET — it was, and removing it is a fix.
+// Before the apply it was the honest signature of "the definers do not exist yet". After the apply
+// the four definers DO exist, so `undefined_function` can now only mean a signature mismatch (an
+// argument type or arity changed under us) or a dropped definer. Both are real faults, and both used
+// to be swallowed into `{persisted:false}` with no log at all — which the UI then rendered as a
+// reassuring "this session only", the exact 0089 costume the paragraph above forbids. Data the
+// operator believed was saved would simply be gone, silently and repeatably. Letting it throw routes
+// it to the actions' `catch`, which logs and returns `{ok:false, reason:'failed'}`, and the panel
+// says the save did not happen. A loud wrong answer beats a quiet one.
+
+function relationAbsent(err: unknown): boolean {
+  const code = typeof err === 'object' && err !== null ? String((err as { code?: unknown }).code) : '';
+  return code === '42P01' || code === '3F000';
+}
+
+export async function loadQualifyWatcherRows(userId: string): Promise<QualifyWatcherRow[] | null> {
+  const q = buildWatcherListQuery(userId);
+  try {
+    const res = await qualifyV2Reader().query<QualifyWatcherRow>(q.sql, q.params);
+    return res.rows;
+  } catch (err) {
+    if (relationAbsent(err)) {
+      // 0097 IS APPLIED, so this is a fault, not a provisioning stage: the relations went missing.
+      // Logged at error precisely because the UI's own rendering of it is calm by design.
+      console.error(
+        'qualify watcher relations are absent though mig 0097 is applied — board degraded to session-only',
+      );
+      return null;
+    }
+    throw err;
+  }
+}
+
+export async function loadQualifyRecentSearchRows(userId: string): Promise<QualifyRecentSearchRow[] | null> {
+  const q = buildRecentSearchListQuery(userId);
+  try {
+    const res = await qualifyV2Reader().query<QualifyRecentSearchRow>(q.sql, q.params);
+    return res.rows;
+  } catch (err) {
+    if (relationAbsent(err)) return null; // the watcher loader above already logged the class
+    throw err;
+  }
+}
+
+/** Sparkline series off the 0093 daily table. NOT fail-soft here — the CORE owns that (enrichment
+ *  degrades to no sparkline), same division of labor as loadQualifyPolicyTapeContext above. */
+export async function loadQualifyWatcherSeries(
+  subjects: readonly { token: string | null; payer: string }[],
+): Promise<QualifyWatcherSeriesRow[]> {
+  if (subjects.length === 0) return [];
+  const q = buildWatcherSeriesQuery(subjects);
+  const res = await qualifyV2Reader().query<QualifyWatcherSeriesRow>(q.sql, q.params);
+  return res.rows;
+}
+
+/** One definer call each. `persisted:false` = the RELATIONS ARE ABSENT — a should-never-see fault
+ *  now that 0097 is applied, kept as a fail-soft so a missing table degrades the board instead of
+ *  500ing the page. Everything else, 42883 included, rethrows to the action's catch. */
+export async function saveQualifyWatcherRow(args: {
+  userId: string;
+  kind: 'trend' | 'patient';
+  payer: string | null;
+  token: string | null;
+  echo: string | null;
+  thresholdPts: number | null;
+}): Promise<{ persisted: boolean }> {
+  try {
+    await qualifyV2Reader().query('select claims.save_qualify_watcher($1::uuid, $2, $3, $4, $5, $6::int)', [
+      args.userId,
+      args.kind,
+      args.payer,
+      args.token,
+      args.echo,
+      args.thresholdPts,
+    ]);
+    return { persisted: true };
+  } catch (err) {
+    if (relationAbsent(err)) return { persisted: false };
+    throw err;
+  }
+}
+
+export async function deleteQualifyWatcherRow(userId: string, id: string): Promise<{ persisted: boolean }> {
+  try {
+    await qualifyV2Reader().query('select claims.delete_qualify_watcher($1::uuid, $2::bigint)', [userId, id]);
+    return { persisted: true };
+  } catch (err) {
+    if (relationAbsent(err)) return { persisted: false };
+    throw err;
+  }
+}
+
+export async function recordQualifyRecentSearchRow(args: {
+  userId: string;
+  payer: string | null;
+  echo: string | null;
+  planClass: string | null;
+}): Promise<{ persisted: boolean }> {
+  try {
+    await qualifyV2Reader().query('select claims.record_qualify_recent_search($1::uuid, $2, $3, $4)', [
+      args.userId,
+      args.payer,
+      args.echo,
+      args.planClass,
+    ]);
+    return { persisted: true };
+  } catch (err) {
+    if (relationAbsent(err)) return { persisted: false };
+    throw err;
+  }
+}
+
+export async function clearQualifyRecentSearchRows(userId: string): Promise<{ persisted: boolean }> {
+  try {
+    await qualifyV2Reader().query('select claims.clear_qualify_recent_searches($1::uuid)', [userId]);
+    return { persisted: true };
+  } catch (err) {
+    if (relationAbsent(err)) return { persisted: false };
+    throw err;
+  }
 }
