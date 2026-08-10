@@ -14,7 +14,7 @@ import { dashboardAccess } from '@/lib/access';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { QualifyMaintenanceNotice } from '@/components/qualify/qualify-maintenance-notice';
 import { qualifyMaintenanceBlocks } from '@/lib/qualify/maintenance';
-import { qualifyV3FlowEnabled } from '@/lib/qualify/v3Flags';
+import { qualifySmokeShellEnabled, qualifyV3FlowEnabled } from '@/lib/qualify/v3Flags';
 import { QualifyTab } from '@/components/qualify/qualify-tab';
 import { ResolutionFlowClient } from '@/components/qualify/v3/resolution-flow-client';
 import { PolicyTapeMount } from '@/components/qualify/policy-tape-mount';
@@ -57,6 +57,12 @@ export default async function QualifyPage() {
   // Authorization is re-checked inside the action by requireQualifyPrincipal; this page gate is the
   // routing mirror, not the control.
   if (qualifyV3FlowEnabled()) {
+    // ── THE SMOKE SHELL (2026-08-10, default ON) — the two-pane lane/board layout. The tape moves
+    // INTO the board (the client mounts it in the tape stack), so the standalone mount below is
+    // exclusively the single-column fallback's. Kill switch: QUALIFY_SMOKE_SHELL=off.
+    if (qualifySmokeShellEnabled()) {
+      return <ResolutionFlowClient viewerHasAmountsCapability={viewerHasAmountsCapability} shellMode />;
+    }
     // The policy tape sits ABOVE the flow and owns its own fetch, so it adds no latency to the
     // page and no state to the flow shell. It renders as ABSENT (not as an empty bar) whenever
     // there is nothing to show, so a quiet book costs no vertical space. Its own <main> matches

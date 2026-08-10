@@ -4114,6 +4114,15 @@ export interface ResolutionStagesProps {
    *  and the carriers the rail counts can never be two derivations that merely happen to agree. */
   payerGroups?: PayerGroup[];
   answer: Omit<StageAnswerProps, 'resolution'> | null;
+  /**
+   * WHERE THE ANSWER STAGE RENDERS (Smoke shell, 2026-08-10). Default true — the single-column
+   * layout, unchanged. The two-pane shell passes false and hosts <StageAnswer> itself in the board
+   * pane ("drill left → resolve right"); everything else here — the rail, the receipt, the ONE
+   * live region, the skip — stays in this root, because they read `props.answer` for their claims
+   * and splitting THOSE across panes would be two derivations of one truth. The `answer` bag must
+   * therefore still be passed even when this is false.
+   */
+  answerInline?: boolean;
 }
 
 /**
@@ -4296,7 +4305,7 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
           />
         ) : null}
 
-        {props.stage === 'answer' && props.resolution && props.answer ? (
+        {props.stage === 'answer' && props.resolution && props.answer && (props.answerInline ?? true) ? (
           <StageAnswer resolution={props.resolution} {...props.answer} />
         ) : null}
       </div>

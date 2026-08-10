@@ -83,13 +83,38 @@ board sections out. UI build proceeds; the LANE binds to the rewrite when it lan
 - Facilities tape → `getQualifyFacilityTrends()` (already live)
 - Lane / stepper / receipt → `resolveCoverageAction` (v3) — REBIND after the rewrite
 - AI chips/composer → `generateQualifyAiExplanation` + aiChips (live; slot grammar TBD)
-- Echo labels on tape items → arrive when the rewrite calls
-  `record_qualify_prefix_echo` (until then the UI shows `⋯` + token tail)
+- Echo labels on tape items → SOLVED BETTER than the echo seam: `prefixLabel.ts` resolves the
+  whole 46,656-value domain in-process (ratified 2026-08-09); `record_qualify_prefix_echo`
+  stays permanently unwired — see CLAUDE.md's corrected note.
 
-Still parked (unchanged):
-- Watchers need a `collections.qualify_watchers` table (user, kind, hmac_token/
-  payer_key, masked echo, threshold) — RLS per user; own scoped session.
-- "Patient watcher" alerts ("new ERA posted") imply joining era-835 output against
-  watcher tokens — feasible via the same blind index, needs its own scoped session.
-- Recent searches: terms are unrecoverable from claims.access_audit BY DESIGN —
-  persistence is an audit-policy decision, not just an action.
+## Build status — 2026-08-10 (the full shell landed on feat/qualify-smoke-tokens-chips)
+
+Everything above is BUILT except where noted:
+- **Phase 0** — extend-and-unify, NOT the tokens.json compile: ths-v2.css turned out to be a
+  better system than the mock's `:root` (which reuses 7 live token names at different values —
+  see the Smoke-primitives block in ths-v2.css and app/test/ths-tokens-contrast.test.tsx's
+  tripwire). Style Dictionary consciously skipped; fonts stay the existing CDN import.
+- **Phase 1** — the two-pane shell IS the rendered /qualify (kill switch `QUALIFY_SMOKE_SHELL=off`):
+  LaneRail (head + Start over + lock strip + composer) wraps the UNCHANGED v3 staged flow; the
+  board hosts the two-lane tape, the This-Search zone (empty → matched → hero → StageAnswer via
+  `answerInline={false}`), watchers, and recent searches. One answer bag, two render sites.
+- **Phase 2** — slot-chips on the panel AND the rail composer (same grammar, same <SlotChip>).
+  Free text structurally impossible; facility slots travel as indices, resolved server-side.
+- **Watchers + recent searches** — mig 0096 AUTHORED (claims plane, the 0046 pattern; NOT the
+  `collections.qualify_watchers` shape sketched above) but **NOT APPLIED**; until it applies the
+  panels run session-only and say so. Sparklines read the live 0093 daily table. Kinds:
+  'trend' (payer, optional prefix pin) + 'patient' (token + masked echo, never the raw ID).
+  Recent searches persist non-PHI facets only; a member-ID search degrades to its prefix.
+  Persistence was ruled by Alec 2026-08-10 ("save their history") — the audit-policy question
+  the old note flagged is thereby decided, with the facet allowlist as the boundary.
+- **Prompt tree** — src/collections/qualifyPromptTree.ts: deterministic branches over the
+  validated payload (ticker/search mode, evidence none/thin/solid, all-plans, estimated,
+  self-funded) + the always-on admissions voice; the ratified honesty core travels verbatim.
+  Qualify renders the sections as "Bottom line / What we see / Watch out for" (wire markers
+  unchanged — the collections panel keeps TL;DR).
+
+Still parked:
+- "Patient watcher" alerts ("new ERA posted") — joining era-835 output against watcher tokens;
+  its own scoped session (the panel's pill reads rating-history presence for now).
+- The mock's `.kpi__range` one-line flank is SUPERSEDED by the shipped named-facility flank
+  layout (Alec, 2026-08-10 — see tileFlanks.ts and the kpi-flank memory note).

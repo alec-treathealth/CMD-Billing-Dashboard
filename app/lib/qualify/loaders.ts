@@ -37,6 +37,14 @@ import {
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../../../src/tenants';
 import { facilityLocation } from './facilityLocations';
 import type { QualifyPolicyTapeContext } from './board';
+import {
+  buildRecentSearchListQuery,
+  buildWatcherListQuery,
+  buildWatcherSeriesQuery,
+  type QualifyRecentSearchRow,
+  type QualifyWatcherRow,
+  type QualifyWatcherSeriesRow,
+} from '../../../src/collections/qualifyWatchers';
 
 let executor: PgExecutor | null = null;
 /** Module-cached executor on a SEPARATE small claims_reader pool (the verisReaderPool precedent). */
@@ -297,4 +305,118 @@ export async function loadQualifyPolicyTapeContext(
       facilityCount: r.facility_count,
     };
   });
+}
+
+// ── Watchers + recent searches (mig 0096) ─────────────────────────────────────────────────────────
+//
+// SAME FAIL-SOFT CLASS AS THE TAPE ABOVE, plus 42883 (undefined_function): the WRITE path calls
+// SECURITY DEFINER functions, and an unapplied 0096 surfaces there as undefined_function rather
+// than undefined_table. All three degrade to "relations absent" (null / persisted:false) so the
+// board runs session-only instead of 500ing; any OTHER error rethrows — a 42501 must never
+// masquerade as "not provisioned yet" (the 0089 lesson).
+
+function relationAbsent(err: unknown): boolean {
+  const code = typeof err === 'object' && err !== null ? String((err as { code?: unknown }).code) : '';
+  return code === '42P01' || code === '3F000' || code === '42883';
+}
+
+export async function loadQualifyWatcherRows(userId: string): Promise<QualifyWatcherRow[] | null> {
+  const q = buildWatcherListQuery(userId);
+  try {
+    const res = await qualifyV2Reader().query<QualifyWatcherRow>(q.sql, q.params);
+    return res.rows;
+  } catch (err) {
+    if (relationAbsent(err)) {
+      console.error('qualify watchers unavailable (mig 0096 unapplied?) — board runs session-only');
+      return null;
+    }
+    throw err;
+  }
+}
+
+export async function loadQualifyRecentSearchRows(userId: string): Promise<QualifyRecentSearchRow[] | null> {
+  const q = buildRecentSearchListQuery(userId);
+  try {
+    const res = await qualifyV2Reader().query<QualifyRecentSearchRow>(q.sql, q.params);
+    return res.rows;
+  } catch (err) {
+    if (relationAbsent(err)) return null; // the watcher loader above already logged the class
+    throw err;
+  }
+}
+
+/** Sparkline series off the 0093 daily table. NOT fail-soft here — the CORE owns that (enrichment
+ *  degrades to no sparkline), same division of labor as loadQualifyPolicyTapeContext above. */
+export async function loadQualifyWatcherSeries(
+  subjects: readonly { token: string | null; payer: string }[],
+): Promise<QualifyWatcherSeriesRow[]> {
+  if (subjects.length === 0) return [];
+  const q = buildWatcherSeriesQuery(subjects);
+  const res = await qualifyV2Reader().query<QualifyWatcherSeriesRow>(q.sql, q.params);
+  return res.rows;
+}
+
+/** One definer call each. persisted:false = 0096 unapplied (session-only mode); errors rethrow. */
+export async function saveQualifyWatcherRow(args: {
+  userId: string;
+  kind: 'trend' | 'patient';
+  payer: string | null;
+  token: string | null;
+  echo: string | null;
+  thresholdPts: number | null;
+}): Promise<{ persisted: boolean }> {
+  try {
+    await qualifyV2Reader().query('select claims.save_qualify_watcher($1::uuid, $2, $3, $4, $5, $6::int)', [
+      args.userId,
+      args.kind,
+      args.payer,
+      args.token,
+      args.echo,
+      args.thresholdPts,
+    ]);
+    return { persisted: true };
+  } catch (err) {
+    if (relationAbsent(err)) return { persisted: false };
+    throw err;
+  }
+}
+
+export async function deleteQualifyWatcherRow(userId: string, id: string): Promise<{ persisted: boolean }> {
+  try {
+    await qualifyV2Reader().query('select claims.delete_qualify_watcher($1::uuid, $2::bigint)', [userId, id]);
+    return { persisted: true };
+  } catch (err) {
+    if (relationAbsent(err)) return { persisted: false };
+    throw err;
+  }
+}
+
+export async function recordQualifyRecentSearchRow(args: {
+  userId: string;
+  payer: string | null;
+  echo: string | null;
+  planClass: string | null;
+}): Promise<{ persisted: boolean }> {
+  try {
+    await qualifyV2Reader().query('select claims.record_qualify_recent_search($1::uuid, $2, $3, $4)', [
+      args.userId,
+      args.payer,
+      args.echo,
+      args.planClass,
+    ]);
+    return { persisted: true };
+  } catch (err) {
+    if (relationAbsent(err)) return { persisted: false };
+    throw err;
+  }
+}
+
+export async function clearQualifyRecentSearchRows(userId: string): Promise<{ persisted: boolean }> {
+  try {
+    await qualifyV2Reader().query('select claims.clear_qualify_recent_searches($1::uuid)', [userId]);
+    return { persisted: true };
+  } catch (err) {
+    if (relationAbsent(err)) return { persisted: false };
+    throw err;
+  }
 }

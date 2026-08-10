@@ -192,9 +192,9 @@ library from `../src` and is the Vercel app root.
 
 Two **separate** migration planes — never mix the directories:
 
-| Plane | Directory | Next number (as of 2026-08-09) |
+| Plane | Directory | Next number (as of 2026-08-10) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0096** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0097** — 0096 (qualify watchers, claims plane) is AUTHORED on `feat/qualify-smoke-tokens-chips`, **NOT applied**; its panels run session-only until `apply_migration` |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **032** |
 
 **0095 consumed its slot without leaving a file — the next number is 0096, not 0095.**
@@ -237,10 +237,21 @@ never-rateable rows (~90% smaller, but blinds the majority persona) and a retent
 (bounds growth; keep ≥400 days or year-over-year and the January deductible-reset explanation
 are both lost).
 
-`collections.qualify_prefix_echo` is still EMPTY and that is correct — the search rewrite does
-not yet call `record_qualify_prefix_echo`, so tape items show a token tail instead of a `GGS`
-echo. Note also that `getQualifyPolicyTape()` reads `available:true` with zero items when the
-table is applied-but-empty; `available:false` means the RELATION is absent.
+`collections.qualify_prefix_echo` is still EMPTY, and as of 2026-08-09 that is **permanent, not
+pending** — ⚠ **do NOT wire `record_qualify_prefix_echo`; the problem it was minted for is solved
+by a better mechanism that already ships.** This paragraph previously said tape items "show a
+token tail instead of a `GGS` echo" and read as a to-do; it was stale within a day and is
+corrected here (2026-08-10). `src/collections/prefixLabel.ts` resolves a token back to its
+readable 3-character prefix **in-process, with no write and no query**: an alpha prefix is 3
+characters over `[A-Z0-9]`, so the domain is 46,656 values, and the key holder computes the whole
+token→prefix map once per warm process (~150ms, ~7MB, lazily). It is wired — `prefixLabelsFor` →
+`resolvePrefixes` at `app/lib/qualify/board-actions.ts:44`, rendered by `policy-tape.tsx` — and
+**ratified by Alec 2026-08-09** (see prefixLabel.ts's header; do not re-litigate or soften it back
+to the masked tail without a new ruling). The echo seam is strictly worse on coverage: it can only
+ever label prefixes somebody already SEARCHED, so a tape of the whole book would stay mostly
+masked for weeks, and it costs a write per search to do it. Note separately that
+`getQualifyPolicyTape()` reads `available:true` with zero items when the table is
+applied-but-empty; `available:false` means the RELATION is absent.
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
 0077. 0080/0081/0082 (explorer perf) are **applied live 2026-08-04** — 0081
