@@ -165,10 +165,20 @@ Two **separate** migration planes — never mix the directories:
 
 | Plane | Directory | Next number (as of 2026-08-09) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0095** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0096** |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **032** |
 
-**0093 (Qualify rating history) is APPLIED LIVE 2026-08-08** via `apply_migration` — plain
+**0095 consumed its slot without leaving a file — the next number is 0096, not 0095.**
+`0095_qualify_rating_history_prune` is in the live ledger (version `20260809073608`) but has no
+`.sql` and no `_rollback.sql` on any ref: it was an intentional **one-shot retention job**. The
+definer it created, `collections.prune_qualify_rating_history(date)`, was applied at 07:36:08 UTC,
+used once to prune `qualify_policy_rating_daily` below `current_date - 120` (= 2026-04-11, the
+surviving floor), then **dropped in the same session at 07:42:39 UTC** and verified gone. A
+version number is consumed the moment it lands in the ledger — **never reuse one**, even when the
+migration left no file behind, because the ledger row is permanent and a second 0095 would collide
+with it.
+
+**0093 (Qualify rating history) is APPLIED LIVE 2026-08-09** via `apply_migration` — plain
 transactional DDL, so the 0081/0092 autocommit discipline does NOT apply here. It creates
 `collections.qualify_policy_rating_daily` + `qualify_rating_run` + `qualify_prefix_echo` and
 the `record_qualify_prefix_echo` definer. Verified at apply: reader SELECT true · writer
