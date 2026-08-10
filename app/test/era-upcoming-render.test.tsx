@@ -394,9 +394,16 @@ test('THE PROOF CASE: the past-dated $72,000 row renders in Overdue and NOWHERE 
   assert.ok(!html.includes('$72,100.00'), 'overdue never folds into the ERA headline');
 });
 
-test('RESOLVE THEN PARTITION: a past-dated manual add buckets into Overdue', () => {
-  // kind='add' is the door a server-side partition would miss: the add enters at the
-  // client resolver with its own date, after any SQL bucketing of sheet rows.
+test('A PAST-DATED MANUAL ADD STAYS IN THE TABLE — it is never Overdue', () => {
+  // ⚠️ THIS TEST WAS INVERTED ON 2026-08-10, and the old assertion pinned a real bug.
+  // It used to require exactly the opposite ("buckets into Overdue"), which is why the defect
+  // shipped green: the suite was enforcing it.
+  //
+  // A super admin keys a payment by hand BECAUSE a check arrived and CollaborateMD has not
+  // logged it yet — so the date they type is today or earlier, essentially always. Filing that
+  // under a heading reading "past their date without landing — not in any total above" is
+  // wrong in every clause, and it also dropped the money out of the Forecast subtotal. Live
+  // 2026-08-10: an add dated 2026-08-12 worked; the same form with 2026-08-07 disappeared.
   const html = renderToStaticMarkup(
     <EraUpcomingBody
       data={S({ total: '100.00', remits: 1, groups: [G({})] })}
@@ -416,10 +423,26 @@ test('RESOLVE THEN PARTITION: a past-dated manual add buckets into Overdue', () 
       ]}
     />,
   );
-  assert.ok(html.includes('Overdue'), 'the section appears for the add alone');
-  assert.ok(html.includes('$1,234.00'), 'the overdue add renders');
-  assert.ok(html.includes('manual add'), 'and is marked as a manual add');
-  assert.ok(!html.includes('not included in the total above'), 'no upcoming Forecast line — nothing upcoming');
+  assert.ok(html.includes('$1,234.00'), 'the add renders');
+  assert.ok(!html.includes('Overdue'), 'and NOT under an Overdue heading');
+  assert.ok(
+    html.includes('not included in the total above'),
+    'it counts in the upcoming Forecast subtotal, which is the money it represents',
+  );
+});
+
+test('a past-dated SHEET row IS still Overdue — the asymmetry is the decision', () => {
+  // The counterpart to the test above. Nobody watches the sheet feed row by row, so a sheet
+  // row past its date genuinely is an escalation (Alec, 2026-08-03) and must keep escalating.
+  // `origin` is what separates "a human just asserted this" from "a forecast quietly failed".
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([OR({ expected_date: '2026-05-26', amount: '72000.00' })])}
+    />,
+  );
+  assert.ok(html.includes('Overdue'), 'a sheet row past its date still escalates');
+  assert.ok(html.includes('$72,000.00'));
 });
 
 test('TOTALS PROVENANCE: the overdue subtotal is the RESOLVED recomputation, not the SQL aggregate', () => {
@@ -607,10 +630,16 @@ test('overdue controls are absent for everyone but a super admin', () => {
   assert.ok(!html.includes('cannot be re-dated here'), 'and no editor-only prose');
 });
 
-test('a manual-origin overdue row offers Remove row but NOT the correct-amount form', () => {
+test('a manual-origin row offers Remove row but NOT the correct-amount form', () => {
   // resolveForecast's adds loop never consults the correct map, so a correction keyed to a
   // manual add is unconditionally orphaned. Offering the box would invite an operator to type a
   // dollar figure straight into the not-in-effect strip.
+  //
+  // The aria-labels lost their "(overdue)" suffix on 2026-08-10 — not a wording change, a
+  // LOCATION change. A past-dated manual add now renders in the group table instead of the
+  // Overdue strip (see "A PAST-DATED MANUAL ADD STAYS IN THE TABLE"), and `context` is only
+  // passed by the strip. The behaviour under test — Remove yes, correct-amount no — is
+  // unchanged, and is what this test is actually for.
   const html = renderToStaticMarkup(
     <EraUpcomingBody
       data={S({ total: '100.00', remits: 1, groups: [G({})] })}
@@ -631,10 +660,10 @@ test('a manual-origin overdue row offers Remove row but NOT the correct-amount f
       ]}
     />,
   );
-  assert.ok(html.includes('aria-label="Remove admin edit: KWC TRICARE 2026-07-01 (overdue)"'));
+  assert.ok(html.includes('aria-label="Remove admin edit: KWC TRICARE 2026-07-01"'));
   assert.ok(html.includes('Remove row'), 'a manual add is removed, not un-corrected');
   assert.ok(
-    !html.includes('Correct amount: KWC TRICARE 2026-07-01 (overdue)'),
+    !html.includes('Correct amount: KWC TRICARE 2026-07-01'),
     'no amount box on a row a correction cannot reach',
   );
 });

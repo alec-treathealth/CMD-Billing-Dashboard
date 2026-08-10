@@ -340,12 +340,20 @@ export interface ForecastFacilityOption {
 /** The amount shape 024 accepts: up to 10 digits, at most 2 decimals, positive. */
 const AMOUNT_RE = /^\d{1,10}(\.\d{1,2})?$/;
 
-/** Small pill marking a leaf's epistemic class. Text-labelled, never color-only. */
+/**
+ * Small pill marking a leaf's epistemic class. Text-labelled, never color-only.
+ *
+ * "ERA Confirmed" and "Forecasted", not "Confirmed" and "Forecast" (Alec, 2026-08-10). Bare
+ * "Confirmed" does not say WHO confirmed it, and on a tile that also carries operator-keyed
+ * money that is the one thing the pill exists to disambiguate — a reader could reasonably take
+ * it to mean a human confirmed the row. Naming the 835 makes the source unmistakable, and
+ * "Forecasted" reads as a state the row is in rather than a noun that could be a section name.
+ */
 function KindTag({ kind }: { kind: UpcomingItem['kind'] }) {
   return kind === 'forecast' ? (
-    <span className="ths-tag ths-tag-accent-2">Forecast</span>
+    <span className="ths-tag ths-tag-accent-2">Forecasted</span>
   ) : (
-    <span className="ths-tag ths-tag-accent">Confirmed</span>
+    <span className="ths-tag ths-tag-accent">ERA Confirmed</span>
   );
 }
 
@@ -401,10 +409,35 @@ export function EraUpcomingBody({
   // payload is absent (023 dark / sync failed soft), where every resolved row is a manual
   // add with no boundary to bucket against — treated as upcoming, the pre-partition shape.
   const cutoff = overrides?.cutoff ?? null;
-  const upcomingResolved = cutoff
-    ? resolved.rows.filter((r) => r.expected_date >= cutoff)
-    : resolved.rows;
-  const overdueResolved = cutoff ? resolved.rows.filter((r) => r.expected_date < cutoff) : [];
+  /**
+   * ⚠️ A MANUAL ADD IS NEVER OVERDUE, WHATEVER ITS DATE (Alec, 2026-08-10).
+   *
+   * The partition used to be date-only, and it broke the feature's primary use case. The
+   * reason a super admin keys a payment by hand is that a check ARRIVED and CollaborateMD has
+   * not logged it yet — so the date they type is today or earlier, essentially always. A
+   * date-only rule therefore routed every such row into the Overdue strip, which says:
+   *
+   *     "past their date without landing — not in any total above"
+   *
+   * Every clause of that is wrong for a check sitting on someone's desk, and the row was also
+   * excluded from the Forecast subtotal, so hand-keyed money silently stopped counting.
+   * Measured live 2026-08-10: an add dated 2026-08-12 landed in the table and behaved fine; the
+   * same form with 2026-08-07 vanished into Overdue. That is what "adding doesn't work" was.
+   *
+   * A SHEET row past its date still IS overdue, and deliberately stays so — nobody is watching
+   * the sheet feed row by row, so that escalation signal is the whole point of the strip
+   * (Alec's 2026-08-03 ruling). The asymmetry is the decision: `origin` distinguishes money a
+   * human just asserted from a forecast that may have quietly failed.
+   *
+   * THE COST, accepted and worth knowing: a manual add that genuinely never arrives no longer
+   * escalates into Overdue. It stays in the table at its own date, where the operator who
+   * typed it can see and remove it. If that turns out to matter, the fix is a per-row
+   * "date has passed" marker in the table — NOT sending these back to Overdue.
+   */
+  const isOverdue = (r: ResolvedForecastRow): boolean =>
+    cutoff !== null && r.expected_date < cutoff && r.origin !== 'manual';
+  const upcomingResolved = cutoff ? resolved.rows.filter((r) => !isOverdue(r)) : resolved.rows;
+  const overdueResolved = cutoff ? resolved.rows.filter(isOverdue) : [];
   // ⚠️ TOTALS PROVENANCE (Alec's constraint): BOTH rendered subtotals are recomputed from
   // the RESOLVED rows of their partition. The SQL aggregates riding in the payload
   // (overrides.upcoming.total / overrides.overdue.total) are pre-resolution and are NOT
@@ -553,7 +586,7 @@ export function EraUpcomingBody({
             additive-only note in this file's header. */}
         {forecastRows > 0 && (
           <div className="ths-card-meta mt-1.5 flex flex-wrap items-center gap-1.5">
-            <span className="ths-tag ths-tag-accent-2">Forecast</span>
+            <span className="ths-tag ths-tag-accent-2">Forecasted</span>
             <span className="ths-num tabular-nums">{money(fixed2FromCents(forecastCents))}</span>
             <span>
               across {count(forecastRows)} operator-keyed {forecastRows === 1 ? 'row' : 'rows'} — not
@@ -680,7 +713,7 @@ function SuggestionStrip({
             payer) tuple — same latent collision the overdue list had. Keyed the same way. */}
         {suggestions.map((sg, i) => (
           <li key={forecastRowKey(sg.forecast, i)} className="flex flex-wrap items-center gap-2">
-            <span className="ths-tag ths-tag-accent-2">Forecast</span>
+            <span className="ths-tag ths-tag-accent-2">Forecasted</span>
             <span className="ths-num tabular-nums">{money(sg.forecast.amount)}</span>
             <span>
               {sg.forecast.facility_code} · {sg.forecast.payer_label} · {sg.forecast.expected_date}
@@ -1193,7 +1226,7 @@ function UpcomingGroupRow({
             <>
               {' '}
               <span className="ths-tag ths-tag-accent-2">
-                +{money(fixed2FromCents(g.forecastCents))} forecast
+                +{money(fixed2FromCents(g.forecastCents))} forecasted
               </span>
             </>
           )}
