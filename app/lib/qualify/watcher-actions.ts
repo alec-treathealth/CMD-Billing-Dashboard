@@ -2,7 +2,7 @@
 
 /**
  * Qualify WATCHER Server Actions — the write/read edge for the smoke-shell board's watcher and
- * recent-search panels (mig 0096).
+ * recent-search panels (mig 0097).
  *
  * ⚠ 'use server' RULES (test/useServerExports.test.ts enforces): ONLY async functions exported.
  * Types + DI core live in ./watchers (plain module); this file is the thin binder, exactly like
@@ -15,7 +15,7 @@
  *   · the keyed-HMAC blind index (memberIdBlindIndex / alphaPrefixBlindIndex — the same tokens the
  *     search itself mints), and
  *   · a bounded display echo (maskedPatientEcho: 'GGS •••• 8841'; recentSearchEcho: ≤3 chars).
- * The raw term is NEVER stored, NEVER logged, and never appears in an error message. The 0096
+ * The raw term is NEVER stored, NEVER logged, and never appears in an error message. The 0097
  * column constraints make over-persistence structurally impossible (echo ≤13 chars, prefix ≤3).
  *
  * ── AUDIT POSTURE, decided rather than defaulted ────────────────────────────────────────────────
@@ -102,7 +102,7 @@ export async function saveQualifyTrendWatcher(input: {
       kind: 'trend',
       payer,
       token,
-      echo: null, // trend echoes resolve at read time via prefixLabel.ts — never stored (0096 header)
+      echo: null, // trend echoes resolve at read time via prefixLabel.ts — never stored (0097 header)
       thresholdPts: threshold,
     });
     return { ok: true, persisted: res.persisted };
@@ -164,7 +164,7 @@ export async function deleteQualifyWatcher(id: string): Promise<QualifyWatcherSa
 /**
  * Record one resolved search's NON-PHI FACETS (payer label · ≤3-char prefix echo · plan class).
  * Takes the term ONLY to derive the echo server-side (a member-ID search degrades to its alpha
- * prefix — the 0096 compliance contract); the term itself is discarded. Fire-and-forget from the
+ * prefix — the 0097 compliance contract); the term itself is discarded. Fire-and-forget from the
  * client: a failed record must never disturb the search that just succeeded.
  */
 export async function recordQualifyRecentSearch(input: {

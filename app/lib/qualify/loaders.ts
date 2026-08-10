@@ -307,10 +307,10 @@ export async function loadQualifyPolicyTapeContext(
   });
 }
 
-// ── Watchers + recent searches (mig 0096) ─────────────────────────────────────────────────────────
+// ── Watchers + recent searches (mig 0097) ─────────────────────────────────────────────────────────
 //
 // SAME FAIL-SOFT CLASS AS THE TAPE ABOVE, plus 42883 (undefined_function): the WRITE path calls
-// SECURITY DEFINER functions, and an unapplied 0096 surfaces there as undefined_function rather
+// SECURITY DEFINER functions, and an unapplied 0097 surfaces there as undefined_function rather
 // than undefined_table. All three degrade to "relations absent" (null / persisted:false) so the
 // board runs session-only instead of 500ing; any OTHER error rethrows — a 42501 must never
 // masquerade as "not provisioned yet" (the 0089 lesson).
@@ -327,7 +327,7 @@ export async function loadQualifyWatcherRows(userId: string): Promise<QualifyWat
     return res.rows;
   } catch (err) {
     if (relationAbsent(err)) {
-      console.error('qualify watchers unavailable (mig 0096 unapplied?) — board runs session-only');
+      console.error('qualify watchers unavailable (mig 0097 unapplied?) — board runs session-only');
       return null;
     }
     throw err;
@@ -356,7 +356,7 @@ export async function loadQualifyWatcherSeries(
   return res.rows;
 }
 
-/** One definer call each. persisted:false = 0096 unapplied (session-only mode); errors rethrow. */
+/** One definer call each. persisted:false = 0097 unapplied (session-only mode); errors rethrow. */
 export async function saveQualifyWatcherRow(args: {
   userId: string;
   kind: 'trend' | 'patient';

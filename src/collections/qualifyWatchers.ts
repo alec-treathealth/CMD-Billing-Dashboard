@@ -1,6 +1,6 @@
 /**
  * QUALIFY WATCHERS — query builders + pure folds for the smoke-shell board's persistence surfaces
- * (mig 0096: claims.qualify_watcher / claims.qualify_recent_search) and the sparkline series they
+ * (mig 0097: claims.qualify_watcher / claims.qualify_recent_search) and the sparkline series they
  * read off the ALREADY-LIVE 0093 daily rating table.
  *
  * Parameterized queries only; every table/column name is a fixed literal; only values are $n bound
@@ -11,7 +11,7 @@
  *   · watcher rows      — token (keyed-HMAC blind index), masked echo (≤13 chars), payer label,
  *                         threshold. No raw identifier is selectable because none is stored.
  *   · recent searches   — payer label · ≤3-char prefix echo · plan class · timestamp. The facet
- *                         allowlist IS the compliance contract (0096 header).
+ *                         allowlist IS the compliance contract (0097 header).
  *   · sparkline series  — ratings + dates off qualify_policy_rating_daily. Non-dollar by
  *                         PROJECTION: that table carries billed/allowed/paid columns and this
  *                         builder must never select them — an admissions_seat session reads the
@@ -20,14 +20,14 @@
 
 export const QUALIFY_WATCHER_SERIES_DAYS = 90;
 /**
- * The per-user watcher cap `claims.save_qualify_watcher` (0096) enforces on NEW rows. The real limit
+ * The per-user watcher cap `claims.save_qualify_watcher` (0097) enforces on NEW rows. The real limit
  * lives in that definer as a literal, not here — this constant exists so the two can be asserted
  * equal (`test/qualifyWatchers.test.ts`) instead of silently drifting apart, which is the failure
  * mode a source-of-truth constant with no consumer invites.
  */
 export const QUALIFY_WATCHER_MAX = 40;
 /**
- * Recent-search history depth `claims.record_qualify_recent_search` (0096) prunes past. Consumed
+ * Recent-search history depth `claims.record_qualify_recent_search` (0097) prunes past. Consumed
  * directly by `buildRecentSearchListQuery`'s LIMIT below, and asserted against the definer's own
  * literal in `test/qualifyWatchers.test.ts` so the two cannot silently diverge.
  */
@@ -78,7 +78,7 @@ export function buildRecentSearchListQuery(userId: string): { sql: string; param
       'from claims.qualify_recent_search where app_user_id = $1::uuid ' +
       // QUALIFY_RECENT_MAX rides as $2, not interpolated — a LIMIT is a value, and the standing
       // rule (CLAUDE.md) is only table/column/GUC names are fixed literals; every value is a
-      // bound param. The 0096 definer already prunes to this many rows; this LIMIT is a
+      // bound param. The 0097 definer already prunes to this many rows; this LIMIT is a
       // display-side belt-and-braces bound, not the source of truth.
       'order by searched_at desc, id desc limit $2::int',
     params: [userId, QUALIFY_RECENT_MAX],
@@ -88,7 +88,7 @@ export function buildRecentSearchListQuery(userId: string): { sql: string; param
 /**
  * Rating series for the trend watchers' sparklines, off the 0093 daily table.
  *
- * TWO SUBJECT SHAPES IN ONE QUERY, matching the two trend-watcher shapes 0096 stores:
+ * TWO SUBJECT SHAPES IN ONE QUERY, matching the two trend-watcher shapes 0097 stores:
  *   · token-pinned  (subject_token + payer_label) — the pair's own daily rating, verbatim.
  *   · payer-wide    (payer_label only)            — the LINE-WEIGHTED mean across that payer's
  *     rated pairs per day. Weighted, not flat-averaged: a 3-member pair and a 300-line book pair
@@ -218,7 +218,7 @@ export function maskedPatientEcho(rawTerm: string): string | null {
 }
 
 /** The ≤3-char alpha prefix echo a RECENT SEARCH may persist — [A-Z0-9]{1,3} or null, exactly the
- *  0096 CHECK constraint, so a violation is caught here as a null rather than surfacing as a 500. */
+ *  0097 CHECK constraint, so a violation is caught here as a null rather than surfacing as a 500. */
 export function recentSearchEcho(rawTerm: string): string | null {
   const norm = rawTerm.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 3);
   return /^[A-Z0-9]{1,3}$/.test(norm) ? norm : null;

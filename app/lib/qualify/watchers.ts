@@ -4,10 +4,10 @@
  * The board.ts pattern exactly: this module is plain (no 'use server', no I/O), the loaders own
  * the SQL, watcher-actions.ts is the thin binder, and the hermetic suite tests the core directly.
  *
- * ── THE AVAILABILITY UNION, because 0096 SHIPS UNAPPLIED ────────────────────────────────────────
- * `available: false` means the RELATIONS ARE ABSENT (mig 0096 not applied) — the panels then run
+ * ── THE AVAILABILITY UNION, because 0097 SHIPS UNAPPLIED ────────────────────────────────────────
+ * `available: false` means the RELATIONS ARE ABSENT (mig 0097 not applied) — the panels then run
  * SESSION-ONLY: adds work, live in React state, badged "this session only", gone on refresh. That
- * is honest UI, not a degraded error state, and it flips to durable the moment 0096 applies with
+ * is honest UI, not a degraded error state, and it flips to durable the moment 0097 applies with
  * zero code change (the loaders stop returning null). `ok: false` at the action layer means the
  * READ ITSELF failed — a different claim, rendered as absence.
  *
@@ -63,7 +63,7 @@ export interface QualifyRecentSearch {
 }
 
 export interface QualifyWatchboardResult {
-  /** False = mig 0096 unapplied → session-only mode. See the header union. */
+  /** False = mig 0097 unapplied → session-only mode. See the header union. */
   available: boolean;
   trend: QualifyTrendWatcher[];
   patient: QualifyPatientWatcher[];
@@ -80,7 +80,7 @@ export const EMPTY_WATCHBOARD: QualifyWatchboardResult = {
 export interface QualifyWatchboardDeps {
   /** Fail-closed gate; the same requireQualifyPrincipal the board uses. */
   requirePrincipal: () => Promise<{ ok: true; userId: string } | { ok: false; error: string }>;
-  /** null = relations absent (0096 unapplied) — NOT an empty list. */
+  /** null = relations absent (0097 unapplied) — NOT an empty list. */
   loadWatchers: (userId: string) => Promise<QualifyWatcherRow[] | null>;
   loadRecent: (userId: string) => Promise<QualifyRecentSearchRow[] | null>;
   /** Rating series for the trend watchers' subjects; [] when 0093 has nothing for them. OPTIONAL
@@ -103,7 +103,7 @@ export async function getQualifyWatchboardCore(deps: QualifyWatchboardDeps): Pro
     deps.loadRecent(gate.userId),
   ]);
   // EITHER relation absent → the whole surface is session-only. They ship in one migration, so a
-  // half-applied 0096 is not a state this union needs to flatter with per-panel granularity.
+  // half-applied 0097 is not a state this union needs to flatter with per-panel granularity.
   if (watcherRows === null || recentRows === null) return EMPTY_WATCHBOARD;
 
   const trendRows = watcherRows.filter((r) => r.kind === 'trend');
@@ -161,7 +161,7 @@ export async function getQualifyWatchboardCore(deps: QualifyWatchboardDeps): Pro
    * ever read false is a claim the UI then renders as if it meant something, so it is gone.
    *
    * What a patient watcher is FOR is the ERA-join alert ("new ERA posted"), which needs its own
-   * scoped session (0096 header) — until then the panel says only that it is watching.
+   * scoped session (0097 header) — until then the panel says only that it is watching.
    */
   const patient: QualifyPatientWatcher[] = patientRows.map((r) => ({
     id: String(r.id),

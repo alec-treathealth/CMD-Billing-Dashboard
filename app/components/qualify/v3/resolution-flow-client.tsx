@@ -786,14 +786,14 @@ export function ResolutionFlowClient({
   // effect and handler below guards on `shellMode` instead. None of these are reducer fields, each
   // for a reason the machine's header already states: the watchboard is a mount fetch no flow field
   // touches (the `trends` rule); externalAsk is one-shot presentation the panel consumes; the
-  // session lists are the browser-only fallback while mig 0096 is unapplied.
+  // session lists are the browser-only fallback while mig 0097 is unapplied.
   /** The composer's pending ask — nonce'd so two identical asks are two requests. */
   const [externalAsk, setExternalAsk] = useState<QualifyExternalAsk | null>(null);
   const askNonceRef = useRef(0);
   /** Server-persisted watchers + recent searches. null = not yet loaded; 'failed' = the READ failed
-   *  (distinct from `available:false`, which means mig 0096 is unapplied — see reloadWatchboard). */
+   *  (distinct from `available:false`, which means mig 0097 is unapplied — see reloadWatchboard). */
   const [watchboard, setWatchboard] = useState<QualifyWatchboardResult | 'failed' | null>(null);
-  /** Session-only fallbacks (0096 unapplied → saves return persisted:false and land here). */
+  /** Session-only fallbacks (0097 unapplied → saves return persisted:false and land here). */
   const [sessionTrend, setSessionTrend] = useState<(QualifyTrendWatcher & { sessionOnly: true })[]>([]);
   const [sessionPatient, setSessionPatient] = useState<(QualifyPatientWatcher & { sessionOnly: true })[]>([]);
   const [sessionRecent, setSessionRecent] = useState<(QualifyRecentSearch & { sessionOnly: true })[]>([]);
@@ -810,8 +810,8 @@ export function ResolutionFlowClient({
   /**
    * THREE STATES, NOT TWO — `null` (not loaded yet), a board, or `'failed'`.
    *
-   * The first version collapsed a FAILED read to null, and null renders as "migration 0096 is not
-   * applied". Those are different claims and the difference is operationally nasty: with 0096
+   * The first version collapsed a FAILED read to null, and null renders as "migration 0097 is not
+   * applied". Those are different claims and the difference is operationally nasty: with 0097
    * applied but the reader's SELECT grant or RLS policy missing, the read 42501s while WRITES still
    * succeed (they go through the SECURITY DEFINER, which needs only EXECUTE) — so a rep saves a
    * watcher, the save reports persisted, and the watcher appears nowhere while the panel calmly
@@ -940,7 +940,7 @@ export function ResolutionFlowClient({
     setExternalAsk({ question, slots, nonce: ++askNonceRef.current });
   }, []);
 
-  /** Watch the resolved payer (trend). Persisted when 0096 is live; session-only otherwise. */
+  /** Watch the resolved payer (trend). Persisted when 0097 is live; session-only otherwise. */
   const watchPayerLabel = snapshot?.resolved?.payerName ?? payerPick;
   const onWatchPayer = useCallback(() => {
     if (watchPayerLabel === null) return;

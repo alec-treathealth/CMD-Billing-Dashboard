@@ -1,7 +1,7 @@
 /**
  * WATCHBOARD CORE + SHELL PANELS — the app half of the watcher surface.
  *
- * Core: the availability union (0096 unapplied ≠ empty), enrichment fail-soft (a thrown series
+ * Core: the availability union (0097 unapplied ≠ empty), enrichment fail-soft (a thrown series
  * read costs sparklines, never rows), threshold alerting. Panels: rendered-HTML assertions in the
  * policy-tape-render.test.tsx idiom — no dollars, no raw tokens, masked echo only, and the
  * compliance footer present (it is the contract, not decoration).
@@ -41,7 +41,7 @@ function trendRow(over: Partial<QualifyWatcherRow> = {}): QualifyWatcherRow {
 }
 
 // ── The availability union ──────────────────────────────────────────────────────────────────────
-test('a null loader (0096 unapplied) reads available:false — session-only, not an error', async () => {
+test('a null loader (0097 unapplied) reads available:false — session-only, not an error', async () => {
   const board = await getQualifyWatchboardCore(deps({ loadWatchers: async () => null }));
   assert.equal(board.available, false);
   assert.deepEqual(board.trend, []);
@@ -152,7 +152,7 @@ test('session-only mode says so instead of silently pretending durability', () =
     />,
   );
   assert.match(html, /this session only/);
-  assert.match(html, /0096/);
+  assert.match(html, /0097/);
 });
 
 test('RecentSearches: re-run only where an echo exists, and the facet line stays non-PHI-shaped', () => {

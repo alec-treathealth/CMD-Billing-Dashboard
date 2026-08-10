@@ -4,7 +4,7 @@
  * RECENT SEARCHES — the board's history strip (mock: `.recents`). NON-PHI FACETS ONLY, which is
  * the whole design: payer label · ≤3-char prefix echo · plan class · when. Re-run RE-RESOLVES the
  * prefix fresh (the facets are never a cached answer), and a member-ID search appears here only as
- * its prefix — the deliberate degradation the 0096 header records; durable full-ID follow-up is
+ * its prefix — the deliberate degradation the 0097 header records; durable full-ID follow-up is
  * the patient watcher's job, which stores a token instead.
  */
 import type { QualifyRecentSearch } from '../../../lib/qualify/watchers';
@@ -19,7 +19,7 @@ export function RecentSearches({
 }: {
   items: (QualifyRecentSearch & { sessionOnly?: boolean })[];
   available: boolean;
-  /** The read failed — say that, not "0096 is not applied yet". See WatchersPanel's prop. */
+  /** The read failed — say that, not "0097 is not applied yet". See WatchersPanel's prop. */
   readFailed?: boolean;
   onRerun: (prefixEcho: string) => void;
   onClear: () => void;
@@ -46,7 +46,7 @@ export function RecentSearches({
         <p className="rounded-lg border border-dashed border-line px-3 py-3 text-[12px] text-ink400">
           {readFailed
             ? 'Saved history could not be read just now — this session only.'
-            : `No searches yet${available ? '' : ' — history is session-only until migration 0096 applies'}.`}
+            : `No searches yet${available ? '' : ' — history is session-only until migration 0097 applies'}.`}
         </p>
       ) : (
         <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">

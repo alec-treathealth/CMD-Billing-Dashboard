@@ -1,4 +1,4 @@
--- 0096 rollback — drop the watcher/recent-search functions and tables.
+-- 0097 rollback — drop the watcher/recent-search functions and tables.
 --
 -- Functions first (they are separate objects; dropping the table does not cascade to them), then
 -- the tables. IF EXISTS throughout so a partial forward-apply still rolls back cleanly. App code

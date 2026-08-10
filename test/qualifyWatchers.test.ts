@@ -27,7 +27,7 @@ import {
 } from '../src/collections/qualifyWatchers';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const MIGRATION_0096 = join(REPO_ROOT, 'supabase/migrations/0096_qualify_watchers.sql');
+const MIGRATION_0097 = join(REPO_ROOT, 'supabase/migrations/0097_qualify_watchers.sql');
 
 // ── Builders ────────────────────────────────────────────────────────────────────────────────────
 test('list queries are parameterized and user-scoped', () => {
@@ -124,7 +124,7 @@ test('the 5-7 char band is REFUSED outright — it cannot be masked at this widt
   assert.equal(maskedPatientEcho('ABC12345'), '••• •••• 2345');
 });
 
-test('the masked echo always fits the 0096 column bound (≤13 chars)', () => {
+test('the masked echo always fits the 0097 column bound (≤13 chars)', () => {
   for (const term of ['GGS00418841', '12345678', 'ABCDEFGHIJKLMNOP']) {
     const echo = maskedPatientEcho(term);
     assert.ok(echo === null || echo.length <= 13, `echo too wide for the column: ${echo}`);
@@ -140,22 +140,22 @@ test('recentSearchEcho is the ≤3-char [A-Z0-9] facet or null — the CHECK con
 
 // ── Constant/definer agreement ──────────────────────────────────────────────────────────────────
 // QUALIFY_WATCHER_MAX and QUALIFY_RECENT_MAX exist so a rep-facing surface can explain a refusal in
-// the same terms the DB enforces it in — but the DB is the real source of truth (0096's
+// the same terms the DB enforces it in — but the DB is the real source of truth (0097's
 // `claims.save_qualify_watcher` / `claims.record_qualify_recent_search`), and a literal duplicated
 // in two files can drift without either one erroring. These tests fail loudly the moment they do,
 // which is the "at minimum" bar for a constant whose only other job is to look like a source of
 // truth it is not.
-test('QUALIFY_WATCHER_MAX matches the cap literal in 0096\'s save_qualify_watcher', () => {
-  const sql = readFileSync(MIGRATION_0096, 'utf8');
+test('QUALIFY_WATCHER_MAX matches the cap literal in 0097\'s save_qualify_watcher', () => {
+  const sql = readFileSync(MIGRATION_0097, 'utf8');
   const match = sql.match(/>=\s*(\d+)\s+then\s+raise exception 'save_qualify_watcher: watcher limit reached/);
-  assert.ok(match, 'could not find the watcher-cap raise in 0096 — did the definer change shape?');
+  assert.ok(match, 'could not find the watcher-cap raise in 0097 — did the definer change shape?');
   assert.equal(Number(match![1]), QUALIFY_WATCHER_MAX);
 });
 
-test('QUALIFY_RECENT_MAX matches the prune literal in 0096\'s record_qualify_recent_search', () => {
-  const sql = readFileSync(MIGRATION_0096, 'utf8');
+test('QUALIFY_RECENT_MAX matches the prune literal in 0097\'s record_qualify_recent_search', () => {
+  const sql = readFileSync(MIGRATION_0097, 'utf8');
   const match = sql.match(/record_qualify_recent_search[\s\S]*?order by searched_at desc, id desc\s+limit\s+(\d+)/);
-  assert.ok(match, 'could not find the recent-search prune LIMIT in 0096 — did the definer change shape?');
+  assert.ok(match, 'could not find the recent-search prune LIMIT in 0097 — did the definer change shape?');
   assert.equal(Number(match![1]), QUALIFY_RECENT_MAX);
 });
 

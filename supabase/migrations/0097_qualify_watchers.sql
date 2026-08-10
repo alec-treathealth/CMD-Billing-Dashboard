@@ -1,4 +1,4 @@
--- 0096 — Qualify watchers + recent searches: the smoke-shell board's two persistence surfaces.
+-- 0097 — Qualify watchers + recent searches: the smoke-shell board's two persistence surfaces.
 --
 -- WHY: the Smoke shell (docs/mockups/qualify-smoke-NOTES.md §5) persists three things per user:
 --   · TRENDWATCHERS  — a payer (optionally pinned to one prefix token) the rep follows, with an
@@ -47,7 +47,7 @@
 --   wholesale and inherited that bug — caught in review before apply, corrected here.
 --   If `set role claims_admin` fails 42501, the standing grant is missing: restore it as an OPERATOR
 --   step, not from a migration, then re-apply.
--- Rollback: 0096_qualify_watchers_rollback.sql
+-- Rollback: 0097_qualify_watchers_rollback.sql
 
 set role claims_admin;
 

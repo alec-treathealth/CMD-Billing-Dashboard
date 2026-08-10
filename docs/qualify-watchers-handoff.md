@@ -2,7 +2,7 @@
 
 **Status: SUPERSEDED same day (2026-08-10).** Alec directed the full Smoke build-out hours after
 this was written; watchers are now BUILT on `feat/qualify-smoke-tokens-chips` — migration
-`supabase/migrations/0096_qualify_watchers.sql` (AUTHORED, **NOT applied**; fail-soft session-only
+`supabase/migrations/0097_qualify_watchers.sql` (AUTHORED, **NOT applied**; fail-soft session-only
 mode until it is), core `app/lib/qualify/watchers.ts`, actions `watcher-actions.ts`, panels under
 `app/components/qualify/shell/`. Three deltas from the design below, all deliberate:
   · kinds shipped as `'trend' | 'patient'` (a trend watcher's optional `subject_token` IS the
@@ -10,7 +10,7 @@ mode until it is), core `app/lib/qualify/watchers.ts`, actions `watcher-actions.
   · the schema is the **claims plane** per 0046's own header (per-user UI state FKs to
     `claims.app_user`), not `collections.qualify_watcher` — §2's sketch had the right pattern and
     the wrong plane;
-  · 0096 SHIPPED a retention answer §4 below left open: a 40-watcher-per-user cap
+  · 0097 SHIPPED a retention answer §4 below left open: a 40-watcher-per-user cap
     (`claims.save_qualify_watcher`) and a 20-row recent-search history prune
     (`claims.record_qualify_recent_search`, self-pruning on every insert). It shipped **NO
     `last_seen_at` column** — §4's "a prune job has an axis if one is ever wanted" sentence
@@ -56,7 +56,7 @@ null is correct and expected for the prefix kind, and a blanket NOT NULL would f
 echo for rows that need none — the same shape of mistake as back-filling `reviewed_by` on the 695
 pre-029 `ref.payer_alias_map` rows.
 
-## 2. Migration 0096 — sketch
+## 2. Migration 0097 — sketch
 
 Plain transactional DDL (no `CREATE INDEX CONCURRENTLY`), so `apply_migration` is fine — the
 0081/0092 autocommit discipline does not apply.
@@ -120,12 +120,12 @@ wrote nothing, one well-formed call upserted, test row deleted; do the same here
 - **Patient-watcher alerts** ("a new ERA posted"). Feasible by joining era-835 output against
   watcher tokens through the same blind index, but it is a second scoped session: it makes a
   background job that reads PHI-adjacent state on a schedule.
-- **Retention — ANSWERED by 0096, not open.** Watchers are capped at 40 per user, enforced in
+- **Retention — ANSWERED by 0097, not open.** Watchers are capped at 40 per user, enforced in
   `claims.save_qualify_watcher` (checked against existing rows before an INSERT only, so hitting the
   cap still permits editing an existing watcher's threshold — see the definer's header). Recent
   searches self-prune to the newest 20 rows per user inside `claims.record_qualify_recent_search`,
   so no separate cron and no app code owns that retention. There is no `last_seen_at` column on
-  either table — this paragraph previously proposed one as a future prune axis; 0096 shipped the
+  either table — this paragraph previously proposed one as a future prune axis; 0097 shipped the
   prune without it.
 - **Cross-tenant.** Every other `collections` surface carries a tenant scope. Watchers are
   per-USER and the Qualify surface is already cross-tenant for super_admin (by design — see the

@@ -104,7 +104,7 @@ Everything above is BUILT except where noted:
   `answerInline={false}`), watchers, and recent searches. One answer bag, two render sites.
 - **Phase 2** — slot-chips on the panel AND the rail composer (same grammar, same <SlotChip>).
   Free text structurally impossible; facility slots travel as indices, resolved server-side.
-- **Watchers + recent searches** — mig 0096 AUTHORED (claims plane, the 0046 pattern; NOT the
+- **Watchers + recent searches** — mig 0097 AUTHORED (claims plane, the 0046 pattern; NOT the
   `collections.qualify_watchers` shape sketched above) but **NOT APPLIED**; until it applies the
   panels run session-only and say so. Sparklines read the live 0093 daily table. Kinds:
   'trend' (payer, optional prefix pin) + 'patient' (token + masked echo, never the raw ID).

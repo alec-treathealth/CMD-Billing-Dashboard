@@ -3,14 +3,14 @@
 /**
  * WATCHERS — the board's persistence panel (mock: `.watchgrid`): trendwatchers (payers/prefixes
  * with a sparkline + threshold alert) and patient watchers (blind-token + masked echo). The
- * compliance footer is the mock's own line, kept verbatim — it is the contract 0096 implements.
+ * compliance footer is the mock's own line, kept verbatim — it is the contract 0097 implements.
  *
- * SESSION-ONLY MODE: `available:false` means mig 0096 is unapplied. Adds still work — they live in
+ * SESSION-ONLY MODE: `available:false` means mig 0097 is unapplied. Adds still work — they live in
  * the owner's React state and arrive here through the same props — but the panel says so, per item
  * and once at the top, because a rep who saves a watcher deserves to know whether it survives a
- * refresh. The moment 0096 applies the same props carry durable rows and the badges disappear.
+ * refresh. The moment 0097 applies the same props carry durable rows and the badges disappear.
  *
- * ERA-join alerts ("new ERA posted", the mock's pill) are a SEPARATE scoped session — see the 0096
+ * ERA-join alerts ("new ERA posted", the mock's pill) are a SEPARATE scoped session — see the 0097
  * header. The pill here says only what is true today: that the watcher exists.
  */
 import type { QualifyPatientWatcher, QualifyTrendWatcher } from '../../../lib/qualify/watchers';
@@ -29,7 +29,7 @@ export function WatchersPanel({
   watchAction,
 }: {
   available: boolean;
-  /** The READ failed — a different claim from "0096 unapplied", and the panel must not offer the
+  /** The READ failed — a different claim from "0097 unapplied", and the panel must not offer the
    *  latter's reassuring explanation for the former's problem (0089's costume). */
   readFailed?: boolean;
   /** The last WATCHER SAVE was refused or failed — `readFailed`'s shape for the write direction.
@@ -66,7 +66,7 @@ export function WatchersPanel({
         </p>
       ) : !available && (trend.length > 0 || patient.length > 0) ? (
         <p className="mb-2 rounded-lg border border-dashed border-line bg-ground px-3 py-1.5 font-mono text-[10px] text-ink400">
-          this session only — durable storage arrives when migration 0096 is applied
+          this session only — durable storage arrives when migration 0097 is applied
         </p>
       ) : null}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -155,7 +155,7 @@ export function WatchersPanel({
                   <span className="font-mono text-[12px] font-semibold text-ink900">{w.echo}</span>
                   <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink600">{w.planContext ?? '—'}</span>
                   {/* The mock's pill said "new ERA posted" / "auth window closing". Those need the
-                      era-835 join that is its own scoped session (0096 header), so the pill states
+                      era-835 join that is its own scoped session (0097 header), so the pill states
                       only what is true today rather than a status nothing computes. */}
                   <span className="rounded-full bg-ground px-2 py-0.5 font-mono text-[9.5px] text-ink400">
                     {w.sessionOnly ? 'session only' : 'watching'}
