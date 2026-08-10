@@ -194,8 +194,30 @@ Two **separate** migration planes — never mix the directories:
 
 | Plane | Directory | Next number (as of 2026-08-10) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0098** — 0096 (manual deposits) applied live 2026-08-10 by a concurrent session, **file untracked**; 0097 (qualify watchers) is authored on `feat/qualify-smoke-tokens-chips` |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0098** — 0096 (manual deposits) applied live 2026-08-10 by a concurrent session, **file untracked**; **0097 (qualify watchers) APPLIED LIVE 2026-08-10**, ledger `20260810120258` |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **035** — 032/033/034 applied live 2026-08-10 |
+
+**0097 (Qualify watchers + recent searches) is APPLIED LIVE 2026-08-10** (ledger `20260810120258`),
+claims plane, the 0046 `user_grid_views` pattern: two tables FK'd to `claims.app_user`, four
+`security definer` functions owned by `claims_admin`, reader SELECT + app-layer WHERE for reads and
+EXECUTE-only for writes. Verified AT APPLY, as privileges rather than as migration text: reader
+SELECT true on both tables · reader **INSERT/DELETE false** (least privilege — writes go only
+through the definers) · reader EXECUTE true on all four definers · **`public` and `anon` EXECUTE
+false** · RLS enabled on both · **4 policies** · all four definers `security definer` owned by
+`claims_admin` · and **`pg_has_role('postgres','claims_admin','SET')` still TRUE afterwards**, which
+was a specific review finding: the migration's first draft copied 0046's `revoke claims_admin from
+postgres` tail, which would have stripped the standing operator grant and 42501'd every later claims
+migration. Validation exercised both ways as 0093 did — 6/6 malformed definer calls raised and wrote
+nothing (0 rows), then a well-formed insert followed by a re-save of the SAME conflict key returned
+the **same id** with the threshold updated and the row count unchanged, which is the live proof of
+the cap-applies-to-INSERTs-only fix (the one behaviour the hermetic suite structurally cannot
+cover). Test rows deleted; both tables verified back to 0 rows.
+
+⚠ `postgres` **cannot** `SET ROLE claims_reader` (no grant) — so the definer validation above ran as
+`postgres` and the reader's access was proven via `has_table_privilege`/`has_function_privilege`
+instead. That is the correct split, not a shortcut: RLS is invisible to `postgres` anyway
+(`rolbypassrls`), so a role-visibility claim must come from the catalog, never from a `postgres`
+query returning rows.
 
 ⚠ **TWO NUMBERS WERE CLAIMED ON 2026-08-10 BY WORK THAT IS NOT ON ANY BRANCH, AND ONE OF THEM
 COLLIDED.** The qualify-watchers migration was authored as `0096` from a file listing; while it sat

@@ -104,10 +104,19 @@ Everything above is BUILT except where noted:
   `answerInline={false}`), watchers, and recent searches. One answer bag, two render sites.
 - **Phase 2** — slot-chips on the panel AND the rail composer (same grammar, same <SlotChip>).
   Free text structurally impossible; facility slots travel as indices, resolved server-side.
-- **Watchers + recent searches** — mig 0097 AUTHORED (claims plane, the 0046 pattern; NOT the
-  `collections.qualify_watchers` shape sketched above) but **NOT APPLIED**; until it applies the
-  panels run session-only and say so. Sparklines read the live 0093 daily table. Kinds:
-  'trend' (payer, optional prefix pin) + 'patient' (token + masked echo, never the raw ID).
+- **Watchers + recent searches** — mig 0097 **APPLIED LIVE 2026-08-10**, ledger `20260810120258`
+  (claims plane, the 0046 pattern; NOT the `collections.qualify_watchers` shape sketched above).
+  Renumbered from 0096 mid-session when a concurrent session's `0096_manual_deposits` took that
+  slot — caught by the pre-apply ledger check; see CLAUDE.md. Verified at apply: 6/6 malformed
+  definer calls rejected writing nothing · a well-formed insert-then-resave returned the SAME id
+  with the threshold updated and the row count unchanged (the cap-applies-to-INSERTs-only fix) ·
+  reader SELECT true, reader INSERT/DELETE false, reader EXECUTE true on all four definers,
+  `public`/`anon` EXECUTE false · RLS on both tables · 4 policies · all four definers
+  `security definer` owned by `claims_admin` · the standing `claims_admin→postgres` grant intact
+  afterwards · test rows cleaned to 0/0. The session-only fallback stays in the code and is now a
+  should-never-see state (it would mean the relations went missing). Sparklines read the live 0093
+  daily table. Kinds: 'trend' (payer, optional prefix pin) + 'patient' (token + masked echo, never
+  the raw ID).
   Recent searches persist non-PHI facets only; a member-ID search degrades to its prefix.
   Persistence was ruled by Alec 2026-08-10 ("save their history") — the audit-policy question
   the old note flagged is thereby decided, with the facet allowlist as the boundary.

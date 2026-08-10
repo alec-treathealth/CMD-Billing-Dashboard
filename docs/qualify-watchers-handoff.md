@@ -2,8 +2,9 @@
 
 **Status: SUPERSEDED same day (2026-08-10).** Alec directed the full Smoke build-out hours after
 this was written; watchers are now BUILT on `feat/qualify-smoke-tokens-chips` — migration
-`supabase/migrations/0097_qualify_watchers.sql` (AUTHORED, **NOT applied**; fail-soft session-only
-mode until it is), core `app/lib/qualify/watchers.ts`, actions `watcher-actions.ts`, panels under
+`supabase/migrations/0097_qualify_watchers.sql` (**APPLIED LIVE 2026-08-10**, ledger
+`20260810120258` — renumbered from 0096 when a concurrent session's `0096_manual_deposits` took that
+slot; see CLAUDE.md), core `app/lib/qualify/watchers.ts`, actions `watcher-actions.ts`, panels under
 `app/components/qualify/shell/`. Three deltas from the design below, all deliberate:
   · kinds shipped as `'trend' | 'patient'` (a trend watcher's optional `subject_token` IS the
     prefix pin, so a separate `trend_prefix` kind was one enum arm too many);
