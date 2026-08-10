@@ -244,6 +244,30 @@ test('a cleared lane empties the search box and drops the "We read as" sentence'
   assert.match(cleared, /Three characters is read as a prefix/);
 });
 
+/**
+ * ⚠ THE LANE DERIVATION'S OWN CALL SITE — the same "pinned function, unpinned call site" gap this
+ * file already closes for the search counter, found in the fix for it. Every OTHER lane test above
+ * either calls `laneIsOpen` with a fabricated `stageIsIdentify` or renders `LaneRail` with a
+ * pre-computed boolean, so reverting the one line that derives that input to a hardcoded `false`
+ * reproduces the receipt-Change defect — rail locked over an emptied board — under a green suite.
+ * All three inputs are pinned, not only the one the review named: `resolutionPresent` reverting to a
+ * literal would be the same class of silent revert.
+ */
+test('the shell WIRES the lane state: all three laneIsOpen inputs are derived at the call site', () => {
+  const callAt = indexOfOrFail(SHELL_SRC, 'const laneOpen = laneIsOpen({');
+  const closeAt = indexOfOrFail(SHELL_SRC, '});', callAt);
+  const withinCall = (needle: string, why: string) => {
+    const at = indexOfOrFail(SHELL_SRC, needle, callAt);
+    assert.ok(at < closeAt, `${needle} must be INSIDE the laneIsOpen call — ${why}`);
+  };
+  withinCall('resolutionPresent: state.resolution !== null,', 'the server action is the only source of a resolution');
+  withinCall('sessionCleared,', 'the reset bit is the shell’s own, and no reducer field carries it');
+  // THE FINDING: this is the line whose revert to `false` re-opens the receipt-Change defect.
+  withinCall("stageIsIdentify: stage === 'identify',", 'every route back to the identify question must close the lane');
+  // ONE derivation, not two that could disagree about whether a lane is open.
+  assert.equal(SHELL_SRC.split('laneIsOpen(').length - 1, 1, 'one call site, no second derivation');
+});
+
 test('the identify stage gates BOTH halves on laneCleared, and the shell passes the reset bit', () => {
   // Pinned at the call site for the reason item 1's wiring is: the prop defaulting false is what
   // makes single-column inert, and a caller that stops passing it fails nothing else.
