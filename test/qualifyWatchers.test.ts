@@ -33,9 +33,13 @@ const MIGRATION_0096 = join(REPO_ROOT, 'supabase/migrations/0096_qualify_watcher
 test('list queries are parameterized and user-scoped', () => {
   for (const q of [buildWatcherListQuery('u-1'), buildRecentSearchListQuery('u-1')]) {
     assert.match(q.sql, /app_user_id = \$1::uuid/);
-    assert.deepEqual(q.params, ['u-1']);
+    assert.equal(q.params[0], 'u-1');
     assert.doesNotMatch(q.sql, /u-1/, 'the user id must ride as a bound param, never in the SQL');
   }
+});
+
+test('buildWatcherListQuery takes exactly one bound param — the user id', () => {
+  assert.deepEqual(buildWatcherListQuery('u-1').params, ['u-1']);
 });
 
 test('the series query projects ratings and dates — never the dollar columns beside them', () => {
@@ -155,7 +159,22 @@ test('QUALIFY_RECENT_MAX matches the prune literal in 0096\'s record_qualify_rec
   assert.equal(Number(match![1]), QUALIFY_RECENT_MAX);
 });
 
-test('buildRecentSearchListQuery is wired to QUALIFY_RECENT_MAX, not a bare literal', () => {
+/**
+ * buildRecentSearchListQuery's LIMIT rides as $2::int, bound to QUALIFY_RECENT_MAX — not
+ * interpolated into the SQL text. A LIMIT is a value, and the standing rule (CLAUDE.md) is that
+ * only table/column/GUC names are fixed string literals; every value is a bound param.
+ *
+ * This is written to actually FAIL if the LIMIT regresses to a bare inlined literal (the earlier,
+ * corrected draft): the `doesNotMatch` below rejects any numeral after "limit" in the SQL text, and
+ * the params assertion requires the second bound param to equal the constant. An interpolated
+ * `limit 20` would fail the first; a query with only one param (or the wrong second value) would
+ * fail the second. A test that built its "expected" string from the same constant the source uses —
+ * so a hardcoded literal happened to produce a byte-identical string — would not have this property;
+ * this one asserts the SHAPE (bound param, not text), not just the numeric value.
+ */
+test('the recent-search LIMIT is a bound param equal to QUALIFY_RECENT_MAX, never inlined', () => {
   const q = buildRecentSearchListQuery('u-1');
-  assert.match(q.sql, new RegExp(`limit ${QUALIFY_RECENT_MAX}$`));
+  assert.doesNotMatch(q.sql, /limit\s+\d/, 'the LIMIT must never be a numeral literal in the SQL text');
+  assert.match(q.sql, /limit \$2::int/);
+  assert.deepEqual(q.params, ['u-1', QUALIFY_RECENT_MAX]);
 });
