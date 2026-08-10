@@ -226,3 +226,118 @@ test('a rejection is surfaced, not swallowed — the regression this seam exists
   assert.match(r.outcome.text, /Could not remove that edit/);
   assert.equal(r.refetch, false, 'and nothing was written, so nothing to reload');
 });
+
+// ===========================================================================
+// 033 — RECONCILE IN PLACE ('match'), so one payment is never two rows
+// ===========================================================================
+// Confirming a landed forecast used to write a 'suppress' at the same match key regardless of
+// where the row came from. For a SHEET row that is right — the sheet is a feed nothing here can
+// edit, so a decision beside it is the only way to speak. For a MANUAL ADD it produced two rows
+// describing one payment, which is exactly the pair sitting in the live BXR book today
+// (ids 8 and 18, KWC / BCBS TN / 2026-08-05), and it turned "is this reconciled?" into a join.
+
+const MATCH: ForecastEditIntent = {
+  op: 'match',
+  id: 8,
+  status: 'matched',
+  matchedEraKey: '2026-08-06|KWC|BLUE CROSS BLUE SHIELD OF TENNESSEE',
+  label: 'KWC · BCBS TN · 2026-08-05',
+};
+const UNMATCH: ForecastEditIntent = {
+  op: 'match',
+  id: 8,
+  status: 'expected',
+  matchedEraKey: null,
+  label: 'KWC · BCBS TN · 2026-08-05',
+};
+
+/** deps with a match implementation that records exactly what it was handed. */
+const matchDeps = (result: { ok: boolean; error?: string; updated?: boolean }) => {
+  const seen: { id: number; status: string; key: string | null }[] = [];
+  return {
+    seen,
+    save: async () => ({ ok: true, id: '1' }) as const,
+    remove: async () => ({ ok: true, deleted: true }) as const,
+    match: async (id: number, status: 'expected' | 'needs_review' | 'matched', key: string | null) => {
+      seen.push({ id, status, key });
+      return result.ok
+        ? ({ ok: true, updated: result.updated ?? true } as const)
+        : ({ ok: false, error: result.error ?? 'write_failed' } as const);
+    },
+  };
+};
+
+test('a match marshals id + status + era key, and NEVER writes a second row', () => {
+  const d = matchDeps({ ok: true });
+  return runForecastEdit(MATCH, 'bxr', d).then((r) => {
+    assert.deepEqual(d.seen, [
+      { id: 8, status: 'matched', key: '2026-08-06|KWC|BLUE CROSS BLUE SHIELD OF TENNESSEE' },
+    ]);
+    assert.equal(r.outcome.tone, 'ok');
+    assert.match(r.outcome.text, /^Marked landed — KWC · BCBS TN · 2026-08-05\.$/,
+      'the operator sees the SAME sentence a suppress produced — one button, one meaning');
+    assert.equal(r.refetch, true);
+  });
+});
+
+test('the undo is status=expected with a cleared era key', async () => {
+  const d = matchDeps({ ok: true });
+  const r = await runForecastEdit(UNMATCH, 'bxr', d);
+  assert.deepEqual(d.seen, [{ id: 8, status: 'expected', key: null }]);
+  assert.match(r.outcome.text, /^Put back — /);
+});
+
+test('updated:false is reported honestly and STILL refetches — the tile is stale', async () => {
+  // Same reasoning as delete-edit's deleted:false. The id came from this tile's own
+  // tenant-scoped render, so ROW_COUNT 0 means the row changed underneath us (removed, or
+  // already reconciled in another tab). Claiming "Marked landed" would assert an effect this
+  // call did not have; not reloading would leave a dead button offering it forever.
+  const d = matchDeps({ ok: true, updated: false });
+  const r = await runForecastEdit(MATCH, 'bxr', d);
+  assert.equal(r.outcome.tone, 'info', 'honest about having changed nothing');
+  assert.match(r.outcome.text, /already settled/);
+  assert.equal(r.refetch, true, 'and reloads anyway, because it just learned the tile is stale');
+});
+
+test('a match intent with NO match dep fails loudly rather than silently doing nothing', async () => {
+  // The failure mode this whole module exists to end: an action that quietly no-ops while the
+  // UI looks like it worked. A missing dep is a wiring bug, and it must SAY so.
+  const r = await runForecastEdit(MATCH, 'bxr', {
+    save: async () => ({ ok: true, id: '1' }) as const,
+    remove: async () => ({ ok: true, deleted: true }) as const,
+  });
+  assert.equal(r.outcome.tone, 'error');
+  assert.match(r.outcome.text, /Could not mark that payment landed/);
+  assert.equal(r.refetch, false, 'nothing was attempted, so there is nothing to reload for');
+});
+
+test('a rejected match surfaces the server reason and does not pretend to have written', async () => {
+  const d = matchDeps({ ok: false, error: 'forbidden' });
+  const r = await runForecastEdit(MATCH, 'bxr', d);
+  assert.equal(r.outcome.tone, 'error');
+  assert.match(r.outcome.text, /do not have permission/);
+  assert.equal(r.refetch, false, 'forbidden lands before any write — no reload');
+});
+
+test('an unknown server code for a match falls back without printing the code', async () => {
+  // bad_status / bad_era_key mean the UI and the server disagree about what was sent. An
+  // operator cannot act on that, so no instruction is invented and no internals leak.
+  for (const code of ['bad_status', 'bad_era_key']) {
+    const r = await runForecastEdit(MATCH, 'bxr', matchDeps({ ok: false, error: code }));
+    assert.equal(r.outcome.tone, 'error');
+    assert.ok(!r.outcome.text.includes(code), `${code} must not reach the operator`);
+  }
+});
+
+test('a thrown match action becomes a readable outcome, never a rejection', async () => {
+  const boom = {
+    save: async () => ({ ok: true, id: '1' }) as const,
+    remove: async () => ({ ok: true, deleted: true }) as const,
+    match: async () => {
+      throw new Error('network');
+    },
+  };
+  const r = await runForecastEdit(MATCH, 'bxr', boom as never);
+  assert.equal(r.outcome.tone, 'error');
+  assert.match(r.outcome.text, /Could not reach the server/);
+});

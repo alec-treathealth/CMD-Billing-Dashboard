@@ -56,6 +56,32 @@ export type ForecastEditIntent =
       amount: string;
     }
   | {
+      /**
+       * RECONCILE A MANUAL ADD AGAINST AN 835 (033), in place — the alternative to writing a
+       * second row to say the first one landed.
+       *
+       * WHY THIS EXISTS BESIDE 'suppress'. Confirming a landed forecast used to write a
+       * `suppress` at the same match key, whatever the row's origin. For a SHEET row that is
+       * right: the sheet is a feed nobody can edit from here, so the only way to say "this one
+       * arrived" is to file a decision beside it. For a MANUAL ADD it produced two rows saying
+       * one thing about one payment — which is exactly the pair sitting in the live BXR book
+       * (ids 8 and 18, KWC / BCBS TN / 2026-08-05) — and it made "is this reconciled?" a join
+       * across two rows rather than a column on one.
+       *
+       * So: sheet rows still suppress, manual adds now match. Same button, same sentence to
+       * the operator; the difference is which of the two is addressable afterwards.
+       */
+      op: 'match';
+      /** The 024/033 row id. The server addresses by id and re-derives everything else. */
+      id: number;
+      /** 'expected' is the UNDO — it clears the era key and puts the money back on the tile. */
+      status: 'expected' | 'needs_review' | 'matched';
+      /** The 835 natural key 'date|facility|payer'. Required unless status is 'expected'. */
+      matchedEraKey: string | null;
+      /** Display-only, so a failure message can name the row. Never marshalled to the server. */
+      label?: string;
+    }
+  | {
       op: 'delete-edit';
       id: number;
       /**
@@ -97,6 +123,7 @@ export interface ForecastSaveInput {
 
 type SaveResult = { ok: true; id: string } | { ok: false; error: string };
 type DeleteResult = { ok: true; deleted: boolean } | { ok: false; error: string };
+type MatchResult = { ok: true; updated: boolean } | { ok: false; error: string };
 
 /**
  * The reason clause, per server code. Keys mirror app/lib/actions.ts exactly.
@@ -141,7 +168,9 @@ const REASON_FALLBACK =
 
 /** How a row is named in a message: facility · payer · date. Non-PHI by construction. */
 export function intentLabel(i: ForecastEditIntent): string {
-  return i.op === 'delete-edit'
+  // Both id-addressed ops carry only an opaque row id, so they fall back to a display label —
+  // "Could not …" with no subject is barely better than silence.
+  return i.op === 'delete-edit' || i.op === 'match'
     ? (i.label ?? 'this edit')
     : `${i.facilityCode} · ${i.payerLabel} · ${i.expectedDate}`;
 }
@@ -150,6 +179,13 @@ function verb(i: ForecastEditIntent): string {
   if (i.op === 'add') return 'add that payment';
   if (i.op === 'correct') return 'save that amount';
   if (i.op === 'delete-edit') return 'remove that edit';
+  if (i.op === 'match') {
+    return i.status === 'matched'
+      ? 'mark that payment landed'
+      : i.status === 'needs_review'
+        ? 'flag that payment for review'
+        : 'put that payment back';
+  }
   return i.reason === 'landed'
     ? 'mark that payment landed'
     : i.reason === 'incorrect'
@@ -161,6 +197,15 @@ function pastTense(i: ForecastEditIntent): string {
   if (i.op === 'add') return 'Added';
   if (i.op === 'correct') return 'Amount saved';
   if (i.op === 'delete-edit') return 'Edit removed';
+  if (i.op === 'match') {
+    // "Marked landed" deliberately matches the suppress wording. The operator pressed one
+    // button and means one thing; which table column moved is not their concern.
+    return i.status === 'matched'
+      ? 'Marked landed'
+      : i.status === 'needs_review'
+        ? 'Flagged for review'
+        : 'Put back';
+  }
   return i.reason === 'landed'
     ? 'Marked landed'
     : i.reason === 'incorrect'
@@ -184,6 +229,15 @@ export function forecastEditSuccess(i: ForecastEditIntent, deleted = true): Fore
   // and saying "Edit removed" would claim an effect this call did not have.
   if (i.op === 'delete-edit' && !deleted) {
     return { tone: 'info', text: `That edit was already gone — ${intentLabel(i)}. Nothing to remove.` };
+  }
+  // Same honesty rule for a reconciliation that changed no row: claiming "Marked landed" when
+  // ROW_COUNT was 0 would assert an effect this call did not have. The usual cause is the row
+  // having been removed or already reconciled in another tab.
+  if (i.op === 'match' && !deleted) {
+    return {
+      tone: 'info',
+      text: `That payment was already settled — ${intentLabel(i)}. Nothing changed.`,
+    };
   }
   const amount = i.op === 'add' || i.op === 'correct' ? ` · ${money(i.amount)}` : '';
   return { tone: 'ok', text: `${pastTense(i)} — ${intentLabel(i)}${amount}.` };
@@ -215,9 +269,40 @@ export async function runForecastEdit(
   deps: {
     save: (input: ForecastSaveInput, view?: DashboardView) => Promise<SaveResult>;
     remove: (id: number, view?: DashboardView) => Promise<DeleteResult>;
+    /**
+     * 033's reconciliation write. OPTIONAL so every existing call site keeps compiling and
+     * behaving identically; a 'match' intent with no `match` dep is reported as unreachable
+     * rather than silently doing nothing, which is the failure mode this module exists to end.
+     */
+    match?: (
+      id: number,
+      status: 'expected' | 'needs_review' | 'matched',
+      matchedEraKey: string | null,
+      view?: DashboardView,
+    ) => Promise<MatchResult>;
   },
 ): Promise<{ outcome: ForecastEditOutcome; refetch: boolean }> {
   try {
+    if (intent.op === 'match') {
+      if (!deps.match) {
+        return {
+          outcome: { tone: 'error', text: forecastEditErrorText(intent, null) },
+          refetch: false,
+        };
+      }
+      const r = await deps.match(intent.id, intent.status, intent.matchedEraKey, view);
+      // `updated === false` carries the SAME meaning as delete-edit's `deleted === false`, and
+      // gets the same treatment for the same reason: the id came from this tile's own
+      // tenant-scoped render, so false means the row has changed underneath us (removed by
+      // another admin, or already reconciled). Reloading is the correct response to learning
+      // the tile is stale — see the long note on the delete branch below.
+      return r.ok
+        ? { outcome: forecastEditSuccess(intent, r.updated), refetch: true }
+        : {
+            outcome: { tone: 'error', text: forecastEditErrorText(intent, r.error) },
+            refetch: shouldRefetch(r.error, false),
+          };
+    }
     if (intent.op === 'delete-edit') {
       const r = await deps.remove(intent.id, view);
       // ⚠️ `refetch: true` EVEN WHEN `deleted === false`. This looks like a wasted reload and
