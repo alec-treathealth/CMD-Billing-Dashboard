@@ -64,6 +64,10 @@ import {
   type ForecastFacilityOption,
 } from './era-upcoming';
 import { runForecastEdit, type ForecastEditOutcome } from '@/lib/forecast/edit-feedback';
+// Lives next to edit-feedback.ts rather than in this file so it can be unit-tested: importing this
+// component pulls in actions.ts → access.ts, which calls React `cache` at module scope and dies
+// under the test runner. See deposit-feedback.ts's header.
+import { depositErrorText } from '@/lib/forecast/deposit-feedback';
 import { activeFacilityCodesForEntity } from '../../../src/collections/cmdCustomers';
 // The Overview tab's name for the no-facility bucket. Deliberately NOT the shared
 // UNASSIGNED_FACILITY_LABEL, which the Collections tab still uses — see OTHER_FACILITY_LABEL.
@@ -807,26 +811,6 @@ function ManualDepositSection({
 }
 
 /** Server codes → an operator-actionable sentence. Unknown codes never print the code. */
-function depositErrorText(code: string): string {
-  switch (code) {
-    case 'forbidden':
-      return 'You do not have permission to record payments.';
-    case 'pick_a_tenant_view':
-      return 'Switch to the BXR or Indigo view first — a payment has to name one company’s book.';
-    case 'facility_not_in_tenant':
-      return 'That facility is not in this view’s book. Switch to the view that owns it.';
-    case 'facility_retired':
-      return 'That facility’s account is closed, so no payment can arrive for it.';
-    case 'bad_amount':
-      return 'Enter an amount in dollars, up to two decimals — e.g. 4200 or 4200.50.';
-    case 'bad_date':
-      return 'Enter the date received as a calendar date.';
-    default:
-      // write_failed and anything unrecognised: the outcome is genuinely unknown, so the
-      // message must not claim either way, and internals never reach the operator.
-      return 'That may not have been saved. Reopen this panel to check before trying again.';
-  }
-}
 
 /**
  * "Upcoming Payments" as a reveal panel — same interaction as the All Facilities table.
