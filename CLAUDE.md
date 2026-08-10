@@ -155,6 +155,35 @@ Open PRs against `staging`, never `main` — use `gh pr create --base staging`
 explicitly. `main` is production; it only receives a PR from `staging` after
 Vercel and Qodo checks pass.
 
+**`main` is GitHub-enforced** — ruleset `20617104`, `enforcement: active`, scoped
+to `~DEFAULT_BRANCH`. It replaced discipline that was not holding on its own: 21
+of the last 100 updates to `main` were direct pushes, two of them carrying
+migrations (0073/0074, 2026-07-29).
+
+| Rule | Effect |
+|---|---|
+| `pull_request` | a PR is required; `required_approving_review_count` is **0** — it gates the route, not review |
+| `creation` + `update` | direct push to `main` is refused |
+| `non_fast_forward` | force-push to `main` is refused |
+| `required_linear_history` | **merge commits are refused — promote with squash or rebase** |
+
+Three consequences, none of them accidental:
+
+- **Checks are read by hand, deliberately.** There is **no `required_status_checks`
+  rule and one is not wanted** — Alec reads Vercel and Qodo himself before
+  promoting. A green check is not a gate and a red one does not disable the merge
+  button; the human is the gate. **Do not propose adding required status checks.**
+- **`required_linear_history` overrides the `pull_request` rule's own
+  `allowed_merge_methods`, which still lists `merge`.** GitHub refuses the merge
+  commit at push time. Promotions through `8fb2917` were true two-parent merges and
+  everything after is squash/rebase, so ahead/behind counts read differently across
+  that boundary.
+- **`staging` carries no ruleset** (`rules/branches/staging` → `[]`), and two actors
+  bypass with `bypass_mode: always`: the repository **admin** role and Integration
+  `1236702` (not Vercel `8329`, not GitHub Actions `15368`). An admin push to `main`
+  therefore succeeds and leaves no disable/re-enable event behind. This is the
+  intended posture — the ruleset stops accidents, not its owner.
+
 ## Repo layout
 
 Monorepo-style **two packages**: the root package is the ingest + query/agent
