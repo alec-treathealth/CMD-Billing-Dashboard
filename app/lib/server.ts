@@ -3343,10 +3343,12 @@ export async function loadFacilityResolutionQueue(
  *  reject a legitimate in-book assignment as "not on this book's roster". */
 export const loadResolutionFacilityOptions = unstable_cache(
   async (entityIds: string[]): Promise<Array<{ facility_code: string; facility_name: string }>> => {
-    const roster = OWNED_CMD_CUSTOMERS
-      .filter((c) => c.businessEntityId !== undefined && entityIds.includes(c.businessEntityId))
-      .map((c) => c.facilityCode);
-    const codes = [...new Set(roster)];
+    // No `!== undefined` guard: CmdCustomer.businessEntityId is a required string, so the conjunct
+    // was always true and only read as though optional entries were handled. No Set-dedup either:
+    // OWNED_CMD_CUSTOMERS is asserted duplicate-free on BOTH keys in test/upcomingForecast.test.ts.
+    const codes = OWNED_CMD_CUSTOMERS.filter((c) => entityIds.includes(c.businessEntityId)).map(
+      (c) => c.facilityCode,
+    );
     if (codes.length === 0) return [];
     const { sql, params } = buildResolutionFacilityOptionsQuery(codes);
     const { rows } = await readerExecutor().query<{ facility_code: string; facility_name: string }>(

@@ -94,7 +94,7 @@ import {
   removeUpcomingManualRow,
   type ManualForecastRow,
 } from '@/lib/server';
-import { facilityBelongsToEntity } from '../../src/collections/cmdCustomers.js';
+import { facilityBelongsToEntity, facilityIsActiveForEntity } from '../../src/collections/cmdCustomers.js';
 import { requireExecutive } from '@/lib/executive';
 import { dashboardAccess } from '@/lib/access';
 import { BXR_ENTITY_ID, clampView, viewToEntityIds, type DashboardView } from '@/lib/views';
@@ -643,6 +643,16 @@ export async function saveUpcomingManual(
   // visible only as an odd row on a tile. The roster in cmdCustomers.ts is the source of truth.
   if (!facilityBelongsToEntity(input.facilityCode, entityId)) {
     return { ok: false, error: 'facility_not_in_tenant' };
+  }
+  // LIVENESS GUARD, deliberately separate from the tenancy guard above and with its own error.
+  // This is a CREATE path: a retired CMD account can never receive a payment, so a forecast row
+  // naming one would sit on the Upcoming tile as a permanently overdue item nothing can clear.
+  // Ownership stays true for retired facilities (that is what keeps their history attributable),
+  // so the tenancy check passes and only this one refuses — and it must NOT reuse
+  // 'facility_not_in_tenant', which would tell the operator to switch to a view they are already
+  // in. See facilityIsActiveForEntity in src/collections/cmdCustomers.ts.
+  if (!facilityIsActiveForEntity(input.facilityCode, entityId)) {
+    return { ok: false, error: 'facility_retired' };
   }
   try {
     await recordAccess({

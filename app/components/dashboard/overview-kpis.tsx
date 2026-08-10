@@ -57,7 +57,7 @@ import {
   type ForecastFacilityOption,
 } from './era-upcoming';
 import { runForecastEdit, type ForecastEditOutcome } from '@/lib/forecast/edit-feedback';
-import { facilityCodesForEntity } from '../../../src/collections/cmdCustomers';
+import { activeFacilityCodesForEntity } from '../../../src/collections/cmdCustomers';
 import type { EraUpcomingSummary } from '../../../src/veris/era835Upcoming.js';
 import type { UpcomingOverrideSummary } from '../../../src/veris/upcomingOverride.js';
 import type { ManualForecastRow } from '../../../src/veris/upcomingForecast';
@@ -352,13 +352,18 @@ export function OverviewKpis({
 
   // Facilities a manual forecast row may name. The ROSTER decides tenancy (collections.facilities
   // is tenant-agnostic reference data and cannot), so the dimension is narrowed by
-  // facilityCodesForEntity — which is also exactly what the Server Action re-checks. Consolidated
-  // resolves to two tenants, so it yields NOTHING and the form is replaced by an explanation
-  // rather than offering choices the server would reject.
+  // activeFacilityCodesForEntity — which is also exactly what the Server Action re-checks (it
+  // applies facilityBelongsToEntity AND facilityIsActiveForEntity). Consolidated resolves to two
+  // tenants, so it yields NOTHING and the form is replaced by an explanation rather than offering
+  // choices the server would reject.
+  //
+  // ACTIVE, not merely owned: this form CREATES a forecast, and a retired CMD account can never
+  // receive a payment, so offering one would guarantee a row that never resolves. Retired
+  // facilities stay owned (their history remains attributable) — they are just not selectable here.
   const forecastFacilityOptions: ForecastFacilityOption[] =
     view === 'consolidated'
       ? []
-      : facilityCodesForEntity(viewToEntityIds(view)[0] ?? '')
+      : activeFacilityCodesForEntity(viewToEntityIds(view)[0] ?? '')
           .map((code) => {
             const dim = dimByCode.get(code);
             // Label with everything a human needs to pick confidently; fall back to the bare
@@ -501,9 +506,9 @@ function EraUpcomingPanel({
    * to remove: a control that cannot succeed must not render.
    *
    * facilityOptions is the signal because it is the SAME one the server re-checks — the caller
-   * derives it from facilityCodesForEntity, empty exactly on Consolidated, and AddForecastForm
-   * has been using it for this purpose since 024. Reusing it keeps one definition of "a write
-   * has somewhere to land" instead of two that can drift.
+   * derives it from activeFacilityCodesForEntity, empty exactly on Consolidated, and
+   * AddForecastForm has been using it for this purpose since 024. Reusing it keeps one definition
+   * of "a write has somewhere to land" instead of two that can drift.
    */
   const canEdit = hasEditRole && facilityOptions.length > 0;
   const [status, setStatus] = useState<'idle' | 'loading' | 'error' | 'ready'>('idle');
