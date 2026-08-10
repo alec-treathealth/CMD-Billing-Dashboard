@@ -39,6 +39,10 @@ import { aiGroundingCaption, type QualifyBookPlacement } from '../../lib/qualify
 import { buildQualifyAiInput } from '../../lib/qualify/aiPayload';
 // The scope claim's ONE home — see scopeLabel.ts for why it does not live in this file.
 import { aiScopeLabel } from '../../lib/qualify/scopeLabel';
+// The externalAsk one-shot-per-nonce decision lives here, not inline, for the reason aiPayload.ts
+// and bookPlacement.ts do: this file reaches the 'use server' chain, so a hermetic test cannot
+// exercise a decision written only here. See externalAsk.ts for the rule and why it is nonce-keyed.
+import { decideExternalAsk, type QualifyExternalAsk } from '../../lib/qualify/externalAsk';
 import { IQ_BAND_HEX } from './tokens';
 // The model is ASKED for markdown by SYSTEM_PROMPT; this is what turns it into markup instead of
 // printing the delimiters. Pure + hermetically tested (app/test/markdown-render.test.tsx).
@@ -74,7 +78,7 @@ export function QualifyAiPanel({
    * conflate. Same one-shot discipline as autoAsk: consumed once, then the owner disarms via
    * onExternalAsked — an unmount/remount must not re-fire an audited, billed model call.
    */
-  externalAsk?: { question: QualifyAiChipId; slots: QualifyChipSlots | null; nonce: number } | null;
+  externalAsk?: QualifyExternalAsk | null;
   onExternalAsked?: () => void;
   /**
    * WHERE THE PAYER'S WHOLE BOOK IS DRAWN, relative to this panel (S2, extended by S3 2026-08-08).
@@ -215,10 +219,11 @@ export function QualifyAiPanel({
   // across remounts, exactly as onAutoAsked does one effect up).
   const externalConsumedRef = useRef<number | null>(null);
   useEffect(() => {
-    if (externalAsk === null || externalConsumedRef.current === externalAsk.nonce) return;
-    externalConsumedRef.current = externalAsk.nonce;
+    const decision = decideExternalAsk(externalAsk, externalConsumedRef.current);
+    if (!decision.fire) return;
+    externalConsumedRef.current = decision.nextConsumed;
     onExternalAsked?.();
-    void run(externalAsk.question, externalAsk.slots);
+    void run(decision.ask.question, decision.ask.slots);
   }, [externalAsk, run, onExternalAsked]);
 
   const sections = parseAiSections(text);

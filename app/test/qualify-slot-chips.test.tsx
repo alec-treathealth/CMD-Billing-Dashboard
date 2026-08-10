@@ -4,10 +4,15 @@
  * The firewall's schema half is asserted in test/qualifyAiSlots.test.ts (root suite). This file
  * covers the two things that live only on the app side:
  *
- *   1. ENUM PARITY. chipTemplates.ts declares the slot vocabularies for the UI and qualifyAi.ts
- *      re-declares them for the wire. They are two hand-written lists that must agree exactly: a
- *      value the UI offers but the schema rejects is a dropdown option that silently fails to run,
- *      and the reverse is a hole. Nothing but this test connects them.
+ *   1. ENUM PARITY, BOTH DIRECTIONS. chipTemplates.ts declares the slot vocabularies for the UI and
+ *      qualifyAi.ts re-declares them for the wire. They are two hand-written lists that must agree
+ *      exactly, and until Task 3 only the forward direction (§1a: every UI value is schema-accepted)
+ *      was checked — a value ADDED to the schema and never offered by the UI passed silently, which
+ *      is a real hole (the rep can never select it) that the header's "must agree exactly" claim
+ *      denied existed. §1b closes the reverse direction: every value the SCHEMA accepts must also be
+ *      offered by the UI. Rather than hand-copy a THIRD list that could independently drift from
+ *      both existing ones, §1b's schema-side lists are DERIVED from `QualifyAiInputSchema` itself via
+ *      zod's own public introspection (`.unwrap()` / `.options` / `.value`) — see `schemaValuesOf`.
  *   2. NO FREE-TEXT CONTROL reaches the DOM. The chip's whole purpose is that a rep cannot type on
  *      this surface; an <input> or <textarea> appearing here later would be the regression, and it
  *      would look like a feature in review.
@@ -16,6 +21,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { z } from 'zod';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { SlotChip } from '../components/qualify/slot-chip';
 import {
@@ -58,7 +64,7 @@ const snapshot = {
   facilities: [facility('Nashville Mental Health'), facility('Lonestar Mental Health'), facility('Opus Health')],
 } as unknown as QualifySnapshot;
 
-// ── 1. Enum parity between the UI's vocabulary and the wire's ──────────────────────────────────
+// ── 1a. Enum parity, forward direction: every UI value is schema-accepted ──────────────────────
 test('every slot value the UI offers is accepted by the wire schema', () => {
   const base = {
     question: 'placement' as const,
@@ -83,6 +89,81 @@ test('every slot value the UI offers is accepted by the wire schema', () => {
   for (const careSetting of SLOT_CARE_SETTINGS) {
     assert.ok(accepts({ ...EMPTY_SLOTS, careSetting }), `schema rejects care setting "${careSetting}"`);
   }
+});
+
+// ── 1b. Enum parity, REVERSE direction: every schema value is UI-offered ───────────────────────
+//
+// `app/` and the root package are two separate npm installs (`app/node_modules/zod` and the root's
+// are different files on disk, same version) — the `z` imported HERE is a different module instance
+// from the one `src/collections/qualifyAi.ts` built `QualifyAiInputSchema` with, so `instanceof
+// z.ZodEnum` etc. is always false across that boundary even though the runtime shape is identical.
+// Reading `_def.typeName` (a plain string, not a class identity) is what actually works across two
+// zod copies, so unwrapping goes through that instead of `instanceof` — still "derived from the
+// schema itself", just via the property that survives the module-instance split.
+function unwrapZod(schema: z.ZodTypeAny): z.ZodTypeAny {
+  let s: z.ZodTypeAny = schema;
+  while (s._def.typeName === z.ZodFirstPartyTypeKind.ZodOptional || s._def.typeName === z.ZodFirstPartyTypeKind.ZodNullable) {
+    s = (s as unknown as { unwrap(): z.ZodTypeAny }).unwrap();
+  }
+  return s;
+}
+
+/** The schema's OWN permitted values for a `z.enum([...])` or a `z.union([z.literal(...), ...])`
+ *  field, read off the schema rather than hand-copied — the whole point of §1b (see file header). */
+function schemaValuesOf(schema: z.ZodTypeAny): unknown[] {
+  const s = unwrapZod(schema);
+  const typeName = s._def.typeName;
+  if (typeName === z.ZodFirstPartyTypeKind.ZodEnum) {
+    return [...(s as unknown as { options: unknown[] }).options];
+  }
+  if (typeName === z.ZodFirstPartyTypeKind.ZodUnion) {
+    const options = (s as unknown as { options: z.ZodTypeAny[] }).options;
+    return options.map((option) => {
+      const lit = unwrapZod(option);
+      if (lit._def.typeName !== z.ZodFirstPartyTypeKind.ZodLiteral) {
+        throw new Error('schemaValuesOf: expected a union of z.literal(...) members');
+      }
+      return (lit as unknown as { value: unknown }).value;
+    });
+  }
+  throw new Error(`schemaValuesOf: unsupported zod node "${typeName}"`);
+}
+
+const slotsSchema = unwrapZod(QualifyAiInputSchema.shape.slots);
+if (slotsSchema._def.typeName !== z.ZodFirstPartyTypeKind.ZodObject) {
+  throw new Error('QualifyAiInputSchema.shape.slots did not unwrap to an object schema');
+}
+const slotsShape = (slotsSchema as unknown as { shape: Record<string, z.ZodTypeAny> }).shape;
+const SCHEMA_METRICS = schemaValuesOf(slotsShape.metric!);
+const SCHEMA_HORIZONS = schemaValuesOf(slotsShape.horizonDays!);
+const SCHEMA_CARE_SETTINGS = schemaValuesOf(slotsShape.careSetting!);
+
+/** Is `schemaValue` one of the values the UI's own vocabulary array offers? */
+function uiOffers<T>(uiValues: readonly T[], schemaValue: unknown): boolean {
+  return uiValues.some((v) => (v as unknown) === schemaValue);
+}
+
+test('every metric value the SCHEMA accepts is offered by the UI', () => {
+  for (const value of SCHEMA_METRICS) {
+    assert.ok(uiOffers(SLOT_METRICS, value), `schema accepts metric "${String(value)}" the UI never offers`);
+  }
+  // Equal cardinality closes the gap containment alone would miss: every schema value happening to
+  // collide with a UI value already checked would pass containment even if the schema grew by one.
+  assert.equal(SCHEMA_METRICS.length, SLOT_METRICS.length, 'metric list length mismatch — one side has a value the other lacks');
+});
+
+test('every horizon value the SCHEMA accepts is offered by the UI', () => {
+  for (const value of SCHEMA_HORIZONS) {
+    assert.ok(uiOffers(SLOT_HORIZONS, value), `schema accepts horizon ${String(value)} the UI never offers`);
+  }
+  assert.equal(SCHEMA_HORIZONS.length, SLOT_HORIZONS.length, 'horizon list length mismatch');
+});
+
+test('every care-setting value the SCHEMA accepts is offered by the UI', () => {
+  for (const value of SCHEMA_CARE_SETTINGS) {
+    assert.ok(uiOffers(SLOT_CARE_SETTINGS, value), `schema accepts care setting "${String(value)}" the UI never offers`);
+  }
+  assert.equal(SCHEMA_CARE_SETTINGS.length, SLOT_CARE_SETTINGS.length, 'care-setting list length mismatch');
 });
 
 // ── 2. Slot plumbing ───────────────────────────────────────────────────────────────────────────

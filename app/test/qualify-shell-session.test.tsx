@@ -15,6 +15,9 @@
  *   3. THE REVEAL SCOPE follows the pane the answer actually renders in.
  *   4. A REFUSED WATCHER SAVE IS SPOKEN — a distinct sentence per reason, inside a live region that
  *      exists before it has anything to say.
+ *   5. A WATCHER DELETE ROUTES CORRECTLY — a server-backed row (non-empty id) always deletes by id;
+ *      a session-only row's position in `[...(board?.trend ?? []), ...sessionTrend]` (server rows
+ *      first, declared ~170 lines from the handler) resolves to the right SESSION-slice index.
  *
  * ⚠️ Must be .tsx — app/package.json collects `test/*.test.tsx` only; a `.ts` file here would
  * "pass" by never running (forecast-edit-feedback.test.tsx's header).
@@ -25,6 +28,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
+  deriveWatcherDeleteAction,
   laneIsOpen,
   recentSearchKeyOf,
   revealScopeFor,
@@ -323,4 +327,69 @@ test('the watchers panel announces a failed save and keeps its live region mount
     // A failed SAVE is not a failed READ — the panel must not offer the read banner's explanation.
     assert.doesNotMatch(failed, /saved watchers could not be read/);
   }
+});
+
+// ── 5. The watcher delete route ────────────────────────────────────────────────────────────────
+//
+// `onDeleteWatcher` receives `index` as the position in the CONCATENATED view
+// `[...(board?.trend ?? []), ...sessionTrend]` — server rows first. A session-only row's `id` is
+// `''` (falsy); a server-backed row's `id` is a non-empty string that must never be coerced with
+// `Number()` (node-pg returns bigint as a string).
+
+test('a server-backed row (non-empty id) always takes the server route, whatever index/serverCount say', () => {
+  assert.deepEqual(deriveWatcherDeleteAction('42', 0, 5), { kind: 'server', id: '42' });
+  // A large index and a serverCount of 0 would make the naive arithmetic wildly wrong — the id check
+  // must win outright, not merely "usually" win.
+  assert.deepEqual(deriveWatcherDeleteAction('42', 99, 0), { kind: 'server', id: '42' });
+});
+
+test('a session-only row (null id) resolves to its position within the session-only slice', () => {
+  // 3 server rows precede the session slice: view index 3 is session index 0, the FIRST session row.
+  assert.deepEqual(deriveWatcherDeleteAction(null, 3, 3), { kind: 'session', sessionIndex: 0 });
+  assert.deepEqual(deriveWatcherDeleteAction(null, 4, 3), { kind: 'session', sessionIndex: 1 });
+});
+
+test('zero server rows: the session index equals the view index unchanged', () => {
+  assert.deepEqual(deriveWatcherDeleteAction(null, 0, 0), { kind: 'session', sessionIndex: 0 });
+  assert.deepEqual(deriveWatcherDeleteAction(null, 2, 0), { kind: 'session', sessionIndex: 2 });
+});
+
+test('deleting the FIRST session row removes exactly that row — server rows first, session rows after', () => {
+  // Mirrors the shell's own concat: trendView = [...(board?.trend ?? []), ...sessionTrend].
+  const serverRows = ['server-a', 'server-b'];
+  let sessionRows = ['session-x', 'session-y', 'session-z'];
+  const trendView = [...serverRows, ...sessionRows];
+
+  // The operator deletes the first SESSION row as rendered — its position in the concatenated view.
+  const viewIndex = trendView.indexOf('session-x');
+  assert.equal(viewIndex, serverRows.length, 'sanity: the first session row sits right after the server rows');
+
+  const action = deriveWatcherDeleteAction(null, viewIndex, serverRows.length);
+  assert.equal(action.kind, 'session');
+  if (action.kind === 'session') sessionRows = sessionRows.filter((_, i) => i !== action.sessionIndex);
+
+  assert.deepEqual(sessionRows, ['session-y', 'session-z'], 'exactly the first session row is removed');
+  assert.deepEqual(serverRows, ['server-a', 'server-b'], 'server rows are never touched by the session filter');
+});
+
+/**
+ * ⚠ THE CALL SITE. `onDeleteWatcher` used to inline `index - serverCount` directly — the exact
+ * "pinned function, unpinned call site" gap items 1 and 3 of this file already close for their own
+ * rules. Reverting the wiring to that inline subtraction (or to a bare `if (id)` that skips the
+ * derivation) reproduces the delete-index bug under a green suite unless the call site itself is
+ * pinned, so every position below goes through `indexOfOrFail`.
+ */
+test('the shell WIRES the delete route: onDeleteWatcher calls deriveWatcherDeleteAction, not inline math', () => {
+  const handlerAt = indexOfOrFail(SHELL_SRC, 'const onDeleteWatcher = useCallback(');
+  const closeAt = indexOfOrFail(SHELL_SRC, '[watchboard, reloadWatchboard],', handlerAt);
+  const callAt = indexOfOrFail(SHELL_SRC, 'deriveWatcherDeleteAction(id, index, serverCount)', handlerAt);
+  assert.ok(callAt < closeAt, 'the derivation must be called inside onDeleteWatcher');
+  // The inline subtraction this extraction replaced must not come back.
+  assert.doesNotMatch(
+    SHELL_SRC,
+    /const sessionIndex = index - serverCount;/,
+    'the inline index math is the defect this extraction replaced',
+  );
+  // Exactly one call site.
+  assert.equal(SHELL_SRC.split('deriveWatcherDeleteAction(').length - 1, 1, 'one call site, no second copy');
 });

@@ -115,6 +115,33 @@ export function revealScopeFor<T>(shellMode: boolean, root: T, stageEl: T): T {
   return shellMode ? root : stageEl;
 }
 
+/**
+ * THE WATCHER DELETE ROUTE — server-id delete, or the session-only index math, as one decision.
+ *
+ * `onDeleteWatcher` (`../v3/resolution-flow-client.tsx`) is handed `(kind, id, index)` from
+ * `WatchersPanel`'s `.map((w, i) => …)`, where `index` is the position in the CONCATENATED view —
+ * `[...(board?.trend ?? []), ...sessionTrend]` (and the `patient` twin), server rows first, declared
+ * ~170 lines away from the delete handler. A session-only row's `id` is `''` (falsy); a server-backed
+ * row's `id` is a non-empty string — node-pg returns the underlying bigint as a STRING, so this must
+ * never be coerced with `Number()` and this function never touches it as anything but an opaque id.
+ *
+ * TWO INDEPENDENT CLAIMS, encoded so a caller cannot conflate them:
+ *   - a non-empty `id` ALWAYS takes the server route, regardless of `index`/`serverCount` — a
+ *     server-backed row must never fall through to the session-index arithmetic below it.
+ *   - a null-`id` (session-only) row's position in the SESSION-ONLY slice is `index - serverCount`,
+ *     because the concatenation puts every server row before the first session row. Deleting the
+ *     first session-only item is `index === serverCount`, i.e. `sessionIndex === 0`.
+ *
+ * PURE: `serverCount` is computed at the call site (it depends on `kind` and the shell's watchboard
+ * shape, which this module has no reason to know about) and handed in as a plain number.
+ */
+export type QualifyWatcherDeleteAction = { kind: 'server'; id: string } | { kind: 'session'; sessionIndex: number };
+
+export function deriveWatcherDeleteAction(id: string | null, index: number, serverCount: number): QualifyWatcherDeleteAction {
+  if (id) return { kind: 'server', id };
+  return { kind: 'session', sessionIndex: index - serverCount };
+}
+
 /** Why a watcher save did not happen — the action's own `reason` union, re-exported as the UI's. */
 export type QualifyWatcherSaveFailure = 'denied' | 'invalid' | 'failed';
 

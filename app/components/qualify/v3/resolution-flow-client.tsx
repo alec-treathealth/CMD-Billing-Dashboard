@@ -99,6 +99,7 @@ import { RecentSearches } from '../shell/recent-searches';
 // moved somewhere a hermetic test can call it. Read that module's headers before changing any of the
 // four call sites below; the reasoning is the fix, not the one-liner.
 import {
+  deriveWatcherDeleteAction,
   laneIsOpen,
   recentSearchKeyOf,
   revealScopeFor,
@@ -107,6 +108,8 @@ import {
 import { PolicyTapeMount } from '../policy-tape-mount';
 import type { QualifyAiChipId } from '../../../lib/qualify/aiChips';
 import type { QualifyChipSlots } from '../../../lib/qualify/chipTemplates';
+// The one shape of a composer ask, shared with the panel that consumes it — see externalAsk.ts.
+import type { QualifyExternalAsk } from '../../../lib/qualify/externalAsk';
 import {
   clearQualifyRecentSearches,
   deleteQualifyWatcher,
@@ -785,11 +788,7 @@ export function ResolutionFlowClient({
   // touches (the `trends` rule); externalAsk is one-shot presentation the panel consumes; the
   // session lists are the browser-only fallback while mig 0096 is unapplied.
   /** The composer's pending ask — nonce'd so two identical asks are two requests. */
-  const [externalAsk, setExternalAsk] = useState<{
-    question: QualifyAiChipId;
-    slots: QualifyChipSlots | null;
-    nonce: number;
-  } | null>(null);
+  const [externalAsk, setExternalAsk] = useState<QualifyExternalAsk | null>(null);
   const askNonceRef = useRef(0);
   /** Server-persisted watchers + recent searches. null = not yet loaded; 'failed' = the READ failed
    *  (distinct from `available:false`, which means mig 0096 is unapplied — see reloadWatchboard). */
@@ -1030,8 +1029,13 @@ export function ResolutionFlowClient({
 
   const onDeleteWatcher = useCallback(
     (kind: 'trend' | 'patient', id: string | null, index: number) => {
-      if (id) {
-        void deleteQualifyWatcher(id)
+      // Session-only rows are indexed within the SESSION slice, which renders after the server
+      // rows — deriveWatcherDeleteAction is the one place that arithmetic lives; see its header.
+      const b = watchboard === 'failed' || watchboard === null ? null : watchboard;
+      const serverCount = kind === 'trend' ? (b?.trend.length ?? 0) : (b?.patient.length ?? 0);
+      const action = deriveWatcherDeleteAction(id, index, serverCount);
+      if (action.kind === 'server') {
+        void deleteQualifyWatcher(action.id)
           .then((res) => {
             // "clear it on the next successful action" — a delete that lands proves the panel is
             // reachable, so a stale save notice above it is no longer describing anything current.
@@ -1044,10 +1048,7 @@ export function ResolutionFlowClient({
         return;
       }
       setWatcherSaveFailed(null);
-      // Session-only rows are indexed within the SESSION slice, which renders after the server rows.
-      const b = watchboard === 'failed' || watchboard === null ? null : watchboard;
-      const serverCount = kind === 'trend' ? (b?.trend.length ?? 0) : (b?.patient.length ?? 0);
-      const sessionIndex = index - serverCount;
+      const { sessionIndex } = action;
       if (kind === 'trend') setSessionTrend((prev) => prev.filter((_, i) => i !== sessionIndex));
       else setSessionPatient((prev) => prev.filter((_, i) => i !== sessionIndex));
     },
