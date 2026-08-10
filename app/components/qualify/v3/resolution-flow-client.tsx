@@ -95,6 +95,15 @@ import { QualifyComposer } from '../shell/composer';
 import { ThisSearchZone, ZoneRule } from '../shell/board-zone';
 import { WatchersPanel } from '../shell/watchers-panel';
 import { RecentSearches } from '../shell/recent-searches';
+// The shell's own pure derivations — each one a defect the review confirmed in THIS file's wiring,
+// moved somewhere a hermetic test can call it. Read that module's headers before changing any of the
+// four call sites below; the reasoning is the fix, not the one-liner.
+import {
+  laneIsOpen,
+  recentSearchKeyOf,
+  revealScopeFor,
+  type QualifyWatcherSaveFailure,
+} from '../shell/shell-session';
 import { PolicyTapeMount } from '../policy-tape-mount';
 import type { QualifyAiChipId } from '../../../lib/qualify/aiChips';
 import type { QualifyChipSlots } from '../../../lib/qualify/chipTemplates';
@@ -153,6 +162,35 @@ export function ResolutionFlowClient({
 
   // The raw term — JS memory only. See the header block before moving this anywhere.
   const termRef = useRef<string>('');
+
+  /** ── THE SESSION'S OWN COUNT OF SEARCHES ───────────────────────────────────────────────────────
+   *  Bumped once per identify dispatch, and the ONLY thing on this surface that distinguishes two
+   *  members: `predicateId`, `scopeKey` and `handle.echo` all provably collide across them, and the
+   *  raw term may not be used as a key at all. `recentSearchKeyOf` owns the full argument. An integer
+   *  — never PHI, never on the wire, never rendered. Declared here beside `termRef` because
+   *  `identifyAction` (below) is the one writer and lives above the shell's own state block. */
+  const searchSeqRef = useRef(0);
+
+  /** ── "START OVER" HAPPENED AND `useActionState` CANNOT BE TOLD ─────────────────────────────────
+   *  `state.resolution` is owned by the server action; only a new dispatch replaces it, so the reset
+   *  leaves it non-null and the rail went on saying "Locked to GGS" over an emptied board. This is
+   *  the session's own bit, armed by the reset and disarmed by the next identify submit; what the
+   *  rail renders is DERIVED from it and `state.resolution` together (`laneIsOpen`), never stored as
+   *  a third "hasResolution" flag — the stuck-flag rule this file's header sets.
+   *
+   *  DISARMED AT SUBMIT, NOT AT THE NEXT RESOLUTION, and that is a choice rather than an oversight.
+   *  Between a submit and the action returning, `useActionState` still holds the PREVIOUS resolution,
+   *  so the whole rail shows the previous lane for that second — `deriveStage` puts the stage back on
+   *  'payer' over the old carriers, which is pre-existing v3 behaviour on EVERY search, reset or not.
+   *  Holding this armed until a new resolution landed would make the strip alone say "No lane yet"
+   *  while the stage beside it listed the old lane's carriers, which is exactly the two-panes-
+   *  disagreeing failure the shell's one-derivation discipline exists to prevent. The residual is
+   *  named here so it is weighed rather than rediscovered; fixing it means fixing the stage too.
+   *
+   *  INERT IN SINGLE-COLUMN MODE: nothing outside the shell branch reads it, and its only non-shell
+   *  writer (`identifyAction`) writes `false` over `false`, which React's `useState` bail-out drops
+   *  without scheduling a render. */
+  const [sessionCleared, setSessionCleared] = useState(false);
 
   // ONE state machine, not sixteen useState hooks. Destructured so every read site below is the
   // same identifier it always was. Notable fields, restated here because they are easy to misuse:
@@ -235,6 +273,12 @@ export function ResolutionFlowClient({
     (fd: FormData) => {
       const term = fd.get('term');
       termRef.current = typeof term === 'string' ? term : '';
+      // A NEW SEARCH IS A NEW SESSION IDENTITY, and both of these say so — one for the history
+      // dedupe (two members are two sequence numbers however identically they hash), one for the
+      // rail's lock strip (a submit re-opens a lane a reset closed). Both are inert in single-column
+      // mode: nothing there reads either, and the setState is a no-op write of `false` over `false`.
+      searchSeqRef.current += 1;
+      setSessionCleared(false);
       dispatch({ type: 'search_submitted' });
       formAction(fd);
     },
@@ -595,7 +639,16 @@ export function ResolutionFlowClient({
       // — for whom none of this runs — gets the fully-revealed list immediately. `once: true`: a
       // list the user is scanning must not re-animate on scroll-back. Stage 3 gets full amplitude,
       // stage 2 the same vocabulary at lower amplitude, so the two screens read as one system.
-      const tiles = gsap.utils.toArray<HTMLElement>('[data-v3-tile]', stageEl);
+      // ── WHERE THE TWO REVEALS LOOK (shell fix, 2026-08-10) ──────────────────────────────────────
+      // Single-column: the stage subtree, exactly as before. SHELL: the whole root, because the
+      // answer renders in the BOARD pane (`answerInline={false}`) and is therefore not under
+      // `[data-v3-stage]` at all — so both reveals below were selecting over a subtree that in shell
+      // mode contains no answer content, and neither the tile stagger nor the facet reveal ever ran.
+      // The ENTRANCE above deliberately does NOT take this scope: it animates `autoAlpha`, and
+      // widening `visibility: hidden` to the root is the <main>-level regression this effect's own
+      // header is a post-mortem of. See `revealScopeFor` for the full statement.
+      const revealRoot = revealScopeFor(shellMode, root, stageEl);
+      const tiles = gsap.utils.toArray<HTMLElement>('[data-v3-tile]', revealRoot);
       if (tiles.length > 0) {
         const rise = stage === 'plan' ? 10 : 6;
         gsap.set(tiles, { autoAlpha: 0, y: rise });
@@ -641,7 +694,10 @@ export function ResolutionFlowClient({
       // everything on the control card re-issues the ranking request and area does not). It is still
       // a facet of the inventory, so it is still a beat of the reveal, and DOM order puts it last,
       // which is where it belongs — the last thing between the operator and the list.
-      const facetRows = gsap.utils.toArray<HTMLElement>('[data-v3-facet]', stageEl);
+      // Same widened scope in shell mode as the tiles above, and the `opacity`-not-`autoAlpha` rule
+      // matters MORE there, not less: in the board these rows are the answer's live controls and the
+      // reveal now actually reaches them.
+      const facetRows = gsap.utils.toArray<HTMLElement>('[data-v3-facet]', revealRoot);
       if (facetRows.length > 0) {
         gsap.fromTo(
           facetRows,
@@ -674,7 +730,10 @@ export function ResolutionFlowClient({
       }
     }, root);
     return () => ctx.revert();
-  }, [stage, hasSnapshot]);
+    // `shellMode` is server-decided and stable for the life of the mount, so it can never actually
+    // re-fire this — it is in the array because the effect now READS it, and a dependency a reader
+    // has to prove constant is worse than one that is simply listed.
+  }, [stage, hasSnapshot, shellMode]);
 
   // The employer filter changes the tile list's length on every keystroke, which invalidates every
   // ScrollTrigger's measured position — refresh, debounced, or 186 keystroke-refreshes thrash.
@@ -736,8 +795,15 @@ export function ResolutionFlowClient({
   const [sessionTrend, setSessionTrend] = useState<(QualifyTrendWatcher & { sessionOnly: true })[]>([]);
   const [sessionPatient, setSessionPatient] = useState<(QualifyPatientWatcher & { sessionOnly: true })[]>([]);
   const [sessionRecent, setSessionRecent] = useState<(QualifyRecentSearch & { sessionOnly: true })[]>([]);
-  /** predicateIds already recorded to history — a re-scope of the same resolution must not re-log. */
+  /** Searches already recorded to history, keyed by `recentSearchKeyOf` — a re-scope of the same
+   *  resolution must not re-log, and two DIFFERENT members must never share a key. Read that
+   *  function's header before touching the key: the three obvious candidates all collide, and the
+   *  collision is silent (the second member's search simply never appears in the list). */
   const recordedRef = useRef<Set<string>>(new Set());
+  /** The last watcher SAVE was refused or failed — the write-direction twin of the panel's
+   *  `readFailed`. Cleared by the next save or delete that succeeds, so the notice describes the
+   *  last outcome rather than accumulating. Null = nothing to say. */
+  const [watcherSaveFailed, setWatcherSaveFailed] = useState<QualifyWatcherSaveFailure | null>(null);
 
   /**
    * THREE STATES, NOT TWO — `null` (not loaded yet), a board, or `'failed'`.
@@ -772,17 +838,28 @@ export function ResolutionFlowClient({
     reloadWatchboard();
   }, [shellMode, reloadWatchboard]);
 
-  // ── RECENT-SEARCH RECORDING: once per RESOLUTION (predicateId), not per snapshot ──────────────
-  // A window chip or billed-under press re-resolves the same search and must not re-log it; a new
-  // identify submit mints a new predicateId and does. Facets only — the term goes to the action
-  // solely so the ≤3-char echo derives SERVER-side (a member-ID search degrades to its prefix; see
-  // watcher-actions.ts), and the in-memory copy uses the already-safe `state.echo`.
+  // ── RECENT-SEARCH RECORDING: once per RESOLVED SEARCH, not per snapshot ───────────────────────
+  // A window chip, a billed-under press or a refresh re-fetches the same resolved search and must
+  // not re-log it; a new identify submit — and a plan pick inside one, which re-resolves to a
+  // concrete plan class — does. Facets only: the term goes to the action solely so the ≤3-char echo
+  // derives SERVER-side (a member-ID search degrades to its prefix; see watcher-actions.ts), and the
+  // in-memory copy uses the already-safe `state.echo`.
+  //
+  // ⚠ THE KEY IS `(searchSeq, predicateId)`, NOT `predicateId`. `predicateIdFor` hashes only
+  // {kind, canonicalPayerId, employerLabel, funding, planType, from, to} — no identifier — so two
+  // different members on the same plan shape hashed identically and the SECOND one's search was
+  // silently never recorded. `scopeKey` fails the same way (its header: "carries NO identifier at
+  // all") and `handle.echo` is '' for every full-member-ID search, so neither rescues it. The
+  // session's own search counter does, and it is an integer rather than the one thing that would
+  // trivially work and must never be used — the raw term. See `recentSearchKeyOf`.
   const snapshotForRecent = snapshot;
   useEffect(() => {
     if (!shellMode || snapshotForRecent === null) return;
     const pid = state.resolution?.predicateId ?? null;
-    if (pid === null || recordedRef.current.has(pid)) return;
-    recordedRef.current.add(pid);
+    if (pid === null) return;
+    const key = recentSearchKeyOf(searchSeqRef.current, pid);
+    if (recordedRef.current.has(key)) return;
+    recordedRef.current.add(key);
     const term = termRef.current;
     if (term === '') return;
     const payer = snapshotForRecent.resolved?.payerName ?? null;
@@ -804,19 +881,30 @@ export function ResolutionFlowClient({
     void recordQualifyRecentSearch({ term, payer, planClass }).catch(() => {});
   }, [shellMode, snapshotForRecent, state.resolution, state.echo]);
 
+  /** ── THE RAIL'S LOCK STATE, DERIVED ────────────────────────────────────────────────────────────
+   *  What the strip says must describe the SESSION, not the server action's leftover state. See
+   *  `laneIsOpen` for why the shell cannot simply null `state.resolution`. */
+  const laneOpen = laneIsOpen(state.resolution !== null, sessionCleared);
+
   /** Rail head "Start over": drop the held term, step the machine back to identify, clear the
-   *  pending ask. Watchers and history deliberately survive — they are the session's memory. */
+   *  pending ask, and CLOSE THE LANE. Watchers and history deliberately survive — they are the
+   *  session's memory. */
   const onSessionReset = useCallback(() => {
-    if (state.resolution === null) return; // aria-disabled control — the refusal lives here
+    if (!laneOpen) return; // aria-disabled control — the refusal lives here, and it reads the
+    // DERIVED lane state so a second press on an already-reset rail is the no-op the treatment
+    // promises (`state.resolution !== null` would have let it through).
     termRef.current = '';
     setExternalAsk(null);
     setExplainTrend(null);
-    // A brand-new session may legitimately re-run a search this mount already recorded; clearing
-    // the dedupe set is what makes "Start over" mean start over rather than "start over, except
-    // history will silently skip anything you already looked at".
+    // ⚠ THIS is what makes the strip say "No lane yet" — dispatching `went_back` cannot, because
+    // `state.resolution` lives in `useActionState` and no client dispatch replaces it.
+    setSessionCleared(true);
+    // Belt and braces, no longer load-bearing: with the search counter in the key (see the
+    // recording effect) a post-reset search mints new keys anyway. Kept because it bounds the set
+    // to one session's worth of entries rather than the mount's.
     recordedRef.current = new Set();
     dispatch({ type: 'went_back', target: 'identify' });
-  }, [state.resolution]);
+  }, [laneOpen]);
 
   /** A recent-search Re-run: the stored ≤3-char prefix IS a valid search term — re-resolve fresh
    *  through the same identify path a typed search takes (term into the ref, never the DOM). */
@@ -842,7 +930,14 @@ export function ResolutionFlowClient({
     const payer = watchPayerLabel;
     void saveQualifyTrendWatcher({ payer, term: termRef.current, thresholdPts: QUALIFY_WATCHER_DEFAULT_THRESHOLD })
       .then((res) => {
-        if (!res.ok) return;
+        // A REFUSED SAVE USED TO BE COMPLETELY SILENT — `return` and nothing on screen moved, so the
+        // only available reading was "the click missed". The reason rides through to the panel's
+        // aria-live status; the success path clears it, so the notice describes the last outcome.
+        if (!res.ok) {
+          setWatcherSaveFailed(res.reason);
+          return;
+        }
+        setWatcherSaveFailed(null);
         if (res.persisted) reloadWatchboard();
         else
           setSessionTrend((prev) =>
@@ -866,7 +961,7 @@ export function ResolutionFlowClient({
                 ],
           );
       })
-      .catch(() => {});
+      .catch(() => setWatcherSaveFailed('failed'));
   }, [watchPayerLabel, state.echo, reloadWatchboard]);
 
   /** Watch this patient — full-member-ID searches only (echo === '' is that signal: handle.echo is
@@ -875,7 +970,13 @@ export function ResolutionFlowClient({
   const canWatchPatient = state.echo === '' && stage === 'answer' && state.resolution !== null;
   const onWatchPatient = useCallback(() => {
     const term = termRef.current;
-    if (term.length < 5) return;
+    // The other silent refusal on this button, and it is reachable: the ref empties on a reset and
+    // on a hot reload mid-flow while `canWatchPatient` still reads true off `state`. Say so rather
+    // than returning into nothing — the action would answer `invalid` for the same input.
+    if (term.length < 5) {
+      setWatcherSaveFailed('invalid');
+      return;
+    }
     const planContext = [snapshot?.resolved?.payerName, snapshot?.policy?.found ? snapshot.policy.policyType : null]
       .filter(Boolean)
       .join(' · ');
@@ -883,7 +984,11 @@ export function ResolutionFlowClient({
     const localEcho = `${norm.slice(0, 3).replace(/[^A-Z]/g, '') || '•••'} •••• ${norm.slice(-4)}`;
     void saveQualifyPatientWatcher({ term, planContext: planContext || null })
       .then((res) => {
-        if (!res.ok) return;
+        if (!res.ok) {
+          setWatcherSaveFailed(res.reason);
+          return;
+        }
+        setWatcherSaveFailed(null);
         if (res.persisted) reloadWatchboard();
         else
           setSessionPatient((prev) =>
@@ -902,7 +1007,7 @@ export function ResolutionFlowClient({
                 ],
           );
       })
-      .catch(() => {});
+      .catch(() => setWatcherSaveFailed('failed'));
   }, [snapshot, reloadWatchboard]);
 
   const onDeleteWatcher = useCallback(
@@ -910,11 +1015,17 @@ export function ResolutionFlowClient({
       if (id) {
         void deleteQualifyWatcher(id)
           .then((res) => {
-            if (res.ok) reloadWatchboard();
+            // "clear it on the next successful action" — a delete that lands proves the panel is
+            // reachable, so a stale save notice above it is no longer describing anything current.
+            if (res.ok) {
+              setWatcherSaveFailed(null);
+              reloadWatchboard();
+            }
           })
           .catch(() => {});
         return;
       }
+      setWatcherSaveFailed(null);
       // Session-only rows are indexed within the SESSION slice, which renders after the server rows.
       const b = watchboard === 'failed' || watchboard === null ? null : watchboard;
       const serverCount = kind === 'trend' ? (b?.trend.length ?? 0) : (b?.patient.length ?? 0);
@@ -1125,9 +1236,14 @@ export function ResolutionFlowClient({
     <main ref={stageRef} className="mx-auto max-w-[1680px] p-4 sm:p-6">
       <div className="grid grid-cols-1 items-start gap-5 xl:grid-cols-[416px_minmax(0,1fr)]">
         <LaneRail
-          echo={state.echo}
-          readAs={state.resolution?.handle.readAs ?? null}
-          hasResolution={state.resolution !== null}
+          // ALL THREE GATE ON `laneOpen`, NOT ON `state.resolution`. The rail describes the session,
+          // and after "Start over" the server action's resolution is stale but unclearable — passing
+          // it straight through is what left the strip naming the abandoned lane. Gating the echo and
+          // the sentence too (not only the boolean) keeps that structural rather than dependent on
+          // LaneRail continuing to branch on `hasResolution` internally.
+          echo={laneOpen ? state.echo : ''}
+          readAs={laneOpen ? (state.resolution?.handle.readAs ?? null) : null}
+          hasResolution={laneOpen}
           onReset={onSessionReset}
           composer={<QualifyComposer snapshot={snapshot} onAsk={onComposerAsk} />}
         >
@@ -1152,6 +1268,7 @@ export function ResolutionFlowClient({
           <WatchersPanel
             available={watchersAvailable}
             readFailed={boardFailed}
+            saveFailed={watcherSaveFailed}
             trend={trendView}
             patient={patientView}
             onDelete={onDeleteWatcher}

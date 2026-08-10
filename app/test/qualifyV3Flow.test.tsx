@@ -46,6 +46,7 @@ import {
   shellReducer,
   type ShellAction,
 } from '../components/qualify/v3/flow-state';
+import { revealScopeFor } from '../components/qualify/shell/shell-session';
 import { deriveNotices, panelProvenance } from '../lib/qualify/resolution';
 import type { PanelEvidence, PanelId, QualifyResolution } from '../lib/qualify/resolution';
 import type { QualifyFacility, QualifySnapshot } from '../lib/qualify/contract';
@@ -4609,15 +4610,28 @@ test('S6: the sparkle is decoration over a LIVE control — motion narrates, it 
   assert.ok(!/data-v3-tile|data-v3-facet/.test(btn), 'no motion hook on the control');
 });
 
-test('S6: the hoist cannot break the skip reveal — the stagger keys on the stage subtree, not the button', () => {
-  // The reveal selects `[data-v3-facet]` INSIDE `[data-v3-stage]`. The Skip now lives ABOVE that
-  // element, so the target set is unchanged by construction — asserted from both ends rather than
-  // argued, because "by construction" is exactly the claim that rots.
+test('S6: the hoist cannot break the skip reveal — the stagger keys on the reveal scope, not the button', () => {
+  // The reveal selects `[data-v3-facet]` inside the REVEAL SCOPE. The Skip lives ABOVE
+  // `[data-v3-stage]`, so the target set is unchanged by construction — asserted from both ends
+  // rather than argued, because "by construction" is exactly the claim that rots.
+  //
+  // ⚠ THE SCOPE IS NO LONGER UNCONDITIONALLY `stageEl` (2026-08-10). In Smoke-shell mode the answer
+  // renders in the BOARD pane, outside `[data-v3-stage]` entirely, so scoping there found no answer
+  // content and neither reveal ran. `revealScopeFor` makes the choice, and it is CALLED below rather
+  // than read out of the source — the source match alone is the class of assertion that survived a
+  // deleted guard once already (see makeRetryHandler's header).
+  const ROOT = { id: 'root' };
+  const STAGE = { id: 'stage' };
+  assert.equal(revealScopeFor(false, ROOT, STAGE), STAGE, 'single-column: the stage subtree, unchanged');
+  assert.equal(revealScopeFor(true, ROOT, STAGE), ROOT, 'shell: the root, because the answer is in the board');
+  // Under the WIDER of the two scopes the hoisted Skip is in range; what keeps it out of the stagger
+  // is that it carries no `data-v3-facet` hook at all, which the test above pins directly.
   const shell = readFileSync(
     fileURLToPath(new URL('../components/qualify/v3/resolution-flow-client.tsx', import.meta.url)),
     'utf8',
   );
-  assert.match(shell, /toArray<HTMLElement>\('\[data-v3-facet\]', stageEl\)/, 'the reveal is scoped to the stage subtree');
+  assert.match(shell, /toArray<HTMLElement>\('\[data-v3-facet\]', revealRoot\)/, 'the reveal is scoped to the derived root');
+  assert.match(shell, /const revealRoot = revealScopeFor\(shellMode, root, stageEl\)/, 'and that root is the derivation');
   assert.match(shell, /querySelector<HTMLElement>\('\[data-v3-stage\]'\)/, 'and stageEl is that subtree');
 
   const html = render(

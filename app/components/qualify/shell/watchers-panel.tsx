@@ -17,10 +17,12 @@ import type { QualifyPatientWatcher, QualifyTrendWatcher } from '../../../lib/qu
 import { QUALIFY_PALETTE, RATING_HEX } from '../tokens';
 import { Spark } from '../spark';
 import { ZoneRule } from './board-zone';
+import { watcherSaveNotice, type QualifyWatcherSaveFailure } from './shell-session';
 
 export function WatchersPanel({
   available,
   readFailed = false,
+  saveFailed = null,
   trend,
   patient,
   onDelete,
@@ -30,6 +32,9 @@ export function WatchersPanel({
   /** The READ failed — a different claim from "0096 unapplied", and the panel must not offer the
    *  latter's reassuring explanation for the former's problem (0089's costume). */
   readFailed?: boolean;
+  /** The last WATCHER SAVE was refused or failed — `readFailed`'s shape for the write direction.
+   *  Null once any later save or delete succeeds; the owner clears it, this panel only states it. */
+  saveFailed?: QualifyWatcherSaveFailure | null;
   trend: (QualifyTrendWatcher & { sessionOnly?: boolean })[];
   patient: (QualifyPatientWatcher & { sessionOnly?: boolean })[];
   /** Null id = a session-only item (index-keyed removal is the owner's job via key). */
@@ -40,6 +45,20 @@ export function WatchersPanel({
   return (
     <section aria-label="Watchers" data-testid="qualify-watchers">
       <ZoneRule label="Watchers" tag="SAVED FROM PAST SEARCHES · ALERTS ON MOVEMENT" action={watchAction} level={2} />
+      {/* ── THE SAVE'S OWN CHANNEL ──────────────────────────────────────────────────────────────
+          ALWAYS MOUNTED, EMPTY WHEN THERE IS NOTHING TO SAY. A live region that appears at the same
+          moment its text does is unreliably announced — the region has to exist for the change to be
+          a change. So the wrapper is unconditional (it renders nothing and occupies nothing) and only
+          the sentence is conditional. `role="status"` + `aria-live="polite"` because this must never
+          interrupt: the watcher failing is not a reason to talk over whatever the operator is
+          reading, but it is emphatically a reason not to stay silent. */}
+      <div role="status" aria-live="polite">
+        {saveFailed ? (
+          <p className="mb-2 rounded-lg border border-status-danger/40 bg-coral50 px-3 py-1.5 font-mono text-[10px] text-status-danger">
+            {watcherSaveNotice(saveFailed)}
+          </p>
+        ) : null}
+      </div>
       {readFailed ? (
         <p className="mb-2 rounded-lg border border-status-danger/40 bg-coral50 px-3 py-1.5 font-mono text-[10px] text-status-danger">
           saved watchers could not be read just now — anything below is this session only, and a
