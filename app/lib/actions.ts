@@ -854,12 +854,25 @@ export async function addManualDeposit(
   }
   const entityId = await singleWriteEntity(view);
   if (!entityId) return { ok: false, error: 'pick_a_tenant_view' };
+  // CROSS-TENANT GUARD, kept: daily_collections does not FK facility_code, so nothing else in
+  // the stack can tell that CAMH is BXR's and 10034230 is Indigo's. Without this a super admin
+  // on the BXR view could file an Indigo facility's money under BXR.
   if (!facilityBelongsToEntity(input.facilityCode, entityId)) {
     return { ok: false, error: 'facility_not_in_tenant' };
   }
-  if (!facilityIsActiveForEntity(input.facilityCode, entityId)) {
-    return { ok: false, error: 'facility_retired' };
-  }
+  // ⚠️ NO LIVENESS GUARD HERE, and its absence is deliberate — this is where the forecast path
+  // and the deposit path genuinely differ.
+  //
+  // saveUpcomingManual refuses a RETIRED facility because a forecast is a claim about the
+  // FUTURE, and a closed CMD account can never receive a payment, so the row would sit on the
+  // tile as permanently overdue. A deposit is the opposite: it is a record of money that ALREADY
+  // ARRIVED, and a facility whose account closed last month still has every dollar it collected
+  // before that. Refusing one would make historical entry impossible for exactly the facilities
+  // whose books most need closing out.
+  //
+  // Ownership survives retirement by design (facilityCodesForEntity includes retired codes,
+  // activeFacilityCodesForEntity does not), which is what keeps that history attributable — so
+  // the tenancy check above still answers "whose money is this" correctly.
   try {
     await recordAccess({
       actorEmail: actor.email,

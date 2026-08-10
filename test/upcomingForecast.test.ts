@@ -993,3 +993,51 @@ test('THE CHART CANNOT SEE HIDDEN OR MATCHED MONEY — only resolved.rows feeds 
   assert.equal(r.matched.length, 1, 'the CAMH add is reconciled');
   assert.equal(expectedCentsByFacilityForMonth(r.rows, 2026, 8).size, 0, 'neither reaches the chart');
 });
+
+// ===========================================================================
+// DEPOSITS vs FORECASTS: which roster each may name (2026-08-10)
+// ===========================================================================
+// The two write paths take DIFFERENT facility lists, and the difference is not cosmetic.
+//
+//   FORECAST (saveUpcomingManual)  -> activeFacilityCodesForEntity. A forecast is a claim about
+//     the FUTURE, and a closed CMD account can never receive a payment, so a retired facility
+//     would produce a row that sits on the tile permanently overdue and can never resolve.
+//
+//   DEPOSIT (addManualDeposit)     -> facilityCodesForEntity. A deposit records money that
+//     ALREADY ARRIVED. A facility whose account closed last month still has every dollar it
+//     collected before that, and refusing one makes HISTORICAL entry impossible for exactly the
+//     books that most need closing out.
+//
+// Ownership deliberately survives retirement, which is what keeps that history attributable and
+// what lets the cross-tenant guard still answer "whose money is this".
+
+test('a retired facility is OWNED but not ACTIVE — deposits may name it, forecasts may not', () => {
+  // Indigo carries the retired codes (10036020 MADISON, 10036030 MISSOURI, dropped 2026-08-02
+  // for hard INVALID CRITERIA); BXR has none today.
+  const owned = facilityCodesForEntity(INDIGO_ENTITY_ID);
+  const active = activeFacilityCodesForEntity(INDIGO_ENTITY_ID);
+  assert.ok(RETIRED_CMD_CUSTOMERS.length > 0, 'the fixture is only meaningful with retired rows');
+
+  for (const r of RETIRED_CMD_CUSTOMERS) {
+    assert.ok(
+      owned.includes(r.facilityCode),
+      `${r.facilityCode} must stay OWNED — a deposit path needs it, and its history must stay attributable`,
+    );
+    assert.ok(
+      !active.includes(r.facilityCode),
+      `${r.facilityCode} must NOT be ACTIVE — a forecast naming it could never resolve`,
+    );
+    // The guard the deposit action actually calls still answers correctly for a retired code.
+    assert.equal(facilityBelongsToEntity(r.facilityCode, INDIGO_ENTITY_ID), true);
+    assert.equal(facilityIsActiveForEntity(r.facilityCode, INDIGO_ENTITY_ID), false);
+  }
+  assert.ok(owned.length > active.length, 'owned strictly contains active');
+});
+
+test('the deposit roster is still tenant-exclusive — retirement does not blur the books', () => {
+  // If a retired code appeared under both tenants, "whose money is this" would have no answer
+  // and the cross-tenant guard would wave a mis-filed historical payment through.
+  const bxr = new Set(facilityCodesForEntity(BXR_ENTITY_ID));
+  const overlap = facilityCodesForEntity(INDIGO_ENTITY_ID).filter((c) => bxr.has(c));
+  assert.deepEqual(overlap, [], 'the two owned rosters share no facility code');
+});

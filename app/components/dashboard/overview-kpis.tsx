@@ -64,7 +64,10 @@ import {
   type ForecastFacilityOption,
 } from './era-upcoming';
 import { runForecastEdit, type ForecastEditOutcome } from '@/lib/forecast/edit-feedback';
-import { activeFacilityCodesForEntity } from '../../../src/collections/cmdCustomers';
+import {
+  activeFacilityCodesForEntity,
+  facilityCodesForEntity,
+} from '../../../src/collections/cmdCustomers';
 // The Overview tab's name for the no-facility bucket. Deliberately NOT the shared
 // UNASSIGNED_FACILITY_LABEL, which the Collections tab still uses — see OTHER_FACILITY_LABEL.
 import { OTHER_FACILITY_LABEL } from '../../../src/collections/summaryTypes';
@@ -382,6 +385,9 @@ export function OverviewKpis({
   // ACTIVE, not merely owned: this form CREATES a forecast, and a retired CMD account can never
   // receive a payment, so offering one would guarantee a row that never resolves. Retired
   // facilities stay owned (their history remains attributable) — they are just not selectable here.
+  const activeCodes = new Set(
+    view === 'consolidated' ? [] : activeFacilityCodesForEntity(viewToEntityIds(view)[0] ?? ''),
+  );
   const forecastFacilityOptions: ForecastFacilityOption[] =
     view === 'consolidated'
       ? []
@@ -393,6 +399,34 @@ export function OverviewKpis({
             const name = dim?.facility_name;
             const acr = dim?.display_acronym;
             return { code, label: acr && name ? `${acr} — ${name}` : (name ?? acr ?? code) };
+          })
+          .sort((a, b) => a.label.localeCompare(b.label));
+
+  /**
+   * Facilities a manual DEPOSIT may name — OWNED, including retired.
+   *
+   * Deliberately a different list from forecastFacilityOptions above, for the same reason
+   * addManualDeposit deliberately omits the liveness guard: a deposit records money that ALREADY
+   * ARRIVED, and a facility whose CMD account closed last month still has every dollar it
+   * collected before that. Offering only active facilities would make historical entry
+   * impossible for exactly the books that most need closing out.
+   *
+   * Still ownership-scoped, so the cross-tenant guard the Server Action re-checks has the same
+   * answer: retirement removes a facility from polling, never from a book.
+   */
+  const depositFacilityOptions: ForecastFacilityOption[] =
+    view === 'consolidated'
+      ? []
+      : facilityCodesForEntity(viewToEntityIds(view)[0] ?? '')
+          .map((code) => {
+            const dim = dimByCode.get(code);
+            const name = dim?.facility_name;
+            const acr = dim?.display_acronym;
+            const label = acr && name ? `${acr} — ${name}` : (name ?? acr ?? code);
+            // Name the state rather than hiding it: picking a closed account for a historical
+            // payment is correct, but doing it by accident for a recent one is not.
+            const retired = !activeCodes.has(code);
+            return { code, label: retired ? `${label} (closed account)` : label };
           })
           .sort((a, b) => a.label.localeCompare(b.label));
 
@@ -485,6 +519,7 @@ export function OverviewKpis({
         onClose={() => setAddOpen(false)}
         view={view}
         facilityOptions={forecastFacilityOptions}
+        depositFacilityOptions={depositFacilityOptions}
         onSaved={onForecastChange}
       />
       <AllFacilitiesTable
@@ -532,12 +567,16 @@ function AddForecastPanel({
   onClose,
   view,
   facilityOptions,
+  depositFacilityOptions,
   onSaved,
 }: {
   open: boolean;
   onClose: () => void;
   view: DashboardView;
+  /** ACTIVE facilities — a forecast about the future cannot name a closed account. */
   facilityOptions: ForecastFacilityOption[];
+  /** OWNED facilities incl. retired — a historical deposit legitimately names a closed one. */
+  depositFacilityOptions: ForecastFacilityOption[];
   onSaved?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -608,7 +647,11 @@ function AddForecastPanel({
         </button>
       </div>
       <ForecastEditBanner outcome={outcome} />
-      <ManualDepositSection view={view} facilityOptions={facilityOptions} onChanged={onSaved} />
+      <ManualDepositSection
+        view={view}
+        facilityOptions={depositFacilityOptions}
+        onChanged={onSaved}
+      />
       <div className="mt-4 border-t pt-4" style={{ borderColor: 'var(--color-divider)' }}>
         <p className="ths-card-meta mb-2">
           Or schedule a <span className="font-medium">future</span> expected payment. This does
@@ -689,7 +732,21 @@ function ManualDepositSection({
     );
     setBusy(false);
     if (r.ok) {
-      setNote({ tone: 'ok', text: 'Recorded — it now counts toward MTD and All Facilities.' });
+      // NAME THE MONTH IT LANDED IN. A historical payment is fully supported (the view carries
+      // it into that month's All Facilities figures and into YTD — measured 2026-08-10: a March
+      // deposit moved March by exactly its amount and YTD by the same), but the MTD card and
+      // whichever month the table is showing will NOT move for a back-dated one. Saying
+      // "Recorded — counts toward MTD" there would be a flat lie, and silence would read as the
+      // write having failed, which is the confusion this whole feature has already produced once.
+      const iso = String(data.get('date') ?? '');
+      const monthName = MONTH_NAMES[Number(iso.slice(5, 7)) - 1] ?? '';
+      const isCurrentPeriod = iso.slice(0, 7) === new Date().toISOString().slice(0, 7);
+      setNote({
+        tone: 'ok',
+        text: isCurrentPeriod
+          ? 'Recorded — it now counts toward MTD, All Facilities and the chart.'
+          : `Recorded into ${monthName} ${iso.slice(0, 4)} — it counts toward that month and YTD, not MTD. Switch the month picker to ${monthName} to see it.`,
+      });
       form.reset();
       setTick((t) => t + 1);
       // The chart and the KPI cards live outside this subtree; the page counter reaches them.
