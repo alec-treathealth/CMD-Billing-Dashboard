@@ -5,34 +5,41 @@
  * with a sparkline + threshold alert) and patient watchers (blind-token + masked echo). The
  * compliance footer is the mock's own line, kept verbatim — it is the contract 0097 implements.
  *
- * SESSION-ONLY MODE: `available:false` means mig 0097 is unapplied. Adds still work — they live in
- * the owner's React state and arrive here through the same props — but the panel says so, per item
- * and once at the top, because a rep who saves a watcher deserves to know whether it survives a
- * refresh. The moment 0097 applies the same props carry durable rows and the badges disappear.
+ * SESSION-ONLY MODE: `status:'absent'` means the watcher relations did not answer. Adds still work —
+ * they live in the owner's React state and arrive here through the same props — but the panel says
+ * so, per item and once at the top, because a rep who saves a watcher deserves to know whether it
+ * survives a refresh.
+ *
+ * ⚠ THAT IS NOW A FAULT, NOT A PROVISIONING STAGE. Migration 0097 has been APPLIED LIVE since
+ * 2026-08-10 (ledger 20260810120258), so the relations exist and `absent` should never be reachable;
+ * if it is, something dropped them. The copy says the actionable thing ("tell an admin") and names
+ * no migration — an admissions rep can do nothing with "0097", and the previous wording was shown to
+ * every operator on every page load because `status` used to be a boolean that collapsed
+ * NOT-LOADED-YET onto absent (see `deriveBoardStatus`). The number stays where it helps: the comment
+ * in `app/lib/qualify/loaders.ts` beside the code that produces the state.
  *
  * ERA-join alerts ("new ERA posted", the mock's pill) are a SEPARATE scoped session — see the 0097
- * header. The pill here says only what is true today: that the watcher exists.
+ * migration header. The pill here says only what is true today: that the watcher exists.
  */
 import type { QualifyPatientWatcher, QualifyTrendWatcher } from '../../../lib/qualify/watchers';
 import { QUALIFY_PALETTE, RATING_HEX } from '../tokens';
 import { Spark } from '../spark';
 import { ZoneRule } from './board-zone';
-import { watcherSaveNotice, type QualifyWatcherSaveFailure } from './shell-session';
+import { watcherSaveNotice, type QualifyBoardStatus, type QualifyWatcherSaveFailure } from './shell-session';
 
 export function WatchersPanel({
-  available,
-  readFailed = false,
+  status,
   saveFailed = null,
   trend,
   patient,
   onDelete,
   watchAction,
 }: {
-  available: boolean;
-  /** The READ failed — a different claim from "0097 unapplied", and the panel must not offer the
-   *  latter's reassuring explanation for the former's problem (0089's costume). */
-  readFailed?: boolean;
-  /** The last WATCHER SAVE was refused or failed — `readFailed`'s shape for the write direction.
+  /** loading · durable · absent · failed. FOUR states and never a boolean: `failed` (the READ
+   *  failed) and `absent` (the relations are missing) are different claims, and `loading` is neither
+   *  — the panel must not offer a storage explanation before it has one. See `deriveBoardStatus`. */
+  status: QualifyBoardStatus;
+  /** The last WATCHER SAVE was refused or failed — the read direction's twin for writes.
    *  Null once any later save or delete succeeds; the owner clears it, this panel only states it. */
   saveFailed?: QualifyWatcherSaveFailure | null;
   trend: (QualifyTrendWatcher & { sessionOnly?: boolean })[];
@@ -59,16 +66,20 @@ export function WatchersPanel({
           </p>
         ) : null}
       </div>
-      {readFailed ? (
+      {status === 'failed' ? (
         <p className="mb-2 rounded-lg border border-status-danger/40 bg-coral50 px-3 py-1.5 font-mono text-[10px] text-status-danger">
           saved watchers could not be read just now — anything below is this session only, and a
           watcher you already saved may exist but be hidden. Retry, or tell an admin if it persists.
         </p>
-      ) : !available && (trend.length > 0 || patient.length > 0) ? (
-        <p className="mb-2 rounded-lg border border-dashed border-line bg-ground px-3 py-1.5 font-mono text-[10px] text-ink400">
-          this session only — durable storage arrives when migration 0097 is applied
+      ) : status === 'absent' && (trend.length > 0 || patient.length > 0) ? (
+        <p className="mb-2 rounded-lg border border-status-danger/40 bg-coral50 px-3 py-1.5 font-mono text-[10px] text-status-danger">
+          this session only — saved watchers are unavailable, so anything below disappears on
+          refresh. Tell an admin if it persists.
         </p>
       ) : null}
+      {/* `loading` renders NOTHING here on purpose — the pre-fetch window must make no claim about
+          storage in either direction. It is also why this is a switch on four states rather than a
+          `!available` test: the boolean made every page load open with the absent-state sentence. */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div>
           <h3 className="mb-1.5 flex items-baseline gap-2 font-head text-[12.5px] font-semibold text-ink900">

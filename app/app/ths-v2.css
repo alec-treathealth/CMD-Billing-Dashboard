@@ -187,6 +187,15 @@
   --tape-up: #46c4b8; /* 5.8:1 on inverse */
   --tape-down: #f0917c; /* 5.4:1 on inverse */
 
+  /* ⚠ THE SIX NAMES BELOW HAVE NO CONSUMER YET, AND THAT IS ON PURPOSE — DO NOT
+     DELETE THEM AS DEAD CODE. They are a token VOCABULARY: the shell's radii and
+     hit-target floors written down once, in the stylesheet, so the components
+     that adopt them arrive at the same numbers instead of each inventing one.
+     The two --tape-* / --color-*-inverse names above ARE consumed (their TS
+     mirror TAPE_PALETTE paints policy-tape.tsx). These are the deliberate
+     forward half, and app/test/ths-tokens-contrast.test.tsx asserts their
+     presence and their values so "unused" can never quietly become "wrong". */
+
   /* Smoke's card radius sits above this system's 14px --radius-lg. A NEW step
      rather than a redefinition, so existing cards keep their shape. */
   --radius-xl: 24px;

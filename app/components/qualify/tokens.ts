@@ -68,7 +68,14 @@ export const IQ_BAND_WASH: Record<'65' | '50' | '30' | '15' | '0', string> = {
 /**
  * THE TAPE'S INVERSE SURFACE (Smoke Phase 0, 2026-08-10) — the JS mirror of the `--color-surface-
  * inverse` / `--tape-*` block in ths-v2.css, for the same reason every other hex here is mirrored:
- * the mobile shell styles inline and cannot read a CSS custom property.
+ * a surface that styles inline cannot read a CSS custom property.
+ *
+ * CONSUMED BY `policy-tape.tsx`'s `DeltaText`, which is the only place these are painted today, plus
+ * `ths-tokens-contrast.test.tsx`, which asserts both the AA ratios and that this object has not
+ * drifted from the stylesheet. It briefly had NO production consumer at all — the tape kept a private
+ * `TAPE_UP`/`TAPE_DOWN` pair with the same hexes — so the guard covered two copies and missed the
+ * render site. If you add a third caller, add it here; if you ever find this unconsumed again, wire
+ * it rather than deleting it, because the CSS side is what the desktop strip's `bg-teal900` paints.
  *
  * ⚠ THESE ARE NOT RATING_HEX AND MUST NOT BE SWAPPED FOR IT. Every other palette in this file is
  * measured against white or `ground`; these are measured against `#0E3A3A`. Running RATING_HEX.ok

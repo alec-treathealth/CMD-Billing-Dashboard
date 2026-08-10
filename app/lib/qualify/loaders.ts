@@ -307,17 +307,27 @@ export async function loadQualifyPolicyTapeContext(
   });
 }
 
-// ── Watchers + recent searches (mig 0097) ─────────────────────────────────────────────────────────
+// ── Watchers + recent searches (mig 0097, APPLIED LIVE 2026-08-10, ledger 20260810120258) ────────
 //
-// SAME FAIL-SOFT CLASS AS THE TAPE ABOVE, plus 42883 (undefined_function): the WRITE path calls
-// SECURITY DEFINER functions, and an unapplied 0097 surfaces there as undefined_function rather
-// than undefined_table. All three degrade to "relations absent" (null / persisted:false) so the
-// board runs session-only instead of 500ing; any OTHER error rethrows — a 42501 must never
-// masquerade as "not provisioned yet" (the 0089 lesson).
+// SAME FAIL-SOFT CLASS AS THE TAPE ABOVE: 42P01 (undefined_table) / 3F000 (invalid_schema_name)
+// degrade to "relations absent" (null / persisted:false) so the board runs session-only instead of
+// 500ing. That path REMAINS, but it is now a SHOULD-NEVER-SEE state meaning the relations went
+// missing — not the expected pre-apply mode it was written for. Any other error rethrows: a 42501
+// must never masquerade as "not provisioned yet" (the 0089 lesson).
+//
+// ⚠ 42883 (undefined_function) IS DELIBERATELY NOT IN THIS SET — it was, and removing it is a fix.
+// Before the apply it was the honest signature of "the definers do not exist yet". After the apply
+// the four definers DO exist, so `undefined_function` can now only mean a signature mismatch (an
+// argument type or arity changed under us) or a dropped definer. Both are real faults, and both used
+// to be swallowed into `{persisted:false}` with no log at all — which the UI then rendered as a
+// reassuring "this session only", the exact 0089 costume the paragraph above forbids. Data the
+// operator believed was saved would simply be gone, silently and repeatably. Letting it throw routes
+// it to the actions' `catch`, which logs and returns `{ok:false, reason:'failed'}`, and the panel
+// says the save did not happen. A loud wrong answer beats a quiet one.
 
 function relationAbsent(err: unknown): boolean {
   const code = typeof err === 'object' && err !== null ? String((err as { code?: unknown }).code) : '';
-  return code === '42P01' || code === '3F000' || code === '42883';
+  return code === '42P01' || code === '3F000';
 }
 
 export async function loadQualifyWatcherRows(userId: string): Promise<QualifyWatcherRow[] | null> {
@@ -327,7 +337,11 @@ export async function loadQualifyWatcherRows(userId: string): Promise<QualifyWat
     return res.rows;
   } catch (err) {
     if (relationAbsent(err)) {
-      console.error('qualify watchers unavailable (mig 0097 unapplied?) — board runs session-only');
+      // 0097 IS APPLIED, so this is a fault, not a provisioning stage: the relations went missing.
+      // Logged at error precisely because the UI's own rendering of it is calm by design.
+      console.error(
+        'qualify watcher relations are absent though mig 0097 is applied — board degraded to session-only',
+      );
       return null;
     }
     throw err;
@@ -356,7 +370,9 @@ export async function loadQualifyWatcherSeries(
   return res.rows;
 }
 
-/** One definer call each. persisted:false = 0097 unapplied (session-only mode); errors rethrow. */
+/** One definer call each. `persisted:false` = the RELATIONS ARE ABSENT — a should-never-see fault
+ *  now that 0097 is applied, kept as a fail-soft so a missing table degrades the board instead of
+ *  500ing the page. Everything else, 42883 included, rethrows to the action's catch. */
 export async function saveQualifyWatcherRow(args: {
   userId: string;
   kind: 'trend' | 'patient';

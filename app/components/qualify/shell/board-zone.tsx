@@ -113,12 +113,18 @@ function PayerHero({
 /**
  * The mock's `.rule` — a labelled divider with a state tag. Shared by the board's sections.
  *
- * `level` is opt-in: omit it and the label renders as the original `<span>` (byte-identical for
- * any caller left unchanged, e.g. `resolution-flow-client.tsx`'s import). Pass a heading level and
- * the SAME classes render on a real heading element instead — the board's three sections
- * (This search, Watchers, Recent searches) all do, because their `<h3>`s (WatchersPanel's
- * Trendwatchers / Patient watchers) were dangling under no `<h2>` and the page's only `<h1>` lives
- * in the rail's `ResolutionStages`, two levels up.
+ * `level` is REQUIRED, and was briefly optional for a caller that no longer exists. The optional
+ * form defaulted to a `<span>` so that `resolution-flow-client.tsx`'s then-unchanged import stayed
+ * byte-identical; that import was removed as dead code in the same review round, so the default's
+ * only justification went with it. All three live callers (This search, Watchers, Recent searches)
+ * pass `level={2}`, which means the `<span>` branch was unreachable — and an unreachable default
+ * that silently produces a NON-heading is precisely the wrong thing to leave lying around here: the
+ * next section added to the board would inherit a dangling `<h3>` under no `<h2>` by simply omitting
+ * a prop, which is the accessibility defect this component was changed to fix. Requiring the level
+ * makes that a type error instead of a silent regression.
+ *
+ * The page's only `<h1>` lives in the rail's `ResolutionStages`, two levels up, so `2` is the board's
+ * section level; `3`/`4` stay available for nesting without another edit here.
  */
 export function ZoneRule({
   label,
@@ -129,9 +135,9 @@ export function ZoneRule({
   label: string;
   tag?: string;
   action?: ReactNode;
-  level?: 2 | 3 | 4;
+  level: 2 | 3 | 4;
 }) {
-  const Label: 'span' | 'h2' | 'h3' | 'h4' = level === 2 ? 'h2' : level === 3 ? 'h3' : level === 4 ? 'h4' : 'span';
+  const Label: 'h2' | 'h3' | 'h4' = level === 2 ? 'h2' : level === 3 ? 'h3' : 'h4';
   return (
     <div className="mb-3 mt-6 flex items-center gap-3 first:mt-0">
       <Label className="font-head text-[13px] font-semibold tracking-tight text-ink900">{label}</Label>

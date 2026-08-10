@@ -4,7 +4,9 @@
  * Qualify WATCHER Server Actions — the write/read edge for the smoke-shell board's watcher and
  * recent-search panels (mig 0097).
  *
- * ⚠ 'use server' RULES (test/useServerExports.test.ts enforces): ONLY async functions exported.
+ * ⚠ 'use server' RULES (app/test/useServerExports.test.tsx enforces — the extension is load-bearing:
+ * app/package.json collects `test/*.test.tsx` only, so a `.ts` there would pass by never running).
+ * ONLY async functions exported.
  * Types + DI core live in ./watchers (plain module); this file is the thin binder, exactly like
  * board-actions.ts.
  *
@@ -113,9 +115,13 @@ export async function saveQualifyTrendWatcher(input: {
 }
 
 /**
- * Save a PATIENT watcher — the blind-index token + the masked echo, never the raw ID. Refuses a
- * term too short to mask meaningfully (maskedPatientEcho's <5-char rule): persisting a nearly-whole
- * identifier as its own "mask" would be the exact leak the mask exists to prevent.
+ * Save a PATIENT watcher — the blind-index token + the masked echo, never the raw ID. Refuses a term
+ * too short to mask meaningfully, and THE RULE IS `maskedPatientEcho` RETURNING NULL — not a length
+ * literal restated here. Its floor is 8 normalized characters (below that the 3-char prefix and the
+ * 4-char tail overlap and the "mask" is the identifier), degrading to a tail-only echo at 8-9 and
+ * refusing under 8; the "<5-char rule" this comment used to cite was the pre-fix bug, not the rule.
+ * Persisting a nearly-whole identifier as its own "mask" is the exact leak the mask exists to
+ * prevent, so the only correct restatement of the rule is the call itself.
  */
 export async function saveQualifyPatientWatcher(input: {
   term: string;

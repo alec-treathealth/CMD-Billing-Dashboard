@@ -99,12 +99,23 @@ import { RecentSearches } from '../shell/recent-searches';
 // moved somewhere a hermetic test can call it. Read that module's headers before changing any of the
 // four call sites below; the reasoning is the fix, not the one-liner.
 import {
+  deriveBoardStatus,
   deriveWatcherDeleteAction,
   laneIsOpen,
   recentSearchKeyOf,
   revealScopeFor,
   type QualifyWatcherSaveFailure,
 } from '../shell/shell-session';
+// ⚠ THE ONE MASK. This shell derived its own `${slice(0,3)} •••• ${slice(-4)}` echo with a `<5`
+// length guard — byte-for-byte the defect adversarial review had already found and fixed inside
+// `maskedPatientEcho`: below eight characters the prefix and the tail OVERLAP, so an 8-char id like
+// `ABC12345` rendered `ABC •••• 2345` — seven of eight characters, in order, into the DOM. The
+// server refuses that shape (it returns tail-only), so the two paths disagreed about what a mask is.
+// `qualifyWatchers.ts` claims to be "the ONLY implementation of the format, so … exactly one place to
+// audit"; importing it is what makes that claim true. It is pure, dependency-free and already in this
+// bundle via watcher-actions.ts. NEVER re-derive a mask here — the refusal is its `null`, not a
+// length literal.
+import { maskedPatientEcho } from '../../../../src/collections/qualifyWatchers';
 import { PolicyTapeMount } from '../policy-tape-mount';
 import type { QualifyAiChipId } from '../../../lib/qualify/aiChips';
 import type { QualifyChipSlots } from '../../../lib/qualify/chipTemplates';
@@ -786,14 +797,17 @@ export function ResolutionFlowClient({
   // effect and handler below guards on `shellMode` instead. None of these are reducer fields, each
   // for a reason the machine's header already states: the watchboard is a mount fetch no flow field
   // touches (the `trends` rule); externalAsk is one-shot presentation the panel consumes; the
-  // session lists are the browser-only fallback while mig 0097 is unapplied.
+  // session lists are the browser-only fallback for a save the server could not persist.
   /** The composer's pending ask — nonce'd so two identical asks are two requests. */
   const [externalAsk, setExternalAsk] = useState<QualifyExternalAsk | null>(null);
   const askNonceRef = useRef(0);
-  /** Server-persisted watchers + recent searches. null = not yet loaded; 'failed' = the READ failed
-   *  (distinct from `available:false`, which means mig 0097 is unapplied — see reloadWatchboard). */
+  /** Server-persisted watchers + recent searches. null = NOT YET LOADED (a state of its own — see
+   *  `deriveBoardStatus`, and never collapse it onto a boolean); 'failed' = the READ failed, which is
+   *  a different claim from `available:false` (the relations answered as absent — see
+   *  reloadWatchboard, and note that mig 0097 is APPLIED, so absent means they went missing). */
   const [watchboard, setWatchboard] = useState<QualifyWatchboardResult | 'failed' | null>(null);
-  /** Session-only fallbacks (0097 unapplied → saves return persisted:false and land here). */
+  /** Session-only fallbacks — a save that came back `persisted:false` lands here rather than being
+   *  lost. Post-0097 that path is a should-never-see fault, not the expected pre-apply mode. */
   const [sessionTrend, setSessionTrend] = useState<(QualifyTrendWatcher & { sessionOnly: true })[]>([]);
   const [sessionPatient, setSessionPatient] = useState<(QualifyPatientWatcher & { sessionOnly: true })[]>([]);
   const [sessionRecent, setSessionRecent] = useState<(QualifyRecentSearch & { sessionOnly: true })[]>([]);
@@ -808,15 +822,17 @@ export function ResolutionFlowClient({
   const [watcherSaveFailed, setWatcherSaveFailed] = useState<QualifyWatcherSaveFailure | null>(null);
 
   /**
-   * THREE STATES, NOT TWO — `null` (not loaded yet), a board, or `'failed'`.
+   * THREE STATES HERE, FOUR AT THE PANELS — `null` (not loaded yet), a board (whose own `available`
+   * splits durable from absent), or `'failed'`. `deriveBoardStatus` is the mapping.
    *
-   * The first version collapsed a FAILED read to null, and null renders as "migration 0097 is not
-   * applied". Those are different claims and the difference is operationally nasty: with 0097
-   * applied but the reader's SELECT grant or RLS policy missing, the read 42501s while WRITES still
-   * succeed (they go through the SECURITY DEFINER, which needs only EXECUTE) — so a rep saves a
-   * watcher, the save reports persisted, and the watcher appears nowhere while the panel calmly
-   * explains that storage is not set up. That is the 0089 failure shape the loaders' own header
-   * cites: a permission error wearing "not provisioned yet" as a costume.
+   * The first version collapsed a FAILED read to null, and null rendered as "storage is not set up".
+   * Those are different claims and the difference is operationally nasty: with the relations present
+   * but the reader's SELECT grant or RLS policy missing, the read 42501s while WRITES still succeed
+   * (they go through the SECURITY DEFINER, which needs only EXECUTE) — so a rep saves a watcher, the
+   * save reports persisted, and the watcher appears nowhere while the panel calmly explains that
+   * storage is not set up. That is the 0089 failure shape the loaders' own header cites: a permission
+   * error wearing "not provisioned yet" as a costume. The second version fixed that and then made the
+   * mirror-image mistake one layer out, at the panel props — see `deriveBoardStatus`.
    *
    * The in-flight generation counter is the second half: five call sites can fire reloads that
    * resolve out of order, and a stale response landing last would resurrect a just-deleted watcher.
@@ -940,7 +956,8 @@ export function ResolutionFlowClient({
     setExternalAsk({ question, slots, nonce: ++askNonceRef.current });
   }, []);
 
-  /** Watch the resolved payer (trend). Persisted when 0097 is live; session-only otherwise. */
+  /** Watch the resolved payer (trend). Persisted — 0097 is applied live; the session-only branch
+   *  below is the fault path for a save the server could not persist, not the normal one. */
   const watchPayerLabel = snapshot?.resolved?.payerName ?? payerPick;
   const onWatchPayer = useCallback(() => {
     if (watchPayerLabel === null) return;
@@ -987,18 +1004,21 @@ export function ResolutionFlowClient({
   const canWatchPatient = state.echo === '' && stage === 'answer' && state.resolution !== null;
   const onWatchPatient = useCallback(() => {
     const term = termRef.current;
-    // The other silent refusal on this button, and it is reachable: the ref empties on a reset and
-    // on a hot reload mid-flow while `canWatchPatient` still reads true off `state`. Say so rather
-    // than returning into nothing — the action would answer `invalid` for the same input.
-    if (term.length < 5) {
+    // THE REFUSAL IS `maskedPatientEcho` RETURNING NULL — not a length literal here. The old `< 5`
+    // was wrong twice over: it is the exact off-by-three the shared function's header is a
+    // post-mortem of (the real floor is 8, because prefix and tail overlap below that), and having a
+    // second copy of the rule at all is how the two paths came to disagree. Asking the one
+    // implementation whether this term is maskable answers both questions at once, and it still
+    // covers the case this guard was originally added for: the ref empties on a reset and on a hot
+    // reload mid-flow while `canWatchPatient` reads true off `state`, and '' masks to null.
+    const localEcho = maskedPatientEcho(term);
+    if (localEcho === null) {
       setWatcherSaveFailed('invalid');
       return;
     }
     const planContext = [snapshot?.resolved?.payerName, snapshot?.policy?.found ? snapshot.policy.policyType : null]
       .filter(Boolean)
       .join(' · ');
-    const norm = term.toUpperCase().replace(/[^A-Z0-9]/g, '');
-    const localEcho = `${norm.slice(0, 3).replace(/[^A-Z]/g, '') || '•••'} •••• ${norm.slice(-4)}`;
     void saveQualifyPatientWatcher({ term, planContext: planContext || null })
       .then((res) => {
         if (!res.ok) {
@@ -1230,11 +1250,14 @@ export function ResolutionFlowClient({
   // Server rows first, session-only rows after (onDeleteWatcher's index math depends on exactly
   // this order); recent shows session first because newest-first is that list's whole ordering.
   const board = watchboard === 'failed' || watchboard === null ? null : watchboard;
-  const boardFailed = watchboard === 'failed';
   const trendView = [...(board?.trend ?? []), ...sessionTrend];
   const patientView = [...(board?.patient ?? []), ...sessionPatient];
   const recentView = [...sessionRecent, ...(board?.recent ?? [])];
-  const watchersAvailable = board?.available ?? false;
+  // ⚠ NOT `board?.available ?? false`. That collapsed `null` (the mount fetch has not resolved) onto
+  // `false` (the relations are absent), so for the whole fetch window both panels rendered the
+  // absent-state sentence to every operator on every load — and 0097 is applied, so it was false.
+  // `deriveBoardStatus` keeps the four states four; the panels switch on it and cannot default.
+  const boardStatus = deriveBoardStatus(watchboard);
 
   const watchActions = (
     <span className="flex items-center gap-1.5">
@@ -1296,8 +1319,7 @@ export function ResolutionFlowClient({
           </ThisSearchZone>
 
           <WatchersPanel
-            available={watchersAvailable}
-            readFailed={boardFailed}
+            status={boardStatus}
             saveFailed={watcherSaveFailed}
             trend={trendView}
             patient={patientView}
@@ -1307,8 +1329,7 @@ export function ResolutionFlowClient({
 
           <RecentSearches
             items={recentView}
-            available={watchersAvailable}
-            readFailed={boardFailed}
+            status={boardStatus}
             onRerun={onRerunRecent}
             onClear={onClearRecent}
           />

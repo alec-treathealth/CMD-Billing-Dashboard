@@ -4,12 +4,16 @@
  * The board.ts pattern exactly: this module is plain (no 'use server', no I/O), the loaders own
  * the SQL, watcher-actions.ts is the thin binder, and the hermetic suite tests the core directly.
  *
- * ── THE AVAILABILITY UNION, because 0097 SHIPS UNAPPLIED ────────────────────────────────────────
- * `available: false` means the RELATIONS ARE ABSENT (mig 0097 not applied) — the panels then run
- * SESSION-ONLY: adds work, live in React state, badged "this session only", gone on refresh. That
- * is honest UI, not a degraded error state, and it flips to durable the moment 0097 applies with
- * zero code change (the loaders stop returning null). `ok: false` at the action layer means the
- * READ ITSELF failed — a different claim, rendered as absence.
+ * ── THE AVAILABILITY UNION, now that 0097 IS APPLIED LIVE (2026-08-10, ledger 20260810120258) ────
+ * `available: false` means the RELATIONS ARE ABSENT — the panels then run SESSION-ONLY: adds work,
+ * live in React state, badged "this session only", gone on refresh. The union was written for the
+ * pre-apply world, where that was the normal steady state; it is NOT retired, but its meaning has
+ * inverted. The relations exist, so `available:false` is a FAULT — they went missing — and the panel
+ * copy is fault-framed accordingly (it no longer promises that storage "arrives" with a migration).
+ * Keeping the fail-soft is still right: a missing table should degrade the board, not 500 the page.
+ * `ok: false` at the action layer means the READ ITSELF failed — a different claim, rendered as
+ * absence. And a THIRD state lives only in the client: not-loaded-yet, which must never be collapsed
+ * onto either of these (see `components/qualify/shell/shell-session.ts`'s `deriveBoardStatus`).
  *
  * ── NON-DOLLAR BY CONSTRUCTION ──────────────────────────────────────────────────────────────────
  * Everything here is a label, an echo, a rating, a count or a date. The sparkline series builder
@@ -63,7 +67,8 @@ export interface QualifyRecentSearch {
 }
 
 export interface QualifyWatchboardResult {
-  /** False = mig 0097 unapplied → session-only mode. See the header union. */
+  /** False = the relations did not answer → session-only mode. 0097 is applied, so this is a fault,
+   *  not a stage. See the header union — and note the client adds a fourth, not-loaded-yet state. */
   available: boolean;
   trend: QualifyTrendWatcher[];
   patient: QualifyPatientWatcher[];
@@ -80,7 +85,8 @@ export const EMPTY_WATCHBOARD: QualifyWatchboardResult = {
 export interface QualifyWatchboardDeps {
   /** Fail-closed gate; the same requireQualifyPrincipal the board uses. */
   requirePrincipal: () => Promise<{ ok: true; userId: string } | { ok: false; error: string }>;
-  /** null = relations absent (0097 unapplied) — NOT an empty list. */
+  /** null = relations absent — NOT an empty list, and NOT "not loaded yet" (that state exists only
+   *  in the client, where the loaders' result has not arrived at all). */
   loadWatchers: (userId: string) => Promise<QualifyWatcherRow[] | null>;
   loadRecent: (userId: string) => Promise<QualifyRecentSearchRow[] | null>;
   /** Rating series for the trend watchers' subjects; [] when 0093 has nothing for them. OPTIONAL
@@ -102,8 +108,9 @@ export async function getQualifyWatchboardCore(deps: QualifyWatchboardDeps): Pro
     deps.loadWatchers(gate.userId),
     deps.loadRecent(gate.userId),
   ]);
-  // EITHER relation absent → the whole surface is session-only. They ship in one migration, so a
-  // half-applied 0097 is not a state this union needs to flatter with per-panel granularity.
+  // EITHER relation absent → the whole surface is session-only. Both tables ship in 0097, which is
+  // applied, so a half-present pair is not a state this union needs to flatter with per-panel
+  // granularity — it would mean something dropped one table and not the other.
   if (watcherRows === null || recentRows === null) return EMPTY_WATCHBOARD;
 
   const trendRows = watcherRows.filter((r) => r.kind === 'trend');

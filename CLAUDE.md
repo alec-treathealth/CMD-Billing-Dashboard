@@ -332,8 +332,12 @@ The `NOT VALID` is **permanent and deliberate**: the 695 pre-029 confirmed rows 
 exempt forever, so `confirmed + reviewed_by IS NULL` is a reliable "predates the
 boundary" marker, not a defect. **Never `VALIDATE` that constraint and never
 back-fill those 695 with a synthetic reviewer** — see `veris-data-notes.md` § 029.
-**030 (dedup round 2) and 031 (payer brand allowlist) are AUTHORED BUT NOT APPLIED**,
-so the next Veris number is **032**. 030 drops and re-adds the 029 gate inside its own
+**030 (dedup round 2) and 031 (payer brand allowlist) are AUTHORED BUT NOT APPLIED.**
+That does **not** make 032 the next number — **032/033/034 were applied live 2026-08-10**
+by a concurrent session and **the next Veris number is 035**, as the migration table
+above says. (This sentence claimed 032 until 2026-08-10; an authored-not-applied file is
+not a reservation, and a gap in the file listing is not a free slot — re-derive from the
+live ledger.) 030 drops and re-adds the 029 gate inside its own
 transaction; that is sanctioned *only* because its final section proves confirmation
 state was byte-identical throughout. Copy the proof if you copy the pattern.
 ⚠ **031 IS HELD ON PURPOSE — DO NOT APPLY IT TO CLEAR THE BACKLOG.** It creates

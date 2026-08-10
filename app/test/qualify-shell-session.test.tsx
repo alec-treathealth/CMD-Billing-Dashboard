@@ -18,6 +18,10 @@
  *   5. A WATCHER DELETE ROUTES CORRECTLY — a server-backed row (non-empty id) always deletes by id;
  *      a session-only row's position in `[...(board?.trend ?? []), ...sessionTrend]` (server rows
  *      first, declared ~170 lines from the handler) resolves to the right SESSION-slice index.
+ *   6. THERE IS EXACTLY ONE PATIENT-ECHO MASK, and the shell calls it rather than owning a second.
+ *      The shell's own copy revealed 7 of 8 characters of a member ID into the DOM — the identical
+ *      overlapping-slice defect `maskedPatientEcho` had already been fixed for, shipped in a second
+ *      location. See that section's header.
  *
  * ⚠️ Must be .tsx — app/package.json collects `test/*.test.tsx` only; a `.ts` file here would
  * "pass" by never running (forecast-edit-feedback.test.tsx's header).
@@ -38,6 +42,8 @@ import {
 import { LaneRail } from '../components/qualify/shell/lane-rail';
 import { WatchersPanel } from '../components/qualify/shell/watchers-panel';
 import { ResolutionStages, type ResolutionStagesProps } from '../components/qualify/v3/resolution-flow';
+// The ONE mask — imported here for the same reason the shell imports it: there must not be a second.
+import { maskedPatientEcho } from '../../src/collections/qualifyWatchers';
 import type { QualifyResolution } from '../lib/qualify/resolution';
 
 /** The shell's source, for the CALL-SITE pins below. */
@@ -57,6 +63,18 @@ function indexOfOrFail(hay: string, needle: string, from = 0): number {
   assert.notEqual(at, -1, `missing from the shell: ${needle}`);
   return at;
 }
+
+/**
+ * THE SHELL WITH ITS COMMENTS REMOVED — a code-only view, for the ABSENCE assertions.
+ *
+ * `doesNotMatch` over raw source cannot tell a live expression from a docblock quoting one, and the
+ * mask section below deliberately quotes the deleted formula verbatim so the defect stays legible.
+ * Scanning the raw text there would mean the fix's own explanation failed the fix's own test —
+ * which teaches the next session to delete the explanation. Presence pins keep using `SHELL_SRC`
+ * (a needle found in a comment is still a needle worth finding); only "this must not exist" reads
+ * from here.
+ */
+const SHELL_CODE = SHELL_SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 
 // ── 1. The recent-search dedupe key ─────────────────────────────────────────────────────────────
 //
@@ -311,7 +329,7 @@ test('each save-failure reason gets its own sentence, and all of them say nothin
 
 test('the watchers panel announces a failed save and keeps its live region mounted when quiet', () => {
   const quiet = renderToStaticMarkup(
-    <WatchersPanel available={false} trend={[]} patient={[]} onDelete={() => {}} />,
+    <WatchersPanel status="absent" trend={[]} patient={[]} onDelete={() => {}} />,
   );
   // The region must EXIST before it has anything to say — a live region that appears together with
   // its text is unreliably announced.
@@ -320,7 +338,7 @@ test('the watchers panel announces a failed save and keeps its live region mount
 
   for (const r of REASONS) {
     const failed = renderToStaticMarkup(
-      <WatchersPanel available={false} saveFailed={r} trend={[]} patient={[]} onDelete={() => {}} />,
+      <WatchersPanel status="absent" saveFailed={r} trend={[]} patient={[]} onDelete={() => {}} />,
     );
     assert.match(failed, /role="status" aria-live="polite"/);
     assert.ok(failed.includes(watcherSaveNotice(r)), `the ${r} sentence must render`);
@@ -392,4 +410,74 @@ test('the shell WIRES the delete route: onDeleteWatcher calls deriveWatcherDelet
   );
   // Exactly one call site.
   assert.equal(SHELL_SRC.split('deriveWatcherDeleteAction(').length - 1, 1, 'one call site, no second copy');
+});
+
+// ── 6. ONE MASK, AND IT IS THE SERVER'S ─────────────────────────────────────────────────────────
+//
+// THE DEFECT (adversarial review, twice): `onWatchPatient` derived its own display echo —
+//
+//     if (term.length < 5) { setWatcherSaveFailed('invalid'); return; }
+//     const norm = term.toUpperCase().replace(/[^A-Z0-9]/g, '');
+//     const localEcho = `${norm.slice(0, 3).replace(/[^A-Z]/g, '') || '•••'} •••• ${norm.slice(-4)}`;
+//
+// — byte-for-byte the bug already found and fixed inside `maskedPatientEcho`, re-introduced in a
+// second location. `slice(0,3)` and `slice(-4)` OVERLAP below eight characters, so an 8-char id
+// yields prefix+tail = 7 of its 8 characters, in order, and this one was RENDERED into the DOM
+// (watchers-panel.tsx's patient row) on the session-only branch. The server refuses that shape.
+//
+// So the property under test is not "the mask is correct" — `test/qualifyWatchers.test.ts` owns that
+// — but "there is ONE mask", which is the claim `src/collections/qualifyWatchers.ts` makes in its own
+// header ("this is the ONLY implementation of the format, so … exactly one place to audit").
+//
+// TWO ASSERTIONS, because neither alone catches the revert. The behavioural one shows the two
+// formulas genuinely disagree (a same-implementation test over one function is vacuous by
+// construction — both "paths" would be the same call). The SOURCE one is what actually fails if the
+// shell grows its own copy again, and it is the only mechanism available: the shell needs
+// `useActionState` and cannot be mounted here.
+test('the client and the server derive the SAME patient echo — because it is the same function', () => {
+  // The shell calls it, by name, inside onWatchPatient — the same call `watcher-actions.ts` makes.
+  const handlerAt = indexOfOrFail(SHELL_SRC, 'const onWatchPatient = useCallback(');
+  const callAt = indexOfOrFail(SHELL_SRC, 'const localEcho = maskedPatientEcho(term);', handlerAt);
+  const closeAt = indexOfOrFail(SHELL_SRC, '}, [snapshot, reloadWatchboard]);', handlerAt);
+  assert.ok(callAt < closeAt, 'the echo must be derived inside onWatchPatient');
+  assert.match(
+    SHELL_SRC,
+    /import \{ maskedPatientEcho \} from '\.\.\/\.\.\/\.\.\/\.\.\/src\/collections\/qualifyWatchers';/,
+    'and it must come from the one implementation, by relative import',
+  );
+
+  // THE REFUSAL IS THAT FUNCTION'S null, never a length literal restated in the shell.
+  assert.match(
+    SHELL_SRC,
+    /if \(localEcho === null\) \{\s*setWatcherSaveFailed\('invalid'\);/,
+    "the client's refusal must be maskedPatientEcho's null",
+  );
+  assert.doesNotMatch(SHELL_CODE, /term\.length < 5/, 'the <5 literal is the pre-fix bug, not the rule');
+
+  // NO SECOND MASK ANYWHERE IN THE SHELL'S CODE. These three needles are what the local copy was
+  // made of; any one of them coming back means a mask is being built here rather than imported.
+  assert.doesNotMatch(SHELL_CODE, /••••/, 'no mask literal may be constructed in the shell');
+  assert.doesNotMatch(SHELL_CODE, /\.slice\(-4\)/, 'nor a last-four slice');
+  assert.doesNotMatch(SHELL_CODE, /\.slice\(0, 3\)/, 'nor the overlapping prefix slice');
+});
+
+test('the deleted local formula and the shared one disagree exactly where it mattered', () => {
+  // The local copy, verbatim as it shipped, so the divergence is demonstrated rather than asserted.
+  const deletedLocalMask = (term: string): string => {
+    const norm = term.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return `${norm.slice(0, 3).replace(/[^A-Z]/g, '') || '•••'} •••• ${norm.slice(-4)}`;
+  };
+
+  // 8 characters: prefix(0..3) and tail(-4) overlap by nothing, but together they are 7 of the 8.
+  assert.equal(deletedLocalMask('ABC12345'), 'ABC •••• 2345', 'the leak, reproduced');
+  assert.equal(maskedPatientEcho('ABC12345'), '••• •••• 2345', 'the shared function drops the prefix');
+  assert.notEqual(maskedPatientEcho('ABC12345'), deletedLocalMask('ABC12345'));
+
+  // 7 characters: the local copy revealed the WHOLE identifier and called it a mask.
+  assert.equal(deletedLocalMask('ABC1234'), 'ABC •••• 1234');
+  assert.equal(maskedPatientEcho('ABC1234'), null, 'the shared function refuses rather than masks');
+
+  // Where both are safe they agree, which is why the divergence above is easy to miss by eye.
+  assert.equal(maskedPatientEcho('GGS00418841'), 'GGS •••• 8841');
+  assert.equal(deletedLocalMask('GGS00418841'), 'GGS •••• 8841');
 });

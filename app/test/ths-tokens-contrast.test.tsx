@@ -151,6 +151,11 @@ test('info stays the 5.27:1 blue, not the mock 3.46:1 blue', () => {
 });
 
 // ── 5. The new primitives exist and are self-consistent ────────────────────────────────────────
+//
+// These six names have NO consumer yet, on purpose — they are a token vocabulary the shell's
+// components adopt as they land, written down once so they cannot each invent their own number.
+// Asserting them here is what stops "unused" from quietly becoming "wrong", and it is why the CSS
+// block carries a do-not-delete note: an unconsumed custom property looks exactly like dead code.
 test('Smoke primitives are present with the shapes the shell will consume', () => {
   assert.equal(token('radius-pill'), '999px');
   assert.equal(token('radius-xl'), '24px');
@@ -158,4 +163,38 @@ test('Smoke primitives are present with the shapes the shell will consume', () =
   // the token's presence.
   assert.ok(Number.parseInt(token('size-row'), 10) >= 44);
   assert.ok(Number.parseInt(token('size-control'), 10) >= Number.parseInt(token('size-row'), 10));
+});
+
+// ── 6. THE GUARD REACHES THE RENDER SITE ───────────────────────────────────────────────────────
+//
+// Everything above pinned copy 1 (ths-v2.css) against copy 2 (TAPE_PALETTE) while a THIRD copy —
+// a private `const TAPE_UP`/`TAPE_DOWN` pair inside policy-tape.tsx, with the same hexes — did the
+// actual painting and was covered by nothing. A contrast guard that protects two values nobody
+// renders is theatre. The tape now reads the token, and this test says so, because "wire it up" is
+// a state that reverts silently: re-inlining the hexes would leave every assertion above green.
+const TAPE_SRC = readFileSync(new URL('../components/qualify/policy-tape.tsx', import.meta.url), 'utf8');
+
+test('policy-tape paints from TAPE_PALETTE, not from a private copy of the same hexes', () => {
+  assert.match(TAPE_SRC, /import \{ IQ_BAND_HEX, TAPE_PALETTE \} from '\.\/tokens';/);
+  assert.match(TAPE_SRC, /TAPE_PALETTE\.up/, 'the up colour comes from the token');
+  assert.match(TAPE_SRC, /TAPE_PALETTE\.down/, 'and so does the down colour');
+  // The private pair must not come back — it is the copy the guard could not see. ANCHORED TO THE
+  // LINE START: a top-level `const` sits at column 0, while the file's own docblock names the
+  // deleted constants so the history stays readable. An unanchored needle would fail on the prose
+  // and teach the next session to delete the explanation instead of keeping the fix.
+  assert.doesNotMatch(TAPE_SRC, /^const TAPE_UP\b/m, 'no local up hex');
+  assert.doesNotMatch(TAPE_SRC, /^const TAPE_DOWN\b/m, 'no local down hex');
+  assert.doesNotMatch(TAPE_SRC, /#46[Cc]4[Bb]8|#[Ff]0917[Cc]/, 'nor either hex inlined by value');
+});
+
+// The strip's ground is the Tailwind class `bg-teal900`, NOT an inline TAPE_PALETTE.surfaceInverse
+// — so every ratio asserted in section 1 is only true if those two are the same colour. They are
+// declared in three unrelated files, which is exactly the drift this file exists to catch.
+test('the surface the tape actually paints on is the one the ratios were measured against', () => {
+  assert.equal(
+    QUALIFY_PALETTE.teal900.toUpperCase(),
+    TAPE_PALETTE.surfaceInverse.toUpperCase(),
+    'policy-tape renders on bg-teal900; if that is not surfaceInverse, section 1 measures a colour ' +
+      'nothing displays and the tape could ship at any contrast at all',
+  );
 });

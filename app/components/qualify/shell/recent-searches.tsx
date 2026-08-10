@@ -9,18 +9,38 @@
  */
 import type { QualifyRecentSearch } from '../../../lib/qualify/watchers';
 import { ZoneRule } from './board-zone';
+import type { QualifyBoardStatus } from './shell-session';
+
+/**
+ * THE EMPTY STATE'S SENTENCE, one per status — see `deriveBoardStatus` for why this is not a
+ * boolean. `loading` deliberately makes NO claim about storage: this panel used to receive
+ * `available={false}` for the whole mount-fetch window and told every operator, on every page load,
+ * that history was session-only "until migration 0097 applies". 0097 has been applied since
+ * 2026-08-10, so that sentence was false as well as unactionable.
+ *
+ * `absent` is now written as a FAULT rather than as a provisioning stage, and it names no migration:
+ * an admissions rep cannot act on "0097", but they can act on "tell an admin". The migration number
+ * lives where it is useful — the comment in `app/lib/qualify/loaders.ts` beside the code that
+ * produces the state.
+ */
+const EMPTY_COPY: Record<QualifyBoardStatus, string> = {
+  loading: 'Loading your recent searches…',
+  durable: 'No searches yet.',
+  absent:
+    'No searches yet. Saved history is unavailable right now, so anything you search stays in this session only — tell an admin if this persists.',
+  failed: 'Saved history could not be read just now — this session only.',
+};
 
 export function RecentSearches({
   items,
-  available,
-  readFailed = false,
+  status,
   onRerun,
   onClear,
 }: {
   items: (QualifyRecentSearch & { sessionOnly?: boolean })[];
-  available: boolean;
-  /** The read failed — say that, not "0097 is not applied yet". See WatchersPanel's prop. */
-  readFailed?: boolean;
+  /** loading · durable · absent · failed — never a boolean. See WatchersPanel's prop and
+   *  `deriveBoardStatus`; collapsing `loading` onto `absent` is the defect this replaced. */
+  status: QualifyBoardStatus;
   onRerun: (prefixEcho: string) => void;
   onClear: () => void;
 }) {
@@ -44,9 +64,7 @@ export function RecentSearches({
       />
       {items.length === 0 ? (
         <p className="rounded-lg border border-dashed border-line px-3 py-3 text-[12px] text-ink400">
-          {readFailed
-            ? 'Saved history could not be read just now — this session only.'
-            : `No searches yet${available ? '' : ' — history is session-only until migration 0097 applies'}.`}
+          {EMPTY_COPY[status]}
         </p>
       ) : (
         <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">

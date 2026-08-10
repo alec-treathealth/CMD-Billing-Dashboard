@@ -142,6 +142,40 @@ export function deriveWatcherDeleteAction(id: string | null, index: number, serv
   return { kind: 'session', sessionIndex: index - serverCount };
 }
 
+/**
+ * THE BOARD'S PERSISTENCE STATUS — FOUR states, because collapsing the first of them into the third
+ * is what shipped a false sentence to every operator on every page load.
+ *
+ * The shell holds `QualifyWatchboardResult | 'failed' | null` and handed the panels a BOOLEAN:
+ * `board?.available ?? false`. That `?? false` maps NOT-LOADED-YET onto RELATIONS-ABSENT, so for the
+ * entire mount-fetch window both panels rendered the absent-state sentence. With migration 0097
+ * applied live (2026-08-10) that sentence is not merely premature, it is FALSE — and it was being
+ * shown to an admissions rep, naming an internal migration number at them, on a surface where the
+ * shell is default-ON.
+ *
+ * A boolean cannot carry four claims. This union can, and a panel that switches on it cannot quietly
+ * acquire a default the way `?? false` did:
+ *
+ *  · `loading` — the mount fetch has not resolved. The panels must say NOTHING about storage here;
+ *    nothing is known yet, and "we don't know yet" is not "it isn't there".
+ *  · `durable` — the relations answered. Saves survive a refresh.
+ *  · `absent`  — the relations are missing. POST-0097 THIS IS A FAULT, not a provisioning stage, so
+ *    the copy is fault-framed and names no migration (an operator cannot act on a migration number;
+ *    the number belongs in the code comment that explains the state, and it is in `loaders.ts`).
+ *  · `failed`  — the READ itself failed. A different claim from `absent` and deliberately kept
+ *    separate: a 42501 wearing "not provisioned yet" as a costume is the 0089 failure shape.
+ *
+ * Pure and total over the shell's own union, so `app/test/qualify-watchboard.test.tsx` pins the
+ * mapping rather than inferring it from markup.
+ */
+export type QualifyBoardStatus = 'loading' | 'durable' | 'absent' | 'failed';
+
+export function deriveBoardStatus(board: { available: boolean } | 'failed' | null): QualifyBoardStatus {
+  if (board === null) return 'loading';
+  if (board === 'failed') return 'failed';
+  return board.available ? 'durable' : 'absent';
+}
+
 /** Why a watcher save did not happen — the action's own `reason` union, re-exported as the UI's. */
 export type QualifyWatcherSaveFailure = 'denied' | 'invalid' | 'failed';
 
