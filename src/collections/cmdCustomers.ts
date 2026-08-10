@@ -92,10 +92,33 @@ export interface CmdCustomer {
   readonly facilityCode: string;
   /** Owning tenant (business_entity_id). Drives per-customer RLS scoping at ingest. */
   readonly businessEntityId: string;
+  /**
+   * ISO date (YYYY-MM-DD) the CMD account stopped existing. ABSENT means active.
+   *
+   * This one field is what keeps LIVENESS and OWNERSHIP from being answered by the same list.
+   * A retired row stays here forever — it is still the tenant's facility, its history is still
+   * reported, and its `collections.facilities` dimension row still labels those rows — but it is
+   * filtered out of every polling roster, so no cron calls a closed account.
+   *
+   * Retiring a facility is therefore a ONE-FIELD edit that cannot desync: add `retired`, and the
+   * derived constants below do the rest. Do NOT delete the row — that is the bug this replaced,
+   * where removal-from-polling silently also removed ownership and a liveness problem surfaced as
+   * a tenancy error ('facility_not_in_tenant'). Tenant-agnostic on purpose: it works for BXR the
+   * same way, so the next retirement in either book needs no new list.
+   *
+   * Test `every retired marker is an ISO date` enforces the shape; predicates compare against
+   * `undefined` explicitly rather than truthiness, so a `retired: ''` typo cannot read as active
+   * in one place and retired in another.
+   */
+  readonly retired?: string;
 }
 
-/** BXR's 15 active facility customer accounts (8 IP + 7 OP — matches collections.facilities). */
-export const BXR_CUSTOMERS: readonly CmdCustomer[] = [
+/**
+ * BXR's full roster (active + any retired). MODULE-PRIVATE: the exported BXR_CUSTOMERS below is
+ * the active-only view the crons consume. Nothing retired today — 8 IP + 7 OP, matching
+ * collections.facilities.
+ */
+const BXR_ROSTER: readonly CmdCustomer[] = [
   { customerId: '10027973', facilityCode: 'CAMH', businessEntityId: BXR_ENTITY_ID }, //          CA MENTAL HEALTH (IP)
   { customerId: '10033950', facilityCode: 'DMH', businessEntityId: BXR_ENTITY_ID }, //           DALLAS MENTAL HEALTH (IP)
   { customerId: '10034908', facilityCode: 'KWC', businessEntityId: BXR_ENTITY_ID }, //           KENTUCKY WELLNESS CENTER (IP)
@@ -113,8 +136,12 @@ export const BXR_CUSTOMERS: readonly CmdCustomer[] = [
   { customerId: '10031212', facilityCode: 'TREAT_WA', businessEntityId: BXR_ENTITY_ID }, //      TREAT MENTAL HEALTH WASHINGTON (OP)
 ];
 
-/** Indigo's 29 active facility customer accounts (CMD account 474623). facilityCode = CMD id. */
-export const INDIGO_CUSTOMERS: readonly CmdCustomer[] = [
+/**
+ * Indigo's full roster — 29 ACTIVE + 3 RETIRED (CMD account 474623). facilityCode = CMD id.
+ * MODULE-PRIVATE: the exported INDIGO_CUSTOMERS below is the active-only view the crons consume,
+ * so adding a `retired` row here can never resume polling. Retired rows are at the end.
+ */
+const INDIGO_ROSTER: readonly CmdCustomer[] = [
   { customerId: '10026460', facilityCode: '10026460', businessEntityId: INDIGO_ENTITY_ID }, // 405 RECOVERY
   { customerId: '10029373', facilityCode: '10029373', businessEntityId: INDIGO_ENTITY_ID }, // ADDICTION FREE RECOVERY SERVICES
   { customerId: '10029528', facilityCode: '10029528', businessEntityId: INDIGO_ENTITY_ID }, // ADOLESCENT MENTAL HEALTH
@@ -144,7 +171,34 @@ export const INDIGO_CUSTOMERS: readonly CmdCustomer[] = [
   { customerId: '10033531', facilityCode: '10033531', businessEntityId: INDIGO_ENTITY_ID }, // THE EDGE TREATMENT CENTER
   { customerId: '10033708', facilityCode: '10033708', businessEntityId: INDIGO_ENTITY_ID }, // THE FORGE RECOVERY CENTER
   { customerId: '10031547', facilityCode: '10031547', businessEntityId: INDIGO_ENTITY_ID }, // VISALIA RECOVERY CENTER
+
+  // --- RETIRED (still owned, never polled) — see CmdCustomer.retired ------------------------
+  // The roster answers three different questions and only ONE of them is "poll CMD for this":
+  //   1. ingest    — which accounts the crons call (INDIGO_CUSTOMERS / ALL_CMD_CUSTOMERS)
+  //   2. ownership — "whose facility is this code?" (facilityBelongsToEntity)
+  //   3. new work  — which facilities may be TARGETED by a new write (facilityIsActiveForEntity)
+  // Marking a row `retired` stops (1) and (3) while keeping (2) true. Deleting the row would stop
+  // all three, which is the bug: a closed account does not stop being Indigo's. Its history, its
+  // collections.facilities dimension row, and its reported revenue all remain.
+  //
+  // Membership is measured, not assumed (2026-08-10) — three codes, not all eight removals:
+  // 10035467 retains 8 collections.daily_collections rows ($28,843.12, 2026-05-16 -> 2026-06-18)
+  // plus its dimension row; 10036020 and 10036030 retain dimension rows with zero data rows; the
+  // 2026-07-09 batch (10034063, 10035913, 10032612, 10029219, 10034039) has neither a dimension
+  // row nor any data, so those are genuinely gone and are deliberately NOT listed.
+  { customerId: '10035467', facilityCode: '10035467', businessEntityId: INDIGO_ENTITY_ID, retired: '2026-08-06' }, // RESTORED HOPE RECOVERY   — closed CMD-side; 8 daily rows + dimension row retained
+  { customerId: '10036020', facilityCode: '10036020', businessEntityId: INDIGO_ENTITY_ID, retired: '2026-08-02' }, // MADISON RECOVERY CENTER  — hard INVALID CRITERIA; dimension row only
+  { customerId: '10036030', facilityCode: '10036030', businessEntityId: INDIGO_ENTITY_ID, retired: '2026-08-02' }, // MISSOURI BEHAVIORAL HEALTH — hard INVALID CRITERIA; dimension row only
 ];
+
+/** True when a roster row is still a live CMD account. Explicit `undefined` compare, not truthiness. */
+const isActive = (c: CmdCustomer): boolean => c.retired === undefined;
+
+/** BXR's ACTIVE facility customer accounts (8 IP + 7 OP). POLLING roster. */
+export const BXR_CUSTOMERS: readonly CmdCustomer[] = BXR_ROSTER.filter(isActive);
+
+/** Indigo's ACTIVE facility customer accounts (CMD account 474623). POLLING roster. */
+export const INDIGO_CUSTOMERS: readonly CmdCustomer[] = INDIGO_ROSTER.filter(isActive);
 
 /**
  * The Collections Explorer / Master BXR chart cron is BXR-only today, so its roster is
@@ -153,28 +207,88 @@ export const INDIGO_CUSTOMERS: readonly CmdCustomer[] = [
  */
 export const CMD_EXPLORER_CUSTOMERS: readonly CmdCustomer[] = BXR_CUSTOMERS;
 
-/** BXR + Indigo — the full customer roster for tenant-aware ingest loops (era_ingest). */
+/**
+ * BXR + Indigo — the ACTIVE customer roster for tenant-aware ingest loops (era_ingest).
+ * POLLING ONLY. Retired facilities are excluded by construction: they are filtered out of
+ * BXR_CUSTOMERS / INDIGO_CUSTOMERS, so no edit here can resume CMD calls against a closed
+ * account. For "does this tenant own this code", use OWNED_CMD_CUSTOMERS.
+ */
 export const ALL_CMD_CUSTOMERS: readonly CmdCustomer[] = [...BXR_CUSTOMERS, ...INDIGO_CUSTOMERS];
 
 /**
- * Every facilityCode the given tenant owns. THE ROSTER IS THE SOURCE OF TRUTH for "which book
- * does this facility belong to" — `collections.facilities` is tenant-agnostic reference data
- * and cannot answer it.
+ * Every facility either tenant OWNS — active AND retired, both books.
+ *
+ * This, not ALL_CMD_CUSTOMERS, is the correct basis for ownership guards and for any surface
+ * describing facilities that ALREADY have data. Both are derived from the same two source arrays,
+ * so they cannot desync: a retirement is one `retired:` field, and nothing has to be remembered
+ * in a second place.
+ */
+export const OWNED_CMD_CUSTOMERS: readonly CmdCustomer[] = [...BXR_ROSTER, ...INDIGO_ROSTER];
+
+/** Retired-but-owned facilities, both books. Derived — never hand-maintained. */
+export const RETIRED_CMD_CUSTOMERS: readonly CmdCustomer[] = OWNED_CMD_CUSTOMERS.filter(
+  (c) => c.retired !== undefined,
+);
+
+/**
+ * Every facilityCode the given tenant owns — active AND retired. THIS MODULE IS THE SOURCE OF
+ * TRUTH for "which book does this facility belong to" — `collections.facilities` is
+ * tenant-agnostic reference data and cannot answer it. Specifically OWNED_CMD_CUSTOMERS is that
+ * source, not the polling roster: liveness and ownership are separate questions.
  *
  * Exists for the forecast-edit write path (migration 024): a super admin picks a facility for a
  * hand-added expected payment, and without this check a facility from the OTHER book could be
  * attributed to the tenant being written — money filed under the wrong company, visible nowhere
  * except as an odd row on a tile. Pure and data-only, so it is safe to import from a client
  * component as well as from the server.
+ *
+ * ⚠ For a picker that CREATES something, use activeFacilityCodesForEntity instead — offering a
+ * retired facility invites a forecast row that can never resolve.
  */
 export function facilityCodesForEntity(businessEntityId: string): string[] {
+  return OWNED_CMD_CUSTOMERS.filter((c) => c.businessEntityId === businessEntityId).map(
+    (c) => c.facilityCode,
+  );
+}
+
+/**
+ * Every facilityCode the given tenant owns AND still operates — the correct list for any picker
+ * whose selection creates NEW work.
+ *
+ * The distinction is about tense, and it is the reason both functions exist. An ASSIGNMENT is a
+ * statement about the past ("this historical charge belongs to that facility") and must accept a
+ * retired facility. A FORECAST is a claim about the future ("a payment will arrive") and must not:
+ * a closed CMD account can never receive one, so the row would sit on the Upcoming tile as a
+ * permanently overdue item nothing can clear.
+ */
+export function activeFacilityCodesForEntity(businessEntityId: string): string[] {
   return ALL_CMD_CUSTOMERS.filter((c) => c.businessEntityId === businessEntityId).map(
     (c) => c.facilityCode,
   );
 }
 
-/** True when `facilityCode` is on the given tenant's roster. Case-sensitive: codes are canonical. */
+/**
+ * True when `facilityCode` is owned by the given tenant. Case-sensitive: codes are canonical.
+ *
+ * Reads OWNED_CMD_CUSTOMERS, NOT the polling roster, so a facility removed from CMD polling
+ * still answers truthfully about whose book it is. Ownership is permanent; polling is not.
+ */
 export function facilityBelongsToEntity(facilityCode: string, businessEntityId: string): boolean {
+  return OWNED_CMD_CUSTOMERS.some(
+    (c) => c.businessEntityId === businessEntityId && c.facilityCode === facilityCode,
+  );
+}
+
+/**
+ * True when `facilityCode` is owned by the tenant AND still a live CMD account.
+ *
+ * Pair this WITH facilityBelongsToEntity on a create path, never instead of it — the two answer
+ * different questions and must produce different errors. Checking only this one would report a
+ * retired in-book facility as a tenancy violation, which is exactly the conflation this module was
+ * restructured to remove: the operator would be told to "switch views" for a facility already in
+ * the right view.
+ */
+export function facilityIsActiveForEntity(facilityCode: string, businessEntityId: string): boolean {
   return ALL_CMD_CUSTOMERS.some(
     (c) => c.businessEntityId === businessEntityId && c.facilityCode === facilityCode,
   );

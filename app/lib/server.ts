@@ -234,7 +234,7 @@ import type {
 import { manualRowFromDb } from '../../src/veris/upcomingForecast.js';
 import { cmdPayerMonth, type CmdPayerMonthResult } from '../../src/collections/cmdPayerRollup.js';
 import { refreshCmdPayerRollup } from '../../src/collections/cmdPayerRefresh.js';
-import { CMD_EXPLORER_CUSTOMERS, INDIGO_CUSTOMERS, BXR_CUSTOMERS, type CmdCustomer } from '../../src/collections/cmdCustomers.js';
+import { CMD_EXPLORER_CUSTOMERS, INDIGO_CUSTOMERS, BXR_CUSTOMERS, OWNED_CMD_CUSTOMERS, type CmdCustomer } from '../../src/collections/cmdCustomers.js';
 // src-side canonical tenant ids (agree with app/lib/views.ts — dual-declaration note in
 // src/tenants.ts). Each cron's writes are stamped + GUC-scoped to its tenant explicitly
 // (migration-B era), never inferred; the Indigo roster also carries per-customer ids.
@@ -3332,16 +3332,23 @@ export async function loadFacilityResolutionQueue(
   return { rows: page, nextCursor };
 }
 
-/** The assignment picker's canonical facility list: the ENTITY'S OWN roster only (the 0086
+/** The assignment picker's canonical facility list: the ENTITY'S OWN facilities only (the 0086
  *  cross-book guard, applied to humans too — a BXR charge must never be assigned to an Indigo
  *  office). Codes come from the checked-in roster (cmdCustomers.ts), names from
- *  collections.facilities. Cached 15 min per scope. */
+ *  collections.facilities. Cached 15 min per scope.
+ *
+ *  Reads OWNED_CMD_CUSTOMERS, not the polling roster: a facility removed from CMD polling is
+ *  still the tenant's, and a stray historical charge for it must stay assignable. Narrowing this
+ *  to the polling roster would make the containment check in facility-resolution-actions.ts
+ *  reject a legitimate in-book assignment as "not on this book's roster". */
 export const loadResolutionFacilityOptions = unstable_cache(
   async (entityIds: string[]): Promise<Array<{ facility_code: string; facility_name: string }>> => {
-    const roster = [...CMD_EXPLORER_CUSTOMERS, ...INDIGO_CUSTOMERS]
-      .filter((c) => c.businessEntityId !== undefined && entityIds.includes(c.businessEntityId))
-      .map((c) => c.facilityCode);
-    const codes = [...new Set(roster)];
+    // No `!== undefined` guard: CmdCustomer.businessEntityId is a required string, so the conjunct
+    // was always true and only read as though optional entries were handled. No Set-dedup either:
+    // OWNED_CMD_CUSTOMERS is asserted duplicate-free on BOTH keys in test/upcomingForecast.test.ts.
+    const codes = OWNED_CMD_CUSTOMERS.filter((c) => entityIds.includes(c.businessEntityId)).map(
+      (c) => c.facilityCode,
+    );
     if (codes.length === 0) return [];
     const { sql, params } = buildResolutionFacilityOptionsQuery(codes);
     const { rows } = await readerExecutor().query<{ facility_code: string; facility_name: string }>(

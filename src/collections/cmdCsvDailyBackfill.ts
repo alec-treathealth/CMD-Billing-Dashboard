@@ -36,7 +36,27 @@ import { aliasIndigoFacilityColumn, aggregateDailyDeposits, dropFuturePaymentRow
 import { replaceCmdDailyForFacility, makeClient } from './db.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../tenants.js';
 
-/** Indigo facility_code (CMD customer id) -> name. Mirrors migration 0034 / INDIGO_CUSTOMERS. */
+/**
+ * Indigo facility_code (CMD customer id) -> name. Mirrors migration 0034 / the
+ * `collections.facilities` seed, and DELIBERATELY INCLUDES DEFUNCT FACILITIES — it does NOT
+ * mirror INDIGO_CUSTOMERS, which is the live polling roster.
+ *
+ * That divergence is required, not drift: this script labels HISTORICAL deposit rows, so it must
+ * name every facility that existed during the period being backfilled, including accounts closed
+ * since. Narrowing it to the active roster would leave older rows unlabelled.
+ *
+ * The set it must equal is Indigo's OWNED codes (active + retired) from cmdCustomers.ts — i.e.
+ * `OWNED_CMD_CUSTOMERS` filtered to INDIGO_ENTITY_ID, 32 today: the 29 active, plus 10035467
+ * RESTORED HOPE RECOVERY, 10036020 MADISON RECOVERY CENTER and 10036030 MISSOURI BEHAVIORAL
+ * HEALTH. Do not "fix" the gap by deleting them here.
+ *
+ * ⚠ NOT ENFORCED — this equality is prose, and three separately-edited literals can drift: add a
+ * facility to the roster without naming it here and a backfill silently labels its historical
+ * deposit rows with nothing. A test cannot currently read this map, because importing this module
+ * runs its CLI `main()` (it exits with "--file=<csv> is required"). Guarding that entry point with
+ * an `import.meta.url === process.argv[1]` check would make the map importable and let one
+ * assertion close the gap; that is a deliberate follow-up, not a drive-by edit to a backfill CLI.
+ */
 const INDIGO_NAME_BY_CODE: Readonly<Record<string, string>> = {
   '10026460': '405 RECOVERY', '10029373': 'ADDICTION FREE RECOVERY SERVICES', '10029528': 'ADOLESCENT MENTAL HEALTH',
   '10031413': 'BRITE RECOVERY', '10028848': 'CALIFORNIA TREATMENT COLLECTIVE', '10028842': 'COVENANT HILLS TREATMENT CENTERS',
