@@ -24,6 +24,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
+  AddForecastForm,
   buildUpcomingGroups,
   payerSuggestions,
   centsFromText,
@@ -393,9 +394,16 @@ test('THE PROOF CASE: the past-dated $72,000 row renders in Overdue and NOWHERE 
   assert.ok(!html.includes('$72,100.00'), 'overdue never folds into the ERA headline');
 });
 
-test('RESOLVE THEN PARTITION: a past-dated manual add buckets into Overdue', () => {
-  // kind='add' is the door a server-side partition would miss: the add enters at the
-  // client resolver with its own date, after any SQL bucketing of sheet rows.
+test('A PAST-DATED MANUAL ADD STAYS IN THE TABLE — it is never Overdue', () => {
+  // ⚠️ THIS TEST WAS INVERTED ON 2026-08-10, and the old assertion pinned a real bug.
+  // It used to require exactly the opposite ("buckets into Overdue"), which is why the defect
+  // shipped green: the suite was enforcing it.
+  //
+  // A super admin keys a payment by hand BECAUSE a check arrived and CollaborateMD has not
+  // logged it yet — so the date they type is today or earlier, essentially always. Filing that
+  // under a heading reading "past their date without landing — not in any total above" is
+  // wrong in every clause, and it also dropped the money out of the Forecast subtotal. Live
+  // 2026-08-10: an add dated 2026-08-12 worked; the same form with 2026-08-07 disappeared.
   const html = renderToStaticMarkup(
     <EraUpcomingBody
       data={S({ total: '100.00', remits: 1, groups: [G({})] })}
@@ -415,10 +423,26 @@ test('RESOLVE THEN PARTITION: a past-dated manual add buckets into Overdue', () 
       ]}
     />,
   );
-  assert.ok(html.includes('Overdue'), 'the section appears for the add alone');
-  assert.ok(html.includes('$1,234.00'), 'the overdue add renders');
-  assert.ok(html.includes('manual add'), 'and is marked as a manual add');
-  assert.ok(!html.includes('not included in the total above'), 'no upcoming Forecast line — nothing upcoming');
+  assert.ok(html.includes('$1,234.00'), 'the add renders');
+  assert.ok(!html.includes('Overdue'), 'and NOT under an Overdue heading');
+  assert.ok(
+    html.includes('not included in the total above'),
+    'it counts in the upcoming Forecast subtotal, which is the money it represents',
+  );
+});
+
+test('a past-dated SHEET row IS still Overdue — the asymmetry is the decision', () => {
+  // The counterpart to the test above. Nobody watches the sheet feed row by row, so a sheet
+  // row past its date genuinely is an escalation (Alec, 2026-08-03) and must keep escalating.
+  // `origin` is what separates "a human just asserted this" from "a forecast quietly failed".
+  const html = renderToStaticMarkup(
+    <EraUpcomingBody
+      data={S({ total: '100.00', remits: 1, groups: [G({})] })}
+      overrides={OS([OR({ expected_date: '2026-05-26', amount: '72000.00' })])}
+    />,
+  );
+  assert.ok(html.includes('Overdue'), 'a sheet row past its date still escalates');
+  assert.ok(html.includes('$72,000.00'));
 });
 
 test('TOTALS PROVENANCE: the overdue subtotal is the RESOLVED recomputation, not the SQL aggregate', () => {
@@ -606,10 +630,16 @@ test('overdue controls are absent for everyone but a super admin', () => {
   assert.ok(!html.includes('cannot be re-dated here'), 'and no editor-only prose');
 });
 
-test('a manual-origin overdue row offers Remove row but NOT the correct-amount form', () => {
+test('a manual-origin row offers Remove row but NOT the correct-amount form', () => {
   // resolveForecast's adds loop never consults the correct map, so a correction keyed to a
   // manual add is unconditionally orphaned. Offering the box would invite an operator to type a
   // dollar figure straight into the not-in-effect strip.
+  //
+  // The aria-labels lost their "(overdue)" suffix on 2026-08-10 — not a wording change, a
+  // LOCATION change. A past-dated manual add now renders in the group table instead of the
+  // Overdue strip (see "A PAST-DATED MANUAL ADD STAYS IN THE TABLE"), and `context` is only
+  // passed by the strip. The behaviour under test — Remove yes, correct-amount no — is
+  // unchanged, and is what this test is actually for.
   const html = renderToStaticMarkup(
     <EraUpcomingBody
       data={S({ total: '100.00', remits: 1, groups: [G({})] })}
@@ -630,10 +660,10 @@ test('a manual-origin overdue row offers Remove row but NOT the correct-amount f
       ]}
     />,
   );
-  assert.ok(html.includes('aria-label="Remove admin edit: KWC TRICARE 2026-07-01 (overdue)"'));
+  assert.ok(html.includes('aria-label="Remove admin edit: KWC TRICARE 2026-07-01"'));
   assert.ok(html.includes('Remove row'), 'a manual add is removed, not un-corrected');
   assert.ok(
-    !html.includes('Correct amount: KWC TRICARE 2026-07-01 (overdue)'),
+    !html.includes('Correct amount: KWC TRICARE 2026-07-01'),
     'no amount box on a row a correction cannot reach',
   );
 });
@@ -779,41 +809,58 @@ const FACILITIES = [
   { code: 'KWC', label: 'KWC — KENTUCKY WELLNESS CENTER' },
 ];
 
-test('the add form renders only for a super admin', () => {
-  const withEdit = renderToStaticMarkup(
-    <EraUpcomingBody data={S({})} canEdit facilityOptions={FACILITIES} />,
-  );
-  assert.ok(withEdit.includes('Add an expected payment'), 'super admin gets the form');
-  assert.ok(withEdit.includes('CA MENTAL HEALTH'), 'facilities are selectable, not free text');
+// THE FORM MOVED (2026-08-10). It used to render at the BOTTOM of EraUpcomingBody, below the
+// upcoming list, the overdue strip and the hidden strip — inside a tile that is collapsed by
+// default. Creating a forecast row therefore took a click, a scroll past three sections, and
+// prior knowledge that a form was down there. It now lives in a standalone "Add expected
+// payment" button at the top of the Overview tab (AddForecastPanel in overview-kpis.tsx).
+//
+// These four tests kept their original intent and moved with it: they exercise the exported
+// AddForecastForm directly, which is where the behaviour they were always really about lives.
+// The fifth pins the move itself, so nothing quietly re-adds a second form to the tile.
 
-  const withoutEdit = renderToStaticMarkup(
-    <EraUpcomingBody data={S({})} facilityOptions={FACILITIES} />,
+const renderForm = (facilityOptions: { code: string; label: string }[]) =>
+  renderToStaticMarkup(
+    <AddForecastForm
+      facilityOptions={facilityOptions}
+      payerSuggestions={[]}
+      busy={false}
+      onEdit={() => {}}
+    />,
   );
-  assert.ok(!withoutEdit.includes('Add an expected payment'), 'nobody else sees it');
+
+test('the add form offers facilities as a closed list, never free text', () => {
+  const html = renderForm(FACILITIES);
+  assert.ok(html.includes('Add an expected payment'), 'the form names itself');
+  assert.ok(html.includes('CA MENTAL HEALTH'), 'facilities are selectable, not free text');
+  assert.ok(html.includes('KENTUCKY WELLNESS CENTER'));
 });
 
-test('the form appears on an EMPTY tile too — that is when it is most needed', () => {
-  const html = renderToStaticMarkup(
+test('THE FORM IS GONE FROM THE TILE — it must not render in two places', () => {
+  // Two live forms would be two ways to write the same row, with two states and two banners.
+  // The empty tile is the branch that used to carry its own copy, so it is the one asserted.
+  const empty = renderToStaticMarkup(
     <EraUpcomingBody data={S({})} canEdit facilityOptions={FACILITIES} />,
   );
-  assert.ok(html.includes('No future payments scheduled'), 'still the calm empty read');
-  assert.ok(html.includes('Add an expected payment'), 'and the form is reachable from it');
+  assert.ok(empty.includes('No future payments scheduled'), 'still the calm empty read');
+  assert.ok(!empty.includes('Add an expected payment'), 'the tile no longer carries the form');
 });
 
 test('Consolidated explains instead of offering a form the server would reject', () => {
   // A write must name one tenant; Consolidated resolves to two entity ids, so the action
   // returns 'pick_a_tenant_view'. Offering the form there would be a guaranteed dead end.
-  const html = renderToStaticMarkup(<EraUpcomingBody data={S({})} canEdit facilityOptions={[]} />);
-  assert.ok(!html.includes('Add an expected payment'), 'no form without a single tenant');
+  // The caller ALSO hides the button entirely in that case (overview-kpis.tsx gates on
+  // facilityOptions.length > 0) — this is the form's own second line of defence, which is what
+  // makes a stale open panel safe rather than merely unlikely.
+  const html = renderForm([]);
+  assert.ok(!html.includes('<select'), 'no facility picker without a single tenant');
   assert.ok(html.includes('Switch to the BXR or Indigo view'), 'it says what to do instead');
 });
 
 test('the amount field constrains itself to a money shape in the markup', () => {
-  const html = renderToStaticMarkup(
-    <EraUpcomingBody data={S({})} canEdit facilityOptions={FACILITIES} />,
-  );
   // The browser blocks a bad value and announces it on the field — the accessible place for
   // the message — before the client check or the Server Action ever see it.
+  const html = renderForm(FACILITIES);
   assert.ok(html.includes('pattern="\\d{1,10}(\\.\\d{1,2})?"'), 'money pattern is on the input');
   assert.ok(html.includes('type="date"'), 'native date input, not a parsed text field');
   assert.ok(html.includes('required'), 'the required fields are marked for the browser');

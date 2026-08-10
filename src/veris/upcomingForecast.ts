@@ -72,6 +72,42 @@ export interface ManualForecastRow {
   amount: string | null;
   suppress_reason: 'landed' | 'incorrect' | 'cancelled' | null;
   matched_era_key: string | null;
+  /**
+   * 033's reconciliation lifecycle. Only ever non-'expected' on an 'add' (033's status
+   * coherence CHECK), because only an add represents money in its own right.
+   *
+   * ⚠️ OPTIONAL IN THE TYPE, NEVER READ BARE. Pre-033 fixtures and any hand-built row omit
+   * it, and `undefined` is not `'expected'` — read it through `manualStatus()` below, which
+   * coalesces. Declaring it required would have been stricter but would also have broken
+   * every existing fixture into a compile error rather than a considered default.
+   */
+  status?: 'expected' | 'needs_review' | 'matched';
+  /**
+   * 033's soft delete. Non-null means a super admin took this decision back.
+   *
+   * ⚠️ NEVER WRITE `m.removed_at !== null`. On a row that omits the field that expression is
+   * TRUE (undefined !== null), which silently inverts the filter and hides every live row
+   * while showing every tombstone. Go through `isRemoved()`. This exact trap has already
+   * cost this repo a broken tile and two vacuously-green tests.
+   */
+  removed_at?: string | null;
+}
+
+/** A manual row's lifecycle status, defaulting an absent field to the honest 'expected'. */
+export function manualStatus(m: {
+  status?: 'expected' | 'needs_review' | 'matched';
+}): 'expected' | 'needs_review' | 'matched' {
+  return m.status ?? 'expected';
+}
+
+/**
+ * Has a super admin taken this decision back (033 soft delete)?
+ *
+ * The `?? null` is the whole point — see the warning on `removed_at`. A bare
+ * `m.removed_at !== null` reads TRUE for an absent field.
+ */
+export function isRemoved(m: { removed_at?: string | null }): boolean {
+  return (m.removed_at ?? null) !== null;
 }
 
 /**
@@ -111,7 +147,10 @@ export function manualRowFromDb(r: ManualForecastDbRow): ManualForecastRow {
       `upcomingForecast: expected_payment_manual.id is not a safe positive integer (${String(r.id)})`,
     );
   }
-  return { ...r, id };
+  // Normalize 033's two lifecycle fields AT THE READ BOUNDARY, so nothing downstream has to
+  // remember the `?? null` dance. A pre-033 database (or a fixture) omits both; an absent
+  // status is honestly 'expected', and an absent removed_at is honestly "not removed".
+  return { ...r, id, status: manualStatus(r), removed_at: r.removed_at ?? null };
 }
 
 /** One row of the resolved forecast the tile renders. */
@@ -129,6 +168,34 @@ export interface ResolvedForecastRow {
   corrected: boolean;
   /** The 024 row id behind a manual add, or behind the correction applied to a sheet row. */
   manualId?: number;
+  /**
+   * 033: an 835 plausibly covers this manual add, but nobody has confirmed it. The row is
+   * STILL RENDERED and STILL COUNTED — 'needs_review' is a prompt, not a suppression. Hiding
+   * money on a guess is the exact failure `suggestLandedMatches` refuses to commit (024), and
+   * doing it here through a status column would be the same mistake wearing a different hat.
+   * Only 'matched' (a named human) takes a row out of the count, and that never reaches here.
+   */
+  needsReview?: boolean;
+  /** 033: the 835 key a 'needs_review' row is waiting on a human to confirm or reject. */
+  candidateEraKey?: string | null;
+}
+
+/**
+ * A manual 'add' a super admin has CONFIRMED an 835 already covers (033 status='matched').
+ *
+ * Not in `rows` and not in `totalCents`, deliberately: the 835 itself is already on the tile
+ * through the confirmed half, so counting the forecast too would render one payment twice and
+ * double its money — the precise defect that made a manual add + suppress pair the old
+ * workaround. Surfaced as its own output so the UI can say "reconciled" and offer an undo,
+ * rather than the row simply evaporating with no id on screen (the one-way door
+ * HiddenForecastRow was created to close).
+ */
+export interface MatchedForecastRow {
+  manual: ManualForecastRow;
+  /** The 835 key the confirming human agreed covers it. */
+  eraKey: string;
+  /** Fixed-2 amount this row would contribute if it were un-matched. NEVER added to a total. */
+  amount: string;
 }
 
 /**
@@ -196,6 +263,17 @@ export interface ResolvedForecast {
    * — a suppress that hid nothing is `stale`, never `hidden`.
    */
   hidden: HiddenForecastRow[];
+  /**
+   * 033: manual adds a human confirmed an 835 already covers, ascending by edit id. Never in
+   * `rows`, never in `totalCents` — see MatchedForecastRow.
+   */
+  matched: MatchedForecastRow[];
+  /**
+   * 033: manual decisions a super admin soft-removed, ascending by edit id. They change no
+   * number anywhere; they are returned only so an operator can see what was taken back and by
+   * whom. A hard DELETE used to make this unanswerable.
+   */
+  removed: ManualForecastRow[];
   /** Sum of `rows` in exact integer cents. NEVER includes `hidden` — see the warning above. */
   totalCents: number;
 }
@@ -256,7 +334,31 @@ export function resolveForecast(
   const suppress = new Map<string, ManualForecastRow>();
   const correct = new Map<string, ManualForecastRow>();
   const adds: ManualForecastRow[] = [];
+  // 033 outputs. Collected in the same pass so a removed/matched row is classified exactly
+  // once and can never also reach `rows` — two loops would let the two drift.
+  const removed: ManualForecastRow[] = [];
+  const matched: MatchedForecastRow[] = [];
   for (const m of manual) {
+    // SOFT DELETE WINS OVER EVERYTHING, and it comes first for that reason. A removed row is
+    // a decision the operator took back — it must not suppress a sheet row, must not correct
+    // an amount, and must not add money. `isRemoved` rather than `m.removed_at !== null`
+    // because an absent field makes that comparison TRUE; see the warning on the field.
+    if (isRemoved(m)) {
+      removed.push(m);
+      continue;
+    }
+    // A CONFIRMED MATCH ALSO LEAVES THE FOLD, before it can be filed as an add. The 835 is
+    // already on the tile, so emitting the forecast beside it renders one payment twice.
+    // Guarded on kind: 033's status coherence CHECK confines a non-'expected' status to an
+    // 'add', and this must not silently start eating suppressions if that ever changes.
+    if (m.kind === 'add' && manualStatus(m) === 'matched') {
+      matched.push({
+        manual: m,
+        eraKey: m.matched_era_key ?? '',
+        amount: m.amount ?? '0.00',
+      });
+      continue;
+    }
     const key = matchKey(m.facility_code, m.payer_label, m.expected_date);
     if (m.kind === 'suppress') suppress.set(key, m);
     else if (m.kind === 'correct') correct.set(key, m);
@@ -384,6 +486,10 @@ export function resolveForecast(
       origin: 'manual',
       corrected: false,
       manualId: a.id,
+      // STILL COUNTED. needs_review marks a row for a human to look at; it does not take the
+      // money off the tile. See the field comment on ResolvedForecastRow.needsReview.
+      needsReview: manualStatus(a) === 'needs_review',
+      candidateEraKey: a.matched_era_key ?? null,
     });
   }
 
@@ -417,14 +523,61 @@ export function resolveForecast(
   // Ascending by edit id, matching `stale` — both strips read as "oldest decision first".
   const hidden = [...hiddenByKey.values()].sort((a, b) => a.manual.id - b.manual.id);
 
+  // Ascending by edit id, matching `stale` and `hidden` — every strip reads "oldest first".
+  matched.sort((a, b) => a.manual.id - b.manual.id);
+  removed.sort((a, b) => a.id - b.id);
+
   return {
     rows,
     stale,
     hidden,
+    matched,
+    removed,
     // `rows` ONLY. Never `hidden` — see the warning on HiddenForecastRow. Summing what a human
     // deliberately removed would put it straight back on the tile as a number.
     totalCents: rows.reduce((sum, r) => sum + (centsFromAmount(r.amount) ?? 0), 0),
   };
+}
+
+/**
+ * Expected (not-yet-collected) money per facility for ONE calendar month, in exact integer
+ * cents. Backs the Master BXR Chart's expected-payment series.
+ *
+ * WHY THE CHART NEEDS THIS AT ALL. A check can physically arrive days before CMD logs it, so
+ * the collections feed shows nothing while the money is provably in hand. The operator keys it
+ * as a forecast row; this is what puts that row on the chart immediately instead of after the
+ * next hourly pull.
+ *
+ * ⚠️ THIS IS NOT COLLECTED MONEY AND MUST NEVER BE ADDED INTO ONE. Keep it a separate series
+ * with its own label wherever it renders. It is an assertion by a human, not a deposit
+ * confirmed by CMD, and the two must stay tellable apart on screen.
+ *
+ * ⚠️ AND IT MUST NEVER BE WRITTEN INTO collections.daily_collections. That table is read
+ * through `daily_collections_resolved`, which is MAX-GROSS-WINS per (entity, facility,
+ * payment_date) — not SUM. A forecast row there would either be silently dropped or REPLACE
+ * the real CMD deposit for that facility-day. Reading it live from staging, as the chart does,
+ * is the only form of this feature that cannot corrupt a collected figure.
+ *
+ * `month` is 1-based, matching the chart's dropdown and JS's own `YYYY-MM` string, NOT
+ * Date#getMonth. Rows are matched on the `YYYY-MM` prefix of expected_date, which is already a
+ * civil-date string — no Date parsing, so no timezone can move a row into another month.
+ */
+export function expectedCentsByFacilityForMonth(
+  rows: ResolvedForecastRow[],
+  year: number,
+  month: number,
+): Map<string, number> {
+  const prefix = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`;
+  const out = new Map<string, number>();
+  for (const r of rows) {
+    if (!r.expected_date.startsWith(prefix)) continue;
+    const cents = centsFromAmount(r.amount);
+    // An unreadable amount contributes NOTHING rather than a zero-valued bar entry: a facility
+    // whose only forecast row is unparseable has no expected money we can honestly draw.
+    if (cents === null) continue;
+    out.set(r.facility_code, (out.get(r.facility_code) ?? 0) + cents);
+  }
+  return out;
 }
 
 // ===========================================================================

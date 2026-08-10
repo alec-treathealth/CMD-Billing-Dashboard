@@ -4595,3 +4595,131 @@ the same canonical` has been red since 027 and is red for a real reason — it c
 the crosswalk's remaining duplicate-identity backlog, not scorer error. Re-baselining
 it to green would hide the only measurement of that backlog. `OVERALL: SANITY CHECKS
 FAILED` on this script is therefore expected, pre-existing, and not a regression.
+
+---
+
+## 033 — expected_payment_manual lifecycle: soft delete + reconciliation status (APPLIED LIVE 2026-08-10)
+
+**Applied via `apply_migration` as postgres.** Pure DDL — no `CONCURRENTLY`, no `VACUUM` — so
+unlike 0081/0092 it runs inside a transaction and needed no autocommit statement splitting.
+`SET ROLE claims_admin` is correct here: `staging` is the claims_admin plane. (Do **not** copy
+that block into a `collections` migration, where every relation is `relowner = postgres` and the
+SET ROLE *downgrades* the applying role — that cost two failed applies on 0084/0085.)
+
+### Number derivation — the table was stale in two places at once
+
+`.claude/rules/sql-migrations.md` and CLAUDE.md both said "next Veris = 032". **032 already
+existed on `main`** (`032_intel_writer_select_grant`), having landed after both docs were
+written. Re-derived by scanning `origin/main` plus all 17 live worktrees: max was 032, no 033
+anywhere → 033. Both docs corrected to **034** in this change. The same sweep found the product
+plane disagreeing with itself (rules said 0095, CLAUDE.md said 0096 with a note that 0095
+consumed its slot without leaving a file); CLAUDE.md was right and the rules file was corrected.
+**The ref-derived max is a floor, never the answer.**
+
+### What it changes
+
+- `status text NOT NULL DEFAULT 'expected'` — `'expected' | 'needs_review' | 'matched'`.
+- `removed_at timestamptz` + `removed_by uuid`, moving together (`removal_shape_ck`).
+- `kind_shape_ck` **re-stated** to let an `add` carry `matched_era_key`. 024 allowed that column
+  only on a `'landed'` suppress, which is why the live book held **two rows describing one
+  payment** (ids 8 and 18, KWC / BCBS TN / 2026-08-05 — an add plus a suppress at the same key).
+  `'correct'` was deliberately NOT widened: a correction is a statement about a sheet row's
+  amount, not a payment in its own right.
+- `status_shape_ck`: a non-`'expected'` status requires `kind='add'` AND a non-null era key.
+- New SECURITY DEFINER functions `remove_expected_payment_manual` (soft) and
+  `set_expected_payment_manual_status`. `delete_expected_payment_manual` (024, HARD) is left in
+  place on purpose — dropping it would break any in-flight deploy still holding the old code —
+  but the app path no longer calls it.
+
+### The two decisions worth not re-litigating
+
+**1. The unique index stays FULL, not partial.** `expected_payment_manual_decision_uidx` covers
+tombstones too, so re-adding a removed key UPDATEs the tombstone and the upsert clears
+`removed_at`/`removed_by`/`status` — a clean REVIVE. A partial index (`WHERE removed_at IS NULL`)
+would allow an unbounded pile of tombstones at one key and destroy "one decision per kind + match
+key", the invariant that stops the resolved amount depending on scan order.
+
+**2. A manual expected payment is NEVER written into `collections.daily_collections`.** This was
+the requested design and it is unsafe. `daily_collections_resolved` is **MAX-GROSS-WINS, not
+SUM** — `row_number() over (partition by business_entity_id, facility_code, payment_date order by
+gross_amount desc, ...) where rn = 1`. A forecast row at a facility-day would therefore either be
+silently discarded (CMD's gross is higher) or **REPLACE the real CMD deposit** (the expected
+amount is higher). The Master BXR Chart reads the forecast live from `staging` and stacks it as a
+separate labelled amber series instead. **Price any "just add a row to daily_collections" idea
+against max-gross-wins first.**
+
+### Backward compatibility — apply order matters in ONE direction
+
+033 only ADDS columns and functions, so applying it ahead of the code is safe: the deployed build
+does not select the new columns and still calls the 024 delete function. **The reverse is not
+safe** — `getUpcomingManual` selects `status`/`removed_at`, so shipping that code against a
+pre-033 database 500s the Future Payments tile. Migration first, deploy second.
+
+### Verified live at apply (2026-08-10)
+
+- 3 columns present; `status` `NOT NULL DEFAULT 'expected'`; both existing rows backfilled to
+  `status='expected'`, `removed_at` null.
+- PHI column-name assertion returns **0 rows**.
+- Grants: `claims_admin` (owner) + `claims_reader` SELECT **only**. `cmd_rollup_writer` still has
+  **no privilege of any kind** on this table — that absent privilege, not a predicate, is what
+  guarantees the hourly CMD/sheet crons cannot write, overwrite, resurrect or delete a manual row.
+- All 4 functions `prosecdef = t`, `proconfig = {search_path=""}` (advisor 0011).
+- Behaviour driven inside a `DO` block that self-aborted with a sentinel exception, so every test
+  write rolled back and the two live rows were left byte-identical: first remove `true`, second
+  `false`, **`removed_by` still the FIRST actor** (idempotent — a double-click cannot overwrite
+  who removed it), a removed row refuses reconciliation, a `suppress` refuses reconciliation
+  (only an `add` is reconcilable), and a wrong-tenant id returns `false`.
+
+⚠️ **A round trip written as one `SELECT` with several volatile calls in the target list proves
+less than it looks.** The first attempt did that and its `(select removed_by ...)` subquery read
+the statement's pre-UPDATE snapshot, returning `null` — which is a snapshot artifact, not
+evidence either way. Sequential statements in a `DO` block are what actually answer the question.
+
+### Still open
+
+- `'needs_review'` is plumbed end-to-end (column, constraint, function, Server Action, resolver
+  flag, UI) but **nothing writes it yet** — no rule decides when a `suggestLandedMatches`
+  candidate is weak enough to warrant it rather than a straight confirm.
+- No automatic matching, by design and by Alec's explicit instruction (2026-08-10). The only
+  stable identifier anywhere near this is `era_835_payment.check_eft_trace_number`; the CMD
+  deposit feed that drives the chart has **no** identifier at all — no claim id, no trace number,
+  not even a payer, because `aggregateDailyDeposits` emits `{facility_code, payment_date, checks,
+  eft, gross}` stamped with the *pulled customer's* code. Amounts cannot substitute: a remittance
+  differs from an expected billed amount by contractual adjustment as a matter of course.
+
+### CORRECTION (2026-08-10, same day) — 033's partial index was dead on arrival; 034 drops it
+
+033 created `expected_payment_manual_live_idx (business_entity_id, expected_date) WHERE
+removed_at IS NULL` and justified it as serving "the tile's live path". **That justification was
+wrong when it was written**, and 033's own sibling change contradicted it in the same commit:
+`getUpcomingManual` deliberately does NOT filter `removed_at`, because the resolver returns
+removed rows as a first-class output so an operator can see what was taken back and by whom.
+
+Its only predicate is `business_entity_id = $1`. **Postgres uses a partial index only when it can
+PROVE the query's WHERE implies the index predicate**, and a tenant id implies nothing about
+`removed_at`. The planner could never have chosen it.
+
+Measured live 2026-08-10, which settled it:
+
+| index | idx_scan |
+|---|---|
+| `expected_payment_manual_live_idx` (033, partial) | **0** |
+| `expected_payment_manual_upcoming_idx` (024, non-partial, same leading columns) | **155** |
+
+024's index was doing the work the whole time. Caught by Qodo on PR #187, verified against
+`pg_stat_user_indexes` rather than taken on faith.
+
+**Dropped rather than justified.** The alternative was to split the read — a live-only query for
+the tile plus a second one for the removed rows the UI still has to show. That is the right shape
+for a big table; this one is bounded by construction to one row per human decision about ~9 sheet
+rows and currently holds 3. A second read path, a second round trip and a second failure mode to
+make a 16 kB index reachable is complexity in the service of a comment.
+
+**033 was NOT edited in place** — it is applied live, and an applied migration file must keep
+describing what actually ran. The correction lives in 034's header and here.
+
+⚠️ THE GENERALISABLE LESSON: **an index whose predicate the query cannot imply is not a slow
+index, it is an absent one.** Before adding a partial index, write the exact query beside it and
+check the predicate is present in the WHERE — and confirm with `idx_scan` after apply rather than
+assuming. A partial index also cannot be caught by a typecheck, a test, or a review that reads
+only the migration: both halves have to be read together, which is exactly what did not happen.

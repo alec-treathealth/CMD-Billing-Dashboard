@@ -4,6 +4,8 @@
  * Dashboard — overview composition: the claim-distribution widgets and the
  * /dashboard landing section. Split out of the former dashboard.tsx.
  */
+import { useState } from 'react';
+
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { count, percent } from '@/lib/format';
 import {
@@ -129,14 +131,26 @@ export function Dashboard({
   // "Future <tenant> Payments" moved from a standalone top card into the
   // OverviewKpis toggle-button row (next to "All Facilities Table") — same data,
   // now revealed on demand.
+  //
+  // FORECAST VERSION lives HERE because the two things a forecast write must reach are
+  // SIBLINGS, not parent and child: the Future Payments tile (inside OverviewKpis) and the
+  // Master BXR Chart's expected-payment series (inside OverviewBarChart). A counter in either
+  // one could not reach the other, and the operator's entire reason for typing a payment in is
+  // that it shows up immediately — "wait for the next hourly cron" is the bug this closes.
+  const [forecastVersion, setForecastVersion] = useState(0);
   return (
     // data-ths='v2' opts this page — and only this page — into the Treat Design
     // System v2 light-ground tokens and class layer (app/app/ths-v2.css). Every
     // rule in that file is scoped to this attribute, so Collections, the Explorer
     // grid, Qualify and Claims Audit are untouched until each is ported.
     <section data-ths="v2" className="space-y-6">
-      <OverviewKpis view={view} canEditForecast={canEditForecast} />
-      <OverviewBarChart scope={view} />
+      <OverviewKpis
+        view={view}
+        canEditForecast={canEditForecast}
+        forecastVersion={forecastVersion}
+        onForecastChange={() => setForecastVersion((v) => v + 1)}
+      />
+      <OverviewBarChart scope={view} forecastVersion={forecastVersion} />
     </section>
   );
 }

@@ -672,6 +672,41 @@
   overflow-x: auto;
 }
 
+/* ---- Bounded panel height --------------------------------------------------
+   The All Facilities table and the Future Payments tile are reveal panels whose
+   height is driven by row count — 15 facilities plus a header, or an ERA tile
+   carrying a group list, an overdue strip and two edit strips. Unbounded, they
+   push the Master chart entirely below the fold, so opening one to check a
+   number costs you the chart you were comparing it against.
+
+   min(60vh, 30rem): 60vh keeps roughly a third of the viewport for the page
+   around it on any screen, and the 30rem ceiling stops a very tall monitor from
+   handing back a panel so long the bound does nothing. Both panels get the SAME
+   value so two open at once stay predictable.
+
+   `overscroll-behavior: contain` stops a scroll that reaches the panel's end
+   from continuing into the page — otherwise flicking through facilities jumps
+   the whole Overview, which reads as the page having lost your place.
+--------------------------------------------------------------------------- */
+[data-ths='v2'] .ths-panel-scroll {
+  max-height: min(60vh, 30rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Inside a bounded panel, the two rows a reader navigates BY stay put: the
+   header names the columns and the TOTALS row is the figure the whole table
+   exists to produce. Letting either scroll away turns a bounded table into a
+   worse version of an unbounded one — you would scroll to the end just to read
+   the total, which is exactly what the height bound was meant to save.
+   z-index 2 beats the sticky thead's 1 so the two never fight at the seam. */
+[data-ths='v2'] .ths-panel-scroll .ths-table-total td {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  background: var(--color-surface);
+}
+
 /* ---- Clickable chart -------------------------------------------------------
    recharts writes `cursor: 'default'` into .recharts-wrapper's INLINE style
    (generateCategoricalChart), and an inline style on the child beats `pointer`

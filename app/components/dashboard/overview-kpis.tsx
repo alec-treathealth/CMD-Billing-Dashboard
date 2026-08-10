@@ -29,7 +29,7 @@
  * that needs to change scope once the real data layer lands.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { CalendarClock, ChevronDown, Filter, Table2, X } from 'lucide-react';
+import { CalendarClock, ChevronDown, Filter, Plus, Table2, X } from 'lucide-react';
 
 import { Skeleton } from '@/components/ui/skeleton';
 import { ControlSelect } from '@/components/data-grid';
@@ -44,6 +44,11 @@ import {
   loadUpcomingOverrides,
   saveUpcomingManual,
   deleteUpcomingManual,
+  matchUpcomingManual,
+  loadManualDeposits,
+  addManualDeposit,
+  removeManualDeposit,
+  type ManualDepositRow,
   type CollectionsDailyResult,
   type CollectionsKpis,
   type CollectionsYoy,
@@ -51,16 +56,21 @@ import {
 } from '@/lib/actions';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID, viewToEntityIds, type DashboardView } from '@/lib/views';
 import {
+  AddForecastForm,
   EraUpcomingBody,
   ForecastEditBanner,
+  payerSuggestions,
   type ForecastEditIntent,
   type ForecastFacilityOption,
 } from './era-upcoming';
 import { runForecastEdit, type ForecastEditOutcome } from '@/lib/forecast/edit-feedback';
 import { activeFacilityCodesForEntity } from '../../../src/collections/cmdCustomers';
+// The Overview tab's name for the no-facility bucket. Deliberately NOT the shared
+// UNASSIGNED_FACILITY_LABEL, which the Collections tab still uses — see OTHER_FACILITY_LABEL.
+import { OTHER_FACILITY_LABEL } from '../../../src/collections/summaryTypes';
 import type { EraUpcomingSummary } from '../../../src/veris/era835Upcoming.js';
 import type { UpcomingOverrideSummary } from '../../../src/veris/upcomingOverride.js';
-import type { ManualForecastRow } from '../../../src/veris/upcomingForecast';
+import { resolveForecast, type ManualForecastRow } from '../../../src/veris/upcomingForecast';
 import { useWidget } from './widgets';
 
 const MONTH_NAMES = [
@@ -272,13 +282,25 @@ function PanelToggleButton({
 export function OverviewKpis({
   view,
   canEditForecast = false,
+  forecastVersion = 0,
+  onForecastChange,
 }: {
   view: DashboardView;
   /** super_admin only — surfaces the Future Payments edit controls. */
   canEditForecast?: boolean;
+  /**
+   * Bumped by ANY successful forecast write on the page, including one made by a sibling.
+   * Folded into this subtree's loader deps so the Future Payments tile re-reads after the
+   * top-level Add form writes — the two are no longer parent and child, so a shared counter
+   * is what keeps them from disagreeing about what the operator just did.
+   */
+  forecastVersion?: number;
+  /** Call after a successful forecast write so the Master BXR Chart re-reads too. */
+  onForecastChange?: () => void;
 }) {
   const [facilitiesOpen, setFacilitiesOpen] = useState(false);
   const [eraOpen, setEraOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
   // `view` is the active tenant scope. It is passed to every collections load* action (which
   // re-derives the entitled business_entity_id(s) SERVER-SIDE — the client value is only a hint)
   // and used as the useWidget/effect dependency, so switching the view re-fetches for the new
@@ -442,8 +464,29 @@ export function OverviewKpis({
           <CalendarClock className="h-4 w-4" aria-hidden />
           {futurePaymentsTitle(view)}
         </PanelToggleButton>
+        {/* SUPER-ADMIN ONLY, and gated on the SAME two conditions as every other forecast
+            control: the role (canEditForecast, decided server-side in page.tsx) AND a single
+            tenant in scope (forecastFacilityOptions is empty exactly on Consolidated, where
+            singleWriteEntity would reject the write). Rendering it on Consolidated would be a
+            button whose every submission fails — the dead-control class this codebase has
+            already been bitten by. The Server Action re-checks both regardless. */}
+        {canEditForecast && forecastFacilityOptions.length > 0 && (
+          <PanelToggleButton open={addOpen} onToggle={() => setAddOpen((s) => !s)}>
+            <Plus className="h-4 w-4" aria-hidden />
+            Add expected payment
+          </PanelToggleButton>
+        )}
       </div>
 
+      {/* Above both reveal panels: this is a CREATE control, and burying it under the lists it
+          feeds is what made it undiscoverable in its old table-bottom position. */}
+      <AddForecastPanel
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        view={view}
+        facilityOptions={forecastFacilityOptions}
+        onSaved={onForecastChange}
+      />
       <AllFacilitiesTable
         open={facilitiesOpen}
         onClose={() => setFacilitiesOpen(false)}
@@ -458,9 +501,331 @@ export function OverviewKpis({
         view={view}
         canEdit={canEditForecast}
         facilityOptions={forecastFacilityOptions}
+        externalVersion={forecastVersion}
+        onChanged={onForecastChange}
       />
     </div>
   );
+}
+
+/**
+ * "Add an expected payment" as its own reveal panel at the top of Overview.
+ *
+ * WHY IT IS NOT INSIDE THE FUTURE PAYMENTS TILE ANY MORE. It was rendered at the bottom of
+ * that tile — below the upcoming list, the overdue strip and the hidden strip — and the tile
+ * itself is collapsed by default. Creating a forecast row therefore took a click to open the
+ * panel, a scroll past three sections, and prior knowledge that a form was down there at all.
+ * A create control has to be reachable before you have read the list it adds to.
+ *
+ * IT FETCHES ITS OWN COPY OF THE FORECAST, and only while open. The payer type-ahead is built
+ * from the same `payerSuggestions(resolved.rows, era.groups)` the tile used, so hoisting the
+ * form without hoisting that read would have silently downgraded the field to a bare text box.
+ * The duplicate read is bounded (one on-demand open, three actions) and buys one definition of
+ * the suggestion list instead of two that drift.
+ *
+ * NOT A SECURITY BOUNDARY. The caller renders this only for a super admin with one tenant in
+ * scope; saveUpcomingManual re-checks the role, re-derives the tenant server-side, re-checks
+ * facility ownership and liveness, and writes the claims.access_audit row.
+ */
+function AddForecastPanel({
+  open,
+  onClose,
+  view,
+  facilityOptions,
+  onSaved,
+}: {
+  open: boolean;
+  onClose: () => void;
+  view: DashboardView;
+  facilityOptions: ForecastFacilityOption[];
+  onSaved?: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [outcome, setOutcome] = useState<ForecastEditOutcome | null>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+
+  // Suggestions only. A failure here degrades the payer field to free text — which is exactly
+  // what it was before this panel existed — so it is deliberately silent and never blocks the
+  // form. The form is the point; the type-ahead is an affordance.
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    setSuggestions([]);
+    Promise.all([loadEraUpcoming(view), loadUpcomingOverrides(view), loadUpcomingManual(view)])
+      .then(([era, ovr, man]) => {
+        if (!live || !era.ok) return;
+        // BOTH partitions, exactly as EraUpcomingBody does it. An overdue row's payer is just
+        // as valid a suggestion as an upcoming one — and on a book that is entirely overdue
+        // (a real state this tile has a dedicated branch for) `upcoming` alone is empty.
+        const resolved = resolveForecast(
+          ovr.ok ? [...ovr.data.upcoming.rows, ...ovr.data.overdue.rows] : [],
+          man.ok ? man.data.rows : [],
+        );
+        setSuggestions(payerSuggestions(resolved.rows, era.data.groups));
+      })
+      .catch(() => {
+        /* type-ahead only — see above */
+      });
+    return () => {
+      live = false;
+    };
+  }, [open, view]);
+
+  // Clear stale feedback on close/view change, matching EraUpcomingPanel. Not on a save: the
+  // success message is the whole point of the save and must outlive it.
+  useEffect(() => {
+    setOutcome(null);
+  }, [open, view]);
+
+  async function applyEdit(intent: ForecastEditIntent) {
+    setBusy(true);
+    setOutcome({ tone: 'busy', text: 'Saving…' });
+    const { outcome: result, refetch } = await runForecastEdit(intent, view, {
+      save: saveUpcomingManual,
+      remove: deleteUpcomingManual,
+      match: matchUpcomingManual,
+    });
+    setOutcome(result);
+    setBusy(false);
+    // Tell the page, not just this panel. The write has to reach the Future Payments tile AND
+    // the Master BXR Chart's forecast series — the operator's whole reason for adding a row is
+    // that it should show up, and "it appears after the next cron" is the bug being fixed.
+    if (refetch) onSaved?.();
+  }
+
+  if (!open) return null;
+  return (
+    <div className="ths-card ths-elev-sm">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h3 className="ths-card-title">Add an expected payment</h3>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close add expected payment"
+          className="ths-btn ths-btn-ghost ths-btn-icon ths-btn-sm"
+        >
+          <X className="h-4 w-4" aria-hidden />
+        </button>
+      </div>
+      <ForecastEditBanner outcome={outcome} />
+      <ManualDepositSection view={view} facilityOptions={facilityOptions} onChanged={onSaved} />
+      <div className="mt-4 border-t pt-4" style={{ borderColor: 'var(--color-divider)' }}>
+        <p className="ths-card-meta mb-2">
+          Or schedule a <span className="font-medium">future</span> expected payment. This does
+          not count toward MTD until the money actually arrives — it appears on the Future
+          Payments tile only.
+        </p>
+        <AddForecastForm
+          facilityOptions={facilityOptions}
+          payerSuggestions={suggestions}
+          busy={busy}
+          onEdit={(intent) => void applyEdit(intent)}
+        />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * RECORD A PAYMENT CMD HAS NOT POSTED YET — the half that actually moves the numbers.
+ *
+ * Writes `collections.daily_collections` with source_tag='manual' (migration 0096), which the
+ * MTD/YTD cards, the All Facilities table and the Master chart all read through
+ * daily_collections_resolved. A forecast row does none of that, which is what made the original
+ * feature useless: "if it doesn't add to the actual MTD total or All Facilities table it's
+ * useless" (Alec, 2026-08-10).
+ *
+ * NO PAYER FIELD, and that is a real limitation rather than an oversight. daily_collections is
+ * facility-day grain — checks, EFT, gross — with no payer column anywhere in it, and none of
+ * the three surfaces this feeds displays a payer. Collecting one here would either be silently
+ * discarded on write or force a second row in a second table to hold it. The Future Payments
+ * forecast form below still takes a payer, because 023/024 do have the column.
+ *
+ * DOUBLE COUNTING IS FLAGGED, NEVER AUTO-RESOLVED. Once CMD posts a deposit for the same
+ * facility-day, `cmd_now_covers` goes true and the row is marked — but it keeps counting until
+ * a human removes it. Auto-suppressing would swallow a genuine second same-day payment
+ * invisibly; that trade was considered and rejected.
+ */
+function ManualDepositSection({
+  view,
+  facilityOptions,
+  onChanged,
+}: {
+  view: DashboardView;
+  facilityOptions: ForecastFacilityOption[];
+  onChanged?: () => void;
+}) {
+  const [rows, setRows] = useState<ManualDepositRow[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<ForecastEditOutcome | null>(null);
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    let live = true;
+    loadManualDeposits(view)
+      .then((r) => {
+        if (live) setRows(r.ok ? r.data.rows : []);
+      })
+      .catch(() => {
+        /* the form still works without the list; a failed read must not block a write */
+      });
+    return () => {
+      live = false;
+    };
+  }, [view, tick]);
+
+  async function submit(form: HTMLFormElement) {
+    const data = new FormData(form);
+    setBusy(true);
+    setNote({ tone: 'busy', text: 'Recording…' });
+    const r = await addManualDeposit(
+      {
+        facilityCode: String(data.get('facility') ?? ''),
+        paymentDate: String(data.get('date') ?? ''),
+        method: String(data.get('method') ?? 'EFT') === 'Check' ? 'Check' : 'EFT',
+        amount: String(data.get('amount') ?? '').trim(),
+      },
+      view,
+    );
+    setBusy(false);
+    if (r.ok) {
+      setNote({ tone: 'ok', text: 'Recorded — it now counts toward MTD and All Facilities.' });
+      form.reset();
+      setTick((t) => t + 1);
+      // The chart and the KPI cards live outside this subtree; the page counter reaches them.
+      onChanged?.();
+    } else {
+      setNote({ tone: 'error', text: depositErrorText(r.error) });
+    }
+  }
+
+  async function remove(id: number) {
+    setBusy(true);
+    setNote({ tone: 'busy', text: 'Removing…' });
+    const r = await removeManualDeposit(id, view);
+    setBusy(false);
+    // `removed: false` means the row was already gone — honest, and still worth reloading,
+    // because it means this list is stale (same reasoning as the forecast delete path).
+    setNote(
+      r.ok
+        ? r.removed
+          ? { tone: 'ok', text: 'Removed — it no longer counts toward MTD.' }
+          : { tone: 'info', text: 'That payment was already removed. Nothing changed.' }
+        : { tone: 'error', text: depositErrorText(r.error) },
+    );
+    setTick((t) => t + 1);
+    onChanged?.();
+  }
+
+  return (
+    <div>
+      <p className="ths-card-meta mb-2">
+        Record a payment you have received that CollaborateMD has not posted yet. It counts
+        toward <span className="font-medium">MTD</span>, the All Facilities table and the chart
+        immediately.
+      </p>
+      <ForecastEditBanner outcome={note} />
+      <form
+        className="flex flex-wrap items-end gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit(e.currentTarget);
+        }}
+      >
+        <label className="flex flex-col gap-1 text-xs">
+          Facility
+          <select name="facility" required className="ths-input" aria-label="Facility">
+            {facilityOptions.map((f) => (
+              <option key={f.code} value={f.code}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs">
+          Date received
+          <input type="date" name="date" required className="ths-input" aria-label="Date received" />
+        </label>
+        <label className="flex flex-col gap-1 text-xs">
+          Method
+          <select name="method" className="ths-input" aria-label="Payment method">
+            <option value="EFT">EFT</option>
+            <option value="Check">Check</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs">
+          Amount
+          <input
+            type="text"
+            inputMode="decimal"
+            name="amount"
+            required
+            // Mirrors the MONEY regex in actions.ts and 0096's positive-amount CHECK. The
+            // browser blocks a bad value and announces it ON the field, before any round trip.
+            pattern="\d{1,10}(\.\d{1,2})?"
+            title="Dollars, up to two decimals — e.g. 4200 or 4200.50"
+            className="ths-input ths-num"
+            aria-label="Amount received"
+          />
+        </label>
+        <button type="submit" className="ths-btn ths-btn-primary ths-btn-sm" disabled={busy}>
+          Record payment
+        </button>
+      </form>
+
+      {rows.length > 0 && (
+        <ul className="mt-3 flex flex-col gap-1.5">
+          {rows.map((d) => (
+            <li key={d.id} className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="ths-tag ths-tag-accent-2">Recorded</span>
+              <span className="ths-num tabular-nums">{money(d.gross_amount)}</span>
+              <span>
+                {d.facility_code} · {d.payment_date} ·{' '}
+                {Number(d.checks_amount) > 0 ? 'Check' : 'EFT'}
+              </span>
+              {/* The prompt, not an automatic removal — see the component header. */}
+              {d.cmd_now_covers && (
+                <span className="ths-tag ths-tag-warn">
+                  CMD has now posted this facility-day — remove to avoid double counting
+                </span>
+              )}
+              <button
+                type="button"
+                className="ths-btn ths-btn-ghost ths-btn-sm"
+                disabled={busy}
+                aria-label={`Remove recorded payment: ${d.facility_code} ${d.payment_date}`}
+                onClick={() => void remove(d.id)}
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** Server codes → an operator-actionable sentence. Unknown codes never print the code. */
+function depositErrorText(code: string): string {
+  switch (code) {
+    case 'forbidden':
+      return 'You do not have permission to record payments.';
+    case 'pick_a_tenant_view':
+      return 'Switch to the BXR or Indigo view first — a payment has to name one company’s book.';
+    case 'facility_not_in_tenant':
+      return 'That facility is not in this view’s book. Switch to the view that owns it.';
+    case 'facility_retired':
+      return 'That facility’s account is closed, so no payment can arrive for it.';
+    case 'bad_amount':
+      return 'Enter an amount in dollars, up to two decimals — e.g. 4200 or 4200.50.';
+    case 'bad_date':
+      return 'Enter the date received as a calendar date.';
+    default:
+      // write_failed and anything unrecognised: the outcome is genuinely unknown, so the
+      // message must not claim either way, and internals never reach the operator.
+      return 'That may not have been saved. Reopen this panel to check before trying again.';
+  }
 }
 
 /**
@@ -484,6 +849,8 @@ function EraUpcomingPanel({
   view,
   canEdit: hasEditRole,
   facilityOptions,
+  externalVersion,
+  onChanged,
 }: {
   open: boolean;
   /** See AllFacilitiesTable.onClose — the toggle button owns this state. */
@@ -494,6 +861,15 @@ function EraUpcomingPanel({
   /** The active tenant's facilities — the only valid targets for a manual add. Empty on
    *  Consolidated, where a write has no single tenant to name. */
   facilityOptions: ForecastFacilityOption[];
+  /**
+   * Page-level forecast counter. Bumped by a SIBLING's write (the top-of-page Add form), and
+   * folded into the loader deps below so this tile re-reads. Without it, adding a payment from
+   * the new button would leave an already-open tile showing the pre-write list — the row would
+   * be in the database and absent from the surface that exists to display it.
+   */
+  externalVersion: number;
+  /** Bubble this panel's own successful writes up, so the chart's forecast series re-reads. */
+  onChanged?: () => void;
 }) {
   /**
    * EDITABLE = THE ROLE **AND** A SINGLE TENANT IN SCOPE.
@@ -556,7 +932,11 @@ function EraUpcomingPanel({
     return () => {
       live = false;
     };
-  }, [open, view, reloadKey]);
+    // externalVersion sits alongside reloadKey deliberately rather than replacing it: this
+    // panel's own writes stay local and instant, while a sibling's write reaches it through
+    // the page counter. Collapsing the two would make every tile write also re-render the
+    // chart's forecast series, which is correct but noisier than it needs to be.
+  }, [open, view, reloadKey, externalVersion]);
 
   // Clear the feedback on panel close and on a view change — deliberately NOT on reloadKey.
   // reloadKey is bumped by the very write whose outcome we are showing, so folding this into the
@@ -591,10 +971,18 @@ function EraUpcomingPanel({
     const { outcome, refetch } = await runForecastEdit(intent, view, {
       save: saveUpcomingManual,
       remove: deleteUpcomingManual,
+      // 033: confirming a landed MANUAL add reconciles the row in place instead of writing a
+      // second 'suppress' beside it. Without this dep a 'match' intent reports unreachable.
+      match: matchUpcomingManual,
     });
     setEditOutcome(outcome);
     setBusy(false);
-    if (refetch) setReloadKey((k) => k + 1);
+    if (refetch) {
+      setReloadKey((k) => k + 1);
+      // A Remove or a Mark-landed here changes what the chart's forecast series should show,
+      // so the page has to hear about it too — not just this tile.
+      onChanged?.();
+    }
   }
 
   if (!open) return null;
@@ -645,15 +1033,20 @@ function EraUpcomingPanel({
       {status === 'error' ? (
         <div className="ths-alert">Unable to load future payments.</div>
       ) : status === 'ready' && data ? (
-        <EraUpcomingBody
-          data={data}
-          overrides={overrides}
-          manual={manual}
-          canEdit={canEdit}
-          busy={busy}
-          facilityOptions={facilityOptions}
-          onEdit={(intent) => void applyEdit(intent)}
-        />
+        // Same height bound as the All Facilities table. This tile is the taller of the two —
+        // a group list, an overdue strip, a stale strip, a hidden strip and a reconciled strip
+        // can all be on screen at once — so unbounded it buried the Master chart entirely.
+        <div className="ths-panel-scroll">
+          <EraUpcomingBody
+            data={data}
+            overrides={overrides}
+            manual={manual}
+            canEdit={canEdit}
+            busy={busy}
+            facilityOptions={facilityOptions}
+            onEdit={(intent) => void applyEdit(intent)}
+          />
+        </div>
       ) : (
         <div className="ths-card-meta py-6 text-center">Loading…</div>
       )}
@@ -808,7 +1201,10 @@ function AllFacilitiesTable({
       .map((f) => {
         const dim = f.facility_code ? dimByCode.get(f.facility_code) : undefined;
         return {
-          label: dim?.display_acronym ?? f.facility_name ?? '(unassigned)',
+          // "Interest Payments/Other", not "(unassigned)" — Alec, 2026-08-10. See
+          // OTHER_FACILITY_LABEL for why this is a display name and NOT a classifier, and why
+          // the Collections tab deliberately keeps the older wording.
+          label: dim?.display_acronym ?? f.facility_name ?? OTHER_FACILITY_LABEL,
           careSetting: dim?.care_setting ?? null,
           book: bookOf(f.business_entity_id),
           checks: f.checks,
@@ -817,7 +1213,23 @@ function AllFacilitiesTable({
         };
       })
       // A 'BOTH' facility (serves inpatient AND outpatient) is a member of both filters.
-      .filter((r) => setting === 'ALL' || r.careSetting === setting || r.careSetting === 'BOTH')
+      //
+      // ⚠️ AN UNCLASSIFIED ROW (careSetting === null) SURVIVES EVERY SETTING FILTER, and that
+      // is the fix, not an oversight. It used to be dropped — `r.careSetting === setting` is
+      // false for null — while the MTD/YTD cards above kept counting it, because those read
+      // `kpis.mtd`/`kpis.ytd`, which sum `by_facility` UNFILTERED. So selecting IP or OP
+      // silently removed money from the TOTALS row while the card above still showed it, with
+      // nothing on screen saying the two now disagreed.
+      //
+      // Nothing triggers it today: all 15 BXR facilities carry a care_setting (measured
+      // 2026-08-10, 9 IP / 6 OP) and there are zero null-facility deposit rows. It is one
+      // unmapped facility away from being live, which is exactly when a silent subtraction is
+      // hardest to notice — the number just looks a bit low.
+      //
+      // Showing it under an IP filter is the lesser wrong: it is money, it is real, and it is
+      // labelled "Interest Payments/Other" so a reader can see it is not classified rather
+      // than having it vanish.
+      .filter((r) => setting === 'ALL' || r.careSetting === null || r.careSetting === setting || r.careSetting === 'BOTH')
       // Book filter: an unattributable row (book === null) is excluded by a specific book rather
       // than silently counted under it — the TOTALS row must equal the book actually selected.
       .filter((r) => effectiveBook === 'ALL' || r.book === effectiveBook)
@@ -836,6 +1248,32 @@ function AllFacilitiesTable({
       ),
     [rows],
   );
+
+  /**
+   * RECONCILIATION AGAINST THE MTD CARD — the whole point of this block.
+   *
+   * The MTD Gross card above sums `kpis.by_facility` with no filter at all. This table's TOTALS
+   * row sums the FILTERED rows. Those are two different numbers by construction whenever a
+   * Setting or Book filter is active, and until now nothing on screen said so — a reader
+   * comparing the card to the table had no way to tell a legitimate narrowing from money going
+   * missing.
+   *
+   * So: state which it is. When no filter is active the two MUST agree, and a discrepancy is a
+   * real defect the caption surfaces instead of hiding. When a filter IS active the caption
+   * names the excluded amount, so the arithmetic closes either way.
+   *
+   * Current month only. A past month's rows come from loadCollectionsDailyRange, which the MTD
+   * card never reads, so there is no card to reconcile against and claiming one would be a
+   * fabricated check.
+   */
+  const reconciliation = useMemo(() => {
+    if (!isCurrent) return null;
+    const unfiltered = kpis.mtd.gross;
+    // Cents, because these are two float sums of the same decimal data and an exact === would
+    // report a phantom discrepancy on a rounding artifact.
+    const diff = Math.round((unfiltered - totals.gross) * 100) / 100;
+    return { unfiltered, diff, filtered: setting !== 'ALL' || effectiveBook !== 'ALL' };
+  }, [isCurrent, kpis, totals.gross, setting, effectiveBook]);
 
   // Month options: current month + every preceding month of the current year (reverse-chron).
   const monthOptions = currentMonth ? Array.from({ length: currentMonth }, (_, i) => currentMonth - i) : [];
@@ -942,8 +1380,11 @@ function AllFacilitiesTable({
           </div>
         )
       ) : (
-        <div className="ths-scroll-x">
-          <table className="ths-table">
+        // Bounded height + sticky head/total: 15 facilities plus a header pushed the Master
+        // chart off the page, so opening this to read a number cost you the chart you were
+        // comparing it to. See .ths-panel-scroll in ths-v2.css.
+        <div className="ths-scroll-x ths-panel-scroll">
+          <table className="ths-table ths-table-sticky">
             <thead>
               <tr>
                 <th>Facility</th>
@@ -978,6 +1419,30 @@ function AllFacilitiesTable({
               </tr>
             </tbody>
           </table>
+          {/* THE TIE-OUT TO THE MTD CARD. Without this the reader has two gross figures on one
+              screen and no way to tell a deliberate narrowing from money going missing. Three
+              honest states, never silence:
+                · filtered      → name the excluded amount, so the arithmetic closes
+                · unfiltered OK → say so positively; this is the claim being made
+                · unfiltered ≠  → a real defect. Surface it rather than let the reader find it. */}
+          {reconciliation && (
+            <p className="ths-card-meta mt-2" role="status">
+              {reconciliation.filtered ? (
+                <>
+                  Filtered view. These totals cover the rows shown;{' '}
+                  {money(reconciliation.diff)} of the {money(reconciliation.unfiltered)} MTD Gross
+                  above sits outside the current filters.
+                </>
+              ) : reconciliation.diff === 0 ? (
+                <>Ties to MTD Gross above ({money(reconciliation.unfiltered)}).</>
+              ) : (
+                <span className="ths-text-danger">
+                  These totals do not tie to MTD Gross above ({money(reconciliation.unfiltered)}) —
+                  a difference of {money(reconciliation.diff)} with no filter applied. Report this.
+                </span>
+              )}
+            </p>
+          )}
         </div>
       )}
     </div>

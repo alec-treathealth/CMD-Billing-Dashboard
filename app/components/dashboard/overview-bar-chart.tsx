@@ -51,12 +51,26 @@ import {
   loadCollectionsKpis,
   loadFacilityDimension,
   loadPayerGapRange,
+  loadUpcomingManual,
+  loadUpcomingOverrides,
   type CollectionsDailyResult,
   type CollectionsKpis,
   type FacilityDimensionRow,
   type PayerGapSummary,
 } from '@/lib/actions';
-import { facilityLabel } from '../../../src/collections/summaryTypes';
+// overviewFacilityLabel, not facilityLabel: this tab calls the no-facility bucket
+// "Interest Payments/Other" (Alec, 2026-08-10). The Collections tab keeps "(unassigned)",
+// where the bucket really is group-code lineage and the interest wording would be wrong.
+import { OTHER_FACILITY_LABEL, overviewFacilityLabel } from '../../../src/collections/summaryTypes';
+import {
+  expectedCentsByFacilityForMonth,
+  resolveForecast,
+  type ResolvedForecastRow,
+} from '../../../src/veris/upcomingForecast';
+import {
+  mergeExpectedIntoFacilityRows,
+  type FacilityGrossRow,
+} from '@/lib/forecast/chart-series';
 import type { CmdPayerFacilityRow } from '../../../src/collections/cmdPayerRollup';
 import { MiniBar, useWidget } from './widgets';
 import { tenantBrand } from '@/lib/tenant-branding';
@@ -79,6 +93,14 @@ const CHART = {
   ytd: 'var(--chart-5)',
   grid: 'var(--chart-grid)',
   axis: 'var(--chart-axis)',
+  /**
+   * EXPECTED (operator-keyed, not yet collected). Amber --chart-4 (#9a6a00, 4.5:1) because it
+   * is the only remaining token that reads as "outstanding" without reading as "wrong" —
+   * coral is already Checks and is explicitly decoration in v2, and reusing either teal would
+   * make asserted money indistinguishable from confirmed money at a glance, which is the one
+   * thing this series must never do.
+   */
+  expected: 'var(--chart-4)',
 } as const;
 
 /** Bar hover wash — the accent at 6%, matching the v2 table row-hover weight. */
@@ -140,15 +162,10 @@ type View = 'facility' | 'payer';
 type CareFilter = 'ALL' | 'IP' | 'OP';
 
 /** A single-month gross row per facility (past-month facility view). */
-interface FacilityGrossRow {
-  facility: string;
-  /** Real facility code (drill-down key + IP/OP dimension join), or null if unassigned. */
-  facility_code: string | null;
-  blank: boolean;
-  gross: number;
-  checks: number;
-  eft: number;
-}
+// FacilityGrossRow and mergeExpectedIntoFacilityRows live in app/lib/forecast/chart-series.ts.
+// They are pure, and this component is not importable under the app's plain-node test runner
+// (it reaches @/lib/actions -> app/lib/access.ts -> React cache()), so keeping them here would
+// have made them untestable. Same seam, same reason, as app/lib/forecast/edit-feedback.ts.
 
 /** Aggregate a month's daily rows into one gross/checks/eft total per facility. */
 function aggregateGrossByFacility(rows: CollectionsDailyResult['rows']): FacilityGrossRow[] {
@@ -162,12 +179,14 @@ function aggregateGrossByFacility(rows: CollectionsDailyResult['rows']): Facilit
       existing.eft += r.eft_amount;
     } else {
       byFacility.set(key, {
-        facility: facilityLabel(r),
+        facility: overviewFacilityLabel(r),
         facility_code: r.facility_code,
         blank: r.facility_name === null,
         gross: r.gross_amount,
         checks: r.checks_amount,
         eft: r.eft_amount,
+        // Filled in by mergeExpectedIntoFacilityRows; this aggregate is collections-only.
+        expected: 0,
       });
     }
   }
@@ -182,12 +201,14 @@ function aggregateGrossByFacility(rows: CollectionsDailyResult['rows']): Facilit
 function mtdGrossRows(data: CollectionsKpis): FacilityGrossRow[] {
   return data.by_facility
     .map((r) => ({
-      facility: facilityLabel(r),
+      facility: overviewFacilityLabel(r),
       facility_code: r.facility_code,
       blank: r.facility_name === null,
       gross: r.mtd_gross,
       checks: r.mtd_checks,
       eft: r.mtd_eft,
+      // Collections-only; mergeExpectedIntoFacilityRows adds the forecast series.
+      expected: 0,
     }))
     .sort((a, b) => b.gross - a.gross);
 }
@@ -217,6 +238,10 @@ function FacilityGrossTooltip({
   const prefix = monthLabel ? `${monthLabel} ` : '';
   // gross = checks + eft (verified). The bar splits gross into Checks + EFT; Gross
   // is shown last as the summary total (the bar length), not a stacked segment.
+  //
+  // EXPECTED IS NAMED SEPARATELY AND AFTER GROSS, never folded into it. Someone reading this
+  // tooltip is deciding whether money is in the bank; "Gross" must keep meaning exactly what
+  // CMD confirmed, with the asserted-but-unconfirmed figure standing beside it on its own row.
   return (
     <div className="ths-tooltip">
       <div className="ths-card-title mb-1">{r.facility}</div>
@@ -227,7 +252,16 @@ function FacilityGrossTooltip({
         <dd>{money(r.eft)}</dd>
         <dt>{prefix}Gross</dt>
         <dd className="total">{money(r.gross)}</dd>
+        {r.expected > 0 && (
+          <>
+            <dt>Expected</dt>
+            <dd>{money(r.expected)}</dd>
+          </>
+        )}
       </dl>
+      {r.expected > 0 && (
+        <p className="ths-card-meta mt-1">Expected is operator-keyed, not yet confirmed by CMD.</p>
+      )}
     </div>
   );
 }
@@ -258,6 +292,10 @@ function FacilityGrossBars({
   /** Optional: invoked with the clicked bar's facility_code (drill-down key). */
   onBarClick?: (facilityCode: string) => void;
 }) {
+  // Drives whether the Expected series, its legend entry and its caption exist at all. A book
+  // with no forecast rows must render EXACTLY the chart it rendered before this feature — no
+  // extra legend key, no zero-height segment, no altered caption.
+  const anyExpected = rows.some((r) => r.expected > 0);
   return (
     <>
       {/* Vertical bars (facility on X, money on Y), spread to the full container width. */}
@@ -298,9 +336,30 @@ function FacilityGrossBars({
               stroke={CHART.grid}
             />
             <Tooltip content={<FacilityGrossTooltip monthLabel={monthLabel} />} cursor={{ fill: BAR_CURSOR_FILL }} />
-            {/* Stacked bottom→top: Checks → EFT = month gross (bar height). */}
+            {/* Stacked bottom→top: Checks → EFT = COLLECTED gross, then Expected on top.
+                Expected is last so the collected portion keeps its familiar footprint at the
+                axis and the asserted money reads as sitting above it. The rounded cap moves
+                to Expected only when there is any — see roundedTopKey. */}
             <Bar dataKey="checks" stackId="gross" name={`${monthLabel} Checks`} fill={CHART.checks} radius={[0, 0, 0, 0]} />
-            <Bar dataKey="eft" stackId="gross" name={`${monthLabel} EFT`} fill={CHART.eft} radius={[3, 3, 0, 0]} />
+            <Bar
+              dataKey="eft"
+              stackId="gross"
+              name={`${monthLabel} EFT`}
+              fill={CHART.eft}
+              radius={anyExpected ? [0, 0, 0, 0] : [3, 3, 0, 0]}
+            />
+            {/* Rendered ONLY when there is expected money, so an empty series never adds a
+                legend entry or a zero-height segment to a book that has no forecast rows. */}
+            {anyExpected && (
+              <Bar
+                dataKey="expected"
+                stackId="gross"
+                name="Expected (not yet in CMD)"
+                fill={CHART.expected}
+                fillOpacity={0.55}
+                radius={[3, 3, 0, 0]}
+              />
+            )}
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -308,7 +367,15 @@ function FacilityGrossBars({
       <div className="ths-card-meta flex flex-wrap items-center gap-4">
         <LegendDot color={CHART.checks} label={`${monthLabel} Checks`} />
         <LegendDot color={CHART.eft} label={`${monthLabel} EFT`} />
-        <span className="ml-auto">Bar height = {monthLabel || 'month'} gross.</span>
+        {anyExpected && <LegendDot color={CHART.expected} label="Expected (not yet in CMD)" />}
+        {/* The caption has to change with the data, not stay a fixed sentence: once an
+            expected segment is on screen, "bar height = gross" is false, and a caption that
+            quietly overstates collected money is worse than no caption. */}
+        <span className="ml-auto">
+          {anyExpected
+            ? `Bar height = ${monthLabel || 'month'} collected + expected. Expected is operator-keyed and not yet confirmed by CMD.`
+            : `Bar height = ${monthLabel || 'month'} gross.`}
+        </span>
       </div>
     </>
   );
@@ -338,7 +405,7 @@ interface FacilityYtdRow {
 function ytdRows(data: CollectionsKpis): FacilityYtdRow[] {
   return data.by_facility
     .map((r) => ({
-      facility: facilityLabel(r),
+      facility: overviewFacilityLabel(r),
       facility_code: r.facility_code,
       ytd_gross: r.ytd_gross,
     }))
@@ -622,8 +689,8 @@ function PayerFacilityPanel({
             </thead>
             <tbody>
               {payerRows.map((r) => (
-                <tr key={r.facility_name ?? '(unassigned)'}>
-                  <td>{r.facility_name ?? '(unassigned)'}</td>
+                <tr key={r.facility_name ?? OTHER_FACILITY_LABEL}>
+                  <td>{r.facility_name ?? OTHER_FACILITY_LABEL}</td>
                   <td className="num">{money(r.total_charge)}</td>
                   <td className="num">{money(r.total_allowed)}</td>
                   <td className="num">{money(r.total_paid)}</td>
@@ -815,19 +882,37 @@ function ChartEmpty({
  * entitled to both tenants, so each child's server-side scope (bxr / indigo) is authorized; the
  * server re-derives entity ids from the view and never trusts this client hint.
  */
-export function OverviewBarChart({ scope = 'consolidated' }: { scope?: DashboardView }) {
+export function OverviewBarChart({
+  scope = 'consolidated',
+  forecastVersion = 0,
+}: {
+  scope?: DashboardView;
+  /**
+   * Bumped by the page when a forecast row is added, removed or reconciled. The expected
+   * series re-reads on change, so a payment typed into the top-of-page form appears on this
+   * chart immediately rather than after the next hourly CMD pull — which is the entire point
+   * of the feature.
+   */
+  forecastVersion?: number;
+}) {
   if (scope === 'consolidated') {
     return (
       <div className="space-y-6">
-        <OverviewBarChartSingle scope="bxr" />
-        <OverviewBarChartSingle scope="indigo" />
+        <OverviewBarChartSingle scope="bxr" forecastVersion={forecastVersion} />
+        <OverviewBarChartSingle scope="indigo" forecastVersion={forecastVersion} />
       </div>
     );
   }
-  return <OverviewBarChartSingle scope={scope} />;
+  return <OverviewBarChartSingle scope={scope} forecastVersion={forecastVersion} />;
 }
 
-function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
+function OverviewBarChartSingle({
+  scope,
+  forecastVersion = 0,
+}: {
+  scope: DashboardView;
+  forecastVersion?: number;
+}) {
   // `scope` is the active tenant view. It is passed to every collections load* action (which
   // re-derives the entitled business_entity_id(s) SERVER-SIDE — the client value is only a hint)
   // and used as the useWidget/effect dependency so switching views re-fetches for the new tenant.
@@ -853,6 +938,48 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
   const monthOptions = currentMonth
     ? Array.from({ length: currentMonth }, (_, i) => currentMonth - i)
     : [];
+
+  /**
+   * EXPECTED (operator-keyed) money, read LIVE from the staging forecast tables.
+   *
+   * Deliberately its own read rather than a column on the collections aggregate, because the
+   * two live in different planes and must stay that way: collections.daily_collections_resolved
+   * is MAX-GROSS-WINS per facility-day, so a forecast row written into it would either vanish
+   * or REPLACE a real CMD deposit. Reading it here, and stacking it as a separate labelled
+   * series, is the only shape of this feature that cannot corrupt a collected figure.
+   *
+   * FAIL-SOFT AND SILENT. An ok:false on either half degrades to "no expected money", which
+   * renders exactly the chart that existed before this feature. That is the honest failure
+   * direction: showing no asserted money is a smaller lie than showing collected money that
+   * might be asserted. It also matters operationally — 023/024 are not applied in every
+   * environment, and coupling the Master BXR Chart's health to them would take the primary
+   * product surface down over a feed behaving as designed.
+   */
+  const [expectedRows, setExpectedRows] = useState<ResolvedForecastRow[]>([]);
+  useEffect(() => {
+    let live = true;
+    setExpectedRows([]);
+    Promise.all([loadUpcomingOverrides(scope), loadUpcomingManual(scope)])
+      .then(([ovr, man]) => {
+        if (!live) return;
+        // BOTH partitions: an overdue expected payment is still money the operator says is
+        // coming, and dropping it here would make the chart disagree with the tile.
+        const resolved = resolveForecast(
+          ovr.ok ? [...ovr.data.upcoming.rows, ...ovr.data.overdue.rows] : [],
+          man.ok ? man.data.rows : [],
+        );
+        // `resolved.rows` ONLY — never `hidden` or `matched`. Both are money a human has
+        // already accounted for elsewhere (suppressed, or covered by an 835 that is itself on
+        // the tile), and adding either back here would re-render it as outstanding.
+        setExpectedRows(resolved.rows);
+      })
+      .catch(() => {
+        /* fail-soft — see above */
+      });
+    return () => {
+      live = false;
+    };
+  }, [scope, forecastVersion]);
 
   const [view, setView] = useState<View>('facility');
   const [month, setMonth] = useState<number | null>(null);
@@ -1070,7 +1197,7 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
       table = [
         ['Facility', 'Checks', 'EFT', 'Gross', 'YTD Gross'],
         ...facilities.map((r) => [
-          facilityLabel(r),
+          overviewFacilityLabel(r),
           r.mtd_checks.toFixed(2),
           r.mtd_eft.toFixed(2),
           r.mtd_gross.toFixed(2),
@@ -1106,12 +1233,50 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
       ? { label: `View ${latestName}`, onClick: () => setMonth(currentMonth) }
       : undefined;
 
+  /**
+   * Expected cents per facility for the month currently on screen.
+   *
+   * Month-scoped, not whole-book: the chart shows one month at a time, and folding every
+   * outstanding forecast row into whichever month happened to be selected would attribute
+   * September's expected check to July's bar.
+   *
+   * Applied AFTER filterFacilityRows in the call sites below, so the Setting/Facility
+   * dropdowns narrow the expected series exactly as they narrow the collected one — a
+   * facility filtered out of the bars must not reappear carrying only expected money.
+   */
+  const expectedByCode = useMemo(
+    () =>
+      month === null
+        ? new Map<string, number>()
+        : expectedCentsByFacilityForMonth(expectedRows, anchorYear, month),
+    [expectedRows, anchorYear, month],
+  );
+
+  /** Label a facility that has expected money but no collected row, using the same dimension
+   *  source the bars use so its axis label matches its neighbours. */
+  const labelForCode = (code: string): string | null =>
+    dimByCode.get(code)?.display_acronym ?? null;
+
+  /** Narrow to the visible facilities FIRST, then fold in that month's expected money. */
+  function withExpected(rows: FacilityGrossRow[]): FacilityGrossRow[] {
+    const visible = filterFacilityRows(rows);
+    if (expectedByCode.size === 0) return visible;
+    // Re-apply the same filters to the expected side, so a facility the dropdowns exclude
+    // cannot re-enter the chart through the forecast series.
+    const allowed = new Map(
+      [...expectedByCode].filter(([code]) =>
+        filterFacilityRows([{ facility: code, facility_code: code }]).length > 0,
+      ),
+    );
+    return mergeExpectedIntoFacilityRows(visible, allowed, labelForCode);
+  }
+
   function chartArea() {
     if (view === 'facility') {
       if (isMtd) {
         if (kpisState.status === 'loading') return <ChartLoading />;
         if (kpisState.status === 'error') return <ChartError />;
-        const rows = filterFacilityRows(mtdGrossRows(kpisState.data));
+        const rows = withExpected(mtdGrossRows(kpisState.data));
         if (rows.length === 0) {
           return facilityFiltersActive ? (
             <ChartEmpty
@@ -1130,7 +1295,7 @@ function OverviewBarChartSingle({ scope }: { scope: DashboardView }) {
         return <FacilityGrossBars rows={rows} monthLabel={monthName} onBarClick={setSelectedFacility} />;
       }
       if (past.kind === 'facility') {
-        const rows = filterFacilityRows(past.rows);
+        const rows = withExpected(past.rows);
         if (rows.length === 0) {
           return facilityFiltersActive ? (
             <ChartEmpty
