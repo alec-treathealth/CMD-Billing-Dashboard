@@ -33,6 +33,20 @@ import type { QualifyAiChipId } from './aiChips';
 export const QUALIFY_SLOT_KEYS = ['facility', 'comparator', 'metric', 'horizonDays', 'careSetting'] as const;
 export type QualifySlotKey = (typeof QUALIFY_SLOT_KEYS)[number];
 
+/**
+ * Human-readable label per slot key, for accessible names. The raw key (e.g. `horizonDays`,
+ * `careSetting`) is what an `aria-label={segment.slot}` used to emit verbatim, and AT reads a
+ * camelCase identifier literally rather than as words — this is the fix, and the single source
+ * both `slot-chip.tsx` and its test import from, so the two cannot drift.
+ */
+export const SLOT_LABELS: Record<QualifySlotKey, string> = {
+  facility: 'facility',
+  comparator: 'compare against',
+  metric: 'measure',
+  horizonDays: 'time window',
+  careSetting: 'care setting',
+};
+
 /** Static slot vocabularies. Mirrored EXACTLY by the zod enums in src/collections/qualifyAi.ts —
  *  the test asserts the two lists are identical, because a value accepted here and rejected there
  *  is a chip that silently fails to run, and the reverse is a hole in the firewall. */
@@ -146,6 +160,30 @@ export function slotChoices(snapshot: QualifySnapshot, key: QualifySlotKey): Qua
     case 'careSetting':
       return SLOT_CARE_SETTINGS.map((c) => ({ value: c, label: CARE_SETTING_LABELS[c] || 'any' }));
   }
+}
+
+/**
+ * The template rendered as the plain-language sentence it currently reads as — every text segment
+ * verbatim, every slot segment replaced by the CHOSEN option's label (never the raw value, and
+ * never a facility index). Used to build the chip group's accessible name ("announce the sentence
+ * it is") and the Ask button's name, so a screen reader hears the same question a sighted rep
+ * reads off the chip rather than "group" followed by a run of unlabelled controls. A slot with no
+ * value yet (or whose value has no matching choice) falls back to its human label in brackets so
+ * the sentence stays readable before a rep has picked anything.
+ */
+export function templateSentence(
+  template: QualifyChipTemplate,
+  snapshot: QualifySnapshot,
+  slots: QualifyChipSlots,
+): string {
+  return template.segments
+    .map((segment) => {
+      if (segment.kind === 'text') return segment.text;
+      const value = slots[segment.slot];
+      const label = slotChoices(snapshot, segment.slot).find((c) => String(c.value) === String(value))?.label;
+      return label && label !== '' ? label : `[${SLOT_LABELS[segment.slot]}]`;
+    })
+    .join(' ');
 }
 
 /**

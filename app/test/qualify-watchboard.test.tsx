@@ -167,8 +167,49 @@ test('RecentSearches: re-run only where an echo exists, and the facet line stays
       onClear={() => {}}
     />,
   );
-  const reruns = html.match(/Re-run/g) ?? [];
+  // Counts the visible button, not the substring: the accessible name now also starts with
+  // "Re-run" (WCAG "label in name"), so a raw substring count would double per eligible row.
+  const reruns = html.match(/>↻ Re-run</g) ?? [];
   assert.equal(reruns.length, 1, 'the echo-less row must not offer a re-run it cannot perform');
   assert.match(html, /NON-PHI FACETS ONLY/);
   assert.match(html, /clear history/);
+});
+
+test('RecentSearches: two rows with echoes produce two DISTINCT Re-run accessible names', () => {
+  const html = renderToStaticMarkup(
+    <RecentSearches
+      items={[
+        { id: '1', payer: 'AETNA', prefixEcho: 'GGS', planClass: 'PPO', searchedAt: '2026-08-10T14:22:00Z' },
+        { id: '2', payer: 'CIGNA', prefixEcho: 'ABC', planClass: 'EPO', searchedAt: '2026-08-10T13:00:00Z' },
+      ]}
+      available={true}
+      onRerun={() => {}}
+      onClear={() => {}}
+    />,
+  );
+  const labels = [...html.matchAll(/aria-label="(Re-run search[^"]*)"/g)].map((m) => m[1]);
+  assert.equal(labels.length, 2, 'both rows have an echo and must each carry a labelled Re-run control');
+  assert.notEqual(labels[0], labels[1], 'identical accessible names is the confirmed defect (every row announced as just "Re-run")');
+  assert.match(labels[0]!, /AETNA/);
+  assert.match(labels[0]!, /GGS/);
+  assert.match(labels[1]!, /CIGNA/);
+  assert.match(labels[1]!, /ABC/);
+  // the visible glyph+text is unchanged — only the accessible name gained context
+  assert.match(html, />↻ Re-run</);
+});
+
+test("RecentSearches' section label renders as an <h2>, not a dangling <span>", () => {
+  const html = renderToStaticMarkup(
+    <RecentSearches items={[]} available={true} onRerun={() => {}} onClear={() => {}} />,
+  );
+  assert.match(html, /<h2[^>]*>Recent searches<\/h2>/);
+});
+
+test("WatchersPanel's section label renders as an <h2>, so the panel's own <h3>s no longer dangle", () => {
+  const html = renderToStaticMarkup(
+    <WatchersPanel available={true} trend={[]} patient={[]} onDelete={() => {}} />,
+  );
+  assert.match(html, /<h2[^>]*>Watchers<\/h2>/);
+  // the Trendwatchers / Patient watchers <h3>s are untouched by this fix
+  assert.match(html, /<h3[^>]*>Trendwatchers/);
 });

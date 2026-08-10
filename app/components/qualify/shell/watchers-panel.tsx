@@ -39,7 +39,7 @@ export function WatchersPanel({
 }) {
   return (
     <section aria-label="Watchers" data-testid="qualify-watchers">
-      <ZoneRule label="Watchers" tag="SAVED FROM PAST SEARCHES · ALERTS ON MOVEMENT" action={watchAction} />
+      <ZoneRule label="Watchers" tag="SAVED FROM PAST SEARCHES · ALERTS ON MOVEMENT" action={watchAction} level={2} />
       {readFailed ? (
         <p className="mb-2 rounded-lg border border-status-danger/40 bg-coral50 px-3 py-1.5 font-mono text-[10px] text-status-danger">
           saved watchers could not be read just now — anything below is this session only, and a

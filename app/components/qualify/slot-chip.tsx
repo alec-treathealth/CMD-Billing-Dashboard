@@ -19,7 +19,14 @@
  * The control emits template id + slot values and nothing else. There is no text input here and
  * none may be added; see the `slots` field on QualifyAiInputSchema for why that is structural.
  */
-import { slotChoices, type QualifyChipSlots, type QualifyChipTemplate, type QualifySlotKey } from '../../lib/qualify/chipTemplates';
+import {
+  slotChoices,
+  templateSentence,
+  SLOT_LABELS,
+  type QualifyChipSlots,
+  type QualifyChipTemplate,
+  type QualifySlotKey,
+} from '../../lib/qualify/chipTemplates';
 import type { QualifySnapshot } from '../../lib/qualify/contract';
 
 export function SlotChip({
@@ -49,9 +56,15 @@ export function SlotChip({
     onChange({ ...slots, [key]: value } as QualifyChipSlots);
   };
 
+  // The sentence THIS chip currently reads as, given the picked slot values — the group's
+  // accessible name and the seed for the Ask button's, so AT announces the question rather than
+  // "group" followed by a run of unlabelled controls (the confirmed review finding).
+  const sentence = templateSentence(template, snapshot, slots);
+
   return (
     <div
       role="group"
+      aria-label={sentence}
       data-testid="qualify-slot-chip"
       className={[
         'flex flex-wrap items-center gap-x-1 gap-y-1.5 rounded-xl border px-3 py-2 text-left text-[12.5px] font-semibold leading-snug transition-colors',
@@ -84,7 +97,7 @@ export function SlotChip({
         return (
           <select
             key={i}
-            aria-label={segment.slot}
+            aria-label={SLOT_LABELS[segment.slot]}
             value={value === null ? '' : String(value)}
             onChange={(e) => set(segment.slot, e.target.value)}
             className="max-w-[13rem] cursor-pointer truncate rounded border border-teal200 bg-surface px-1 py-0.5 font-semibold text-teal700 underline decoration-dotted underline-offset-2"
@@ -101,6 +114,7 @@ export function SlotChip({
         type="button"
         onClick={onAsk}
         aria-pressed={active}
+        aria-label={`Ask: ${sentence}`}
         className="ml-auto rounded-lg border border-teal200 px-2 py-1 text-[11.5px] font-semibold text-teal700 transition-colors hover:bg-teal50"
       >
         Ask

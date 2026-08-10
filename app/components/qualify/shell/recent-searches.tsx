@@ -29,6 +29,7 @@ export function RecentSearches({
       <ZoneRule
         label="Recent searches"
         tag="NON-PHI FACETS ONLY · RE-RUN RESOLVES FRESH"
+        level={2}
         action={
           items.length > 0 ? (
             <button
@@ -71,6 +72,9 @@ export function RecentSearches({
                   <button
                     type="button"
                     onClick={() => onRerun(r.prefixEcho!)}
+                    // Per-item context (payer + prefix echo — both non-PHI and already rendered),
+                    // so AT does not announce every row's control as the identical "Re-run".
+                    aria-label={`Re-run search — ${r.payer ?? 'no payer resolved'} · ${r.prefixEcho}`}
                     className="shrink-0 rounded-lg border border-teal200 px-2 py-1 font-mono text-[10px] font-semibold text-teal700 transition-colors hover:bg-teal50"
                   >
                     ↻ Re-run

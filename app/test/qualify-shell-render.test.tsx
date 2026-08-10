@@ -129,4 +129,62 @@ test('the composer is quiet without a snapshot and slots-only with one', () => {
   assert.match(live, /free text never reaches the model/);
   // option VALUES are template ids / indices — never a free string a rep typed
   assert.match(live, /<option value="placement"/);
+  // the SlotChip's own select (facility, for the default 'placement' template) has a human
+  // accessible name, not the bare camelCase slot key.
+  assert.match(live, /aria-label="facility"/);
+});
+
+// ── 4. No positional "on the left" language anywhere in the shell ────────────────────────────────
+// Below the `xl` breakpoint the rail sits ABOVE the board, not beside it, so "on the left" is
+// simply false in that layout. Checked across every stage of every chrome component this file
+// renders — the confirmed review finding named board-zone.tsx, but the defect class is what
+// matters, so lane-rail.tsx and composer.tsx are covered too.
+test('no shell component renders positional "on the left" language', () => {
+  const renders = [
+    renderToStaticMarkup(
+      <LaneRail echo="" readAs={null} hasResolution={false} onReset={() => {}} composer={null}>
+        <p>flow</p>
+      </LaneRail>,
+    ),
+    renderToStaticMarkup(
+      <LaneRail echo="GGS" readAs="read as a 3-character member-ID prefix" hasResolution={true} onReset={() => {}} composer={null}>
+        <p>flow</p>
+      </LaneRail>,
+    ),
+    renderToStaticMarkup(
+      <ThisSearchZone stage="identify" resolution={null} payerGroups={[]} payerPick={null} echo="">
+        <p>answer</p>
+      </ThisSearchZone>,
+    ),
+    renderToStaticMarkup(
+      <ThisSearchZone stage="payer" resolution={RESOLUTION} payerGroups={[group()]} payerPick={null} echo="GGS">
+        <p>answer</p>
+      </ThisSearchZone>,
+    ),
+    renderToStaticMarkup(
+      <ThisSearchZone stage="plan" resolution={RESOLUTION} payerGroups={[group()]} payerPick={null} echo="GGS">
+        <p>answer</p>
+      </ThisSearchZone>,
+    ),
+    renderToStaticMarkup(
+      <ThisSearchZone stage="plan" resolution={RESOLUTION} payerGroups={[group()]} payerPick="AETNA" echo="GGS">
+        <p>answer</p>
+      </ThisSearchZone>,
+    ),
+    renderToStaticMarkup(<QualifyComposer snapshot={null} onAsk={() => {}} />),
+  ];
+  for (const html of renders) {
+    assert.doesNotMatch(html, /on the left/i);
+  }
+});
+
+// ── 5. The board's section labels are real headings, not dangling spans ──────────────────────────
+test("the board's 'This search' section renders as an <h2>, under the rail's single <h1>", () => {
+  const html = renderToStaticMarkup(
+    <ThisSearchZone stage="identify" resolution={null} payerGroups={[]} payerPick={null} echo="">
+      <p>answer</p>
+    </ThisSearchZone>,
+  );
+  assert.match(html, /<h2[^>]*>This search<\/h2>/);
+  assert.doesNotMatch(html, /<span[^>]*>This search<\/span>/);
 });

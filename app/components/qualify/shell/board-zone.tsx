@@ -40,13 +40,13 @@ export function ThisSearchZone({
 }) {
   return (
     <section aria-label="This search" data-testid="qualify-this-search">
-      <ZoneRule label="This search" tag={STAGE_TAGS[stage]} />
+      <ZoneRule label="This search" tag={STAGE_TAGS[stage]} level={2} />
 
       {stage === 'identify' || resolution === null ? (
         <p className="rounded-xl border border-dashed border-line bg-surface px-4 py-6 text-center text-[13px] leading-relaxed text-ink600">
           Nothing resolved yet — <b>the board fills in as you answer the rail</b>.
           <br />
-          Start with a member ID prefix or a full member ID on the left.
+          Start with a member ID prefix or a full member ID in the search lane.
         </p>
       ) : null}
 
@@ -55,7 +55,7 @@ export function ThisSearchZone({
           {echo !== '' ? <b className="font-mono">{echo}</b> : <b>Member ID</b>} matched —{' '}
           {payerGroups.length} carrier{payerGroups.length === 1 ? '' : 's'} possible ·{' '}
           <b>{payerGroups.reduce((n, g) => n + g.planCount, 0)}</b> plans on file across{' '}
-          {payerGroups.reduce((n, g) => n + g.memberCount, 0)} members. Pick the carrier on the left.
+          {payerGroups.reduce((n, g) => n + g.memberCount, 0)} members. Pick the carrier in the lane.
         </p>
       ) : null}
 
@@ -82,7 +82,7 @@ function PayerHero({
   if (group === null) {
     return (
       <p className="rounded-xl border border-line bg-surface px-4 py-3 text-[13px] text-ink600">
-        Carrier picked — choosing a plan on the left narrows this board to it.
+        Carrier picked — choosing a plan in the lane narrows this board to it.
       </p>
     );
   }
@@ -105,16 +105,36 @@ function PayerHero({
           <dd className="font-display text-2xl text-ink900">{group.memberCount}</dd>
         </div>
       </dl>
-      <p className="mt-2 text-[11.5px] text-ink400">Pick a plan on the left — the full answer lands here.</p>
+      <p className="mt-2 text-[11.5px] text-ink400">Pick a plan in the lane — the full answer lands here.</p>
     </div>
   );
 }
 
-/** The mock's `.rule` — a labelled divider with a state tag. Shared by the board's sections. */
-export function ZoneRule({ label, tag, action }: { label: string; tag?: string; action?: ReactNode }) {
+/**
+ * The mock's `.rule` — a labelled divider with a state tag. Shared by the board's sections.
+ *
+ * `level` is opt-in: omit it and the label renders as the original `<span>` (byte-identical for
+ * any caller left unchanged, e.g. `resolution-flow-client.tsx`'s import). Pass a heading level and
+ * the SAME classes render on a real heading element instead — the board's three sections
+ * (This search, Watchers, Recent searches) all do, because their `<h3>`s (WatchersPanel's
+ * Trendwatchers / Patient watchers) were dangling under no `<h2>` and the page's only `<h1>` lives
+ * in the rail's `ResolutionStages`, two levels up.
+ */
+export function ZoneRule({
+  label,
+  tag,
+  action,
+  level,
+}: {
+  label: string;
+  tag?: string;
+  action?: ReactNode;
+  level?: 2 | 3 | 4;
+}) {
+  const Label: 'span' | 'h2' | 'h3' | 'h4' = level === 2 ? 'h2' : level === 3 ? 'h3' : level === 4 ? 'h4' : 'span';
   return (
     <div className="mb-3 mt-6 flex items-center gap-3 first:mt-0">
-      <span className="font-head text-[13px] font-semibold tracking-tight text-ink900">{label}</span>
+      <Label className="font-head text-[13px] font-semibold tracking-tight text-ink900">{label}</Label>
       {tag ? (
         <span className="font-mono text-[9.5px] font-medium uppercase tracking-[1px] text-ink400">{tag}</span>
       ) : null}
