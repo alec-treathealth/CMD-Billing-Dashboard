@@ -8,10 +8,10 @@ paths:
 
 Two separate planes. Never put a file in the wrong directory.
 
-| Plane | Directory | Next number (as of 2026-08-09) |
+| Plane | Directory | Next number (as of 2026-08-10) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0095** — 0092/0093/0094 all applied live (2026-08-06 / 08-08 / 08-09) |
-| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **032** — 029 applied live; **030 and 031 are AUTHORED BUT NOT APPLIED** (031 held on purpose — do not apply it to clear the backlog; see CLAUDE.md) |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0096** — 0092/0093/0094 all applied live (2026-08-06 / 08-08 / 08-09); **0095 consumed its slot without leaving a file**, so 0096 is next (this table said 0095 while CLAUDE.md said 0096 — CLAUDE.md was right) |
+| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **034** — 029/032/033 applied live; **030 and 031 are AUTHORED BUT NOT APPLIED** (031 held on purpose — do not apply it to clear the backlog; see CLAUDE.md) |
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
 0077. 0080/0081/0082 (explorer perf: filter-options matview, rollup trigram

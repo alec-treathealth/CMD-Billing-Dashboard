@@ -76,6 +76,7 @@ import {
   resolveForecast,
   suggestLandedMatches,
   type HiddenForecastRow,
+  type MatchedForecastRow,
   type LandedSuggestion,
   type ManualForecastRow,
   type ResolvedForecastRow,
@@ -466,18 +467,17 @@ export function EraUpcomingBody({
             <HiddenStrip hidden={resolved.hidden} busy={busy} onEdit={onEdit} />
           </div>
         )}
-        {/* The form belongs here too: an empty tile is exactly when a super admin needs to key
-            the first expected payment, and hiding it would send them to the sheet instead. */}
-        {canEdit && (
+        {/* An all-empty tile is a state a reconciliation can CAUSE — matching the last
+            outstanding row empties it — so the undo has to be reachable from here. */}
+        {canEdit && resolved.matched.length > 0 && (
           <div className="mt-3">
-            <AddForecastForm
-              facilityOptions={facilityOptions}
-              payerSuggestions={[]}
-              busy={busy}
-              onEdit={onEdit}
-            />
+            <MatchedStrip matched={resolved.matched} busy={busy} onEdit={onEdit} />
           </div>
         )}
+        {/* The form used to be repeated here so an empty tile still offered a way in. It now
+            lives in the always-visible "Add expected payment" button at the top of the
+            Overview tab, which is strictly MORE reachable from this state than an in-tile
+            form was — the operator no longer has to open a collapsed panel to find it. */}
       </div>
     );
   }
@@ -517,14 +517,10 @@ export function EraUpcomingBody({
         {canEdit && resolved.hidden.length > 0 && (
           <HiddenStrip hidden={resolved.hidden} busy={busy} onEdit={onEdit} />
         )}
-        {canEdit && (
-          <AddForecastForm
-            facilityOptions={facilityOptions}
-            payerSuggestions={[]}
-            busy={busy}
-            onEdit={onEdit}
-          />
+        {canEdit && resolved.matched.length > 0 && (
+          <MatchedStrip matched={resolved.matched} busy={busy} onEdit={onEdit} />
         )}
+        {/* Add form moved to the top-of-Overview button — see the note in the main return. */}
       </div>
     );
   }
@@ -625,14 +621,16 @@ export function EraUpcomingBody({
         <HiddenStrip hidden={resolved.hidden} busy={busy} onEdit={onEdit} />
       )}
 
-      {canEdit && (
-        <AddForecastForm
-          facilityOptions={facilityOptions}
-          payerSuggestions={payerSuggestions(resolved.rows, data.groups)}
-          busy={busy}
-          onEdit={onEdit}
-        />
+      {canEdit && resolved.matched.length > 0 && (
+        <MatchedStrip matched={resolved.matched} busy={busy} onEdit={onEdit} />
       )}
+
+      {/* THE ADD FORM IS NO LONGER HERE. It moved out of this table-bottom position into a
+          standalone "Add expected payment" button at the top of the Overview tab
+          (AddForecastPanel in overview-kpis.tsx), because a create control buried under a
+          list is only discoverable to someone who already knew it existed — and this tile is
+          collapsed by default, so it was two clicks and a scroll from the page. The form
+          component itself is unchanged and is now exported for that call site. */}
 
       {/* Truncation is named PER SOURCE. The two halves cap independently and at different
           numbers, so one blended "breakdown capped" sentence would attribute the cut to the
@@ -694,19 +692,37 @@ function SuggestionStrip({
               {sg.confidence === 'high' ? 'amount and payer match' : 'partial match'}
               {sg.dayGap !== 0 ? ` · ${Math.abs(sg.dayGap)}d ${sg.dayGap > 0 ? 'later' : 'earlier'}` : ''}
             </span>
+            {/* ONE BUTTON, TWO WRITES, chosen by where the row came from.
+                · MANUAL ADD  → reconcile IN PLACE (033 status='matched' + matched_era_key).
+                  The row is ours to address, so saying "this landed" is a column on it.
+                · SHEET ROW   → write a 'suppress' beside it, as before. The sheet is a feed
+                  nothing here can edit, so a decision alongside it is the only way to speak.
+                Before 033 both took the suppress path, which meant confirming a manual add
+                left TWO rows describing one payment — the pair now sitting in the live BXR
+                book (ids 8 and 18). The operator sees no difference; the data does. */}
             <button
               type="button"
               className="ths-btn ths-btn-primary ths-btn-sm"
               disabled={busy}
               onClick={() =>
-                onEdit?.({
-                  op: 'suppress',
-                  facilityCode: sg.forecast.facility_code,
-                  payerLabel: sg.forecast.payer_label,
-                  expectedDate: sg.forecast.expected_date,
-                  reason: 'landed',
-                  matchedEraKey: sg.eraKey,
-                })
+                onEdit?.(
+                  sg.forecast.origin === 'manual' && sg.forecast.manualId !== undefined
+                    ? {
+                        op: 'match',
+                        id: sg.forecast.manualId,
+                        status: 'matched',
+                        matchedEraKey: sg.eraKey,
+                        label: `${sg.forecast.facility_code} · ${sg.forecast.payer_label} · ${sg.forecast.expected_date}`,
+                      }
+                    : {
+                        op: 'suppress',
+                        facilityCode: sg.forecast.facility_code,
+                        payerLabel: sg.forecast.payer_label,
+                        expectedDate: sg.forecast.expected_date,
+                        reason: 'landed',
+                        matchedEraKey: sg.eraKey,
+                      },
+                )
               }
             >
               Confirm landed
@@ -1071,6 +1087,79 @@ function HiddenStrip({
 }
 
 /**
+ * RECONCILED (033): manual adds a human confirmed an 835 already covers.
+ *
+ * WHY THIS STRIP IS NOT OPTIONAL. `resolveForecast` removes a matched row from `rows` and from
+ * `totalCents` — correctly, because the 835 is already on the tile through the confirmed half
+ * and rendering both would show one payment twice. But a row that leaves the tile with no id on
+ * screen is a ONE-WAY DOOR: no control to undo it, and re-keying the same payment through the
+ * add form just revives the row into the same matched state. That is precisely the trap
+ * HiddenStrip was built to close for suppressions, and shipping `matched` without the same
+ * escape hatch would re-open it in a new place.
+ *
+ * ⚠️ NEVER TOTALLED. These amounts are money accounted for elsewhere. Summing them here — or
+ * folding them into the Forecast line, the ERA headline or the overdue subtotal — would
+ * double-count against the 835 that settled them.
+ */
+function MatchedStrip({
+  matched,
+  busy,
+  onEdit,
+}: {
+  matched: MatchedForecastRow[];
+  busy: boolean;
+  onEdit?: (intent: ForecastEditIntent) => void;
+}) {
+  return (
+    <details className="ths-item">
+      <summary className="ths-item-summary ths-add-summary">
+        <span className="ths-item-chevron" aria-hidden>
+          ▸
+        </span>
+        <span className="font-medium">Reconciled ({count(matched.length)})</span>
+        <span className="ths-card-meta">
+          {matched.length === 1 ? 'a payment you added that' : 'payments you added that'} an 835
+          now covers — expand to undo
+        </span>
+      </summary>
+      <ul className="flex flex-col gap-1.5 px-3 pb-3 pt-1">
+        {matched.map((m) => {
+          const label = `${m.manual.facility_code} · ${m.manual.payer_label} · ${m.manual.expected_date}`;
+          return (
+            <li key={m.manual.id} className="flex flex-col gap-0.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="ths-tag ths-tag-neutral">matched to an 835</span>
+                <span className="ths-num tabular-nums">{money(m.amount)}</span>
+                <span>{label}</span>
+                <button
+                  type="button"
+                  className="ths-btn ths-btn-secondary ths-btn-sm"
+                  disabled={busy}
+                  aria-label={`Undo reconciliation: ${m.manual.facility_code} ${m.manual.payer_label} ${m.manual.expected_date}`}
+                  // status 'expected' is the undo: it clears matched_era_key and the row starts
+                  // counting as expected money again.
+                  onClick={() =>
+                    onEdit?.({ op: 'match', id: m.manual.id, status: 'expected', matchedEraKey: null, label })
+                  }
+                >
+                  Undo
+                </button>
+              </div>
+              {/* The 835 is named so the operator can check the decision against the remit
+                  rather than having to trust a tag. Non-PHI: date, facility, payer. */}
+              <span className="ths-card-meta">
+                {m.eraKey ? `Matched to ${m.eraKey}. ` : ''}Undo puts it back on the tile as
+                expected money.
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </details>
+  );
+}
+
+/**
  * One parent row + its subitems, as a native disclosure.
  *
  * The <summary> carries the whole accessible name of the group (date, facility, payer
@@ -1362,7 +1451,7 @@ export function payerSuggestions(
  * and lets the message land next to the field; the Server Action validates independently
  * because a client check is not a control. 024's CHECK constraints are the third layer.
  */
-function AddForecastForm({
+export function AddForecastForm({
   facilityOptions,
   payerSuggestions: payers,
   busy,

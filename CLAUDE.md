@@ -192,10 +192,20 @@ library from `../src` and is the Vercel app root.
 
 Two **separate** migration planes — never mix the directories:
 
-| Plane | Directory | Next number (as of 2026-08-09) |
+| Plane | Directory | Next number (as of 2026-08-10) |
 |---|---|---|
 | Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0096** |
-| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **032** |
+| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **034** |
+
+**Veris 032 and 033 are APPLIED LIVE.** 032 (`intel` writer SELECT grant) arrived on `main`
+before this table said so, which is why "next = 032" was briefly wrong in two places at once —
+re-derive the number, never trust the table alone. **033
+(`staging.expected_payment_manual` soft delete + reconciliation status) was applied
+2026-08-10** via `apply_migration` (pure DDL, no `CONCURRENTLY`, so it runs in a transaction —
+unlike 0081/0092). It is **backward-compatible**: it only adds columns and functions and leaves
+`delete_expected_payment_manual` in place, so it was safe to apply ahead of the code that reads
+it. The reverse order is not safe — `getUpcomingManual` selects `status`/`removed_at`, so
+deploying that code against a pre-033 database 500s the Future Payments tile.
 
 **0095 consumed its slot without leaving a file — the next number is 0096, not 0095.**
 `0095_qualify_rating_history_prune` is in the live ledger (version `20260809073608`) but has no

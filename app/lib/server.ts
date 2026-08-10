@@ -1191,9 +1191,15 @@ export async function getUpcomingManual(entityIds: string[]): Promise<ManualFore
       // correction" button on the tile a silent no-op: deleteUpcomingManual guards with
       // Number.isSafeInteger, and Number.isSafeInteger("15") is false. The generic is the
       // *Db* row on purpose, so returning res.rows unmapped is a tsc error, not a review miss.
+      // 033 adds status/removed_at. Both are SELECTED, not filtered in SQL: the resolver
+      // returns removed rows as their own output so an operator can see what was taken back
+      // and by whom, which a `where removed_at is null` here would make impossible. The
+      // volume argument that would justify filtering does not apply — this is one decision
+      // per human judgement about ~9 sheet rows.
       const res = await client.query<ManualForecastDbRow>(
         `select id, kind, facility_code, payer_label, expected_date::text as expected_date,
-                method_label, amount::text as amount, suppress_reason, matched_era_key
+                method_label, amount::text as amount, suppress_reason, matched_era_key,
+                status, removed_at::text as removed_at
            from staging.expected_payment_manual
           where business_entity_id = $1::uuid
           order by expected_date asc, facility_code asc, payer_label asc, id asc`,
@@ -1254,16 +1260,53 @@ export async function saveUpcomingManualRow(input: {
   return id;
 }
 
-/** Remove one edit. Returns false when the id did not exist for this tenant (idempotent). */
+/**
+ * Remove one edit — a SOFT delete since 033.
+ *
+ * Returns false when no LIVE row matched for this tenant, which covers both "already removed"
+ * and "never existed" and makes a double-click harmless. 033's function carries the
+ * `removed_at IS NULL` predicate, so a second call cannot overwrite the first remover's name.
+ *
+ * ⚠️ NOT staging.delete_expected_payment_manual. That function still exists and still works,
+ * but it is a HARD delete: it destroys the row an existing claims.access_audit entry names,
+ * leaving the audit trail pointing at an id that resolves to nothing. It stays available for a
+ * deliberate hand-run purge; the app path must not use it.
+ */
 export async function removeUpcomingManualRow(
   businessEntityId: string,
   id: number,
+  actorUserId: string,
 ): Promise<boolean> {
-  const { rows } = await readerExecutor().query<{ deleted: boolean }>(
-    'select staging.delete_expected_payment_manual($1::uuid, $2::bigint) as deleted',
-    [businessEntityId, id],
+  const { rows } = await readerExecutor().query<{ removed: boolean }>(
+    'select staging.remove_expected_payment_manual($1::uuid, $2::bigint, $3::uuid) as removed',
+    [businessEntityId, id, actorUserId],
   );
-  return rows[0]?.deleted === true;
+  return rows[0]?.removed === true;
+}
+
+/**
+ * Record a reconciliation decision against an 835 (033).
+ *
+ * 'matched' takes the forecast row out of the tile's count because the 835 is already there;
+ * 'needs_review' leaves it counted and flags it; 'expected' is the undo. The DB function
+ * refuses a non-'expected' status with no era key, and only touches kind='add'.
+ *
+ * NOTHING HERE DECIDES A MATCH. `suggestLandedMatches` proposes and a super admin confirms —
+ * a wrong automatic match silently deletes money from a forecast (024's ruling, still live).
+ */
+export async function setUpcomingManualStatusRow(
+  businessEntityId: string,
+  id: number,
+  status: 'expected' | 'needs_review' | 'matched',
+  matchedEraKey: string | null,
+  actorUserId: string,
+): Promise<boolean> {
+  const { rows } = await readerExecutor().query<{ updated: boolean }>(
+    'select staging.set_expected_payment_manual_status(' +
+      '$1::uuid, $2::bigint, $3, $4, $5::uuid) as updated',
+    [businessEntityId, id, status, matchedEraKey, actorUserId],
+  );
+  return rows[0]?.updated === true;
 }
 
 /**

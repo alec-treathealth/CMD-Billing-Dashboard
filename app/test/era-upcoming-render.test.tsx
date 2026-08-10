@@ -24,6 +24,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
+  AddForecastForm,
   buildUpcomingGroups,
   payerSuggestions,
   centsFromText,
@@ -779,41 +780,58 @@ const FACILITIES = [
   { code: 'KWC', label: 'KWC — KENTUCKY WELLNESS CENTER' },
 ];
 
-test('the add form renders only for a super admin', () => {
-  const withEdit = renderToStaticMarkup(
-    <EraUpcomingBody data={S({})} canEdit facilityOptions={FACILITIES} />,
-  );
-  assert.ok(withEdit.includes('Add an expected payment'), 'super admin gets the form');
-  assert.ok(withEdit.includes('CA MENTAL HEALTH'), 'facilities are selectable, not free text');
+// THE FORM MOVED (2026-08-10). It used to render at the BOTTOM of EraUpcomingBody, below the
+// upcoming list, the overdue strip and the hidden strip — inside a tile that is collapsed by
+// default. Creating a forecast row therefore took a click, a scroll past three sections, and
+// prior knowledge that a form was down there. It now lives in a standalone "Add expected
+// payment" button at the top of the Overview tab (AddForecastPanel in overview-kpis.tsx).
+//
+// These four tests kept their original intent and moved with it: they exercise the exported
+// AddForecastForm directly, which is where the behaviour they were always really about lives.
+// The fifth pins the move itself, so nothing quietly re-adds a second form to the tile.
 
-  const withoutEdit = renderToStaticMarkup(
-    <EraUpcomingBody data={S({})} facilityOptions={FACILITIES} />,
+const renderForm = (facilityOptions: { code: string; label: string }[]) =>
+  renderToStaticMarkup(
+    <AddForecastForm
+      facilityOptions={facilityOptions}
+      payerSuggestions={[]}
+      busy={false}
+      onEdit={() => {}}
+    />,
   );
-  assert.ok(!withoutEdit.includes('Add an expected payment'), 'nobody else sees it');
+
+test('the add form offers facilities as a closed list, never free text', () => {
+  const html = renderForm(FACILITIES);
+  assert.ok(html.includes('Add an expected payment'), 'the form names itself');
+  assert.ok(html.includes('CA MENTAL HEALTH'), 'facilities are selectable, not free text');
+  assert.ok(html.includes('KENTUCKY WELLNESS CENTER'));
 });
 
-test('the form appears on an EMPTY tile too — that is when it is most needed', () => {
-  const html = renderToStaticMarkup(
+test('THE FORM IS GONE FROM THE TILE — it must not render in two places', () => {
+  // Two live forms would be two ways to write the same row, with two states and two banners.
+  // The empty tile is the branch that used to carry its own copy, so it is the one asserted.
+  const empty = renderToStaticMarkup(
     <EraUpcomingBody data={S({})} canEdit facilityOptions={FACILITIES} />,
   );
-  assert.ok(html.includes('No future payments scheduled'), 'still the calm empty read');
-  assert.ok(html.includes('Add an expected payment'), 'and the form is reachable from it');
+  assert.ok(empty.includes('No future payments scheduled'), 'still the calm empty read');
+  assert.ok(!empty.includes('Add an expected payment'), 'the tile no longer carries the form');
 });
 
 test('Consolidated explains instead of offering a form the server would reject', () => {
   // A write must name one tenant; Consolidated resolves to two entity ids, so the action
   // returns 'pick_a_tenant_view'. Offering the form there would be a guaranteed dead end.
-  const html = renderToStaticMarkup(<EraUpcomingBody data={S({})} canEdit facilityOptions={[]} />);
-  assert.ok(!html.includes('Add an expected payment'), 'no form without a single tenant');
+  // The caller ALSO hides the button entirely in that case (overview-kpis.tsx gates on
+  // facilityOptions.length > 0) — this is the form's own second line of defence, which is what
+  // makes a stale open panel safe rather than merely unlikely.
+  const html = renderForm([]);
+  assert.ok(!html.includes('<select'), 'no facility picker without a single tenant');
   assert.ok(html.includes('Switch to the BXR or Indigo view'), 'it says what to do instead');
 });
 
 test('the amount field constrains itself to a money shape in the markup', () => {
-  const html = renderToStaticMarkup(
-    <EraUpcomingBody data={S({})} canEdit facilityOptions={FACILITIES} />,
-  );
   // The browser blocks a bad value and announces it on the field — the accessible place for
   // the message — before the client check or the Server Action ever see it.
+  const html = renderForm(FACILITIES);
   assert.ok(html.includes('pattern="\\d{1,10}(\\.\\d{1,2})?"'), 'money pattern is on the input');
   assert.ok(html.includes('type="date"'), 'native date input, not a parsed text field');
   assert.ok(html.includes('required'), 'the required fields are marked for the browser');

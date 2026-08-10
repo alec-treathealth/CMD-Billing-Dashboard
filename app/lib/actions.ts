@@ -91,6 +91,7 @@ import {
   type UpcomingOverrideSummary,
   getUpcomingManual,
   saveUpcomingManualRow,
+  setUpcomingManualStatusRow,
   removeUpcomingManualRow,
   type ManualForecastRow,
 } from '@/lib/server';
@@ -689,7 +690,14 @@ export async function saveUpcomingManual(
   }
 }
 
-/** Remove one forecast edit (reverting to whatever the sheet says). SUPER-ADMIN ONLY. */
+/**
+ * Remove one forecast edit (reverting to whatever the sheet says). SUPER-ADMIN ONLY.
+ *
+ * SOFT since 033 — the row is tombstoned, not destroyed. The name is unchanged because the
+ * operator-facing meaning is unchanged ("take this decision back"), and renaming it would
+ * churn every call site to describe an implementation detail. What changed is that the
+ * claims.access_audit row written just below now names an id that still resolves to a row.
+ */
 export async function deleteUpcomingManual(
   id: number,
   view?: DashboardView,
@@ -709,9 +717,71 @@ export async function deleteUpcomingManual(
       action: 'delete_upcoming_forecast_edit',
       detail: { manual_id: id, entity: entityId },
     });
-    return { ok: true, deleted: await removeUpcomingManualRow(entityId, id) };
+    return { ok: true, deleted: await removeUpcomingManualRow(entityId, id, actor.id) };
   } catch (err) {
     console.error('deleteUpcomingManual failed:', err instanceof Error ? err.message : String(err));
+    return { ok: false, error: 'write_failed' };
+  }
+}
+
+/** The 835 key format `suggestLandedMatches` stamps: 'YYYY-MM-DD|FACILITY|PAYER'. */
+const ERA_KEY_MAX = 400;
+
+/**
+ * Record that an 835 does (or does not) cover a manual forecast add. SUPER-ADMIN ONLY.
+ *
+ * This is the CONFIRM half of suggest-then-confirm. `suggestLandedMatches` proposes a
+ * candidate with 'high' or 'medium' confidence and never 'confirmed'; a human turns that into
+ * 'matched'. 'needs_review' records a candidate WITHOUT asserting it — the row keeps counting
+ * as expected money and simply carries a flag. 'expected' is the undo.
+ *
+ * WHY THIS IS NOT AUTOMATIC, restated because it is the load-bearing decision: the only stable
+ * identifier on the confirmed side is era_835_payment.check_eft_trace_number, and the CMD
+ * deposit feed that drives the chart has no identifier at all — not a claim id, not a trace
+ * number, not even a payer. Amounts cannot stand in for one either: a remittance differs from
+ * an expected billed amount by contractual adjustment as a matter of course. So a machine
+ * cannot close this loop, and a wrong close silently deletes money from a forecast.
+ */
+export async function matchUpcomingManual(
+  id: number,
+  status: 'expected' | 'needs_review' | 'matched',
+  matchedEraKey: string | null,
+  view?: DashboardView,
+): Promise<{ ok: true; updated: boolean } | { ok: false; error: string }> {
+  const gate = await dashboardAccess();
+  if (!gate.ok || gate.access.role !== 'super_admin' || !gate.access.user) {
+    return { ok: false, error: 'forbidden' };
+  }
+  const actor = gate.access.user;
+  if (!Number.isSafeInteger(id) || id <= 0) return { ok: false, error: 'bad_id' };
+  if (!['expected', 'needs_review', 'matched'].includes(status)) {
+    return { ok: false, error: 'bad_status' };
+  }
+  // Bounded at the trust boundary, mirroring 024's CHECK, so an over-long key surfaces as a
+  // clean message rather than a constraint violation.
+  const key = status === 'expected' ? null : (matchedEraKey ?? '').trim();
+  if (key !== null && (key.length < 1 || key.length > ERA_KEY_MAX)) {
+    return { ok: false, error: 'bad_era_key' };
+  }
+  const entityId = await singleWriteEntity(view);
+  if (!entityId) return { ok: false, error: 'pick_a_tenant_view' };
+  try {
+    await recordAccess({
+      actorEmail: actor.email,
+      actorUserId: actor.id,
+      action: 'match_upcoming_forecast',
+      // NON-PHI: a row id, a status, and an 835 natural key (date|facility|payer).
+      detail: { manual_id: id, status, matched_era_key: key, entity: entityId },
+    });
+    return {
+      ok: true,
+      updated: await setUpcomingManualStatusRow(entityId, id, status, key, actor.id),
+    };
+  } catch (err) {
+    console.error(
+      'matchUpcomingManual failed:',
+      err instanceof Error ? err.message : String(err),
+    );
     return { ok: false, error: 'write_failed' };
   }
 }
