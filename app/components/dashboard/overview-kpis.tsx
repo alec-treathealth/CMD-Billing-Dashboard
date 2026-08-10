@@ -45,6 +45,10 @@ import {
   saveUpcomingManual,
   deleteUpcomingManual,
   matchUpcomingManual,
+  loadManualDeposits,
+  addManualDeposit,
+  removeManualDeposit,
+  type ManualDepositRow,
   type CollectionsDailyResult,
   type CollectionsKpis,
   type CollectionsYoy,
@@ -604,14 +608,224 @@ function AddForecastPanel({
         </button>
       </div>
       <ForecastEditBanner outcome={outcome} />
-      <AddForecastForm
-        facilityOptions={facilityOptions}
-        payerSuggestions={suggestions}
-        busy={busy}
-        onEdit={(intent) => void applyEdit(intent)}
-      />
+      <ManualDepositSection view={view} facilityOptions={facilityOptions} onChanged={onSaved} />
+      <div className="mt-4 border-t pt-4" style={{ borderColor: 'var(--color-divider)' }}>
+        <p className="ths-card-meta mb-2">
+          Or schedule a <span className="font-medium">future</span> expected payment. This does
+          not count toward MTD until the money actually arrives — it appears on the Future
+          Payments tile only.
+        </p>
+        <AddForecastForm
+          facilityOptions={facilityOptions}
+          payerSuggestions={suggestions}
+          busy={busy}
+          onEdit={(intent) => void applyEdit(intent)}
+        />
+      </div>
     </div>
   );
+}
+
+/**
+ * RECORD A PAYMENT CMD HAS NOT POSTED YET — the half that actually moves the numbers.
+ *
+ * Writes `collections.daily_collections` with source_tag='manual' (migration 0096), which the
+ * MTD/YTD cards, the All Facilities table and the Master chart all read through
+ * daily_collections_resolved. A forecast row does none of that, which is what made the original
+ * feature useless: "if it doesn't add to the actual MTD total or All Facilities table it's
+ * useless" (Alec, 2026-08-10).
+ *
+ * NO PAYER FIELD, and that is a real limitation rather than an oversight. daily_collections is
+ * facility-day grain — checks, EFT, gross — with no payer column anywhere in it, and none of
+ * the three surfaces this feeds displays a payer. Collecting one here would either be silently
+ * discarded on write or force a second row in a second table to hold it. The Future Payments
+ * forecast form below still takes a payer, because 023/024 do have the column.
+ *
+ * DOUBLE COUNTING IS FLAGGED, NEVER AUTO-RESOLVED. Once CMD posts a deposit for the same
+ * facility-day, `cmd_now_covers` goes true and the row is marked — but it keeps counting until
+ * a human removes it. Auto-suppressing would swallow a genuine second same-day payment
+ * invisibly; that trade was considered and rejected.
+ */
+function ManualDepositSection({
+  view,
+  facilityOptions,
+  onChanged,
+}: {
+  view: DashboardView;
+  facilityOptions: ForecastFacilityOption[];
+  onChanged?: () => void;
+}) {
+  const [rows, setRows] = useState<ManualDepositRow[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<ForecastEditOutcome | null>(null);
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    let live = true;
+    loadManualDeposits(view)
+      .then((r) => {
+        if (live) setRows(r.ok ? r.data.rows : []);
+      })
+      .catch(() => {
+        /* the form still works without the list; a failed read must not block a write */
+      });
+    return () => {
+      live = false;
+    };
+  }, [view, tick]);
+
+  async function submit(form: HTMLFormElement) {
+    const data = new FormData(form);
+    setBusy(true);
+    setNote({ tone: 'busy', text: 'Recording…' });
+    const r = await addManualDeposit(
+      {
+        facilityCode: String(data.get('facility') ?? ''),
+        paymentDate: String(data.get('date') ?? ''),
+        method: String(data.get('method') ?? 'EFT') === 'Check' ? 'Check' : 'EFT',
+        amount: String(data.get('amount') ?? '').trim(),
+      },
+      view,
+    );
+    setBusy(false);
+    if (r.ok) {
+      setNote({ tone: 'ok', text: 'Recorded — it now counts toward MTD and All Facilities.' });
+      form.reset();
+      setTick((t) => t + 1);
+      // The chart and the KPI cards live outside this subtree; the page counter reaches them.
+      onChanged?.();
+    } else {
+      setNote({ tone: 'error', text: depositErrorText(r.error) });
+    }
+  }
+
+  async function remove(id: number) {
+    setBusy(true);
+    setNote({ tone: 'busy', text: 'Removing…' });
+    const r = await removeManualDeposit(id, view);
+    setBusy(false);
+    // `removed: false` means the row was already gone — honest, and still worth reloading,
+    // because it means this list is stale (same reasoning as the forecast delete path).
+    setNote(
+      r.ok
+        ? r.removed
+          ? { tone: 'ok', text: 'Removed — it no longer counts toward MTD.' }
+          : { tone: 'info', text: 'That payment was already removed. Nothing changed.' }
+        : { tone: 'error', text: depositErrorText(r.error) },
+    );
+    setTick((t) => t + 1);
+    onChanged?.();
+  }
+
+  return (
+    <div>
+      <p className="ths-card-meta mb-2">
+        Record a payment you have received that CollaborateMD has not posted yet. It counts
+        toward <span className="font-medium">MTD</span>, the All Facilities table and the chart
+        immediately.
+      </p>
+      <ForecastEditBanner outcome={note} />
+      <form
+        className="flex flex-wrap items-end gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit(e.currentTarget);
+        }}
+      >
+        <label className="flex flex-col gap-1 text-xs">
+          Facility
+          <select name="facility" required className="ths-input" aria-label="Facility">
+            {facilityOptions.map((f) => (
+              <option key={f.code} value={f.code}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs">
+          Date received
+          <input type="date" name="date" required className="ths-input" aria-label="Date received" />
+        </label>
+        <label className="flex flex-col gap-1 text-xs">
+          Method
+          <select name="method" className="ths-input" aria-label="Payment method">
+            <option value="EFT">EFT</option>
+            <option value="Check">Check</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs">
+          Amount
+          <input
+            type="text"
+            inputMode="decimal"
+            name="amount"
+            required
+            // Mirrors the MONEY regex in actions.ts and 0096's positive-amount CHECK. The
+            // browser blocks a bad value and announces it ON the field, before any round trip.
+            pattern="\d{1,10}(\.\d{1,2})?"
+            title="Dollars, up to two decimals — e.g. 4200 or 4200.50"
+            className="ths-input ths-num"
+            aria-label="Amount received"
+          />
+        </label>
+        <button type="submit" className="ths-btn ths-btn-primary ths-btn-sm" disabled={busy}>
+          Record payment
+        </button>
+      </form>
+
+      {rows.length > 0 && (
+        <ul className="mt-3 flex flex-col gap-1.5">
+          {rows.map((d) => (
+            <li key={d.id} className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="ths-tag ths-tag-accent-2">Recorded</span>
+              <span className="ths-num tabular-nums">{money(d.gross_amount)}</span>
+              <span>
+                {d.facility_code} · {d.payment_date} ·{' '}
+                {Number(d.checks_amount) > 0 ? 'Check' : 'EFT'}
+              </span>
+              {/* The prompt, not an automatic removal — see the component header. */}
+              {d.cmd_now_covers && (
+                <span className="ths-tag ths-tag-warn">
+                  CMD has now posted this facility-day — remove to avoid double counting
+                </span>
+              )}
+              <button
+                type="button"
+                className="ths-btn ths-btn-ghost ths-btn-sm"
+                disabled={busy}
+                aria-label={`Remove recorded payment: ${d.facility_code} ${d.payment_date}`}
+                onClick={() => void remove(d.id)}
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** Server codes → an operator-actionable sentence. Unknown codes never print the code. */
+function depositErrorText(code: string): string {
+  switch (code) {
+    case 'forbidden':
+      return 'You do not have permission to record payments.';
+    case 'pick_a_tenant_view':
+      return 'Switch to the BXR or Indigo view first — a payment has to name one company’s book.';
+    case 'facility_not_in_tenant':
+      return 'That facility is not in this view’s book. Switch to the view that owns it.';
+    case 'facility_retired':
+      return 'That facility’s account is closed, so no payment can arrive for it.';
+    case 'bad_amount':
+      return 'Enter an amount in dollars, up to two decimals — e.g. 4200 or 4200.50.';
+    case 'bad_date':
+      return 'Enter the date received as a calendar date.';
+    default:
+      // write_failed and anything unrecognised: the outcome is genuinely unknown, so the
+      // message must not claim either way, and internals never reach the operator.
+      return 'That may not have been saved. Reopen this panel to check before trying again.';
+  }
 }
 
 /**

@@ -194,8 +194,23 @@ Two **separate** migration planes — never mix the directories:
 
 | Plane | Directory | Next number (as of 2026-08-10) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0096** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0097** |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **035** |
+
+**0096 (manual deposits) is APPLIED LIVE 2026-08-10.** It lets a super admin record money
+in hand that CMD has not posted, as `collections.daily_collections.source_tag = 'manual'`.
+⚠️ **`manual` is ADDITIVE in `daily_collections_resolved`, never a rank participant.** That
+view is max-gross-wins, which is right for `workbook`/`deposit_sheet`/`cmd` — three
+competing imports of the same deposits — but a manual row is money none of them has yet, so
+it is a third `UNION ALL` branch. Folding it into the `row_number()` branch is the one edit
+that silently destroys collected money: a hand-keyed amount would REPLACE a real CMD
+deposit for that facility-day. Verified at apply: view row count, total gross, BXR August
+gross and one facility-day were all byte-identical before and after, and an inserted manual
+row moved MTD by exactly its own amount with the row count going UP by one.
+0096 also narrows `cmd_rollup_writer`'s DELETE/INSERT policies to `source_tag <> 'manual'`,
+so the cron guard is a privilege rather than a predicate in application code.
+**Veris 034 is APPLIED LIVE 2026-08-10** — it drops a partial index 033 created for a query
+that does not exist (measured `idx_scan = 0` against 024's 155). See `veris-data-notes.md`.
 
 **Veris 032 and 033 are APPLIED LIVE.** 032 (`intel` writer SELECT grant) arrived on `main`
 before this table said so, which is why "next = 032" was briefly wrong in two places at once —
