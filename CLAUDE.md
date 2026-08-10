@@ -155,6 +155,35 @@ Open PRs against `staging`, never `main` — use `gh pr create --base staging`
 explicitly. `main` is production; it only receives a PR from `staging` after
 Vercel and Qodo checks pass.
 
+**`main` is GitHub-enforced** — ruleset `20617104`, `enforcement: active`, scoped
+to `~DEFAULT_BRANCH`. It replaced discipline that was not holding on its own: 21
+of the last 100 updates to `main` were direct pushes, two of them carrying
+migrations (0073/0074, 2026-07-29).
+
+| Rule | Effect |
+|---|---|
+| `pull_request` | a PR is required; `required_approving_review_count` is **0** — it gates the route, not review |
+| `creation` + `update` | direct push to `main` is refused |
+| `non_fast_forward` | force-push to `main` is refused |
+| `required_linear_history` | **merge commits are refused — promote with squash or rebase** |
+
+Three consequences, none of them accidental:
+
+- **Checks are read by hand, deliberately.** There is **no `required_status_checks`
+  rule and one is not wanted** — Alec reads Vercel and Qodo himself before
+  promoting. A green check is not a gate and a red one does not disable the merge
+  button; the human is the gate. **Do not propose adding required status checks.**
+- **`required_linear_history` overrides the `pull_request` rule's own
+  `allowed_merge_methods`, which still lists `merge`.** GitHub refuses the merge
+  commit at push time. Promotions through `8fb2917` were true two-parent merges and
+  everything after is squash/rebase, so ahead/behind counts read differently across
+  that boundary.
+- **`staging` carries no ruleset** (`rules/branches/staging` → `[]`), and two actors
+  bypass with `bypass_mode: always`: the repository **admin** role and Integration
+  `1236702` (not Vercel `8329`, not GitHub Actions `15368`). An admin push to `main`
+  therefore succeeds and leaves no disable/re-enable event behind. This is the
+  intended posture — the ruleset stops accidents, not its owner.
+
 ## Repo layout
 
 Monorepo-style **two packages**: the root package is the ingest + query/agent
@@ -165,10 +194,20 @@ Two **separate** migration planes — never mix the directories:
 
 | Plane | Directory | Next number (as of 2026-08-09) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0095** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0096** |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **032** |
 
-**0093 (Qualify rating history) is APPLIED LIVE 2026-08-08** via `apply_migration` — plain
+**0095 consumed its slot without leaving a file — the next number is 0096, not 0095.**
+`0095_qualify_rating_history_prune` is in the live ledger (version `20260809073608`) but has no
+`.sql` and no `_rollback.sql` on any ref: it was an intentional **one-shot retention job**. The
+definer it created, `collections.prune_qualify_rating_history(date)`, was applied at 07:36:08 UTC,
+used once to prune `qualify_policy_rating_daily` below `current_date - 120` (= 2026-04-11, the
+surviving floor), then **dropped in the same session at 07:42:39 UTC** and verified gone. A
+version number is consumed the moment it lands in the ledger — **never reuse one**, even when the
+migration left no file behind, because the ledger row is permanent and a second 0095 would collide
+with it.
+
+**0093 (Qualify rating history) is APPLIED LIVE 2026-08-09** via `apply_migration` — plain
 transactional DDL, so the 0081/0092 autocommit discipline does NOT apply here. It creates
 `collections.qualify_policy_rating_daily` + `qualify_rating_run` + `qualify_prefix_echo` and
 the `record_qualify_prefix_echo` definer. Verified at apply: reader SELECT true · writer

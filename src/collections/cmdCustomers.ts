@@ -37,7 +37,7 @@
  *   INVALID CRITERIA — and TEEN TX / WELLNESS RECOVERY accept it but return no rows. If any of
  *   these becomes active, add its collections.facilities row + the saved filter before listing it.)
  *
- * Indigo (business_entity_id 141d459c…, CMD account 474623): 30 active facility accounts,
+ * Indigo (business_entity_id 141d459c…, CMD account 474623): 29 active facility accounts,
  * confirmed by the business owner. Indigo has no short-code/acronym scheme yet, so facilityCode
  * = the CMD facility ID itself (staging.era_835_adjustment.facility_code is free text). Names
  * below are authoritative — preserve exact spelling/casing; the two CROWN VIEW entries are
@@ -63,6 +63,24 @@
  *   REMOVED 2026-07-09 (shut down / no longer exist, verified 0 rows): 10034063 MAPSONG PC,
  *   10035913 NORTHERN CALIFORNIA MENTAL HEALTH, 10032612 POSTPARTUM MENTAL HEALTH,
  *   10029219 THRIVE MEDICAL SPECIALISTS, 10034039 TREADSTONE SERVICES PC.
+ *
+ *   REMOVED 2026-08-09 — 10035467 RESTORED HOPE RECOVERY. Alec: "this customer no longer exists."
+ *   ⚠ THIS IS A DIFFERENT CLASS FROM THE 2026-08-02 PAIR ABOVE, and the difference is worth keeping:
+ *   those two NEVER succeeded (`last_ok IS NULL`, zero rows ever). This one WORKED and then stopped.
+ *   Measured in collections.cmd_census_run at removal: 15 runs `status='ok'` from 2026-07-22 to
+ *   2026-08-05, then 82 consecutive `fetch_failed` from 2026-08-06 to 2026-08-09 — the signature of
+ *   an account closed CMD-side on 2026-08-06, not of a filter that was never saved. So do NOT read
+ *   this entry as evidence the filter was wrong; if the account is ever reopened the filter is known
+ *   to have been valid under it, and a rows-bearing probe is the only thing needed to re-add it.
+ *
+ *   ITS DATA IS DELIBERATELY LEFT IN PLACE (2026-08-09). Removing a customer from this roster stops
+ *   the cron calling CMD for it; it does not and must not delete history. At removal the facility
+ *   held 8 `collections.daily_collections` rows ($28,843.12 gross, 2026-05-16 → 2026-06-18) that are
+ *   REPORTED on Overview and Collections, plus its `collections.facilities` dimension row that
+ *   labels them. Deleting either would silently restate two months of revenue. `cmd_explorer_rows`
+ *   is genuinely empty for it (0 rows, ever). The 129 `cmd_charge_census` rows are a separate
+ *   question — they are PHI-bearing open charges that can never resolve now — and are held pending
+ *   Alec's call rather than purged as a drive-by.
  */
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../tenants.js';
 
@@ -95,7 +113,7 @@ export const BXR_CUSTOMERS: readonly CmdCustomer[] = [
   { customerId: '10031212', facilityCode: 'TREAT_WA', businessEntityId: BXR_ENTITY_ID }, //      TREAT MENTAL HEALTH WASHINGTON (OP)
 ];
 
-/** Indigo's 30 active facility customer accounts (CMD account 474623). facilityCode = CMD id. */
+/** Indigo's 29 active facility customer accounts (CMD account 474623). facilityCode = CMD id. */
 export const INDIGO_CUSTOMERS: readonly CmdCustomer[] = [
   { customerId: '10026460', facilityCode: '10026460', businessEntityId: INDIGO_ENTITY_ID }, // 405 RECOVERY
   { customerId: '10029373', facilityCode: '10029373', businessEntityId: INDIGO_ENTITY_ID }, // ADDICTION FREE RECOVERY SERVICES
@@ -119,7 +137,6 @@ export const INDIGO_CUSTOMERS: readonly CmdCustomer[] = [
   { customerId: '10034901', facilityCode: '10034901', businessEntityId: INDIGO_ENTITY_ID }, // NEXT FRONTIER RECOVERY
   { customerId: '10021573', facilityCode: '10021573', businessEntityId: INDIGO_ENTITY_ID }, // OPUS HEALTH
   { customerId: '10031652', facilityCode: '10031652', businessEntityId: INDIGO_ENTITY_ID }, // ORANGE COUNTY MENTAL HEALTH
-  { customerId: '10035467', facilityCode: '10035467', businessEntityId: INDIGO_ENTITY_ID }, // RESTORED HOPE RECOVERY
   { customerId: '10028595', facilityCode: '10028595', businessEntityId: INDIGO_ENTITY_ID }, // REVIVAL MENTAL HEALTH
   { customerId: '10026159', facilityCode: '10026159', businessEntityId: INDIGO_ENTITY_ID }, // SADDLEBACK RECOVERY
   { customerId: '10028219', facilityCode: '10028219', businessEntityId: INDIGO_ENTITY_ID }, // SHINE MENTAL HEALTH

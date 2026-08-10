@@ -1,0 +1,124 @@
+-- 032 — grant SELECT on intel.payer_policy_finding to intel_writer
+--
+-- WHY: The payer-intel worker cannot persist a single finding without this. 025
+--   granted the writer INSERT + UPDATE only, but `UPSERT_FINDING_SQL`
+--   (src/intel/payer_policy/upsert.ts:154-168) needs SELECT for TWO independent
+--   reasons — `ON CONFLICT (finding_hash) DO UPDATE ... WHERE` reads the existing
+--   row's columns, and `RETURNING (xmax = 0)` reads the written row back. Postgres
+--   requires SELECT for both. MEASURED live 2026-08-10 as intel_writer_login
+--   (member of intel_writer), each case in its own rolled-back transaction:
+--
+--     plain INSERT                                        -> OK, rowCount=1
+--     INSERT ... RETURNING (xmax = 0)                     -> 42501
+--     INSERT ... RETURNING finding_id                     -> 42501
+--     INSERT ... ON CONFLICT DO NOTHING                   -> 42501
+--     INSERT ... ON CONFLICT DO UPDATE (with and without WHERE) -> 42501
+--
+--   So a plain INSERT already works and only the statement the code actually runs
+--   fails. Without this grant the roster researches the full nine keys (~$14 and
+--   25-70 min per .github/workflows/payer-intel.yml), then every write fails 42501
+--   and zero rows persist — the per-key catch in scripts/run_payer_intel.ts:155-160
+--   turns each into a logged `ERROR` and continues, so the spend is incurred in full.
+--
+--   ⚠ 025's own preflight CANNOT detect this and passed green in the broken state:
+--   PREFLIGHT_SQL asserts has_table_privilege('intel_writer', …, 'INSERT') and
+--   'UPDATE' — precisely the two privileges that were already granted — and never
+--   checks SELECT. Do not read a green preflight as proof the writer can write.
+--
+-- PHI DISCIPLINE: None. `intel` is deliberately non-PHI (public payer bulletins,
+--   CMS fact sheets, Federal Register documents; see 025's schema COMMENT and
+--   CLAUDE.md). No business_entity_id, no PHI column, no join to a PHI table. This
+--   grant widens READ on public policy findings only, and adds NO DELETE and NO
+--   TRUNCATE — 025's "append-and-correct, never DELETE, at both the grant and the
+--   policy layer" posture is preserved exactly.
+--
+--   The RLS half of the gate ALREADY permits this read: policy
+--   `payer_policy_finding_read_all` is FOR SELECT TO public USING (true), and RLS is
+--   enabled on the table. This is the inverse of the 0089/0090 trap recorded in
+--   .claude/rules/sql-migrations.md — there the GRANT existed and the policy was
+--   missing; here the policy exists and the GRANT was missing. Both halves are
+--   required, and after this migration both are present.
+--
+-- OWNERSHIP: Unchanged. intel.payer_policy_finding is owned by `claims_admin`
+--   (measured 2026-08-10, as are payer_policy_run and payer_policy_run_check), so
+--   this follows the `claims` convention and runs the GRANT inside
+--   `SET ROLE claims_admin` … `RESET ROLE`, exactly as 025 did. The
+--   "no SET ROLE" rule in .claude/rules/sql-migrations.md applies to the
+--   `collections` plane, where relations are postgres-owned — it does NOT apply here.
+--   No object is created, altered, or reowned.
+--
+-- IDEMPOTENT: A single unconditional GRANT. GRANT is idempotent by definition —
+--   re-running it is a no-op, not an error. No role is created and none is dropped.
+--
+-- DEPENDENCY: `SQL Schemas/025_payer_policy_intel.sql` (applied live 2026-08-03,
+--   ledger 20260803234940), which creates the schema, the table, the RLS policies
+--   and the `intel_writer` role. Nothing else. Independent of 030 and 031, which are
+--   authored-but-unapplied and deliberately untouched here — in particular this does
+--   NOT unblock or require 031, which stays held.
+--
+-- SCOPE — deliberately ONE table, not all three:
+--   payer_policy_finding    -> SELECT granted here. Verified required.
+--   payer_policy_run_check  -> NOT granted. INSERT_RUN_CHECK_SQL is a plain INSERT
+--                              with no ON CONFLICT and no RETURNING, so it needs no
+--                              SELECT. Confirmed live: it fails only on a bogus FK
+--                              (23503), never on privilege.
+--   payer_policy_run        -> NOT granted. No code inserts it at all today
+--                              (src/intel/payer_policy/run.ts:96 hardcodes
+--                              runId: null). When that gap is wired, a run-row
+--                              INSERT ... RETURNING run_id will need SELECT here —
+--                              that is a separate, deliberate migration, not a
+--                              speculative grant now.
+--
+-- Rollback: 032_intel_writer_select_grant_rollback.sql
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- 1. The grant (as the owning role)
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+SET ROLE claims_admin;
+
+GRANT SELECT ON intel.payer_policy_finding TO intel_writer;
+
+RESET ROLE;
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- 2. Verification (run manually after apply)
+-- ═══════════════════════════════════════════════════════════════════════════════
+--
+-- 2a. The grant landed, and DELETE/TRUNCATE did NOT come along:
+--
+--   select grantee, privilege_type
+--     from information_schema.table_privileges
+--    where table_schema = 'intel' and table_name = 'payer_policy_finding'
+--      and grantee = 'intel_writer'
+--    order by privilege_type;
+--   -- expect exactly: INSERT, SELECT, UPDATE
+--
+-- 2b. Both halves of the gate are present (grant AND policy):
+--
+--   select relrowsecurity from pg_class c join pg_namespace n on n.oid = c.relnamespace
+--    where n.nspname = 'intel' and c.relname = 'payer_policy_finding';       -- expect t
+--   select policyname, roles, cmd from pg_policies
+--    where schemaname = 'intel' and tablename = 'payer_policy_finding' and cmd = 'SELECT';
+--   -- expect payer_policy_finding_read_all | {public} | SELECT
+--
+-- 2c. ⚠ YOU CANNOT VERIFY THIS AS `postgres` — it has rolbypassrls and every
+--     privilege, so it is blind to this whole class by construction (see
+--     .claude/rules/sql-migrations.md). Verify by connecting as the ACTUAL login
+--     role with its ACTUAL credential (INTEL_WRITER_DATABASE_URL) and running the
+--     real statement inside a transaction you roll back:
+--
+--       begin;
+--       insert into intel.payer_policy_finding
+--         (finding_hash, payer_key, payer_plan, change_type, originator, summary,
+--          codes_affected, scope, self_funded_relevant, source_url, source_domain,
+--          source_tier, confidence, status, embed_text)
+--       values ('verify032' || repeat('0', 55), 'aetna', 'VERIFY', 'prior_auth',
+--               'payer', 'v', ARRAY['J0013'], 'in_network', true,
+--               'https://example.invalid/v', 'example.invalid', 'primary',
+--               'confirmed', 'confirmed', 'v')
+--       on conflict (finding_hash) do update set source_url = excluded.source_url
+--        where intel.payer_policy_finding.source_url is distinct from excluded.source_url
+--       returning (xmax = 0) as inserted;
+--       rollback;
+--     -- expect one row, inserted = true. A 42501 here means the grant did not take.
