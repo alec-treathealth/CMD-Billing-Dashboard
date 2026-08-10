@@ -819,15 +819,20 @@ function EraUpcomingPanel({
       {status === 'error' ? (
         <div className="ths-alert">Unable to load future payments.</div>
       ) : status === 'ready' && data ? (
-        <EraUpcomingBody
-          data={data}
-          overrides={overrides}
-          manual={manual}
-          canEdit={canEdit}
-          busy={busy}
-          facilityOptions={facilityOptions}
-          onEdit={(intent) => void applyEdit(intent)}
-        />
+        // Same height bound as the All Facilities table. This tile is the taller of the two —
+        // a group list, an overdue strip, a stale strip, a hidden strip and a reconciled strip
+        // can all be on screen at once — so unbounded it buried the Master chart entirely.
+        <div className="ths-panel-scroll">
+          <EraUpcomingBody
+            data={data}
+            overrides={overrides}
+            manual={manual}
+            canEdit={canEdit}
+            busy={busy}
+            facilityOptions={facilityOptions}
+            onEdit={(intent) => void applyEdit(intent)}
+          />
+        </div>
       ) : (
         <div className="ths-card-meta py-6 text-center">Loading…</div>
       )}
@@ -1161,8 +1166,11 @@ function AllFacilitiesTable({
           </div>
         )
       ) : (
-        <div className="ths-scroll-x">
-          <table className="ths-table">
+        // Bounded height + sticky head/total: 15 facilities plus a header pushed the Master
+        // chart off the page, so opening this to read a number cost you the chart you were
+        // comparing it to. See .ths-panel-scroll in ths-v2.css.
+        <div className="ths-scroll-x ths-panel-scroll">
+          <table className="ths-table ths-table-sticky">
             <thead>
               <tr>
                 <th>Facility</th>
