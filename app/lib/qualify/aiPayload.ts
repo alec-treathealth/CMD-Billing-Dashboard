@@ -14,14 +14,32 @@
  */
 import type { QualifyAiInput } from '../../../src/collections/qualifyAi';
 import type { QualifySnapshot } from './contract';
+import type { QualifyChipSlots } from './chipTemplates';
 
 export function buildQualifyAiInput(
   question: QualifyAiInput['question'],
   snap: QualifySnapshot,
   blind: boolean,
+  /** The template's slot values (Smoke Phase 2). OPTIONAL so every pre-Phase-2 caller — the ticker
+   *  path, the auto-run suggestion — keeps compiling and simply sends no slots. A chip with no
+   *  slots and a chip whose slots are all null are the same request, deliberately. */
+  slots: QualifyChipSlots | null = null,
 ): QualifyAiInput {
   return {
     question,
+    // Sent only when at least one slot is filled: `slots: null` and an all-null object mean the same
+    // thing to the prompt builder, and the smaller payload is the one that cannot confuse a reader
+    // of the audit row about whether the rep chose anything.
+    slots:
+      slots && Object.values(slots).some((v) => v !== null)
+        ? {
+            facility: slots.facility,
+            comparator: slots.comparator,
+            metric: slots.metric,
+            horizonDays: slots.horizonDays,
+            careSetting: slots.careSetting,
+          }
+        : null,
     // The scope, stated to the model rather than left to be inferred from a null payerName — after
     // the identifier-wide Skip that null means "several labels", not "none". See QualifyAiInput.
     payerName: snap.resolved?.payerName ?? null,

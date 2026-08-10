@@ -10,8 +10,17 @@ Two separate planes. Never put a file in the wrong directory.
 
 | Plane | Directory | Next number (as of 2026-08-10) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0097** — 0096 (manual deposits) applied live 2026-08-10 — 0092/0093/0094 all applied live (2026-08-06 / 08-08 / 08-09); **0095 consumed its slot without leaving a file**, so 0096 is next (this table said 0095 while CLAUDE.md said 0096 — CLAUDE.md was right) |
-| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **035** — 029/032/033/034 applied live (034 drops a dead index 033 added); **030 and 031 are AUTHORED BUT NOT APPLIED** (031 held on purpose — do not apply it to clear the backlog; see CLAUDE.md) |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0098** — 0092/0093/0094 applied live; **0095 consumed its slot with NO file** (one-shot prune, ledger 20260809073608 — never reuse it); **0096 = `manual_deposits`, applied live 2026-08-10 by a concurrent session, file UNTRACKED on every ref**; **0097 (qualify watchers) APPLIED LIVE 2026-08-10** (ledger `20260810120258`) |
+| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **035** — 029 applied live; 030/031 authored-not-applied (031 held on purpose — see CLAUDE.md); **032/033/034 applied live 2026-08-10** (`intel_writer_select_grant`, `expected_payment_manual_lifecycle`, `drop_expected_payment_manual_live_idx`) |
+
+⚠ **2026-08-10 — THE COLLISION THIS PARAGRAPH WARNS ABOUT ACTUALLY HAPPENED.** The qualify-watchers
+migration was numbered `0096` off a directory listing. While it sat unapplied, a concurrent session
+authored and APPLIED its own `0096_manual_deposits`; that file is untracked in the primary worktree
+and exists on no branch, so *nothing in git* would ever have revealed the clash. It was caught only
+because the number was re-verified against `supabase_migrations.schema_migrations` immediately
+before `apply_migration`, and the watchers migration was renumbered to 0097 before touching the
+database. **Query the ledger every time, and grep every worktree for untracked `.sql` — the numbers
+in this table are a floor, and on a busy day they are stale within hours.**
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
 0077. 0080/0081/0082 (explorer perf: filter-options matview, rollup trigram

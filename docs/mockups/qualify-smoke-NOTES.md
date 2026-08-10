@@ -58,22 +58,26 @@ The search logic is being rewritten (another session). Everything below the
 board sections out. UI build proceeds; the LANE binds to the rewrite when it lands.
 
 **BUILT on this branch (2026-08-08) — the tape is no longer parked:**
-- **Mig 0093** (`supabase/migrations/0093_qualify_rating_history.sql`, NOT applied):
-  `collections.qualify_policy_rating_daily` (one row per active prefix-token × payer
-  per day — the five-factor policy rating + the claims aggregates that fed it),
-  `collections.qualify_rating_run` (catch-up ledger), and
+- **Mig 0093** (`supabase/migrations/0093_qualify_rating_history.sql`) — **APPLIED LIVE
+  2026-08-09** and backfilled the same day (180/180 dates, 2026-02-10 → 2026-08-08, no
+  gaps, 70 seconds, 214,407 rows; see CLAUDE.md's 0093 note for the verified apply
+  detail). Creates `collections.qualify_policy_rating_daily` (one row per active
+  prefix-token × payer per day — the five-factor policy rating + the claims aggregates
+  that fed it), `collections.qualify_rating_run` (catch-up ledger), and
   `collections.qualify_prefix_echo` + SECURITY DEFINER
   `collections.record_qualify_prefix_echo(token, echo)` — the echo seam the search
-  rewrite calls at term-mint time so tape items gain their 'GGS' labels.
+  rewrite calls at term-mint time so tape items gain their 'GGS' labels (still unwired —
+  superseded by `prefixLabel.ts`, see the UI binding map below).
 - **Nightly cron** `/api/cron/qualify-rating-history` (daily 05:10 UTC, DB-only):
-  self-healing catch-up over a 180-day horizon — the FIRST run backfills ~180 daily
-  snapshots so the 90d delta works immediately. Backfill is a disclosed
-  reconstruction: claims factors are exact as-of; coding/census context is
-  current-state (see qualifyRatingHistory.ts header). Rating parity by injection:
-  app/lib/server.ts wires the real computeRatingV2 + derivePolicyRating.
+  self-healing catch-up over a 180-day horizon — the FIRST run backfilled ~180 daily
+  snapshots so the 90d delta works immediately (confirmed: the 2026-08-09 backfill above).
+  Backfill is a disclosed reconstruction: claims factors are exact as-of; coding/census
+  context is current-state (see qualifyRatingHistory.ts header). Rating parity by
+  injection: app/lib/server.ts wires the real computeRatingV2 + derivePolicyRating.
 - **Tape read API**: `getQualifyPolicyTape()` (app/lib/qualify/board-actions.ts →
-  board.ts core → loaders.ts `loadQualifyPolicyTape`, fail-soft while 0093 is
-  unapplied). Reads as of YESTERDAY's close (the newest fully-ingested date).
+  board.ts core → loaders.ts `loadQualifyPolicyTape`, fail-soft while 0093 was
+  unapplied — now returns live data). Reads as of YESTERDAY's close (the newest
+  fully-ingested date).
   Top 20 by |Δ90|, member floor 3, NON-DOLLAR payload
   (`QualifyPolicyTapeItem`: token, tokenTail, echo, payer, ratingNow/Then, deltaPts,
   members, lines). **This is the contract the new UI's prefix tape binds to.**
@@ -83,13 +87,47 @@ board sections out. UI build proceeds; the LANE binds to the rewrite when it lan
 - Facilities tape → `getQualifyFacilityTrends()` (already live)
 - Lane / stepper / receipt → `resolveCoverageAction` (v3) — REBIND after the rewrite
 - AI chips/composer → `generateQualifyAiExplanation` + aiChips (live; slot grammar TBD)
-- Echo labels on tape items → arrive when the rewrite calls
-  `record_qualify_prefix_echo` (until then the UI shows `⋯` + token tail)
+- Echo labels on tape items → SOLVED BETTER than the echo seam: `prefixLabel.ts` resolves the
+  whole 46,656-value domain in-process (ratified 2026-08-09); `record_qualify_prefix_echo`
+  stays permanently unwired — see CLAUDE.md's corrected note.
 
-Still parked (unchanged):
-- Watchers need a `collections.qualify_watchers` table (user, kind, hmac_token/
-  payer_key, masked echo, threshold) — RLS per user; own scoped session.
-- "Patient watcher" alerts ("new ERA posted") imply joining era-835 output against
-  watcher tokens — feasible via the same blind index, needs its own scoped session.
-- Recent searches: terms are unrecoverable from claims.access_audit BY DESIGN —
-  persistence is an audit-policy decision, not just an action.
+## Build status — 2026-08-10 (the full shell landed on feat/qualify-smoke-tokens-chips)
+
+Everything above is BUILT except where noted:
+- **Phase 0** — extend-and-unify, NOT the tokens.json compile: ths-v2.css turned out to be a
+  better system than the mock's `:root` (which reuses 7 live token names at different values —
+  see the Smoke-primitives block in ths-v2.css and app/test/ths-tokens-contrast.test.tsx's
+  tripwire). Style Dictionary consciously skipped; fonts stay the existing CDN import.
+- **Phase 1** — the two-pane shell IS the rendered /qualify (kill switch `QUALIFY_SMOKE_SHELL=off`):
+  LaneRail (head + Start over + lock strip + composer) wraps the UNCHANGED v3 staged flow; the
+  board hosts the two-lane tape, the This-Search zone (empty → matched → hero → StageAnswer via
+  `answerInline={false}`), watchers, and recent searches. One answer bag, two render sites.
+- **Phase 2** — slot-chips on the panel AND the rail composer (same grammar, same <SlotChip>).
+  Free text structurally impossible; facility slots travel as indices, resolved server-side.
+- **Watchers + recent searches** — mig 0097 **APPLIED LIVE 2026-08-10**, ledger `20260810120258`
+  (claims plane, the 0046 pattern; NOT the `collections.qualify_watchers` shape sketched above).
+  Renumbered from 0096 mid-session when a concurrent session's `0096_manual_deposits` took that
+  slot — caught by the pre-apply ledger check; see CLAUDE.md. Verified at apply: 6/6 malformed
+  definer calls rejected writing nothing · a well-formed insert-then-resave returned the SAME id
+  with the threshold updated and the row count unchanged (the cap-applies-to-INSERTs-only fix) ·
+  reader SELECT true, reader INSERT/DELETE false, reader EXECUTE true on all four definers,
+  `public`/`anon` EXECUTE false · RLS on both tables · 4 policies · all four definers
+  `security definer` owned by `claims_admin` · the standing `claims_admin→postgres` grant intact
+  afterwards · test rows cleaned to 0/0. The session-only fallback stays in the code and is now a
+  should-never-see state (it would mean the relations went missing). Sparklines read the live 0093
+  daily table. Kinds: 'trend' (payer, optional prefix pin) + 'patient' (token + masked echo, never
+  the raw ID).
+  Recent searches persist non-PHI facets only; a member-ID search degrades to its prefix.
+  Persistence was ruled by Alec 2026-08-10 ("save their history") — the audit-policy question
+  the old note flagged is thereby decided, with the facet allowlist as the boundary.
+- **Prompt tree** — src/collections/qualifyPromptTree.ts: deterministic branches over the
+  validated payload (ticker/search mode, evidence none/thin/solid, all-plans, estimated,
+  self-funded) + the always-on admissions voice; the ratified honesty core travels verbatim.
+  Qualify renders the sections as "Bottom line / What we see / Watch out for" (wire markers
+  unchanged — the collections panel keeps TL;DR).
+
+Still parked:
+- "Patient watcher" alerts ("new ERA posted") — joining era-835 output against watcher tokens;
+  its own scoped session (the panel's pill reads rating-history presence for now).
+- The mock's `.kpi__range` one-line flank is SUPERSEDED by the shipped named-facility flank
+  layout (Alec, 2026-08-10 — see tileFlanks.ts and the kpi-flank memory note).

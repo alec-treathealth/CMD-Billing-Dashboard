@@ -194,43 +194,53 @@ Two **separate** migration planes — never mix the directories:
 
 | Plane | Directory | Next number (as of 2026-08-10) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0097** |
-| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **035** |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0098** — 0096 (manual deposits) applied live 2026-08-10 by a concurrent session, **file untracked**; **0097 (qualify watchers) APPLIED LIVE 2026-08-10**, ledger `20260810120258` |
+| Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **035** — 032/033/034 applied live 2026-08-10 |
 
-**0096 (manual deposits) is APPLIED LIVE 2026-08-10.** It lets a super admin record money
-in hand that CMD has not posted, as `collections.daily_collections.source_tag = 'manual'`.
-⚠️ **`manual` is ADDITIVE in `daily_collections_resolved`, never a rank participant.** That
-view is max-gross-wins, which is right for `workbook`/`deposit_sheet`/`cmd` — three
-competing imports of the same deposits — but a manual row is money none of them has yet, so
-it is a third `UNION ALL` branch. Folding it into the `row_number()` branch is the one edit
-that silently destroys collected money: a hand-keyed amount would REPLACE a real CMD
-deposit for that facility-day. Verified at apply: view row count, total gross, BXR August
-gross and one facility-day were all byte-identical before and after, and an inserted manual
-row moved MTD by exactly its own amount with the row count going UP by one.
-0096 also narrows `cmd_rollup_writer`'s DELETE/INSERT policies to `source_tag <> 'manual'`,
-so the cron guard is a privilege rather than a predicate in application code.
-**Veris 034 is APPLIED LIVE 2026-08-10** — it drops a partial index 033 created for a query
-that does not exist (measured `idx_scan = 0` against 024's 155). See `veris-data-notes.md`.
+**0097 (Qualify watchers + recent searches) is APPLIED LIVE 2026-08-10** (ledger `20260810120258`),
+claims plane, the 0046 `user_grid_views` pattern: two tables FK'd to `claims.app_user`, four
+`security definer` functions owned by `claims_admin`, reader SELECT + app-layer WHERE for reads and
+EXECUTE-only for writes. Verified AT APPLY, as privileges rather than as migration text: reader
+SELECT true on both tables · reader **INSERT/DELETE false** (least privilege — writes go only
+through the definers) · reader EXECUTE true on all four definers · **`public` and `anon` EXECUTE
+false** · RLS enabled on both · **4 policies** · all four definers `security definer` owned by
+`claims_admin` · and **`pg_has_role('postgres','claims_admin','SET')` still TRUE afterwards**, which
+was a specific review finding: the migration's first draft copied 0046's `revoke claims_admin from
+postgres` tail, which would have stripped the standing operator grant and 42501'd every later claims
+migration. Validation exercised both ways as 0093 did — 6/6 malformed definer calls raised and wrote
+nothing (0 rows), then a well-formed insert followed by a re-save of the SAME conflict key returned
+the **same id** with the threshold updated and the row count unchanged, which is the live proof of
+the cap-applies-to-INSERTs-only fix (the one behaviour the hermetic suite structurally cannot
+cover). Test rows deleted; both tables verified back to 0 rows.
 
-**Veris 032 and 033 are APPLIED LIVE.** 032 (`intel` writer SELECT grant) arrived on `main`
-before this table said so, which is why "next = 032" was briefly wrong in two places at once —
-re-derive the number, never trust the table alone. **033
-(`staging.expected_payment_manual` soft delete + reconciliation status) was applied
-2026-08-10** via `apply_migration` (pure DDL, no `CONCURRENTLY`, so it runs in a transaction —
-unlike 0081/0092). It is **backward-compatible**: it only adds columns and functions and leaves
-`delete_expected_payment_manual` in place, so it was safe to apply ahead of the code that reads
-it. The reverse order is not safe — `getUpcomingManual` selects `status`/`removed_at`, so
-deploying that code against a pre-033 database 500s the Future Payments tile.
+⚠ `postgres` **cannot** `SET ROLE claims_reader` (no grant) — so the definer validation above ran as
+`postgres` and the reader's access was proven via `has_table_privilege`/`has_function_privilege`
+instead. That is the correct split, not a shortcut: RLS is invisible to `postgres` anyway
+(`rolbypassrls`), so a role-visibility claim must come from the catalog, never from a `postgres`
+query returning rows.
 
-**0095 consumed its slot without leaving a file — the next number is 0096, not 0095.**
-`0095_qualify_rating_history_prune` is in the live ledger (version `20260809073608`) but has no
-`.sql` and no `_rollback.sql` on any ref: it was an intentional **one-shot retention job**. The
-definer it created, `collections.prune_qualify_rating_history(date)`, was applied at 07:36:08 UTC,
-used once to prune `qualify_policy_rating_daily` below `current_date - 120` (= 2026-04-11, the
-surviving floor), then **dropped in the same session at 07:42:39 UTC** and verified gone. A
-version number is consumed the moment it lands in the ledger — **never reuse one**, even when the
-migration left no file behind, because the ledger row is permanent and a second 0095 would collide
-with it.
+⚠ **TWO NUMBERS WERE CLAIMED ON 2026-08-10 BY WORK THAT IS NOT ON ANY BRANCH, AND ONE OF THEM
+COLLIDED.** The qualify-watchers migration was authored as `0096` from a file listing; while it sat
+unapplied, a concurrent session authored and APPLIED its own `0096_manual_deposits` (ledger
+`20260810084817`) whose `.sql` lives untracked in the primary worktree and is on no ref. The
+collision was caught by the pre-apply live check and the watchers migration was renumbered to
+**0097** before it touched the database — but only because the number was verified against
+`supabase_migrations.schema_migrations` rather than against `ls supabase/migrations/`.
+
+**A file listing is not the number. The live ledger is.** Before claiming a number, query the ledger
+AND check every worktree for untracked `.sql` files — `.claude/rules/sql-migrations.md` says exactly
+this ("These numbers are a floor, not the answer … Fail loud"), and this is the incident that proves
+the rule earns its keep. The same 2026-08-10 sweep also took Veris 033 and 034 while this branch's
+docs still said the next Veris number was 032.
+
+**0095 consumed its slot without leaving a file** — `0095_qualify_rating_history_prune` is in the
+live ledger (version `20260809073608`) but has no `.sql` and no `_rollback.sql` on any ref: it was an
+intentional **one-shot retention job**. The definer it created,
+`collections.prune_qualify_rating_history(date)`, was applied at 07:36:08 UTC, used once to prune
+`qualify_policy_rating_daily` below `current_date - 120` (= 2026-04-11, the surviving floor), then
+**dropped in the same session at 07:42:39 UTC** and verified gone. A version number is consumed the
+moment it lands in the ledger — **never reuse one**, even when the migration left no file behind,
+because the ledger row is permanent and a second 0095 would collide with it.
 
 **0093 (Qualify rating history) is APPLIED LIVE 2026-08-09** via `apply_migration` — plain
 transactional DDL, so the 0081/0092 autocommit discipline does NOT apply here. It creates
@@ -262,10 +272,21 @@ never-rateable rows (~90% smaller, but blinds the majority persona) and a retent
 (bounds growth; keep ≥400 days or year-over-year and the January deductible-reset explanation
 are both lost).
 
-`collections.qualify_prefix_echo` is still EMPTY and that is correct — the search rewrite does
-not yet call `record_qualify_prefix_echo`, so tape items show a token tail instead of a `GGS`
-echo. Note also that `getQualifyPolicyTape()` reads `available:true` with zero items when the
-table is applied-but-empty; `available:false` means the RELATION is absent.
+`collections.qualify_prefix_echo` is still EMPTY, and as of 2026-08-09 that is **permanent, not
+pending** — ⚠ **do NOT wire `record_qualify_prefix_echo`; the problem it was minted for is solved
+by a better mechanism that already ships.** This paragraph previously said tape items "show a
+token tail instead of a `GGS` echo" and read as a to-do; it was stale within a day and is
+corrected here (2026-08-10). `src/collections/prefixLabel.ts` resolves a token back to its
+readable 3-character prefix **in-process, with no write and no query**: an alpha prefix is 3
+characters over `[A-Z0-9]`, so the domain is 46,656 values, and the key holder computes the whole
+token→prefix map once per warm process (~150ms, ~7MB, lazily). It is wired — `prefixLabelsFor` →
+`resolvePrefixes` at `app/lib/qualify/board-actions.ts:44`, rendered by `policy-tape.tsx` — and
+**ratified by Alec 2026-08-09** (see prefixLabel.ts's header; do not re-litigate or soften it back
+to the masked tail without a new ruling). The echo seam is strictly worse on coverage: it can only
+ever label prefixes somebody already SEARCHED, so a tape of the whole book would stay mostly
+masked for weeks, and it costs a write per search to do it. Note separately that
+`getQualifyPolicyTape()` reads `available:true` with zero items when the table is
+applied-but-empty; `available:false` means the RELATION is absent.
 
 0077/0078/0079 are **Qualify-owned and applied live** — never author a new
 0077. 0080/0081/0082 (explorer perf) are **applied live 2026-08-04** — 0081
@@ -311,8 +332,12 @@ The `NOT VALID` is **permanent and deliberate**: the 695 pre-029 confirmed rows 
 exempt forever, so `confirmed + reviewed_by IS NULL` is a reliable "predates the
 boundary" marker, not a defect. **Never `VALIDATE` that constraint and never
 back-fill those 695 with a synthetic reviewer** — see `veris-data-notes.md` § 029.
-**030 (dedup round 2) and 031 (payer brand allowlist) are AUTHORED BUT NOT APPLIED**,
-so the next Veris number is **032**. 030 drops and re-adds the 029 gate inside its own
+**030 (dedup round 2) and 031 (payer brand allowlist) are AUTHORED BUT NOT APPLIED.**
+That does **not** make 032 the next number — **032/033/034 were applied live 2026-08-10**
+by a concurrent session and **the next Veris number is 035**, as the migration table
+above says. (This sentence claimed 032 until 2026-08-10; an authored-not-applied file is
+not a reservation, and a gap in the file listing is not a free slot — re-derive from the
+live ledger.) 030 drops and re-adds the 029 gate inside its own
 transaction; that is sanctioned *only* because its final section proves confirmation
 state was byte-identical throughout. Copy the proof if you copy the pattern.
 ⚠ **031 IS HELD ON PURPOSE — DO NOT APPLY IT TO CLEAR THE BACKLOG.** It creates

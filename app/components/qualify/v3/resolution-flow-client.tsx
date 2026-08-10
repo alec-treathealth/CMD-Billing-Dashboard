@@ -37,6 +37,7 @@
  * `visibility: hidden` would make them unclickable for the length of the stagger — see the effect.
  */
 import {
+  startTransition,
   useActionState,
   useCallback,
   useEffect,
@@ -58,7 +59,7 @@ import {
   loadQualifyDataFreshness,
   loadQualifyFacilityOptions,
 } from '../../../lib/qualify/actions';
-import type { QualifyFacilityTrend } from '../../../lib/qualify/contract';
+import type { QualifyFacilityTrend, QualifyTrailingDays } from '../../../lib/qualify/contract';
 import type { QualifyFacilityNarrowOption } from '../../../lib/qualify/facilityVariants';
 import { QualifyAiPanel } from '../qualify-ai-panel';
 import { bookPlacementFor } from '../../../lib/qualify/bookPlacement';
@@ -84,6 +85,57 @@ import {
 // The flow's sixteen fields and the rules that move them. Its header is the spec; this file is the
 // transport (PHI ref, effects, derivations) wired to it.
 import { INITIAL_SHELL_STATE, makeRetryHandler, shellReducer } from './flow-state';
+// ── The Smoke two-pane shell (2026-08-10) ────────────────────────────────────────────────────────
+// The rail + board composition around the SAME machinery above. Everything is reused: the rail
+// hosts ResolutionStages (answerInline=false), the board hosts StageAnswer with the SAME answer
+// bag, so the two panes cannot disagree — one derivation, two render sites.
+import { StageAnswer } from './resolution-flow';
+import { LaneRail } from '../shell/lane-rail';
+import { QualifyComposer } from '../shell/composer';
+import { ThisSearchZone } from '../shell/board-zone';
+import { WatchersPanel } from '../shell/watchers-panel';
+import { RecentSearches } from '../shell/recent-searches';
+// The shell's own pure derivations — each one a defect the review confirmed in THIS file's wiring,
+// moved somewhere a hermetic test can call it. Read that module's headers before changing any of the
+// four call sites below; the reasoning is the fix, not the one-liner.
+import {
+  deriveBoardStatus,
+  deriveWatcherDeleteAction,
+  laneIsOpen,
+  recentSearchKeyOf,
+  revealScopeFor,
+  type QualifyWatcherSaveFailure,
+} from '../shell/shell-session';
+// ⚠ THE ONE MASK. This shell derived its own `${slice(0,3)} •••• ${slice(-4)}` echo with a `<5`
+// length guard — byte-for-byte the defect adversarial review had already found and fixed inside
+// `maskedPatientEcho`: below eight characters the prefix and the tail OVERLAP, so an 8-char id like
+// `ABC12345` rendered `ABC •••• 2345` — seven of eight characters, in order, into the DOM. The
+// server refuses that shape (it returns tail-only), so the two paths disagreed about what a mask is.
+// `qualifyWatchers.ts` claims to be "the ONLY implementation of the format, so … exactly one place to
+// audit"; importing it is what makes that claim true. It is pure, dependency-free and already in this
+// bundle via watcher-actions.ts. NEVER re-derive a mask here — the refusal is its `null`, not a
+// length literal.
+import { maskedPatientEcho } from '../../../../src/collections/qualifyWatchers';
+import { PolicyTapeMount } from '../policy-tape-mount';
+import type { QualifyAiChipId } from '../../../lib/qualify/aiChips';
+import type { QualifyChipSlots } from '../../../lib/qualify/chipTemplates';
+// The one shape of a composer ask, shared with the panel that consumes it — see externalAsk.ts.
+import type { QualifyExternalAsk } from '../../../lib/qualify/externalAsk';
+import {
+  clearQualifyRecentSearches,
+  deleteQualifyWatcher,
+  getQualifyWatchboard,
+  recordQualifyRecentSearch,
+  saveQualifyPatientWatcher,
+  saveQualifyTrendWatcher,
+} from '../../../lib/qualify/watcher-actions';
+import {
+  QUALIFY_WATCHER_DEFAULT_THRESHOLD,
+  type QualifyPatientWatcher,
+  type QualifyRecentSearch,
+  type QualifyTrendWatcher,
+  type QualifyWatchboardResult,
+} from '../../../lib/qualify/watchers';
 
 // ScrollTrigger ships inside the gsap package — no new dependency. Client components also render on
 // the server once, so guard the registration behind a window check.
@@ -113,13 +165,46 @@ const NO_TICKER_KEYS: ReadonlySet<string> = new Set();
 
 export function ResolutionFlowClient({
   viewerHasAmountsCapability,
+  shellMode = false,
 }: {
   viewerHasAmountsCapability: boolean;
+  /** The Smoke two-pane shell (rail + board). Server-decided (qualifySmokeShellEnabled) and stable
+   *  for the life of the mount — page.tsx passes it once; it never changes at runtime. */
+  shellMode?: boolean;
 }): React.ReactElement {
   const [state, formAction, isPending] = useActionState(resolveCoverageAction, V3_INITIAL_STATE);
 
   // The raw term — JS memory only. See the header block before moving this anywhere.
   const termRef = useRef<string>('');
+
+  /** ── THE SESSION'S OWN COUNT OF SEARCHES ───────────────────────────────────────────────────────
+   *  Bumped once per identify dispatch, and the ONLY thing on this surface that distinguishes two
+   *  members: `predicateId`, `scopeKey` and `handle.echo` all provably collide across them, and the
+   *  raw term may not be used as a key at all. `recentSearchKeyOf` owns the full argument. An integer
+   *  — never PHI, never on the wire, never rendered. Declared here beside `termRef` because
+   *  `identifyAction` (below) is the one writer and lives above the shell's own state block. */
+  const searchSeqRef = useRef(0);
+
+  /** ── "START OVER" HAPPENED AND `useActionState` CANNOT BE TOLD ─────────────────────────────────
+   *  `state.resolution` is owned by the server action; only a new dispatch replaces it, so the reset
+   *  leaves it non-null and the rail went on saying "Locked to GGS" over an emptied board. This is
+   *  the session's own bit, armed by the reset and disarmed by the next identify submit; what the
+   *  rail renders is DERIVED from it and `state.resolution` together (`laneIsOpen`), never stored as
+   *  a third "hasResolution" flag — the stuck-flag rule this file's header sets.
+   *
+   *  DISARMED AT SUBMIT, NOT AT THE NEXT RESOLUTION, and that is a choice rather than an oversight.
+   *  Between a submit and the action returning, `useActionState` still holds the PREVIOUS resolution,
+   *  so the whole rail shows the previous lane for that second — `deriveStage` puts the stage back on
+   *  'payer' over the old carriers, which is pre-existing v3 behaviour on EVERY search, reset or not.
+   *  Holding this armed until a new resolution landed would make the strip alone say "No lane yet"
+   *  while the stage beside it listed the old lane's carriers, which is exactly the two-panes-
+   *  disagreeing failure the shell's one-derivation discipline exists to prevent. The residual is
+   *  named here so it is weighed rather than rediscovered; fixing it means fixing the stage too.
+   *
+   *  INERT IN SINGLE-COLUMN MODE: nothing outside the shell branch reads it, and its only non-shell
+   *  writer (`identifyAction`) writes `false` over `false`, which React's `useState` bail-out drops
+   *  without scheduling a render. */
+  const [sessionCleared, setSessionCleared] = useState(false);
 
   // ONE state machine, not sixteen useState hooks. Destructured so every read site below is the
   // same identifier it always was. Notable fields, restated here because they are easy to misuse:
@@ -202,6 +287,15 @@ export function ResolutionFlowClient({
     (fd: FormData) => {
       const term = fd.get('term');
       termRef.current = typeof term === 'string' ? term : '';
+      // A NEW SEARCH IS A NEW SESSION IDENTITY, and both of these say so — one for the history
+      // dedupe (two members are two sequence numbers however identically they hash), one for the
+      // rail's lock strip (a submit re-opens a lane a reset closed). Both are inert in single-column
+      // mode: nothing there reads either, and the setState is a no-op write of `false` over `false`.
+      searchSeqRef.current += 1;
+      setSessionCleared(false);
+      // The third of the same kind: a "watcher not saved" notice belongs to the search that failed
+      // to save, not to the one being typed now. Same inertness argument — null over null.
+      setWatcherSaveFailed(null);
       dispatch({ type: 'search_submitted' });
       formAction(fd);
     },
@@ -562,7 +656,16 @@ export function ResolutionFlowClient({
       // — for whom none of this runs — gets the fully-revealed list immediately. `once: true`: a
       // list the user is scanning must not re-animate on scroll-back. Stage 3 gets full amplitude,
       // stage 2 the same vocabulary at lower amplitude, so the two screens read as one system.
-      const tiles = gsap.utils.toArray<HTMLElement>('[data-v3-tile]', stageEl);
+      // ── WHERE THE TWO REVEALS LOOK (shell fix, 2026-08-10) ──────────────────────────────────────
+      // Single-column: the stage subtree, exactly as before. SHELL: the whole root, because the
+      // answer renders in the BOARD pane (`answerInline={false}`) and is therefore not under
+      // `[data-v3-stage]` at all — so both reveals below were selecting over a subtree that in shell
+      // mode contains no answer content, and neither the tile stagger nor the facet reveal ever ran.
+      // The ENTRANCE above deliberately does NOT take this scope: it animates `autoAlpha`, and
+      // widening `visibility: hidden` to the root is the <main>-level regression this effect's own
+      // header is a post-mortem of. See `revealScopeFor` for the full statement.
+      const revealRoot = revealScopeFor(shellMode, root, stageEl);
+      const tiles = gsap.utils.toArray<HTMLElement>('[data-v3-tile]', revealRoot);
       if (tiles.length > 0) {
         const rise = stage === 'plan' ? 10 : 6;
         gsap.set(tiles, { autoAlpha: 0, y: rise });
@@ -608,7 +711,10 @@ export function ResolutionFlowClient({
       // everything on the control card re-issues the ranking request and area does not). It is still
       // a facet of the inventory, so it is still a beat of the reveal, and DOM order puts it last,
       // which is where it belongs — the last thing between the operator and the list.
-      const facetRows = gsap.utils.toArray<HTMLElement>('[data-v3-facet]', stageEl);
+      // Same widened scope in shell mode as the tiles above, and the `opacity`-not-`autoAlpha` rule
+      // matters MORE there, not less: in the board these rows are the answer's live controls and the
+      // reveal now actually reaches them.
+      const facetRows = gsap.utils.toArray<HTMLElement>('[data-v3-facet]', revealRoot);
       if (facetRows.length > 0) {
         gsap.fromTo(
           facetRows,
@@ -641,7 +747,10 @@ export function ResolutionFlowClient({
       }
     }, root);
     return () => ctx.revert();
-  }, [stage, hasSnapshot]);
+    // `shellMode` is server-decided and stable for the life of the mount, so it can never actually
+    // re-fire this — it is in the array because the effect now READS it, and a dependency a reader
+    // has to prove constant is worse than one that is simply listed.
+  }, [stage, hasSnapshot, shellMode]);
 
   // The employer filter changes the tile list's length on every keystroke, which invalidates every
   // ScrollTrigger's measured position — refresh, debounced, or 186 keystroke-refreshes thrash.
@@ -684,16 +793,304 @@ export function ResolutionFlowClient({
    *  ("does any handler or flow field touch it") says a bit like this stays out of there. */
   const [explainTrend, setExplainTrend] = useState<QualifyFacilityTrend | null>(null);
 
-  return (
-    // THE PAGE CHROME. Matching the v2 tab's <main> exactly, because the route layout supplies none:
-    // the first staged build returned a bare <div> and rendered the h1 flush against the viewport's
-    // top-left corner with zero padding. max-w-[1680px] is the design system's wide-desktop bound.
-    <main ref={stageRef} className="mx-auto max-w-[1680px] p-6 sm:p-8">
-      <ResolutionStages
-        ticker={
-          trends === null ? (
-            <HeatingUpSkeleton />
-          ) : (
+  // ── SMOKE SHELL STATE (2026-08-10) — all hooks run unconditionally (rules of hooks); every
+  // effect and handler below guards on `shellMode` instead. None of these are reducer fields, each
+  // for a reason the machine's header already states: the watchboard is a mount fetch no flow field
+  // touches (the `trends` rule); externalAsk is one-shot presentation the panel consumes; the
+  // session lists are the browser-only fallback for a save the server could not persist.
+  /** The composer's pending ask — nonce'd so two identical asks are two requests. */
+  const [externalAsk, setExternalAsk] = useState<QualifyExternalAsk | null>(null);
+  const askNonceRef = useRef(0);
+  /** Server-persisted watchers + recent searches. null = NOT YET LOADED (a state of its own — see
+   *  `deriveBoardStatus`, and never collapse it onto a boolean); 'failed' = the READ failed, which is
+   *  a different claim from `available:false` (the relations answered as absent — see
+   *  reloadWatchboard, and note that mig 0097 is APPLIED, so absent means they went missing). */
+  const [watchboard, setWatchboard] = useState<QualifyWatchboardResult | 'failed' | null>(null);
+  /** Session-only fallbacks — a save that came back `persisted:false` lands here rather than being
+   *  lost. Post-0097 that path is a should-never-see fault, not the expected pre-apply mode. */
+  const [sessionTrend, setSessionTrend] = useState<(QualifyTrendWatcher & { sessionOnly: true })[]>([]);
+  const [sessionPatient, setSessionPatient] = useState<(QualifyPatientWatcher & { sessionOnly: true })[]>([]);
+  const [sessionRecent, setSessionRecent] = useState<(QualifyRecentSearch & { sessionOnly: true })[]>([]);
+  /** Searches already recorded to history, keyed by `recentSearchKeyOf` — a re-scope of the same
+   *  resolution must not re-log, and two DIFFERENT members must never share a key. Read that
+   *  function's header before touching the key: the three obvious candidates all collide, and the
+   *  collision is silent (the second member's search simply never appears in the list). */
+  const recordedRef = useRef<Set<string>>(new Set());
+  /** The last watcher SAVE was refused or failed — the write-direction twin of the panel's
+   *  `readFailed`. Cleared by the next save or delete that succeeds, so the notice describes the
+   *  last outcome rather than accumulating. Null = nothing to say. */
+  const [watcherSaveFailed, setWatcherSaveFailed] = useState<QualifyWatcherSaveFailure | null>(null);
+
+  /**
+   * THREE STATES HERE, FOUR AT THE PANELS — `null` (not loaded yet), a board (whose own `available`
+   * splits durable from absent), or `'failed'`. `deriveBoardStatus` is the mapping.
+   *
+   * The first version collapsed a FAILED read to null, and null rendered as "storage is not set up".
+   * Those are different claims and the difference is operationally nasty: with the relations present
+   * but the reader's SELECT grant or RLS policy missing, the read 42501s while WRITES still succeed
+   * (they go through the SECURITY DEFINER, which needs only EXECUTE) — so a rep saves a watcher, the
+   * save reports persisted, and the watcher appears nowhere while the panel calmly explains that
+   * storage is not set up. That is the 0089 failure shape the loaders' own header cites: a permission
+   * error wearing "not provisioned yet" as a costume. The second version fixed that and then made the
+   * mirror-image mistake one layer out, at the panel props — see `deriveBoardStatus`.
+   *
+   * The in-flight generation counter is the second half: five call sites can fire reloads that
+   * resolve out of order, and a stale response landing last would resurrect a just-deleted watcher.
+   */
+  const boardGenRef = useRef(0);
+  const reloadWatchboard = useCallback(() => {
+    const gen = ++boardGenRef.current;
+    getQualifyWatchboard()
+      .then((r) => {
+        if (boardGenRef.current !== gen) return; // superseded by a newer reload
+        setWatchboard(r.ok ? r.board : 'failed');
+      })
+      .catch(() => {
+        if (boardGenRef.current === gen) setWatchboard('failed');
+      });
+  }, []);
+
+  // Watchboard: mount-once, shell only, fail-soft — the panels render their empty states on null.
+  useEffect(() => {
+    if (!shellMode) return;
+    reloadWatchboard();
+  }, [shellMode, reloadWatchboard]);
+
+  // ── RECENT-SEARCH RECORDING: once per RESOLVED SEARCH, not per snapshot ───────────────────────
+  // A window chip, a billed-under press or a refresh re-fetches the same resolved search and must
+  // not re-log it; a new identify submit — and a plan pick inside one, which re-resolves to a
+  // concrete plan class — does. Facets only: the term goes to the action solely so the ≤3-char echo
+  // derives SERVER-side (a member-ID search degrades to its prefix; see watcher-actions.ts), and the
+  // in-memory copy uses the already-safe `state.echo`.
+  //
+  // ⚠ THE KEY IS `(searchSeq, predicateId)`, NOT `predicateId`. `predicateIdFor` hashes only
+  // {kind, canonicalPayerId, employerLabel, funding, planType, from, to} — no identifier — so two
+  // different members on the same plan shape hashed identically and the SECOND one's search was
+  // silently never recorded. `scopeKey` fails the same way (its header: "carries NO identifier at
+  // all") and `handle.echo` is '' for every full-member-ID search, so neither rescues it. The
+  // session's own search counter does, and it is an integer rather than the one thing that would
+  // trivially work and must never be used — the raw term. See `recentSearchKeyOf`.
+  const snapshotForRecent = snapshot;
+  useEffect(() => {
+    if (!shellMode || snapshotForRecent === null) return;
+    const pid = state.resolution?.predicateId ?? null;
+    if (pid === null) return;
+    const key = recentSearchKeyOf(searchSeqRef.current, pid);
+    if (recordedRef.current.has(key)) return;
+    recordedRef.current.add(key);
+    const term = termRef.current;
+    if (term === '') return;
+    const payer = snapshotForRecent.resolved?.payerName ?? null;
+    const planClass = snapshotForRecent.policy?.found ? snapshotForRecent.policy.policyType : null;
+    setSessionRecent((prev) =>
+      [
+        {
+          id: '',
+          payer,
+          prefixEcho: state.echo !== '' ? state.echo : null,
+          planClass,
+          searchedAt: new Date().toISOString(),
+          sessionOnly: true as const,
+        },
+        ...prev,
+      ].slice(0, 20),
+    );
+    // Fire-and-forget: a failed record must never disturb the search that just succeeded.
+    void recordQualifyRecentSearch({ term, payer, planClass }).catch(() => {});
+  }, [shellMode, snapshotForRecent, state.resolution, state.echo]);
+
+  /** ── THE RAIL'S LOCK STATE, DERIVED ────────────────────────────────────────────────────────────
+   *  What the strip says must describe the SESSION, not the server action's leftover state. See
+   *  `laneIsOpen` for why the shell cannot simply null `state.resolution`.
+   *
+   *  ⚠ `stageIsIdentify` IS THE SECOND DOOR, and it was open until now. `onChange('identify')` — the
+   *  receipt's Change on the Search row — dispatches the SAME `went_back{target:'identify'}` as the
+   *  reset but through a handler that arms nothing, so the board zone rendered "Nothing resolved yet"
+   *  while the strip beside it still said "🔒 Locked to GGS". Reading the STAGE closes every route
+   *  back to that screen at once, including a future one, instead of arming a bit per handler. It
+   *  does not disturb the pending-window behaviour documented on `sessionCleared`: there the stage is
+   *  'payer', not 'identify' (a new submit clears `backTo`, and `deriveStage` sees the previous
+   *  resolution). */
+  const laneOpen = laneIsOpen({
+    resolutionPresent: state.resolution !== null,
+    sessionCleared,
+    stageIsIdentify: stage === 'identify',
+  });
+
+  /** Rail head "Start over": drop the held term, step the machine back to identify, clear the
+   *  pending ask, and CLOSE THE LANE. Watchers and history deliberately survive — they are the
+   *  session's memory. */
+  const onSessionReset = useCallback(() => {
+    if (!laneOpen) return; // aria-disabled control — the refusal lives here, and it reads the
+    // DERIVED lane state so a second press on an already-reset rail is the no-op the treatment
+    // promises (`state.resolution !== null` would have let it through).
+    termRef.current = '';
+    setExternalAsk(null);
+    setExplainTrend(null);
+    // ⚠ THIS is what makes the strip say "No lane yet" — dispatching `went_back` cannot, because
+    // `state.resolution` lives in `useActionState` and no client dispatch replaces it.
+    setSessionCleared(true);
+    // A watcher notice is about a search that no longer exists — it must not stand over a new lane.
+    setWatcherSaveFailed(null);
+    // Belt and braces, no longer load-bearing: with the search counter in the key (see the
+    // recording effect) a post-reset search mints new keys anyway. Kept because it bounds the set
+    // to one session's worth of entries rather than the mount's.
+    recordedRef.current = new Set();
+    dispatch({ type: 'went_back', target: 'identify' });
+  }, [laneOpen]);
+
+  /** A recent-search Re-run: the stored ≤3-char prefix IS a valid search term — re-resolve fresh
+   *  through the same identify path a typed search takes (term into the ref, never the DOM). */
+  const onRerunRecent = useCallback(
+    (prefixEcho: string) => {
+      const fd = new FormData();
+      fd.set('term', prefixEcho);
+      startTransition(() => {
+        identifyAction(fd);
+      });
+    },
+    [identifyAction],
+  );
+
+  const onComposerAsk = useCallback((question: QualifyAiChipId, slots: QualifyChipSlots | null) => {
+    setExternalAsk({ question, slots, nonce: ++askNonceRef.current });
+  }, []);
+
+  /** Watch the resolved payer (trend). Persisted — 0097 is applied live; the session-only branch
+   *  below is the fault path for a save the server could not persist, not the normal one. */
+  const watchPayerLabel = snapshot?.resolved?.payerName ?? payerPick;
+  const onWatchPayer = useCallback(() => {
+    if (watchPayerLabel === null) return;
+    const payer = watchPayerLabel;
+    void saveQualifyTrendWatcher({ payer, term: termRef.current, thresholdPts: QUALIFY_WATCHER_DEFAULT_THRESHOLD })
+      .then((res) => {
+        // A REFUSED SAVE USED TO BE COMPLETELY SILENT — `return` and nothing on screen moved, so the
+        // only available reading was "the click missed". The reason rides through to the panel's
+        // aria-live status; the success path clears it, so the notice describes the last outcome.
+        if (!res.ok) {
+          setWatcherSaveFailed(res.reason);
+          return;
+        }
+        setWatcherSaveFailed(null);
+        if (res.persisted) reloadWatchboard();
+        else
+          setSessionTrend((prev) =>
+            prev.some((w) => w.payer === payer)
+              ? prev
+              : [
+                  ...prev,
+                  {
+                    id: '',
+                    kind: 'trend' as const,
+                    payer,
+                    prefix: state.echo !== '' ? state.echo : null,
+                    thresholdPts: QUALIFY_WATCHER_DEFAULT_THRESHOLD,
+                    since: 'today',
+                    points: [],
+                    ratingNow: null,
+                    deltaPts: null,
+                    alerting: false,
+                    sessionOnly: true as const,
+                  },
+                ],
+          );
+      })
+      .catch(() => setWatcherSaveFailed('failed'));
+  }, [watchPayerLabel, state.echo, reloadWatchboard]);
+
+  /** Watch this patient — full-member-ID searches only (echo === '' is that signal: handle.echo is
+   *  prefix-only by construction). The raw term goes to the action, which stores token + masked
+   *  echo and discards it; the SESSION copy masks locally and also never keeps the term. */
+  const canWatchPatient = state.echo === '' && stage === 'answer' && state.resolution !== null;
+  const onWatchPatient = useCallback(() => {
+    const term = termRef.current;
+    // THE REFUSAL IS `maskedPatientEcho` RETURNING NULL — not a length literal here. The old `< 5`
+    // was wrong twice over: it is the exact off-by-three the shared function's header is a
+    // post-mortem of (the real floor is 8, because prefix and tail overlap below that), and having a
+    // second copy of the rule at all is how the two paths came to disagree. Asking the one
+    // implementation whether this term is maskable answers both questions at once, and it still
+    // covers the case this guard was originally added for: the ref empties on a reset and on a hot
+    // reload mid-flow while `canWatchPatient` reads true off `state`, and '' masks to null.
+    const localEcho = maskedPatientEcho(term);
+    if (localEcho === null) {
+      setWatcherSaveFailed('invalid');
+      return;
+    }
+    const planContext = [snapshot?.resolved?.payerName, snapshot?.policy?.found ? snapshot.policy.policyType : null]
+      .filter(Boolean)
+      .join(' · ');
+    void saveQualifyPatientWatcher({ term, planContext: planContext || null })
+      .then((res) => {
+        if (!res.ok) {
+          setWatcherSaveFailed(res.reason);
+          return;
+        }
+        setWatcherSaveFailed(null);
+        if (res.persisted) reloadWatchboard();
+        else
+          setSessionPatient((prev) =>
+            prev.some((w) => w.echo === localEcho)
+              ? prev
+              : [
+                  ...prev,
+                  {
+                    id: '',
+                    kind: 'patient' as const,
+                    echo: localEcho,
+                    planContext: planContext || null,
+                    since: 'today',
+                    sessionOnly: true as const,
+                  },
+                ],
+          );
+      })
+      .catch(() => setWatcherSaveFailed('failed'));
+  }, [snapshot, reloadWatchboard]);
+
+  const onDeleteWatcher = useCallback(
+    (kind: 'trend' | 'patient', id: string | null, index: number) => {
+      // Session-only rows are indexed within the SESSION slice, which renders after the server
+      // rows — deriveWatcherDeleteAction is the one place that arithmetic lives; see its header.
+      const b = watchboard === 'failed' || watchboard === null ? null : watchboard;
+      const serverCount = kind === 'trend' ? (b?.trend.length ?? 0) : (b?.patient.length ?? 0);
+      const action = deriveWatcherDeleteAction(id, index, serverCount);
+      if (action.kind === 'server') {
+        void deleteQualifyWatcher(action.id)
+          .then((res) => {
+            // "clear it on the next successful action" — a delete that lands proves the panel is
+            // reachable, so a stale save notice above it is no longer describing anything current.
+            if (res.ok) {
+              setWatcherSaveFailed(null);
+              reloadWatchboard();
+            }
+          })
+          .catch(() => {});
+        return;
+      }
+      setWatcherSaveFailed(null);
+      const { sessionIndex } = action;
+      if (kind === 'trend') setSessionTrend((prev) => prev.filter((_, i) => i !== sessionIndex));
+      else setSessionPatient((prev) => prev.filter((_, i) => i !== sessionIndex));
+    },
+    [watchboard, reloadWatchboard],
+  );
+
+  const onClearRecent = useCallback(() => {
+    setSessionRecent([]);
+    void clearQualifyRecentSearches()
+      .then((res) => {
+        if (res.ok) reloadWatchboard();
+      })
+      .catch(() => {});
+  }, [reloadWatchboard]);
+
+  // ── THE TICKER NODE, built once and mounted once — in the stages root (single-column) or in the
+  // board's tape stack (shell). Two mount SITES, one element; the single-mount rule (marquee scroll
+  // position) is per-render-path, and the flag never changes at runtime.
+  const tickerNode =
+    trends === null ? (
+      <HeatingUpSkeleton />
+    ) : (
             // readOnly OFF only on the answer stage: there a click seeds the AREA facet. On the
             // landing there is no ranking to narrow, so the cards stay inert — v3 resolves a MEMBER,
             // and inert cards beat buttons that no-op. `scopePayer` stays null on BOTH stages: these
@@ -724,93 +1121,220 @@ export function ResolutionFlowClient({
                 <TrendExplainer trend={explainTrend} onClose={() => setExplainTrend(null)} />
               ) : null}
             </>
-          )
-        }
-        payerGroups={payerGroups}
-        stage={stage}
-        resolution={state.resolution}
-        reason={state.reason}
-        echo={state.echo}
-        denied={state.denied}
-        pending={isPending}
-        payerPick={payerPick}
-        planFilter={planFilter}
-        identifyAction={identifyAction}
-        planAction={planAction}
-        onPickPayer={(p) => dispatch({ type: 'payer_picked', payer: p })}
-        onPlanFilter={(v) => dispatch({ type: 'plan_filter_changed', value: v })}
-        onAskAi={() => dispatch({ type: 'ai_armed' })}
-        onChange={onChange}
-        onSkip={onSkip}
-        answer={
-          state.resolution
-            ? {
-                snapshot,
-                snapshotError,
-                aiPanel: snapshot ? (
-                  <QualifyAiPanel
-                    snapshot={snapshot}
-                    blind={!viewerHasAmountsCapability}
-                    // WHERE the answer stage drew the payer's book, so the panel's grounding caption
-                    // names the list the model actually read. TOLD, not derived from the field — it is
-                    // on the wire for the v2 tab too, and v2 draws no book (see the prop's own doc).
-                    //
-                    // ⚠ ONE CALL, NOT A TERNARY HERE. The composition (leads-first, then on-screen)
-                    // used to be written inline in this file — which nothing hermetic imports, so
-                    // INVERTING IT shipped app 557/0 and a clean build with 'leading' unreachable.
-                    // The decision now lives in bookPlacement.ts with its own tests; this is JSX.
-                    bookPlacement={bookPlacementFor(snapshot)}
-                    autoAsk={autoAsk}
-                    // ONE-SHOT (review Critical 2): without the disarm, every re-scope (window,
-                    // billed-under chip) nulls the snapshot, unmounts the panel, and the remount
-                    // re-fires an unrequested, audited, billed LLM call over whatever was on screen.
-                    onAutoAsked={() => dispatch({ type: 'ai_disarmed' })}
-                  />
-                ) : null,
-                pending: isPending,
-                scopeSource,
-                // The reducer field itself. Everything that must not claim a plan was chosen —
-                // the receipt, the identity line, the skip banner, the suppressed notices and
-                // provenance — reads THIS, so a re-scope cannot un-skip the presentation.
-                skipped,
-                refetching,
-                staleAfterError,
-                // ONE HANDLER, TWO RENDER SITES (S5): the failure banner's "Try again" and the
-                // NARROW SEARCH card's standing "Refresh the ranking". A second refetch path would
-                // be a second writer of the value the fetch effect keys on.
-                onRetry: onRetrySnapshot,
-                // The refresh's own progress signal — see the derivation above for why the three
-                // fields beside it cannot cover a same-scope re-run.
-                refreshing,
-                dataRebuiltAt,
-                // The auto window landing on a different rung under an UNCHANGED request key: the
-                // one scope change on this surface that no staleness flag can observe.
-                windowMove,
-                candidates: answerCandidates,
-                filters,
-                onToggleFilter,
-                onClearFilters,
-                employerNarrowTooMany: narrow.tooMany,
-                area,
-                onSelectArea,
-                // The SECOND grid narrow (S4). Both of these ride here rather than through
-                // `scopeKey`, and that absence from the fetch effect's inputs is the whole guarantee.
-                facilityOptions,
-                facilityNarrow,
-                onToggleFacility,
-                payerOverride,
-                // Re-scopes are REFETCHES of content already on screen: the snapshot stays rendered
-                // (dimmed, with the progress bar) rather than blanking — the design system's rule.
-                // Which is why these two actions write ONE field each and never touch `snapshot`.
-                onPayerOverride: (label) => dispatch({ type: 'payer_override_changed', label }),
-                windowDays,
-                onWindowDays: (d) => dispatch({ type: 'window_days_changed', days: d }),
-                narrowExpanded,
-                onToggleNarrow,
-              }
-            : null
-        }
-      />
+          );
+
+  // ── THE ANSWER BAG — one derivation, two render sites. ResolutionStages reads it for the live
+  // region + receipt EVEN when answerInline is false; the board's StageAnswer renders from the same
+  // object, so the spoken claim and the drawn answer cannot disagree across panes.
+  const answerBag = state.resolution
+    ? {
+        snapshot,
+        snapshotError,
+        aiPanel: snapshot ? (
+          <QualifyAiPanel
+            snapshot={snapshot}
+            blind={!viewerHasAmountsCapability}
+            // WHERE the answer stage drew the payer's book, so the panel's grounding caption
+            // names the list the model actually read. TOLD, not derived from the field — it is
+            // on the wire for the v2 tab too, and v2 draws no book (see the prop's own doc).
+            //
+            // ⚠ ONE CALL, NOT A TERNARY HERE. The composition (leads-first, then on-screen)
+            // used to be written inline in this file — which nothing hermetic imports, so
+            // INVERTING IT shipped app 557/0 and a clean build with 'leading' unreachable.
+            // The decision now lives in bookPlacement.ts with its own tests; this is JSX.
+            bookPlacement={bookPlacementFor(snapshot)}
+            autoAsk={autoAsk}
+            // ONE-SHOT (review Critical 2): without the disarm, every re-scope (window,
+            // billed-under chip) nulls the snapshot, unmounts the panel, and the remount
+            // re-fires an unrequested, audited, billed LLM call over whatever was on screen.
+            onAutoAsked={() => dispatch({ type: 'ai_disarmed' })}
+            // The rail composer's ask (Smoke shell) — nonce'd, one-shot, disarmed by the owner
+            // here so a panel remount cannot re-fire it. Same discipline as autoAsk above.
+            externalAsk={externalAsk}
+            onExternalAsked={() => setExternalAsk(null)}
+          />
+        ) : null,
+        pending: isPending,
+        scopeSource,
+        // The reducer field itself. Everything that must not claim a plan was chosen —
+        // the receipt, the identity line, the skip banner, the suppressed notices and
+        // provenance — reads THIS, so a re-scope cannot un-skip the presentation.
+        skipped,
+        refetching,
+        staleAfterError,
+        // ONE HANDLER, TWO RENDER SITES (S5): the failure banner's "Try again" and the
+        // NARROW SEARCH card's standing "Refresh the ranking". A second refetch path would
+        // be a second writer of the value the fetch effect keys on.
+        onRetry: onRetrySnapshot,
+        // The refresh's own progress signal — see the derivation above for why the three
+        // fields beside it cannot cover a same-scope re-run.
+        refreshing,
+        dataRebuiltAt,
+        // The auto window landing on a different rung under an UNCHANGED request key: the
+        // one scope change on this surface that no staleness flag can observe.
+        windowMove,
+        candidates: answerCandidates,
+        filters,
+        onToggleFilter,
+        onClearFilters,
+        employerNarrowTooMany: narrow.tooMany,
+        area,
+        onSelectArea,
+        // The SECOND grid narrow (S4). Both of these ride here rather than through
+        // `scopeKey`, and that absence from the fetch effect's inputs is the whole guarantee.
+        facilityOptions,
+        facilityNarrow,
+        onToggleFacility,
+        payerOverride,
+        // Re-scopes are REFETCHES of content already on screen: the snapshot stays rendered
+        // (dimmed, with the progress bar) rather than blanking — the design system's rule.
+        // Which is why these two actions write ONE field each and never touch `snapshot`.
+        onPayerOverride: (label: string | null) => dispatch({ type: 'payer_override_changed', label }),
+        windowDays,
+        onWindowDays: (d: QualifyTrailingDays | null) => dispatch({ type: 'window_days_changed', days: d }),
+        narrowExpanded,
+        onToggleNarrow,
+      }
+    : null;
+
+  const stagesNode = (
+    <ResolutionStages
+      // In shell mode the strip mounts in the BOARD's tape stack instead — one mount per render
+      // path, decided by a server prop that never changes at runtime, so the marquee's single-mount
+      // rule (no per-stage remount) still holds within each path.
+      ticker={shellMode ? null : tickerNode}
+      payerGroups={payerGroups}
+      stage={stage}
+      resolution={state.resolution}
+      reason={state.reason}
+      echo={state.echo}
+      // ── THE SEARCH BOX MUST NOT CONTRADICT THE STRIP 12px ABOVE IT ────────────────────────────
+      // `echo` becomes StageIdentify's `defaultValue` and the resolution's `readAs` becomes
+      // "We read as a 3-character member-ID prefix." — both claims about a search that a reset has
+      // dropped. Before the lock-strip fix these were stale AND AGREED with the strip; fixing one
+      // and not the other would leave the rail arguing with itself.
+      //
+      // ⚠ `sessionCleared`, NOT `!laneOpen`. The receipt's Change lands on this same screen with the
+      // term still held, and there the pre-fill is the point — the operator is editing a search, not
+      // starting one. Only a reset drops the term. Passing `!laneOpen` here would also change the
+      // SINGLE-COLUMN path, where a Change legitimately pre-fills today.
+      laneCleared={sessionCleared}
+      denied={state.denied}
+      pending={isPending}
+      payerPick={payerPick}
+      planFilter={planFilter}
+      identifyAction={identifyAction}
+      planAction={planAction}
+      onPickPayer={(p) => dispatch({ type: 'payer_picked', payer: p })}
+      onPlanFilter={(v) => dispatch({ type: 'plan_filter_changed', value: v })}
+      onAskAi={() => dispatch({ type: 'ai_armed' })}
+      onChange={onChange}
+      onSkip={onSkip}
+      answer={answerBag}
+      answerInline={!shellMode}
+    />
+  );
+
+  if (!shellMode) {
+    return (
+      // THE PAGE CHROME. Matching the v2 tab's <main> exactly, because the route layout supplies
+      // none: the first staged build returned a bare <div> and rendered the h1 flush against the
+      // viewport's top-left corner. max-w-[1680px] is the design system's wide-desktop bound.
+      <main ref={stageRef} className="mx-auto max-w-[1680px] p-6 sm:p-8">
+        {stagesNode}
+      </main>
+    );
+  }
+
+  // ── THE SMOKE SHELL — rail + board ("drill left → resolve right") ──────────────────────────────
+  // Server rows first, session-only rows after (onDeleteWatcher's index math depends on exactly
+  // this order); recent shows session first because newest-first is that list's whole ordering.
+  const board = watchboard === 'failed' || watchboard === null ? null : watchboard;
+  const trendView = [...(board?.trend ?? []), ...sessionTrend];
+  const patientView = [...(board?.patient ?? []), ...sessionPatient];
+  const recentView = [...sessionRecent, ...(board?.recent ?? [])];
+  // ⚠ NOT `board?.available ?? false`. That collapsed `null` (the mount fetch has not resolved) onto
+  // `false` (the relations are absent), so for the whole fetch window both panels rendered the
+  // absent-state sentence to every operator on every load — and 0097 is applied, so it was false.
+  // `deriveBoardStatus` keeps the four states four; the panels switch on it and cannot default.
+  const boardStatus = deriveBoardStatus(watchboard);
+
+  const watchActions = (
+    <span className="flex items-center gap-1.5">
+      {stage !== 'identify' && watchPayerLabel !== null ? (
+        <button
+          type="button"
+          onClick={onWatchPayer}
+          className="rounded-lg border border-teal200 px-2 py-0.5 font-mono text-[10px] font-semibold text-teal700 transition-colors hover:bg-teal50"
+        >
+          ＋ watch {watchPayerLabel}
+        </button>
+      ) : null}
+      {canWatchPatient ? (
+        <button
+          type="button"
+          onClick={onWatchPatient}
+          className="rounded-lg border border-teal200 px-2 py-0.5 font-mono text-[10px] font-semibold text-teal700 transition-colors hover:bg-teal50"
+        >
+          ＋ watch this patient
+        </button>
+      ) : null}
+    </span>
+  );
+
+  return (
+    // NO <h1> HERE: ResolutionStages renders the page's one "Qualify a client" heading inside the
+    // rail. A second identical h1 would give the page two top-level headings with the same text —
+    // heading navigation would announce the surface twice and neither would be the landmark.
+    <main ref={stageRef} className="mx-auto max-w-[1680px] p-4 sm:p-6">
+      <div className="grid grid-cols-1 items-start gap-5 xl:grid-cols-[416px_minmax(0,1fr)]">
+        <LaneRail
+          // ALL THREE GATE ON `laneOpen`, NOT ON `state.resolution`. The rail describes the session,
+          // and after "Start over" the server action's resolution is stale but unclearable — passing
+          // it straight through is what left the strip naming the abandoned lane. Gating the echo and
+          // the sentence too (not only the boolean) keeps that structural rather than dependent on
+          // LaneRail continuing to branch on `hasResolution` internally.
+          echo={laneOpen ? state.echo : ''}
+          readAs={laneOpen ? (state.resolution?.handle.readAs ?? null) : null}
+          hasResolution={laneOpen}
+          onReset={onSessionReset}
+          composer={<QualifyComposer snapshot={snapshot} onAsk={onComposerAsk} />}
+        >
+          {stagesNode}
+        </LaneRail>
+
+        <div className="min-w-0">
+          {/* the two-lane tape: policies on the move (dark idiom), then facility momentum. */}
+          <PolicyTapeMount />
+          <div className="mt-3">{tickerNode}</div>
+
+          <ThisSearchZone
+            stage={stage}
+            resolution={state.resolution}
+            payerGroups={payerGroups}
+            payerPick={payerPick}
+            echo={state.echo}
+          >
+            {state.resolution && answerBag ? <StageAnswer resolution={state.resolution} {...answerBag} /> : null}
+          </ThisSearchZone>
+
+          <WatchersPanel
+            status={boardStatus}
+            saveFailed={watcherSaveFailed}
+            trend={trendView}
+            patient={patientView}
+            onDelete={onDeleteWatcher}
+            watchAction={watchActions}
+          />
+
+          <RecentSearches
+            items={recentView}
+            status={boardStatus}
+            onRerun={onRerunRecent}
+            onClear={onClearRecent}
+          />
+        </div>
+      </div>
     </main>
   );
 }

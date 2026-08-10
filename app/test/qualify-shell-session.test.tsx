@@ -1,0 +1,483 @@
+/**
+ * THE SMOKE SHELL'S SESSION RULES — the four state-correctness defects, pinned.
+ *
+ * The shell that wires these (`components/qualify/v3/resolution-flow-client.tsx`) needs
+ * `useActionState` and cannot be mounted hermetically, so each rule was extracted into
+ * `components/qualify/shell/shell-session.ts` as a total function and is CALLED here. That is the
+ * deliberate alternative to a source scan: `makeRetryHandler`'s header records how an `indexOf`-based
+ * scan of this same shell survived the deletion of the guard it was meant to protect.
+ *
+ * What must hold:
+ *   1. TWO DIFFERENT MEMBERS ARE TWO HISTORY ROWS even when they share a predicateId — and a
+ *      re-scope of one member is still exactly one row.
+ *   2. THE RAIL SAYS "No lane yet" IMMEDIATELY AFTER A RESET, though `state.resolution` is still
+ *      non-null (the server action owns it and the shell cannot clear it).
+ *   3. THE REVEAL SCOPE follows the pane the answer actually renders in.
+ *   4. A REFUSED WATCHER SAVE IS SPOKEN — a distinct sentence per reason, inside a live region that
+ *      exists before it has anything to say.
+ *   5. A WATCHER DELETE ROUTES CORRECTLY — a server-backed row (non-empty id) always deletes by id;
+ *      a session-only row's position in `[...(board?.trend ?? []), ...sessionTrend]` (server rows
+ *      first, declared ~170 lines from the handler) resolves to the right SESSION-slice index.
+ *   6. THERE IS EXACTLY ONE PATIENT-ECHO MASK, and the shell calls it rather than owning a second.
+ *      The shell's own copy revealed 7 of 8 characters of a member ID into the DOM — the identical
+ *      overlapping-slice defect `maskedPatientEcho` had already been fixed for, shipped in a second
+ *      location. See that section's header.
+ *
+ * ⚠️ Must be .tsx — app/package.json collects `test/*.test.tsx` only; a `.ts` file here would
+ * "pass" by never running (forecast-edit-feedback.test.tsx's header).
+ */
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { renderToStaticMarkup } from 'react-dom/server';
+import {
+  deriveWatcherDeleteAction,
+  laneIsOpen,
+  recentSearchKeyOf,
+  revealScopeFor,
+  watcherSaveNotice,
+  type QualifyWatcherSaveFailure,
+} from '../components/qualify/shell/shell-session';
+import { LaneRail } from '../components/qualify/shell/lane-rail';
+import { WatchersPanel } from '../components/qualify/shell/watchers-panel';
+import { ResolutionStages, type ResolutionStagesProps } from '../components/qualify/v3/resolution-flow';
+// The ONE mask — imported here for the same reason the shell imports it: there must not be a second.
+import { maskedPatientEcho } from '../../src/collections/qualifyWatchers';
+import type { QualifyResolution } from '../lib/qualify/resolution';
+
+/** The shell's source, for the CALL-SITE pins below. */
+const SHELL_SRC = readFileSync(
+  fileURLToPath(new URL('../components/qualify/v3/resolution-flow-client.tsx', import.meta.url)),
+  'utf8',
+);
+
+/**
+ * `indexOf` RETURNS -1 FOR AN ABSENT NEEDLE, which is how a `a.indexOf(x) < b.indexOf(y)` ordering
+ * assertion became `-1 < positive` — TRUE — the moment the thing it guarded was deleted
+ * (`makeRetryHandler`'s header, MUT-25). Every position this file takes goes through here, so an
+ * absent needle FAILS instead of quietly satisfying a comparison.
+ */
+function indexOfOrFail(hay: string, needle: string, from = 0): number {
+  const at = hay.indexOf(needle, from);
+  assert.notEqual(at, -1, `missing from the shell: ${needle}`);
+  return at;
+}
+
+/**
+ * THE SHELL WITH ITS COMMENTS REMOVED — a code-only view, for the ABSENCE assertions.
+ *
+ * `doesNotMatch` over raw source cannot tell a live expression from a docblock quoting one, and the
+ * mask section below deliberately quotes the deleted formula verbatim so the defect stays legible.
+ * Scanning the raw text there would mean the fix's own explanation failed the fix's own test —
+ * which teaches the next session to delete the explanation. Presence pins keep using `SHELL_SRC`
+ * (a needle found in a comment is still a needle worth finding); only "this must not exist" reads
+ * from here.
+ */
+const SHELL_CODE = SHELL_SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+// ── 1. The recent-search dedupe key ─────────────────────────────────────────────────────────────
+//
+// `predicateIdFor` (resolutionService.ts:415) hashes {kind, canonicalPayerId, employerLabel,
+// funding, planType, from, to} — NO identifier. Two members on the same plan shape in the same
+// window are the same hash, which is the exact input this test holds fixed.
+const SHARED_PREDICATE = 'pred-aetna-acme-selffunded-ppo-2025';
+
+test('two different members sharing a predicateId are two different history keys', () => {
+  // The shell bumps its search counter on every identify dispatch; the hash is identical.
+  const memberA = recentSearchKeyOf(1, SHARED_PREDICATE);
+  const memberB = recentSearchKeyOf(2, SHARED_PREDICATE);
+  assert.notEqual(memberA, memberB, 'a colliding predicateId must not collapse two searches');
+});
+
+test('the dedupe records the second member and still swallows a re-scope of the first', () => {
+  // The shell's own loop, replayed: a Set of keys, one `has`/`add` per resolved snapshot.
+  const recorded = new Set<string>();
+  const record = (seq: number, pid: string): boolean => {
+    const key = recentSearchKeyOf(seq, pid);
+    if (recorded.has(key)) return false;
+    recorded.add(key);
+    return true;
+  };
+
+  // Member A resolves, then the operator presses a window chip and a billed-under chip: three
+  // snapshots, ONE search — the counter does not move, because no identify was dispatched.
+  assert.equal(record(1, SHARED_PREDICATE), true, 'the first resolve is logged');
+  assert.equal(record(1, SHARED_PREDICATE), false, 'a re-scope must not re-log');
+  assert.equal(record(1, SHARED_PREDICATE), false, 'nor a refresh');
+
+  // Member B is typed in. Same plan shape, same hash, new search.
+  assert.equal(record(2, SHARED_PREDICATE), true, 'the SECOND member must be logged — the defect');
+
+  // A plan pick inside member B's search re-resolves to a concrete plan class: a real new row.
+  assert.equal(record(2, 'pred-aetna-acme-selffunded-hmo-2025'), true);
+  assert.equal(recorded.size, 3);
+});
+
+test('the dedupe key carries no identifier — only the counter and the hash', () => {
+  const key = recentSearchKeyOf(7, SHARED_PREDICATE);
+  assert.equal(key, `7:${SHARED_PREDICATE}`);
+  // The raw term is the one thing that would trivially work and must never be used: a Set of terms
+  // in a ref is PHI at rest for the life of the mount.
+  assert.doesNotMatch(key, /W12345678|GGS0001/, 'no member identifier may reach the key');
+});
+
+/**
+ * ⚠ THE CALL SITE, NOT ONLY THE FUNCTION. Everything above passes with `searchSeqRef.current += 1`
+ * DELETED and with `recordedRef` still keyed on the bare `pid` — the two tests above call
+ * `recentSearchKeyOf` directly and re-implement the shell's `has`/`add` loop rather than exercising
+ * it. Extracting the rule moved the untestable part; it did not shrink it. The shell needs
+ * `useActionState` and cannot be mounted here, so the wiring is pinned by reading the source — with
+ * every position taken through `indexOfOrFail`, never a bare `indexOf` comparison.
+ */
+test('the shell WIRES the key: the counter is bumped inside identifyAction and the Set is keyed on it', () => {
+  // (a) THE INCREMENT — present, and inside `identifyAction`, before the dispatch that starts the
+  // search. A bump anywhere else (an effect, a later handler) would race the recording effect.
+  const identifyAt = indexOfOrFail(SHELL_SRC, 'const identifyAction = useCallback(');
+  const bumpAt = indexOfOrFail(SHELL_SRC, 'searchSeqRef.current += 1;', identifyAt);
+  const closeAt = indexOfOrFail(SHELL_SRC, '[formAction],', identifyAt);
+  assert.ok(bumpAt < closeAt, 'the counter must be bumped INSIDE identifyAction');
+  const dispatchAt = indexOfOrFail(SHELL_SRC, "dispatch({ type: 'search_submitted' })", identifyAt);
+  assert.ok(bumpAt < dispatchAt, 'and before the search it identifies is dispatched');
+  // Exactly one writer — a second `+= 1` anywhere would double-count and split one search in two.
+  assert.equal(SHELL_SRC.split('searchSeqRef.current += 1').length - 1, 1, 'one writer, no more');
+
+  // (b) THE SET IS KEYED ON IT. Both the read and the write, and the old keying is gone.
+  assert.match(
+    SHELL_SRC,
+    /const key = recentSearchKeyOf\(searchSeqRef\.current, pid\);/,
+    'the dedupe key must be derived by recentSearchKeyOf',
+  );
+  assert.match(SHELL_SRC, /recordedRef\.current\.has\(key\)/, 'the read uses the derived key');
+  assert.match(SHELL_SRC, /recordedRef\.current\.add\(key\)/, 'and so does the write');
+  assert.doesNotMatch(
+    SHELL_SRC,
+    /recordedRef\.current\.(has|add)\(pid\)/,
+    'the predicateId-only keying is the defect — it must not come back',
+  );
+});
+
+// ── 2. The lane's lock state after "Start over" AND after the receipt's Change ──────────────────
+const LIVE_LANE = { resolutionPresent: true, sessionCleared: false, stageIsIdentify: false };
+
+test('laneIsOpen is the SESSION, not the server action leftover', () => {
+  assert.equal(laneIsOpen({ ...LIVE_LANE, resolutionPresent: false, stageIsIdentify: true }), false, 'nothing resolved yet');
+  assert.equal(laneIsOpen(LIVE_LANE), true, 'a live lane');
+  // DEFECT 1: `went_back` cannot clear `state.resolution`, so `resolutionPresent` stays true.
+  assert.equal(laneIsOpen({ ...LIVE_LANE, sessionCleared: true, stageIsIdentify: true }), false, 'reset closes the lane');
+  // DEFECT 2 (the review's find): the receipt's Change dispatches the same `went_back` through a
+  // handler that arms NOTHING, so `sessionCleared` is false and only the stage says the lane is gone.
+  assert.equal(
+    laneIsOpen({ ...LIVE_LANE, stageIsIdentify: true }),
+    false,
+    'a receipt Change back to Search closes the lane too — the board already says "Nothing resolved yet"',
+  );
+  // ...and the pending window after a NEW submit is deliberately NOT closed: the stage is 'payer'
+  // there, so the rail keeps agreeing with the stage beside it (see the field's own docblock).
+  assert.equal(laneIsOpen({ ...LIVE_LANE, sessionCleared: false }), true);
+});
+
+test('the rail says "No lane yet" after a reset AND after a receipt Change, resolution still present', () => {
+  const railFor = (input: Parameters<typeof laneIsOpen>[0]) => {
+    const open = laneIsOpen(input);
+    return renderToStaticMarkup(
+      <LaneRail
+        echo={open ? 'GGS' : ''}
+        readAs={open ? 'read as a 3-character member-ID prefix' : null}
+        hasResolution={open}
+        onReset={() => {}}
+        composer={null}
+      >
+        <p>flow</p>
+      </LaneRail>,
+    );
+  };
+
+  const live = railFor(LIVE_LANE);
+  assert.match(live, /Locked to/, 'positive control: a live lane really does say so');
+  assert.match(live, /GGS/);
+
+  // BOTH routes back to the identify question, asserted separately — one arms the session bit, the
+  // other only moves the stage, and until the fix only the first was covered.
+  for (const [what, input] of [
+    ['Start over', { ...LIVE_LANE, sessionCleared: true, stageIsIdentify: true }],
+    ['receipt Change → Search', { ...LIVE_LANE, stageIsIdentify: true }],
+  ] as const) {
+    const html = railFor(input);
+    assert.match(html, /No lane yet/, `${what}: the strip must say the lane is gone`);
+    assert.doesNotMatch(html, /Locked to/, `${what}: it must not name the abandoned lane`);
+    assert.doesNotMatch(html, /GGS/, `${what}: nor echo it`);
+    // The reset control goes inert — aria-disabled, never `disabled` (the focus-drop rule).
+    assert.match(html, /aria-disabled="true"/);
+    assert.doesNotMatch(html, / disabled=""/);
+  }
+});
+
+// ── 2b. The rail must not contradict the search box inside it ───────────────────────────────────
+//
+// `echo` is StageIdentify's `defaultValue` and the resolution's `readAs` is the "We read as …"
+// sentence. A reset drops the held term, so both are claims about a search that no longer exists —
+// and before this they sat 12px under a strip already saying "No lane yet".
+const IDENTIFY_RESOLUTION = {
+  handle: { readAs: 'read as a 3-character member-ID prefix', echo: 'GGS', kind: 'alpha_prefix' },
+  candidates: { total: 4 },
+  group: { claimsPayerLabels: [] },
+} as unknown as QualifyResolution;
+
+function identifyStage(over: Partial<ResolutionStagesProps> = {}): string {
+  return renderToStaticMarkup(
+    <ResolutionStages
+      stage="identify"
+      resolution={IDENTIFY_RESOLUTION}
+      reason={null}
+      echo="GGS"
+      denied={null}
+      pending={false}
+      payerPick={null}
+      planFilter=""
+      identifyAction={() => {}}
+      planAction={() => {}}
+      onPickPayer={() => {}}
+      onPlanFilter={() => {}}
+      onAskAi={() => {}}
+      onChange={() => {}}
+      onSkip={() => {}}
+      ticker={null}
+      payerGroups={[]}
+      answer={null}
+      {...over}
+    />,
+  );
+}
+
+test('a cleared lane empties the search box and drops the "We read as" sentence', () => {
+  // POSITIVE CONTROL — and the single-column v3 path, where `laneCleared` is never passed at all.
+  // A receipt Change lands here with the term still HELD, so the pre-fill is correct and must stay.
+  const changed = identifyStage();
+  assert.match(changed, /defaultValue|value="GGS"/, 'sanity: the input renders its value attribute');
+  assert.ok(changed.includes('value="GGS"'), 'a Change pre-fills the prefix it is editing');
+  assert.match(changed, /We read as a 3-character member-ID prefix/);
+
+  // A RESET dropped the term — neither claim may survive.
+  const cleared = identifyStage({ laneCleared: true });
+  assert.ok(!cleared.includes('value="GGS"'), 'the box must not pre-fill an abandoned prefix');
+  assert.doesNotMatch(cleared, /We read as/, 'nor describe how it was read');
+  // ...and the generic help sentence takes over rather than the field going silent.
+  assert.match(cleared, /Three characters is read as a prefix/);
+});
+
+/**
+ * ⚠ THE LANE DERIVATION'S OWN CALL SITE — the same "pinned function, unpinned call site" gap this
+ * file already closes for the search counter, found in the fix for it. Every OTHER lane test above
+ * either calls `laneIsOpen` with a fabricated `stageIsIdentify` or renders `LaneRail` with a
+ * pre-computed boolean, so reverting the one line that derives that input to a hardcoded `false`
+ * reproduces the receipt-Change defect — rail locked over an emptied board — under a green suite.
+ * All three inputs are pinned, not only the one the review named: `resolutionPresent` reverting to a
+ * literal would be the same class of silent revert.
+ */
+test('the shell WIRES the lane state: all three laneIsOpen inputs are derived at the call site', () => {
+  const callAt = indexOfOrFail(SHELL_SRC, 'const laneOpen = laneIsOpen({');
+  const closeAt = indexOfOrFail(SHELL_SRC, '});', callAt);
+  const withinCall = (needle: string, why: string) => {
+    const at = indexOfOrFail(SHELL_SRC, needle, callAt);
+    assert.ok(at < closeAt, `${needle} must be INSIDE the laneIsOpen call — ${why}`);
+  };
+  withinCall('resolutionPresent: state.resolution !== null,', 'the server action is the only source of a resolution');
+  withinCall('sessionCleared,', 'the reset bit is the shell’s own, and no reducer field carries it');
+  // THE FINDING: this is the line whose revert to `false` re-opens the receipt-Change defect.
+  withinCall("stageIsIdentify: stage === 'identify',", 'every route back to the identify question must close the lane');
+  // ONE derivation, not two that could disagree about whether a lane is open.
+  assert.equal(SHELL_SRC.split('laneIsOpen(').length - 1, 1, 'one call site, no second derivation');
+});
+
+test('the identify stage gates BOTH halves on laneCleared, and the shell passes the reset bit', () => {
+  // Pinned at the call site for the reason item 1's wiring is: the prop defaulting false is what
+  // makes single-column inert, and a caller that stops passing it fails nothing else.
+  assert.match(SHELL_SRC, /laneCleared=\{sessionCleared\}/, 'the shell must pass the reset bit');
+  assert.doesNotMatch(
+    SHELL_SRC,
+    /laneCleared=\{!laneOpen\}/,
+    'NOT !laneOpen — a receipt Change closes the lane but keeps the term, and the box should pre-fill',
+  );
+});
+
+// ── 3. Where the tile/facet reveal looks ────────────────────────────────────────────────────────
+test('the reveal scope follows the pane the answer renders in', () => {
+  const root = { id: 'root' };
+  const stageEl = { id: 'stage' };
+  // Single-column: the answer is inside [data-v3-stage].
+  assert.equal(revealScopeFor(false, root, stageEl), stageEl);
+  // Shell: `answerInline` is false and StageAnswer mounts in the BOARD, outside [data-v3-stage] —
+  // scoping to the stage found no answer content at all, which is why neither reveal ran.
+  assert.equal(revealScopeFor(true, root, stageEl), root);
+});
+
+// ── 4. A refused or failed watcher save is spoken ───────────────────────────────────────────────
+const REASONS: QualifyWatcherSaveFailure[] = ['denied', 'invalid', 'failed'];
+
+test('each save-failure reason gets its own sentence, and all of them say nothing was stored', () => {
+  const seen = new Set<string>();
+  for (const r of REASONS) {
+    const s = watcherSaveNotice(r);
+    assert.ok(s.length > 0);
+    assert.match(s, /not saved/);
+    assert.match(s, /Nothing is stored/);
+    seen.add(s);
+  }
+  assert.equal(seen.size, REASONS.length, 'three reasons, three distinct sentences');
+});
+
+test('the watchers panel announces a failed save and keeps its live region mounted when quiet', () => {
+  const quiet = renderToStaticMarkup(
+    <WatchersPanel status="absent" trend={[]} patient={[]} onDelete={() => {}} />,
+  );
+  // The region must EXIST before it has anything to say — a live region that appears together with
+  // its text is unreliably announced.
+  assert.match(quiet, /role="status" aria-live="polite"/);
+  assert.doesNotMatch(quiet, /not saved/);
+
+  for (const r of REASONS) {
+    const failed = renderToStaticMarkup(
+      <WatchersPanel status="absent" saveFailed={r} trend={[]} patient={[]} onDelete={() => {}} />,
+    );
+    assert.match(failed, /role="status" aria-live="polite"/);
+    assert.ok(failed.includes(watcherSaveNotice(r)), `the ${r} sentence must render`);
+    // A failed SAVE is not a failed READ — the panel must not offer the read banner's explanation.
+    assert.doesNotMatch(failed, /saved watchers could not be read/);
+  }
+});
+
+// ── 5. The watcher delete route ────────────────────────────────────────────────────────────────
+//
+// `onDeleteWatcher` receives `index` as the position in the CONCATENATED view
+// `[...(board?.trend ?? []), ...sessionTrend]` — server rows first. A session-only row's `id` is
+// `''` (falsy); a server-backed row's `id` is a non-empty string that must never be coerced with
+// `Number()` (node-pg returns bigint as a string).
+
+test('a server-backed row (non-empty id) always takes the server route, whatever index/serverCount say', () => {
+  assert.deepEqual(deriveWatcherDeleteAction('42', 0, 5), { kind: 'server', id: '42' });
+  // A large index and a serverCount of 0 would make the naive arithmetic wildly wrong — the id check
+  // must win outright, not merely "usually" win.
+  assert.deepEqual(deriveWatcherDeleteAction('42', 99, 0), { kind: 'server', id: '42' });
+});
+
+test('a session-only row (null id) resolves to its position within the session-only slice', () => {
+  // 3 server rows precede the session slice: view index 3 is session index 0, the FIRST session row.
+  assert.deepEqual(deriveWatcherDeleteAction(null, 3, 3), { kind: 'session', sessionIndex: 0 });
+  assert.deepEqual(deriveWatcherDeleteAction(null, 4, 3), { kind: 'session', sessionIndex: 1 });
+});
+
+test('zero server rows: the session index equals the view index unchanged', () => {
+  assert.deepEqual(deriveWatcherDeleteAction(null, 0, 0), { kind: 'session', sessionIndex: 0 });
+  assert.deepEqual(deriveWatcherDeleteAction(null, 2, 0), { kind: 'session', sessionIndex: 2 });
+});
+
+test('deleting the FIRST session row removes exactly that row — server rows first, session rows after', () => {
+  // Mirrors the shell's own concat: trendView = [...(board?.trend ?? []), ...sessionTrend].
+  const serverRows = ['server-a', 'server-b'];
+  let sessionRows = ['session-x', 'session-y', 'session-z'];
+  const trendView = [...serverRows, ...sessionRows];
+
+  // The operator deletes the first SESSION row as rendered — its position in the concatenated view.
+  const viewIndex = trendView.indexOf('session-x');
+  assert.equal(viewIndex, serverRows.length, 'sanity: the first session row sits right after the server rows');
+
+  const action = deriveWatcherDeleteAction(null, viewIndex, serverRows.length);
+  assert.equal(action.kind, 'session');
+  if (action.kind === 'session') sessionRows = sessionRows.filter((_, i) => i !== action.sessionIndex);
+
+  assert.deepEqual(sessionRows, ['session-y', 'session-z'], 'exactly the first session row is removed');
+  assert.deepEqual(serverRows, ['server-a', 'server-b'], 'server rows are never touched by the session filter');
+});
+
+/**
+ * ⚠ THE CALL SITE. `onDeleteWatcher` used to inline `index - serverCount` directly — the exact
+ * "pinned function, unpinned call site" gap items 1 and 3 of this file already close for their own
+ * rules. Reverting the wiring to that inline subtraction (or to a bare `if (id)` that skips the
+ * derivation) reproduces the delete-index bug under a green suite unless the call site itself is
+ * pinned, so every position below goes through `indexOfOrFail`.
+ */
+test('the shell WIRES the delete route: onDeleteWatcher calls deriveWatcherDeleteAction, not inline math', () => {
+  const handlerAt = indexOfOrFail(SHELL_SRC, 'const onDeleteWatcher = useCallback(');
+  const closeAt = indexOfOrFail(SHELL_SRC, '[watchboard, reloadWatchboard],', handlerAt);
+  const callAt = indexOfOrFail(SHELL_SRC, 'deriveWatcherDeleteAction(id, index, serverCount)', handlerAt);
+  assert.ok(callAt < closeAt, 'the derivation must be called inside onDeleteWatcher');
+  // The inline subtraction this extraction replaced must not come back.
+  assert.doesNotMatch(
+    SHELL_SRC,
+    /const sessionIndex = index - serverCount;/,
+    'the inline index math is the defect this extraction replaced',
+  );
+  // Exactly one call site.
+  assert.equal(SHELL_SRC.split('deriveWatcherDeleteAction(').length - 1, 1, 'one call site, no second copy');
+});
+
+// ── 6. ONE MASK, AND IT IS THE SERVER'S ─────────────────────────────────────────────────────────
+//
+// THE DEFECT (adversarial review, twice): `onWatchPatient` derived its own display echo —
+//
+//     if (term.length < 5) { setWatcherSaveFailed('invalid'); return; }
+//     const norm = term.toUpperCase().replace(/[^A-Z0-9]/g, '');
+//     const localEcho = `${norm.slice(0, 3).replace(/[^A-Z]/g, '') || '•••'} •••• ${norm.slice(-4)}`;
+//
+// — byte-for-byte the bug already found and fixed inside `maskedPatientEcho`, re-introduced in a
+// second location. `slice(0,3)` and `slice(-4)` OVERLAP below eight characters, so an 8-char id
+// yields prefix+tail = 7 of its 8 characters, in order, and this one was RENDERED into the DOM
+// (watchers-panel.tsx's patient row) on the session-only branch. The server refuses that shape.
+//
+// So the property under test is not "the mask is correct" — `test/qualifyWatchers.test.ts` owns that
+// — but "there is ONE mask", which is the claim `src/collections/qualifyWatchers.ts` makes in its own
+// header ("this is the ONLY implementation of the format, so … exactly one place to audit").
+//
+// TWO ASSERTIONS, because neither alone catches the revert. The behavioural one shows the two
+// formulas genuinely disagree (a same-implementation test over one function is vacuous by
+// construction — both "paths" would be the same call). The SOURCE one is what actually fails if the
+// shell grows its own copy again, and it is the only mechanism available: the shell needs
+// `useActionState` and cannot be mounted here.
+test('the client and the server derive the SAME patient echo — because it is the same function', () => {
+  // The shell calls it, by name, inside onWatchPatient — the same call `watcher-actions.ts` makes.
+  const handlerAt = indexOfOrFail(SHELL_SRC, 'const onWatchPatient = useCallback(');
+  const callAt = indexOfOrFail(SHELL_SRC, 'const localEcho = maskedPatientEcho(term);', handlerAt);
+  const closeAt = indexOfOrFail(SHELL_SRC, '}, [snapshot, reloadWatchboard]);', handlerAt);
+  assert.ok(callAt < closeAt, 'the echo must be derived inside onWatchPatient');
+  assert.match(
+    SHELL_SRC,
+    /import \{ maskedPatientEcho \} from '\.\.\/\.\.\/\.\.\/\.\.\/src\/collections\/qualifyWatchers';/,
+    'and it must come from the one implementation, by relative import',
+  );
+
+  // THE REFUSAL IS THAT FUNCTION'S null, never a length literal restated in the shell.
+  assert.match(
+    SHELL_SRC,
+    /if \(localEcho === null\) \{\s*setWatcherSaveFailed\('invalid'\);/,
+    "the client's refusal must be maskedPatientEcho's null",
+  );
+  assert.doesNotMatch(SHELL_CODE, /term\.length < 5/, 'the <5 literal is the pre-fix bug, not the rule');
+
+  // NO SECOND MASK ANYWHERE IN THE SHELL'S CODE. These three needles are what the local copy was
+  // made of; any one of them coming back means a mask is being built here rather than imported.
+  assert.doesNotMatch(SHELL_CODE, /••••/, 'no mask literal may be constructed in the shell');
+  assert.doesNotMatch(SHELL_CODE, /\.slice\(-4\)/, 'nor a last-four slice');
+  assert.doesNotMatch(SHELL_CODE, /\.slice\(0, 3\)/, 'nor the overlapping prefix slice');
+});
+
+test('the deleted local formula and the shared one disagree exactly where it mattered', () => {
+  // The local copy, verbatim as it shipped, so the divergence is demonstrated rather than asserted.
+  const deletedLocalMask = (term: string): string => {
+    const norm = term.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return `${norm.slice(0, 3).replace(/[^A-Z]/g, '') || '•••'} •••• ${norm.slice(-4)}`;
+  };
+
+  // 8 characters: prefix(0..3) and tail(-4) overlap by nothing, but together they are 7 of the 8.
+  assert.equal(deletedLocalMask('ABC12345'), 'ABC •••• 2345', 'the leak, reproduced');
+  assert.equal(maskedPatientEcho('ABC12345'), '••• •••• 2345', 'the shared function drops the prefix');
+  assert.notEqual(maskedPatientEcho('ABC12345'), deletedLocalMask('ABC12345'));
+
+  // 7 characters: the local copy revealed the WHOLE identifier and called it a mask.
+  assert.equal(deletedLocalMask('ABC1234'), 'ABC •••• 1234');
+  assert.equal(maskedPatientEcho('ABC1234'), null, 'the shared function refuses rather than masks');
+
+  // Where both are safe they agree, which is why the divergence above is easy to miss by eye.
+  assert.equal(maskedPatientEcho('GGS00418841'), 'GGS •••• 8841');
+  assert.equal(deletedLocalMask('GGS00418841'), 'GGS •••• 8841');
+});
