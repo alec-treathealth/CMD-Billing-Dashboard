@@ -26,10 +26,12 @@ import {
   ALL_CMD_CUSTOMERS,
   BXR_CUSTOMERS,
   INDIGO_CUSTOMERS,
-  INDIGO_RETIRED_CUSTOMERS,
   OWNED_CMD_CUSTOMERS,
+  RETIRED_CMD_CUSTOMERS,
+  activeFacilityCodesForEntity,
   facilityBelongsToEntity,
   facilityCodesForEntity,
+  facilityIsActiveForEntity,
 } from '../src/collections/cmdCustomers.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../src/tenants.js';
 import {
@@ -613,7 +615,7 @@ test('facilityCodesForEntity returns exactly one tenant, and covers OWNED (not j
   assert.equal(bxr.length, BXR_CUSTOMERS.length, 'BXR has no retired facilities today');
   // Ownership spans active + retired. Asserting against INDIGO_CUSTOMERS alone would re-encode
   // the bug this separation exists to prevent (a removed facility losing its owner).
-  assert.equal(indigo.length, INDIGO_CUSTOMERS.length + INDIGO_RETIRED_CUSTOMERS.length);
+  assert.equal(indigo.length, INDIGO_CUSTOMERS.length + RETIRED_CMD_CUSTOMERS.length);
   assert.ok(bxr.includes('CAMH'), 'a known BXR short code');
   // THE POINT OF THE GUARD: no facility may appear on both rosters, or "whose is it" has no
   // answer and the guard would wave a cross-tenant write through.
@@ -621,20 +623,26 @@ test('facilityCodesForEntity returns exactly one tenant, and covers OWNED (not j
   assert.deepEqual(overlap, [], 'the two books share no facility code');
 });
 
-// --- polling roster vs ownership set: the separation must not collapse -----------------
-// Removing a facility from CMD polling must never remove it from its tenant's ownership. These
-// lock both halves so a future removal cannot silently answer a liveness question with a
-// tenancy error (and cannot silently resume polling a closed account).
+// --- polling vs ownership vs new-work: three questions, one `retired` field ------------------
+// Retiring a facility must stop polling and stop NEW writes while keeping ownership true. These
+// lock all three so a future retirement cannot silently resume polling, cannot lose an owner, and
+// cannot answer a liveness question with a tenancy error.
 
 test('retired facilities are OWNED but never POLLED', () => {
-  assert.ok(INDIGO_RETIRED_CUSTOMERS.length > 0, 'the list is load-bearing; keep it populated');
-  for (const retired of INDIGO_RETIRED_CUSTOMERS) {
-    // Not in any ingest roster — polling must stay stopped.
+  assert.ok(RETIRED_CMD_CUSTOMERS.length > 0, 'the marker is load-bearing; keep it exercised');
+  for (const retired of RETIRED_CMD_CUSTOMERS) {
+    // Not in any ingest roster — polling must stay stopped. Excluded on BOTH keys: for Indigo
+    // customerId and facilityCode are the same string, so checking one would hide a BXR-shaped
+    // mistake where they differ (facilityCode is a mnemonic like 'CAMH').
     assert.ok(
       !ALL_CMD_CUSTOMERS.some((c) => c.customerId === retired.customerId),
-      `${retired.customerId} must NOT be in the polling roster`,
+      `${retired.customerId} must NOT be in the polling roster (customerId)`,
     );
-    // But still owned, so guards and pickers answer truthfully.
+    assert.ok(
+      !ALL_CMD_CUSTOMERS.some((c) => c.facilityCode === retired.facilityCode),
+      `${retired.facilityCode} must NOT be in the polling roster (facilityCode)`,
+    );
+    // But still owned, so guards and history-facing surfaces answer truthfully.
     assert.ok(
       OWNED_CMD_CUSTOMERS.some((c) => c.facilityCode === retired.facilityCode),
       `${retired.facilityCode} must be in the owned set`,
@@ -647,25 +655,63 @@ test('retired facilities are OWNED but never POLLED', () => {
       !facilityBelongsToEntity(retired.facilityCode, BXR_ENTITY_ID),
       'a retired Indigo facility is still not BXR\'s',
     );
+    // ...and must NOT accept new work. This is the pair that keeps the two errors distinct.
+    assert.ok(
+      !facilityIsActiveForEntity(retired.facilityCode, retired.businessEntityId),
+      `${retired.facilityCode} must not accept a NEW forecast row`,
+    );
+    assert.ok(
+      !activeFacilityCodesForEntity(retired.businessEntityId).includes(retired.facilityCode),
+      `${retired.facilityCode} must not be offered in a create picker`,
+    );
   }
 });
 
-test('10035467 stays owned — it holds reported revenue that must remain attributable', () => {
-  // Measured 2026-08-10: 8 collections.daily_collections rows, $28,843.12, plus its
-  // collections.facilities dimension row. Reporting reads the DB and is roster-independent, but
-  // the forecast-edit guard and the assignment picker read the roster — so dropping ownership
-  // here would reject legitimate edits to this facility's history.
-  assert.ok(facilityBelongsToEntity('10035467', INDIGO_ENTITY_ID));
-  assert.ok(facilityCodesForEntity(INDIGO_ENTITY_ID).includes('10035467'));
+test('every retired marker is an ISO date — so `retired` cannot be a falsy typo', () => {
+  // `retired: ''` would read as retired under `!== undefined` and as active under truthiness.
+  // The predicates all compare against undefined, and this pins the value shape too.
+  for (const c of RETIRED_CMD_CUSTOMERS) {
+    assert.match(c.retired ?? '', /^\d{4}-\d{2}-\d{2}$/, `${c.facilityCode} retired marker`);
+  }
 });
 
-test('OWNED_CMD_CUSTOMERS is the active roster plus retired, with no duplicates', () => {
-  assert.equal(
-    OWNED_CMD_CUSTOMERS.length,
-    ALL_CMD_CUSTOMERS.length + INDIGO_RETIRED_CUSTOMERS.length,
-  );
+test('an ACTIVE facility accepts new work, and both predicates agree on it', () => {
+  const active = INDIGO_CUSTOMERS[0]!;
+  assert.ok(facilityBelongsToEntity(active.facilityCode, INDIGO_ENTITY_ID));
+  assert.ok(facilityIsActiveForEntity(active.facilityCode, INDIGO_ENTITY_ID));
+  assert.ok(activeFacilityCodesForEntity(INDIGO_ENTITY_ID).includes(active.facilityCode));
+  // Liveness never widens tenancy: an active BXR facility is still not Indigo's.
+  assert.ok(!facilityIsActiveForEntity('CAMH', INDIGO_ENTITY_ID));
+});
+
+test('10035467 stays owned but is closed to new work', () => {
+  // Measured 2026-08-10: 8 collections.daily_collections rows, $28,843.12, plus its
+  // collections.facilities dimension row. Reporting reads the DB and is roster-independent, but
+  // the ownership guard reads the roster — so dropping ownership would break attribution of that
+  // history. Its CMD account closed 2026-08-06, so no NEW payment can ever arrive for it.
+  assert.ok(facilityBelongsToEntity('10035467', INDIGO_ENTITY_ID));
+  assert.ok(facilityCodesForEntity(INDIGO_ENTITY_ID).includes('10035467'));
+  assert.ok(!facilityIsActiveForEntity('10035467', INDIGO_ENTITY_ID));
+  assert.ok(!activeFacilityCodesForEntity(INDIGO_ENTITY_ID).includes('10035467'));
+});
+
+test('OWNED_CMD_CUSTOMERS is active plus retired, unique on BOTH keys', () => {
+  assert.equal(OWNED_CMD_CUSTOMERS.length, ALL_CMD_CUSTOMERS.length + RETIRED_CMD_CUSTOMERS.length);
   const codes = OWNED_CMD_CUSTOMERS.map((c) => c.facilityCode);
   assert.equal(new Set(codes).size, codes.length, 'a facility must not be both active and retired');
+  // customerId too: for BXR the two keys differ, so uniqueness on facilityCode alone would let a
+  // future retirement reuse an active customerId under a different code and pass.
+  const ids = OWNED_CMD_CUSTOMERS.map((c) => c.customerId);
+  assert.equal(new Set(ids).size, ids.length, 'a CMD customer id must appear once');
+});
+
+test('Indigo owns exactly 32 codes — the set cmdCsvDailyBackfill must name', () => {
+  // The backfill's INDIGO_NAME_BY_CODE labels HISTORICAL deposits, so it must cover retired
+  // facilities too. It cannot be imported here (that module runs a CLI main() on import), so this
+  // pins the count its comment cites; keeping the number honest is the most a test can do until
+  // that entry point is guarded.
+  const indigoOwned = OWNED_CMD_CUSTOMERS.filter((c) => c.businessEntityId === INDIGO_ENTITY_ID);
+  assert.equal(indigoOwned.length, 32, 'cmdCsvDailyBackfill.ts cites 32 — update both together');
 });
 
 test('facilityBelongsToEntity is exact and rejects the other tenant', () => {

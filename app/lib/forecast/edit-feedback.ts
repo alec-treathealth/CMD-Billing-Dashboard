@@ -112,6 +112,10 @@ const REASON: Readonly<Record<string, string>> = {
     'Switch to the BXR or Indigo view first — a forecast edit has to name one company’s book.',
   facility_not_in_tenant:
     'That facility is not in this view’s book. Switch to the view that owns it, or pick a facility from the list.',
+  // Owned by this book, but the CMD account is closed — so "switch views" would be wrong advice.
+  // The facility is deliberately absent from the picker; this covers a stale form or a hand-sent code.
+  facility_retired:
+    'That facility’s account is closed, so no payment can arrive for it. Pick a facility from the list.',
   bad_facility: 'Pick a facility from the list.',
   bad_payer: 'Enter a payer name of 1 to 200 characters.',
   bad_date: 'Enter the expected date as a calendar date.',

@@ -24,6 +24,11 @@ import {
   resolveResolutionSort,
   type ResolutionChip,
 } from '../src/collections/facilityResolutionQuery.js';
+import {
+  OWNED_CMD_CUSTOMERS,
+  RETIRED_CMD_CUSTOMERS,
+} from '../src/collections/cmdCustomers.js';
+import { INDIGO_ENTITY_ID as INDIGO } from '../src/tenants.js';
 
 const BXR = 'af504ab6-3dcd-4aa4-a93c-27bc58de4088';
 
@@ -226,6 +231,32 @@ test('the facility options builder is bounded', () => {
   const { sql, params } = buildResolutionFacilityOptionsQuery(['CAMH']);
   assert.match(sql, /facility_code = any\(\$1::text\[\]\)/);
   assert.deepEqual(params[0], ['CAMH']);
+});
+
+// --- the assignment picker's allowlist (loadResolutionFacilityOptions feeds this builder) ------
+// That function's result IS the roster-containment gate in app/lib/facility-resolution-actions.ts
+// ("That facility is not on this book's roster"), so what it may contain is security-relevant and
+// what it must not exceed is a hard throw. Both were untested.
+
+test('the OWNED code set both books together stays inside the builder bound', () => {
+  // Consolidated resolves to both tenants, so the picker sends every owned code in one call. The
+  // builder throws above 100 and each retirement adds one, so this is the tripwire for that drift.
+  const all = OWNED_CMD_CUSTOMERS.map((c) => c.facilityCode);
+  assert.ok(all.length >= 1 && all.length <= 100, `owned codes must be 1..100, got ${all.length}`);
+  assert.doesNotThrow(() => buildResolutionFacilityOptionsQuery(all));
+});
+
+test('a RETIRED facility stays assignable — an assignment is about the past', () => {
+  // Deliberately the opposite of the forecast create path: a historical charge genuinely belongs to
+  // the facility that incurred it, so the allowlist must still accept a retired code. Narrowing
+  // this to the polling roster would make a legitimate in-book assignment fail as "not on this
+  // book's roster".
+  const retired = RETIRED_CMD_CUSTOMERS[0]!;
+  const indigoOwned = OWNED_CMD_CUSTOMERS.filter((c) => c.businessEntityId === INDIGO)
+    .map((c) => c.facilityCode);
+  assert.ok(indigoOwned.includes(retired.facilityCode), 'retired code must reach the picker');
+  const { params } = buildResolutionFacilityOptionsQuery(indigoOwned);
+  assert.ok((params[0] as string[]).includes(retired.facilityCode));
 });
 
 test('the member display token exposes only its documented prefix', () => {
