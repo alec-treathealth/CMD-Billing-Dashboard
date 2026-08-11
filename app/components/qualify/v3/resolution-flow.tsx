@@ -818,13 +818,16 @@ export function StepRail(props: {
  *   reads "skipped" (a sole carrier is never asked about), so a second way of counting carriers here
  *   would let the checklist and the stepper disagree about a question the operator was never shown.
  *
- * · `policy` is `derivePolicyRating` over the snapshot's facilities — READ, never recomputed. It is
- *   the same call the answer stage's own headline makes, so the number under the ANSWER step is the
- *   number on screen beside it. A locally-averaged "headline" would be a second rating that could
- *   disagree with the cards, which is the exact failure `policyRating.ts` was written to prevent.
+ * · `policy` is `derivePolicyRating` over the same facility list that leads the answer — the member
+ *   ranking normally, or the payer book in book-led mode. It is the same rating basis the answer
+ *   stage's own headline makes, so the number under the ANSWER step is the number on screen beside
+ *   it. A locally-averaged "headline" would be a second rating that could disagree with the cards,
+ *   which is the exact failure `policyRating.ts` was written to prevent.
  */
 function laneInputForFlow(props: ResolutionStagesProps, skipped: boolean): LaneStepsInput {
-  const facilities = props.answer?.snapshot?.facilities ?? null;
+  const snap = props.answer?.snapshot ?? null;
+  const bookLeads = snap !== null && bookLeadsAnswer(snap);
+  const facilities = snap === null ? null : bookLeads ? (snap.bookFacilities ?? []) : (snap.facilities ?? []);
   return {
     stage: props.stage,
     resolution: props.resolution,
