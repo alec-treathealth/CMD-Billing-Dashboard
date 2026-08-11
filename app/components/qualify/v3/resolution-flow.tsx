@@ -818,26 +818,41 @@ export function StepRail(props: {
  *   reads "skipped" (a sole carrier is never asked about), so a second way of counting carriers here
  *   would let the checklist and the stepper disagree about a question the operator was never shown.
  *
- * · `policy` is `derivePolicyRating` over the list `answerRatingBasis` selects — READ, never
- *   recomputed, and selected by the SAME function the answer stage's own hero reads. That shared
- *   derivation is what makes "the number under the ANSWER step is the number on screen beside it"
- *   true; it is not a remark about how the two happen to be written.
+ * · `policy` is THE LANE-SCOPED RATING OR NOTHING. It never shows a number whose basis is wider
+ *   than the lane's own lock.
  *
- *   ⚠ IT USED TO BE `snapshot.facilities` AND THE SENTENCE ABOVE WAS FALSE (fixed 2026-08-11). The
- *   answer stage re-bases onto the payer's book when `bookLeadsAnswer` (S3) and this did not, so in
- *   book-led mode the rail patient-weighted the member ranking while the hero patient-weighted the
- *   book — two lists that genuinely differ, since the member ranking is floorless and the book
- *   applies `QUALIFY_MIN_LINES`. A locally-averaged "headline" was never the only way to get a
- *   second rating that disagrees with the cards; reading a different LIST was the other, and it is
- *   the one that shipped. Both are the failure `policyRating.ts` was written to prevent.
+ *   The rail sits inside a panel that promises, in `shell/lane-rail.tsx`: "Locked to <prefix> …
+ *   Answers come only from this lane's matched lines — nothing outside it." When the book leads
+ *   (`bookLeadsAnswer`, S3) the answer stage's hero deliberately re-bases onto the payer's WHOLE
+ *   BOOK — facilities this member has never touched, which is by definition outside the lane. So in
+ *   that mode the rail renders NO rating: the ANSWER step's `meta` goes null and the step simply
+ *   omits its value, which `laneSteps`' own "null shows nothing rather than a zero" rule already
+ *   handles. Silence is the honest reading; a whole-book number under a lane-locked panel is not.
+ *
+ *   ⚠ TWO WRONG REPAIRS WERE TRIED FIRST, and both are worth naming. Until 2026-08-11 this passed
+ *   `snapshot.facilities` while the hero passed the book, so the two showed DIFFERENT numbers side
+ *   by side (measured: band 15 over 5 patients here, band 50 over 14 there — the member ranking is
+ *   floorless, the book applies `QUALIFY_MIN_LINES`). The first fix made them EQUAL by widening this
+ *   one to the book — which removed the contradiction between the two numbers by moving it into the
+ *   lock, where a scoped surface would have been quoting an unscoped figure. Equality was never the
+ *   invariant; SCOPE HONESTY is. Outside book-led mode the two lists are the same list, so the rail
+ *   and the hero still agree there, and that agreement is now a consequence rather than the goal.
+ *
+ *   `answerRatingBasis` still owns the LIST-AND-SCOPE choice for both surfaces — the hero reads it
+ *   and rates; the rail reads it and decides whether it is entitled to speak at all.
  *
  * ⚠ EXPORTED FOR ONE TEST, exactly as `railStates` is. `qualify-lane-rating-parity.test.tsx` pins
- * this function's ANSWER rating equal to the hero's in book-led mode — the assertion whose absence
- * let the two drift. The export adds no parameter, changes no behaviour, and invites no production
- * caller: `ResolutionStages` remains the only one.
+ * both halves: null under book-led, equal to the hero otherwise. The export adds no parameter,
+ * changes no behaviour, and invites no production caller — `ResolutionStages` remains the only one.
  */
 export function laneInputForFlow(props: ResolutionStagesProps, skipped: boolean): LaneStepsInput {
-  const basis = answerRatingBasis(props.answer?.snapshot);
+  const snapshot = props.answer?.snapshot ?? null;
+  const basis = answerRatingBasis(snapshot);
+  /* `bookLeadsAnswer` rather than `basis.basisScope !== undefined`, though the two track each other
+   * today: the predicate NAMES the condition this rule is about, while the scope label is a
+   * rendering detail that merely happens to be set in the same case. Reading the predicate is
+   * reading the one definition; inferring from the label would be a second one. */
+  const widerThanLane = snapshot !== null && bookLeadsAnswer(snapshot);
   return {
     stage: props.stage,
     resolution: props.resolution,
@@ -845,7 +860,7 @@ export function laneInputForFlow(props: ResolutionStagesProps, skipped: boolean)
       props.resolution === null ? 0 : (props.payerGroups ?? payerGroupsOf(props.resolution)).length,
     payerPick: props.payerPick,
     skipped,
-    policy: basis === null ? null : derivePolicyRating(basis.facilities, basis.basisScope),
+    policy: basis === null || widerThanLane ? null : derivePolicyRating(basis.facilities, basis.basisScope),
   };
 }
 
