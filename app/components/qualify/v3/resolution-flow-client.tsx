@@ -1232,6 +1232,9 @@ export function ResolutionFlowClient({
       onSkip={onSkip}
       answer={answerBag}
       answerInline={!shellMode}
+      // The mock's rail progression — stepper-with-values, receipt checklist, event feed. Shell only:
+      // the single-column fallback keeps the bare StepRail it has always had.
+      showLaneReceipt={shellMode}
     />
   );
 
