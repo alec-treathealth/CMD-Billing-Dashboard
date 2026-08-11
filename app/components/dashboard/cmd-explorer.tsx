@@ -72,6 +72,10 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ControlSelect, Pager } from '@/components/data-grid';
 import { MultiSelectTagPicker, type PickerOption } from '@/components/ui/multi-select-tag-picker';
+// Pure, and deliberately OUTSIDE this file so it can be unit-tested: importing this component pulls
+// in lib/actions.ts → lib/access.ts, which calls React `cache` at module scope and cannot load under
+// the test runner at all.
+import { facilityPickerOptionsFrom } from '@/lib/collections/facilityPickerOptions';
 // The AI panel's prompt ASKS for markdown; this renders it as markup instead of printing `**`/`##`.
 import { Markdown } from '@/components/ui/markdown';
 import { PHI_MASK } from '@/lib/phi';
@@ -580,13 +584,11 @@ export function CmdCollectionsExplorer({
 
   // Options for the guided pickers. Facility carries a friendly display name + IP/OP/Both badge;
   // payer is a plain name. `value` (raw facility text / payer name) is what the grid filters on.
+  // Display-only disambiguation of facilities whose CMD export carries more than one spelling.
+  // ⚠ GRAIN STAYS RAW — see facilityPickerOptions.ts for why collapsing to one option per
+  // facility_code (Qualify's behaviour) was explicitly ruled out for this surface.
   const facilityPickerOptions = useMemo<PickerOption[]>(
-    () =>
-      facilityOptions.map((o) => ({
-        value: o.facility,
-        display: o.facility_name ?? o.facility,
-        badge: o.care_setting,
-      })),
+    () => facilityPickerOptionsFrom(facilityOptions),
     [facilityOptions],
   );
   const payerPickerOptions = useMemo<PickerOption[]>(
