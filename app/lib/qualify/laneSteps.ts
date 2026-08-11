@@ -26,7 +26,7 @@
  *     `FlowReceipt` already renders in this rail today. This module moves no field into a new
  *     channel: no URL, no log, no model prompt, no storage.
  *   · the answer step shows a rating and a verdict word — integers and an enum.
- *   · `revisit` carries a stage ENUM and one of two fixed strings ('Change', 'Pick a plan'). It is
+ *   · `revisit` carries a stage ENUM and one of two fixed strings ('Change', 'Pick a carrier'). It is
  *     static copy plus a target, never a value read off the resolution.
  */
 import type { QualifyResolution } from './resolution';
@@ -177,20 +177,30 @@ export function laneSteps(input: LaneStepsInput): LaneStep[] {
  *
  * ⚠ ONLY AN OPERATOR'S SKIP EARNS AN ESCAPE HATCH. A step is 'skipped' for two unrelated reasons and
  * they must not be treated alike: the operator DECLINED the question (`skipped`), or it was never
- * askable — one carrier on file, one candidate. Offering "Pick a plan" on a sole-carrier lane would
- * send the operator back to a stage with a single chip and nothing to decide, which is precisely why
- * the chip row suppressed its Carrier entry on `payers.length > 1`.
+ * askable — one carrier on file, one candidate. Offering the hatch on a sole-carrier lane would send
+ * the operator back to a stage with a single chip and nothing to decide, which is precisely why the
+ * chip row suppressed its Carrier entry on `payers.length > 1`.
  *
- * ⚠ AND ITS TARGET IS `payer`, NOT `plan`, WHICH IS NOT A TYPO. This reproduces the chip row's Scope
- * entry exactly: the way back into choosing is the CARRIER stage, because a plan is picked within a
- * carrier. The label is the operator's goal; the target is the stage that gets them there.
+ * ⚠ THE HATCH SAYS "Pick a carrier" AND TARGETS `payer`, AND THE TWO MUST KEEP MATCHING. It said
+ * "Pick a plan" — inherited verbatim from the chip row's Scope entry — while landing the operator on
+ * the CARRIER stage. Retargeting it to `plan` to match the old words is the wrong repair, and the
+ * reducer is what rules it out: `skipped` sets `payerPick = null` (flow-state.ts), and `went_back`'s
+ * one conditional write KEEPS `payerPick` when the target is 'plan' (invariant h). So a 'plan' target
+ * would arrive with no carrier chosen — and `StagePlan` does not read null as "none", it falls back
+ * to `payers[0]` and renders the largest cluster's plans under that cluster's name. An operator who
+ * declined to choose a carrier would be shown one anyway, with `skipped` flipped false so nothing on
+ * screen reports the narrowing. That is the "arbitrary rather than general" failure SKIP_CARRIER_MAX
+ * was ruled on. Targeting `payer` re-enters the funnel where the operator left it; only the label
+ * was ever wrong.
+ *
+ * "Pick a carrier", not "re-pick": under a skip there was no first pick to redo.
  */
 function revisitFor(key: LaneStepKey, state: LaneStepState, skipped: boolean): LaneRevisit | null {
   // Nothing follows the answer, so there is nowhere to go back to FROM it — and `onChange` has no
   // 'answer' target for the same reason.
   if (key === 'answer') return null;
   if (state === 'done') return { to: key, label: 'Change' };
-  if (key === 'plan' && state === 'skipped' && skipped) return { to: 'payer', label: 'Pick a plan' };
+  if (key === 'plan' && state === 'skipped' && skipped) return { to: 'payer', label: 'Pick a carrier' };
   return null;
 }
 

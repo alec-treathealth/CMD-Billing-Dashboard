@@ -249,18 +249,34 @@ test('a STRUCTURAL skip offers no control — the question was never askable', (
       skipped: false,
     }),
   );
-  assert.equal(r.payer, null, 'a sole-carrier lane must not offer "Pick a plan"');
+  assert.equal(r.payer, null, 'a sole-carrier lane must not offer "Pick a carrier"');
   assert.equal(r.plan, null, 'nor a sole-candidate one');
 });
 
 test("an OPERATOR's skip offers the escape hatch, back to the carrier stage", () => {
   const r = revisitOf(baseInput({ stage: 'answer', skipped: true, payerPick: null }));
-  // The label is the operator's GOAL and the target is the stage that gets them there: a plan is
-  // picked within a carrier, so "Pick a plan" goes back to `payer`. This reproduces the chip row's
-  // Scope entry exactly — same words, same target.
-  assert.deepEqual(r.plan, { to: 'payer', label: 'Pick a plan' });
+  assert.deepEqual(r.plan, { to: 'payer', label: 'Pick a carrier' });
   assert.equal(r.payer, null, 'one escape hatch, not two — the chip row offered a single Scope entry');
   assert.deepEqual(r.identify, { to: 'identify', label: 'Change' }, 'the search is always revisitable');
+});
+
+// ⚠ THE HATCH'S LABEL AND TARGET ARE PINNED AS A PAIR, and this exists because they were once out of
+// step: the words said "Pick a plan" — inherited verbatim from the chip row's Scope entry — while the
+// button landed the operator on the CARRIER stage. A mismatch like that can be "fixed" from either
+// end, so both halves are asserted together with the reason the TARGET is the half that must not move.
+test('the escape hatch never says "plan" while sending the operator to the carrier stage', () => {
+  const hatch = revisitOf(baseInput({ stage: 'answer', skipped: true, payerPick: null })).plan;
+  assert.ok(hatch != null, 'positive control: a declined carrier question really does offer a hatch');
+  assert.equal(hatch.to, 'payer', 'the target is the half that must not move — see the note below');
+  assert.doesNotMatch(hatch.label, /plan/i, 'the words must name the stage the button actually reaches');
+  assert.match(hatch.label, /carrier/i);
+  /* WHY RETARGETING TO 'plan' WOULD BE THE WRONG REPAIR, recorded here because no unit test of this
+   * pure module can reach the consequence: `skipped` sets payerPick = null, and `went_back` KEEPS
+   * payerPick when the target is 'plan' (flow-state.ts, invariant h — the machine's one conditional
+   * write). StagePlan does not read a null pick as "none"; it falls back to `payers[0]`. So a 'plan'
+   * target would show the largest cluster's plans, under that cluster's name, to an operator who had
+   * just declined to choose a carrier — with `skipped` flipped false, so nothing on screen reports
+   * the narrowing. */
 });
 
 test('a revisit target is always a real went_back stage, never the answer', () => {
@@ -289,7 +305,7 @@ test('a revisit label is fixed copy and never carries a value', () => {
       );
       for (const s of steps) {
         if (s.revisit === null) continue;
-        assert.ok(['Change', 'Pick a plan'].includes(s.revisit.label), `${stage}/${s.key}: ${s.revisit.label}`);
+        assert.ok(['Change', 'Pick a carrier'].includes(s.revisit.label), `${stage}/${s.key}: ${s.revisit.label}`);
       }
     }
   }
