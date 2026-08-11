@@ -19,7 +19,7 @@
  *
  * PURE and client-safe: no React, no `'use server'` chain, relative imports only.
  */
-import type { QualifySnapshot } from './contract';
+import type { QualifyFacility, QualifySnapshot } from './contract';
 import { EMPTY_FACILITIES, scopedPayerOf } from './contract';
 import { memberBucketOf } from './memberPreface';
 
@@ -82,6 +82,58 @@ export function bookLeadsAnswer(snapshot: QualifySnapshot | null | undefined): b
     (snapshot!.bookFacilities ?? EMPTY_FACILITIES).length > 0 &&
     memberBucketOf(snapshot!.memberCount) === 'one'
   );
+}
+
+/** What the answer's rating is computed OVER, and what it should call that basis. */
+export interface AnswerRatingBasis {
+  /** The list that LEADS: the book in book-led mode, the member ranking otherwise. */
+  facilities: readonly QualifyFacility[];
+  /** The scope label handed to `derivePolicyRating` — undefined for the member ranking. */
+  basisScope: string | undefined;
+}
+
+/**
+ * ── WHICH LIST THE ANSWER'S RATING IS PATIENT-WEIGHTED OVER — ONE DEFINITION (2026-08-11) ────────
+ *
+ * The answer stage's hero and the lane rail's ANSWER step both show a `derivePolicyRating` number,
+ * and they must be the SAME number: they sit on one screen, feet apart, describing one answer.
+ *
+ * ⚠ THEY WERE NOT. `StageAnswer` re-based onto the book when `bookLeadsAnswer` (S3), while
+ * `laneInputForFlow` kept passing `snapshot.facilities` — the member ranking — with no scope label.
+ * So in book-led mode the rail patient-weighted a list nobody had drawn, and the two numbers could
+ * differ for real rather than theoretically: the member ranking is FLOORLESS while the book applies
+ * `QUALIFY_MIN_LINES`, so a facility billed 1-2 lines is in one list and absent from the other. The
+ * rail's own docblock asserted the numbers were identical the whole time it was false.
+ *
+ * ⚠ THE REPAIR IS THIS FUNCTION, NOT A SECOND COPY OF THE CHOICE. Restating
+ * `leads ? bookFacilities : facilities` at the second call site would make today's numbers agree and
+ * leave two expressions to keep in step — which is precisely how `bookIsOnScreen` above came to
+ * exist, after the shell and the stage drifted onto different spellings of "is there a book". One
+ * definition, two readers; a relabel cannot move one site without the other.
+ *
+ * PURE and snapshot-only ON PURPOSE. Every input is a field of the snapshot, so this needs no
+ * component state and no hook — which is what lets a parent (`ResolutionStages`, via
+ * `laneInputForFlow`) and a child (`StageAnswer`) read one value without threading a prop between
+ * them or lifting state to hold it.
+ *
+ * Null in, null out: no snapshot is "nothing to rate", distinct from a snapshot whose list is empty
+ * (a real verdict — see `derivePolicyRating`'s own not-rated branch).
+ */
+export function answerRatingBasis(
+  snapshot: QualifySnapshot | null | undefined,
+): AnswerRatingBasis | null {
+  if (snapshot == null) return null;
+  const leads = bookLeadsAnswer(snapshot);
+  const payer = scopedPayerOf(snapshot.resolved);
+  return {
+    facilities: leads
+      ? (snapshot.bookFacilities ?? EMPTY_FACILITIES)
+      : (snapshot.facilities ?? EMPTY_FACILITIES),
+    // `leads` already implies a non-null payer (`bookIsOnScreen` is its first half), so the
+    // `payer !== null` half is unreachable — kept because TS cannot narrow through the predicate,
+    // and because dropping a coercion during a unification is how a unification regresses.
+    basisScope: leads && payer !== null ? `${payer}'s whole book` : undefined,
+  };
 }
 
 /**

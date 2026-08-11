@@ -20,6 +20,7 @@ import {
   bookIsOnScreen,
   bookLeadsAnswer,
   bookPlacementFor,
+  answerRatingBasis,
 } from '../lib/qualify/bookPlacement';
 import type { QualifyFacility, QualifySnapshot } from '../lib/qualify/contract';
 import { QUALIFY_FACILITY_V2_NULLS } from './helpers/qualifyV2Fixture';
@@ -103,4 +104,48 @@ test('aiGroundingCaption — all three arms, and the two that are NOT the defaul
   // ⚠ THREE DISTINCT STRINGS. An arm that duplicated another would make the caption a decoration:
   // the inverted-ternary mutation the reviewer ran is invisible unless the arms actually differ.
   assert.equal(new Set(['none', 'secondary', 'leading'].map((p) => aiGroundingCaption(p as 'none'))).size, 3);
+});
+
+/**
+ * ── WHICH LIST THE ANSWER'S RATING IS WEIGHTED OVER ─────────────────────────────────────────────
+ *
+ * `answerRatingBasis` is the single definition the answer stage's hero AND the lane rail's ANSWER
+ * step both read. It was added because they had drifted: the stage re-based onto the book when
+ * `bookLeadsAnswer`, `laneInputForFlow` did not, and the rail showed a number weighted over a list
+ * nobody had drawn. The parity of the two call sites is pinned in
+ * `qualify-lane-rating-parity.test.tsx`; what is pinned HERE is the choice itself.
+ */
+test('answerRatingBasis picks the book exactly when the book leads, and says so in the scope', () => {
+  // BOOK-LED: the list is the book, and the basis NAMES whose book — the label the hero prints.
+  const leading = answerRatingBasis(snap());
+  assert.equal(bookLeadsAnswer(snap()), true, 'precondition: this fixture is book-led');
+  assert.deepEqual(leading?.facilities.map((f) => f.facilityKey), ['SUMMIT'], 'the BOOK list');
+  assert.equal(leading?.basisScope, "AETNA US HEALTHCARE's whole book");
+
+  // NOT BOOK-LED (a real member population): the member ranking leads and there is NO scope label —
+  // `derivePolicyRating` prints its unscoped basis, which is what the member ranking has always said.
+  const member = snap({ memberCount: 4 } as Partial<QualifySnapshot>);
+  assert.equal(bookLeadsAnswer(member), false, 'precondition: this fixture is not book-led');
+  assert.deepEqual(answerRatingBasis(member)?.facilities.map((f) => f.facilityKey), ['NASH'], 'the MEMBER list');
+  assert.equal(answerRatingBasis(member)?.basisScope, undefined);
+
+  // ⚠ THE TWO LISTS MUST ACTUALLY DIFFER, or every assertion above is satisfiable by either branch
+  // and the whole file proves nothing. This is the positive control for the pair.
+  assert.notDeepEqual(leading?.facilities, answerRatingBasis(member)?.facilities);
+});
+
+test('answerRatingBasis tracks bookLeadsAnswer through every state, including the two that do not lead', () => {
+  // An EMPTY book is on screen but cannot lead, so the member ranking keeps the grid AND the rating.
+  const emptyBook = snap({ bookFacilities: [] } as Partial<QualifySnapshot>);
+  assert.equal(bookLeadsAnswer(emptyBook), false);
+  assert.deepEqual(answerRatingBasis(emptyBook)?.facilities.map((f) => f.facilityKey), ['NASH']);
+  assert.equal(answerRatingBasis(emptyBook)?.basisScope, undefined, 'an empty book must not name a basis');
+
+  // A book nobody can name is not a book on screen — same outcome, different reason.
+  const unnamed = snap({ resolved: { payerName: null, payerScope: 'all' } } as unknown as Partial<QualifySnapshot>);
+  assert.equal(answerRatingBasis(unnamed)?.basisScope, undefined);
+
+  // Null in, null out — distinct from a snapshot whose list is empty, which is a real verdict.
+  assert.equal(answerRatingBasis(null), null);
+  assert.equal(answerRatingBasis(undefined), null);
 });
