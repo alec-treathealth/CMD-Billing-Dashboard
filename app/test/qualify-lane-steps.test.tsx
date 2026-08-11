@@ -198,3 +198,99 @@ test('the feed is empty before anything resolves', () => {
   const input = baseInput({ stage: 'identify', resolution: null });
   assert.deepEqual(laneFeed(laneSteps(input), input), []);
 });
+
+// ── 7. REVISIT — which steps offer a way back, and to where ──────────────────────────────────────
+//
+// `revisit` replaces the chip row's Change buttons in shell mode, so these pin that the replacement
+// offers the SAME controls the chip row did. The rule is `state === 'done'` for the three ordinary
+// steps; the interesting cases are the two that are not ordinary.
+const revisitOf = (input: LaneStepsInput) =>
+  Object.fromEntries(laneSteps(input).map((s) => [s.key, s.revisit]));
+
+test('every settled step offers a way back to its own stage', () => {
+  const r = revisitOf(baseInput({ stage: 'answer', payerPick: 'AETNA' }));
+  assert.deepEqual(r.identify, { to: 'identify', label: 'Change' });
+  assert.deepEqual(r.payer, { to: 'payer', label: 'Change' });
+  assert.deepEqual(r.plan, { to: 'plan', label: 'Change' });
+});
+
+test('the answer step offers nothing — there is nowhere after it to come back from', () => {
+  const r = revisitOf(
+    baseInput({
+      stage: 'answer',
+      payerPick: 'AETNA',
+      policy: { rating: 71, band: '65', verdict: 'Strong · 65%+', ratedCount: 9, patients: 60, basis: 'x' },
+    }),
+  );
+  // Settled — 'done', not 'current' — and still no control, which is why `onChange` has no 'answer'.
+  assert.equal(laneSteps(baseInput({ stage: 'answer', payerPick: 'A' })).at(-1)?.key, 'answer');
+  assert.equal(r.answer, null);
+});
+
+test('the step you are ON offers no way back to itself', () => {
+  const r = revisitOf(baseInput({ stage: 'payer' }));
+  assert.equal(r.payer, null, 'a Change button on the open question is a control that does nothing');
+  assert.equal(r.plan, null, 'and a pending step has nothing to change');
+  assert.deepEqual(r.identify, { to: 'identify', label: 'Change' }, 'the settled one still does');
+});
+
+// ⚠ THE TWO SKIPS ARE DIFFERENT AND THIS IS THE PAIR THAT PROVES IT. Both render `state === 'skipped'`
+// and the only other downstream discriminator is the `meta` display string, so if this distinction is
+// ever lost it will be lost silently.
+test('a STRUCTURAL skip offers no control — the question was never askable', () => {
+  // One carrier on file and one candidate: the operator declined nothing, so sending them back to a
+  // stage with a single chip would be a control with no decision behind it. The chip row suppressed
+  // its Carrier entry on `payers.length > 1` for exactly this reason.
+  const r = revisitOf(
+    baseInput({
+      stage: 'answer',
+      resolution: resolutionWith({ echo: 'GGS', candidates: 1 }),
+      carrierCount: 1,
+      skipped: false,
+    }),
+  );
+  assert.equal(r.payer, null, 'a sole-carrier lane must not offer "Pick a plan"');
+  assert.equal(r.plan, null, 'nor a sole-candidate one');
+});
+
+test("an OPERATOR's skip offers the escape hatch, back to the carrier stage", () => {
+  const r = revisitOf(baseInput({ stage: 'answer', skipped: true, payerPick: null }));
+  // The label is the operator's GOAL and the target is the stage that gets them there: a plan is
+  // picked within a carrier, so "Pick a plan" goes back to `payer`. This reproduces the chip row's
+  // Scope entry exactly — same words, same target.
+  assert.deepEqual(r.plan, { to: 'payer', label: 'Pick a plan' });
+  assert.equal(r.payer, null, 'one escape hatch, not two — the chip row offered a single Scope entry');
+  assert.deepEqual(r.identify, { to: 'identify', label: 'Change' }, 'the search is always revisitable');
+});
+
+test('a revisit target is always a real went_back stage, never the answer', () => {
+  // `onChange` accepts 'identify' | 'payer' | 'plan'. A derivation that emitted 'answer' would
+  // typecheck against `LaneRevisit` only if someone widened it, so this is the runtime backstop.
+  for (const stage of STAGES) {
+    for (const skipped of [false, true]) {
+      for (const step of laneSteps(baseInput({ stage, skipped, payerPick: skipped ? null : 'AETNA' }))) {
+        if (step.revisit === null) continue;
+        assert.ok(
+          ['identify', 'payer', 'plan'].includes(step.revisit.to),
+          `${stage}/${step.key}: ${step.revisit.to} is not a went_back target`,
+        );
+      }
+    }
+  }
+});
+
+test('a revisit label is fixed copy and never carries a value', () => {
+  // PHI, same argument as section 4: `revisit` reaches the markup. It must be one of two constants —
+  // never the echo, the payer or the employer.
+  for (const stage of STAGES) {
+    for (const skipped of [false, true]) {
+      const steps = laneSteps(
+        baseInput({ stage, skipped, resolution: resolutionWith({ echo: '', candidates: 12 }), payerPick: 'AETNA' }),
+      );
+      for (const s of steps) {
+        if (s.revisit === null) continue;
+        assert.ok(['Change', 'Pick a plan'].includes(s.revisit.label), `${stage}/${s.key}: ${s.revisit.label}`);
+      }
+    }
+  }
+});

@@ -4289,6 +4289,13 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
                   ? `Qualifying prefix ${props.resolution.handle.echo}`
                   : 'Qualifying this member ID'
             }
+            onChange={props.onChange}
+            memberCount={props.answer?.snapshot?.memberCount ?? null}
+            /* Passed ONLY on a skipped lane, so a non-null value IS the "the operator declined"
+               signal. `LaneReceipt` must not have to tell an operator's skip from a structural one
+               (sole carrier, sole candidate) — `state` collapses the two, and re-deriving the
+               difference in the component is the second decision site this merge exists to close. */
+            scope={skipped ? { payer: scopePayer, allPayers: scopeAllPayers, byUser: scopeByUser } : null}
           />
           <LaneFeed lines={laneFeed(laneStepList, laneInput)} />
         </>
@@ -4370,7 +4377,16 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
         </p>
       ) : null}
 
-      {props.resolution && props.stage !== 'identify' ? (
+      {/* ⚠ `!== true`, NOT `!props.showLaneReceipt`. The prop is OPTIONAL, so the single-column path
+          passes `undefined` — and `undefined !== true` is true, which is what keeps that path's
+          condition byte-identical to the one that shipped. (`!undefined` happens to agree here; the
+          explicit form is used because the absent case is the one that matters and the repo has been
+          bitten three times by a guard that read as "not set" and meant something else.)
+
+          In SHELL mode this whole chip row is off: `LaneReceipt` above now carries the record, the
+          Change controls, the member count and the scope — see its docblock, which supersedes the
+          #194 note claiming both should render. */}
+      {props.resolution && props.stage !== 'identify' && props.showLaneReceipt !== true ? (
         <FlowReceipt
           resolution={props.resolution}
           stage={props.stage}
