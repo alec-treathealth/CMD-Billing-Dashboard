@@ -279,6 +279,48 @@ test('the escape hatch never says "plan" while sending the operator to the carri
    * the narrowing. */
 });
 
+// ⚠ THE GENERAL FORM OF THE CHECK ABOVE, KEPT BESIDE IT RATHER THAN REPLACING IT. The test above
+// names the bug that actually happened — one hatch, one input shape, the exact words that were
+// wrong — and that is what makes a future failure legible. This one guards the CLASS: every revisit
+// the derivation can emit, across every stage and both skip states, so a row that does not exist yet
+// cannot repeat it. Dropping either loses something real: the specific one explains, the general one
+// covers.
+test('a revisit label names the stage it goes to — never a stage it merely sits on', () => {
+  // Why the pair above was not enough on its own: the label and the target were each defensible
+  // ALONE — "the operator's goal" and "the stage that gets them there" — and were asserted apart, so
+  // nothing was watching the only claim that was false, that pressing the control does what the
+  // control says. This asserts the two halves against EACH OTHER instead of against constants.
+  //
+  // 'Change' names no stage and is exempt BY CONSTRUCTION rather than by an allowlist: it is
+  // row-relative, and the `state === 'done'` arm targets its own key.
+  const NAMES: readonly (readonly [RegExp, 'identify' | 'payer' | 'plan'])[] = [
+    [/\bcarriers?\b/i, 'payer'],
+    [/\bplans?\b/i, 'plan'],
+  ];
+  let checked = 0;
+  for (const stage of STAGES) {
+    for (const skipped of [false, true]) {
+      for (const step of laneSteps(baseInput({ stage, skipped, payerPick: skipped ? null : 'AETNA' }))) {
+        if (step.revisit === null) continue;
+        for (const [noun, target] of NAMES) {
+          if (!noun.test(step.revisit.label)) continue;
+          checked += 1;
+          assert.equal(
+            step.revisit.to,
+            target,
+            `${stage}/${step.key}: "${step.revisit.label}" names a stage but goes to '${step.revisit.to}'`,
+          );
+        }
+      }
+    }
+  }
+  // ⚠ WITHOUT THIS THE TEST IS VACUOUS, and vacuously-green is the failure mode this file has hit
+  // before. Every assertion above sits behind two `continue`s: a derivation that stopped emitting
+  // stage-named labels, or a `NAMES` table that stopped matching them, would pass by examining
+  // nothing at all.
+  assert.ok(checked > 0, `positive control: no stage-named revisit label was examined (checked=${checked})`);
+});
+
 test('a revisit target is always a real went_back stage, never the answer', () => {
   // `onChange` accepts 'identify' | 'payer' | 'plan'. A derivation that emitted 'answer' would
   // typecheck against `LaneRevisit` only if someone widened it, so this is the runtime backstop.
