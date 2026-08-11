@@ -43,6 +43,12 @@
 import { useMemo } from 'react';
 import { Briefcase, ChevronRight, Building2 } from 'lucide-react';
 import { MultiSelectTagPicker } from '../../ui/multi-select-tag-picker';
+// The mock's rail progression (stepper · receipt checklist · feed) and its ONE derivation. Rendered
+// only under `showLaneReceipt`; the derivation is pure and lives in lib/ so tests can read it
+// without mounting React.
+import { LaneStepper, LaneReceipt, LaneFeed } from '../shell/lane-progress';
+import { laneSteps, laneFeed, type LaneStepsInput } from '../../../lib/qualify/laneSteps';
+// `derivePolicyRating` is already imported below with the rest of policyRating's exports.
 // S4 — the facility grid narrow's set operations, PURE and unit-tested next door. Nothing here
 // reaches a request; see flow-state.ts invariant (m) and `FacilityNarrowLine` below.
 import {
@@ -799,6 +805,38 @@ export function StepRail(props: {
 }
 
 /**
+ * THE ADAPTER between this component's props and `laneSteps`' input (Smoke shell, 2026-08-10).
+ *
+ * It exists so `laneSteps.ts` can stay pure and React-free — the flow's props are a UI shape, and
+ * teaching the derivation to read them would drag `StageAnswerProps` into a module the hermetic
+ * tests import directly.
+ *
+ * TWO READINGS WORTH STATING, because both are places a plausible shortcut would be wrong:
+ *
+ * · `carrierCount` falls back to `payerGroupsOf(resolution)` when the memoized clusters were not
+ *   threaded, matching `railStates`' own fallback exactly. The count decides whether the CARRIER step
+ *   reads "skipped" (a sole carrier is never asked about), so a second way of counting carriers here
+ *   would let the checklist and the stepper disagree about a question the operator was never shown.
+ *
+ * · `policy` is `derivePolicyRating` over the snapshot's facilities — READ, never recomputed. It is
+ *   the same call the answer stage's own headline makes, so the number under the ANSWER step is the
+ *   number on screen beside it. A locally-averaged "headline" would be a second rating that could
+ *   disagree with the cards, which is the exact failure `policyRating.ts` was written to prevent.
+ */
+function laneInputForFlow(props: ResolutionStagesProps, skipped: boolean): LaneStepsInput {
+  const facilities = props.answer?.snapshot?.facilities ?? null;
+  return {
+    stage: props.stage,
+    resolution: props.resolution,
+    carrierCount:
+      props.resolution === null ? 0 : (props.payerGroups ?? payerGroupsOf(props.resolution)).length,
+    payerPick: props.payerPick,
+    skipped,
+    policy: facilities === null ? null : derivePolicyRating(facilities),
+  };
+}
+
+/**
  * Skip is only offered on the CARRIER stage when the carrier choice is nearly obvious — fewer than
  * this many clusters. Ruled 2026-08-06: with a dozen carriers behind a prefix, "skip" resolves the
  * ranking to whichever payer happens to dominate the identifier's claims, which is ARBITRARY rather
@@ -1183,7 +1221,17 @@ export function StagePayer(props: {
       </p>
       {/* S6: the Skip moved OUT of this body to a single site beneath the step rail — with the
           carrier-count suppression intact, now expressed by `skipOffered`. */}
-      <ul data-v3-grid className="grid list-none grid-cols-1 gap-2.5 p-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      {/* ⚠ COLUMN COUNT IS CONTAINER-RELATIVE, NOT VIEWPORT-RELATIVE (2026-08-10). This was
+          `sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4`, and every one of those breakpoints measures
+          the VIEWPORT. The shell renders this flow inside the right pane of
+          `xl:grid-cols-[416px_minmax(0,1fr)]`, so a wide monitor put four columns into a pane a few
+          hundred pixels across: carrier names line-clamped to "Ar B." and the plan tile's action
+          buttons ran off the edge. `auto-fill` + `minmax` asks the ONLY question that matters — how
+          many 15rem tiles fit in THIS container — so the single-column v3 layout and the shell's
+          narrow pane both get an honest count with no breakpoint to keep in sync.
+          `min(100%,15rem)` is load-bearing: a bare 15rem floor overflows its own container once the
+          pane is narrower than one tile, which is precisely the phone case. */}
+      <ul data-v3-grid className="grid list-none grid-cols-[repeat(auto-fill,minmax(min(100%,15rem),1fr))] gap-2.5 p-0">
         {groups.map((g, i) => (
           <li key={g.payer}>
             <button
@@ -1339,7 +1387,17 @@ export function StagePlan(props: {
           TARGET — one dominant line (the employer), one muted metric line, pills for the attributes.
           At 2 columns on a wide desktop each tile was ~800px of mostly whitespace; two tiles filled
           the fold. */}
-      <ul data-v3-grid className="grid list-none grid-cols-1 gap-2.5 p-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      {/* ⚠ COLUMN COUNT IS CONTAINER-RELATIVE, NOT VIEWPORT-RELATIVE (2026-08-10). This was
+          `sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4`, and every one of those breakpoints measures
+          the VIEWPORT. The shell renders this flow inside the right pane of
+          `xl:grid-cols-[416px_minmax(0,1fr)]`, so a wide monitor put four columns into a pane a few
+          hundred pixels across: carrier names line-clamped to "Ar B." and the plan tile's action
+          buttons ran off the edge. `auto-fill` + `minmax` asks the ONLY question that matters — how
+          many 15rem tiles fit in THIS container — so the single-column v3 layout and the shell's
+          narrow pane both get an honest count with no breakpoint to keep in sync.
+          `min(100%,15rem)` is load-bearing: a bare 15rem floor overflows its own container once the
+          pane is narrower than one tile, which is precisely the phone case. */}
+      <ul data-v3-grid className="grid list-none grid-cols-[repeat(auto-fill,minmax(min(100%,15rem),1fr))] gap-2.5 p-0">
         {visible.map((c) => (
           <li key={`${c.canonicalPayerId ?? 'unmapped'}-${c.index}`}>
             <form
@@ -1366,7 +1424,9 @@ export function StagePlan(props: {
               </span>
               {evidenceWord(c.hasClaimEvidence)}
               {/* Both actions, one compact row — the pair is pinned by the invariant suite. */}
-              <span className="mt-auto flex gap-1.5 pt-1.5">
+              {/* `flex-wrap` because the pair is the widest thing in the tile: unwrapped, the two
+                  buttons overflowed the tile's right edge in a narrow pane rather than stacking. */}
+              <span className="mt-auto flex flex-wrap gap-1.5 pt-1.5">
                 <button
                   type="submit"
                   disabled={props.pending}
@@ -4138,6 +4198,20 @@ export interface ResolutionStagesProps {
    * therefore still be passed even when this is false.
    */
   answerInline?: boolean;
+  /**
+   * THE MOCK'S RAIL PROGRESS SURFACES (Smoke shell, 2026-08-10). Default false — the single-column
+   * layout keeps the bare `<StepRail>` it has always rendered, byte-identical.
+   *
+   * True swaps that rail for `<LaneStepper>` (the same four segments, now each carrying the value it
+   * settled on) and adds the mock's `.receipt` checklist and `.feed` beneath it.
+   *
+   * ⚠ A SEPARATE FLAG FROM `answerInline`, DELIBERATELY. Both are true exactly when the shell is on,
+   * so one bit would work today — and would silently mean "the shell" rather than what each actually
+   * controls. They answer different questions (where does the ANSWER render · does the RAIL show a
+   * checklist), and the next layout that wants one without the other would have to unpick a
+   * conflated flag under time pressure. Two names, two decisions.
+   */
+  showLaneReceipt?: boolean;
 }
 
 /**
@@ -4171,6 +4245,11 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
   // was applied, and `scopePayer` is the label actually used. Calling a rejected chip "your re-scope"
   // would be the same class of overclaim this fix removes.
   const scopeByUser = props.answer?.scopeSource === 'user' && (props.answer?.snapshot?.payerOverridden ?? false);
+  // ONE derivation for the stepper, the checklist and the feed (see `showLaneReceipt`). Computed
+  // unconditionally because it is three field reads and a 4-element map — cheaper than the branch,
+  // and a hook here would have to be conditional, which React forbids.
+  const laneInput = laneInputForFlow(props, skipped);
+  const laneStepList = laneSteps(laneInput);
   return (
     <div role="region" aria-labelledby="qualify-v3-flow-heading" className="flex flex-col gap-5">
       {/* ── THE TREND STRIP, ABOVE THE HEADING (Alec, 2026-08-09) ─────────────────────────────────
@@ -4194,7 +4273,35 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
         Qualify a client
       </h1>
 
-      <StepRail stage={props.stage} resolution={props.resolution} payerGroups={props.payerGroups} />
+      {/* ── THE PROGRESSION (mock `.stepper` + `.receipt` + `.feed`) ──────────────────────────────
+          One `laneSteps()` call feeds all three, so the timeline, the checklist and the commentary
+          cannot disagree about what was decided or skipped. The bare `<StepRail>` remains the
+          single-column layout's rendering; see `showLaneReceipt`. ── */}
+      {props.showLaneReceipt === true ? (
+        <>
+          <LaneStepper steps={laneStepList} />
+          <LaneReceipt
+            steps={laneStepList}
+            title={
+              props.resolution === null
+                ? 'Qualifying a client'
+                : props.resolution.handle.echo !== ''
+                  ? `Qualifying prefix ${props.resolution.handle.echo}`
+                  : 'Qualifying this member ID'
+            }
+            onChange={props.onChange}
+            memberCount={props.answer?.snapshot?.memberCount ?? null}
+            /* Passed ONLY on a skipped lane, so a non-null value IS the "the operator declined"
+               signal. `LaneReceipt` must not have to tell an operator's skip from a structural one
+               (sole carrier, sole candidate) — `state` collapses the two, and re-deriving the
+               difference in the component is the second decision site this merge exists to close. */
+            scope={skipped ? { payer: scopePayer, allPayers: scopeAllPayers, byUser: scopeByUser } : null}
+          />
+          <LaneFeed lines={laneFeed(laneStepList, laneInput)} />
+        </>
+      ) : (
+        <StepRail stage={props.stage} resolution={props.resolution} payerGroups={props.payerGroups} />
+      )}
 
       {/* ── THE SKIP, DIRECTLY BENEATH THE RAIL (S6, 2026-08-08) ──────────────────────────────────
           "Just underneath the green timeline", and one site rather than the three it used to render
@@ -4270,7 +4377,16 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
         </p>
       ) : null}
 
-      {props.resolution && props.stage !== 'identify' ? (
+      {/* ⚠ `!== true`, NOT `!props.showLaneReceipt`. The prop is OPTIONAL, so the single-column path
+          passes `undefined` — and `undefined !== true` is true, which is what keeps that path's
+          condition byte-identical to the one that shipped. (`!undefined` happens to agree here; the
+          explicit form is used because the absent case is the one that matters and the repo has been
+          bitten three times by a guard that read as "not set" and meant something else.)
+
+          In SHELL mode this whole chip row is off: `LaneReceipt` above now carries the record, the
+          Change controls, the member count and the scope — see its docblock, which supersedes the
+          #194 note claiming both should render. */}
+      {props.resolution && props.stage !== 'identify' && props.showLaneReceipt !== true ? (
         <FlowReceipt
           resolution={props.resolution}
           stage={props.stage}
