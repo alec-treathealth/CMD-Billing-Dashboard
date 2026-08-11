@@ -887,6 +887,18 @@ export async function addManualDeposit(
     revalidateTag(DASHBOARD_CACHE_TAG);
     return { ok: true, id };
   } catch (err) {
+    // DP001 is add_manual_deposit's "a live manual deposit already holds this facility-day"
+    // (migration 0098). It is a REFUSAL, not a failure: nothing was written and retrying is
+    // guaranteed to fail the same way, so it must not wear `write_failed`'s "that may not have been
+    // saved, reopen and check" wording — that invites the retry, and before 0098 the retry is what
+    // produced a bare 23505 the operator could do nothing with.
+    //
+    // ⚠ MATCHED ON SQLSTATE, NEVER ON THE MESSAGE. The message names the row and its amount and
+    // will be reworded; the code is the contract. It is read defensively because a pg error's
+    // `code` is untyped on the way through node-pg.
+    if (typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'DP001') {
+      return { ok: false, error: 'deposit_exists' };
+    }
     console.error('addManualDeposit failed:', err instanceof Error ? err.message : String(err));
     return { ok: false, error: 'write_failed' };
   }
