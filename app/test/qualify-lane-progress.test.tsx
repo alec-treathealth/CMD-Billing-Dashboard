@@ -168,19 +168,21 @@ test('a structurally skipped row offers no control at all', () => {
   assert.deepEqual(buttons.map((b) => b.label), ['Change'], 'only the search is revisitable here');
 });
 
-test('an operator’s skip offers "Pick a plan", and it goes back to the carrier stage', () => {
+test('an operator’s skip offers "Pick a carrier", and it goes back to the carrier stage', () => {
   const skippedSteps: LaneStep[] = [
     { ...STEPS[0]! },
     { key: 'payer', label: 'Carrier', question: 'Carrier — which is on the card?', state: 'skipped', meta: 'All carriers', revisit: null },
-    { key: 'plan', label: 'Plan', question: 'Plan — which plan is it?', state: 'skipped', meta: 'All plans', revisit: { to: 'payer', label: 'Pick a plan' } },
+    { key: 'plan', label: 'Plan', question: 'Plan — which plan is it?', state: 'skipped', meta: 'All plans', revisit: { to: 'payer', label: 'Pick a carrier' } },
     { ...STEPS[3]! },
   ];
   const sent: string[] = [];
   const buttons = buttonsIn(LaneReceipt({ steps: skippedSteps, title: 't', onChange: (to) => sent.push(to) }));
-  const hatch = buttons.find((b) => b.label === 'Pick a plan');
+  const hatch = buttons.find((b) => b.label === 'Pick a carrier');
   assert.ok(hatch !== undefined, 'a declined carrier question must keep a way back into choosing');
   hatch.onClick();
-  assert.deepEqual(sent, ['payer'], 'a plan is picked WITHIN a carrier, so the way back is the carrier stage');
+  // The words and the destination agree. They did not always: the label read "Pick a plan" over a
+  // button that lands on the carrier stage — see the pair pin in qualify-lane-steps.test.tsx § 7.
+  assert.deepEqual(sent, ['payer'], 'and the button reaches the stage its label names');
 });
 
 test('without onChange the receipt is a read-only record, not a row of dead buttons', () => {

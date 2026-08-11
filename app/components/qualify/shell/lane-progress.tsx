@@ -113,7 +113,9 @@ export function LaneStepper({ steps }: { steps: readonly LaneStep[] }) {
  * mode and this component carries everything it carried:
  *
  *   · the RECORD      — the four questions and their settled values (was always here)
- *   · the REVISIT     — `step.revisit`, the chip row's "Change" / "Pick a plan"
+ *   · the REVISIT     — `step.revisit`: the chip row's "Change", and its skipped-lane escape hatch,
+ *                       which reads "Pick a carrier" here because that is the stage it reaches (the
+ *                       chip row called the same button "Pick a plan" and still does)
  *   · the MEMBER COUNT— the chip row's `· N members`, with the basis in its accessible name
  *   · the SCOPE       — the chip row's "All plans · all payers — your re-scope" on a skipped lane
  *
