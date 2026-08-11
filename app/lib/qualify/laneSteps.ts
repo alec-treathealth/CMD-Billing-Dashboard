@@ -26,6 +26,8 @@
  *     `FlowReceipt` already renders in this rail today. This module moves no field into a new
  *     channel: no URL, no log, no model prompt, no storage.
  *   · the answer step shows a rating and a verdict word — integers and an enum.
+ *   · `revisit` carries a stage ENUM and one of two fixed strings ('Change', 'Pick a plan'). It is
+ *     static copy plus a target, never a value read off the resolution.
  */
 import type { QualifyResolution } from './resolution';
 import type { QualifyPolicyRating } from './policyRating';
@@ -41,6 +43,13 @@ export type LaneStepKey = 'identify' | 'payer' | 'plan' | 'answer';
  */
 export type LaneStepState = 'pending' | 'current' | 'done' | 'skipped';
 
+/** Where a step's revisit control goes back to, and the words on it. */
+export interface LaneRevisit {
+  /** The `went_back` target. NOT always this step's own key — see the skip case in `revisitFor`. */
+  to: 'identify' | 'payer' | 'plan';
+  label: string;
+}
+
 export interface LaneStep {
   key: LaneStepKey;
   /** The stepper's short label — "Carrier". */
@@ -50,6 +59,16 @@ export interface LaneStep {
   state: LaneStepState;
   /** The decided value, or null while the step is undecided. NON-PHI by construction (see header). */
   meta: string | null;
+  /**
+   * The revisit affordance, or null when there is nothing to go back to.
+   *
+   * ⚠ IT IS DERIVED HERE, WITH THE REST, AND THAT IS THE WHOLE POINT. Whether a step is revisitable
+   * turns on `skipped` vs `soleCarrier`/`soleCandidate` — a distinction `state` COLLAPSES, because
+   * both render as 'skipped'. The only other discriminator visible downstream is the `meta` STRING
+   * ('All carriers' vs 'Only carrier on file'), and branching a control on display copy is how a
+   * wording change silently removes a button. Deciding it here keeps one derivation.
+   */
+  revisit: LaneRevisit | null;
 }
 
 const STEP_TEXT: readonly { key: LaneStepKey; label: string; question: string }[] = [
@@ -130,8 +149,49 @@ export function laneSteps(input: LaneStepsInput): LaneStep[] {
               : seg.key === 'plan' && (soleCandidate || skipped)
                 ? 'skipped'
                 : 'done';
-    return { key: seg.key, label: seg.label, question: seg.question, state, meta: metaFor(seg.key, state, input) };
+    return {
+      key: seg.key,
+      label: seg.label,
+      question: seg.question,
+      state,
+      meta: metaFor(seg.key, state, input),
+      revisit: revisitFor(seg.key, state, skipped),
+    };
   });
+}
+
+/**
+ * The revisit control for a step, or null.
+ *
+ * ⚠ THESE ARE `FlowReceipt`'S GATES, RESTATED IN THE VOCABULARY OF `state` — not new rules. The chip
+ * row this replaces in shell mode showed Change on three conditions, and each maps exactly:
+ *
+ *   · Search  — rendered whenever the receipt did (`resolution && stage !== 'identify'`)
+ *               ⟺ `identify.state === 'done'`, since identify is the one step that is never skipped.
+ *   · Carrier — `payerLabel !== null && payers.length > 1`
+ *               ⟺ `payer.state === 'done'`, which already implies `!soleCarrier`, i.e. >1 carrier.
+ *   · Plan    — `stage === 'answer' && candidates.total > 1`
+ *               ⟺ `plan.state === 'done'`, which already implies `!soleCandidate`.
+ *
+ * So `done` is the whole rule for the three, and no count has to be re-read to know it.
+ *
+ * ⚠ ONLY AN OPERATOR'S SKIP EARNS AN ESCAPE HATCH. A step is 'skipped' for two unrelated reasons and
+ * they must not be treated alike: the operator DECLINED the question (`skipped`), or it was never
+ * askable — one carrier on file, one candidate. Offering "Pick a plan" on a sole-carrier lane would
+ * send the operator back to a stage with a single chip and nothing to decide, which is precisely why
+ * the chip row suppressed its Carrier entry on `payers.length > 1`.
+ *
+ * ⚠ AND ITS TARGET IS `payer`, NOT `plan`, WHICH IS NOT A TYPO. This reproduces the chip row's Scope
+ * entry exactly: the way back into choosing is the CARRIER stage, because a plan is picked within a
+ * carrier. The label is the operator's goal; the target is the stage that gets them there.
+ */
+function revisitFor(key: LaneStepKey, state: LaneStepState, skipped: boolean): LaneRevisit | null {
+  // Nothing follows the answer, so there is nowhere to go back to FROM it — and `onChange` has no
+  // 'answer' target for the same reason.
+  if (key === 'answer') return null;
+  if (state === 'done') return { to: key, label: 'Change' };
+  if (key === 'plan' && state === 'skipped' && skipped) return { to: 'payer', label: 'Pick a plan' };
+  return null;
 }
 
 /**

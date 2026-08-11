@@ -4975,3 +4975,33 @@ test('FF-m8 — the 2-9 preface names an action available on the stage it render
   assert.match(html, /This search covers all of them — refine the prefix to narrow it to one\./);
   assert.ok(!html.includes('Continue to search across all of them'), 'no Continue control exists on this stage');
 });
+
+// ── THE RECEIPT MERGE — the shell states its progress ONCE ───────────────────────────────────────
+//
+// #194 shipped `LaneReceipt` beside `FlowReceipt` and deferred the dedup, so shell mode listed the
+// same four decisions twice: a checklist, and the chip row 40px below it. `FlowReceipt` is now gated
+// off in shell mode and `LaneReceipt` carries what it carried.
+//
+// These two tests are a PAIR and neither is redundant. The first pins the merge; the SECOND pins that
+// the single-column path was not touched — the whole safety argument for the change is that
+// `showLaneReceipt` is optional, so a non-shell render passes `undefined` and keeps the shipped
+// condition. Without the mirror, deleting the chip row outright would still pass the first.
+
+test('shell mode renders exactly one receipt — the checklist, not the chip row', () => {
+  const html = render(props('answer', fixture(), { showLaneReceipt: true, answer: answerProps() }));
+  assert.ok(
+    !html.includes('aria-label="Your search so far"'),
+    'the chip row must be gone in shell mode — two receipts is the defect this closes',
+  );
+  assert.match(html, /data-testid="qualify-lane-receipt"/, 'and the checklist must be the one that stays');
+  // The record survives the merge: the questions are still on screen, not just the chips' labels.
+  assert.match(html, /who are we looking at/);
+});
+
+test('the single-column layout still renders the chip row, untouched', () => {
+  // `showLaneReceipt` omitted — exactly what the non-shell path passes. This is the assertion that
+  // makes the gate safe: `undefined !== true`, so the condition is the one that shipped.
+  const html = render(props('answer', fixture(), { answer: answerProps() }));
+  assert.match(html, /aria-label="Your search so far"/, 'the chip row is what QUALIFY_SMOKE_SHELL=off ships');
+  assert.ok(!html.includes('data-testid="qualify-lane-receipt"'), 'and the checklist stays shell-only');
+});
