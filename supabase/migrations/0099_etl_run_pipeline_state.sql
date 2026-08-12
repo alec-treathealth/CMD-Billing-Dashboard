@@ -10,8 +10,18 @@
 --
 --     stage                     runs   observed wall clock            source
 --     refresh-charge-rollup     168    81.6s – 117.5s (avg 98.4s)     rollup_refresh_run, 7d
---     cmd-census (BXR)           98    p50 0.5s / p95 135s / max 214s cmd_census_run, 7d
---     cmd-census (Indigo)        14    p50 30.4s / max 121s           cmd_census_run, 7d
+--     cmd-census (Indigo)        98    p50 0.5s / p95 135s / max 214s cmd_census_run, 7d
+--     cmd-census (BXR)           14    p50 30.4s / max 121s           cmd_census_run, 7d
+--
+--   ⚠ THE TWO CENSUS ROWS ABOVE WERE LABELLED THE WRONG WAY ROUND when this file was first
+--   written, and the correction is recorded rather than quietly applied. The heavier population —
+--   98 batches, 30 customers, the 213.8s maximum — is INDIGO, not BXR. Verified against
+--   collections.cmd_census_run: business_entity_id 141d459c-f371-4229-9a92-ace198e940bb has 30
+--   distinct customers and af504ab6-3dcd-4aa4-a93c-27bc58de4088 has 15, which matches the rosters
+--   (Indigo 30, BXR 15) and app/lib/views.ts's INDIGO_ENTITY_ID / BXR_ENTITY_ID. No reserve, cadence
+--   or conclusion below depends on which tenant owns the maximum — 213.8s is the number that sets
+--   cmd-census's reserve either way — but a UUID mislabelled in a header is exactly the kind of
+--   thing a later reader trusts without re-deriving.
 --     cmd-explorer                —    UNKNOWN — no run log exists    —
 --     indigo-explorer             —    UNKNOWN — no run log exists    —
 --
