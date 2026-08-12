@@ -265,21 +265,14 @@
   );
 }
 
-/* Resolved-payer hero band — the dark teal gradient the subject sits on, with a coral radial glow. */
-.q-subject {
-  background: linear-gradient(120deg, #0e3a3a 0%, #124b47 55%, #135e5a 100%);
-}
-.q-subject::after {
-  content: '';
-  position: absolute;
-  right: -40px;
-  top: -60px;
-  width: 240px;
-  height: 240px;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(226, 103, 79, 0.3), transparent 70%);
-  pointer-events: none;
-}
+/*
+ * `.q-subject` — DELETED 2026-08-12 with its only consumer, the v3 NARROW SEARCH card. It painted the
+ * dark teal gradient band, and its `::after` was a 240×240 coral glow positioned OUTSIDE the box
+ * (right:-40px; top:-60px) — which is precisely what forced an `overflow-hidden` onto the card and
+ * very nearly clipped the employer type-ahead's dropdown. The rule is removed with the markup on
+ * purpose: leaving it here invites someone to re-use it on the verdict card that replaced the NARROW
+ * SEARCH card, and re-introduce that clipping bug at a new address.
+ */
 
 /*
  * Beta nav flag — sparkly coral badge on beta top-nav tabs (Qualify + Claims Audit). Decorative

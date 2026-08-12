@@ -75,11 +75,13 @@ export function QualifyComposer({
 
   if (snapshot === null || offerable.length === 0 || template === null) {
     return (
-      <div className="border-t border-line px-4 py-3" data-testid="qualify-composer-quiet">
-        <p className="text-[11.5px] leading-relaxed text-ink400">
-          The composer lights up once a search resolves — then you can ask about any facility in the
-          answer, from a fixed set of questions.
-        </p>
+      // `shrink-0`: flex items default to `flex-shrink: 1`, so under the rail's 2026-08-12
+      // max-height this pane — which carries the ratified compliance line — would compress instead
+      // of pinning.
+      <div className="shrink-0 border-t border-line px-4 py-3" data-testid="qualify-composer-quiet">
+        {/* 26 words of explanation for a visibly-inert control, until 2026-08-12. The control's own
+            disabled treatment already says it is not ready; the sentence only had to say why. */}
+        <p className="text-[11.5px] leading-relaxed text-ink400">Resolve a search to ask about it.</p>
         <ComposerFoot />
       </div>
     );
@@ -90,7 +92,8 @@ export function QualifyComposer({
   const current = slots ?? defaultSlots(snapshot, activeTemplate);
 
   return (
-    <div className="border-t border-line px-4 py-3" data-testid="qualify-composer">
+    // `shrink-0` for the same reason as the quiet state above — the rail now has a max-height.
+    <div className="shrink-0 border-t border-line px-4 py-3" data-testid="qualify-composer">
       <div className="mb-2 flex items-center gap-2">
         <label htmlFor="qualify-composer-template" className="font-mono text-[10px] font-semibold uppercase tracking-wide text-ink400">
           Ask

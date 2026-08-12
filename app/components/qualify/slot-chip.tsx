@@ -100,6 +100,14 @@ export function SlotChip({
             aria-label={SLOT_LABELS[segment.slot]}
             value={value === null ? '' : String(value)}
             onChange={(e) => set(segment.slot, e.target.value)}
+            /* ⚠ THE 13rem PIN STAYS — an edit here was proposed on 2026-08-12 and WITHDRAWN in
+               review, recorded so nobody re-proposes it. The reasoning was "a 208px cap cannot fit
+               the 416px lane rail". That is backwards twice over: a `max-width` can only make a box
+               NARROWER, so the cap was never what stopped the control fitting anywhere — it is the
+               only thing keeping this `<select>` from growing to its widest `<option>` — and 208px
+               fits a 416px rail with room to spare. Relaxing it to `max-w-full` would have widened
+               the control ~2.4x on the FULL-WIDTH v2 tab, a surface that brief never touched, and
+               `truncate` means the difference is a visible ellipsis rather than a theoretical one. */
             className="max-w-[13rem] cursor-pointer truncate rounded border border-teal200 bg-surface px-1 py-0.5 font-semibold text-teal700 underline decoration-dotted underline-offset-2"
           >
             {choices.map((choice) => (

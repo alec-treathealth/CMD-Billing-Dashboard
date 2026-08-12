@@ -101,7 +101,8 @@ test('the zone fills per stage and the hero carries counts, never dollars', () =
 // ── 3. The composer ─────────────────────────────────────────────────────────────────────────────
 test('the composer is quiet without a snapshot and slots-only with one', () => {
   const quiet = renderToStaticMarkup(<QualifyComposer snapshot={null} onAsk={() => {}} />);
-  assert.match(quiet, /lights up once a search resolves/);
+  // 26 words until 2026-08-12; the disabled treatment already says the control is not ready.
+  assert.match(quiet, /Resolve a search to ask about it\./);
   assert.match(quiet, /free text never reaches the model/);
   assert.doesNotMatch(quiet, /<input|<textarea/);
 
@@ -174,7 +175,9 @@ test('no shell component renders positional "on the left" language', () => {
     renderToStaticMarkup(<QualifyComposer snapshot={null} onAsk={() => {}} />),
   ];
   for (const html of renders) {
-    assert.doesNotMatch(html, /on the left/i);
+    // ⚠ WIDENED 2026-08-12. "on the right" is exactly as false as "on the left" below `xl`, and the
+    // change that split the scroll between the two panes is the one most likely to write it.
+    assert.doesNotMatch(html, /on the (left|right)|left[- ]hand|right[- ]hand/i);
   }
 });
 
