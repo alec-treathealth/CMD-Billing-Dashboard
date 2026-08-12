@@ -2,6 +2,7 @@
   "regions": ["sfo1"],
   "installCommand": "cd .. && npm install && cd app && npm install",
   "crons": [
+    { "path": "/api/cron/pipeline-tick", "schedule": "*/5 * * * *" },
     { "path": "/api/cron/cmd-explorer", "schedule": "0 * * * *" },
     { "path": "/api/cron/indigo-explorer", "schedule": "30 * * * *" },
     { "path": "/api/cron/cmd-census", "schedule": "15 * * * *" },
