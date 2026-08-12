@@ -1,6 +1,31 @@
 -- 0099 — collections.etl_run + pipeline_state + pipeline_lock: one shared ETL run-log, and the
 --        state a completion-chained pipeline runs on.
 --
+-- ✅ APPLIED LIVE 2026-08-12, ledger version 20260812203336.
+--
+--   VERIFIED AT APPLY, as privileges and behaviour rather than as migration text:
+--     · all three relations exist, RLS enabled, owner = postgres (NOT claims_admin)
+--     · claims_reader SELECT true on all three
+--     · cmd_rollup_writer INSERT/UPDATE true, DELETE **false** (the 0091 least-privilege shape)
+--     · public and anon SELECT **false** on all three
+--     · 12 policies total, 4 per table; etl_run_stage_started_idx present
+--     · seed = 5 rows, all status 'idle'
+--   Validation exercised BOTH ways, as 0093/0097 did:
+--     · `insert ... status = 'bogus'` raised 23514 on etl_run_status_check and wrote nothing
+--     · a well-formed start row plus a separate close-out UPDATE produced status='ok' with the
+--       duration_ms and rows_touched written; probe row deleted, etl_run confirmed back to 0 rows.
+--
+--   ⚠ THE START ROW AND ITS CLOSE-OUT MUST BE SEPARATE STATEMENTS, which this validation proved by
+--   accident: attempting them as two data-modifying CTEs in ONE statement updated NOTHING, because
+--   every CTE sees the same snapshot and the UPDATE cannot see the sibling INSERT's row.
+--   src/collections/etlRun.ts already issues them separately (the Supavisor autocommit discipline).
+--   Do not "optimise" that into a single round trip.
+--
+--   Applied while the instrumentation was ALREADY LIVE in production with the table absent — #215
+--   reached main via the #213 staging promotion before this ran. The fail-soft 42P01 handling in
+--   etlRun.ts held exactly as designed: over the preceding 6 hours the rollup logged 7 runs, the
+--   census 24, and 607 explorer rows ingested, with no cron affected by the missing table.
+--
 -- WHY: data freshness is currently bounded by clock gaps, not by work. The five CMD stages are
 --   staggered cmd-explorer :00 / cmd-census :15 / indigo-explorer :30 / indigo-census :35 /
 --   refresh-charge-rollup :45, so a CMD change landing at :01 is not visible in the charge rollup
@@ -10,8 +35,18 @@
 --
 --     stage                     runs   observed wall clock            source
 --     refresh-charge-rollup     168    81.6s – 117.5s (avg 98.4s)     rollup_refresh_run, 7d
---     cmd-census (BXR)           98    p50 0.5s / p95 135s / max 214s cmd_census_run, 7d
---     cmd-census (Indigo)        14    p50 30.4s / max 121s           cmd_census_run, 7d
+--     cmd-census (Indigo)        98    p50 0.5s / p95 135s / max 214s cmd_census_run, 7d
+--     cmd-census (BXR)           14    p50 30.4s / max 121s           cmd_census_run, 7d
+--
+--   ⚠ THE TWO CENSUS ROWS ABOVE WERE LABELLED THE WRONG WAY ROUND when this file was first
+--   written, and the correction is recorded rather than quietly applied. The heavier population —
+--   98 batches, 30 customers, the 213.8s maximum — is INDIGO, not BXR. Verified against
+--   collections.cmd_census_run: business_entity_id 141d459c-f371-4229-9a92-ace198e940bb has 30
+--   distinct customers and af504ab6-3dcd-4aa4-a93c-27bc58de4088 has 15, which matches the rosters
+--   (Indigo 30, BXR 15) and app/lib/views.ts's INDIGO_ENTITY_ID / BXR_ENTITY_ID. No reserve, cadence
+--   or conclusion below depends on which tenant owns the maximum — 213.8s is the number that sets
+--   cmd-census's reserve either way — but a UUID mislabelled in a header is exactly the kind of
+--   thing a later reader trusts without re-deriving.
 --     cmd-explorer                —    UNKNOWN — no run log exists    —
 --     indigo-explorer             —    UNKNOWN — no run log exists    —
 --
