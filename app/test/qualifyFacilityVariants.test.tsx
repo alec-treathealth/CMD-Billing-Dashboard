@@ -152,8 +152,11 @@ test('S4 — facilitiesElsewhere names the EXCLUDED rows, de-duplicated, with th
 });
 
 test('S4 — offerableFacilityOptions drops the placeholder: you cannot send someone to “No Facility”', () => {
-  // It stays a real ranked ROW everywhere (dropping it would hide $29,081,575.38 of charges) — it is
-  // only un-OFFERABLE, because picking it asks a question about a place that does not exist.
+  // It stays in every DENOMINATOR (the book-wide KPI tile and the policy-tape rating math still carry
+  // it, so none of the $29,081,575.38 is hidden). Since the 2026-08-12 ruling it is no longer RANKED
+  // either — the SQL entity surfaces exclude it upstream. This helper is unchanged and still correct:
+  // it answers "can I send a patient here", and it also guards options that arrive from outside the
+  // ranking (a bookmarked URL). Assertion below is unchanged; only this justification moved.
   assert.deepEqual(offerableFacilityOptions(NARROW_OPTIONS).map((o) => o.value), [
     'LONESTAR MENTAL HEALTH',
     'NASHVILLE MENTAL HEALTH LLC',

@@ -139,10 +139,10 @@ export function narrowByFacility<T extends { facilityKey: string }>(
  * TWO RULES, both of which a naive `.filter().map()` gets wrong:
  *  - DE-DUPLICATED BY NAME. Two raw spellings of one facility resolve to one `name`, so an un-deduped
  *    list reads "this member billed at LSMH and LSMH".
- *  - THE PLACEHOLDER IS NOT A PLACE. `No Facility` is a real bucket in the rollup and keeps its rank
- *    everywhere, but "this member billed at No Facility" asserts a place they were treated, which is
- *    the fabricated-place claim S3 suppressed the history annotation for. Callers must handle an
- *    EMPTY result rather than assuming there is always somewhere to name.
+ *  - THE PLACEHOLDER IS NOT A PLACE. `No Facility` is a real bucket in the rollup and stays in every
+ *    DENOMINATOR (2026-08-12 ruling), but "this member billed at No Facility" asserts a place they
+ *    were treated, which is the fabricated-place claim S3 suppressed the history annotation for.
+ *    Callers must handle an EMPTY result rather than assuming there is always somewhere to name.
  */
 export function facilitiesElsewhere(
   rows: readonly FacilityNarrowRow[],
@@ -162,9 +162,12 @@ export function facilitiesElsewhere(
 /**
  * The options a user may PICK — every facility except the placeholder.
  *
- * `No Facility` ranks like any other text and must keep doing so (dropping the row would hide
- * $29,081,575.38 of charges, contract.ts `QUALIFY_NO_FACILITY`). What it may not be is an OPTION:
- * the question this narrow asks is "can I send this patient here", and there is no here.
+ * `No Facility` stays in every DENOMINATOR — the book-wide KPI tile and the policy-tape rating math
+ * still carry it, so none of the $29,081,575.38 is hidden (contract.ts `QUALIFY_NO_FACILITY`). Since
+ * the 2026-08-12 ruling it is no longer RANKED either: the SQL entity surfaces exclude it upstream.
+ * This helper stays regardless, because it answers a different question — "can I send this patient
+ * here", and there is no here — and because options can arrive from sources the ranking does not
+ * gate (a bookmarked URL, a saved link). Defence in depth, not a duplicate of the SQL clause.
  */
 export function offerableFacilityOptions<T extends { value: string }>(options: readonly T[]): T[] {
   return options.filter((o) => o.value !== QUALIFY_NO_FACILITY);

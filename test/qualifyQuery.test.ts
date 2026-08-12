@@ -192,7 +192,11 @@ test('buildFacilityRankingQuery: rates on allowed_reliable with tier e2 excluded
   assert.match(sql, /as estimate_claims/, 'coverage: estimate count projected');
   assert.match(sql, /as unknown_claims/, 'coverage: unknown count projected');
   assert.match(sql, /max\(f\.care_setting\) as care_setting/, 'level-of-care from the existing dimension join');
-  assert.deepEqual(params, [BOTH, 'AETNA', '2026-06-17', '2026-07-17']);
+  // The 5th bind is the 'No Facility' placeholder (ruling 2026-08-12): this query produces RANKED
+  // facility cards — named, sorted, drilled into, and the source of tileFlanks' Best/Worst — and the
+  // placeholder is a bucket, not a place. Bound, never interpolated. The book-wide KPI denominator
+  // deliberately binds no such param; test/qualifyNoFacility.test.ts pins both halves.
+  assert.deepEqual(params, [BOTH, 'AETNA', '2026-06-17', '2026-07-17', 'No Facility']);
 });
 
 // ── buildIdentifierLandingFacilityQuery (Fix A): kind→column, payer+window scope, recency limit 1. ───

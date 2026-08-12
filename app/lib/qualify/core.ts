@@ -468,8 +468,11 @@ function memberHistoryIndex(memberFacilities: readonly QualifyFacility[]): Map<s
        * `'No Facility'` is the literal CMD emits when a charge resolves to no facility at all —
        * interest lines plus a residual unattributed trickle: **11,414 charges / $29,081,575.38 at
        * charge grain** (supabase/migrations/0084_cmd_explorer_pull_facility.sql). It is a REAL
-       * bucket in the rollup and it ranks like any other text, deliberately — dropping it would
-       * hide money, which is why the row itself stays.
+       * bucket in the rollup and it stays in every DENOMINATOR — dropping it there would hide
+       * money. Since the 2026-08-12 ruling it no longer RANKS: buildFacilityRankingQuery excludes
+       * it, so the placeholder does not reach this list from SQL at all. This suppression is kept
+       * anyway — it is the join's own invariant, it is cheap, and the annotation must not depend on
+       * an upstream WHERE clause staying exactly as it is today.
        *
        * But the annotation reads "Seen here before", and that asserts a PLACE the member was
        * treated. There is no such place. Suppressing at the JOIN rather than at the render means

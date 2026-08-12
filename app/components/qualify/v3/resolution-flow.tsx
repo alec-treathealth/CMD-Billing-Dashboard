@@ -3287,10 +3287,13 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
   // Same block, same law: derived from the rows the ranking ALREADY returned, and grep this region
   // for `props.filters` — there is nothing to find, which is the structural half of invariant (m).
   //
-  // ⚠ THE PLACEHOLDER IS DROPPED FROM THE OPTIONS, NOT FROM THE ROWS. `No Facility` keeps its rank in
-  // every grid on this surface (dropping it would hide $29,081,575.38 of charges) and is simply not
-  // offerable — you cannot send a patient to a bucket. Because it can never be PICKED, the narrow can
-  // never be "show me the placeholder", and the empty states below never have to defend that claim.
+  // ⚠ THE PLACEHOLDER IS DROPPED FROM THE OPTIONS. `No Facility` stays in every DENOMINATOR — the
+  // book-wide KPI tile and the policy-tape rating math still carry it, so none of the $29,081,575.38
+  // is hidden — but since the 2026-08-12 ruling it is no longer RANKED either: the SQL entity
+  // surfaces (buildFacilityRankingQuery, buildFacilityTrendQuery) exclude it upstream, so it does not
+  // reach these grids at all. This filter stays as defence in depth for options that arrive from
+  // outside the ranking. Because it can never be PICKED, the narrow can never be "show me the
+  // placeholder", and the empty states below never have to defend that claim.
   const facilityOptions = useMemo(
     () => offerableFacilityOptions(props.facilityOptions),
     [props.facilityOptions],

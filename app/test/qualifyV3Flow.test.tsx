@@ -3920,8 +3920,11 @@ test('S4 — the facility type-ahead renders BESIDE the grid, and NEVER inside t
 });
 
 test('S4 — “No Facility” is never OFFERABLE: you cannot send someone to a placeholder', () => {
-  // The row keeps its rank everywhere (dropping it would hide $29,081,575.38 of charges) — it is only
-  // un-offerable, because picking it asks whether a patient can be admitted to a bucket.
+  // The placeholder stays in every DENOMINATOR (the book-wide KPI tile and the policy-tape rating math
+  // still carry it, so none of the $29,081,575.38 is hidden). Since the 2026-08-12 ruling it is no
+  // longer RANKED either — the SQL entity surfaces exclude it upstream, so it does not reach these
+  // grids at all. This filter remains as defence in depth for options sourced outside the ranking.
+  // Assertions below are unchanged; only this justification moved.
   const html = withFacility(threeStateSnapshot());
   assert.match(html, /aria-label="Facility"/, 'positive control: the picker rendered at all');
   assert.match(html, /Off · all 5/, 'six options in, five offered — the placeholder is the one removed');
