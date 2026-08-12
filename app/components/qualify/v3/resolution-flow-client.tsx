@@ -1457,7 +1457,7 @@ export function ResolutionFlowClient({
               INSIDE the rail's `overflow-y-auto`, deliberately — one scrollbar governs "the chat".
               Do not give the panel its own nested scroller: two stacked scrollports in a 416px
               column is the failure mode. */}
-          {aiPanelNode}
+          {shellMode ? aiPanelNode : null}
         </LaneRail>
 
         <div className="min-w-0">

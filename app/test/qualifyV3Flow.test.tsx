@@ -5499,7 +5499,11 @@ test('the AI panel mounts in the RAIL in shell mode and in the STAGE in single-c
   const inProse = (shell.match(/`<QualifyAiPanel>`/g) ?? []).length;
   assert.equal(constructions - inProse, 1, 'two constructions are two billed calls per arm');
   assert.match(shell, /aiPanel: shellMode \? null : aiPanelNode,/, 'the board slot is empty in shell mode');
-  assert.match(shell, /\{aiPanelNode\}\n\s*<\/LaneRail>/, 'and the rail is where it renders');
+  assert.match(
+    shell,
+    /\{shellMode \? aiPanelNode : null\}\n\s*<\/LaneRail>/,
+    'and the rail render is gated to shell mode',
+  );
   // The single-column path still fills the slot, and StageAnswer still has somewhere to put it.
   const flow = readFileSync(
     fileURLToPath(new URL('../components/qualify/v3/resolution-flow.tsx', import.meta.url)),
