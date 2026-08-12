@@ -837,7 +837,11 @@ export function handlePipelineTick(req: PipelineTickHttpRequest) {
         runStage: async (stage) => {
           let runId: number | null = null;
           const opts: CronInvocationOptions = {
-            triggeredBy: holder.startsWith('manual:') ? 'tick-manual' : 'tick',
+            // `holder` here is the HANDLER's clamped value — the literal 'manual' or 'cron'.
+            // runPipelineTick derives its own unique lease token ('manual:<ts>:<uuid>') internally
+            // and never hands it back, so matching a 'manual:' PREFIX here can never fire and every
+            // hand-run tick would be misattributed to 'tick'. Compare the literal.
+            triggeredBy: holder === 'manual' ? 'tick-manual' : 'tick',
             onRunId: (id) => {
               runId = id;
             },
