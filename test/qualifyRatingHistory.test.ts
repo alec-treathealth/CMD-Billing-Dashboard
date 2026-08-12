@@ -170,7 +170,10 @@ test('buildPolicyTapeContextQuery: tenant-scoped, token-bounded, and NO dollar o
   assert.match(q.sql, /business_entity_id = any\(\$1::uuid\[\]\)/, 'tenant predicate present');
   assert.match(q.sql, /member_id_prefix_bidx = any\(\$2::text\[\]\)/, 'bounded to the strip’s own tokens');
   assert.match(q.sql, /payment_received >= \$3::date and payment_received < \$4::date/, 'half-open window');
-  assert.deepEqual(q.params, [BOTH, ['tok1', 'tok2'], '2026-05-11', '2026-08-10']);
+  // $5 is the 'No Facility' placeholder, BOUND not interpolated (ruling 2026-08-12): this query picks
+  // a pair's dominant facility LABEL, and the placeholder is not a place that can be named.
+  assert.match(q.sql, /and facility <> \$5/, 'the placeholder is excluded from the label pick');
+  assert.deepEqual(q.params, [BOTH, ['tok1', 'tok2'], '2026-05-11', '2026-08-10', 'No Facility']);
   assert.throws(
     () => buildPolicyTapeContextQuery([], ['tok1'], '2026-05-11', '2026-08-10'),
     /entityIds required/,

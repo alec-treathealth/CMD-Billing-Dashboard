@@ -23,6 +23,7 @@
  * them in the action layer (single choke point), never here.
  */
 import { assertEntityScope } from './entityScope.js';
+import { QUALIFY_NO_FACILITY_SQL } from './qualifyFacilityPlaceholder.js';
 import {
   CMD_EXPLORER_CHARGE_ROLLUP,
   buildVobMarketSemiJoin,
@@ -416,6 +417,14 @@ export function buildFacilityRankingQuery(
     payerCond +
     `and payment_received >= ${f}::date and payment_received < ${t}::date ` +
     "and facility is not null and btrim(facility) <> '' " +
+    // ENTITY SURFACE — the placeholder is excluded here (ruling 2026-08-12). Every row this query
+    // returns becomes a RANKED facility card: it is named, sorted, drilled into, and it feeds
+    // deriveTileFlanks' Best/Worst. "No Facility" is a bucket, not a place, so it cannot be any of
+    // those. Excluding it HERE is what removes it from tileFlanks (single executor → assembleFacilities
+    // → rankedForScope → deriveTileFlanks) and from the identifier LANDING facility, which core.ts
+    // keeps only when the candidate is also a ranked facility. Denominators are unaffected: this
+    // query is not one, and buildBookKpisQuery deliberately carries no such clause.
+    `and facility <> ${add(QUALIFY_NO_FACILITY_SQL)} ` +
     idNarrow +
     (mj ? `and ${mj} ` : '') +
     'group by facility';
@@ -840,6 +849,10 @@ export function buildFacilityTrendQuery(
   const f = add(from);
   const t = add(to);
   const payerCond = opts.payer ? ` and primary_payer = ${add(opts.payer)}` : '';
+  // Bound HERE rather than inline in `span` below so the row cap stays the LAST bound param — an
+  // invariant qualifyQuery.test.ts asserts directly (`params[params.length - 1] === TOP_N`), and one
+  // worth keeping: it is how an inlined-literal limit would be caught.
+  const nf = add(QUALIFY_NO_FACILITY_SQL);
   const nb = add(buckets);
   const ml = add(minLines);
   const mp = add(minPatients);
@@ -857,7 +870,12 @@ export function buildFacilityTrendQuery(
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
     `where business_entity_id = any(${e}::uuid[]) ` +
     `and payment_received >= ${pf}::date and payment_received < ${t}::date ` +
-    "and facility is not null and btrim(facility) <> ''" +
+    "and facility is not null and btrim(facility) <> '' " +
+    // ENTITY SURFACE — the placeholder is excluded here (ruling 2026-08-12). The ticker NAMES a
+    // facility and calls it a mover; "No Facility is heating up" is a claim about a place that does
+    // not exist. It ranked #1 on this strip before this clause. Denominator rows are untouched — the
+    // book-wide KPI tile scans the same rollup without this clause, on purpose.
+    `and facility <> ${nf}` +
     payerCond;
   // fac: per-facility current + prior aggregates + entity set + BOTH-window distinct-patient counts
   // (the delta gate). member_id_bidx is COUNTED here, never projected.

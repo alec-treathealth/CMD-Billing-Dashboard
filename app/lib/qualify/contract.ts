@@ -509,12 +509,27 @@ export const EMPTY_FACILITIES: readonly QualifyFacility[] = [];
  *
  * CMD emits `facility = 'No Facility'` for charges that resolve to nowhere: interest lines (cpt INT
  * / INTRST) plus a residual unattributed trickle. **11,414 charges / $29,081,575.38 at charge
- * grain**, measured in `supabase/migrations/0084_cmd_explorer_pull_facility.sql`. It groups by
- * itself and keeps its own row everywhere in this product — dropping it would hide money.
+ * grain**, measured in `supabase/migrations/0084_cmd_explorer_pull_facility.sql`.
+ *
+ * ⚠ SPLIT BY ROLE (ruling 2026-08-12). This REVERSES the earlier "keeps its own row everywhere"
+ * rule on the ENTITY half only; the denominator half is unchanged and is why nothing was filtered
+ * out of the rollup:
+ *
+ *   · DENOMINATORS KEEP IT — money is not hidden and collections still reconcile. The book-wide KPI
+ *     tile (`buildBookKpisQuery`) and the policy-tape rating-math grouping set
+ *     (`buildRatingHistoryAggQuery`) both still carry these rows, deliberately and permanently.
+ *   · ENTITY SURFACES SUPPRESS IT — anything that RANKS, PICKS, NAMES or hands a facility to the
+ *     model. The momentum ticker, the facility ranking (and therefore tileFlanks' Best/Worst), the
+ *     Qualify picker, and the policy-tape dominant-facility label. Enforced in SQL via
+ *     `src/collections/qualifyFacilityPlaceholder.ts`, per site — never in a shared predicate, which
+ *     would reach the denominators above.
  *
  * It is named here because a surface that makes a claim about a PLACE has to be able to tell it
- * apart from one. The first such claim is S3's member-history annotation ("Seen here before"), which
- * is suppressed for this key at the join in core.ts.
+ * apart from one. The first such claim was S3's member-history annotation ("Seen here before"),
+ * suppressed for this key at the join in core.ts.
+ *
+ * Collections is NOT governed by this: it keeps the placeholder under the separate 2026-08-10
+ * raw-grain payment-search ruling (`cmd_explorer_filter_options`, the Collections facility picker).
  */
 export const QUALIFY_NO_FACILITY = 'No Facility';
 

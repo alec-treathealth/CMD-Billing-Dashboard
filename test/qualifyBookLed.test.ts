@@ -38,7 +38,7 @@ import {
 } from '../app/lib/qualify/memberPreface.js';
 import { requireQualifyPrincipalFromAccess } from '../app/lib/qualify/principal.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../src/tenants.js';
-import type { QualifyFacilityRow } from '../src/collections/qualifyQuery.js';
+import { buildFacilityRankingQuery, type QualifyFacilityRow } from '../src/collections/qualifyQuery.js';
 import type { QualifyWindowRungsRow } from '../src/collections/qualifyPolicyQuery.js';
 
 const SUPER = () =>
@@ -581,10 +581,15 @@ const NO_FACILITY: QualifyFacilityRow = {
 };
 
 test('S3 M3 — the “No Facility” bucket is never annotated: nobody was SEEN at a placeholder', async () => {
-  /* ⚠ THE CARD IS PRE-EXISTING; THE PERSONAL CLAIM IS NEW. "No Facility" has always been able to
-   * rank — it is a real bucket (interest lines and a residual unattributed trickle), and dropping it
-   * would hide money. But S3 puts "Seen here before — N claim lines" on annotated rows, and that
-   * sentence asserts a PLACE the member was treated. There is no such place here.
+  /* ⚠ THIS TEST FEEDS ROWS THE SQL NO LONGER EMITS, ON PURPOSE — read the next paragraph before
+   * "simplifying" it. Under the 2026-08-12 ruling buildFacilityRankingQuery EXCLUDES the placeholder,
+   * so it cannot reach bookFacilities in production at all (asserted separately, below). These deps
+   * inject the row directly, bypassing SQL, so this stays a live test of the JOIN's own invariant
+   * rather than of the WHERE clause upstream of it — defence in depth, so the annotation cannot start
+   * fabricating a place if that clause is ever loosened.
+   *
+   * S3 puts "Seen here before — N claim lines" on annotated rows, and that sentence asserts a PLACE
+   * the member was treated. There is no such place here.
    *
    * SUPPRESSED AT THE JOIN, not at the chip, so the TIEBREAK goes with it: an annotation that
    * silently floated the placeholder above a real facility at equal footing would be the same
@@ -599,8 +604,21 @@ test('S3 M3 — the “No Facility” bucket is never annotated: nobody was SEEN
     lineCount: 120,
     distinctPatients: 22,
   });
-  // And it is still RANKED — suppressing the annotation must not suppress the row.
-  assert.ok(namesOf(book.bookFacilities).includes('No Facility'), 'the bucket keeps its place in the list');
+  // And it is NOT REACHABLE FROM SQL — the entity-surface half of the 2026-08-12 ruling.
+  //
+  // ⚠ THIS ASSERTION WAS REVERSED, DELIBERATELY. It used to read
+  //   assert.ok(namesOf(book.bookFacilities).includes('No Facility'), 'the bucket keeps its place …')
+  // which encoded the SUPERSEDED "keeps its own row everywhere" rule. The ruling now splits by role:
+  // denominators keep the placeholder (buildBookKpisQuery and buildRatingHistoryAggQuery still carry
+  // it, so no money is hidden) and entity surfaces suppress it. bookFacilities is an entity surface —
+  // its rows are ranked, named and drilled into — so the ranking query excludes the placeholder and
+  // it can no longer appear here. Asserting the OLD expectation would have stayed green forever on
+  // injected fixtures while production had already stopped producing it.
+  assert.match(
+    buildFacilityRankingQuery('AETNA', '2026-05-11', '2026-08-10', [BXR_ENTITY_ID, INDIGO_ENTITY_ID]).sql,
+    /and facility <> \$\d+/,
+    'the ranking query excludes the placeholder, so it cannot reach bookFacilities from SQL',
+  );
 });
 
 test('S3 M4 — the by-NAME path carries no annotation either (the test that used to claim four paths)', async () => {
