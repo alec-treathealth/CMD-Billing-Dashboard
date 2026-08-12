@@ -239,10 +239,137 @@ export function payerGroupsOf(r: QualifyResolution): PayerGroup[] {
 }
 
 /**
+ * THE CLUSTERS THAT COULD ANSWER THE CARRIER QUESTION — not merely the clusters that exist.
+ *
+ * ⚠ THIS DISTINCTION IS THE WHOLE POINT, AND COUNTING RAW CLUSTERS WAS A LIVE DEFECT (Alec,
+ * 2026-08-11). `deriveStage` asked "how many carriers are behind this token", so a prefix carrying
+ * AETNA (real history) plus two dead-end fragments — measured live: "AETNA /CAMH", 1 member, 1 plan,
+ * no history, and "SADDLEBACK", the same shape — rendered a full carrier question with three tiles.
+ * The operator's only rational move was to skip it, and the screenshot of that session shows exactly
+ * that: straight through to "All carriers · All plans, 4/4". A question whose extra options cannot
+ * produce an answer is not a question; it is a click the surface charges for nothing.
+ *
+ * `hasClaimEvidence` IS THE ENTIRE DEFINITION, and two facts make it sufficient rather than a
+ * heuristic — both are structural, not observational:
+ *
+ *  1. UNMAPPED IMPLIES NO EVIDENCE, BY CONSTRUCTION. `resolutionService` looks the batch evidence up
+ *     by `canonical_payer_id` (:265, :294); a null id cannot hit the map, so an unmapped candidate
+ *     gets `ZERO_EVIDENCE` whatever its claims really are. So `unmapped ⇒ !hasClaimEvidence`, and an
+ *     `&& !g.unmapped` term would only imply the two are independent signals when one strictly
+ *     implies the other.
+ *  2. NO EVIDENCE MEANS THE PICK CANNOT SCOPE THE RANKING AT ALL. `claimsPayerLabels` — the
+ *     pick→ranking bridge the answer stage rides — is filled only when
+ *     `canonicalPayerId !== null && claimEvidence.lines > 0` (resolutionService §5b). Picking a
+ *     no-evidence cluster sends nothing, so the ranking silently reverts to the dominant payer: the
+ *     PR #92 scope-honesty defect class, reached through a tile the surface invited the user to press.
+ *
+ * ⚠ AND DELIBERATELY NO MEMBER-COUNT FLOOR. A one-member cluster WITH history is answerable — 58.8%
+ * of prefixes are a single member ("a prefix is a person, not a population"), so a `memberCount > 1`
+ * term would blind the majority persona. The dead ends in the report are dead because they have no
+ * history, never because they have one member.
+ *
+ * ⚠ IT IS WINDOW-SCOPED, AND THE COPY MUST SAY SO. The batch query takes the resolve window, whose
+ * default is `DEFAULT_WINDOW_DAYS = 365` (v3-actions.ts). So "answerable" means "has a paid claim
+ * line in the last 12 months" — the same basis the receipt's member chip already states — and never
+ * "has ever been billed". Every sentence this predicate drives says "in the last 12 months"; a bare
+ * "no claim history" would be a stronger claim than the data supports.
+ */
+export function answerableCarriers(groups: readonly PayerGroup[]): PayerGroup[] {
+  return groups.filter((g) => g.hasClaimEvidence);
+}
+
+/**
+ * The ONE cluster that could answer the carrier question, or null when zero or several could.
+ *
+ * This is the auto-resolve authority, and it returns the GROUP rather than a boolean because the
+ * surfaces need its label: the plan stage names it, the receipt records it, `PayerHero` renders it,
+ * and the answer's scope rides its cluster. A boolean would send each of those off to re-find it.
+ *
+ * ⚠ IT DOES NOT WRITE `payerPick`, AND THAT IS THE DESIGN (Design A, ratified 2026-08-11). The
+ * reducer stays untouched: the shell composes `payerPick ?? soleAnswerableCarrier(...)?.payer`, so
+ * the operator's own choice and the machine's resolution remain DIFFERENT VALUES that merely feed one
+ * derivation. Dispatching `payer_picked` from an effect would have been shorter and is wrong for the
+ * reason `ScopeSource` documents at length: a machine-authored decision indistinguishable from the
+ * operator's makes the lane rail claim `done` for a question the operator was never asked, and puts a
+ * navigation rule outside the machine that owns every other one.
+ */
+export function soleAnswerableCarrier(groups: readonly PayerGroup[]): PayerGroup | null {
+  const answerable = answerableCarriers(groups);
+  return answerable.length === 1 ? (answerable[0] ?? null) : null;
+}
+
+/** Which carrier the SCREEN is scoped to, and whether the machine or the operator decided it. */
+export interface CarrierResolution {
+  /** The operator's own pick, or the machine's auto-resolve, or null. */
+  effectivePick: string | null;
+  /** True only when `effectivePick` is the MACHINE's ruling rather than the operator's choice. */
+  autoResolved: boolean;
+}
+
+/**
+ * COMPOSE "who picked the carrier" — the read-site half of Design A, as ONE pure function.
+ *
+ * ⚠ IT TAKES `stage`, AND THAT PARAMETER IS THE FIX FOR A REAL DEFECT (Qodo on PR #204, 2026-08-11).
+ * The shell used to compute the auto-resolve inline from `payerPick`/`payerGroups` alone, several
+ * dozen lines ABOVE where `stage` was computed. But `stage` is `backTo ?? derived`, and the new
+ * "Pick a carrier" revisit dispatches `went_back{target:'payer'}` — which clears the reducer's
+ * `payerPick` and sets `backTo`, leaving `payerGroups` untouched. So on the override path the carrier
+ * question was back ON SCREEN while the derivation still reported a resolved carrier, and that value
+ * went downstream as `payerPick`: the receipt recorded "Carrier — resolved for you" and the lane
+ * checklist printed a value under the step it was simultaneously rendering as the OPEN question.
+ * The operator pressed "Pick a carrier" and the surface answered it for them again.
+ *
+ * Taking `stage` as an input makes the ordering hazard unrepresentable rather than merely fixed: this
+ * cannot be called before the stage is known, so no future edit can reintroduce the read-before-derive
+ * that caused it. (A `backTo === 'payer'` guard in the shell would have fixed the same symptom while
+ * leaving the trap in place.)
+ *
+ * A CARRIER SCOPE IS ONLY IN FORCE ON `plan` AND `answer`. On `payer` the question is open by
+ * definition; on `identify` it has not been reached. Stating it as the positive set rather than as
+ * `!== 'payer'` also covers the `backTo === 'identify'` case, which is harmless today only because
+ * every downstream surface happens to gate on the stage as well.
+ */
+export function carrierResolutionFor(args: {
+  stage: FlowStage;
+  /** The REDUCER's pick — the operator's own choice, never a composed value. */
+  payerPick: string | null;
+  skipped?: boolean;
+  payerGroups: readonly PayerGroup[];
+}): CarrierResolution {
+  // The operator's own pick always wins and is never an auto-resolve, whatever the stage.
+  if (args.payerPick !== null) return { effectivePick: args.payerPick, autoResolved: false };
+  const carrierScopeInForce = args.stage === 'plan' || args.stage === 'answer';
+  // A skip decided the carrier question WIDE; resolving it to one carrier would contradict the
+  // all-payers request the skip put on the wire.
+  if (!carrierScopeInForce || args.skipped === true || args.payerGroups.length <= 1) {
+    return { effectivePick: null, autoResolved: false };
+  }
+  const sole = soleAnswerableCarrier(args.payerGroups);
+  if (sole === null) return { effectivePick: null, autoResolved: false };
+  return { effectivePick: sole.payer, autoResolved: true };
+}
+
+/**
  * Which stage the flow is on. PURE — the shell owns `payerPick` (client-side carrier choice) and
  * `picked` (the user submitted a plan). A sole candidate skips straight to the answer; a single
  * carrier skips the payer stage. Skipped stages are STATED on the answer stage's disclosure, never
  * silent (deriveNotices already emits `sole_candidate`).
+ *
+ * ⚠ THE CARRIER QUESTION COUNTS ANSWERABLE CLUSTERS, NOT CLUSTERS (2026-08-11). See
+ * `answerableCarriers` for why, and note the three-way reading, because "one answerable" and "none
+ * answerable" are DIFFERENT states and collapsing them is how a dead end starts reading as an answer:
+ *
+ *  · MORE THAN ONE answerable → ask, unchanged in shape. This is a real question.
+ *  · EXACTLY ONE answerable, among several clusters → AUTO-RESOLVE to it, and the plan stage STATES
+ *    the resolution and its reason. Not a silent skip: `railStates` marks the carrier step 'skipped'
+ *    rather than 'done', the lane label reads "Only carrier with history", and the plan header names
+ *    the carrier and says how many others were eliminated and why.
+ *  · ZERO answerable → ASK ANYWAY, unchanged. "Nothing here can answer" is not "here is the obvious
+ *    answer", and there is no cluster to resolve TO. `StagePayer` states it at set level so the dead
+ *    end is named rather than implied by every tile carrying the same word. It must NOT machine-set
+ *    `skipped`: that flag is the operator's own declared act everywhere else in this flow (it sends
+ *    `payerScope: 'all'` on the wire), so setting it here would fake a decision — the exact
+ *    masquerade `ScopeSource` exists to prevent.
  *
  * `skipped` is the user's OWN escape hatch (the Skip button on either narrowing stage): jump to the
  * answer without choosing a carrier or a plan, and browse the identifier's whole footprint with the
@@ -267,7 +394,14 @@ export function deriveStage(args: {
   if (args.skipped) return 'answer';
   if (r.candidates.total <= 1) return 'answer';
   if (args.picked) return 'answer';
-  if ((args.payerGroups ?? payerGroupsOf(r)).length > 1 && args.payerPick === null) return 'payer';
+  const groups = args.payerGroups ?? payerGroupsOf(r);
+  // `!== 1` rather than `> 1`: it keeps the question for the ZERO case as well as for the many case,
+  // which is the reading the two branches genuinely want. `> 1` would have skipped a dead end into
+  // the plan stage, where a null pick falls back to `payers[0]` — an arbitrary carrier presented as a
+  // resolution.
+  if (groups.length > 1 && answerableCarriers(groups).length !== 1 && args.payerPick === null) {
+    return 'payer';
+  }
   return 'plan';
 }
 
@@ -559,6 +693,13 @@ export function liveSentenceFor(
     scopeAllPayers?: boolean;
     payerGroups?: PayerGroup[];
     /**
+     * The carrier question was resolved BY THE MACHINE (one answerable cluster among several), not by
+     * the operator. Omit and the 'plan' announcement is byte-identical to what it was.
+     */
+    carrierAutoResolved?: boolean;
+    /** The carrier that was auto-resolved to. Named in the announcement — see the 'plan' branch. */
+    carrierAutoResolvedLabel?: string | null;
+    /**
      * S3: the payer whose WHOLE BOOK is the ranked grid, or null/omitted when the grid is the
      * identifier's own footprint. It is a NAME rather than a boolean because the sentence has to say
      * whose book — "the ranking below is a whole book" would leave a screen-reader user knowing the
@@ -629,10 +770,32 @@ export function liveSentenceFor(
     return 'Back at the search step. Searching again replaces the current result.';
   }
   if (stage === 'payer') {
-    return `${(opts.payerGroups ?? payerGroupsOf(resolution)).length} carriers match what you typed. Pick the one on the card.`;
+    const carriers = opts.payerGroups ?? payerGroupsOf(resolution);
+    /* ⚠ THE DEAD-END SET IS ANNOUNCED, because the sr-only channel is where an unstated claim survives
+     * a browser pass — this function's own header says so, and the visible banner on this stage would
+     * otherwise be the one thing a screen-reader user could not reach. Same window wording as the
+     * visible copy; two sentences saying this differently is how they drift. */
+    const dead =
+      answerableCarriers(carriers).length === 0
+        ? ' None of them has claim history in the last 12 months, so a ranking under any of them would have nothing behind it.'
+        : '';
+    return `${carriers.length} carriers match what you typed. Pick the one on the card.${dead}`;
   }
   if (stage === 'plan') {
-    return `${resolution.candidates.total} plans match. Pick one, or ask the AI about one.`;
+    /* ⚠ AND THE AUTO-RESOLVE IS ANNOUNCED HERE, for the identical reason: a sighted operator gets the
+     * banner in the pinned header explaining why the carrier question never appeared, and without this
+     * clause a screen-reader user would be told "N plans match" on a screen they never asked to be on.
+     * The carrier is NAMED rather than described as "one carrier", because "the carrier question was
+     * resolved" leaves them knowing a decision was made and not what it was.
+     *
+     * `carrierAutoResolved` is threaded rather than re-derived — the shell owns the "machine resolved
+     * vs operator picked" distinction (it is unrecoverable from the label alone, see
+     * ResolutionStagesProps), so deriving it here would guess at it. */
+    const auto =
+      opts.carrierAutoResolved === true && opts.carrierAutoResolvedLabel != null
+        ? ` The carrier question was resolved to ${opts.carrierAutoResolvedLabel} for you: the other carriers behind this search have no claim history in the last 12 months.`
+        : '';
+    return `${resolution.candidates.total} plans match. Pick one, or ask the AI about one.${auto}`;
   }
   const g = resolution.group;
   /* ⚠ THE PREFACE REPLACES THE RESOLUTION'S FACILITY COUNT ONLY WHEN IT CARRIES ONE OF ITS OWN.
@@ -727,11 +890,20 @@ const RAIL_SEGMENTS: readonly { stage: FlowStage; label: string }[] = [
  * the stage machine about what was skipped: a sole carrier skips the payer question, a sole
  * candidate skips both questions. A skipped segment must never render as "done" — done implies the
  * user answered a question they were never asked.
+ *
+ * ⚠ `soleCarrier` HAS TO FOLLOW `deriveStage`'S ANSWERABLE READING, OR THIS RAIL LIES (2026-08-11).
+ * It was `groups.length <= 1`, which is a different question from the one the stage machine now asks.
+ * With three clusters and one answerable, the flow auto-resolves past the carrier stage while this
+ * predicate still saw three carriers — so the payer segment fell through to 'done' and claimed the
+ * operator had answered a question that was never put on screen. That is precisely the collapse the
+ * paragraph above forbids, arriving by way of a second definition rather than by a wrong branch.
  */
 export function railStates(stage: FlowStage, resolution: QualifyResolution | null, groups?: PayerGroup[]): RailState[] {
   const idx = RAIL_SEGMENTS.findIndex((s) => s.stage === stage);
   const soleCandidate = resolution !== null && resolution.candidates.total <= 1;
-  const soleCarrier = resolution !== null && (groups ?? payerGroupsOf(resolution)).length <= 1;
+  const carriers = resolution === null ? [] : (groups ?? payerGroupsOf(resolution));
+  const soleCarrier =
+    resolution !== null && (carriers.length <= 1 || answerableCarriers(carriers).length === 1);
   return RAIL_SEGMENTS.map((seg, i) => {
     if (i === idx) return 'current';
     if (i > idx) return 'pending';
@@ -818,6 +990,13 @@ export function StepRail(props: {
  *   reads "skipped" (a sole carrier is never asked about), so a second way of counting carriers here
  *   would let the checklist and the stepper disagree about a question the operator was never shown.
  *
+ * · `answerableCount` rides ALONGSIDE `carrierCount` rather than replacing it, and both are needed
+ *   (2026-08-11). They answer different questions and the checklist asks both: `carrierCount` is what
+ *   the feed reports as "N carriers possible behind this search" — a true statement about the token's
+ *   footprint that the auto-resolve does not make false — while `answerableCount` is what decides
+ *   whether the carrier step was ASKED, and which of the three skip labels it wears. Collapsing them
+ *   would either understate the footprint or overstate what was answerable.
+ *
  * · `policy` is THE LANE-SCOPED RATING OR NOTHING. It never shows a number whose basis is wider
  *   than the lane's own lock.
  *
@@ -853,11 +1032,14 @@ export function laneInputForFlow(props: ResolutionStagesProps, skipped: boolean)
    * rendering detail that merely happens to be set in the same case. Reading the predicate is
    * reading the one definition; inferring from the label would be a second one. */
   const widerThanLane = snapshot !== null && bookLeadsAnswer(snapshot);
+  // ONE `payerGroupsOf` fallback for both counts — deriving them from two separate calls is how the
+  // pair would come to describe two different cluster sets.
+  const carriers = props.resolution === null ? [] : (props.payerGroups ?? payerGroupsOf(props.resolution));
   return {
     stage: props.stage,
     resolution: props.resolution,
-    carrierCount:
-      props.resolution === null ? 0 : (props.payerGroups ?? payerGroupsOf(props.resolution)).length,
+    carrierCount: carriers.length,
+    answerableCount: answerableCarriers(carriers).length,
     payerPick: props.payerPick,
     skipped,
     policy: basis === null || widerThanLane ? null : derivePolicyRating(basis.facilities, basis.basisScope),
@@ -1018,6 +1200,15 @@ export interface ReceiptProps {
    * than falling silent about half of it.
    */
   scopeByUser?: boolean;
+  /**
+   * The Carrier entry records the MACHINE's resolution, not the operator's pick.
+   *
+   * ⚠ THE RECEIPT IS A RECORD OF DECISIONS, so an unqualified "CARRIER AETNA" here claims the operator
+   * made one. That is the same false-decision-claim the `skipped` guards above exist for, and it
+   * arrives on the auto-resolve path with nothing else on the strip to contradict it. The "Change"
+   * button still renders, so the entry stays revisitable either way — this only fixes what it CLAIMS.
+   */
+  carrierAutoResolved?: boolean;
 }
 
 /**
@@ -1035,6 +1226,7 @@ export function FlowReceipt({
   scopePayer = null,
   scopeAllPayers = false,
   scopeByUser = false,
+  carrierAutoResolved = false,
 }: ReceiptProps): React.ReactElement {
   // For a full member id the echo is '' by construction — the receipt shows the READING instead,
   // so the id never reaches the markup and the entry still says what was searched.
@@ -1124,7 +1316,12 @@ export function FlowReceipt({
       {payerLabel !== null && payers.length > 1 ? (
         <span className={entry}>
           <span className="text-xs font-medium uppercase tracking-wide text-ink400">Carrier</span>
-          <span className="text-sm text-ink900">{payerLabel}</span>
+          <span className="text-sm text-ink900">
+            {payerLabel}
+            {/* Not "· auto": the strip is compressed, but a two-letter abbreviation for "nobody chose
+                this" is compression past the point of meaning. */}
+            {carrierAutoResolved ? ' — resolved for you' : ''}
+          </span>
           <button type="button" className={change} onClick={() => onChange('payer')}>
             Change
           </button>
@@ -1228,8 +1425,35 @@ export function StagePayer(props: {
 }): React.ReactElement {
   const groups = props.payerGroups ?? payerGroupsOf(props.resolution);
   const spellingsFolded = groups.reduce((s, g) => s + g.otherSpellings.length, 0);
+  // ZERO ANSWERABLE — the dead-end set. `deriveStage` deliberately still asks the question here (there
+  // is no cluster to resolve TO, and machine-setting `skipped` would fake an operator act), so this
+  // stage is where the state gets named.
+  const noneAnswerable = groups.length > 0 && answerableCarriers(groups).length === 0;
   return (
     <Stage id="qualify-s-payer" question="Which carrier is on the card?">
+      {/* ⚠ THE SET-LEVEL CLAIM, WHICH NO TILE CAN MAKE. Every tile already carries `evidenceWord`, so
+          on a dead-end set the operator sees the same sentence repeated N times — and N identical
+          per-item warnings read as a formatting quirk, not as "none of these can answer". Saying it
+          once about the SET is the difference between a screen the operator can act on and one they
+          have to infer from. The question stays askable: a carrier pick still scopes the plan stage and
+          the identity line, it just will not produce a ranking, and that is the operator's call to
+          make rather than ours to pre-empt. Window named for the same reason as the auto-resolve copy.
+
+          [BOOK-LED EXEMPT: the carrier stage has no ranking on screen yet, so no grid can lead] */}
+      {noneAnswerable ? (
+        <p
+          role="status"
+          className="rounded-lg border border-coral400/40 bg-coral50 px-3 py-2 text-sm text-ink900"
+          data-testid="qualify-carrier-none-answerable"
+        >
+          <strong className="font-semibold">
+            {groups.length === 1 ? 'This carrier has' : `None of these ${groups.length} carriers has`}
+          </strong>{' '}
+          claim history in the last 12 months, so a ranking under{' '}
+          {groups.length === 1 ? 'it' : 'any of them'} would have nothing behind it. Picking one still
+          shows what is on file; use “Skip — search all plans” to browse the whole footprint instead.
+        </p>
+      ) : null}
       <p className="text-sm text-ink600">
         <strong className="font-semibold text-ink900">
           {groups.length === 1 ? 'One carrier' : `${groups.length} carriers`}
@@ -1280,12 +1504,21 @@ export function StagePayer(props: {
                   strokeWidth={2.5}
                 />
               </span>
+              {/* Both nouns pluralize. `plan`/`plans` always did and `members` never did, so a
+                  one-member cluster read "1 members · 1 plan" — and those are exactly the dead-end
+                  rows this stage now reasons about, so the broken half was on the most-scrutinised
+                  tile on the screen. The aria-label carries the same fix: it is the only version a
+                  screen-reader user gets. */}
               <span className="font-mono text-xs tabular-nums text-ink400">
-                <span aria-label={`${g.memberCount} verified members under this carrier`}>
+                <span
+                  aria-label={`${g.memberCount} verified member${g.memberCount === 1 ? '' : 's'} under this carrier`}
+                >
                   {g.memberCount.toLocaleString()}
                 </span>{' '}
-                members ·{' '}
-                <span aria-label={`${g.planCount} plans under this carrier`}>{g.planCount.toLocaleString()}</span>{' '}
+                member{g.memberCount === 1 ? '' : 's'} ·{' '}
+                <span aria-label={`${g.planCount} plan${g.planCount === 1 ? '' : 's'} under this carrier`}>
+                  {g.planCount.toLocaleString()}
+                </span>{' '}
                 {g.planCount === 1 ? 'plan' : 'plans'}
               </span>
               <span className="flex flex-wrap items-center gap-1 text-xs font-semibold">
@@ -1338,6 +1571,8 @@ export function StagePlan(props: {
   pending: boolean;
   /** Optional pre-computed clusters (the shell memoizes one call per resolution). */
   payerGroups?: PayerGroup[];
+  /** `payerPick` is the machine's auto-resolve, not the operator's pick — see ResolutionStagesProps. */
+  carrierAutoResolved?: boolean;
 }): React.ReactElement {
   const all = orderedCandidates(props.resolution);
   const payers = props.payerGroups ?? payerGroupsOf(props.resolution);
@@ -1383,6 +1618,36 @@ export function StagePlan(props: {
       // order is unchanged: this is the same DOM order, in a sticky wrapper.
       pinned={
         <>
+          {/* ── THE AUTO-RESOLVE, STATED ─────────────────────────────────────────────────────────────
+              The carrier question was not asked because only one carrier behind this token could have
+              answered it. That is a RULING, and a ruling the operator never saw made is the thing this
+              block exists to prevent: before 2026-08-11 the flow put up a three-tile carrier question
+              whose other two tiles were 1-member, no-history fragments, and the only sane move was to
+              skip it. Auto-resolving without saying so would have removed the pointless click and
+              replaced it with a silent narrowing — strictly worse, because a narrowing the operator
+              cannot see is one they cannot overrule.
+
+              ⚠ IT NAMES THE WINDOW, and "in the last 12 months" is not padding. `hasClaimEvidence` is
+              the resolve window's evidence (365 days by default, v3-actions.ts), so a bare "no claim
+              history" would assert something about all time that this data cannot support — and would
+              read as "these carriers are wrong" rather than "these carriers are quiet".
+
+              ⚠ IT RENDERS ABOVE THE PLAN COUNT, not after it. The operator's first question on landing
+              here is "why am I on the plan screen already"; answering it second reads as a footnote.
+
+              [BOOK-LED EXEMPT: the plan stage has no ranking on screen yet, so no grid can lead] */}
+          {props.carrierAutoResolved && payers.length > 1 ? (
+            <p
+              role="status"
+              className="rounded-lg border border-teal200 bg-teal50 px-3 py-2 text-sm text-ink900"
+              data-testid="qualify-carrier-auto-resolved"
+            >
+              <strong className="font-semibold">Resolved to {payer}</strong> — the other{' '}
+              {payers.length - 1} carrier{payers.length - 1 === 1 ? '' : 's'} behind this search{' '}
+              {payers.length - 1 === 1 ? 'has' : 'have'} no claim history in the last 12 months, so there
+              was nothing to ask. Use the carrier row above to pick a different one.
+            </p>
+          ) : null}
           <p className="text-sm text-ink600">
             <strong className="font-semibold text-ink900">
               {underPayer.length === 1 ? 'One plan' : `${underPayer.length} plans`}
@@ -1438,9 +1703,13 @@ export function StagePlan(props: {
               <span className="line-clamp-2 font-head text-[15px] font-semibold leading-tight tracking-tight text-ink900">
                 {c.employerLabel ?? 'No plan sponsor on file'}
               </span>
+              {/* Pluralizes, same as the carrier tile — a one-member plan is the common case on a
+                  single-member prefix, not an edge one. */}
               <span className="font-mono text-xs tabular-nums text-ink400">
-                <span aria-label={`${c.memberCount} members on this plan`}>{c.memberCount.toLocaleString()}</span>{' '}
-                members
+                <span aria-label={`${c.memberCount} member${c.memberCount === 1 ? '' : 's'} on this plan`}>
+                  {c.memberCount.toLocaleString()}
+                </span>{' '}
+                member{c.memberCount === 1 ? '' : 's'}
               </span>
               {/* Attributes as pills: categories, not judgements — two distinguishable muted fills
                   (funding wears the brand teal, plan shape the info blue). Never below 12px. */}
@@ -4173,7 +4442,23 @@ export interface ResolutionStagesProps {
   laneCleared?: boolean;
   denied?: string | null;
   pending: boolean;
+  /**
+   * The carrier the answer is scoped to — the shell's `effectivePick`, which is the operator's own
+   * pick OR the machine's auto-resolve (`soleAnswerableCarrier`). See the shell for why the two are
+   * composed at the read site rather than in the reducer.
+   */
   payerPick: string | null;
+  /**
+   * TRUE when `payerPick` above is the MACHINE's resolution rather than the operator's pick.
+   *
+   * ⚠ IT CANNOT BE DERIVED FROM `payerPick` AND `payerGroups`, AND THAT IS WHY IT IS A PROP. Checking
+   * `payerPick === soleAnswerableCarrier(groups)?.payer` is true in two different situations — the
+   * machine resolved to the only answerable carrier, or the operator looked at the tiles and PICKED
+   * that same carrier by hand. Those are different claims and the screen must not print the second
+   * as the first ("Resolved to AETNA for you" over a choice the operator made is as wrong as the
+   * reverse). Defaults false, so every caller that does not pass it renders exactly what it did.
+   */
+  carrierAutoResolved?: boolean;
   planFilter: string;
   identifyAction: (fd: FormData) => void;
   planAction: (fd: FormData) => void;
@@ -4350,6 +4635,12 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
           scopePayer,
           scopeAllPayers,
           payerGroups: props.payerGroups,
+          /* The auto-resolve, ANNOUNCED — same words, same window, one derivation. `?? false` and
+           * `?? null` rather than spreading the props through: the sentence's own gate needs both
+           * halves present or it says nothing, which is the correct behaviour for every caller that
+           * does not pass them. */
+          carrierAutoResolved: props.carrierAutoResolved ?? false,
+          carrierAutoResolvedLabel: props.payerPick,
           /* S2: the preface, ANNOUNCED — and suppressed on exactly the same condition as the visible
            * line. The sr-only region carries no dim and no beam, so a screen-reader user has no
            * signal that what they are hearing describes a scope already being replaced; withholding
@@ -4423,6 +4714,7 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
           scopePayer={scopePayer}
           scopeAllPayers={scopeAllPayers}
           scopeByUser={scopeByUser}
+          carrierAutoResolved={props.carrierAutoResolved ?? false}
         />
       ) : null}
 
@@ -4465,6 +4757,7 @@ export function ResolutionStages(props: ResolutionStagesProps): React.ReactEleme
             onAskAi={props.onAskAi}
             pending={props.pending}
             payerGroups={props.payerGroups}
+            carrierAutoResolved={props.carrierAutoResolved ?? false}
           />
         ) : null}
 
