@@ -117,6 +117,74 @@ test('a tick that cannot take the lease returns immediately without running anyt
   assert.equal(report.ok, true); // a contended tick is not a failure
 });
 
+test('each tick takes a UNIQUE lease token, so an expired tick cannot release a later one', async () => {
+  // Qodo review #216, and it was a real defect: with a shared holder label ('cron'), tick A whose
+  // lease had already EXPIRED would still match `where holder = 'cron'` on release and clear tick
+  // B's live lease — letting a third tick in while B was mid-stage against the one-report-at-a-time
+  // CMD slot. The original comment claimed holder scoping prevented exactly that; it did not.
+  const holders: string[] = [];
+  const capture = {
+    async query(sql: string, params?: unknown[]) {
+      if (/insert into collections\.pipeline_lock/i.test(sql)) {
+        holders.push(String(params?.[2]));
+        return { rowCount: 1, rows: [{ holder: params?.[2] }] };
+      }
+      if (/select stage, status/i.test(sql)) return { rowCount: 0, rows: [] };
+      return { rowCount: 1, rows: [] };
+    },
+  } as unknown as Db;
+
+  const run = () =>
+    runPipelineTick({ db: capture, stages: [], runStage: async () => ok, holder: 'cron' });
+  await run();
+  await run();
+
+  assert.equal(holders.length, 2);
+  assert.notEqual(holders[0], holders[1], 'two ticks must not share a lease token');
+  for (const h of holders) assert.match(h, /^cron:\d+:[0-9a-f-]{36}$/);
+});
+
+test('a manual tick is distinguishable in its lease token', async () => {
+  let holder = '';
+  const capture = {
+    async query(sql: string, params?: unknown[]) {
+      if (/insert into collections\.pipeline_lock/i.test(sql)) {
+        holder = String(params?.[2]);
+        return { rowCount: 1, rows: [{ holder: params?.[2] }] };
+      }
+      if (/select stage, status/i.test(sql)) return { rowCount: 0, rows: [] };
+      return { rowCount: 1, rows: [] };
+    },
+  } as unknown as Db;
+  await runPipelineTick({ db: capture, stages: [], runStage: async () => ok, holder: 'manual' });
+  assert.match(holder, /^manual:/);
+});
+
+test('an unrecognised holder is clamped to cron rather than stored verbatim', async () => {
+  let holder = '';
+  const capture = {
+    async query(sql: string, params?: unknown[]) {
+      if (/insert into collections\.pipeline_lock/i.test(sql)) {
+        holder = String(params?.[2]);
+        return { rowCount: 1, rows: [{ holder: params?.[2] }] };
+      }
+      if (/select stage, status/i.test(sql)) return { rowCount: 0, rows: [] };
+      return { rowCount: 1, rows: [] };
+    },
+  } as unknown as Db;
+  await runPipelineTick({ db: capture, stages: [], runStage: async () => ok, holder: "'; drop--" });
+  assert.match(holder, /^cron:/);
+});
+
+test('the default lease OUTLIVES the 300s function ceiling', async () => {
+  // If the lease could expire while the function was still alive, a second tick would start
+  // alongside the first — the precise contention the lease exists to prevent. It must therefore be
+  // longer than the platform ceiling, not shorter than the stage budget.
+  const { DEFAULT_LEASE_MS, DEFAULT_TICK_BUDGET_MS } = await import('../src/collections/pipelineTick.js');
+  assert.ok(DEFAULT_LEASE_MS > 300_000, 'lease must exceed the 300s maxDuration ceiling');
+  assert.ok(DEFAULT_LEASE_MS > DEFAULT_TICK_BUDGET_MS);
+});
+
 test('the lease is released after a normal tick', async () => {
   const f = fakeDb();
   await runPipelineTick({ db: f.db, stages: TWO_STAGES, runStage: async () => ok });

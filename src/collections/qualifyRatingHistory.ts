@@ -51,6 +51,9 @@
  * model): a platform kill leaves ok/finished_at NULL as the "started but unfinished" signal.
  */
 import { assertEntityScope } from './entityScope.js';
+// A leaf constant, NOT qualifyQuery.ts — the module boundary this file keeps (see
+// buildRatingHistoryAggQuery's header) is against the other QUERY module, not against a bare literal.
+import { QUALIFY_NO_FACILITY_SQL } from './qualifyFacilityPlaceholder.js';
 
 /** The minimal query surface this module needs — STRUCTURAL on purpose, so a pg.Pool (the writer),
  *  a PgExecutor (the app's reader pools), and a plain test fake all satisfy it without casts. Every
@@ -400,6 +403,20 @@ export function buildPolicyTapeContextQuery(
     'and member_id_prefix_bidx = any($2::text[]) ' +
     "and primary_payer is not null and btrim(primary_payer) <> '' " +
     "and facility is not null and btrim(facility) <> '' " +
+    // ENTITY SURFACE — the placeholder is excluded here (ruling 2026-08-12). This query exists to
+    // pick a pair's DOMINANT FACILITY LABEL (`distinct on (token, payer) … order by lines desc`), and
+    // a tape item captioned "No Facility" names a place the member was never treated. Label
+    // selection only: the rating MATH lives in buildRatingHistoryAggQuery and is untouched.
+    //
+    // ⚠ THIS ALSO DECREMENTS `facility_count` BELOW, AND THAT DIVERGENCE IS DELIBERATE (ruled
+    // 2026-08-12). facility_count here counts facility ENTITIES a pair billed at, and the
+    // placeholder is not one — so excluding it is correct for this number. It therefore no longer
+    // agrees with `facilityCount` on the daily snapshot, which comes from buildRatingHistoryAggQuery
+    // and RETAINS the placeholder because that query is a denominator (money must not be hidden).
+    // Two numbers, two questions: "how many places" vs "over what population". Reconciling them is a
+    // NAMED FOLLOW-UP and was explicitly excluded from this pass — do not "fix" it by adding this
+    // clause to the agg query, which would strip the placeholder from the rating denominator.
+    `and facility <> $5 ` +
     'group by member_id_prefix_bidx, primary_payer, facility' +
     '), dim as (' +
     'select agg.member_id_prefix_bidx as token, agg.primary_payer as payer, agg.lines, ' +
@@ -418,7 +435,7 @@ export function buildPolicyTapeContextQuery(
     'count(*) over (partition by token, payer)::int as facility_count ' +
     'from dim ' +
     'order by token, payer, lines desc nulls last, facility_code nulls last';
-  return { sql, params: [entityIds, tokens, from, to] };
+  return { sql, params: [entityIds, tokens, from, to, QUALIFY_NO_FACILITY_SQL] };
 }
 
 /** One (token, payer) context row — the dimensions the daily snapshot does not carry. */

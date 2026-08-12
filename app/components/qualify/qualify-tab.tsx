@@ -93,6 +93,7 @@ import {
   expandFacilitySelection,
   indexFacilityCanonical,
   indexFacilityVariants,
+  offerableFacilityOptions,
 } from '@/lib/qualify/facilityVariants';
 import { buildQualifySearchParams, parseQualifySearchParams } from '@/lib/qualify/urlState';
 import { deriveTileFlanks, NO_TILE_FLANKS } from '@/lib/qualify/tileFlanks';
@@ -403,10 +404,21 @@ export function QualifyTab({
       // ONE ROW PER FACILITY. The server already collapsed the raw-text grain by facility_code and
       // labelled from display_acronym (falling back to facility_name, then the raw text), so the
       // two `LONESTAR MENTAL HEALTH…` spellings arrive as a single option here.
-      setFacilityOptions(r.facilities.map((f) => ({ value: f.value, display: f.display, badge: f.care_setting })));
+      // OFFERABLE ONLY — the same helper v3 uses (resolution-flow.tsx), which closes the v2/v3 picker
+      // inconsistency: v3 has dropped the `No Facility` placeholder from its options since S4 while
+      // v2 still offered it. You cannot send a patient to a bucket, so it may not be a pick.
+      setFacilityOptions(
+        offerableFacilityOptions(r.facilities).map((f) => ({ value: f.value, display: f.display, badge: f.care_setting })),
+      );
       // Both maps are keyed by EVERY spelling, so a selection that did not come from the picker (a
       // ticker-card click, an older URL) still expands and still canonicalizes. The indexes are pure
       // and unit-tested (lib/qualify/facilityVariants.ts) — every failure mode here is silent.
+      //
+      // ⚠ THESE TWO TAKE THE RAW LIST, NOT THE OFFERABLE ONE, AND THAT IS DELIBERATE. The options
+      // above answer "what may I pick"; these answer "what does this stored value mean". A value can
+      // still arrive that the picker would never offer — a bookmarked URL carrying the placeholder,
+      // an older saved link — and it must still resolve to a chip rather than silently expanding to
+      // nothing. Filtering the indexes would break that for exactly the values most likely to need it.
       setFacilityVariants(indexFacilityVariants(r.facilities));
       facilityCanonicalRef.current = indexFacilityCanonical(r.facilities);
     });
