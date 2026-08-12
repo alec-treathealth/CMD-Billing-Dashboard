@@ -302,8 +302,12 @@ export function ResolutionFlowClient({
    * only answerable carrier by hand, and that is a different claim from the machine resolving to it —
    * which is why it travels as its own prop rather than being re-derived per surface. */
   const soleAnswerable = useMemo(() => soleAnswerableCarrier(payerGroups), [payerGroups]);
-  const carrierAutoResolved = payerPick === null && !skipped && payerGroups.length > 1 && soleAnswerable !== null;
-  const effectivePick = payerPick ?? (carrierAutoResolved ? (soleAnswerable?.payer ?? null) : null);
+  const reopeningPayer = backTo === 'payer';
+  const carrierAutoResolved =
+    !reopeningPayer && payerPick === null && !skipped && payerGroups.length > 1 && soleAnswerable !== null;
+  const effectivePick = reopeningPayer
+    ? null
+    : payerPick ?? (carrierAutoResolved ? (soleAnswerable?.payer ?? null) : null);
 
   /** A new identify submit invalidates every downstream choice — clear them BEFORE dispatching to
    *  the server action. Capturing the term into the ref is the ONLY thing that happens outside the
