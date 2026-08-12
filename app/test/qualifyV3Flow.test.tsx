@@ -32,6 +32,7 @@ import {
   NO_FACILITY_NARROW,
   UNRESOLVABLE_COPY,
   answerableCarriers,
+  carrierResolutionFor,
   deriveStage,
   liveSentenceFor,
   orderedCandidates,
@@ -583,6 +584,98 @@ test('an auto-resolve NEVER writes payerPick — only the operator can, via paye
   // The operator's own pick of the SAME carrier is a different state, and must stay distinguishable
   // from the resolution above — that difference is what `carrierAutoResolved` carries to the screen.
   assert.equal(shellReducer(INITIAL_SHELL_STATE, { type: 'payer_picked', payer: 'Aetna' }).payerPick, 'Aetna');
+});
+
+// ── THE OVERRIDE PATH: reopening the question must UNRESOLVE it (Qodo on PR #204) ─────────────────
+//
+// The defect the stage parameter exists to prevent. `stage` is `backTo ?? derived`, and the new
+// "Pick a carrier" revisit dispatches `went_back{target:'payer'}` — which clears the reducer's
+// `payerPick` and sets `backTo`, leaving `payerGroups` untouched. The shell computed the auto-resolve
+// from `payerPick`/`payerGroups` alone, ~120 lines above where `stage` was computed, so on the
+// override path the carrier question was back on screen while the derivation still reported a
+// resolved carrier — and that value went downstream as `payerPick`. The operator pressed
+// "Pick a carrier" and the surface answered it for them again.
+test('reopening the carrier question withdraws the auto-resolve — no derived pick, no flag', () => {
+  const groups = payerGroupsOf(deadEndCarriers());
+
+  // The plan stage: the resolution is real and stated.
+  const onPlan = carrierResolutionFor({ stage: 'plan', payerPick: null, skipped: false, payerGroups: groups });
+  assert.deepEqual(onPlan, { effectivePick: 'Aetna', autoResolved: true });
+
+  // ⚠ THE FIX. `went_back{target:'payer'}` → payerPick=null, backTo='payer' → stage='payer'. The
+  // question is open, so NOTHING may claim a carrier: no pick to send downstream as payerPick (the
+  // receipt would record a decision), and no flag (the banner would explain a screen that is not up).
+  const reopened = carrierResolutionFor({ stage: 'payer', payerPick: null, skipped: false, payerGroups: groups });
+  assert.deepEqual(
+    reopened,
+    { effectivePick: null, autoResolved: false },
+    'the carrier stage is the question being open — it cannot also be answered',
+  );
+
+  // And the reducer really does produce that state, so the case above is reachable and not theoretical.
+  const back = shellReducer(
+    { ...INITIAL_SHELL_STATE, payerPick: 'Aetna' },
+    { type: 'went_back', target: 'payer' },
+  );
+  assert.equal(back.payerPick, null, 'went_back to payer clears the operator pick');
+  assert.equal(back.backTo, 'payer', 'and pins the stage to the carrier question');
+  assert.deepEqual(
+    carrierResolutionFor({ stage: back.backTo, payerPick: back.payerPick, skipped: back.skipped, payerGroups: groups }),
+    { effectivePick: null, autoResolved: false },
+  );
+});
+
+test('carrierResolutionFor: the operator pick always wins and is never called auto-resolved', () => {
+  const groups = payerGroupsOf(deadEndCarriers());
+  for (const stage of ['identify', 'payer', 'plan', 'answer'] as const) {
+    assert.deepEqual(
+      carrierResolutionFor({ stage, payerPick: 'SADDLEBACK', skipped: false, payerGroups: groups }),
+      { effectivePick: 'SADDLEBACK', autoResolved: false },
+      `stage=${stage}: an explicit pick is the operator's, even for a no-history carrier`,
+    );
+  }
+});
+
+test('carrierResolutionFor: a carrier scope is in force only on plan and answer', () => {
+  const groups = payerGroupsOf(deadEndCarriers());
+  const at = (stage: FlowStage) => carrierResolutionFor({ stage, payerPick: null, skipped: false, payerGroups: groups });
+  // `identify` has not reached the question; `payer` IS the question.
+  assert.deepEqual(at('identify'), { effectivePick: null, autoResolved: false });
+  assert.deepEqual(at('payer'), { effectivePick: null, autoResolved: false });
+  assert.deepEqual(at('plan'), { effectivePick: 'Aetna', autoResolved: true });
+  assert.deepEqual(at('answer'), { effectivePick: 'Aetna', autoResolved: true });
+});
+
+test('carrierResolutionFor: a skip is never overwritten by an auto-resolve', () => {
+  // A skip put `payerScope: 'all'` on the wire. Resolving to one carrier would contradict the request
+  // the operator actually made, and `skipped` un-sets only by a plan pick or a step back.
+  const groups = payerGroupsOf(deadEndCarriers());
+  assert.deepEqual(
+    carrierResolutionFor({ stage: 'answer', payerPick: null, skipped: true, payerGroups: groups }),
+    { effectivePick: null, autoResolved: false },
+  );
+});
+
+test('carrierResolutionFor: a sole carrier is not an auto-resolve — nothing was eliminated', () => {
+  // One cluster means the question was never askable; the existing sole-carrier copy owns that case,
+  // and claiming "resolved for you — the others have no history" would name others that do not exist.
+  const soleCarrier = fixture({
+    candidates: {
+      total: 2,
+      chosenIndex: 0,
+      wasAmbiguous: true,
+      chosenBy: 'user',
+      rejected: [
+        { canonicalPayerId: 'pi_aetna', payerDisplayName: 'Aetna', employerLabel: 'ACME CO', funding: null, planType: null, memberCount: 9, hasClaimEvidence: true },
+      ],
+    },
+  });
+  const groups = payerGroupsOf(soleCarrier);
+  assert.equal(groups.length, 1, 'one cluster');
+  assert.deepEqual(
+    carrierResolutionFor({ stage: 'plan', payerPick: null, skipped: false, payerGroups: groups }),
+    { effectivePick: null, autoResolved: false },
+  );
 });
 
 test('the auto-resolve STATES itself on the plan stage, names the window, and offers the way back', () => {

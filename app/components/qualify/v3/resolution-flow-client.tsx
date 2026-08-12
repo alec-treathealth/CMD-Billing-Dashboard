@@ -76,7 +76,7 @@ import {
   isRefetching,
   orderedCandidates,
   payerGroupsOf,
-  soleAnswerableCarrier,
+  carrierResolutionFor,
   ResolutionStages,
   scopeKeyOf,
   scopeSourceOf,
@@ -281,6 +281,27 @@ export function ResolutionFlowClient({
     [state.resolution],
   );
 
+  /* ── WHICH STAGE, FIRST — because the carrier derivation below DEPENDS on it ─────────────────────
+   *
+   * `payerGroups` is the SAME memoized set the rail, receipt and tiles read (see the useMemo above).
+   * Passing it here is what makes "which stage are we on" and "how many carriers does the rail show"
+   * one derivation instead of two that happen to agree.
+   *
+   * ⚠ RAW `payerPick` HERE, NOT `effectivePick`, AND THE ASYMMETRY IS DELIBERATE. `deriveStage` is the
+   * STAGE authority and computes answerability itself, so handing it the already-composed pick would
+   * short-circuit its own answerable branch — the machine's resolution would then be decided here and
+   * merely ratified there, which is two derivations of one decision and exactly what threading
+   * `payerGroups` was meant to stop. The split that holds: `deriveStage` owns "which question is open",
+   * `carrierResolutionFor` owns "which carrier the screen is scoped to".
+   *
+   * ⚠ AND THIS BLOCK MOVED ABOVE THE CARRIER DERIVATION ON PURPOSE (Qodo on PR #204). It used to sit
+   * ~120 lines BELOW it, so the auto-resolve was computed without knowing the stage — and `stage` is
+   * `backTo ?? derived`, which is how the "Pick a carrier" revisit reopened the question while the
+   * derivation went on reporting it resolved. Order is load-bearing here; do not move it back. */
+  const derived = deriveStage({ resolution: state.resolution, payerPick, picked, skipped, payerGroups });
+  // The receipt's Change can only step BACKWARD from what is derivable; any submit clears it.
+  const stage: FlowStage = backTo ?? derived;
+
   /* ── THE AUTO-RESOLVED CARRIER (Design A, ratified 2026-08-11) ──────────────────────────────────
    * When exactly ONE cluster behind the token could answer the carrier question, `deriveStage` does
    * not ask it — and this is the value that makes that resolution real everywhere downstream instead
@@ -300,10 +321,14 @@ export function ResolutionFlowClient({
    * `carrierAutoResolved` is the one bit that says which of the two `effectivePick` came from. That
    * bit cannot be recovered downstream from the label alone — an operator may legitimately pick the
    * only answerable carrier by hand, and that is a different claim from the machine resolving to it —
-   * which is why it travels as its own prop rather than being re-derived per surface. */
-  const soleAnswerable = useMemo(() => soleAnswerableCarrier(payerGroups), [payerGroups]);
-  const carrierAutoResolved = payerPick === null && !skipped && payerGroups.length > 1 && soleAnswerable !== null;
-  const effectivePick = payerPick ?? (carrierAutoResolved ? (soleAnswerable?.payer ?? null) : null);
+   * which is why it travels as its own prop rather than being re-derived per surface.
+   *
+   * The composition itself lives in `carrierResolutionFor` (pure, exported, hermetically tested) —
+   * NOT inline here. Its docblock carries the stage-gate reasoning and the defect that produced it. */
+  const { effectivePick, autoResolved: carrierAutoResolved } = useMemo(
+    () => carrierResolutionFor({ stage, payerPick, skipped, payerGroups }),
+    [stage, payerPick, skipped, payerGroups],
+  );
 
   /** A new identify submit invalidates every downstream choice — clear them BEFORE dispatching to
    *  the server action. Capturing the term into the ref is the ONLY thing that happens outside the
@@ -409,21 +434,6 @@ export function ResolutionFlowClient({
   const onChange = useCallback((target: 'identify' | 'payer' | 'plan') => {
     dispatch({ type: 'went_back', target });
   }, []);
-
-  // `payerGroups` is the SAME memoized set the rail, receipt and tiles read (see the useMemo above).
-  // Passing it here is what makes "which stage are we on" and "how many carriers does the rail show"
-  // one derivation instead of two that happen to agree.
-  //
-  // ⚠ RAW `payerPick` HERE, NOT `effectivePick`, AND THE ASYMMETRY IS DELIBERATE. `deriveStage` is the
-  // STAGE authority and computes answerability itself, so handing it the already-composed pick would
-  // short-circuit its own answerable branch — the machine's resolution would then be decided here and
-  // merely ratified there, which is two derivations of one decision and exactly what threading
-  // `payerGroups` was meant to stop. The split that holds: `deriveStage` owns "which question is open",
-  // `effectivePick` owns "which carrier the screen is scoped to". They cannot disagree, because
-  // `effectivePick` is non-null in precisely the cases `deriveStage` declines to ask.
-  const derived = deriveStage({ resolution: state.resolution, payerPick, picked, skipped, payerGroups });
-  // The receipt's Change can only step BACKWARD from what is derivable; any submit clears it.
-  const stage: FlowStage = backTo ?? derived;
 
   // ── The pick→ranking bridge (review Critical 1) ────────────────────────────────────────────────
   // The pick is in VOB vocabulary; the snapshot's payerOverride is in claims vocabulary. The chosen

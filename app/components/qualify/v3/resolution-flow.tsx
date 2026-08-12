@@ -298,6 +298,57 @@ export function soleAnswerableCarrier(groups: readonly PayerGroup[]): PayerGroup
   return answerable.length === 1 ? (answerable[0] ?? null) : null;
 }
 
+/** Which carrier the SCREEN is scoped to, and whether the machine or the operator decided it. */
+export interface CarrierResolution {
+  /** The operator's own pick, or the machine's auto-resolve, or null. */
+  effectivePick: string | null;
+  /** True only when `effectivePick` is the MACHINE's ruling rather than the operator's choice. */
+  autoResolved: boolean;
+}
+
+/**
+ * COMPOSE "who picked the carrier" — the read-site half of Design A, as ONE pure function.
+ *
+ * ⚠ IT TAKES `stage`, AND THAT PARAMETER IS THE FIX FOR A REAL DEFECT (Qodo on PR #204, 2026-08-11).
+ * The shell used to compute the auto-resolve inline from `payerPick`/`payerGroups` alone, several
+ * dozen lines ABOVE where `stage` was computed. But `stage` is `backTo ?? derived`, and the new
+ * "Pick a carrier" revisit dispatches `went_back{target:'payer'}` — which clears the reducer's
+ * `payerPick` and sets `backTo`, leaving `payerGroups` untouched. So on the override path the carrier
+ * question was back ON SCREEN while the derivation still reported a resolved carrier, and that value
+ * went downstream as `payerPick`: the receipt recorded "Carrier — resolved for you" and the lane
+ * checklist printed a value under the step it was simultaneously rendering as the OPEN question.
+ * The operator pressed "Pick a carrier" and the surface answered it for them again.
+ *
+ * Taking `stage` as an input makes the ordering hazard unrepresentable rather than merely fixed: this
+ * cannot be called before the stage is known, so no future edit can reintroduce the read-before-derive
+ * that caused it. (A `backTo === 'payer'` guard in the shell would have fixed the same symptom while
+ * leaving the trap in place.)
+ *
+ * A CARRIER SCOPE IS ONLY IN FORCE ON `plan` AND `answer`. On `payer` the question is open by
+ * definition; on `identify` it has not been reached. Stating it as the positive set rather than as
+ * `!== 'payer'` also covers the `backTo === 'identify'` case, which is harmless today only because
+ * every downstream surface happens to gate on the stage as well.
+ */
+export function carrierResolutionFor(args: {
+  stage: FlowStage;
+  /** The REDUCER's pick — the operator's own choice, never a composed value. */
+  payerPick: string | null;
+  skipped?: boolean;
+  payerGroups: readonly PayerGroup[];
+}): CarrierResolution {
+  // The operator's own pick always wins and is never an auto-resolve, whatever the stage.
+  if (args.payerPick !== null) return { effectivePick: args.payerPick, autoResolved: false };
+  const carrierScopeInForce = args.stage === 'plan' || args.stage === 'answer';
+  // A skip decided the carrier question WIDE; resolving it to one carrier would contradict the
+  // all-payers request the skip put on the wire.
+  if (!carrierScopeInForce || args.skipped === true || args.payerGroups.length <= 1) {
+    return { effectivePick: null, autoResolved: false };
+  }
+  const sole = soleAnswerableCarrier(args.payerGroups);
+  if (sole === null) return { effectivePick: null, autoResolved: false };
+  return { effectivePick: sole.payer, autoResolved: true };
+}
+
 /**
  * Which stage the flow is on. PURE — the shell owns `payerPick` (client-side carrier choice) and
  * `picked` (the user submitted a plan). A sole candidate skips straight to the answer; a single
