@@ -2204,10 +2204,16 @@ export interface StageAnswerProps {
   snapshot: QualifySnapshot | null;
   snapshotError: string | null;
   /**
-   * The AI explainer, mounted by the SHELL — a slot, not an import, so this presentational module
-   * pulls in no `'use server'` dependency chain (gate → cookies → DB) and stays statically
-   * renderable in the hermetic tests. The shell passes `<QualifyAiPanel …autoAsk/>` once the
-   * snapshot lands; the plan-tile "Ask AI" drill-down arrives as that panel's autoAsk prop.
+   * The AI explainer — a SLOT, not an import, so this presentational module pulls in no `'use server'`
+   * dependency chain (gate → cookies → DB) and stays statically renderable in the hermetic tests.
+   * That reason is unchanged; only the consumer moved.
+   *
+   * ⚠ SHELL MODE FILLS THIS WITH `null` AS OF 2026-08-12 (Alec: the AI panel belongs in the "chat"
+   * column). The shell mounts `<QualifyAiPanel>` inside LaneRail instead, so ask and answer share a
+   * pane. The SINGLE-COLUMN path still fills the slot and renders it here, byte-identically.
+   * ⚠ NEVER FILL BOTH. `autoAskedRef` and `externalConsumedRef` are per-instance, so two mounts fire
+   * two audited, BILLED model calls per arm — and the audit row is written before the stream, so
+   * cancelling one does not undo it.
    */
   aiPanel: React.ReactNode;
   pending: boolean;
@@ -2292,7 +2298,7 @@ export interface StageAnswerProps {
    * trigger, clicking the same chip again is a no-op.
    *
    * ⚠ TWO RENDER SITES, ONE HANDLER (S5). It was minted for the `refreshFailed` banner's "Try
-   * again"; the NARROW SEARCH card's standing "Refresh the ranking" is the same call. Promoting it
+   * again"; the verdict card's standing "Refresh the ranking" is the same call. Promoting it
    * needed no second refetch path — `retry_requested` is the one reducer case that bypasses the
    * bail-out guard, so it fires with no error present and no input moved — and a second path would
    * be a second writer of the thing the fetch effect keys on.
@@ -2328,13 +2334,13 @@ export interface StageAnswerProps {
    */
   windowMove: WindowMove | null;
   /**
-   * Is the NARROW SEARCH card showing its FIELDS? The reducer's own bit (flow-state.ts invariant n),
-   * threaded rather than held locally: a Skip must land the card open and a plan pick must land it
-   * closed, and a `useState` in a component that needs `useActionState` is untestable.
+   * Is the verdict card showing its FIELDS? The reducer's own bit (flow-state.ts invariant n),
+   * threaded rather than held locally: a Skip must land the fields open and a plan pick must land
+   * them closed, and a `useState` in a component that needs `useActionState` is untestable.
    *
-   * ⚠ IT GATES THE CONTROLS, NEVER THE INVENTORY. The card's summary states the resolved scope and
-   * every facet's ON/OFF reading in BOTH positions — see the card itself for why that is not a style
-   * choice but the ratified promise.
+   * ⚠ IT GATES THE CONTROLS, NEVER THE INVENTORY — and as of 2026-08-12 that is structural rather
+   * than merely observed. The tag strip is PERMANENT on the verdict card; it no longer collapses
+   * with the fields, so this bit cannot reach the ON/OFF reading even by accident.
    */
   narrowExpanded: boolean;
   onToggleNarrow: () => void;
@@ -2355,9 +2361,13 @@ export interface StageAnswerProps {
  * match nothing.
  */
 /**
- * THE ONE EXPRESSION BEHIND EVERY MULTISELECT FACET'S BADGE — read by the row that carries the
- * controls AND by the NARROW SEARCH card's collapsed summary, which is the whole reason it exists as
- * a function rather than three copies of a ternary.
+ * THE ONE EXPRESSION BEHIND EVERY MULTISELECT FACET'S BADGE — read by `cardFacets`, which feeds the
+ * verdict card's permanent tag strip, and by the AREA line beside the grid. That is the whole reason
+ * it exists as a function rather than three copies of a ternary.
+ *
+ * ⚠ IT HAD A THIRD READER UNTIL 2026-08-12: the field rows carried their own badges beside their own
+ * controls, because the collapsed summary's strip vanished when they opened. The strip is permanent
+ * now, so those badges were duplicates and went — one reading, one place.
  *
  * Direct precedent, and it is not hypothetical: the AREA badge's denominator was computed a SECOND
  * way (`chips.length - 1`) and drifted from the list it claimed to count, with a `Math.max(1, …)`
@@ -2373,8 +2383,14 @@ export function facetReading(selected: readonly string[], optionCount: number): 
 function FacetState(props: { on: boolean; text: string }): React.ReactElement {
   return (
     <span
-      className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
-        props.on ? 'bg-teal50 text-teal700' : 'bg-ground text-ink600'
+      /* ⚠ THE BORDER IS THE BINARY (2026-08-12). Fill alone was two pale tints ~1.06:1 apart, and on
+         the verdict card's band wash the ON fill was byte-identical to the surface: `bg-teal50` is
+         #EAF4F2 and `IQ_BAND_WASH['50']` is #EAF4F2 — 1.000:1, an invisible chip on exactly the Solid
+         band in Alec's screenshot. A filled-teal-outline against a hairline-line outline survives
+         white, all five band washes, and grayscale. Text tokens unchanged — teal700 and ink600 both
+         clear AA on every one of them. */
+      className={`rounded-full border px-2 py-0.5 text-xs font-semibold ${
+        props.on ? 'border-teal500 bg-teal50 text-teal700' : 'border-line bg-ground text-ink600'
       }`}
     >
       {props.on ? 'On' : 'Off'} · {props.text}
@@ -2399,7 +2415,9 @@ function FilterLine(props: {
   return (
     <div data-v3-facet className="flex flex-wrap items-center gap-2">
       <span className="text-xs font-medium uppercase tracking-wide text-ink400">{props.label}</span>
-      <FacetState {...facetReading(props.selected, props.options.length)} />
+      {/* ⚠ NO `<FacetState>` HERE SINCE 2026-08-12 — the verdict card's tag strip is PERMANENT now, so
+          a badge on this row would print the same reading twice within 200px. The `data-v3-facet`
+          hook above stays: it is a reveal beat, not a badge. */}
       {props.options.map((o) => {
         const on = props.selected.includes(o.value);
         return (
@@ -2595,13 +2613,20 @@ export function AreaLine(props: {
  * member billed at LSMH and KWC"*, because the un-narrowed list is still in hand. Strictly more
  * information, zero extra round trips, and no refetch on toggle. See `gridNarrowEmptyCopy`.
  *
- * ⚠ IT RENDERS **BESIDE THE GRID WITH AREA**, NEVER ON THE NARROW SEARCH CARD (controller ruling
- * 2026-08-08, flagged to Alec). His earlier "folds into the card" wording yields to his later
- * fetched-set ruling plus the card's own documented rule — *everything on the control card re-issues
- * the ranking request, and this does not*. That rule is exactly why AREA was sorted out of the card
- * and kept out of `cardFacets`; a requestless field inside the card would either break it or force
- * it to be re-ruled. So the two beside-the-grid narrows sit together, and the card's tally NAMES
- * them rather than absorbing them.
+ * ⚠ IT RENDERS **BESIDE THE GRID WITH AREA**, NEVER ON THE SCOPE CARD (controller ruling 2026-08-08,
+ * flagged to Alec). His earlier "folds into the card" wording yields to his later fetched-set ruling
+ * plus the card's own documented rule — *everything on the control card re-issues the ranking
+ * request, and this does not*. That rule is exactly why AREA was sorted out of the card and kept out
+ * of `cardFacets`; a requestless field inside the card would either break it or force it to be
+ * re-ruled. So the two beside-the-grid narrows sit together, and the card NAMES them rather than
+ * absorbing them.
+ *
+ * ⚠ RESTATED 2026-08-12, NOT REVERSED — ITS COUNTERPARTY MOVED. This used to name "the NARROW SEARCH
+ * card", which no longer exists. The distinction is unchanged and is now expressed against the
+ * VERDICT CARD: the verdict card carries the four REQUEST-SCOPING facets, beside the number they
+ * scope; the grid carries the DISPLAY-ONLY narrows, beside the list they hide. Same rule, new
+ * counterparty. What was the card's TALLY is now the footnote clause "Plus the area narrow, beside
+ * the list."
  *
  * THE SHARED PICKER, IN CLIENT MODE. `MultiSelectTagPicker` is the same primitive Collections and the
  * v2 tab render; the vocabulary is 47 options, small enough to load once and filter locally, so no
@@ -3026,12 +3051,16 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
    * that only ever costs and never pays. */
   const preface = snap === null ? null : memberPrefaceFor(snap.memberCount, snap.facilities.length);
   /**
-   * ── THE NARROW SEARCH CARD'S FACETS, DERIVED ONCE ────────────────────────────────────────────
+   * ── THE VERDICT CARD'S FACETS, DERIVED ONCE ──────────────────────────────────────────────────
    *
-   * The card folds the answer stage's filter region behind a click (Alec, 2026-08-07). What may NOT
+   * The card folds the answer stage's filter FIELDS behind a click (Alec, 2026-08-07). What may NOT
    * go behind that click is the inventory: the ratified pattern doc's own words are "at the end show
-   * which filters are ON and which are OFF so they can toggle them", so the card's SUMMARY carries
-   * the ON/OFF reading in both positions and only the CONTROLS live in the disclosure.
+   * which filters are ON and which are OFF so they can toggle them", so the tag strip carries the
+   * ON/OFF reading and only the CONTROLS live in the disclosure.
+   *
+   * ⚠ AS OF 2026-08-12 THAT STRIP IS PERMANENT rather than collapsed-only — it no longer swaps out
+   * for the rows when the fields open, which is the strongest form of the same promise. The rows
+   * dropped their own badges in the same change; this derivation is now the ONLY badge source.
    *
    * ⚠ ONE DERIVATION, TWO RENDER SITES. The collapsed strip and the expanded rows read the SAME
    * `facetReading` on the SAME inputs — never a parallel count. That is not tidiness: the AREA
@@ -3071,7 +3100,10 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               ]
             : []),
         ];
-  const cardFacetsOn = cardFacets.filter((f) => f.on).length;
+  // `cardFacetsOn` lived here until 2026-08-12 and died with the tally sentence it fed
+  // ("N of these M switches on"). Not replaced: four tags are countable at a glance, and a derived
+  // count nothing renders is the kind of binding that gets re-wired to something it never meant.
+  // The COUNTS are still guarded — qualifyV3Flow.test.tsx counts the ON/OFF pills directly.
   /**
    * WHAT THE SEARCH RESOLVED TO, in one line, for the reader who never opens the card: plan-or-all-
    * plans, the billed-under scope, and the window. Three facts, three sources, none of them re-derived
@@ -3536,213 +3568,344 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
             </p>
           ) : null}
 
-          {/* ── THE NARROW SEARCH CARD (Alec, 2026-08-07) ────────────────────────────────────────
-              The answer stage's filter region folds into a card you click to expand. Two halves, and
-              which half a thing belongs in is decided by ONE rule:
 
-                  STATEMENTS GO IN THE SUMMARY · CONTROLS GO BEHIND THE CLICK.
+          {/* ── THE VERDICT CARD (Alec, 2026-08-12) ───────────────────────────────────────────────
+              ⚠ REVERSED 2026-08-12 (Alec, on two annotated screenshots of the live screen). The
+              dark-teal NARROW SEARCH card is GONE and this card absorbed it. Three rulings changed at
+              once; the chain matters more than any one link, so it is written out rather than
+              replaced.
 
-              ⚠ THE COLLAPSED SUMMARY *IS* THE INVENTORY, AND THAT IS NOT A STYLE CHOICE. The ratified
-              pattern doc records Alec's own words — "at the end show which filters are ON and which
-              are OFF so they can toggle them" — so a collapse may put the toggles behind a click but
-              may NOT put the on/off reading behind one. Collapsed, this card still carries the scope
-              it resolved to, the anyFacetOn sentence, a named ON/OFF badge per facet, and the tally.
-              Expanding swaps the badge strip for the rows that carry those same badges next to their
-              controls. Nothing about "which switches are on" ever costs a click.
+                · The card's sorting rule read: "STATEMENTS GO IN THE SUMMARY · CONTROLS GO BEHIND THE
+                  CLICK." That rule needed two halves of one card to sort between. There is one
+                  surface now, and the scope bar carries statements (the tags) and controls (Refresh,
+                  Filters) on the same line.
 
-              ⚠ THIS REVERSES THE COMMENT THAT STOOD HERE ONE DAY ("All visible, none behind a
-              dropdown"), which is recorded rather than deleted because that ruling was right for a
-              screen with no card and wrong for one with a summary that states what the fields hold.
+                · The card's ratified promise read: "⚠ THE COLLAPSED SUMMARY *IS* THE INVENTORY, AND
+                  THAT IS NOT A STYLE CHOICE. The ratified pattern doc records Alec's own words — 'at
+                  the end show which filters are ON and which are OFF so they can toggle them' — so a
+                  collapse may put the toggles behind a click but may NOT put the on/off reading
+                  behind one."
+                  THAT PROMISE IS STRENGTHENED, NOT ABANDONED. The strip is PERMANENT here — it no
+                  longer disappears when the fields open, which the old card did on the reasoning that
+                  the rows carried their own badges. Both halves of Alec's sentence now hold in every
+                  state: the on/off reading is always on screen, and the toggles are one click right.
+
+                · That comment itself recorded reversing "All visible, none behind a dropdown". This is
+                  the THIRD link, not a fresh start: no card → card with a summary → one card whose
+                  inventory is permanent.
+
+              WHAT THIS CARD IS. The hero row is unchanged: ONE number, patient-weighted, with its
+              basis stated. Beneath it the four REQUEST-SCOPING facets — Window, Funding, Employers,
+              Billed under — as permanent tags, the two controls that act on the request as a whole,
+              the statements that qualify the number, and the fields well behind one disclosure.
+
+              ⚠ AREA AND FACILITY MAY NEVER JOIN THE STRIP, and the reason survives the card that used
+              to carry it. These four are exactly the facets that RE-ISSUE the ranking request, which
+              is what makes them honest company for the number they scope. AREA and FACILITY hide rows
+              the ranking already returned; they do NOT move the hero, which is pinned byte-identical
+              by two tests. A fifth tag here would invite a reader to generalise from four to six and
+              read the number as narrowed. The footnote clause below ("Plus the area narrow, beside the
+              list.") is what points at them instead.
 
               ⚠ AND IT IS NOT A `<details>`. A closed <details> serializes its children, so the whole
               inventory would sit in the SSR string — every existing assertion green, the operator
               seeing none of it. The fields are CONDITIONALLY RENDERED and the tests assert their
               absence against an expanded positive control.
 
-              `data-v3-inventory` marks the card for the shell's reveal timeline and `data-v3-facet`
-              marks each beat — ON THE SUMMARY BADGES WHEN COLLAPSED, on the rows when expanded, so
-              the stagger has 5-6 beats in either position. Without that re-homing a collapse would
-              leave AREA as the only beat on the stage and `staggerDelayMs(0) === 0` would make the
-              reveal a silent no-op. The shell's layout effect keys on `[stage, hasSnapshot]` and this
-              bit is deliberately NOT added to it: `ctx.revert()` would replay the 14px stage rise and
-              re-hide the entire scorecard grid on every toggle. ── */}
+              `data-v3-inventory` bounds this card for the test helper; `data-v3-facet` marks each
+              reveal beat — the skip headline plus the four tags, five in every position, which is the
+              floor the stagger needs (`staggerDelayMs(0) === 0`, so a shrunken set degrades to a
+              silent no-op rather than an error). ── */}
           <section
+            /* THE MARKER FOLLOWS THE INVENTORY. `inventoryRegion()` (app/test/qualifyV3Flow.test.tsx)
+               hard-asserts this attribute exists before it can bound anything, and ~26 assertion
+               sites route through it. It moved here with the tags rather than being retired, so the
+               helper keeps bounding a REAL region — which is now the right one, since the tags, the
+               two controls and the fields all live on this card. */
             data-v3-inventory
-            aria-labelledby="qualify-narrow-heading"
-            className="relative isolate flex flex-col gap-3 rounded-xl px-4 py-3.5 shadow-ths-sm"
+            /* ⚠ `aria-labelledby` A REAL HEADING, NOT A BARE `aria-label` (review fix, 2026-08-12).
+               The deleted NARROW SEARCH card carried `<h3 id="qualify-narrow-heading">Narrow search`,
+               and the first draft of this card replaced it with `aria-label` alone. That names the
+               region but puts NO node in the heading outline — so on a page whose other two sections
+               are h3s ("Facilities, ranked", the book heading), heading navigation skipped straight
+               past the page's HEADLINE ANSWER to the list beneath it. The heading is `sr-only`
+               because the brief's whole point is that this card stops shouting; screen-reader users
+               get the outline back at zero visual cost. */
+            aria-labelledby="qualify-verdict-heading"
+            /* ⚠ NO `overflow-hidden` ON THIS SECTION OR ANY NEW WRAPPER INSIDE IT, EVER. The employer
+               type-ahead's dropdown is `absolute left-0 right-0 top-full z-50 max-h-64`
+               (multi-select-tag-picker.tsx) and it now opens inside this card. A clipping ancestor
+               cuts the matches off with nothing wrong in the DOM to notice — the post-mortem the
+               deleted card's `.q-subject` paint layer existed for. */
+            className="flex flex-col rounded-xl border border-line bg-surface shadow-ths-sm"
           >
-            {/* ⚠ THE SURFACE IS ITS OWN LAYER, AND THE REASON IS THE TYPE-AHEAD BELOW. `.q-subject`
-                and `overflow-hidden` used to sit on the <section>: the class paints the dark teal
-                gradient, and its `::after` is a coral glow positioned OUTSIDE the box (right:-40px,
-                top:-60px), so something has to clip it. But `overflow-hidden` on the card also clips
-                every absolutely-positioned DESCENDANT — and MultiSelectTagPicker's dropdown is one,
-                opening downward from a row near the card's bottom edge. That would have shipped a
-                type-ahead whose matches are cut off, with nothing wrong in the DOM to notice.
-                So the clip moved down onto a layer that holds nothing but paint. It is FIRST in DOM
-                order and every sibling below is `relative`, so painting order alone puts the content
-                above it — no z-index, no `isolate` dependency beyond the one already here. */}
-            <span aria-hidden className="q-subject absolute inset-0 overflow-hidden rounded-xl" />
-            {/* LIGHT-ON-DARK. `.q-subject` is the app's dark teal gradient band; every label on it is
-                the design system's blessed eyebrow at its dark-surface palette (teal200 on #0e3a3a
-                clears AA), and nothing here goes below `text-xs` — 13px in this config, which is the
-                house floor. */}
-            <div className="relative flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-              <h3 id="qualify-narrow-heading" className="text-xs font-semibold uppercase tracking-wide text-teal200">
-                Narrow search
-              </h3>
-              <div className="flex flex-wrap items-center gap-2">
-                {/* ── THE REFRESH CONTROL (S5, 2026-08-08) ────────────────────────────────────────
-                    ON THE CARD, and the card's own rule is exactly why: *everything on the control
-                    card re-issues the ranking request*, and this is the only thing here that does
-                    nothing BUT that. The same rule keeps the two grid narrows (area, facility)
-                    outside the card; this is it applied in the other direction.
+            {/* The heading the outline needs and the design does not. `h3` matches its two siblings
+                ("Facilities, ranked" and the book heading) — this card is a peer of those, not their
+                parent, and promoting it to h2 would put it under the board's own "This search" h2
+                twice over. Copy names what the card ANSWERS, not what it is made of. */}
+            <h3 id="qualify-verdict-heading" className="sr-only">
+              How this policy pays, and what the ranking is scoped to
+            </h3>
+            {/* ROW 1 — THE HERO. ONE number, patient-weighted, with its basis stated; the verdict WORD
+                beside the numeral still carries the meaning.
+                ⚠ IT IS NO LONGER ALONE ON ITS CARD (2026-08-12). It was "ONE number … with its basis
+                stated" and nothing else; the four facet tags, two controls and the fields well now
+                share the surface. The sentence is kept because it still describes THIS ROW, which is
+                the part that must not grow.
+                SUPPRESSED IN FLIGHT (rules e7e8a0e + 2654416): the numeral, the verdict word and the
+                basis are claims about the data — at zero rated facilities the basis literally reads
+                "no facility clears the sample floor", which is FALSE during a fetch. The dim treatment
+                is a marker calibrated for the grid's numbers; these sentences wait instead.
+                ⚠ THE WASH MOVED FROM THE CARD ONTO THIS ROW, and it is a correctness fix, not taste:
+                `bg-teal50` (FacetState's ON pill) is #EAF4F2 and `IQ_BAND_WASH['50']` is #EAF4F2 —
+                byte-identical, 1.000:1, an invisible chip on exactly the Solid band. The band still
+                means the NUMBER, so it now tints only the number's row and the tags below sit on
+                plain `bg-surface`. */}
+            <div
+              className="flex items-center gap-5 rounded-t-xl px-5 py-4"
+              style={!stale && rating?.band ? { backgroundColor: IQ_BAND_WASH[rating.band] } : undefined}
+            >
+              {stale ? (
+                // No numeral, no verdict, no basis — a wordless placeholder holds the footprint. It
+                // PULSES only while a fetch is genuinely running; after a failure it is static, for
+                // the same reason the progress beam is withheld — motion is a progress claim, and
+                // there is no progress to claim once the request has stopped.
+                <span
+                  aria-hidden
+                  className={`h-14 w-full max-w-sm rounded-lg bg-ground ${inFlight ? 'animate-pulse' : ''}`}
+                />
+              ) : (
+                <>
+                  {rating && rating.rating !== null ? (
+                    <span
+                      className="font-display text-6xl font-semibold tracking-tight"
+                      style={{ color: rating.band ? IQ_BAND_HEX[rating.band] : undefined }}
+                      aria-label={`policy rating ${rating.rating} out of 100`}
+                    >
+                      {rating.rating}
+                    </span>
+                  ) : (
+                    <span className="text-2xl font-semibold text-ink600">Not rated</span>
+                  )}
+                  <div className="flex flex-col gap-0.5">
+                    <span className="text-sm font-semibold text-ink900">{rating?.verdict ?? 'Not rated'}</span>
+                    <span className="text-xs text-ink600">{rating?.basis ?? 'no facility clears the sample floor'}</span>
+                    {rating && rating.rating !== null ? (
+                      /* THE RATED-FACILITY COUNT IS NOT REPEATED HERE (2026-08-12). `rating.basis` one
+                         line above already reads "patient-weighted across N rated facilities" — the
+                         same number, 12px away. `basis` is byte-pinned across two suites and is
+                         untouched; only the JSX duplicate went. */
+                      <span className="text-xs text-ink600">
+                        <span className="ths-num" aria-label={`${rating.patients} patients behind this rating`}>
+                          {rating.patients.toLocaleString()}
+                        </span>{' '}
+                        patients
+                      </span>
+                    ) : null}
+                  </div>
+                </>
+              )}
+            </div>
 
-                    IN THE HEADER ROW, so it survives the disclosure. The collapsed card is what an
-                    operator meets on every path except a Skip, and a refresh that costs a click to
-                    reach is a refresh nobody presses.
+            {/* ROW 2 — THE SCOPE BAR. The inventory and its two controls, on one line.
+                ⚠ OUTSIDE THE HERO'S STALE TERNARY, ON PURPOSE. The hero blanks to a wordless ghost on
+                every re-scope; the request-side facts (window, funding, employers) are still true
+                while a fetch runs, and a test asserts the Window tag survives a FAILED refetch. Only
+                BILLED UNDER is filtered out — its text is `snap.resolved.payerName`, a claim about
+                the set being REPLACED (rule 2654416), which is why its caption below has always been
+                suppressed in flight while its badge was not. That asymmetry was quiet on a separate
+                dark card; on a card whose every other element is a ghost it would put "BILLED UNDER
+                On · AETNA US HEALTHCARE" alone on a blank panel during a re-scope away from Aetna.
 
-                    ⚠ SAME HANDLER AS THE FAILURE BANNER'S "Try again", not a second one.
-                    `retry_requested` was always general — the one reducer case that bypasses the
-                    bail-out guard, so it fires with no error present and no input moved. A second
-                    refetch path would be a second writer of the value the fetch effect keys on,
-                    which is the shape `scopeKeyOf`'s header is a post-mortem of.
+                ⚠ GATED ON `refetching`, NOT ON `stale` — corrected in review before shipping, and the
+                distinction is the whole point of the rule it invokes. `stale` is
+                `refetching || staleAfterError || refreshing`. On `staleAfterError` NOTHING is being
+                replaced: the refetch failed, the previous ranking is still drawn, and the failure
+                banner says so in as many words — so `snap.resolved.payerName` is exactly the right
+                description of what is on screen, the billed-under CHIP row 200px below is still lit
+                for that same label, and blanking the tag would have contradicted both. Same for
+                `refreshing`, which is a SAME-scope re-run where the label cannot change. Rule 2654416
+                suppresses a claim about a set being REPLACED; only `refetching` is that state. */}
+            <div className="flex flex-col gap-2 border-t border-line px-5 py-3">
+              {/* The inventory's own sentence, shown only after a Skip — the state where "nothing is
+                  filtered" is a fact worth asserting rather than left to be read off unlit tags. It is
+                  also the FIFTH `data-v3-facet` beat: four tags plus this holds the skip reveal's
+                  stagger floor without manufacturing a beat. `anyFacetOn` deliberately counts the two
+                  BESIDE-THE-GRID narrows, which is what stops it contradicting a lit control one click
+                  away — do not narrow it to `cardFacets`. */}
+              {skipped && !stale ? (
+                <p data-v3-facet className="text-xs font-semibold text-ink900">
+                  {anyFacetOn
+                    ? 'Some narrows are on — anything marked Off is unrestricted.'
+                    : 'Nothing narrows this search but the window.'}
+                </p>
+              ) : null}
+              <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+                {/* ⚠ `role="group"` + name, because "Narrow search" stopped being visible copy. Without
+                    it a screen reader runs "policy rating 56 out of 100" straight into "WINDOW On ·
+                    automatic" with nothing separating the two claims. The accessible name is the
+                    deleted <h3>'s only surviving job.
+                    LABELS ARE `text-ink400`, NOT `text-teal200`: teal200 was the blessed eyebrow at the
+                    DARK-surface palette and measures 1.26-1.34:1 on a band wash. ink400 is the class
+                    the light fields well already uses for these same labels. */}
+                <div role="group" aria-label="Narrow search" className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                  {cardFacets
+                    .filter((f) => f.label !== 'Billed under' || !props.refetching)
+                    .map((f) => (
+                      <span key={f.label} data-v3-facet className="flex items-center gap-2">
+                        <span className="text-xs font-medium uppercase tracking-wide text-ink400">{f.label}</span>
+                        <FacetState on={f.on} text={f.text} />
+                      </span>
+                    ))}
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* ── THE REFRESH CONTROL (S5, 2026-08-08; re-homed 2026-08-12) ──────────────────
+                      ⚠ RE-HOMED 2026-08-12. It stood on the NARROW SEARCH card and the argument was
+                      "ON THE CARD, and the card's own rule is exactly why: everything on the control
+                      card re-issues the ranking request, and this is the only thing here that does
+                      nothing BUT that … IN THE HEADER ROW, so it survives the disclosure … a refresh
+                      that costs a click to reach is a refresh nobody presses."
+                      BOTH HALVES STILL HOLD, at the new address. It sits on the scope bar beside the
+                      four tags that name exactly what it re-issues, and outside the disclosure so it
+                      still costs no click. What changed is only that the card whose rule it invoked
+                      was deleted.
 
-                    ⚠ DISABLED WHILE IN FLIGHT, AND WHILE THE RESOLVE IS PENDING. Every press writes
-                    one `SEARCH_QUALIFY_PHI` row (the core audits BEFORE any data), and this repo has
-                    already treated duplicate audit rows from one user action as a defect worth its
-                    own fix (payerOverride.ts). `pending` is in the guard because the fetch effect
-                    returns early while the server action runs — a press there would arm the
-                    in-flight marker with no request behind it.
+                      ⚠ SAME HANDLER AS THE FAILURE BANNER'S "Try again", not a second one.
+                      `retry_requested` was always general — the one reducer case that bypasses the
+                      bail-out guard, so it fires with no error present and no input moved. A second
+                      refetch path would be a second writer of the value the fetch effect keys on.
 
-                    ⚠ `type="button"`. A submit would reach a form action and re-run
-                    `resolveCoverageAction`, which writes sixteen reducer fields and drops the
-                    operator back to the payer stage. Copy unratified. ── */}
-                <button
-                  type="button"
-                  onClick={props.onRetry}
-                  /* ⚠ `aria-disabled`, NOT THE REAL ATTRIBUTE (fix round M3). `disabled` makes the
-                     element unfocusable the instant it lands — so the control the operator is
-                     STANDING ON stops being focusable mid-press and focus falls to <body>, the exact
-                     regression the shell's focus effect exists to prevent one layer up; it is also
-                     not reliably announced. The REFUSAL moved into `makeRetryHandler`, where a
-                     second press during flight is a tested no-op rather than a browser side effect,
-                     and the visual treatment is unchanged. */
-                  aria-disabled={props.refreshing || props.pending}
-                  aria-busy={props.refreshing}
-                  className="flex items-center gap-1.5 rounded-full border border-teal200/40 bg-white/10 px-3 py-1 text-xs font-semibold text-white transition-colors hover:border-teal200 hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/60 aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
-                >
-                  <span aria-hidden className={props.refreshing ? 'animate-spin' : ''}>
-                    ↻
-                  </span>
-                  {props.refreshing ? 'Refreshing the ranking…' : 'Refresh the ranking'}
-                </button>
-                <button
-                  type="button"
-                  aria-expanded={props.narrowExpanded}
-                  aria-controls="qualify-narrow-fields"
-                  onClick={props.onToggleNarrow}
-                  className="flex items-center gap-1.5 rounded-full border border-teal200/40 bg-white/10 px-3 py-1 text-xs font-semibold text-white transition-colors hover:border-teal200 hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/60"
-                >
-                  {props.narrowExpanded ? 'Hide the fields' : 'Change these'}
-                  <span aria-hidden className={`text-teal200 transition-transform ${props.narrowExpanded ? 'rotate-180' : ''}`}>
-                    ▾
-                  </span>
-                </button>
+                      ⚠ DISABLED WHILE IN FLIGHT, AND WHILE THE RESOLVE IS PENDING. Every press writes
+                      one `SEARCH_QUALIFY_PHI` row (the core audits BEFORE any data), and this repo has
+                      already treated duplicate audit rows from one user action as a defect worth its
+                      own fix (payerOverride.ts).
+
+                      ⚠ `type="button"`. A submit would reach a form action and re-run
+                      `resolveCoverageAction`, which writes sixteen reducer fields and drops the
+                      operator back to the payer stage. ── */}
+                  <button
+                    type="button"
+                    onClick={props.onRetry}
+                    /* ⚠ `aria-disabled`, NOT THE REAL ATTRIBUTE. `disabled` makes the element
+                       unfocusable the instant it lands — so the control the operator is STANDING ON
+                       stops being focusable mid-press and focus falls to <body>. The REFUSAL lives in
+                       the handler, where a second press during flight is a tested no-op. */
+                    aria-disabled={props.refreshing || props.pending}
+                    aria-busy={props.refreshing}
+                    className="flex items-center gap-1.5 rounded-full border border-line bg-surface px-3 py-1 text-xs font-semibold text-ink600 transition-colors hover:border-teal200 hover:text-teal700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500 aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
+                  >
+                    <span aria-hidden className={props.refreshing ? 'animate-spin' : ''}>
+                      ↻
+                    </span>
+                    {props.refreshing ? 'Refreshing the ranking…' : 'Refresh the ranking'}
+                  </button>
+                  <button
+                    type="button"
+                    aria-expanded={props.narrowExpanded}
+                    aria-controls="qualify-narrow-fields"
+                    onClick={props.onToggleNarrow}
+                    className="flex items-center gap-1.5 rounded-full border border-line bg-surface px-3 py-1 text-xs font-semibold text-ink600 transition-colors hover:border-teal200 hover:text-teal700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500"
+                  >
+                    {/* "Change these" / "Hide the fields" until 2026-08-12 — vague about what it
+                        opened, on a control whose whole job is naming the four fields below it. */}
+                    {props.narrowExpanded ? 'Hide filters' : 'Filters'}
+                    <span aria-hidden className={`text-teal500 transition-transform ${props.narrowExpanded ? 'rotate-180' : ''}`}>
+                      ▾
+                    </span>
+                  </button>
+                </div>
               </div>
             </div>
 
-            {/* ── THE SUMMARY. Every line below is a STATEMENT about the search, which is why it is
-                here and not behind the disclosure. ── */}
-            <div className="relative flex flex-col gap-2">
-              {/* WHAT THE SEARCH RESOLVED TO, for the reader who never clicks. A categorical sentence
-                  about the data, so RULE 2654416 suppresses it in flight rather than letting it
-                  describe the set being replaced. */}
+            {/* ── THE WINDOW MOVED UNDER THE OPERATOR (S5) ──────────────────────────────────────
+                `scopeKeyOf` serializes the automatic case as the literal 'auto' and NOT the ladder's
+                chosen days, so a refresh that lands on a different rung leaves `loadedKey ===
+                scopeKey`: every staleness flag reads "nothing changed", the WINDOW tag above still
+                says "On · automatic", and the sentence below quietly renders a different number. That
+                is a scope change nobody is told about, on the surface this lineage exists to keep
+                honest.
+
+                ⚠ THREE GATES, AND EACH ONE IS A DIFFERENT FALSE SENTENCE IT PREVENTS.
+                  · `!stale` — RULE 2654416: a categorical claim about the data waits.
+                  · `windowDays === null` — it is a claim about the AUTOMATIC window. Rendered beside
+                    "Showing trailing 180 days — your selection" it would be two contradictory
+                    sentences about the same control.
+                  · `windowMove !== null` — THE NEGATIVE CONTROL. Most refreshes return the same rung;
+                    a notice that fired on every one would be noise, and noise is how the real one
+                    gets ignored.
+
+                ONE EXPRESSION, TWO CHANNELS: `liveSentenceFor` announces this exact string. ── */}
+            {/* [BOOK-LED EXEMPT: it describes the WINDOW the request used, not which list came back]
+                Both the member's footprint and the payer's book are loaded over the same chosen
+                window, so the sentence is true word for word in either mode. */}
+            {!stale && props.windowDays === null && props.windowMove !== null ? (
+              <p role="status" className="mx-5 mb-3 rounded-lg border border-teal200 bg-teal50 p-2.5 text-xs font-medium text-teal700">
+                {windowMoveNotice(props.windowMove)}
+              </p>
+            ) : null}
+
+            {/* ROW 3 — THE FOOTNOTES, STACKED.
+                ⚠ STACKED LINES, NOT ONE WRAPPING RUN-ON, AND THAT WAS A DELIBERATE REJECTION
+                (2026-08-12). Concatenating these four with mid-dots is ~400 characters of unrelated
+                prose wrapping unpredictably at 13px in the page's faintest ink; four lines each start
+                at a predictable left edge and can be found by position rather than by reading. It
+                would have reduced LINE COUNT, not wordiness — and it would have buried the file's only
+                `onClearFilters` call site mid-paragraph. Each line below is the ONLY channel for what
+                it says; none of them is the wordiness the brief is pointing at. */}
+            <div className="flex flex-col gap-1.5 border-t border-line px-5 py-3">
+              {/* WHAT THE SEARCH RESOLVED TO, for the reader who never opens the fields. Its plan half
+                  ("The plan you picked" / "All plans — no plan chosen") is the ONLY statement of that
+                  fact on the board — LaneReceipt carries it in the rail, in the other column and
+                  inside a scroller, so it is not a substitute here. A categorical sentence about the
+                  data, so RULE 2654416 suppresses it in flight. */}
               {stale || resolvedScopeSentence === null ? null : (
-                <p className="text-sm font-medium text-white">{resolvedScopeSentence}</p>
+                <p className="text-sm font-medium text-ink900">{resolvedScopeSentence}</p>
               )}
-              {/* The inventory's own sentence, shown only after a Skip — the state where "nothing is
-                  filtered" is a fact worth asserting rather than left to be read off unlit rows. */}
-              {skipped && !stale ? (
-                <p data-v3-facet className="text-xs font-semibold text-teal50">
-                  {/* ⚠ "EVERY SWITCH IS OFF" WAS FALSE ONE CLICK IN. Skip, then press "90 days": no
-                      filter is active, no label is scoped, so the old sentence claimed nothing was
-                      restricting the search — directly above a Window row reading "On · 90 days".
-                      Both halves were wrong at once. The window is a real narrowing that can never be
-                      turned off (see its FacetState), so the sentence names it as the standing
-                      exception instead of pretending the screen has none. */}
-                  {anyFacetOn
-                    ? 'Some switches are on — everything marked Off is unrestricted.'
-                    : 'No filters are on — apart from the window, nothing is narrowing this search. Turn any switch on to narrow it.'}
-                </p>
-              ) : null}
-              {/* GRANULAR suppression, honouring the RULE 2654416 ruling rather than blanketing it.
-                  The MANUAL variant ("— your selection") states the user's own action — a fact,
-                  allowed to speak immediately under the dim+beam marker (the standing ruling in the
-                  RULE 2654416 test). But the AUTO variants read the RENDERED snapshot's LADDER — a
-                  data claim about the set being replaced — so they wait like every other categorical
-                  sentence. And after a FAILED refetch (staleAfterError) the WHOLE sentence waits:
-                  there is no beam, the duration is unbounded post-F2, and the failure banner just
-                  said the content shows the previous scope — "Showing trailing 365 days" printed
-                  beside that banner would be a direct contradiction. The Window CHIPS stay behind the
-                  disclosure — they are the user's controls (and, after a failure, the escape route). */}
+              {/* GRANULAR suppression, honouring RULE 2654416 rather than blanketing it. The MANUAL
+                  variant states the user's own action — a fact, allowed to speak immediately under the
+                  dim+beam marker. The AUTO variants read the RENDERED snapshot's LADDER — a data claim
+                  about the set being replaced — so they wait. After a FAILED refetch the WHOLE sentence
+                  waits: the failure banner just said the content shows the previous scope.
+                  ⚠ THE ONLY PLACE THE CHOSEN DAY COUNT IS PRINTED. `resolvedScopeSentence` prints the
+                  MODE only, deliberately, and the WINDOW tag reads "On · automatic" — delete this and
+                  an operator on the automatic path cannot tell 30 days from 365. */}
               {props.staleAfterError || (inFlight && props.windowDays === null) ? null : (
-                <p className="text-sm text-teal50">{windowSentence(snap, props.windowDays)}</p>
+                <p className="text-xs text-ink600">{windowSentence(snap, props.windowDays)}</p>
               )}
+              {/* ── WHEN THIS DATA WAS BUILT (S5) ──────────────────────────────────────────────────
+                  ⚠ DIRECTLY REVERSED 2026-08-12. This read: "It sits in the summary rather than beside
+                  the button because it is a STATEMENT, and this card's one sorting rule is
+                  statements-in-the-summary / controls-behind-the-click." That rule needed a two-half
+                  card and there is one surface now, so the line and its button share the verdict card
+                  — which is arguably where it always belonged: it is the refresh control's own answer
+                  to "is this even going to be newer?", and it is the ONLY basis or freshness claim
+                  anywhere on /qualify.
 
-              {/* ── THE WINDOW MOVED UNDER THE OPERATOR (S5) ──────────────────────────────────────
-                  `scopeKeyOf` serializes the automatic case as the literal 'auto' and NOT the
-                  ladder's chosen days, so a refresh that lands on a different rung leaves
-                  `loadedKey === scopeKey`: every staleness flag reads "nothing changed", the facet
-                  badge above still says "On · automatic", and the sentence one line up quietly
-                  renders a different number. That is a scope change nobody is told about, on the
-                  surface this whole lineage exists to keep honest.
-
-                  ⚠ THREE GATES, AND EACH ONE IS A DIFFERENT FALSE SENTENCE IT PREVENTS.
-                    · `!stale` — RULE 2654416: it is a categorical claim about the data, so it waits
-                      like every other one rather than describing the set being replaced.
-                    · `windowDays === null` — it is a claim about the AUTOMATIC window. Rendered
-                      beside "Showing trailing 180 days — your selection" it would be two
-                      contradictory sentences about the same control. The reducer cannot know a
-                      manual selection arrived after the resolve, so the render decides.
-                    · `windowMove !== null` — THE NEGATIVE CONTROL. Most refreshes return the same
-                      rung; a notice that fired on every one would be noise, and noise is how the
-                      real one gets ignored.
-
-                  ONE EXPRESSION, TWO CHANNELS: `liveSentenceFor` announces this exact string. ── */}
-              {/* [BOOK-LED EXEMPT: it describes the WINDOW the request used, not which list came back]
-                  Both the member's footprint and the payer's book are loaded over the same chosen
-                  window, so the sentence is true word for word in either mode. */}
-              {!stale && props.windowDays === null && props.windowMove !== null ? (
-                <p role="status" className="rounded-lg border border-teal200/40 bg-white/10 p-2.5 text-xs font-medium text-white">
-                  {windowMoveNotice(props.windowMove)}
-                </p>
-              ) : null}
-
-              {/* ── WHEN THIS DATA WAS BUILT (S5) ─────────────────────────────────────────────────
-                  The refresh control's own basis line: what it is refreshing FROM. It sits in the
-                  summary rather than beside the button because it is a STATEMENT, and this card's
-                  one sorting rule is statements-in-the-summary / controls-behind-the-click.
-
-                  ⚠ NOT SUPPRESSED IN FLIGHT, unlike every sentence above it, and the exception is
+                  ⚠ NOT SUPPRESSED IN FLIGHT, unlike the sentences above it, and the exception is
                   principled rather than convenient: those describe the SET being replaced, this
-                  describes the PIPELINE. Blanking it during the very refresh it explains would
-                  remove the one line that answers "is this even going to be newer?" at the only
-                  moment the operator is asking.
+                  describes the PIPELINE. Blanking it during the very refresh it explains would remove
+                  the one line that answers "is this even going to be newer?" at the only moment the
+                  operator is asking.
 
                   `rebuiltAtSentence` owns the copy, the named timezone, and the argument for why
                   `max(ingested_at)` and `rollup_max_payment_date` are both disqualified. ── */}
               {/* [BOOK-LED EXEMPT: it dates the index rebuild, not the list that came back]
                   `facilities` and `bookFacilities` are two queries over one matview, so one rebuild
                   time is the honest answer in either mode. */}
-              <p className="text-xs text-teal200">{rebuiltAtSentence(props.dataRebuiltAt, { refreshFailed })}</p>
+              <p className="text-xs text-ink400">{rebuiltAtSentence(props.dataRebuiltAt, { refreshFailed })}</p>
               {/* THE PAYER-SCOPE CLAIM. "You picked this" / "your plan pick implies this" / "we
                   defaulted" are three different claims, and a REJECTED override must never render as
-                  honoured. It sits in the SUMMARY rather than beside its chips because it is a
-                  sentence about what the ranking IS, not a control — and because a caption that only
-                  appears once you open the card cannot do the job it exists for. SUPPRESSED IN FLIGHT
-                  (rule 2654416); the chips themselves stay live below, they are controls, not claims. */}
+                  honoured. All nine arms survive verbatim — including "Your selection.", which is NOT
+                  redundant with the BILLED UNDER tag: the tag prints the label, never HOW it was
+                  chosen.
+                  ⚠ UPHELD AT A NEW ADDRESS 2026-08-12. The argument was "a caption that only appears
+                  once you open the card cannot do the job it exists for", and it still governs: this
+                  renders outside the disclosure, above the fields, on every multi-payer snapshot.
+                  SUPPRESSED IN FLIGHT (rule 2654416) — and as of 2026-08-12 the BILLED UNDER tag is
+                  suppressed with it, closing an asymmetry that was quiet on a separate dark card and
+                  would be loud on a card whose every other element is a wordless ghost. */}
               {snap.payerOptions.length > 1 && !stale ? (
-                <p className="text-xs text-teal200">
+                <p className="text-xs text-ink400">
                   {billedUnderCaption({
                     skipped,
                     payerOverridden: snap.payerOverridden,
@@ -3751,61 +3914,28 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                   })}
                 </p>
               ) : null}
-
-              {/* ── THE ON/OFF STRIP, collapsed only. Expanded, each row states its own badge beside
-                  its own controls (which is strictly better — the state sits next to the thing that
-                  changes it), so rendering both would print the inventory twice. Each badge is a
-                  `data-v3-facet` beat: this is what keeps the skip reveal alive through the collapse.
-                  Values come from `cardFacets`, the SINGLE derivation the rows read too. ── */}
-              {props.narrowExpanded ? null : (
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                  {cardFacets.map((f) => (
-                    <span key={f.label} data-v3-facet className="flex items-center gap-2">
-                      <span className="text-xs font-medium uppercase tracking-wide text-teal200">{f.label}</span>
-                      <FacetState on={f.on} text={f.text} />
-                    </span>
-                  ))}
-                </div>
-              )}
-
-              {/* THE TALLY — the aggregate a reader takes in at a glance, beside the named strip that
-                  says WHICH. Derived by counting `cardFacets`, never a hand-written total: a facet
-                  that stops rendering (its options ran out, or a future ruling drops it) leaves the
-                  list and the tally together. WINDOW IS ALWAYS ON, so "1" is this card's honest floor
-                  rather than a bug — the headline sentence names that exception in words.
-
-                  ⚠ "OF THESE" IS LOAD-BEARING, AND SO IS THE AREA CLAUSE. This read a bare "1 on ·
-                  4 off", which is a claim about the SCREEN in a card that holds five of the screen's
-                  six facets. With an area narrow on and every in-card switch off, the card said
-                  "Some switches are on" and then counted one — the Window, which the headline's other
-                  arm explicitly discounts. Two live narrows, a tally of one, and nothing pointing at
-                  the one that is elsewhere.
-                  The fix is NOT to fold AREA into `cardFacets`: its control lives beside the grid it
-                  narrows and that placement is the honesty argument made in layout (see AreaLine).
-                  Instead the tally scopes its claim to this card ("of these") and NAMES the narrow
-                  that is not in it when that narrow is live. Wording is unratified — plain on purpose.
-
-                  ⚠ S4 MADE IT TWO. The facility narrow lands beside the area one, outside this card
-                  for the identical reason, so the clause ENUMERATES rather than counts: "plus 2
-                  narrows beside the list" is arithmetically honest and operationally useless — it
-                  sends an operator hunting for the second one. Naming both costs four words. */}
-              <p className="text-xs text-teal200">
-                <span className="font-semibold text-white">{cardFacetsOn} of these {cardFacets.length} switches on</span>
-                {areaActive && facilityNarrowActive
-                  ? ' · plus the area and facility narrows, beside the list'
-                  : areaActive
-                    ? ' · plus the area narrow, beside the list'
-                    : facilityNarrowActive
-                      ? ' · plus the facility narrow, beside the list'
-                      : ''}
-                {props.narrowExpanded ? '' : ' — open the fields to change any of them'}
-              </p>
-
-              {/* What the filters DID to the ranking — stated, never inferred. It is a STATEMENT, so
-                  it lives here; "Clear filters" rides with it because a narrow the operator cannot
-                  reach without first opening the card is a narrow that outlived its own reset. */}
+              {/* THE POINTER TO THE TWO NARROWS THAT ARE NOT TAGS HERE. All that survives of the tally
+                  (2026-08-12) — the count and "open the fields to change any of them" went, because
+                  four tags are countable at a glance and the disclosure is 40px to their right. This
+                  clause did NOT go: a four-tag strip on the page's one tinted card reads as a COMPLETE
+                  inventory of what is narrowing the answer, and with an area or facility narrow live it
+                  is not. Enumerated, never counted — "plus 2 narrows" is arithmetically honest and
+                  operationally useless; it sends an operator hunting for the second one. */}
+              {areaActive || facilityNarrowActive ? (
+                <p className="text-xs text-ink400">
+                  {areaActive && facilityNarrowActive
+                    ? 'Plus the area and facility narrows, beside the list.'
+                    : areaActive
+                      ? 'Plus the area narrow, beside the list.'
+                      : 'Plus the facility narrow, beside the list.'}
+                </p>
+              ) : null}
+              {/* What the filters DID to the ranking — stated, never inferred. "Clear filters" rides
+                  with it and stays OUTSIDE the disclosure: a narrow the operator cannot reach without
+                  first opening the fields is a narrow that outlived its own reset. This is the file's
+                  ONLY `onClearFilters` call site and the only channel for the 200-employer refusal. */}
               {filtersActive ? (
-                <p className="flex flex-wrap items-center gap-2 text-xs text-teal50">
+                <p className="flex flex-wrap items-center gap-2 text-xs text-ink600">
                   <span>
                     Ranking over {filteredCandidates.length} of {props.candidates.length} plans
                     {props.employerNarrowTooMany !== null
@@ -3816,7 +3946,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                   <button
                     type="button"
                     onClick={props.onClearFilters}
-                    className="rounded-full border border-teal200/50 px-2.5 py-0.5 font-semibold text-white hover:bg-white/15"
+                    className="rounded-full border border-line px-2.5 py-0.5 font-semibold text-teal700 hover:bg-teal50"
                   >
                     Clear filters
                   </button>
@@ -3824,20 +3954,26 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
               ) : null}
             </div>
 
-            {/* ── THE FIELDS. Conditionally rendered, so "collapsed" is a fact about the DOM and a
-                test can tell a hidden control from an absent one. They sit in a LIGHT WELL rather
-                than inheriting the dark palette, and that decision is now load-bearing rather than
-                merely conservative: the shared type-ahead below carries the dashboard's own light
-                tokens, so a dark well would have meant forking it.
+            {/* ── THE FIELDS. Conditionally rendered, so "collapsed" is a fact about the DOM and a test
+                can tell a hidden control from an absent one. They sit in a WELL rather than inheriting
+                the card's surface, and that decision is load-bearing rather than merely conservative:
+                the shared type-ahead below carries the dashboard's own light tokens.
 
-                THE HYBRID (Alec, 2026-08-07): short vocabularies stay counted chips (Window,
-                Funding, Billed under — every option visible, each with its own count and toggle),
-                long ones become the shared type-ahead (Employers, and Facility when Task 3 lands
-                beside it). Plan type is not here in either form; `AnswerFilters` records why. ── */}
+                THE HYBRID (Alec, 2026-08-07): short vocabularies stay counted chips (Window, Funding,
+                Billed under — every option visible, each with its own count and toggle), long ones
+                become the shared type-ahead (Employers). Plan type is not here in either form;
+                `AnswerFilters` records why.
+
+                ⚠ THE ROWS NO LONGER CARRY THEIR OWN `<FacetState>` (2026-08-12). The strip above is
+                PERMANENT now, so a badge here would print the inventory twice within 200px. The
+                `data-v3-facet` hooks STAY — they are reveal beats, not badges. This reverses the
+                2026-08-07 note that "each row states its own badge beside its own controls (which is
+                strictly better — the state sits next to the thing that changes it)": correct while the
+                strip disappeared on open, wrong once it cannot. ── */}
             {props.narrowExpanded ? (
               <div
                 id="qualify-narrow-fields"
-                className="q-narrow-fields relative flex flex-col gap-2.5 rounded-lg border border-line bg-surface px-3.5 py-3"
+                className="q-narrow-fields relative mx-5 mb-4 flex flex-col gap-2.5 rounded-lg border border-line bg-ground px-3.5 py-3"
               >
                 <div data-v3-facet className="flex flex-wrap items-center gap-2">
                   <span className="text-xs font-medium uppercase tracking-wide text-ink400">Window</span>
@@ -3846,7 +3982,6 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                       absence of one — so this reads "On · automatic" or "On · 90 days", never "Off". The
                       Collections model carries the same caveat (its 90-day recency chip is a real default
                       narrowing, captioned as "· Last 90 days" rather than hidden). */}
-                  <FacetState on text={props.windowDays === null ? 'automatic' : `${props.windowDays} days`} />
                   {WINDOW_CHOICES.map((d) => {
                     const active = props.windowDays === d;
                     return (
@@ -3893,12 +4028,15 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                     surfaces cannot drift into three employer controls. There was nothing to port and
                     nothing to fork — it already carries a Qualify-only `tone` prop.
 
-                    THE BADGE RIDES THE PICKER'S OWN LABEL ROW. This card's contract is that every
-                    facet states ON/OFF beside its own control, and the picker owns the only label
-                    this facet has; a second "Employers" heading above it would say the word twice to
-                    a screen reader. Same `facetReading` expression as every other badge — the
-                    collapsed summary reads it too, and one expression is what stops the two from
-                    drifting (see `cardFacets`).
+                    ⚠ THE BADGE NO LONGER RIDES THE PICKER'S LABEL ROW (2026-08-12). It did, and the
+                    argument was sound at the time: "this card's contract is that every facet states
+                    ON/OFF beside its own control, and the picker owns the only label this facet has;
+                    a second 'Employers' heading above it would say the word twice to a screen
+                    reader." That contract existed because the collapsed summary's strip DISAPPEARED
+                    when the fields opened, so the rows had to carry the reading themselves. The
+                    verdict card's strip is PERMANENT, so the row badge became the second copy — and
+                    the two-headings-to-a-screen-reader problem it was avoiding now argues the other
+                    way. One reading, on the strip, from the same `facetReading` expression.
 
                     `onClear` walks the selection through `onToggleFilter` rather than reaching for a
                     new reducer action. `filter_toggled` is the machine's ONLY facet-scoped write to
@@ -3908,7 +4046,6 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                   <div data-v3-facet>
                     <MultiSelectTagPicker
                       label="Employers"
-                      badge={<FacetState {...facetReading(props.filters.employers, facets.employers.length)} />}
                       placeholder="Type to find an employer…"
                       icon={<Briefcase className="h-3.5 w-3.5" aria-hidden />}
                       options={employerPickerOptions}
@@ -3933,10 +4070,6 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 {snap.payerOptions.length > 1 ? (
                   <div data-v3-facet className="flex flex-wrap items-center gap-2">
                     <span className="text-xs font-medium uppercase tracking-wide text-ink400">Billed under</span>
-                    <FacetState
-                      on={!allPayers}
-                      text={allPayers ? `all ${snap.payerOptions.length} labels` : (scopePayer ?? '1 label')}
-                    />
                     {snap.payerOptions.map((p) => {
                       // ⚠ COMPARE AGAINST THE SCOPE, NOT THE NAME. `resolved.payerName` is null under an
                       // all-payers ranking, so `=== p.payer` is false for every chip and none lights —
@@ -3969,59 +4102,11 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
             ) : null}
           </section>
 
-          {/* The hero: ONE number, patient-weighted, with its basis stated. The band wash sits
-              behind it (Phase 5); the verdict WORD beside the numeral still carries the meaning.
-              SUPPRESSED IN FLIGHT (rules e7e8a0e + 2654416): the numeral, the verdict word and the
-              basis are claims about the data — at zero rated facilities the basis literally reads
-              "no facility clears the sample floor", which is FALSE during a fetch. The dim treatment
-              is a marker calibrated for the grid's numbers; these sentences wait instead. */}
-          <div
-            className="flex items-center gap-5 rounded-xl border border-line bg-surface p-5 shadow-ths-sm"
-            style={!stale && rating?.band ? { backgroundColor: IQ_BAND_WASH[rating.band] } : undefined}
-          >
-            {stale ? (
-              // No numeral, no verdict, no basis — a wordless placeholder holds the footprint. It
-              // PULSES only while a fetch is genuinely running; after a failure it is static, for
-              // the same reason the progress beam is withheld — motion is a progress claim, and
-              // there is no progress to claim once the request has stopped.
-              <span
-                aria-hidden
-                className={`h-14 w-full max-w-sm rounded-lg bg-ground ${inFlight ? 'animate-pulse' : ''}`}
-              />
-            ) : (
-              <>
-                {rating && rating.rating !== null ? (
-                  <span
-                    className="font-display text-6xl font-semibold tracking-tight"
-                    style={{ color: rating.band ? IQ_BAND_HEX[rating.band] : undefined }}
-                    aria-label={`policy rating ${rating.rating} out of 100`}
-                  >
-                    {rating.rating}
-                  </span>
-                ) : (
-                  <span className="text-2xl font-semibold text-ink600">Not rated</span>
-                )}
-                <div className="flex flex-col gap-0.5">
-                  <span className="text-sm font-semibold text-ink900">{rating?.verdict ?? 'Not rated'}</span>
-                  <span className="text-xs text-ink600">{rating?.basis ?? 'no facility clears the sample floor'}</span>
-                  {rating && rating.rating !== null ? (
-                    <span className="text-xs text-ink600">
-                      <span className="ths-num" aria-label={`${rating.patients} patients behind this rating`}>
-                        {rating.patients.toLocaleString()}
-                      </span>{' '}
-                      patients ·{' '}
-                      <span className="ths-num" aria-label={`${rating.ratedCount} rated facilities`}>
-                        {rating.ratedCount}
-                      </span>{' '}
-                      rated facilities
-                    </span>
-                  ) : null}
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* The AI layer — preset chips, streamed answers, grounded in THIS snapshot. */}
+          {/* The AI layer — preset chips, streamed answers, grounded in THIS snapshot.
+              ⚠ SHELL MODE FILLS THIS SLOT WITH `null` AS OF 2026-08-12 (Alec: the AI panel belongs in
+              the "chat" column), so nothing renders here on that path — the shell mounts the panel in
+              LaneRail instead. The SINGLE-COLUMN path still fills the slot and renders it here,
+              byte-identically, which is why the line stays. */}
           {props.aiPanel}
 
           {/* The scorecard. Ranked; each card explains itself behind ONE disclosure. The AREA row
@@ -4073,9 +4158,10 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                 downward) belongs at the bottom edge of the row rather than above a chip wall.
 
                 ⚠ NO CLIPPING ANCESTOR HERE, AND THAT IS CHECKED RATHER THAN ASSUMED. The picker's
-                option list is absolutely positioned; the NARROW SEARCH card moved its
-                `overflow-hidden` down onto a paint-only layer for exactly that reason. This row sits
-                OUTSIDE that card, in the scorecard section, whose chain to `[data-v3-stage]` carries
+                option list is absolutely positioned; the deleted NARROW SEARCH card had to move its
+                `overflow-hidden` down onto a paint-only layer for exactly that reason, and the
+                verdict card that replaced it carries none at all. This row sits OUTSIDE that card,
+                in the scorecard section, whose chain to `[data-v3-stage]` carries
                 no `overflow-hidden` at all — verified 2026-08-08, and a future wrapper that adds one
                 would clip these matches with nothing wrong in the DOM to notice. ── */}
             {showAreaLine || showFacilityLine ? (

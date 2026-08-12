@@ -61,7 +61,8 @@ test('bookPlacementFor — three states, and the ORDER of the two questions is t
   // LEADING is asked FIRST: when the book leads it is not "also on screen", it IS the grid, and the
   // member ranking the model read is no longer drawn as a list at all. An implementation that asked
   // `bookIsOnScreen` first would answer 'secondary' for every book-led screen and the caption would
-  // point the reader at a list that is above them, not below.
+  // name the list the reader is NOT looking at. (The arms stopped naming a DIRECTION on 2026-08-12,
+  // when the panel moved into the lane rail — they name the list itself now.)
   assert.equal(bookPlacementFor(snap()), 'leading');
   assert.equal(bookPlacementFor(snap({ memberCount: 4 } as Partial<QualifySnapshot>)), 'secondary');
   assert.equal(bookPlacementFor(snap({ bookFacilities: null } as Partial<QualifySnapshot>)), 'none');
@@ -91,11 +92,15 @@ test('the two predicates travelled WITH the derivation, and still answer what th
 
 test('aiGroundingCaption — all three arms, and the two that are NOT the default are the point', () => {
   /* The payload is `snap.facilities.slice(0, 10)` in every mode — the identifier's own ranking, with
-   * an unchanged schema. So the caption's job is to name the list the model READ by its position
-   * relative to the one on screen, and each arm is false in the other two states. */
-  assert.match(aiGroundingCaption('none'), /grounded in the exact numbers on this screen/);
-  assert.match(aiGroundingCaption('secondary'), /in the ranking above, not the whole-book list below/);
-  assert.match(aiGroundingCaption('leading'), /in this member's own history, not the whole-book ranking above/);
+   * an unchanged schema. So the caption's job is to NAME the list the model READ, and each arm is
+   * false in the other two states. */
+  assert.match(aiGroundingCaption('none'), /grounded in the exact numbers in this search/);
+  assert.match(aiGroundingCaption('secondary'), /in the member ranking, not the whole-book list/);
+  assert.match(aiGroundingCaption('leading'), /in this member's own history, not the whole-book ranking/);
+  // ⚠ NO POSITIONAL WORDS (2026-08-12). The panel moved into the lane rail, so "above"/"below" are
+  // false — and below `xl` the rail stacks ABOVE the board, so no direction is safe at all.
+  assert.doesNotMatch(aiGroundingCaption('secondary'), /\b(above|below)\b/);
+  assert.doesNotMatch(aiGroundingCaption('leading'), /\b(above|below)\b/);
   // Every arm keeps the two clauses that are true regardless of placement.
   for (const p of ['none', 'secondary', 'leading'] as const) {
     assert.match(aiGroundingCaption(p), /^Preset questions only — /);

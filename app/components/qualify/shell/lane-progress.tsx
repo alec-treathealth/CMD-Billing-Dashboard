@@ -10,6 +10,10 @@
  *
  * WHY THESE ARE NOT ONE COMPONENT. They occupy different places in the rail's scroll — the stepper is
  * pinned above the fold, the receipt and feed scroll with the flow — so they cannot share a wrapper.
+ * ⚠ THAT SENTENCE WAS ASPIRATIONAL UNTIL 2026-08-12 AND IS NOW LITERAL. The rail had no fold: its
+ * root carried no height and its grid cell is `items-start`, so `flex-1` resolved to content height
+ * and lane-rail.tsx's `overflow-y-auto` could never produce a scrollbar. The sticky rail
+ * (`xl:max-h-[calc(100dvh-6rem)]`) bounded it, so there is a fold to be above.
  *
  * MOTION: no GSAP here. The stepper's fill and the receipt's tick are CSS transitions, which collapse
  * under the global `prefers-reduced-motion` reset in globals.css. The mock animates the feed lines in
@@ -129,6 +133,9 @@ export function LaneStepper({ steps }: { steps: readonly LaneStep[] }) {
  *
  * `title` names the lane rather than restating the search, because the head is the one line that
  * stays visible while the list scrolls.
+ * ⚠ TRUE SINCE 2026-08-12, ASPIRATIONAL BEFORE IT — and it is true only because the rail's head,
+ * lock strip and composer all gained `shrink-0` in the same change. Flex items default to
+ * `flex-shrink: 1`, so under the new max-height they would have compressed instead of pinning.
  */
 export function LaneReceipt({
   steps,

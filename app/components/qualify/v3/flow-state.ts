@@ -224,9 +224,14 @@
  *     inside the card's own summary, not a navigation, and moving the surface the operator is
  *     standing on is not a default either way.
  *     THE BIT IS PRESENTATION AND MUST STAY PRESENTATION: nothing in `scopeKeyOf` reads it, so like
- *     `area` it is structurally unable to reach a request. What it must never become is a gate on
- *     the ON/OFF inventory — the card's SUMMARY carries that in both states, and only the CONTROLS
- *     live behind the disclosure.
+ *     `area` it is structurally unable to reach a request.
+ *     ⚠ UPHELD AND STRENGTHENED 2026-08-12. This used to warn "what it must never become is a gate
+ *     on the ON/OFF inventory — the card's SUMMARY carries that in both states, and only the
+ *     CONTROLS live behind the disclosure." The NARROW SEARCH card was deleted and its tags moved
+ *     onto the verdict card, where the strip is PERMANENT rather than collapsed-only — so this bit
+ *     now gates the controls and NOTHING else, which is the strongest form of the same rule. It
+ *     still has exactly one writer (`narrow_toggled`, from the "Filters" disclosure on the verdict
+ *     card); a design that leaves it with no writer makes the four field groups unreachable forever.
  * o · `refreshingNonce` IS ARMED IN ONE PLACE AND CLEARED IN SIX — the stuck-flag post-mortem, run
  *     deliberately in reverse (S5, 2026-08-08). The refresh needs a progress signal that the derived
  *     trio structurally cannot give it: `stale`/`refetching`/`staleAfterError` all hang off
