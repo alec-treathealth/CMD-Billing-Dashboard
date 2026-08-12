@@ -36,13 +36,14 @@
  * PHI DISCIPLINE: nothing here touches PHI — stage names are literals, and the report carries
  * counts, timestamps and skip reasons only.
  */
+import { randomUUID } from 'node:crypto';
 import type { Db } from './db.js';
 import { CMD_PIPELINE, CMD_STAGES, planTick, type EtlStage, type StagePlan, type StageState } from './etlStages.js';
 
 /** Default wall-clock the tick may spend starting new stages. Under the 300s function ceiling. */
 export const DEFAULT_TICK_BUDGET_MS = 200_000;
-/** Default lease length. Longer than the budget so a slow final stage cannot lose its own lock. */
-export const DEFAULT_LEASE_MS = 290_000;
+/** Default lease length. Exceeds the 300s function ceiling with a buffer. */
+export const DEFAULT_LEASE_MS = 360_000;
 
 export interface StageOutcome {
   stage: string;
@@ -89,7 +90,10 @@ export async function runPipelineTick(deps: PipelineTickDeps): Promise<TickRepor
   const pipeline = deps.pipeline ?? CMD_PIPELINE;
   const budgetMs = deps.budgetMs ?? DEFAULT_TICK_BUDGET_MS;
   const leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS;
-  const holder = deps.holder ?? 'cron';
+  // The source label is deliberately reduced to the two server-controlled values, then made
+  // unique per invocation so an expired tick can never release a later tick's lease.
+  const holderKind = deps.holder === 'manual' ? 'manual' : 'cron';
+  const holder = `${holderKind}:${Date.now()}:${randomUUID()}`;
   const now = deps.now ?? (() => new Date());
 
   const startedMs = now().getTime();
@@ -191,7 +195,7 @@ export async function runPipelineTick(deps: PipelineTickDeps): Promise<TickRepor
     }
   } finally {
     // Always release, even on a thrown state write — a lease that outlives its tick would stall the
-    // pipeline for its full duration for no reason. `holder` scoping means a tick that already lost
+    // pipeline for its full duration for no reason. The unique holder means a tick that already lost
     // its lease to an expiry cannot clear somebody else's.
     await releaseLease(db, pipeline, holder);
   }

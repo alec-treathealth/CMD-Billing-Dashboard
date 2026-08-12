@@ -837,7 +837,7 @@ export function handlePipelineTick(req: PipelineTickHttpRequest) {
         runStage: async (stage) => {
           let runId: number | null = null;
           const opts: CronInvocationOptions = {
-            triggeredBy: holder === 'manual' ? 'tick-manual' : 'tick',
+            triggeredBy: holder.startsWith('manual:') ? 'tick-manual' : 'tick',
             onRunId: (id) => {
               runId = id;
             },
