@@ -41,6 +41,56 @@ test('the stepper says "skipped" in words, not only in colour', () => {
   assert.match(html, /current step/);
 });
 
+// ── 1b. THE AUTO-RESOLVED SIBLING (2026-08-11) ───────────────────────────────────────────────────
+//
+// The same 'skipped' state, a DIFFERENT reason, and — unlike the sole-carrier lane above — a real way
+// back: several carriers existed, so the machine's ruling is overridable and the rail must offer that.
+// `laneSteps` emits exactly this shape; `qualify-lane-steps.test.tsx` pins the derivation.
+const AUTO_RESOLVED_STEPS: LaneStep[] = [
+  { key: 'identify', label: 'Identify', question: 'Identify — who are we looking at?', state: 'done', meta: 'GGS•••', revisit: { to: 'identify', label: 'Change' } },
+  { key: 'payer', label: 'Carrier', question: 'Carrier — which is on the card?', state: 'skipped', meta: 'Only carrier with history', revisit: { to: 'payer', label: 'Pick a carrier' } },
+  { key: 'plan', label: 'Plan', question: 'Plan — which plan is it?', state: 'current', meta: null, revisit: null },
+  { key: 'answer', label: 'Answer', question: 'Answer — do they pay us, where?', state: 'pending', meta: null, revisit: null },
+];
+
+test('an auto-resolved carrier reaches the markup with its reason and its way back', () => {
+  const stepper = renderToStaticMarkup(<LaneStepper steps={AUTO_RESOLVED_STEPS} />);
+  assert.match(
+    stepper,
+    /Only carrier with history/,
+    'the WHY must be on the stepper — a step that vanished with no reason reads as an omission',
+  );
+  assert.doesNotMatch(
+    stepper,
+    /Only carrier on file/,
+    'and it must not borrow the sole-carrier wording, which would be false: others existed',
+  );
+  assert.match(stepper, /skipped — not asked/, 'still skipped, never done');
+
+  // ⚠ THE HATCH IS THE POINT IN SHELL MODE, where this checklist ABSORBS the chip row whose Carrier
+  // "Change" is the only other route back to the tiles. Without it the machine's ruling would be
+  // un-overridable here while the single-column path could still undo it.
+  //
+  // `onChange` is required for the control to render at all — absent it the checklist is a read-only
+  // record (see lane-progress.tsx:260), so omitting it here would have asserted against a surface that
+  // structurally cannot carry a button and proved nothing.
+  const checklist = renderToStaticMarkup(
+    <LaneReceipt steps={AUTO_RESOLVED_STEPS} title="t" onChange={() => {}} />,
+  );
+  assert.match(checklist, /Pick a carrier/, 'the operator can overrule the resolution');
+  assert.match(
+    checklist,
+    /Pick a carrier — Carrier — which is on the card\?/,
+    'and the accessible name says which question it reopens',
+  );
+});
+
+test('an auto-resolved carrier step is not ticked either', () => {
+  const html = renderToStaticMarkup(<LaneReceipt steps={AUTO_RESOLVED_STEPS} title="t" />);
+  assert.match(html, /border-dashed/);
+  assert.equal((html.match(/✓/g) ?? []).length, 1, 'one tick for the one genuinely answered question');
+});
+
 // ── 2. The checklist ────────────────────────────────────────────────────────────────────────────
 test('the checklist strikes through settled questions and leaves the open one plain', () => {
   const html = renderToStaticMarkup(<LaneReceipt steps={STEPS} title="Qualifying prefix GGS" />);
