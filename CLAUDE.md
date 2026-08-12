@@ -292,9 +292,9 @@ library from `../src` and is the Vercel app root.
 
 Two **separate** migration planes — never mix the directories:
 
-| Plane | Directory | Next number (as of 2026-08-10) |
+| Plane | Directory | Next number (as of 2026-08-12) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0098** — 0096 (manual deposits) applied live 2026-08-10 by a concurrent session, **file untracked**; **0097 (qualify watchers) APPLIED LIVE 2026-08-10**, ledger `20260810120258` |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0100** — re-derived from the live ledger 2026-08-12: **0098 (`manual_deposit_invoker_and_conflict`) APPLIED LIVE 2026-08-11**, ledger `20260811040852`, which is what made the previous "next = 0098" stale; **0099 (etl_run + pipeline_state) is authored on `feat/etl-pipeline-chain`**. 0096's file is now tracked (it was untracked when the collision note was written). |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **035** — 032/033/034 applied live 2026-08-10 |
 
 **0097 (Qualify watchers + recent searches) is APPLIED LIVE 2026-08-10** (ledger `20260810120258`),
@@ -501,12 +501,13 @@ Surfaces:
   `redirect('/')` stub. `<SearchConsole />` and the `/api/agent` path stay in git
   history; restoring means remounting the page *and* re-adding the nav entry.
 
-`app/vercel.json` declares **21 cron entries across 19 distinct routes**
-(`billing-audit-consolidated` runs on three schedules; the previous 19/17 count
-predated `facility-outcomes`, and `qualify-rating-history` is new on this branch):
+`app/vercel.json` declares **22 cron entries across 20 distinct routes**
+(`billing-audit-consolidated` runs on three schedules; the previous 21/19 count
+predated `pipeline-tick`):
 
 | Route | Cadence |
 |---|---|
+| `pipeline-tick` | every 5 min — **INERT** until `ETL_PIPELINE_ENABLED` is set |
 | `cmd-explorer` · `indigo-explorer` | hourly, :00 / :30 |
 | `cmd-census` · `indigo-census` | hourly, :15 / :35 |
 | `refresh-charge-rollup` | hourly, :45 |
@@ -543,6 +544,37 @@ predated `facility-outcomes`, and `qualify-rating-history` is new on this branch
 > applied conservatively rather than argued down. If the band is ever redefined as wall-clock-absolute
 > rather than CMD-scoped, these two need their own explicitly-scoped change; they are
 > production-critical and must not be moved as a drive-by.
+>
+> **`pipeline-tick` (every 5 min) is the third, and it is the first entry that lands in the band
+> BY DESIGN rather than by exception.** A 5-minute cadence necessarily fires at :45/:50/:55, so the
+> tick enforces the rule itself instead of dodging it in cron syntax: every stage carries a
+> `usesCmdApi` flag (`src/collections/etlStages.ts`), and inside :41–:59 the four CMD-calling stages
+> are held with reason `cmd_quiet_window` while the DB-only `refresh-charge-rollup` stage still runs.
+> That is the same CMD-scoped reading the two bullets above record, applied per-stage instead of
+> per-route — which is what it always meant.
+
+### The completion-chained ETL pipeline (built, shipped DISABLED)
+
+`/api/cron/pipeline-tick` runs the five CMD stages off `collections.pipeline_state` instead of off
+clock slots: a stage becomes due when its dependencies finish, not when the clock reaches its
+minute. It is **inert without `ETL_PIPELINE_ENABLED`**, and the five standalone entries above are
+still the production path. Three things to know before touching it:
+
+- **The DAG is a fork, not the chain the schedule implies.** Verified 2026-08-12 from
+  `pg_get_viewdef`: `cmd_explorer_charge_rollup` reads `cmd_explorer_rows` and nothing else, so
+  **explorers → rollup** — while both census stages write `cmd_charge_census`, which no stage in the
+  pipeline reads. **The census stages are NOT upstream of the rollup**, and encoding the :15/:35
+  clock order as a dependency would put a stage measured at 214s in the rollup's critical path for
+  no data reason. Sequencing between CMD stages is a *resource* mutex (one report at a time), which
+  the tick models separately from `dependsOn`.
+- **Don't cut over on these reserve numbers.** `etlStages.ts` reserves both explorer stages at the
+  full 300s ceiling because **no run log has ever existed for them** — that gap is exactly what
+  `collections.etl_run` (0099) was added to close. Removing the five cron entries is a follow-up PR
+  gated on a day of measured `etl_run` durations, not on a guess.
+- **`etl_run` writes are deliberately fail-soft; `pipeline_state` writes are deliberately fatal.**
+  The first is observability wrapping production-critical crons (a 42P01 before 0099 is applied must
+  not take down the ingest); the second is scheduling truth (a tick that cannot record "this ran"
+  would re-run stages against the CMD partner slot). Both headers say so — don't harmonise them.
 
 `/api/cron/qualify-census` was scheduled 2026-08-04 (hourly **:22**) in the
 explicitly-scoped Auth/LOS session the morning runbook reserved it for, after

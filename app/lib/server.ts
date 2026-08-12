@@ -273,6 +273,12 @@ import {
 } from '../../src/routes/refreshChargeRollupHandler.js';
 import { refreshChargeRollup } from '../../src/collections/refreshChargeRollup.js';
 import {
+  handlePipelineTickRequest,
+  type PipelineTickHttpRequest,
+} from '../../src/routes/pipelineTickHandler.js';
+import { runPipelineTick, DEFAULT_TICK_BUDGET_MS } from '../../src/collections/pipelineTick.js';
+import { withEtlRun, classifyCronResult } from '../../src/collections/etlRun.js';
+import {
   handleQualifyRatingHistoryRequest,
   type QualifyRatingHistoryHttpRequest,
 } from '../../src/routes/qualifyRatingHistoryHandler.js';
@@ -762,8 +768,18 @@ export function handleCmdPayerRefresh(req: CmdPayerRefreshHttpRequest) {
  * the durable, queryable freshness record that replaces the swallowed inline refresh (removed from
  * cmdExplorerCron). No PHI crosses this boundary; only non-PHI run stats are returned.
  */
-export function handleRefreshChargeRollup(req: RefreshChargeRollupHttpRequest) {
-  return handleRefreshChargeRollupRequest(req, {
+export function handleRefreshChargeRollup(
+  req: RefreshChargeRollupHttpRequest,
+  opts?: CronInvocationOptions,
+): Promise<{ status: number; body: unknown }> {
+  // Wrapped OUTSIDE the request handler, unlike the four CMD stages: this handler does its own
+  // 405/401 gating internally, so there is no seam between auth and work to slot the run row into.
+  // classifyCronResult still keys off the HTTP status, so a 401 would be recorded as an error — the
+  // one case where a rejected request produces a row. Acceptable here and not worth restructuring a
+  // production-critical handler for: this route is reached only by Vercel Cron and the tick, both of
+  // which carry the secret, so a 401 on it is a real misconfiguration worth seeing in the log.
+  return withStageRun('refresh-charge-rollup', opts, () =>
+    handleRefreshChargeRollupRequest(req, {
     secret: process.env.CRON_SECRET,
     refresh: async () => {
       const stats = await refreshChargeRollup({ db: rollupWriterDb(), triggeredBy: 'cron' });
@@ -786,7 +802,93 @@ export function handleRefreshChargeRollup(req: RefreshChargeRollupHttpRequest) {
       }
       return stats;
     },
+    }),
+  );
+}
+
+/**
+ * GET /api/cron/pipeline-tick — one slice of the completion-chained CMD pipeline.
+ *
+ * SHIPPED DISABLED (ETL_PIPELINE_ENABLED unset ⇒ no-op 200). The five standalone cron entries in
+ * app/vercel.json keep running exactly as they do today; this PR instruments and builds, and the
+ * cutover — deleting those five entries and setting the tick's real cadence — is a follow-up gated
+ * on a day of measured collections.etl_run durations. Do not enable it and delete the five in the
+ * same change: the tick's stage reserves are currently pessimistic placeholders, and the two
+ * explorer reserves are the full 300s function ceiling because nothing has ever timed them.
+ *
+ * runStage dispatches to the SAME exported handlers the standalone routes call, with
+ * triggeredBy: 'tick'. That is deliberate and is what keeps this PR honest about moving WHEN stages
+ * run and never WHAT they do — there is no second code path for a stage to drift down. Each handler
+ * re-checks the bearer itself, so the tick passes the secret through rather than bypassing auth.
+ *
+ * ROLES: lock/state/etl_run writes go through rollupWriterDb (cmd_rollup_writer, 0099 grants). The
+ * stages keep whatever roles they already use. No PHI crosses this boundary.
+ */
+export function handlePipelineTick(req: PipelineTickHttpRequest) {
+  const secret = process.env.CRON_SECRET;
+  return handlePipelineTickRequest(req, {
+    secret,
+    enabled: envFlagEnabled(process.env.ETL_PIPELINE_ENABLED),
+    tick: (holder) =>
+      runPipelineTick({
+        db: rollupWriterDb(),
+        holder,
+        budgetMs: envIntMs(process.env.ETL_PIPELINE_BUDGET_MS, DEFAULT_TICK_BUDGET_MS),
+        runStage: async (stage) => {
+          let runId: number | null = null;
+          const opts: CronInvocationOptions = {
+            triggeredBy: holder === 'manual' ? 'tick-manual' : 'tick',
+            onRunId: (id) => {
+              runId = id;
+            },
+          };
+          // The secret is re-presented because each handler gates independently — the tick is a
+          // caller, not a privileged bypass.
+          const cronReq = { method: 'GET', authorization: `Bearer ${secret ?? ''}` };
+          const result = await dispatchStage(stage, cronReq, opts);
+          return { ...result, runId };
+        },
+      }),
   });
+}
+
+/**
+ * Stage name -> the exact handler its standalone cron route calls. An unknown stage THROWS rather
+ * than silently succeeding: pipeline_state is seeded from migration 0099 and the stage list lives in
+ * etlStages.ts, so a name that reaches here without a handler is a wiring bug, and a tick that
+ * quietly advanced past it would mark a stage that never ran as 'ok'.
+ */
+function dispatchStage(
+  stage: string,
+  req: { method: string; authorization: string },
+  opts: CronInvocationOptions,
+): Promise<{ status: number; body: unknown }> {
+  switch (stage) {
+    case 'cmd-explorer':
+      return handleCmdExplorerCron(req, opts);
+    case 'indigo-explorer':
+      return handleIndigoExplorerCron(req, opts);
+    case 'cmd-census':
+      return handleCmdCensusCron(req, opts);
+    case 'indigo-census':
+      return handleIndigoCensusCron(req, opts);
+    case 'refresh-charge-rollup':
+      return handleRefreshChargeRollup(req, opts);
+    default:
+      throw new Error(`pipeline-tick: no handler wired for stage '${stage}'`);
+  }
+}
+
+/** Truthy env flag: '1' / 'true' / 'on' / 'yes'. Anything else (including unset) is off. */
+function envFlagEnabled(raw: string | undefined): boolean {
+  const v = raw?.trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'on' || v === 'yes';
+}
+
+/** Positive-integer ms env override; anything unparseable or <= 0 falls back to the default. */
+function envIntMs(raw: string | undefined, fallback: number): number {
+  const n = Number(raw?.trim());
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
 /**
@@ -855,6 +957,45 @@ export function handleQualifyRatingHistory(req: QualifyRatingHistoryHttpRequest)
  * tenant stamp, and (Indigo only) a row transform. Separate schedules keep the two off the shared
  * one-report-at-a-time CMD partner session (BXR :00, Indigo :30).
  */
+/**
+ * How a cron stage was invoked. Passed by the pipeline tick; the standalone Vercel cron routes omit
+ * it and get the 'cron' default, so their behaviour and their run rows are unchanged.
+ */
+export interface CronInvocationOptions {
+  /** 'cron' (a standalone Vercel entry), 'tick' (the pipeline) or 'manual'. Stored on etl_run. */
+  triggeredBy?: string;
+  /** Receives the etl_run row id, so the tick can link pipeline_state to the exact run. */
+  onRunId?: (runId: number | null) => void;
+}
+
+/**
+ * Wrap a cron stage's WORK (never its auth) in a collections.etl_run row.
+ *
+ * Placed inside each handler AFTER the 405/401 gates on purpose: a rejected request is not a stage
+ * invocation, and logging one would put unauthenticated probe traffic into the timing measurements.
+ *
+ * classifyCronResult is required because these handlers CATCH their own failures and return
+ * `{status: 500}` rather than throwing — without it every failed ingest would be recorded as a
+ * success. Every etl_run write is fail-soft (see etlRun.ts), so this wrapper cannot change what the
+ * wrapped stage does, and in particular cannot break the production crons before 0099 is applied.
+ */
+function withStageRun(
+  stage: string,
+  opts: CronInvocationOptions | undefined,
+  work: () => Promise<{ status: number; body: unknown }>,
+): Promise<{ status: number; body: unknown }> {
+  return withEtlRun(
+    {
+      db: rollupWriterDb(),
+      stage,
+      triggeredBy: opts?.triggeredBy ?? 'cron',
+      classify: classifyCronResult,
+      ...(opts?.onRunId ? { onRunId: opts.onRunId } : {}),
+    },
+    work,
+  );
+}
+
 async function handleExplorerCronForTenant(
   req: { method?: string; authorization?: string | null },
   tenant: {
@@ -871,6 +1012,7 @@ async function handleExplorerCronForTenant(
     /** Exact column-name set the report must project; omit to run unguarded. */
     expectedColumns?: readonly string[];
   },
+  opts?: CronInvocationOptions,
 ): Promise<{ status: number; body: unknown }> {
   // GET only — reject any other verb before touching auth or the live API.
   if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
@@ -881,6 +1023,7 @@ async function handleExplorerCronForTenant(
   if (!secret || !isAuthorized(req.authorization, secret)) {
     return { status: 401, body: { error: 'unauthorized' } };
   }
+  return withStageRun(tenant.label, opts, async () => {
   try {
     const transform = tenant.transformRows;
     const stats = await cmdExplorerCron({
@@ -906,13 +1049,14 @@ async function handleExplorerCronForTenant(
     console.error(`${tenant.label} cron failed:`, err instanceof Error ? err.message : String(err));
     return { status: 500, body: { error: 'cron_failed' } };
   }
+  });
 }
 
 /** BXR daily explorer cron (/api/cron/cmd-explorer). Roster = CMD_EXPLORER_CUSTOMERS (BXR's 15). */
-export function handleCmdExplorerCron(req: {
-  method?: string;
-  authorization?: string | null;
-}): Promise<{ status: number; body: unknown }> {
+export function handleCmdExplorerCron(
+  req: { method?: string; authorization?: string | null },
+  opts?: CronInvocationOptions,
+): Promise<{ status: number; body: unknown }> {
   return handleExplorerCronForTenant(req, {
     label: 'cmd-explorer',
     customers: CMD_EXPLORER_CUSTOMERS,
@@ -923,7 +1067,7 @@ export function handleCmdExplorerCron(req: {
     // DELETE, so the feed freezes (recoverable) instead of being overwritten with nulls (not).
     // If you deliberately add/remove a column in CMD, update BXR_REPORT_COLUMNS in the same change.
     expectedColumns: BXR_REPORT_COLUMNS,
-  });
+  }, opts);
 }
 
 /**
@@ -934,10 +1078,10 @@ export function handleCmdExplorerCron(req: {
  * aliasIndigoFacilityColumn maps it before mapping — the SAME transform the one-time seed used, so
  * cron re-pulls are fingerprint-idempotent (ON CONFLICT) against the loaded seed.
  */
-export function handleIndigoExplorerCron(req: {
-  method?: string;
-  authorization?: string | null;
-}): Promise<{ status: number; body: unknown }> {
+export function handleIndigoExplorerCron(
+  req: { method?: string; authorization?: string | null },
+  opts?: CronInvocationOptions,
+): Promise<{ status: number; body: unknown }> {
   return handleExplorerCronForTenant(req, {
     label: 'indigo-explorer',
     customers: INDIGO_CUSTOMERS,
@@ -949,7 +1093,7 @@ export function handleIndigoExplorerCron(req: {
     // while keeping 'Customer Name', so the guarded set is the report's columns PLUS that one.
     // Pinning it from an unverified list would break a currently-healthy feed, so Indigo stays
     // unguarded until its set is probed and committed as a deliberate change. Known gap.
-  });
+  }, opts);
 }
 
 /**
@@ -1011,6 +1155,7 @@ async function handleCensusCronForTenant(
     /** Exact column-name set the census report must project; omit to run unguarded. */
     expectedColumns?: readonly string[];
   },
+  opts?: CronInvocationOptions,
 ): Promise<{ status: number; body: unknown }> {
   if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
     return { status: 405, body: { error: 'method_not_allowed' } };
@@ -1019,6 +1164,7 @@ async function handleCensusCronForTenant(
   if (!secret || !isAuthorized(req.authorization, secret)) {
     return { status: 401, body: { error: 'unauthorized' } };
   }
+  return withStageRun(tenant.label, opts, async () => {
   try {
     assertRequiredEnvVars(tenant.label, tenant.requiredEnvVars);
     const stats = await cmdCensusCron({
@@ -1034,13 +1180,14 @@ async function handleCensusCronForTenant(
     console.error(`${tenant.label} cron failed:`, err instanceof Error ? err.message : String(err));
     return { status: 500, body: { error: 'cron_failed' } };
   }
+  });
 }
 
 /** BXR census cron (/api/cron/cmd-census). Roster = BXR_CUSTOMERS (BXR's 15). */
-export function handleCmdCensusCron(req: {
-  method?: string;
-  authorization?: string | null;
-}): Promise<{ status: number; body: unknown }> {
+export function handleCmdCensusCron(
+  req: { method?: string; authorization?: string | null },
+  opts?: CronInvocationOptions,
+): Promise<{ status: number; body: unknown }> {
   return handleCensusCronForTenant(req, {
     label: 'cmd-census',
     customers: BXR_CUSTOMERS,
@@ -1053,14 +1200,14 @@ export function handleCmdCensusCron(req: {
     // Must match the required-no-fallback throws inside cmdBxrCensusConfigFor. Keep in sync when
     // adding another env var to the BXR census config builder.
     requiredEnvVars: ['CMD_BXR_CENSUS_REPORT_ID', 'CMD_BXR_CENSUS_FILTER_ID'],
-  });
+  }, opts);
 }
 
 /** Indigo census cron (/api/cron/indigo-census). Roster = INDIGO_CUSTOMERS (29); facility-column alias. */
-export function handleIndigoCensusCron(req: {
-  method?: string;
-  authorization?: string | null;
-}): Promise<{ status: number; body: unknown }> {
+export function handleIndigoCensusCron(
+  req: { method?: string; authorization?: string | null },
+  opts?: CronInvocationOptions,
+): Promise<{ status: number; body: unknown }> {
   return handleCensusCronForTenant(req, {
     label: 'indigo-census',
     customers: INDIGO_CUSTOMERS,
@@ -1069,7 +1216,7 @@ export function handleIndigoCensusCron(req: {
     // Indigo deliberately still spreads cmdIndigoConfigFor's report (see the block comment above
     // requiredCensusReportId): only the filter is required-no-fallback here.
     requiredEnvVars: ['CMD_INDIGO_CENSUS_FILTER_ID'],
-  });
+  }, opts);
 }
 
 // --- ERA-confirmed upcoming payments (Overview tile, staging.era_835_payment) --------
