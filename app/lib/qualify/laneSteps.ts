@@ -83,6 +83,16 @@ export interface LaneStepsInput {
   resolution: QualifyResolution | null;
   /** Carrier clusters behind the identifier — the shell's memoized `payerGroupsOf` result. */
   carrierCount: number;
+  /**
+   * How many of those clusters could ANSWER the carrier question — `answerableCarriers`' count, i.e.
+   * clusters with a paid claim line in the resolve window (12 months by default).
+   *
+   * ⚠ IT IS A SEPARATE FIELD FROM `carrierCount` ON PURPOSE. The feed's "N carriers possible behind
+   * this search" is a true statement about the token's footprint and stays on `carrierCount`; whether
+   * the carrier step was ASKED is a statement about answerability and reads this. One number cannot
+   * carry both claims without overstating one of them.
+   */
+  answerableCount: number;
   /** The carrier the operator picked, or null (pre-pick, or a skip). */
   payerPick: string | null;
   /** True when the operator declined the carrier question — the all-payers scope. */
@@ -125,10 +135,18 @@ export function laneEchoLabel(echo: string): string {
  * the domain the two share. Do not "fix" a future pin failure by deleting that asymmetry.
  */
 export function laneSteps(input: LaneStepsInput): LaneStep[] {
-  const { stage, resolution, carrierCount, skipped } = input;
+  const { stage, resolution, carrierCount, answerableCount, skipped } = input;
   const idx = STEP_TEXT.findIndex((s) => s.key === stage);
   const soleCandidate = resolution !== null && resolution.candidates.total <= 1;
-  const soleCarrier = resolution !== null && carrierCount <= 1;
+  // ⚠ TWO WAYS THE CARRIER QUESTION GOES UNASKED, and both must read 'skipped' rather than 'done'
+  // (2026-08-11). One cluster existed, or several did and only ONE of them could answer — the
+  // auto-resolve. This mirrors `railStates`' predicate exactly, which is what the pin in
+  // `qualify-lane-steps.test.tsx` exists to enforce; changing it here alone fails that test loudly
+  // instead of letting the stepper and this checklist disagree.
+  const soleCarrier = resolution !== null && (carrierCount <= 1 || answerableCount === 1);
+  // The auto-resolve, as its own fact: several carriers existed and exactly one could answer. Distinct
+  // from `soleCarrier`, which is true for the sole-carrier case too — and only this one earns a hatch.
+  const autoResolvedCarrier = resolution !== null && carrierCount > 1 && answerableCount === 1;
 
   return STEP_TEXT.map((seg, i) => {
     const state: LaneStepState =
@@ -155,7 +173,7 @@ export function laneSteps(input: LaneStepsInput): LaneStep[] {
       question: seg.question,
       state,
       meta: metaFor(seg.key, state, input),
-      revisit: revisitFor(seg.key, state, skipped),
+      revisit: revisitFor(seg.key, state, skipped, autoResolvedCarrier),
     };
   });
 }
@@ -181,6 +199,16 @@ export function laneSteps(input: LaneStepsInput): LaneStep[] {
  * the operator back to a stage with a single chip and nothing to decide, which is precisely why the
  * chip row suppressed its Carrier entry on `payers.length > 1`.
  *
+ * ⚠ THE AUTO-RESOLVE IS A THIRD REASON, AND IT *DOES* EARN THE HATCH (2026-08-11). It is 'skipped'
+ * with `skipped === false`, so the rule above would have denied it one — and that rule's own
+ * justification does not reach this case: there ARE other carriers to go back to (that is what makes
+ * it an auto-resolve rather than a sole carrier), and the operator holding a card that says SADDLEBACK
+ * must be able to override a machine ruling. Denying it here would have made the resolution
+ * un-overridable in SHELL mode specifically, because there the lane checklist absorbs the chip row
+ * (`showLaneReceipt`) whose Carrier "Change" is the other way back — so the single-column path would
+ * have kept an escape the shell had lost. `payerCount > 1` is the discriminator, and it is the same
+ * fact `metaFor` reads to choose between its three labels.
+ *
  * ⚠ THE HATCH SAYS "Pick a carrier" AND TARGETS `payer`, AND THE TWO MUST KEEP MATCHING. It said
  * "Pick a plan" — inherited verbatim from the chip row's Scope entry — while landing the operator on
  * the CARRIER stage. Retargeting it to `plan` to match the old words is the wrong repair, and the
@@ -195,12 +223,22 @@ export function laneSteps(input: LaneStepsInput): LaneStep[] {
  *
  * "Pick a carrier", not "re-pick": under a skip there was no first pick to redo.
  */
-function revisitFor(key: LaneStepKey, state: LaneStepState, skipped: boolean): LaneRevisit | null {
+function revisitFor(
+  key: LaneStepKey,
+  state: LaneStepState,
+  skipped: boolean,
+  autoResolvedCarrier: boolean,
+): LaneRevisit | null {
   // Nothing follows the answer, so there is nowhere to go back to FROM it — and `onChange` has no
   // 'answer' target for the same reason.
   if (key === 'answer') return null;
   if (state === 'done') return { to: key, label: 'Change' };
   if (key === 'plan' && state === 'skipped' && skipped) return { to: 'payer', label: 'Pick a carrier' };
+  // "Pick a carrier", the same words the skip hatch uses, and for the same reason: under an
+  // auto-resolve there was no first pick to "change" either.
+  if (key === 'payer' && state === 'skipped' && autoResolvedCarrier) {
+    return { to: 'payer', label: 'Pick a carrier' };
+  }
   return null;
 }
 
@@ -213,7 +251,7 @@ function revisitFor(key: LaneStepKey, state: LaneStepState, skipped: boolean): L
  * appearing before the choice presents a guess as a decision.
  */
 function metaFor(key: LaneStepKey, state: LaneStepState, input: LaneStepsInput): string | null {
-  const { resolution, carrierCount, payerPick, skipped, policy } = input;
+  const { resolution, carrierCount, answerableCount, payerPick, skipped, policy } = input;
   if (state === 'pending' || resolution === null) return null;
   switch (key) {
     case 'identify':
@@ -222,7 +260,15 @@ function metaFor(key: LaneStepKey, state: LaneStepState, input: LaneStepsInput):
       return laneEchoLabel(resolution.handle.echo);
     case 'payer':
       if (skipped) return 'All carriers';
-      if (state === 'skipped') return carrierCount === 1 ? 'Only carrier on file' : 'Not asked';
+      // ⚠ THREE SKIP REASONS, THREE LABELS — the third is new (2026-08-11) and the label is the only
+      // place the rail can say WHY the question vanished. 'Only carrier on file' would be false (there
+      // were others) and 'Not asked' is true but mute, which on a step that silently disappeared reads
+      // as an omission rather than a ruling. "with history" carries the window implicitly, and the
+      // plan-stage header states the 12-month basis in full for the operator who wants the reason.
+      if (state === 'skipped') {
+        if (carrierCount === 1) return 'Only carrier on file';
+        return answerableCount === 1 ? 'Only carrier with history' : 'Not asked';
+      }
       return payerPick ?? (state === 'done' ? resolution.group.payerDisplayName : null);
     case 'plan':
       if (skipped) return 'All plans';
@@ -271,6 +317,17 @@ export function laneFeed(steps: readonly LaneStep[], input: LaneStepsInput): str
     lines.push(`Lane locked — answers now draw on ${payer.meta} matches only.`);
   } else if (input.skipped) {
     lines.push('Carrier skipped — the ranking covers every carrier behind this search.');
+  } else if (payer?.state === 'skipped' && input.carrierCount > 1 && input.answerableCount === 1) {
+    // ⚠ THE AUTO-RESOLVE GETS ITS OWN FEED LINE, and it is not the 'skipped' line above (2026-08-11).
+    // That one says the ranking covers EVERY carrier, which is the opposite of what happened here: the
+    // lane locked onto one carrier without the operator being asked. Falling through to it would have
+    // described an all-payers scope over a single-carrier ranking. `payer.meta` is the resolved label
+    // — read rather than re-derived, so the feed and the checklist name the same carrier.
+    const eliminated = input.carrierCount - 1;
+    lines.push(
+      `Lane locked on ${payer.meta} — the other ${eliminated} carrier${eliminated === 1 ? '' : 's'} ` +
+        'behind this search have no claim history in the last 12 months, so you were not asked.',
+    );
   }
   if (plan?.state === 'done' && plan.meta !== null) {
     lines.push(`Plan picked: ${plan.meta}.`);

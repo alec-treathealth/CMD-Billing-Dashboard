@@ -34,13 +34,21 @@ function resolutionWith(opts: { echo: string; candidates: number; payer?: string
   } as unknown as QualifyResolution;
 }
 
-const groupsOf = (n: number): PayerGroup[] =>
-  Array.from({ length: n }, (_, i) => ({ payer: `CARRIER ${i}` })) as unknown as PayerGroup[];
+/** N carriers, the first `answerable` of them carrying claim history. `hasClaimEvidence` is the whole
+ *  definition of answerable (see `answerableCarriers`), and `railStates` now reads it — so a fixture
+ *  that omitted it would silently make every carrier a dead end and the pin below would prove nothing
+ *  about the shapes that matter. */
+const groupsOf = (n: number, answerable = n): PayerGroup[] =>
+  Array.from({ length: n }, (_, i) => ({
+    payer: `CARRIER ${i}`,
+    hasClaimEvidence: i < answerable,
+  })) as unknown as PayerGroup[];
 
 const baseInput = (over: Partial<LaneStepsInput> = {}): LaneStepsInput => ({
   stage: 'identify',
   resolution: resolutionWith({ echo: 'GGS', candidates: 40 }),
   carrierCount: 4,
+  answerableCount: 4,
   payerPick: null,
   skipped: false,
   policy: null,
@@ -56,16 +64,28 @@ const STAGES = ['identify', 'payer', 'plan', 'answer'] as const;
 // checklist shows as never-asked.
 test('laneSteps agrees with railStates about every stage and every skip', () => {
   const shapes = [
-    { name: 'many carriers, many candidates', carriers: 4, candidates: 40 },
-    { name: 'sole carrier', carriers: 1, candidates: 40 },
-    { name: 'sole candidate', carriers: 4, candidates: 1 },
-    { name: 'sole carrier AND sole candidate', carriers: 1, candidates: 1 },
+    { name: 'many carriers, many candidates', carriers: 4, answerable: 4, candidates: 40 },
+    { name: 'sole carrier', carriers: 1, answerable: 1, candidates: 40 },
+    { name: 'sole candidate', carriers: 4, answerable: 4, candidates: 1 },
+    { name: 'sole carrier AND sole candidate', carriers: 1, answerable: 1, candidates: 1 },
+    // ── The 2026-08-11 shapes. Both are cases where the CARRIER COUNT alone is misleading, which is
+    // exactly where the two modules' separate predicates could drift apart.
+    { name: 'many carriers, ONE answerable (auto-resolve)', carriers: 4, answerable: 1, candidates: 40 },
+    { name: 'many carriers, NONE answerable (dead end)', carriers: 4, answerable: 0, candidates: 40 },
+    { name: 'many carriers, two answerable (a real question)', carriers: 4, answerable: 2, candidates: 40 },
   ];
   for (const shape of shapes) {
     for (const stage of STAGES) {
       const resolution = resolutionWith({ echo: 'GGS', candidates: shape.candidates });
-      const groups = groupsOf(shape.carriers);
-      const mine = laneSteps(baseInput({ stage, resolution, carrierCount: shape.carriers })).map((s) => s.state);
+      const groups = groupsOf(shape.carriers, shape.answerable);
+      const mine = laneSteps(
+        baseInput({
+          stage,
+          resolution,
+          carrierCount: shape.carriers,
+          answerableCount: shape.answerable,
+        }),
+      ).map((s) => s.state);
       const theirs = railStates(stage, resolution, groups);
       assert.deepEqual(
         mine,
@@ -106,6 +126,60 @@ test('each settled step names what was decided', () => {
   assert.equal(byKey('plan'), 'GOOGLE LLC');
   // The mock's "71 · Strong" — the verdict's band suffix ("· 65%+") is dropped for the rail's width.
   assert.equal(byKey('answer'), '71 · Strong');
+});
+
+// ── 3b. The auto-resolve: three skip reasons, three labels, and only one of them earns a hatch ────
+//
+// The defect this covers: `deriveStage` counted CLUSTERS, so a token carrying one real carrier plus
+// two 1-member no-history fragments put up a full carrier question the operator could only skip.
+// Auto-resolving is the fix; auto-resolving SILENTLY would have been a worse one.
+test('an auto-resolved carrier says WHY it was not asked, and is not called the only carrier', () => {
+  const steps = laneSteps(
+    baseInput({ stage: 'plan', carrierCount: 3, answerableCount: 1, payerPick: null }),
+  );
+  const payer = steps.find((s) => s.key === 'payer');
+  assert.equal(payer?.state, 'skipped', 'never "done" — the operator answered nothing here');
+  assert.equal(
+    payer?.meta,
+    'Only carrier with history',
+    'the label must distinguish an auto-resolve from a sole carrier and from a mute "Not asked"',
+  );
+});
+
+test('the three carrier-skip labels stay three distinct claims', () => {
+  const label = (carrierCount: number, answerableCount: number, skipped = false) =>
+    laneSteps(baseInput({ stage: 'plan', carrierCount, answerableCount, skipped }))
+      .find((s) => s.key === 'payer')?.meta ?? null;
+  assert.equal(label(1, 1), 'Only carrier on file', 'one carrier existed');
+  assert.equal(label(3, 1), 'Only carrier with history', 'three existed, one could answer');
+  // Zero answerable does NOT skip the question (deriveStage keeps asking), so reaching the plan stage
+  // with none answerable means the operator picked one — hence 'Not asked' is reached only via a
+  // sole-candidate skip, which is what this asserts is still intact.
+  assert.equal(
+    laneSteps(
+      baseInput({
+        stage: 'plan',
+        resolution: resolutionWith({ echo: 'GGS', candidates: 1 }),
+        carrierCount: 3,
+        answerableCount: 3,
+      }),
+    ).find((s) => s.key === 'payer')?.meta,
+    'Not asked',
+    'a sole CANDIDATE still skips the carrier question with no answerability claim attached',
+  );
+  assert.equal(label(3, 1, true), 'All carriers', "an operator's own skip still outranks everything");
+});
+
+test('an auto-resolved carrier can still be overridden — the hatch is not a sole-carrier hatch', () => {
+  // ⚠ THE SHELL DEPENDS ON THIS. There, the lane checklist ABSORBS the chip row, whose Carrier
+  // "Change" is the only other way back to the carrier tiles — so without a revisit here the machine's
+  // ruling would be un-overridable in shell mode while the single-column path could still undo it.
+  const auto = laneSteps(baseInput({ stage: 'plan', carrierCount: 3, answerableCount: 1 }));
+  assert.deepEqual(auto.find((s) => s.key === 'payer')?.revisit, { to: 'payer', label: 'Pick a carrier' });
+
+  // A SOLE carrier still gets none: going back would show one tile and nothing to decide.
+  const sole = laneSteps(baseInput({ stage: 'plan', carrierCount: 1, answerableCount: 1 }));
+  assert.equal(sole.find((s) => s.key === 'payer')?.revisit, null);
 });
 
 test('an unrateable book shows no number rather than a zero', () => {
@@ -192,6 +266,35 @@ test('a skipped carrier says the ranking went wide, not that a carrier was chose
   const lines = laneFeed(laneSteps(input), input);
   assert.ok(lines.some((l) => l.includes('every carrier')), 'the all-carriers scope must be stated');
   assert.ok(!lines.some((l) => l.includes('Lane locked')), 'nothing was locked — no carrier was picked');
+});
+
+test('an auto-resolved carrier gets its own feed line — never the all-carriers one', () => {
+  // ⚠ THE TWO LINES MAKE OPPOSITE CLAIMS. The skip line says the ranking covers EVERY carrier; the
+  // auto-resolve locked onto exactly one. Falling through to the skip line would have described an
+  // all-payers scope over a single-carrier ranking, in the one channel that narrates what happened.
+  const input = baseInput({ stage: 'plan', carrierCount: 3, answerableCount: 1, payerPick: null });
+  const lines = laneFeed(laneSteps(input), input);
+  const lock = lines.find((l) => l.includes('Lane locked'));
+  assert.ok(lock !== undefined, 'the lock must be narrated — an auto-resolve is not a no-op');
+  assert.match(lock, /Only carrier with history/, 'the line names the resolved carrier via the step value');
+  assert.match(lock, /other 2 carriers/, 'it says how many were eliminated');
+  assert.match(
+    lock,
+    /no claim history in the last 12 months/,
+    'the WINDOW is stated — hasClaimEvidence is 365-day scoped, so a bare "no claim history" overclaims',
+  );
+  assert.ok(
+    !lines.some((l) => l.includes('every carrier')),
+    'the all-carriers claim must not appear beside a single-carrier lock',
+  );
+});
+
+test('a dead-end set is not narrated as a lock — nothing was resolved', () => {
+  // Zero answerable keeps the carrier question open, so there is no lock to report and no skip either.
+  const input = baseInput({ stage: 'payer', carrierCount: 3, answerableCount: 0, payerPick: null });
+  const lines = laneFeed(laneSteps(input), input);
+  assert.ok(!lines.some((l) => l.includes('Lane locked')), 'no carrier was resolved');
+  assert.ok(!lines.some((l) => l.includes('every carrier')), 'and the operator has not skipped');
 });
 
 test('the feed is empty before anything resolves', () => {

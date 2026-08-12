@@ -31,11 +31,15 @@ import {
   windowMoveNotice,
   NO_FACILITY_NARROW,
   UNRESOLVABLE_COPY,
+  answerableCarriers,
+  carrierResolutionFor,
   deriveStage,
   liveSentenceFor,
   orderedCandidates,
   payerGroupsOf,
+  railStates,
   scopeSourceOf,
+  soleAnswerableCarrier,
   type AnswerFilters,
   type FlowStage,
   type OrderedCandidate,
@@ -117,7 +121,16 @@ function fixture(over: Partial<QualifyResolution> = {}): QualifyResolution {
           funding: null,
           planType: 'POS',
           memberCount: 4,
-          hasClaimEvidence: false,
+          // ⚠ `true`, AND IT WAS `false` UNTIL 2026-08-11 — the flip preserves this fixture's MEANING
+          // rather than changing it. `deriveStage` now counts ANSWERABLE carriers, so with Cigna at
+          // `false` this fixture had exactly one answerable cluster (Aetna) and would AUTO-RESOLVE:
+          // eleven `props('payer', …)` renders and three `deriveStage` assertions that exist to
+          // exercise "several carriers, so ask the question" would instead have been silently
+          // re-baselined onto the auto-resolve path, deleting the coverage they were written for.
+          // `fixture()` means "a genuinely ambiguous carrier question" everywhere it is used, so it
+          // now carries two answerable carriers and keeps meaning that. The dead-end shapes get their
+          // own fixtures below — `deadEndCarriers()` and `noAnswerableCarriers()`.
+          hasClaimEvidence: true,
         },
         {
           canonicalPayerId: 'pi_aetna',
@@ -180,6 +193,87 @@ function fixture(over: Partial<QualifyResolution> = {}): QualifyResolution {
 /** A sole-candidate resolution — skips straight to the answer stage. */
 const soleCandidate = () =>
   fixture({ candidates: { total: 1, chosenIndex: 0, wasAmbiguous: false, chosenBy: 'sole_candidate', rejected: [] } });
+
+/**
+ * THE DEFECT SHAPE, AS MEASURED (Alec's report, 2026-08-11). Three carrier clusters behind one token,
+ * and only ONE of them can answer anything: Aetna carries real history, while "AETNA /CAMH" and
+ * "SADDLEBACK" are 1-member / 1-plan / no-history fragments. Before the answerable-aware predicate
+ * this rendered a full three-tile carrier question whose only rational answer was to skip it.
+ *
+ * ⚠ "AETNA /CAMH" MUST NOT CLUSTER WITH "Aetna", or this fixture would be a 2-cluster one and prove
+ * nothing. `clusterCarriers` merges on text similarity but the CROSSWALK OUTRANKS IT — two
+ * confirmed-but-DIFFERENT `canonicalPayerId`s never merge (payerGroupsOf's own note) — so the
+ * distinct `pi_camh` id is what keeps them apart. The assertion in the auto-resolve tests re-checks
+ * the cluster count for exactly that reason: a fixture that quietly collapsed to two clusters would
+ * still "pass" the stage assertion for the wrong reason.
+ */
+const deadEndCarriers = () =>
+  fixture({
+    candidates: {
+      total: 3,
+      chosenIndex: 0,
+      wasAmbiguous: true,
+      chosenBy: 'user',
+      rejected: [
+        {
+          canonicalPayerId: 'pi_camh',
+          payerDisplayName: 'AETNA /CAMH',
+          employerLabel: null,
+          funding: null,
+          planType: null,
+          memberCount: 1,
+          hasClaimEvidence: false,
+        },
+        {
+          canonicalPayerId: 'pi_saddleback',
+          payerDisplayName: 'SADDLEBACK',
+          employerLabel: null,
+          funding: null,
+          planType: null,
+          memberCount: 1,
+          hasClaimEvidence: false,
+        },
+      ],
+    },
+  });
+
+/**
+ * NOTHING behind this token can answer — the chosen group has no history either. Distinct from
+ * `deadEndCarriers()` and deliberately NOT folded into it: "one obvious answer" and "no answer at
+ * all" are different states, and the whole point of the 2026-08-11 change is that the flow must not
+ * collapse them. Here `deriveStage` keeps asking the carrier question, because there is no cluster to
+ * resolve TO and machine-setting `skipped` would fake an operator act.
+ */
+const noAnswerableCarriers = () =>
+  fixture({
+    group: { ...fixture().group, claimEvidence: { ...fixture().group.claimEvidence, lines: 0 } },
+    candidates: {
+      total: 3,
+      chosenIndex: 0,
+      wasAmbiguous: true,
+      chosenBy: 'user',
+      rejected: [
+        {
+          canonicalPayerId: 'pi_camh',
+          payerDisplayName: 'AETNA /CAMH',
+          employerLabel: null,
+          funding: null,
+          planType: null,
+          memberCount: 1,
+          hasClaimEvidence: false,
+        },
+        {
+          canonicalPayerId: 'pi_saddleback',
+          payerDisplayName: 'SADDLEBACK',
+          employerLabel: null,
+          funding: null,
+          planType: null,
+          memberCount: 1,
+          hasClaimEvidence: false,
+        },
+      ],
+    },
+  });
 
 const noop = (): void => {};
 const noopAction = (_form: FormData): void => {};
@@ -368,6 +462,292 @@ test('deriveStage: a single carrier with many plans skips the payer stage, not t
   });
   assert.equal(payerGroupsOf(r).length, 1, 'one carrier');
   assert.equal(deriveStage({ resolution: r, payerPick: null, picked: false }), 'plan');
+});
+
+// ── THE ANSWERABLE-CARRIER PREDICATE (2026-08-11) ─────────────────────────────────────────────────
+//
+// The defect, measured live: `deriveStage` counted CLUSTERS, so a token carrying one real carrier plus
+// two 1-member/1-plan/no-history fragments ("AETNA /CAMH", "SADDLEBACK") put up a full three-tile
+// carrier question. The operator's only rational move was to skip it, and the reported session shows
+// exactly that — straight through to "All carriers · All plans, 4/4". A question whose extra options
+// cannot produce an answer is a click the surface charges for nothing.
+//
+// The fix must clear a HIGHER bar than "stop asking", and these tests are that bar: an auto-resolve
+// the operator cannot see is worse than a pointless question, because a narrowing nobody announced is
+// one nobody can overrule.
+
+test('answerableCarriers counts history, and nothing else — no member floor, no alias lookup', () => {
+  const groups = payerGroupsOf(deadEndCarriers());
+  assert.equal(groups.length, 3, 'three distinct clusters — the crosswalk keeps /CAMH off Aetna');
+  assert.deepEqual(
+    answerableCarriers(groups).map((g) => g.payer),
+    ['Aetna'],
+    'only the cluster with claim history can answer',
+  );
+  // ⚠ THE ONE-MEMBER CLUSTER IS THE POINT. 58.8% of prefixes are a single member, so a memberCount
+  // floor would have blinded the majority persona. A 1-member cluster WITH history is answerable.
+  const oneMemberWithHistory = fixture({
+    candidates: {
+      total: 2,
+      chosenIndex: 0,
+      wasAmbiguous: true,
+      chosenBy: 'user',
+      rejected: [
+        { canonicalPayerId: 'pi_cigna', payerDisplayName: 'Cigna', employerLabel: null, funding: null, planType: null, memberCount: 1, hasClaimEvidence: true },
+      ],
+    },
+  });
+  assert.equal(
+    answerableCarriers(payerGroupsOf(oneMemberWithHistory)).length,
+    2,
+    'a single member with history is answerable — the floor is history, not population',
+  );
+});
+
+test('deriveStage: exactly one answerable carrier AUTO-RESOLVES past the question it cannot ask', () => {
+  const r = deadEndCarriers();
+  assert.equal(payerGroupsOf(r).length, 3, 'three carriers exist…');
+  assert.equal(answerableCarriers(payerGroupsOf(r)).length, 1, '…and exactly one can answer');
+  assert.equal(
+    deriveStage({ resolution: r, payerPick: null, picked: false }),
+    'plan',
+    'the carrier question is not asked when only one carrier could have answered it',
+  );
+  assert.deepEqual(soleAnswerableCarrier(payerGroupsOf(r))?.payer, 'Aetna');
+});
+
+test('deriveStage: ZERO answerable carriers still ASK — a dead end is not an obvious answer', () => {
+  const r = noAnswerableCarriers();
+  assert.equal(answerableCarriers(payerGroupsOf(r)).length, 0);
+  assert.equal(
+    deriveStage({ resolution: r, payerPick: null, picked: false }),
+    'payer',
+    'there is no carrier to resolve TO, so the question stays open',
+  );
+  assert.equal(
+    soleAnswerableCarrier(payerGroupsOf(r)),
+    null,
+    'nothing to auto-resolve to — and null is what stops the shell composing a pick',
+  );
+});
+
+test('deriveStage: two answerable carriers keep the question, unchanged in shape', () => {
+  // `fixture()` is the ambiguous case (Aetna + Cigna, both with history) — the shape ~11 payer-stage
+  // renders in this file depend on. If this flips, those were re-baselined rather than preserved.
+  const groups = payerGroupsOf(fixture());
+  assert.equal(groups.length, 2, 'two carriers');
+  assert.equal(answerableCarriers(groups).length, 2, 'both answerable — a real question');
+  assert.equal(deriveStage({ resolution: fixture(), payerPick: null, picked: false }), 'payer');
+});
+
+test('an auto-resolve NEVER writes payerPick — only the operator can, via payer_picked', () => {
+  /* DESIGN A, RATIFIED: the reducer is untouched and the shell composes `payerPick ?? sole?.payer` at
+   * the read sites. This is the reducer half of that guarantee, and it is asserted as a SWEEP rather
+   * than as one action because the property that matters is universal: `payerPick` means "the OPERATOR
+   * chose this carrier", and every surface reading it — the checklist's `done`, the receipt's decision
+   * entry, `scopeSourceOf`'s 'user'/'pick'/'dominant' — is entitled to believe that. A later
+   * convenience effect dispatching one of these to "apply" an auto-resolve is exactly the regression
+   * this pins, and a single-action test would not have caught it. */
+  const groups = payerGroupsOf(deadEndCarriers());
+  assert.equal(soleAnswerableCarrier(groups)?.payer, 'Aetna', 'the machine has a resolution to apply…');
+
+  const everyActionButThePick: ShellAction[] = [
+    { type: 'search_submitted' },
+    { type: 'skipped' },
+    { type: 'plan_submitted' },
+    { type: 'went_back', target: 'identify' },
+    { type: 'went_back', target: 'payer' },
+    { type: 'plan_filter_changed', value: 'ACME' },
+    { type: 'filter_toggled', facet: 'funding', value: 'Self-Funded' },
+    { type: 'filters_cleared' },
+    { type: 'retry_requested' },
+    { type: 'snapshot_requested' },
+    { type: 'snapshot_failed' },
+    { type: 'ai_armed' },
+    { type: 'ai_disarmed' },
+    { type: 'payer_override_changed', label: 'AETNA US HEALTHCARE' },
+    { type: 'window_days_changed', days: 90 },
+    { type: 'area_selected', key: 'CA' },
+    { type: 'facility_narrow_toggled', value: 'f1' },
+    { type: 'narrow_toggled' },
+  ];
+  for (const action of everyActionButThePick) {
+    const next = shellReducer(INITIAL_SHELL_STATE, action);
+    assert.equal(next.payerPick, null, `${action.type} wrote payerPick — only the operator's pick may`);
+  }
+
+  // ⚠ AND `skipped` STAYS FALSE ON ITS OWN. The zero-answerable branch must not reach for the skip
+  // flag to get off the carrier stage: that flag is the operator's declared act (it sends
+  // `payerScope: 'all'` on the wire), so machine-setting it would fake a decision.
+  assert.equal(shellReducer(INITIAL_SHELL_STATE, { type: 'search_submitted' }).skipped, false);
+
+  // The operator's own pick of the SAME carrier is a different state, and must stay distinguishable
+  // from the resolution above — that difference is what `carrierAutoResolved` carries to the screen.
+  assert.equal(shellReducer(INITIAL_SHELL_STATE, { type: 'payer_picked', payer: 'Aetna' }).payerPick, 'Aetna');
+});
+
+// ── THE OVERRIDE PATH: reopening the question must UNRESOLVE it (Qodo on PR #204) ─────────────────
+//
+// The defect the stage parameter exists to prevent. `stage` is `backTo ?? derived`, and the new
+// "Pick a carrier" revisit dispatches `went_back{target:'payer'}` — which clears the reducer's
+// `payerPick` and sets `backTo`, leaving `payerGroups` untouched. The shell computed the auto-resolve
+// from `payerPick`/`payerGroups` alone, ~120 lines above where `stage` was computed, so on the
+// override path the carrier question was back on screen while the derivation still reported a
+// resolved carrier — and that value went downstream as `payerPick`. The operator pressed
+// "Pick a carrier" and the surface answered it for them again.
+test('reopening the carrier question withdraws the auto-resolve — no derived pick, no flag', () => {
+  const groups = payerGroupsOf(deadEndCarriers());
+
+  // The plan stage: the resolution is real and stated.
+  const onPlan = carrierResolutionFor({ stage: 'plan', payerPick: null, skipped: false, payerGroups: groups });
+  assert.deepEqual(onPlan, { effectivePick: 'Aetna', autoResolved: true });
+
+  // ⚠ THE FIX. `went_back{target:'payer'}` → payerPick=null, backTo='payer' → stage='payer'. The
+  // question is open, so NOTHING may claim a carrier: no pick to send downstream as payerPick (the
+  // receipt would record a decision), and no flag (the banner would explain a screen that is not up).
+  const reopened = carrierResolutionFor({ stage: 'payer', payerPick: null, skipped: false, payerGroups: groups });
+  assert.deepEqual(
+    reopened,
+    { effectivePick: null, autoResolved: false },
+    'the carrier stage is the question being open — it cannot also be answered',
+  );
+
+  // And the reducer really does produce that state, so the case above is reachable and not theoretical.
+  const back = shellReducer(
+    { ...INITIAL_SHELL_STATE, payerPick: 'Aetna' },
+    { type: 'went_back', target: 'payer' },
+  );
+  assert.equal(back.payerPick, null, 'went_back to payer clears the operator pick');
+  assert.equal(back.backTo, 'payer', 'and pins the stage to the carrier question');
+  assert.deepEqual(
+    carrierResolutionFor({ stage: back.backTo, payerPick: back.payerPick, skipped: back.skipped, payerGroups: groups }),
+    { effectivePick: null, autoResolved: false },
+  );
+});
+
+test('carrierResolutionFor: the operator pick always wins and is never called auto-resolved', () => {
+  const groups = payerGroupsOf(deadEndCarriers());
+  for (const stage of ['identify', 'payer', 'plan', 'answer'] as const) {
+    assert.deepEqual(
+      carrierResolutionFor({ stage, payerPick: 'SADDLEBACK', skipped: false, payerGroups: groups }),
+      { effectivePick: 'SADDLEBACK', autoResolved: false },
+      `stage=${stage}: an explicit pick is the operator's, even for a no-history carrier`,
+    );
+  }
+});
+
+test('carrierResolutionFor: a carrier scope is in force only on plan and answer', () => {
+  const groups = payerGroupsOf(deadEndCarriers());
+  const at = (stage: FlowStage) => carrierResolutionFor({ stage, payerPick: null, skipped: false, payerGroups: groups });
+  // `identify` has not reached the question; `payer` IS the question.
+  assert.deepEqual(at('identify'), { effectivePick: null, autoResolved: false });
+  assert.deepEqual(at('payer'), { effectivePick: null, autoResolved: false });
+  assert.deepEqual(at('plan'), { effectivePick: 'Aetna', autoResolved: true });
+  assert.deepEqual(at('answer'), { effectivePick: 'Aetna', autoResolved: true });
+});
+
+test('carrierResolutionFor: a skip is never overwritten by an auto-resolve', () => {
+  // A skip put `payerScope: 'all'` on the wire. Resolving to one carrier would contradict the request
+  // the operator actually made, and `skipped` un-sets only by a plan pick or a step back.
+  const groups = payerGroupsOf(deadEndCarriers());
+  assert.deepEqual(
+    carrierResolutionFor({ stage: 'answer', payerPick: null, skipped: true, payerGroups: groups }),
+    { effectivePick: null, autoResolved: false },
+  );
+});
+
+test('carrierResolutionFor: a sole carrier is not an auto-resolve — nothing was eliminated', () => {
+  // One cluster means the question was never askable; the existing sole-carrier copy owns that case,
+  // and claiming "resolved for you — the others have no history" would name others that do not exist.
+  const soleCarrier = fixture({
+    candidates: {
+      total: 2,
+      chosenIndex: 0,
+      wasAmbiguous: true,
+      chosenBy: 'user',
+      rejected: [
+        { canonicalPayerId: 'pi_aetna', payerDisplayName: 'Aetna', employerLabel: 'ACME CO', funding: null, planType: null, memberCount: 9, hasClaimEvidence: true },
+      ],
+    },
+  });
+  const groups = payerGroupsOf(soleCarrier);
+  assert.equal(groups.length, 1, 'one cluster');
+  assert.deepEqual(
+    carrierResolutionFor({ stage: 'plan', payerPick: null, skipped: false, payerGroups: groups }),
+    { effectivePick: null, autoResolved: false },
+  );
+});
+
+test('the auto-resolve STATES itself on the plan stage, names the window, and offers the way back', () => {
+  const html = render(
+    props('plan', deadEndCarriers(), { payerPick: 'Aetna', carrierAutoResolved: true }),
+  );
+  assert.match(html, /Resolved to Aetna/, 'the resolution is named — not silently applied');
+  assert.match(html, /other 2 carriers/, 'it says how many were eliminated');
+  // ⚠ THE WINDOW IS LOAD-BEARING COPY. `hasClaimEvidence` is the resolve window's evidence (365 days
+  // by default), so a bare "no claim history" would assert something about all time that the data
+  // cannot support — and would read as "these carriers are wrong" rather than "these carriers are
+  // quiet". Asserted as the PHRASE, so deleting the window qualifier fails here.
+  assert.match(
+    html,
+    /no claim history in the last 12 months/,
+    'the 12-month basis must be stated, never a bare "no claim history"',
+  );
+  assert.doesNotMatch(html, /no claim history ever/i, 'and never an all-time claim');
+  assert.match(html, /pick a different one/i, 'the ruling is overridable, and says so');
+});
+
+test('an operator who PICKS the only answerable carrier is not told it was resolved for them', () => {
+  // The two states render the same label, so the screen must take the claim from the flag rather than
+  // inferring it — otherwise "Resolved to Aetna for you" appears over a choice the operator made.
+  const html = render(
+    props('plan', deadEndCarriers(), { payerPick: 'Aetna', carrierAutoResolved: false }),
+  );
+  assert.doesNotMatch(html, /Resolved to Aetna/, 'the operator chose this — nothing was resolved for them');
+  assert.match(html, /under Aetna/, 'the plan stage still scopes to their pick');
+});
+
+test('a dead-end SET is named once, about the set — not left to N identical tile warnings', () => {
+  const html = render(props('payer', noAnswerableCarriers()));
+  assert.match(html, /None of these 3 carriers has/, 'the set-level claim, which no tile can make');
+  assert.match(html, /claim history in the last 12 months/, 'window-scoped here too');
+  assert.match(html, /nothing behind it/, 'and says what that means for a ranking');
+  // The question is still on screen: a carrier pick still scopes the plan stage, and that is the
+  // operator's call. What must NOT happen is the flow deciding for them.
+  assert.match(html, /Which carrier is on the card\?/, 'the question stays askable');
+});
+
+test('the sr-only channel carries the same two claims as the screen', () => {
+  // ⚠ THIS IS WHERE AN UNFIXED CLAIM SURVIVES A BROWSER PASS — liveSentenceFor's own header says so.
+  const auto = liveSentenceFor('plan', deadEndCarriers(), null, {
+    carrierAutoResolved: true,
+    carrierAutoResolvedLabel: 'Aetna',
+  });
+  assert.match(auto, /resolved to Aetna for you/i, 'the carrier is NAMED, not described as "one carrier"');
+  assert.match(auto, /no claim history in the last 12 months/, 'same window wording as the visible banner');
+
+  const dead = liveSentenceFor('payer', noAnswerableCarriers(), null, {});
+  assert.match(dead, /None of them has claim history in the last 12 months/, 'the dead-end set is announced');
+
+  // Omitting the pair leaves every existing announcement byte-identical.
+  assert.equal(
+    liveSentenceFor('plan', fixture(), null, {}),
+    liveSentenceFor('plan', fixture(), null, { carrierAutoResolved: false }),
+  );
+});
+
+test('the stepper and the checklist call an auto-resolved carrier SKIPPED, never done', () => {
+  // "done" claims the operator answered a question they were never shown. `railStates` had its own
+  // `groups.length <= 1` predicate, which is a different question from the one deriveStage now asks —
+  // so without following it here, the rail would have ticked the carrier step as answered.
+  const groups = payerGroupsOf(deadEndCarriers());
+  const states = railStates('plan', deadEndCarriers(), groups);
+  const payerIdx = 1; // identify · payer · plan · answer
+  assert.equal(states[payerIdx], 'skipped', 'the carrier step was never asked — it cannot be "done"');
+
+  // And a genuine two-answerable question, answered, IS done — the fix must not over-reach.
+  const answered = railStates('plan', fixture(), payerGroupsOf(fixture()));
+  assert.equal(answered[payerIdx], 'done');
 });
 
 // F3a. deriveStage and liveSentenceFor used to ALWAYS self-derive payerGroupsOf, so the stage the

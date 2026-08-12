@@ -76,6 +76,7 @@ import {
   isRefetching,
   orderedCandidates,
   payerGroupsOf,
+  carrierResolutionFor,
   ResolutionStages,
   scopeKeyOf,
   scopeSourceOf,
@@ -280,6 +281,55 @@ export function ResolutionFlowClient({
     [state.resolution],
   );
 
+  /* ── WHICH STAGE, FIRST — because the carrier derivation below DEPENDS on it ─────────────────────
+   *
+   * `payerGroups` is the SAME memoized set the rail, receipt and tiles read (see the useMemo above).
+   * Passing it here is what makes "which stage are we on" and "how many carriers does the rail show"
+   * one derivation instead of two that happen to agree.
+   *
+   * ⚠ RAW `payerPick` HERE, NOT `effectivePick`, AND THE ASYMMETRY IS DELIBERATE. `deriveStage` is the
+   * STAGE authority and computes answerability itself, so handing it the already-composed pick would
+   * short-circuit its own answerable branch — the machine's resolution would then be decided here and
+   * merely ratified there, which is two derivations of one decision and exactly what threading
+   * `payerGroups` was meant to stop. The split that holds: `deriveStage` owns "which question is open",
+   * `carrierResolutionFor` owns "which carrier the screen is scoped to".
+   *
+   * ⚠ AND THIS BLOCK MOVED ABOVE THE CARRIER DERIVATION ON PURPOSE (Qodo on PR #204). It used to sit
+   * ~120 lines BELOW it, so the auto-resolve was computed without knowing the stage — and `stage` is
+   * `backTo ?? derived`, which is how the "Pick a carrier" revisit reopened the question while the
+   * derivation went on reporting it resolved. Order is load-bearing here; do not move it back. */
+  const derived = deriveStage({ resolution: state.resolution, payerPick, picked, skipped, payerGroups });
+  // The receipt's Change can only step BACKWARD from what is derivable; any submit clears it.
+  const stage: FlowStage = backTo ?? derived;
+
+  /* ── THE AUTO-RESOLVED CARRIER (Design A, ratified 2026-08-11) ──────────────────────────────────
+   * When exactly ONE cluster behind the token could answer the carrier question, `deriveStage` does
+   * not ask it — and this is the value that makes that resolution real everywhere downstream instead
+   * of merely skipping a screen.
+   *
+   * ⚠ IT IS A DERIVATION, NOT A DISPATCH, AND THAT IS THE WHOLE DESIGN. The obvious shortcut is an
+   * effect that fires `payer_picked` when one answerable cluster exists. It is wrong for a reason this
+   * flow has already paid for twice: the reducer's `payerPick` means "the OPERATOR chose this carrier",
+   * and every surface that reads it — the lane checklist's `done`, the receipt's decision entry,
+   * `scopeSourceOf`'s 'user' vs 'pick' vs 'dominant' — is entitled to believe that. Writing a machine
+   * ruling into that field makes the two indistinguishable, which is precisely the collapse
+   * `ScopeSource` documents at length. It would also put a navigation rule outside the machine that
+   * owns every other one (see the `onToggleNarrow` note above).
+   *
+   * So `payerPick` STAYS NULL through an auto-resolve, and the composition happens at the read sites:
+   * `effectivePick` is what the SCREEN is scoped to, `payerPick` is what the OPERATOR decided, and
+   * `carrierAutoResolved` is the one bit that says which of the two `effectivePick` came from. That
+   * bit cannot be recovered downstream from the label alone — an operator may legitimately pick the
+   * only answerable carrier by hand, and that is a different claim from the machine resolving to it —
+   * which is why it travels as its own prop rather than being re-derived per surface.
+   *
+   * The composition itself lives in `carrierResolutionFor` (pure, exported, hermetically tested) —
+   * NOT inline here. Its docblock carries the stage-gate reasoning and the defect that produced it. */
+  const { effectivePick, autoResolved: carrierAutoResolved } = useMemo(
+    () => carrierResolutionFor({ stage, payerPick, skipped, payerGroups }),
+    [stage, payerPick, skipped, payerGroups],
+  );
+
   /** A new identify submit invalidates every downstream choice — clear them BEFORE dispatching to
    *  the server action. Capturing the term into the ref is the ONLY thing that happens outside the
    *  reducer here, and it happens outside because the term is PHI (see the header). */
@@ -385,13 +435,6 @@ export function ResolutionFlowClient({
     dispatch({ type: 'went_back', target });
   }, []);
 
-  // `payerGroups` is the SAME memoized set the rail, receipt and tiles read (see the useMemo above).
-  // Passing it here is what makes "which stage are we on" and "how many carriers does the rail show"
-  // one derivation instead of two that happen to agree.
-  const derived = deriveStage({ resolution: state.resolution, payerPick, picked, skipped, payerGroups });
-  // The receipt's Change can only step BACKWARD from what is derivable; any submit clears it.
-  const stage: FlowStage = backTo ?? derived;
-
   // ── The pick→ranking bridge (review Critical 1) ────────────────────────────────────────────────
   // The pick is in VOB vocabulary; the snapshot's payerOverride is in claims vocabulary. The chosen
   // group carries its own confirmed claims labels (claimsPayerLabels, resolutionService §5b), so the
@@ -425,13 +468,19 @@ export function ResolutionFlowClient({
   // ── The answer-stage filter universe and the market narrow ────────────────────────────────────
   // Universe: after a Skip, every candidate behind the identifier; otherwise the picked carrier's
   // cluster, so the filter lines describe the set the user is actually looking at.
+  // ⚠ `effectivePick`, NOT `payerPick` — otherwise the facet universe outruns the answer's own scope.
+  // On an auto-resolve the reducer's pick is null, so this fell through to `all`: the funding and
+  // employer facets would have enumerated the DEAD-END carriers' plans beside a ranking scoped to the
+  // one answerable carrier, and (per the memo below) the surviving employers are sent as
+  // `market.employers`. So a filter press could have re-ranked over employers belonging to a carrier
+  // the operator was never even shown a tile for.
   const answerCandidates = useMemo(() => {
     if (state.resolution === null) return [];
     const all = orderedCandidates(state.resolution);
-    if (skipped || payerPick === null) return all;
-    const cluster = payerGroups.find((p) => p.payer === payerPick);
+    if (skipped || effectivePick === null) return all;
+    const cluster = payerGroups.find((p) => p.payer === effectivePick);
     return cluster ? all.filter((c) => cluster.names.has(c.payerDisplayName)) : all;
-  }, [state.resolution, skipped, payerPick, payerGroups]);
+  }, [state.resolution, skipped, effectivePick, payerGroups]);
 
   // Funding goes to the market directly (a closed vocabulary the action intersects); the employer
   // selection goes by way of `employerNarrowFor`, which sends it only when it is a PROPER SUBSET
@@ -958,7 +1007,10 @@ export function ResolutionFlowClient({
 
   /** Watch the resolved payer (trend). Persisted — 0097 is applied live; the session-only branch
    *  below is the fault path for a save the server could not persist, not the normal one. */
-  const watchPayerLabel = snapshot?.resolved?.payerName ?? payerPick;
+  // `effectivePick` as the fallback: on an auto-resolve, before the snapshot lands, the reducer's pick
+  // is null and the "＋ watch …" control would simply not render — the one carrier the lane is actually
+  // locked to being the one the operator could not watch.
+  const watchPayerLabel = snapshot?.resolved?.payerName ?? effectivePick;
   const onWatchPayer = useCallback(() => {
     if (watchPayerLabel === null) return;
     const payer = watchPayerLabel;
@@ -1221,7 +1273,11 @@ export function ResolutionFlowClient({
       laneCleared={sessionCleared}
       denied={state.denied}
       pending={isPending}
-      payerPick={payerPick}
+      // The carrier the SCREEN is scoped to (operator's pick, or the machine's auto-resolve), paired
+      // with the bit that says which — so no surface downstream has to guess, and none can claim the
+      // operator decided something they did not. See the `effectivePick` derivation above.
+      payerPick={effectivePick}
+      carrierAutoResolved={carrierAutoResolved}
       planFilter={planFilter}
       identifyAction={identifyAction}
       planAction={planAction}
@@ -1315,7 +1371,11 @@ export function ResolutionFlowClient({
             stage={stage}
             resolution={state.resolution}
             payerGroups={payerGroups}
-            payerPick={payerPick}
+            // `PayerHero` mounts only on the plan stage and keys on this being non-null. With the raw
+            // pick it rendered its "Carrier picked — choosing a plan in the lane narrows this board to
+            // it" placeholder on every auto-resolve — a board panel saying nothing had been resolved
+            // while the lane beside it said the carrier was locked.
+            payerPick={effectivePick}
             echo={state.echo}
           >
             {state.resolution && answerBag ? <StageAnswer resolution={state.resolution} {...answerBag} /> : null}
