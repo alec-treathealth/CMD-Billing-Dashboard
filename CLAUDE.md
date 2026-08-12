@@ -112,9 +112,9 @@ Run all five before any commit. This is the bar for "verified" — not typecheck
 alone, and especially not when a shared helper changed.
 
 ```bash
-npm test                          # root hermetic suite — >=1284 pass / 0 fail
+npm test                          # root hermetic suite — >=1439 pass / 0 fail
 npm run typecheck                 # root tsc (strict: noUncheckedIndexedAccess)
-cd app && npm test                # app suite — >=386 pass / 0 fail
+cd app && npm test                # app suite — >=831 pass / 0 fail
 cd app && npm run typecheck        # app tsc
 cd app && npm run build            # catches bundler-only failures tsc cannot
 ```
@@ -128,21 +128,28 @@ number above, tests were lost — find out why before committing. They are writt
 as `>=` floors deliberately, because the suites grow and a hardcoded exact number
 rots into a false tripwire within days.
 
-**Provenance of the current floors (read before trusting them).** 1284 / 386 are
-**RATIFIED counts**, not merely floors known to be reachable: measured 2026-08-06
-on a **clean detached worktree** of `origin/main` @`ea3dadb` (`git worktree add
+**Provenance of the current floors (read before trusting them).** 1439 / 831 are
+**RATIFIED counts**, not merely floors known to be reachable: measured 2026-08-11
+on a **clean detached worktree** of `origin/main` @`f3a8d93` (`git worktree add
 --detach origin/main`, `git status --porcelain` empty before any command ran,
 `npm ci` clean at both root and `app/`, all five gate commands exit 0). That is
 the exact condition the paragraph below demands, so these may be trusted as
 measured rather than as a lower bound someone once hit.
 
-They supersede 1110 / 259, which were measured 2026-08-04 on the **shared working
-tree** of branch `fix/qualify-no-matches-stale` and were explicitly flagged as
-not-evidence; those in turn superseded 1076 / 206 (tree of `main` @`53b49d6`).
-The 1110 / 259 pair had drifted **174 root and 127 app tests low**, which had
-quietly disabled the tripwire: a suite could have silently lost ~170 tests and
-still "passed" the floor. If you find yourself more than a few dozen tests above
-the number here, that is the same rot — re-measure and promote.
+They supersede 1284 / 386, measured 2026-08-06 under the same clean-worktree
+condition on `origin/main` @`ea3dadb` — correctly ratified then, simply outgrown
+since. That pair had drifted **155 root and 445 app tests low**, and the app half
+is the worse number this chain has recorded: 386 was **less than half** the real
+count, so `app/` could have silently lost 445 tests and still "passed" the floor.
+Earlier links, kept for the pattern: 1284 / 386 superseded 1110 / 259 (2026-08-04,
+measured on a **shared working tree** and flagged not-evidence, drifted 174 root /
+127 app low), which superseded 1076 / 206 (tree of `main` @`53b49d6`).
+
+The lesson the app number now makes unmissable: a floor rots fastest where the
+suite grows fastest, and nothing in CI reports it — no script enforces these
+counts, by design (see the Git workflow section: checks are read by hand). If you
+find yourself more than a few dozen tests above the number here, that is the same
+rot — re-measure and promote.
 
 **The rule that produced these numbers, unchanged:** only counts measured on a
 clean detached checkout of `origin/main` are trustworthy — a shared working tree
@@ -165,7 +172,22 @@ migrations (0073/0074, 2026-07-29).
 | `pull_request` | a PR is required; `required_approving_review_count` is **0** — it gates the route, not review |
 | `creation` + `update` | direct push to `main` is refused |
 | `non_fast_forward` | force-push to `main` is refused |
-| `required_linear_history` | **merge commits are refused — promote with squash or rebase** |
+
+That is the **whole** rule list — verified live 2026-08-12 against
+`gh api repos/…/rulesets/20617104` (`rules: non_fast_forward, pull_request,
+creation, update`) and `gh api repos/…/rules/branches/main`.
+
+⚠ **THIS TABLE CARRIED A FOURTH ROW UNTIL 2026-08-12, AND IT WAS FICTION.** It
+claimed `required_linear_history` — "merge commits are refused — promote with
+squash or rebase". **That rule does not exist on the ruleset and never did.**
+Merge commits to `main` are *not* refused. The `pull_request` rule's own
+`allowed_merge_methods` is `["merge","squash","rebase"]` and **all three are
+live**, with no `required_linear_history` to override any of them. So **squash
+promotion is a CONVENTION we choose, not an enforcement we obey** — and it is
+that convention which manufactures the ghost commits described under
+[Staging discipline](#staging-discipline--it-is-a-batching-branch-not-an-environment).
+The false row mattered: it was the stated reason for squashing, so it made a
+reversible choice look like a constraint.
 
 Three consequences, none of them accidental:
 
@@ -173,16 +195,94 @@ Three consequences, none of them accidental:
   rule and one is not wanted** — Alec reads Vercel and Qodo himself before
   promoting. A green check is not a gate and a red one does not disable the merge
   button; the human is the gate. **Do not propose adding required status checks.**
-- **`required_linear_history` overrides the `pull_request` rule's own
-  `allowed_merge_methods`, which still lists `merge`.** GitHub refuses the merge
-  commit at push time. Promotions through `8fb2917` were true two-parent merges and
-  everything after is squash/rebase, so ahead/behind counts read differently across
-  that boundary.
+- **Promotions are squashed BY CONVENTION, and nothing stops a merge commit.**
+  Promotions through `8fb2917` were true two-parent merges and everything after is
+  squash, so ahead/behind counts read differently across that boundary — that
+  observation is correct and still useful. What was wrong was the cause: this bullet
+  used to say `required_linear_history` made GitHub refuse the merge commit at push
+  time. It does not, because that rule is not on the ruleset (see the table above).
+  The squash is a choice, its cost is the ghost commits, and changing it is a
+  decision available to us rather than a fight with GitHub.
 - **`staging` carries no ruleset** (`rules/branches/staging` → `[]`), and two actors
   bypass with `bypass_mode: always`: the repository **admin** role and Integration
   `1236702` (not Vercel `8329`, not GitHub Actions `15368`). An admin push to `main`
   therefore succeeds and leaves no disable/re-enable event behind. This is the
   intended posture — the ruleset stops accidents, not its owner.
+
+**`Verified` ⇔ `committer=GitHub`.** The badge tracks **who created the commit
+object**, not whether anything was reviewed. GitHub signs the commits it creates
+itself — squash merges, and merges made through the web UI — so those read
+Verified; a commit authored locally survives into history unsigned and reads
+Unverified. So an **Unverified commit in a range means "that PR was merged with a
+merge commit", NOT "somebody pushed directly"** (`24c6d36` is the worked example:
+Unverified, and merged via PR #179). Do not read the badge as a process signal.
+Local `git log --format=%G?` is useless for this on Alec's machine — gpg is not
+installed, so it prints `N` for everything; ask
+`gh api repos/…/commits/<sha> --jq .commit.verification` instead.
+
+### Vercel branch↔environment binding
+
+There are exactly **two** Vercel environments, and `app/vercel.json` binds
+neither (it carries `regions` / `installCommand` / `crons` only — all binding is
+project-side, `prj_vPJxHFny6OS9gU32swXMn3XJsog3`):
+
+| Environment | Bound to | URLs |
+|---|---|---|
+| **Production** | `main` **only** | `billing-rcm.treathealth.ai` · `cmd-billing-dashboard.vercel.app` · `…-git-main-….vercel.app` |
+| **Preview** | **every other branch, per commit** | an immutable per-deployment URL |
+
+⚠ **THERE IS NO STAGING ENVIRONMENT AND NO `…-git-staging-…` ALIAS.** Verified
+2026-08-12: the project's `domains` list contains a `git-main` alias and no
+`git-staging` one, and DNS agrees. The `staging` branch receives ordinary
+per-commit **Preview** deployments — identical in kind to any feature branch, at
+unmemorable URLs. It has **no privileged status in Vercel at all**.
+
+So **browser-test on the feature branch's own preview URL**, not on staging.
+Every push to every branch already builds one, so a PR's preview is the test
+surface and no persistent branch is required to get one.
+
+### Staging discipline — it is a batching branch, not an environment
+
+`staging` exists to **batch** several already-tested changes into ONE production
+deploy. That batching is worth real money here — the hourly collections crons are
+production-critical, and every promotion obliges the "verify the next scheduled
+run" check — but batching is the *only* thing it provides, because the previews
+above are where testing actually happens.
+
+**The invariant: at the START of every cycle, `git diff origin/main..origin/staging`
+is EMPTY.** If it is not, the previous cycle did not finish.
+
+⚠ **READ THE CONTENT DIFF, NEVER THE COMMIT COUNT.** Squash promotion gives `main`
+a commit whose patch-id matches nothing on `staging`, so merged work looks unmerged
+**forever**: `git cherry origin/main origin/staging` marked all 16 non-merge commits
+as "not on main" when 13 of them were, and PR #203 advertised **24 commits** for
+**3 PRs / 6 files** of genuine content. `git diff --stat origin/main..origin/staging`
+is the only honest measure; `git log` and `git cherry` both lie here.
+
+**After every squash promotion to `main`, reset staging to prod:**
+
+```bash
+git fetch origin
+git push --force-with-lease origin origin/main:refs/heads/staging
+git diff --stat origin/main..origin/staging   # must be EMPTY
+```
+
+Legal because **`staging` carries no ruleset** — `non_fast_forward` is scoped to
+`~DEFAULT_BRANCH` and does not reach it.
+
+⚠ **PREREQUISITE, AND IT IS ABSOLUTE: NOTHING MAY LIVE ONLY ON `staging`.** The
+force-reset **eats** anything pushed straight there. Every change must reach staging
+through a PR from a feature branch, so that the feature branch is the durable copy
+and the reset can only ever discard commits whose content is already on `main`.
+
+⚠ **DO NOT CLICK "Update branch" ON THE PROMOTION PR.** That button is the drift
+engine: it merges `main` into `staging`, which adds a commit and makes main's squash
+an *ancestor* of staging while staging's own commits never become ancestors of main —
+so the commit count ratchets up permanently while the content delta stays near zero.
+All four `Merge branch 'main' into staging` commits in the #203 range were that
+button, each clicked 1–3 minutes after the promotion PR was opened (`81a75b2` 71 s
+after #188, `82f1c9b` 3 min after #192, `afaf998` 98 s after #203). If staging starts
+each cycle equal to `main`, there is never anything to update.
 
 ## Repo layout
 

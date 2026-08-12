@@ -81,7 +81,7 @@ import { EMPTY_FACILITIES, scopedPayerOf } from '../../../lib/qualify/contract';
  * `bookIsOnScreen` / `bookLeadsAnswer` from this module keeps reading the SAME functions: one
  * definition, two import paths, never two definitions. */
 export { bookIsOnScreen, bookLeadsAnswer } from '../../../lib/qualify/bookPlacement';
-import { bookIsOnScreen, bookLeadsAnswer } from '../../../lib/qualify/bookPlacement';
+import { answerRatingBasis, bookIsOnScreen, bookLeadsAnswer } from '../../../lib/qualify/bookPlacement';
 import { derivePolicyRating } from '../../../lib/qualify/policyRating';
 // The ladder's own stopping threshold. The window-move notice NAMES it rather than typing "10", so
 // the sentence cannot outlive the constant it describes.
@@ -818,13 +818,41 @@ export function StepRail(props: {
  *   reads "skipped" (a sole carrier is never asked about), so a second way of counting carriers here
  *   would let the checklist and the stepper disagree about a question the operator was never shown.
  *
- * · `policy` is `derivePolicyRating` over the snapshot's facilities — READ, never recomputed. It is
- *   the same call the answer stage's own headline makes, so the number under the ANSWER step is the
- *   number on screen beside it. A locally-averaged "headline" would be a second rating that could
- *   disagree with the cards, which is the exact failure `policyRating.ts` was written to prevent.
+ * · `policy` is THE LANE-SCOPED RATING OR NOTHING. It never shows a number whose basis is wider
+ *   than the lane's own lock.
+ *
+ *   The rail sits inside a panel that promises, in `shell/lane-rail.tsx`: "Locked to <prefix> …
+ *   Answers come only from this lane's matched lines — nothing outside it." When the book leads
+ *   (`bookLeadsAnswer`, S3) the answer stage's hero deliberately re-bases onto the payer's WHOLE
+ *   BOOK — facilities this member has never touched, which is by definition outside the lane. So in
+ *   that mode the rail renders NO rating: the ANSWER step's `meta` goes null and the step simply
+ *   omits its value, which `laneSteps`' own "null shows nothing rather than a zero" rule already
+ *   handles. Silence is the honest reading; a whole-book number under a lane-locked panel is not.
+ *
+ *   ⚠ TWO WRONG REPAIRS WERE TRIED FIRST, and both are worth naming. Until 2026-08-11 this passed
+ *   `snapshot.facilities` while the hero passed the book, so the two showed DIFFERENT numbers side
+ *   by side (measured: band 15 over 5 patients here, band 50 over 14 there — the member ranking is
+ *   floorless, the book applies `QUALIFY_MIN_LINES`). The first fix made them EQUAL by widening this
+ *   one to the book — which removed the contradiction between the two numbers by moving it into the
+ *   lock, where a scoped surface would have been quoting an unscoped figure. Equality was never the
+ *   invariant; SCOPE HONESTY is. Outside book-led mode the two lists are the same list, so the rail
+ *   and the hero still agree there, and that agreement is now a consequence rather than the goal.
+ *
+ *   `answerRatingBasis` still owns the LIST-AND-SCOPE choice for both surfaces — the hero reads it
+ *   and rates; the rail reads it and decides whether it is entitled to speak at all.
+ *
+ * ⚠ EXPORTED FOR ONE TEST, exactly as `railStates` is. `qualify-lane-rating-parity.test.tsx` pins
+ * both halves: null under book-led, equal to the hero otherwise. The export adds no parameter,
+ * changes no behaviour, and invites no production caller — `ResolutionStages` remains the only one.
  */
-function laneInputForFlow(props: ResolutionStagesProps, skipped: boolean): LaneStepsInput {
-  const facilities = props.answer?.snapshot?.facilities ?? null;
+export function laneInputForFlow(props: ResolutionStagesProps, skipped: boolean): LaneStepsInput {
+  const snapshot = props.answer?.snapshot ?? null;
+  const basis = answerRatingBasis(snapshot);
+  /* `bookLeadsAnswer` rather than `basis.basisScope !== undefined`, though the two track each other
+   * today: the predicate NAMES the condition this rule is about, while the scope label is a
+   * rendering detail that merely happens to be set in the same case. Reading the predicate is
+   * reading the one definition; inferring from the label would be a second one. */
+  const widerThanLane = snapshot !== null && bookLeadsAnswer(snapshot);
   return {
     stage: props.stage,
     resolution: props.resolution,
@@ -832,7 +860,7 @@ function laneInputForFlow(props: ResolutionStagesProps, skipped: boolean): LaneS
       props.resolution === null ? 0 : (props.payerGroups ?? payerGroupsOf(props.resolution)).length,
     payerPick: props.payerPick,
     skipped,
-    policy: facilities === null ? null : derivePolicyRating(facilities),
+    policy: basis === null || widerThanLane ? null : derivePolicyRating(basis.facilities, basis.basisScope),
   };
 }
 
@@ -2680,13 +2708,12 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
    * its own pass, pinned by a scan test in app/test/qualify-mobile-render.test.tsx.
    */
   const bookLeads = bookLeadsAnswer(snap);
-  /* THE LIST THAT LEADS, RESOLVED ONCE. Everything downstream — the area facet, the counts, the
-   * hero, the grid — reads this rather than choosing for itself. `bookLeads` implies a non-empty
-   * `bookFacilities` (its own precondition), so the `?? EMPTY_FACILITIES` is unreachable and kept
-   * only because TS cannot narrow through the predicate. */
-  const answerFacilities: readonly QualifyFacility[] = bookLeads
-    ? (bookFacilities ?? EMPTY_FACILITIES)
-    : (snap?.facilities ?? EMPTY_FACILITIES);
+  /* THE LIST THAT LEADS, RESOLVED ONCE — AND NOT HERE. `answerRatingBasis` owns the choice, because
+   * the lane rail's ANSWER step has to make the SAME one and a copy of it in this component is how
+   * the two came apart (see that function's header). Everything downstream — the area facet, the
+   * counts, the hero, the grid — still reads this one const rather than choosing for itself. */
+  const ratingBasis = answerRatingBasis(snap);
+  const answerFacilities: readonly QualifyFacility[] = ratingBasis?.facilities ?? EMPTY_FACILITIES;
   /* THE HERO, DERIVED FROM THE LIST THAT LEADS — and it SAYS which list that is.
    *
    * `derivePolicyRating(snap.facilities)` was right while the member ranking was the answer. In
@@ -2695,9 +2722,7 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
    * invariant in the one place that invariant exists to hold (policyRating.ts's own header). The
    * scope label is passed rather than derived there, because that module cannot tell two
    * `QualifyFacility[]`s apart and a guess would be a second derivation. */
-  const rating = snap
-    ? derivePolicyRating(answerFacilities, bookLeads && bookPayer !== null ? `${bookPayer}'s whole book` : undefined)
-    : null;
+  const rating = ratingBasis === null ? null : derivePolicyRating(ratingBasis.facilities, ratingBasis.basisScope);
   /* ── THE HOLE THE FLIP OPENS, NAMED RATHER THAN SWALLOWED ────────────────────────────────────────
    *
    * The member ranking is FLOORLESS and the book applies QUALIFY_MIN_LINES (core.ts, deliberately:
