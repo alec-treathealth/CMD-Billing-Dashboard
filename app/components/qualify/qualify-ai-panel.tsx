@@ -43,6 +43,9 @@ import { aiScopeLabel } from '../../lib/qualify/scopeLabel';
 // and bookPlacement.ts do: this file reaches the 'use server' chain, so a hermetic test cannot
 // exercise a decision written only here. See externalAsk.ts for the rule and why it is nonce-keyed.
 import { decideExternalAsk, type QualifyExternalAsk } from '../../lib/qualify/externalAsk';
+// WHICH BOX SCROLLS. Same extraction rule as every import above it — the follow guard's bound is a
+// decision, and a decision written only in this file can never be exercised by a hermetic test.
+import { followBoundOf, scrollPortOf } from '../../lib/qualify/scrollPort';
 import { IQ_BAND_HEX } from './tokens';
 // The model is ASKED for markdown by SYSTEM_PROMPT; this is what turns it into markup instead of
 // printing the delimiters. Pure + hermetically tested (app/test/markdown-render.test.tsx).
@@ -58,9 +61,14 @@ export function QualifyAiPanel({
   externalAsk = null,
   onExternalAsked,
   bookPlacement = 'none',
+  dense = false,
 }: {
   snapshot: QualifySnapshot;
   blind: boolean;
+  /** Rail mount (2026-08-12): one-column chips for the 416px lane pane. Default false keeps the v2
+   *  tab's full-width three-column strip byte-identical — the breakpoints in this file are VIEWPORT
+   *  breakpoints, so a global edit would have collapsed a surface this brief never touched. */
+  dense?: boolean;
   /** v3 plan-tile drill-down: run the SUGGESTED chip once, unprompted, when the panel arrives. The
    *  suggestion derives from this snapshot (aiChips), so the auto-question is grounded in what the
    *  search actually returned — a self-funded plan opens with the plan-administrator question, etc.
@@ -71,8 +79,10 @@ export function QualifyAiPanel({
    *  per-mount guard and re-fires an unrequested, audited, billed model call. One ask per arm. */
   onAutoAsked?: () => void;
   /**
-   * THE COMPOSER'S SEAM (Smoke shell, 2026-08-10): the lane rail's slots-only composer lives in a
-   * different pane from this panel, so its Ask arrives as a prop — a question id + slot values +
+   * THE COMPOSER'S SEAM (Smoke shell, 2026-08-10; wording corrected 2026-08-12). The slots-only
+   * composer is a different COMPONENT from this panel — as of 2026-08-12 they are siblings in the
+   * same rail, which changed nothing: two siblings still cannot call each other's functions, so the
+   * Ask still travels up to the owner and back down as a prop — a question id + slot values +
    * a NONCE. The nonce is what the consume effect keys on: two identical composer asks in a row
    * are two distinct requests (the operator pressed Ask twice), which object identity alone would
    * conflate. Same one-shot discipline as autoAsk: consumed once, then the owner disarms via
@@ -123,12 +133,27 @@ export function QualifyAiPanel({
   // Gated on `streaming`: once the answer is done, the panel stops steering the scroll position.
   // ALSO gated on the reader still being near the tail: following unconditionally scroll-LOCKS a
   // reader who scrolled up to re-read an earlier bullet, because the next delta yanks them back.
+  //
+  // ⚠ MEASURED AGAINST THE SCROLLPORT, NOT THE VIEWPORT (2026-08-12). `window.innerHeight` was the
+  // right bound while the DOCUMENT was the only scroller on /qualify. The sticky lane rail made its
+  // `overflow-y-auto` live, and `scrollIntoView('nearest')` retargets to it — so a viewport-relative
+  // predicate is true for nearly every sentinel inside a ~660px pane and the guard stops guarding.
+  // `scrollPortOf` is a pure walk in lib so the rule is hermetically testable; this module reaches
+  // the `'use server'` chain and cannot be rendered by any test.
+  //
+  // ⚠ AND IT MUST BE A *LIVE* PORT. The rail's height cap is `xl:`-gated but its `overflow-y-auto`
+  // is not, so below 1280px that box declares a scroll overflow and cannot scroll. `scrollPortOf`
+  // owns that distinction (see `isLiveScrollPort`); this call site just supplies the measurements.
   useEffect(() => {
     if (!streaming || !text) return;
     const el = followRef.current;
     if (!el) return;
-    const { top } = el.getBoundingClientRect();
-    if (top <= window.innerHeight + 200) el.scrollIntoView({ block: 'nearest' });
+    const port = scrollPortOf(el, (e) => {
+      const { overflowY } = window.getComputedStyle(e);
+      return { overflowY, scrollHeight: e.scrollHeight, clientHeight: e.clientHeight };
+    });
+    const bound = followBoundOf(port === null ? null : port.getBoundingClientRect().bottom, window.innerHeight);
+    if (el.getBoundingClientRect().top <= bound + 200) el.scrollIntoView({ block: 'nearest' });
   }, [streaming, text]);
 
   // A NEW SEARCH INVALIDATES THE OLD ANSWER (review). `ranks` re-derives off the new snapshot while
@@ -243,7 +268,27 @@ export function QualifyAiPanel({
         </span>
       </div>
 
-      <div className="grid grid-cols-1 gap-2 p-3.5 sm:grid-cols-2 lg:grid-cols-3">
+      {/* ⚠ `sm:`/`lg:` ARE VIEWPORT BREAKPOINTS, NOT CONTAINER ONES (2026-08-12). No container-query
+          plugin is installed — so inside the 416px lane rail `lg:grid-cols-3` is unconditionally on
+          and yields ~112px columns holding chips that are full sentences. `dense` is the rail's
+          mount saying so; the v2 tab (qualify-tab.tsx) renders this panel full-width and keeps the
+          three-column strip it has always had.
+
+          ⚠ `dense` COLLAPSES AT `xl` ONLY, AND THE MISSING `xl:` WAS A BUG — caught before shipping
+          when Alec asked what the sub-1280 layout actually does. `dense` is `shellMode`, a SERVER
+          boolean that is true at every width, but the rail is only 416px wide at `xl`: below that
+          the shell grid is `grid-cols-1` and the rail is FULL WIDTH. An unconditional `grid-cols-1`
+          therefore stacked full-sentence chips in a single ~976px column on every narrow viewport —
+          the same shape of mistake as the ScrollTrigger scroller (a wide-viewport assumption applied
+          at every width). Tailwind emits breakpoints in ascending order, so `xl:grid-cols-1` wins
+          over `lg:grid-cols-3` where both apply. */}
+      <div
+        className={
+          dense
+            ? 'grid grid-cols-1 gap-2 p-3.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-1'
+            : 'grid grid-cols-1 gap-2 p-3.5 sm:grid-cols-2 lg:grid-cols-3'
+        }
+      >
         {chips.map((chip) => {
           // The suggestion is a resting-state nudge only — it clears the moment any chip runs.
           const suggested = chip.id === suggestedId && active === null;
@@ -407,7 +452,9 @@ export function QualifyAiPanel({
                             </span>
                           ) : null}
                         </span>
-                        <span className="whitespace-nowrap text-xs text-ink400">{r.evidence}</span>
+                        {/* NOT `whitespace-nowrap` since 2026-08-12: it is the second thing that
+                            overflows the 416px rail. The name cell already has `min-w-0 truncate`. */}
+                        <span className="text-xs text-ink400">{r.evidence}</span>
                         <span
                           className="min-w-[34px] text-right font-mono text-[14px] font-semibold tabular-nums"
                           style={{ color: IQ_BAND_HEX[r.band] }}
@@ -421,8 +468,10 @@ export function QualifyAiPanel({
               ) : null}
               {!streaming && text ? (
                 <p className="mt-3 border-t border-dashed border-line pt-2 text-xs text-ink400">
-                  Grounded in the factors above · window {snapshot.ladder?.chosenDays ?? '—'}d · verify benefits on the
-                  case before quoting anything.
+                  {/* "Grounded in the factors above" until 2026-08-12 — it named the board's ranking,
+                      which is no longer above this panel (the panel moved into the lane rail). The
+                      verify clause is the half that carries an obligation, so it is the half kept. */}
+                  window {snapshot.ladder?.chosenDays ?? '—'}d · verify benefits before quoting anything.
                 </p>
               ) : null}
               <div ref={followRef} aria-hidden className="h-px scroll-mb-4" />

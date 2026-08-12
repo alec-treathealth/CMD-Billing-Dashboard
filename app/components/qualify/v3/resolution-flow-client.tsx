@@ -122,6 +122,9 @@ import type { QualifyAiChipId } from '../../../lib/qualify/aiChips';
 import type { QualifyChipSlots } from '../../../lib/qualify/chipTemplates';
 // The one shape of a composer ask, shared with the panel that consumes it — see externalAsk.ts.
 import type { QualifyExternalAsk } from '../../../lib/qualify/externalAsk';
+// "Is this box REALLY a scroller" — one predicate, shared with the AI panel's follow guard, so the
+// ScrollTrigger scroller and the follow bound can never disagree about what scrolls. See its header.
+import { isLiveScrollPort } from '../../../lib/qualify/scrollPort';
 import {
   clearQualifyRecentSearches,
   deleteQualifyWatcher,
@@ -714,23 +717,72 @@ export function ResolutionFlowClient({
       // widening `visibility: hidden` to the root is the <main>-level regression this effect's own
       // header is a post-mortem of. See `revealScopeFor` for the full statement.
       const revealRoot = revealScopeFor(shellMode, root, stageEl);
+      // ── THE SCROLLER SPLIT (2026-08-12) ─────────────────────────────────────────────────────────
+      // ⚠ MANDATORY, NOT COSMETIC. The lane rail became a real scroll container on 2026-08-12
+      // (`xl:max-h-…` finally bounding the `overflow-y-auto` that had been inert since launch).
+      // `scroll` does not bubble from an overflow div to window, and NO `scroller:` was configured
+      // anywhere in this app — so a WINDOW-scrolled batch over rail tiles would leave every tile
+      // below the rail's fold at `autoAlpha: 0`, i.e. `visibility: hidden`: genuinely unclickable
+      // and out of the accessibility tree, with nothing thrown and nothing logged.
+      //
+      // ⚠ THE SCOPE STAYS UNIFIED — only the SCROLLER is per-pane. This is NOT a regression back to
+      // the 2026-08-10 bug this effect's header is a post-mortem of: `revealScopeFor` is untouched
+      // and still returns the whole shell root, so the board's answer tiles are still reached.
+      //
+      // ⚠ MARKER PRESENCE IS NOT SCROLLABILITY, AND THE FIRST DRAFT OF THIS HUNK GOT IT WRONG —
+      // caught in review by three independent lenses before it shipped, so it is written down. The
+      // rail's height cap is `xl:`-gated (`xl:max-h-[calc(100dvh-6rem)]`, lane-rail.tsx) while
+      // `data-v3-rail-scroll` and `overflow-y-auto` are NOT. Below 1280px the box therefore declares
+      // a scroll overflow and cannot scroll: `scrollHeight === clientHeight`, max scroll 0. Handing
+      // that box to `ScrollTrigger.batch` as `scroller` computes every start against a port that
+      // never moves, and GSAP does not clamp a start past max scroll unless you ask — so every tile
+      // past 88% of the rail's content height stays at the `autoAlpha: 0` the batch set, i.e.
+      // `visibility: hidden`: unclickable, out of the accessibility tree, nothing thrown, nothing
+      // logged. That is the EXACT failure this split exists to prevent, reintroduced at the other
+      // end of the breakpoint. `isLiveScrollPort` is the same predicate the AI panel's follow guard
+      // uses, from the same module, so the two cannot drift.
+      const railEl = root.querySelector<HTMLElement>('[data-v3-rail-scroll]');
+      const railScroll =
+        railEl !== null &&
+        isLiveScrollPort({
+          overflowY: window.getComputedStyle(railEl).overflowY,
+          scrollHeight: railEl.scrollHeight,
+          clientHeight: railEl.clientHeight,
+        })
+          ? railEl
+          : null;
       const tiles = gsap.utils.toArray<HTMLElement>('[data-v3-tile]', revealRoot);
       if (tiles.length > 0) {
         const rise = stage === 'plan' ? 10 : 6;
-        gsap.set(tiles, { autoAlpha: 0, y: rise });
-        ScrollTrigger.batch(tiles, {
-          start: 'top 88%',
-          once: true,
-          interval: 0.1,
-          onEnter: (batch) =>
-            gsap.to(batch, {
-              autoAlpha: 1,
-              y: 0,
-              duration: 0.22,
-              ease: 'power2.out',
-              stagger: (i: number) => staggerDelayMs(i) / 1000,
-            }),
-        });
+        const railTiles = railScroll === null ? [] : tiles.filter((t) => railScroll.contains(t));
+        const boardTiles = tiles.filter((t) => !railTiles.includes(t));
+        const revealBatch = (batchTiles: HTMLElement[], scroller: HTMLElement | undefined): void => {
+          if (batchTiles.length === 0) return;
+          gsap.set(batchTiles, { autoAlpha: 0, y: rise });
+          ScrollTrigger.batch(batchTiles, {
+            ...(scroller ? { scroller } : {}),
+            // ⚠ `clamp(...)` IS BELT-AND-BRACES OVER THE SCROLLABILITY GATE ABOVE, not a substitute
+            // for it. GSAP 3.15 only clamps a start to max scroll when the value is written in this
+            // opt-in form (`_parseClamp`, ScrollTrigger.js:53); without it a start computed past a
+            // short scrollport's maximum can never be reached, and a tile set to `autoAlpha: 0` is
+            // stranded at `visibility: hidden` rather than merely un-animated. Two independent
+            // guards, because the failure is silent and costs the operator a control they cannot
+            // see, click, or hear announced.
+            start: 'clamp(top 88%)',
+            once: true,
+            interval: 0.1,
+            onEnter: (batch) =>
+              gsap.to(batch, {
+                autoAlpha: 1,
+                y: 0,
+                duration: 0.22,
+                ease: 'power2.out',
+                stagger: (i: number) => staggerDelayMs(i) / 1000,
+              }),
+          });
+        };
+        revealBatch(boardTiles, undefined);
+        revealBatch(railTiles, railScroll ?? undefined);
       }
 
       // ── THE SKIP REVEAL (Alec, 2026-08-07) ──────────────────────────────────────────────────────
@@ -789,6 +841,9 @@ export function ResolutionFlowClient({
       if (sticky && grid) {
         ScrollTrigger.create({
           trigger: grid,
+          // Same scroller split as the tile batch above: `top 128px` is a SCROLLPORT offset, and the
+          // plan grid lives inside the rail in shell mode.
+          ...(railScroll !== null && railScroll.contains(grid) ? { scroller: railScroll } : {}),
           start: 'top 128px',
           end: 'max',
           onToggle: (self) => sticky.classList.toggle('q-stuck', self.isActive),
@@ -1175,6 +1230,44 @@ export function ResolutionFlowClient({
             </>
           );
 
+  // ── ONE ELEMENT, ONE MOUNT (2026-08-12) ────────────────────────────────────────────────────────
+  // Built here rather than inline in the bag so the SHELL can render it in the rail (Alec: the AI
+  // panel belongs in the "chat" column) while the SINGLE-COLUMN path keeps filling StageAnswer's
+  // `aiPanel` slot byte-identically. Two `<QualifyAiPanel>` constructions would be two INSTANCES:
+  // `autoAskedRef` and `externalConsumedRef` are per-instance, so each would fire its own audited,
+  // BILLED model call per arm — and the audit row is written before the stream, so cancelling one
+  // does not undo it.
+  const aiPanelNode =
+    state.resolution && snapshot ? (
+      <QualifyAiPanel
+        snapshot={snapshot}
+        blind={!viewerHasAmountsCapability}
+        // ONE COLUMN IN THE RAIL. The panel's chip grid uses VIEWPORT breakpoints, so `lg:grid-cols-3`
+        // is unconditionally on inside a 416px pane. `dense` is the mount telling it where it is;
+        // `shellMode` is server-decided and never flips at runtime, so this is not a responsive swap.
+        dense={shellMode}
+        // WHERE the answer stage drew the payer's book, so the panel's grounding caption
+        // names the list the model actually read. TOLD, not derived from the field — it is
+        // on the wire for the v2 tab too, and v2 draws no book (see the prop's own doc).
+        //
+        // ⚠ ONE CALL, NOT A TERNARY HERE. The composition (leads-first, then on-screen)
+        // used to be written inline in this file — which nothing hermetic imports, so
+        // INVERTING IT shipped app 557/0 and a clean build with 'leading' unreachable.
+        // The decision now lives in bookPlacement.ts with its own tests; this is JSX.
+        bookPlacement={bookPlacementFor(snapshot)}
+        autoAsk={autoAsk}
+        // ONE-SHOT (review Critical 2): without the disarm, every re-scope (window,
+        // billed-under chip) nulls the snapshot, unmounts the panel, and the remount
+        // re-fires an unrequested, audited, billed LLM call over whatever was on screen.
+        onAutoAsked={() => dispatch({ type: 'ai_disarmed' })}
+        // The rail composer's ask (Smoke shell) — nonce'd, one-shot, disarmed by the owner
+        // here so a panel remount cannot re-fire it. The protocol is layout-independent and is
+        // UNCHANGED by the 2026-08-12 move: two siblings still cannot call each other's functions.
+        externalAsk={externalAsk}
+        onExternalAsked={() => setExternalAsk(null)}
+      />
+    ) : null;
+
   // ── THE ANSWER BAG — one derivation, two render sites. ResolutionStages reads it for the live
   // region + receipt EVEN when answerInline is false; the board's StageAnswer renders from the same
   // object, so the spoken claim and the drawn answer cannot disagree across panes.
@@ -1182,30 +1275,10 @@ export function ResolutionFlowClient({
     ? {
         snapshot,
         snapshotError,
-        aiPanel: snapshot ? (
-          <QualifyAiPanel
-            snapshot={snapshot}
-            blind={!viewerHasAmountsCapability}
-            // WHERE the answer stage drew the payer's book, so the panel's grounding caption
-            // names the list the model actually read. TOLD, not derived from the field — it is
-            // on the wire for the v2 tab too, and v2 draws no book (see the prop's own doc).
-            //
-            // ⚠ ONE CALL, NOT A TERNARY HERE. The composition (leads-first, then on-screen)
-            // used to be written inline in this file — which nothing hermetic imports, so
-            // INVERTING IT shipped app 557/0 and a clean build with 'leading' unreachable.
-            // The decision now lives in bookPlacement.ts with its own tests; this is JSX.
-            bookPlacement={bookPlacementFor(snapshot)}
-            autoAsk={autoAsk}
-            // ONE-SHOT (review Critical 2): without the disarm, every re-scope (window,
-            // billed-under chip) nulls the snapshot, unmounts the panel, and the remount
-            // re-fires an unrequested, audited, billed LLM call over whatever was on screen.
-            onAutoAsked={() => dispatch({ type: 'ai_disarmed' })}
-            // The rail composer's ask (Smoke shell) — nonce'd, one-shot, disarmed by the owner
-            // here so a panel remount cannot re-fire it. Same discipline as autoAsk above.
-            externalAsk={externalAsk}
-            onExternalAsked={() => setExternalAsk(null)}
-          />
-        ) : null,
+        // SHELL: the panel mounts in the RAIL (see the LaneRail children below), so this slot is
+        // empty — filling both would be two instances and two billed calls per arm.
+        // SINGLE COLUMN: unchanged, StageAnswer renders it inline as it always has.
+        aiPanel: shellMode ? null : aiPanelNode,
         pending: isPending,
         scopeSource,
         // The reducer field itself. Everything that must not claim a plan was chosen —
@@ -1346,6 +1419,12 @@ export function ResolutionFlowClient({
     // rail. A second identical h1 would give the page two top-level headings with the same text —
     // heading navigation would announce the surface twice and neither would be the landmark.
     <main ref={stageRef} className="mx-auto max-w-[1680px] p-4 sm:p-6">
+      {/* ⚠ `items-start` IS LOAD-BEARING AS OF 2026-08-12, NOT INCIDENTAL. With the grid's default
+          `align-items: stretch` the rail's box is stretched to the full row height, leaving zero
+          travel distance — and `position: sticky` becomes a silent no-op with nothing to grep for.
+          Do not "tidy" this to `items-stretch`; that alignment belongs to the full-height two-pane
+          shell, which was considered and rejected (it moves the BOARD's scroll off the document too,
+          breaking both ScrollTriggers instead of one). */}
       <div className="grid grid-cols-1 items-start gap-5 xl:grid-cols-[416px_minmax(0,1fr)]">
         <LaneRail
           // ALL THREE GATE ON `laneOpen`, NOT ON `state.resolution`. The rail describes the session,
@@ -1360,6 +1439,25 @@ export function ResolutionFlowClient({
           composer={<QualifyComposer snapshot={snapshot} onAsk={onComposerAsk} />}
         >
           {stagesNode}
+          {/* ── THE AI PANEL, IN THE RAIL (Alec, 2026-08-12) ─────────────────────────────────────
+              Brief item 1: asking and answering belong in the same column. The plan tile's
+              "✦ Ask AI about this plan" ARMS `autoAsk` from inside this rail and the answer used to
+              stream into the board's right column below the tape, the ticker and the hero — usually
+              off-screen. Arm and answer are now ~200px apart.
+
+              ⚠ EXACTLY ONE MOUNT, AND IT IS NOT NEGOTIABLE. `autoAskedRef` and `externalConsumedRef`
+              are per-INSTANCE, so two mounts each fire an audited, BILLED model call per arm — and
+              the audit row is written BEFORE the stream, so aborting one does not undo it. That is
+              why this renders `aiPanelNode` (the same element built once above) and why the bag's
+              slot is nulled in shell mode. `shellMode` is server-decided and never flips at runtime,
+              so there is no responsive swap and no re-parent. NEVER render the panel behind a
+              responsive-visibility branch — re-parenting in React is unmount+remount, which cancels
+              the in-flight stream and resets active/text/slotState.
+
+              INSIDE the rail's `overflow-y-auto`, deliberately — one scrollbar governs "the chat".
+              Do not give the panel its own nested scroller: two stacked scrollports in a 416px
+              column is the failure mode. */}
+          {aiPanelNode}
         </LaneRail>
 
         <div className="min-w-0">

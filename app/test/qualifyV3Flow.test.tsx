@@ -51,6 +51,8 @@ import {
   type ShellAction,
 } from '../components/qualify/v3/flow-state';
 import { revealScopeFor } from '../components/qualify/shell/shell-session';
+// The band washes the verdict card paints, measured against the facet pills that now sit on it.
+import { IQ_BAND_WASH } from '../components/qualify/tokens';
 import { deriveNotices, panelProvenance } from '../lib/qualify/resolution';
 import type { PanelEvidence, PanelId, QualifyResolution } from '../lib/qualify/resolution';
 import type { QualifyFacility, QualifySnapshot } from '../lib/qualify/contract';
@@ -1324,7 +1326,9 @@ test('a selected employer is a REMOVABLE TAG on the type-ahead, and the vocabula
   );
   const inv = inventoryRegion(html);
   assert.match(inv, /aria-label="Remove ACME CO"/, 'the picked employer is a tag you can take off');
-  assert.match(inv, />Employers<span class="[^"]*">On · 1 of 2</, 'and the badge counts it');
+  // ⚠ THE BADGE IS ON THE STRIP, NOT THE PICKER, SINCE 2026-08-12 — the strip is permanent now, so
+  // a badge on the picker's own label row printed the same reading twice within 200px.
+  assert.match(inv, />Employers<\/span><span class="[^"]*">On · 1 of 2</, 'and the strip counts it');
   // NEGATIVE: the OTHER employer in the universe is not on screen at rest. A chip wall would have it.
   assert.ok(!inv.includes('SOUTHWEST AIRLINES CO'), 'the unpicked vocabulary lives in the dropdown, not the row');
 });
@@ -1547,20 +1551,23 @@ test('I9: no meaning-bearing text below 12px anywhere in the flow', () => {
       },
       /at NASHVILLE MENTAL HEALTH/,
     ],
-    // THE NARROW SEARCH CARD, BOTH POSITIONS (2026-08-07). Two rows, not one: collapsed and expanded
-    // render DIFFERENT markup — the badge strip and the tally on one side, the chip rows and the
-    // employer disclosure on the other — so a single case would leave half the card outside the
-    // floor. The card is a dark `.q-subject` surface whose labels are the blessed eyebrow at its
-    // dark palette, and the eyebrow is exactly the treatment this floor exists to police.
+    // THE SCOPE CARD, BOTH POSITIONS (2026-08-07; re-pointed at the verdict card 2026-08-12). Two
+    // rows, not one: collapsed and expanded render DIFFERENT markup — the tag strip and the
+    // footnotes on one side, the chip rows and the employer disclosure on the other — so a single
+    // case would leave half the card outside the floor.
+    // ⚠ IT WAS A DARK `.q-subject` SURFACE UNTIL 2026-08-12, and the labels were the blessed eyebrow
+    // at that dark palette. The verdict card is `bg-surface`, so those labels are `text-ink400` now
+    // — but the eyebrow SIZE is unchanged and is exactly the treatment this 12px floor polices, so
+    // the case earns its place at the new address for the same reason it did at the old one.
     [
-      'answer + NARROW SEARCH card collapsed',
+      'answer + verdict card collapsed',
       'answer',
       fixture(),
       { answer: answerProps({ snapshot: allPayersSnapshot(), skipped: true, scopeSource: 'dominant', candidates: orderedCandidates(fixture()) }) },
-      /Narrow search/,
+      /Refresh the ranking/,
     ],
     [
-      'answer + NARROW SEARCH card expanded',
+      'answer + verdict card expanded',
       'answer',
       fixture(),
       {
@@ -1572,7 +1579,7 @@ test('I9: no meaning-bearing text below 12px anywhere in the flow', () => {
           narrowExpanded: true,
         }),
       },
-      /Hide the fields/,
+      /Hide filters/,
     ],
     // ...and the ANSWER-stage ticker, which is a live control there rather than the landing's inert
     // strip. Different markup (chevrons, enabled buttons), so it needs its own sweep.
@@ -1969,6 +1976,27 @@ test('the window sentence: ladder variants wait while stale; nothing speaks over
       />Window<\/span><span class="[^"]*">On · /,
       `the card still states the window's state after a failure (windowDays=${windowDays})`,
     );
+    // ...AND SO DOES BILLED UNDER, which is the half a first draft of the 2026-08-12 card got wrong.
+    // It suppressed the tag on the whole `stale` union (`refetching || staleAfterError ||
+    // refreshing`), invoking rule 2654416 — "a claim about the set being REPLACED". On a FAILED
+    // refetch nothing is being replaced: the previous ranking is still drawn, the banner says so,
+    // and the billed-under CHIP row below is still lit for that same label. Blanking the tag
+    // contradicted both, and only the Window arm above was guarded, so nothing caught it.
+    assert.match(
+      inventoryRegion(failed),
+      />Billed under<\/span><span class="[^"]*">On · AETNA US HEALTHCARE</,
+      `a failed refetch still shows the label the ranking on screen is scoped to (windowDays=${windowDays})`,
+    );
+    // NEGATIVE CONTROL — a genuine in-flight re-scope DOES suppress it, which is the asymmetry the
+    // card closed on purpose. Without this the assertion above would be satisfied by no gate at all.
+    const inFlight = render(
+      props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), windowDays, refetching: true }) }),
+    );
+    assert.ok(
+      !inventoryRegion(inFlight).includes('>Billed under</span>'),
+      `an in-flight re-scope withholds the label of the set being replaced (windowDays=${windowDays})`,
+    );
+
     // EXPANDED — and the CHIPS are the escape route. Changing the window is how an operator gets out
     // of a failed refetch, so they must survive it live, with the current one still reading pressed.
     const open = render(props('answer', fixture(), { answer: answerProps({ ...base, narrowExpanded: true }) }));
@@ -2237,7 +2265,11 @@ test('all-payers: NO billed-under chip is active, and the caption says the ranki
   // i.e. between two strings whose ORDER was an accident of layout — and the NARROW SEARCH card moved
   // the caption into the summary ABOVE the row, inverting the slice into an empty string. An empty
   // slice passes every `!includes(...)` below it, so this guard would have gone quietly vacuous.
-  const billedUnder = rowAround(html, '>Billed under<');
+  // ⚠ THE STRIP GOT THERE FIRST (2026-08-12). `>Billed under<` now appears TWICE — once as the
+  // verdict card's permanent tag and once as the fields row's label — and `rowAround` takes the
+  // first. The tag carries no chips, so the slice went vacuous. Anchored on the CHIP row's own
+  // marker instead, which only the fields well has.
+  const billedUnder = rowAround(html, 'charge lines under this label');
   assert.ok(billedUnder.includes('AETNA'), 'the slice really is the billed-under row');
   assert.ok(!billedUnder.includes(' · showing'), 'no billed-under chip claims to be the scope');
   assert.ok(!/aria-pressed="true"[^>]*>AETNA/.test(html), 'and none reads pressed');
@@ -2356,14 +2388,15 @@ test('THE SKIP INVENTORY: every facet states ON or OFF, and the toggles are live
   // The headline claim, then one legible state per facet. ⚠ The window is NAMED as the standing
   // exception rather than swept into "nothing is restricting this search" — see the sentence's own
   // comment, and the one-click contradiction below.
-  assert.match(inv, /No filters are on — apart from the window, nothing is narrowing this search\./);
+  assert.match(inv, /Nothing narrows this search but the window\./);
   assert.match(inv, />Window<\/span><span class="[^"]*">On · automatic</, 'window is never off, and says which it is');
   assert.match(inv, />Funding<\/span><span class="[^"]*">Off · all \d+</);
   assert.match(inv, />Billed under<\/span><span class="[^"]*">Off · all 2 labels</);
-  // EMPLOYERS IS A TYPE-AHEAD NOW, so its badge rides the picker's own label row rather than a
-  // label-span/badge-span pair. Same expression (`facetReading`), same vocabulary, different frame —
-  // and the frame is asserted here so a picker that silently dropped the badge is a failure.
-  assert.match(inv, /Employers<span class="[^"]*">Off · all \d+</, 'the employer picker still states its reach');
+  // ⚠ EMPLOYERS' BADGE RODE THE PICKER'S OWN LABEL ROW UNTIL 2026-08-12, because the collapsed
+  // strip vanished when the fields opened. The strip is PERMANENT now, so every facet — employers
+  // included — states itself in the SAME label-span/badge-span frame, from the same `facetReading`
+  // expression. Asserted here so a strip that silently dropped a facet is a failure.
+  assert.match(inv, />Employers<\/span><span class="[^"]*">Off · all \d+</, 'the strip states the employer facet');
   assert.ok(!inv.includes('Plan type'), 'plan type stopped being a switch 2026-08-07 — no row, no badge');
   // ⚠ TOGGLEABLE IN PLACE. The inventory is the CONTROLS, not a summary beside them — every row it
   // lists carries its own control in the same markup, which is what "flip any of them" requires.
@@ -2400,11 +2433,11 @@ const narrowCase = (narrowExpanded: boolean): string =>
     }),
   );
 
-test('THE NARROW SEARCH CARD, COLLAPSED: the summary IS the inventory — every facet states ON or OFF with no click', () => {
+test('THE VERDICT CARD, COLLAPSED: the tag strip IS the inventory — every facet states ON or OFF with no click', () => {
   const shut = inventoryRegion(narrowCase(false));
   // The same five claims the expanded card makes, in the same vocabulary, from the same expressions.
   // A second vocabulary for the collapsed state is the drift the AREA-denominator bug shipped as.
-  assert.match(shut, /No filters are on — apart from the window, nothing is narrowing this search\./);
+  assert.match(shut, /Nothing narrows this search but the window\./);
   assert.match(shut, />Window<\/span><span class="[^"]*">On · automatic</, 'window is never off, and says which it is');
   assert.match(shut, />Funding<\/span><span class="[^"]*">Off · all \d+</);
   assert.match(shut, />Employers<\/span><span class="[^"]*">Off · all \d+</);
@@ -2415,7 +2448,7 @@ test('THE NARROW SEARCH CARD, COLLAPSED: the summary IS the inventory — every 
   assert.ok(!shut.includes('Plan type'), 'no plan-type facet in the inventory');
 });
 
-test('THE NARROW SEARCH CARD, COLLAPSED: the CONTROLS are genuinely gone — not hidden, not serialized', () => {
+test('THE VERDICT CARD, COLLAPSED: the CONTROLS are genuinely gone — not hidden, not serialized', () => {
   const shut = inventoryRegion(narrowCase(false));
   const open = inventoryRegion(narrowCase(true));
   // POSITIVE CONTROL FIRST. Without these four, every negative below would pass against a card that
@@ -2433,29 +2466,29 @@ test('THE NARROW SEARCH CARD, COLLAPSED: the CONTROLS are genuinely gone — not
   assert.match(open, /aria-expanded="true"[^>]*aria-controls="qualify-narrow-fields"/);
 });
 
-test('THE NARROW SEARCH CARD: the surface clips its own glow — never the type-ahead dropdown', () => {
+test('THE VERDICT CARD: nothing clips the type-ahead dropdown', () => {
   // ⚠ A CLIP ON THE CARD IS A CLIP ON THE PICKER'S OPTION LIST, and nothing else in this file would
-  // notice. `.q-subject::after` is a coral glow positioned OUTSIDE the card's box (right:-40px,
-  // top:-60px), so something has to clip it — the card wore `overflow-hidden` for exactly that. But
-  // an ancestor `overflow-hidden` also clips absolutely-positioned DESCENDANTS, and
-  // MultiSelectTagPicker's dropdown is one (`absolute top-full max-h-64`, opening downward from a row
-  // that sits near the bottom of the card). Left alone, the employer type-ahead would render its
-  // matches into a box whose bottom the operator cannot see, with nothing wrong in the DOM to catch.
-  // So the clip moved down one level, onto a layer that holds nothing but the paint.
+  // notice. MultiSelectTagPicker's dropdown is absolutely positioned (`absolute top-full max-h-64`,
+  // opening downward from a row near the bottom of the card), so ANY `overflow-hidden` ancestor
+  // renders its matches into a box whose bottom the operator cannot see, with nothing wrong in the
+  // DOM to catch.
+  //
+  // ⚠ REWRITTEN 2026-08-12, AND THE REWRITE IS THE POINT. This test used to assert a two-layer
+  // arrangement: the deleted NARROW SEARCH card needed `overflow-hidden` because `.q-subject::after`
+  // was a coral glow positioned OUTSIDE its box (right:-40px, top:-60px), so the clip was pushed down
+  // onto a paint-only `<span>` and this test pinned it there. The verdict card that replaced it has
+  // no gradient, no glow and therefore NO CLIP ANYWHERE — `.q-subject` was deleted from globals.css
+  // in the same change so nobody can re-introduce one by re-using the class. What survives is the
+  // guard that actually protected the operator: the region the picker lives in must not clip.
   const card = inventoryRegion(narrowCase(true));
+  assert.match(card, /aria-label="Employers"/, 'positive control: the picker really is inside this card');
   const cardTag = card.slice(0, card.indexOf('>') + 1);
   assert.ok(!/\boverflow-hidden\b/.test(cardTag), 'the card itself must not clip — the dropdown lives inside it');
-  // POSITIVE CONTROL, both halves: the clip still EXISTS (the glow is still contained) and it is on
-  // the paint layer. Without them, deleting `overflow-hidden` outright would satisfy the line above.
-  assert.match(
-    card,
-    /<span aria-hidden="true" class="[^"]*\bq-subject\b[^"]*\boverflow-hidden\b[^"]*"/,
-    'the glow layer clips itself',
-  );
-  assert.ok(!/\bq-subject\b/.test(cardTag), 'and the gradient rides that layer, not the card');
+  assert.ok(!/\boverflow-hidden\b/.test(card), 'and no wrapper inside it may either');
+  assert.ok(!/\bq-subject\b/.test(card), 'the deleted gradient layer must not come back');
 });
 
-test('THE NARROW SEARCH CARD, COLLAPSED: the skip reveal still has beats to stagger', () => {
+test('THE VERDICT CARD, COLLAPSED: the skip reveal still has beats to stagger', () => {
   // ⚠ `staggerDelayMs(0) === 0`, so a one-element stagger is arithmetically a no-op. A collapse that
   // unmounted the rows without re-homing the hook would leave AREA as the only `[data-v3-facet]` on
   // the whole stage and kill the reveal silently — the tween would still run, over one element, at
@@ -2467,7 +2500,7 @@ test('THE NARROW SEARCH CARD, COLLAPSED: the skip reveal still has beats to stag
   }
 });
 
-test('THE NARROW SEARCH CARD, COLLAPSED: it states what the search resolved to, and tallies the switches', () => {
+test('THE VERDICT CARD, COLLAPSED: it states what the search resolved to, and every facet ON or OFF', () => {
   const shut = inventoryRegion(narrowCase(false));
   // (a) WHAT THE SEARCH RESOLVED TO — plan-or-all-plans, payer, window. A reader who never clicks
   //     must still know the scope they are looking at.
@@ -2482,18 +2515,18 @@ test('THE NARROW SEARCH CARD, COLLAPSED: it states what the search resolved to, 
   const off = (shut.match(/>Off · /g) ?? []).length;
   assert.equal(on, 1, 'window is on and never off — the honest floor for this card, not a bug');
   assert.equal(off, 3, 'funding, employers, billed under — plan type stopped being a switch 2026-08-07');
-  assert.match(
-    shut,
-    new RegExp(`>${on} of these ${on + off} switches on</span>`),
-    'the tally states what the strip shows',
-  );
-  // "OF THESE" IS LOAD-BEARING, not filler. The card holds four of the screen's five facets — AREA's
-  // control lives beside the grid — so an unqualified "1 on" reads as a claim about the whole screen
-  // and can contradict the headline one line above it. See the AREA test below.
+  // ⚠ THE TALLY SENTENCE WENT 2026-08-12 — four tags are countable at a glance, and the disclosure
+  // that used to need "open the fields to change any of them" is 40px to their right. THE COUNTS
+  // STAY ASSERTED: a strip that silently stopped rendering a facet is still the defect this guards,
+  // and it is exactly the defect a tally derived from the strip could never catch.
+  assert.match(shut, />Window<\/span>/, 'positive control: the scope bar rendered');
+  // The card holds four of the screen's five facets — AREA's control lives beside the grid — so the
+  // footnote NAMES that narrow when it is live rather than folding it into a count. See the AREA
+  // test below.
   assert.ok(!shut.includes('area narrow'), 'no area narrow here, so nothing to point at');
 });
 
-test('THE NARROW SEARCH CARD, COLLAPSED: an active AREA narrow is NAMED, so the tally cannot contradict the headline', () => {
+test('THE VERDICT CARD, COLLAPSED: an active AREA narrow is NAMED, so the strip cannot contradict the headline', () => {
   // ⚠ THE COLLAPSED CARD IS THE ONLY THING ON SCREEN ANSWERING "IS ANYTHING NARROWING THIS SEARCH",
   // and with an area narrow it was answering incompletely. Every in-card switch off + area on gives:
   // headline "Some switches are on" (correct — `anyFacetOn` has counted area since 2026-08-07), then
@@ -2526,14 +2559,14 @@ test('THE NARROW SEARCH CARD, COLLAPSED: an active AREA narrow is NAMED, so the 
     );
 
   const narrowed = withArea('TN');
-  assert.match(narrowed, /Some switches are on/, 'the headline counts area — it always has');
-  assert.match(narrowed, /plus the area narrow, beside the list/, 'and the tally says where the other one is');
+  assert.match(narrowed, /Some narrows are on/, 'the headline counts area — it always has');
+  assert.match(narrowed, /Plus the area narrow, beside the list\./, 'and the footnote says where the other one is');
 
   // NEGATIVE CONTROL. Without it the clause could be unconditional, which would name a narrow that
   // is not on — the mirror image of the bug being fixed.
   const wide = withArea(AREA_ALL);
   assert.ok(!wide.includes('area narrow'), 'no area narrow, no clause');
-  assert.match(wide, /No filters are on/, 'and the headline agrees that nothing is on');
+  assert.match(wide, /Nothing narrows this search/, 'and the headline agrees that nothing is on');
 });
 
 // The AREA facet is the one whose control does NOT live on the control card (#164 put it beside the
@@ -2576,8 +2609,8 @@ test('THE SKIP INVENTORY covers AREA too, even though its control lives beside t
   const narrowed = withArea('TN');
   // The headline lives INSIDE the card, so it is asserted inside the card — unbounded, this passed on
   // a headline rendered anywhere on the page.
-  assert.match(inventoryRegion(narrowed), /Some switches are on — everything marked Off is unrestricted\./);
-  assert.ok(!narrowed.includes('No filters are on'), 'an active area IS a filter that is on');
+  assert.match(inventoryRegion(narrowed), /Some narrows are on — anything marked Off is unrestricted\./);
+  assert.ok(!narrowed.includes('Nothing narrows this search'), 'an active area IS a filter that is on');
   assert.match(narrowed.slice(narrowed.indexOf('aria-label="Filter the ranked list by area"')), /On · 1 of \d+/);
 });
 
@@ -2629,12 +2662,12 @@ test('the inventory headline flips once ANY facet is on — including the billed
   const scoped = render(
     props('answer', fixture(), { answer: answerProps({ snapshot: snapshotFixture(), skipped: true, scopeSource: 'dominant' }) }),
   );
-  assert.match(inventoryRegion(scoped), /Some switches are on — everything marked Off is unrestricted\./);
+  assert.match(inventoryRegion(scoped), /Some narrows are on — anything marked Off is unrestricted\./);
   // ⚠ THIS NEGATIVE USED TO NAME 'Every switch is off', WHICH THE I4 FIX DELETED FROM THE SOURCE —
   // so it passed no matter what the component did. A guard that cannot fail is worse than no guard,
   // because it reads as coverage. Re-pointed at the string the component would ACTUALLY emit if
   // `anyFacetOn` regressed, which is the other arm of the same ternary.
-  assert.ok(!scoped.includes('No filters are on'), 'a payer-scoped ranking is a switch that is on');
+  assert.ok(!scoped.includes('Nothing narrows this search'), 'a payer-scoped ranking is a switch that is on');
 });
 
 test('with ONE label on file the billed-under scope is not counted as a switch that is on', () => {
@@ -2648,8 +2681,8 @@ test('with ONE label on file the billed-under scope is not counted as a switch t
   const html = render(props('answer', fixture(), { answer: answerProps({ snapshot: one, skipped: true, scopeSource: 'dominant' }) }));
   // Whole-document negative on purpose — "Billed under" must appear NOWHERE, card or not.
   assert.ok(!html.includes('Billed under'), 'the chip row self-hides at one option');
-  assert.match(inventoryRegion(html), /No filters are on — apart from the window/);
-  assert.ok(!html.includes('Some switches are on'));
+  assert.match(inventoryRegion(html), /Nothing narrows this search but the window/);
+  assert.ok(!html.includes('Some narrows are on'));
 });
 
 test('the inventory sentence is a SKIP affordance — it does not intrude on a resolved plan pick', () => {
@@ -2658,8 +2691,8 @@ test('the inventory sentence is a SKIP affordance — it does not intrude on a r
       answer: answerProps({ snapshot: snapshotFixture(), scopeSource: 'pick', candidates: orderedCandidates(fixture()) }),
     }),
   );
-  assert.ok(!picked.includes('No filters are on'), 'no inventory headline outside a skip');
-  assert.ok(!picked.includes('Some switches are on'));
+  assert.ok(!picked.includes('Nothing narrows this search'), 'no inventory headline outside a skip');
+  assert.ok(!picked.includes('Some narrows are on'));
   // The per-facet badges DO stay — they are honest on every path, and a second vocabulary for the
   // picked path would be exactly the kind of drift this file keeps out. ⚠ BOUNDED: unbounded, the
   // AREA badge below the card satisfied this on its own, so the assertion said nothing about the card.
@@ -3861,7 +3894,7 @@ const withFacility = (
 const gridRegion = (html: string): string =>
   outerHtmlFrom(html, html.lastIndexOf('<section', html.indexOf('qualify-scorecard-heading')));
 
-test('S4 — the facility type-ahead renders BESIDE the grid, and NEVER inside the NARROW SEARCH card', () => {
+test('S4 — the facility type-ahead renders BESIDE the grid, and NEVER inside the verdict card', () => {
   const html = withFacility(threeStateSnapshot(), { candidates: orderedCandidates(fixture()) });
   // POSITIVE CONTROL: the grid rendered, so the negative below is about a real screen.
   assert.match(html, /NASHVILLE MENTAL HEALTH/, 'the scorecard rendered — otherwise this test is vacuous');
@@ -3877,9 +3910,13 @@ test('S4 — the facility type-ahead renders BESIDE the grid, and NEVER inside t
   const row = outerHtmlFrom(html, html.lastIndexOf('<div data-v3-facet', html.indexOf('aria-label="Facility"')));
   assert.match(row, /Off · all 5/, 'five offerable facilities, and it says so while off');
   assert.match(row.slice(0, 60), /data-v3-facet/, 'it carries the reveal hook so the stagger includes it');
-  // AND THE CARD'S OWN TALLY IS UNMOVED. Facility is not a card facet, so `cardFacets` must not grow —
-  // the hardcoded `off === 3` assertion above stays about the CARD's facets and is untouched by S4.
-  assert.match(inventoryRegion(html), /of these 4 switches on/, 'four card facets, and facility is not one');
+  // AND THE CARD'S OWN STRIP IS UNMOVED. Facility is not a card facet, so `cardFacets` must not grow
+  // — the hardcoded `off === 3` assertion above stays about the CARD's facets and is untouched by S4.
+  // (The tally SENTENCE it used to read went 2026-08-12; the facet count it was standing in for is
+  // asserted directly.)
+  const strip = inventoryRegion(html);
+  assert.equal((strip.match(/tracking-wide text-ink400">(Window|Funding|Employers|Billed under)</g) ?? []).length, 4,
+    'four card facets on the strip, and facility is not one');
 });
 
 test('S4 — “No Facility” is never OFFERABLE: you cannot send someone to a placeholder', () => {
@@ -4291,17 +4328,17 @@ test('S4 — the inventory counts the facility narrow: one pick can never read �
     resolved: { ...base.resolved, payerName: null, payerScope: 'all' },
   } as unknown as QualifySnapshot;
   const wide = withFacility(allPayersThreeStates, { skipped: true, scopeSource: 'dominant' });
-  assert.match(inventoryRegion(wide), /No filters are on — apart from the window/, 'positive control');
+  assert.match(inventoryRegion(wide), /Nothing narrows this search but the window/, 'positive control');
   const narrowed = withFacility(allPayersThreeStates, {
     skipped: true,
     scopeSource: 'dominant',
     facilityNarrow: ['NASH'],
   });
-  assert.match(inventoryRegion(narrowed), /Some switches are on — everything marked Off is unrestricted\./);
-  assert.ok(!inventoryRegion(narrowed).includes('No filters are on'), 'an active facility IS a filter that is on');
+  assert.match(inventoryRegion(narrowed), /Some narrows are on — anything marked Off is unrestricted\./);
+  assert.ok(!inventoryRegion(narrowed).includes('Nothing narrows this search'), 'an active facility IS a filter that is on');
 });
 
-test('S4 — the tally names BOTH beside-the-grid narrows, or one, or neither', () => {
+test('S4 — the footnote names BOTH beside-the-grid narrows, or one, or neither', () => {
   // The card holds FOUR of the screen's six facets. "Of these" scopes its count to the card; the
   // clause points at whichever of the two outside narrows is live. Enumerated rather than counted,
   // because "plus 2 narrows" makes an operator hunt for the second one.
@@ -4323,14 +4360,14 @@ test('S4 — the tally names BOTH beside-the-grid narrows, or one, or neither', 
       }),
     );
 
-  assert.match(tally({ area: 'TN' }), / · plus the area narrow, beside the list/);
-  assert.match(tally({ facilityNarrow: ['NASH'] }), / · plus the facility narrow, beside the list/);
-  assert.match(tally({ area: 'TN', facilityNarrow: ['NASH'] }), / · plus the area and facility narrows, beside the list/);
+  assert.match(tally({ area: 'TN' }), /Plus the area narrow, beside the list\./);
+  assert.match(tally({ facilityNarrow: ['NASH'] }), /Plus the facility narrow, beside the list\./);
+  assert.match(tally({ area: 'TN', facilityNarrow: ['NASH'] }), /Plus the area and facility narrows, beside the list\./);
   // NEGATIVE CONTROL: without it the clause could be unconditional, naming narrows that are off.
   const none = tally({});
   assert.ok(!none.includes('area narrow'), 'no area narrow, no clause');
   assert.ok(!none.includes('facility narrow'), 'no facility narrow, no clause');
-  assert.match(none, /1 of these 4 switches on/, 'and the CARD’s own tally never counts either of them');
+  assert.match(none, />Window<\/span>/, 'positive control: the strip rendered, so the negatives above mean something');
 });
 
 test('S4 HONESTY GUARD — the facility narrow reaches nothing that describes the FETCH', () => {
@@ -4427,7 +4464,7 @@ test('S5: the rebuilt-at line names the ROLLUP REBUILD, in a named timezone, and
   assert.equal(rebuiltAtSentence('not-a-timestamp'), unknown);
 });
 
-test('S5: the refresh control stands ON the NARROW SEARCH card, in BOTH positions, as a plain button', () => {
+test('S5: the refresh control stands ON the verdict card, in BOTH positions, as a plain button', () => {
   for (const narrowExpanded of [false, true]) {
     const html = render(
       props('answer', fixture(), {
@@ -4945,6 +4982,57 @@ test('S6: every colour the shimmer sweeps clears WCAG 1.4.3 on the fill — comp
   assert.ok(contrastRatio('#ffffff', '#000000') > 20, 'and the calculator agrees with the known extreme');
 });
 
+test('the facet pill stays visible on every IQ band wash — the border is the binary, not the fill', () => {
+  /* ⚠ MEASURED, NOT ASSUMED (2026-08-12). `bg-teal50` is #EAF4F2 and `IQ_BAND_WASH['50']` is #EAF4F2
+   * — BYTE-IDENTICAL, 1.000:1. Until the tags moved onto the verdict card that never mattered: the
+   * pills lived on a dark teal slab. On a band-washed card an ON pill on a Solid-band rating is an
+   * invisible chip, which is exactly the band in the screenshot that prompted the move. The fix was
+   * to make the pill a filled-teal OUTLINE against a hairline-line outline, and to take the wash off
+   * the card body so only the numeral's row carries it. This test is what stops a future palette
+   * change silently re-merging them. */
+  // `twToken` lower-cases; `IQ_BAND_WASH` is transcribed upper. Compare as colours, not as strings.
+  assert.equal(
+    twToken('teal50'),
+    IQ_BAND_WASH['50'].toLowerCase(),
+    'the collision is real — this is the premise of the whole test, not a typo',
+  );
+  for (const [band, wash] of Object.entries(IQ_BAND_WASH)) {
+    // The BORDER is what has to survive, because the fill provably does not.
+    assert.ok(
+      contrastRatio(twToken('teal500'), wash) >= 1.6,
+      `ON pill border on band ${band} (${wash}) is ${contrastRatio(twToken('teal500'), wash).toFixed(2)}:1`,
+    );
+    assert.ok(contrastRatio(twToken('teal700'), wash) >= 4.5, `ON pill text on band ${band}`);
+    assert.ok(contrastRatio(twToken('ink600'), wash) >= 4.5, `OFF pill text on band ${band}`);
+  }
+});
+
+test('the verdict card wears the band wash on the HERO ROW only, never behind the tags', () => {
+  // The structural half of the contrast fix above: if the wash ever climbs back onto the <section>,
+  // the pills are sitting on it again and the measurement test above stops describing the screen.
+  const card = inventoryRegion(narrowCase(false));
+  const cardTag = card.slice(0, card.indexOf('>') + 1);
+  assert.ok(!/background-color/.test(cardTag), 'the card itself must not be washed');
+  assert.match(cardTag, /bg-surface/, 'positive control: it paints a plain surface instead');
+
+  // ⚠ INSPECTING THE OPENING TAG IS NOT ENOUGH, and the first draft of this test only did that
+  // (review finding, 2026-08-12). A wash on ANY wrapper between the <section> and the tags puts the
+  // pills back on a tinted ground, and the opening-tag slice cannot see it. So: find where the wash
+  // actually is, and prove the tags are NOT inside it.
+  const heroOpen = card.indexOf('<div class="flex items-center gap-5 rounded-t-xl px-5 py-4"');
+  assert.ok(heroOpen >= 0, 'the hero row is not where this test thinks it is');
+  const hero = outerHtmlFrom(card, heroOpen);
+  assert.match(hero, /background-color:#/, 'positive control: this fixture is on a rated band, so a wash exists');
+  assert.ok(!hero.includes('>Window</span>'), 'the tag strip must not be inside the washed row');
+  assert.ok(!hero.includes('Refresh the ranking'), 'nor the controls');
+  // ...and NOTHING ELSE in the card carries one. `background-color` appears exactly once.
+  assert.equal(
+    (card.match(/background-color/g) ?? []).length,
+    1,
+    'exactly one washed element on this card, and the assertions above prove it is the hero row',
+  );
+});
+
 test('S6: the label survives a UA without background-clip:text — transparency is behind @supports', () => {
   /* `background-clip: text` + `color: transparent` is the whole shimmer, and the failure mode is
    * total: with no support the label is transparent over the fill and the PRIMARY control on the
@@ -5384,4 +5472,138 @@ test('the single-column layout still renders the chip row, untouched', () => {
   const html = render(props('answer', fixture(), { answer: answerProps() }));
   assert.match(html, /aria-label="Your search so far"/, 'the chip row is what QUALIFY_SMOKE_SHELL=off ships');
   assert.ok(!html.includes('data-testid="qualify-lane-receipt"'), 'and the checklist stays shell-only');
+});
+
+// ── THE AI PANEL'S ONE MOUNT (2026-08-12) ────────────────────────────────────────────────────────
+// Source-read rather than render-asserted, and that is forced: `<QualifyAiPanel>` reaches the
+// `'use server'` chain (gate → cookies → DB), so no hermetic test can render the shell that mounts
+// it. The same hole is why bookPlacement.ts, aiPayload.ts, externalAsk.ts and scrollPort.ts exist as
+// separate pure modules — see bookPlacement.ts's header for the regression that taught it.
+test('the AI panel mounts in the RAIL in shell mode and in the STAGE in single-column — never both', () => {
+  const shell = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/resolution-flow-client.tsx', import.meta.url)),
+    'utf8',
+  );
+  // ⚠ ONE CONSTRUCTION. `autoAskedRef` and `externalConsumedRef` are per-INSTANCE, so a second panel
+  // element in this file is a second instance firing its own audited, BILLED model call per arm —
+  // and the audit row is written BEFORE the stream, so cancelling one does not undo it.
+  // Matched on the OPENING TAG FOLLOWED BY A NEWLINE (the multi-line JSX form), not on the bare
+  // identifier: prose in this file legitimately names the component, and a count that a comment can
+  // trip is a count that gets deleted the first time it cries wolf.
+  // ⚠ COUNTED TWO WAYS, because either one alone is escapable (review finding, 2026-08-12): the
+  // newline form misses a single-line `<QualifyAiPanel snapshot={s} … />`, and a bare identifier
+  // count trips on the prose in this file's own comments. `<QualifyAiPanel` followed by whitespace
+  // or `/` or `>` is a construction in every JSX formatting; subtracting the backticked comment
+  // form is what keeps it honest.
+  const constructions = (shell.match(/<QualifyAiPanel[\s/>]/g) ?? []).length;
+  const inProse = (shell.match(/`<QualifyAiPanel>`/g) ?? []).length;
+  assert.equal(constructions - inProse, 1, 'two constructions are two billed calls per arm');
+  assert.match(shell, /aiPanel: shellMode \? null : aiPanelNode,/, 'the board slot is empty in shell mode');
+  assert.match(shell, /\{aiPanelNode\}\n\s*<\/LaneRail>/, 'and the rail is where it renders');
+  // The single-column path still fills the slot, and StageAnswer still has somewhere to put it.
+  const flow = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/resolution-flow.tsx', import.meta.url)),
+    'utf8',
+  );
+  assert.equal(flow.split('{props.aiPanel}').length - 1, 1, 'exactly one render site for the slot');
+});
+
+// ── THE RAIL IS THE ONE INNER SCROLLER, AND GSAP KNOWS (2026-08-12) ──────────────────────────────
+// `scroll` does not bubble from an overflow div to window. A ScrollTrigger over a rail tile that
+// still uses the default window scroller leaves that tile at `autoAlpha: 0` — `visibility: hidden`,
+// genuinely unclickable and out of the accessibility tree — with nothing thrown and nothing logged.
+// Source-read for the same reason as above: this effect needs a real layout, which jsdom has not.
+test('the rail scroller is marked, and both ScrollTriggers over it are re-pointed at it', () => {
+  const rail = readFileSync(
+    fileURLToPath(new URL('../components/qualify/shell/lane-rail.tsx', import.meta.url)),
+    'utf8',
+  );
+  assert.match(rail, /data-v3-rail-scroll className="min-h-0 flex-1 overflow-y-auto/,
+    'the marker must sit on the overflow div itself, not the outer box');
+  // The cap is what makes that overflow live at all; without it `flex-1` resolves to content height.
+  assert.match(rail, /xl:sticky xl:top-4 xl:max-h-\[calc\(100dvh-6rem\)\]/, 'sticky + capped, xl-only');
+  // ⚠ EVERY STICKY/CAP CLASS MUST BE `xl:`-GUARDED. Below 1280px the grid is one column and the rail
+  // PRECEDES the board in source order, so an unguarded full-height sticky rail buries it entirely.
+  // Read off the root element's own class list, so an unguarded class cannot hide in a child.
+  const rootClasses = rail.match(/className="(flex min-h-0 flex-col[^"]*)"/)?.[1];
+  assert.ok(rootClasses !== undefined, "the rail's root className is not where this test thinks it is");
+  for (const cls of rootClasses.split(/\s+/)) {
+    if (/^(sticky|top-\d|max-h-)/.test(cls)) {
+      assert.fail(`\`${cls}\` is unguarded — below xl it buries the board. Write it as \`xl:${cls}\`.`);
+    }
+  }
+
+  const client = readFileSync(
+    fileURLToPath(new URL('../components/qualify/v3/resolution-flow-client.tsx', import.meta.url)),
+    'utf8',
+  );
+  assert.match(client, /querySelector<HTMLElement>\('\[data-v3-rail-scroll\]'\)/, 'the client looks the scroller up');
+  assert.match(client, /railScroll\.contains\(t\)/, 'and splits the tile batch on containment');
+  assert.match(client, /revealBatch\(railTiles, railScroll \?\? undefined\)/, 'the rail batch gets the rail scroller');
+  assert.match(client, /revealBatch\(boardTiles, undefined\)/, 'the board batch keeps the document scroller');
+  assert.match(client, /railScroll\.contains\(grid\) \? \{ scroller: railScroll \} : \{\}/,
+    'and the plan-grid sticky trigger is re-pointed the same way');
+
+  // ⚠ THE TWO GUARDS THAT STOP THIS BEING A BUG BELOW 1280px, and both are load-bearing. The cap is
+  // `xl:`-gated while the marker and `overflow-y-auto` are not, so below that breakpoint the box
+  // declares a scroll overflow and cannot scroll. Handing it to ScrollTrigger anyway strands every
+  // tile past 88% of the rail's content height at `autoAlpha: 0` — visibility:hidden, unclickable,
+  // out of the a11y tree, nothing thrown. Caught in review before it shipped; pinned so it stays.
+  assert.match(client, /isLiveScrollPort\(\{/, 'marker presence is not scrollability — the client must probe');
+  assert.match(client, /scrollHeight: railEl\.scrollHeight,\n\s*clientHeight: railEl\.clientHeight,/,
+    'and the probe must feed it the real measurements');
+  assert.ok(
+    !/scroller: railScroll[\s\S]{0,40}start: 'top 88%'/.test(client),
+    'an unclamped start on a rail scroller is the stranding bug',
+  );
+  assert.match(client, /start: 'clamp\(top 88%\)'/,
+    "GSAP only clamps a start to max scroll in the opt-in `clamp(...)` form — belt-and-braces over the probe");
+  // ⚠ THE SCOPE STAYS UNIFIED. Only the SCROLLER became per-pane; `revealScopeFor` is untouched, so
+  // this is not a regression back to the 2026-08-10 bug where the board's tiles were never reached.
+  assert.match(client, /const revealRoot = revealScopeFor\(shellMode, root, stageEl\);/);
+});
+
+// ── NO WIDE-VIEWPORT ASSUMPTION MAY APPLY AT EVERY WIDTH (2026-08-12) ────────────────────────────
+// The rail is 416px ONLY at `xl`; below 1280px the shell grid is `grid-cols-1` and the rail is FULL
+// WIDTH. Two separate defects came from forgetting that in one change — the ScrollTrigger scroller
+// (above) and the chip grid (here) — so the rule gets its own guard rather than one more comment.
+// `shellMode` is a SERVER boolean: it says WHICH SHELL, never HOW WIDE. Anything it gates that is
+// really about the rail's 416px must carry an `xl:` of its own.
+test('the rail-width assumptions are xl-gated — shellMode says which shell, not how wide', () => {
+  const panel = readFileSync(
+    fileURLToPath(new URL('../components/qualify/qualify-ai-panel.tsx', import.meta.url)),
+    'utf8',
+  );
+  // The dense chip grid must keep the full-width breakpoints AND add the xl collapse — not replace
+  // them. A bare `grid-cols-1` under `dense` stacks full-sentence chips in one ~976px column on
+  // every viewport under 1280px, which is what shipped in the first draft.
+  assert.match(
+    panel,
+    /dense\s*\n?\s*\?\s*'grid grid-cols-1 gap-2 p-3\.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-1'/,
+    'dense must collapse at xl only, and keep sm:/lg: for the full-width rail below it',
+  );
+  // The non-dense arm — the v2 tab — stays byte-identical. `dense` defaults false, so a regression
+  // here silently changes a surface this change never touched.
+  assert.match(panel, /:\s*'grid grid-cols-1 gap-2 p-3\.5 sm:grid-cols-2 lg:grid-cols-3'/,
+    'the v2 tab keeps the three-column strip it has always had');
+
+  // And the shared width cap on the slot chip was NOT relaxed: 208px fits a 416px rail, and
+  // un-pinning it would have widened the full-width v2 tab ~2.4x. Withdrawn in review; pinned here.
+  const chip = readFileSync(
+    fileURLToPath(new URL('../components/qualify/slot-chip.tsx', import.meta.url)),
+    'utf8',
+  );
+  // ⚠ READ THE CLASS LISTS, NOT THE FILE. The withdrawal is recorded in a comment that necessarily
+  // names `max-w-full`, so a whole-file negative fails on the very note explaining why it must not
+  // be there. Second time this exact shape bit in one change (see the panel-mount count above):
+  // when a guard's needle is a word the surrounding prose legitimately uses, scope it to the code.
+  const chipClasses = [...chip.matchAll(/className="([^"]*)"/g)].map((m) => m[1]!);
+  assert.ok(
+    chipClasses.some((c) => c.includes('max-w-[13rem]') && c.includes('truncate')),
+    'the 13rem truncation cap stays',
+  );
+  assert.ok(
+    !chipClasses.some((c) => c.includes('max-w-full')),
+    'relaxing it widens the v2 tab, which this change must not touch',
+  );
 });

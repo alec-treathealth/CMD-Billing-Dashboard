@@ -2,8 +2,9 @@
  * The shared guided type-ahead's MATCH PREDICATE — the first direct test this primitive has ever had.
  *
  * WHY IT EXISTS NOW. `MultiSelectTagPicker` is rendered by the Collections explorer (facility, payer,
- * employer, funding), the v2 Qualify tab (employer, funding) and the v3 NARROW SEARCH card
- * (employer) — four surfaces, and a grep of `app/test/` for it returned ZERO hits. That absence was
+ * employer, funding), the v2 Qualify tab (employer, funding) and the v3 verdict card
+ * (employer; it was the NARROW SEARCH card until 2026-08-12) — four surfaces, and a grep of
+ * `app/test/` for it returned ZERO hits. That absence was
  * the stated blocker on fixing the S4 finding that the facility narrow cannot be found by typing its
  * raw CMD spelling: changing a filter four surfaces depend on, with no unit-level guard, is not a
  * change anyone should make. So the predicate is extracted and tested, and only then extended.

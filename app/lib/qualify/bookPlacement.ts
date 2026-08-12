@@ -173,11 +173,17 @@ export function bookPlacementFor(snapshot: QualifySnapshot | null | undefined): 
  * ⚠ COPY IS UNRATIFIED (flagged for Alec).
  */
 export function aiGroundingCaption(placement: QualifyBookPlacement): string {
+  // ⚠ POSITION-NEUTRAL SINCE 2026-08-12. These arms read "above" and "below" while the panel
+  // rendered in the BOARD, directly under the ranking. The panel now mounts in the LANE RAIL and the
+  // ranking is in the other column, so both words were false — and below `xl` the rail stacks ABOVE
+  // the board, so no positional word is safe here at all (the same reason
+  // qualify-shell-render.test.tsx forbids "on the left" in shell components). Name the LIST, never
+  // the direction.
   const grounded =
     placement === 'leading'
-      ? "in this member's own history, not the whole-book ranking above"
+      ? "in this member's own history, not the whole-book ranking"
       : placement === 'secondary'
-        ? 'in the ranking above, not the whole-book list below'
-        : 'on this screen';
+        ? 'in the member ranking, not the whole-book list'
+        : 'in this search';
   return `Preset questions only — each streams a short read grounded in the exact numbers ${grounded}. Nothing here is a guarantee of payment.`;
 }
