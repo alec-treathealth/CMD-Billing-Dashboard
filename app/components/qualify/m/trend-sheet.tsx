@@ -6,8 +6,14 @@
  * explanation (explainRating — the value-first sentence + limited-data flag), the 0059 coverage
  * breakdown (confirmed / estimate / unknown + the reversal note — Phase 4), then the final rating +
  * bucket. Carries NO dollar fields by design. Light bottom-sheet.
+ *
+ * ⚠ RATING PARITY WITH THE CARD (audit 2026-08-12, P0-1): this sheet explains THE NUMBER THE CARD
+ * SHOWS — ratingV2 + IQ band when rated, the v1 bucket only as the unrated fallback, the exact
+ * derivation swipe-row.tsx uses. It used to print v1 here unconditionally, so tapping "why" on a
+ * card reading 56 opened a sheet asking "Why is this rated 78?". If you change one derivation,
+ * change both.
  */
-import { mobileBucketStyle } from './colors';
+import { mobileBucketStyle, mobileIqStyle } from './colors';
 import { explainRating } from '../../../lib/qualify/rating';
 import { ratingSampleTier } from '../../../lib/qualify/sampleGate';
 import type { QualifyFacility } from '../../../lib/qualify/contract';
@@ -41,9 +47,21 @@ export function TrendSheet({
   // SAMPLE GATE (hotfix 2026-07-27): suppress the confident rating below 3 distinct patients.
   const tier = sampleGated ? ratingSampleTier(facility.distinctPatients) : 'full';
   const insufficient = tier === 'insufficient';
-  const b = insufficient ? mobileBucketStyle(null) : mobileBucketStyle(facility.rating);
+  // v2 preferred, v1 fallback — the SAME derivation as swipe-row.tsx (P0-1 parity; see header ⚠).
+  const v2 = facility.ratingV2 !== null && facility.iqBand !== null;
+  const b = insufficient
+    ? mobileBucketStyle(null)
+    : v2
+      ? mobileIqStyle(facility.iqBand)
+      : mobileBucketStyle(facility.rating);
   const ex = explainRating(facility.pctAllowedOfBilled, facility.lineCount);
-  const ratingText = insufficient || facility.rating === null ? '—' : String(Math.round(facility.rating));
+  const ratingText = insufficient
+    ? '—'
+    : v2
+      ? String(facility.ratingV2)
+      : facility.rating === null
+        ? '—'
+        : String(Math.round(facility.rating));
   return (
     <div
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
@@ -91,6 +109,13 @@ export function TrendSheet({
             </p>
           ) : null}
           <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5, color: INK600 }}>{ex.sentence}</p>
+          {/* The composite's basis (P0-2/P0-6 companion): out-of-100 weighting, renormalized over
+              the factors that have data — so equal numbers over different factor sets say so. */}
+          {v2 && !insufficient ? (
+            <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5, color: INK600 }}>
+              Scored on {facility.availableWeight} of 100 weighting — factors without data are excluded, never guessed.
+            </p>
+          ) : null}
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, borderTop: `0.5px solid ${LINE}`, paddingTop: 10 }}>
             <span style={{ color: INK600 }}>Rating</span>
             <span className="ths-num" style={{ fontWeight: 700, color: b.color }}>{insufficient ? 'Insufficient data' : `${ratingText} · ${b.label}`}</span>

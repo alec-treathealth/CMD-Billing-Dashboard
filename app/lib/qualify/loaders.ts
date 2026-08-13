@@ -26,6 +26,7 @@ import {
 import { buildQualifyCensusReadQuery, buildQualifyOutcomesReadQuery } from '../../../src/collections/qualifyCensus';
 import { buildRollupRefreshFreshnessQuery } from '../../../src/collections/rollupFreshnessQuery';
 import type { QualifyTokenKind } from '../../../src/collections/qualifyQuery';
+import { qualifyBusinessDayIso } from './contract';
 import {
   buildPolicyTapeQuery,
   buildPolicyTapeContextQuery,
@@ -285,7 +286,9 @@ export async function loadQualifyPolicyTapeContext(
   tokens: readonly string[],
 ): Promise<QualifyPolicyTapeContext[]> {
   if (tokens.length === 0) return [];
-  const today = new Date().toISOString().slice(0, 10);
+  // Business-zone "today", not the UTC slice — same anchor as every other Qualify window (audit
+  // 2026-08-12, P1-1: this was the second of the two stray UTC anchors).
+  const today = qualifyBusinessDayIso(new Date());
   const q = buildPolicyTapeContextQuery(
     [BXR_ENTITY_ID, INDIGO_ENTITY_ID],
     tokens,

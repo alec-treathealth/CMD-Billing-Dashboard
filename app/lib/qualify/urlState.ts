@@ -3,12 +3,20 @@
  * params. PURE (no React/Next imports) so the allowlist is enforced + root-tested here, not implied.
  *
  * ┌─ PHI ALLOWLIST (HARD CONSTRAINT — "PHI never in URLs") ────────────────────────────────────────┐
- * │ ONLY the NON-PHI compose selections may appear: facility · payer · employer · funding (each a   │
- * │ repeated key), plus window · loc. These are all resolved, non-PHI values (raw rollup facility    │
- * │ text, payer/employer/funding labels, the serialized window token, the LOC lens). NEVER a member  │
- * │ id, alpha prefix, group number, or client name — the compose bar's PHI terms have NO field here  │
- * │ BY TYPE, and the parser ignores every other param. A shared link restores the selection arrays;  │
- * │ the PHI narrows never leave the searcher's browser.                                              │
+ * │ ONLY the NON-PHI compose selections may appear: facility · payer · funding (each a repeated     │
+ * │ key), plus window · loc. These are all resolved, non-PHI values (raw rollup facility text,      │
+ * │ payer/funding labels, the serialized window token, the LOC lens). NEVER a member id, alpha      │
+ * │ prefix, group number, or client name — the compose bar's PHI terms have NO field here BY TYPE,  │
+ * │ and the parser ignores every other param. A shared link restores the selection arrays; the PHI  │
+ * │ narrows never leave the searcher's browser.                                                     │
+ * │                                                                                                 │
+ * │ ⚠ EMPLOYER IS EXCLUDED (audit 2026-08-12, P0-4). `employer_norm` is byte-identical to the       │
+ * │ `employer_name` this repo's own phi.ts lists as a PHI column (the options query aliases one AS  │
+ * │ the other), and resolution.ts (I7) + the D2 resolution query module's R6 already rule employers │
+ * │ out of every URL: ?employer=<small employer>&facility=<rehab>&payer=<carrier> in history/       │
+ * │ Referer/edge logs is a re-identification vector on an OON book. The chips still work            │
+ * │ — the selection lives in component state; it simply never rides the URL, so a shared link       │
+ * │ restores everything BUT the employer chips.                                                     │
  * └─────────────────────────────────────────────────────────────────────────────────────────────────┘
  *
  * Writes ride router.replace (never push) and fire on selection/window/loc change — never on a PHI
@@ -26,7 +34,7 @@ import type { QualifyLocFilter } from './groupClaims';
 export interface QualifyUrlState {
   facilities: string[]; // raw rollup facility text (== QualifyFacility.facilityKey), non-PHI
   payers: string[]; // plaintext primary_payer labels, non-PHI
-  employers: string[]; // employer_norm keys, non-PHI
+  employers: string[]; // IN-MEMORY ONLY — never serialized or parsed (PHI-adjacent; header ⚠, P0-4)
   funding: string[]; // 'Self-Funded' | 'Fully Insured', non-PHI
   window: QualifyWindow;
   loc: QualifyLocFilter;
@@ -64,14 +72,14 @@ function boundLabels(raw: string[]): string[] {
 export function buildQualifySearchParams(s: QualifyUrlState): string {
   const facilities = boundLabels(s.facilities);
   const payers = boundLabels(s.payers);
-  const employers = boundLabels(s.employers);
   const funding = boundLabels(s.funding);
-  const anySelection = facilities.length + payers.length + employers.length + funding.length > 0;
+  // s.employers is deliberately NOT read — see the header ⚠ (P0-4). An employer-only selection is
+  // therefore "nothing shareable": the URL must not even reveal that an employer filter is active.
+  const anySelection = facilities.length + payers.length + funding.length > 0;
   if (!anySelection && !s.loc) return ''; // nothing shareable → clean URL
   const p = new URLSearchParams();
   for (const v of facilities) p.append('facility', v);
   for (const v of payers) p.append('payer', v);
-  for (const v of employers) p.append('employer', v);
   for (const v of funding) p.append('funding', v);
   p.set('window', serializeQualifyWindow(s.window));
   if (s.loc) p.set('loc', s.loc.toLowerCase());
@@ -85,7 +93,9 @@ export function buildQualifySearchParams(s: QualifyUrlState): string {
 export function parseQualifySearchParams(params: URLSearchParams): QualifyUrlState {
   const facilities = boundLabels(params.getAll('facility'));
   const payers = boundLabels(params.getAll('payer'));
-  const employers = boundLabels(params.getAll('employer'));
+  // An inbound ?employer= is ignored like every other non-allowlisted param (P0-4) — old shared
+  // links degrade to the rest of their selection instead of resurrecting the employer filter.
+  const employers: string[] = [];
   const funding = boundLabels(params.getAll('funding'));
   const window = parseQualifyWindow(params.get('window')) ?? trailingWindow(30);
   const locToken = (params.get('loc') ?? '').toLowerCase();

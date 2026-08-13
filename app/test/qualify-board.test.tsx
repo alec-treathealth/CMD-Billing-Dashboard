@@ -347,3 +347,16 @@ test('rows map to the contract; a corrupt stored band is recomputed from the num
   assert.equal(res.items[1]?.echo, 'GGS');
   assert.equal(res.items[0]?.tokenTail, 'ffffff');
 });
+
+test('the band is ALWAYS recomputed from rating_now — a VALID-but-drifted stored band never ships (P1-3)', async () => {
+  // Before the 2026-08-12 fix, a stored band that PARSED ('30') was preferred over the number
+  // beside it (51 → band '50'), so a drifted cron row shipped the numeral in the wrong band's
+  // color and told the AI explainer the wrong band. The number is the truth; text is derived.
+  const res = await getQualifyPolicyTapeCore({
+    requirePrincipal: GATE_OK,
+    loadTape: async () => [tapeRow({ rating_now: 51, band_now: '30' }), tapeRow({ rating_now: 29, band_now: '65' })],
+    deltaDays: 90,
+  });
+  assert.equal(res.items[0]?.bandNow, '50', "iqBandOf(51) — the stored '30' is ignored, not preferred");
+  assert.equal(res.items[1]?.bandNow, '15', "iqBandOf(29) — a stored '65' cannot inflate a Weak pair");
+});

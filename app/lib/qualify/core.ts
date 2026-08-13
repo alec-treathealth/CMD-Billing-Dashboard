@@ -32,6 +32,7 @@ import {
   QUALIFY_MEMBER_ID_MASK,
   QUALIFY_NO_FACILITY,
   QUALIFY_REVEAL_BATCH_CAP,
+  QUALIFY_CLIENT_NAME_ENABLED,
   type QualifyInput,
   type QualifyPayerInput,
   type QualifyNameInput,
@@ -113,6 +114,12 @@ export interface QualifyDeps {
   /** Mint the EXACT normalized-name blind index (Change C). Same key discipline; null when the
    *  term normalizes to nothing. The raw name never leaves this call's argument. */
   mintNameToken: (raw: string) => string | null;
+  /** Whether the client-name (patient_name_bidx) search paths are live. Absent → the
+   *  QUALIFY_CLIENT_NAME_ENABLED contract constant, i.e. fail-closed while the feature is dark
+   *  (audit 2026-08-12, P0-3: the constant used to gate only the UI, so a hand-crafted POST could
+   *  run a patient-name PHI search the team believed was off). Injectable so tests exercise the
+   *  enabled branch without flipping the shipped constant. */
+  clientNameEnabled?: boolean;
   resolvePayer: (token: string, kind: QualifyTokenKind, entityIds: string[]) => Promise<string | null>;
   /** EVERY payer behind the token, ranked — the widened resolvePayer (buildResolvePayerSpreadQuery).
    *  Row [0] agrees with resolvePayer exactly by construction; this exists so the surface can offer
@@ -1268,6 +1275,27 @@ export async function getQualifySnapshotByPayerCore(
 }
 
 /**
+ * P0-3 (audit 2026-08-12): the client-name kill switch is enforced SERVER-SIDE, not just in the UI.
+ * QUALIFY_CLIENT_NAME_ENABLED used to be consulted only by client components, so the rendered UI
+ * never offered a name field — while every name-shaped Server Action stayed a live POST endpoint
+ * against a production `patient_name_bidx` column that is partially populated. Every path that
+ * would mint a name token calls this first and fails closed: a disabled feature must be disabled
+ * for a hand-crafted POST exactly as for the rendered UI. `deps.clientNameEnabled` exists so tests
+ * can pin BOTH branches without flipping the shipped constant.
+ *
+ * ROLE POSTURE, RULED BY ALEC 2026-08-12: when this feature flips on, `admissions_seat` MAY use
+ * name search — names are allowed for that role wherever they make the job easier; DOLLARS are
+ * not, and the amounts stripping is a separate, unchanged gate (`gate.hasAmounts`). So this check
+ * is deliberately flag-only: do NOT "harden" it with a role or canRevealPhi condition without a
+ * new ruling. (The v2 UI's `canRevealPhi &&` chip-gating is about who sees the input, not who the
+ * server serves.)
+ */
+function assertClientNameEnabled(deps: QualifyDeps): void {
+  if (deps.clientNameEnabled ?? QUALIFY_CLIENT_NAME_ENABLED) return;
+  throw new Error('Client-name search is disabled.');
+}
+
+/**
  * Resolve by CLIENT NAME (Change C): HMAC the typed name against the EXACT normalized-name blind
  * index (patient_name_bidx), resolve the dominant payer among matching rows, then the standard
  * facility ranking + Fix-A landing (the client's most-recent in-window facility). Mirrors
@@ -1284,6 +1312,7 @@ export async function getQualifySnapshotByNameCore(
 ): Promise<QualifySnapshot> {
   const gate = await deps.requirePrincipal();
   if (!gate.ok) throw new Error(gate.error); // fail-closed backstop (route guards are the primary gate)
+  assertClientNameEnabled(deps); // P0-3: the kill switch binds the SERVER, not just the UI
 
   const window: QualifyWindow = input.window;
   if (!isQualifyWindow(window)) throw new Error('Invalid window.');
@@ -1396,6 +1425,11 @@ export async function getQualifyFacilityCasesCore(
   const memberId = (input.filter?.memberId ?? '').trim();
   const prefix = (input.filter?.prefix ?? '').trim();
   const clientName = (input.filter?.clientName ?? '').trim();
+  // BEFORE the mint try/catch on purpose: inside it, the refusal would be re-labelled "temporarily
+  // unavailable", which claims a retry could succeed. A disabled feature is not a transient fault.
+  // Refusing (not ignoring) also matters: dropping the narrow would silently return the WIDER
+  // un-narrowed case set (P0-3).
+  if (clientName !== '') assertClientNameEnabled(deps);
   let memberToken: string | null = null;
   let prefixToken: string | null = null;
   let nameToken: string | null = null;
@@ -1507,6 +1541,9 @@ function buildComposeFilter(
   const alphaPrefix = term(input.alphaPrefix, 40);
   const group = term(input.group, 40);
   const clientName = term(input.clientName, 120);
+  // BEFORE the mint try/catch, same reasoning as the facility-cases narrow: a disabled feature must
+  // refuse honestly, not masquerade as a transient key fault or silently widen the result (P0-3).
+  if (clientName) assertClientNameEnabled(deps);
   let memberToken: string | null = null;
   let prefixToken: string | null = null;
   let groupToken: string | null = null;

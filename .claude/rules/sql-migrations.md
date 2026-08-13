@@ -8,9 +8,9 @@ paths:
 
 Two separate planes. Never put a file in the wrong directory.
 
-| Plane | Directory | Next number (as of 2026-08-10) |
+| Plane | Directory | Next number (as of 2026-08-12) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0098** — 0092/0093/0094 applied live; **0095 consumed its slot with NO file** (one-shot prune, ledger 20260809073608 — never reuse it); **0096 = `manual_deposits`, applied live 2026-08-10 by a concurrent session, file UNTRACKED on every ref**; **0097 (qualify watchers) APPLIED LIVE 2026-08-10** (ledger `20260810120258`) |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0101** — 0098 applied live 2026-08-11 (`20260811040852`); **0099 (etl_run + pipeline_state) applied live 2026-08-12** (`20260812203336`); **0100 (`facility_assignments_guard` search_path pin) AUTHORED-NOT-APPLIED on `fix/qualify-audit-wave1`**; **0095 consumed its slot with NO file** (one-shot prune, ledger 20260809073608 — never reuse it); 0096 (`manual_deposits`, now tracked) + 0097 (qualify watchers) applied live 2026-08-10 |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **035** — 029 applied live; 030/031 authored-not-applied (031 held on purpose — see CLAUDE.md); **032/033/034 applied live 2026-08-10** (`intel_writer_select_grant`, `expected_payment_manual_lifecycle`, `drop_expected_payment_manual_live_idx`) |
 
 ⚠ **2026-08-10 — THE COLLISION THIS PARAGRAPH WARNS ABOUT ACTUALLY HAPPENED.** The qualify-watchers

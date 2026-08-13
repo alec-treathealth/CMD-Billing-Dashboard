@@ -128,6 +128,7 @@ function deps(
     mintToken: () => 'HMAC_TOKEN',
     mintGroupToken: () => 'GROUP_TOKEN',
     mintNameToken: () => 'NAME_TOKEN',
+    clientNameEnabled: true, // fixture-enabled so the by-name path stays exercised (P0-3 gate is pinned in qualifyCore.test.ts)
     resolvePayer: async () => 'AETNA',
     loadFacilities: async () => [STRONG, WEAK],
     loadIdentifierLandingFacility: async () => 'strong house',

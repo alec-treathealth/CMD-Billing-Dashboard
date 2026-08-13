@@ -294,7 +294,7 @@ Two **separate** migration planes — never mix the directories:
 
 | Plane | Directory | Next number (as of 2026-08-12) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0100** — re-derived from the live ledger 2026-08-12: **0098 (`manual_deposit_invoker_and_conflict`) APPLIED LIVE 2026-08-11**, ledger `20260811040852`, which is what made the previous "next = 0098" stale; **0099 (etl_run + pipeline_state) is authored on `feat/etl-pipeline-chain`**. 0096's file is now tracked (it was untracked when the collision note was written). |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0101** — re-derived from the live ledger later on 2026-08-12: **0099 (etl_run + pipeline_state) APPLIED LIVE 2026-08-12**, ledger `20260812203336` (it was authored-only when the previous "next = 0100" note was written); **0100 (`facility_assignments_guard` search_path pin, audit P1-13) is AUTHORED on `fix/qualify-audit-wave1`, NOT applied** — apply is gated like any migration. 0098 applied live 2026-08-11 (`20260811040852`); 0096's file is tracked. |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **035** — 032/033/034 applied live 2026-08-10 |
 
 **0097 (Qualify watchers + recent searches) is APPLIED LIVE 2026-08-10** (ledger `20260810120258`),

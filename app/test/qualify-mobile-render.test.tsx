@@ -196,6 +196,27 @@ test('trend sheet — shows the facility City, ST under the name (parity with th
   assert.ok(html.includes('San Diego, CA'), 'the trend sheet header carries City, ST like the card and detail sheet');
 });
 
+// ── P0-1 (audit 2026-08-12): the sheet explains the number THE CARD SHOWS ────────────────────────
+// SwipeRow renders ratingV2 + IQ band when rated; the sheet used to print v1 unconditionally, so
+// tapping "why" on a card reading 56 opened "Why is this rated 78?". These pins hold the two
+// derivations together (see the parity ⚠ in both files).
+
+const FAC_V2: QualifyFacility = { ...FAC, ratingV2: 56, iqBand: '50', availableWeight: 45 };
+
+test('trend sheet — P0-1 parity: a v2-rated facility is explained on ratingV2 + the IQ band, with its weighting basis', () => {
+  const html = renderToStaticMarkup(<TrendSheet facility={FAC_V2} onClose={noop} />);
+  assert.ok(html.includes('Why is this rated 56?'), 'the heading carries ratingV2 — the number the card shows');
+  assert.ok(!html.includes('Why is this rated 61?'), 'and NOT the v1 clamp of pctAllowed');
+  assert.ok(html.includes('Solid 50%+'), 'IQ verdict + band — the card’s vocabulary, one scale');
+  assert.ok(html.includes('Scored on 45 of 100 weighting'), 'the composite basis disclosure renders (P0-2 companion)');
+});
+
+test('trend sheet — v1 fallback unchanged: an unrated-v2 facility still explains the v1 rating, with NO weighting line', () => {
+  const html = renderToStaticMarkup(<TrendSheet facility={FAC} onClose={noop} />);
+  assert.ok(html.includes('Why is this rated 61?'), 'v1 fallback (FAC carries the V2 nulls)');
+  assert.ok(!html.includes('of 100 weighting'), 'the weighting basis is a v2 claim — absent on the fallback');
+});
+
 test('detail — NO amounts: Billed/Allowed columns omitted from the DOM', () => {
   const html = renderToStaticMarkup(<DetailSheet facility={FAC} claims={CASES} loading={false} hasAmounts={false} onOpenClaim={noop} onClose={noop} {...noReveal} />);
   assert.ok(!html.includes('Billed') && !html.includes('Allowed'), 'no $ labels when !hasAmounts');
