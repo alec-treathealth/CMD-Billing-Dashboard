@@ -34,7 +34,7 @@
  */
 import { memo } from 'react';
 import type { QualifyPolicyTapeItem } from '../../lib/qualify/board';
-import { IQ_BAND_HEX, TAPE_PALETTE } from './tokens';
+import { TAPE_PALETTE } from './tokens';
 import { useMarquee } from './useMarquee';
 
 /**
@@ -157,8 +157,18 @@ export const PolicyTapeStrip = memo(function PolicyTapeStrip({
         <span className="max-w-[168px] truncate text-xs text-white/60">{p.payer}</span>
         {/* The kind-and-place clause. Absent entirely when the context read gave nothing, rather than
             rendered as an em-dash placeholder — a strip of dashes teaches the eye to skip the slot. */}
-        {clause ? <span className="whitespace-nowrap text-xs text-white/45">{clause}</span> : null}
-        <span className="font-mono text-[15px] font-semibold" style={{ color: IQ_BAND_HEX[band] }}>
+        {/* white/60, NOT white/45 (audit M14). Composited on teal900 the old value measured 3.81:1
+            — under the 4.5:1 floor for text this size — and this clause is the required
+            disambiguator this file's own header describes, so it is the last thing that should be
+            hard to read. white/60 measures 5.53:1 and is already this file's vocabulary. */}
+        {clause ? <span className="whitespace-nowrap text-xs text-white/60">{clause}</span> : null}
+        {/* ⚠ TAPE_PALETTE.band, NOT IQ_BAND_HEX (audit C-4). This span is the reason tokens.ts
+            carries its "these are not RATING_HEX" warning, and it was painting the light-surface
+            band colours anyway: on this dark strip they measured 2.99 / 3.01 / 4.17 / 3.73 / 2.47,
+            so "Avoid" — the band that matters most — was the least legible number on screen. The
+            inverse-surface set clears 4.5:1 on teal900. Do not swap this back to IQ_BAND_HEX; the
+            two are named for the same idea and differ only by the surface they were measured on. */}
+        <span className="font-mono text-[15px] font-semibold" style={{ color: TAPE_PALETTE.band[band] }}>
           {p.ratingNow}
         </span>
         <DeltaText deltaPts={p.deltaPts} />

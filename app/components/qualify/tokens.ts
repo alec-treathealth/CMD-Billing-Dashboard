@@ -30,12 +30,30 @@ export const QUALIFY_PALETTE = {
   info: '#2D7393',
 } as const;
 
-/** Rating/confidence bucket → its solid status hex (matches globals.css `.q-*` `--q-c`). */
+/**
+ * Rating/confidence bucket → its solid status hex (matches globals.css `.q-*` `--q-c`).
+ *
+ * ⚠ DARKENED 2026-08-14 (audit C-5 / M4 / M5) AND THE BINDING SURFACE IS THE WASH, NOT WHITE.
+ * These paint as SMALL TEXT (`.q-pct`/`.q-pctcell` at 12.5-13px, the mobile verdict word at 12px),
+ * so 1.4.3 asks 4.5:1 — and they are painted on their OWN `--q-wash`/tint as often as on white,
+ * which is a lighter background and therefore the tighter constraint. Solving only against white
+ * would leave every `.q-heat` cell failing. Measured before → after, on wash / on white:
+ *   ok      #2E8B6F → #287860   3.63 → 4.63   ·   4.17 → 5.32
+ *   warn    #C9881E → #936316   2.67 → 4.64   ·   2.99 → 5.20   (the worst pair in the audit)
+ *   danger  #C0453B → #B64138   4.25 → 4.64   ·   5.05 → 5.52
+ *   neutral #6B7B79 → #5F6D6C   3.79 → 4.61   ·   4.44 → 5.40
+ * Amber had to travel furthest and now reads bronze. It stays amber-FAMILY on purpose: it is the
+ * estimate/reversal tell, the one a biller most needs to catch, so its hue (≈37°) still separates
+ * it from band15's burnt orange (≈17°) and danger's red (≈4°).
+ *
+ * `--q-c` also paints NON-text (`.q-fac` border-left, `.q-bar > span`, `.q-dot`). Darkening only
+ * raises those ratios, so 1.4.11 cannot regress here.
+ */
 export const RATING_HEX: Record<RatingBucket, string> = {
-  ok: '#2E8B6F',
-  warn: '#C9881E',
-  danger: '#C0453B',
-  neutral: '#6B7B79',
+  ok: '#287860',
+  warn: '#936316',
+  danger: '#B64138',
+  neutral: '#5F6D6C',
 };
 
 /** Rating bucket → its heat-wash hex (matches `--q-wash`); neutral washes to transparent. */
@@ -50,12 +68,32 @@ export const RATING_WASH: Record<RatingBucket, string> = {
  *  wash. Five bands, five visual tiers: the top two are both green-family (deep green vs brand
  *  teal) so an 82 never reads identical to a 52; 15 wears the coral warm accent; 0 is the true
  *  danger red. Mirrors `.q-band*` in globals.css — mobile styles inline from these. */
+/**
+ * ⚠ DARKENED 2026-08-14 alongside RATING_HEX, for the same reason and against the same binding
+ * surface (each band's own wash). Before → after, on wash / on white:
+ *   65 #2E8B6F → #287860   3.63 → 4.63  ·  4.17 → 5.32
+ *   50 #1C8B82 → #197A72   3.70 → 4.60  ·  4.15 → 5.16
+ *   30 #C9881E → #936316   2.67 → 4.64  ·  2.99 → 5.20
+ *   15 #E2674F → #AD4F2A   2.93 → 4.69  ·  3.34 → 5.35
+ *   0  #C0453B → #B64138   4.25 → 4.64  ·  5.05 → 5.52
+ *
+ * BAND 15 WAS NOT SOLVED FOR CONTRAST ALONE, and that is deliberate. Pure lightness-reduction on
+ * #E2674F lands on #C43B20, which sits ~6° of hue from band 0's red — collapsing two of the five
+ * tiers this scale exists to distinguish ("15 wears the coral warm accent; 0 is the true danger
+ * red", below). #AD4F2A keeps ~13° of separation and still clears 4.5:1, so the ladder survives the
+ * fix. If you retune these, re-check tier SEPARATION, not just the ratio.
+ *
+ * ⚠ `IQ_BAND_HEX['50']` IS NO LONGER `QUALIFY_PALETTE.teal500`, and that divergence is intended.
+ * teal500 is a BRAND colour used for borders, rings and fills, where 1.4.11 asks only 3:1; band 50
+ * is TEXT, where 1.4.3 asks 4.5:1. They were the same hex by coincidence of origin, not by rule.
+ * Do not "resynchronise" them — that would silently re-break this band.
+ */
 export const IQ_BAND_HEX: Record<'65' | '50' | '30' | '15' | '0', string> = {
-  '65': '#2E8B6F',
-  '50': '#1C8B82',
-  '30': '#C9881E',
-  '15': '#E2674F',
-  '0': '#C0453B',
+  '65': '#287860',
+  '50': '#197A72',
+  '30': '#936316',
+  '15': '#AD4F2A',
+  '0': '#B64138',
 };
 export const IQ_BAND_WASH: Record<'65' | '50' | '30' | '15' | '0', string> = {
   '65': '#E6F2EC',
@@ -88,7 +126,44 @@ export const TAPE_PALETTE = {
   onInverse: '#FFFFFF', // 12.5:1 on surfaceInverse
   up: '#46C4B8', // 5.8:1 on surfaceInverse
   down: '#F0917C', // 5.4:1 on surfaceInverse
+  /**
+   * IQ BAND COLOURS FOR THE INVERSE SURFACE (audit C-4, 2026-08-14) — and this entry is the ⚠ above
+   * happening for real. `policy-tape.tsx` painted `IQ_BAND_HEX` (light-surface colours) directly on
+   * `bg-teal900` at 15px/600 — normal text, 4.5:1 required — and measured 2.99 / 3.01 / 4.17 / 3.73
+   * / 2.47. Band 0, the "avoid this policy" signal, was the least legible thing on the strip at
+   * 2.47:1. Exactly the mistake the warning block predicted, in the exact file it names.
+   *
+   * These are LIGHTENED rather than darkened because the surface is dark, which is the whole point
+   * of the token split. Measured on #0E3A3A: 65 → 4.61, 50 → 4.64, 30 → 4.63, 15 → 4.60, 0 → 4.60,
+   * against `up` 5.84 and `down` 5.37 as the proven precedent for what reads on this ground.
+   *
+   * NO CSS TWIN, unlike the four keys above: the tape paints these through a React `style` prop,
+   * never a class, so there is nothing for a custom property to feed. The mirror test below asserts
+   * the four that DO have twins; the contrast test asserts all of these.
+   */
+  band: {
+    '65': '#3AB08C',
+    '50': '#23B0A4',
+    '30': '#D49020',
+    '15': '#E7816D',
+    '0': '#D88881',
+  },
 } as const;
+
+/**
+ * THE GLOBAL FOCUS-RING COLOUR (audit C-6, 2026-08-14). `globals.css` had NO `:focus-visible` rule
+ * at all — verified, the only `focus` occurrence in that file was a comment — so every control that
+ * set `outline: none` inline (both mobile text inputs, including the mobile app's PRIMARY SEARCH
+ * FIELD) gave a keyboard user zero indication of focus.
+ *
+ * ONE colour has to work on both grounds this app paints on, which pins it to a narrow band: to
+ * clear 3:1 (1.4.11, non-text) against BOTH `surface` #FFFFFF and `teal900` #0E3A3A, its relative
+ * luminance must sit between 0.203 and 0.300. #2F9A90 measures 0.257 — 3.42:1 on white, 3.65:1 on
+ * teal900. A darker teal fails the dark strip; a lighter one fails white. That is why this is its
+ * own token and not `teal500` (4.15 on white but only 3.01 on teal900) or `TAPE_PALETTE.up` (5.84
+ * on teal900 but 2.13 on white — invisible on every light surface in the app).
+ */
+export const FOCUS_RING_HEX = '#2F9A90';
 
 /**
  * Staged-reveal per-item animation delay (ms), CAPPED so the total stagger stays bounded no matter how

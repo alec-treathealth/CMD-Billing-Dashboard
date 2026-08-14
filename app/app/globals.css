@@ -164,19 +164,19 @@
  * collides with the Tailwind/shadcn utility layer.
  */
 .q-ok {
-  --q-c: #2e8b6f;
+  --q-c: #287860;
   --q-wash: #e6f2ec;
 }
 .q-warn {
-  --q-c: #c9881e;
+  --q-c: #936316;
   --q-wash: #fbf1de;
 }
 .q-danger {
-  --q-c: #c0453b;
+  --q-c: #b64138;
   --q-wash: #fbe7e4;
 }
 .q-neutral {
-  --q-c: #6b7b79;
+  --q-c: #5f6d6c;
   --q-wash: transparent;
 }
 
@@ -184,24 +184,47 @@
    Five visual tiers: deep green / brand teal / amber / coral / red. Hexes mirror tokens.ts
    IQ_BAND_HEX / IQ_BAND_WASH (mobile styles inline from those). */
 .q-band65 {
-  --q-c: #2e8b6f;
+  --q-c: #287860;
   --q-wash: #e6f2ec;
 }
 .q-band50 {
-  --q-c: #1c8b82;
+  --q-c: #197a72;
   --q-wash: #eaf4f2;
 }
 .q-band30 {
-  --q-c: #c9881e;
+  --q-c: #936316;
   --q-wash: #fbf1de;
 }
 .q-band15 {
-  --q-c: #e2674f;
+  --q-c: #ad4f2a;
   --q-wash: #fcede8;
 }
 .q-band0 {
-  --q-c: #c0453b;
+  --q-c: #b64138;
   --q-wash: #fbe7e4;
+}
+
+/*
+ * ── GLOBAL FOCUS-VISIBLE FALLBACK (audit C-6, 2026-08-14) ────────────────────────────────────────
+ *
+ * There was NO :focus-visible rule anywhere in this stylesheet before today — the only occurrence
+ * of the word "focus" in this file was a prose comment. That is why both mobile text inputs, one of
+ * them the mobile app's PRIMARY SEARCH FIELD, could set `outline: 'none'` inline and leave a
+ * keyboard user with no focus indication at all (SC 2.4.7).
+ *
+ * A FALLBACK, NOT AN OVERRIDE. This is deliberately the lowest-specificity rule that can do the
+ * job: any component that already paints an adequate ring keeps winning on specificity, so this
+ * adds a floor without repainting the design system. It is also why the colour is a token rather
+ * than a hex — see FOCUS_RING_HEX in components/qualify/tokens.ts for the luminance-window
+ * derivation (#2F9A90 is the one value clearing 3:1 on BOTH #FFFFFF and #0E3A3A; a darker teal
+ * disappears on the dark tape, a lighter one disappears on white).
+ *
+ * `:focus-visible`, not `:focus`, so a mouse click on a button does not paint a ring — that is the
+ * behaviour that gets focus styling deleted again six months later.
+ */
+:focus-visible {
+  outline: 2px solid #2f9a90;
+  outline-offset: 2px;
 }
 
 .q-fac {
