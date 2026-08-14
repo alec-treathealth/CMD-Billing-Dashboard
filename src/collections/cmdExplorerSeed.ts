@@ -121,6 +121,21 @@ const INSERT_COLS = [
 
 const BATCH = 500;
 
+// Migration 0101 is intentionally deployable ahead of the application. Probe once per
+// client/process so an out-of-order rollout can continue ingesting the older schema.
+const employerColumnByClient = new WeakMap<object, Promise<boolean>>();
+async function hasEmployerColumn(db: ReturnType<typeof makeClient>): Promise<boolean> {
+  const key = db as unknown as object;
+  let probe = employerColumnByClient.get(key);
+  if (!probe) {
+    probe = db.query(
+      `select exists (select 1 from information_schema.columns where table_schema = 'collections' and table_name = 'cmd_explorer_rows' and column_name = 'employer_name') as present`,
+    ).then((result) => Boolean(result.rows[0]?.present));
+    employerColumnByClient.set(key, probe);
+  }
+  return probe;
+}
+
 /** A fully-validated, typed row ready for fingerprinting + (at insert) encryption.
  *  PHI fields hold PLAINTEXT here; they are encrypted only at the insert boundary.
  *  Exported so the cron (cmdExplorerCron.ts) reuses the exact same row shape. */
@@ -430,9 +445,14 @@ export async function insertRows(
   businessEntityId: string,
 ): Promise<number> {
   let inserted = 0;
+  const includeEmployer = await hasEmployerColumn(db);
+  const insertCols = includeEmployer ? INSERT_COLS : INSERT_COLS.slice(0, -1);
   for (const batch of chunk(rows, BATCH)) {
     // Encrypt OUTSIDE the transaction — never hold a pooled connection across libsodium work.
-    const paramRows = await Promise.all(batch.map((r) => buildInsertParams(r, businessEntityId)));
+    const paramRows = await Promise.all(batch.map(async (r) => {
+      const values = await buildInsertParams(r, businessEntityId);
+      return includeEmployer ? values : values.slice(0, -1);
+    }));
     inserted += await withTenant(db, businessEntityId, async (client) => {
       const params: unknown[] = [];
       const tuples = paramRows.map((vals) => {
@@ -441,7 +461,7 @@ export async function insertRows(
         return `(${vals.map((_, i) => `$${base + i + 1}`).join(', ')})`;
       });
       const sql =
-        `insert into collections.cmd_explorer_rows (${INSERT_COLS.join(', ')}) ` +
+        `insert into collections.cmd_explorer_rows (${insertCols.join(', ')}) ` +
         `values ${tuples.join(', ')} on conflict (row_fingerprint) do nothing`;
       const res = await client.query(sql, params);
       return res.rowCount ?? 0;
